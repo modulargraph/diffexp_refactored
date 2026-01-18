@@ -223,9 +223,9 @@ If[ListQ[BoundaryConditionsDiffExp] && Length[BoundaryConditionsDiffExp] >= 2,
   Print["  [FAIL] Boundary conditions preparation failed"];
 ];
 
-(* Point X1 - a simple nearby point for quick testing *)
-X1 = {v1 -> 3 + 1/10, v2 -> -1, v3 -> 1, v4 -> 1, v5 -> -1};
-Print["\nTarget point X1 (simple nearby point): ", X1];
+(* Point X1 - from the arXiv paper, avoiding singularities *)
+X1 = {v1 -> 4, v2 -> -113/47, v3 -> 281/149, v4 -> 349/257, v5 -> -863/541};
+Print["\nTarget point X1: ", X1];
 
 (* Transport from X0 to X1 *)
 Print["\n=== Test 4: Transport ==="];

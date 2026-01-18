@@ -1,0 +1,17 @@
+# Mathematica
+*.nb
+*.mx
+*.wl~
+FrontEnd/*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude
+.claude/
+
+# Temporary files
+*.tmp
+*~

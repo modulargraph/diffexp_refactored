@@ -8,23 +8,23 @@ Print["Working directory: ", scriptDir];
 
 (* Load the subpackages in order *)
 Print["\n=== Loading Symbols subpackage ==="];
-Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExpSubpackages", "Symbols.m"}]];
+Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExp", "Symbols.m"}]];
 Print["Symbols loaded."];
 
 Print["\n=== Loading State subpackage ==="];
-Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExpSubpackages", "State.m"}]];
+Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExp", "State.m"}]];
 Print["State loaded."];
 
 Print["\n=== Loading Utilities subpackage ==="];
-Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExpSubpackages", "Utilities.m"}]];
+Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExp", "Utilities.m"}]];
 Print["Utilities loaded."];
 
 Print["\n=== Loading SeriesOps subpackage ==="];
-Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExpSubpackages", "SeriesOps.m"}]];
+Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExp", "SeriesOps.m"}]];
 Print["SeriesOps loaded."];
 
 Print["\n=== Loading Integration subpackage ==="];
-Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExpSubpackages", "Integration.m"}]];
+Get[FileNameJoin[{ParentDirectory[scriptDir], "DiffExp", "Integration.m"}]];
 Print["Integration loaded."];
 
 (* Test 1: Check that eps evaluates to \[Epsilon] *)

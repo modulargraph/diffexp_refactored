@@ -6,7 +6,7 @@ scriptDir = Directory[];
 parentDir = ParentDirectory[scriptDir];
 
 (* Add subpackages to path *)
-$Path = Prepend[$Path, FileNameJoin[{parentDir, "DiffExpSubpackages"}]];
+$Path = Prepend[$Path, FileNameJoin[{parentDir, "DiffExp"}]];
 
 Print["==========================================="];
 Print["Testing Refactored DiffExp with Equal Mass Banana"];
@@ -21,7 +21,7 @@ Print["Package loaded!\n"];
 Print["=== Equal Mass Banana Configuration ==="];
 EqualMassConfiguration = {
   DiffExp`DeltaPrescriptions -> {t - 16 + I * \[Delta]},
-  DiffExp`MatrixDirectory -> FileNameJoin[{parentDir, "Examples", "Banana_EqualMass_Matrices"}] <> "/",
+  DiffExp`MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
   DiffExp`Verbosity -> 1,
   DiffExp`UseMobius -> True,
   DiffExp`UsePade -> True

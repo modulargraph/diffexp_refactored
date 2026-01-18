@@ -1,7 +1,7 @@
 (* Test package loading for refactored DiffExp *)
 
 (* Set path to subpackages *)
-$Path = Prepend[$Path, FileNameJoin[{DirectoryName[$InputFileName], "..", "DiffExpSubpackages"}]];
+$Path = Prepend[$Path, FileNameJoin[{DirectoryName[$InputFileName], "..", "DiffExp"}]];
 
 Print["Testing refactored DiffExp package loading..."];
 Print[""];

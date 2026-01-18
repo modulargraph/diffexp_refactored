@@ -7,7 +7,7 @@ scriptDir = Directory[];
 parentDir = ParentDirectory[scriptDir];
 
 (* Add subpackages to path *)
-$Path = Prepend[$Path, FileNameJoin[{parentDir, "DiffExpSubpackages"}]];
+$Path = Prepend[$Path, FileNameJoin[{parentDir, "DiffExp"}]];
 
 Print["==========================================="];
 Print["Full Unequal Mass Banana Test"];
@@ -22,7 +22,7 @@ Print["Package loaded!\n"];
 Print["=== Step 1: Generate boundary conditions at t = 1/2 using equal mass ==="];
 EqualMassConfiguration = {
   DeltaPrescriptions -> {t - 16 + I * \[Delta]},
-  MatrixDirectory -> FileNameJoin[{parentDir, "Examples", "Banana_EqualMass_Matrices"}] <> "/",
+  MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
   Verbosity -> 1,
   UseMobius -> True,
   UsePade -> True
@@ -64,7 +64,7 @@ UnequalMassConfiguration = {
   ChopPrecision -> 500,
   DivisionOrder -> 4,
   ExpansionOrder -> 70,
-  MatrixDirectory -> FileNameJoin[{parentDir, "Examples", "Banana_Matrices"}] <> "/",
+  MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_Matrices"}] <> "/",
   RadiusOfConvergence -> 10,
   UseMobius -> True,
   UsePade -> True,

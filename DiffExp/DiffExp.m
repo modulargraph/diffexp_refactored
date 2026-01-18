@@ -33,6 +33,7 @@ Get["LineSegmentation.m"];
 Get["Frobenius.m"];
 Get["Wronskian.m"];
 Get["MatrixLoading.m"];
+Get["IntegrationStrategies.m"];
 Get["Transport.m"];
 
 (* Begin package with imported subpackage contexts *)
@@ -49,6 +50,7 @@ BeginPackage["DiffExp`", {
   "DiffExp`Frobenius`",
   "DiffExp`Wronskian`",
   "DiffExp`MatrixLoading`",
+  "DiffExp`IntegrationStrategies`",
   "DiffExp`Transport`"
 }];
 

@@ -132,6 +132,16 @@ If[ValueQ[DiffExp`MatrixLoading`LoadMatrices::usage],
   Print["  [FAIL] MatrixLoading.m failed to load"];
 ];
 
+(* Load IntegrationStrategies *)
+testsTotal++;
+Get["IntegrationStrategies.m"];
+If[ValueQ[DiffExp`IntegrationStrategies`DispatchStrategy::usage],
+  Print["  [PASS] IntegrationStrategies.m loaded"];
+  testsPassed++;
+  ,
+  Print["  [FAIL] IntegrationStrategies.m failed to load"];
+];
+
 (* Load Transport *)
 testsTotal++;
 Get["Transport.m"];

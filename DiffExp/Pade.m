@@ -10,7 +10,6 @@ GetPade::usage = "GetPade[a_] returns the Pade approximant of a series.";
 SEval1::usage = "SEval1[a_] evaluates series, optionally using Pade approximant.";
 SEval2::usage = "SEval2[a_,at_] evaluates expression at a point with analytic continuation.";
 SEval::usage = "SEval[a_,at_] evaluates series at a point.";
-ToPiecewise::usage = "ToPiecewise[segmentdata_List, pade_:False] converts segment data to piecewise functions.";
 
 Begin["`Private`"];
 
@@ -69,61 +68,6 @@ SEval[a_SeriesData, at_] := Block[{$MinPrecision = DiffExp`State`FEWorkingPrecis
 ];
 SEval[0, at_] := 0;
 SEval[a_ /; NumericQ[a], at_] := a;
-
-(* ToPiecewise - convert saved segment data to piecewise functions *)
-ToPiecewise[SavedData2_, Pade : _?BooleanQ : False, Ord_Integer : Null] := Module[
-  {SavedData, piecewiseResult, Uncompressed, Counter},
-
-  If[MatchQ[SavedData2, {{a_Association, _}, {__}}] || MatchQ[SavedData2, {{a_Association, _, _}, {__}}],
-    SavedData = SavedData2[[2]],
-    SavedData = SavedData2
-  ];
-
-  If[!(MatchQ[SavedData[[0]] === List] && Quiet[Dimensions[SavedData][[2]] === 5]),
-    DiffExp`Utilities`ReportError["Could not interpret the argument. Maybe TransportTo[...] was not called with the option save_ set to True?"];
-  ];
-
-  Counter = 1;
-  If[!$FrontEnd === Null,
-    PrintTemporary["Processing ", Dynamic[Counter]];
-  ];
-
-  If[DiffExp`State`FEC["SaveExpansionsCompress"] === True,
-    If[!DiffExp`State`FEC["SaveExpansionsCompressDirectory"] === "?",
-      If[StringJoin[SavedData[[1, 5]] // StringPart[#, -2 ;; -1] &] === ".m",
-        Uncompressed[ind_] := Uncompressed[ind] = Uncompress[Import[SavedData[[ind, 5]]]];,
-        Uncompressed[ind_] := Uncompressed[ind] = Uncompress[SavedData[[ind, 5]]];
-      ];,
-      Uncompressed[ind_] := Uncompressed[ind] = Uncompress[SavedData[[ind, 5]]];
-    ],
-    Uncompressed[ind_] := SavedData[[ind, 5]];
-  ];
-
-  Table[
-    piecewiseResult = Piecewise@Table[
-      Counter = {ind, intind, epsord};
-      {
-        (If[Pade === True,
-          (DiffExp`AnalyticContinuation`Project\[Theta]s[#, GetPade] &@#) /.
-            DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /.
-            DiffExp`Symbols`\[Theta]p -> HeavisideTheta[DiffExp`Symbols`x] /.
-            DiffExp`Symbols`\[Theta]m -> HeavisideTheta[-DiffExp`Symbols`x] /.
-            (SavedData[[ind, 2]]),
-          (Normal@#) /.
-            DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /.
-            DiffExp`Symbols`\[Theta]p -> HeavisideTheta[DiffExp`Symbols`x] /.
-            DiffExp`Symbols`\[Theta]m -> HeavisideTheta[-DiffExp`Symbols`x] /.
-            (SavedData[[ind, 2]])
-        ] &@(Uncompressed[ind][[intind, epsord]] + If[Ord === Null, 0, O[DiffExp`Symbols`x]^Ord])),
-        DiffExp`Symbols`x >= SavedData[[ind, 3, 1]] && DiffExp`Symbols`x <= SavedData[[ind, 3, 2]]
-      },
-      {ind, Length@SavedData}
-    ];
-    Evaluate[piecewiseResult /. DiffExp`Symbols`x -> #] &,
-    {intind, Uncompressed[1] // Dimensions // First},
-    {epsord, Uncompressed[1] // Dimensions // Last}
-  ]
-];
 
 End[];
 

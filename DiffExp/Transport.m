@@ -23,6 +23,7 @@ BeginPackage["DiffExp`Transport`", {
 PrepareBoundaryConditions::usage = "PrepareBoundaryConditions[bcs_List, line_List] prepares boundary conditions for use with IntegrateSystem or TransportTo.";
 IntegrateSystem::usage = "IntegrateSystem[line_List] obtains general series solutions along a line. IntegrateSystem[bcs_List, line_List] uses boundary conditions.";
 TransportTo::usage = "TransportTo[bcs_List, line_List, to_:1, save_:False] transports boundary conditions to arbitrary points.";
+ToPiecewise::usage = "ToPiecewise[segmentdata_List, pade_:False] converts segment data to piecewise functions.";
 
 Begin["`Private`"];
 
@@ -1066,6 +1067,61 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
 IntervalOverlapQ[intv1_, intv2_] := !(IntervalIntersection[Interval[intv1], Interval[intv2]] === Interval[]);
 IntervalIntersec[intv1_, intv2_] := IntervalIntersection[Interval[intv1], Interval[intv2]][[1]];
 IntervalContainsQ[intv_, point_] := intv[[1]] <= point <= intv[[2]];
+
+(* ToPiecewise - convert saved segment data to piecewise functions *)
+ToPiecewise[SavedData2_, Pade : _?BooleanQ : False, Ord_Integer : Null] := Module[
+  {SavedData, piecewiseResult, Uncompressed, Counter},
+
+  If[MatchQ[SavedData2, {{a_Association, _}, {__}}] || MatchQ[SavedData2, {{a_Association, _, _}, {__}}],
+    SavedData = SavedData2[[2]],
+    SavedData = SavedData2
+  ];
+
+  If[!(MatchQ[SavedData[[0]] === List] && Quiet[Dimensions[SavedData][[2]] === 5]),
+    DiffExp`Utilities`ReportError["Could not interpret the argument. Maybe TransportTo[...] was not called with the option save_ set to True?"];
+  ];
+
+  Counter = 1;
+  If[!$FrontEnd === Null,
+    PrintTemporary["Processing ", Dynamic[Counter]];
+  ];
+
+  If[DiffExp`State`FEC["SaveExpansionsCompress"] === True,
+    If[!DiffExp`State`FEC["SaveExpansionsCompressDirectory"] === "?",
+      If[StringJoin[SavedData[[1, 5]] // StringPart[#, -2 ;; -1] &] === ".m",
+        Uncompressed[ind_] := Uncompressed[ind] = Uncompress[Import[SavedData[[ind, 5]]]];,
+        Uncompressed[ind_] := Uncompressed[ind] = Uncompress[SavedData[[ind, 5]]];
+      ];,
+      Uncompressed[ind_] := Uncompressed[ind] = Uncompress[SavedData[[ind, 5]]];
+    ],
+    Uncompressed[ind_] := SavedData[[ind, 5]];
+  ];
+
+  Table[
+    piecewiseResult = Piecewise@Table[
+      Counter = {ind, intind, epsord};
+      {
+        (If[Pade === True,
+          (DiffExp`AnalyticContinuation`Project\[Theta]s[#, DiffExp`Pade`GetPade] &@#) /.
+            DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /.
+            DiffExp`Symbols`\[Theta]p -> HeavisideTheta[DiffExp`Symbols`x] /.
+            DiffExp`Symbols`\[Theta]m -> HeavisideTheta[-DiffExp`Symbols`x] /.
+            (SavedData[[ind, 2]]),
+          (Normal@#) /.
+            DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /.
+            DiffExp`Symbols`\[Theta]p -> HeavisideTheta[DiffExp`Symbols`x] /.
+            DiffExp`Symbols`\[Theta]m -> HeavisideTheta[-DiffExp`Symbols`x] /.
+            (SavedData[[ind, 2]])
+        ] &@(Uncompressed[ind][[intind, epsord]] + If[Ord === Null, 0, O[DiffExp`Symbols`x]^Ord])),
+        DiffExp`Symbols`x >= SavedData[[ind, 3, 1]] && DiffExp`Symbols`x <= SavedData[[ind, 3, 2]]
+      },
+      {ind, Length@SavedData}
+    ];
+    Evaluate[piecewiseResult /. DiffExp`Symbols`x -> #] &,
+    {intind, Uncompressed[1] // Dimensions // First},
+    {epsord, Uncompressed[1] // Dimensions // Last}
+  ]
+];
 
 End[];
 

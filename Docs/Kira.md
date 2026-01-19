@@ -32,11 +32,14 @@ The Kira source code is already cloned in `./kira/`. To build:
 ```bash
 cd kira
 pip3 install --user meson  # if meson not installed
-meson setup --prefix=$HOME/.local builddir
+meson setup builddir
 cd builddir
-ninja
-ninja install
+LIBRARY_PATH="/opt/homebrew/lib:$LIBRARY_PATH" ninja  # macOS ARM64: set LIBRARY_PATH for gmp
 ```
+
+**Note**: On macOS ARM64 with Homebrew, you must set `LIBRARY_PATH` during the build for the linker to find gmp.
+
+The executable is located at: `kira/builddir/src/kira/kira`
 
 #### Build Options
 
@@ -47,6 +50,29 @@ ninja install
 | `-Dmpi=true` | `false` | Enable MPI for cluster parallelization |
 | `-Djemalloc=true` | `false` | Enable jemalloc (often 20%+ speedup with FireFly) |
 | `-Dweight_width=128` | `64` | Use 128-bit integers (creates `kira128` executable) |
+
+## Environment Setup
+
+### Required Environment Variables
+
+```bash
+# Path to Fermat executable (REQUIRED)
+export FERMATPATH=/Users/mhidding/Desktop/diffexp_refactor/Ferm7a/fer64
+
+# Runtime library paths for FireFly/FLINT (macOS - REQUIRED)
+export DYLD_LIBRARY_PATH=/Users/mhidding/Desktop/diffexp_refactor/kira/builddir/subprojects/firefly/source:/Users/mhidding/Desktop/diffexp_refactor/kira/builddir/subprojects/flint-2.8.4
+```
+
+### Shell Alias (Optional)
+
+Add to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+export FERMATPATH=/Users/mhidding/Desktop/diffexp_refactor/Ferm7a/fer64
+export DYLD_LIBRARY_PATH=/Users/mhidding/Desktop/diffexp_refactor/kira/builddir/subprojects/firefly/source:/Users/mhidding/Desktop/diffexp_refactor/kira/builddir/subprojects/flint-2.8.4
+
+alias kira='/Users/mhidding/Desktop/diffexp_refactor/kira/builddir/src/kira/kira'
+```
 
 ## Usage
 
@@ -184,6 +210,32 @@ Kira outputs master integral reductions that can be used with DiffExp for differ
 1. Use Kira to reduce your Feynman integrals to master integrals
 2. Derive differential equations for the master integrals
 3. Use DiffExp to solve these differential equations via series expansion
+
+## Troubleshooting
+
+### Segmentation Fault (Exit Code 139) on macOS
+
+If Kira crashes with exit code 139 (SIGSEGV), ensure `DYLD_LIBRARY_PATH` is set to include the FireFly and FLINT library directories:
+
+```bash
+export DYLD_LIBRARY_PATH=/path/to/kira/builddir/subprojects/firefly/source:/path/to/kira/builddir/subprojects/flint-2.8.4
+```
+
+### "Library 'gmp' not found" During Build
+
+On macOS ARM64 with Homebrew, set `LIBRARY_PATH` before running ninja:
+
+```bash
+LIBRARY_PATH="/opt/homebrew/lib:$LIBRARY_PATH" ninja
+```
+
+### Fermat Not Found
+
+Set the `FERMATPATH` environment variable to the Fermat executable:
+
+```bash
+export FERMATPATH=/path/to/fer64
+```
 
 ## References
 

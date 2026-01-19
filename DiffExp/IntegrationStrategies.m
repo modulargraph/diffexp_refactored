@@ -175,8 +175,9 @@ SolveSimple[intind_, bVec_, line_, epsord_] := Module[
 
 (* Default integration strategy *)
 (* Uses Frobenius solutions and Wronskian computation *)
+(* Falls back to VOPAlt if no valid pivot is found *)
 SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
-  {systemSize, HomogeneousEquation, MtildeMat, selectedPivot, NMat, Solns, Wronsk, WronskInv, FMat, FMatInv,
+  {systemSize, HomogeneousEquation, MtildeMat, selectedPivot, pivotResult, NMat, Solns, Wronsk, WronskInv, FMat, FMatInv,
    GMat, BMat, cIndices, fGeneral, crossCheck, CurrInvWronskSolver,
    HomogeneousEquation2, MtildeMat2, NMat2, Solns2, Wronsk2, WronskInvPrime, wronskianProduct, MtildeInv, c,
    BufferedData = BufferedDataIn},
@@ -188,12 +189,22 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       DiffExp`Utilities`PrintInfo["Combining differential equations: ", intind, " with automatic pivot selection."][3];
     ];
     systemSize = intind // Length;
-    {HomogeneousEquation, MtildeMat, selectedPivot} = DiffExp`Wronskian`CombineDifferentialEquationsWithPivotSelection[
+
+    (* Try to find a valid pivot; fall back to VOPAlt if all pivots fail *)
+    pivotResult = DiffExp`Wronskian`CombineDifferentialEquationsWithPivotSelection[
       If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
         DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]],
         DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]]
       ]
     ];
+
+    (* Check if fallback to VOPAlt is needed *)
+    If[pivotResult === $NeedsFallback,
+      DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
+      Return[SolveVOPAlt[intind, bVec, line, epsord, BufferedData]]
+    ];
+
+    {HomogeneousEquation, MtildeMat, selectedPivot} = pivotResult;
     DiffExp`Utilities`PrintInfo["Using pivot integral ", intind[[selectedPivot]], " (index ", selectedPivot, " of ", systemSize, ")."][3];
 
     DiffExp`Utilities`PrintDebug["Found homogeneous differential equation: ", HomogeneousEquation + O[DiffExp`Symbols`x]^4 // DiffExp`SeriesOps`SN][3];

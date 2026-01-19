@@ -81,7 +81,7 @@ CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
 ];
 
 (* Wrapper that tries multiple pivot indices to find an invertible Mtilde *)
-(* Returns {HomogeneousEquation, MtildeMat, pivotIndex} on success, or throws error if all fail *)
+(* Returns {HomogeneousEquation, MtildeMat, pivotIndex} on success, or $NeedsFallback if all pivots fail *)
 CombineDifferentialEquationsWithPivotSelection[Amat_] := Module[
   {matrixSize = Amat // Length, result, pivotIndex},
 
@@ -99,9 +99,9 @@ CombineDifferentialEquationsWithPivotSelection[Amat_] := Module[
       , {pivotIndex, matrixSize}
     ];
 
-    (* All pivots failed - report error *)
-    DiffExp`State`LastErrorContext = {Amat};
-    DiffExp`Utilities`ReportError["All pivot indices yield singular Mtilde matrices. The system may have degenerate structure on this line segment. Use IntegrationStrategy -> \"VOP\", or choose a different line."]
+    (* All pivots failed - return indicator for fallback to VOPAlt *)
+    DiffExp`Utilities`PrintInfo["All pivot indices yield singular Mtilde. Falling back to VOPAlt strategy."][2];
+    $NeedsFallback
 
     , "PivotFound"  (* Catch tag *)
   ]

@@ -23,6 +23,136 @@ DispatchStrategy::usage = "DispatchStrategy[intind, bVec, line, epsord, Buffered
 
 Begin["`Private`"];
 
+(* ============================================================================ *)
+(* SHARED HELPER FUNCTIONS                                                      *)
+(* ============================================================================ *)
+
+(* Compute M^(j) matrices via nested differentiation *)
+(* Used by VOP and VOPAlt strategies *)
+ComputeMatricesMSupj[intind_, line_] := Module[
+  {MyN = Length[intind], MatricesMSupj},
+
+  If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+    MatricesMSupj = DiffExp`Utilities`PChop@NestList[
+      DiffExp`SeriesOps`SExpand[(DiffExp`SeriesOps`SD[#, DiffExp`Symbols`x] +
+        DiffExp`SeriesOps`MatrixMultiplySExpand[#, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]]])] &,
+      IdentityMatrix[MyN], MyN];
+    ,
+    MatricesMSupj = NestList[
+      Together[(D[#, DiffExp`Symbols`x] + # . DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]])] &,
+      IdentityMatrix[MyN], MyN];
+  ];
+
+  MatricesMSupj
+];
+
+(* Extract nth-order differential equations from MatricesMSupj *)
+(* Used by VOP and VOPAlt strategies *)
+ComputeNthOrderDiffEqns[MatricesMSupj_, MyN_] := Module[
+  {TmpSols},
+
+  Table[
+    If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+      TmpSols = MatricesMSupj[[All, ind]] // Transpose //
+        NullSpace[#, Method -> "DivisionFreeRowReduction",
+          Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
+      ,
+      TmpSols = MatricesMSupj[[All, ind]] // Transpose // NullSpace // Together;
+    ];
+    TmpSols = Internal`DeleteTrailingZeros /@ TmpSols;
+    TmpSols = DiffExp`SeriesOps`DiffExpSeries[MinimalBy[TmpSols, Length] // First];
+    TmpSols/(TmpSols // Last)
+    , {ind, MyN}
+  ]
+];
+
+(* Compute Wronskian matrix for a set of homogeneous solutions *)
+(* Used by VOP and VOPAlt strategies *)
+ComputeWronskianMatrix[homogeneousSolutions_] := Module[
+  {numSols = Length[homogeneousSolutions]},
+
+  Table[
+    DiffExp`SeriesOps`SD[homogeneousSolutions[[mysolind]],
+      Sequence @@ ConstantArray[DiffExp`Symbols`x, diffind]]
+    , {diffind, 0, numSols - 1}, {mysolind, numSols}
+  ]
+];
+
+(* Reduce indeterminate constants using vanishing term constraints *)
+(* Used by VOP and VOPAlt strategies *)
+(* Parameters:
+   - fGeneral: current general solution
+   - vanishingTerms: terms that must vanish
+   - numSolutions: expected number of remaining indeterminates
+   Returns: {updatedFGeneral, cIndices} *)
+ReduceIndeterminates[fGeneral_, vanishingTerms_, numSolutions_] := Module[
+  {csCurr, IndeterminatesRemaining, xAdd, VanishingTermsCurr, OverdeterminedEqns,
+   Cmat, Cb, CsPartSol, CsNullVectors, CsGeneralSol, CsReps, c, result},
+
+  IndeterminatesRemaining = csCurr = DiffExp`Utilities`GetCases[fGeneral, Subscript[c, i_, j_]];
+  result = fGeneral;
+
+  If[!DeleteDuplicates[Normal[vanishingTerms]] === {0},
+    xAdd = -1;
+
+    While[Length[IndeterminatesRemaining] > numSolutions,
+      VanishingTermsCurr = Series[vanishingTerms, {DiffExp`Symbols`x, 0, xAdd}];
+
+      DiffExp`Utilities`PrintDebug["Reducing number of indeterminate constants, considering terms up to O[x]^", xAdd][3];
+      OverdeterminedEqns = Flatten[Flatten[DiffExp`SeriesOps`LogxCoeffList /@ VanishingTermsCurr][[All, 3]]];
+
+      If[Length[OverdeterminedEqns] > 0,
+        {Cmat, Cb} = {#[[2]], -#[[1]]} &@CoefficientArrays[DeleteCases[OverdeterminedEqns, True], csCurr];
+
+        CsPartSol = LinearSolve[Cmat, Cb,
+          ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)];
+
+        CsNullVectors = Cmat // NullSpace[#, Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
+        CsGeneralSol = CsPartSol + Sum[CsNullVectors[[ind]] Subscript[c, ind], {ind, Length[CsNullVectors]}] //
+          DiffExp`SeriesOps`SExpand;
+
+        CsReps = Thread[csCurr -> CsGeneralSol] // DiffExp`Utilities`PChop;
+        IndeterminatesRemaining = DiffExp`Utilities`GetCases[CsGeneralSol, Subscript[c, __]];
+      ];
+
+      xAdd += 1;
+    ];
+
+    If[Length[IndeterminatesRemaining] < numSolutions,
+      DiffExp`State`LastErrorContext = {Cmat, Cb, CsGeneralSol, result};
+      DiffExp`Utilities`ReportError["There was an error reducing indeterminates. Try decreasing ChopPrecision or increasing WorkingPrecision."];
+    ];
+
+    result = result /. CsReps;
+    ,
+    (* No constraints needed - just rename constants *)
+    result = result /. Table[csCurr[[ind]] -> Subscript[c, ind], {ind, Length@csCurr}];
+  ];
+
+  result
+];
+
+(* Compute general solution matrix GMat from FMat, FMatInv, and inhomogeneous term *)
+(* Used by SolveDefault and VOPAlt strategies *)
+ComputeGMat[FMat_, FMatInv_, bVec_, intind_] := Module[
+  {BMat, cIndices, GMat, c},
+
+  BMat = 1/Length@intind Table[bVec, {iind, intind // Length}] // Transpose;
+  cIndices = Table[Subscript[c, i], {i, intind // Length}];
+
+  GMat = DiffExp`SeriesOps`MatrixMultiplySExpand[
+    FMat,
+    DiffExp`Integration`DiffExpIntegrate[DiffExp`SeriesOps`MatrixMultiplySExpand[FMatInv, BMat]] +
+      DiagonalMatrix[cIndices]
+  ] // DiffExp`Utilities`PChop;
+
+  {cIndices, GMat}
+];
+
+(* ============================================================================ *)
+(* INTEGRATION STRATEGIES                                                       *)
+(* ============================================================================ *)
+
 (* Simple integration strategy *)
 (* Used when there's a single integral without homogeneous components *)
 SolveSimple[intind_, bVec_, line_, epsord_] := Module[
@@ -190,11 +320,10 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
   {FMat, FMatInv} = BufferedData[intind];
 
+  (* Use shared helper for GMat computation *)
   DiffExp`Utilities`PrintDebug["Setting up general solution."][3];
+  {cIndices, GMat} = ComputeGMat[FMat, FMatInv, bVec, intind];
   BMat = 1/Length@intind Table[bVec, {iind, intind // Length}] // Transpose;
-  cIndices = Table[Subscript[c, i], {i, intind // Length}];
-
-  GMat = DiffExp`SeriesOps`MatrixMultiplySExpand[FMat, DiffExp`Integration`DiffExpIntegrate[DiffExp`SeriesOps`MatrixMultiplySExpand[FMatInv, BMat]] + DiagonalMatrix[cIndices]] // DiffExp`Utilities`PChop;
 
   If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolutionMatrix"] === True,
     DiffExp`Utilities`PrintDebug["Cross-checking GMat with differential equations."][1];
@@ -217,11 +346,10 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 (* Uses variation of parameters method *)
 SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   {MyN, MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions,
-   SolveFrom, MtildeMatrix, TmpSols, HighestOrderDifferentialEquationPosition,
+   SolveFrom, MtildeMatrix, HighestOrderDifferentialEquationPosition,
    MyHomogeneousSolutions, MyNumberOfSolutions, MyInhomogeneousTerm,
-   bSupjVecs, fGeneral, cIndices, VanishingTerms, IndeterminatesRemaining, csCurr,
-   xAdd, VanishingTermsCurr, OverdeterminedEqns, Cmat, Cb, CsPartSol, CsNullVectors,
-   CsGeneralSol, CsReps, DerivativeVec, BDerVec, MtildeInv, MyWi, MyWronsk, MyWronskDetInv, c, PlaceHolder,
+   bSupjVecs, fGeneral, cIndices, VanishingTerms,
+   DerivativeVec, BDerVec, MtildeInv, MyWi, MyWronsk, MyWronskDetInv, c, PlaceHolder,
    BufferedData = BufferedDataIn},
 
   DiffExp`Utilities`PrintDebug["Solving by variation of parameters. ", intind][3];
@@ -235,23 +363,9 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   If[epsord === 0 && !KeyExistsQ[BufferedData, intind],
     DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
 
-    If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
-      MatricesMSupj = DiffExp`Utilities`PChop@NestList[DiffExp`SeriesOps`SExpand[(DiffExp`SeriesOps`SD[#, DiffExp`Symbols`x] + DiffExp`SeriesOps`MatrixMultiplySExpand[#, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]]])] &, IdentityMatrix[MyN], MyN];
-      ,
-      MatricesMSupj = NestList[Together[(D[#, DiffExp`Symbols`x] + # . DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]])] &, IdentityMatrix[MyN], MyN];
-    ];
-
-    nthOrderDifferentialEquations = Table[
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
-        TmpSols = MatricesMSupj[[All, ind]] // Transpose // NullSpace[#, Method -> "DivisionFreeRowReduction", Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
-        ,
-        TmpSols = MatricesMSupj[[All, ind]] // Transpose // NullSpace // Together;
-      ];
-      TmpSols = Internal`DeleteTrailingZeros /@ TmpSols;
-      TmpSols = DiffExp`SeriesOps`DiffExpSeries[MinimalBy[TmpSols, Length] // First];
-      TmpSols/(TmpSols // Last)
-      , {ind, MyN}
-    ];
+    (* Use shared helper functions for common computations *)
+    MatricesMSupj = ComputeMatricesMSupj[intind, line];
+    nthOrderDifferentialEquations = ComputeNthOrderDiffEqns[MatricesMSupj, MyN];
 
     If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
       MatricesMSupj = DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj];
@@ -287,10 +401,10 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     Table[
       MyHomogeneousSolutions = nthOrderDifferentialEquationsSolutions[[myintind]];
 
-      MyWronsk[{intind, myintind}] = Table[
-        DiffExp`SeriesOps`SD[MyHomogeneousSolutions[[mysolind]], Sequence @@ ConstantArray[DiffExp`Symbols`x, diffind]]
-        , {diffind, 0, Length[MyHomogeneousSolutions] - 1}, {mysolind, Length[MyHomogeneousSolutions]}];
+      (* Use shared helper for Wronskian matrix computation *)
+      MyWronsk[{intind, myintind}] = ComputeWronskianMatrix[MyHomogeneousSolutions];
 
+      (* VOP-specific: compute inverse Wronskian determinant *)
       DiffExp`Utilities`PrintDebug["Determining 1/WronskianDet: ", myintind][3];
       MyWronskDetInv[{intind, myintind}] = DiffExp`SeriesOps`DiffExpSeries[1/(MyWronsk[{intind, myintind}] // Det // DiffExp`SeriesOps`SExpand), DiffExp`State`ExpansionOrderVal];
       DiffExp`Utilities`PrintDebug["Done determining 1/WronskianDet: ", myintind][3];
@@ -403,7 +517,7 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 (* Alternative variation of parameters method *)
 SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   {MyN, MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions,
-   SolveFrom, MtildeMatrix, TmpSols, HighestOrderDifferentialEquationPosition,
+   SolveFrom, MtildeMatrix, HighestOrderDifferentialEquationPosition,
    MyHomogeneousSolutions, fGeneral, cIndices, VanishingTerms, IndeterminatesRemaining, csCurr,
    xAdd, VanishingTermsCurr, OverdeterminedEqns, Cmat, Cb, CsPartSol, CsNullVectors,
    CsGeneralSol, CsReps, FMat, FMatInv, GMat, BMat, CrossC, MyWronsk, c,
@@ -416,23 +530,9 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   If[epsord === 0 && !KeyExistsQ[BufferedData, intind],
     DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
 
-    If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
-      MatricesMSupj = DiffExp`Utilities`PChop@NestList[DiffExp`SeriesOps`SExpand[(DiffExp`SeriesOps`SD[#, DiffExp`Symbols`x] + DiffExp`SeriesOps`MatrixMultiplySExpand[#, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]]])] &, IdentityMatrix[MyN], MyN];
-      ,
-      MatricesMSupj = NestList[Together[(D[#, DiffExp`Symbols`x] + # . DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]])] &, IdentityMatrix[MyN], MyN];
-    ];
-
-    nthOrderDifferentialEquations = Table[
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
-        TmpSols = MatricesMSupj[[All, ind]] // Transpose // NullSpace[#, Method -> "DivisionFreeRowReduction", Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
-        ,
-        TmpSols = MatricesMSupj[[All, ind]] // Transpose // NullSpace // Together;
-      ];
-      TmpSols = Internal`DeleteTrailingZeros /@ TmpSols;
-      TmpSols = DiffExp`SeriesOps`DiffExpSeries[MinimalBy[TmpSols, Length] // First];
-      TmpSols/(TmpSols // Last)
-      , {ind, MyN}
-    ];
+    (* Use shared helper functions for common computations *)
+    MatricesMSupj = ComputeMatricesMSupj[intind, line];
+    nthOrderDifferentialEquations = ComputeNthOrderDiffEqns[MatricesMSupj, MyN];
 
     If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
       MatricesMSupj = DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj];
@@ -455,13 +555,10 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     (* Initialize MyWronsk as local association *)
     MyWronsk = Association[{}];
 
+    (* Use shared helper for Wronskian matrix computation *)
     Table[
       MyHomogeneousSolutions = nthOrderDifferentialEquationsSolutions[[myintind]];
-
-      MyWronsk[{intind, myintind}] = Table[
-        DiffExp`SeriesOps`SD[MyHomogeneousSolutions[[mysolind]], Sequence @@ ConstantArray[DiffExp`Symbols`x, diffind]]
-        , {diffind, 0, Length[MyHomogeneousSolutions] - 1}, {mysolind, Length[MyHomogeneousSolutions]}];
-
+      MyWronsk[{intind, myintind}] = ComputeWronskianMatrix[MyHomogeneousSolutions];
       , {myintind, SolveFrom}
     ];
 
@@ -537,11 +634,10 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
   {FMat, FMatInv} = BufferedData[intind];
 
+  (* Use shared helper for GMat computation *)
   DiffExp`Utilities`PrintDebug["Setting up general solution."][3];
+  {cIndices, GMat} = ComputeGMat[FMat, FMatInv, bVec, intind];
   BMat = 1/Length@intind Table[bVec, {iind, intind // Length}] // Transpose;
-  cIndices = Table[Subscript[c, i], {i, intind // Length}];
-
-  GMat = DiffExp`SeriesOps`MatrixMultiplySExpand[FMat, DiffExp`Integration`DiffExpIntegrate[DiffExp`SeriesOps`MatrixMultiplySExpand[FMatInv, BMat]] + DiagonalMatrix[cIndices]] // DiffExp`Utilities`PChop;
 
   If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolutionMatrix"] === True,
     DiffExp`Utilities`PrintDebug["Cross-checking GMat with differential equations."][1];

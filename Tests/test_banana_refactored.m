@@ -181,6 +181,91 @@ If[maxRelDiff < 10^-10,
   Print[TableForm[N[roundTripValues, 10]]];
 ];
 
+(* ============================================================ *)
+(* Test VOP Strategy *)
+(* ============================================================ *)
+Print["\n=== Testing VOP Strategy ==="];
+
+(* Reload configuration with VOP strategy *)
+VOPConfiguration = {
+  DeltaPrescriptions -> {t - 16 + I * \[Delta]},
+  MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
+  Verbosity -> 1,
+  UseMobius -> True,
+  UsePade -> True,
+  IntegrationStrategy -> "VOP"
+};
+
+Print["Loading VOP configuration..."];
+LoadConfiguration[VOPConfiguration];
+
+(* Prepare boundary conditions *)
+PreparedBCsVOP = PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
+
+(* Transport to t = -1 with VOP *)
+Print["Transporting to t = -1 with VOP strategy..."];
+ResultsVOP = TransportTo[PreparedBCsVOP, <|t -> -1|>];
+Print["VOP transport complete"];
+
+(* Compare VOP results with Default results *)
+testsTotal++;
+vopDiff = Max[Abs[Flatten[N[Results1[[2]] - ResultsVOP[[2]], 20]]]];
+Print["Max difference between Default and VOP: ", N[vopDiff, 5]];
+If[vopDiff < 10^-10,
+  Print["  [PASS] VOP strategy produces same results as Default"];
+  testsPassed++;
+  ,
+  Print["  [FAIL] VOP strategy results differ from Default"];
+  Print["  Default values at t=-1:"];
+  Print[TableForm[N[Results1[[2]], 10]]];
+  Print["  VOP values at t=-1:"];
+  Print[TableForm[N[ResultsVOP[[2]], 10]]];
+];
+
+(* ============================================================ *)
+(* Test VOPAlt Strategy *)
+(* ============================================================ *)
+Print["\n=== Testing VOPAlt Strategy ==="];
+
+(* Reload configuration with VOPAlt strategy *)
+VOPAltConfiguration = {
+  DeltaPrescriptions -> {t - 16 + I * \[Delta]},
+  MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
+  Verbosity -> 1,
+  UseMobius -> True,
+  UsePade -> True,
+  IntegrationStrategy -> "VOPAlt"
+};
+
+Print["Loading VOPAlt configuration..."];
+LoadConfiguration[VOPAltConfiguration];
+
+(* Prepare boundary conditions *)
+PreparedBCsVOPAlt = PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
+
+(* Transport to t = -1 with VOPAlt *)
+Print["Transporting to t = -1 with VOPAlt strategy..."];
+ResultsVOPAlt = TransportTo[PreparedBCsVOPAlt, <|t -> -1|>];
+Print["VOPAlt transport complete"];
+
+(* Compare VOPAlt results with Default results *)
+testsTotal++;
+vopAltDiff = Max[Abs[Flatten[N[Results1[[2]] - ResultsVOPAlt[[2]], 20]]]];
+Print["Max difference between Default and VOPAlt: ", N[vopAltDiff, 5]];
+If[vopAltDiff < 10^-10,
+  Print["  [PASS] VOPAlt strategy produces same results as Default"];
+  testsPassed++;
+  ,
+  Print["  [FAIL] VOPAlt strategy results differ from Default"];
+  Print["  Default values at t=-1:"];
+  Print[TableForm[N[Results1[[2]], 10]]];
+  Print["  VOPAlt values at t=-1:"];
+  Print[TableForm[N[ResultsVOPAlt[[2]], 10]]];
+];
+
+(* ============================================================ *)
+(* Summary *)
+(* ============================================================ *)
 Print["\n==========================================="];
 Print["Results: ", testsPassed, " / ", testsTotal, " tests passed"];
 If[testsPassed === testsTotal,

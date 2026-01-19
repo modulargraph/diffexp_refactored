@@ -16,14 +16,14 @@ SetAttributes[Project\[Theta]s, Listable];
 
 (* Prepares replacement rules for analytic continuation along the given line segment *)
 PrepareAnalyticContinuation[Line_] := Module[
-  {Tmp, Tmp2, SignsNeeded, SignNeeded, CurrSignChoices, FindVanishingFactors, AllPrescriptions, VanishingFactors},
+  {leadingCoeffs, indexedTerms, SignsNeeded, uniqueSigns, CurrSignChoices, FindVanishingFactors, AllPrescriptions, VanishingFactors},
 
   FindVanishingFactors[Factors_] := (
-    Tmp = {Normal[DiffExp`SeriesOps`LeadingCoefficientSeries[#[[1]]]], #[[2]]} & /@
+    leadingCoeffs = {Normal[DiffExp`SeriesOps`LeadingCoefficientSeries[#[[1]]]], #[[2]]} & /@
       (Factors /. Line // Expand // DiffExp`Utilities`PChop);
-    Tmp2 = Table[{iind, Tmp[[iind]]}, {iind, Length[Tmp]}];
-    Tmp2 = Select[Tmp2, DiffExp`Utilities`DependsQ[#[[2, 1]], DiffExp`Symbols`x] &];
-    VanishingFactors = Tmp2[[All, 2]];
+    indexedTerms = Table[{iind, leadingCoeffs[[iind]]}, {iind, Length[leadingCoeffs]}];
+    indexedTerms = Select[indexedTerms, DiffExp`Utilities`DependsQ[#[[2, 1]], DiffExp`Symbols`x] &];
+    VanishingFactors = indexedTerms[[All, 2]];
   );
 
   (* Check whether the singularity coincides with an automatically added +I\[Delta] coming from a root in the differential equations *)
@@ -48,27 +48,27 @@ PrepareAnalyticContinuation[Line_] := Module[
       {k_, -1} :> (k /. {1 -> -1, a_ -> "?"})
     }
   ) & /@ VanishingFactors;
-  SignNeeded = DeleteDuplicates@SignsNeeded;
+  uniqueSigns = DeleteDuplicates@SignsNeeded;
 
-  CurrSignChoices = Thread[List[DiffExp`State`DeltaPrescriptionsVal[[Tmp2[[All, 1]]]][[All, 1]], SignsNeeded]];
+  CurrSignChoices = Thread[List[DiffExp`State`DeltaPrescriptionsVal[[indexedTerms[[All, 1]]]][[All, 1]], SignsNeeded]];
 
-  If[(DiffExp`Utilities`DependsQ[SignNeeded, "?"]) || Length[SignNeeded] > 1,
+  If[(DiffExp`Utilities`DependsQ[uniqueSigns, "?"]) || Length[uniqueSigns] > 1,
     If[!KeyExistsQ[DiffExp`State`AnalyticContinuationReplacementsAssociation, Line],
       DiffExp`Utilities`PrintInfo["Singularity => Sign[Im[x]]:"][2];
       DiffExp`Utilities`PrintInfo[
         Rule @@ # & /@ (Thread[List[
-          DiffExp`State`DeltaPrescriptionsVal[[Tmp2[[All, 1]]]][[All, 1]] +
-            I "\[Delta]" DiffExp`State`DeltaPrescriptionsVal[[Tmp2[[All, 1]]]][[All, 2]],
+          DiffExp`State`DeltaPrescriptionsVal[[indexedTerms[[All, 1]]]][[All, 1]] +
+            I "\[Delta]" DiffExp`State`DeltaPrescriptionsVal[[indexedTerms[[All, 1]]]][[All, 2]],
           SignsNeeded
         ]])
       ][2];
     ];
     DiffExp`State`AnalyticContinuationFailed = True;
-    SignNeeded = {1};
+    uniqueSigns = {1};
   ];
 
   DiffExp`State`AnalyticContinuationReplacements = {};
-  If[SignNeeded === {-1},
+  If[uniqueSigns === {-1},
     DiffExp`State`AnalyticContinuationReplacements = {
       DiffExp`Symbols`Logx -> (DiffExp`Symbols`\[Theta]p + DiffExp`Symbols`\[Theta]m) DiffExp`Symbols`Logx - 2 \[Pi] I DiffExp`Symbols`\[Theta]m,
       DiffExp`Symbols`x^b_ /; Denominator[b] == 2 :>
@@ -79,9 +79,9 @@ PrepareAnalyticContinuation[Line_] := Module[
   ];
 
   If[!KeyExistsQ[DiffExp`State`AnalyticContinuationReplacementsAssociation, Line],
-    If[SignNeeded === {},
+    If[uniqueSigns === {},
       DiffExp`Utilities`PrintDebug["Line not centered at a singularity."][1];,
-      DiffExp`Utilities`PrintDebug["Analytic continuation: x carries ", SignNeeded[[1]], "*i\[Delta]"][1];
+      DiffExp`Utilities`PrintDebug["Analytic continuation: x carries ", uniqueSigns[[1]], "*i\[Delta]"][1];
       DiffExp`Utilities`PrintDebug["Using replacement rules: ", DiffExp`State`AnalyticContinuationReplacements][1];
     ];
   ];

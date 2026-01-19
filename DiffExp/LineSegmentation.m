@@ -19,41 +19,41 @@ Begin["`Private`"];
 
 (* Relates line parameters of different segments *)
 RelateLines[a2_Association, b2_Association, noerror_: False] := Module[
-  {a = KeySort[a2], b = KeySort[b2], Sol, Sols, CanSolveFrom, SFKey, SugSol},
+  {lineA = KeySort[a2], lineB = KeySort[b2], lineSolution, allSolutions, CanSolveFrom, solvableKey, suggestedSolution},
 
   (* Find one component of a that contains x, and use that to solve the equation *)
-  CanSolveFrom = Flatten[Position[DiffExp`Utilities`DependsQ[DiffExp`Utilities`PChop@Expand@#, DiffExp`Symbols`x] & /@ a, True]];
+  CanSolveFrom = Flatten[Position[DiffExp`Utilities`DependsQ[DiffExp`Utilities`PChop@Expand@#, DiffExp`Symbols`x] & /@ lineA, True]];
   If[Length[CanSolveFrom] === 0,
-    DiffExp`State`LastErrorContext = {a, b};
+    DiffExp`State`LastErrorContext = {lineA, lineB};
     DiffExp`Utilities`ReportError["Argument does not depend on the line parameter!"];
   ];
 
-  SFKey = CanSolveFrom[[1, 1]];
+  solvableKey = CanSolveFrom[[1, 1]];
 
-  Sol = Quiet[Solve[(a[SFKey] /. DiffExp`Symbols`x -> y) - b[SFKey] == 0, y]];
+  lineSolution = Quiet[Solve[(lineA[solvableKey] /. DiffExp`Symbols`x -> y) - lineB[solvableKey] == 0, y]];
 
-  If[Length[Sol] > 1,
+  If[Length[lineSolution] > 1,
     DiffExp`Utilities`ReportError["Multiple solutions encountered while relating lines: ",
-      a // Normal // N // Association, " and ", b // Normal // N // Association,
+      lineA // Normal // N // Association, " and ", lineB // Normal // N // Association,
       ". This is likely because you chose a non-linear line segment."];
   ];
 
-  If[!(Length[Sol] === 1),
-    DiffExp`State`LastErrorContext = {a, b};
+  If[!(Length[lineSolution] === 1),
+    DiffExp`State`LastErrorContext = {lineA, lineB};
     If[!noerror, DiffExp`Utilities`ReportError["Could not relate lines."];];
     False,
     (* Crosscheck *)
-    SugSol = Sol[[1, 1, 2]] // Together // DiffExp`Utilities`PChop;
+    suggestedSolution = lineSolution[[1, 1, 2]] // Together // DiffExp`Utilities`PChop;
 
     Quiet[
       If[!(SameQ @@ Append[Values[(DiffExp`Utilities`PChop@Together@N[#, DiffExp`State`FEC[WorkingPrecision]]) & /@
-          ((a /. DiffExp`Symbols`x -> SugSol) - b)], 0]),
+          ((lineA /. DiffExp`Symbols`x -> suggestedSolution) - lineB)], 0]),
         DiffExp`Utilities`PrintDebug["Could not relate lines:"][1];
-        DiffExp`Utilities`PrintDebug[Values[(a /. DiffExp`Symbols`x -> SugSol) - b] // Factor // N][1];
-        DiffExp`State`LastErrorContext = {a, b};
+        DiffExp`Utilities`PrintDebug[Values[(lineA /. DiffExp`Symbols`x -> suggestedSolution) - lineB] // Factor // N][1];
+        DiffExp`State`LastErrorContext = {lineA, lineB};
         If[!noerror, DiffExp`Utilities`ReportError["Could not relate lines."];];
         False,
-        SugSol
+        suggestedSolution
       ]
     ]
   ]
@@ -64,7 +64,7 @@ RelateLinesPoint[a_Association, b_Association, pointb_] :=
 
 (* Derives singularity positions *)
 FindMatrixSingularities[line_, getcomplex_: False, {fixat_, to_}] := Module[
-  {AllSingularTerms, RatPoles, Sqrts, SPos1, SPos1N, SPos, SPosProjections, MySing, MySingN, NumPoles, Tmp, Tmp2, Tmp3, Tmp4, LI, RI},
+  {AllSingularTerms, RatPoles, Sqrts, singularityPositions, singularityPositionsNumeric, projectedSingularities, SPosProjections, currentSingularity, currentSingularityNumeric, NumPoles, Tmp, Tmp2, Tmp3, Tmp4, leftInterval, rightInterval},
 
   DiffExp`Utilities`PrintInfo["Determining positions of singularities and branch-cuts."][1];
 
@@ -74,44 +74,44 @@ FindMatrixSingularities[line_, getcomplex_: False, {fixat_, to_}] := Module[
   ]]] // DeleteDuplicates // DeleteCases[#, a_ /; !DiffExp`Utilities`DependsQ[a, DiffExp`Symbols`x]] & //
     DeleteDuplicates[#, Expand[#1] === Expand[#2] || Expand[#1] === Expand[-#2] &] &;
 
-  SPos1 = Quiet[Solve[# == 0, DiffExp`Symbols`x] & /@ AllSingularTerms];
-  SPos1 = Join[(SPos1 // Flatten)[[All, 2]] // DeleteDuplicatesBy[#, N[#, DiffExp`State`ChopPrecisionVal] &] &,
+  singularityPositions = Quiet[Solve[# == 0, DiffExp`Symbols`x] & /@ AllSingularTerms];
+  singularityPositions = Join[(singularityPositions // Flatten)[[All, 2]] // DeleteDuplicatesBy[#, N[#, DiffExp`State`ChopPrecisionVal] &] &,
     {-\[Infinity], \[Infinity]}] // Sort[#, Re[N[#1, DiffExp`State`ChopPrecisionVal]] < Re[N[#2, DiffExp`State`ChopPrecisionVal]] &] &;
-  SPos1N = N[SPos1, DiffExp`State`FEWorkingPrecision];
+  singularityPositionsNumeric = N[singularityPositions, DiffExp`State`FEWorkingPrecision];
 
   (* Project complex singularities onto the real line *)
   SPosProjections = (
-    MySing = #[[1]]; MySingN = #[[2]];
+    currentSingularity = #[[1]]; currentSingularityNumeric = #[[2]];
 
-    LI = Select[SPos1N, Re[MySingN] - Im[MySingN] < Re[#] < Re[MySingN] &];
-    RI = Select[SPos1N, Re[MySingN] < Re[#] < Re[MySingN] + Im[MySingN] &];
+    leftInterval = Select[singularityPositionsNumeric, Re[currentSingularityNumeric] - Im[currentSingularityNumeric] < Re[#] < Re[currentSingularityNumeric] &];
+    rightInterval = Select[singularityPositionsNumeric, Re[currentSingularityNumeric] < Re[#] < Re[currentSingularityNumeric] + Im[currentSingularityNumeric] &];
 
     {
-      If[LI === {}, Re[MySing] - Im[MySing], Null],
-      Re[MySing],
-      If[RI === {}, Re[MySing] + Im[MySing], Null]
+      If[leftInterval === {}, Re[currentSingularity] - Im[currentSingularity], Null],
+      Re[currentSingularity],
+      If[rightInterval === {}, Re[currentSingularity] + Im[currentSingularity], Null]
     }
-  ) & /@ Transpose[{SPos1, SPos1N}];
+  ) & /@ Transpose[{singularityPositions, singularityPositionsNumeric}];
 
   Quiet[
-    SPos = Sort[
+    projectedSingularities = Sort[
       DeleteDuplicatesBy[DeleteCases[Flatten[SPosProjections], Null], N[#, DiffExp`State`ChopPrecisionVal] &],
       N[#1, DiffExp`State`FEWorkingPrecision] < N[#2, DiffExp`State`FEWorkingPrecision] &
     ];
   ];
 
   If[getcomplex === True,
-    {SPos, SPos1},
-    SPos
+    {projectedSingularities, singularityPositions},
+    projectedSingularities
   ]
 ];
 
 (* Normalizes terms in numerator and denominator for printing *)
-PrintMobiusNormalized[a_] := Module[{Tmp = a // Together, mt, md, m},
-  mt = Max[Abs /@ {Coefficient[Tmp // Numerator, DiffExp`Symbols`x], (Tmp // Numerator) /. DiffExp`Symbols`x -> 0}];
-  md = Max[Abs /@ {Coefficient[Tmp // Denominator, DiffExp`Symbols`x], (Tmp // Denominator) /. DiffExp`Symbols`x -> 0}];
-  m = Max[mt, md];
-  Expand[Numerator[Tmp]/m]/Expand[Denominator[Tmp]/m] // N
+PrintMobiusNormalized[a_] := Module[{rationalForm = a // Together, maxNumerator, maxDenominator, maxCoeff},
+  maxNumerator = Max[Abs /@ {Coefficient[rationalForm // Numerator, DiffExp`Symbols`x], (rationalForm // Numerator) /. DiffExp`Symbols`x -> 0}];
+  maxDenominator = Max[Abs /@ {Coefficient[rationalForm // Denominator, DiffExp`Symbols`x], (rationalForm // Denominator) /. DiffExp`Symbols`x -> 0}];
+  maxCoeff = Max[maxNumerator, maxDenominator];
+  Expand[Numerator[rationalForm]/maxCoeff]/Expand[Denominator[rationalForm]/maxCoeff] // N
 ];
 
 (* Gives a large term which can be used to estimate the error *)
@@ -155,7 +155,7 @@ GetMatricesPrecisionDistance[line_Association] := Module[{DiffCoeffs, MaxVariati
 
 (* Provides consistency checks and reparametrizes boundary conditions *)
 CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
-  {bcs2, bcs = {Null, Null}, lrln, lrln2, FixAt, zerlim, linerelser, tmp},
+  {bcs2, bcs = {Null, Null}, lineRelation, inverseLineRelation, FixAt, zeroLimit, lineRelationSeries, logTerms},
 
   bcs2 = bcs3;
 
@@ -183,17 +183,17 @@ CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
   ];
   bcs2[[2]] = bcs2[[2]][[Range@DiffExp`State`NumIntegrals, Range@(DiffExp`State`EpsilonOrderVal + 1)]];
 
-  lrln = RelateLines[line, bcs2[[1]], True];
+  lineRelation = RelateLines[line, bcs2[[1]], True];
 
-  If[lrln === False,
+  If[lineRelation === False,
     DiffExp`State`LastErrorContext = {bcs2, line};
     DiffExp`Utilities`ReportError["Chosen boundary point does not lie on line."];
   ];
 
   bcs2[[2]] = MapAt[If[!Accuracy[#] === \[Infinity], SetPrecision[#, DiffExp`State`FEWorkingPrecision], #] &, bcs2[[2]], {All, All}];
 
-  zerlim = Limit[lrln, DiffExp`Symbols`x -> 0] // DiffExp`Utilities`PChop;
-  If[zerlim === 0,
+  zeroLimit = Limit[lineRelation, DiffExp`Symbols`x -> 0] // DiffExp`Utilities`PChop;
+  If[zeroLimit === 0,
     FixAt = 0;
 
     If[!DiffExp`Utilities`DependsQ[bcs2[[1]], DiffExp`Symbols`x],
@@ -203,26 +203,26 @@ CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
       bcs[[2]] = bcs[[2]] /. (a_: 1) "?" + O[DiffExp`Symbols`x]^(1/2) -> "?";,
 
       (* Line segment around origin *)
-      lrln2 = RelateLines[bcs2[[1]], line];
+      inverseLineRelation = RelateLines[bcs2[[1]], line];
 
-      If[(Sign@Limit[D[lrln2, DiffExp`Symbols`x], DiffExp`Symbols`x -> 0]) === -1,
+      If[(Sign@Limit[D[inverseLineRelation, DiffExp`Symbols`x], DiffExp`Symbols`x -> 0]) === -1,
         DiffExp`Utilities`ReportError["Asymptotic boundary conditions should be oriented in the same direction as the integration line."];
       ];
 
-      bcs[[1]] = bcs2[[1]] /. DiffExp`Symbols`x -> lrln2;
-      linerelser = DiffExp`Symbols`x -> (Series[lrln2, {DiffExp`Symbols`x, 0, DiffExp`State`ISeriesChangeCoefficient DiffExp`State`ExpansionOrderVal},
+      bcs[[1]] = bcs2[[1]] /. DiffExp`Symbols`x -> inverseLineRelation;
+      lineRelationSeries = DiffExp`Symbols`x -> (Series[inverseLineRelation, {DiffExp`Symbols`x, 0, DiffExp`State`ISeriesChangeCoefficient DiffExp`State`ExpansionOrderVal},
         Assumptions -> DiffExp`Symbols`x > 0]);
       bcs[[2]] = Assuming[DiffExp`Symbols`x > 0,
-        bcs2[[2]] /. linerelser /. DiffExp`Symbols`Logx -> Log[(linerelser[[2]] // Normal) /. DiffExp`Symbols`x -> yy]];
+        bcs2[[2]] /. lineRelationSeries /. DiffExp`Symbols`Logx -> Log[(lineRelationSeries[[2]] // Normal) /. DiffExp`Symbols`x -> yy]];
 
-      tmp = bcs[[2]] // DiffExp`Utilities`GetCases[#, Log[_]] &;
-      tmp = # -> Normal[Series[#, {yy, 0, DiffExp`State`ExpansionOrderVal}, Assumptions -> yy > 0]] & /@ tmp;
-      tmp[[All, 2]] = (tmp[[All, 2]] /. {
+      logTerms = bcs[[2]] // DiffExp`Utilities`GetCases[#, Log[_]] &;
+      logTerms = # -> Normal[Series[#, {yy, 0, DiffExp`State`ExpansionOrderVal}, Assumptions -> yy > 0]] & /@ logTerms;
+      logTerms[[All, 2]] = (logTerms[[All, 2]] /. {
         Log[a_ yy] /; a > 0 :> Log[a] + Log[yy],
         Log[a_ yy] /; a < 0 :> Log[-a] + Log[yy]
       } /. Log[yy] -> DiffExp`Symbols`Logx /. yy -> DiffExp`Symbols`x);
 
-      bcs[[2]] = DiffExp`SeriesOps`SafeReplaceSeries11[bcs[[2]], tmp] //
+      bcs[[2]] = DiffExp`SeriesOps`SafeReplaceSeries11[bcs[[2]], logTerms] //
         Quiet[N[#, DiffExp`State`FEC[WorkingPrecision]]] &;
 
       If[DiffExp`Utilities`DependsQ[bcs[[2]], Log[_]],
@@ -231,36 +231,36 @@ CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
       ];
     ];,
 
-    If[DiffExp`Utilities`DependsQ[Normal[lrln], DiffExp`Symbols`x],
+    If[DiffExp`Utilities`DependsQ[Normal[lineRelation], DiffExp`Symbols`x],
       DiffExp`Utilities`ReportError["Boundary conditions given on asymptotic limit that is not centered at current line."];
     ];
 
     (* From hereon we can assume we are fixing at a point *)
-    bcs[[1]] = line /. DiffExp`Symbols`x -> lrln;
+    bcs[[1]] = line /. DiffExp`Symbols`x -> lineRelation;
     bcs[[2]] = bcs2[[2]];
-    FixAt = lrln;
+    FixAt = lineRelation;
   ];
 
   {bcs, FixAt}
 ];
 
 (* Gets matching point on a line *)
-GetMatchingPoint[line_Association, bcsline_] := Module[{lrln, zerlim, FixAt},
-  lrln = RelateLines[line, bcsline, True];
+GetMatchingPoint[line_Association, bcsline_] := Module[{lineRelation, zeroLimit, FixAt},
+  lineRelation = RelateLines[line, bcsline, True];
 
-  If[lrln === False,
+  If[lineRelation === False,
     DiffExp`State`LastErrorContext = {bcsline, line};
     DiffExp`Utilities`ReportError["GetMatchingPoint: Internal error"];
   ];
 
-  If[DiffExp`Utilities`DependsQ[lrln, DiffExp`Symbols`x],
-    zerlim = Limit[lrln, DiffExp`Symbols`x -> 0] // DiffExp`Utilities`PChop;
+  If[DiffExp`Utilities`DependsQ[lineRelation, DiffExp`Symbols`x],
+    zeroLimit = Limit[lineRelation, DiffExp`Symbols`x -> 0] // DiffExp`Utilities`PChop;
 
-    If[zerlim === 0,
+    If[zeroLimit === 0,
       FixAt = 0;,
       DiffExp`Utilities`ReportError["GetMatchingPoint: Internal error."];
     ];,
-    FixAt = lrln;
+    FixAt = lineRelation;
   ];
 
   FixAt

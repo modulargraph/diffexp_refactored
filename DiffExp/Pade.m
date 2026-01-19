@@ -20,19 +20,19 @@ GetPade[a_?NumericQ] := a;
 GetPade[a_SeriesData] := Block[
   {
     $MinPrecision = DiffExp`State`FEWorkingPrecision,
-    MaxOrd = {Floor[((a[[5]] - a[[4]])/a[[6]] + 1)/2], Floor[((a[[5]] - a[[4]])/a[[6]] + 1)/2]},
+    maxPadeOrder = {Floor[((a[[5]] - a[[4]])/a[[6]] + 1)/2], Floor[((a[[5]] - a[[4]])/a[[6]] + 1)/2]},
     MaxLogOrder = DiffExp`SeriesOps`MaxLogxPower[a],
-    TempPad
+    tempPadeApprox
   },
 
   Sum[
     DiffExp`Symbols`Logx^ind (
       (Quiet[
-        TempPad = PadeApproximant[Chop[#, 10^-DiffExp`State`ChopPrecisionVal], {DiffExp`Symbols`x, 0, MaxOrd}];
-        If[Length[DiffExp`Utilities`GetCases[TempPad, PadeApproximant[__]]] > 0,
+        tempPadeApprox = PadeApproximant[Chop[#, 10^-DiffExp`State`ChopPrecisionVal], {DiffExp`Symbols`x, 0, maxPadeOrder}];
+        If[Length[DiffExp`Utilities`GetCases[tempPadeApprox, PadeApproximant[__]]] > 0,
           DiffExp`Utilities`PrintWarning["Error in Pade approximant of ", # // N, ". Evaluating normally."][1];
           DiffExp`Utilities`PChop@#,
-          TempPad
+          tempPadeApprox
         ]
       ]) &@(Normal@DiffExp`SeriesOps`LogxCoeff[a, ind])
     ),
@@ -72,7 +72,7 @@ SEval[a_ /; NumericQ[a], at_] := a;
 
 (* ToPiecewise - convert saved segment data to piecewise functions *)
 ToPiecewise[SavedData2_, Pade : _?BooleanQ : False, Ord_Integer : Null] := Module[
-  {SavedData, Res, Uncompressed, Counter},
+  {SavedData, piecewiseResult, Uncompressed, Counter},
 
   If[MatchQ[SavedData2, {{a_Association, _}, {__}}] || MatchQ[SavedData2, {{a_Association, _, _}, {__}}],
     SavedData = SavedData2[[2]],
@@ -100,7 +100,7 @@ ToPiecewise[SavedData2_, Pade : _?BooleanQ : False, Ord_Integer : Null] := Modul
   ];
 
   Table[
-    Res = Piecewise@Table[
+    piecewiseResult = Piecewise@Table[
       Counter = {ind, intind, epsord};
       {
         (If[Pade === True,
@@ -119,7 +119,7 @@ ToPiecewise[SavedData2_, Pade : _?BooleanQ : False, Ord_Integer : Null] := Modul
       },
       {ind, Length@SavedData}
     ];
-    Evaluate[Res /. DiffExp`Symbols`x -> #] &,
+    Evaluate[piecewiseResult /. DiffExp`Symbols`x -> #] &,
     {intind, Uncompressed[1] // Dimensions // First},
     {epsord, Uncompressed[1] // Dimensions // Last}
   ]

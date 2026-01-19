@@ -28,7 +28,7 @@ Begin["`Private`"];
 
 (* Prepare boundary conditions *)
 PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
-  {line, CoeffList = {}, Coeffs, CoeffSer, bcs1, OneSer = (1 // N[#, DiffExp`State`FEWorkingPrecision] &), Mask, ispoint, LineRat, tmp},
+  {line, CoeffList = {}, Coeffs, CoeffSer, bcs1, unitSeries = (1 // N[#, DiffExp`State`FEWorkingPrecision] &), Mask, ispoint, LineRat, maskedEntry},
 
   DiffExp`Utilities`PrintDebug["Preparing boundary conditions."][1];
 
@@ -91,8 +91,8 @@ PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
     Table[
       If[!(#[[ind]][[0]] === SeriesData),
         (
-          DiffExp`SeriesOps`LeadingCoefficientSeries[(#[[ind]] /. line) * OneSer, 2]
-        ) /. OneSer "?" + O[DiffExp`Symbols`x]^(1/2) -> "?",
+          DiffExp`SeriesOps`LeadingCoefficientSeries[(#[[ind]] /. line) * unitSeries, 2]
+        ) /. unitSeries "?" + O[DiffExp`Symbols`x]^(1/2) -> "?",
         #[[ind]]
       ]
       , {ind, Length[#]}
@@ -101,15 +101,15 @@ PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
     If[DiffExp`Utilities`DependsQ[Normal[#], DiffExp`Symbols`x],
       DiffExp`Utilities`ReportError["The boundary terms that are provided depend on the line parameter ", DiffExp`Symbols`x, ", but the line itself does not."];
     ];
-    OneSer * # /. line
+    unitSeries * # /. line
   ] & /@ CoeffList;
 
   If[!ispoint,
     Mask = MapAt[Switch[#[[0]],
       SeriesData,
-      tmp = #;
-      tmp[[3]] = Table["(...)", {ind, #[[3]] // Length}];
-      tmp,
+      maskedEntry = #;
+      maskedEntry[[3]] = Table["(...)", {ind, #[[3]] // Length}];
+      maskedEntry,
       _, #] &, bcs1, {All, All}] // TableForm;
 
     DiffExp`Utilities`PrintInfo["Prepared boundary conditions in asymptotic limit, of the form:"][1];
@@ -121,11 +121,11 @@ PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
 
 (* Main integration function *)
 IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}] := Module[
-  {bcs, line, BCSRelevant, relevantinds, IgnorePositions, CrossC, bVec, IntegrationData, fGeneral,
+  {bcs, line, BCSRelevant, relevantIndices, IgnorePositions, crossCheck, bVec, IntegrationData, fGeneral,
    FixAt, BoundaryEqns1, BoundaryEqns2, cIndices, Cmat, Cb, csol, NewResults, opts = opts2,
-   DEqnMatricesExpandedCopy, TurnOffPade, CsReps, csFreedom, CouldntSolve, LogsPresent,
-   AlgebraicRootsPresent, TmpSolutionsNormal, BufferedData, MyWronsk, MyWronskDetInv,
-   IntegrationDataTab, bVec0, bVec1, bVecRest, jinds, IntegrationDataTab0jind},
+   DEqnMatricesExpandedCopy, TurnOffPade, constantReplacements, csFreedom, solveFailed, LogsPresent,
+   AlgebraicRootsPresent, normalizedSolutions, BufferedData, MyWronsk, MyWronskDetInv,
+   IntegrationDataTab, bVec0, bVec1, bVecRest, complementIndices, otherIntegralData},
 
   If[line2[[0]] === List, line = line2 // Association // KeySort, line = line2 // KeySort];
 
@@ -234,9 +234,9 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
 
       DiffExp`Utilities`PrintDebug["Getting inhomogeneous terms."][3];
 
-      jinds = Complement[Range[DiffExp`State`NumIntegrals], intind];
-      IntegrationDataTab0jind = Table[IntegrationData[{ind, myeps}], {ind, jinds}, {myeps, 0, epsord}];
-      bVec0 = DiffExp`SeriesOps`SExpand[DEqnMatricesExpandedCopy[0][[intind, jinds]] . IntegrationDataTab0jind[[All, epsord + 1]]];
+      complementIndices = Complement[Range[DiffExp`State`NumIntegrals], intind];
+      otherIntegralData = Table[IntegrationData[{ind, myeps}], {ind, complementIndices}, {myeps, 0, epsord}];
+      bVec0 = DiffExp`SeriesOps`SExpand[DEqnMatricesExpandedCopy[0][[intind, complementIndices]] . otherIntegralData[[All, epsord + 1]]];
       Which[epsord === 0,
         bVec = bVec0 // DiffExp`SeriesOps`SExpand;,
         epsord === 1,
@@ -256,11 +256,11 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
 
         BCSRelevant = bcs[[2]][[intind]][[All, epsord + 1]];
         IgnorePositions = Flatten[Position[BCSRelevant, "?"]];
-        relevantinds = Complement[Range@Length[intind], IgnorePositions];
-        BCSRelevant = BCSRelevant[[relevantinds]];
+        relevantIndices = Complement[Range@Length[intind], IgnorePositions];
+        BCSRelevant = BCSRelevant[[relevantIndices]];
 
         If[FixAt === 0,
-          BoundaryEqns1 = (DiffExp`Utilities`PChop@*DiffExp`SeriesOps`SExpand) /@ (fGeneral[[relevantinds]] - BCSRelevant);
+          BoundaryEqns1 = (DiffExp`Utilities`PChop@*DiffExp`SeriesOps`SExpand) /@ (fGeneral[[relevantIndices]] - BCSRelevant);
 
           If[
             !SameQ[Append[BoundaryEqns1[[All, 0]], SeriesData]],
@@ -277,7 +277,7 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
           BoundaryEqns1 = Table[Sum[
             cIndices[[ind]] DiffExp`Pade`SEval[DiffExp`SeriesOps`SApply[Coefficient[#, cIndices[[ind]]] &, term], FixAt]
             , {ind, cIndices // Length}
-          ] + DiffExp`Pade`SEval[term /. (# -> 0 & /@ cIndices), FixAt], {term, fGeneral[[relevantinds]]}] - BCSRelevant;
+          ] + DiffExp`Pade`SEval[term /. (# -> 0 & /@ cIndices), FixAt], {term, fGeneral[[relevantIndices]]}] - BCSRelevant;
 
           BoundaryEqns2 = # == 0 & /@ Flatten[BoundaryEqns1];
         ];
@@ -290,14 +290,14 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
 
           {Cmat, Cb} = {#[[2]], -#[[1]]} &@CoefficientArrays[BoundaryEqns2, cIndices];
 
-          CouldntSolve = False;
+          solveFailed = False;
           If[!MemberQ[BoundaryEqns2, False],
             Check[csol = LinearSolve[Cmat, Cb, ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)];
-              , CouldntSolve = True;];
-            , CouldntSolve = True;];
+              , solveFailed = True;];
+            , solveFailed = True;];
 
-          If[CouldntSolve,
-            DiffExp`State`LastErrorContext = {fGeneral[[relevantinds]], BoundaryEqns1, BoundaryEqns2, BCSRelevant, Cmat, Cb, bVec, intind, epsord};
+          If[solveFailed,
+            DiffExp`State`LastErrorContext = {fGeneral[[relevantIndices]], BoundaryEqns1, BoundaryEqns2, BCSRelevant, Cmat, Cb, bVec, intind, epsord};
             DiffExp`Utilities`ReportError["Boundary conditions cannot be matched to general solution for integral(s): ", intind];
           ];
 
@@ -311,9 +311,9 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
             TurnOffPade[];
           ];
 
-          CsReps = Thread[cIndices -> csol] // DiffExp`Utilities`PChop;
+          constantReplacements = Thread[cIndices -> csol] // DiffExp`Utilities`PChop;
 
-          fGeneral = fGeneral /. CsReps // DiffExp`SeriesOps`SExpand;
+          fGeneral = fGeneral /. constantReplacements // DiffExp`SeriesOps`SExpand;
 
           ,
 
@@ -336,10 +336,10 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
 
       If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolution"] === True,
         DiffExp`Utilities`PrintDebug["General solution found. Cross-checking with differential equations."][1];
-        CrossC = DiffExp`SeriesOps`SD[fGeneral, DiffExp`Symbols`x] - DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]] . fGeneral - bVec + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-        DiffExp`Utilities`PrintDebug["Found: ", CrossC + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
+        crossCheck = DiffExp`SeriesOps`SD[fGeneral, DiffExp`Symbols`x] - DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]] . fGeneral - bVec + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
+        DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
         If[
-          !(SameQ @@ Append[CrossC // Normal // Flatten, 0])
+          !(SameQ @@ Append[crossCheck // Normal // Flatten, 0])
           ,
           DiffExp`Utilities`ReportError["Cross-check failed"];
         ];
@@ -372,9 +372,9 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
   );
 
   If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "SingularityCheck"] === True,
-    TmpSolutionsNormal = Values[IntegrationData] // Normal // Chop[#, 10^-DiffExp`State`ICheckMultivaluedChop] &;
-    LogsPresent = DiffExp`Utilities`DependsQ[TmpSolutionsNormal, DiffExp`Symbols`Logx | DiffExp`Symbols`Logx^_];
-    AlgebraicRootsPresent = DiffExp`Utilities`DependsQ[TmpSolutionsNormal, (DiffExp`Symbols`x^b_ /; Denominator[b] > 1)];
+    normalizedSolutions = Values[IntegrationData] // Normal // Chop[#, 10^-DiffExp`State`ICheckMultivaluedChop] &;
+    LogsPresent = DiffExp`Utilities`DependsQ[normalizedSolutions, DiffExp`Symbols`Logx | DiffExp`Symbols`Logx^_];
+    AlgebraicRootsPresent = DiffExp`Utilities`DependsQ[normalizedSolutions, (DiffExp`Symbols`x^b_ /; Denominator[b] > 1)];
 
     If[!DiffExp`State`CurrentSingularityHasIDeltaPrescription && (AlgebraicRootsPresent || LogsPresent),
       GiveMultivaluedError[];
@@ -401,7 +401,7 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
 
 (* TransportTo function - transports boundary conditions *)
 TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, SaveExpansions : _?BooleanQ : False, SampleAtList_List : {}] := Module[
-  {line = If[line2[[0]] === List, line2 // Association // KeySort, line2 // KeySort], LineRat, ToRat, to, Tmp, bcs, FixAt, MySingularities, MySingularitiesImaginary, MySingularitiesRelevant, SingularitySegments, PoleIntervals, CurrLine, CurrLineNoMobius = Null, CurrIntegrated, CurrIntervalCurrLine, CurrIntervalLine, Done = False, Tmp2, CurrEvalPoint, CurrEvalPointCurrLine, CurrEval, Currbcs, AllIntegrationData = {}, MyCenter, EvaluateCurrPoint, NextIsPole = False, SegmentCounter = 1, TmpRelateLines, InterSec, CurrIntervalLinePos, CurrIntervalLineNeg, CurrEvalError, CurrIntegratedError, CurrbcsError, PrintError, CurrError, CurrErrorAcc = 0, CurrErrorAccs = ConstantArray[0, {DiffExp`State`NumIntegrals, DiffExp`State`EpsilonOrderVal + 1}], FixWithin, SegmentsToIntegrate, UpdateMatrixExpansionError, TimeStart, TimeStart0, LineReturn, FailedLine, ExpansionsIndeterminates = {}, bcsprev, CurrStatusBackup, BoundaryFixPoint, CurrEvalErrorEx, CurrEvalError1, CurrEvalError2, CurrEvalAtBoundaryFixPoint, CurrEvalEx, AllSegmentsPredivision, TmpFile, Ses, CompressedTermForExport, CompressedTermForExportFN, CurrLineLR, FullLineLR, TmpTmp, PoleIntervals1, RepeatingSegment, LastEvaluation, LastSavedData, LastLine, ExpansionOrders, DigitsNeeded},
+  {line = If[line2[[0]] === List, line2 // Association // KeySort, line2 // KeySort], to, tempResult, bcs, FixAt, singularities, imaginarySingularities, relevantSingularities, SingularitySegments, PoleIntervals, CurrLine, CurrLineNoMobius = Null, CurrIntegrated, CurrIntervalCurrLine, CurrIntervalLine, Done = False, overlapCheck, CurrEvalPoint, CurrEvalPointCurrLine, CurrEval, Currbcs, AllIntegrationData = {}, currentCenter, EvaluateCurrPoint, NextIsPole = False, SegmentCounter = 1, lineRelation, CurrIntervalLinePos, CurrIntervalLineNeg, CurrEvalError, CurrIntegratedError, CurrbcsError, PrintError, CurrError, accumulatedError = 0, accumulatedErrors = ConstantArray[0, {DiffExp`State`NumIntegrals, DiffExp`State`EpsilonOrderVal + 1}], FixWithin, SegmentsToIntegrate, UpdateMatrixExpansionError, TimeStart, TimeStart0, LineReturn, FailedLine, ExpansionsIndeterminates = {}, previousBoundaryConditions, CurrStatusBackup, BoundaryFixPoint, CurrEvalErrorEx, CurrEvalError1, CurrEvalError2, CurrEvalAtBoundaryFixPoint, CurrEvalEx, AllSegmentsPredivision, tempFile, CompressedTermForExport, CompressedTermForExportFN, CurrLineLR, FullLineLR, cachedPoleIntervals, RepeatingSegment, LastEvaluation, LastSavedData, LastLine, ExpansionOrders, DigitsNeeded},
 
   DiffExp`State`BenchmarkData = Association[];
   DiffExp`State`BenchmarkData["TimeStart"] = AbsoluteTime[];
@@ -434,9 +434,9 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
     If[DiffExp`Utilities`IsPoint[bcs[[1]]],
       line = Merge[{bcs[[1]], line}, Expand[#[[1]] (1 - DiffExp`Symbols`x) + DiffExp`Symbols`x #[[2]]] &];
       ,
-      Tmp = DiffExp`LineSegmentation`RelateLines[bcs[[1]], line, True];
-      If[Tmp === False, DiffExp`Utilities`ReportError["Endpoint does not lie on same line as the boundary conditions."]];
-      line = bcs[[1]] /. DiffExp`Symbols`x -> DiffExp`Symbols`x Tmp;
+      tempResult = DiffExp`LineSegmentation`RelateLines[bcs[[1]], line, True];
+      If[tempResult === False, DiffExp`Utilities`ReportError["Endpoint does not lie on same line as the boundary conditions."]];
+      line = bcs[[1]] /. DiffExp`Symbols`x -> DiffExp`Symbols`x tempResult;
     ];
     to = 1;
     ,
@@ -455,25 +455,25 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
   ];
 
   (* Check whether the line lies on a singularity of the differential equations. *)
-  If[Length[Tmp = Flatten[Position[Factor[DiffExp`State`MatricesIrreducibleFactors /. line], 0]]] > 0,
-    DiffExp`Utilities`ReportError["The line lies on a singularity of the differential equations. The vanishing factors are: ", DiffExp`State`MatricesIrreducibleFactors[[Tmp]], "."];
+  If[Length[tempResult = Flatten[Position[Factor[DiffExp`State`MatricesIrreducibleFactors /. line], 0]]] > 0,
+    DiffExp`Utilities`ReportError["The line lies on a singularity of the differential equations. The vanishing factors are: ", DiffExp`State`MatricesIrreducibleFactors[[tempResult]], "."];
   ];
 
   (* Will abort if something is wrong with the boundary conditions. *)
-  {bcs, FixAt} = DiffExp`LineSegmentation`CheckBoundaryConditionsAndReparametrize[bcsprev = bcs, line];
+  {bcs, FixAt} = DiffExp`LineSegmentation`CheckBoundaryConditionsAndReparametrize[previousBoundaryConditions = bcs, line];
 
-  If[Length[bcsprev] > 2,
-    CurrErrorAcc = bcsprev[[3]] // Abs // Max;
-    CurrErrorAccs = bcsprev[[3]];
+  If[Length[previousBoundaryConditions] > 2,
+    accumulatedError = previousBoundaryConditions[[3]] // Abs // Max;
+    accumulatedErrors = previousBoundaryConditions[[3]];
     ,
     Quiet[
-      CurrErrorAccs = 10^-(MapAt[Accuracy, bcsprev[[2]], {All, All}] // SetPrecision[#, DiffExp`State`FEWorkingPrecision] &);
-      CurrErrorAcc = CurrErrorAccs // Max;
+      accumulatedErrors = 10^-(MapAt[Accuracy, previousBoundaryConditions[[2]], {All, All}] // SetPrecision[#, DiffExp`State`FEWorkingPrecision] &);
+      accumulatedError = accumulatedErrors // Max;
     ];
   ];
 
-  If[!((CurrErrorAccs // Dimensions // Last) === DiffExp`State`EpsilonOrderVal + 1),
-    CurrErrorAccs = PadRight[#, DiffExp`State`EpsilonOrderVal + 1, 10^-DiffExp`State`FEWorkingPrecision] & /@ CurrErrorAccs;
+  If[!((accumulatedErrors // Dimensions // Last) === DiffExp`State`EpsilonOrderVal + 1),
+    accumulatedErrors = PadRight[#, DiffExp`State`EpsilonOrderVal + 1, 10^-DiffExp`State`FEWorkingPrecision] & /@ accumulatedErrors;
   ];
 
   DiffExp`Utilities`PrintInfo["Transporting boundary conditions along ", line // Normal // N // Association, " from x = ", FixAt // N, " to x = ", to // N][1];
@@ -486,17 +486,17 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
 
   DiffExp`MatrixLoading`InitializeIntegrationSequence[line];
 
-  {MySingularities, MySingularitiesImaginary} = DiffExp`LineSegmentation`FindMatrixSingularities[line, True, {FixAt, to}];
+  {singularities, imaginarySingularities} = DiffExp`LineSegmentation`FindMatrixSingularities[line, True, {FixAt, to}];
 
-  MySingularitiesRelevant = Select[MySingularities, FixAt <= # <= to || to <= # <= FixAt &];
+  relevantSingularities = Select[singularities, FixAt <= # <= to || to <= # <= FixAt &];
   If[DiffExp`State`FEC[UseMobius] === True,
     SingularitySegments = {
       #,
-      DiffExp`Mobius`GetLineRescaled[line, #, {MySingularities, MySingularitiesImaginary}],
-      DiffExp`Mobius`GetLineRescaled[line, #, {MySingularities, MySingularitiesImaginary}, True]
-    } & /@ MySingularitiesRelevant;
+      DiffExp`Mobius`GetLineRescaled[line, #, {singularities, imaginarySingularities}],
+      DiffExp`Mobius`GetLineRescaled[line, #, {singularities, imaginarySingularities}, True]
+    } & /@ relevantSingularities;
     ,
-    SingularitySegments = {#, DiffExp`Mobius`GetLineRescaled[line, #, {MySingularities, MySingularitiesImaginary}]} & /@ MySingularitiesRelevant;
+    SingularitySegments = {#, DiffExp`Mobius`GetLineRescaled[line, #, {singularities, imaginarySingularities}]} & /@ relevantSingularities;
   ];
 
   DiffExp`Utilities`PrintInfo["Possible singularities along line at positions ", DeleteCases[SingularitySegments[[All, 1]], \[Infinity] | -\[Infinity]] // N, "."][1];
@@ -515,18 +515,18 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
       DiffExp`AnalyticContinuation`PrepareAnalyticContinuation[sline[[2]]];
       DiffExp`MatrixLoading`PrepareMatricesFrom[line, sline[[2]]];
 
-      Tmp = {-#, #} &@DiffExp`LineSegmentation`GetMatricesPrecisionDistance[sline[[2]]];
+      tempResult = {-#, #} &@DiffExp`LineSegmentation`GetMatricesPrecisionDistance[sline[[2]]];
     ];
 
     If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
-      Tmp = {-DiffExp`State`RadiusOfConvergenceVal/DiffExp`State`FEC[DivisionOrder], DiffExp`State`RadiusOfConvergenceVal/DiffExp`State`FEC[DivisionOrder]};
+      tempResult = {-DiffExp`State`RadiusOfConvergenceVal/DiffExp`State`FEC[DivisionOrder], DiffExp`State`RadiusOfConvergenceVal/DiffExp`State`FEC[DivisionOrder]};
     ];
 
-    Tmp = {sline, DiffExp`LineSegmentation`RelateLinesPoint[line, sline[[2]], #] & /@ Tmp};
+    tempResult = {sline, DiffExp`LineSegmentation`RelateLinesPoint[line, sline[[2]], #] & /@ tempResult};
 
-    DiffExp`Utilities`PrintInfo["Expansion around x = ", sline[[1]] // N, " is valid within region x \[Element] [", Tmp[[2, 1]] // N, ", ", Tmp[[2, 2]] // N, "]."][2];
+    DiffExp`Utilities`PrintInfo["Expansion around x = ", sline[[1]] // N, " is valid within region x \[Element] [", tempResult[[2, 1]] // N, ", ", tempResult[[2, 2]] // N, "]."][2];
 
-    Tmp
+    tempResult
     , {sline, SingularitySegments}
   ];
 
@@ -543,14 +543,14 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
   AllSegmentsPredivision = {};
   If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
     DiffExp`Utilities`PrintInfo["Analyzing integration segments."][1];
-    PoleIntervals1 = PoleIntervals;
-    MyCenter = FixAt;
-    CurrLine = DiffExp`Mobius`GetLineRescaled[line, FixAt, {MySingularities, MySingularitiesImaginary}];
+    cachedPoleIntervals = PoleIntervals;
+    currentCenter = FixAt;
+    CurrLine = DiffExp`Mobius`GetLineRescaled[line, FixAt, {singularities, imaginarySingularities}];
     AppendTo[AllSegmentsPredivision, CurrLine];
 
     Done = False;
     While[!Done,
-      PoleIntervals = Select[PoleIntervals, !(#[[1, 1]] === MyCenter) &];
+      PoleIntervals = Select[PoleIntervals, !(#[[1, 1]] === currentCenter) &];
 
       CurrIntervalCurrLine = {-DiffExp`State`RadiusOfConvergenceVal/DiffExp`State`FEC[DivisionOrder], DiffExp`State`RadiusOfConvergenceVal/DiffExp`State`FEC[DivisionOrder]};
       CurrIntervalLine = DiffExp`LineSegmentation`RelateLinesPoint[line, CurrLine, #] & /@ CurrIntervalCurrLine;
@@ -565,31 +565,31 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
         SegmentCounter += 1;
 
         If[to > FixAt,
-          Tmp = Select[PoleIntervals, #[[1, 1]] > MyCenter &];
+          tempResult = Select[PoleIntervals, #[[1, 1]] > currentCenter &];
           ,
-          Tmp = Select[PoleIntervals, #[[1, 1]] <= MyCenter &];
+          tempResult = Select[PoleIntervals, #[[1, 1]] <= currentCenter &];
         ];
-        Tmp2 = {#[[1]], IntervalOverlapQ[CurrIntervalLine, #[[2]]]} & /@ Tmp;
-        Tmp2 = Flatten[Position[Tmp2[[All, 2]], True]];
-        NextIsPole = Length[Tmp2] > 0;
+        overlapCheck = {#[[1]], IntervalOverlapQ[CurrIntervalLine, #[[2]]]} & /@ tempResult;
+        overlapCheck = Flatten[Position[overlapCheck[[All, 2]], True]];
+        NextIsPole = Length[overlapCheck] > 0;
 
         If[NextIsPole,
-          Tmp = Tmp[[Tmp2[[1]]]];
+          tempResult = tempResult[[overlapCheck[[1]]]];
 
           If[to > FixAt,
-            FixWithin = IntervalIntersec[IntervalIntersec[{MyCenter, Tmp[[1, 1]]}, Tmp[[2]]], CurrIntervalLine];
+            FixWithin = IntervalIntersec[IntervalIntersec[{currentCenter, tempResult[[1, 1]]}, tempResult[[2]]], CurrIntervalLine];
             CurrEvalPoint = (FixWithin[[1]] + FixWithin[[2]])/2;
             ,
 
-            FixWithin = IntervalIntersec[IntervalIntersec[{Tmp[[1, 1]], MyCenter}, Tmp[[2]]], CurrIntervalLine];
+            FixWithin = IntervalIntersec[IntervalIntersec[{tempResult[[1, 1]], currentCenter}, tempResult[[2]]], CurrIntervalLine];
             CurrEvalPoint = (FixWithin[[1]] + FixWithin[[2]])/2;
           ];
 
           CurrEvalPointCurrLine = DiffExp`LineSegmentation`RelateLinesPoint[CurrLine, line, CurrEvalPoint];
 
-          MyCenter = Tmp[[1, 1]];
-          CurrLine = Tmp[[1, 2]];
-          If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = Tmp[[1, 3]]];
+          currentCenter = tempResult[[1, 1]];
+          CurrLine = tempResult[[1, 2]];
+          If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = tempResult[[1, 3]]];
           ,
 
           (* Finite point *)
@@ -600,23 +600,23 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
           CurrEvalPointCurrLine = DiffExp`LineSegmentation`RelateLinesPoint[CurrLine, line, CurrEvalPoint];
 
           If[DiffExp`State`FEC[SegmentationStrategy] === "Dynamic",
-            MyCenter = CurrEvalPoint;
+            currentCenter = CurrEvalPoint;
           ];
 
           If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
             If[to > FixAt,
-              MyCenter = DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, MySingularities],
-              MyCenter = DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, MySingularities]
+              currentCenter = DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, singularities],
+              currentCenter = DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, singularities]
             ];
           ];
 
-          CurrLine = DiffExp`Mobius`GetLineRescaled[line, MyCenter, {MySingularities, MySingularitiesImaginary}];
+          CurrLine = DiffExp`Mobius`GetLineRescaled[line, currentCenter, {singularities, imaginarySingularities}];
         ];
       ];
 
       AppendTo[AllSegmentsPredivision, CurrLine];
 
-      PoleIntervals = PoleIntervals1;
+      PoleIntervals = cachedPoleIntervals;
     ];
 
     DiffExp`Utilities`PrintInfo["Segments to integrate: ", SegmentsToIntegrate = SegmentCounter, "."][1];
@@ -716,10 +716,10 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
     CurrIntegrated = IntegrateSystem[Currbcs, CurrLine, {"TransportToCall"}];
 
     If[SaveExpansions === True,
-      TmpRelateLines = DiffExp`Symbols`x -> DiffExp`LineSegmentation`RelateLines[CurrLine, line];
+      lineRelation = DiffExp`Symbols`x -> DiffExp`LineSegmentation`RelateLines[CurrLine, line];
       AppendTo[AllIntegrationData, {
         CurrLine, (* Current line *)
-        TmpRelateLines, (* Change of line parameter from CurrLine to line *)
+        lineRelation, (* Change of line parameter from CurrLine to line *)
         If[to > FixAt, Identity, Reverse]@{Limit[DiffExp`LineSegmentation`RelateLines[line, Currbcs[[1]]], DiffExp`Symbols`x -> 0], CurrEvalPoint}, (*  Expansions gives results on line between x and y *)
         {Limit[DiffExp`LineSegmentation`RelateLines[CurrLine, Currbcs[[1]]], DiffExp`Symbols`x -> 0], CurrEvalPointCurrLine}, (*  Expansions gives results on CurrLine between x and y *)
         If[DiffExp`State`FEC["SaveExpansionsCompress"] === True,
@@ -817,44 +817,44 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
 
   )];
 
-  ComputeErrorsPerIndeterminate[aaa_, bbb_, ExpIndets_] := Module[{TmpErrors},
-    TmpErrors = Table[DiffExp`SeriesOps`LogxCoeffNS[aaa - bbb, logxord], {logxord, 0, DiffExp`State`IMaxLogOrder}];
-    TmpErrors = Table[(
+  ComputeErrorsPerIndeterminate[aaa_, bbb_, indeterminates_] := Module[{errorsByOrder},
+    errorsByOrder = Table[DiffExp`SeriesOps`LogxCoeffNS[aaa - bbb, logxord], {logxord, 0, DiffExp`State`IMaxLogOrder}];
+    errorsByOrder = Table[(
 
       Flatten[
         Append[
           Table[
-            Coefficient[TmpErrors[[All, ii, jj]], var]
-            , {var, ExpIndets}]
+            Coefficient[errorsByOrder[[All, ii, jj]], var]
+            , {var, indeterminates}]
           ,
-          TmpErrors[[All, ii, jj]] /. (# -> 0 & /@ ExpIndets)
+          errorsByOrder[[All, ii, jj]] /. (# -> 0 & /@ indeterminates)
         ]
       ]
 
-    ) // Abs // Max, {ii, (TmpErrors // Dimensions)[[2]]}, {jj, (TmpErrors // Dimensions)[[3]]}] // N
+    ) // Abs // Max, {ii, (errorsByOrder // Dimensions)[[2]]}, {jj, (errorsByOrder // Dimensions)[[3]]}] // N
   ];
 
-  PrintError[] := Block[{TmpErrors, TmpErrors1, TmpErrors2, ExpIndets},
+  PrintError[] := Block[{segmentErrors, endpointErrors, boundaryErrors, indeterminates},
 
     If[!DiffExp`State`MultivaluedFail,
 
-      ExpIndets = DeleteCases[Currbcs[[2]] // System`Variables, "?" | DiffExp`Symbols`x | DiffExp`Symbols`Logx];
+      indeterminates = DeleteCases[Currbcs[[2]] // System`Variables, "?" | DiffExp`Symbols`x | DiffExp`Symbols`Logx];
 
-      TmpErrors1 = ComputeErrorsPerIndeterminate[CurrEvalError1, CurrEval, ExpIndets];
-      TmpErrors2 = ComputeErrorsPerIndeterminate[CurrEvalError2, CurrEvalAtBoundaryFixPoint, ExpIndets];
-      TmpErrors = Table[Max[{TmpErrors1[[ii, jj]], TmpErrors2[[ii, jj]]}], {ii, First@Dimensions@TmpErrors1}, {jj, Last@Dimensions@TmpErrors1}];
+      endpointErrors = ComputeErrorsPerIndeterminate[CurrEvalError1, CurrEval, indeterminates];
+      boundaryErrors = ComputeErrorsPerIndeterminate[CurrEvalError2, CurrEvalAtBoundaryFixPoint, indeterminates];
+      segmentErrors = Table[Max[{endpointErrors[[ii, jj]], boundaryErrors[[ii, jj]]}], {ii, First@Dimensions@endpointErrors}, {jj, Last@Dimensions@endpointErrors}];
 
-      CurrError = Flatten[TmpErrors] // Abs // Max;
+      CurrError = Flatten[segmentErrors] // Abs // Max;
 
       Switch[DiffExp`State`FEC["EstimateError"],
         "Fast",
-        CurrErrorAcc = CurrErrorAcc + CurrError;
-        CurrErrorAccs = CurrErrorAccs + TmpErrors;
+        accumulatedError = accumulatedError + CurrError;
+        accumulatedErrors = accumulatedErrors + segmentErrors;
       ];
 
       Which[DiffExp`State`FEC["EstimateError"] == "Fast",
         DiffExp`Utilities`PrintInfo["Current segment error estimate: ", CurrError][1];
-        DiffExp`Utilities`PrintInfo["Total error estimate: ", CurrErrorAcc][1];
+        DiffExp`Utilities`PrintInfo["Total error estimate: ", accumulatedError][1];
       ];
 
       If[CurrError > 1,
@@ -865,9 +865,9 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
 
   ];
 
-  MyCenter = FixAt;
-  CurrLine = DiffExp`Mobius`GetLineRescaled[line, FixAt, {MySingularities, MySingularitiesImaginary}];
-  If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = DiffExp`Mobius`GetLineRescaled[line, FixAt, {MySingularities, MySingularitiesImaginary}, True]];
+  currentCenter = FixAt;
+  CurrLine = DiffExp`Mobius`GetLineRescaled[line, FixAt, {singularities, imaginarySingularities}];
+  If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = DiffExp`Mobius`GetLineRescaled[line, FixAt, {singularities, imaginarySingularities}, True]];
   Currbcs = CurrbcsError = bcs;
 
   DiffExp`State`BenchmarkData["Segments"] = Association[];
@@ -877,10 +877,10 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
     DiffExp`State`BenchmarkData["Segments"][CurrLine // N] = Association[];
     DiffExp`State`BenchmarkData["Segments"][CurrLine // N]["ComputationTime"] = TimeStart = AbsoluteTime[];
 
-    CurrStatusBackup = {Currbcs, CurrbcsError, bcs, CurrLine, MyCenter, FixAt, CurrErrorAcc, CurrErrorAccs};
+    CurrStatusBackup = {Currbcs, CurrbcsError, bcs, CurrLine, currentCenter, FixAt, accumulatedError, accumulatedErrors};
 
     DiffExp`Utilities`PrintInfo["Integrating segment: ", DiffExp`LineSegmentation`PrintMobiusNormalized /@ CurrLine, "."][1];
-    If[NextIsPole && MemberQ[MySingularitiesImaginary, MyCenter],
+    If[NextIsPole && MemberQ[imaginarySingularities, currentCenter],
       DiffExp`Utilities`PrintInfo["Current segment is centered at singularity."][1];
     ];
 
@@ -888,7 +888,7 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
     LastSavedData = AllIntegrationData;
     LastLine = CurrLine;
 
-    PoleIntervals = Select[PoleIntervals, !(#[[1, 1]] === MyCenter) &];
+    PoleIntervals = Select[PoleIntervals, !(#[[1, 1]] === currentCenter) &];
 
     DiffExp`State`AnalyticContinuationFailed = False;
     DiffExp`AnalyticContinuation`PrepareAnalyticContinuation[CurrLine];
@@ -931,26 +931,26 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
       ,
 
       If[to > FixAt,
-        Tmp = Select[PoleIntervals, #[[1, 1]] > MyCenter &];
+        tempResult = Select[PoleIntervals, #[[1, 1]] > currentCenter &];
         ,
-        Tmp = Select[PoleIntervals, #[[1, 1]] <= MyCenter &];
+        tempResult = Select[PoleIntervals, #[[1, 1]] <= currentCenter &];
       ];
-      Tmp2 = {#[[1]], IntervalOverlapQ[CurrIntervalLine, #[[2]]]} & /@ Tmp;
-      Tmp2 = Flatten[Position[Tmp2[[All, 2]], True]];
-      NextIsPole = Length[Tmp2] > 0;
+      overlapCheck = {#[[1]], IntervalOverlapQ[CurrIntervalLine, #[[2]]]} & /@ tempResult;
+      overlapCheck = Flatten[Position[overlapCheck[[All, 2]], True]];
+      NextIsPole = Length[overlapCheck] > 0;
 
       If[NextIsPole,
-        Tmp = Tmp[[Tmp2[[1]]]];
+        tempResult = tempResult[[overlapCheck[[1]]]];
 
         If[to > FixAt,
           (* (Current line center, pole center), (poleinterval) *)
-          FixWithin = IntervalIntersec[IntervalIntersec[{MyCenter, Tmp[[1, 1]]}, Tmp[[2]]], CurrIntervalLine];
+          FixWithin = IntervalIntersec[IntervalIntersec[{currentCenter, tempResult[[1, 1]]}, tempResult[[2]]], CurrIntervalLine];
           CurrEvalPoint = (FixWithin[[1]] + FixWithin[[2]])/2;
 
           ,
 
           (* (pole center, current line center), (poleinterval) *)
-          FixWithin = IntervalIntersec[IntervalIntersec[{Tmp[[1, 1]], MyCenter}, Tmp[[2]]], CurrIntervalLine];
+          FixWithin = IntervalIntersec[IntervalIntersec[{tempResult[[1, 1]], currentCenter}, tempResult[[2]]], CurrIntervalLine];
           CurrEvalPoint = (FixWithin[[1]] + FixWithin[[2]])/2;
 
 
@@ -960,9 +960,9 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
         CurrEvalPointCurrLine = DiffExp`LineSegmentation`RelateLinesPoint[CurrLine, line, CurrEvalPoint];
         EvaluateCurrPoint[];
 
-        MyCenter = Tmp[[1, 1]];
-        CurrLine = Tmp[[1, 2]];
-        If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = Tmp[[1, 3]]];
+        currentCenter = tempResult[[1, 1]];
+        CurrLine = tempResult[[1, 2]];
+        If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = tempResult[[1, 3]]];
         ,
         (* Finite point *)
         If[to > FixAt,
@@ -973,17 +973,17 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
         EvaluateCurrPoint[];
 
         If[DiffExp`State`FEC[SegmentationStrategy] === "Dynamic",
-          MyCenter = CurrEvalPoint;
+          currentCenter = CurrEvalPoint;
         ];
         If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
           If[to > FixAt,
-            MyCenter = DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, MySingularities],
-            MyCenter = DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, MySingularities]
+            currentCenter = DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, singularities],
+            currentCenter = DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, singularities]
           ];
         ];
 
-        CurrLine = DiffExp`Mobius`GetLineRescaled[line, MyCenter, {MySingularities, MySingularitiesImaginary}];
-        If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = DiffExp`Mobius`GetLineRescaled[line, MyCenter, {MySingularities, MySingularitiesImaginary}, True]];
+        CurrLine = DiffExp`Mobius`GetLineRescaled[line, currentCenter, {singularities, imaginarySingularities}];
+        If[DiffExp`State`FEC[UseMobius] === True, CurrLineNoMobius = DiffExp`Mobius`GetLineRescaled[line, currentCenter, {singularities, imaginarySingularities}, True]];
       ];
 
       Currbcs = {
@@ -1011,7 +1011,7 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
         DiffExp`State`ExpansionOrderVal += DiffExp`State`IExpansionOrderIncrease2;
         DiffExp`Utilities`PrintInfo["The estimated error of the results is lower than the requested AccuracyGoal. The expansions will be repeated at the order ", DiffExp`State`ExpansionOrderVal, "."][1];
         (* Reload variables for the computation of the segment *)
-        {Currbcs, CurrbcsError, bcs, CurrLine, MyCenter, FixAt, CurrErrorAcc, CurrErrorAccs} = CurrStatusBackup;
+        {Currbcs, CurrbcsError, bcs, CurrLine, currentCenter, FixAt, accumulatedError, accumulatedErrors} = CurrStatusBackup;
         If[SaveExpansions === True,
           AllIntegrationData = Delete[AllIntegrationData, -1];
         ];
@@ -1051,12 +1051,12 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
 
   If[SaveExpansions === True,
     If[!DiffExp`State`FEC["EstimateError"] === False,
-      {{LineReturn, CurrEval, CurrErrorAccs}, AllIntegrationData},
+      {{LineReturn, CurrEval, accumulatedErrors}, AllIntegrationData},
       {{LineReturn, CurrEval}, AllIntegrationData}
     ]
     ,
     If[!DiffExp`State`FEC["EstimateError"] === False,
-      {LineReturn, CurrEval, CurrErrorAccs},
+      {LineReturn, CurrEval, accumulatedErrors},
       {LineReturn, CurrEval}
     ]
   ]

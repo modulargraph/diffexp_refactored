@@ -13,7 +13,7 @@ Begin["`Private`"];
 
 (* Solution from the Frobenius ansatz *)
 Frobenius1[DEqn_] := Module[
-  {DEqnSer, n = Length[DEqn], IndicialEquation, rMax, Ansatz, c, Eqns, cUnknowns, cSols, r, tmp, tmp2, Maxc, LeadingPowers},
+  {DEqnSer, equationLength = Length[DEqn], IndicialEquation, rMax, Ansatz, c, Eqns, cUnknowns, cSols, r, validatedSolution, crossCheckResult, maxCoefficientIndex, LeadingPowers},
 
   LeadingPowers = (#[[4]]/#[[6]] &@DiffExp`SeriesOps`LeadingCoefficientSeries[#, 2]) & /@ DEqn;
   LeadingPowers = LeadingPowers - Last[LeadingPowers];
@@ -32,7 +32,7 @@ Frobenius1[DEqn_] := Module[
   IndicialEquation = Sum[
     DiffExp`SeriesOps`LeadingCoefficientSeries[DEqnSer[[ind]]] *
       (D[DiffExp`Symbols`x^r, Sequence @@ ConstantArray[DiffExp`Symbols`x, ind - 1]] DiffExp`Symbols`x^-r),
-    {ind, n}
+    {ind, equationLength}
   ] // Normal // Rationalize[#, 10^-DiffExp`State`ChopPrecisionVal] &;
 
   DiffExp`Utilities`PrintDebug["Indicial equation: ", IndicialEquation /. r -> "r"][3];
@@ -52,7 +52,7 @@ Frobenius1[DEqn_] := Module[
 
   Eqns = DiffExp`Utilities`PChop[# == 0 & /@ Sum[
     DEqnSer[[ind]] (D[Ansatz, Sequence @@ ConstantArray[DiffExp`Symbols`x, ind - 1]]),
-    {ind, n}
+    {ind, equationLength}
   ][[3]]];
 
   Check[
@@ -61,17 +61,17 @@ Frobenius1[DEqn_] := Module[
       ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)
     ]], DiffExp`State`FEWorkingPrecision];,
 
-    DiffExp`State`LastErrorContext = {DEqn, DEqnSer, IndicialEquation, rMax, Ansatz, cUnknowns, Eqns, tmp, cSols};
+    DiffExp`State`LastErrorContext = {DEqn, DEqnSer, IndicialEquation, rMax, Ansatz, cUnknowns, Eqns, validatedSolution, cSols};
 
     If[DiffExp`Utilities`DependsQ[cSols, LinearSolve],
       DiffExp`Utilities`ReportError["Something went wrong while applying the Frobenius method."];,
       DiffExp`Utilities`PrintWarning["Encountered possible instability during evaluation of the Frobenius method. Cross-checking the result."];
-      tmp2 = Ansatz /. (DiffExp`Utilities`PChop[cSols]);
-      tmp2 = Normal[DiffExp`SeriesOps`SExpand@Sum[
-        DEqnSer[[ord]] D[tmp2, Sequence @@ ConstantArray[DiffExp`Symbols`x, ord - 1]],
+      crossCheckResult = Ansatz /. (DiffExp`Utilities`PChop[cSols]);
+      crossCheckResult = Normal[DiffExp`SeriesOps`SExpand@Sum[
+        DEqnSer[[ord]] D[crossCheckResult, Sequence @@ ConstantArray[DiffExp`Symbols`x, ord - 1]],
         {ord, Length[DEqnSer]}
       ]];
-      If[tmp2 === 0,
+      If[crossCheckResult === 0,
         DiffExp`Utilities`PrintInfo["Solution is valid. Continuing."][1];,
         DiffExp`Utilities`ReportError["Result is incorrect. Aborting."];
       ];
@@ -80,13 +80,13 @@ Frobenius1[DEqn_] := Module[
 
   DiffExp`Utilities`PrintDebug["Frobenius solution found."][3];
 
-  Maxc = Max[Cases[Eqns, Subscript[c, i_] :> i, Infinity]];
-  Series[Ansatz, {DiffExp`Symbols`x, 0, Floor[Maxc + rMax]}] /. (DiffExp`Utilities`PChop[cSols])
+  maxCoefficientIndex = Max[Cases[Eqns, Subscript[c, i_] :> i, Infinity]];
+  Series[Ansatz, {DiffExp`Symbols`x, 0, Floor[maxCoefficientIndex + rMax]}] /. (DiffExp`Utilities`PChop[cSols])
 ];
 
 (* All Frobenius solutions *)
 FrobeniusSolutions[DEqn_] := Module[
-  {DEqnOrder = Length[DEqn] - 1, Solns, DEqnReduced, DEqnSer, DEqnZeros, Checks, nTrail},
+  {DEqnOrder = Length[DEqn] - 1, Solns, DEqnReduced, DEqnSer, DEqnZeros, Checks},
 
   DEqnSer = DiffExp`SeriesOps`DiffExpSeries[DEqn, DiffExp`State`ExpansionOrderVal];
 

@@ -14,38 +14,38 @@ Begin["`Private`"];
 
 (* Inverse of matrix containing Logx terms *)
 MatrixLogxInverse[Mat_] := Module[
-  {MaxLogxPower = (Mat // Dimensions // First) - 1, BB, AAA, AA},
+  {maxLogPower = (Mat // Dimensions // First) - 1, inverseCoeffs, matrixExpanded, logCoeffs},
 
-  AAA = Mat // DiffExp`SeriesOps`SExpand;
-  AA[0] = AAA /. DiffExp`Symbols`Logx -> 0;
-  BB[0] = Inverse[AA[0]];
+  matrixExpanded = Mat // DiffExp`SeriesOps`SExpand;
+  logCoeffs[0] = matrixExpanded /. DiffExp`Symbols`Logx -> 0;
+  inverseCoeffs[0] = Inverse[logCoeffs[0]];
 
   Do[
-    AA[mm] = Coefficient[AAA, DiffExp`Symbols`Logx^mm];
-    BB[mm] = -DiffExp`SeriesOps`MatrixMultiplySExpand[BB[0],
-      (Sum[AA[jj] . BB[mm - jj], {jj, 1, mm}])];,
-    {mm, 1, MaxLogxPower}
+    logCoeffs[mm] = Coefficient[matrixExpanded, DiffExp`Symbols`Logx^mm];
+    inverseCoeffs[mm] = -DiffExp`SeriesOps`MatrixMultiplySExpand[inverseCoeffs[0],
+      (Sum[logCoeffs[jj] . inverseCoeffs[mm - jj], {jj, 1, mm}])];,
+    {mm, 1, maxLogPower}
   ];
 
-  Sum[BB[mm] DiffExp`Symbols`Logx^mm, {mm, 0, MaxLogxPower}] // DiffExp`SeriesOps`SExpand
+  Sum[inverseCoeffs[mm] DiffExp`Symbols`Logx^mm, {mm, 0, maxLogPower}] // DiffExp`SeriesOps`SExpand
 ];
 
 (* NullSpace with retry on failure *)
-NullSpaceTryAgainOnFail[ex_, r___] := Module[{Res, ValidateTerm},
-  Res = NullSpace[ex, r];
+NullSpaceTryAgainOnFail[ex_, r___] := Module[{nullSpaceResult},
+  nullSpaceResult = NullSpace[ex, r];
 
-  If[Quiet[Length[Cases[Res, SeriesData[DiffExp`Symbols`x, _, List[], k_, k_, _] /; k < 0, Infinity]] > 0],
+  If[Quiet[Length[Cases[nullSpaceResult, SeriesData[DiffExp`Symbols`x, _, List[], k_, k_, _] /; k < 0, Infinity]] > 0],
     DiffExp`Utilities`PrintWarning["Encountered a problem while determining the nullspace of a matrix. Try setting the option \"HomogeneousSolve\" -> \"DontExpand\" "];
     DiffExp`State`LastErrorContext = {ex, r};
     Abort[];
   ];
 
-  Res
+  nullSpaceResult
 ];
 
 (* Derives an n-th order differential equation for a single integral *)
 CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
-  {Amats, n = Amat // Length, Solns, MtildeMat},
+  {Amats, matrixSize = Amat // Length, Solns, MtildeMat},
 
   DiffExp`Utilities`PrintDebug["Getting higher order derivatives.."][2];
 
@@ -55,13 +55,13 @@ CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
         DiffExp`SeriesOps`SExpand[(DiffExp`SeriesOps`SD[#, DiffExp`Symbols`x] +
           DiffExp`SeriesOps`MatrixMultiplySExpand[#, Amat])]
       ] &,
-      IdentityMatrix[n], n
+      IdentityMatrix[matrixSize], matrixSize
     ];
     Solns = Amats[[All, topind]] // Transpose //
       NullSpaceTryAgainOnFail[#, Method -> "DivisionFreeRowReduction",
         Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;,
 
-    Amats = DiffExp`Utilities`PChop@NestList[Together[(D[#, DiffExp`Symbols`x] + # . Amat)] &, IdentityMatrix[n], n];
+    Amats = DiffExp`Utilities`PChop@NestList[Together[(D[#, DiffExp`Symbols`x] + # . Amat)] &, IdentityMatrix[matrixSize], matrixSize];
     Solns = DiffExp`SeriesOps`DiffExpSeries[Amats[[All, topind]] // Transpose // NullSpace[#] & // Together];
   ];
 
@@ -72,8 +72,8 @@ CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
 
   If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
     MtildeMat = DiffExp`Utilities`PChop@DiffExp`SeriesOps`DiffExpSeries[
-      Amats[[All, topind]][[Range[n], Range[n]]]];,
-    MtildeMat = Amats[[All, topind]][[Range[n], Range[n]]];
+      Amats[[All, topind]][[Range[matrixSize], Range[matrixSize]]]];,
+    MtildeMat = Amats[[All, topind]][[Range[matrixSize], Range[matrixSize]]];
   ];
 
   {Solns[[1]]/(Solns[[1]] // Last), MtildeMat}

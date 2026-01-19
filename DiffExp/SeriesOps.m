@@ -96,7 +96,7 @@ LogxCoeffList[Ser_] := Block[{maxpow = MaxLogxPower[Ser]},
 ];
 
 (* Matrix multiplication with series expansion *)
-MatrixMultiplySExpand[MatA_, MatB_] := Module[{Dim1 = Dimensions[MatA], Dim2 = Dimensions[MatB], ABFile},
+MatrixMultiplySExpand[MatA_, MatB_] := Module[{Dim1 = Dimensions[MatA], Dim2 = Dimensions[MatB]},
   If[!(Dim1[[2]] === Dim2[[1]]),
     DiffExp`State`LastErrorContext = {MatA, MatB};
     DiffExp`Utilities`ReportError["Matrix dimensions don't match."];
@@ -131,19 +131,19 @@ SeriesAlways[term_, {a_, b_, c_}, ex_: 1] := If[DiffExp`Utilities`DependsQ[term,
 ];
 
 (* Leading coefficient series *)
-LeadingCoefficientSeries[Ser_, AddTo2_: 1] := Module[{Ser1, Ser2, AddTo, Den1, Den2, tmp},
+LeadingCoefficientSeries[Ser_, AddTo2_: 1] := Module[{leadingSeries, truncatedSeries, combinedDenominator, Den1, Den2, fractionalPower},
   If[!DiffExp`Utilities`DependsQ[Ser // Normal, DiffExp`Symbols`x],
     Ser + O[DiffExp`Symbols`x]^(1/AddTo2),
     Assuming[DiffExp`Symbols`x > 0,
-      Ser1 = Ser /. DiffExp`Symbols`x -> (DiffExp`Symbols`x + O[DiffExp`Symbols`x]^2);
-      Ser2 = Ser1 /. a_List :> Take[a, 1];
+      leadingSeries = Ser /. DiffExp`Symbols`x -> (DiffExp`Symbols`x + O[DiffExp`Symbols`x]^2);
+      truncatedSeries = leadingSeries /. a_List :> Take[a, 1];
 
-      Den1 = Association[#[[1]] -> #[[2]] & /@ (Ser1[[6]] // FactorInteger)];
+      Den1 = Association[#[[1]] -> #[[2]] & /@ (leadingSeries[[6]] // FactorInteger)];
       Den2 = Association[#[[1]] -> #[[2]] & /@ (AddTo2 // FactorInteger)];
-      AddTo = Times @@ KeyValueMap[#1^#2 &, Merge[{Den1, Den2}, Max]];
+      combinedDenominator = Times @@ KeyValueMap[#1^#2 &, Merge[{Den1, Den2}, Max]];
 
-      tmp = Ser1[[4]]/Ser1[[6]] + 1/AddTo;
-      Ser2 + SeriesData[DiffExp`Symbols`x, 0, List[], tmp // Numerator, tmp // Numerator, tmp // Denominator]
+      fractionalPower = leadingSeries[[4]]/leadingSeries[[6]] + 1/combinedDenominator;
+      truncatedSeries + SeriesData[DiffExp`Symbols`x, 0, List[], fractionalPower // Numerator, fractionalPower // Numerator, fractionalPower // Denominator]
     ]
   ]
 ];

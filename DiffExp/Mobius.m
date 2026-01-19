@@ -38,24 +38,24 @@ GetMobius[{zmin_, \[Infinity], zmax_}] /; zmax != \[Infinity] && zmin != -\[Infi
 GetLineRescaled[line_Association, at_, {signsproj_, signsim_}, nomobius_: False] :=
   Block[{$MaxExtraPrecision = 1000},
     If[DiffExp`State`UseMobiusVal === True && nomobius === False,
-      Module[{t1l, t1r, tmp},
-        t1l = Select[signsproj, # < at &] // Last;
-        t1r = Select[signsproj, # > at &] // First;
+      Module[{leftBound, rightBound},
+        leftBound = Select[signsproj, # < at &] // Last;
+        rightBound = Select[signsproj, # > at &] // First;
 
-        (tmp = Together[#]; Collect[Numerator[#], DiffExp`Symbols`x]/Collect[Denominator[#], DiffExp`Symbols`x]) & /@
-          ((line /. DiffExp`Symbols`x -> GetMobius[{t1l, at, t1r}])) /.
+        (Collect[Numerator[#], DiffExp`Symbols`x]/Collect[Denominator[#], DiffExp`Symbols`x]) & /@
+          ((line /. DiffExp`Symbols`x -> GetMobius[{leftBound, at, rightBound}])) /.
           DiffExp`Symbols`x -> DiffExp`Symbols`x/DiffExp`State`FEC[RadiusOfConvergence] //
           SetPrecision[#, 2 DiffExp`State`FEWorkingPrecision] &
       ],
-      Module[{t1, tmp, mynearest, t1l, t1r},
-        t1l = Select[signsproj, # < at &] // Last;
-        t1r = Select[signsproj, # > at &] // First;
-        t1 = Min[at - t1l, t1r - at];
+      Module[{minDistance, leftBound, rightBound},
+        leftBound = Select[signsproj, # < at &] // Last;
+        rightBound = Select[signsproj, # > at &] // First;
+        minDistance = Min[at - leftBound, rightBound - at];
 
-        (tmp = Together[#]; Collect[Numerator[#], DiffExp`Symbols`x]/Collect[Denominator[#], DiffExp`Symbols`x]) & /@
+        (Collect[Numerator[#], DiffExp`Symbols`x]/Collect[Denominator[#], DiffExp`Symbols`x]) & /@
           (((Normal[line] /. DiffExp`Symbols`x -> at + DiffExp`Symbols`x # /.
             DiffExp`Symbols`x -> DiffExp`Symbols`x/DiffExp`State`FEC[RadiusOfConvergence] //
-            SetPrecision[#, 2 DiffExp`State`FEWorkingPrecision] & // Expand // Association) &@t1))
+            SetPrecision[#, 2 DiffExp`State`FEWorkingPrecision] & // Expand // Association) &@minDistance))
       ]
     ]
   ];
@@ -82,9 +82,9 @@ GetMobiusCPR[{zmin_, zbound_, zmax_}] :=
    (2 zbound - zmax - k zmax - zmin + k zmin) /. k -> DiffExp`State`FEC[DivisionOrder];
 
 (* Helper function for center point calculation *)
-GetCPLRep[MyEq_] := Block[{rs},
-  rs = Cases[MyEq, xnew == a_ | s == a_] /. Equal -> Rule;
-  xnew //. rs
+GetCPLRep[MyEq_] := Block[{ruleSet},
+  ruleSet = Cases[MyEq, xnew == a_ | s == a_] /. Equal -> Rule;
+  xnew //. ruleSet
 ];
 
 GetCPL[{-\[Infinity], zbound_, zmax_}, k2_: Null] := Block[
@@ -134,16 +134,16 @@ GetCPR[{zmin_, zbound_, zmax_}, k2_: Null] := Block[
 ];
 
 (* Find next center points *)
-FindNextCenterPointL[xbc_, singsproj_] := Module[{xl, xr},
-  xl = Select[singsproj, # < xbc &] // Last;
-  xr = Select[singsproj, # > xbc &] // First;
-  If[DiffExp`State`FEC[UseMobius] === True, GetMobiusCPL[{xl, xbc, xr}], GetCPL[{xl, xbc, xr}]]
+FindNextCenterPointL[xbc_, singsproj_] := Module[{leftBound, rightBound},
+  leftBound = Select[singsproj, # < xbc &] // Last;
+  rightBound = Select[singsproj, # > xbc &] // First;
+  If[DiffExp`State`FEC[UseMobius] === True, GetMobiusCPL[{leftBound, xbc, rightBound}], GetCPL[{leftBound, xbc, rightBound}]]
 ];
 
-FindNextCenterPointR[xbc_, singsproj_] := Module[{xl, xr},
-  xl = Select[singsproj, # < xbc &] // Last;
-  xr = Select[singsproj, # > xbc &] // First;
-  If[DiffExp`State`FEC[UseMobius] === True, GetMobiusCPR[{xl, xbc, xr}], GetCPR[{xl, xbc, xr}]]
+FindNextCenterPointR[xbc_, singsproj_] := Module[{leftBound, rightBound},
+  leftBound = Select[singsproj, # < xbc &] // Last;
+  rightBound = Select[singsproj, # > xbc &] // First;
+  If[DiffExp`State`FEC[UseMobius] === True, GetMobiusCPR[{leftBound, xbc, rightBound}], GetCPR[{leftBound, xbc, rightBound}]]
 ];
 
 End[];

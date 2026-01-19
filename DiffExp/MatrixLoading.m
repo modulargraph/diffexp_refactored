@@ -19,37 +19,37 @@ Begin["`Private`"];
 
 (* Loads files in the location of MatrixDirectory *)
 LoadMatrices[Folder_] := Module[
-  {TmpFiles, CurrFileName, CurrMatrix, DimTest, MatrixHeads, MHLeft, PSFL, NewSquareRootSingularities,
-   Tmp, SqrtFlips, VarsPartialDerivatives, ExtraVars, AlphabetLogs, FilePattern, ExtraVarsEncountered},
+  {matrixFiles, CurrFileName, CurrMatrix, dimensionCheck, MatrixHeads, unsupportedHeads, primeFactorList, NewSquareRootSingularities,
+   parsedVariables, SqrtFlips, VarsPartialDerivatives, ExtraVars, AlphabetLogs, FilePattern, ExtraVarsEncountered},
 
   DiffExp`Utilities`PrintInfo["Loading matrices."][1];
 
   VarsPartialDerivatives = DiffExp`State`FEC[System`Variables];
   If[DiffExp`State`FEC[System`Variables] === {},
-    TmpFiles = FileNames[FileNameJoin[{DiffExp`State`FEC[MatrixDirectory], "d*_*.m"}]];
+    matrixFiles = FileNames[FileNameJoin[{DiffExp`State`FEC[MatrixDirectory], "d*_*.m"}]];
 
-    If[Length[TmpFiles] === 0,
+    If[Length[matrixFiles] === 0,
       DiffExp`Utilities`ReportError["No partial derivative matrices found in the given directory."];
     ];
 
     FilePattern = Longest[pre__] ~~ $PathnameSeparator ~~ "d" ~~ Shortest[a___] ~~ "_" ~~ Shortest[b__] ~~ ".m" /;
       NumericQ[ToExpression[b]] || b === "d";
     DiffExp`Utilities`PrintInfo["Found files: ",
-      Flatten[StringCases[#, FilePattern :> "d" <> a <> "_" <> b <> ".m"] & @TmpFiles]][1];
-    Tmp = Flatten[StringCases[#, FilePattern :> {a, b}], 1] & /@ TmpFiles;
-    Tmp = DeleteCases[Tmp, {}];
+      Flatten[StringCases[#, FilePattern :> "d" <> a <> "_" <> b <> ".m"] & @matrixFiles]][1];
+    parsedVariables = Flatten[StringCases[#, FilePattern :> {a, b}], 1] & /@ matrixFiles;
+    parsedVariables = DeleteCases[parsedVariables, {}];
 
-    If[DeleteDuplicates[Tmp[[All, 2]]] === {"d"},
+    If[DeleteDuplicates[parsedVariables[[All, 2]]] === {"d"},
       DiffExp`Utilities`PrintInfo["Found differential equations in closed form."][1];
       DiffExp`State`UsingClosedFormMatrix = True;,
       DiffExp`State`UsingClosedFormMatrix = False;
     ];
 
-    Tmp = ToExpression /@ (Tmp[[All, 1]] // DeleteDuplicates);
-    Tmp = DeleteCases[Tmp, Null];
-    VarsPartialDerivatives = Tmp;
+    parsedVariables = ToExpression /@ (parsedVariables[[All, 1]] // DeleteDuplicates);
+    parsedVariables = DeleteCases[parsedVariables, Null];
+    VarsPartialDerivatives = parsedVariables;
 
-    If[MemberQ[Tmp, DiffExp`State`LineParameterVal],
+    If[MemberQ[parsedVariables, DiffExp`State`LineParameterVal],
       DiffExp`Utilities`ReportError["Some of the kinematic invariants or masses are named the same as the line parameter."];
     ];
   ];
@@ -125,12 +125,12 @@ LoadMatrices[Folder_] := Module[
   ];
 
   (* Sanity check on matrix dimensions *)
-  DimTest = (If[!# === "ZeroM", # // Dimensions, Null] & /@
+  dimensionCheck = (If[!# === "ZeroM", # // Dimensions, Null] & /@
     Join[Values[DiffExp`State`ExpansionMatrices], {DiffExp`State`ExpansionMatricesCanonical1},
       Values[DiffExp`State`ExpansionMatricesClosedForm]]) // DeleteCases[#, Null] &;
 
-  If[!(DimTest // SameQ),
-    DiffExp`Utilities`ReportError["Loaded matrices are of different dimensions: ", DimTest];
+  If[!(dimensionCheck // SameQ),
+    DiffExp`Utilities`ReportError["Loaded matrices are of different dimensions: ", dimensionCheck];
   ];
 
   DiffExp`Utilities`PrintInfo["Loaded system of size ",
@@ -139,21 +139,21 @@ LoadMatrices[Folder_] := Module[
         {DiffExp`State`ExpansionMatricesCanonical1}, Values[DiffExp`State`ExpansionMatricesClosedForm]], {}]][1];
 
   DiffExp`State`ExpansionMatrices = DiffExp`State`ExpansionMatrices /.
-    "ZeroM" -> DiffExp`Utilities`CA[0, {DimTest[[1, 1]], DimTest[[1, 1]]}];
+    "ZeroM" -> DiffExp`Utilities`CA[0, {dimensionCheck[[1, 1]], dimensionCheck[[1, 1]]}];
   DiffExp`State`ExpansionMatricesCanonical1 = DiffExp`State`ExpansionMatricesCanonical1 /.
-    "ZeroM" -> DiffExp`Utilities`CA[0, {DimTest[[1, 1]], DimTest[[1, 1]]}];
+    "ZeroM" -> DiffExp`Utilities`CA[0, {dimensionCheck[[1, 1]], dimensionCheck[[1, 1]]}];
 
-  DiffExp`State`NumIntegrals = DimTest[[1, 1]];
+  DiffExp`State`NumIntegrals = dimensionCheck[[1, 1]];
 
   MatrixHeads = DiffExp`Utilities`GetCases[
     Join[DiffExp`State`ExpansionMatrices // Values, DiffExp`State`ExpansionMatricesClosedForm // Values,
       AlphabetLogs /. Log[a_] :> a] // Flatten,
     a_ :> a[[0]]
   ];
-  MHLeft = Complement[MatrixHeads, {Association, List, Complex, Integer, Plus, Power, Rational, Symbol, Times}];
+  unsupportedHeads = Complement[MatrixHeads, {Association, List, Complex, Integer, Plus, Power, Rational, Symbol, Times}];
 
-  If[Length[MHLeft] > 0,
-    DiffExp`Utilities`ReportError["The differential equation matrices contain unsupported functions: ", MHLeft];
+  If[Length[unsupportedHeads] > 0,
+    DiffExp`Utilities`ReportError["The differential equation matrices contain unsupported functions: ", unsupportedHeads];
   ];
 
   If[Length[DiffExp`Utilities`GetCases[
@@ -173,8 +173,8 @@ LoadMatrices[Folder_] := Module[
   DiffExp`State`DEqnSquareRoots = DeleteDuplicates[DiffExp`State`DEqnSquareRoots,
     Expand[#1] === Expand[#2] || Expand[#1] === Expand[-#2] &];
 
-  PSFL = FactorList /@ DiffExp`State`DEqnSquareRoots;
-  If[DiffExp`Utilities`DependsQ[Length[#] > 2 & /@ PSFL, True],
+  primeFactorList = FactorList /@ DiffExp`State`DEqnSquareRoots;
+  If[DiffExp`Utilities`DependsQ[Length[#] > 2 & /@ primeFactorList, True],
     DiffExp`Utilities`ReportError["Matrices contain square roots which are not irreducible!"];
   ];
 
@@ -356,28 +356,28 @@ PrepareMatricesExpanded[line_Association] := (
 
 (* Detects the integration sequence *)
 InitializeIntegrationSequence[line_] := Module[
-  {dDot, HomogeneousMask, EdgeL, CurrIndex, IntegrationDependencies, KeysToDelete},
+  {HomogeneousMask, dependencyEdges, CurrIndex, IntegrationDependencies, redundantKeys},
 
   DiffExp`Utilities`PrintDebug["Analyzing integration sequence on current line."][1];
   HomogeneousMask = MapAt[DiffExp`Utilities`ZeroQ, DiffExp`State`DEqnMatricesFactored[line][0], {All, All}];
 
   (* A graph describing which integrals couple together in the differential equations *)
-  EdgeL = Flatten[MapIndexed[
+  dependencyEdges = Flatten[MapIndexed[
     (CurrIndex = #2[[1]]; CurrIndex -> # &) /@ #1 &,
     (Flatten[Position[#, False]]) & /@ HomogeneousMask
   ]];
-  EdgeL = Join[EdgeL, Table[DirectedEdge[i, i], {i, DiffExp`State`NumIntegrals}]] // DeleteDuplicates;
+  dependencyEdges = Join[dependencyEdges, Table[DirectedEdge[i, i], {i, DiffExp`State`NumIntegrals}]] // DeleteDuplicates;
 
-  IntegrationDependencies = (# -> VertexOutComponent[Graph[EdgeL], {#}]) & /@ Range[DiffExp`State`NumIntegrals];
+  IntegrationDependencies = (# -> VertexOutComponent[Graph[dependencyEdges], {#}]) & /@ Range[DiffExp`State`NumIntegrals];
 
   (* Integration sequence and coupled integrals *)
   DiffExp`State`IntegrationSequence = SortBy[IntegrationDependencies, Length[#[[2]]] &][[All, 1]];
   DiffExp`State`IntegrationSequence = Association[
-    # -> Union[DiffExp`Utilities`GetCases[ConnectedComponents[EdgeL // Graph, #], _Integer], {#}] & /@
+    # -> Union[DiffExp`Utilities`GetCases[ConnectedComponents[dependencyEdges // Graph, #], _Integer], {#}] & /@
       DiffExp`State`IntegrationSequence
   ];
-  KeysToDelete = (DeleteDuplicates@*Flatten)[Delete[#, -1] & /@ (DiffExp`State`IntegrationSequence // Values)];
-  DiffExp`State`IntegrationSequence = KeyDrop[DiffExp`State`IntegrationSequence, KeysToDelete] // Values;
+  redundantKeys = (DeleteDuplicates@*Flatten)[Delete[#, -1] & /@ (DiffExp`State`IntegrationSequence // Values)];
+  DiffExp`State`IntegrationSequence = KeyDrop[DiffExp`State`IntegrationSequence, redundantKeys] // Values;
 
   DiffExp`Utilities`PrintDebug["Integration sequence is ", DiffExp`State`IntegrationSequence][1];
   DiffExp`State`MaxCouplingOrder = (Length /@ DiffExp`State`IntegrationSequence) // Max;

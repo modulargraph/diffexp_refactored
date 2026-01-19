@@ -15,3 +15,6 @@ FrontEnd/*
 # Temporary files
 *.tmp
 *~
+
+# External packages (cloned repos)
+kira/

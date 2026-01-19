@@ -880,7 +880,7 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
 
     CurrStatusBackup = {Currbcs, CurrbcsError, bcs, CurrLine, currentCenter, FixAt, accumulatedError, accumulatedErrors};
 
-    DiffExp`Utilities`PrintInfo["Integrating segment: ", DiffExp`LineSegmentation`PrintMobiusNormalized /@ CurrLine, "."][1];
+    DiffExp`Utilities`PrintInfo["Integrating segment: ", DiffExp`Utilities`PrintMobiusNormalized /@ CurrLine, "."][1];
     If[NextIsPole && MemberQ[imaginarySingularities, currentCenter],
       DiffExp`Utilities`PrintInfo["Current segment is centered at singularity."][1];
     ];

@@ -9,7 +9,6 @@ BeginPackage["DiffExp`LineSegmentation`", {"DiffExp`Symbols`", "DiffExp`State`",
 RelateLines::usage = "RelateLines[a_,b_,noerror_] relates line parameters of different segments.";
 RelateLinesPoint::usage = "RelateLinesPoint[a_,b_,pointb_] relates lines at a specific point.";
 FindMatrixSingularities::usage = "FindMatrixSingularities[line_,getcomplex_,{fixat_,to_}] finds singularities.";
-PrintMobiusNormalized::usage = "PrintMobiusNormalized[a_] normalizes terms for printing.";
 GetLargestTerm::usage = "GetLargestTerm[line_] gives a large term for error estimation.";
 GetMatricesPrecisionDistance::usage = "GetMatricesPrecisionDistance[line_] gets intervals in dynamic segmentation.";
 CheckBoundaryConditionsAndReparametrize::usage = "CheckBoundaryConditionsAndReparametrize[bcs_,line_] validates and reparametrizes boundary conditions.";
@@ -104,14 +103,6 @@ FindMatrixSingularities[line_, getcomplex_: False, {fixat_, to_}] := Module[
     {projectedSingularities, singularityPositions},
     projectedSingularities
   ]
-];
-
-(* Normalizes terms in numerator and denominator for printing *)
-PrintMobiusNormalized[a_] := Module[{rationalForm = a // Together, maxNumerator, maxDenominator, maxCoeff},
-  maxNumerator = Max[Abs /@ {Coefficient[rationalForm // Numerator, DiffExp`Symbols`x], (rationalForm // Numerator) /. DiffExp`Symbols`x -> 0}];
-  maxDenominator = Max[Abs /@ {Coefficient[rationalForm // Denominator, DiffExp`Symbols`x], (rationalForm // Denominator) /. DiffExp`Symbols`x -> 0}];
-  maxCoeff = Max[maxNumerator, maxDenominator];
-  Expand[Numerator[rationalForm]/maxCoeff]/Expand[Denominator[rationalForm]/maxCoeff] // N
 ];
 
 (* Gives a large term which can be used to estimate the error *)

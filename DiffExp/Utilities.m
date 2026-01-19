@@ -10,6 +10,7 @@ PrintDebug::usage = "PrintDebug[args__][lev_] prints debug messages at specified
 PrintInfo::usage = "PrintInfo[args__][lev_] prints info messages at specified verbosity level.";
 PrintWarning::usage = "PrintWarning[args__] prints warning messages.";
 ReportError::usage = "ReportError[mes__] reports an error and aborts.";
+PrintMobiusNormalized::usage = "PrintMobiusNormalized[a_] normalizes Mobius terms for printing.";
 
 (* General utilities *)
 AllSameQ::usage = "AllSameQ[l_,b_] checks if all elements in l are equal to b.";
@@ -59,6 +60,14 @@ PrintWarning[args__] := Print["DiffExp Warning: ", args];
 
 ReportError[mes__] := (Print["DiffExp Error: ", mes]; Abort[];);
 ReportError[mes__, False] := Print["DiffExp Error: ", mes];
+
+(* Normalizes terms in numerator and denominator for printing *)
+PrintMobiusNormalized[a_] := Module[{rationalForm = a // Together, maxNumerator, maxDenominator, maxCoeff},
+  maxNumerator = Max[Abs /@ {Coefficient[rationalForm // Numerator, DiffExp`Symbols`x], (rationalForm // Numerator) /. DiffExp`Symbols`x -> 0}];
+  maxDenominator = Max[Abs /@ {Coefficient[rationalForm // Denominator, DiffExp`Symbols`x], (rationalForm // Denominator) /. DiffExp`Symbols`x -> 0}];
+  maxCoeff = Max[maxNumerator, maxDenominator];
+  Expand[Numerator[rationalForm]/maxCoeff]/Expand[Denominator[rationalForm]/maxCoeff] // N
+];
 
 (* General utilities *)
 AllSameQ[l_, b_] := If[Length[l] > 0, SameQ[l] && l[[1]] === b, True];

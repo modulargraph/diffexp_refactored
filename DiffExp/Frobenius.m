@@ -61,7 +61,7 @@ Frobenius1[DEqn_] := Module[
       ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)
     ]], DiffExp`State`FEWorkingPrecision];,
 
-    Global`DebugData = {DEqn, DEqnSer, IndicialEquation, rMax, Ansatz, cUnknowns, Eqns, tmp, cSols};
+    DiffExp`State`LastErrorContext = {DEqn, DEqnSer, IndicialEquation, rMax, Ansatz, cUnknowns, Eqns, tmp, cSols};
 
     If[DiffExp`Utilities`DependsQ[cSols, LinearSolve],
       DiffExp`Utilities`ReportError["Something went wrong while applying the Frobenius method."];,

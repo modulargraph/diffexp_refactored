@@ -136,11 +136,11 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       DiffExp`Utilities`PrintDebug["Deriving inverse Wronskian..."][3];
       If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "WronskInv"] === True,
         If[DiffExp`Utilities`DependsQ[(WWinvprimeprod // DiffExp`Utilities`CPChop) + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // Normal, DiffExp`Symbols`x],
-          Global`DebugData = {WronskInvPrime, Wronsk, WWinvprimeprod};
+          DiffExp`State`LastErrorContext = {WronskInvPrime, Wronsk, WWinvprimeprod};
           DiffExp`Utilities`ReportError["Warning, product of Wronskian inverse times Wronskian does not match identity. Try increasing \"ChopPrecision\" or \"WorkingPrecision\", or try decreasing \"ExpansionOrder\"."][1];
         ];
       ];
-      Global`DebugData = {WWinvprimeprod};
+      DiffExp`State`LastErrorContext = {WWinvprimeprod};
       WWinvprimeprod = WWinvprimeprod /. DiffExp`Symbols`x^(k_ : 1) :> 0 /. DiffExp`Symbols`Logx -> 0;
       WronskInv = DiffExp`Utilities`PChop@DiffExp`SeriesOps`MatrixMultiplySExpand[(WWinvprimeprod // Inverse), WronskInvPrime];
       DiffExp`Utilities`PrintDebug["Done."][3];
@@ -173,7 +173,7 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "PeriodMatrix"] === True,
       DiffExp`Utilities`PrintDebug["Cross-checking period matrix.."][1];
       CrossC = DiffExp`SeriesOps`SD[FMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], FMat + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder] // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-      Global`DebugData = {FMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], CrossC, MtildeMat, Wronsk};
+      DiffExp`State`LastErrorContext = {FMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], CrossC, MtildeMat, Wronsk};
       DiffExp`Utilities`PrintDebug["Found: ", CrossC + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
       If[
         !(SameQ @@ Append[CrossC // Normal // Flatten, 0])
@@ -199,7 +199,7 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolutionMatrix"] === True,
     DiffExp`Utilities`PrintDebug["Cross-checking GMat with differential equations."][1];
     CrossC = DiffExp`SeriesOps`SD[GMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], GMat + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder] - BMat // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-    Global`DebugData = {FMat, GMat, FMatInv, BMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], CrossC, MtildeMat, Wronsk};
+    DiffExp`State`LastErrorContext = {FMat, GMat, FMatInv, BMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], CrossC, MtildeMat, Wronsk};
     DiffExp`Utilities`PrintDebug["Found: ", CrossC + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
     If[
       !(SameQ @@ Append[CrossC + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // Normal // Flatten, 0])
@@ -361,7 +361,7 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       ];
 
       If[Length[IndeterminatesRemaining] < Length[fGeneral],
-        Global`DebugData = {Cmat, Cb, CsGeneralSol};
+        DiffExp`State`LastErrorContext = {Cmat, Cb, CsGeneralSol};
         DiffExp`Utilities`ReportError["There was an error in obtaining the solutions for integrals ", intind, " at order ", epsord, " using the \"VOP\" strategy. Try decreasing the value of the option ChopPrecision or increasing the WorkingPrecision."];
       ];
 
@@ -513,7 +513,7 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       ];
 
       If[Length[IndeterminatesRemaining] < Length[fGeneral],
-        Global`DebugData = {Cmat, Cb, CsGeneralSol, fGeneral};
+        DiffExp`State`LastErrorContext = {Cmat, Cb, CsGeneralSol, fGeneral};
         DiffExp`Utilities`ReportError["There was an error in obtaining the solutions for integrals ", intind, " at order ", epsord, " using the \"VOP\" strategy. Try decreasing the value of the option ChopPrecision or increasing the WorkingPrecision."];
       ];
 
@@ -546,7 +546,7 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolutionMatrix"] === True,
     DiffExp`Utilities`PrintDebug["Cross-checking GMat with differential equations."][1];
     CrossC = DiffExp`SeriesOps`SD[GMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], GMat + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder] - BMat // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-    Global`DebugData = {FMat, GMat, FMatInv, BMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], CrossC, MtildeMatrix, MyWronsk};
+    DiffExp`State`LastErrorContext = {FMat, GMat, FMatInv, BMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], CrossC, MtildeMatrix, MyWronsk};
     DiffExp`Utilities`PrintDebug["Found: ", CrossC + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
     If[
       !(SameQ @@ Append[CrossC + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // Normal // Flatten, 0])

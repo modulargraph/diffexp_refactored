@@ -98,7 +98,7 @@ LogxCoeffList[Ser_] := Block[{maxpow = MaxLogxPower[Ser]},
 (* Matrix multiplication with series expansion *)
 MatrixMultiplySExpand[MatA_, MatB_] := Module[{Dim1 = Dimensions[MatA], Dim2 = Dimensions[MatB], ABFile},
   If[!(Dim1[[2]] === Dim2[[1]]),
-    Global`DebugData = {MatA, MatB};
+    DiffExp`State`LastErrorContext = {MatA, MatB};
     DiffExp`Utilities`ReportError["Matrix dimensions don't match."];
   ];
 

@@ -77,6 +77,7 @@ CurrCrosscheckFlags::usage = "Current crosscheck flags.";
 CrosscheckFlags::usage = "Crosscheck flag definitions.";
 DiffExpExtensions::usage = "DiffExp extensions.";
 LogStream::usage = "Log stream for output.";
+LastErrorContext::usage = "Stores diagnostic context from the last error for debugging. Access with DiffExp`State`LastErrorContext.";
 
 (* Internal constants *)
 ISeriesChangeCoefficient::usage = "Internal constant.";
@@ -146,7 +147,7 @@ ChopPrecisionVal := FEC[ChopPrecision];
 LinearSolveChopPrecisionVal := FEC["LinearSolveChopPrecision"];
 CrosscheckChopPrecision := 30;
 ExternalScalesVal := FEC[System`Variables];
-LineParameterVal = FEC[LineParameter];
+LineParameterVal := FEC[LineParameter];
 
 (* Set the internal x to the line parameter *)
 DiffExp`Symbols`x = FEC[LineParameter];
@@ -188,6 +189,7 @@ DEqnSquareRoots = {};
 MultivaluedFail = False;
 UserDeltaPrescriptions = {};
 UsingClosedFormMatrix = False;
+LastErrorContext = {};
 
 (* Crosscheck flags *)
 CrosscheckFlags = {

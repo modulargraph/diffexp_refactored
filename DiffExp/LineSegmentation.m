@@ -24,7 +24,7 @@ RelateLines[a2_Association, b2_Association, noerror_: False] := Module[
   (* Find one component of a that contains x, and use that to solve the equation *)
   CanSolveFrom = Flatten[Position[DiffExp`Utilities`DependsQ[DiffExp`Utilities`PChop@Expand@#, DiffExp`Symbols`x] & /@ a, True]];
   If[Length[CanSolveFrom] === 0,
-    Global`DebugData = {a, b};
+    DiffExp`State`LastErrorContext = {a, b};
     DiffExp`Utilities`ReportError["Argument does not depend on the line parameter!"];
   ];
 
@@ -39,7 +39,7 @@ RelateLines[a2_Association, b2_Association, noerror_: False] := Module[
   ];
 
   If[!(Length[Sol] === 1),
-    Global`DebugData = {a, b};
+    DiffExp`State`LastErrorContext = {a, b};
     If[!noerror, DiffExp`Utilities`ReportError["Could not relate lines."];];
     False,
     (* Crosscheck *)
@@ -50,7 +50,7 @@ RelateLines[a2_Association, b2_Association, noerror_: False] := Module[
           ((a /. DiffExp`Symbols`x -> SugSol) - b)], 0]),
         DiffExp`Utilities`PrintDebug["Could not relate lines:"][1];
         DiffExp`Utilities`PrintDebug[Values[(a /. DiffExp`Symbols`x -> SugSol) - b] // Factor // N][1];
-        Global`DebugData = {a, b};
+        DiffExp`State`LastErrorContext = {a, b};
         If[!noerror, DiffExp`Utilities`ReportError["Could not relate lines."];];
         False,
         SugSol
@@ -132,7 +132,7 @@ GetMatricesPrecisionDistance[line_Association] := Module[{DiffCoeffs, MaxVariati
   DiffCoeffs = {GetLargestTerm[line]} /. (a_: 1) DiffExp`Symbols`x^(b_: 1) :> {Abs@a, b};
 
   If[DiffCoeffs === {-\[Infinity]},
-    Global`DebugData = {line, DiffExp`State`DEqnMatricesExpanded[line]};
+    DiffExp`State`LastErrorContext = {line, DiffExp`State`DEqnMatricesExpanded[line]};
     DiffExp`Utilities`ReportError["Could not determine variation in the expanded matrices."];
   ];
 
@@ -163,7 +163,7 @@ CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
     DiffExp`Utilities`ReportError["Non-linear line segments are currently not supported!"];
   ];
   If[Or @@ (!DiffExp`Utilities`DependsQ[Keys@bcs2[[1]], #] & /@ DiffExp`State`ExternalScalesVal),
-    Global`DebugData = {Keys@bcs2[[1]], DiffExp`State`ExternalScalesVal};
+    DiffExp`State`LastErrorContext = {Keys@bcs2[[1]], DiffExp`State`ExternalScalesVal};
     DiffExp`Utilities`ReportError["The point/line where the boundary conditions are defined does not fix all kinematic invariants and masses!"];
   ];
   If[(DiffExp`Utilities`IsPoint[bcs2[[1]]]) && DiffExp`Utilities`DependsQ[bcs2[[2]] // Normal, DiffExp`Symbols`x],
@@ -186,7 +186,7 @@ CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
   lrln = RelateLines[line, bcs2[[1]], True];
 
   If[lrln === False,
-    Global`DebugData = {bcs2, line};
+    DiffExp`State`LastErrorContext = {bcs2, line};
     DiffExp`Utilities`ReportError["Chosen boundary point does not lie on line."];
   ];
 
@@ -226,7 +226,7 @@ CheckBoundaryConditionsAndReparametrize[bcs3_, line_Association] := Module[
         Quiet[N[#, DiffExp`State`FEC[WorkingPrecision]]] &;
 
       If[DiffExp`Utilities`DependsQ[bcs[[2]], Log[_]],
-        Global`DebugData = DiffExp`SeriesOps`SExpand@bcs[[2]];
+        DiffExp`State`LastErrorContext = DiffExp`SeriesOps`SExpand@bcs[[2]];
         DiffExp`Utilities`ReportError["Error rescaling boundary conditions."];
       ];
     ];,
@@ -249,7 +249,7 @@ GetMatchingPoint[line_Association, bcsline_] := Module[{lrln, zerlim, FixAt},
   lrln = RelateLines[line, bcsline, True];
 
   If[lrln === False,
-    Global`DebugData = {bcsline, line};
+    DiffExp`State`LastErrorContext = {bcsline, line};
     DiffExp`Utilities`ReportError["GetMatchingPoint: Internal error"];
   ];
 

@@ -36,7 +36,7 @@ NullSpaceTryAgainOnFail[ex_, r___] := Module[{Res, ValidateTerm},
 
   If[Quiet[Length[Cases[Res, SeriesData[DiffExp`Symbols`x, _, List[], k_, k_, _] /; k < 0, Infinity]] > 0],
     DiffExp`Utilities`PrintWarning["Encountered a problem while determining the nullspace of a matrix. Try setting the option \"HomogeneousSolve\" -> \"DontExpand\" "];
-    Global`DebugData = {ex, r};
+    DiffExp`State`LastErrorContext = {ex, r};
     Abort[];
   ];
 
@@ -66,7 +66,7 @@ CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
   ];
 
   If[Length[Solns] > 1,
-    Global`DebugData = {Amats[[All, topind]]};
+    DiffExp`State`LastErrorContext = {Amats[[All, topind]]};
     DiffExp`Utilities`ReportError["Found multiple solutions while combining the differential equations. Use the option IntegrationStrategy -> \"VariationOfParameters\", or choose a different line."]
   ];
 

@@ -121,7 +121,11 @@ PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
 
 (* Main integration function *)
 IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}] := Module[
-  {bcs, line, lrln, lrln2, BCSRelevant, relevantinds, IgnorePositions, CurrBlock, HomogeneousEquation, Solns, MtildeMat, GMat, FMat, FMatInv, FMatInvBMat, BMat, CrossC, bVec, IntegrationData, fGeneral, FixAt, BoundaryEqns1, BoundaryEqns2, boundarysols, cIndices, Cmat, Cb, cpivs, csol, NewResults, Wronsk, ll, FMat2, NMat, HomogeneousEquation2, MtildeMat2, NMat2, Solns2, Wronsk2, WronskInvPrime, WWinvprimeprod, WronskInv, opts = opts2, DEqnMatricesExpandedCopy, TurnOffPade, MyN, MatricesMSupj, nthOrderDifferentialEquations, TmpSols, HighestOrderDifferentialEquationPosition, SolveFrom, nthOrderDifferentialEquationsSolutions, MtildeMatrix, bSupjVecs, MyHomogeneousSolutions, MyNumberOfSolutions, MyInhomogeneousTerm, VanishingTerms, csCurr, OverdeterminedEqns, CsPartSol, CsNullVectors, CsGeneralSol, CsReps, DerivativeVec, BDerVec, LineRat, csFreedom, CouldntSolve, xAdd, IndeterminatesRemaining, VanishingTermsCurr, LogsPresent, AlgebraicRootsPresent, TmpSolutionsNormal, MatricesMSupjExp, InhomPlaceHolder, MtildeInv, BufferedData, MyWronsk, MyWronskDetInv, IntegrationDataTab, bVec0, bVec1, bVecRest, jinds, IntegrationDataTab0jind, CurrInvWronskSolver, MyWi, c, PlaceHolder},
+  {bcs, line, BCSRelevant, relevantinds, IgnorePositions, CrossC, bVec, IntegrationData, fGeneral,
+   FixAt, BoundaryEqns1, BoundaryEqns2, cIndices, Cmat, Cb, csol, NewResults, opts = opts2,
+   DEqnMatricesExpandedCopy, TurnOffPade, CsReps, csFreedom, CouldntSolve, LogsPresent,
+   AlgebraicRootsPresent, TmpSolutionsNormal, BufferedData, MyWronsk, MyWronskDetInv,
+   IntegrationDataTab, bVec0, bVec1, bVecRest, jinds, IntegrationDataTab0jind},
 
   If[line2[[0]] === List, line = line2 // Association // KeySort, line = line2 // KeySort];
 
@@ -293,7 +297,7 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
             , CouldntSolve = True;];
 
           If[CouldntSolve,
-            Global`DebugData = {BMat, fGeneral[[relevantinds]], BoundaryEqns1, BoundaryEqns2, BCSRelevant, Cmat, Cb, MtildeMat, Wronsk, WronskInv, WronskInvPrime, bVec, FMat, FMatInv, GMat, csol};
+            DiffExp`State`LastErrorContext = {fGeneral[[relevantinds]], BoundaryEqns1, BoundaryEqns2, BCSRelevant, Cmat, Cb, bVec, intind, epsord};
             DiffExp`Utilities`ReportError["Boundary conditions cannot be matched to general solution for integral(s): ", intind];
           ];
 
@@ -769,7 +773,7 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
     If[!DiffExp`State`MultivaluedFail,
 
       DiffExp`Utilities`PrintInfo["Evaluating at x = ", CurrEvalPoint // N][1];
-      Global`DebugData = CurrIntegrated;
+      DiffExp`State`LastErrorContext = CurrIntegrated;
       (* Either returns the Pade approximant, or the series with Normal applied *)
       CurrEvalEx = DiffExp`Pade`SEval1[CurrIntegrated];
       CurrEval = DiffExp`Pade`SEval2[CurrEvalEx, CurrEvalPointCurrLine];

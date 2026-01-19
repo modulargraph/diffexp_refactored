@@ -20,40 +20,40 @@ Print["Package loaded!\n"];
 (* Equal mass banana configuration *)
 Print["=== Equal Mass Banana Configuration ==="];
 EqualMassConfiguration = {
-  DiffExp`DeltaPrescriptions -> {t - 16 + I * \[Delta]},
-  DiffExp`MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
-  DiffExp`Verbosity -> 1,
-  DiffExp`UseMobius -> True,
-  DiffExp`UsePade -> True
+  DeltaPrescriptions -> {t - 16 + I * \[Delta]},
+  MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
+  Verbosity -> 1,
+  UseMobius -> True,
+  UsePade -> True
 };
 
 Print["Loading configuration..."];
-DiffExp`LoadConfiguration[EqualMassConfiguration];
+LoadConfiguration[EqualMassConfiguration];
 
 Print["\nCurrent configuration:"];
-Print[DiffExp`CurrentConfiguration[]];
+Print[CurrentConfiguration[]];
 
 (* Boundary conditions *)
 Print["\n=== Setting up boundary conditions ==="];
 EqualMassBoundaryConditions = {
   "?",
   "?",
-  DiffExp`\[Epsilon] (1 + 3 DiffExp`\[Epsilon]) (1 + 4 DiffExp`\[Epsilon]) * (
-    -4 E^(3 EulerGamma DiffExp`\[Epsilon]) Gamma[DiffExp`\[Epsilon]]^3/t +
-    6 E^(3 EulerGamma DiffExp`\[Epsilon]) (-1/t)^(1 + DiffExp`\[Epsilon]) DiffExp`\[Epsilon] Gamma[-DiffExp`\[Epsilon]]^2 Gamma[DiffExp`\[Epsilon]]^3/Gamma[-2 DiffExp`\[Epsilon]] +
-    8 E^(3 EulerGamma DiffExp`\[Epsilon]) (-1/t)^(1 + 2 DiffExp`\[Epsilon]) DiffExp`\[Epsilon] Gamma[-DiffExp`\[Epsilon]]^3 Gamma[DiffExp`\[Epsilon]] Gamma[2 DiffExp`\[Epsilon]]/Gamma[-3 DiffExp`\[Epsilon]] +
-    3 E^(3 EulerGamma DiffExp`\[Epsilon]) (-1/t)^(1 + 3 DiffExp`\[Epsilon]) DiffExp`\[Epsilon] Gamma[-DiffExp`\[Epsilon]]^4 Gamma[3 DiffExp`\[Epsilon]]/Gamma[-4 DiffExp`\[Epsilon]]
+  \[Epsilon] (1 + 3 \[Epsilon]) (1 + 4 \[Epsilon]) * (
+    -4 E^(3 EulerGamma \[Epsilon]) Gamma[\[Epsilon]]^3/t +
+    6 E^(3 EulerGamma \[Epsilon]) (-1/t)^(1 + \[Epsilon]) \[Epsilon] Gamma[-\[Epsilon]]^2 Gamma[\[Epsilon]]^3/Gamma[-2 \[Epsilon]] +
+    8 E^(3 EulerGamma \[Epsilon]) (-1/t)^(1 + 2 \[Epsilon]) \[Epsilon] Gamma[-\[Epsilon]]^3 Gamma[\[Epsilon]] Gamma[2 \[Epsilon]]/Gamma[-3 \[Epsilon]] +
+    3 E^(3 EulerGamma \[Epsilon]) (-1/t)^(1 + 3 \[Epsilon]) \[Epsilon] Gamma[-\[Epsilon]]^4 Gamma[3 \[Epsilon]]/Gamma[-4 \[Epsilon]]
   ),
-  E^(3 EulerGamma DiffExp`\[Epsilon]) DiffExp`\[Epsilon]^3 Gamma[DiffExp`\[Epsilon]]^3
+  E^(3 EulerGamma \[Epsilon]) \[Epsilon]^3 Gamma[\[Epsilon]]^3
 };
 
 Print["Preparing boundary conditions..."];
-PreparedBCs = DiffExp`PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
+PreparedBCs = PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
 Print["Boundary conditions prepared\n"];
 
 (* Transport to t = -1 *)
 Print["=== Transporting to t = -1 ==="];
-Results1 = DiffExp`TransportTo[PreparedBCs, <|t -> -1|>];
+Results1 = TransportTo[PreparedBCs, <|t -> -1|>];
 Print["Transport to t = -1 complete"];
 Print["Result point: ", Results1[[1]]];
 
@@ -87,7 +87,7 @@ If[Results1[[1]][t] === -1,
 
 (* Transport from t = -1 to t = 5, saving expansions *)
 Print["\n=== Transporting from t = -1 to t = 5 (with save) ==="];
-Results2 = DiffExp`TransportTo[Results1, <|t -> x|>, 5, True];
+Results2 = TransportTo[Results1, <|t -> x|>, 5, True];
 Print["Transport complete!"];
 
 testsTotal++;
@@ -100,7 +100,7 @@ If[Head[Results2] === List && Length[Results2] >= 2,
 
 (* Test ToPiecewise *)
 Print["\n=== Testing ToPiecewise ==="];
-ResultsForEval = DiffExp`ToPiecewise[Results2];
+ResultsForEval = ToPiecewise[Results2];
 
 testsTotal++;
 If[Head[ResultsForEval] === List && MatrixQ[ResultsForEval],
@@ -121,12 +121,64 @@ evaluatedResults = Table[
 Print[TableForm[evaluatedResults]];
 
 testsTotal++;
-(* Check that results are numerical *)
-If[And @@ Flatten[NumericQ /@ evaluatedResults],
+(* Check that results are numerical - use N to convert arbitrary precision to machine numbers *)
+numericCheck = And @@ Flatten[Table[
+  NumericQ[evaluatedResults[[i, j]]] || NumericQ[N[evaluatedResults[[i, j]]]],
+  {i, Length[evaluatedResults]}, {j, Length[evaluatedResults[[1]]]}
+]];
+If[numericCheck,
   Print["  [PASS] Results are numerical"];
   testsPassed++;
   ,
   Print["  [FAIL] Results contain non-numerical values"];
+];
+
+(* Round-trip test: transport back to t = -1 and compare with original *)
+Print["\n=== Round-trip Test: Transporting back to t = -1 ==="];
+Results3 = TransportTo[Results2[[1]], <|t -> x|>, -1];
+Print["Transport back complete!"];
+Print["Result point: ", Results3[[1]]];
+
+testsTotal++;
+If[Results3[[1]][t] === -1,
+  Print["  [PASS] Round-trip returned to t = -1"];
+  testsPassed++;
+  ,
+  Print["  [FAIL] Round-trip did not return to t = -1, got: ", Results3[[1]][t]];
+];
+
+(* Compare values from original transport (Results1) with round-trip (Results3) *)
+Print["\n=== Comparing original vs round-trip values ==="];
+originalValues = Results1[[2]];
+roundTripValues = Results3[[2]];
+
+(* Calculate maximum relative difference *)
+maxRelDiff = 0;
+Do[
+  orig = originalValues[[i, j]];
+  roundTrip = roundTripValues[[i, j]];
+  If[NumericQ[orig] && NumericQ[roundTrip] && Abs[orig] > 10^-50,
+    relDiff = Abs[(orig - roundTrip)/orig];
+    If[NumericQ[relDiff] && relDiff > maxRelDiff,
+      maxRelDiff = relDiff;
+    ];
+  ];
+  , {i, Length[originalValues]}, {j, Length[originalValues[[1]]]}
+];
+
+Print["Maximum relative difference: ", N[maxRelDiff, 5]];
+
+testsTotal++;
+(* Allow for some numerical error - should be very small *)
+If[maxRelDiff < 10^-10,
+  Print["  [PASS] Round-trip values match original (rel. diff < 10^-10)"];
+  testsPassed++;
+  ,
+  Print["  [FAIL] Round-trip values differ significantly from original"];
+  Print["  Original values at t=-1:"];
+  Print[TableForm[N[originalValues, 10]]];
+  Print["  Round-trip values at t=-1:"];
+  Print[TableForm[N[roundTripValues, 10]]];
 ];
 
 Print["\n==========================================="];

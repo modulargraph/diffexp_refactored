@@ -66,12 +66,10 @@ diffexp_refactor/
 - Configuration via LoadConfiguration[], UpdateConfiguration[], CurrentConfiguration[]
 - FEC is shorthand for DiffExpConfiguration (the main config association)
 
-### Important Rules (preserved from original prompt)
-1. NEVER rename variables or functions from the original code
-2. NEVER change functionality - this is a 1-1 refactor
-3. Keep all Attributes on functions exactly as they were
-4. Each function should be defined in exactly one place
-5. Use `DiffExp\`Symbols\`x` for the line parameter variable throughout
+### Important Rules
+1. Stay focused on the task at hand - don't fix or refactor unrelated code
+2. Each function should be defined in exactly one place
+3. Use `DiffExp\`Symbols\`x` for the line parameter variable throughout
 
 ## Running Tests
 

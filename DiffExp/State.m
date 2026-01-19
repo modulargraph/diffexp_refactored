@@ -19,6 +19,7 @@ LineParameter::usage = "The line parameter used for parsing lines to DiffExp.";
 LogFile::usage = "Location of a log file on which to write all output of the current session.";
 MatrixDirectory::usage = "The location of a directory on the file system which contains the partial derivative matrices.";
 RadiusOfConvergence::usage = "This option has the effect of rescaling the line parameter of each line segment.";
+RationalizationTolerance::usage = "Tolerance for rationalizing exponents (a, b) in singularity decomposition. Default 10^-10.";
 SegmentationStrategy::usage = "This option determines which segmentation strategy is used.";
 UseMobius::usage = "This option determines whether the line segments are obtained by linear transformations or by Mobius transformations.";
 UsePade::usage = "Determines whether Pade approximants are used while transporting boundary conditions.";
@@ -121,6 +122,7 @@ DefaultConfiguration = {
   LineParameter -> Global`x,
   MatrixDirectory -> "",
   RadiusOfConvergence -> 1,
+  RationalizationTolerance -> 10^-10,  (* Tolerance for rationalizing exponents in singularity decomposition *)
   "SaveExpansionsCompress" -> False,
   "HomogeneousSolve" -> "Expand",
   "Parallel" -> False,

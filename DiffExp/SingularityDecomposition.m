@@ -22,7 +22,7 @@ BeginPackage["DiffExp`SingularityDecomposition`", {
 }];
 
 (* Main function *)
-DecomposeSingularity::usage = "DecomposeSingularity[seriesList] decomposes a list of series (one per eps order) from IntegrateSystem into canonical singularity form. Returns a list of terms {<|\"a\"->..., \"b\"->..., \"g\"->...|>, ...}.";
+DecomposeSingularity::usage = "DecomposeSingularity[seriesList] decomposes a list of series (one per eps order) from IntegrateSystem into canonical singularity form. Returns a list of terms {<|\"a\"->..., \"b\"->..., \"g\"->...|>, ...}. Uses RationalizationTolerance from configuration for determining a and b.";
 
 DecomposeSingularityAll::usage = "DecomposeSingularityAll[integrateSystemOutput] applies DecomposeSingularity to all integrals.";
 
@@ -95,18 +95,19 @@ AllNonNegativePowers[seriesList_List] := Module[{minPower},
 ];
 
 (* Check if all series are effectively zero (within numerical precision) *)
+(* Uses RationalizationTolerance since this is for determining decomposition structure *)
 AllEffectivelyZero[seriesList_List] := Module[{},
   And @@ (EffectivelyZero /@ seriesList)
 ];
 
 EffectivelyZero[0] := True;
-EffectivelyZero[n_?NumericQ] := Abs[n] < 10^(-DiffExp`State`FEC[ChopPrecision] + 5);
+EffectivelyZero[n_?NumericQ] := Abs[n] < DiffExp`State`FEC[RationalizationTolerance];
 EffectivelyZero[ser_SeriesData] := Module[{coeffs, maxAbs},
   coeffs = Flatten[{ser[[3]]}];
   If[Length[coeffs] == 0, Return[True]];
   (* Check if all coefficients (including Logx parts) are small *)
   maxAbs = Max[Abs[coeffs /. DiffExp`Symbols`Logx -> 0]];
-  maxAbs < 10^(-DiffExp`State`FEC[ChopPrecision] + 5)
+  maxAbs < DiffExp`State`FEC[RationalizationTolerance]
 ];
 
 (* ============================================================ *)
@@ -114,7 +115,7 @@ EffectivelyZero[ser_SeriesData] := Module[{coeffs, maxAbs},
 (* ============================================================ *)
 
 DecomposeSingularity[seriesList_List] := Module[
-  {terms, current, a, b, g, c0, c1Logx, maxIter, iter},
+  {terms, current, a, b, g, c0, c1Logx, maxIter, iter, ratTol},
 
   (* Initialize *)
   terms = {};
@@ -144,19 +145,20 @@ DecomposeSingularity[seriesList_List] := Module[
        - Then eps^(n+1) has Logx coeff = b * c_n at x^a
        - So b = (Logx coeff at eps^(n+1)) / (non-Logx coeff at eps^n) *)
     b = 0;
+    ratTol = DiffExp`State`FEC[RationalizationTolerance];
     Do[
       c0 = GetCoefficientAtPower[current[[refOrder]], a] /. DiffExp`Symbols`Logx -> 0;
-      (* Use numerical threshold to check if c0 is effectively non-zero *)
-      If[Abs[c0] > 10^(-DiffExp`State`FEC[ChopPrecision] + 10) && Length[current] > refOrder,
+      (* Use rationalization tolerance to check if c0 is effectively non-zero *)
+      If[Abs[c0] > ratTol && Length[current] > refOrder,
         c1Logx = Coefficient[GetCoefficientAtPower[current[[refOrder + 1]], a], DiffExp`Symbols`Logx];
         b = c1Logx / c0;
         (* Clean up numerical noise: take real part if imaginary part is tiny *)
-        If[NumericQ[b] && Abs[Im[b]] < 10^(-DiffExp`State`FEC[ChopPrecision] + 10),
+        If[NumericQ[b] && Abs[Im[b]] < ratTol,
           b = Re[b];
         ];
-        (* Try to rationalize if it's a numerical approximation *)
+        (* Rationalize b - it should be an integer or simple fraction *)
         If[NumericQ[b],
-          b = Rationalize[b, 10^(-10)];
+          b = Rationalize[b, ratTol];
         ];
         Break[];
       ];
@@ -164,6 +166,7 @@ DecomposeSingularity[seriesList_List] := Module[
 
     (* Step 3: Extract g(x, eps) by factoring out x^(a + b*eps) *)
     (* g = x^(-a) * x^(-b*eps) * f *)
+    (* Note: g coefficients keep their full precision from the original series *)
     g = ShiftSeriesByPower[#, a] & /@ current;
     g = MultiplyByXMinusBEps[g, b];
 

@@ -9,6 +9,7 @@ BeginPackage["DiffExp`Wronskian`", {"DiffExp`Symbols`", "DiffExp`State`", "DiffE
 MatrixLogxInverse::usage = "MatrixLogxInverse[Mat_] computes inverse of matrix with Logx terms.";
 NullSpaceTryAgainOnFail::usage = "NullSpaceTryAgainOnFail[ex_,r___] computes nullspace with retry on fail.";
 CombineDifferentialEquationsHomogeneous::usage = "CombineDifferentialEquationsHomogeneous[Amat_,topind_] combines differential equations.";
+CombineDifferentialEquationsWithPivotSelection::usage = "CombineDifferentialEquationsWithPivotSelection[Amat_] tries multiple pivot indices to find an invertible Mtilde.";
 
 Begin["`Private`"];
 
@@ -66,8 +67,8 @@ CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
   ];
 
   If[Length[Solns] > 1,
-    DiffExp`State`LastErrorContext = {Amats[[All, topind]]};
-    DiffExp`Utilities`ReportError["Found multiple solutions while combining the differential equations. Use the option IntegrationStrategy -> \"VariationOfParameters\", or choose a different line."]
+    DiffExp`Utilities`PrintDebug["Pivot ", topind, " yields singular Mtilde (", Length[Solns], " null space solutions). Trying next pivot..."][2];
+    Return[$Failed]
   ];
 
   If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
@@ -77,6 +78,33 @@ CombineDifferentialEquationsHomogeneous[Amat_, topind_: 1] := Module[
   ];
 
   {Solns[[1]]/(Solns[[1]] // Last), MtildeMat}
+];
+
+(* Wrapper that tries multiple pivot indices to find an invertible Mtilde *)
+(* Returns {HomogeneousEquation, MtildeMat, pivotIndex} on success, or throws error if all fail *)
+CombineDifferentialEquationsWithPivotSelection[Amat_] := Module[
+  {matrixSize = Amat // Length, result, pivotIndex},
+
+  (* Use Catch/Throw for early return from Do loop *)
+  Catch[
+    (* Try each pivot index from 1 to matrixSize *)
+    Do[
+      DiffExp`Utilities`PrintDebug["Trying pivot index ", pivotIndex, " of ", matrixSize][3];
+      result = CombineDifferentialEquationsHomogeneous[Amat, pivotIndex];
+
+      If[result =!= $Failed,
+        DiffExp`Utilities`PrintDebug["Successfully found invertible Mtilde with pivot ", pivotIndex][2];
+        Throw[Append[result, pivotIndex], "PivotFound"]
+      ];
+      , {pivotIndex, matrixSize}
+    ];
+
+    (* All pivots failed - report error *)
+    DiffExp`State`LastErrorContext = {Amat};
+    DiffExp`Utilities`ReportError["All pivot indices yield singular Mtilde matrices. The system may have degenerate structure on this line segment. Use IntegrationStrategy -> \"VOP\", or choose a different line."]
+
+    , "PivotFound"  (* Catch tag *)
+  ]
 ];
 
 End[];

@@ -176,7 +176,7 @@ SolveSimple[intind_, bVec_, line_, epsord_] := Module[
 (* Default integration strategy *)
 (* Uses Frobenius solutions and Wronskian computation *)
 SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
-  {systemSize, HomogeneousEquation, MtildeMat, NMat, Solns, Wronsk, WronskInv, FMat, FMatInv,
+  {systemSize, HomogeneousEquation, MtildeMat, selectedPivot, NMat, Solns, Wronsk, WronskInv, FMat, FMatInv,
    GMat, BMat, cIndices, fGeneral, crossCheck, CurrInvWronskSolver,
    HomogeneousEquation2, MtildeMat2, NMat2, Solns2, Wronsk2, WronskInvPrime, wronskianProduct, MtildeInv, c,
    BufferedData = BufferedDataIn},
@@ -185,15 +185,16 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
 
     If[Length[intind] > 1,
-      DiffExp`Utilities`PrintInfo["Combining differential equations: ", intind -> intind[[1]], "."][3];
+      DiffExp`Utilities`PrintInfo["Combining differential equations: ", intind, " with automatic pivot selection."][3];
     ];
     systemSize = intind // Length;
-    {HomogeneousEquation, MtildeMat} = DiffExp`Wronskian`CombineDifferentialEquationsHomogeneous[
+    {HomogeneousEquation, MtildeMat, selectedPivot} = DiffExp`Wronskian`CombineDifferentialEquationsWithPivotSelection[
       If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
         DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]],
         DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]]
       ]
-      , 1];
+    ];
+    DiffExp`Utilities`PrintInfo["Using pivot integral ", intind[[selectedPivot]], " (index ", selectedPivot, " of ", systemSize, ")."][3];
 
     DiffExp`Utilities`PrintDebug["Found homogeneous differential equation: ", HomogeneousEquation + O[DiffExp`Symbols`x]^4 // DiffExp`SeriesOps`SN][3];
 

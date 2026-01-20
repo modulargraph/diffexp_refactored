@@ -36,6 +36,7 @@ Get["MatrixLoading.m"];
 Get["IntegrationStrategies.m"];
 Get["Transport.m"];
 Get["SingularityDecomposition.m"];
+Get["RegularizedIntegration.m"];
 
 (* Begin package with imported subpackage contexts *)
 BeginPackage["DiffExp`", {
@@ -53,7 +54,8 @@ BeginPackage["DiffExp`", {
   "DiffExp`MatrixLoading`",
   "DiffExp`IntegrationStrategies`",
   "DiffExp`Transport`",
-  "DiffExp`SingularityDecomposition`"
+  "DiffExp`SingularityDecomposition`",
+  "DiffExp`RegularizedIntegration`"
 }];
 
 Print["Loading DiffExp version 1.1 (refactored)"];

@@ -1409,9 +1409,9 @@ SolveSingularRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
       DiffExp`Utilities`PrintInfo["Singular recurrence: particular solution resonance detected, falling back to Default."][3];
       (* Ensure SolveDefault's BufferedData is initialized *)
       If[!KeyExistsQ[BufferedData, intind],
-        {_, _, BufferedData} = SolveDefault[intind,
+        BufferedData = SolveDefault[intind,
           ConstantArray[SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1], systemSize],
-          line, 0, BufferedData];
+          line, 0, BufferedData][[3]];
       ];
       Return[SolveDefault[intind, bVec, line, epsord, BufferedData]]
     ];

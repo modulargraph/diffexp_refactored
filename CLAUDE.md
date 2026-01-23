@@ -33,7 +33,13 @@ diffexp_refactored/
 │   ├── Frobenius.m                    # Frobenius method functions (141 lines)
 │   ├── Wronskian.m                    # Wronskian computations (112 lines)
 │   ├── MatrixLoading.m                # Matrix loading and processing (389 lines)
-│   ├── IntegrationStrategies.m        # Integration strategies: Default, VOP, VOPAlt (697 lines)
+│   ├── IntegrationStrategies.m        # Integration strategies package wrapper (38 lines)
+│   ├── IntegrationStrategies/          # Strategy implementations
+│   │   ├── Helpers.m                   # Shared helpers (ComputeGMat, ComputeWronskianMatrix, etc.)
+│   │   ├── Default.m                   # SolveSimple + SolveDefault
+│   │   ├── VOP.m                       # SolveVOP + SolveVOPAlt
+│   │   ├── Recurrence.m               # Rational + Singular recurrence strategies
+│   │   └── Dispatch.m                  # DispatchStrategy routing
 │   ├── Transport.m                    # TransportTo, IntegrateSystem, ToPiecewise (1128 lines)
 │   ├── SingularityDecomposition.m     # Singularity analysis (232 lines)
 │   └── RegularizedIntegration.m       # Regularized integration (724 lines)

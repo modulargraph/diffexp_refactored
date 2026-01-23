@@ -55,14 +55,14 @@ Print["Boundary conditions prepared\n"];
 Print["=== Transporting to t = -1 ==="];
 Results1 = TransportTo[PreparedBCs, <|t -> -1|>];
 Print["Transport to t = -1 complete"];
-Print["Result point: ", Results1[[1]]];
+Print["Result point: ", Results1["KinematicPoint"]];
 
 (* Check that result has the expected structure *)
 testsPassed = 0;
 testsTotal = 0;
 
 testsTotal++;
-If[Head[Results1] === List && Length[Results1] >= 2,
+If[AssociationQ[Results1] && KeyExistsQ[Results1, "SeriesValues"],
   Print["  [PASS] TransportTo returned expected structure"];
   testsPassed++;
   ,
@@ -70,7 +70,7 @@ If[Head[Results1] === List && Length[Results1] >= 2,
 ];
 
 testsTotal++;
-If[AssociationQ[Results1[[1]]] && KeyExistsQ[Results1[[1]], t],
+If[AssociationQ[Results1["KinematicPoint"]] && KeyExistsQ[Results1["KinematicPoint"], t],
   Print["  [PASS] Result contains point with key 't'"];
   testsPassed++;
   ,
@@ -78,11 +78,11 @@ If[AssociationQ[Results1[[1]]] && KeyExistsQ[Results1[[1]], t],
 ];
 
 testsTotal++;
-If[Results1[[1]][t] === -1,
+If[Results1["KinematicPoint"][t] === -1,
   Print["  [PASS] Result evaluated at t = -1"];
   testsPassed++;
   ,
-  Print["  [FAIL] Result not at expected point t = -1, got: ", Results1[[1]][t]];
+  Print["  [FAIL] Result not at expected point t = -1, got: ", Results1["KinematicPoint"][t]];
 ];
 
 (* Transport from t = -1 to t = 5, saving expansions *)
@@ -91,8 +91,8 @@ Results2 = TransportTo[Results1, <|t -> x|>, 5, True];
 Print["Transport complete!"];
 
 testsTotal++;
-If[Head[Results2] === List && Length[Results2] >= 2,
-  Print["  [PASS] Transport with save returned list"];
+If[AssociationQ[Results2] && !MissingQ[Results2["SegmentData"]],
+  Print["  [PASS] Transport with save returned Association with SegmentData"];
   testsPassed++;
   ,
   Print["  [FAIL] Transport with save returned unexpected structure"];
@@ -135,22 +135,22 @@ If[numericCheck,
 
 (* Round-trip test: transport back to t = -1 and compare with original *)
 Print["\n=== Round-trip Test: Transporting back to t = -1 ==="];
-Results3 = TransportTo[Results2[[1]], <|t -> x|>, -1];
+Results3 = TransportTo[Results2, <|t -> x|>, -1];
 Print["Transport back complete!"];
-Print["Result point: ", Results3[[1]]];
+Print["Result point: ", Results3["KinematicPoint"]];
 
 testsTotal++;
-If[Results3[[1]][t] === -1,
+If[Results3["KinematicPoint"][t] === -1,
   Print["  [PASS] Round-trip returned to t = -1"];
   testsPassed++;
   ,
-  Print["  [FAIL] Round-trip did not return to t = -1, got: ", Results3[[1]][t]];
+  Print["  [FAIL] Round-trip did not return to t = -1, got: ", Results3["KinematicPoint"][t]];
 ];
 
 (* Compare values from original transport (Results1) with round-trip (Results3) *)
 Print["\n=== Comparing original vs round-trip values ==="];
-originalValues = Results1[[2]];
-roundTripValues = Results3[[2]];
+originalValues = Results1["SeriesValues"];
+roundTripValues = Results3["SeriesValues"];
 
 (* Calculate maximum relative difference *)
 maxRelDiff = 0;
@@ -209,7 +209,7 @@ Print["VOP transport complete"];
 
 (* Compare VOP results with Default results *)
 testsTotal++;
-vopDiff = Max[Abs[Flatten[N[Results1[[2]] - ResultsVOP[[2]], 20]]]];
+vopDiff = Max[Abs[Flatten[N[Results1["SeriesValues"] - ResultsVOP["SeriesValues"], 20]]]];
 Print["Max difference between Default and VOP: ", N[vopDiff, 5]];
 If[vopDiff < 10^-10,
   Print["  [PASS] VOP strategy produces same results as Default"];
@@ -217,9 +217,9 @@ If[vopDiff < 10^-10,
   ,
   Print["  [FAIL] VOP strategy results differ from Default"];
   Print["  Default values at t=-1:"];
-  Print[TableForm[N[Results1[[2]], 10]]];
+  Print[TableForm[N[Results1["SeriesValues"], 10]]];
   Print["  VOP values at t=-1:"];
-  Print[TableForm[N[ResultsVOP[[2]], 10]]];
+  Print[TableForm[N[ResultsVOP["SeriesValues"], 10]]];
 ];
 
 (* ============================================================ *)
@@ -250,7 +250,7 @@ Print["VOPAlt transport complete"];
 
 (* Compare VOPAlt results with Default results *)
 testsTotal++;
-vopAltDiff = Max[Abs[Flatten[N[Results1[[2]] - ResultsVOPAlt[[2]], 20]]]];
+vopAltDiff = Max[Abs[Flatten[N[Results1["SeriesValues"] - ResultsVOPAlt["SeriesValues"], 20]]]];
 Print["Max difference between Default and VOPAlt: ", N[vopAltDiff, 5]];
 If[vopAltDiff < 10^-10,
   Print["  [PASS] VOPAlt strategy produces same results as Default"];
@@ -258,9 +258,9 @@ If[vopAltDiff < 10^-10,
   ,
   Print["  [FAIL] VOPAlt strategy results differ from Default"];
   Print["  Default values at t=-1:"];
-  Print[TableForm[N[Results1[[2]], 10]]];
+  Print[TableForm[N[Results1["SeriesValues"], 10]]];
   Print["  VOPAlt values at t=-1:"];
-  Print[TableForm[N[ResultsVOPAlt[[2]], 10]]];
+  Print[TableForm[N[ResultsVOPAlt["SeriesValues"], 10]]];
 ];
 
 (* ============================================================ *)

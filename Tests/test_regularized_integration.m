@@ -134,7 +134,7 @@ If[DirectoryQ[matricesDir],
   Print["Transporting 2F1 from z=0.01 to z=0.5 (saving segments)..."];
   ResultWithSave = TransportTo[BCs, <|z -> 1/2|>, 1, True];
 
-  Print["Transport complete. Segments saved: ", Length[ResultWithSave[[2]]]];
+  Print["Transport complete. Segments saved: ", Length[ResultWithSave["SegmentData"]]];
 
   (* Test that we can call DefiniteIntegral *)
   testsTotal++;

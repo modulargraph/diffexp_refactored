@@ -90,11 +90,11 @@ Print["=== Transporting to z = 1/2 ==="];
 Result = TransportTo[BCs, <|z -> 1/2|>];
 
 Print["\nTransport complete!"];
-Print["Result point: ", Result[[1]]];
+Print["Result point: ", Result["KinematicPoint"]];
 
 (* Extract results *)
-y2F1Result = Result[[2, 1, 1]];
-yPrimeResult = Result[[2, 2, 1]];
+y2F1Result = Result["SeriesValues"][[1, 1]];
+yPrimeResult = Result["SeriesValues"][[2, 1]];
 
 Print["\n=== Comparison with Mathematica ==="];
 

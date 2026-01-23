@@ -233,9 +233,9 @@ testsTotal++;
 Print["Transporting from X0 to X1..."];
 X0ToX1 = TransportTo[BoundaryConditionsDiffExp, X1];
 
-If[ListQ[X0ToX1] && Length[X0ToX1] >= 2,
+If[AssociationQ[X0ToX1] && KeyExistsQ[X0ToX1, "SeriesValues"],
   Print["  [PASS] Transport completed"];
-  Print["  Result structure: ", Length[X0ToX1], " elements"];
+  Print["  Result structure: Association with keys ", Keys[X0ToX1]];
   testsPassed++;
   ,
   Print["  [FAIL] Transport failed"];
@@ -244,9 +244,9 @@ If[ListQ[X0ToX1] && Length[X0ToX1] >= 2,
 (* Test 5: Check results are numerical *)
 Print["\n=== Test 5: Results Numerical ==="];
 testsTotal++;
-If[Length[X0ToX1] >= 3 && NumericQ[X0ToX1[[2, 1, 1]]],
+If[NumericQ[X0ToX1["SeriesValues"][[1, 1]]],
   Print["  [PASS] Results are numerical"];
-  Print["  First master integral: ", X0ToX1[[2, 1, 1]], " +/- ", X0ToX1[[3, 1, 1]]];
+  Print["  First master integral: ", X0ToX1["SeriesValues"][[1, 1]], " +/- ", X0ToX1["ErrorEstimates"][[1, 1]]];
   testsPassed++;
   ,
   Print["  [FAIL] Results are not numerical"];

@@ -60,7 +60,7 @@ resultA2 = TransportTo[resultA2, <|t -> 1/2|>];
 timeA2 = AbsoluteTime[] - timeA2;
 Print["  Time: ", timeA2, " s\n"];
 
-diffA = Max[Abs[Flatten[N[resultA1[[2]] - resultA2[[2]], 100]]]];
+diffA = Max[Abs[Flatten[N[resultA1["SeriesValues"] - resultA2["SeriesValues"], 100]]]];
 Print["  TEST A Results (equal mass, Mobius):"];
 Print["    Default:    ", timeA1, " s"];
 Print["    Recurrence: ", timeA2, " s"];
@@ -75,11 +75,11 @@ Print["=== TEST B: Unequal mass (15x15) WITHOUT Mobius ===\n"];
 UnequalMassBoundaryConditions = {
   <|psq -> 1/2, mm1 -> 1, mm2 -> 1, mm3 -> 1, mm4 -> 1|>,
   {
-    resultA1[[2, 1]], resultA1[[2, 1]], resultA1[[2, 1]],
-    resultA1[[2, 1]], resultA1[[2, 1]], resultA1[[2, 1]],
-    resultA1[[2, 2]], resultA1[[2, 2]], resultA1[[2, 2]], resultA1[[2, 2]],
-    resultA1[[2, 3]],
-    resultA1[[2, 4]], resultA1[[2, 4]], resultA1[[2, 4]], resultA1[[2, 4]]
+    resultA1["SeriesValues"][[1]], resultA1["SeriesValues"][[1]], resultA1["SeriesValues"][[1]],
+    resultA1["SeriesValues"][[1]], resultA1["SeriesValues"][[1]], resultA1["SeriesValues"][[1]],
+    resultA1["SeriesValues"][[2]], resultA1["SeriesValues"][[2]], resultA1["SeriesValues"][[2]], resultA1["SeriesValues"][[2]],
+    resultA1["SeriesValues"][[3]],
+    resultA1["SeriesValues"][[4]], resultA1["SeriesValues"][[4]], resultA1["SeriesValues"][[4]], resultA1["SeriesValues"][[4]]
   }
 };
 unequalMassLine = <|psq -> 1/2, mm1 -> 1 + x, mm2 -> 1 + x/2, mm3 -> 1 + x/3, mm4 -> 1|>;
@@ -114,7 +114,7 @@ resultB2 = TransportTo[UnequalMassBoundaryConditions, unequalMassLine, 1];
 timeB2 = AbsoluteTime[] - timeB2;
 Print["  Time: ", timeB2, " s\n"];
 
-diffB = Max[Abs[Flatten[N[resultB1[[2]] - resultB2[[2]], 200]]]];
+diffB = Max[Abs[Flatten[N[resultB1["SeriesValues"] - resultB2["SeriesValues"], 200]]]];
 Print["  TEST B Results (unequal mass, no Mobius):"];
 Print["    Default:    ", timeB1, " s"];
 Print["    Recurrence: ", timeB2, " s"];

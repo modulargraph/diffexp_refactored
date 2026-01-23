@@ -195,8 +195,8 @@ Print["First few master integrals (showing value and error estimate):"];
 
 (* Show first 3 master integrals *)
 Do[
-  Print["Master integral ", i, ": ", X0ToX1[[2, i, 1]], " +/- ", X0ToX1[[3, i, 1]]];
-, {i, 1, Min[3, Length[X0ToX1[[2]]]]}];
+  Print["Master integral ", i, ": ", X0ToX1["SeriesValues"][[i, 1]], " +/- ", X0ToX1["ErrorEstimates"][[i, 1]]];
+, {i, 1, Min[3, X0ToX1["NumIntegrals"]]}];
 
 Print["\n========================================================================"];
 Print["=== TEST COMPLETED SUCCESSFULLY! ==="];

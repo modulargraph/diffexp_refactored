@@ -143,7 +143,7 @@ BuildSegmentContext[intind_, line_] := <|
 |>;
 
 (* Main integration function *)
-IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}] := Module[
+IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_List, opts2_ : {}] := Module[
   {bcs, line, BCSRelevant, relevantIndices, IgnorePositions, crossCheck, bVec, IntegrationData, fGeneral,
    FixAt, BoundaryEqns1, BoundaryEqns2, cIndices, Cmat, Cb, csol, NewResults, opts = opts2,
    DEqnMatricesExpandedCopy, TurnOffPade, constantReplacements, csFreedom, solveFailed, LogsPresent,
@@ -181,10 +181,13 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
 
   segmentCaches = Association[{}];
 
-  (* To deal with the output of SaveExpansions = True *)
-  If[MatchQ[bcs2, {{a_Association, __}, _}],
-    bcs = bcs2[[1]];,
-    bcs = bcs2;
+  (* Handle Association output from TransportTo/IntegrateSystem *)
+  If[AssociationQ[bcs2],
+    bcs = {bcs2["KinematicPoint"], bcs2["SeriesValues"]};,
+    If[MatchQ[bcs2, {{a_Association, __}, _}],
+      bcs = bcs2[[1]];,
+      bcs = bcs2;
+    ];
   ];
 
   If[!(bcs2 === "?"),
@@ -425,12 +428,17 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
     DiffExp`State`BenchmarkData["Segments"]["ComputationTime"] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"]["ComputationTime"];
 
     DiffExp`MatrixLoading`ClearMatrices[];
-    Table[DiffExp`SeriesOps`ApplyAnalyticContinuation[IntegrationData[{ind, epsord}]] // DiffExp`AnalyticContinuation`Project\[Theta]s, {ind, DiffExp`State`NumIntegrals}, {epsord, 0, DiffExp`State`EpsilonOrderVal}]
+    <|
+      "SeriesValues" -> Table[DiffExp`SeriesOps`ApplyAnalyticContinuation[IntegrationData[{ind, epsord}]] // DiffExp`AnalyticContinuation`Project\[Theta]s, {ind, DiffExp`State`NumIntegrals}, {epsord, 0, DiffExp`State`EpsilonOrderVal}],
+      "NumIntegrals" -> DiffExp`State`NumIntegrals,
+      "EpsilonOrder" -> DiffExp`State`EpsilonOrderVal,
+      "ExpansionOrder" -> DiffExp`State`ExpansionOrderVal
+    |>
   ]
 ];
 
 (* TransportTo function - transports boundary conditions *)
-TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, SaveExpansions : _?BooleanQ : False, SampleAtList_List : {}] := Module[
+TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 : _?NumericQ : 1, SaveExpansions : _?BooleanQ : False, SampleAtList_List : {}] := Module[
   {line = If[line2[[0]] === List, line2 // Association // KeySort, line2 // KeySort], to, tempResult, bcs, FixAt, singularities, imaginarySingularities, relevantSingularities, SingularitySegments, PoleIntervals, CurrLine, CurrLineNoMobius = Null, CurrIntegrated, CurrIntervalCurrLine, CurrIntervalLine, Done = False, overlapCheck, CurrEvalPoint, CurrEvalPointCurrLine, CurrEval, Currbcs, AllIntegrationData = {}, currentCenter, EvaluateCurrPoint, NextIsPole = False, SegmentCounter = 1, lineRelation, CurrIntervalLinePos, CurrIntervalLineNeg, CurrEvalError, CurrIntegratedError, CurrbcsError, PrintError, CurrError, accumulatedError = 0, accumulatedErrors = ConstantArray[0, {DiffExp`State`NumIntegrals, DiffExp`State`EpsilonOrderVal + 1}], FixWithin, SegmentsToIntegrate, UpdateMatrixExpansionError, TimeStart, TimeStart0, LineReturn, FailedLine, ExpansionsIndeterminates = {}, previousBoundaryConditions, CurrStatusBackup, BoundaryFixPoint, CurrEvalErrorEx, CurrEvalError1, CurrEvalError2, CurrEvalAtBoundaryFixPoint, CurrEvalEx, AllSegmentsPredivision, tempFile, CompressedTermForExport, CompressedTermForExportFN, CurrLineLR, FullLineLR, cachedPoleIntervals, RepeatingSegment, LastEvaluation, LastSavedData, LastLine, ExpansionOrders, DigitsNeeded},
 
   DiffExp`State`BenchmarkData = Association[];
@@ -446,10 +454,13 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
   DigitsNeeded = DiffExp`State`FEAccuracyGoal + DiffExp`State`ISafetyDigits;
   TimeStart0 = AbsoluteTime[];
 
-  (* To deal with the output of SaveExpansions = True *)
-  If[MatchQ[bcs2, {{a_Association, __}, _}],
-    bcs = bcs2[[1]];,
-    bcs = bcs2;
+  (* Handle Association output from TransportTo/IntegrateSystem *)
+  If[AssociationQ[bcs2],
+    bcs = {bcs2["KinematicPoint"], bcs2["SeriesValues"]};,
+    If[MatchQ[bcs2, {{a_Association, __}, _}],
+      bcs = bcs2[[1]];,
+      bcs = bcs2;
+    ];
   ];
 
   bcs[[1]] = bcs[[1]] // KeySort;
@@ -1079,17 +1090,18 @@ TransportTo[bcs2_List, line2_Association | line2_List, to2 : _?NumericQ : 1, Sav
   DiffExp`State`BenchmarkData["ComputationTime"] = DiffExp`State`BenchmarkData["TimeEnd"] - DiffExp`State`BenchmarkData["TimeStart"];
   KeyDropFrom[DiffExp`State`BenchmarkData, {"TimeEnd", "TimeStart"}];
 
-  If[SaveExpansions === True,
-    If[!DiffExp`State`FEC["EstimateError"] === False,
-      {{LineReturn, CurrEval, accumulatedErrors}, AllIntegrationData},
-      {{LineReturn, CurrEval}, AllIntegrationData}
-    ]
-    ,
-    If[!DiffExp`State`FEC["EstimateError"] === False,
-      {LineReturn, CurrEval, accumulatedErrors},
-      {LineReturn, CurrEval}
-    ]
-  ]
+  <|
+    "KinematicPoint" -> LineReturn,
+    "SeriesValues" -> CurrEval,
+    "ErrorEstimates" -> If[!DiffExp`State`FEC["EstimateError"] === False,
+      accumulatedErrors, Missing["NotComputed"]],
+    "SegmentData" -> If[SaveExpansions === True,
+      AllIntegrationData, Missing["NotRequested"]],
+    "ComputationTime" -> DiffExp`State`BenchmarkData["ComputationTime"],
+    "NumIntegrals" -> DiffExp`State`NumIntegrals,
+    "EpsilonOrder" -> DiffExp`State`EpsilonOrderVal,
+    "ExpansionOrder" -> DiffExp`State`FEC[ExpansionOrder]
+  |>
 ];
 
 (* Helper functions *)
@@ -1101,9 +1113,15 @@ IntervalContainsQ[intv_, point_] := intv[[1]] <= point <= intv[[2]];
 ToPiecewise[SavedData2_, Pade : _?BooleanQ : False, Ord_Integer : Null] := Module[
   {SavedData, piecewiseResult, Uncompressed, Counter},
 
-  If[MatchQ[SavedData2, {{a_Association, _}, {__}}] || MatchQ[SavedData2, {{a_Association, _, _}, {__}}],
-    SavedData = SavedData2[[2]],
-    SavedData = SavedData2
+  If[AssociationQ[SavedData2],
+    If[MissingQ[SavedData2["SegmentData"]],
+      DiffExp`Utilities`ReportError["No segment data. TransportTo was not called with SaveExpansions -> True."];
+    ];
+    SavedData = SavedData2["SegmentData"],
+    If[MatchQ[SavedData2, {{a_Association, _}, {__}}] || MatchQ[SavedData2, {{a_Association, _, _}, {__}}],
+      SavedData = SavedData2[[2]],
+      SavedData = SavedData2
+    ]
   ];
 
   If[!(MatchQ[SavedData[[0]] === List] && Quiet[Dimensions[SavedData][[2]] === 5]),

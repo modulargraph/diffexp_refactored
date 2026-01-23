@@ -74,7 +74,7 @@ Print["Dimensions: ", Dimensions[PiecewiseFunctions], "\n"];
 Print["=== Manually transporting to t = 3 ==="];
 ManualResultsAt3 = TransportTo[ResultsAtMinus1, <|t -> x|>, 3];
 Print["Manual transport to t = 3 complete."];
-Print["Result point: ", ManualResultsAt3[[1]], "\n"];
+Print["Result point: ", ManualResultsAt3["KinematicPoint"], "\n"];
 
 (* ============================================================ *)
 (* Compare: Evaluate piecewise at t = 3 vs manual transport *)
@@ -94,7 +94,7 @@ PiecewiseValuesAt3 = Table[
 ];
 
 (* Get manual transport values *)
-ManualValuesAt3 = ManualResultsAt3[[2]];
+ManualValuesAt3 = ManualResultsAt3["SeriesValues"];
 
 Print["\n--- Comparison of values ---"];
 Print["(Integral index, Epsilon order): Piecewise vs Manual"];
@@ -163,7 +163,7 @@ evalPoint2 = 2;
 
 Print["Manually transporting to t = ", evalPoint2, "..."];
 ManualResultsAt2 = TransportTo[ResultsAtMinus1, <|t -> x|>, evalPoint2];
-ManualValuesAt2 = ManualResultsAt2[[2]];
+ManualValuesAt2 = ManualResultsAt2["SeriesValues"];
 
 PiecewiseValuesAt2 = Table[
   PiecewiseFunctions[[i, j]][evalPoint2],

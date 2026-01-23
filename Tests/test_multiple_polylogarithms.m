@@ -103,8 +103,8 @@ GEvaluateFiniteBasepoint[a__, endpoint_] /; Im[endpoint] === 0 := Module[
 
   (* Obtain the numerical results *)
   Res = TransportTo[BoundaryData, {t -> endpoint}];
-  (Res[[2, 1, 1]] + pm Res[[3, 1, 1]]) // N[#,
-    Round[-Log10[Res[[3, 1, 1]]] + Log10[Abs@Res[[2, 1, 1]]]]
+  (Res["SeriesValues"][[1, 1]] + pm Res["ErrorEstimates"][[1, 1]]) // N[#,
+    Round[-Log10[Res["ErrorEstimates"][[1, 1]]] + Log10[Abs@Res["SeriesValues"][[1, 1]]]]
   ] &
 ];
 

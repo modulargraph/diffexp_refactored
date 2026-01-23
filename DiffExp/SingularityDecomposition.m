@@ -201,6 +201,9 @@ DecomposeSingularity[seriesList_List] := Module[
   terms
 ];
 
+DecomposeSingularityAll[integrateSystemOutput_Association] :=
+  DecomposeSingularityAll[integrateSystemOutput["SeriesValues"]];
+
 DecomposeSingularityAll[integrateSystemOutput_List] :=
   Table[DecomposeSingularity[integrateSystemOutput[[i]]], {i, Length[integrateSystemOutput]}];
 

@@ -81,8 +81,8 @@ LoadConfiguration[Config2F1Default];
 ResultDefault = TransportTo[BCs2F1, <|z -> 1/2|>];
 Print["Default transport complete."];
 
-y2F1Default = ResultDefault[[2, 1, 1]];
-yPrimeDefault = ResultDefault[[2, 2, 1]];
+y2F1Default = ResultDefault["SeriesValues"][[1, 1]];
+yPrimeDefault = ResultDefault["SeriesValues"][[2, 1]];
 
 (* Configuration for Singular Recurrence *)
 Config2F1Recurrence = Join[Config2F1Default, {
@@ -96,8 +96,8 @@ LoadConfiguration[Config2F1Recurrence];
 ResultRecurrence = TransportTo[BCs2F1, <|z -> 1/2|>];
 Print["Recurrence transport complete."];
 
-y2F1Recurrence = ResultRecurrence[[2, 1, 1]];
-yPrimeRecurrence = ResultRecurrence[[2, 2, 1]];
+y2F1Recurrence = ResultRecurrence["SeriesValues"][[1, 1]];
+yPrimeRecurrence = ResultRecurrence["SeriesValues"][[2, 1]];
 
 (* Compare with exact values *)
 y2F1Exact = N[Hypergeometric2F1[a, b, c, 1/2], 200];
@@ -188,7 +188,7 @@ Print["Recurrence transport complete.\n"];
 
 (* Compare results *)
 Print["--- Banana Results Comparison ---"];
-bananaDiff = Max[Abs[Flatten[N[BananaResultDefault[[2]] - BananaResultRecurrence[[2]], 30]]]];
+bananaDiff = Max[Abs[Flatten[N[BananaResultDefault["SeriesValues"] - BananaResultRecurrence["SeriesValues"], 30]]]];
 Print["  Max difference Default vs Recurrence: ", ScientificForm[bananaDiff, 3]];
 
 testsTotal++;
@@ -198,9 +198,9 @@ If[bananaDiff < 10^-10,
   ,
   Print["  [FAIL] Banana: results differ by ", ScientificForm[bananaDiff, 3]];
   Print["  Default values at t=-1:"];
-  Print[TableForm[N[BananaResultDefault[[2]], 10]]];
+  Print[TableForm[N[BananaResultDefault["SeriesValues"], 10]]];
   Print["  Recurrence values at t=-1:"];
-  Print[TableForm[N[BananaResultRecurrence[[2]], 10]]];
+  Print[TableForm[N[BananaResultRecurrence["SeriesValues"], 10]]];
 ];
 
 (* ============================================================ *)
@@ -230,7 +230,7 @@ Print["Recurrence transport to t=5 complete.\n"];
 
 (* Compare results at t=5 *)
 Print["--- Banana t=5 Results Comparison ---"];
-bananaDiff5 = Max[Abs[Flatten[N[BananaDefault5[[2]] - BananaRecurrence5[[2]], 30]]]];
+bananaDiff5 = Max[Abs[Flatten[N[BananaDefault5["SeriesValues"] - BananaRecurrence5["SeriesValues"], 30]]]];
 Print["  Max difference Default vs Recurrence at t=5: ", ScientificForm[bananaDiff5, 3]];
 
 testsTotal++;

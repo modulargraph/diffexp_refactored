@@ -67,7 +67,7 @@ Print["=== Step 3: Structure of IntegrateSystem Output ===\n"];
 Do[
   Print["Integral ", i, ":"];
   Do[
-    ser = intResult[[i, j]];
+    ser = intResult["SeriesValues"][[i, j]];
     If[MatchQ[ser, _SeriesData],
       minPow = ser[[4]] / ser[[6]];
       maxPow = (ser[[5]] - 1) / ser[[6]];
@@ -77,9 +77,9 @@ Do[
     ,
       Print["  eps^", j-1, ": ", Head[ser], " = ", Short[ser, 2]];
     ];
-  , {j, Length[intResult[[i]]]}];
+  , {j, intResult["EpsilonOrder"] + 1}];
   Print[""];
-, {i, Length[intResult]}];
+, {i, intResult["NumIntegrals"]}];
 
 (* ============================================================ *)
 (* Step 4: Apply DecomposeSingularity *)

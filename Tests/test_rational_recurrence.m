@@ -52,8 +52,8 @@ LoadConfiguration[{
 }];
 
 result1 = TransportTo[BCs, <|z -> 1/2|>];
-val1Y = result1[[2, 1, 1]];
-val1Yp = result1[[2, 2, 1]];
+val1Y = result1["SeriesValues"][[1, 1]];
+val1Yp = result1["SeriesValues"][[2, 1]];
 
 diff1Y = Abs[val1Y - y2F1Exact];
 diff1Yp = Abs[val1Yp - yPrimeExact];
@@ -77,8 +77,8 @@ LoadConfiguration[{
 }];
 
 result2 = TransportTo[BCs, <|z -> 1/2|>];
-val2Y = result2[[2, 1, 1]];
-val2Yp = result2[[2, 2, 1]];
+val2Y = result2["SeriesValues"][[1, 1]];
+val2Yp = result2["SeriesValues"][[2, 1]];
 
 diff2Y = Abs[val2Y - y2F1Exact];
 diff2Yp = Abs[val2Yp - yPrimeExact];

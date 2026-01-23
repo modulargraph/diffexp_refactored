@@ -83,21 +83,21 @@ Print["=== Step 3: Prepare unequal mass boundary conditions ==="];
 UnequalMassBoundaryConditions = {
   <|psq -> 1/2, mm1 -> 1, mm2 -> 1, mm3 -> 1, mm4 -> 1|>,
   {
-    BoundaryConditionsAtHalf[[2, 1]],
-    BoundaryConditionsAtHalf[[2, 1]],
-    BoundaryConditionsAtHalf[[2, 1]],
-    BoundaryConditionsAtHalf[[2, 1]],
-    BoundaryConditionsAtHalf[[2, 1]],
-    BoundaryConditionsAtHalf[[2, 1]],
-    BoundaryConditionsAtHalf[[2, 2]],
-    BoundaryConditionsAtHalf[[2, 2]],
-    BoundaryConditionsAtHalf[[2, 2]],
-    BoundaryConditionsAtHalf[[2, 2]],
-    BoundaryConditionsAtHalf[[2, 3]],
-    BoundaryConditionsAtHalf[[2, 4]],
-    BoundaryConditionsAtHalf[[2, 4]],
-    BoundaryConditionsAtHalf[[2, 4]],
-    BoundaryConditionsAtHalf[[2, 4]]
+    BoundaryConditionsAtHalf["SeriesValues"][[1]],
+    BoundaryConditionsAtHalf["SeriesValues"][[1]],
+    BoundaryConditionsAtHalf["SeriesValues"][[1]],
+    BoundaryConditionsAtHalf["SeriesValues"][[1]],
+    BoundaryConditionsAtHalf["SeriesValues"][[1]],
+    BoundaryConditionsAtHalf["SeriesValues"][[1]],
+    BoundaryConditionsAtHalf["SeriesValues"][[2]],
+    BoundaryConditionsAtHalf["SeriesValues"][[2]],
+    BoundaryConditionsAtHalf["SeriesValues"][[2]],
+    BoundaryConditionsAtHalf["SeriesValues"][[2]],
+    BoundaryConditionsAtHalf["SeriesValues"][[3]],
+    BoundaryConditionsAtHalf["SeriesValues"][[4]],
+    BoundaryConditionsAtHalf["SeriesValues"][[4]],
+    BoundaryConditionsAtHalf["SeriesValues"][[4]],
+    BoundaryConditionsAtHalf["SeriesValues"][[4]]
   }
 };
 Print["Unequal mass boundary conditions prepared.\n"];
@@ -115,7 +115,7 @@ UnequalMassResults1 = TransportTo[
 ];
 
 Print["Transport complete!"];
-Print["Result point: ", UnequalMassResults1[[1]]];
+Print["Result point: ", UnequalMassResults1["KinematicPoint"]];
 
 Print["\n==========================================="];
 Print["Test completed successfully!"];

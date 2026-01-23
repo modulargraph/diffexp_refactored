@@ -537,10 +537,16 @@ IntegratePiecewiseSaved[savedData2_, {a_, b_}] := Module[
    segmentContributions, result, seg, segBounds, overlapBounds,
    uncompressed},
 
-  (* Handle wrapper format from TransportTo *)
-  If[MatchQ[savedData2, {{_Association, __}, {__}}],
-    savedData = savedData2[[2]],
-    savedData = savedData2
+  (* Handle Association output from TransportTo *)
+  If[AssociationQ[savedData2],
+    If[MissingQ[savedData2["SegmentData"]],
+      DiffExp`Utilities`ReportError["IntegratePiecewiseSaved: No segment data available."];
+    ];
+    savedData = savedData2["SegmentData"],
+    If[MatchQ[savedData2, {{_Association, __}, {__}}],
+      savedData = savedData2[[2]],
+      savedData = savedData2
+    ]
   ];
 
   (* Validate format *)
@@ -604,10 +610,16 @@ IndefiniteIntegral[savedData2_] := Module[
    cumulativeIntegrals, currentValue, seg, segBounds,
    result, segIdx, intIdx, epsOrd},
 
-  (* Handle wrapper format *)
-  If[MatchQ[savedData2, {{_Association, __}, {__}}],
-    savedData = savedData2[[2]],
-    savedData = savedData2
+  (* Handle Association output from TransportTo *)
+  If[AssociationQ[savedData2],
+    If[MissingQ[savedData2["SegmentData"]],
+      DiffExp`Utilities`ReportError["IndefiniteIntegral: No segment data available."];
+    ];
+    savedData = savedData2["SegmentData"],
+    If[MatchQ[savedData2, {{_Association, __}, {__}}],
+      savedData = savedData2[[2]],
+      savedData = savedData2
+    ]
   ];
 
   (* Get dimensions *)

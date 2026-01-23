@@ -183,21 +183,19 @@ If[DirectoryQ[matricesDir],
   testsTotal++;
   Print["\nVerifying integral numerically..."];
 
-  (* The first integral is 2F1 itself, so ∫ 2F1 dz from z0 to z1 *)
-  (* The main line is z -> z0 + (1/2 - z0)*x_main, so:
-     - at x_main=0, z=z0
-     - at x_main=1, z=1/2
-     - dz/dx_main = 1/2 - z0 = 0.49 *)
+  (* DefiniteIntegral computes ∫ f(x) dx where x is the main line parameter *)
+  (* Main line: z -> z0 + (1/2 - z0)*x, so dz/dx = 1/2 - z0 = 0.49 *)
+  (* To compare with ∫ f(z) dz, we use: ∫ f(z) dz = (dz/dx) * ∫ f(x) dx *)
+
   z1 = 3/10;  (* Upper bound in z *)
-  dzdx = 1/2 - z0;  (* = 0.49, the slope of main line *)
-  x1 = (z1 - z0) / dzdx;  (* Convert z1 to x_main coordinate *)
+  dzdx = 1/2 - z0;  (* Jacobian of main line *)
+  x1 = (z1 - z0) / dzdx;  (* Convert z1 to x coordinate *)
 
   expectedIntegral = NIntegrate[Hypergeometric2F1[a, b, c, zz], {zz, z0, z1}, WorkingPrecision -> 50];
 
-  (* Call DefiniteIntegral with x_main bounds (0 to x1) *)
-  (* This gives ∫ f(x) dx in x_main coords. To get ∫ f(z) dz, multiply by dz/dx *)
+  (* DefiniteIntegral gives ∫ f(x) dx; multiply by dz/dx to get ∫ f(z) dz *)
   xIntegralResult = DefiniteIntegral[ResultWithSave, {0, x1}];
-  ourIntegral = dzdx * xIntegralResult[[1, 1]];  (* First integral, eps^0 order *)
+  ourIntegral = dzdx * xIntegralResult[[1, 1]];  (* Convert to z-integral *)
 
   integralDiff = Abs[ourIntegral - expectedIntegral];
   Print["  Expected (NIntegrate): ", NumberForm[expectedIntegral, 15]];

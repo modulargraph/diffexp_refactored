@@ -10,15 +10,10 @@
    segments use linear transforms which are handled correctly.
 
    COORDINATE SYSTEM:
-   - DefiniteIntegral and IntegratePiecewiseSaved take bounds in the main line parameter x_main
-   - If main line is: kinematic_var -> a + b*x_main, then the bounds are in x_main, not kinematic_var
-   - To convert ∫ f(z) dz to ∫ f(x) dx, multiply the result by dz/dx = b
-
-   Example: If main line is z -> 0.01 + 0.49*x, and you want ∫_{z=0.01}^{z=0.3} f(z) dz:
-     x_start = (0.01 - 0.01) / 0.49 = 0
-     x_end = (0.3 - 0.01) / 0.49 ≈ 0.592
-     result_x = DefiniteIntegral[savedData, {0, 0.592}]
-     result_z = 0.49 * result_x  (* multiply by dz/dx *)
+   - All integrals are computed in the main line parameter x: ∫ f(x) dx
+   - Bounds {a, b} are in x coordinates
+   - The kinematic invariants are functions of x along the main line
+   - If you need ∫ f(z) dz where z = z(x), multiply result by dz/dx
 
    The regularization formula for integrals of the form:
      Integrate[x^(a + b*eps) * g(x), {x, 0, c}]
@@ -59,9 +54,9 @@ EvaluateLimitAtSingularity::usage = "EvaluateLimitAtSingularity[decomposition, d
 
 IntegrateSegmentData::usage = "IntegrateSegmentData[segmentData, {a, b}] integrates a single segment's data over the portion [a,b] (in main line coordinates).";
 
-IntegratePiecewiseSaved::usage = "IntegratePiecewiseSaved[savedData, {a, b}] integrates the piecewise function (from TransportTo with save=True) from a to b in main line x coordinates. Returns a list indexed by {integralIndex, epsilonOrder}. To get the integral in kinematic coordinates, multiply by dz/dx.";
+IntegratePiecewiseSaved::usage = "IntegratePiecewiseSaved[savedData, {a, b}] computes ∫ f(x) dx from a to b where x is the main line parameter. Returns a list indexed by {integralIndex, epsilonOrder}.";
 
-DefiniteIntegral::usage = "DefiniteIntegral[savedData, {a, b}] computes definite integrals from a to b in main line x coordinates. Returns results indexed by {integralIndex, epsilonOrder}. Note: Use UseMobius -> False when transporting. To convert to kinematic variable z, multiply by dz/dx.";
+DefiniteIntegral::usage = "DefiniteIntegral[savedData, {a, b}] computes ∫ f(x) dx from a to b where x is the main line parameter. Returns results indexed by {integralIndex, epsilonOrder}. Use UseMobius -> False when transporting.";
 
 IndefiniteIntegral::usage = "IndefiniteIntegral[savedData] returns a piecewise function representing the indefinite integral. The integration constant is fixed such that the integral is 0 at the start of the first segment.";
 

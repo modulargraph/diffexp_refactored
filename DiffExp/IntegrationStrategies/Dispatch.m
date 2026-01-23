@@ -2,13 +2,13 @@
 (* Strategy dispatch logic *)
 
 (* Dispatch to appropriate strategy based on configuration and problem type *)
-DispatchStrategy[intind_, bVec_, line_, epsord_, BufferedData_] := Module[
+DispatchStrategy[ctx_Association, bVec_, epsord_, cache_Association] := Module[
   {cIndices, fGeneral, result, useRationalRecurrence, useSingularRecurrence},
 
   (* Check if rational recurrence should be used (non-singular points) *)
   useRationalRecurrence = (
-    DiffExp`State`FEC[UseRationalRecurrence] === True &&
-    RationalRecurrenceApplicableQ[intind, line] &&
+    ctx["UseRationalRecurrence"] === True &&
+    RationalRecurrenceApplicableQ[ctx] &&
     (* bVec must not contain Logx (non-singular point solutions are Logx-free) *)
     !DiffExp`Utilities`DependsQ[bVec, DiffExp`Symbols`Logx]
   );
@@ -16,36 +16,36 @@ DispatchStrategy[intind_, bVec_, line_, epsord_, BufferedData_] := Module[
   (* Check if singular recurrence should be used (simple pole, non-resonant) *)
   useSingularRecurrence = (
     !useRationalRecurrence &&
-    DiffExp`State`FEC[UseRationalRecurrence] === True &&
-    SingularRecurrenceApplicableQ[intind, line] &&
+    ctx["UseRationalRecurrence"] === True &&
+    SingularRecurrenceApplicableQ[ctx] &&
     (* Solutions at non-resonant singular points are Logx-free *)
     !DiffExp`Utilities`DependsQ[bVec, DiffExp`Symbols`Logx]
   );
 
   Which[
     (* Simple case: single integral without homogeneous components *)
-    Length[intind] === 1 && DiffExp`Utilities`PChop[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]]] == {{0}},
-    {cIndices, fGeneral} = SolveSimple[intind, bVec, line, epsord];
-    {cIndices, fGeneral, BufferedData}
+    ctx["SystemSize"] === 1 && DiffExp`Utilities`PChop[ctx["AMatExpanded"]] == {{0}},
+    {cIndices, fGeneral} = SolveSimple[ctx, bVec, epsord];
+    {cIndices, fGeneral, cache}
 
     (* Rational recurrence method for non-singular points with rational matrices *)
     , useRationalRecurrence,
-    SolveRationalRecurrence[intind, bVec, line, epsord, BufferedData]
+    SolveRationalRecurrence[ctx, bVec, epsord, cache]
 
     (* Singular recurrence method for regular singular points *)
     , useSingularRecurrence,
-    SolveSingularRecurrence[intind, bVec, line, epsord, BufferedData]
+    SolveSingularRecurrence[ctx, bVec, epsord, cache]
 
     (* Default strategy *)
-    , DiffExp`State`FEC[IntegrationStrategy] === "Default",
-    SolveDefault[intind, bVec, line, epsord, BufferedData]
+    , ctx["IntegrationStrategy"] === "Default",
+    SolveDefault[ctx, bVec, epsord, cache]
 
     (* VOP strategy *)
-    , DiffExp`State`FEC[IntegrationStrategy] === "VOP" || DiffExp`State`FEC[IntegrationStrategy] === "VariationOfParameters",
-    SolveVOP[intind, bVec, line, epsord, BufferedData]
+    , ctx["IntegrationStrategy"] === "VOP" || ctx["IntegrationStrategy"] === "VariationOfParameters",
+    SolveVOP[ctx, bVec, epsord, cache]
 
     (* VOPAlt strategy *)
-    , DiffExp`State`FEC[IntegrationStrategy] === "VOPAlt",
-    SolveVOPAlt[intind, bVec, line, epsord, BufferedData]
+    , ctx["IntegrationStrategy"] === "VOPAlt",
+    SolveVOPAlt[ctx, bVec, epsord, cache]
   ]
 ];

@@ -3,17 +3,17 @@
 
 (* Compute M^(j) matrices via nested differentiation *)
 (* Used by VOP and VOPAlt strategies *)
-ComputeMatricesMSupj[intind_, line_] := Module[
-  {systemSize = Length[intind], MatricesMSupj},
+ComputeMatricesMSupj[ctx_Association] := Module[
+  {systemSize = ctx["SystemSize"], MatricesMSupj},
 
-  If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+  If[ctx["HomogeneousSolve"] === "Expand",
     MatricesMSupj = DiffExp`Utilities`PChop@NestList[
       DiffExp`SeriesOps`SExpand[(DiffExp`SeriesOps`SD[#, DiffExp`Symbols`x] +
-        DiffExp`SeriesOps`MatrixMultiplySExpand[#, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]]])] &,
+        DiffExp`SeriesOps`MatrixMultiplySExpand[#, ctx["AMatExpanded"]])] &,
       IdentityMatrix[systemSize], systemSize];
     ,
     MatricesMSupj = NestList[
-      Together[(D[#, DiffExp`Symbols`x] + # . DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]])] &,
+      Together[(D[#, DiffExp`Symbols`x] + # . ctx["AMatFactored"])] &,
       IdentityMatrix[systemSize], systemSize];
   ];
 
@@ -108,11 +108,11 @@ ReduceIndeterminates[fGeneral_, vanishingTerms_, numSolutions_] := Module[
 
 (* Compute general solution matrix GMat from FMat, FMatInv, and inhomogeneous term *)
 (* Used by SolveDefault and VOPAlt strategies *)
-ComputeGMat[FMat_, FMatInv_, bVec_, intind_] := Module[
-  {BMat, cIndices, GMat, c},
+ComputeGMat[FMat_, FMatInv_, bVec_] := Module[
+  {systemSize = Length[bVec], BMat, cIndices, GMat, c},
 
-  BMat = 1/Length@intind Table[bVec, {iind, intind // Length}] // Transpose;
-  cIndices = Table[Subscript[c, i], {i, intind // Length}];
+  BMat = 1/systemSize Table[bVec, {iind, systemSize}] // Transpose;
+  cIndices = Table[Subscript[c, i], {i, systemSize}];
 
   GMat = DiffExp`SeriesOps`MatrixMultiplySExpand[
     FMat,

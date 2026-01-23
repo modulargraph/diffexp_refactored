@@ -15,15 +15,15 @@ BeginPackage["DiffExp`IntegrationStrategies`", {
 }];
 
 (* Strategy functions *)
-SolveSimple::usage = "SolveSimple[intind, bVec, line, epsord] solves a simple integration case where the integral has no homogeneous components.";
-SolveDefault::usage = "SolveDefault[intind, bVec, line, epsord, BufferedData] solves using the default Frobenius/Wronskian strategy.";
-SolveVOP::usage = "SolveVOP[intind, bVec, line, epsord, BufferedData] solves using the variation of parameters strategy.";
-SolveVOPAlt::usage = "SolveVOPAlt[intind, bVec, line, epsord, BufferedData] solves using the alternative variation of parameters strategy.";
-SolveRationalRecurrence::usage = "SolveRationalRecurrence[intind, bVec, line, epsord, BufferedData] solves using the rational recurrence method for non-singular points with rational matrices.";
-RationalRecurrenceApplicableQ::usage = "RationalRecurrenceApplicableQ[intind, line] checks if the rational recurrence method is applicable.";
-SolveSingularRecurrence::usage = "SolveSingularRecurrence[intind, bVec, line, epsord, BufferedData] solves using the Frobenius recurrence method for regular singular points (simple pole) with non-resonant, diagonalizable residue.";
-SingularRecurrenceApplicableQ::usage = "SingularRecurrenceApplicableQ[intind, line] checks if the singular recurrence method is applicable (simple pole, diagonalizable, non-resonant).";
-DispatchStrategy::usage = "DispatchStrategy[intind, bVec, line, epsord, BufferedData] dispatches to the appropriate integration strategy based on configuration.";
+SolveSimple::usage = "SolveSimple[ctx, bVec, epsord] solves a simple integration case where the integral has no homogeneous components. ctx is a SegmentContext association.";
+SolveDefault::usage = "SolveDefault[ctx, bVec, epsord, cache] solves using the default Frobenius/Wronskian strategy. Returns {cIndices, fGeneral, cache}.";
+SolveVOP::usage = "SolveVOP[ctx, bVec, epsord, cache] solves using the variation of parameters strategy. Returns {cIndices, fGeneral, cache}.";
+SolveVOPAlt::usage = "SolveVOPAlt[ctx, bVec, epsord, cache] solves using the alternative variation of parameters strategy. Returns {cIndices, fGeneral, cache}.";
+SolveRationalRecurrence::usage = "SolveRationalRecurrence[ctx, bVec, epsord, cache] solves using the rational recurrence method for non-singular points with rational matrices. Returns {cIndices, fGeneral, cache}.";
+RationalRecurrenceApplicableQ::usage = "RationalRecurrenceApplicableQ[ctx] checks if the rational recurrence method is applicable for the given SegmentContext.";
+SolveSingularRecurrence::usage = "SolveSingularRecurrence[ctx, bVec, epsord, cache] solves using the Frobenius recurrence method for regular singular points (simple pole) with non-resonant, diagonalizable residue. Returns {cIndices, fGeneral, cache}.";
+SingularRecurrenceApplicableQ::usage = "SingularRecurrenceApplicableQ[ctx] checks if the singular recurrence method is applicable (simple pole, diagonalizable, non-resonant) for the given SegmentContext.";
+DispatchStrategy::usage = "DispatchStrategy[ctx, bVec, epsord, cache] dispatches to the appropriate integration strategy based on the SegmentContext configuration. Returns {cIndices, fGeneral, cache}.";
 
 Begin["`Private`"];
 

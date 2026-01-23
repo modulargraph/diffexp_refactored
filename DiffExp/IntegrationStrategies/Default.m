@@ -3,19 +3,15 @@
 
 (* Simple integration strategy *)
 (* Used when there's a single integral without homogeneous components *)
-SolveSimple[intind_, bVec_, line_, epsord_] := Module[
+SolveSimple[ctx_Association, bVec_, epsord_] := Module[
   {cIndices, fGeneral, c},
-
-  If[epsord === 0,
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = 0;
-  ];
 
   cIndices = {Subscript[c, 1]};
 
   If[DiffExp`Utilities`PChop[bVec] === {0},
-    fGeneral = {Subscript[c, 1] + O[DiffExp`Symbols`x]^(DiffExp`State`ExpansionOrderVal + 1)};
+    fGeneral = {Subscript[c, 1] + O[DiffExp`Symbols`x]^(ctx["ExpansionOrder"] + 1)};
     ,
-    fGeneral = {DiffExp`Integration`DiffExpIntegrate[bVec[[1]], DiffExp`Symbols`x] + Subscript[c, 1] + O[DiffExp`Symbols`x]^(DiffExp`State`ExpansionOrderVal + 1)};
+    fGeneral = {DiffExp`Integration`DiffExpIntegrate[bVec[[1]], DiffExp`Symbols`x] + Subscript[c, 1] + O[DiffExp`Symbols`x]^(ctx["ExpansionOrder"] + 1)};
   ];
 
   {cIndices, fGeneral}
@@ -24,36 +20,34 @@ SolveSimple[intind_, bVec_, line_, epsord_] := Module[
 (* Default integration strategy *)
 (* Uses Frobenius solutions and Wronskian computation *)
 (* Falls back to VOPAlt if no valid pivot is found *)
-SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
+SolveDefault[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {systemSize, HomogeneousEquation, MtildeMat, selectedPivot, pivotResult, NMat, Solns, Wronsk, WronskInv, FMat, FMatInv,
    GMat, BMat, cIndices, fGeneral, crossCheck, CurrInvWronskSolver,
    HomogeneousEquation2, MtildeMat2, NMat2, Solns2, Wronsk2, WronskInvPrime, wronskianProduct, MtildeInv, c,
-   BufferedData = BufferedDataIn},
+   cache = cacheIn},
 
-  If[epsord === 0 && !KeyExistsQ[BufferedData, intind],
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
+  If[epsord === 0 && !KeyExistsQ[cache, "FMat"],
+    systemSize = ctx["SystemSize"];
 
-    If[Length[intind] > 1,
-      DiffExp`Utilities`PrintInfo["Combining differential equations: ", intind, " with automatic pivot selection."][3];
+    If[systemSize > 1,
+      DiffExp`Utilities`PrintInfo["Combining differential equations: ", ctx["Label"], " with automatic pivot selection."][3];
     ];
-    systemSize = intind // Length;
 
     (* Try to find a valid pivot; fall back to VOPAlt if all pivots fail *)
     pivotResult = DiffExp`Wronskian`CombineDifferentialEquationsWithPivotSelection[
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
-        DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]],
-        DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]]
+      If[ctx["HomogeneousSolve"] === "Expand",
+        ctx["AMatExpanded"],
+        ctx["AMatFactored"]
       ]
     ];
 
     (* Check if fallback to VOPAlt is needed *)
     If[pivotResult === $NeedsFallback,
-      DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
-      Return[SolveVOPAlt[intind, bVec, line, epsord, BufferedData]]
+      Return[SolveVOPAlt[ctx, bVec, epsord, cache]]
     ];
 
     {HomogeneousEquation, MtildeMat, selectedPivot} = pivotResult;
-    DiffExp`Utilities`PrintInfo["Using pivot integral ", intind[[selectedPivot]], " (index ", selectedPivot, " of ", systemSize, ")."][3];
+    DiffExp`Utilities`PrintInfo["Using pivot integral ", ctx["Label"][[selectedPivot]], " (index ", selectedPivot, " of ", systemSize, ")."][3];
 
     DiffExp`Utilities`PrintDebug["Found homogeneous differential equation: ", HomogeneousEquation + O[DiffExp`Symbols`x]^4 // DiffExp`SeriesOps`SN][3];
 
@@ -73,13 +67,13 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     DiffExp`Utilities`PrintDebug["Got Wronskian..."][3];
     DiffExp`Utilities`PrintDebug["Inverting Wronskian..."][3];
 
-    If[(DiffExp`State`FEC["InvWronskSolver"] === "Auto"),
+    If[(ctx["InvWronskSolver"] === "Auto"),
       If[(DiffExp`Utilities`DependsQ[Wronsk, DiffExp`Symbols`Logx]),
         CurrInvWronskSolver = "Frobenius";,
         CurrInvWronskSolver = "Inverse";
       ];
       ,
-      CurrInvWronskSolver = DiffExp`State`FEC["InvWronskSolver"];
+      CurrInvWronskSolver = ctx["InvWronskSolver"];
     ];
 
     If[CurrInvWronskSolver === "Frobenius",
@@ -101,18 +95,18 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       ] // DiffExp`SeriesOps`SExpand;
 
       (* Cross-checking Wronskians *)
-      If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "Wronskians"] === True,
+      If[MemberQ[ctx["CrosscheckFlags"], "Wronskians"] === True,
         DiffExp`Utilities`PrintDebug["Cross-checking Wronskians."][1];
-        crossCheck = (DiffExp`SeriesOps`SD[Wronsk, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[NMat, Wronsk] // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand)) + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder;
-        DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
+        crossCheck = (DiffExp`SeriesOps`SD[Wronsk, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[NMat, Wronsk] // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand)) + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"];
+        DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckPrintOrder"] // DiffExp`SeriesOps`SN][3];
         If[
           !(SameQ @@ Append[crossCheck // Normal // Flatten, 0])
           ,
           DiffExp`Utilities`ReportError["Cross-check failed."];
         ];
 
-        crossCheck = (DiffExp`SeriesOps`SD[Wronsk2, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[NMat2, Wronsk2] // (DiffExp`Utilities`PChop@*DiffExp`SeriesOps`SExpand)) + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder;
-        DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][1];
+        crossCheck = (DiffExp`SeriesOps`SD[Wronsk2, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[NMat2, Wronsk2] // (DiffExp`Utilities`PChop@*DiffExp`SeriesOps`SExpand)) + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"];
+        DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckPrintOrder"] // DiffExp`SeriesOps`SN][1];
         If[
           !(SameQ @@ Append[crossCheck // Normal // Flatten, 0])
           ,
@@ -124,8 +118,8 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       DiffExp`Utilities`PrintDebug["Deriving inverse Wronskian.."][3];
       wronskianProduct = DiffExp`Utilities`PChop@Normal@DiffExp`SeriesOps`MatrixMultiplySExpand[WronskInvPrime, Wronsk];
       DiffExp`Utilities`PrintDebug["Deriving inverse Wronskian..."][3];
-      If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "WronskInv"] === True,
-        If[DiffExp`Utilities`DependsQ[(wronskianProduct // DiffExp`Utilities`CPChop) + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // Normal, DiffExp`Symbols`x],
+      If[MemberQ[ctx["CrosscheckFlags"], "WronskInv"] === True,
+        If[DiffExp`Utilities`DependsQ[(wronskianProduct // DiffExp`Utilities`CPChop) + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"] // Normal, DiffExp`Symbols`x],
           DiffExp`State`LastErrorContext = {WronskInvPrime, Wronsk, wronskianProduct};
           DiffExp`Utilities`ReportError["Warning, product of Wronskian inverse times Wronskian does not match identity. Try increasing \"ChopPrecision\" or \"WorkingPrecision\", or try decreasing \"ExpansionOrder\"."][1];
         ];
@@ -147,7 +141,7 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     DiffExp`Utilities`PrintDebug["Inverting MTilde... "][3];
 
     Check[
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+      If[ctx["HomogeneousSolve"] === "Expand",
         MtildeInv = Inverse[MtildeMat, Method -> "DivisionFreeRowReduction", ZeroTest -> (Normal[#] == 0 &)];,
         MtildeInv = DiffExp`SeriesOps`DiffExpSeries[Inverse[MtildeMat] // Together];
       ];
@@ -160,11 +154,11 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     FMatInv = DiffExp`Utilities`PChop@(DiffExp`SeriesOps`MatrixMultiplySExpand[WronskInv, MtildeMat]);
 
     (* Cross-checking FMat *)
-    If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "PeriodMatrix"] === True,
+    If[MemberQ[ctx["CrosscheckFlags"], "PeriodMatrix"] === True,
       DiffExp`Utilities`PrintDebug["Cross-checking period matrix.."][1];
-      crossCheck = DiffExp`SeriesOps`SD[FMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], FMat + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder] // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-      DiffExp`State`LastErrorContext = {FMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], crossCheck, MtildeMat, Wronsk};
-      DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
+      crossCheck = DiffExp`SeriesOps`SD[FMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[ctx["AMatExpanded"], FMat + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"]] // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
+      DiffExp`State`LastErrorContext = {FMat, ctx["AMatExpanded"], crossCheck, MtildeMat, Wronsk};
+      DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckPrintOrder"] // DiffExp`SeriesOps`SN][3];
       If[
         !(SameQ @@ Append[crossCheck // Normal // Flatten, 0])
         ,
@@ -174,24 +168,24 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
     DiffExp`Utilities`PrintDebug["Period matrix derived."][3];
 
-    BufferedData[intind] = {FMat, FMatInv};
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
+    cache["FMat"] = FMat;
+    cache["FMatInv"] = FMatInv;
   ];
 
-  {FMat, FMatInv} = BufferedData[intind];
+  {FMat, FMatInv} = {cache["FMat"], cache["FMatInv"]};
 
   (* Use shared helper for GMat computation *)
   DiffExp`Utilities`PrintDebug["Setting up general solution."][3];
-  {cIndices, GMat} = ComputeGMat[FMat, FMatInv, bVec, intind];
-  BMat = 1/Length@intind Table[bVec, {iind, intind // Length}] // Transpose;
+  {cIndices, GMat} = ComputeGMat[FMat, FMatInv, bVec];
+  BMat = 1/ctx["SystemSize"] Table[bVec, {iind, ctx["SystemSize"]}] // Transpose;
 
-  If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolutionMatrix"] === True,
+  If[MemberQ[ctx["CrosscheckFlags"], "GeneralSolutionMatrix"] === True,
     DiffExp`Utilities`PrintDebug["Cross-checking GMat with differential equations."][1];
-    crossCheck = DiffExp`SeriesOps`SD[GMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], GMat + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder] - BMat // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-    DiffExp`State`LastErrorContext = {FMat, GMat, FMatInv, BMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], crossCheck, MtildeMat, Wronsk};
-    DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
+    crossCheck = DiffExp`SeriesOps`SD[GMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[ctx["AMatExpanded"], GMat + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"]] - BMat // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
+    DiffExp`State`LastErrorContext = {FMat, GMat, FMatInv, BMat, ctx["AMatExpanded"], crossCheck, MtildeMat, Wronsk};
+    DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckPrintOrder"] // DiffExp`SeriesOps`SN][3];
     If[
-      !(SameQ @@ Append[crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // Normal // Flatten, 0])
+      !(SameQ @@ Append[crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"] // Normal // Flatten, 0])
       ,
       DiffExp`Utilities`ReportError["Cross-check of solution matrix failed"];
     ];
@@ -199,5 +193,5 @@ SolveDefault[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
   fGeneral = Total[GMat // Transpose];
 
-  {cIndices, fGeneral, BufferedData}
+  {cIndices, fGeneral, cache}
 ];

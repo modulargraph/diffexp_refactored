@@ -120,12 +120,34 @@ PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
   {line, bcs1} /. Log[a_ DiffExp`Symbols`x] /; NumericQ[a] :> Log[a] + DiffExp`Symbols`Logx /. Log[DiffExp`Symbols`x] -> DiffExp`Symbols`Logx
 ];
 
+(* Build a SegmentContext association for a given integral block and line *)
+BuildSegmentContext[intind_, line_] := <|
+  "AMatExpanded" -> DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]],
+  "AMatFactored" -> If[KeyExistsQ[DiffExp`State`DEqnMatricesFactored, line],
+    DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]],
+    Missing["NotAvailable"]
+  ],
+  "SystemSize" -> Length[intind],
+  "ExpansionOrder" -> DiffExp`State`ExpansionOrderVal,
+  "WorkingPrecision" -> DiffExp`State`FEWorkingPrecision,
+  "ChopPrecision" -> DiffExp`State`ChopPrecisionVal,
+  "LinearSolveChopPrecision" -> DiffExp`State`LinearSolveChopPrecisionVal,
+  "HomogeneousSolve" -> DiffExp`State`FEC["HomogeneousSolve"],
+  "InvWronskSolver" -> DiffExp`State`FEC["InvWronskSolver"],
+  "CrosscheckFlags" -> DiffExp`State`CurrCrosscheckFlags,
+  "CrossCheckPrintOrder" -> DiffExp`State`ICrossCheckPrintResultOrder,
+  "CrossCheckVerifyOrder" -> DiffExp`State`ICrossCheckVerifyResultOrder,
+  "IntegrationStrategy" -> DiffExp`State`FEC[IntegrationStrategy],
+  "UseRationalRecurrence" -> DiffExp`State`FEC[UseRationalRecurrence],
+  "Label" -> intind
+|>;
+
 (* Main integration function *)
 IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}] := Module[
   {bcs, line, BCSRelevant, relevantIndices, IgnorePositions, crossCheck, bVec, IntegrationData, fGeneral,
    FixAt, BoundaryEqns1, BoundaryEqns2, cIndices, Cmat, Cb, csol, NewResults, opts = opts2,
    DEqnMatricesExpandedCopy, TurnOffPade, constantReplacements, csFreedom, solveFailed, LogsPresent,
-   AlgebraicRootsPresent, normalizedSolutions, BufferedData, MyWronsk, MyWronskDetInv,
+   AlgebraicRootsPresent, normalizedSolutions, segmentCaches, ctx, blockCache, benchStart,
    IntegrationDataTab, bVec0, bVec1, bVecRest, complementIndices, otherIntegralData},
 
   If[line2[[0]] === List, line = line2 // Association // KeySort, line = line2 // KeySort];
@@ -157,9 +179,7 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
     DiffExp`State`DiffExpConfiguration[UsePade] = False;
   ];
 
-  BufferedData = Association[{}];
-  MyWronsk = Association[{}];
-  MyWronskDetInv = Association[{}];
+  segmentCaches = Association[{}];
 
   (* To deal with the output of SaveExpansions = True *)
   If[MatchQ[bcs2, {{a_Association, __}, _}],
@@ -249,7 +269,16 @@ IntegrateSystem[bcs2 : _List : "?", line2_Association | line2_List, opts2_ : {}]
       DiffExp`Utilities`PrintDebug["Done."][3];
 
       (* Dispatch to appropriate integration strategy *)
-      {cIndices, fGeneral, BufferedData} = DiffExp`IntegrationStrategies`DispatchStrategy[intind, bVec, line, epsord, BufferedData];
+      ctx = BuildSegmentContext[intind, line];
+      blockCache = Lookup[segmentCaches, Key[intind], <||>];
+      If[epsord === 0,
+        benchStart = AbsoluteTime[];
+      ];
+      {cIndices, fGeneral, blockCache} = DiffExp`IntegrationStrategies`DispatchStrategy[ctx, bVec, epsord, blockCache];
+      segmentCaches[intind] = blockCache;
+      If[epsord === 0,
+        DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - benchStart;
+      ];
 
       (* Code for fixing boundary conditions. *)
       If[!(bcs2 === "?"),

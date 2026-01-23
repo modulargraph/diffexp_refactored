@@ -256,22 +256,47 @@ LoadConfiguration[Config2F1Default];
 Print["Checking applicability functions on 2F1 matrices..."];
 
 (* We need to prepare matrices first to test applicability *)
-(* The check functions use the internal matrix state, so we just verify
-   they don't crash and return Boolean values *)
-testsTotal++;
-If[BooleanQ[DiffExp`IntegrationStrategies`RationalRecurrenceApplicableQ[{1, 2}, <|z -> z0 + (1/2 - z0) * x|>]],
-  Print["  [PASS] RationalRecurrenceApplicableQ returns Boolean"];
-  testsPassed++;
-  ,
-  Print["  [FAIL] RationalRecurrenceApplicableQ did not return Boolean"];
-];
+(* Construct a SegmentContext with the matrix data *)
+Module[{testLine, testCtx},
+  testLine = <|z -> z0 + (1/2 - z0) * x|>;
+  DiffExp`AnalyticContinuation`PrepareAnalyticContinuation[testLine];
+  DiffExp`MatrixLoading`PrepareMatrices[testLine];
+  testCtx = <|
+    "AMatExpanded" -> DiffExp`State`DEqnMatricesExpanded[testLine][0][[{1, 2}, {1, 2}]],
+    "AMatFactored" -> If[KeyExistsQ[DiffExp`State`DEqnMatricesFactored, testLine],
+      DiffExp`State`DEqnMatricesFactored[testLine][0][[{1, 2}, {1, 2}]],
+      Missing["NotAvailable"]
+    ],
+    "SystemSize" -> 2,
+    "ExpansionOrder" -> DiffExp`State`ExpansionOrderVal,
+    "WorkingPrecision" -> DiffExp`State`FEWorkingPrecision,
+    "ChopPrecision" -> DiffExp`State`ChopPrecisionVal,
+    "LinearSolveChopPrecision" -> DiffExp`State`LinearSolveChopPrecisionVal,
+    "HomogeneousSolve" -> "Expand",
+    "InvWronskSolver" -> "Auto",
+    "CrosscheckFlags" -> {},
+    "CrossCheckPrintOrder" -> 5,
+    "CrossCheckVerifyOrder" -> 5,
+    "IntegrationStrategy" -> "Default",
+    "UseRationalRecurrence" -> True,
+    "Label" -> {1, 2}
+  |>;
 
-testsTotal++;
-If[BooleanQ[DiffExp`IntegrationStrategies`SingularRecurrenceApplicableQ[{1, 2}, <|z -> z0 + (1/2 - z0) * x|>]],
-  Print["  [PASS] SingularRecurrenceApplicableQ returns Boolean"];
-  testsPassed++;
-  ,
-  Print["  [FAIL] SingularRecurrenceApplicableQ did not return Boolean"];
+  testsTotal++;
+  If[BooleanQ[DiffExp`IntegrationStrategies`RationalRecurrenceApplicableQ[testCtx]],
+    Print["  [PASS] RationalRecurrenceApplicableQ returns Boolean"];
+    testsPassed++;
+    ,
+    Print["  [FAIL] RationalRecurrenceApplicableQ did not return Boolean"];
+  ];
+
+  testsTotal++;
+  If[BooleanQ[DiffExp`IntegrationStrategies`SingularRecurrenceApplicableQ[testCtx]],
+    Print["  [PASS] SingularRecurrenceApplicableQ returns Boolean"];
+    testsPassed++;
+    ,
+    Print["  [FAIL] SingularRecurrenceApplicableQ did not return Boolean"];
+  ];
 ];
 
 (* ============================================================ *)

@@ -7,17 +7,17 @@
 
 (* Check if the rational recurrence method is applicable:
    The expansion point must be non-singular (series starts at x^0).
-   Checks the expanded matrix series for the given integral block. *)
-RationalRecurrenceApplicableQ[intind_, line_] := Quiet[Check[
+   Checks the factored matrix in ctx for the given integral block. *)
+RationalRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
   Module[{AMat, atZero},
 
-    (* Check that factored matrices exist *)
-    If[!KeyExistsQ[DiffExp`State`DEqnMatricesFactored, line],
+    (* Check that factored matrix is available *)
+    If[MissingQ[ctx["AMatFactored"]],
       Return[False]
     ];
 
     (* Non-singular iff the factored matrix is finite at x=0 *)
-    AMat = DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]];
+    AMat = ctx["AMatFactored"];
     atZero = AMat /. DiffExp`Symbols`x -> 0;
 
     TrueQ[And @@ (NumericQ /@ Flatten[atZero])]
@@ -28,19 +28,19 @@ RationalRecurrenceApplicableQ[intind_, line_] := Quiet[Check[
 (* Try to rationalize the factored A matrix and extract polynomial coefficients.
    Returns {True, dCoeffs, aCoeffs, dD, dA, d0, d0Inv} on success,
    or {False} if rationalization is too expensive or not possible. *)
-TryRationalizeMatrix[intind_, line_] := Module[
+TryRationalizeMatrix[ctx_Association] := Module[
   {AMat, AMatTogether, flatEntries, denoms, Dpoly, NAMat,
    dCoeffs, aCoeffs, dD, dA, d0, d0Inv, maxOrd, result},
 
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  maxOrd = ctx["ExpansionOrder"];
 
-  (* Only attempt rationalization if factored matrices exist *)
-  If[!KeyExistsQ[DiffExp`State`DEqnMatricesFactored, line],
+  (* Only attempt rationalization if factored matrix is available *)
+  If[MissingQ[ctx["AMatFactored"]],
     Return[{False}]
   ];
 
   (* Get the factored A matrix *)
-  AMat = DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]];
+  AMat = ctx["AMatFactored"];
 
   (* Try to put in Together form - use TimeConstrained to avoid hanging *)
   result = TimeConstrained[
@@ -83,12 +83,12 @@ TryRationalizeMatrix[intind_, line_] := Module[
   (* Extract polynomial coefficients *)
   dD = Exponent[Dpoly, DiffExp`Symbols`x];
   dCoeffs = Table[
-    N[Coefficient[Dpoly, DiffExp`Symbols`x, i], DiffExp`State`FEWorkingPrecision],
+    N[Coefficient[Dpoly, DiffExp`Symbols`x, i], ctx["WorkingPrecision"]],
     {i, 0, dD}
   ];
 
   aCoeffs = Table[
-    Map[N[Coefficient[#, DiffExp`Symbols`x, j], DiffExp`State`FEWorkingPrecision] &, NAMat, {2}],
+    Map[N[Coefficient[#, DiffExp`Symbols`x, j], ctx["WorkingPrecision"]] &, NAMat, {2}],
     {j, 0, dA}
   ];
 
@@ -100,12 +100,12 @@ TryRationalizeMatrix[intind_, line_] := Module[
 
 (* Extract series coefficients of the A matrix from the expanded form.
    Returns {aCoeffs, dA} where dA = maxOrd (all orders used). *)
-ExtractSeriesCoefficients[intind_, line_] := Module[
+ExtractSeriesCoefficients[ctx_Association] := Module[
   {AMatExpanded, maxOrd, aCoeffs, systemSize},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
-  AMatExpanded = DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]];
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
+  AMatExpanded = ctx["AMatExpanded"];
 
   (* Extract the matrix coefficient at each order from the SeriesData *)
   aCoeffs = Table[
@@ -119,20 +119,19 @@ ExtractSeriesCoefficients[intind_, line_] := Module[
   {aCoeffs, maxOrd - 1}
 ];
 
-(* Core recurrence computation: computes the fundamental matrix (homogeneous solutions)
-   and stores preprocessed data in BufferedData. *)
-ComputeFundamentalMatrix[intind_, line_, aCoeffs_, dCoeffs_, dD_, dA_, d0Inv_, BufferedData_] := Module[
+(* Core recurrence computation: computes the fundamental matrix (homogeneous solutions). *)
+ComputeFundamentalMatrix[ctx_Association, aCoeffs_, dCoeffs_, dD_, dA_, d0Inv_] := Module[
   {systemSize, maxOrd, fCoeffs, FMat},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
 
   FMat = Table[
     fCoeffs = ConstantArray[
-      ConstantArray[N[0, DiffExp`State`FEWorkingPrecision], systemSize],
+      ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
       maxOrd + 1
     ];
-    fCoeffs[[1]] = N[UnitVector[systemSize, col], DiffExp`State`FEWorkingPrecision];
+    fCoeffs[[1]] = N[UnitVector[systemSize, col], ctx["WorkingPrecision"]];
 
     Do[
       fCoeffs[[m + 2]] = d0Inv/(m + 1) * (
@@ -162,43 +161,39 @@ ComputeFundamentalMatrix[intind_, line_, aCoeffs_, dCoeffs_, dD_, dA_, d0Inv_, B
    2. Direct series: uses the expanded series coefficients A_j directly.
       Recurrence cost is O(N^2) per solution but avoids rationalization overhead.
    Both modes bypass the Frobenius/Wronskian machinery. *)
-SolveRationalRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
+SolveRationalRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {systemSize, maxOrd, fCoeffs, bSeriesCoeffs, bCoeffAtN, nbCoeff,
    FMat, fParticular, fGeneral, cIndices, c,
    dCoeffs, aCoeffs, dD, dA, d0, d0Inv, rationalResult,
-   BufferedData = BufferedDataIn},
+   cache = cacheIn},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
 
-  If[epsord === 0 && !KeyExistsQ[BufferedData, {"RR", intind}],
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
-
+  If[epsord === 0 && !KeyExistsQ[cache, "RR"],
     (* Try the denominator-clearing approach first *)
-    rationalResult = TryRationalizeMatrix[intind, line];
+    rationalResult = TryRationalizeMatrix[ctx];
 
     If[rationalResult[[1]],
       (* Denominator-clearing mode: polynomial recurrence *)
       {dCoeffs, aCoeffs, dD, dA, d0, d0Inv} = rationalResult[[{2, 3, 4, 5, 6, 7}]];
-      DiffExp`Utilities`PrintInfo["Using rational recurrence (poly degree ", dA, ") for integrals ", intind, "."][3];
+      DiffExp`Utilities`PrintInfo["Using rational recurrence (poly degree ", dA, ") for integrals ", ctx["Label"], "."][3];
       ,
       (* Direct series mode: use expanded series coefficients *)
-      {aCoeffs, dA} = ExtractSeriesCoefficients[intind, line];
+      {aCoeffs, dA} = ExtractSeriesCoefficients[ctx];
       dD = 0;
-      dCoeffs = {N[1, DiffExp`State`FEWorkingPrecision]};
-      d0Inv = N[1, DiffExp`State`FEWorkingPrecision];
-      DiffExp`Utilities`PrintInfo["Using series recurrence for integrals ", intind, "."][3];
+      dCoeffs = {N[1, ctx["WorkingPrecision"]]};
+      d0Inv = N[1, ctx["WorkingPrecision"]];
+      DiffExp`Utilities`PrintInfo["Using series recurrence for integrals ", ctx["Label"], "."][3];
     ];
 
     (* Compute fundamental matrix *)
-    FMat = ComputeFundamentalMatrix[intind, line, aCoeffs, dCoeffs, dD, dA, d0Inv, BufferedData];
+    FMat = ComputeFundamentalMatrix[ctx, aCoeffs, dCoeffs, dD, dA, d0Inv];
 
-    BufferedData[{"RR", intind}] = {FMat, dCoeffs, aCoeffs, dD, dA, d0Inv};
-
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
+    cache["RR"] = {FMat, dCoeffs, aCoeffs, dD, dA, d0Inv};
   ];
 
-  {FMat, dCoeffs, aCoeffs, dD, dA, d0Inv} = BufferedData[{"RR", intind}];
+  {FMat, dCoeffs, aCoeffs, dD, dA, d0Inv} = cache["RR"];
 
   (* Compute particular solution using bVec *)
   If[DiffExp`Utilities`PChop[bVec] === ConstantArray[0, systemSize],
@@ -216,7 +211,7 @@ SolveRationalRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
 
     (* Run recurrence with f_0 = 0 for particular solution *)
     fCoeffs = ConstantArray[
-      ConstantArray[N[0, DiffExp`State`FEWorkingPrecision], systemSize],
+      ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
       maxOrd + 1
     ];
 
@@ -255,7 +250,7 @@ SolveRationalRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
   fGeneral = fParticular + Sum[cIndices[[i]] * FMat[[All, i]], {i, systemSize}];
   fGeneral = DiffExp`SeriesOps`SExpand[fGeneral];
 
-  {cIndices, fGeneral, BufferedData}
+  {cIndices, fGeneral, cache}
 ];
 
 (* ============================================================================ *)
@@ -268,18 +263,12 @@ SolveRationalRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
    1. The expanded matrix has minimum order -1 (simple pole at x=0)
    2. The residue matrix A_{-1} is diagonalizable
    3. No two eigenvalues differ by a positive integer (non-resonance) *)
-SingularRecurrenceApplicableQ[intind_, line_] := Quiet[Check[
+SingularRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
   Module[{AMatExpanded, minOrders, minOrder, residueMat, systemSize,
           eigenvalues, eigenvectors, diffs},
 
-    systemSize = Length[intind];
-
-    (* Check that expanded matrices exist *)
-    If[!KeyExistsQ[DiffExp`State`DEqnMatricesExpanded, line],
-      Return[False]
-    ];
-
-    AMatExpanded = DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]];
+    systemSize = ctx["SystemSize"];
+    AMatExpanded = ctx["AMatExpanded"];
 
     (* Determine minimum order of the matrix entries *)
     minOrders = Flatten[Table[
@@ -306,12 +295,12 @@ SingularRecurrenceApplicableQ[intind_, line_] := Quiet[Check[
     ];
 
     (* Compute eigenvalues *)
-    eigenvalues = Eigenvalues[N[residueMat, DiffExp`State`FEWorkingPrecision]];
-    eigenvalues = Rationalize[eigenvalues, 10^(-DiffExp`State`ChopPrecisionVal/2)];
+    eigenvalues = Eigenvalues[N[residueMat, ctx["WorkingPrecision"]]];
+    eigenvalues = Rationalize[eigenvalues, 10^(-ctx["ChopPrecision"]/2)];
 
     (* Check diagonalizability: rank of eigenvector matrix must equal system size *)
-    eigenvectors = Eigenvectors[N[residueMat, DiffExp`State`FEWorkingPrecision]];
-    If[MatrixRank[eigenvectors, Tolerance -> 10^(-DiffExp`State`ChopPrecisionVal/2)] < systemSize,
+    eigenvectors = Eigenvectors[N[residueMat, ctx["WorkingPrecision"]]];
+    If[MatrixRank[eigenvectors, Tolerance -> 10^(-ctx["ChopPrecision"]/2)] < systemSize,
       Return[False]
     ];
 
@@ -332,21 +321,21 @@ SingularRecurrenceApplicableQ[intind_, line_] := Quiet[Check[
 (* Diagonalize the residue matrix.
    Returns {eigenvalues, P, PInv} where P is the matrix of eigenvectors (columns)
    and PInv = P^{-1}. Eigenvalues are rationalized for exact arithmetic. *)
-DiagonalizeResidue[residueMat_, systemSize_] := Module[
+DiagonalizeResidue[residueMat_, systemSize_, ctx_Association] := Module[
   {eigenvalues, eigenvectors, P, PInv, sorted, perm},
 
-  {eigenvalues, eigenvectors} = Eigensystem[N[residueMat, DiffExp`State`FEWorkingPrecision]];
+  {eigenvalues, eigenvectors} = Eigensystem[N[residueMat, ctx["WorkingPrecision"]]];
 
   (* Rationalize eigenvalues for exact recurrence denominators *)
-  eigenvalues = Rationalize[eigenvalues, 10^(-DiffExp`State`ChopPrecisionVal/2)];
+  eigenvalues = Rationalize[eigenvalues, 10^(-ctx["ChopPrecision"]/2)];
 
   (* P = matrix of eigenvectors as columns, so P = Transpose[eigenvectors] *)
   P = Transpose[eigenvectors];
   PInv = Inverse[P];
 
   (* Normalize to working precision *)
-  P = N[P, DiffExp`State`FEWorkingPrecision];
-  PInv = N[PInv, DiffExp`State`FEWorkingPrecision];
+  P = N[P, ctx["WorkingPrecision"]];
+  PInv = N[PInv, ctx["WorkingPrecision"]];
 
   {eigenvalues, P, PInv}
 ];
@@ -354,19 +343,19 @@ DiagonalizeResidue[residueMat_, systemSize_] := Module[
 (* Try to rationalize the singular matrix A(x) = R(x)/(x*D(x))
    and extract polynomial coefficients in the eigenbasis.
    Returns {True, rHatCoeffs, dCoeffs, dR, dD, d0} on success, or {False} on failure. *)
-TryRationalizeSingularMatrix[intind_, line_, PInv_, P_] := Module[
+TryRationalizeSingularMatrix[ctx_Association, PInv_, P_] := Module[
   {AMat, systemSize, result, AMatTogether, flatEntries, denoms, Dpoly, xDpoly,
    NAMat, dD, dR, dCoeffs, rCoeffs, rHatCoeffs, d0, maxOrd},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
 
-  (* Only attempt if factored matrices exist *)
-  If[!KeyExistsQ[DiffExp`State`DEqnMatricesFactored, line],
+  (* Only attempt if factored matrix is available *)
+  If[MissingQ[ctx["AMatFactored"]],
     Return[{False}]
   ];
 
-  AMat = DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]];
+  AMat = ctx["AMatFactored"];
 
   result = TimeConstrained[
     Module[{at, fe, dn, dp, xdp, naMat, degA, degD},
@@ -422,14 +411,14 @@ TryRationalizeSingularMatrix[intind_, line_, PInv_, P_] := Module[
 
   (* Extract D(x) polynomial coefficients *)
   dCoeffs = Table[
-    N[Coefficient[Dpoly, DiffExp`Symbols`x, i], DiffExp`State`FEWorkingPrecision],
+    N[Coefficient[Dpoly, DiffExp`Symbols`x, i], ctx["WorkingPrecision"]],
     {i, 0, dD}
   ];
   d0 = dCoeffs[[1]];
 
   (* Extract R(x) = N_A(x) polynomial matrix coefficients *)
   rCoeffs = Table[
-    Map[N[Coefficient[#, DiffExp`Symbols`x, j], DiffExp`State`FEWorkingPrecision] &, NAMat, {2}],
+    Map[N[Coefficient[#, DiffExp`Symbols`x, j], ctx["WorkingPrecision"]] &, NAMat, {2}],
     {j, 0, dR}
   ];
 
@@ -441,12 +430,12 @@ TryRationalizeSingularMatrix[intind_, line_, PInv_, P_] := Module[
 
 (* Extract series coefficients A_0, A_1, ... from the expanded matrix (excluding the pole)
    and transform to eigenbasis. Returns {bHatCoeffs, numCoeffs}. *)
-ExtractSingularSeriesCoefficients[intind_, line_, PInv_, P_] := Module[
+ExtractSingularSeriesCoefficients[ctx_Association, PInv_, P_] := Module[
   {AMatExpanded, maxOrd, systemSize, aCoeffs, bHatCoeffs},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
-  AMatExpanded = DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]];
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
+  AMatExpanded = ctx["AMatExpanded"];
 
   (* Extract A_k for k = 0, 1, ..., maxOrd-1 (the regular part) *)
   aCoeffs = Table[
@@ -467,20 +456,20 @@ ExtractSingularSeriesCoefficients[intind_, line_, PInv_, P_] := Module[
    Each column i corresponds to the Frobenius solution with exponent lambda_i.
    Mode "rational": uses denominator-cleared polynomial recurrence.
    Mode "series": uses direct series coefficient recurrence. *)
-ComputeSingularFundamentalMatrix[intind_, eigenvalues_, P_, PInv_,
+ComputeSingularFundamentalMatrix[ctx_Association, eigenvalues_, P_, PInv_,
     rHatCoeffs_, dCoeffs_, dR_, dD_, d0_, bHatCoeffs_, numBCoeffs_, mode_] := Module[
   {systemSize, maxOrd, gCoeffs, FMat, rhs, divisor, col, m, j},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
 
   FMat = Table[
     (* For eigenvalue lambda_col, initial condition g_0 = e_col *)
     gCoeffs = ConstantArray[
-      ConstantArray[N[0, DiffExp`State`FEWorkingPrecision], systemSize],
+      ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
       maxOrd + 1
     ];
-    gCoeffs[[1]] = N[UnitVector[systemSize, col], DiffExp`State`FEWorkingPrecision];
+    gCoeffs[[1]] = N[UnitVector[systemSize, col], ctx["WorkingPrecision"]];
 
     If[mode === "rational",
       (* Denominator-clearing recurrence:
@@ -499,7 +488,7 @@ ComputeSingularFundamentalMatrix[intind_, eigenvalues_, P_, PInv_,
           divisor = d0 * (m + eigenvalues[[col]] - eigenvalues[[j]]);
           If[divisor == 0,
             (* Should not happen due to non-resonance check, but be safe *)
-            N[0, DiffExp`State`FEWorkingPrecision],
+            N[0, ctx["WorkingPrecision"]],
             rhs[[j]] / divisor
           ],
           {j, systemSize}
@@ -515,7 +504,7 @@ ComputeSingularFundamentalMatrix[intind_, eigenvalues_, P_, PInv_,
         gCoeffs[[m + 1]] = Table[
           divisor = m + eigenvalues[[col]] - eigenvalues[[j]];
           If[divisor == 0,
-            N[0, DiffExp`State`FEWorkingPrecision],
+            N[0, ctx["WorkingPrecision"]],
             rhs[[j]] / divisor
           ],
           {j, systemSize}
@@ -543,12 +532,12 @@ ComputeSingularFundamentalMatrix[intind_, eigenvalues_, P_, PInv_,
    The particular solution starts at power s determined by the leading power of bVec.
    Returns the particular solution vector, or $Failed if resonance is detected. *)
 ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
-    rHatCoeffs_, dCoeffs_, dR_, dD_, d0_, bHatCoeffs_, numBCoeffs_, mode_] := Module[
+    rHatCoeffs_, dCoeffs_, dR_, dD_, d0_, bHatCoeffs_, numBCoeffs_, mode_, ctx_Association] := Module[
   {systemSize, maxOrd, bLeadPow, bLeadDen, s, gCoeffs, rhs, divisor, nbCoeff,
    bVecInEigen, bSeriesCoeffs, numBVecCoeffs, fParticular, m, j},
 
   systemSize = Length[bVec];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  maxOrd = ctx["ExpansionOrder"];
 
   (* Determine leading power of bVec *)
   bLeadPow = Min[Table[
@@ -559,19 +548,6 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
     {k, systemSize}
   ]];
 
-  (* For the ODE x*f' = A_{-1}*f + (regular)*f + x*B,
-     the particular solution starts at power s = bLeadPow + 1
-     (since x*B shifts B up by one power, and the recurrence preserves order) *)
-  (* Actually, f' = A(x)*f + B means:
-     x*f' = A_{-1}*f + x*A_0*f + ... + x*B
-     If B starts at x^bLeadPow, then x*B starts at x^{bLeadPow+1}.
-     The particular solution starts at x^s where s = bLeadPow + 1 is the first
-     power where the inhomogeneous term contributes to the recurrence. *)
-  (* However, if bLeadPow < min(eigenvalues), f_p could start at bLeadPow itself
-     from the derivative balance. The correct s comes from the full ODE:
-     f' = (A_{-1}/x + ...)*f + B
-     At leading order: s*f_s*x^{s-1} = A_{-1}*f_s*x^{s-1} + B_bLeadPow*x^{bLeadPow}
-     If s-1 = bLeadPow: (s*I - A_{-1})*f_s = B_bLeadPow *)
   s = bLeadPow + 1;
 
   (* Check non-resonance for particular solution:
@@ -580,10 +556,7 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
     Return[$Failed]
   ];
 
-  (* Extract bVec coefficients in eigenbasis.
-     Transform: b_eigen = PInv . bVec componentwise *)
-  (* We need coefficients of x*B (= xB) at powers s, s+1, ..., s+maxOrd *)
-  (* (xB)_{s+m} = B_{s+m-1} = B_{bLeadPow+m} *)
+  (* Extract bVec coefficients in eigenbasis. *)
   bSeriesCoeffs = Table[
     Table[
       SeriesCoefficient[bVec[[k]], {DiffExp`Symbols`x, 0, s - 1 + n}],
@@ -596,19 +569,11 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
 
   (* Run recurrence for particular solution *)
   gCoeffs = ConstantArray[
-    ConstantArray[N[0, DiffExp`State`FEWorkingPrecision], systemSize],
+    ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
     maxOrd + 1
   ];
 
   If[mode === "rational",
-    (* Denominator-clearing:
-       d0*(m+s-lambda_j)*g_m^(j) =
-         sum_{k=1}^{min(m,dR)} Rhat_k . g_{m-k}
-         - sum_{i=1}^{min(m,dD)} d_i*(m-i+s)*g_{m-i}
-         + [D(x)*x*B in eigenbasis]_{m+s}  *)
-    (* For the inhomogeneous term with denominator clearing:
-       x*D(x)*B has coefficients that combine d_i and B coefficients.
-       nb_m = sum_{i=0}^{min(m,dD)} d_i * bVecInEigen_{m-i} *)
     Do[
       nbCoeff = Sum[
         If[m - i >= 0 && m - i < Length[bVecInEigen],
@@ -633,9 +598,6 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
       , {m, 0, maxOrd}
     ];
     ,
-    (* Series mode:
-       (m+s-lambda_j)*g_m^(j) =
-         [sum_{k=0}^{m-1} Bhat_k . g_{m-1-k}]^(j) + bVecInEigen_m  *)
     Do[
       rhs = bVecInEigen[[m + 1]] +
         If[m >= 1,
@@ -665,33 +627,31 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
 
 (* Main entry point for the singular recurrence solver.
    Handles regular singular points with diagonalizable, non-resonant residue. *)
-SolveSingularRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
+SolveSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {systemSize, maxOrd, FMat, fParticular, fGeneral, cIndices, c,
    eigenvalues, P, PInv, residueMat,
    rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs,
    mode, rationalResult, AMatExpanded,
-   BufferedData = BufferedDataIn},
+   cache = cacheIn},
 
-  systemSize = Length[intind];
-  maxOrd = DiffExp`State`ExpansionOrderVal;
+  systemSize = ctx["SystemSize"];
+  maxOrd = ctx["ExpansionOrder"];
 
-  If[epsord === 0 && !KeyExistsQ[BufferedData, {"SingRR", intind}],
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
-
+  If[epsord === 0 && !KeyExistsQ[cache, "SingRR"],
     (* Extract residue matrix A_{-1} *)
-    AMatExpanded = DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]];
+    AMatExpanded = ctx["AMatExpanded"];
     residueMat = Table[
       SeriesCoefficient[AMatExpanded[[i, j]], {DiffExp`Symbols`x, 0, -1}],
       {i, systemSize}, {j, systemSize}
     ];
 
     (* Diagonalize the residue *)
-    {eigenvalues, P, PInv} = DiagonalizeResidue[residueMat, systemSize];
-    DiffExp`Utilities`PrintInfo["Using singular recurrence for integrals ", intind,
+    {eigenvalues, P, PInv} = DiagonalizeResidue[residueMat, systemSize, ctx];
+    DiffExp`Utilities`PrintInfo["Using singular recurrence for integrals ", ctx["Label"],
       " (eigenvalues: ", eigenvalues, ")."][3];
 
     (* Try denominator-clearing mode first *)
-    rationalResult = TryRationalizeSingularMatrix[intind, line, PInv, P];
+    rationalResult = TryRationalizeSingularMatrix[ctx, PInv, P];
 
     If[rationalResult[[1]],
       mode = "rational";
@@ -701,27 +661,25 @@ SolveSingularRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
       DiffExp`Utilities`PrintInfo["  Singular recurrence: denominator-clearing mode (poly degree ", dR, ")."][3];
       ,
       mode = "series";
-      {bHatCoeffs, numBCoeffs} = ExtractSingularSeriesCoefficients[intind, line, PInv, P];
+      {bHatCoeffs, numBCoeffs} = ExtractSingularSeriesCoefficients[ctx, PInv, P];
       rHatCoeffs = {};
       dCoeffs = {};
       dR = 0;
       dD = 0;
-      d0 = N[1, DiffExp`State`FEWorkingPrecision];
+      d0 = N[1, ctx["WorkingPrecision"]];
       DiffExp`Utilities`PrintInfo["  Singular recurrence: series mode."][3];
     ];
 
     (* Compute fundamental matrix *)
-    FMat = ComputeSingularFundamentalMatrix[intind, eigenvalues, P, PInv,
+    FMat = ComputeSingularFundamentalMatrix[ctx, eigenvalues, P, PInv,
       rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode];
 
-    BufferedData[{"SingRR", intind}] = {FMat, eigenvalues, P, PInv,
+    cache["SingRR"] = {FMat, eigenvalues, P, PInv,
       rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode};
-
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
   ];
 
   {FMat, eigenvalues, P, PInv,
-   rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode} = BufferedData[{"SingRR", intind}];
+   rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode} = cache["SingRR"];
 
   (* Compute particular solution *)
   If[DiffExp`Utilities`PChop[bVec] === ConstantArray[0, systemSize],
@@ -731,18 +689,18 @@ SolveSingularRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
     ];
     ,
     fParticular = ComputeSingularParticular[bVec, eigenvalues, P, PInv,
-      rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode];
+      rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode, ctx];
 
     (* If particular solution fails (resonance), fall back to Default *)
     If[fParticular === $Failed,
       DiffExp`Utilities`PrintInfo["Singular recurrence: particular solution resonance detected, falling back to Default."][3];
-      (* Ensure SolveDefault's BufferedData is initialized *)
-      If[!KeyExistsQ[BufferedData, intind],
-        BufferedData = SolveDefault[intind,
+      (* Initialize SolveDefault's cache if needed *)
+      If[!KeyExistsQ[cache, "FMat"],
+        cache = SolveDefault[ctx,
           ConstantArray[SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1], systemSize],
-          line, 0, BufferedData][[3]];
+          0, cache][[3]];
       ];
-      Return[SolveDefault[intind, bVec, line, epsord, BufferedData]]
+      Return[SolveDefault[ctx, bVec, epsord, cache]]
     ];
   ];
 
@@ -751,5 +709,5 @@ SolveSingularRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Modu
   fGeneral = fParticular + Sum[cIndices[[i]] * FMat[[All, i]], {i, systemSize}];
   fGeneral = DiffExp`SeriesOps`SExpand[fGeneral];
 
-  {cIndices, fGeneral, BufferedData}
+  {cIndices, fGeneral, cache}
 ];

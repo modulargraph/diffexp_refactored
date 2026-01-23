@@ -3,30 +3,28 @@
 
 (* VOP integration strategy *)
 (* Uses variation of parameters method *)
-SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
+SolveVOP[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {systemSize, MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions,
    SolveFrom, MtildeMatrix, HighestOrderDifferentialEquationPosition,
    homogeneousSolutions, numSolutions, inhomogeneousTerm,
    bSupjVecs, fGeneral, cIndices, VanishingTerms,
    DerivativeVec, boundaryDerivatives, MtildeInv, wronskianColumn, wronskianMatrices, wronskianDetInverse, c, PlaceHolder,
-   BufferedData = BufferedDataIn},
+   cache = cacheIn},
 
-  DiffExp`Utilities`PrintDebug["Solving by variation of parameters. ", intind][3];
+  DiffExp`Utilities`PrintDebug["Solving by variation of parameters. ", ctx["Label"]][3];
 
-  systemSize = intind // Length;
+  systemSize = ctx["SystemSize"];
 
   (* Initialize wronskianMatrices and wronskianDetInverse as local associations *)
   wronskianMatrices = Association[{}];
   wronskianDetInverse = Association[{}];
 
-  If[epsord === 0 && !KeyExistsQ[BufferedData, intind],
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
-
+  If[epsord === 0 && !KeyExistsQ[cache, "VOP"],
     (* Use shared helper functions for common computations *)
-    MatricesMSupj = ComputeMatricesMSupj[intind, line];
+    MatricesMSupj = ComputeMatricesMSupj[ctx];
     nthOrderDifferentialEquations = ComputeNthOrderDiffEqns[MatricesMSupj, systemSize];
 
-    If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+    If[ctx["HomogeneousSolve"] === "Expand",
       MatricesMSupj = DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj];
     ];
 
@@ -35,7 +33,7 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       SolveFrom = Range@Length@nthOrderDifferentialEquations;
       nthOrderDifferentialEquationsSolutions = DiffExp`Frobenius`FrobeniusSolutions /@ nthOrderDifferentialEquations;
       If[systemSize == 1,
-        If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+        If[ctx["HomogeneousSolve"] === "Expand",
           MtildeMatrix = DiffExp`Utilities`PChop@DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj[[All, SolveFrom[[1]]]][[Range[systemSize], Range[systemSize]]]];
           ,
           MtildeMatrix = MatricesMSupj[[All, SolveFrom[[1]]]][[Range[systemSize], Range[systemSize]]];
@@ -46,7 +44,7 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       ,
       SolveFrom = {HighestOrderDifferentialEquationPosition};
 
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+      If[ctx["HomogeneousSolve"] === "Expand",
         MtildeMatrix = DiffExp`Utilities`PChop@DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj[[All, SolveFrom[[1]]]][[Range[systemSize], Range[systemSize]]]];
         ,
         MtildeMatrix = MatricesMSupj[[All, SolveFrom[[1]]]][[Range[systemSize], Range[systemSize]]];
@@ -61,37 +59,35 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       homogeneousSolutions = nthOrderDifferentialEquationsSolutions[[myintind]];
 
       (* Use shared helper for Wronskian matrix computation *)
-      wronskianMatrices[{intind, myintind}] = ComputeWronskianMatrix[homogeneousSolutions];
+      wronskianMatrices[myintind] = ComputeWronskianMatrix[homogeneousSolutions];
 
       (* VOP-specific: compute inverse Wronskian determinant *)
       DiffExp`Utilities`PrintDebug["Determining 1/WronskianDet: ", myintind][3];
-      wronskianDetInverse[{intind, myintind}] = DiffExp`SeriesOps`DiffExpSeries[1/(wronskianMatrices[{intind, myintind}] // Det // DiffExp`SeriesOps`SExpand), DiffExp`State`ExpansionOrderVal];
+      wronskianDetInverse[myintind] = DiffExp`SeriesOps`DiffExpSeries[1/(wronskianMatrices[myintind] // Det // DiffExp`SeriesOps`SExpand), ctx["ExpansionOrder"]];
       DiffExp`Utilities`PrintDebug["Done determining 1/WronskianDet: ", myintind][3];
       , {myintind, SolveFrom}
     ];
 
-    BufferedData[intind] = {MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions, SolveFrom, MtildeMatrix, wronskianMatrices, wronskianDetInverse};
-
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
+    cache["VOP"] = {MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions, SolveFrom, MtildeMatrix, wronskianMatrices, wronskianDetInverse};
   ];
 
-  {MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions, SolveFrom, MtildeMatrix, wronskianMatrices, wronskianDetInverse} = BufferedData[intind];
+  {MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions, SolveFrom, MtildeMatrix, wronskianMatrices, wronskianDetInverse} = cache["VOP"];
 
   DiffExp`Utilities`PrintDebug["Determining b's.."][3];
   bSupjVecs = FoldList[DiffExp`SeriesOps`SExpand[#2 . bVec + DiffExp`SeriesOps`SD[#1, DiffExp`Symbols`x]] &, ConstantArray[0, systemSize], Delete[MatricesMSupj, -1]];
 
-  DiffExp`Utilities`PrintDebug["Setting up general solutions. ", intind][3];
+  DiffExp`Utilities`PrintDebug["Setting up general solutions. ", ctx["Label"]][3];
   fGeneral = Table[
     homogeneousSolutions = nthOrderDifferentialEquationsSolutions[[myintind]];
     numSolutions = homogeneousSolutions // Length;
     inhomogeneousTerm = nthOrderDifferentialEquations[[myintind]] . bSupjVecs[[All, myintind]][[Range@(numSolutions + 1)]];
 
     DiffExp`SeriesOps`SExpand@Sum[
-      wronskianColumn = wronskianMatrices[{intind, myintind}];
+      wronskianColumn = wronskianMatrices[myintind];
       wronskianColumn[[All, ind]] = Append[ConstantArray[0, numSolutions - 1], PlaceHolder];
 
       (homogeneousSolutions[[ind]] (Subscript[c, myintind, ind] + DiffExp`Integration`DiffExpIntegrate[
-        wronskianDetInverse[{intind, myintind}] ((wronskianColumn // Det // DiffExp`SeriesOps`SExpand) /. PlaceHolder -> inhomogeneousTerm // DiffExp`SeriesOps`SExpand) // DiffExp`SeriesOps`SExpand
+        wronskianDetInverse[myintind] ((wronskianColumn // Det // DiffExp`SeriesOps`SExpand) /. PlaceHolder -> inhomogeneousTerm // DiffExp`SeriesOps`SExpand) // DiffExp`SeriesOps`SExpand
       ]) // DiffExp`SeriesOps`SExpand) // DiffExp`SeriesOps`SExpand
 
       , {ind, homogeneousSolutions // Length}]
@@ -99,10 +95,10 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     , {myintind, SolveFrom}
   ];
 
-  DiffExp`Utilities`PrintDebug["Done. ", intind][3];
+  DiffExp`Utilities`PrintDebug["Done. ", ctx["Label"]][3];
 
   If[Length[SolveFrom] > 1,
-    VanishingTerms = DiffExp`SeriesOps`SExpand@(DiffExp`SeriesOps`SD[fGeneral, DiffExp`Symbols`x] - DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]] . fGeneral - bVec);
+    VanishingTerms = DiffExp`SeriesOps`SExpand@(DiffExp`SeriesOps`SD[fGeneral, DiffExp`Symbols`x] - ctx["AMatExpanded"] . fGeneral - bVec);
 
     IndeterminatesRemaining = currentConstants = DiffExp`Utilities`GetCases[fGeneral, Subscript[c, i_, j_]];
 
@@ -119,9 +115,9 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
           {Cmat, Cb} = {#[[2]], -#[[1]]} &@CoefficientArrays[DeleteCases[OverdeterminedEqns, True], currentConstants];
 
-          CsPartSol = LinearSolve[Cmat, Cb, ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)];
+          CsPartSol = LinearSolve[Cmat, Cb, ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], ctx["LinearSolveChopPrecision"]] == 0 &)];
 
-          CsNullVectors = Cmat // NullSpace[#, Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
+          CsNullVectors = Cmat // NullSpace[#, Tolerance -> 10^-ctx["LinearSolveChopPrecision"]] &;
           CsGeneralSol = CsPartSol + Sum[CsNullVectors[[ind]] Subscript[c, ind], {ind, Length[CsNullVectors]}] // DiffExp`SeriesOps`SExpand;
 
           constantReplacements = Thread[currentConstants -> CsGeneralSol] // DiffExp`Utilities`PChop;
@@ -135,7 +131,7 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
       If[Length[IndeterminatesRemaining] < Length[fGeneral],
         DiffExp`State`LastErrorContext = {Cmat, Cb, CsGeneralSol};
-        DiffExp`Utilities`ReportError["There was an error in obtaining the solutions for integrals ", intind, " at order ", epsord, " using the \"VOP\" strategy. Try decreasing the value of the option ChopPrecision or increasing the WorkingPrecision."];
+        DiffExp`Utilities`ReportError["There was an error in obtaining the solutions for integrals ", ctx["Label"], " at order ", epsord, " using the \"VOP\" strategy. Try decreasing the value of the option ChopPrecision or increasing the WorkingPrecision."];
       ];
 
       fGeneral = fGeneral /. constantReplacements;
@@ -148,12 +144,12 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     ,
 
     (* We can currently put fGeneral[[1]], as SolveFrom is either one element, or all elements. *)
-    DerivativeVec = Table[DiffExp`SeriesOps`SD[fGeneral[[1]], Sequence @@ DiffExp`Utilities`CA[DiffExp`Symbols`x, jind - 1]], {jind, intind // Length}] // DiffExp`SeriesOps`SExpand;
+    DerivativeVec = Table[DiffExp`SeriesOps`SD[fGeneral[[1]], Sequence @@ DiffExp`Utilities`CA[DiffExp`Symbols`x, jind - 1]], {jind, systemSize}] // DiffExp`SeriesOps`SExpand;
     (* But for boundaryDerivatives we should choose SolveFrom[[1]] *)
     boundaryDerivatives = bSupjVecs[[All, SolveFrom[[1]]]][[Range@systemSize]];
 
     Check[
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+      If[ctx["HomogeneousSolve"] === "Expand",
         MtildeInv = Inverse[MtildeMatrix, Method -> "DivisionFreeRowReduction", ZeroTest -> (Normal[#] == 0 &)];,
         MtildeInv = DiffExp`SeriesOps`DiffExpSeries[Inverse[MtildeMatrix] // Together];
       ];
@@ -169,31 +165,29 @@ SolveVOP[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
   cIndices = DiffExp`Utilities`GetCases[fGeneral, Subscript[c, i_]];
 
-  {cIndices, fGeneral, BufferedData}
+  {cIndices, fGeneral, cache}
 ];
 
 (* VOPAlt integration strategy *)
 (* Alternative variation of parameters method *)
-SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
+SolveVOPAlt[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {systemSize, MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions,
    SolveFrom, MtildeMatrix, HighestOrderDifferentialEquationPosition,
    homogeneousSolutions, fGeneral, cIndices, VanishingTerms, IndeterminatesRemaining, currentConstants,
    seriesOrderOffset, VanishingTermsCurr, OverdeterminedEqns, Cmat, Cb, CsPartSol, CsNullVectors,
    CsGeneralSol, constantReplacements, FMat, FMatInv, GMat, BMat, crossCheck, wronskianMatrices, c,
-   BufferedData = BufferedDataIn},
+   cache = cacheIn},
 
-  DiffExp`Utilities`PrintDebug["Solving by alternative strategy. ", intind][3];
+  DiffExp`Utilities`PrintDebug["Solving by alternative strategy. ", ctx["Label"]][3];
 
-  systemSize = intind // Length;
+  systemSize = ctx["SystemSize"];
 
-  If[epsord === 0 && !KeyExistsQ[BufferedData, intind],
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
-
+  If[epsord === 0 && !KeyExistsQ[cache, "FMat"],
     (* Use shared helper functions for common computations *)
-    MatricesMSupj = ComputeMatricesMSupj[intind, line];
+    MatricesMSupj = ComputeMatricesMSupj[ctx];
     nthOrderDifferentialEquations = ComputeNthOrderDiffEqns[MatricesMSupj, systemSize];
 
-    If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+    If[ctx["HomogeneousSolve"] === "Expand",
       MatricesMSupj = DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj];
     ];
 
@@ -201,7 +195,7 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     SolveFrom = Range@Length@nthOrderDifferentialEquations;
     nthOrderDifferentialEquationsSolutions = DiffExp`Frobenius`FrobeniusSolutions /@ nthOrderDifferentialEquations;
     If[systemSize == 1,
-      If[DiffExp`State`FEC["HomogeneousSolve"] === "Expand",
+      If[ctx["HomogeneousSolve"] === "Expand",
         MtildeMatrix = DiffExp`Utilities`PChop@DiffExp`SeriesOps`DiffExpSeries[MatricesMSupj[[All, SolveFrom[[1]]]][[Range[systemSize], Range[systemSize]]]];
         ,
         MtildeMatrix = MatricesMSupj[[All, SolveFrom[[1]]]][[Range[systemSize], Range[systemSize]]];
@@ -217,16 +211,11 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
     (* Use shared helper for Wronskian matrix computation *)
     Table[
       homogeneousSolutions = nthOrderDifferentialEquationsSolutions[[myintind]];
-      wronskianMatrices[{intind, myintind}] = ComputeWronskianMatrix[homogeneousSolutions];
+      wronskianMatrices[myintind] = ComputeWronskianMatrix[homogeneousSolutions];
       , {myintind, SolveFrom}
     ];
 
-    BufferedData[intind] = {MatricesMSupj, nthOrderDifferentialEquations, nthOrderDifferentialEquationsSolutions, SolveFrom, MtildeMatrix};
-
-    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
-
-
-    DiffExp`Utilities`PrintDebug["Combining homogeneous solutions. ", intind][3];
+    DiffExp`Utilities`PrintDebug["Combining homogeneous solutions. ", ctx["Label"]][3];
     fGeneral = Table[
       homogeneousSolutions = nthOrderDifferentialEquationsSolutions[[myintind]];
 
@@ -235,9 +224,9 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
       , {myintind, SolveFrom}
     ];
 
-    DiffExp`Utilities`PrintDebug["Done. ", intind][3];
+    DiffExp`Utilities`PrintDebug["Done. ", ctx["Label"]][3];
 
-    VanishingTerms = DiffExp`SeriesOps`SExpand@(DiffExp`SeriesOps`SD[fGeneral, DiffExp`Symbols`x] - DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]] . fGeneral);
+    VanishingTerms = DiffExp`SeriesOps`SExpand@(DiffExp`SeriesOps`SD[fGeneral, DiffExp`Symbols`x] - ctx["AMatExpanded"] . fGeneral);
 
     IndeterminatesRemaining = currentConstants = DiffExp`Utilities`GetCases[fGeneral, Subscript[c, i_, j_]];
 
@@ -254,9 +243,9 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
           {Cmat, Cb} = {#[[2]], -#[[1]]} &@CoefficientArrays[DeleteCases[OverdeterminedEqns, True], currentConstants];
 
-          CsPartSol = LinearSolve[Cmat, Cb, ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)];
+          CsPartSol = LinearSolve[Cmat, Cb, ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], ctx["LinearSolveChopPrecision"]] == 0 &)];
 
-          CsNullVectors = Cmat // NullSpace[#, Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
+          CsNullVectors = Cmat // NullSpace[#, Tolerance -> 10^-ctx["LinearSolveChopPrecision"]] &;
           CsGeneralSol = CsPartSol + Sum[CsNullVectors[[ind]] Subscript[c, ind], {ind, Length[CsNullVectors]}] // DiffExp`SeriesOps`SExpand;
 
           constantReplacements = Thread[currentConstants -> CsGeneralSol] // DiffExp`Utilities`PChop;
@@ -270,7 +259,7 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
       If[Length[IndeterminatesRemaining] < Length[fGeneral],
         DiffExp`State`LastErrorContext = {Cmat, Cb, CsGeneralSol, fGeneral};
-        DiffExp`Utilities`ReportError["There was an error in obtaining the solutions for integrals ", intind, " at order ", epsord, " using the \"VOP\" strategy. Try decreasing the value of the option ChopPrecision or increasing the WorkingPrecision."];
+        DiffExp`Utilities`ReportError["There was an error in obtaining the solutions for integrals ", ctx["Label"], " at order ", epsord, " using the \"VOP\" strategy. Try decreasing the value of the option ChopPrecision or increasing the WorkingPrecision."];
       ];
 
       fGeneral = fGeneral /. constantReplacements;
@@ -285,26 +274,25 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
     FMat = Table[fGeneral /. myc -> 1 /. Subscript[c, _] :> 0, {myc, cIndices}] // Transpose;
     FMatInv = DiffExp`Wronskian`MatrixLogxInverse[FMat];
-    BufferedData[intind] = {FMat, FMatInv};
-
-
+    cache["FMat"] = FMat;
+    cache["FMatInv"] = FMatInv;
   ];
 
 
-  {FMat, FMatInv} = BufferedData[intind];
+  {FMat, FMatInv} = {cache["FMat"], cache["FMatInv"]};
 
   (* Use shared helper for GMat computation *)
   DiffExp`Utilities`PrintDebug["Setting up general solution."][3];
-  {cIndices, GMat} = ComputeGMat[FMat, FMatInv, bVec, intind];
-  BMat = 1/Length@intind Table[bVec, {iind, intind // Length}] // Transpose;
+  {cIndices, GMat} = ComputeGMat[FMat, FMatInv, bVec];
+  BMat = 1/systemSize Table[bVec, {iind, systemSize}] // Transpose;
 
-  If[MemberQ[DiffExp`State`CurrCrosscheckFlags, "GeneralSolutionMatrix"] === True,
+  If[MemberQ[ctx["CrosscheckFlags"], "GeneralSolutionMatrix"] === True,
     DiffExp`Utilities`PrintDebug["Cross-checking GMat with differential equations."][1];
-    crossCheck = DiffExp`SeriesOps`SD[GMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], GMat + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder] - BMat // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
-    DiffExp`State`LastErrorContext = {FMat, GMat, FMatInv, BMat, DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]], crossCheck, MtildeMatrix, wronskianMatrices};
-    DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckPrintResultOrder // DiffExp`SeriesOps`SN][3];
+    crossCheck = DiffExp`SeriesOps`SD[GMat, DiffExp`Symbols`x] - DiffExp`SeriesOps`MatrixMultiplySExpand[ctx["AMatExpanded"], GMat + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"]] - BMat // (DiffExp`Utilities`CPChop@*DiffExp`SeriesOps`SExpand);
+    DiffExp`State`LastErrorContext = {FMat, GMat, FMatInv, BMat, ctx["AMatExpanded"], crossCheck};
+    DiffExp`Utilities`PrintDebug["Found: ", crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckPrintOrder"] // DiffExp`SeriesOps`SN][3];
     If[
-      !(SameQ @@ Append[crossCheck + O[DiffExp`Symbols`x]^DiffExp`State`ICrossCheckVerifyResultOrder // Normal // Flatten, 0])
+      !(SameQ @@ Append[crossCheck + O[DiffExp`Symbols`x]^ctx["CrossCheckVerifyOrder"] // Normal // Flatten, 0])
       ,
       DiffExp`Utilities`ReportError["Cross-check of solution matrix failed"];
     ];
@@ -312,5 +300,5 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
 
   fGeneral = Total[GMat // Transpose];
 
-  {cIndices, fGeneral, BufferedData}
+  {cIndices, fGeneral, cache}
 ];

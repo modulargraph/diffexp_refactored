@@ -135,6 +135,26 @@ cd Tests && wolframscript -file test_five_point_nonplanar.m
 cd Tests && wolframscript -file test_topiecewise.m
 ```
 
+## Running Tests in tmux
+
+For long-running tests, use the tmux session `diffexp-tests` so output can be monitored independently:
+
+```bash
+# Start (or attach to) the test session
+tmux new-session -d -s diffexp-tests 2>/dev/null || true
+
+# Run a test in the tmux session (example)
+tmux send-keys -t diffexp-tests "cd /Users/mhidding/Desktop/diffexp_refactored/Tests && export WOLFRAMSCRIPT_KERNELPATH=\"/Applications/Wolfram Engine.app/Contents/Resources/Wolfram Player.app/Contents/MacOS/WolframKernel\" && wolframscript -file test_recurrence_speedup.m 2>&1 | tee /tmp/diffexp_test_output.log" Enter
+
+# Check progress manually
+tmux attach -t diffexp-tests        # attach to watch live
+# or
+wc -l /tmp/diffexp_test_output.log  # check output size before reading
+tail -50 /tmp/diffexp_test_output.log  # see recent output
+```
+
+**Important:** Before reading test output files, always check their size first with `wc -l` or `ls -lh` to avoid loading excessively large output into context.
+
 ## Current Test Results
 - test_package_loading.m: **18/18 PASS**
 - test_symbols_namespacing.m: **ALL PASS**

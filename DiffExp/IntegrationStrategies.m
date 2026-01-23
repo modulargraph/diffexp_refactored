@@ -19,6 +19,8 @@ SolveSimple::usage = "SolveSimple[intind, bVec, line, epsord] solves a simple in
 SolveDefault::usage = "SolveDefault[intind, bVec, line, epsord, BufferedData] solves using the default Frobenius/Wronskian strategy.";
 SolveVOP::usage = "SolveVOP[intind, bVec, line, epsord, BufferedData] solves using the variation of parameters strategy.";
 SolveVOPAlt::usage = "SolveVOPAlt[intind, bVec, line, epsord, BufferedData] solves using the alternative variation of parameters strategy.";
+SolveRationalRecurrence::usage = "SolveRationalRecurrence[intind, bVec, line, epsord, BufferedData] solves using the rational recurrence method for non-singular points with rational matrices.";
+RationalRecurrenceApplicableQ::usage = "RationalRecurrenceApplicableQ[intind, line] checks if the rational recurrence method is applicable.";
 DispatchStrategy::usage = "DispatchStrategy[intind, bVec, line, epsord, BufferedData] dispatches to the appropriate integration strategy based on configuration.";
 
 Begin["`Private`"];
@@ -668,15 +670,284 @@ SolveVOPAlt[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
   {cIndices, fGeneral, BufferedData}
 ];
 
+(* ============================================================================ *)
+(* RATIONAL RECURRENCE METHOD                                                  *)
+(* ============================================================================ *)
+
+(* Check if the rational recurrence method is applicable:
+   The expansion point must be non-singular (series starts at x^0).
+   Checks the expanded matrix series for the given integral block. *)
+RationalRecurrenceApplicableQ[intind_, line_] := Quiet[Check[
+  Module[{AMat, atZero},
+
+    (* Check that factored matrices exist *)
+    If[!KeyExistsQ[DiffExp`State`DEqnMatricesFactored, line],
+      Return[False]
+    ];
+
+    (* Non-singular iff the factored matrix is finite at x=0 *)
+    AMat = DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]];
+    atZero = AMat /. DiffExp`Symbols`x -> 0;
+
+    TrueQ[And @@ (NumericQ /@ Flatten[atZero])]
+  ],
+  False (* Return False on any error *)
+]];
+
+(* Try to rationalize the factored A matrix and extract polynomial coefficients.
+   Returns {True, dCoeffs, aCoeffs, dD, dA, d0, d0Inv} on success,
+   or {False} if rationalization is too expensive or not possible. *)
+TryRationalizeMatrix[intind_, line_] := Module[
+  {AMat, AMatTogether, flatEntries, denoms, Dpoly, NAMat,
+   dCoeffs, aCoeffs, dD, dA, d0, d0Inv, maxOrd, result},
+
+  maxOrd = DiffExp`State`ExpansionOrderVal;
+
+  (* Only attempt rationalization if factored matrices exist *)
+  If[!KeyExistsQ[DiffExp`State`DEqnMatricesFactored, line],
+    Return[{False}]
+  ];
+
+  (* Get the factored A matrix *)
+  AMat = DiffExp`State`DEqnMatricesFactored[line][0][[intind, intind]];
+
+  (* Try to put in Together form - use TimeConstrained to avoid hanging *)
+  result = TimeConstrained[
+    Module[{at, fe, dn, dp},
+      at = Map[Together, AMat, {2}];
+      fe = Flatten[at];
+
+      (* Check rationality *)
+      If[!And @@ (PolynomialQ[Numerator[#], DiffExp`Symbols`x] &&
+                  PolynomialQ[Denominator[#], DiffExp`Symbols`x] & /@ fe),
+        Return[{False}]
+      ];
+
+      (* Compute common denominator *)
+      dn = DeleteDuplicates[Denominator /@ fe];
+      dn = DeleteCases[dn, a_ /; FreeQ[a, DiffExp`Symbols`x]];
+      If[dn === {},
+        dp = 1;,
+        dp = PolynomialLCM @@ dn;
+      ];
+
+      (* Check non-singularity *)
+      If[(dp /. DiffExp`Symbols`x -> 0) === 0, Return[{False}]];
+
+      (* Check that polynomial degree is beneficial: dA < maxOrd/2 *)
+      NAMat = Expand[dp * at];
+      dA = Max[0, Max[Exponent[#, DiffExp`Symbols`x] & /@ Flatten[NAMat]]];
+      If[dA > maxOrd/2, Return[{False}]]; (* Not beneficial over direct series *)
+
+      {True, at, dp, NAMat, dA}
+    ],
+    5.0, (* 5 second timeout *)
+    {False}
+  ];
+
+  If[!result[[1]], Return[{False}]];
+
+  {AMatTogether, Dpoly, NAMat, dA} = result[[{2, 3, 4, 5}]];
+
+  (* Extract polynomial coefficients *)
+  dD = Exponent[Dpoly, DiffExp`Symbols`x];
+  dCoeffs = Table[
+    N[Coefficient[Dpoly, DiffExp`Symbols`x, i], DiffExp`State`FEWorkingPrecision],
+    {i, 0, dD}
+  ];
+
+  aCoeffs = Table[
+    Map[N[Coefficient[#, DiffExp`Symbols`x, j], DiffExp`State`FEWorkingPrecision] &, NAMat, {2}],
+    {j, 0, dA}
+  ];
+
+  d0 = dCoeffs[[1]];
+  d0Inv = 1/d0;
+
+  {True, dCoeffs, aCoeffs, dD, dA, d0, d0Inv}
+];
+
+(* Extract series coefficients of the A matrix from the expanded form.
+   Returns {aCoeffs, dA} where dA = maxOrd (all orders used). *)
+ExtractSeriesCoefficients[intind_, line_] := Module[
+  {AMatExpanded, maxOrd, aCoeffs, systemSize},
+
+  systemSize = Length[intind];
+  maxOrd = DiffExp`State`ExpansionOrderVal;
+  AMatExpanded = DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]];
+
+  (* Extract the matrix coefficient at each order from the SeriesData *)
+  aCoeffs = Table[
+    Table[
+      SeriesCoefficient[AMatExpanded[[i, k]], {DiffExp`Symbols`x, 0, j}],
+      {i, systemSize}, {k, systemSize}
+    ],
+    {j, 0, maxOrd - 1}
+  ];
+
+  {aCoeffs, maxOrd - 1}
+];
+
+(* Core recurrence computation: computes the fundamental matrix (homogeneous solutions)
+   and stores preprocessed data in BufferedData. *)
+ComputeFundamentalMatrix[intind_, line_, aCoeffs_, dCoeffs_, dD_, dA_, d0Inv_, BufferedData_] := Module[
+  {systemSize, maxOrd, fCoeffs, FMat},
+
+  systemSize = Length[intind];
+  maxOrd = DiffExp`State`ExpansionOrderVal;
+
+  FMat = Table[
+    fCoeffs = ConstantArray[
+      ConstantArray[N[0, DiffExp`State`FEWorkingPrecision], systemSize],
+      maxOrd + 1
+    ];
+    fCoeffs[[1]] = N[UnitVector[systemSize, col], DiffExp`State`FEWorkingPrecision];
+
+    Do[
+      fCoeffs[[m + 2]] = d0Inv/(m + 1) * (
+        Sum[aCoeffs[[j + 1]] . fCoeffs[[m - j + 1]], {j, 0, Min[m, dA]}] -
+        If[dD >= 1,
+          Sum[dCoeffs[[i + 1]] (m - i + 1) fCoeffs[[m - i + 2]], {i, 1, Min[m, dD]}],
+          0
+        ]
+      );
+      , {m, 0, maxOrd - 1}
+    ];
+
+    Table[
+      SeriesData[DiffExp`Symbols`x, 0, fCoeffs[[All, k]], 0, maxOrd + 1, 1],
+      {k, systemSize}
+    ]
+    , {col, systemSize}
+  ] // Transpose;
+
+  DiffExp`Utilities`PChop[FMat]
+];
+
+(* Rational recurrence solver for f'(x) = A(x)f(x) + B(x) at non-singular points.
+   Two modes:
+   1. Denominator clearing: if A(x) is cheaply rationalizable, clears denominators
+      to get D(x)f' = N_A(x)f + N_B(x). Recurrence cost is O(N*dA) per solution.
+   2. Direct series: uses the expanded series coefficients A_j directly.
+      Recurrence cost is O(N^2) per solution but avoids rationalization overhead.
+   Both modes bypass the Frobenius/Wronskian machinery. *)
+SolveRationalRecurrence[intind_, bVec_, line_, epsord_, BufferedDataIn_] := Module[
+  {systemSize, maxOrd, fCoeffs, bSeriesCoeffs, bCoeffAtN, nbCoeff,
+   FMat, fParticular, fGeneral, cIndices, c,
+   dCoeffs, aCoeffs, dD, dA, d0, d0Inv, rationalResult,
+   BufferedData = BufferedDataIn},
+
+  systemSize = Length[intind];
+  maxOrd = DiffExp`State`ExpansionOrderVal;
+
+  If[epsord === 0 && !KeyExistsQ[BufferedData, {"RR", intind}],
+    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[];
+
+    (* Try the denominator-clearing approach first *)
+    rationalResult = TryRationalizeMatrix[intind, line];
+
+    If[rationalResult[[1]],
+      (* Denominator-clearing mode: polynomial recurrence *)
+      {dCoeffs, aCoeffs, dD, dA, d0, d0Inv} = rationalResult[[{2, 3, 4, 5, 6, 7}]];
+      DiffExp`Utilities`PrintInfo["Using rational recurrence (poly degree ", dA, ") for integrals ", intind, "."][3];
+      ,
+      (* Direct series mode: use expanded series coefficients *)
+      {aCoeffs, dA} = ExtractSeriesCoefficients[intind, line];
+      dD = 0;
+      dCoeffs = {N[1, DiffExp`State`FEWorkingPrecision]};
+      d0Inv = N[1, DiffExp`State`FEWorkingPrecision];
+      DiffExp`Utilities`PrintInfo["Using series recurrence for integrals ", intind, "."][3];
+    ];
+
+    (* Compute fundamental matrix *)
+    FMat = ComputeFundamentalMatrix[intind, line, aCoeffs, dCoeffs, dD, dA, d0Inv, BufferedData];
+
+    BufferedData[{"RR", intind}] = {FMat, dCoeffs, aCoeffs, dD, dA, d0Inv};
+
+    DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind] = AbsoluteTime[] - DiffExp`State`BenchmarkData["Segments"][line // N]["HomogeneousSolveAllPreprocessing"]["Integrals"][intind];
+  ];
+
+  {FMat, dCoeffs, aCoeffs, dD, dA, d0Inv} = BufferedData[{"RR", intind}];
+
+  (* Compute particular solution using bVec *)
+  If[DiffExp`Utilities`PChop[bVec] === ConstantArray[0, systemSize],
+    fParticular = ConstantArray[
+      SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1],
+      systemSize
+    ];
+    ,
+    (* Extract series coefficients from bVec *)
+    bSeriesCoeffs = Table[
+      bCoeffAtN = SeriesCoefficient[bVec[[k]], {DiffExp`Symbols`x, 0, n}];
+      If[NumericQ[bCoeffAtN], bCoeffAtN, DiffExp`Utilities`PChop[bCoeffAtN]],
+      {n, 0, maxOrd - 1}, {k, systemSize}
+    ];
+
+    (* Run recurrence with f_0 = 0 for particular solution *)
+    fCoeffs = ConstantArray[
+      ConstantArray[N[0, DiffExp`State`FEWorkingPrecision], systemSize],
+      maxOrd + 1
+    ];
+
+    Do[
+      (* Compute N_B coefficient at order m: nb_m = sum_{i=0}^{min(m,dD)} d_i * B_{m-i} *)
+      nbCoeff = Sum[
+        If[m - i <= maxOrd - 1,
+          dCoeffs[[i + 1]] * bSeriesCoeffs[[m - i + 1]],
+          ConstantArray[0, systemSize]
+        ],
+        {i, 0, Min[m, dD]}
+      ];
+
+      (* f_{m+1} = d0Inv/(m+1) * [nb_m + sum_j a_j.f_{m-j} - sum_{i>=1} d_i*(m-i+1)*f_{m-i+1}] *)
+      fCoeffs[[m + 2]] = d0Inv/(m + 1) * (
+        nbCoeff +
+        Sum[aCoeffs[[j + 1]] . fCoeffs[[m - j + 1]], {j, 0, Min[m, dA]}] -
+        If[dD >= 1,
+          Sum[dCoeffs[[i + 1]] (m - i + 1) fCoeffs[[m - i + 2]], {i, 1, Min[m, dD]}],
+          0
+        ]
+      );
+      , {m, 0, maxOrd - 1}
+    ];
+
+    fParticular = Table[
+      SeriesData[DiffExp`Symbols`x, 0,
+        DiffExp`Utilities`PChop[fCoeffs[[All, k]]],
+        0, maxOrd + 1, 1],
+      {k, systemSize}
+    ];
+  ];
+
+  (* General solution: f = particular + sum_i c_i * F_i *)
+  cIndices = Table[Subscript[c, i], {i, systemSize}];
+  fGeneral = fParticular + Sum[cIndices[[i]] * FMat[[All, i]], {i, systemSize}];
+  fGeneral = DiffExp`SeriesOps`SExpand[fGeneral];
+
+  {cIndices, fGeneral, BufferedData}
+];
+
 (* Dispatch to appropriate strategy based on configuration and problem type *)
 DispatchStrategy[intind_, bVec_, line_, epsord_, BufferedData_] := Module[
-  {cIndices, fGeneral, result},
+  {cIndices, fGeneral, result, useRationalRecurrence},
+
+  (* Check if rational recurrence should be used *)
+  useRationalRecurrence = (
+    DiffExp`State`FEC["UseRationalRecurrence"] === True &&
+    RationalRecurrenceApplicableQ[intind, line] &&
+    (* bVec must not contain Logx (non-singular point solutions are Logx-free) *)
+    !DiffExp`Utilities`DependsQ[bVec, DiffExp`Symbols`Logx]
+  );
 
   Which[
     (* Simple case: single integral without homogeneous components *)
     Length[intind] === 1 && DiffExp`Utilities`PChop[DiffExp`State`DEqnMatricesExpanded[line][0][[intind, intind]]] == {{0}},
     {cIndices, fGeneral} = SolveSimple[intind, bVec, line, epsord];
     {cIndices, fGeneral, BufferedData}
+
+    (* Rational recurrence method for non-singular points with rational matrices *)
+    , useRationalRecurrence,
+    SolveRationalRecurrence[intind, bVec, line, epsord, BufferedData]
 
     (* Default strategy *)
     , DiffExp`State`FEC[IntegrationStrategy] === "Default",

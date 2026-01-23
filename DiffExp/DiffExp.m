@@ -84,7 +84,7 @@ CurrentConfiguration[] := KeySelect[DiffExp`State`DiffExpConfiguration, MemberQ[
   DivisionOrder, EpsilonOrder, ExpansionOrder,
   LineParameter, MatrixDirectory, RadiusOfConvergence,
   SegmentationStrategy, IntegrationStrategy, UseMobius,
-  UsePade, System`Variables, Verbosity, System`WorkingPrecision
+  UsePade, "UseRationalRecurrence", System`Variables, Verbosity, System`WorkingPrecision
 }, #] &];
 
 (* LoadConfiguration *)

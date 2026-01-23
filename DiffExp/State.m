@@ -127,7 +127,7 @@ DefaultConfiguration = {
   "SaveExpansionsCompress" -> False,
   "HomogeneousSolve" -> "Expand",
   "Parallel" -> False,
-  "UseRationalRecurrence" -> False,
+  UseRationalRecurrence -> False,
   SegmentationStrategy -> "Predivision",
   IntegrationStrategy -> "Default",
   UseMobius -> False,

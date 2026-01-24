@@ -3,7 +3,8 @@
 
 (* Dispatch to appropriate strategy based on configuration and problem type *)
 DispatchStrategy[ctx_Association, bVec_, epsord_, cache_Association] := Module[
-  {cIndices, fGeneral, result, useRationalRecurrence, useSingularRecurrence},
+  {cIndices, fGeneral, result,
+   useRationalRecurrence, useSingularRecurrence, useGeneralSingularRecurrence},
 
   (* Check if rational recurrence should be used (non-singular points) *)
   useRationalRecurrence = (
@@ -22,6 +23,15 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cache_Association] := Module[
     !DiffExp`Utilities`DependsQ[bVec, DiffExp`Symbols`Logx]
   );
 
+  (* Check if general singular recurrence should be used (simple pole, any eigenvalues) *)
+  (* This handles resonant eigenvalues, Jordan blocks, and Logx in bVec *)
+  useGeneralSingularRecurrence = (
+    !useRationalRecurrence &&
+    !useSingularRecurrence &&
+    ctx["UseRationalRecurrence"] === True &&
+    GeneralSingularRecurrenceApplicableQ[ctx]
+  );
+
   Which[
     (* Simple case: single integral without homogeneous components *)
     ctx["SystemSize"] === 1 && DiffExp`Utilities`PChop[ctx["AMatExpanded"]] == {{0}},
@@ -32,9 +42,13 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cache_Association] := Module[
     , useRationalRecurrence,
     SolveRationalRecurrence[ctx, bVec, epsord, cache]
 
-    (* Singular recurrence method for regular singular points *)
+    (* Singular recurrence method for non-resonant regular singular points *)
     , useSingularRecurrence,
     SolveSingularRecurrence[ctx, bVec, epsord, cache]
+
+    (* General singular recurrence for resonant/non-diagonalizable regular singular points *)
+    , useGeneralSingularRecurrence,
+    SolveGeneralSingularRecurrence[ctx, bVec, epsord, cache]
 
     (* Default strategy *)
     , ctx["IntegrationStrategy"] === "Default",

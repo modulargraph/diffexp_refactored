@@ -24,6 +24,8 @@ RationalRecurrenceApplicableQ::usage = "RationalRecurrenceApplicableQ[ctx] check
 SolveSingularRecurrence::usage = "SolveSingularRecurrence[ctx, bVec, epsord, cache] solves using the Frobenius recurrence method for regular singular points (simple pole) with non-resonant, diagonalizable residue. Returns {cIndices, fGeneral, cache}.";
 SingularRecurrenceApplicableQ::usage = "SingularRecurrenceApplicableQ[ctx] checks if the singular recurrence method is applicable (simple pole, diagonalizable, non-resonant) for the given SegmentContext.";
 DispatchStrategy::usage = "DispatchStrategy[ctx, bVec, epsord, cache] dispatches to the appropriate integration strategy based on the SegmentContext configuration. Returns {cIndices, fGeneral, cache}.";
+SolveGeneralSingularRecurrence::usage = "SolveGeneralSingularRecurrence[ctx, bVec, epsord, cache] solves using the general singular recurrence method for regular singular points with resonant or non-diagonalizable residue. Returns {cIndices, fGeneral, cache}.";
+GeneralSingularRecurrenceApplicableQ::usage = "GeneralSingularRecurrenceApplicableQ[ctx] checks if the general singular recurrence method is applicable (simple pole, any eigenvalue structure).";
 
 Begin["`Private`"];
 
@@ -31,6 +33,7 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "IntegrationStrategies", "Helpe
 Get[FileNameJoin[{DirectoryName[$InputFileName], "IntegrationStrategies", "Default.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "IntegrationStrategies", "VOP.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "IntegrationStrategies", "Recurrence.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "IntegrationStrategies", "ResonantRecurrence.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "IntegrationStrategies", "Dispatch.m"}]];
 
 End[];

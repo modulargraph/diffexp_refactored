@@ -694,20 +694,13 @@ ComputeUnifiedParticular[bVec_, resInfo_Association,
    M_0 is the residue, M_1 = A_0, M_2 = A_1, etc.
    Returns {mCoeffs, numMCoeffs} where mCoeffs[[i+1]] = M_i. *)
 ExtractMCoefficients[ctx_Association] := Module[
-  {AMatExpanded, systemSize, maxOrd, mCoeffs},
+  {maxOrd, mCoeffs},
 
-  systemSize = ctx["SystemSize"];
   maxOrd = ctx["ExpansionOrder"];
-  AMatExpanded = ctx["AMatExpanded"];
 
-  (* M_i = coefficient of x^i in x*A(x) = coefficient of x^{i-1} in A(x) *)
-  mCoeffs = Table[
-    Table[
-      SeriesCoefficient[AMatExpanded[[row, col]], {DiffExp`Symbols`x, 0, i - 1}],
-      {row, systemSize}, {col, systemSize}
-    ],
-    {i, 0, maxOrd}
-  ];
+  (* M_i = coefficient of x^i in x*A(x) = coefficient of x^{i-1} in A(x)
+     So we extract A_{-1}, A_0, A_1, ..., A_{maxOrd-1} *)
+  mCoeffs = ExtractAMatCoefficients[ctx, -1, maxOrd - 1];
 
   (* Convert to working precision *)
   mCoeffs = N[mCoeffs, ctx["WorkingPrecision"]];

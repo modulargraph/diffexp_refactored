@@ -2,6 +2,166 @@
 (* Rational recurrence and singular recurrence strategies *)
 
 (* ============================================================================ *)
+(* SHARED HELPERS                                                              *)
+(* ============================================================================ *)
+
+(* Core rationalization of the factored A matrix.
+   Computes the common denominator and numerator matrix.
+   Returns {True, AMatTogether, Dpoly, NAMat, maxPolyDeg} on success,
+   or {False} if rationalization is not possible or not beneficial.
+   The caller specifies whether a pole (x factor) is expected via requirePole. *)
+RationalizeAMatrixCore[ctx_Association, requirePole:(True|False)] := Module[
+  {AMat, maxOrd, result},
+
+  maxOrd = ctx["ExpansionOrder"];
+
+  (* Only attempt if factored matrix is available *)
+  If[MissingQ[ctx["AMatFactored"]],
+    Return[{False}]
+  ];
+
+  AMat = ctx["AMatFactored"];
+
+  result = TimeConstrained[
+    Module[{at, fe, dn, dp, naMat, degA},
+      at = Map[Together, AMat, {2}];
+      fe = Flatten[at];
+
+      (* Check all entries are rational in x *)
+      If[!And @@ (PolynomialQ[Numerator[#], DiffExp`Symbols`x] &&
+                  PolynomialQ[Denominator[#], DiffExp`Symbols`x] & /@ fe),
+        Return[{False}]
+      ];
+
+      (* Compute common denominator *)
+      dn = DeleteDuplicates[Denominator /@ fe];
+      dn = DeleteCases[dn, a_ /; FreeQ[a, DiffExp`Symbols`x]];
+
+      If[requirePole,
+        (* Singular case: denominator must have x-dependence *)
+        If[dn === {}, Return[{False}]];
+        dp = PolynomialLCM @@ dn;
+        (* Must have x as a factor (pole) *)
+        If[Exponent[dp, DiffExp`Symbols`x, Min] < 1, Return[{False}]];
+        (* Factor out x: use the full x*D(x) for the numerator *)
+        naMat = Expand[dp * at];
+        (* Now dp becomes D(x) without the x factor *)
+        dp = Cancel[dp / DiffExp`Symbols`x];
+        ,
+        (* Non-singular case *)
+        If[dn === {},
+          dp = 1;,
+          dp = PolynomialLCM @@ dn;
+        ];
+        (* D(0) must be nonzero *)
+        If[(dp /. DiffExp`Symbols`x -> 0) === 0, Return[{False}]];
+        naMat = Expand[dp * at];
+      ];
+
+      (* For the singular case, check D(0) != 0 after factoring out x *)
+      If[requirePole,
+        If[(dp /. DiffExp`Symbols`x -> 0) === 0, Return[{False}]];
+      ];
+
+      (* Check that polynomial degree is beneficial: degA < maxOrd/2 *)
+      degA = Max[0, Max[Exponent[#, DiffExp`Symbols`x] & /@ Flatten[naMat]]];
+      If[degA > maxOrd/2, Return[{False}]];
+
+      {True, at, dp, naMat, degA}
+    ],
+    5.0, (* 5 second timeout *)
+    {False}
+  ];
+
+  result
+];
+
+(* Extract matrix coefficients from the expanded A matrix at specified order range.
+   Returns a list of matrices: result[[j+1]] = coefficient of x^(minOrder+j) in AMatExpanded.
+   For non-singular: minOrder=0, maxOrder=maxOrd-1 gives A_0, A_1, ..., A_{maxOrd-1}
+   For singular (M coefficients): minOrder=-1, maxOrder=maxOrd-1 gives A_{-1}, A_0, ..., A_{maxOrd-1} *)
+ExtractAMatCoefficients[ctx_Association, minOrder_Integer, maxOrder_Integer] := Module[
+  {AMatExpanded, systemSize, coeffs},
+
+  systemSize = ctx["SystemSize"];
+  AMatExpanded = ctx["AMatExpanded"];
+
+  coeffs = Table[
+    Table[
+      SeriesCoefficient[AMatExpanded[[i, k]], {DiffExp`Symbols`x, 0, j}],
+      {i, systemSize}, {k, systemSize}
+    ],
+    {j, minOrder, maxOrder}
+  ];
+
+  coeffs
+];
+
+(* Prepare eigenvalue data for the singular recurrence method.
+   Combines the applicability check with eigenvalue computation.
+   Returns {eigenvalues, P, PInv} on success, or $Failed if not applicable. *)
+PrepareSingularRecurrence[ctx_Association] := Quiet[Check[
+  Module[{AMatExpanded, minOrders, minOrder, residueMat, systemSize,
+          eigenvalues, eigenvectors, diffs, P, PInv},
+
+    systemSize = ctx["SystemSize"];
+    AMatExpanded = ctx["AMatExpanded"];
+
+    (* Determine minimum order of the matrix entries *)
+    minOrders = Flatten[Table[
+      If[Head[AMatExpanded[[i, j]]] === SeriesData,
+        AMatExpanded[[i, j]][[4]] / AMatExpanded[[i, j]][[6]],
+        0 (* constant entries have order 0 *)
+      ],
+      {i, systemSize}, {j, systemSize}
+    ]];
+    minOrder = Min[minOrders];
+
+    (* Must be exactly -1 for a simple pole *)
+    If[minOrder =!= -1, Return[$Failed]];
+
+    (* Extract residue matrix A_{-1} *)
+    residueMat = Table[
+      SeriesCoefficient[AMatExpanded[[i, j]], {DiffExp`Symbols`x, 0, -1}],
+      {i, systemSize}, {j, systemSize}
+    ];
+
+    (* Residue must not be identically zero *)
+    If[DiffExp`Utilities`PChop[residueMat] === ConstantArray[0, {systemSize, systemSize}],
+      Return[$Failed]
+    ];
+
+    (* Compute eigenvalues *)
+    eigenvalues = Eigenvalues[N[residueMat, ctx["WorkingPrecision"]]];
+    eigenvalues = Rationalize[eigenvalues, 10^(-ctx["ChopPrecision"]/2)];
+
+    (* Check diagonalizability: rank of eigenvector matrix must equal system size *)
+    eigenvectors = Eigenvectors[N[residueMat, ctx["WorkingPrecision"]]];
+    If[MatrixRank[eigenvectors, Tolerance -> 10^(-ctx["ChopPrecision"]/2)] < systemSize,
+      Return[$Failed]
+    ];
+
+    (* Check non-resonance: no difference lambda_j - lambda_i is a positive integer *)
+    diffs = Flatten[Table[
+      eigenvalues[[j]] - eigenvalues[[i]],
+      {i, systemSize}, {j, systemSize}
+    ]];
+    If[AnyTrue[diffs, (IntegerQ[#] && # > 0) &],
+      Return[$Failed]
+    ];
+
+    (* Diagonalize: P = eigenvectors as columns *)
+    P = Transpose[eigenvectors];
+    PInv = Inverse[P];
+    P = N[P, ctx["WorkingPrecision"]];
+    PInv = N[PInv, ctx["WorkingPrecision"]];
+
+    {eigenvalues, P, PInv}
+  ],
+  $Failed (* Return $Failed on any error *)
+]];
+
+(* ============================================================================ *)
 (* RATIONAL RECURRENCE METHOD                                                  *)
 (* ============================================================================ *)
 
@@ -25,60 +185,21 @@ RationalRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
   False (* Return False on any error *)
 ]];
 
+(* SingularRecurrenceApplicableQ is now a thin wrapper around PrepareSingularRecurrence.
+   Returns True if the singular recurrence method is applicable. *)
+SingularRecurrenceApplicableQ[ctx_Association] :=
+  PrepareSingularRecurrence[ctx] =!= $Failed;
+
 (* Try to rationalize the factored A matrix and extract polynomial coefficients.
    Returns {True, dCoeffs, aCoeffs, dD, dA, d0, d0Inv} on success,
    or {False} if rationalization is too expensive or not possible. *)
 TryRationalizeMatrix[ctx_Association] := Module[
-  {AMat, AMatTogether, flatEntries, denoms, Dpoly, NAMat,
-   dCoeffs, aCoeffs, dD, dA, d0, d0Inv, maxOrd, result},
+  {result, Dpoly, NAMat, dA, dD, dCoeffs, aCoeffs, d0, d0Inv},
 
-  maxOrd = ctx["ExpansionOrder"];
-
-  (* Only attempt rationalization if factored matrix is available *)
-  If[MissingQ[ctx["AMatFactored"]],
-    Return[{False}]
-  ];
-
-  (* Get the factored A matrix *)
-  AMat = ctx["AMatFactored"];
-
-  (* Try to put in Together form - use TimeConstrained to avoid hanging *)
-  result = TimeConstrained[
-    Module[{at, fe, dn, dp},
-      at = Map[Together, AMat, {2}];
-      fe = Flatten[at];
-
-      (* Check rationality *)
-      If[!And @@ (PolynomialQ[Numerator[#], DiffExp`Symbols`x] &&
-                  PolynomialQ[Denominator[#], DiffExp`Symbols`x] & /@ fe),
-        Return[{False}]
-      ];
-
-      (* Compute common denominator *)
-      dn = DeleteDuplicates[Denominator /@ fe];
-      dn = DeleteCases[dn, a_ /; FreeQ[a, DiffExp`Symbols`x]];
-      If[dn === {},
-        dp = 1;,
-        dp = PolynomialLCM @@ dn;
-      ];
-
-      (* Check non-singularity *)
-      If[(dp /. DiffExp`Symbols`x -> 0) === 0, Return[{False}]];
-
-      (* Check that polynomial degree is beneficial: dA < maxOrd/2 *)
-      NAMat = Expand[dp * at];
-      dA = Max[0, Max[Exponent[#, DiffExp`Symbols`x] & /@ Flatten[NAMat]]];
-      If[dA > maxOrd/2, Return[{False}]]; (* Not beneficial over direct series *)
-
-      {True, at, dp, NAMat, dA}
-    ],
-    5.0, (* 5 second timeout *)
-    {False}
-  ];
-
+  result = RationalizeAMatrixCore[ctx, False];
   If[!result[[1]], Return[{False}]];
 
-  {AMatTogether, Dpoly, NAMat, dA} = result[[{2, 3, 4, 5}]];
+  {Dpoly, NAMat, dA} = result[[{3, 4, 5}]];
 
   (* Extract polynomial coefficients *)
   dD = Exponent[Dpoly, DiffExp`Symbols`x];
@@ -99,23 +220,10 @@ TryRationalizeMatrix[ctx_Association] := Module[
 ];
 
 (* Extract series coefficients of the A matrix from the expanded form.
-   Returns {aCoeffs, dA} where dA = maxOrd (all orders used). *)
-ExtractSeriesCoefficients[ctx_Association] := Module[
-  {AMatExpanded, maxOrd, aCoeffs, systemSize},
-
-  systemSize = ctx["SystemSize"];
+   Returns {aCoeffs, dA} where dA = maxOrd-1 (all orders used). *)
+ExtractSeriesCoefficients[ctx_Association] := Module[{maxOrd, aCoeffs},
   maxOrd = ctx["ExpansionOrder"];
-  AMatExpanded = ctx["AMatExpanded"];
-
-  (* Extract the matrix coefficient at each order from the SeriesData *)
-  aCoeffs = Table[
-    Table[
-      SeriesCoefficient[AMatExpanded[[i, k]], {DiffExp`Symbols`x, 0, j}],
-      {i, systemSize}, {k, systemSize}
-    ],
-    {j, 0, maxOrd - 1}
-  ];
-
+  aCoeffs = ExtractAMatCoefficients[ctx, 0, maxOrd - 1];
   {aCoeffs, maxOrd - 1}
 ];
 
@@ -259,157 +367,19 @@ SolveRationalRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] :=
 (* Requires: diagonalizable A_{-1}, non-resonant eigenvalues                  *)
 (* ============================================================================ *)
 
-(* Check if the singular recurrence method is applicable:
-   1. The expanded matrix has minimum order -1 (simple pole at x=0)
-   2. The residue matrix A_{-1} is diagonalizable
-   3. No two eigenvalues differ by a positive integer (non-resonance) *)
-SingularRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
-  Module[{AMatExpanded, minOrders, minOrder, residueMat, systemSize,
-          eigenvalues, eigenvectors, diffs},
-
-    systemSize = ctx["SystemSize"];
-    AMatExpanded = ctx["AMatExpanded"];
-
-    (* Determine minimum order of the matrix entries *)
-    minOrders = Flatten[Table[
-      If[Head[AMatExpanded[[i, j]]] === SeriesData,
-        AMatExpanded[[i, j]][[4]] / AMatExpanded[[i, j]][[6]],
-        0 (* constant entries have order 0 *)
-      ],
-      {i, systemSize}, {j, systemSize}
-    ]];
-    minOrder = Min[minOrders];
-
-    (* Must be exactly -1 for a simple pole *)
-    If[minOrder =!= -1, Return[False]];
-
-    (* Extract residue matrix A_{-1} *)
-    residueMat = Table[
-      SeriesCoefficient[AMatExpanded[[i, j]], {DiffExp`Symbols`x, 0, -1}],
-      {i, systemSize}, {j, systemSize}
-    ];
-
-    (* Residue must not be identically zero *)
-    If[DiffExp`Utilities`PChop[residueMat] === ConstantArray[0, {systemSize, systemSize}],
-      Return[False]
-    ];
-
-    (* Compute eigenvalues *)
-    eigenvalues = Eigenvalues[N[residueMat, ctx["WorkingPrecision"]]];
-    eigenvalues = Rationalize[eigenvalues, 10^(-ctx["ChopPrecision"]/2)];
-
-    (* Check diagonalizability: rank of eigenvector matrix must equal system size *)
-    eigenvectors = Eigenvectors[N[residueMat, ctx["WorkingPrecision"]]];
-    If[MatrixRank[eigenvectors, Tolerance -> 10^(-ctx["ChopPrecision"]/2)] < systemSize,
-      Return[False]
-    ];
-
-    (* Check non-resonance: no difference lambda_j - lambda_i is a positive integer *)
-    diffs = Flatten[Table[
-      eigenvalues[[j]] - eigenvalues[[i]],
-      {i, systemSize}, {j, systemSize}
-    ]];
-    If[AnyTrue[diffs, (IntegerQ[#] && # > 0) &],
-      Return[False]
-    ];
-
-    True
-  ],
-  False (* Return False on any error *)
-]];
-
-(* Diagonalize the residue matrix.
-   Returns {eigenvalues, P, PInv} where P is the matrix of eigenvectors (columns)
-   and PInv = P^{-1}. Eigenvalues are rationalized for exact arithmetic. *)
-DiagonalizeResidue[residueMat_, systemSize_, ctx_Association] := Module[
-  {eigenvalues, eigenvectors, P, PInv, sorted, perm},
-
-  {eigenvalues, eigenvectors} = Eigensystem[N[residueMat, ctx["WorkingPrecision"]]];
-
-  (* Rationalize eigenvalues for exact recurrence denominators *)
-  eigenvalues = Rationalize[eigenvalues, 10^(-ctx["ChopPrecision"]/2)];
-
-  (* P = matrix of eigenvectors as columns, so P = Transpose[eigenvectors] *)
-  P = Transpose[eigenvectors];
-  PInv = Inverse[P];
-
-  (* Normalize to working precision *)
-  P = N[P, ctx["WorkingPrecision"]];
-  PInv = N[PInv, ctx["WorkingPrecision"]];
-
-  {eigenvalues, P, PInv}
-];
-
 (* Try to rationalize the singular matrix A(x) = R(x)/(x*D(x))
    and extract polynomial coefficients in the eigenbasis.
    Returns {True, rHatCoeffs, dCoeffs, dR, dD, d0} on success, or {False} on failure. *)
 TryRationalizeSingularMatrix[ctx_Association, PInv_, P_] := Module[
-  {AMat, systemSize, result, AMatTogether, flatEntries, denoms, Dpoly, xDpoly,
-   NAMat, dD, dR, dCoeffs, rCoeffs, rHatCoeffs, d0, maxOrd},
+  {result, Dpoly, NAMat, dR, dD, dCoeffs, rCoeffs, rHatCoeffs, d0},
 
-  systemSize = ctx["SystemSize"];
-  maxOrd = ctx["ExpansionOrder"];
-
-  (* Only attempt if factored matrix is available *)
-  If[MissingQ[ctx["AMatFactored"]],
-    Return[{False}]
-  ];
-
-  AMat = ctx["AMatFactored"];
-
-  result = TimeConstrained[
-    Module[{at, fe, dn, dp, xdp, naMat, degA, degD},
-      at = Map[Together, AMat, {2}];
-      fe = Flatten[at];
-
-      (* Check all entries are rational in x *)
-      If[!And @@ (PolynomialQ[Numerator[#], DiffExp`Symbols`x] &&
-                  PolynomialQ[Denominator[#], DiffExp`Symbols`x] & /@ fe),
-        Return[{False}]
-      ];
-
-      (* Compute common denominator *)
-      dn = DeleteDuplicates[Denominator /@ fe];
-      dn = DeleteCases[dn, a_ /; FreeQ[a, DiffExp`Symbols`x]];
-      If[dn === {},
-        Return[{False}] (* No x-dependence in denominator means no pole *)
-      ];
-      dp = PolynomialLCM @@ dn;
-
-      (* The denominator must have exactly one factor of x (simple pole) *)
-      If[Exponent[dp, DiffExp`Symbols`x, Min] < 1,
-        (* dp doesn't have x as factor - not a pole *)
-        Return[{False}]
-      ];
-
-      (* Factor out x: dp = x * D(x) *)
-      xdp = dp;
-      dp = Cancel[dp / DiffExp`Symbols`x];
-
-      (* D(0) must be nonzero *)
-      If[(dp /. DiffExp`Symbols`x -> 0) === 0, Return[{False}]];
-
-      (* N_A = x*D(x) * A(x) = polynomial matrix *)
-      naMat = Expand[xdp * at];
-
-      (* Check polynomial degrees *)
-      degA = Max[0, Max[Exponent[#, DiffExp`Symbols`x] & /@ Flatten[naMat]]];
-      degD = Exponent[dp, DiffExp`Symbols`x];
-
-      (* Only beneficial if polynomial degree is small *)
-      If[degA > maxOrd/2, Return[{False}]];
-
-      {True, at, dp, naMat, degA, degD}
-    ],
-    5.0, (* 5 second timeout *)
-    {False}
-  ];
-
+  result = RationalizeAMatrixCore[ctx, True];
   If[!result[[1]], Return[{False}]];
 
-  {AMatTogether, Dpoly, NAMat, dR, dD} = result[[{2, 3, 4, 5, 6}]];
+  {Dpoly, NAMat, dR} = result[[{3, 4, 5}]];
 
   (* Extract D(x) polynomial coefficients *)
+  dD = Exponent[Dpoly, DiffExp`Symbols`x];
   dCoeffs = Table[
     N[Coefficient[Dpoly, DiffExp`Symbols`x, i], ctx["WorkingPrecision"]],
     {i, 0, dD}
@@ -431,20 +401,12 @@ TryRationalizeSingularMatrix[ctx_Association, PInv_, P_] := Module[
 (* Extract series coefficients A_0, A_1, ... from the expanded matrix (excluding the pole)
    and transform to eigenbasis. Returns {bHatCoeffs, numCoeffs}. *)
 ExtractSingularSeriesCoefficients[ctx_Association, PInv_, P_] := Module[
-  {AMatExpanded, maxOrd, systemSize, aCoeffs, bHatCoeffs},
+  {maxOrd, aCoeffs, bHatCoeffs},
 
-  systemSize = ctx["SystemSize"];
   maxOrd = ctx["ExpansionOrder"];
-  AMatExpanded = ctx["AMatExpanded"];
 
   (* Extract A_k for k = 0, 1, ..., maxOrd-1 (the regular part) *)
-  aCoeffs = Table[
-    Table[
-      SeriesCoefficient[AMatExpanded[[i, k]], {DiffExp`Symbols`x, 0, j}],
-      {i, systemSize}, {k, systemSize}
-    ],
-    {j, 0, maxOrd - 1}
-  ];
+  aCoeffs = ExtractAMatCoefficients[ctx, 0, maxOrd - 1];
 
   (* Transform to eigenbasis: Bhat_k = PInv . A_k . P *)
   bHatCoeffs = Table[PInv . aCoeffs[[k]] . P, {k, Length[aCoeffs]}];
@@ -629,24 +591,21 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
    Handles regular singular points with diagonalizable, non-resonant residue. *)
 SolveSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {systemSize, maxOrd, FMat, fParticular, fGeneral, cIndices, c,
-   eigenvalues, P, PInv, residueMat,
+   eigenvalues, P, PInv,
    rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs,
-   mode, rationalResult, AMatExpanded,
+   mode, rationalResult,
    cache = cacheIn},
 
   systemSize = ctx["SystemSize"];
   maxOrd = ctx["ExpansionOrder"];
 
   If[epsord === 0 && !KeyExistsQ[cache, "SingRR"],
-    (* Extract residue matrix A_{-1} *)
-    AMatExpanded = ctx["AMatExpanded"];
-    residueMat = Table[
-      SeriesCoefficient[AMatExpanded[[i, j]], {DiffExp`Symbols`x, 0, -1}],
-      {i, systemSize}, {j, systemSize}
+    (* Get eigenvalue data from cache (stored by dispatch) or compute fresh *)
+    If[KeyExistsQ[cache, "SingularEigenData"],
+      {eigenvalues, P, PInv} = cache["SingularEigenData"];
+      ,
+      {eigenvalues, P, PInv} = PrepareSingularRecurrence[ctx];
     ];
-
-    (* Diagonalize the residue *)
-    {eigenvalues, P, PInv} = DiagonalizeResidue[residueMat, systemSize, ctx];
     DiffExp`Utilities`PrintInfo["Using singular recurrence for integrals ", ctx["Label"],
       " (eigenvalues: ", eigenvalues, ")."][3];
 

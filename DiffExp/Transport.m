@@ -971,12 +971,47 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
       CurrEvalPointCurrLine = DiffExp`LineSegmentation`RelateLinesPoint[CurrLine, line, CurrEvalPoint];
 
       If[EndpointIsSingularity,
-        (* Singular endpoint: store the series expansion without evaluating at the point *)
-        DiffExp`Utilities`PrintInfo["Reached singular endpoint. Storing series expansion."][1];
+        (* Singular endpoint: integrate the system but don't evaluate at the singular point *)
+        DiffExp`Utilities`PrintInfo["Reached singular endpoint. Integrating final segment and storing series expansion."][1];
 
-        (* Save the integrated series as the "evaluation" - it contains the x-dependent expansion *)
+        (* Integrate the system (same as first part of EvaluateCurrPoint) *)
+        CurrIntegrated = IntegrateSystem[Currbcs, CurrLine, {"TransportToCall"}];
+
+        (* Save expansion data if requested *)
+        If[SaveExpansions === True,
+          lineRelation = DiffExp`Symbols`x -> DiffExp`LineSegmentation`RelateLines[CurrLine, line];
+          AppendTo[AllIntegrationData, {
+            CurrLine,
+            lineRelation,
+            If[to > FixAt, Identity, Reverse]@{Limit[DiffExp`LineSegmentation`RelateLines[line, Currbcs[[1]]], DiffExp`Symbols`x -> 0], CurrEvalPoint},
+            {Limit[DiffExp`LineSegmentation`RelateLines[CurrLine, Currbcs[[1]]], DiffExp`Symbols`x -> 0], CurrEvalPointCurrLine},
+            If[DiffExp`State`FEC["SaveExpansionsCompress"] === True,
+              CompressedTermForExport = (DiffExp`SeriesOps`ApplyAnalyticContinuation[CurrIntegrated] // DiffExp`AnalyticContinuation`Project\[Theta]s) // If[KeyExistsQ[DiffExp`State`FEC, "SaveExpansionsOrder"], (# + O[DiffExp`Symbols`x]^DiffExp`State`FEC["SaveExpansionsOrder"]) &, Identity] // Compress;
+              If[!DiffExp`State`FEC["SaveExpansionsCompressDirectory"] === "?",
+                CompressedTermForExportFN = FileNameJoin[{DiffExp`State`FEC["SaveExpansionsCompressDirectory"], Hash[CompressedTermForExport, "SHA256", "HexString"] <> ".m"}];
+                Export[CompressedTermForExportFN, CompressedTermForExport];
+                CompressedTermForExportFN
+                ,
+                CompressedTermForExport
+              ]
+              ,
+              (DiffExp`SeriesOps`ApplyAnalyticContinuation[CurrIntegrated] // DiffExp`AnalyticContinuation`Project\[Theta]s) // If[KeyExistsQ[DiffExp`State`FEC, "SaveExpansionsOrder"], (# + O[DiffExp`Symbols`x]^DiffExp`State`FEC["SaveExpansionsOrder"]) &, Identity]
+            ]
+          }];
+        ];
+
+        (* Store the series expansion as the result (not evaluated at the point) *)
         CurrEval = DiffExp`SeriesOps`ApplyAnalyticContinuation[CurrIntegrated] //
           DiffExp`AnalyticContinuation`Project\[Theta]s;
+
+        DiffExp`Utilities`PrintInfo[
+          If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
+            "Integrated segment " <> ToString[SegmentCounter - 1] <> " out of " <> ToString[SegmentsToIntegrate] <> " (singular endpoint) in ",
+            "Integrated segment (singular endpoint) in "
+          ],
+          AbsoluteTime[] - TimeStart // N,
+          " seconds."
+        ][1];
 
         Currbcs = {line /. DiffExp`Symbols`x -> CurrEvalPoint, CurrEval};
       ,

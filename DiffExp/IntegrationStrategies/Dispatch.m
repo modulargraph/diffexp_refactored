@@ -46,7 +46,7 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
 
   Which[
     (* Simple case: single integral without homogeneous components *)
-    ctx["SystemSize"] === 1 && DiffExp`Utilities`PChop[ctx["AMatExpanded"]] == {{0}},
+    ctx["SystemSize"] === 1 && Normal[DiffExp`Utilities`PChop[ctx["AMatExpanded"]]] === {{0}},
     {cIndices, fGeneral} = SolveSimple[ctx, bVec, epsord];
     {cIndices, fGeneral, cache}
 

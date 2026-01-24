@@ -106,8 +106,10 @@ Module[{fixedVal, precision, expOrder, verbosity,
      Extract the detected variable symbol so our points match DiffExp's internal state. *)
   Module[{detectedVar},
     detectedVar = First[DiffExp`State`FEC[System`Variables]];
-    If[verbosity >= 2,
+    If[verbosity >= 1,
       Print["  DiffExp detected variable: ", detectedVar, " (context: ", Context[detectedVar], ")"];
+      Print["  ExternalScalesVal: ", DiffExp`State`ExternalScalesVal];
+      Print["  Boundary values dimensions: ", Dimensions[boundaryValues]];
     ];
 
     (* Prepare boundary conditions at xx = fixedVal *)

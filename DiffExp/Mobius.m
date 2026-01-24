@@ -51,6 +51,14 @@ GetLineRescaled[line_Association, at_, {signsproj_, signsim_}, nomobius_: False]
         leftBound = Select[signsproj, # < at &] // Last;
         rightBound = Select[signsproj, # > at &] // First;
         minDistance = Min[at - leftBound, rightBound - at];
+        (* Handle infinite bounds: mirror the finite side, or use unit distance *)
+        If[!TrueQ[minDistance < Infinity],
+          minDistance = Which[
+            leftBound =!= -Infinity, at - leftBound,
+            rightBound =!= Infinity, rightBound - at,
+            True, 1
+          ];
+        ];
 
         (Collect[Numerator[#], DiffExp`Symbols`x]/Collect[Denominator[#], DiffExp`Symbols`x]) & /@
           (((Normal[line] /. DiffExp`Symbols`x -> at + DiffExp`Symbols`x # /.

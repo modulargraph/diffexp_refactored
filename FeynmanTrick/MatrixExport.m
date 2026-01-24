@@ -6,7 +6,7 @@ BeginPackage["FeynmanTrick`MatrixExport`", {"FeynmanTrick`"}];
 ExportDiffExpMatrix::usage =
   "ExportDiffExpMatrix[matrix, variable, directory, epsOrder] exports a matrix \
 with eps dependence to DiffExp order-by-order format: d{variable}_{0..epsOrder}.m. \
-The eps symbol is taken from FTConfiguration.";
+The dimension variable d is substituted as d = 4 - 2*eps before expansion.";
 
 ExportGeneralMatrix::usage =
   "ExportGeneralMatrix[matrix, variable, directory] exports the full matrix \
@@ -18,6 +18,19 @@ d{variable}_full.m.";
 
 Begin["`Private`"];
 
+(* Helper: strip contexts from symbols for clean file output *)
+(* Substitutes all non-Global, non-System symbols with Global equivalents *)
+stripContexts[expr_] :=
+Module[{allSyms, nonGlobal, rules},
+  allSyms = Cases[expr, _Symbol, Infinity] // DeleteDuplicates;
+  nonGlobal = Select[allSyms,
+    (Context[#] =!= "Global`" && Context[#] =!= "System`") &
+  ];
+  rules = Rule[#, Symbol[SymbolName[#]]] & /@ nonGlobal;
+  expr /. rules
+];
+
+
 (* ============================================================ *)
 (* ExportDiffExpMatrix                                           *)
 (* Exports in DiffExp order-by-order format                      *)
@@ -27,13 +40,17 @@ Begin["`Private`"];
 (* ============================================================ *)
 
 ExportDiffExpMatrix[matrix_, variable_, directory_String, epsOrder_Integer:4] :=
-Module[{eps, varName, fileName, epsMat, k},
+Module[{eps, dimVar, varName, fileName, epsMat, epsMatrix, k},
   eps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
-  varName = ToString[variable];
+  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
+  varName = If[Head[variable] === Symbol, SymbolName[variable], ToString[variable]];
 
   If[!DirectoryQ[directory],
     CreateDirectory[directory, CreateIntermediateDirectories -> True]
   ];
+
+  (* Substitute d -> 4 - 2*eps to express matrix in terms of eps *)
+  epsMatrix = matrix /. dimVar -> (4 - 2*eps);
 
   Do[
     (* Extract coefficient of eps^k from each matrix entry *)
@@ -41,9 +58,12 @@ Module[{eps, varName, fileName, epsMat, k},
       Function[entry,
         SeriesCoefficient[entry, {eps, 0, k}] // Normal // Together
       ],
-      matrix,
+      epsMatrix,
       {2}
     ];
+
+    (* Strip contexts for clean output *)
+    epsMat = stripContexts[epsMat];
 
     fileName = FileNameJoin[{directory,
       "d" <> varName <> "_" <> ToString[k] <> ".m"
@@ -69,18 +89,24 @@ Module[{eps, varName, fileName, epsMat, k},
 (* ============================================================ *)
 
 ExportGeneralMatrix[matrix_, variable_, directory_String] :=
-Module[{varName, fileName},
-  varName = ToString[variable];
+Module[{varName, fileName, exportMatrix, eps, dimVar},
+  varName = If[Head[variable] === Symbol, SymbolName[variable], ToString[variable]];
+  eps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
 
   If[!DirectoryQ[directory],
     CreateDirectory[directory, CreateIntermediateDirectories -> True]
   ];
 
+  (* Substitute d -> 4 - 2*eps and strip contexts *)
+  exportMatrix = matrix /. dimVar -> (4 - 2*eps);
+  exportMatrix = stripContexts[exportMatrix];
+
   fileName = FileNameJoin[{directory,
     "d" <> varName <> "_full.m"
   }];
 
-  Put[matrix, fileName];
+  Put[exportMatrix, fileName];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Exported general matrix to: ", fileName];
@@ -95,7 +121,7 @@ Module[{varName, fileName},
 
 LoadGeneralMatrix[variable_, directory_String] :=
 Module[{varName, fileName},
-  varName = ToString[variable];
+  varName = If[Head[variable] === Symbol, SymbolName[variable], ToString[variable]];
   fileName = FileNameJoin[{directory,
     "d" <> varName <> "_full.m"
   }];

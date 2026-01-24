@@ -42,9 +42,11 @@ Module[{nProps, derivs, expandedProps, loopVectors, derivVectors,
 
   nProps = Length[propagators];
 
-  (* Step 1: Expand propagators and compute derivatives *)
-  expandedProps = Expand[# /. replacements] & /@ propagators;
-  derivs = Expand[D[#, variable] /. replacements] & /@ propagators;
+  (* Step 1: Expand propagators and apply replacements *)
+  (* Must expand FIRST so that p1^2, p1*p2 etc. are visible for replacement *)
+  expandedProps = (Expand[#] /. replacements // Expand) & /@ propagators;
+  (* Differentiate the replaced expressions w.r.t. variable *)
+  derivs = Expand[D[#, variable]] & /@ expandedProps;
 
   (* Step 2: Extract polynomial structure in loop momenta *)
   (* Using CoefficientRules: each expression is a polynomial in loop momenta *)

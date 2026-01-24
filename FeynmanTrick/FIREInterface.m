@@ -62,12 +62,111 @@ TopologyQ[_] := False;
 
 
 (* Extract symbolic variables from propagators and replacements *)
+(* Returns Global` symbols suitable for FIRE/Fermat *)
 extractVariables[props_List, repls_List, loops_List, exts_List] :=
 Module[{allSyms, momenta, vars},
   allSyms = Cases[{props, repls}, _Symbol, Infinity] // DeleteDuplicates;
   momenta = Join[loops, exts];
   vars = Complement[allSyms, momenta];
-  vars
+  (* Return as Global symbols for FIRE compatibility *)
+  Symbol[SymbolName[#]] & /@ vars
+];
+
+(* Build substitution rules mapping contexted symbols to Global equivalents *)
+(* This ensures Fermat (which FIRE uses internally) gets simple variable names *)
+buildFIRESubstitution[topology_Association] :=
+Module[{allSyms, momenta, contextedSyms},
+  allSyms = Cases[topology["Propagators"], _Symbol, Infinity] // DeleteDuplicates;
+  momenta = Join[topology["LoopMomenta"], topology["ExternalMomenta"]];
+  (* Find symbols not in Global` context that aren't momenta *)
+  contextedSyms = Select[
+    Complement[allSyms, momenta],
+    (Context[#] =!= "Global`") &
+  ];
+  (* Map each to its Global equivalent *)
+  Rule[#, Symbol[SymbolName[#]]] & /@ contextedSyms
+];
+
+
+(* ============================================================ *)
+(* runFIRE6 - helper to run FIRE6 binary robustly                *)
+(* Uses a shell script to ensure proper subprocess handling      *)
+(* ============================================================ *)
+
+runFIRE6[fireBin_String, dir_String, configName_String] :=
+Module[{exitCode, maxRetries = 3, attempt},
+  Do[
+    exitCode = runFIRE6Once[fireBin, dir, configName];
+    If[exitCode === 0, Return[0, Module]];
+    If[attempt < maxRetries,
+      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+        Print["FIRE6 failed (exit ", exitCode, "), retrying (attempt ", attempt+1, "/", maxRetries, ")..."];
+      ];
+      Pause[1]; (* brief pause before retry *)
+    ];
+  , {attempt, maxRetries}];
+  (* All retries failed *)
+  If[exitCode =!= 0,
+    Print["FIRE6 failed after ", maxRetries, " attempts (last exit code: ", exitCode, ")."];
+  ];
+  exitCode
+];
+
+runFIRE6Once[fireBin_String, dir_String, configName_String] :=
+Module[{scriptFile, exitCode, scriptContent, doneFile, maxWait, waited},
+  scriptFile = FileNameJoin[{dir, "run_fire.sh"}];
+  doneFile = FileNameJoin[{dir, "fire_done.txt"}];
+
+  (* Remove stale done marker and old temp *)
+  If[FileExistsQ[doneFile], DeleteFile[doneFile]];
+
+  (* Write script that runs FIRE6 in its own process group *)
+  scriptContent = StringJoin[
+    "#!/bin/bash\n",
+    "cd \"", dir, "\"\n",
+    "rm -rf temp\n",
+    "\"", fireBin, "\" -c ", configName, " > fire_stdout.log 2>&1\n",
+    "echo $? > fire_done.txt\n"
+  ];
+  Export[scriptFile, scriptContent, "Text"];
+  Run["chmod +x \"" <> scriptFile <> "\""];
+
+  (* Run detached: use perl setsid to create new process group *)
+  Run["perl -e 'use POSIX \"setsid\"; fork and exit; setsid(); exec @ARGV' -- bash \"" <> scriptFile <> "\" &"];
+
+  (* Wait for completion *)
+  maxWait = 600; (* seconds *)
+  waited = 0;
+  While[!FileExistsQ[doneFile] && waited < maxWait,
+    Pause[0.5];
+    waited += 0.5;
+  ];
+
+  If[!FileExistsQ[doneFile],
+    Print["FIRE6 timed out after ", maxWait, " seconds."];
+    exitCode = -1;
+  ,
+    Pause[0.1]; (* let file flush *)
+    exitCode = ToExpression[StringTrim[Import[doneFile, "Text"]]];
+  ];
+
+  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2 && FileExistsQ[FileNameJoin[{dir, "fire_stdout.log"}]],
+    Print["FIRE6 output (tail): "];
+    Module[{log = Import[FileNameJoin[{dir, "fire_stdout.log"}], "Text"]},
+      Print[StringTake[log, -Min[500, StringLength[log]]]];
+    ];
+  ];
+  If[exitCode =!= 0 && exitCode =!= -1,
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+      Print["FIRE6 exit code: ", exitCode];
+      If[FileExistsQ[FileNameJoin[{dir, "fire_stdout.log"}]],
+        Module[{log = Import[FileNameJoin[{dir, "fire_stdout.log"}], "Text"]},
+          Print["Output: ", StringTake[log, -Min[300, StringLength[log]]]];
+        ];
+      ];
+    ];
+  ];
+  exitCode
 ];
 
 
@@ -77,7 +176,7 @@ Module[{allSyms, momenta, vars},
 (* ============================================================ *)
 
 SetupFIRE[topology_Association, workDir_String:""] :=
-Module[{dir, firePath, name, config, result},
+Module[{dir, firePath, name, config, result, fireSubst, fireProps, fireRepls},
   name = topology["Name"];
   firePath = FeynmanTrick`Private`$FTConfig["FIREPath"];
 
@@ -95,14 +194,21 @@ Module[{dir, firePath, name, config, result},
     ];
   ];
 
+  (* Substitute contexted symbols with Global equivalents for FIRE/Fermat *)
+  (* Fermat cannot handle capital letters or backticks in variable names *)
+  fireSubst = buildFIRESubstitution[topology];
+
+  fireProps = topology["Propagators"] /. fireSubst;
+  fireRepls = topology["Replacements"] /. fireSubst;
+
   (* Set FIRE variables (all in FIRE` context) *)
   FIRE`Internal = topology["LoopMomenta"];
   FIRE`External = topology["ExternalMomenta"];
-  FIRE`Propagators = topology["Propagators"];
+  FIRE`Propagators = fireProps;
 
   (* Replacements: convert our rule format to FIRE's *)
-  If[topology["Replacements"] =!= {},
-    FIRE`Replacements = topology["Replacements"];
+  If[fireRepls =!= {},
+    FIRE`Replacements = fireRepls;
   ];
 
   (* Prepare IBP relations *)
@@ -152,7 +258,7 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name},
   content = StringJoin[
     "#threads           ", ToString[threads], "\n",
     "#fthreads          ", ToString[fthreads], "\n",
-    "#variables         ", StringRiffle[ToString /@ vars, ","], "\n",
+    "#variables         ", StringRiffle[SymbolName /@ vars, ","], "\n",
     "#start\n",
     "#problem           1 ", name, ".start\n",
     "#integrals         ", intFile, "\n",
@@ -181,10 +287,16 @@ Module[{dir, name, fireBin, intFile, configFile, result, masters,
   name = topology["Name"];
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
-  (* Write integrals file with the top-sector integral *)
-  topSector = Table[1, {topology["NumPropagators"]}];
-  intFile = FileNameJoin[{dir, name <> ".m"}];
-  Export[intFile, "{{1," <> ToString[topSector, InputForm] <> "}}\n", "Text"];
+  (* Write integrals file with all sector corners *)
+  (* Each sector corner has indices 0 or 1 for each propagator *)
+  Module[{nP = topology["NumPropagators"], allSectors, intContent},
+    allSectors = Rest[Tuples[{0, 1}, nP]]; (* all 2^n - 1 non-zero sectors *)
+    intContent = StringJoin["{",
+      StringRiffle[("{1," <> ToString[#, InputForm] <> "}") & /@ allSectors, ",\n"],
+      "}\n"];
+    intFile = FileNameJoin[{dir, name <> ".m"}];
+    Export[intFile, intContent, "Text"];
+  ];
 
   (* Write config for this reduction *)
   writeConfigFile[topology, dir, name <> ".config"];
@@ -193,21 +305,7 @@ Module[{dir, name, fireBin, intFile, configFile, result, masters,
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Running FIRE6 to find basis..."];
   ];
-  Module[{cmd, exitCode},
-    cmd = "cd " <> StringReplace[dir, " " -> "\\ "] <>
-          " && " <> StringReplace[fireBin, " " -> "\\ "] <> " -c " <> name <>
-          " > fire_stdout.log 2> fire_stderr.log";
-    exitCode = Run[cmd];
-    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-      Print["FIRE6 exit code: ", exitCode];
-    ];
-    If[exitCode =!= 0,
-      Print["FIRE6 failed with exit code ", exitCode];
-      If[FileExistsQ[FileNameJoin[{dir, "fire_stderr.log"}]],
-        Print["stderr: ", Import[FileNameJoin[{dir, "fire_stderr.log"}], "Text"]];
-      ];
-    ];
-  ];
+  runFIRE6[fireBin, dir, name];
 
   (* Load tables and extract masters *)
   tablesFile = FileNameJoin[{dir, name <> ".tables"}];
@@ -283,16 +381,7 @@ Module[{dir, name, fireBin, intFile, configFile, tablesFile, rules,
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
     Print["Reducing ", Length[integrals], " integrals..."];
   ];
-  Module[{cmd, exitCode},
-    cmd = "cd " <> StringReplace[dir, " " -> "\\ "] <>
-          " && " <> StringReplace[fireBin, " " -> "\\ "] <>
-          " -c " <> name <> "_reduce" <>
-          " > fire_stdout.log 2> fire_stderr.log";
-    exitCode = Run[cmd];
-    If[exitCode =!= 0,
-      Print["FIRE6 reduction failed with exit code ", exitCode];
-    ];
-  ];
+  runFIRE6[fireBin, dir, name <> "_reduce"];
 
   (* Load results *)
   tablesFile = FileNameJoin[{dir, name <> "_reduce.tables"}];
@@ -378,6 +467,14 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
     Return[$Failed];
   ];
 
+  (* Map FIRE's Global variables back to the requested variable symbol *)
+  (* FIRE uses Global` symbols internally; our decomposition may use contexted symbols *)
+  If[Context[variable] =!= "Global`",
+    Module[{globalVar = Symbol[SymbolName[variable]]},
+      reductions = Map[(# /. globalVar -> variable) &, reductions];
+    ];
+  ];
+
   (* Step 5: Assemble the matrix *)
   diffMatrix = Table[0, {nMasters}, {nMasters}];
 
@@ -394,7 +491,7 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
   , {i, nMasters}];
 
   (* Simplify entries *)
-  diffMatrix = Together /@ diffMatrix // Map[#, {2}] &;
+  diffMatrix = Map[Together, diffMatrix, {2}];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Differential matrix computed (", nMasters, "x", nMasters, ")."];

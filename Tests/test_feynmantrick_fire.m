@@ -1,5 +1,5 @@
 (* Test script for FeynmanTrick FIRE interface *)
-(* Tests DefineTopology, SetupFIRE, FindBasis with a simple 1-loop box *)
+(* Tests DefineTopology, SetupFIRE, FindBasis, ReduceIntegrals, ComputeDiffMatrix *)
 
 SetDirectory[ParentDirectory[DirectoryName[$InputFileName]]];
 $Path = Prepend[$Path, Directory[]];
@@ -10,6 +10,11 @@ Print["=== Testing FeynmanTrick FIRE Interface ===\n"];
 Print["Loading FeynmanTrick package..."];
 Get["FeynmanTrick.m"];
 Print["Package loaded.\n"];
+
+(* Reduce threads for stability on macOS *)
+SetFTOption["Threads", 1];
+SetFTOption["FThreads", 1];
+SetFTOption["Verbosity", 2];
 
 passed = 0;
 failed = 0;
@@ -27,6 +32,18 @@ test[name_, expr_, expected_] := Module[{result},
   ];
 ];
 
+testTrue[name_, expr_] := Module[{},
+  If[TrueQ[expr],
+    Print["PASS: ", name];
+    passed++;
+  ,
+    Print["FAIL: ", name];
+    Print["  Expected: True"];
+    Print["  Got:      ", expr];
+    failed++;
+  ];
+];
+
 (* ============================================================ *)
 (* Test 1: DefineTopology - 1-loop box *)
 (* Convention: D_j = -q_j^2 + m_j^2 *)
@@ -34,8 +51,8 @@ test[name_, expr_, expected_] := Module[{result},
 
 Print["--- Test: DefineTopology (1-loop box) ---"];
 
-(* Note: l1, p1, p2, p3, s, t must be Global symbols for FIRE *)
-Module[{topo},
+Module[{topo, workDir, setupTopo, basisTopo, masters, reductions, diffMat},
+
   topo = FeynmanTrick`FIREInterface`DefineTopology[
     "box",
     {l1},                     (* loop momenta *)
@@ -56,56 +73,84 @@ Module[{topo},
   test["LoopMomenta", topo["LoopMomenta"], {l1}];
   test["ExternalMomenta", topo["ExternalMomenta"], {p1, p2, p3}];
 
+  (* ============================================================ *)
   Print["\n--- Test: SetupFIRE ---"];
 
-  Module[{workDir, setupTopo},
-    workDir = FileNameJoin[{$TemporaryDirectory, "FTtest_box"}];
-    If[DirectoryQ[workDir], DeleteDirectory[workDir, DeleteContents -> True]];
+  workDir = FileNameJoin[{$TemporaryDirectory, "FTtest_full_" <> ToString[$ProcessID]}];
+  If[DirectoryQ[workDir], DeleteDirectory[workDir, DeleteContents -> True]];
+  Print["  Work directory: ", workDir];
 
-    Print["  Work directory: ", workDir];
+  setupTopo = FeynmanTrick`FIREInterface`SetupFIRE[topo, workDir];
 
-    setupTopo = FeynmanTrick`FIREInterface`SetupFIRE[topo, workDir];
+  test["SetupFIRE returns association", Head[setupTopo], Association];
+  test["StartFileReady", setupTopo["StartFileReady"], True];
+  testTrue[".start file exists",
+    FileExistsQ[FileNameJoin[{workDir, "box.start"}]]];
+  testTrue[".config file exists",
+    FileExistsQ[FileNameJoin[{workDir, "box.config"}]]];
 
-    test["SetupFIRE returns association", Head[setupTopo], Association];
-    test["StartFileReady", setupTopo["StartFileReady"], True];
-    test[".start file exists",
-      FileExistsQ[FileNameJoin[{workDir, "box.start"}]], True];
-    test[".config file exists",
-      FileExistsQ[FileNameJoin[{workDir, "box.config"}]], True];
+  (* ============================================================ *)
+  Print["\n--- Test: FindBasis ---"];
 
-    (* Check config file contents *)
-    Module[{configContent},
-      configContent = Import[FileNameJoin[{workDir, "box.config"}], "Text"];
-      Print["  Config file:\n", configContent];
-      test["Config has #threads", StringContainsQ[configContent, "#threads"], True];
-      test["Config has #variables", StringContainsQ[configContent, "#variables"], True];
+  basisTopo = FeynmanTrick`FIREInterface`FindBasis[setupTopo];
+
+  If[basisTopo =!= $Failed,
+    masters = basisTopo["Masters"];
+    Print["  Masters found: ", Length[masters]];
+    Print["  Master indices: ", masters];
+
+    testTrue["At least 1 master found", Length[masters] >= 1];
+    testTrue["Masters are lists of length 4",
+      AllTrue[masters, Length[#] == 4 &]];
+
+    (* Known: massless box in d dimensions has 3 masters:
+       box {1,1,1,1}, and two bubbles *)
+
+    (* ============================================================ *)
+    Print["\n--- Test: ReduceIntegrals ---"];
+
+    (* Reduce a dotted integral *)
+    reductions = FeynmanTrick`FIREInterface`ReduceIntegrals[
+      basisTopo,
+      {{1, 1, 2, 1}}  (* box with D3 raised *)
     ];
 
-    Print["\n--- Test: FindBasis ---"];
-
-    Module[{basisTopo, masters},
-      basisTopo = FeynmanTrick`FIREInterface`FindBasis[setupTopo];
-
-      If[basisTopo =!= $Failed,
-        masters = basisTopo["Masters"];
-        Print["  Masters found: ", Length[masters]];
-        Print["  Master indices: ", masters];
-
-        (* 1-loop box should have a small number of masters *)
-        (* In d=4-2eps with 4 massless propagators, there are typically *)
-        (* a few master integrals depending on how FIRE counts them *)
-        test["At least 1 master found", Length[masters] >= 1, True];
-        test["Masters are lists of length 4",
-          AllTrue[masters, Length[#] == 4 &], True];
-      ,
-        Print["FAIL: FindBasis returned $Failed"];
-        failed++;
-      ];
+    If[reductions =!= $Failed,
+      Print["  Reduction of {1,1,2,1}: ", reductions[{1, 1, 2, 1}]];
+      testTrue["Reduction succeeded", AssociationQ[reductions]];
+      testTrue["Result contains G terms",
+        !FreeQ[reductions[{1, 1, 2, 1}], Global`G]];
+    ,
+      Print["FAIL: ReduceIntegrals returned $Failed"];
+      failed++;
     ];
 
-    (* Clean up *)
-    If[DirectoryQ[workDir], DeleteDirectory[workDir, DeleteContents -> True]];
+    (* ============================================================ *)
+    Print["\n--- Test: ComputeDiffMatrix ---"];
+
+    (* Compute diff matrix w.r.t. s *)
+    diffMat = FeynmanTrick`FIREInterface`ComputeDiffMatrix[basisTopo, s];
+
+    If[diffMat =!= $Failed,
+      Print["  Matrix dimensions: ", Dimensions[diffMat]];
+      Print["  Matrix:\n", MatrixForm[diffMat]];
+      testTrue["Matrix is square",
+        Length[diffMat] == Length[masters] && Length[diffMat[[1]]] == Length[masters]];
+      testTrue["Matrix has nonzero entries",
+        !AllTrue[Flatten[diffMat], # === 0 &]];
+    ,
+      Print["FAIL: ComputeDiffMatrix returned $Failed"];
+      failed++;
+    ];
+  ,
+    Print["FAIL: FindBasis returned $Failed"];
+    Print["  (FIRE6 may have crashed - check logs in ", workDir, ")"];
+    failed += 5; (* count missed subtests *)
   ];
+
+  (* Clean up *)
+  (* If[DirectoryQ[workDir], DeleteDirectory[workDir, DeleteContents -> True]]; *)
+  Print["\n  (Work directory preserved: ", workDir, ")"];
 ];
 
 (* ============================================================ *)

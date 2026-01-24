@@ -99,7 +99,7 @@ Module[{ftData, nLevels},
 BuildLevel[ftData_Association, level_Integer] :=
 Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
         param, fixedVal, prevParam, numericalPoint, newTopology,
-        prevFixedParams, fixRules, name, result},
+        prevFixedParams, fixRules, name, result, newReplacements},
 
   If[level < 1 || level > ftData["NumLevels"],
     Print["Error: level must be between 1 and ", ftData["NumLevels"]];
@@ -137,10 +137,8 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
       prevLevel["FeynmanParameter"] -> fixedVal];
   ];
 
-  (* Fix kinematics to numerical point *)
-  If[numericalPoint =!= {},
-    newProps = newProps /. numericalPoint;
-  ];
+  (* Propagator replacements: original scalar product rules with numerical kinematic values *)
+  newReplacements = ftData["TopTopology"]["Replacements"] /. numericalPoint;
 
   (* Create new topology *)
   name = ftData["TopTopology"]["Name"] <> "_L" <> ToString[level];
@@ -149,7 +147,7 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
     ftData["TopTopology"]["LoopMomenta"],
     ftData["TopTopology"]["ExternalMomenta"],
     newProps,
-    {} (* Replacements already applied via numericalPoint *)
+    newReplacements
   ];
 
   (* Update ftData *)

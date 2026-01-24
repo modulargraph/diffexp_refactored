@@ -11,16 +11,22 @@ matrices from matrixDir, sets boundary conditions at the fixed parameter point, 
 and transports to cover [0,1]. Returns the TransportTo result with SegmentData.";
 
 IntegrateLevelMaster::usage =
-  "IntegrateLevelMaster[transportResult, masterIdx, v1, v2, ibpCoefficients, epsOrder] \
+  "IntegrateLevelMaster[transportResult, masterIdx, v1, v2, ibpCoeff, epsOrder] \
 integrates the Feynman trick recursion for a single master: \
-Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) * Integral[x^(v1-1)*(1-x)^(v2-1) * sum_j c_j(x)*f_j(x), {x,0,1}]. \
+Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) * Integral[x^(v1-1)*(1-x)^(v2-1) * c(x)*f(x), {x,0,1}]. \
 Returns the integrated boundary value as a list of eps-order coefficients.";
+
+EvaluateLimitFromTransport::usage =
+  "EvaluateLimitFromTransport[transportResult, ibpCoeffs, boundary, epsOrder] \
+evaluates lim_{x->boundary} of the linear combination sum_j ibpCoeffs[[j]] * f_j(x). \
+boundary = 0 or 1. Uses segment decomposition, keeping only pure Taylor terms \
+(setting x^{a+b*eps} terms with b!=0 to zero). Returns eps-order coefficient list.";
 
 ComputeLevelBoundary::usage =
   "ComputeLevelBoundary[ftData, level, transportResult, epsOrder] computes boundary \
 conditions for all masters at 'level' using the transport results from level+1. \
 Handles IBP reductions and the Feynman trick recursion formula. \
-Returns <|\"BoundaryValues\" -> {...}, \"EpsPrefactors\" -> {...}|>.";
+Returns <|\"BoundaryValues\" -> {...}, \"Masters\" -> {...}, \"Level\" -> ...|>.";
 
 RunIntegrationPipeline::usage =
   "RunIntegrationPipeline[ftData, outputDir, epsOrder, opts] runs the full bottom-up \
@@ -181,9 +187,8 @@ Module[{fixedVal, precision, expOrder, verbosity,
 *)
 IntegrateLevelMaster[transportResult_Association, masterIdx_Integer,
     v1_Integer, v2_Integer, ibpCoeff_, epsOrder_Integer] :=
-Module[{prefactorSpec, result, gammaPrefactor, eps},
-
-  eps = FeynmanTrick`FTeps;
+Module[{prefactorSpec, result, gammaPrefactor, segData, modifiedSegments,
+        singleMasterData},
 
   (* Gamma prefactor: Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) *)
   gammaPrefactor = Gamma[v1 + v2] / (Gamma[v1] * Gamma[v2]);
@@ -197,55 +202,134 @@ Module[{prefactorSpec, result, gammaPrefactor, eps},
   |>;
 
   (* Extract segment data for just this master *)
-  (* We need to modify the transport result to point to a single integral *)
-  Module[{singleMasterData, segData, modifiedSegments},
-    segData = transportResult["SegmentData"];
+  segData = transportResult["SegmentData"];
 
-    (* Modify each segment to contain only the requested master *)
-    modifiedSegments = Table[
-      Module[{seg, seriesData, uncompressed, singleSeries},
-        seg = segData[[segIdx]];
-        seriesData = seg[[5]];
+  (* Modify each segment to contain only the requested master *)
+  modifiedSegments = Table[
+    Module[{seg, seriesRaw, uncompressed, singleSeries},
+      seg = segData[[segIdx]];
+      seriesRaw = seg[[5]];
 
-        (* Uncompress *)
-        If[StringQ[seriesData],
-          uncompressed = Uncompress[Import[seriesData]];,
-          If[Head[seriesData] === String && StringLength[seriesData] > 100,
-            uncompressed = Uncompress[seriesData];,
-            uncompressed = seriesData;
-          ]
-        ];
+      (* Uncompress if needed *)
+      If[StringQ[seriesRaw],
+        uncompressed = Uncompress[Import[seriesRaw]];,
+        If[Head[seriesRaw] === String && StringLength[seriesRaw] > 100,
+          uncompressed = Uncompress[seriesRaw];,
+          uncompressed = seriesRaw;
+        ]
+      ];
 
-        (* Extract just this master's series *)
-        singleSeries = {uncompressed[[masterIdx]]};
+      (* Extract just this master's series *)
+      singleSeries = {uncompressed[[masterIdx]]};
 
-        (* Rebuild segment with single master *)
-        {seg[[1]], seg[[2]], seg[[3]], seg[[4]], singleSeries}
-      ],
-      {segIdx, Length[segData]}
-    ];
+      (* Rebuild segment with single master *)
+      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], singleSeries}
+    ],
+    {segIdx, Length[segData]}
+  ];
 
-    singleMasterData = <|
-      "SegmentData" -> modifiedSegments,
-      "NumIntegrals" -> 1,
-      "EpsilonOrder" -> epsOrder
-    |>;
+  singleMasterData = <|
+    "SegmentData" -> modifiedSegments,
+    "NumIntegrals" -> 1,
+    "EpsilonOrder" -> epsOrder
+  |>;
 
-    (* Call the extended DefiniteIntegral *)
-    result = DiffExp`RegularizedIntegration`DefiniteIntegralWithPrefactor[
-      singleMasterData,
-      {0, 1},
-      prefactorSpec
-    ];
+  (* Call the extended DefiniteIntegral *)
+  result = DiffExp`RegularizedIntegration`DefiniteIntegralWithPrefactor[
+    singleMasterData,
+    {0, 1},
+    prefactorSpec
+  ];
 
-    (* Result is indexed as {{eps0, eps1, ...}} for 1 integral *)
-    (* Multiply by Gamma prefactor *)
-    If[ListQ[result] && Length[result] >= 1,
-      gammaPrefactor * result[[1]],
-      Print["Warning: Integration returned unexpected format."];
-      Table[0, {epsOrder + 1}]
-    ]
+  (* Result is indexed as result[[intIdx, epsOrd+1]] for 1 integral *)
+  (* Multiply by Gamma prefactor *)
+  If[ListQ[result] && Length[result] >= 1,
+    gammaPrefactor * result[[1]],
+    Print["Warning: Integration returned unexpected format: ", Head[result]];
+    Table[0, {epsOrder + 1}]
   ]
+];
+
+
+(* ============================================================ *)
+(* Evaluate Limit from Transport Result                          *)
+(* ============================================================ *)
+
+(*
+  Evaluates lim_{x->boundary} sum_j ibpCoeffs[[j]] * f_j(x)
+  where f_j are the masters from the transport result.
+
+  Per the paper (section 3.2): "Take the segment centered at x=0
+  (or x'=1-x=0), and filter out the finite coefficient of the Taylor
+  series g_0(x,eps). Put any contributions of the form x^{a_i+b_i*eps}
+  with b_i != 0 to zero (even when a_i < 0)."
+*)
+EvaluateLimitFromTransport[transportResult_Association, ibpCoeffs_List,
+    boundary_Integer, epsOrder_Integer] :=
+Module[{segData, targetSeg, uncompressed, numMasters,
+        limitValues, seriesAtMaster, decomposition,
+        taylorPart, limitVal},
+
+  segData = transportResult["SegmentData"];
+  numMasters = transportResult["NumIntegrals"];
+
+  (* Select the boundary segment *)
+  If[boundary === 0,
+    (* First segment: nearest to x=0 *)
+    targetSeg = First[SortBy[segData, Min[#[[3]]] &]];
+  ,
+    (* Last segment: nearest to x=1 *)
+    targetSeg = First[SortBy[segData, -Max[#[[3]]] &]];
+  ];
+
+  (* Uncompress series data *)
+  If[StringQ[targetSeg[[5]]],
+    uncompressed = Uncompress[Import[targetSeg[[5]]]];,
+    If[Head[targetSeg[[5]]] === String && StringLength[targetSeg[[5]]] > 100,
+      uncompressed = Uncompress[targetSeg[[5]]];,
+      uncompressed = targetSeg[[5]];
+    ]
+  ];
+
+  (* For each master, evaluate the limit *)
+  limitValues = Table[0, {epsOrder + 1}];
+
+  Do[
+    If[ibpCoeffs[[mIdx]] =!= 0,
+      (* Get series for this master (list of eps orders) *)
+      seriesAtMaster = uncompressed[[mIdx]];
+
+      (* Decompose into x^{a+b*eps} * g(x,eps) terms *)
+      decomposition = DiffExp`SingularityDecomposition`DecomposeSingularity[seriesAtMaster];
+
+      (* Extract the pure Taylor contribution: a >= 0 and b == 0 *)
+      taylorPart = Select[decomposition, (#["a"] >= 0 && #["b"] == 0) &];
+
+      (* The limit at x=0 is the constant term of the Taylor series g *)
+      (* For a=0, b=0: g(0,eps) is the constant coefficient of the series *)
+      limitVal = Table[0, {epsOrder + 1}];
+
+      Do[
+        Module[{gSeries, constCoeff},
+          gSeries = term["g"];
+          (* g is a list of SeriesData objects, one per eps order *)
+          Do[
+            If[epsIdx <= Length[gSeries] && MatchQ[gSeries[[epsIdx]], _SeriesData],
+              constCoeff = SeriesCoefficient[gSeries[[epsIdx]], 0];
+              If[NumericQ[constCoeff],
+                limitVal[[epsIdx]] += constCoeff;
+              ];
+            ];
+          , {epsIdx, Min[epsOrder + 1, Length[gSeries]]}];
+        ];
+      , {term, taylorPart}];
+
+      (* Add weighted contribution *)
+      limitValues += ibpCoeffs[[mIdx]] * limitVal;
+    ];
+  , {mIdx, numMasters}];
+
+  limitValues
 ];
 
 
@@ -257,142 +341,152 @@ Module[{prefactorSpec, result, gammaPrefactor, eps},
   Computes boundary conditions for all masters at a given level,
   using the transport results from the level above.
 
-  The Feynman trick recursion:
+  The Feynman trick recursion (eq. 2.8 of the paper):
   I^(k-1)_{v1,...} = Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) *
     Integral[x^(v1-1)*(1-x)^(v2-1) * I^(k)_{v1+v2,...}, {x,0,1}]
 
-  Special cases:
-  I^(k-1)_{0,0,...} = I^(k)_{0,...}  (no integration)
-  I^(k-1)_{v1,0,...} = lim_{x->1} I^(k)_{v1,...}
-  I^(k-1)_{0,v2,...} = lim_{x->0} I^(k)_{v2,...}
+  Where the combination at level k merges positions {posI, posJ}.
+  Given a master M at level k-1:
+  - vi = M[[posI]], vj = M[[posJ]]
+  - The needed integral at level k has:
+    - Position posI: vi+vj (for integration) or vi/vj (for limits)
+    - Position posJ: 0 (absorbed into combined propagator)
+
+  Special cases (eq. 2.10):
+  I_{0,0,...}^(k-1) = I_{0,...}^(k)  (direct: no integration)
+  I_{v1,0,...}^(k-1) = lim_{x->1} I_{v1,...}^(k)
+  I_{0,v2,...}^(k-1) = lim_{x->0} I_{v2,...}^(k)
 *)
 ComputeLevelBoundary[ftData_Association, level_Integer,
     transportResult_Association, epsOrder_Integer] :=
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
-        combinedPositions, neededIntegrals, bcValues,
-        topologyAbove, reducedIntegrals, v1, v2},
+        combinedPositions, posI, posJ, topologyAbove, bcValues},
 
   levelData = ftData["Levels"][level];
   levelAbove = ftData["Levels"][level + 1];
   mastersAtLevel = levelData["Masters"];
   mastersAbove = levelAbove["Masters"];
   combinedPositions = levelAbove["CombinedPositions"];
+  {posI, posJ} = combinedPositions;
+  topologyAbove = levelAbove["Topology"];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Computing boundary for level ", level, " from level ", level + 1];
     Print["  Masters at level ", level, ": ", Length[mastersAtLevel]];
     Print["  Masters at level ", level + 1, ": ", Length[mastersAbove]];
-    Print["  Combined positions: ", combinedPositions];
+    Print["  Combined positions: {", posI, ", ", posJ, "}"];
   ];
 
-  (* For each master at the current level, identify what integrals
-     at the level above are needed, and how they reduce to masters above *)
-  topologyAbove = levelAbove["Topology"];
-
+  (* For each master at the current level *)
   bcValues = Table[
-    Module[{masterVec, integralsNeeded, totalBC, integral, reduced,
-            ibpCoeffs, masterContribIdx, masterContrib},
+    Module[{masterVec, vi, vj, neededVec, case, reduction, expr,
+            ibpCoeffs, totalBC},
 
       masterVec = mastersAtLevel[[masterIdx]];
+      vi = masterVec[[posI]];
+      vj = masterVec[[posJ]];
 
-      (* Identify needed integrals at level+1 via the Feynman trick recursion *)
-      integralsNeeded = FeynmanTrick`FeynmanTrickIteration`IdentifyNeededIntegrals[
-        ftData, level, masterVec
+      (* Determine which case of the recursion applies *)
+      case = Which[
+        vi > 0 && vj > 0, "integrate",
+        vi > 0 && vj == 0, "limitUpper",
+        vi == 0 && vj > 0, "limitLower",
+        True, "direct"
       ];
 
       If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-        Print["  Master ", masterIdx, " (", masterVec, ") needs: ", Length[integralsNeeded], " integrals"];
+        Print["  Master ", masterIdx, " (", masterVec, "): case=", case,
+              " vi=", vi, " vj=", vj];
       ];
 
-      (* Sum contributions from all needed integrals *)
-      totalBC = Table[0, {epsOrder + 1}];
+      (* Construct the needed integral at level+1 *)
+      neededVec = masterVec;
+      Switch[case,
+        "integrate",
+          (* Combined propagator gets power vi+vj, position j gets 0 *)
+          neededVec[[posI]] = vi + vj;
+          neededVec[[posJ]] = 0;,
+        "limitUpper",
+          (* At x=1: D_combined = D_i. Position i has vi, j has 0 *)
+          neededVec[[posI]] = vi;
+          neededVec[[posJ]] = 0;,
+        "limitLower",
+          (* At x=0: D_combined = D_j. Position i has vj, j has 0 *)
+          neededVec[[posI]] = vj;
+          neededVec[[posJ]] = 0;,
+        "direct",
+          (* Both absent: same integral with j set to 0 *)
+          neededVec[[posJ]] = 0;
+      ];
 
-      Do[
-        Module[{neededVec, neededV1, neededV2, isSpecialCase},
-          neededVec = integralsNeeded[[intIdx, 1]];
-          neededV1 = integralsNeeded[[intIdx, 2]];
-          neededV2 = integralsNeeded[[intIdx, 3]];
+      (* Reduce the needed integral to masters at level+1 via IBP *)
+      reduction = FeynmanTrick`FIREInterface`ReduceIntegrals[
+        topologyAbove,
+        {neededVec}
+      ];
 
-          (* Check for special cases *)
-          isSpecialCase = Which[
-            neededV1 == 0 && neededV2 == 0, "zero",
-            neededV1 > 0 && neededV2 == 0, "limitUpper",
-            neededV1 == 0 && neededV2 > 0, "limitLower",
-            True, "integrate"
-          ];
+      If[reduction === $Failed,
+        If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+          Print["  Warning: IBP reduction failed for ", neededVec];
+        ];
+        Return[Table[0, {epsOrder + 1}], Module];
+      ];
 
-          (* Reduce the needed integral to masters at level+1 *)
-          reduced = FeynmanTrick`FIREInterface`ReduceIntegrals[
-            topologyAbove,
-            {neededVec}
-          ];
+      (* Extract the reduction expression *)
+      expr = reduction[neededVec];
 
-          If[reduced =!= $Failed && Length[reduced] > 0,
-            Module[{reduction, ibpPairs},
-              reduction = reduced[[1]];  (* IBP reduction of the first (only) integral *)
+      (* Extract coefficient of each master G[1, masters_j] *)
+      ibpCoeffs = Table[
+        Coefficient[expr, Global`G[1, mastersAbove[[j]]]],
+        {j, Length[mastersAbove]}
+      ];
 
-              (* reduction is a list of {coefficient, masterIndex} pairs *)
-              (* or similar format from FIRE *)
+      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+        Print["    IBP coefficients: ", ibpCoeffs];
+      ];
 
-              Switch[isSpecialCase,
-                "zero",
-                  (* Nothing to add *)
-                  Null,
-
-                "limitLower",
-                  (* lim_{x->0} I^(k)_{v2,...} *)
-                  (* Use EvaluateLimitAtSingularity on the transport result *)
-                  Module[{limitVal},
-                    Do[
-                      Module[{coeff, mIdx, segData, firstSeg, seriesAtMaster, decomp, limitResult},
-                        {coeff, mIdx} = ibpPairs[[pairIdx]];
-                        (* Get the first segment (near x=0) *)
-                        segData = transportResult["SegmentData"];
-                        firstSeg = segData[[1]];
-                        (* Decompose and evaluate limit *)
-                        (* ... simplified for now *)
-                      ],
-                      {pairIdx, Length[ibpPairs]}
-                    ];
-                  ],
-
-                "limitUpper",
-                  (* lim_{x->1} I^(k)_{v1,...} *)
-                  (* Similar to limitLower but at x=1 *)
-                  Null,
-
-                "integrate",
-                  (* Full integration: Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) *
-                     Integral[x^(v1-1)*(1-x)^(v2-1) * sum_j c_j(x) * f_j(x)] *)
-
-                  (* For each master j at level+1 with IBP coefficient c_j *)
-                  Do[
-                    Module[{coeff, mIdx, contribution},
-                      (* coeff is the IBP coefficient (may be a function of xx) *)
-                      (* mIdx is the index into mastersAbove *)
-                      {coeff, mIdx} = reduction[[pairIdx]];
-
-                      contribution = IntegrateLevelMaster[
-                        transportResult, mIdx,
-                        neededV1, neededV2,
-                        coeff, epsOrder
-                      ];
-
-                      totalBC = totalBC + contribution;
-                    ],
-                    {pairIdx, Length[reduction]}
-                  ];
+      (* Compute the boundary value based on the case *)
+      Switch[case,
+        "integrate",
+          (* Full integration: sum_j ibpCoeffs[[j]] * IntegrateLevelMaster[...] *)
+          totalBC = Table[0, {epsOrder + 1}];
+          Do[
+            If[ibpCoeffs[[j]] =!= 0,
+              Module[{contribution},
+                contribution = IntegrateLevelMaster[
+                  transportResult, j, vi, vj, ibpCoeffs[[j]], epsOrder
+                ];
+                totalBC = totalBC + contribution;
               ];
-            ],
-            If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
-              Print["  Warning: IBP reduction failed for ", neededVec];
             ];
-          ];
-        ],
-        {intIdx, Length[integralsNeeded]}
-      ];
+          , {j, Length[mastersAbove]}];
+          totalBC,
 
-      totalBC
+        "limitUpper",
+          (* lim_{x->1} sum_j ibpCoeffs[[j]] * f_j(x) *)
+          EvaluateLimitFromTransport[transportResult, ibpCoeffs, 1, epsOrder],
+
+        "limitLower",
+          (* lim_{x->0} sum_j ibpCoeffs[[j]] * f_j(x) *)
+          EvaluateLimitFromTransport[transportResult, ibpCoeffs, 0, epsOrder],
+
+        "direct",
+          (* Evaluate at the fixed parameter value *)
+          (* The "direct" case means both propagators are absent, *)
+          (* so this integral at level+1 equals the one at level directly *)
+          (* Evaluate at the fixed point from the boundary values *)
+          Module[{directVal},
+            directVal = Table[0, {epsOrder + 1}];
+            Do[
+              If[ibpCoeffs[[j]] =!= 0,
+                (* Use the boundary values from level+1 *)
+                (* These were already computed for the transport *)
+                directVal += ibpCoeffs[[j]] * transportResult["BoundaryValuesAbove"][[j]];
+              ];
+            , {j, Length[mastersAbove]}];
+            directVal
+          ]
+      ]
     ],
     {masterIdx, Length[mastersAtLevel]}
   ];
@@ -464,7 +558,7 @@ Module[{nLevels, currentBCs, currentPrefactors, matrixDir,
     ];
   ];
 
-  (* Step 3: Transport and integrate level by level *)
+  (* Step 3: Transport and integrate level by level (bottom-up) *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["\n--- Phase 3: Transport and integration ---"];
   ];
@@ -495,30 +589,23 @@ Module[{nLevels, currentBCs, currentPrefactors, matrixDir,
       Return[$Failed];
     ];
 
-    (* Compute boundary for level-1 by integration *)
-    If[level > 1,
-      levelBoundary = ComputeLevelBoundary[
-        updatedFtData, level - 1, transportResult, epsOrder
-      ];
+    (* Store boundary values used for transport (needed for "direct" case) *)
+    transportResult["BoundaryValuesAbove"] = currentBCs;
 
-      If[AssociationQ[levelBoundary],
-        currentBCs = levelBoundary["BoundaryValues"];
-        If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
-          Print["  Level ", level - 1, " boundary computed: ", Length[currentBCs], " masters"];
-        ];
-      ,
-        Print["Error: ComputeLevelBoundary failed at level ", level - 1];
-        Return[$Failed];
+    (* Compute boundary for level-1 by integration *)
+    levelBoundary = ComputeLevelBoundary[
+      updatedFtData, level - 1, transportResult, epsOrder
+    ];
+
+    If[AssociationQ[levelBoundary],
+      currentBCs = levelBoundary["BoundaryValues"];
+      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+        Print["  Level ", level - 1, " boundary computed: ",
+              Length[currentBCs], " masters"];
       ];
     ,
-      (* At level 1: the integration gives boundary for level 0 (the original topology) *)
-      levelBoundary = ComputeLevelBoundary[
-        updatedFtData, 0, transportResult, epsOrder
-      ];
-      currentBCs = If[AssociationQ[levelBoundary],
-        levelBoundary["BoundaryValues"],
-        $Failed
-      ];
+      Print["Error: ComputeLevelBoundary failed at level ", level - 1];
+      Return[$Failed];
     ];
     ,
     {level, nLevels, 1, -1}

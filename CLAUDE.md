@@ -66,7 +66,12 @@ diffexp_refactored/
 │   ├── test_resonant_banana.m        # Resonant equal-mass banana (Jordan+resonance)
 │   ├── test_multiple_polylogarithms.m # Multiple polylogarithms test
 │   ├── test_five_point_nonplanar.m    # Five-point nonplanar test
-│   └── test_topiecewise.m             # Piecewise function conversion test
+│   ├── test_topiecewise.m             # Piecewise function conversion test
+│   ├── test_feynmantrick_algebra.m    # FeynmanTrick propagator algebra tests
+│   ├── test_feynmantrick_fire.m       # FeynmanTrick FIRE6 interface tests
+│   ├── test_feynmantrick_iteration.m  # FeynmanTrick iteration/combination tests
+│   ├── test_feynmantrick_endtoend.m   # FeynmanTrick end-to-end pipeline tests
+│   └── test_feynmantrick_pipeline.m   # Full Feynman trick integration pipeline test
 ├── Docs/                              # Documentation
 │   ├── CoreModules.md                 # Symbols.m, State.m, Utilities.m
 │   ├── SeriesAndEvaluation.md         # SeriesOps.m, Integration.m, Pade.m
@@ -76,11 +81,19 @@ diffexp_refactored/
 │   ├── SingularityDecomposition.md    # Singularity decomposition algorithm
 │   ├── RegularizedIntegration.md      # Regularized integration formulas
 │   └── Kira.md                        # Kira IBP reduction tool guide
-├── Paper/                             # Academic paper
-│   ├── main.tex                       # Paper source
-│   ├── main.pdf                       # Compiled paper
-│   ├── refs.bib                       # Bibliography
-│   └── Plots/                         # Generated plots
+├── FeynmanTrick/                      # Feynman trick integration package
+│   ├── FeynmanTrick.m                 # Main loader (loads submodules)
+│   ├── PropagatorAlgebra.m            # Symbolic propagator manipulation
+│   ├── FIREInterface.m                # FIRE6 IBP reduction interface
+│   ├── MatrixExport.m                 # Matrix export to DiffExp format
+│   ├── EpsPrefactors.m                # ε-prefactor computation for poles
+│   ├── FeynmanTrickIteration.m        # Multi-level iteration logic
+│   ├── BoundaryConditions.m           # Deepest-level boundary (generalized tadpole)
+│   ├── DiffExpIntegration.m           # DiffExp transport + integration bridge
+│   └── IMPLEMENTATION_STATUS.md       # Current pipeline status and known bugs
+├── Papers/                            # Reference papers (gitignored)
+│   └── FeynmanTrick/                  # Hidding & Usovitsch (2022)
+│       └── main.tex                   # "Feynman parameter integration through differential equations"
 └── CLAUDE.md                          # This file
 ```
 
@@ -110,6 +123,70 @@ diffexp_refactored/
 1. Stay focused on the task at hand - don't fix or refactor unrelated code
 2. Each function should be defined in exactly one place
 3. Use `DiffExp\`Symbols\`x` for the line parameter variable throughout
+
+## FeynmanTrick Package
+
+Implements the method from **Papers/FeynmanTrick/main.tex** (Hidding & Usovitsch, "Feynman parameter integration through differential equations", JHEP 2022). When working on the FeynmanTrick code, read this paper for the full mathematical context.
+
+### Key Formulas (from paper)
+
+**Feynman's trick** (eq. 2.1): Combines two propagators into one parametric integral:
+```
+1/(D_i^v_i * D_j^v_j) = Gamma(v_i+v_j)/(Gamma(v_i)*Gamma(v_j)) *
+    ∫₀¹ x^(v_i-1)*(1-x)^(v_j-1) / [x*D_i + (1-x)*D_j]^(v_i+v_j) dx
+```
+
+**Rescaled Feynman parameters** (eq. 2.11):
+```
+x_1' = prod_{i=1}^{n-1} x_i
+x_j' = (1-x_{j-1}) * prod_{i=j}^{n-1} x_i   for j=2,...,n-1
+x_n' = (1-x_{n-1})
+```
+
+**Generalized tadpole** (eq. 2.16, multiloop-ready):
+```
+I_v = Gamma(v - L*d/2) / Gamma(v) * U^(v-(L+1)*d/2) / F^(v-L*d/2)
+```
+where U, F are Symanzik polynomials (computed via FIRE6's UF function), L is loop number, d=4-2ε.
+
+**Differential equation** (eq. 2.9): The combined integral satisfies:
+```
+d/dx I^(k)_{v1+v2,...} = A(x) * I^(k)_{masters}
+```
+where A(x) is computed via IBP reductions (FIRE6) of propagator derivatives.
+
+### Architecture
+
+The pipeline works bottom-up through levels:
+```
+Level N (tadpole) → boundary via generalized tadpole formula
+  ↓ DiffExp transport (piecewise series in [0,1])
+  ↓ Integration: ∫ x^(v1-1)*(1-x)^(v2-1) * r(x) * f(x) dx
+Level N-1 → boundary values
+  ↓ ... repeat ...
+Level 0 (original topology) → final result
+```
+
+### Key Design Decisions
+- Variable `xx` (not `x`) for Feynman parameter to avoid DiffExp conflict
+- FIRE6's UF function for Symanzik polynomials (multiloop-ready from start)
+- Order-by-order ε expansion (not ε-sampling)
+- ε-prefactors: define J_i = ε^{k_i} * I_i to remove poles from matrices
+- DiffExp config: `UseMobius -> False`, `SaveExpansions -> True` for integration
+- Fixed parameter value: 11/23 (avoids singularities)
+
+### Current Test Results (FeynmanTrick)
+- test_feynmantrick_algebra.m: **21/21 PASS**
+- test_feynmantrick_fire.m: **15/15 PASS**
+- test_feynmantrick_iteration.m: **17/17 PASS**
+- test_feynmantrick_endtoend.m: Partially passes (boundary bugs)
+- test_feynmantrick_pipeline.m: Fails at boundary (DeepestLevelBoundary bug)
+
+### Known Issues
+See `FeynmanTrick/IMPLEMENTATION_STATUS.md` for detailed status.
+- **FIXED**: `ComputeLevelBoundary` rewritten with correct recursion mapping
+- **BUG**: `DeepestLevelBoundary` computes Symanzik polys from wrong topology (should use level-0 original, not combined)
+- **BUG**: `TransportLevel` missing `ChopPrecision` in DiffExp config
 
 ## Running Tests
 
@@ -142,6 +219,13 @@ cd Tests && wolframscript -file test_five_point_nonplanar.m
 
 # Piecewise conversion test
 cd Tests && wolframscript -file test_topiecewise.m
+
+# FeynmanTrick tests
+cd Tests && wolframscript -file test_feynmantrick_algebra.m
+cd Tests && wolframscript -file test_feynmantrick_fire.m
+cd Tests && wolframscript -file test_feynmantrick_iteration.m
+cd Tests && wolframscript -file test_feynmantrick_endtoend.m
+cd Tests && wolframscript -file test_feynmantrick_pipeline.m
 ```
 
 ## Running Tests in tmux

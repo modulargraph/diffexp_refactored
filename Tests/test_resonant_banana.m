@@ -65,8 +65,10 @@ Print["Preparing boundary conditions..."];
 PreparedBCsDefault = PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
 
 Print["Transporting to t = -1 with Default strategy..."];
+defaultStart = AbsoluteTime[];
 ResultsDefault = TransportTo[PreparedBCsDefault, <|t -> -1|>];
-Print["Default transport complete.\n"];
+defaultTime = AbsoluteTime[] - defaultStart;
+Print["Default transport complete in ", NumberForm[defaultTime, 4], " seconds.\n"];
 
 (* Now compute with the general singular recurrence *)
 Print["=== Phase 2: Computing with General Singular Recurrence ===\n"];
@@ -87,8 +89,10 @@ Print["Preparing boundary conditions..."];
 PreparedBCsRecurrence = PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
 
 Print["Transporting to t = -1 with General Singular Recurrence..."];
+recurrenceStart = AbsoluteTime[];
 ResultsRecurrence = TransportTo[PreparedBCsRecurrence, <|t -> -1|>];
-Print["Recurrence transport complete.\n"];
+recurrenceTime = AbsoluteTime[] - recurrenceStart;
+Print["Recurrence transport complete in ", NumberForm[recurrenceTime, 4], " seconds.\n"];
 
 (* Compare results *)
 Print["=== Comparison ==="];
@@ -142,6 +146,16 @@ If[maxAbsDiff < 10^-10 || maxRelDiff < 10^-10,
   testsPassed++;
   ,
   Print["  [FAIL] Recurrence and Default results differ significantly"];
+];
+
+(* Timing comparison *)
+Print["\n=== Timing Comparison ==="];
+Print["  Default strategy:    ", NumberForm[defaultTime, 4], " seconds"];
+Print["  Recurrence strategy: ", NumberForm[recurrenceTime, 4], " seconds"];
+If[recurrenceTime < defaultTime,
+  Print["  Speedup: ", NumberForm[defaultTime / recurrenceTime, 3], "x faster with recurrence"];
+  ,
+  Print["  Ratio: ", NumberForm[recurrenceTime / defaultTime, 3], "x slower with recurrence"];
 ];
 
 (* Summary *)

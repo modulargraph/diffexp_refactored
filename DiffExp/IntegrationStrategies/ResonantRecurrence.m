@@ -433,63 +433,67 @@ ComputeRecurrenceRHS[fCoeffs_, bCoeffs_, n_, k_, kMax_, bMaxLogK_,
   rhs
 ];
 
-(* Resolve solvability constraints from the previous step's null-space freedom.
-   When step k+1 left a null-space component, the solvability condition at step k
-   determines it. Returns {updatedFCoeffs, newPrevFreeParams}. *)
-ResolveSolvability[fCoeffsIn_, n_, k_, kMax_, Ln_, prevFreeParams_,
-    bCoeffs_, bMaxLogK_, mCoeffs_, numMCoeffs_,
-    systemSize_, maxOrd_, wp_, tolerance_, ctx_] := Module[
-  {leftNull, fullRhs, overlapMat, rhsVec, alpha, nullVecs, isSingular,
-   fCoeffs = fCoeffsIn, newPrevFreeParams},
+(* Solve the recurrence at a singular step n using the full block system.
+   When L_n has a Jordan block structure, the k-by-k approach with PseudoInverse
+   fails because the null-space/left-null-space overlap is zero for Jordan blocks
+   of size > 1. Instead, we assemble the coupled system across ALL k values:
+     L_n f_{n,k} + (k+1) f_{n,k+1} = sourceRHS_k
+   and solve it simultaneously.
+   Returns a list of vectors: result[[k+1]] = f_{n,k}. *)
+SolveSingularNBlock[Ln_, n_, kMax_, bCoeffs_, bMaxLogK_,
+    fCoeffs_, mCoeffs_, numMCoeffs_,
+    systemSize_, maxOrd_, wp_, tolerance_] := Module[
+  {bigSize, bigMatrix, bigRHS, bigSol, result, sourceRHS, k, i},
 
-  leftNull = NullSpace[Transpose[Ln], Tolerance -> tolerance];
+  bigSize = (kMax + 1) * systemSize;
 
-  If[Length[leftNull] > 0 && Length[prevFreeParams] > 0,
-    (* Recompute the full RHS with current fCoeffs *)
-    fullRhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
-      bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
+  (* Build block matrix: L_n on diagonal, (k+1)*I on super-diagonal *)
+  bigMatrix = ConstantArray[N[0, wp], {bigSize, bigSize}];
+  bigRHS = ConstantArray[N[0, wp], bigSize];
 
-    (* The correction to f_{n,k+1} is sum_j alpha_j * prevNull_j.
-       This changes rhs by -(k+1) * sum_j alpha_j * prevNull_j.
-       Solvability: leftNull . (rhs + correction) = 0 *)
-    overlapMat = Table[
-      leftNull[[a]] . prevFreeParams[[b]],
-      {a, Length[leftNull]}, {b, Length[prevFreeParams]}
-    ] * (-(k + 1));
-    rhsVec = Table[leftNull[[a]] . fullRhs, {a, Length[leftNull]}];
-
-    If[Max[Abs[Flatten[overlapMat]]] > tolerance,
-      alpha = Quiet[Check[
-        LinearSolve[overlapMat, -rhsVec],
-        ConstantArray[N[0, wp], Length[prevFreeParams]]
-      ]];
-      (* Update f_{n, k+1} with the correction *)
-      Do[
-        fCoeffs[[n + 1, k + 2]] += alpha[[j]] * prevFreeParams[[j]];
-        , {j, Length[prevFreeParams]}
-      ];
-      (* Recompute f_{n, k} with corrected RHS *)
-      fullRhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
-        bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
-      {fCoeffs[[n + 1, k + 1]], nullVecs, isSingular} =
-        SolveRecurrenceStep[Ln, fullRhs, systemSize, ctx];
-      newPrevFreeParams = If[isSingular, nullVecs, {}];
-      Return[{fCoeffs, newPrevFreeParams}]
+  Do[
+    (* Diagonal block at position k: L_n *)
+    bigMatrix[[k * systemSize + 1 ;; (k + 1) * systemSize,
+               k * systemSize + 1 ;; (k + 1) * systemSize]] = Ln;
+    (* Super-diagonal block: (k+1)*I *)
+    If[k < kMax,
+      bigMatrix[[k * systemSize + 1 ;; (k + 1) * systemSize,
+                 (k + 1) * systemSize + 1 ;; (k + 2) * systemSize]] =
+        N[(k + 1) * IdentityMatrix[systemSize], wp];
     ];
+    (* Source RHS: β_{n,k} + Σ M_i f_{n-i,k} (without the -(k+1)f_{n,k+1} coupling) *)
+    sourceRHS = If[k <= bMaxLogK && n + 1 <= Length[bCoeffs] && k + 1 <= Length[bCoeffs[[1]]],
+      N[bCoeffs[[n + 1, k + 1]], wp],
+      ConstantArray[N[0, wp], systemSize]
+    ];
+    Do[
+      sourceRHS += mCoeffs[[i + 1]] . fCoeffs[[n - i + 1, k + 1]];
+      , {i, 1, Min[n, numMCoeffs]}
+    ];
+    bigRHS[[k * systemSize + 1 ;; (k + 1) * systemSize]] = sourceRHS;
+    , {k, 0, kMax}
   ];
 
-  (* No correction applied; determine current null space *)
-  nullVecs = NullSpace[Ln, Tolerance -> tolerance];
-  newPrevFreeParams = If[Length[nullVecs] > 0, nullVecs, {}];
-  {fCoeffs, newPrevFreeParams}
+  (* Solve using PseudoInverse (handles the singular block system) *)
+  bigSol = PseudoInverse[N[bigMatrix, wp], Tolerance -> tolerance] . bigRHS;
+
+  (* Extract results: result[[k+1]] = f_{n,k} *)
+  result = Table[
+    bigSol[[k * systemSize + 1 ;; (k + 1) * systemSize]],
+    {k, 0, kMax}
+  ];
+
+  result
 ];
 
 (* Run the core particular recurrence for a given base exponent sigma.
+   At non-singular steps (L_n invertible): direct back-substitution k-by-k.
+   At singular steps (L_n has zero eigenvalues): full block system solve.
    Returns fCoeffs[[n+1, k+1]] = vector of length systemSize. *)
 RunParticularRecurrence[sigma_, bCoeffs_, bMaxLogK_, kMax_,
     M0_, mCoeffs_, numMCoeffs_,
     systemSize_, maxOrd_, wp_, tolerance_, ctx_] := Module[
-  {fCoeffs, Ln, rhs, prevFreeParams, nullVecs, isSingular, n, k, result},
+  {fCoeffs, Ln, rhs, det, blockResult, n, k},
 
   fCoeffs = Table[
     ConstantArray[N[0, wp], systemSize],
@@ -498,28 +502,25 @@ RunParticularRecurrence[sigma_, bCoeffs_, bMaxLogK_, kMax_,
 
   Do[
     Ln = N[(sigma + n) * IdentityMatrix[systemSize] - M0, wp];
-    prevFreeParams = {};
+    det = Det[Ln];
 
-    Do[
-      (* Compute RHS *)
-      rhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
-        bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
-
-      (* Solve L_n . f_{n,k} = rhs *)
-      {fCoeffs[[n + 1, k + 1]], nullVecs, isSingular} =
-        SolveRecurrenceStep[Ln, rhs, systemSize, ctx];
-
-      (* Handle solvability with previous free parameters *)
-      If[isSingular && Length[prevFreeParams] > 0,
-        {fCoeffs, prevFreeParams} =
-          ResolveSolvability[fCoeffs, n, k, kMax, Ln, prevFreeParams,
-            bCoeffs, bMaxLogK, mCoeffs, numMCoeffs,
-            systemSize, maxOrd, wp, tolerance, ctx];
-        ,
-        prevFreeParams = If[isSingular, nullVecs, {}];
+    If[Abs[det] < tolerance,
+      (* Singular step: solve the full block system across all k *)
+      blockResult = SolveSingularNBlock[Ln, n, kMax, bCoeffs, bMaxLogK,
+        fCoeffs, mCoeffs, numMCoeffs,
+        systemSize, maxOrd, wp, tolerance];
+      Do[
+        fCoeffs[[n + 1, k + 1]] = blockResult[[k + 1]];
+        , {k, 0, kMax}
       ];
-
-      , {k, kMax, 0, -1}
+      ,
+      (* Non-singular step: direct back-substitution *)
+      Do[
+        rhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
+          bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
+        fCoeffs[[n + 1, k + 1]] = LinearSolve[Ln, rhs];
+        , {k, kMax, 0, -1}
+      ];
     ];
 
     , {n, 0, maxOrd}
@@ -627,8 +628,10 @@ ComputeUnifiedParticular[bVec_, resInfo_Association,
      (from xf' = M(x)f + xB(x): the x*B shifts power by +1) *)
   sigma = bLeadPow + 1;
 
-  (* Initial K_max: log depth of source + max log power from resonance structure *)
-  kMaxInitial = bMaxLogK + Max[resInfo["MaxLogPowers"]];
+  (* Initial K_max: log depth of source + max Jordan block size among resonating eigenvalues.
+     MaxLogPowers = blockSize - 1, so we add +1 to get blockSize.
+     This ensures the block system at singular n is fully solvable. *)
+  kMaxInitial = bMaxLogK + Max[resInfo["MaxLogPowers"]] + 1;
   kMax = kMaxInitial;
 
   (* Extract beta coefficients: beta_{n,k,comp} = coeff of x^{sigma-1+n} (Logx)^k in bVec *)

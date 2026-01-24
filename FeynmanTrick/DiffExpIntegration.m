@@ -81,16 +81,19 @@ Module[{fixedVal, precision, expOrder, verbosity,
     ];
   ];
 
-  (* Configure DiffExp for this level *)
+  (* Configure DiffExp for this level.
+     All config keys must be fully qualified to match DiffExp's internal symbols,
+     since this package's BeginPackage restricts the context path. *)
   diffExpConfig = {
-    MatrixDirectory -> matrixDir,
+    DiffExp`State`MatrixDirectory -> matrixDir,
     System`WorkingPrecision -> precision,
-    ExpansionOrder -> expOrder,
-    EpsilonOrder -> epsOrder,
-    UseMobius -> False,  (* Required for integration! *)
-    UsePade -> False,
-    Verbosity -> verbosity,
-    SegmentationStrategy -> "Predivision"
+    DiffExp`State`ChopPrecision -> precision - 50,
+    DiffExp`State`ExpansionOrder -> expOrder,
+    DiffExp`State`EpsilonOrder -> epsOrder,
+    DiffExp`State`UseMobius -> False,  (* Required for integration! *)
+    DiffExp`State`UsePade -> False,
+    DiffExp`State`Verbosity -> verbosity,
+    DiffExp`State`SegmentationStrategy -> "Predivision"
   };
 
   If[verbosity >= 1,
@@ -99,46 +102,60 @@ Module[{fixedVal, precision, expOrder, verbosity,
 
   DiffExp`LoadConfiguration[diffExpConfig];
 
-  (* Prepare boundary conditions at xx = fixedVal *)
-  (* boundaryValues is a list of lists: {{bc_eps0, bc_eps1, ...}, ...} *)
-  (* One entry per master integral *)
-  bcs = boundaryValues;
+  (* After loading, DiffExp auto-detects the variable from filenames (dxx_*.m).
+     Extract the detected variable symbol so our points match DiffExp's internal state. *)
+  Module[{detectedVar},
+    detectedVar = First[DiffExp`State`FEC[System`Variables]];
+    If[verbosity >= 2,
+      Print["  DiffExp detected variable: ", detectedVar, " (context: ", Context[detectedVar], ")"];
+    ];
 
-  (* Transport from fixedVal towards 0 (lower bound) *)
-  If[verbosity >= 1,
-    Print["  Transporting from xx=", fixedVal, " towards 0..."];
-  ];
+    (* Prepare boundary conditions at xx = fixedVal *)
+    bcs = boundaryValues;
 
-  startPoint = <|Global`xx -> SetPrecision[fixedVal, precision]|>;
+    (* Transport from fixedVal towards 0 (lower bound) *)
+    If[verbosity >= 1,
+      Print["  Transporting from xx=", fixedVal, " towards 0..."];
+    ];
 
-  (* Transport to xx = 0 (or close to it) *)
-  resultToLower = Quiet[
-    DiffExp`TransportTo[
+    (* Use the detected variable symbol for start/end points.
+       DiffExp now handles singular endpoints by returning the series expansion
+       instead of trying to evaluate at the singularity. *)
+    startPoint = Association[detectedVar -> SetPrecision[fixedVal, precision]];
+
+    (* Transport towards xx = 0 (singular endpoint handled by DiffExp) *)
+    resultToLower = DiffExp`Transport`TransportTo[
       {startPoint, bcs},
-      <|Global`xx -> 0|>,
+      Association[detectedVar -> 0],
       1,  (* endpoint *)
       True  (* SaveExpansions *)
-    ],
-    {General::shdw, Symbol::shdw}
-  ];
+    ];
 
-  If[verbosity >= 1,
-    Print["  Transporting from xx=", fixedVal, " towards 1..."];
-  ];
+    If[verbosity >= 2,
+      Print["  Lower transport result head: ", Head[resultToLower]];
+      If[AssociationQ[resultToLower], Print["  Lower keys: ", Keys[resultToLower]]];
+    ];
 
-  (* Reload config for transport in other direction *)
-  DiffExp`LoadConfiguration[diffExpConfig];
+    If[verbosity >= 1,
+      Print["  Transporting from xx=", fixedVal, " towards 1..."];
+    ];
 
-  (* Transport to xx = 1 *)
-  resultToUpper = Quiet[
-    DiffExp`TransportTo[
+    (* Reload config for transport in other direction *)
+    DiffExp`LoadConfiguration[diffExpConfig];
+
+    (* Transport towards xx = 1 (singular endpoint handled by DiffExp) *)
+    resultToUpper = DiffExp`Transport`TransportTo[
       {startPoint, bcs},
-      <|Global`xx -> 1|>,
+      Association[detectedVar -> 1],
       1,
       True  (* SaveExpansions *)
-    ],
-    {General::shdw, Symbol::shdw}
-  ];
+    ];
+
+    If[verbosity >= 2,
+      Print["  Upper transport result head: ", Head[resultToUpper]];
+      If[AssociationQ[resultToUpper], Print["  Upper keys: ", Keys[resultToUpper]]];
+    ];
+  ];  (* End Module with detectedVar *)
 
   (* Combine segment data from both transports *)
   If[AssociationQ[resultToLower] && AssociationQ[resultToUpper],
@@ -164,8 +181,8 @@ Module[{fixedVal, precision, expOrder, verbosity,
   ,
     Print["Error: Transport failed."];
     If[verbosity >= 2,
-      Print["  Lower result: ", Head[resultToLower]];
-      Print["  Upper result: ", Head[resultToUpper]];
+      Print["  Lower result head: ", Head[resultToLower]];
+      Print["  Upper result head: ", Head[resultToUpper]];
     ];
     $Failed
   ]

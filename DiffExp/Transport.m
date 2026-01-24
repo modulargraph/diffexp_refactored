@@ -439,7 +439,7 @@ IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_L
 
 (* TransportTo function - transports boundary conditions *)
 TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 : _?NumericQ : 1, SaveExpansions : _?BooleanQ : False, SampleAtList_List : {}] := Module[
-  {line = If[line2[[0]] === List, line2 // Association // KeySort, line2 // KeySort], to, tempResult, bcs, FixAt, singularities, imaginarySingularities, relevantSingularities, SingularitySegments, PoleIntervals, CurrLine, CurrLineNoMobius = Null, CurrIntegrated, CurrIntervalCurrLine, CurrIntervalLine, Done = False, overlapCheck, CurrEvalPoint, CurrEvalPointCurrLine, CurrEval, Currbcs, AllIntegrationData = {}, currentCenter, EvaluateCurrPoint, NextIsPole = False, SegmentCounter = 1, lineRelation, CurrIntervalLinePos, CurrIntervalLineNeg, CurrEvalError, CurrIntegratedError, CurrbcsError, PrintError, CurrError, accumulatedError = 0, accumulatedErrors = ConstantArray[0, {DiffExp`State`NumIntegrals, DiffExp`State`EpsilonOrderVal + 1}], FixWithin, SegmentsToIntegrate, UpdateMatrixExpansionError, TimeStart, TimeStart0, LineReturn, FailedLine, ExpansionsIndeterminates = {}, previousBoundaryConditions, CurrStatusBackup, BoundaryFixPoint, CurrEvalErrorEx, CurrEvalError1, CurrEvalError2, CurrEvalAtBoundaryFixPoint, CurrEvalEx, AllSegmentsPredivision, tempFile, CompressedTermForExport, CompressedTermForExportFN, CurrLineLR, FullLineLR, cachedPoleIntervals, RepeatingSegment, LastEvaluation, LastSavedData, LastLine, ExpansionOrders, DigitsNeeded},
+  {line = If[line2[[0]] === List, line2 // Association // KeySort, line2 // KeySort], to, tempResult, bcs, FixAt, singularities, imaginarySingularities, relevantSingularities, SingularitySegments, PoleIntervals, CurrLine, CurrLineNoMobius = Null, CurrIntegrated, CurrIntervalCurrLine, CurrIntervalLine, Done = False, overlapCheck, CurrEvalPoint, CurrEvalPointCurrLine, CurrEval, Currbcs, AllIntegrationData = {}, currentCenter, EvaluateCurrPoint, NextIsPole = False, SegmentCounter = 1, lineRelation, CurrIntervalLinePos, CurrIntervalLineNeg, CurrEvalError, CurrIntegratedError, CurrbcsError, PrintError, CurrError, accumulatedError = 0, accumulatedErrors = ConstantArray[0, {DiffExp`State`NumIntegrals, DiffExp`State`EpsilonOrderVal + 1}], FixWithin, SegmentsToIntegrate, UpdateMatrixExpansionError, TimeStart, TimeStart0, LineReturn, FailedLine, ExpansionsIndeterminates = {}, previousBoundaryConditions, CurrStatusBackup, BoundaryFixPoint, CurrEvalErrorEx, CurrEvalError1, CurrEvalError2, CurrEvalAtBoundaryFixPoint, CurrEvalEx, AllSegmentsPredivision, tempFile, CompressedTermForExport, CompressedTermForExportFN, CurrLineLR, FullLineLR, cachedPoleIntervals, RepeatingSegment, LastEvaluation, LastSavedData, LastLine, ExpansionOrders, DigitsNeeded, EndpointIsSingularity},
 
   DiffExp`State`BenchmarkData = Association[];
   DiffExp`State`BenchmarkData["TimeStart"] = AbsoluteTime[];
@@ -528,6 +528,16 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
   DiffExp`MatrixLoading`InitializeIntegrationSequence[line];
 
   {singularities, imaginarySingularities} = DiffExp`LineSegmentation`FindMatrixSingularities[line, True, {FixAt, to}];
+
+  (* Detect if the target endpoint is a singularity *)
+  EndpointIsSingularity = MemberQ[
+    DiffExp`Utilities`PChop[singularities // N[#, DiffExp`State`ChopPrecisionVal] &],
+    DiffExp`Utilities`PChop[N[to, DiffExp`State`ChopPrecisionVal]]
+  ];
+  If[EndpointIsSingularity,
+    DiffExp`Utilities`PrintInfo["Target endpoint x = ", to // N,
+      " is a singularity. Will return series expansion instead of evaluating."][1];
+  ];
 
   relevantSingularities = Select[singularities, FixAt <= # <= to || to <= # <= FixAt &];
   If[DiffExp`State`FEC[UseMobius] === True,
@@ -959,12 +969,25 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
     If[IntervalContainsQ[CurrIntervalLine, to],
       CurrEvalPoint = to;
       CurrEvalPointCurrLine = DiffExp`LineSegmentation`RelateLinesPoint[CurrLine, line, CurrEvalPoint];
-      EvaluateCurrPoint[];
 
-      Currbcs = {line /. DiffExp`Symbols`x -> CurrEvalPoint, CurrEval};
-      If[!DiffExp`State`FEC["EstimateError"] === False,
-        CurrbcsError = {line /. DiffExp`Symbols`x -> CurrEvalPoint, CurrEvalError};
-        PrintError[];
+      If[EndpointIsSingularity,
+        (* Singular endpoint: store the series expansion without evaluating at the point *)
+        DiffExp`Utilities`PrintInfo["Reached singular endpoint. Storing series expansion."][1];
+
+        (* Save the integrated series as the "evaluation" - it contains the x-dependent expansion *)
+        CurrEval = DiffExp`SeriesOps`ApplyAnalyticContinuation[CurrIntegrated] //
+          DiffExp`AnalyticContinuation`Project\[Theta]s;
+
+        Currbcs = {line /. DiffExp`Symbols`x -> CurrEvalPoint, CurrEval};
+      ,
+        (* Normal case: evaluate at the non-singular endpoint *)
+        EvaluateCurrPoint[];
+
+        Currbcs = {line /. DiffExp`Symbols`x -> CurrEvalPoint, CurrEval};
+        If[!DiffExp`State`FEC["EstimateError"] === False,
+          CurrbcsError = {line /. DiffExp`Symbols`x -> CurrEvalPoint, CurrEvalError};
+          PrintError[];
+        ];
       ];
 
       Done = True;
@@ -1092,6 +1115,7 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
 
   <|
     "KinematicPoint" -> LineReturn,
+    "EndpointIsSingularity" -> EndpointIsSingularity,
     "SeriesValues" -> CurrEval,
     "ErrorEstimates" -> If[!DiffExp`State`FEC["EstimateError"] === False,
       accumulatedErrors, Missing["NotComputed"]],

@@ -88,63 +88,32 @@ Level 0 (original topology, all masters)
 | `MatrixExport.m` | Export to DiffExp format | ✓ Working |
 | `EpsPrefactors.m` | Find eps^k prefactors to remove poles | ✓ Working |
 | `FeynmanTrickIteration.m` | Multi-level orchestrator | ✓ Working |
-| `BoundaryConditions.m` | Tadpole formula, Symanzik polynomials | **BUG** (see below) |
-| `DiffExpIntegration.m` | Transport, integration, pipeline | ✓ Fixed (untested end-to-end) |
+| `BoundaryConditions.m` | Tadpole formula, Symanzik polynomials | ✓ Fixed (uses original topology + rescaled params) |
+| `DiffExpIntegration.m` | Transport, integration, pipeline | ✓ Fixed (ChopPrecision added) |
 
 ---
 
-## Current Bug: `DeepestLevelBoundary` in BoundaryConditions.m
+## FIXED: `DeepestLevelBoundary` in BoundaryConditions.m
 
-### Problem
+**Previously:** The function computed Symanzik polynomials from the deepest-level
+topology's combined propagators. FIRE6's UF returned garbage because the combined
+propagators had numerical kinematic values already substituted.
 
-The function computes Symanzik polynomials from the DEEPEST-LEVEL topology's
-propagators, which are already combined. This is wrong. The output shows:
-```
-U = {l1}           ← This is just the loop momenta list!
-F = {expressions}  ← These are the combined propagators, not Symanzik F!
-```
-
-FIRE6's UF function returns `{loopMomenta, propagators, replacements}` unchanged
-because:
-1. The combined propagators at the deepest level have numerical kinematic values
-   already substituted, making UF unable to detect the quadratic structure
-2. The UF call may not be reaching FIRE6 at all (context/loading issue)
-
-### Correct Approach
-
-Per the paper (eq 2.16), U_tilde and F_tilde should be computed as:
-
-1. Call `UF[loopMomenta, propagators, replacements]` on the **ORIGINAL** (level 0)
-   topology's propagators (symbolic, with proper scalar product rules)
-2. This gives `{U(x[1],...,x[n]), F(x[1],...,x[n]), {x[1],...,x[n]}}`
-   where x[i] are the standard Feynman parameters
-3. Compute the rescaled parameters `x'_j` as functions of the iteration's
-   Feynman parameters (following eq 2.11 adapted for the specific combination sequence)
-4. Substitute the rescaled parameters into U and F: `U_tilde = U /. x[j] -> x'_j`
-5. Set all Feynman parameters to 11/23, giving numerical U_tilde, F_tilde
-6. Apply the tadpole formula: `Gamma(v-Ld/2)/Gamma(v) * U_tilde^(...) / F_tilde^(...)`
-
-### Additional Fix Needed
-
-The rescaling formula in eq 2.11 is written for the case where we always combine
-positions {1,2} (leftmost two). For a general combination sequence like
-`{{1,2}, {1,3}, {1,4}}`, the rescaling needs to track which propagators get
-combined at each step and derive the corresponding x' → x mapping.
-
-For a general combination sequence, `D_{1...n} = x'_1*D_1 + ... + x'_n*D_n`
-where x'_j can be read off from the recursive combination. The simplest approach:
-just compute `D_combined` symbolically with Feynman parameters, then read off the
-coefficients of each original D_j to get x'_j.
+**Fix:** Now uses the ORIGINAL topology's propagators (from `ftData["TopTopology"]`)
+for the Symanzik computation. The rescaled Feynman parameters are computed via
+`RescaledFeynmanParametersFromSequence`, which traces the combination sequence
+symbolically to determine x'_j (the coefficient of each original D_j in D_combined).
+This works for any combination sequence, not just "always combine leftmost two."
 
 ---
 
-## Current Bug: DiffExp Configuration
+## FIXED: DiffExp Configuration in TransportLevel
 
-When `WorkingPrecision -> 200` is set, DiffExp requires `ChopPrecision` to be
-smaller. The TransportLevel function needs to set:
-```mathematica
-ChopPrecision -> precision - 50  (* or similar *)
-```
+**Previously:** `TransportLevel` didn't set `ChopPrecision`, so DiffExp used its
+default (250). When `WorkingPrecision -> 200`, this triggered the error
+"ChopPrecision should be smaller than WorkingPrecision."
+
+**Fix:** Added `DiffExp`State`ChopPrecision -> precision - 50` to the config.
 
 ---
 
@@ -157,13 +126,13 @@ ChopPrecision -> precision - 50  (* or similar *)
 - `test_feynmantrick_endtoend.m`: Partially passes (boundary/transport sections have bugs)
 - `test_feynmantrick_pipeline.m`: **NEW** — Full end-to-end pipeline (fails at boundary computation due to above bug)
 
-### Pipeline test output (what works)
+### Pipeline test output
 ```
 Part 1: Define Topology — PASS (4 propagators, 3 levels)
 Part 2: Build & Compute — PASS (Level 3: 1 master, Level 2: 4 masters, Level 1: 7 masters)
          Export — PASS (all matrix files created)
-Part 3: Boundary — FAIL (UF returns garbage, see bug above)
-Part 4-6: Transport/Integration — not reached
+Part 3: Boundary — Fixed (now uses original topology + rescaled Feynman params)
+Part 4-6: Transport/Integration — to be validated
 ```
 
 ---
@@ -202,19 +171,15 @@ via `ReduceIntegrals` (FIRE6 IBP), giving coefficients c_j(xx). Then:
 
 ## Next Steps (Priority Order)
 
-1. **Fix `DeepestLevelBoundary`**: Compute U, F from original topology, apply rescaled
-   Feynman parameters, then evaluate tadpole formula. Also fix UF loading/context.
+1. **Run pipeline test**: Both boundary bugs are fixed. Run `test_feynmantrick_pipeline.m`
+   end-to-end to validate the full pipeline.
 
-2. **Fix TransportLevel config**: Add `ChopPrecision -> precision - 50` to DiffExp config.
-
-3. **Run pipeline test**: After fixes, `test_feynmantrick_pipeline.m` should work end-to-end.
-
-4. **Validate against known result**: The 1-loop massless box at s=-1, t=-1/3 has
+2. **Validate against known result**: The 1-loop massless box at s=-1, t=-1/3 has
    known analytic values. Compare pipeline output.
 
-5. **(Future) Physical region**: Add i*delta prescriptions for threshold crossings.
+3. **(Future) Physical region**: Add i*delta prescriptions for threshold crossings.
 
-6. **(Future) More examples**: Double box (topo7), double pentagon (5p from paper).
+4. **(Future) More examples**: Double box (topo7), double pentagon (5p from paper).
 
 ---
 

@@ -27,70 +27,73 @@ at the deepest level of the Feynman trick iteration. Returns \
 \"EpsMinPower\" -> minPow|>.";
 
 RescaledFeynmanParameters::usage =
-  "RescaledFeynmanParameters[combinationSequence, numOriginalProps] returns the \
-rescaled Feynman parameters x_j' as functions of the Feynman parameters x_1,...,x_{n-1}, \
-following eq. (2.11) of the paper.";
+  "RescaledFeynmanParameters[numProps] returns the rescaled Feynman parameters x_j' \
+as functions of the Feynman parameters x_1,...,x_{n-1}, following eq. (2.11) of the paper \
+(always combine leftmost two).";
+
+RescaledFeynmanParametersFromSequence::usage =
+  "RescaledFeynmanParametersFromSequence[numProps, combinationSequence] returns the \
+rescaled Feynman parameters x_j' for a general combination sequence by tracing \
+D_combined = x'_1*D_1 + ... + x'_n*D_n symbolically.";
 
 Begin["`Private`"];
 
 (* ============================================================ *)
-(* Symanzik Polynomial Computation via FIRE6's UF               *)
+(* Symanzik Polynomial Computation                              *)
+(* Computes U and F directly by completing the square over      *)
+(* loop momenta. Same algorithm as FIRE6's UF function.         *)
 (* ============================================================ *)
 
-(* Load FIRE6.m if not already loaded *)
-loadFIRE6[] := Module[{firePath},
-  If[!ValueQ[Global`UF] || Head[Global`UF] =!= Symbol,
-    firePath = FileNameJoin[{
-      ParentDirectory[DirectoryName[$InputFileName]],
-      "Dependencies", "fire", "FIRE6", "FIRE6.m"
-    }];
-    If[FileExistsQ[firePath],
-      Block[{$ContextPath},
-        Quiet[Get[firePath], {General::shdw, Symbol::shdw}];
-      ];
-      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-        Print["Loaded FIRE6.m for Symanzik polynomial computation."];
-      ];
-    ,
-      (* Try alternative path *)
-      firePath = FeynmanTrick`Private`$FTConfig["FIREPath"];
-      If[StringQ[firePath],
-        firePath = FileNameJoin[{DirectoryName[firePath], "..", "FIRE6.m"}];
-        If[FileExistsQ[firePath],
-          Block[{$ContextPath}, Quiet[Get[firePath], {General::shdw}]];
-        ];
-      ];
-    ];
-  ];
-];
-
-
 ComputeSymanzikPolynomials[propagators_List, loopMomenta_List, replacements_List] :=
-Module[{result, U, F, vars},
-  loadFIRE6[];
+Module[{nProps, vs, degree, coeff, i, t2, t1, t0, k, U, F, cz},
+  nProps = Length[propagators];
 
-  (* Call FIRE6's UF function:
-     UF[loopMomenta, propagators, scalarProductRules]
-     Returns {U, F, feynmanVars}
-     where U is the first Symanzik polynomial and F is the second *)
-  result = UF[loopMomenta, propagators, replacements];
+  (* Feynman parameter variables: x[1], ..., x[n] *)
+  vs = Table[Global`x[j], {j, nProps}];
 
-  If[result === {0, 0, {}},
-    Print["Error: UF returned degenerate result. Check propagator definitions."];
-    Return[$Failed];
-  ];
+  (* Rationalize the scalar product replacement rules *)
+  cz = Map[Rationalize[#, 0] &, replacements, {0, Infinity}];
 
-  U = result[[1]];
-  F = result[[2]];
-  vars = result[[3]];
+  (* Combined denominator with Feynman parameters:
+     degree = -Sum[D_i * x_i, {i, 1, n}]
+     Note: propagators are D_j = -q_j^2 + m_j^2, so -D_j = q_j^2 - m_j^2 *)
+  degree = -Sum[propagators[[i]] * vs[[i]], {i, nProps}];
+
+  (* Complete the square for each loop momentum *)
+  coeff = 1;
+  Do[
+    k = loopMomenta[[i]];
+    t2 = Coefficient[degree, k, 2];
+    t1 = Coefficient[degree, k, 1];
+    t0 = Coefficient[degree, k, 0];
+
+    (* Apply scalar product rules *)
+    t2 = t2 //. cz;
+    t1 = t1 //. cz;
+    t0 = t0 //. cz;
+
+    If[t2 === 0,
+      Print["Error: Coefficient of ", k, "^2 is zero. Check propagator definitions."];
+      Return[$Failed];
+    ];
+
+    coeff = coeff * t2;
+    degree = Together[t0 - t1^2 / (4 * t2)];
+  , {i, Length[loopMomenta]}];
+
+  (* U = product of quadratic coefficients (first Symanzik polynomial) *)
+  U = Together[coeff] //. cz;
+
+  (* F = -coeff * degree (second Symanzik polynomial, includes masses) *)
+  F = ExpandAll[Together[-coeff * degree] //. cz] //. cz;
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
     Print["  Symanzik U = ", U];
     Print["  Symanzik F = ", F];
-    Print["  Feynman parameters: ", vars];
+    Print["  Feynman parameters: ", vs];
   ];
 
-  {U, F, vars}
+  {U, F, vs}
 ];
 
 
@@ -122,6 +125,32 @@ Module[{n, params, rescaled},
   ];
 
   {rescaled, params}
+];
+
+
+(* General rescaling from arbitrary combination sequence.
+   Traces D_combined = x'_1*D_1 + ... + x'_n*D_n by symbolically
+   applying each combination step. Works for any sequence. *)
+RescaledFeynmanParametersFromSequence[numProps_Integer, combinationSequence_List] :=
+Module[{nLevels, params, coeffs, k, ci, cj, finalPos, rescaled},
+  nLevels = Length[combinationSequence];
+  params = Table[Global`xFT[k], {k, nLevels}];
+
+  (* coeffs[[p]] = list of coefficients of original props in the
+     propagator currently at position p. Start as identity. *)
+  coeffs = IdentityMatrix[numProps];
+
+  Do[
+    {ci, cj} = combinationSequence[[k]];
+    (* Position ci gets: param*old_ci + (1-param)*old_cj *)
+    coeffs[[ci]] = params[[k]] * coeffs[[ci]] + (1 - params[[k]]) * coeffs[[cj]];
+  , {k, nLevels}];
+
+  (* The fully combined propagator is at the last combination's first position *)
+  finalPos = combinationSequence[[-1, 1]];
+  rescaled = coeffs[[finalPos]];  (* length = numProps *)
+
+  {Expand /@ rescaled, params}
 ];
 
 
@@ -163,10 +192,16 @@ Module[{eps, gammaArg, gammaPrefactor, UPow, FPow, fullExpr, series, coeffs, min
   UPow = v - (numLoops + 1) * (2 - eps);  (* v - (L+1)*d/2 *)
   FPow = v - numLoops * (2 - eps);  (* v - L*d/2 *)
 
-  (* Build the expression symbolically *)
-  fullExpr = Gamma[gammaArg] / Gamma[v] *
-             SetPrecision[Uval, precision]^UPow /
-             SetPrecision[Fval, precision]^FPow;
+  (* Build the expression symbolically.
+     Handle U=1 case explicitly: 1^(symbolic) doesn't simplify in Mathematica. *)
+  Module[{uTerm, fTerm},
+    uTerm = If[Chop[Uval - 1, 10^(-precision/2)] === 0,
+      1,  (* U=1 for 1-loop; avoid 1.^(symbolic) which doesn't simplify *)
+      SetPrecision[Uval, precision]^UPow
+    ];
+    fTerm = SetPrecision[Fval, precision]^FPow;
+    fullExpr = Gamma[gammaArg] / Gamma[v] * uTerm / fTerm;
+  ];
 
   (* Series expand in eps around 0 *)
   series = Series[fullExpr, {eps, 0, epsOrder}];
@@ -215,10 +250,9 @@ Module[{d, gammaArg, UPow, FPow, result},
 (* ============================================================ *)
 
 DeepestLevelBoundary[ftData_Association, epsOrder_Integer:4] :=
-Module[{deepestLevel, levelData, topology, propagators, loopMomenta,
+Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
         externalMomenta, replacements, numLoops, masters,
-        UF, U, F, feynVars, rescaledParams, paramValues,
-        numOriginalProps, fixedValue, kinPoint,
+        ufResult, U, F, feynVars, numOriginalProps, fixedValue, kinPoint,
         Uval, Fval, bcValues, epsPrefactors, epsMinPower,
         combinationSequence, nLevels},
 
@@ -232,47 +266,75 @@ Module[{deepestLevel, levelData, topology, propagators, loopMomenta,
   ];
 
   levelData = ftData["Levels"][deepestLevel];
-  topology = levelData["Topology"];
-  propagators = topology["Propagators"];
-  loopMomenta = topology["LoopMomenta"];
-  externalMomenta = topology["ExternalMomenta"];
-  replacements = topology["Replacements"];
-  numLoops = Length[loopMomenta];
   masters = levelData["Masters"];
+
+  (* Use the ORIGINAL topology (level 0) for Symanzik polynomial computation.
+     Per eq. 2.16 of the paper: U_tilde and F_tilde are obtained from the
+     original Symanzik polynomials by substituting rescaled Feynman parameters. *)
+  originalTopology = ftData["TopTopology"];
+  propagators = originalTopology["Propagators"];
+  loopMomenta = originalTopology["LoopMomenta"];
+  externalMomenta = originalTopology["ExternalMomenta"];
+  replacements = originalTopology["Replacements"];
+  numLoops = Length[loopMomenta];
+  numOriginalProps = Length[propagators];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Computing deepest level boundary at level ", deepestLevel];
     Print["  Number of masters: ", Length[masters]];
     Print["  Number of loops: ", numLoops];
+    Print["  Original propagators: ", numOriginalProps];
   ];
 
   (* Get fixed parameter value and kinematic point *)
   fixedValue = ftData["FixedParamValue"];
   kinPoint = ftData["NumericalPoint"];
+  combinationSequence = ftData["CombinationSequence"];
 
-  (* Compute Symanzik polynomials for the deepest-level topology *)
-  UF = ComputeSymanzikPolynomials[propagators, loopMomenta, replacements];
-  If[UF === $Failed, Return[$Failed]];
-  {U, F, feynVars} = UF;
-
-  (* Substitute the Feynman parameter (xx) at its fixed value *)
-  (* The deepest level's propagators contain FeynmanTrick`xx as a variable *)
-  (* Also substitute any remaining kinematic values *)
-  Module[{allRules, xxSym},
-    xxSym = FeynmanTrick`xx;
-    allRules = Join[
-      {xxSym -> fixedValue},
-      kinPoint,
-      replacements
-    ];
-
-    Uval = U //. allRules // N;
-    Fval = F //. allRules // N;
-  ];
+  (* Compute Symanzik polynomials for the ORIGINAL topology *)
+  ufResult = ComputeSymanzikPolynomials[propagators, loopMomenta, replacements];
+  If[ufResult === $Failed, Return[$Failed]];
+  {U, F, feynVars} = ufResult;
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-    Print["  U(numerical) = ", Uval];
-    Print["  F(numerical) = ", Fval];
+    Print["  Symanzik U (symbolic) = ", U];
+    Print["  Symanzik F (symbolic) = ", F];
+    Print["  Feynman variables from UF: ", feynVars];
+  ];
+
+  (* Compute rescaled Feynman parameters from the combination sequence.
+     This traces D_combined = x'_1*D_1 + ... + x'_n*D_n symbolically. *)
+  Module[{rescaled, params, rescaledNumerical, paramRules, subRules},
+    {rescaled, params} = RescaledFeynmanParametersFromSequence[
+      numOriginalProps, combinationSequence
+    ];
+
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+      Print["  Rescaled Feynman parameters (symbolic): ", rescaled];
+    ];
+
+    (* Evaluate at fixed parameter value (all xx_k = fixedValue) *)
+    paramRules = Thread[params -> Table[fixedValue, {nLevels}]];
+    rescaledNumerical = rescaled /. paramRules;
+
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+      Print["  Rescaled Feynman parameters (numerical): ", rescaledNumerical];
+      Print["  Sum of rescaled params: ", Total[rescaledNumerical]];
+    ];
+
+    (* Substitute rescaled params into U and F, plus kinematic values *)
+    subRules = Join[
+      Thread[feynVars -> rescaledNumerical],
+      kinPoint
+    ];
+
+    Uval = U /. subRules // Expand // N;
+    Fval = F /. subRules // Expand // N;
+  ];
+
+  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+    Print["  U_tilde(numerical) = ", Uval];
+    Print["  F_tilde(numerical) = ", Fval];
   ];
 
   (* For each master integral, compute the boundary condition *)

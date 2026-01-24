@@ -60,6 +60,11 @@ DefiniteIntegral::usage = "DefiniteIntegral[savedData, {a, b}] computes ∫ f(x)
 
 IndefiniteIntegral::usage = "IndefiniteIntegral[savedData] returns a piecewise function representing the indefinite integral. The integration constant is fixed such that the integral is 0 at the start of the first segment.";
 
+DefiniteIntegralWithPrefactor::usage = "DefiniteIntegralWithPrefactor[savedData, {lower, upper}, prefactorSpec] computes ∫_lower^upper x^alpha * (upper-x)^beta * r(x) * f(x) dx. \
+prefactorSpec is <|\"PowerAtLower\" -> alpha, \"PowerAtUpper\" -> beta, \"RationalFactor\" -> r(x), \"Variable\" -> x|>. \
+f(x) is the piecewise series from saved transport data. Powers alpha, beta >= 0 for convergence (regularization applied otherwise). \
+RationalFactor is a rational function that gets series-expanded at each segment.";
+
 Begin["`Private`"];
 
 (* ============================================================ *)
@@ -730,6 +735,263 @@ IntegrateSegmentIndefinite[segmentData_List, intIndex_Integer, epsOrder_Integer]
       DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x]
   ]
 ];
+
+(* ============================================================ *)
+(* Definite Integral with Prefactors                            *)
+(* ============================================================ *)
+
+(*
+   Computes ∫_lower^upper x^alpha * (upper-x)^beta * r(x) * f_i(x) dx
+   for each integral i and each epsilon order.
+
+   The prefactor x^alpha * (upper-x)^beta * r(x) is handled by:
+   1. Converting to local segment coordinates
+   2. Separating singular parts (power-law at boundaries) from smooth parts
+   3. Series-expanding the smooth parts
+   4. Multiplying with the DiffExp series
+   5. Adjusting the singular power in the decomposition
+   6. Integrating using the standard machinery
+*)
+
+DefiniteIntegralWithPrefactor[savedData2_, {lower_, upper_}, prefactorSpec_Association] := Module[
+  {savedData, numIntegrals, numEpsOrders, uncompressed,
+   alpha, beta, rationalFactor, variable, relevantSegments,
+   result, seg, segBounds, overlapBounds},
+
+  (* Extract prefactor specification *)
+  alpha = Lookup[prefactorSpec, "PowerAtLower", 0];
+  beta = Lookup[prefactorSpec, "PowerAtUpper", 0];
+  rationalFactor = Lookup[prefactorSpec, "RationalFactor", 1];
+  variable = Lookup[prefactorSpec, "Variable", DiffExp`Symbols`x];
+
+  (* Handle Association output from TransportTo *)
+  If[AssociationQ[savedData2],
+    If[MissingQ[savedData2["SegmentData"]],
+      DiffExp`Utilities`ReportError["DefiniteIntegralWithPrefactor: No segment data available."];
+    ];
+    savedData = savedData2["SegmentData"],
+    savedData = savedData2
+  ];
+
+  (* Get dimensions from first segment *)
+  If[StringQ[savedData[[1, 5]]],
+    uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
+    If[Head[savedData[[1, 5]]] === String && StringLength[savedData[[1, 5]]] > 100,
+      uncompressed = Uncompress[savedData[[1, 5]]];,
+      uncompressed = savedData[[1, 5]];
+    ]
+  ];
+
+  numIntegrals = Length[uncompressed];
+  numEpsOrders = Length[uncompressed[[1]]];
+
+  DiffExp`Utilities`PrintInfo["Computing definite integral with prefactor from ", lower // N, " to ", upper // N][1];
+
+  (* Find segments that overlap with [lower, upper] *)
+  relevantSegments = Select[savedData,
+    Module[{segMin, segMax},
+      segMin = Min[#[[3]]];
+      segMax = Max[#[[3]]];
+      Not[segMax <= lower || segMin >= upper]
+    ] &
+  ];
+
+  (* Integrate each relevant segment with prefactors *)
+  result = Table[
+    Sum[
+      seg = relevantSegments[[segIdx]];
+      segBounds = seg[[3]];
+
+      (* Find overlap with [lower, upper] *)
+      overlapBounds = {Max[Min[segBounds], lower], Min[Max[segBounds], upper]};
+
+      If[overlapBounds[[1]] >= overlapBounds[[2]],
+        0,
+        IntegrateSegmentWithPrefactor[seg, overlapBounds, intIdx, epsOrd,
+          alpha, beta, rationalFactor, variable, lower, upper]
+      ]
+      ,
+      {segIdx, Length[relevantSegments]}
+    ],
+    {intIdx, numIntegrals},
+    {epsOrd, 0, numEpsOrders - 1}
+  ];
+
+  result
+];
+
+
+(* Integrate a single segment with prefactors.
+   The full integrand is: (x-lower)^alpha * (upper-x)^beta * r(x) * f(x)
+   where f(x) is the DiffExp series at this segment.
+*)
+IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsOrder_Integer,
+    alpha_, beta_, rationalFactor_, variable_, lower_, upper_] := Module[
+  {currLine, lineRelation, mainBounds, localBounds, seriesData,
+   jacobian, localA, localB, seriesAtIndex, uncompressed,
+   mainMin, mainMax, localMin, localMax, slope,
+   atLowerBound, atUpperBound, expansionOrder,
+   prefactorSeries, combinedDecomposition, integralResult,
+   localSeries, decomposition, xLocal},
+
+  currLine = segmentData[[1]];
+  lineRelation = segmentData[[2]];
+  mainBounds = segmentData[[3]];
+  localBounds = segmentData[[4]];
+  seriesData = segmentData[[5]];
+
+  (* Uncompress if needed *)
+  If[StringQ[seriesData],
+    uncompressed = Uncompress[Import[seriesData]];,
+    If[Head[seriesData] === String && StringLength[seriesData] > 100,
+      uncompressed = Uncompress[seriesData];,
+      uncompressed = seriesData;
+    ]
+  ];
+
+  (* Get the series for this integral (all eps orders) *)
+  seriesAtIndex = uncompressed[[intIndex]];
+
+  (* Compute coordinate transforms *)
+  mainMin = mainBounds[[1]];
+  mainMax = mainBounds[[2]];
+  localMin = localBounds[[1]];
+  localMax = localBounds[[2]];
+  xLocal = DiffExp`Symbols`x;
+
+  If[mainMax - mainMin != 0,
+    slope = (localMax - localMin) / (mainMax - mainMin);
+    localA = localMin + (a - mainMin) * slope;
+    localB = localMin + (b - mainMin) * slope;
+    jacobian = D[lineRelation[[2]], xLocal];
+    jacobian = jacobian /. xLocal -> (localA + localB)/2;
+    ,
+    localA = localMin;
+    localB = localMin;
+    jacobian = 1;
+  ];
+
+  (* Determine expansion order from the series *)
+  expansionOrder = If[MatchQ[seriesAtIndex[[1]], _SeriesData],
+    seriesAtIndex[[1]][[5]] - seriesAtIndex[[1]][[4]],
+    50
+  ];
+
+  (* Check if this segment is at the integration boundaries *)
+  atLowerBound = Abs[a - lower] < DiffExp`State`FEC[RationalizationTolerance];
+  atUpperBound = Abs[b - upper] < DiffExp`State`FEC[RationalizationTolerance];
+
+  (* Compute the prefactor in local coordinates.
+     lineRelation gives: x_main = f(x_local)
+     So x_main - lower = f(x_local) - lower, and upper - x_main = upper - f(x_local)
+  *)
+  Module[{xMainExpr, prefactorLower, prefactorUpper, prefactorRational,
+          smoothPrefactor, singularPowerLower, singularPowerUpper,
+          totalSingularPower, smoothSeries, modifiedDecomp},
+
+    (* x_main as function of local x *)
+    xMainExpr = lineRelation[[2]];
+
+    (* Handle power-law prefactors:
+       - (x_main - lower)^alpha: if at lower boundary, this is singular
+       - (upper - x_main)^beta: if at upper boundary, this is singular
+    *)
+
+    (* Compute smooth prefactor: the product of all smooth parts *)
+    (* Start with the rational factor r(x_main) *)
+    prefactorRational = rationalFactor /. variable -> xMainExpr;
+
+    (* For boundary segments, separate singular and smooth parts *)
+    singularPowerLower = 0;
+    singularPowerUpper = 0;
+
+    If[atLowerBound && Abs[localA] < DiffExp`State`FEC[RationalizationTolerance],
+      (* This segment starts at the lower integration bound *)
+      (* (x_main - lower) ~ jacobian * (x_local - localA) ~ jacobian * x_local when localA ~ 0 *)
+      (* So (x_main - lower)^alpha ~ |jacobian|^alpha * x_local^alpha *)
+      singularPowerLower = alpha;
+      (* The smooth part from (x_main - lower)^alpha is |jacobian|^alpha *)
+      prefactorLower = Abs[jacobian]^alpha;
+      ,
+      (* Not at lower boundary: (x_main - lower)^alpha is smooth, series-expand *)
+      prefactorLower = (xMainExpr - lower)^alpha;
+    ];
+
+    If[atUpperBound && Abs[localB] < DiffExp`State`FEC[RationalizationTolerance],
+      (* This segment ends at the upper integration bound *)
+      (* (upper - x_main) ~ |jacobian| * (localB - x_local) ~ |jacobian| * (-x_local) when localB ~ 0 *)
+      (* But typically near upper bound, local x goes to 0 at x_main = upper *)
+      (* So (upper - x_main) ~ |jacobian| * x_local *)
+      singularPowerUpper = beta;
+      prefactorUpper = Abs[jacobian]^beta;
+      ,
+      (* Not at upper boundary: smooth *)
+      prefactorUpper = (upper - xMainExpr)^beta;
+    ];
+
+    totalSingularPower = singularPowerLower + singularPowerUpper;
+
+    (* Combine all smooth prefactor parts *)
+    smoothPrefactor = prefactorLower * prefactorUpper * prefactorRational;
+
+    (* Series-expand the smooth prefactor in local coordinates *)
+    smoothSeries = Quiet[
+      Series[smoothPrefactor, {xLocal, 0, expansionOrder}] // Normal // Expand
+    ];
+
+    (* If Series fails (e.g., non-analytic), try direct expansion *)
+    If[!FreeQ[smoothSeries, Series] || !FreeQ[smoothSeries, SeriesData],
+      smoothSeries = Normal[Series[smoothPrefactor, {xLocal, 0, expansionOrder}]];
+    ];
+
+    (* Decompose the DiffExp series *)
+    decomposition = DiffExp`SingularityDecomposition`DecomposeSingularity[seriesAtIndex];
+
+    (* Modify each term in the decomposition by:
+       1. Adding the singular power from boundary prefactors
+       2. Multiplying g-series by the smooth prefactor series
+    *)
+    modifiedDecomp = Table[
+      Module[{termA, termB, termG, newA, newG, gSeries, smoothSer},
+        termA = decomposition[[termIdx]]["a"];
+        termB = decomposition[[termIdx]]["b"];
+        termG = decomposition[[termIdx]]["g"];
+
+        (* Add singular power from boundary prefactors *)
+        newA = termA + totalSingularPower;
+
+        (* Multiply each epsilon-order g-series by the smooth prefactor *)
+        newG = Table[
+          If[ord <= Length[termG],
+            gSeries = termG[[ord]];
+            (* Multiply series by smooth prefactor series *)
+            If[MatchQ[gSeries, _SeriesData],
+              Module[{result},
+                smoothSer = Series[smoothPrefactor, {xLocal, gSeries[[2]], gSeries[[5]] - gSeries[[4]]}];
+                result = gSeries * smoothSer // Normal;
+                (* Convert back to SeriesData *)
+                Series[result, {xLocal, gSeries[[2]], Min[gSeries[[5]] - gSeries[[4]], expansionOrder]}]
+              ],
+              gSeries * (smoothPrefactor /. xLocal -> 0)
+            ],
+            0
+          ],
+          {ord, Length[termG]}
+        ];
+
+        <|"a" -> newA, "b" -> termB, "g" -> newG|>
+      ],
+      {termIdx, Length[decomposition]}
+    ];
+
+    (* Integrate the modified decomposition *)
+    integralResult = IntegrateDecomposition[modifiedDecomp, {localA, localB}];
+
+    (* Apply Jacobian correction *)
+    integralResult[[epsOrder + 1]] / Abs[jacobian]
+  ]
+];
+
 
 End[];
 

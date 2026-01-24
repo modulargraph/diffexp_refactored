@@ -17,6 +17,8 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "FIREInterface.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "MatrixExport.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "EpsPrefactors.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FeynmanTrickIteration.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "BoundaryConditions.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExpIntegration.m"}]];
 
 Begin["`Private`"];
 
@@ -33,6 +35,7 @@ $FTConfig = <|
   "EpsilonSymbol" -> FeynmanTrick`FTeps,
   "Threads" -> 4,
   "FThreads" -> 4,
+  "WorkingPrecision" -> 500,
   "Verbosity" -> 1
 |>;
 

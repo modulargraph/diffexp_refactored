@@ -39,6 +39,7 @@ diffexp_refactored/
 │   │   ├── Default.m                   # SolveSimple + SolveDefault
 │   │   ├── VOP.m                       # SolveVOP + SolveVOPAlt
 │   │   ├── Recurrence.m               # Rational + Singular recurrence strategies
+│   │   ├── ResonantRecurrence.m        # General singular recurrence (resonant/Jordan) + unified particular solver
 │   │   └── Dispatch.m                  # DispatchStrategy routing
 │   ├── Transport.m                    # TransportTo, IntegrateSystem, ToPiecewise (1128 lines)
 │   ├── SingularityDecomposition.m     # Singularity analysis (232 lines)
@@ -54,14 +55,15 @@ diffexp_refactored/
 │   ├── Banana_EqualMass_Matrices/     # Equal mass matrices (5 files)
 │   ├── Banana_Matrices/               # Unequal mass matrices (25 files)
 │   ├── Hypergeometric2F1_Matrices/    # Hypergeometric function matrices (5 files)
-│   ├── test_package_loading.m         # Package loading test (18/18 pass)
+│   ├── test_package_loading.m         # Package loading test (19/19 pass)
 │   ├── test_symbols_namespacing.m     # Symbol namespacing test (all pass)
-│   ├── test_unequal_mass_banana.m     # Simple configuration test (5/5 pass)
-│   ├── test_unequal_mass_full.m       # Full transport test (passes)
+│   ├── test_unequal_mass_full.m       # Full transport test: Default vs Recurrence comparison
 │   ├── test_banana_refactored.m       # Equal mass banana test
 │   ├── test_decomposition.m           # Singularity decomposition tests
 │   ├── test_regularized_integration.m # Regularized integration tests
 │   ├── test_hypergeometric2f1.m       # Hypergeometric function tests
+│   ├── test_resonant_2f1.m           # Resonant 2F1 (c=2, eigenvalues {-2,0})
+│   ├── test_resonant_banana.m        # Resonant equal-mass banana (Jordan+resonance)
 │   ├── test_multiple_polylogarithms.m # Multiple polylogarithms test
 │   ├── test_five_point_nonplanar.m    # Five-point nonplanar test
 │   └── test_topiecewise.m             # Piecewise function conversion test
@@ -99,6 +101,10 @@ diffexp_refactored/
 - **Default**: Frobenius/Wronskian method with automatic pivot selection. Falls back to VOPAlt if all pivots fail.
 - **VOP**: Variation of Parameters method. Derives nth-order scalar ODEs per integral.
 - **VOPAlt**: Alternative VOP. Constructs FMat directly from homogeneous solutions. Used as fallback.
+- **Recurrence** (UseRationalRecurrence -> True): Direct recurrence on series coefficients. Includes:
+  - Rational recurrence for non-singular points
+  - Singular recurrence for non-resonant regular singular points
+  - General singular recurrence (ResonantRecurrence.m) for resonant/non-diagonalizable cases with unified particular solution solver
 
 ### Important Rules
 1. Stay focused on the task at hand - don't fix or refactor unrelated code
@@ -116,10 +122,7 @@ cd Tests && wolframscript -file test_package_loading.m
 # Symbol namespacing test (quick)
 cd Tests && wolframscript -file test_symbols_namespacing.m
 
-# Simple configuration test (quick)
-cd Tests && wolframscript -file test_unequal_mass_banana.m
-
-# Full transport test
+# Full transport test (Default vs Recurrence comparison)
 cd Tests && wolframscript -file test_unequal_mass_full.m
 
 # Singularity decomposition test
@@ -162,10 +165,12 @@ tail -50 /tmp/diffexp_test_output.log  # see recent output
 **Important:** Before reading test output files, always check their size first with `wc -l` or `ls -lh` to avoid loading excessively large output into context.
 
 ## Current Test Results
-- test_package_loading.m: **18/18 PASS**
+- test_package_loading.m: **19/19 PASS**
 - test_symbols_namespacing.m: **ALL PASS**
-- test_unequal_mass_banana.m: **5/5 PASS**
-- test_unequal_mass_full.m: **PASS** (completes transport to mm1=2, mm2=3/2, mm3=4/3, mm4=1)
+- test_unequal_mass_full.m: **3/3 PASS** (Default vs Recurrence: identical results, 2.4x speedup)
+- test_hypergeometric2f1.m: **PASS** (50+ digits accuracy)
+- test_resonant_2f1.m: **PASS** (52 digits, resonant eigenvalues {-2, 0})
+- test_resonant_banana.m: **2/2 PASS** (matches Default to 10^-31)
 
 ## Documentation
 

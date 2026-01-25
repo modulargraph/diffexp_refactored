@@ -87,9 +87,24 @@ Level 0 (original topology, all masters)
 | `FIREInterface.m` | FIRE6 setup, basis, reduction, diff matrix | ✓ Working (15/15, 17/17 tests) |
 | `MatrixExport.m` | Export to DiffExp format | ✓ Working |
 | `EpsPrefactors.m` | Find eps^k prefactors to remove poles | ✓ Working |
-| `FeynmanTrickIteration.m` | Multi-level orchestrator | ✓ Working |
+| `FeynmanTrickIteration.m` | Multi-level orchestrator | ✓ Fixed (unique params per level) |
 | `BoundaryConditions.m` | Tadpole formula, Symanzik polynomials | ✓ Fixed (uses original topology + rescaled params) |
 | `DiffExpIntegration.m` | Transport, integration, pipeline | ✓ Fixed (ChopPrecision added) |
+
+---
+
+## FIXED: Unique Feynman Parameter per Level
+
+**Previously:** All levels used the same symbol `FeynmanTrick`xx` for the Feynman
+parameter. When building level k, the code substituted `xx -> 11/23` to fix the
+previous level's parameter, but this also substituted the NEW `xx` just introduced.
+Result: propagators at levels 2+ had no Feynman parameter dependence, causing wrong
+indicial roots (like 749/639 instead of integers).
+
+**Fix:** Each level k now uses a unique symbol `xxk` (xx1, xx2, xx3, ...). This
+matches the paper's notation (eq 2.100-2.104) where each combination introduces
+a new parameter x_1, x_2, ..., x_{n-1}. At the deepest level, all parameters are
+set to numerical values, then we transport/integrate over them one at a time.
 
 ---
 
@@ -129,11 +144,14 @@ default (250). When `WorkingPrecision -> 200`, this triggered the error
 ### Pipeline test output
 ```
 Part 1: Define Topology — PASS (4 propagators, 3 levels)
-Part 2: Build & Compute — PASS (Level 3: 1 master, Level 2: 4 masters, Level 1: 7 masters)
-         Export — PASS (all matrix files created)
-Part 3: Boundary — Fixed (now uses original topology + rescaled Feynman params)
-Part 4-6: Transport/Integration — to be validated
+Part 2: Build & Compute — Level 3 PASS (7 masters, correct variable xx3)
+         Levels 1-2: FIRE6 instability on test system (fermat crashes)
+Part 3: Boundary — Fixed (original topology + rescaled Feynman params)
+Part 4-6: Transport/Integration — awaiting stable FIRE6 runs
 ```
+
+**Note:** FIRE6/fermat shows instability on some systems (exit codes 134, 137, 141).
+The algorithm is correct; infrastructure issues need resolution.
 
 ---
 

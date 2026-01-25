@@ -86,10 +86,11 @@ Module[{topo, ftData, level1Data, level1Topo, level1Props,
     KeyExistsQ[ftData["Levels"], 1]];
   testTrue["Combined positions recorded",
     level1Data["CombinedPositions"] === {1, 2}];
-  testTrue["Feynman parameter is xx",
-    level1Data["FeynmanParameter"] === FeynmanTrick`xx];
-  testTrue["Propagator 1 contains xx",
-    !FreeQ[level1Props[[1]], FeynmanTrick`xx]];
+  (* Each level has a unique parameter: xx1 for level 1, xx2 for level 2, etc. *)
+  testTrue["Feynman parameter is xx1",
+    level1Data["FeynmanParameter"] === Global`xx1];
+  testTrue["Propagator 1 contains xx1",
+    !FreeQ[level1Props[[1]], Global`xx1]];
 
   (* Check the decomposition fast path *)
   Print["\n--- Test: FeynmanTrickDecomposition ---"];
@@ -169,7 +170,7 @@ Module[{topo, ftData, level1Data, level1Topo, level1Props,
         FeynmanTrick`FeynmanTrickIteration`ExportLevel[ftData, 1, exportDir, "both", 2];
         testTrue["Export directory created", DirectoryQ[exportDir]];
         testTrue["Full matrix exported",
-          FileExistsQ[FileNameJoin[{exportDir, "Level_1_Matrices", "dxx_full.m"}]]];
+          FileExistsQ[FileNameJoin[{exportDir, "Level_1_Matrices", "dxx1_full.m"}]]];
       ,
         Print["FAIL: ComputeDiffMatrix returned $Failed"];
         failed += 3;

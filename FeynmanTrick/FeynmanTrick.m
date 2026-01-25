@@ -33,8 +33,8 @@ $FTConfig = <|
   "FixedParameterValue" -> 11/23,
   "DimensionVariable" -> Global`d,
   "EpsilonSymbol" -> FeynmanTrick`FTeps,
-  "Threads" -> 4,
-  "FThreads" -> 4,
+  "Threads" -> 1,        (* FIRE6 multi-threading can be unstable; default to 1 *)
+  "FThreads" -> 1,
   "WorkingPrecision" -> 500,
   "Verbosity" -> 1
 |>;

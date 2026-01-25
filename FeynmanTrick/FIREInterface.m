@@ -2,6 +2,18 @@
 (* FIREInterface - Wrapper for FIRE6 IBP reduction *)
 (* Handles topology definition, FIRE setup, basis finding, *)
 (* integral reduction, and differential matrix computation *)
+(*
+   ARCHITECTURE: Multi-topology batch processing
+
+   Instead of clearing and restarting FIRE for each topology, we:
+   1. Generate all .start files first (SetupFIRE or SetupFIREBatch)
+   2. Load all topologies with unique problem numbers
+   3. Run FIRE6 once with all problems in a single config
+   4. Parse combined results
+
+   This avoids fermat subprocess race conditions and is how FIRE6 is
+   designed to work with multiple related topologies.
+*)
 
 BeginPackage["FeynmanTrick`FIREInterface`", {"FeynmanTrick`", "FeynmanTrick`PropagatorAlgebra`"}];
 
@@ -11,31 +23,47 @@ defines a topology for FIRE reduction. Propagator convention: D_j = -q_j^2 + m_j
 Returns a Topology association.";
 
 SetupFIRE::usage =
-  "SetupFIRE[topology, workDir] generates .start and .config files for FIRE6. \
-Loads FIRE6.m, sets up IBP relations, and saves the start file.";
+  "SetupFIRE[topology, workDir] generates .start file for FIRE6. \
+Does NOT run FIRE - call FindBasis or ReduceIntegrals after setup.";
+
+SetupFIREBatch::usage =
+  "SetupFIREBatch[{topo1, topo2, ...}, workDir] sets up multiple topologies \
+at once, assigning each a unique problem number. Returns list of updated topologies.";
 
 FindBasis::usage =
   "FindBasis[topology] runs FIRE6 to determine master integrals. \
-Returns the list of master integral index vectors.";
+Returns the topology with Masters field populated.";
+
+FindBasisBatch::usage =
+  "FindBasisBatch[{topo1, topo2, ...}] finds master integrals for all topologies \
+in a single FIRE6 run. Returns list of updated topologies.";
 
 ReduceIntegrals::usage =
   "ReduceIntegrals[topology, integrals] reduces a list of integrals \
 (given as index vectors) to the master basis using FIRE6. \
-Returns an association: integral -> {coeff, masterIndex} pairs.";
+Returns an association: integral -> linear combination of masters.";
+
+ReduceIntegralsBatch::usage =
+  "ReduceIntegralsBatch[{{topo1, ints1}, {topo2, ints2}, ...}] reduces \
+integrals for multiple topologies in a single FIRE6 run.";
 
 ComputeDiffMatrix::usage =
   "ComputeDiffMatrix[topology, variable] computes the differential equation \
 matrix A such that d/dx Masters = A . Masters. \
-The variable is typically the Feynman parameter xx. \
-Optional: ComputeDiffMatrix[topology, variable, {coeffMatrix, constVector}] \
-uses a pre-computed decomposition (e.g. from FeynmanTrickDecomposition).";
+The variable is typically the Feynman parameter xx.";
 
 GetFIREResult::usage =
   "GetFIREResult[topology, integral] returns the reduction of a single integral.";
 
 TopologyQ::usage = "TopologyQ[expr] returns True if expr is a valid topology association.";
 
+ClearFIREState::usage = "ClearFIREState[] clears all FIRE internal state. Call before setting up new topologies.";
+
 Begin["`Private`"];
+
+(* Global state: track which topologies have been set up *)
+$SetupTopologies = <||>;  (* name -> topology association *)
+$NextProblemNumber = 1;
 
 (* ============================================================ *)
 (* DefineTopology                                                *)
@@ -51,6 +79,7 @@ DefineTopology[name_String, loopMomenta_List, externalMomenta_List,
     "Replacements" -> replacements,
     "NumPropagators" -> Length[propagators],
     "WorkDirectory" -> "",
+    "ProblemNumber" -> 0,  (* Assigned during SetupFIRE *)
     "Masters" -> {},
     "MasterRules" -> {},
     "StartFileReady" -> False,
@@ -89,8 +118,44 @@ Module[{allSyms, momenta, contextedSyms},
 
 
 (* ============================================================ *)
-(* runFIRE6 - helper to run FIRE6 binary robustly                *)
-(* Uses a shell script to ensure proper subprocess handling      *)
+(* ClearFIREState - reset all FIRE state                        *)
+(* ============================================================ *)
+
+ClearFIREState[] := Module[{},
+  $SetupTopologies = <||>;
+  $NextProblemNumber = 1;
+
+  (* Load FIRE6.m if needed *)
+  ensureFIRELoaded[];
+
+  (* Clear FIRE internal state *)
+  Quiet[
+    Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+    Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+    (* Clear all problem-indexed data *)
+    Clear[FIRE`ExampleDimension, FIRE`SBasis0L, FIRE`SBasis0D, FIRE`SBasis0C,
+          FIRE`SBasisL, FIRE`SBasisS, FIRE`SBasisR, FIRE`SBasisRL, FIRE`SBasisM, FIRE`HPI];
+    FIRE`Burning = False;
+  , {Unprotect::ssym, Clear::ssym}];
+];
+
+
+(* ============================================================ *)
+(* ensureFIRELoaded - load FIRE6.m if not already               *)
+(* ============================================================ *)
+
+ensureFIRELoaded[] := Module[{firePath},
+  If[!MemberQ[$Packages, "FIRE`"],
+    firePath = FeynmanTrick`Private`$FTConfig["FIREPath"];
+    Block[{$Path = Prepend[$Path, firePath]},
+      Quiet[Get["FIRE6.m"], {General::shdw}];
+    ];
+  ];
+];
+
+
+(* ============================================================ *)
+(* runFIRE6 - helper to run FIRE6 binary robustly               *)
 (* ============================================================ *)
 
 runFIRE6[fireBin_String, dir_String, configName_String] :=
@@ -102,10 +167,13 @@ Module[{exitCode, maxRetries = 3, attempt},
       If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
         Print["FIRE6 failed (exit ", exitCode, "), retrying (attempt ", attempt+1, "/", maxRetries, ")..."];
       ];
-      Pause[1]; (* brief pause before retry *)
+      (* Clean up before retry *)
+      Quiet[Run["pkill -9 -f fer64 2>/dev/null"]];
+      Quiet[Run["pkill -9 -f FIRE6 2>/dev/null"]];
+      Quiet[DeleteDirectory[FileNameJoin[{dir, "temp"}], DeleteContents -> True]];
+      Pause[2];
     ];
   , {attempt, maxRetries}];
-  (* All retries failed *)
   If[exitCode =!= 0,
     Print["FIRE6 failed after ", maxRetries, " attempts (last exit code: ", exitCode, ")."];
   ];
@@ -113,72 +181,60 @@ Module[{exitCode, maxRetries = 3, attempt},
 ];
 
 runFIRE6Once[fireBin_String, dir_String, configName_String] :=
-Module[{scriptFile, exitCode, scriptContent, doneFile, maxWait, waited},
-  scriptFile = FileNameJoin[{dir, "run_fire.sh"}];
-  doneFile = FileNameJoin[{dir, "fire_done.txt"}];
+Module[{exitCode, result, logFile, oldDir},
+  logFile = FileNameJoin[{dir, "fire_stdout.log"}];
 
-  (* Remove stale done marker and old temp *)
-  If[FileExistsQ[doneFile], DeleteFile[doneFile]];
+  (* Kill any stale fermat processes *)
+  Quiet[Run["pkill -9 -f 'fer64.*" <> FileBaseName[configName] <> "' 2>/dev/null"]];
+  Pause[0.2];
 
-  (* Write script that runs FIRE6 in its own process group *)
-  scriptContent = StringJoin[
-    "#!/bin/bash\n",
-    "cd \"", dir, "\"\n",
-    "rm -rf temp\n",
-    "\"", fireBin, "\" -c ", configName, " > fire_stdout.log 2>&1\n",
-    "echo $? > fire_done.txt\n"
-  ];
-  Export[scriptFile, scriptContent, "Text"];
-  Run["chmod +x \"" <> scriptFile <> "\""];
+  (* Clean temp directory *)
+  Quiet[DeleteDirectory[FileNameJoin[{dir, "temp"}], DeleteContents -> True]];
 
-  (* Run detached: use perl setsid to create new process group *)
-  Run["perl -e 'use POSIX \"setsid\"; fork and exit; setsid(); exec @ARGV' -- bash \"" <> scriptFile <> "\" &"];
+  (* Run FIRE6 *)
+  oldDir = Directory[];
+  SetDirectory[dir];
 
-  (* Wait for completion *)
-  maxWait = 600; (* seconds *)
-  waited = 0;
-  While[!FileExistsQ[doneFile] && waited < maxWait,
-    Pause[0.5];
-    waited += 0.5;
+  result = Quiet[
+    RunProcess[
+      {fireBin, "-c", configName},
+      ProcessDirectory -> dir
+    ],
+    {OptionValue::nodef}
   ];
 
-  If[!FileExistsQ[doneFile],
-    Print["FIRE6 timed out after ", maxWait, " seconds."];
-    exitCode = -1;
-  ,
-    Pause[0.1]; (* let file flush *)
-    exitCode = ToExpression[StringTrim[Import[doneFile, "Text"]]];
-  ];
+  SetDirectory[oldDir];
 
-  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2 && FileExistsQ[FileNameJoin[{dir, "fire_stdout.log"}]],
-    Print["FIRE6 output (tail): "];
-    Module[{log = Import[FileNameJoin[{dir, "fire_stdout.log"}], "Text"]},
-      Print[StringTake[log, -Min[500, StringLength[log]]]];
+  (* Save output to log file *)
+  Export[logFile, result["StandardOutput"] <> result["StandardError"], "Text"];
+
+  exitCode = result["ExitCode"];
+
+  (* Print output on verbose or failure *)
+  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2 || exitCode =!= 0,
+    If[StringLength[result["StandardOutput"]] > 0,
+      Print["FIRE6 output (tail): "];
+      Print[StringTake[result["StandardOutput"], -Min[500, StringLength[result["StandardOutput"]]]]];
     ];
-  ];
-  If[exitCode =!= 0 && exitCode =!= -1,
-    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+    If[exitCode =!= 0,
       Print["FIRE6 exit code: ", exitCode];
-      If[FileExistsQ[FileNameJoin[{dir, "fire_stdout.log"}]],
-        Module[{log = Import[FileNameJoin[{dir, "fire_stdout.log"}], "Text"]},
-          Print["Output: ", StringTake[log, -Min[300, StringLength[log]]]];
-        ];
+      If[StringLength[result["StandardError"]] > 0,
+        Print["FIRE6 stderr: ", StringTake[result["StandardError"], -Min[300, StringLength[result["StandardError"]]]]];
       ];
     ];
   ];
+
   exitCode
 ];
 
 
 (* ============================================================ *)
-(* SetupFIRE                                                     *)
-(* Generates .start file via FIRE6.m API                         *)
+(* SetupFIRE - Generate .start file for a single topology       *)
 (* ============================================================ *)
 
 SetupFIRE[topology_Association, workDir_String:""] :=
-Module[{dir, firePath, name, config, result, fireSubst, fireProps, fireRepls},
+Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn},
   name = topology["Name"];
-  firePath = FeynmanTrick`Private`$FTConfig["FIREPath"];
 
   (* Determine working directory *)
   dir = If[workDir === "",
@@ -187,33 +243,32 @@ Module[{dir, firePath, name, config, result, fireSubst, fireProps, fireRepls},
   ];
   If[!DirectoryQ[dir], CreateDirectory[dir, CreateIntermediateDirectories -> True]];
 
-  (* Load FIRE6.m if not already loaded *)
-  If[!MemberQ[$Packages, "FIRE`"],
-    Block[{$Path = Prepend[$Path, firePath]},
-      Quiet[Get["FIRE6.m"], {General::shdw}];
-    ];
-  ];
+  (* Load FIRE6.m if needed *)
+  ensureFIRELoaded[];
+
+  (* Assign problem number *)
+  pn = $NextProblemNumber++;
 
   (* Substitute contexted symbols with Global equivalents for FIRE/Fermat *)
-  (* Fermat cannot handle capital letters or backticks in variable names *)
   fireSubst = buildFIRESubstitution[topology];
-
   fireProps = topology["Propagators"] /. fireSubst;
   fireRepls = topology["Replacements"] /. fireSubst;
 
-  (* Set FIRE variables (all in FIRE` context) *)
+  (* Clear FIRE state for problem 0 (temp slot) *)
+  Quiet[
+    Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+    Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+  , {Unprotect::ssym, Clear::ssym}];
+
+  (* Set FIRE variables *)
   FIRE`Internal = topology["LoopMomenta"];
   FIRE`External = topology["ExternalMomenta"];
   FIRE`Propagators = fireProps;
-
-  (* Replacements: convert our rule format to FIRE's *)
-  If[fireRepls =!= {},
-    FIRE`Replacements = fireRepls;
-  ];
+  If[fireRepls =!= {}, FIRE`Replacements = fireRepls];
 
   (* Prepare IBP relations *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
-    Print["Setting up FIRE for topology: ", name];
+    Print["Setting up FIRE for topology: ", name, " (problem ", pn, ")"];
   ];
   FIRE`PrepareIBP[];
 
@@ -227,26 +282,80 @@ Module[{dir, firePath, name, config, result, fireSubst, fireProps, fireRepls},
     SetDirectory[oldDir];
   ];
 
-  (* Write config file *)
-  writeConfigFile[topology, dir, name <> ".config"];
-
   (* Return updated topology *)
   result = topology;
   result["WorkDirectory"] = dir;
+  result["ProblemNumber"] = pn;
   result["StartFileReady"] = True;
+
+  (* Store in global registry *)
+  $SetupTopologies[name] = result;
+
   result
 ];
 
 
-(* Write FIRE6 config file *)
-writeConfigFile[topology_Association, dir_String, configName_String,
-                integralsFile_String:"", outputFile_String:""] :=
-Module[{vars, content, threads, fthreads, intFile, outFile, name},
-  name = topology["Name"];
+(* ============================================================ *)
+(* SetupFIREBatch - Set up multiple topologies at once          *)
+(* ============================================================ *)
+
+SetupFIREBatch[topologies_List, workDir_String:""] :=
+Module[{results},
+  (* Clear state before batch setup *)
+  ClearFIREState[];
+
+  (* Set up each topology *)
+  results = SetupFIRE[#, workDir] & /@ topologies;
+
+  results
+];
+
+
+(* ============================================================ *)
+(* writeMultiProblemConfig - config file for multiple problems  *)
+(* ============================================================ *)
+
+writeMultiProblemConfig[topologies_List, dir_String, configName_String,
+                        integralsFile_String, outputFile_String] :=
+Module[{vars, content, threads, fthreads, problemLines, allVars},
   threads = FeynmanTrick`Private`$FTConfig["Threads"];
   fthreads = FeynmanTrick`Private`$FTConfig["FThreads"];
 
-  (* Variables: d plus any kinematic/Feynman parameter variables *)
+  (* Collect all variables from all topologies *)
+  allVars = Join[
+    {FeynmanTrick`Private`$FTConfig["DimensionVariable"]},
+    Flatten[#["Variables"] & /@ topologies]
+  ] // DeleteDuplicates;
+
+  (* Build #problem lines *)
+  problemLines = StringJoin[
+    "#problem           ", ToString[#["ProblemNumber"]], " ",
+    #["Name"], ".start\n"
+  ] & /@ topologies;
+
+  content = StringJoin[
+    "#threads           ", ToString[threads], "\n",
+    "#fthreads          ", ToString[fthreads], "\n",
+    "#variables         ", StringRiffle[SymbolName /@ allVars, ","], "\n",
+    "#start\n",
+    Sequence @@ problemLines,
+    "#integrals         ", integralsFile, "\n",
+    "#output            ", outputFile, "\n"
+  ];
+
+  Export[FileNameJoin[{dir, configName}], content, "Text"];
+];
+
+
+(* Write single-problem config (for backwards compatibility) *)
+writeSingleProblemConfig[topology_Association, dir_String, configName_String,
+                         integralsFile_String:"", outputFile_String:""] :=
+Module[{vars, content, threads, fthreads, intFile, outFile, name, pn},
+  name = topology["Name"];
+  pn = topology["ProblemNumber"];
+  threads = FeynmanTrick`Private`$FTConfig["Threads"];
+  fthreads = FeynmanTrick`Private`$FTConfig["FThreads"];
+
   vars = Join[
     {FeynmanTrick`Private`$FTConfig["DimensionVariable"]},
     topology["Variables"]
@@ -260,7 +369,7 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name},
     "#fthreads          ", ToString[fthreads], "\n",
     "#variables         ", StringRiffle[SymbolName /@ vars, ","], "\n",
     "#start\n",
-    "#problem           1 ", name, ".start\n",
+    "#problem           ", ToString[pn], " ", name, ".start\n",
     "#integrals         ", intFile, "\n",
     "#output            ", outFile, "\n"
   ];
@@ -270,13 +379,11 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name},
 
 
 (* ============================================================ *)
-(* FindBasis                                                     *)
-(* Runs FIRE6 to determine master integrals                      *)
+(* FindBasis - find master integrals for a single topology      *)
 (* ============================================================ *)
 
 FindBasis[topology_Association] :=
-Module[{dir, name, fireBin, intFile, configFile, result, masters,
-        topSector, tablesFile, rules, allIntegrals},
+Module[{dir, name, fireBin, intFile, result, masters, tablesFile, pn},
 
   If[!topology["StartFileReady"],
     Print["Error: Must call SetupFIRE before FindBasis."];
@@ -285,25 +392,25 @@ Module[{dir, name, fireBin, intFile, configFile, result, masters,
 
   dir = topology["WorkDirectory"];
   name = topology["Name"];
+  pn = topology["ProblemNumber"];
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
   (* Write integrals file with all sector corners *)
-  (* Each sector corner has indices 0 or 1 for each propagator *)
   Module[{nP = topology["NumPropagators"], allSectors, intContent},
-    allSectors = Rest[Tuples[{0, 1}, nP]]; (* all 2^n - 1 non-zero sectors *)
+    allSectors = Rest[Tuples[{0, 1}, nP]];
     intContent = StringJoin["{",
-      StringRiffle[("{1," <> ToString[#, InputForm] <> "}") & /@ allSectors, ",\n"],
+      StringRiffle[("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ allSectors, ",\n"],
       "}\n"];
     intFile = FileNameJoin[{dir, name <> ".m"}];
     Export[intFile, intContent, "Text"];
   ];
 
-  (* Write config for this reduction *)
-  writeConfigFile[topology, dir, name <> ".config"];
+  (* Write config *)
+  writeSingleProblemConfig[topology, dir, name <> ".config"];
 
   (* Run FIRE6 *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
-    Print["Running FIRE6 to find basis..."];
+    Print["Running FIRE6 to find basis for ", name, "..."];
   ];
   runFIRE6[fireBin, dir, name];
 
@@ -311,46 +418,100 @@ Module[{dir, name, fireBin, intFile, configFile, result, masters,
   tablesFile = FileNameJoin[{dir, name <> ".tables"}];
   If[!FileExistsQ[tablesFile],
     Print["Error: FIRE6 did not produce output tables."];
-    Print["Binary: ", fireBin, " exists: ", FileExistsQ[fireBin]];
     Return[$Failed];
   ];
 
-  (* Extract master integrals using FIRE's Tables2Masters *)
   masters = FIRE`Tables2Masters[tablesFile];
-  (* Tables2Masters returns {{problemNum, {indices}}, ...} - extract just the indices *)
-  masters = Cases[masters, {_, indices_List} :> indices];
+  (* Filter for this problem number and extract indices *)
+  masters = Cases[masters, {pn, indices_List} :> indices];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Found ", Length[masters], " master integrals."];
   ];
 
-  (* Return updated topology *)
   result = topology;
   result["Masters"] = masters;
   result
 ];
 
 
-(* Extract master integral indices from reduction rules *)
-extractMastersFromRules[rules_List, nProps_Integer] :=
-Module[{allG, masters},
-  (* rules are of the form: G[1, {indices}] -> expression *)
-  (* Masters are the G[1, {...}] that appear on the RHS *)
-  allG = Cases[rules[[All, 2]], Global`G[1, _List], Infinity] // DeleteDuplicates;
-  masters = Cases[allG, Global`G[1, indices_List] :> indices];
-  (* Sort by total index sum (simpler integrals first) *)
-  SortBy[masters, Total]
+(* ============================================================ *)
+(* FindBasisBatch - find masters for multiple topologies        *)
+(* ============================================================ *)
+
+FindBasisBatch[topologies_List] :=
+Module[{dir, fireBin, intContent, allSectors, tablesFile, masters, results},
+
+  If[Length[topologies] == 0, Return[{}]];
+
+  (* Use first topology's work directory *)
+  dir = topologies[[1]]["WorkDirectory"];
+  fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
+
+  (* Build combined integrals file *)
+  intContent = StringJoin["{",
+    StringRiffle[
+      Flatten[
+        Table[
+          With[{topo = topologies[[i]], pn = topologies[[i]]["ProblemNumber"]},
+            allSectors = Rest[Tuples[{0, 1}, topo["NumPropagators"]]];
+            ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ allSectors
+          ],
+          {i, Length[topologies]}
+        ],
+        1
+      ],
+      ",\n"
+    ],
+    "}\n"
+  ];
+  Export[FileNameJoin[{dir, "batch_basis.m"}], intContent, "Text"];
+
+  (* Write multi-problem config *)
+  writeMultiProblemConfig[topologies, dir, "batch_basis.config",
+                          "batch_basis.m", "batch_basis.tables"];
+
+  (* Run FIRE6 once *)
+  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+    Print["Running FIRE6 to find basis for ", Length[topologies], " topologies..."];
+  ];
+  runFIRE6[fireBin, dir, "batch_basis"];
+
+  (* Load results *)
+  tablesFile = FileNameJoin[{dir, "batch_basis.tables"}];
+  If[!FileExistsQ[tablesFile],
+    Print["Error: FIRE6 did not produce output tables."];
+    Return[$Failed];
+  ];
+
+  masters = FIRE`Tables2Masters[tablesFile];
+
+  (* Update each topology with its masters *)
+  results = Table[
+    With[{topo = topologies[[i]], pn = topologies[[i]]["ProblemNumber"]},
+      Module[{topoMasters, result},
+        topoMasters = Cases[masters, {pn, indices_List} :> indices];
+        If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+          Print["  ", topo["Name"], ": ", Length[topoMasters], " masters"];
+        ];
+        result = topo;
+        result["Masters"] = topoMasters;
+        result
+      ]
+    ],
+    {i, Length[topologies]}
+  ];
+
+  results
 ];
 
 
 (* ============================================================ *)
-(* ReduceIntegrals                                               *)
-(* Reduces a list of integrals to the master basis               *)
+(* ReduceIntegrals - reduce integrals for a single topology     *)
 (* ============================================================ *)
 
 ReduceIntegrals[topology_Association, integrals_List] :=
-Module[{dir, name, fireBin, intFile, configFile, tablesFile, rules,
-        intContent, result},
+Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result, pn},
 
   If[!topology["StartFileReady"],
     Print["Error: Must call SetupFIRE before ReduceIntegrals."];
@@ -359,13 +520,14 @@ Module[{dir, name, fireBin, intFile, configFile, tablesFile, rules,
 
   dir = topology["WorkDirectory"];
   name = topology["Name"];
+  pn = topology["ProblemNumber"];
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
-  (* Write integrals file *)
+  (* Write integrals file with problem number *)
   intContent = StringJoin[
     "{",
     StringRiffle[
-      ("{1," <> ToString[#, InputForm] <> "}") & /@ integrals,
+      ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ integrals,
       ",\n"
     ],
     "}\n"
@@ -374,8 +536,8 @@ Module[{dir, name, fireBin, intFile, configFile, tablesFile, rules,
   Export[FileNameJoin[{dir, intFile}], intContent, "Text"];
 
   (* Write config *)
-  writeConfigFile[topology, dir, name <> "_reduce.config",
-                  intFile, name <> "_reduce.tables"];
+  writeSingleProblemConfig[topology, dir, name <> "_reduce.config",
+                           intFile, name <> "_reduce.tables"];
 
   (* Run FIRE6 *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
@@ -392,9 +554,12 @@ Module[{dir, name, fireBin, intFile, configFile, tablesFile, rules,
 
   rules = FIRE`Tables2Rules[tablesFile];
 
-  (* Convert to our format: integral index -> linear combination of masters *)
+  (* Convert to our format *)
+  (* FIRE uses G[problemNumber, indices] *)
   result = Association[
-    (Global`G[1, #] /. rules) & /@ integrals //
+    (Global`G[pn, #] /. rules) & /@ integrals //
+    (* Replace G[pn, ...] with G[1, ...] for consistency *)
+    (# /. Global`G[pn, idx_] :> Global`G[1, idx]) & //
     MapThread[Rule, {integrals, #}] &
   ];
 
@@ -403,14 +568,86 @@ Module[{dir, name, fireBin, intFile, configFile, tablesFile, rules,
 
 
 (* ============================================================ *)
+(* ReduceIntegralsBatch - reduce integrals for multiple topos   *)
+(* ============================================================ *)
+
+ReduceIntegralsBatch[topoIntegralPairs_List] :=
+Module[{dir, fireBin, intContent, tablesFile, rules, results, allIntegrals},
+
+  If[Length[topoIntegralPairs] == 0, Return[{}]];
+
+  (* Use first topology's work directory *)
+  dir = topoIntegralPairs[[1, 1]]["WorkDirectory"];
+  fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
+
+  (* Build combined integrals file *)
+  allIntegrals = Flatten[
+    Table[
+      With[{topo = topoIntegralPairs[[i, 1]],
+            ints = topoIntegralPairs[[i, 2]],
+            pn = topoIntegralPairs[[i, 1]]["ProblemNumber"]},
+        {pn, #} & /@ ints
+      ],
+      {i, Length[topoIntegralPairs]}
+    ],
+    1
+  ];
+
+  intContent = StringJoin[
+    "{",
+    StringRiffle[
+      ("{" <> ToString[#[[1]]] <> "," <> ToString[#[[2]], InputForm] <> "}") & /@ allIntegrals,
+      ",\n"
+    ],
+    "}\n"
+  ];
+  Export[FileNameJoin[{dir, "batch_reduce.m"}], intContent, "Text"];
+
+  (* Write multi-problem config *)
+  writeMultiProblemConfig[topoIntegralPairs[[All, 1]], dir, "batch_reduce.config",
+                          "batch_reduce.m", "batch_reduce.tables"];
+
+  (* Run FIRE6 *)
+  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+    Print["Reducing integrals for ", Length[topoIntegralPairs], " topologies..."];
+  ];
+  runFIRE6[fireBin, dir, "batch_reduce"];
+
+  (* Load results *)
+  tablesFile = FileNameJoin[{dir, "batch_reduce.tables"}];
+  If[!FileExistsQ[tablesFile],
+    Print["Error: FIRE6 reduction did not produce output."];
+    Return[$Failed];
+  ];
+
+  rules = FIRE`Tables2Rules[tablesFile];
+
+  (* Parse results for each topology *)
+  results = Table[
+    With[{topo = topoIntegralPairs[[i, 1]],
+          ints = topoIntegralPairs[[i, 2]],
+          pn = topoIntegralPairs[[i, 1]]["ProblemNumber"]},
+      Association[
+        (Global`G[pn, #] /. rules) & /@ ints //
+        (* Normalize G[pn, ...] -> G[1, ...] *)
+        (# /. Global`G[pn, idx_] :> Global`G[1, idx]) & //
+        MapThread[Rule, {ints, #}] &
+      ]
+    ],
+    {i, Length[topoIntegralPairs]}
+  ];
+
+  results
+];
+
+
+(* ============================================================ *)
 (* ComputeDiffMatrix                                             *)
-(* Computes the differential equation matrix                     *)
-(* d/dx vec{M} = A(x) . vec{M}                                  *)
 (* ============================================================ *)
 
 ComputeDiffMatrix[topology_Association, variable_, precomputedDecomp_:{Automatic}] :=
-Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
-        uniqueIntegrals, reductions, diffMatrix, i, j, expr, updatedTopology},
+Module[{masters, nMasters, coeffMat, constVec, shiftedPerMaster,
+        uniqueIntegrals, reductions, diffMatrix, i, j, expr},
 
   masters = topology["Masters"];
   If[masters === {},
@@ -426,7 +663,6 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
 
   (* Step 1: Decompose propagator derivatives *)
   If[precomputedDecomp =!= {Automatic} && Length[precomputedDecomp] == 2,
-    (* Use pre-computed decomposition (e.g. from FeynmanTrickDecomposition) *)
     {coeffMat, constVec} = precomputedDecomp;
   ,
     {coeffMat, constVec} = DecomposePropagatorDerivative[
@@ -435,10 +671,6 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
       variable,
       topology["Replacements"]
     ];
-  ];
-
-  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-    Print["Derivative decomposition computed."];
   ];
 
   (* Step 2: For each master, find shifted integrals in d/dx M_i *)
@@ -451,9 +683,6 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
   uniqueIntegrals = DeleteDuplicates[
     Flatten[shiftedPerMaster[[All, All, 1]], 1]
   ];
-
-  (* Remove integrals that are already masters (no reduction needed) *)
-  (* But keep them in the list for uniform processing *)
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Need to reduce ", Length[uniqueIntegrals], " integrals."];
@@ -468,7 +697,6 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
   ];
 
   (* Map FIRE's Global variables back to the requested variable symbol *)
-  (* FIRE uses Global` symbols internally; our decomposition may use contexted symbols *)
   If[Context[variable] =!= "Global`",
     Module[{globalVar = Symbol[SymbolName[variable]]},
       reductions = Map[(# /. globalVar -> variable) &, reductions];
@@ -479,18 +707,14 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
   diffMatrix = Table[0, {nMasters}, {nMasters}];
 
   Do[
-    (* d/dx M_i = Sum over shifted integrals *)
     expr = Total[
       (#[[2]] * (reductions[#[[1]]])) & /@ shiftedPerMaster[[i]]
     ];
-
-    (* Extract coefficient of each master G[1, masters[[j]]] *)
     Do[
       diffMatrix[[i, j]] = Coefficient[expr, Global`G[1, masters[[j]]]];
     , {j, nMasters}];
   , {i, nMasters}];
 
-  (* Simplify entries *)
   diffMatrix = Map[Together, diffMatrix, {2}];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
@@ -503,7 +727,6 @@ Module[{masters, nMasters, coeffMat, constVec, allShifted, shiftedPerMaster,
 
 (* ============================================================ *)
 (* GetFIREResult                                                 *)
-(* Returns reduction of a single integral (for debugging)        *)
 (* ============================================================ *)
 
 GetFIREResult[topology_Association, integral_List] :=

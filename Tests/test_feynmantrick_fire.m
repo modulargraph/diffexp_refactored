@@ -84,10 +84,10 @@ Module[{topo, workDir, setupTopo, basisTopo, masters, reductions, diffMat},
 
   test["SetupFIRE returns association", Head[setupTopo], Association];
   test["StartFileReady", setupTopo["StartFileReady"], True];
+  test["ProblemNumber assigned", IntegerQ[setupTopo["ProblemNumber"]], True];
   testTrue[".start file exists",
     FileExistsQ[FileNameJoin[{workDir, "box.start"}]]];
-  testTrue[".config file exists",
-    FileExistsQ[FileNameJoin[{workDir, "box.config"}]]];
+  (* Note: .config file is now written when FIRE is run, not during setup *)
 
   (* ============================================================ *)
   Print["\n--- Test: FindBasis ---"];

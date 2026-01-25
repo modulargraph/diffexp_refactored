@@ -132,6 +132,28 @@ default (250). When `WorkingPrecision -> 200`, this triggered the error
 
 ---
 
+## FIXED: FIREInterface Multi-Topology Support
+
+**Previously:** The FIREInterface called `ClearIBP[]` before each topology and ran
+FIRE6 separately for each operation (FindBasis, ReduceIntegrals). This caused:
+- Each FIRE run spawned a new fermat subprocess
+- State wasn't preserved between calls
+- Race conditions and cleanup issues with fermat processes (exit codes 134, 137)
+
+**Fix:** Restructured FIREInterface.m for proper multi-topology batch processing:
+
+1. **Problem numbers**: Each topology gets a unique `ProblemNumber` (1, 2, 3, ...)
+2. **Batch functions**: Added `SetupFIREBatch`, `FindBasisBatch`, `ReduceIntegralsBatch`
+3. **Multi-problem configs**: Config files can list multiple `#problem N name.start` lines
+4. **Proper integral format**: Integrals include problem number: `{pn, {indices}}`
+5. **State management**: `$SetupTopologies`, `$NextProblemNumber`, `ClearFIREState[]`
+
+This matches how FIRE6 is designed to work - define all topologies first, then run
+reductions in a single FIRE6 invocation. The batch approach is more stable and
+avoids fermat subprocess management issues.
+
+---
+
 ## Files and Test Results
 
 ### Tests (all in Tests/)

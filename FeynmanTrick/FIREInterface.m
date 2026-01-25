@@ -181,27 +181,39 @@ Module[{exitCode, maxRetries = 3, attempt},
 ];
 
 runFIRE6Once[fireBin_String, dir_String, configName_String] :=
-Module[{exitCode, result, logFile, oldDir},
+Module[{exitCode, result, logFile, oldDir, cmd, stdoutFile, stderrFile},
   logFile = FileNameJoin[{dir, "fire_stdout.log"}];
-
-  (* Kill any stale fermat processes *)
-  Quiet[Run["pkill -9 -f 'fer64.*" <> FileBaseName[configName] <> "' 2>/dev/null"]];
-  Pause[0.2];
+  stdoutFile = FileNameJoin[{dir, "fire_stdout.tmp"}];
+  stderrFile = FileNameJoin[{dir, "fire_stderr.tmp"}];
 
   (* Clean temp directory *)
   Quiet[DeleteDirectory[FileNameJoin[{dir, "temp"}], DeleteContents -> True]];
 
-  (* Run FIRE6 *)
+  (* Run FIRE6 using shell execution - works better with Rosetta on M1 Macs *)
+  (* RunProcess has issues spawning x86_64 child processes (fermat) from arm64 *)
   oldDir = Directory[];
   SetDirectory[dir];
 
-  result = Quiet[
-    RunProcess[
-      {fireBin, "-c", configName},
-      ProcessDirectory -> dir
-    ],
-    {OptionValue::nodef}
+  cmd = StringJoin[
+    "cd ", dir, " && ",
+    fireBin, " -c ", configName,
+    " > ", stdoutFile, " 2> ", stderrFile
   ];
+
+  exitCode = Run[cmd];
+  (* Run returns exit code * 256 on Unix *)
+  exitCode = If[IntegerQ[exitCode], BitShiftRight[exitCode, 8], exitCode];
+
+  (* Read output *)
+  result = <|
+    "ExitCode" -> exitCode,
+    "StandardOutput" -> If[FileExistsQ[stdoutFile], ReadString[stdoutFile], ""],
+    "StandardError" -> If[FileExistsQ[stderrFile], ReadString[stderrFile], ""]
+  |>;
+
+  (* Clean up temp files *)
+  Quiet[DeleteFile[stdoutFile]];
+  Quiet[DeleteFile[stderrFile]];
 
   SetDirectory[oldDir];
 
@@ -254,11 +266,23 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn},
   fireProps = topology["Propagators"] /. fireSubst;
   fireRepls = topology["Replacements"] /. fireSubst;
 
-  (* Clear FIRE state for problem 0 (temp slot) *)
+  (* CRITICAL: Completely clear all FIRE state before setting up new topology *)
+  (* Without this, FIRE reuses stale IBP relations and hangs *)
   Quiet[
-    Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+    (* Unprotect everything that FIRE protects *)
+    Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements,
+              FIRE`PrepareIBPd, FIRE`BackMatrix, FIRE`Squares, FIRE`startinglist];
+    (* Clear the "already prepared" flag and cached IBP data - this is critical! *)
+    Clear[FIRE`PrepareIBPd, FIRE`BackMatrix, FIRE`Squares, FIRE`startinglist];
     Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
-  , {Unprotect::ssym, Clear::ssym}];
+    (* Clear IBP and sector data *)
+    Clear[FIRE`ExampleDimension, FIRE`SBasis0L, FIRE`SBasis0D, FIRE`SBasis0C,
+          FIRE`SBasisL, FIRE`SBasisD, FIRE`SBasisA, FIRE`SBasisH, FIRE`SBasisO,
+          FIRE`SBasisC, FIRE`SBasisS, FIRE`SBasisR, FIRE`SBasisRL, FIRE`SBasisM,
+          FIRE`SBasisN, FIRE`HPI, FIRE`LRules];
+    FIRE`Burning = False;
+    FIRE`ProblemNumber = 0;
+  , {Unprotect::ssym, Clear::ssym, Set::write}];
 
   (* Set FIRE variables *)
   FIRE`Internal = topology["LoopMomenta"];
@@ -272,7 +296,7 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn},
   ];
   FIRE`PrepareIBP[];
 
-  (* Prepare sector basis *)
+  (* Prepare sector basis - this should now say "Prepared" not "Already prepared" *)
   FIRE`Prepare[AutoDetectRestrictions -> True];
 
   (* Save start file *)

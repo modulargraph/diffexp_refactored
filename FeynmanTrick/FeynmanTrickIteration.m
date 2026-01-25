@@ -117,7 +117,9 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
   {i, j} = combo;
   prevProps = prevLevel["Propagators"];
 
-  param = FeynmanTrick`xx;
+  (* Each level gets a unique Feynman parameter symbol: xx1, xx2, xx3, ... *)
+  (* This is essential: the paper uses x_1, x_2, ..., x_{n-1} for each combination step *)
+  param = Symbol["xx" <> ToString[level]];
   fixedVal = ftData["FixedParamValue"];
   numericalPoint = ftData["NumericalPoint"];
 

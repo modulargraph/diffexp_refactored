@@ -154,6 +154,34 @@ avoids fermat subprocess management issues.
 
 ---
 
+## FIXED: FIRE State Clearing (`startinglist`)
+
+**Previously:** When computing multiple levels sequentially (3 → 2 → 1), level 2
+would hang because FIRE was using level 3's variable names (xx3 instead of xx2).
+Fermat would wait forever for equations that referenced undefined variables.
+
+**Root cause:** FIRE caches IBP relations in `FIRE`startinglist`. If not cleared,
+`PrepareIBP[]` skips regenerating IBPs and reuses the cached ones with old variables.
+
+**Fix:** Added `FIRE`startinglist` to the list of variables cleared in `SetupFIRE`:
+```mathematica
+Clear[FIRE`PrepareIBPd, FIRE`BackMatrix, FIRE`Squares, FIRE`startinglist];
+```
+
+---
+
+## FIXED: ARM64 Fermat and Shell Execution
+
+**Previously:** On Apple Silicon Macs, FIRE6 (arm64) couldn't spawn fermat (x86_64)
+properly when called via Mathematica's `RunProcess[]`. The child process would get
+killed (signal 9) or fail with `CHILD LAUNCH ERROR: errno = 8`.
+
+**Fix:**
+1. Installed native ARM64 fermat v7.8 from `https://home.bway.net/lewis/fermat64/Ferm7a.tar.gz`
+2. Changed from `RunProcess[]` to `Run[]` with shell execution for FIRE6 invocation
+
+---
+
 ## Files and Test Results
 
 ### Tests (all in Tests/)

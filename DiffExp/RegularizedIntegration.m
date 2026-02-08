@@ -269,17 +269,8 @@ IntegrateSingularTerm[a_, b_, gList_List, {xmin_, xmax_}] := Module[
          If regA >= 0 and regB = 0 (Taylor term), just integrate directly.
          If regB != 0, we need the full eps-dependent integration. *)
 
-      If[regB == 0,
-        (* Simple Taylor integration *)
-        integrated = DiffExp`Integration`DiffExpIntegrate[gAtOrd * DiffExp`Symbols`x^regA, DiffExp`Symbols`x];
-        upperVal = DiffExp`Pade`SEval[integrated, xmax];
-        lowerVal = If[atLowerSingularity && regA < 0, 0, DiffExp`Pade`SEval[integrated, xmin]];
-        upperVal - lowerVal
-        ,
-        (* eps-dependent power: x^(regA+regB*eps) *)
-        (* Need to handle this more carefully *)
-        IntegratePowerTimesSeriesAtOrder[regA, regB, regG, ord, {xmin, xmax}, atLowerSingularity, atUpperSingularity]
-      ]
+      (* Always use the detailed integration to handle fractional terms correctly *)
+      IntegratePowerTimesSeriesAtOrder[regA, regB, regG, ord, {xmin, xmax}, atLowerSingularity, atUpperSingularity]
     ],
     {ord, 0, epsOrder}
   ];
@@ -305,7 +296,7 @@ IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_},
 
   result = Sum[
     Module[{logPow = k, logCoeff, gAtOrder, integ, uVal, lVal},
-      logCoeff = b^logPow / logPow!;
+      logCoeff = If[b == 0 && logPow == 0, 1, If[b == 0, 0, b^logPow / logPow!]];
       gAtOrder = If[targetOrd - k >= 0 && targetOrd - k <= epsOrder,
                     gList[[targetOrd - k + 1]],
                     0];
@@ -479,11 +470,11 @@ IntegrateSegmentData[segmentData_List, {a_, b_}, intIndex_Integer, epsOrder_Inte
 
   (* Uncompress if needed *)
   If[StringQ[seriesData],
-    uncompressed = Uncompress[Import[seriesData]];,
-    If[Head[seriesData] === String && StringLength[seriesData] > 100,
-      uncompressed = Uncompress[seriesData];,
-      uncompressed = seriesData;
-    ]
+    If[FileExistsQ[seriesData],
+       uncompressed = Uncompress[Import[seriesData]];,
+       uncompressed = Uncompress[seriesData];
+    ];,
+    uncompressed = seriesData;
   ];
 
   (* Get the series for this integral (all eps orders) *)
@@ -527,9 +518,11 @@ IntegrateSegmentData[segmentData_List, {a_, b_}, intIndex_Integer, epsOrder_Inte
   (* Integrate the decomposition *)
   integralResult = IntegrateDecomposition[decomposition, {localA, localB}];
 
-  (* Apply Jacobian - lineRelation maps x_main -> x_local, so jacobian = dx_local/dx_main *)
-  (* For the integral: ∫ f(x_main) dx_main = ∫ g(x_local) * |dx_main/dx_local| dx_local = (1/|jacobian|) * ∫ g dx_local *)
-  integralResult[[epsOrder + 1]] / Abs[jacobian]
+  (* Apply Jacobian - handle empty decomposition gracefully *)
+  If[ListQ[integralResult] && Length[integralResult] > epsOrder,
+    integralResult[[epsOrder + 1]] / Abs[jacobian],
+    0  (* Empty decomposition means zero integrand on this segment *)
+  ]
 ];
 
 (* ============================================================ *)
@@ -561,11 +554,11 @@ IntegratePiecewiseSaved[savedData2_, {a_, b_}] := Module[
 
   (* Get dimensions from first segment *)
   If[StringQ[savedData[[1, 5]]],
-    uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
-    If[Head[savedData[[1, 5]]] === String && StringLength[savedData[[1, 5]]] > 100,
-      uncompressed = Uncompress[savedData[[1, 5]]];,
-      uncompressed = savedData[[1, 5]];
-    ]
+    If[FileExistsQ[savedData[[1, 5]]],
+       uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
+       uncompressed = Uncompress[savedData[[1, 5]]];
+    ];,
+    uncompressed = savedData[[1, 5]];
   ];
 
   numIntegrals = Length[uncompressed];
@@ -629,11 +622,11 @@ IndefiniteIntegral[savedData2_] := Module[
 
   (* Get dimensions *)
   If[StringQ[savedData[[1, 5]]],
-    uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
-    If[Head[savedData[[1, 5]]] === String && StringLength[savedData[[1, 5]]] > 100,
-      uncompressed = Uncompress[savedData[[1, 5]]];,
-      uncompressed = savedData[[1, 5]];
-    ]
+    If[FileExistsQ[savedData[[1, 5]]],
+       uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
+       uncompressed = Uncompress[savedData[[1, 5]]];
+    ];,
+    uncompressed = savedData[[1, 5]];
   ];
 
   numIntegrals = Length[uncompressed];
@@ -698,11 +691,11 @@ IntegrateSegmentIndefinite[segmentData_List, intIndex_Integer, epsOrder_Integer]
 
   (* Uncompress *)
   If[StringQ[seriesData],
-    uncompressed = Uncompress[Import[seriesData]];,
-    If[Head[seriesData] === String && StringLength[seriesData] > 100,
-      uncompressed = Uncompress[seriesData];,
-      uncompressed = seriesData;
-    ]
+    If[FileExistsQ[seriesData],
+       uncompressed = Uncompress[Import[seriesData]];,
+       uncompressed = Uncompress[seriesData];
+    ];,
+    uncompressed = seriesData;
   ];
 
   seriesAtIndex = uncompressed[[intIndex]];
@@ -775,11 +768,11 @@ DefiniteIntegralWithPrefactor[savedData2_, {lower_, upper_}, prefactorSpec_Assoc
 
   (* Get dimensions from first segment *)
   If[StringQ[savedData[[1, 5]]],
-    uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
-    If[Head[savedData[[1, 5]]] === String && StringLength[savedData[[1, 5]]] > 100,
-      uncompressed = Uncompress[savedData[[1, 5]]];,
-      uncompressed = savedData[[1, 5]];
-    ]
+    If[FileExistsQ[savedData[[1, 5]]],
+       uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
+       uncompressed = Uncompress[savedData[[1, 5]]];
+    ];,
+    uncompressed = savedData[[1, 5]];
   ];
 
   numIntegrals = Length[uncompressed];
@@ -842,11 +835,11 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
 
   (* Uncompress if needed *)
   If[StringQ[seriesData],
-    uncompressed = Uncompress[Import[seriesData]];,
-    If[Head[seriesData] === String && StringLength[seriesData] > 100,
-      uncompressed = Uncompress[seriesData];,
-      uncompressed = seriesData;
-    ]
+    If[FileExistsQ[seriesData],
+       uncompressed = Uncompress[Import[seriesData]];,
+       uncompressed = Uncompress[seriesData];
+    ];,
+    uncompressed = seriesData;
   ];
 
   (* Get the series for this integral (all eps orders) *)
@@ -987,8 +980,11 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
     (* Integrate the modified decomposition *)
     integralResult = IntegrateDecomposition[modifiedDecomp, {localA, localB}];
 
-    (* Apply Jacobian correction *)
-    integralResult[[epsOrder + 1]] / Abs[jacobian]
+    (* Apply Jacobian correction - handle empty decomposition gracefully *)
+    If[ListQ[integralResult] && Length[integralResult] > epsOrder,
+      integralResult[[epsOrder + 1]] / Abs[jacobian],
+      0  (* Empty decomposition means zero integrand on this segment *)
+    ]
   ]
 ];
 

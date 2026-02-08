@@ -145,10 +145,20 @@ ClearFIREState[] := Module[{},
 (* ============================================================ *)
 
 ensureFIRELoaded[] := Module[{firePath},
-  If[!MemberQ[$Packages, "FIRE`"],
+  (* Check if FIRE is actually loaded by testing for a key function, not just $Packages *)
+  (* $Packages can be misleading if the context was created without loading the package *)
+  If[!ValueQ[FIRE`SaveStart] || Head[FIRE`SaveStart] === Symbol,
     firePath = FeynmanTrick`Private`$FTConfig["FIREPath"];
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+      Print["Loading FIRE6.m from: ", firePath];
+    ];
     Block[{$Path = Prepend[$Path, firePath]},
-      Quiet[Get["FIRE6.m"], {General::shdw}];
+      Get["FIRE6.m"];
+    ];
+    (* Verify FIRE was actually loaded *)
+    If[!ValueQ[FIRE`SaveStart] || Head[FIRE`SaveStart] === Symbol,
+      Print["Error: Failed to load FIRE6.m. Check FIREPath: ", firePath];
+      Return[$Failed];
     ];
   ];
 ];

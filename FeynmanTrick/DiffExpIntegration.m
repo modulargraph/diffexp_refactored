@@ -1,39 +1,85 @@
-(* ::Package:: *)
-(* DiffExpIntegration - Bridge between FeynmanTrick and DiffExp *)
-(* Handles transport, integration with Feynman trick prefactors, *)
-(* and the full bottom-up integration pipeline.                   *)
+(*::Package::*)(*DiffExpIntegration - Bridge between FeynmanTrick and
+                DiffExp *)(*Handles transport,
+                           integration with Feynman trick prefactors,
+                               *)(*and the full bottom -
+                                  up integration pipeline.*)
 
-BeginPackage["FeynmanTrick`DiffExpIntegration`", {"FeynmanTrick`"}];
+    BeginPackage["FeynmanTrick`DiffExpIntegration`", {"FeynmanTrick`"}];
 
 TransportLevel::usage =
-  "TransportLevel[matrixDir, boundaryValues, epsOrder, opts] loads DiffExp with \
+    "TransportLevel[matrixDir, boundaryValues, epsOrder, opts] loads DiffExp with \
 matrices from matrixDir, sets boundary conditions at the fixed parameter point, \
 and transports to cover [0,1]. Returns the TransportTo result with SegmentData.";
 
-IntegrateLevelMaster::usage =
-  "IntegrateLevelMaster[transportResult, masterIdx, v1, v2, ibpCoeff, epsOrder] \
-integrates the Feynman trick recursion for a single master: \
-Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) * Integral[x^(v1-1)*(1-x)^(v2-1) * c(x)*f(x), {x,0,1}]. \
+IntegrateCombinedMasters::usage =
+    "IntegrateCombinedMasters[transportResult, ibpCoeffs, v1, v2, epsOrder, epsPrefactors, feynmanParam] \
+integrates the combined Feynman trick integrand: \
+Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) * Integral[x^(v1-1)*(1-x)^(v2-1) * Sum_j c_j(x)*f_j(x), {x,0,1}]. \
+Combines the integrand before integration to handle cancellation of poles in IBP coefficients. \
 Returns the integrated boundary value as a list of eps-order coefficients.";
 
 EvaluateLimitFromTransport::usage =
-  "EvaluateLimitFromTransport[transportResult, ibpCoeffs, boundary, epsOrder] \
+    "EvaluateLimitFromTransport[transportResult, ibpCoeffs, boundary, epsOrder] \
 evaluates lim_{x->boundary} of the linear combination sum_j ibpCoeffs[[j]] * f_j(x). \
 boundary = 0 or 1. Uses segment decomposition, keeping only pure Taylor terms \
 (setting x^{a+b*eps} terms with b!=0 to zero). Returns eps-order coefficient list.";
 
 ComputeLevelBoundary::usage =
-  "ComputeLevelBoundary[ftData, level, transportResult, epsOrder] computes boundary \
+    "ComputeLevelBoundary[ftData, level, transportResult, epsOrder] computes boundary \
 conditions for all masters at 'level' using the transport results from level+1. \
 Handles IBP reductions and the Feynman trick recursion formula. \
 Returns <|\"BoundaryValues\" -> {...}, \"Masters\" -> {...}, \"Level\" -> ...|>.";
 
 RunIntegrationPipeline::usage =
-  "RunIntegrationPipeline[ftData, outputDir, epsOrder, opts] runs the full bottom-up \
+    "RunIntegrationPipeline[ftData, outputDir, epsOrder, opts] runs the full bottom-up \
 integration pipeline: computes matrices at all levels, evaluates boundary at deepest \
 level, transports and integrates level by level. Returns final boundary conditions for level 0.";
 
 Begin["`Private`"];
+
+(* ============================================================ *)
+(* Resolve DiffExp analytic continuation symbols                 *)
+(* ============================================================ *)
+
+(*
+  DiffExp's transport produces series containing symbolic theta functions
+  (θp, θm) from analytic continuation, and Logx = Log[x].
+  For integration over [0,1] with +i*delta prescription, we need to
+  resolve these to numerical values:
+    θp -> 1, θm -> 0  (approaching from upper half plane)
+    Logx -> Log[x]     (actual logarithm)
+*)
+$thetaRules = {
+  DiffExp`Symbols`\[Theta]p -> 1,
+  DiffExp`Symbols`\[Theta]m -> 0
+};
+
+(* Resolve theta functions in a single series expression *)
+resolveThetas[expr_] := expr /. $thetaRules;
+
+(* Resolve theta functions in segment data (list of segments).
+   Each segment is {line, transform, mainBounds, localBounds, seriesData}.
+   The seriesData (element 5) may contain theta functions in coefficients. *)
+resolveSegmentThetas[segData_List] := Table[
+  Module[{seg, rawSeries, resolved},
+    seg = segData[[segIdx]];
+    rawSeries = seg[[5]];
+
+    (* Uncompress if needed, resolve thetas, recompress *)
+    If[StringQ[rawSeries],
+      If[FileExistsQ[rawSeries],
+        resolved = Uncompress[Import[rawSeries]];,
+        resolved = Uncompress[rawSeries];
+      ];
+      resolved = resolved /. $thetaRules;
+      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], Compress[resolved]}
+    ,
+      resolved = rawSeries /. $thetaRules;
+      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], resolved}
+    ]
+  ],
+  {segIdx, Length[segData]}
+];
 
 (* ============================================================ *)
 (* DiffExp Loading and Transport                                 *)
@@ -84,6 +130,10 @@ Module[{fixedVal, precision, expOrder, verbosity,
   (* Configure DiffExp for this level.
      All config keys must be fully qualified to match DiffExp's internal symbols,
      since this package's BeginPackage restricts the context path. *)
+  (* Delta prescriptions for branch cuts at x=0 and x=1 *)
+  (* Format: {polynomial, sign} where sign=1 means +I*delta prescription *)
+  (* The variable will be detected after loading matrices *)
+
   diffExpConfig = {
     DiffExp`State`MatrixDirectory -> matrixDir,
     System`WorkingPrecision -> precision,
@@ -106,6 +156,19 @@ Module[{fixedVal, precision, expOrder, verbosity,
      Extract the detected variable symbol so our points match DiffExp's internal state. *)
   Module[{detectedVar},
     detectedVar = First[DiffExp`State`FEC[System`Variables]];
+
+    (* Add delta prescriptions for branch cuts at endpoints *)
+    (* {polynomial, sign}: sign=1 means approach from above (Im > 0) *)
+    (* Also disable abort on analytic continuation failure - the pipeline
+       handles incomplete results gracefully *)
+    DiffExp`UpdateConfiguration[{
+      DiffExp`State`DeltaPrescriptions -> {
+        {detectedVar, 1},        (* x + I*delta at x=0 *)
+        {1 - detectedVar, 1}     (* (1-x) + I*delta at x=1 *)
+      },
+      "AbortOnAnalyticContinuationFail" -> False
+    }];
+
     If[verbosity >= 1,
       Print["  DiffExp detected variable: ", detectedVar, " (context: ", Context[detectedVar], ")"];
       Print["  ExternalScalesVal: ", DiffExp`State`ExternalScalesVal];
@@ -144,6 +207,15 @@ Module[{fixedVal, precision, expOrder, verbosity,
 
     (* Reload config for transport in other direction *)
     DiffExp`LoadConfiguration[diffExpConfig];
+
+    (* CRITICAL: Re-add delta prescriptions after LoadConfiguration reset *)
+    DiffExp`UpdateConfiguration[{
+      DiffExp`State`DeltaPrescriptions -> {
+        {detectedVar, 1},        (* x + I*delta at x=0 *)
+        {1 - detectedVar, 1}     (* (1-x) + I*delta at x=1 *)
+      },
+      "AbortOnAnalyticContinuationFail" -> False
+    }];
 
     (* Transport towards xx = 1 (singular endpoint handled by DiffExp) *)
     resultToUpper = DiffExp`Transport`TransportTo[
@@ -196,75 +268,263 @@ Module[{fixedVal, precision, expOrder, verbosity,
 (* ============================================================ *)
 
 (*
-  Integrates the Feynman trick recursion for a single contribution:
-  Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) * Integral[x^(v1-1)*(1-x)^(v2-1) * c(x)*f_j(x), {x,0,1}]
+  IntegrateCombinedMasters: Integrates the Feynman trick recursion.
 
-  Where:
-  - v1, v2 are the propagator exponents being combined
-  - c(x) is the IBP coefficient (rational function in xx)
-  - f_j(x) is the j-th master from the transport result
+  Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) *
+    Integral[x^(v1-1)*(1-x)^(v2-1) * Sum_j c_j(x)*f_j(x), {x,0,1}]
+
+  CRITICAL: The integrand Sum_j c_j(x)*f_j(x) must be combined BEFORE
+  integration. Individual c_j(x) may have poles at x=0 and x=1, but the
+  sum cancels these poles. Integrating term by term would diverge.
+
+  The IBP coefficients c_j(x,d) depend on d = 4-2*eps. We expand in eps:
+  c_j(x,eps) = Sum_k eps^k * c_j^{(k)}(x)
+
+  The transport gives J_j = eps^{k_j} * I_j (prefactored masters), while
+  IBP coefficients relate to I_j. So the full integrand at eps order n is:
+  Sum_j Sum_{k=0}^{n+k_j} c_j^{(k)}(x) * J_j^{(n+k_j-k)}(x)
+
+  where k_j is the eps-prefactor for master j.
+
+  Arguments:
+  - transportResult: transport data with SegmentData
+  - ibpCoeffs: list of IBP coefficients (one per master, may contain d)
+  - v1, v2: propagator exponents being combined
+  - epsOrder: number of eps orders
+  - epsPrefactors: list of eps-prefactor powers {k_1,...,k_n} (0 = no prefactor)
+  - feynmanParam: the Feynman parameter symbol for this level
+
+  Returns: list of eps-order coefficients for the integrated result.
 *)
-IntegrateLevelMaster[transportResult_Association, masterIdx_Integer,
-    v1_Integer, v2_Integer, ibpCoeff_, epsOrder_Integer] :=
-Module[{prefactorSpec, result, gammaPrefactor, segData, modifiedSegments,
-        singleMasterData},
+IntegrateCombinedMasters[transportResult_Association, ibpCoeffs_List,
+    v1_Integer, v2_Integer, epsOrder_Integer,
+    epsPrefactors_List:{}, feynmanParam_:Automatic] :=
+Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
+        segData, actualVar, combinedSegments, combinedData,
+        prefactorSpec, result, prefacs, numMasters},
 
   (* Gamma prefactor: Gamma(v1+v2)/(Gamma(v1)*Gamma(v2)) *)
   gammaPrefactor = Gamma[v1 + v2] / (Gamma[v1] * Gamma[v2]);
 
-  (* Set up the prefactor specification for DefiniteIntegralWithPrefactor *)
-  prefactorSpec = <|
-    "PowerAtLower" -> v1 - 1,      (* x^(v1-1) *)
-    "PowerAtUpper" -> v2 - 1,      (* (1-x)^(v2-1) *)
-    "RationalFactor" -> ibpCoeff,   (* IBP coefficient c(x) *)
-    "Variable" -> Global`xx         (* variable in rational prefactor *)
-  |>;
+  numMasters = Length[ibpCoeffs];
 
-  (* Extract segment data for just this master *)
+  (* Default: no eps-prefactors (all zero) *)
+  prefacs = If[Length[epsPrefactors] == numMasters, epsPrefactors,
+    Table[0, {numMasters}]];
+
+  (* Expand each IBP coefficient in eps: d -> 4-2*eps *)
+  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
+  epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+
+  (* ibpCoeffOrders[[j]] is a list of eps-order coefficients for master j
+     Each element is a rational function of x (no eps) *)
+  ibpCoeffOrders = Table[
+    Module[{expanded},
+      If[ibpCoeffs[[j]] === 0,
+        Table[0, {epsOrder + Max[prefacs] + 1}],
+        expanded = ibpCoeffs[[j]] /. dimVar -> (4 - 2*epsSymbol);
+        Table[
+          SeriesCoefficient[expanded, {epsSymbol, 0, k}] // Normal // Together,
+          {k, 0, epsOrder + Max[prefacs]}
+        ]
+      ]
+    ],
+    {j, numMasters}
+  ];
+
+  (* Determine the actual variable from the segment transform.
+     CRITICAL: The transport segments use a variable created by DiffExp's ToExpression
+     (e.g., FeynmanTrick`DiffExpIntegration`Private`xx3), while the IBP coefficients
+     from FIRE6 use a different symbol (e.g., Global`xx3). We must detect BOTH
+     and normalize the IBP coefficients to use the segment variable. *)
+  Module[{segVar, ibpVar, varName},
+    (* Get the variable from the segment transform *)
+    Module[{seg1, transform},
+      seg1 = transportResult["SegmentData"][[1]];
+      transform = seg1[[2]];
+      segVar = If[AssociationQ[transform],
+        First[Keys[transform]], Global`xx];
+    ];
+
+    (* The IBP variable may be in a different context.
+       Find it by looking for symbols with the same name in the IBP coefficients. *)
+    varName = SymbolName[segVar];
+    ibpVar = segVar;  (* Default: assume same *)
+
+    (* Check if the IBP coefficients contain a different symbol with the same name *)
+    Module[{allSymbols, ibpSymbols},
+      allSymbols = Cases[ibpCoeffOrders, _Symbol, Infinity] // DeleteDuplicates;
+      ibpSymbols = Select[allSymbols,
+        SymbolName[#] === varName && # =!= segVar &];
+      If[Length[ibpSymbols] > 0,
+        ibpVar = First[ibpSymbols];
+        If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+          Print["    Variable context mismatch: IBP uses ", ibpVar, " (",
+                Context[ibpVar], "), segments use ", segVar, " (", Context[segVar], ")"];
+          Print["    Remapping IBP coefficients..."];
+        ];
+        (* Remap IBP coefficients to use the segment variable *)
+        ibpCoeffOrders = ibpCoeffOrders /. ibpVar -> segVar;
+      ];
+    ];
+
+    actualVar = segVar;
+  ];
+
   segData = transportResult["SegmentData"];
 
-  (* Modify each segment to contain only the requested master *)
-  modifiedSegments = Table[
-    Module[{seg, seriesRaw, uncompressed, singleSeries},
+  (* For each segment, combine all masters weighted by IBP coefficients.
+     The combined series at eps order n is:
+       combined^{(n)}(x) = Sum_j Sum_{k=0}^{n+k_j} c_j^{(k)}(x) * J_j^{(n+k_j-k)}(x)
+
+     where k_j is the eps-prefactor for master j (J_j = eps^{k_j} * I_j).
+     The prefactor shift accounts for the fact that J_j starts at eps^0
+     while I_j starts at eps^{-k_j}.
+
+     The IBP coefficient multiplied by eps^{-k_j} shifts the eps order:
+     c_j(x) * I_j(x) = c_j(x) * eps^{-k_j} * J_j(x)
+     At eps order n: Sum_{k=0}^{n+k_j} c_j^{(k)}(x) * J_j^{(n+k_j-k)}(x)
+  *)
+  combinedSegments = Table[
+    Module[{seg, seriesRaw, uncompressed, xLocal, xMainExpr,
+            combinedEpsOrders, numEpsOrders},
       seg = segData[[segIdx]];
       seriesRaw = seg[[5]];
 
-      (* Uncompress if needed *)
+      (* Uncompress and resolve theta functions *)
       If[StringQ[seriesRaw],
-        uncompressed = Uncompress[Import[seriesRaw]];,
-        If[Head[seriesRaw] === String && StringLength[seriesRaw] > 100,
-          uncompressed = Uncompress[seriesRaw];,
-          uncompressed = seriesRaw;
-        ]
+        If[FileExistsQ[seriesRaw],
+           uncompressed = Uncompress[Import[seriesRaw]];,
+           uncompressed = Uncompress[seriesRaw];
+        ];,
+        uncompressed = seriesRaw;
+      ];
+      uncompressed = uncompressed /. $thetaRules;
+
+      (* uncompressed[[j]] = list of eps orders for master j
+         uncompressed[[j]][[n+1]] = SeriesData for J_j at eps order n *)
+      numEpsOrders = Length[uncompressed[[1]]];
+
+      (* Get the coordinate transformation: x_main = f(x_local) *)
+      xLocal = DiffExp`Symbols`x;
+      xMainExpr = If[AssociationQ[seg[[2]]],
+        First[Values[seg[[2]]]],
+        seg[[2, 2]]  (* Rule format: variable -> expression *)
       ];
 
-      (* Extract just this master's series *)
-      singleSeries = {uncompressed[[masterIdx]]};
+      (* Build combined series for each output eps order *)
+      combinedEpsOrders = Table[
+        Module[{total = 0},
+          Do[
+            If[ibpCoeffs[[j]] =!= 0,
+              Module[{kj, cjSeries},
+                kj = prefacs[[j]];
 
-      (* Rebuild segment with single master *)
-      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], singleSeries}
+                (* For this master, the contribution at output order n is:
+                   Sum_{k=0}^{n+kj} c_j^{(k)}(x) * J_j^{(n+kj-k)}(x)
+                   where the J index is in transport's eps numbering *)
+                Do[
+                  If[ibpCoeffOrders[[j, k + 1]] =!= 0,
+                    Module[{jIdx, cLocal, cSeries, prod},
+                      jIdx = n + kj - k + 1;  (* 1-based index into eps orders *)
+
+                      If[jIdx >= 1 && jIdx <= numEpsOrders,
+                        (* Convert IBP coefficient to local coordinates *)
+                        cLocal = ibpCoeffOrders[[j, k + 1]] /. actualVar -> xMainExpr;
+
+                        (* Series-expand the coefficient in local coords *)
+                        Module[{transportVal = uncompressed[[j, jIdx]]},
+                          If[MatchQ[transportVal, _SeriesData],
+                            (* Normal case: transport gives a series *)
+                            Module[{expOrd},
+                              expOrd = transportVal[[5]] - transportVal[[4]];
+                              cSeries = Quiet[
+                                Series[cLocal, {xLocal, 0, expOrd}],
+                                {Power::infy, Infinity::indet, General::indet}
+                              ];
+                              prod = cSeries * transportVal;
+                              total = total + prod;
+                            ];
+                          , If[NumericQ[transportVal] && Chop[transportVal] =!= 0,
+                              (* Transport is a non-zero constant (e.g., from a master
+                                 with constant boundary value). Expand c_j(x)*const
+                                 as a series in local coords. *)
+                              Module[{expOrd = 30},
+                                cSeries = Quiet[
+                                  Series[cLocal * transportVal, {xLocal, 0, expOrd}],
+                                  {Power::infy, Infinity::indet, General::indet}
+                                ];
+                                If[MatchQ[cSeries, _SeriesData],
+                                  total = total + cSeries;
+                                ];
+                              ];
+                            ];
+                            (* Zero or non-numeric: skip *)
+                          ];
+                        ];
+                      ];
+                    ];
+                  ];
+                , {k, 0, Min[n + kj, Length[ibpCoeffOrders[[j]]] - 1]}];
+              ];
+            ];
+          , {j, numMasters}];
+          total
+        ],
+        {n, 0, epsOrder}  (* eps orders 0 through epsOrder *)
+      ];
+
+      (* Package as single-master segment:
+         {line, transform, mainBounds, localBounds, {{epsOrder0, epsOrder1, ...}}} *)
+      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], {combinedEpsOrders}}
     ],
     {segIdx, Length[segData]}
   ];
 
-  singleMasterData = <|
-    "SegmentData" -> modifiedSegments,
+  combinedData = <|
+    "SegmentData" -> combinedSegments,
     "NumIntegrals" -> 1,
     "EpsilonOrder" -> epsOrder
   |>;
 
-  (* Call the extended DefiniteIntegral *)
-  result = DiffExp`RegularizedIntegration`DefiniteIntegralWithPrefactor[
-    singleMasterData,
-    {0, 1},
-    prefactorSpec
+  (* Check if all combined series are zero (no contributions from any master).
+     This happens when all non-zero IBP coefficients multiply zero transport data.
+     In this case, the boundary value is zero - skip DefiniteIntegralWithPrefactor. *)
+  Module[{allZero},
+    allZero = And @@ Table[
+      And @@ Table[
+        combinedSegments[[s, 5, 1, n]] === 0,
+        {n, epsOrder + 1}
+      ],
+      {s, Length[combinedSegments]}
+    ];
+    If[allZero,
+      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+        Print["    [Combine] All combined series are zero -> returning zero boundary"];
+      ];
+      Return[Table[0, {epsOrder + 1}], Module];
+    ];
   ];
 
-  (* Result is indexed as result[[intIdx, epsOrd+1]] for 1 integral *)
-  (* Multiply by Gamma prefactor *)
-  If[ListQ[result] && Length[result] >= 1,
-    gammaPrefactor * result[[1]],
-    Print["Warning: Integration returned unexpected format: ", Head[result]];
+  (* Now integrate the combined series with just the power-law prefactors.
+     No rational factor needed - it's already been folded into the series. *)
+  prefactorSpec = <|
+    "PowerAtLower" -> v1 - 1,
+    "PowerAtUpper" -> v2 - 1,
+    "RationalFactor" -> 1,
+    "Variable" -> actualVar
+  |>;
+
+  result = DiffExp`RegularizedIntegration`DefiniteIntegralWithPrefactor[
+    combinedData, {0, 1}, prefactorSpec
+  ];
+
+  If[ListQ[result] && Length[result] >= 1 && ListQ[result[[1]]],
+    gammaPrefactor * result[[1]]
+  ,
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+      Print["Warning: Combined integration returned unexpected format: ", Head[result]];
+    ];
     Table[0, {epsOrder + 1}]
   ]
 ];
@@ -287,10 +547,24 @@ EvaluateLimitFromTransport[transportResult_Association, ibpCoeffs_List,
     boundary_Integer, epsOrder_Integer] :=
 Module[{segData, targetSeg, uncompressed, numMasters,
         limitValues, seriesAtMaster, decomposition,
-        taylorPart, limitVal},
+        taylorPart, limitVal, dimVar, epsSymbol, ibpCoeffsExpanded},
 
   segData = transportResult["SegmentData"];
   numMasters = transportResult["NumIntegrals"];
+
+  (* Expand IBP coefficients in eps: d -> 4 - 2*eps *)
+  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
+  epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+  ibpCoeffsExpanded = Table[
+    Module[{coeff, expanded},
+      coeff = ibpCoeffs[[i]] /. dimVar -> (4 - 2*epsSymbol);
+      (* Series expand in eps to required order *)
+      expanded = coeff + O[epsSymbol]^(epsOrder + 1);
+      (* Extract coefficient at each eps order *)
+      Table[SeriesCoefficient[expanded, k], {k, 0, epsOrder}]
+    ],
+    {i, Length[ibpCoeffs]}
+  ];
 
   (* Select the boundary segment *)
   If[boundary === 0,
@@ -301,14 +575,15 @@ Module[{segData, targetSeg, uncompressed, numMasters,
     targetSeg = First[SortBy[segData, -Max[#[[3]]] &]];
   ];
 
-  (* Uncompress series data *)
+  (* Uncompress series data and resolve theta functions *)
   If[StringQ[targetSeg[[5]]],
-    uncompressed = Uncompress[Import[targetSeg[[5]]]];,
-    If[Head[targetSeg[[5]]] === String && StringLength[targetSeg[[5]]] > 100,
-      uncompressed = Uncompress[targetSeg[[5]]];,
-      uncompressed = targetSeg[[5]];
-    ]
+    If[FileExistsQ[targetSeg[[5]]],
+       uncompressed = Uncompress[Import[targetSeg[[5]]]];,
+       uncompressed = Uncompress[targetSeg[[5]]];
+    ];,
+    uncompressed = targetSeg[[5]];
   ];
+  uncompressed = uncompressed /. $thetaRules;
 
   (* For each master, evaluate the limit *)
   limitValues = Table[0, {epsOrder + 1}];
@@ -343,8 +618,23 @@ Module[{segData, targetSeg, uncompressed, numMasters,
         ];
       , {term, taylorPart}];
 
-      (* Add weighted contribution *)
-      limitValues += ibpCoeffs[[mIdx]] * limitVal;
+      (* Add weighted contribution using eps-expanded coefficients *)
+      (* ibpCoeffsExpanded[[mIdx]] is a list of eps-order coefficients *)
+      (* Convolve with limitVal to get the product in eps *)
+      Module[{coeffsAtM, contribution},
+        coeffsAtM = ibpCoeffsExpanded[[mIdx]];
+        contribution = Table[
+          Sum[
+            If[k >= 0 && k <= epsOrder && (n - k) >= 0 && (n - k) <= epsOrder,
+              coeffsAtM[[k + 1]] * limitVal[[n - k + 1]],
+              0
+            ],
+            {k, 0, n}
+          ],
+          {n, 0, epsOrder}
+        ];
+        limitValues += contribution;
+      ];
     ];
   , {mIdx, numMasters}];
 
@@ -376,10 +666,33 @@ Module[{segData, targetSeg, uncompressed, numMasters,
   I_{v1,0,...}^(k-1) = lim_{x->1} I_{v1,...}^(k)
   I_{0,v2,...}^(k-1) = lim_{x->0} I_{v2,...}^(k)
 *)
+
+(* Helper: expand IBP coefficient in eps, returning list of eps-order coefficients *)
+ExpandIBPCoeffInEps[coeff_, epsOrder_Integer] :=
+Module[{dimVar, epsSymbol, expanded},
+  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
+  epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+  expanded = coeff /. dimVar -> (4 - 2*epsSymbol);
+  Table[SeriesCoefficient[expanded + O[epsSymbol]^(epsOrder + 1), k], {k, 0, epsOrder}]
+];
+
+(* Helper: multiply two eps-expanded coefficient lists (convolution) *)
+MultiplyEpsCoeffs[coeffs1_List, coeffs2_List, epsOrder_Integer] :=
+Table[
+  Sum[
+    If[k >= 0 && k < Length[coeffs1] && (n - k) >= 0 && (n - k) < Length[coeffs2],
+      coeffs1[[k + 1]] * coeffs2[[n - k + 1]],
+      0
+    ],
+    {k, 0, n}
+  ],
+  {n, 0, epsOrder}
+];
+
 ComputeLevelBoundary[ftData_Association, level_Integer,
     transportResult_Association, epsOrder_Integer] :=
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
-        combinedPositions, posI, posJ, topologyAbove, bcValues},
+        combinedPositions, posI, posJ, topologyAbove, bcValues, feynmanParamAbove},
 
   levelData = ftData["Levels"][level];
   levelAbove = ftData["Levels"][level + 1];
@@ -388,6 +701,9 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
   combinedPositions = levelAbove["CombinedPositions"];
   {posI, posJ} = combinedPositions;
   topologyAbove = levelAbove["Topology"];
+
+  (* Get the Feynman parameter for the level above - needed for IBP coefficient expansion *)
+  feynmanParamAbove = levelAbove["FeynmanParameter"];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Computing boundary for level ", level, " from level ", level + 1];
@@ -467,19 +783,31 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
       (* Compute the boundary value based on the case *)
       Switch[case,
         "integrate",
-          (* Full integration: sum_j ibpCoeffs[[j]] * IntegrateLevelMaster[...] *)
-          totalBC = Table[0, {epsOrder + 1}];
-          Do[
-            If[ibpCoeffs[[j]] =!= 0,
-              Module[{contribution},
-                contribution = IntegrateLevelMaster[
-                  transportResult, j, vi, vj, ibpCoeffs[[j]], epsOrder
-                ];
-                totalBC = totalBC + contribution;
-              ];
+          (* Full integration: combine Sum_j c_j(x)*f_j(x) first, then integrate.
+             Individual c_j(x) may have poles at x=0,1 that cancel in the sum.
+             Also accounts for eps-prefactors (J vs I basis). *)
+          Module[{epsPrefacs, diffMatAbove, epsSymbol},
+            (* Compute eps-prefactors from the diff matrix at level+1.
+               These tell us J_j = eps^{k_j} * I_j, where k_j accounts for
+               the transformation applied during matrix export. *)
+            epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+            diffMatAbove = levelAbove["DiffMatrix"];
+            If[MatrixQ[diffMatAbove] &&
+               FeynmanTrick`EpsPrefactors`CheckEpsPoles[diffMatAbove, epsSymbol],
+              epsPrefacs = FeynmanTrick`EpsPrefactors`FindEpsPrefactors[diffMatAbove, epsSymbol];
+            ,
+              epsPrefacs = Table[0, {Length[mastersAbove]}];
             ];
-          , {j, Length[mastersAbove]}];
-          totalBC,
+
+            If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+              Print["    Eps prefactors for level above: ", epsPrefacs];
+            ];
+
+            IntegrateCombinedMasters[
+              transportResult, ibpCoeffs, vi, vj, epsOrder,
+              epsPrefacs, feynmanParamAbove
+            ]
+          ],
 
         "limitUpper",
           (* lim_{x->1} sum_j ibpCoeffs[[j]] * f_j(x) *)
@@ -499,8 +827,12 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
             Do[
               If[ibpCoeffs[[j]] =!= 0,
                 (* Use the boundary values from level+1 *)
-                (* These were already computed for the transport *)
-                directVal += ibpCoeffs[[j]] * transportResult["BoundaryValuesAbove"][[j]];
+                (* Expand IBP coeff in eps and convolve with boundary values *)
+                Module[{coeffExpanded, bcAbove},
+                  coeffExpanded = ExpandIBPCoeffInEps[ibpCoeffs[[j]], epsOrder];
+                  bcAbove = transportResult["BoundaryValuesAbove"][[j]];
+                  directVal += MultiplyEpsCoeffs[coeffExpanded, bcAbove, epsOrder];
+                ];
               ];
             , {j, Length[mastersAbove]}];
             directVal

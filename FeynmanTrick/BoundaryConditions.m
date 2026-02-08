@@ -193,13 +193,17 @@ Module[{eps, gammaArg, gammaPrefactor, UPow, FPow, fullExpr, series, coeffs, min
   FPow = v - numLoops * (2 - eps);  (* v - L*d/2 *)
 
   (* Build the expression symbolically.
-     Handle U=1 case explicitly: 1^(symbolic) doesn't simplify in Mathematica. *)
+     Handle U=1 and F=1 cases explicitly: 1.0^(symbolic) doesn't simplify in Mathematica,
+     which prevents Series from expanding properly. *)
   Module[{uTerm, fTerm},
     uTerm = If[Chop[Uval - 1, 10^(-precision/2)] === 0,
       1,  (* U=1 for 1-loop; avoid 1.^(symbolic) which doesn't simplify *)
       SetPrecision[Uval, precision]^UPow
     ];
-    fTerm = SetPrecision[Fval, precision]^FPow;
+    fTerm = If[Chop[Fval - 1, 10^(-precision/2)] === 0,
+      1,  (* F=1; same issue as U=1 *)
+      SetPrecision[Fval, precision]^FPow
+    ];
     fullExpr = Gamma[gammaArg] / Gamma[v] * uTerm / fTerm;
   ];
 
@@ -267,6 +271,17 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
 
   levelData = ftData["Levels"][deepestLevel];
   masters = levelData["Masters"];
+
+  (* Validate masters *)
+  If[!ListQ[masters] || Length[masters] == 0,
+    Print["Error: No valid masters found at deepest level ", deepestLevel];
+    Print["  masters = ", masters];
+    Return[$Failed];
+  ];
+  If[!AllTrue[masters, ListQ],
+    Print["Error: Masters should be a list of index lists, got: ", masters];
+    Return[$Failed];
+  ];
 
   (* Use the ORIGINAL topology (level 0) for Symanzik polynomial computation.
      Per eq. 2.16 of the paper: U_tilde and F_tilde are obtained from the

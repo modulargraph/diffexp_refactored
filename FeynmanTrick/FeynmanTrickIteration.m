@@ -212,10 +212,31 @@ Module[{levelData, topology, masters, diffMat, param, result, updatedTopo,
 
   (* Step 1: Setup FIRE *)
   updatedTopo = SetupFIRE[topology];
+  If[updatedTopo === $Failed,
+    Print["Error: SetupFIRE failed for level ", level];
+    result = ftData;
+    result["Levels"][level]["Computed"] = False;
+    result["Levels"][level]["Error"] = "SetupFIRE failed";
+    Return[result];
+  ];
 
   (* Step 2: Find master basis *)
   updatedTopo = FindBasis[updatedTopo];
+  If[updatedTopo === $Failed,
+    Print["Error: FindBasis failed for level ", level];
+    result = ftData;
+    result["Levels"][level]["Computed"] = False;
+    result["Levels"][level]["Error"] = "FindBasis failed";
+    Return[result];
+  ];
   masters = updatedTopo["Masters"];
+  If[!ListQ[masters] || Length[masters] == 0,
+    Print["Error: No masters found for level ", level];
+    result = ftData;
+    result["Levels"][level]["Computed"] = False;
+    result["Levels"][level]["Error"] = "No masters found";
+    Return[result];
+  ];
 
   (* Step 3: Compute differential matrix *)
   (* Use the Feynman trick fast path for the decomposition *)
@@ -229,6 +250,14 @@ Module[{levelData, topology, masters, diffMat, param, result, updatedTopo,
   ,
     (* General case: no combination info, use full decomposition *)
     diffMat = ComputeDiffMatrix[updatedTopo, param];
+  ];
+
+  If[diffMat === $Failed,
+    Print["Error: ComputeDiffMatrix failed for level ", level];
+    result = ftData;
+    result["Levels"][level]["Computed"] = False;
+    result["Levels"][level]["Error"] = "ComputeDiffMatrix failed";
+    Return[result];
   ];
 
   (* Update ftData *)

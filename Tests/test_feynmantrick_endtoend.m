@@ -211,10 +211,12 @@ Module[{topo, ftData, workDir, exportDir, nLevels},
 
   (* Verify matrix files exist *)
   Do[
-    Module[{levelDir},
+    Module[{levelDir, expectedFile},
       levelDir = FileNameJoin[{exportDir, "Level_" <> ToString[k] <> "_Matrices"}];
+      (* Each level uses unique parameter: xx1, xx2, xx3, etc. *)
+      expectedFile = FileNameJoin[{levelDir, "dxx" <> ToString[k] <> "_0.m"}];
       testTrue["Level " <> ToString[k] <> " matrix files exist",
-        DirectoryQ[levelDir] && FileExistsQ[FileNameJoin[{levelDir, "dxx_0.m"}]]
+        DirectoryQ[levelDir] && FileExistsQ[expectedFile]
       ];
     ];
     ,

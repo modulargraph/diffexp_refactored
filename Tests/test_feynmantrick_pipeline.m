@@ -122,11 +122,11 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
     FeynmanTrick`FeynmanTrickIteration`ExportLevel[ftData, level, outputDir, "diffexp", epsOrder];
   , {level, 3, 1, -1}];
 
-  (* Check matrix files exist *)
+  (* Check matrix files exist - each level has its own parameter (xx1, xx2, xx3) *)
   Do[
     Module[{matDir, matFile},
       matDir = FileNameJoin[{outputDir, "Level_" <> ToString[level] <> "_Matrices"}];
-      matFile = FileNameJoin[{matDir, "dxx_0.m"}];
+      matFile = FileNameJoin[{matDir, "dxx" <> ToString[level] <> "_0.m"}];
       testTrue["Level " <> ToString[level] <> " matrix exported",
         FileExistsQ[matFile]];
     ];

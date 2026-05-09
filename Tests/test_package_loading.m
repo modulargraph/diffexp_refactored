@@ -112,6 +112,16 @@ If[ValueQ[DiffExp`Frobenius`FrobeniusSolutions::usage],
   Print["  [FAIL] Frobenius.m failed to load"];
 ];
 
+(* Load LocalSeries *)
+testsTotal++;
+Get["LocalSeries.m"];
+If[ValueQ[DiffExp`LocalSeries`RecursiveFiniteWidthSolve::usage],
+  Print["  [PASS] LocalSeries.m loaded"];
+  testsPassed++;
+  ,
+  Print["  [FAIL] LocalSeries.m failed to load"];
+];
+
 (* Load Wronskian *)
 testsTotal++;
 Get["Wronskian.m"];

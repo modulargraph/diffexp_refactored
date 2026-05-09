@@ -31,6 +31,7 @@ Get["Mobius.m"];
 Get["AnalyticContinuation.m"];
 Get["LineSegmentation.m"];
 Get["Frobenius.m"];
+Get["LocalSeries.m"];
 Get["Wronskian.m"];
 Get["MatrixLoading.m"];
 Get["IntegrationStrategies.m"];
@@ -50,6 +51,7 @@ BeginPackage["DiffExp`", {
   "DiffExp`AnalyticContinuation`",
   "DiffExp`LineSegmentation`",
   "DiffExp`Frobenius`",
+  "DiffExp`LocalSeries`",
   "DiffExp`Wronskian`",
   "DiffExp`MatrixLoading`",
   "DiffExp`IntegrationStrategies`",

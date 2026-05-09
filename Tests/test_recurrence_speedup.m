@@ -130,6 +130,13 @@ Print["Test B (15x15, no Mob): ", N[timeB1/timeB2, 3], "x speedup, diff = ", Sci
 
 testAPass = diffA < 10^-30;
 testBPass = diffB < 10^-30;
+testBSpeedPass = timeB1/timeB2 > 2;
 If[testAPass, Print["  [PASS] Test A"], Print["  [FAIL] Test A: ", ScientificForm[diffA, 3]]];
 If[testBPass, Print["  [PASS] Test B"], Print["  [FAIL] Test B: ", ScientificForm[diffB, 3]]];
+If[testBSpeedPass,
+  Print["  [PASS] Test B speedup > 2x"],
+  Print["  [FAIL] Test B speedup too small: ", N[timeB1/timeB2, 3], "x"]
+];
 Print["==========================================="];
+
+If[testAPass && testBPass && testBSpeedPass, Quit[0], Quit[1]];

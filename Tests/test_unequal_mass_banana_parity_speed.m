@@ -1,5 +1,5 @@
-(* Unequal-mass banana parity and speed regression *)
-(* Compares the standard solver with the rational recurrence path at two nontrivial endpoint transports. *)
+(* Unequal-mass banana midpoint parity and speed regression *)
+(* Compares the standard solver with the rational recurrence path at the x = 1/2 points that previously regressed. *)
 
 SetDirectory[DirectoryName[$InputFileName]];
 scriptDir = Directory[];
@@ -7,7 +7,7 @@ parentDir = ParentDirectory[scriptDir];
 $Path = Prepend[$Path, FileNameJoin[{parentDir, "DiffExp"}]];
 
 Print["==========================================="];
-Print["Unequal-Mass Banana Parity/Speed Test"];
+Print["Unequal-Mass Banana Midpoint Parity/Speed Test"];
 Print["===========================================\n"];
 
 Get["DiffExp.m"];
@@ -49,10 +49,10 @@ LoadConfiguration[{
   UseMobius -> True,
   UsePade -> True,
   UseRationalRecurrence -> False,
-  WorkingPrecision -> 300,
-  ChopPrecision -> 180,
+  WorkingPrecision -> 400,
+  ChopPrecision -> 220,
   DivisionOrder -> 4,
-  ExpansionOrder -> 50
+  ExpansionOrder -> 55
 }];
 
 preparedBCs = PrepareBoundaryConditions[EqualMassBoundaryConditions, <|t -> -1/x|>];
@@ -79,27 +79,27 @@ UnequalMassBoundaryConditions = {
 };
 
 unequalConfig = {
-  ChopPrecision -> 180,
+  ChopPrecision -> 220,
   DivisionOrder -> 4,
-  ExpansionOrder -> 50,
+  ExpansionOrder -> 55,
   MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_Matrices"}] <> "/",
   RadiusOfConvergence -> 10,
   UseMobius -> False,
   UsePade -> True,
-  WorkingPrecision -> 300,
+  WorkingPrecision -> 400,
   Verbosity -> 1
 };
 
 targets = {
   <|
-    "Name" -> "mass-ramp-three-quarter",
+    "Name" -> "mass-ramp-midpoint",
     "Line" -> <|psq -> 1/2, mm1 -> 1 + x, mm2 -> 1 + x/2, mm3 -> 1 + x/3, mm4 -> 1|>,
-    "At" -> 3/4
+    "At" -> 1/2
   |>,
   <|
-    "Name" -> "mass-ramp-endpoint",
-    "Line" -> <|psq -> 1/2, mm1 -> 1 + x, mm2 -> 1 + x/2, mm3 -> 1 + x/3, mm4 -> 1|>,
-    "At" -> 1
+    "Name" -> "all-scales-ramp-midpoint",
+    "Line" -> <|psq -> 1/2 + x/10, mm1 -> 1 + 2 x/5, mm2 -> 1 + 3 x/10, mm3 -> 1 + x/10, mm4 -> 1 + x/5|>,
+    "At" -> 1/2
   |>
 };
 

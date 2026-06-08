@@ -650,16 +650,12 @@ SolveSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] :=
     fParticular = ComputeSingularParticular[bVec, eigenvalues, P, PInv,
       rHatCoeffs, dCoeffs, dR, dD, d0, bHatCoeffs, numBCoeffs, mode, ctx];
 
-    (* If particular solution fails (resonance), fall back to Default *)
+    (* If this restricted solver hits a resonance, stay on the recursive path. *)
     If[fParticular === $Failed,
-      DiffExp`Utilities`PrintInfo["Singular recurrence: particular solution resonance detected, falling back to Default."][3];
-      (* Initialize SolveDefault's cache if needed *)
-      If[!KeyExistsQ[cache, "FMat"],
-        cache = SolveDefault[ctx,
-          ConstantArray[SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1], systemSize],
-          0, cache][[3]];
-      ];
-      Return[SolveDefault[ctx, bVec, epsord, cache]]
+      DiffExp`Utilities`PrintInfo[
+        "Singular recurrence: particular solution resonance detected; switching to general singular recurrence."
+      ][3];
+      Return[SolveGeneralSingularRecurrence[ctx, bVec, epsord, cache]]
     ];
   ];
 

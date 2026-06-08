@@ -13,6 +13,19 @@ SEval::usage = "SEval[a_,at_] evaluates series at a point.";
 
 Begin["`Private`"];
 
+SafeSeriesCoefficient[s_SeriesData, ord_] := Module[
+  {order = Round[ord], minOrder, maxOrder, step},
+
+  minOrder = s[[4]];
+  maxOrder = s[[5]];
+  step = s[[6]];
+
+  If[order < minOrder || order >= maxOrder || !IntegerQ[(order - minOrder)/step],
+    0,
+    SeriesCoefficient[s, order]
+  ]
+];
+
 (* GetPade for various inputs *)
 GetPade[0] = 0;
 GetPade[a_?NumericQ] := a;
@@ -44,6 +57,13 @@ SetAttributes[SEval1, Listable];
 SEval1[a_SeriesData] := If[DiffExp`State`FEC[UsePade] === True, GetPade[a], Normal[a]];
 SEval1[0] := 0;
 SEval1[a_ /; NumericQ[a]] := a;
+NormalizeEmbeddedSeries[a_] := a /. {
+      HoldPattern[SeriesCoefficient[s_SeriesData, {_, _, ord_}]] :>
+        SafeSeriesCoefficient[s, ord],
+      HoldPattern[SeriesCoefficient[s_SeriesData, ord_]] :>
+        SafeSeriesCoefficient[s, ord]
+    } /. s_SeriesData :> SEval1[s];
+SEval1[a_] := NormalizeEmbeddedSeries[a];
 
 (* SEval2 - evaluate at a point with analytic continuation *)
 SetAttributes[SEval2, Listable];
@@ -68,6 +88,7 @@ SEval[a_SeriesData, at_] := Block[{$MinPrecision = DiffExp`State`FEWorkingPrecis
 ];
 SEval[0, at_] := 0;
 SEval[a_ /; NumericQ[a], at_] := a;
+SEval[a_, at_] := SEval2[NormalizeEmbeddedSeries[a], at];
 
 End[];
 

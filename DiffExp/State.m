@@ -23,7 +23,7 @@ RationalizationTolerance::usage = "Tolerance for rationalizing exponents (a, b) 
 SegmentationStrategy::usage = "This option determines which segmentation strategy is used.";
 UseMobius::usage = "This option determines whether the line segments are obtained by linear transformations or by Mobius transformations.";
 UsePade::usage = "Determines whether Pade approximants are used while transporting boundary conditions.";
-UseRationalRecurrence::usage = "When set to True, uses the rational recurrence method for solving the differential equations at non-singular points where the matrices are purely rational in x. This avoids series-series multiplication by working directly with polynomial coefficients of the rationalized matrices.";
+UseRationalRecurrence::usage = "When set to True, uses recursive finite-width strategies for ordinary and regular-singular local systems. If no recursive strategy accepts a block, DiffExp reports an error instead of silently falling back to the default Wronskian/Frobenius path.";
 Verbosity::usage = "Determines the level of printed output.";
 
 (* State accessors - exported for internal use *)

@@ -58,7 +58,8 @@ GeneralSingularRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
    - "InitialVectors": for each solution, the initial f_{0, initK} vector
 *)
 ComputeResonanceStructure[residueMat_, systemSize_, ctx_Association] := Module[
-  {eigenvalues, rawEigenvalues, jordanS, jordanJ, jordanSInv,
+  {eigenvalues, rawEigenvalues, jordanS, jordanJ, jordanSInv, jordanData,
+   residueForJordan,
    blockStarts, blockSizes, blockEigenvalues,
    resonanceClasses, visited, class, classIdx,
    solutionExponents, maxLogPowers, initialLogPowers, initialVectors,
@@ -67,8 +68,28 @@ ComputeResonanceStructure[residueMat_, systemSize_, ctx_Association] := Module[
 
   tolerance = 10^(-ctx["ChopPrecision"]/2);
 
-  (* Compute Jordan decomposition *)
-  {jordanS, jordanJ} = JordanDecomposition[N[residueMat, ctx["WorkingPrecision"]]];
+  (* Compute Jordan decomposition. Numeric JordanDecomposition can fail for
+     exactly rational residues at high precision, so try the rationalized
+     residue first and only then fall back to a numerical decomposition. *)
+  residueForJordan = Rationalize[residueMat, tolerance];
+  jordanData = Quiet[Check[JordanDecomposition[residueForJordan], $Failed]];
+  If[!(ListQ[jordanData] && Length[jordanData] === 2 &&
+       MatrixQ[jordanData[[1]]] && MatrixQ[jordanData[[2]]]),
+    jordanData = Quiet[Check[
+      JordanDecomposition[N[residueMat, ctx["WorkingPrecision"]]],
+      $Failed
+    ]];
+  ];
+  If[!(ListQ[jordanData] && Length[jordanData] === 2 &&
+       MatrixQ[jordanData[[1]]] && MatrixQ[jordanData[[2]]]),
+    DiffExp`State`LastErrorContext = {ctx, residueMat, residueForJordan};
+    DiffExp`Utilities`ReportError[
+      "General singular recurrence could not compute a Jordan decomposition of the residue matrix for integral(s) ",
+      ctx["Label"],
+      ". Refusing to fall back to the default Wronskian/Frobenius path."
+    ];
+  ];
+  {jordanS, jordanJ} = jordanData;
   jordanSInv = Inverse[jordanS];
 
   (* Rationalize eigenvalues on the diagonal of J *)
@@ -574,6 +595,96 @@ BuildParticularFromCoeffs[fCoeffs_, sigma_, kMax_,
   DiffExp`Utilities`PChop[fParticular]
 ];
 
+NormalizeSourcePower[p_, ctx_Association] := Module[
+  {tol = 10^(-ctx["ChopPrecision"]/2)},
+  Quiet@Rationalize[N[p, ctx["WorkingPrecision"]], tol]
+];
+
+SourcePowerClass[p_, ctx_Association] := Mod[NormalizeSourcePower[p, ctx], 1];
+
+MergeSourcePower[p_, groups_Association, ctx_Association] := Module[
+  {power = NormalizeSourcePower[p, ctx], key},
+  key = SourcePowerClass[power, ctx];
+  If[!KeyExistsQ[groups, key] || power < groups[key],
+    Join[groups, <|key -> power|>],
+    groups
+  ]
+];
+
+SourcePowersInExpression[expr_, ctx_Association] := Module[
+  {x = DiffExp`Symbols`x, e, head, coeffs, ns, factorPowers},
+
+  e = DiffExp`Utilities`PChop[expr];
+
+  Which[
+    e === 0,
+    {},
+
+    Head[e] === SeriesData,
+    coeffs = e[[3]];
+    ns = e[[4]] + Range[0, Length[coeffs] - 1];
+    NormalizeSourcePower[#, ctx] & /@
+      Pick[ns/e[[6]], !TrueQ[DiffExp`Utilities`PChop[#] === 0] & /@ coeffs],
+
+    Head[e] === Plus,
+    DeleteDuplicates[Flatten[SourcePowersInExpression[#, ctx] & /@ (List @@ e)]],
+
+    MatchQ[e, Power[x, _]],
+    {NormalizeSourcePower[e[[2]], ctx]},
+
+    Head[e] === Times,
+    factorPowers = SourcePowersInExpression[#, ctx] & /@ (List @@ e);
+    If[MemberQ[factorPowers, {}],
+      {},
+      DeleteDuplicates[NormalizeSourcePower[Total[#], ctx] & /@ Tuples[factorPowers]]
+    ],
+
+    FreeQ[e, x],
+    {0},
+
+    True,
+    DeleteDuplicates[Flatten[SourcePowersInExpression[#, ctx] & /@ (List @@ Expand[e])]]
+  ]
+];
+
+SourceBasePowers[bVec_, bMaxLogK_, ctx_Association] := Module[
+  {groups = <||>, powers},
+
+  powers = DeleteDuplicates[Flatten[Table[
+    SourcePowersInExpression[
+      DiffExp`SeriesOps`LogxCoeff[bVec[[comp]], logk],
+      ctx
+    ],
+    {comp, Length[bVec]}, {logk, 0, bMaxLogK}
+  ]]];
+
+  Do[
+    groups = MergeSourcePower[p, groups, ctx],
+    {p, powers}
+  ];
+
+  Sort[Values[groups]]
+];
+
+PowerCoefficient[expr_, power_, ctx_Association] := Module[
+  {x = DiffExp`Symbols`x, p = NormalizeSourcePower[power, ctx], coeff},
+
+  If[DiffExp`Utilities`PChop[expr] === 0,
+    Return[0]
+  ];
+
+  coeff = Quiet@Check[
+    SeriesCoefficient[expr, {x, 0, p}],
+    $Failed
+  ];
+
+  If[coeff === $Failed || coeff === Indeterminate ||
+      !FreeQ[coeff, SeriesCoefficient | Indeterminate | DirectedInfinity | ComplexInfinity],
+    0,
+    DiffExp`Utilities`PChop[coeff]
+  ]
+];
+
 (* Unified particular solution solver.
    Handles resonant eigenvalues, fractional base exponents, Logx in bVec.
    Uses SVD pseudoinverse at resonant steps with residual-driven K_max growth.
@@ -590,9 +701,9 @@ ComputeUnifiedParticular[bVec_, resInfo_Association,
     mCoeffs_, numMCoeffs_, ctx_Association] := Module[
   {systemSize, maxOrd, wp, tolerance,
    M0, eigenvalues,
-   bLeadPow, bMaxLogK, bCoeffs,
+   bLeadPow, bMaxLogK, bCoeffs, sourceBases, sigmas,
    sigma, kMax, kMaxInitial, kMaxGrowthAttempts,
-   fCoeffs, maxResidual, fParticular},
+   fCoeffs, maxResidual, fParticular, fParticularPieces},
 
   systemSize = Length[bVec];
   maxOrd = ctx["ExpansionOrder"];
@@ -609,85 +720,96 @@ ComputeUnifiedParticular[bVec_, resInfo_Association,
     {i, systemSize}
   ]]];
 
-  (* Determine leading power of bVec across all components and log orders *)
-  bLeadPow = Min[Table[
-    Module[{ser, minPow = maxOrd},
-      Do[
-        ser = DiffExp`SeriesOps`LogxCoeff[bVec[[comp]], logk];
-        If[Head[ser] === SeriesData && ser =!= 0,
-          minPow = Min[minPow, ser[[4]] / ser[[6]]];
+  sourceBases = SourceBasePowers[bVec, bMaxLogK, ctx];
+
+  If[sourceBases === {},
+    Return[ConstantArray[
+      SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1],
+      systemSize
+    ]]
+  ];
+
+  sigmas = NormalizeSourcePower[# + 1, ctx] & /@ sourceBases;
+
+  fParticularPieces = Table[
+    sigma = sigmas[[sigmaIndex]];
+    bLeadPow = sourceBases[[sigmaIndex]];
+
+    (* Initial K_max: log depth of source + max Jordan block size among resonating eigenvalues.
+       MaxLogPowers = blockSize - 1, so we add +1 to get blockSize.
+       This ensures the block system at singular n is fully solvable. *)
+    kMaxInitial = bMaxLogK + Max[resInfo["MaxLogPowers"]] + 1;
+    kMax = kMaxInitial;
+
+    (* Extract beta coefficients for this source sector:
+       beta_{n,k,comp} = coeff of x^{sigma-1+n} (Logx)^k in bVec. *)
+    bCoeffs = Table[
+      PowerCoefficient[
+        DiffExp`SeriesOps`LogxCoeff[bVec[[comp]], logk],
+        sigma - 1 + n,
+        ctx
+      ],
+      {n, 0, maxOrd}, {logk, 0, bMaxLogK}, {comp, systemSize}
+    ];
+
+    If[DiffExp`Utilities`PChop[bCoeffs] === ConstantArray[0, Dimensions[bCoeffs]],
+      Nothing,
+
+      DiffExp`Utilities`PrintInfo["  Unified particular: sigma = ", sigma,
+        ", K_b = ", bMaxLogK, ", K_max = ", kMax, "."][3];
+
+      (* Run recurrence with residual checking and dynamic K_max growth *)
+      kMaxGrowthAttempts = 0;
+      While[True,
+        fCoeffs = RunParticularRecurrence[sigma, bCoeffs, bMaxLogK, kMax,
+          M0, mCoeffs, numMCoeffs,
+          systemSize, maxOrd, wp, tolerance, ctx];
+
+        (* Check residual at resonant steps *)
+        maxResidual = CheckParticularResidual[fCoeffs, sigma, bCoeffs, bMaxLogK, kMax,
+          M0, mCoeffs, numMCoeffs,
+          systemSize, maxOrd, wp, tolerance];
+
+        If[maxResidual < tolerance,
+          (* Solution is good *)
+          Break[];
         ];
-        , {logk, 0, bMaxLogK}
+
+        (* Residual too large: try increasing K_max *)
+        kMaxGrowthAttempts++;
+        If[kMaxGrowthAttempts > 3,
+          DiffExp`Utilities`PrintInfo[
+            "  Unified particular: residual ", maxResidual,
+            " still too large after 3 K_max increases. Returning $Failed."][3];
+          Return[$Failed]
+        ];
+
+        kMax += 1;
+        DiffExp`Utilities`PrintInfo[
+          "  Unified particular: residual ", maxResidual,
+          " > tolerance. Increasing K_max to ", kMax, "."][3];
       ];
-      minPow
+
+      (* Update IMaxLogOrder if our particular solution has higher log powers *)
+      If[kMax > DiffExp`State`IMaxLogOrder,
+        DiffExp`Integration`UpdateIntReps[kMax];
+      ];
+
+      BuildParticularFromCoeffs[fCoeffs, sigma, kMax, systemSize, maxOrd, wp]
+    ]
+    ,
+    {sigmaIndex, Length[sigmas]}
+  ];
+
+  fParticularPieces = DeleteCases[fParticularPieces, Null];
+
+  If[fParticularPieces === {},
+    ConstantArray[
+      SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1],
+      systemSize
     ],
-    {comp, systemSize}
-  ]];
-
-  (* The particular solution base exponent: sigma = bLeadPow + 1
-     (from xf' = M(x)f + xB(x): the x*B shifts power by +1) *)
-  sigma = bLeadPow + 1;
-
-  (* Initial K_max: log depth of source + max Jordan block size among resonating eigenvalues.
-     MaxLogPowers = blockSize - 1, so we add +1 to get blockSize.
-     This ensures the block system at singular n is fully solvable. *)
-  kMaxInitial = bMaxLogK + Max[resInfo["MaxLogPowers"]] + 1;
-  kMax = kMaxInitial;
-
-  (* Extract beta coefficients: beta_{n,k,comp} = coeff of x^{sigma-1+n} (Logx)^k in bVec *)
-  bCoeffs = Table[
-    Module[{logCoeff},
-      logCoeff = DiffExp`SeriesOps`LogxCoeff[bVec[[comp]], logk];
-      If[Head[logCoeff] === SeriesData,
-        SeriesCoefficient[logCoeff, {DiffExp`Symbols`x, 0, sigma - 1 + n}],
-        If[n == 0 && logk == 0 && NumericQ[logCoeff], logCoeff, 0]
-      ]
-    ],
-    {n, 0, maxOrd}, {logk, 0, bMaxLogK}, {comp, systemSize}
-  ];
-
-  DiffExp`Utilities`PrintInfo["  Unified particular: sigma = ", sigma,
-    ", K_b = ", bMaxLogK, ", K_max = ", kMax, "."][3];
-
-  (* Run recurrence with residual checking and dynamic K_max growth *)
-  kMaxGrowthAttempts = 0;
-  While[True,
-    fCoeffs = RunParticularRecurrence[sigma, bCoeffs, bMaxLogK, kMax,
-      M0, mCoeffs, numMCoeffs,
-      systemSize, maxOrd, wp, tolerance, ctx];
-
-    (* Check residual at resonant steps *)
-    maxResidual = CheckParticularResidual[fCoeffs, sigma, bCoeffs, bMaxLogK, kMax,
-      M0, mCoeffs, numMCoeffs,
-      systemSize, maxOrd, wp, tolerance];
-
-    If[maxResidual < tolerance,
-      (* Solution is good *)
-      Break[];
-    ];
-
-    (* Residual too large: try increasing K_max *)
-    kMaxGrowthAttempts++;
-    If[kMaxGrowthAttempts > 3,
-      DiffExp`Utilities`PrintInfo[
-        "  Unified particular: residual ", maxResidual,
-        " still too large after 3 K_max increases. Returning $Failed."][3];
-      Return[$Failed]
-    ];
-
-    kMax += 1;
-    DiffExp`Utilities`PrintInfo[
-      "  Unified particular: residual ", maxResidual,
-      " > tolerance. Increasing K_max to ", kMax, "."][3];
-  ];
-
-  (* Update IMaxLogOrder if our particular solution has higher log powers *)
-  If[kMax > DiffExp`State`IMaxLogOrder,
-    DiffExp`Integration`UpdateIntReps[kMax];
-  ];
-
-  (* Build and return the particular solution *)
-  BuildParticularFromCoeffs[fCoeffs, sigma, kMax, systemSize, maxOrd, wp]
+    DiffExp`Utilities`PChop[Total[fParticularPieces]]
+  ]
 ];
 
 (* Extract the M_i coefficients (M(x) = x*A(x) = sum M_i x^i) from the expanded matrix.
@@ -719,7 +841,7 @@ SolveGeneralSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Associat
   systemSize = ctx["SystemSize"];
   maxOrd = ctx["ExpansionOrder"];
 
-  If[epsord === 0 && !KeyExistsQ[cache, "GenSingRR"],
+  If[!KeyExistsQ[cache, "GenSingRR"],
     (* Extract matrix coefficients M_i *)
     {mCoeffs, numMCoeffs} = ExtractMCoefficients[ctx];
 
@@ -761,24 +883,16 @@ SolveGeneralSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Associat
     fParticular = ComputeUnifiedParticular[bVec, resInfo,
       mCoeffs, numMCoeffs, ctx];
 
-    (* If unified solver fails, fall back to Default strategy *)
+    (* UseRationalRecurrence is an exclusive recurrence mode. Do not hide
+       recurrence failures by using the default Wronskian/Frobenius path. *)
     If[fParticular === $Failed,
-      DiffExp`Utilities`PrintInfo[
-        "Unified particular solver failed for integrals ", ctx["Label"],
-        ". Falling back to Default strategy."][3];
-      Module[{defaultCache, defaultResult, defaultCIndices, defaultFGeneral},
-        defaultCache = Lookup[cache, "DefaultFallback", <||>];
-        If[!KeyExistsQ[defaultCache, "FMat"],
-          defaultResult = SolveDefault[ctx,
-            ConstantArray[SeriesData[DiffExp`Symbols`x, 0, {}, 0, maxOrd + 1, 1], systemSize],
-            0, defaultCache];
-          defaultCache = defaultResult[[3]];
-        ];
-        defaultResult = SolveDefault[ctx, bVec, epsord, defaultCache];
-        cache["DefaultFallback"] = defaultResult[[3]];
-        {defaultCIndices, defaultFGeneral} = defaultResult[[{1, 2}]];
-        fParticular = defaultFGeneral /. Thread[defaultCIndices -> 0];
-        fParticular = DiffExp`SeriesOps`SExpand[fParticular];
+      DiffExp`State`LastErrorContext = {ctx, bVec, resInfo, mCoeffs, numMCoeffs, epsord, cache};
+      DiffExp`Utilities`ReportError[
+        "General singular recurrence failed to construct a particular solution for integral(s) ",
+        ctx["Label"],
+        " at epsilon order ",
+        epsord,
+        ". Refusing to fall back to the default Wronskian/Frobenius path."
       ];
     ];
   ];

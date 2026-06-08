@@ -146,7 +146,8 @@ BuildSegmentContext[intind_, line_] := <|
 IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_List, opts2_ : {}] := Module[
   {bcs, line, BCSRelevant, relevantIndices, IgnorePositions, crossCheck, bVec, IntegrationData, fGeneral,
    FixAt, BoundaryEqns1, BoundaryEqns2, cIndices, Cmat, Cb, csol, NewResults, opts = opts2,
-   DEqnMatricesExpandedCopy, TurnOffPade, constantReplacements, csFreedom, solveFailed, LogsPresent,
+   DEqnMatricesExpandedCopy, TurnOffPade, constantReplacements, csFreedom, solveFailed,
+   csolLeastSquares, lsResidual, lsScale, lsTol, LogsPresent,
    AlgebraicRootsPresent, normalizedSolutions, segmentCaches, ctx, blockCache, benchStart,
    IntegrationDataTab, bVec0, bVec1, bVecRest, complementIndices, otherIntegralData},
 
@@ -307,10 +308,20 @@ IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_L
 
           ,
 
+          (* Recurrence-generated singular solutions can be compound expressions
+             with SeriesData objects whose coefficients contain the c_i. Applying
+             Coefficient at the outer level misses those nested constants. Since
+             fGeneral is linear in the c_i, differentiating extracts the
+             coefficient through nested SeriesData without sending symbolic
+             constants into PadeApproximant. *)
           BoundaryEqns1 = Table[Sum[
-            cIndices[[ind]] DiffExp`Pade`SEval[DiffExp`SeriesOps`SApply[Coefficient[#, cIndices[[ind]]] &, term], FixAt]
-            , {ind, cIndices // Length}
-          ] + DiffExp`Pade`SEval[term /. (# -> 0 & /@ cIndices), FixAt], {term, fGeneral[[relevantIndices]]}] - BCSRelevant;
+            cIndices[[ind]] DiffExp`Pade`SEval[
+              D[term, cIndices[[ind]]] /. (# -> 0 & /@ cIndices),
+              FixAt
+            ],
+            {ind, cIndices // Length}
+          ] + DiffExp`Pade`SEval[term /. (# -> 0 & /@ cIndices), FixAt], {term, fGeneral[[relevantIndices]]}] -
+            BCSRelevant /. DiffExp`Symbols`Logx -> Log[SetPrecision[FixAt, DiffExp`State`FEWorkingPrecision]];
 
           BoundaryEqns2 = # == 0 & /@ Flatten[BoundaryEqns1];
         ];
@@ -329,15 +340,61 @@ IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_L
               , solveFailed = True;];
             , solveFailed = True;];
 
+          If[solveFailed && !MemberQ[BoundaryEqns2, False],
+            csolLeastSquares = Quiet@Check[
+              LeastSquares[
+                N[Cmat, DiffExp`State`FEWorkingPrecision],
+                N[Cb, DiffExp`State`FEWorkingPrecision]
+              ],
+              $Failed
+            ];
+            If[csolLeastSquares =!= $Failed,
+              lsResidual = Norm[
+                N[Cmat.csolLeastSquares - Cb, DiffExp`State`LinearSolveChopPrecisionVal]
+              ];
+              lsScale = 1 + Norm[N[Cb, DiffExp`State`LinearSolveChopPrecisionVal]];
+              lsTol = 10^-Min[80, Max[20, Floor[DiffExp`State`LinearSolveChopPrecisionVal/4]]];
+              If[lsResidual <= lsTol lsScale,
+                DiffExp`Utilities`PrintDebug[
+                  "Boundary matching used checked least-squares solve with relative residual ",
+                  N[lsResidual/lsScale]
+                ][2];
+                csol = csolLeastSquares;
+                solveFailed = False;
+              ];
+            ];
+          ];
+
           If[solveFailed,
-            DiffExp`State`LastErrorContext = {fGeneral[[relevantIndices]], BoundaryEqns1, BoundaryEqns2, BCSRelevant, Cmat, Cb, bVec, intind, epsord};
-            DiffExp`Utilities`ReportError["Boundary conditions cannot be matched to general solution for integral(s): ", intind];
+            DiffExp`State`LastErrorContext = {
+              fGeneral[[relevantIndices]], BoundaryEqns1, BoundaryEqns2,
+              BCSRelevant, Cmat, Cb, bVec, intind, epsord,
+              <|"LeastSquaresResidual" -> lsResidual, "LeastSquaresScale" -> lsScale|>
+            };
+            DiffExp`Utilities`ReportError[
+              "Boundary conditions cannot be matched to general solution for integral(s): ",
+              intind,
+              ". Checked least-squares relative residual: ",
+              If[ValueQ[lsResidual] && ValueQ[lsScale], N[lsResidual/lsScale], "unavailable"]
+            ];
           ];
 
           DiffExp`Utilities`PrintDebug["Solutions: ", Thread[(ToString /@ cIndices) -> N[csol]]][2];
 
           csFreedom = Cmat // NullSpace[#, Method -> "DivisionFreeRowReduction", Tolerance -> 10^-DiffExp`State`LinearSolveChopPrecisionVal] &;
           If[Length[csFreedom] > 0,
+            DiffExp`State`LastBoundaryMatchingContext = <|
+              "Cmat" -> Cmat,
+              "Cb" -> Cb,
+              "CIndices" -> cIndices,
+              "BoundaryEquations" -> BoundaryEqns2,
+              "FGeneral" -> fGeneral,
+              "BCSRelevant" -> BCSRelevant,
+              "Integrals" -> intind,
+              "EpsilonOrder" -> epsord,
+              "FixAt" -> FixAt,
+              "NullSpace" -> csFreedom
+            |>;
             DiffExp`Utilities`PrintWarning["Not enough boundary data was provided for integral(s): ", intind, " at epsilon order ", epsord, "."];
             DiffExp`Utilities`PrintWarning["Introducing free parameters: ", Table[Subscript[Global`c, epsord, intind, i], {i, Length@csFreedom}]][1];
             csol = csol + Sum[csFreedom[[nullvecind]] Subscript[Global`c, epsord, intind, nullvecind], {nullvecind, Length@csFreedom}];
@@ -351,6 +408,14 @@ IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_L
           ,
 
           If[Length[cIndices] > 0,
+            DiffExp`State`LastBoundaryMatchingContext = <|
+              "CIndices" -> cIndices,
+              "FGeneral" -> fGeneral,
+              "BCSRelevant" -> BCSRelevant,
+              "Integrals" -> intind,
+              "EpsilonOrder" -> epsord,
+              "FixAt" -> FixAt
+            |>;
             DiffExp`Utilities`PrintWarning["Not enough boundary data was provided for integral(s): ", intind, " at epsilon order ", epsord, "."];
             DiffExp`Utilities`PrintWarning["Introducing free parameters: ", cIndices /. Subscript[c, i_] :> Subscript[Global`c, epsord, intind, i]][1];
 

@@ -62,6 +62,17 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
     , useGeneralSingularRecurrence,
     SolveGeneralSingularRecurrence[ctx, bVec, epsord, cache]
 
+    (* Recurrence was requested, but no recursive strategy accepted this block. *)
+    , ctx["UseRationalRecurrence"] === True,
+    DiffExp`State`LastErrorContext = {ctx, bVec, epsord, cache};
+    DiffExp`Utilities`ReportError[
+      "UseRationalRecurrence -> True was requested, but no recursive finite-width strategy accepted integral(s) ",
+      ctx["Label"],
+      " at epsilon order ",
+      epsord,
+      ". Refusing to fall back to the default Wronskian/Frobenius path."
+    ]
+
     (* Default strategy *)
     , ctx["IntegrationStrategy"] === "Default",
     SolveDefault[ctx, bVec, epsord, cache]

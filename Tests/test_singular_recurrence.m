@@ -12,7 +12,8 @@
    - Transport from boundary to t=-1
    - Compare Default strategy vs UseRationalRecurrence->True
    - Non-resonant singular points (t=4, t=16) use singular recurrence
-   - Resonant point (t=0) falls back to Frobenius
+   - Resonant point (t=0) stays in recurrence mode via the general
+     singular recurrence machinery
 *)
 
 (* Set directory and paths *)
@@ -159,7 +160,7 @@ EqualMassBoundaryConditions = {
 
 (* Default configuration *)
 BananaConfigDefault = {
-  DeltaPrescriptions -> {t - 16 + I * \[Delta]},
+  DeltaPrescriptions -> {t + I * \[Delta], t - 4 + I * \[Delta], t - 16 + I * \[Delta]},
   MatrixDirectory -> FileNameJoin[{scriptDir, "Banana_EqualMass_Matrices"}] <> "/",
   Verbosity -> 1,
   UseMobius -> True,

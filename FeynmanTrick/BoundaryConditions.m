@@ -371,30 +371,32 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
     {masterIdx, Length[masters]}
   ];
 
-  (* Determine eps prefactors to make all boundaries finite *)
-  (* If minPow < 0 for master i, we need prefactor eps^(-minPow) *)
+  (* Determine a global eps prefactor to make all boundaries finite.
+     A per-master boundary prefactor would require transforming the differential
+     equation matrix. A single global factor leaves the matrix unchanged. *)
   epsMinPower = Min[bcValues[[All, 1]]];
-  epsPrefactors = Table[-bcValues[[masterIdx, 1]], {masterIdx, Length[masters]}];
+  epsPrefactors = Table[Max[0, -epsMinPower], {Length[masters]}];
 
   (* Apply prefactors to get finite boundary values *)
-  (* After prefactor eps^k_i, the boundary for J_i = eps^k_i * I_i starts at eps^0 *)
-  Module[{shiftedBCs},
+  (* After global prefactor eps^k, the boundary for J_i = eps^k * I_i starts at eps^0 *)
+  Module[{shiftedBCs, shiftedOrder},
+    shiftedOrder = epsOrder + Max[epsPrefactors];
     shiftedBCs = Table[
       Module[{minPow, coeffs, shift, shiftedCoeffs},
         {minPow, coeffs} = bcValues[[masterIdx]];
-        shift = epsPrefactors[[masterIdx]];  (* = -minPow *)
+        shift = epsPrefactors[[masterIdx]];
 
-        (* The boundary of J_i = eps^shift * I_i is:
-           coeffs shifted by 'shift' positions *)
-        If[shift > 0,
-          (* Drop the first 'shift' coefficients (they were at negative eps powers) *)
-          shiftedCoeffs = Drop[coeffs, shift];
-          (* Pad to epsOrder+1 length *)
-          shiftedCoeffs = PadRight[shiftedCoeffs, epsOrder + 1, 0];
-          ,
-          shiftedCoeffs = coeffs;
-          shiftedCoeffs = Take[shiftedCoeffs, Min[Length[shiftedCoeffs], epsOrder + 1]];
-          shiftedCoeffs = PadRight[shiftedCoeffs, epsOrder + 1, 0];
+        (* Coefficients are indexed by original powers minPow, minPow+1, ...
+           The shifted eps^n coefficient uses original eps^(n-shift). *)
+        shiftedCoeffs = Table[
+          Module[{origPower = n - shift, idx},
+            idx = origPower - minPow + 1;
+            If[IntegerQ[idx] && idx >= 1 && idx <= Length[coeffs],
+              coeffs[[idx]],
+              0
+            ]
+          ],
+          {n, 0, shiftedOrder}
         ];
         shiftedCoeffs
       ],
@@ -410,6 +412,8 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
       "BoundaryValues" -> shiftedBCs,
       "EpsPrefactors" -> epsPrefactors,
       "EpsMinPower" -> epsMinPower,
+      "WorkingEpsilonOrder" -> shiftedOrder,
+      "RequestedEpsilonOrder" -> epsOrder,
       "Masters" -> masters,
       "NumLoops" -> numLoops,
       "Uval" -> Uval,

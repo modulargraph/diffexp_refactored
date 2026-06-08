@@ -100,14 +100,34 @@ AllEffectivelyZero[seriesList_List] := Module[{},
   And @@ (EffectivelyZero /@ seriesList)
 ];
 
+EffectivelyZeroExpr[expr_] := Module[
+  {tol, expanded, numeric},
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  expanded = DiffExp`Utilities`PChop[Expand[expr]];
+
+  If[TrueQ[PossibleZeroQ[expanded]], Return[True]];
+  numeric = Quiet[Check[N[expanded, 50], $Failed]];
+  If[NumericQ[numeric],
+    Abs[numeric] < tol,
+    False
+  ]
+];
+
 EffectivelyZero[0] := True;
 EffectivelyZero[n_?NumericQ] := Abs[n] < DiffExp`State`FEC[RationalizationTolerance];
-EffectivelyZero[ser_SeriesData] := Module[{coeffs, maxAbs},
+EffectivelyZero[ser_SeriesData] := Module[{coeffs},
   coeffs = Flatten[{ser[[3]]}];
   If[Length[coeffs] == 0, Return[True]];
-  (* Check if all coefficients (including Logx parts) are small *)
-  maxAbs = Max[Abs[coeffs /. DiffExp`Symbols`Logx -> 0]];
-  maxAbs < DiffExp`State`FEC[RationalizationTolerance]
+  (* Check every Logx coefficient; a pure Logx term must not be treated as zero. *)
+  And @@ Flatten[
+    Table[
+      EffectivelyZeroExpr[
+        DiffExp`SeriesOps`LogxCoeffNS[coeff, logPow]
+      ],
+      {coeff, coeffs},
+      {logPow, 0, DiffExp`SeriesOps`MaxLogxPower[coeff]}
+    ]
+  ]
 ];
 
 (* ============================================================ *)
@@ -149,7 +169,7 @@ DecomposeSingularity[seriesList_List] := Module[
     Do[
       c0 = GetCoefficientAtPower[current[[refOrder]], a] /. DiffExp`Symbols`Logx -> 0;
       (* Use rationalization tolerance to check if c0 is effectively non-zero *)
-      If[Abs[c0] > ratTol && Length[current] > refOrder,
+      If[!EffectivelyZeroExpr[c0] && Length[current] > refOrder,
         c1Logx = Coefficient[GetCoefficientAtPower[current[[refOrder + 1]], a], DiffExp`Symbols`Logx];
         b = c1Logx / c0;
         (* Clean up numerical noise: take real part if imaginary part is tiny *)

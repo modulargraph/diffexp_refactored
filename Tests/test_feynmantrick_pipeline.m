@@ -48,7 +48,7 @@ testNumerical[name_String, expr_, expected_, tol_:10^-10] := If[
 (* ============================================================ *)
 Print["\n--- Part 1: Define Topology ---"];
 
-Module[{topology, ftData, outputDir, epsOrder, workDir},
+Module[{topology, ftData, outputDir, epsOrder, matrixEpsOrder, boundaryEpsOrder, workDir},
 
   (* 1-loop massless box: 4 propagators *)
   (* Convention: D_j = -q_j^2 + m_j^2 (following code convention) *)
@@ -86,6 +86,8 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
   (* Set up output directory *)
   outputDir = FileNameJoin[{$TemporaryDirectory, "FT_pipeline_test_" <> ToString[$ProcessID]}];
   epsOrder = 2;  (* Keep eps order low for speed *)
+  boundaryEpsOrder = epsOrder + 3;
+  matrixEpsOrder = boundaryEpsOrder + 1;
 
   Print["\n  Output directory: ", outputDir];
   Print["  Epsilon order: ", epsOrder];
@@ -119,7 +121,7 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
 
   (* Export matrices *)
   Do[
-    FeynmanTrick`FeynmanTrickIteration`ExportLevel[ftData, level, outputDir, "diffexp", epsOrder];
+    FeynmanTrick`FeynmanTrickIteration`ExportLevel[ftData, level, outputDir, "diffexp", matrixEpsOrder];
   , {level, 3, 1, -1}];
 
   (* Check matrix files exist - each level has its own parameter (xx1, xx2, xx3) *)
@@ -139,7 +141,7 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
   Print["\n--- Part 3: Deepest Level Boundary ---"];
 
   Module[{deepBoundary},
-    deepBoundary = FeynmanTrick`BoundaryConditions`DeepestLevelBoundary[ftData, epsOrder];
+    deepBoundary = FeynmanTrick`BoundaryConditions`DeepestLevelBoundary[ftData, boundaryEpsOrder];
 
     If[deepBoundary =!= $Failed && AssociationQ[deepBoundary],
       passed++;
@@ -177,10 +179,11 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
       Print["  Transporting level 3 (", Length[currentBCs], " masters)..."];
 
       transportResult = FeynmanTrick`DiffExpIntegration`TransportLevel[
-        matDir, currentBCs, epsOrder,
+        matDir, currentBCs, Lookup[$deepBoundary, "WorkingEpsilonOrder", epsOrder],
         "WorkingPrecision" -> 200,
         "ExpansionOrder" -> 30,
-        "Verbosity" -> 1
+        "Verbosity" -> 1,
+        "EpsPrefactors" -> $deepBoundary["EpsPrefactors"]
       ];
 
       If[transportResult =!= $Failed && AssociationQ[transportResult],
@@ -215,6 +218,7 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
     Module[{levelBoundary, currentBCs},
       (* Store boundary values in transport result for "direct" case *)
       $transportResult3["BoundaryValuesAbove"] = $deepBoundary["BoundaryValues"];
+      $transportResult3["EpsPrefactorsAbove"] = $deepBoundary["EpsPrefactors"];
 
       Print["  Computing level 2 boundary from level 3 transport..."];
       Print["  Level 2 masters: ", ftData["Levels"][2]["Masters"]];
@@ -229,18 +233,30 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
         passed++;
         Print["  PASS: Level 2 boundary computed"];
         Print["    Boundary values: ", levelBoundary["BoundaryValues"]];
+        Print["    Eps prefactors: ", levelBoundary["EpsPrefactors"]];
+        If[KeyExistsQ[levelBoundary, "RawBoundaryValues"],
+          Print["    Raw eps range: ",
+            levelBoundary["RawMinPower"], " ... ", levelBoundary["RawMaxPower"]];
+        ];
 
         testTrue["Level 2 boundary has values",
           Length[levelBoundary["BoundaryValues"]] > 0];
         testTrue["Level 2 boundary values are numeric",
           AllTrue[Flatten[levelBoundary["BoundaryValues"]], NumericQ]];
+        testTrue["Level 2 limit boundary is nonzero",
+          Length[levelBoundary["BoundaryValues"]] >= 2 &&
+            AnyTrue[levelBoundary["BoundaryValues"][[2]],
+              !TrueQ[PossibleZeroQ[#]] &
+            ]];
 
         $level2BCs = levelBoundary["BoundaryValues"];
+        $level2Prefactors = levelBoundary["EpsPrefactors"];
       ,
         failed += 3;
         Print["  FAIL: ComputeLevelBoundary failed"];
         Print["    Result: ", levelBoundary];
         $level2BCs = $Failed;
+        $level2Prefactors = {};
       ];
     ];
   ,
@@ -256,18 +272,23 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
   Print["\n--- Part 6: Complete Pipeline ---"];
 
   If[$level2BCs =!= $Failed,
-    Module[{matDir, transportResult, levelBoundary, currentBCs},
+    Module[{matDir, transportResult, levelBoundary, currentBCs, currentPrefactors},
       currentBCs = $level2BCs;
+      currentPrefactors = $level2Prefactors;
 
       (* Transport level 2 *)
       matDir = FileNameJoin[{outputDir, "Level_2_Matrices"}];
+      FeynmanTrick`FeynmanTrickIteration`ExportLevel[
+        ftData, 2, outputDir, "diffexp", Length[First[currentBCs]] - 1
+      ];
       Print["  Transporting level 2 (", Length[currentBCs], " masters)..."];
 
       transportResult = FeynmanTrick`DiffExpIntegration`TransportLevel[
-        matDir, currentBCs, epsOrder,
+        matDir, currentBCs, Length[First[currentBCs]] - 1,
         "WorkingPrecision" -> 200,
         "ExpansionOrder" -> 30,
-        "Verbosity" -> 1
+        "Verbosity" -> 1,
+        "EpsPrefactors" -> currentPrefactors
       ];
 
       If[transportResult =!= $Failed,
@@ -276,24 +297,34 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
 
         (* Integrate to get level 1 boundary *)
         transportResult["BoundaryValuesAbove"] = currentBCs;
+        transportResult["EpsPrefactorsAbove"] = currentPrefactors;
         levelBoundary = FeynmanTrick`DiffExpIntegration`ComputeLevelBoundary[
           ftData, 1, transportResult, epsOrder
         ];
 
         If[AssociationQ[levelBoundary],
           currentBCs = levelBoundary["BoundaryValues"];
+          currentPrefactors = Lookup[
+            levelBoundary,
+            "EpsPrefactors",
+            Table[0, {Length[currentBCs]}]
+          ];
           passed++;
           Print["  PASS: Level 1 boundary computed (", Length[currentBCs], " masters)"];
 
           (* Transport level 1 *)
           matDir = FileNameJoin[{outputDir, "Level_1_Matrices"}];
+          FeynmanTrick`FeynmanTrickIteration`ExportLevel[
+            ftData, 1, outputDir, "diffexp", Length[First[currentBCs]] - 1
+          ];
           Print["  Transporting level 1 (", Length[currentBCs], " masters)..."];
 
           transportResult = FeynmanTrick`DiffExpIntegration`TransportLevel[
-            matDir, currentBCs, epsOrder,
+            matDir, currentBCs, Length[First[currentBCs]] - 1,
             "WorkingPrecision" -> 200,
             "ExpansionOrder" -> 30,
-            "Verbosity" -> 1
+            "Verbosity" -> 1,
+            "EpsPrefactors" -> currentPrefactors
           ];
 
           If[transportResult =!= $Failed,
@@ -302,6 +333,7 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
 
             (* Integrate to get level 0 boundary (final result!) *)
             transportResult["BoundaryValuesAbove"] = currentBCs;
+            transportResult["EpsPrefactorsAbove"] = currentPrefactors;
             levelBoundary = FeynmanTrick`DiffExpIntegration`ComputeLevelBoundary[
               ftData, 0, transportResult, epsOrder
             ];
@@ -315,6 +347,17 @@ Module[{topology, ftData, outputDir, epsOrder, workDir},
               Do[
                 Print["  Master ", i, ": ", levelBoundary["BoundaryValues"][[i]]];
               , {i, Length[levelBoundary["BoundaryValues"]]}];
+              If[KeyExistsQ[levelBoundary, "RawBoundaryValues"],
+                Print["  Raw eps range: ",
+                  levelBoundary["RawMinPower"], " ... ", levelBoundary["RawMaxPower"]];
+                Print["  Final eps prefactors: ", levelBoundary["EpsPrefactors"]];
+                testTrue["Final result has epsilon pole",
+                  TrueQ[levelBoundary["RawMinPower"] < 0]];
+              ];
+              testTrue["Final result is nonzero",
+                AnyTrue[Flatten[levelBoundary["BoundaryValues"]],
+                  !TrueQ[PossibleZeroQ[#]] &
+                ]];
               Print["  =================="];
             ,
               failed++;

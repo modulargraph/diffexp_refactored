@@ -78,6 +78,7 @@ DefineTopology[name_String, loopMomenta_List, externalMomenta_List,
     "Propagators" -> propagators,
     "Replacements" -> replacements,
     "NumPropagators" -> Length[propagators],
+    "EliminatedPositions" -> {},
     "WorkDirectory" -> "",
     "ProblemNumber" -> 0,  (* Assigned during SetupFIRE *)
     "Masters" -> {},
@@ -88,6 +89,35 @@ DefineTopology[name_String, loopMomenta_List, externalMomenta_List,
 
 TopologyQ[t_Association] := KeyExistsQ[t, "Propagators"] && KeyExistsQ[t, "LoopMomenta"];
 TopologyQ[_] := False;
+
+topologyEliminatedPositions[topology_Association] :=
+Module[{nP, eliminated},
+  nP = topology["NumPropagators"];
+  eliminated = Lookup[topology, "EliminatedPositions", {}];
+  Sort[DeleteDuplicates[
+    Select[eliminated, IntegerQ[#] && 1 <= # <= nP &]
+  ]]
+];
+
+feynmanTrickRestrictions[topology_Association] :=
+Module[{nP, eliminated},
+  nP = topology["NumPropagators"];
+  eliminated = topologyEliminatedPositions[topology];
+  Table[
+    ReplacePart[ConstantArray[0, nP], pos -> 1],
+    {pos, eliminated}
+  ]
+];
+
+allowedBasisSectorQ[sector_List, eliminated_List] :=
+  AllTrue[eliminated, sector[[#]] === 0 &];
+
+basisSectors[topology_Association] :=
+Module[{nP, eliminated},
+  nP = topology["NumPropagators"];
+  eliminated = topologyEliminatedPositions[topology];
+  Select[Rest[Tuples[{0, 1}, nP]], allowedBasisSectorQ[#, eliminated] &]
+];
 
 
 (* Extract symbolic variables from propagators and replacements *)
@@ -130,8 +160,10 @@ ClearFIREState[] := Module[{},
 
   (* Clear FIRE internal state *)
   Quiet[
-    Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
-    Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+    Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements,
+              FIRE`RESTRICTIONS];
+    Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements,
+          FIRE`RESTRICTIONS];
     (* Clear all problem-indexed data *)
     Clear[FIRE`ExampleDimension, FIRE`SBasis0L, FIRE`SBasis0D, FIRE`SBasis0C,
           FIRE`SBasisL, FIRE`SBasisS, FIRE`SBasisR, FIRE`SBasisRL, FIRE`SBasisM, FIRE`HPI];
@@ -165,22 +197,68 @@ ensureFIRELoaded[] := Module[{firePath},
 
 
 (* ============================================================ *)
+(* FIRE runner helpers                                           *)
+(* ============================================================ *)
+
+shellQuote[s_String] := "\"" <> StringReplace[s, {
+    "\\" -> "\\\\",
+    "\"" -> "\\\""
+  }] <> "\"";
+
+safeReadString[path_String] := Module[{txt},
+  If[!FileExistsQ[path], Return["", Module]];
+  txt = Quiet[ReadString[path], {ReadString::read, General::stop}];
+  If[StringQ[txt], txt, ""]
+];
+
+cleanupFIREProcesses[fireBin_String, configName_String] :=
+Module[{fireDir, flameBin, fermatBin},
+  fireDir = DirectoryName[fireBin];
+  flameBin = FileNameJoin[{fireDir, "FLAME6"}];
+  fermatBin = FileNameJoin[{fireDir, "..", "extra", "fuel", "extra", "ferm64", "fer64"}];
+
+  (* Kill workers tied to this config first, then any orphan Fermat from this FIRE install. *)
+  Quiet[Run["pkill -9 -f " <> shellQuote[fireBin <> " -c " <> configName] <> " 2>/dev/null || true"]];
+  Quiet[Run["pkill -9 -f " <> shellQuote[flameBin <> " -c " <> configName] <> " 2>/dev/null || true"]];
+  Quiet[Run["pkill -9 -f " <> shellQuote[fermatBin] <> " 2>/dev/null || true"]];
+];
+
+cleanupFIREWorkDir[dir_String] := Module[{tempDir},
+  tempDir = FileNameJoin[{dir, "temp"}];
+  If[DirectoryQ[tempDir],
+    Quiet[DeleteDirectory[tempDir, DeleteContents -> True]];
+  ];
+  (* Fallback for stubborn temp dirs left by aborted workers. *)
+  If[DirectoryQ[tempDir],
+    Quiet[Run["rm -rf " <> shellQuote[tempDir] <> " 2>/dev/null || true"]];
+  ];
+
+  (* Remove stale per-attempt run directories. *)
+  Scan[
+    Quiet[DeleteDirectory[#, DeleteContents -> True]] &,
+    Select[FileNames["run_*", dir], DirectoryQ]
+  ];
+];
+
+
+(* ============================================================ *)
 (* runFIRE6 - helper to run FIRE6 binary robustly               *)
 (* ============================================================ *)
 
 runFIRE6[fireBin_String, dir_String, configName_String] :=
 Module[{exitCode, maxRetries = 3, attempt},
   Do[
+    cleanupFIREProcesses[fireBin, configName];
+    cleanupFIREWorkDir[dir];
     exitCode = runFIRE6Once[fireBin, dir, configName];
     If[exitCode === 0, Return[0, Module]];
     If[attempt < maxRetries,
       If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
         Print["FIRE6 failed (exit ", exitCode, "), retrying (attempt ", attempt+1, "/", maxRetries, ")..."];
       ];
-      (* Clean up before retry *)
-      Quiet[Run["pkill -9 -f fer64 2>/dev/null"]];
-      Quiet[Run["pkill -9 -f FIRE6 2>/dev/null"]];
-      Quiet[DeleteDirectory[FileNameJoin[{dir, "temp"}], DeleteContents -> True]];
+      (* Additional cleanup before retry *)
+      cleanupFIREProcesses[fireBin, configName];
+      cleanupFIREWorkDir[dir];
       Pause[2];
     ];
   , {attempt, maxRetries}];
@@ -191,46 +269,93 @@ Module[{exitCode, maxRetries = 3, attempt},
 ];
 
 runFIRE6Once[fireBin_String, dir_String, configName_String] :=
-Module[{exitCode, result, logFile, oldDir, cmd, stdoutFile, stderrFile},
+Module[{exitCode, result, logFile, cmd, stdoutFile, stderrFile,
+        timeoutSeconds, fireBinQ, configQ, stdoutQ, stderrQ,
+        runDir, inputFiles, tableFiles},
   logFile = FileNameJoin[{dir, "fire_stdout.log"}];
   stdoutFile = FileNameJoin[{dir, "fire_stdout.tmp"}];
   stderrFile = FileNameJoin[{dir, "fire_stderr.tmp"}];
 
-  (* Clean temp directory *)
-  Quiet[DeleteDirectory[FileNameJoin[{dir, "temp"}], DeleteContents -> True]];
+  timeoutSeconds = Lookup[FeynmanTrick`Private`$FTConfig, "FIRETimeoutSeconds", 600];
+  If[!IntegerQ[timeoutSeconds] || timeoutSeconds <= 0,
+    timeoutSeconds = 600;
+  ];
 
-  (* Run FIRE6 using shell execution - works better with Rosetta on M1 Macs *)
-  (* RunProcess has issues spawning x86_64 child processes (fermat) from arm64 *)
-  oldDir = Directory[];
-  SetDirectory[dir];
+  fireBinQ = shellQuote[fireBin];
+  configQ = shellQuote[configName];
+  stdoutQ = shellQuote[stdoutFile];
+  stderrQ = shellQuote[stderrFile];
+
+  (* Isolate each run in its own working directory to avoid stale temp/db locks
+     from interrupted FIRE workers. *)
+  runDir = FileNameJoin[{dir, "run_" <> StringReplace[CreateUUID[], "-" -> ""]}];
+  CreateDirectory[runDir, CreateIntermediateDirectories -> True];
+  inputFiles = Join[
+    FileNames["*.start", dir],
+    FileNames["*.config", dir],
+    FileNames["*.m", dir]
+  ] // DeleteDuplicates;
+  Scan[
+    Quiet[CopyFile[#, FileNameJoin[{runDir, FileNameTake[#]}], OverwriteTarget -> True]] &,
+    inputFiles
+  ];
 
   cmd = StringJoin[
-    "cd ", dir, " && ",
-    fireBin, " -c ", configName,
-    " > ", stdoutFile, " 2> ", stderrFile
+    "cd ", shellQuote[runDir], " && ",
+    fireBinQ, " -c ", configQ, " > ", stdoutQ, " 2> ", stderrQ, " & ",
+    "fire_pid=$!; ",
+    "start=$(date +%s); timeout=", ToString[timeoutSeconds], "; ",
+    "while kill -0 $fire_pid 2>/dev/null; do ",
+      "now=$(date +%s); ",
+      "if [ $((now-start)) -ge $timeout ]; then ",
+        "pkill -TERM -P $fire_pid 2>/dev/null || true; ",
+        "kill -TERM $fire_pid 2>/dev/null || true; ",
+        "sleep 2; ",
+        "pkill -KILL -P $fire_pid 2>/dev/null || true; ",
+        "kill -KILL $fire_pid 2>/dev/null || true; ",
+        "echo ", shellQuote["FIRE6 timeout after " <> ToString[timeoutSeconds] <> "s"], " >> ", stderrQ, "; ",
+        "exit 124; ",
+      "fi; ",
+      "sleep 2; ",
+    "done; ",
+    "wait $fire_pid; ",
+    "exit $?"
   ];
 
   exitCode = Run[cmd];
   (* Run returns exit code * 256 on Unix *)
   exitCode = If[IntegerQ[exitCode], BitShiftRight[exitCode, 8], exitCode];
 
+  (* Copy generated table outputs back to the canonical topology directory. *)
+  tableFiles = FileNames["*.tables", runDir];
+  Scan[
+    Quiet[CopyFile[#, FileNameJoin[{dir, FileNameTake[#]}], OverwriteTarget -> True]] &,
+    tableFiles
+  ];
+
   (* Read output *)
   result = <|
     "ExitCode" -> exitCode,
-    "StandardOutput" -> If[FileExistsQ[stdoutFile], ReadString[stdoutFile], ""],
-    "StandardError" -> If[FileExistsQ[stderrFile], ReadString[stderrFile], ""]
+    "StandardOutput" -> safeReadString[stdoutFile],
+    "StandardError" -> safeReadString[stderrFile]
   |>;
 
   (* Clean up temp files *)
   Quiet[DeleteFile[stdoutFile]];
   Quiet[DeleteFile[stderrFile]];
 
-  SetDirectory[oldDir];
-
   (* Save output to log file *)
   Export[logFile, result["StandardOutput"] <> result["StandardError"], "Text"];
 
   exitCode = result["ExitCode"];
+
+  (* Ensure no orphan workers leak across retries/runs. *)
+  If[exitCode =!= 0,
+    cleanupFIREProcesses[fireBin, configName];
+  ];
+
+  (* Best-effort cleanup of this attempt's isolated run directory. *)
+  Quiet[DeleteDirectory[runDir, DeleteContents -> True]];
 
   (* Print output on verbose or failure *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2 || exitCode =!= 0,
@@ -255,7 +380,7 @@ Module[{exitCode, result, logFile, oldDir, cmd, stdoutFile, stderrFile},
 (* ============================================================ *)
 
 SetupFIRE[topology_Association, workDir_String:""] :=
-Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn},
+Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions},
   name = topology["Name"];
 
   (* Determine working directory *)
@@ -281,10 +406,12 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn},
   Quiet[
     (* Unprotect everything that FIRE protects *)
     Unprotect[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements,
+              FIRE`RESTRICTIONS,
               FIRE`PrepareIBPd, FIRE`BackMatrix, FIRE`Squares, FIRE`startinglist];
     (* Clear the "already prepared" flag and cached IBP data - this is critical! *)
     Clear[FIRE`PrepareIBPd, FIRE`BackMatrix, FIRE`Squares, FIRE`startinglist];
-    Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements];
+    Clear[FIRE`Internal, FIRE`External, FIRE`Propagators, FIRE`Replacements,
+          FIRE`RESTRICTIONS];
     (* Clear IBP and sector data *)
     Clear[FIRE`ExampleDimension, FIRE`SBasis0L, FIRE`SBasis0D, FIRE`SBasis0C,
           FIRE`SBasisL, FIRE`SBasisD, FIRE`SBasisA, FIRE`SBasisH, FIRE`SBasisO,
@@ -299,10 +426,15 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn},
   FIRE`External = topology["ExternalMomenta"];
   FIRE`Propagators = fireProps;
   If[fireRepls =!= {}, FIRE`Replacements = fireRepls];
+  restrictions = feynmanTrickRestrictions[topology];
+  FIRE`RESTRICTIONS = restrictions;
 
   (* Prepare IBP relations *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Setting up FIRE for topology: ", name, " (problem ", pn, ")"];
+    If[Length[restrictions] > 0,
+      Print["  Sector restrictions: ", restrictions];
+    ];
   ];
   FIRE`PrepareIBP[];
 
@@ -430,8 +562,8 @@ Module[{dir, name, fireBin, intFile, result, masters, tablesFile, pn},
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
   (* Write integrals file with all sector corners *)
-  Module[{nP = topology["NumPropagators"], allSectors, intContent},
-    allSectors = Rest[Tuples[{0, 1}, nP]];
+  Module[{allSectors, intContent},
+    allSectors = basisSectors[topology];
     intContent = StringJoin["{",
       StringRiffle[("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ allSectors, ",\n"],
       "}\n"];
@@ -488,7 +620,7 @@ Module[{dir, fireBin, intContent, allSectors, tablesFile, masters, results},
       Flatten[
         Table[
           With[{topo = topologies[[i]], pn = topologies[[i]]["ProblemNumber"]},
-            allSectors = Rest[Tuples[{0, 1}, topo["NumPropagators"]]];
+            allSectors = basisSectors[topo];
             ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ allSectors
           ],
           {i, Length[topologies]}

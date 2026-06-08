@@ -69,7 +69,8 @@ Module[{ftData, nLevels},
         "Propagators" -> topology["Propagators"],
         "FeynmanParameter" -> None,
         "FixedParams" -> {},
-        "Masters" -> {},
+        "EliminatedPositions" -> Lookup[topology, "EliminatedPositions", {}],
+        "Masters" -> {ConstantArray[1, topology["NumPropagators"]]},
         "DiffMatrix" -> {},
         "Computed" -> False
       |>
@@ -99,7 +100,8 @@ Module[{ftData, nLevels},
 BuildLevel[ftData_Association, level_Integer] :=
 Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
         param, fixedVal, prevParam, numericalPoint, newTopology,
-        prevFixedParams, fixRules, name, result, newReplacements},
+        prevFixedParams, fixRules, name, result, newReplacements,
+        prevEliminated, eliminatedPositions},
 
   If[level < 1 || level > ftData["NumLevels"],
     Print["Error: level must be between 1 and ", ftData["NumLevels"]];
@@ -116,6 +118,8 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
   combo = ftData["CombinationSequence"][[level]];
   {i, j} = combo;
   prevProps = prevLevel["Propagators"];
+  prevEliminated = Lookup[prevLevel, "EliminatedPositions", {}];
+  eliminatedPositions = Sort[DeleteDuplicates[Append[prevEliminated, j]]];
 
   (* Each level gets a unique Feynman parameter symbol: xx1, xx2, xx3, ... *)
   (* This is essential: the paper uses x_1, x_2, ..., x_{n-1} for each combination step *)
@@ -151,6 +155,7 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
     newProps,
     newReplacements
   ];
+  newTopology["EliminatedPositions"] = eliminatedPositions;
 
   (* Update ftData *)
   result = ftData;
@@ -160,6 +165,7 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
     "FeynmanParameter" -> param,
     "FixedParams" -> prevFixedParams,
     "CombinedPositions" -> {i, j},
+    "EliminatedPositions" -> eliminatedPositions,
     "Masters" -> {},
     "DiffMatrix" -> {},
     "Computed" -> False

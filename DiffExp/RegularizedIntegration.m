@@ -48,7 +48,11 @@ RegularizeIntegrand::usage = "RegularizeIntegrand[a, b, gList, c] repeatedly app
 
 IntegrateSingularTerm::usage = "IntegrateSingularTerm[a, b, gList, {xmin, xmax}] integrates x^(a+b*eps)*g(x,eps) from xmin to xmax using regularization if needed. Returns list of results per epsilon order.";
 
+IntegrateSingularTermLaurent::usage = "IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {xmin, xmax}] integrates x^(a+b*eps)*g(x,eps), where gList starts at eps^epsMinPower. Returns <|\"MinPower\" -> m, \"Coefficients\" -> {...}|>.";
+
 IntegrateDecomposition::usage = "IntegrateDecomposition[decomposition, {xmin, xmax}] integrates a decomposed series (from DecomposeSingularity) over the given interval.";
+
+IntegrateDecompositionLaurent::usage = "IntegrateDecompositionLaurent[decomposition, {xmin, xmax}, epsMinPower] integrates a decomposed series whose epsilon coefficient list starts at eps^epsMinPower. Returns a Laurent coefficient association.";
 
 EvaluateLimitAtSingularity::usage = "EvaluateLimitAtSingularity[decomposition, direction] evaluates the limit of a decomposed series at x=0. direction is +1 for x->0+ or -1 for x->0-. Terms with b != 0 are set to zero per regularization prescription.";
 
@@ -65,7 +69,60 @@ prefactorSpec is <|\"PowerAtLower\" -> alpha, \"PowerAtUpper\" -> beta, \"Ration
 f(x) is the piecewise series from saved transport data. Powers alpha, beta >= 0 for convergence (regularization applied otherwise). \
 RationalFactor is a rational function that gets series-expanded at each segment.";
 
+DefiniteIntegralWithPrefactorLaurent::usage = "DefiniteIntegralWithPrefactorLaurent[savedData, {lower, upper}, prefactorSpec, epsMinPower] is the Laurent-aware version of DefiniteIntegralWithPrefactor. It returns one association per integral, each with \"MinPower\" and \"Coefficients\".";
+
 Begin["`Private`"];
+
+LaurentMaxPower[laur_Association] :=
+  laur["MinPower"] + Length[laur["Coefficients"]] - 1;
+
+LaurentCoeff[laur_Association, power_Integer] := Module[
+  {idx = power - laur["MinPower"] + 1},
+  If[idx >= 1 && idx <= Length[laur["Coefficients"]],
+    laur["Coefficients"][[idx]],
+    0
+  ]
+];
+
+LaurentZero[minPower_Integer, maxPower_Integer] := <|
+  "MinPower" -> minPower,
+  "Coefficients" -> Table[0, {Max[0, maxPower - minPower + 1]}]
+|>;
+
+LaurentScale[c_, laur_Association] := <|
+  "MinPower" -> laur["MinPower"],
+  "Coefficients" -> (DiffExp`Utilities`PChop /@ (c * laur["Coefficients"]))
+|>;
+
+LaurentAdd[a_Association, b_Association] := Module[
+  {minPower, maxPower},
+  minPower = Min[a["MinPower"], b["MinPower"]];
+  maxPower = Max[LaurentMaxPower[a], LaurentMaxPower[b]];
+  <|
+    "MinPower" -> minPower,
+    "Coefficients" -> Table[
+      DiffExp`Utilities`PChop[Expand[LaurentCoeff[a, p] + LaurentCoeff[b, p]]],
+      {p, minPower, maxPower}
+    ]
+  |>
+];
+
+LaurentToNonNegativeList[laur_Association, epsOrder_Integer] :=
+  Table[LaurentCoeff[laur, p], {p, 0, epsOrder}];
+
+KnownSeriesDerivative[ser_SeriesData, var_] := Module[
+  {order},
+  order = Max[0, Ceiling[ser[[5]] / ser[[6]]]];
+  Quiet[
+    Series[
+      DiffExp`SeriesOps`SD[Normal[ser], var],
+      {var, ser[[2]], order}
+    ]
+  ]
+];
+
+KnownSeriesDerivative[expr_, var_] :=
+  DiffExp`SeriesOps`SD[expr, var];
 
 (* ============================================================ *)
 (* Regularization Formula Implementation *)
@@ -88,17 +145,20 @@ Begin["`Private`"];
    The gList represents coefficients of eps^(epsMinPower), eps^(epsMinPower+1), ...
 *)
 ApplyRegularizationStep[a_, b_, epsMinPower_Integer, gList_List, c_] := Module[
-  {epsOrder, newGList, newEpsMin, transformedG, n},
+  {epsOrder, transformedMaxOrder, newGList, newEpsMin, transformedG, n, tol, zeroQ},
 
   epsOrder = Length[gList] - 1;
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  zeroQ[z_] := TrueQ[PossibleZeroQ[z]] || TrueQ[NumericQ[z] && Abs[N[z, 50]] < tol];
+  transformedMaxOrder = epsOrder + If[zeroQ[1 + a], 1, 0];
 
   (* First compute the transformed g: (2+a+b*eps)/c * g - (1-x/c) * g'
      This doesn't change the eps structure, just transforms each coefficient *)
   transformedG = Table[
     Module[{gAtOrd, gAtOrdMinus1, gpAtOrd},
-      gAtOrd = gList[[ord + 1]];
-      gAtOrdMinus1 = If[ord > 0, gList[[ord]], 0];
-      gpAtOrd = DiffExp`SeriesOps`SD[gAtOrd, DiffExp`Symbols`x];
+      gAtOrd = If[ord <= epsOrder, gList[[ord + 1]], 0];
+      gAtOrdMinus1 = If[ord > 0 && ord - 1 <= epsOrder, gList[[ord]], 0];
+      gpAtOrd = KnownSeriesDerivative[gAtOrd, DiffExp`Symbols`x];
 
       (* (2+a)/c * g_ord + b/c * g_{ord-1} - (1-x/c) * g'_ord *)
       DiffExp`SeriesOps`SExpand[
@@ -107,11 +167,11 @@ ApplyRegularizationStep[a_, b_, epsMinPower_Integer, gList_List, c_] := Module[
         (1 - DiffExp`Symbols`x / c) * gpAtOrd
       ]
     ],
-    {ord, 0, epsOrder}
+    {ord, 0, transformedMaxOrder}
   ];
 
   (* Now handle the prefactor 1/(1+a+b*eps) *)
-  If[1 + a == 0,
+  If[zeroQ[1 + a],
     (* Special case: a = -1, prefactor is 1/(b*eps) = (1/b) * eps^{-1} *)
     (* This shifts eps powers down by 1 and multiplies by 1/b *)
     newEpsMin = epsMinPower - 1;
@@ -124,14 +184,14 @@ ApplyRegularizationStep[a_, b_, epsMinPower_Integer, gList_List, c_] := Module[
       Sum[
         Module[{prefactorCoeff},
           prefactorCoeff = (-b / (1 + a))^k / (1 + a);
-          If[n - k >= 0 && n - k <= epsOrder,
+          If[n - k >= 0 && n - k <= transformedMaxOrder,
             prefactorCoeff * transformedG[[n - k + 1]],
             0
           ]
         ],
         {k, 0, n}
       ] // DiffExp`SeriesOps`SExpand,
-      {n, 0, epsOrder}
+      {n, 0, transformedMaxOrder}
     ];
   ];
 
@@ -156,7 +216,7 @@ ApplyRegularizationStepOld[a_, b_, gList_List, c_] := Module[
     Module[{gAtOrd, gAtOrdMinus1, gpAtOrd},
       gAtOrd = gList[[ord + 1]];
       gAtOrdMinus1 = If[ord > 0, gList[[ord]], 0];
-      gpAtOrd = DiffExp`SeriesOps`SD[gAtOrd, DiffExp`Symbols`x];
+      gpAtOrd = KnownSeriesDerivative[gAtOrd, DiffExp`Symbols`x];
       DiffExp`SeriesOps`SExpand[
         (2 + a) / c * gAtOrd +
         (If[ord > 0, b / c * gAtOrdMinus1, 0]) -
@@ -189,8 +249,11 @@ ApplyRegularizationStepOld[a_, b_, gList_List, c_] := Module[
 
 (* Repeatedly apply regularization until a >= 0, tracking eps offset *)
 (* Returns {newA, b, epsMinPower, newGList} *)
-RegularizeIntegrand[a_, b_, gList_List, c_] := Module[
-  {currentA = a, currentB = b, currentEpsMin = 0, currentG = gList, maxIter = 50, iter = 0, result},
+RegularizeIntegrand[a_, b_, gList_List, c_] :=
+  RegularizeIntegrand[a, b, 0, gList, c];
+
+RegularizeIntegrand[a_, b_, epsMinPower_Integer, gList_List, c_] := Module[
+  {currentA = a, currentB = b, currentEpsMin = epsMinPower, currentG = gList, maxIter = 50, iter = 0, result},
 
   While[currentA < 0 && iter < maxIter,
     iter++;
@@ -223,27 +286,64 @@ RegularizeIntegrand[a_, b_, gList_List, c_] := Module[
    - At x=c: evaluate normally
 *)
 IntegrateSingularTerm[a_, b_, gList_List, {xmin_, xmax_}] := Module[
+  {epsOrder, laur},
+  epsOrder = Length[gList] - 1;
+  laur = IntegrateSingularTermLaurent[a, b, 0, gList, {xmin, xmax}];
+  LaurentToNonNegativeList[laur, epsOrder]
+];
+
+IntegrateSingularTermLaurent[a_, b_, epsMinPower_Integer, gList_List, {xmin_, xmax_}] := Module[
   {epsOrder, regA, regB, regEpsMin, regG, integratedG, upperEval, lowerEval, result,
-   atLowerSingularity, atUpperSingularity, regResult},
+   atLowerSingularity, atUpperSingularity, regResult, tol, zeroQ, epsMaxPower},
 
   epsOrder = Length[gList] - 1;
+  epsMaxPower = epsMinPower + epsOrder;
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  zeroQ[z_] := TrueQ[PossibleZeroQ[z]] || TrueQ[Abs[N[z, 50]] < tol];
+
+  (* The regularization formula is written with the singular point x=0
+     as the lower endpoint.  If zero is the upper endpoint, flip the
+     interval; if zero lies inside the interval, split into two regulated
+     endpoint integrals. *)
+  If[zeroQ[xmax] && !zeroQ[xmin],
+    Return[LaurentScale[-1, IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {0, xmin}]]]
+  ];
+  If[!zeroQ[xmin] && !zeroQ[xmax] &&
+     TrueQ[N[xmin, 50] < 0 < N[xmax, 50]],
+    Return[
+      LaurentAdd[
+        IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {xmin, 0}],
+        IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {0, xmax}]
+      ]
+    ]
+  ];
 
   (* Check if boundaries are at singularities *)
-  atLowerSingularity = (Abs[xmin] < DiffExp`State`FEC[RationalizationTolerance]);
-  atUpperSingularity = (Abs[xmax] < DiffExp`State`FEC[RationalizationTolerance]);
+  atLowerSingularity = If[zeroQ[xmin],
+    If[zeroQ[xmax], 1, Sign[N[xmax, 50]]],
+    False
+  ];
+  atUpperSingularity = If[zeroQ[xmax],
+    If[zeroQ[xmin], 1, Sign[N[xmin, 50]]],
+    False
+  ];
 
-  (* If a < 0 and b != 0, we need regularization *)
-  If[a < 0 && b != 0,
+  (* If a < 0 and b != 0 at the endpoint x=0, we need regularization.
+     Away from x=0 the ordinary termwise antiderivative is finite; applying
+     the endpoint regularization formula there creates a spurious boundary term. *)
+  If[a < 0 && b != 0 && atLowerSingularity =!= False,
     (* Apply regularization to make a >= 0 *)
-    regResult = RegularizeIntegrand[a, b, gList, xmax];
+    regResult = RegularizeIntegrand[a, b, epsMinPower, gList, xmax];
     regA = regResult[[1]];
     regB = regResult[[2]];
     regEpsMin = regResult[[3]];
     regG = regResult[[4]];
     ,
     (* No regularization needed *)
-    regA = a; regB = b; regEpsMin = 0; regG = gList;
+    regA = a; regB = b; regEpsMin = epsMinPower; regG = gList;
   ];
+
+  epsMaxPower = regEpsMin + Length[regG] - 1;
 
   (* Now integrate x^(regA + regB*eps) * g(x,eps) *)
   (* The integral is: x^(regA+1+regB*eps)/(regA+1+regB*eps) * G(x,eps)
@@ -260,7 +360,7 @@ IntegrateSingularTerm[a_, b_, gList_List, {xmin_, xmax_}] := Module[
 
   result = Table[
     Module[{gAtOrd, norms, integrated, upperVal, lowerVal},
-      gAtOrd = regG[[ord + 1]];
+      gAtOrd = LaurentCoeff[<|"MinPower" -> regEpsMin, "Coefficients" -> regG|>, ord];
 
       (* Integrate the series: for each x^k term in g, we get x^(regA+regB*eps+k+1)/(regA+regB*eps+k+1) *)
       (* This is complex because regB*eps affects the power and the denominator *)
@@ -270,20 +370,25 @@ IntegrateSingularTerm[a_, b_, gList_List, {xmin_, xmax_}] := Module[
          If regB != 0, we need the full eps-dependent integration. *)
 
       (* Always use the detailed integration to handle fractional terms correctly *)
-      IntegratePowerTimesSeriesAtOrder[regA, regB, regG, ord, {xmin, xmax}, atLowerSingularity, atUpperSingularity]
+      IntegratePowerTimesSeriesAtPower[regA, regB, regEpsMin, regG, ord,
+        {xmin, xmax}, atLowerSingularity, atUpperSingularity]
     ],
-    {ord, 0, epsOrder}
+    {ord, regEpsMin, epsMaxPower}
   ];
 
-  result
+  <|"MinPower" -> regEpsMin, "Coefficients" -> result|>
 ];
 
 (* Helper: integrate x^(a+b*eps) * g(x,eps) at a specific epsilon order *)
 (* This handles the eps-expansion of the power and denominator *)
-IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_}, atLower_, atUpper_] := Module[
-  {epsOrder, result, k, m, contrib, gCoeffs, intCoeff, upperVal, lowerVal},
+IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_}, atLower_, atUpper_] :=
+  IntegratePowerTimesSeriesAtPower[a, b, 0, gList, targetOrd, {xmin, xmax}, atLower, atUpper];
 
-  epsOrder = Length[gList] - 1;
+IntegratePowerTimesSeriesAtPower[a_, b_, epsMinPower_Integer, gList_List, targetPower_Integer,
+    {xmin_, xmax_}, atLower_, atUpper_] := Module[
+  {epsMaxPower, result, k, m, contrib, gCoeffs, intCoeff, upperVal, lowerVal, maxLogPower},
+
+  epsMaxPower = epsMinPower + Length[gList] - 1;
 
   (* x^(a+b*eps) = x^a * x^(b*eps) = x^a * exp(b*eps*Logx) = x^a * sum_k (b*Logx)^k/k! * eps^k *)
   (* So at eps^n, we get: sum_{k=0}^{n} (b*Logx)^k/k! * g_{n-k}(x) * x^a *)
@@ -294,11 +399,14 @@ IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_},
        x^(a+m+1)/(a+m+1) * (Logx^k - k*Logx^(k-1)/(a+m+1) + k*(k-1)*Logx^(k-2)/(a+m+1)^2 - ...)
   *)
 
+  maxLogPower = targetPower - epsMinPower;
+  If[maxLogPower < 0, Return[0]];
+
   result = Sum[
     Module[{logPow = k, logCoeff, gAtOrder, integ, uVal, lVal},
       logCoeff = If[b == 0 && logPow == 0, 1, If[b == 0, 0, b^logPow / logPow!]];
-      gAtOrder = If[targetOrd - k >= 0 && targetOrd - k <= epsOrder,
-                    gList[[targetOrd - k + 1]],
+      gAtOrder = If[targetPower - k >= epsMinPower && targetPower - k <= epsMaxPower,
+                    gList[[targetPower - k - epsMinPower + 1]],
                     0];
 
       If[gAtOrder === 0,
@@ -313,7 +421,7 @@ IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_},
         logCoeff * (uVal - lVal)
       ]
     ],
-    {k, 0, targetOrd}
+    {k, 0, maxLogPower}
   ];
 
   result // DiffExp`Utilities`PChop // Expand
@@ -321,14 +429,30 @@ IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_},
 
 (* Integrate x^a * Logx^n * (series in x) *)
 (* Returns a function/expression that can be evaluated at bounds *)
+IntegratePowerLogMonomial[p_, n_, coeff_, tol_] := Module[
+  {zeroQ},
+  zeroQ[z_] := TrueQ[PossibleZeroQ[z]] || TrueQ[NumericQ[z] && Abs[N[z, 50]] < tol];
+
+  If[coeff === 0 || TrueQ[PossibleZeroQ[coeff]] ||
+      (NumericQ[coeff] && Abs[coeff] < 10^-DiffExp`State`FEC[ChopPrecision]),
+    0,
+    If[zeroQ[p + 1],
+      coeff * DiffExp`Symbols`Logx^(n + 1) / (n + 1),
+      coeff * DiffExp`Symbols`x^(p + 1) / (p + 1) *
+        Sum[(-1)^j * Factorial[n] / Factorial[n - j] *
+          DiffExp`Symbols`Logx^(n - j) / (p + 1)^j, {j, 0, n}]
+    ]
+  ]
+];
+
 IntegrateWithLogPower[a_, n_, ser_SeriesData] := Module[
-  {nmin, nmax, den, coeffs, result, m, intPow, logTerms},
+  {nmin, nmax, den, coeffs, result, m, intPow, logTerms, tol},
 
   nmin = ser[[4]];
   nmax = ser[[5]];
   den = ser[[6]];
   coeffs = ser[[3]];
-
+  tol = DiffExp`State`FEC[RationalizationTolerance];
   (* For each term c_m * x^(m/den) in the series:
      Integrate x^a * Logx^n * c_m * x^(m/den) = c_m * Integrate x^(a+m/den) * Logx^n
 
@@ -342,17 +466,13 @@ IntegrateWithLogPower[a_, n_, ser_SeriesData] := Module[
       coeff = If[idx <= Length[coeffs], coeffs[[idx]], 0];
       p = a + powIdx / den;
 
-      If[coeff === 0 || (NumericQ[coeff] && Abs[coeff] < 10^-DiffExp`State`FEC[ChopPrecision]),
-        0,
-        (* Integrate x^p * Logx^n *)
-        If[p == -1,
-          (* Special case: gives Logx^(n+1)/(n+1) *)
-          coeff * DiffExp`Symbols`Logx^(n + 1) / (n + 1)
-          ,
-          (* General case *)
-          coeff * DiffExp`Symbols`x^(p + 1) / (p + 1) *
-            Sum[(-1)^j * Factorial[n] / Factorial[n - j] * DiffExp`Symbols`Logx^(n - j) / (p + 1)^j, {j, 0, n}]
-        ]
+      Sum[
+        IntegratePowerLogMonomial[
+          p, n + logPow,
+          DiffExp`SeriesOps`LogxCoeffNS[coeff, logPow],
+          tol
+        ],
+        {logPow, 0, DiffExp`SeriesOps`MaxLogxPower[coeff]}
       ]
     ],
     {idx, 1, Length[coeffs]}
@@ -365,17 +485,82 @@ IntegrateWithLogPower[a_, n_, 0] := 0;
 IntegrateWithLogPower[a_, n_, c_?NumericQ] := IntegrateWithLogPower[a, n,
   SeriesData[DiffExp`Symbols`x, 0, {c}, 0, 1, 1]];
 
+thetaRulesAtPoint[pt_, direction_:Automatic] := Module[
+  {tol, sign},
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  sign = Which[
+    direction =!= Automatic && NumericQ[direction], Sign[N[direction, 50]],
+    TrueQ[PossibleZeroQ[pt]] || TrueQ[NumericQ[pt] && Abs[N[pt, 50]] < tol], 1,
+    TrueQ[N[pt, 50] < 0], -1,
+    True, 1
+  ];
+
+  If[sign < 0,
+    {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1},
+    {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}
+  ]
+];
+
+branchDirection[pt_, atSingularity_] := Module[
+  {},
+  Which[
+    NumericQ[atSingularity], atSingularity,
+    TrueQ[atSingularity === False], Automatic,
+    True, Automatic
+  ]
+];
+
+localSidePhase[side_, power_] := Module[
+  {tol = DiffExp`State`FEC[RationalizationTolerance], numericSide},
+  numericSide = Quiet[Check[N[side, 50], $Failed]];
+  If[numericSide =!= $Failed && NumericQ[numericSide] &&
+      TrueQ[numericSide < -tol],
+    Exp[-I Pi power],
+    1
+  ]
+];
+
 (* Evaluate the integral expression at a point, handling singularity limits *)
-EvaluateIntegralAtPoint[expr_, pt_, a_, atSingularity_] := Module[{val},
-  If[atSingularity && pt == 0,
+EvaluateIntegralAtPoint[expr_, pt_, a_, atSingularity_] := Module[{val, zeroQ, tol},
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  zeroQ = TrueQ[PossibleZeroQ[pt]] || TrueQ[Abs[N[pt, 50]] < tol];
+
+  If[zeroQ,
     (* At x=0 singularity: terms with Logx or negative powers vanish *)
     (* Only finite constant terms survive *)
-    (expr /. DiffExp`Symbols`Logx -> 0 /. DiffExp`Symbols`x -> 0) //
-      Quiet[Limit[#, DiffExp`Symbols`x -> 0]] & //
+    Quiet[Limit[
+      (expr /. thetaRulesAtPoint[pt, branchDirection[pt, atSingularity]]) /.
+        DiffExp`Symbols`Logx -> 0,
+      DiffExp`Symbols`x -> 0
+    ]] //
       If[NumericQ[#], #, 0] &
     ,
     (* Normal evaluation *)
-    expr /. DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /. DiffExp`Symbols`x -> pt
+    val = expr /. thetaRulesAtPoint[pt, branchDirection[pt, atSingularity]] /.
+      DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /. DiffExp`Symbols`x -> pt;
+    If[NumericQ[val] && TrueQ[Abs[N[val, 50]] > 10^100],
+      Module[{ser, padeVal},
+        ser = Quiet[
+          Check[
+            Series[expr, {DiffExp`Symbols`x, 0,
+              DiffExp`State`FEC[ExpansionOrder] + 2}],
+            $Failed
+          ]
+        ];
+        If[MatchQ[ser, _SeriesData],
+          padeVal = Quiet[
+            Check[
+              DiffExp`Pade`SEval2[DiffExp`Pade`GetPade[ser], pt],
+              $Failed
+            ]
+          ];
+          If[NumericQ[padeVal] && TrueQ[Abs[N[padeVal, 50]] < Abs[N[val, 50]]],
+            val = padeVal
+          ];
+        ];
+      ];
+    ];
+    val
   ]
 ];
 
@@ -385,21 +570,38 @@ EvaluateIntegralAtPoint[expr_, pt_, a_, atSingularity_] := Module[{val},
 
 (* Integrate a full decomposition from DecomposeSingularity *)
 IntegrateDecomposition[decomposition_List, {xmin_, xmax_}] := Module[
-  {epsOrder, result, term, a, b, g},
+  {epsOrder, laur},
 
   If[Length[decomposition] == 0, Return[{}]];
 
   epsOrder = Length[decomposition[[1]]["g"]] - 1;
+  laur = IntegrateDecompositionLaurent[decomposition, {xmin, xmax}, 0];
+  LaurentToNonNegativeList[laur, epsOrder]
+];
 
-  (* Sum contributions from all terms *)
-  result = Table[0, {epsOrder + 1}];
+IntegrateDecompositionLaurent[decomposition_List, {xmin_, xmax_}, epsMinPower_Integer:0] := Module[
+  {epsMaxPower, result, term, a, b, g},
+
+  If[Length[decomposition] == 0,
+    Return[LaurentZero[epsMinPower, epsMinPower - 1]]
+  ];
+
+  If[TrueQ[N[xmin, 50] > N[xmax, 50]],
+    Return[LaurentScale[-1, IntegrateDecompositionLaurent[decomposition, {xmax, xmin}, epsMinPower]]]
+  ];
+
+  epsMaxPower = epsMinPower + Length[decomposition[[1]]["g"]] - 1;
+  result = LaurentZero[epsMinPower, epsMaxPower];
 
   Do[
     a = decomposition[[i]]["a"];
     b = decomposition[[i]]["b"];
     g = decomposition[[i]]["g"];
 
-    result = result + IntegrateSingularTerm[a, b, g, {xmin, xmax}];
+    result = LaurentAdd[
+      result,
+      IntegrateSingularTermLaurent[a, b, epsMinPower, g, {xmin, xmax}]
+    ];
     ,
     {i, Length[decomposition]}
   ];
@@ -679,6 +881,38 @@ IndefiniteIntegral[savedData2_] := Module[
   result
 ];
 
+segmentMainExpression[segmentData_List] := Module[
+  {currLine = segmentData[[1]], lineRelation = segmentData[[2]]},
+  If[AssociationQ[currLine],
+    First[Values[currLine]],
+    If[Head[currLine] === Rule,
+      currLine[[2]],
+      lineRelation[[2]]
+    ]
+  ]
+];
+
+segmentActualBounds[segmentData_List] := Module[
+  {xLocal = DiffExp`Symbols`x, xMainExpr, localBounds, values},
+  xMainExpr = segmentMainExpression[segmentData];
+  localBounds = segmentData[[4]];
+  values = Quiet[N[(xMainExpr /. xLocal -> #), 80] & /@ localBounds];
+  {Min[values], Max[values]}
+];
+
+segmentLocalCoordinateForValue[segmentData_List, value_, xMainExpr_:Automatic] := Module[
+  {xLocal = DiffExp`Symbols`x, expr, localBounds, values, denom},
+  expr = If[xMainExpr === Automatic, segmentMainExpression[segmentData], xMainExpr];
+  localBounds = segmentData[[4]];
+  values = (expr /. xLocal -> #) & /@ localBounds;
+  denom = values[[2]] - values[[1]];
+  If[TrueQ[PossibleZeroQ[denom]],
+    localBounds[[1]],
+    localBounds[[1]] + (value - values[[1]]) *
+      (localBounds[[2]] - localBounds[[1]]) / denom
+  ]
+];
+
 (* Helper: integrate a segment indefinitely, returning a function of x *)
 IntegrateSegmentIndefinite[segmentData_List, intIndex_Integer, epsOrder_Integer] := Module[
   {currLine, lineRelation, seriesData, jacobian,
@@ -782,9 +1016,10 @@ DefiniteIntegralWithPrefactor[savedData2_, {lower_, upper_}, prefactorSpec_Assoc
 
   (* Find segments that overlap with [lower, upper] *)
   relevantSegments = Select[savedData,
-    Module[{segMin, segMax},
-      segMin = Min[#[[3]]];
-      segMax = Max[#[[3]]];
+    Module[{segMin, segMax, actualBounds},
+      actualBounds = segmentActualBounds[#];
+      segMin = actualBounds[[1]];
+      segMax = actualBounds[[2]];
       Not[segMax <= lower || segMin >= upper]
     ] &
   ];
@@ -793,7 +1028,7 @@ DefiniteIntegralWithPrefactor[savedData2_, {lower_, upper_}, prefactorSpec_Assoc
   result = Table[
     Sum[
       seg = relevantSegments[[segIdx]];
-      segBounds = seg[[3]];
+      segBounds = segmentActualBounds[seg];
 
       (* Find overlap with [lower, upper] *)
       overlapBounds = {Max[Min[segBounds], lower], Min[Max[segBounds], upper]};
@@ -813,6 +1048,73 @@ DefiniteIntegralWithPrefactor[savedData2_, {lower_, upper_}, prefactorSpec_Assoc
   result
 ];
 
+DefiniteIntegralWithPrefactorLaurent[savedData2_, {lower_, upper_}, prefactorSpec_Association,
+    epsMinPower_Integer:0] := Module[
+  {savedData, numIntegrals, numEpsOrders, uncompressed,
+   alpha, beta, rationalFactor, variable, relevantSegments,
+   result, seg, segBounds, overlapBounds, epsMaxPower},
+
+  alpha = Lookup[prefactorSpec, "PowerAtLower", 0];
+  beta = Lookup[prefactorSpec, "PowerAtUpper", 0];
+  rationalFactor = Lookup[prefactorSpec, "RationalFactor", 1];
+  variable = Lookup[prefactorSpec, "Variable", DiffExp`Symbols`x];
+
+  If[AssociationQ[savedData2],
+    If[MissingQ[savedData2["SegmentData"]],
+      DiffExp`Utilities`ReportError["DefiniteIntegralWithPrefactorLaurent: No segment data available."];
+    ];
+    savedData = savedData2["SegmentData"],
+    savedData = savedData2
+  ];
+
+  If[StringQ[savedData[[1, 5]]],
+    If[FileExistsQ[savedData[[1, 5]]],
+       uncompressed = Uncompress[Import[savedData[[1, 5]]]];,
+       uncompressed = Uncompress[savedData[[1, 5]]];
+    ];,
+    uncompressed = savedData[[1, 5]];
+  ];
+
+  numIntegrals = Length[uncompressed];
+  numEpsOrders = Length[uncompressed[[1]]];
+  epsMaxPower = epsMinPower + numEpsOrders - 1;
+
+  DiffExp`Utilities`PrintInfo["Computing Laurent definite integral with prefactor from ", lower // N, " to ", upper // N][1];
+
+  relevantSegments = Select[savedData,
+    Module[{segMin, segMax, actualBounds},
+      actualBounds = segmentActualBounds[#];
+      segMin = actualBounds[[1]];
+      segMax = actualBounds[[2]];
+      Not[segMax <= lower || segMin >= upper]
+    ] &
+  ];
+
+  result = Table[
+    Module[{acc = LaurentZero[epsMinPower, epsMaxPower]},
+      Do[
+        seg = relevantSegments[[segIdx]];
+        segBounds = segmentActualBounds[seg];
+        overlapBounds = {Max[Min[segBounds], lower], Min[Max[segBounds], upper]};
+
+        If[overlapBounds[[1]] < overlapBounds[[2]],
+          acc = LaurentAdd[
+            acc,
+            IntegrateSegmentWithPrefactorLaurent[seg, overlapBounds, intIdx,
+              epsMinPower, alpha, beta, rationalFactor, variable, lower, upper]
+          ];
+        ];
+        ,
+        {segIdx, Length[relevantSegments]}
+      ];
+      acc
+    ],
+    {intIdx, numIntegrals}
+  ];
+
+  result
+];
+
 
 (* Integrate a single segment with prefactors.
    The full integrand is: (x-lower)^alpha * (upper-x)^beta * r(x) * f(x)
@@ -825,7 +1127,7 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
    mainMin, mainMax, localMin, localMax, slope,
    atLowerBound, atUpperBound, expansionOrder,
    prefactorSeries, combinedDecomposition, integralResult,
-   localSeries, decomposition, xLocal},
+   localSeries, decomposition, xLocal, xMainExpr},
 
   currLine = segmentData[[1]];
   lineRelation = segmentData[[2]];
@@ -851,18 +1153,12 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
   localMin = localBounds[[1]];
   localMax = localBounds[[2]];
   xLocal = DiffExp`Symbols`x;
+  xMainExpr = DiffExp`Utilities`PChop[Expand[segmentMainExpression[segmentData]]];
 
-  If[mainMax - mainMin != 0,
-    slope = (localMax - localMin) / (mainMax - mainMin);
-    localA = localMin + (a - mainMin) * slope;
-    localB = localMin + (b - mainMin) * slope;
-    jacobian = D[lineRelation[[2]], xLocal];
-    jacobian = jacobian /. xLocal -> (localA + localB)/2;
-    ,
-    localA = localMin;
-    localB = localMin;
-    jacobian = 1;
-  ];
+  localA = segmentLocalCoordinateForValue[segmentData, a, xMainExpr];
+  localB = segmentLocalCoordinateForValue[segmentData, b, xMainExpr];
+  jacobian = D[xMainExpr, xLocal];
+  jacobian = jacobian /. xLocal -> (localA + localB)/2;
 
   (* Determine expansion order from the series *)
   expansionOrder = If[MatchQ[seriesAtIndex[[1]], _SeriesData],
@@ -878,12 +1174,9 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
      lineRelation gives: x_main = f(x_local)
      So x_main - lower = f(x_local) - lower, and upper - x_main = upper - f(x_local)
   *)
-  Module[{xMainExpr, prefactorLower, prefactorUpper, prefactorRational,
+  Module[{prefactorLower, prefactorUpper, prefactorRational,
           smoothPrefactor, singularPowerLower, singularPowerUpper,
           totalSingularPower, smoothSeries, modifiedDecomp},
-
-    (* x_main as function of local x *)
-    xMainExpr = lineRelation[[2]];
 
     (* Handle power-law prefactors:
        - (x_main - lower)^alpha: if at lower boundary, this is singular
@@ -901,10 +1194,12 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
     If[atLowerBound && Abs[localA] < DiffExp`State`FEC[RationalizationTolerance],
       (* This segment starts at the lower integration bound *)
       (* (x_main - lower) ~ jacobian * (x_local - localA) ~ jacobian * x_local when localA ~ 0 *)
-      (* So (x_main - lower)^alpha ~ |jacobian|^alpha * x_local^alpha *)
+      (* So (x_main - lower)^alpha is |jacobian|^alpha times the
+         branch phase needed to express the physical positive distance
+         as x_local^alpha. *)
       singularPowerLower = alpha;
-      (* The smooth part from (x_main - lower)^alpha is |jacobian|^alpha *)
-      prefactorLower = Abs[jacobian]^alpha;
+      prefactorLower = Abs[jacobian]^alpha *
+        localSidePhase[localB - localA, alpha];
       ,
       (* Not at lower boundary: (x_main - lower)^alpha is smooth, series-expand *)
       prefactorLower = (xMainExpr - lower)^alpha;
@@ -916,7 +1211,8 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
       (* But typically near upper bound, local x goes to 0 at x_main = upper *)
       (* So (upper - x_main) ~ |jacobian| * x_local *)
       singularPowerUpper = beta;
-      prefactorUpper = Abs[jacobian]^beta;
+      prefactorUpper = Abs[jacobian]^beta *
+        localSidePhase[localA - localB, beta];
       ,
       (* Not at upper boundary: smooth *)
       prefactorUpper = (upper - xMainExpr)^beta;
@@ -972,6 +1268,32 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
           {ord, Length[termG]}
         ];
 
+        (* If the rational factor introduced poles (negative starting powers in g),
+           absorb them into the exponent a. This ensures IntegrateSingularTerm
+           sees a g-series starting at x^0. *)
+        Module[{gNmins, minNmin},
+          gNmins = Table[
+            If[MatchQ[newG[[ord]], _SeriesData],
+              newG[[ord]][[4]],  (* nmin of this SeriesData *)
+              0
+            ], {ord, Length[newG]}
+          ];
+          minNmin = Min[gNmins];
+          If[minNmin < 0,
+            newA = newA + minNmin;
+            (* Shift each g-series so it starts at x^0 *)
+            newG = Table[
+              If[MatchQ[newG[[ord]], _SeriesData],
+                Module[{s = newG[[ord]]},
+                  SeriesData[s[[1]], s[[2]], s[[3]],
+                    s[[4]] - minNmin, s[[5]] - minNmin, s[[6]]]
+                ],
+                newG[[ord]]
+              ], {ord, Length[newG]}
+            ];
+          ];
+        ];
+
         <|"a" -> newA, "b" -> termB, "g" -> newG|>
       ],
       {termIdx, Length[decomposition]}
@@ -980,10 +1302,156 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
     (* Integrate the modified decomposition *)
     integralResult = IntegrateDecomposition[modifiedDecomp, {localA, localB}];
 
-    (* Apply Jacobian correction - handle empty decomposition gracefully *)
+    (* Apply dy/dx_local for integration in the Feynman parameter. *)
     If[ListQ[integralResult] && Length[integralResult] > epsOrder,
-      integralResult[[epsOrder + 1]] / Abs[jacobian],
+      jacobian * integralResult[[epsOrder + 1]],
       0  (* Empty decomposition means zero integrand on this segment *)
+    ]
+  ]
+];
+
+IntegrateSegmentWithPrefactorLaurent[segmentData_List, {a_, b_}, intIndex_Integer,
+    epsMinPower_Integer, alpha_, beta_, rationalFactor_, variable_, lower_, upper_] := Module[
+  {currLine, lineRelation, mainBounds, localBounds, seriesData,
+   jacobian, localA, localB, seriesAtIndex, uncompressed,
+   mainMin, mainMax, localMin, localMax, slope,
+   atLowerBound, atUpperBound, expansionOrder,
+   prefactorSeries, combinedDecomposition, integralResult,
+   localSeries, decomposition, xLocal, epsMaxPower, xMainExpr},
+
+  currLine = segmentData[[1]];
+  lineRelation = segmentData[[2]];
+  mainBounds = segmentData[[3]];
+  localBounds = segmentData[[4]];
+  seriesData = segmentData[[5]];
+
+  If[StringQ[seriesData],
+    If[FileExistsQ[seriesData],
+       uncompressed = Uncompress[Import[seriesData]];,
+       uncompressed = Uncompress[seriesData];
+    ];,
+    uncompressed = seriesData;
+  ];
+
+  seriesAtIndex = uncompressed[[intIndex]];
+  epsMaxPower = epsMinPower + Length[seriesAtIndex] - 1;
+
+  mainMin = mainBounds[[1]];
+  mainMax = mainBounds[[2]];
+  localMin = localBounds[[1]];
+  localMax = localBounds[[2]];
+  xLocal = DiffExp`Symbols`x;
+  xMainExpr = DiffExp`Utilities`PChop[Expand[segmentMainExpression[segmentData]]];
+
+  localA = segmentLocalCoordinateForValue[segmentData, a, xMainExpr];
+  localB = segmentLocalCoordinateForValue[segmentData, b, xMainExpr];
+  jacobian = D[xMainExpr, xLocal];
+  jacobian = jacobian /. xLocal -> (localA + localB)/2;
+
+  expansionOrder = If[MatchQ[seriesAtIndex[[1]], _SeriesData],
+    seriesAtIndex[[1]][[5]] - seriesAtIndex[[1]][[4]],
+    50
+  ];
+
+  atLowerBound = Abs[a - lower] < DiffExp`State`FEC[RationalizationTolerance];
+  atUpperBound = Abs[b - upper] < DiffExp`State`FEC[RationalizationTolerance];
+
+  Module[{prefactorLower, prefactorUpper, prefactorRational,
+          smoothPrefactor, singularPowerLower, singularPowerUpper,
+          totalSingularPower, smoothSeries, modifiedDecomp},
+
+    prefactorRational = rationalFactor /. variable -> xMainExpr;
+
+    singularPowerLower = 0;
+    singularPowerUpper = 0;
+
+    If[atLowerBound && Abs[localA] < DiffExp`State`FEC[RationalizationTolerance],
+      singularPowerLower = alpha;
+      prefactorLower = Abs[jacobian]^alpha *
+        localSidePhase[localB - localA, alpha];
+      ,
+      prefactorLower = (xMainExpr - lower)^alpha;
+    ];
+
+    If[atUpperBound && Abs[localB] < DiffExp`State`FEC[RationalizationTolerance],
+      singularPowerUpper = beta;
+      prefactorUpper = Abs[jacobian]^beta *
+        localSidePhase[localA - localB, beta];
+      ,
+      prefactorUpper = (upper - xMainExpr)^beta;
+    ];
+
+    totalSingularPower = singularPowerLower + singularPowerUpper;
+    smoothPrefactor = prefactorLower * prefactorUpper * prefactorRational;
+
+    smoothSeries = Quiet[
+      Series[smoothPrefactor, {xLocal, 0, expansionOrder}] // Normal // Expand
+    ];
+
+    If[!FreeQ[smoothSeries, Series] || !FreeQ[smoothSeries, SeriesData],
+      smoothSeries = Normal[Series[smoothPrefactor, {xLocal, 0, expansionOrder}]];
+    ];
+
+    decomposition = DiffExp`SingularityDecomposition`DecomposeSingularity[seriesAtIndex];
+
+    modifiedDecomp = Table[
+      Module[{termA, termB, termG, newA, newG, gSeries, smoothSer},
+        termA = decomposition[[termIdx]]["a"];
+        termB = decomposition[[termIdx]]["b"];
+        termG = decomposition[[termIdx]]["g"];
+
+        newA = termA + totalSingularPower;
+
+        newG = Table[
+          If[ord <= Length[termG],
+            gSeries = termG[[ord]];
+            If[MatchQ[gSeries, _SeriesData],
+              Module[{result},
+                smoothSer = Series[smoothPrefactor, {xLocal, gSeries[[2]], gSeries[[5]] - gSeries[[4]]}];
+                result = gSeries * smoothSer // Normal;
+                Series[result, {xLocal, gSeries[[2]], Min[gSeries[[5]] - gSeries[[4]], expansionOrder]}]
+              ],
+              gSeries * (smoothPrefactor /. xLocal -> 0)
+            ],
+            0
+          ],
+          {ord, Length[termG]}
+        ];
+
+        Module[{gNmins, minNmin},
+          gNmins = Table[
+            If[MatchQ[newG[[ord]], _SeriesData],
+              newG[[ord]][[4]],
+              0
+            ], {ord, Length[newG]}
+          ];
+          minNmin = Min[gNmins];
+          If[minNmin < 0,
+            newA = newA + minNmin;
+            newG = Table[
+              If[MatchQ[newG[[ord]], _SeriesData],
+                Module[{s = newG[[ord]]},
+                  SeriesData[s[[1]], s[[2]], s[[3]],
+                    s[[4]] - minNmin, s[[5]] - minNmin, s[[6]]]
+                ],
+                newG[[ord]]
+              ], {ord, Length[newG]}
+            ];
+          ];
+        ];
+
+        <|"a" -> newA, "b" -> termB, "g" -> newG|>
+      ],
+      {termIdx, Length[decomposition]}
+    ];
+
+    integralResult = IntegrateDecompositionLaurent[
+      modifiedDecomp, {localA, localB}, epsMinPower
+    ];
+
+    If[AssociationQ[integralResult],
+      LaurentScale[jacobian, integralResult],
+      LaurentZero[epsMinPower, epsMaxPower]
     ]
   ]
 ];

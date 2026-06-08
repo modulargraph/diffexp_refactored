@@ -35,6 +35,7 @@ $FTConfig = <|
   "EpsilonSymbol" -> FeynmanTrick`FTeps,
   "Threads" -> 1,        (* FIRE6 multi-threading can be unstable; default to 1 *)
   "FThreads" -> 1,
+  "FIRETimeoutSeconds" -> 600,  (* watchdog timeout for a single FIRE6 run *)
   "WorkingPrecision" -> 500,
   "Verbosity" -> 1
 |>;

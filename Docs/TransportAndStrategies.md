@@ -101,16 +101,16 @@ TransportTo(bcs, line, endpoint)
 **File:** `/DiffExp/DiffExp.m`
 **Context:** `DiffExp``
 **Lines:** 197
-**Dependencies:** All 16 subpackages
+**Dependencies:** All subpackages
 
 This is the main package file that loads all subpackages and provides the user-facing configuration API. It prints version information on load and re-exports symbols from all subpackages.
 
 ### Package Loading
 
 On load, the package:
-1. Loads all 16 subpackages via `Get[]` in dependency order
+1. Loads all subpackages via `Get[]` in dependency order
 2. Begins the `DiffExp`` package context with all subpackage contexts imported
-3. Prints version info (`v1.1 refactored`)
+3. Prints version info (`v2.0 refactored recurrence`)
 
 ### Functions
 

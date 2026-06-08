@@ -18,7 +18,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>. *)
 
-(* This software is maintained on https://gitlab.com/hiddingm/diffexp *)
+(* Original DiffExp is maintained on https://gitlab.com/hiddingm/diffexp *)
+(* This refactored recurrence version is maintained on https://github.com/modulargraph/diffexp_refactored *)
 
 (* Load all subpackages explicitly before BeginPackage *)
 Get["Symbols.m"];
@@ -60,9 +61,10 @@ BeginPackage["DiffExp`", {
   "DiffExp`RegularizedIntegration`"
 }];
 
-Print["Loading DiffExp version 1.1 (refactored)"];
+Print["Loading DiffExp version 2.0 (refactored recurrence)"];
 Print["For questions, email: martijnhidding@outlook.com"];
-Print["For the latest version, see: https://gitlab.com/hiddingm/diffexp"];
+Print["For the original DiffExp release, see: https://gitlab.com/hiddingm/diffexp"];
+Print["For this refactored recurrence version, see: https://github.com/modulargraph/diffexp_refactored"];
 
 (* Note: Symbols like \[Epsilon], eps, Logx, \[Theta]p, \[Theta]m are available
    from DiffExp`Symbols` context which is imported above.

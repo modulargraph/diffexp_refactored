@@ -26,6 +26,8 @@ SingularRecurrenceApplicableQ::usage = "SingularRecurrenceApplicableQ[ctx] check
 DispatchStrategy::usage = "DispatchStrategy[ctx, bVec, epsord, cache] dispatches to the appropriate integration strategy based on the SegmentContext configuration. Returns {cIndices, fGeneral, cache}.";
 SolveGeneralSingularRecurrence::usage = "SolveGeneralSingularRecurrence[ctx, bVec, epsord, cache] solves using the general singular recurrence method for regular singular points with resonant or non-diagonalizable residue. Returns {cIndices, fGeneral, cache}.";
 GeneralSingularRecurrenceApplicableQ::usage = "GeneralSingularRecurrenceApplicableQ[ctx] checks if the general singular recurrence method is applicable (simple pole, any eigenvalue structure).";
+SolveFuchsianizedSingularRecurrence::usage = "SolveFuchsianizedSingularRecurrence[ctx, bVec, epsord, cache] locally fuchsianizes a higher-pole singular system, solves it by recurrence, and transforms back.";
+FuchsianizedSingularRecurrenceApplicableQ::usage = "FuchsianizedSingularRecurrenceApplicableQ[ctx] checks if the recurrence path should try local Fuchsianization for a higher-pole singular system.";
 
 Begin["`Private`"];
 

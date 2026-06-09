@@ -43,6 +43,10 @@ ReduceIntegrals::usage =
 (given as index vectors) to the master basis using FIRE6. \
 Returns an association: integral -> linear combination of masters.";
 
+ReduceIntegralsDetailed::usage =
+  "ReduceIntegralsDetailed[topology, integrals] reduces integrals with FIRE6 and \
+returns an association containing reductions and the masters reported by FIRE.";
+
 ReduceIntegralsBatch::usage =
   "ReduceIntegralsBatch[{{topo1, ints1}, {topo2, ints2}, ...}] reduces \
 integrals for multiple topologies in a single FIRE6 run.";
@@ -64,6 +68,7 @@ Begin["`Private`"];
 (* Global state: track which topologies have been set up *)
 $SetupTopologies = <||>;  (* name -> topology association *)
 $NextProblemNumber = 1;
+$ReductionCache = <||>;
 
 (* ============================================================ *)
 (* DefineTopology                                                *)
@@ -119,6 +124,80 @@ Module[{nP, eliminated},
   Select[Rest[Tuples[{0, 1}, nP]], allowedBasisSectorQ[#, eliminated] &]
 ];
 
+coefficientMatrixForPropagators[props_List, squares_List] :=
+  Table[
+    Coefficient[props[[i]], squares[[j]]],
+    {i, Length[props]}, {j, Length[squares]}
+  ];
+
+completePropagators[props_List, squares_List] := Module[
+  {completed = props, currentRank, targetRank, candidates, improved},
+  targetRank = Length[squares];
+  currentRank = MatrixRank[coefficientMatrixForPropagators[completed, squares]];
+  candidates = DeleteCases[squares, _?(MemberQ[completed, #] &)];
+
+  While[currentRank < targetRank,
+    improved = SelectFirst[
+      candidates,
+      MatrixRank[coefficientMatrixForPropagators[Append[completed, #], squares]] >
+        currentRank &,
+      Missing["NotFound"]
+    ];
+    If[MissingQ[improved], Break[]];
+    AppendTo[completed, improved];
+    candidates = DeleteCases[candidates, improved];
+    currentRank = MatrixRank[coefficientMatrixForPropagators[completed, squares]];
+  ];
+
+  completed
+];
+
+normalizeIntegralIndex[topology_Association, integral_List] := Module[
+  {nP = topology["NumPropagators"]},
+  Which[
+    Length[integral] == nP,
+      integral,
+    Length[integral] < nP,
+      PadRight[integral, nP, 0],
+    True,
+      Print["Error: integral index has length ", Length[integral],
+        " but topology ", topology["Name"], " has ", nP, " propagators."];
+      $Failed
+  ]
+];
+
+normalizeIntegralIndices[topology_Association, integrals_List] :=
+  normalizeIntegralIndex[topology, #] & /@ integrals;
+
+reductionCacheKey[topology_Association, fireIntegral_List] := {
+  topology["WorkDirectory"],
+  topology["Name"],
+  topology["ProblemNumber"],
+  topology["NumPropagators"],
+  fireIntegral
+};
+
+cacheReduction[topology_Association, fireIntegral_List, reduction_, masters_List] :=
+Module[{key},
+  If[!TrueQ[Lookup[FeynmanTrick`Private`$FTConfig, "ReductionCache", True]],
+    Return[Null, Module]
+  ];
+  key = reductionCacheKey[topology, fireIntegral];
+  $ReductionCache[key] = <|
+    "Reduction" -> reduction,
+    "Masters" -> masters
+  |>;
+];
+
+cachedReduction[topology_Association, fireIntegral_List] :=
+Module[{key},
+  If[!TrueQ[Lookup[FeynmanTrick`Private`$FTConfig, "ReductionCache", True]],
+    Return[Missing["Disabled"], Module]
+  ];
+  key = reductionCacheKey[topology, fireIntegral];
+  Lookup[$ReductionCache, Key[key], Missing["NotCached"]]
+];
+
 
 (* Extract symbolic variables from propagators and replacements *)
 (* Returns Global` symbols suitable for FIRE/Fermat *)
@@ -154,6 +233,7 @@ Module[{allSyms, momenta, contextedSyms},
 ClearFIREState[] := Module[{},
   $SetupTopologies = <||>;
   $NextProblemNumber = 1;
+  $ReductionCache = <||>;
 
   (* Load FIRE6.m if needed *)
   ensureFIRELoaded[];
@@ -380,7 +460,8 @@ Module[{exitCode, result, logFile, cmd, stdoutFile, stderrFile,
 (* ============================================================ *)
 
 SetupFIRE[topology_Association, workDir_String:""] :=
-Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions},
+Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions,
+        squares, completedFireProps, originalFirePropCount, numeratorPositions},
   name = topology["Name"];
 
   (* Determine working directory *)
@@ -400,6 +481,7 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions},
   fireSubst = buildFIRESubstitution[topology];
   fireProps = topology["Propagators"] /. fireSubst;
   fireRepls = topology["Replacements"] /. fireSubst;
+  originalFirePropCount = Length[fireProps];
 
   (* CRITICAL: Completely clear all FIRE state before setting up new topology *)
   (* Without this, FIRE reuses stale IBP relations and hangs *)
@@ -424,9 +506,33 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions},
   (* Set FIRE variables *)
   FIRE`Internal = topology["LoopMomenta"];
   FIRE`External = topology["ExternalMomenta"];
-  FIRE`Propagators = fireProps;
   If[fireRepls =!= {}, FIRE`Replacements = fireRepls];
+  FIRE`Propagators = fireProps;
+
+  (* FIRE requires a complete basis of loop-momentum scalar products. Add
+     irreducible numerator slots explicitly instead of relying on Prepare[] to
+     limp on after PrepareIBP[] reports "Not enough propagators". *)
+  squares = FIRE`SquaresEv[];
+  completedFireProps = completePropagators[fireProps, squares];
+  If[Length[completedFireProps] > Length[fireProps] &&
+     FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+    Print["  Added ", Length[completedFireProps] - Length[fireProps],
+      " irreducible numerator(s) for FIRE."]
+  ];
+  fireProps = completedFireProps;
+  FIRE`Propagators = fireProps;
+
   restrictions = feynmanTrickRestrictions[topology];
+  restrictions = PadRight[#, Length[fireProps], 0] & /@ restrictions;
+  numeratorPositions = Range[originalFirePropCount + 1, Length[fireProps]];
+  restrictions = Join[
+    restrictions,
+    {ConstantArray[-1, Length[fireProps]]},
+    Table[
+      ReplacePart[ConstantArray[0, Length[fireProps]], pos -> 1],
+      {pos, numeratorPositions}
+    ]
+  ];
   FIRE`RESTRICTIONS = restrictions;
 
   (* Prepare IBP relations *)
@@ -439,7 +545,10 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions},
   FIRE`PrepareIBP[];
 
   (* Prepare sector basis - this should now say "Prepared" not "Already prepared" *)
-  FIRE`Prepare[AutoDetectRestrictions -> True];
+  FIRE`Prepare[
+    AutoDetectRestrictions ->
+      FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"]
+  ];
 
   (* Save start file *)
   Module[{oldDir = Directory[]},
@@ -453,6 +562,15 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions},
   result["WorkDirectory"] = dir;
   result["ProblemNumber"] = pn;
   result["StartFileReady"] = True;
+  result["OriginalNumPropagators"] = Lookup[
+    topology, "OriginalNumPropagators", topology["NumPropagators"]];
+  result["OriginalPropagators"] = Lookup[
+    topology, "OriginalPropagators", topology["Propagators"]];
+  result["Propagators"] = fireProps;
+  result["NumPropagators"] = Length[fireProps];
+  result["NumeratorPositions"] = numeratorPositions;
+  result["Variables"] = extractVariables[
+    fireProps, fireRepls, topology["LoopMomenta"], topology["ExternalMomenta"]];
 
   (* Store in global registry *)
   $SetupTopologies[name] = result;
@@ -676,24 +794,67 @@ Module[{dir, fireBin, intContent, allSectors, tablesFile, masters, results},
 (* ReduceIntegrals - reduce integrals for a single topology     *)
 (* ============================================================ *)
 
-ReduceIntegrals[topology_Association, integrals_List] :=
-Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result, pn},
+ReduceIntegralsDetailed[topology_Association, integrals_List] :=
+Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
+        pn, masters = {}, fireIntegrals, cacheEntries, missingPositions,
+        missingFireIntegrals, missingIntegrals, newReductions = {},
+        computedReductions, allEntries, allMasters, cacheEnabled},
 
   If[!topology["StartFileReady"],
     Print["Error: Must call SetupFIRE before ReduceIntegrals."];
     Return[$Failed];
   ];
 
+  If[integrals === {},
+    Return[<|"Reductions" -> <||>, "Masters" -> {}, "Rules" -> {},
+      "TablesFile" -> Missing["NoIntegrals"]|>]
+  ];
+
+  fireIntegrals = normalizeIntegralIndices[topology, integrals];
+  If[MemberQ[fireIntegrals, $Failed], Return[$Failed]];
+
+  cacheEnabled = TrueQ[
+    Lookup[FeynmanTrick`Private`$FTConfig, "ReductionCache", True]
+  ];
+  cacheEntries = (cachedReduction[topology, #] &) /@ fireIntegrals;
+  missingPositions = If[cacheEnabled,
+    Flatten[Position[cacheEntries, _Missing, {1}]],
+    Range[Length[fireIntegrals]]
+  ];
+
+  If[missingPositions === {},
+    result = Association[
+      MapThread[Rule, {integrals, ((#["Reduction"] &) /@ cacheEntries)}]
+    ];
+    allMasters = DeleteDuplicates[
+      Flatten[Cases[cacheEntries, assoc_Association :> assoc["Masters"]], 1]
+    ];
+    Return[
+      <|
+        "Reductions" -> result,
+        "Masters" -> allMasters,
+        "Rules" -> {},
+        "TablesFile" -> Missing["Cached"]
+      |>,
+      Module
+    ];
+  ];
+
+  ensureFIRELoaded[];
+
   dir = topology["WorkDirectory"];
   name = topology["Name"];
   pn = topology["ProblemNumber"];
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
+  missingFireIntegrals = fireIntegrals[[missingPositions]];
+  missingIntegrals = integrals[[missingPositions]];
+
   (* Write integrals file with problem number *)
   intContent = StringJoin[
     "{",
     StringRiffle[
-      ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ integrals,
+      ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ missingFireIntegrals,
       ",\n"
     ],
     "}\n"
@@ -707,7 +868,7 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result, pn},
 
   (* Run FIRE6 *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-    Print["Reducing ", Length[integrals], " integrals..."];
+    Print["Reducing ", Length[missingIntegrals], " integrals..."];
   ];
   runFIRE6[fireBin, dir, name <> "_reduce"];
 
@@ -719,19 +880,59 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result, pn},
   ];
 
   rules = FIRE`Tables2Rules[tablesFile];
+  masters = Cases[FIRE`Tables2Masters[tablesFile],
+    {pn, indices_List} :> indices
+  ];
 
   (* Convert to our format *)
   (* FIRE uses G[problemNumber, indices] *)
-  result = Association[
-    (Global`G[pn, #] /. rules) & /@ integrals //
-    (* Replace G[pn, ...] with G[1, ...] for consistency *)
-    (# /. Global`G[pn, idx_] :> Global`G[1, idx]) & //
-    MapThread[Rule, {integrals, #}] &
+  newReductions = ((Global`G[pn, #] /. rules) &) /@ missingFireIntegrals;
+  (* Replace G[pn, ...] with G[1, ...] for consistency *)
+  newReductions = newReductions /. Global`G[pn, idx_] :> Global`G[1, idx];
+
+  MapThread[
+    cacheReduction[topology, #1, #2, masters] &,
+    {missingFireIntegrals, newReductions}
   ];
 
-  result
+  computedReductions = Association[
+    MapThread[Rule, {missingFireIntegrals, newReductions}]
+  ];
+  allEntries = (cachedReduction[topology, #] &) /@ fireIntegrals;
+
+  result = Association[
+    MapThread[
+      Function[{orig, fire, entry},
+        orig -> If[AssociationQ[entry],
+          entry["Reduction"],
+          computedReductions[fire]
+        ]
+      ],
+      {integrals, fireIntegrals, allEntries}
+    ]
+  ];
+
+  allMasters = DeleteDuplicates[
+    Join[
+      masters,
+      Flatten[Cases[allEntries, assoc_Association :> assoc["Masters"]], 1]
+    ]
+  ];
+
+  <|
+    "Reductions" -> result,
+    "Masters" -> allMasters,
+    "Rules" -> rules,
+    "TablesFile" -> tablesFile
+  |>
 ];
 
+ReduceIntegrals[topology_Association, integrals_List] :=
+Module[{detailed},
+  detailed = ReduceIntegralsDetailed[topology, integrals];
+  If[detailed === $Failed, Return[$Failed]];
+  detailed["Reductions"]
+];
 
 (* ============================================================ *)
 (* ReduceIntegralsBatch - reduce integrals for multiple topos   *)
@@ -752,7 +953,10 @@ Module[{dir, fireBin, intContent, tablesFile, rules, results, allIntegrals},
       With[{topo = topoIntegralPairs[[i, 1]],
             ints = topoIntegralPairs[[i, 2]],
             pn = topoIntegralPairs[[i, 1]]["ProblemNumber"]},
-        {pn, #} & /@ ints
+        Module[{fireInts = normalizeIntegralIndices[topo, ints]},
+          If[MemberQ[fireInts, $Failed], Return[$Failed, Module]];
+          MapThread[{pn, #1, #2} &, {ints, fireInts}]
+        ]
       ],
       {i, Length[topoIntegralPairs]}
     ],
@@ -762,7 +966,7 @@ Module[{dir, fireBin, intContent, tablesFile, rules, results, allIntegrals},
   intContent = StringJoin[
     "{",
     StringRiffle[
-      ("{" <> ToString[#[[1]]] <> "," <> ToString[#[[2]], InputForm] <> "}") & /@ allIntegrals,
+      ("{" <> ToString[#[[1]]] <> "," <> ToString[#[[3]], InputForm] <> "}") & /@ allIntegrals,
       ",\n"
     ],
     "}\n"
@@ -793,11 +997,14 @@ Module[{dir, fireBin, intContent, tablesFile, rules, results, allIntegrals},
     With[{topo = topoIntegralPairs[[i, 1]],
           ints = topoIntegralPairs[[i, 2]],
           pn = topoIntegralPairs[[i, 1]]["ProblemNumber"]},
-      Association[
-        (Global`G[pn, #] /. rules) & /@ ints //
-        (* Normalize G[pn, ...] -> G[1, ...] *)
-        (# /. Global`G[pn, idx_] :> Global`G[1, idx]) & //
-        MapThread[Rule, {ints, #}] &
+      Module[{fireInts = normalizeIntegralIndices[topo, ints]},
+        If[MemberQ[fireInts, $Failed], Return[$Failed, Module]];
+        Association[
+          (Global`G[pn, #] /. rules) & /@ fireInts //
+          (* Normalize G[pn, ...] -> G[1, ...] *)
+          (# /. Global`G[pn, idx_] :> Global`G[1, idx]) & //
+          MapThread[Rule, {ints, #}] &
+        ]
       ]
     ],
     {i, Length[topoIntegralPairs]}

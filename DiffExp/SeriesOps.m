@@ -17,6 +17,7 @@ SafeReplaceSeries11::usage = "SafeReplaceSeries11[a_,b_] safely replaces in seri
 
 (* Log operations *)
 MaxLogxPower::usage = "MaxLogxPower[ex_] returns maximum power of Logx in expression.";
+LogxPowerRange::usage = "LogxPowerRange[ex_] returns the non-negative integer Logx powers to scan.";
 LogxCoeff::usage = "LogxCoeff[Ser_,Which_] extracts coefficient of Logx^Which from series.";
 LogxCoeffNS::usage = "LogxCoeffNS[Ser_,Which_] extracts coefficient of Logx^Which (non-series).";
 LogxCoeffList::usage = "LogxCoeffList[Ser_] returns list of Logx coefficients.";
@@ -37,6 +38,17 @@ DecreaseSeriesOrderBy::usage = "DecreaseSeriesOrderBy[a_,k_] decreases series or
 SD::usage = "SD[a_,b_] takes derivative avoiding Log[x] terms.";
 
 Begin["`Private`"];
+
+activeNumericPrecision[] := Module[{precision},
+  precision = Quiet[Check[DiffExp`State`FEWorkingPrecision, 500]];
+  If[IntegerQ[precision] && precision > 0, precision, 500]
+];
+
+numericAtActivePrecision[expr_, precision_:Automatic] := Module[
+  {p = If[precision === Automatic, activeNumericPrecision[], precision], val},
+  val = Quiet[Check[N[expr, p], $Failed]];
+  If[val === $Failed, val, SetPrecision[val, p]]
+];
 
 (* Set attributes as in original code *)
 (* Note: SEval1, SEval2 are defined in Pade.m and should have their attributes set there *)
@@ -79,7 +91,33 @@ SafeReplaceSeries11[a_List, b_] := SafeReplaceSeries11[#, b] & /@ a;
 SafeReplaceSeries11[a_, b_] := a /. b;
 
 (* Log operations *)
-MaxLogxPower[ex_] := Append[DiffExp`Utilities`GetCases[ex // SExpand, DiffExp`Symbols`Logx^(k_: 1) :> k], 0] // Max;
+NormalizeLogPower[p_] := Module[
+  {tol = DiffExp`State`FEC[RationalizationTolerance], np, rounded, exact},
+  If[IntegerQ[p], Return[p, Module]];
+  np = numericAtActivePrecision[p];
+  If[np =!= $Failed && NumericQ[np] &&
+      TrueQ[Abs[np - Round[np]] < tol],
+    rounded = Round[np];
+    exact = Rationalize[rounded, 0];
+    If[IntegerQ[exact], exact, rounded],
+    p
+  ]
+];
+
+MaxLogxPower[ex_] := Module[{powers},
+  powers = NormalizeLogPower /@
+    Append[
+      DiffExp`Utilities`GetCases[
+        ex // SExpand, DiffExp`Symbols`Logx^(k_: 1) :> k
+      ],
+      0
+    ];
+  Max[powers]
+];
+
+LogxPowerRange[ex_] := Module[{maxpow = NormalizeLogPower[MaxLogxPower[ex]]},
+  If[IntegerQ[maxpow] && maxpow >= 0, Range[0, maxpow], {0}]
+];
 
 LogxCoeff[Ser_, Which_] := If[Which === 0,
   SApply[(# /. DiffExp`Symbols`Logx -> 0) &, Ser],
@@ -91,9 +129,7 @@ LogxCoeffNS[Ser_, Which_] := If[Which === 0,
   Coefficient[Ser, DiffExp`Symbols`Logx^Which]
 ];
 
-LogxCoeffList[Ser_] := Block[{maxpow = MaxLogxPower[Ser]},
-  Table[LogxCoeff[Ser, ord], {ord, 0, maxpow}]
-];
+LogxCoeffList[Ser_] := LogxCoeff[Ser, #] & /@ LogxPowerRange[Ser];
 
 (* Matrix multiplication with series expansion *)
 MatrixMultiplySExpand[MatA_, MatB_] := Module[{Dim1 = Dimensions[MatA], Dim2 = Dimensions[MatB]},
@@ -163,11 +199,11 @@ DecreaseSeriesOrderBy[a_, k_: 1] := Block[{tmp},
 ];
 
 (* Series derivative avoiding Log[x] terms *)
-SD[a_, b_] := Block[{CurrMaxLogPower = MaxLogxPower[a], Tmp},
+SD[a_, b_] := Block[{Tmp},
   Sum[
     Tmp = LogxCoeff[a, logxord];
     D[Tmp, b] DiffExp`Symbols`Logx^logxord + (D[Log[DiffExp`Symbols`x]^logxord, b] /. Log[DiffExp`Symbols`x] -> DiffExp`Symbols`Logx) Tmp,
-    {logxord, 0, CurrMaxLogPower}
+    {logxord, LogxPowerRange[a]}
   ] // SExpand
 ];
 SD[a_, b__] := SD[SD[a, {b} // First], Sequence @@ Delete[{b}, 1]];

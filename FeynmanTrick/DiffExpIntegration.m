@@ -43,6 +43,8 @@ level, transports and integrates level by level. Returns final boundary conditio
 
 Begin["`Private`"];
 
+$DiffExpIntegrationDirectory = DirectoryName[$InputFileName];
+
 (* ============================================================ *)
 (* Resolve DiffExp analytic continuation symbols                 *)
 (* ============================================================ *)
@@ -70,21 +72,98 @@ $thetaMinusRules = {
 
 $thetaRules = $thetaPlusRules;
 
+activeNumericPrecision[] := Module[{precision},
+  precision = Quiet[
+    Check[
+      DiffExp`State`FEWorkingPrecision,
+      FeynmanTrick`Private`$FTConfig["WorkingPrecision"]
+    ]
+  ];
+  If[IntegerQ[precision] && precision > 0,
+    precision,
+    500
+  ]
+];
+
+numericAtActivePrecision[expr_, precision_:Automatic] := Module[
+  {p = If[precision === Automatic, activeNumericPrecision[], precision], val},
+  val = Quiet[Check[N[expr, p], $Failed]];
+  If[val === $Failed,
+    val,
+    SetPrecision[val, p]
+  ]
+];
+
+realNumericAtActivePrecision[expr_, tol_:Automatic] := Module[
+  {eps = If[tol === Automatic, DiffExp`State`FEC[RationalizationTolerance], tol],
+   val},
+  val = numericAtActivePrecision[expr];
+  If[val === $Failed || !NumericQ[val],
+    val,
+    If[TrueQ[Abs[Im[val]] < eps], Re[val], val]
+  ]
+];
+
 thetaRulesForSegment[seg_List] := Module[
   {tol, localBounds, nonzeroBounds, sample},
   tol = DiffExp`State`FEC[RationalizationTolerance];
-  localBounds = Quiet[N[seg[[4]], 80]];
+  localBounds = numericAtActivePrecision[seg[[4]]];
   nonzeroBounds = Select[localBounds,
-    !TrueQ[PossibleZeroQ[#]] && !TrueQ[NumericQ[#] && Abs[N[#, 50]] < tol] &
+    !TrueQ[PossibleZeroQ[#]] &&
+      !TrueQ[NumericQ[#] && Abs[realNumericAtActivePrecision[#, tol]] < tol] &
   ];
   sample = If[Length[nonzeroBounds] > 0,
     Mean[nonzeroBounds],
     1
   ];
-  If[TrueQ[N[sample, 50] < 0],
+  If[TrueQ[realNumericAtActivePrecision[sample, tol] < 0],
     $thetaMinusRules,
     $thetaPlusRules
   ]
+];
+
+thetaRulesAtLocalPoint[pt_, direction_:Automatic] := Module[
+  {tol, sign},
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  sign = Which[
+    direction =!= Automatic && NumericQ[direction],
+      Sign[realNumericAtActivePrecision[direction, tol]],
+    TrueQ[PossibleZeroQ[pt]] ||
+      TrueQ[NumericQ[pt] && Abs[realNumericAtActivePrecision[pt, tol]] < tol], 1,
+    TrueQ[realNumericAtActivePrecision[pt, tol] < 0], -1,
+    True, 1
+  ];
+
+  If[sign < 0,
+    $thetaMinusRules,
+    $thetaPlusRules
+  ]
+];
+
+localEndpointDirection[seg_List, localEndpoint_] := Module[
+  {tol, localBounds, otherBounds},
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  localBounds = seg[[4]];
+  otherBounds = Select[localBounds,
+    !TrueQ[PossibleZeroQ[# - localEndpoint]] &&
+      !TrueQ[NumericQ[# - localEndpoint] &&
+        Abs[realNumericAtActivePrecision[# - localEndpoint, tol]] < tol] &
+  ];
+  If[Length[otherBounds] > 0,
+    First[otherBounds] - localEndpoint,
+    Automatic
+  ]
+];
+
+evaluateLocalExpressionAtPoint[expr_, pt_, direction_:Automatic,
+    precision_:Automatic] := Module[{xLocal, val, p},
+  p = If[precision === Automatic, activeNumericPrecision[], precision];
+  xLocal = DiffExp`Symbols`x;
+  val = expr /.
+      thetaRulesAtLocalPoint[pt, direction] /.
+      DiffExp`Symbols`Logx -> Log[xLocal] /.
+      xLocal -> SetPrecision[pt, p];
+  numericAtActivePrecision[val, p]
 ];
 
 snapMainExpression[expr_, localBounds_List, snapTargets_List:{0, 1}] := Module[
@@ -101,10 +180,10 @@ snapMainExpression[expr_, localBounds_List, snapTargets_List:{0, 1}] := Module[
   ];
 
   Do[
-    val = Quiet[Check[N[snapped /. xLocal -> lb, 80], $Failed]];
+    val = numericAtActivePrecision[snapped /. xLocal -> lb];
     If[val =!= $Failed && NumericQ[val],
       target = SelectFirst[targets,
-        TrueQ[Abs[N[val - #, 80]] < tol] &,
+        TrueQ[Abs[numericAtActivePrecision[val - #]] < tol] &,
         Missing["NoSnapTarget"]
       ];
       If[target =!= Missing["NoSnapTarget"],
@@ -127,13 +206,16 @@ snapValuesFromFactors[factors_List, variable_] := Module[
     ]
   ];
   numericRoots = Select[RootReduce /@ roots,
-    NumericQ[N[#, 80]] &&
-      TrueQ[Abs[Im[N[#, 80]]] < tol] &&
-      TrueQ[Re[N[#, 80]] >= -tol] &&
-      TrueQ[Re[N[#, 80]] <= 1 + tol] &
+    With[{n = numericAtActivePrecision[#]},
+      n =!= $Failed &&
+        NumericQ[n] &&
+        TrueQ[Abs[Im[n]] < tol] &&
+        TrueQ[Re[n] >= -tol] &&
+        TrueQ[Re[n] <= 1 + tol]
+    ] &
   ];
   DeleteDuplicates[Chop[Re /@ numericRoots, tol],
-    TrueQ[Abs[N[#1 - #2, 80]] < tol] &
+    TrueQ[Abs[numericAtActivePrecision[#1 - #2]] < tol] &
   ]
 ];
 
@@ -157,15 +239,15 @@ appendMatrixFactors[factors_List, verbosity_Integer:0] := Module[
   cleanFactors
 ];
 
-deltaPrescriptionsForFactors[detectedVar_, factors_List:{}] := Module[
+deltaPrescriptionsForFactors[detectedVar_, factors_List:{}, sign_:1] := Module[
   {prescriptions, cleanFactors},
   cleanFactors = DeleteCases[Factor /@ Flatten[{factors}], 0 | 1 | -1];
   prescriptions = Join[
     {
-      {detectedVar, 1},
-      {1 - detectedVar, 1}
+      {detectedVar, sign},
+      {1 - detectedVar, sign}
     },
-    ({#, 1} & /@ cleanFactors)
+    ({#, sign} & /@ cleanFactors)
   ];
   DeleteDuplicates[prescriptions,
     TrueQ[PossibleZeroQ[Expand[#1[[1]] - #2[[1]]]]] ||
@@ -216,10 +298,18 @@ TransportLevel[matrixDir_String, boundaryValues_List, epsOrder_Integer,
       "FixedParamValue" -> 11/23,
       "WorkingPrecision" -> 500,
       "ExpansionOrder" -> 50,
-      "DivisionOrder" -> 8,
+      "DivisionOrder" -> 4,
       "Verbosity" -> 1,
       "EpsPrefactors" -> Automatic,
-      "ExtraSingularFactors" -> {}
+      "ExtraSingularFactors" -> {},
+      "HomogeneousSolve" -> "DontExpand",
+      "UseRationalRecurrence" -> False,
+      "IntegrationStrategy" -> "Default",
+      "EstimateError" -> "Fast",
+      "DeltaPrescriptionSign" -> 1,
+      "PrescribeMatrixFactors" -> False,
+      "LowerEndpoint" -> 0,
+      "UpperEndpoint" -> 1
     }]] :=
 Module[{fixedVal, precision, expOrder, verbosity,
         diffExpConfig, bcs, startPoint, result,
@@ -227,7 +317,9 @@ Module[{fixedVal, precision, expOrder, verbosity,
         savedDataLower, savedDataUpper, combinedSegments,
         epsPrefactors, divisionOrder, extraSingularFactors,
         remappedExtraFactors = {}, snapValues = {0, 1},
-        deltaPrescriptions},
+        deltaPrescriptions, homogeneousSolve, useRationalRecurrence,
+        integrationStrategy, estimateError, deltaPrescriptionSign,
+        prescribeMatrixFactors, lowerEndpoint, upperEndpoint},
 
   fixedVal = OptionValue["FixedParamValue"];
   precision = OptionValue["WorkingPrecision"];
@@ -235,6 +327,21 @@ Module[{fixedVal, precision, expOrder, verbosity,
   divisionOrder = OptionValue["DivisionOrder"];
   verbosity = OptionValue["Verbosity"];
   extraSingularFactors = OptionValue["ExtraSingularFactors"];
+  homogeneousSolve = OptionValue["HomogeneousSolve"];
+  useRationalRecurrence = OptionValue["UseRationalRecurrence"];
+  integrationStrategy = OptionValue["IntegrationStrategy"];
+  estimateError = OptionValue["EstimateError"];
+  deltaPrescriptionSign = OptionValue["DeltaPrescriptionSign"];
+  prescribeMatrixFactors = OptionValue["PrescribeMatrixFactors"];
+  lowerEndpoint = OptionValue["LowerEndpoint"];
+  upperEndpoint = OptionValue["UpperEndpoint"];
+  snapValues = DeleteDuplicates[
+    Join[
+      snapValues,
+      Select[{lowerEndpoint, upperEndpoint}, NumericQ]
+    ],
+    TrueQ[PossibleZeroQ[#1 - #2]] &
+  ];
   epsPrefactors = OptionValue["EpsPrefactors"];
   If[!(ListQ[epsPrefactors] && Length[epsPrefactors] == Length[boundaryValues]),
     epsPrefactors = Table[0, {Length[boundaryValues]}];
@@ -242,7 +349,7 @@ Module[{fixedVal, precision, expOrder, verbosity,
 
   (* Determine DiffExp path *)
   diffExpPath = FileNameJoin[{
-    ParentDirectory[DirectoryName[$InputFileName]],
+    ParentDirectory[$DiffExpIntegrationDirectory],
     "DiffExp.m"
   }];
 
@@ -275,7 +382,11 @@ Module[{fixedVal, precision, expOrder, verbosity,
     DiffExp`State`UsePade -> False,
     DiffExp`State`DivisionOrder -> divisionOrder,
     DiffExp`State`Verbosity -> verbosity,
-    DiffExp`State`SegmentationStrategy -> "Predivision"
+    DiffExp`State`SegmentationStrategy -> "Predivision",
+    DiffExp`State`UseRationalRecurrence -> useRationalRecurrence,
+    DiffExp`State`IntegrationStrategy -> integrationStrategy,
+    "EstimateError" -> estimateError,
+    "HomogeneousSolve" -> homogeneousSolve
   };
 
   If[verbosity >= 1,
@@ -314,7 +425,15 @@ Module[{fixedVal, precision, expOrder, verbosity,
        IBP-induced singular factors that were added to the segmentation
        alphabet. The sign is chosen consistently as +i delta. *)
     deltaPrescriptions = deltaPrescriptionsForFactors[
-      detectedVar, remappedExtraFactors
+      detectedVar,
+      If[TrueQ[prescribeMatrixFactors],
+        Join[
+          Flatten[{DiffExp`State`MatricesIrreducibleFactors}],
+          remappedExtraFactors
+        ],
+        remappedExtraFactors
+      ],
+      deltaPrescriptionSign
     ];
     (* Also disable abort on analytic continuation failure - the pipeline
        handles incomplete results gracefully *)
@@ -334,7 +453,9 @@ Module[{fixedVal, precision, expOrder, verbosity,
 
     (* Transport from fixedVal towards 0 (lower bound) *)
     If[verbosity >= 1,
-      Print["  Transporting from xx=", fixedVal, " towards 0..."];
+      If[lowerEndpoint =!= None,
+        Print["  Transporting from xx=", fixedVal, " towards ", lowerEndpoint, "..."];
+      ];
     ];
 
     (* Use the detected variable symbol for start/end points.
@@ -342,12 +463,15 @@ Module[{fixedVal, precision, expOrder, verbosity,
        instead of trying to evaluate at the singularity. *)
     startPoint = Association[detectedVar -> SetPrecision[fixedVal, precision]];
 
-    (* Transport towards xx = 0 (singular endpoint handled by DiffExp) *)
-    resultToLower = DiffExp`Transport`TransportTo[
-      {startPoint, bcs},
-      Association[detectedVar -> 0],
-      1,  (* endpoint *)
-      True  (* SaveExpansions *)
+    (* Transport towards lower endpoint (singular endpoint handled by DiffExp) *)
+    resultToLower = If[lowerEndpoint === None,
+      Missing["Skipped"],
+      DiffExp`Transport`TransportTo[
+        {startPoint, bcs},
+        Association[detectedVar -> lowerEndpoint],
+        1,  (* endpoint *)
+        True  (* SaveExpansions *)
+      ]
     ];
 
     If[verbosity >= 2,
@@ -356,7 +480,9 @@ Module[{fixedVal, precision, expOrder, verbosity,
     ];
 
     If[verbosity >= 1,
-      Print["  Transporting from xx=", fixedVal, " towards 1..."];
+      If[upperEndpoint =!= None,
+        Print["  Transporting from xx=", fixedVal, " towards ", upperEndpoint, "..."];
+      ];
     ];
 
     (* Reload config for transport in other direction *)
@@ -371,12 +497,15 @@ Module[{fixedVal, precision, expOrder, verbosity,
       "AbortOnAnalyticContinuationFail" -> False
     }];
 
-    (* Transport towards xx = 1 (singular endpoint handled by DiffExp) *)
-    resultToUpper = DiffExp`Transport`TransportTo[
-      {startPoint, bcs},
-      Association[detectedVar -> 1],
-      1,
-      True  (* SaveExpansions *)
+    (* Transport towards upper endpoint (singular endpoint handled by DiffExp) *)
+    resultToUpper = If[upperEndpoint === None,
+      Missing["Skipped"],
+      DiffExp`Transport`TransportTo[
+        {startPoint, bcs},
+        Association[detectedVar -> upperEndpoint],
+        1,
+        True  (* SaveExpansions *)
+      ]
     ];
 
     If[verbosity >= 2,
@@ -386,9 +515,15 @@ Module[{fixedVal, precision, expOrder, verbosity,
   ];  (* End Module with detectedVar *)
 
   (* Combine segment data from both transports *)
-  If[AssociationQ[resultToLower] && AssociationQ[resultToUpper],
-    savedDataLower = resultToLower["SegmentData"];
-    savedDataUpper = resultToUpper["SegmentData"];
+  If[AssociationQ[resultToLower] || AssociationQ[resultToUpper],
+    savedDataLower = If[AssociationQ[resultToLower],
+      resultToLower["SegmentData"],
+      {}
+    ];
+    savedDataUpper = If[AssociationQ[resultToUpper],
+      resultToUpper["SegmentData"],
+      {}
+    ];
 
     (* Reverse the lower segments (they go from fixedVal to 0) *)
     (* and concatenate with upper segments (fixedVal to 1) *)
@@ -433,7 +568,8 @@ Module[{fixedVal, precision, expOrder, verbosity,
   integration. Individual c_j(x) may have poles at x=0 and x=1, but the
   sum cancels these poles. Integrating term by term would diverge.
 
-  The IBP coefficients c_j(x,d) depend on d = 4-2*eps. We expand in eps:
+  The IBP coefficients c_j(x,d) depend on d. We expand d using
+  FTConfiguration["DimensionExpression"]:
   c_j(x,eps) = Sum_k eps^k * c_j^{(k)}(x)
 
   The transport gives J_j = eps^{k_j} * I_j (prefactored masters), while
@@ -470,7 +606,7 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
     Table[0, {numMasters}]];
   workingMaxPower = Lookup[transportResult, "EpsilonOrder", epsOrder + Max[prefacs]];
 
-  (* Expand each IBP coefficient in eps: d -> 4-2*eps *)
+  (* Expand each IBP coefficient in eps using the configured dimension. *)
   dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
   epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
 
@@ -543,18 +679,19 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
       seg = segData[[segIdx]];
       seriesRaw = seg[[5]];
 
-      (* Uncompress and resolve theta functions *)
-      If[StringQ[seriesRaw],
-        If[FileExistsQ[seriesRaw],
-           uncompressed = Uncompress[Import[seriesRaw]];,
-           uncompressed = Uncompress[seriesRaw];
-        ];,
-        uncompressed = seriesRaw;
-      ];
-      uncompressed = uncompressed /. thetaRulesForSegment[seg];
+	      (* Uncompress the saved local series. Keep DiffExp theta symbols
+	         until point evaluation/integration so segments that cross local
+	         x=0 can use the correct branch on each side. *)
+	      If[StringQ[seriesRaw],
+	        If[FileExistsQ[seriesRaw],
+	           uncompressed = Uncompress[Import[seriesRaw]];,
+	           uncompressed = Uncompress[seriesRaw];
+	        ];,
+	        uncompressed = seriesRaw;
+	      ];
 
-      (* uncompressed[[j]] = list of eps orders for master j
-         uncompressed[[j]][[n+1]] = SeriesData for J_j at eps order n *)
+	      (* uncompressed[[j]] = list of eps orders for master j
+	         uncompressed[[j]][[n+1]] = SeriesData for J_j at eps order n *)
       numEpsOrders = Length[uncompressed[[1]]];
 
       (* Get the coordinate transformation: x_main = f(x_local)
@@ -657,12 +794,16 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
     {segIdx, Length[segData]}
   ];
 
-	  combinedData = <|
-	    "SegmentData" -> combinedSegments,
-	    "NumIntegrals" -> 1,
-	    "EpsilonOrder" -> combinedMaxPower,
-	    "EpsilonMinPower" -> combinedMinPower
-	  |>;
+  combinedData = <|
+    "SegmentData" -> combinedSegments,
+    "NumIntegrals" -> 1,
+    "EpsilonOrder" -> combinedMaxPower,
+    "EpsilonMinPower" -> combinedMinPower
+  |>;
+
+  If[returnLaurent === "CombinedData",
+    Return[combinedData, Module]
+  ];
 
 	  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 3,
     Do[
@@ -784,10 +925,10 @@ Module[{segData, targetSeg, uncompressed, numMasters,
   workingMaxPower = Lookup[transportResult, "EpsilonOrder", epsOrder + maxPrefactor];
   tol = DiffExp`State`FEC[RationalizationTolerance];
   zeroQ[z_] := TrueQ[PossibleZeroQ[z]] ||
-    TrueQ[NumericQ[z] && Abs[N[z, 50]] < tol];
+    TrueQ[NumericQ[z] && Abs[numericAtActivePrecision[z]] < tol];
   nonNegativeQ[z_] := TrueQ[z >= 0] ||
     zeroQ[z] ||
-    TrueQ[NumericQ[z] && N[z, 50] > -tol];
+    TrueQ[NumericQ[z] && realNumericAtActivePrecision[z, tol] > -tol];
 
   xLocal = DiffExp`Symbols`x;
 
@@ -804,7 +945,7 @@ Module[{segData, targetSeg, uncompressed, numMasters,
           If[Head[seg[[1]]] === Rule, seg[[1, 2]], seg[[1]]]
         ];
         localBounds = seg[[4]];
-        values = Quiet[N[(xMainExpr /. xLocal -> #), 80] & /@ localBounds];
+        values = numericAtActivePrecision[(xMainExpr /. xLocal -> #) & /@ localBounds];
         distances = Abs[values - boundary];
         best = First[Ordering[distances, 1]];
         <|
@@ -827,10 +968,10 @@ Module[{segData, targetSeg, uncompressed, numMasters,
   ];
   boundaryPrecision = If[NumericQ[targetInfo["EndpointValue"]],
     Precision[targetInfo["EndpointValue"]],
-    80
+    activeNumericPrecision[]
   ];
 
-  (* Expand IBP coefficients in eps: d -> 4 - 2*eps *)
+  (* Expand IBP coefficients in eps using the configured dimension. *)
   dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
   epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
   ibpCoeffsExpanded = Table[
@@ -854,7 +995,8 @@ Module[{segData, targetSeg, uncompressed, numMasters,
     ];
   ];
 
-  (* Uncompress series data and resolve theta functions *)
+  (* Uncompress series data. Theta symbols must be resolved at the actual
+     local endpoint, not once for the whole segment. *)
   If[StringQ[targetSeg[[5]]],
     If[FileExistsQ[targetSeg[[5]]],
        uncompressed = Uncompress[Import[targetSeg[[5]]]];,
@@ -862,7 +1004,6 @@ Module[{segData, targetSeg, uncompressed, numMasters,
     ];,
     uncompressed = targetSeg[[5]];
   ];
-  uncompressed = uncompressed /. thetaRulesForSegment[targetSeg];
 
   (* For each master, evaluate the limit *)
   limitValues = LaurentZero[0, workingMaxPower];
@@ -892,7 +1033,13 @@ Module[{segData, targetSeg, uncompressed, numMasters,
               If[epsIdx <= Length[gSeries],
                 Which[
                   MatchQ[gSeries[[epsIdx]], _SeriesData],
-                    constCoeff = SeriesCoefficient[gSeries[[epsIdx]], 0];
+                    constCoeff = evaluateLocalExpressionAtPoint[
+                      SeriesCoefficient[gSeries[[epsIdx]], 0] /.
+                        DiffExp`Symbols`Logx -> 0,
+                      localEndpoint,
+                      localEndpointDirection[targetSeg, localEndpoint],
+                      boundaryPrecision
+                    ];
                     If[NumericQ[constCoeff], limitVal[[epsIdx]] += constCoeff],
                   NumericQ[gSeries[[epsIdx]]],
                     limitVal[[epsIdx]] += gSeries[[epsIdx]]
@@ -905,25 +1052,35 @@ Module[{segData, targetSeg, uncompressed, numMasters,
         (* Nonsingular endpoint inside the segment. Evaluate the saved local
            series at the endpoint's local coordinate instead of taking the
            constant term at the segment center. *)
-        Do[
-          If[epsIdx <= Length[seriesAtMaster],
-            Module[{seriesTerm = seriesAtMaster[[epsIdx]], endpointValue},
-              endpointValue = Which[
-                MatchQ[seriesTerm, _SeriesData],
-                  Quiet[Check[
-                    N[Normal[seriesTerm] /. xLocal -> localEndpoint, boundaryPrecision],
-                    0
-                  ]],
-                NumericQ[seriesTerm],
-                  seriesTerm,
-                seriesTerm === 0,
-                  0,
-                True,
-                  Quiet[Check[
-                    N[seriesTerm /. xLocal -> localEndpoint, boundaryPrecision],
-                    0
-                  ]]
-              ];
+	        Do[
+	          If[epsIdx <= Length[seriesAtMaster],
+	            Module[{seriesTerm = seriesAtMaster[[epsIdx]], endpointValue},
+	              endpointValue = Which[
+	                MatchQ[seriesTerm, _SeriesData],
+	                  Quiet[Check[
+	                    evaluateLocalExpressionAtPoint[
+	                      Normal[seriesTerm],
+	                      localEndpoint,
+	                      localEndpointDirection[targetSeg, localEndpoint],
+	                      boundaryPrecision
+	                    ],
+	                    0
+	                  ]],
+	                NumericQ[seriesTerm],
+	                  seriesTerm,
+	                seriesTerm === 0,
+	                  0,
+	                True,
+	                  Quiet[Check[
+	                    evaluateLocalExpressionAtPoint[
+	                      seriesTerm,
+	                      localEndpoint,
+	                      localEndpointDirection[targetSeg, localEndpoint],
+	                      boundaryPrecision
+	                    ],
+	                    0
+	                  ]]
+	              ];
               If[NumericQ[endpointValue],
                 limitVal[[epsIdx]] += endpointValue;
               ];
@@ -1011,7 +1168,7 @@ ExpandIBPCoeffInEps[coeff_, epsOrder_Integer] :=
 Module[{dimVar, epsSymbol, expanded},
   dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
   epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
-  expanded = coeff /. dimVar -> (4 - 2*epsSymbol);
+  expanded = coeff /. dimVar -> FeynmanTrick`Private`DimensionExpression[];
   Table[SeriesCoefficient[expanded + O[epsSymbol]^(epsOrder + 1), k], {k, 0, epsOrder}]
 ];
 
@@ -1050,7 +1207,7 @@ LaurentScale[c_, laur_Association] := <|
 |>;
 
 zeroCoeffQ[c_] := TrueQ[PossibleZeroQ[c]] ||
-  TrueQ[NumericQ[c] && Abs[N[c, 50]] < 10^-40];
+  TrueQ[NumericQ[c] && Abs[numericAtActivePrecision[c]] < 10^-40];
 
 LaurentTrim[laur_Association] := Module[
   {minPower = laur["MinPower"], coeffs = laur["Coefficients"]},
@@ -1081,13 +1238,14 @@ Module[{dimVar, epsSymbol, expanded, minPower, coeffs},
 
   expanded = Quiet[
     Check[
-      Series[coeff /. dimVar -> (4 - 2*epsSymbol), {epsSymbol, 0, maxPower}],
+      Series[coeff /. dimVar -> FeynmanTrick`Private`DimensionExpression[],
+        {epsSymbol, 0, maxPower}],
       $Failed
     ]
   ];
 
   If[expanded === $Failed,
-    expanded = coeff /. dimVar -> (4 - 2*epsSymbol);
+    expanded = coeff /. dimVar -> FeynmanTrick`Private`DimensionExpression[];
   ];
 
   minPower = If[Head[expanded] === SeriesData,
@@ -1131,7 +1289,21 @@ Module[{coeffMin, coeffMax},
 
 ShiftRawBoundariesToFinite[rawBCs_List, epsOrder_Integer] := Module[
   {trimmed, minPower, maxPower, shift, finiteBCs},
+  If[TrueQ[DiffExp`RegularizedIntegration`Private`$DebugBadRegularizedIntegration],
+    Print["DEBUG_SHIFT_INPUT_BAD=", Position[
+      rawBCs,
+      Indeterminate | ComplexInfinity | DirectedInfinity[_],
+      Infinity
+    ]];
+  ];
   trimmed = LaurentTrim /@ rawBCs;
+  If[TrueQ[DiffExp`RegularizedIntegration`Private`$DebugBadRegularizedIntegration],
+    Print["DEBUG_SHIFT_TRIMMED_BAD=", Position[
+      trimmed,
+      Indeterminate | ComplexInfinity | DirectedInfinity[_],
+      Infinity
+    ]];
+  ];
   minPower = Min[trimmed[[All, "MinPower"]]];
   maxPower = Max[LaurentMaxPower /@ trimmed];
   shift = Max[0, -minPower];
@@ -1143,6 +1315,13 @@ ShiftRawBoundariesToFinite[rawBCs_List, epsOrder_Integer] := Module[
     ],
     {i, Length[trimmed]}
   ];
+  If[TrueQ[DiffExp`RegularizedIntegration`Private`$DebugBadRegularizedIntegration],
+    Print["DEBUG_SHIFT_FINITE_BAD=", Position[
+      finiteBCs,
+      Indeterminate | ComplexInfinity | DirectedInfinity[_],
+      Infinity
+    ]];
+  ];
 
   <|
     "BoundaryValues" -> finiteBCs,
@@ -1153,28 +1332,11 @@ ShiftRawBoundariesToFinite[rawBCs_List, epsOrder_Integer] := Module[
   |>
 ];
 
-CollectLevelIBPSingularFactors[ftData_Association, level_Integer] :=
-Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
-        combinedPositions, posI, posJ, topologyAbove, feynmanParamAbove,
-        varName, factors = {}},
-
-  If[level <= 0 || !KeyExistsQ[ftData["Levels"], level] ||
-     !KeyExistsQ[ftData["Levels"], level - 1],
-    Return[{}]
-  ];
-
-  levelData = ftData["Levels"][level - 1];
-  levelAbove = ftData["Levels"][level];
-  mastersAtLevel = levelData["Masters"];
-  mastersAbove = levelAbove["Masters"];
-  combinedPositions = levelAbove["CombinedPositions"];
+BoundaryRequestRecords[mastersAtLevel_List, combinedPositions_List] :=
+Module[{posI, posJ},
   {posI, posJ} = combinedPositions;
-  topologyAbove = levelAbove["Topology"];
-  feynmanParamAbove = levelAbove["FeynmanParameter"];
-  varName = SymbolName[feynmanParamAbove];
-
-  Do[
-    Module[{masterVec, vi, vj, neededVec, case, reduction, expr, ibpCoeffs},
+  Table[
+    Module[{masterVec, vi, vj, neededVec, case},
       masterVec = mastersAtLevel[[masterIdx]];
       vi = masterVec[[posI]];
       vj = masterVec[[posJ]];
@@ -1201,13 +1363,52 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
           neededVec[[posJ]] = 0;
       ];
 
-      reduction = FeynmanTrick`FIREInterface`ReduceIntegrals[
-        topologyAbove,
-        {neededVec}
-      ];
-      If[reduction === $Failed, Continue[]];
+      <|
+        "MasterIndex" -> masterIdx,
+        "MasterVec" -> masterVec,
+        "Vi" -> vi,
+        "Vj" -> vj,
+        "Case" -> case,
+        "NeededVec" -> neededVec
+      |>
+    ],
+    {masterIdx, Length[mastersAtLevel]}
+  ]
+];
 
-      expr = reduction[neededVec];
+CollectLevelIBPSingularFactors[ftData_Association, level_Integer] :=
+Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
+        combinedPositions, posI, posJ, topologyAbove, feynmanParamAbove,
+        varName, factors = {}, boundaryRequests, neededVecs, reductions},
+
+  If[level <= 0 || !KeyExistsQ[ftData["Levels"], level] ||
+     !KeyExistsQ[ftData["Levels"], level - 1],
+    Return[{}]
+  ];
+
+  levelData = ftData["Levels"][level - 1];
+  levelAbove = ftData["Levels"][level];
+  mastersAtLevel = levelData["Masters"];
+  mastersAbove = levelAbove["Masters"];
+  combinedPositions = levelAbove["CombinedPositions"];
+  {posI, posJ} = combinedPositions;
+  topologyAbove = levelAbove["Topology"];
+  feynmanParamAbove = levelAbove["FeynmanParameter"];
+  varName = SymbolName[feynmanParamAbove];
+  boundaryRequests = BoundaryRequestRecords[mastersAtLevel, combinedPositions];
+  neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
+  reductions = If[neededVecs === {},
+    <||>,
+    FeynmanTrick`FIREInterface`ReduceIntegrals[topologyAbove, neededVecs]
+  ];
+  If[reductions === $Failed, Return[{}]];
+
+  Do[
+    Module[{request, neededVec, expr, ibpCoeffs},
+      request = boundaryRequests[[masterIdx]];
+      neededVec = request["NeededVec"];
+      If[!KeyExistsQ[reductions, neededVec], Continue[]];
+      expr = reductions[neededVec];
       ibpCoeffs = Table[
         Coefficient[expr, Global`G[1, mastersAbove[[j]]]],
         {j, Length[mastersAbove]}
@@ -1240,6 +1441,69 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
     TrueQ[PossibleZeroQ[Expand[#1 - #2]]] ||
       TrueQ[PossibleZeroQ[Expand[#1 + #2]]] &
   ]
+];
+
+RequiredTransportEpsilonOrder[ftData_Association, level_Integer,
+    epsOrder_Integer, epsPrefactors_List:{}] :=
+Module[{levelData, levelBelow, mastersBelow, mastersAbove,
+        combinedPositions, posI, posJ, topologyAbove, prefacs,
+        required = epsOrder, maxProbe, boundaryRequests, neededVecs,
+        reductions},
+
+  If[level <= 0 || !KeyExistsQ[ftData["Levels"], level] ||
+     !KeyExistsQ[ftData["Levels"], level - 1],
+    Return[epsOrder + If[ListQ[epsPrefactors] && Length[epsPrefactors] > 0,
+      Max[epsPrefactors],
+      0
+    ]]
+  ];
+
+  levelBelow = ftData["Levels"][level - 1];
+  levelData = ftData["Levels"][level];
+  mastersBelow = levelBelow["Masters"];
+  mastersAbove = levelData["Masters"];
+  combinedPositions = levelData["CombinedPositions"];
+  {posI, posJ} = combinedPositions;
+  topologyAbove = levelData["Topology"];
+  prefacs = If[ListQ[epsPrefactors] && Length[epsPrefactors] == Length[mastersAbove],
+    epsPrefactors,
+    Table[0, {Length[mastersAbove]}]
+  ];
+  maxProbe = epsOrder + Max[prefacs] + 20;
+  boundaryRequests = BoundaryRequestRecords[mastersBelow, combinedPositions];
+  neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
+  reductions = If[neededVecs === {},
+    <||>,
+    FeynmanTrick`FIREInterface`ReduceIntegrals[topologyAbove, neededVecs]
+  ];
+  If[reductions === $Failed, Return[Max[0, Ceiling[required]]]];
+
+  Do[
+    Module[{request, neededVec, expr, ibpCoeffs, coeffLaurent},
+      request = boundaryRequests[[masterIdx]];
+      neededVec = request["NeededVec"];
+      If[!KeyExistsQ[reductions, neededVec], Continue[]];
+      expr = reductions[neededVec];
+      ibpCoeffs = Table[
+        Coefficient[expr, Global`G[1, mastersAbove[[j]]]],
+        {j, Length[mastersAbove]}
+      ];
+
+      Do[
+        If[ibpCoeffs[[j]] =!= 0,
+          coeffLaurent = ExpandIBPCoeffLaurent[ibpCoeffs[[j]], maxProbe];
+          required = Max[
+            required,
+            epsOrder + prefacs[[j]] - coeffLaurent["MinPower"]
+          ];
+        ],
+        {j, Length[mastersAbove]}
+      ];
+    ],
+    {masterIdx, Length[mastersBelow]}
+  ];
+
+  Max[0, Ceiling[required]]
 ];
 
 (* Helper: multiply two eps-expanded coefficient lists (convolution) *)
@@ -1278,7 +1542,7 @@ ComputeLevelBoundary[ftData_Association, level_Integer,
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
         combinedPositions, posI, posJ, topologyAbove, bcValues,
         feynmanParamAbove, epsPrefactorsAbove, shiftedBoundary,
-        workingMaxPower},
+        workingMaxPower, boundaryRequests, neededVecs, reductions},
 
   levelData = ftData["Levels"][level];
   levelAbove = ftData["Levels"][level + 1];
@@ -1315,6 +1579,18 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
     "EpsilonOrder",
     epsOrder + Max[epsPrefactorsAbove]
   ];
+  boundaryRequests = BoundaryRequestRecords[mastersAtLevel, combinedPositions];
+  neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
+  reductions = If[neededVecs === {},
+    <||>,
+    FeynmanTrick`FIREInterface`ReduceIntegrals[topologyAbove, neededVecs]
+  ];
+  If[reductions === $Failed,
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+      Print["  Warning: IBP batch reduction failed for level ", level];
+    ];
+    Return[$Failed];
+  ];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Computing boundary for level ", level, " from level ", level + 1];
@@ -1328,16 +1604,12 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
     Module[{masterVec, vi, vj, neededVec, case, reduction, expr,
             ibpCoeffs, totalBC},
 
-      masterVec = mastersAtLevel[[masterIdx]];
-      vi = masterVec[[posI]];
-      vj = masterVec[[posJ]];
-
-      (* Determine which case of the recursion applies *)
-      case = Which[
-        vi > 0 && vj > 0, "integrate",
-        vi > 0 && vj == 0, "limitUpper",
-        vi == 0 && vj > 0, "limitLower",
-        True, "direct"
+      Module[{request = boundaryRequests[[masterIdx]]},
+        masterVec = request["MasterVec"];
+        vi = request["Vi"];
+        vj = request["Vj"];
+        case = request["Case"];
+        neededVec = request["NeededVec"];
       ];
 
       If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
@@ -1345,41 +1617,15 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
               " vi=", vi, " vj=", vj];
       ];
 
-      (* Construct the needed integral at level+1 *)
-      neededVec = masterVec;
-      Switch[case,
-        "integrate",
-          (* Combined propagator gets power vi+vj, position j gets 0 *)
-          neededVec[[posI]] = vi + vj;
-          neededVec[[posJ]] = 0;,
-        "limitUpper",
-          (* At x=1: D_combined = D_i. Position i has vi, j has 0 *)
-          neededVec[[posI]] = vi;
-          neededVec[[posJ]] = 0;,
-        "limitLower",
-          (* At x=0: D_combined = D_j. Position i has vj, j has 0 *)
-          neededVec[[posI]] = vj;
-          neededVec[[posJ]] = 0;,
-        "direct",
-          (* Both absent: same integral with j set to 0 *)
-          neededVec[[posJ]] = 0;
-      ];
-
-      (* Reduce the needed integral to masters at level+1 via IBP *)
-      reduction = FeynmanTrick`FIREInterface`ReduceIntegrals[
-        topologyAbove,
-        {neededVec}
-      ];
-
-      If[reduction === $Failed,
+      If[!KeyExistsQ[reductions, neededVec],
         If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
-          Print["  Warning: IBP reduction failed for ", neededVec];
+          Print["  Warning: IBP reduction missing for ", neededVec];
         ];
         Return[LaurentZero[0, workingMaxPower], Module];
       ];
 
       (* Extract the reduction expression *)
-      expr = reduction[neededVec];
+      expr = reductions[neededVec];
 
       (* Extract coefficient of each master G[1, masters_j] *)
       ibpCoeffs = Table[
@@ -1391,9 +1637,9 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
         Print["    IBP coefficients: ", ibpCoeffs];
       ];
 
-      (* Compute the boundary value based on the case *)
-      Switch[case,
-        "integrate",
+	      (* Compute the boundary value based on the case *)
+	      totalBC = Switch[case,
+	        "integrate",
           (* Full integration: combine Sum_j c_j(x)*f_j(x) first, then integrate.
              Individual c_j(x) may have poles at x=0,1 that cancel in the sum.
              Also accounts for eps-prefactors (J vs I basis). *)
@@ -1449,9 +1695,10 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
               ];
             , {j, Length[mastersAbove]}];
             directVal
-          ]
-      ]
-    ],
+	          ]
+		      ];
+	        totalBC
+		    ],
     {masterIdx, Length[mastersAtLevel]}
   ];
 
@@ -1477,15 +1724,31 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
 RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
     opts:OptionsPattern[{
       "WorkingPrecision" -> 500,
-      "ExpansionOrder" -> 50
+      "ExpansionOrder" -> 50,
+      "DivisionOrder" -> 4,
+      "HomogeneousSolve" -> "DontExpand",
+      "UseRationalRecurrence" -> False,
+      "IntegrationStrategy" -> "Default",
+      "EstimateError" -> "Fast",
+      "CheckpointDirectory" -> None,
+      "StopAfterBoundaryLevel" -> None
     }]] :=
   Module[{nLevels, currentBCs, currentPrefactors, matrixDir,
         transportResult, levelBoundary, precision, expOrder,
         updatedFtData, transportEpsOrder, boundaryWorkingOrder,
-        finalBoundary, extraSingularFactors},
+        finalBoundary, extraSingularFactors, homogeneousSolve,
+        useRationalRecurrence, integrationStrategy, estimateError, checkpointDir,
+        stopAfterBoundaryLevel, divisionOrder},
 
   precision = OptionValue["WorkingPrecision"];
   expOrder = OptionValue["ExpansionOrder"];
+  divisionOrder = OptionValue["DivisionOrder"];
+  homogeneousSolve = OptionValue["HomogeneousSolve"];
+  useRationalRecurrence = OptionValue["UseRationalRecurrence"];
+  integrationStrategy = OptionValue["IntegrationStrategy"];
+  estimateError = OptionValue["EstimateError"];
+  checkpointDir = OptionValue["CheckpointDirectory"];
+  stopAfterBoundaryLevel = OptionValue["StopAfterBoundaryLevel"];
   nLevels = ftData["NumLevels"];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
@@ -1554,7 +1817,19 @@ RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
 
     (* Get matrix directory for this level *)
     matrixDir = FileNameJoin[{outputDir, "Level_" <> ToString[level] <> "_Matrices"}];
-    transportEpsOrder = Length[First[currentBCs]] - 1;
+    transportEpsOrder = Min[
+      Length[First[currentBCs]] - 1,
+      RequiredTransportEpsilonOrder[
+        updatedFtData, level, epsOrder, currentPrefactors
+      ]
+    ];
+    If[transportEpsOrder < Length[First[currentBCs]] - 1,
+      currentBCs = currentBCs[[All, 1 ;; transportEpsOrder + 1]];
+      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+        Print["  Trimming transport epsilon order to ", transportEpsOrder,
+              " for level ", level, "."];
+      ];
+    ];
 
     FeynmanTrick`FeynmanTrickIteration`ExportLevel[
       updatedFtData, level, outputDir, "diffexp", transportEpsOrder
@@ -1576,9 +1851,14 @@ RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
       matrixDir, currentBCs, transportEpsOrder,
       "WorkingPrecision" -> precision,
       "ExpansionOrder" -> expOrder,
+      "DivisionOrder" -> divisionOrder,
       "Verbosity" -> FeynmanTrick`Private`$FTConfig["Verbosity"],
       "EpsPrefactors" -> currentPrefactors,
-      "ExtraSingularFactors" -> extraSingularFactors
+      "ExtraSingularFactors" -> extraSingularFactors,
+      "HomogeneousSolve" -> homogeneousSolve,
+      "UseRationalRecurrence" -> useRationalRecurrence,
+      "IntegrationStrategy" -> integrationStrategy,
+      "EstimateError" -> estimateError
     ];
 
     If[transportResult === $Failed,
@@ -1606,7 +1886,50 @@ RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
         Print["  Level ", level - 1, " boundary computed: ",
               Length[currentBCs], " masters"];
       ];
+      If[StringQ[checkpointDir],
+        If[!DirectoryQ[checkpointDir],
+          CreateDirectory[checkpointDir, CreateIntermediateDirectories -> True]
+        ];
+        Put[
+          <|
+            "BoundaryLevel" -> level - 1,
+            "NextTransportLevel" -> level - 1,
+            "BoundaryValues" -> currentBCs,
+            "EpsPrefactors" -> currentPrefactors,
+            "TransportEpsilonOrder" -> Length[First[currentBCs]] - 1,
+            "RequestedEpsilonOrder" -> epsOrder,
+            "OutputDirectory" -> outputDir,
+            "FtData" -> updatedFtData,
+            "DimensionExpression" ->
+              FeynmanTrick`Private`DimensionExpression[]
+          |>,
+          FileNameJoin[{checkpointDir,
+            "boundary_level_" <> ToString[level - 1] <> ".m"}]
+        ];
+      ];
       finalBoundary = levelBoundary;
+      If[stopAfterBoundaryLevel === level - 1,
+        If[level - 1 >= 1,
+          FeynmanTrick`FeynmanTrickIteration`ExportLevel[
+            updatedFtData, level - 1, outputDir, "diffexp",
+            Length[First[currentBCs]] - 1
+          ];
+        ];
+        Return[
+          <|
+            "BoundaryValues" -> currentBCs,
+            "Level" -> level - 1,
+            "EpsPrefactors" -> currentPrefactors,
+            "TransportEpsilonOrder" -> Length[First[currentBCs]] - 1,
+            "FtData" -> updatedFtData,
+            "OutputDirectory" -> outputDir,
+            "DimensionExpression" ->
+              FeynmanTrick`Private`DimensionExpression[],
+            "StoppedAfterBoundaryLevel" -> level - 1
+          |>,
+          Module
+        ];
+      ];
     ,
       Print["Error: ComputeLevelBoundary failed at level ", level - 1];
       Return[$Failed];

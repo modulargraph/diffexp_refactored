@@ -34,6 +34,17 @@ Begin["`Private`"];
 (* Helper functions *)
 (* ============================================================ *)
 
+activeNumericPrecision[] := Module[{precision},
+  precision = Quiet[Check[DiffExp`State`FEWorkingPrecision, 500]];
+  If[IntegerQ[precision] && precision > 0, precision, 500]
+];
+
+numericAtActivePrecision[expr_, precision_:Automatic] := Module[
+  {p = If[precision === Automatic, activeNumericPrecision[], precision], val},
+  val = Quiet[Check[N[expr, p], $Failed]];
+  If[val === $Failed, val, SetPrecision[val, p]]
+];
+
 (* Get the leading (minimum) power of x in a SeriesData *)
 GetLeadingPower[ser_SeriesData] := ser[[4]] / ser[[6]];
 GetLeadingPower[0] := Infinity;
@@ -101,12 +112,25 @@ AllEffectivelyZero[seriesList_List] := Module[{},
 ];
 
 EffectivelyZeroExpr[expr_] := Module[
-  {tol, expanded, numeric},
+  {tol, expanded, numeric, thetaBranches, branchValues},
   tol = DiffExp`State`FEC[RationalizationTolerance];
   expanded = DiffExp`Utilities`PChop[Expand[expr]];
 
   If[TrueQ[PossibleZeroQ[expanded]], Return[True]];
-  numeric = Quiet[Check[N[expanded, 50], $Failed]];
+  thetaBranches = {
+    {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0},
+    {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}
+  };
+  If[!FreeQ[expanded, DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m],
+    branchValues = numericAtActivePrecision[expanded /. #] & /@ thetaBranches;
+    If[AllTrue[
+        branchValues,
+        (# =!= $Failed && NumericQ[#] && Abs[#] < tol) &
+      ],
+      Return[True]
+    ];
+  ];
+  numeric = numericAtActivePrecision[expanded];
   If[NumericQ[numeric],
     Abs[numeric] < tol,
     False
@@ -125,7 +149,7 @@ EffectivelyZero[ser_SeriesData] := Module[{coeffs},
         DiffExp`SeriesOps`LogxCoeffNS[coeff, logPow]
       ],
       {coeff, coeffs},
-      {logPow, 0, DiffExp`SeriesOps`MaxLogxPower[coeff]}
+      {logPow, DiffExp`SeriesOps`LogxPowerRange[coeff]}
     ]
   ]
 ];

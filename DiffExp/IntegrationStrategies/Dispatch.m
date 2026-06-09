@@ -5,7 +5,7 @@
 DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
   {cIndices, fGeneral, result, cache = cacheIn,
    useRationalRecurrence, useSingularRecurrence, useGeneralSingularRecurrence,
-   singularEigenData},
+   useFuchsianizedSingularRecurrence, singularEigenData},
 
   (* Check if rational recurrence should be used (non-singular points) *)
   useRationalRecurrence = (
@@ -44,6 +44,14 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
     GeneralSingularRecurrenceApplicableQ[ctx]
   );
 
+  useFuchsianizedSingularRecurrence = (
+    !useRationalRecurrence &&
+    !useSingularRecurrence &&
+    !useGeneralSingularRecurrence &&
+    ctx["UseRationalRecurrence"] === True &&
+    FuchsianizedSingularRecurrenceApplicableQ[ctx]
+  );
+
   Which[
     (* Simple case: single integral without homogeneous components *)
     ctx["SystemSize"] === 1 && Normal[DiffExp`Utilities`PChop[ctx["AMatExpanded"]]] === {{0}},
@@ -61,6 +69,10 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
     (* General singular recurrence for resonant/non-diagonalizable regular singular points *)
     , useGeneralSingularRecurrence,
     SolveGeneralSingularRecurrence[ctx, bVec, epsord, cache]
+
+    (* Higher-pole singular systems that can be locally fuchsianized *)
+    , useFuchsianizedSingularRecurrence,
+    SolveFuchsianizedSingularRecurrence[ctx, bVec, epsord, cache]
 
     (* Recurrence was requested, but no recursive strategy accepted this block. *)
     , ctx["UseRationalRecurrence"] === True,

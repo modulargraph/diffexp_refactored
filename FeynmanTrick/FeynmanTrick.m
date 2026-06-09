@@ -6,7 +6,7 @@ BeginPackage["FeynmanTrick`"];
 
 (* --- Public symbols --- *)
 xx::usage = "Feynman parameter variable used in FeynmanTrick (avoids conflict with DiffExp's x).";
-FTeps::usage = "Dimensional regulator symbol: d = 4 - 2*FTeps.";
+FTeps::usage = "Dimensional regulator symbol. By default d = 4 - 2*FTeps.";
 
 FTConfiguration::usage = "FTConfiguration[] returns the current FeynmanTrick configuration.";
 SetFTOption::usage = "SetFTOption[key, value] sets a configuration option.";
@@ -32,10 +32,13 @@ $FTConfig = <|
   "FeynmanParameter" -> FeynmanTrick`xx,
   "FixedParameterValue" -> 11/23,
   "DimensionVariable" -> Global`d,
+  "DimensionExpression" -> Automatic,
   "EpsilonSymbol" -> FeynmanTrick`FTeps,
   "Threads" -> 1,        (* FIRE6 multi-threading can be unstable; default to 1 *)
   "FThreads" -> 1,
   "FIRETimeoutSeconds" -> 600,  (* watchdog timeout for a single FIRE6 run *)
+  "AutoDetectRestrictions" -> False,
+  "ReductionCache" -> True,
   "WorkingPrecision" -> 500,
   "Verbosity" -> 1
 |>;
@@ -43,6 +46,12 @@ $FTConfig = <|
 FTConfiguration[] := $FTConfig;
 
 SetFTOption[key_String, value_] := ($FTConfig[key] = value);
+
+DimensionExpression[] := Module[
+  {expr = Lookup[$FTConfig, "DimensionExpression", Automatic],
+   eps = $FTConfig["EpsilonSymbol"]},
+  If[expr === Automatic, 4 - 2*eps, expr]
+];
 
 End[];
 EndPackage[];

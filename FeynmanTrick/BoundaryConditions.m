@@ -14,7 +14,7 @@ Symanzik polynomials U and F using FIRE6's UF function. Returns {U, F, feynmanVa
 EvaluateTadpoleBoundary::usage =
   "EvaluateTadpoleBoundary[U, F, v, numLoops, epsOrder] evaluates the generalized \
 tadpole I_v = Gamma(v-L*d/2)/Gamma(v) * U^(v-(L+1)*d/2) / F^(v-L*d/2) and expands \
-in eps (d=4-2*eps) to the given order. Returns {epsMinPower, coefficients}.";
+in eps using FTConfiguration[\"DimensionExpression\"]. Returns {epsMinPower, coefficients}.";
 
 EvaluateTadpoleNumerical::usage =
   "EvaluateTadpoleNumerical[U, F, v, numLoops, epsValue, precision] evaluates the \
@@ -169,28 +169,20 @@ Module[{rescaled, params, rules},
 (* Generalized Tadpole Evaluation                               *)
 (* ============================================================ *)
 
-(*
-  I_v^(n-1) = Gamma(v - L*d/2) / Gamma(v) * U^(v-(L+1)*d/2) / F^(v-L*d/2)
-
-  With d = 4 - 2*eps:
-  - v - L*d/2 = v - L*(2-eps) = v - 2L + L*eps
-  - v - (L+1)*d/2 = v - (L+1)*(2-eps) = v - 2(L+1) + (L+1)*eps
-  - v - L*d/2 = v - 2L + L*eps (same as first)
-*)
-
 EvaluateTadpoleBoundary[Uval_?NumericQ, Fval_?NumericQ, v_Integer, numLoops_Integer, epsOrder_Integer] :=
 Module[{eps, gammaArg, gammaPrefactor, UPow, FPow, fullExpr, series, coeffs, minPow,
-        precision},
+        precision, dExpr},
 
   precision = FeynmanTrick`Private`$FTConfig["WorkingPrecision"];
   If[!IntegerQ[precision] || precision < 50, precision = 200];
 
-  eps = FeynmanTrick`FTeps;
+  eps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+  dExpr = FeynmanTrick`Private`DimensionExpression[];
 
   (* Arguments *)
-  gammaArg = v - numLoops * (2 - eps);  (* v - L*d/2 *)
-  UPow = v - (numLoops + 1) * (2 - eps);  (* v - (L+1)*d/2 *)
-  FPow = v - numLoops * (2 - eps);  (* v - L*d/2 *)
+  gammaArg = v - numLoops * dExpr / 2;
+  UPow = v - (numLoops + 1) * dExpr / 2;
+  FPow = v - numLoops * dExpr / 2;
 
   (* Build the expression symbolically.
      Handle U=1 and F=1 cases explicitly: 1.0^(symbolic) doesn't simplify in Mathematica,
@@ -233,7 +225,8 @@ Module[{eps, gammaArg, gammaPrefactor, UPow, FPow, fullExpr, series, coeffs, min
 (* Numerical evaluation at fixed eps (for eps-sampling approach) *)
 EvaluateTadpoleNumerical[Uval_?NumericQ, Fval_?NumericQ, v_Integer, numLoops_Integer, epsValue_?NumericQ, precision_Integer:200] :=
 Module[{d, gammaArg, UPow, FPow, result},
-  d = 4 - 2*epsValue;
+  d = FeynmanTrick`Private`DimensionExpression[] /.
+    FeynmanTrick`Private`$FTConfig["EpsilonSymbol"] -> epsValue;
   gammaArg = v - numLoops * d / 2;
   UPow = v - (numLoops + 1) * d / 2;
   FPow = v - numLoops * d / 2;
@@ -258,10 +251,12 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
         externalMomenta, replacements, numLoops, masters,
         ufResult, U, F, feynVars, numOriginalProps, fixedValue, kinPoint,
         Uval, Fval, bcValues, epsPrefactors, epsMinPower,
-        combinationSequence, nLevels},
+        combinationSequence, nLevels, precision},
 
   nLevels = ftData["NumLevels"];
   deepestLevel = nLevels;
+  precision = FeynmanTrick`Private`$FTConfig["WorkingPrecision"];
+  If[!IntegerQ[precision] || precision < 50, precision = 200];
 
   (* Check that the deepest level is computed *)
   If[!KeyExistsQ[ftData["Levels"], deepestLevel],
@@ -329,7 +324,7 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
     ];
 
     (* Evaluate at fixed parameter value (all xx_k = fixedValue) *)
-    paramRules = Thread[params -> Table[fixedValue, {nLevels}]];
+    paramRules = Thread[params -> Table[SetPrecision[fixedValue, precision], {nLevels}]];
     rescaledNumerical = rescaled /. paramRules;
 
     If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
@@ -343,8 +338,8 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
       kinPoint
     ];
 
-    Uval = U /. subRules // Expand // N;
-    Fval = F /. subRules // Expand // N;
+    Uval = N[Expand[U /. subRules], precision];
+    Fval = N[Expand[F /. subRules], precision];
   ];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,

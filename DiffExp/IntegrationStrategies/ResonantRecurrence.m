@@ -48,6 +48,73 @@ GeneralSingularRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
   False
 ]];
 
+ExpandedMatrixMinOrder[AMatExpanded_, systemSize_Integer] := Module[{minOrders},
+  minOrders = Flatten[Table[
+    If[Head[AMatExpanded[[i, j]]] === SeriesData,
+      AMatExpanded[[i, j]][[4]] / AMatExpanded[[i, j]][[6]],
+      0
+    ],
+    {i, systemSize}, {j, systemSize}
+  ]];
+  Min[minOrders]
+];
+
+FuchsianizedSingularRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
+  Module[{minOrder},
+    If[MissingQ[ctx["AMatFactored"]], Return[False]];
+    minOrder = ExpandedMatrixMinOrder[ctx["AMatExpanded"], ctx["SystemSize"]];
+    minOrder < -1
+  ],
+  False
+]];
+
+BuildFuchsianizedRecurrenceData[ctx_Association] := Module[
+  {x = DiffExp`Symbols`x, maxOrd, systemSize, thetaMat, fb, T, B,
+   TInv, AMatFactoredG, AMatExpandedG, ctxG},
+
+  If[MissingQ[ctx["AMatFactored"]],
+    Return[$Failed]
+  ];
+
+  maxOrd = ctx["ExpansionOrder"];
+  systemSize = ctx["SystemSize"];
+  thetaMat = Together[x ctx["AMatFactored"]];
+
+  fb = DiffExp`LocalSeries`FuchsianizeLocal[
+    thetaMat,
+    x,
+    "MaxSteps" -> 200
+  ];
+
+  If[MatchQ[fb, _Failure],
+    Return[$Failed]
+  ];
+
+  {T, B} = fb;
+  {T, B} = DiffExp`LocalSeries`TrimFuchsianLattice[thetaMat, T, x];
+  TInv = Together[Inverse[T]];
+  AMatFactoredG = Together[B/x];
+  AMatExpandedG = Table[
+    Quiet[Series[AMatFactoredG[[i, j]], {x, 0, maxOrd}]],
+    {i, systemSize}, {j, systemSize}
+  ];
+
+  If[ExpandedMatrixMinOrder[AMatExpandedG, systemSize] =!= -1,
+    Return[$Failed]
+  ];
+
+  ctxG = Join[
+    ctx,
+    <|
+      "AMatFactored" -> AMatFactoredG,
+      "AMatExpanded" -> AMatExpandedG,
+      "Label" -> ctx["Label"]
+    |>
+  ];
+
+  <|"T" -> T, "TInv" -> TInv, "Ctx" -> ctxG, "Subcache" -> <||>|>
+];
+
 (* Compute the resonance structure of the eigenvalues.
    Returns an Association with:
    - "Eigenvalues": rationalized eigenvalues (list)
@@ -198,6 +265,54 @@ ComputeResonanceStructure[residueMat_, systemSize_, ctx_Association] := Module[
   |>
 ];
 
+SafeNumericLinearSolve[mat_, rhs_, wp_, tolerance_] := Module[
+  {matN, rhsN, sol, residual, scale},
+
+  matN = N[mat, wp];
+  rhsN = N[rhs, wp];
+
+  sol = Quiet@Check[
+    LinearSolve[matN, rhsN],
+    $Failed,
+    {LinearSolve::nosol, LinearSolve::luc, LinearSolve::sing}
+  ];
+
+  If[sol === $Failed || !FreeQ[sol, LinearSolve],
+    sol = Quiet@Check[
+      LeastSquares[matN, rhsN],
+      $Failed
+    ];
+  ];
+
+  If[sol === $Failed || !FreeQ[sol, LinearSolve | LeastSquares],
+    sol = Quiet@Check[
+      PseudoInverse[matN, Tolerance -> tolerance] . rhsN,
+      $Failed
+    ];
+  ];
+
+  If[sol === $Failed || !FreeQ[sol, LinearSolve | LeastSquares | PseudoInverse],
+    DiffExp`State`LastErrorContext = {mat, rhs, matN, rhsN, sol};
+    DiffExp`Utilities`ReportError[
+      "General singular recurrence failed to solve a finite-width linear system."
+    ];
+  ];
+
+  residual = Quiet@Check[matN . sol - rhsN, ConstantArray[0, Dimensions[rhsN]]];
+  scale = 1 + Norm[Flatten[N[rhsN, wp]]];
+  If[NumericQ[scale] && scale > 0 &&
+     NumericQ[Norm[Flatten[N[residual, wp]]]] &&
+     Norm[Flatten[N[residual, wp]]]/scale > 100 tolerance,
+    DiffExp`Utilities`PrintInfo[
+      "  General singular recurrence linear solve residual ",
+      N[Norm[Flatten[N[residual, wp]]]/scale, 6],
+      " exceeds tolerance scale."
+    ][3];
+  ];
+
+  sol
+];
+
 (* Solve one step of the recurrence when the matrix L_n may be singular.
    L_n = (lambda + n)I - M_0
    Solves: L_n f = rhs
@@ -218,7 +333,7 @@ SolveRecurrenceStep[Ln_, rhs_, systemSize_, ctx_Association] := Module[
 
   If[Abs[det] > tolerance,
     (* Non-singular: direct solve *)
-    solution = LinearSolve[Ln, rhs];
+    solution = SafeNumericLinearSolve[Ln, rhs, ctx["WorkingPrecision"], tolerance];
     Return[{solution, {}, False}]
   ];
 
@@ -228,7 +343,7 @@ SolveRecurrenceStep[Ln_, rhs_, systemSize_, ctx_Association] := Module[
 
   If[Length[nullVecs] == 0,
     (* Numerically singular but no null space found - treat as non-singular *)
-    solution = LinearSolve[Ln, rhs];
+    solution = SafeNumericLinearSolve[Ln, rhs, ctx["WorkingPrecision"], tolerance];
     Return[{solution, {}, False}]
   ];
 
@@ -370,7 +485,7 @@ ComputeResonantFundamentalMatrix[ctx_Association, resInfo_Association,
               If[Max[Abs[Flatten[overlapMat]]] > tolerance,
                 (* Solve for alpha *)
                 alpha = Quiet[Check[
-                  LinearSolve[overlapMat, -rhsVec],
+                  SafeNumericLinearSolve[overlapMat, -rhsVec, wp, tolerance],
                   ConstantArray[N[0, wp], Length[prevNull]]
                 ]];
 
@@ -539,7 +654,8 @@ RunParticularRecurrence[sigma_, bCoeffs_, bMaxLogK_, kMax_,
       Do[
         rhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
           bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
-        fCoeffs[[n + 1, k + 1]] = LinearSolve[Ln, rhs];
+        fCoeffs[[n + 1, k + 1]] =
+          SafeNumericLinearSolve[Ln, rhs, wp, tolerance];
         , {k, kMax, 0, -1}
       ];
     ];
@@ -901,6 +1017,49 @@ SolveGeneralSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Associat
   cIndices = Table[Subscript[c, i], {i, systemSize}];
   fGeneral = fParticular + Sum[cIndices[[i]] * FMat[[All, i]], {i, systemSize}];
   fGeneral = DiffExp`SeriesOps`SExpand[fGeneral];
+
+  {cIndices, fGeneral, cache}
+];
+
+SolveFuchsianizedSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
+  {cache = cacheIn, data, T, TInv, ctxG, subcache, bVecG,
+   cIndices, gGeneral, fGeneral},
+
+  If[!KeyExistsQ[cache, "FuchsianRR"],
+    data = BuildFuchsianizedRecurrenceData[ctx];
+    If[data === $Failed,
+      DiffExp`State`LastErrorContext = {ctx, bVec, epsord};
+      DiffExp`Utilities`ReportError[
+        "Local Fuchsianization failed for integral(s) ",
+        ctx["Label"],
+        ". Refusing to fall back to the default Wronskian/Frobenius path."
+      ];
+    ];
+
+    DiffExp`Utilities`PrintInfo[
+      "Using fuchsianized singular recurrence for integrals ",
+      ctx["Label"],
+      "."
+    ][3];
+
+    cache["FuchsianRR"] = data;
+  ];
+
+  data = cache["FuchsianRR"];
+  T = data["T"];
+  TInv = data["TInv"];
+  ctxG = data["Ctx"];
+  subcache = data["Subcache"];
+
+  bVecG = DiffExp`SeriesOps`SExpand[TInv . bVec];
+
+  {cIndices, gGeneral, subcache} =
+    SolveGeneralSingularRecurrence[ctxG, bVecG, epsord, subcache];
+
+  data["Subcache"] = subcache;
+  cache["FuchsianRR"] = data;
+
+  fGeneral = DiffExp`SeriesOps`SExpand[T . gGeneral];
 
   {cIndices, fGeneral, cache}
 ];

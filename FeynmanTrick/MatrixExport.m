@@ -6,7 +6,7 @@ BeginPackage["FeynmanTrick`MatrixExport`", {"FeynmanTrick`"}];
 ExportDiffExpMatrix::usage =
   "ExportDiffExpMatrix[matrix, variable, directory, epsOrder] exports a matrix \
 with eps dependence to DiffExp order-by-order format: d{variable}_{0..epsOrder}.m. \
-The dimension variable d is substituted as d = 4 - 2*eps before expansion.";
+The dimension variable d is substituted using FTConfiguration[\"DimensionExpression\"].";
 
 ExportGeneralMatrix::usage =
   "ExportGeneralMatrix[matrix, variable, directory] exports the full matrix \
@@ -49,8 +49,8 @@ Module[{eps, dimVar, varName, fileName, epsMat, epsMatrix, k},
     CreateDirectory[directory, CreateIntermediateDirectories -> True]
   ];
 
-  (* Substitute d -> 4 - 2*eps to express matrix in terms of eps *)
-  epsMatrix = matrix /. dimVar -> (4 - 2*eps);
+  (* Substitute d using the configured dimension expression. *)
+  epsMatrix = matrix /. dimVar -> FeynmanTrick`Private`DimensionExpression[];
 
   Do[
     (* Extract coefficient of eps^k from each matrix entry *)
@@ -98,8 +98,8 @@ Module[{varName, fileName, exportMatrix, eps, dimVar},
     CreateDirectory[directory, CreateIntermediateDirectories -> True]
   ];
 
-  (* Substitute d -> 4 - 2*eps and strip contexts *)
-  exportMatrix = matrix /. dimVar -> (4 - 2*eps);
+  (* Substitute d using the configured dimension expression and strip contexts. *)
+  exportMatrix = matrix /. dimVar -> FeynmanTrick`Private`DimensionExpression[];
   exportMatrix = stripContexts[exportMatrix];
 
   fileName = FileNameJoin[{directory,

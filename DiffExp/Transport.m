@@ -720,9 +720,12 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
           ];
 
           If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
-            If[to > FixAt,
-              currentCenter = DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, singularities],
-              currentCenter = DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, singularities]
+            currentCenter = If[tempResult === {},
+              CurrEvalPoint,
+              If[to > FixAt,
+                DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, singularities],
+                DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, singularities]
+              ]
             ];
           ];
 
@@ -1140,9 +1143,12 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
           currentCenter = CurrEvalPoint;
         ];
         If[DiffExp`State`FEC[SegmentationStrategy] === "Predivision",
-          If[to > FixAt,
-            currentCenter = DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, singularities],
-            currentCenter = DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, singularities]
+          currentCenter = If[tempResult === {},
+            CurrEvalPoint,
+            If[to > FixAt,
+              DiffExp`Mobius`FindNextCenterPointL[CurrEvalPoint, singularities],
+              DiffExp`Mobius`FindNextCenterPointR[CurrEvalPoint, singularities]
+            ]
           ];
         ];
 

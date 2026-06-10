@@ -48,40 +48,59 @@ M2 = Gamma(eps) B(1-eps,1-eps) ((1-t)/3)^(-eps).  The L1->L0 integrand
    terms (artificial eps-mixing; exact Hadamard finite-part now).
 Tests: `Tests/test_interior_singular_integration.m` (11 checks).
 
-## Remaining defect: endpoint-segment SERIES at eps^0+
+## RESOLVED: the endpoint-series corruption (NormalizeLogPower export)
 
-Pinned by the pointwise reference {2,0,1,1}(t = 1/20) (family exporter
-at FT_FIXED_VALUE=1/20 + driver):
+The endpoint-segment series corruption is FOUND and FIXED:
+`DiffExp`SeriesOps`NormalizeLogPower` had no usage declaration, so
+Integration.m's fully qualified call hit an undefined public symbol and
+returned unevaluated; the integer filter in DiffExpIntegrate's entry then
+saw no powers and the IMaxLogOrder auto-extension NEVER fired.  Any
+solve relying on DiffExpIntegrate with sources deeper than the current
+IntReps (the box L1 endpoint blocks: diagonal A = eps diag(-1/x, ...),
+per-order A0 = 0, dispatched to SolveSimple = pure integration; sources
+gain one Logx power per epsilon order) silently integrated
+x^-1 Logx^k (k >= 2) terms AS CONSTANTS (the b*Const fallback).
+Breakage exactly from epsilon order 3 (= IntReps depth 1 + 2), matching
+the observed ODE residuals {3,4,5,6} and the spurious (r-1)^3 confluent
+moments.  Post-fix: endpoint ODE residuals = 0 exactly, towers are clean
+single-sector, the salvage warnings are gone, and
+Tests/test_integration_log_depth.m locks the behavior.
 
-- pySecDec: -63.1579/eps + 1357.9 +/- 142 (real)
-- dump integrand series at t = 0.05 (inside endpoint segment 1):
-  eps^-1 = -126.3158 = 2 x (-63.1579) EXACT (prefactor ratio 2);
-  eps^0 complex/wrong (about -349 - 471 i under the local-side theta
-  + real-log reading).
+## Remaining: eps^0 deficit (+6.69) now at the COMBINATION level
 
-So the boundary-anchored endpoint segments (1 and 12) of the L1
-transport represent the integrand correctly at eps^-1 but WRONGLY from
-eps^0 up.  All integrator-level explanations are exhausted: interior
-segments verified against NIntegrate, endpoint towers verified
-frame-independently (the q0 = 0 moment diagonal is invariant under the
-complex-log <-> real-log rebasing), and the salvage windows are honest.
-The defect is in how the endpoint series are CONSTRUCTED (transport ->
-boundary handoff / local sector matching), one level upstream.
+Post-solver-fix state: the box L0 totals are bit-identical
+({12, -0.334914, -47.9756, -64.1316, -20.1632, ...} all real) because
+the eps^0 output only consumes tower offsets <= 2, which were always
+correct.  Verified piece by piece: interior segments match NIntegrate;
+straddling segment 5 matches its closed form; endpoint segment 1's
+machinery integration matches an independent termwise closed-form
+reconstruction to 13 digits; the b != 0 endpoint monomial machinery is
+exact on synthetic input; the endpoint towers satisfy the level ODE
+exactly.  The pin (-41.28417 at eps^0) is confirmed independently by
+the analytic all-orders box formula.
 
-Diagnostic facts for the continuation:
-- endpoint towers show an EXACT confluent structure on the q0 = 0
-  moment diagonal: moments {24,0,0,24,72,144,240} = 12(k-1)(k-2), i.e.
-  characteristic polynomial (r-1)^3 (triple root) relative to the
-  extracted b = -1 - while the true function (M1, M2 above) has two
-  DISTINCT sectors t^(-eps) and t^0.  A triple root at +1 on top of
-  b = -1 is NOT explicable by the true sector content; it is whatever
-  the boundary builder emitted.
-- branch confluent-sectors-wip holds a full N-root/confluent Prony
-  generalization of FitResidualEndpointSectors (works, explains the
-  full tower, but integrating the reassigned sectors loses the eps^-2
-  pole - do not merge until the upstream representation is understood).
-- The warnings ("omitted N endpoint coefficients... starting at eps^k")
-  fire on exactly these segments; trust windows are honest.
+Therefore the discrepancy is in WHAT is being integrated - the
+combination assembled by ComputeLevelBoundary - or in a normalization
+convention between the dump integrand and the true {2,0,1,1}(t).
+Pointwise (machinery convention: local-side thetas + complex local
+log) the dump integrand is real and smooth:
+  t = 1/20 : -126.3158/eps - 349.2138
+  t = 2/5  : -25/eps      - 43.1342
+  t = 19/20: -126.3158/eps - 453.3886
+with dump(eps^-1) = -6/(t(1-t)) = 2 x spec(eps^-1) at all three points
+(spec eps^-1 = -3/(t(1-t)) exactly, verified both by pySecDec and the
+z0-endpoint residue formula 1/(A(A+B))).  A clean global factor 2 with
+1x totals at the poles is self-contradictory, so something in this
+reading is convention-skewed; the four-way real-eps test
+(/tmp/fourway_eps_test.py: 3d quad of the box, int dt of the spec, pin
+Laurent, FT Laurent, all at eps = -1/20) discriminates which leg is
+broken without any Laurent bookkeeping.
+
+- branch confluent-sectors-wip holds an N-root/confluent Prony
+  generalization of FitResidualEndpointSectors built while chasing the
+  (now-explained) spurious confluent moments; with the solver fixed the
+  towers are plain and the existing 2-root fitter suffices for the box.
+  Keep the branch for genuinely multi-sector future families.
 
 ## Practical guidance
 

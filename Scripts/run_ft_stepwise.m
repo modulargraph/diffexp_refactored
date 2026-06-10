@@ -36,6 +36,14 @@ FeynmanTrick`SetFTOption["FIRETimeoutSeconds", 1800];
 FeynmanTrick`SetFTOption["IntegrationPoleAllowance",
   ToExpression[envOrDefault["FT_POLE_ALLOWANCE", "4"]]];
 
+(* Solver self-check diagnostics (slow; banana-era instrumentation):
+   GENCHECK verifies every solve piece against the block ODE, RESIDSER
+   prints the escaping residual series. *)
+If[Environment["DEBUG_FUCHS_CHECK"] === "1",
+  DiffExp`State`$DebugFuchsianizedCheck = True];
+If[Environment["DEBUG_BLOCK_RESID"] === "1",
+  DiffExp`State`$DebugBlockResidualSeries = True];
+
 laurentCoefficient[laur_Association, power_Integer] := Module[
   {idx = power - laur["MinPower"] + 1},
   If[idx >= 1 && idx <= Length[laur["Coefficients"]],
@@ -173,7 +181,7 @@ runExample[name_String] := Module[
       "WorkingPrecision" -> wp,
       "ExpansionOrder" -> expansionOrder,
       "DivisionOrder" -> divisionOrder,
-      "Verbosity" -> 0,
+      "Verbosity" -> ToExpression[envOrDefault["FT_TRANSPORT_VERBOSITY", "0"]],
       "EpsPrefactors" -> currentPrefactors,
       "ExtraSingularFactors" -> extraSingularFactors,
       "UseRationalRecurrence" -> True

@@ -16,6 +16,7 @@ ApplyAnalyticContinuation::usage = "ApplyAnalyticContinuation[s_] applies analyt
 SafeReplaceSeries11::usage = "SafeReplaceSeries11[a_,b_] safely replaces in series.";
 
 (* Log operations *)
+NormalizeLogPower::usage = "NormalizeLogPower[p_] rationalizes a numeric Logx power to the nearby integer at the active tolerance (returns p unchanged when not recognizably integer).";
 MaxLogxPower::usage = "MaxLogxPower[ex_] returns maximum power of Logx in expression.";
 LogxPowerRange::usage = "LogxPowerRange[ex_] returns the non-negative integer Logx powers to scan.";
 LogxCoeff::usage = "LogxCoeff[Ser_,Which_] extracts coefficient of Logx^Which from series.";

@@ -14,6 +14,7 @@ tests=(
   Tests/test_regularized_integration.m
   Tests/test_regularized_integration_edge_cases.m
   Tests/test_interior_singular_integration.m
+  Tests/test_integration_log_depth.m
   Tests/test_feynmantrick_algebra.m
   Tests/test_feynmantrick_fire.m
   Tests/test_feynmantrick_iteration.m

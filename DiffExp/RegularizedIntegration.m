@@ -845,6 +845,53 @@ IntegrateAnalyticRegularizedByIBPLaurent[a_, b_, epsMinPower_Integer, gList_List
    top epsilon orders) the non-log content is salvaged against the plain
    branch exponent under the usual truncation-boundary convention, and
    dropped Logx content is reported. *)
+(* Cluster numerically coincident Prony roots into confluent sector
+   specs {root, logPower}: an m-fold root r contributes sectors
+   {r,0}, {r,1}, ..., {r,m-1} (weights polynomial in the Logx slice
+   order).  Cluster representatives snap to nearby integers/rationals:
+   sector exponents are small exact numbers and the splitting of a
+   noisy m-fold root scales like noise^(1/m). *)
+clusterRootSpecs[rts_List] := Module[
+  {tol = DiffExp`State`FEC[RationalizationTolerance], remaining, clusters,
+   clusterTol, specs},
+  clusterTol = 10^-2;
+  remaining = SortBy[rts, {Abs[numericAtActivePrecision[#]] &}];
+  clusters = {};
+  Do[
+    Module[{placed = False},
+      Do[
+        If[!placed &&
+            TrueQ[Abs[numericAtActivePrecision[r - clusters[[c, 1]]]] <
+              clusterTol*(1 + Abs[numericAtActivePrecision[clusters[[c, 1]]]])],
+          clusters[[c, 2]] = Append[clusters[[c, 2]], r];
+          placed = True;
+        ],
+        {c, Length[clusters]}
+      ];
+      If[!placed, AppendTo[clusters, {r, {r}}]];
+    ],
+    {r, remaining}
+  ];
+  specs = Flatten[
+    Table[
+      Module[{mean, rounded, rep},
+        mean = Mean[clusters[[c, 2]]];
+        rounded = Round[numericAtActivePrecision[mean]];
+        rep = Which[
+          TrueQ[Abs[numericAtActivePrecision[mean - rounded]] < clusterTol],
+            rounded,
+          True,
+            DiffExp`Utilities`PChop[Expand[mean]]
+        ];
+        Table[{rep, pw}, {pw, 0, Length[clusters[[c, 2]]] - 1}]
+      ],
+      {c, Length[clusters]}
+    ],
+    1
+  ];
+  specs
+];
+
 FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
   {resolved, maxOffset, firstVisible, maxLogAtFirst, logCoeffAt,
    relTol, relZeroQ, q0Candidates, candidateRootSets, ladder,
@@ -914,9 +961,9 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
     m3 = If[Length[ladder] >= 4, ladder[[4]], 0];
     If[!EffectiveZeroExprQ[m0, tol],
       AppendTo[candidateRootSets,
-        <|"Roots" -> {If[EffectiveZeroExprQ[m1, tol], 0,
+        <|"SectorSpecs" -> {{If[EffectiveZeroExprQ[m1, tol], 0,
             DiffExp`Utilities`PChop[Expand[m1 / m0]]
-          ]},
+          ], 0}},
           "ReferenceOrder" -> q0|>
       ];
     ];
@@ -930,37 +977,153 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
           {(e1 + Sqrt[disc])/2, (e1 - Sqrt[disc])/2};
         If[!EffectiveZeroExprQ[twoRoots[[1]] - twoRoots[[2]], tol],
           AppendTo[candidateRootSets,
-            <|"Roots" -> twoRoots, "ReferenceOrder" -> q0|>
+            <|"SectorSpecs" -> {{twoRoots[[1]], 0}, {twoRoots[[2]], 0}},
+              "ReferenceOrder" -> q0|>
           ];
         ];
       ];
+    ];
+    (* N >= 2 sector specs from the full-depth Prony/Hankel system on the
+       same moment diagonal (m_{k+N} = sum_j s_j m_{k+j}).  Repeated
+       characteristic roots are CONFLUENT sectors x^(r eps) (eps Logx)^p
+       (polynomial-in-k weights); the d = 4-2eps box-family endpoints are
+       the first data needing them (triple root r = 1). *)
+    Module[{kMaxFull = maxOffset - q0, momentsFull, nUpper},
+      momentsFull = Table[
+        DiffExp`Utilities`PChop[
+          Expand[Factorial[k] * logCoeffAt[q0 + k, k]]
+        ],
+        {k, 0, kMaxFull}
+      ];
+      nUpper = Min[Quotient[Length[momentsFull], 2], 6];
+      If[TrueQ[DiffExp`State`$DebugSectorFit] ||
+          Environment["DEBUG_SECTOR_FIT"] === "1",
+        Print["SECTORFIT q0=", q0, " moments=",
+          InputForm[N[Chop[momentsFull, 10^-20], 6]], " nUpper=", nUpper];
+      ];
+      Do[
+        Module[{hankel, rhsH, scaleH, detH, charSol, rvar, rts, specs},
+          hankel = Table[momentsFull[[i + j - 1]], {i, nSec}, {j, nSec}];
+          rhsH = Table[momentsFull[[nSec + i]], {i, nSec}];
+          scaleH = Max[Join[{1},
+            Map[Abs[numericAtActivePrecision[#]] &, Flatten[{hankel, rhsH}]]
+          ]];
+          detH = numericAtActivePrecision[Det[hankel]];
+          If[NumericQ[detH] && NumericQ[scaleH] &&
+              Abs[detH] > relTol * scaleH^nSec,
+            charSol = Quiet[Check[
+              LinearSolve[
+                SetPrecision[hankel, activeNumericPrecision[]],
+                SetPrecision[rhsH, activeNumericPrecision[]]
+              ],
+              $Failed
+            ]];
+            If[charSol =!= $Failed,
+              rts = Quiet[Check[
+                rvar /. NSolve[
+                  rvar^nSec - Sum[charSol[[j]]*rvar^(j - 1), {j, nSec}] == 0,
+                  rvar
+                ],
+                $Failed
+              ]];
+              specs = If[ListQ[rts] && Length[rts] === nSec &&
+                  AllTrue[rts, NumericQ[numericAtActivePrecision[#]] &],
+                clusterRootSpecs[rts],
+                $Failed
+              ];
+              If[TrueQ[DiffExp`State`$DebugSectorFit] ||
+                  Environment["DEBUG_SECTOR_FIT"] === "1",
+                Print["SECTORFIT N=", nSec, " roots=",
+                  InputForm[N[Chop[rts, 10^-20], 6]], " specs=",
+                  InputForm[N[Chop[specs, 10^-20], 6]]];
+              ];
+              If[specs =!= $Failed,
+                AppendTo[candidateRootSets,
+                  <|"SectorSpecs" -> specs, "ReferenceOrder" -> q0|>
+                ];
+              ];
+            ];
+          ];
+        ],
+        {nSec, 2, nUpper}
+      ];
     ],
     {q0, q0Candidates}
+  ];
+  If[TrueQ[DiffExp`State`$DebugSectorFit] ||
+      Environment["DEBUG_SECTOR_FIT"] === "1",
+    Print["SECTORFIT candidates (maxOffset=", maxOffset,
+      ", firstVisible=", firstVisible, "):"];
+    Do[
+      Print["  q0=", cand["ReferenceOrder"], " N=", Length[cand["SectorSpecs"]],
+        " specs=", InputForm[N[Chop[cand["SectorSpecs"], 10^-20], 6]]],
+      {cand, candidateRootSets}
+    ];
   ];
   If[candidateRootSets === {}, Return[$Failed, Module]];
 
   (* Solve the weight tower for a candidate root set and count how many
      leading offsets the full Logx reconstruction explains. *)
-  evaluateFit[testRoots_List] := Module[
-    {count = Length[testRoots], coeffs, qSolveMax, w0, w1, denom,
-     validOffsets, q, predicted, dataVal, scaleVal, failed},
+  (* Confluent Prony basis: a sector {r, p} contributes
+     phi(k) = k^(p) r^(k-p) / p!  (falling factorial)  to the moment
+     m_k = k! T(q+k, k); p = 0 reduces to the plain power r^k. *)
+  phiBasis[r_, pw_Integer, k_Integer] := If[k < pw, 0,
+    (Factorial[k]/Factorial[k - pw]) *
+      zeroPowerSafe[r, k - pw] / Factorial[pw]
+  ];
+
+  evaluateFit[specs_List] := Module[
+    {count = Length[specs], coeffs, qSolveMax, w0, w1, denom,
+     validOffsets, q, predicted, dataVal, scaleVal, failed,
+     plainPair},
 
     qSolveMax = maxOffset - (count - 1);
     coeffs = ConstantArray[0, {count, maxOffset + 1}];
+    plainPair = count === 2 && specs[[1, 2]] === 0 && specs[[2, 2]] === 0;
     Do[
-      If[count === 1,
-        coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
-          Expand[logCoeffAt[q, 0]]
-        ],
-        w0 = logCoeffAt[q, 0];
-        w1 = logCoeffAt[q + 1, 1];
-        denom = testRoots[[1]] - testRoots[[2]];
-        coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
-          Expand[(w1 - w0 * testRoots[[2]]) / denom]
-        ];
-        coeffs[[2, q + 1]] = DiffExp`Utilities`PChop[
-          Expand[w0 - coeffs[[1, q + 1]]]
-        ];
+      Which[
+        count === 1,
+          coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
+            Expand[logCoeffAt[q, 0]]
+          ],
+        plainPair,
+          w0 = logCoeffAt[q, 0];
+          w1 = logCoeffAt[q + 1, 1];
+          denom = specs[[1, 1]] - specs[[2, 1]];
+          coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
+            Expand[(w1 - w0 * specs[[2, 1]]) / denom]
+          ];
+          coeffs[[2, q + 1]] = DiffExp`Utilities`PChop[
+            Expand[w0 - coeffs[[1, q + 1]]]
+          ];,
+        True,
+          (* general: confluent Vandermonde over the log slices
+             k! T(q+k, k) = sum_i c_i phi_i(k), k = 0..count-1 *)
+          Module[{vand, rhsW, solW},
+            vand = Table[
+              phiBasis[specs[[i, 1]], specs[[i, 2]], k],
+              {k, 0, count - 1}, {i, count}
+            ];
+            rhsW = Table[
+              DiffExp`Utilities`PChop[
+                Expand[Factorial[k] * logCoeffAt[q + k, k]]
+              ],
+              {k, 0, count - 1}
+            ];
+            solW = Quiet[Check[
+              LinearSolve[
+                SetPrecision[vand, activeNumericPrecision[]],
+                SetPrecision[rhsW, activeNumericPrecision[]]
+              ],
+              $Failed
+            ]];
+            Do[
+              coeffs[[i, q + 1]] = If[solW === $Failed, 0,
+                DiffExp`Utilities`PChop[Expand[solW[[i]]]]
+              ],
+              {i, count}
+            ];
+          ]
       ],
       {q, 0, qSolveMax}
     ];
@@ -975,7 +1138,7 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
           If[qq >= 0 && qq <= qSolveMax,
             dataVal = Factorial[k] * logCoeffAt[n, k];
             predicted = Total[Table[
-              coeffs[[i, qq + 1]] * zeroPowerSafe[testRoots[[i]], k],
+              coeffs[[i, qq + 1]] * phiBasis[specs[[i, 1]], specs[[i, 2]], k],
               {i, count}
             ]];
             scaleVal = Max[
@@ -1003,7 +1166,7 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
        example missing low-log homogeneous content in truncated upstream
        data), so retreat one extra order beyond the validated run. *)
     <|
-      "Roots" -> testRoots,
+      "SectorSpecs" -> specs,
       "SectorCount" -> count,
       "Coefficients" -> coeffs,
       "ValidOffsets" -> validOffsets,
@@ -1016,7 +1179,15 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
 
   best = Missing["None"];
   Do[
-    fitResult = evaluateFit[candidate["Roots"]];
+    fitResult = evaluateFit[candidate["SectorSpecs"]];
+    If[TrueQ[DiffExp`State`$DebugSectorFit] ||
+        Environment["DEBUG_SECTOR_FIT"] === "1",
+      Print["SECTORFIT eval q0=", candidate["ReferenceOrder"],
+        " N=", fitResult["SectorCount"],
+        " validOffsets=", fitResult["ValidOffsets"],
+        " usableQMax=", fitResult["UsableQMax"],
+        " gate=", candidate["ReferenceOrder"] + 2*fitResult["SectorCount"]];
+    ];
     (* The moment ladder at the candidate's reference order must lie
        inside the validated run, otherwise the roots themselves are not
        trustworthy. *)
@@ -1030,17 +1201,27 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
     ],
     {candidate, candidateRootSets}
   ];
+  If[TrueQ[DiffExp`State`$DebugSectorFit] ||
+      Environment["DEBUG_SECTOR_FIT"] === "1",
+    If[MissingQ[best],
+      Print["SECTORFIT best: NONE"],
+      Print["SECTORFIT best: N=", best["SectorCount"],
+        " specs=", InputForm[N[Chop[best["SectorSpecs"], 10^-20], 6]],
+        " validOffsets=", best["ValidOffsets"],
+        " usableQMax=", best["UsableQMax"]]
+    ];
+  ];
   If[MissingQ[best] || best["UsableQMax"] < 0, Return[$Failed, Module]];
 
   sectorCount = best["SectorCount"];
-  roots = best["Roots"];
+  roots = best["SectorSpecs"];
   usableQMax = best["UsableQMax"];
   salvageOffsets = Select[
     Range[usableQMax + 1, maxOffset],
     !EffectiveZeroExprQ[resolved[[# + 1]], tol] &
   ];
-  salvageExact = sectorCount === 1 &&
-    EffectiveZeroExprQ[roots[[1]], tol];
+  salvageExact = sectorCount === 1 && roots[[1, 2]] === 0 &&
+    EffectiveZeroExprQ[roots[[1, 1]], tol];
 
 
   sectorCoeffs = ConstantArray[0, {sectorCount, Length[resolved]}];
@@ -1053,7 +1234,8 @@ FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
   <|
     "Sectors" -> Table[
       <|
-        "ResidualB" -> roots[[i]],
+        "ResidualB" -> roots[[i, 1]],
+        "LogPower" -> roots[[i, 2]],
         "Coefficients" -> sectorCoeffs[[i]]
       |>,
       {i, sectorCount}
@@ -1203,9 +1385,20 @@ IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gL
     If[EffectiveZeroExprQ[coeff, tol], Return[Null, Module]];
     If[NumericZeroQ[basisB, tol] &&
         NumericZeroQ[a + localPower + 1, tol],
-      DiffExp`Utilities`PrintWarning[
-        "IntegrateSingularTermLaurent: encountered a resonant endpoint ",
-        "coefficient with zero epsilon regulator; dropping contribution."
+      (* Resonant monomial x^-1 Logx^j with no epsilon regulator: take
+         the Hadamard finite part.  The formal log divergence at the
+         singular endpoint is dropped (it pairs with the partner segment
+         sharing this singular point, PV-style), leaving the
+         antiderivative Logx^(j+1)/(j+1) at the far bound. *)
+      If[epsMaxPower - gPower < 0, Return[Null, Module]];
+      result = LaurentAdd[
+        result,
+        <|
+          "MinPower" -> gPower,
+          "Coefficients" -> {DiffExp`Utilities`PChop[Expand[
+            coeff * logValue^(logPower + 1) / (logPower + 1)
+          ]]}
+        |>
       ];
       Return[Null, Module];
     ];
@@ -1273,14 +1466,18 @@ IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gL
       Do[
         Module[{basisB = DiffExp`Utilities`PChop[
             Expand[branchB + sector["ResidualB"]]
-          ]},
+          ], sp = Lookup[sector, "LogPower", 0]},
+          (* a confluent sector {r, p} is the monomial family
+             (w_q / p!) eps^(q+p) Logx^p x^((branchB + r) eps): the
+             explicit (eps Logx)^p factor shifts the weight tower up by
+             p epsilon orders and adds a plain Logx^p to the monomial. *)
           Do[
             addMonomialWithB[
               basisB,
-              epsMin + gIdx - 1,
+              epsMin + gIdx - 1 + sp,
               lp,
-              0,
-              sector["Coefficients"][[gIdx]]
+              sp,
+              sector["Coefficients"][[gIdx]] / Factorial[sp]
             ],
             {gIdx, Length[sector["Coefficients"]]}
           ];
@@ -1761,11 +1958,21 @@ EvaluateEndpointLimitSectors[seriesList_List, direction_:1] := Module[
             Do[
               Module[{absB = DiffExp`Utilities`PChop[
                   Expand[branchB + sector["ResidualB"]]
-                ]},
+                ], sp = Lookup[sector, "LogPower", 0]},
                 Which[
                   !NumericZeroQ[absB, tol],
                     (* b != 0 sector: put to zero, even at a + lp < 0 *)
                     Null,
+                  sp > 0,
+                    If[AnyTrue[sector["Coefficients"],
+                        !EffectiveZeroExprQ[#, tol] &],
+                      DiffExp`Utilities`PrintWarning[
+                        "EvaluateEndpointLimitSectors: a confluent b = 0 ",
+                        "sector carries Logx^", sp, " at the endpoint; ",
+                        "the limit diverges logarithmically. Dropping ",
+                        "this contribution."
+                      ]
+                    ],
                   atZeroPower,
                     Do[
                       result[[q]] += sector["Coefficients"][[q]],

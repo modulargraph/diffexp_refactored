@@ -79,9 +79,41 @@ exact on synthetic input; the endpoint towers satisfy the level ODE
 exactly.  The pin (-41.28417 at eps^0) is confirmed independently by
 the analytic all-orders box formula.
 
-Therefore the discrepancy is in WHAT is being integrated - the
-combination assembled by ComputeLevelBoundary - or in a normalization
-convention between the dump integrand and the true {2,0,1,1}(t).
+RESOLVED FURTHER (forensics complete, fix pending): the dump integrand
+IS the true G = c1 M1 + c2 M2 (FIRE coefficients verified: c1 =
+(18-6d)/(t-4t^2), c2 = 18(d-3)/(1-5t+4t^2); pointwise eps^0 values
+match the dump analytically at t = 0.05, 0.4, 0.95 to all digits; the
+exporter's "needed"-spec is a DIFFERENT normalization - same class as
+the banana "factor 2" memory note - red herring).  Per-segment
+comparison against semi-analytic window integrals (partial fractions +
+Beta forms, validated: window sum = pin to Laurent truncation) pins the
+ENTIRE deficit on SEGMENT 12 (the xx1 = 1 endpoint segment):
+
+  seg12 true Laurent:      {6, 12.33311519, +4.892941862, -24.49, ...}
+  seg12 machinery Laurent: {6, 12.33311519, -1.798476481, -66.23, ...}
+  Delta(eps^0) = -6.691418 = exactly the global deficit; eps^-2/-1
+  agree to 10 digits; segment 1 (xx1 = 0) is CORRECT (its termwise
+  closed-form reconstruction matches the machinery to 13 digits, and
+  matches the true window integral).
+
+The machinery's seg12 value equals the termwise closed-form of its own
+series under the (+i pi power-phase, +i pi log-value, formal drop at
+the singular end) convention - i.e. integration is internally
+consistent; the stored seg12 tower carries -i pi w1-relative content
+where seg1 carries +i pi w1 (the toUpper transport's branch data for
+the (-1+xx1) factor vs the local-side theta resolution).  Pointwise
+evaluation of the same data is correct, so the inconsistency is
+specifically between the upper-line stored branch structure and the
+endpoint-integration convention.  Flipping evaluation-side branches
+alone is inconsistent (breaks eps^-1); the fix must align the
+convention pair (stored data <-> integration) for upper-anchored
+segments.
+
+Probe inventory (all /tmp): per_segment_truth.py (semi-analytic
+windows), probe_seg12_exact.m (+ _conj/_split variants),
+probe_seg1_exact.m, identity_finite_eps.py, probe_fire_reduction.m.
+
+Previously suspected and now exonerated:
 Pointwise (machinery convention: local-side thetas + complex local
 log) the dump integrand is real and smooth:
   t = 1/20 : -126.3158/eps - 349.2138

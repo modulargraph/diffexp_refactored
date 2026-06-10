@@ -282,6 +282,22 @@ resolveSegmentThetas[segData_List] := Table[
   {segIdx, Length[segData]}
 ];
 
+uncompressSeriesData[rawSeries_] := Module[{},
+  If[StringQ[rawSeries],
+    If[FileExistsQ[rawSeries],
+      Uncompress[Import[rawSeries]],
+      Uncompress[rawSeries]
+    ],
+    rawSeries
+  ]
+];
+
+uncompressSegmentSeries[seg_List] :=
+  ReplacePart[seg, 5 -> uncompressSeriesData[seg[[5]]]];
+
+prepareTransportSegments[transportResult_Association] :=
+  uncompressSegmentSeries /@ transportResult["SegmentData"];
+
 (* ============================================================ *)
 (* DiffExp Loading and Transport                                 *)
 (* ============================================================ *)
@@ -303,7 +319,7 @@ TransportLevel[matrixDir_String, boundaryValues_List, epsOrder_Integer,
       "EpsPrefactors" -> Automatic,
       "ExtraSingularFactors" -> {},
       "HomogeneousSolve" -> "DontExpand",
-      "UseRationalRecurrence" -> False,
+      "UseRationalRecurrence" -> True,
       "IntegrationStrategy" -> "Default",
       "EstimateError" -> "Fast",
       "DeltaPrescriptionSign" -> 1,
@@ -661,6 +677,40 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
 
   segData = transportResult["SegmentData"];
 
+  (* A combined output order n is only complete when every active master
+     still has transport data at the shifted index n + k_j - k for every
+     nonzero IBP coefficient order k.  Above that bound contributions would
+     be silently dropped, so trim those incomplete top orders away instead
+     of handing partially combined epsilon orders downstream (they would
+     poison the residual endpoint-sector resummation in the regularized
+     integration). *)
+  Module[{numEpsOrdersAvailable, completeMaxPower},
+    numEpsOrdersAvailable = Length[uncompressSeriesData[segData[[1, 5]]][[1]]];
+    completeMaxPower = If[Length[activeMasters] == 0,
+      combinedMaxPower,
+      Min[Table[
+        numEpsOrdersAvailable - 1 - prefacs[[j]] +
+          ibpCoeffOrders[[j]]["MinPower"],
+        {j, activeMasters}
+      ]]
+    ];
+    If[completeMaxPower < combinedMaxPower,
+      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+        Print["    [Combine] trimming incomplete top eps orders ",
+          completeMaxPower + 1, " .. ", combinedMaxPower,
+          " (transport provides ", numEpsOrdersAvailable, " orders)"];
+      ];
+      (* Keep at least one output order so callers receive a well-formed
+         (if explicitly warned-about) result. *)
+      combinedMaxPower = Max[completeMaxPower, combinedMinPower];
+    ];
+    If[combinedMaxPower < epsOrder,
+      Print["  Warning: combined series only reaches eps^", combinedMaxPower,
+        " but eps^", epsOrder, " was requested. Increase the transport ",
+        "epsilon order (IntegrationPoleAllowance) for trustworthy results."];
+    ];
+  ];
+
   (* For each segment, combine all masters weighted by IBP coefficients.
      The combined series at eps order n is:
        combined^{(n)}(x) = Sum_j Sum_{k=0}^{n+k_j} c_j^{(k)}(x) * J_j^{(n+k_j-k)}(x)
@@ -682,13 +732,7 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
 	      (* Uncompress the saved local series. Keep DiffExp theta symbols
 	         until point evaluation/integration so segments that cross local
 	         x=0 can use the correct branch on each side. *)
-	      If[StringQ[seriesRaw],
-	        If[FileExistsQ[seriesRaw],
-	           uncompressed = Uncompress[Import[seriesRaw]];,
-	           uncompressed = Uncompress[seriesRaw];
-	        ];,
-	        uncompressed = seriesRaw;
-	      ];
+      uncompressed = uncompressSeriesData[seriesRaw];
 
 	      (* uncompressed[[j]] = list of eps orders for master j
 	         uncompressed[[j]][[n+1]] = SeriesData for J_j at eps order n *)
@@ -997,13 +1041,7 @@ Module[{segData, targetSeg, uncompressed, numMasters,
 
   (* Uncompress series data. Theta symbols must be resolved at the actual
      local endpoint, not once for the whole segment. *)
-  If[StringQ[targetSeg[[5]]],
-    If[FileExistsQ[targetSeg[[5]]],
-       uncompressed = Uncompress[Import[targetSeg[[5]]]];,
-       uncompressed = Uncompress[targetSeg[[5]]];
-    ];,
-    uncompressed = targetSeg[[5]];
-  ];
+  uncompressed = uncompressSeriesData[targetSeg[[5]]];
 
   (* For each master, evaluate the limit *)
   limitValues = LaurentZero[0, workingMaxPower];
@@ -1448,7 +1486,7 @@ RequiredTransportEpsilonOrder[ftData_Association, level_Integer,
 Module[{levelData, levelBelow, mastersBelow, mastersAbove,
         combinedPositions, posI, posJ, topologyAbove, prefacs,
         required = epsOrder, maxProbe, boundaryRequests, neededVecs,
-        reductions},
+        reductions, integrationPoleAllowance},
 
   If[level <= 0 || !KeyExistsQ[ftData["Levels"], level] ||
      !KeyExistsQ[ftData["Levels"], level - 1],
@@ -1471,6 +1509,22 @@ Module[{levelData, levelBelow, mastersBelow, mastersAbove,
   ];
   maxProbe = epsOrder + Max[prefacs] + 20;
   boundaryRequests = BoundaryRequestRecords[mastersBelow, combinedPositions];
+  integrationPoleAllowance = If[
+    AnyTrue[boundaryRequests, #["Case"] === "integrate" &],
+    Module[{raw = Environment["FT_INTEGRATION_POLE_ALLOWANCE"], parsed, configured},
+      parsed = If[StringQ[raw], Quiet[Check[ToExpression[raw], None]], None];
+      configured = Lookup[
+        FeynmanTrick`Private`$FTConfig, "IntegrationPoleAllowance", 4
+      ];
+      Which[
+        IntegerQ[parsed] && parsed >= 0, parsed,
+        IntegerQ[configured] && configured >= 0, configured,
+        True, 4
+      ]
+    ],
+    0
+  ];
+  required = Max[required, epsOrder + integrationPoleAllowance];
   neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
   reductions = If[neededVecs === {},
     <||>,
@@ -1494,7 +1548,8 @@ Module[{levelData, levelBelow, mastersBelow, mastersAbove,
           coeffLaurent = ExpandIBPCoeffLaurent[ibpCoeffs[[j]], maxProbe];
           required = Max[
             required,
-            epsOrder + prefacs[[j]] - coeffLaurent["MinPower"]
+            epsOrder + prefacs[[j]] - coeffLaurent["MinPower"] +
+              integrationPoleAllowance
           ];
         ],
         {j, Length[mastersAbove]}
@@ -1542,7 +1597,8 @@ ComputeLevelBoundary[ftData_Association, level_Integer,
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
         combinedPositions, posI, posJ, topologyAbove, bcValues,
         feynmanParamAbove, epsPrefactorsAbove, shiftedBoundary,
-        workingMaxPower, boundaryRequests, neededVecs, reductions},
+        workingMaxPower, boundaryRequests, neededVecs, reductions,
+        preparedTransportResult},
 
   levelData = ftData["Levels"][level];
   levelAbove = ftData["Levels"][level + 1];
@@ -1599,6 +1655,11 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
     Print["  Combined positions: {", posI, ", ", posJ, "}"];
   ];
 
+  preparedTransportResult = Join[
+    transportResult,
+    <|"SegmentData" -> prepareTransportSegments[transportResult]|>
+  ];
+
   (* For each master at the current level *)
   bcValues = Table[
     Module[{masterVec, vi, vj, neededVec, case, reduction, expr,
@@ -1649,7 +1710,7 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
             ];
 
             IntegrateCombinedMasters[
-              transportResult, ibpCoeffs, vi, vj, epsOrder,
+              preparedTransportResult, ibpCoeffs, vi, vj, epsOrder,
               epsPrefactorsAbove, feynmanParamAbove, True
             ]
           ],
@@ -1657,13 +1718,13 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
         "limitUpper",
           (* lim_{x->1} sum_j ibpCoeffs[[j]] * f_j(x) *)
           EvaluateLimitFromTransport[
-            transportResult, ibpCoeffs, 1, epsOrder, epsPrefactorsAbove, True
+            preparedTransportResult, ibpCoeffs, 1, epsOrder, epsPrefactorsAbove, True
           ],
 
         "limitLower",
           (* lim_{x->0} sum_j ibpCoeffs[[j]] * f_j(x) *)
           EvaluateLimitFromTransport[
-            transportResult, ibpCoeffs, 0, epsOrder, epsPrefactorsAbove, True
+            preparedTransportResult, ibpCoeffs, 0, epsOrder, epsPrefactorsAbove, True
           ],
 
         "direct",
@@ -1727,7 +1788,7 @@ RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
       "ExpansionOrder" -> 50,
       "DivisionOrder" -> 4,
       "HomogeneousSolve" -> "DontExpand",
-      "UseRationalRecurrence" -> False,
+      "UseRationalRecurrence" -> True,
       "IntegrationStrategy" -> "Default",
       "EstimateError" -> "Fast",
       "CheckpointDirectory" -> None,
@@ -1817,11 +1878,17 @@ RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
 
     (* Get matrix directory for this level *)
     matrixDir = FileNameJoin[{outputDir, "Level_" <> ToString[level] <> "_Matrices"}];
-    transportEpsOrder = Min[
-      Length[First[currentBCs]] - 1,
-      RequiredTransportEpsilonOrder[
+    Module[{requiredOrder = RequiredTransportEpsilonOrder[
         updatedFtData, level, epsOrder, currentPrefactors
-      ]
+      ]},
+      transportEpsOrder = Min[Length[First[currentBCs]] - 1, requiredOrder];
+      If[transportEpsOrder < requiredOrder,
+        Print["  Warning: level ", level, " transport needs eps order ",
+          requiredOrder, " but only ", transportEpsOrder,
+          " is available from the boundary above. Top Laurent orders of ",
+          "this level's boundary may be incomplete; increase the deepest ",
+          "boundary order to recover them."];
+      ];
     ];
     If[transportEpsOrder < Length[First[currentBCs]] - 1,
       currentBCs = currentBCs[[All, 1 ;; transportEpsOrder + 1]];

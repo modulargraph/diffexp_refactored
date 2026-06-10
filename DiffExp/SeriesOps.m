@@ -104,15 +104,18 @@ NormalizeLogPower[p_] := Module[
   ]
 ];
 
-MaxLogxPower[ex_] := Module[{powers},
-  powers = NormalizeLogPower /@
-    Append[
-      DiffExp`Utilities`GetCases[
-        ex // SExpand, DiffExp`Symbols`Logx^(k_: 1) :> k
-      ],
-      0
-    ];
-  Max[powers]
+MaxLogxPower[ex_] := Module[{rawPowers, powers},
+  rawPowers = Append[
+    DiffExp`Utilities`GetCases[
+      ex // SExpand, DiffExp`Symbols`Logx^(k_: 1) :> k
+    ],
+    0
+  ];
+  powers = Cases[
+    NormalizeLogPower /@ Flatten[{rawPowers}],
+    _Integer?NonNegative
+  ];
+  If[powers === {}, 0, Max[powers]]
 ];
 
 LogxPowerRange[ex_] := Module[{maxpow = NormalizeLogPower[MaxLogxPower[ex]]},

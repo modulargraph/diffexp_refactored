@@ -135,6 +135,16 @@ PrepareSingularRecurrence[ctx_Association] := Quiet[Check[
     eigenvalues = Eigenvalues[N[residueMat, ctx["WorkingPrecision"]]];
     eigenvalues = Rationalize[eigenvalues, 10^(-ctx["ChopPrecision"]/2)];
 
+    (* Degenerate (snapped-equal) eigenvalues are Jordan/resonant territory:
+       float-level noise splits them by roughly the square root of the
+       noise, so the eigenvector matrix looks full-rank to any reasonable
+       tolerance while being catastrophically ill-conditioned.  Reject and
+       let the general singular recurrence handle the block with proper
+       generalized-eigenvector chains. *)
+    If[Length[DeleteDuplicates[eigenvalues]] < systemSize,
+      Return[$Failed]
+    ];
+
     (* Check diagonalizability: rank of eigenvector matrix must equal system size *)
     eigenvectors = Eigenvectors[N[residueMat, ctx["WorkingPrecision"]]];
     If[MatrixRank[eigenvectors, Tolerance -> 10^(-ctx["ChopPrecision"]/2)] < systemSize,
@@ -270,10 +280,11 @@ ComputeFundamentalMatrix[ctx_Association, aCoeffs_, dCoeffs_, dD_, dA_, d0Inv_] 
       Recurrence cost is O(N^2) per solution but avoids rationalization overhead.
    Both modes bypass the Frobenius/Wronskian machinery. *)
 SolveRationalRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
-  {systemSize, maxOrd, fCoeffs, bSeriesCoeffs, bCoeffAtN, nbCoeff,
-   FMat, fParticular, fGeneral, cIndices, c,
-   dCoeffs, aCoeffs, dD, dA, d0, d0Inv, rationalResult,
-   cache = cacheIn},
+	  {systemSize, maxOrd, fCoeffs, bSeriesCoeffs, bCoeffAtN, nbCoeff,
+	   FMat, fParticular, fGeneral, cIndices, c,
+	   dCoeffs, aCoeffs, dD, dA, d0, d0Inv, rationalResult,
+	   bMaxLogK, zeroVec, logDerivativeCoeff,
+	   cache = cacheIn},
 
   systemSize = ctx["SystemSize"];
   maxOrd = ctx["ExpansionOrder"];
@@ -310,47 +321,90 @@ SolveRationalRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] :=
       systemSize
     ];
     ,
-    (* Extract series coefficients from bVec *)
-    bSeriesCoeffs = Table[
-      bCoeffAtN = SeriesCoefficient[bVec[[k]], {DiffExp`Symbols`x, 0, n}];
-      If[NumericQ[bCoeffAtN], bCoeffAtN, DiffExp`Utilities`PChop[bCoeffAtN]],
-      {n, 0, maxOrd - 1}, {k, systemSize}
-    ];
+	    bMaxLogK = Max[0, Max[Table[
+	      DiffExp`SeriesOps`MaxLogxPower[bVec[[k]]],
+	      {k, systemSize}
+	    ]]];
+	    zeroVec = ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize];
 
-    (* Run recurrence with f_0 = 0 for particular solution *)
-    fCoeffs = ConstantArray[
-      ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
-      maxOrd + 1
-    ];
+	    If[bMaxLogK > DiffExp`State`IMaxLogOrder,
+	      DiffExp`Integration`UpdateIntReps[bMaxLogK];
+	    ];
 
-    Do[
-      (* Compute N_B coefficient at order m: nb_m = sum_{i=0}^{min(m,dD)} d_i * B_{m-i} *)
-      nbCoeff = Sum[
-        If[m - i <= maxOrd - 1,
-          dCoeffs[[i + 1]] * bSeriesCoeffs[[m - i + 1]],
-          ConstantArray[0, systemSize]
-        ],
-        {i, 0, Min[m, dD]}
-      ];
+	    (* Extract series coefficients from each Logx sector of bVec. *)
+	    bSeriesCoeffs = Table[
+	      bCoeffAtN = SeriesCoefficient[
+	        DiffExp`SeriesOps`LogxCoeff[bVec[[k]], logk],
+	        {DiffExp`Symbols`x, 0, n}
+	      ];
+	      If[NumericQ[bCoeffAtN], bCoeffAtN, DiffExp`Utilities`PChop[bCoeffAtN]],
+	      {n, 0, maxOrd - 1}, {logk, 0, bMaxLogK}, {k, systemSize}
+	    ];
 
-      (* f_{m+1} = d0Inv/(m+1) * [nb_m + sum_j a_j.f_{m-j} - sum_{i>=1} d_i*(m-i+1)*f_{m-i+1}] *)
-      fCoeffs[[m + 2]] = d0Inv/(m + 1) * (
-        nbCoeff +
-        Sum[aCoeffs[[j + 1]] . fCoeffs[[m - j + 1]], {j, 0, Min[m, dA]}] -
-        If[dD >= 1,
-          Sum[dCoeffs[[i + 1]] (m - i + 1) fCoeffs[[m - i + 2]], {i, 1, Min[m, dD]}],
-          0
-        ]
-      );
-      , {m, 0, maxOrd - 1}
-    ];
+	    (* Run recurrence with f_0 = 0 for the particular solution.
+	       Coefficients are indexed as fCoeffs[[n+1, logk+1, comp]].
+	       Solve log powers top-down because d/dx Logx^(k+1) contributes to
+	       the Logx^k equation at the same power of x. *)
+	    fCoeffs = ConstantArray[
+	      ConstantArray[
+	        ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
+	        bMaxLogK + 1
+	      ],
+	      maxOrd + 1
+	    ];
 
-    fParticular = Table[
-      SeriesData[DiffExp`Symbols`x, 0,
-        DiffExp`Utilities`PChop[fCoeffs[[All, k]]],
-        0, maxOrd + 1, 1],
-      {k, systemSize}
-    ];
+	    Do[
+	      Do[
+	        (* Compute N_B coefficient at order m and log power logk:
+	           nb_{m,k} = sum_i d_i * B_{m-i,k}. *)
+	        nbCoeff = Sum[
+	          If[m - i <= maxOrd - 1,
+	            dCoeffs[[i + 1]] * bSeriesCoeffs[[m - i + 1, logk + 1]],
+	            zeroVec
+	          ],
+	          {i, 0, Min[m, dD]}
+	        ];
+
+	        logDerivativeCoeff = If[logk < bMaxLogK,
+	          Sum[
+	            If[0 <= m - i + 1 <= maxOrd,
+	              dCoeffs[[i + 1]] * (logk + 1) *
+	                fCoeffs[[m - i + 2, logk + 2]],
+	              zeroVec
+	            ],
+	            {i, 0, Min[m + 1, dD]}
+	          ],
+	          zeroVec
+	        ];
+
+	        (* D f' = N_A f + D B.  Isolate d0*(m+1)*f_{m+1,k};
+	           all lower denominator-derivative terms and Logx-derivative
+	           mixing move to the right-hand side with a minus sign. *)
+	        fCoeffs[[m + 2, logk + 1]] = d0Inv/(m + 1) * (
+	          nbCoeff +
+	          Sum[aCoeffs[[j + 1]] . fCoeffs[[m - j + 1, logk + 1]], {j, 0, Min[m, dA]}] -
+	          If[dD >= 1,
+	            Sum[dCoeffs[[i + 1]] (m - i + 1) fCoeffs[[m - i + 2, logk + 1]], {i, 1, Min[m, dD]}],
+	            zeroVec
+	          ] -
+	          logDerivativeCoeff
+	        );
+	        ,
+	        {logk, bMaxLogK, 0, -1}
+	      ];
+	      , {m, 0, maxOrd - 1}
+	    ];
+
+	    fParticular = Table[
+	      Sum[
+	        DiffExp`Symbols`Logx^logk *
+	          SeriesData[DiffExp`Symbols`x, 0,
+	            DiffExp`Utilities`PChop[fCoeffs[[All, logk + 1, k]]],
+	            0, maxOrd + 1, 1],
+	        {logk, 0, bMaxLogK}
+	      ],
+	      {k, systemSize}
+	    ];
   ];
 
   (* General solution: f = particular + sum_i c_i * F_i *)

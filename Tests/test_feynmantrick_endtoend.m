@@ -237,7 +237,7 @@ Module[{topo, ftData, workDir, exportDir, nLevels},
       Print["  Boundary computed successfully."];
       Print["  Eps prefactors: ", boundary["EpsPrefactors"]];
       Print["  Boundary values (first 3 eps orders): ",
-        N[boundary["BoundaryValues"][[All, 1;;Min[3, Length[boundary["BoundaryValues"][[1]]]]]]]]];
+        N[boundary["BoundaryValues"][[All, 1;;Min[3, Length[boundary["BoundaryValues"][[1]]]]]]]];
       Print["  U value: ", boundary["Uval"]];
       Print["  F value: ", boundary["Fval"]];
       testTrue["Boundary is Association", True];

@@ -27,6 +27,31 @@ ToPiecewise::usage = "ToPiecewise[segmentdata_List, pade_:False] converts segmen
 
 Begin["`Private`"];
 
+NonFiniteOrUnevaluatedSolvePattern = Overflow[] | Indeterminate |
+  ComplexInfinity | DirectedInfinity[_] | _LinearSolve | _LeastSquares |
+  _PseudoInverse;
+
+ReplaceSparseArrays[expr_] := expr /. s_SparseArray :> Normal[s];
+
+NonFiniteOrUnevaluatedSolveQ[expr_] := !FreeQ[
+  ReplaceSparseArrays[Unevaluated[expr]],
+  NonFiniteOrUnevaluatedSolvePattern
+];
+
+FiniteAbsMax[expr_] := Module[{normal = ReplaceSparseArrays[expr]},
+  If[NonFiniteOrUnevaluatedSolveQ[normal],
+    0,
+    Quiet[
+      Check[
+        Max[Abs[Flatten[normal]]],
+        0,
+        {Max::nord}
+      ],
+      {Max::nord}
+    ]
+  ]
+];
+
 (* Prepare boundary conditions *)
 PrepareBoundaryConditions[bcs_List, line2_Association | line2_List] := Module[
   {line, CoeffList = {}, Coeffs, CoeffSer, bcs1, unitSeries = (1 // N[#, DiffExp`State`FEWorkingPrecision] &), Mask, ispoint, LineRat, maskedEntry},
@@ -335,9 +360,14 @@ IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_L
           {Cmat, Cb} = {#[[2]], -#[[1]]} &@CoefficientArrays[BoundaryEqns2, cIndices];
 
           solveFailed = False;
-          If[!MemberQ[BoundaryEqns2, False],
+          If[
+            !MemberQ[BoundaryEqns2, False] &&
+              !NonFiniteOrUnevaluatedSolveQ[{Cmat, Cb}],
             Check[csol = LinearSolve[Cmat, Cb, ZeroTest -> (N[DiffExp`Utilities`LSPChop@Expand@Normal[#1], DiffExp`State`LinearSolveChopPrecisionVal] == 0 &)];
               , solveFailed = True;];
+            If[!solveFailed && NonFiniteOrUnevaluatedSolveQ[csol],
+              solveFailed = True;
+            ];
             , solveFailed = True;];
 
           If[solveFailed && !MemberQ[BoundaryEqns2, False],
@@ -348,13 +378,16 @@ IntegrateSystem[bcs2 : (_List | _Association) : "?", line2_Association | line2_L
               ],
               $Failed
             ];
-            If[csolLeastSquares =!= $Failed,
+            If[csolLeastSquares =!= $Failed &&
+                !NonFiniteOrUnevaluatedSolveQ[csolLeastSquares],
               lsResidual = Norm[
                 N[Cmat.csolLeastSquares - Cb, DiffExp`State`LinearSolveChopPrecisionVal]
               ];
               lsScale = 1 + Norm[N[Cb, DiffExp`State`LinearSolveChopPrecisionVal]];
               lsTol = 10^-Min[80, Max[20, Floor[DiffExp`State`LinearSolveChopPrecisionVal/4]]];
-              If[lsResidual <= lsTol lsScale,
+              If[
+                !NonFiniteOrUnevaluatedSolveQ[{lsResidual, lsScale}] &&
+                  lsResidual <= lsTol lsScale,
                 DiffExp`Utilities`PrintDebug[
                   "Boundary matching used checked least-squares solve with relative residual ",
                   N[lsResidual/lsScale]
@@ -569,7 +602,7 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
   {bcs, FixAt} = DiffExp`LineSegmentation`CheckBoundaryConditionsAndReparametrize[previousBoundaryConditions = bcs, line];
 
   If[Length[previousBoundaryConditions] > 2,
-    accumulatedError = previousBoundaryConditions[[3]] // Abs // Max;
+    accumulatedError = FiniteAbsMax[previousBoundaryConditions[[3]]];
     accumulatedErrors = previousBoundaryConditions[[3]];
     ,
     Quiet[
@@ -757,9 +790,9 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
 
     If[FixAtLineSegment === 0,
       CurrErrorLeft = 0;,
-      CurrErrorLeft = CurrErrorTerms /. (DiffExp`State`AnalyticContinuationReplacements /. If[FixAtLineSegment >= 0, {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}, {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]) /. DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /. DiffExp`Symbols`x -> FixAtLineSegment // Abs // N[#, DiffExp`State`FEWorkingPrecision] & // Max;
+      CurrErrorLeft = CurrErrorTerms /. (DiffExp`State`AnalyticContinuationReplacements /. If[FixAtLineSegment >= 0, {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}, {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]) /. DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /. DiffExp`Symbols`x -> FixAtLineSegment // N[#, DiffExp`State`FEWorkingPrecision] & // FiniteAbsMax;
     ];
-    CurrErrorRight = CurrErrorTerms /. (DiffExp`State`AnalyticContinuationReplacements /. If[CurrEvalPointCurrLine >= 0, {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}, {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]) /. DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /. DiffExp`Symbols`x -> CurrEvalPointCurrLine // Abs // N[#, DiffExp`State`FEWorkingPrecision] & // Max;
+    CurrErrorRight = CurrErrorTerms /. (DiffExp`State`AnalyticContinuationReplacements /. If[CurrEvalPointCurrLine >= 0, {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}, {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]) /. DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /. DiffExp`Symbols`x -> CurrEvalPointCurrLine // N[#, DiffExp`State`FEWorkingPrecision] & // FiniteAbsMax;
     CurrError = Max[CurrErrorLeft, CurrErrorRight]
   ];
 
@@ -950,7 +983,7 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
         ]
       ]
 
-    ) // Abs // Max, {ii, (errorsByOrder // Dimensions)[[2]]}, {jj, (errorsByOrder // Dimensions)[[3]]}] // N
+    ) // FiniteAbsMax, {ii, (errorsByOrder // Dimensions)[[2]]}, {jj, (errorsByOrder // Dimensions)[[3]]}] // N
   ];
 
   PrintError[] := Block[{segmentErrors, endpointErrors, boundaryErrors, indeterminates},
@@ -961,9 +994,13 @@ TransportTo[bcs2 : (_List | _Association), line2_Association | line2_List, to2 :
 
       endpointErrors = ComputeErrorsPerIndeterminate[CurrEvalError1, CurrEval, indeterminates];
       boundaryErrors = ComputeErrorsPerIndeterminate[CurrEvalError2, CurrEvalAtBoundaryFixPoint, indeterminates];
-      segmentErrors = Table[Max[{endpointErrors[[ii, jj]], boundaryErrors[[ii, jj]]}], {ii, First@Dimensions@endpointErrors}, {jj, Last@Dimensions@endpointErrors}];
+      segmentErrors = Table[
+        FiniteAbsMax[{endpointErrors[[ii, jj]], boundaryErrors[[ii, jj]]}],
+        {ii, First@Dimensions@endpointErrors},
+        {jj, Last@Dimensions@endpointErrors}
+      ];
 
-      CurrError = Flatten[segmentErrors] // Abs // Max;
+      CurrError = FiniteAbsMax[segmentErrors];
 
       Switch[DiffExp`State`FEC["EstimateError"],
         "Fast",

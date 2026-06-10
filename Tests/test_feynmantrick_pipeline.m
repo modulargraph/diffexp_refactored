@@ -183,6 +183,7 @@ Module[{topology, ftData, outputDir, epsOrder, matrixEpsOrder, boundaryEpsOrder,
         "WorkingPrecision" -> 200,
         "ExpansionOrder" -> 30,
         "Verbosity" -> 1,
+        "UseRationalRecurrence" -> False,
         "EpsPrefactors" -> $deepBoundary["EpsPrefactors"]
       ];
 
@@ -288,6 +289,7 @@ Module[{topology, ftData, outputDir, epsOrder, matrixEpsOrder, boundaryEpsOrder,
         "WorkingPrecision" -> 200,
         "ExpansionOrder" -> 30,
         "Verbosity" -> 1,
+        "UseRationalRecurrence" -> False,
         "EpsPrefactors" -> currentPrefactors
       ];
 
@@ -324,6 +326,7 @@ Module[{topology, ftData, outputDir, epsOrder, matrixEpsOrder, boundaryEpsOrder,
             "WorkingPrecision" -> 200,
             "ExpansionOrder" -> 30,
             "Verbosity" -> 1,
+            "UseRationalRecurrence" -> False,
             "EpsPrefactors" -> currentPrefactors
           ];
 

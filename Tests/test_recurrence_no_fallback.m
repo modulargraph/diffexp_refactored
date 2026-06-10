@@ -27,6 +27,7 @@ dispatch = read["DiffExp/IntegrationStrategies/Dispatch.m"];
 singular = read["DiffExp/IntegrationStrategies/Recurrence.m"];
 generalSingular = read["DiffExp/IntegrationStrategies/ResonantRecurrence.m"];
 state = read["DiffExp/State.m"];
+ftDiffExpIntegration = read["FeynmanTrick/DiffExpIntegration.m"];
 
 pass[
   "restricted singular recurrence does not call SolveDefault",
@@ -54,6 +55,16 @@ pass[
   "UseRationalRecurrence usage documents exclusive recurrence behavior",
   containsQ[state, "no recursive strategy accepts a block"] &&
     containsQ[state, "instead of silently falling back"]
+];
+
+pass[
+  "DiffExp defaults to recurrence mode",
+  containsQ[state, "UseRationalRecurrence -> True"]
+];
+
+pass[
+  "FeynmanTrick transport defaults to recurrence mode",
+  containsQ[ftDiffExpIntegration, "\"UseRationalRecurrence\" -> True"]
 ];
 
 Print["\n==========================================="];

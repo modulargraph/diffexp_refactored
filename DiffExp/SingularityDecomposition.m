@@ -78,6 +78,90 @@ ShiftSeriesByPower[ser_SeriesData, a_] := Module[
 ShiftSeriesByPower[0, a_] := 0;
 ShiftSeriesByPower[n_?NumericQ, a_] := n * DiffExp`Symbols`x^(-a);
 
+AddCompatibleSeries[terms_List] := Module[
+  {activeTerms, seriesTerms, first, var, center, den, minPow, maxPow,
+   coeffs, hasConstants, constMaxPower},
+
+  activeTerms = Select[terms, #[[1]] =!= 0 && #[[2]] =!= 0 &];
+  If[activeTerms === {}, Return[0, Module]];
+
+  seriesTerms = Select[activeTerms, MatchQ[#[[2]], _SeriesData] &];
+  If[seriesTerms === {},
+    Return[
+      DiffExp`Utilities`PChop[
+        Expand[Total[#[[1]] #[[2]] & /@ activeTerms]]
+      ],
+      Module
+    ]
+  ];
+
+  If[!AllTrue[
+      activeTerms,
+      MatchQ[#[[2]], _SeriesData] ||
+        TrueQ[FreeQ[#[[2]], DiffExp`Symbols`x]] &
+    ],
+    Return[
+      DiffExp`SeriesOps`SExpand[
+        Total[#[[1]] #[[2]] & /@ activeTerms]
+      ],
+      Module
+    ]
+  ];
+
+  first = seriesTerms[[1, 2]];
+  {var, center, den} = {first[[1]], first[[2]], first[[6]]};
+  If[!AllTrue[
+      seriesTerms[[All, 2]],
+      #[[1]] === var && #[[2]] === center && #[[6]] === den &
+    ],
+    Return[
+      DiffExp`SeriesOps`SExpand[
+        Total[#[[1]] #[[2]] & /@ activeTerms]
+      ],
+      Module
+    ]
+  ];
+
+  hasConstants = Length[seriesTerms] < Length[activeTerms];
+  constMaxPower = den;
+  minPow = Min[
+    Join[
+      seriesTerms[[All, 2, 4]],
+      If[hasConstants, {0}, {}]
+    ]
+  ];
+  maxPow = Max[
+    Join[
+      seriesTerms[[All, 2, 5]],
+      If[hasConstants, {constMaxPower}, {}]
+    ]
+  ];
+  coeffs = ConstantArray[0, Max[0, maxPow - minPow]];
+
+  Do[
+    Module[{factor = term[[1]], ser = term[[2]], start},
+      If[MatchQ[ser, _SeriesData],
+        start = ser[[4]] - minPow + 1;
+        Do[
+          coeffs[[start + idx - 1]] += factor ser[[3, idx]],
+          {idx, Length[ser[[3]]]}
+        ],
+        coeffs[[1 - minPow]] += factor ser
+      ];
+    ],
+    {term, activeTerms}
+  ];
+
+  SeriesData[
+    var,
+    center,
+    DiffExp`Utilities`PChop[Expand[#]] & /@ coeffs,
+    minPow,
+    maxPow,
+    den
+  ]
+];
+
 (* Multiply series by x^(-b*eps) expanded to given epsilon order *)
 (* x^(-b*eps) = exp(-b*eps*Logx) = Sum[(-b*Logx)^n/n! * eps^n, {n, 0, Infinity}] *)
 (* This modifies the epsilon expansion coefficients *)
@@ -88,12 +172,14 @@ MultiplyByXMinusBEps[seriesList_List, b_] := Module[
   (* For each eps order n, we need to account for contributions from
      lower orders k via (-b*Logx)^(n-k)/(n-k)! *)
   result = Table[
-    Sum[
-      (* When n = k, the factor is 1 (avoid 0^0 issue) *)
-      factor = If[n == k, 1, (-b * DiffExp`Symbols`Logx)^(n - k) / (n - k)!];
-      factor * seriesList[[k + 1]],
-      {k, 0, n}
-    ] // DiffExp`SeriesOps`SExpand,
+    AddCompatibleSeries[
+      Table[
+        (* When n = k, the factor is 1 (avoid 0^0 issue) *)
+        factor = If[n == k, 1, (-b * DiffExp`Symbols`Logx)^(n - k) / (n - k)!];
+        {factor, seriesList[[k + 1]]},
+        {k, 0, n}
+      ]
+    ],
     {n, 0, epsOrder}
   ];
   result
@@ -203,6 +289,18 @@ DecomposeSingularity[seriesList_List] := Module[
         (* Rationalize b - it should be an integer or simple fraction *)
         If[NumericQ[b],
           b = Rationalize[b, ratTol];
+        ];
+        (* A numeric b that does not rationalize cleanly is the collapsed
+           average of several x^(a + b_i eps) sectors sharing this power
+           (it can even come out complex).  Extracting it would only
+           reshuffle the epsilon tower against a meaningless exponent;
+           keep b = 0 so the tower stays explicit for the downstream
+           endpoint-sector recovery. *)
+        If[NumericQ[b] &&
+            !(IntegerQ[b] || Head[b] === Rational) ||
+            (Head[b] === Rational && Denominator[b] > 16) ||
+            (NumericQ[b] && Abs[b] > 100),
+          b = 0;
         ];
         Break[];
       ];

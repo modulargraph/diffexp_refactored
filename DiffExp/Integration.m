@@ -20,12 +20,17 @@ SetAttributes[DiffExpIntegrate1, Listable];
 IntReps = {};
 
 (* Main integration function *)
-DiffExpIntegrate[a__] := Block[{LogOrd},
+DiffExpIntegrate[a__] := Block[{LogOrd, rawLogPowers, logPowers},
   (* If maximum power of Logx has increased, update the replacement relations. *)
-  LogOrd = Append[
+  rawLogPowers = Append[
     DiffExp`Utilities`GetCases[{a} // DiffExp`SeriesOps`SExpand, DiffExp`Symbols`Logx^(k_: 1) | Log[DiffExp`Symbols`x]^(k_: 1) :> k],
     1
-  ] // Max;
+  ];
+  logPowers = Cases[
+    DiffExp`SeriesOps`NormalizeLogPower /@ Flatten[{rawLogPowers}],
+    _Integer?NonNegative
+  ];
+  LogOrd = If[logPowers === {}, 1, Max[logPowers]];
 
   If[LogOrd > DiffExp`State`IMaxLogOrder,
     DiffExp`Utilities`PrintDebug["Encountered ", Log[DiffExp`Symbols`x]^LogOrd, ". Updating IntReps."][2];

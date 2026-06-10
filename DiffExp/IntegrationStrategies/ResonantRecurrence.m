@@ -59,6 +59,90 @@ ExpandedMatrixMinOrder[AMatExpanded_, systemSize_Integer] := Module[{minOrders},
   Min[minOrders]
 ];
 
+NonFinitePattern = Overflow[] | Indeterminate | ComplexInfinity |
+  DirectedInfinity[_] | _LinearSolve | _LeastSquares | _PseudoInverse;
+
+ReplaceSparseArrays[expr_] := expr /. s_SparseArray :> Normal[s];
+
+NonFiniteExpressionQ[expr_] := !FreeQ[
+  ReplaceSparseArrays[Unevaluated[expr]],
+  NonFinitePattern
+];
+
+FiniteAbsMax[expr_] := Module[{normal = ReplaceSparseArrays[Unevaluated[expr]]},
+  If[NonFiniteExpressionQ[normal],
+    0,
+    Quiet[
+      Check[
+        Max[Abs[Flatten[normal]]],
+        0,
+        {Max::nord}
+      ],
+      {Max::nord}
+    ]
+  ]
+];
+
+TrimNonFiniteSeriesTails[expr_, ctx_Association, epsord_, source_String] :=
+Module[{trimmed = {}, failed = False, result, trimOne},
+  trimOne[s_SeriesData] := Module[
+    {coeffs = s[[3]], badFlags, badIndices, firstBad, tailIndices,
+     newMax},
+
+    badFlags = NonFiniteExpressionQ /@ coeffs;
+    badIndices = Flatten@Position[badFlags, True];
+    If[badIndices === {}, Return[s]];
+
+    firstBad = First[badIndices];
+    tailIndices = Range[firstBad, Length[coeffs]];
+    If[badIndices =!= tailIndices,
+      failed = True;
+      DiffExp`State`LastErrorContext = <|
+        "Context" -> ctx,
+        "EpsilonOrder" -> epsord,
+        "Source" -> source,
+        "Series" -> s,
+        "BadCoefficientIndices" -> badIndices
+      |>;
+      Return[s];
+    ];
+
+    newMax = s[[4]] + firstBad - 1;
+    AppendTo[
+      trimmed,
+      <|
+        "Source" -> source,
+        "EpsilonOrder" -> epsord,
+        "Label" -> Lookup[ctx, "Label", Missing["Unknown"]],
+        "FirstDroppedPower" -> newMax/s[[6]],
+        "DroppedCount" -> Length[badIndices]
+      |>
+    ];
+    SeriesData[s[[1]], s[[2]], Take[coeffs, firstBad - 1],
+      s[[4]], newMax, s[[6]]]
+  ];
+
+  result = expr /. s_SeriesData :> trimOne[s];
+  If[failed,
+    DiffExp`Utilities`ReportError[
+      "General singular recurrence produced non-finite local coefficients ",
+      "before the truncation tail for integral(s) ",
+      Lookup[ctx, "Label", Missing["Unknown"]],
+      " at epsilon order ",
+      epsord,
+      "."
+    ];
+  ];
+  If[Length[trimmed] > 0,
+    DiffExp`Utilities`PrintWarning[
+      "General singular recurrence dropped trailing non-finite local-series ",
+      "coefficient tail(s): ",
+      trimmed
+    ];
+  ];
+  result
+];
+
 FuchsianizedSingularRecurrenceApplicableQ[ctx_Association] := Quiet[Check[
   Module[{minOrder},
     If[MissingQ[ctx["AMatFactored"]], Return[False]];
@@ -79,6 +163,19 @@ BuildFuchsianizedRecurrenceData[ctx_Association] := Module[
   maxOrd = ctx["ExpansionOrder"];
   systemSize = ctx["SystemSize"];
   thetaMat = Together[x ctx["AMatFactored"]];
+
+  (* The lattice saturation and the trim pass decide pole cancellations with
+     exact zero tests (RatCancel pivots, minimum-valuation checks).  On
+     numeric coefficients those cancellations are never exact, so the trim
+     test keeps "succeeding" on noise and multiplies lattice columns by x
+     once per pass, ratcheting T up to x^50-scale entries while the working
+     precision collapses.  Rationalize the local matrix (its entries are
+     exact data evaluated at the numeric segment center) and run the whole
+     reduction in exact arithmetic. *)
+  thetaMat = Rationalize[
+    thetaMat,
+    10^(-Max[20, ctx["WorkingPrecision"] - 50])
+  ];
 
   fb = DiffExp`LocalSeries`FuchsianizeLocal[
     thetaMat,
@@ -103,6 +200,34 @@ BuildFuchsianizedRecurrenceData[ctx_Association] := Module[
     Return[$Failed]
   ];
 
+  (* Guard against degenerate lattices: a local balance only needs power
+     shifts of the order of the system size plus the pole depth.  Anything
+     much larger means the reduction went numerically astray. *)
+  Module[{maxDeg},
+    maxDeg = Max[Map[
+      Function[entry,
+        If[TrueQ[PossibleZeroQ[entry]],
+          0,
+          Module[{tog = Together[entry]},
+            Max[
+              Exponent[Numerator[tog], x],
+              Exponent[Denominator[tog], x]
+            ]
+          ]
+        ]
+      ],
+      T, {2}
+    ]];
+    If[!TrueQ[maxDeg <= 4 systemSize + 8],
+      DiffExp`Utilities`PrintWarning[
+        "BuildFuchsianizedRecurrenceData: local Fuchsianizing lattice has ",
+        "entries of x-degree ", maxDeg,
+        "; refusing the degenerate balance."
+      ];
+      Return[$Failed]
+    ];
+  ];
+
   ctxG = Join[
     ctx,
     <|
@@ -115,6 +240,140 @@ BuildFuchsianizedRecurrenceData[ctx_Association] := Module[
   <|"T" -> T, "TInv" -> TInv, "Ctx" -> ctxG, "Subcache" -> <||>|>
 ];
 
+(* Toleranced Jordan data for a numeric residue matrix with a degenerate
+   snapped spectrum.  Builds generalized-eigenvector chains per snapped
+   eigenvalue from toleranced nested null spaces of (M - lambda)^k, so that
+   float-level splitting of degenerate eigenvalues cannot leak ill-scaled
+   exact eigenvectors into the fundamental system.  Returns {S, J} in the
+   same convention as JordanDecomposition (chains ordered eigenvector
+   first; J carries the snapped eigenvalues with 1's on the superdiagonal
+   inside each chain), or $Failed. *)
+NumericJordanData[residueMat_, snappedSpectrum_, wp_, tolerance_] := Quiet[Check[
+  Catch[
+    Module[{M, d, clusters, columns = {}, jdiag = {}, jsuper = {},
+            projectOut, svdNullBasis, S, J},
+
+      M = N[residueMat, wp];
+      d = Length[M];
+      clusters = Tally[snappedSpectrum];
+
+      (* Orthonormal toleranced null basis via the right singular vectors;
+         NullSpace[..., Tolerance] is unreliable for high-precision input
+         (it can underflow to machine arithmetic and return nothing). *)
+      svdNullBasis[mat_] := Module[{u, s, v, svals, smax},
+        {u, s, v} = SingularValueDecomposition[N[mat, wp]];
+        svals = Diagonal[s];
+        smax = Max[Append[Abs[svals], 0]];
+        If[TrueQ[smax == 0],
+          IdentityMatrix[d],
+          Select[
+            Transpose[v],
+            Function[col,
+              TrueQ[Norm[mat . col] <= Max[tolerance smax, tolerance]]
+            ]
+          ]
+        ]
+      ];
+
+      (* Component of vec orthogonal to span(vs); vs need not be
+         orthonormal (orthonormalized on the fly). *)
+      projectOut[vec_, vs_] := Module[{work = vec, basis},
+        basis = Orthogonalize[vs, Method -> "GramSchmidt"];
+        basis = DeleteCases[basis, v_ /; Norm[v] < 1/2];
+        Do[
+          work = work - (Conjugate[b] . work) b,
+          {b, basis}
+        ];
+        work
+      ];
+
+      Do[
+        Module[{lambda = cluster[[1]], mult = cluster[[2]], Mshift,
+                powers, nullBases, depth, chains = {}, levelMembers,
+                tops, cand, k},
+          Mshift = M - lambda IdentityMatrix[d];
+
+          (* Nested toleranced null spaces of Mshift^k up to multiplicity. *)
+          nullBases = {};
+          powers = IdentityMatrix[d];
+          depth = 0;
+          While[depth < mult + 1,
+            depth++;
+            powers = powers . Mshift;
+            AppendTo[nullBases, svdNullBasis[powers]];
+            If[Length[Last[nullBases]] >= mult, Break[]];
+          ];
+          If[Length[Last[nullBases]] != mult,
+            Throw[$Failed, "numericJordan"]
+          ];
+          depth = Length[nullBases];
+
+          (* levelMembers[k] collects vectors already claimed at level k by
+             deeper chains; new level-k tops must be independent of these
+             and of Null(Mshift^(k-1)). *)
+          levelMembers = ConstantArray[{}, depth];
+
+          Do[
+            Do[
+              cand = projectOut[
+                candidate,
+                Join[
+                  If[k > 1, nullBases[[k - 1]], {}],
+                  levelMembers[[k]]
+                ]
+              ];
+              If[Norm[cand] > tolerance^(1/3),
+                Module[{top = cand / Norm[cand], chain},
+                  chain = NestList[Mshift . # &, top, k - 1];
+                  (* chain = {v_k, v_(k-1), ..., v_1}; the deepest entry is
+                     the eigenvector.  Reject defective chains whose lower
+                     members degenerate. *)
+                  If[Min[Norm /@ chain] < tolerance^(1/3),
+                    Throw[$Failed, "numericJordan"]
+                  ];
+                  Do[
+                    levelMembers[[k - j + 1]] =
+                      Append[levelMembers[[k - j + 1]], chain[[j]]],
+                    {j, k}
+                  ];
+                  AppendTo[chains, {k, Reverse[chain]}];
+                ];
+              ],
+              {candidate, nullBases[[k]]}
+            ],
+            {k, depth, 1, -1}
+          ];
+
+          If[Total[First /@ chains] != mult,
+            Throw[$Failed, "numericJordan"]
+          ];
+
+          Do[
+            Module[{k = ch[[1]], cols = ch[[2]]},
+              columns = Join[columns, cols];
+              jdiag = Join[jdiag, ConstantArray[lambda, k]];
+              jsuper = Join[jsuper, Append[ConstantArray[1, k - 1], 0]];
+            ],
+            {ch, chains}
+          ];
+        ],
+        {cluster, clusters}
+      ];
+
+      If[Length[columns] != d, Throw[$Failed, "numericJordan"]];
+
+      S = Transpose[columns];
+      If[Abs[Det[S]] < tolerance, Throw[$Failed, "numericJordan"]];
+
+      J = DiagonalMatrix[jdiag] + DiagonalMatrix[Most[jsuper], 1];
+
+      {S, J}
+    ],
+    "numericJordan"
+  ],
+  $Failed
+]];
+
 (* Compute the resonance structure of the eigenvalues.
    Returns an Association with:
    - "Eigenvalues": rationalized eigenvalues (list)
@@ -126,7 +385,7 @@ BuildFuchsianizedRecurrenceData[ctx_Association] := Module[
 *)
 ComputeResonanceStructure[residueMat_, systemSize_, ctx_Association] := Module[
   {eigenvalues, rawEigenvalues, jordanS, jordanJ, jordanSInv, jordanData,
-   residueForJordan,
+   residueForJordan, snappedSpectrum, degenerateSnapped,
    blockStarts, blockSizes, blockEigenvalues,
    resonanceClasses, visited, class, classIdx,
    solutionExponents, maxLogPowers, initialLogPowers, initialVectors,
@@ -135,11 +394,37 @@ ComputeResonanceStructure[residueMat_, systemSize_, ctx_Association] := Module[
 
   tolerance = 10^(-ctx["ChopPrecision"]/2);
 
-  (* Compute Jordan decomposition. Numeric JordanDecomposition can fail for
-     exactly rational residues at high precision, so try the rationalized
-     residue first and only then fall back to a numerical decomposition. *)
-  residueForJordan = Rationalize[residueMat, tolerance];
-  jordanData = Quiet[Check[JordanDecomposition[residueForJordan], $Failed]];
+  (* The residue of a local system evaluated at a numeric segment center
+     carries float-level noise that splits degenerate eigenvalues by roughly
+     the square root of the noise.  Exact JordanDecomposition on (a
+     rationalization of) such a matrix sees distinct eigenvalues with
+     ill-scaled eigenvectors and returns a useless similarity matrix.
+     Detect spectral degeneracy from the snapped spectrum and build the
+     Jordan data with toleranced generalized-nullspace chains instead. *)
+  snappedSpectrum = Quiet[Check[
+    Rationalize[
+      Eigenvalues[N[residueMat, ctx["WorkingPrecision"]]],
+      tolerance
+    ],
+    $Failed
+  ]];
+  degenerateSnapped = ListQ[snappedSpectrum] &&
+    Max[Last /@ Tally[snappedSpectrum]] > 1;
+
+  jordanData = If[degenerateSnapped,
+    NumericJordanData[residueMat, snappedSpectrum,
+      ctx["WorkingPrecision"], tolerance],
+    $Failed
+  ];
+
+  If[!(ListQ[jordanData] && Length[jordanData] === 2 &&
+       MatrixQ[jordanData[[1]]] && MatrixQ[jordanData[[2]]]),
+    (* Compute Jordan decomposition. Numeric JordanDecomposition can fail for
+       exactly rational residues at high precision, so try the rationalized
+       residue first and only then fall back to a numerical decomposition. *)
+    residueForJordan = Rationalize[residueMat, tolerance];
+    jordanData = Quiet[Check[JordanDecomposition[residueForJordan], $Failed]];
+  ];
   If[!(ListQ[jordanData] && Length[jordanData] === 2 &&
        MatrixQ[jordanData[[1]]] && MatrixQ[jordanData[[2]]]),
     jordanData = Quiet[Check[
@@ -412,11 +697,49 @@ ComputeResonantFundamentalMatrix[ctx_Association, resInfo_Association,
     Ln = N[(lambda) * IdentityMatrix[systemSize] - M0, wp];
     LnData = {};
 
-    (* For n = 0, iterate k from initK - 1 down to 0 *)
+    (* For n = 0, iterate k from initK - 1 down to 0.  L_0 is singular by
+       construction, so every chain step leaves kernel freedom; the
+       minimal-norm pseudo-inverse choice strips kernel components that the
+       true generalized-eigenvector chain needs, making the NEXT step's
+       right-hand side inconsistent (which SolveRecurrenceStep would
+       silently project away).  Resolve each step's freedom from the next
+       step's solvability, exactly like the n >= 1 loop below. *)
+    prevFreeParams = {};
     Do[
       rhs = -(k + 1) * fCoeffs[[1, k + 2]];
       {fCoeffs[[1, k + 1]], nullVecs, isSingular} =
         SolveRecurrenceStep[Ln, rhs, systemSize, ctx];
+
+      If[isSingular && Length[prevFreeParams] > 0,
+        Module[{leftNull, fullRhs, alpha, prevNull, overlapMat,
+                overlapMagnitude, rhsVec},
+          leftNull = NullSpace[Transpose[Ln], Tolerance -> tolerance];
+          prevNull = prevFreeParams;
+          If[Length[leftNull] > 0 && Length[prevNull] > 0,
+            fullRhs = -(k + 1) * fCoeffs[[1, k + 2]];
+            overlapMat = Table[
+              leftNull[[a]] . prevNull[[b]],
+              {a, Length[leftNull]}, {b, Length[prevNull]}
+            ] * (-(k + 1));
+            rhsVec = Table[leftNull[[a]] . fullRhs, {a, Length[leftNull]}];
+            overlapMagnitude = FiniteAbsMax[overlapMat];
+            If[overlapMagnitude > tolerance,
+              alpha = PseudoInverse[
+                N[overlapMat, wp], Tolerance -> tolerance
+              ] . (-rhsVec);
+              Do[
+                fCoeffs[[1, k + 2]] += alpha[[j]] * prevNull[[j]];
+                , {j, Length[prevNull]}
+              ];
+              rhs = -(k + 1) * fCoeffs[[1, k + 2]];
+              {fCoeffs[[1, k + 1]], nullVecs, isSingular} =
+                SolveRecurrenceStep[Ln, rhs, systemSize, ctx];
+            ];
+          ];
+        ];
+      ];
+
+      prevFreeParams = If[isSingular, nullVecs, {}];
       ,
       {k, initK - 1, 0, -1}
     ];
@@ -453,7 +776,7 @@ ComputeResonantFundamentalMatrix[ctx_Association, resInfo_Association,
              Recompute: adjust f_{n, k+1} by adding null-space components
              and check if this makes the current step solvable. *)
           Module[{leftNull, fullRhs, residualProj, correction, alpha,
-                  prevNull, overlapMat, rhsVec},
+                  prevNull, overlapMat, overlapMagnitude, rhsVec},
             leftNull = NullSpace[Transpose[Ln], Tolerance -> tolerance];
             prevNull = prevFreeParams;
 
@@ -482,7 +805,8 @@ ComputeResonantFundamentalMatrix[ctx_Association, resInfo_Association,
               ] * (-(k + 1));
               rhsVec = Table[leftNull[[a]] . fullRhs, {a, Length[leftNull]}];
 
-              If[Max[Abs[Flatten[overlapMat]]] > tolerance,
+              overlapMagnitude = FiniteAbsMax[overlapMat];
+              If[overlapMagnitude > tolerance,
                 (* Solve for alpha *)
                 alpha = Quiet[Check[
                   SafeNumericLinearSolve[overlapMat, -rhsVec, wp, tolerance],
@@ -671,7 +995,7 @@ RunParticularRecurrence[sigma_, bCoeffs_, bMaxLogK_, kMax_,
 CheckParticularResidual[fCoeffs_, sigma_, bCoeffs_, bMaxLogK_, kMax_,
     M0_, mCoeffs_, numMCoeffs_,
     systemSize_, maxOrd_, wp_, tolerance_] := Module[
-  {maxResidual = 0, Ln, rhs, residual, n, k},
+  {maxResidual = 0, Ln, rhs, residual, residualMagnitude, n, k},
 
   Do[
     Ln = N[(sigma + n) * IdentityMatrix[systemSize] - M0, wp];
@@ -681,7 +1005,20 @@ CheckParticularResidual[fCoeffs_, sigma_, bCoeffs_, bMaxLogK_, kMax_,
         rhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
           bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
         residual = Ln . fCoeffs[[n + 1, k + 1]] - rhs;
-        maxResidual = Max[maxResidual, Max[Abs[residual]]];
+        (* Analytic-continuation theta symbols may survive in the source;
+           FiniteAbsMax would silently treat such symbolic residuals as 0,
+           blinding this check.  Evaluate both branches instead. *)
+        residualMagnitude = If[
+          FreeQ[residual, DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m],
+          FiniteAbsMax[residual],
+          Max[
+            FiniteAbsMax[residual /. {
+              DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}],
+            FiniteAbsMax[residual /. {
+              DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]
+          ]
+        ];
+        maxResidual = FiniteAbsMax[{maxResidual, residualMagnitude}];
         , {k, kMax, 0, -1}
       ];
     ];
@@ -886,6 +1223,12 @@ ComputeUnifiedParticular[bVec_, resInfo_Association,
           M0, mCoeffs, numMCoeffs,
           systemSize, maxOrd, wp, tolerance];
 
+        If[TrueQ[DiffExp`State`$DebugFuchsianizedCheck],
+          Print["UNIPART sigma=", sigma, " bMaxLogK=", bMaxLogK,
+            " kMax=", kMax, " maxResidual=", ScientificForm[N[maxResidual, 3]],
+            " tol=", ScientificForm[N[tolerance, 2]]];
+        ];
+
         If[maxResidual < tolerance,
           (* Solution is good *)
           Break[];
@@ -996,8 +1339,10 @@ SolveGeneralSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Associat
       systemSize
     ];
     ,
-    fParticular = ComputeUnifiedParticular[bVec, resInfo,
-      mCoeffs, numMCoeffs, ctx];
+    fParticular = Quiet[
+      ComputeUnifiedParticular[bVec, resInfo, mCoeffs, numMCoeffs, ctx],
+      {Max::nord}
+    ];
 
     (* UseRationalRecurrence is an exclusive recurrence mode. Do not hide
        recurrence failures by using the default Wronskian/Frobenius path. *)
@@ -1011,14 +1356,75 @@ SolveGeneralSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Associat
         ". Refusing to fall back to the default Wronskian/Frobenius path."
       ];
     ];
+    fParticular = TrimNonFiniteSeriesTails[fParticular, ctx, epsord,
+      "particular"];
   ];
 
   (* General solution: f = particular + sum_i c_i * FMat_column_i *)
   cIndices = Table[Subscript[c, i], {i, systemSize}];
   fGeneral = fParticular + Sum[cIndices[[i]] * FMat[[All, i]], {i, systemSize}];
   fGeneral = DiffExp`SeriesOps`SExpand[fGeneral];
+  fGeneral = TrimNonFiniteSeriesTails[fGeneral, ctx, epsord,
+    "general"];
+
+  If[TrueQ[DiffExp`State`$DebugFuchsianizedCheck],
+    DebugCheckBlockSolution["GENCHECK", ctx, bVec, cIndices, fGeneral, epsord];
+  ];
 
   {cIndices, fGeneral, cache}
+];
+
+(* Gated debug self-check shared by the singular solvers: verify each piece
+   of a general solution (particular and each fundamental column) against
+   the block ODE f' = A f + b around the local origin.  Enable by setting
+   DiffExp`State`$DebugFuchsianizedCheck = True. *)
+DebugCheckBlockSolution[tag_String, ctx_Association, bVec_, cIndices_,
+    fGeneral_, epsord_] := Module[
+  {xv, LL, A, toN, ddx, maxAbs, pieces, checkOrd = 8},
+  xv = DiffExp`Symbols`x;
+  LL = Unique["LL"];
+  A = ctx["AMatFactored"];
+  If[MissingQ[A], Return[Null, Module]];
+  toN[s_SeriesData] := Module[{nmin = s[[4]], den = s[[6]], cf = s[[3]]},
+    Sum[cf[[i]] xv^((nmin + i - 1)/den),
+      {i, Min[Length[cf], (checkOrd + 3) den - nmin + 1]}] /.
+      DiffExp`Symbols`Logx -> LL
+  ];
+  toN[e_] := e /. DiffExp`Symbols`Logx -> LL;
+  ddx[e_] := D[e, xv] + D[e, LL]/xv;
+  maxAbs[e_] := Module[{tr, vals},
+    tr = Normal[Quiet[Expand[e] + O[xv]^(checkOrd - 2)]];
+    vals = Table[
+      Max[Flatten[{0, Abs[N[
+        (tr /. br /. LL -> Log[xv] /. xv -> SetPrecision[-1/20, 60]),
+        20]]}]],
+      {br, {
+        {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0},
+        {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}
+      }}
+    ];
+    Max[vals]
+  ];
+  pieces = Join[
+    {{"particular", fGeneral /. Thread[cIndices -> 0], toN /@ bVec}},
+    Table[
+      {"hom" <> ToString[i],
+       Coefficient[#, cIndices[[i]]] & /@ fGeneral,
+       ConstantArray[0, Length[bVec]]},
+      {i, Length[cIndices]}
+    ]
+  ];
+  Do[
+    Module[{name = piece[[1]], fv = toN /@ piece[[2]], src = piece[[3]], r},
+      r = Max[Table[
+        maxAbs[ddx[fv[[comp]]] - (A[[comp]] . fv) - src[[comp]]],
+        {comp, Length[fv]}
+      ]];
+      Print[tag, " ", ctx["Label"], " eps^", epsord, " ", name,
+        " maxResid=", ScientificForm[N[r, 3]]];
+    ],
+    {piece, pieces}
+  ];
 ];
 
 SolveFuchsianizedSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
@@ -1060,6 +1466,33 @@ SolveFuchsianizedSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Ass
   cache["FuchsianRR"] = data;
 
   fGeneral = DiffExp`SeriesOps`SExpand[T . gGeneral];
+
+  (* Debug self-check: verify each piece of the back-transformed general
+     solution against the original-frame block ODE f' = A f + b.  Enable by
+     setting DiffExp`State`$DebugFuchsianizedCheck = True. *)
+  If[TrueQ[DiffExp`State`$DebugFuchsianizedCheck],
+    Print["FUCHSCHECK eps^", epsord,
+      " bVec free of thetas: ",
+      FreeQ[bVec, DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m],
+      ", free of Logx: ", FreeQ[bVec, DiffExp`Symbols`Logx]];
+    Print["FUCHSCHECK eps^", epsord, " bVecG info: ",
+      Table[
+        Module[{e = bVecG[[i]]},
+          Which[
+            MatchQ[e, _SeriesData],
+            {"ser", e[[4]]/e[[6]], e[[5]]/e[[6]],
+              DiffExp`SeriesOps`MaxLogxPower[e]},
+            True,
+            {Head[e], DiffExp`SeriesOps`MaxLogxPower[e]}
+          ]
+        ],
+        {i, Length[bVecG]}
+      ]
+    ];
+  ];
+  If[TrueQ[DiffExp`State`$DebugFuchsianizedCheck],
+    DebugCheckBlockSolution["FUCHSCHECK", ctx, bVec, cIndices, fGeneral, epsord];
+  ];
 
   {cIndices, fGeneral, cache}
 ];

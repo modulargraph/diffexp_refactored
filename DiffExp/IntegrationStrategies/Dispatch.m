@@ -7,13 +7,11 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
    useRationalRecurrence, useSingularRecurrence, useGeneralSingularRecurrence,
    useFuchsianizedSingularRecurrence, singularEigenData},
 
-  (* Check if rational recurrence should be used (non-singular points) *)
-  useRationalRecurrence = (
-    ctx["UseRationalRecurrence"] === True &&
-    RationalRecurrenceApplicableQ[ctx] &&
-    (* bVec must not contain Logx (non-singular point solutions are Logx-free) *)
-    !DiffExp`Utilities`DependsQ[bVec, DiffExp`Symbols`Logx]
-  );
+	  (* Check if rational recurrence should be used (non-singular points) *)
+	  useRationalRecurrence = (
+	    ctx["UseRationalRecurrence"] === True &&
+	    RationalRecurrenceApplicableQ[ctx]
+	  );
 
   (* Check if singular recurrence should be used (simple pole, non-resonant) *)
   (* Uses PrepareSingularRecurrence which combines the check and eigenvalue computation *)
@@ -51,6 +49,32 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
     ctx["UseRationalRecurrence"] === True &&
     FuchsianizedSingularRecurrenceApplicableQ[ctx]
   );
+
+  (* Optional dispatch trace for debugging local solves: enable by setting
+     DiffExp`State`$LogStrategyDispatch = True (survives LoadConfiguration). *)
+  If[TrueQ[DiffExp`State`$LogStrategyDispatch],
+    If[!ListQ[DiffExp`State`StrategyDispatchLog],
+      DiffExp`State`StrategyDispatchLog = {}
+    ];
+    AppendTo[
+      DiffExp`State`StrategyDispatchLog,
+      <|
+        "Label" -> ctx["Label"],
+        "EpsilonOrder" -> epsord,
+        "SystemSize" -> ctx["SystemSize"],
+        "Strategy" -> Which[
+          ctx["SystemSize"] === 1 &&
+            Normal[DiffExp`Utilities`PChop[ctx["AMatExpanded"]]] === {{0}},
+          "Simple",
+          useRationalRecurrence, "RationalRecurrence",
+          useSingularRecurrence, "SingularRecurrence",
+          useGeneralSingularRecurrence, "GeneralSingularRecurrence",
+          useFuchsianizedSingularRecurrence, "FuchsianizedSingularRecurrence",
+          True, "Other"
+        ]
+      |>
+    ];
+  ];
 
   Which[
     (* Simple case: single integral without homogeneous components *)

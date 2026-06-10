@@ -40,6 +40,14 @@ $FTConfig = <|
   "AutoDetectRestrictions" -> False,
   "ReductionCache" -> True,
   "WorkingPrecision" -> 500,
+  (* Extra epsilon orders requested from each level transport beyond the
+     orders needed by the IBP coefficients alone.  Regularized endpoint
+     integration consumes lookahead: each x^(a + b eps) endpoint pole
+     deepens the Laurent window by one order, and recovering several
+     x^(a + b_i eps) sectors that DecomposeSingularity collapsed into one
+     average exponent needs sectorCount extra orders for the residual
+     moment solve plus one guard order for the truncation boundary. *)
+  "IntegrationPoleAllowance" -> 4,
   "Verbosity" -> 1
 |>;
 

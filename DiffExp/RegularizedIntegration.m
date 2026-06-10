@@ -507,10 +507,24 @@ IntegrateSingularTermLaurent[a_, b_, epsMinPower_Integer, gList_List, {xmin_, xm
   If[!zeroQ[xmin] && !zeroQ[xmax] &&
      TrueQ[realNumericAtActivePrecision[xmin, tol] < 0 <
        realNumericAtActivePrecision[xmax, tol]],
+    If[!zeroQ[DiffExp`Utilities`PChop[Expand[
+          b /. {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}]]] ||
+       !zeroQ[DiffExp`Utilities`PChop[Expand[
+          b /. {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]]],
+      DiffExp`Utilities`PrintWarning[
+        "IntegrateSingularTermLaurent: interval straddles the local ",
+        "singular point with nonzero epsilon exponent b = ", b,
+        ". The real-log split assumes a meromorphic (b = 0) crossing; ",
+        "x^(b eps) branch phases on the negative side are NOT applied ",
+        "and the result may be wrong."
+      ];
+    ];
     Return[
-      LaurentAdd[
-        IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {xmin, 0}],
-        IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {0, xmax}]
+      Block[{$InteriorSplitRealLog = True},
+        LaurentAdd[
+          IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {xmin, 0}],
+          IntegrateSingularTermLaurent[a, b, epsMinPower, gList, {0, xmax}]
+        ]
       ]
     ]
   ];
@@ -546,6 +560,97 @@ IntegrateSingularTermLaurent[a_, b_, epsMinPower_Integer, gList_List, {xmin_, xm
      towers: towers mean the true sector exponents survive inside gList
      (e.g. perfectly cancelling leading weights), and shifting the basis
      exponent by one would displace every recovered x^(b eps) sector. *)
+
+  (* A meromorphic term (b = 0, no Logx) must not regulate its REGULAR
+     powers: the unit regulator is a bookkeeping device whose formal
+     endpoint drops pair up across segments only for the genuinely
+     divergent powers x^(a+m), a+m <= -1.  Regulating the regular
+     remainder injects artificial higher-epsilon terms - e.g. an eps^-1
+     coefficient c1 x leaks c1 (B log B - A log|A| - (B-A)) into eps^0.
+     Peel the regular part off and integrate it exactly. *)
+  If[zeroQ[effectiveB] && atLowerSingularity =!= False &&
+      TrueQ[realNumericAtActivePrecision[a, tol] <= -1 + tol] &&
+      FreeQ[gList, DiffExp`Symbols`Logx] && IntegerQ[a] &&
+      AllTrue[gList, MatchQ[#, _SeriesData] || NumericQ[#] &] &&
+      AllTrue[Cases[gList, s_SeriesData :> s[[6]]], # === 1 &],
+    Module[{splitPow = -a, gSing, gReg, singAllZero},
+      gSing = Map[
+        Function[g, If[MatchQ[g, _SeriesData],
+          SeriesData[g[[1]], 0,
+            Table[
+              If[g[[4]] + j - 1 < splitPow && j <= Length[g[[3]]],
+                g[[3, j]], 0],
+              {j, Length[g[[3]]]}
+            ],
+            g[[4]], g[[5]], 1
+          ],
+          g  (* numeric constant: power 0 < splitPow, singular side *)
+        ]],
+        gList
+      ];
+      gReg = Map[
+        Function[g, If[MatchQ[g, _SeriesData],
+          SeriesData[g[[1]], 0,
+            Table[
+              If[g[[4]] + j - 1 >= splitPow && j <= Length[g[[3]]],
+                g[[3, j]], 0],
+              {j, Length[g[[3]]]}
+            ],
+            g[[4]] + a, g[[5]] + a, 1
+          ],
+          0
+        ]],
+        gList
+      ];
+      singAllZero = AllTrue[gSing, EffectiveZeroExprQ[#, tol] &];
+      (* The singular part is meromorphic (b = 0): integrate each power
+         with its Hadamard finite-part antiderivative directly.  The
+         formal divergence at x = 0 is dropped (it pairs with the partner
+         arm of the split / the neighbouring segment, giving PV for the
+         residue), and crucially NO epsilon dependence is introduced, so
+         nothing leaks between epsilon orders.  Routing this through the
+         unit-regulated subtraction machinery instead leaks boundary
+         terms of higher-epsilon residues into lower orders. *)
+      Return[
+        LaurentAdd[
+          If[singAllZero,
+            LaurentZero[epsMinPower, epsMinPower + Length[gList] - 1],
+            Module[{fpAt, slotVal},
+              fpAt = Function[{aTot, X},
+                Which[
+                  TrueQ[PossibleZeroQ[X]] ||
+                    TrueQ[Abs[numericAtActivePrecision[X]] < tol], 0,
+                  aTot === -1, Log[Abs[numericAtActivePrecision[X]]],
+                  True, numericAtActivePrecision[X]^(aTot + 1)/(aTot + 1)
+                ]
+              ];
+              slotVal = Function[g,
+                If[MatchQ[g, _SeriesData],
+                  Sum[
+                    Module[{m = g[[4]] + j - 1, c = g[[3, j]]},
+                      If[m < splitPow && !TrueQ[PossibleZeroQ[c]],
+                        c * (fpAt[a + m, xmax] - fpAt[a + m, xmin]),
+                        0
+                      ]
+                    ],
+                    {j, Length[g[[3]]]}
+                  ],
+                  If[NumericQ[g] && !TrueQ[PossibleZeroQ[g]],
+                    g * (fpAt[a, xmax] - fpAt[a, xmin]),
+                    0
+                  ]
+                ]
+              ];
+              <|"MinPower" -> epsMinPower,
+                "Coefficients" -> Map[slotVal, gSing]|>
+            ]
+          ],
+          IntegrateSingularTermLaurent[0, 0, epsMinPower, gReg, {xmin, xmax}]
+        ]
+      ];
+    ]
+  ];
+
   regulatorB = If[
     zeroQ[effectiveB] && atLowerSingularity =!= False &&
       TrueQ[realNumericAtActivePrecision[a, tol] <= -1 + tol] &&
@@ -1405,7 +1510,6 @@ thetaRulesAtPoint[pt_, direction_:Automatic] := Module[
     TrueQ[realNumericAtActivePrecision[pt, tol] < 0], -1,
     True, 1
   ];
-
   If[sign < 0,
     {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1},
     {DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}
@@ -1456,8 +1560,16 @@ EvaluateIntegralAtPoint[expr_, pt_, a_, atSingularity_] := Module[
     (* Only finite constant terms survive *)
     FiniteEndpointConstant[branchExpr]
     ,
-    (* Normal evaluation *)
-    val = branchExpr /. DiffExp`Symbols`Logx -> Log[DiffExp`Symbols`x] /.
+    (* Normal evaluation.  In the interior-split path (an integration
+       interval straddling the local singular point, split at zero) the
+       negative arm must use the REAL log of the distance: both arms hold
+       real series of a meromorphic crossing and the formal regulator
+       bookkeeping cancels between them.  Complex Log[negative] there
+       leaks i*pi (and -pi^2 at the next order) into the result.  The
+       endpoint-regularized paths instead rely on complex Log pairing
+       with the theta-resolved branch phases, so this stays conditional. *)
+    val = branchExpr /. DiffExp`Symbols`Logx ->
+        If[TrueQ[$InteriorSplitRealLog], Log[Abs[ptPrecise]], Log[ptPrecise]] /.
       DiffExp`Symbols`x -> ptPrecise;
     val = numericAtActivePrecision[val, precision];
     If[NumericQ[val] && TrueQ[Abs[numericAtActivePrecision[val, precision]] > 10^100],

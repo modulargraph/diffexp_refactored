@@ -1,31 +1,93 @@
 #!/usr/bin/env python3
 """Compare STEPWISE boundary rows from a stepwise-check log against
-pySecDec references. Usage: compare_stepwise_log.py <logfile> [level]"""
+pySecDec references.
+
+Usage: compare_stepwise_log.py <logfile> [level] [--refs results.json ...]
+
+References come from two sources:
+  - hardcoded banana values below (family exporter, z0 = 11/23);
+  - any number of --refs files: results.json as written by
+    Scripts/pysecdec_family_driver.py (keys (level, master) are read from
+    each entry's spec, values parsed from the pySecDec summary line).
+"""
+import argparse
 import json
 import re
 import sys
 
 REFS = {
     # banana level 1 at z0 = 11/23 (pySecDec, family exporter)
-    (1, (2, 0, 1, 1)): {0: 5.4025802965},
-    (1, (1, 0, 1, 0)): {-2: -2.0037878788, -1: 2.2439088015, 0: -13.5042252469},
-    (1, (1, 0, 0, 1)): {-2: -2.0037878788, -1: 2.2439088015, 0: -13.5042252469},
-    (1, (1, 0, 1, 1)): {-3: 1/3, -2: -0.1144868285, -1: 1.3904392399, 0: -5.8738356912},
-    (1, (1, 0, 1, 2)): {-2: 0.5, -1: -0.1717302427, 0: -0.9025092631},
-    (1, (1, 0, 2, 1)): {-2: 0.5, -1: -0.1717302427, 0: -0.9025092631},
+    ("banana", 1, (2, 0, 1, 1)): {0: 5.4025802965},
+    ("banana", 1, (1, 0, 1, 0)): {-2: -2.0037878788, -1: 2.2439088015, 0: -13.5042252469},
+    ("banana", 1, (1, 0, 0, 1)): {-2: -2.0037878788, -1: 2.2439088015, 0: -13.5042252469},
+    ("banana", 1, (1, 0, 1, 1)): {-3: 1/3, -2: -0.1144868285, -1: 1.3904392399, 0: -5.8738356912},
+    ("banana", 1, (1, 0, 1, 2)): {-2: 0.5, -1: -0.1717302427, 0: -0.9025092631},
+    ("banana", 1, (1, 0, 2, 1)): {-2: 0.5, -1: -0.1717302427, 0: -0.9025092631},
     # no direct pySecDec reference for the numerator master {1,-1,1,1}
     # banana level 0 (direct Feynman-parameter integration)
-    (0, (1, 1, 1, 1)): {0: 8.26810451329511583109184},
+    ("banana", 0, (1, 1, 1, 1)): {0: 8.26810451329511583109184},
 }
 
 TOL = 5e-6
 
+# one Laurent term of a pySecDec summary line, real or complex payload:
+#   + (1.234e+00 +/- 2e-09)*eps^-2     or
+#   + ((1.2e+00,3.4e-05) +/- (2e-09,1e-09))*eps^0
+TERM_RE = re.compile(
+    r"([+-])\s*\(\s*(\(?[^()]*?\)?)\s*\+/-\s*(\(?[^()]*?\)?)\s*\)\s*\*\s*eps\^\(?(-?\d+)\)?"
+)
+
+
+def parse_value(tok: str) -> complex:
+    tok = tok.strip()
+    if tok.startswith("(") and tok.endswith(")"):
+        re_s, im_s = tok[1:-1].split(",")
+        return complex(float(re_s), float(im_s))
+    return complex(float(tok), 0.0)
+
+
+def parse_summary(summary: str) -> dict:
+    out = {}
+    for sign, val, _err, power in TERM_RE.findall(summary):
+        v = parse_value(val)
+        if sign == "-":
+            v = -v
+        out[int(power)] = v
+    return out
+
+
+def load_refs_file(path: str) -> dict:
+    refs = {}
+    for entry in json.loads(open(path).read()):
+        spec = entry.get("spec", {})
+        if "Level" not in spec or "Master" not in spec:
+            continue
+        # skip the duplicated "_needed" exports of the same master
+        if entry.get("source_name", "").endswith("_needed"):
+            continue
+        coeffs = parse_summary(entry.get("summary", ""))
+        if not coeffs:
+            continue
+        key = (spec.get("Example", ""), int(spec["Level"]),
+               tuple(int(v) for v in spec["Master"]))
+        refs[key] = {p: c.real for p, c in coeffs.items() if abs(c.imag) < 1e-6 * max(1.0, abs(c.real))}
+    return refs
+
 
 def main():
-    path = sys.argv[1]
-    only_level = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    ap = argparse.ArgumentParser()
+    ap.add_argument("logfile")
+    ap.add_argument("level", nargs="?", type=int, default=None)
+    ap.add_argument("--refs", action="append", default=[],
+                    help="pysecdec_family_driver results.json (repeatable)")
+    args = ap.parse_args()
+
+    refs = dict(REFS)
+    for rf in args.refs:
+        refs.update(load_refs_file(rf))
+
     rows = []
-    for line in open(path):
+    for line in open(args.logfile):
         if line.startswith("STEPWISE "):
             payload = line[len("STEPWISE "):]
             # Mathematica RawJSON can emit zero-precision zeros like 0.e-63,
@@ -35,14 +97,16 @@ def main():
     failures = 0
     for row in rows:
         level = int(round(row["Level"]))
-        if only_level is not None and level != only_level:
+        if args.level is not None and level != args.level:
             continue
-        master = tuple(int(round(v)) for v in row["Master"])[:4]
+        master = tuple(int(round(v)) for v in row["Master"])
+        example = row.get("Example", "")
         coeffs = {}
         for p, c in row["Coefficients"]:
             val = c if isinstance(c, (int, float)) else complex(c["Re"], c["Im"])
             coeffs[int(round(p))] = val
-        ref = REFS.get((level, master))
+        ref = refs.get((example, level, master),
+                       refs.get((example, level, master[:4])))
         print(f"L{level} {list(master)}:")
         for p in sorted(coeffs):
             v = coeffs[p]

@@ -49,6 +49,41 @@ numericAtActivePrecision[expr_, precision_:Automatic] := Module[
 GetLeadingPower[ser_SeriesData] := ser[[4]] / ser[[6]];
 GetLeadingPower[0] := Infinity;
 GetLeadingPower[n_?NumericQ] := 0;
+NormalizeXPower[p_] := Module[{tol, np, rounded},
+  If[IntegerQ[p] || Head[p] === Rational, Return[p, Module]];
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  np = numericAtActivePrecision[p];
+  If[np =!= $Failed && NumericQ[np],
+    rounded = Round[np];
+    If[Abs[np - rounded] < tol,
+      Rationalize[rounded, 0],
+      Rationalize[np, tol]
+    ],
+    p
+  ]
+];
+TermXPower[term_] := Module[{tagged, powers},
+  tagged = term /. Power[DiffExp`Symbols`x, p_] :> xPowerTag[p] /.
+    DiffExp`Symbols`x -> xPowerTag[1];
+  powers = Cases[tagged, xPowerTag[p_] :> p, Infinity];
+  NormalizeXPower[Total[powers]]
+];
+GetLeadingPower[expr_] := Module[{expanded, terms, powers},
+  expanded = DiffExp`Utilities`PChop[Expand[expr]];
+  If[TrueQ[PossibleZeroQ[expanded]], Return[Infinity, Module]];
+  terms = If[Head[expanded] === Plus, List @@ expanded, {expanded}];
+  powers = DeleteCases[
+    Table[
+      Module[{power = TermXPower[term], coeff},
+        coeff = DiffExp`Utilities`PChop[Expand[term / DiffExp`Symbols`x^power]];
+        If[EffectivelyZeroExpr[coeff], Missing["Zero"], power]
+      ],
+      {term, terms}
+    ],
+    Missing["Zero"]
+  ];
+  If[powers === {}, Infinity, Min[powers]]
+];
 
 (* Get the coefficient at a specific power of x in a SeriesData *)
 (* Power k means x^k; returns the full coefficient (may contain Logx) *)
@@ -63,6 +98,24 @@ GetCoefficientAtPower[ser_SeriesData, k_] := Module[
 ];
 GetCoefficientAtPower[0, k_] := 0;
 GetCoefficientAtPower[n_?NumericQ, k_] := If[k == 0, n, 0];
+GetCoefficientAtPower[expr_, k_] := Module[
+  {expanded, terms, tol, selected},
+  expanded = DiffExp`Utilities`PChop[Expand[expr]];
+  If[TrueQ[PossibleZeroQ[expanded]], Return[0, Module]];
+  terms = If[Head[expanded] === Plus, List @@ expanded, {expanded}];
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  selected = Table[
+    Module[{power = TermXPower[term]},
+      If[TrueQ[power == k] ||
+          TrueQ[NumericQ[N[power - k]] && Abs[N[power - k, activeNumericPrecision[]]] < tol],
+        term / DiffExp`Symbols`x^power,
+        0
+      ]
+    ],
+    {term, terms}
+  ];
+  DiffExp`Utilities`PChop[Expand[Total[selected]]]
+];
 
 (* Multiply a series by x^(-a) to shift powers *)
 (* After this, leading power becomes 0 *)
@@ -77,6 +130,10 @@ ShiftSeriesByPower[ser_SeriesData, a_] := Module[
 ];
 ShiftSeriesByPower[0, a_] := 0;
 ShiftSeriesByPower[n_?NumericQ, a_] := n * DiffExp`Symbols`x^(-a);
+ShiftSeriesByPower[expr_, a_] :=
+  DiffExp`Utilities`PChop[
+    Expand[expr * DiffExp`Symbols`x^(-a)]
+  ];
 
 AddCompatibleSeries[terms_List] := Module[
   {activeTerms, seriesTerms, first, var, center, den, minPow, maxPow,
@@ -239,6 +296,7 @@ EffectivelyZero[ser_SeriesData] := Module[{coeffs},
     ]
   ]
 ];
+EffectivelyZero[expr_] := EffectivelyZeroExpr[expr];
 
 (* ============================================================ *)
 (* Main decomposition algorithm *)

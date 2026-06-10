@@ -70,6 +70,20 @@ If[Length[pureLogDecomp] == 1,
 ];
 
 testsTotal++;
+plainExprDecomp = DiffExp`SingularityDecomposition`DecomposeSingularity[
+  {SetPrecision[-1/2, 80] * DiffExp`Symbols`x +
+    SetPrecision[3, 80] * DiffExp`Symbols`x^2}
+];
+If[DiffExp`SingularityDecomposition`Private`GetLeadingPower[
+      plainExprDecomp[[1]]["g"][[1]]] === 1 &&
+    Length[plainExprDecomp] == 1 && plainExprDecomp[[1]]["a"] === 0 &&
+    plainExprDecomp[[1]]["b"] === 0,
+  pass["plain polynomial x-series decomposes with numeric coefficients"],
+  fail["plain polynomial x-series decomposes with numeric coefficients",
+    plainExprDecomp]
+];
+
+testsTotal++;
 directNonzeroInterval =
   DiffExp`RegularizedIntegration`IntegrateSingularTermLaurent[
     -1, 1, 0, {1, 0}, {1, 2}

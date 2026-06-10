@@ -44,7 +44,7 @@ FT_WORKING_PRECISION=500 \
 FT_EXPANSION_ORDER=50 \
 FT_DIVISION_ORDER=4 \
 FT_BOUNDARY_EXTRA_ORDER=8 \
-wolframscript -file temp/feynmantrick_stepwise_pysecdec_check.m
+wolframscript -file Scripts/run_ft_stepwise.m
 ```
 
 Level 3 and level 2 (unchanged, matched before):
@@ -70,7 +70,7 @@ All imaginary parts are at or below `1e-16` (numerical noise).
 limit fix below; the numerator master `{1,-1,1,1}` has NO direct pySecDec
 reference (see the exporter caveat in "Level-0 Fix") and is validated
 indirectly through the level-0 result.  Compare STEPWISE rows of any run
-with `temp/compare_stepwise_log.py <log> [level]`.
+with `Scripts/compare_stepwise_log.py <log> [level]`.
 
 ## Root Causes Found
 
@@ -189,16 +189,16 @@ duplicated non-finite-expression helpers now live once in
 `ReplaceSparseArrays`).
 
 The canonical end-to-end check for all examples is
-`temp/feynmantrick_stepwise_pysecdec_check.m`
+`Scripts/run_ft_stepwise.m`
 (`FT_EXAMPLES=bubble,sunrise,banana`); the box example is covered by
 `Tests/test_feynmantrick_pipeline.m`.
 
 ## Diagnostic Tools
 
-- `temp/eval_dump_generic.m`: evaluate any Laurent dump
+- `Scripts/eval_dump_generic.m`: evaluate any Laurent dump
   (`DUMP_FILE=... [PRINT_SEGMENTS=0]`), prints totals and per-segment
   results.
-- `temp/debug_banana_l1_sector_fit.m`: inspect the residual sector fit for
+- `debug_banana_l1_sector_fit.m (removed; see git history)`: inspect the residual sector fit for
   a dump segment (`DUMP_FILE=... SEG_INDEX=... LOCAL_POWER=...`), prints
   moments, Hankel data, roots, weights, and per-q coefficient rows.
 - Dumps are produced by setting `DIFFEXP_DUMP_LAURENT_DIR=<dir>` during a
@@ -220,7 +220,7 @@ banana {1,1,1,1} finite = 8.26810451329511583109184...   (no eps poles)
 The level-0 run (`FT_EXAMPLES=banana`, no stop level) initially produced
 spurious `eps^-2`/`eps^-1` poles and O(10^-3) imaginary contamination.
 Diagnosing the level-1 -> 0 transport with per-segment ODE-residual checks
-(`temp/check_transport_ode_residual.m`) exposed FOUR local-solver bugs at
+(`Scripts/check_transport_ode_residual.m`) exposed FOUR local-solver bugs at
 the singular endpoints `xx1 = 0, 1` of the level-1 system in the
 Feynman-trick variable (the level-1 system is the first place where a
 nilpotent DOUBLE pole and 5-fold resonant residues appear; bubble/sunrise
@@ -289,8 +289,8 @@ numerator master `{1,-1,1,1}`.
 
 pySecDec was rerun for ALL level-1 masters at a second parameter point
 z0 = 2/5 (export with `FT_FIXED_VALUE=2/5` via
-`temp/export_pysecdec_family_specs.m`, run with
-`temp/pysecdec_family_driver.py --factor-monomials`; the `_loop_`
+`Scripts/export_pysecdec_family_specs.m`, run with
+`Scripts/pysecdec_family_driver.py --factor-monomials`; the `_loop_`
 exporter fails with "scaleless" for this family).  Comparison against the
 transported functions at xx1 = 2/5:
 
@@ -379,7 +379,7 @@ IMPORTANT correction to the 2/5 table in the previous section: the
 `{1,-1,1,1}` "reference" `0.166667/eps^3` was INVALID - the family
 exporter silently dropped the `-1` numerator index, so the exported spec
 (U, F, powers, remainder, prefactor) was byte-identical to `{1,0,1,1}`'s
-and the value was `{1,0,1,1}`'s.  `temp/export_pysecdec_family_specs.m`
+and the value was `{1,0,1,1}`'s.  `Scripts/export_pysecdec_family_specs.m`
 now refuses masters with negative indices.  Numerator masters have no
 direct pySecDec reference; they are validated indirectly through the
 level-0 result.
@@ -457,7 +457,7 @@ entirely.  The residual ~1e-8 difference reflects the accuracy the data
 carries through the x = 1/2 resonant crossing (values arrive there with
 finite accumulated accuracy and the solve is exact on them); pushing
 further digits would require precision re-padding at segment handoffs.
-Compare any run with `temp/compare_stepwise_log.py <log>`.
+Compare any run with `Scripts/compare_stepwise_log.py <log>`.
 
 ## Remaining Notes / Next Steps
 
@@ -478,7 +478,7 @@ Compare any run with `temp/compare_stepwise_log.py <log>`.
    banana level 0 = 8.2681045359 (reference 8.26810451329...),
    bubble = 0.860817881928008 and sunrise = 2.2367927002126465 through
    their final values
-   (`temp/feynmantrick_stepwise_pysecdec_check.m` with
+   (`Scripts/run_ft_stepwise.m` with
    `FT_EXAMPLES=bubble,sunrise,banana` and no stop level).
 5. To push the banana level-0 agreement beyond ~1e-9, re-pad the working
    precision at segment handoffs in the level-1 transport: the values

@@ -107,11 +107,6 @@ seriesAtActivePrecision[expr_] := DiffExp`SeriesOps`SApply[
   expr
 ];
 
-seriesChop[expr_] := DiffExp`SeriesOps`SApply[
-  DiffExp`Utilities`PChop,
-  expr
-];
-
 seriesMultiplyByX[ser_SeriesData] :=
   SeriesData[ser[[1]], ser[[2]], ser[[3]], ser[[4]] + ser[[6]],
     ser[[5]] + ser[[6]], ser[[6]]];
@@ -444,49 +439,6 @@ ApplyRegularizationStep[a_, b_, gList_List, c_] :=
     {result[[1]], result[[2]], result[[3]], result[[4]]}
   ];
 
-(* Old interface for compatibility - returns {a+1, b, newGList} *)
-ApplyRegularizationStepOld[a_, b_, gList_List, c_] := Module[
-  {epsOrder, newGList, transformedG, n},
-
-  epsOrder = Length[gList] - 1;
-
-  transformedG = Table[
-    Module[{gAtOrd, gAtOrdMinus1, gpAtOrd},
-      gAtOrd = gList[[ord + 1]];
-      gAtOrdMinus1 = If[ord > 0, gList[[ord]], 0];
-      gpAtOrd = KnownSeriesDerivative[gAtOrd, DiffExp`Symbols`x];
-      DiffExp`SeriesOps`SExpand[
-        (2 + a) / c * gAtOrd +
-        (If[ord > 0, b / c * gAtOrdMinus1, 0]) -
-        (1 - DiffExp`Symbols`x / c) * gpAtOrd
-      ]
-    ],
-    {ord, 0, epsOrder}
-  ];
-
-  If[1 + a == 0,
-    DiffExp`Utilities`ReportError["ApplyRegularizationStepOld: a = -1 encountered. Use ApplyRegularizationStep with epsMinPower."];
-  ];
-
-  newGList = Table[
-    Sum[
-      Module[{prefactorCoeff},
-        prefactorCoeff = (-b / (1 + a))^k / (1 + a);
-        If[n - k >= 0 && n - k <= epsOrder,
-          prefactorCoeff * transformedG[[n - k + 1]],
-          0
-        ]
-      ],
-      {k, 0, n}
-    ] // DiffExp`SeriesOps`SExpand,
-    {n, 0, epsOrder}
-  ];
-
-  {a + 1, b, newGList}
-];
-
-(* Repeatedly apply regularization until a >= 0, tracking eps offset *)
-(* Returns {newA, b, epsMinPower, newGList} *)
 RegularizeIntegrand[a_, b_, gList_List, c_] :=
   RegularizeIntegrand[a, b, 0, gList, c];
 
@@ -641,105 +593,6 @@ IntegrateSingularTermLaurent[a_, b_, epsMinPower_Integer, gList_List, {xmin_, xm
   <|"MinPower" -> regEpsMin, "Coefficients" -> result|>
 ];
 
-branchSymbolsPattern = DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m;
-
-prepareBranchResolvedExpr[expr_, branchRules_, tol_] := If[
-  FreeQ[expr, branchSymbolsPattern],
-  expr,
-  expr /. branchRules
-];
-
-prepareBranchResolvedSeries[ser_SeriesData, branchRules_, tol_] := If[
-  FreeQ[ser[[3]], branchSymbolsPattern],
-  ser,
-  DiffExp`SeriesOps`SApply[
-    prepareBranchResolvedExpr[#, branchRules, tol] &,
-    ser
-  ]
-];
-prepareBranchResolvedSeries[expr_, branchRules_, tol_] :=
-  prepareBranchResolvedExpr[expr, branchRules, tol];
-
-prepareBranchResolvedGList[gList_List, branchRules_, tol_] := If[
-  FreeQ[gList, branchSymbolsPattern],
-  gList,
-  gList /. branchRules
-];
-
-branchRulesForLocalBounds[xmin_, xmax_] := Module[
-  {tol, zeroQ, atLowerSingularity, atUpperSingularity, branchDir, branchPoint},
-  tol = DiffExp`State`FEC[RationalizationTolerance];
-  zeroQ[z_] := TrueQ[PossibleZeroQ[z]] ||
-    TrueQ[Abs[numericAtActivePrecision[z]] < tol];
-
-  atLowerSingularity = If[zeroQ[xmin],
-    If[zeroQ[xmax], 1, Sign[realNumericAtActivePrecision[xmax, tol]]],
-    False
-  ];
-  atUpperSingularity = If[zeroQ[xmax],
-    If[zeroQ[xmin], 1, Sign[realNumericAtActivePrecision[xmin, tol]]],
-    False
-  ];
-
-  branchDir = Which[
-    NumericQ[atLowerSingularity], atLowerSingularity,
-    NumericQ[atUpperSingularity], atUpperSingularity,
-    !zeroQ[xmin], Sign[realNumericAtActivePrecision[xmin, tol]],
-    !zeroQ[xmax], Sign[realNumericAtActivePrecision[xmax, tol]],
-    True, 1
-  ];
-  branchPoint = If[zeroQ[xmin], xmax, xmin];
-  thetaRulesAtPoint[branchPoint, branchDir]
-];
-
-localSideSignForBounds[xmin_, xmax_] := Module[
-  {tol, zeroQ, nonzero},
-  tol = DiffExp`State`FEC[RationalizationTolerance];
-  zeroQ[z_] := TrueQ[PossibleZeroQ[z]] ||
-    TrueQ[Abs[numericAtActivePrecision[z]] < tol];
-  nonzero = Select[{xmin, xmax}, !zeroQ[#] &];
-  If[nonzero === {},
-    1,
-    Module[{signs = Sign[realNumericAtActivePrecision[#, tol]] & /@ nonzero},
-      If[Length[DeleteDuplicates[signs]] == 1 && First[signs] < 0, -1, 1]
-    ]
-  ]
-];
-
-reorientLogExprForSide[expr_, side_Integer] := If[side < 0,
-  expr /. DiffExp`Symbols`Logx -> DiffExp`Symbols`Logx + I Pi,
-  expr
-];
-
-reorientSeriesForLocalSide[ser_SeriesData, side_Integer] := Module[
-  {nmin, den, coeffs},
-  If[side >= 0, Return[ser, Module]];
-  nmin = ser[[4]];
-  den = ser[[6]];
-  coeffs = Table[
-    Module[{power = (nmin + idx - 1)/den},
-      DiffExp`Utilities`PChop[
-        Expand[
-          Exp[I Pi power] *
-            reorientLogExprForSide[ser[[3, idx]], side]
-        ]
-      ]
-    ],
-    {idx, Length[ser[[3]]]}
-  ];
-  SeriesData[ser[[1]], ser[[2]], coeffs, ser[[4]], ser[[5]], ser[[6]]]
-];
-reorientSeriesForLocalSide[expr_, side_Integer] :=
-  reorientLogExprForSide[expr, side];
-
-reorientGListForLocalSide[gList_List, side_Integer] :=
-  reorientSeriesForLocalSide[#, side] & /@ gList;
-
-(* Helper: integrate x^(a+b*eps) * g(x,eps) at a specific epsilon order *)
-(* This handles the eps-expansion of the power and denominator *)
-IntegratePowerTimesSeriesAtOrder[a_, b_, gList_List, targetOrd_, {xmin_, xmax_}, atLower_, atUpper_] :=
-  IntegratePowerTimesSeriesAtPower[a, b, 0, gList, targetOrd, {xmin, xmax}, atLower, atUpper];
-
 IntegratePowerTimesSeriesAtPower[a_, b_, epsMinPower_, gList_List, targetPower_,
     {xmin_, xmax_}, atLower_, atUpper_] := Module[
   {epsMaxPower, result, maxLogPower, epsMin, target, contribs, tol, zeroQ,
@@ -824,105 +677,7 @@ IntegratePowerTimesSeriesAtPower[a_, b_, epsMinPower_, gList_List, targetPower_,
   result // DiffExp`Utilities`PChop // Expand
 ];
 
-IntegratePowerTimesSeriesLaurentPrepared[a_, branchB_, epsMinPower_, branchGList_List,
-    {xmin_, xmax_}, atLower_, atUpper_] := Module[
-  {epsMin, epsMaxPower, tol, xLocal, basis, definiteSeries, logCoeff},
-
-  epsMin = IntegerPower[epsMinPower];
-  If[!IntegerQ[epsMin],
-    DiffExp`Utilities`PrintWarning[
-      "IntegratePowerTimesSeriesLaurentPrepared: non-integer epsilon lower bound ",
-      epsMinPower, "; dropping contribution."
-    ];
-    Return[{}];
-  ];
-
-  epsMaxPower = epsMin + Length[branchGList] - 1;
-  tol = DiffExp`State`FEC[RationalizationTolerance];
-  xLocal = DiffExp`Symbols`x;
-
-  basis[p_, n_Integer] := basis[p, n] = Module[{anti},
-    If[n < 0, Return[0, Module]];
-    anti = IntegratePowerLogMonomial[p, n, 1, tol];
-    DiffExp`Utilities`PChop[
-      Expand[
-        EvaluateIntegralAtPoint[anti, xmax, p, atUpper] -
-          EvaluateIntegralAtPoint[anti, xmin, p, atLower]
-      ]
-    ]
-  ];
-
-  definiteSeries[outerLog_Integer, 0] := 0;
-  definiteSeries[outerLog_Integer, ser_SeriesData] := Module[
-    {nmin = ser[[4]], den = ser[[6]], coeffs = ser[[3]]},
-    DiffExp`Utilities`PChop[
-      Expand[
-        Sum[
-          Module[{pow = a + (nmin + idx - 1)/den, coeff = coeffs[[idx]]},
-            Sum[
-              Module[{c = DiffExp`SeriesOps`LogxCoeffNS[coeff, lp]},
-                If[EffectiveZeroExprQ[c, tol],
-                  0,
-                  c * basis[pow, outerLog + lp]
-                ]
-              ],
-              {lp, DiffExp`SeriesOps`LogxPowerRange[coeff]}
-            ]
-          ],
-          {idx, Length[coeffs]}
-        ]
-      ]
-    ]
-  ];
-  definiteSeries[outerLog_Integer, c_?NumericQ] :=
-    DiffExp`Utilities`PChop[Expand[c * basis[a, outerLog]]];
-  definiteSeries[outerLog_Integer, expr_] := Module[{ser},
-    If[EffectiveZeroExprQ[expr, tol],
-      0,
-      ser = Quiet[Check[Series[expr, {xLocal, 0, 0}], $Failed]];
-      If[MatchQ[ser, _SeriesData],
-        definiteSeries[outerLog, ser],
-        0
-      ]
-    ]
-  ];
-
-  Table[
-    DiffExp`Utilities`PChop[
-      Expand[
-        Sum[
-          logCoeff = If[k == 0,
-            1,
-            DiffExp`Utilities`PChop[Expand[branchB^k / k!]]
-          ];
-          If[EffectiveZeroExprQ[logCoeff, tol],
-            0,
-            logCoeff * definiteSeries[k, branchGList[[target - k - epsMin + 1]]]
-          ],
-          {k, 0, target - epsMin}
-        ]
-      ]
-    ],
-    {target, epsMin, epsMaxPower}
-  ]
-];
-
 zeroPowerSafe[base_, power_Integer] := If[power === 0, 1, base^power];
-
-simplePoleNegativeBasisCoeff[branchB_, logValue_, logPower_Integer, epsPower_Integer] :=
-  Module[{result = 0, s},
-    If[epsPower >= 0, Return[0, Module]];
-    Do[
-      s = epsPower + 1 + r;
-      If[IntegerQ[s] && s >= 0,
-        result += Binomial[logPower, r] * (-1)^r * Factorial[r] *
-          zeroPowerSafe[logValue, logPower - r] * branchB^(-1 - r) *
-          branchB^s * zeroPowerSafe[logValue, s] / Factorial[s];
-      ],
-      {r, 0, logPower}
-    ];
-    DiffExp`Utilities`PChop[Expand[result]]
-  ];
 
 IntegrateAnalyticRegularizedByIBPLaurent[a_, b_, epsMinPower_Integer, gList_List,
     {xmin_, xmax_}, atLower_, atUpper_] := Module[
@@ -1567,139 +1322,6 @@ IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gL
   LaurentTrim[result]
 ];
 
-IntegrateAnalyticRegularizedLaurentPrepared[a_, branchB_, epsMinPower_, branchGList_List,
-    {xmin_, xmax_}, atLower_, atUpper_] := Module[
-  {base, epsMin, epsMaxPower, tol, logValue, minPoleOrder = 0, result,
-   xLocal, addCoeff, gPower, ser, nmin, den, coeffs, pow, coeff, logPowers,
-   logCoeff, maxLogPower, basisCoeff, resultMinPower, resultCoeffs},
-
-  epsMin = IntegerPower[epsMinPower];
-  epsMaxPower = epsMin + Length[branchGList] - 1;
-  tol = DiffExp`State`FEC[RationalizationTolerance];
-  xLocal = DiffExp`Symbols`x;
-
-  base = IntegratePowerTimesSeriesLaurentPrepared[
-    a, branchB, epsMin, branchGList, {xmin, xmax}, atLower, atUpper
-  ];
-
-  Do[
-    ser = branchGList[[gIdx]];
-    If[MatchQ[ser, _SeriesData],
-      nmin = ser[[4]];
-      den = ser[[6]];
-      coeffs = ser[[3]];
-      Do[
-        pow = a + (nmin + idx - 1)/den;
-        If[NumericZeroQ[pow + 1, tol],
-          coeff = coeffs[[idx]];
-          maxLogPower = IntegerPower[DiffExp`SeriesOps`MaxLogxPower[coeff]];
-          If[IntegerQ[maxLogPower],
-            minPoleOrder = Min[minPoleOrder, -maxLogPower - 1];
-          ];
-        ],
-        {idx, Length[coeffs]}
-      ];
-      ,
-      If[!EffectiveZeroExprQ[ser, tol] && NumericZeroQ[a + 1, tol],
-        maxLogPower = IntegerPower[DiffExp`SeriesOps`MaxLogxPower[ser]];
-        If[IntegerQ[maxLogPower],
-          minPoleOrder = Min[minPoleOrder, -maxLogPower - 1];
-        ];
-      ];
-    ];
-    ,
-    {gIdx, Length[branchGList]}
-  ];
-
-  result = LaurentZero[epsMin + minPoleOrder, epsMaxPower];
-  Do[
-    result = LaurentAdd[
-      result,
-      <|"MinPower" -> epsMin, "Coefficients" -> base|>
-    ];
-    ,
-    {1}
-  ];
-  resultMinPower = result["MinPower"];
-  resultCoeffs = result["Coefficients"];
-
-  logValue = EvaluateIntegralAtPoint[
-    DiffExp`Symbols`Logx, xmax, a, atUpper
-  ];
-
-  addCoeff[power_Integer, value_] := Module[{idx},
-    idx = power - resultMinPower + 1;
-    If[idx >= 1 && idx <= Length[resultCoeffs],
-      resultCoeffs[[idx]] =
-        DiffExp`Utilities`PChop[
-          Expand[resultCoeffs[[idx]] + value]
-        ];
-    ];
-  ];
-
-  Do[
-    gPower = epsMin + gIdx - 1;
-    ser = branchGList[[gIdx]];
-    If[MatchQ[ser, _SeriesData],
-      nmin = ser[[4]];
-      den = ser[[6]];
-      coeffs = ser[[3]];
-      Do[
-        pow = a + (nmin + idx - 1)/den;
-        If[NumericZeroQ[pow + 1, tol],
-          coeff = coeffs[[idx]];
-          logPowers = DiffExp`SeriesOps`LogxPowerRange[coeff];
-          Do[
-            logCoeff = DiffExp`SeriesOps`LogxCoeffNS[coeff, lp];
-            If[!EffectiveZeroExprQ[logCoeff, tol],
-              Do[
-                basisCoeff = simplePoleNegativeBasisCoeff[
-                  branchB, logValue, lp, polePower
-                ];
-                If[!EffectiveZeroExprQ[basisCoeff, tol],
-                  addCoeff[gPower + polePower, logCoeff * basisCoeff]
-                ];
-                ,
-                {polePower, -lp - 1, -1}
-              ];
-            ];
-            ,
-            {lp, logPowers}
-          ];
-        ];
-        ,
-        {idx, Length[coeffs]}
-      ];
-      ,
-      If[!EffectiveZeroExprQ[ser, tol] && NumericZeroQ[a + 1, tol],
-        coeff = ser;
-        logPowers = DiffExp`SeriesOps`LogxPowerRange[coeff];
-        Do[
-          logCoeff = DiffExp`SeriesOps`LogxCoeffNS[coeff, lp];
-          If[!EffectiveZeroExprQ[logCoeff, tol],
-            Do[
-              basisCoeff = simplePoleNegativeBasisCoeff[
-                branchB, logValue, lp, polePower
-              ];
-              If[!EffectiveZeroExprQ[basisCoeff, tol],
-                addCoeff[gPower + polePower, logCoeff * basisCoeff]
-              ];
-              ,
-              {polePower, -lp - 1, -1}
-            ];
-          ];
-          ,
-          {lp, logPowers}
-        ];
-      ];
-    ];
-    ,
-    {gIdx, Length[branchGList]}
-  ];
-
-  LaurentTrim[<|"MinPower" -> resultMinPower, "Coefficients" -> resultCoeffs|>]
-];
-
 FiniteEndpointConstant[expr_] := Module[
   {x = DiffExp`Symbols`x, logx = DiffExp`Symbols`Logx, noLog, terms},
   noLog = DiffExp`Utilities`PChop[Expand[expr /. logx -> 0]];
@@ -1920,137 +1542,6 @@ IntegrateDecompositionLaurent[decomposition_List, {xmin_, xmax_}, epsMinPower_In
   LaurentTrim[result]
 ];
 
-stripReconstructedEndpointLogsFromTerm[term_Association] := Module[
-  {a = term["a"], b = term["b"], g = term["g"], tol, xLocal,
-   zeroQ, subtractPowerQ, powers, firstInfo, dropped = 0, cleanedG},
-
-  tol = DiffExp`State`FEC[RationalizationTolerance];
-  xLocal = DiffExp`Symbols`x;
-  zeroQ[z_] := TrueQ[PossibleZeroQ[z]] ||
-    TrueQ[Abs[numericAtActivePrecision[z]] < tol];
-
-  If[zeroQ[b], Return[{term, 0}, Module]];
-
-  subtractPowerQ[localPower_] :=
-    NumericNegativeQ[a + localPower + 1, tol] ||
-      NumericZeroQ[a + localPower + 1, tol];
-
-  powers = DeleteDuplicates[
-    Flatten[
-      Table[
-        If[MatchQ[g[[idx]], _SeriesData],
-          Table[
-            (g[[idx, 4]] + powerIdx - 1)/g[[idx, 6]],
-            {powerIdx, Length[g[[idx, 3]]]}
-          ],
-          {0}
-        ],
-        {idx, Length[g]}
-      ]
-    ]
-  ];
-  powers = Select[powers, subtractPowerQ];
-
-  firstInfo = Association[];
-  Do[
-    Module[{first = Missing["NotFound"]},
-      Do[
-        Module[{coeff = If[MatchQ[g[[idx]], _SeriesData],
-            GetSeriesCoefficientAtLocalPower[g[[idx]], localPower],
-            If[localPower === 0, g[[idx]], 0]
-          ]},
-          If[!EffectiveZeroExprQ[coeff, tol],
-            first = <|
-              "Index" -> idx,
-              "HasLog" -> AnyTrue[
-                DiffExp`SeriesOps`LogxPowerRange[coeff],
-                # > 0 && !EffectiveZeroExprQ[
-                  DiffExp`SeriesOps`LogxCoeffNS[coeff, #], tol
-                ] &
-              ]
-            |>;
-            Break[];
-          ];
-        ],
-        {idx, Length[g]}
-      ];
-      firstInfo[localPower] = first;
-    ],
-    {localPower, powers}
-  ];
-
-  cleanedG = Table[
-    Module[{ser = g[[idx]]},
-      If[MatchQ[ser, _SeriesData],
-        Module[{nmin = ser[[4]], den = ser[[6]], coeffs},
-          coeffs = Table[
-            Module[{localPower = (nmin + coeffIdx - 1)/den,
-                    coeff = ser[[3, coeffIdx]], info, logPowers},
-              info = Lookup[firstInfo, localPower, Missing["NotFound"]];
-              If[MissingQ[info] || TrueQ[info["HasLog"]],
-                coeff,
-                logPowers = DiffExp`SeriesOps`LogxPowerRange[coeff];
-                Fold[
-                  Function[{acc, lp},
-                    Module[{logCoeff = DiffExp`SeriesOps`LogxCoeffNS[acc, lp]},
-                      If[lp > 0 && !EffectiveZeroExprQ[logCoeff, tol],
-                        dropped++;
-                        acc - logCoeff * DiffExp`Symbols`Logx^lp,
-                        acc
-                      ]
-                    ]
-                  ],
-                  coeff,
-                  logPowers
-                ]
-              ]
-            ],
-            {coeffIdx, Length[ser[[3]]]}
-          ];
-          SeriesData[ser[[1]], ser[[2]], coeffs, ser[[4]], ser[[5]], ser[[6]]]
-        ],
-        ser
-      ]
-    ],
-    {idx, Length[g]}
-  ];
-
-  {Association[term, "g" -> cleanedG], dropped}
-];
-
-GetSeriesCoefficientAtLocalPower[ser_SeriesData, localPower_] := Module[
-  {idx = localPower * ser[[6]] - ser[[4]] + 1},
-  If[IntegerQ[idx] && idx >= 1 && idx <= Length[ser[[3]]],
-    ser[[3, idx]],
-    0
-  ]
-];
-
-stripReconstructedEndpointLogs[decomp_List] := Module[
-  {pairs, dropped},
-  pairs = stripReconstructedEndpointLogsFromTerm /@ decomp;
-  dropped = Total[pairs[[All, 2]]];
-  If[dropped > 0,
-    DiffExp`Utilities`PrintWarning[
-      "DefiniteIntegralWithPrefactorLaurent: dropped ",
-      dropped,
-      " reconstructed endpoint Logx term(s) after extracting x^(a+b eps). ",
-      "The first nonzero endpoint coefficient was log-free, so later logs ",
-      "are treated as finite-order reconstruction artifacts."
-    ];
-  ];
-  pairs[[All, 1]]
-];
-
-(* ============================================================ *)
-(* Limit Evaluation at Singularities *)
-(* ============================================================ *)
-
-(* Evaluate limit of decomposed series at x=0
-   Per regularization prescription:
-   - Terms with b != 0: set to 0
-   - Taylor terms (a >= 0, b = 0): evaluate g at x=0
-*)
 EvaluateLimitAtSingularity[decomposition_List, direction_: 1] := Module[
   {epsOrder, result, term, a, b, g, gVal},
 
@@ -2715,8 +2206,8 @@ IntegrateSegmentWithPrefactor[segmentData_List, {a_, b_}, intIndex_Integer, epsO
                   ]
                 ]
               ],
-		              gSeries * (smoothPrefactor /. xLocal -> 0)
-		            ],
+                  gSeries * (smoothPrefactor /. xLocal -> 0)
+                ],
             0
           ],
           {ord, Length[termG]}
@@ -2886,8 +2377,8 @@ IntegrateSegmentWithPrefactorLaurent[segmentData_List, {a_, b_}, intIndex_Intege
                   ]
                 ]
               ],
-		              gSeries * (smoothPrefactor /. xLocal -> 0)
-		            ],
+                  gSeries * (smoothPrefactor /. xLocal -> 0)
+                ],
             0
           ],
           {ord, Length[termG]}
@@ -2942,12 +2433,12 @@ IntegrateSegmentWithPrefactorLaurent[segmentData_List, {a_, b_}, intIndex_Intege
            log monomials directly; only the top epsilon order is treated as a
            truncation boundary inside IntegrateAnalyticRegularizedBySubtractionLaurent. *)
 
-		    integralResult = IntegrateDecompositionLaurent[
-		      modifiedDecomp, {localA, localB}, epsMinPower
-		    ];
+        integralResult = IntegrateDecompositionLaurent[
+          modifiedDecomp, {localA, localB}, epsMinPower
+        ];
 
-		    If[AssociationQ[integralResult],
-	      LaurentScale[jacobian, integralResult],
+        If[AssociationQ[integralResult],
+        LaurentScale[jacobian, integralResult],
       LaurentZero[epsMinPower, epsMaxPower]
     ]
   ]

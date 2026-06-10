@@ -59,37 +59,13 @@ ExpandedMatrixMinOrder[AMatExpanded_, systemSize_Integer] := Module[{minOrders},
   Min[minOrders]
 ];
 
-NonFinitePattern = Overflow[] | Indeterminate | ComplexInfinity |
-  DirectedInfinity[_] | _LinearSolve | _LeastSquares | _PseudoInverse;
-
-ReplaceSparseArrays[expr_] := expr /. s_SparseArray :> Normal[s];
-
-NonFiniteExpressionQ[expr_] := !FreeQ[
-  ReplaceSparseArrays[Unevaluated[expr]],
-  NonFinitePattern
-];
-
-FiniteAbsMax[expr_] := Module[{normal = ReplaceSparseArrays[Unevaluated[expr]]},
-  If[NonFiniteExpressionQ[normal],
-    0,
-    Quiet[
-      Check[
-        Max[Abs[Flatten[normal]]],
-        0,
-        {Max::nord}
-      ],
-      {Max::nord}
-    ]
-  ]
-];
-
 TrimNonFiniteSeriesTails[expr_, ctx_Association, epsord_, source_String] :=
 Module[{trimmed = {}, failed = False, result, trimOne},
   trimOne[s_SeriesData] := Module[
     {coeffs = s[[3]], badFlags, badIndices, firstBad, tailIndices,
      newMax},
 
-    badFlags = NonFiniteExpressionQ /@ coeffs;
+    badFlags = DiffExp`Utilities`NonFiniteExpressionQ /@ coeffs;
     badIndices = Flatten@Position[badFlags, True];
     If[badIndices === {}, Return[s]];
 
@@ -722,7 +698,7 @@ ComputeResonantFundamentalMatrix[ctx_Association, resInfo_Association,
               {a, Length[leftNull]}, {b, Length[prevNull]}
             ] * (-(k + 1));
             rhsVec = Table[leftNull[[a]] . fullRhs, {a, Length[leftNull]}];
-            overlapMagnitude = FiniteAbsMax[overlapMat];
+            overlapMagnitude = DiffExp`Utilities`FiniteAbsMax[overlapMat];
             If[overlapMagnitude > tolerance,
               alpha = PseudoInverse[
                 N[overlapMat, wp], Tolerance -> tolerance
@@ -805,7 +781,7 @@ ComputeResonantFundamentalMatrix[ctx_Association, resInfo_Association,
               ] * (-(k + 1));
               rhsVec = Table[leftNull[[a]] . fullRhs, {a, Length[leftNull]}];
 
-              overlapMagnitude = FiniteAbsMax[overlapMat];
+              overlapMagnitude = DiffExp`Utilities`FiniteAbsMax[overlapMat];
               If[overlapMagnitude > tolerance,
                 (* Solve for alpha *)
                 alpha = Quiet[Check[
@@ -1006,19 +982,19 @@ CheckParticularResidual[fCoeffs_, sigma_, bCoeffs_, bMaxLogK_, kMax_,
           bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
         residual = Ln . fCoeffs[[n + 1, k + 1]] - rhs;
         (* Analytic-continuation theta symbols may survive in the source;
-           FiniteAbsMax would silently treat such symbolic residuals as 0,
+           DiffExp`Utilities`FiniteAbsMax would silently treat such symbolic residuals as 0,
            blinding this check.  Evaluate both branches instead. *)
         residualMagnitude = If[
           FreeQ[residual, DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m],
-          FiniteAbsMax[residual],
+          DiffExp`Utilities`FiniteAbsMax[residual],
           Max[
-            FiniteAbsMax[residual /. {
+            DiffExp`Utilities`FiniteAbsMax[residual /. {
               DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}],
-            FiniteAbsMax[residual /. {
+            DiffExp`Utilities`FiniteAbsMax[residual /. {
               DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]
           ]
         ];
-        maxResidual = FiniteAbsMax[{maxResidual, residualMagnitude}];
+        maxResidual = DiffExp`Utilities`FiniteAbsMax[{maxResidual, residualMagnitude}];
         , {k, kMax, 0, -1}
       ];
     ];

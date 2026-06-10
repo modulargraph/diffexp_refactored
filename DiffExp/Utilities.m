@@ -42,6 +42,11 @@ IntervalContainsQ::usage = "IntervalContainsQ[intv_,point_] checks if interval c
 ExactLineQ::usage = "ExactLineQ[line_Association] checks if line has exact coefficients.";
 FactorOrTogether::usage = "FactorOrTogether[line_Association] returns Factor or Together based on line type.";
 
+(* Non-finite expression handling *)
+NonFiniteExpressionQ::usage = "NonFiniteExpressionQ[expr_] checks for overflow, indeterminate, infinite, or unevaluated linear-algebra content.";
+FiniteAbsMax::usage = "FiniteAbsMax[expr_] gives the maximum absolute value over expr, or 0 when expr contains non-finite or non-numeric content.";
+ReplaceSparseArrays::usage = "ReplaceSparseArrays[expr_] normalizes any SparseArray content in expr.";
+
 Begin["`Private`"];
 
 (* Import state variables *)
@@ -118,6 +123,32 @@ ExactLineQ[line_Association] := And @@ (ExactNumberQ /@ Flatten[({
 
 FactorOrTogether[line_Association] := If[ExactLineQ[line], Factor, Together];
 FactorOrTogether[line1_Association, line2_Association] := If[ExactLineQ[line1] && ExactLineQ[line2], Factor, Together];
+
+(* Non-finite expression handling, shared by Transport and the singular
+   recurrence strategies. *)
+NonFinitePattern = Overflow[] | Indeterminate | ComplexInfinity |
+  DirectedInfinity[_] | _LinearSolve | _LeastSquares | _PseudoInverse;
+
+ReplaceSparseArrays[expr_] := expr /. s_SparseArray :> Normal[s];
+
+NonFiniteExpressionQ[expr_] := !FreeQ[
+  ReplaceSparseArrays[Unevaluated[expr]],
+  NonFinitePattern
+];
+
+FiniteAbsMax[expr_] := Module[{normal = ReplaceSparseArrays[Unevaluated[expr]]},
+  If[NonFiniteExpressionQ[normal],
+    0,
+    Quiet[
+      Check[
+        Max[Abs[Flatten[normal]]],
+        0,
+        {Max::nord}
+      ],
+      {Max::nord}
+    ]
+  ]
+];
 
 End[];
 

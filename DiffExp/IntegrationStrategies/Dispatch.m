@@ -7,11 +7,11 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
    useRationalRecurrence, useSingularRecurrence, useGeneralSingularRecurrence,
    useFuchsianizedSingularRecurrence, singularEigenData},
 
-	  (* Check if rational recurrence should be used (non-singular points) *)
-	  useRationalRecurrence = (
-	    ctx["UseRationalRecurrence"] === True &&
-	    RationalRecurrenceApplicableQ[ctx]
-	  );
+    (* Check if rational recurrence should be used (non-singular points) *)
+    useRationalRecurrence = (
+      ctx["UseRationalRecurrence"] === True &&
+      RationalRecurrenceApplicableQ[ctx]
+    );
 
   (* Check if singular recurrence should be used (simple pole, non-resonant) *)
   (* Uses PrepareSingularRecurrence which combines the check and eigenvalue computation *)

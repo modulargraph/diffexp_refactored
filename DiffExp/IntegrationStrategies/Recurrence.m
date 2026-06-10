@@ -280,11 +280,11 @@ ComputeFundamentalMatrix[ctx_Association, aCoeffs_, dCoeffs_, dD_, dA_, d0Inv_] 
       Recurrence cost is O(N^2) per solution but avoids rationalization overhead.
    Both modes bypass the Frobenius/Wronskian machinery. *)
 SolveRationalRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module[
-	  {systemSize, maxOrd, fCoeffs, bSeriesCoeffs, bCoeffAtN, nbCoeff,
-	   FMat, fParticular, fGeneral, cIndices, c,
-	   dCoeffs, aCoeffs, dD, dA, d0, d0Inv, rationalResult,
-	   bMaxLogK, zeroVec, logDerivativeCoeff,
-	   cache = cacheIn},
+    {systemSize, maxOrd, fCoeffs, bSeriesCoeffs, bCoeffAtN, nbCoeff,
+     FMat, fParticular, fGeneral, cIndices, c,
+     dCoeffs, aCoeffs, dD, dA, d0, d0Inv, rationalResult,
+     bMaxLogK, zeroVec, logDerivativeCoeff,
+     cache = cacheIn},
 
   systemSize = ctx["SystemSize"];
   maxOrd = ctx["ExpansionOrder"];
@@ -321,90 +321,90 @@ SolveRationalRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Association] :=
       systemSize
     ];
     ,
-	    bMaxLogK = Max[0, Max[Table[
-	      DiffExp`SeriesOps`MaxLogxPower[bVec[[k]]],
-	      {k, systemSize}
-	    ]]];
-	    zeroVec = ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize];
+      bMaxLogK = Max[0, Max[Table[
+        DiffExp`SeriesOps`MaxLogxPower[bVec[[k]]],
+        {k, systemSize}
+      ]]];
+      zeroVec = ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize];
 
-	    If[bMaxLogK > DiffExp`State`IMaxLogOrder,
-	      DiffExp`Integration`UpdateIntReps[bMaxLogK];
-	    ];
+      If[bMaxLogK > DiffExp`State`IMaxLogOrder,
+        DiffExp`Integration`UpdateIntReps[bMaxLogK];
+      ];
 
-	    (* Extract series coefficients from each Logx sector of bVec. *)
-	    bSeriesCoeffs = Table[
-	      bCoeffAtN = SeriesCoefficient[
-	        DiffExp`SeriesOps`LogxCoeff[bVec[[k]], logk],
-	        {DiffExp`Symbols`x, 0, n}
-	      ];
-	      If[NumericQ[bCoeffAtN], bCoeffAtN, DiffExp`Utilities`PChop[bCoeffAtN]],
-	      {n, 0, maxOrd - 1}, {logk, 0, bMaxLogK}, {k, systemSize}
-	    ];
+      (* Extract series coefficients from each Logx sector of bVec. *)
+      bSeriesCoeffs = Table[
+        bCoeffAtN = SeriesCoefficient[
+          DiffExp`SeriesOps`LogxCoeff[bVec[[k]], logk],
+          {DiffExp`Symbols`x, 0, n}
+        ];
+        If[NumericQ[bCoeffAtN], bCoeffAtN, DiffExp`Utilities`PChop[bCoeffAtN]],
+        {n, 0, maxOrd - 1}, {logk, 0, bMaxLogK}, {k, systemSize}
+      ];
 
-	    (* Run recurrence with f_0 = 0 for the particular solution.
-	       Coefficients are indexed as fCoeffs[[n+1, logk+1, comp]].
-	       Solve log powers top-down because d/dx Logx^(k+1) contributes to
-	       the Logx^k equation at the same power of x. *)
-	    fCoeffs = ConstantArray[
-	      ConstantArray[
-	        ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
-	        bMaxLogK + 1
-	      ],
-	      maxOrd + 1
-	    ];
+      (* Run recurrence with f_0 = 0 for the particular solution.
+         Coefficients are indexed as fCoeffs[[n+1, logk+1, comp]].
+         Solve log powers top-down because d/dx Logx^(k+1) contributes to
+         the Logx^k equation at the same power of x. *)
+      fCoeffs = ConstantArray[
+        ConstantArray[
+          ConstantArray[N[0, ctx["WorkingPrecision"]], systemSize],
+          bMaxLogK + 1
+        ],
+        maxOrd + 1
+      ];
 
-	    Do[
-	      Do[
-	        (* Compute N_B coefficient at order m and log power logk:
-	           nb_{m,k} = sum_i d_i * B_{m-i,k}. *)
-	        nbCoeff = Sum[
-	          If[m - i <= maxOrd - 1,
-	            dCoeffs[[i + 1]] * bSeriesCoeffs[[m - i + 1, logk + 1]],
-	            zeroVec
-	          ],
-	          {i, 0, Min[m, dD]}
-	        ];
+      Do[
+        Do[
+          (* Compute N_B coefficient at order m and log power logk:
+             nb_{m,k} = sum_i d_i * B_{m-i,k}. *)
+          nbCoeff = Sum[
+            If[m - i <= maxOrd - 1,
+              dCoeffs[[i + 1]] * bSeriesCoeffs[[m - i + 1, logk + 1]],
+              zeroVec
+            ],
+            {i, 0, Min[m, dD]}
+          ];
 
-	        logDerivativeCoeff = If[logk < bMaxLogK,
-	          Sum[
-	            If[0 <= m - i + 1 <= maxOrd,
-	              dCoeffs[[i + 1]] * (logk + 1) *
-	                fCoeffs[[m - i + 2, logk + 2]],
-	              zeroVec
-	            ],
-	            {i, 0, Min[m + 1, dD]}
-	          ],
-	          zeroVec
-	        ];
+          logDerivativeCoeff = If[logk < bMaxLogK,
+            Sum[
+              If[0 <= m - i + 1 <= maxOrd,
+                dCoeffs[[i + 1]] * (logk + 1) *
+                  fCoeffs[[m - i + 2, logk + 2]],
+                zeroVec
+              ],
+              {i, 0, Min[m + 1, dD]}
+            ],
+            zeroVec
+          ];
 
-	        (* D f' = N_A f + D B.  Isolate d0*(m+1)*f_{m+1,k};
-	           all lower denominator-derivative terms and Logx-derivative
-	           mixing move to the right-hand side with a minus sign. *)
-	        fCoeffs[[m + 2, logk + 1]] = d0Inv/(m + 1) * (
-	          nbCoeff +
-	          Sum[aCoeffs[[j + 1]] . fCoeffs[[m - j + 1, logk + 1]], {j, 0, Min[m, dA]}] -
-	          If[dD >= 1,
-	            Sum[dCoeffs[[i + 1]] (m - i + 1) fCoeffs[[m - i + 2, logk + 1]], {i, 1, Min[m, dD]}],
-	            zeroVec
-	          ] -
-	          logDerivativeCoeff
-	        );
-	        ,
-	        {logk, bMaxLogK, 0, -1}
-	      ];
-	      , {m, 0, maxOrd - 1}
-	    ];
+          (* D f' = N_A f + D B.  Isolate d0*(m+1)*f_{m+1,k};
+             all lower denominator-derivative terms and Logx-derivative
+             mixing move to the right-hand side with a minus sign. *)
+          fCoeffs[[m + 2, logk + 1]] = d0Inv/(m + 1) * (
+            nbCoeff +
+            Sum[aCoeffs[[j + 1]] . fCoeffs[[m - j + 1, logk + 1]], {j, 0, Min[m, dA]}] -
+            If[dD >= 1,
+              Sum[dCoeffs[[i + 1]] (m - i + 1) fCoeffs[[m - i + 2, logk + 1]], {i, 1, Min[m, dD]}],
+              zeroVec
+            ] -
+            logDerivativeCoeff
+          );
+          ,
+          {logk, bMaxLogK, 0, -1}
+        ];
+        , {m, 0, maxOrd - 1}
+      ];
 
-	    fParticular = Table[
-	      Sum[
-	        DiffExp`Symbols`Logx^logk *
-	          SeriesData[DiffExp`Symbols`x, 0,
-	            DiffExp`Utilities`PChop[fCoeffs[[All, logk + 1, k]]],
-	            0, maxOrd + 1, 1],
-	        {logk, 0, bMaxLogK}
-	      ],
-	      {k, systemSize}
-	    ];
+      fParticular = Table[
+        Sum[
+          DiffExp`Symbols`Logx^logk *
+            SeriesData[DiffExp`Symbols`x, 0,
+              DiffExp`Utilities`PChop[fCoeffs[[All, logk + 1, k]]],
+              0, maxOrd + 1, 1],
+          {logk, 0, bMaxLogK}
+        ],
+        {k, systemSize}
+      ];
   ];
 
   (* General solution: f = particular + sum_i c_i * F_i *)

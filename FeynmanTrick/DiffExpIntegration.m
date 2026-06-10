@@ -104,24 +104,6 @@ realNumericAtActivePrecision[expr_, tol_:Automatic] := Module[
   ]
 ];
 
-thetaRulesForSegment[seg_List] := Module[
-  {tol, localBounds, nonzeroBounds, sample},
-  tol = DiffExp`State`FEC[RationalizationTolerance];
-  localBounds = numericAtActivePrecision[seg[[4]]];
-  nonzeroBounds = Select[localBounds,
-    !TrueQ[PossibleZeroQ[#]] &&
-      !TrueQ[NumericQ[#] && Abs[realNumericAtActivePrecision[#, tol]] < tol] &
-  ];
-  sample = If[Length[nonzeroBounds] > 0,
-    Mean[nonzeroBounds],
-    1
-  ];
-  If[TrueQ[realNumericAtActivePrecision[sample, tol] < 0],
-    $thetaMinusRules,
-    $thetaPlusRules
-  ]
-];
-
 thetaRulesAtLocalPoint[pt_, direction_:Automatic] := Module[
   {tol, sign},
   tol = DiffExp`State`FEC[RationalizationTolerance];
@@ -253,33 +235,6 @@ deltaPrescriptionsForFactors[detectedVar_, factors_List:{}, sign_:1] := Module[
     TrueQ[PossibleZeroQ[Expand[#1[[1]] - #2[[1]]]]] ||
       TrueQ[PossibleZeroQ[Expand[#1[[1]] + #2[[1]]]]] &
   ]
-];
-
-(* Resolve theta functions in a single series expression *)
-resolveThetas[expr_] := expr /. $thetaRules;
-
-(* Resolve theta functions in segment data (list of segments).
-   Each segment is {line, transform, mainBounds, localBounds, seriesData}.
-   The seriesData (element 5) may contain theta functions in coefficients. *)
-resolveSegmentThetas[segData_List] := Table[
-  Module[{seg, rawSeries, resolved},
-    seg = segData[[segIdx]];
-    rawSeries = seg[[5]];
-
-    (* Uncompress if needed, resolve thetas, recompress *)
-    If[StringQ[rawSeries],
-      If[FileExistsQ[rawSeries],
-        resolved = Uncompress[Import[rawSeries]];,
-        resolved = Uncompress[rawSeries];
-      ];
-      resolved = resolved /. $thetaRules;
-      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], Compress[resolved]}
-    ,
-      resolved = rawSeries /. $thetaRules;
-      {seg[[1]], seg[[2]], seg[[3]], seg[[4]], resolved}
-    ]
-  ],
-  {segIdx, Length[segData]}
 ];
 
 uncompressSeriesData[rawSeries_] := Module[{},
@@ -723,19 +678,19 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
      c_j(x) * I_j(x) = c_j(x) * eps^{-k_j} * J_j(x)
      At eps order n: Sum_{k=0}^{n+k_j} c_j^{(k)}(x) * J_j^{(n+k_j-k)}(x)
   *)
-	  combinedSegments = Table[
-	    Module[{seg, seriesRaw, uncompressed, xLocal, xMainExpr,
-	            combinedEpsOrders, numEpsOrders, snappedLine},
+    combinedSegments = Table[
+      Module[{seg, seriesRaw, uncompressed, xLocal, xMainExpr,
+              combinedEpsOrders, numEpsOrders, snappedLine},
       seg = segData[[segIdx]];
       seriesRaw = seg[[5]];
 
-	      (* Uncompress the saved local series. Keep DiffExp theta symbols
-	         until point evaluation/integration so segments that cross local
-	         x=0 can use the correct branch on each side. *)
+        (* Uncompress the saved local series. Keep DiffExp theta symbols
+           until point evaluation/integration so segments that cross local
+           x=0 can use the correct branch on each side. *)
       uncompressed = uncompressSeriesData[seriesRaw];
 
-	      (* uncompressed[[j]] = list of eps orders for master j
-	         uncompressed[[j]][[n+1]] = SeriesData for J_j at eps order n *)
+        (* uncompressed[[j]] = list of eps orders for master j
+           uncompressed[[j]][[n+1]] = SeriesData for J_j at eps order n *)
       numEpsOrders = Length[uncompressed[[1]]];
 
       (* Get the coordinate transformation: x_main = f(x_local)
@@ -746,15 +701,15 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
       xMainExpr = If[AssociationQ[seg[[1]]],
         First[Values[seg[[1]]]],
         If[Head[seg[[1]]] === Rule, seg[[1, 2]], seg[[1]]]
-	      ];
-	      xMainExpr = DiffExp`Utilities`PChop[Expand[xMainExpr]];
-	      xMainExpr = snapMainExpression[
-	        xMainExpr, seg[[4]], Lookup[transportResult, "SnapValues", {0, 1}]
-	      ];
-	      snappedLine = If[AssociationQ[seg[[1]]],
-	        Association[First[Keys[seg[[1]]]] -> xMainExpr],
-	        seg[[1]]
-	      ];
+        ];
+        xMainExpr = DiffExp`Utilities`PChop[Expand[xMainExpr]];
+        xMainExpr = snapMainExpression[
+          xMainExpr, seg[[4]], Lookup[transportResult, "SnapValues", {0, 1}]
+        ];
+        snappedLine = If[AssociationQ[seg[[1]]],
+          Association[First[Keys[seg[[1]]]] -> xMainExpr],
+          seg[[1]]
+        ];
 
       (* Build combined series for each output eps order *)
       combinedEpsOrders = Table[
@@ -833,8 +788,8 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
 
       (* Package as single-master segment:
          {line, transform, mainBounds, localBounds, {{epsOrder0, epsOrder1, ...}}} *)
-	      {snappedLine, seg[[2]], seg[[3]], seg[[4]], {combinedEpsOrders}}
-	    ],
+        {snappedLine, seg[[2]], seg[[3]], seg[[4]], {combinedEpsOrders}}
+      ],
     {segIdx, Length[segData]}
   ];
 
@@ -849,7 +804,7 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
     Return[combinedData, Module]
   ];
 
-	  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 3,
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 3,
     Do[
       Module[{orders = combinedSegments[[s, 5, 1]], powers, bad},
         powers = Table[
@@ -1090,35 +1045,35 @@ Module[{segData, targetSeg, uncompressed, numMasters,
         (* Nonsingular endpoint inside the segment. Evaluate the saved local
            series at the endpoint's local coordinate instead of taking the
            constant term at the segment center. *)
-	        Do[
-	          If[epsIdx <= Length[seriesAtMaster],
-	            Module[{seriesTerm = seriesAtMaster[[epsIdx]], endpointValue},
-	              endpointValue = Which[
-	                MatchQ[seriesTerm, _SeriesData],
-	                  Quiet[Check[
-	                    evaluateLocalExpressionAtPoint[
-	                      Normal[seriesTerm],
-	                      localEndpoint,
-	                      localEndpointDirection[targetSeg, localEndpoint],
-	                      boundaryPrecision
-	                    ],
-	                    0
-	                  ]],
-	                NumericQ[seriesTerm],
-	                  seriesTerm,
-	                seriesTerm === 0,
-	                  0,
-	                True,
-	                  Quiet[Check[
-	                    evaluateLocalExpressionAtPoint[
-	                      seriesTerm,
-	                      localEndpoint,
-	                      localEndpointDirection[targetSeg, localEndpoint],
-	                      boundaryPrecision
-	                    ],
-	                    0
-	                  ]]
-	              ];
+          Do[
+            If[epsIdx <= Length[seriesAtMaster],
+              Module[{seriesTerm = seriesAtMaster[[epsIdx]], endpointValue},
+                endpointValue = Which[
+                  MatchQ[seriesTerm, _SeriesData],
+                    Quiet[Check[
+                      evaluateLocalExpressionAtPoint[
+                        Normal[seriesTerm],
+                        localEndpoint,
+                        localEndpointDirection[targetSeg, localEndpoint],
+                        boundaryPrecision
+                      ],
+                      0
+                    ]],
+                  NumericQ[seriesTerm],
+                    seriesTerm,
+                  seriesTerm === 0,
+                    0,
+                  True,
+                    Quiet[Check[
+                      evaluateLocalExpressionAtPoint[
+                        seriesTerm,
+                        localEndpoint,
+                        localEndpointDirection[targetSeg, localEndpoint],
+                        boundaryPrecision
+                      ],
+                      0
+                    ]]
+                ];
               If[NumericQ[endpointValue],
                 limitVal[[epsIdx]] += endpointValue;
               ];
@@ -1200,15 +1155,6 @@ Module[{segData, targetSeg, uncompressed, numMasters,
   I_{v1,0,...}^(k-1) = lim_{x->1} I_{v1,...}^(k)
   I_{0,v2,...}^(k-1) = lim_{x->0} I_{v2,...}^(k)
 *)
-
-(* Helper: expand IBP coefficient in eps, returning list of eps-order coefficients *)
-ExpandIBPCoeffInEps[coeff_, epsOrder_Integer] :=
-Module[{dimVar, epsSymbol, expanded},
-  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
-  epsSymbol = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
-  expanded = coeff /. dimVar -> FeynmanTrick`Private`DimensionExpression[];
-  Table[SeriesCoefficient[expanded + O[epsSymbol]^(epsOrder + 1), k], {k, 0, epsOrder}]
-];
 
 LaurentMaxPower[laur_Association] :=
   laur["MinPower"] + Length[laur["Coefficients"]] - 1;
@@ -1327,21 +1273,7 @@ Module[{coeffMin, coeffMax},
 
 ShiftRawBoundariesToFinite[rawBCs_List, epsOrder_Integer] := Module[
   {trimmed, minPower, maxPower, shift, finiteBCs},
-  If[TrueQ[DiffExp`RegularizedIntegration`Private`$DebugBadRegularizedIntegration],
-    Print["DEBUG_SHIFT_INPUT_BAD=", Position[
-      rawBCs,
-      Indeterminate | ComplexInfinity | DirectedInfinity[_],
-      Infinity
-    ]];
-  ];
   trimmed = LaurentTrim /@ rawBCs;
-  If[TrueQ[DiffExp`RegularizedIntegration`Private`$DebugBadRegularizedIntegration],
-    Print["DEBUG_SHIFT_TRIMMED_BAD=", Position[
-      trimmed,
-      Indeterminate | ComplexInfinity | DirectedInfinity[_],
-      Infinity
-    ]];
-  ];
   minPower = Min[trimmed[[All, "MinPower"]]];
   maxPower = Max[LaurentMaxPower /@ trimmed];
   shift = Max[0, -minPower];
@@ -1352,13 +1284,6 @@ ShiftRawBoundariesToFinite[rawBCs_List, epsOrder_Integer] := Module[
       {n, 0, Max[epsOrder + shift, maxPower + shift]}
     ],
     {i, Length[trimmed]}
-  ];
-  If[TrueQ[DiffExp`RegularizedIntegration`Private`$DebugBadRegularizedIntegration],
-    Print["DEBUG_SHIFT_FINITE_BAD=", Position[
-      finiteBCs,
-      Indeterminate | ComplexInfinity | DirectedInfinity[_],
-      Infinity
-    ]];
   ];
 
   <|
@@ -1561,37 +1486,6 @@ Module[{levelData, levelBelow, mastersBelow, mastersAbove,
   Max[0, Ceiling[required]]
 ];
 
-(* Helper: multiply two eps-expanded coefficient lists (convolution) *)
-  MultiplyEpsCoeffs[coeffs1_List, coeffs2_List, epsOrder_Integer] :=
-Table[
-  Sum[
-    If[k >= 0 && k < Length[coeffs1] && (n - k) >= 0 && (n - k) < Length[coeffs2],
-      coeffs1[[k + 1]] * coeffs2[[n - k + 1]],
-      0
-    ],
-    {k, 0, n}
-  ],
-  {n, 0, epsOrder}
-];
-
-(* Multiply eps-expanded coeffs by a prefactored master series.
-   If J = eps^shift I, then I = eps^-shift J.  The coefficient at
-   output order n receives coeff[k] * J[n + shift - k]. *)
-MultiplyEpsCoeffsShifted[coeffs1_List, coeffs2_List, shift_Integer, epsOrder_Integer] :=
-Table[
-  Sum[
-    Module[{jIdx = n + shift - k},
-      If[k >= 0 && k < Length[coeffs1] &&
-         jIdx >= 0 && jIdx < Length[coeffs2],
-        coeffs1[[k + 1]] * coeffs2[[jIdx + 1]],
-        0
-      ]
-    ],
-    {k, 0, n + shift}
-  ],
-  {n, 0, epsOrder}
-];
-
 ComputeLevelBoundary[ftData_Association, level_Integer,
     transportResult_Association, epsOrder_Integer] :=
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
@@ -1698,9 +1592,9 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
         Print["    IBP coefficients: ", ibpCoeffs];
       ];
 
-	      (* Compute the boundary value based on the case *)
-	      totalBC = Switch[case,
-	        "integrate",
+        (* Compute the boundary value based on the case *)
+        totalBC = Switch[case,
+          "integrate",
           (* Full integration: combine Sum_j c_j(x)*f_j(x) first, then integrate.
              Individual c_j(x) may have poles at x=0,1 that cancel in the sum.
              Also accounts for eps-prefactors (J vs I basis). *)
@@ -1756,10 +1650,10 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
               ];
             , {j, Length[mastersAbove]}];
             directVal
-	          ]
-		      ];
-	        totalBC
-		    ],
+            ]
+          ];
+          totalBC
+        ],
     {masterIdx, Length[mastersAtLevel]}
   ];
 

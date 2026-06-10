@@ -166,6 +166,24 @@ New regression tests (all 25 pass, as do the other suites):
 - a truncated top epsilon order must not corrupt lower Laurent orders
   (the stale-dump mechanism).
 
+## Code Cleanup (2026-06-10)
+
+Dead ends from earlier debugging rounds were removed once the live path
+was verified: 18 unused private functions in
+`DiffExp/RegularizedIntegration.m` (the abandoned `*LaurentPrepared`
+integration path, the `reorient*`/`prepareBranchResolved*` branch-handling
+experiments, the `stripReconstructedEndpointLogs` approach superseded by
+the residual-sector fit, `ApplyRegularizationStepOld`), 6 unused helpers
+and 3 dead debug blocks in `FeynmanTrick/DiffExpIntegration.m`, and the
+duplicated non-finite-expression helpers now live once in
+`DiffExp`Utilities` (`NonFiniteExpressionQ`, `FiniteAbsMax`,
+`ReplaceSparseArrays`).
+
+The canonical end-to-end check for all examples is
+`temp/feynmantrick_stepwise_pysecdec_check.m`
+(`FT_EXAMPLES=bubble,sunrise,banana`); the box example is covered by
+`Tests/test_feynmantrick_pipeline.m`.
+
 ## Diagnostic Tools
 
 - `temp/eval_dump_generic.m`: evaluate any Laurent dump

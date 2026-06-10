@@ -275,13 +275,65 @@ nilpotent double pole in the numerator-master row and is the only level
 never validated against pySecDec) and/or the IBP tables involving the
 numerator master `{1,-1,1,1}`.
 
+## Level-0 Root Cause Localized (2026-06-10, second-point validation)
+
+pySecDec was rerun for ALL level-1 masters at a second parameter point
+z0 = 2/5 (export with `FT_FIXED_VALUE=2/5` via
+`temp/export_pysecdec_family_specs.m`, run with
+`temp/pysecdec_family_driver.py --factor-monomials`; the `_loop_`
+exporter fails with "scaleless" for this family).  Comparison against the
+transported functions at xx1 = 2/5:
+
+```text
+master       pySecDec @ 2/5 (leading)    transported @ 2/5
+{2,0,1,1}    finite 5.52702, no poles    -0.0201/eps + 5.6095     WRONG
+{1,-1,1,1}   0.166667/eps^3              0.02667/eps^3            WRONG
+{1,0,0,1}    -0.694444/eps^2             identically 0            WRONG
+{1,0,1,0}    -0.694444/eps^2             -2.0833/eps^2            differs (x-dep)
+{1,0,1,1}    0.166667/eps^3              0.3333/eps^3 (frozen)    WRONG
+{1,0,1,2}    0.5/eps^2                   0.5/eps^2                ok (leading)
+```
+
+Diagnosis chain:
+
+- The level-1 master `{1,0,0,1}` boundary value is computed as
+  `lim_{x->1}` of its level-2 reduction (`limitUpper` case in
+  `BoundaryRequestRecords`) and comes out IDENTICALLY ZERO, while pySecDec
+  gives `-2.0038/eps^2 + 2.2439/eps - 13.504` at 11/23 (it must equal
+  `{1,0,1,0}` by symmetry).  NOTE: this master produced no Laurent dump
+  (the zero shortcut) and was silently missing from every dump-based
+  comparison.
+- `EvaluateLimitFromTransport` implements the paper prescription "drop
+  x^(a + b eps) sectors with b != 0 at the endpoint" using
+  `DecomposeSingularity`'s SINGLE extracted exponent.  For multi-sector
+  endpoints (the same collapsed-average-b problem fixed in the definite
+  integrals) the entire series - including its genuine b = 0 sector - is
+  dropped or kept wholesale.  The limit path needs the same
+  endpoint-sector resolution the definite-integral path now has, keeping
+  only the b = 0 sector's constant term.
+- The `{1,-1,1,1}` boundary (an integrate-case over the never-validated
+  level-2 numerator vec `{2,-1,0,1}`) is also wrong at 2/5.
+- With masters 2 and 3 wrong/zero at the boundary, the dxx1 transport
+  couplings corrupt the OTHER masters' evolution away from the anchor
+  while every segment stays ODE-exact and the anchor values stay
+  pinned - exactly the observed symptoms (e.g. the transported
+  `{1,0,1,1}` eps^-3 coefficient stays frozen at 1/3 while the true
+  function varies to 1/6 at 2/5).
+
+So the remaining level-0 work is NOT in the local solvers (now verified
+exact): fix the multi-sector limit evaluation in
+`EvaluateLimitFromTransport`, and validate/fix the `{1,-1,1,1}` needed-vec
+boundary; the final banana value (reference 8.26810451329511583109,
+reproduced by pySecDec's direct L0 run: 8.2681 +/- 3e-5) should follow.
+
 ## Remaining Notes / Next Steps
 
-1. Validate the banana level-1 `dxx1` matrix / numerator-master IBP layer
-   directly: pySecDec the level-1 family at a second parameter point
-   (e.g. z0 = 1/4 or 3/4) and compare the transported combination
-   pointwise (`temp/check_dump_anchor.m` with `ANCHOR=...`); or verify
-   the matrix against an independent derivation.
+1. Fix `EvaluateLimitFromTransport` to resolve endpoint sectors before
+   applying the b != 0 drop rule (reuse the residual endpoint-sector
+   recovery from `DiffExp/RegularizedIntegration.m`), then re-validate
+   `{1,0,0,1}` against `-2.0038/eps^2 + 2.2439/eps - 13.504` at 11/23 and
+   `-0.694444/eps^2` at 2/5, and `{1,-1,1,1}` against `0.166667/eps^3` at
+   2/5.
 2. `ShiftRawBoundariesToFinite` still zero-pads shorter boundary lists up
    to the longest master's window; with the per-level warnings and the
    combine-window trim this is detected downstream, but a per-master

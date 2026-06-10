@@ -66,73 +66,84 @@ moments.  Post-fix: endpoint ODE residuals = 0 exactly, towers are clean
 single-sector, the salvage warnings are gone, and
 Tests/test_integration_log_depth.m locks the behavior.
 
-## Remaining: eps^0 deficit (+6.69) now at the COMBINATION level
+## RESOLVED: the eps^0 deficit (apparent-singularity solver fixes)
 
-Post-solver-fix state: the box L0 totals are bit-identical
-({12, -0.334914, -47.9756, -64.1316, -20.1632, ...} all real) because
-the eps^0 output only consumes tower offsets <= 2, which were always
-correct.  Verified piece by piece: interior segments match NIntegrate;
-straddling segment 5 matches its closed form; endpoint segment 1's
-machinery integration matches an independent termwise closed-form
-reconstruction to 13 digits; the b != 0 endpoint monomial machinery is
-exact on synthetic input; the endpoint towers satisfy the level ODE
-exactly.  The pin (-41.28417 at eps^0) is confirmed independently by
-the analytic all-orders box formula.
+Box L0 now reproduces the pin to 11 significant digits
+(-41.28416739754647 vs -41.28416739757452; eps^-2/-1 exact as before).
+Fixed 2026-06-11 in DiffExp/IntegrationStrategies/Recurrence.m.
 
-RESOLVED FURTHER (forensics complete, fix pending): the dump integrand
-IS the true G = c1 M1 + c2 M2 (FIRE coefficients verified: c1 =
-(18-6d)/(t-4t^2), c2 = 18(d-3)/(1-5t+4t^2); pointwise eps^0 values
-match the dump analytically at t = 0.05, 0.4, 0.95 to all digits; the
-exporter's "needed"-spec is a DIFFERENT normalization - same class as
-the banana "factor 2" memory note - red herring).  Per-segment
-comparison against semi-analytic window integrals (partial fractions +
-Beta forms, validated: window sum = pin to Laurent truncation) pins the
-ENTIRE deficit on SEGMENT 12 (the xx1 = 1 endpoint segment):
+Root cause: the L2 transport line crosses an APPARENT singularity of the
+DE at xx2 = 7/11 (the root of the quadratic Symanzik coefficient
+beta(t) = -A*B - A/3 + 4B/3, A = 1-11t/23, B = 1-t) - the first interior
+singular chart any example ever exercised (banana had none; the box L1
+system is diagonal with poles only at 0 and 1).  The function is
+analytic there, so all genuine local x^-1/x^-2 content is zero by
+analyticity; what broke was numerics/bookkeeping in the singular
+recurrence's particular solution, in compounding layers:
 
-  seg12 true Laurent:      {6, 12.33311519, +4.892941862, -24.49, ...}
-  seg12 machinery Laurent: {6, 12.33311519, -1.798476481, -66.23, ...}
-  Delta(eps^0) = -6.691418 = exactly the global deficit; eps^-2/-1
-  agree to 10 digits; segment 1 (xx1 = 0) is CORRECT (its termwise
-  closed-form reconstruction matches the machinery to 13 digits, and
-  matches the true window integral).
+1. Upstream series arithmetic leaves inert one-past-the-end
+   SeriesCoefficient[sd, {x, 0, nmax}] tail requests (numerically
+   ~1e-25) in the eps>=2 sources; their symbolic presence turns the
+   source entry's head into Plus.
+2. ComputeSingularParticular probed Head === SeriesData and silently
+   fell back to leading power 0, so the genuine x^-1 source coefficient
+   was never consumed: the particular lost a CONSTANT (-2.367 at eps^2),
+   boundary fixing absorbed the mismatch into the x^-1 homogeneous mode,
+   and the wrong-by-a-constant function propagated through the matching
+   chain into the L1 anchor of master {1,0,0,1} (eps^2 off by -1.11524),
+   rode the L1 transport as an exact constant (order-2 deviations are
+   x-independent when eps^0/1 are exact), entered the combined eps^1
+   residue, and the x^(-1-eps) endpoint sector integration's 1/eps
+   enhancement deposited it in the final eps^0: the -6.6914.
+3. The source assembly also leaves a cancellation-residue x^-2
+   coefficient (~1e-29 RELATIVE at WP 300, precision-tracked at ~271
+   digits - far above both PChop and 10^(-ChopPrecision/2)); reading
+   nmin naively then shifts the ansatz onto the eigenvalue (s - lambda
+   = 0).
+4. The non-resonance guard used IntegerQ on numeric eigenvalue
+   differences (always False), and the particular recursion loops had no
+   zero-divisor guard - a software-zero division could poison silently.
+5. The particular's SD * x^s assembly can come out head-Plus when
+   coefficients carry theta/Logx content; downstream only consumes
+   SeriesData shapes and silently dropped such particulars.
 
-The machinery's seg12 value equals the termwise closed-form of its own
-series under the (+i pi power-phase, +i pi log-value, formal drop at
-the singular end) convention - i.e. integration is internally
-consistent; the stored seg12 tower carries -i pi w1-relative content
-where seg1 carries +i pi w1 (the toUpper transport's branch data for
-the (-1+xx1) factor vs the local-side theta resolution).  Pointwise
-evaluation of the same data is correct, so the inconsistency is
-specifically between the upper-line stored branch structure and the
-endpoint-integration convention.  Flipping evaluation-side branches
-alone is inconsistent (breaks eps^-1); the fix must align the
-convention pair (stored data <-> integration) for upper-anchored
-segments.
+Fixes: normalize compound sources back to SeriesData (zeroing
+out-of-window SeriesCoefficient tails, loudly otherwise); theta-aware,
+Logx-probed RELATIVE leading-coefficient skip with threshold
+Max[10^(-ChopPrecision/2), 10^-24] (the 1e-24 floor is load-bearing);
+numeric-aware resonance guard; zero-divisor guards (defer to the general
+solver); particular normalized to SeriesData on return.  Env-gated debug
+hooks added: DEBUG_SING_PART=1 (routing/extraction telemetry),
+DEBUG_DUMP_DISPATCH_DIR (per-call ctx/bVec dumps),
+DEBUG_POWER_COEFF=1 (silent-zero events).
 
-Probe inventory (all /tmp): per_segment_truth.py (semi-analytic
-windows), probe_seg12_exact.m (+ _conj/_split variants),
-probe_seg1_exact.m, identity_finite_eps.py, probe_fire_reduction.m.
+Validation: the L2 upper-endpoint limit tower is exact to 20 digits at
+ALL eps orders (Gamma[1+eps]B(1-eps,1-eps)(4/23)^-eps); battery 17/17;
+bubble/sunrise/banana comparators 0 failures; box L0 matches the pin.
 
-Previously suspected and now exonerated:
-Pointwise (machinery convention: local-side thetas + complex local
-log) the dump integrand is real and smooth:
-  t = 1/20 : -126.3158/eps - 349.2138
-  t = 2/5  : -25/eps      - 43.1342
-  t = 19/20: -126.3158/eps - 453.3886
-with dump(eps^-1) = -6/(t(1-t)) = 2 x spec(eps^-1) at all three points
-(spec eps^-1 = -3/(t(1-t)) exactly, verified both by pySecDec and the
-z0-endpoint residue formula 1/(A(A+B))).  A clean global factor 2 with
-1x totals at the poles is self-contradictory, so something in this
-reading is convention-skewed; the four-way real-eps test
-(/tmp/fourway_eps_test.py: 3d quad of the box, int dt of the spec, pin
-Laurent, FT Laurent, all at eps = -1/20) discriminates which leg is
-broken without any Laurent bookkeeping.
+Exonerated along the way (each by direct measurement): theta/branch
+conventions (twice), the combination assembly (verified exact on its
+inputs to 13 digits), EvaluateLimitFromTransport (faithful to stored
+data), the eps-lookahead budget (warnings gone, value unchanged), the
+exported matrices (all slices exact; matrix linear in eps),
+PowerCoefficient's silent zeroing (3 benign boundary events), and the
+frozen-SC tails' numeric value (~1e-25) - their TYPE was the poison,
+not their size.
 
-- branch confluent-sectors-wip holds an N-root/confluent Prony
-  generalization of FitResidualEndpointSectors built while chasing the
-  (now-explained) spurious confluent moments; with the solver fixed the
-  towers are plain and the existing 2-root fitter suffices for the box.
-  Keep the branch for genuinely multi-sector future families.
+Latent issues catalogued for follow-up (subagent audit reports):
+the general singular solver returns an empty particular (with complex
+leaks at higher orders) for resonant-with-source inputs - currently
+bypassed, never properly fixed; CheckEpsPoles guard tests the d-form
+and can never fire (FeynmanTrickIteration.m:454); negative-index
+boundary requests fall through to "direct" and can silently delete
+numerator powers; EvaluateLimitFromTransport silently zeroes
+endpoint-divergent IBP coefficients; the limit/direct paths lack the
+integrate path's incomplete-top-order trimming and
+ShiftRawBoundariesToFinite zero-pads unknown orders; hardcoded
+expOrd = 30 in the symbolic assembly branch; Normal+re-Series launders
+one phantom top order (also in ApplyAnalyticContinuation); the inert
+SeriesCoefficient tail emission itself; eps_prefactors.m is written but
+never read.
 
 ## Practical guidance
 

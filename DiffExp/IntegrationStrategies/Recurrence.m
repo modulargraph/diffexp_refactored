@@ -547,18 +547,92 @@ ComputeSingularFundamentalMatrix[ctx_Association, eigenvalues_, P_, PInv_,
 (* Compute the particular solution for the singular recurrence.
    The particular solution starts at power s determined by the leading power of bVec.
    Returns the particular solution vector, or $Failed if resonance is detected. *)
-ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
+ComputeSingularParticular[bVecRaw_, eigenvalues_, P_, PInv_,
     rHatCoeffs_, dCoeffs_, dR_, dD_, d0_, bHatCoeffs_, numBCoeffs_, mode_, ctx_Association] := Module[
   {systemSize, maxOrd, bLeadPow, bLeadDen, s, gCoeffs, rhs, divisor, nbCoeff,
-   bVecInEigen, bSeriesCoeffs, numBVecCoeffs, fParticular, m, j},
+   bVecInEigen, bSeriesCoeffs, numBVecCoeffs, fParticular, m, j, bVec},
 
-  systemSize = Length[bVec];
+  systemSize = Length[bVecRaw];
   maxOrd = ctx["ExpansionOrder"];
 
-  (* Determine leading power of bVec *)
+  (* Normalize compound source entries back to SeriesData.  Upstream
+     series arithmetic can leave inert SeriesCoefficient requests at or
+     beyond a series' truncation order (numerically negligible tail
+     bookkeeping); their symbolic presence turns the entry's head into
+     Plus, which would silently disable the Laurent leading-power
+     detection below and drop genuine x^-1 source content. *)
+  bVec = Map[
+    Function[entry,
+      If[Head[entry] === SeriesData,
+        entry,
+        Module[{v = entry},
+          v = v /. HoldPattern[SeriesCoefficient[ss_SeriesData, {_, _, k_}]] /;
+              (IntegerQ[k] && (k*ss[[6]] >= ss[[5]] || k*ss[[6]] < ss[[4]])) :> 0;
+          v = v /. HoldPattern[SeriesCoefficient[ss_SeriesData, k_Integer]] /;
+              (k*ss[[6]] >= ss[[5]] || k*ss[[6]] < ss[[4]]) :> 0;
+          v = DiffExp`SeriesOps`SExpand[v];
+          If[Head[v] =!= SeriesData && !TrueQ[PossibleZeroQ[v]],
+            DiffExp`Utilities`PrintWarning[
+              "Singular recurrence: source entry is not a series after ",
+              "normalization (head ", Head[v], "); leading-power ",
+              "detection may be unreliable."];
+          ];
+          v
+        ]
+      ]
+    ],
+    bVecRaw
+  ];
+
+  (* Determine leading power of bVec.  Skip effectively-zero leading
+     coefficients: the source assembly can leave numerical-noise entries
+     (e.g. ~1e-29 at WP 300) below the true leading power, and an
+     off-by-one here shifts s onto an eigenvalue and silently corrupts
+     the particular solution from that epsilon order onward. *)
   bLeadPow = Min[Table[
     If[Head[bVec[[k]]] === SeriesData,
-      bVec[[k]][[4]] / bVec[[k]][[6]],
+      Module[{ser = bVec[[k]], logProbe, branchVals, scale, lead, tolRel},
+        (* Relative threshold: imperfect cancellations at apparent
+           singularities leave residues far above the absolute chop
+           scale; judge leading coefficients against the series' own
+           magnitude.  Coefficients may carry Logx towers and theta
+           branch content - probe Logx at an irrational value and
+           require both theta branches to be negligible. *)
+        logProbe = N[Pi, ctx["WorkingPrecision"]];
+        branchVals[cc_] := Table[
+          cc /. {DiffExp`Symbols`\[Theta]p -> br[[1]],
+                 DiffExp`Symbols`\[Theta]m -> br[[2]]} /.
+            DiffExp`Symbols`Logx -> logProbe,
+          {br, {{1, 0}, {0, 1}}}
+        ];
+        scale = Max[0, Max[Map[
+          Function[cc, Max[0, Max[
+            If[NumericQ[#], Abs[N[#]], 0] & /@ branchVals[cc]]]],
+          ser[[3]]
+        ]]];
+        (* Cancellation residues at apparent singularities sit far above
+           10^(-ChopPrecision/2) (e.g. ~1e-29 relative at WP 300, from
+           ~30 digits of cancellation): genuine leading content is either
+           O(1) relative or exactly zero in exact arithmetic, so a loose
+           relative floor is safe and necessary here. *)
+        tolRel = Max[10^(-ctx["ChopPrecision"]/2), 10^(-24)];
+        lead = SelectFirst[
+          Range[Length[ser[[3]]]],
+          Function[idx, Module[{cc = DiffExp`Utilities`PChop[ser[[3, idx]]], vals},
+            If[TrueQ[PossibleZeroQ[cc]],
+              False,
+              vals = branchVals[cc];
+              !(scale > 0 && AllTrue[vals,
+                NumericQ[#] && Abs[N[#]] < tolRel*scale &])
+            ]
+          ]],
+          Missing["AllZero"]
+        ];
+        If[lead === Missing["AllZero"],
+          0,
+          (ser[[4]] + lead - 1) / ser[[6]]
+        ]
+      ],
       0
     ],
     {k, systemSize}
@@ -566,9 +640,25 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
 
   s = bLeadPow + 1;
 
+  If[Environment["DEBUG_SING_PART"] === "1",
+    Print["DEBUG SingPart: label=", ctx["Label"], " mode=", mode, " s=", s,
+      " bLeadPowRaw=", Table[If[Head[bVec[[k]]] === SeriesData,
+        bVec[[k]][[4]]/bVec[[k]][[6]], Head[bVec[[k]]]], {k, systemSize}],
+      " eig=", eigenvalues];
+  ];
+
   (* Check non-resonance for particular solution:
-     need (m + s - lambda_j) != 0 for all m >= 0 and all j *)
-  If[AnyTrue[eigenvalues, (IntegerQ[# - s] && # - s >= 0) &],
+     need (m + s - lambda_j) != 0 for all m >= 0 and all j.
+     Eigenvalues are typically inexact numerics, so test integer
+     distance numerically rather than with IntegerQ (which is always
+     False on approximate numbers and would let resonant cases through
+     to a division by a software zero below). *)
+  If[AnyTrue[eigenvalues,
+      Module[{diff = # - s, rounded},
+        rounded = Round[Re[diff]];
+        rounded >= 0 &&
+          TrueQ[PossibleZeroQ[DiffExp`Utilities`PChop[diff - rounded]]]
+      ] &],
     Return[$Failed]
   ];
 
@@ -580,6 +670,19 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
     ],
     {n, 0, maxOrd}
   ];
+  If[Environment["DEBUG_SING_PART"] === "1",
+    Print["DEBUG SingPart2: bVec head=", Head[bVec[[1]]],
+      " nmin/nmax/den=", If[MatchQ[bVec[[1]], _SeriesData],
+        {bVec[[1]][[4]], bVec[[1]][[5]], bVec[[1]][[6]]}, "?"],
+      " rawcoeffs=", If[MatchQ[bVec[[1]], _SeriesData],
+        InputForm[N[Chop[Take[bVec[[1]][[3]], Min[3, Length[bVec[[1]][[3]]]]] /.
+          {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1} /.
+          DiffExp`Symbols`Logx -> 1, 10^-15], 6]], "?"],
+      " first bSeriesCoeffs=", InputForm[N[Chop[
+        (Take[bSeriesCoeffs, Min[3, Length[bSeriesCoeffs]]] /.
+          {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1} /.
+          DiffExp`Symbols`Logx -> 1), 10^-15], 6]]];
+  ];
   (* Transform to eigenbasis *)
   bVecInEigen = Table[PInv . bSeriesCoeffs[[n]], {n, Length[bSeriesCoeffs]}];
 
@@ -589,6 +692,8 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
     maxOrd + 1
   ];
 
+  Module[{resonantHit},
+  resonantHit = Catch[
   If[mode === "rational",
     Do[
       nbCoeff = Sum[
@@ -608,7 +713,12 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
 
       gCoeffs[[m + 1]] = Table[
         divisor = d0 * (m + s - eigenvalues[[j]]);
-        rhs[[j]] / divisor,
+        If[TrueQ[PossibleZeroQ[DiffExp`Utilities`PChop[divisor]]],
+          (* Resonant step the guard above should have caught - never
+             divide by a (software) zero; defer to the general solver. *)
+          Throw[True, "DiffExpResonantDivisor"],
+          rhs[[j]] / divisor
+        ],
         {j, systemSize}
       ];
       , {m, 0, maxOrd}
@@ -623,11 +733,18 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
 
       gCoeffs[[m + 1]] = Table[
         divisor = m + s - eigenvalues[[j]];
-        rhs[[j]] / divisor,
+        If[TrueQ[PossibleZeroQ[DiffExp`Utilities`PChop[divisor]]],
+          Throw[True, "DiffExpResonantDivisor"],
+          rhs[[j]] / divisor
+        ],
         {j, systemSize}
       ];
       , {m, 0, maxOrd}
     ];
+  ];
+  False,
+  "DiffExpResonantDivisor"];
+  If[TrueQ[resonantHit], Return[$Failed, Module]];
   ];
 
   (* Transform back to original basis and build SeriesData at power s *)
@@ -636,6 +753,37 @@ ComputeSingularParticular[bVec_, eigenvalues_, P_, PInv_,
       DiffExp`Utilities`PChop[Table[Sum[P[[k, j]] * gCoeffs[[n + 1, j]], {j, systemSize}], {n, 0, maxOrd}]],
       0, maxOrd + 1, 1] * DiffExp`Symbols`x^s,
     {k, systemSize}
+  ];
+
+  If[Environment["DEBUG_SING_PART"] === "1",
+    Print["DEBUG SingPart3: g0=", InputForm[N[Chop[gCoeffs[[1]] /.
+        {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1} /.
+        DiffExp`Symbols`Logx -> 1, 10^-15], 6]],
+      " g1=", InputForm[N[Chop[gCoeffs[[2]] /.
+        {DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1} /.
+        DiffExp`Symbols`Logx -> 1, 10^-15], 6]],
+      " fPart-shape=", Map[If[MatchQ[#, _Times | _SeriesData],
+        Module[{sd = If[MatchQ[#, _SeriesData], #, First[Cases[{#}, _SeriesData, Infinity, 1]]]},
+          {sd[[4]], sd[[5]], Length[sd[[3]]]}], Head[#]] &, fParticular]];
+  ];
+
+  (* Normalize each component to a plain SeriesData: the x^s product (and
+     theta/Logx-bearing coefficients) can leave a compound Plus/Times
+     expression, which downstream boundary fixing and per-order source
+     assembly do not reliably consume - the particular content would be
+     silently dropped there. *)
+  fParticular = Map[
+    Function[entry,
+      Module[{v = DiffExp`SeriesOps`SExpand[entry]},
+        If[Head[v] =!= SeriesData && !TrueQ[PossibleZeroQ[v]],
+          DiffExp`Utilities`PrintWarning[
+            "Singular recurrence: particular solution did not normalize ",
+            "to a series (head ", Head[v], ")."];
+        ];
+        v
+      ]
+    ],
+    fParticular
   ];
 
   DiffExp`Utilities`PChop[fParticular]

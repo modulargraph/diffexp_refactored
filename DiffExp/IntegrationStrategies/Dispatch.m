@@ -7,6 +7,14 @@ DispatchStrategy[ctx_Association, bVec_, epsord_, cacheIn_Association] := Module
    useRationalRecurrence, useSingularRecurrence, useGeneralSingularRecurrence,
    useFuchsianizedSingularRecurrence, singularEigenData},
 
+  If[StringQ[Environment["DEBUG_DUMP_DISPATCH_DIR"]],
+    Module[{ddir = Environment["DEBUG_DUMP_DISPATCH_DIR"], nfile},
+      nfile = Length[FileNames["dispatch_*.m", ddir]] + 1;
+      Put[<|"ctx" -> ctx, "bVec" -> bVec, "epsord" -> epsord|>,
+        FileNameJoin[{ddir, "dispatch_" <> IntegerString[nfile, 10, 4] <> ".m"}]];
+    ];
+  ];
+
     (* Check if rational recurrence should be used (non-singular points) *)
     useRationalRecurrence = (
       ctx["UseRationalRecurrence"] === True &&

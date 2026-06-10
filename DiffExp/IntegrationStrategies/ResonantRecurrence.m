@@ -1127,6 +1127,12 @@ PowerCoefficient[expr_, power_, ctx_Association] := Module[
 
   If[coeff === $Failed || coeff === Indeterminate ||
       !FreeQ[coeff, SeriesCoefficient | Indeterminate | DirectedInfinity | ComplexInfinity],
+    If[Environment["DEBUG_POWER_COEFF"] === "1",
+      Print["DEBUG PowerCoefficient ZERO: p=", InputForm[p],
+        " window=", If[MatchQ[expr, _SeriesData],
+          {expr[[4]], expr[[5]], expr[[6]]}, Head[expr]],
+        " result=", If[coeff === $Failed, "$Failed", Short[coeff, 2]]];
+    ];
     0,
     DiffExp`Utilities`PChop[coeff]
   ]

@@ -56,6 +56,10 @@ IntegrateDecompositionLaurent::usage = "IntegrateDecompositionLaurent[decomposit
 
 EvaluateLimitAtSingularity::usage = "EvaluateLimitAtSingularity[decomposition, direction] evaluates the limit of a decomposed series at x=0. direction is +1 for x->0+ or -1 for x->0-. Terms with b != 0 are set to zero per regularization prescription.";
 
+EvaluateEndpointLimitSectors::usage = "EvaluateEndpointLimitSectors[seriesList, direction] evaluates lim_{x->0} of a transport series tower (one entry per epsilon order), resolving residual x^(a + b_i*eps) endpoint sectors so the analytic-regularization prescription (drop sectors with b != 0, even when a < 0) is applied per sector instead of to DecomposeSingularity's single collapsed exponent. Returns the per-epsilon-order list of limit values.";
+
+FitResidualEndpointSectors::usage = "FitResidualEndpointSectors[coeffList, branchRules] resolves the epsilon tower of a fixed local power (one polynomial in Logx per epsilon offset) into residual x^(r*eps) sectors. Returns <|\"Sectors\" -> {<|\"ResidualB\", \"Coefficients\"|>..}, \"SalvageOffsets\", \"SalvageExact\", \"Resolved\"|> or $Failed.";
+
 IntegrateSegmentData::usage = "IntegrateSegmentData[segmentData, {a, b}] integrates a single segment's data over the portion [a,b] (in main line coordinates).";
 
 IntegratePiecewiseSaved::usage = "IntegratePiecewiseSaved[savedData, {a, b}] computes ∫ f(x) dx from a to b where x is the main line parameter. Returns a list indexed by {integralIndex, epsilonOrder}.";
@@ -717,13 +721,251 @@ IntegrateAnalyticRegularizedByIBPLaurent[a_, b_, epsMinPower_Integer, gList_List
   <|"MinPower" -> regEpsMin, "Coefficients" -> result|>
 ];
 
+(* Recover residual endpoint sectors sum_i w_i(eps) x^(r_i eps) from the
+   epsilon tower of a fixed local power.  After DecomposeSingularity has
+   factored out x^(a + branchB*eps), genuinely multi-sector data leaves a
+   residual tower whose Logx structure encodes the remaining exponents:
+
+     T(n, k) := [Logx^k] coeff(epsilon offset n)
+             ==  Sum_i c_{i, n-k} r_i^k / k!
+
+   with absolute offsets n counted from the first gList entry, so each
+   (n, k) pair probes a single weight order q = n - k.  The shifted
+   diagonals m_k = k! T(q0 + k, k) = Sum_i c_{i, q0} r_i^k form a Prony
+   system for the roots r_i for any reference order q0 whose weight slice
+   is nonzero; q0 is scanned because leading weight slices can cancel
+   (e.g. the s0 = 0 banana {1,0,2,1} tower).  Fits are only trusted on
+   the leading run of offsets where the full reconstructed Logx content
+   matches the data.  Beyond that run (truncated or partially combined
+   top epsilon orders) the non-log content is salvaged against the plain
+   branch exponent under the usual truncation-boundary convention, and
+   dropped Logx content is reported. *)
+FitResidualEndpointSectors[coeffList_List, branchRules_List] := Module[
+  {resolved, maxOffset, firstVisible, maxLogAtFirst, logCoeffAt,
+   relTol, relZeroQ, q0Candidates, candidateRootSets, ladder,
+   m0, m1, m2, m3, det, e1, e2, disc, twoRoots,
+   evaluateFit, best, fitResult, sectorCount, roots, sectorCoeffs,
+   usableQMax, salvageOffsets, salvageExact, tol},
+
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  resolved = DiffExp`Utilities`PChop[
+    Expand[branchReplaceAtActivePrecision[#, branchRules]]
+  ] & /@ coeffList;
+  maxOffset = Length[resolved] - 1;
+  firstVisible = SelectFirst[
+    Range[0, maxOffset],
+    !EffectiveZeroExprQ[resolved[[# + 1]], tol] &,
+    Missing["None"]
+  ];
+  If[MissingQ[firstVisible],
+    Return[<|"Sectors" -> {}, "SalvageOffsets" -> {},
+      "SalvageExact" -> True, "Resolved" -> resolved|>, Module]
+  ];
+
+  logCoeffAt[offset_Integer, logPower_Integer] := If[
+    offset < 0 || offset > maxOffset,
+    0,
+    DiffExp`SeriesOps`LogxCoeffNS[resolved[[offset + 1]], logPower]
+  ];
+
+  (* Relative consistency test.  Tower data carries the active working
+     precision, so genuine sector-model violations (truncated or
+     partially combined data, resonant logs) sit many orders of magnitude
+     above the noise floor of a valid fit. *)
+  relTol = Max[tol^(1/3), 10^-12];
+  relZeroQ[diff_, scale_] := Module[
+    {d = numericAtActivePrecision[diff], s = numericAtActivePrecision[scale]},
+    If[!NumericQ[d] || !NumericQ[s], Return[False, Module]];
+    Abs[d] <= relTol * (1 + Abs[s])
+  ];
+
+  (* The weight slices may start before the first visible offset when the
+     leading weights cancel: content at (firstVisible, log power k) probes
+     weight order firstVisible - k. *)
+  maxLogAtFirst = Max[0, Max[Join[{0},
+    Select[
+      DiffExp`SeriesOps`LogxPowerRange[resolved[[firstVisible + 1]]],
+      !EffectiveZeroExprQ[logCoeffAt[firstVisible, #], tol] &
+    ]
+  ]]];
+  q0Candidates = Range[Max[0, firstVisible - maxLogAtFirst], firstVisible];
+
+  (* Candidate root sets from the shifted moment diagonals, smallest
+     sector count first for each usable reference order. *)
+  candidateRootSets = {};
+  Do[
+    ladder = Table[
+      DiffExp`Utilities`PChop[
+        Expand[Factorial[k] * logCoeffAt[q0 + k, k]]
+      ],
+      {k, 0, Min[3, maxOffset - q0]}
+    ];
+    If[Length[ladder] < 2 ||
+        AllTrue[ladder, EffectiveZeroExprQ[#, tol] &],
+      Continue[]
+    ];
+    {m0, m1} = ladder[[1 ;; 2]];
+    m2 = If[Length[ladder] >= 3, ladder[[3]], 0];
+    m3 = If[Length[ladder] >= 4, ladder[[4]], 0];
+    If[!EffectiveZeroExprQ[m0, tol],
+      AppendTo[candidateRootSets,
+        <|"Roots" -> {If[EffectiveZeroExprQ[m1, tol], 0,
+            DiffExp`Utilities`PChop[Expand[m1 / m0]]
+          ]},
+          "ReferenceOrder" -> q0|>
+      ];
+    ];
+    If[Length[ladder] >= 4,
+      det = DiffExp`Utilities`PChop[Expand[m0 * m2 - m1^2]];
+      If[!EffectiveZeroExprQ[det, tol],
+        e1 = DiffExp`Utilities`PChop[Expand[(m0 * m3 - m1 * m2) / det]];
+        e2 = DiffExp`Utilities`PChop[Expand[(m1 * m3 - m2^2) / det]];
+        disc = DiffExp`Utilities`PChop[Expand[e1^2 - 4 * e2]];
+        twoRoots = (DiffExp`Utilities`PChop[Expand[#]] &) /@
+          {(e1 + Sqrt[disc])/2, (e1 - Sqrt[disc])/2};
+        If[!EffectiveZeroExprQ[twoRoots[[1]] - twoRoots[[2]], tol],
+          AppendTo[candidateRootSets,
+            <|"Roots" -> twoRoots, "ReferenceOrder" -> q0|>
+          ];
+        ];
+      ];
+    ],
+    {q0, q0Candidates}
+  ];
+  If[candidateRootSets === {}, Return[$Failed, Module]];
+
+  (* Solve the weight tower for a candidate root set and count how many
+     leading offsets the full Logx reconstruction explains. *)
+  evaluateFit[testRoots_List] := Module[
+    {count = Length[testRoots], coeffs, qSolveMax, w0, w1, denom,
+     validOffsets, q, predicted, dataVal, scaleVal, failed},
+
+    qSolveMax = maxOffset - (count - 1);
+    coeffs = ConstantArray[0, {count, maxOffset + 1}];
+    Do[
+      If[count === 1,
+        coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
+          Expand[logCoeffAt[q, 0]]
+        ],
+        w0 = logCoeffAt[q, 0];
+        w1 = logCoeffAt[q + 1, 1];
+        denom = testRoots[[1]] - testRoots[[2]];
+        coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
+          Expand[(w1 - w0 * testRoots[[2]]) / denom]
+        ];
+        coeffs[[2, q + 1]] = DiffExp`Utilities`PChop[
+          Expand[w0 - coeffs[[1, q + 1]]]
+        ];
+      ],
+      {q, 0, qSolveMax}
+    ];
+
+    (* Validate every available (offset, log power) pair whose weight
+       order has been solved; stop at the first failing offset. *)
+    validOffsets = maxOffset + 1;
+    Do[
+      failed = False;
+      Do[
+        Module[{qq = n - k},
+          If[qq >= 0 && qq <= qSolveMax,
+            dataVal = Factorial[k] * logCoeffAt[n, k];
+            predicted = Total[Table[
+              coeffs[[i, qq + 1]] * zeroPowerSafe[testRoots[[i]], k],
+              {i, count}
+            ]];
+            scaleVal = Max[
+              Abs[numericAtActivePrecision[dataVal]],
+              Abs[numericAtActivePrecision[predicted]]
+            ];
+            If[!relZeroQ[dataVal - predicted, scaleVal],
+              failed = True;
+            ];
+          ];
+        ];
+        If[failed, Break[]],
+        {k, 0, n}
+      ];
+      If[failed,
+        validOffsets = n;
+        Break[];
+      ],
+      {n, 0, maxOffset}
+    ];
+
+    (* When validation fails at some offset, the weight orders solved
+       from the by-construction rows touching the failing region may have
+       absorbed pollution that only became visible one offset later (for
+       example missing low-log homogeneous content in truncated upstream
+       data), so retreat one extra order beyond the validated run. *)
+    <|
+      "Roots" -> testRoots,
+      "SectorCount" -> count,
+      "Coefficients" -> coeffs,
+      "ValidOffsets" -> validOffsets,
+      "UsableQMax" -> Min[
+        qSolveMax,
+        validOffsets - count - If[validOffsets <= maxOffset, 1, 0]
+      ]
+    |>
+  ];
+
+  best = Missing["None"];
+  Do[
+    fitResult = evaluateFit[candidate["Roots"]];
+    (* The moment ladder at the candidate's reference order must lie
+       inside the validated run, otherwise the roots themselves are not
+       trustworthy. *)
+    If[fitResult["ValidOffsets"] >=
+        candidate["ReferenceOrder"] + 2 * fitResult["SectorCount"],
+      If[MissingQ[best] ||
+          fitResult["ValidOffsets"] > best["ValidOffsets"],
+        best = fitResult;
+      ];
+      If[fitResult["ValidOffsets"] >= maxOffset + 1, Break[]];
+    ],
+    {candidate, candidateRootSets}
+  ];
+  If[MissingQ[best] || best["UsableQMax"] < 0, Return[$Failed, Module]];
+
+  sectorCount = best["SectorCount"];
+  roots = best["Roots"];
+  usableQMax = best["UsableQMax"];
+  salvageOffsets = Select[
+    Range[usableQMax + 1, maxOffset],
+    !EffectiveZeroExprQ[resolved[[# + 1]], tol] &
+  ];
+  salvageExact = sectorCount === 1 &&
+    EffectiveZeroExprQ[roots[[1]], tol];
+
+
+  sectorCoeffs = ConstantArray[0, {sectorCount, Length[resolved]}];
+  Do[
+    sectorCoeffs[[i, q + 1]] = best["Coefficients"][[i, q + 1]],
+    {i, sectorCount},
+    {q, 0, usableQMax}
+  ];
+
+  <|
+    "Sectors" -> Table[
+      <|
+        "ResidualB" -> roots[[i]],
+        "Coefficients" -> sectorCoeffs[[i]]
+      |>,
+      {i, sectorCount}
+    ],
+    "SalvageOffsets" -> salvageOffsets,
+    "SalvageExact" -> salvageExact,
+    "Resolved" -> resolved
+  |>
+];
+
 IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gList_List,
     {xmin_, xmax_}, atLower_, atUpper_] := Module[
   {epsMin, epsMaxPower, baseCoeffs, result, tol, zeroQ, branchDir, branchPoint,
    branchRules, branchB, logValue, xLocal, subtractPowerQ, subtractSeries,
    remainderGList, monomialBasis, addMonomial, addMonomialWithB,
    scanSubtractedCoeff, coefficientAtLocalPower, collectSubtractedPowers,
-   fitResidualEndpointSectors, addSubtractedPower,
+   addSubtractedPower,
    gPower, ser, nmin, den, coeffs, localPower, coeff, logPowers, logCoeff,
    localP, resolvedCoeff, maxRelPower, relPower, epsLocal, s, basisExpr,
    seriesExpr, basisLaurent, droppedTopOrderLogTerms = 0,
@@ -915,276 +1157,13 @@ IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gL
     ]
   ];
 
-  (* Recover residual endpoint sectors sum_i w_i(eps) x^(r_i eps) from the
-     epsilon tower of a fixed local power.  After DecomposeSingularity has
-     factored out x^(a + branchB*eps), genuinely multi-sector data leaves a
-     residual tower whose Logx structure encodes the remaining exponents:
-
-       T(n, k) := [Logx^k] coeff(epsilon offset n)
-               ==  Sum_i c_{i, n-k} r_i^k / k!
-
-     with absolute offsets n counted from the first gList entry, so each
-     (n, k) pair probes a single weight order q = n - k.  The shifted
-     diagonals m_k = k! T(q0 + k, k) = Sum_i c_{i, q0} r_i^k form a Prony
-     system for the roots r_i for any reference order q0 whose weight slice
-     is nonzero; q0 is scanned because leading weight slices can cancel
-     (e.g. the s0 = 0 banana {1,0,2,1} tower).  Fits are only trusted on
-     the leading run of offsets where the full reconstructed Logx content
-     matches the data.  Beyond that run (truncated or partially combined
-     top epsilon orders) the non-log content is salvaged against the plain
-     branch exponent under the usual truncation-boundary convention, and
-     dropped Logx content is reported. *)
-  fitResidualEndpointSectors[coeffList_List] := Module[
-    {resolved, maxOffset, firstVisible, maxLogAtFirst, logCoeffAt,
-     relTol, relZeroQ, q0Candidates, candidateRootSets, ladder,
-     m0, m1, m2, m3, det, e1, e2, disc, twoRoots,
-     evaluateFit, best, fitResult, sectorCount, roots, sectorCoeffs,
-     usableQMax, salvageOffsets, salvageExact},
-
-    resolved = DiffExp`Utilities`PChop[
-      Expand[branchReplaceAtActivePrecision[#, branchRules]]
-    ] & /@ coeffList;
-    maxOffset = Length[resolved] - 1;
-    firstVisible = SelectFirst[
-      Range[0, maxOffset],
-      !EffectiveZeroExprQ[resolved[[# + 1]], tol] &,
-      Missing["None"]
-    ];
-    If[MissingQ[firstVisible],
-      Return[<|"Sectors" -> {}, "SalvageOffsets" -> {},
-        "SalvageExact" -> True|>, Module]
-    ];
-
-    logCoeffAt[offset_Integer, logPower_Integer] := If[
-      offset < 0 || offset > maxOffset,
-      0,
-      DiffExp`SeriesOps`LogxCoeffNS[resolved[[offset + 1]], logPower]
-    ];
-
-    (* Relative consistency test.  Tower data carries the active working
-       precision, so genuine sector-model violations (truncated or
-       partially combined data, resonant logs) sit many orders of magnitude
-       above the noise floor of a valid fit. *)
-    relTol = Max[tol^(1/3), 10^-12];
-    relZeroQ[diff_, scale_] := Module[
-      {d = numericAtActivePrecision[diff], s = numericAtActivePrecision[scale]},
-      If[!NumericQ[d] || !NumericQ[s], Return[False, Module]];
-      Abs[d] <= relTol * (1 + Abs[s])
-    ];
-
-    (* The weight slices may start before the first visible offset when the
-       leading weights cancel: content at (firstVisible, log power k) probes
-       weight order firstVisible - k. *)
-    maxLogAtFirst = Max[0, Max[Join[{0},
-      Select[
-        DiffExp`SeriesOps`LogxPowerRange[resolved[[firstVisible + 1]]],
-        !EffectiveZeroExprQ[logCoeffAt[firstVisible, #], tol] &
-      ]
-    ]]];
-    q0Candidates = Range[Max[0, firstVisible - maxLogAtFirst], firstVisible];
-
-    (* Candidate root sets from the shifted moment diagonals, smallest
-       sector count first for each usable reference order. *)
-    candidateRootSets = {};
-    Do[
-      ladder = Table[
-        DiffExp`Utilities`PChop[
-          Expand[Factorial[k] * logCoeffAt[q0 + k, k]]
-        ],
-        {k, 0, Min[3, maxOffset - q0]}
-      ];
-      If[Length[ladder] < 2 ||
-          AllTrue[ladder, EffectiveZeroExprQ[#, tol] &],
-        Continue[]
-      ];
-      {m0, m1} = ladder[[1 ;; 2]];
-      m2 = If[Length[ladder] >= 3, ladder[[3]], 0];
-      m3 = If[Length[ladder] >= 4, ladder[[4]], 0];
-      If[!EffectiveZeroExprQ[m0, tol],
-        AppendTo[candidateRootSets,
-          <|"Roots" -> {If[EffectiveZeroExprQ[m1, tol], 0,
-              DiffExp`Utilities`PChop[Expand[m1 / m0]]
-            ]},
-            "ReferenceOrder" -> q0|>
-        ];
-      ];
-      If[Length[ladder] >= 4,
-        det = DiffExp`Utilities`PChop[Expand[m0 * m2 - m1^2]];
-        If[!EffectiveZeroExprQ[det, tol],
-          e1 = DiffExp`Utilities`PChop[Expand[(m0 * m3 - m1 * m2) / det]];
-          e2 = DiffExp`Utilities`PChop[Expand[(m1 * m3 - m2^2) / det]];
-          disc = DiffExp`Utilities`PChop[Expand[e1^2 - 4 * e2]];
-          twoRoots = (DiffExp`Utilities`PChop[Expand[#]] &) /@
-            {(e1 + Sqrt[disc])/2, (e1 - Sqrt[disc])/2};
-          If[!EffectiveZeroExprQ[twoRoots[[1]] - twoRoots[[2]], tol],
-            AppendTo[candidateRootSets,
-              <|"Roots" -> twoRoots, "ReferenceOrder" -> q0|>
-            ];
-          ];
-        ];
-      ],
-      {q0, q0Candidates}
-    ];
-    If[candidateRootSets === {}, Return[$Failed, Module]];
-
-    (* Solve the weight tower for a candidate root set and count how many
-       leading offsets the full Logx reconstruction explains. *)
-    evaluateFit[testRoots_List] := Module[
-      {count = Length[testRoots], coeffs, qSolveMax, w0, w1, denom,
-       validOffsets, q, predicted, dataVal, scaleVal, failed},
-
-      qSolveMax = maxOffset - (count - 1);
-      coeffs = ConstantArray[0, {count, maxOffset + 1}];
-      Do[
-        If[count === 1,
-          coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
-            Expand[logCoeffAt[q, 0]]
-          ],
-          w0 = logCoeffAt[q, 0];
-          w1 = logCoeffAt[q + 1, 1];
-          denom = testRoots[[1]] - testRoots[[2]];
-          coeffs[[1, q + 1]] = DiffExp`Utilities`PChop[
-            Expand[(w1 - w0 * testRoots[[2]]) / denom]
-          ];
-          coeffs[[2, q + 1]] = DiffExp`Utilities`PChop[
-            Expand[w0 - coeffs[[1, q + 1]]]
-          ];
-        ],
-        {q, 0, qSolveMax}
-      ];
-
-      (* Validate every available (offset, log power) pair whose weight
-         order has been solved; stop at the first failing offset. *)
-      validOffsets = maxOffset + 1;
-      Do[
-        failed = False;
-        Do[
-          Module[{qq = n - k},
-            If[qq >= 0 && qq <= qSolveMax,
-              dataVal = Factorial[k] * logCoeffAt[n, k];
-              predicted = Total[Table[
-                coeffs[[i, qq + 1]] * zeroPowerSafe[testRoots[[i]], k],
-                {i, count}
-              ]];
-              scaleVal = Max[
-                Abs[numericAtActivePrecision[dataVal]],
-                Abs[numericAtActivePrecision[predicted]]
-              ];
-              If[!relZeroQ[dataVal - predicted, scaleVal],
-                failed = True;
-              ];
-            ];
-          ];
-          If[failed, Break[]],
-          {k, 0, n}
-        ];
-        If[failed,
-          validOffsets = n;
-          Break[];
-        ],
-        {n, 0, maxOffset}
-      ];
-
-      (* When validation fails at some offset, the weight orders solved
-         from the by-construction rows touching the failing region may have
-         absorbed pollution that only became visible one offset later (for
-         example missing low-log homogeneous content in truncated upstream
-         data), so retreat one extra order beyond the validated run. *)
-      <|
-        "Roots" -> testRoots,
-        "SectorCount" -> count,
-        "Coefficients" -> coeffs,
-        "ValidOffsets" -> validOffsets,
-        "UsableQMax" -> Min[
-          qSolveMax,
-          validOffsets - count - If[validOffsets <= maxOffset, 1, 0]
-        ]
-      |>
-    ];
-
-    best = Missing["None"];
-    Do[
-      fitResult = evaluateFit[candidate["Roots"]];
-      (* The moment ladder at the candidate's reference order must lie
-         inside the validated run, otherwise the roots themselves are not
-         trustworthy. *)
-      If[fitResult["ValidOffsets"] >=
-          candidate["ReferenceOrder"] + 2 * fitResult["SectorCount"],
-        If[MissingQ[best] ||
-            fitResult["ValidOffsets"] > best["ValidOffsets"],
-          best = fitResult;
-        ];
-        If[fitResult["ValidOffsets"] >= maxOffset + 1, Break[]];
-      ],
-      {candidate, candidateRootSets}
-    ];
-    If[MissingQ[best] || best["UsableQMax"] < 0, Return[$Failed, Module]];
-
-    sectorCount = best["SectorCount"];
-    roots = best["Roots"];
-    usableQMax = best["UsableQMax"];
-    salvageOffsets = Select[
-      Range[usableQMax + 1, maxOffset],
-      !EffectiveZeroExprQ[resolved[[# + 1]], tol] &
-    ];
-    salvageExact = sectorCount === 1 &&
-      EffectiveZeroExprQ[roots[[1]], tol];
-
-    (* Salvaged offsets are integrated against the plain branch exponent
-       (their Logx content is dropped under the truncation-boundary
-       convention), which is only exact for a single sector with zero
-       residual root.  Flag everything else when it can reach the reported
-       Laurent window. *)
-    Do[
-      Module[{coeff = resolved[[o + 1]], logPs},
-        logPs = Select[
-          DiffExp`SeriesOps`LogxPowerRange[coeff],
-          # > 0 && !EffectiveZeroExprQ[
-            DiffExp`SeriesOps`LogxCoeffNS[coeff, #], tol
-          ] &
-        ];
-        If[Length[logPs] > 0 || !salvageExact,
-          droppedUnresolvedSectorTerms++;
-          Module[{outputOrder = epsMin + o - 1},
-            If[outputOrder <= epsMaxPower,
-              unresolvedSectorOrdersInWindow = Min[
-                unresolvedSectorOrdersInWindow,
-                outputOrder
-              ];
-            ];
-          ];
-        ];
-      ],
-      {o, salvageOffsets}
-    ];
-
-    sectorCoeffs = ConstantArray[0, {sectorCount, Length[resolved]}];
-    Do[
-      sectorCoeffs[[i, q + 1]] = best["Coefficients"][[i, q + 1]],
-      {i, sectorCount},
-      {q, 0, usableQMax}
-    ];
-
-    <|
-      "Sectors" -> Table[
-        <|
-          "ResidualB" -> roots[[i]],
-          "Coefficients" -> sectorCoeffs[[i]]
-        |>,
-        {i, sectorCount}
-      ],
-      "SalvageOffsets" -> salvageOffsets,
-      "SalvageExact" -> salvageExact
-    |>
-  ];
-
   addSubtractedPower[lp_] := Module[
     {coeffList, fit},
     coeffList = Table[
       coefficientAtLocalPower[gList[[gIdx]], lp],
       {gIdx, Length[gList]}
     ];
-    fit = fitResidualEndpointSectors[coeffList];
+    fit = FitResidualEndpointSectors[coeffList, branchRules];
     If[AssociationQ[fit],
       Do[
         Module[{basisB = DiffExp`Utilities`PChop[
@@ -1205,14 +1184,12 @@ IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gL
       ];
       (* Offsets beyond the validated run: keep their non-log content on
          the plain branch exponent and drop residual Logx content as
-         truncation-boundary noise. *)
+         truncation-boundary noise.  Salvage is exact only for a single
+         zero-root sector with no Logx content; flag everything else for
+         the integrator's trust warnings. *)
       Do[
-        Module[{resolvedCoeff2, logPowers2, logCoeff2},
-          resolvedCoeff2 = DiffExp`Utilities`PChop[
-            Expand[branchReplaceAtActivePrecision[
-              coeffList[[o + 1]], branchRules
-            ]]
-          ];
+        Module[{resolvedCoeff2, logPowers2, logCoeff2, salvLogPs},
+          resolvedCoeff2 = fit["Resolved"][[o + 1]];
           logPowers2 = DiffExp`SeriesOps`LogxPowerRange[resolvedCoeff2];
           Do[
             logCoeff2 = DiffExp`SeriesOps`LogxCoeffNS[resolvedCoeff2, logPower2];
@@ -1220,6 +1197,23 @@ IntegrateAnalyticRegularizedBySubtractionLaurent[a_, b_, epsMinPower_Integer, gL
               addMonomial[epsMin + o, lp, 0, logCoeff2]
             ],
             {logPower2, logPowers2}
+          ];
+          salvLogPs = Select[
+            logPowers2,
+            # > 0 && !EffectiveZeroExprQ[
+              DiffExp`SeriesOps`LogxCoeffNS[resolvedCoeff2, #], tol
+            ] &
+          ];
+          If[Length[salvLogPs] > 0 || !fit["SalvageExact"],
+            droppedUnresolvedSectorTerms++;
+            Module[{outputOrder = epsMin + o - 1},
+              If[outputOrder <= epsMaxPower,
+                unresolvedSectorOrdersInWindow = Min[
+                  unresolvedSectorOrdersInWindow,
+                  outputOrder
+                ];
+              ];
+            ];
           ];
         ],
         {o, fit["SalvageOffsets"]}
@@ -1570,6 +1564,185 @@ EvaluateLimitAtSingularity[decomposition_List, direction_: 1] := Module[
     (* Terms with b != 0 contribute 0 *)
     ,
     {i, Length[decomposition]}
+  ];
+
+  result
+];
+
+(* Sector-aware endpoint limit.  EvaluateLimitAtSingularity (and the paper
+   prescription it implements) assumes DecomposeSingularity's single
+   extracted exponent describes the whole series.  For multi-sector
+   endpoints - several local solutions x^(a_i + b_i eps) sharing integer
+   powers - that collapses distinct b_i into one averaged (or, with the
+   most negative power leading, simply the wrong) exponent, and the b != 0
+   drop rule then discards or keeps entire towers wholesale.  Here each
+   integer power's epsilon tower is resolved into sectors with
+   FitResidualEndpointSectors first, and the drop rule is applied to the
+   ABSOLUTE exponent (extracted b + residual root) per sector: only the
+   b = 0 sector at absolute power x^0 survives the limit. *)
+EvaluateEndpointLimitSectors[seriesList_List, direction_:1] := Module[
+  {tol, branchRules, decomposition, nOrders, result, coeffAtLP,
+   droppedLogOffsets = {}, unresolvedTower = False},
+
+  nOrders = Length[seriesList];
+  result = Table[0, {nOrders}];
+  tol = DiffExp`State`FEC[RationalizationTolerance];
+  branchRules = thetaRulesAtPoint[0, direction];
+
+  coeffAtLP[ser_SeriesData, lp_] := Module[
+    {idx = lp * ser[[6]] - ser[[4]] + 1},
+    If[IntegerQ[idx] && idx >= 1 && idx <= Length[ser[[3]]],
+      ser[[3, idx]],
+      0
+    ]
+  ];
+  coeffAtLP[expr_, lp_] := If[lp === 0, expr, 0];
+
+  decomposition =
+    DiffExp`SingularityDecomposition`DecomposeSingularity[seriesList];
+
+  Do[
+    Module[{a = term["a"], b = term["b"], g = term["g"], branchB,
+            localPowers},
+      branchB = DiffExp`Utilities`PChop[
+        Expand[branchReplaceAtActivePrecision[b, branchRules]]
+      ];
+
+      (* Local powers lp with a + lp <= 0: absolute x^0 contributes the
+         limit; negative absolute powers are scanned for genuine (b = 0)
+         divergences.  Powers above x^0 vanish at the endpoint. *)
+      localPowers = DeleteDuplicates[Flatten[Table[
+        Module[{ser = g[[n]]},
+          Which[
+            MatchQ[ser, _SeriesData],
+              Module[{nmin = ser[[4]], den = ser[[6]]},
+                Table[
+                  Module[{lp = (nmin + idx - 1)/den},
+                    If[NumericNegativeQ[a + lp, tol] ||
+                        NumericZeroQ[a + lp, tol],
+                      lp,
+                      Nothing
+                    ]
+                  ],
+                  {idx, Length[ser[[3]]]}
+                ]
+              ],
+            !EffectiveZeroExprQ[ser, tol] &&
+              (NumericNegativeQ[a, tol] || NumericZeroQ[a, tol]),
+              {0},
+            True,
+              {}
+          ]
+        ],
+        {n, Length[g]}
+      ]]];
+
+      Do[
+        Module[{coeffList, fit, atZeroPower},
+          atZeroPower = NumericZeroQ[a + lp, tol];
+          coeffList = Table[coeffAtLP[g[[n]], lp], {n, Length[g]}];
+          If[AllTrue[coeffList, EffectiveZeroExprQ[#, tol] &],
+            Continue[]
+          ];
+          fit = FitResidualEndpointSectors[coeffList, branchRules];
+          If[AssociationQ[fit],
+            Do[
+              Module[{absB = DiffExp`Utilities`PChop[
+                  Expand[branchB + sector["ResidualB"]]
+                ]},
+                Which[
+                  !NumericZeroQ[absB, tol],
+                    (* b != 0 sector: put to zero, even at a + lp < 0 *)
+                    Null,
+                  atZeroPower,
+                    Do[
+                      result[[q]] += sector["Coefficients"][[q]],
+                      {q, Min[nOrders, Length[sector["Coefficients"]]]}
+                    ],
+                  AnyTrue[sector["Coefficients"],
+                      !EffectiveZeroExprQ[#, tol] &],
+                    DiffExp`Utilities`PrintWarning[
+                      "EvaluateEndpointLimitSectors: a b = 0 sector at ",
+                      "negative power x^", a + lp, " does not vanish at ",
+                      "the endpoint; the limit diverges. Dropping this ",
+                      "contribution."
+                    ]
+                ];
+              ],
+              {sector, fit["Sectors"]}
+            ];
+            (* Offsets beyond the validated run: keep their non-log content
+               on the plain extracted exponent (truncation-boundary
+               convention), mirroring the definite-integral path. *)
+            Do[
+              Module[{rc = fit["Resolved"][[o + 1]], logPs, c0},
+                logPs = Select[
+                  DiffExp`SeriesOps`LogxPowerRange[rc],
+                  # > 0 && !EffectiveZeroExprQ[
+                    DiffExp`SeriesOps`LogxCoeffNS[rc, #], tol
+                  ] &
+                ];
+                If[Length[logPs] > 0 || !fit["SalvageExact"],
+                  AppendTo[droppedLogOffsets, o];
+                ];
+                If[atZeroPower && NumericZeroQ[branchB, tol],
+                  c0 = DiffExp`SeriesOps`LogxCoeffNS[rc, 0];
+                  If[!EffectiveZeroExprQ[c0, tol] && o + 1 <= nOrders,
+                    result[[o + 1]] += c0;
+                  ];
+                ];
+              ],
+              {o, fit["SalvageOffsets"]}
+            ];
+            ,
+            (* Fit refused the tower: fall back to the collapsed-exponent
+               rule, loudly when Logx towers indicate unresolved sectors. *)
+            Module[{resolved},
+              resolved = DiffExp`Utilities`PChop[
+                Expand[branchReplaceAtActivePrecision[#, branchRules]]
+              ] & /@ coeffList;
+              If[AnyTrue[resolved, Function[rc, AnyTrue[
+                    DiffExp`SeriesOps`LogxPowerRange[rc],
+                    # > 0 && !EffectiveZeroExprQ[
+                      DiffExp`SeriesOps`LogxCoeffNS[rc, #], tol
+                    ] &
+                  ]]],
+                unresolvedTower = True;
+              ];
+              If[atZeroPower && NumericZeroQ[branchB, tol],
+                Do[
+                  Module[{c0 = DiffExp`SeriesOps`LogxCoeffNS[resolved[[n]], 0]},
+                    If[!EffectiveZeroExprQ[c0, tol],
+                      result[[n]] += c0
+                    ];
+                  ],
+                  {n, nOrders}
+                ];
+              ];
+            ];
+          ];
+        ],
+        {lp, localPowers}
+      ];
+    ],
+    {term, decomposition}
+  ];
+
+  If[unresolvedTower,
+    DiffExp`Utilities`PrintWarning[
+      "EvaluateEndpointLimitSectors: endpoint tower with unresolved ",
+      "x^(r eps) sector structure (sector fit failed); the limit used the ",
+      "single collapsed exponent and is NOT trustworthy."
+    ];
+  ];
+  If[Length[droppedLogOffsets] > 0,
+    DiffExp`Utilities`PrintWarning[
+      "EvaluateEndpointLimitSectors: dropped unresolved sector content at ",
+      Length[DeleteDuplicates[droppedLogOffsets]],
+      " epsilon offset(s) beyond the validated run (first affected ",
+      "offset ", Min[droppedLogOffsets],
+      "); limit orders at and above that offset may be incomplete."
+    ];
   ];
 
   result

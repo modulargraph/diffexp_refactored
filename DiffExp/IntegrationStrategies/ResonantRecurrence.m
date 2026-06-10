@@ -532,6 +532,17 @@ SafeNumericLinearSolve[mat_, rhs_, wp_, tolerance_] := Module[
   matN = N[mat, wp];
   rhsN = N[rhs, wp];
 
+  (* Catastrophic cancellations upstream leave zero-accuracy zeros (0``a)
+     in the data, which drag the overall Precision of the input to 0.
+     LinearSolve and LeastSquares then FAIL or - worse - return a zero
+     "solution" for a manifestly nonzero rhs, silently dropping a source
+     term of the recurrence (the banana x = 1/2 eps^-1 impurity).  The
+     recurrence data is exact at the working precision by construction,
+     so re-fix the precision instead of letting significance arithmetic
+     veto the solve. *)
+  If[Precision[matN] < wp, matN = SetPrecision[matN, wp]];
+  If[Precision[rhsN] < wp, rhsN = SetPrecision[rhsN, wp]];
+
   sol = Quiet@Check[
     LinearSolve[matN, rhsN],
     $Failed,
@@ -564,11 +575,12 @@ SafeNumericLinearSolve[mat_, rhs_, wp_, tolerance_] := Module[
   If[NumericQ[scale] && scale > 0 &&
      NumericQ[Norm[Flatten[N[residual, wp]]]] &&
      Norm[Flatten[N[residual, wp]]]/scale > 100 tolerance,
-    DiffExp`Utilities`PrintInfo[
-      "  General singular recurrence linear solve residual ",
+    DiffExp`Utilities`PrintWarning[
+      "SafeNumericLinearSolve: linear solve residual ",
       N[Norm[Flatten[N[residual, wp]]]/scale, 6],
-      " exceeds tolerance scale."
-    ][3];
+      " exceeds the tolerance scale; the returned solution may be a ",
+      "least-squares projection rather than an exact solve."
+    ];
   ];
 
   sol
@@ -941,6 +953,10 @@ RunParticularRecurrence[sigma_, bCoeffs_, bMaxLogK_, kMax_,
     det = Det[Ln];
 
     If[Abs[det] < tolerance,
+      If[TrueQ[DiffExp`State`$DebugBlockResidualSeries],
+        Print["SINGSTEP sigma=", sigma, " n=", n, " |det|=",
+          ScientificForm[N[Abs[det], 3]]];
+      ];
       (* Singular step: solve the full block system across all k *)
       blockResult = SolveSingularNBlock[Ln, n, kMax, bCoeffs, bMaxLogK,
         fCoeffs, mCoeffs, numMCoeffs,
@@ -973,30 +989,32 @@ CheckParticularResidual[fCoeffs_, sigma_, bCoeffs_, bMaxLogK_, kMax_,
     systemSize_, maxOrd_, wp_, tolerance_] := Module[
   {maxResidual = 0, Ln, rhs, residual, residualMagnitude, n, k},
 
+  (* Check EVERY step, not only the potentially singular ones: a
+     non-singular step whose linear solve silently degraded (e.g. on
+     precision-collapsed input) is otherwise invisible here, and a
+     dropped source term corrupts everything downstream (the banana
+     x = 1/2 eps^-1 impurity). *)
   Do[
     Ln = N[(sigma + n) * IdentityMatrix[systemSize] - M0, wp];
-    (* Only check at potentially singular steps *)
-    If[Abs[Det[Ln]] < tolerance,
-      Do[
-        rhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
-          bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
-        residual = Ln . fCoeffs[[n + 1, k + 1]] - rhs;
-        (* Analytic-continuation theta symbols may survive in the source;
-           DiffExp`Utilities`FiniteAbsMax would silently treat such symbolic residuals as 0,
-           blinding this check.  Evaluate both branches instead. *)
-        residualMagnitude = If[
-          FreeQ[residual, DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m],
-          DiffExp`Utilities`FiniteAbsMax[residual],
-          Max[
-            DiffExp`Utilities`FiniteAbsMax[residual /. {
-              DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}],
-            DiffExp`Utilities`FiniteAbsMax[residual /. {
-              DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]
-          ]
-        ];
-        maxResidual = DiffExp`Utilities`FiniteAbsMax[{maxResidual, residualMagnitude}];
-        , {k, kMax, 0, -1}
+    Do[
+      rhs = ComputeRecurrenceRHS[fCoeffs, bCoeffs, n, k, kMax,
+        bMaxLogK, mCoeffs, numMCoeffs, systemSize, maxOrd, wp];
+      residual = Ln . fCoeffs[[n + 1, k + 1]] - rhs;
+      (* Analytic-continuation theta symbols may survive in the source;
+         DiffExp`Utilities`FiniteAbsMax would silently treat such symbolic residuals as 0,
+         blinding this check.  Evaluate both branches instead. *)
+      residualMagnitude = If[
+        FreeQ[residual, DiffExp`Symbols`\[Theta]p | DiffExp`Symbols`\[Theta]m],
+        DiffExp`Utilities`FiniteAbsMax[residual],
+        Max[
+          DiffExp`Utilities`FiniteAbsMax[residual /. {
+            DiffExp`Symbols`\[Theta]p -> 1, DiffExp`Symbols`\[Theta]m -> 0}],
+          DiffExp`Utilities`FiniteAbsMax[residual /. {
+            DiffExp`Symbols`\[Theta]p -> 0, DiffExp`Symbols`\[Theta]m -> 1}]
+        ]
       ];
+      maxResidual = DiffExp`Utilities`FiniteAbsMax[{maxResidual, residualMagnitude}];
+      , {k, kMax, 0, -1}
     ];
     , {n, 0, maxOrd}
   ];
@@ -1205,7 +1223,11 @@ ComputeUnifiedParticular[bVec_, resInfo_Association,
             " tol=", ScientificForm[N[tolerance, 2]]];
         ];
 
-        If[maxResidual < tolerance,
+        (* Accept unless the residual is PROVEN above tolerance: residuals
+           of steps fed by accuracy-limited data are significance zeros
+           (0``a) whose comparison against the tolerance is undetermined,
+           and they must not reject an exact solve. *)
+        If[!TrueQ[maxResidual > tolerance],
           (* Solution is good *)
           Break[];
         ];
@@ -1308,6 +1330,12 @@ SolveGeneralSingularRecurrence[ctx_Association, bVec_, epsord_, cacheIn_Associat
 
   {FMat, resInfo, mCoeffs, numMCoeffs} = cache["GenSingRR"];
 
+  If[TrueQ[DiffExp`State`$DebugBlockResidualSeries],
+    Print["GENEIG ", ctx["Label"], " eps^", epsord,
+      " exponents=", InputForm[N[resInfo["SolutionExponents"], 6]],
+      " maxLogPowers=", InputForm[resInfo["MaxLogPowers"]]];
+  ];
+
   (* Compute particular solution using the unified solver *)
   If[DiffExp`Utilities`PChop[bVec] === ConstantArray[0, systemSize],
     fParticular = ConstantArray[
@@ -1398,6 +1426,25 @@ DebugCheckBlockSolution[tag_String, ctx_Association, bVec_, cIndices_,
       ]];
       Print[tag, " ", ctx["Label"], " eps^", epsord, " ", name,
         " maxResid=", ScientificForm[N[r, 3]]];
+      (* Optional: print the residual series itself to expose WHICH x-powers,
+         Logx depths, and theta content escaped the solve.  Enable with
+         DiffExp`State`$DebugBlockResidualSeries = True. *)
+      If[TrueQ[DiffExp`State`$DebugBlockResidualSeries] && TrueQ[r > 10^-12],
+        Do[
+          Module[{resid},
+            resid = Normal[Quiet[
+              Expand[ddx[fv[[comp]]] - (A[[comp]] . fv) - src[[comp]]] +
+                O[xv]^(checkOrd - 2)
+            ]];
+            resid = DiffExp`Utilities`PChop[resid /. LL -> DiffExp`Symbols`Logx];
+            If[!TrueQ[resid === 0] && !TrueQ[PossibleZeroQ[resid]],
+              Print["RESIDSER ", ctx["Label"], " eps^", epsord, " ", name,
+                " comp=", comp, " : ", InputForm[N[Chop[resid, 10^-40], 8]]];
+            ];
+          ],
+          {comp, Length[fv]}
+        ];
+      ];
     ],
     {piece, pieces}
   ];

@@ -111,6 +111,15 @@ specForMaster[example_String, level_Integer, master_List, ftData_Association,
     {levelParam -> fixedValue}
   ];
 
+  (* Negative indices (numerator powers) have no representation in this
+     U/F-based export: dropping them silently produces the spec of the
+     corresponding non-numerator integral.  Refuse instead of lying. *)
+  If[AnyTrue[master, # < 0 &],
+    Print["specForMaster: skipping ", master,
+      " - negative (numerator) indices are not supported by the ",
+      "U/F family export"];
+    Return[$Failed, Module];
+  ];
   active = Flatten@Position[master, _?(# > 0 &), {1}, Heads -> False];
   powers = master[[active]];
   activeProps = topo["Propagators"][[active]] /. fixedRules;

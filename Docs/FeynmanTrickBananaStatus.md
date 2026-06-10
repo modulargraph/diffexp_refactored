@@ -1,7 +1,10 @@
 # Feynman Trick Banana Status
 
-Date: 2026-06-09 (updated 2026-06-10: level 1 matches pySecDec; level 0 in
-progress, four further local-solver bugs found and fixed)
+Date: 2026-06-09 (updated 2026-06-10: RESOLVED - banana level 0 matches
+the reference with no eps poles.  Level 1 matches pySecDec; four
+local-solver bugs fixed; the boundary-limit evaluation made sector-aware
+(root cause 1); zero-accuracy linear solves fixed (root cause 2).  See
+the "RESULT" section below.)
 
 This note records the Feynman trick banana debugging work against pySecDec.
 The level-1 mismatches described in earlier revisions of this note are
@@ -57,11 +60,17 @@ Level 1 (all previously failing entries now match):
 |-------------|------------------------------------------------------------------|------------------------------------------------|
 | `{2,0,1,1}` | `5.4025802965`                                                   | `5.4025802965`                                 |
 | `{1,0,1,0}` | `-2.0037878788/eps^2 + 2.2439088015/eps - 13.5042252469`         | same                                           |
+| `{1,0,0,1}` | `-2.0037878788/eps^2 + 2.2439088015/eps - 13.5042252469`         | same (and `= {1,0,1,0}` by symmetry)           |
 | `{1,0,1,1}` | `1/3/eps^3 - 0.1144868285/eps^2 + 1.3904392399/eps - 5.8738356912` | `0.3333333333/eps^3 - 0.114487/eps^2 + 1.39044/eps - 5.87384` |
 | `{1,0,1,2}` | `0.5/eps^2 - 0.1717302427/eps - 0.9025092631`                    | `0.5/eps^2 - 0.171730/eps - 0.902509`          |
 | `{1,0,2,1}` | `0.5/eps^2 - 0.1717302427/eps - 0.9025092631`                    | same as `{1,0,1,2}`                            |
 
 All imaginary parts are at or below `1e-16` (numerical noise).
+`{1,0,0,1}` (the limitUpper-case boundary) matches since the sector-aware
+limit fix below; the numerator master `{1,-1,1,1}` has NO direct pySecDec
+reference (see the exporter caveat in "Level-0 Fix") and is validated
+indirectly through the level-0 result.  Compare STEPWISE rows of any run
+with `temp/compare_stepwise_log.py <log> [level]`.
 
 ## Root Causes Found
 
@@ -254,13 +263,14 @@ Supporting hardening from the same investigation:
   per-block strategy choices; `DiffExp`State`$DebugFuchsianizedCheck`
   residual-checks every solver output piece against the block ODE.
 
-Current level-0 state after these fixes: the spurious `eps^-2` pole and
-all imaginary contamination are gone and level 1 still matches pySecDec,
-but the value still disagrees:
+Level-0 state after these four solver fixes (historical; fully resolved
+by the two further fixes below): the spurious `eps^-2` pole and all
+imaginary contamination were gone and level 1 matched pySecDec, but the
+value still disagreed:
 
 ```text
-current:   -0.3976/eps + 12.9242
-reference:  0/eps      +  8.2681
+at this point: -0.3976/eps + 12.9242
+reference:      0/eps      +  8.2681
 ```
 
 All 33 transported segments now satisfy the level-1 ODE to ~1e-400,
@@ -326,6 +336,129 @@ exact): fix the multi-sector limit evaluation in
 boundary; the final banana value (reference 8.26810451329511583109,
 reproduced by pySecDec's direct L0 run: 8.2681 +/- 3e-5) should follow.
 
+## Level-0 Fix: Sector-Aware Boundary Limits (2026-06-10)
+
+The mechanism diagnosed above is confirmed and fixed.  `DecomposeSingularity`
+always returns a single term whose `a` is the MOST NEGATIVE integer power
+across the epsilon tower, with everything else folded into `g`.  At the
+level-2 upper endpoint the data mixes `x^0`, `x^(-1+eps)`, and `x^(2 eps)`
+sectors, so the single extracted exponent is `(a, b) = (-1, 1)` and the old
+"keep only `a >= 0, b == 0` terms" filter dropped the ENTIRE series -
+including the genuine `b = 0` sector buried at relative power `x^1` inside
+`g`.  That made the `{1,0,0,1}` limitUpper boundary identically zero.
+
+Changes (`DiffExp/RegularizedIntegration.m`, `FeynmanTrick/DiffExpIntegration.m`):
+
+1. The residual endpoint-sector fitter was lifted out of the definite-
+   integral closure into the exported
+   `FitResidualEndpointSectors[coeffList, branchRules]` (same algorithm;
+   it now also returns the theta-resolved tower as `"Resolved"`, and the
+   integrator keeps its salvage-warning bookkeeping on the caller side).
+2. New exported `EvaluateEndpointLimitSectors[seriesList, direction]`:
+   decomposes the endpoint tower, resolves each integer power's epsilon tower
+   into `x^(r eps)` sectors, and applies the paper's `b != 0` drop rule to
+   the ABSOLUTE exponent (extracted `b` + residual root) per sector.  Only
+   the absolute `b = 0` sector at absolute power `x^0` contributes; a
+   `b = 0` sector at negative power triggers a divergence warning; offsets
+   beyond the validated fit run follow the same salvage convention as the
+   definite-integral path and are reported.
+3. `EvaluateLimitFromTransport` (the limitUpper/limitLower boundary cases)
+   now calls the sector-aware limit instead of filtering the collapsed
+   decomposition.
+4. Three regression tests in
+   `Tests/test_regularized_integration_edge_cases.m`: the exact `{1,0,0,1}`
+   sector mixture, a pure `x^(2 eps)` sector (regulated to zero), and plain
+   Taylor passthrough.
+
+With this fix the `{1,0,0,1}` boundary comes out as
+`-2.0037878788/eps^2 + 2.2439088015/eps - 13.5042252469`, matching
+pySecDec and `{1,0,1,0}` (symmetry) through the finite term, and ALL seven
+level-1 masters produce the values in the verification table above.
+
+IMPORTANT correction to the 2/5 table in the previous section: the
+`{1,-1,1,1}` "reference" `0.166667/eps^3` was INVALID - the family
+exporter silently dropped the `-1` numerator index, so the exported spec
+(U, F, powers, remainder, prefactor) was byte-identical to `{1,0,1,1}`'s
+and the value was `{1,0,1,1}`'s.  `temp/export_pysecdec_family_specs.m`
+now refuses masters with negative indices.  Numerator masters have no
+direct pySecDec reference; they are validated indirectly through the
+level-0 result.
+
+## Level-0 Root Cause 2: Zero-Accuracy Linear Solves (2026-06-10)
+
+With the boundary limit fixed, the level-0 run produced
+`-1.06e-5/eps + 8.26820` against the reference `8.26810451...` - a
+residual that was BIT-IDENTICAL (28+ digits) under both more epsilon
+lookahead (allowance 6, boundary extra 12) and a doubled expansion order
+(100), i.e. deterministic and discrete, not truncation.
+
+Dissection chain (tools listed under Diagnostic Tools):
+
+- The combined level-0 integrand is pointwise EXACT on the lower line
+  (`5.4025802965` at 11/23, `5.52702048` at 2/5, matching pySecDec with
+  poles at the 1e-19 cancellation floor), but every upper-line segment
+  carries a growing `eps^-1` impurity: ~0 through x = 0.481, seeded
+  ~1e-10 in the segment centered on the singular point x = 1/2, smoothly
+  amplified to ~1.3e-4 near x = 1.  Total: the observed -1.06e-5 pole.
+- The per-segment ODE-residual harness showed master 2 (`{1,-1,1,1}`)
+  violating the level-1 ODE on the x = 1/2-centered segment from epsilon
+  offset 2 (relative 4e-6 .. 2e-4); all other masters and all
+  homogeneous columns exact to ~1e-449.
+- In `SolveGeneralSingularRecurrence`'s particular solve, the eps^2 step
+  n = 3 (L_3 = 5I - M0, eigenvalues {5,5,5,5,4}, perfectly invertible)
+  returned the ZERO VECTOR for a manifestly nonzero rhs.  The rhs
+  contained zero-accuracy zeros (`0``17`-style fully-cancelled
+  significance zeros) which drag the vector's overall Precision to 0;
+  `LinearSolve` then fails outright and the LeastSquares/PseudoInverse
+  fallbacks return a zero "solution".  The dropped source term is exactly
+  the `0.0413 x^4` remainder seen by the block-ODE check.
+- `CheckParticularResidual` only verified POTENTIALLY SINGULAR steps
+  (|det L_n| < tol).  The eigenvalues at x = 1/2 are {0,0,0,0,1}, so the
+  sigma = 2 source group has NO singular steps and the check trivially
+  passed while the solution was missing a source term.
+
+Fixes (`DiffExp/IntegrationStrategies/ResonantRecurrence.m`):
+
+1. `SafeNumericLinearSolve` re-fixes the precision of its inputs
+   (`SetPrecision` to the working precision) when significance
+   arithmetic has collapsed it: the recurrence data is exact at the
+   working precision by construction, and a Precision-0 rhs must not
+   veto an exact solve.  The internal residual check now warns visibly
+   (PrintWarning) instead of a verbosity-3 note.
+2. `CheckParticularResidual` checks EVERY recurrence step, not only the
+   potentially singular ones, so a silently degraded non-singular solve
+   can never pass again.  Its acceptance is `!TrueQ[residual > tol]`:
+   residuals of steps fed by accuracy-limited data are significance
+   zeros (`0``a`) whose comparison with the tolerance is undetermined,
+   and they must not reject an exact solve.
+3. Gated diagnostics (enable `DiffExp`State`$DebugBlockResidualSeries`):
+   per-solve exponent/log-structure print (`GENEIG`), singular-step
+   trace (`SINGSTEP`), and a residual-series dump (`RESIDSER`) inside
+   the `$DebugFuchsianizedCheck` block self-test that prints WHICH
+   x-powers/Logx depths escaped a failing solve.
+4. Regression tests: the zero-accuracy linear solve
+   (`Tests/test_singular_recurrence.m`) and the sector-aware limits
+   (`Tests/test_regularized_integration_edge_cases.m`).
+
+## RESULT: Banana Level 0 Matches (2026-06-10)
+
+With both fixes (sector-aware limits + zero-accuracy solves), the full
+banana level-0 pipeline at the standard settings
+(`FT_WORKING_PRECISION=500 FT_EXPANSION_ORDER=50 FT_DIVISION_ORDER=4
+FT_BOUNDARY_EXTRA_ORDER=8`) gives
+
+```text
+banana {1,1,1,1} = 8.2681045359   (no eps poles)
+reference        = 8.26810451329511583109...
+```
+
+an agreement of 2.3e-9 relative, with the former `eps^-1` pole gone
+entirely.  The residual ~1e-8 difference reflects the accuracy the data
+carries through the x = 1/2 resonant crossing (values arrive there with
+finite accumulated accuracy and the solve is exact on them); pushing
+further digits would require precision re-padding at segment handoffs.
+Compare any run with `temp/compare_stepwise_log.py <log>`.
+
 ## Remaining Notes / Next Steps
 
 1. Fix `EvaluateLimitFromTransport` to resolve endpoint sectors before
@@ -341,9 +474,14 @@ reproduced by pySecDec's direct L0 run: 8.2681 +/- 3e-5) should follow.
 3. The residual-sector fitter handles one and two pure sectors. Three or
    more sectors at one integer power will fail validation and fall back
    loudly.
-4. After banana level 0, rerun the full pySecDec comparison matrix:
-   bubble 2d/4d, sunrise 2d/4d, and banana
+4. The full comparison matrix passes with all fixes in place:
+   banana level 0 = 8.2681045359 (reference 8.26810451329...),
+   bubble = 0.860817881928008 and sunrise = 2.2367927002126465 through
+   their final values
    (`temp/feynmantrick_stepwise_pysecdec_check.m` with
    `FT_EXAMPLES=bubble,sunrise,banana` and no stop level).
-   Bubble (0.860817881928) and sunrise (2.2367927002126465) currently
-   match through their final values with all fixes in place.
+5. To push the banana level-0 agreement beyond ~1e-9, re-pad the working
+   precision at segment handoffs in the level-1 transport: the values
+   that reach the x = 1/2 resonant crossing carry finite accumulated
+   accuracy (significance decay through the epsilon orders), and the
+   solve - now exact on its inputs - inherits exactly that accuracy.

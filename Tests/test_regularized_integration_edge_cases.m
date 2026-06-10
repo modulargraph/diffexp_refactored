@@ -552,6 +552,109 @@ If[laurentCloseQ[truncatedResult, -1, truncatedExpected],
     {truncatedResult, truncatedExpected}]
 ];
 
+(* ----------------------------------------------------------------- *)
+(* Sector-aware endpoint limits (EvaluateEndpointLimitSectors)        *)
+(* ----------------------------------------------------------------- *)
+
+(* Like sectorTowerSeries, but with sectors at several integer powers:
+   specs is a list of <|"a" -> integer, "bs" -> {..}, "ws" -> {..}|>. *)
+multiPowerSectorSeries[specs_List, epsOrders_Integer] := Module[
+  {amin, amax},
+  amin = Min[#["a"] & /@ specs];
+  amax = Max[#["a"] & /@ specs];
+  Table[
+    SeriesData[x, 0,
+      Table[
+        Total[Table[
+          If[spec["a"] === p,
+            Sum[
+              Sum[
+                If[q + 1 <= Length[spec["ws"][[i]]],
+                  spec["ws"][[i, q + 1]] *
+                    sectorPow[spec["bs"][[i]] * logx, n - 1 - q] /
+                    Factorial[n - 1 - q],
+                  0
+                ],
+                {q, 0, n - 1}
+              ],
+              {i, Length[spec["bs"]]}
+            ],
+            0
+          ],
+          {spec, specs}
+        ]],
+        {p, amin, amax}
+      ],
+      amin, amax + 1, 1
+    ],
+    {n, 1, epsOrders}
+  ]
+];
+
+testsTotal++;
+(* The banana {1,0,0,1} limitUpper mechanism: endpoint data mixing
+   x^(-1 + eps), x^(2 eps), and x^0 sectors.  DecomposeSingularity
+   extracts the most negative power's exponent (a = -1, b = 1), burying
+   the genuine b = 0 sector inside g; the naive "drop the term unless
+   a >= 0 and b == 0" rule then returns 0.  The sector-aware limit must
+   recover exactly the b = 0 sector's weight tower. *)
+limitTowerW0 = {3, 1, -4, 0, 0, 0, 0, 0};
+limitMultiSector = Quiet[
+  DiffExp`RegularizedIntegration`EvaluateEndpointLimitSectors[
+    multiPowerSectorSeries[{
+      <|"a" -> -1, "bs" -> {1}, "ws" -> {{7, -2, 5, 0, 0, 0, 0, 0}}|>,
+      <|"a" -> 0, "bs" -> {0, 2},
+        "ws" -> {limitTowerW0, {-6, 2, 9, 0, 0, 0, 0, 0}}|>
+    }, 8],
+    1
+  ]
+];
+If[ListQ[limitMultiSector] &&
+    And @@ Table[
+      closeQ[limitMultiSector[[k]], limitTowerW0[[k]]],
+      {k, 5}
+    ],
+  pass["multi-sector endpoint limit keeps exactly the b = 0 sector"],
+  fail["multi-sector endpoint limit keeps exactly the b = 0 sector",
+    limitMultiSector]
+];
+
+testsTotal++;
+(* Single sector x^(2 eps) at a = 0 (clean b extraction): regulated to
+   zero in the limit. *)
+limitPureBSector = Quiet[
+  DiffExp`RegularizedIntegration`EvaluateEndpointLimitSectors[
+    sectorTowerSeries[0, {2}, {{5, 3, 0, 0, 0, 0}}, 6],
+    1
+  ]
+];
+If[ListQ[limitPureBSector] &&
+    And @@ Table[closeQ[limitPureBSector[[k]], 0], {k, 4}],
+  pass["pure b != 0 sector limit is regulated to zero"],
+  fail["pure b != 0 sector limit is regulated to zero", limitPureBSector]
+];
+
+testsTotal++;
+(* Plain Taylor data must pass through unchanged (the single-sector
+   b = 0 case every other example exercises). *)
+limitTaylor = Quiet[
+  DiffExp`RegularizedIntegration`EvaluateEndpointLimitSectors[
+    {
+      SeriesData[x, 0, {4, 11}, 0, 2, 1],
+      SeriesData[x, 0, {-9, 2}, 0, 2, 1],
+      SeriesData[x, 0, {13/7, 1}, 0, 2, 1]
+    },
+    1
+  ]
+];
+If[ListQ[limitTaylor] &&
+    closeQ[limitTaylor[[1]], 4] &&
+    closeQ[limitTaylor[[2]], -9] &&
+    closeQ[limitTaylor[[3]], 13/7],
+  pass["plain Taylor endpoint limit passes through unchanged"],
+  fail["plain Taylor endpoint limit passes through unchanged", limitTaylor]
+];
+
 Print["==========================================="];
 Print["Results: ", testsPassed, " / ", testsTotal, " tests passed"];
 If[testsPassed === testsTotal,

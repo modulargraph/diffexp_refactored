@@ -301,6 +301,32 @@ Module[{testLine, testCtx},
 ];
 
 (* ============================================================ *)
+(* Zero-accuracy rhs entries must not break the linear solve     *)
+(* ============================================================ *)
+(* Catastrophic cancellations upstream leave significance zeros (0``a)
+   in recurrence sources; these drag the vector's Precision to 0, which
+   used to make LinearSolve fail and the fallbacks silently return a
+   ZERO solution for a nonzero rhs (the banana x = 1/2 level-0 bug). *)
+testsTotal++;
+Module[{mat, rhs, sol, resid},
+  mat = SetPrecision[{{5, 1, 0}, {0, 4, 1}, {1, 0, 5}}, 500];
+  rhs = {SetAccuracy[0, 17], SetPrecision[-413/10000, 6], SetAccuracy[0, 17]};
+  sol = DiffExp`IntegrationStrategies`Private`SafeNumericLinearSolve[
+    mat, rhs, 500, 10^-150
+  ];
+  resid = Max[Abs[N[mat . sol - SetPrecision[rhs, 500], 50]]];
+  If[ListQ[sol] &&
+      TrueQ[Abs[N[sol[[2]], 30]] > 10^-6] &&
+      TrueQ[resid < 10^-100],
+    testsPassed++;
+    Print["  [PASS] zero-accuracy rhs entries solve exactly (no silent zero)"];
+    ,
+    Print["  [FAIL] zero-accuracy rhs entries solve exactly (no silent zero): ",
+      {N[sol, 10], N[resid, 5]}];
+  ];
+];
+
+(* ============================================================ *)
 (* Summary                                                       *)
 (* ============================================================ *)
 Print["\n==========================================="];

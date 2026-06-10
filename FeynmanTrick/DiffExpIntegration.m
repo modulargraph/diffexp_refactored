@@ -908,11 +908,10 @@ Module[{gammaPrefactor, dimVar, epsSymbol, ibpCoeffOrders,
 EvaluateLimitFromTransport[transportResult_Association, ibpCoeffs_List,
     boundary_Integer, epsOrder_Integer, epsPrefactors_List:{}, returnLaurent_:False] :=
 Module[{segData, targetSeg, uncompressed, numMasters,
-        limitValues, seriesAtMaster, decomposition,
-        taylorPart, limitVal, dimVar, epsSymbol, ibpCoeffsExpanded,
-        prefacs, maxPrefactor, workingMaxPower, tol, zeroQ, nonNegativeQ,
-        xLocal, targetInfo, localEndpoint, actualVar, coeffBoundaryRules,
-        boundaryPrecision},
+        limitValues, seriesAtMaster, limitVal, dimVar, epsSymbol,
+        ibpCoeffsExpanded, prefacs, maxPrefactor, workingMaxPower, tol,
+        zeroQ, xLocal, targetInfo, localEndpoint, actualVar,
+        coeffBoundaryRules, boundaryPrecision},
 
   segData = transportResult["SegmentData"];
   numMasters = transportResult["NumIntegrals"];
@@ -925,9 +924,6 @@ Module[{segData, targetSeg, uncompressed, numMasters,
   tol = DiffExp`State`FEC[RationalizationTolerance];
   zeroQ[z_] := TrueQ[PossibleZeroQ[z]] ||
     TrueQ[NumericQ[z] && Abs[numericAtActivePrecision[z]] < tol];
-  nonNegativeQ[z_] := TrueQ[z >= 0] ||
-    zeroQ[z] ||
-    TrueQ[NumericQ[z] && realNumericAtActivePrecision[z, tol] > -tol];
 
   xLocal = DiffExp`Symbols`x;
 
@@ -1009,38 +1005,26 @@ Module[{segData, targetSeg, uncompressed, numMasters,
       limitVal = Table[0, {workingMaxPower + 1}];
 
       If[zeroQ[localEndpoint],
-        (* Endpoint is the local expansion center. Decompose into
-           x^{a+b eps} sectors and keep only finite pure Taylor terms. *)
-        decomposition = DiffExp`SingularityDecomposition`DecomposeSingularity[seriesAtMaster];
-
-        taylorPart = Select[
-          decomposition,
-          (nonNegativeQ[#["a"]] && zeroQ[#["b"]]) &
+        (* Endpoint is the local expansion center.  Resolve residual
+           x^(a + b_i eps) endpoint sectors and keep only the absolute
+           b = 0 sector's constant term: the b != 0 drop rule must be
+           applied per sector, since DecomposeSingularity's single
+           extracted exponent collapses multi-sector endpoints. *)
+        Module[{sectorLimit, numericLimit},
+          sectorLimit =
+            DiffExp`RegularizedIntegration`EvaluateEndpointLimitSectors[
+              seriesAtMaster,
+              localEndpointDirection[targetSeg, localEndpoint]
+            ];
+          Do[
+            numericLimit = numericAtActivePrecision[
+              sectorLimit[[epsIdx]], boundaryPrecision
+            ];
+            If[NumericQ[numericLimit],
+              limitVal[[epsIdx]] += numericLimit
+            ];
+          , {epsIdx, Min[Length[limitVal], Length[sectorLimit]]}];
         ];
-
-        Do[
-          Module[{gSeries, constCoeff},
-            gSeries = term["g"];
-            (* g is a list of SeriesData objects, one per eps order *)
-            Do[
-              If[epsIdx <= Length[gSeries],
-                Which[
-                  MatchQ[gSeries[[epsIdx]], _SeriesData],
-                    constCoeff = evaluateLocalExpressionAtPoint[
-                      SeriesCoefficient[gSeries[[epsIdx]], 0] /.
-                        DiffExp`Symbols`Logx -> 0,
-                      localEndpoint,
-                      localEndpointDirection[targetSeg, localEndpoint],
-                      boundaryPrecision
-                    ];
-                    If[NumericQ[constCoeff], limitVal[[epsIdx]] += constCoeff],
-                  NumericQ[gSeries[[epsIdx]]],
-                    limitVal[[epsIdx]] += gSeries[[epsIdx]]
-                ];
-              ];
-            , {epsIdx, Min[Length[limitVal], Length[gSeries]]}];
-          ],
-        {term, taylorPart}];
       ,
         (* Nonsingular endpoint inside the segment. Evaluate the saved local
            series at the endpoint's local coordinate instead of taking the

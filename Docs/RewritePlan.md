@@ -42,8 +42,9 @@ NON-GOALS (v1)
 ## 2. Diagnosis
 
 Empirical record: bubble, sunrise, banana, box (11 digits), box_bubble (all
-orders) validated end-to-end; box_triangle NO VERDICT on the N-root run
-(power loss mid-run); pentagon FAILS its pin at every order INCLUDING the
+orders) validated end-to-end; box_triangle FAILS its pin with the N-root
+fitter (complex from eps^-3, leading order wrong magnitude — confirmed
+D2-class); pentagon FAILS its pin at every order INCLUDING the
 leading pole even with the working N-root fitter — its content loss happens
 in the zero-regulator drop rule on collapsed towers, upstream of any fitting,
 PLUS it emits "current point is not recognized as a branch point... add

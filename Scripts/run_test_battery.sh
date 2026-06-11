@@ -4,6 +4,9 @@ export WolframKernel="${WolframKernel:-/Applications/Wolfram Engine.app/Contents
 cd "$(dirname "$0")/.."
 
 tests=(
+  "Tests/test_tolerances.m"
+  "Tests/test_config.m"
+  "Tests/test_eps_series.m"
   Tests/test_package_loading.m
   Tests/test_symbols_namespacing.m
   Tests/test_recurrence_no_fallback.m

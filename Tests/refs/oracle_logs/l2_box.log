@@ -1,0 +1,57 @@
+FeynmanTrick package loaded.
+Loading DiffExp version 2.0 (refactored recurrence)
+For questions, email: martijnhidding@outlook.com
+For the original DiffExp release, see: https://gitlab.com/hiddingm/diffexp
+For this refactored recurrence version, see: https://github.com/modulargraph/diffexp_refactored
+EXAMPLE box
+FIRE, version 6.5.2
+Prepared
+Dimension set to 4
+No symmetries
+Saving initial data
+Prepared
+Dimension set to 4
+No symmetries
+Saving initial data
+Prepared
+Dimension set to 4
+No symmetries
+Saving initial data
+STEPWISE {"Example":"box","Level":3.0000000000000000000000000000000000000000000000000,"Master":[1.0000000000000000000000000000000000000000000000000,0,0,0],"EpsPrefactor":1.0000000000000000000000000000000000000000000000000,"RawMinPower":-1.0000000000000000000000000000000000000000000000000,"Coefficients":[[-1.0000000000000000000000000000000000000000000000000,-0.048051509995660579307224614971576250675266995559435],[0,-0.16617490584461899870664997372983976074672382345969]]}
+EXTRA_SINGULAR_FACTORS level 3: InputForm[{xx3, 23 + 10*xx3}]
+STEPWISE {"Example":"box","Level":2.0000000000000000000000000000000000000000000000000,"Master":[1.0000000000000000000000000000000000000000000000000,0,0,1.0000000000000000000000000000000000000000000000000],"EpsPrefactor":1.0000000000000000000000000000000000000000000000000,"RawMinPower":-1.0000000000000000000000000000000000000000000000000,"Coefficients":[[-1.0000000000000000000000000000000000000000000000000,1.0000000000000000000000000000000000000000000000000],[0,2.7182390927653145607641470084444778498842087780169]]}
+STEPWISE {"Example":"box","Level":2.0000000000000000000000000000000000000000000000000,"Master":[1.0000000000000000000000000000000000000000000000000,0,0,0],"EpsPrefactor":1.0000000000000000000000000000000000000000000000000,"RawMinPower":-1.0000000000000000000000000000000000000000000000000,"Coefficients":[[-1.0000000000000000000000000000000000000000000000000,-0.11933919618640585189446864469466589956439549601381],[0,-0.30414426986534937364544566985822745886852079202134]]}
+EXTRA_SINGULAR_FACTORS level 2: InputForm[{-1 + xx2, xx2}]
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -310
+General::munfl: -4.80742413504882021392114616966999341111129705885511960842329270911774787782023273746142806131001121270167998383930866910558825217258666940233042191961801508018396025088101384485381467688785823162011834242136182482642527598013893390317700953136308952783827729077870465344273679308675714170765244887990 + 9.10940867473077642302930305671240635514356500031492938939676769646910147133404410963796401396591136503420686906631526646904485144675328443265493407436149344887299998676579337947998053962378863128193146385433281706622828673722881740749428400907876237954888256917657740961530452259426826724980619290536 10     I is too small to represent as a normalized machine number; precision may be lost.
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -308
+General::munfl: -10.7801989915679615134710517938056070292834790886387487748446379859198889796512980014343013089328866516847169440387620362519664289665261706715950460585760541655557057854515423476167862577755872739433041220217333597001899836965557787727714834960890394462536254229937739582961105619993452021192928623050 - 1.15992934334249021321601802517125139496128363107924734263784575841541223216508243765351302047582152851012781175688049121186152615011062923200956886282780748618796657097882439154151186323707493349459953415441752823917870741174157013243879229047255926912602255236072648661875427311741378363143972387476 10     I is too small to represent as a normalized machine number; precision may be lost.
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+DiffExp Warning: Singular recurrence: particular solution did not normalize to a series (head Plus).
+
+Flatten::normal: Nonatomic expression expected at position 1 in Flatten[x].
+DiffExp Warning: After fixing the boundary conditions, the solutions on the current line segment contain multivalued functions. However, the current point is not recognized as a branch point in the configuration, so DiffExp can't perform the analytic continuation! Please add a prescription for the analytic continuation using the option "DeltaPrescriptions".
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -309
+General::munfl: -4.11945998689315092385165774973558630189706370169081564427774497961497039440751301937466519309946178334077387523129139549095892586040895324718216469889174637477457014273867892483724687317633242314530518625924097392735484211039103329826765185872628126677126103977301916564332433847337441779834117801635 + 3.32316225811610083388672937552242947108962384578793683868582005824966641402557889305870242030385435207295633704606535879058815601600317447255362194460803223217643041135160660369179821759256916743050629124299287139208909448221950814697248138778742630220938849045194617927498426421205491613610098085698 10     I is too small to represent as a normalized machine number; precision may be lost.
+
+General::stop: Further output of General::munfl will be suppressed during this calculation.
+STEPWISE {"Example":"box","Level":1.0000000000000000000000000000000000000000000000000,"Master":[1.0000000000000000000000000000000000000000000000000,0,1.0000000000000000000000000000000000000000000000000,0],"EpsPrefactor":1.0000000000000000000000000000000000000000000000000,"RawMinPower":-1.0000000000000000000000000000000000000000000000000,"Coefficients":[[-1.0000000000000000000000000000000000000000000000000,1.0000000000000000000000000000000000000000000000000],[0,2.1603832782292462860752534045687487022469901996850]]}
+STEPWISE {"Example":"box","Level":1.0000000000000000000000000000000000000000000000000,"Master":[1.0000000000000000000000000000000000000000000000000,0,0,1.0000000000000000000000000000000000000000000000000],"EpsPrefactor":1.0000000000000000000000000000000000000000000000000,"RawMinPower":-1.0000000000000000000000000000000000000000000000000,"Coefficients":[[-1.0000000000000000000000000000000000000000000000000,1.0000000000000000000000000000000000000000000000000],[0,3.1719841899077262113657764887832286293696442261781]]}
+EXTRA_SINGULAR_FACTORS level 1: InputForm[{xx1, -1 + 4*xx1, -1 + xx1}]
+STEPWISE {"Example":"box","Level":0,"Master":[1.0000000000000000000000000000000000000000000000000,1.0000000000000000000000000000000000000000000000000,1.0000000000000000000000000000000000000000000000000,1.0000000000000000000000000000000000000000000000000],"EpsPrefactor":2.0000000000000000000000000000000000000000000000000,"RawMinPower":-2.0000000000000000000000000000000000000000000000000,"Coefficients":[[-2.0000000000000000000000000000000000000000000000000,12.000000000000000000000000000000000000000000000000],[-1.0000000000000000000000000000000000000000000000000,-0.33491424680973617928364450314943985097906492928887],[0,{"Re":-41.284167397546468571426400698794670175547992166505,"Im":-7.77795062648535688462625621e-22}]]}
+FINAL {"Example":"box","Finite":12.000000000000000000000000000000000000000000000000,"RawMinPower":-2.0000000000000000000000000000000000000000000000000}

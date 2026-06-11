@@ -5,4 +5,5 @@ Module[{dir = DirectoryName[$InputFileName]},
   Get[FileNameJoin[{dir, "Tolerances.m"}]];
   Get[FileNameJoin[{dir, "Config.m"}]];
   Get[FileNameJoin[{dir, "EpsSeries.m"}]];
+  Get[FileNameJoin[{dir, "Indicial.m"}]];
 ];

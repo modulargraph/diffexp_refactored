@@ -152,19 +152,23 @@ runExample[name_String] := Module[
   currentBCs = deepBoundary["BoundaryValues"];
   currentPrefactors = deepBoundary["EpsPrefactors"];
   Do[
+    (* Carry ALL available boundary depth through the chain: the
+       single-level RequiredTransportEpsilonOrder underestimates deep
+       towers (each level's IBP eps-poles and prefactor shifts consume
+       orders cumulatively), and cutting here starves the levels below
+       (observed: box_bubble L2 capped at eps order 2 while needing 9
+       despite a generous deepest-level budget).  requiredOrder is kept
+       as a lower-bound diagnostic only. *)
     Module[{requiredOrder =
         FeynmanTrick`DiffExpIntegration`Private`RequiredTransportEpsilonOrder[
           ftData, level, epsOrder, currentPrefactors
         ]},
-      transportOrder = Min[Length[First[currentBCs]] - 1, requiredOrder];
+      transportOrder = Length[First[currentBCs]] - 1;
       If[transportOrder < requiredOrder,
-        Print["WARNING level ", level, " transport capped at eps order ",
-          transportOrder, " (needs ", requiredOrder,
-          "); increase FT_BOUNDARY_EXTRA_ORDER."];
+        Print["WARNING level ", level, " transport depth ", transportOrder,
+          " is below the single-level requirement ", requiredOrder,
+          "; increase FT_BOUNDARY_EXTRA_ORDER."];
       ];
-    ];
-    If[transportOrder < Length[First[currentBCs]] - 1,
-      currentBCs = currentBCs[[All, 1 ;; transportOrder + 1]]
     ];
     FeynmanTrick`FeynmanTrickIteration`ExportLevel[
       ftData, level, outputDir, "diffexp", transportOrder

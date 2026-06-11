@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Sequential test battery (ONE Wolfram kernel license - never parallelize).
-export WolframKernel='/Applications/Wolfram Engine.app/Contents/Resources/Wolfram Player.app/Contents/MacOS/WolframKernel'
+export WolframKernel="${WolframKernel:-/Applications/Wolfram Engine.app/Contents/Resources/Wolfram Player.app/Contents/MacOS/WolframKernel}"
 cd "$(dirname "$0")/.."
 
 tests=(
@@ -24,13 +24,13 @@ tests=(
 )
 
 overall=0
-for t in $tests; do
+for t in "${tests[@]}"; do
   echo "=== $t"
   out=$(wolframscript -file "$t" 2>&1)
   code=$?
   summary=$(echo "$out" | grep -E "tests passed|PASSED|FAILED|Results:" | tail -3)
   echo "$summary"
-  if [ $code -ne 0 ] || echo "$out" | grep -q "Some tests FAILED"; then
+  if [ $code -ne 0 ] || echo "$out" | grep -Eq "Some tests FAILED|SOME FAILED|TEST FAILED"; then
     echo "FAILED: $t (exit $code)"
     echo "$out" | tail -30
     overall=1

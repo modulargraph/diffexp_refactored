@@ -18,6 +18,12 @@ normalization - confirmed +1 for the 1-loop box by the pin below.
   + 11.944387049203/eps + 9.470615214143   (sign flip NOT needed: 6 props)
 - box_bubble: -0.5/eps^3 - 0.422784335096/eps^2 - 0.356269003210/eps
   + 4.877038708178   (FT convention = MINUS these: 5 props)
+  VALIDATED 2026-06-11: FT gives +0.5, +0.4227843351, +0.35627956,
+  -4.8771397 (all orders, to the reference's epsrel) after the runner
+  budget fix: per-level transports now carry the FULL incoming boundary
+  depth instead of cutting to the single-level requirement (which
+  starved deep chains - box_bubble L2 was capped at eps order 2 while
+  needing 9 despite a generous deepest-level budget).
 
 Family-exporter route (exact FT normalization, any level):
 `Scripts/export_pysecdec_family_specs.m` (FT_EXAMPLE, FT_FIXED_VALUE) +

@@ -86,3 +86,4 @@ Print["Test 7 (integration with Log): ", If[testResult7, "PASSED", "FAILED"]];
 Print["\n=== Summary ==="];
 allPassed = testResult1 && testResult2 && testResult3 && testResult4 && testResult5 && testResult6a && testResult6b && testResult7;
 Print["All tests: ", If[allPassed, "PASSED", "SOME FAILED"]];
+Exit[If[allPassed, 0, 1]];

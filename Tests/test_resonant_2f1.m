@@ -131,3 +131,4 @@ If[test1Pass && test2Pass,
   If[!test2Pass, Print["  - y' mismatch: ", ScientificForm[diff2, 3]]];
 ];
 Print["==========================================="];
+Exit[If[test1Pass && test2Pass, 0, 1]];

@@ -46,9 +46,13 @@ FindSingularities[sys_Association] := Module[
     "Factors" -> Association[roots]|>];
 
 ChartRadius[center_, all_List] := Module[
-  {others = Select[all, !TrueQ[PossibleZeroQ[RootReduce[# - center]]] &]},
+  {others = Select[all, !TrueQ[PossibleZeroQ[RootReduce[# - center]]] &], diffs},
   If[others === {}, Infinity,
-    Min[Abs[N[# - center, 40]] & /@ others]]];
+    (* EXACT distances when inputs are exact: inexact radii leak into match
+       points and destroy precision through symbolic-log numericization *)
+    diffs = Map[If[FreeQ[{#, center}, _?InexactNumberQ],
+      RootReduce[Abs[# - center]], Abs[N[# - center, 40]]] &, others];
+    Min[diffs]]];
 
 (* ---- 2.4 GetCPL/GetCPR geometry ---- *)
 
@@ -240,7 +244,7 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
 TransportLine[sys_Association, boundary_, plan_Association] := Module[
   {charts = plan["Charts"], dir = plan["Direction"], current, errAcc,
    req, expOrd = cfg["ExpansionOrder"], epsOrd = cfg["EpsilonOrder"],
-   lastSingular = False, lastLS = None, lastChart = None},
+   lastSingular = False, lastLS = None, lastChart = None, kept = {}},
   req = <|"EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> epsOrd|>,
     "TOrder" -> expOrd|>;
   (* boundary: LocalSolution (anchored at plan From) or plain values matrix *)
@@ -308,10 +312,12 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       err["E10", <|"Chart" -> chart["Name"], "Errors" -> N[errAcc, 4],
         "Detail" -> "accumulated error estimate exceeds 1; transport aborted"|>]];
     current = ls;
+    AppendTo[kept, <|"Chart" -> chart, "LocalSolution" -> ls|>];
     lastSingular = TrueQ[chart["Singular"]];
     lastChart = chart],
     {ci, Length[charts]}];
   <|"Final" -> current,
+    "Charts" -> kept,
     "EndpointIsSingular" -> plan["EndpointIsSingular"],
     "ErrorEstimate" -> errAcc,
     "Value" -> If[plan["EndpointIsSingular"], None,

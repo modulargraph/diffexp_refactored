@@ -130,7 +130,7 @@ padeEvaluate[coeffs_List, point_, ctx_] := Module[{u, mm, poly, pa},
   If[!FreeQ[pa, _PadeApproximant],
     DiffExp2`Config`PrintWarning["SectorSeries::padefail at ", ctx,
       " - falling back to the direct partial sum (recorded)"];
-    {Total[coeffs*point^Range[0, Length[coeffs] - 1]], True},
+    {Total[coeffs*Table[pow[point, nn], {nn, 0, Length[coeffs] - 1}]], True},
     {pa /. u -> point, False}]];
 
 EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
@@ -187,7 +187,7 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
             {v, fb} = padeEvaluate[cs, tval, {chartName[ls], tagOf[sec], k, c2}];
             If[fb, AppendTo[fallbacks,
               <|"Sector" -> tagOf[sec], "EpsRow" -> k, "Component" -> c2|>]],
-            v = Total[cs*tval^Range[0, ncols - 1]]];
+            v = Total[cs*Table[pow[tval, nn], {nn, 0, ncols - 1}]]];
           v], {c2, ncomp}]],
         {k, kmin, kmax}];
       Do[Module[{Kc},

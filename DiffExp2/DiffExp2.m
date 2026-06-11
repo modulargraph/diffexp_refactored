@@ -9,4 +9,5 @@ Module[{dir = DirectoryName[$InputFileName]},
   Get[FileNameJoin[{dir, "Indicial.m"}]];
   Get[FileNameJoin[{dir, "Solve.m"}]];
   Get[FileNameJoin[{dir, "Transport.m"}]];
+  Get[FileNameJoin[{dir, "Integrate.m"}]];
 ];

@@ -454,9 +454,11 @@ R9 sign protocol passes; box_triangle loop_package pin likewise.
 ## 10. Baseline at plan time
 
 master = f48cd94.  Validated: bubble, sunrise, banana, box (11 digits),
-box_bubble (all orders).  box_triangle: NO VERDICT (N-root run lost to
-power-cut; pre-N-root runs were complex-corrupt from the L3→L2 step,
-interior pole at 0.9617 near endpoint).  pentagon: FAILS pin at all orders
+box_bubble (all orders).  box_triangle: FAILS its pin WITH the working
+N-root fitter (eps^-4 = 153.36 vs pin 2.25; complex from eps^-3; numbers
+changed vs pre-fitter runs but never correct) - confirmed D2-class like
+pentagon; the L3 line's interior IBP pole at 0.9617 near the endpoint is
+the geometric trigger.  pentagon: FAILS pin at all orders
 incl. leading pole with the working N-root fitter; failure sits in the
 zero-regulator drop rule on collapsed towers (D2) AND an unresolved
 DeltaPrescriptions configuration warning (M0 task 16 triages).  N-root

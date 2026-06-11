@@ -9,6 +9,7 @@ tests=(
   "Tests/test_eps_series.m"
   "Tests/test_indicial.m"
   "Tests/test_sectorseries.m"
+  "Tests/test_solve.m"
   Tests/test_package_loading.m
   Tests/test_symbols_namespacing.m
   Tests/test_recurrence_no_fallback.m

@@ -88,7 +88,8 @@ Accessors:
 - `ESCoefficientList[s_?ESQ, k1_Integer, k2_Integer] -> List`
   Coefficients of eps^k1 .. eps^k2 in order (length k2-k1+1), with below-Min
   entries filled by exact 0.  LOUD ERROR if `k2 > CompleteMax` (ERR-RANGE),
-  if `k1 > k2` (ERR-RANGE), or if `k1 > Min` and any coefficient in
+  if `k1 > k2` (ERR-RANGE; sole exception: the blessed empty polar slice
+  below), or if `k1 > Min` and any coefficient in
   `[Min, k1-1]` is non-negligible per `ESCoeffZeroQ` at the series' own scale
   (ERR-DROP-BELOW): slicing away a known nonzero pole must be a deliberate
   two-step (inspect `ESLeading`, then `ESShift`/handle the pole), never an
@@ -96,6 +97,20 @@ Accessors:
   (FeynmanTrick/DiffExpIntegration.m:1192-1196,
   DiffExp/RegularizedIntegration.m:222-223), which silently zero-padded above
   the window and silently dropped negative powers.
+  POLAR-PART IDIOM (blessed; REVIEW-minimalism defect 36): the polar part of
+  `s` is `ESCoefficientList[s, ESMinPower[s], -1]`, the empty list `{}` when
+  `ESMinPower[s] >= 0` — the call with `k2 == -1` and
+  `k1 == ESMinPower[s] >= 0` is the ONE sanctioned empty-range slice and
+  returns `{}` instead of ERR-RANGE.  The regular complement is
+  `ESCoefficientList[s, 0, ESCompleteMax[s]]` when `Min >= 0`; for a series
+  with genuine polar content the caller takes the single full-window call
+  `ESCoefficientList[s, ESMinPower[s], ESCompleteMax[s]]` and splits it at
+  index `-Min` (polar | regular) — a `k1 = 0` slice on a pole-bearing series
+  still fires ERR-DROP-BELOW, DELIBERATELY (the F12 guard stands; the
+  defect-36 claim that the `k1 = 0` spelling never triggers it was wrong for
+  pole-bearing input, so the split spelling is the blessed route).  This is
+  the form Solve.m's compensation (its 3.7: polar AND regular parts
+  separately) uses.  No new export is added.
 
 - `ESLeading[s_?ESQ] -> {k_Integer, coefficient} | None`
   The lowest order whose coefficient is non-negligible (exact-nonzero, or
@@ -103,6 +118,9 @@ Accessors:
   not-provably-zero counts as nonzero).  `None` when every coefficient is
   negligible.  Returning `None` is honest data for the caller's decision, not
   a fallback; callers that require a nonzero lead must error themselves.
+  The scan classifies each coefficient through `ESCoeffZeroQ`; a coefficient
+  in the ambiguity band (ternary outcome, see ESCoeffZeroQ) is the same loud
+  error — never silently classified either way.
 
 Arithmetic (all window rules normative; see section 3 table):
 
@@ -209,29 +227,42 @@ Arithmetic (all window rules normative; see section 3 table):
 
 Predicates and comparison:
 
-- `ESCoeffZeroQ[c_, scale_] -> True | False`
-  THE zero test of the new core, exported for reuse (Solve.m/Transport.m
-  matching solves use the same semantics — Lessons Ledger seed
-  "numerical-zero leading-coefficient skipping (generalizes to matching
-  solves)", RewritePlan section 5).  True iff `PossibleZeroQ[c]`, OR `c` is
-  numeric (NumericQ) and `Abs[N[c, wp]] < laurentLeadTol * scale` where `wp`
-  and `laurentLeadTol` come from Tolerances.m and `scale > 0`.  Symbolic
-  non-numeric `c` that is not provably zero -> False, ALWAYS: this predicate
-  never substitutes values for `Logx`/theta/indeterminates (the theta-aware,
-  Logx-probed variant lives where those symbols have semantics — the old
-  model is DiffExp/IntegrationStrategies/Recurrence.m:595-634; SectorSeries/
-  Solve pre-probe and pass a numeric value here).  The test is RELATIVE by
+- `ESCoeffZeroQ[c_, scale_, tol_:Automatic] -> True | False | LOUD ERROR`
+  Thin wrapper over THE library-wide zero predicate (DEC-3), definitionally:
+  `ESCoeffZeroQ[c_, scale_, tol_] := Tolerances`NumericallyZeroQ[c, scale,
+  tol /. Automatic -> Tol["LaurentLeadTol"], $ESErrorContext, band]` with
+  `band = $LaurentLeadBandDecades` (= 4, DEC-2) for the LaurentLeadTol
+  default and Tolerances' default `$AmbiguityBandDecades` when an explicit
+  `tol` is passed (`Automatic -> Tol["LaurentLeadTol"]`; ESSameQ passes
+  `Tol["MatchTol"]` explicitly — math review D24).  All semantics
+  (PossibleZeroQ short-circuit, symbolic not-provably-zero -> False ALWAYS,
+  zero scale -> only exact zeros, relative band, loud ambiguity error
+  embedding the caller's context) are Tolerances.md's; EpsSeries adds
+  nothing beyond the window fields and `$ESErrorContext` it contributes to
+  the error payload (DEC-3).  The ternary outcome is deliberate: a
+  coefficient inside the ambiguity band ABORTS the trim/lead/inversion that
+  asked, naming the window and context — it is never silently classified.
+  Band geometry is DEC-2's: `laurentLeadTol =
+  Max[10^(-Floor[chopDigits/2]), 10^-24]`, the `10^-24` floor a hard
+  constant, band width 4 decades, and the band does NOT apply at the floor —
+  at default settings (chopDigits 250, tol = the floor) the predicate is
+  binary, so the documented ~1e-29 RELATIVE cancellation residues (N-2)
+  classify zero with no ambiguity abort.  This predicate never substitutes
+  values for `Logx`/theta/indeterminates (the theta-aware, Logx-probed
+  variant lives where those symbols have semantics — the old model is
+  DiffExp/IntegrationStrategies/Recurrence.m:595-634; SectorSeries/Solve
+  pre-probe and pass a numeric value here).  The test is RELATIVE by
   construction; there is no absolute-threshold code path (F9).  Scale
   convention used by ESTrim/ESInvert/ESLeading/ERR-DROP-BELOW:
   `scale = Max[Abs[N[c_k]]]` over the series' numeric coefficients (symbolic
   coefficients excluded from the scale); if that scale is 0, only exact
   zeros qualify.
-  Calibration precedent the tolerance must respect: the box campaign's
-  apparent-singularity fix used the relative threshold
-  `Max[10^(-ChopPrecision/2), 10^-24]` and found the `10^-24` floor
-  load-bearing (DiffExp/IntegrationStrategies/Recurrence.m:613-618;
-  Docs/FeynmanTrickBoxFamilyStatus.md:116-119).  laurentLeadTol's derivation
-  from WorkingPrecision is Tolerances.m's contract; this module only consumes
+  Calibration precedent: the box campaign's apparent-singularity fix used
+  the relative threshold `Max[10^(-ChopPrecision/2), 10^-24]` and found the
+  `10^-24` floor load-bearing
+  (DiffExp/IntegrationStrategies/Recurrence.m:613-618;
+  Docs/FeynmanTrickBoxFamilyStatus.md:116-119) — now pinned library-wide by
+  DEC-2.  The derivation lives in Tolerances.m; this module only consumes
   the named value.
 
 - `ESSameQ[a_?ESQ, b_?ESQ] -> True | False`

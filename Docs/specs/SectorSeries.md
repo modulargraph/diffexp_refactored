@@ -1,8 +1,10 @@
 # Module spec: SectorSeries.m (DiffExp2)
 
-Status: M0 deliverable, v1.  Contract for the implementation agent.  Read
-together with Docs/RewritePlan.md (sections 3.1, 3.2, 3.3) and the old-code
-citations below.  Budget: ~400 lines core + ~100 lines Pade port (section 9).
+Status: M0 deliverable, v1, amended per Docs/specs/DECISIONS-M0.md and the
+M0 reviews (REVIEW-math.md, REVIEW-minimalism.md).  Contract for the
+implementation agent.  Read together with Docs/RewritePlan.md (sections 3.1,
+3.2, 3.3) and the old-code citations below.  Budget: 400 + 75 Pade = 475
+restated TOTAL, +50 review-added scope (2.10, 2.11) — section 9.
 
 Module context: ``DiffExp2`SectorSeries` ``.  Position in the acyclic module
 order: Tolerances < Config < EpsSeries < **SectorSeries** < Indicial < Solve <
@@ -19,7 +21,10 @@ evaluate at a point (with the branch rule derived from the chart's
 Prescriptions, accelerated by ported Pade approximants), multiply by a rational
 function c(x,eps) (closed under partial fractions, with poles split across
 charts), re-expand around a new regular center under an explicit truncation
-contract, and differentiate.  It replaces the role of the old
+contract, differentiate, linearly combine LocalSolutions with EpsSeries
+weights (2.10, for Solve's compensation terms and Transport's matched
+assembly), and parse boundary-condition tagged powers for API.m (2.11).  It
+replaces the role of the old
 DiffExp/SingularityDecomposition.m (435 lines) — which numerically *fitted*
 sector exponents back out of collapsed per-eps-order towers — with exact tag
 bookkeeping: tags are constructed once (by Indicial/Solve), never inferred, and
@@ -80,20 +85,34 @@ Derives the chart's Im-sign from `ls["Prescriptions"]` (the LIST of
 Deterministic and cheap; called by `EvaluateLocalSolution` and
 `ReexpandLocalSolution` whenever a branch is needed.
 
-### 2.4 `EvaluateLocalSolution[ls_Association, tval, opts] -> EpsLaurentValue`
-### `EvaluateLocalSolution[ls_Association, {tval1, tval2, ...}, opts] -> {EpsLaurentValue ...}`
+SINGLE OWNER (math review D28; minimalism review 18): `ChartImSign` is the
+ONE sign-derivation in DiffExp2.  Transport's `Chart["CrossSign"]` and
+Integrate's pairing/negative-arm sigma are DEFINED as this function applied
+to the chart's Prescriptions record; neither module reimplements the rule.
+SIGN-AWARENESS (DEC-16): the derivation is sign-aware through
+`LeadingCoeffSign` — two prescription entries whose factors differ only by
+leading-coefficient normalization (`{-1+x, +1}` vs `{1-x, +1}` flip the
+implied i-delta side) derive OPPOSITE sigmas and MUST surface as
+`::branchconflict`; a sign-blind upstream dedup (the old
+deltaPrescriptionsForFactors class) that would hide the conflict is
+forbidden.
 
-Evaluates the LocalSolution at the chart-coordinate point(s) `tval`.
+### 2.4 `EvaluateLocalSolution[ls_Association, tval, opts] -> EvaluationResult`
+
+Evaluates the LocalSolution at the chart-coordinate point `tval`.
+
+The multi-point form is CUT (taken up front per REVIEW-minimalism defect 4,
+cut 3): callers needing several points (the old pattern: `SEval1` once,
+`SEval2` per point — Transport.m:905-918 evaluates the same segment at the
+eval point, the boundary fix point, and two reduced-order probe points) loop
+over single-point calls; the cost of rebuilding Pade per point is ACCEPTED
+and recorded in the R6 benchmark notes.
 
 Arguments:
-- `tval`: a real number (exact rational, or arbitrary-precision Real) or a
-  list of such.  Complex or symbolic points -> LOUD error (v1; open question
+- `tval`: a real number (exact rational, or arbitrary-precision Real).
+  Complex or symbolic points -> LOUD error (v1; open question
   Q5).  `0 < |tval| < ls["Radius"]` required for singular charts;
-  `|tval| < Radius` (including 0) for regular charts.  The multi-point form
-  builds each Pade approximant ONCE and evaluates it at all points (the old
-  pattern: `SEval1` once, `SEval2` per point — Transport.m:905-918 evaluates
-  the same segment at the eval point, the boundary fix point, and two
-  reduced-order probe points).
+  `|tval| < Radius` (including 0) for regular charts.
 - Options:
   - `"UsePade" -> Automatic | True | False`.  Automatic reads Config key
     `UsePade`.  See 2.4.2.
@@ -105,9 +124,9 @@ Arguments:
   - `"ImSign" -> Automatic | 1 | -1` (default Automatic = `ChartImSign[ls]`):
     test/Transport override of the branch sign.
 
-Return value `EpsLaurentValue` (section 3.4): the eps-Laurent vector value
-with honest window metadata and evaluation metadata (`"PadeFallbacks"`,
-`"TailEstimates"`).
+Return value `EvaluationResult` (section 3.4): the eps-Laurent vector value
+as a canonical EpsSeries.m object (DEC-13) with sibling evaluation metadata
+(`"PadeFallbacks"`, `"TailEstimates"`).
 
 #### 2.4.1 Evaluation formula and branch rule
 
@@ -150,19 +169,29 @@ of the old `x^(b eps) = Exp[b eps Logx]` convolution
 (SingularityDecomposition.m:222-243, `MultiplyByXMinusBEps`) — same math, now
 applied forward instead of being fitted backward.
 
-Value window: `MinPower = Min over sectors of (first present row + p)`;
-`CompleteMax = ls["EpsWindow"]["CompleteMax"]` (every value order
+Value window (the returned EpsSeries' `EpsWindow`, section 3.4):
+`"Min" = Min over sectors of (first present row + p)`;
+`"CompleteMax" = ls["EpsWindow"]["CompleteMax"]` (every value order
 `K <= CompleteMax` needs only rows `k = K - p - j <= K <= CompleteMax`, all
 present).  Requesting orders above CompleteMax is impossible by construction
 (the return object carries the window; consumers check — RewritePlan 3.1
 invariants).
 
+TailEstimates on EVALUATION results (minimalism review 29): per eps order,
+`Max over comp of |c[k, ntop, comp] * tval^ntop| * q/(1-q)` with
+`q = |tval|/Radius` and `ntop` the last used t-column — the geometric tail
+at the actual evaluation point.  Computed always (cheap); Missing[] never
+occurs on the evaluation path (the §3.4 Missing[] option applies only to
+objects that bypassed evaluation).  Transport's probe (its 2.10) remains the
+authoritative error feed; TailEstimates is advisory metadata.
+
 Evaluation at `tval == 0`:
 - regular chart (single `(0,0,0)` sector): exact, returns the `n = 0` column.
 - any sector with `a < 0`, fractional `a`, `b != 0`, or `p > 0` present:
-  LOUD error `SectorSeries::originlimit` directing the caller to the
-  EndpointLimit semantics in API.m/Integrate.m (the b≠0 drop rule and the
-  divergence checks live THERE, not here; RewritePlan 3.3).  Silently
+  LOUD error `SectorSeries::originlimit` directing the caller to
+  `Integrate`EndpointSectorLimit` (Integrate.md 2.4, per REVIEW-minimalism
+  defect 12) under API.m's EndpointLimit (the b≠0 drop rule and the
+  divergence gate live THERE, not here; RewritePlan 3.3).  Silently
   returning the `(0,0,0)` constant would re-create the old wholesale-drop
   disease (banana doc, Docs/FeynmanTrickBananaStatus.md:314-329).
 
@@ -183,13 +212,21 @@ PadeApproximant per-Logx-coefficient of each per-eps-order SeriesData
 the new representation the log structure is the exact tag `p`, so Pade applies
 to the inner t-polynomial per `(sector, eps-row k, component)`:
 
-- diagonal order `[m/m]` with `m = Floor[(numberOfCoefficients + 1)/2]`
-  (Pade.m:35);
+- diagonal order `[m/m]` with `m = Floor[numberOfCoefficients/2]` (so
+  2m+1 <= numberOfCoefficients: the approximant is determined ENTIRELY by
+  known coefficients; for `{c0..cN}`, `m = Floor[(N+1)/2]`).  DELIBERATE
+  one-slot deviation from old Pade.m:35, whose SeriesData arithmetic
+  (`(a[[5]]-a[[4]])/a[[6]] + 1`) overcounts by one and silently consumes a
+  phantom top order — LessonsLedger entry required ("Pade order off-by-one:
+  old code built [m/m] needing 2m+1 coefficients from 2m known ones,
+  treating the truncation boundary as exact zeros").  Normative per DEC-12;
+  unit t14 is the gate;
 - coefficients chopped before construction at the Tolerances-derived
   `chopFloor` (old: `Chop[#, 10^-ChopPrecisionVal]`, Pade.m:43 — the constant
   moves to Tolerances.m);
-- constructed once per (ls, options) call, evaluated at every requested
-  point (multi-point form, 2.4);
+- constructed once per (ls, options) call (the multi-point form is cut per
+  REVIEW-minimalism defect 4 — callers evaluating several points rebuild;
+  cost accepted, see 2.4);
 - FAILURE (Mathematica's `PadeApproximant` returns unevaluated — detected
   exactly as the old code does, by an embedded `PadeApproximant[__]` head,
   Pade.m:44): the old code printed a level-1 warning and silently evaluated
@@ -224,14 +261,16 @@ Multiplies the LocalSolution by a rational function `c` of (variable, eps).
 The algebra is CLOSED: the result is again a LocalSolution on the same chart.
 
 Arguments:
-- `c`: an expression rational in the coordinate symbol and the eps symbol
-  (symbols pinned by Config).  Anything non-rational (Sqrt of the variable,
-  Log, special functions) -> LOUD error `SectorSeries::nonrational`
-  (RewritePlan non-goal: algebraic x-dependence is out of scope v1).
-- Options: `"Coordinates" -> "Chart" | "Main"` (default `"Main"`): with
-  `"Main"`, `c` is given in the main line variable and is converted through
-  `ls["ChartMap"]` first (the FT IBP coefficients arrive in main-line
-  coordinates — old conversion site FeynmanTrick/DiffExpIntegration.m:731-736).
+- `c`: an expression rational in the CHART coordinate symbol and the eps
+  symbol (eps symbol per Config's `CanonicalEps[]`).  Anything non-rational
+  (Sqrt of the variable, Log, special functions) -> LOUD error
+  `SectorSeries::nonrational` (RewritePlan non-goal: algebraic x-dependence
+  is out of scope v1).
+- The `"Coordinates" -> "Main"` conversion option is CUT (taken up front per
+  REVIEW-minimalism defect 4, cut 1): the FT shim converts main-line-variable
+  IBP coefficients through `ls["ChartMap"]` BEFORE calling (old conversion
+  site FeynmanTrick/DiffExpIntegration.m:731-736 maps to the shim); t23
+  retargets the shim's test file.
 
 Algorithm (normative):
 
@@ -267,8 +306,11 @@ Algorithm (normative):
      unreachable by placing a chart at every pole; reaching it is a
      segmentation bug, not a representable state.
    - `|t_i|` vs `Radius` comparison numerically ambiguous at WorkingPrecision
-     (difference below the Tolerances guard): LOUD error
-     `SectorSeries::geomambiguous` — never pick a side silently.
+     — difference magnitude below `Tol["GeomGuardTol"] * Max[|t_i|, Radius]`
+     (the named Tolerances.m export `GeomGuardTol[wp] = 10^(-Floor[wp/2])`,
+     per REVIEW-minimalism defect 17 / math review D26): LOUD error
+     `SectorSeries::geomambiguous` — never pick a side silently.  The same
+     guard governs the `|D|` vs `Radius` comparison of 2.6.
 4. Convolve: `c'[k, n, comp] = Sum[ Q_jrow[n1] * c[krow, n2, comp] ]` over
    `jrow + krow = k`, `n1 + n2 = n`, where `Q` is the assembled analytic part.
    eps windows combine per EpsSeries.m multiplication (honest min);
@@ -322,12 +364,17 @@ TRUNCATION CONTRACT (math-review finding 12 — this is the load-bearing part):
   `rho = Min[R_old - |D|, If[chart singular, |D|, Infinity]]`
   (triangle inequality; the old center is itself a singularity at distance
   |D| when the chart is singular).  For each output eps order k the module
-  records
+  records (math review D11 — the formula must be rho-aware; the unit-radius
+  form under- or over-estimates by rho^(±N) on small/large charts):
 
-      TailEstimate[k] = Max over comp of Abs[ c'[k, N, comp] ] * q^(N+1)/(1-q),
-      q = (rho / DivisionOrder) / rho = 1/DivisionOrder
+      TailEstimate[k] = Max over comp of Abs[ c'[k, N, comp] ] * r^N * q/(1-q),
+      with r = rho/DivisionOrder (the design evaluation radius) and
+      q = 1/DivisionOrder (so q/(1-q) = 1/(DivisionOrder - 1)).
 
-  i.e. the geometric tail at the DESIGN evaluation radius rho/DivisionOrder
+  Equivalently, in the radius-normalized coordinate w = t'/rho the familiar
+  form |ĉ_N| q^(N+1)/(1-q) holds with ĉ_N = c'_N rho^N; the implementation
+  must use whichever form matches its stored coordinate.  This is the
+  geometric tail at the DESIGN evaluation radius rho/DivisionOrder
   (DivisionOrder from Config; FT pins 4).  The geometric model (|c'_n| ~
   rho^-n, top kept coefficient representative) is valid because RoC chart
   rescaling keeps high-order coefficients O(1) (ledger lesson; banana
@@ -355,10 +402,9 @@ composed with the affine shift `t = D + t'`), `Radius = rho`,
 `Prescriptions = {}` (regular center — no vanishing prescription factors),
 `Sectors = {single (0,0,0) sector}`, windows and ErrorEstimate per above.
 
-### 2.7 `DifferentiateLocalSolution[ls_Association, opts] -> ls'`
+### 2.7 `DifferentiateLocalSolution[ls_Association] -> ls'`
 
-Exact termwise derivative.  Option `"Coordinates" -> "Chart" | "Main"`
-(default `"Chart"`).
+Exact termwise derivative, in CHART coordinates.
 
 Chart-coordinate rule (normative).  Each sector `(a, b, p)` with rows
 `c[k, n, comp]` contributes:
@@ -379,10 +425,12 @@ known mod `t^(a+N)`); since the output exponent is `a - 1` the INDEX range
 per-Logx-power derivative `SD` (DiffExp/SeriesOps.m:206-214) with exact tag
 algebra.
 
-Main-variable rule: affine ChartMap `x = x0 + beta*t` -> multiply the chart
-derivative by the exact constant `1/beta`.  Mobius ChartMap -> chain through
-`MultiplyRational` with the exact rational factor `dt/dx` expressed in `t`
-(cuttable, section 9).
+The `"Coordinates" -> "Main"` option is CUT (taken up front per
+REVIEW-minimalism defect 4, cut 1): the caller (FT shim / Transport) applies
+the exact affine factor `1/beta` of `x = x0 + beta*t` itself; t29 retargets
+the shim's test file.  ChartMap is AFFINE ONLY in the new core (DEC-18:
+Mobius is dropped entirely; RoC chart rescaling is an affine rescaling and
+is kept) — no Mobius chain rule exists.
 
 ### 2.8 `SectorDecomposition[ls_Association] -> Association`
 
@@ -407,49 +455,90 @@ several sectors instead of one collapsed term; `p` explicit instead of
 residual `Logx` towers; vector-valued (component index); exact tags instead
 of `RationalizationTolerance`-rationalized fits.  The drop rule consumers
 (limitUpper/limitLower: "constant of the (0,0,0)-sector; b != 0 dropped
-exactly", RewritePlan 3.3) read this output in API.m/Integrate.m; the FT
+exactly", RewritePlan 3.3) read this output through
+`Integrate`EndpointSectorLimit` (Integrate.md 2.4) under API.m's
+EndpointLimit; the FT
 verbosity printout at DiffExpIntegration.m:822-826 maps to
 `{#a, #b, #p} & /@ result["Sectors"]`.
 
-### 2.9 `PadeEvaluate[coeffs_List, tval_] -> value`
-### `PadeEvaluate[coeffs_List, {tval1, ...}] -> {value ...}`
+### 2.9 `padeEvaluate` (Private — NOT exported)
 
-Test seam and internal workhorse: given one plain coefficient vector
+Internal workhorse, demoted from the public surface (cut 5 taken up front
+per REVIEW-minimalism defect 4; t14/t15 exercise it through
+EvaluateLocalSolution): given one plain coefficient vector
 `{c0, c1, ..., cN}` (numbers, arbitrary precision), build the `[m/m]`
-diagonal Pade approximant (`m = Floor[(N + 2)/2]` slots convention as in
-Pade.m:35) of `Sum[c_n t^n]` and evaluate at the point(s).  Same chop,
-precision-block, failure-detection, and loud-fallback contract as 2.4.2
-(failure here raises `SectorSeries::padefail` with sector/order context
-supplied by the caller via an internal hook; standalone calls name the
-coefficient list's hash).
+diagonal Pade approximant with `m = Floor[numberOfCoefficients/2]
+= Floor[(N + 1)/2]` (the 2.4.2 formula, normative per DEC-12 — NOT old
+Pade.m:35's off-by-one) of `Sum[c_n t^n]` and evaluate at the point.  Same
+chop, precision-block, failure-detection, and loud-fallback contract as
+2.4.2 (failure here raises `SectorSeries::padefail` with sector/order
+context supplied by the caller via an internal hook).
+
+### 2.10 `CombineLocalSolutions[weights_List, lss_List] -> LocalSolution`
+
+(Added per REVIEW-minimalism defect 6 — the operation Solve.md §3.7 step 2
+and Transport.md §2.6 step 4 consume.)  Exact linear combination
+Σ_i w_i · ls_i where each `w_i` is an EpsSeries (EpsSeries.md object; a
+plain exact number is auto-wrapped as a width-1 series with window
+[0, +inf-equivalent: the partner's CompleteMax]).  All ls_i must share
+Center/ChartMap/Radius/Prescriptions exactly (else `::dims`).  Per sector:
+coefficient rows are EpsSeries-multiplied by w_i (window per ESTimes;
+Laurent weights shift kmin honestly — this is how Solve's compensation terms
+with polar γ(eps) and Transport's matched weights enter), same-tag sectors
+merged by ESAdd, result canonicalized (2.2).  EpsWindow = honest min over
+contributions; TWindow = min; ErrorEstimate = entrywise sum (I-10).  Budget
++~25 lines (funded per REVIEW-minimalism defect 4).  Unit test t34.
+
+### 2.11 `ParseTaggedPower[expr_, var_Symbol, epsSym_Symbol] -> <|"a", "b", "p", "Coefficient"|> | $FailedParse`
+
+(Added per REVIEW-minimalism defect 13.)  Boundary-ingestion helper (sole
+caller: API.m PrepareBoundaryConditions).  Recognizes
+c * var^(a + b*epsSym) * Log[var]^p products with exact a, b (affine-in-eps
+exponent REQUIRED: a non-affine exponent is a LOUD error naming the exponent
+— same I1 discipline as Indicial, never a numeric fit), p integer >= 0;
+rewrites Log[k*var] -> Log[k] + Log[var] first (old Transport.m:120 rule).
+Returns the inert marker $FailedParse for expressions that are not of this
+product form — the CALLER (API.m) decides between the documented minimum
+contract (old eps-expansion into Logx polynomials, old Transport.m:91-120)
+and an error; $FailedParse is data for that documented branch, not a silent
+fallback.  Budget +~25 lines (funded per REVIEW-minimalism defect 4).  Unit
+test t35.
 
 ---
 
 ## 3. DATA CONTRACTS
 
-### 3.1 LocalSolution (RewritePlan 3.1, VERBATIM — normative)
+### 3.1 LocalSolution (RewritePlan 3.1 as amended by DECISIONS-M0
+DEC-9/DEC-16/DEC-18 — normative)
 
     LocalSolution = <|
-      "Center" -> exact x0, "ChartMap" -> affine (Mobius optional, see 3.2),
+      "Center" -> exact x0, "ChartMap" -> AFFINE ONLY (DEC-18: Mobius is
+                  dropped from the new core entirely; RoC chart rescaling is
+                  an affine rescaling and is kept),
       "Radius" -> distance to nearest singularity IN THE COMPLEX PLANE
                   (complex singularities are real: pentagon/unequal-mass
                   lines have them; old code projects ghosts Re, Re±Im —
                   ledger item; new code uses true complex distance),
       "Sectors" -> { Sector.. },
       "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
-      "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* t-order honesty: top
-                  (couplingDepth−1) orders of chained particular solutions
-                  are degraded (old MaxCouplingOrder/ISafetyExpansionSubtract
-                  lesson); tracked, not guessed *)
+      "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* the truncation-order
+                  record ONLY (DEC-9): recursion matrices are exact
+                  polynomials, so there is NO coupling-depth degradation in
+                  the new core — the old MaxCouplingOrder discount was a
+                  numeric-matrix artifact, subsumed by exact recursion +
+                  ErrorEstimate *)
       "ErrorEstimate" -> per (eps-order) accumulated error (two-point
                   full-vs-reduced-order probe, additive across segments,
                   abort > 1 — ported old machinery, user-facing),
       "Prescriptions" -> LIST of <|"Factor", "Sign", "Multiplicity",
                   "LeadingCoeffSign"|> with the derived chart Im-sign;
                   consistency-checked at construction (even multiplicity = no
-                  constraint; conflict or missing prescription at a chart with
-                  b!=0/p>0 sectors = LOUD ERROR; sqrt factors auto-prescribed
-                  as in old State.m DEqnSquareRoots)
+                  constraint; conflict or missing prescription at a chart that
+                  is multivalued AT ALL — b != 0 OR p > 0 OR Denominator[a] >
+                  1, DEC-16: the Kallen charts are fractional-a with b=0, p=0
+                  — = LOUD ERROR; dedup of prescription factors is SIGN-AWARE
+                  per DEC-16 and 2.3; the old sqrt auto-prescription union has
+                  no v1 source — LoadSystem rejects sqrt matrices, API.md E6)
     |>
 
     Sector = <|
@@ -481,15 +570,22 @@ coefficient list's hash).
 - Third index: component, `1..Ncomp`, identical across sectors (math finding
   10: solutions are VECTORS; matching solves and ODE residuals need all
   components).
-- The array may extend in `n` beyond `TWindow["CompleteMax"]`: those top
-  columns are PRESENT BUT DEGRADED (coupling-depth lesson); consumers must
-  not use them for matching or completeness decisions.  Evaluation uses them
-  (the old code did), with honesty supplied by the two-point error probe via
-  `"TOrderReduction"`.
+- `TWindow["CompleteMax"]` is the truncation-order record ONLY (DEC-9): the
+  exact polynomial recursion delivers every stored column complete, and no
+  coupling-depth degradation exists in the new core.  Columns beyond
+  `TWindow["CompleteMax"]` do not arise from the solver; consumers treat
+  CompleteMax as the completeness bound.  Evaluation honesty is supplied by
+  the two-point error probe via `"TOrderReduction"`.
 - Coefficient entries: exact numbers, arbitrary-precision numbers, or linear
   combinations of DECLARED indeterminate symbols (the API.m symbolic-BC
   feature).  `SeriesData`, `SeriesCoefficient`, theta symbols, or any other
   compound head -> construction-time LOUD error.
+- LocalSolution carries an OPTIONAL `"Indeterminates" -> {sym..}` key
+  (default {}; populated by API.m from the BoundaryConditions record).
+  I-5's "declared indeterminate symbols" means EXACTLY this list: a symbolic
+  coefficient entry whose symbols are not all in the object's own
+  Indeterminates list is `::badcoeff`.  Config holds no indeterminate state
+  (REVIEW-minimalism defect 16).
 
 ### 3.3 EpsWindow / TWindow (verbatim semantics)
 
@@ -500,19 +596,28 @@ sector, order).  `TWindow = <|"CompleteMax" -> nmax|>`: t-order honesty as in
 justification (the enumerated cases: eps-Laurent shift in 2.5 step 1 moves
 both ends; everything else is min-arithmetic).
 
-### 3.4 EpsLaurentValue (returned by EvaluateLocalSolution)
+### 3.4 EvaluationResult (returned by EvaluateLocalSolution)
 
-    <| "MinPower"      -> m_Integer,
-       "CompleteMax"   -> M_Integer,
-       "Coefficients"  -> { v_m, v_(m+1), ..., v_M },   (* each v: length-Ncomp
-                                                           numeric List *)
+(Rewritten per math review D18 / REVIEW-minimalism defect 23 / DEC-13.)
+
+    <| "Value"         -> the canonical EpsSeries.m object
+                          <|"EpsWindow" -> <|"Min" -> m, "CompleteMax" -> M|>,
+                            "Coeffs" -> { v_m, ..., v_M }|>
+                          (key names VERBATIM from Docs/specs/EpsSeries.md
+                          §3.1 — the ONLY in-core eps-Laurent shape, DEC-13;
+                          each coefficient v is a length-Ncomp numeric List),
        "PadeFallbacks" -> { <|"Sector" -> {a,b,p}, "EpsRow" -> k,
                              "Component" -> comp|> .. },
-       "TailEstimates" -> per-eps-order list or Missing[] |>
+       "TailEstimates" -> per-eps-order list (always computed on the
+                          evaluation path, 2.4.1; Missing[] only on objects
+                          that bypassed evaluation) |>
 
-The first three keys MUST match the canonical eps-Laurent array object of
-EpsSeries.m (Docs/specs/EpsSeries.md); if that spec fixes different key names,
-EpsSeries.md wins and this spec's consumers follow (open question Q1).
+Evaluation metadata is a SIBLING of the series value, never carried inside
+the EpsSeries object.  API.md's user-facing LaurentValue
+(`"MinPower"/"Coefficients"/"CompleteMax"`) is the FT-boundary shape only,
+produced exclusively by an API.m converter
+(`ESMinPower`/`ESCoefficientList`/`ESCompleteMax`); no core module
+constructs or consumes it.
 
 ### 3.5 MultiplyRational input
 

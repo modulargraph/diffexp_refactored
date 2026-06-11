@@ -1,6 +1,9 @@
 # Module spec: DiffExp2/Indicial.m
 
 Status: M0 deliverable (RewritePlan.md section 6, agent tasks 4-11).
+Amended at the M0 spec-amendment pass per Docs/specs/DECISIONS-M0.md
+(binding), REVIEW-math.md (D5, D6c, D8a, D17) and REVIEW-minimalism.md
+(defects 4, 5, 14, 15, 33, 35).
 Authority: Docs/RewritePlan.md (v2) is the execution contract; this spec
 binds the implementation of `Indicial.m`.  An implementation agent must be
 able to build the module from THIS file, RewritePlan.md, and the old code
@@ -44,11 +47,19 @@ All matrices/vectors below have entries that are exact rational functions
 of their stated variables with exact numeric coefficients (Integer,
 Rational, or exact algebraics: `Root`, `AlgebraicNumber`, Gaussian
 rationals).  `t` is the chart coordinate with the (possible) singularity
-at t = 0; the caller (Solve.m / Transport.m) has already applied the chart
-map.  `eps` is the dimensional regulator symbol.  Everything in this
-module is generic-eps algebra: valuations, ranks, spectra, and nilpotency
-are computed over the field Q(alpha)(eps) (alpha = algebraic numbers
-present in the input), never at a specialized eps value.
+at t = 0; the caller (Solve.m's `PrepareChart`, DEC-7) has already
+applied the chart map.  `eps` is the dimensional regulator symbol.
+Everything in this module is generic-eps algebra: valuations, ranks,
+spectra, and nilpotency are computed over the field Q(alpha)(eps)
+(alpha = algebraic numbers present in the input), never at a specialized
+eps value.
+
+PUBLIC SURFACE (REVIEW-minimalism defect 4: cut C-2 taken up front):
+the exported symbols are `ChartIndicial`, `MatrixPoleData`,
+`FuchsianReduce`, and `EpsDegenerateFamilies` (DEC-7).
+`AffineSpectrum`, `JordanChains`, and `PartitionResonanceFamilies`
+(2.4-2.6) are PACKAGE-PRIVATE — specified below for implementability
+and tested through ChartIndicial's output fields.
 
 ### 2.1 ChartIndicial — the orchestrator
 
@@ -66,10 +77,15 @@ Behavior:
 1. Validate input exactness (error E1 otherwise; see section 5).
 2. `pole = MatrixPoleData[A, t]`.
 3. If `pole["PoleOrder"] <= 0`: return the trivial regular-chart
-   IndicialData (one family, one sector spec `<|"a"->0,"b"->0,"p"->0|>`,
-   identity gauge).  This is the SAME code path as singular charts — the
-   degenerate case, per RewritePlan 3.1 invariant "Regular chart <=>
-   exactly one sector (a=0,b=0,p=0)".
+   IndicialData (one family whose single EigRecord is a = 0, b = 0,
+   Multiplicity = d, BlockSizes = ConstantArray[1, d], Chains = the
+   standard basis vectors; d sector specs, each
+   `<|"a"->0,"b"->0,"p"->0|>`; identity gauge).  This is the SAME code
+   path as singular charts — the degenerate case.  Per DEC-6
+   (superseding the RewritePlan 3.1 one-sector phrasing): a regular
+   chart is ONE (a=0,b=0,p=0) sector FAMILY with d-dimensional
+   coefficient space; Solve.m's basis completeness and Transport.md's
+   T-1 assert match this.
 4. If `pole["PoleOrder"] == 1`: residue R = coefficient of t^-1 of A;
    skip reduction (identity gauge).
 5. If `pole["PoleOrder"] >= 2`: `red = FuchsianReduce[A, t, eps,
@@ -306,10 +322,11 @@ For each distinct eigenvalue lam = a + b*eps with multiplicity m:
 
 The eps -> 0 collision of EIGENVECTORS across different-b eigenvalues
 (the log x = (x^(2 eps) - 1)/(2 eps) class) is NOT Jordan structure at
-generic eps and is NOT detected here; it is exactly what the family
-flags of 2.6 hand to Transport.m's unimodular basis recombination
-(RewritePlan 3.2 Transport.m; review math finding 4).  Division of
-labor: Indicial = generic-eps structure; Transport = eps -> 0 limits.
+generic eps; it IS detected here, exactly, by the per-family
+EpsZeroDegeneracy rank computation of section 2.6 step 7 and exported
+through `EpsDegenerateFamilies` (2.7; DEC-7).  Division of labor
+(REVIEW-math D8): Indicial DETECTS (exact rank at eps = 0), Transport
+REMOVES (unimodular recombination, Transport.md 2.8).
 
 ### 2.6 PartitionResonanceFamilies — resonance / pseudo-resonance
 
@@ -351,7 +368,11 @@ PartitionResonanceFamilies[spectrum:{__Association},
        "Type" -> If[b_i === b_j, "Log", "LaurentShift"]|>
    For n == 0 (equal a, different b) both ordered pairs satisfy the
    condition; record ONLY the canonically ordered one (i before j in
-   the family's sector sort) — one collision, one record.
+   the family's sector sort) — one collision, one record.  (REVIEW-math
+   D6c, resolved by its second option per DEC-7: n = 0 collisions
+   ARRIVE canonically ordered, and Solve.m's `PrepareChart` symmetrizes
+   to both ordered pairs where its recursion bookkeeping needs them;
+   this single canonical record and T-11 are normative.)
    "Log" entries (same b, n > 0) are where the recursion operator
    L_n = (lam_i + n) I - R is singular identically in eps -> log bump.
    "LaurentShift" entries are where det L_n carries the exact factor
@@ -361,9 +382,32 @@ PartitionResonanceFamilies[spectrum:{__Association},
 6. Family record fields: section 3.4.  `JointSolve -> True` iff the
    family contains >= 2 distinct exact b values.  `LogMax` = max p over
    the family's sector specs.
+7. `"EpsZeroDegeneracy" -> r0_Integer` per family (REVIEW-math D8a):
+   assemble the family's chain-top vectors v_i(eps) (columns),
+   normalize each by its eps-valuation (exact), substitute eps -> 0
+   (exact), and set r0 = (number of columns) − rank over Q(alpha) of
+   the resulting matrix.  r0 > 0 iff the eps -> 0 eigenvectors collide;
+   r0 is the recursion depth Transport.m's RecombineBasis needs.
+   Computed only for families with >= 2 distinct b (elsewhere
+   r0 := 0).  All-exact, no tolerance (invariant I-8 applies).
 
 Families are returned sorted by (min a at eps = 0, then b) for
 deterministic output; sectors within a family sorted by (a, b, p).
+
+### 2.7 EpsDegenerateFamilies — eps = 0 degeneracy selector (DEC-7)
+
+```
+EpsDegenerateFamilies[data_Association (* IndicialData, section 3.6 *)]
+  -> {<|"FamilyIndex" -> _Integer, "EpsZeroDegeneracy" -> _Integer|>..}
+```
+
+Thin exact selector, no new mathematics: one record per Family whose
+`EpsZeroDegeneracy` r0 is > 0 (same a mod Z, distinct b, colliding
+eps = 0 eigenvectors — the 2.6 step 7 field), `FamilyIndex` indexing
+into `data["Families"]`; empty list when no family is degenerate.
+Transport.m's RecombineBasis is tag-driven off this output and performs
+NO numeric degeneracy detection (DEC-7; REVIEW-math D8; REVIEW-
+minimalism defect 14).
 
 ---
 
@@ -444,11 +488,27 @@ Family = <|
                                         (I2 spec decision) *)
   "LogMax"     -> _Integer,          (* max p over Sectors: Solve.m's
                                         log-chain ansatz depth *)
+  "EpsZeroDegeneracy" -> _Integer,   (* >= 0; section 2.6 step 7
+                                        (REVIEW-math D8a): number of
+                                        chain-top columns minus their
+                                        exact rank at eps = 0.  r0 > 0
+                                        iff the eps -> 0 eigenvectors
+                                        collide; r0 = RecombineBasis'
+                                        recursion depth.  Always 0 when
+                                        fewer than 2 distinct b. *)
   "Collisions" -> {<|"n" -> _Integer, "LowerIdx" -> _Integer,
                      "UpperIdx" -> _Integer, "DeltaB" -> exact,
                      "Type" -> "Log" | "LaurentShift"|>..}
 |>
 ```
+
+NORMATIVITY (REVIEW-minimalism defect 15; DEC-7): the Family and
+EigRecord shapes above — including the collision keys
+n/LowerIdx/UpperIdx/DeltaB/Type — are consumed VERBATIM by Solve.m's
+`PrepareChart` (Solve's former From/To/Offset names are renamed to
+these).  Solve.m itself builds the per-family spectral frame V/VInv,
+CollisionDepth, and the ChartSystem from this output; Indicial emits
+exactly what this section specifies, nothing more.
 
 NOTE ON p SEMANTICS: `Sectors[..,"p"]` is the allocation bound for the
 ansatz (old `MaxLogPowers` role, ResonantRecurrence.m:489-493).  Solve.m
@@ -492,8 +552,9 @@ IndicialData = <|
                                         to: the REDUCED system's residue *)
   "Spectrum"   -> {EigRecord..},
   "Families"   -> {Family..},
-  "Regular"    -> True | False       (* True iff PoleOrder <= 0: exactly
-                                        one family, one (0,0,0) sector *)
+  "Regular"    -> True | False       (* True iff PoleOrder <= 0: one
+                                        family, d (0,0,0) sector specs
+                                        (DEC-6) *)
 |>
 ```
 
@@ -540,10 +601,10 @@ I-4  Chain identities: (R - lam I).v_{q+1} == v_q and
 I-5  Reduction validity: min t-valuation of ThetaMatrix >= 0;
      T . TInv == Identity exactly; recomputing
      LocalConnectionMatrix(M, T) reproduces ThetaMatrix exactly.
-I-6  Regular chart <=> exactly one family with exactly one sector spec
-     (0, 0, 0) (RewritePlan 3.1 invariant; scoped to ODE solutions —
-     the products-with-IBP-coefficients exemption lives in
-     SectorSeries.md, not here).
+I-6  Regular chart <=> exactly d sector specs, all (0, 0, 0), one
+     family (DEC-6, amending the RewritePlan 3.1 one-sector phrasing;
+     scoped to ODE solutions — the products-with-IBP-coefficients
+     exemption lives in SectorSeries.md, not here).
 I-7  Every "a" with b == 0 in a Fuchsian-from-the-start FT chart is
      rational; algebraic a/b only ever enter via algebraic chart centers
      or algebraic char-poly factors — both exact (R2).
@@ -554,8 +615,8 @@ I-9  Determinism: identical input produces identical output (sorted
      families/sectors, canonicalized chain normalization, fixed
      tie-breaks).
 
-All asserts raise the module's loud-error primitive (section 5.0) with
-the chart name; none is downgradeable.
+All asserts raise through ``Tolerances`DE2Error`` (section 5.0; DEC-1)
+with the chart name; none is downgradeable.
 
 ---
 
@@ -563,12 +624,16 @@ the chart name; none is downgradeable.
 
 ### 5.0 Mechanism
 
-Every error is raised as `Throw[Failure["DiffExp2", payload], "DiffExp2"]`
-(or the shared loud-error primitive if Config.md defines one — open
-question OQ-2), where payload ALWAYS contains:
+All errors are raised via ``Tolerances`DE2Error[id, payload]`` (DEC-1;
+REVIEW-math D17, REVIEW-minimalism defect 5): DE2Error prints a
+one-line summary and performs
+`Throw[Failure["DiffExp2", payload], "DiffExp2Error"]`; the only Catch
+sites are API.m's entry points.  This module defines NO other error
+mechanism.  The E-names below are the `id` argument; payload ALWAYS
+contains:
 
 ```
-<|"Module" -> "Indicial", "Error" -> <name below>,
+<|"ID" -> <name below>, "Module" -> "Indicial",
   "Chart" -> chartRef["Name"], "Center" -> chartRef["Center"],
   "Variable" -> chartRef["Variable"], ...class-specific fields...|>
 ```
@@ -618,9 +683,10 @@ Fires when: pole order r >= 2 and the leading Laurent coefficient
 A_{-r} (equivalently the t^v coefficient of the theta matrix) is NOT
 nilpotent (Moser necessary condition fails; local solutions contain
 exp(c/t^(r-1)) behavior — genuinely out of scope, RewritePlan R11).
-Carries: r, the leading coefficient matrix, its nonzero eigenvalue
-witness (any one exact eigenvalue of A_{-r} != 0, when cheap — else the
-nonzero entry pattern of A_{-r}^d).
+Carries: r, the leading coefficient matrix, and the nonzero entry
+pattern of A_{-r}^d as the non-nilpotency witness (the optional
+exact-eigenvalue witness is cut C-3, taken up front per
+REVIEW-minimalism defect 4).
 Forbidden fallback: attempting saturation anyway; truncating the pole.
 
 ### 5.4 E4 "RankReductionNonTermination"
@@ -803,21 +869,26 @@ N-9 The exact full-eps matrix is a PREREQUISITE: slice exports are
 ## 7. DEPENDENCIES
 
 May call (per the acyclic order `Tolerances < Config < EpsSeries <
-SectorSeries < Indicial`):
-- `Config.m`: ONLY for the shared loud-error primitive / chart-name
-  formatting and verbosity-gated info logging (if Config.md provides
-  them; OQ-2).  No configuration key changes Indicial's mathematics.
-- `Tolerances.m`: NOT USED.  Deliberate and load-bearing: this module
-  has no numerics, hence no thresholds (invariant I-8).  Listing it
-  here forecloses "just one little snapTol" drift.
+SectorSeries < Indicial`; REVIEW-minimalism defect 33, names per
+DEC-1):
+- `Tolerances.m`: ``Tolerances`DE2Error`` ONLY (sole Tolerances use —
+  the I-8 "no numeric tolerances" invariant is about thresholds, not
+  the error helper).  NO tolerance accessor is consumed — deliberate
+  and load-bearing: this module has no numerics, hence no thresholds
+  (invariant I-8).  Stating it here forecloses "just one little
+  snapTol" drift.
+- `Config.m`: ``Config`PrintInfo`` for verbosity-gated info logging.
+  No configuration key changes Indicial's mathematics.
 - `EpsSeries.m`, `SectorSeries.m`: NOT USED.  Allowed by the order but
   unnecessary — Indicial works on exact symbols, not truncated arrays.
   Gauge composition (which does need SectorSeries/EpsSeries) executes
   in Solve.m under the section 3.7 contract.
 
-Consumed by: `Solve.m` (primary: one ChartIndicial call per chart,
-result cached on the chart), `Transport.m` (chart classification for
-segmentation/matching decisions), `API.m` (SolveAtPoint surface).
+Consumed by: `Solve.m` (primary: `PrepareChart` makes one ChartIndicial
+call per chart, caches the result on the chart, and assembles the
+ChartSystem itself — DEC-7), `Transport.m` (chart classification for
+segmentation/matching decisions; RecombineBasis is tag-driven off
+`EpsDegenerateFamilies`, section 2.7), `API.m` (SolveAtPoint surface).
 
 Wolfram built-ins relied on (implementation note): Cancel, Together,
 Factor/FactorList (+ Extension), Solve (exact, on univariate factors),
@@ -830,11 +901,16 @@ Tolerance options, MatrixPower, Inverse, PolynomialLCM.
 
 File: `Tests/test_indicial.m` (battery-registered at M2).  "Assert"
 means exact equality (SameQ after RootReduce/Together canonicalization)
-unless stated.  Tests T-15..T-17 need vendored campaign matrices and the
-single kernel; all others are pure closed-form and fast.
+unless stated.  Error tests assert via `Catch[..., "DiffExp2Error"]`
+returning the `Failure["DiffExp2", ...]` with the named Module/ID
+payload fields (DEC-1; REVIEW-math D17).  Tests T-15..T-17 need
+vendored campaign matrices and the single kernel; all others are pure
+closed-form and fast.
 
 T-1  test_regular_chart: A = {{0, 1}, {1/(1−t), 0}} (holomorphic at 0).
-     Assert: Regular -> True; one family; Sectors == {<|a->0,b->0,p->0|>};
+     Assert: Regular -> True; one family;
+     Sectors == ConstantArray[<|"a"->0,"b"->0,"p"->0|>, 2] (DEC-6 /
+     REVIEW-math D5: d sector specs, one per basis solution);
      Gauge == IdentityMatrix[2]; PoleOrder == 0.
 T-2  test_zero_residue_after_cancellation: A with entries that LOOK
      singular but cancel, e.g. A = {{(2 t)/(2 t^2) − 1/t, 1}, {0, 0}}
@@ -848,7 +924,7 @@ T-3  test_simple_pole_two_families: A = {{(1+eps)/t, 1}, {0,
      p == 0.
 T-4  test_i1_violation_sqrt_eps: A = {{0, 1}, {eps, 0}}/t (RewritePlan
      section 2 counterexample).  Assert: E2 thrown; payload contains
-     Error -> "NonAffineEigenvalue", Chart name, the char poly
+     ID -> "NonAffineEigenvalue", Chart name, the char poly
      lambda^2 − eps, and the irreducible factor.
 T-5  test_i1_violation_rational_root: residue {{eps/(1+eps), 0},{0, 0}}
      (A = that /t).  Assert: E2 (root eps/(1+eps) is eps-rational but
@@ -950,11 +1026,26 @@ T-20 test_series_input_loud: A with a SeriesData entry (an eps-slice
      lesson N-9).
 T-21 test_no_numerics_in_source: read DiffExp2/Indicial.m as text;
      assert no occurrence of `N[`, `Rationalize[`, `Chop[`,
-     `Tolerance ->`, `Quiet[`, `Check[` outside the documented
-     error-throw helper (invariant I-8 made mechanical).
+     `Tolerance ->`, `Quiet[`, `Check[` anywhere (invariant I-8 made
+     mechanical; the module defines no local error helper).  Calls to
+     ``Tolerances`DE2Error`` are ALLOWED — I-8 is about numeric
+     thresholds, not the error primitive (REVIEW-minimalism defect 33,
+     name per DEC-1).
 T-22 test_error_payload_completeness: for each of E1-E7 triggered
-     synthetically, assert payload contains Module, Error, Chart,
-     Center, Variable, and the class-specific fields of section 5.
+     synthetically, assert payload contains ID, Module, Chart,
+     Center, Variable (DEC-1), and the class-specific fields of
+     section 5.
+T-23 test_eps_zero_degeneracy: residues diag(eps, 2 eps) vs
+     {{0, 1}, {0, 2 eps}} (the log x class: the residue of Transport.md
+     T12's matrix {{0, 1/x}, {0, 2 eps/x}}).  Both are ONE Pseudo
+     family (JointSolve -> True, n == 0 collision).  Assert: the former
+     has EpsZeroDegeneracy == 0 (eps -> 0 eigenvectors (1,0), (0,1)
+     stay independent) and `EpsDegenerateFamilies` returns {}; the
+     latter has EpsZeroDegeneracy == 1 (chain tops (1,0) and (1, 2 eps)
+     collide at eps = 0) and `EpsDegenerateFamilies` returns
+     {<|"FamilyIndex" -> 1, "EpsZeroDegeneracy" -> 1|>}.
+     (REVIEW-minimalism defect 14's T-23, adapted to the integer r0
+     field of REVIEW-math D8a per DEC-7.)
 
 ---
 
@@ -966,23 +1057,35 @@ char-poly factorization contract (I1); Jordan/confluence -> {a,b,p}
 specs; resonance/pseudo-resonance partitioning; HIGHER-ORDER POLES:
 ported rank-reduction ... with loud non-termination error").  Estimated
 spend: pole data ~35; reduction (saturation + adjoin + trim + guards)
-~95; spectrum/I1 ~55; Jordan chains ~65; partitioning ~40; orchestration,
-error helper, asserts ~40.  Total ~330 — over.  Cut order if the
-implementation lands above ~300:
+~95; spectrum/I1 ~55; Jordan chains ~65; partitioning ~40 (+~10 for the
+2.6 step 7 EpsZeroDegeneracy rank, REVIEW-math D8a); the 2.7
+`EpsDegenerateFamilies` selector ~4 (DEC-7); orchestration, payload
+assembly, asserts ~40 (the error PRIMITIVE is Tolerances.m's DE2Error,
+DEC-1 — not budgeted here).  Pre-cut total ~344.
+
+PRE-AUTHORIZED at M0 review (REVIEW-minimalism defect 4): cuts C-2 and
+C-3 are TAKEN UP FRONT (−18; already reflected in sections 2 and 5.3),
+compensating the D8a/DEC-7 additions (+~14).  RESTATED TOTAL: ~326.
+C-1 (trim pass) stays IN until M2 evidence, because T-12/N-1b
+regression-pins it.  Per defect 4's library-wide rule: if the
+implementation lands >10% over the restated figure, STOP and report to
+the orchestrator BEFORE writing more code.
 
 C-1 Drop the trim pass (Step 3, ~25 lines).  Correctness-neutral; cost
     is larger integer a-shifts and wider t/eps windows downstream
     (honest-window arithmetic absorbs it).  Keep the degree guard.
-C-2 Drop the standalone exports `AffineSpectrum`/`JordanChains`/
-    `PartitionResonanceFamilies` from the public surface (keep them as
-    package-private, tested through ChartIndicial's output fields):
-    ~10 lines of usage/declaration plumbing.
-C-3 Restrict E3's "nonzero eigenvalue witness" to the entry pattern of
-    A_{-r}^d (skip the eigenvalue computation in the error path): ~8.
-C-4 LAST RESORT (needs orchestrator sign-off, touches Solve.md): move
-    chain CONSTRUCTION (2.5 step 3-4) to Solve.m and emit only
-    BlockSizes; saves ~40 here, adds ~40 there.  Do not take this cut
-    silently.
+    M2-EVIDENCE-ONLY (defect 4): taking it requires re-pointing T-12's
+    N-1b regression role first.
+C-2 TAKEN (defect 4): the standalone exports `AffineSpectrum`/
+    `JordanChains`/`PartitionResonanceFamilies` are package-private
+    (section 2), tested through ChartIndicial's output fields: −10.
+C-3 TAKEN (defect 4): E3's witness is restricted to the entry pattern
+    of A_{-r}^d, no eigenvalue computation in the error path
+    (section 5.3): −8.
+C-4 is withdrawn (REVIEW-minimalism defect 35): Solve.m consumes Chains
+    verbatim (defect-15 resolution; section 3.4 NORMATIVITY), so chain
+    construction cannot leave Indicial.  Remaining headroom comes from
+    C-2/C-3 (pre-authorized, defect 4) and, on M2 evidence only, C-1.
 
 What may NEVER be cut: the Moser pre-check, the I1 affine verification
 + closure assert, the exactness asserts, any error path, the collision
@@ -992,6 +1095,13 @@ list (Solve.m's joint-solve and the 3.4 budget asserts consume it).
 
 ## 10. OPEN QUESTIONS
 
+(Numbering gaps are deliberate: OQ-2 was CLOSED at the M0 amendment
+pass by DEC-1 — the error primitive is ``Tolerances`DE2Error``, section
+5.0; REVIEW-math D17, REVIEW-minimalism defect 5.  OQ-5 was DELETED as
+subsumed by REVIEW-minimalism defect 15 / DEC-7 — Solve.m's
+`PrepareChart` consumes the section 3.4 collision records VERBATIM,
+see the NORMATIVITY note there.)
+
 OQ-1 Vendored matrix paths for T-15/T-16/T-17: M0 task 14 vendors pin
      generators and reference data into Tests/refs/, but the banana L1
      dxx1 FULL matrix and the box L2 chart matrix are kernel-generated
@@ -999,11 +1109,6 @@ OQ-1 Vendored matrix paths for T-15/T-16/T-17: M0 task 14 vendors pin
      M0 idle-kernel oracle pass (RewritePlan M0 KERNEL item) and fix
      the file names; this spec assumes
      Tests/refs/banana_l1_dxx1_full.m and Tests/refs/box_l2_full.m.
-OQ-2 Shared loud-error primitive: section 5.0 assumes
-     Throw[Failure["DiffExp2", payload]].  If Config.md defines a
-     common helper (it should — every module needs the same payload
-     skeleton), Indicial uses it; align at spec review (M0 tasks
-     12-13).
 OQ-3 The banana xx1 = 1/2 chart's Jordan block structure is not
      recorded in the campaign docs (only the spectrum {0,0,0,0,1} is,
      FeynmanTrickBananaStatus.md:416-417); T-16 freezes it as a pin on
@@ -1016,12 +1121,6 @@ OQ-4 MaxSteps (200) and MaxPasses (50) are spec constants (old
      RewritePlan 3.2) does not include them, and a chart needing more
      than 200 saturation steps deserves a human, not a knob.  Revisit
      only with evidence.
-OQ-5 Collision-list shape: section 2.6 step 5 is this spec's proposal;
-     the Solve.md author must confirm it carries everything the joint
-     solve and the RewritePlan 3.4 `pseudoResonanceShift == 0` /
-     `matchingShift` asserts need (in particular whether Solve wants
-     collisions indexed by recursion step n or by sector pair — both
-     are derivable from the proposed record).
 OQ-6 Performance of exact Q(eps) linear algebra at d = 5 with deep
      rational entries (banana L1) is untested; R2 flags performance,
      not correctness.  Mitigation if slow: per-chart memoization (one

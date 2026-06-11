@@ -489,7 +489,8 @@ dtcRun2F1[variant_String] := Module[
     config = {
       DiffExp`State`MatrixDirectory -> matrixDir,
       DiffExp`State`Verbosity -> dtcVerbosity,
-      DiffExp`State`UseMobius -> True,
+      (* DEC-18: oracle re-baselined without Mobius; RoC rescaling kept *)
+      DiffExp`State`UseMobius -> False,
       DiffExp`State`UsePade -> True,
       DiffExp`State`UseRationalRecurrence -> True,
       System`WorkingPrecision -> 200,
@@ -508,7 +509,8 @@ dtcRun2F1[variant_String] := Module[
     config = {
       DiffExp`State`MatrixDirectory -> matrixDir,
       DiffExp`State`Verbosity -> dtcVerbosity,
-      DiffExp`State`UseMobius -> True,
+      (* DEC-18: oracle re-baselined without Mobius; RoC rescaling kept *)
+      DiffExp`State`UseMobius -> False,
       DiffExp`State`UsePade -> True,
       System`WorkingPrecision -> 200,
       DiffExp`State`ExpansionOrder -> 60,
@@ -573,7 +575,8 @@ dtcEqualMassChain[] := Module[
   config = {
     DiffExp`State`MatrixDirectory -> matrixDir,
     DiffExp`State`Verbosity -> dtcVerbosity,
-    DiffExp`State`UseMobius -> True,
+    (* DEC-18: oracle re-baselined without Mobius; RoC rescaling kept *)
+      DiffExp`State`UseMobius -> False,
     DiffExp`State`UsePade -> True
   };
   DiffExp`LoadConfiguration[config];
@@ -648,7 +651,8 @@ dtcRunBanana[] := Module[
     DiffExp`State`ExpansionOrder -> 70,
     DiffExp`State`MatrixDirectory -> matrixDir,
     DiffExp`State`RadiusOfConvergence -> 10,
-    DiffExp`State`UseMobius -> True,
+    (* DEC-18: oracle re-baselined without Mobius; RoC rescaling kept *)
+      DiffExp`State`UseMobius -> False,
     DiffExp`State`UsePade -> True,
     System`WorkingPrecision -> 1000,
     DiffExp`State`Verbosity -> dtcVerbosity
@@ -706,7 +710,8 @@ dtcRunBananaEqualMass[] := Module[
   config = {
     DiffExp`State`MatrixDirectory -> matrixDir,
     DiffExp`State`Verbosity -> dtcVerbosity,
-    DiffExp`State`UseMobius -> True,
+    (* DEC-18: oracle re-baselined without Mobius; RoC rescaling kept *)
+      DiffExp`State`UseMobius -> False,
     DiffExp`State`UsePade -> True
   };
   DiffExp`LoadConfiguration[config];

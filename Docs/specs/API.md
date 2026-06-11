@@ -1,5 +1,15 @@
 # Module spec: DiffExp2/API.m
 
+> **PENDING AMENDMENTS (apply before M5 consumption; tracked, binding
+> resolutions in DECISIONS-M0.md):** REVIEW-math D10 (test 12 exponents,
+> DEC-17), D13 (EndpointLimit on merged objects), D14 (abort scope E19,
+> DEC-15), D18 (value shape keys, DEC-13); REVIEW-minimalism 3 (PrepareChart/
+> EpsDegenerateFamilies naming, DEC-7), 5 (DE2Error, DEC-1), 7 (Prefactor
+> narrowing + test 17, DEC-22), 12 (EndpointLimit owner line); DEC-24
+> (IndefiniteIntegral note). Already applied: D19/D20, min-8/9/11/13,
+> DEC-10/11/14/23.
+
+
 Status: M0 deliverable (RewritePlan section 3.2, API.m entry; section 6 M0
 task 4-11).  This document is the FULL user-facing compatibility contract for
 DiffExp2.  It is written to be implementable by an agent that reads ONLY this
@@ -77,8 +87,9 @@ directory contents, probed in this order:
       Rationale: RewritePlan I1 prerequisite; legacy review findings 1-2;
       math review finding 13.
   (d) CANONICAL d_1.m FORMAT (MatrixLoading.m:60-85): REJECTED with a loud
-      error in v1.  Its only in-repo user is the five-point non-planar
-      classic example whose alphabet carries square roots
+      error in v1; the format is DECLARED LEGACY-PARITY-ONLY (DEC-23).  Its
+      only in-repo user is the five-point non-planar classic example whose
+      alphabet carries square roots
       (Reference/Examples/FivePointNonPlanar_example.m:42-66, 117), which is
       out of scope v1 anyway (NON-GOALS).  Error text must name the file
       and say "canonical dlog format is not supported by DiffExp2 v1; run
@@ -112,12 +123,18 @@ FEC[Variables] behavior MatrixLoading.m:27-28).  Everything else (Verbosity,
 WorkingPrecision, ...) comes from Config.m; LoadSystem takes NO numerical
 options of its own.
 
+Input form (DEC-23, binding): FILES ONLY in v1 — LoadSystem accepts a
+directory path, never an in-memory matrix Association; unit tests write
+temp files.  Together with (d) above this fixes the v1 ingestion surface:
+exact full format and closed form are first-class, legacy slices are
+parity-fenced, canonical dlog d_1.m is legacy-parity-only.
+
 Old entry point mirrored: LoadConfiguration[... MatrixDirectory -> dir ...]
 triggering LoadMatrices (DiffExp/DiffExp.m:171-179, MatrixLoading.m:21-232).
 Intentional differences:
   - loading is an explicit verb, not a config side effect.  LoadConfiguration
-    with MatrixDirectory still works (Config.m forwards to LoadSystem) so the
-    classic call pattern survives unchanged;
+    with MatrixDirectory still works (the API.m re-export wrapper forwards;
+    see 2.8) so the classic call pattern survives unchanged;
   - the exact full format is new (consumed, not just written);
   - sqrt matrices and canonical d_1.m loudly rejected (were supported);
   - returns SystemInfo instead of nothing.
@@ -165,7 +182,11 @@ expansion, each coefficient is evaluated on the line and its leading
 asymptotics extracted (old Transport.m:91-106, LeadingCoefficientSeries with
 2 orders); powers x^(a+b*eps) arising from the substitution (e.g.
 (-1/t)^(1+3eps) /. t -> -1/x) are parsed into EXACT sector tags {a, b, p}
-of the t=anchor chart wherever possible — this is the sector-native upgrade
+of the t=anchor chart wherever possible — the parser is SectorSeries.m's
+ParseTaggedPower (SectorSeries.md 2.11; sole caller is this function;
+REVIEW-minimalism 13), whose inert $FailedParse return selects the
+documented minimum-contract branch below (data for a documented branch,
+never a silent fallback) — this is the sector-native upgrade
 of the old eps-expansion into Logx polynomials; the minimum contract is the
 old behavior: expand, rewrite Log[a*x] -> Log[a] + Logx and Log[x] -> Logx
 (old Transport.m:120), and zero the sub-leading-in-eps orders below the
@@ -239,6 +260,15 @@ Target semantics (all old, must be preserved):
   - non-linear lines (x appearing at powers other than +-1) rejected loudly
     (LineSegmentation.m:153-155).
 
+Option (DEC-10; closes FTShimContract G1):
+  `"ExtraSingularFactors" -> {poly..}` — exact polynomials in the pinned
+  variables, unioned EXACTLY into the segmentation alphabet for this call
+  (charts are placed at every real root in range; complex roots cap radii).
+  Loud error if any "Combination"/"Prefactor" denominator has a root not in
+  the alphabet (closure check; the implicit-widening alternative is rejected
+  per FTShimContract G1).  Threaded to Transport.m segmentation; same option
+  on IntegrateOverLine (2.6).
+
 SINGULAR-ENDPOINT MODE (old Transport.m:605-613 detection, 1053-1096 final
 segment; test_singular_endpoint.m): if `to` is a singular point of the
 system on this line, the final chart is solved but NOT evaluated; the result
@@ -251,10 +281,16 @@ and SolveAtPoint consume.  For compatibility, "SeriesValues" at a singular
 endpoint holds the per-(integral, eps-order) x-series evaluation forms of
 that LocalSolution (Normal-izable, Logx-bearing), matching what
 test_singular_endpoint.m:119-140 asserts.  Endpoint singularity detection is
-EXACT: `to` is compared against the exact singularity roots; a numeric `to`
-within Tolerances.snapTol of an exact root is snapped WITH A WARNING; the
-old numeric-chop membership test (old Transport.m:605-609) is replaced (a
-chop miss there silently attempted evaluation AT the singularity).
+EXACT: `to` is compared against the exact singularity roots; an INEXACT
+numeric `to` within `InputSnapTol[to]` of an exact root is snapped WITH A
+WARNING (W5) — the input's own accuracy, never wp, sets the snap scale
+(Tolerances.md InputSnapTol + $NearSingularityGuardDecades entries; DEC-14;
+REVIEW-math D19, REVIEW-minimalism 11), and an inexact `to` in the
+suspicious band between InputSnapTol[to] and
+10^(-$NearSingularityGuardDecades) is the LOUD Transport.md E14, never a
+guess; exact `to` uses exact membership only.  The old numeric-chop
+membership test (old Transport.m:605-609) is replaced (a chop miss there
+silently attempted evaluation AT the singularity).
 
 Eps-window honesty: "SeriesValues" is a NumIntegrals x (CompleteMax-Min+1)
 matrix; column k is the coefficient of eps^(Window["Min"]+k-1).  For classic
@@ -291,9 +327,12 @@ NEVER a zero array.
 Precision/budgeting lessons (implemented in Transport.m, surfaced here
 because the API owns the user knobs): predivision two-pass segment counting
 and DigitsNeeded = AccuracyGoal + Ceiling[Log10[#segments]] + safety (old
-Transport.m:666-760, 758-760); AccuracyGoalValidate "Before" adaptive
-expansion-order search (old Transport.m:776-841) and "After" redo-segment
-(old Transport.m:1191-1213); input precision raise to 2x WP (old
+Transport.m:666-760, 758-760); AccuracyGoal numeric => always-on
+per-segment accuracy validation (Transport.md E11; DEC-11 — the old
+AccuracyGoalValidate "Before" adaptive expansion-order search, old
+Transport.m:776-841, and "After" redo-segment, old Transport.m:1191-1213,
+are NOT ported; ledger waiver "replaced by exact recursion + ErrorEstimate
+gate"; REVIEW-minimalism 8); input precision raise to 2x WP (old
 Transport.m:541-544, 559-562).
 
 Old entry point mirrored: TransportTo (old Transport.m:514).  IntegrateSystem

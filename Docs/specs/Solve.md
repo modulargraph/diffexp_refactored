@@ -1,4 +1,4 @@
-# Module spec: DiffExp2/Solve.m (~700 lines)
+# Module spec: DiffExp2/Solve.m (~700 lines; restated ~725 at M0 — section 9)
 
 Status: M0 deliverable (RewritePlan task 4-11).  This spec is a contract: an
 implementation agent reading ONLY this file, Docs/RewritePlan.md, and the
@@ -10,10 +10,11 @@ f48cd94 (working tree paths under DiffExp/).
 
 ## 1. PURPOSE
 
-Solve.m is THE one local solver of DiffExp2: given a chart system prepared by
-Indicial.m (theta-form matrix, exact in eps, at worst a simple pole at the
-chart origin after rank reduction, plus the exact spectral data of the
-residue), it constructs (a) the homogeneous fundamental system — exactly one
+Solve.m is THE one local solver of DiffExp2: given a chart system assembled
+by its own PrepareChart (section 2.5, DEC-7) from Indicial.m's exact output
+(theta-form matrix, exact in eps, at worst a simple pole at the chart origin
+after rank reduction, plus the exact spectral data of the residue), it
+constructs (a) the homogeneous fundamental system — exactly one
 LocalSolution column per indicial sector spec — and (b) particular solutions
 for inhomogeneous sources given in the same sector-native representation, by
 a single Frobenius recursion at SYMBOLIC eps whose coefficients are truncated
@@ -35,7 +36,9 @@ Taylor), not a separate strategy.
 
 ## 2. PUBLIC SYMBOLS
 
-Exactly three exported symbols.  Everything else is `Private`` (unit tests
+Exactly five exported symbols (M0 review: SolveChart added per
+REVIEW-minimalism defect 3, ratified DEC-9; PrepareChart added per
+REVIEW-math D6, ratified DEC-7).  Everything else is `Private`` (unit tests
 may reach into the private context; nothing else may).
 
 ### 2.1 SolveHomogeneous
@@ -56,11 +59,14 @@ SolveHomogeneous[chart_Association, req_Association] -> fundamental_Association
   normalized per section 3.5, with Diagnostics.
 - Side effect: runs the ODE-residual spot check (section 2.3) on every
   column before returning; a failed check is a loud error, never a warning.
-- Idempotent; the prepared chart data (cleared polynomials, spectral-frame
-  EpsSeries arrays) is memoized under `chart["PreparedCacheKey"]` so a
-  following SolveParticular on the same chart does not recompute it.  The
-  memo is keyed on (chart identity, work window); it is an optimization
-  only — results must be bit-identical with and without it.
+- Idempotent.  The exact prepared data (cleared polynomials, spectral
+  frame V/VInv/J) lives in the ChartSystem assembled ONCE per chart by
+  PrepareChart (2.5); the eps-expanded work-window arrays are computed per
+  solve call.  The old memo-table plumbing is CUT (§9 cut 3, taken at M0
+  review to fund SolveChart — REVIEW-minimalism defects 3-4): on the
+  Transport path SolveChart performs the homogeneous and particular solves
+  in one call, so nothing is recomputed there; results must be
+  bit-identical regardless of call pattern.
 
 ### 2.2 SolveParticular
 
@@ -111,6 +117,62 @@ ODEResidualCheck[chart_Association, sol_Association, source_:None,
 - `sol` may be a single LocalSolution or a FundamentalSystem (checks every
   column, homogeneous: source = None).
 
+### 2.4 SolveChart
+
+```
+SolveChart[cs_Association, req_Association, source_:None]
+  -> <|"Basis" -> FundamentalSystem, "Particular" -> LocalSolution | None,
+       "CouplingDepth" -> _Integer|>
+```
+
+The Transport-facing wrapper (`cs` = a ChartSystem from PrepareChart, 2.5).
+POLICY (binding, ratified DEC-9): the chart system is solved
+BLOCK-SEQUENTIALLY along the exact block-triangular structure of
+ThetaMatrix (blocks = strongly connected components of the entry-sparsity
+graph, topologically ordered — the old InitializeIntegrationSequence role,
+DiffExp/MatrixLoading.m:357-385).  Per block: SolveHomogeneous on the
+diagonal block; the coupling submatrix times already-solved lower-block
+LocalSolutions (SectorSeries rational-multiply, exact polynomial
+coefficients) forms the SourceData for SolveParticular.  An external
+`source` (a SourceData, 3.3), when supplied, is added to the per-block
+sources (its sectors route to the blocks of their components).
+"CouplingDepth" = longest chain in the block dependency DAG.  "Particular"
+is None for a chart whose system is a single block with no external source
+(then transport is purely homogeneous).  T-ORDER NOTE (binding on
+Transport.md; RATIFIED DEC-9): because the coupling coefficients are exact
+polynomials, a particular built from a lower-block solution complete to
+TOrder is itself complete to TOrder — there is NO (couplingDepth-1)
+degradation in the new core (the old degradation was a numeric-matrix
+artifact); Transport's `TWindow["CompleteMax"] = expansionOrder`, TWindow
+stays in the object as the truncation-order record only, and the
+LessonsLedger MaxCouplingOrder entry reads "subsumed: exact polynomial
+recursion + ErrorEstimate covers it".  The probe decrement formula of
+Transport.md 2.10 keeps couplingDepth as input unchanged (heuristic only).
+
+### 2.5 PrepareChart
+
+```
+PrepareChart[sys_Association, chart_Association] -> ChartSystem
+```
+
+(DEC-7; REVIEW-math D6.)  Applies `chart["Map"]` to the loaded exact
+matrix, forms the theta matrix, calls ``Indicial`ChartIndicial``, and
+assembles the ChartSystem of 3.2: V = the full d x d matrix formed by
+concatenating ALL families' chain vectors in family order (column order =
+(family, root in descending a, chain position), eigenvector first —
+matching the column order of 3.4/3.5); VInv = exact `Inverse[V]`
+(Q(alpha)(eps) arithmetic); J = the corresponding block-diagonal Jordan
+data; per family, CollisionDepth = the longest directed path in the
+family's collision DAG restricted to Type == "LaurentShift" edges; the
+det-V collision-factor property is certified here by exact factorization
+of Det[V(eps)] (E2 on failure).  n = 0 collisions arriving from Indicial
+canonically ordered (one record per unordered pair, Indicial.md 2.6
+step 5) are SYMMETRIZED here: the reversed pair (DeltaB negated) is added
+when absent, so the Family record of 3.2 always carries all ordered pairs
+with integer offset >= 0.  +~40 lines against the §9 budget (the former
+OQ1 reserved +20 for the det-V certification; the remaining 20 funded by
+taking part of §9 cut 1).
+
 NOT exported (deliberately): no SolveGeneral convenience wrapper (Transport
 assembles general solutions from columns + particular + matching weights);
 no strategy/dispatch entry point; no per-eps-order entry point (the old
@@ -158,11 +220,25 @@ array at WorkingPrecision with an explicit honest window (EpsSeries.m
 contract).  Tags a, b, p are EXACT (rational/algebraic); coefficients are
 the only numerics.
 
-### 3.2 ChartSystem (consumed; produced by Indicial.m)
+### 3.2 ChartSystem (assembled by PrepareChart, 2.5)
 
-Solve.m requires the following fields.  (Key names to be reconciled with
-Docs/specs/Indicial.md — open question OQ1; the SEMANTICS below are
-Solve.m's hard requirements.)
+RESOLUTION (M0 review; REVIEW-minimalism defect 15 + REVIEW-math D6,
+adapted per DEC-7): (i) Solve.m consumes Indicial's Family/EigRecord
+shapes VERBATIM (Docs/specs/Indicial.md 3.3/3.4 are normative; collision
+keys n/LowerIdx/UpperIdx/DeltaB/Type — this spec's former From/To/Offset
+names are renamed to those).  (ii) Solve.m BUILDS the spectral frame
+itself, once per chart inside PrepareChart: V = the full d x d matrix of
+all families' chain vectors in spec column order, VInv = exact Inverse[V]
+(Q(alpha)(eps) arithmetic), and certifies at that point that det V's
+eps -> 0 vanishing order equals the count implied by the recorded
+LaurentShift collisions (the E2 third check; failure stays E2).
+(iii) CollisionDepth = longest directed path in the family's collision
+DAG restricted to Type == "LaurentShift" edges, computed here.
+(iv) ChartSystem is ASSEMBLED BY PrepareChart (DEC-7 — this supersedes
+the review's Transport-assembly variant): chart geometry fields from
+Transport's chart record (Transport.md 3.2) + IndicialData fields, with
+"ThetaMatrix"/"Gauge"/"GaugeInverse"/"Residue" lifted from
+IndicialData["Reduction"].
 
 ```
 ChartSystem = <|
@@ -182,32 +258,42 @@ ChartSystem = <|
                    ResonantRecurrence.m:1489 bVecG = TInv.bVec and
                    :1497 fGeneral = T.gGeneral),
   "Residue" -> M0(eps) = B(0,eps) exact,
-  "Families" -> { Family.. },
-  "PreparedCacheKey" -> (opaque; memo slot, see 2.1)
+  "V" -> V(eps), "VInv" -> V^(-1)(eps): full d x d, exact in eps,
+         M0·V = V·J, BUILT BY PrepareChart from the families' Chains
+         (column order = (family, root in descending a, chain position),
+         eigenvector first),
+  "J" -> block-diagonal Jordan data in the same column order: per root i
+         the block λ_i·I_{q_i} + N_i (N_i = upper shift; chain vectors
+         are UNIT vectors in the J-frame),
+  "Families" -> { Family.. }
 |>
 
 Family = <|
   "Roots" -> {<|"a" -> a_i, "b" -> b_i, "BlockSize" -> q_i|> ..}
              (* integer-spaced a within the family: a_i - a_j ∈ Z;
                 Σ q_i over ALL families = SystemSize *),
-  "V" -> V(eps), "VInv" -> V^(-1)(eps): exact in eps, M0·V = V·J,
-  "J" -> block data: per root i the Jordan block λ_i·I_{q_i} + N_i
-         (N_i = upper shift; chain vectors are UNIT vectors in the J-frame),
-  "Collisions" -> {<|"From" -> i, "To" -> j, "Offset" -> n_ij = a_j - a_i
-                     (>= 0), "DeltaB" -> b_i - b_j|> ..}
-                  (* all ordered pairs with integer offset >= 0; entries
-                     with DeltaB == 0 and Offset > 0 are TRUE resonances;
-                     DeltaB != 0 are PSEUDO resonances (any Offset >= 0) *),
-  "CollisionDepth" -> longest pseudo-resonant chain in the family's
-                      collision DAG (integer >= 0)
+  "ColumnRange" -> the family's contiguous column indices in V/J,
+  "Collisions" -> {<|"n" -> n_ij = a_j - a_i (>= 0), "LowerIdx" -> i,
+                     "UpperIdx" -> j, "DeltaB" -> b_i - b_j,
+                     "Type" -> (Indicial.md 3.4 vocabulary)|> ..}
+                  (* all ordered pairs with integer offset >= 0 AFTER
+                     PrepareChart's n = 0 symmetrization (2.5); entries
+                     with DeltaB == 0 and n > 0 are TRUE resonances;
+                     DeltaB != 0 (Type == "LaurentShift") are PSEUDO
+                     resonances (any n >= 0) *),
+  "CollisionDepth" -> longest directed path in the family's collision
+                      DAG restricted to Type == "LaurentShift" edges
+                      (integer >= 0; computed by PrepareChart)
 |>
 ```
 
-Requirements Solve asserts on receipt (violations are E2):
+Requirements certified at PrepareChart assembly (violations are E2):
 char-poly factorization already certified by Indicial (I1 contract);
 det V(eps) vanishes at eps = 0 only through the collision factors
-Π (b_i−b_j)·eps recorded in "Collisions"; Σ BlockSizes = SystemSize;
-ThetaMatrix entries have no t-pole (exact check on the rational form).
+Π (b_i−b_j)·eps recorded in "Collisions" (exact factorization of
+Det[V(eps)], 2.5); Σ BlockSizes = SystemSize; ThetaMatrix entries have no
+t-pole (exact check on the rational form).  SolveHomogeneous/
+SolveParticular re-assert cheaply on receipt (Σ BlockSizes, t-pole).
 
 ### 3.3 SourceData (consumed)
 
@@ -242,7 +328,10 @@ FundamentalSystem = <|
         actually exercised,
      "WindowExtensions" -> per column the by-construction kmin extension
         (true-resonance -p and/or collision depth),
-     "ResidualProbe" -> <|"t" -> t0, "MaxResidual" -> r|>
+     "ResidualProbe" -> <|"t" -> t0, "MaxResidual" -> r|>,
+     "CouplingDepth" -> longest chain in the block dependency DAG (set by
+        SolveChart, 2.4; 0 for a direct SolveHomogeneous call — Transport
+        reads it from here, REVIEW-math D6(b))
   |>
 |>
 ```
@@ -278,7 +367,9 @@ FundamentalSystem = <|
 
 ### 3.6 The recursion (normative)
 
-Setup, once per chart (memoized):
+Setup, once per chart (the exact spectral part lives in PrepareChart's
+ChartSystem; the eps-expansion below happens once per SolveChart call —
+see 2.1, memo table cut at M0):
 
 1. CLEAR DENOMINATORS (the performance backbone; old fast path:
    Recurrence.m:13-77 RationalizeAMatrixCore, :206-230, :427-453; lesson
@@ -293,9 +384,11 @@ Setup, once per chart (memoized):
    mode" alternative (forbidden fallback F2): the input is exact rational
    by the LoadSystem contract, so clearing always succeeds.
 
-2. SPECTRAL FRAME: per family, N̂_j := V^(-1)·N_j·V.  N̂_0 = d_0·J(eps).
-   Expand every d_j(eps), N̂_j(eps), and V/VInv entry ONCE into EpsSeries
-   arrays at WorkingPrecision over the WORK WINDOW:
+2. SPECTRAL FRAME: N̂_j := VInv·N_j·V, once per chart in the GLOBAL frame
+   of 3.2 (V/VInv built by PrepareChart; J block-diagonal in (family,
+   root, chain) column order).  N̂_0 = d_0·J(eps).  Expand every d_j(eps),
+   N̂_j(eps), and V/VInv entry ONCE into EpsSeries arrays at
+   WorkingPrecision over the WORK WINDOW:
 
    workWindow = [ reqMin − P_max − epsPoleDepth ,
                   reqMax + CollisionDepth + R_max + epsPoleDepth ]
@@ -317,11 +410,13 @@ Setup, once per chart (memoized):
      (each resonant passage bumps by at most the block size; this REPLACES
      the old kMaxInitial guess + grow-and-retry loop,
      ResonantRecurrence.m:1191-1195, :1242-1254 — forbidden F6).
-   Trailing log members whose final coefficient arrays are all below
-   chopFloor (RELATIVE to the column's own coefficient scale; Tolerances.m)
-   are dropped at assembly, the drop recorded in Diagnostics; this is the
-   ONE numeric structural decision in Solve.m and it is guarded by the
-   residual check.
+   Trailing log members whose final coefficient arrays all classify zero
+   under laurentLeadTol (relative, Tolerances.md as amended — the
+   Max[10^(-Floor[chopDigits/2]), 10^-24] campaign calibration, DEC-2;
+   tested through Tolerances`NumericallyZeroQ per DEC-3, scale = the
+   column's own coefficient scale) are dropped at assembly, the drop
+   recorded in Diagnostics; this is the ONE numeric structural decision in
+   Solve.m and it is guarded by the residual check.
 
 RECURSION (per column / per source-sector tag).  Ansatz in the J-frame with
 tag exponent λ = a + b·eps (a, b from the column's root or the source
@@ -379,7 +474,7 @@ Block-by-block, top-down in ℓ:
 
 - CASE R (true-resonant): a + n = a_i AND b = b_i, so δ_i ≡ 0 identically
   in eps.  No division happens.  The block-i rows of level ℓ read
-  −N_i·û[n,ℓ]_i + d_0·eps·û[n,ℓ+1]_i = R[n,ℓ]_i: they DETERMINE the
+  −d_0·N_i·û[n,ℓ]_i + d_0·eps·û[n,ℓ+1]_i = R[n,ℓ]_i: they DETERMINE the
   next-higher log member û[n,ℓ+1]_i (the LOG BUMP, p → p+1: along the
   eigendirection the equation is d_0·eps·û[n,ℓ+1]_eig = R_eig, an EXACT
   monomial eps-division — the normalization's eps^{-1}, accounted as
@@ -423,8 +518,9 @@ POLAR PART γ(eps) = Σ_{k<0} γ_k eps^k along the block-i chain directions
 2. REGISTER the compensation term  −Σ γ-polar(eps) × (family column of root
    i, matching chain member)  onto the object under construction: extra
    Sectors with root-i tags whose coefficients are (−γ-polar) × the
-   already-built column-i coefficient arrays (an EpsSeries-scalar ×
-   LocalSolution operation; SectorSeries.m provides it).  Columns are built
+   already-built column-i coefficient arrays (the EpsSeries-weighted
+   combination `SectorSeries`CombineLocalSolutions`, SectorSeries.md 2.10 —
+   REVIEW-minimalism defect 6).  Columns are built
    in DESCENDING-a order within each family precisely so column i exists
    when the collision fires.  Chained collisions recurse through the
    family's collision DAG (depth = "CollisionDepth").
@@ -455,9 +551,11 @@ distinct b values (Docs/FeynmanTrickBananaStatus.md:340-348; RewritePlan I2).
 - I-2 COMPLETENESS OF THE BASIS: number of delivered columns =
   SystemSize = Σ BlockSizes; specs enumerate every (root, chain position)
   exactly once.
-- I-3 REGULAR CHART DEGENERACY: a regular chart (M0 = 0, one family, one
-  root (0,0), V = I) produces exactly one sector (a=0, b=0, p=0) per
-  column and the SAME code path executes (no SolveSimple-style special
+- I-3 REGULAR CHART DEGENERACY: a regular chart (M0 = 0; per DEC-6 one
+  (0,0,0) FAMILY whose single root has Multiplicity = d, BlockSizes =
+  ConstantArray[1, d], V = I — d columns, d sector specs) produces exactly
+  one sector (a=0, b=0, p=0) per column and the SAME code path executes
+  (no SolveSimple-style special
   case — the old special case was the NormalizeLogPower hole's host,
   Default.m:6-18 + Docs/FeynmanTrickBoxFamilyStatus.md:57-73).
 - I-4 WINDOW EXEMPTIONS ARE STRUCTURAL: kmin extensions appear ONLY as
@@ -491,10 +589,15 @@ distinct b values (Docs/FeynmanTrickBananaStatus.md:340-348; RewritePlan I2).
 
 ## 5. ERROR CONTRACT
 
-All errors are loud (single error head, e.g. `DiffExp2::solve`), abort the
-computation, and carry AT MINIMUM: the chart identification (Center,
-ChartVar, ChartMap summary), the family roots involved, the sector tags
-(a, b, p), the t-order n and log level ℓ where applicable, and the
+All errors are raised via ``Tolerances`DE2Error[id, payload]`` (DEC-1: the
+library-wide primitive — prints a one-line summary and
+`Throw[Failure["DiffExp2", payload], "DiffExp2Error"]`, caught only at
+API.m entry points); this module defines no other error mechanism
+(REVIEW-math D17 / REVIEW-minimalism defect 5, as superseded by DEC-1).
+`id` is the E-tag below; the payload always carries "ID", "Module" ->
+"Solve", and AT MINIMUM: the chart identification (Center, ChartVar,
+ChartMap summary), the family roots involved, the sector tags (a, b, p),
+the t-order n and log level ℓ where applicable, and the
 requested-vs-available windows where applicable.  Enumerated conditions:
 
 - E1 NON-FUCHSIAN INPUT: ThetaMatrix has a t-pole (exact rational check at
@@ -527,14 +630,16 @@ requested-vs-available windows where applicable.  Enumerated conditions:
   a coefficient array, at the moment of creation.  Message: chart + tag +
   (k, n, comp).  (Replaces TrimNonFiniteSeriesTails' trim-and-warn,
   ResonantRecurrence.m:62-120 — forbidden F7.)
-- E9 MALFORMED REQUEST/SOURCE: req windows inverted; source sector tags
-  non-exact (numeric a or b heads); source in d/dt form detected (caller
-  contract breach is not detectable in general, but a source sector with
-  a ≤ −1 integer and b = 0 colliding with nothing is flagged when its
-  particular would integrate t^{-1}: that specific divergence is a loud
-  error here naming the tag — the b = 0, a+n+1 ≤ 0 divergence is otherwise
-  Integrate.m's table; Solve only hits it through the theta-form n = a = 0
-  resonance which the log bump handles exactly).
+- E9 MALFORMED REQUEST/SOURCE: req windows inverted (Min > CompleteMax);
+  source sector tags non-exact (inexact a/b heads, negative or non-integer
+  p); source TWindow/EpsWindow inconsistent with its Coeffs dimensions.
+  The theta-form normalization contract (3.3) is NOT mechanically
+  detectable and is not guessed at: a d/dt-form source produces wrong
+  (shifted-tag) results that the always-on ODE residual check (E7, which
+  includes the source term) catches — that is the designed backstop, and a
+  code comment at the SourceData validator must say so.  (REVIEW-math D27
+  / REVIEW-minimalism defect 32: Solve never integrates in t; b = 0
+  endpoint divergences are wholly Integrate.m's table.)
 
 NO SILENT FALLBACKS.  Every place a fallback might be tempting, explicitly
 forbidden (each cites the old site that must NOT be reproduced):
@@ -676,9 +781,11 @@ NUMERICAL LESSONS THAT MUST SURVIVE (read from the old code, normative):
   ResonantRecurrence.m:536-545, kept; its rescue ladder, dropped per F4).
 - L7 Cancellation residue sits far above absolute chop scales; all
   tolerance judgments relative (Recurrence.m:594-618 incl. the 1e-24 floor
-  rationale at :612-618) — folded into Tolerances.m's chopFloor/matchTol
-  semantics; inside Solve only the assembly-time log-member trim (3.6
-  step 3) and the invariant probes consume tolerances.
+  rationale at :612-618) — folded into Tolerances.m's
+  laurentLeadTol/matchTol semantics (relative, with the load-bearing
+  10^-24 floor; REVIEW-minimalism defect 1, DEC-2); inside Solve only the
+  assembly-time log-member trim (3.6 step 3) and the invariant probes
+  consume tolerances.
 - L8 Zero-source short-circuit must be structural, not numeric-chop
   (old PChop test Recurrence.m:318, :846 -> empty Sectors list, 2.2).
 - L9 Type poisoning is silent death: every old warn-and-continue
@@ -697,21 +804,30 @@ Tolerances < Config < EpsSeries < SectorSeries < Indicial < Solve <
 Transport/Integrate < API.
 
 Solve.m MAY call:
-- Tolerances.m: residualTol, matchTol, chopFloor (named semantics only; no
-  literal thresholds in Solve.m).
+- Tolerances.m: residualTol, matchTol, rankTol, laurentLeadTol
+  (assembly-time log-member trim, 3.6 step 3 — the binding consumer table,
+  Tolerances.md §3 as amended by REVIEW-minimalism defect 17), the
+  NumericallyZeroQ predicate (DEC-3), and DE2Error (the library-wide
+  loud-error primitive, DEC-1).  Named semantics only; no literal
+  thresholds in Solve.m.
 - Config.m: WorkingPrecision, Verbosity (via the validated accessor);
   Solve takes windows/orders as EXPLICIT arguments — it never reads
   ExpansionOrder/EpsilonOrder-style globals (the old
   ctx["ExpansionOrder"]/FEC pattern dies with the dispatch layer).
 - EpsSeries.m: all coefficient arithmetic — add, mul, scalar mul, Taylor
-  and LAURENT division with window-shift semantics, polar-part extraction,
-  window queries.  (If matrix-valued EpsSeries helpers are needed, they
-  belong in EpsSeries.m, not here.)
+  and LAURENT division with window-shift semantics, polar-part extraction
+  via the blessed ESCoefficientList idiom (EpsSeries.md §2,
+  REVIEW-minimalism defect 36 — not a separate export), window queries.
+  (If matrix-valued EpsSeries helpers are needed, they belong in
+  EpsSeries.m, not here.)
 - SectorSeries.m: LocalSolution assembly, rational multiply (gauge T,
-  theta-form conversions), EpsSeries-scalar × LocalSolution (compensation
-  terms), evaluation at a point (residual probe), differentiate.
-- Indicial.m: nothing at runtime beyond consuming ChartSystem; Solve never
-  re-derives spectral data.
+  theta-form conversions, block-coupling sources in 2.4),
+  CombineLocalSolutions (SectorSeries.md 2.10: EpsSeries-weighted
+  combinations — compensation terms), evaluation at a point (residual
+  probe), differentiate.
+- Indicial.m: ChartIndicial, called ONLY from PrepareChart (2.5, DEC-7);
+  Solve never re-derives spectral data — it assembles V/VInv/J from the
+  delivered Chains (3.2 resolution).
 
 Solve.m MUST NOT call Transport.m, Integrate.m, API.m, or any FeynmanTrick/
 symbol, and must not read or write any global mutable state (no
@@ -723,6 +839,17 @@ DiffExp`State` analogue).
 
 Closed-form expectations are exact unless noted.  WP = 50 digits unless a
 test says otherwise; comparisons relative 1e-40 where exact values exist.
+Error tests assert via `Catch[..., "DiffExp2Error"]` returning the
+`Failure["DiffExp2", ...]` with the named ID/Module payload fields (DEC-1).
+
+> COVERAGE RULE (M0 review): every error ID and warning ID of section 5
+> has at least one unit test that triggers it and asserts its required
+> payload fields, OR a one-line waiver in the test file naming the ID and
+> why it is untestable in isolation (e.g. "unreachable by construction,
+> guarded by assert X").  The IDs currently missing tests are enumerated
+> in Docs/specs/REVIEW-minimalism.md defect 25 (for Solve: E2, E4, E5, E6,
+> E8); the implementation agent closes the list before the module's
+> milestone gate.
 
 - SU-01 `regular_exponential`: chart B = t·[[1]] (i.e. f' = f), regular.
   Assert: one column, single sector (0,0,0), c[0,n,1] = 1/n! exactly
@@ -733,9 +860,12 @@ test says otherwise; comparisons relative 1e-40 where exact values exist.
   f = t·eps·(Log t − 1) = t[(eps Log t)/1! − eps].  Assert both sector
   members exactly; locks the top-down ℓ sweep (L3).
 - SU-03 `frobenius_2f1`: the 2F1 companion system at x = 0 (chart matrices
-  from Tests/Hypergeometric2F1_Matrices, exact load); roots {0, 1−c(eps)}.
-  Assert the n ≤ 8 coefficients against the exact hypergeometric ratios
-  (Pochhammer products) for both columns (M3 gate item).
+  from Tests/Hypergeometric2F1_Matrices, exact load); residue eigenvalues
+  {0, −c} (companion-system tags, DEC-17; for the committed dz_0.m this is
+  {0, −3/2} — the scalar exponent 1−c appears as component-1 content at
+  column n = 1 of the a = −c sector).  Assert the n ≤ 8 coefficients
+  against the exact hypergeometric ratios (Pochhammer products) for both
+  columns (M3 gate item).
 - SU-04 `singular_nonresonant_2x2`: B with M0 = diag(−1+eps, 2eps) and
   N(t) = M0 + t·[[0,0],[1,0]].  Column 1 closed form (worked in 3.7's
   class): component 2 coefficient at n = 1 is −1/eps exactly (window
@@ -787,8 +917,10 @@ test says otherwise; comparisons relative 1e-40 where exact values exist.
 - SU-13 `e3_degenerate_denominator`: B with denominator (t − eps): assert
   E3 names the factor.
 - SU-14 `e1_nonfuchsian_refused`: ThetaMatrix with a 1/t entry: assert E1.
-- SU-15 `box_l2_apparent_chart` (M3 gate; fixture from Tests/refs once
-  vendored — Tests/PINS.md): the box L2 apparent-singularity chart at
+- SU-15 `box_l2_apparent_chart` (M3 gate; the box L2 J1/J2 pointwise
+  20-digit pins were flagged NOT FOUND at M0 and are regenerated at M3 by
+  the orchestrator's kernel queue per DEC-25 — Tests/PINS.md): the box L2
+  apparent-singularity chart at
   t* = 7/11 (campaign: memory brief + Docs/FeynmanTrickBoxFamilyStatus.md:
   75-128).  Assert the J1/J2 pointwise pins to 20 digits and that the
   apparent chart's particular reproduces analyticity (the assembled
@@ -822,14 +954,45 @@ compensation ~130; assembly/normalization/window bookkeeping ~110;
 ODEResidualCheck + invariant probes ~70; errors/validation ~60; headers
 ~30.
 
+M0 RESTATEMENT: +40 PrepareChart (DEC-7/REVIEW-math D6: 20 = the former
+OQ1 det-V-certification reserve realized, 20 funded by taking cut 1 in
+part) and +35 SolveChart (REVIEW-minimalism defect 3/DEC-9: funded by
+taking cut 3, the memoization plumbing, ~−30).  Restated total: ~725; the
+net +25 over the plan figure is DEC-7/DEC-9-imposed scope, accounted
+against the defect-4 library headroom (restated totals ~3455 of 3500).
+Landing >10% over 725 stops and reports to the orchestrator BEFORE
+writing more code.
+
 If over budget, cut in this order:
-1. Move any matrix-EpsSeries convenience helpers into EpsSeries.m (they are
-   generic; ~30-50 lines).
+1. (TAKEN IN PART at M0: −20 funds PrepareChart) Move any matrix-EpsSeries
+   convenience helpers into EpsSeries.m (they are generic; ~30-50 lines).
 2. Trim Diagnostics to the fields the 3.4 budget validation and M5 ladder
-   actually consume (LogCeilings, WindowExtensions, ResidualProbe).
-3. Drop the memoization plumbing (2.1) — correctness-neutral, costs a
-   factor ~2 on charts solved for both homogeneous and particular.
+   actually consume (LogCeilings, WindowExtensions, ResidualProbe,
+   CouplingDepth).
+3. (TAKEN at M0: funds SolveChart) The memoization plumbing is dropped —
+   correctness-neutral; PrepareChart's explicit ChartSystem handoff (2.5)
+   plus SolveChart's one-call solve replace its role on the Transport
+   path.
 4. Fold SU-18's instrumentation behind a single env-gated counter.
+
+> PRE-AUTHORIZED at M0 review (REVIEW-minimalism.md defect 4), to be taken
+> at implementation time WITHOUT further sign-off, freeing ~200 lines
+> library-wide to fund the missing operations:
+> - SectorSeries.md §9 cuts 1, 3, 5 are taken up front (Main-coordinates
+>   option, multi-point evaluation form, public PadeEvaluate): -55; the
+>   SectorSeries target is restated as 400 + 75 Pade = 475 TOTAL.
+> - Indicial.md §9 cuts C-2 and C-3 are taken up front: -18 (C-1 trim-pass
+>   stays IN until M2 evidence, because T-12/N-1b regression-pins it).
+> - Transport.md §9 cut 3 (SavedCharts via caller callback): -30.
+> - Tolerances.md: the dead adaptive-search constants are DELETED, not
+>   folded (defect 8): -10.
+> - EpsSeries.md §9 cuts 1-2 (binary ESAdd, drop ESZero): -13.
+> - Integrate.md §9 cut 2 (b != 0 interior phase-paired path demoted to a
+>   loud not-implemented error + ledger waiver) is pre-authorized but NOT
+>   taken by default; it is the designated reserve (-50) if the post-fund
+>   total exceeds 3450.
+> Any module landing >10% over its restated figure stops and reports to
+> the orchestrator BEFORE writing more code.
 
 NEVER cut (load-bearing for correctness or the M5 gates): the joint
 pseudo-resonant construction (3.7), the CASE R exact ladder + log bump, the
@@ -840,14 +1003,10 @@ finite width (R6 benchmark fails without it).
 
 ## 10. OPEN QUESTIONS
 
-- OQ1 ChartSystem/Family key names and the exact V/J encoding must be
-  reconciled with Docs/specs/Indicial.md (written in parallel).  This spec
-  fixes the SEMANTICS Solve requires (3.2); whichever names Indicial.md
-  publishes, the orchestrator aligns both specs before M1.  In particular:
-  Indicial must supply V(eps), V^(-1)(eps) EXACTLY (Solve only expands
-  them), and must certify the det V collision-factor property (E2's third
-  check) — if Indicial cannot cheaply certify it, the check moves here at
-  +~20 lines.
+- OQ1 — DELETED at M0 review (subsumed by the §3.2 RESOLUTION and
+  PrepareChart, 2.5: Solve consumes Indicial's shapes verbatim, builds
+  V/VInv itself, and certifies the det-V collision-factor property here;
+  REVIEW-minimalism defect 15, REVIEW-math D6, DEC-7).
 - OQ2 Algebraic (non-rational) a, b (R2): collision tests remain exact, but
   EpsSeries arrays with algebraic-number tag arithmetic in δ-divisions may
   be slow; if an example hits this, the division denominators
@@ -860,12 +1019,12 @@ finite width (R6 benchmark fails without it).
   order (descending-a, polar-part-only γ) needs the full-Laurent-γ variant
   — both are valid bases; the spec pins polar-part-only as canonical and
   M3 revisits only on evidence.
-- OQ4 Whether Transport wants, in addition to the compensated columns, the
-  RAW uncompensated columns for its eps-graded matching recombination
-  (RewritePlan Transport.m: "(S_i−S_j)/((b_i−b_j)eps) columns").  Current
-  answer: no — the compensated basis already has ord_eps det = 0 at the
-  leading block, which is what matching needs; revisit when
-  Docs/specs/Transport.md lands.
+- OQ4 — RESOLVED at M0 review (REVIEW-math D8; DEC-7): RAW columns are
+  not needed, but recombination IS: joint compensation only fires when a
+  Laurent division occurs in the recursion; eps=0 eigenvector collisions
+  without any division (the log x class) leave det F(0) = 0 and are
+  Transport's RecombineBasis job, keyed on Indicial's exported
+  EpsDegenerateFamilies (DEC-7 canonical name).
 - OQ5 The probe-point policy for charts whose Radius is not yet final at
   solve time (Transport may shrink radii after product operations per the
   SectorSeries multiply contract): current spec draws the probe from the

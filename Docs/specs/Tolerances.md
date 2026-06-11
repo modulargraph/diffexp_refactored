@@ -20,13 +20,18 @@ RationalizationTolerance in DiffExp/State.m:123, `10^-2`/`10^-12` cluster and
 moment tolerances in DiffExp/RegularizedIntegration.m:862,941, hardwired option
 defaults `"Tolerance" -> 10^-10` in DiffExp/LocalSeries.m:480,492, chop constants
 in DiffExp/State.m:109,119,149,212).  Each threshold gets a NAME with stated
-semantics (chopFloor, matchTol, snapTol, rankTol, laurentLeadTol, residTol), is
-DERIVED from WorkingPrecision (never a free literal at a call site), and zero
+semantics (chopFloor, matchTol, snapTol, inputSnapTol, rankTol, geomGuardTol,
+laurentLeadTol, residTol, chopReserve), is DERIVED from WorkingPrecision or
+from the input's own accuracy (never a free literal at a call site), and zero
 tests that classify structure (leading-coefficient trimming, rank decisions) are
-RELATIVE with a loud-error ambiguity band, so a borderline value can never be
-silently classified either way.  The module also centralizes the old library's
-operational safety constants (the `I*` constants of DiffExp/State.m:209-224) so
-that no tuning number lives anywhere else in DiffExp2.
+RELATIVE with a loud-error ambiguity band — except at the universal 10^-24
+floor, where the campaign calibration makes the test binary (DEC-2) — so a
+borderline value can never be silently classified either way.  The module also
+centralizes the SURVIVING operational safety constants of the old library (the
+`I*` constants of DiffExp/State.m:209-224 minus the dropped adaptive-search
+set, DEC-11) so that no tuning number lives anywhere else in DiffExp2.  As the
+BOTTOM module, Tolerances.m additionally exports the ONE library-wide
+loud-error primitive `DE2Error` (DEC-1) that every other module raises through.
 
 ## 2. PUBLIC SYMBOLS
 
@@ -61,28 +66,75 @@ machine Integers; all return exact rationals `10^-k` unless stated):
   in its two SURVIVING roles (FeynmanTrick/DiffExpIntegration.m:151-178
   snapMainExpression, 180-202 snapValuesFromFactors).  Precedent for the wp/2
   scaling is in-tree: `Chop[Uval - 1, 10^(-precision/2)]`
-  (FeynmanTrick/BoundaryConditions.m:191,195).
-- `RankTol[wp_Integer] -> 10^(-Floor[wp/2])`
+  (FeynmanTrick/BoundaryConditions.m:191,195).  SnapTol applies to COMPUTED
+  full-precision quantities ONLY (chart-map endpoint values, factor-root dedup
+  pre-filter); it plays NO role in matching/rank solves (REVIEW-minimalism 10)
+  and EXTERNAL numeric inputs are snapped/guarded by InputSnapTol and
+  `$NearSingularityGuardDecades` below (DEC-14).
+- `InputSnapTol[v_] -> 10^(-Floor[3*Min[Precision[v], Accuracy[v]]/4])`
+  (argument: an INEXACT numeric input; exact input uses exact membership only.)
+  Input-scaled snap tolerance for EXTERNAL targets/bounds (DEC-14;
+  REVIEW-math D19): external numeric inputs carry input-resolution error;
+  snapping them at the internal SnapTol (wp/2 decades) is a dead test — the
+  lesson behind the old absolute 10^-10 (State.m:123), made input-aware instead
+  of absolute.  Endpoint classification rule (consumed by Transport.md E14/W5
+  and API.md W5): an inexact target `to` with `|to - root| < InputSnapTol[to]`
+  for some exact singularity root is SNAPPED to the root with warning W5 (a
+  1e-16-off machine-precision target and a 30-digit 0.25 both snap — the
+  input's own accuracy, not wp, sets the snap scale); an inexact `to` with
+  `InputSnapTol[to] <= |to - root| < 10^-$NearSingularityGuardDecades` is a
+  LOUD ERROR ("target is suspiciously near singularity <root>; pass the exact
+  value, or an exact offset, to confirm intent").  Exact inputs are never
+  snapped and never guarded (exact arithmetic decides).
+- `$NearSingularityGuardDecades = 6` (new; REVIEW-minimalism 11): outer edge
+  of the loud-guard zone in the InputSnapTol rule above.
+- `RankTol[wp_Integer] -> 10^(-Floor[wp/4])`
   RELATIVE rank/nullspace threshold: a singular value (or pivot) counts as zero
-  iff `sv < RankTol[wp] * svMax`.  Replaces the absolute
+  iff `sv < RankTol[wp] * svMax`.  Rank/pivot cuts must sit a band above the
+  snap floor (DEC-14; REVIEW-math D15): the gray zone
+  `[SnapTol*scale, RankTol*scale]` (width wp/4 decades) is the loud-error
+  region of Transport.md E7, and the NumericallyZeroQ ambiguity band at RankTol
+  IS that gray zone (REVIEW-minimalism 10) — not a separate mechanism.
+  Replaces the absolute
   `NullSpace[..., Tolerance -> 10^-LinearSolveChopPrecisionVal]` sites
   (DiffExp/Wronskian.m:63, IntegrationStrategies/Helpers.m:32,84, VOP.m:120,248)
   and the fitter's `Min[svals] >= 10^(-activeNumericPrecision[]/2) * ...` test
   (DiffExp/RegularizedIntegration.m:1047).  Rank decisions create/destroy
   structure (disease D1) and therefore MUST be relative and MUST go through
   `NumericallyZeroQ` (ambiguity band) — never a raw comparison.
-- `LaurentLeadTol[chopDigits_Integer] -> 10^(-Floor[chopDigits/2])`
-  RELATIVE leading-coefficient zero test for eps-Laurent window trimming.  This
-  is the replacement demanded by RewritePlan 3.2 for the FT `zeroCoeffQ`
-  ABSOLUTE `10^-40` test (FeynmanTrick/DiffExpIntegration.m:1177-1178, consumed
-  by LaurentTrim at 1180-1190).  Semantics: leading coefficient `c` of a Laurent
-  array with window scale `s = Max[Abs /@ allWindowCoefficients]` is zero iff
-  `NumericallyZeroQ[c, s, LaurentLeadTol[chopDigits], context]`.  `s == 0` =>
-  only exact zeros trim.  Rationale for the midpoint exponent: post-chop noise
-  sits at relative `<= 10^-chopDigits`, real signal at relative `>= ~10^-40`
-  empirically (the campaign's constant); `chopDigits/2` (default 125 decades)
-  separates both by >= 80 decades, and the ambiguity band (below) turns any
-  violation of that separation into a loud error instead of a wrong window.
+- `GeomGuardTol[wp_Integer] -> 10^(-Floor[wp/2])`
+  Radius-vs-pole-modulus comparison guard consumed by SectorSeries
+  `::geomambiguous` and Transport geometry asserts: comparisons whose
+  difference magnitude falls below `GeomGuardTol[wp] * Max[|t_i|, Radius]` are
+  LOUD errors, not decisions (REVIEW-minimalism 17; supersedes REVIEW-math
+  D26's RankTol-based guard — the named export keeps the wp/2 width that D26
+  intended after RankTol moved to wp/4, honoring F4's named-export rule).
+- `ChopReserve[wp_Integer, chopDigits_Integer] -> wp - chopDigits`
+  The digit reserve between working precision and the chop floor; Transport.md
+  E3 requires `DigitsNeeded + ChopReserve <= wp` (old implicit reserve
+  WP - ChopPrecision = 250, State.m:109,135).
+- `LaurentLeadTol[chopDigits_Integer] -> Max[10^(-Floor[chopDigits/2]), 10^-24]`
+  RELATIVE leading-coefficient zero test for eps-Laurent window trimming and
+  for object-level cancellation gates (DEC-2).  This is the replacement
+  demanded by RewritePlan 3.2 for the FT `zeroCoeffQ` ABSOLUTE `10^-40` test
+  (FeynmanTrick/DiffExpIntegration.m:1177-1178, consumed by LaurentTrim at
+  1180-1190).  The 10^-24 floor is the campaign-verified calibration
+  (DiffExp/IntegrationStrategies/Recurrence.m:613-618;
+  Docs/FeynmanTrickBoxFamilyStatus.md "the 1e-24 floor is load-bearing"):
+  incomplete cancellations at apparent singularities leave residues up to
+  ~1e-29 RELATIVE at WP 300 which MUST classify zero, while genuine leading
+  content is O(1) relative or exactly zero.  The floor is a HARD CONSTANT
+  (not configurable, not separately exported — DEC-2) and is a RELATIVE
+  quantity, so it does not reproduce forbidden fallback F1 (which bans
+  absolute tests on raw coefficients).  Semantics: leading coefficient `c` of
+  a Laurent array with window scale `s = Max[Abs /@ allWindowCoefficients]` is
+  zero iff `NumericallyZeroQ[c, s, LaurentLeadTol[chopDigits], context]`;
+  `s == 0` => only exact zeros trim.  When the Max picks the floor
+  (chopDigits >= 48 — every campaign setting) the classification is BINARY:
+  the ambiguity band does NOT apply at the floor (DEC-2; a band abort there
+  would fire on the correct ~1e-29 residue population).  For the Integrate.m
+  cancellation gate the scale is the max |coefficient| of the merged
+  combination at that eps order (DEC-4).
 - `ResidTol[wp_Integer] -> 10^(-Floor[wp/10])`
   RELATIVE threshold for the always-on ODE-residual spot-check (RewritePlan 3.1
   invariants) and for construction-time cross-checks.  Replaces the old absolute
@@ -93,20 +145,49 @@ machine Integers; all return exact rationals `10^-k` unless stated):
 
 The shared classification predicate:
 
-- `NumericallyZeroQ[c_, scale_, tol_, context_String] -> True | False | LOUD ERROR`
-  THE one zero-classification routine for all relative tests in DiffExp2.
-  Contract: (1) `PossibleZeroQ[c]` exactly True -> True.  (2) `c` not NumericQ
-  -> False (symbolic content is never "numerically zero"; callers handle
-  symbols structurally).  (3) `scale == 0` (no reference magnitude) -> False
-  unless branch (1) fired.  (4) Otherwise let `r = Abs[N[c, dig]]` with `dig`
-  the installed ChopDigits: `r < tol*scale/10^bandDecades -> True`;
-  `r > tol*scale*10^bandDecades -> False`; ELSE LOUD ERROR (section 5) quoting
-  `context` verbatim — `context` MUST already contain the chart / sector tag
-  (a,b,p) / eps-order / t-order identifiers the caller has.  `bandDecades`
-  is the exported constant `$AmbiguityBandDecades = 10`.
+- `NumericallyZeroQ[c_, scale_, tol_, context_String, bandDecades_:$AmbiguityBandDecades]
+   -> True | False | LOUD ERROR`
+  THE one zero-classification predicate for all relative tests in DiffExp2
+  (DEC-3): exactly one library-wide; EpsSeries' `ESCoeffZeroQ` is a thin
+  wrapper over it that adds window context to the error payload — same
+  semantics, never a second predicate.  Contract: (1) `PossibleZeroQ[c]`
+  exactly True -> True.  (2) `c` not NumericQ -> False (symbolic content is
+  never "numerically zero"; callers handle symbols structurally).
+  (3) `scale == 0` (no reference magnitude) -> False unless branch (1) fired.
+  (4) Otherwise let `r = Abs[N[c, dig]]` with `dig` the installed ChopDigits.
+  FLOOR EXEMPTION (DEC-2/DEC-3): if `tol === 10^-24` (the universal floor —
+  the Max in LaurentLeadTol picked the hard constant; in practice only
+  LaurentLeadTol-derived calls reach it at campaign settings), the test is
+  BINARY: `r <= tol*scale -> True`, else False — no ambiguity error at the
+  floor.  (5) Else ternary: `r < tol*scale/10^bandDecades -> True`;
+  `r > tol*scale*10^bandDecades -> False`; ELSE LOUD ERROR (section 5, E5)
+  quoting `context` verbatim — `context` MUST already contain the chart /
+  sector tag (a,b,p) / eps-order / t-order identifiers the caller has.
+  `bandDecades` defaults to the exported constant `$AmbiguityBandDecades = 4`
+  (recalibrated from 10 by DEC-2/DEC-3: the two documented populations are
+  ~1e-29-relative cancellation residues vs O(1)-relative signal; every
+  in-scope zero/nonzero population pair is separated by far more than
+  2*4 decades, and the narrower band aborts on strictly less).
   This predicate is what makes "IntegerQ-on-floats" and threshold-straddling
   misclassification (disease D1; the LaurentTrim MinPower-shift hazard of
   legacy-review finding 13a, Docs/reviews/rewrite_plan_review_3lens.json) impossible.
+
+The shared loud-error primitive (DEC-1; REVIEW-math D17, REVIEW-minimalism 5 —
+exported from the bottom of the dependency order so every module can raise
+through it without inverting the module order):
+
+- `DE2Error[id_String, payload_Association] -> (never returns)`
+  THE library-wide error primitive.  Behavior: prints one line
+  `"DiffExp2 error <id>: <payload as key=value summary>"`, then
+  `Throw[Failure["DiffExp2", Join[<|"ID" -> id|>, payload]], "DiffExp2Error"]`.
+  `payload` always carries `"Module"` (and `"ID"` after the join) plus
+  whatever chart / sector / eps-order / t-order context the caller's
+  `$ESErrorContext`-style scoping provides.  The catch sits at every API.m
+  entry point — API.m's entry points are the ONLY `Catch[..., "DiffExp2Error"]`
+  sites and convert the Failure to a user-facing abort.  No module defines its
+  own Abort/Message idiom.  DE2Error has no state dependency (it must work
+  before any tolerance install).  (~12 lines, funded by the deleted
+  adaptive-search constants — REVIEW-minimalism 5/8.)
 
 Installed-state accessors (state is write-once-per-configuration, installed by
 Config.m ONLY):
@@ -138,19 +219,21 @@ these are data, not functions):
   `Block[{$MinPrecision = wp}]` (DiffExp/Pade.m:34,70,80) with
   `$MaxExtraPrecision = $MaxExtraPrecisionValue = 1000` (DiffExp/Mobius.m:39).
   Tolerances exports the two constants; the Blocks live at the consumer.
-- `$SafetyExpansionSubtract = 5` (ISafetyExpansionSubtract, DiffExp/State.m:216;
-  matrix-truncation error read at order
-  `ExpansionOrder - $SafetyExpansionSubtract - (couplingDepth - 1)`,
-  DiffExp/LineSegmentation.m:109-113).
-- `$ExpansionOrdersAveraging = 3`, `$ExpansionOrderIncrease = 10`,
-  `$ExpansionOrderDecrease = 10`, `$ExpansionOrderIncreaseValidate = 25`,
-  `$DigitsSurplusDecrease = 3`, `$MinExpansionOrder = 10`
-  (DiffExp/State.m:217-224; the AccuracyGoalValidate "Before" adaptive search,
-  DiffExp/Transport.m:776-841, and "After" redo, Transport.m:1191-1213).
+- `$MinExpansionOrder = 10` (DiffExp/State.m:223; floor consumed by Config's
+  ExpansionOrder validator — the ONE survivor of the State.m:216-224 set).
+  The other six adaptive-search constants ($SafetyExpansionSubtract,
+  $ExpansionOrdersAveraging, $ExpansionOrderIncrease, $ExpansionOrderDecrease,
+  $ExpansionOrderIncreaseValidate, $DigitsSurplusDecrease) are DELETED, not
+  ported and not folded: their only consumer, the AccuracyGoalValidate
+  adaptive expansion-order search (DiffExp/Transport.m:776-841,1191-1213) and
+  the LineSegmentation.m:109-113 truncation read-off, is not ported (DEC-11;
+  REVIEW-minimalism 8 — LessonsLedger waiver "expansion-order adaptive
+  search"; the -10 lines fund DE2Error per REVIEW-minimalism 4/5).
 - `EvalErrorSeriesDecrease[couplingDepth_Integer] := Ceiling[0.7*couplingDepth] + 2`
   (ICurrEvalErrorSeriesDecrease, DiffExp/State.m:222; the two-point error probe
   order reduction, DiffExp/Transport.m:913).
-- `$AmbiguityBandDecades = 10` (new; see NumericallyZeroQ).
+- `$AmbiguityBandDecades = 4` (new; see NumericallyZeroQ — recalibrated from
+  10 by DEC-2/DEC-3, and exempt at the 10^-24 floor).
 
 ## 3. DATA CONTRACTS
 
@@ -162,22 +245,31 @@ these are data, not functions):
   All tolerance values exact `10^-k` rationals (never machine reals — they are
   compared against arbitrary-precision numbers).
 - Consumers and which name they may use (binding; anything else is a spec
-  violation found in review):
-  - EpsSeries.m: `LaurentLeadTol` (window trimming via NumericallyZeroQ only),
-    `ChopFloor` (coefficient chop after add/mul/div).
+  violation found in review — table per REVIEW-minimalism 17 / REVIEW-math
+  D16; DE2Error is an error helper, not a tolerance, and is implicitly
+  available to every module):
+  - EpsSeries.m: `LaurentLeadTol` (window/lead classification via
+    NumericallyZeroQ only — ESCoeffZeroQ is the thin wrapper, DEC-3),
+    `MatchTol` (ESSameQ).  NO chopping: EpsSeries never alters stored
+    coefficients (its I-6).
   - SectorSeries.m: `ChopFloor`, `ResidTol` (evaluate/re-expand checks),
-    `SnapTol` (none expected; flag in review if used).
-  - Indicial.m: NONE of the numeric tolerances for exponents — indicial data is
-    EXACT (RewritePlan I1); only `ChopFloor` for numeric matrix entries.
-    Exponent rationalization tolerances are DELETED (section 6).
-  - Solve.m: `MatchTol`, `RankTol`, `ChopFloor`, `ResidTol`.
-  - Transport.m: `MatchTol`, `RankTol`, `ResidTol`, `$SafetyDigits`,
-    `$InputPrecisionFactor`, the expansion-order constants,
+    `GeomGuardTol` (geometry ambiguity guard, `::geomambiguous`).
+  - Indicial.m: NOTHING — indicial data is EXACT (RewritePlan I1; its §7
+    "NOT USED" statement governs, and I-8/E1 reject numeric entries
+    outright).  Exponent rationalization tolerances are DELETED (section 6).
+  - Solve.m: `MatchTol`, `RankTol`, `LaurentLeadTol` (assembly-time
+    log-member trim, REVIEW-minimalism 1), `ResidTol`.
+  - Transport.m: `MatchTol`, `RankTol` (via NumericallyZeroQ — the band IS
+    the E7 gray zone), `ResidTol`, `SnapTol` (computed-value snapping only),
+    `InputSnapTol` + `$NearSingularityGuardDecades` (E14/W5 endpoint rule),
+    `ChopReserve` (E3 digit budget), `GeomGuardTol` (geometry asserts),
+    `$SafetyDigits`, `$InputPrecisionFactor`, `$MinExpansionOrder`,
     `EvalErrorSeriesDecrease`.
-  - Integrate.m: `ChopFloor`, `LaurentLeadTol` (assembled-combination
-    cancellation checks at the object level), `SnapTol` (endpoint snapping).
+  - Integrate.m: `LaurentLeadTol` (cancellation gate at the DEC-4
+    merged-combination per-eps-order scale, + result trim), `SnapTol`
+    (tiling/endpoint snapping), `MatchTol` (additivity spot-check I6).
   - API.m / FT layer: `SnapTol` (chart-map endpoint snapping, singularity
-    dedup), `ChopFloor`.
+    dedup pre-filter), `InputSnapTol` (W5 user-target snapping), `ChopFloor`.
 - LocalSolution / Sector / EpsWindow (RewritePlan 3.1, verbatim definitions are
   normative there): Tolerances.m never constructs or stores these; it only
   classifies their numeric coefficients.  In particular EpsWindow
@@ -200,9 +292,11 @@ these are data, not functions):
 
 ## 5. ERROR CONTRACT (no silent fallbacks anywhere)
 
-Every error is raised via the shared DiffExp2 loud-error primitive (Abort with
-printed context; the API.m spec owns its exact form) and must carry the strings
-shown.  Enumerated conditions:
+All errors are raised via `DE2Error` (section 2; DEC-1); this module defines
+no other error mechanism, and no other spec owns the form (the old "API.m spec
+owns its exact form" clause is deleted — REVIEW-math D17 / REVIEW-minimalism 5;
+API.m's entry points only own the `Catch[..., "DiffExp2Error"]`).  Each
+condition must carry the strings shown.  Enumerated conditions:
 
 E1 `Tol` before install: "Tolerances: no tolerance state installed (key <name>
    requested). Load a configuration first."  MUST NOT return a default.
@@ -283,14 +377,21 @@ F6 Chopping with a literal (`Chop[x, 10^-20]`-style debug chops are fine in
 - DiffExp/Wronskian.m:63, IntegrationStrategies/Helpers.m:32,84, VOP.m:120,248,
   RegularizedIntegration.m:1047 (rank/nullspace tolerances) -> RankTol.
   Lesson: the fitter's relative `10^(-prec/2)` SVD cut was the only relative
-  test in the old code and the only one that never misfired in the campaign.
+  test in the old code and the only one that never misfired in the campaign;
+  tightened to wp/4 to open the [SnapTol, RankTol] gray zone (REVIEW-math
+  D15) — the fitter itself is deleted.
 - DiffExp/State.m:209-224 (`I*` constants), DiffExp/LineSegmentation.m:109-113,
   121,132 (DigitsNeeded, safety-subtract geometry), DiffExp/Transport.m:527,
-  759-760,776-841,913,1191-1213 -> the exported operational constants.  Lessons:
-  per-segment digit budget needs `Ceiling[Log10[#segments]]` (predivision
-  two-pass, Transport.m:666-760); error-probe order reduction grows with
-  coupling depth (top `(couplingDepth-1)` t-orders of chained particular
-  solutions are degraded — MaxCouplingOrder, DiffExp/MatrixLoading.m:383).
+  759-760,776-841,913,1191-1213 -> the SURVIVING operational constants
+  ($SafetyDigits, $MinExpansionOrder, EvalErrorSeriesDecrease); the six
+  adaptive-search constants are DELETED with their machinery (DEC-11;
+  REVIEW-minimalism 8; ledger waiver "expansion-order adaptive search").
+  Lessons kept: per-segment digit budget needs `Ceiling[Log10[#segments]]`
+  (predivision two-pass, Transport.m:666-760); error-probe order reduction
+  grows with coupling depth (top `(couplingDepth-1)` t-orders of chained
+  particular solutions are degraded — MaxCouplingOrder itself is subsumed by
+  exact polynomial recursion + ErrorEstimate, DEC-9, but the probe-order
+  decrement survives as EvalErrorSeriesDecrease).
 - DiffExp/State.m:212 ICheckMultivaluedChop (= 5, used at Transport.m:481 to
   chop before the SingularityCheck) — DROPPED WITH REASON: in DiffExp2 leftover
   multivaluedness is a STRUCTURAL question on exact tags (is there a sector
@@ -317,15 +418,27 @@ record.  This is what makes the acyclic order sound.
 
 ## 8. UNIT TESTS (Tests/test_tolerances.m; names binding)
 
+Error assertions ("aborts"/"ABORTS" below) are `Catch[..., "DiffExp2Error"]`
+returning the `Failure["DiffExp2", ...]` with the named "ID"/"Module" payload
+fields (DEC-1; REVIEW-math D17) — not CheckAbort, not message assertions.
+
 T1  `test_chop_digits_default`: `ChopDigits[500] === 250`, `ChopDigits[100] === 50`.
 T2  `test_chop_floor_exact`: `ChopFloor[250] === 10^-250` and is an exact
     Rational (Head === Rational), not a Real.
-T3  `test_match_tol_sync_default`: with a state installed via a minimal Config
-    round-trip at wp=500 and no explicit overrides,
+T3  `test_match_tol_sync_default`: install directly via
+    `InstallToleranceState` with the record Config WOULD produce at wp=500
+    defaults (the Config.md §3 table is the source of the expected values; NO
+    Config call — this suite depends on NOTHING, section 7, and must run
+    before Config.m exists; REVIEW-minimalism 31); assert
     `Tol["MatchTol"] === Tol["ChopFloor"] === 10^-250`
-    (DiffExp/DiffExp.m:126 sync behavior).
-T4  `test_snap_rank_derivation`: `SnapTol[500] === RankTol[500] === 10^-250`;
-    `LaurentLeadTol[250] === 10^-125`; `ResidTol[500] === 10^-50`.
+    (DiffExp/DiffExp.m:126 sync behavior).  The Config-side half of the sync
+    is tested in test_config.m, not here.
+T4  `test_snap_rank_derivation`: `SnapTol[500] === 10^-250`;
+    `RankTol[500] === 10^-125` (strictly looser — the E7 gray zone is
+    non-empty, REVIEW-math D15); `GeomGuardTol[500] === 10^-250`;
+    `ChopReserve[500, 250] === 250`; `LaurentLeadTol[250] === 10^-24` (the
+    floor); `LaurentLeadTol[40] === 10^-20` (the Max picks the derived value
+    below chopDigits 48); `ResidTol[500] === 10^-50`.
 T5  `test_install_schema_loud`: InstallToleranceState with (a) a missing key,
     (b) an extra key `"Foo"`, (c) `"ChopDigits" -> 250.0` (Real) each abort with
     messages naming the offender (E3).
@@ -339,8 +452,15 @@ T9  `test_numerically_zero_band`: with tol = 10^-125, scale = 1:
     `NumericallyZeroQ[10^-300, 1, 10^-125, "t"] === True`;
     `NumericallyZeroQ[10^-40, 1, 10^-125, "t"] === False`;
     `NumericallyZeroQ[10^-125, 1, 10^-125, "t"]` ABORTS quoting "t" (E5);
-    band edges: `10^-136` -> True, `10^-114` -> False (closed-form:
-    band is `[tol/10^10, tol*10^10] = [10^-135, 10^-115]`, exclusive).
+    band edges: `10^-130` -> True, `10^-120` -> False (closed-form: the
+    ERROR band is the closed interval `[tol/10^4, tol*10^4] =
+    [10^-129, 10^-121]`; the True/False regions are the open exteriors —
+    REVIEW-math D29 wording).  Floor exemption (DEC-2/DEC-3):
+    `NumericallyZeroQ[10^-29, 1, 10^-24, "t"] === True` and
+    `NumericallyZeroQ[10^-22, 1, 10^-24, "t"] === False`, with NO error in
+    either case — at the 10^-24 floor the test is binary, so the two
+    campaign populations (~1e-29-relative residues, O(1)-relative signal)
+    both classify cleanly.
 T10 `test_numerically_zero_exact_and_symbolic`:
     `NumericallyZeroQ[0, 0, tol, "t"] === True` (exact zero, zero scale);
     `NumericallyZeroQ[2 - 2, anything...] === True`;
@@ -350,16 +470,17 @@ T10 `test_numerically_zero_exact_and_symbolic`:
 T11 `test_laurent_trim_lesson_relative`: the FT regression in miniature —
     coefficient `10^-45` with window scale `10^-44` (tiny but REAL leading
     term, relative size 10^-1) classifies False under
-    `LaurentLeadTol[250] = 10^-125`, where the old absolute 10^-40 test
-    (DiffExpIntegration.m:1178) would have trimmed it and shifted MinPower.
+    `LaurentLeadTol[250] = 10^-24` (binary at the floor: 10^-1 >> 10^-24),
+    where the old absolute 10^-40 test (DiffExpIntegration.m:1178) would
+    have trimmed it and shifted MinPower.
 T12 `test_operational_constants_pinned`: `$SafetyDigits === 2`,
-    `$SafetyExpansionSubtract === 5`, `$ExpansionOrdersAveraging === 3`,
-    `$ExpansionOrderIncrease === 10`, `$ExpansionOrderDecrease === 10`,
-    `$ExpansionOrderIncreaseValidate === 25`, `$DigitsSurplusDecrease === 3`,
     `$MinExpansionOrder === 10`, `$InputPrecisionFactor === 2`,
-    `$MaxExtraPrecisionValue === 1000`, `$AmbiguityBandDecades === 10`,
+    `$MaxExtraPrecisionValue === 1000`, `$AmbiguityBandDecades === 4`,
+    `$NearSingularityGuardDecades === 6`,
     `EvalErrorSeriesDecrease[1] === 3`, `EvalErrorSeriesDecrease[5] === 6`
-    (Ceiling[0.7*5]+2 = 6; DiffExp/State.m:222 formula).
+    (Ceiling[0.7*5]+2 = 6; DiffExp/State.m:222 formula); additionally the
+    six deleted adaptive-search symbols (section 2) do NOT exist in the
+    `DiffExp2`Tolerances` context (DEC-11; REVIEW-minimalism 8).
 T13 `test_exports_visible_cross_context`: from a scratch context with an empty
     $ContextPath, every symbol in section 2 evaluates under its fully
     qualified name (e.g. ``DiffExp2`Tolerances`ChopDigits[500]`` returns 250,
@@ -367,22 +488,27 @@ T13 `test_exports_visible_cross_context`: from a scratch context with an empty
 
 ## 9. LINE BUDGET
 
-~100 lines (RewritePlan 3.2).  Estimated: derivations ~25, NumericallyZeroQ
-~20, install/Tol state ~25, constants ~15, usage strings ~15.  If over budget,
-cut in this order: (1) fold the six expansion-order constants into one exported
-association `$TransportTuning` (saves ~8 lines of usage text); (2) drop
-`ToleranceStateInstalledQ` (API.m can probe via a Check on `Tol`); (3) shorten
-error messages to the mandatory fields only.  DO NOT cut: the ambiguity band,
-the install-time schema check, or any usage declaration (export visibility is a
-correctness property here, not documentation).
+~100 lines (RewritePlan 3.2).  PRE-AUTHORIZED at M0 review
+(REVIEW-minimalism 4): the six dead adaptive-search constants are DELETED,
+not folded (-10), funding DE2Error (+~12, REVIEW-minimalism 5).  Estimated:
+derivations ~30 (incl. InputSnapTol/GeomGuardTol/ChopReserve),
+NumericallyZeroQ ~20, DE2Error ~12, install/Tol state ~25, constants ~7,
+usage strings ~15 — total ~109 against the restated ceiling.  If over
+budget, cut in this order: (1) drop `ToleranceStateInstalledQ` (API.m can
+probe via a Check on `Tol`); (2) shorten error messages to the mandatory
+fields only.  (The former cut "fold the expansion-order constants into
+$TransportTuning" is gone — nothing left to fold, REVIEW-minimalism 8.)
+DO NOT cut: the ambiguity band, the floor exemption, the install-time schema
+check, or any usage declaration (export visibility is a correctness property
+here, not documentation).
 
 ## 10. OPEN QUESTIONS
 
-Q1 `LaurentLeadTol` window scale: spec says "max |coeff| over the SAME Laurent
-   object".  For multi-master combined objects, should the scale be per-master
-   or global per level?  Per-object is the default; M5 ladder data (box_bubble
-   level boundaries) should confirm no cross-master scale disparity > 10^80
-   (which would put real coefficients in the band).  Owner decision if it does.
+Q1 RESOLVED (DEC-4): for combined/merged objects the cancellation-gate scale
+   is the max |coefficient| of the merged combination at that eps order —
+   global per merged object per eps order, not per-master.  For a single
+   Laurent object the scale stays "max |coeff| over the SAME object".  No
+   open question remains; M5 ladder data is observational only.
 Q2 `ResidTol = 10^(-wp/10)` is a judgment call (old absolute 30 digits at
    wp=500 corresponds to wp/16.7).  Any value in [wp/16, wp/8] separates the
    observed populations; revisit only if M3 closed-form units show residuals

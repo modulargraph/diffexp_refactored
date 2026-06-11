@@ -33,18 +33,24 @@ ErrorEstimate metadata end-to-end with no silent fallback anywhere.
 
 All symbols live in `` DiffExp2`Transport` `` and are exported with ::usage.
 "EpsSeries" below means the truncated eps-Laurent array object of
-Docs/specs/EpsSeries.md (window-carrying); "exact" means an exact Wolfram
-expression (Rational, algebraic number, `Root`), never a float.
+Docs/specs/EpsSeries.md (window-carrying); per DEC-13 its shape is the
+EpsSeries.md canonical `<|"EpsWindow" -> <|"Min","CompleteMax"|>,
+"Coeffs" -> ...|>` — no alternative eps-Laurent shape appears in this
+module.  "exact" means an exact Wolfram expression (Rational, algebraic
+number, `Root`), never a float.
 
 ### 2.1 `FindSingularities[sys_Association] -> Association`
 
 Input: the LoadSystem record (API.md contract); the fields consumed are
 `sys["SingularFactors"]` (the irreducible x-dependent factors of all matrix
 denominators, the analogue of `DiffExp`State`MatricesIrreducibleFactors`,
-old MatrixLoading.m:217-231) and `sys["ExtraSingularFactors"]` (config; the
-FT layer's IBP-coefficient denominators, old
+old MatrixLoading.m:217-231) and `sys["ExtraSingularFactors"]` (threaded
+PER CALL from the "ExtraSingularFactors" option of TransportTo and
+IntegrateOverLine — DEC-10, REVIEW-math D20; NOT system state and NOT a
+config key: the FT layer's IBP-coefficient denominators, old
 FeynmanTrick/DiffExpIntegration.m:204-222 `appendMatrixFactors` and
-:1326-1385 `CollectLevelIBPSingularFactors`).
+:1326-1385 `CollectLevelIBPSingularFactors`, cannot place charts without
+it).
 
 Output:
 ```
@@ -63,6 +69,10 @@ Behavior contract:
   (old code dedups by `N[#, ChopPrecisionVal]`, LineSegmentation.m:77 — this
   can merge distinct nearby roots; box_triangle's interior pole at
   12167/12651 ~ 0.9617 sits 0.038 from the endpoint 1 and must never merge).
+  A numeric SnapTol pre-filter MAY be used to find merge CANDIDATES on
+  large root sets, but two roots are merged only after exact RootReduce
+  confirmation (Tolerances.md Q3); an unconfirmed near-pair is kept
+  distinct.
 - Complex roots are RETAINED as complex numbers.  The old ghost projection
   (each complex root projected to real points Re and Re±Im unless another
   singularity already lies in that interval, LineSegmentation.m:81-99) is
@@ -111,8 +121,10 @@ Behavior contract:
 
 ### 2.4 `NextCenter[prevMatch_, singularities_, direction_] -> center`
 
-The GetCPL/GetCPR geometry, ported from old Mobius.m:98-142 (affine charts)
-and Mobius.m:72-90 (Mobius charts): given the previous match point x_b and
+The GetCPL/GetCPR geometry, ported from old Mobius.m:98-142 (affine
+charts only; the Mobius variants Mobius.m:72-90 are NOT ported — Mobius
+charts are dropped from the new core, DEC-18): given the previous match
+point x_b and
 its two neighbouring singularities {z_min, z_max}, solve for the next
 center x_new such that x_b sits at exactly (new chart radius)/k of the NEW
 chart, k = DivisionOrder.  Closed form (affine, finite bounds, right-moving,
@@ -142,6 +154,11 @@ Tolerances.m; old code keeps WP - ChopPrecision = 250 of reserve,
 State.m:109,135), LOUD ERROR E3 — the old code never checks and silently
 loses digits on long lines.
 
+With AccuracyGoal == "?": DigitsNeeded := ChopDigits (the chop reserve is
+then the only budget), E3 still applies, and E11 is skipped — recorded in
+the plan as `"BudgetMode" -> "Unvalidated"`, never silently (REVIEW-math
+D25; the old code silently skipped budgeting, Transport.m:776-777 class).
+
 ### 2.6 `TransportLine[sys_Association, boundary_, plan_SegmentPlan] -> TransportResult`
 
 The marching loop (pass 2).  `boundary` is either
@@ -152,23 +169,37 @@ The marching loop (pass 2).  `boundary` is either
     (wrapped internally into the one-sector regular LocalSolution).
 Symbolic indeterminate coefficients in `boundary` are allowed and tracked
 per-indeterminate by the error probe (old Transport.m:565-569, 947-962);
-they force UsePade off in SectorSeries evaluation (old Transport.m:566-569).
+they force UsePade off in SectorSeries evaluation via an explicit per-call
+option override, NEVER by mutating the configuration store
+(REVIEW-minimalism 20; the old global mutation at Transport.m:566-569 is
+the forbidden pattern).
 
 Loop body per chart (in plan order):
-1. `basis, particular, meta = DiffExp2`Solve`SolveChart[sys, chart, ...]`
-   — fundamental LocalSolution basis + particular + metadata, including
-   `meta["CouplingDepth"]` (longest chain in the coupled-block dependency
-   DAG; old proxy `MaxCouplingOrder` = largest coupled block,
-   MatrixLoading.m:357-385, esp. :383).
+1. `cs = DiffExp2`Solve`PrepareChart[sys, chart]` — Solve.m assembles the
+   ChartSystem (chart map applied to the loaded exact matrix, theta form,
+   ``Indicial`ChartIndicial``, per-family V/VInv/J, collision data;
+   DEC-7, Solve.md §2).  Then `sol = DiffExp2`Solve`SolveChart[cs, req]`
+   -> `<|"Basis" -> fundamental LocalSolution basis, "Particular" ->
+   LocalSolution | None, "CouplingDepth" -> _Integer|>`, solved
+   BLOCK-SEQUENTIALLY along the exact block-triangular structure of
+   ThetaMatrix (DEC-9; Solve.md §2.4; CouplingDepth = longest chain in
+   the block dependency DAG — old proxy `MaxCouplingOrder` = largest
+   coupled block, MatrixLoading.m:357-385, esp. :383).
 2. v = incoming data evaluated at chart's MatchIn point (SectorSeries
    evaluate on the previous chart's LocalSolution; if MatchIn lies on the
    far side of a singular previous chart, evaluation goes through
    `ApplyCrossing` — exactly once, invariant I6).
 3. `w = MatchWeights[...]` (2.7) after `RecombineBasis` (2.8).
-4. Assemble the chart's LocalSolution = basis.w + particular (SectorSeries
-   algebra), set EpsWindow by honest window arithmetic, set
-   `TWindow["CompleteMax"] = expansionOrder - (meta["CouplingDepth"] - 1)`
-   (legacy finding 6; old GetLargestTerm discount, LineSegmentation.m:109-113).
+4. Assemble the chart's LocalSolution = basis.w + particular via
+   `SectorSeries`CombineLocalSolutions` (SectorSeries.md 2.10), set
+   EpsWindow by honest window arithmetic, set
+   `TWindow["CompleteMax"] = expansionOrder` — DEC-9: there is NO
+   (couplingDepth - 1) degradation in the new core (recursion matrices
+   are exact polynomials, so a particular built from a lower-block
+   solution complete to TOrder is itself complete to TOrder; the old
+   GetLargestTerm/MaxCouplingOrder discount, LineSegmentation.m:109-113,
+   is waived in the LessonsLedger as "subsumed: exact polynomial
+   recursion + ErrorEstimate covers it").
 5. `SegmentErrorProbe` (2.10); accumulate additively into the running
    ErrorEstimate array; LOUD ERROR E10 when any entry > 1
    (old Transport.m:991-993).
@@ -185,16 +216,22 @@ layer and by EndpointLimit in API.m).
 ### 2.7 `MatchWeights[basisValues_, incomingValues_, chartLabel_] -> EpsSeries vector`
 
 The eps-graded Laurent weight solve.  `basisValues` = N x N matrix of
-EpsSeries (basis solution i, component c, evaluated at the match point;
-columns pre-normalized by eps^(-kmin_i) so every column's window starts at
-eps^0 — note homogeneous true-resonance sectors have kmin = -p BY
-CONSTRUCTION, RewritePlan 3.1 invariant, and this normalization is exempt
-window arithmetic, not an error).  `incomingValues` = EpsSeries vector.
+EpsSeries (basis solution i, component c: columns are the EpsSeries VALUES
+of the basis solutions at the match point; before the graded solve, each
+column is trimmed (`ESTrim`) and it is ASSERTED that the trimmed window
+starts at eps^0 — negative-order content must be numerically zero (it is
+the cancelling polar content of compensated joint columns, Solve.md I-5);
+a negative-order coefficient failing `ESCoeffZeroQ` at matchTol is error
+E5, gray zone is E7.  No eps-power renormalization of columns is
+performed: true-resonance columns already have value MinPower = 0 under
+the (eps Logx)^p/p! normalization — REVIEW-math D7).
+`incomingValues` = EpsSeries vector.
 
 Contract:
 - Graded solve: with F~ = Sum_k F[k] eps^k after recombination (2.8),
-  assert |det F[0]| > rankTol * scale (Tolerances.m), then solve order by
-  order.  ord_eps det F~ != 0 after recombination is LOUD ERROR E5 — never
+  assert det F[0] is nonzero via ``Tolerances`NumericallyZeroQ[detF0,
+  scale, Tol["RankTol"], <chart label>]`` (False required; True -> E5,
+  band hit -> E7; DEC-3), then solve order by order.  ord_eps det F~ != 0 after recombination is LOUD ERROR E5 — never
   a silent window shift (RewritePlan 3.4: matchingShift "target 0,
   asserted"; math review finding 4).
 - Result window: honest min over the windows of incomingValues and
@@ -204,11 +241,15 @@ Contract:
   carrying the residual.  This replaces BOTH the old LinearSolve-with-
   ZeroTest (old Transport.m:341) and the old checked least-squares rescue
   (old Transport.m:348-374) — the rescue is FORBIDDEN (F6).
-- Numerically-zero leading rows/pivots: a pivot with
-  |pivot| < snapTol * scale is snapped to exact 0; snapTol*scale <= |pivot|
-  <= rankTol*scale is the gray zone = LOUD ERROR E7 (no silent rounding;
+- Pivot/leading-coefficient zero classification: EXACTLY
+  ``Tolerances`NumericallyZeroQ[pivot, scale, Tol["RankTol"], <chart
+  label + operation>]``.  True -> the pivot is exact 0 (snap); False ->
+  nonzero; the ambiguity band IS the gray zone and aborts loudly (E7 is
+  the band error, not a separate mechanism — REVIEW-minimalism 10,
+  DEC-3/DEC-14).  SnapTol plays NO role in matching solves; it is
+  reserved for coordinate/endpoint snapping.  (No silent rounding;
   RewritePlan section 5: "numerical-zero leading-coefficient skipping
-  (generalizes to matching solves)").
+  (generalizes to matching solves)".)
 - Underdetermined systems: FORBIDDEN inside the marching loop (F7).  The
   old NullSpace free-parameter path (old Transport.m:392-410) survives ONLY
   as the API-level `"?"` wildcard contract (API.md): wildcards enter
@@ -224,18 +265,24 @@ canonical class: log x = (x^(2eps) - 1)/(2eps), i.e. sectors with equal a
 
 Contract:
 - Candidate families are determined from EXACT data: sector tags with
-  a_i - a_j in Z and b_i != b_j, restricted to families flagged eps=0-
-  degenerate by Indicial.m metadata (`chart["EpsDegenerateFamilies"]`:
-  the eps->0 limit of the residue has a Jordan block that nonzero eps
-  resolves).  See OPEN QUESTIONS Q2 for the Indicial.md cross-contract.
+  a_i - a_j in Z and b_i != b_j, restricted to the families returned by
+  ``Indicial`EpsDegenerateFamilies`` (DEC-7: per-chart families with the
+  same a mod Z, distinct b, whose eps=0 eigenvectors collide; detected
+  EXACTLY by Indicial — chain-top vectors normalized by their
+  eps-valuation, eps -> 0 substituted exactly, rank over Q(alpha); the
+  record carries the rank deficiency r0 = column count − eps=0 rank,
+  REVIEW-math D8).  Division of labor: Indicial DETECTS, Transport
+  REMOVES (unimodular recombination); Transport performs NO numeric
+  degeneracy detection (REVIEW-minimalism 14, name per DEC-7).
 - Replacement rule, per degenerate family ordered by b:
   `B_1 = S_1`, `B_m = (S_m - S_1)/((b_m - b_1) eps)` for m >= 2; applied
-  recursively to {B_2, ...} while degeneracy persists (depth = size of the
-  eps=0 Jordan block).  Each division is an exact EpsSeries window SHIFT.
+  recursively to {B_2, ...} while degeneracy persists (recursion depth =
+  the family's r0 from the EpsDegenerateFamilies record, REVIEW-math D8).  Each division is an exact EpsSeries window SHIFT.
   Every B_m is a genuine solution (exact linear combination of solutions
   divided by an x-independent scalar).
 - Assert after each division: the eps^(-1) (post-shift leading) coefficient
-  of B_m's value data is zero after snapping (snapTol); gray zone = E7.
+  of B_m's value data is zero via NumericallyZeroQ at Tol["RankTol"]; band
+  hit = loud E7 (REVIEW-minimalism 10).
 - det effect: each division multiplies det F by 1/((b_m - b_1) eps),
   cancelling exactly one eps order of det degeneracy; "unimodular at eps=0"
   means the FINAL recombined fundamental matrix has det = O(1), assert E5.
@@ -291,8 +338,17 @@ DiffExp/AnalyticContinuation.m:18-90, replacement rules at :70-79):
   logs of the distance with the phases accounted at the object level.
   Consequences for Transport.m: (i) SectorSeries evaluation is only ever
   called with POSITIVE chart-coordinate arguments; `ApplyCrossing` happens
-  first (invariant I7); (ii) `CrossingOperator` is the single exported
-  authority that Integrate.m reuses for its interior-pole pairing.
+  first (invariant I7); (ii) the sector-level mixing operator is
+  Transport-internal and is DEFINED as the SectorSeries sigma rule
+  (its 2.4.1) applied tagwise; Integrate.m's interior pairing and
+  negative-arm boundary terms use the SectorSeries rule directly (its
+  2.2.5), guaranteeing the conventions coincide (REVIEW-math D28 —
+  SectorSeries owns the scalar branch rule; Integrate does NOT call
+  Transport).  Sign derivation is NOT reimplemented here:
+  Chart["CrossSign"] := ``SectorSeries`ChartImSign`` applied to the
+  chart's Prescriptions record; conflict/missing surfaces as ChartImSign's
+  `::branchconflict`/`::branchmissing` wrapped into E8's payload
+  (REVIEW-minimalism 18).
 
 Family closure: applying the operator to a p > 0 sector POPULATES ALL
 lower-p members of the same (a,b) family.  Target sectors that do not yet
@@ -326,31 +382,36 @@ Transport.m:905-993:
   E10.  Seeding: when `boundary` carries no error data the seed is exact 0
   with `"ErrorSeeded" -> False` metadata — the old Accuracy[]-based seeding
   and PadRight zero-padding (Transport.m:583-591) are FORBIDDEN (F11).
-- Per-segment digit check: when AccuracyGoal is numeric, the per-segment
-  error must satisfy err <= 10^-DigitsNeeded; violation = LOUD ERROR E11
-  naming the segment and the order increase that would be needed.  (This
-  replaces the old adaptive AccuracyGoalValidate Before/After machinery —
-  see section 9 cuts and Q4.)
+- Per-segment digit check: when AccuracyGoalValidate is enabled (any
+  non-False value; default False per DEC-5) and AccuracyGoal is numeric,
+  the per-segment error must satisfy err <= 10^-DigitsNeeded; violation =
+  LOUD ERROR E11 naming the segment and the order increase that would be
+  needed.  (DEC-11: AccuracyGoalValidate is demoted to validation-only;
+  the old adaptive Before/After machinery is NOT ported — Config's table
+  records the waiver "replaced by exact recursion + ErrorEstimate gate".
+  See section 9 cuts.)
 
 ---
 
 ## 3. DATA CONTRACTS
 
-### 3.1 LocalSolution / Sector / EpsWindow (RewritePlan 3.1, VERBATIM)
+### 3.1 LocalSolution / Sector / EpsWindow (RewritePlan 3.1; the ChartMap
+and TWindow comments are superseded by DEC-18 and DEC-9 as noted)
 
 ```
 LocalSolution = <|
-  "Center" -> exact x0, "ChartMap" -> affine (Mobius optional, see 3.2),
+  "Center" -> exact x0, "ChartMap" -> affine (Mobius DROPPED, DEC-18),
   "Radius" -> distance to nearest singularity IN THE COMPLEX PLANE
               (complex singularities are real: pentagon/unequal-mass
               lines have them; old code projects ghosts Re, Re±Im —
               ledger item; new code uses true complex distance),
   "Sectors" -> { Sector.. },
   "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
-  "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* t-order honesty: top
-              (couplingDepth−1) orders of chained particular solutions
-              are degraded (old MaxCouplingOrder/ISafetyExpansionSubtract
-              lesson); tracked, not guessed *)
+  "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* t-order truncation
+              record ONLY (DEC-9): no coupling-depth degradation in the
+              new core — recursion matrices are exact polynomials; the
+              old MaxCouplingOrder/ISafetyExpansionSubtract discount is
+              waived in the LessonsLedger *)
   "ErrorEstimate" -> per (eps-order) accumulated error (two-point
               full-vs-reduced-order probe, additive across segments,
               abort > 1 — ported old machinery, user-facing),
@@ -382,18 +443,17 @@ sectors have kmin = -p BY CONSTRUCTION; Transport's column normalization
 Chart = <|
   "Index"      -> k (1-based position in the plan),
   "Center"     -> exact x0,
-  "Map"        -> <|"Type" -> "Affine" | "Mobius",
-                    (* Affine: x = Center + t * Scale, with
+  "Map"        -> <|"Type" -> "Affine",
+                    (* x = Center + t * Scale, with
                        Scale = trueRadius / RadiusOfConvergence so the
                        chart-coordinate radius is RoC and high-order
                        coefficients stay O(1) — old Mobius.m:47,65;
-                       banana REQUIRES RoC = 10 (ledger).
-                       Mobius: the old GetMobius map, Mobius.m:22-35,
-                       composed with t -> t/RoC; optional, see Q3. *)
-                    "Scale" -> ..., "Params" -> ...|>,
-  "Radius"     -> chart-coordinate radius (= RoC for affine charts; for
-                  Mobius charts the min |chart image| over ALL
-                  singularities, complex included),
+                       banana REQUIRES RoC = 10 (ledger).  Mobius charts
+                       are DROPPED from the new core (DEC-18); the RoC
+                       rescaling is an affine rescaling and is KEPT. *)
+                    "Scale" -> ...|>,
+  "Radius"     -> chart-coordinate radius (= RoC; charts are affine-only,
+                  DEC-18),
   "IsSingular" -> True | False,
   "MatchIn"    -> chart-coordinate t of the incoming match point (None for
                   the first chart; |MatchIn| = Radius/DivisionOrder up to
@@ -403,7 +463,9 @@ Chart = <|
   "CrossSign"  -> +1 | -1 | None  (derived chart Im-sign; None iff not
                   crossed or no multivalued content),
   "Prescriptions" -> as in 3.1,
-  "EpsDegenerateFamilies" -> from Indicial.m (see 2.8, Q2),
+  "EpsDegenerateFamilies" -> from `` Indicial`EpsDegenerateFamilies ``
+                  (DEC-7); populated when the chart is prepared/solved
+                  (2.6 step 1), NOT by SegmentLine geometry (see 2.8),
   "Label"      -> string "chart #k at x0=<N[center]> (singular|regular)"
                   used verbatim in every error message
 |>
@@ -428,21 +490,23 @@ TransportResult = <|
   "ErrorEstimate" -> errs[[integral, epsorder]] (* additive, per 2.10 *),
   "ErrorSeeded" -> True | False,
   "EpsWindow" -> as 3.1, "TWindow" -> as 3.1,
-  "SegmentCount" -> n,
-  "SavedCharts" -> {(* per-chart LocalSolutions, only when the
-                      SaveExpansions-equivalent config is on *)} | Missing
+  "SegmentCount" -> n
 |>
 ```
-API.m wraps this into the user-facing TransportTo association (kinematic
-point, NumIntegrals, orders — API.md contract; old return shape at old
-Transport.m:1234-1246).
+SavedCharts/SaveExpansions is NOT a TransportResult field: per-chart
+LocalSolution saving lives in API.m, which passes TransportLine an
+optional caller-supplied per-chart callback (pre-authorized cut 3,
+section 9; REVIEW-minimalism defect 4).  API.m wraps this into the
+user-facing TransportTo association (kinematic point, NumIntegrals,
+orders — API.md contract; old return shape at old Transport.m:1234-1246).
 
 ### 3.5 Weights
 
 `MatchWeights` returns an EpsSeries vector with an explicit window
-`<|"Min" -> 0 (asserted for regular incoming data), "CompleteMax" -> ...|>`;
-any Min < 0 for data whose own window starts at 0 is E5 territory (it means
-recombination failed).
+`<|"Min" -> 0, "CompleteMax" -> ...|>`; the eps^0 window start is asserted
+for ALL columns post-trim (2.7; REVIEW-math D7 — not only "regular
+incoming data"); any Min < 0 for data whose own window starts at 0 is E5
+territory (it means recombination failed).
 
 ---
 
@@ -471,9 +535,12 @@ I8  Precision: after input raising (section 6, L1), every numeric input has
     $MinPrecision = WP (old Pade.m:34,70,80) with $MaxExtraPrecision
     headroom (old Mobius.m:39).
 I9  ErrorEstimate entries are monotone nondecreasing across segments.
-I10 Regular chart <=> exactly one sector (a=0, b=0, p=0) among the
-    HOMOGENEOUS solutions (RewritePlan 3.1, scope per math finding 8:
-    ODE solutions only).
+I10 Regular chart <=> exactly one sector (a=0, b=0, p=0) PER HOMOGENEOUS
+    basis column (RewritePlan 3.1, scope per math finding 8: ODE solutions
+    only).  DEC-6 alignment: at a regular chart Indicial returns ONE
+    (0,0,0) family with d-dimensional coefficient space (d sector specs),
+    so the fundamental basis is d columns, each with exactly one (0,0,0)
+    sector; the assert checks every column.
 I11 ODE residual spot-check at one random interior point per chart
     (RewritePlan 3.1 invariant; executed on the assembled chart
     LocalSolution, residual <= matchTol*scale).
@@ -482,11 +549,14 @@ I11 ODE residual spot-check at one random interior point per chart
 
 ## 5. ERROR CONTRACT
 
-Every error below is LOUD (a thrown, aborting error in the DiffExp2 error
-idiom) and its message MUST carry the Chart "Label" (chart index + center +
-singular/regular) where applicable, plus the named fields listed.  There is
-NO error class in this module that downgrades to a warning, with the single
-structured exception noted in E8.
+All errors are raised via ``Tolerances`DE2Error[id, payload]`` (DEC-1: THE
+library-wide loud-error primitive — prints a one-line summary and
+`Throw[Failure["DiffExp2", payload], "DiffExp2Error"]`, caught only at
+API.m entry points); this module defines no other error mechanism.  The
+payload always carries "ID", "Module" -> "Transport", the Chart "Label"
+(chart index + center + singular/regular) where applicable, plus the named
+fields listed.  There is NO error class in this module that downgrades to
+a warning, with the single structured exception noted in E8.
 
 E1  UNSOLVABLE SINGULAR FACTOR.  A matrix-denominator or extra singular
     factor has no exact root solution in the line parameter.
@@ -512,19 +582,26 @@ E6  MATCHING RESIDUAL.  |F~.w - v| > matchTol*scale at some (eps order k,
     component c).  Carries: chart label, k, c, residual, scale.
     (Replaces old solveFailed -> least-squares -> ReportError chain,
     Transport.m:337-387.)
-E7  TOLERANCE GRAY ZONE.  A pivot/leading coefficient lies between
-    snapTol*scale and rankTol*scale (matching solve or recombination
-    post-shift leading coefficient).  Carries: chart label, the value, both
-    thresholds, the operation.
-E8  PRESCRIPTION CONFLICT OR MISSING.  At a singular chart whose solutions
-    contain multivalued sectors (b != 0, p > 0, or non-integer a), the
-    Prescriptions list yields no consistent derived Im-sign (conflicting
-    signs across simultaneously vanishing factors after the
-    multiplicity-parity and leading-coefficient-sign reduction —
-    derivation rules per old AnalyticContinuation.m:45-68: even vanishing
-    multiplicity = no constraint; required sign = prescribed sign divided
-    by leading-coefficient sign) or no prescription covers the chart at
-    all.  Carries: chart label, every vanishing factor with its prescribed
+E7  TOLERANCE GRAY ZONE.  A pivot/leading coefficient falls inside the
+    NumericallyZeroQ ambiguity band around Tol["RankTol"]*scale (matching
+    solve or recombination post-shift leading coefficient; E7 IS the band
+    error of DEC-3, not a separate mechanism — REVIEW-minimalism 10).
+    Carries: chart label, the value, both band edges, the operation.
+E8  PRESCRIPTION CONFLICT OR MISSING.  Fires when the chart is multivalued
+    AT ALL: b != 0 OR p > 0 OR Denominator[a] > 1 (DEC-16; the
+    pentagon-triage Kallen charts are fractional-a with b = 0, p = 0 and
+    MUST trigger this) and the Prescriptions list yields no consistent
+    derived Im-sign or no prescription covers the chart at all.  The sign
+    derivation is ``SectorSeries`ChartImSign`` (REVIEW-minimalism 18 —
+    not reimplemented here; rules per old AnalyticContinuation.m:45-68:
+    even vanishing multiplicity = no constraint; required sign =
+    prescribed sign divided by leading-coefficient sign); its
+    `::branchconflict`/`::branchmissing` are wrapped into this error's
+    payload.  Prescription-factor dedup is SIGN-AWARE (DEC-16:
+    {-1+x, +1} vs {1-x, +1} flip the implied i-delta side; conflicting
+    normalizations are an error here — the old sign-blind
+    deltaPrescriptionsForFactors dedup is forbidden).
+    Carries: chart label, every vanishing factor with its prescribed
     sign/multiplicity/leading-coefficient sign, the per-factor derived
     Im-signs, and the hint to add/fix DeltaPrescriptions.
     The old behavior of flagging AnalyticContinuationFailed and CONTINUING
@@ -537,7 +614,9 @@ E8  PRESCRIPTION CONFLICT OR MISSING.  At a singular chart whose solutions
     the FINAL one in the plan, TransportLine may return a TransportResult
     whose completeness metadata marks every order INCOMPLETE from that
     chart on — an honest partial result, never a silently one-sided value.
-    Anywhere else: error.  (See Q5.)
+    Anywhere else: error.  (DEC-15: this final-chart-only rule is
+    NORMATIVE across Transport/API/Config — REVIEW-math D14; pentagon
+    triage does not override it.)
 E9  CROSSING WITHOUT SIGN.  ApplyCrossing invoked with CrossSign None on a
     chart with multivalued content (should be unreachable given E8; kept as
     a cheap assert).  Carries: chart label, sector tags.
@@ -545,9 +624,11 @@ E10 ERROR ESTIMATE > 1.  Any accumulated ErrorEstimate entry exceeds 1.
     Carries: chart label of the segment that tipped it, the (integral,
     eps-order) entry, the per-segment and accumulated values.  (Port of old
     Transport.m:991-993.)
-E11 SEGMENT ACCURACY MISS.  Numeric AccuracyGoal configured and a segment's
-    probe error > 10^-DigitsNeeded.  Carries: chart label, measured error,
-    DigitsNeeded, current ExpansionOrder, suggested ExpansionOrder.
+E11 SEGMENT ACCURACY MISS.  AccuracyGoalValidate enabled (DEC-11
+    validation-only semantics; DEC-5 default False), AccuracyGoal numeric,
+    and a segment's probe error > 10^-DigitsNeeded.  Carries: chart label,
+    measured error, DigitsNeeded, current ExpansionOrder, suggested
+    ExpansionOrder.
 E12 WINDOW UNDERFLOW.  A consumer (matching, crossing, evaluation,
     assembly) requests an eps order > EpsWindow["CompleteMax"] or a t order
     > TWindow["CompleteMax"] of any operand.  Carries: chart label, sector
@@ -556,10 +637,21 @@ E12 WINDOW UNDERFLOW.  A consumer (matching, crossing, evaluation,
 E13 NO MARCHING PROGRESS.  A planned step does not strictly advance toward
     `to`, or executed segments exceed plan["SegmentCount"] (I1).  Carries:
     chart label, match points.  (Old code can loop forever; NEW.)
-E14 AMBIGUOUS ENDPOINT.  `to` is within snapTol of a singularity but not
-    exactly equal to it (exact arithmetic distinguishes; chop-based
-    detection of the old Transport.m:606-609 is forbidden, F13).  Carries:
-    `to`, the nearby root, their exact difference.
+E14 SUSPICIOUSLY NEAR-SINGULAR ENDPOINT.  Input-accuracy guard rule
+    (Tolerances.md $NearSingularityGuardDecades entry; DEC-14: user-input
+    target snapping is INPUT-scaled, never wp-scaled — a 1e-16-off user
+    target must snap, not create a degenerate chart).  An INEXACT `to`
+    with |to - root| < 10^(-Floor[Accuracy[to]/2]) for some exact
+    singularity root is SNAPPED to the root with a visible warning (the
+    input's own accuracy sets the snap scale); an inexact `to` with
+    10^(-Floor[Accuracy[to]/2]) <= |to - root| <
+    10^(-$NearSingularityGuardDecades) is THIS loud error ("target is
+    suspiciously near singularity <root>; pass the exact value, or an
+    exact offset, to confirm intent" — REVIEW-minimalism 11).  Exact `to`
+    is never snapped and never guarded — exact membership decides
+    (chop-based detection of the old Transport.m:606-609 is forbidden,
+    F13).  Carries: `to`, the nearby root, their exact difference, both
+    thresholds.
 
 ### Forbidden fallbacks (exhaustive; each is a place a fallback is tempting)
 
@@ -633,25 +725,25 @@ F15 Falling back from the exact `FindSingularities` root set to a numeric
 | DiffExp/Transport.m:635-655, 679, 1041-1046 | predivision pole intervals at ±RoC/DivisionOrder | match-point placement, 2.3 |
 | DiffExp/Transport.m:1124-1136 | FixWithin midpoint clipping before a singular chart | preserved, 2.3 |
 | DiffExp/Transport.m:1147-1168 | regular-step next center via FindNextCenterPointL/R | `NextCenter` (2.4) |
-| DiffExp/Transport.m:776-841, 1191-1213 | AccuracyGoalValidate "Before" adaptive order search / "After" redo | NOT ported; replaced by E11 (see 9, Q4) |
+| DiffExp/Transport.m:776-841, 1191-1213 | AccuracyGoalValidate "Before" adaptive order search / "After" redo | NOT ported; replaced by E11 (DEC-11 validation-only; Config's table records the waiver "replaced by exact recursion + ErrorEstimate gate") |
 | DiffExp/Transport.m:287-441 (in IntegrateSystem) | boundary fixing: equations, LinearSolve, least-squares rescue, NullSpace free params | `MatchWeights` (2.7) + E5/E6/E7; rescue/NullSpace forbidden F6/F7 |
 | DiffExp/Transport.m:317-327 | FixAt != 0 coefficient extraction by differentiation through nested SeriesData | obsolete: exact tags + SectorSeries evaluation |
 | DiffExp/Transport.m:905-993 | SEval1/SEval2 evaluation + two-point error probe + per-indeterminate errors + abort > 1 | `SegmentErrorProbe` (2.10) + E10 |
 | DiffExp/Transport.m:947-962 | ComputeErrorsPerIndeterminate | inside 2.10 |
 | DiffExp/Transport.m:1234-1246 | return association | TransportResult (3.4) via API.m |
 | DiffExp/LineSegmentation.m:65-106 `FindMatrixSingularities` | factor collection, Quiet Solve, chop dedup, ghost projection | `FindSingularities` (2.1); F3/F4 |
-| DiffExp/LineSegmentation.m:109-113 `GetLargestTerm` | matrix-truncation magnitude at coupling-discounted order | subsumed by TWindow discount + probe (2.6 step 4, 2.10) |
+| DiffExp/LineSegmentation.m:109-113 `GetLargestTerm` | matrix-truncation magnitude at coupling-discounted order | WAIVED (DEC-9: the degradation premise — truncated matrix expansions — is removed; error control = probe (2.10) + E11; ledger entry "subsumed: exact polynomial recursion + ErrorEstimate covers it") |
 | DiffExp/LineSegmentation.m:116-145 `GetMatricesPrecisionDistance` | Dynamic segmentation intervals | DROPPED (SegmentationStrategy = Predivision only in v1, RewritePlan Config.m) |
 | DiffExp/LineSegmentation.m:20-62, 239-258 `RelateLines`/`GetMatchingPoint` | Solve-based relation between segment parametrizations | obsolete: explicit invertible ChartMaps composed exactly |
 | DiffExp/LineSegmentation.m:148-236 `CheckBoundaryConditionsAndReparametrize` | bcs validation/reparametrization | API.m's contract; Transport asserts normalized input |
-| DiffExp/Mobius.m:22-35 `GetMobius` | Mobius chart maps | Chart "Map" Type "Mobius" (optional, Q3) |
+| DiffExp/Mobius.m:22-35 `GetMobius` | Mobius chart maps | DROPPED (DEC-18: Mobius is out of the new core entirely; the RoC rescaling — an affine rescaling, not a Mobius map — is KEPT) |
 | DiffExp/Mobius.m:38-69 `GetLineRescaled` | chart construction + RoC rescaling + 2x WP SetPrecision | Chart construction in SegmentLine; L1/L4 |
-| DiffExp/Mobius.m:72-142 GetMobiusCPL/R, GetCPL/GetCPR | next-center geometry (1/k of both charts) | `NextCenter` (2.4) |
+| DiffExp/Mobius.m:72-142 GetMobiusCPL/R, GetCPL/GetCPR | next-center geometry (1/k of both charts) | `NextCenter` (2.4; affine GetCPL/GetCPR only — Mobius variants dropped, DEC-18) |
 | DiffExp/Mobius.m:145-155 FindNextCenterPointL/R | bound selection wrapper | inside `NextCenter` |
 | DiffExp/AnalyticContinuation.m:18-90 `PrepareAnalyticContinuation` | per-chart vanishing-factor collection, sign derivation, replacement rules, conflict flag | sign derivation -> Prescriptions construction (3.1, shared contract with SectorSeries/API); rules -> `CrossingOperator` (2.9); conflict -> E8 |
 | DiffExp/AnalyticContinuation.m:93-103 `Project\[Theta]s` | theta-projection of two-sided data | subsumed by one-sided data + explicit crossing |
 | DiffExp/Pade.m:55-91 SEval1/SEval2/SEval | evaluation with continuation + theta resolution | evaluation -> SectorSeries (with Pade, RewritePlan 3.2); theta resolution -> ApplyCrossing |
-| DiffExp/MatrixLoading.m:357-385 `InitializeIntegrationSequence` | coupled-block ordering + MaxCouplingOrder | block ordering -> Solve.m; depth metadata consumed here for TWindow/probe |
+| DiffExp/MatrixLoading.m:357-385 `InitializeIntegrationSequence` | coupled-block ordering + MaxCouplingOrder | block ordering -> Solve.m (SolveChart, DEC-9); CouplingDepth consumed here for the probe decrement ONLY (not TWindow — DEC-9) |
 | DiffExp/MatrixLoading.m:217-231 MatricesIrreducibleFactors | singular-factor inventory | provided by LoadSystem (API.md); consumed by 2.1 |
 | FeynmanTrick/DiffExpIntegration.m:204-238 appendMatrixFactors / deltaPrescriptionsForFactors | merging IBP singular factors + endpoint prescriptions into DiffExp state | first-class config inputs: sys["ExtraSingularFactors"], Prescriptions |
 | DiffExp/Transport.m:277-282 segmentCaches/blockCache | per-segment block caching across eps orders | largely moot under symbolic-eps solve; per-chart Solve results are computed once per chart by construction (L9) |
@@ -688,14 +780,18 @@ L6  Two-point error probe.  Full vs reduced order at BOTH the incoming
     log terms vanish spuriously (old Transport.m:905-925, hack at
     :916-923); per-indeterminate error split (:947-962); additive
     accumulation (:980-984); hard abort when > 1 (:991-993).
-L7  Coupling-depth t-order degradation.  The top (couplingDepth - 1)
-    t-orders of chained particular solutions are garbage; the old code
-    discounts them in the matrix-error read-off
+L7  Coupling-depth t-order degradation — premise REMOVED (DEC-9).  The
+    old top-(couplingDepth - 1) t-orders were garbage because chained
+    particulars were built from TRUNCATED numeric matrix expansions; the
+    old code discounts them in the matrix-error read-off
     (ExpansionOrder - ISafetyExpansionSubtract - (MaxCouplingOrder - 1),
     LineSegmentation.m:109-113, ISafetyExpansionSubtract = 5 State.m:216)
     and in the probe decrement (Ceiling[0.7 MaxCouplingOrder] + 2,
-    State.m:222).  New: TWindow["CompleteMax"] = N - (couplingDepth - 1),
-    probe decrement formula preserved verbatim.
+    State.m:222).  New core: recursion matrices are exact polynomials, so
+    TWindow["CompleteMax"] = ExpansionOrder with NO discount (LessonsLedger
+    entry "subsumed: exact polynomial recursion + ErrorEstimate covers
+    it"); the probe decrement formula is preserved verbatim as a heuristic
+    input (couplingDepth from Solve metadata).
 L8  Crossing convention.  sign +1 = NO replacement, relying on
     principal-branch Log/Power on the far side; sign -1 = Logx ->
     Logx - 2 Pi I theta_m SHIFT (binomial log-chain mixing), e^(-2 Pi I b)
@@ -714,7 +810,9 @@ L9  Per-chart work is computed once.  Old code caches solver blocks across
 L10 Gray-zone honesty in numerical-zero decisions.  Leading-coefficient /
     pivot zero tests must be relative and three-valued (zero / nonzero /
     loud gray zone) — generalization of the FT LaurentTrim lesson
-    (RewritePlan section 5; Tolerances.md snapTol/rankTol).
+    (RewritePlan section 5; DEC-3: the one library-wide predicate is
+    ``Tolerances`NumericallyZeroQ`` at Tol["RankTol"], whose ambiguity
+    band IS the gray zone).
 
 ---
 
@@ -725,26 +823,38 @@ Order (acyclic, RewritePlan):
 Transport/Integrate < API`.
 
 Transport.m MAY call:
-- Tolerances.m: matchTol, snapTol, rankTol, safetyDigits, chopReserve,
-  probe constants.
-- Config.m: WorkingPrecision, AccuracyGoal(+Validate), DivisionOrder,
-  RadiusOfConvergence, ExpansionOrder, EpsilonOrder, EstimateError,
-  SegmentationStrategy (must be "Predivision"; anything else is Config's
-  loud error), UseMobius, UsePade (read-only; enforcement in SectorSeries),
-  DeltaPrescriptions, AbortOnAnalyticContinuationFail, Verbosity,
-  SaveExpansions-equivalents.
+- Tolerances.m: DE2Error (DEC-1), MatchTol, RankTol (only via
+  NumericallyZeroQ, DEC-3), ResidTol, SnapTol (computed-value/geometry
+  snapping only — no role in matching solves), ChopReserve, $SafetyDigits,
+  $InputPrecisionFactor, EvalErrorSeriesDecrease (probe constants),
+  $MinExpansionOrder, $NearSingularityGuardDecades (E14 input-accuracy
+  guard).  (Names per the Tolerances §3 consumer table as amended by
+  REVIEW-math D16 / REVIEW-minimalism 17.)
+- Config.m: WorkingPrecision, AccuracyGoal, AccuracyGoalValidate
+  (validation-only gate for E11 — DEC-11; default False — DEC-5),
+  DivisionOrder, RadiusOfConvergence, ExpansionOrder, EpsilonOrder,
+  EstimateError, SegmentationStrategy (must be "Predivision"; anything
+  else is Config's loud error), UsePade (read-only; enforcement in
+  SectorSeries), DeltaPrescriptions, AbortOnAnalyticContinuationFail,
+  Verbosity via PrintInfo/PrintWarning (the only print helpers,
+  REVIEW-minimalism 5).  UseMobius is NOT read (Mobius dropped, DEC-18);
+  SaveExpansions is API.m's business (caller callback, 3.4).
 - EpsSeries.m: all window-carrying eps-Laurent arithmetic, the graded/
   Laurent linear solve used by MatchWeights, exact eps-division (window
-  shift) used by RecombineBasis.
+  shift) used by RecombineBasis, ESTrim/ESCoeffZeroQ (2.7 column trim).
 - SectorSeries.m: evaluate (with Pade and ITS loud fallback), multiply,
-  re-expand, assemble/add LocalSolutions, differentiate.
+  re-expand, CombineLocalSolutions (SectorSeries.md 2.10), differentiate,
+  ChartImSign (the single sign-derivation authority, REVIEW-minimalism
+  18).
 - Indicial.m: per-chart sector specs, Prescriptions derivation inputs,
-  EpsDegenerateFamilies metadata (Q2).
-- Solve.m: SolveChart (fundamental basis + particular + CouplingDepth and
-  related metadata).
+  EpsDegenerateFamilies (DEC-7).
+- Solve.m: PrepareChart (ChartSystem assembly from Indicial output:
+  V, VInv, J, collision data — DEC-7) and SolveChart (block-sequential
+  fundamental basis + particular + CouplingDepth — DEC-9).
 
-Transport.m MUST NOT call: Integrate.m (sibling; Integrate may call
-Transport's exported CrossingOperator), API.m, anything in FeynmanTrick/,
+Transport.m MUST NOT call: Integrate.m (sibling — no calls in EITHER
+direction; the shared branch convention is SectorSeries' sigma rule, not
+a sibling export — REVIEW-math D28), API.m, anything in FeynmanTrick/,
 anything in the frozen DiffExp/ tree.
 
 ---
@@ -754,6 +864,16 @@ anything in the frozen DiffExp/ tree.
 Closed-form/pure tests run without the old library; tests marked (kernel,
 oracle) consume M0-pregenerated artifacts and belong to the M4 gate but are
 enumerated here because they pin THIS module's behavior.
+
+Error tests assert via `Catch[..., "DiffExp2Error"]` returning the
+`Failure["DiffExp2", ...]` with the named "ID"/"Module" payload fields
+(DEC-1).  COVERAGE RULE (M0 review): every error ID and warning ID of
+section 5 has at least one unit test that triggers it and asserts its
+required payload fields, OR a one-line waiver in the test file naming the
+ID and why it is untestable in isolation (e.g. "unreachable by
+construction, guarded by assert X").  The IDs currently missing tests are
+enumerated in Docs/specs/REVIEW-minimalism.md defect 25; the
+implementation agent closes the list before the module's milestone gate.
 
 T1  `test_segmentation_exact_roots`
     Factors {1 - 4 x, x, 1 - x}; SegmentLine from 11/23 to 0.  Asserts: the
@@ -814,9 +934,12 @@ T12 `test_matching_recombination_logx`
     class).  Naive basis S1 = (1, 0), S2 = (x^(2eps), 2 eps x^(2eps)):
     ord_eps det F == 1 at any match point.  Asserts: RecombineBasis
     produces B2 = (S2 - S1)/(2 eps); det F~[0] == 1 (unimodular); for
-    incoming data = the regular solution ((x^(2eps)-1)/(2 eps),
-    x^(2eps)-1) evaluated at t_m = 1/3, MatchWeights == (0, 1) to matchTol,
-    with weight window starting at eps^0 (NOT eps^-1).
+    incoming data = the eps-regular solution B2 itself, i.e.
+    ((x^(2eps)-1)/(2 eps), x^(2eps)) evaluated at t_m = 1/3 (eps^0 value
+    (Log[1/3], 1)), MatchWeights == (0, 1) to matchTol, with weight window
+    starting at eps^0 (NOT eps^-1).  (Second component corrected at M0
+    review: x^(2eps)-1 is not a solution of this system — REVIEW-math D9 /
+    REVIEW-minimalism 22.)
 T13 `test_matching_det_assert_loud`
     Two identical basis columns with IDENTICAL tags (not recombinable):
     E5 fires; message contains the chart label string, all sector tags,

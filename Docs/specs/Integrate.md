@@ -25,15 +25,17 @@ case table with one load-bearing boundary rule (the dimreg convention
 divergences that fail the object-level cancellation check). The module also
 handles interior singular points (PV / finite-part for `b = 0`, exact
 phase-paired iδ crossing for `b ≠ 0`, both with the two-half-segment pairing
-enforced by assert), rejects Mobius charts loudly, and assembles the segment
-chain into one final eps-Laurent per component with honest EpsWindow and
-TWindow metadata — no padding, no silent drops, no fitting.
+enforced by assert), owns the endpoint-limit drop rule and divergence gate
+(`EndpointSectorLimit`, 2.4 — it shares the 2.2.3 gate), rejects non-affine
+charts loudly, and assembles the segment chain into one final eps-Laurent per
+component with honest EpsWindow and TWindow metadata — no padding, no silent
+drops, no fitting.
 
 ---
 
 ## 2. PUBLIC SYMBOLS
 
-Context: `DiffExp2`Integrate``. Exactly three exports. Everything else is
+Context: `DiffExp2`Integrate``. Exactly four exports. Everything else is
 `Private``.
 
 ### 2.1 `SectorMonomialIntegral[m, b, p, T, kMaxOut]`
@@ -61,9 +63,9 @@ Arguments:
             because the closed form is exact to all orders; the result is
             truncated, with `CompleteMax = kMaxOut` honestly.
 
-Returns: `EpsLaurent` (section 3.4) with
-`Min = p − (p+1) = −1` in the pole cell, `Min = p` otherwise, and
-`CompleteMax = kMaxOut`.
+Returns: an EpsSeries value (section 3.4; DEC-13 shape) with
+`EpsWindow["Min"] = p − (p+1) = −1` in the pole cell, `= p` otherwise, and
+`EpsWindow["CompleteMax"] = kMaxOut`.
 
 #### 2.1.1 The antiderivative (exact closed forms)
 
@@ -89,7 +91,7 @@ it is the exact Laurent shift `1/(b·eps)^(j+1)` (EpsSeries Laurent-division
 contract, math review finding 6(iv)). `T^(b·eps) = Σ_r (b·Log T)^r eps^r/r!`
 is assembled to the needed length with `Log T` evaluated once per chart at
 ≥ 2×WP under `$MinPrecision = WP` (ledger: precision floors). No symbolic
-`Series[]` calls; everything is finite EpsLaurent arithmetic.
+`Series[]` calls; everything is finite EpsSeries window arithmetic.
 
 #### 2.1.2 Boundary evaluation at t = 0 — THE RULES
 
@@ -170,10 +172,11 @@ Arguments:
   with the chart center is decided exactly or within `snapTol`
   (Tolerances.m); a bound that is "almost" 0 but not snapped is E5.
 
-Returns: `<| "Values" -> {EpsLaurent per component},
+Returns: `<| "Values" -> {EpsSeries value per component (3.4)},
 "EpsWindow" -> <|"Min"->.., "CompleteMax"->..|> (of the Values),
 "ErrorEstimate" -> <|k -> est..|> (t-truncation tail per eps order),
-"TWindowUsed" -> nmax |>`.
+"TWindowUsed" -> nmax |>` — the metadata keys are SIBLINGS of the
+series values, never fields inside them (3.4).
 
 #### 2.2.1 Endpoint classification (exact, three cases)
 
@@ -208,15 +211,22 @@ Returns: `<| "Values" -> {EpsLaurent per component},
 For each sector `s = <|a, b, p, Coeffs c[k,n,comp]|>` and component:
 
     contribution = Σ_{k=κmin}^{κmax} Σ_{n=0}^{nmax} c[k,n,comp] · eps^k ·
-                   SectorMonomialIntegral[a+n, b, p, T, κmax + shift_s(k)]
+                   SectorMonomialIntegral[a+n, b, p, T, K_s − k]
 
-implemented sector-at-a-time (factor `T^(b·eps)` and the `Log^q T` powers
-once per sector; per-n only the geometric `1/α^(j+1)` series differ), with
-`nmax = ls["TWindow"]["CompleteMax"]` — degraded top t-orders beyond
-CompleteMax are NEVER consumed (coupling-depth lesson, legacy review
-finding 6). The t-truncation tail per eps order is estimated as
-`|c[k,nmax,comp]| · T^(a+nmax+1) / |a+nmax+1|` (the next term's magnitude;
-for the pole-cell sector use the same bound at `n = nmax`), accumulated into
+where `kMaxOut = K_s − k`, with `K_s = κmax + p` for sectors that cannot hit
+the pole cell and `K_s = κmax − 1` for pole-hit sectors (`b ≠ 0` with
+`a + n + 1 = 0` reachable), so that after the `eps^k` shift every
+contribution shares the sector's uniform CompleteMax `K_s` of 2.1.3
+(REVIEW-math D22). Implemented sector-at-a-time (factor `T^(b·eps)` and the
+`Log^q T` powers once per sector; per-n only the geometric `1/α^(j+1)`
+series differ), with `nmax = ls["TWindow"]["CompleteMax"]` — t-orders beyond
+CompleteMax do not exist in the object (TWindow is the truncation-order
+record ONLY, DEC-9: recursion matrices are exact polynomials, so the old
+coupling-depth degradation has no premise in the new core). The t-truncation
+tail per eps order is estimated as
+`|c[k,nmax,comp]| · T^(a+nmax+1) / |a+nmax+1|` when `a+nmax+1 ≠ 0`, and
+`|c[k,nmax,comp]| · |Log T|` when `a+nmax+1 == 0` (the next term's
+antiderivative magnitude in the log cell; REVIEW-minimalism 28), accumulated into
 `ErrorEstimate[k']` for every output order k' the term feeds, and ADDED to
 the LocalSolution's incoming `ErrorEstimate`. Estimate > 1 (relative to the
 result's leading coefficient at that order) ⇒ abort, error E8 (the ported
@@ -233,7 +243,11 @@ Precondition: the LocalSolution handed to Integrate is the ASSEMBLED
 combination — in FT use, `Σ_j c_j(x,eps)·f_j(x,eps)` has already been formed
 by SectorSeries rational-multiply + add (RewritePlan 3.3 "integrate:
 rational-multiply + exact cancellation at object level"), and same-tag
-sectors are merged (one sector per exact `(a,b,p)`; invariant I2). The old
+sectors are merged (one sector per exact `(a,b,p)`; invariant I2), and
+integer-spaced same-(b,p) sectors merged to minimal a (SectorSeries.md 2.2;
+assert at entry: no two sectors share b, p with integer a-difference —
+violation is E7-class; REVIEW-math D12). The gate's per-monomial
+coefficients are well-defined only on this canonical form. The old
 warning "Combines the integrand before integration to handle cancellation of
 poles in IBP coefficients" (FeynmanTrick/DiffExpIntegration.m:16-21,
 532-545) is here an input invariant, not a hope.
@@ -250,13 +264,16 @@ For every `b = 0` sector and every divergent local power
    pre-merge data). Distinct p values are distinct monomials and may NOT be
    summed against each other.
 2. If the coefficient is exactly zero: drop, no event.
-3. If it is numerically zero — `|c| ≤ chopFloor · scale_k` with
+3. If it is numerically zero — `ESCoeffZeroQ[c, scale_k]` at
+   `Tol["LaurentLeadTol"]` (= `Max[10^(-Floor[chopDigits/2]), 10^-24]` per
+   Tolerances.md as amended by REVIEW-math D1; the campaign class
+   Recurrence.m:613-618; DEC-2's hard 10^-24 floor and 4-decade band), with
    `scale_k = max_n' |c[k,n',comp]|` over the merged combination at that eps
-   order and `chopFloor` from Tolerances.m (RELATIVE test; the campaign's
-   numerical-zero leading-coefficient lesson, threshold class
-   `Max[10^(−ChopPrecision/2), 10^−24]`, memory brief "Fixes") — drop it and
-   count the event (result metadata `"CancelledDivergent" -> count`; an
-   info-level Verbosity≥2 print, never a warning).
+   order (DEC-4: RELATIVE, per-eps-order; the divergence error fires only if
+   the offending coefficient exceeds laurentLeadTol relative to that scale)
+   — drop it and count the event (result metadata
+   `"CancelledDivergent" -> count`; an info-level `Config`PrintInfo` at
+   Verbosity≥2, never a warning).
 4. Otherwise: LOUD ERROR E2, carrying every field listed in section 5.
    There is NO step 5. In particular the old "resonant endpoint coefficient
    with zero epsilon regulator; dropping contribution" silent drop
@@ -308,11 +325,15 @@ Docs/FeynmanTrickBoxFamilyStatus.md "Fixed this campaign").
     real results (Im ≤ tol; invariant I7). This is the 9aeb300 regression
     pin.
 - **b ≠ 0 monomials:** exact iδ crossing using the chart prescription sign
-  σ ∈ {+1, −1} (from `ls["Prescriptions"]`; missing/ambiguous ⇒ E3). With
+  σ ∈ {+1, −1}: `σ := SectorSeries`ChartImSign[ls]`; E3 fires iff it returns
+  None while a phase is needed, or throws conflict (the sign derivation is
+  NOT reimplemented here — REVIEW-minimalism 18). With
   the principal-branch-far-side convention (negative arm:
-  `t^α := e^(iπσα)|t|^α`, `Log t := Log|t| + iπσ`; pinned to the SAME
-  convention as Transport.m's crossing operator and SectorSeries' branch
-  rule — RewritePlan 3.2 Transport, legacy review finding 14), the paired
+  `t^α := e^(iπσα)|t|^α`, `Log t := Log|t| + iπσ`; pinned to SectorSeries'
+  sigma rule (its 2.4.1), the single owner of the scalar branch rule —
+  REVIEW-math D28; agreement with Transport.m's sector-level mixing operator
+  is guaranteed by the cross-module parity tests (Transport T8, test 14
+  here), never by a sibling call), the paired
   integral of the pole cell is computed as ONE regular series:
 
       ∫_{t1}^{t2} t^(−1+b·eps) dt
@@ -339,7 +360,9 @@ Docs/FeynmanTrickBoxFamilyStatus.md "Fixed this campaign").
 `F(T)` at `T > 0`: principal real `Log T`, real powers, evaluated at ≥ 2×WP
 under `$MinPrecision = WP`. `F(t)` at `t < 0` (case-3 windows on the
 negative side, and the b ≠ 0 interior arms): the chart's resolved branch
-sign σ from `Prescriptions` gives `Log t = Log|t| + iπσ`,
+sign σ — `σ := SectorSeries`ChartImSign[ls]`; E3 fires iff it returns None
+while a phase is needed, or throws conflict (REVIEW-minimalism 18) — gives
+`Log t = Log|t| + iπσ`,
 `t^(m+b·eps) = e^(iπσ(m+b·eps))|t|^(m+b·eps)` — note the phase carries the
 FULL exponent `a + n + b·eps` including non-integer a (math review
 finding 5(i); old half-integer special-casing,
@@ -402,6 +425,37 @@ one-shot script (old pattern: `maybeDumpLaurentDefiniteIntegral`,
 DiffExp/RegularizedIntegration.m:225-256 + `Scripts/eval_dump_generic.m`;
 memory brief "dump-replay loop"). ~25 lines; prints one line per dump.
 
+### 2.4 `EndpointSectorLimit[ls, direction]`
+
+    EndpointSectorLimit[ls_Association, direction_:1]
+      -> {EpsSeries value per component (3.4)}
+
+The RewritePlan 3.3 limitUpper/limitLower primitive, owned HERE because it
+shares the 2.2.3 gate (REVIEW-minimalism 12): `lim_{t→0}` of the assembled
+LocalSolution. Per sector:
+
+- `b ≠ 0` (any a, any p): dropped EXACTLY — the dimreg convention of 2.1.2
+  applied to the value, `t^(b·eps) Log^q t |_{t=0} := 0`.
+- `b = 0` content that diverges at t = 0 — any monomial `t^m` with
+  `m = a + n ≤ −1` (any p), or `t^0` content (`a + n = 0`) with `p > 0` —
+  runs the 2.2.3 merged-coefficient cancellation gate per eps order; a
+  surviving coefficient is a LOUD ERROR (E2-class; API.md E26 payload:
+  component, tag, eps order — REVIEW-math D13).
+- The limit readout is the coefficient of the monomial `t^0`: Σ over sectors
+  with `b == 0`, `p == 0` and integer `a ≤ 0` of `c[k, n = −a, comp]` (exact
+  tag selection; on the canonical merged input — I2 — at most one such
+  sector exists per component). NOT "the (0,0,0) sector's constant": after
+  the integer-spaced merge the former (0,0,0) content may sit at column
+  n = −a of a merged a < 0 sector (REVIEW-math D13).
+
+`direction` resolves nothing here (the limit value is branch-independent for
+the surviving terms) but is validated against the chart Prescriptions for
+consistency: E3 fires if the chart is multivalued AT ALL (`b ≠ 0` OR `p > 0`
+OR `Denominator[a] > 1` — DEC-16) and no prescription exists — the check
+stays so configuration gaps surface even on the drop path. API.m's
+EndpointLimit = combination (SectorSeries CombineLocalSolutions /
+MultiplyRational) + this function (API.md §7).
+
 ---
 
 ## 3. DATA CONTRACTS
@@ -409,26 +463,31 @@ memory brief "dump-replay loop"). ~25 lines; prints one line per dump.
 ### 3.1 LocalSolution (RewritePlan 3.1, verbatim)
 
     LocalSolution = <|
-      "Center" -> exact x0, "ChartMap" -> affine (Mobius optional, see 3.2),
+      "Center" -> exact x0, "ChartMap" -> affine (DEC-18: Mobius is dropped
+                  from the new core entirely; RoC rescaling is an affine
+                  rescaling and folds into Scale — see 3.2),
       "Radius" -> distance to nearest singularity IN THE COMPLEX PLANE
                   (complex singularities are real: pentagon/unequal-mass
                   lines have them; old code projects ghosts Re, Re±Im —
                   ledger item; new code uses true complex distance),
       "Sectors" -> { Sector.. },
       "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
-      "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* t-order honesty: top
-                  (couplingDepth−1) orders of chained particular solutions
-                  are degraded (old MaxCouplingOrder/ISafetyExpansionSubtract
-                  lesson); tracked, not guessed *)
+      "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* truncation-order record
+                  ONLY (DEC-9): recursion matrices are exact polynomials, so
+                  the old coupling-depth degradation has no premise in the
+                  new core; the MaxCouplingOrder lesson is subsumed by exact
+                  polynomial recursion + ErrorEstimate *)
       "ErrorEstimate" -> per (eps-order) accumulated error (two-point
                   full-vs-reduced-order probe, additive across segments,
                   abort > 1 — ported old machinery, user-facing),
       "Prescriptions" -> LIST of <|"Factor", "Sign", "Multiplicity",
                   "LeadingCoeffSign"|> with the derived chart Im-sign;
                   consistency-checked at construction (even multiplicity = no
-                  constraint; conflict or missing prescription at a chart with
-                  b!=0/p>0 sectors = LOUD ERROR; sqrt factors auto-prescribed
-                  as in old State.m DEqnSquareRoots)
+                  constraint; conflict or missing prescription at a chart
+                  that is multivalued AT ALL — b != 0 OR p > 0 OR
+                  Denominator[a] > 1, DEC-16 — = LOUD ERROR;
+                  prescription-factor dedup is SIGN-AWARE per DEC-16; sqrt
+                  factors auto-prescribed as in old State.m DEqnSquareRoots)
     |>
 
 ### 3.2 Sector (RewritePlan 3.1, verbatim)
@@ -449,8 +508,9 @@ true-resonance sectors have `Min = −p`). `TWindow["CompleteMax"]` is the
 highest trustworthy t-power n. Integrate consumes ONLY k ≤ CompleteMax and
 n ≤ TWindow CompleteMax.
 
-`ChartMap` assumed canonical affine form (reconcile with
-SectorSeries.md/Transport.md, open question Q2):
+`ChartMap` canonical affine form (affine-only is now library-wide — DEC-18
+drops Mobius from the new core; field-name reconciliation with
+Transport.md remains, Q2):
 
     "ChartMap" -> <|"Type" -> "Affine", "Center" -> x0, "Scale" -> s|>
     meaning x = x0 + s·t,  s ≠ 0 real (includes any RoC rescaling).
@@ -466,21 +526,26 @@ by API.m's IntegrateOverLine)
                                        the sub-interval this chart covers *)
     |>
 
-### 3.4 EpsLaurent (owned by Docs/specs/EpsSeries.md; assumed shape)
+### 3.4 Eps-Laurent values (owned by Docs/specs/EpsSeries.md; DEC-13)
 
-    EpsLaurent = <|
-      "Min" -> kmin, "CompleteMax" -> kmax,        (* integers *)
-      "Coefficients" -> {c_kmin, ..., c_kmax}      (* numbers at WP *)
-    |>
+Every eps-Laurent value this module produces or consumes is the canonical
+EpsSeries object, verbatim (DEC-13; REVIEW-math D18 / REVIEW-minimalism 23):
+
+    <|"EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
+      "Coeffs" -> {c_kmin, ..., c_kmax}|>
 
 with add / scale / multiply / Laurent-divide carrying windows per the
 EpsSeries window-shift semantics (denominator with vanishing eps^0 part
-shifts Min AND CompleteMax). Field names to be reconciled (Q1).
+shifts Min AND CompleteMax). Metadata ("ErrorEstimate",
+"CancelledDivergent", tail estimates) lives in SIBLING association keys
+(2.2 return shape, 3.5), never inside the series object. No other in-core
+shape exists; API.md's user-facing LaurentValue is produced exclusively by
+an API.m boundary converter — this module never constructs or consumes it.
 
 ### 3.5 LineIntegralResult (output of 2.3)
 
     LineIntegralResult = <|
-      "Values" -> {EpsLaurent per component},
+      "Values" -> {EpsSeries value per component (3.4)},
       "EpsWindow" -> <|"Min"->.., "CompleteMax"->..|>,
       "ErrorEstimate" -> <|k -> est ..|>,
       "CancelledDivergent" -> n1, "FinitePartDrops" -> n2,
@@ -500,9 +565,13 @@ unnecessary and forbidden (F8, F10).
 
 - **I1 Affine-only:** every consumed chart has `ChartMap["Type"] === "Affine"`
   with numeric nonzero Scale. Violation ⇒ E1 (assert at entry of 2.2 and 2.3).
-- **I2 Unique tags:** within each LocalSolution, sector tags `(a,b,p)` are
-  pairwise distinct under exact comparison. Violation ⇒ E7. (Cancellation
-  correctness depends on this: merging is summation.)
+- **I2 Unique tags, merged canonical form:** within each LocalSolution,
+  sector tags `(a,b,p)` are pairwise distinct under exact comparison, AND no
+  two sectors share (b, p) with integer a-difference (the integer-spaced
+  merge of SectorSeries.md 2.2 has been applied — REVIEW-math D12).
+  Violation ⇒ E7. (Cancellation correctness depends on this: merging is
+  summation, and the 2.2.3 gate's per-monomial coefficients are well-defined
+  only on the merged canonical form.)
 - **I3 Exact cell selection:** `b == 0` and `a+n+1 == 0` decided on exact
   tags only; assert tags are exact (no inexact numbers in a, b, p).
 - **I4 Pairing/window assert:** after any interior crossing, the assembled
@@ -531,8 +600,12 @@ unnecessary and forbidden (F8, F10).
 
 ## 5. ERROR CONTRACT
 
-All errors are raised through one helper that prints/returns a structured
-Failure carrying, ALWAYS: the entry point name, the chart Center x0
+All errors are raised via ``Tolerances`DE2Error[id, payload]`` (DEC-1:
+prints a one-line summary and
+`Throw[Failure["DiffExp2", payload], "DiffExp2Error"]`; the catch sits at
+every API.m entry point); this module defines no other error mechanism
+(REVIEW-math D17 / REVIEW-minimalism 5). The payload carries, ALWAYS: "ID",
+"Module" -> "Integrate", the entry point name, the chart Center x0
 (main-line), the integration bounds (main-line and chart coordinates), and
 the component index; plus the per-error fields below. No error in this
 module is catchable-and-defaulted internally (no `Quiet[Check[..., 0]]`
@@ -540,15 +613,19 @@ anywhere — the FT-layer instances at FeynmanTrick/DiffExpIntegration.m:
 1037-1059 and 1080-1093 are the named anti-pattern, F9).
 
 - **E1 MobiusChartRejected.** Fires when any consumed `ChartMap` is not
-  affine. Message: chart Center, the map's Type, and the remediation "this
-  line was transported with UseMobius enabled; integration requires affine
-  charts (v1) — re-transport with UseMobius -> False". Same contract as the
-  old hard requirement (FeynmanTrick/DiffExpIntegration.m:352
+  affine. Message: chart Center, the map's Type, and the remediation "Mobius
+  charts are dropped from the new core entirely (DEC-18); this segment came
+  from the legacy pipeline or a foreign producer — re-transport with the
+  DiffExp2 core (affine charts only; RoC rescaling is affine and stays)".
+  Same contract as the old hard requirement
+  (FeynmanTrick/DiffExpIntegration.m:352
   `UseMobius -> False, (* Required for integration! *)`;
   DiffExp/RegularizedIntegration.m:8-10), now loud instead of conventional.
 - **E2 NonIntegrableB0Divergence.** Fires per 2.2.3 step 4: a `b = 0` sector
   with `a+n+1 ≤ 0` (ANY p, including the `a+n+1 = 0`, p ≥ 0 log classes)
-  has a merged coefficient above the chop floor at an integration endpoint
+  has a merged coefficient failing the RELATIVE `laurentLeadTol`
+  cancellation test of 2.2.3 step 3 (DEC-4; REVIEW-math D3 — never the
+  absolute chop floor) at an integration endpoint
   at the chart center. Message: chart Center, sector tag (a, b, p), local
   power n, absolute power m = a+n, eps order k, the coefficient value, the
   relative scale and threshold used, which bound (Lower/Upper) hit the
@@ -666,15 +743,15 @@ RegularizedIntegration.m:45-76). Disposition of every export:
 | `IntegrateSingularTermLaurent` (:51; impl 489-703) | ABSORBED → same. Its three internal paths map: interior-split (507-530) → 2.2.4; meromorphic Hadamard split (571-652) → 2.2.4 b = 0 closed forms; subtraction dispatch (668-675) → dimreg rule. |
 | `IntegrateDecomposition` (:53; impl 1880-1888) | DIES (the DecomposeSingularity input format is replaced by exact Sector data from SectorSeries). |
 | `IntegrateDecompositionLaurent` (:55; impl 1890-1919) | ABSORBED → `IntegrateLocalSolution` (per-sector sum with EpsLaurent assembly). |
-| `EvaluateLimitAtSingularity` (:57; impl 1921-1952) | NOT Integrate.m: endpoint limits are SectorSeries evaluate-with-branch-rule / API.m EndpointLimit (RewritePlan 3.3 limitUpper/limitLower). Cross-reference only. |
+| `EvaluateLimitAtSingularity` (:57; impl 1921-1952) | ABSORBED → `EndpointSectorLimit` (2.4): the b ≠ 0 drop rule and the divergence gate live HERE (REVIEW-minimalism 12); API.m's EndpointLimit = SectorSeries combination + this function (API.md §7). |
 | `EvaluateEndpointLimitSectors` (:59; impl 1965-2141) | DIES WITH THE FITTER. Its contract (drop rule applied per sector to the ABSOLUTE exponent, not to a collapsed exponent — RegularizedIntegration.m:1954-1964) is automatic in the sector-native representation. FT call site FeynmanTrick/DiffExpIntegration.m:1015 retargets to the API limit entry (shim audit R4). |
 | `FitResidualEndpointSectors` (:61; impl 909-1331, plus clusterRootSpecs 860-907) | DIES WITH THE FITTER (Prony/Hankel recovery, candidate dominance gates, salvage). ~470 lines deleted by design; the N-root fitter (f48cd94) is superseded (RewritePlan section 10). |
 | `IntegrateSegmentData` (:63; impl 2150-2211) | ABSORBED → per-segment step of `IntegrateSegmentedLine` (with F13 fixed: exact affine jacobian). |
 | `IntegratePiecewiseSaved` (:65; impl 2218-2276) | ABSORBED → `IntegrateSegmentedLine` (overlap selection becomes the strict tiling contract E5). |
 | `DefiniteIntegral` (:67; impl 2279-2282) | ABSORBED → thin API.m wrapper (IntegrateOverLine) over `IntegrateSegmentedLine`. |
-| `IndefiniteIntegral` (:69; impl 2285-2353) | DROPPED v1 with reason: only referenced by the old-core test Tests/test_regularized_integration.m:165-180; no FT or example dependency; API.m's ToPiecewise-equivalents cover the use case. Record in Docs/ExportDisposition.md. |
+| `IndefiniteIntegral` (:69; impl 2285-2353) | DROPPED v1 (DEC-24: API exposes IntegrateOverLine only; the 6 IndefiniteIntegral test sites are retargeted/retired at M6, when the disposition table is updated). No FT or example dependency; API.m's ToPiecewise-equivalents cover the use case. Record in Docs/ExportDisposition.md. |
 | `DefiniteIntegralWithPrefactor` (:71; impl 2487-2547) | DIES (non-Laurent variant; superseded). |
-| `DefiniteIntegralWithPrefactorLaurent` (:76; impl 2549-2625 + segment workers 2632-3010) | SPLIT: the power-law/rational prefactor multiplication and the pole-absorption-into-a (impl 2680-2838) are SectorSeries.m's rational-multiply (a-shift at the endpoint charts is exact tag arithmetic); the integration core is `IntegrateSegmentedLine`. The FT call site FeynmanTrick/DiffExpIntegration.m:875 gets the named replacement: API.m `IntegrateOverLine[segments, {0,1}, "Prefactor" -> <|"PowerAtLower" -> v1−1, "PowerAtUpper" -> v2−1|>]` = SectorSeries multiply then this module (shim audit R4). The Gamma prefactor stays in the FT layer (FeynmanTrick/DiffExpIntegration.m:570-571). |
+| `DefiniteIntegralWithPrefactorLaurent` (:76; impl 2549-2625 + segment workers 2632-3010) | SPLIT: the power-law/rational prefactor multiplication and the pole-absorption-into-a (impl 2680-2838) are SectorSeries.m's rational-multiply (a-shift at the endpoint charts is exact tag arithmetic); the integration core is `IntegrateSegmentedLine`. The FT call site FeynmanTrick/DiffExpIntegration.m:875 gets the named replacement: API.m `IntegrateOverLine[segments, {0,1}, "Prefactor" -> <|"PowerAtLower" -> v1−1, "PowerAtUpper" -> v2−1|>]` = SectorSeries multiply then this module (shim audit R4). v1−1, v2−1 are INTEGER (FT propagator exponents): per DEC-22, v1 prefactors are rational in x times integer powers of eps only — eps-DEPENDENT closed-form prefactors (the Beta-function pin class) are handled at the FT layer, which already carries EpsPrefactors as integer shifts; an eps-dependent power is a loud API-level error (API test 17 replaced accordingly). The Gamma prefactor stays in the FT layer (FeynmanTrick/DiffExpIntegration.m:570-571). |
 
 Supporting internals that DIE with their callers: the Laurent helper family
 (LaurentAdd/Scale/Trim/Zero, RegularizedIntegration.m:176-223 — EpsSeries
@@ -741,9 +818,15 @@ affine contract).
 May call (acyclic order Tolerances < Config < EpsSeries < SectorSeries <
 Indicial < Solve < Transport/Integrate < API):
 
-- **Tolerances.m** — chopFloor (2.2.3), snapTol (E5), matchTol (I6),
-  laurentLeadTol (2.3 step 6). No literal tolerance constants in this module.
-- **Config.m** — WorkingPrecision, Verbosity via the validated accessor only.
+- **Tolerances.m** — laurentLeadTol (cancellation gate 2.2.3 + result trim
+  2.3 step 6 — REVIEW-math D3/D16, REVIEW-minimalism 1/17), snapTol
+  (tiling/endpoint snapping, E5; computed-value snapping only), matchTol
+  (additivity spot-check I6), and `DE2Error` (section 5). NO chopFloor: it
+  is the absolute coefficient noise floor, never a classification tolerance.
+  No literal tolerance constants in this module.
+- **Config.m** — WorkingPrecision, Verbosity via the validated accessor
+  only; ``Config`PrintInfo`` for the gated info prints (2.2.3 step 3 —
+  REVIEW-minimalism 5; no other print helper is defined here).
 - **EpsSeries.m** — all eps-Laurent arithmetic incl. Laurent division
   window-shift semantics (cells 9/10) and window-carrying add/scale.
 - **SectorSeries.m** — LocalSolution structural accessors/validators and the

@@ -81,6 +81,19 @@ visibility test C18 mirrors Tolerances T13).
 - `ConfiguredQ[] -> True|False` True after the first successful
   Load/UpdateConfiguration (used by API.m for its "no configuration loaded"
   error path).
+- `PrintInfo[level_Integer, args__]` / `PrintWarning[args__]`: the only
+  verbosity-gated print helpers in DiffExp2 (gates: CFG["Verbosity"],
+  CFG["VerbosityDebug"]).  PrintWarning is never gated below visibility of
+  level 1.  No other module defines print helpers.  (REVIEW-minimalism 5;
+  +~8 lines, funded by the LogFile/Crosscheck drops, section 9.)
+- `EpsSymbols[] -> {Global`eps, \[Epsilon]}` and
+  `CanonicalEps[] -> Global`eps`: constants (not schema keys — not user
+  configurable), THE library-wide answer to "which symbols are the
+  regulator" (RewritePlan 3.2 API.m: both accepted).  EpsSeries I-3 and
+  SectorSeries validation read these; API.m normalizes inputs to
+  CanonicalEps[] at ingestion.  Config holds no indeterminate state
+  (REVIEW-minimalism 16: per-call "Indeterminates" travel on the
+  LocalSolution/BoundaryConditions records, never through Config).
 
 Note: there is deliberately NO exported mutable association and NO `FEC`-style
 alias.  Higher modules read through `CFG` only; Tests assert (C19) that the
@@ -103,30 +116,26 @@ Kept keys, their DiffExp2 meaning, type, default, and the old-code anchor:
 | "WorkingPrecision" | Integer >= 20 | 500 | master precision; drives ALL tolerances | State.m:135 |
 | "ChopPrecision" | Integer or Automatic | Automatic -> `Tolerances`ChopDigits[wp]` | chopDigits for Tolerances; must be < WP | State.m:109; DiffExp.m:121-125 |
 | "LinearSolveChopPrecision" | Integer or Automatic | Automatic -> ChopPrecision | matchDigits; auto-syncs to ChopPrecision unless explicitly set IN THE SAME update | State.m:119; DiffExp.m:126-130 |
-| "AccuracyGoal" | Integer or "?" | "?" | requested digits at evaluation points; digit budgeting + adaptive order search (Transport.m module) | State.m:107; old Transport.m:527,759 |
-| "AccuracyGoalValidate" | "Before" \| "After" \| None | "Before" | "Before": adaptive expansion-order search (averaging window $ExpansionOrdersAveraging, +/-10 steps, 3-digit surplus, min order 10; old Transport.m:776-841); "After": redo segment at +$ExpansionOrderIncreaseValidate (old Transport.m:1191-1213); None: fixed order | State.m:108 |
+| "AccuracyGoal" | Integer or "?" | "?" | requested digits at evaluation points; digit budgeting + per-segment accuracy validation (Transport.md §2.5/E11; "?" => DigitsNeeded := ChopDigits, plan "BudgetMode" -> "Unvalidated", never silently) | State.m:107; old Transport.m:527,759 |
+| "AccuracyGoalValidate" | False \| True (Normalize: compat "Before"/"After" -> True, None -> False) | False | False: no per-segment accuracy check; True: the DiffExp2 post-hoc per-segment accuracy check (Transport.md E11: segment probe error must satisfy err <= 10^-DigitsNeeded, error names the segment and the suggested ExpansionOrder).  The old adaptive expansion-order search (old Transport.m:776-841, 1191-1213) is NOT ported — ledger waiver with reason "replaced by exact recursion + ErrorEstimate gate" (DEC-11; REVIEW-math D4 as adapted by DEC-5) | State.m:108 |
 | "DeltaPrescriptions" | list, see 3.3 | {} | branch-point prescriptions feeding LocalSolution "Prescriptions" | DiffExp.m:140-148,164-168 |
 | "DivisionOrder" | Integer >= 2 | 3 | chart geometry k: match/eval point at radius/k of BOTH adjacent charts (GetCPL/GetCPR lesson, old Mobius.m:98-142; old Transport.m:679); FT pins k=4 (DiffExpIntegration.m:272) | State.m:112 |
 | "EpsilonOrder" | Integer >= 0 | 4 | requested top eps order; EpsWindow tracks honest completeness against it | State.m:113 |
-| "EstimateError" | False \| True \| "Fast" | "Fast" | two-point error probe per segment, additive accumulation, abort > 1 (old Transport.m:907-925,980-993); feeds "ErrorEstimate" of LocalSolution and "ErrorEstimates" output | State.m:114 |
+| "EstimateError" | False \| True \| "Fast" | "Fast" | two-point error probe per segment, additive accumulation, abort > 1 (old Transport.m:907-925,980-993); feeds "ErrorEstimate" of LocalSolution and "ErrorEstimates" output.  True is accepted as an alias of "Fast" (one probe implementation exists in DiffExp2; the old slow/fast split is waived in the ledger — REVIEW-minimalism 8) | State.m:114 |
 | "ExpansionOrder" | Integer >= `Tolerances`$MinExpansionOrder` | 50 | t-truncation order of chart series | State.m:115; old Transport.m:526 |
 | "LineParameter" | Symbol | Global`x | user-facing line-parameter NAME (pinned via PinnedVariable); must not be in Variables | State.m:120; DiffExp.m:131-138 |
-| "LogFile" | String or None | None | append session output to file | DiffExp.m:107-114 |
-| "MatrixDirectory" | String | "" | data only; consumed by API.m LoadSystem (full-format `d<var>_full.m` primary, legacy slices for parity transport only, per RewritePlan I1) — Config performs NO loading | State.m:121; old auto-load DiffExp.m:171-179 WAIVED |
-| "RadiusOfConvergence" | positive rational | 1 | chart-coordinate rescaling keeping high-order coefficients O(1); banana REQUIRES 10 (ledger seed; old Mobius.m:47,65) | State.m:122 |
+| "MatrixDirectory" | String | "" | data only; consumed by API.m LoadSystem (full-format `d<var>_full.m` primary, legacy slices for parity transport only, per RewritePlan I1) — Config performs NO loading; the classic auto-load behavior survives ONLY in API.m's re-export wrapper of LoadConfiguration (API.md §2.8; REVIEW-minimalism 9) | State.m:121; old auto-load DiffExp.m:171-179 WAIVED |
+| "RadiusOfConvergence" | positive rational | 1 | chart-coordinate rescaling keeping high-order coefficients O(1); banana REQUIRES 10 (ledger seed; old Mobius.m:47,65); KEPT under DEC-18 — the RoC rescaling is an affine rescaling, not a Mobius map | State.m:122 |
 | "RationalizationTolerance" | positive rational or Automatic | Automatic -> `Tolerances`SnapTol[wp]` | REDEFINED: snap/dedup tolerance at the FT seam ONLY (chart-map endpoint snapping, singular-factor root dedup; old FeynmanTrick/DiffExpIntegration.m:151-202). Exponent-rationalization uses are DELETED (exact tags, RewritePlan I1/I2) | State.m:123 |
 | "SegmentationStrategy" | "Predivision" | "Predivision" | v1 supports Predivision ONLY; "Dynamic" -> loud error E10 (its machinery, old LineSegmentation.m:116-145, is not ported; RewritePlan 3.2) | State.m:128 |
-| "UseMobius" | Boolean | False | Mobius chart maps for classic transport (banana classic line); Integrate.m REJECTS Mobius charts loudly (old FT hard-required False: "Required for integration!", DiffExpIntegration.m:352) | State.m:130 |
 | "UsePade" | Boolean | False | Pade evaluation accelerator in SectorSeries.m (ported per RewritePlan 3.2; old GetPade applied per-Logx-coefficient, Pade.m:32-53; its silent fallback Pade.m:44-46 becomes loud there) | State.m:131 |
 | "Variables" | list of Symbols | {} | kinematic invariants/masses; pinned via PinnedVariable; auto-detected by LoadSystem from filenames when {} (old MatrixLoading.m:27-55,88) — see E12 for the overwrite rule | State.m:132 |
-| "Verbosity" | Integer >= 0 | 1 | PrintInfo gate (old Utilities.m:60) | State.m:133 |
-| "VerbosityDebug" | Integer >= 0 | 0 | PrintDebug gate (old Utilities.m:56) | State.m:134 |
-| "CrosscheckLevel" | Integer >= 0 | 0 | enables OPTIONAL extra cross-checks by level threshold (old DiffExp.m:115-117, State.m:196-206). DiffExp2's always-on invariants (RewritePlan 3.1) are NOT gated by this and cannot be disabled | State.m:110 |
-| "CrosscheckFlags" | list of Strings from the published check registry | {} | enable named optional checks regardless of level (old DiffExp.m:118-120). Unknown flag name -> loud error. Old flag "SingularityCheck" (default-OFF at level 0, State.m:205) is SUPERSEDED: prescription consistency is an always-on construction check in DiffExp2 (RewritePlan 3.1 "Prescriptions"; legacy review finding 3) and the flag name is rejected with a pointer | State.m:196-207 |
+| "Verbosity" | Integer >= 0 | 1 | PrintInfo gate (section 2; old Utilities.m:60) | State.m:133 |
+| "VerbosityDebug" | Integer >= 0 | 0 | debug-level PrintInfo gate (old Utilities.m:56) | State.m:134 |
 | "SaveExpansionsCompress" | Boolean | False | compress saved segment series (old Transport.m:852-865,1278-1287) | State.m:124 |
 | "SaveExpansionsCompressDirectory" | String or None | None | spill compressed segments to files (old Transport.m:854-855,1070-1071; old code probed this key with `!FEC[...] === "?"` against an ABSENT key — declared default kills that pattern, see F-h) | Transport.m:854 |
 | "SaveExpansionsOrder" | Integer or None | None | truncation order applied when saving (old Transport.m:853,1069: KeyExistsQ-gated) | Transport.m:853 |
-| "AbortOnAnalyticContinuationFail" | Boolean | True | True: missing/conflicting prescription at a chart that needs one is a hard abort; False: downgrade to warning + flagged, FT pipeline mode (old Transport.m:470-478; FT sets False at DiffExpIntegration.m:413,468). Old default was IMPLICIT (key absent -> `Missing =!= False` -> abort-ish branch); now declared | Transport.m:471 |
+| "AbortOnAnalyticContinuationFail" | Boolean | True | True: missing/conflicting prescription at a chart that needs one is a hard abort; False: downgrade to warning + flagged, FT pipeline mode (old Transport.m:470-478; FT sets False at DiffExpIntegration.m:413,468). Old default was IMPLICIT (key absent -> `Missing =!= False` -> abort-ish branch); now declared.  (False softens the FINAL chart only; mid-path failures always abort — Transport.md E8; REVIEW-math D14/DEC-15) | Transport.m:471 |
 
 Dropped keys — `UpdateConfiguration`/`CFG` reject each with a DEDICATED error
 (E9) naming the replacement, never the generic unknown-key error:
@@ -140,6 +149,9 @@ Dropped keys — `UpdateConfiguration`/`CFG` reject each with a DEDICATED error
 | "KeepMatrixExpansions" | cache policy is internal to DiffExp2 (old MatrixLoading.m:236-249) | State.m:118 |
 | "Parallel" | no consumer in the old core (grep-verified: defined only at State.m:126) | State.m:126 |
 | "IgnoreIndicialCheck" | suppressed the indicial-root warning (old Frobenius.m:42); the DiffExp2 I1 contract violation (char poly not factoring as Π(λ−a−b eps)) is a HARD error and must not be suppressible (RewritePlan R1) | State.m:116, Frobenius.m:42 |
+| "CrosscheckLevel" / "CrosscheckFlags" | DiffExp2's invariants are always-on (RewritePlan A2) and not configurable; no optional-check registry exists in v1.  Re-add (fixed name list, no runtime registration) only when a module specifies a concrete expensive check.  Ledger waiver required (DEC-19; REVIEW-minimalism 26).  Old flag "SingularityCheck" (default-OFF footgun, State.m:205): prescription consistency is an always-on construction check in DiffExp2 (RewritePlan 3.1 "Prescriptions") | State.m:110, 196-207 |
+| "LogFile" | no in-repo consumer (grep over Reference/Examples, Tests, Scripts, FeynmanTrick: zero hits — REVIEW-minimalism 27); session logging is the shell's job; E9 names the removal.  Ledger waiver (DEC-19) | DiffExp.m:107-114 |
+| "UseMobius" | Mobius chart maps are dropped from the new core ENTIRELY (DEC-18): every DiffExp2 chart is affine; the RoC rescaling survives as "RadiusOfConvergence" (an affine rescaling, not a Mobius map).  The M4 banana classic parity oracle is re-baselined with UseMobius -> False (DEC-18; fallback to bubble/sunrise/2f1 + banana FT lines, which already run UseMobius -> False).  Old FT hard-required False anyway ("Required for integration!", DiffExpIntegration.m:352).  `-> False` is ALSO E9, never silently accepted: affine-only is unconditional, and the migration hint must surface.  Ledger waiver required | State.m:130 |
 
 ### 3.3 DeltaPrescriptions normalized form
 
@@ -149,13 +161,20 @@ Normalized stored form: list of `{poly, sign}` with `sign ∈ {+1, -1}` and
 `poly` an irreducible polynomial in the PINNED kinematic variables
 (irreducibility check via FactorList as in DiffExp/DiffExp.m:164-168: more
 than one nontrivial factor -> E6; message text "Physical singularities should
-be irreducible polynomials!").  The USER list is stored separately from the
-effective list (old UserDeltaPrescriptions, DiffExp.m:147, State.m:191) so
-that LoadSystem can union in sqrt-derived auto-prescriptions
-(old State.m:227-230 SquareRootPrescriptionsAdded; MatrixLoading.m:181-190
-assigns +iδ to new sqrt factors with an info print) without clobbering user
-data on re-parse.  Downstream contract: Transport.m derives from this list the
-per-chart record required by RewritePlan 3.1 (quoted verbatim):
+be irreducible polynomials!").  SIGN-AWARE canonicalization (DEC-16): the
+stored poly's overall sign is canonical — the coefficient of the first
+monomial of `MonomialList[poly, pinned vars]` is made positive, and negating
+the polynomial FLIPS the stored sign, so `{-1+x, +1}` and `{1-x, -1}` are the
+SAME prescription while `{-1+x, +1}` vs `{1-x, +1}` CONFLICT (they flip the
+implied i-delta side; the old deltaPrescriptionsForFactors dedup was
+sign-blind).  Equal canonicalized pairs collapse to one entry; the same
+canonical poly with OPPOSITE signs is a loud error (E7).  The old sqrt
+auto-prescription union (State.m:227-230, MatrixLoading.m:181-190) has no v1
+source — LoadSystem rejects sqrt matrices (API.md E6).  The user/effective
+list separation is kept (it is ~2 lines and the v1.1 sqrt ledger item lands
+on it), with a comment that the effective list equals the user list in v1
+(REVIEW-minimalism 18).  Downstream contract: Transport.m derives from this
+list the per-chart record required by RewritePlan 3.1 (quoted verbatim):
 
 ```
 "Prescriptions" -> LIST of <|"Factor", "Sign", "Multiplicity",
@@ -165,6 +184,10 @@ per-chart record required by RewritePlan 3.1 (quoted verbatim):
             b!=0/p>0 sectors = LOUD ERROR; sqrt factors auto-prescribed
             as in old State.m DEqnSquareRoots)
 ```
+
+(The "chart with b!=0/p>0 sectors" trigger in the quoted block is superseded
+by DEC-16: the missing/conflicting-prescription error fires whenever the
+chart is multivalued AT ALL — b != 0 OR p > 0 OR Denominator[a] > 1.)
 
 Config.m's responsibility ends at the validated `{poly, sign}` list +
 separate user list; multiplicity/leading-coefficient derivation is
@@ -201,15 +224,22 @@ other modules build them.
   check on canonicalized names).
 - Every Symbol stored under "Variables"/"LineParameter" has
   `Context[s] === "Global`"` (post-pinning).
-- If "AccuracyGoalValidate" =!= None then "AccuracyGoal" is numeric (the old
-  code SILENTLY SKIPPED the order search when AccuracyGoal was "?",
-  Transport.m:776-777 `NumericQ` gate — now a cross-field error E8).
+- If "AccuracyGoalValidate" is True (after normalization) then "AccuracyGoal"
+  is numeric (the old code SILENTLY SKIPPED the order search when
+  AccuracyGoal was "?", Transport.m:776-777 `NumericQ` gate — now a
+  cross-field error E8 firing ONLY on the inconsistent combination; the
+  default pair False + "?" is self-consistent and `LoadConfiguration[{}]`
+  succeeds, DEC-5).
 - Tolerance state in Tolerances.m is never stale: re-installed atomically on
   every successful update (so `Tol` and `CFG` can never disagree about wp).
 
 ## 5. ERROR CONTRACT (no silent fallbacks anywhere)
 
-All errors abort with messages carrying the named fields.  Conditions:
+All errors are raised via ``Tolerances`DE2Error[id, payload]`` (DEC-1: prints
+a one-line summary and `Throw[Failure["DiffExp2", payload], "DiffExp2Error"]`;
+the catch sits at every API.m entry point); payload always carries "ID",
+"Module" -> "Config", and the named fields below.  This module defines no
+other error mechanism.  Conditions:
 
 E1  READ of unknown key: "Config: unknown configuration key <name>. Valid keys:
     <schema list>."  When the key was a Symbol, append "(symbol context:
@@ -231,10 +261,14 @@ E5  `LineParameter` ∈ Variables (by name): old text preserved — "The symbol
     for the line parameter can't be equal to one of the kinematic invariants
     or masses." (DiffExp/DiffExp.m:133).
 E6  Reducible DeltaPrescriptions polynomial (3.3).
-E7  DeltaPrescriptions sign not ±1 after normalization, or δ appearing
-    nonlinearly: error naming the offending element (old parser would compute
-    a garbage Coefficient silently, DiffExp.m:142).
-E8  "AccuracyGoalValidate" set with non-numeric "AccuracyGoal" (section 4).
+E7  DeltaPrescriptions sign not ±1 after normalization, δ appearing
+    nonlinearly, or two entries whose canonicalized polynomials coincide with
+    OPPOSITE signs (DEC-16 sign-aware dedup; the old dedup was sign-blind):
+    error naming the offending element(s) (old parser would compute a garbage
+    Coefficient silently, DiffExp.m:142).
+E8  "AccuracyGoalValidate" -> True (or compat "Before"/"After") with
+    non-numeric "AccuracyGoal" (section 4; DEC-5 — fires ONLY on this
+    inconsistent combination, never on the defaults).
 E9  Dropped-key write/read: "Config: <key> was removed in DiffExp2: <reason
     from 3.2 table>."  (Migration aid; distinct from E1 so old scripts fail
     with instructions, not confusion.)
@@ -249,8 +283,9 @@ E12 Variables auto-detect conflict (enforced here, raised by LoadSystem
     (DiffExp/MatrixLoading.m:88 writes FEC[Variables] unconditionally); in
     DiffExp2 this is an error naming both lists.  Empty user list -> detected
     list is adopted (and pinned) as before.
-E13 "LogFile" unopenable: error (old code would propagate a failed
-    OpenAppend stream into $Output silently, DiffExp.m:108-114).
+E13 RETIRED — "LogFile" is a dropped key (3.2 dropped table; DEC-19,
+    REVIEW-minimalism 27); writes/reads hit E9.  ID kept reserved so
+    cross-references stay stable.
 
 Forbidden fallbacks (every place a fallback is tempting; each is banned):
 
@@ -307,26 +342,28 @@ F-j Quietly accepting both-symbol-and-string twins of one key as DIFFERENT
 - DiffExp/DiffExp.m:86-197 (CurrentConfiguration/LoadConfiguration/
   UpdateConfiguration) -> sections 2/5 above.  Specific lessons preserved:
   ChopPrecision sync (121-130) = invariant 2 + Automatic resolution; LogFile
-  (107-114) = E13; LineParameter checks (131-138) = E5/F-g; DeltaPrescriptions
-  parsing + irreducibility (140-168) = 3.3/E6/E7; EstimateError parsing
-  (150-158) = E3; the auto-LoadMatrices + cache-wipe block (171-190) = MOVED
-  to API.m LoadSystem (Config is side-effect-free beyond the tolerance
-  install); CrosscheckLevel/Flags resolution (115-120) = kept keys with the
-  always-on carve-out.
+  (107-114) = DROPPED key (3.2 dropped table; DEC-19); LineParameter checks
+  (131-138) = E5/F-g; DeltaPrescriptions parsing + irreducibility (140-168) =
+  3.3/E6/E7; EstimateError parsing (150-158) = E3; the auto-LoadMatrices +
+  cache-wipe block (171-190) = MOVED to API.m LoadSystem (Config is
+  side-effect-free beyond the tolerance install); CrosscheckLevel/Flags
+  resolution (115-120) = DROPPED keys (3.2 dropped table; DEC-19).
 - DiffExp/State.m:196-207 (CrosscheckFlags registry incl. "SingularityCheck"
-  default-off) -> "CrosscheckLevel"/"CrosscheckFlags" keys; the
-  SingularityCheck OFF-by-default footgun (an unprescribed branch point could
-  pass silently unless the flag was enabled; Transport.m:480-492) is closed by
-  making prescription checking structural and always-on (RewritePlan 3.1).
+  default-off) -> dropped keys (3.2); the SingularityCheck OFF-by-default
+  footgun (an unprescribed branch point could pass silently unless the flag
+  was enabled; Transport.m:480-492) is closed by making prescription checking
+  structural and always-on (RewritePlan 3.1) — invariants are not
+  configurable, so the gating keys have nothing left to gate.
 - FeynmanTrick/DiffExpIntegration.m:339-361,409-414,465-469 (the FT layer's
   fully-qualified config block, its UseMobius->False pin, ChopPrecision =
   precision-50, DivisionOrder 4, AbortOnAnalyticContinuationFail->False,
   re-adding DeltaPrescriptions after every LoadConfiguration because reset
   wiped them) -> after M5 the FT layer issues ONE
   `LoadConfiguration[...]`-equivalent through the DiffExp2 API with string
-  keys; the "CRITICAL: Re-add delta prescriptions after LoadConfiguration
-  reset" dance (465) disappears because LoadSystem, not LoadConfiguration,
-  owns matrix-coupled state.
+  keys; the UseMobius->False pin disappears with the key (DEC-18: charts are
+  affine unconditionally); the "CRITICAL: Re-add delta prescriptions after
+  LoadConfiguration reset" dance (465) disappears because LoadSystem, not
+  LoadConfiguration, owns matrix-coupled state.
 - FeynmanTrick/FIREInterface.m:203-226 (extractVariables/buildFIRESubstitution
   Global`-pinning) -> PinnedVariable.  Lesson: every external tool boundary
   (FIRE/Fermat, matrix files, user notebooks) speaks bare names; the ONLY safe
@@ -340,20 +377,31 @@ F-j Quietly accepting both-symbol-and-string twins of one key as DIFFERENT
 ## 7. DEPENDENCIES
 
 May call: ``DiffExp2`Tolerances` `` ONLY (derivation functions +
-InstallToleranceState).  May be called by: EpsSeries, SectorSeries, Indicial,
-Solve, Transport, Integrate, API, and (post-M5) the FT layer through the API
-shim.  Config performs NO file I/O except "LogFile" (E13) and NO kernel-state
+InstallToleranceState + DE2Error).  May be called by: EpsSeries,
+SectorSeries, Indicial, Solve, Transport, Integrate, API, and (post-M5) the
+FT layer through the API shim.  Config performs NO file I/O (the old LogFile
+carve-out died with the key, REVIEW-minimalism 27) and NO kernel-state
 mutation outside its own store + the Tolerances install (F-g).
 
 ## 8. UNIT TESTS (Tests/test_config.m; names binding)
 
-C1  `test_defaults_complete`: after `LoadConfiguration[{}]`,
-    `CurrentConfiguration[]` has exactly the 3.2 kept-key set; spot values:
+COVERAGE RULE (M0 review): every error ID and warning ID of section 5 has at
+least one unit test that triggers it and asserts its required payload fields,
+OR a one-line waiver in the test file naming the ID and why it is untestable
+in isolation (e.g. "unreachable by construction, guarded by assert X").  The
+IDs currently missing tests are enumerated in Docs/specs/REVIEW-minimalism.md
+defect 25; the implementation agent closes the list before the module's
+milestone gate.  (Config's listed gaps: E7 — now C21; E13 — retired.)
+
+C1  `test_defaults_complete`: after `LoadConfiguration[{}]` (which MUST
+    succeed, DEC-5), `CurrentConfiguration[]` has exactly the 3.2 kept-key
+    set; spot values:
     "WorkingPrecision" -> 500, "ChopPrecision" resolves to 250,
     "LinearSolveChopPrecision" resolves to 250, "DivisionOrder" -> 3,
     "EpsilonOrder" -> 4, "EstimateError" -> "Fast", "ExpansionOrder" -> 50,
     "RadiusOfConvergence" -> 1, "SegmentationStrategy" -> "Predivision",
-    "UseMobius" -> False, "UsePade" -> False, "Verbosity" -> 1,
+    "UsePade" -> False, "Verbosity" -> 1,
+    "AccuracyGoal" -> "?", "AccuracyGoalValidate" -> False,
     "AbortOnAnalyticContinuationFail" -> True.
 C2  `test_read_unknown_key_loud`: `CFG["RationalizationTollerance"]` (typo)
     aborts with E1 listing valid keys.
@@ -394,9 +442,12 @@ C13 `test_dropped_keys_dedicated_errors`: each of "IntegrationStrategy",
     "KeepMatrixExpansions", "Parallel", "IgnoreIndicialCheck" aborts on write
     with E9 text containing the word "removed" and the per-key reason; and
     "SegmentationStrategy" -> "Dynamic" aborts with E10.
-C14 `test_accuracy_goal_cross_field`: `{"AccuracyGoalValidate" -> "Before"}`
-    with "AccuracyGoal" left at "?" aborts (E8);
-    `{"AccuracyGoal" -> 30, "AccuracyGoalValidate" -> "Before"}` succeeds.
+C14 `test_accuracy_goal_cross_field`: `{"AccuracyGoalValidate" -> True}` with
+    "AccuracyGoal" left at "?" aborts (E8); so does the compat spelling
+    `{"AccuracyGoalValidate" -> "Before"}` (normalized to True);
+    `{"AccuracyGoal" -> 30, "AccuracyGoalValidate" -> True}` succeeds and
+    `CFG["AccuracyGoalValidate"] === True`; defaults (False + "?") never
+    trip E8 — that is C1 (DEC-5).
 C15 `test_load_resets_then_applies`: after `UpdateConfiguration[
     {"Verbosity" -> 3}]`, `LoadConfiguration[{"WorkingPrecision" -> 300}]`
     yields "Verbosity" -> 1 (reset) and "WorkingPrecision" -> 300.
@@ -415,24 +466,38 @@ C19 `test_no_raw_store_reads_in_tree`: source grep over DiffExp2/*.m — the
     private store symbol name appears only in Config.m, and the regexes
     `FEC\[` / `DiffExpConfiguration` have zero hits outside Config.m and
     Legacy/.  (Static test, runs without a kernel solve.)
-C20 `test_crosscheck_flag_unknown_loud`: `{"CrosscheckFlags" ->
-    {"FrobeniusSolutions"}}` aborts naming the flag as not in the DiffExp2
-    registry (old registry State.m:196-206 does not carry over names whose
-    machinery died); `{"CrosscheckFlags" -> {"SingularityCheck"}}` aborts with
-    the always-on supersession pointer (3.2 table).
+C20 `test_dead_keys_dropped`: each of "CrosscheckLevel", "CrosscheckFlags",
+    "LogFile", "UseMobius" aborts on write with the E9 dropped-key text
+    carrying the 3.2 reason (always-on invariants / no in-repo consumer /
+    Mobius dropped; DEC-19, DEC-18, REVIEW-minimalism 26-27), not the
+    generic unknown-key error; `"UseMobius" -> False` in particular is E9
+    too (no value-dependent acceptance of a dropped key).
+C21 `test_delta_prescriptions_sign_aware` (DEC-16; closes the E7 coverage
+    gap, REVIEW-minimalism 25): `{{m^2 - s, -1}, {s - m^2, +1}}` collapses to
+    EXACTLY ONE stored entry, equal to `{m^2 - s, -1}` up to the 3.3
+    canonical orientation (i.e. ≡ `{s - m^2, +1}` — same prescription);
+    `{{m^2 - s, -1}, {s - m^2, -1}}` aborts (E7: same canonical factor,
+    opposite implied i-delta sides) naming both elements.
 
 ## 9. LINE BUDGET
 
 ~150 lines (RewritePlan 3.2; the execution review finding 3 sized Config at
 ~150 precisely so MatrixLoading's 389 lines do NOT creep in here — matrix
-loading is API.m's).  Estimate: schema table ~45 (one line per key), CFG +
-canonicalization ~20, Update/Load (validate-then-commit + sync + tolerance
-install) ~40, DeltaPrescriptions parsing ~15, errors/usage ~30.  If over
-budget, cut in this order: (1) collapse E9 per-key reasons into one lookup
-table line each; (2) drop the E1 nearest-key suggestion text (keep the key
-list); (3) move "LogFile" handling to API.m (it is the only I/O here).  DO NOT
-cut: canonicalization, all-or-nothing commit, cross-field checks, dedicated
-dropped-key errors, or any ::usage declaration.
+loading is API.m's).  Estimate: schema table ~42 (one line per kept key; two
+keys fewer after DEC-19), CFG + canonicalization ~20, Update/Load
+(validate-then-commit + sync + tolerance install) ~40, DeltaPrescriptions
+parsing incl. sign-aware canonicalization ~20, print helpers + eps constants
+~11, errors/usage ~28.  M0 amendments net roughly zero: +~18 (PrintInfo/
+PrintWarning 8, EpsSymbols/CanonicalEps 3, DEC-16 sign-aware dedup 5,
+AccuracyGoalValidate compat normalization 2) funded by the LogFile/Crosscheck
+drops and the LogFile I/O path (~-14, REVIEW-minimalism 26/27, DEC-19) and
+the simplified E8.  If over budget, cut in this order: (1) collapse E9
+per-key reasons into one lookup table line each; (2) drop the E1 nearest-key
+suggestion text (keep the key list); old cut (3) (move "LogFile" to API.m)
+is DELETED — moot, the key is dropped.  DO NOT cut: canonicalization,
+all-or-nothing commit, cross-field checks, dedicated dropped-key errors, or
+any ::usage declaration.  Per REVIEW-minimalism defect 4: landing >10% over
+150 stops and reports to the orchestrator BEFORE writing more code.
 
 ## 10. OPEN QUESTIONS
 
@@ -440,16 +505,10 @@ Q1 Pinned context for variables is `Global`` (matches FIRE and user
    notebooks).  If DiffExp2 is ever loaded in an environment that sandboxes
    Global` (cloud kernels), PinnedVariable needs a configurable target
    context; out of scope v1 — flag if M5 hits it.
-Q2 Should "CrosscheckLevel"/"CrosscheckFlags" survive at all, given always-on
-   invariants?  Kept as the on-switch for EXPENSIVE optional checks (full
-   ODE-residual sweeps vs spot checks).  The DiffExp2 check registry (names ->
-   level) is owned by the modules that implement the checks; Config validates
-   names against a registry constant that those modules register at load.  If
-   that registration mechanism proves > ~10 lines, simplify to a fixed name
-   list in Config.m and accept the coupling.
-Q3 "AccuracyGoal" accepts "?" for backward compatibility.  Should DiffExp2
-   instead require None?  Kept "?" because Reference/Examples and Tests pass
-   it (old default State.m:107); revisit at M6 docs rewrite.
+Q2 RESOLVED at M0 (deleted): "CrosscheckLevel"/"CrosscheckFlags" are dropped
+   keys (REVIEW-minimalism 26; DEC-19) — no optional-check registry in v1.
+Q3 RESOLVED at M0 (deleted): "AccuracyGoal" keeps "?" — DEC-5 makes the
+   default pair ("?", Validate False) self-consistent; no None migration.
 Q4 The FT layer's own `$FTConfig` (FeynmanTrick/FeynmanTrick.m:26-56,
    `SetFTOption` is unvalidated assignment) is OUT OF SCOPE for this module,
    but it has the same disease (string keys, no read validation,

@@ -1,5 +1,15 @@
 # FT-layer reach-in shim contract (M0 task 3)
 
+> **PENDING AMENDMENTS (apply before M5 consumption; tracked, binding
+> resolutions in DECISIONS-M0.md):** REVIEW-math.md:87 gate-threshold note;
+> G1 status -> RESOLVED (ExtraSingularFactors accepted on TransportTo/
+> IntegrateOverLine per DEC-10, closure-check semantics now in API.md 2.3);
+> DEC-21 (pentagon Kallen patch deferred to M5 step), DEC-22 (FT keeps
+> integer EpsPrefactors), Q2 resolved (keep FT explicit ChopPrecision at
+> cutover, A/B at M6), Q3 resolved (static budget supersedes
+> RequiredTransportEpsilonOrder at M5; box_bubble 9/11 unit gates it).
+
+
 Status: M0 deliverable per Docs/RewritePlan.md section 6 (M0 task 3) and risk
 R4.  This document is the binding contract for the M5 FT cutover: it
 enumerates EVERY reference from the retained FT layer (FeynmanTrick/ and

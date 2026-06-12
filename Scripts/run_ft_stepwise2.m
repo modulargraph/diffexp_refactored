@@ -134,7 +134,10 @@ runExample[name_String] := Module[
     catch2[DiffExp2`Config`LoadConfiguration[{
       "WorkingPrecision" -> wp, "ExpansionOrder" -> expansionOrder,
       "EpsilonOrder" -> Max[esCMxLevel = epsOrder + level + boundaryExtraOrder, 1],
-      "DivisionOrder" -> 4, "Variables" -> {}}]];
+      "DivisionOrder" -> 4,
+      (* classic stride: the Automatic wide strides broke sunrise (zero
+         result, collapsed window) - investigate before enabling *)
+      "StepDivisionOrder" -> 4, "Variables" -> {}}]];
     (* ONE two-way transport per level serves every master: precompute the
        chart chain + the two endpoint transports *)
     Module[{needInt, needLo, needHi},

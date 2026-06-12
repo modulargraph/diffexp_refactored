@@ -44,6 +44,17 @@ esTimes = DiffExp2`EpsSeries`ESTimes; esShift = DiffExp2`EpsSeries`ESShift;
 esCoeff = DiffExp2`EpsSeries`ESCoefficient; esMin = DiffExp2`EpsSeries`ESMinPower;
 esCM = DiffExp2`EpsSeries`ESCompleteMax;
 
+(* pipeline numeric handoff: evaluated VALUES entering the matching seam
+   numericize at WP+20 — the runner's boundary/level-handoff policy (M5c)
+   applied inside the marching loop.  EvaluateLocalSolution itself stays
+   exact-in/exact-out (a module contract, pinned by test_sectorseries);
+   but exact evaluation outputs fed into MatchWeights/Combine grind
+   exact-giant field arithmetic (measured d = 7 hot spot: 430/560 exact
+   coefficients, MatchWeights 3.0 s -> see Docs/SpeedIdeas.md §2).
+   Values only; tags, windows and structural decisions untouched;
+   symbols pass through N unchanged; idempotent on bignums. *)
+numHandoff[x_] := N[x, cfg["WorkingPrecision"] + 20];
+
 (* ---- 2.1 singularities ---- *)
 
 FindSingularities[sys_Association] := Module[
@@ -693,8 +704,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       prevEval = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tIn,
         "UsePade" -> False, "ImSign" -> sigmaFor[current]];
       vvals = Module[{vv = prevEval["Value"], d2 = cs["SystemSize"]},
-        Table[esNew[esMin[vv], Table[esCoeff[vv, k][[c]],
-          {k, esMin[vv], esCM[vv]}]], {c, d2}]]];
+        Table[esNew[esMin[vv], numHandoff[Table[esCoeff[vv, k][[c]],
+          {k, esMin[vv], esCM[vv]}]]], {c, d2}]]];
     If[valueMode,
       If[Environment["DEBUG_CHART"] === "1",
         Print["CHART value-solve start t=", SessionTime[]]];
@@ -715,7 +726,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
           tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, basis];
         F = Table[esNew[esMin[Feval[[i]]],
-          Table[esCoeff[Feval[[i]], k][[c]], {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]],
+          numHandoff[Table[esCoeff[Feval[[i]], k][[c]],
+            {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]]],
           {c, cs["SystemSize"]}, {i, Length[basis]}]];
       w = MatchWeights[F, vvals, chart["Name"]];
       ls = DiffExp2`SectorSeries`CombineLocalSolutions[w, basis]];

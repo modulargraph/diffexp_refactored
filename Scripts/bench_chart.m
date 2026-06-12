@@ -195,9 +195,11 @@ benchFixture[fname_String] := Module[
   row[fname, "EvalBasis", ph, <|"Columns" -> Length[basis]|>]; perChart += ph;
 
   (* component-major EpsSeries matrix + realistic incoming values
-     (vvals = F . ones, so MatchWeights solves a genuine system) *)
+     (vvals = F . ones, so MatchWeights solves a genuine system);
+     numericized at WP+20 — mirrors TransportLine's numHandoff seam *)
   F = Table[esNew[esMin[Feval[[i]]],
-      Table[esCoeff[Feval[[i]], k][[c]], {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]],
+      N[Table[esCoeff[Feval[[i]], k][[c]], {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}],
+        wp + 20]],
     {c, d}, {i, Length[basis]}];
   vvals = Table[Fold[esAdd, F[[c, 1]], Rest[F[[c]]]], {c, d}];
 

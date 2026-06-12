@@ -17,7 +17,18 @@ Begin["`Private`"];
 err[id_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "Integrate"|>, payload]];
 cfg = DiffExp2`Config`CFG;
-zeroQ[e_] := TrueQ[PossibleZeroQ[Together[e]]];
+(* zeroQ: exact-first (see Solve.m).  Call sites here test exact tags
+   (a, b, m + 1): the rational fast path decides them without numerics;
+   anything outside the rational domain keeps PossibleZeroQ unchanged. *)
+ratExprQ[c_] := Switch[c,
+  _Integer | _Rational, True,
+  _Complex, !InexactNumberQ[c],
+  _Symbol, !NumericQ[c],
+  _Plus | _Times, AllTrue[List @@ c, ratExprQ],
+  Power[_, _Integer], ratExprQ[First[c]],
+  _, False];
+zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
+zeroQ[e_] := zeroCanQ[Together[e]];
 esNew = DiffExp2`EpsSeries`ESNew; esZero = DiffExp2`EpsSeries`ESZero;
 esAdd = DiffExp2`EpsSeries`ESAdd; esScale = DiffExp2`EpsSeries`ESScale;
 esTimes = DiffExp2`EpsSeries`ESTimes; esShift = DiffExp2`EpsSeries`ESShift;

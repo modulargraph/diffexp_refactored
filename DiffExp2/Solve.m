@@ -26,7 +26,21 @@ err[id_, cs_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "Solve",
     "Chart" -> ToString[Lookup[cs, "Center", "?"], InputForm]|>, payload]];
 cfg = DiffExp2`Config`CFG;
-zeroQ[e_] := TrueQ[PossibleZeroQ[Together[e]]];
+(* zeroQ: exact-first.  Together-canonical rational functions over the
+   Gaussian rationals in non-numeric symbols are a zero-DECISION domain:
+   === 0 decides.  Only forms outside it (inexact numbers, radicals/Root,
+   numeric symbol constants like Pi) fall through to PossibleZeroQ, whose
+   numeric ztest meprec-storms and can mis-answer on giant exact rationals.
+   zeroCanQ takes input the caller already Together/Cancel-canonicalized. *)
+ratExprQ[c_] := Switch[c,
+  _Integer | _Rational, True,
+  _Complex, !InexactNumberQ[c],
+  _Symbol, !NumericQ[c],
+  _Plus | _Times, AllTrue[List @@ c, ratExprQ],
+  Power[_, _Integer], ratExprQ[First[c]],
+  _, False];
+zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
+zeroQ[e_] := zeroCanQ[Together[e]];
 
 esNew = DiffExp2`EpsSeries`ESNew; esZero = DiffExp2`EpsSeries`ESZero;
 esAdd = DiffExp2`EpsSeries`ESAdd; esScale = DiffExp2`EpsSeries`ESScale;
@@ -37,13 +51,15 @@ esFrom = DiffExp2`EpsSeries`ESFromExpression; esTrim = DiffExp2`EpsSeries`ESTrim
 
 (* exact t-Laurent coefficient of a rational function at t = 0 (local copy
    of the Indicial recursion; entries exact) *)
-polyMinDeg[p_, t_] := If[zeroQ[p], Infinity, Exponent[p, t, Min]];
+(* contract: p is 0 or a polynomial part of a CANCELED fraction, so the
+   syntactic test in zeroCanQ is complete *)
+polyMinDeg[p_, t_] := If[zeroCanQ[p], Infinity, Exponent[p, t, Min]];
 tVal[e_, t_] := Module[{c = Cancel[Together[e]]},
-  If[zeroQ[c], Infinity,
+  If[zeroCanQ[c], Infinity,
     polyMinDeg[Numerator[c], t] - polyMinDeg[Denominator[c], t]]];
 tLaurent[e_, t_, k_Integer] := Module[{c, v, num, den, nc, dc, ord, csr},
   c = Cancel[Together[e]];
-  If[zeroQ[c] || k < (v = tVal[c, t]), Return[0]];
+  If[zeroCanQ[c] || k < (v = tVal[c, t]), Return[0]];
   num = Numerator[c]; den = Denominator[c];
   num = Cancel[num/t^polyMinDeg[num, t]]; den = Cancel[den/t^polyMinDeg[den, t]];
   ord = k - v;
@@ -102,7 +118,7 @@ prepareChartCore[sys_Association, chart_Association] := Module[
     {fam, idata["Families"]}];
   V = Transpose[cols];
   detV = Together[Det[V]];
-  If[zeroQ[detV], err["E2", chart, <|"Detail" -> "spectral frame V is singular"|>]];
+  If[zeroCanQ[detV], err["E2", chart, <|"Detail" -> "spectral frame V is singular"|>]];
   VInv = Map[Cancel[Together[#]] &, Inverse[V], {2}];
   <|"ChartVar" -> t, "Center" -> x0,
     "ChartMap" -> <|"Center" -> x0, "Scale" -> beta|>,
@@ -155,7 +171,7 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
   {c, num, den, vn, vd, v, nc, dc, rel, out, wp2, top},
   out = ConstantArray[0, W];
   c = Cancel[Together[expr]];
-  If[zeroQ[c], Return[out]];
+  If[zeroCanQ[c], Return[out]];
   num = Numerator[c]; den = Denominator[c];
   vn = Exponent[num, eps, Min]; vd = Exponent[den, eps, Min];
   v = vn - vd;
@@ -325,13 +341,13 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
           dA, dB, deltaList},
         dA = Together[aT + n - aI]; dB = Together[bT - bI];
         Which[
-          !zeroQ[dA],
+          !zeroCanQ[dA],
           deltaList = Module[{l2 = zeroV}, l2[[-fb + 1]] = dA;
             If[-fb + 2 <= W, l2[[-fb + 2]] = dB]; l2];
           U[[n + 1, l + 1]] = ReplacePart[U[[n + 1, l + 1]],
             Thread[colsB -> blockSolveTPFrame[rhsFull[[colsB]], deltaList,
               invD0, q, fb, W]]],
-          !zeroQ[dB],
+          !zeroCanQ[dB],
           (deltaList = Module[{l2 = zeroV},
             If[-fb + 2 <= W, l2[[-fb + 2]] = dB]; l2];
           U[[n + 1, l + 1]] = ReplacePart[U[[n + 1, l + 1]],
@@ -419,14 +435,15 @@ applyGauge[cs_, ls_, nmax_] := Module[
   kmin = ls["EpsWindow", "Min"]; kmax = ls["EpsWindow", "CompleteMax"];
   (* eps-valuation of T entries (rational in eps) *)
   vT = Min[0, Min[Map[Module[{c2 = Cancel[Together[#]]},
-    If[zeroQ[c2], 0,
+    If[zeroCanQ[c2], 0,
       Exponent[Numerator[c2] /. t -> 1/2, eps, Min] -
         Exponent[Denominator[c2] /. t -> 1/2, eps, Min]]] &, Flatten[T]]]];
   fbT = vT; WG = (kmax - kmin) + (-vT) + 1;
   (* TexpL[m - gv + 1][r][c] = eps-frame list (base fbT, width WG) of the
      t^m Laurent coefficient of T_rc *)
   TexpL = Table[Map[Module[{lc = tLaurent[#, t, m]},
-      If[zeroQ[lc], ConstantArray[0, WG], ratEpsList[lc, eps, fbT, WG]]] &,
+      (* tLaurent output is canonical (0 or a Cancel[Together[...]]) *)
+      If[zeroCanQ[lc], ConstantArray[0, WG], ratEpsList[lc, eps, fbT, WG]]] &,
       T, {2}],
     {m, gv, nmax}];
   newSecs = Map[Module[{arr = #["Coeffs"], aS = #["a"], outF, kminN, kmaxN,

@@ -13,6 +13,7 @@ tests=(
   "Tests/test_transport.m"
   "Tests/test_integrate.m"
   "Tests/test_api.m"
+  "Tests/test_pins.m"
   Tests/test_package_loading.m
   Tests/test_symbols_namespacing.m
   Tests/test_recurrence_no_fallback.m

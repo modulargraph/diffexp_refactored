@@ -374,39 +374,60 @@ assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
   ls = applyGauge[cs, ls, nmax];
   DiffExp2`SectorSeries`CanonicalizeLocalSolution[ls]];
 
-(* gauge composition f = T.g: T exact rational, poles only at t = 0 *)
+(* gauge composition f = T.g: T exact rational, poles only at t = 0.
+   Frame-list implementation: the k-axis (eps) stays a plain index, the
+   t-convolution runs per (np, r) with ListConvolve on eps-frame lists.
+   A negative eps-lead in T pays the window top (same rule as the V
+   multiply in assembleSolution). *)
 applyGauge[cs_, ls_, nmax_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], T = cs["Gauge"], d,
-   gv, Texp, kmin, kmax, newSecs, top},
+   gv, kmin, kmax, newSecs, vT, fbT, WG, TexpL},
   If[T === IdentityMatrix[cs["SystemSize"]] || T === IdentityMatrix[Length[T]],
     Return[ls]];
   d = Length[T];
   gv = Min[tVal[#, t] & /@ Flatten[T]];
   kmin = ls["EpsWindow", "Min"]; kmax = ls["EpsWindow", "CompleteMax"];
-  top = kmax;
-  (* Texp[m][r][c] = EpsSeries of the t^m Laurent coefficient of T_{rc} *)
-  Texp = Table[Map[Module[{lc = tLaurent[#, t, m]},
-      If[zeroQ[lc], esZero[top], esFrom[Together[lc], eps, top]]] &, T, {2}],
+  (* eps-valuation of T entries (rational in eps) *)
+  vT = Min[0, Min[Map[Module[{c2 = Cancel[Together[#]]},
+    If[zeroQ[c2], 0,
+      Exponent[Numerator[c2] /. t -> 1/2, eps, Min] -
+        Exponent[Denominator[c2] /. t -> 1/2, eps, Min]]] &, Flatten[T]]]];
+  fbT = vT; WG = (kmax - kmin) + (-vT) + 1;
+  (* TexpL[m - gv + 1][r][c] = eps-frame list (base fbT, width WG) of the
+     t^m Laurent coefficient of T_rc *)
+  TexpL = Table[Map[Module[{lc = tLaurent[#, t, m]},
+      If[zeroQ[lc], ConstantArray[0, WG], ratEpsList[lc, eps, fbT, WG]]] &,
+      T, {2}],
     {m, gv, nmax}];
-  newSecs = Map[Module[{arr = #["Coeffs"], aS = #["a"], out, kminS, kmaxS, esArr},
-    (* per (n, comp): EpsSeries from the rows *)
-    esArr = Table[Table[esNew[kmin, Table[arr[[k - kmin + 1, n + 1, c]],
-        {k, kmin, kmax}]], {c, d}], {n, 0, nmax}];
-    out = Table[Table[Module[{s = None},
-      Do[Module[{n = np - (m - gv)},  (* m + n = np + gv *)
-        If[0 <= n <= nmax,
-          Do[Module[{term = esTimes[Texp[[m - gv + 1, r, c]], esArr[[n + 1, c]]]},
-            s = If[s === None, term, esAdd[s, term]]],
-            {c, d}]]],
-        {m, gv, gv + np}];
-      If[s === None, esZero[kmax], s]], {r, d}], {np, 0, nmax}];
-    Module[{kminN = Min[esMin /@ Flatten[out]], kmaxN = Min[esCM /@ Flatten[out]]},
-      <|"a" -> Together[aS + gv], "b" -> #["b"], "p" -> #["p"],
-        "Coeffs" -> Table[Table[Table[esCoeff[out[[n + 1, r]], k], {r, d}],
-          {n, 0, nmax}], {k, kminN, kmaxN}],
-        "KMin" -> kminN, "KMax" -> kmaxN|>]] &, ls["Sectors"]];
+  newSecs = Map[Module[{arr = #["Coeffs"], aS = #["a"], outF, kminN, kmaxN,
+      ncolsS = Dimensions[#["Coeffs"]][[2]], topValidG},
+    (* arr columns as eps-frame lists on [kmin, kmin + WG - 1] (pad top) *)
+    outF = Table[ConstantArray[0, WG], {nmax + 1}, {d}];
+    Do[Module[{n = np - (m - gv)},
+      If[0 <= n <= nmax && n < ncolsS,
+        Do[Module[{arrCol = PadRight[arr[[All, n + 1, c]], WG], tl},
+          Do[
+            tl = TexpL[[m - gv + 1, r, c]];
+            If[!AllTrue[tl, # === 0 &],
+              outF[[np + 1, r]] += Take[
+                ListConvolve[tl, arrCol, {1, -1}, 0], WG]],
+            {r, d}]],
+          {c, d}]]],
+      {np, 0, nmax}, {m, gv, gv + nmax}];
+    topValidG = kmax + vT;  (* pay |vT| at the top (vT <= 0) *)
+    kminN = Module[{i = 1, found = False, fbG = kmin + fbT},
+      While[i <= WG && !found,
+        If[AnyTrue[Flatten[outF[[All, All, i]]], # =!= 0 &], found = True, i++]];
+      kmin + fbT + i - 1];
+    kmaxN = Max[topValidG, kminN];
+    <|"a" -> Together[aS + gv], "b" -> #["b"], "p" -> #["p"],
+      "Coeffs" -> Table[Table[Table[
+        Module[{idx = k - (kmin + fbT) + 1},
+          If[1 <= idx <= WG, outF[[n + 1, r, idx]], 0]], {r, d}],
+        {n, 0, nmax}], {k, kminN, kmaxN}],
+      "KMin" -> kminN, "KMax" -> kmaxN|>] &, ls["Sectors"]];
   Module[{kminA = Min[#["KMin"] & /@ newSecs], kmaxA = Min[#["KMax"] & /@ newSecs]},
-    newSecs = Map[Module[{sh = #["KMin"] - kminA, padTop = kmaxA - #["KMin"] + 1},
+    newSecs = Map[Module[{sh = #["KMin"] - kminA},
       <|"a" -> #["a"], "b" -> #["b"], "p" -> #["p"],
         "Coeffs" -> Table[
           If[kminA + i - 1 < #["KMin"],

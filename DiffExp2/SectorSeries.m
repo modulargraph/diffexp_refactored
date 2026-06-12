@@ -445,8 +445,11 @@ CombineLocalSolutions[weights_List, lss_List] := Module[
     {i, n}];
   CanonicalizeLocalSolution[Join[base, <|"Sectors" -> secs,
     "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
-    "ErrorEstimate" -> Total[Map[If[ListQ[#["ErrorEstimate"]],
-      #["ErrorEstimate"], 0] &, lss]]|>]]];
+    "ErrorEstimate" -> Module[{ees = Map[If[ListQ[#["ErrorEstimate"]],
+        #["ErrorEstimate"], {0}] &, lss], L},
+      (* columns may carry different window lengths: pad before summing *)
+      L = Max[Length /@ ees];
+      Total[PadRight[#, L] & /@ ees]]|>]]];
 
 (* ---- 2.11 boundary tagged-power parser ---- *)
 

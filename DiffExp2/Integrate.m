@@ -31,8 +31,10 @@ pow[x_, 0] := 1; pow[x_, n_] := x^n;
 (* antiderivative value F(T) for alpha != 0:
    F(T) = T^(m+1) T^(b eps) Sum_j (-1)^j eps^p Log^(p-j)T / ((p-j)! alpha^(j+1)) *)
 antiderivativeAt[m_, b_, p_, T_, kMaxOut_] := Module[
-  {logT, width, tbeps, invAlpha, jsum, alphaES},
-  logT = Log[T];
+  {logT, width, tbeps, invAlpha, jsum, alphaES, wp},
+  wp = DiffExp2`Config`CFG["WorkingPrecision"];
+  (* numeric log: exact Log[rational] towers compound into symbolic giants *)
+  logT = If[FreeQ[T, _Symbol], N[Log[T], 2*wp], Log[T]];
   width = kMaxOut + p + 4;
   tbeps = If[zeroQ[b], esNew[0, PadRight[{1}, width + 1]],
     esNew[0, Table[pow[b*logT, r]/r!, {r, 0, width}]]];

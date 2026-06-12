@@ -70,8 +70,15 @@ nextCenter[xb_, sings_, dir_, k_, allSings_] := Module[
   rad = ChartRadius[xnew, allSings];
   If[rad < s,
     s = k*rad/(1 + k); xnew = xb + dir*s/k];
-  (* exact-ify the center *)
-  xnew = Rationalize[N[xnew, 30], 10^-20];
+  (* exact-ify the center COARSELY: the center is a placement CHOICE; a
+     simple nearby rational keeps Indicial's exact algebra on small
+     fractions (20-digit-denominator centers ground PossibleZeroQ into
+     meprec storms).  Geometry self-corrects: the true radius and match
+     point are recomputed from the actual center downstream. *)
+  xnew = Module[{cand = Rationalize[N[xnew, 20], Abs[N[s, 20]]/(8 k)]},
+    (* never land ON a singularity *)
+    If[AnyTrue[allSings, TrueQ[PossibleZeroQ[RootReduce[# - cand]]] &],
+      Rationalize[N[xnew, 20], Abs[N[s, 20]]/(64 k)], cand]];
   xnew];
 
 (* ---- 2.5 digit budget ---- *)

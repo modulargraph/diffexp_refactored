@@ -229,9 +229,12 @@ runExample[name_String] := Module[
     (* shift to finite for the next level's transport *)
     rawMin = Min[esMn /@ rawES];
     shift = Max[0, -rawMin];
+    (* numericize at the level handoff: exact Log-trees from the tile
+       antiderivatives otherwise compound into symbolic giants that grind
+       the next level's recursion (meprec storms) *)
     currentBCs = Table[Module[{r = rawES[[i]], top},
       top = Min[esCMx[r], epsOrder + (level - 1) + boundaryExtraOrder - shift];
-      Table[esC[r, k], {k, -shift, top}]],
+      Table[N[esC[r, k], 2*wp], {k, -shift, top}]],
       {i, Length[rawES]}];
     currentPrefactors = ConstantArray[shift, Length[rawES]];
     finalRaw = rawES],

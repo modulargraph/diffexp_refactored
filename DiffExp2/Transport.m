@@ -172,58 +172,88 @@ ApplyCrossing[ls_Association, sigma_] := Module[
   DiffExp2`SectorSeries`CanonicalizeLocalSolution[
     Join[ls, <|"Sectors" -> out|>]]];
 
+(* ---- 2.8 RecombineBasis: remove eps=0 degeneracy of the fundamental
+   matrix (the log x = (x^(2eps)-1)/(2eps) class).  Tag-driven off
+   Indicial`EpsDegenerateFamilies (DEC-7): per degenerate family, ordered
+   by b: B_1 = S_1, B_m = (S_m - S_1)/((b_m - b_1) eps); recursively on
+   {B_2, ...} up to the family's recorded degeneracy depth. *)
+
+recombineDegenerate[cs_, basis_List, specs_List] := Module[
+  {degs, newBasis = basis, width},
+  degs = DiffExp2`Indicial`EpsDegenerateFamilies[cs["IndicialData"]];
+  If[Environment["DEBUG_RECOMBINE"] === "1",
+    Print["RECOMBINE chart ", cs["Center"], " degs=", degs,
+      " specs=", {#["a"], #["b"], #["Family"], #["ChainPos"]} & /@ specs]];
+  If[degs === {}, Return[newBasis]];
+  width = 4 + Max[0, Max[Map[#["EpsWindow", "CompleteMax"] -
+    #["EpsWindow", "Min"] &, basis]]];
+  Do[Module[{fi = rec["FamilyIndex"], r0 = rec["EpsZeroDegeneracy"], cols, bs},
+    cols = Select[Range[Length[specs]], specs[[#]]["Family"] === fi &];
+    (* value-level degeneracy pairs columns with the SAME exact a and
+       DISTINCT b (different-a columns are different functions); per
+       same-a group, the recursive (S_m - S_1)/((b_m - b_1) eps) ladder *)
+    Module[{groups},
+      groups = GatherBy[Select[cols, specs[[#]]["ChainPos"] === 0 &],
+        Together[specs[[#]]["a"]] &];
+      Do[Module[{bs = SortBy[grp, N[specs[[#]]["b"], 20] &], active, pass = 0},
+        active = bs;
+        While[Length[active] >= 2 && pass < Max[r0, 1],
+          Module[{base = First[active], rest = Rest[active]},
+            Do[Module[{m = rest[[ri]], db, wPlus, wMinus},
+              db = Together[specs[[m]]["b"] - specs[[base]]["b"]];
+              If[!TrueQ[PossibleZeroQ[db]],
+                wPlus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{1/db}, width]];
+                wMinus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{-1/db}, width]];
+                newBasis[[m]] = DiffExp2`SectorSeries`CombineLocalSolutions[
+                  {wPlus, wMinus}, {newBasis[[m]], newBasis[[base]]}]]],
+              {ri, Length[rest]}];
+            active = rest; pass++]]],
+        {grp, Select[groups, Length[#] >= 2 &]}]]],
+    {rec, degs}];
+  newBasis];
+
 (* ---- 2.7 matching ---- *)
 
 MatchWeights[Fmat_List, vIn_List, label_String] := Module[
-  {nb = Length[Fmat], shifts, Fn, kTop, kBot, w, mtol, scale, rtolBand},
+  {nb = Length[Fmat], FF, vv, perm, mtol, w},
   mtol = DiffExp2`Tolerances`Tol["MatchTol"];
-  (* per-column eps-normalization: column i shifted so it starts at eps^0 *)
-  shifts = Table[Module[{lead, mn},
-    mn = Min[esMin /@ Fmat[[All, i]]];
-    mn], {i, nb}];
-  Fn = Table[esShift[Fmat[[r, i]], -shifts[[i]]], {r, nb}, {i, nb}];
-  kBot = Min[esMin /@ vIn];
-  kTop = Min[Min[esCM /@ Flatten[Fn]], Min[esCM /@ vIn]];
-  (* order-by-order solve: F0.w[k] = v[k] - sum_{m=1..} F[m].w[k-m] *)
-  Module[{F0, lu, ws = <||>, scale0},
-    F0 = Table[esCoeff[Fn[[r, i]], 0], {r, nb}, {i, nb}];
-    scale0 = Max[1, Max[Abs[N[#, 20]] & /@ Select[Flatten[F0], NumericQ]]];
-    If[TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[Det[F0], scale0^nb,
-        DiffExp2`Tolerances`Tol["RankTol"], label]],
-      err["E5", <|"Chart" -> label,
-        "Detail" -> "eps^0 fundamental matrix singular after normalization; RecombineBasis required (degenerate family)"|>]];
-    lu = LinearSolve[F0];
-    Do[Module[{rhs},
-      rhs = Table[
-        If[esMin[vIn[[r]]] <= k <= esCM[vIn[[r]]], esCoeff[vIn[[r]], k], 0] -
-        Sum[Module[{km = k - m},
-          Sum[If[esMin[Fn[[r, i]]] <= m <= esCM[Fn[[r, i]]] && KeyExistsQ[ws, km],
-            esCoeff[Fn[[r, i]], m]*ws[km][[i]], 0], {i, nb}]],
-          {m, 1, k - kBot}],
-        {r, nb}];
-      ws[k] = lu[rhs]],
-      {k, kBot, kTop}];
-    (* assemble weight EpsSeries, de-shift per column *)
-    w = Table[Module[{coeffs = Table[ws[k][[i]], {k, kBot, kTop}]},
-      esShift[esNew[kBot, coeffs], -shifts[[i]]]], {i, nb}];
-    (* residual assert at each order *)
-    Do[Module[{res, sc},
-      res = Table[
-        If[esMin[vIn[[r]]] <= k <= esCM[vIn[[r]]], esCoeff[vIn[[r]], k], 0] -
-        Sum[Module[{wMin = esMin[w[[i]]] + shifts[[i]]},
-          Sum[If[esMin[Fn[[r, i]]] <= m <= esCM[Fn[[r, i]]] &&
-              KeyExistsQ[ws, k - m], esCoeff[Fn[[r, i]], m]*ws[k - m][[i]], 0],
-            {m, 0, k - kBot}]],
-          {i, nb}],
-        {r, nb}];
-      sc = Max[1, Max[0, Sequence @@ (Abs[N[#, 20]] & /@
-        Select[Flatten[Table[esCoeff[vIn[[r]], Max[k, esMin[vIn[[r]]]]], {r, nb}]], NumericQ])]];
-      If[Max[0, Sequence @@ (Abs[N[#, 20]] & /@ Select[res, NumericQ])] > 100*mtol*sc,
-        err["E6", <|"Chart" -> label, "Order" -> k,
-          "Residual" -> N[Max[Abs[N[#, 10]] & /@ Select[res, NumericQ]], 6],
-          "Detail" -> "matching residual above tolerance"|>]]],
-      {k, kBot, Min[kBot + 2, kTop]}];
-    w]];
+  (* Gaussian elimination over the eps-Laurent field: EpsSeries entries,
+     pivots by minimal leading eps-order (then largest leading magnitude),
+     ESDivide row operations.  Honest windows propagate; a column with no
+     usable pivot = genuinely singular system (E5). *)
+  FF = Map[esTrim, Fmat, {2}];
+  vv = vIn;
+  perm = Range[nb];   (* row order after pivoting *)
+  Do[Module[{cands, pivRow, pivLead},
+    cands = Select[Range[col, nb], Module[{ld},
+      ld = DiffExp2`EpsSeries`ESLeading[FF[[perm[[#]], col]]];
+      ld =!= None] &];
+    If[cands === {},
+      err["E5", <|"Chart" -> label, "Column" -> col,
+        "Detail" -> "matching system singular over the eps-Laurent field"|>]];
+    pivRow = First[SortBy[cands, Module[{ld =
+        DiffExp2`EpsSeries`ESLeading[FF[[perm[[#]], col]]]},
+      {ld[[1]], -Abs[N[ld[[2]], 20]]}] &]];
+    If[pivRow =!= col, perm[[{col, pivRow}]] = perm[[{pivRow, col}]]];
+    Do[Module[{entry = FF[[perm[[r]], col]], factor},
+      If[DiffExp2`EpsSeries`ESLeading[entry] =!= None,
+        factor = esTrim[DiffExp2`EpsSeries`ESDivide[entry, FF[[perm[[col]], col]]]];
+        Do[FF[[perm[[r]], c2]] = esTrim[esAdd[FF[[perm[[r]], c2]],
+          esScale[-1, esTimes[factor, FF[[perm[[col]], c2]]]]]],
+          {c2, col, nb}];
+        vv[[perm[[r]]]] = esTrim[esAdd[vv[[perm[[r]]]],
+          esScale[-1, esTimes[factor, vv[[perm[[col]]]]]]]]]],
+      {r, col + 1, nb}]],
+    {col, nb}];
+  (* back substitution *)
+  w = Table[None, {nb}];
+  Do[Module[{rhs = vv[[perm[[col]]]]},
+    Do[rhs = esTrim[esAdd[rhs,
+      esScale[-1, esTimes[FF[[perm[[col]], c2]], w[[c2]]]]]],
+      {c2, col + 1, nb}];
+    w[[col]] = esTrim[DiffExp2`EpsSeries`ESDivide[rhs, FF[[perm[[col]], col]]]]],
+    {col, nb, 1, -1}];
+  w];
 
 (* ---- 2.10 probe ---- *)
 
@@ -266,7 +296,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       basis, probeErrs},
     cs = DiffExp2`Solve`PrepareChart[sys, chart];
     sol = DiffExp2`Solve`SolveChart[cs, req];
-    basis = sol["Basis"]["Columns"];
+    basis = recombineDegenerate[cs, sol["Basis"]["Columns"],
+      sol["Basis"]["Specs"]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
        object is only valid at its anchor); thereafter at radius/k of THIS
        chart on the incoming side *)

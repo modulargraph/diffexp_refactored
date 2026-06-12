@@ -88,6 +88,8 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     keptAll = Join[keptAll, res["Charts"]]];
   If[keptAll === {},
     err["E9", <|"Detail" -> "empty integration range or anchor outside"|>]];
+  If[Environment["DEBUG_LI"] === "1",
+    Print["    LI: transports done t=", SessionTime[], " ncharts=", Length[keptAll]]];
   (* tile [lo, hi]: breakpoints at midpoints between adjacent chart centers *)
   keptAll = SortBy[keptAll, N[#["Chart"]["Center"], 30] &];
   tiles = Module[{cs = #["Chart"]["Center"] & /@ keptAll, bps},
@@ -105,7 +107,11 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
           If[!zeroQ[cc],
             lsM = DiffExp2`SectorSeries`MultiplyRational[ls,
               Together[cc /. var -> center + Global`t], Global`t];
+            If[Environment["DEBUG_LI"] === "1",
+              Print["      tile mul done t=", SessionTime[]]];
             ri2 = DiffExp2`Integrate`IntegrateLocalSolution[lsM, {t1, t2}];
+            If[Environment["DEBUG_LI"] === "1",
+              Print["      tile int done t=", SessionTime[]]];
             vci = ri2["Values"][[ci]];
             vals = If[vals === None, vci, esAdd[vals, vci]]]],
           {ci, Length[cvec]}];

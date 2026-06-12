@@ -140,12 +140,19 @@ prepareCleared[cs_, wideTop_] := Module[
       "Detail" -> "cleared denominator degenerates onto the chart origin at eps = 0"|>]];
   dD = Exponent[den, t];
   dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
-  dES = Table[esFrom[Coefficient[den, t, j], eps, wideTop], {j, 0, dD}];
-  NhatES = Table[Module[{Nj, Nhat},
-    Nj = Map[Coefficient[#, t, j] &, num, {2}];
-    Nhat = Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}];
-    Map[If[zeroQ[#], esZero[wideTop], esFrom[#, eps, wideTop]] &, Nhat, {2}]],
-    {j, 0, dN}];
+  (* R6: numericize the recursion coefficient expansions at 2x WP -
+     structure (tags, windows, case selection) is decided on EXACT data
+     upstream; exact-rational coefficient growth grinds multi-master
+     systems.  Exact zeros stay exact. *)
+  Module[{wp2 = 2*DiffExp2`Config`CFG["WorkingPrecision"], numz},
+    numz[s_] := DiffExp2`EpsSeries`ESMap[
+      If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &, s];
+    dES = Table[numz[esFrom[Coefficient[den, t, j], eps, wideTop]], {j, 0, dD}];
+    NhatES = Table[Module[{Nj, Nhat},
+      Nj = Map[Coefficient[#, t, j] &, num, {2}];
+      Nhat = Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}];
+      Map[If[zeroQ[#], esZero[wideTop], numz[esFrom[#, eps, wideTop]]] &, Nhat, {2}]],
+      {j, 0, dN}]];
   <|"dES" -> dES, "NhatES" -> NhatES, "dD" -> dD, "dN" -> dN|>];
 
 (* matrix(of ES).vector(of ES) *)
@@ -256,8 +263,11 @@ assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], d = cs["SystemSize"], U = rec["U"],
    P = rec["P"], kminO, kmaxO, Vexp, W, secs, gv, ls},
   (* original-frame vectors W[n+1][l+1] = V . U *)
-  Module[{top = Max[esCM /@ Flatten[U, 2]]},
-    Vexp = Map[If[zeroQ[#], esZero[top], esFrom[Together[#], eps, top]] &, cs["V"], {2}]];
+  Module[{top = Max[esCM /@ Flatten[U, 2]],
+    wp2 = 2*DiffExp2`Config`CFG["WorkingPrecision"]},
+    Vexp = Map[If[zeroQ[#], esZero[top],
+      DiffExp2`EpsSeries`ESMap[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &,
+        esFrom[Together[#], eps, top]]] &, cs["V"], {2}]];
   W = Table[mDotV[Vexp, U[[n + 1, l + 1]]], {n, 0, nmax}, {l, 0, P}];
   kminO = Min[esMin /@ Flatten[W, 2]];
   kmaxO = Min[esCM /@ Flatten[W, 2]];

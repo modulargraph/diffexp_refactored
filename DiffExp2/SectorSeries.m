@@ -270,8 +270,22 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
       {r0, troots}]];
   (* center-pole order and analytic Taylor parts *)
   M = Max[0, Max[Map[Max[0, -tValuation[#, var]] &, cj]]];
-  Q = Table[Module[{qj = Together[cj[[j]]*var^M]},
-      Table[SeriesCoefficient[qj, {var, 0, n}], {n, 0, ncols - 1}]],
+  (* one-pass exact Taylor via the division recursion (SeriesCoefficient
+     per order is prohibitively slow on big rationals), then numericize at
+     2x WP (structure already decided on exact data) *)
+  Q = Table[Module[{qj = Cancel[Together[cj[[j]]*var^M]], num1, den1, nc, dc, csr},
+      If[zeroQ[qj], ConstantArray[0, ncols],
+        num1 = Numerator[qj]; den1 = Denominator[qj];
+        nc = Table[Coefficient[num1, var, n], {n, 0, ncols - 1}];
+        dc = Table[Coefficient[den1, var, n], {n, 0, ncols - 1}];
+        csr = ConstantArray[0, ncols];
+        csr[[1]] = Together[nc[[1]]/dc[[1]]];
+        Do[csr[[m + 1]] = Together[
+            (nc[[m + 1]] - Sum[dc[[l + 1]]*csr[[m - l + 1]], {l, 1, m}])/dc[[1]]],
+          {m, 1, ncols - 1}];
+        (* ByteCount-gated: small exact coefficients stay exact (I-6);
+           giants numericize (R6 performance) *)
+        Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, 2*wp]] &, csr]]],
     {j, 1, jcount}];
   (* convolve into each sector; a -> a - M; windows shift by jmin *)
   newSecs = Map[Module[{arr = #["Coeffs"], out},

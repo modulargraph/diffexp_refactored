@@ -69,7 +69,7 @@ ChartRadius[center_, all_List] := Module[
 (* ---- 2.4 GetCPL/GetCPR geometry ---- *)
 
 nextCenter[xb_, sings_, dir_, k_, allSings_] := Module[
-  {caps, zcap, s, xnew, rad},
+  {caps, zcap, s, xnew, rad, rb},
   (* nearest real on-path singularity ahead *)
   caps = Select[sings, TrueQ[dir*(N[#, 40] - N[xb, 40]) > 0] &];
   zcap = If[caps === {}, dir*Infinity,
@@ -78,6 +78,15 @@ nextCenter[xb_, sings_, dir_, k_, allSings_] := Module[
     (* unbounded: fixed stride of k * |xb|-scale or 1 *)
     s = Max[1, Abs[xb]]/2; xnew = xb + dir*s/k,
     s = k*Abs[N[zcap - xb, 40]]/(1 + k); xnew = xb + dir*s/k];
+  (* CHAIN INVARIANT: the next chart's match point (at r_new/k from its
+     center) must lie INSIDE this chart's disk.  The step geometry above
+     only sees singularities AHEAD - a singularity just BEHIND the path
+     (banana: x = 1/2 next to the anchor) caps r_b and breaks coverage.
+     step <= r_b/2 guarantees |step| + r_new/k <= (1/2 + (3/2)/k) r_b < r_b
+     for k >= 4 (radius is 1-Lipschitz in the center). *)
+  rb = ChartRadius[xb, allSings];
+  If[rb =!= Infinity && TrueQ[s/k > rb/2],
+    s = k*rb/2; xnew = xb + dir*s/k];
   (* complex-distance cap: re-solve placement against the capped radius *)
   rad = ChartRadius[xnew, allSings];
   If[rad < s,

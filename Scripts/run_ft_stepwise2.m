@@ -92,7 +92,7 @@ runExample[name_String] := Module[
   (* coefficients are the only numerics (tags stay exact): numericize the
      deep boundary at 2x WP so the chain runs at arbitrary precision instead
      of exact-symbolic (Log/Gamma giants grind the Laurent-field algebra) *)
-  currentBCs = N[deepBoundary["BoundaryValues"], 2*wp];
+  currentBCs = N[deepBoundary["BoundaryValues"], wp + 20];
   currentPrefactors = deepBoundary["EpsPrefactors"];
   printRows[name, nLevels, ftData["Levels"][nLevels]["Masters"],
     Table[DiffExp2`EpsSeries`ESShift[
@@ -234,7 +234,7 @@ runExample[name_String] := Module[
        the next level's recursion (meprec storms) *)
     currentBCs = Table[Module[{r = rawES[[i]], top},
       top = Min[esCMx[r], epsOrder + (level - 1) + boundaryExtraOrder - shift];
-      Table[N[esC[r, k], 2*wp], {k, -shift, top}]],
+      Table[N[esC[r, k], wp + 20], {k, -shift, top}]],
       {i, Length[rawES]}];
     currentPrefactors = ConstantArray[shift, Length[rawES]];
     finalRaw = rawES],

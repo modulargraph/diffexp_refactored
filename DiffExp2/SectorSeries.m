@@ -285,19 +285,25 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
           {m, 1, ncols - 1}];
         (* ByteCount-gated: small exact coefficients stay exact (I-6);
            giants numericize (R6 performance) *)
-        Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, 2*wp]] &, csr]]],
+        Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp + 20]] &, csr]]],
     {j, 1, jcount}];
   (* convolve into each sector; a -> a - M; windows shift by jmin *)
   newSecs = Map[Module[{arr = #["Coeffs"], out},
-    out = Table[
-      Sum[Module[{krow = kp - (jrow - 1) - jmin},
-        If[kmin <= krow <= kmax,
-          Table[Sum[Q[[jrow, n1 + 1]]*arr[[krow - kmin + 1, n - n1 + 1, cc]],
-            {n1, 0, n}], {n, 0, ncols - 1}, {cc, ncomp}], 0]],
-        {jrow, 1, jcount}],
-      {kp, kmin + jmin, kmax + jmin}];
+    (* vectorized t-convolution: per (kp, jrow) one ListConvolve per
+       component along n (the per-element Sum was the last interpreted
+       hot loop - banana: 5 masters x 12 tiles x 1.5M ops each) *)
+    out = Table[Module[{acc = ConstantArray[0, {ncols, ncomp}]},
+      Do[Module[{krow = kp - (jrow - 1) - jmin},
+        If[kmin <= krow <= kmax && !AllTrue[Q[[jrow]], # === 0 &],
+          Module[{slabT = Transpose[arr[[krow - kmin + 1]]]},
+            acc += Transpose[Table[
+              Take[ListConvolve[Q[[jrow]], slabT[[cc]], {1, -1}, 0], ncols],
+              {cc, ncomp}]]]]],
+        {jrow, 1, jcount}];
+      acc], {kp, kmin + jmin, kmax + jmin}];
     <|"a" -> Together[#["a"] - M], "b" -> #["b"], "p" -> #["p"],
-      "Coeffs" -> Map[Together, out, {3}]|>] &, ls["Sectors"]];
+      "Coeffs" -> If[FreeQ[out, _Symbol], out, Map[Together, out, {3}]]|>] &,
+    ls["Sectors"]];
   CanonicalizeLocalSolution[Join[ls, <|"Sectors" -> newSecs,
     "EpsWindow" -> <|"Min" -> kmin + jmin, "CompleteMax" -> kmax + jmin|>|>]]];
 

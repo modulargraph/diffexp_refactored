@@ -110,6 +110,10 @@ prepareChartCore[sys_Association, chart_Association] := Module[
     "Prescriptions" -> Lookup[chart, "Prescriptions", {}],
     "SystemSize" -> d,
     "ThetaMatrix" -> idata["Reduction"]["ThetaMatrix"],
+    (* original theta matrix t*A(chart): the residual check runs on the
+       GAUGED-BACK solution f = T.g, which solves the ORIGINAL system -
+       checking it against the reduced B would fail every gauge chart *)
+    "ThetaOriginal" -> Map[Cancel[Together[t*#]] &, Achart, {2}],
     "Gauge" -> idata["Reduction"]["Gauge"],
     "GaugeInverse" -> idata["Reduction"]["GaugeInverse"],
     "Residue" -> idata["Residue"],
@@ -168,7 +172,7 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
     Do[csr[[m + 1]] = Together[
         (ncl[[m + 1]] - Sum[dcl[[j + 1]]*csr[[m - j + 1]], {j, 1, m}])/dcl[[1]]],
       {m, 1, rel}];
-    wp2 = 2*DiffExp2`Config`CFG["WorkingPrecision"];
+    wp2 = DiffExp2`Config`CFG["WorkingPrecision"] + 20;
     csr = Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &, csr];
     Do[out[[v - fb + 1 + m]] = csr[[m + 1]], {m, 0, rel}]];
   out];
@@ -221,7 +225,22 @@ prepareCleared[cs_, fb_, W_] := Module[
     Nj = Map[Coefficient[#, t, j] &, num, {2}];
     Nhat = Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}];
     Map[ratEpsList[#, eps, fb, W] &, Nhat, {2}]], {j, 0, dN}];
-  <|"dL" -> dL, "NhatL" -> NhatL, "dD" -> dD, "dN" -> dN|>];
+  (* sparse-offset forms: den coefficients and Nhat are eps-POLYNOMIAL
+     (cleared system) -> 1-3 nonzero eps-orders each.  Each multiplier
+     becomes a short list of {eps-shift, scalar} / {eps-shift, d x d
+     matrix}; the recursion then runs on whole (d x W) blocks with
+     matrix Dot + column shifts instead of per-entry convolutions. *)
+  Module[{dSp, NhatSp},
+    dSp = Table[Module[{lst = dL[[j + 1]]},
+      Table[{i + fb - 1, lst[[i]]}, {i, Select[Range[W], lst[[#]] =!= 0 &]}]],
+      {j, 0, dD}];
+    NhatSp = Table[Module[{idxs},
+      idxs = Select[Range[W], Module[{i = #},
+        AnyTrue[Flatten[NhatL[[j + 1]], 1], #[[i]] =!= 0 &]] &];
+      Table[{i + fb - 1, Map[#[[i]] &, NhatL[[j + 1]], {2}]}, {i, idxs}]],
+      {j, 0, dN}];
+    <|"dL" -> dL, "NhatL" -> NhatL, "dD" -> dD, "dN" -> dN,
+      "dSp" -> dSp, "NhatSp" -> NhatSp|>]];
 
 (* EpsSeries -> frame list *)
 esToFrame[s_, fb_, W_] := Module[{out = ConstantArray[0, W], m1, m2},
@@ -266,31 +285,37 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
   If[init =!= None,
     Do[U[[1, l + 1]] = Map[esToFrame[#, fb, W] &, init[[l + 1]]],
       {l, 0, Min[P, Length[init] - 1]}]];
+  (* shift a (d x W) block by s eps-slots (s > 0: content moves UP) *)
+  Module[{shB, dSp = prep["dSp"], NhatSp = prep["NhatSp"]},
+  shB[M_, s_] := Which[s === 0, M,
+    s > 0, Join[ConstantArray[0, {Length[M], s}], M[[All, 1 ;; W - s]], 2],
+    True, Join[M[[All, -s + 1 ;; W]], ConstantArray[0, {Length[M], -s}], 2]];
   Do[Module[{R, rhsFull},
-    R = Table[Module[{acc = Table[zeroV, {d}]},
+    R = Table[Module[{acc = ConstantArray[0, {d, W}]},
       Do[If[n - j >= 0,
-        acc = Table[acc[[r]] + Sum[
-          frConv[NhatL[[j + 1, r, c]], U[[n - j + 1, l + 1, c]], fb, W],
-          {c, d}], {r, d}]],
+        Module[{Ublk = U[[n - j + 1, l + 1]]},
+          Do[acc += sp[[2]] . shB[Ublk, sp[[1]]], {sp, NhatSp[[j + 1]]}]]],
         {j, 1, Min[n, dN]}];
       Do[If[n - j >= 0,
-        Module[{lam = lamL[n - j]},
-          acc = Table[acc[[r]] -
-            frConv[dL[[j + 1]],
-              frConv[lam, U[[n - j + 1, l + 1, r]], fb, W] +
-                frShiftUp[U[[n - j + 1, l + 2, r]]], fb, W], {r, d}]]],
+        Module[{Ublk = U[[n - j + 1, l + 1]], term},
+          (* lam*U + eps*U_above: lam = (aT + n - j) + bT*eps *)
+          term = Together[aT + n - j]*Ublk + shB[Together[bT]*Ublk, 1] +
+            shB[U[[n - j + 1, l + 2]], 1];
+          Do[acc -= sp[[2]]*shB[term, sp[[1]]], {sp, dSp[[j + 1]]}]]],
         {j, 1, Min[n, dD]}];
       If[srcHat =!= None,
         Do[If[n - j >= 0,
           Module[{sv = srcF[n - j, l]},
             If[sv =!= None,
-              acc = Table[acc[[r]] + frConv[dL[[j + 1]], sv[[r]], fb, W], {r, d}]]]],
+              Do[acc += sp[[2]]*shB[sv, sp[[1]]], {sp, dSp[[j + 1]]}]]]],
           {j, 0, Min[n, dD]}]];
       acc], {l, 0, P}];
     (* solve top-down in l *)
     Do[Module[{},
-      rhsFull = Table[R[[l + 1, r]] -
-        frConv[dL[[1]], frShiftUp[U[[n + 1, l + 2, r]]], fb, W], {r, d}];
+      rhsFull = R[[l + 1]];
+      Do[rhsFull -= sp[[2]]*shB[shB[U[[n + 1, l + 2]], 1], sp[[1]]],
+        {sp, dSp[[1]]}];
+      rhsFull = Table[rhsFull[[r]], {r, d}];
       Do[Module[{aI = blk["a"], bI = blk["b"], q = blk["q"], colsB = blk["Cols"],
           dA, dB, deltaList},
         dA = Together[aT + n - aI]; dB = Together[bT - bI];
@@ -333,7 +358,7 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
               colsB[[r]] -> assigned[{l, r}]]],
             {l, 0, P}, {r, 1, q}]]]],
       {blk, blocks}]],
-    {n, n0, nmax}];
+    {n, n0, nmax}]];
   <|"U" -> U, "Hits" -> hits, "P" -> P, "FrameBase" -> fb, "TopValid" -> topValid|>];
 
 (* ---- assembly ---- *)
@@ -448,8 +473,8 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   Pmax = Max[0, Max[Table[logCeiling[cs, b["a"], b["b"], b["q"] - 1], {b, blocks}]]];
   cdMax = Max[0, Max[#["CollisionDepth"] & /@ fams]];
-  wideTop = reqMax + Pmax + cdMax + 4 - Min[0, reqMin - Pmax - 2];
-  fb = Min[reqMin, 0] - Pmax - cdMax - 4;   (* frame base; eps-poles of the
+  wideTop = reqMax + Pmax + cdMax + 2 - Min[0, reqMin - Pmax - 2];
+  fb = Min[reqMin, 0] - Pmax - cdMax - 2;   (* frame base; eps-poles of the
     cleared system are caught by ratEpsList's below-frame assert *)
   Wd = wideTop - fb + 1;
   prep = prepareCleared[cs, fb, Wd];
@@ -501,8 +526,8 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
       P, srcMin, srcMax, VInvExp, bHat, srcFn, rec, ls, wideTop2, prep2},
     P = logCeiling[cs, aS, bS, pS, True];  (* sources: Z>=0 incl. the same-a hit *)
     srcMin = source["EpsWindow", "Min"]; srcMax = source["EpsWindow", "CompleteMax"];
-    wideTop2 = srcMax + P + 4 - Min[0, srcMin - P - 2];
-    Module[{fb2 = Min[srcMin, 0] - P - 4, Wd2},
+    wideTop2 = srcMax + P + 2 - Min[0, srcMin - P - 2];
+    Module[{fb2 = Min[srcMin, 0] - P - 2 - 2, Wd2},
       Wd2 = wideTop2 - fb2 + 1;
       prep2 = prepareCleared[cs, fb2, Wd2];
       VInvExp = Map[ratEpsList[Together[#], eps, fb2, Wd2] &, cs["VInv"], {2}];
@@ -562,7 +587,8 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
       DiffExp2`SectorSeries`DifferentiateLocalSolution[ls], t0, "UsePade" -> False];
     k1 = Max[esMin[f["Value"]], esMin[df["Value"]]];
     k2 = Min[esCM[f["Value"]], esCM[df["Value"]]];
-    Bt0 = Map[Together[# /. t -> t0] &, cs["ThetaMatrix"], {2}];
+    Bt0 = Map[Together[# /. t -> t0] &,
+      Lookup[cs, "ThetaOriginal", cs["ThetaMatrix"]], {2}];
     Bt0 = Map[Module[{fl = ratEpsList[#, eps, Min[k1, 0], k2 - Min[k1, 0] + 1]},
       DiffExp2`EpsSeries`ESNew[Min[k1, 0], fl]] &, Bt0, {2}];
     (* theta f = t f' *)

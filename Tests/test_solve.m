@@ -137,6 +137,24 @@ r2f1 = catchDE2[sc[cs2f1, req[0, 2, 6]]];
 assert["su2f1_true_resonant_basis",
   !FailureQ[r2f1] && Length[r2f1["Basis"]["Columns"]] === 2];
 
+(* SU-18: gauge chart end-to-end (T-12 rank reduction, closed form
+   f = (c1 - c2/x, c2)): the residual check must verify the GAUGED-BACK
+   solution against the ORIGINAL system *)
+cs18 = pc[mkSys[{{0, x^-2}, {0, 0}}], mkChart[0, 1, "su18"]];
+r18 = catchDE2[sc[cs18, req[0, 2, 6]]];
+assert["su18_gauge_chart_closed_form",
+  !FailureQ[r18] && Length[r18["Basis"]["Columns"]] === 2 &&
+  Module[{vals},
+    vals = Map[Module[{ev = DiffExp2`SectorSeries`EvaluateLocalSolution[#, 1/3,
+        "UsePade" -> False]["Value"]},
+      N[DiffExp2`EpsSeries`ESCoefficient[ev, 0], 10]] &,
+      r18["Basis"]["Columns"]];
+    (* span of (1,0) and (-3,1) at x=1/3: check both columns lie in it *)
+    AllTrue[vals, Abs[#[[1]] + 3*#[[2]] - (#[[1]] + 3*#[[2]])] < 10^-8 &] &&
+    Module[{m = vals},
+      Abs[Det[m]] > 10^-8 &&
+      AllTrue[m, NumericQ[#[[1]]] && NumericQ[#[[2]]] &]]]];
+
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Print["Some tests FAILED."]; Exit[1],
   Print["All tests PASSED!"]; Exit[0]];

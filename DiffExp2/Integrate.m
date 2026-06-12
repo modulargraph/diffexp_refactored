@@ -34,7 +34,7 @@ antiderivativeAt[m_, b_, p_, T_, kMaxOut_] := Module[
   {logT, width, tbeps, invAlpha, jsum, alphaES, wp},
   wp = DiffExp2`Config`CFG["WorkingPrecision"];
   (* numeric log: exact Log[rational] towers compound into symbolic giants *)
-  logT = If[FreeQ[T, _Symbol], N[Log[T], 2*wp], Log[T]];
+  logT = If[FreeQ[T, _Symbol], N[Log[T], wp + 20], Log[T]];
   width = kMaxOut + p + 4;
   tbeps = If[zeroQ[b], esNew[0, PadRight[{1}, width + 1]],
     esNew[0, Table[pow[b*logT, r]/r!, {r, 0, width}]]];

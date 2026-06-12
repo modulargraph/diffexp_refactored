@@ -124,6 +124,12 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
             "Detail" -> "adjacent kept charts do not overlap; tiling hole"|>]];
         Rationalize[N[Max[Min[mid, lA], lB], 30], N[rs[[i + 1]], 30]/64]],
         {i, Length[cs] - 1}], {hi}];
+    (* a non-monotone breakpoint pair would silently DROP the inverted
+       tile while both neighbors integrate the overlap (double counting) *)
+    Do[If[!TrueQ[N[bps[[i]], 30] <= N[bps[[i + 1]], 30]],
+      err["E9", <|"Breakpoints" -> {bps[[i]], bps[[i + 1]]},
+        "Detail" -> "non-monotone tile breakpoints (tiling inversion)"|>]],
+      {i, Length[bps] - 1}];
     Table[{keptAll[[i]], bps[[i]], bps[[i + 1]]}, {i, Length[cs]}]];
   Do[Module[{entry = tile[[1]], a = tile[[2]], b2 = tile[[3]], ls, center,
       t1, t2, contrib},

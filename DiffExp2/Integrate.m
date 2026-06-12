@@ -194,7 +194,7 @@ sumAntiderivative[ls_, T_, kmin_, kmax_, ncols_, ncomp_] := Module[{acc},
     Do[Module[{m = Together[a + n], base},
       base = If[zeroQ[b] && zeroQ[m + 1],
         (* alpha == 0: F = eps^p Log^(p+1) t/((p+1) p!) *)
-        esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/((p + 1))}, kmax - kmin + 4]], p],
+        esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/((p + 1)*p!)}, kmax - kmin + 4]], p],
         DiffExp2`EpsSeries`ESTruncate[
           antiderivativeAt[m, b, p, T, kmax + p + 2], kmax + p + 2]];
       Do[Module[{cESc},
@@ -235,7 +235,7 @@ sumAntiderivativePV[ls_, T_, kmin_, kmax_, ncols_, ncomp_, arm_] := Module[{acc}
         zeroQ[b] && TrueQ[m + 1 > 0],
         SectorMonomialIntegral[m, b, p, T, kmax + p + 2],
         zeroQ[b] && zeroQ[m + 1],
-        esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/(p + 1)}, kmax - kmin + 4]], p],
+        esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/((p + 1)*p!)}, kmax - kmin + 4]], p],
         zeroQ[b],
         (* m+1 < 0 power cell: real finite part F(T) (the 1/t^k endpoint
            terms cancel between PV arms for the surviving combinations;

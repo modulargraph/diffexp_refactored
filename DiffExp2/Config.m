@@ -82,7 +82,11 @@ $schema = <|
      geometry exactly). *)
   "StepDivisionOrder" -> <|"Type" -> (# === Automatic ||
       ((IntegerQ[#] || Head[#] === Rational) && 1 <= # <= 16) &),
-    "Default" -> Automatic, "Normalize" -> None|>,
+    (* default = classic coupled geometry; Automatic (wide strides) is
+       structurally validated but currently fails SILENTLY on multi-master
+       systems (binary trim floor absorbs supra-floor truncation residue -
+       see the M5j branch) - opt-in until the tail-honest gates land *)
+    "Default" -> 4, "Normalize" -> None|>,
   "EpsilonOrder" -> <|"Type" -> (IntegerQ[#] && # >= 0 &), "Default" -> 4, "Normalize" -> None|>,
   "EstimateError" -> <|"Type" -> (MemberQ[{False, True, "Fast"}, #] &), "Default" -> "Fast", "Normalize" -> None|>,
   "ExpansionOrder" -> <|"Type" -> (IntegerQ[#] && # >= DiffExp2`Tolerances`$MinExpansionOrder &), "Default" -> 50, "Normalize" -> None|>,

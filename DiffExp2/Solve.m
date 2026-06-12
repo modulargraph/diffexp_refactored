@@ -268,7 +268,12 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
    topValid, lamL, zeroV, srcF},
   invD0 = frInv[dL[[1]], fb, W];
   blocks = blockList[cs];
-  topValid = fb + W - 1;
+  (* negative eps-leads in the sparse multipliers (Nhat = VInv.N.V is
+     rational in eps; the frame can carry eps-poles) erode the top |s|
+     slots of every product - a STABLE depth, paid once *)
+  topValid = fb + W - 1 - Max[0, Max[Map[Module[{offs = #[[All, 1]]},
+    If[offs === {}, 0, -Min[offs]]] &,
+    Join[prep["dSp"], prep["NhatSp"]]]]];
   zeroV = ConstantArray[0, W];
   lamL[m_] := Module[{l = zeroV}, l[[-fb + 1]] = Together[aT + m];
     If[-fb + 2 <= W, l[[-fb + 2]] = Together[bT]]; l];

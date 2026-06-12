@@ -40,8 +40,21 @@ pow[x_, 0] := 1; pow[x_, n_] := x^n;
 (* ---- 2.1 the primitive ---- *)
 
 (* antiderivative value F(T) for alpha != 0:
-   F(T) = T^(m+1) T^(b eps) Sum_j (-1)^j eps^p Log^(p-j)T / ((p-j)! alpha^(j+1)) *)
+   F(T) = T^(m+1) T^(b eps) Sum_j (-1)^j eps^p Log^(p-j)T / ((p-j)! alpha^(j+1))
+   MEMOIZED on the exact argument tuple (+ WP, which sets the numeric log):
+   a tile's base towers are identical across components, masters and cvec
+   entries — LineIntegral re-integrates the same tile once per nonzero
+   coefficient, and the per-n towers dominated the tile profile
+   (Docs/SpeedIdeas.md R1).  Pure function of exact inputs: same values,
+   bounded cache (flush at cap, the $shCache pattern). *)
+$adCache = <||>; $adCacheMax = 4096;
 antiderivativeAt[m_, b_, p_, T_, kMaxOut_] := Module[
+  {key = {m, b, p, T, kMaxOut, DiffExp2`Config`CFG["WorkingPrecision"]}},
+  If[KeyExistsQ[$adCache, key], $adCache[key],
+    If[Length[$adCache] >= $adCacheMax, $adCache = <||>];
+    $adCache[key] = antiderivativeAtCore[m, b, p, T, kMaxOut]]];
+
+antiderivativeAtCore[m_, b_, p_, T_, kMaxOut_] := Module[
   {logT, width, tbeps, invAlpha, jsum, alphaES, wp},
   wp = DiffExp2`Config`CFG["WorkingPrecision"];
   (* numeric log: exact Log[rational] towers compound into symbolic giants *)

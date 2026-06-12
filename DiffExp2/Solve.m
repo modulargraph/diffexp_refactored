@@ -676,9 +676,19 @@ capWindow[cs_, ls_, capCM_] := Module[
 
 (* ---- residual check ---- *)
 
+(* residual-check numeric handoff (the Transport`numHandoff policy): the
+   evaluated f / theta-f VALUES feeding the d^2 esTimes grid numericize at
+   WP+20.  Exact evaluation outputs otherwise compound into exact-rational
+   giants across the grid (measured: the check was ~3.1 s of a 13 s chart
+   at d = 7, Docs/SpeedIdeas.md §2).  Values only — the residual compare
+   below is numeric by construction (Abs[N[...]]); windows untouched. *)
+numV[s_] := esNew[esMin[s],
+  N[Table[esCoeff[s, k], {k, esMin[s], esCM[s]}],
+    cfg["WorkingPrecision"] + 20]];
+
 ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], t0, sols, maxRel = 0,
-   Bt0, win, rtol},
+   Bsub, bt0Cache = <||>, bt0For, win, rtol},
   rtol = DiffExp2`Tolerances`Tol["ResidTol"];
   sols = If[KeyExistsQ[sol, "Columns"], sol["Columns"], {sol}];
   (* truncation-aware probe: the residual of a degree-nmax truncation is
@@ -692,23 +702,35 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
          downstream evaluation into exact algebraic arithmetic *)
       Rationalize[N[raw, 20], N[raw, 20]/50]],
     probe];
-  Do[Module[{f, df, lhs, rhs, srcv, k1, k2, scale},
+  (* B(t0) is column-independent: hoist the d^2 exact substitutions out of
+     the per-column loop (they dominated the check at d = 7: ~7x recompute)
+     and memoize the eps-frame expansion per (k1, k2) window — columns
+     share windows in the common case.  Values are identical per column;
+     pure cost hoist, no honesty change. *)
+  Bsub = Map[Together[# /. t -> t0] &,
+    Lookup[cs, "ThetaOriginal", cs["ThetaMatrix"]], {2}];
+  bt0For[k1_, k2_] := Module[{key = {Min[k1, 0], k2}},
+    If[!KeyExistsQ[bt0Cache, key],
+      bt0Cache[key] = Map[Module[
+          {fl = ratEpsList[#, eps, key[[1]], k2 - key[[1]] + 1]},
+        DiffExp2`EpsSeries`ESNew[key[[1]], fl]] &, Bsub, {2}]];
+    bt0Cache[key]];
+  Do[Module[{f, df, lhs, rhs, srcv, k1, k2, scale, Bt0},
     If[Environment["DEBUG_RESID"] === "1",
       Print["RESID col window=", ls["EpsWindow"], " tags=",
         {#["a"], #["b"], #["p"]} & /@ ls["Sectors"]]];
-    f = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, t0, "UsePade" -> False];
-    df = DiffExp2`SectorSeries`EvaluateLocalSolution[
-      DiffExp2`SectorSeries`DifferentiateLocalSolution[ls], t0, "UsePade" -> False];
-    k1 = Max[esMin[f["Value"]], esMin[df["Value"]]];
-    k2 = Min[esCM[f["Value"]], esCM[df["Value"]]];
-    Bt0 = Map[Together[# /. t -> t0] &,
-      Lookup[cs, "ThetaOriginal", cs["ThetaMatrix"]], {2}];
-    Bt0 = Map[Module[{fl = ratEpsList[#, eps, Min[k1, 0], k2 - Min[k1, 0] + 1]},
-      DiffExp2`EpsSeries`ESNew[Min[k1, 0], fl]] &, Bt0, {2}];
+    f = numV[DiffExp2`SectorSeries`EvaluateLocalSolution[ls, t0,
+      "UsePade" -> False]["Value"]];
+    df = numV[DiffExp2`SectorSeries`EvaluateLocalSolution[
+      DiffExp2`SectorSeries`DifferentiateLocalSolution[ls], t0,
+      "UsePade" -> False]["Value"]];
+    k1 = Max[esMin[f], esMin[df]];
+    k2 = Min[esCM[f], esCM[df]];
+    Bt0 = bt0For[k1, k2];
     (* theta f = t f' *)
     Module[{thetaF, Bf, resid},
-      thetaF = esScale[t0, df["Value"]];
-      Bf = Module[{fv = f["Value"], comps},
+      thetaF = esScale[t0, df];
+      Bf = Module[{fv = f, comps},
         comps = Length[esCoeff[fv, esMin[fv]]];
         Table[Module[{s = None},
           Do[Module[{cESr},

@@ -69,6 +69,20 @@ $schema = <|
     "Normalize" -> (Replace[#, {"Before" -> True, "After" -> True, None -> False}] &)|>,
   "DeltaPrescriptions" -> <|"Type" -> ListQ, "Default" -> {}, "Normalize" -> parsePrescriptions|>,
   "DivisionOrder" -> <|"Type" -> (IntegerQ[#] && # >= 2 &), "Default" -> 3, "Normalize" -> None|>,
+  (* StepDivisionOrder: the chart PLACEMENT stride divisor k_eff.  Match
+     points keep sitting at radius/DivisionOrder (that key's meaning is
+     unchanged); k_eff only sets how far the next chart center is placed.
+     Marching toward a singularity the remaining distance shrinks by
+     k_eff/(1+k_eff) per chart, so SMALLER values mean FEWER charts; the
+     price is series evaluations farther out in the convergence disk
+     (worst-case ratio inventory in Transport.m stepDivisor).  Automatic
+     derives the largest safe stride from ExpansionOrder so truncation
+     tails stay below the 1e-14 design line, and never exceeds
+     DivisionOrder (low ExpansionOrder reproduces the classic coupled
+     geometry exactly). *)
+  "StepDivisionOrder" -> <|"Type" -> (# === Automatic ||
+      ((IntegerQ[#] || Head[#] === Rational) && 1 <= # <= 16) &),
+    "Default" -> Automatic, "Normalize" -> None|>,
   "EpsilonOrder" -> <|"Type" -> (IntegerQ[#] && # >= 0 &), "Default" -> 4, "Normalize" -> None|>,
   "EstimateError" -> <|"Type" -> (MemberQ[{False, True, "Fast"}, #] &), "Default" -> "Fast", "Normalize" -> None|>,
   "ExpansionOrder" -> <|"Type" -> (IntegerQ[#] && # >= DiffExp2`Tolerances`$MinExpansionOrder &), "Default" -> 50, "Normalize" -> None|>,

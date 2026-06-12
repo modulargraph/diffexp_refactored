@@ -106,7 +106,9 @@ Behavior contract:
   membership is tested EXACTLY (old code uses chopped numeric MemberQ,
   Transport.m:606-609 — forbidden, F13).
 - Regular chart centers are produced by `NextCenter` (2.4) so that every
-  match point sits at radius/DivisionOrder of BOTH adjacent charts.
+  match point sits at radius/DivisionOrder of BOTH adjacent charts
+  (consuming side; the producing-side ratio is relaxed and clamped — see
+  the recorded AMENDMENT at the end of 2.4).
 - Match points: each chart's outgoing match point is at chart-coordinate
   distance Radius/DivisionOrder from its center on the marching side
   (old Transport.m:679, 1041-1046: interval ±RoC/DivisionOrder in the
@@ -141,6 +143,29 @@ on-path cap points, but the resulting radius must additionally be capped by
 `ChartRadius` (complex distance).  If the complex cap is the binding one,
 re-solve the 1/k placement against the capped radius (the geometry formula
 holds with z-cap replaced by center ± capped radius).
+
+AMENDMENT (recorded, M5h): the placement STRIDE is decoupled from the
+match-point divisor.  `nextCenter` places centers with the stride divisor
+k_eff = `stepDivisor[k]` (config `StepDivisionOrder`, Automatic =
+`Min[k, Max[5/4, ceil16(10^(14/(ExpansionOrder+1))/2)]]`), while match
+points keep sitting at radius/DivisionOrder of the CONSUMING chart — that
+half of the both-adjacent-charts guarantee, which is the one conditioning
+the matching solve (F is the consuming chart's basis at radius/k), is
+unchanged.  The PRODUCING-side ratio is no longer pinned to 1/k; it is
+bounded instead by the explicit (G2) clamp in `nextCenter`
+(h = step − radius/k ≤ 0.9·Max[1/(2 k_eff), 1/k]·prevRadius, ≈ 0.36·R at
+the FT defaults) and the truncation tail at the worst consumer ratio is
+probed honestly per chart (`SegmentErrorProbe` at
+Max[1/(2 k_eff), 1/k]·Radius).  With k_eff = k (low ExpansionOrder or
+explicit `StepDivisionOrder -> DivisionOrder`) the classic coupled
+geometry is reproduced exactly.  Additionally each `SegmentLine` plan now
+begins with an ANCHOR CHART centered exactly at `from`: the boundary is
+matched at t = 0 and the chart is shared by the lo/hi transports of one
+anchor.  Rationale: chart count drives transport wall-clock; the approach
+ratio toward a singular target improves from k/(1+k) per chart to
+k_eff/(1+k_eff) (~2.6x fewer charts per decade at the FT defaults) while
+every evaluation ratio stays ≤ ~0.41 with tails below the 1e-14 design
+line at ExpansionOrder 40.
 
 ### 2.5 `DigitBudget[accuracyGoal_, segmentCount_] -> Integer`
 

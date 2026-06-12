@@ -68,38 +68,130 @@ ChartRadius[center_, all_List] := Module[
 
 (* ---- 2.4 GetCPL/GetCPR geometry ---- *)
 
-nextCenter[xb_, sings_, dir_, k_, allSings_] := Module[
-  {caps, zcap, s, xnew, rad, rb},
+(* stepDivisor: the chart PLACEMENT stride divisor k_eff (<= DivisionOrder
+   k when Automatic).  Two distinct roles were coupled in one k:
+     (a) the MATCH-POINT ratio: match points sit at radius/k — truncation
+         tail there is (1/k)^(ExpansionOrder+1) ((1/4)^41 ~ 1e-25 at the FT
+         defaults k = 4, ExpansionOrder = 40: ~11 decades of headroom below
+         the 1e-14 design line);
+     (b) the STRIDE: marching toward a dominating singularity, radius s and
+         step g = s/k_eff satisfy s = (distance) - g, so the remaining
+         distance shrinks by r = k_eff/(1+k_eff) per chart and the chart
+         count grows like log(d0/dstop)/log((1+k_eff)/k_eff) — k = 4 gives
+         r = 4/5 and ~10.3 charts per decade of approach; LARGER divisors
+         mean MORE charts.
+   Decoupling: placement uses k_eff <= k (bigger steps), match points keep
+   radius/k.  Evaluation-ratio inventory under the nextCenter invariants
+   (G1)+(G2) below, each ratio in units of the OWNING chart's radius:
+     - incoming match point in the new chart:            1/k
+     - incoming match point in the PREVIOUS chart:      <= ~0.41
+       ((G2) clamps h = g - R_new/k <= (9/10) clamp prevRad directly,
+       clamp = Max[1/(2 k_eff), 1/k]; the h < 0 side is <= prevRad/(k-1))
+     - LineIntegral tile edges (midpoints between centers, API.m):
+       backward edge g/(2 R_new) <= 1/(2 k_eff) when (G1) holds
+       (R_new >= k_eff g); in the back-binding case R_new >= g keeps it
+       <= 1/2 — the SAME class the old geometry produced next to singular
+       charts; forward edge g/(2 prevRad) <= ~0.41 by (G2) + the
+       1-Lipschitz bound R_new <= prevRad + g
+   so the controlled worst ratio is ~Max[1/(2 k_eff), 1/k, 0.41-class] and
+   the per-evaluation tail is ratio^(ExpansionOrder+1).  Automatic picks
+   the largest stride whose 1/(2 k_eff) ratio keeps that tail below 1e-14,
+     k_eff = Min[k, Max[5/4, ceil16(10^(14/(eo+1))/2)]]
+   (ceil16 = round UP to sixteenths; the 5/4 floor is where the 0.41-class
+   ratios stop improving).  At eo = 40 this gives 5/4: controlled ratios
+   <= 0.41, tails <= 0.41^41 ~ 1.3e-16, and the approach ratio drops from
+   4/5 to 5/9 — ln(9/5)/ln(5/4) ~ 2.6x fewer marching charts per decade.
+   At eo <= ~14 the formula exceeds k and the Min restores the classic
+   coupled geometry exactly.  TransportLine's SegmentErrorProbe probes at
+   the design ratio Max[1/(2 k_eff), 1/k], so the accumulated error
+   accounting sees these wider handoffs honestly. *)
+stepDivisor[k_] := Module[{raw = cfg["StepDivisionOrder"], eo},
+  eo = cfg["ExpansionOrder"];
+  If[raw === Automatic,
+    Min[k, Max[5/4, Ceiling[N[8*10^(14/(eo + 1)), 20]]/16]],
+    raw]];
+
+(* nextCenter: place the next chart center marching dir-ward from xb.
+   k = match-point divisor (DivisionOrder), keff = stepDivisor stride
+   divisor, prevRad = the previous chart's (line-capped) radius,
+   matchTarget = the current target's incoming match point, lineCap = the
+   2|to - from| radius cap used throughout SegmentLine. *)
+nextCenter[xb_, sings_, dir_, k_, keff_, allSings_, prevRad_, matchTarget_,
+    lineCap_] := Module[
+  {caps, zcap, s, g, xnew, rad, radC, clamp, h, tgtGap, it},
   (* nearest real on-path singularity ahead *)
   caps = Select[sings, TrueQ[dir*(N[#, 40] - N[xb, 40]) > 0] &];
   zcap = If[caps === {}, dir*Infinity,
     First[SortBy[caps, Abs[N[# - xb, 40]] &]]];
   If[zcap === dir*Infinity,
-    (* unbounded: fixed stride of k * |xb|-scale or 1 *)
-    s = Max[1, Abs[xb]]/2; xnew = xb + dir*s/k,
-    s = k*Abs[N[zcap - xb, 40]]/(1 + k); xnew = xb + dir*s/k];
-  (* CHAIN INVARIANT: the next chart's match point (at r_new/k from its
-     center) must lie INSIDE this chart's disk.  The step geometry above
-     only sees singularities AHEAD - a singularity just BEHIND the path
-     (banana: x = 1/2 next to the anchor) caps r_b and breaks coverage.
-     step <= r_b/2 guarantees |step| + r_new/k <= (1/2 + (3/2)/k) r_b < r_b
-     for k >= 4 (radius is 1-Lipschitz in the center). *)
-  rb = ChartRadius[xb, allSings];
-  If[rb =!= Infinity && TrueQ[s/k > rb/2],
-    s = k*rb/2; xnew = xb + dir*s/k];
-  (* complex-distance cap: re-solve placement against the capped radius *)
+    (* unbounded: fixed stride scale of |xb| or 1 *)
+    s = Max[1, Abs[xb]]/2,
+    (* dominated march: radius s touches the cap and xb sits at s/keff of
+       the new chart; remaining distance shrinks by keff/(1+keff) *)
+    s = keff*Abs[N[zcap - xb, 40]]/(1 + keff)];
+  g = s/keff;
+  (* never step past the target's incoming match point: the cover test and
+     the endpoint handoff assume |matchTarget - center| <= radius-scale *)
+  tgtGap = dir*(N[matchTarget, 40] - N[xb, 40]);
+  If[TrueQ[tgtGap > 0] && TrueQ[g > tgtGap], g = tgtGap; s = keff*g];
+  xnew = xb + dir*g;
+  (* (G1) complex-distance cap, ITERATED toward its fixed point rad >= s
+     (i.e. R_new >= keff*g; the old one-shot re-solve could leave
+     rad << s).  The contraction g <- rad/(1+keff) converges only when the
+     binding singularity lies AHEAD (rad grows as g shrinks).  When it lies
+     BEHIND xb (receding from a just-crossed singular chart) rad ~ u_b + g
+     SHRINKS with g and the iteration would contract g to 0 — there
+     R_new >= keff*g is unsatisfiable for keff > 1, so STOP at the first
+     non-improving contraction and accept the back-binding placement:
+     R_new >= g keeps the backward tile edge <= 1/2 (the pre-existing class
+     next to singular charts) and (G2) below enforces the honest handoff
+     bound, which also caps the forward edge in the 0.41 class. *)
   rad = ChartRadius[xnew, allSings];
-  If[rad < s,
-    s = k*rad/(1 + k); xnew = xb + dir*s/k];
+  it = 0;
+  While[TrueQ[N[rad, 40] < N[s, 40]] && it < 10,
+    (* iterate NUMERICALLY: intermediate placements are choices, and exact
+       algebraic intermediate centers would drag ChartRadius into
+       RootReduce algebra; only the final center is (coarsely) exact *)
+    Module[{s2 = keff*N[rad, 40]/(1 + keff), g2, x2, rad2},
+      g2 = s2/keff; x2 = N[xb, 40] + dir*g2;
+      rad2 = ChartRadius[x2, allSings];
+      If[TrueQ[N[rad2, 40] < N[rad, 40]], Break[]];
+      s = s2; g = g2; xnew = x2; rad = rad2];
+    it++];
+  (* (G2) prev-disk clamp: the new chart's incoming match point
+     xnew - dir*Radius/k is where the PREVIOUS solution gets evaluated; it
+     must sit well inside the previous disk.  Enforce directly:
+       h := g - Radius/k <= (9/10)*clamp*prevRad,
+       clamp = Max[1/(2 keff), 1/k]
+     (the 9/10 absorbs the coarse center rationalization below; the h < 0
+     side needs no clamp: h < 0 forces g < prevRad/(k-1), so
+     |h| <= R_new/k <= (prevRad + g)/k stays in the 1/(k-1) class).  h is
+     increasing in g with slope in [1 - 1/k, 1 + 1/k] (ChartRadius is
+     1-Lipschitz), so the unit-slope Newton step contracts the excess by a
+     factor <= 1/k; shrinking g preserves (G1) because s = keff*g falls at
+     least as fast as rad (keff >= 1).  Uses the line-CAPPED radius radC:
+     that is the radius attached downstream, hence the actual match-point
+     offset.  With keff = k the dominated march has h = 0 exactly and the
+     clamp is inert (classic behavior). *)
+  clamp = Max[1/(2*keff), 1/k];
+  radC = Min[rad, lineCap];
+  h = N[g - radC/k, 40];
+  it = 0;
+  While[TrueQ[h > (9/10)*clamp*N[prevRad, 40]] && it < 8,
+    g = g - (h - (9/10)*clamp*N[prevRad, 40]);
+    s = keff*g; xnew = xb + dir*g;
+    rad = ChartRadius[xnew, allSings]; radC = Min[rad, lineCap];
+    h = N[g - radC/k, 40]; it++];
   (* exact-ify the center COARSELY: the center is a placement CHOICE; a
      simple nearby rational keeps Indicial's exact algebra on small
      fractions (20-digit-denominator centers ground PossibleZeroQ into
      meprec storms).  Geometry self-corrects: the true radius and match
-     point are recomputed from the actual center downstream. *)
-  xnew = Module[{cand = Rationalize[N[xnew, 20], Abs[N[s, 20]]/(8 k)]},
+     point are recomputed from the actual center downstream.  Tolerance
+     g/8 equals the former s/(8k) at keff = k. *)
+  xnew = Module[{cand = Rationalize[N[xnew, 20], Abs[N[g, 20]]/8]},
     (* never land ON a singularity *)
     If[AnyTrue[allSings, TrueQ[PossibleZeroQ[RootReduce[# - cand]]] &],
-      Rationalize[N[xnew, 20], Abs[N[s, 20]]/(64 k)], cand]];
+      Rationalize[N[xnew, 20], Abs[N[g, 20]]/64], cand]];
   xnew];
 
 (* ---- 2.5 digit budget ---- *)
@@ -117,8 +209,8 @@ DigitBudget[ag_, nseg_Integer] := Module[{wp = cfg["WorkingPrecision"], dn, cd},
 (* ---- 2.3 segmentation ---- *)
 
 SegmentLine[sys_Association, {from_, to_}] := Module[
-  {sings, real, dir, k = cfg["DivisionOrder"], charts = {}, cur, interior,
-   endpointSingular, all, guard = 0},
+  {sings, real, dir, k = cfg["DivisionOrder"], keff, charts, cur, interior,
+   endpointSingular, all, guard = 0, lineCap, prevRad},
   sings = FindSingularities[sys];
   all = sings["All"]; real = sings["Real"];
   dir = Sign[to - from];
@@ -127,35 +219,51 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
   If[AnyTrue[real, TrueQ[PossibleZeroQ[RootReduce[# - from]]] &],
     err["E1", <|"From" -> from,
       "Detail" -> "transport FROM a singular point requires a singular boundary object (not supported in v1 marching start)"|>]];
+  keff = stepDivisor[k];
+  lineCap = 2*Abs[to - from];
   interior = Sort[Select[real, TrueQ[dir*(N[#, 40] - N[from, 40]) > 0] &&
       TrueQ[dir*(N[to, 40] - N[#, 40]) > 0] &], dir*N[#1 - #2, 40] < 0 &];
+  (* the ANCHOR CHART sits exactly at `from` (regular by the check above):
+     the boundary is matched at t = 0 — exact and perfectly conditioned —
+     and the chart is plan-independent, so the lo/hi endpoint transports
+     from one anchor share its PrepareChart AND SolveHomogeneous cache
+     entries (one anchor solve per level instead of two near-copies). *)
+  charts = {<|"Center" -> from, "Singular" -> False|>};
   cur = from;
-  Module[{targets = Join[interior, {to}], reached = False},
-    Do[Module[{target = targets[[ti]], targetSingular},
+  prevRad = Min[ChartRadius[from, all], lineCap];
+  Module[{targets = Join[interior, {to}]},
+    Do[Module[{target = targets[[ti]], targetSingular, radTarget, matchTarget},
       targetSingular = ti < Length[targets] || endpointSingular;
+      radTarget = Min[ChartRadius[target, all], lineCap];
+      (* the point the LAST chart must reach: the target chart's incoming
+         match point (radius/k before the target) *)
+      matchTarget = If[targetSingular, target - dir*radTarget/k, target];
       While[True,
         guard++;
         If[guard > 500, err["E1", <|"Detail" -> "segmentation runaway"|>]];
-        Module[{radCur, nxt, radTarget, matchTarget},
-          radTarget = Min[ChartRadius[target, all], 2*Abs[to - from]];
-          (* the point the LAST chart must reach: the target chart's
-             incoming match point (radius/k before the target) *)
-          matchTarget = If[targetSingular, target - dir*radTarget/k, target];
-          nxt = nextCenter[cur, real, dir, k, all];
-          radCur = Min[ChartRadius[nxt, all], 2*Abs[to - from]];
-          If[TrueQ[Abs[N[matchTarget - nxt, 40]] <= radCur/k] ||
-             TrueQ[dir*(N[nxt, 40] - N[matchTarget, 40]) >= 0],
-            (* nxt covers the target's match point: append it as the last
-               regular chart; a singular target additionally gets its own
-               chart (matched from nxt) *)
-            AppendTo[charts, <|"Center" -> nxt, "Singular" -> False|>];
-            If[targetSingular,
-              AppendTo[charts, <|"Center" -> target, "Singular" -> True|>]];
-            Break[],
-            AppendTo[charts, <|"Center" -> nxt, "Singular" -> False|>];
-            cur = nxt]]];
-      cur = target],
-      {ti, Length[Join[interior, {to}]]}]];
+        (* cover check on the LAST placed chart: matchTarget within
+           prevRad/k means the handoff evaluation sits at the design ratio
+           1/k and no further regular chart is needed.  Only a REGULAR last
+           chart may cover: consecutive singular targets can never cover
+           each other (radius = distance to the nearest OTHER singularity
+           forbids it), and a singular-chart-to-endpoint shortcut would put
+           the final evaluation on an uncrossed branch — keep one regular
+           chart in between. *)
+        If[!TrueQ[Last[charts]["Singular"]] &&
+           (TrueQ[Abs[N[matchTarget - cur, 40]] <= N[prevRad, 40]/k] ||
+            TrueQ[dir*(N[cur, 40] - N[matchTarget, 40]) >= 0]),
+          If[targetSingular,
+            AppendTo[charts, <|"Center" -> target, "Singular" -> True|>]];
+          Break[]];
+        Module[{nxt},
+          nxt = nextCenter[cur, real, dir, k, keff, all, prevRad,
+            matchTarget, lineCap];
+          AppendTo[charts, <|"Center" -> nxt, "Singular" -> False|>];
+          cur = nxt;
+          prevRad = Min[ChartRadius[nxt, all], lineCap]]];
+      cur = target;
+      If[targetSingular, prevRad = radTarget]],
+      {ti, Length[targets]}]];
   (* attach radii, match points, names; radii capped at line scale
      (a validity bound: capping is conservative; uncapped Infinity poisons
      the match-point arithmetic on singularity-free systems) *)
@@ -419,9 +527,9 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     (* PROTOTYPE (env-gated, default off): value-vector propagation for
        REGULAR interior charts (Docs/PerfGapAnalysis.md lever 1).  The
        incoming object is evaluated AT THIS CHART'S CENTER — inside the
-       previous chart's disk by the predivision geometry (step/radius <=
-       1/(1+k)); EvaluateLocalSolution's radius assert is the loud
-       backstop — and that value is the t^0 Cauchy datum of ONE
+       previous chart's disk (step/radius <= 1/(1+k_eff) on dominated
+       marches; EvaluateLocalSolution's radius assert is the loud
+       backstop) — and that value is the t^0 Cauchy datum of ONE
        d-dimensional recursion (Solve`SolveValueRegular), replacing the
        d-column basis + MatchWeights + CombineLocalSolutions.  Singular
        charts and the first chart (anchor-only incoming data) keep the
@@ -430,10 +538,17 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       !TrueQ[chart["Singular"]] &&
       TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
       (* conservative geometry pre-check: the center must sit WELL inside
-         the previous object's disk (margin 9/10); otherwise fall back to
-         the basis path (a performance choice, not an ambiguity) *)
-      TrueQ[Abs[N[chart["Center"] - current["Center"], 30]] <
-        9/10*N[current["Radius"], 30]];
+         the previous object's disk; otherwise fall back to the basis path
+         (a performance choice, not an ambiguity).  Margin: 9/10 under the
+         classic coupled geometry (stepDivisor = DivisionOrder); under the
+         wide-stride geometry the center handoff must ALSO keep the
+         ratio^(ExpansionOrder+1) truncation tail below the 1e-14 design
+         line — receding-leg gaps (up to ~0.8 of the previous radius)
+         would otherwise pass the 9/10 check with ~1e-4 tails. *)
+      Module[{margin = If[stepDivisor[cfg["DivisionOrder"]] < cfg["DivisionOrder"],
+          Min[9/10, N[10^(-14/(cfg["ExpansionOrder"] + 1)), 30]], 9/10]},
+        TrueQ[Abs[N[chart["Center"] - current["Center"], 30]] <
+          margin*N[current["Radius"], 30]]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
        object is only valid at its anchor); thereafter at radius/k of THIS
        chart on the incoming side *)
@@ -488,10 +603,22 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           {c, cs["SystemSize"]}, {i, Length[basis]}]];
       w = MatchWeights[F, vvals, chart["Name"]];
       ls = DiffExp2`SectorSeries`CombineLocalSolutions[w, basis]];
-    (* probe on the APPROACH side (positive chart coordinate after any
-       crossing handling; singular charts are one-sided here) *)
-    probeErrs = SegmentErrorProbe[ls,
-      (matchPt - chart["Center"])/2, couplingDepth];
+    (* probe on the INCOMING side (sign of matchPt - center keeps singular
+       charts one-sided; the anchor chart, whose matchPt IS its center,
+       probes the outgoing side) at the DESIGN evaluation ratio
+       rho = Max[1/(2 k_step), 1/k]: downstream consumers — the next
+       chart's match point under the stepDivisor geometry, the
+       LineIntegral tile edges — evaluate THIS solution at |t| up to
+       ~rho*Radius, so the honest truncation probe sits there.  The old
+       half-incoming-match-point probe (Radius/(2k)) underestimates those
+       tails by many decades once strides are wider than radius/k, and is
+       identically 0 on the anchor chart. *)
+    probeErrs = Module[{rho = Max[1/(2*stepDivisor[cfg["DivisionOrder"]]),
+        1/cfg["DivisionOrder"]], sgn, raw},
+      sgn = Sign[N[matchPt - chart["Center"], 30]];
+      If[!MemberQ[{-1, 1}, sgn], sgn = dir];
+      raw = rho*N[chart["Radius"], 20];
+      SegmentErrorProbe[ls, sgn*Rationalize[raw, raw/50], couplingDepth]];
     errAcc = If[errAcc === None, probeErrs,
       Module[{l1 = Length[errAcc], l2 = Length[probeErrs]},
         PadRight[errAcc, Max[l1, l2]] + PadRight[probeErrs, Max[l1, l2]]]];

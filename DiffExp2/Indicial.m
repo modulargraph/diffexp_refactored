@@ -17,16 +17,31 @@ err[id_, chartRef_, payload_] := DiffExp2`Tolerances`DE2Error[id,
     "Center" -> Lookup[chartRef, "Center", None],
     "Variable" -> Lookup[chartRef, "Variable", None]|>, payload]];
 
-(* exact zero test on rational/algebraic scalars; no banned tokens *)
-zeroQ[e_] := Together[e] === 0 || RootReduce[Together[e]] === 0;
+(* exact zero test on rational/algebraic scalars; no banned tokens.
+   Together-canonical rational functions over the Gaussian rationals in
+   non-numeric symbols are a zero-DECISION domain: === 0 decides.  Only
+   forms outside it (radicals/Root, numeric symbol constants) need the
+   exact RootReduce test; both branches stay exact.  zeroCanQ takes input
+   the caller has already Together/Cancel-canonicalized. *)
+ratExprQ[c_] := Switch[c,
+  _Integer | _Rational, True,
+  _Complex, !InexactNumberQ[c],
+  _Symbol, !NumericQ[c],
+  _Plus | _Times, AllTrue[List @@ c, ratExprQ],
+  Power[_, _Integer], ratExprQ[First[c]],
+  _, False];
+zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && RootReduce[c] === 0);
+zeroQ[e_] := zeroCanQ[Together[e]];
 matZeroQ[m_] := AllTrue[Flatten[m], zeroQ];
 
 (* ---- exact t-valuation and Laurent heads of rational entries ---- *)
 
-(* min t-degree of a polynomial; entry must be polynomial in t *)
-polyMinDeg[p_, t_] := If[zeroQ[p], Infinity, Exponent[p, t, Min]];
+(* min t-degree of a polynomial; entry must be polynomial in t.
+   contract: p is 0 or a polynomial part of a CANCELED fraction, so the
+   syntactic test in zeroCanQ is complete *)
+polyMinDeg[p_, t_] := If[zeroCanQ[p], Infinity, Exponent[p, t, Min]];
 tValuation[e_, t_] := Module[{c = Cancel[Together[e]]},
-  If[zeroQ[c], Infinity,
+  If[zeroCanQ[c], Infinity,
     polyMinDeg[Numerator[c], t] - polyMinDeg[Denominator[c], t]]];
 matMinValuation[m_, t_] := Min[tValuation[#, t] & /@ Flatten[m]];
 
@@ -35,7 +50,7 @@ matMinValuation[m_, t_] := Min[tValuation[#, t] & /@ Flatten[m]];
    exact division recursion (never Series on possibly-inexact objects) *)
 laurentCoeff[e_, t_, k_Integer] := Module[{c, v, num, den, nc, dc, ord, cs},
   c = Cancel[Together[e]];
-  If[zeroQ[c], Return[0]];
+  If[zeroCanQ[c], Return[0]];
   v = tValuation[c, t];
   If[k < v, Return[0]];
   num = Numerator[c]; den = Denominator[c];
@@ -51,7 +66,9 @@ laurentCoeff[e_, t_, k_Integer] := Module[{c, v, num, den, nc, dc, ord, cs},
     {m, 1, ord}];
   cs[[ord + 1]]];
 
-leadingCoeff[e_, t_] := laurentCoeff[e, t, tValuation[Cancel[Together[e]], t]];
+(* canonicalize once: tValuation and laurentCoeff each re-Cancel their input *)
+leadingCoeff[e_, t_] := Module[{c = Cancel[Together[e]]},
+  laurentCoeff[c, t, tValuation[c, t]]];
 
 MatrixPoleData[A_?MatrixQ, t_Symbol] := Module[{r, heads},
   r = Max[0, Max[-matMinValuation[A, t], 0]];
@@ -294,8 +311,8 @@ PartitionResonanceFamilies[spectrum_List, eps_Symbol, chartRef_Association] := M
       Module[{tops, cols},
         tops = Flatten[Map[Function[mem, Last /@ mem["Chains"]], members], 1];
         cols = Map[Function[v, Module[{ev},
-          ev = Min[Map[If[zeroQ[#], Infinity,
-            Module[{c = Cancel[Together[#]]},
+          ev = Min[Map[Module[{c = Cancel[Together[#]]},
+            If[zeroCanQ[c], Infinity,
               polyMinDeg[Numerator[c], eps] - polyMinDeg[Denominator[c], eps]]] &, v]];
           Map[Cancel[Together[#/eps^ev]] /. eps -> 0 &, v]]], tops];
         Length[cols] - MatrixRank[cols]]];
@@ -319,28 +336,31 @@ validateExact[A_, chartRef_] := Module[{pos},
       "Detail" -> "SeriesData entry: eps-truncated slice exports cannot certify the I1 contract; use the exact full export d<var>_full.m (ExportGeneralMatrix)"|>]];];
 
 ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
-  {d = Length[A], pole, red, R, spec, fams, idMat, regular},
+  {d = Length[A], pole, red, R, spec, fams, idMat, regular, Anorm},
   If[d == 0 || Length[A] =!= Length[First[A]] || t === eps ||
       !KeyExistsQ[chartRef, "Name"],
     err["E7", chartRef, <|"Shape" -> Dimensions[A], "t" -> t, "eps" -> eps,
       "Detail" -> "bad shape or chart reference"|>]];
   validateExact[A, chartRef];
-  pole = MatrixPoleData[A, t];
+  (* canonicalize entries ONCE: MatrixPoleData re-walks every entry per
+     Laurent order (valuation + laurentCoeff), each walk re-Cancels *)
+  Anorm = Map[Cancel[Together[#]] &, A, {2}];
+  pole = MatrixPoleData[Anorm, t];
   idMat = IdentityMatrix[d];
   regular = pole["PoleOrder"] == 0;
   Which[
     regular,
     red = <|"PoleOrder" -> 0, "Gauge" -> idMat, "GaugeInverse" -> idMat,
-      "ThetaMatrix" -> Map[Cancel[Together[#]] &, t*A, {2}],
+      "ThetaMatrix" -> Map[Cancel[Together[#]] &, t*Anorm, {2}],
       "Residue" -> ConstantArray[0, {d, d}], "Steps" -> 0,
       "Trimmed" -> False, "GaugeValuation" -> 0|>,
     pole["PoleOrder"] == 1,
     red = <|"PoleOrder" -> 1, "Gauge" -> idMat, "GaugeInverse" -> idMat,
-      "ThetaMatrix" -> Map[Cancel[Together[#]] &, t*A, {2}],
+      "ThetaMatrix" -> Map[Cancel[Together[#]] &, t*Anorm, {2}],
       "Residue" -> pole["Coefficients"][-1], "Steps" -> 0,
       "Trimmed" -> False, "GaugeValuation" -> 0|>,
     True,
-    red = FuchsianReduce[A, t, eps, chartRef]];
+    red = FuchsianReduce[Anorm, t, eps, chartRef]];
   R = red["Residue"];
   If[regular,
     (* DEC-6: one (0,0,0) family with d-dimensional coefficient space *)

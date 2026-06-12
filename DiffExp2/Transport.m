@@ -23,7 +23,19 @@ Begin["`Private`"];
 err[id_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "Transport"|>, payload]];
 cfg = DiffExp2`Config`CFG;
-zeroQ[e_] := TrueQ[PossibleZeroQ[Together[e]]];
+(* zeroQ: exact-first (see Solve.m).  Together-canonical rational functions
+   over Q(i) in non-numeric symbols: === 0 decides; inexact/radical/
+   numeric-constant forms (RootReduce'd radii etc.) keep the PossibleZeroQ
+   fallback unchanged. *)
+ratExprQ[c_] := Switch[c,
+  _Integer | _Rational, True,
+  _Complex, !InexactNumberQ[c],
+  _Symbol, !NumericQ[c],
+  _Plus | _Times, AllTrue[List @@ c, ratExprQ],
+  Power[_, _Integer], ratExprQ[First[c]],
+  _, False];
+zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
+zeroQ[e_] := zeroCanQ[Together[e]];
 esQ = DiffExp2`EpsSeries`ESQ;
 esNew = DiffExp2`EpsSeries`ESNew; esZero = DiffExp2`EpsSeries`ESZero;
 esAdd = DiffExp2`EpsSeries`ESAdd; esScale = DiffExp2`EpsSeries`ESScale;
@@ -210,7 +222,8 @@ recombineDegenerate[cs_, basis_List, specs_List] := Module[
           Module[{base = First[active], rest = Rest[active]},
             Do[Module[{m = rest[[ri]], db, wPlus, wMinus},
               db = Together[specs[[m]]["b"] - specs[[base]]["b"]];
-              If[!TrueQ[PossibleZeroQ[db]],
+              (* exact tag difference, already Together'd *)
+              If[!zeroCanQ[db],
                 wPlus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{1/db}, width]];
                 wMinus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{-1/db}, width]];
                 newBasis[[m]] = DiffExp2`SectorSeries`CombineLocalSolutions[

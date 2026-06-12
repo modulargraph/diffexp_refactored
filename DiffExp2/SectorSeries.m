@@ -30,7 +30,18 @@ $ForcePadeFail = False;
 exactQ[e_] := FreeQ[e, _?InexactNumberQ];
 pow[x_, 0] := 1;   (* 0^0 = 1 convention for the empty product *)
 pow[x_, n_] := x^n;
-zeroQ[e_] := TrueQ[PossibleZeroQ[Together[e]]];
+(* zeroQ: exact-first (see Solve.m).  Together-canonical rational functions
+   over Q(i) in non-numeric symbols: === 0 decides; inexact/radical/
+   numeric-constant forms keep the PossibleZeroQ fallback unchanged. *)
+ratExprQ[c_] := Switch[c,
+  _Integer | _Rational, True,
+  _Complex, !InexactNumberQ[c],
+  _Symbol, !NumericQ[c],
+  _Plus | _Times, AllTrue[List @@ c, ratExprQ],
+  Power[_, _Integer], ratExprQ[First[c]],
+  _, False];
+zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
+zeroQ[e_] := zeroCanQ[Together[e]];
 badHeadQ[c_] := !FreeQ[c, _SeriesData | _SeriesCoefficient] ||
   MemberQ[{$Failed, Indeterminate, ComplexInfinity}, c];
 
@@ -216,7 +227,7 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
 
 epsValPoly[p_, eps_] := If[zeroQ[p], Infinity, Exponent[p, eps, Min]];
 tValuation[e_, t_] := Module[{c = Cancel[Together[e]]},
-  If[zeroQ[c], Infinity,
+  If[zeroCanQ[c], Infinity,
     Exponent[Numerator[c], t, Min] - Exponent[Denominator[c], t, Min]]];
 
 MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
@@ -274,7 +285,7 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
      per order is prohibitively slow on big rationals), then numericize at
      2x WP (structure already decided on exact data) *)
   Q = Table[Module[{qj = Cancel[Together[cj[[j]]*var^M]], num1, den1, nc, dc, csr},
-      If[zeroQ[qj], ConstantArray[0, ncols],
+      If[zeroCanQ[qj], ConstantArray[0, ncols],
         num1 = Numerator[qj]; den1 = Denominator[qj];
         nc = Table[Coefficient[num1, var, n], {n, 0, ncols - 1}];
         dc = Table[Coefficient[den1, var, n], {n, 0, ncols - 1}];

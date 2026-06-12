@@ -19,7 +19,18 @@ Begin["`Private`"];
 err[id_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "API"|>, payload]];
 cfg = DiffExp2`Config`CFG;
-zeroQ[e_] := TrueQ[PossibleZeroQ[Together[e]]];
+(* zeroQ: exact-first (see Solve.m).  Call sites test user coefficient
+   functions: rational ones get the exact decision; anything outside the
+   rational domain keeps PossibleZeroQ unchanged. *)
+ratExprQ[c_] := Switch[c,
+  _Integer | _Rational, True,
+  _Complex, !InexactNumberQ[c],
+  _Symbol, !NumericQ[c],
+  _Plus | _Times, AllTrue[List @@ c, ratExprQ],
+  Power[_, _Integer], ratExprQ[First[c]],
+  _, False];
+zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
+zeroQ[e_] := zeroCanQ[Together[e]];
 esAdd = DiffExp2`EpsSeries`ESAdd;
 esZero = DiffExp2`EpsSeries`ESZero;
 esMin = DiffExp2`EpsSeries`ESMinPower; esCM = DiffExp2`EpsSeries`ESCompleteMax;

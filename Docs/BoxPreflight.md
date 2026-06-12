@@ -51,8 +51,9 @@ chart's disk; the two singular-handoff (FixWithin) clips that exist — into
 7/11 on the L2 hi line and into 1/4 on the L1 lo line — are geometrically
 possible.  DigitsNeeded = 60 everywhere (AccuracyGoal "?", WP 120: ample).
 
-Chart chains (centers; S = singular chart; full radii/match points in the
-audit log and reproducible in ~5 s via `Scripts/box_preflight_audit.m`):
+Chart chains (centers; S = singular chart; full exact radii + match-point
+chains vendored in `Tests/refs/bench/box_plan_audit.log` AUDIT JSON rows,
+reproducible in ~5 s via `Scripts/box_preflight_audit.m`):
 
 - L3→0: 0.478, 0.375, 0.300, **0(S)** — 4 charts.
 - L3→1: 0.478, 0.600, 0.714, 0.833 — 4 charts, endpoint REGULAR
@@ -226,18 +227,42 @@ Optional cross-check (informational; expect exit 1 with EXACTLY one FAIL,
 the L0 garbage ref): `python3 Scripts/compare_stepwise_log.py
 /tmp/ft2_box.log --refs Tests/refs/pysecdec/results_box1l.json`.
 
-## 6. Runtime estimate and reproducer timings
+## 6. Runtime confirmation (reproducer, generic boundary values) and estimate
 
-PLACEHOLDER-REPRO
+`Scripts/box_preflight_repro.m` ran all six transports at FT settings
+(17.6 s kernel total, log /tmp/box_preflight_repro.log, 2026-06-12):
 
-Estimate for the full box run at FT settings (WP 120, eo 40, FT_EPS_ORDER
-0), assuming B1 fixed: FIRE + iteration ~20 s; transports: 41 charts at
-d ≤ 2 (sunrise's d=3 charts ran 1–4 s at the same settings; d ≤ 2 with
-EpsilonOrder ≤ 7 sits at the low end); LineIntegral tiles: 8×1 (L3) +
-16×1 (L2) + 17×2 (L1) coefficient-component integrations, ~0.5–2 s each;
-three endpoint limits, cheap.  **Total ≈ 2–6 min** — between bubble
-(13 s) and sunrise (~1.5 min) in spirit but with three levels; far below
-banana (~12 min at the same settings).
+| transport | result | charts | wall |
+|---|---|---|---|
+| L2 → 1 | **FAIL E8 at seg5@0.714286** — `"crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"` — B1 confirmed at exactly the predicted chart | failed at 5/10 | 2.0 s |
+| L1 → 0 | OK (the 1/4 regular-indicial crossing PASSES, as predicted) | 13 | 4.3 s |
+| L1 → 1 | OK | 4 | 1.3 s |
+| L2 → 0 | OK | 6 | 3.0 s |
+| L3 → 0 | OK | 4 | 0.6 s |
+| L3 → 1 | OK (regular endpoint, `EndpointIsSingular` False) | 4 | 0.6 s |
+
+Per-chart cost at d ≤ 2, WP 120, eo 40: ~0.15–0.7 s (vs sunrise's 1–4 s at
+d = 3).
+
+### W2 (watch, cosmetic): meprec/ztest1 warning storms at L2 charts
+
+During BOTH L2 transports the log carries `N::meprec` (4) and
+`PossibleZeroQ::ztest1` (4, then General::stop) warnings on GIANT exact
+rational + Log[...] combinations — the known exact-giant zeroQ class
+(campaign ledger; banana L1 tolerates 4 of the same).  L1/L3 are clean.
+Transports succeed regardless; this is a perf/cleanliness tax tied to the
+L2 resonant/pseudo charts, not a correctness gate.  If the box run grinds
+at L2, this is the first suspect (`grep -c meprec <log>`).
+
+### Full-run estimate (after the B1 fix)
+
+FIRE + iteration ~18 s (measured in phase A) + transports ~15 s (measured
+above; one two-way transport per level serves all masters via the runner's
+chart cache) + LineIntegral tiles: 8×1 (L3) + 16×1 (L2) + 17×2 (L1) = 58
+component-tile integrations at ~0.3–1.5 s each (sunrise's d=3 tiles ran
+~2 s) ≈ 20–90 s + two endpoint limits + handoffs (cheap).
+**Total ≈ 1–3 minutes** at FT_EPS_ORDER=0, WP 120 — between bubble (13 s)
+and sunrise (~1.5 min) per level-count scaling, far below banana (~12 min).
 
 ## 7. Regeneration recipes
 

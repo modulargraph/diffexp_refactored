@@ -683,11 +683,23 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       If[lastSingular && TrueQ[N[tIn, 30] dir > 0],
         sigma = DiffExp2`SectorSeries`ChartImSign[current];
         If[!MemberQ[{1, -1}, sigma],
-          If[AnyTrue[current["Sectors"],
-              !IntegerQ[#["a"]] || !zeroQ[#["b"]] || #["p"] > 0 &],
-            err["E8", <|"Chart" -> chart["Name"],
-              "Detail" -> "crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"|>],
-            sigma = 1]];
+          (* magnitude-aware gate: a multivalued sector blocks the crossing
+             only if it carries MATERIAL content (box L2's apparent chart at
+             7/11 has a t^(-1+eps) sector of physically zero weight; the
+             syntactic tag test alone would E8 every such crossing).
+             Ambiguous magnitudes stay material -> still loud. *)
+          Module[{secs = current["Sectors"], scale, materialQ},
+            scale = Max[1*^-300, Sequence @@ (Abs[N[#, 20]] & /@
+              Select[Flatten[#["Coeffs"] & /@ secs], NumericQ])];
+            materialQ[sec_] := Module[{mx},
+              mx = Max[0, Sequence @@ (Abs[N[#, 20]] & /@
+                Select[Flatten[sec["Coeffs"]], NumericQ])];
+              !TrueQ[mx <= DiffExp2`Tolerances`Tol["LaurentLeadTol"]*scale]];
+            If[AnyTrue[Select[secs, materialQ],
+                !IntegerQ[#["a"]] || !zeroQ[#["b"]] || #["p"] > 0 &],
+              err["E8", <|"Chart" -> chart["Name"],
+                "Detail" -> "crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"|>],
+              sigma = 1]]];
         current = ApplyCrossing[current, sigma];
         tIn = -tIn  (* far side evaluates at positive u *)];
       prevEval = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tIn,

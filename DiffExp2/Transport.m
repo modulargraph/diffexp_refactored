@@ -14,6 +14,7 @@ FindSingularities::usage = "FindSingularities[sys] gives <|\"All\", \"Real\", \"
 ChartRadius::usage = "ChartRadius[center, allSingularities] gives the exact/numeric complex-plane distance to the nearest OTHER singularity.";
 SegmentLine::usage = "SegmentLine[sys, {from, to}] gives the SegmentPlan: charts, radii, match points, digit budget.";
 TransportLine::usage = "TransportLine[sys, boundary, plan] runs the marching loop and returns the TransportResult.";
+ValidatePlan::usage = "ValidatePlan[plan] statically audits the chart chain: every incoming match point (the shared chartMatchPoint formula) must lie strictly inside the producing chart's disk, singular handoffs must be geometrically possible. Loud E8 on violation; returns the plan.";
 MatchWeights::usage = "MatchWeights[basisValues, incoming, label] solves the eps-graded (Laurent) weight system with loud residual asserts.";
 ApplyCrossing::usage = "ApplyCrossing[ls, sigma] applies the crossing operator (phase times unipotent log-chain mixing) so the far side evaluates at positive chart coordinate.";
 SegmentErrorProbe::usage = "SegmentErrorProbe[ls, tOut, couplingDepth] gives the full-vs-reduced evaluation error per eps order.";
@@ -194,6 +195,65 @@ nextCenter[xb_, sings_, dir_, k_, keff_, allSings_, prevRad_, matchTarget_,
       Rationalize[N[xnew, 20], Abs[N[g, 20]]/64], cand]];
   xnew];
 
+(* singularMatchPoint: the incoming match point of a SINGULAR chart
+   approached from the producing chart (prevCenter, prevRad) — the
+   FixWithin clip (spec 2.3; old Transport.m:1124-1136).  The naive point
+   z - dir*radTarget/k is anchored to the singular chart ALONE and can
+   land far outside the producing disk (banana level 1: anchor radius
+   1/46, singular radius ~0.45 — the naive point sits ~4 anchor radii
+   BEHIND the anchor).  Required instead: a point of the intersection of
+     (a) |m - prevCenter| <= margin*prevRad  (margin 9/10: strictly inside
+         the producing disk, headroom absorbing the coarse rationalization
+         below), and
+     (b) dir*(z - m) > 0 and |m - z| < radTarget  (approach side of the
+         singular chart, inside its disk).
+   Since prevRad <= gap := dir*(z - prevCenter) (z is a singularity, so
+   the producing disk never contains it), the intersection is nonempty iff
+   gap < den := margin*prevRad + radTarget, and the BALANCED point
+     m* = prevCenter + dir*gap*margin*prevRad/den
+   equalizes the two normalized evaluation ratios
+     |m - prevCenter|/(margin*prevRad) = |m - z|/radTarget = gap/den < 1,
+   which (max of two opposed V-shaped functions of m) MINIMIZES
+   max[ratioPrev/margin, ratioSing] over the intersection — the producing
+   chart's truncation tail and the singular chart's matching/read tail are
+   jointly as small as the geometry allows.  Regimes: tiny producing disk
+   far inside a wide singular disk (banana: gap ~ prevRad ~ 0.022,
+   radTarget ~ 0.45) gives BOTH ratios ~ gap/radTarget ~ 0.05; tiny
+   singular disk reproduces the classic near-z handoff.  SegmentLine's
+   cover test admits the singular chart only once |m - prevCenter| <=
+   prevRad/k, which caps the executed ratios at 1/k (producing side) and
+   ~(9/8)/(margin*k) (singular side) — the design classes.  Returns None
+   when the intersection is empty: SegmentLine reads "not coverable from
+   here, keep marching"; TransportLine/ValidatePlan read E8.  The point is
+   a coarse simple rational like every match point: Rationalize at 1/8 of
+   the least distance from m* to a constraint boundary, so (a) and (b)
+   survive rationalization with 7/8 of their slack. *)
+singularMatchPoint[prevCenter_, prevRad_, z_, radTarget_, dir_] := Module[
+  {margin = 9/10, gap, den, mstar, bnd},
+  gap = dir*(N[z, 40] - N[prevCenter, 40]);
+  den = margin*N[prevRad, 40] + N[radTarget, 40];
+  If[!TrueQ[0 < gap < den], Return[None]];
+  mstar = N[prevCenter, 40] + dir*gap*margin*N[prevRad, 40]/den;
+  bnd = Min[Min[margin*N[prevRad, 40], N[radTarget, 40]]*(den - gap),
+    gap*N[radTarget, 40]]/den;
+  Rationalize[N[mstar, 20], N[bnd, 20]/8]];
+
+(* chartMatchPoint: THE incoming-match-point formula — the single source
+   shared by TransportLine (evaluation), SegmentLine (cover target), and
+   ValidatePlan (static audit), so plan and execution cannot drift.
+   First chart (prev === None): the boundary anchor `from`, matched at
+   t = 0.  Regular chart: center - dir*Radius/k, coarsely rationalized
+   (algebraic radii otherwise force exact algebra through every
+   evaluation).  Singular chart: the FixWithin clip against the producing
+   chart (None when the handoff is impossible -> E8 at the consumers). *)
+chartMatchPoint[None, chart_Association, from_, dir_, k_] := from;
+chartMatchPoint[prev_Association, chart_Association, from_, dir_, k_] :=
+  If[TrueQ[chart["Singular"]],
+    singularMatchPoint[prev["Center"], prev["Radius"], chart["Center"],
+      chart["Radius"], dir],
+    Module[{raw = chart["Center"] - dir*chart["Radius"]/k},
+      Rationalize[N[raw, 20], N[chart["Radius"], 20]/(100*k)]]];
+
 (* ---- 2.5 digit budget ---- *)
 
 DigitBudget[ag_, nseg_Integer] := Module[{wp = cfg["WorkingPrecision"], dn, cd},
@@ -235,21 +295,30 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
     Do[Module[{target = targets[[ti]], targetSingular, radTarget, matchTarget},
       targetSingular = ti < Length[targets] || endpointSingular;
       radTarget = Min[ChartRadius[target, all], lineCap];
-      (* the point the LAST chart must reach: the target chart's incoming
-         match point (radius/k before the target) *)
-      matchTarget = If[targetSingular, target - dir*radTarget/k, target];
       While[True,
         guard++;
         If[guard > 500, err["E1", <|"Detail" -> "segmentation runaway"|>]];
+        (* the point the LAST chart must reach: the target chart's incoming
+           match point.  Singular target: the SHARED FixWithin clip
+           (singularMatchPoint — the same formula TransportLine evaluates
+           and ValidatePlan audits); it depends on the producing chart
+           (cur, prevRad), hence recomputed per placement; None = the
+           validity intersection is empty from here, not coverable yet.
+           Regular target: the endpoint itself. *)
+        matchTarget = If[targetSingular,
+          singularMatchPoint[cur, prevRad, target, radTarget, dir],
+          target];
         (* cover check on the LAST placed chart: matchTarget within
-           prevRad/k means the handoff evaluation sits at the design ratio
-           1/k and no further regular chart is needed.  Only a REGULAR last
-           chart may cover: consecutive singular targets can never cover
-           each other (radius = distance to the nearest OTHER singularity
-           forbids it), and a singular-chart-to-endpoint shortcut would put
-           the final evaluation on an uncrossed branch — keep one regular
+           prevRad/k keeps the handoff evaluation in the design-ratio
+           class in BOTH charts (clipped point: <= 1/k producing-side,
+           <= ~(9/8)/(margin k) singular-side) and no further regular
+           chart is needed.  Only a REGULAR last chart may cover:
+           consecutive singular targets can never cover each other
+           (radius = distance to the nearest OTHER singularity forbids
+           it), and a singular-chart-to-endpoint shortcut would put the
+           final evaluation on an uncrossed branch — keep one regular
            chart in between. *)
-        If[!TrueQ[Last[charts]["Singular"]] &&
+        If[matchTarget =!= None && !TrueQ[Last[charts]["Singular"]] &&
            (TrueQ[Abs[N[matchTarget - cur, 40]] <= N[prevRad, 40]/k] ||
             TrueQ[dir*(N[cur, 40] - N[matchTarget, 40]) >= 0]),
           If[targetSingular,
@@ -257,7 +326,8 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
           Break[]];
         Module[{nxt},
           nxt = nextCenter[cur, real, dir, k, keff, all, prevRad,
-            matchTarget, lineCap];
+            If[matchTarget === None, target - dir*radTarget/k, matchTarget],
+            lineCap];
           AppendTo[charts, <|"Center" -> nxt, "Singular" -> False|>];
           cur = nxt;
           prevRad = Min[ChartRadius[nxt, all], lineCap]]];
@@ -498,10 +568,55 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
 
 (* ---- 2.6 marching ---- *)
 
+(* ValidatePlan: static pre-pass over the chart chain (TransportLine runs
+   it before any solve).  Every chart's incoming match point — computed by
+   the SAME chartMatchPoint formula the marching loop evaluates — must lie
+   strictly inside the producing chart's disk (EvaluateLocalSolution's
+   validity bound is |t| < Radius); a singular chart's point must in
+   addition sit on the approach side strictly inside its own disk; the
+   first chart's point is the boundary anchor plan["From"], inside the
+   first disk.  A violation is a planner bug: E8 with the full chain
+   geometry, raised before the expensive solves instead of deep inside
+   them. *)
+ValidatePlan[plan_Association] := Module[
+  {charts = plan["Charts"], dir = plan["Direction"],
+   k = cfg["DivisionOrder"], chain},
+  chain = Map[<|"Center" -> #["Center"], "Radius" -> #["Radius"],
+    "Singular" -> #["Singular"]|> &, charts];
+  Do[Module[{chart = charts[[ci]], prev, mp, bad},
+    prev = If[ci === 1, None, charts[[ci - 1]]];
+    mp = chartMatchPoint[prev, chart, plan["From"], dir, k];
+    If[mp === None,
+      err["E8", <|"Chart" -> chart["Name"],
+        "Detail" -> "singular-chart handoff impossible: the producing disk (margin 9/10) does not intersect the singular chart's approach interval",
+        "PrevCenter" -> prev["Center"], "PrevRadius" -> prev["Radius"],
+        "SingularCenter" -> chart["Center"],
+        "SingularRadius" -> chart["Radius"],
+        "AttemptedPoint" -> chart["Center"] - dir*chart["Radius"]/k,
+        "Chain" -> chain|>]];
+    bad = Which[
+      ci === 1,
+      !TrueQ[Abs[N[mp - chart["Center"], 40]] < N[chart["Radius"], 40]],
+      True,
+      !TrueQ[Abs[N[mp - prev["Center"], 40]] < N[prev["Radius"], 40]] ||
+      (TrueQ[chart["Singular"]] &&
+        !(TrueQ[dir*N[chart["Center"] - mp, 40] > 0] &&
+          TrueQ[Abs[N[mp - chart["Center"], 40]] < N[chart["Radius"], 40]]))];
+    If[bad,
+      err["E8", <|"Chart" -> chart["Name"], "MatchPoint" -> mp,
+        "PrevCenter" -> If[prev === None, None, prev["Center"]],
+        "PrevRadius" -> If[prev === None, None, prev["Radius"]],
+        "Center" -> chart["Center"], "Radius" -> chart["Radius"],
+        "Chain" -> chain,
+        "Detail" -> "incoming match point outside the producing chart's disk (planner bug)"|>]]],
+    {ci, Length[charts]}];
+  plan];
+
 TransportLine[sys_Association, boundary_, plan_Association] := Module[
   {charts = plan["Charts"], dir = plan["Direction"], current, errAcc,
    req, expOrd = cfg["ExpansionOrder"], epsOrd = cfg["EpsilonOrder"],
    lastSingular = False, lastLS = None, lastChart = None, kept = {}},
+  ValidatePlan[plan];
   req = <|"EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> epsOrd|>,
     "TOrder" -> expOrd|>;
   (* boundary: LocalSolution (anchored at plan From) or plain values matrix *)
@@ -550,14 +665,15 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         TrueQ[Abs[N[chart["Center"] - current["Center"], 30]] <
           margin*N[current["Radius"], 30]]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
-       object is only valid at its anchor); thereafter at radius/k of THIS
-       chart on the incoming side *)
-    matchPt = If[ci === 1, plan["From"],
-      Module[{raw = chart["Center"] - dir*chart["Radius"]/cfg["DivisionOrder"]},
-        (* simple rational match point: algebraic radii otherwise force
-           exact algebraic arithmetic through every evaluation *)
-        Rationalize[N[raw, 20],
-          N[chart["Radius"], 20]/(100*cfg["DivisionOrder"])]]];
+       object is only valid at its anchor); thereafter the shared
+       chartMatchPoint formula — radius/k of THIS chart on the incoming
+       side, or the FixWithin clip when THIS chart is singular
+       (ValidatePlan certified every point against the producing disk) *)
+    matchPt = chartMatchPoint[If[ci === 1, None, charts[[ci - 1]]], chart,
+      plan["From"], dir, cfg["DivisionOrder"]];
+    If[matchPt === None,
+      err["E8", <|"Chart" -> chart["Name"],
+        "Detail" -> "singular-chart handoff impossible (unreachable past ValidatePlan)"|>]];
     (* incoming value in the PREVIOUS object's chart coordinate: at the
        match point (basis path) or at this chart's center (value mode) *)
     tIn = If[valueMode, chart["Center"], matchPt] - current["Center"];

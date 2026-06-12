@@ -116,6 +116,36 @@ Behavior contract:
   point is additionally clipped into the intersection of both charts'
   validity intervals and centered there (old Transport.m:1124-1136
   `FixWithin` midpoint rule) — preserve the midpoint rule.
+
+  AMENDMENT (recorded, M5i): the FixWithin clip is implemented as the
+  BALANCED point of the validity intersection rather than the literal
+  interval midpoint.  (The old midpoint operated on ±RoC/DivisionOrder
+  design intervals, old Transport.m:635-655; a midpoint of full-radius
+  validity intervals would sit at 1/2 of the singular radius whenever the
+  singular interval is interior to the producing disk — a 0.5 evaluation
+  ratio.)  With gap = dir·(z − prevCenter) > 0, margin = 9/10: the
+  intersection of {|m − prevCenter| ≤ margin·prevRad} with the approach
+  interval (z − radius_sing, z) is nonempty iff
+  gap < den := margin·prevRad + radius_sing (note prevRad ≤ gap always,
+  since z is a singularity), and the clip point
+    m* = prevCenter + dir·gap·margin·prevRad/den
+  equalizes — and thereby minimizes the max of — the two normalized
+  evaluation ratios |m − prevCenter|/(margin·prevRad) = |m − z|/radius_sing
+  = gap/den.  SegmentLine's cover test admits the singular chart only once
+  |m* − prevCenter| ≤ prevRad/k, which bounds the EXECUTED ratios to the
+  design classes ≤ 1/k (producing side) and ≤ ~(9/8)/(margin·k) (singular
+  side); the un-clipped point z − dir·radius_sing/k is geometry-blind on
+  the producing side and lands outside small producing disks (banana
+  level 1: anchor radius 1/46 vs singular radius ~0.45 — the naive point
+  sits ~4 anchor radii behind the anchor).  Empty intersection = loud E8.
+  ONE shared helper (`chartMatchPoint`/`singularMatchPoint`) produces the
+  point for SegmentLine's cover target, TransportLine's evaluation, and
+  the static audit `ValidatePlan[plan]` (run unconditionally at the top of
+  TransportLine): every chart's incoming match point must lie strictly
+  inside the producing chart's disk (first chart: the anchor inside its
+  own disk; singular charts: additionally on the approach side strictly
+  inside their own disk) — violations raise E8 with the full chain
+  geometry before any solve is attempted.
 - `DigitsNeeded` is computed from the resulting segment count (2.5) and
   stored in the plan.
 - The plan is the SINGLE source of truth: `TransportLine` executes it

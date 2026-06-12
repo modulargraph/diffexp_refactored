@@ -18,6 +18,7 @@ PrepareChart::usage = "PrepareChart[sys, chart] applies the chart map, runs Char
 SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the FundamentalSystem: one LocalSolution column per indicial sector spec.";
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
+SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -581,6 +582,68 @@ SolveChart[cs_Association, req_Association, source_:None] := Module[{basis, part
   basis = SolveHomogeneous[cs, req];
   part = If[source === None, None, SolveParticular[cs, source, req]];
   <|"Basis" -> basis, "Particular" -> part, "CouplingDepth" -> 0|>];
+
+(* ---- value-vector propagation (regular charts; prototype) ----
+   The incoming VALUE at the chart center is the t^0 Cauchy datum of the
+   transported solution: ONE runRecursion with init = vals replaces the
+   d-column basis + MatchWeights + CombineLocalSolutions of the basis
+   path (the old engine's Currbcs chaining, DiffExp/Transport.m).
+   Regular charts only: the single (0,0,0) family makes every n >= 1
+   step CASE T (dA = n != 0), so no eps-division occurs, TopValid never
+   erodes, and the honest delivered window is exactly the incoming one
+   (the eps-first cascade's [kmin, kmax] preservation).  Invariants kept:
+   exact (0,0,0) sector tag, honest window (capped at the incoming
+   CompleteMax), no matching solve to go ambiguous, and the always-on
+   ODE residual check runs on the propagated solution itself. *)
+SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
+  {d = cs["SystemSize"], nmax, vMin, vCM, fb, wideTop, Wd, prep, rec, ls},
+  If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    err["E8", cs, <|"Detail" ->
+      "SolveValueRegular requires a regular chart (pole order 0); singular charts keep the basis+matching path"|>]];
+  If[Length[vals] =!= d || !AllTrue[vals, DiffExp2`EpsSeries`ESQ],
+    err["E8", cs, <|"Components" -> Length[vals], "Dimension" -> d,
+      "Detail" -> "value vector must be d EpsSeries components"|>]];
+  nmax = req["TOrder"];
+  vMin = Min[esMin /@ vals]; vCM = Min[esCM /@ vals];
+  If[AllTrue[vals, Function[v,
+      AllTrue[Table[esCoeff[v, k], {k, esMin[v], esCM[v]}], # === 0 &]]],
+    (* exactly-zero incoming value: the propagated solution is zero *)
+    Return[<|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+      "Radius" -> cs["Radius"],
+      "Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+        "Coeffs" -> Table[0, {vCM - vMin + 1}, {nmax + 1}, {d}]|>},
+      "EpsWindow" -> <|"Min" -> vMin, "CompleteMax" -> vCM|>,
+      "TWindow" -> <|"CompleteMax" -> nmax|>,
+      "ErrorEstimate" -> ConstantArray[0, vCM - vMin + 1],
+      "Prescriptions" -> cs["Prescriptions"]|>]];
+  (* frame: the SolveHomogeneous work-window shape with Pmax = cdMax = 0
+     (regular chart), based on the INCOMING window instead of req *)
+  fb = Min[vMin, 0] - 2;
+  wideTop = vCM + 2 - Min[0, vMin - 2];
+  Wd = wideTop - fb + 1;
+  prep = prepareCleared[cs, fb, Wd];
+  rec = runRecursion[cs, prep, 0, 0, 0, nmax, None, fb, Wd, {vals}];
+  ls = assembleSolution[cs, 0, 0, rec, nmax];
+  ls = capWindow[cs, ls, vCM];
+  ODEResidualCheck[cs, ls];
+  ls];
+
+(* honesty cap: nothing above the incoming CompleteMax is complete (the
+   frame's buffer slots above it absorb eps-shifts but are not delivered) *)
+capWindow[cs_, ls_, capCM_] := Module[
+  {kmin = ls["EpsWindow", "Min"], kmax = ls["EpsWindow", "CompleteMax"], keep},
+  If[kmax <= capCM, Return[ls]];
+  If[capCM < kmin,
+    err["E8", cs, <|"WindowMin" -> kmin, "Cap" -> capCM,
+      "Detail" -> "window cap below the content minimum (inconsistent incoming value)"|>]];
+  keep = capCM - kmin + 1;
+  Join[ls, <|
+    "Sectors" -> Map[Append[#, "Coeffs" -> Take[#["Coeffs"], keep]] &,
+      ls["Sectors"]],
+    "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> capCM|>,
+    "ErrorEstimate" -> If[ListQ[ls["ErrorEstimate"]],
+      Take[PadRight[ls["ErrorEstimate"], kmax - kmin + 1], keep],
+      ls["ErrorEstimate"]]|>]];
 
 (* ---- residual check ---- *)
 

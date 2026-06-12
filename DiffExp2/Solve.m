@@ -58,7 +58,14 @@ tLaurent[e_, t_, k_Integer] := Module[{c, v, num, den, nc, dc, ord, csr},
 
 (* ---- PrepareChart ---- *)
 
+$pcCache = <||>;
 PrepareChart[sys_Association, chart_Association] := Module[
+  {pcKey = {Hash[sys["Matrix"]], chart["Center"], Lookup[chart, "Scale", 1],
+    Lookup[chart, "Radius", None]}},
+  If[KeyExistsQ[$pcCache, pcKey], Return[$pcCache[pcKey]]];
+  $pcCache[pcKey] = prepareChartCore[sys, chart]];
+
+prepareChartCore[sys_Association, chart_Association] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t, x0, beta, A, Achart, idata, d,
    cols, V, VInv, fams, detV, colIdx},
   t = chart["ChartVar"]; x0 = chart["Center"]; beta = Lookup[chart, "Scale", 1];
@@ -128,10 +135,79 @@ logCeiling[cs_, aT_, bT_, p0_, includeEqual_:False] := p0 + Total[Map[
 
 (* ---- the recursion ---- *)
 
-(* prepared eps-expansions of the cleared system, shared per solve call *)
-prepareCleared[cs_, wideTop_] := Module[
+(* ===================== PACKED-FRAME RECURSION CORE =====================
+   Coefficient vectors are PLAIN LISTS over a fixed eps-frame
+   [fb, fb+W-1] (index i <-> eps^(fb+i-1)); products via ListConvolve.
+   This bypasses the per-op EpsSeries object layer (Association churn +
+   per-coefficient Together) that cost ~18s/chart on 3-master systems.
+   Honest windows: the frame is sized by the deterministic work-window
+   formula; eps-divisions decrement a topValid watermark; the delivered
+   EpsWindow is [content-min, topValid].  EpsSeries objects appear only
+   at the boundaries (sources in, LocalSolutions out). *)
+
+(* fast exact eps-expansion of a RATIONAL expr into a frame list;
+   ByteCount-gated numericization at 2x WP *)
+ratEpsList[expr_, eps_, fb_, W_] := Module[
+  {c, num, den, vn, vd, v, nc, dc, rel, out, wp2, top},
+  out = ConstantArray[0, W];
+  c = Cancel[Together[expr]];
+  If[zeroQ[c], Return[out]];
+  num = Numerator[c]; den = Denominator[c];
+  vn = Exponent[num, eps, Min]; vd = Exponent[den, eps, Min];
+  v = vn - vd;
+  If[v < fb, err["E4", <|"Center" -> "(frame)"|>,
+    <|"Valuation" -> v, "FrameBase" -> fb,
+      "Detail" -> "eps-valuation below the work frame (buffer formula violated)"|>]];
+  num = num/eps^vn // Cancel; den = den/eps^vd // Cancel;
+  top = fb + W - 1;
+  rel = top - v;
+  Module[{ncl = Table[Coefficient[num, eps, j], {j, 0, rel}],
+    dcl = Table[Coefficient[den, eps, j], {j, 0, rel}], csr},
+    csr = ConstantArray[0, rel + 1];
+    csr[[1]] = Together[ncl[[1]]/dcl[[1]]];
+    Do[csr[[m + 1]] = Together[
+        (ncl[[m + 1]] - Sum[dcl[[j + 1]]*csr[[m - j + 1]], {j, 1, m}])/dcl[[1]]],
+      {m, 1, rel}];
+    wp2 = 2*DiffExp2`Config`CFG["WorkingPrecision"];
+    csr = Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &, csr];
+    Do[out[[v - fb + 1 + m]] = csr[[m + 1]], {m, 0, rel}]];
+  out];
+
+(* framed product: a, b based at fb -> product re-framed at fb *)
+frConv[a_, b_, fb_, W_] :=
+  Take[ListConvolve[a, b, {1, -1}, 0], {1 - fb, W - fb}];
+
+(* framed inverse: leading nonzero at frame position pos0 (eps-power
+   fb+pos0-1); the inverse leads at the negated power (must lie in-frame) *)
+frInv[dlist_, fb_, W_] := Module[{pos0, drel, m, e, out, lead, startIdx},
+  pos0 = SelectFirst[Range[W], dlist[[#]] =!= 0 &, None];
+  If[pos0 === None,
+    err["E5", <|"Center" -> "(frame)"|>,
+      <|"Detail" -> "framed inverse of an identically zero series"|>]];
+  lead = fb + pos0 - 1;
+  startIdx = -lead - fb + 1;   (* frame index of eps^(-lead) *)
+  If[startIdx < 1,
+    err["E4", <|"Center" -> "(frame)"|>,
+      <|"Lead" -> lead, "FrameBase" -> fb,
+        "Detail" -> "inverse leads below the work frame"|>]];
+  drel = dlist[[pos0 ;;]];
+  m = W - startIdx;            (* relative orders we can store *)
+  e = ConstantArray[0, m + 1];
+  e[[1]] = If[NumericQ[drel[[1]]], 1/drel[[1]], Together[1/drel[[1]]]];
+  Do[e[[k + 1]] = -e[[1]]*Sum[
+      If[j + 1 <= Length[drel], drel[[j + 1]], 0]*e[[k - j + 1]], {j, 1, k}],
+    {k, 1, m}];
+  out = ConstantArray[0, W];
+  out[[startIdx ;; startIdx + m]] = e;
+  out];
+
+(* x eps and / eps as frame shifts *)
+frShiftUp[a_] := Prepend[Most[a], 0];
+frDivEps[a_] := Append[Rest[a], 0];
+
+prepareCleared[cs_, fb_, W_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], d = cs["SystemSize"],
-   den, num, d0, dD, dN, dES, NhatES},
+   den, num, d0, dD, dN, dL, NhatL},
   den = Together[PolynomialLCM @@ (Denominator[Together[#]] & /@ Flatten[cs["ThetaMatrix"]])];
   num = Map[Cancel[Together[#*den]] &, cs["ThetaMatrix"], {2}];
   d0 = Together[den /. t -> 0];
@@ -140,110 +216,116 @@ prepareCleared[cs_, wideTop_] := Module[
       "Detail" -> "cleared denominator degenerates onto the chart origin at eps = 0"|>]];
   dD = Exponent[den, t];
   dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
-  (* R6: numericize the recursion coefficient expansions at 2x WP -
-     structure (tags, windows, case selection) is decided on EXACT data
-     upstream; exact-rational coefficient growth grinds multi-master
-     systems.  Exact zeros stay exact. *)
-  Module[{wp2 = 2*DiffExp2`Config`CFG["WorkingPrecision"], numz},
-    numz[s_] := DiffExp2`EpsSeries`ESMap[
-      If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &, s];
-    dES = Table[numz[esFrom[Coefficient[den, t, j], eps, wideTop]], {j, 0, dD}];
-    NhatES = Table[Module[{Nj, Nhat},
-      Nj = Map[Coefficient[#, t, j] &, num, {2}];
-      Nhat = Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}];
-      Map[If[zeroQ[#], esZero[wideTop], numz[esFrom[#, eps, wideTop]]] &, Nhat, {2}]],
-      {j, 0, dN}]];
-  <|"dES" -> dES, "NhatES" -> NhatES, "dD" -> dD, "dN" -> dN|>];
+  dL = Table[ratEpsList[Coefficient[den, t, j], eps, fb, W], {j, 0, dD}];
+  NhatL = Table[Module[{Nj, Nhat},
+    Nj = Map[Coefficient[#, t, j] &, num, {2}];
+    Nhat = Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}];
+    Map[ratEpsList[#, eps, fb, W] &, Nhat, {2}]], {j, 0, dN}];
+  <|"dL" -> dL, "NhatL" -> NhatL, "dD" -> dD, "dN" -> dN|>];
 
-(* matrix(of ES).vector(of ES) *)
-mDotV[mES_, v_] := Table[
-  Module[{s = None},
-    Do[Module[{term = esTimes[mES[[r, c]], v[[c]]]},
-      s = If[s === None, term, esAdd[s, term]]],
-      {c, Length[v]}];
-    s], {r, Length[mES]}];
+(* EpsSeries -> frame list *)
+esToFrame[s_, fb_, W_] := Module[{out = ConstantArray[0, W], m1, m2},
+  m1 = esMin[s]; m2 = esCM[s];
+  Do[If[1 <= k - fb + 1 <= W, out[[k - fb + 1]] = esCoeff[s, k]], {k, m1, m2}];
+  out];
 
-(* CASE T/P block solve: uhat_i = (1/d0) Sum_{m=0}^{q-1} N^m rhs / delta^(m+1);
-   (N^m rhs)_r = rhs_{r+m} *)
-blockSolveTP[rhs_, deltaES_, d0ES_, q_] := Module[{inv = DiffExp2`EpsSeries`ESInvert[deltaES]},
-  Table[Module[{acc = None, pw = inv},
+(* CASE T/P block solve on frames *)
+blockSolveTPFrame[rhs_, deltaList_, invD0_, q_, fb_, W_] := Module[
+  {inv = frInv[deltaList, fb, W]},
+  Table[Module[{acc = ConstantArray[0, W], pw = inv},
     Do[
-      If[r + m <= q,
-        acc = If[acc === None, esTimes[pw, rhs[[r + m]]],
-          esAdd[acc, esTimes[pw, rhs[[r + m]]]]]];
-      pw = esTimes[pw, inv],
+      If[r + m <= q, acc = acc + frConv[pw, rhs[[r + m]], fb, W]];
+      If[m < q - 1, pw = frConv[pw, inv, fb, W]],
       {m, 0, q - 1}];
-    esDiv[acc, d0ES]], {r, q}]];
+    frConv[acc, invD0, fb, W]], {r, q}]];
 
-(* runRecursion: theta g = B g + s in the J-frame for tag lambda = a + b eps.
-   srcHat: None | function srcHat[n, l] -> d-vector of EpsSeries (theta-form,
-   J-frame).  init: None | initial U[0][l] table.  Returns
-   <|"U", "Hits", "P"|> with U[[n+1, l+1]] a d-vector of EpsSeries. *)
-runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, wideTop_, init_] := Module[
-  {d = cs["SystemSize"], dES = prep["dES"], NhatES = prep["NhatES"],
-   dD = prep["dD"], dN = prep["dN"], d0ES, blocks, U, hits = {}, lamPoly, n0},
-  d0ES = dES[[1]];
+(* the recursion on frames.  Returns <|"U" -> U (frame lists), "Hits",
+   "P", "FrameBase", "TopValid"|>.  runRecursionFramedSrc = same entry
+   point; srcF auto-detects pre-framed source vectors. *)
+runRecursionFramedSrc[args___] := runRecursion[args];
+runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module[
+  {d = cs["SystemSize"], dL = prep["dL"], NhatL = prep["NhatL"],
+   dD = prep["dD"], dN = prep["dN"], invD0, blocks, U, hits = {}, n0,
+   topValid, lamL, zeroV, srcF},
+  invD0 = frInv[dL[[1]], fb, W];
   blocks = blockList[cs];
-  lamPoly[m_] := esNew[0, PadRight[{Together[aT + m], Together[bT]}, wideTop + 1]];
-  U = Table[Table[Table[esZero[wideTop], {d}], {l, 0, P + 1}], {n, 0, nmax}];
+  topValid = fb + W - 1;
+  zeroV = ConstantArray[0, W];
+  lamL[m_] := Module[{l = zeroV}, l[[-fb + 1]] = Together[aT + m];
+    If[-fb + 2 <= W, l[[-fb + 2]] = Together[bT]]; l];
+  srcF[n_, l_] := If[srcHat === None, None,
+    Module[{sv = srcHat[n, l]},
+      Which[
+        sv === None, None,
+        (* already frame lists (vectors of plain lists of length W) *)
+        VectorQ[First[sv], AtomQ] || (ListQ[First[sv]] && Length[First[sv]] === W &&
+          !AssociationQ[First[sv]]), sv,
+        True, Map[esToFrame[#, fb, W] &, sv]]]];
+  U = Table[Table[Table[zeroV, {d}], {l, 0, P + 1}], {n, 0, nmax}];
   n0 = If[init === None, 0, 1];
   If[init =!= None,
-    Do[U[[1, l + 1]] = init[[l + 1]], {l, 0, Min[P, Length[init] - 1]}]];
+    Do[U[[1, l + 1]] = Map[esToFrame[#, fb, W] &, init[[l + 1]]],
+      {l, 0, Min[P, Length[init] - 1]}]];
   Do[Module[{R, rhsFull},
-    (* R[l] from HISTORY (t-orders < n) + source *)
-    R = Table[Module[{acc = Table[esZero[wideTop], {d}]},
+    R = Table[Module[{acc = Table[zeroV, {d}]},
       Do[If[n - j >= 0,
-        acc = vAddLocal[acc, mDotV[NhatES[[j + 1]], U[[n - j + 1, l + 1]]]]],
+        acc = Table[acc[[r]] + Sum[
+          frConv[NhatL[[j + 1, r, c]], U[[n - j + 1, l + 1, c]], fb, W],
+          {c, d}], {r, d}]],
         {j, 1, Min[n, dN]}];
       Do[If[n - j >= 0,
-        acc = vAddLocal[acc, Table[esScale[-1, esAdd[
-          esTimes[dES[[j + 1]], esTimes[lamPoly[n - j], U[[n - j + 1, l + 1, r]]]],
-          esTimes[dES[[j + 1]], esShift[U[[n - j + 1, l + 2, r]], 1]]]], {r, d}]]],
+        Module[{lam = lamL[n - j]},
+          acc = Table[acc[[r]] -
+            frConv[dL[[j + 1]],
+              frConv[lam, U[[n - j + 1, l + 1, r]], fb, W] +
+                frShiftUp[U[[n - j + 1, l + 2, r]]], fb, W], {r, d}]]],
         {j, 1, Min[n, dD]}];
       If[srcHat =!= None,
         Do[If[n - j >= 0,
-          Module[{sv = srcHat[n - j, l]},
+          Module[{sv = srcF[n - j, l]},
             If[sv =!= None,
-              acc = vAddLocal[acc, Table[esTimes[dES[[j + 1]], sv[[r]]], {r, d}]]]]],
+              acc = Table[acc[[r]] + frConv[dL[[j + 1]], sv[[r]], fb, W], {r, d}]]]],
           {j, 0, Min[n, dD]}]];
       acc], {l, 0, P}];
-    (* solve top-down in l: L_n U[n,l] = R[l] - d0 eps U[n,l+1] *)
+    (* solve top-down in l *)
     Do[Module[{},
-      rhsFull = Table[esAdd[R[[l + 1, r]],
-        esScale[-1, esTimes[d0ES, esShift[U[[n + 1, l + 2, r]], 1]]]], {r, d}];
+      rhsFull = Table[R[[l + 1, r]] -
+        frConv[dL[[1]], frShiftUp[U[[n + 1, l + 2, r]]], fb, W], {r, d}];
       Do[Module[{aI = blk["a"], bI = blk["b"], q = blk["q"], colsB = blk["Cols"],
-          dA, dB},
+          dA, dB, deltaList},
         dA = Together[aT + n - aI]; dB = Together[bT - bI];
         Which[
           !zeroQ[dA],
+          deltaList = Module[{l2 = zeroV}, l2[[-fb + 1]] = dA;
+            If[-fb + 2 <= W, l2[[-fb + 2]] = dB]; l2];
           U[[n + 1, l + 1]] = ReplacePart[U[[n + 1, l + 1]],
-            Thread[colsB -> blockSolveTP[rhsFull[[colsB]],
-              esTrim[esNew[0, PadRight[{dA, dB}, wideTop + 1]]], d0ES, q]]],
+            Thread[colsB -> blockSolveTPFrame[rhsFull[[colsB]], deltaList,
+              invD0, q, fb, W]]],
           !zeroQ[dB],
-          (U[[n + 1, l + 1]] = ReplacePart[U[[n + 1, l + 1]],
-            Thread[colsB -> blockSolveTP[rhsFull[[colsB]],
-              esNew[1, PadRight[{dB}, wideTop]], d0ES, q]]];
-           If[l == 0, AppendTo[hits,
-             <|"n" -> n, "Cols" -> colsB, "DeltaB" -> dB|>]]),
-          True, Null]],  (* CASE R after the level loop *)
+          (deltaList = Module[{l2 = zeroV},
+            If[-fb + 2 <= W, l2[[-fb + 2]] = dB]; l2];
+          U[[n + 1, l + 1]] = ReplacePart[U[[n + 1, l + 1]],
+            Thread[colsB -> blockSolveTPFrame[rhsFull[[colsB]], deltaList,
+              invD0, q, fb, W]]];
+          topValid -= q;
+          If[l == 0, AppendTo[hits, <|"n" -> n, "Cols" -> colsB, "DeltaB" -> dB|>]]),
+          True, Null]],
         {blk, blocks}]],
       {l, P, 0, -1}];
     (* CASE R ladder *)
     Do[Module[{aI = blk["a"], bI = blk["b"], q = blk["q"], colsB = blk["Cols"]},
       If[zeroQ[aT + n - aI] && zeroQ[bT - bI],
         Module[{Rt, assigned = Association[]},
-          Rt = Table[Table[esDiv[R[[l + 1, colsB[[r]]]], d0ES], {r, q}], {l, 0, P}];
-          (* row q, level l: U[n,l+1]_q = Rt[l]_q / eps  (the log bump) *)
+          Rt = Table[Table[
+            frConv[R[[l + 1, colsB[[r]]]], invD0, fb, W], {r, q}], {l, 0, P}];
           Do[If[l + 1 <= P,
-            assigned[{l + 1, q}] =
-              esDiv[Rt[[l + 1, q]], esNew[1, PadRight[{1}, wideTop]]]],
+            assigned[{l + 1, q}] = frDivEps[Rt[[l + 1, q]]];
+            topValid -= 1],
             {l, 0, P - 1}];
-          (* rows r<q top-down: U[n,l]_{r+1} = eps U[n,l+1]_r - Rt[l]_r *)
           Do[
-            Do[Module[{upr = Lookup[assigned, Key[{l + 1, r}], esZero[wideTop]]},
+            Do[Module[{upr = Lookup[assigned, Key[{l + 1, r}], zeroV]},
               If[!KeyExistsQ[assigned, {l, r + 1}],
-                assigned[{l, r + 1}] =
-                  esAdd[esShift[upr, 1], esScale[-1, Rt[[l + 1, r]]]]]],
+                assigned[{l, r + 1}] = frShiftUp[upr] - Rt[[l + 1, r]]]],
               {r, 1, q - 1}],
             {l, P, 0, -1}];
           Do[If[KeyExistsQ[assigned, {l, r}],
@@ -252,27 +334,35 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, wideTop_, init_] := Modul
             {l, 0, P}, {r, 1, q}]]]],
       {blk, blocks}]],
     {n, n0, nmax}];
-  <|"U" -> U, "Hits" -> hits, "P" -> P|>];
-
-vAddLocal[u_, v_] := MapThread[esAdd, {u, v}];
+  <|"U" -> U, "Hits" -> hits, "P" -> P, "FrameBase" -> fb, "TopValid" -> topValid|>];
 
 (* ---- assembly ---- *)
 
-(* J-frame U -> original-frame LocalSolution with sectors (a, b, l) *)
+(* frame U -> original-frame LocalSolution with sectors (a, b, l) *)
 assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], d = cs["SystemSize"], U = rec["U"],
-   P = rec["P"], kminO, kmaxO, Vexp, W, secs, gv, ls},
-  (* original-frame vectors W[n+1][l+1] = V . U *)
-  Module[{top = Max[esCM /@ Flatten[U, 2]],
-    wp2 = 2*DiffExp2`Config`CFG["WorkingPrecision"]},
-    Vexp = Map[If[zeroQ[#], esZero[top],
-      DiffExp2`EpsSeries`ESMap[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &,
-        esFrom[Together[#], eps, top]]] &, cs["V"], {2}]];
-  W = Table[mDotV[Vexp, U[[n + 1, l + 1]]], {n, 0, nmax}, {l, 0, P}];
-  kminO = Min[esMin /@ Flatten[W, 2]];
-  kmaxO = Min[esCM /@ Flatten[W, 2]];
+   P = rec["P"], fb = rec["FrameBase"], W, kminO, kmaxO, VexpL, WL, secs, ls,
+   nzQ, rec2TopShift = 0},
+  W = Length[U[[1, 1, 1]]];
+  VexpL = Map[ratEpsList[Together[#], eps, fb, W] &, cs["V"], {2}];
+  (* a NEGATIVE-lead V entry (rational-in-eps chain vectors) shifts content
+     down AND makes the product's top |lead| slots incomplete: the delivered
+     window pays for it *)
+  rec2TopShift = Max[0, Max[Flatten[Map[
+    Function[entry, Module[{pos = SelectFirst[Range[Length[entry]],
+        entry[[#]] =!= 0 &, None]},
+      If[pos === None, 0, Max[0, -(fb + pos - 1)]]]],
+    VexpL, {2}]]]];
+  WL = Table[
+    Table[Sum[frConv[VexpL[[r, c]], U[[n + 1, l + 1, c]], fb, W], {c, d}], {r, d}],
+    {n, 0, nmax}, {l, 0, P}];
+  (* content min: lowest frame index with a nonzero entry anywhere *)
+  nzQ[i_] := AnyTrue[Flatten[WL, 2], #[[i]] =!= 0 &];
+  kminO = Module[{i = 1}, While[i < W && !nzQ[i], i++]; fb + i - 1];
+  kmaxO = Min[rec["TopValid"], fb + W - 1] - rec2TopShift;
+  If[kmaxO < kminO, kmaxO = kminO];
   secs = Table[<|"a" -> aT, "b" -> bT, "p" -> l,
-    "Coeffs" -> Table[Table[Table[esCoeff[W[[n + 1, l + 1, r]], k], {r, d}],
+    "Coeffs" -> Table[Table[Table[WL[[n + 1, l + 1, r, k - fb + 1]], {r, d}],
       {n, 0, nmax}], {k, kminO, kmaxO}]|>,
     {l, 0, P}];
   ls = <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
@@ -332,13 +422,16 @@ applyGauge[cs_, ls_, nmax_] := Module[
 SolveHomogeneous[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,
    columns = {}, specs = {}, hitsAll = {}, fams = cs["Families"], colCursor = 0,
-   wideTop, prep, Pmax, cdMax},
+   wideTop, prep, Pmax, cdMax, fb, Wd},
   nmax = req["TOrder"];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   Pmax = Max[0, Max[Table[logCeiling[cs, b["a"], b["b"], b["q"] - 1], {b, blocks}]]];
   cdMax = Max[0, Max[#["CollisionDepth"] & /@ fams]];
   wideTop = reqMax + Pmax + cdMax + 4 - Min[0, reqMin - Pmax - 2];
-  prep = prepareCleared[cs, wideTop];
+  fb = Min[reqMin, 0] - Pmax - cdMax - 4;   (* frame base; eps-poles of the
+    cleared system are caught by ratEpsList's below-frame assert *)
+  Wd = wideTop - fb + 1;
+  prep = prepareCleared[cs, fb, Wd];
   Do[Module[{fIdx = fi, fam = fams[[fi]]},
     Do[Module[{blk, root, q},
       (* identify the block for this root via the running cursor *)
@@ -353,7 +446,7 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
                 esShift[esNew[0, PadRight[{1}, wideTop + 1 + l]], -l]];
             vv],
           {l, 0, P}];
-        rec = runRecursion[cs, prep, root["a"], root["b"], P, nmax, None, wideTop, init];
+        rec = runRecursion[cs, prep, root["a"], root["b"], P, nmax, None, fb, Wd, init];
         hitsAll = Join[hitsAll, rec["Hits"]];
         ls = assembleSolution[cs, root["a"], root["b"], rec, nmax];
         AppendTo[columns, ls];
@@ -388,17 +481,25 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
     P = logCeiling[cs, aS, bS, pS, True];  (* sources: Z>=0 incl. the same-a hit *)
     srcMin = source["EpsWindow", "Min"]; srcMax = source["EpsWindow", "CompleteMax"];
     wideTop2 = srcMax + P + 4 - Min[0, srcMin - P - 2];
-    prep2 = prepareCleared[cs, wideTop2];
-    VInvExp = Map[If[zeroQ[#], esZero[wideTop2],
-      esFrom[Together[#], eps, wideTop2]] &, cs["VInv"], {2}];
-    (* J-frame source: bHat[n+1] = VInv . (source eps-vectors at t-order n) *)
-    bHat = Table[mDotV[VInvExp,
-      Table[esNew[srcMin, Table[arr[[k - srcMin + 1, n + 1, c]],
-        {k, srcMin, srcMax}]], {c, d}]],
-      {n, 0, Min[nmax, Length[arr[[1]]] - 1]}];
-    srcFn = Function[{n, l},
-      If[l === pS && n + 1 <= Length[bHat], bHat[[n + 1]], None]];
-    rec = runRecursion[cs, prep2, aS, bS, P, nmax, srcFn, wideTop2, None];
+    Module[{fb2 = Min[srcMin, 0] - P - 4, Wd2},
+      Wd2 = wideTop2 - fb2 + 1;
+      prep2 = prepareCleared[cs, fb2, Wd2];
+      VInvExp = Map[ratEpsList[Together[#], eps, fb2, Wd2] &, cs["VInv"], {2}];
+      (* J-frame source as FRAME LISTS: bHat[n+1][r] *)
+      bHat = Table[Module[{vc = Table[Module[{fl = ConstantArray[0, Wd2]},
+          Do[If[1 <= k - fb2 + 1 <= Wd2,
+            fl[[k - fb2 + 1]] = arr[[k - srcMin + 1, n + 1, c]]],
+            {k, srcMin, srcMax}]; fl], {c, d}]},
+        Table[Sum[frConv[VInvExp[[r, c]], vc[[c]], fb2, Wd2], {c, d}], {r, d}]],
+        {n, 0, Min[nmax, Length[arr[[1]]] - 1]}];
+      (* hand frame lists straight through: wrap as a function returning
+         pre-framed vectors via a marker *)
+      (* fresh formal names: bare Private n/l carry values from package
+         evaluation and corrupt Function parameter lists *)
+      srcFn = With[{bb = bHat, pp = pS},
+        Function[{srcN, srcL},
+          If[srcL === pp && srcN + 1 <= Length[bb], bb[[srcN + 1]], None]]];
+      rec = runRecursionFramedSrc[cs, prep2, aS, bS, P, nmax, srcFn, fb2, Wd2, None]];
     hitsAll = Join[hitsAll, rec["Hits"]];
     AppendTo[parts, assembleSolution[cs, aS, bS, rec, nmax]]],
     {sec, source["Sectors"]}];
@@ -423,19 +524,26 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
   (* truncation-aware probe: the residual of a degree-nmax truncation is
      O((t0/R)^(nmax+1)); place t0 so that tail sits below rtol/100 *)
   t0 = If[probe === Automatic,
-    Module[{nmaxS, frac},
+    Module[{nmaxS, frac, raw},
       nmaxS = Min[#["TWindow", "CompleteMax"] & /@ sols];
       frac = Min[1/4, Rationalize[N[(rtol/100)^(1/(nmaxS + 1))], 10^-3]];
-      cs["Radius"]*frac*(2 + Mod[Hash[cs["Center"]], 5])/10],
+      raw = cs["Radius"]*frac*(2 + Mod[Hash[cs["Center"]], 5])/10;
+      (* a SIMPLE RATIONAL probe: algebraic radii otherwise drag every
+         downstream evaluation into exact algebraic arithmetic *)
+      Rationalize[N[raw, 20], N[raw, 20]/50]],
     probe];
   Do[Module[{f, df, lhs, rhs, srcv, k1, k2, scale},
+    If[Environment["DEBUG_RESID"] === "1",
+      Print["RESID col window=", ls["EpsWindow"], " tags=",
+        {#["a"], #["b"], #["p"]} & /@ ls["Sectors"]]];
     f = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, t0, "UsePade" -> False];
     df = DiffExp2`SectorSeries`EvaluateLocalSolution[
       DiffExp2`SectorSeries`DifferentiateLocalSolution[ls], t0, "UsePade" -> False];
     k1 = Max[esMin[f["Value"]], esMin[df["Value"]]];
     k2 = Min[esCM[f["Value"]], esCM[df["Value"]]];
     Bt0 = Map[Together[# /. t -> t0] &, cs["ThetaMatrix"], {2}];
-    Bt0 = Map[If[zeroQ[#], esZero[k2], esFrom[#, eps, k2]] &, Bt0, {2}];
+    Bt0 = Map[Module[{fl = ratEpsList[#, eps, Min[k1, 0], k2 - Min[k1, 0] + 1]},
+      DiffExp2`EpsSeries`ESNew[Min[k1, 0], fl]] &, Bt0, {2}];
     (* theta f = t f' *)
     Module[{thetaF, Bf, resid},
       thetaF = esScale[t0, df["Value"]];
@@ -463,7 +571,10 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
           esCoeff[srcv, k], ConstantArray[0, Length[Bf]]];
         rv = Select[Flatten[{tf - bfk - sv}], NumericQ];
         sc = Max[1, Sequence @@ (Abs[N[#, 20]] & /@ Select[Flatten[{tf, bfk, sv}], NumericQ])];
-        maxRel = Max[maxRel, Max[0, Sequence @@ (Abs[N[#, 20]] & /@ rv)]/sc]],
+        Module[{rk = Max[0, Sequence @@ (Abs[N[#, 20]] & /@ rv)]/sc},
+          If[Environment["DEBUG_RESID"] === "1" && rk > 10^-12,
+            Print["RESID k=", k, " rel=", N[rk, 4]]];
+          maxRel = Max[maxRel, rk]]],
         {k, Max[k1, esMin[thetaF]], Min[k2, esCM[thetaF],
           Min[esCM /@ Bf]]}]]],
     {ls, sols}];

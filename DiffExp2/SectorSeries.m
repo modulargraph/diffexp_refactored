@@ -177,9 +177,9 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
         ta, alphas},
       ta = If[TrueQ[tval < 0], (-tval)^a*Exp[I*Pi*sigma*a],
         If[TrueQ[tval == 0], If[a === 0, 1, 0], tval^a]];
-      alphas = Table[Module[{coefVec},
-        coefVec = Table[Table[arr[[k - kmin + 1, n + 1, c2]], {n, 0, ncols - 1}], {c2, ncomp}];
-        Table[Module[{cs = coefVec[[c2]], v, fb},
+      Module[{tpows = Table[pow[tval, nn], {nn, 0, ncols - 1}]},
+      alphas = Table[Module[{slab = Transpose[arr[[k - kmin + 1, 1 ;; ncols]]]},
+        Table[Module[{cs = slab[[c2]], v, fb},
           If[TrueQ[usePade] && !FreeQ[cs, s_Symbol /; Context[s] === "Global`"],
             err["indetpade", <|"Chart" -> chartName[ls], "Sector" -> tagOf[sec],
               "Detail" -> "Pade requested on symbolic coefficients"|>]];
@@ -187,9 +187,9 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
             {v, fb} = padeEvaluate[cs, tval, {chartName[ls], tagOf[sec], k, c2}];
             If[fb, AppendTo[fallbacks,
               <|"Sector" -> tagOf[sec], "EpsRow" -> k, "Component" -> c2|>]],
-            v = Total[cs*Table[pow[tval, nn], {nn, 0, ncols - 1}]]];
+            v = cs . tpows];
           v], {c2, ncomp}]],
-        {k, kmin, kmax}];
+        {k, kmin, kmax}]];
       Do[Module[{Kc},
         Kc = Sum[If[kmin <= K - p - j <= kmax,
           alphas[[K - p - j - kmin + 1]]*pow[b*Lv, j]/j!, 0],
@@ -427,17 +427,20 @@ CombineLocalSolutions[weights_List, lss_List] := Module[
   kmax = Min @@ Table[lsCM[lss[[i]]] + DiffExp2`EpsSeries`ESMinPower[ws[[i]]], {i, n}];
   kmax = Min[kmax, Min @@ Table[
     DiffExp2`EpsSeries`ESCompleteMax[ws[[i]]] + lsMin[lss[[i]]], {i, n}]];
-  Do[Module[{l = lss[[i]], w = ws[[i]], lkmin, lkmax},
+  Do[Module[{l = lss[[i]], w = ws[[i]], lkmin, lkmax, wmin, wmax, wc},
     lkmin = lsMin[l]; lkmax = lsCM[l];
+    wmin = DiffExp2`EpsSeries`ESMinPower[w];
+    wmax = DiffExp2`EpsSeries`ESCompleteMax[w];
+    wc = Table[DiffExp2`EpsSeries`ESCoefficient[w, j], {j, wmin, wmax}];
     Do[Module[{arr = sec["Coeffs"], out},
-      out = Table[
-        Sum[If[lkmin <= k <= lkmax,
-          DiffExp2`EpsSeries`ESCoefficient[w, kp - k]*arr[[k - lkmin + 1, nn + 1, cc]], 0],
-          {k, Max[lkmin, kp - DiffExp2`EpsSeries`ESCompleteMax[w]],
-            Min[lkmax, kp - DiffExp2`EpsSeries`ESMinPower[w]]}],
-        {kp, kmin, kmax}, {nn, 0, ncols - 1}, {cc, ncomp}];
+      (* slab convolution: out[kp] += wc[j]*arr[k], kp = k + j *)
+      out = ConstantArray[0, {kmax - kmin + 1, ncols, ncomp}];
+      Do[Module[{kp = k + j},
+        If[kmin <= kp <= kmax && wc[[j - wmin + 1]] =!= 0,
+          out[[kp - kmin + 1]] += wc[[j - wmin + 1]]*arr[[k - lkmin + 1]]]],
+        {k, lkmin, lkmax}, {j, wmin, wmax}];
       AppendTo[secs, <|"a" -> sec["a"], "b" -> sec["b"], "p" -> sec["p"],
-        "Coeffs" -> Map[Together, out, {3}]|>]],
+        "Coeffs" -> If[FreeQ[out, _Symbol], out, Map[Together, out, {3}]]|>]],
       {sec, l["Sectors"]}]],
     {i, n}];
   CanonicalizeLocalSolution[Join[base, <|"Sectors" -> secs,

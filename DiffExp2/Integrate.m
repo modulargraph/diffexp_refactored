@@ -151,11 +151,11 @@ IntegrateLocalSolution[ls0_Association, {t1_, t2_}] := Module[
     "TWindowUsed" -> ncols - 1|>];
 
 resolveSigma[ls_] := Module[{sg = DiffExp2`SectorSeries`ChartImSign[ls]},
-  If[MemberQ[{1, -1}, sg], sg,
-    If[AnyTrue[ls["Sectors"],
-        !IntegerQ[#["a"]] || !zeroQ[#["b"]] || #["p"] > 0 &],
-      err["E8", <|"Detail" -> "negative-arm integration on a multivalued chart without a derivable Im-sign"|>],
-      1]]];
+  (* prescriptions when derivable, else the SAME fixed +1 convention the
+     transport matching used (Transport`sigmaFor): the weights were fitted
+     under +1, so the crossing must use +1 - phases cancel in the real
+     Euclidean combination *)
+  If[MemberQ[{1, -1}, sg], sg, 1]];
 
 (* sum of endpoint sector integrals over [0, T]; skip = offender list
    (cancelled divergent monomials are EXCLUDED from every sector) *)

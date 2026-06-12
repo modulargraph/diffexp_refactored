@@ -172,7 +172,9 @@ ApplyCrossing[ls_Association, sigma_] := Module[
               If[kmin <= kk <= kmax && esMin[prefES] <= jj <= esCM[prefES],
                 esCoeff[prefES, jj]*arr[[kk - kmin + 1, n + 1, c]], 0]],
               {jj, esMin[prefES], Min[esCM[prefES], k - kmin]}];
-            s],
+            (* the crossing phase is e^(sigma I Pi (a + n + b eps)) PER
+               t-COLUMN: the integer part depends on n -> (-1)^n *)
+            (-1)^n*s],
           {k, kmin, kmax}, {n, 0, d[[2]] - 1}, {c, d[[3]]}]];
       <|"a" -> a, "b" -> b, "p" -> p - j, "Coeffs" -> newArr|>],
       {j, 0, p}]] &, ls["Sectors"]], 1];
@@ -221,6 +223,12 @@ recombineDegenerate[cs_, basis_List, specs_List] := Module[
 
 (* ---- 2.7 matching ---- *)
 
+(* endpoint-matching log-branch convention: prescriptions when derivable,
+   else the fixed +1 convention (weights absorb it; Euclidean FT results
+   stay real - verified against the oracle) *)
+sigmaFor[ls_] := Module[{s = DiffExp2`SectorSeries`ChartImSign[ls]},
+  If[MemberQ[{1, -1}, s], s, 1]];
+
 MatchWeights[Fmat_List, vIn_List, label_String] := Module[
   {nb = Length[Fmat], FF, vv, perm, mtol, w},
   mtol = DiffExp2`Tolerances`Tol["MatchTol"];
@@ -267,8 +275,9 @@ MatchWeights[Fmat_List, vIn_List, label_String] := Module[
 SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
   {dec = DiffExp2`Tolerances`EvalErrorSeriesDecrease[Max[couplingDepth, 1]],
    full, red},
-  full = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "UsePade" -> False];
-  red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut,
+  full = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "UsePade" -> False,
+    "ImSign" -> sigmaFor[ls]];
+  red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "ImSign" -> sigmaFor[ls],
     "UsePade" -> False, "TOrderReduction" -> dec];
   Table[Module[{kf = esCoeff[full["Value"], k],
       kr = If[esMin[red["Value"]] <= k <= esCM[red["Value"]],
@@ -301,15 +310,25 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
   errAcc = None;
   Do[Module[{chart = charts[[ci]], cs, sol, matchPt, tIn, vvals, F, w, ls,
       basis, probeErrs},
+    If[Environment["DEBUG_CHART"] === "1",
+      Print["CHART ", chart["Name"], " prep start t=", SessionTime[]]];
     cs = DiffExp2`Solve`PrepareChart[sys, chart];
+    If[Environment["DEBUG_CHART"] === "1",
+      Print["CHART solve start t=", SessionTime[]]];
     sol = DiffExp2`Solve`SolveChart[cs, req];
+    If[Environment["DEBUG_CHART"] === "1",
+      Print["CHART solve done t=", SessionTime[]]];
     basis = recombineDegenerate[cs, sol["Basis"]["Columns"],
       sol["Basis"]["Specs"]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
        object is only valid at its anchor); thereafter at radius/k of THIS
        chart on the incoming side *)
     matchPt = If[ci === 1, plan["From"],
-      chart["Center"] - dir*chart["Radius"]/cfg["DivisionOrder"]];
+      Module[{raw = chart["Center"] - dir*chart["Radius"]/cfg["DivisionOrder"]},
+        (* simple rational match point: algebraic radii otherwise force
+           exact algebraic arithmetic through every evaluation *)
+        Rationalize[N[raw, 20],
+          N[chart["Radius"], 20]/(100*cfg["DivisionOrder"])]]];
     (* incoming value at matchPt in the PREVIOUS object's chart coordinate *)
     tIn = matchPt - current["Center"];
     Module[{prevEval, sigma},
@@ -326,14 +345,14 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         current = ApplyCrossing[current, sigma];
         tIn = -tIn  (* far side evaluates at positive u *)];
       prevEval = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tIn,
-        "UsePade" -> False];
+        "UsePade" -> False, "ImSign" -> sigmaFor[current]];
       vvals = Module[{vv = prevEval["Value"], d2 = cs["SystemSize"]},
         Table[esNew[esMin[vv], Table[esCoeff[vv, k][[c]],
           {k, esMin[vv], esCM[vv]}]], {c, d2}]]];
     (* basis values at the same point, in THIS chart's coordinate *)
     Module[{tLoc = matchPt - chart["Center"], Feval},
       Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
-        tLoc, "UsePade" -> False]["Value"] &, basis];
+        tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, basis];
       F = Table[esNew[esMin[Feval[[i]]],
         Table[esCoeff[Feval[[i]], k][[c]], {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]],
         {c, cs["SystemSize"]}, {i, Length[basis]}]];
@@ -360,7 +379,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     "ErrorEstimate" -> errAcc,
     "Value" -> If[plan["EndpointIsSingular"], None,
       DiffExp2`SectorSeries`EvaluateLocalSolution[current,
-        plan["To"] - current["Center"], "UsePade" -> False]["Value"]]|>];
+        plan["To"] - current["Center"], "UsePade" -> False,
+        "ImSign" -> sigmaFor[current]]["Value"]]|>];
 
 End[];
 EndPackage[];

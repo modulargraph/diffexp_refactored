@@ -104,10 +104,22 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     err["E9", <|"Detail" -> "empty integration range or anchor outside"|>]];
   If[Environment["DEBUG_LI"] === "1",
     Print["    LI: transports done t=", SessionTime[], " ncharts=", Length[keptAll]]];
-  (* tile [lo, hi]: breakpoints at midpoints between adjacent chart centers *)
+  (* tile [lo, hi]: breakpoints between adjacent charts, CLAMPED into the
+     overlap of their disks - midpoints alone break when radii differ
+     wildly (a tiny chart squeezed against a singularity next to a big
+     neighbor would receive a tile far outside its disk) *)
   keptAll = SortBy[keptAll, N[#["Chart"]["Center"], 30] &];
-  tiles = Module[{cs = #["Chart"]["Center"] & /@ keptAll, bps},
-    bps = Join[{lo}, Table[(cs[[i]] + cs[[i + 1]])/2, {i, Length[cs] - 1}], {hi}];
+  tiles = Module[{cs = #["Chart"]["Center"] & /@ keptAll,
+      rs = #["Chart"]["Radius"] & /@ keptAll, bps},
+    bps = Join[{lo},
+      Table[Module[{mid = (cs[[i]] + cs[[i + 1]])/2,
+          lA = cs[[i]] + (9/10)*rs[[i]], lB = cs[[i + 1]] - (9/10)*rs[[i + 1]]},
+        If[TrueQ[N[lB, 30] > N[lA, 30]],
+          err["E9", <|"Charts" -> {cs[[i]], cs[[i + 1]]},
+            "Radii" -> {rs[[i]], rs[[i + 1]]},
+            "Detail" -> "adjacent kept charts do not overlap; tiling hole"|>]];
+        Rationalize[N[Max[Min[mid, lA], lB], 30], N[rs[[i + 1]], 30]/64]],
+        {i, Length[cs] - 1}], {hi}];
     Table[{keptAll[[i]], bps[[i]], bps[[i + 1]]}, {i, Length[cs]}]];
   Do[Module[{entry = tile[[1]], a = tile[[2]], b2 = tile[[3]], ls, center,
       t1, t2, contrib},

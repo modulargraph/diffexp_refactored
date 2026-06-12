@@ -19,6 +19,7 @@ SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the Fundamen
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
+ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -124,6 +125,7 @@ prepareChartCore[sys_Association, chart_Association] := Module[
   <|"ChartVar" -> t, "Center" -> x0,
     "ChartMap" -> <|"Center" -> x0, "Scale" -> beta|>,
     "Radius" -> chart["Radius"],
+    "SystemHash" -> Hash[sys["Matrix"]],   (* solve-cache flush tag *)
     "Prescriptions" -> Lookup[chart, "Prescriptions", {}],
     "SystemSize" -> d,
     "ThetaMatrix" -> idata["Reduction"]["ThetaMatrix"],
@@ -488,7 +490,34 @@ applyGauge[cs_, ls_, nmax_] := Module[
 
 (* ---- public functions ---- *)
 
+(* SolveHomogeneous memo: the fundamental basis depends ONLY on the
+   ChartSystem and the request window — solveHomogeneousCore reads cs
+   (blocks/families, the prepared cleared system, V/gauge) and req (TOrder,
+   EpsWindow); boundary values never enter (they meet the basis later in
+   MatchWeights).  The lo/hi endpoint transports of one level share the
+   anchor chart (and any coinciding centers), so the second direction's
+   solve is a pure replay: memoize on (Hash[cs], request window, WP).
+   PrepareChart already dedups cs itself ($pcCache), so shared charts hash
+   identically.  WorkingPrecision is in the key because ratEpsList
+   numericizes large coefficients at WP+20.  Memory policy: the cache holds
+   ONE system's charts (flushed when SystemHash changes — each FT level is
+   a fresh system), is entry-capped as a runaway guard, and is cleared by
+   ClearSolveCaches[] from API`LoadSystem.  A memo hit skips the
+   ODEResidualCheck rerun: the identical result already passed it when
+   computed. *)
+$shCache = <||>; $shSysTag = None; $shCacheMax = 64;
 SolveHomogeneous[cs_Association, req_Association] := Module[
+  {tag = Lookup[cs, "SystemHash", None], key},
+  key = {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
+    req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"]};
+  If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
+  If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
+  If[Length[$shCache] >= $shCacheMax, $shCache = <||>];
+  $shCache[key] = solveHomogeneousCore[cs, req]];
+
+ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;);
+
+solveHomogeneousCore[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,
    columns = {}, specs = {}, hitsAll = {}, fams = cs["Families"], colCursor = 0,
    wideTop, prep, Pmax, cdMax, fb, Wd},

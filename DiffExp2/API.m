@@ -59,6 +59,10 @@ LoadSystem[spec_Association] := Module[{A, var, eps},
     err["E6", <|"Detail" -> "inexact entries: the exact eps-rational matrix is required (d<var>_full.m, not eps-truncated slices)"|>]];
   If[!FreeQ[A, Power[b_, e_] /; !FreeQ[b, var] && !IntegerQ[e]],
     err["E6", <|"Detail" -> "irrational x-dependence (sqrt matrices) is out of scope v1"|>]];
+  (* loading a system is the natural memory boundary for the solver memo
+     caches (PrepareChart, SolveHomogeneous): entries for previous systems
+     are dead weight from here on *)
+  DiffExp2`Solve`ClearSolveCaches[];
   <|"Matrix" -> A, "Variable" -> var,
     "SingularFactors" -> singularFactorsOf[A, var]|>];
 

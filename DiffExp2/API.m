@@ -68,7 +68,8 @@ TransportEndpoint[sys_Association, bvals_, from_, to_, OptionsPattern[]] := Modu
    each c-component IN CHART COORDINATES (x = center + t), integrate the
    per-component scalar objects, sum. *)
 
-Options[LineIntegral] = {"ExtraSingularFactors" -> {}};
+Options[LineIntegral] = {"ExtraSingularFactors" -> {},
+  "PrecomputedCharts" -> None};
 LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     OptionsPattern[]] := Module[
   {sys2, var = sys["Variable"], eps, res, kept, tiles, total = None,
@@ -76,6 +77,8 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
   eps = DiffExp2`Config`CanonicalEps[];
   sys2 = Join[sys, <|"ExtraSingularFactors" ->
     Select[OptionValue["ExtraSingularFactors"], !FreeQ[#, var] &]|>];
+  keptAll = OptionValue["PrecomputedCharts"];
+  If[keptAll === None,
   (* transport BOTH ways from the anchor to cover [lo, hi] *)
   keptAll = {};
   If[TrueQ[lo < from],
@@ -85,7 +88,7 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
   If[TrueQ[hi > from],
     planHi = DiffExp2`Transport`SegmentLine[sys2, {from, hi}];
     res = DiffExp2`Transport`TransportLine[sys2, bvals, planHi];
-    keptAll = Join[keptAll, res["Charts"]]];
+    keptAll = Join[keptAll, res["Charts"]]]];
   If[keptAll === {},
     err["E9", <|"Detail" -> "empty integration range or anchor outside"|>]];
   If[Environment["DEBUG_LI"] === "1",

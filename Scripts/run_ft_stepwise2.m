@@ -58,8 +58,12 @@ printRows[example_, level_, masters_, rawES_List, prefactors_] := Module[{},
 limitCombined[tres_, cvec_, var_] := Module[{ls = tres["Final"], out = None},
   Do[Module[{cc = cvec[[j]], lsM, lim},
     If[!PossibleZeroQ[Together[cc]],
+      If[Environment["DEBUG_LI"] === "1",
+        Print["      limit j=", j, " mul start t=", SessionTime[]]];
       lsM = DiffExp2`SectorSeries`MultiplyRational[ls,
         Together[cc /. var -> ls["Center"] + Global`t], Global`t];
+      If[Environment["DEBUG_LI"] === "1",
+        Print["      limit j=", j, " lim start t=", SessionTime[]]];
       lim = DiffExp2`Integrate`EndpointSectorLimit[lsM][[j]];
       out = If[out === None, lim, DiffExp2`EpsSeries`ESAdd[out, lim]]]],
     {j, Length[cvec]}];
@@ -102,7 +106,7 @@ runExample[name_String] := Module[
     {levelData = ftData["Levels"][level], levelBelow = ftData["Levels"][level - 1],
      var, A, sys, mastersBelow, mastersHere, requests, neededVecs, reductions,
      extraFacs, rawES, trims, rawMin, shift, kmaxAvail, ftEps, dimVar,
-     dimExpr, normalizeFT},
+     dimExpr, normalizeFT, trLoCache, trHiCache, chartCache},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -125,12 +129,30 @@ runExample[name_String] := Module[
     If[reductions === $Failed, Print["FIRE FAIL"]; Return[$Failed, Module]];
     extraFacs = normalizeFT[
       FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
-        ftData, level - 1]];
+        ftData, level]];
     (* configure DiffExp2 for this level *)
     catch2[DiffExp2`Config`LoadConfiguration[{
       "WorkingPrecision" -> wp, "ExpansionOrder" -> expansionOrder,
       "EpsilonOrder" -> Max[esCMxLevel = epsOrder + level + boundaryExtraOrder, 1],
       "DivisionOrder" -> 4, "Variables" -> {}}]];
+    (* ONE two-way transport per level serves every master: precompute the
+       chart chain + the two endpoint transports *)
+    Module[{needInt, needLo, needHi},
+      needInt = AnyTrue[requests, #["Case"] === "integrate" &];
+      needLo = needInt || AnyTrue[requests, #["Case"] === "limitLower" &];
+      needHi = needInt || AnyTrue[requests, #["Case"] === "limitUpper" &];
+      trLoCache = If[needLo,
+        catch2[DiffExp2`API`TransportEndpoint[sys, currentBCs, anchor, 0,
+          "ExtraSingularFactors" -> extraFacs]], None];
+      trHiCache = If[needHi,
+        catch2[DiffExp2`API`TransportEndpoint[sys, currentBCs, anchor, 1,
+          "ExtraSingularFactors" -> extraFacs]], None];
+      If[FailureQ[trLoCache] || FailureQ[trHiCache],
+        Print["TRANSPORT FAIL ", {trLoCache, trHiCache} // Select[#, FailureQ] &];
+        Throw[$Failed, "FT2Abort"]];
+      chartCache = Join[
+        If[trLoCache === None, {}, trLoCache["Charts"]],
+        If[trHiCache === None, {}, trHiCache["Charts"]]]];
     (* per lower master: dispatch the boundary case *)
     rawES = Table[Module[
       {req = requests[[mi]], expr2, cvecBase, cvec, case, res2, vi, vj, gammaFac},
@@ -151,15 +173,13 @@ runExample[name_String] := Module[
           cvec = Table[Together[
             var^(vi - 1)*(1 - var)^(vj - 1)*cvecBase[[j]]], {j, Length[mastersHere]}];
           w = catch2[DiffExp2`API`LineIntegral[sys, currentBCs, anchor, {0, 1},
-            cvec, "ExtraSingularFactors" -> extraFacs]];
+            cvec, "ExtraSingularFactors" -> extraFacs,
+            "PrecomputedCharts" -> chartCache]];
           If[FailureQ[w], Print["INTEGRATE FAIL master ", mi, ": ", w];
             Return[$Failed, Module]];
           DiffExp2`EpsSeries`ESScale[gammaFac, w]],
         "limitUpper",
-        Module[{tr},
-          tr = catch2[DiffExp2`API`TransportEndpoint[sys, currentBCs, anchor, 1,
-            "ExtraSingularFactors" -> extraFacs]];
-          If[FailureQ[tr], Print["LIMIT1 FAIL ", tr]; Return[$Failed, Module]];
+        Module[{tr = trHiCache},
           If[TrueQ[tr["EndpointIsSingular"]],
             limitCombined[tr, cvecBase, var],
             Module[{vv = tr["Value"], out = None},
@@ -175,10 +195,7 @@ runExample[name_String] := Module[
                 {j, Length[mastersHere]}];
               out]]],
         "limitLower",
-        Module[{tr},
-          tr = catch2[DiffExp2`API`TransportEndpoint[sys, currentBCs, anchor, 0,
-            "ExtraSingularFactors" -> extraFacs]];
-          If[FailureQ[tr], Print["LIMIT0 FAIL ", tr]; Return[$Failed, Module]];
+        Module[{tr = trLoCache},
           If[TrueQ[tr["EndpointIsSingular"]],
             limitCombined[tr, cvecBase, var],
             Module[{vv = tr["Value"], out = None},

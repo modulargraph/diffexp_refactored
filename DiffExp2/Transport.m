@@ -309,17 +309,28 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         "Prescriptions" -> {}|>]];
   errAcc = None;
   Do[Module[{chart = charts[[ci]], cs, sol, matchPt, tIn, vvals, F, w, ls,
-      basis, probeErrs},
+      basis, probeErrs, valueMode, couplingDepth = 0},
     If[Environment["DEBUG_CHART"] === "1",
       Print["CHART ", chart["Name"], " prep start t=", SessionTime[]]];
     cs = DiffExp2`Solve`PrepareChart[sys, chart];
-    If[Environment["DEBUG_CHART"] === "1",
-      Print["CHART solve start t=", SessionTime[]]];
-    sol = DiffExp2`Solve`SolveChart[cs, req];
-    If[Environment["DEBUG_CHART"] === "1",
-      Print["CHART solve done t=", SessionTime[]]];
-    basis = recombineDegenerate[cs, sol["Basis"]["Columns"],
-      sol["Basis"]["Specs"]];
+    (* PROTOTYPE (env-gated, default off): value-vector propagation for
+       REGULAR interior charts (Docs/PerfGapAnalysis.md lever 1).  The
+       incoming object is evaluated AT THIS CHART'S CENTER — inside the
+       previous chart's disk by the predivision geometry (step/radius <=
+       1/(1+k)); EvaluateLocalSolution's radius assert is the loud
+       backstop — and that value is the t^0 Cauchy datum of ONE
+       d-dimensional recursion (Solve`SolveValueRegular), replacing the
+       d-column basis + MatchWeights + CombineLocalSolutions.  Singular
+       charts and the first chart (anchor-only incoming data) keep the
+       basis+matching path unchanged. *)
+    valueMode = Environment["DE2_VALUE_TRANSPORT"] === "1" && ci > 1 &&
+      !TrueQ[chart["Singular"]] &&
+      TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+      (* conservative geometry pre-check: the center must sit WELL inside
+         the previous object's disk (margin 9/10); otherwise fall back to
+         the basis path (a performance choice, not an ambiguity) *)
+      TrueQ[Abs[N[chart["Center"] - current["Center"], 30]] <
+        9/10*N[current["Radius"], 30]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
        object is only valid at its anchor); thereafter at radius/k of THIS
        chart on the incoming side *)
@@ -329,8 +340,9 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
            exact algebraic arithmetic through every evaluation *)
         Rationalize[N[raw, 20],
           N[chart["Radius"], 20]/(100*cfg["DivisionOrder"])]]];
-    (* incoming value at matchPt in the PREVIOUS object's chart coordinate *)
-    tIn = matchPt - current["Center"];
+    (* incoming value in the PREVIOUS object's chart coordinate: at the
+       match point (basis path) or at this chart's center (value mode) *)
+    tIn = If[valueMode, chart["Center"], matchPt] - current["Center"];
     Module[{prevEval, sigma},
       (* crossing: if the previous chart was singular and matchPt lies on its
          far side (sign of tIn relative to approach), apply the operator *)
@@ -349,19 +361,34 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       vvals = Module[{vv = prevEval["Value"], d2 = cs["SystemSize"]},
         Table[esNew[esMin[vv], Table[esCoeff[vv, k][[c]],
           {k, esMin[vv], esCM[vv]}]], {c, d2}]]];
-    (* basis values at the same point, in THIS chart's coordinate *)
-    Module[{tLoc = matchPt - chart["Center"], Feval},
-      Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
-        tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, basis];
-      F = Table[esNew[esMin[Feval[[i]]],
-        Table[esCoeff[Feval[[i]], k][[c]], {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]],
-        {c, cs["SystemSize"]}, {i, Length[basis]}]];
-    w = MatchWeights[F, vvals, chart["Name"]];
-    ls = DiffExp2`SectorSeries`CombineLocalSolutions[w, basis];
+    If[valueMode,
+      If[Environment["DEBUG_CHART"] === "1",
+        Print["CHART value-solve start t=", SessionTime[]]];
+      ls = DiffExp2`Solve`SolveValueRegular[cs, req, vvals];
+      If[Environment["DEBUG_CHART"] === "1",
+        Print["CHART value-solve done t=", SessionTime[]]];
+      ,
+      If[Environment["DEBUG_CHART"] === "1",
+        Print["CHART solve start t=", SessionTime[]]];
+      sol = DiffExp2`Solve`SolveChart[cs, req];
+      If[Environment["DEBUG_CHART"] === "1",
+        Print["CHART solve done t=", SessionTime[]]];
+      basis = recombineDegenerate[cs, sol["Basis"]["Columns"],
+        sol["Basis"]["Specs"]];
+      couplingDepth = sol["CouplingDepth"];
+      (* basis values at the same point, in THIS chart's coordinate *)
+      Module[{tLoc = matchPt - chart["Center"], Feval},
+        Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
+          tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, basis];
+        F = Table[esNew[esMin[Feval[[i]]],
+          Table[esCoeff[Feval[[i]], k][[c]], {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]],
+          {c, cs["SystemSize"]}, {i, Length[basis]}]];
+      w = MatchWeights[F, vvals, chart["Name"]];
+      ls = DiffExp2`SectorSeries`CombineLocalSolutions[w, basis]];
     (* probe on the APPROACH side (positive chart coordinate after any
        crossing handling; singular charts are one-sided here) *)
     probeErrs = SegmentErrorProbe[ls,
-      (matchPt - chart["Center"])/2, sol["CouplingDepth"]];
+      (matchPt - chart["Center"])/2, couplingDepth];
     errAcc = If[errAcc === None, probeErrs,
       Module[{l1 = Length[errAcc], l2 = Length[probeErrs]},
         PadRight[errAcc, Max[l1, l2]] + PadRight[probeErrs, Max[l1, l2]]]];

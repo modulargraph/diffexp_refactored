@@ -189,18 +189,21 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
       ta = If[TrueQ[tval < 0], (-tval)^a*Exp[I*Pi*sigma*a],
         If[TrueQ[tval == 0], If[a === 0, 1, 0], tval^a]];
       Module[{tpows = Table[pow[tval, nn], {nn, 0, ncols - 1}]},
-      alphas = Table[Module[{slab = Transpose[arr[[k - kmin + 1, 1 ;; ncols]]]},
-        Table[Module[{cs = slab[[c2]], v, fb},
-          If[TrueQ[usePade] && !FreeQ[cs, s_Symbol /; Context[s] === "Global`"],
-            err["indetpade", <|"Chart" -> chartName[ls], "Sector" -> tagOf[sec],
-              "Detail" -> "Pade requested on symbolic coefficients"|>]];
-          If[TrueQ[usePade],
+      alphas = If[TrueQ[usePade],
+        Table[Module[{slab = Transpose[arr[[k - kmin + 1, 1 ;; ncols]]]},
+          Table[Module[{cs = slab[[c2]], v, fb},
+            If[!FreeQ[cs, s_Symbol /; Context[s] === "Global`"],
+              err["indetpade", <|"Chart" -> chartName[ls], "Sector" -> tagOf[sec],
+                "Detail" -> "Pade requested on symbolic coefficients"|>]];
             {v, fb} = padeEvaluate[cs, tval, {chartName[ls], tagOf[sec], k, c2}];
             If[fb, AppendTo[fallbacks,
-              <|"Sector" -> tagOf[sec], "EpsRow" -> k, "Component" -> c2|>]],
-            v = cs . tpows];
-          v], {c2, ncomp}]],
-        {k, kmin, kmax}]];
+              <|"Sector" -> tagOf[sec], "EpsRow" -> k, "Component" -> c2|>]];
+            v], {c2, ncomp}]],
+          {k, kmin, kmax}],
+        (* fast path: ONE contraction per sector — the (k x n x c) slab
+           against the t-power vector along n; element (k, c2) equals the
+           former per-entry arr[[k, 1;;ncols, c2]] . tpows verbatim *)
+        Transpose[arr[[All, 1 ;; ncols]], {1, 3, 2}] . tpows]];
       Do[Module[{Kc},
         Kc = Sum[If[kmin <= K - p - j <= kmax,
           alphas[[K - p - j - kmin + 1]]*pow[b*Lv, j]/j!, 0],

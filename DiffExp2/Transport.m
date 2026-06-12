@@ -41,7 +41,7 @@ esNew = DiffExp2`EpsSeries`ESNew; esZero = DiffExp2`EpsSeries`ESZero;
 esAdd = DiffExp2`EpsSeries`ESAdd; esScale = DiffExp2`EpsSeries`ESScale;
 esTimes = DiffExp2`EpsSeries`ESTimes; esShift = DiffExp2`EpsSeries`ESShift;
 esCoeff = DiffExp2`EpsSeries`ESCoefficient; esMin = DiffExp2`EpsSeries`ESMinPower;
-esCM = DiffExp2`EpsSeries`ESCompleteMax; esTrim = DiffExp2`EpsSeries`ESTrim;
+esCM = DiffExp2`EpsSeries`ESCompleteMax;
 
 (* ---- 2.1 singularities ---- *)
 
@@ -164,30 +164,38 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
 (* ---- 2.9 crossing ---- *)
 
 ApplyCrossing[ls_Association, sigma_] := Module[
-  {eps = DiffExp2`Config`CanonicalEps[], secs, kmin, kmax, out, grouped},
+  {eps = DiffExp2`Config`CanonicalEps[], kmin, kmax, nk, out},
   kmin = ls["EpsWindow", "Min"]; kmax = ls["EpsWindow", "CompleteMax"];
+  nk = kmax - kmin + 1;
   (* per sector (a,b,p): phase e^(sigma I Pi (a + b eps)) times
      M_{p -> p-j} = (sigma I Pi eps)^j / j!.  The phase's b-part is an
-     eps-exponential: expand to the window width. *)
+     eps-exponential: expand to the window width.  Slab-vectorized (the
+     CombineLocalSolutions pattern): the per-(k,n,c) Sum becomes weighted
+     SHIFTED-SLAB adds over the k-axis — one whole-array op per prefactor
+     eps-order.  The crossing phase is e^(sigma I Pi (a + n + b eps)) PER
+     t-COLUMN: the integer part depends on n -> the (-1)^n per-column
+     factor, pre-applied to the source slabs (exact, jj-independent). *)
   out = Flatten[Map[Module[{a = #["a"], b = #["b"], p = #["p"], arr = #["Coeffs"],
-      phaseA, width = kmax - kmin},
+      phaseA, dims, arrS},
     phaseA = Exp[sigma*I*Pi*a];
-    Table[Module[{shiftTot, prefES, newArr},
+    dims = Dimensions[arr];
+    arrS = Module[{signs = Table[(-1)^n, {n, 0, dims[[2]] - 1}]},
+      Map[signs*# &, arr]];
+    Table[Module[{prefES, newArr},
       (* contribution to target (a, b, p - j):
          phaseA * e^(sigma I Pi b eps) * (sigma I Pi eps)^j / j! *)
       prefES = DiffExp2`EpsSeries`ESFromExpression[
         phaseA*Exp[sigma*I*Pi*b*eps]*(sigma*I*Pi*eps)^j/j!, eps, kmax - kmin + 2];
-      newArr = Module[{d = Dimensions[arr]},
-        Table[
-          Module[{s},
-            s = Sum[Module[{kk = k - jj},
-              If[kmin <= kk <= kmax && esMin[prefES] <= jj <= esCM[prefES],
-                esCoeff[prefES, jj]*arr[[kk - kmin + 1, n + 1, c]], 0]],
-              {jj, esMin[prefES], Min[esCM[prefES], k - kmin]}];
-            (* the crossing phase is e^(sigma I Pi (a + n + b eps)) PER
-               t-COLUMN: the integer part depends on n -> (-1)^n *)
-            (-1)^n*s],
-          {k, kmin, kmax}, {n, 0, d[[2]] - 1}, {c, d[[3]]}]];
+      newArr = ConstantArray[0, {nk, dims[[2]], dims[[3]]}];
+      (* newArr[k] += pref[jj]*arrS[k - jj] <=> target slabs [1+jj, nk]
+         from source slabs [1, nk - jj] (the same index set as the old
+         per-element Sum, in the same ascending-jj addition order) *)
+      Do[Module[{pc = esCoeff[prefES, jj], lo, hi},
+        If[pc =!= 0,
+          lo = Max[1, 1 - jj]; hi = Min[nk, nk - jj];
+          If[lo <= hi,
+            newArr[[lo + jj ;; hi + jj]] += pc*arrS[[lo ;; hi]]]]],
+        {jj, esMin[prefES], Min[esCM[prefES], kmax - kmin]}];
       <|"a" -> a, "b" -> b, "p" -> p - j, "Coeffs" -> newArr|>],
       {j, 0, p}]] &, ls["Sectors"]], 1];
   DiffExp2`SectorSeries`CanonicalizeLocalSolution[
@@ -242,46 +250,119 @@ recombineDegenerate[cs_, basis_List, specs_List] := Module[
 sigmaFor[ls_] := Module[{s = DiffExp2`SectorSeries`ChartImSign[ls]},
   If[MemberQ[{1, -1}, s], s, 1]];
 
+(* ===================== MATCHWEIGHTS FRAME KERNELS =====================
+   Gaussian elimination over the eps-Laurent field on PLAIN WINDOWED
+   COEFFICIENT LISTS {min, coeffs} (index i <-> eps^(min+i-1); the honest
+   complete window is [min, min + Length[coeffs] - 1]) — the runRecursion
+   packed-list style applied to the matching solve.  This bypasses the
+   per-op EpsSeries object layer (Association churn, per-coefficient
+   window reads) that made the nb^2..nb^3 row operations the per-chart
+   hot spot at d = 7.  EpsSeries objects appear only at the boundaries
+   (matrix/rhs in, weights out).
+   WINDOW HONESTY: every kernel implements EXACTLY the EpsSeries window
+   rule it replaces (ESAdd min-rules; the ESTimes Cauchy window; the
+   ESInvert/ESDivide structure shift [-L, CM - 2L] for division by a
+   pivot leading at relative index L; ESTrim's value-classified leading
+   advance with CompleteMax untouched), so the delivered weight windows
+   equal the former per-object path's windows order for order. *)
+
+(* seriesScale mirror: max |numeric coefficient|, symbolic excluded *)
+mwScale[c_List] := Max[0, Sequence @@ (If[NumericQ[#], Abs[N[#, 10]], Nothing] & /@ c)];
+
+(* EpsSeries norm mirror: numerics pass through; symbolics Together *)
+mwNorm[c_List] := If[FreeQ[c, _Symbol], c,
+  Map[If[NumericQ[#], #, Together[Expand[#]]] &, c]];
+
+(* ESTrim mirror: advance min past negligible leading coefficients under
+   the SAME relative gate (ESCoeffZeroQ -> Tol["LaurentLeadTol"], scale
+   over the stored window, the ambiguity band stays loud); the top never
+   changes; all-negligible gives the canonical zero {top, {0}}.  This is
+   the trim-before-normalize guard: numerically-tiny leading storage
+   never becomes a pivot. *)
+mwTrim[{min_, c_}] := Module[{scale = mwScale[c], n = Length[c], i = 1},
+  While[i <= n && TrueQ[DiffExp2`EpsSeries`ESCoeffZeroQ[c[[i]], scale]], i++];
+  If[i > n, {min + n - 1, {0}}, {min + i - 1, Drop[c, i - 1]}]];
+
+(* trimmed-entry zero test (the ESLeading === None equivalent) *)
+mwZeroQ[{_, c_}] := c === {0};
+
+mwNeg[{m_, c_}] := {m, -c};
+
+(* ESAdd mirror: min = Min[mins], top = Min[tops] — never zero-padded *)
+mwAdd[{am_, ac_}, {bm_, bc_}] := Module[
+  {min = Min[am, bm], top = Min[am + Length[ac], bm + Length[bc]] - 1, out},
+  out = ConstantArray[0, top - min + 1];
+  Module[{lo = am - min + 1, hi = Min[am + Length[ac] - 1, top] - min + 1},
+    If[lo <= hi, out[[lo ;; hi]] += Take[ac, hi - lo + 1]]];
+  Module[{lo = bm - min + 1, hi = Min[bm + Length[bc] - 1, top] - min + 1},
+    If[lo <= hi, out[[lo ;; hi]] += Take[bc, hi - lo + 1]]];
+  {min, mwNorm[out]}];
+
+(* ESTimes mirror via ListConvolve: mins add; honest length =
+   Min[operand lengths] (the Cauchy-product window rule) *)
+mwMul[{am_, ac_}, {bm_, bc_}] :=
+  {am + bm, mwNorm[Take[ListConvolve[ac, bc, {1, -1}, 0],
+    Min[Length[ac], Length[bc]]]]};
+
+(* ESDivide mirror as the direct quotient recursion (b q = a through the
+   honest order — coefficient-identical to ESTimes[a, ESInvert[b]]):
+   min = aMin - bMin, length = Min[operand lengths].  Division by a pivot
+   leading at index L > 0 shifts content down by L AND costs completeness
+   at the top, exactly ESInvert's [-L, CM - 2L] window rule.  The caller
+   guarantees a trimmed denominator with a non-negligible (hence nonzero)
+   leading entry. *)
+mwDiv[{am_, ac_}, {bm_, bc_}] := Module[
+  {len = Min[Length[ac], Length[bc]], b0 = First[bc], sym, q},
+  sym = !FreeQ[{ac, bc}, _Symbol];
+  q = ConstantArray[0, len];
+  q[[1]] = If[sym, Together[ac[[1]]/b0], ac[[1]]/b0];
+  Do[q[[m + 1]] = Module[
+      {v = (ac[[m + 1]] - Sum[bc[[j + 1]]*q[[m - j + 1]],
+          {j, 1, Min[m, Length[bc] - 1]}])/b0},
+      If[sym, Together[v], v]],
+    {m, 1, len - 1}];
+  {am - bm, q}];
+
+mwFromES[s_] := {esMin[s], s["Coeffs"]};
+mwToES[{m_, c_}] := esNew[m, c];
+
 MatchWeights[Fmat_List, vIn_List, label_String] := Module[
-  {nb = Length[Fmat], FF, vv, perm, mtol, w},
-  mtol = DiffExp2`Tolerances`Tol["MatchTol"];
-  (* Gaussian elimination over the eps-Laurent field: EpsSeries entries,
+  {nb = Length[Fmat], FF, vv, perm, w},
+  (* Gaussian elimination over the eps-Laurent field on frame lists:
      pivots by minimal leading eps-order (then largest leading magnitude),
-     ESDivide row operations.  Honest windows propagate; a column with no
-     usable pivot = genuinely singular system (E5). *)
-  FF = Map[esTrim, Fmat, {2}];
-  vv = vIn;
+     quotient-recursion row operations.  Honest windows propagate through
+     the mirrored EpsSeries rules; a column with no usable pivot =
+     genuinely singular system (E5). *)
+  FF = Map[mwTrim[mwFromES[#]] &, Fmat, {2}];
+  vv = mwFromES /@ vIn;
   perm = Range[nb];   (* row order after pivoting *)
-  Do[Module[{cands, pivRow, pivLead},
-    cands = Select[Range[col, nb], Module[{ld},
-      ld = DiffExp2`EpsSeries`ESLeading[FF[[perm[[#]], col]]];
-      ld =!= None] &];
+  Do[Module[{cands, pivRow},
+    cands = Select[Range[col, nb], !mwZeroQ[FF[[perm[[#]], col]]] &];
     If[cands === {},
       err["E5", <|"Chart" -> label, "Column" -> col,
         "Detail" -> "matching system singular over the eps-Laurent field"|>]];
-    pivRow = First[SortBy[cands, Module[{ld =
-        DiffExp2`EpsSeries`ESLeading[FF[[perm[[#]], col]]]},
-      {ld[[1]], -Abs[N[ld[[2]], 20]]}] &]];
+    pivRow = First[SortBy[cands, Module[{e = FF[[perm[[#]], col]]},
+      {e[[1]], -Abs[N[e[[2, 1]], 20]]}] &]];
     If[pivRow =!= col, perm[[{col, pivRow}]] = perm[[{pivRow, col}]]];
     Do[Module[{entry = FF[[perm[[r]], col]], factor},
-      If[DiffExp2`EpsSeries`ESLeading[entry] =!= None,
-        factor = esTrim[DiffExp2`EpsSeries`ESDivide[entry, FF[[perm[[col]], col]]]];
-        Do[FF[[perm[[r]], c2]] = esTrim[esAdd[FF[[perm[[r]], c2]],
-          esScale[-1, esTimes[factor, FF[[perm[[col]], c2]]]]]],
+      If[!mwZeroQ[entry],
+        factor = mwTrim[mwDiv[entry, FF[[perm[[col]], col]]]];
+        Do[FF[[perm[[r]], c2]] = mwTrim[mwAdd[FF[[perm[[r]], c2]],
+          mwNeg[mwMul[factor, FF[[perm[[col]], c2]]]]]],
           {c2, col, nb}];
-        vv[[perm[[r]]]] = esTrim[esAdd[vv[[perm[[r]]]],
-          esScale[-1, esTimes[factor, vv[[perm[[col]]]]]]]]]],
+        vv[[perm[[r]]]] = mwTrim[mwAdd[vv[[perm[[r]]]],
+          mwNeg[mwMul[factor, vv[[perm[[col]]]]]]]]]],
       {r, col + 1, nb}]],
     {col, nb}];
   (* back substitution *)
   w = Table[None, {nb}];
   Do[Module[{rhs = vv[[perm[[col]]]]},
-    Do[rhs = esTrim[esAdd[rhs,
-      esScale[-1, esTimes[FF[[perm[[col]], c2]], w[[c2]]]]]],
+    Do[rhs = mwTrim[mwAdd[rhs,
+      mwNeg[mwMul[FF[[perm[[col]], c2]], w[[c2]]]]]],
       {c2, col + 1, nb}];
-    w[[col]] = esTrim[DiffExp2`EpsSeries`ESDivide[rhs, FF[[perm[[col]], col]]]]],
+    w[[col]] = mwTrim[mwDiv[rhs, FF[[perm[[col]], col]]]]],
     {col, nb, 1, -1}];
-  w];
+  mwToES /@ w];
 
 (* ---- 2.10 probe ---- *)
 

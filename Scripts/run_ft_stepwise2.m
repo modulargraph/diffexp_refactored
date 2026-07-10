@@ -22,7 +22,16 @@ wp = ToExpression[envOrDefault["FT_WORKING_PRECISION", "500"]];
 epsOrder = ToExpression[envOrDefault["FT_EPS_ORDER", "0"]];
 expansionOrder = ToExpression[envOrDefault["FT_EXPANSION_ORDER", "50"]];
 boundaryExtraOrder = ToExpression[envOrDefault["FT_BOUNDARY_EXTRA_ORDER", "4"]];
-stepDivisionOrder = ToExpression[envOrDefault["FT_STEP_DIVISION_ORDER", "4"]];
+divisionOrder = ToExpression[envOrDefault["FT_DIVISION_ORDER", "3"]];
+radiusOfConvergence = ToExpression[
+  envOrDefault["FT_RADIUS_OF_CONVERGENCE", "1"]];
+stepDivisionOrder = ToExpression[envOrDefault["FT_STEP_DIVISION_ORDER",
+  ToString[divisionOrder, InputForm]]];
+If[stepDivisionOrder =!= divisionOrder,
+  Print["FT_STEP_DIVISION_ORDER=", stepDivisionOrder,
+    " overridden by classic coupled segmentation; using FT_DIVISION_ORDER=",
+    divisionOrder, " for both placement and +/-1/k matching"];
+  stepDivisionOrder = divisionOrder];
 levelEpsilonHalos = Quiet[Check[
   ToExpression["{" <> envOrDefault["FT_LEVEL_EPS_HALOS", "0"] <> "}"],
   $Failed]];
@@ -34,6 +43,22 @@ levelEpsilonHalo[level_Integer] := If[1 <= level <= Length[levelEpsilonHalos],
   levelEpsilonHalos[[level]], 0];
 requestedEpsilonOrder[level_Integer] := Max[
   epsOrder + level + boundaryExtraOrder + levelEpsilonHalo[level], 1];
+
+(* Old FeynmanTrick/DiffExp prescribed both endpoints and every matrix/IBP
+   segmentation factor with a consistent +i delta side.  DiffExp2's config
+   is reset at every level, so rebuild that effective list explicitly here;
+   otherwise Transport receives an empty Prescriptions record and loses the
+   branch sheet after crossing an interior singularity. *)
+levelDeltaPrescriptions[var_Symbol, sys_Association, extra_List] := Module[
+  {raw, factors},
+  raw = Join[{var, 1 - var}, Lookup[sys, "SingularFactors", {}], extra];
+  factors = Flatten[Map[Module[{fl = FactorList[Factor[Numerator[Together[#]]]]},
+      First /@ Select[fl, !FreeQ[First[#], var] &]] &, raw]];
+  factors = DeleteDuplicates[factors,
+    TrueQ[PossibleZeroQ[Expand[#1 - #2]]] ||
+      TrueQ[PossibleZeroQ[Expand[#1 + #2]]] &];
+  {#, 1} & /@ factors];
+
 anchor = 11/23;
 inputPrecision = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
 prepCacheRoot = envOrDefault["FT_PREP_CACHE_DIR",
@@ -225,6 +250,18 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
     Return[ladderCheckpointReject[file,
       "requested ExpansionOrder is lower than the checkpoint order"], Module]];
   If[kind === "Transport",
+    If[KeyExistsQ[payload, "DivisionOrder"] &&
+        payload["DivisionOrder"] =!= divisionOrder,
+      Return[ladderCheckpointReject[file,
+        "DivisionOrder does not match"], Module]];
+    If[KeyExistsQ[payload, "RadiusOfConvergence"] &&
+        payload["RadiusOfConvergence"] =!= radiusOfConvergence,
+      Return[ladderCheckpointReject[file,
+        "RadiusOfConvergence does not match"], Module]];
+    If[KeyExistsQ[payload, "ValueTransportMode"] &&
+        payload["ValueTransportMode"] =!= Environment["DE2_VALUE_TRANSPORT"],
+      Return[ladderCheckpointReject[file,
+        "DE2_VALUE_TRANSPORT mode does not match"], Module]];
     belowData = data["Levels"][level - 1];
     mastersBelow = belowData["Masters"];
     currentRequests =
@@ -309,7 +346,8 @@ printRows[example_, level_, masters_, rawES_List, prefactors_] := Module[{},
    Assemble the scalar combination first: testing each master separately
    rejects legitimate cancellations between endpoint-singular terms. *)
 limitCombined[tres_, cvec_, var_] := Module[
-  {ls = tres["Final"], pieces = {}, active = {}, scalar},
+  {ls = tres["Final"], pieces = {}, active = {}, scalar, scale},
+  scale = ls["ChartMap", "Scale"];
   Do[Module[{cc = cvec[[j]], lsP, lsM},
     If[!PossibleZeroQ[Together[cc]],
       If[Environment["DEBUG_LI"] === "1",
@@ -318,7 +356,7 @@ limitCombined[tres_, cvec_, var_] := Module[
         Join[#, <|"Coeffs" -> #["Coeffs"][[All, All, {j}]]|>] &,
         ls["Sectors"]]|>];
       lsM = DiffExp2`SectorSeries`MultiplyRational[lsP,
-        Together[cc /. var -> ls["Center"] + Global`t], Global`t];
+        Together[cc /. var -> ls["Center"] + scale*Global`t], Global`t];
       AppendTo[pieces, lsM]; AppendTo[active, j]]],
     {j, Length[cvec]}];
   If[pieces === {}, Return[DiffExp2`EpsSeries`ESZero[
@@ -434,10 +472,13 @@ runExample[name_String] := Module[
     catch2[DiffExp2`Config`LoadConfiguration[{
       "WorkingPrecision" -> wp, "ExpansionOrder" -> levelExpansionOrder,
       "EpsilonOrder" -> (esCMxLevel = requestedEpsilonOrder[level]),
-      "DivisionOrder" -> 4,
-      (* classic stride: the Automatic wide strides broke sunrise (zero
-         result, collapsed window) - investigate before enabling *)
-      "StepDivisionOrder" -> stepDivisionOrder, "Variables" -> {}}]];
+      "DivisionOrder" -> divisionOrder,
+      "RadiusOfConvergence" -> radiusOfConvergence,
+      (* The restored classic predivision planner couples placement and
+         matching: adjacent regular segments meet at +1/k and -1/k. *)
+      "StepDivisionOrder" -> stepDivisionOrder,
+      "DeltaPrescriptions" -> levelDeltaPrescriptions[var, sys, extraFacs],
+      "Variables" -> {}}]];
     (* ONE two-way transport per level serves every master: precompute the
        chart chain + the two endpoint transports *)
     If[resumeTransport,
@@ -482,6 +523,9 @@ runExample[name_String] := Module[
         "ExtraSingularFactors" -> extraFacs, "ChartCache" -> chartCache,
         "TransportLow" -> trLoCache, "TransportHigh" -> trHiCache,
         "Anchor" -> anchor, "WorkingPrecision" -> wp,
+        "DivisionOrder" -> divisionOrder,
+        "RadiusOfConvergence" -> radiusOfConvergence,
+        "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
         "EpsilonOrder" -> epsOrder,
         "BoundaryExtraOrder" -> boundaryExtraOrder,
         "LevelEpsilonHalos" -> levelEpsilonHalos,

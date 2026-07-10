@@ -122,7 +122,7 @@ Int = Integrate.m, API = API.m.
 |---|---|---|---|---|
 | RelateLines | DiffExp/LineSegmentation.m:9 | no | yes(1) | absorbed → Tr (chart-map relation between adjacent segments; chart maps are recorded on LocalSolution per §3.1) |
 | RelateLinesPoint | DiffExp/LineSegmentation.m:10 | no | no | absorbed → Tr (point variant of the same) |
-| FindMatrixSingularities | DiffExp/LineSegmentation.m:11 | no | no | absorbed → Tr (exact singularity solve incl. complex roots, §3.2 Transport.m; the Re/Re±Im ghost projection at LineSegmentation.m:81-99 is REPLACED by true complex distance — ledger item) |
+| FindMatrixSingularities | DiffExp/LineSegmentation.m:11 | no | no | absorbed → Tr (exact complex roots determine true radii; suppressed Re/Re±Im projections remain regular predivision waypoints for symmetric matching — ledger L26) |
 | GetLargestTerm | DiffExp/LineSegmentation.m:12 | no | no | absorbed → Tr (coupling-depth-discounted magnitude probe feeding the error estimate; reads order ExpansionOrder−ISafetyExpansionSubtract−(MaxCouplingOrder−1) at LineSegmentation.m:109-113 — the TWindow lesson) |
 | GetMatricesPrecisionDistance | DiffExp/LineSegmentation.m:13 | no | no | dropped (Dynamic segmentation strategy only; v1 is Predivision-only per §3.2 Config.m) |
 | CheckBoundaryConditionsAndReparametrize | DiffExp/LineSegmentation.m:14 | no | no | absorbed → API (TransportTo/PrepareBoundaryConditions input validation and bcs-line reparametrization) |

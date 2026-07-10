@@ -384,7 +384,7 @@ TRUNCATION CONTRACT (math-review finding 12 — this is the load-bearing part):
   form |ĉ_N| q^(N+1)/(1-q) holds with ĉ_N = c'_N rho^N; the implementation
   must use whichever form matches its stored coordinate.  This is the
   geometric tail at the DESIGN evaluation radius rho/DivisionOrder
-  (DivisionOrder from Config; FT pins 4).  The geometric model (|c'_n| ~
+  (DivisionOrder from Config; FT defaults to 3).  The geometric model (|c'_n| ~
   rho^-n, top kept coefficient representative) is valid because RoC chart
   rescaling keeps high-order coefficients O(1) (ledger lesson; banana
   requires RoC = 10).  These estimates are ADDED per eps order into
@@ -524,10 +524,10 @@ DEC-9/DEC-16/DEC-18 — normative)
       "Center" -> exact x0, "ChartMap" -> AFFINE ONLY (DEC-18: Mobius is
                   dropped from the new core entirely; RoC chart rescaling is
                   an affine rescaling and is kept),
-      "Radius" -> distance to nearest singularity IN THE COMPLEX PLANE
-                  (complex singularities are real: pentagon/unequal-mass
-                  lines have them; old code projects ghosts Re, Re±Im —
-                  ledger item; new code uses true complex distance),
+      "Radius" -> distance to nearest true singularity expressed in the
+                  local affine chart coordinate t (physical distance divided
+                  by ChartMap["Scale"]; restored Re, Re±Im points determine
+                  the affine scale but are regular planner waypoints),
       "Sectors" -> { Sector.. },
       "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
       "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* the truncation-order

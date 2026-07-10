@@ -41,7 +41,8 @@ FT_EXPANSION_ORDER=50 \
 FT_EPS_ORDER=0 \
 FT_BOUNDARY_EXTRA_ORDER=4 \
 FT_LEVEL_EPS_HALOS=0 \
-FT_STEP_DIVISION_ORDER=4 \
+FT_DIVISION_ORDER=3 \
+FT_RADIUS_OF_CONVERGENCE=1 \
 wolframscript -file Scripts/run_ft_stepwise2.m
 ```
 
@@ -50,10 +51,14 @@ are `bubble`, `sunrise`, `banana`, `box`, `pentagon`, `box_bubble`,
 `box_triangle`, and `double_box_planar`.  The other variables set the working
 precision, local expansion order, requested epsilon order, extra epsilon
 orders retained at level boundaries, optional comma-separated per-level
-epsilon halos (levels listed from 1 upward), and classic transport stride,
-respectively.  A halo computes extra internal coefficients without raising
-the downstream requested order; it compensates only certified finite-window
-losses such as analytic log/Laurent basis width. `DE2_VALUE_TRANSPORT=1` opts
+epsilon halos (levels listed from 1 upward), the classic coupled
+predivision/matching divisor, and the affine chart-coordinate radius,
+respectively. Adjacent regular charts meet at
+`+1/DivisionOrder` and `-1/DivisionOrder`; the runner overrides a differing
+legacy `FT_STEP_DIVISION_ORDER` value. A halo computes extra internal
+coefficients without raising the downstream requested order; it compensates
+only certified finite-window losses such as analytic log/Laurent basis
+width. `DE2_VALUE_TRANSPORT=1` opts
 into the experimental regular-chart
 value-transport path.  It is a prototype, is off by default, and retains its
 safety fallbacks to basis transport.

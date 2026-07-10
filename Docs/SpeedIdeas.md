@@ -1,5 +1,62 @@
 # SpeedIdeas: measured per-chart profile and ranked levers
 
+## 2026-07-10 integration coefficient-frame fast path
+
+Two algebraic changes remove the current integration bottleneck without
+changing WorkingPrecision, ExpansionOrder, epsilon windows, or tolerances:
+
+1. `IntegrateLocalSolution` computes each primitive term's honest product
+   window, takes the sum intersection once, and accumulates all finite Cauchy
+   products directly into coefficient slabs.  This replaces one
+   `ESNew`/`ESTimes`/ever-growing `ESAdd` chain per
+   `(sector,Taylor-order,component)`.
+2. `antiderivativeAtLog` now emits the coefficients of
+   `Exp[b eps Log T] (m+1+b eps)^(-j-1)` directly from the finite binomial
+   convolution.  It is algebraically identical to the former repeated
+   `ESInvert`/`ESTimes` tower.  Same-sign `m=-1,b!=0` bounds use the manifestly
+   combined interval formula, as required by `Integrate.md` 2.2.1, so no
+   artificial Laurent row or CompleteMax loss is introduced.
+
+Measured with the committed `Scripts/bench_chart.m` fixtures at WP120,
+EO40, epsilon order 5, three repetitions/minimum:
+
+| fixture/phase | pre-change s | direct slabs s | direct primitive s | total speedup |
+|---|---:|---:|---:|---:|
+| sunrise cold integrate | 0.435663 | 0.313533 | 0.029059 | 14.99x |
+| sunrise warm integrate | 0.148134 | 0.024243 | 0.024288 | 6.10x |
+| banana cold integrate | 0.607841 | 0.324169 | 0.032313 | 18.81x |
+| banana warm integrate | 0.322845 | 0.028576 | 0.027656 | 11.67x |
+| banana sliced scalar unit | 0.071462 | 0.029918 | 0.029073 | 2.46x |
+
+On the saved production L2 checkpoint (WP1000, EO100, unchanged halo and
+tolerances), banana master 1 fell from 213.6 s to 57.7 s: **3.70x
+end-to-end** including all rational multiplications and 36-tile API overhead.
+The exact differential coverage is in `Tests/test_integrate_fastpath.m`:
+40 randomized honest-window contractions, 42 direct-vs-legacy primitive
+cases, symbolic/arbitrary-precision inputs, exact-zero window constraints,
+and same-sign analytically regularized pole sectors on both arms through log
+depth 3.
+
+## 2026-07-10 regular match-frame normalization
+
+The restored `+1/DivisionOrder` / `-1/DivisionOrder` geometry removed the
+excess segment count, but the WP1000 banana trace exposed a second,
+independent conditioning cost: each fundamental basis is center-normalized,
+while its weights are solved at the incoming edge.  The raw regular-chart
+frame lost about 60–90 digits at every match and reached segment 9 with only
+about seven digits, even though its epsilon lattice and truncation tail were
+certified.
+
+After lattice saturation, regular charts now use the constant right action
+`P = F_eps0^-1` at the match point.  The transformed LocalSolutions are
+re-evaluated and must pass identity, window, and repeat-saturation proofs.
+This consumes no epsilon order and does not change tags or prescriptions.
+On the same saved level-1 boundary, the observed per-match loss fell to about
+28–35 digits; segment 9 entered with 391.8 digits and its weights retained
+361.0 digits, clearing the former failure.  Singular/resonant frames retain
+the existing saturated Laurent path to avoid forcing their unequal tagged
+windows to a common top.
+
 Date: 2026-06-12.  Baseline: master 1ce6038 (M5g-8).  Companion to
 Docs/PerfGapAnalysis.md (structural old-vs-new analysis; its lever 1 —
 value-vector transport — is being landed separately and is NOT

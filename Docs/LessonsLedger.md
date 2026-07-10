@@ -428,10 +428,11 @@ divergent partial sums with no real singularity in sight.  Pentagon and the
 unequal-mass banana Kallen denominators put complex roots on generic lines.
 The projection is the old code's approximation of "radius = distance in the
 complex plane".
-DISPOSITION: subsumed-by-complex-radius (plan 3.1: Radius = true complex
-distance; segmentation solves exact roots incl. complex; ghost CHARTS
-disappear, but the suppression lesson survives as "complex roots influence
-radius only, never indicial structure") — implement-in-Transport.m.
+DISPOSITION: split-and-preserved. `Radius` uses the true complex distance,
+while the suppressed Re, Re±|Im| points remain regular real waypoints for
+the exact GetCPL/GetCPR +1/k/-1/k geometry.  They never acquire indicial or
+branch-point semantics.  The attempted deletion caused the banana planner
+to replace this conditioning construction with excessive one-sided matches.
 
 ### L27 DivisionOrder controls THREE things; the match point must satisfy BOTH adjacent charts
 WHAT: k = DivisionOrder governs (a) the evaluation/matching point at chart
@@ -458,10 +459,12 @@ WHY: With chart radius r != 1, coefficient c_n ~ r^-n; at order 50+ this
 overflows/underflows the working precision budget and poisons Pade and
 matching.  Rescaling normalizes the geometric growth so coefficients stay
 O(1).
-DISPOSITION: implement-in-Transport.m (chart coordinate normalized so the
-local radius is O(1) ALWAYS, automatically — not a user knob; keep the
-config key accepted for compatibility, mapped or ignored with a note in
-Config.md).
+DISPOSITION: implemented in Transport.m.  For the affine chart
+`x = center + Scale t`, use
+`Scale = projectedGeometryRadius/RadiusOfConvergence`; keep the true complex
+physical radius separately and expose `LocalRadius = physicalRadius/Scale`
+to Solve/SectorSeries.  Every transport delta is divided by the owning
+scale, and LineIntegral includes `dx = Scale dt` exactly.
 
 ### L29 Mobius charts: needed for classic lines, forbidden for integration
 WHAT: UseMobius -> True maps (prev sing, center, next sing) -> (-1, 0, +1)
@@ -1674,6 +1677,8 @@ DEBUG_POWER_COEFF, DEBUG_SECTOR_FIT (Recurrence.m:643-648, 673-685;
 ResonantRecurrence.m:1130-1135; RegularizedIntegration.m:1013-1097);
 $LogStrategyDispatch trace (Dispatch.m:61-85); $DebugFuchsianizedCheck /
 $DebugBlockResidualSeries self-checks (ResonantRecurrence.m:1387-1457);
+DiffExp2 `DEBUG_CHART` timing and `DEBUG_MATCHACC` coefficient-accuracy
+traces (both off by default);
 FT_INTEGRATION_POLE_ALLOWANCE, FT_SAVE_TRANSPORT_DIR,
 FT_STOP_AFTER_BOUNDARY_LEVEL (runner).
 WHY: The dump-replay loop (capture once, iterate in seconds without the
@@ -1694,6 +1699,24 @@ WHY: With a single kernel and multi-hour runs, a post-mortem inspectable
 context is the difference between one debug cycle and five.
 DISPOSITION: implement-in-API.m (structured error objects carrying context —
 the plan's "fail loudly naming (chart, sector, order)" plus payload).
+
+### L107 Normalize regular matching frames at epsilon order zero
+WHAT: After epsilon-lattice saturation, a regular chart's evaluated
+fundamental matrix can still be badly conditioned solely because its columns
+were normalized at the chart center and are being matched near an edge.  Use
+the local epsilon-independent right action `P = F_eps0^-1`, re-evaluate the
+actual transformed LocalSolutions, and require the new leading value matrix
+to be the identity.
+WHY: In the unequal-mass banana level-1 march, the unnormalized frame lost
+roughly 60–90 digits per ordinary match and reached the ninth chart with only
+about seven digits.  Constant normalization reduced the observed loss to
+roughly 28–35 digits per chart and crossed that seam with about 361 digits.
+This is a basis-conditioning artifact, not a physical loss and not an
+epsilon-adic rank defect.  An epsilon-independent GL action preserves whole
+fractional/log sectors, prescriptions, valuations, and honest windows.
+DISPOSITION: implement-in-Transport.m for ODE-regular charts, locally after
+cache retrieval.  Certify `F_eps0.P == I`, re-evaluate, rerun saturation,
+preserve shared CompleteMax, and never threshold small entries of `P`.
 
 ---
 

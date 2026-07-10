@@ -13,7 +13,7 @@ FindSingularities::usage = "FindSingularities[sys] gives <|\"All\", \"Real\", \"
 ChartRadius::usage = "ChartRadius[center, allSingularities] gives the exact/numeric complex-plane distance to the nearest OTHER singularity.";
 SegmentLine::usage = "SegmentLine[sys, {from, to}] gives the SegmentPlan: charts, radii, match points, digit budget.";
 TransportLine::usage = "TransportLine[sys, boundary, plan] runs the marching loop and returns the TransportResult.";
-ValidatePlan::usage = "ValidatePlan[plan] statically audits the chart chain: every incoming match point (the shared chartMatchPoint formula) must lie strictly inside the producing chart's disk, singular handoffs must be geometrically possible. Loud E8 on violation; returns the plan.";
+ValidatePlan::usage = "ValidatePlan[plan] statically audits the chart chain: every incoming match point (the shared chartMatchPoint formula) must lie inside both adjacent physical disks and their half-radius error-probe envelopes; singular handoffs must approach from the correct side. Loud E8 on violation; returns the plan.";
 MatchWeights::usage = "MatchWeights[basisValues, incoming, label] solves the eps-graded (Laurent) weight system with loud residual asserts.";
 ApplyCrossing::usage = "ApplyCrossing[ls, sigma] applies the crossing operator (phase times unipotent log-chain mixing) so the far side evaluates at positive chart coordinate.";
 SegmentErrorProbe::usage = "SegmentErrorProbe[ls, tOut, couplingDepth] gives the full-vs-reduced evaluation error per eps order.";
@@ -46,6 +46,23 @@ esCM = DiffExp2`EpsSeries`ESCompleteMax;
 (* Stable true modulus shared by all coefficient/residual decisions. *)
 numMag = DiffExp2`Tolerances`NumericMagnitude;
 numMagBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
+(* Numerically compare algebraic points by evaluating each endpoint first.
+   N[a-b] can demand thousands of extra digits merely to recognize a close
+   cancellation between two different Root representations (N::meprec),
+   even though the planner only needs a stable 40-digit distance. *)
+numericDistance[a_, b_, digits_Integer:40] := Module[{delta, value},
+  If[FreeQ[{a, b}, _?InexactNumberQ],
+    delta = Quiet[RootReduce[Together[a - b]]];
+    If[delta === 0, Return[0, Module]];
+    value = Quiet[Check[Block[{$MaxExtraPrecision = Max[1000,
+          2*DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]]},
+        N[Abs[delta], digits]], $Failed]];
+    If[value === $Failed || !NumericQ[value],
+      err["E8", <|"PointA" -> a, "PointB" -> b,
+        "ExactDifference" -> delta,
+        "Detail" -> "could not resolve an exact algebraic planner distance"|>]];
+    value,
+    Abs[N[a, digits] - N[b, digits]]]];
 
 (* Pipeline numeric handoff: evaluated VALUES entering the matching seam
    numericize at 2x WP — the pinned $InputPrecisionFactor policy and the
@@ -94,17 +111,67 @@ valueCenterMargin[expansionOrder_Integer] := Min[9/10,
 
 (* ---- 2.1 singularities ---- *)
 
+projectComplexRoots[all_List] := Module[{data, projected},
+  (* Port the old DiffExp ghost-waypoint construction faithfully, but keep
+     the true complex roots as the sole convergence-radius alphabet.  For a
+     conjugate pair z=re+/-i h this contributes the real waypoints
+     re-h,re,re+h unless another singularity's real projection already lies
+     in the corresponding open strip.  These are REGULAR chart centers, not
+     fake poles; they stabilize the real march around a nearby complex pair
+     and carry no indicial/branch semantics of their own. *)
+  data = Map[Function[root, Module[{z = root, re, im, h},
+      re = RootReduce[(z + Conjugate[z])/2];
+      im = RootReduce[(z - Conjugate[z])/(2 I)];
+      h = If[TrueQ[N[im, 50] < 0], -im, im];
+      {z, re, h, N[re, 50], Abs[N[h, 50]]}]], all];
+  projected = Flatten[Map[Function[row, Module[{re = row[[2]], h = row[[3]],
+        reN = row[[4]], hN = row[[5]], leftOccupied, rightOccupied},
+      If[TrueQ[PossibleZeroQ[h]], {re},
+        leftOccupied = AnyTrue[data,
+          Function[other, TrueQ[reN - hN < other[[4]] < reN]]];
+        rightOccupied = AnyTrue[data,
+          Function[other, TrueQ[reN < other[[4]] < reN + hN]]];
+        Join[If[leftOccupied, {}, {RootReduce[re - h]}], {re},
+          If[rightOccupied, {}, {RootReduce[re + h]}]]]]], data]];
+  Sort[DeleteDuplicates[projected,
+      TrueQ[PossibleZeroQ[RootReduce[#1 - #2]]] &],
+    N[#1, 50] < N[#2, 50] &]];
+
 FindSingularities[sys_Association] := Module[
-  {var = sys["Variable"], facs, extra, all, roots},
+  {var = sys["Variable"], facs, extra, all, roots, real},
   facs = Lookup[sys, "SingularFactors", {}];
   extra = Lookup[sys, "ExtraSingularFactors", {}];
   facs = DeleteDuplicates[Join[facs, extra]];
   roots = Map[# -> DeleteDuplicates[var /. Solve[# == 0, var]] &, facs];
   all = DeleteDuplicates[Flatten[Last /@ roots],
     TrueQ[PossibleZeroQ[RootReduce[#1 - #2]]] &];
+  real = Select[all, zeroQ[Im[RootReduce[#]]] &];
   <|"All" -> all,
-    "Real" -> Select[all, zeroQ[Im[RootReduce[#]]] &],
+    "Real" -> real,
+    "Projected" -> projectComplexRoots[all],
     "Factors" -> Association[roots]|>];
+
+chartPrescriptions[center_, var_Symbol] := Module[
+  {entries = cfg["DeltaPrescriptions"], t = Global`t, out = {}},
+  Do[Module[{poly = entry[[1]], sign = entry[[2]], shifted, mult, lead,
+      leadSign},
+    shifted = Together[poly /. s_Symbol /;
+        SymbolName[s] === SymbolName[var] :> center + t];
+    If[zeroQ[shifted /. t -> 0],
+      If[!PolynomialQ[shifted, t],
+        err["E8", <|"Center" -> center, "Factor" -> poly,
+          "Detail" -> "prescription did not become a polynomial in the chart coordinate"|>]];
+      mult = Exponent[shifted, t, Min];
+      lead = RootReduce[Coefficient[shifted, t, mult]];
+      leadSign = Sign[lead];
+      If[!MemberQ[{1, -1}, leadSign],
+        err["E8", <|"Center" -> center, "Factor" -> poly,
+          "LeadingCoefficient" -> lead,
+          "Detail" -> "could not derive a real nonzero leading-coefficient sign for DeltaPrescriptions"|>]];
+      AppendTo[out, <|"Factor" -> poly, "Sign" -> sign,
+        "Multiplicity" -> mult, "LeadingCoeffSign" -> leadSign|>]]],
+    {entry, entries}];
+  out];
 
 ChartRadius[center_, all_List] := Module[
   {others = Select[all, !TrueQ[PossibleZeroQ[RootReduce[# - center]]] &], diffs},
@@ -115,133 +182,87 @@ ChartRadius[center_, all_List] := Module[
       RootReduce[Abs[# - center]], numMag[# - center, 40]] &, others];
     Min[diffs]]];
 
+simpleProjectionWaypoints[projected_List, real_List, lineCap_] := Module[
+  {pts},
+  pts = Map[Function[p,
+    If[AnyTrue[real, Function[r,
+        TrueQ[PossibleZeroQ[RootReduce[r - p]]]]], p,
+      Module[{seps, tol, cand},
+        seps = Select[numericDistance[p, #, 40] & /@ projected, # > 0 &];
+        tol = Min[N[lineCap, 40], If[seps === {}, N[lineCap, 40], Min[seps]]]/64;
+        cand = Rationalize[N[p, 30], tol];
+        If[AnyTrue[real, Function[r,
+            TrueQ[PossibleZeroQ[RootReduce[r - cand]]]]],
+          Rationalize[N[p, 30], tol/64], cand]]]], projected];
+  Sort[DeleteDuplicates[pts,
+      TrueQ[PossibleZeroQ[RootReduce[#1 - #2]]] &],
+    N[#1, 40] < N[#2, 40] &]];
+
+projectionRadius[center_, projected_List, lineCap_] := Module[{others},
+  others = Select[projected,
+    !TrueQ[PossibleZeroQ[RootReduce[# - center]]] &];
+  If[others === {}, lineCap,
+    Min[lineCap, Min[RootReduce[Abs[# - center]] & /@ others]]]];
+
+(* Matching and the error probe share one hard geometric envelope.  Keep the
+   old projected-geometry 1/k point whenever it lies within half of the true
+   complex convergence radius; k=2 plus rationalized algebraic projections
+   can differ by a tiny amount, in which case the true half-radius wins. *)
+matchOffset[matchRadius_, trueRadius_, k_Integer] :=
+  Block[{$MaxExtraPrecision = Max[1000,
+      2*DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]]},
+  Quiet[Module[{projected = RootReduce[matchRadius/k],
+      cap = RootReduce[trueRadius/2], delta, numericDelta},
+    delta = RootReduce[cap - projected];
+    Which[
+      delta === 0, projected,
+      TrueQ[Quiet[Sign[delta]] === 1], projected,
+      TrueQ[Quiet[Sign[delta]] === -1], cap,
+      True,
+      numericDelta = Quiet[Check[Block[{
+          $MaxExtraPrecision = Max[1000,
+            2*DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]]},
+          N[delta, DiffExp2`Tolerances`$InputPrecisionFactor*
+            cfg["WorkingPrecision"]]], $Failed]];
+      Which[TrueQ[numericDelta > 0], projected,
+        TrueQ[numericDelta < 0], cap,
+        True, err["E8", <|"MatchRadius" -> matchRadius,
+          "TrueRadius" -> trueRadius, "DivisionOrder" -> k,
+          "Difference" -> delta,
+          "Detail" -> "could not decide projected 1/k versus true half-radius match bound"|>]]]]]];
+
 (* ---- 2.4 GetCPL/GetCPR geometry ---- *)
 
-(* stepDivisor: the chart PLACEMENT stride divisor k_eff (<= DivisionOrder
-   k when Automatic).  Two distinct roles were coupled in one k:
-     (a) the MATCH-POINT ratio: match points sit at radius/k — truncation
-         tail there is (1/k)^(ExpansionOrder+1) ((1/4)^41 ~ 1e-25 at the FT
-         defaults k = 4, ExpansionOrder = 40: ~11 decades of headroom below
-         the 1e-14 design line);
-     (b) the STRIDE: marching toward a dominating singularity, radius s and
-         step g = s/k_eff satisfy s = (distance) - g, so the remaining
-         distance shrinks by r = k_eff/(1+k_eff) per chart and the chart
-         count grows like log(d0/dstop)/log((1+k_eff)/k_eff) — k = 4 gives
-         r = 4/5 and ~10.3 charts per decade of approach; LARGER divisors
-         mean MORE charts.
-   Decoupling: placement uses k_eff <= k (bigger steps), match points keep
-   radius/k.  Evaluation-ratio inventory under the nextCenter invariants
-   (G1)+(G2) below, each ratio in units of the OWNING chart's radius:
-     - incoming match point in the new chart:            1/k
-     - incoming match point in the PREVIOUS chart:      <= ~0.41
-       ((G2) clamps h = g - R_new/k <= (9/10) clamp prevRad directly,
-       clamp = Max[1/(2 k_eff), 1/k]; the h < 0 side is <= prevRad/(k-1))
-     - LineIntegral tile edges (midpoints between centers, API.m):
-       backward edge g/(2 R_new) <= 1/(2 k_eff) when (G1) holds
-       (R_new >= k_eff g); in the back-binding case R_new >= g keeps it
-       <= 1/2 — the SAME class the old geometry produced next to singular
-       charts; forward edge g/(2 prevRad) <= ~0.41 by (G2) + the
-       1-Lipschitz bound R_new <= prevRad + g
-   so the controlled worst ratio is ~Max[1/(2 k_eff), 1/k, 0.41-class] and
-   the per-evaluation tail is ratio^(ExpansionOrder+1).  Automatic picks
-   the largest stride whose 1/(2 k_eff) ratio keeps that tail below 1e-14,
-     k_eff = Min[k, Max[5/4, ceil16(10^(14/(eo+1))/2)]]
-   (ceil16 = round UP to sixteenths; the 5/4 floor is where the 0.41-class
-   ratios stop improving).  At eo = 40 this gives 5/4: controlled ratios
-   <= 0.41, tails <= 0.41^41 ~ 1.3e-16, and the approach ratio drops from
-   4/5 to 5/9 — ln(9/5)/ln(5/4) ~ 2.6x fewer marching charts per decade.
-   At eo <= ~14 the formula exceeds k and the Min restores the classic
-   coupled geometry exactly.  TransportLine's SegmentErrorProbe probes at
-   the design ratio Max[1/(2 k_eff), 1/k], so the accumulated error
-   accounting sees these wider handoffs honestly. *)
-stepDivisor[k_] := Module[{raw = cfg["StepDivisionOrder"], eo},
-  eo = cfg["ExpansionOrder"];
-  If[raw === Automatic,
-    Min[k, Max[5/4, Ceiling[N[8*10^(14/(eo + 1)), 20]]/16]],
-    raw]];
-
-(* nextCenter: place the next chart center marching dir-ward from xb.
-   k = match-point divisor (DivisionOrder), keff = stepDivisor stride
-   divisor, prevRad = the previous chart's (line-capped) radius,
-   matchTarget = the current target's incoming match point, lineCap = the
-   2|to - from| radius cap used throughout SegmentLine. *)
-nextCenter[xb_, sings_, dir_, k_, keff_, allSings_, prevRad_, matchTarget_,
-    lineCap_] := Module[
-  {caps, zcap, s, g, xnew, rad, radC, clamp, h, tgtGap, it},
-  (* nearest real on-path singularity ahead *)
-  caps = Select[sings, TrueQ[dir*(N[#, 40] - N[xb, 40]) > 0] &];
-  zcap = If[caps === {}, dir*Infinity,
-    First[SortBy[caps, Abs[N[# - xb, 40]] &]]];
-  If[zcap === dir*Infinity,
-    (* unbounded: fixed stride scale of |xb| or 1 *)
-    s = Max[1, Abs[xb]]/2,
-    (* dominated march: radius s touches the cap and xb sits at s/keff of
-       the new chart; remaining distance shrinks by keff/(1+keff) *)
-    s = keff*Abs[N[zcap - xb, 40]]/(1 + keff)];
-  g = s/keff;
-  (* never step past the target's incoming match point: the cover test and
-     the endpoint handoff assume |matchTarget - center| <= radius-scale *)
-  tgtGap = dir*(N[matchTarget, 40] - N[xb, 40]);
-  If[TrueQ[tgtGap > 0] && TrueQ[g > tgtGap], g = tgtGap; s = keff*g];
-  xnew = xb + dir*g;
-  (* (G1) complex-distance cap, ITERATED toward its fixed point rad >= s
-     (i.e. R_new >= keff*g; the old one-shot re-solve could leave
-     rad << s).  The contraction g <- rad/(1+keff) converges only when the
-     binding singularity lies AHEAD (rad grows as g shrinks).  When it lies
-     BEHIND xb (receding from a just-crossed singular chart) rad ~ u_b + g
-     SHRINKS with g and the iteration would contract g to 0 — there
-     R_new >= keff*g is unsatisfiable for keff > 1, so STOP at the first
-     non-improving contraction and accept the back-binding placement:
-     R_new >= g keeps the backward tile edge <= 1/2 (the pre-existing class
-     next to singular charts) and (G2) below enforces the honest handoff
-     bound, which also caps the forward edge in the 0.41 class. *)
-  rad = ChartRadius[xnew, allSings];
-  it = 0;
-  While[TrueQ[N[rad, 40] < N[s, 40]] && it < 10,
-    (* iterate NUMERICALLY: intermediate placements are choices, and exact
-       algebraic intermediate centers would drag ChartRadius into
-       RootReduce algebra; only the final center is (coarsely) exact *)
-    Module[{s2 = keff*N[rad, 40]/(1 + keff), g2, x2, rad2},
-      g2 = s2/keff; x2 = N[xb, 40] + dir*g2;
-      rad2 = ChartRadius[x2, allSings];
-      If[TrueQ[N[rad2, 40] < N[rad, 40]], Break[]];
-      s = s2; g = g2; xnew = x2; rad = rad2];
-    it++];
-  (* (G2) prev-disk clamp: the new chart's incoming match point
-     xnew - dir*Radius/k is where the PREVIOUS solution gets evaluated; it
-     must sit well inside the previous disk.  Enforce directly:
-       h := g - Radius/k <= (9/10)*clamp*prevRad,
-       clamp = Max[1/(2 keff), 1/k]
-     (the 9/10 absorbs the coarse center rationalization below; the h < 0
-     side needs no clamp: h < 0 forces g < prevRad/(k-1), so
-     |h| <= R_new/k <= (prevRad + g)/k stays in the 1/(k-1) class).  h is
-     increasing in g with slope in [1 - 1/k, 1 + 1/k] (ChartRadius is
-     1-Lipschitz), so the unit-slope Newton step contracts the excess by a
-     factor <= 1/k; shrinking g preserves (G1) because s = keff*g falls at
-     least as fast as rad (keff >= 1).  Uses the line-CAPPED radius radC:
-     that is the radius attached downstream, hence the actual match-point
-     offset.  With keff = k the dominated march has h = 0 exactly and the
-     clamp is inert (classic behavior). *)
-  clamp = Max[1/(2*keff), 1/k];
-  radC = Min[rad, lineCap];
-  h = N[g - radC/k, 40];
-  it = 0;
-  While[TrueQ[h > (9/10)*clamp*N[prevRad, 40]] && it < 8,
-    g = g - (h - (9/10)*clamp*N[prevRad, 40]);
-    s = keff*g; xnew = xb + dir*g;
-    rad = ChartRadius[xnew, allSings]; radC = Min[rad, lineCap];
-    h = N[g - radC/k, 40]; it++];
-  (* exact-ify the center COARSELY: the center is a placement CHOICE; a
-     simple nearby rational keeps Indicial's exact algebra on small
-     fractions (20-digit-denominator centers ground PossibleZeroQ into
-     meprec storms).  Geometry self-corrects: the true radius and match
-     point are recomputed from the actual center downstream.  Tolerance
-     g/8 equals the former s/(8k) at keff = k. *)
-  xnew = Module[{cand = Rationalize[N[xnew, 20], Abs[N[g, 20]]/8]},
-    (* never land ON a singularity *)
-    If[AnyTrue[allSings, TrueQ[PossibleZeroQ[RootReduce[# - cand]]] &],
-      Rationalize[N[xnew, 20], Abs[N[g, 20]]/64], cand]];
-  xnew];
+(* Exact port of the old non-Mobius GetCPL/GetCPR construction.  Let xb be
+   the current chart center and r its projected-real geometry radius.  The
+   outgoing point is q=xb+dir r/k.  The next center is chosen so q is also
+   exactly centerNext-dir rNext/k.  Thus every regular-to-regular match is
+   evaluated at +1/k in the producing segment and -1/k in the receiving
+   segment, instead of accumulating one-sided, ill-conditioned matches. *)
+classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
+    matchTarget_] := Module[
+  {r, q, left, right, steps, g, xnew, targetGap},
+  r = projectionRadius[xb, projected, lineCap];
+  q = xb + dir*r/k;
+  left = Select[projected, TrueQ[N[# - q, 40] < 0] &];
+  right = Select[projected, TrueQ[N[# - q, 40] > 0] &];
+  left = If[left === {}, -Infinity, Last[left]];
+  right = If[right === {}, Infinity, First[right]];
+  steps = If[dir > 0,
+    DeleteCases[{If[right === Infinity, Infinity, (right - q)/(k + 1)],
+      If[left === -Infinity, Infinity, (q - left)/(k - 1)]}, Infinity],
+    DeleteCases[{If[left === -Infinity, Infinity, (q - left)/(k + 1)],
+      If[right === Infinity, Infinity, (right - q)/(k - 1)]}, Infinity]];
+  g = If[steps === {}, lineCap/k, Min[steps]];
+  xnew = q + dir*g;
+  targetGap = dir*N[matchTarget - xb, 40];
+  If[TrueQ[targetGap > 0] && TrueQ[dir*N[xnew - matchTarget, 40] >= 0],
+    xnew = matchTarget];
+  (* All non-real projections were simplified to nearby rationals above;
+     retain exact real singularities verbatim and keep ordinary centers in
+     the same small exact field as the old predivision formulas. *)
+  If[FreeQ[xnew, _?InexactNumberQ], RootReduce[xnew],
+    Rationalize[N[xnew, 30], Max[10^-30, Abs[N[g, 30]]/256]]]];
 
 (* singularMatchPoint: the incoming match point of a SINGULAR chart
    approached from the producing chart (prevCenter, prevRad) — the
@@ -296,11 +317,13 @@ singularMatchPoint[prevCenter_, prevRad_, z_, radTarget_, dir_] := Module[
    chart (None when the handoff is impossible -> E8 at the consumers). *)
 chartMatchPoint[None, chart_Association, from_, dir_, k_] := from;
 chartMatchPoint[prev_Association, chart_Association, from_, dir_, k_] :=
-  If[TrueQ[chart["Singular"]],
+  If[KeyExistsQ[chart, "IncomingMatchPoint"],
+    chart["IncomingMatchPoint"],
+    If[TrueQ[chart["Singular"]],
     singularMatchPoint[prev["Center"], prev["Radius"], chart["Center"],
       chart["Radius"], dir],
-    Module[{raw = chart["Center"] - dir*chart["Radius"]/k},
-      Rationalize[N[raw, 20], N[chart["Radius"], 20]/(100*k)]]];
+    chart["Center"] - dir*matchOffset[
+      Lookup[chart, "MatchRadius", chart["Radius"]], chart["Radius"], k]]];
 
 (* ---- 2.5 digit budget ---- *)
 
@@ -317,8 +340,9 @@ DigitBudget[ag_, nseg_Integer] := Module[{wp = cfg["WorkingPrecision"], dn, cd},
 (* ---- 2.3 segmentation ---- *)
 
 SegmentLine[sys_Association, {from_, to_}] := Module[
-  {sings, real, dir, k = cfg["DivisionOrder"], keff, charts, cur, interior,
-   endpointSingular, all, guard = 0, lineCap, prevRad},
+  {sings, real, projected, dir, k = cfg["DivisionOrder"], charts,
+   cur, interior, endpointSingular, all, guard = 0, lineCap, prevRad,
+   prevMatchRad, var = sys["Variable"]},
   sings = FindSingularities[sys];
   all = sings["All"]; real = sings["Real"];
   dir = Sign[to - from];
@@ -327,9 +351,9 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
   If[AnyTrue[real, TrueQ[PossibleZeroQ[RootReduce[# - from]]] &],
     err["E1", <|"From" -> from,
       "Detail" -> "transport FROM a singular point requires a singular boundary object (not supported in v1 marching start)"|>]];
-  keff = stepDivisor[k];
   lineCap = 2*Abs[to - from];
-  interior = Sort[Select[real, TrueQ[dir*(N[#, 40] - N[from, 40]) > 0] &&
+  projected = simpleProjectionWaypoints[sings["Projected"], real, lineCap];
+  interior = Sort[Select[projected, TrueQ[dir*(N[#, 40] - N[from, 40]) > 0] &&
       TrueQ[dir*(N[to, 40] - N[#, 40]) > 0] &], dir*N[#1 - #2, 40] < 0 &];
   (* the ANCHOR CHART sits exactly at `from` (regular by the check above):
      the boundary is matched at t = 0 — exact and perfectly conditioned —
@@ -339,9 +363,16 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
   charts = {<|"Center" -> from, "Singular" -> False|>};
   cur = from;
   prevRad = Min[ChartRadius[from, all], lineCap];
-  Module[{targets = Join[interior, {to}]},
-    Do[Module[{target = targets[[ti]], targetSingular, radTarget, matchTarget},
-      targetSingular = ti < Length[targets] || endpointSingular;
+  prevMatchRad = projectionRadius[from, projected, lineCap];
+  Module[{targets = Join[Map[Function[q, {q, AnyTrue[real,
+          Function[r, TrueQ[PossibleZeroQ[RootReduce[r - q]]]]]}], interior],
+        {{to, endpointSingular}}]},
+    Do[Module[{target = targets[[ti, 1]],
+        targetSingular = targets[[ti, 2]], forcedWaypoint,
+        radTarget, matchTarget},
+      forcedWaypoint = ti < Length[targets] ||
+        (!targetSingular && AnyTrue[projected,
+          TrueQ[PossibleZeroQ[RootReduce[# - target]]] &]);
       radTarget = Min[ChartRadius[target, all], lineCap];
       While[True,
         guard++;
@@ -355,7 +386,10 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
            Regular target: the endpoint itself. *)
         matchTarget = If[targetSingular,
           singularMatchPoint[cur, prevRad, target, radTarget, dir],
-          target];
+          If[forcedWaypoint,
+            target - dir*matchOffset[
+              projectionRadius[target, projected, lineCap], radTarget, k],
+            target]];
         (* cover check on the LAST placed chart: matchTarget within
            prevRad/k keeps the handoff evaluation in the design-ratio
            class in BOTH charts (clipped point: <= 1/k producing-side,
@@ -367,34 +401,102 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
            final evaluation on an uncrossed branch — keep one regular
            chart in between. *)
         If[matchTarget =!= None && !TrueQ[Last[charts]["Singular"]] &&
-           (TrueQ[Abs[N[matchTarget - cur, 40]] <= N[prevRad, 40]/k] ||
-            TrueQ[dir*(N[cur, 40] - N[matchTarget, 40]) >= 0]),
+           (TrueQ[numericDistance[matchTarget, cur, 40] <=
+                N[matchOffset[prevMatchRad, prevRad, k], 40]] ||
+            TrueQ[dir*(N[cur, 40] - N[matchTarget, 40]) >= 0]) &&
+           (!targetSingular ||
+             TrueQ[numericDistance[matchTarget, target, 40] <= N[radTarget, 40]/2]),
           If[targetSingular,
-            AppendTo[charts, <|"Center" -> target, "Singular" -> True|>]];
+            AppendTo[charts, <|"Center" -> target, "Singular" -> True,
+              "IncomingMatchPoint" -> matchTarget|>],
+            If[forcedWaypoint &&
+                !TrueQ[PossibleZeroQ[RootReduce[Last[charts]["Center"] - target]]],
+              AppendTo[charts, <|"Center" -> target, "Singular" -> False,
+                "IncomingMatchPoint" -> matchTarget|>]]];
           Break[]];
-        Module[{nxt},
-          nxt = nextCenter[cur, real, dir, k, keff, all, prevRad,
-            If[matchTarget === None, target - dir*radTarget/k, matchTarget],
-            lineCap];
-          AppendTo[charts, <|"Center" -> nxt, "Singular" -> False|>];
+        Module[{nxt, incoming, producerIncoming, receiverIncoming,
+            nxtMatchRad, nxtTrueRad, symmetric, receiverSafeQ,
+            clipRefinements = 0},
+          nxt = classicNextCenter[cur, projected, dir, k, lineCap,
+            If[matchTarget === None, target - dir*radTarget/k, matchTarget]];
+          nxtMatchRad = projectionRadius[nxt, projected, lineCap];
+          nxtTrueRad = Min[ChartRadius[nxt, all], lineCap];
+          producerIncoming = cur + dir*matchOffset[prevMatchRad, prevRad, k];
+          receiverIncoming = nxt - dir*matchOffset[
+            nxtMatchRad, nxtTrueRad, k];
+          receiverSafeQ[] :=
+            TrueQ[numericDistance[receiverIncoming, cur, 40] <=
+              N[matchOffset[prevMatchRad, prevRad, k], 40]] &&
+            TrueQ[numericDistance[receiverIncoming, cur, 40] < N[prevRad, 40]] &&
+            TrueQ[numericDistance[receiverIncoming, nxt, 40] <= N[nxtTrueRad, 40]/2];
+          (* classicNextCenter may clip its natural symmetric center to a
+             nearby target (notably the mandatory regular chart immediately
+             after a singular crossing).  The producer's old +R/k point then
+             belongs to the UNCLIPPED chart and can sit near/outside the new
+             receiver disk.  Recompute from the actual receiver's -R/k side.
+             If that point is not yet in the producer's design disk, insert a
+             midpoint chart and repeat; never store a stale pre-clip point. *)
+          If[TrueQ[PossibleZeroQ[Together[
+                producerIncoming - receiverIncoming]]] && receiverSafeQ[],
+            incoming = producerIncoming,
+            While[!receiverSafeQ[] && clipRefinements < 64,
+              nxt = RootReduce[(cur + nxt)/2];
+              nxtMatchRad = projectionRadius[nxt, projected, lineCap];
+              nxtTrueRad = Min[ChartRadius[nxt, all], lineCap];
+              receiverIncoming = nxt - dir*matchOffset[
+                nxtMatchRad, nxtTrueRad, k];
+              clipRefinements++];
+            If[!receiverSafeQ[],
+              err["E8", <|"CurrentCenter" -> cur,
+                "CurrentRadius" -> prevRad,
+                "CurrentMatchRadius" -> prevMatchRad,
+                "CandidateCenter" -> nxt,
+                "CandidateRadius" -> nxtTrueRad,
+                "CandidateMatchRadius" -> nxtMatchRad,
+                "CandidateIncomingPoint" -> receiverIncoming,
+                "Detail" -> "could not place a clipped receiver match point inside both adjacent design disks"|>]];
+            incoming = receiverIncoming];
+          symmetric = TrueQ[PossibleZeroQ[Together[
+              (incoming - cur)/prevMatchRad - dir/k]]] &&
+            TrueQ[PossibleZeroQ[Together[
+              (incoming - nxt)/nxtMatchRad + dir/k]]];
+          AppendTo[charts, <|"Center" -> nxt, "Singular" -> False,
+            "IncomingMatchPoint" -> incoming,
+            "SymmetricMatch" -> symmetric|>];
           cur = nxt;
-          prevRad = Min[ChartRadius[nxt, all], lineCap]]];
+          prevRad = Min[ChartRadius[nxt, all], lineCap];
+          prevMatchRad = nxtMatchRad]];
       cur = target;
-      If[targetSingular, prevRad = radTarget]],
+      prevRad = radTarget;
+      prevMatchRad = projectionRadius[target, projected, lineCap]],
       {ti, Length[targets]}]];
   (* attach radii, match points, names; radii capped at line scale
      (a validity bound: capping is conservative; uncapped Infinity poisons
      the match-point arithmetic on singularity-free systems) *)
-  charts = MapIndexed[Module[{c = #1, rad},
+  charts = MapIndexed[Module[{c = #1, rad, matchRad, scale, localRad,
+      roc = cfg["RadiusOfConvergence"]},
     rad = Min[ChartRadius[c["Center"], all], 2*Abs[to - from]];
+    matchRad = projectionRadius[c["Center"], projected,
+      2*Abs[to - from]];
+    (* Faithful affine part of old GetLineRescaled: projected geometry sets
+       the physical scale, while the true complex distance remains the
+       validity bound.  In local t, x = center + scale t, so high Taylor
+       coefficients stay O(1) and the true convergence radius is rad/scale.
+       RadiusOfConvergence is a coordinate normalization, not a change to
+       the physical chart coverage or match points. *)
+    scale = RootReduce[matchRad/roc];
+    localRad = RootReduce[rad/scale];
     Join[c, <|"Radius" -> rad, "ChartVar" -> Global`t,
+      "MatchRadius" -> matchRad, "Scale" -> scale,
+      "LocalRadius" -> localRad,
       "Name" -> "seg" <> ToString[First[#2]] <> "@" <>
         ToString[N[c["Center"], 6]],
-      "Prescriptions" -> {}|>]] &, charts];
+      "Prescriptions" -> chartPrescriptions[c["Center"], var]|>]] &, charts];
   <|"From" -> from, "To" -> to, "Direction" -> dir,
-    "Charts" -> charts, "EndpointIsSingular" -> endpointSingular,
+    "Charts" -> charts, "SegmentCount" -> Length[charts],
+    "EndpointIsSingular" -> endpointSingular,
     "DigitsNeeded" -> DigitBudget[cfg["AccuracyGoal"], Length[charts]],
-    "Singularities" -> sings|>];
+    "Singularities" -> Append[sings, "ProjectionWaypoints" -> projected]|>];
 
 (* ---- 2.9 crossing ---- *)
 
@@ -568,20 +670,29 @@ mwInputTrim[{min_, c_}, context_String] := Module[
    the formal valuation.
    In particular, an underresolved 0``acc is not evidence of cancellation. *)
 mwCenteredZeroQ[c_, context_String, scale_:1] := Module[
-  {digits = DiffExp2`Tolerances`Tol["ChopDigits"], mag, upper, mtol},
+  {digits = DiffExp2`Tolerances`Tol["ChopDigits"], bounds, lower, upper,
+   center, mtol},
   Which[
     NumericQ[c],
-      mag = numMag[c, digits];
-      If[!SameQ[mag, 0], Return[False, Module]];
-      If[!InexactNumberQ[c], Return[True, Module]];
-      upper = Last[numMagBounds[c, digits]];
+      If[!InexactNumberQ[c], Return[TrueQ[PossibleZeroQ[c]], Module]];
+      bounds = numMagBounds[c, digits];
+      {lower, upper} = bounds;
+      center = numMag[c, digits];
       mtol = Max[DiffExp2`Tolerances`Tol["MatchTol"],
         DiffExp2`Tolerances`Tol["LaurentLeadTol"]];
-      If[TrueQ[upper <= mtol*scale], True,
+      Which[
+        (* Input trimming has already classified structural smallness.  A
+           resolved nonzero Schur coefficient remains formal data no matter
+           how small it is; only its uncertainty ball relative to zero is
+           relevant here. *)
+        !SameQ[center, 0] && TrueQ[lower > 0], False,
+        SameQ[center, 0] && TrueQ[upper <= mtol*scale], True,
+        True,
         err["E5", <|"Context" -> context, "Coefficient" -> c,
+          "UncertaintyLowerBound" -> lower,
           "UncertaintyUpperBound" -> upper, "Scale" -> scale,
           "EffectiveTolerance" -> mtol,
-          "Detail" -> "underresolved centered zero in matching elimination"|>]],
+          "Detail" -> "coefficient uncertainty overlaps zero in matching elimination"|>]],
     True, zeroQ[c]]];
 
 mwCancellationTrim[{min_, c_}, context_String:"matching row cancellation",
@@ -855,6 +966,102 @@ mwApplySaturationPlan[basis_List, plan_Association] := Module[
     {action, plan["Actions"]}];
   out];
 
+(* Once epsilon-lattice saturation has made the leading value matrix a unit,
+   normalize the solution frame at THIS match point by the epsilon-independent
+   right action P = F_eps0^-1.  This is ordinary fundamental-matrix frame
+   normalization: whole LocalSolutions (including all fractional/log sectors
+   and their prescriptions) are mixed together, so no tag, branch, valuation,
+   or epsilon-completeness rule changes.  Keeping P local to the march avoids
+   making a sheet-specific frame part of the global chart cache. *)
+mwLeadingValueMatrix[Fmat_List, label_String] := Module[{n = Length[Fmat]},
+  If[n == 0 || !MatrixQ[Fmat] || Dimensions[Fmat] =!= {n, n},
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "match preconditioner received a nonsquare value matrix"|>]];
+  If[AnyTrue[Flatten[Fmat], esMin[#] < 0 &],
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "match preconditioner received a value matrix with epsilon poles after saturation"|>]];
+  Table[If[esMin[Fmat[[r, c]]] <= 0 <= esCM[Fmat[[r, c]]],
+      esCoeff[Fmat[[r, c]], 0], 0], {r, n}, {c, n}]];
+
+mwContractZeroQ[res_, contributions_List, label_String] := Module[
+  {tol = Max[DiffExp2`Tolerances`Tol["MatchTol"],
+      DiffExp2`Tolerances`Tol["LaurentLeadTol"]], scale},
+  scale = Max[1, Sequence @@ (numMag[#, 20] & /@
+      Select[Flatten[contributions], NumericQ])];
+  Which[
+    FreeQ[res, _?InexactNumberQ] && TrueQ[PossibleZeroQ[res]], True,
+    NumericQ[res], TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[
+      res, scale, tol, label, DiffExp2`Tolerances`$AmbiguityBandDecades,
+      True]],
+    True, zeroQ[res]]];
+
+mwIdentityMatrixQ[M_List, label_String] := Module[{n = Length[M]},
+  MatrixQ[M] && Dimensions[M] === {n, n} &&
+    And @@ Flatten[Table[Module[{target = KroneckerDelta[r, c], res},
+      res = M[[r, c]] - target;
+      If[!FreeQ[res, _Symbol], res = Together[Expand[res]]];
+      mwContractZeroQ[res, {M[[r, c]], target},
+        label <> "/" <> ToString[r] <> "," <> ToString[c]]],
+      {r, n}, {c, n}]]];
+
+mwProductIdentityAssert[left_List, right_List, label_String] := Module[
+  {n = Length[left]},
+  Do[Module[{terms = Table[left[[r, j]]*right[[j, c]], {j, n}],
+      target = KroneckerDelta[r, c], res},
+    res = Total[terms] - target;
+    If[!FreeQ[res, _Symbol], res = Together[Expand[res]]];
+    If[!mwContractZeroQ[res, Join[terms, {target}],
+        label <> "/" <> ToString[r] <> "," <> ToString[c]],
+      err["E5", <|"Chart" -> label, "Row" -> r, "Column" -> c,
+        "Residual" -> res,
+        "Detail" -> "F_eps0.P failed the identity contract"|>]]],
+    {r, n}, {c, n}];
+  Null];
+
+mwConstantMatchPrecondition[basis_List, Fmat_List, basisValues_,
+    requiredTop_Integer, label_String] := Module[
+  {fEps0 = mwLeadingValueMatrix[Fmat, label], n = Length[Fmat], P, out,
+   Fprime, fPrimeEps0, verify, sharedTop, sharedTopPrime},
+  (* An already normalized frame (notably the anchor chart) needs no dense
+     recombination.  The uncertainty-aware contract makes this skip safe for
+     both exact and arbitrary-precision numeric matrices. *)
+  If[mwIdentityMatrixQ[fEps0, label <> "#already-normalized"],
+    Return[<|"Basis" -> basis, "Matrix" -> Fmat,
+      "LeadingInverse" -> IdentityMatrix[n], "Applied" -> False|>, Module]];
+  P = Quiet[Check[LinearSolve[fEps0, IdentityMatrix[n]], $Failed]];
+  If[P === $Failed || !MatrixQ[P] || Dimensions[P] =!= {n, n} ||
+      !FreeQ[P, Indeterminate | ComplexInfinity | DirectedInfinity[_]],
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "could not construct a finite constant match preconditioner"|>]];
+  (* Do not threshold small entries of P: a tiny coefficient can be essential
+     next to a large column.  Certify the full contribution-aware product. *)
+  mwProductIdentityAssert[fEps0, P, label <> "#raw-preconditioner"];
+  sharedTop = Min[# ["EpsWindow", "CompleteMax"] & /@ basis];
+  out = Table[DiffExp2`SectorSeries`CombineLocalSolutions[P[[All, j]], basis],
+    {j, n}];
+  sharedTopPrime = Min[# ["EpsWindow", "CompleteMax"] & /@ out];
+  If[sharedTopPrime < sharedTop || sharedTopPrime < requiredTop,
+    err["E5", <|"Chart" -> label, "RequiredTop" -> requiredTop,
+      "SharedCompleteMaxBefore" -> sharedTop,
+      "SharedCompleteMaxAfter" -> sharedTopPrime,
+      "Detail" -> "constant match preconditioning reduced the honest epsilon window"|>]];
+  (* Re-evaluation of the transformed LocalSolutions is authoritative: it
+     checks the actual tagged objects, not just matrix algebra on old values. *)
+  Fprime = basisValues[out];
+  fPrimeEps0 = mwLeadingValueMatrix[Fprime, label <> "#transformed"];
+  If[!mwIdentityMatrixQ[fPrimeEps0, label <> "#transformed-identity"],
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "re-evaluated preconditioned basis is not identity at epsilon order zero"|>]];
+  verify = mwSaturationPlan[Fprime, label <> "#precondition-verify"];
+  If[verify["Steps"] =!= 0 ||
+      AnyTrue[verify["InitialShifts"], # =!= 0 &],
+    err["E5", <|"Chart" -> label,
+      "VerificationShifts" -> verify["InitialShifts"],
+      "VerificationSteps" -> verify["Steps"],
+      "Detail" -> "constant match preconditioner did not preserve the regular epsilon lattice"|>]];
+  <|"Basis" -> out, "Matrix" -> Fprime, "LeadingInverse" -> P,
+    "Applied" -> True|>];
+
 (* Residual vector for iterative refinement.  It is formed against the
    ORIGINAL, untrimmed matching matrix: the primary elimination may classify
    individually sub-LaurentLeadTol leading coefficients as structural zero,
@@ -869,6 +1076,14 @@ matchingResidualVector[Fmat_List, vIn_List, weights_List] := Module[
     lhs = Fold[esAdd, First[terms], Rest[terms]];
     esAdd[vIn[[comp]], esScale[-1, lhs]]],
     {comp, nb}]];
+
+mwDebugSummary[x_] := Module[{nums, accs, mags},
+  nums = Cases[x, z_?InexactNumberQ :> z, Infinity];
+  If[nums === {}, Return[<|"Count" -> 0|>, Module]];
+  accs = Accuracy /@ nums;
+  mags = numMag[#, 20] & /@ nums;
+  <|"Count" -> Length[nums], "AccuracyMinMax" -> MinMax[accs],
+    "MagnitudeMinMax" -> MinMax[mags]|>];
 
 (* Non-throwing form of the residual proof.  MatchWeights uses it to decide
    whether a bounded refinement is needed; matchingResidualAssert remains the
@@ -1025,8 +1240,15 @@ MatchWeights[Fmat_List, vIn_List, label_String] := Module[
   {w = mwSolve[Fmat, vIn, label], failure, residual, correction,
    refinementSteps = 0, maxRefinementSteps = 2},
   failure = matchingResidualFailure[Fmat, vIn, w, label];
+  If[Environment["DEBUG_MATCHACC"] === "1",
+    Print["MATCHDBG ", label, " inputF=", mwDebugSummary[Fmat],
+      " inputV=", mwDebugSummary[vIn], " initialW=", mwDebugSummary[w],
+      " initialFailure=", failure]];
   While[AssociationQ[failure] && refinementSteps < maxRefinementSteps,
     residual = matchingResidualVector[Fmat, vIn, w];
+    If[Environment["DEBUG_MATCHACC"] === "1",
+      Print["MATCHDBG ", label, " refine=", refinementSteps + 1,
+        " residual=", mwDebugSummary[residual]]];
     correction = mwSolve[Fmat, residual,
       label <> "#refine" <> ToString[refinementSteps + 1]];
     (* ESAdd takes the intersection of complete upper windows.  Refinement
@@ -1063,9 +1285,11 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
 (* ValidatePlan: static pre-pass over the chart chain (TransportLine runs
    it before any solve).  Every chart's incoming match point — computed by
    the SAME chartMatchPoint formula the marching loop evaluates — must lie
-   strictly inside the producing chart's disk (EvaluateLocalSolution's
-   validity bound is |t| < Radius); a singular chart's point must in
-   addition sit on the approach side strictly inside its own disk; the
+   strictly inside both adjacent charts' physical disks and no farther than
+   one half-radius out (the SegmentErrorProbe certification envelope)
+   (EvaluateLocalSolution's validity bound is |t| < Radius after affine
+   conversion); a singular chart's point must in addition sit on the
+   approach side; the
    first chart's point is the boundary anchor plan["From"], inside the
    first disk.  A violation is a planner bug: E8 with the full chain
    geometry, raised before the expensive solves instead of deep inside
@@ -1073,9 +1297,14 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
 ValidatePlan[plan_Association] := Module[
   {charts = plan["Charts"], dir = plan["Direction"],
    k = cfg["DivisionOrder"], chain},
+  If[KeyExistsQ[plan, "SegmentCount"] &&
+      plan["SegmentCount"] =!= Length[charts],
+    err["E8", <|"SegmentCount" -> plan["SegmentCount"],
+      "ChartCount" -> Length[charts],
+      "Detail" -> "plan SegmentCount does not equal the stored chart count"|>]];
   chain = Map[<|"Center" -> #["Center"], "Radius" -> #["Radius"],
     "Singular" -> #["Singular"]|> &, charts];
-  Do[Module[{chart = charts[[ci]], prev, mp, bad},
+  Do[Module[{chart = charts[[ci]], prev, mp, expectedSingular, bad},
     prev = If[ci === 1, None, charts[[ci - 1]]];
     mp = chartMatchPoint[prev, chart, plan["From"], dir, k];
     If[mp === None,
@@ -1086,22 +1315,51 @@ ValidatePlan[plan_Association] := Module[
         "SingularRadius" -> chart["Radius"],
         "AttemptedPoint" -> chart["Center"] - dir*chart["Radius"]/k,
         "Chain" -> chain|>]];
+    If[ci > 1 && TrueQ[chart["Singular"]],
+      expectedSingular = singularMatchPoint[prev["Center"], prev["Radius"],
+        chart["Center"], chart["Radius"], dir];
+      If[expectedSingular === None ||
+          !TrueQ[PossibleZeroQ[Together[mp - expectedSingular]]],
+        err["E8", <|"Chart" -> chart["Name"], "MatchPoint" -> mp,
+          "ExpectedMatchPoint" -> expectedSingular,
+          "PrevCenter" -> prev["Center"], "PrevRadius" -> prev["Radius"],
+          "Center" -> chart["Center"], "Radius" -> chart["Radius"],
+          "Chain" -> chain,
+          "Detail" -> "stored singular handoff differs from the canonical balanced approach point"|>]]];
     bad = Which[
       ci === 1,
-      !TrueQ[Abs[N[mp - chart["Center"], 40]] < N[chart["Radius"], 40]],
+      !TrueQ[numericDistance[mp, chart["Center"], 40] < N[chart["Radius"], 40]] ||
+      !TrueQ[numericDistance[mp, chart["Center"], 40] <= N[chart["Radius"], 40]/2],
       True,
-      !TrueQ[Abs[N[mp - prev["Center"], 40]] < N[prev["Radius"], 40]] ||
+      !TrueQ[numericDistance[mp, prev["Center"], 40] < N[prev["Radius"], 40]] ||
+      !TrueQ[numericDistance[mp, chart["Center"], 40] < N[chart["Radius"], 40]] ||
+      (* SegmentErrorProbe certifies every handed-off LocalSolution at one
+         half of its true physical convergence radius.  The actual shared
+         point must be no farther out in EITHER adjacent disk; otherwise the
+         accumulated error estimate would be nonconservative even though
+         analytic convergence alone still holds. *)
+      !TrueQ[numericDistance[mp, prev["Center"], 40] <= N[prev["Radius"], 40]/2] ||
+      !TrueQ[numericDistance[mp, chart["Center"], 40] <= N[chart["Radius"], 40]/2] ||
       (TrueQ[chart["Singular"]] &&
-        !(TrueQ[dir*N[chart["Center"] - mp, 40] > 0] &&
-          TrueQ[Abs[N[mp - chart["Center"], 40]] < N[chart["Radius"], 40]]))];
+        !TrueQ[dir*N[chart["Center"] - mp, 40] > 0])];
     If[bad,
       err["E8", <|"Chart" -> chart["Name"], "MatchPoint" -> mp,
         "PrevCenter" -> If[prev === None, None, prev["Center"]],
         "PrevRadius" -> If[prev === None, None, prev["Radius"]],
         "Center" -> chart["Center"], "Radius" -> chart["Radius"],
         "Chain" -> chain,
-        "Detail" -> "incoming match point outside the producing chart's disk (planner bug)"|>]]],
+        "Detail" -> "incoming match point outside a producing/receiving disk, beyond the half-radius error-probe envelope, or on the wrong singular approach side (planner bug)"|>]]],
     {ci, Length[charts]}];
+  If[!TrueQ[Lookup[plan, "EndpointIsSingular", False]],
+    Module[{last = Last[charts], endpoint = plan["To"]},
+      If[!TrueQ[numericDistance[endpoint, last["Center"], 40] <
+            N[last["Radius"], 40]] ||
+          !TrueQ[numericDistance[endpoint, last["Center"], 40] <=
+            N[last["Radius"], 40]/2],
+        err["E8", <|"Chart" -> last["Name"], "Endpoint" -> endpoint,
+          "Center" -> last["Center"], "Radius" -> last["Radius"],
+          "Chain" -> chain,
+          "Detail" -> "regular final endpoint lies beyond the half-radius error-probe envelope"|>]]]];
   plan];
 
 TransportLine[sys_Association, boundary_, plan_Association] := Module[
@@ -1136,8 +1394,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     (* PROTOTYPE (env-gated, default off): value-vector propagation for
        REGULAR interior charts (Docs/PerfGapAnalysis.md lever 1).  The
        incoming object is evaluated AT THIS CHART'S CENTER — inside the
-       previous chart's disk (step/radius <= 1/(1+k_eff) on dominated
-       marches; EvaluateLocalSolution's radius assert is the loud
+       previous chart's disk (the classic +1/k,-1/k construction keeps
+       ordinary handoffs safely interior; EvaluateLocalSolution's radius assert is the loud
        backstop) — and that value is the t^0 Cauchy datum of ONE
        d-dimensional recursion (Solve`SolveValueRegular), replacing the
        d-column basis + MatchWeights + CombineLocalSolutions.  Singular
@@ -1150,8 +1408,9 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
          the previous object's disk and ratio^(ExpansionOrder+1) must stay
          two decades below LaurentLeadTol.  This applies to every stride
          mode: receding-leg gaps can be large even under classic geometry. *)
-      Module[{margin = valueCenterMargin[cfg["ExpansionOrder"]]},
-        TrueQ[Abs[N[chart["Center"] - current["Center"], 30]] <
+      Module[{margin = valueCenterMargin[cfg["ExpansionOrder"]],
+          currentScale = current["ChartMap", "Scale"]},
+        TrueQ[Abs[N[(chart["Center"] - current["Center"])/currentScale, 30]] <
           margin*N[current["Radius"], 30]]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
        object is only valid at its anchor); thereafter the shared
@@ -1167,16 +1426,21 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
        match point (basis path) or at this chart's center (value mode).
        Across a singular chart both candidate points must be on the same
        sheet; otherwise the conservative basis path owns the handoff. *)
-    centerTIn = chart["Center"] - current["Center"];
-    matchTIn = matchPt - current["Center"];
+    centerTIn = Together[(chart["Center"] - current["Center"])/
+      current["ChartMap", "Scale"]];
+    matchTIn = Together[(matchPt - current["Center"])/
+      current["ChartMap", "Scale"]];
     If[valueMode && lastSingular &&
         !SameQ[TrueQ[N[centerTIn, 30] dir > 0],
           TrueQ[N[matchTIn, 30] dir > 0]],
       valueMode = False];
     tIn = If[valueMode, centerTIn, matchTIn];
     Module[{sigma, crossed = False, valuesAt},
-      (* crossing: if the previous chart was singular and matchPt lies on its
-         far side (sign of tIn relative to approach), apply the operator *)
+      (* A far-side transition always owns the prescription/material-content
+         proof, in both directions.  ApplyCrossing itself is specifically the
+         t<0 -> u=-t representation change: rightward far-side t is already
+         positive and must not receive a second phase; leftward t is negative
+         and is reflected exactly once. *)
       If[lastSingular && TrueQ[N[tIn, 30] dir > 0],
         sigma = DiffExp2`SectorSeries`ChartImSign[current];
         If[!MemberQ[{1, -1}, sigma],
@@ -1206,9 +1470,10 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
               err["E8", <|"Chart" -> chart["Name"],
                 "Detail" -> "crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"|>],
               sigma = 1]]];
-        current = ApplyCrossing[current, sigma];
-        crossed = True;
-        tIn = -tIn];  (* far side evaluates at positive u *)
+        If[TrueQ[N[tIn, 30] < 0],
+          current = ApplyCrossing[current, sigma];
+          crossed = True;
+          tIn = -tIn]];  (* a reflected far side evaluates at positive u *)
       valuesAt[tt_] := Module[{ev, vv, d2 = cs["SystemSize"]},
         ev = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tt,
           "UsePade" -> False, "ImSign" -> sigmaFor[current]];
@@ -1243,7 +1508,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         sol["Basis"]["Specs"], sol["Basis"]["Diagnostics"]];
       couplingDepth = sol["CouplingDepth"];
       (* basis values at the same point, in THIS chart's coordinate *)
-      Module[{tLoc = matchPt - chart["Center"], basisValues},
+      Module[{tLoc = Together[(matchPt - chart["Center"])/chart["Scale"]],
+          basisValues, pre},
         basisValues[bb_List] := Module[{Feval},
           Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
             tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, bb];
@@ -1269,29 +1535,57 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
               "SaturationSteps" -> satPlan["Steps"],
               "VerificationShifts" -> satVerify["InitialShifts"],
               "VerificationSteps" -> satVerify["Steps"],
-              "Detail" -> "transformed LocalSolution basis did not verify as a regular epsilon lattice"|>]]]];
+              "Detail" -> "transformed LocalSolution basis did not verify as a regular epsilon lattice"|>]]];
+        (* Ordinary charts all share the single Taylor-sector window, so the
+           constant frame normalization is window-trivial there and removes
+           the artificial center-to-edge conditioning seen in long banana
+           marches.  Singular/resonant frames remain on the certified
+           epsilon-saturated path: mixing their unequal tagged windows is
+           algebraically valid but can impose an unnecessary common top. *)
+        If[TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+          pre = mwConstantMatchPrecondition[basis, F, basisValues,
+            req["EpsWindow", "CompleteMax"], chart["Name"]];
+          basis = pre["Basis"];
+          F = pre["Matrix"];
+          If[Environment["DEBUG_MATCHACC"] === "1",
+            Print["MATCHDBG ", chart["Name"],
+              " preconditionedF=", mwDebugSummary[F]]]]];
       w = MatchWeights[F, vvals, chart["Name"]];
       If[AnyTrue[w, esMin[#] < 0 &],
         err["E5", <|"Chart" -> chart["Name"],
           "WeightWindows" -> ({esMin[#], esCM[#]} & /@ w),
           "Detail" -> "epsilon-saturated matching returned Laurent weights"|>]];
       ls = DiffExp2`SectorSeries`CombineLocalSolutions[w, basis]];
-    (* probe on the INCOMING side (sign of matchPt - center keeps singular
-       charts one-sided; the anchor chart, whose matchPt IS its center,
-       probes the outgoing side) at the DESIGN evaluation ratio
-       rho = Max[1/(2 k_step), 1/k]: downstream consumers — the next
-       chart's match point under the stepDivisor geometry, the
-       LineIntegral tile edges — evaluate THIS solution at |t| up to
-       ~rho*Radius, so the honest truncation probe sits there.  The old
-       half-incoming-match-point probe (Radius/(2k)) underestimates those
-       tails by many decades once strides are wider than radius/k, and is
-       identically 0 on the anchor chart. *)
-    probeErrs = Module[{rho = Max[1/(2*stepDivisor[cfg["DivisionOrder"]]),
-        1/cfg["DivisionOrder"]], sgn, raw},
+    (* Probe BOTH sides of a regular chart and the incoming side of a
+       singular chart (sign of matchPt - center keeps it one-sided) just
+       outside half radius.  Under classic
+       GetCPL/GetCPR geometry the +/-1/k joins lie no farther out, while
+       LineIntegral midpoint tile edges can reach the 1/2 class near a
+       change of limiting projection.  Probing at 51/100 is therefore a
+       conservative cover of the shared R/2 envelope and is nonzero on the
+       anchor chart. *)
+    probeErrs = Module[{rho = 51/100, sgn, raw, points, probes,
+        twoSidedQ},
       sgn = Sign[N[matchPt - chart["Center"], 30]];
       If[!MemberQ[{-1, 1}, sgn], sgn = dir];
-      raw = rho*N[chart["Radius"], 20];
-      SegmentErrorProbe[ls, sgn*Rationalize[raw, raw/50], couplingDepth]];
+      (* Probe just OUTSIDE the planner/API half-radius envelope.  Keeping
+         this numeric at the 2x-WP handoff precision avoids an algebraic
+         evaluation grind without a Rationalize step that could move the
+         probe inward past an accepted R/2 handoff/tile edge. *)
+      raw = rho*N[ls["Radius"],
+        DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]];
+      (* Regular charts and INTERIOR singular charts can both be consumed on
+         either side: LineIntegral owns a two-arm tile around an interior
+         singularity and applies the prescription-aware pairing directly to
+         this kept LocalSolution.  Only a singular endpoint is genuinely
+         one-sided. *)
+      twoSidedQ = TrueQ[Lookup[cs["IndicialData"], "Regular", False]] ||
+        (TrueQ[chart["Singular"]] &&
+          !(TrueQ[plan["EndpointIsSingular"]] && ci === Length[charts]));
+      points = If[twoSidedQ,
+        {-raw, raw}, {sgn*raw}];
+      probes = SegmentErrorProbe[ls, #, couplingDepth] & /@ points;
+      If[Length[probes] === 1, First[probes], MapThread[Max, probes]]];
     errAcc = If[errAcc === None, probeErrs,
       Module[{l1 = Length[errAcc], l2 = Length[probeErrs]},
         PadRight[errAcc, Max[l1, l2]] + PadRight[probeErrs, Max[l1, l2]]]];
@@ -1305,11 +1599,13 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     {ci, Length[charts]}];
   <|"Final" -> current,
     "Charts" -> kept,
+    "SegmentCount" -> Length[kept],
     "EndpointIsSingular" -> plan["EndpointIsSingular"],
     "ErrorEstimate" -> errAcc,
     "Value" -> If[plan["EndpointIsSingular"], None,
       DiffExp2`SectorSeries`EvaluateLocalSolution[current,
-        plan["To"] - current["Center"], "UsePade" -> False,
+        Together[(plan["To"] - current["Center"])/
+          current["ChartMap", "Scale"]], "UsePade" -> False,
         "ImSign" -> sigmaFor[current]]["Value"]]|>];
 
 End[];

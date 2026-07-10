@@ -666,8 +666,11 @@ is a loud error, never zero-fill.
    regular endpoint has values free of Logx and fractional powers; asserted
    cheaply by head inspection.
 7. SEGMENT TILING: SegmentData MainIntervals tile the transported range
-   contiguously (no gaps/overlaps beyond shared endpoints); asserted at
-   result construction and again by ToPiecewise/IntegrateOverLine.
+   contiguously (no gaps/overlaps beyond shared endpoints).  Every ownership
+   breakpoint lies in the overlap of the adjacent charts' true half-radius
+   disks, so every tile stays inside the same envelope certified by
+   `SegmentErrorProbe`; no-overlap and per-tile envelope violations are loud.
+   Asserted at result construction and again by ToPiecewise/IntegrateOverLine.
 8. LEGACY-MODE FENCE: SystemInfo["Format"] === "LegacySlices" implies the
    singular-operation gate (sections 2.1c, 5.E1) — checked at the TOP of
    SolveAtPoint, EndpointLimit, IntegrateOverLine, and inside TransportTo

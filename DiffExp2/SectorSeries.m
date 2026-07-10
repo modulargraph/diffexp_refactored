@@ -350,7 +350,8 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
 Options[ReexpandLocalSolution] = {"ImSign" -> Automatic};
 ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Module[
   {ls = ValidateLocalSolution[ls0], eps, sigma, kmin, kmax, ncols, ncomp,
-   singularQ, rho, LogD, w, out, tails, divOrd, newCenter},
+   singularQ, rho, LogD, w, out, tails, divOrd, newCenter, chartScale,
+   newChartMap},
   eps = DiffExp2`Config`CanonicalEps[];
   kmin = lsMin[ls]; kmax = lsCM[ls];
   ncols = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2]];
@@ -415,7 +416,15 @@ ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Mod
     topc = Max[0, Sequence @@ (Last[numMagBounds[#, 10]] & /@
       Select[Flatten[out[[K - kmin + 1, NN + 1]]], NumericQ])];
     topc*N[(rho/divOrd), 10]^NN/(divOrd - 1)], {K, kmin, kmax}];
-  <|"Center" -> ls["Center"] + Dc, "ChartMap" -> ls["ChartMap"],
+  chartScale = If[AssociationQ[ls["ChartMap"]],
+    Lookup[ls["ChartMap"], "Scale", 1],
+    If[ListQ[ls["ChartMap"]] && Length[ls["ChartMap"]] >= 3,
+      Last[ls["ChartMap"]], 1]];
+  newCenter = Together[ls["Center"] + chartScale*Dc];
+  newChartMap = If[AssociationQ[ls["ChartMap"]],
+    <|"Center" -> newCenter, "Scale" -> chartScale|>,
+    {"Affine", newCenter, chartScale}];
+  <|"Center" -> newCenter, "ChartMap" -> newChartMap,
     "Radius" -> rho,
     "Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0, "Coeffs" -> out|>},
     "EpsWindow" -> ls["EpsWindow"],

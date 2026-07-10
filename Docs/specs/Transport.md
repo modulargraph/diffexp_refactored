@@ -15,7 +15,8 @@ one point on a line" and "a LocalSolution (or numeric values) at another
 point on that line": it locates ALL singularities of the system on and near
 the line exactly (matrix-denominator factors plus configured
 ExtraSingularFactors, complex roots included, with chart radii equal to true
-complex-plane distances), plans the chain of expansion charts (predivision,
+complex-plane distances and old-style real projection waypoints), plans the
+chain of expansion charts (predivision,
 two passes over ONE shared geometry function, with the segment-count digit
 budget), and runs the marching loop that at each chart solves (via Solve.m),
 matches the incoming data onto the chart's fundamental basis with an
@@ -57,6 +58,7 @@ Output:
 <|
   "All"    -> { exact roots, complex included, deduplicated EXACTLY },
   "Real"   -> { the subset with exactly real value },
+  "Projected" -> { old suppressed real projections Re(z), Re(z)+/-|Im(z)| },
   "Factors"-> { factor -> {its roots} associations, for error messages }
 |>
 ```
@@ -73,11 +75,12 @@ Behavior contract:
   large root sets, but two roots are merged only after exact RootReduce
   confirmation (Tolerances.md Q3); an unconfirmed near-pair is kept
   distinct.
-- Complex roots are RETAINED as complex numbers.  The old ghost projection
-  (each complex root projected to real points Re and Re±Im unless another
-  singularity already lies in that interval, LineSegmentation.m:81-99) is
-  NOT reimplemented (forbidden fallback F4); complex roots enter only
-  through `ChartRadius`.
+- Complex roots are RETAINED as complex numbers and remain the sole source
+  for `ChartRadius`.  In addition, the old suppressed real projections
+  (Re and Re±|Im|, LineSegmentation.m:81-99) are restored as REGULAR
+  predivision waypoints.  They are never treated as matrix poles.  The
+  planner simplifies non-real algebraic waypoints to nearby small rationals
+  so exact chart preparation does not inherit a large algebraic field.
 
 ### 2.2 `ChartRadius[center_, allSingularities_List] -> radius`
 
@@ -106,11 +109,13 @@ Behavior contract:
   membership is tested EXACTLY (old code uses chopped numeric MemberQ,
   Transport.m:606-609 — forbidden, F13).
 - Regular chart centers are produced by `NextCenter` (2.4) so that every
-  match point sits at radius/DivisionOrder of BOTH adjacent charts
-  (consuming side; the producing-side ratio is relaxed and clamped — see
-  the recorded AMENDMENT at the end of 2.4).
-- Match points: each chart's outgoing match point is at chart-coordinate
-  distance Radius/DivisionOrder from its center on the marching side
+  ordinary, unclipped match point sits at projected geometry
+  radius/DivisionOrder of BOTH adjacent charts.  Target-clipped and singular
+  transitions use the bounded exceptions below.
+- Match points: each ordinary chart's outgoing match point is at physical
+  distance `Min[MatchRadius/DivisionOrder, Radius/2]` from its center on the
+  marching side.  The first term is the old projected-geometry construction;
+  the true half-radius cap aligns every handoff with the error probe
   (old Transport.m:679, 1041-1046: interval ±RoC/DivisionOrder in the
   rescaled chart coordinate); when the next chart is singular the match
   point is additionally clipped into the intersection of both charts'
@@ -165,37 +170,27 @@ old Mobius.m:110-119): with s the new radius,
 the mirror branch when capped on the left), `x_new = x_b + s/k`.
 This both-adjacent-charts guarantee is the actual ill-conditioning defense
 for the matching solve (RewritePlan R3; legacy review finding 12).
-DivisionOrder: classic default 3 (State.m:112), FT pins 4
-(FeynmanTrick/DiffExpIntegration.m:272).
+DivisionOrder: classic default 3 (State.m:112); the FT stepwise runner now
+uses that same default.
 
-NEW vs old: the bounding singularities for the s-solve are the REAL
-on-path cap points, but the resulting radius must additionally be capped by
-`ChartRadius` (complex distance).  If the complex cap is the binding one,
-re-solve the 1/k placement against the capped radius (the geometry formula
-holds with z-cap replaced by center ± capped radius).
-
-AMENDMENT (recorded, M5h): the placement STRIDE is decoupled from the
-match-point divisor.  `nextCenter` places centers with the stride divisor
-k_eff = `stepDivisor[k]` (config `StepDivisionOrder`, Automatic =
-`Min[k, Max[5/4, ceil16(10^(14/(ExpansionOrder+1))/2)]]`), while match
-points keep sitting at radius/DivisionOrder of the CONSUMING chart — that
-half of the both-adjacent-charts guarantee, which is the one conditioning
-the matching solve (F is the consuming chart's basis at radius/k), is
-unchanged.  The PRODUCING-side ratio is no longer pinned to 1/k; it is
-bounded instead by the explicit (G2) clamp in `nextCenter`
-(h = step − radius/k ≤ 0.9·Max[1/(2 k_eff), 1/k]·prevRadius, ≈ 0.36·R at
-the FT defaults) and the truncation tail at the worst consumer ratio is
-probed honestly per chart (`SegmentErrorProbe` at
-Max[1/(2 k_eff), 1/k]·Radius).  With k_eff = k (low ExpansionOrder or
-explicit `StepDivisionOrder -> DivisionOrder`) the classic coupled
-geometry is reproduced exactly.  Additionally each `SegmentLine` plan now
-begins with an ANCHOR CHART centered exactly at `from`: the boundary is
-matched at t = 0 and the chart is shared by the lo/hi transports of one
-anchor.  Rationale: chart count drives transport wall-clock; the approach
-ratio toward a singular target improves from k/(1+k) per chart to
-k_eff/(1+k_eff) (~2.6x fewer charts per decade at the FT defaults) while
-every evaluation ratio stays ≤ ~0.41 with tails below the 1e-14 design
-line at ExpansionOrder 40.
+The bounding points for this solve are the restored real projection
+waypoints.  Their distance is a conservative geometry scale; the separately
+stored true complex-plane `Radius` remains the validity bound.  Every
+ordinary adjacent pair therefore shares one exact match point at +1/k in
+the producing chart's geometry scale and -1/k in the receiving chart's
+scale.  This is the old GetCPL/GetCPR conditioning trick.  The attempted
+`StepDivisionOrder` decoupling is retired for this path: a value such as 16
+created 28/29 banana-L1 charts and destroyed significance through needless
+matching.  The FT runner couples both divisors and defaults them to 3.
+Each plan still begins with an anchor chart centered exactly at `from`.
+When the mandatory regular chart after a singular crossing is clipped to a
+nearby target, the natural pre-clip point MUST be discarded.  The shared
+point is recomputed from the actual receiver's
+`-Min[MatchRadius/k, Radius/2]` side and accepted
+only inside the producer's design and physical disks; otherwise an
+intermediate center is inserted.  `ValidatePlan` independently requires all
+actual handoffs to lie within one half of both true physical radii, matching
+the conservative `SegmentErrorProbe` envelope.
 
 ### 2.5 `DigitBudget[accuracyGoal_, segmentCount_] -> Integer`
 
@@ -241,9 +236,10 @@ Loop body per chart (in plan order):
    the block dependency DAG — old proxy `MaxCouplingOrder` = largest
    coupled block, MatrixLoading.m:357-385, esp. :383).
 2. v = incoming data evaluated at chart's MatchIn point (SectorSeries
-   evaluate on the previous chart's LocalSolution; if MatchIn lies on the
-   far side of a singular previous chart, evaluation goes through
-   `ApplyCrossing` — exactly once, invariant I6).
+   evaluate on the previous chart's LocalSolution).  After a singular
+   previous chart, `ApplyCrossing` is used exactly when that point has
+   negative previous-chart coordinate `t`; a rightward far-side point has
+   `t > 0` and must not receive a second branch phase (invariant I6).
 3. `w = MatchWeights[...]` (2.7) after `RecombineBasis` (2.8).
 4. Assemble the chart's LocalSolution = basis.w + particular via
    `SectorSeries`CombineLocalSolutions` (SectorSeries.md 2.10), set
@@ -274,8 +270,11 @@ The eps-graded Laurent weight solve.  `basisValues` = N x N matrix of
 EpsSeries (basis solution i, component c: columns are the EpsSeries VALUES
 of the basis solutions at the match point). Direct callers may supply an
 honest Laurent frame.  The marching path first applies tag-driven
-recombination and the epsilon-adic lattice saturation in 2.8, then requires
-the resulting weights to start at or above eps^0.
+recombination and the epsilon-adic lattice saturation in 2.8.  On an
+ODE-regular chart it then applies the constant right-frame normalization
+`P = F_eps0^-1` at that match point and re-evaluates the transformed
+LocalSolutions, so the leading value matrix is the identity.  It finally
+requires the resulting weights to start at or above eps^0.
 `incomingValues` = EpsSeries vector.
 
 Contract:
@@ -287,6 +286,18 @@ Contract:
   `ord_eps det F~ != 0` after saturation is LOUD ERROR E5—never a silent
   window shift (RewritePlan 3.4: matchingShift "target 0, asserted"; math
   review finding 4).
+- Constant regular-chart frame normalization is epsilon-independent and
+  therefore preserves sector tags `(a,b,p)`, prescriptions, valuations, and
+  each operand's epsilon window; it is local to the march and MUST NOT be
+  installed in the cached chart basis.  The implementation MUST NOT
+  threshold small entries of `P`.  It certifies `F_eps0.P == I` with a
+  contribution-aware uncertainty scale, recombines whole LocalSolutions,
+  re-evaluates them, certifies `F'_eps0 == I`, reruns the saturation audit
+  (zero shifts and zero steps required), and asserts that the shared
+  `CompleteMax` did not fall or cross the requested top.  Any failed proof is
+  E5.  Singular/resonant frames stay on the saturated Laurent path because
+  dense mixing of unequal tagged windows can impose an unnecessary common
+  top, even though the constant GL action is algebraically valid there.
 - Result window: honest min over the windows of incomingValues and
   basisValues; no padding.
 - Residual assert: per eps order and component, the ORIGINAL, untrimmed
@@ -315,6 +326,11 @@ Contract:
   reserved for coordinate/endpoint snapping.  (No silent rounding;
   RewritePlan section 5: "numerical-zero leading-coefficient skipping
   (generalizes to matching solves)".)
+- After input/rank classification, cancellation trimming advances only past
+  exact zeros or centered inexact zeros whose full uncertainty ball is below
+  the matching residual contract.  A resolved nonzero Schur coefficient is
+  retained however small; a coefficient whose uncertainty ball overlaps
+  zero is E5, never a formal pivot.
 - Underdetermined systems: FORBIDDEN inside the marching loop (F7).  The
   old NullSpace free-parameter path (old Transport.m:392-410) survives ONLY
   as the API-level `"?"` wildcard contract (API.md): wildcards enter
@@ -375,8 +391,9 @@ Contract:
 
 ### 2.9 `CrossingOperator[sector_, sigma_] -> operator` and `ApplyCrossing[ls_LocalSolution, sigma_] -> LocalSolution`
 
-The analytic-continuation rule for evaluating a singular chart's
-LocalSolution on the far side (chart coordinate t < 0, u := -t > 0).
+The analytic-continuation rule for representing a singular chart's negative
+arm (chart coordinate t < 0) in the positive reflected coordinate
+u := -t > 0.
 sigma in {+1, -1} is the chart's derived Im-sign from its Prescriptions
 list (RewritePlan 3.1; consistency rules in 5/E8 below).
 
@@ -419,9 +436,13 @@ DiffExp/AnalyticContinuation.m:18-90, replacement rules at :70-79):
   prescription — never by accidental principal-branch evaluation of Log at
   a negative number, and PV-paired half-segments (Integrate.m) use real
   logs of the distance with the phases accounted at the object level.
-  Consequences for Transport.m: (i) SectorSeries evaluation is only ever
-  called with POSITIVE chart-coordinate arguments; `ApplyCrossing` happens
-  first (invariant I7); (ii) the sector-level mixing operator is
+  Consequences for Transport.m: (i) once `ApplyCrossing` has reflected an
+  object, that object is evaluated only at POSITIVE u.  Direct negative-t
+  evaluations used to match onto the approach arm instead pass the same
+  sigma to SectorSeries and do not also apply the operator.  In particular,
+  leftward far-side continuation reflects once, while rightward far-side
+  continuation already has positive t and does not reflect (invariant I7);
+  (ii) the sector-level mixing operator is
   Transport-internal and is DEFINED as the SectorSeries sigma rule
   (its 2.4.1) applied tagwise; Integrate.m's interior pairing and
   negative-arm boundary terms use the SectorSeries rule directly (its
@@ -440,26 +461,29 @@ forbidden (F8).  Window arithmetic: the eps^j factor shifts that
 contribution's window up by j; the merged sector window is the honest min
 (EpsSeries contract).
 
-### 2.10 `SegmentErrorProbe[ls_LocalSolution, {tIn_, tOut_}, indeterminates_List] -> errs[[component, epsorder]]`
+### 2.10 `SegmentErrorProbe[ls_LocalSolution, tProbe_, couplingDepth_] -> errs[[epsorder]]`
 
-The two-point full-vs-reduced-order probe, ported from old
+The full-vs-reduced-order probe, ported from old
 Transport.m:905-993:
-- Evaluate ls at tOut and (when tIn != 0) at tIn, twice: at full order and
+- Evaluate ls at `tProbe`, twice: at full order and
   with the t-series truncated down by
   `probeDecrement = Ceiling[0.7 * couplingDepth] + 2`
   (old `ICurrEvalErrorSeriesDecrease`, State.m:222; reduction applied as in
   old Transport.m:913 via DecreaseSeriesOrderBy).  Both evaluations go
   through SectorSeries (Pade applied there when configured, with ITS loud
   fallback — Transport must not Quiet it, F5).
-- tIn == 0 (chart center) is SKIPPED — at the center every log-bearing term
-  vanishes spuriously and the error would read 0 (old comment and hack,
-  Transport.m:915-923); the tOut value is used for both points in that case
-  (parity with old :920-922).
-- Per-indeterminate errors: for each symbolic indeterminate, the error of
-  its coefficient is tracked separately, plus the constant part
-  (old ComputeErrorsPerIndeterminate, Transport.m:947-962).
-- The per-(component, epsorder) error = max over the two probe points of
-  |full - reduced| (old Transport.m:970-976).
+- `TransportLine` calls the probe at both `-0.51 Radius` and `+0.51 Radius`
+  for every regular chart and takes the per-order maximum.
+  A regular LocalSolution can be consumed on either side by the next match
+  or by `LineIntegral`, so an incoming-side-only probe is nonconservative.
+  Interior singular charts are also probed on both signs because
+  `LineIntegral` consumes their prescription-aware two-arm tile directly.
+  Only a singular endpoint is probed on its actual incoming side.
+  The 0.51 radius is deliberately outside the planner/API's accepted
+  half-radius envelope and never the chart center, where log-bearing terms
+  vanish spuriously.
+- The per-epsorder error is `|full - reduced|`; the marching call takes the
+  maximum over the two regular-chart signs before accumulation.
 - Accumulation across segments is ADDITIVE into
   `TransportResult["ErrorEstimate"]` (old Transport.m:980-984); abort > 1 is
   E10.  Seeding: when `boundary` carries no error data the seed is exact 0
@@ -484,10 +508,8 @@ and TWindow comments are superseded by DEC-18 and DEC-9 as noted)
 ```
 LocalSolution = <|
   "Center" -> exact x0, "ChartMap" -> affine (Mobius DROPPED, DEC-18),
-  "Radius" -> distance to nearest singularity IN THE COMPLEX PLANE
-              (complex singularities are real: pentagon/unequal-mass
-              lines have them; old code projects ghosts Re, Re±Im —
-              ledger item; new code uses true complex distance),
+  "Radius" -> true complex-plane distance expressed in the local affine
+              coordinate t, i.e. PhysicalRadius/ChartMap["Scale"],
   "Sectors" -> { Sector.. },
   "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
   "TWindow"   -> <|"CompleteMax" -> nmax|>,   (* t-order truncation
@@ -526,23 +548,19 @@ sectors have kmin = -p BY CONSTRUCTION; Transport's column normalization
 Chart = <|
   "Index"      -> k (1-based position in the plan),
   "Center"     -> exact x0,
-  "Map"        -> <|"Type" -> "Affine",
-                    (* x = Center + t * Scale, with
-                       Scale = trueRadius / RadiusOfConvergence so the
-                       chart-coordinate radius is RoC and high-order
-                       coefficients stay O(1) — old Mobius.m:47,65;
-                       banana REQUIRES RoC = 10 (ledger).  Mobius charts
-                       are DROPPED from the new core (DEC-18); the RoC
-                       rescaling is an affine rescaling and is KEPT. *)
-                    "Scale" -> ...|>,
-  "Radius"     -> chart-coordinate radius (= RoC; charts are affine-only,
-                  DEC-18),
+  "Scale"      -> projectedGeometryRadius / RadiusOfConvergence,
+                  (* physical x = Center + Scale t; this is the affine part
+                     of old GetLineRescaled.  The projected radius preserves
+                     the classic Re/Re±Im geometry, while true roots still
+                     own the validity bound. *)
+  "Radius"     -> physical true complex-plane radius (used by plan
+                  validation and API physical tiling),
+  "MatchRadius" -> physical projected-geometry radius,
+  "LocalRadius" -> Radius/Scale (copied to LocalSolution["Radius"]),
   "IsSingular" -> True | False,
-  "MatchIn"    -> chart-coordinate t of the incoming match point (None for
-                  the first chart; |MatchIn| = Radius/DivisionOrder up to
-                  the FixWithin midpoint clipping, 2.3),
-  "MatchOut"   -> chart-coordinate t of the outgoing match point, or
-                  "Endpoint",
+  "IncomingMatchPoint" -> physical x of the incoming match point (absent
+                  for the first chart; converted through Scale only at the
+                  solve/evaluation boundary),
   "CrossSign"  -> +1 | -1 | None  (derived chart Im-sign; None iff not
                   crossed or no multivalued content),
   "Prescriptions" -> as in 3.1,
@@ -598,10 +616,14 @@ territory (it means recombination failed).
 I1  Plan fidelity: TransportLine executes exactly plan["SegmentCount"]
     segments with exactly the planned centers/match points; any deviation
     aborts (kills the old duplicated-dry-run drift, old Transport.m:666).
-I2  Geometry: for every interior match point m between charts i and i+1,
-    |t_i(m)| / Radius_i == 1/DivisionOrder == |t_{i+1}(m)| / Radius_{i+1}
-    within snapTol (the GetCPL/GetCPR guarantee, Mobius.m:98-142); every
-    evaluation point satisfies |t| <= Radius/DivisionOrder < Radius.
+I2  Geometry: every ordinary, unclipped match point m between charts i and
+    i+1 obeys +1/DivisionOrder and -1/DivisionOrder in the two projected
+    geometry scales within snapTol (the GetCPL/GetCPR guarantee,
+    Mobius.m:98-142).  Singular/target-clipped transitions may be asymmetric,
+    but the stored ACTUAL shared point must lie within one half of both true
+    physical radii; the receiver-side point is recomputed after every clip.
+    This half-radius bound is the `SegmentErrorProbe` contract, not merely a
+    convergence check.
 I3  ord_eps det F~ == 0 after recombination, and |det F~[0]| > rankTol*scale
     (per 2.7/2.8).
 I4  Matching residual <= matchTol*scale per eps order and component.
@@ -747,11 +769,9 @@ F2  Multivalued-without-prescription -> warn, abort early, return last
 F3  Numeric chop-deduplication of singularity roots and chop-membership
     endpoint tests (old LineSegmentation.m:77, Transport.m:606-609).
     FORBIDDEN -> exact arithmetic + E14.
-F4  Ghost projection of complex roots to Re, Re±Im real points
-    (old LineSegmentation.m:81-99, suppression rule included).  FORBIDDEN
-    -> true complex distance in ChartRadius (the suppression lesson — do
-    not create extra charts for complex roots — is preserved by
-    construction: complex roots only cap radii).
+F4  Treating projected Re, Re±Im waypoints as actual matrix singularities.
+    FORBIDDEN.  The waypoints are required for classic predivision geometry,
+    but only true roots in "All" cap `ChartRadius` or produce singular charts.
 F5  Pade failure -> silently evaluate the plain partial sum
     (old Pade.m:44-46 warns at verbosity and proceeds).  Pade lives in
     SectorSeries (RewritePlan 3.2); Transport MUST NOT Quiet/Check around
@@ -844,25 +864,24 @@ L2  Segment-count digit budgeting.  DigitsNeeded = AccuracyGoal +
     Ceiling[Log10[#segments]] + 2, computed AFTER a geometry-only counting
     pass (old Transport.m:666-760; ISafetyDigits = 2, State.m:215).
 L3  Both-adjacent-charts match-point geometry.  The match point must sit at
-    radius/DivisionOrder of BOTH the chart that produced the values and the
-    chart that consumes them (GetCPL/GetCPR solve for this, Mobius.m:98-142)
-    — this, not the solver, is the conditioning defense for matching (R3).
-    Classic default k=3 (State.m:112); FT pins k=4
-    (DiffExpIntegration.m:272).
-L4  RoC chart rescaling.  Chart coordinate scaled by trueRadius/RoC so that
-    the series' convergence radius maps to RoC and high-order coefficients
-    stay O(1) (Mobius.m:47,65); banana classic line REQUIRES RoC = 10
+    projected geometry radius/DivisionOrder of BOTH charts for every natural
+    unclipped join (GetCPL/GetCPR, Mobius.m:98-142).  Target/singular clips
+    recompute the actual receiver point and remain within both true
+    half-radius envelopes.  This, not the solver alone, is the conditioning
+    defense for matching (R3).  Classic and FT default k=3.
+L4  RoC chart rescaling.  Chart coordinate scaled by
+    projectedGeometryRadius/RoC so high-order coefficients stay O(1), while
+    the separately stored true complex radius divided by that scale remains
+    the LocalSolution validity bound.  Banana classic line uses RoC = 10
     (Reference/Examples Banana_example.m; RewritePlan section 5).
-L5  Complex singularities are real and cap radii.  Old ghost projection
-    with suppression (LineSegmentation.m:81-99) exists BECAUSE complex
-    roots limit convergence; the new true-complex-distance radius preserves
-    the cap while deleting the ghosts (legacy finding 4; pentagon and
-    unequal-mass banana have complex roots on generic lines).
+L5  Complex singularities have two distinct roles: exact complex roots cap
+    convergence radii, while the old suppressed Re, Re±Im projections are
+    regular real waypoints for stable symmetric predivision matching.
 L6  Two-point error probe.  Full vs reduced order at BOTH the incoming
-    match point and the evaluation point, skipping the chart center where
-    log terms vanish spuriously (old Transport.m:905-925, hack at
-    :916-923); per-indeterminate error split (:947-962); additive
-    accumulation (:980-984); hard abort when > 1 (:991-993).
+    and outgoing 0.51-radius points of regular and interior-singular charts
+    (incoming side only for a singular endpoint), skipping the chart center
+    where log terms vanish spuriously; additive accumulation and hard abort
+    when > 1.
 L7  Coupling-depth t-order degradation — premise REMOVED (DEC-9).  The
     old top-(couplingDepth - 1) t-orders were garbage because chained
     particulars were built from TRUNCATED numeric matrix expansions; the
@@ -881,7 +900,10 @@ L8  Crossing convention.  sign +1 = NO replacement, relying on
     only for Denominator[b] > 2, half-integers through explicit Sqrt with
     (theta_p - theta_m) (AnalyticContinuation.m:70-79).  The single formula
     of 2.9 must reproduce all of these (unit test T8).  9aeb300 lesson:
-    crossing phases come from the prescription exactly once; PV-paired
+    crossing phases come from the prescription exactly once.  Reflection
+    `t -> -u` is required only for a negative target coordinate; applying it
+    to an already-positive rightward far-side point adds a spurious full
+    monodromy.  PV-paired
     interior splits use real logs ($InteriorSplitRealLog,
     RegularizedIntegration.m:523, :1842).
 L9  Per-chart work is computed once.  Old code caches solver blocks across
@@ -965,10 +987,9 @@ T1  `test_segmentation_exact_roots`
     True (endpoint 0).  (Box L1 geometry; campaign interior pole at 1/4.)
 T2  `test_segmentation_complex_radius`
     Factors {x^2 + 1, x - 3}.  Asserts: ChartRadius[0, all] == 1 — the
-    COMPLEX roots ±I are binding (real root 3 is farther), and there are
-    no ghost projections at ±1; ChartRadius[2, all] == Min[|2 - 3|,
-    |2 - I|] == Min[1, Sqrt[5]] == 1 — the real root is binding; no chart
-    in any plan is CENTERED at a non-real point or at a ghost projection.
+    COMPLEX roots ±I are binding (real root 3 is farther), Projected contains
+    {-1,0,1,3}, and the -1,0,1 charts are regular.  ChartRadius[2, all] ==
+    Min[|2 - 3|, |2 - I|] == 1: projections never cap true radius.
 T3  `test_segmentation_exact_complex_roots`
     Factor x^2 - 2 x + 2 (roots 1 ± I).  Asserts ChartRadius[1, all] == 1
     with the exact algebraic roots retained in "All".
@@ -977,8 +998,10 @@ T4  `test_nextcenter_both_charts`
     Asserts NextCenter == 3/5 exactly, new radius == 2/5, and
     |1/2 - 3/5| == (2/5)/4 == 1/10 (the GetCPL closed form,
     Mobius.m:110-119).  Property sweep: for 50 random rational
-    {z_min, x_b, z_max, k in 2..6}, the 1/k relation holds for BOTH
-    adjacent charts within snapTol (I2).
+    {z_min, x_b, z_max, k in 2..6}, the natural unclipped 1/k relation holds
+    for BOTH adjacent projected geometry scales within snapTol (I2).  Separate
+    target/singular-clip properties assert the actual point stays within both
+    true half-radius envelopes.
 T5  `test_digit_budget`
     DigitBudget[20, 12] == 20 + Ceiling[Log10[12]] + 2 == 24.  And: E3
     fires when DigitsNeeded + chopReserve > WP (construct WP = 30 case);

@@ -237,6 +237,16 @@ carry windows); additionally the static per-sector account
 (`[κmin+p, κmax+p]` regular, `[κmin−1, κmax−1]` pole-hit) is computed
 independently and asserted equal (invariant I5).
 
+The implementation need not allocate one EpsSeries object per monomial.  The
+finite coefficient slabs may be contracted directly with the
+primitive coefficient lists provided that it first computes every term's
+`ESTimes` Min/CompleteMax, takes the single `ESAdd` CompleteMax intersection,
+and retains exact-zero terms in that intersection.  Structural omissions are
+allowed only where the endpoint/interior regularization rules above already
+declare the monomial inactive.  This coefficient-frame contraction is pinned
+against the literal `ESNew`/`ESTimes`/`ESAdd` reduction by
+`Tests/test_integrate_fastpath.m`.
+
 #### 2.2.3 The b = 0 divergence gate and the object-level cancellation check
 
 Precondition: the LocalSolution handed to Integrate is the ASSEMBLED

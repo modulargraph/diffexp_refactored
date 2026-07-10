@@ -195,6 +195,14 @@ assert["t24_reexpand_singular_source",
   Table[Simplify[r24["Sectors"][[1]]["Coeffs"][[1, m + 1, 1]] - (-1)^m 4^(m + 1)],
     {m, 0, 10}] === ConstantArray[0, 11]];
 
+ls24scaled = Join[ls24, <|"Center" -> 2,
+  "ChartMap" -> <|"Center" -> 2, "Scale" -> 1/5|>|>];
+r24scaled = reex[ls24scaled, 1/4, 4];
+assert["t24_reexpand_composes_affine_chart_scale",
+  r24scaled["Center"] === 41/20 &&
+  r24scaled["ChartMap"] === <|"Center" -> 41/20, "Scale" -> 1/5|> &&
+  r24scaled["Radius"] === 1/4];
+
 (* t25: b-collapse *)
 ls25 = mkls[{{{0, 1, 0}, <|0 -> {1}|>}}, 0, 3, 1];
 r25 = reex[ls25, 1/2, 4];

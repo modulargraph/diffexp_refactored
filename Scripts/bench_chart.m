@@ -14,7 +14,8 @@
 
    Settings are FT-realistic (run_ft_stepwise2.m at level 1):
      WorkingPrecision 120, ExpansionOrder 40, EpsilonOrder 5,
-     DivisionOrder 4, StepDivisionOrder 4 (the runner's pinned stride).
+     DivisionOrder 4, StepDivisionOrder 4 (the frozen benchmark fixture;
+     the production FT runner now defaults to classic coupled order 3).
 
    Phases (AbsoluteTiming, BENCH_REPS reps, MIN reported; the bench chart
    is the first interior REGULAR chart of the [11/23 -> 0] plan):
@@ -111,7 +112,8 @@ SetAttributes[timeIt, HoldFirst];
 simpleRat[x_] := Rationalize[N[x, 20], Abs[N[x, 20]]/100];
 
 benchFixture[fname_String] := Module[
-  {path, fix, var, sys, sys2, plan, tPlan, charts, chart, dir, rad, tLoc,
+  {path, fix, var, sys, sys2, plan, tPlan, charts, chart, dir, rad,
+   localRad, scale, tLoc,
    cs, req, sol, basis, d, Feval, F, vvals, w, ls, lsM, cc, ccT, sings,
    perChart = 0.0, ph},
   (* NB: never localize `t` here — Module would capture the literal
@@ -145,8 +147,10 @@ benchFixture[fname_String] := Module[
   (* bench chart: first interior REGULAR chart (the marching steady state) *)
   chart = SelectFirst[Rest[charts], !TrueQ[#["Singular"]] &, First[charts]];
   dir = plan["Direction"]; rad = chart["Radius"];
-  tLoc = simpleRat[-dir*rad/4];   (* the incoming match-point offset *)
-  Print["  bench chart ", chart["Name"], " radius=", N[rad, 6],
+  localRad = chart["LocalRadius"]; scale = chart["Scale"];
+  tLoc = simpleRat[-dir*localRad/4];   (* local incoming offset class *)
+  Print["  bench chart ", chart["Name"], " physical radius=", N[rad, 6],
+    " local radius=", N[localRad, 6],
     " tLoc=", N[tLoc, 6]];
 
   (* ---- PrepareChart cold / memo ---- *)
@@ -241,13 +245,13 @@ benchFixture[fname_String] := Module[
       Function[f, AllTrue[sings["Factors"][f],
         TrueQ[Abs[N[# - chart["Center"], 30]] > 1.2*N[rad, 30]] &]], None]},
     If[fac === None, 1 + var^2, (1 + var^2)/fac]];
-  ccT = Together[cc /. var -> chart["Center"] + Global`t];
+  ccT = Together[scale*(cc /. var -> chart["Center"] + scale*Global`t)];
   Print["  tile multiplier c = ", InputForm[cc]];
   ph = timeIt[lsM = catch2[DiffExp2`SectorSeries`MultiplyRational[ls, ccT, Global`t]],
     reps];
   If[FailureQ[lsM], Print["MUL FAIL ", lsM]; Quit[1]];
   row[fname, "MultiplyRational", ph];
-  Module[{t1 = simpleRat[-rad/8], t2 = simpleRat[rad/8], phCold},
+  Module[{t1 = simpleRat[-localRad/8], t2 = simpleRat[localRad/8], phCold},
     (* the antiderivative memo makes repeat tile integrals warm — the
        production steady state across cvec components/masters on a tile.
        Report cold (flushed) and warm (min of reps) separately. *)

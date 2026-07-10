@@ -92,6 +92,16 @@ assert["test_delta_prescriptions_parse",
   Length[dp] === 2 &&
   AnyTrue[dp, sameRx[#, {Global`m^2 - Global`s, -1}] &] &&
   AnyTrue[dp, sameRx[#, {Global`s - 4 Global`m^2, 1}] &]];
+assert["test_delta_prescriptions_reject_nonlinear_delta",
+  failsWith[catchDE2[upd[{"DeltaPrescriptions" -> {
+    Global`s + I*Global`\[Delta] + Global`\[Delta]^2}}]], "E7"]];
+assert["test_delta_prescriptions_reject_zero_or_nonpolynomial_factor",
+  failsWith[catchDE2[upd[{"DeltaPrescriptions" -> {
+      I*Global`\[Delta]}}]], "E7"] &&
+  failsWith[catchDE2[upd[{"DeltaPrescriptions" -> {
+      {Sin[Global`s], 1}}}]], "E7"] &&
+  failsWith[catchDE2[upd[{"DeltaPrescriptions" -> {
+      {Global`s + Global`\[Delta], 1}}}]], "E7"]];
 
 (* C10 *)
 assert["test_delta_prescriptions_reducible_loud",

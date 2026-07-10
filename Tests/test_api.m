@@ -28,6 +28,30 @@ assert["line_integral_x_to_eps",
   eqN[esC[li, 1], -1, 10^-10] &&
   eqN[esC[li, 2], 1, 10^-9]];
 
+(* Tiling ownership must stay inside the same R/2 envelope certified by
+   SegmentErrorProbe.  The old 0.9 R clamp assigned the small left chart far
+   beyond that bound for this unequal-radius pair; the half-disks meet only
+   at 1/4, which is therefore the unique safe breakpoint. *)
+mockTiles = catchDE2[DiffExp2`API`Private`halfRadiusTiles[{
+  <|"Chart" -> <|"Center" -> -1/9, "Radius" -> 13/18|>|>,
+  <|"Chart" -> <|"Center" -> 4/3, "Radius" -> 13/6|>|>}, -1/9, 4/3]];
+assert["line_integral_tiles_use_certified_half_radius_overlap",
+  !FailureQ[mockTiles] && Length[mockTiles] === 2 &&
+  mockTiles[[1, 3]] === 1/4 && mockTiles[[2, 2]] === 1/4];
+mockTileGap = catchDE2[DiffExp2`API`Private`halfRadiusTiles[{
+  <|"Chart" -> <|"Center" -> 0, "Radius" -> 1|>|>,
+  <|"Chart" -> <|"Center" -> 2, "Radius" -> 1|>|>}, 0, 2]];
+assert["line_integral_half_radius_tiling_hole_loud",
+  FailureQ[mockTileGap] && mockTileGap["ID"] === "E9"];
+mockTwoSidedTiles = catchDE2[DiffExp2`API`Private`halfRadiusTiles[
+  Map[<|"Chart" -> <|"Center" -> #[[1]], "Radius" -> #[[2]]|>|> &,
+    {{4/3, 11/3}, {7/3, 1}, {7/3, 1}, {17/6, 3/2}}],
+  4/3, 17/6]];
+assert["line_integral_two_sided_duplicate_anchor_tiles_monotone",
+  !FailureQ[mockTwoSidedTiles] &&
+  And @@ Thread[Differences[Join[{mockTwoSidedTiles[[1, 2]]},
+      mockTwoSidedTiles[[All, 3]]]] >= 0]];
+
 (* Cancellation must happen before the endpoint divergence gate.  Each
    component is 1/x and has a divergent integral on [0,1], whereas the
    requested scalar combination is identically zero. *)

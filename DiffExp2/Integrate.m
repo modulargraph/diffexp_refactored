@@ -68,23 +68,46 @@ antiderivativeAtCore[m_, b_, p_, T_, kMaxOut_] := Module[{logT, wp},
    path evaluate the negative endpoint with the full i-delta phase, without
    sending branch data through a symbolic Series[]. *)
 antiderivativeAtLog[m_, b_, p_, T_, logT_, phase0_, kMaxOut_] := Module[
-  {width, tbeps, invAlpha, jsum, alphaES},
+  {width, a0 = Together[m + 1], prefactor, coeffs, outMin, outMax},
   width = kMaxOut + p + 4;
-  tbeps = If[zeroQ[b], esNew[0, PadRight[{1}, width + 1]],
-    esNew[0, Table[pow[b*logT, r]/r!, {r, 0, width}]]];
-  alphaES = If[zeroQ[b],
-    esNew[0, PadRight[{m + 1}, width + 1]],
-    If[zeroQ[m + 1],
-      esNew[1, PadRight[{b}, width]],
-      esNew[0, PadRight[{m + 1, b}, width + 1]]]];
-  invAlpha = esInv[alphaES];
-  jsum = Module[{acc = None, pwr = invAlpha},
-    Do[Module[{term = esScale[(-1)^j*pow[logT, p - j]/(p - j)!, pwr]},
-      acc = If[acc === None, term, esAdd[acc, term]];
-      pwr = esTimes[pwr, invAlpha]],
-      {j, 0, p}];
-    acc];
-  esScale[phase0*pow[T, m + 1], esTimes[tbeps, esShift[jsum, p]]]];
+  prefactor = phase0*pow[T, a0];
+  If[zeroQ[a0],
+    (* alpha=b eps.  Assemble the already-combined Laurent coefficients
+       directly: the j-th integration-by-parts term starts at
+       eps^(p-j-1), and multiplication by Exp[b eps Log T] supplies q.
+       This is algebraically the same finite convolution as the former
+       ESInvert/ESTimes tower, but avoids O(p) temporary series per Taylor
+       monomial. *)
+    If[zeroQ[b],
+      err["E2", <|"m" -> m, "b" -> b, "p" -> p,
+        "Detail" -> "zero antiderivative denominator reached the primitive"|>]];
+    outMin = -1; outMax = width - 2;
+    coeffs = Table[prefactor*Sum[
+        Module[{q = k - p + j + 1},
+          If[q < 0, 0,
+            (-1)^j*pow[logT, p - j]/(p - j)! *
+              pow[b, -j - 1]*pow[b*logT, q]/q!]],
+        {j, 0, p}],
+      {k, outMin, outMax}],
+    (* alpha=a0+b eps with a0!=0.  Coefficient r of
+         Exp[b L eps] (a0+b eps)^(-j-1)
+       is a short binomial convolution.  The b=0 branch is kept explicit
+       both for speed and to avoid manufacturing 0^0 indeterminacies in
+       symbolic kernels. *)
+    outMin = p; outMax = width + p;
+    If[zeroQ[b],
+      coeffs = PadRight[{prefactor*Sum[
+          (-1)^j*pow[logT, p - j]/((p - j)!*pow[a0, j + 1]),
+          {j, 0, p}]}, outMax - outMin + 1],
+      coeffs = Table[Module[{r = k - p},
+          prefactor*pow[b, r]*Sum[
+            (-1)^j*pow[logT, p - j]/(p - j)! *
+              Sum[pow[logT, r - s]/(r - s)! * (-1)^s*
+                  Binomial[j + s, s]/pow[a0, j + 1 + s],
+                {s, 0, r}],
+            {j, 0, p}]],
+        {k, outMin, outMax}]]];
+  esNew[outMin, integralNorm /@ coeffs]];
 
 SectorMonomialIntegral[m_, b_, p_Integer, T_, kMaxOut_Integer] := Module[{},
   If[!FreeQ[m, _?InexactNumberQ] || !FreeQ[b, _?InexactNumberQ] || p < 0,
@@ -182,18 +205,14 @@ IntegrateLocalSolution[ls0_Association, {t1_, t2_}] := Module[
       vals = sumInteriorPaired[ls, -t1, t2, kmin, kmax, ncols, ncomp]],
     (* center outside: plain F(t2) - F(t1) *)
     True,
-    vals = Module[{f2, f1},
+    vals = Module[{},
       If[TrueQ[t1 > 0],
-        f2 = sumAntiderivative[ls, t2, kmin, kmax, ncols, ncomp];
-        f1 = sumAntiderivative[ls, t1, kmin, kmax, ncols, ncomp];
-        MapThread[esAdd[#1, esScale[-1, #2]] &, {f2, f1}],
+        sumIntervalAntiderivative[ls, t1, t2, kmin, kmax, ncols, ncomp],
         (* both negative: crossing-evaluated arm *)
-        Module[{lsX = DiffExp2`Transport`ApplyCrossing[ls, resolveSigma[ls]], g2, g1},
-          g2 = sumAntiderivative[lsX, -t1, lsX["EpsWindow", "Min"],
-            lsX["EpsWindow", "CompleteMax"], ncols, ncomp];
-          g1 = sumAntiderivative[lsX, -t2, lsX["EpsWindow", "Min"],
-            lsX["EpsWindow", "CompleteMax"], ncols, ncomp];
-          MapThread[esAdd[#1, esScale[-1, #2]] &, {g2, g1}]]]]];
+        Module[{lsX = DiffExp2`Transport`ApplyCrossing[ls, resolveSigma[ls]]},
+          sumIntervalAntiderivative[lsX, -t2, -t1,
+            lsX["EpsWindow", "Min"], lsX["EpsWindow", "CompleteMax"],
+            ncols, ncomp]]]]];
   <|"Values" -> vals,
     "EpsWindow" -> <|"Min" -> Min[esMin /@ vals], "CompleteMax" -> Min[esCM /@ vals]|>,
     "TWindowUsed" -> ncols - 1|>];
@@ -205,47 +224,109 @@ resolveSigma[ls_] := Module[{sg = DiffExp2`SectorSeries`ChartImSign[ls]},
      Euclidean combination *)
   If[MemberQ[{1, -1}, sg], sg, 1]];
 
+(* Contract many coefficient slabs with their primitive epsilon series in
+   one pass.  The former implementation constructed one EpsSeries per
+   (sector, Taylor order, component), multiplied it, then ESAdd-ed it into
+   an ever-growing accumulator.  That repeatedly copied and normalized the
+   full output window.  Here every term's honest ESTimes window is computed
+   first, the ESAdd intersection is taken once, and ordinary list
+   convolutions accumulate directly into that certified window.
+
+   A term is {coeffSlab, base}, where coeffSlab has dimensions
+   {kmax-kmin+1,ncomp}.  Exact-zero slabs still participate in the window
+   intersection, matching ESTimes followed by ESAdd exactly; callers omit a
+   term only where their existing regularization rule declares the monomial
+   structurally inactive. *)
+integralNorm[c_] := If[NumericQ[c], c, Together[Expand[c]]];
+
+contractIntegralTerms[terms_List, kmin_Integer, kmax_Integer,
+    ncomp_Integer] := Module[
+  {termMins, termMaxs, outMin, outMax, acc},
+  If[terms === {}, Return[Table[esZero[kmax], {ncomp}], Module]];
+  termMins = (kmin + esMin[#[[2]]]) & /@ terms;
+  termMaxs = (Min[kmax + esMin[#[[2]]],
+      kmin + esCM[#[[2]]]]) & /@ terms;
+  outMin = Min[termMins];
+  outMax = Min[termMaxs];
+  If[outMax < outMin,
+    err["E10", <|"Min" -> outMin, "CompleteMax" -> outMax,
+      "Detail" -> "internal integral contraction produced an empty epsilon window"|>]];
+  acc = ConstantArray[0, {outMax - outMin + 1, ncomp}];
+  Do[Module[{slab = terms[[i, 1]], base = terms[[i, 2]], pmin,
+      pmax, count, start, bc},
+    pmin = termMins[[i]];
+    pmax = Min[termMaxs[[i]], outMax];
+    If[pmax >= pmin,
+      count = pmax - pmin + 1;
+      start = pmin - outMin + 1;
+      bc = base["Coeffs"];
+      Do[
+        acc[[start ;; start + count - 1, c]] +=
+          Take[ListConvolve[bc, slab[[All, c]], {1, -1}, 0], count],
+        {c, ncomp}]]],
+    {i, Length[terms]}];
+  Table[esNew[outMin, integralNorm /@ acc[[All, c]]], {c, ncomp}]];
+
 (* sum of endpoint sector integrals over [0, T]; skip = offender list
    (cancelled divergent monomials are EXCLUDED from every sector) *)
 sumSectorIntegrals[ls_, T_, kmin_, kmax_, ncols_, ncomp_, skip_] := Module[
-  {span = kmax - kmin, acc},
-  acc = Table[None, {ncomp}];
-  Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
-    Do[Module[{m = Together[a + n], base},
-      If[zeroQ[b] && TrueQ[m + 1 <= 0],
-        Null,  (* gated: merged coefficient verified zero *)
-        (* The primitive is multiplied by a coefficient window of width
-           span+1.  Its private depth is relative to that width, not to the
-           absolute (possibly very negative) CompleteMax. *)
-        base = SectorMonomialIntegral[m, b, p, T, span + p + 2];
-        Do[Module[{cESc},
-          cESc = esNew[kmin, Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
-          Module[{term = esTimes[cESc, base]},
-            acc[[c]] = If[acc[[c]] === None, term, esAdd[acc[[c]], term]]]],
-          {c, ncomp}]]],
-      {n, 0, ncols - 1}]],
-    {sec, ls["Sectors"]}];
-  Map[If[# === None, esZero[kmax], #] &, acc]];
+  {span = kmax - kmin, harvested, terms},
+  harvested = Reap[
+    Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
+      Do[Module[{m = Together[a + n], base},
+        If[!(zeroQ[b] && TrueQ[m + 1 <= 0]),
+          (* The primitive is multiplied by a coefficient window of width
+             span+1.  Its private depth is relative to that width, not to the
+             absolute (possibly very negative) CompleteMax. *)
+          base = SectorMonomialIntegral[m, b, p, T, span + p + 2];
+          Sow[{arr[[All, n + 1, All]], base}, "term"]]],
+        {n, 0, ncols - 1}]],
+      {sec, ls["Sectors"]}], "term"][[2]];
+  terms = If[harvested === {}, {}, First[harvested]];
+  contractIntegralTerms[terms, kmin, kmax, ncomp]];
 
-(* plain antiderivative sum at T > 0 (no boundary subtleties) *)
-sumAntiderivative[ls_, T_, kmin_, kmax_, ncols_, ncomp_] := Module[
-  {acc, span = kmax - kmin},
-  acc = Table[None, {ncomp}];
-  Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
-    Do[Module[{m = Together[a + n], base},
-      base = If[zeroQ[b] && zeroQ[m + 1],
-        (* alpha == 0: F = eps^p Log^(p+1) t/((p+1) p!) *)
-        esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/((p + 1)*p!)}, kmax - kmin + 4]], p],
-        DiffExp2`EpsSeries`ESTruncate[
-          antiderivativeAt[m, b, p, T, span + p + 2], span + p + 2]];
-      Do[Module[{cESc},
-        cESc = esNew[kmin, Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
-        Module[{term = esTimes[cESc, base]},
-          acc[[c]] = If[acc[[c]] === None, term, esAdd[acc[[c]], term]]]],
-        {c, ncomp}]],
-      {n, 0, ncols - 1}]],
-    {sec, ls["Sectors"]}];
-  Map[If[# === None, esZero[kmax], #] &, acc]];
+(* Manifestly combined same-side pole interval.  For m=-1,b!=0 the two
+   endpoint primitives each start at eps^-1, but their difference is regular:
+     eps^p/p! d_beta^p [(Exp[beta L2]-Exp[beta L1])/beta], beta=b eps.
+   Building that series as one owner prevents a fake Laurent row and the
+   associated one-order CompleteMax loss. *)
+intervalPoleIntegral[b_, p_, T1_, T2_, width_Integer] := Module[
+  {wp = DiffExp2`Config`CFG["WorkingPrecision"], l1, l2},
+  l1 = If[FreeQ[T1, _Symbol],
+    N[Log[T1], DiffExp2`Tolerances`$InputPrecisionFactor*wp], Log[T1]];
+  l2 = If[FreeQ[T2, _Symbol],
+    N[Log[T2], DiffExp2`Tolerances`$InputPrecisionFactor*wp], Log[T2]];
+  esNew[p, Table[
+    pow[b, q]*(pow[l2, p + q + 1] - pow[l1, p + q + 1])/
+      (p!*q!*(p + q + 1)),
+    {q, 0, width}]]];
+
+(* Plain antiderivative difference on one side of the center.  All
+   monomials are assembled before the epsilon contraction, and the pole
+   cell above is paired before any EpsSeries window arithmetic. *)
+sumIntervalAntiderivative[ls_, T1_, T2_, kmin_, kmax_, ncols_, ncomp_] := Module[
+  {span = kmax - kmin, harvested, terms},
+  harvested = Reap[
+    Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
+      Do[Module[{m = Together[a + n], base},
+        base = Which[
+          zeroQ[m + 1] && zeroQ[b],
+            (* alpha == 0: elementary real-log antiderivative difference. *)
+            esShift[esNew[0, PadRight[{
+              (pow[Log[T2], p + 1] - pow[Log[T1], p + 1])/
+                ((p + 1)*p!)}, span + 4]], p],
+          zeroQ[m + 1],
+            intervalPoleIntegral[b, p, T1, T2, span + 3],
+          True,
+            esAdd[
+              antiderivativeAt[m, b, p, T2, span + p + 2],
+              esScale[-1, antiderivativeAt[m, b, p, T1,
+                span + p + 2]]]];
+        Sow[{arr[[All, n + 1, All]], base}, "term"]],
+        {n, 0, ncols - 1}]],
+      {sec, ls["Sectors"]}], "term"][[2]];
+  terms = If[harvested === {}, {}, First[harvested]];
+  contractIntegralTerms[terms, kmin, kmax, ncomp]];
 
 (* interior gate: which (m,p) monomials are PV-paired (b=0, m+1 <= 0);
    odd/even handled by the pairing formulas below; returns Null (no skip) *)
@@ -299,45 +380,42 @@ pairedRegularIntegral[m_, b_, p_, A_, B_, sigma_, kMaxOut_] := Module[
    negative arm, with the m=-1 pole cell expanded in its combined regular
    form above rather than as two independently shifted Laurent series. *)
 sumInteriorPaired[ls_, A_, B_, kmin_, kmax_, ncols_, ncomp_] := Module[
-  {acc = Table[None, {ncomp}], sigma = None, needSigma, span = kmax - kmin},
+  {sigma = None, needSigma, span = kmax - kmin, harvested, terms},
   needSigma = AnyTrue[ls["Sectors"], Function[sec,
     !zeroQ[sec["b"]] && !AllTrue[Flatten[sec["Coeffs"]], # === 0 &]]];
   If[needSigma, sigma = interiorSigma[ls]];
-  Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
-    If[zeroQ[b] && !IntegerQ[a] &&
-        !AllTrue[Flatten[arr], # === 0 &],
-      err["E8", <|"a" -> a,
-        "Detail" -> "real-log PV for a fractional-a b=0 sector is undefined"|>]];
-    Do[Module[{m = Together[a + n], base},
-      (* An exact-zero coefficient slab is structurally inactive: it neither
-         requires a branch sign nor constrains the result window. *)
-      If[AllTrue[Flatten[arr[[All, n + 1, All]]], # === 0 &], Continue[]];
-      base = Which[
-        zeroQ[b] && zeroQ[m + 1],
-          esShift[esNew[0, PadRight[{
-            (pow[Log[B], p + 1] - pow[Log[A], p + 1])/((p + 1)*p!)},
-            span + 4]], p],
-        zeroQ[b],
-          (* Int_{-A}^B with real Log|t|: the negative-arm substitution
-             contributes (-1)^m.  For m<-1 this is the defined Hadamard
-             finite part; for m>-1 it is the ordinary integral. *)
-          esAdd[antiderivativeAt[m, 0, p, B, span + p + 2],
-            esScale[(-1)^m, antiderivativeAt[m, 0, p, A, span + p + 2]]],
-        zeroQ[m + 1],
-          pairedPoleIntegral[b, p, A, B, sigma, span + 3],
-        True,
-          (* The base-series depth is relative to the coefficient-window
-             width, not to its absolute (possibly negative) upper order. *)
-          pairedRegularIntegral[m, b, p, A, B, sigma, p + span + 3]];
-      Do[Module[{cESc, term},
-        cESc = esNew[kmin,
-          Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
-        term = esTimes[cESc, base];
-        acc[[c]] = If[acc[[c]] === None, term, esAdd[acc[[c]], term]]],
-        {c, ncomp}]],
-      {n, 0, ncols - 1}]],
-    {sec, ls["Sectors"]}];
-  Map[If[# === None, esZero[kmax], #] &, acc]];
+  harvested = Reap[
+    Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
+      If[zeroQ[b] && !IntegerQ[a] &&
+          !AllTrue[Flatten[arr], # === 0 &],
+        err["E8", <|"a" -> a,
+          "Detail" -> "real-log PV for a fractional-a b=0 sector is undefined"|>]];
+      Do[Module[{m = Together[a + n], base},
+        (* An exact-zero coefficient slab is structurally inactive: it neither
+           requires a branch sign nor constrains the result window. *)
+        If[!AllTrue[Flatten[arr[[All, n + 1, All]]], # === 0 &],
+          base = Which[
+            zeroQ[b] && zeroQ[m + 1],
+              esShift[esNew[0, PadRight[{
+                (pow[Log[B], p + 1] - pow[Log[A], p + 1])/((p + 1)*p!)},
+                span + 4]], p],
+            zeroQ[b],
+              (* Int_{-A}^B with real Log|t|: the negative-arm substitution
+                 contributes (-1)^m.  For m<-1 this is the defined Hadamard
+                 finite part; for m>-1 it is the ordinary integral. *)
+              esAdd[antiderivativeAt[m, 0, p, B, span + p + 2],
+                esScale[(-1)^m, antiderivativeAt[m, 0, p, A, span + p + 2]]],
+            zeroQ[m + 1],
+              pairedPoleIntegral[b, p, A, B, sigma, span + 3],
+            True,
+              (* The base-series depth is relative to the coefficient-window
+                 width, not to its absolute (possibly negative) upper order. *)
+              pairedRegularIntegral[m, b, p, A, B, sigma, p + span + 3]];
+          Sow[{arr[[All, n + 1, All]], base}, "term"]]],
+        {n, 0, ncols - 1}]],
+      {sec, ls["Sectors"]}], "term"][[2]];
+  terms = If[harvested === {}, {}, First[harvested]];
+  contractIntegralTerms[terms, kmin, kmax, ncomp]];
 
 (* ---- 2.4 endpoint limit (the FT drop rule) ---- *)
 

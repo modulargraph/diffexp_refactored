@@ -158,7 +158,8 @@ Dropped keys — `UpdateConfiguration`/`CFG` reject each with a DEDICATED error
 Accepted input elements (old parser DiffExp/DiffExp.m:140-148): either
 `poly ± I*Global`δ` (the δ-coefficient/I gives the sign) or `{poly, sign}`.
 Normalized stored form: list of `{poly, sign}` with `sign ∈ {+1, -1}` and
-`poly` an irreducible polynomial in the PINNED kinematic variables
+`poly` a nonzero irreducible polynomial in at least one PINNED kinematic
+variable (zero, constants, and non-polynomial expressions are E7)
 (irreducibility check via FactorList as in DiffExp/DiffExp.m:164-168: more
 than one nontrivial factor -> E6; message text "Physical singularities should
 be irreducible polynomials!").  SIGN-AWARE canonicalization (DEC-16): the
@@ -261,8 +262,10 @@ E5  `LineParameter` ∈ Variables (by name): old text preserved — "The symbol
     for the line parameter can't be equal to one of the kinematic invariants
     or masses." (DiffExp/DiffExp.m:133).
 E6  Reducible DeltaPrescriptions polynomial (3.3).
-E7  DeltaPrescriptions sign not ±1 after normalization, δ appearing
-    nonlinearly, or two entries whose canonicalized polynomials coincide with
+E7  DeltaPrescriptions sign not ±1 after normalization, a zero/constant/
+    non-polynomial factor, reserved δ embedded in the `{poly, sign}` form,
+    δ appearing nonlinearly, or two entries whose
+    canonicalized polynomials coincide with
     OPPOSITE signs (DEC-16 sign-aware dedup; the old dedup was sign-blind):
     error naming the offending element(s) (old parser would compute a garbage
     Coefficient silently, DiffExp.m:142).

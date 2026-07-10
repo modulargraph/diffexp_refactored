@@ -32,9 +32,11 @@ pinAll[expr_] := expr /. s_Symbol /; Context[s] =!= "System`" :> PinnedVariable[
 (* DeltaPrescriptions: parse, validate, sign-aware canonicalization (spec 3.3, DEC-16). *)
 parseOnePrescription[{poly_, sign_}] := {pinAll[poly], sign};
 parseOnePrescription[expr_] := Module[{d = Global`\[Delta], c, poly},
-  c = Coefficient[expr, Global`\[Delta]];
-  poly = expr /. Global`\[Delta] -> 0;
-  If[!FreeQ[poly, Global`\[Delta]] || PossibleZeroQ[c],
+  If[!PolynomialQ[expr, d] || Exponent[expr, d] =!= 1,
+    err["E7", <|"Element" -> expr, "Message" -> "delta must appear exactly linearly with coefficient ±I"|>]];
+  c = Coefficient[expr, d, 1];
+  poly = expr /. d -> 0;
+  If[!FreeQ[c, d] || PossibleZeroQ[c],
     err["E7", <|"Element" -> expr, "Message" -> "delta must appear exactly linearly with coefficient ±I"|>]];
   {pinAll[poly], Simplify[c/I]}];
 canonOrient[{poly_, sign_}] := Module[{vars, lead, nc},
@@ -42,9 +44,17 @@ canonOrient[{poly_, sign_}] := Module[{vars, lead, nc},
   lead = First[MonomialList[poly, vars]];
   nc = lead /. s_Symbol /; Context[s] === "Global`" :> 1;
   If[TrueQ[nc < 0], {Expand[-poly], -sign}, {Expand[poly], sign}]];
-validatePrescription[{poly_, sign_}] := Module[{fl},
+validatePrescription[{poly_, sign_}] := Module[{fl, vars},
   If[!MemberQ[{1, -1}, sign],
     err["E7", <|"Element" -> {poly, sign}, "Message" -> "prescription sign must be +1 or -1"|>]];
+  If[!FreeQ[poly, Global`\[Delta]],
+    err["E7", <|"Element" -> {poly, sign},
+      "Message" -> "reserved delta may appear only in the poly ± I delta expression form"|>]];
+  vars = DeleteDuplicates[Cases[poly,
+    s_Symbol /; Context[s] === "Global`", {0, Infinity}]];
+  If[TrueQ[PossibleZeroQ[poly]] || vars === {} || !PolynomialQ[poly, vars],
+    err["E7", <|"Element" -> {poly, sign},
+      "Message" -> "prescription factor must be a nonzero polynomial in at least one pinned variable"|>]];
   fl = Select[FactorList[poly], !NumericQ[First[#]] &];
   If[Length[fl] > 1 || (Length[fl] === 1 && fl[[1, 2]] > 1),
     err["E6", <|"Polynomial" -> poly, "Message" -> "Physical singularities should be irreducible polynomials!"|>]];
@@ -69,24 +79,13 @@ $schema = <|
     "Normalize" -> (Replace[#, {"Before" -> True, "After" -> True, None -> False}] &)|>,
   "DeltaPrescriptions" -> <|"Type" -> ListQ, "Default" -> {}, "Normalize" -> parsePrescriptions|>,
   "DivisionOrder" -> <|"Type" -> (IntegerQ[#] && # >= 2 &), "Default" -> 3, "Normalize" -> None|>,
-  (* StepDivisionOrder: the chart PLACEMENT stride divisor k_eff.  Match
-     points keep sitting at radius/DivisionOrder (that key's meaning is
-     unchanged); k_eff only sets how far the next chart center is placed.
-     Marching toward a singularity the remaining distance shrinks by
-     k_eff/(1+k_eff) per chart, so SMALLER values mean FEWER charts; the
-     price is series evaluations farther out in the convergence disk
-     (worst-case ratio inventory in Transport.m stepDivisor).  Automatic
-     derives the largest safe stride from ExpansionOrder so truncation
-     tails stay below the 1e-14 design line, and never exceeds
-     DivisionOrder (low ExpansionOrder reproduces the classic coupled
-     geometry exactly). *)
+  (* Compatibility key retained for old configurations and checkpoint
+     metadata.  The active classic GetCPL/GetCPR planner couples placement
+     and matching through DivisionOrder, so StepDivisionOrder no longer
+     changes SegmentLine geometry. *)
   "StepDivisionOrder" -> <|"Type" -> (# === Automatic ||
       ((IntegerQ[#] || Head[#] === Rational) && 1 <= # <= 16) &),
-    (* default = classic coupled geometry; Automatic (wide strides) is
-       structurally validated but currently fails SILENTLY on multi-master
-       systems (binary trim floor absorbs supra-floor truncation residue -
-       see the M5j branch) - opt-in until the tail-honest gates land *)
-    "Default" -> 4, "Normalize" -> None|>,
+    "Default" -> 3, "Normalize" -> None|>,
   "EpsilonOrder" -> <|"Type" -> (IntegerQ[#] && # >= 0 &), "Default" -> 4, "Normalize" -> None|>,
   "EstimateError" -> <|"Type" -> (MemberQ[{False, True, "Fast"}, #] &), "Default" -> "Fast", "Normalize" -> None|>,
   "ExpansionOrder" -> <|"Type" -> (IntegerQ[#] && # >= DiffExp2`Tolerances`$MinExpansionOrder &), "Default" -> 50, "Normalize" -> None|>,

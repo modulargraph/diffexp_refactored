@@ -76,11 +76,51 @@ TransportEndpoint[sys_Association, bvals_, from_, to_, OptionsPattern[]] := Modu
 
 (* ---- LineIntegral ----
    Integrate[c(x,eps).f(x), {x, lo, hi}]: transport from the anchor across
-   [lo, hi] keeping charts; tile the interval by chart ownership (each
-   point belongs to the nearest kept chart); per tile: MultiplyRational by
-   each c-component IN CHART COORDINATES (x = center + t), assemble the
+   [lo, hi] keeping charts; tile the interval by certified half-disk overlap
+   ownership boundaries; per tile: MultiplyRational by
+   each c-component IN CHART COORDINATES (x = center + scale t), including
+   the affine dx = scale dt Jacobian, assemble the
    scalar LocalSolution, then integrate ONCE.  Combine-before-integrate is
    required when endpoint/PV divergences cancel between master components. *)
+
+halfRadiusTiles[kept_List, lo_, hi_] := Module[
+  {ordered = SortBy[kept, N[#["Chart", "Center"], 30] &], cs, rs, bps},
+  cs = #["Chart", "Center"] & /@ ordered;
+  rs = #["Chart", "Radius"] & /@ ordered;
+  bps = Join[{lo}, Table[Module[{mid, lA, lB, raw, gap, cand},
+      (* The transport error certificate probes each kept solution at R/2.
+         Ownership boundaries must stay in the overlap of those certified
+         half-disks; the former 0.9 R clamp was convergent but could make the
+         reported error estimate nonconservative. *)
+      lA = cs[[i]] + rs[[i]]/2;
+      lB = cs[[i + 1]] - rs[[i + 1]]/2;
+      If[TrueQ[N[lB, 40] > N[lA, 40]],
+        err["E9", <|"Charts" -> {cs[[i]], cs[[i + 1]]},
+          "Radii" -> {rs[[i]], rs[[i + 1]]},
+          "HalfDiskGap" -> N[lB - lA, 20],
+          "Detail" -> "adjacent kept charts have no certified half-radius tiling overlap"|>]];
+      (* Preserve global monotonicity across unequal radii and duplicate
+         anchor charts: start from the geometric center midpoint, then clip
+         it into the certified half-disk overlap.  The overlap midpoint can
+         move backward at the next pair even when centers are sorted. *)
+      mid = (cs[[i]] + cs[[i + 1]])/2;
+      raw = RootReduce[Max[Min[mid, lA], lB]];
+      gap = N[lA - lB, 40];
+      cand = If[TrueQ[gap > 0],
+        Rationalize[N[raw, 30], gap/16], raw];
+      If[TrueQ[N[lB, 40] <= N[cand, 40] <= N[lA, 40]], cand, raw]],
+    {i, Length[cs] - 1}], {hi}];
+  Do[If[!TrueQ[N[bps[[i]], 40] <= N[bps[[i + 1]], 40]],
+    err["E9", <|"Breakpoints" -> {bps[[i]], bps[[i + 1]]},
+      "Detail" -> "non-monotone tile breakpoints (tiling inversion)"|>]],
+    {i, Length[bps] - 1}];
+  Do[If[!TrueQ[Max[Abs[N[bps[[i]] - cs[[i]], 40]],
+          Abs[N[bps[[i + 1]] - cs[[i]], 40]]] <= N[rs[[i]], 40]/2],
+    err["E9", <|"Chart" -> cs[[i]], "Radius" -> rs[[i]],
+      "TileBounds" -> {bps[[i]], bps[[i + 1]]},
+      "Detail" -> "tile extends beyond the chart's certified half-radius envelope"|>]],
+    {i, Length[cs]}];
+  Table[{ordered[[i]], bps[[i]], bps[[i + 1]]}, {i, Length[cs]}]];
 
 Options[LineIntegral] = {"ExtraSingularFactors" -> {},
   "PrecomputedCharts" -> None};
@@ -109,34 +149,14 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     err["E9", <|"Detail" -> "empty integration range or anchor outside"|>]];
   If[Environment["DEBUG_LI"] === "1",
     Print["    LI: transports done t=", SessionTime[], " ncharts=", Length[keptAll]]];
-  (* tile [lo, hi]: breakpoints between adjacent charts, CLAMPED into the
-     overlap of their disks - midpoints alone break when radii differ
-     wildly (a tiny chart squeezed against a singularity next to a big
-     neighbor would receive a tile far outside its disk) *)
-  keptAll = SortBy[keptAll, N[#["Chart"]["Center"], 30] &];
-  tiles = Module[{cs = #["Chart"]["Center"] & /@ keptAll,
-      rs = #["Chart"]["Radius"] & /@ keptAll, bps},
-    bps = Join[{lo},
-      Table[Module[{mid = (cs[[i]] + cs[[i + 1]])/2,
-          lA = cs[[i]] + (9/10)*rs[[i]], lB = cs[[i + 1]] - (9/10)*rs[[i + 1]]},
-        If[TrueQ[N[lB, 30] > N[lA, 30]],
-          err["E9", <|"Charts" -> {cs[[i]], cs[[i + 1]]},
-            "Radii" -> {rs[[i]], rs[[i + 1]]},
-            "Detail" -> "adjacent kept charts do not overlap; tiling hole"|>]];
-        Rationalize[N[Max[Min[mid, lA], lB], 30], N[rs[[i + 1]], 30]/64]],
-        {i, Length[cs] - 1}], {hi}];
-    (* a non-monotone breakpoint pair would silently DROP the inverted
-       tile while both neighbors integrate the overlap (double counting) *)
-    Do[If[!TrueQ[N[bps[[i]], 30] <= N[bps[[i + 1]], 30]],
-      err["E9", <|"Breakpoints" -> {bps[[i]], bps[[i + 1]]},
-        "Detail" -> "non-monotone tile breakpoints (tiling inversion)"|>]],
-      {i, Length[bps] - 1}];
-    Table[{keptAll[[i]], bps[[i]], bps[[i + 1]]}, {i, Length[cs]}]];
+  tiles = halfRadiusTiles[keptAll, lo, hi];
   Do[Module[{entry = tile[[1]], a = tile[[2]], b2 = tile[[3]], ls, center,
-      t1, t2},
+      scale, t1, t2},
     If[TrueQ[b2 > a],
       ls = entry["LocalSolution"]; center = entry["Chart"]["Center"];
-      t1 = Together[a - center]; t2 = Together[b2 - center];
+      scale = ls["ChartMap", "Scale"];
+      t1 = Together[(a - center)/scale];
+      t2 = Together[(b2 - center)/scale];
       (* Project each selected component to a scalar LocalSolution, multiply,
          then combine BEFORE integration so the endpoint/PV cancellation
          gate sees the assembled scalar integrand. *)
@@ -147,7 +167,8 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
               Join[#, <|"Coeffs" -> #["Coeffs"][[All, All, {ci}]]|>] &,
               ls["Sectors"]]|>];
             lsM = DiffExp2`SectorSeries`MultiplyRational[lsP,
-              Together[cc /. var -> center + Global`t], Global`t];
+              Together[scale*(cc /. var -> center + scale*Global`t)],
+              Global`t];
             AppendTo[pieces, lsM];
             If[Environment["DEBUG_LI"] === "1",
               Print["      tile mul done t=", SessionTime[]]]]],

@@ -91,7 +91,8 @@ familyCollisionDepth[roots_List, collisions_List] := Module[{perRoot},
 
 PrepareChart[sys_Association, chart_Association] := Module[
   {pcKey = {Hash[sys["Matrix"]], chart["Center"], Lookup[chart, "Scale", 1],
-    Lookup[chart, "Radius", None]}},
+    Lookup[chart, "Radius", None], Lookup[chart, "LocalRadius", None],
+    Lookup[chart, "Prescriptions", {}]}},
   If[KeyExistsQ[$pcCache, pcKey], Return[$pcCache[pcKey]]];
   $pcCache[pcKey] = prepareChartCore[sys, chart]];
 
@@ -136,7 +137,8 @@ prepareChartCore[sys_Association, chart_Association] := Module[
   VInv = Map[Cancel[Together[#]] &, Inverse[V], {2}];
   <|"ChartVar" -> t, "Center" -> x0,
     "ChartMap" -> <|"Center" -> x0, "Scale" -> beta|>,
-    "Radius" -> chart["Radius"],
+    (* LocalSolution evaluation is in t, not the physical line variable. *)
+    "Radius" -> Lookup[chart, "LocalRadius", chart["Radius"]],
     "SystemHash" -> Hash[sys["Matrix"]],   (* solve-cache flush tag *)
     "Prescriptions" -> Lookup[chart, "Prescriptions", {}],
     "SystemSize" -> d,

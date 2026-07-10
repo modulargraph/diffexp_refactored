@@ -11,7 +11,7 @@ assert[label_String, cond_] := If[TrueQ[cond],
 SetAttributes[catchDE2, HoldFirst];
 catchDE2[expr_] := Quiet[Catch[expr, "DiffExp2Error"]];
 
-eps = Global`eps; rho = Global`rho;
+eps = Global`eps; rho = Global`rho; x = Global`x; t = Global`t;
 catchDE2[DiffExp2`Config`LoadConfiguration[{
   "WorkingPrecision" -> 100, "ExpansionOrder" -> 10,
   "EpsilonOrder" -> 2, "DivisionOrder" -> 3,
@@ -165,6 +165,114 @@ assert["grouped_lower_frame_guard_parity",
   FailureQ[badOld] && badOld["ID"] === "E4" &&
   FailureQ[badNew] && badNew["ID"] === "E4"];
 
+(* Cross-lag fusion: two B_j operators with the same normalized Q carry
+   distinct finite-top boundary corrections.  Summing their B_j.U_j right
+   sides before ONE causal division must be exactly identical to the old
+   sum of two separately divided results. *)
+fbFuse = -2; WFuse = 5; topFuse = fbFuse + WFuse - 1;
+lagMatrices = {
+  {{(1 + 2 eps + 3 eps^2 + 4 eps^3 + 5 eps^4)/(1 + eps)}},
+  {{eps^-1 (2 - rho eps + 3 eps^2 + 7 eps^4)/(1 + eps)}}
+};
+lagHybrid = DiffExp2`Solve`Private`prepareNhatHybrid[
+  lagMatrices, eps, fbFuse, WFuse, csTest];
+lagGroups = lagHybrid["RationalGroups"];
+lagU = {{{0, 0, 2, -1, 3}}, {{0, 0, -4, 5, 1}}};
+lagOld = Total[MapThread[
+  DiffExp2`Solve`Private`applyRationalMatrixGroups[
+    #1, #2, fbFuse, WFuse, csTest] &, {lagGroups, lagU}]];
+lagRHS = Total[MapThread[
+  DiffExp2`Solve`Private`rationalMatrixGroupNumerator[
+    First[#1], #2, fbFuse, WFuse, csTest] &, {lagGroups, lagU}]];
+lagFused = DiffExp2`Solve`Private`divideRationalMatrixRHS[
+  lagRHS, lagGroups[[1, 1, "DenominatorCoefficients"]], WFuse];
+assert["grouped_cross_lag_same_q_finite_top_exact",
+  AllTrue[Flatten[lagOld - lagFused], Together[#] === 0 &] &&
+  AllTrue[lagGroups,
+    Max[#[[1, "NumeratorSp", All, 1]]] > topFuse &]];
+
+(* Per-contribution lower guards are intentionally stronger than checking
+   the final fused sum.  These two contributions cancel algebraically, but
+   each would discard a nonzero eps^-1 input and must remain loud. *)
+cancelMatrices = {{{eps^-1/(1 + eps)}}, {{-eps^-1/(1 + eps)}}};
+cancelHybrid = DiffExp2`Solve`Private`prepareNhatHybrid[
+  cancelMatrices, eps, -1, 5, csTest];
+cancelGroups = cancelHybrid["RationalGroups"];
+cancelU = {{1, 2, 3, 4, 5}};
+cancelFused = catchDE2[Module[{rr = ConstantArray[0, {1, 5}]},
+  Do[rr += DiffExp2`Solve`Private`rationalMatrixGroupNumerator[
+      First[gg], cancelU, -1, 5, csTest], {gg, cancelGroups}];
+  DiffExp2`Solve`Private`divideRationalMatrixRHS[
+    rr, cancelGroups[[1, 1, "DenominatorCoefficients"]], 5]]];
+assert["grouped_cross_lag_cancellation_keeps_each_underflow_witness",
+  FailureQ[cancelFused] && cancelFused["ID"] === "E4"];
+
+(* End-to-end production path.  The first scalar system has one Q shared by
+   Taylor lags 1 and 2; the second has distinct Qs.  Toggle the private seam
+   WITHOUT clearing the homogeneous cache to also pin its memo-key mode. *)
+fusionChart[name_] := <|"ChartVar" -> t, "Center" -> 0, "Scale" -> 1,
+  "Radius" -> 1, "LocalRadius" -> 1, "Singular" -> True, "Name" -> name|>;
+fusionReq = <|"EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 2|>,
+  "TOrder" -> 6|>;
+fusionSystemSolve[A_, name_] := Module[{cs, fused, unfused, prep, sym},
+  DiffExp2`Solve`ClearSolveCaches[];
+  cs = catchDE2[DiffExp2`Solve`PrepareChart[
+    <|"Matrix" -> A, "Variable" -> x|>, fusionChart[name]]];
+  If[FailureQ[cs], Return[{cs, cs, cs}]];
+  sym = DiffExp2`Solve`Private`clearedSymbolic[cs];
+  prep = catchDE2[DiffExp2`Solve`Private`prepareCleared[cs, -6, 15, sym]];
+  fused = Block[{
+      DiffExp2`Solve`Private`$disableRationalDenominatorFusion = False},
+    catchDE2[DiffExp2`Solve`SolveChart[cs, fusionReq]]];
+  (* no cache clear: fusion mode must be part of the memo key *)
+  unfused = Block[{
+      DiffExp2`Solve`Private`$disableRationalDenominatorFusion = True},
+    catchDE2[DiffExp2`Solve`SolveChart[cs, fusionReq]]];
+  {fused, unfused, prep}];
+
+sameQRun = fusionSystemSolve[
+  {{eps/x + (1 + x)/(1 + 2 eps)}}, "grouped_fusion_same_q"];
+assert["grouped_cross_lag_same_q_end_to_end_and_cache_key",
+  !AnyTrue[sameQRun, FailureQ] &&
+  sameQRun[[1, "Basis", "Columns"]] ===
+    sameQRun[[2, "Basis", "Columns"]] &&
+  Length[sameQRun[[3, "NhatRationalDenominators"]]] === 1 &&
+  Count[Flatten[sameQRun[[3, "NhatRationalGroups"]], 1],
+    g_Association /; KeyExistsQ[g, "DenominatorIndex"]] >= 2];
+
+distinctQRun = fusionSystemSolve[
+  {{eps/x + 1/(1 + 2 eps) + x/(1 - eps + eps^2)}},
+  "grouped_fusion_distinct_q"];
+assert["grouped_cross_lag_distinct_q_stays_separate",
+  !AnyTrue[distinctQRun, FailureQ] &&
+  distinctQRun[[1, "Basis", "Columns"]] ===
+    distinctQRun[[2, "Basis", "Columns"]] &&
+  Length[distinctQRun[[3, "NhatRationalDenominators"]]] === 2];
+
+(* Inhomogeneous recurrence shares the same grouped operator path.  A
+   nonresonant fractional-power source exercises source validity, the
+   particular solve, and homogeneous compensation-target cache behavior. *)
+sourceFusion = <|"Sectors" -> {<|"a" -> 1/2, "b" -> 0, "p" -> 0,
+    "Coeffs" -> Table[{If[k === 0 && n === 0, 1, 0]},
+      {k, 0, 2}, {n, 0, 6}]|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 2|>,
+  "TWindow" -> <|"CompleteMax" -> 6|>|>;
+sourceCS = catchDE2[DiffExp2`Solve`PrepareChart[
+  <|"Matrix" -> {{eps/x + (1 + x)/(1 + 2 eps)}}, "Variable" -> x|>,
+  fusionChart["grouped_fusion_source"]]];
+DiffExp2`Solve`ClearSolveCaches[];
+sourceFused = Block[{
+    DiffExp2`Solve`Private`$disableRationalDenominatorFusion = False},
+  catchDE2[DiffExp2`Solve`SolveChart[sourceCS, fusionReq, sourceFusion]]];
+DiffExp2`Solve`ClearSolveCaches[];
+sourceUnfused = Block[{
+    DiffExp2`Solve`Private`$disableRationalDenominatorFusion = True},
+  catchDE2[DiffExp2`Solve`SolveChart[sourceCS, fusionReq, sourceFusion]]];
+assert["grouped_cross_lag_inhomogeneous_exact_parity",
+  !FailureQ[sourceFused] && !FailureQ[sourceUnfused] &&
+  sourceFused["Basis", "Columns"] === sourceUnfused["Basis", "Columns"] &&
+  sourceFused["Particular"] === sourceUnfused["Particular"]];
+
 (* Real banana L1 endpoint: the x=1 frame activates one nonconstant group
    (six entries with Q=1+5 eps), while x=0 stays polynomial.  SolveChart's
    always-on residual certificate and delivered windows exercise the path
@@ -188,9 +296,19 @@ assert["grouped_banana_upper_metadata",
 
 reqU = <|"EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 2|>,
   "TOrder" -> 10|>;
-solU = catchDE2[DiffExp2`Solve`SolveChart[csU, reqU]];
+DiffExp2`Solve`ClearSolveCaches[];
+solU = Block[{
+    DiffExp2`Solve`Private`$disableRationalDenominatorFusion = False},
+  catchDE2[DiffExp2`Solve`SolveChart[csU, reqU]]];
+(* no clear: the mode-key regression is also exercised on the real chart *)
+solUUnfused = Block[{
+    DiffExp2`Solve`Private`$disableRationalDenominatorFusion = True},
+  catchDE2[DiffExp2`Solve`SolveChart[csU, reqU]]];
 assert["grouped_banana_upper_local_solution_windows_and_residual",
-  !FailureQ[solU] && Length[solU["Basis", "Columns"]] === 7 &&
+  !FailureQ[solU] && !FailureQ[solUUnfused] &&
+  solU["Basis", "Columns"] === solUUnfused["Basis", "Columns"] &&
+  solU["Basis", "Specs"] === solUUnfused["Basis", "Specs"] &&
+  Length[solU["Basis", "Columns"]] === 7 &&
   AllTrue[solU["Basis", "Columns"],
     #["EpsWindow", "CompleteMax"] === 2 &] &&
   TrueQ[solU["Basis", "Diagnostics", "PseudoCollisionsCompensated"]] &&

@@ -231,6 +231,7 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
    narrowly scoped Block, the established public E4 contract is unchanged. *)
 $adaptiveLowerFrameProbe = False;
 $disableAdaptiveLowerFrames = False;   (* private parity/benchmark seam *)
+$disableRationalDenominatorFusion = False;  (* private parity/benchmark seam *)
 lowerFrameUnderflow[cs_, payload_Association] :=
   If[TrueQ[$adaptiveLowerFrameProbe],
     Throw[Failure["AdaptiveLowerFrame", Join[
@@ -431,24 +432,38 @@ prepareNhatHybrid[exprs_List, eps_, fb_Integer, W_Integer, cs_] := Module[
   <|"PolynomialSp" -> polySp, "RationalGroups" -> ratGroups,
     "Valuations" -> valuations, "Stats" -> stats|>];
 
+(* B.U for one grouped rational matrix Mbar, where B = Q Mbar includes the
+   finite-top boundary correction.  Keep this operation per (lag, group): a
+   lower-frame witness must be raised before any cancellation with another
+   lag is allowed. *)
+rationalMatrixGroupNumerator[group_Association, U_List,
+    fb_Integer, W_Integer, cs_] := Module[
+  {rhs = ConstantArray[0, Dimensions[U]]},
+  (* During an adaptive probe, apply the coefficient matrix before the
+     lower-frame shift so banana's rank-one/square-zero annihilation is
+     visible before the underflow decision.  Terminal/ordinary runs retain
+     the established operation order bit-for-bit. *)
+  Do[rhs += matrixShiftProduct[sp[[2]], U, sp[[1]], fb, W, cs],
+    {sp, group["NumeratorSp"]}];
+  rhs];
+
+(* Causal finite-frame division by the normalized epsilon unit Q.  Q(0) is
+   nonzero, so this map is linear and lower triangular. *)
+divideRationalMatrixRHS[rhs_List, q_List, W_Integer] := Module[
+  {qd = Length[q] - 1, y = ConstantArray[0, Dimensions[rhs]]},
+  y[[All, 1]] = rhs[[All, 1]]/q[[1]];
+  Do[y[[All, i]] = (rhs[[All, i]] - Sum[
+      q[[h + 1]]*y[[All, i - h]], {h, 1, Min[i - 1, qd]}])/q[[1]],
+    {i, 2, W}];
+  y];
+
+(* Unfused single-lag form retained as the equivalence/benchmark seam. *)
 applyRationalMatrixGroups[groups_List, U_List, fb_Integer, W_Integer, cs_] :=
- Module[{acc = ConstantArray[0, Dimensions[U]], rhs, q, qd, y},
+ Module[{acc = ConstantArray[0, Dimensions[U]], rhs},
   Do[
-    rhs = ConstantArray[0, Dimensions[U]];
-    (* During an adaptive probe, apply the coefficient matrix before the
-       lower-frame shift so banana's rank-one/square-zero annihilation is
-       visible before the underflow decision.  Terminal/ordinary runs retain
-       the established operation order bit-for-bit. *)
-    Do[rhs += matrixShiftProduct[sp[[2]], U, sp[[1]], fb, W, cs],
-      {sp, group["NumeratorSp"]}];
-    q = group["DenominatorCoefficients"];
-    qd = Length[q] - 1;
-    y = ConstantArray[0, Dimensions[U]];
-    y[[All, 1]] = rhs[[All, 1]]/q[[1]];
-    Do[y[[All, i]] = (rhs[[All, i]] - Sum[
-        q[[h + 1]]*y[[All, i - h]], {h, 1, Min[i - 1, qd]}])/q[[1]],
-      {i, 2, W}];
-    acc += y,
+    rhs = rationalMatrixGroupNumerator[group, U, fb, W, cs];
+    acc += divideRationalMatrixRHS[
+      rhs, group["DenominatorCoefficients"], W],
     {group, groups}];
   acc];
 
@@ -640,11 +655,26 @@ finalTransformPoleDepth[cs_, nmax_Integer] :=
 
 prepareCleared[cs_, fb_, W_, symbolic_:Automatic] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], data, dD, dN, dL, nhatPrep,
-   d0Expr, d0InvScalar},
+   d0Expr, d0InvScalar, ratGroups, ratDenominators, ratDenominatorKeys},
   data = If[symbolic === Automatic, clearedSymbolic[cs], symbolic];
   dD = data["dD"]; dN = data["dN"];
   dL = Map[ratEpsList[#, eps, fb, W] &, data["dExpr"]];
   nhatPrep = prepareNhatHybrid[data["NhatExpr"], eps, fb, W, cs];
+  (* Cross-lag fusion keys.  epsRationalData already normalized every Q to
+     Q(0)=1, so SameQ of the exact denominator expression is the canonical
+     equivalence relation.  Store the small integer index once rather than
+     rediscovering it in every Taylor recurrence. *)
+  ratGroups = nhatPrep["RationalGroups"];
+  ratDenominators = DeleteDuplicatesBy[
+    Flatten[ratGroups, 1], #["Denominator"] &];
+  ratDenominators = KeyTake[#,
+      {"Denominator", "DenominatorCoefficients"}] & /@ ratDenominators;
+  ratDenominatorKeys = Lookup[ratDenominators, "Denominator", {}];
+  ratGroups = Map[Function[groups, Map[Function[group,
+      Append[group, "DenominatorIndex" -> SelectFirst[
+        Range[Length[ratDenominatorKeys]],
+        ratDenominatorKeys[[#]] === group["Denominator"] &]]], groups]],
+    ratGroups];
   (* Sparse-offset forms.  Epsilon-Laurent-polynomial Nhat entries use the
      established shift/matrix representation.  Nonconstant denominators use
      finite grouped numerators plus a causal coefficient recurrence. *)
@@ -673,7 +703,8 @@ prepareCleared[cs_, fb_, W_, symbolic_:Automatic] := Module[
       "d0InvScalar" -> d0InvScalar,
       "dSp" -> dSp,
       "NhatSp" -> nhatPrep["PolynomialSp"],
-      "NhatRationalGroups" -> nhatPrep["RationalGroups"],
+      "NhatRationalGroups" -> ratGroups,
+      "NhatRationalDenominators" -> ratDenominators,
       "NhatValuations" -> nhatPrep["Valuations"],
       "NhatStats" -> nhatPrep["Stats"]|>]];
 
@@ -814,11 +845,19 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
   (* shift a (d x W) block by s eps-slots (s > 0: content moves UP) *)
   Module[{shB, dSp = prep["dSp"], NhatSp = prep["NhatSp"],
       NhatRationalGroups = prep["NhatRationalGroups"],
-      NhatValuations = prep["NhatValuations"]},
+      NhatRationalDenominators = prep["NhatRationalDenominators"],
+      NhatValuations = prep["NhatValuations"], fuseRational},
+  fuseRational = NhatRationalDenominators =!= {} &&
+    !TrueQ[$disableRationalDenominatorFusion];
   shB[M_, s_] := shiftFrameBlock[M, s, fb, W, cs];
   Do[Module[{RData, R, RValid, rhsFull, rhsValid},
     RData = Table[Module[{acc = ConstantArray[0, {d, W}],
-        accValid = ConstantArray[Infinity, d]},
+        accValid = ConstantArray[Infinity, d], rationalRHS, rationalUsed,
+        denominatorIndex},
+      rationalRHS = If[fuseRational,
+        Table[ConstantArray[0, {d, W}], {Length[NhatRationalDenominators]}], {}];
+      rationalUsed = If[fuseRational,
+        ConstantArray[False, Length[NhatRationalDenominators]], {}];
       Do[If[n - j >= 0,
         Module[{Ublk = U[[n - j + 1, l + 1]]},
           Do[
@@ -826,12 +865,28 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
               sp[[2]], Ublk, sp[[1]], fb, W, cs],
             {sp, NhatSp[[j + 1]]}];
           If[NhatRationalGroups[[j + 1]] =!= {},
-            acc += applyRationalMatrixGroups[
-              NhatRationalGroups[[j + 1]], Ublk, fb, W, cs]];
+            If[fuseRational,
+              Do[
+                denominatorIndex = group["DenominatorIndex"];
+                (* Accumulate only after the per-contribution numerator
+                   application has performed its own lower-frame check. *)
+                rationalRHS[[denominatorIndex]] +=
+                  rationalMatrixGroupNumerator[group, Ublk, fb, W, cs];
+                rationalUsed[[denominatorIndex]] = True,
+                {group, NhatRationalGroups[[j + 1]]}],
+              acc += applyRationalMatrixGroups[
+                NhatRationalGroups[[j + 1]], Ublk, fb, W, cs]]];
           accValid = updateNhatValidity[accValid,
             NhatValuations[[j + 1]],
             UValid[[n - j + 1, l + 1]], frameTop]]],
         {j, 1, Min[n, dN]}];
+      If[fuseRational,
+        Do[If[TrueQ[rationalUsed[[denominatorIndex]]],
+          acc += divideRationalMatrixRHS[
+            rationalRHS[[denominatorIndex]],
+            NhatRationalDenominators[[denominatorIndex,
+              "DenominatorCoefficients"]], W]],
+          {denominatorIndex, Length[NhatRationalDenominators]}]];
       Do[If[n - j >= 0,
         Module[{Ublk = U[[n - j + 1, l + 1]], term, a0, termValid},
           (* lam*U + eps*U_above: lam = (aT + n - j) + bT*eps *)
@@ -1249,7 +1304,8 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
   {tag = Lookup[cs, "SystemHash", None], key},
   key = {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
     req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
-    TrueQ[$disableAdaptiveLowerFrames]};
+    TrueQ[$disableAdaptiveLowerFrames],
+    TrueQ[$disableRationalDenominatorFusion]};
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];

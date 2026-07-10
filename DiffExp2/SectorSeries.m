@@ -48,6 +48,19 @@ structuralZeroQ[e_] := FreeQ[e, _?InexactNumberQ] && zeroQ[e];
 badHeadQ[c_] := !FreeQ[c, _SeriesData | _SeriesCoefficient] ||
   MemberQ[{$Failed, Indeterminate, ComplexInfinity}, c];
 
+groundTaylorCoefficient[e_, wp_Integer] := Module[{wp2},
+  Which[
+    e === 0, 0,
+    !NumericQ[e], e,
+    InexactNumberQ[e], e,
+    ByteCount[e] <= 500 && (IntegerQ[e] || Head[e] === Rational), e,
+    True,
+      wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+      Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
+          DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 wp2]},
+        Chop[SetPrecision[N[RootReduce[e], wp2], wp2],
+          DiffExp2`Tolerances`Tol["ChopFloor"]]]]];
+
 tagOf[sec_] := {sec["a"], sec["b"], sec["p"]};
 lsMin[ls_] := ls["EpsWindow", "Min"];
 lsCM[ls_] := ls["EpsWindow", "CompleteMax"];
@@ -320,10 +333,11 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
         Do[csr[[m + 1]] = Together[
             (nc[[m + 1]] - Sum[dc[[l + 1]]*csr[[m - l + 1]], {l, 1, m}])/dc[[1]]],
           {m, 1, ncols - 1}];
-        (* ByteCount-gated: small exact coefficients stay exact (I-6);
-           giants numericize (R6 performance) *)
-        Map[If[# === 0 || ByteCount[#] <= 500, #,
-          N[#, DiffExp2`Tolerances`$InputPrecisionFactor*wp]] &, csr]]],
+        (* Exact pole classification is complete.  Keep small rationals
+           exact; ground algebraic or giant numeric coefficients once at
+           2x WP so later convolutions cannot accumulate exact-expression
+           swell or hit the kernel's small default extra-precision limit. *)
+        Map[groundTaylorCoefficient[#, wp] &, csr]]],
     {j, 1, jcount}];
   (* convolve into each sector; a -> a - M; windows shift by jmin *)
   newSecs = Map[Module[{arr = #["Coeffs"], out},

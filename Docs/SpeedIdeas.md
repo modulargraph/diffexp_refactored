@@ -21,6 +21,20 @@ On the exact fresh banana level-3 upper chart at WP1000/EO50, total
 assembly 0.003 s, and residual certification 0.027 s.  The focused grouped,
 solve, and transport suites pass 17/17, 40/40, and 62/62 respectively.
 
+The end-to-end gate exposed the same algebraic cancellation again at the
+integration seam.  Numerical grounding now consistently uses
+`RootReduce -> N[2 WP] -> SetPrecision[2 WP] -> Chop[ChopFloor]` inside a
+raised `$MaxExtraPrecision` block, but only after exact planning and pole
+classification.  This policy applies to prepared solve coefficients,
+rational-multiplier Taylor coefficients, and final local integration bounds;
+symbolic analytic regulators remain exact.  `ESTrim` also uses a unit
+decision scale only for an all-centered-zero frame, preventing resolved
+`0``A` rows from manufacturing dozens of fake Laurent pole orders.
+
+At EO50/division-order 3, the ladder is truncation-limited to roughly 25
+digits regardless of WP1000, so the production validation run uses WP500;
+the larger precision paid bignum cost without increasing delivered accuracy.
+
 ## 2026-07-10 adaptive singular lower epsilon frames
 
 The scalar `recurrencePoleDepth` bound remains the authoritative upper

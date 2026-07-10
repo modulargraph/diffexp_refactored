@@ -166,6 +166,12 @@ assert["t19_mul_center_pole",
   Length[r19["Sectors"]] === 1 &&
   {r19["Sectors"][[1]]["a"], r19["Sectors"][[1]]["b"], r19["Sectors"][[1]]["p"]} === {-1, 0, 0} &&
   Flatten[r19["Sectors"][[1]]["Coeffs"][[1, All, 1]]] === ConstantArray[1, 6]];
+r19alg = mul[ls19, 1/(1 - (1 + Sqrt[2]) Global`t/10), Global`t];
+assert["t19_mul_algebraic_taylor_coefficients_grounded_after_classification",
+  InexactNumberQ[r19alg["Sectors"][[1]]["Coeffs"][[1, 2, 1]]] &&
+  Precision[r19alg["Sectors"][[1]]["Coeffs"][[1, 2, 1]]] >= 190 &&
+  Abs[N[r19alg["Sectors"][[1]]["Coeffs"][[1, 2, 1]] -
+      (1 + Sqrt[2])/10, 180]] < 10^-180];
 
 (* t20: eps-Laurent shift + geometric *)
 r20a = mul[ls19, 1/(2 Global`eps), Global`t];

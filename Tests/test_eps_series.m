@@ -123,6 +123,13 @@ assert["true_complex_modulus_preserves_laurent_lead",
 (* 12 *)
 assert["trim_preserves_zero_window",
   trim[es[-2, {0, 0, 0, 0}]] === zero[1]];
+resolvedCenteredZero = SetPrecision[0., 250];
+assert["trim_resolved_all_centered_zero_uses_unit_decision_scale",
+  trim[es[-54, ConstantArray[resolvedCenteredZero, 13]]] === zero[-42]];
+unresolvedCenteredZero = 0``17;
+assert["trim_unresolved_centered_zero_is_not_discarded",
+  DiffExp2`EpsSeries`ESMinPower[
+    trim[es[-1, {unresolvedCenteredZero}]]] === -1];
 
 (* 13 — exact passthrough chain; hand-computed pin *)
 q13 = div[times[add[es[0, {1/3, 22/7}], es[0, {-5/11, 2}]], es[0, {1, 1}]], es[0, {2, 1}]];

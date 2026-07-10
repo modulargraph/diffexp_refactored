@@ -93,6 +93,16 @@ numMag[c_] := If[NumericQ[c],
   DiffExp2`Tolerances`NumericMagnitude[c, 10], Nothing];
 seriesScale[s_?ESQ] := Max[0, Sequence @@ (numMag /@ s["Coeffs"])];
 
+(* NumericallyZeroQ deliberately refuses an all-zero comparison scale: in
+   general there is no relative reference.  A series containing only exact
+   zeros or resolved centered numeric zeros is the one safe exception; use a
+   unit decision scale so ESTrim can remove high-accuracy 0``A rows instead
+   of shifting a downstream Laurent window by dozens of fake pole orders. *)
+seriesDecisionScale[s_?ESQ] := Module[
+  {scale = seriesScale[s], coeffs = s["Coeffs"]},
+  If[scale === 0 && AllTrue[coeffs,
+      # === 0 || (NumericQ[#] && numMag[#] === 0) &], 1, scale]];
+
 ESCoeffZeroQ[c_, scale_, tol_:Automatic] := Module[
   {laurentFloorQ, effectiveTol},
   effectiveTol = tol /. Automatic -> DiffExp2`Tolerances`Tol["LaurentLeadTol"];
@@ -101,7 +111,7 @@ ESCoeffZeroQ[c_, scale_, tol_:Automatic] := Module[
     $ESErrorContext, DiffExp2`Tolerances`$AmbiguityBandDecades,
     laurentFloorQ]];
 
-ESLeading[s_?ESQ] := Module[{scale = seriesScale[s], kmin = ESMinPower[s]},
+ESLeading[s_?ESQ] := Module[{scale = seriesDecisionScale[s], kmin = ESMinPower[s]},
   Do[If[!ESCoeffZeroQ[s["Coeffs"][[i]], scale], Return[{kmin + i - 1, s["Coeffs"][[i]]}, Module]],
     {i, Length[s["Coeffs"]]}];
   None];
@@ -191,7 +201,7 @@ ESTruncate[s_?ESQ, newCM_Integer] := Which[
   True,
   mkSeries[ESMinPower[s], newCM, Take[s["Coeffs"], newCM - ESMinPower[s] + 1]]];
 
-ESTrim[s_?ESQ] := Module[{scale = seriesScale[s], kmin = ESMinPower[s], first = None},
+ESTrim[s_?ESQ] := Module[{scale = seriesDecisionScale[s], kmin = ESMinPower[s], first = None},
   Do[If[!ESCoeffZeroQ[s["Coeffs"][[i]], scale], first = i; Break[]],
     {i, Length[s["Coeffs"]]}];
   If[first === None, ESZero[ESCompleteMax[s]],

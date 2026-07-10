@@ -34,6 +34,20 @@ zeroQ[e_] := zeroCanQ[Together[e]];
 esAdd = DiffExp2`EpsSeries`ESAdd;
 esZero = DiffExp2`EpsSeries`ESZero;
 
+(* Geometry remains exact through planning/tiling.  At the integration seam,
+   however, exact quadratic-algebraic local coordinates can grow into huge
+   a+b Sqrt[n] quotients; asking N[Log[T],2 WP] to resolve their cancellation
+   with the kernel's small default $MaxExtraPrecision is both slow and can
+   lose most guard digits.  Root-reduce and ground once at 2x WP. *)
+numericLocalCoordinate[z_] := Module[{wp, wp2},
+  If[!NumericQ[z] || Precision[z] =!= Infinity, Return[z]];
+  wp = cfg["WorkingPrecision"];
+  wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+  Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
+      DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 wp2]},
+    Chop[SetPrecision[N[RootReduce[z], wp2], wp2],
+      DiffExp2`Tolerances`Tol["ChopFloor"]]]];
+
 (* ---- LoadSystem ---- *)
 
 singularFactorsOf[A_, var_] := Module[{dens},
@@ -155,8 +169,8 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     If[TrueQ[b2 > a],
       ls = entry["LocalSolution"]; center = entry["Chart"]["Center"];
       scale = ls["ChartMap", "Scale"];
-      t1 = Together[(a - center)/scale];
-      t2 = Together[(b2 - center)/scale];
+      t1 = numericLocalCoordinate[Together[(a - center)/scale]];
+      t2 = numericLocalCoordinate[Together[(b2 - center)/scale]];
       (* Project each selected component to a scalar LocalSolution, multiply,
          then combine BEFORE integration so the endpoint/PV cancellation
          gate sees the assembled scalar integrand. *)

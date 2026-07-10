@@ -275,9 +275,13 @@ groupedEpsExactSafeQ[e_] := e === 0 ||
 
 preparedEpsCoefficient[e_] := Module[{wp2},
   If[groupedEpsExactSafeQ[e], Return[e]];
+  If[!NumericQ[e], Return[e]];
   wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*
     DiffExp2`Config`CFG["WorkingPrecision"];
-  N[e, wp2]];
+  Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
+      DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 wp2]},
+    Chop[SetPrecision[N[RootReduce[e], wp2], wp2],
+      DiffExp2`Tolerances`Tol["ChopFloor"]]]];
 
 (* Canonical epsilon-rational entry.  eps^Valuation is kept outside P/Q;
    Q is normalized to Q(0)=1 so denominator equality is an exact grouping

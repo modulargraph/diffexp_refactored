@@ -14,6 +14,14 @@ x = Global`x; eps = Global`eps;
 esC = DiffExp2`EpsSeries`ESCoefficient;
 eqN[a_, b_, tol_] := TrueQ[Abs[N[a - b, 30]] < tol];
 
+algCoord = (-74641 + 23*Sqrt[57983929])/133584;
+numCoord = DiffExp2`API`Private`numericLocalCoordinate[algCoord];
+symCoord = DiffExp2`API`Private`numericLocalCoordinate[Global`rho + Sqrt[2]];
+assert["integration_algebraic_coordinate_grounded_at_2x_wp",
+  InexactNumberQ[numCoord] && Precision[numCoord] >= 190 &&
+  Abs[N[numCoord - algCoord, 180]] < 10^-180 &&
+  symCoord === Global`rho + Sqrt[2]];
+
 (* THE mini-FT pin: f' = (eps/x) f, f(11/23) = (11/23)^eps;
    Int_0^1 f dx = 1/(1+eps) = 1 - eps + eps^2 - eps^3 *)
 sys = DiffExp2`API`LoadSystem[<|"Matrix" -> {{eps/x}}, "Variable" -> x|>];

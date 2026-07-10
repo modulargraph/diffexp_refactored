@@ -263,7 +263,10 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
     Lookup[payload, "SourceExpansionOrder", None]];
   If[!IntegerQ[savedEO] || savedEO < 1,
     Return[ladderCheckpointReject[file, "missing source ExpansionOrder"], Module]];
-  If[expansionOrder < savedEO,
+  (* Transport checkpoints contain order-specific chart series.  Boundary
+     checkpoints contain only endpoint Laurent data, so a boundary produced
+     at a higher x-expansion order is safe to reuse in a lower-order run. *)
+  If[kind === "Transport" && expansionOrder < savedEO,
     Return[ladderCheckpointReject[file,
       "requested ExpansionOrder is lower than the checkpoint order"], Module]];
   If[kind === "Transport",

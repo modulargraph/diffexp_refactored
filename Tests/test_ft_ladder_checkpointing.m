@@ -125,6 +125,29 @@ saveLadderCheckpoint[configFile, Join[basePayload, <|
 test["transport configuration fingerprint remains enforced",
   loadLadderCheckpoint[configFile, name, data, prepKey] === $Failed];
 
+highOrderTransportFile = FileNameJoin[{tmpDir, "high-order-transport.mx"}];
+saveLadderCheckpoint[highOrderTransportFile, Join[basePayload, <|
+  "ExpansionOrder" -> expansionOrder + 10,
+  "ChartCache" -> low["Charts"], "TransportLow" -> low,
+  "TransportHigh" -> None, "CompletedArms" -> {"Lower"}|>]];
+test["higher-order transport checkpoint remains order-specific",
+  loadLadderCheckpoint[highOrderTransportFile, name, data, prepKey] === $Failed];
+
+highOrderBoundaryFile = FileNameJoin[{tmpDir, "high-order-boundary.mx"}];
+saveLadderCheckpoint[highOrderBoundaryFile, <|
+  "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
+  "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
+  "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
+  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
+  "LevelEpsilonHalos" -> levelEpsilonHalos,
+  "SourceExpansionOrder" -> expansionOrder + 10,
+  "RequestedEpsilonOrder" -> requestedEpsilonOrder[1]|>];
+loaded = loadLadderCheckpoint[highOrderBoundaryFile, name, data, prepKey];
+test["higher-order boundary checkpoint may seed a lower-order run",
+  AssociationQ[loaded] &&
+    loaded["SourceExpansionOrder"] === expansionOrder + 10, loaded];
+
 (* Rewrite a valid snapshot's source provenance to exercise stale opt-in. *)
 staleFile = FileNameJoin[{tmpDir, "stale.mx"}];
 saveLadderCheckpoint[staleFile, Join[basePayload, <|

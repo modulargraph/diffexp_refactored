@@ -28,6 +28,58 @@ Get["/path/to/diffexp_refactored/DiffExp.m"]
 
 The package prints its version on load.
 
+## DiffExp2 Feynman-Trick runner
+
+Run the stepwise DiffExp2 ladder from the repository root.  Environment
+assignments precede `wolframscript`; this banana invocation uses the default
+numerical settings:
+
+```sh
+FT_EXAMPLES=banana \
+FT_WORKING_PRECISION=500 \
+FT_EXPANSION_ORDER=50 \
+FT_EPS_ORDER=0 \
+FT_BOUNDARY_EXTRA_ORDER=4 \
+FT_LEVEL_EPS_HALOS=0 \
+FT_STEP_DIVISION_ORDER=4 \
+wolframscript -file Scripts/run_ft_stepwise2.m
+```
+
+`FT_EXAMPLES` is a comma-separated list (default `bubble`); available names
+are `bubble`, `sunrise`, `banana`, `box`, `pentagon`, `box_bubble`,
+`box_triangle`, and `double_box_planar`.  The other variables set the working
+precision, local expansion order, requested epsilon order, extra epsilon
+orders retained at level boundaries, optional comma-separated per-level
+epsilon halos (levels listed from 1 upward), and classic transport stride,
+respectively.  A halo computes extra internal coefficients without raising
+the downstream requested order; it compensates only certified finite-window
+losses such as analytic log/Laurent basis width. `DE2_VALUE_TRANSPORT=1` opts
+into the experimental regular-chart
+value-transport path.  It is a prototype, is off by default, and retains its
+safety fallbacks to basis transport.
+
+The runner also supports persistent caches and restart checkpoints:
+
+- `FT_PREP_CACHE_DIR` selects the FIRE/preparation cache directory (default:
+  the system temporary directory under `DiffExp2_FT_Prepared`).
+  `FT_REBUILD_PREP=1` ignores a cached preparation and rebuilds it.  This
+  cache stores the completed Feynman-trick/FIRE preparation and reduction
+  cache; it is separate from transport-ladder checkpoints and intentionally
+  is not invalidated by runner or DiffExp2 edits.
+- `FT_LADDER_CHECKPOINT_DIR=/path/to/checkpoints` writes a transport
+  checkpoint after each level's expensive two-way endpoint transport and a
+  boundary checkpoint after assembling the next level's boundary values.
+  Resuming a transport checkpoint reuses that transport and replays boundary
+  assembly; resuming a boundary checkpoint starts transport at the named
+  lower level.
+- `FT_RESUME_LADDER_CHECKPOINT=/path/to/file.mx` resumes either checkpoint
+  kind.  When no checkpoint directory is supplied, its directory is also
+  used for subsequent checkpoints.  Ladder checkpoints record their example,
+  numerical settings, prepared-data key, level metadata, and a fingerprint of
+  the runner plus DiffExp2 sources.  Stale or unversioned checkpoints are
+  rejected by default; `FT_ALLOW_STALE_LADDER_CHECKPOINT=1` accepts one with a
+  warning and marks its descendants tainted.
+
 ## Tests
 
 Focused recurrence and singularity tests can be run from the repository root:

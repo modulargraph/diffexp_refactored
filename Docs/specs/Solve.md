@@ -162,8 +162,9 @@ concatenating ALL families' chain vectors in family order (column order =
 (family, root in descending a, chain position), eigenvector first —
 matching the column order of 3.4/3.5); VInv = exact `Inverse[V]`
 (Q(alpha)(eps) arithmetic); J = the corresponding block-diagonal Jordan
-data; per family, CollisionDepth = the longest directed path in the
-family's collision DAG restricted to Type == "LaurentShift" edges; the
+data; per family, CollisionDepth is the executed homogeneous Taylor-layer
+budget defined below (parallel CASE-P targets at one `n` count only by the
+largest target Jordan block, while distinct positive `n` layers compose); the
 det-V collision-factor property is certified here by exact factorization
 of Det[V(eps)] (E2 on failure).  n = 0 collisions arriving from Indicial
 canonically ordered (one record per unordered pair, Indicial.md 2.6
@@ -232,8 +233,11 @@ all families' chain vectors in spec column order, VInv = exact Inverse[V]
 (Q(alpha)(eps) arithmetic), and certifies at that point that det V's
 eps -> 0 vanishing order equals the count implied by the recorded
 LaurentShift collisions (the E2 third check; failure stays E2).
-(iii) CollisionDepth = longest directed path in the family's collision
-DAG restricted to Type == "LaurentShift" edges, computed here.
+(iii) CollisionDepth is computed from executed homogeneous CASE-P layers:
+for each source root, discard `n=0` LaurentShift records, group its remaining
+records by positive Taylor order `n`, sum the maximum target BlockSize in
+each group, and take the maximum over source roots.  Thus parallel divisions
+at one `n` are not added, while divisions at distinct Taylor layers compose.
 (iv) ChartSystem is ASSEMBLED BY PrepareChart (DEC-7 — this supersedes
 the review's Transport-assembly variant): chart geometry fields from
 Transport's chart record (Transport.md 3.2) + IndicialData fields, with
@@ -281,9 +285,12 @@ Family = <|
                      with DeltaB == 0 and n > 0 are TRUE resonances;
                      DeltaB != 0 (Type == "LaurentShift") are PSEUDO
                      resonances (any n >= 0) *),
-  "CollisionDepth" -> longest directed path in the family's collision
-                      DAG restricted to Type == "LaurentShift" edges
-                      (integer >= 0; computed by PrepareChart)
+  "CollisionDepth" -> Max over source roots i of
+                      Sum over executed n >= 1 layers of
+                      Max[BlockSize of each LaurentShift target at that n]
+                      (integer >= 0; computed by PrepareChart; n=0 records
+                      are diagnostic degeneracies, not homogeneous
+                      recursion layers)
 |>
 ```
 
@@ -388,15 +395,64 @@ see 2.1, memo table cut at M0):
    of 3.2 (V/VInv built by PrepareChart; J block-diagonal in (family,
    root, chain) column order).  N̂_0 = d_0·J(eps).  Expand every d_j(eps),
    N̂_j(eps), and V/VInv entry ONCE into EpsSeries arrays at
-   WorkingPrecision over the WORK WINDOW:
+   WorkingPrecision over a deterministic WORK WINDOW.  A single worst entry
+   is not a sufficient recurrence-pole budget: a negative-valued multiplier
+   at Taylor offset `j` can be reused every `j` steps.  Define, for
+   `1 <= j <= J = Min[nmax, Max[dD,dN]]`,
 
-   workWindow = [ reqMin − P_max − epsPoleDepth ,
-                  reqMax + CollisionDepth + R_max + epsPoleDepth ]
+   ```
+   stepCost[j] = Max[0, -Min[finite eps valuations of d_j and N̂_j entries]]
+   depth[0] = 0
+   depth[n] = Max[0, Max_{1 <= j <= Min[n,J]}
+                         (depth[n-j] + stepCost[j])]
+   recurrencePoleDepth = depth[nmax].
+   ```
 
-   where P_max = largest log ceiling (below), R_max = the number of
-   true-resonant hits on the deepest same-b chain (each contributes one
-   exact eps^{-1} monomial division), and epsPoleDepth =
-   Max[0, −min eps-valuation of the d_j/N̂_j entries].  This is the
+   Missing/structurally zero coefficients contribute cost zero.  This is a
+   longest-path dynamic program on the executed Taylor dependency DAG; it is
+   tighter than `nmax` times the worst pole when a costly multiplier first
+   occurs at `j > 1`, and unlike the former one-hit bound it covers repeated
+   composition.
+
+   For a homogeneous solve let `Pmax` be the largest log ceiling below,
+   `Cmax = Max[Family["CollisionDepth"]]`, `RPD` the depth above,
+   `SPD = Max[0,-Min valuation(V)]`, and `GPD` the pole depth of exactly the
+   gauge `t`-Laurent coefficients used by `applyGauge` (orders
+   `t^gv .. t^(gv+nmax)`, where `gv` is the minimum `t` valuation of T).
+   The implemented frame is exactly
+
+   ```
+   base0    = Min[reqMin,0] - Pmax - Cmax - 2
+   top0     = reqMax + Pmax + Cmax + 2
+              - Min[0, reqMin - Pmax - 2]
+   workBase = Min[base0, reqMin - Pmax - Cmax - RPD] - SPD
+   workTop  = Max[top0, reqMax + Pmax + Cmax + RPD] + SPD + GPD.
+   ```
+
+   `SPD + GPD` pays the honest-window losses of the final, separately
+   applied back-transforms û -> V.û -> T.V.û; it is private scratch
+   headroom and does not extend the delivered request.  `SPD` also lowers
+   the shared physical frame base, whereas T is multiplied in its own local
+   epsilon frame.
+
+   For a particular source sector, the analogous executed-layer budget is
+   computed directly from that tag, including `n=0`: group all different-b
+   target blocks by `n = aTarget-aSource >= 0`, take the maximum target block
+   size per `n`, and sum the layers.  With this `PD`, that sector's log
+   ceiling `P`, source window `[sMin,sMax]`, and
+   `SFD = poleDepth(VInv)+poleDepth(V)`, SolveParticular uses
+
+   ```
+   sourceTop0 = sMax + P + PD + 2 - Min[0, sMin - P - 2]
+   workBase   = Min[Min[sMin,0] - P - PD - 4,
+                    sMin - P - PD - RPD] - SFD
+   workTop    = Max[sourceTop0, sMax + P + PD + RPD] + SFD.
+   ```
+
+   (`Gauge == Identity` is currently required for a nonzero particular
+   source.)
+
+   This is the
    old eps work-buffer rule (LocalSeries.m:444-455, :529-532;
    Docs/RecursiveFuchsianSolver.md "Epsilon Poles") made DETERMINISTIC: the
    buffer is computed exactly from the family data up front — there is no
@@ -503,15 +559,22 @@ for this path; the M3 closed-form pin is test SU-08 (section 8).
 PARTICULAR ASSEMBLY: one recursion per source-sector tag class (source
 sectors sharing (b_σ, a_σ mod 1) align with one family's frame; tags
 aligning with NO family run pure CASE T).  Sum of the per-tag particulars;
+transform each source into the spectral frame with VInv, solve there,
 back-transform û -> V·û, then apply the gauge: f = T·g via SectorSeries
-rational-multiply; windows = honest min over contributing pieces.
+rational-multiply.  The scratch window pays the exact epsilon-pole depths
+of both VInv and V, in their actual order, before returning the honest
+minimum window over contributing pieces.  CASE-P source hits use the same
+registered homogeneous-target compensation and two-probe certificate as
+homogeneous columns; their finite source window still records every real
+collision-order loss described below.
 
 ### 3.7 Joint pseudo-resonant construction (the I2 spec decision, normative)
 
 At a CASE P collision (column from root σ, colliding block i, offset n), the
 quotient û[n,·]_i = R/((b−b_i)·eps)·(chain-corrected) acquires a finite
 POLAR PART γ(eps) = Σ_{k<0} γ_k eps^k along the block-i chain directions
-(depth ≤ collision-chain depth).  The joint rule:
+(a size-`q` target can consume `q` orders at that layer; distinct executed
+Taylor layers can compose).  The joint rule:
 
 1. Keep the full Laurent quotient in û (the recursion continues with it;
    EpsSeries windows track honestly).
@@ -522,13 +585,26 @@ POLAR PART γ(eps) = Σ_{k<0} γ_k eps^k along the block-i chain directions
    combination `SectorSeries`CombineLocalSolutions`, SectorSeries.md 2.10 —
    REVIEW-minimalism defect 6).  Columns are built
    in DESCENDING-a order within each family precisely so column i exists
-   when the collision fires.  Chained collisions recurse through the
-   family's collision DAG (depth = "CollisionDepth").
+   when the collision fires.  CASE-P divisions at one Taylor order act on
+   disjoint target blocks in parallel; the work budget charges their maximum
+   BlockSize once.  Only distinct increasing `n` layers compose, exactly as
+   recorded by `CollisionDepth` (or the per-source `PD` for particulars).
 3. The delivered object (column or particular) therefore has VALUE finite
-   at eps = 0: the negative eps-orders of the assembled multi-sector value
-   cancel exactly.  This is ASSERTED numerically at the residual probe
-   point (invariant I-5) — it is the runtime discharge of the construction's
-   proof obligation for multi-collision chains.  Failure is E5-class, loud.
+   at eps = 0 through its honest complete window: the negative eps-orders
+   introduced by each registered collision cancel.  This is ASSERTED at
+   two deterministic positive interior probes in the gauge-reduced physical
+   frame `g = GaugeInverse.f`: each registered spectral collision order is
+   mapped through the exact epsilon valuations of its target column in `V`,
+   and the corresponding reduced-component polar coefficients are checked.
+   Applying `VInv` in the certificate is forbidden: when the spectral frame
+   is epsilon-singular (banana L2 at x = 0 is the minimal example), a finite
+   physical value has legitimate polar spectral coordinates.  Probe radii
+   are chosen deterministically inside the disk so the unmatched top Taylor
+   tail of a finite-order compensated target lies below `laurentLeadTol`.
+   Every checked coefficient includes its own significance uncertainty.
+   This value check, not the ODE residual (which any added homogeneous column
+   also satisfies), is the runtime discharge of invariant I-5.  Failure is
+   E5-class, loud.
 4. Window accounting: per-sector arrays carry kmin lowered by the collision
    depth BY CONSTRUCTION (exemption class, like kmin = −p); for HOMOGENEOUS
    columns the internal work buffer (3.6 step 2) restores the delivered
@@ -892,7 +968,9 @@ Error tests assert via `Catch[..., "DiffExp2Error"]` returning the
   collision table has the (−1,1)->(0,0) and (−1,1)->(0,2) offset-1 pairs
   and the (0,0)<->(0,2) offset-0 pair; all three columns delivered with
   requested CompleteMax (homogeneous shift = 0, RewritePlan 3.4 assert);
-  I-5 holds.
+  I-5 holds.  The exact seven-root banana-L1 companion pin has 24 collision
+  records but only one executed positive-`n` layer: assert
+  `CollisionDepth == 1` (ten parallel CASE-P visits must not be summed).
 - SU-08 `resonant_source_log_bump_particular` (M3 closed-form pin, L10):
   scalar B = 0 with source tag (0,0,k): particular =
   (1/eps)·(eps Log t)^{k+1}/(k+1)! exactly, for k = 0,1,2.  And the offset

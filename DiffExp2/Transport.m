@@ -1,10 +1,9 @@
 (* DiffExp2/Transport.m — segmentation, marching, eps-graded matching,
    crossing.  Spec: Docs/specs/Transport.md (binding); DECISIONS-M0.md.
-   V1 notes (recorded): MatchWeights implements the Laurent-graded solve via
-   per-column eps-normalization (consumes Solve's honest Laurent columns
-   directly); RecombineBasis runs on demand when the eps^0 system is
-   singular; the error probe is the full-vs-reduced evaluation at the
-   outgoing match point. *)
+   V1 notes (recorded): MatchWeights implements the honest Laurent-graded
+   solve; the marching path applies tag recombination plus determinant-series
+   epsilon-lattice saturation before matching.  The error probe is the
+   full-vs-reduced evaluation at the outgoing match point. *)
 
 BeginPackage["DiffExp2`Transport`",
   {"DiffExp2`Tolerances`", "DiffExp2`Config`", "DiffExp2`EpsSeries`",
@@ -44,8 +43,15 @@ esTimes = DiffExp2`EpsSeries`ESTimes; esShift = DiffExp2`EpsSeries`ESShift;
 esCoeff = DiffExp2`EpsSeries`ESCoefficient; esMin = DiffExp2`EpsSeries`ESMinPower;
 esCM = DiffExp2`EpsSeries`ESCompleteMax;
 
-(* pipeline numeric handoff: evaluated VALUES entering the matching seam
-   numericize at WP+20 — the runner's boundary/level-handoff policy (M5c)
+(* Stable true modulus shared by all coefficient/residual decisions. *)
+numMag = DiffExp2`Tolerances`NumericMagnitude;
+numMagBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
+
+(* Pipeline numeric handoff: evaluated VALUES entering the matching seam
+   numericize at 2x WP — the pinned $InputPrecisionFactor policy and the
+   runner's boundary/level-handoff policy (M5c).  The extra headroom is
+   essential for ill-conditioned honest Laurent bases: matching may lose
+   many digits while still meeting MatchTol at the configured precision.
    applied inside the marching loop.  EvaluateLocalSolution itself stays
    exact-in/exact-out (a module contract, pinned by test_sectorseries);
    but exact evaluation outputs fed into MatchWeights/Combine grind
@@ -53,7 +59,38 @@ esCM = DiffExp2`EpsSeries`ESCompleteMax;
    coefficients, MatchWeights 3.0 s -> see Docs/SpeedIdeas.md §2).
    Values only; tags, windows and structural decisions untouched;
    symbols pass through N unchanged; idempotent on bignums. *)
-numHandoff[x_] := N[x, cfg["WorkingPrecision"] + 20];
+numHandoff[x_] := N[x,
+  DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]];
+
+(* A value solve cannot recover significance already lost while evaluating
+   the preceding truncated solution at the next chart center.  In
+   particular N[x, 2 WP] does not add digits to an inexact x.  Require the
+   incoming Cauchy data's tracked uncertainty to sit below the same relative
+   scale used by ODEResidualCheck, with the repository safety margin.  When
+   this preflight fails TransportLine chooses the ordinary match-point basis
+   path before solving; this is a conditioning choice between equivalent
+   transports, not a fallback from a recurrence failure. *)
+valueHandoffAccurateQ[vals_List] := Module[
+  {rtol = DiffExp2`Tolerances`Tol["ResidTol"],
+   guard = DiffExp2`Tolerances`$SafetyDigits, nums},
+  nums = Cases[Flatten[Table[
+      Table[esCoeff[v, k], {k, esMin[v], esCM[v]}], {v, vals}]],
+    _?InexactNumberQ, Infinity];
+  AllTrue[nums, Function[z, Module[{acc = Accuracy[z], uncertainty, scale},
+    If[acc === Infinity, Return[True, Module]];
+    If[!NumericQ[acc], Return[False, Module]];
+    (* Exact decade: cannot machine-underflow for high-precision inputs. *)
+    uncertainty = 10^-Floor[acc];
+    scale = Max[1, numMag[z, 20]];
+    TrueQ[uncertainty <= rtol*scale/10^guard]]]]];
+
+(* A center handoff evaluates a truncated Taylor solution farther from its
+   origin than the ordinary match point.  Precision metadata cannot see
+   that truncation error, so admit it only when the geometric tail proxy is
+   two decades below the structural Laurent floor. *)
+valueCenterMargin[expansionOrder_Integer] := Min[9/10,
+  N[(DiffExp2`Tolerances`Tol["LaurentLeadTol"]/100)^
+    (1/(expansionOrder + 1)), 30]];
 
 (* ---- 2.1 singularities ---- *)
 
@@ -75,7 +112,7 @@ ChartRadius[center_, all_List] := Module[
     (* EXACT distances when inputs are exact: inexact radii leak into match
        points and destroy precision through symbolic-log numericization *)
     diffs = Map[If[FreeQ[{#, center}, _?InexactNumberQ],
-      RootReduce[Abs[# - center]], Abs[N[# - center, 40]]] &, others];
+      RootReduce[Abs[# - center]], numMag[# - center, 40]] &, others];
     Min[diffs]]];
 
 (* ---- 2.4 GetCPL/GetCPR geometry ---- *)
@@ -403,14 +440,29 @@ ApplyCrossing[ls_Association, sigma_] := Module[
    matrix (the log x = (x^(2eps)-1)/(2eps) class).  Tag-driven off
    Indicial`EpsDegenerateFamilies (DEC-7): per degenerate family, ordered
    by b: B_1 = S_1, B_m = (S_m - S_1)/((b_m - b_1) eps); recursively on
-   {B_2, ...} up to the family's recorded degeneracy depth. *)
+   {B_2, ...} up to the family's recorded degeneracy depth.
 
-recombineDegenerate[cs_, basis_List, specs_List] := Module[
-  {degs, newBasis = basis, width},
+   SAFETY GATE: an uncompensated CASE-P quotient must not be divided by eps
+   again.  Solve certifies its joint polar cancellation with
+   Diagnostics["PseudoCollisionsCompensated"] -> True.  Once certified,
+   distinct same-a eps-degeneracy is a separate obligation and still needs
+   this divided-difference recombination.  Banana has exactly this mixed
+   case: an n=1 compensated hit alongside a same-a pair whose unrecombined
+   columns are catastrophically ill-conditioned. *)
+
+recombineDegenerate[cs_, basis_List, specs_List, diagnostics_:<||>] := Module[
+  {degs, newBasis = basis, width,
+   hits = If[AssociationQ[diagnostics] &&
+       KeyExistsQ[diagnostics, "PseudoCollisionsHit"],
+     diagnostics["PseudoCollisionsHit"], Missing["NotAvailable"]],
+   compensated = AssociationQ[diagnostics] &&
+     TrueQ[Lookup[diagnostics, "PseudoCollisionsCompensated", False]]},
+  (* Missing/malformed diagnostics are not evidence that CASE-P was
+     discharged.  A nonempty hit list is safe only with Solve's explicit
+     joint-compensation certificate. *)
+  If[!ListQ[hits] || (hits =!= {} && !compensated),
+    Return[newBasis]];
   degs = DiffExp2`Indicial`EpsDegenerateFamilies[cs["IndicialData"]];
-  If[Environment["DEBUG_RECOMBINE"] === "1",
-    Print["RECOMBINE chart ", cs["Center"], " degs=", degs,
-      " specs=", {#["a"], #["b"], #["Family"], #["ChainPos"]} & /@ specs]];
   If[degs === {}, Return[newBasis]];
   width = 4 + Max[0, Max[Map[#["EpsWindow", "CompleteMax"] -
     #["EpsWindow", "Min"] &, basis]]];
@@ -465,26 +517,92 @@ sigmaFor[ls_] := Module[{s = DiffExp2`SectorSeries`ChartImSign[ls]},
    equal the former per-object path's windows order for order. *)
 
 (* seriesScale mirror: max |numeric coefficient|, symbolic excluded *)
-mwScale[c_List] := Max[0, Sequence @@ (If[NumericQ[#], Abs[N[#, 10]], Nothing] & /@ c)];
+mwScale[c_List] := Max[0,
+  Sequence @@ (If[NumericQ[#], numMag[#, 10], Nothing] & /@ c)];
 
 (* EpsSeries norm mirror: numerics pass through; symbolics Together *)
 mwNorm[c_List] := If[FreeQ[c, _Symbol], c,
   Map[If[NumericQ[#], #, Together[Expand[#]]] &, c]];
 
-(* ESTrim mirror: advance min past negligible leading coefficients under
-   the SAME relative gate (ESCoeffZeroQ -> Tol["LaurentLeadTol"], scale
-   over the stored window, the ambiguity band stays loud); the top never
-   changes; all-negligible gives the canonical zero {top, {0}}.  This is
-   the trim-before-normalize guard: numerically-tiny leading storage
-   never becomes a pivot. *)
-mwTrim[{min_, c_}] := Module[{scale = mwScale[c], n = Length[c], i = 1},
-  While[i <= n && TrueQ[DiffExp2`EpsSeries`ESCoeffZeroQ[c[[i]], scale]], i++];
+(* Matching-rank trim: advance min past coefficients certified zero at the
+   matching pivot tolerance RankTol, not at LaurentLeadTol.  The latter is
+   the structural/source-leading floor; using its fixed 10^-24 threshold in
+   every Gaussian row operation discarded resolved rank information (at
+   WP1000 RankTol is 10^-250) and left coherent endpoint residuals.  The
+   binding Transport contract assigns matching pivot/lead decisions to the
+   library-wide ternary NumericallyZeroQ RankTol gate.  The top never
+   changes; all-zero gives canonical {top,{0}}. *)
+mwTrim[{min_, c_}, context_String:"matching Laurent elimination"] := Module[
+  {scale = mwScale[c], n = Length[c], i = 1,
+   rtol = DiffExp2`Tolerances`Tol["RankTol"]},
+  While[i <= n && TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[
+      c[[i]], scale, rtol, context,
+      DiffExp2`Tolerances`$AmbiguityBandDecades, False]], i++];
   If[i > n, {min + n - 1, {0}}, {min + i - 1, Drop[c, i - 1]}]];
+
+(* Input normalization has two distinct proof domains.  Negative epsilon
+   orders are compensated polar content and may be removed at the calibrated
+   Laurent floor.  At and above eps^0 they are rank data, so the much tighter
+   RankTol gate owns the decision (a resolved 1e-40 coefficient at WP500 is
+   not structural zero).  Keeping these roles separate prevents polar noise
+   from entering the Laurent solve without erasing a small F[0] pivot. *)
+mwInputTrim[{min_, c_}, context_String] := Module[
+  {scale = mwScale[c], n = Length[c], i = 1,
+   ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], entry},
+  While[i <= n && min + i - 1 < 0 &&
+      TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[c[[i]], scale, ltol,
+        context <> ": compensated polar input",
+        DiffExp2`Tolerances`$AmbiguityBandDecades,
+        SameQ[ltol, 10^-24]]], i++];
+  entry = If[i > n, {min + n - 1, {0}},
+    {min + i - 1, Drop[c, i - 1]}];
+  mwTrim[entry, context <> ": rank input"]];
+
+(* Row arithmetic must discard only a certified centered zero.  Scaling a
+   Schur series by the maximum over its entire future window is invalid when
+   coefficients grow by many decades per epsilon order: it erased genuine
+   early pivots and collapsed the banana endpoint from 13 coefficients to 3.
+   Initial structural/rank classification is completed by mwInputTrim; after
+   that, only an exact zero or an inexact centered zero whose entire
+   uncertainty ball lies below the matching residual contract may advance
+   the formal valuation.
+   In particular, an underresolved 0``acc is not evidence of cancellation. *)
+mwCenteredZeroQ[c_, context_String, scale_:1] := Module[
+  {digits = DiffExp2`Tolerances`Tol["ChopDigits"], mag, upper, mtol},
+  Which[
+    NumericQ[c],
+      mag = numMag[c, digits];
+      If[!SameQ[mag, 0], Return[False, Module]];
+      If[!InexactNumberQ[c], Return[True, Module]];
+      upper = Last[numMagBounds[c, digits]];
+      mtol = Max[DiffExp2`Tolerances`Tol["MatchTol"],
+        DiffExp2`Tolerances`Tol["LaurentLeadTol"]];
+      If[TrueQ[upper <= mtol*scale], True,
+        err["E5", <|"Context" -> context, "Coefficient" -> c,
+          "UncertaintyUpperBound" -> upper, "Scale" -> scale,
+          "EffectiveTolerance" -> mtol,
+          "Detail" -> "underresolved centered zero in matching elimination"|>]],
+    True, zeroQ[c]]];
+
+mwCancellationTrim[{min_, c_}, context_String:"matching row cancellation",
+    sourceFrames_List:{}] := Module[{n = Length[c], i = 1, scaleAt},
+    scaleAt[k_] := If[sourceFrames === {}, 1,
+      Max[1, Sequence @@ (numMag[#, 20] & /@
+        Select[(mwCoeff[#, k] & /@ sourceFrames), NumericQ])]];
+    While[i <= n && mwCenteredZeroQ[c[[i]], context,
+        scaleAt[min + i - 1]], i++];
+    If[i > n, {min + n - 1, {0}},
+      {min + i - 1, Drop[c, i - 1]}]];
 
 (* trimmed-entry zero test (the ESLeading === None equivalent) *)
 mwZeroQ[{_, c_}] := c === {0};
 
 mwNeg[{m_, c_}] := {m, -c};
+mwScaleBy[a_, {m_, c_}] := {m, mwNorm[a*c]};
+
+mwCoeff[{m_, c_}, k_Integer] := If[m <= k <= m + Length[c] - 1,
+  c[[k - m + 1]], 0];
+mwTop[{m_, c_}] := m + Length[c] - 1;
 
 (* ESAdd mirror: min = Min[mins], top = Min[tops] — never zero-padded *)
 mwAdd[{am_, ac_}, {bm_, bc_}] := Module[
@@ -524,43 +642,405 @@ mwDiv[{am_, ac_}, {bm_, bc_}] := Module[
 mwFromES[s_] := {esMin[s], s["Coeffs"]};
 mwToES[{m_, c_}] := esNew[m, c];
 
-MatchWeights[Fmat_List, vIn_List, label_String] := Module[
-  {nb = Length[Fmat], FF, vv, perm, w},
+(* A rank decision at ONE epsilon order may use a scale from that same
+   coefficient matrix.  It must never look at later epsilon coefficients:
+   their growth is unrelated to the formal valuation. *)
+mwRankZeroQ[c_, scale_, context_String] := Which[
+  FreeQ[c, _?InexactNumberQ] && TrueQ[PossibleZeroQ[c]], True,
+  NumericQ[c], TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[
+    c, scale, DiffExp2`Tolerances`Tol["RankTol"], context,
+    DiffExp2`Tolerances`$AmbiguityBandDecades, False]],
+  True, zeroQ[c]];
+
+(* Full-pivot elimination of a single coefficient matrix.  When deficient,
+   return one certified right-null relation in ORIGINAL column order.  This
+   is deliberately local rather than NullSpace[..., Tolerance -> ...]: every
+   zero/nonzero decision goes through the package ambiguity gate, and tiny
+   coordinates are snapped only after the same certified RankTol test. *)
+mwNullRelation[g0_List, label_String] := Module[
+  {n = Length[g0], original = g0, A, colScales, colPerm, rank = 0,
+   pos, active, nums, scale, cands, piv, factor, y, x, target,
+   residual, terms, rowScale},
+  (* Constant column magnitudes are units of the epsilon-adic coefficient
+     field, not determinant valuations.  Normalize them before rank
+     elimination so an ordinary but ill-scaled fundamental matrix (for
+     example columns differing by 10^70) is not mistaken for an epsilon
+     degeneracy.  Map the null relation back afterward. *)
+  colScales = Table[Max[10^-300,
+      Sequence @@ (numMag[#,
+        DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]] & /@
+          Select[g0[[All, c]], NumericQ])],
+    {c, n}];
+  A = Table[g0[[r, c]]/colScales[[c]], {r, n}, {c, n}];
+  If[!MatrixQ[A] || Dimensions[A] =!= {n, n},
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "matching saturation received a nonsquare leading matrix"|>]];
+  colPerm = Range[n];
+  For[pos = 1, pos <= n, pos++,
+    active = Flatten[Table[{r, c}, {r, pos, n}, {c, pos, n}], 1];
+    nums = Select[(A[[#[[1]], #[[2]]]] & /@ active), NumericQ];
+    scale = Max[1, Sequence @@ (numMag[#, 20] & /@ nums)];
+    cands = Select[active, !mwRankZeroQ[
+        A[[#[[1]], #[[2]]]], scale,
+        label <> ": saturation rank pivot"] &];
+    If[cands === {}, Break[]];
+    piv = First[SortBy[cands, If[NumericQ[A[[#[[1]], #[[2]]]]],
+        -numMag[A[[#[[1]], #[[2]]]], 20], 0] &]];
+    If[piv[[1]] =!= pos, A[[{pos, piv[[1]]}]] = A[[{piv[[1]], pos}]]];
+    If[piv[[2]] =!= pos,
+      A[[All, {pos, piv[[2]]}]] = A[[All, {piv[[2]], pos}]];
+      colPerm[[{pos, piv[[2]]}]] = colPerm[[{piv[[2]], pos}]]];
+    Do[
+      factor = A[[r, pos]]/A[[pos, pos]];
+      A[[r, pos]] = 0;
+      Do[A[[r, c]] = If[FreeQ[{A[[r, c]], factor, A[[pos, c]]}, _Symbol],
+          A[[r, c]] - factor*A[[pos, c]],
+          Together[Expand[A[[r, c]] - factor*A[[pos, c]]]]],
+        {c, pos + 1, n}],
+      {r, pos + 1, n}];
+    rank++];
+  If[rank === n, Return[<|"Rank" -> n, "Vector" -> None|>, Module]];
+  y = ConstantArray[0, n];
+  y[[rank + 1]] = 1;
+  Do[y[[r]] = If[FreeQ[A, _Symbol],
+      -Sum[A[[r, c]]*y[[c]], {c, r + 1, n}]/A[[r, r]],
+      Together[-Sum[A[[r, c]]*y[[c]], {c, r + 1, n}]/A[[r, r]]]],
+    {r, rank, 1, -1}];
+  x = ConstantArray[0, n];
+  Do[x[[colPerm[[c]]]] = y[[c]], {c, n}];
+  x = MapThread[#1/#2 &, {x, colScales}];
+  (* Do not threshold null-vector coordinates in isolation.  A component
+     of size 10^-70 can be essential beside a column of size 10^70; only
+     the certified matrix-vector residual decides whether the relation is
+     valid. *)
+  target = First[Ordering[Map[If[NumericQ[#], numMag[#, 20], 1] &, x], -1]];
+  If[zeroQ[x[[target]]],
+    err["E5", <|"Chart" -> label, "Rank" -> rank,
+      "Detail" -> "matching saturation produced a zero null vector"|>]];
+  x = mwNorm[x/x[[target]]];
+  Do[
+    terms = Table[original[[r, c]]*x[[c]], {c, n}];
+    residual = If[FreeQ[terms, _Symbol], Total[terms], Together[Total[terms]]];
+    rowScale = Max[1, Sequence @@ (numMag[#, 20] & /@
+      Select[terms, NumericQ])];
+    If[!mwRankZeroQ[residual, rowScale,
+        label <> ": saturation null-vector residual"],
+      err["E5", <|"Chart" -> label, "Rank" -> rank, "Row" -> r,
+        "Residual" -> residual, "Scale" -> rowScale,
+        "Detail" -> "candidate saturation relation is not in the certified nullspace"|>]],
+    {r, n}];
+  <|"Rank" -> rank, "Vector" -> x, "Target" -> target|>];
+
+(* Certify that one column combination has no eps^0 value coefficient, then
+   divide its honest finite window by epsilon.  The scale is formed only
+   from terms at eps^0; later large coefficients cannot change the result. *)
+mwSaturationDivide[rowFrames_List, a_List, label_String] := Module[
+  {active, terms, combo, c0, term0, scale},
+  active = Select[Range[Length[a]], !zeroQ[a[[#]]] &];
+  terms = mwScaleBy[a[[#]], rowFrames[[#]]] & /@ active;
+  If[terms === {},
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "empty saturation column combination"|>]];
+  combo = Fold[mwAdd, First[terms], Rest[terms]];
+  If[combo[[1]] < 0,
+    err["E5", <|"Chart" -> label, "Window" -> {combo[[1]], mwTop[combo]},
+      "Detail" -> "saturation combination retained a material epsilon pole"|>]];
+  If[combo[[1]] === 0,
+    c0 = First[combo[[2]]];
+    term0 = Table[a[[j]]*mwCoeff[rowFrames[[j]], 0], {j, active}];
+    scale = Max[1, Sequence @@ (numMag[#, 20] & /@
+      Select[term0, NumericQ])];
+    If[!mwRankZeroQ[c0, scale, label <> ": saturation eps^0 divisibility"],
+      err["E5", <|"Chart" -> label, "Coefficient" -> c0, "Scale" -> scale,
+        "Detail" -> "null-column combination is not divisible by epsilon"|>]];
+    If[Length[combo[[2]]] <= 1,
+      err["E5", <|"Chart" -> label,
+        "Detail" -> "insufficient complete epsilon window for saturation division"|>]];
+    combo = {1, Rest[combo[[2]]]}];
+  combo = mwCancellationTrim[combo, label <> ": saturation quotient"];
+  {combo[[1]] - 1, combo[[2]]}];
+
+(* Division-free determinant series.  This is used only after the leading
+   coefficient matrix appears rank deficient, so the factorial formula is
+   not paid on ordinary charts.  Its coefficient-local cancellation scale
+   distinguishes a tiny constant unit from a determinant whose eps^0 term
+   is merely noise beside a material higher-order coefficient. *)
+mwDetFrame[M_List, label_String] := Module[{n = Length[M], terms, fac, out},
+  terms = DeleteCases[Table[
+    fac = Table[M[[r, perm[[r]]]], {r, n}];
+    If[AnyTrue[fac, mwZeroQ], Nothing,
+      mwScaleBy[Signature[perm], Fold[mwMul, First[fac], Rest[fac]]]],
+    {perm, Permutations[Range[n]]}], Nothing];
+  If[terms === {},
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "matching determinant is identically zero in the complete window"|>]];
+  out = Fold[mwAdd, First[terms], Rest[terms]];
+  mwCancellationTrim[out, label <> ": determinant cancellation", terms]];
+
+(* Construct a sequence of elementary epsilon-adic column operations which
+   turns the match-point value matrix into a regular full-rank frame.
+   Initial shifts normalize each column valuation.  Every later action
+   replaces column j by (Sum_i a_i column_i)/eps, lowering the determinant
+   valuation by one while consuming exactly one honest top coefficient. *)
+mwSaturationPlan[Fmat_List, label_String] := Module[
+  {n = Length[Fmat], G, nonzero, q, shifts, actions = {}, g0, rel, a,
+   target, detFrame, detValuation = None, maxSteps, steps = 0},
+  G = Map[mwInputTrim[mwFromES[#], label <> ": saturation input"] &,
+    Fmat, {2}];
+  q = Table[
+    nonzero = Select[G[[All, j]], !mwZeroQ[#] &];
+    If[nonzero === {},
+      err["E5", <|"Chart" -> label, "Column" -> j,
+        "Detail" -> "zero matching column before epsilon saturation"|>]];
+    Min[First /@ nonzero],
+    {j, n}];
+  shifts = -q;
+  Do[G[[All, j]] = Map[{#[[1]] + shifts[[j]], #[[2]]} &, G[[All, j]]],
+    {j, n}];
+  maxSteps = n*(1 + Max[0, Min[mwTop /@ Flatten[G]]]);
+  While[True,
+    g0 = Table[mwCoeff[G[[r, c]], 0], {r, n}, {c, n}];
+    rel = Catch[mwNullRelation[g0,
+      label <> "#sat" <> ToString[steps]], "DiffExp2Error"];
+    If[!FailureQ[rel] && rel["Rank"] === n,
+      If[IntegerQ[detValuation] && steps =!= detValuation,
+        err["E5", <|"Chart" -> label, "Steps" -> steps,
+          "DeterminantValuation" -> detValuation,
+          "Detail" -> "saturation reached full rank before consuming the certified determinant valuation"|>]];
+      Break[]];
+    If[detValuation === None,
+      detFrame = mwInputTrim[mwDetFrame[G, label],
+        label <> ": determinant valuation"];
+      If[mwZeroQ[detFrame],
+        err["E5", <|"Chart" -> label,
+          "Detail" -> "matching determinant is unresolved in the complete epsilon window"|>]];
+      detValuation = detFrame[[1]];
+      If[detValuation < 0,
+        err["E5", <|"Chart" -> label,
+          "DeterminantValuation" -> detValuation,
+          "Detail" -> "normalized matching determinant retained an epsilon pole"|>]];
+      (* Valuation zero means a constant but possibly ill-conditioned unit.
+         It must not trigger epsilon division. *)
+      If[detValuation === 0, Break[]]];
+    If[FailureQ[rel], Throw[rel, "DiffExp2Error"]];
+    If[steps >= detValuation,
+      err["E5", <|"Chart" -> label, "Steps" -> steps,
+        "DeterminantValuation" -> detValuation,
+        "Detail" -> "certified saturation steps did not produce a full-rank leading matrix"|>]];
+    a = rel["Vector"];
+    target = rel["Target"];
+    G[[All, target]] = Table[mwSaturationDivide[G[[r]], a,
+      label <> "#sat" <> ToString[steps + 1] <> "/row" <> ToString[r]],
+      {r, n}];
+    AppendTo[actions, <|"Target" -> target, "Vector" -> a|>];
+    steps++;
+    If[steps > maxSteps,
+      err["E5", <|"Chart" -> label, "Steps" -> steps,
+        "Detail" -> "epsilon saturation did not reach a full-rank leading matrix"|>]]];
+  <|"Matrix" -> Map[mwToES, G, {2}], "InitialShifts" -> shifts,
+    "Actions" -> actions, "Steps" -> steps, "Label" -> label|>];
+
+mwShiftLocalSolutionEps[ls_Association, shift_Integer] := Join[ls, <|
+  "EpsWindow" -> <|"Min" -> ls["EpsWindow", "Min"] + shift,
+    "CompleteMax" -> ls["EpsWindow", "CompleteMax"] + shift|>|>];
+
+mwApplySaturationPlan[basis_List, plan_Association] := Module[
+  {out = MapThread[mwShiftLocalSolutionEps, {basis, plan["InitialShifts"]}],
+   a, target, active, combo},
+  Do[
+    a = action["Vector"]; target = action["Target"];
+    active = Select[Range[Length[a]], !zeroQ[a[[#]]] &];
+    combo = DiffExp2`SectorSeries`CombineLocalSolutions[a[[active]], out[[active]]];
+    out[[target]] = mwShiftLocalSolutionEps[combo, -1],
+    {action, plan["Actions"]}];
+  out];
+
+(* Residual vector for iterative refinement.  It is formed against the
+   ORIGINAL, untrimmed matching matrix: the primary elimination may classify
+   individually sub-LaurentLeadTol leading coefficients as structural zero,
+   but several such discarded terms can add coherently above the tolerance.
+   Solving that small residual on its own rescales it to O(1), so the same
+   relative structural gate retains the correction without changing either
+   the pivot convention or the public tolerance. *)
+matchingResidualVector[Fmat_List, vIn_List, weights_List] := Module[
+  {nb = Length[Fmat]},
+  Table[Module[{terms, lhs},
+    terms = Table[esTimes[Fmat[[comp, col]], weights[[col]]], {col, nb}];
+    lhs = Fold[esAdd, First[terms], Rest[terms]];
+    esAdd[vIn[[comp]], esScale[-1, lhs]]],
+    {comp, nb}]];
+
+(* Non-throwing form of the residual proof.  MatchWeights uses it to decide
+   whether a bounded refinement is needed; matchingResidualAssert remains the
+   single loud public proof obligation after the final correction. *)
+matchingResidualFailure[Fmat_List, vIn_List, weights_List,
+    label_String] := Module[
+  {nb = Length[Fmat], mtol = DiffExp2`Tolerances`Tol["MatchTol"],
+   ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], effectiveTol},
+  effectiveTol = Max[mtol, ltol];
+  Catch[
+    Do[Module[{terms, lhs, rhs = vIn[[comp]], kmin, kmax},
+      terms = Table[esTimes[Fmat[[comp, col]], weights[[col]]], {col, nb}];
+      lhs = Fold[esAdd, First[terms], Rest[terms]];
+      kmin = Min[esMin[lhs], esMin[rhs]];
+      kmax = Min[esCM[lhs], esCM[rhs]];
+      Do[Module[{lv = esCoeff[lhs, k], rv = esCoeff[rhs, k], residual,
+          termVals, nums, scale, mag, uncertainty, bad},
+        residual = If[FreeQ[{lv, rv}, _Symbol], lv - rv,
+          Together[Expand[lv - rv]]];
+        termVals = esCoeff[#, k] & /@ terms;
+        nums = Select[Flatten[{lv, rv, termVals}], NumericQ];
+        scale = Max[1,
+          Sequence @@ (numMag[#, 20] & /@ nums)];
+        uncertainty = If[InexactNumberQ[residual],
+          Module[{acc = Accuracy[residual]},
+            (* Accuracy is commonly returned as a machine real even for a
+               many-hundred-digit number.  Evaluating 10^-acc would therefore
+               underflow at about 308 digits and silently turn the uncertainty
+               allowance into zero.  The exact decade below is conservative
+               (at most a factor ten larger) and cannot underflow. *)
+            If[NumericQ[acc] && acc =!= Infinity,
+              10^-Floor[acc], 0]], 0];
+        bad = Which[
+          NumericQ[residual],
+            mag = numMag[residual, 20];
+            TrueQ[mag + uncertainty > effectiveTol*scale],
+          TrueQ[PossibleZeroQ[residual]], False,
+          (* Exact symbolic nonzero content is a proof.  An inexact symbolic
+             residue has no parameter domain or coefficient-wise significance
+             certificate here, so accepting it would be an unproved match. *)
+          FreeQ[residual, _?InexactNumberQ], !zeroQ[residual],
+          True, True];
+        If[TrueQ[bad],
+          Throw[<|"Chart" -> label, "EpsOrder" -> k,
+            "Component" -> comp, "Residual" -> residual,
+            "ResidualUncertainty" -> uncertainty, "Scale" -> scale,
+            "MatchTol" -> mtol, "LaurentLeadTol" -> ltol,
+            "EffectiveTolerance" -> effectiveTol,
+            "Detail" -> "matching residual F.w-v exceeds tolerance"|>,
+            "MatchingResidualFailure"]]],
+        {k, kmin, kmax}]],
+      {comp, nb}];
+    None,
+    "MatchingResidualFailure"]];
+
+(* Always-on proof obligation for the Laurent matching solve.  Compare the
+   reconstructed F.w with v on the full shared complete window, including
+   certified-zero orders below either operand's Min.  Gaussian elimination
+   deliberately uses the LaurentLeadTol structural-zero gate while trimming
+   rows; therefore the strongest residual contract for the ORIGINAL,
+   untrimmed F is Max[MatchTol, LaurentLeadTol].  Demanding MatchTol below
+   that floor is internally inconsistent: content the solve was required to
+   discard would immediately fail its checker.  Inexact residuals include a
+   conservative 10^-Accuracy uncertainty
+   allowance; low precision never turns a resolved violation into a pass.
+   Exact/symbolic nonzero residuals remain algebraically checked. *)
+matchingResidualAssert[Fmat_List, vIn_List, weights_List, label_String,
+    checkedFailure_:Automatic] := Module[
+  (* MatchWeights passes the result of the immediately preceding check so a
+     successful seam does not reconstruct F.w twice.  Direct callers retain
+     the four-argument always-compute contract. *)
+  {failure = If[checkedFailure === Automatic,
+      matchingResidualFailure[Fmat, vIn, weights, label], checkedFailure]},
+  If[AssociationQ[failure], err["E6", failure]];
+  Null];
+
+(* One Laurent-field elimination.  It intentionally has no residual policy:
+   MatchWeights owns the original-system proof and may call this kernel on a
+   residual right-hand side during refinement. *)
+mwSolve[Fmat_List, vIn_List, label_String] := Module[
+  {nb = Length[Fmat], FF, vv, scaleFrames, rowPerm, colPerm, wPerm, w, wES},
   (* Gaussian elimination over the eps-Laurent field on frame lists:
-     pivots by minimal leading eps-order (then largest leading magnitude),
-     quotient-recursion row operations.  Honest windows propagate through
-     the mirrored EpsSeries rules; a column with no usable pivot =
+     FULL row+column pivoting by minimal leading eps-order (then largest
+     leading magnitude), followed by quotient-recursion row operations.
+     Column pivoting is essential for compensated Laurent bases: a fixed
+     column order can manufacture a near-zero final Schur pivot and lose all
+     significance even though a well-conditioned pivot exists elsewhere in
+     the remaining submatrix.  Unknowns are mapped back to their original
+     basis-column order after back substitution.  Honest windows propagate
+     through the mirrored EpsSeries rules; no usable submatrix pivot means a
      genuinely singular system (E5). *)
-  FF = Map[mwTrim[mwFromES[#]] &, Fmat, {2}];
+  FF = Map[mwInputTrim[mwFromES[#], label <> ": input"] &, Fmat, {2}];
   vv = mwFromES /@ vIn;
-  perm = Range[nb];   (* row order after pivoting *)
-  Do[Module[{cands, pivRow},
-    cands = Select[Range[col, nb], !mwZeroQ[FF[[perm[[#]], col]]] &];
+  (* Same-order input scale retained throughout elimination.  A zero can
+     have modest absolute Accuracy after canceling 10^N-sized operands yet
+     still be certified to thousands of relative digits.  Keeping the
+     original coefficient frames lets cancellation trimming recover that
+     scale without ever consulting later epsilon orders. *)
+  scaleFrames = Join[Flatten[FF], vv];
+  rowPerm = Range[nb];
+  colPerm = Range[nb];
+  Do[Module[{cands, piv},
+    cands = Select[Tuples[{Range[col, nb], Range[col, nb]}],
+      !mwZeroQ[FF[[rowPerm[[#[[1]]]], colPerm[[#[[2]]]]]]] &];
     If[cands === {},
       err["E5", <|"Chart" -> label, "Column" -> col,
         "Detail" -> "matching system singular over the eps-Laurent field"|>]];
-    pivRow = First[SortBy[cands, Module[{e = FF[[perm[[#]], col]]},
-      {e[[1]], -Abs[N[e[[2, 1]], 20]]}] &]];
-    If[pivRow =!= col, perm[[{col, pivRow}]] = perm[[{pivRow, col}]]];
-    Do[Module[{entry = FF[[perm[[r]], col]], factor},
+    piv = First[SortBy[cands, Module[
+      {e = FF[[rowPerm[[#[[1]]]], colPerm[[#[[2]]]]]]},
+      {e[[1]], -numMag[e[[2, 1]], 20]}] &]];
+    If[piv[[1]] =!= col,
+      rowPerm[[{col, piv[[1]]}]] = rowPerm[[{piv[[1]], col}]]];
+    If[piv[[2]] =!= col,
+      colPerm[[{col, piv[[2]]}]] = colPerm[[{piv[[2]], col}]]];
+    Do[Module[{entry = FF[[rowPerm[[r]], colPerm[[col]]]], factor},
       If[!mwZeroQ[entry],
-        factor = mwTrim[mwDiv[entry, FF[[perm[[col]], col]]]];
-        Do[FF[[perm[[r]], c2]] = mwTrim[mwAdd[FF[[perm[[r]], c2]],
-          mwNeg[mwMul[factor, FF[[perm[[col]], c2]]]]]],
+        factor = mwCancellationTrim[mwDiv[entry,
+          FF[[rowPerm[[col]], colPerm[[col]]]]],
+          label <> ": elimination factor", scaleFrames];
+        Do[Module[{old = FF[[rowPerm[[r]], colPerm[[c2]]]], term},
+          term = mwMul[factor, FF[[rowPerm[[col]], colPerm[[c2]]]]];
+          term = mwNeg[term];
+          FF[[rowPerm[[r]], colPerm[[c2]]]] = mwCancellationTrim[
+            mwAdd[old, term], label <> ": row elimination",
+            Join[{old, term}, scaleFrames]]],
           {c2, col, nb}];
-        vv[[perm[[r]]]] = mwTrim[mwAdd[vv[[perm[[r]]]],
-          mwNeg[mwMul[factor, vv[[perm[[col]]]]]]]]]],
+        Module[{old = vv[[rowPerm[[r]]]], term},
+          term = mwMul[factor, vv[[rowPerm[[col]]]]];
+          term = mwNeg[term];
+          vv[[rowPerm[[r]]]] = mwCancellationTrim[mwAdd[old, term],
+            label <> ": rhs elimination",
+            Join[{old, term}, scaleFrames]]]]],
       {r, col + 1, nb}]],
     {col, nb}];
   (* back substitution *)
-  w = Table[None, {nb}];
-  Do[Module[{rhs = vv[[perm[[col]]]]},
-    Do[rhs = mwTrim[mwAdd[rhs,
-      mwNeg[mwMul[FF[[perm[[col]], c2]], w[[c2]]]]]],
+  wPerm = Table[None, {nb}];
+  Do[Module[{rhs = vv[[rowPerm[[col]]]]},
+    Do[Module[{old = rhs, term},
+      term = mwMul[FF[[rowPerm[[col]], colPerm[[c2]]]], wPerm[[c2]]];
+      term = mwNeg[term];
+      rhs = mwCancellationTrim[mwAdd[old, term],
+        label <> ": back substitution", Join[{old, term}, scaleFrames]]],
       {c2, col + 1, nb}];
-    w[[col]] = mwTrim[mwDiv[rhs, FF[[perm[[col]], col]]]]],
+    wPerm[[col]] = mwCancellationTrim[mwDiv[rhs,
+      FF[[rowPerm[[col]], colPerm[[col]]]]],
+      label <> ": pivot division", scaleFrames]],
     {col, nb, 1, -1}];
-  mwToES /@ w];
+  w = Table[None, {nb}];
+  Do[w[[colPerm[[col]]]] = wPerm[[col]], {col, nb}];
+  wES = mwToES /@ w;
+  wES];
+
+MatchWeights[Fmat_List, vIn_List, label_String] := Module[
+  {w = mwSolve[Fmat, vIn, label], failure, residual, correction,
+   refinementSteps = 0, maxRefinementSteps = 2},
+  failure = matchingResidualFailure[Fmat, vIn, w, label];
+  While[AssociationQ[failure] && refinementSteps < maxRefinementSteps,
+    residual = matchingResidualVector[Fmat, vIn, w];
+    correction = mwSolve[Fmat, residual,
+      label <> "#refine" <> ToString[refinementSteps + 1]];
+    (* ESAdd takes the intersection of complete upper windows.  Refinement
+       must never manufacture a pass by shrinking the original weight
+       window past a failing order; if the correction cannot cover every
+       current complete order, leave w unchanged and let the final proof
+       raise the original failure. *)
+    If[AnyTrue[MapThread[esCM[#1] < esCM[#2] &,
+        {correction, w}], TrueQ], Break[]];
+    w = MapThread[esAdd, {w, correction}];
+    refinementSteps++;
+    failure = matchingResidualFailure[Fmat, vIn, w, label]];
+  matchingResidualAssert[Fmat, vIn, w, label, failure];
+  w];
 
 (* ---- 2.10 probe ---- *)
 
@@ -574,7 +1054,8 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
   Table[Module[{kf = esCoeff[full["Value"], k],
       kr = If[esMin[red["Value"]] <= k <= esCM[red["Value"]],
         esCoeff[red["Value"], k], 0*esCoeff[full["Value"], k]]},
-    Max[0, Sequence @@ (Abs[N[#, 20]] & /@ Select[Flatten[{kf - kr}], NumericQ])]],
+    Max[0, Sequence @@ (Last[numMagBounds[#, 20]] & /@
+      Select[Flatten[{kf - kr}], NumericQ])]],
     {k, esMin[full["Value"]], esCM[full["Value"]]}]];
 
 (* ---- 2.6 marching ---- *)
@@ -645,8 +1126,10 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         "ErrorEstimate" -> ConstantArray[0, kmax + 1],
         "Prescriptions" -> {}|>]];
   errAcc = None;
-  Do[Module[{chart = charts[[ci]], cs, sol, matchPt, tIn, vvals, F, w, ls,
-      basis, probeErrs, valueMode, couplingDepth = 0},
+    Do[Module[{chart = charts[[ci]], cs, sol, matchPt, tIn, centerTIn,
+      matchTIn, vvals, F, w, ls, basis, satPlan, satVerify,
+      probeErrs, valueMode,
+      couplingDepth = 0},
     If[Environment["DEBUG_CHART"] === "1",
       Print["CHART ", chart["Name"], " prep start t=", SessionTime[]]];
     cs = DiffExp2`Solve`PrepareChart[sys, chart];
@@ -664,15 +1147,10 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       !TrueQ[chart["Singular"]] &&
       TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
       (* conservative geometry pre-check: the center must sit WELL inside
-         the previous object's disk; otherwise fall back to the basis path
-         (a performance choice, not an ambiguity).  Margin: 9/10 under the
-         classic coupled geometry (stepDivisor = DivisionOrder); under the
-         wide-stride geometry the center handoff must ALSO keep the
-         ratio^(ExpansionOrder+1) truncation tail below the 1e-14 design
-         line — receding-leg gaps (up to ~0.8 of the previous radius)
-         would otherwise pass the 9/10 check with ~1e-4 tails. *)
-      Module[{margin = If[stepDivisor[cfg["DivisionOrder"]] < cfg["DivisionOrder"],
-          Min[9/10, N[10^(-14/(cfg["ExpansionOrder"] + 1)), 30]], 9/10]},
+         the previous object's disk and ratio^(ExpansionOrder+1) must stay
+         two decades below LaurentLeadTol.  This applies to every stride
+         mode: receding-leg gaps can be large even under classic geometry. *)
+      Module[{margin = valueCenterMargin[cfg["ExpansionOrder"]]},
         TrueQ[Abs[N[chart["Center"] - current["Center"], 30]] <
           margin*N[current["Radius"], 30]]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
@@ -686,9 +1164,17 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       err["E8", <|"Chart" -> chart["Name"],
         "Detail" -> "singular-chart handoff impossible (unreachable past ValidatePlan)"|>]];
     (* incoming value in the PREVIOUS object's chart coordinate: at the
-       match point (basis path) or at this chart's center (value mode) *)
-    tIn = If[valueMode, chart["Center"], matchPt] - current["Center"];
-    Module[{prevEval, sigma},
+       match point (basis path) or at this chart's center (value mode).
+       Across a singular chart both candidate points must be on the same
+       sheet; otherwise the conservative basis path owns the handoff. *)
+    centerTIn = chart["Center"] - current["Center"];
+    matchTIn = matchPt - current["Center"];
+    If[valueMode && lastSingular &&
+        !SameQ[TrueQ[N[centerTIn, 30] dir > 0],
+          TrueQ[N[matchTIn, 30] dir > 0]],
+      valueMode = False];
+    tIn = If[valueMode, centerTIn, matchTIn];
+    Module[{sigma, crossed = False, valuesAt},
       (* crossing: if the previous chart was singular and matchPt lies on its
          far side (sign of tIn relative to approach), apply the operator *)
       If[lastSingular && TrueQ[N[tIn, 30] dir > 0],
@@ -699,25 +1185,48 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
              7/11 has a t^(-1+eps) sector of physically zero weight; the
              syntactic tag test alone would E8 every such crossing).
              Ambiguous magnitudes stay material -> still loud. *)
-          Module[{secs = current["Sectors"], scale, materialQ},
-            scale = Max[1*^-300, Sequence @@ (Abs[N[#, 20]] & /@
+          Module[{secs = current["Sectors"], scale, materialQ,
+              coeffZeroCertifiedQ, ltol, floorQ, zeroLimit},
+            scale = Max[1*^-300, Sequence @@ (numMag[#, 20] & /@
               Select[Flatten[#["Coeffs"] & /@ secs], NumericQ])];
-            materialQ[sec_] := Module[{mx},
-              mx = Max[0, Sequence @@ (Abs[N[#, 20]] & /@
-                Select[Flatten[sec["Coeffs"]], NumericQ])];
-              !TrueQ[mx <= DiffExp2`Tolerances`Tol["LaurentLeadTol"]*scale]];
+            ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"];
+            floorQ = SameQ[ltol, 10^-24];
+            zeroLimit = ltol*scale/If[floorQ, 1,
+              10^DiffExp2`Tolerances`$AmbiguityBandDecades];
+            coeffZeroCertifiedQ[z_] := Which[
+              FreeQ[z, _?InexactNumberQ] && TrueQ[PossibleZeroQ[z]], True,
+              NumericQ[z], With[{upper = Last[numMagBounds[z, 20]]},
+                If[floorQ, TrueQ[upper <= zeroLimit],
+                  TrueQ[upper < zeroLimit]]],
+              True, False];
+            materialQ[sec_] := !AllTrue[Flatten[sec["Coeffs"]],
+              coeffZeroCertifiedQ];
             If[AnyTrue[Select[secs, materialQ],
                 !IntegerQ[#["a"]] || !zeroQ[#["b"]] || #["p"] > 0 &],
               err["E8", <|"Chart" -> chart["Name"],
                 "Detail" -> "crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"|>],
               sigma = 1]]];
         current = ApplyCrossing[current, sigma];
-        tIn = -tIn  (* far side evaluates at positive u *)];
-      prevEval = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tIn,
-        "UsePade" -> False, "ImSign" -> sigmaFor[current]];
-      vvals = Module[{vv = prevEval["Value"], d2 = cs["SystemSize"]},
+        crossed = True;
+        tIn = -tIn];  (* far side evaluates at positive u *)
+      valuesAt[tt_] := Module[{ev, vv, d2 = cs["SystemSize"]},
+        ev = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tt,
+          "UsePade" -> False, "ImSign" -> sigmaFor[current]];
+        vv = ev["Value"];
         Table[esNew[esMin[vv], numHandoff[Table[esCoeff[vv, k][[c]],
-          {k, esMin[vv], esCM[vv]}]]], {c, d2}]]];
+          {k, esMin[vv], esCM[vv]}]]], {c, d2}]];
+      vvals = valuesAt[tIn];
+      (* Repeated center-to-center value handoffs can exhaust a finite
+         boundary's guard digits even though every local recurrence is
+         algebraically sound.  Re-evaluate at the much nearer standard
+         match point and use the basis path before that happens. *)
+      If[valueMode && !valueHandoffAccurateQ[vvals],
+        valueMode = False;
+        If[Environment["DEBUG_CHART"] === "1",
+          Print["CHART value handoff significance fallback t=", SessionTime[]]];
+        tIn = matchTIn;
+        If[crossed, tIn = -tIn];
+        vvals = valuesAt[tIn]]];
     If[valueMode,
       If[Environment["DEBUG_CHART"] === "1",
         Print["CHART value-solve start t=", SessionTime[]]];
@@ -731,17 +1240,41 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       If[Environment["DEBUG_CHART"] === "1",
         Print["CHART solve done t=", SessionTime[]]];
       basis = recombineDegenerate[cs, sol["Basis"]["Columns"],
-        sol["Basis"]["Specs"]];
+        sol["Basis"]["Specs"], sol["Basis"]["Diagnostics"]];
       couplingDepth = sol["CouplingDepth"];
       (* basis values at the same point, in THIS chart's coordinate *)
-      Module[{tLoc = matchPt - chart["Center"], Feval},
-        Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
-          tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, basis];
-        F = Table[esNew[esMin[Feval[[i]]],
-          numHandoff[Table[esCoeff[Feval[[i]], k][[c]],
-            {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]]],
-          {c, cs["SystemSize"]}, {i, Length[basis]}]];
+      Module[{tLoc = matchPt - chart["Center"], basisValues},
+        basisValues[bb_List] := Module[{Feval},
+          Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
+            tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, bb];
+          Table[esNew[esMin[Feval[[i]]],
+            numHandoff[Table[esCoeff[Feval[[i]], k][[c]],
+              {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]]],
+            {c, cs["SystemSize"]}, {i, Length[bb]}]];
+        F = basisValues[basis];
+        satPlan = mwSaturationPlan[F, chart["Name"]];
+        If[satPlan["Steps"] > 0 ||
+            AnyTrue[satPlan["InitialShifts"], # =!= 0 &],
+          basis = mwApplySaturationPlan[basis, satPlan];
+          (* Re-evaluate the ACTUAL transformed LocalSolutions.  The frame
+             algebra constructs the certified column operations, but this
+             second evaluation is the authoritative check that applying
+             them to the sector objects produced the same regular lattice. *)
+          F = basisValues[basis];
+          satVerify = mwSaturationPlan[F, chart["Name"] <> "#verify"];
+          If[satVerify["Steps"] =!= 0 ||
+              AnyTrue[satVerify["InitialShifts"], # =!= 0 &],
+            err["E5", <|"Chart" -> chart["Name"],
+              "InitialShifts" -> satPlan["InitialShifts"],
+              "SaturationSteps" -> satPlan["Steps"],
+              "VerificationShifts" -> satVerify["InitialShifts"],
+              "VerificationSteps" -> satVerify["Steps"],
+              "Detail" -> "transformed LocalSolution basis did not verify as a regular epsilon lattice"|>]]]];
       w = MatchWeights[F, vvals, chart["Name"]];
+      If[AnyTrue[w, esMin[#] < 0 &],
+        err["E5", <|"Chart" -> chart["Name"],
+          "WeightWindows" -> ({esMin[#], esCM[#]} & /@ w),
+          "Detail" -> "epsilon-saturated matching returned Laurent weights"|>]];
       ls = DiffExp2`SectorSeries`CombineLocalSolutions[w, basis]];
     (* probe on the INCOMING side (sign of matchPt - center keeps singular
        charts one-sided; the anchor chart, whose matchPt IS its center,

@@ -12,7 +12,7 @@ BeginPackage["DiffExp2`API`",
 LoadSystem::usage = "LoadSystem[spec] loads an exact eps-rational system: <|\"Matrix\" -> m, \"Variable\" -> x|> (closed form), or <|\"FullMatrixFile\" -> path, \"Variable\" -> x|> (the d<var>_full.m exact export). Returns the system record with SingularFactors.";
 TransportEndpoint::usage = "TransportEndpoint[sys, bvals, from, to, opts] transports plain boundary values from a regular anchor to `to` (singular endpoints return the LocalSolution). Options: \"ExtraSingularFactors\".";
 LineIntegral::usage = "LineIntegral[sys, bvals, from, {lo, hi}, c, opts] gives Integrate[c(x, eps) . f(x), {x, lo, hi}] for the transported solution vector f: chart tiling, per-chart rational multiply, exact sector integrals. c is a coefficient VECTOR (one rational function per component).";
-EndpointLimitValues::usage = "EndpointLimitValues[transportResult, cvec] gives the dimreg endpoint limit of c . f at a singular endpoint (drop rule + divergence gate).";
+EndpointLimitValues::usage = "EndpointLimitValues[transportResult, cvec] gives the dimreg endpoint limit of c . f at a singular endpoint (drop rule + divergence gate). cvec entries are epsilon-free endpoint scalars; substitute the line variable before calling.";
 
 Begin["`Private`"];
 
@@ -33,8 +33,6 @@ zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
 zeroQ[e_] := zeroCanQ[Together[e]];
 esAdd = DiffExp2`EpsSeries`ESAdd;
 esZero = DiffExp2`EpsSeries`ESZero;
-esMin = DiffExp2`EpsSeries`ESMinPower; esCM = DiffExp2`EpsSeries`ESCompleteMax;
-esCoeff = DiffExp2`EpsSeries`ESCoefficient;
 
 (* ---- LoadSystem ---- *)
 
@@ -80,16 +78,19 @@ TransportEndpoint[sys_Association, bvals_, from_, to_, OptionsPattern[]] := Modu
    Integrate[c(x,eps).f(x), {x, lo, hi}]: transport from the anchor across
    [lo, hi] keeping charts; tile the interval by chart ownership (each
    point belongs to the nearest kept chart); per tile: MultiplyRational by
-   each c-component IN CHART COORDINATES (x = center + t), integrate the
-   per-component scalar objects, sum. *)
+   each c-component IN CHART COORDINATES (x = center + t), assemble the
+   scalar LocalSolution, then integrate ONCE.  Combine-before-integrate is
+   required when endpoint/PV divergences cancel between master components. *)
 
 Options[LineIntegral] = {"ExtraSingularFactors" -> {},
   "PrecomputedCharts" -> None};
 LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     OptionsPattern[]] := Module[
-  {sys2, var = sys["Variable"], eps, res, kept, tiles, total = None,
+  {sys2, var = sys["Variable"], res, tiles, total = None,
    planLo, planHi, keptAll},
-  eps = DiffExp2`Config`CanonicalEps[];
+  If[Length[cvec] =!= Length[sys["Matrix"]],
+    err["E9", <|"Detail" -> "line-integral coefficient vector has the wrong dimension",
+      "Coefficients" -> Length[cvec], "SystemSize" -> Length[sys["Matrix"]]|>]];
   sys2 = Join[sys, <|"ExtraSingularFactors" ->
     Select[OptionValue["ExtraSingularFactors"], !FreeQ[#, var] &]|>];
   keptAll = OptionValue["PrecomputedCharts"];
@@ -132,46 +133,59 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
       {i, Length[bps] - 1}];
     Table[{keptAll[[i]], bps[[i]], bps[[i + 1]]}, {i, Length[cs]}]];
   Do[Module[{entry = tile[[1]], a = tile[[2]], b2 = tile[[3]], ls, center,
-      t1, t2, contrib},
+      t1, t2},
     If[TrueQ[b2 > a],
       ls = entry["LocalSolution"]; center = entry["Chart"]["Center"];
       t1 = Together[a - center]; t2 = Together[b2 - center];
-      (* c.f = sum_ci c_ci(x) f_ci: multiply the vector object by each
-         coefficient (in chart coordinates x = center + t) and integrate *)
-      Module[{vals = None},
-        Do[Module[{cc = cvec[[ci]], lsM, ri2, vci},
+      (* Project each selected component to a scalar LocalSolution, multiply,
+         then combine BEFORE integration so the endpoint/PV cancellation
+         gate sees the assembled scalar integrand. *)
+      Module[{pieces = {}},
+        Do[Module[{cc = cvec[[ci]], lsP, lsM},
           If[!zeroQ[cc],
-            lsM = DiffExp2`SectorSeries`MultiplyRational[ls,
+            lsP = Join[ls, <|"Sectors" -> Map[
+              Join[#, <|"Coeffs" -> #["Coeffs"][[All, All, {ci}]]|>] &,
+              ls["Sectors"]]|>];
+            lsM = DiffExp2`SectorSeries`MultiplyRational[lsP,
               Together[cc /. var -> center + Global`t], Global`t];
+            AppendTo[pieces, lsM];
             If[Environment["DEBUG_LI"] === "1",
-              Print["      tile mul done t=", SessionTime[]]];
-            ri2 = DiffExp2`Integrate`IntegrateLocalSolution[lsM, {t1, t2}];
+              Print["      tile mul done t=", SessionTime[]]]]],
+          {ci, Length[cvec]}];
+        If[pieces =!= {},
+          Module[{scalarLS, ri2, value},
+            scalarLS = If[Length[pieces] === 1, First[pieces],
+              DiffExp2`SectorSeries`CombineLocalSolutions[
+                ConstantArray[1, Length[pieces]], pieces]];
+            ri2 = DiffExp2`Integrate`IntegrateLocalSolution[scalarLS, {t1, t2}];
             If[Environment["DEBUG_LI"] === "1",
               Print["      tile int done t=", SessionTime[]]];
-            vci = ri2["Values"][[ci]];
-            vals = If[vals === None, vci, esAdd[vals, vci]]]],
-          {ci, Length[cvec]}];
-        If[vals =!= None,
-          total = If[total === None, vals, esAdd[total, vals]]]]]],
+            value = ri2["Values"][[1]];
+            total = If[total === None, value, esAdd[total, value]]]]]]],
     {tile, tiles}];
   If[total === None, esZero[cfg["EpsilonOrder"]], total]];
 
 (* ---- EndpointLimitValues ---- *)
 
 EndpointLimitValues[tres_Association, cvec_List] := Module[
-  {ls = tres["Final"], lim, eps = DiffExp2`Config`CanonicalEps[], var},
+  {ls = tres["Final"], pieces = {}, weights = {}, scalar},
   If[!TrueQ[tres["EndpointIsSingular"]],
     err["E9", <|"Detail" -> "EndpointLimitValues requires a singular-endpoint transport result"|>]];
-  (* combine with eps-free constant coefficients only in v1; rational
-     c(x) at the endpoint: substitute x -> center exactly *)
-  lim = DiffExp2`Integrate`EndpointSectorLimit[ls];
-  Module[{out = None},
-    Do[Module[{cc = cvec[[ci]]},
-      If[!zeroQ[cc],
-        Module[{term = DiffExp2`EpsSeries`ESScale[cc, lim[[ci]]]},
-          out = If[out === None, term, esAdd[out, term]]]]],
-      {ci, Length[cvec]}];
-    If[out === None, esZero[ls["EpsWindow", "CompleteMax"]], out]]];
+  If[Length[cvec] =!= Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]],
+    err["E9", <|"Detail" -> "endpoint coefficient vector has the wrong dimension",
+      "Coefficients" -> Length[cvec]|>]];
+  (* Combine eps-free endpoint coefficients before applying the drop and
+     divergence rules.  A limit of a scalar observable may exist even when
+     its individual master terms do not. *)
+  Do[If[!zeroQ[cvec[[ci]]],
+    AppendTo[pieces, Join[ls, <|"Sectors" -> Map[
+      Join[#, <|"Coeffs" -> #["Coeffs"][[All, All, {ci}]]|>] &,
+      ls["Sectors"]]|>]];
+    AppendTo[weights, cvec[[ci]]]],
+    {ci, Length[cvec]}];
+  If[pieces === {}, Return[esZero[ls["EpsWindow", "CompleteMax"]], Module]];
+  scalar = DiffExp2`SectorSeries`CombineLocalSolutions[weights, pieces];
+  DiffExp2`Integrate`EndpointSectorLimit[scalar][[1]]];
 
 End[];
 EndPackage[];

@@ -108,6 +108,18 @@ assert["relative_not_absolute_lead",
   lead[d11a][[1]] === 1 && lead[d11a][[2]] === 2 &&
   lead[d11b][[1]] === 0];
 
+(* A low-accuracy centered-zero imaginary component must not collapse the
+   trailing coefficient that defines the relative series scale. *)
+complexScale11 =
+  4.4267459561002104836`0.2683567342206439 +
+    0``-0.022790862816694443*I;
+d11c = es[0, {10^-30, complexScale11}];
+assert["complex_scale_does_not_poison_leading_order",
+  lead[d11c][[1]] === 1 && lead[d11c][[2]] === complexScale11];
+diagonal11 = es[0, {(8 + 8 I)*10^-25, 1}];
+assert["true_complex_modulus_preserves_laurent_lead",
+  DiffExp2`EpsSeries`ESMinPower[trim[diagonal11]] === 0];
+
 (* 12 *)
 assert["trim_preserves_zero_window",
   trim[es[-2, {0, 0, 0, 0}]] === zero[1]];
@@ -144,6 +156,10 @@ s17 = fromx[(1 + Global`eps)/(Global`eps^2 (1 - Global`eps)), Global`eps, 3];
 assert["from_expression_exact_laurent",
   win[s17] === <|"Min" -> -2, "CompleteMax" -> 3|> &&
   s17["Coeffs"] === {1, 2, 2, 2, 2, 2}];
+s17uncertain = fromx[0``17, Global`eps, 3];
+assert["from_expression_inexact_zero_is_not_structural_zero",
+  win[s17uncertain] === <|"Min" -> 0, "CompleteMax" -> 3|> &&
+  InexactNumberQ[coeff[s17uncertain, 0]]];
 
 (* 18 *)
 s18 = fromx[Gamma[1 + Global`eps], Global`eps, 2];

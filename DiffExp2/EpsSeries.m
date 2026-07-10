@@ -89,12 +89,17 @@ ESCoefficient[s_?ESQ, k_Integer] := Which[
     "Detail" -> "coefficient requested above the complete window"|>]];
 
 (* series scale: max numeric coefficient magnitude (symbolic excluded) *)
-numMag[c_] := If[NumericQ[c], Abs[N[c, 10]], Nothing];
+numMag[c_] := If[NumericQ[c],
+  DiffExp2`Tolerances`NumericMagnitude[c, 10], Nothing];
 seriesScale[s_?ESQ] := Max[0, Sequence @@ (numMag /@ s["Coeffs"])];
 
-ESCoeffZeroQ[c_, scale_, tol_:Automatic] :=
-  DiffExp2`Tolerances`NumericallyZeroQ[c, scale,
-    tol /. Automatic -> DiffExp2`Tolerances`Tol["LaurentLeadTol"], $ESErrorContext];
+ESCoeffZeroQ[c_, scale_, tol_:Automatic] := Module[
+  {laurentFloorQ, effectiveTol},
+  effectiveTol = tol /. Automatic -> DiffExp2`Tolerances`Tol["LaurentLeadTol"];
+  laurentFloorQ = SameQ[tol, Automatic] && SameQ[effectiveTol, 10^-24];
+  DiffExp2`Tolerances`NumericallyZeroQ[c, scale, effectiveTol,
+    $ESErrorContext, DiffExp2`Tolerances`$AmbiguityBandDecades,
+    laurentFloorQ]];
 
 ESLeading[s_?ESQ] := Module[{scale = seriesScale[s], kmin = ESMinPower[s]},
   Do[If[!ESCoeffZeroQ[s["Coeffs"][[i]], scale], Return[{kmin + i - 1, s["Coeffs"][[i]]}, Module]],
@@ -115,7 +120,9 @@ ESCoefficientList[s_?ESQ, k1_Integer, k2_Integer] := Module[
     scale = seriesScale[s];
     Do[If[!ESCoeffZeroQ[ESCoefficient[s, k], scale],
       esError["ERR-DROP-BELOW", <|"DroppedOrder" -> k, "k1" -> k1,
-        "Magnitude" -> If[NumericQ[ESCoefficient[s, k]], N[Abs[ESCoefficient[s, k]], 6], "Symbolic"],
+        "Magnitude" -> If[NumericQ[ESCoefficient[s, k]],
+          N[DiffExp2`Tolerances`NumericMagnitude[ESCoefficient[s, k], 10], 6],
+          "Symbolic"],
         "Scale" -> N[scale, 6], "Min" -> kmin, "CompleteMax" -> kmax,
         "Detail" -> "slicing would silently drop non-negligible content below k1"|>]],
       {k, kmin, k1 - 1}]];
@@ -210,7 +217,8 @@ ESSameQ[a_?ESQ, b_?ESQ] := Module[
 
 ESFromExpression[expr_, epsSym_Symbol, kmax_Integer] := Module[
   {ser, nmin, nmax, den, raw, coeffs, cm},
-  If[PossibleZeroQ[expr], Return[ESZero[kmax]]];
+  If[FreeQ[expr, _?InexactNumberQ] && TrueQ[PossibleZeroQ[expr]],
+    Return[ESZero[kmax]]];
   If[FreeQ[expr, epsSym],
     Return[mkSeries[0, kmax, validateCoeffs["ESFromExpression",
       Join[{Together[expr]}, Table[0, {kmax}]]]]]];

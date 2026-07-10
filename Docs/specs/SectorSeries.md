@@ -54,12 +54,21 @@ on tags, window-arithmetic consistency; no numerics.
 
 Returns the canonical form:
 - sectors with identical exact tag `(a, b, p)` merged by adding `Coeffs`;
-- sectors with equal `(b, p)` and `a`-values differing by an integer merged
-  into one sector at the minimal `a` (the higher-`a` member's rows shifted in
-  `n` by the integer difference; the merged array extended exactly);
+- sectors with equal `(b, p)` and integer-spaced `a` are considered greedily
+  in ascending `a`.  To merge a higher-`a` slab into a lower-`a` slab, let
+  `s = aHigh - aLow >= 0`: its `n` columns are shifted right by `s` inside
+  the existing fixed Taylor width.  The merge is performed only when every
+  coefficient that truncation would discard (the final `s` columns, or the
+  whole slab when `s >= ncols`) is syntactically zero.  Otherwise the towers
+  remain separate.  Thus canonicalization never erases known finite-`TOrder`
+  data merely to eliminate an integer-spaced tag pair;
 - sectors whose `Coeffs` are SYNTACTICALLY all zero are dropped (exact zeros
   only — tolerance-based dropping is forbidden, F10 in section 5.3), except
-  that a regular object's single `(0,0,0)` sector is never dropped;
+  that an all-zero `b = 0`, `a < 0` tower is retained when
+  `Floor[-a] >= ncols`: its stored zero prefix does not certify the unseen
+  endpoint-relevant tail.  If every sector would otherwise be dropped, one
+  zero representative is retained (in particular the regular `(0,0,0)`
+  sector is never lost);
 - sectors sorted lexicographically by `(a, b, p)` (canonical order shared with
   Integrate.m and the FT shim).
 
@@ -642,8 +651,12 @@ tolerance-dependent and raises `SectorSeries::inexactdenominator`.
   structure in `a` only).
 - I-5 Coefficient entries per 3.2 (numbers or declared-indeterminate linear
   forms; no compound heads, no theta symbols).
-- I-6 Canonical tag set: after `CanonicalizeLocalSolution`, tags pairwise
-  distinct and no same-`(b,p)` integer-spaced `a` pair remains.
+- I-6 Lossless canonical tag set: after `CanonicalizeLocalSolution`, exact
+  `(a,b,p)` tags are pairwise distinct.  A same-`(b,p)` integer-spaced pair
+  may remain when the greedy fixed-width shift was rejected because it would
+  discard a syntactically nonzero known tail; such a pair is canonical and
+  downstream consumers must accept it.  Under-expanded all-zero negative
+  `b=0` towers are structural completeness records, not droppable zero data.
 - I-7 Regular chart ⇔ exactly one `(0,0,0)` sector — asserted FOR ODE-SOLUTION
   OBJECTS at construction (by Solve.m/Transport.m), NOT re-asserted after
   `MultiplyRational` (math finding 8: products with IBP coefficients
@@ -1017,7 +1030,10 @@ required names (chart/sector/order).
     known arrays merge to one `(-1, 1, 0)` sector with the second's rows
     shifted one column right and added; duplicate `(0, 2, 0)` sectors add;
     an all-syntactic-zero sector is dropped; a numerically tiny
-    (`10^-200`) but nonzero sector is NOT dropped (F10 pin).
+    (`10^-200`) but nonzero sector is NOT dropped (F10 pin).  The companion
+    `t31_canonicalize_preserves_overflowing_integer_shift` pin uses a shift
+    wider than the stored slab and asserts that its nonzero coefficient
+    remains at the higher-`a` tag instead of being truncated away.
 32. `t32_window_request_error` — a consumer helper requesting value order
     `CompleteMax + 1` from t08's evaluation -> `::window` naming the order
     and window.

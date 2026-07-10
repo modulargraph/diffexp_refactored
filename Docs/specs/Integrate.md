@@ -243,11 +243,15 @@ Precondition: the LocalSolution handed to Integrate is the ASSEMBLED
 combination — in FT use, `Σ_j c_j(x,eps)·f_j(x,eps)` has already been formed
 by SectorSeries rational-multiply + add (RewritePlan 3.3 "integrate:
 rational-multiply + exact cancellation at object level"), and same-tag
-sectors are merged (one sector per exact `(a,b,p)`; invariant I2), and
-integer-spaced same-(b,p) sectors merged to minimal a (SectorSeries.md 2.2;
-assert at entry: no two sectors share b, p with integer a-difference —
-violation is E7-class; REVIEW-math D12). The gate's per-monomial
-coefficients are well-defined only on this canonical form. The old
+sectors are merged (one sector per exact `(a,b,p)`; invariant I2).
+SectorSeries' lossless canonical form is accepted verbatim: a merge-safe
+integer-spaced same-`(b,p)` tower may have been shifted to the minimal `a`,
+while a tower whose shift would discard a known finite-`TOrder` tail remains
+separate.  The gate therefore groups cells by the exact absolute monomial
+`(m = a+n, p)` across all sectors; it does not require or assert that every
+integer-spaced pair was merged.  A retained under-expanded structural-zero
+tower is likewise valid input; a center endpoint reports E10 if its stored
+Taylor width cannot certify all potentially divergent/finite cells.  The old
 warning "Combines the integrand before integration to handle cancellation of
 poles in IBP coefficients" (FeynmanTrick/DiffExpIntegration.m:16-21,
 532-545) is here an input invariant, not a hope.
@@ -255,22 +259,23 @@ poles in IBP coefficients" (FeynmanTrick/DiffExpIntegration.m:16-21,
 The gate, run BEFORE any monomial dispatch when an integration bound sits at
 the chart center:
 
-For every `b = 0` sector and every divergent local power
-(`m = a + n ≤ −1`, any p), and every eps order k in the window:
+For every exact divergent monomial class (`b = 0`, `m = a+n <= -1`, any
+`p`) and every eps order `k` in the window:
 
-1. The relevant coefficient is `c[k, n, comp]` of the MERGED sector — i.e.
-   the sum of the offending coefficients across the master combination has
-   already been taken (merging same-tag sectors IS the sum; do not error on
-   pre-merge data). Distinct p values are distinct monomials and may NOT be
-   summed against each other.
+1. The relevant coefficient is the sum of every visible cell
+   `c[k,n,comp]` with the same exact `b=0`, `m=a+n`, and `p`, including cells
+   from separately retained integer-spaced towers.  The assembled master
+   combination has already been formed before this grouping.  Distinct `p`
+   values are distinct monomials and may NOT be summed against each other.
 2. If the coefficient is exactly zero: drop, no event.
 3. If it is numerically zero — `ESCoeffZeroQ[c, scale_k]` at
    `Tol["LaurentLeadTol"]` (= `Max[10^(-Floor[chopDigits/2]), 10^-24]` per
    Tolerances.md as amended by REVIEW-math D1; the campaign class
    Recurrence.m:613-618; DEC-2's hard 10^-24 floor and 4-decade band), with
-   `scale_k = max_n' |c[k,n',comp]|` over the merged combination at that eps
-   order (DEC-4: RELATIVE, per-eps-order; the divergence error fires only if
-   the offending coefficient exceeds laurentLeadTol relative to that scale)
+   `scale_k = Max |c[k,n,comp']|` over the cells/components in that exact
+   absolute-monomial group at that eps order (DEC-4: RELATIVE,
+   per-eps-order; the divergence error fires only if the offending
+   coefficient exceeds laurentLeadTol relative to that scale)
    — drop it and count the event (result metadata
    `"CancelledDivergent" -> count`; an info-level `Config`PrintInfo` at
    Verbosity≥2, never a warning).
@@ -383,7 +388,8 @@ Arguments:
 
 Algorithm:
 1. Validate every chart is affine (E1) and every segment's LocalSolution has
-   unique sector tags (E7).
+   pairwise-distinct exact sector tags (E7).  Distinct integer-spaced tags
+   retained by lossless canonicalization are valid.
 2. Tiling check: the segments' MainWindows must exactly tile `[xLo, xHi]`
    after clipping — successive boundaries equal within `snapTol`, no gaps,
    no overlaps, full coverage (E5). Snap-or-error: a boundary within
@@ -443,10 +449,11 @@ LocalSolution. Per sector:
   component, tag, eps order — REVIEW-math D13).
 - The limit readout is the coefficient of the monomial `t^0`: Σ over sectors
   with `b == 0`, `p == 0` and integer `a ≤ 0` of `c[k, n = −a, comp]` (exact
-  tag selection; on the canonical merged input — I2 — at most one such
-  sector exists per component). NOT "the (0,0,0) sector's constant": after
-  the integer-spaced merge the former (0,0,0) content may sit at column
-  n = −a of a merged a < 0 sector (REVIEW-math D13).
+  tag selection, summed across every separately retained tower). NOT "the
+  (0,0,0) sector's constant": after a lossless integer-spaced merge the
+  former `(0,0,0)` content may sit at column `n = -a` of a merged `a < 0`
+  sector, while an overflow-protected tower remains at its own tag
+  (REVIEW-math D13).
 
 `direction` resolves nothing here (the limit value is branch-independent for
 the surviving terms) but is validated against the chart Prescriptions for
@@ -565,13 +572,13 @@ unnecessary and forbidden (F8, F10).
 
 - **I1 Affine-only:** every consumed chart has `ChartMap["Type"] === "Affine"`
   with numeric nonzero Scale. Violation ⇒ E1 (assert at entry of 2.2 and 2.3).
-- **I2 Unique tags, merged canonical form:** within each LocalSolution,
-  sector tags `(a,b,p)` are pairwise distinct under exact comparison, AND no
-  two sectors share (b, p) with integer a-difference (the integer-spaced
-  merge of SectorSeries.md 2.2 has been applied — REVIEW-math D12).
-  Violation ⇒ E7. (Cancellation correctness depends on this: merging is
-  summation, and the 2.2.3 gate's per-monomial coefficients are well-defined
-  only on the merged canonical form.)
+- **I2 Lossless canonical tags:** within each LocalSolution, sector tags
+  `(a,b,p)` are pairwise distinct under exact comparison (violation ⇒ E7).
+  Same-`(b,p)` integer-spaced pairs are allowed precisely as the fixed-width
+  losslessness case of SectorSeries.md 2.2.  Every endpoint cancellation and
+  limit readout groups by exact absolute monomial `(a+n,p)`, so its result is
+  representation-independent whether a merge-safe pair was shifted or an
+  overflow-protected pair remained separate (REVIEW-math D12).
 - **I3 Exact cell selection:** `b == 0` and `a+n+1 == 0` decided on exact
   tags only; assert tags are exact (no inexact numbers in a, b, p).
 - **I4 Pairing/window assert:** after any interior crossing, the assembled
@@ -664,9 +671,11 @@ anywhere — the FT-layer instances at FeynmanTrick/DiffExpIntegration.m:
   offending bound (both coordinates). **E9b BoundaryEvaluationBlowup**
   (non-numeric or `|F| > 10^(WP/2)`): chart Center, t, the monomial (m,b,p),
   the value's magnitude — and NO Pade or re-summation rescue (F5).
-- **E10 MalformedTag.** Non-exact a/b, negative or non-integer p, inexact T
-  classification, float m reaching SectorMonomialIntegral. Message: the
-  offending value and its Head.
+- **E10 MalformedTagOrIncompleteTaylorCertificate.** Non-exact a/b,
+  negative or non-integer p, inexact T classification, float m reaching
+  SectorMonomialIntegral; or a retained negative-`a`, `b=0` tower whose
+  stored width does not reach every endpoint-relevant Taylor cell.  The
+  latter payload names the sector, `AvailableTOrder`, and `NeededTOrder`.
 - **E11 EmptyOrMalformedInput.** `segments === {}`, missing keys, Coeffs
   dimensions inconsistent with windows. A LocalSolution representing exact
   zero must say so explicitly (zero-dimension Coeffs with valid windows
@@ -999,11 +1008,13 @@ structured error payloads.
   (they likely indicate upstream cancellation failure). v1 keeps FP +
   metadata counter; the M4 multisector closed-form gate should decide
   whether any real example ever exercises it with a nonzero coefficient.
-- **Q5 Cancellation chop scale.** 2.2.3 uses
-  `scale_k = max_n' |c[k,n',comp]|` of the merged combination. Alternative
-  scales (per-sector max; cross-k max) change behavior only for
-  pathologically scaled data; Tolerances.md should own the named semantics
-  (`chopFloor` relative form) — flag for the Tolerances spec review.
+- **Q5 Cancellation chop scale.** 2.2.3 uses `Max[1, ...]` of the visible
+  coefficients over the exact absolute-monomial group at fixed eps order.
+  The unit floor lets a high-accuracy centered zero remain a certified
+  absolute cancellation after identical sectors have already merged, while
+  an underresolved centered zero remains loud. Alternative
+  cross-group or cross-k scales change behavior for pathologically scaled
+  data; Tolerances.md owns the named threshold semantics.
 - **Q6 ErrorEstimate granularity.** This spec emits per-eps-order estimates
   and adds them to the incoming LocalSolution estimates. Whether the FT
   layer wants per-(integral, order) maps in the final result shape is an

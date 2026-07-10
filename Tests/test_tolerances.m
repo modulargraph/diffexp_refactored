@@ -20,6 +20,8 @@ With[{ctx = "DiffExp2`Tolerances`"},
 cd = DiffExp2`Tolerances`ChopDigits;
 tol = DiffExp2`Tolerances`Tol;
 nzq = DiffExp2`Tolerances`NumericallyZeroQ;
+mag = DiffExp2`Tolerances`NumericMagnitude;
+magBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
 install = DiffExp2`Tolerances`InstallToleranceState;
 
 (* T1 *)
@@ -76,7 +78,41 @@ assert["test_numerically_zero_band_aborts",
 assert["test_numerically_zero_band_edges",
   nzq[10^-130, 1, 10^-125, "t"] === True && nzq[10^-120, 1, 10^-125, "t"] === False];
 assert["test_numerically_zero_floor_binary",
-  nzq[10^-29, 1, 10^-24, "t"] === True && nzq[10^-22, 1, 10^-24, "t"] === False];
+  nzq[10^-29, 1, 10^-24, "t", 4, True] === True &&
+  nzq[10^-24, 1, 10^-24, "t", 4, True] === True &&
+  nzq[10^-22, 1, 10^-24, "t", 4, True] === False];
+rankFloorE5 = catchDE2[nzq[10^-24, 1,
+  DiffExp2`Tolerances`RankTol[96], "rank-at-floor", 4, False]];
+assert["test_ranktol_equal_to_floor_remains_ternary",
+  DiffExp2`Tolerances`RankTol[96] === 10^-24 &&
+  failsWith[rankFloorE5, "E5"] && rankFloorE5["BinaryFloor"] === False];
+
+(* A zero imaginary component with poor accuracy must not poison the
+   magnitude of a clearly nonzero real pivot.  Raw Abs collapses this exact
+   Wolfram shape to 0``negative-accuracy; the classifier remains nonzero. *)
+complexPivot =
+  4.4267459561002104836`0.2683567342206439 +
+    0``-0.022790862816694443*I;
+complexScale = 11485.2588999987283699804`1.5130093642078184;
+assert["test_complex_zero_imaginary_does_not_poison_rank_magnitude",
+  PossibleZeroQ[Abs[N[complexPivot, 250]]] &&
+  TrueQ[First[magBounds[complexPivot, 250]] > 0] &&
+  nzq[complexPivot, complexScale, 10^-125, "complex-pivot"] === False];
+
+(* The cure must retain the TRUE modulus, not replace it by an infinity
+   norm: both resolved components contribute across a binary threshold. *)
+diagonalFloor = (8 + 8 I)*10^-25;
+assert["test_complex_magnitude_is_stable_true_modulus",
+  TrueQ[PossibleZeroQ[mag[3 + 4 I, 50] - 5]] &&
+  TrueQ[mag[diagonalFloor, 100] > 10^-24] &&
+  nzq[diagonalFloor, 1, 10^-24, "diagonal-floor", 4, True] === False];
+
+underresolvedRank = catchDE2[nzq[0``125, 1, 10^-125,
+  "underresolved-rank", 4, False]];
+assert["test_componentwise_uncertainty_bounds",
+  failsWith[underresolvedRank, "E5"] &&
+  nzq[0``140, 1, 10^-125, "resolved-rank-zero", 4, False] === True &&
+  nzq[0``17, 1, 10^-24, "underresolved-floor", 4, True] === False];
 
 (* T10 *)
 assert["test_numerically_zero_exact_and_symbolic",
@@ -106,7 +142,8 @@ assert["test_adaptive_search_symbols_absent",
 (* T13 — export visibility from a foreign context *)
 exportNames = {"ChopDigits", "ChopFloor", "MatchTol", "SnapTol", "InputSnapTol",
   "RankTol", "GeomGuardTol", "ChopReserve", "LaurentLeadTol", "ResidTol",
-  "NumericallyZeroQ", "DE2Error", "InstallToleranceState", "Tol",
+  "NumericMagnitude", "NumericMagnitudeBounds", "NumericallyZeroQ", "DE2Error",
+  "InstallToleranceState", "Tol",
   "ToleranceStateInstalledQ", "EvalErrorSeriesDecrease", "$SafetyDigits",
   "$InputPrecisionFactor", "$MaxExtraPrecisionValue", "$MinExpansionOrder",
   "$AmbiguityBandDecades", "$NearSingularityGuardDecades"};

@@ -25,6 +25,8 @@ T = Hold;  (* no-op placeholder to avoid bare-context syntax mistakes *)
 err[id_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "SectorSeries"|>, payload]];
 cfg = DiffExp2`Config`CFG;
+numMag = DiffExp2`Tolerances`NumericMagnitude;
+numMagBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
 $ForcePadeFail = False;
 
 exactQ[e_] := FreeQ[e, _?InexactNumberQ];
@@ -42,6 +44,7 @@ ratExprQ[c_] := Switch[c,
   _, False];
 zeroCanQ[c_] := c === 0 || (!ratExprQ[c] && TrueQ[PossibleZeroQ[c]]);
 zeroQ[e_] := zeroCanQ[Together[e]];
+structuralZeroQ[e_] := FreeQ[e, _?InexactNumberQ] && zeroQ[e];
 badHeadQ[c_] := !FreeQ[c, _SeriesData | _SeriesCoefficient] ||
   MemberQ[{$Failed, Indeterminate, ComplexInfinity}, c];
 
@@ -84,7 +87,12 @@ shiftCols[arr_, sh_Integer] := Module[{d = Dimensions[arr]},
   (* shift t-columns right by sh (a decreased by sh): row content moves up in n *)
   Map[Join[ConstantArray[0, sh], #][[;; d[[2]]]] &, arr, {1}]];
 
-CanonicalizeLocalSolution[ls_Association] := Module[{secs, grouped, merged},
+shiftFitsQ[arr_, sh_Integer] := Module[{n = Dimensions[arr][[2]], tail},
+  If[sh <= 0, Return[True, Module]];
+  tail = If[sh >= n, arr, arr[[All, n - sh + 1 ;; n, All]]];
+  AllTrue[Flatten[tail], # === 0 &]];
+
+CanonicalizeLocalSolution[ls_Association] := Module[{secs, grouped},
   secs = ls["Sectors"];
   (* merge identical tags *)
   grouped = GatherBy[secs, {Together[#["a"] ], Together[#["b"]], #["p"]} &];
@@ -92,15 +100,18 @@ CanonicalizeLocalSolution[ls_Association] := Module[{secs, grouped, merged},
     Append[First[#], "Coeffs" -> Total[#[[All, "Coeffs"]]]]] &, grouped];
   (* merge same-(b,p) integer-spaced a into minimal a *)
   grouped = GatherBy[secs, {Together[#["b"]], #["p"]} &];
-  secs = Flatten[Map[Module[{g = #, byA},
-    byA = GatherBy[g, Function[s, Module[{others},
-      (* group by a mod Z: use a - Round-able? exact: a minus min over the
-         integer-spaced cluster; build clusters greedily *) s["a"]]]];
+  secs = Flatten[Map[Module[{g = #},
     (* greedy integer-spacing clusters *)
-    Module[{rem = SortBy[g, #["a"] &], out = {}, cur, mates},
+    Module[{rem = SortBy[g, #["a"] &], out = {}, cur, mates, candidates},
       While[rem =!= {},
         cur = First[rem]; rem = Rest[rem];
-        mates = Select[rem, IntegerQ[RootReduce[Together[#["a"] - cur["a"]]]] &];
+        candidates = Select[rem,
+          IntegerQ[RootReduce[Together[#["a"] - cur["a"]]]] &];
+        (* A fixed-width slab cannot absorb a shifted nonzero tail without
+           erasing known data.  Keep such a tower separate; downstream
+           operations already understand multiple integer-spaced sectors. *)
+        mates = Select[candidates, shiftFitsQ[#["Coeffs"],
+          RootReduce[Together[#["a"] - cur["a"]]]] &];
         rem = Complement[rem, mates];
         If[mates === {}, AppendTo[out, cur],
           Module[{base = cur["a"], acc = cur["Coeffs"]},
@@ -108,8 +119,17 @@ CanonicalizeLocalSolution[ls_Association] := Module[{secs, grouped, merged},
                 RootReduce[Together[m["a"] - base]]], {m, mates}];
             AppendTo[out, Append[cur, "Coeffs" -> acc]]]]];
       out]] &, grouped], 1];
-  (* drop syntactic-zero sectors (exact zeros only; F10) *)
-  Module[{kept = Select[secs, !AllTrue[Flatten[#["Coeffs"]], zeroQ] &]},
+  (* Drop exact-zero sectors, except an under-expanded negative b=0 tower:
+     its finite zero prefix does not certify the endpoint-relevant tail.
+     Retaining that tag lets Integrate raise E10 consistently instead of
+     making the answer depend on whether canonicalization ran first. *)
+  Module[{ncols = Dimensions[First[secs]["Coeffs"]][[2]], kept},
+    kept = Select[secs, Function[s, Module[{allZero, needed, preserve},
+      allZero = AllTrue[Flatten[s["Coeffs"]], Function[c, c === 0]];
+      needed = If[TrueQ[s["a"] < 0], Floor[-s["a"]], -1];
+      preserve = allZero && zeroQ[s["b"]] && TrueQ[s["a"] < 0] &&
+        (!IntegerQ[needed] || needed >= ncols);
+      !allZero || preserve]]];
     If[kept === {}, kept = {First[secs]}];  (* never drop the last sector *)
     secs = kept];
   secs = SortBy[secs, tagOf];
@@ -179,7 +199,8 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
     (* first pass: per-sector first nonzero row -> value min *)
     Do[Module[{firstRow},
       firstRow = SelectFirst[Range[kmin, kmax],
-        !AllTrue[Flatten[sec["Coeffs"][[# - kmin + 1]]], zeroQ] &, kmax];
+        !AllTrue[Flatten[sec["Coeffs"][[# - kmin + 1]]], structuralZeroQ] &,
+        kmax];
       valueMin2 = Min[valueMin2, firstRow + sec["p"]]],
       {sec, secs}];
     value = ConstantArray[0, {valueCM - valueMin2 + 1, ncomp}];
@@ -215,7 +236,8 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
       If[ls["Radius"] =!= Infinity && TrueQ[Abs[tval] > 0],
         Do[Module[{nums, topc, q},
           nums = Select[Flatten[arr[[k - kmin + 1, ncols]]], NumericQ];
-          topc = If[nums === {}, 0, Max[Abs[N[#, 10]] & /@ nums]];
+          topc = If[nums === {}, 0,
+            Max[Last[numMagBounds[#, 10]] & /@ nums]];
           If[topc > 0 && kmin <= k + p && k + p <= valueCM && valueMin2 <= k + p,
             q = Abs[N[tval/ls["Radius"], 10]];
             tails[[k + p - valueMin2 + 1]] +=
@@ -264,13 +286,14 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
     d0 = Dc[[1]]];
   (* classify t-poles of the leading eps denominator *)
   Module[{dred = Cancel[d0/var^Exponent[d0, var, Min]]},
-    troots = DeleteDuplicates[var /. Solve[dred == 0, var]];
+    troots = If[FreeQ[dred, var], {},
+      DeleteDuplicates[var /. Solve[dred == 0, var]]];
     Do[Module[{exact = exactQ[r0] && exactQ[ls["Radius"]], absr, rad, diff, interior},
       If[exact,
         (* exact comparison decides; |t_i| == Radius counts as FAR (other chart) *)
         interior = TrueQ[RootReduce[Abs[r0]] < ls["Radius"]] &&
           !TrueQ[PossibleZeroQ[RootReduce[Abs[r0]] - ls["Radius"]]],
-        absr = Abs[N[r0, wp]]; rad = N[ls["Radius"], wp];
+        absr = numMag[r0, wp]; rad = N[ls["Radius"], wp];
         diff = absr - rad;
         If[Abs[diff] < DiffExp2`Tolerances`GeomGuardTol[wp]*Max[absr, rad],
           err["geomambiguous", <|"Chart" -> chartName[ls], "Pole" -> r0,
@@ -299,7 +322,8 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
           {m, 1, ncols - 1}];
         (* ByteCount-gated: small exact coefficients stay exact (I-6);
            giants numericize (R6 performance) *)
-        Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp + 20]] &, csr]]],
+        Map[If[# === 0 || ByteCount[#] <= 500, #,
+          N[#, DiffExp2`Tolerances`$InputPrecisionFactor*wp]] &, csr]]],
     {j, 1, jcount}];
   (* convolve into each sector; a -> a - M; windows shift by jmin *)
   newSecs = Map[Module[{arr = #["Coeffs"], out},
@@ -388,7 +412,7 @@ ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Mod
     {i, Length[out]}, {m, 0, NN}, {cc, ncomp}];
   divOrd = cfg["DivisionOrder"];
   tails = Table[Module[{topc},
-    topc = Max[0, Sequence @@ (Abs[N[#, 10]] & /@
+    topc = Max[0, Sequence @@ (Last[numMagBounds[#, 10]] & /@
       Select[Flatten[out[[K - kmin + 1, NN + 1]]], NumericQ])];
     topc*N[(rho/divOrd), 10]^NN/(divOrd - 1)], {K, kmin, kmax}];
   <|"Center" -> ls["Center"] + Dc, "ChartMap" -> ls["ChartMap"],
@@ -431,28 +455,65 @@ SectorDecomposition[ls0_Association] := Module[{ls = CanonicalizeLocalSolution[
 (* ---- 2.10 linear combination with EpsSeries weights ---- *)
 
 CombineLocalSolutions[weights_List, lss_List] := Module[
-  {n = Length[lss], ws, base, kmins, kmaxs, kmin, kmax, ncols, ncomp, secs = {}},
+  {n = Length[lss], base, active, kmin, kmax, tmax, ncols, ncomp,
+   secs = {}},
   If[Length[weights] =!= n || n == 0,
     err["dims", <|"Detail" -> "weights/solutions length mismatch"|>]];
   base = ValidateLocalSolution[First[lss]];
   Do[Module[{l = ValidateLocalSolution[lss[[i]]]},
-    If[!(l["Center"] === base["Center"] && l["Radius"] === base["Radius"]),
+    If[!(l["Center"] === base["Center"] && l["Radius"] === base["Radius"] &&
+        l["ChartMap"] === base["ChartMap"] &&
+        l["Prescriptions"] === base["Prescriptions"]),
       err["dims", <|"Detail" -> "CombineLocalSolutions requires identical charts",
-        "Centers" -> {base["Center"], l["Center"]}|>]]], {i, n}];
-  ws = Map[If[DiffExp2`EpsSeries`ESQ[#], #,
-    DiffExp2`EpsSeries`ESNew[0, {#}]] &, weights];
-  {ncols, ncomp} = Dimensions[First[base["Sectors"]]["Coeffs"]][[2 ;; 3]];
-  (* output window: min over (ls window shifted by weight window) *)
-  kmin = Min @@ Table[lsMin[lss[[i]]] + DiffExp2`EpsSeries`ESMinPower[ws[[i]]], {i, n}];
-  kmax = Min @@ Table[lsCM[lss[[i]]] + DiffExp2`EpsSeries`ESMinPower[ws[[i]]], {i, n}];
-  kmax = Min[kmax, Min @@ Table[
-    DiffExp2`EpsSeries`ESCompleteMax[ws[[i]]] + lsMin[lss[[i]]], {i, n}]];
-  Do[Module[{l = lss[[i]], w = ws[[i]], lkmin, lkmax, wmin, wmax, wc},
+        "Centers" -> {base["Center"], l["Center"]}|>]];
+    If[Dimensions[First[l["Sectors"]]["Coeffs"]][[3]] =!=
+        Dimensions[First[base["Sectors"]]["Coeffs"]][[3]],
+      err["dims", <|"Detail" -> "component dimensions differ in linear combination"|>]]],
+    {i, n}];
+  If[AnyTrue[Select[weights, !DiffExp2`EpsSeries`ESQ[#] &],
+      Function[w, !AllTrue[DiffExp2`Config`EpsSymbols[], FreeQ[w, #] &]]],
+    err["badcoeff", <|"Detail" ->
+      "plain linear-combination weights must be epsilon-independent; use EpsSeries for epsilon-dependent weights"|>]];
+  tmax = Min[#["TWindow", "CompleteMax"] & /@ lss];
+  ncols = tmax + 1;
+  ncomp = Dimensions[First[base["Sectors"]]["Coeffs"]][[3]];
+  (* A plain scalar is an exact eps-independent multiplier, not the finite
+     series ESNew[0,{c}].  Treating it as the latter capped every product at
+     lsMin and collapsed multi-sector particular windows.  A plain exact
+     zero is inactive; an EpsSeries zero remains active because its missing
+     coefficients above CompleteMax are unknown and constrain the sum. *)
+  active = Select[Range[n], Function[i,
+    If[DiffExp2`EpsSeries`ESQ[weights[[i]]],
+      True,
+      Together[weights[[i]]] =!= 0]]];
+  If[active === {},
+    kmax = Min[lsCM /@ lss];
+    Return[Join[base, <|
+      "Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+        "Coeffs" -> ConstantArray[0, {1, ncols, ncomp}]|>},
+      "EpsWindow" -> <|"Min" -> kmax, "CompleteMax" -> kmax|>,
+      "TWindow" -> <|"CompleteMax" -> tmax|>,
+      "ErrorEstimate" -> {0}|>], Module]];
+  (* output window: exact scalars preserve their operand window; genuine
+     EpsSeries weights use the honest Cauchy-product intersection. *)
+  kmin = Min @@ Map[lsMin[lss[[#]]] +
+      If[DiffExp2`EpsSeries`ESQ[weights[[#]]],
+        DiffExp2`EpsSeries`ESMinPower[weights[[#]]], 0] &, active];
+  kmax = Min @@ Map[If[DiffExp2`EpsSeries`ESQ[weights[[#]]],
+      Min[lsCM[lss[[#]]] + DiffExp2`EpsSeries`ESMinPower[weights[[#]]],
+        DiffExp2`EpsSeries`ESCompleteMax[weights[[#]]] + lsMin[lss[[#]]]],
+      lsCM[lss[[#]]]] &, active];
+  If[kmax < kmin,
+    err["window", <|"Min" -> kmin, "CompleteMax" -> kmax,
+      "Detail" -> "linear combination has an empty eps window"|>]];
+  Do[Module[{l = lss[[i]], w = weights[[i]], lkmin, lkmax, wmin, wmax, wc},
     lkmin = lsMin[l]; lkmax = lsCM[l];
-    wmin = DiffExp2`EpsSeries`ESMinPower[w];
-    wmax = DiffExp2`EpsSeries`ESCompleteMax[w];
-    wc = Table[DiffExp2`EpsSeries`ESCoefficient[w, j], {j, wmin, wmax}];
-    Do[Module[{arr = sec["Coeffs"], out},
+    If[DiffExp2`EpsSeries`ESQ[w],
+      wmin = DiffExp2`EpsSeries`ESMinPower[w];
+      wmax = DiffExp2`EpsSeries`ESCompleteMax[w];
+      wc = Table[DiffExp2`EpsSeries`ESCoefficient[w, j], {j, wmin, wmax}],
+      wmin = 0; wmax = 0; wc = {w}];
+    Do[Module[{arr = sec["Coeffs"][[All, 1 ;; ncols]], out},
       (* slab convolution: out[kp] += wc[j]*arr[k], kp = k + j *)
       out = ConstantArray[0, {kmax - kmin + 1, ncols, ncomp}];
       Do[Module[{kp = k + j},
@@ -462,25 +523,48 @@ CombineLocalSolutions[weights_List, lss_List] := Module[
       AppendTo[secs, <|"a" -> sec["a"], "b" -> sec["b"], "p" -> sec["p"],
         "Coeffs" -> If[FreeQ[out, _Symbol], out, Map[Together, out, {3}]]|>]],
       {sec, l["Sectors"]}]],
-    {i, n}];
+    {i, active}];
   CanonicalizeLocalSolution[Join[base, <|"Sectors" -> secs,
     "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
-    "ErrorEstimate" -> Module[{ees = Map[If[ListQ[#["ErrorEstimate"]],
-        #["ErrorEstimate"], {0}] &, lss], L},
-      (* columns may carry different window lengths: pad before summing *)
-      L = Max[Length /@ ees];
-      Total[PadRight[#, L] & /@ ees]]|>]]];
+    "TWindow" -> <|"CompleteMax" -> tmax|>,
+    "ErrorEstimate" -> Module[{outErr = ConstantArray[0, kmax - kmin + 1]},
+      Do[Module[{l, w, lkmin, lkmax, wmin, wmax, wc, ee},
+        l = lss[[i]]; w = weights[[i]];
+        lkmin = lsMin[l]; lkmax = lsCM[l];
+        If[DiffExp2`EpsSeries`ESQ[w],
+          wmin = DiffExp2`EpsSeries`ESMinPower[w];
+          wmax = DiffExp2`EpsSeries`ESCompleteMax[w];
+          wc = Table[DiffExp2`EpsSeries`ESCoefficient[w, j], {j, wmin, wmax}],
+          wmin = 0; wmax = 0; wc = {w}];
+        ee = If[ListQ[l["ErrorEstimate"]],
+          PadRight[l["ErrorEstimate"], lkmax - lkmin + 1],
+          ConstantArray[0, lkmax - lkmin + 1]];
+        Do[Module[{kp = k + j},
+          If[kmin <= kp <= kmax,
+            outErr[[kp - kmin + 1]] +=
+              If[NumericQ[wc[[j - wmin + 1]]],
+                Last[numMagBounds[wc[[j - wmin + 1]], 20]],
+                Abs[wc[[j - wmin + 1]]]]*ee[[k - lkmin + 1]]]],
+          {k, lkmin, lkmax}, {j, wmin, wmax}]],
+        {i, active}];
+      outErr]|>]]];
 
 (* ---- 2.11 boundary tagged-power parser ---- *)
 
 ParseTaggedPower[expr0_, var_Symbol, epsSym_Symbol] := Module[
-  {expr, lp = 0, rest, expo, coef, a, b},
+  {expr, lp = 0, rest, expo, coef, a, b, logPoly, logCoef},
   expr = expr0 /. Log[k_*var] :> Log[k] + Log[var];
   rest = expr;
-  (* peel Log[var]^p *)
-  lp = Exponent[rest /. Log[var] -> \[FormalL], \[FormalL]];
+  (* Peel a SINGLE Log[var]^p monomial.  After Log[k var] is expanded,
+     mixed log depths (for example Log[2 var]) are a sum of sectors and
+     must be handled by the caller's polynomial path, not collapsed here. *)
+  logPoly = Expand[rest /. Log[var] -> \[FormalL]];
+  lp = Exponent[logPoly, \[FormalL]];
   If[!IntegerQ[lp] || lp < 0, Return[$FailedParse]];
-  If[lp > 0, rest = Together[rest/Log[var]^lp] /. Log[var] -> 0];
+  If[lp > 0,
+    logCoef = Coefficient[logPoly, \[FormalL], lp];
+    If[!zeroQ[Expand[logPoly - logCoef*\[FormalL]^lp]], Return[$FailedParse]];
+    rest = logCoef];
   If[!FreeQ[rest, Log[var]], Return[$FailedParse]];
   (* peel var^expo *)
   Which[

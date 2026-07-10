@@ -272,30 +272,40 @@ layer and by EndpointLimit in API.m).
 
 The eps-graded Laurent weight solve.  `basisValues` = N x N matrix of
 EpsSeries (basis solution i, component c: columns are the EpsSeries VALUES
-of the basis solutions at the match point; before the graded solve, each
-column is trimmed (`ESTrim`) and it is ASSERTED that the trimmed window
-starts at eps^0 — negative-order content must be numerically zero (it is
-the cancelling polar content of compensated joint columns, Solve.md I-5);
-a negative-order coefficient failing `ESCoeffZeroQ` at matchTol is error
-E5, gray zone is E7.  No eps-power renormalization of columns is
-performed: true-resonance columns already have value MinPower = 0 under
-the (eps Logx)^p/p! normalization — REVIEW-math D7).
+of the basis solutions at the match point). Direct callers may supply an
+honest Laurent frame.  The marching path first applies tag-driven
+recombination and the epsilon-adic lattice saturation in 2.8, then requires
+the resulting weights to start at or above eps^0.
 `incomingValues` = EpsSeries vector.
 
 Contract:
-- Graded solve: with F~ = Sum_k F[k] eps^k after recombination (2.8),
+- Graded solve: with F~ = Sum_k F[k] eps^k after recombination/saturation
+  (2.8),
   assert det F[0] is nonzero via ``Tolerances`NumericallyZeroQ[detF0,
   scale, Tol["RankTol"], <chart label>]`` (False required; True -> E5,
-  band hit -> E7; DEC-3), then solve order by order.  ord_eps det F~ != 0 after recombination is LOUD ERROR E5 — never
-  a silent window shift (RewritePlan 3.4: matchingShift "target 0,
-  asserted"; math review finding 4).
+  band hit -> E7; DEC-3), then solve order by order. In the marching path,
+  `ord_eps det F~ != 0` after saturation is LOUD ERROR E5—never a silent
+  window shift (RewritePlan 3.4: matchingShift "target 0, asserted"; math
+  review finding 4).
 - Result window: honest min over the windows of incomingValues and
   basisValues; no padding.
-- Residual assert: per eps order and component,
-  |F~.w - v| <= matchTol * scale (Tolerances.m); violation = LOUD ERROR E6
-  carrying the residual.  This replaces BOTH the old LinearSolve-with-
-  ZeroTest (old Transport.m:341) and the old checked least-squares rescue
-  (old Transport.m:348-374) — the rescue is FORBIDDEN (F6).
+- Residual assert: per eps order and component, the ORIGINAL, untrimmed
+  system must satisfy
+  |F~.w - v| <= Max[matchTol, laurentLeadTol] * scale (Tolerances.m).
+  The structural floor is the same relative threshold used to trim Laurent
+  pivots; it is dimension-independent.  Inexact residuals also carry their
+  own accuracy uncertainty, so a numerically zero result with insufficient
+  certified digits is not accepted.  Violation = LOUD ERROR E6 carrying the
+  residual, uncertainty, scale and order/component.
+- A primary violation does not loosen that contract.  At most two
+  deterministic iterative-refinement steps solve
+  `F deltaW = v - F.w` using the same Laurent-field elimination, add the
+  correction only when it preserves every weight CompleteMax, and then
+  rerun the unchanged original-system assertion.  This recovers coherent
+  sums of individually sub-floor row-operation terms without a dimension
+  factor, tolerance inflation, least-squares rescue, or window shrink.
+  The old LinearSolve-with-ZeroTest (old Transport.m:341) and checked
+  least-squares rescue (old Transport.m:348-374) remain FORBIDDEN (F6).
 - Pivot/leading-coefficient zero classification: EXACTLY
   ``Tolerances`NumericallyZeroQ[pivot, scale, Tol["RankTol"], <chart
   label + operation>]``.  True -> the pivot is exact 0 (snap); False ->
@@ -326,9 +336,8 @@ Contract:
   EXACTLY by Indicial — chain-top vectors normalized by their
   eps-valuation, eps -> 0 substituted exactly, rank over Q(alpha); the
   record carries the rank deficiency r0 = column count − eps=0 rank,
-  REVIEW-math D8).  Division of labor: Indicial DETECTS, Transport
-  REMOVES (unimodular recombination); Transport performs NO numeric
-  degeneracy detection (REVIEW-minimalism 14, name per DEC-7).
+  REVIEW-math D8).  Division of labor: Indicial proposes the exact common
+  families and Transport performs the deterministic divided differences.
 - Replacement rule, per degenerate family ordered by b:
   `B_1 = S_1`, `B_m = (S_m - S_1)/((b_m - b_1) eps)` for m >= 2; applied
   recursively to {B_2, ...} while degeneracy persists (recursion depth =
@@ -344,6 +353,25 @@ Contract:
 - The recombined basis REPLACES the original for all downstream use on this
   chart (assembly, evaluation, probe); the Record field stores the exact
   transformation for debugging/parity dumps.
+- After the tag-driven pass, a rank-triggered epsilon-adic closure handles
+  any remaining lattice defect. Columns are first normalized by their
+  certified epsilon valuations. A division-free determinant series fixes
+  `delta = ord_eps det F`; importantly this distinguishes a small constant
+  unit from a zero leading determinant followed by material higher orders.
+  While the eps^0 matrix is rank deficient, full-pivot elimination produces
+  a certified right-null relation `a`, and one target column is replaced by
+  `(Sum_i a_i B_i)/eps`. The same operation is applied to the actual
+  LocalSolution basis and its match-point frame.
+- Each closure step must certify the eps^0 numerator row using same-order
+  scales, consumes exactly one complete top coefficient, and lowers the
+  determinant valuation by one. Exactly `delta` steps must produce a
+  full-rank leading matrix. Gray rank, an unresolved determinant window,
+  failed divisibility, early/late termination, or Laurent matching weights
+  after closure are loud E5/E7 failures.
+- Constant column magnitudes are units, not epsilon valuations. Rank
+  elimination normalizes those magnitudes, and a determinant series of
+  valuation zero prevents an ill-conditioned but ordinary constant matrix
+  from triggering an epsilon division.
 
 ### 2.9 `CrossingOperator[sector_, sigma_] -> operator` and `ApplyCrossing[ls_LocalSolution, sigma_] -> LocalSolution`
 

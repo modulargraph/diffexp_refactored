@@ -28,6 +28,38 @@ assert["line_integral_x_to_eps",
   eqN[esC[li, 1], -1, 10^-10] &&
   eqN[esC[li, 2], 1, 10^-9]];
 
+(* Cancellation must happen before the endpoint divergence gate.  Each
+   component is 1/x and has a divergent integral on [0,1], whereas the
+   requested scalar combination is identically zero. *)
+sysCancel = DiffExp2`API`LoadSystem[
+  <|"Matrix" -> {{-1/x, 0}, {0, -1/x}}, "Variable" -> x|>];
+bvCancel = {{2, 0, 0, 0}, {2, 0, 0, 0}};
+liBadDim = catchDE2[DiffExp2`API`LineIntegral[
+  sysCancel, bvCancel, 1/2, {0, 1}, {1}]];
+assert["line_integral_coefficient_dimension_loud",
+  FailureQ[liBadDim] && liBadDim["ID"] === "E9"];
+liOne = catchDE2[DiffExp2`API`LineIntegral[
+  sysCancel, bvCancel, 1/2, {0, 1}, {1, 0}]];
+assert["line_integral_individual_endpoint_divergence_loud",
+  FailureQ[liOne] && liOne["ID"] === "E2"];
+liCancel = catchDE2[DiffExp2`API`LineIntegral[
+  sysCancel, bvCancel, 1/2, {0, 1}, {1, -1}]];
+assert["line_integral_cross_component_endpoint_cancellation",
+  !FailureQ[liCancel] &&
+  And @@ Table[eqN[esC[liCancel, k], 0, 10^-30], {k, 0, 3}]];
+liCancelLaurent = catchDE2[DiffExp2`API`LineIntegral[
+  sysCancel, bvCancel, 1/2, {0, 1}, {1/eps, -1/eps}]];
+assert["line_integral_laurent_endpoint_cancellation",
+  !FailureQ[liCancelLaurent] &&
+  And @@ Table[eqN[esC[liCancelLaurent, k], 0, 10^-30], {k, -1, 2}]];
+trCancel = catchDE2[DiffExp2`API`TransportEndpoint[
+  sysCancel, bvCancel, 1/2, 0]];
+limCancel = If[FailureQ[trCancel], trCancel,
+  catchDE2[DiffExp2`API`EndpointLimitValues[trCancel, {1, -1}]]];
+assert["endpoint_limit_cross_component_cancellation",
+  !FailureQ[limCancel] &&
+  And @@ Table[eqN[esC[limCancel, k], 0, 10^-30], {k, 0, 3}]];
+
 (* singular-endpoint limit: 2-component f = {x^eps, const}:
    A = diag(eps/x, 0): limit at 0 of {1,1}.f = the constant *)
 sys2 = DiffExp2`API`LoadSystem[<|"Matrix" -> {{eps/x, 0}, {0, 0}}, "Variable" -> x|>];

@@ -142,25 +142,46 @@ machine Integers; all return exact rationals `10^-k` unless stated):
   DiffExp/Utilities.m:105): correct solutions give residuals at the noise floor
   (`~10^-chopDigits` relative), wrong ones give O(1); wp/10 (default 50 decades)
   sits far from both.
+- `NumericMagnitude[c_?NumericQ, digits_Integer] -> nonnegative numeric scalar`
+  Stable mathematical modulus for numeric coefficient and residual decisions.
+  For a complex value, inspect the real and imaginary stored centers
+  independently and evaluate a scaled Euclidean norm.  This avoids Wolfram's
+  `Abs` precision poisoning when (for example) a resolved real component is
+  paired with a centered-zero imaginary component carrying poor accuracy,
+  while retaining the true modulus rather than the smaller infinity norm.
+  The helper reports the central magnitude only; residual proof sites account
+  for the original value's precision uncertainty separately.  Geometry keeps
+  using exact/numeric `Abs` directly.
+- `NumericMagnitudeBounds[c_?NumericQ, digits_Integer] -> {lower, upper}`
+  Componentwise uncertainty enclosure for the same modulus.  Exact inputs
+  remain exact; inexact real/imaginary centers receive independent
+  `10^-Accuracy` radii evaluated at arbitrary precision.  Residual proofs and
+  error bounds use `upper`; rank classification uses both endpoints.
 
 The shared classification predicate:
 
-- `NumericallyZeroQ[c_, scale_, tol_, context_String, bandDecades_:$AmbiguityBandDecades]
+- `NumericallyZeroQ[c_, scale_, tol_, context_String,
+   bandDecades_:$AmbiguityBandDecades, binaryFloor_:False]
    -> True | False | LOUD ERROR`
   THE one zero-classification predicate for all relative tests in DiffExp2
   (DEC-3): exactly one library-wide; EpsSeries' `ESCoeffZeroQ` is a thin
   wrapper over it that adds window context to the error payload — same
-  semantics, never a second predicate.  Contract: (1) `PossibleZeroQ[c]`
-  exactly True -> True.  (2) `c` not NumericQ -> False (symbolic content is
-  never "numerically zero"; callers handle symbols structurally).
+  semantics, never a second predicate.  Contract: (1) for exact data only,
+  `PossibleZeroQ[c]` exactly True -> True; inexact approximate zeros proceed
+  through the uncertainty proof.  (2) `c` not NumericQ -> False (symbolic
+  content is never "numerically zero"; callers handle symbols structurally).
   (3) `scale == 0` (no reference magnitude) -> False unless branch (1) fired.
-  (4) Otherwise let `r = Abs[N[c, dig]]` with `dig` the installed ChopDigits.
-  FLOOR EXEMPTION (DEC-2/DEC-3): if `tol === 10^-24` (the universal floor —
-  the Max in LaurentLeadTol picked the hard constant; in practice only
-  LaurentLeadTol-derived calls reach it at campaign settings), the test is
-  BINARY: `r <= tol*scale -> True`, else False — no ambiguity error at the
-  floor.  (5) Else ternary: `r < tol*scale/10^bandDecades -> True`;
-  `r > tol*scale*10^bandDecades -> False`; ELSE LOUD ERROR (section 5, E5)
+  (4) Otherwise derive componentwise lower/upper magnitude bounds `(lo, hi)`
+  from the stored centers and an arbitrary-precision
+  `10^-Accuracy[component]` uncertainty (so it cannot machine-underflow).  A
+  poor centered-zero imaginary component
+  therefore cannot erase a separately resolved real lower bound.
+  FLOOR EXEMPTION (DEC-2/DEC-3): only a Laurent-semantic caller for which
+  `LaurentLeadTol` actually selected the hard `10^-24` floor passes
+  `binaryFloor -> True`; then `hi <= tol*scale -> True`, else False.  The mode
+  is explicit because `RankTol[96]` also equals `10^-24` numerically and must
+  remain ternary.  (5) Otherwise ternary: `hi < tol*scale/10^bandDecades ->
+  True`; `lo > tol*scale*10^bandDecades -> False`; ELSE LOUD ERROR (section 5, E5)
   quoting `context` verbatim — `context` MUST already contain the chart /
   sector tag (a,b,p) / eps-order / t-order identifiers the caller has.
   `bandDecades` defaults to the exported constant `$AmbiguityBandDecades = 4`

@@ -17,6 +17,7 @@ Begin["`Private`"];
 err[id_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "Integrate"|>, payload]];
 cfg = DiffExp2`Config`CFG;
+numMag = DiffExp2`Tolerances`NumericMagnitude;
 (* zeroQ: exact-first (see Solve.m).  Call sites here test exact tags
    (a, b, m + 1): the rational fast path decides them without numerics;
    anything outside the rational domain keeps PossibleZeroQ unchanged. *)
@@ -54,11 +55,20 @@ antiderivativeAt[m_, b_, p_, T_, kMaxOut_] := Module[
     If[Length[$adCache] >= $adCacheMax, $adCache = <||>];
     $adCache[key] = antiderivativeAtCore[m, b, p, T, kMaxOut]]];
 
-antiderivativeAtCore[m_, b_, p_, T_, kMaxOut_] := Module[
-  {logT, width, tbeps, invAlpha, jsum, alphaES, wp},
+antiderivativeAtCore[m_, b_, p_, T_, kMaxOut_] := Module[{logT, wp},
   wp = DiffExp2`Config`CFG["WorkingPrecision"];
   (* numeric log: exact Log[rational] towers compound into symbolic giants *)
-  logT = If[FreeQ[T, _Symbol], N[Log[T], wp + 20], Log[T]];
+  logT = If[FreeQ[T, _Symbol],
+    N[Log[T], DiffExp2`Tolerances`$InputPrecisionFactor*wp], Log[T]];
+  antiderivativeAtLog[m, b, p, T, logT, 1, kMaxOut]];
+
+(* Antiderivative at a point of modulus T with an already branch-resolved
+   logarithm logT.  phase0 is the eps-independent part of t^(m+1+b eps).
+   Keeping this sibling of antiderivativeAtCore lets the interior-crossing
+   path evaluate the negative endpoint with the full i-delta phase, without
+   sending branch data through a symbolic Series[]. *)
+antiderivativeAtLog[m_, b_, p_, T_, logT_, phase0_, kMaxOut_] := Module[
+  {width, tbeps, invAlpha, jsum, alphaES},
   width = kMaxOut + p + 4;
   tbeps = If[zeroQ[b], esNew[0, PadRight[{1}, width + 1]],
     esNew[0, Table[pow[b*logT, r]/r!, {r, 0, width}]]];
@@ -74,7 +84,7 @@ antiderivativeAtCore[m_, b_, p_, T_, kMaxOut_] := Module[
       pwr = esTimes[pwr, invAlpha]],
       {j, 0, p}];
     acc];
-  esScale[pow[T, m + 1], esTimes[tbeps, esShift[jsum, p]]]];
+  esScale[phase0*pow[T, m + 1], esTimes[tbeps, esShift[jsum, p]]]];
 
 SectorMonomialIntegral[m_, b_, p_Integer, T_, kMaxOut_Integer] := Module[{},
   If[!FreeQ[m, _?InexactNumberQ] || !FreeQ[b, _?InexactNumberQ] || p < 0,
@@ -110,24 +120,38 @@ divergentGate[ls_, kmin_, kmax_] := Module[
         sec["Coeffs"][[k - kmin + 1, n + 1]]] &, grp]];
       rowsAll = Flatten[Map[Module[{sec = #[[1]], n = #[[2]]},
         sec["Coeffs"][[k - kmin + 1, n + 1]]] &, grp]];
-      scale = Max[0, Sequence @@ (Abs[N[#, 15]] & /@ Select[rowsAll, NumericQ])];
+      scale = Max[1, Sequence @@ (numMag[#, 15] & /@
+        Select[rowsAll, NumericQ])];
       Do[
         If[!TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[tot[[c]], scale,
             DiffExp2`Tolerances`Tol["LaurentLeadTol"],
-            "Integrate cancellation gate"]],
+            "Integrate cancellation gate",
+            DiffExp2`Tolerances`$AmbiguityBandDecades,
+            SameQ[DiffExp2`Tolerances`Tol["LaurentLeadTol"], 10^-24]]],
           err["E2", <|"m" -> grp[[1, 3]], "p" -> grp[[1, 4]], "EpsRow" -> k,
-            "MergedCoefficient" -> N[tot[[c]], 6],
+            "MergedCoefficient" -> N[tot[[c]], 6], "Scale" -> scale,
             "Detail" -> "divergent b = 0 endpoint content does not cancel in the assembled combination"|>]],
         {c, Length[tot]}]],
       {k, kmin, kmax}]],
     {g, GatherBy[offenders, {Together[#[[3]]], #[[4]]} &]}];
   offenders];
 
+requireEndpointIntegralOrder[ls_, ncols_Integer] := Module[{missing = {}},
+  Do[If[zeroQ[sec["b"]] && TrueQ[sec["a"] + 1 <= 0],
+    Module[{needed = Floor[-sec["a"] - 1]},
+      If[IntegerQ[needed] && needed >= ncols,
+        AppendTo[missing, <|"Sector" -> {sec["a"], sec["b"], sec["p"]},
+          "NeededTOrder" -> needed|>]]]],
+    {sec, ls["Sectors"]}];
+  If[missing =!= {},
+    err["E10", <|"Sectors" -> missing, "AvailableTOrder" -> ncols - 1,
+      "Detail" -> "endpoint integral is not certified: unseen Taylor cells may still be nonintegrable"|>]]];
+
 (* ---- 2.2 LocalSolution integration ---- *)
 
 IntegrateLocalSolution[ls0_Association, {t1_, t2_}] := Module[
   {ls = DiffExp2`SectorSeries`ValidateLocalSolution[ls0], kmin, kmax, ncols,
-   ncomp, kOut, vals, sigma},
+   ncomp, vals},
   kmin = ls["EpsWindow", "Min"]; kmax = ls["EpsWindow", "CompleteMax"];
   {ncols, ncomp} = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2 ;; 3]];
   If[!TrueQ[t1 < t2],
@@ -139,10 +163,12 @@ IntegrateLocalSolution[ls0_Association, {t1_, t2_}] := Module[
     (* center endpoint: [0, t2] *)
     TrueQ[t1 == 0],
     Module[{skip = divergentGate[ls, kmin, kmax]},
+      requireEndpointIntegralOrder[ls, ncols];
       vals = sumSectorIntegrals[ls, t2, kmin, kmax, ncols, ncomp, skip]],
     (* center endpoint mirrored: [t1, 0] = crossing-evaluated arm *)
     TrueQ[t2 == 0],
     Module[{skip = divergentGate[ls, kmin, kmax], lsX, sg},
+      requireEndpointIntegralOrder[ls, ncols];
       sg = resolveSigma[ls];
       lsX = DiffExp2`Transport`ApplyCrossing[ls, sg];
       (* Int_{t1}^0 f dt = Int_0^{|t1|} f(-u) du: crossing-applied, positive *)
@@ -151,11 +177,9 @@ IntegrateLocalSolution[ls0_Association, {t1_, t2_}] := Module[
         divergentGate[lsX, lsX["EpsWindow", "Min"], lsX["EpsWindow", "CompleteMax"]]]],
     (* interior crossing: [t1, 0] + [0, t2], PV-paired *)
     TrueQ[t1 < 0 < t2],
-    Module[{vPos, vNeg, skip},
+    Module[{skip},
       skip = interiorGate[ls, kmin, kmax];
-      vPos = sumSectorIntegralsPV[ls, t2, kmin, kmax, ncols, ncomp];
-      vNeg = sumSectorIntegralsPVNeg[ls, -t1, kmin, kmax, ncols, ncomp];
-      vals = MapThread[esAdd, {vPos, vNeg}]],
+      vals = sumInteriorPaired[ls, -t1, t2, kmin, kmax, ncols, ncomp]],
     (* center outside: plain F(t2) - F(t1) *)
     True,
     vals = Module[{f2, f1},
@@ -184,13 +208,16 @@ resolveSigma[ls_] := Module[{sg = DiffExp2`SectorSeries`ChartImSign[ls]},
 (* sum of endpoint sector integrals over [0, T]; skip = offender list
    (cancelled divergent monomials are EXCLUDED from every sector) *)
 sumSectorIntegrals[ls_, T_, kmin_, kmax_, ncols_, ncomp_, skip_] := Module[
-  {kOut = kmax, acc},
+  {span = kmax - kmin, acc},
   acc = Table[None, {ncomp}];
   Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
     Do[Module[{m = Together[a + n], base},
       If[zeroQ[b] && TrueQ[m + 1 <= 0],
         Null,  (* gated: merged coefficient verified zero *)
-        base = SectorMonomialIntegral[m, b, p, T, kOut + p + 2];
+        (* The primitive is multiplied by a coefficient window of width
+           span+1.  Its private depth is relative to that width, not to the
+           absolute (possibly very negative) CompleteMax. *)
+        base = SectorMonomialIntegral[m, b, p, T, span + p + 2];
         Do[Module[{cESc},
           cESc = esNew[kmin, Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
           Module[{term = esTimes[cESc, base]},
@@ -201,7 +228,8 @@ sumSectorIntegrals[ls_, T_, kmin_, kmax_, ncols_, ncomp_, skip_] := Module[
   Map[If[# === None, esZero[kmax], #] &, acc]];
 
 (* plain antiderivative sum at T > 0 (no boundary subtleties) *)
-sumAntiderivative[ls_, T_, kmin_, kmax_, ncols_, ncomp_] := Module[{acc},
+sumAntiderivative[ls_, T_, kmin_, kmax_, ncols_, ncomp_] := Module[
+  {acc, span = kmax - kmin},
   acc = Table[None, {ncomp}];
   Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
     Do[Module[{m = Together[a + n], base},
@@ -209,7 +237,7 @@ sumAntiderivative[ls_, T_, kmin_, kmax_, ncols_, ncomp_] := Module[{acc},
         (* alpha == 0: F = eps^p Log^(p+1) t/((p+1) p!) *)
         esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/((p + 1)*p!)}, kmax - kmin + 4]], p],
         DiffExp2`EpsSeries`ESTruncate[
-          antiderivativeAt[m, b, p, T, kmax + p + 2], kmax + p + 2]];
+          antiderivativeAt[m, b, p, T, span + p + 2], span + p + 2]];
       Do[Module[{cESc},
         cESc = esNew[kmin, Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
         Module[{term = esTimes[cESc, base]},
@@ -223,44 +251,89 @@ sumAntiderivative[ls_, T_, kmin_, kmax_, ncols_, ncomp_] := Module[{acc},
    odd/even handled by the pairing formulas below; returns Null (no skip) *)
 interiorGate[ls_, kmin_, kmax_] := Null;
 
-(* positive arm of an interior crossing: F(t2) - lim_{c->0+} F(c) with the
-   divergent b=0 cells kept as REAL-log PV halves: F(t2) with Log real *)
-sumSectorIntegralsPV[ls_, T_, kmin_, kmax_, ncols_, ncomp_] :=
-  sumAntiderivativePV[ls, T, kmin, kmax, ncols, ncomp, 1];
-sumSectorIntegralsPVNeg[ls_, T_, kmin_, kmax_, ncols_, ncomp_] :=
-  sumAntiderivativePV[ls, T, kmin, kmax, ncols, ncomp, -1];
+(* Strict sign lookup for a branch-sensitive interior crossing.  Unlike the
+   regular transport-side convention, an i-delta integral has no meaningful
+   default side: the two choices are complex conjugates. *)
+interiorSigma[ls_] := Module[{sg = DiffExp2`SectorSeries`ChartImSign[ls]},
+  If[!MemberQ[{1, -1}, sg],
+    err["E3", <|"Center" -> ls["Center"],
+      "Prescriptions" -> ls["Prescriptions"],
+      "Detail" -> "b != 0 interior crossing requires a derivable i-delta prescription sign"|>]];
+  sg];
 
-(* PV arm: for b != 0 sectors use the dimreg endpoint integral on each side
-   evaluated with REAL logs of |t| (Euclidean PV convention, campaign
-   9aeb300); the negative arm enters with orientation factor and the parity
-   phase (-1)^(m+1) from t -> -u, u > 0 with REAL u^... :
-   Int_{-T}^0 t^m dt = (-1)^(m+1) Int_0^T u^m du  (integer m; PV pairing
-   cancels the divergent symmetric parts of odd integrands) *)
-sumAntiderivativePV[ls_, T_, kmin_, kmax_, ncols_, ncomp_, arm_] := Module[{acc},
-  acc = Table[None, {ncomp}];
+(* The pole cell m=-1 must be paired BEFORE epsilon-window arithmetic.  With
+     LB = Log B, LN = Log A + i Pi sigma, beta = b eps,
+     H(beta) = (Exp[beta LB] - Exp[beta LN])/beta,
+   the normalized p-log monomial is eps^p H^(p)(beta)/p!.  Its manifestly
+   regular coefficients are
+     eps^(p+q) b^q (LB^(p+q+1)-LN^(p+q+1)) /
+       (p! q! (p+q+1)), q>=0.
+   In particular p=0 has no spurious eps^-1 term. *)
+pairedPoleIntegral[b_, p_, A_, B_, sigma_, width_Integer] := Module[
+  {wp = DiffExp2`Config`CFG["WorkingPrecision"], logB, logNeg},
+  logB = If[FreeQ[B, _Symbol],
+    N[Log[B], DiffExp2`Tolerances`$InputPrecisionFactor*wp], Log[B]];
+  logNeg = If[FreeQ[A, _Symbol],
+      N[Log[A], DiffExp2`Tolerances`$InputPrecisionFactor*wp], Log[A]] +
+    sigma*I*Pi;
+  esNew[p, Table[
+    pow[b, q]*(pow[logB, p + q + 1] - pow[logNeg, p + q + 1])/
+      (p!*q!*(p + q + 1)),
+    {q, 0, width}]]];
+
+(* Branch-resolved paired form away from the pole cell.  Since m+1 != 0,
+   both endpoint antiderivatives are epsilon-regular and their direct
+   difference cannot manufacture a Laurent pole. *)
+pairedRegularIntegral[m_, b_, p_, A_, B_, sigma_, kMaxOut_] := Module[
+  {wp = DiffExp2`Config`CFG["WorkingPrecision"], logNeg, pos, neg},
+  logNeg = If[FreeQ[A, _Symbol],
+      N[Log[A], DiffExp2`Tolerances`$InputPrecisionFactor*wp], Log[A]] +
+    sigma*I*Pi;
+  pos = antiderivativeAt[m, b, p, B, kMaxOut];
+  neg = antiderivativeAtLog[m, b, p, A, logNeg,
+    Exp[sigma*I*Pi*(m + 1)], kMaxOut];
+  esAdd[pos, esScale[-1, neg]]];
+
+(* Single-owner interior pairing.  b=0 retains the real-log PV/Hadamard
+   finite-part convention exactly.  b!=0 uses the chart prescription on the
+   negative arm, with the m=-1 pole cell expanded in its combined regular
+   form above rather than as two independently shifted Laurent series. *)
+sumInteriorPaired[ls_, A_, B_, kmin_, kmax_, ncols_, ncomp_] := Module[
+  {acc = Table[None, {ncomp}], sigma = None, needSigma, span = kmax - kmin},
+  needSigma = AnyTrue[ls["Sectors"], Function[sec,
+    !zeroQ[sec["b"]] && !AllTrue[Flatten[sec["Coeffs"]], # === 0 &]]];
+  If[needSigma, sigma = interiorSigma[ls]];
   Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
-    If[arm === -1 && !IntegerQ[a],
+    If[zeroQ[b] && !IntegerQ[a] &&
+        !AllTrue[Flatten[arr], # === 0 &],
       err["E8", <|"a" -> a,
-        "Detail" -> "interior crossing with fractional-a sector requires the prescription-phase path (not in v1 PV)"|>]];
-    Do[Module[{m = Together[a + n], base, parity},
-      parity = If[arm === 1, 1, (-1)^m];  (* t -> -u, real-log PV convention *)
+        "Detail" -> "real-log PV for a fractional-a b=0 sector is undefined"|>]];
+    Do[Module[{m = Together[a + n], base},
+      (* An exact-zero coefficient slab is structurally inactive: it neither
+         requires a branch sign nor constrains the result window. *)
+      If[AllTrue[Flatten[arr[[All, n + 1, All]]], # === 0 &], Continue[]];
       base = Which[
-        zeroQ[b] && TrueQ[m + 1 > 0],
-        SectorMonomialIntegral[m, b, p, T, kmax + p + 2],
         zeroQ[b] && zeroQ[m + 1],
-        esShift[esNew[0, PadRight[{pow[Log[T], p + 1]/((p + 1)*p!)}, kmax - kmin + 4]], p],
+          esShift[esNew[0, PadRight[{
+            (pow[Log[B], p + 1] - pow[Log[A], p + 1])/((p + 1)*p!)},
+            span + 4]], p],
         zeroQ[b],
-        (* m+1 < 0 power cell: real finite part F(T) (the 1/t^k endpoint
-           terms cancel between PV arms for the surviving combinations;
-           genuine non-cancelling power divergence is caught by the
-           E2-on-assembly check below at the eps-row level) *)
-        antiderivativeAt[m, 0, p, T, kmax + p + 2],
+          (* Int_{-A}^B with real Log|t|: the negative-arm substitution
+             contributes (-1)^m.  For m<-1 this is the defined Hadamard
+             finite part; for m>-1 it is the ordinary integral. *)
+          esAdd[antiderivativeAt[m, 0, p, B, span + p + 2],
+            esScale[(-1)^m, antiderivativeAt[m, 0, p, A, span + p + 2]]],
+        zeroQ[m + 1],
+          pairedPoleIntegral[b, p, A, B, sigma, span + 3],
         True,
-        SectorMonomialIntegral[m, b, p, T, kmax + p + 2]];
-      Do[Module[{cESc},
-        cESc = esNew[kmin, Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
-        Module[{term = esScale[parity, esTimes[cESc, base]]},
-          acc[[c]] = If[acc[[c]] === None, term, esAdd[acc[[c]], term]]]],
+          (* The base-series depth is relative to the coefficient-window
+             width, not to its absolute (possibly negative) upper order. *)
+          pairedRegularIntegral[m, b, p, A, B, sigma, p + span + 3]];
+      Do[Module[{cESc, term},
+        cESc = esNew[kmin,
+          Table[arr[[k - kmin + 1, n + 1, c]], {k, kmin, kmax}]];
+        term = esTimes[cESc, base];
+        acc[[c]] = If[acc[[c]] === None, term, esAdd[acc[[c]], term]]],
         {c, ncomp}]],
       {n, 0, ncols - 1}]],
     {sec, ls["Sectors"]}];
@@ -269,30 +342,74 @@ sumAntiderivativePV[ls_, T_, kmin_, kmax_, ncols_, ncomp_, arm_] := Module[{acc}
 (* ---- 2.4 endpoint limit (the FT drop rule) ---- *)
 
 EndpointSectorLimit[ls0_Association] := Module[
-  {ls = DiffExp2`SectorSeries`ValidateLocalSolution[ls0], kmin, kmax, ncomp,
-   ncols, acc},
+  {ls, kmin, kmax, ncomp, ncols, finite = {}, divergent = {},
+   incomplete = {}, finiteRows},
+  (* Work on the original sectors and merge by ABSOLUTE monomial below.
+     CanonicalizeLocalSolution uses a fixed Taylor width, so shifting a
+     higher-a tower into a much lower-a tower can legitimately place its
+     finite t^0 cell beyond that width.  Endpoint classification must not
+     discard such a cell merely to normalize the representation. *)
+  ls = DiffExp2`SectorSeries`ValidateLocalSolution[ls0];
   kmin = ls["EpsWindow", "Min"]; kmax = ls["EpsWindow", "CompleteMax"];
   {ncols, ncomp} = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2 ;; 3]];
-  acc = Table[esZero[kmax], {ncomp}];
+  (* Classify each coefficient by its ABSOLUTE monomial power m=a+n.
+     Positive powers vanish even when their sector's leading a is negative;
+     this is what permits a finite t^0 coefficient to be buried at n=-a. *)
   Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
-    Which[
-      !zeroQ[b], Null,  (* dropped EXACTLY: the dimreg rule *)
-      TrueQ[Together[a] > 0], Null,  (* vanishes at the center *)
-      zeroQ[a] && p === 0,
-      Do[Module[{cESc = esNew[kmin,
-          Table[arr[[k - kmin + 1, 1, c]], {k, kmin, kmax}]]},
-        acc[[c]] = esAdd[acc[[c]], cESc]],
-        {c, ncomp}],
-      True,
-      (* a < 0 or log content at b = 0: divergent unless the rows vanish *)
-      Module[{flat = Flatten[arr], scale},
-        scale = Max[0, Sequence @@ (Abs[N[#, 15]] & /@ Select[flat, NumericQ])];
-        If[AnyTrue[flat, !TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[#, scale,
-            DiffExp2`Tolerances`Tol["LaurentLeadTol"], "EndpointSectorLimit"]] &],
-          err["E2", <|"Sector" -> {a, b, p},
-            "Detail" -> "divergent b = 0 content at the endpoint limit"|>]]]]],
+    If[zeroQ[b],
+      (* A negative-a tower needs every coefficient through n=floor(-a)
+         to certify its limit.  A finite zero prefix is not an exact-zero
+         certificate for the unknown tail.  Record an incomplete tower now;
+         report it only after any already-visible divergence has had the
+         chance to raise the more specific E2 below. *)
+      If[TrueQ[a < 0],
+        Module[{needed = Floor[-a]},
+          If[IntegerQ[needed] && needed >= ncols,
+            AppendTo[incomplete, <|"Sector" -> {a, b, p},
+              "NeededTOrder" -> needed|>]]]];
+      Do[Module[{m = Together[a + n], cell = {sec, n}},
+        Which[
+          TrueQ[m > 0], Null,
+          zeroQ[m] && p === 0, AppendTo[finite, cell],
+          TrueQ[m < 0] || (zeroQ[m] && p > 0),
+            AppendTo[divergent, {m, p, sec, n}],
+          True,
+            err["E10", <|"Sector" -> {a, b, p}, "AbsolutePower" -> m,
+              "Detail" -> "could not classify exact endpoint monomial power"|>]]],
+        {n, 0, ncols - 1}],
+    Null  (* b != 0: dropped exactly by the dimensional-regulator rule *)]],
     {sec, ls["Sectors"]}];
-  acc];
+  (* Divergent monomials may cancel only against the SAME absolute power
+     and Log depth.  Check their merged coefficient per epsilon row and
+     component; unrelated positive-power and finite cells never enter this
+     gate. *)
+  Do[Module[{grp = g},
+    Do[
+      Do[Module[{terms, total, scale},
+        terms = Map[#[[3]]["Coeffs"][[k - kmin + 1, #[[4]] + 1, c]] &, grp];
+        total = Total[terms];
+        scale = Max[1, Sequence @@ (numMag[#, 15] & /@
+          Select[terms, NumericQ])];
+        If[!TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[total, scale,
+              DiffExp2`Tolerances`Tol["LaurentLeadTol"],
+              "EndpointSectorLimit cancellation gate",
+              DiffExp2`Tolerances`$AmbiguityBandDecades,
+              SameQ[DiffExp2`Tolerances`Tol["LaurentLeadTol"], 10^-24]]],
+          err["E2", <|"AbsolutePower" -> grp[[1, 1]],
+            "LogPower" -> grp[[1, 2]], "EpsRow" -> k, "Component" -> c,
+            "MergedCoefficient" -> total, "Scale" -> scale,
+            "SectorTags" -> ({#[[3]]["a"], #[[3]]["b"], #[[3]]["p"]} & /@ grp),
+            "Detail" -> "divergent b = 0 content at the endpoint limit does not cancel"|>]]],
+        {c, ncomp}],
+      {k, kmin, kmax}]],
+    {g, GatherBy[divergent, {Together[#[[1]]], #[[2]]} &]}];
+  If[incomplete =!= {},
+    err["E10", <|"Sectors" -> incomplete,
+      "AvailableTOrder" -> ncols - 1,
+      "Detail" -> "endpoint limit is not certified: a negative-power tower needs Taylor coefficients beyond the stored T window"|>]];
+  If[finite === {}, Return[Table[esZero[kmax], {ncomp}], Module]];
+  finiteRows = Total[Map[#[[1]]["Coeffs"][[All, #[[2]] + 1]] &, finite]];
+  Table[esNew[kmin, finiteRows[[All, c]]], {c, ncomp}]];
 
 End[];
 EndPackage[];

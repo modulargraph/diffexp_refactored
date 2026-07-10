@@ -68,6 +68,12 @@ r5 = eval[ls5, 1/10, "UsePade" -> False];
 assert["t05_eval_regular_exp",
   Abs[N[esC[r5["Value"], 0][[1]] - Exp[1/10], 30]] < 10^-20];
 
+ls5uncertain = mkls[{{{0, 0, 0}, <|0 -> {0``17}, 1 -> {1}|>}},
+  0, 1, 1];
+r5uncertain = eval[ls5uncertain, 1/3, "UsePade" -> False];
+assert["t05_inexact_zero_row_does_not_shift_honest_epsilon_min",
+  r5uncertain["Value", "EpsWindow", "Min"] === 0];
+
 (* t06: branch half-integer *)
 ls6 = mkls[{{{1/2, 0, 0}, <|0 -> {1}|>}}, 0, 0, 1];
 r6p = eval[ls6, -1/4, "UsePade" -> False, "ImSign" -> 1];
@@ -247,6 +253,16 @@ assert["t31_canonicalize_merge",
   Flatten[m31["Coeffs"][[1, All, 1]]] === {1, 7, 7} &&
   Flatten[SelectFirst[r31["Sectors"], #["b"] === 2 &]["Coeffs"][[1, All, 1]]] === {3, 0, 0}];
 
+(* Do not erase a higher-a tower when its known shifted content would fall
+   outside the fixed Taylor slab.  Here the zero lower tower is dropped and
+   the finite coefficient remains at its original tag. *)
+ls31wide = mkls[{{{-5, 1, 0}, <|0 -> {0, 0, 0}|>},
+  {{0, 1, 0}, <|0 -> {23, 0, 0}|>}}, 0, 0, 3];
+r31wide = canon[ls31wide];
+assert["t31_canonicalize_preserves_overflowing_integer_shift",
+  ({#["a"], #["b"], #["p"]} & /@ r31wide["Sectors"]) === {{0, 1, 0}} &&
+  First[r31wide["Sectors"]]["Coeffs"][[1, 1, 1]] === 23];
+
 (* t32: window request error from the evaluation result *)
 r32 = eval[ls8, 1/3, "UsePade" -> False];
 assert["t32_window_request_error",
@@ -264,6 +280,46 @@ assert["t34_combine",
   sec34["Coeffs"][[1, 1, 1]] === 10 &&   (* row -1: w_B(-1)*lsB row 0 *)
   sec34["Coeffs"][[2, 1, 1]] === 2];     (* row 0: w_A(0)*lsA row 0 *)
 
+(* Error propagation uses the stable true modulus: a centered-zero
+   imaginary component cannot erase a real weight, and two resolved
+   components must not be reduced to an infinity norm. *)
+ls34err = Join[mkls[{{{0, 0, 0}, <|0 -> {1}|>}}, 0, 0, 1],
+  <|"ErrorEstimate" -> {1}|>];
+complexWeight34 =
+  4.4267459561002104836`0.2683567342206439 +
+    0``-0.022790862816694443*I;
+r34complex = combine[{complexWeight34}, {ls34err}];
+r34diagonal = combine[{(8 + 8 I)*10^-25}, {ls34err}];
+assert["t34_combine_error_uses_stable_true_modulus",
+  TrueQ[First[r34complex["ErrorEstimate"]] > 4] &&
+  TrueQ[PossibleZeroQ[First[r34diagonal["ErrorEstimate"]] -
+    Sqrt[128]*10^-25]]];
+
+(* t36: plain scalar weights are exact constants, so they preserve the
+   complete input window; an exact-zero weight is non-constraining. *)
+ls36a = mkls[{{{0, 0, 0}, <|0 -> {2}|>}}, 0, 3, 1];
+ls36b = mkls[{{{0, 0, 0}, <|0 -> {5}|>}}, 0, 2, 1];
+r36a = combine[{1, -1}, {ls36a, ls36b}];
+r36b = combine[{0, 1}, {ls36b, ls36a}];
+r36tiny = combine[{DiffExp2`EpsSeries`ESNew[0, {10.^-80, 0, 0, 0}]},
+  {ls36a}];
+r36tinyPlain = combine[{10.^-80}, {ls36a}];
+r36finiteZero = combine[{DiffExp2`EpsSeries`ESZero[1], 1},
+  {ls36a, ls36b}];
+ls36t2 = mkls[{{{0, 0, 0}, <|0 -> {2, 3, 4}|>}}, 0, 3, 3];
+ls36t1 = mkls[{{{0, 0, 0}, <|0 -> {5, 6}|>}}, 0, 3, 2];
+r36t = combine[{1, 1}, {ls36t2, ls36t1}];
+assert["t36_exact_scalar_weights_preserve_window",
+  r36a["EpsWindow"] === <|"Min" -> 0, "CompleteMax" -> 2|> &&
+  esC[eval[r36a, 1/3, "UsePade" -> False]["Value"], 0][[1]] === -3 &&
+  r36b["EpsWindow"] === <|"Min" -> 0, "CompleteMax" -> 3|> &&
+  esC[eval[r36b, 1/3, "UsePade" -> False]["Value"], 0][[1]] === 2 &&
+  esC[eval[r36tiny, 1/3, "UsePade" -> False]["Value"], 0][[1]] =!= 0 &&
+  esC[eval[r36tinyPlain, 1/3, "UsePade" -> False]["Value"], 0][[1]] =!= 0 &&
+  r36finiteZero["EpsWindow"] === <|"Min" -> 0, "CompleteMax" -> 1|> &&
+  r36t["TWindow", "CompleteMax"] === 1 &&
+  Dimensions[First[r36t["Sectors"]]["Coeffs"]][[2]] === 2];
+
 (* t35: ParseTaggedPower *)
 p35a = parse[3 Global`x^(1 - 2 Global`eps) Log[Global`x]^2, Global`x, Global`eps];
 p35b = parse[Global`c0 Global`x^(Global`eps), Global`x, Global`eps];
@@ -272,7 +328,7 @@ p35d = parse[Exp[Global`x], Global`x, Global`eps];
 assert["t35_parse_tagged_power",
   p35a === <|"a" -> 1, "b" -> -2, "p" -> 2, "Coefficient" -> 3|> &&
   p35b === <|"a" -> 0, "b" -> 1, "p" -> 0, "Coefficient" -> Global`c0|> &&
-  p35c["p"] === 1 && p35c["a"] === 0 &&
+  p35c === DiffExp2`SectorSeries`$FailedParse &&
   p35d === DiffExp2`SectorSeries`$FailedParse];
 
 (* t33: export hygiene *)

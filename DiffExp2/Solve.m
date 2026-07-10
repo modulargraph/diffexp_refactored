@@ -225,6 +225,19 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
     Do[out[[v - fb + 1 + m]] = csr[[m + 1]], {m, 0, rel}]];
   out];
 
+(* Adaptive singular homogeneous solves use a deliberately narrow lower
+   frame first.  A genuine lower underflow throws this private retry signal;
+   the same recurrence is then rerun on a wider rectangle.  Outside that
+   narrowly scoped Block, the established public E4 contract is unchanged. *)
+$adaptiveLowerFrameProbe = False;
+$disableAdaptiveLowerFrames = False;   (* private parity/benchmark seam *)
+lowerFrameUnderflow[cs_, payload_Association] :=
+  If[TrueQ[$adaptiveLowerFrameProbe],
+    Throw[Failure["AdaptiveLowerFrame", Join[
+      <|"ID" -> "AdaptiveLowerFrame"|>, payload]],
+      "DiffExp2AdaptiveLowerFrame"],
+    err["E4", cs, payload]];
+
 (* One (d x W) epsilon-frame shift.  This is shared by the ordinary sparse
    polynomial path and the grouped rational path below, so both retain the
    same strict lower-frame contract. *)
@@ -235,14 +248,19 @@ shiftFrameBlock[M_, s_Integer, fb_Integer, W_Integer, cs_] := Which[
   s >= W, ConstantArray[0, Dimensions[M]],
   -s < W,
     If[AnyTrue[Flatten[M[[All, 1 ;; -s]]], # =!= 0 &],
-      err["E4", cs, <|"FrameBase" -> fb, "Shift" -> s,
+      lowerFrameUnderflow[cs, <|"FrameBase" -> fb, "Shift" -> s,
         "Detail" -> "epsilon shift would discard nonzero lower-frame content"|>]];
     Join[M[[All, -s + 1 ;; W]], ConstantArray[0, {Length[M], -s}], 2],
   True,
     If[AnyTrue[Flatten[M], # =!= 0 &],
-      err["E4", cs, <|"FrameBase" -> fb, "Shift" -> s,
+      lowerFrameUnderflow[cs, <|"FrameBase" -> fb, "Shift" -> s,
         "Detail" -> "epsilon shift lies wholly below the work frame"|>]];
     ConstantArray[0, Dimensions[M]]];
+
+matrixShiftProduct[A_, M_, s_Integer, fb_Integer, W_Integer, cs_] :=
+  If[TrueQ[$adaptiveLowerFrameProbe] && s < 0,
+    shiftFrameBlock[A . M, s, fb, W, cs],
+    A . shiftFrameBlock[M, s, fb, W, cs]];
 
 groupedEpsExactSafeQ[e_] := e === 0 || ByteCount[e] <= 500;
 
@@ -417,7 +435,11 @@ applyRationalMatrixGroups[groups_List, U_List, fb_Integer, W_Integer, cs_] :=
  Module[{acc = ConstantArray[0, Dimensions[U]], rhs, q, qd, y},
   Do[
     rhs = ConstantArray[0, Dimensions[U]];
-    Do[rhs += sp[[2]] . shiftFrameBlock[U, sp[[1]], fb, W, cs],
+    (* During an adaptive probe, apply the coefficient matrix before the
+       lower-frame shift so banana's rank-one/square-zero annihilation is
+       visible before the underflow decision.  Terminal/ordinary runs retain
+       the established operation order bit-for-bit. *)
+    Do[rhs += matrixShiftProduct[sp[[2]], U, sp[[1]], fb, W, cs],
       {sp, group["NumeratorSp"]}];
     q = group["DenominatorCoefficients"];
     qd = Length[q] - 1;
@@ -434,7 +456,7 @@ applyRationalMatrixGroups[groups_List, U_List, fb_Integer, W_Integer, cs_] :=
 applyPreparedNhat[polySp_List, groups_List, U_List,
     fb_Integer, W_Integer, cs_] := Module[
   {acc = ConstantArray[0, Dimensions[U]]},
-  Do[acc += sp[[2]] . shiftFrameBlock[U, sp[[1]], fb, W, cs],
+  Do[acc += matrixShiftProduct[sp[[2]], U, sp[[1]], fb, W, cs],
     {sp, polySp}];
   If[groups =!= {},
     acc += applyRationalMatrixGroups[groups, U, fb, W, cs]];
@@ -455,7 +477,7 @@ frConv[a_, b_, fb_, W_] := Module[{sa, sb, ia, ib, lead, shiftMono},
   ia = First[sa]; ib = First[sb];
   lead = 2 fb + ia + ib - 2;
   If[lead < fb,
-    err["E4", <|"Center" -> "(frame)"|>,
+    lowerFrameUnderflow[<|"Center" -> "(frame)"|>,
       <|"FrameBase" -> fb, "ProductLead" -> lead,
         "Detail" -> "framed convolution would discard nonzero lower-epsilon content"|>]];
   shiftMono[mono_, pos_, other_] := Module[
@@ -502,7 +524,7 @@ frInv[dlist_, fb_, W_] := Module[{pos0, drel, m, e, out, lead, startIdx},
 frShiftUp[a_] := Prepend[Most[a], 0];
 frDivEps[a_] := Module[{},
   If[First[a] =!= 0,
-    err["E4", <|"Center" -> "(frame)"|>,
+    lowerFrameUnderflow[<|"Center" -> "(frame)"|>,
       <|"Detail" -> "division by epsilon would discard the lowest framed coefficient"|>]];
   Append[Rest[a], 0]];
 
@@ -563,6 +585,19 @@ recurrencePoleDepth[data_Association, nmax_Integer] := Module[
       depth[[n - j + 1]] + stepCost[[j]], {j, 1, Min[n, maxJ]}]]],
     {n, 1, nmax}];
   depth[[-1]]];
+
+(* Deepest pole of ONE prepared Taylor multiplier, without composing it
+   along the recurrence.  prepareCleared materializes every dExpr/NhatExpr
+   lag before runRecursion starts, so the adaptive first rectangle must
+   contain even a deep high-j operator (for example t^5/eps^10 when j=1 is
+   pole-free).  The longer recurrencePoleDepth remains the terminal bound. *)
+recurrenceSingleUsePoleDepth[data_Association] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], vals},
+  vals = Join[
+    Map[epsValuation[#, eps] &, data["dExpr"]],
+    Flatten[Map[epsValuation[#, eps] &, data["NhatExpr"], {3}]]];
+  vals = Select[vals, IntegerQ];
+  If[vals === {}, 0, Max[0, -Min[vals]]]];
 
 (* Exact epsilon valuation of the t-Laurent coefficients that applyGauge
    will use.  Evaluating T at a generic numeric t is not sufficient: a
@@ -723,13 +758,13 @@ blockSolveTPFrame[rhs_List, dA_, dB_, invD0_, d0InvScalar_, q_Integer,
        can conceal an individually out-of-frame rhs_j/eps^j term.  The old
        implementation also built inv^q even for an exact-zero RHS. *)
     If[fb > -q || top < 1,
-      err["E4", <|"Center" -> "(frame)"|>,
+      lowerFrameUnderflow[<|"Center" -> "(frame)"|>,
         <|"FrameBase" -> fb, "FrameTop" -> top, "JordanSize" -> q,
           "Detail" -> "CASE-P Jordan inverse exceeds the lower work frame"|>]];
     Do[
       v = frameValuation[rhs[[j]], fb];
       If[IntegerQ[v] && v - j < fb,
-        err["E4", <|"Center" -> "(frame)"|>,
+        lowerFrameUnderflow[<|"Center" -> "(frame)"|>,
           <|"FrameBase" -> fb, "RHSComponent" -> j,
             "RHSValuation" -> v, "RequiredShift" -> -j,
             "Detail" -> "CASE-P Jordan solve would discard nonzero lower-frame content"|>]],
@@ -787,7 +822,8 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
       Do[If[n - j >= 0,
         Module[{Ublk = U[[n - j + 1, l + 1]]},
           Do[
-            acc += sp[[2]] . shB[Ublk, sp[[1]]],
+            acc += matrixShiftProduct[
+              sp[[2]], Ublk, sp[[1]], fb, W, cs],
             {sp, NhatSp[[j + 1]]}];
           If[NhatRationalGroups[[j + 1]] =!= {},
             acc += applyRationalMatrixGroups[
@@ -1212,7 +1248,8 @@ $shCache = <||>; $shSysTag = None; $shCacheMax = 64;
 SolveHomogeneous[cs_Association, req_Association] := Module[
   {tag = Lookup[cs, "SystemHash", None], key},
   key = {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
-    req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"]};
+    req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
+    TrueQ[$disableAdaptiveLowerFrames]};
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];
@@ -1223,36 +1260,44 @@ ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;);
 solveHomogeneousCore[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,
    columns = {}, workColumns = {}, specs = {}, hitsAll = {}, compAll = {},
-   fams = cs["Families"], colCursor = 0, wideTop, prep, Pmax, cdMax, fb, Wd,
-   symbolic, poleDepth, spectralDepth, transformDepth, certs = {}},
+   fams = cs["Families"], colCursor = 0, wideTop, Pmax, cdMax,
+   symbolic, poleDepth, singleUseDepth, spectralDepth, transformDepth,
+   startFb, terminalFb, adaptiveQ, prepCache = <||>, prepFor,
+   adaptiveDiags = {}, certs = {}},
   nmax = req["TOrder"];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   Pmax = Max[0, Max[Table[logCeiling[cs, b["a"], b["b"], b["q"] - 1], {b, blocks}]]];
   cdMax = Max[0, Max[#["CollisionDepth"] & /@ fams]];
   symbolic = clearedSymbolic[cs];
   poleDepth = recurrencePoleDepth[symbolic, nmax];
+  singleUseDepth = recurrenceSingleUsePoleDepth[symbolic];
   spectralDepth = spectralTransformPoleDepth[cs];
   transformDepth = finalTransformPoleDepth[cs, nmax];
   wideTop = reqMax + Pmax + cdMax + 2 - Min[0, reqMin - Pmax - 2];
-  fb = Min[reqMin, 0] - Pmax - cdMax - 2;   (* frame base; eps-poles of the
-    cleared system are caught by ratEpsList's below-frame assert *)
   (* Keep the established scratch halo, enlarging it only when the exact
      longest recurrence path composes more negative-eps shifts. *)
   wideTop = Max[wideTop, reqMax + Pmax + cdMax + poleDepth];
   wideTop += transformDepth;
-  fb = Min[fb, reqMin - Pmax - cdMax - poleDepth];
-  (* V is expanded in the shared physical frame and multiplies the raw
-     recurrence result there, so its lower pole depth must extend fb as
-     well as the upper completeness buffer.  T uses its own local frame in
-     applyGauge and needs only upper headroom here. *)
-  fb -= spectralDepth;
-  Wd = wideTop - fb + 1;
-  prep = prepareCleared[cs, fb, Wd, symbolic];
+  terminalFb = Min[Min[reqMin, 0] - Pmax - cdMax - 2,
+      reqMin - Pmax - cdMax - poleDepth] - spectralDepth;
+  startFb = Min[Min[reqMin, 0] - Pmax - cdMax - 2,
+      reqMin - Pmax - cdMax - singleUseDepth] - spectralDepth;
+  (* The upper frame remains the proven scalar longest-path budget, so
+     CompleteMax/UValid are unchanged.  Only singular homogeneous lower
+     support is adaptive.  The terminal retry is the former rectangle and
+     uses the same strict recurrence -- never an alternate solver. *)
+  adaptiveQ = !TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+    startFb > terminalFb && !TrueQ[$disableAdaptiveLowerFrames];
+  If[!adaptiveQ, startFb = terminalFb];
+  prepFor[ff_Integer] := If[KeyExistsQ[prepCache, ff], prepCache[ff],
+    AssociateTo[prepCache, ff -> prepareCleared[
+      cs, ff, wideTop - ff + 1, symbolic]]; prepCache[ff]];
   Do[Module[{fIdx = fi, fam = fams[[fi]]},
     Do[Module[{blk, root, q},
       (* identify the block for this root via the running cursor *)
       root = fam["Roots"][[ri]]; q = root["BlockSize"];
-      Do[Module[{P, init, rec, ls, comp},
+      Do[Module[{P, init, rec, ls, comp, fbRun = startFb, WRun,
+          attempts = 0, underflow, used, nextUsed},
         P = logCeiling[cs, root["a"], root["b"], qpos];
         (* init ladder: U[0, l] = e_{qpos+1-l} eps^{-l}, l = 0..qpos *)
         init = Table[
@@ -1262,7 +1307,28 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
                 esShift[esNew[0, PadRight[{1}, wideTop + 1 + l]], -l]];
             vv],
           {l, 0, P}];
-        rec = runRecursion[cs, prep, root["a"], root["b"], P, nmax, None, fb, Wd, init];
+        While[True,
+          WRun = wideTop - fbRun + 1;
+          attempts++;
+          underflow = Catch[
+            Block[{$adaptiveLowerFrameProbe = adaptiveQ && fbRun > terminalFb},
+              runRecursion[cs, prepFor[fbRun], root["a"], root["b"],
+                P, nmax, None, fbRun, WRun, init]],
+            "DiffExp2AdaptiveLowerFrame"];
+          If[!FailureQ[underflow], rec = underflow; Break[]];
+          (* Monotone geometric widening.  Since terminalFb is exactly the
+             previous scalar bound, termination and the old error behavior
+             are preserved even for scalar/idempotent repeated poles. *)
+          used = startFb - fbRun;
+          nextUsed = If[used === 0, Max[1, singleUseDepth], 2 used];
+          fbRun = Max[terminalFb, startFb - nextUsed]];
+        AppendTo[adaptiveDiags, <|
+          "Tag" -> {root["a"], root["b"], qpos},
+          "Adaptive" -> adaptiveQ, "Attempts" -> attempts,
+          "FrameBase" -> fbRun, "FrameTop" -> wideTop,
+          "FrameWidth" -> WRun,
+          "TerminalFrameBase" -> terminalFb,
+          "TerminalFrameWidth" -> wideTop - terminalFb + 1|>];
         ls = assembleSolution[cs, root["a"], root["b"], rec, nmax];
         comp = compensatePseudoColumn[cs, ls, rec["Hits"], workColumns, reqMax];
         ls = comp[[1]];
@@ -1292,6 +1358,7 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
       "Diagnostics" -> <|"PseudoCollisionsHit" -> hitsAll,
         "PseudoCompensations" -> compAll,
         "PseudoCollisionsCompensated" -> And @@ certs,
+        "AdaptiveLowerFrames" -> adaptiveDiags,
         "CouplingDepth" -> 0|>|>},
     ODEResidualCheck[cs, fs];
     fs]];

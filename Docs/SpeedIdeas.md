@@ -1,5 +1,46 @@
 # SpeedIdeas: measured per-chart profile and ranked levers
 
+## 2026-07-10 adaptive singular lower epsilon frames
+
+The scalar `recurrencePoleDepth` bound remains the authoritative upper
+completeness halo, but singular homogeneous solves no longer have to mirror
+that pessimistic depth below the physical epsilon window.  They first run the
+same strict recurrence with the deepest exact single-use pole across all
+prepared Taylor lags below the window.
+Negative matrix shifts apply their complete coefficient matrix before testing
+underflow, so rank-one/square-zero annihilation is visible.  Genuine content
+at the lower boundary triggers monotone geometric widening; the terminal
+retry is exactly the former scalar rectangle.  There is no alternate solver,
+tolerance trimming, or assumption that rank-one maps are nilpotent.
+
+Focused controls cover scalar repeated poles, rank-one idempotents,
+square-zero maps, a deep high-Taylor-lag pole hidden behind a pole-free first
+lag, symbolic analytic regulators, and a rational upper tail that later
+crosses into the delivered window.  The latter is why only the
+lower frame is adaptive in this first production slice: the proven full upper
+halo and `UValid`/`CompleteMax` propagation are unchanged.
+
+Measured on the real banana L1 endpoint charts at WP100, epsilon order 2;
+every adaptive result was coefficient-identical to a forced terminal-frame
+run:
+
+| endpoint/order | adaptive width | terminal width | time adaptive | time terminal | speedup |
+|---|---:|---:|---:|---:|---:|
+| x=0, N=10 | 29 | 47 | 1.025 s | 1.218 s | 1.19x |
+| x=0, N=20 | 49 | 87 | 5.236 s | 6.459 s | 1.23x |
+| x=1, N=10 | 29 | 47 | 2.491 s | 2.812 s | 1.13x |
+| x=1, N=20 | 49 | 87 | 14.986 s | 15.077 s | 1.01x |
+
+All seven banana columns completed on their first adaptive rectangle.  The
+width ratio approaches two as Taylor order grows because this slice removes
+the false lower `2 N` depth while deliberately retaining the upper `2 N`
+certificate.  At x=1 the grouped `Q=1+5 eps` causal operator work currently
+dominates and scales less strongly with this lower-only reduction.  This is a
+conservative first-stage gain, not an order-100 measured speedup claim.
+
+The reproducible harness is `Scripts/bench_adaptive_lower_frame.m`; the
+strict parity/unit gate is `Tests/test_adaptive_lower_frame.m`.
+
 ## 2026-07-10 integration coefficient-frame fast path
 
 Two algebraic changes remove the current integration bottleneck without

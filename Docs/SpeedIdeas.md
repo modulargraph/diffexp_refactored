@@ -54,6 +54,12 @@ changing the incoming values or matching weights.  The resumed WP500/EO50
 ladder then completed through level 0; its level-1 lower and upper singular
 endpoint solves took about 163 s and 626 s respectively, establishing the
 upper endpoint recurrence/assembly as the dominant remaining hotspot.
+The first implementation certified every coefficient in the full scratch
+tensor.  The same uncertainty predicate now runs only while locating the
+first physical epsilon row, and certified zeros are exactified only in the
+delivered slice.  This preserves the support/window proof while avoiding a
+full `NumericMagnitudeBounds`/`Rationalize` pass over unused EO50 scratch
+rows.
 
 ## 2026-07-10 adaptive singular lower epsilon frames
 

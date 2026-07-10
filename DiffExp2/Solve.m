@@ -63,12 +63,12 @@ esFrom = DiffExp2`EpsSeries`ESFromExpression; esTrim = DiffExp2`EpsSeries`ESTrim
    Thus 0``17 at WP500 is preserved, while 0``1000 is safely exactified.
    Symbolic analytic regulators and all resolved material values pass
    through unchanged. *)
-certifiedFrameChop[z_?InexactNumberQ] := Module[
+certifiedFrameZeroQ[z_?InexactNumberQ] := Module[
   {floor = DiffExp2`Tolerances`Tol["ChopFloor"]},
-  If[Chop[z, floor] =!= 0, z,
-    If[TrueQ[Last[DiffExp2`Tolerances`NumericMagnitudeBounds[z, 20]] <= floor],
-      0, z]]];
-certifiedFrameChop[z_] := z;
+  Chop[z, floor] === 0 &&
+    TrueQ[Last[DiffExp2`Tolerances`NumericMagnitudeBounds[z, 20]] <= floor]];
+certifiedFrameZeroQ[z_] := z === 0;
+certifiedFrameChop[z_] := If[certifiedFrameZeroQ[z], 0, z];
 
 (* exact t-Laurent coefficient of a rational function at t = 0 (local copy
    of the Indicial recursion; entries exact) *)
@@ -1047,7 +1047,6 @@ assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
   WL = Table[
     Table[Sum[frConv[VexpL[[r, c]], U[[n + 1, l + 1, c]], fb, W], {c, d}], {r, d}],
     {n, 0, nmax}, {l, 0, P}];
-  WL = Map[certifiedFrameChop, WL, {4}];
   WValid = Table[
     Table[validMin[Table[
       If[VVal[[r, c]] === Infinity, Infinity,
@@ -1059,7 +1058,8 @@ assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
   (* content min: an all-zero result has no first coefficient and is
      represented canonically at its honest complete top. *)
   firstNZ = SelectFirst[Range[W],
-    Function[i, AnyTrue[Flatten[WL, 2], Function[fr, fr[[i]] =!= 0]]], None];
+    Function[i, AnyTrue[Flatten[WL, 2],
+      Function[fr, !certifiedFrameZeroQ[fr[[i]]]]]], None];
   kminO = If[firstNZ === None, kmaxO, fb + firstNZ - 1];
   If[firstNZ =!= None && kmaxO < kminO,
     err["E6", cs, <|"FrameBase" -> fb, "FrameTop" -> frameTop,
@@ -1070,7 +1070,8 @@ assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
     Table[<|"a" -> aT, "b" -> bT, "p" -> l,
       "Coeffs" -> ConstantArray[0, {1, nmax + 1, d}]|>, {l, 0, P}],
     Table[<|"a" -> aT, "b" -> bT, "p" -> l,
-      "Coeffs" -> Table[Table[Table[WL[[n + 1, l + 1, r, k - fb + 1]], {r, d}],
+      "Coeffs" -> Table[Table[Table[certifiedFrameChop[
+        WL[[n + 1, l + 1, r, k - fb + 1]]], {r, d}],
         {n, 0, nmax}], {k, kminO, kmaxO}]|>, {l, 0, P}]];
   ls = <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
     "Radius" -> cs["Radius"], "Sectors" -> secs,
@@ -1118,10 +1119,10 @@ applyGauge[cs_, ls_, nmax_] := Module[
             {r, d}]],
           {c, d}]]],
       {np, 0, nmax}, {m, gv, gv + nmax}];
-    outF = Map[certifiedFrameChop, outF, {3}];
     topValidG = kmax + vT;  (* pay |vT| at the top (vT <= 0) *)
     firstNZ = SelectFirst[Range[WG],
-      AnyTrue[Flatten[outF[[All, All, #]]], Function[z, z =!= 0]] &, None];
+      AnyTrue[Flatten[outF[[All, All, #]]],
+        Function[z, !certifiedFrameZeroQ[z]]] &, None];
     kminN = If[firstNZ === None, topValidG, kmin + fbT + firstNZ - 1];
     If[firstNZ =!= None && topValidG < kminN,
       err["E6", cs, <|"InputWindow" -> {kmin, kmax},
@@ -1132,7 +1133,8 @@ applyGauge[cs_, ls_, nmax_] := Module[
     <|"a" -> Together[aS + gv], "b" -> #["b"], "p" -> #["p"],
       "Coeffs" -> Table[Table[Table[
         Module[{idx = k - (kmin + fbT) + 1},
-          If[1 <= idx <= WG, outF[[n + 1, r, idx]], 0]], {r, d}],
+          certifiedFrameChop[
+            If[1 <= idx <= WG, outF[[n + 1, r, idx]], 0]]], {r, d}],
         {n, 0, nmax}], {k, kminN, kmaxN}],
       "KMin" -> kminN, "KMax" -> kmaxN|>] &, ls["Sectors"]];
   Module[{kminA = Min[#["KMin"] & /@ newSecs], kmaxA = Min[#["KMax"] & /@ newSecs]},

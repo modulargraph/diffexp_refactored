@@ -16,6 +16,21 @@ catchDE2[DiffExp2`Config`LoadConfiguration[{
   "WorkingPrecision" -> 100, "ExpansionOrder" -> 10,
   "EpsilonOrder" -> 2, "DivisionOrder" -> 3,
   "StepDivisionOrder" -> 3, "Variables" -> {}}]];
+
+algPrepared = DiffExp2`Solve`Private`preparedEpsCoefficient[1 + Sqrt[2]];
+ratPrepared = DiffExp2`Solve`Private`preparedEpsCoefficient[7/11];
+regPrepared = DiffExp2`Solve`Private`preparedEpsCoefficient[rho*Sqrt[2]];
+groundedRational = Block[{
+    DiffExp2`Solve`Private`$numericizeAllPreparedNumbers = True},
+  DiffExp2`Solve`Private`preparedEpsCoefficient[7/11]];
+groundedRegulator = Block[{
+    DiffExp2`Solve`Private`$numericizeAllPreparedNumbers = True},
+  DiffExp2`Solve`Private`preparedEpsCoefficient[rho*7/11]];
+assert["grouped_small_algebraic_numericized_but_rational_regulator_exact",
+  InexactNumberQ[algPrepared] && Precision[algPrepared] >= 190 &&
+  ratPrepared === 7/11 && regPrepared === rho*Sqrt[2] &&
+  InexactNumberQ[groundedRational] && Precision[groundedRational] >= 190 &&
+  groundedRegulator === rho*7/11];
 csTest = <|"Center" -> "grouped-test"|>;
 
 legacySp[m_, fb_Integer, W_Integer] := Module[{frames, idxs},

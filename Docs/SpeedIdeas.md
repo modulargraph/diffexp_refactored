@@ -1,5 +1,26 @@
 # SpeedIdeas: measured per-chart profile and ranked levers
 
+## 2026-07-10 algebraic regular-chart numeric handoff
+
+Classic balanced segmentation can produce exact quadratic-algebraic regular
+centers and scales.  Small transformed operator coefficients stayed exact
+under the ByteCount gate, so a scalar EO50 level-3 recurrence accumulated
+rational/algebraic expression swell for more than two minutes.  Preparation
+itself took only 0.006 s; the cost was entirely inside `runRecursion`.
+
+For regular charts whose center or scale is an exact non-rational numeric
+quantity, `prepareCleared` now grounds every exact numeric operator
+coefficient once at 2x WorkingPrecision.  Planning geometry and structural
+data remain exact, as do rational charts and symbolic analytic regulators.
+The predicate must be `NumericQ`, not `NumberQ`: Wolfram returns `False` from
+`NumberQ` for expressions such as `a + b Sqrt[n]` even though they are exact
+numeric quantities.
+
+On the exact fresh banana level-3 upper chart at WP1000/EO50, total
+`SolveChart` time fell from more than 120 s to 0.090 s: recurrence 0.038 s,
+assembly 0.003 s, and residual certification 0.027 s.  The focused grouped,
+solve, and transport suites pass 17/17, 40/40, and 62/62 respectively.
+
 ## 2026-07-10 adaptive singular lower epsilon frames
 
 The scalar `recurrencePoleDepth` bound remains the authoritative upper

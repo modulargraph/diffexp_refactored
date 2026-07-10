@@ -196,7 +196,7 @@ pseudoDepthForTag[cs_, aT_, bT_, nStart_Integer] := Module[{events, groups},
 (* fast exact eps-expansion of a RATIONAL expr into a frame list;
    ByteCount-gated numericization at 2x WP *)
 ratEpsList[expr_, eps_, fb_, W_] := Module[
-  {c, num, den, vn, vd, v, nc, dc, rel, out, wp2, top},
+  {c, num, den, vn, vd, v, rel, out, top},
   out = ConstantArray[0, W];
   c = Cancel[Together[expr]];
   If[zeroCanQ[c], Return[out]];
@@ -219,9 +219,7 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
     Do[csr[[m + 1]] = Together[
         (ncl[[m + 1]] - Sum[dcl[[j + 1]]*csr[[m - j + 1]], {j, 1, m}])/dcl[[1]]],
       {m, 1, rel}];
-    wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*
-      DiffExp2`Config`CFG["WorkingPrecision"];
-    csr = Map[If[# === 0 || ByteCount[#] <= 500, #, N[#, wp2]] &, csr];
+    csr = Map[preparedEpsCoefficient, csr];
     Do[out[[v - fb + 1 + m]] = csr[[m + 1]], {m, 0, rel}]];
   out];
 
@@ -263,7 +261,17 @@ matrixShiftProduct[A_, M_, s_Integer, fb_Integer, W_Integer, cs_] :=
     shiftFrameBlock[A . M, s, fb, W, cs],
     A . shiftFrameBlock[M, s, fb, W, cs]];
 
-groupedEpsExactSafeQ[e_] := e === 0 || ByteCount[e] <= 500;
+exactNonRationalNumberQ[e_] := NumericQ[e] && Precision[e] === Infinity &&
+  !IntegerQ[e] && Head[e] =!= Rational;
+
+$numericizeAllPreparedNumbers = False;
+preparedNumericizationRequiredQ[e_] :=
+  exactNonRationalNumberQ[e] ||
+  (TrueQ[$numericizeAllPreparedNumbers] && e =!= 0 && NumericQ[e] &&
+    Precision[e] === Infinity);
+
+groupedEpsExactSafeQ[e_] := e === 0 ||
+  (ByteCount[e] <= 500 && !preparedNumericizationRequiredQ[e]);
 
 preparedEpsCoefficient[e_] := Module[{wp2},
   If[groupedEpsExactSafeQ[e], Return[e]];
@@ -655,11 +663,22 @@ finalTransformPoleDepth[cs_, nmax_Integer] :=
 
 prepareCleared[cs_, fb_, W_, symbolic_:Automatic] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], data, dD, dN, dL, nhatPrep,
-   d0Expr, d0InvScalar, ratGroups, ratDenominators, ratDenominatorKeys},
+   d0Expr, d0InvScalar, ratGroups, ratDenominators, ratDenominatorKeys,
+   numericGeometryQ},
   data = If[symbolic === Automatic, clearedSymbolic[cs], symbolic];
   dD = data["dD"]; dN = data["dN"];
-  dL = Map[ratEpsList[#, eps, fb, W] &, data["dExpr"]];
-  nhatPrep = prepareNhatHybrid[data["NhatExpr"], eps, fb, W, cs];
+  (* Exact algebraic centers/scales are valuable to the planner, but keeping
+     their transformed scalar operators exact through dozens of recurrence
+     steps causes severe rational/algebraic expression swell.  On a regular
+     chart all structural decisions are already complete, so ground every
+     exact numeric operator coefficient once at 2x WP.  Symbolic analytic
+     regulators are not NumberQ and remain exact. *)
+  numericGeometryQ = TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+    AnyTrue[{cs["Center"], cs["ChartMap", "Scale"]},
+      exactNonRationalNumberQ];
+  Block[{$numericizeAllPreparedNumbers = numericGeometryQ},
+    dL = Map[ratEpsList[#, eps, fb, W] &, data["dExpr"]];
+    nhatPrep = prepareNhatHybrid[data["NhatExpr"], eps, fb, W, cs]];
   (* Cross-lag fusion keys.  epsRationalData already normalized every Q to
      Q(0)=1, so SameQ of the exact denominator expression is the canonical
      equivalence relation.  Store the small integer index once rather than

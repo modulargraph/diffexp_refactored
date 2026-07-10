@@ -622,6 +622,16 @@ sigmaFor[ls_] := Module[{s = DiffExp2`SectorSeries`ChartImSign[ls]},
 mwScale[c_List] := Max[0,
   Sequence @@ (If[NumericQ[#], numMag[#, 10], Nothing] & /@ c)];
 
+(* A frame whose stored central values are ALL zero has no relative scale.
+   NumericallyZeroQ intentionally refuses scale == 0, since an arbitrary
+   caller has supplied no meaningful comparison.  Matching does have an
+   absolute contract in this one case: use unit scale so a well-resolved
+   centered-zero frame can canonicalize, while an underresolved zero remains
+   nonzero/loud under the existing uncertainty gate.  Do not Max[1,scale]
+   generally: a resolved 10^-200 coefficient is rank data at its own scale. *)
+mwDecisionScale[c_List] := Module[{scale = mwScale[c]},
+  If[scale === 0, 1, scale]];
+
 (* EpsSeries norm mirror: numerics pass through; symbolics Together *)
 mwNorm[c_List] := If[FreeQ[c, _Symbol], c,
   Map[If[NumericQ[#], #, Together[Expand[#]]] &, c]];
@@ -635,7 +645,7 @@ mwNorm[c_List] := If[FreeQ[c, _Symbol], c,
    library-wide ternary NumericallyZeroQ RankTol gate.  The top never
    changes; all-zero gives canonical {top,{0}}. *)
 mwTrim[{min_, c_}, context_String:"matching Laurent elimination"] := Module[
-  {scale = mwScale[c], n = Length[c], i = 1,
+  {scale = mwDecisionScale[c], n = Length[c], i = 1,
    rtol = DiffExp2`Tolerances`Tol["RankTol"]},
   While[i <= n && TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[
       c[[i]], scale, rtol, context,
@@ -649,7 +659,7 @@ mwTrim[{min_, c_}, context_String:"matching Laurent elimination"] := Module[
    not structural zero).  Keeping these roles separate prevents polar noise
    from entering the Laurent solve without erasing a small F[0] pivot. *)
 mwInputTrim[{min_, c_}, context_String] := Module[
-  {scale = mwScale[c], n = Length[c], i = 1,
+  {scale = mwDecisionScale[c], n = Length[c], i = 1,
    ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], entry},
   While[i <= n && min + i - 1 < 0 &&
       TrueQ[DiffExp2`Tolerances`NumericallyZeroQ[c[[i]], scale, ltol,

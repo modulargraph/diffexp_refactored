@@ -168,7 +168,8 @@ loadPreparedFT[file_, key_] := Module[{payload, ok},
   Print["FTPREP CACHE HIT ", file];
   payload["FTData"]];
 
-saveLadderCheckpoint[file_, payload_] := Module[{tmp, saved},
+saveLadderCheckpoint[file_, payload_] := Module[
+  {tmp, saved, wrote, renamed},
   If[ladderCheckpointDir === "", Return[Null, Module]];
   If[!DirectoryQ[DirectoryName[file]],
     CreateDirectory[DirectoryName[file], CreateIntermediateDirectories -> True]];
@@ -178,24 +179,40 @@ saveLadderCheckpoint[file_, payload_] := Module[{tmp, saved},
   Global`$FT2LadderCheckpoint = saved;
   tmp = file <> ".tmp-" <> ToString[$ProcessID] <> ".mx";
   If[FileExistsQ[tmp], DeleteFile[tmp]];
-  DumpSave[tmp, Global`$FT2LadderCheckpoint];
+  wrote = Quiet[Check[
+    DumpSave[tmp, Global`$FT2LadderCheckpoint]; FileExistsQ[tmp], False]];
   Clear[Global`$FT2LadderCheckpoint];
-  If[FileExistsQ[file], DeleteFile[file]];
-  RenameFile[tmp, file];
-  Print["FTLADDER CHECKPOINT ", file]];
+  If[!TrueQ[wrote],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    Print["FTLADDER CHECKPOINT WRITE FAILED ", file];
+    Return[$Failed, Module]];
+  (* tmp lives beside the destination, so the overwrite is one filesystem
+     rename: a killed upper-arm transport can never expose a missing or
+     half-written lower-arm checkpoint. *)
+  renamed = Quiet[Check[
+    RenameFile[tmp, file, OverwriteTarget -> True]; True, False]];
+  If[!TrueQ[renamed],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    Print["FTLADDER CHECKPOINT RENAME FAILED ", file];
+    Return[$Failed, Module]];
+  Print["FTLADDER CHECKPOINT ", file];
+  file];
 
 ladderCheckpointReject[file_, detail_] :=
   (Print["FTLADDER RESUME REJECT ", file, ": ", detail]; $Failed);
 
-(* A transport checkpoint is taken after the expensive two-way transport but
-   before its boundary cases are assembled.  Resuming it therefore replays
-   only that assembly, then transports the lower levels at the requested
-   ExpansionOrder.  A boundary checkpoint starts directly at the named
-   lower level.  Unversioned/stale files require an explicit opt-in: they may
-   contain mathematically valid data, but source provenance cannot be proved. *)
+(* A transport checkpoint is updated after each successful endpoint arm.
+   In particular, the lower arm reaches disk before the upper arm starts, so
+   an interrupted upper solve can resume without repeating the lower one.
+   The same schema accepts either arm (or both) and computes only what is
+   missing before replaying boundary assembly.  A boundary checkpoint starts
+   directly at the named lower level.  Unversioned/stale files require an
+   explicit opt-in: they may contain mathematically valid data, but source
+   provenance cannot be proved. *)
 loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
   {payload, ok, kind, level, levelData, belowData, mastersHere, mastersBelow,
-   currentRequests, savedEO, savedFingerprint, stale, needInt, needLo, needHi},
+   currentRequests, savedEO, savedFingerprint, stale, needInt, needLo, needHi,
+   cachedArms, recordedArms, expectedCharts},
   If[!FileExistsQ[file],
     Return[ladderCheckpointReject[file, "file does not exist"], Module]];
   Clear[Global`$FT2LadderCheckpoint];
@@ -290,11 +307,23 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
     needInt = AnyTrue[currentRequests, #["Case"] === "integrate" &];
     needLo = needInt || AnyTrue[currentRequests, #["Case"] === "limitLower" &];
     needHi = needInt || AnyTrue[currentRequests, #["Case"] === "limitUpper" &];
-    If[(needLo && !AssociationQ[payload["TransportLow"]]) ||
-        (needHi && !AssociationQ[payload["TransportHigh"]]) ||
-        ((needLo || needHi) && payload["ChartCache"] === {}),
+    cachedArms = Pick[{"Lower", "Upper"},
+      AssociationQ /@ {payload["TransportLow"], payload["TransportHigh"]}];
+    recordedArms = Lookup[payload, "CompletedArms", cachedArms];
+    If[recordedArms =!= cachedArms,
       Return[ladderCheckpointReject[file,
-        "transport payload is missing a required endpoint"], Module]],
+        "completed-arm metadata does not match transport payload"], Module]];
+    expectedCharts = Join[
+      If[AssociationQ[payload["TransportLow"]],
+        Lookup[payload["TransportLow"], "Charts", {}], {}],
+      If[AssociationQ[payload["TransportHigh"]],
+        Lookup[payload["TransportHigh"], "Charts", {}], {}]];
+    If[payload["ChartCache"] =!= expectedCharts,
+      Return[ladderCheckpointReject[file,
+        "chart cache does not match completed transport arms"], Module]];
+    If[(needLo || needHi) && cachedArms === {},
+      Print["FTLADDER RESUME transport has no completed endpoint arms; ",
+        "both required arms will be computed"]],
     If[KeyExistsQ[payload, "RequestedEpsilonOrder"] &&
         payload["RequestedEpsilonOrder"] =!=
           requestedEpsilonOrder[level],
@@ -428,7 +457,8 @@ runExample[name_String] := Module[
      var, A, sys, mastersBelow, mastersHere, requests, neededVecs, reductions,
      extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop, ftEps, dimVar,
      dimExpr, normalizeFT, trLoCache, trHiCache, chartCache,
-     resumeTransport, levelExpansionOrder},
+     resumeTransport, levelExpansionOrder, needInt, needLo, needHi,
+     transportCheckpointFile, saveTransportProgress, completedArms},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -479,40 +509,31 @@ runExample[name_String] := Module[
       "StepDivisionOrder" -> stepDivisionOrder,
       "DeltaPrescriptions" -> levelDeltaPrescriptions[var, sys, extraFacs],
       "Variables" -> {}}]];
-    (* ONE two-way transport per level serves every master: precompute the
-       chart chain + the two endpoint transports *)
+    (* One pair of endpoint transports per level serves every master.  Each
+       arm is checkpointed synchronously before the next arm begins. *)
+    needInt = AnyTrue[requests, #["Case"] === "integrate" &];
+    needLo = needInt || AnyTrue[requests, #["Case"] === "limitLower" &];
+    needHi = needInt || AnyTrue[requests, #["Case"] === "limitUpper" &];
+    transportCheckpointFile = FileNameJoin[{ladderCheckpointDir,
+      name <> "_level" <> ToString[level] <> "_transport.mx"}];
     If[resumeTransport,
       trLoCache = resumeCheckpoint["TransportLow"];
       trHiCache = resumeCheckpoint["TransportHigh"];
       chartCache = resumeCheckpoint["ChartCache"];
       Print["FTLADDER REUSE TRANSPORT level=", level,
         " expansionOrder=", levelExpansionOrder,
+        " cachedArms=", Pick[{"lower", "upper"},
+          AssociationQ /@ {trLoCache, trHiCache}],
         " charts=", Length[chartCache]],
-    Module[{needInt, needLo, needHi},
-      needInt = AnyTrue[requests, #["Case"] === "integrate" &];
-      needLo = needInt || AnyTrue[requests, #["Case"] === "limitLower" &];
-      needHi = needInt || AnyTrue[requests, #["Case"] === "limitUpper" &];
-      trLoCache = If[needLo,
-        catch2[DiffExp2`API`TransportEndpoint[sys, currentBCs, anchor, 0,
-          "ExtraSingularFactors" -> extraFacs]], None];
-      trHiCache = If[needHi,
-        catch2[DiffExp2`API`TransportEndpoint[sys, currentBCs, anchor, 1,
-          "ExtraSingularFactors" -> extraFacs]], None];
-      If[Environment["DEBUG_WINPROG"] === "1",
-          Print["WINPROG level=", level,
-          " reqEpsOrder=", requestedEpsilonOrder[level],
-          " bcMinPow=", Min @@ currentPrefactors, "..", Max @@ currentPrefactors,
-          " trLoFinalWin=", If[trLoCache === None, None, trLoCache["Final"]["EpsWindow"]],
-          " trHiFinalWin=", If[trHiCache === None, None, trHiCache["Final"]["EpsWindow"]]]];
-      If[FailureQ[trLoCache] || FailureQ[trHiCache],
-        Print["TRANSPORT FAIL ", {trLoCache, trHiCache} // Select[#, FailureQ] &];
-        Throw[$Failed, "FT2Abort"]];
+      trLoCache = None; trHiCache = None; chartCache = {}];
+    saveTransportProgress[] := Module[{saved},
+      If[ladderCheckpointDir === "", Return[Null, Module]];
+      completedArms = Pick[{"Lower", "Upper"},
+        AssociationQ /@ {trLoCache, trHiCache}];
       chartCache = Join[
-        If[trLoCache === None, {}, trLoCache["Charts"]],
-        If[trHiCache === None, {}, trHiCache["Charts"]]]]];
-    If[!resumeTransport && ladderCheckpointDir =!= "",
-      saveLadderCheckpoint[FileNameJoin[{ladderCheckpointDir,
-          name <> "_level" <> ToString[level] <> "_transport.mx"}], <|
+        If[AssociationQ[trLoCache], trLoCache["Charts"], {}],
+        If[AssociationQ[trHiCache], trHiCache["Charts"], {}]];
+      saved = saveLadderCheckpoint[transportCheckpointFile, <|
         "Kind" -> "Transport", "Example" -> name, "Level" -> level,
         "PrepKey" -> prepKey, "System" -> sys,
         "Variable" -> var, "BoundaryValues" -> currentBCs,
@@ -522,6 +543,7 @@ runExample[name_String] := Module[
         "Reductions" -> AssociationMap[normalizeFT, reductions],
         "ExtraSingularFactors" -> extraFacs, "ChartCache" -> chartCache,
         "TransportLow" -> trLoCache, "TransportHigh" -> trHiCache,
+        "CompletedArms" -> completedArms,
         "Anchor" -> anchor, "WorkingPrecision" -> wp,
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
@@ -532,7 +554,39 @@ runExample[name_String] := Module[
         "ExpansionOrder" -> levelExpansionOrder,
         "Tainted" -> If[AssociationQ[resumeCheckpoint],
           TrueQ[Lookup[resumeCheckpoint, "Tainted", False]], False],
-        "RequestedEpsilonOrder" -> esCMxLevel|>]];
+        "RequestedEpsilonOrder" -> esCMxLevel|>];
+      If[saved === $Failed, Throw[$Failed, "FT2Abort"]];
+      saved];
+    If[needLo && !AssociationQ[trLoCache],
+      Print["FTLADDER TRANSPORT ARM level=", level, " endpoint=lower"];
+      trLoCache = catch2[DiffExp2`API`TransportEndpoint[
+        sys, currentBCs, anchor, 0, "ExtraSingularFactors" -> extraFacs]];
+      If[FailureQ[trLoCache],
+        Print["TRANSPORT FAIL lower ", trLoCache];
+        Throw[$Failed, "FT2Abort"]];
+      (* This write must finish before the expensive upper solve starts. *)
+      saveTransportProgress[]];
+    If[needHi && !AssociationQ[trHiCache],
+      Print["FTLADDER TRANSPORT ARM level=", level, " endpoint=upper"];
+      trHiCache = catch2[DiffExp2`API`TransportEndpoint[
+        sys, currentBCs, anchor, 1, "ExtraSingularFactors" -> extraFacs]];
+      If[FailureQ[trHiCache],
+        Print["TRANSPORT FAIL upper ", trHiCache];
+        Throw[$Failed, "FT2Abort"]];
+      saveTransportProgress[]];
+    chartCache = Join[
+      If[AssociationQ[trLoCache], trLoCache["Charts"], {}],
+      If[AssociationQ[trHiCache], trHiCache["Charts"], {}]];
+    (* Direct-only levels have no endpoint arm to trigger the write. *)
+    If[!needLo && !needHi && !resumeTransport, saveTransportProgress[]];
+    If[Environment["DEBUG_WINPROG"] === "1",
+      Print["WINPROG level=", level,
+        " reqEpsOrder=", requestedEpsilonOrder[level],
+        " bcMinPow=", Min @@ currentPrefactors, "..", Max @@ currentPrefactors,
+        " trLoFinalWin=", If[trLoCache === None, None,
+          trLoCache["Final"]["EpsWindow"]],
+        " trHiFinalWin=", If[trHiCache === None, None,
+          trHiCache["Final"]["EpsWindow"]]]];
     (* per lower master: dispatch the boundary case *)
     rawES = Table[Module[
       {req = requests[[mi]], expr2, cvecBase, cvec, case, res2, vi, vj, gammaFac},
@@ -663,8 +717,12 @@ runExample[name_String] := Module[
     "RawJSON", "Compact" -> True]];
   True];
 
-requested = StringTrim /@ StringSplit[envOrDefault["FT_EXAMPLES", "bubble"], ","];
-Do[
-  If[runExample[name] === $Failed, Print["FAILED ", name]; Quit[1]],
-  {name, requested}];
-Quit[0];
+(* Let the focused checkpoint tests load these definitions without starting
+   FIRE or terminating their Wolfram kernel. *)
+If[envOrDefault["FT_RUNNER_DEFINITIONS_ONLY", "0"] =!= "1",
+  requested = StringTrim /@
+    StringSplit[envOrDefault["FT_EXAMPLES", "bubble"], ","];
+  Do[
+    If[runExample[name] === $Failed, Print["FAILED ", name]; Quit[1]],
+    {name, requested}];
+  Quit[0]];

@@ -682,6 +682,21 @@ illF18 = {{esT[0, {N[1, 80], 0, 0}],
   {esT[0, {0, 0, 0}], esT[0, {N[1, 80], 0, 0}]}};
 illPlan18 = catchDE2[
   DiffExp2`Transport`Private`mwSaturationPlan[illF18, "tt18_constant_scale"]];
+(* A zero component row can carry arbitrary-precision centered zeros after
+   cancellation.  Its central-value scale is exactly zero; that is an
+   absolute-zero case, not evidence for a spurious column valuation.  The
+   old scale==0 refusal assigned col2 valuation -1, then generated the no-op
+   pair col2 -> eps col2 -> (eps col2)/eps forever. *)
+centeredZero18 = 0``200;
+zeroRowF18 = {
+  {esT[0, {1, 0, 0, 0}],
+    esT[-1, ConstantArray[centeredZero18, 4]]},
+  {esT[0, {0, 0, 0, 0}], esT[-1, {0, 1, 0, 0}]}};
+zeroRowPlan18 = catchDE2[DiffExp2`Transport`Private`mwSaturationPlan[
+  zeroRowF18, "tt18_centered_zero_row"]];
+tinyResolved18 = N[10^-70, 200];
+tinyTrim18 = catchDE2[DiffExp2`Transport`Private`mwInputTrim[
+  {0, {tinyResolved18, 0, 0}}, "tt18_tiny_resolved"]];
 assert["tt18_epsilon_lattice_saturates_to_regular_weights",
   !FailureQ[satPlan18] && satPlan18["InitialShifts"] === {0, 0} &&
   satPlan18["Steps"] === 1 && !FailureQ[satW18] &&
@@ -689,6 +704,13 @@ assert["tt18_epsilon_lattice_saturates_to_regular_weights",
 assert["tt18_constant_ill_conditioning_is_not_epsilon_degeneracy",
   !FailureQ[illPlan18] && illPlan18["InitialShifts"] === {0, 0} &&
   illPlan18["Steps"] === 0];
+assert["tt18_centered_zero_row_does_not_create_noop_saturation_cycle",
+  !FailureQ[zeroRowPlan18] &&
+  zeroRowPlan18["InitialShifts"] === {0, 0} &&
+  zeroRowPlan18["Steps"] === 0];
+assert["tt18_zero_scale_fix_preserves_resolved_tiny_rank_data",
+  !FailureQ[tinyTrim18] && tinyTrim18[[1]] === 0 &&
+  tinyTrim18[[2, 1]] === tinyResolved18];
 
 (* TT19: after epsilon-lattice saturation, normalize an ill-conditioned
    constant match frame by the epsilon-independent right action

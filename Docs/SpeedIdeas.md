@@ -31,9 +31,29 @@ symbolic analytic regulators remain exact.  `ESTrim` also uses a unit
 decision scale only for an all-centered-zero frame, preventing resolved
 `0``A` rows from manufacturing dozens of fake Laurent pole orders.
 
-At EO50/division-order 3, the ladder is truncation-limited to roughly 25
-digits regardless of WP1000, so the production validation run uses WP500;
-the larger precision paid bignum cost without increasing delivered accuracy.
+At EO50/division-order 3, the level-2 boundary data is truncation-limited to
+roughly 25 digits regardless of WP1000, so the production validation run uses
+WP500; the larger precision paid bignum cost without improving that boundary.
+After the remaining ladder integrations, the completed banana finite part
+`8.268104535868963836...` agrees with the existing oracle for roughly 14
+digits and retains residual epsilon poles of order `10^-16`.  Raising WP
+alone cannot recover the final digits lost to the fixed Taylor order.
+
+The WP500 gate also exposed a distinct singular-endpoint window failure:
+the adaptive recurrence correctly found physical basis starts at epsilon
+orders -2/-1, but algebraic cancellations stored as high-accuracy centered
+zeros (`0``A`) made the structural scan retain scratch starts at -52/-51.
+The subsequent honest Cauchy product then had no overlapping complete
+window and returned only zeros.  Framed solve assembly now applies an
+uncertainty-certified absolute chop before its first-nonzero scan: `Chop`
+is only a candidate filter, and the full magnitude upper bound must be below
+`ChopFloor`.  Thus unresolved low-accuracy zeros remain material and
+symbolic regulators remain exact.  On the exact level-2 upper banana replay,
+the matched endpoint window is restored from `-52..-39` to `-2..11` without
+changing the incoming values or matching weights.  The resumed WP500/EO50
+ladder then completed through level 0; its level-1 lower and upper singular
+endpoint solves took about 163 s and 626 s respectively, establishing the
+upper endpoint recurrence/assembly as the dominant remaining hotspot.
 
 ## 2026-07-10 adaptive singular lower epsilon frames
 

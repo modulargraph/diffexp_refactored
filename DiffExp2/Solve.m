@@ -52,6 +52,24 @@ esShift = DiffExp2`EpsSeries`ESShift; esCoeff = DiffExp2`EpsSeries`ESCoefficient
 esMin = DiffExp2`EpsSeries`ESMinPower; esCM = DiffExp2`EpsSeries`ESCompleteMax;
 esFrom = DiffExp2`EpsSeries`ESFromExpression; esTrim = DiffExp2`EpsSeries`ESTrim;
 
+(* Exact algebraic coefficients are grounded at 2x WP before the framed
+   recurrence, but their later cancellations can be stored as 0``A rather
+   than exact 0.  A structural first-nonzero scan must not mistake those
+   resolved zeros for physical epsilon support: doing so retains dozens of
+   adaptive scratch rows and can collapse a later honest Cauchy window.
+
+   Use Chop only as a cheap candidate filter, then require the FULL numeric
+   uncertainty enclosure to lie below the configured absolute ChopFloor.
+   Thus 0``17 at WP500 is preserved, while 0``1000 is safely exactified.
+   Symbolic analytic regulators and all resolved material values pass
+   through unchanged. *)
+certifiedFrameChop[z_?InexactNumberQ] := Module[
+  {floor = DiffExp2`Tolerances`Tol["ChopFloor"]},
+  If[Chop[z, floor] =!= 0, z,
+    If[TrueQ[Last[DiffExp2`Tolerances`NumericMagnitudeBounds[z, 20]] <= floor],
+      0, z]]];
+certifiedFrameChop[z_] := z;
+
 (* exact t-Laurent coefficient of a rational function at t = 0 (local copy
    of the Indicial recursion; entries exact) *)
 (* contract: p is 0 or a polynomial part of a CANCELED fraction, so the
@@ -1029,6 +1047,7 @@ assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
   WL = Table[
     Table[Sum[frConv[VexpL[[r, c]], U[[n + 1, l + 1, c]], fb, W], {c, d}], {r, d}],
     {n, 0, nmax}, {l, 0, P}];
+  WL = Map[certifiedFrameChop, WL, {4}];
   WValid = Table[
     Table[validMin[Table[
       If[VVal[[r, c]] === Infinity, Infinity,
@@ -1099,6 +1118,7 @@ applyGauge[cs_, ls_, nmax_] := Module[
             {r, d}]],
           {c, d}]]],
       {np, 0, nmax}, {m, gv, gv + nmax}];
+    outF = Map[certifiedFrameChop, outF, {3}];
     topValidG = kmax + vT;  (* pay |vT| at the top (vT <= 0) *)
     firstNZ = SelectFirst[Range[WG],
       AnyTrue[Flatten[outF[[All, All, #]]], Function[z, z =!= 0]] &, None];

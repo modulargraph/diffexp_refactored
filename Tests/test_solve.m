@@ -25,6 +25,20 @@ mkChart[c_, r_, name_] := <|"ChartVar" -> t, "Center" -> c, "Radius" -> r, "Name
 rowOf[ls_, sec_, k_] := sec["Coeffs"][[k - ls["EpsWindow", "Min"] + 1]];
 tagsOf[ls_] := {#["a"], #["b"], #["p"]} & /@ ls["Sectors"];
 
+resolvedFrameZero = SetPrecision[0., 250];
+unresolvedFrameZero = 0``17;
+assert["su00_frame_chop_exactifies_only_certified_centered_zero",
+  DiffExp2`Solve`Private`certifiedFrameChop[resolvedFrameZero] === 0 &&
+  SameQ[DiffExp2`Solve`Private`certifiedFrameChop[unresolvedFrameZero],
+    unresolvedFrameZero]];
+assert["su00_frame_chop_uses_configured_absolute_floor",
+  DiffExp2`Solve`Private`certifiedFrameChop[
+    SetPrecision[10^-80, 200]] === 0 &&
+  DiffExp2`Solve`Private`certifiedFrameChop[
+    SetPrecision[10^-40, 200]] =!= 0];
+assert["su00_frame_chop_preserves_symbolic_regulator",
+  DiffExp2`Solve`Private`certifiedFrameChop[Global`rho] === Global`rho];
+
 (* SU-01: f' = f *)
 cs1 = pc[mkSys[{{1}}], mkChart[0, 10, "su01"]];
 r1 = sc[cs1, req[0, 2, 8]];

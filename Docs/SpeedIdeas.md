@@ -61,6 +61,15 @@ delivered slice.  This preserves the support/window proof while avoiding a
 full `NumericMagnitudeBounds`/`Rationalize` pass over unused EO50 scratch
 rows.
 
+The final fully fresh run at commit `126389b` rebuilt FIRE and every ladder
+level at WP500/EO50/division-order 3.  It completed in 1354.8 s and returned
+`8.2681045358689638362295645218336779338490498652054`; both level-1 endpoint
+windows were `-2..8`.  On this thermally slower pass the lower/upper level-1
+endpoint solves took about 261 s/682 s, confirming that the support-scan
+change is a correctness-preserving cleanup rather than the structural
+endpoint speedup.  The remaining residual poles were about `8.0 10^-17` and
+`-5.4 10^-16`.
+
 ## 2026-07-10 adaptive singular lower epsilon frames
 
 The scalar `recurrencePoleDepth` bound remains the authoritative upper

@@ -881,22 +881,52 @@ mwSaturationDivide[rowFrames_List, a_List, label_String] := Module[
   combo = mwCancellationTrim[combo, label <> ": saturation quotient"];
   {combo[[1]] - 1, combo[[2]]}];
 
-(* Division-free determinant series.  This is used only after the leading
-   coefficient matrix appears rank deficient, so the factorial formula is
-   not paid on ordinary charts.  Its coefficient-local cancellation scale
-   distinguishes a tiny constant unit from a determinant whose eps^0 term
-   is merely noise beside a material higher-order coefficient. *)
-mwDetFrame[M_List, label_String] := Module[{n = Length[M], terms, fac, out},
-  terms = DeleteCases[Table[
-    fac = Table[M[[r, perm[[r]]]], {r, n}];
-    If[AnyTrue[fac, mwZeroQ], Nothing,
-      mwScaleBy[Signature[perm], Fold[mwMul, First[fac], Rest[fac]]]],
-    {perm, Permutations[Range[n]]}], Nothing];
-  If[terms === {},
+(* Determinant of a nonnegative epsilon-frame matrix in polynomial time.
+   Newton's identities compute det from Tr[M^k] using only ring addition,
+   multiplication, and division by the exact integers 1..n.  This replaces
+   the former Leibniz sum over n! permutations (which is already impossible
+   for the 16-master kite endpoint).
+
+   After column-valuation normalization every entry starts at eps^0 or
+   above.  If L is the shortest stored nonzero frame length, coefficients
+   eps^0..eps^(L-1) of EVERY determinant term are complete: each product's
+   honest Cauchy length is at least L and its valuation is nonnegative.
+   Working on that common rectangle is conservative and keeps the same
+   finite-window contract without enumerating perfect matchings. *)
+mwDetFrame[M_List, label_String] := Module[
+  {n = Length[M], nonzero, len, zero, one, A, power, traces = {}, elementary,
+   polyMul, polyAdd, matMul, trace, p, s, det},
+  nonzero = Select[Flatten[M, 1], !mwZeroQ[#] &];
+  If[nonzero === {},
     err["E5", <|"Chart" -> label,
       "Detail" -> "matching determinant is identically zero in the complete window"|>]];
-  out = Fold[mwAdd, First[terms], Rest[terms]];
-  mwCancellationTrim[out, label <> ": determinant cancellation", terms]];
+  If[AnyTrue[nonzero, First[#] < 0 &],
+    err["E5", <|"Chart" -> label,
+      "Detail" -> "determinant frame received a negative epsilon valuation after normalization"|>]];
+  len = Min[Length[#[[2]]] & /@ nonzero];
+  zero = ConstantArray[0, len];
+  one = ReplacePart[zero, 1 -> 1];
+  polyAdd[a_List, b_List] := mwNorm[a + b];
+  polyMul[a_List, b_List] := mwNorm[
+    Take[ListConvolve[a, b, {1, -1}, 0], len]];
+  matMul[X_List, Y_List] := Table[Fold[polyAdd, zero,
+      Table[polyMul[X[[r, j]], Y[[j, c]]], {j, n}]],
+    {r, n}, {c, n}];
+  trace[X_List] := Fold[polyAdd, zero, Table[X[[i, i]], {i, n}]];
+  A = Map[Table[mwCoeff[#, k], {k, 0, len - 1}] &, M, {2}];
+  power = A;
+  elementary = {one};
+  Do[
+    p = trace[power];
+    AppendTo[traces, p];
+    s = Fold[polyAdd, zero, Table[
+      mwNorm[(-1)^(i - 1)*polyMul[elementary[[k - i + 1]], traces[[i]]]],
+      {i, 1, k}]];
+    AppendTo[elementary, mwNorm[s/k]];
+    If[k < n, power = matMul[power, A]],
+    {k, 1, n}];
+  det = Last[elementary];
+  mwCancellationTrim[{0, det}, label <> ": determinant cancellation"]];
 
 (* Construct a sequence of elementary epsilon-adic column operations which
    turns the match-point value matrix into a regular full-rank frame.

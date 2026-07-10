@@ -2,7 +2,8 @@
    Load FeynmanTrick/FeynmanTrick.m before Get-ing this file.
 
    All kinematics are baked in numerically (Euclidean region):
-     - bubble/sunrise/banana: massive lines (m=1), p^2 = -1, d = 2-2eps
+     - bubble/sunrise/banana/banana4/kite: massive lines (m=1),
+       p^2 = -1, d = 2-2eps
      - box family + pentagon: massless on-shell legs, d = 4-2eps
        box/box_bubble/box_triangle/double_box_planar: s = -1, t = -1/3
        pentagon: {s12,s23,s34,s45,s15} = {-1,-2,-3,-5,-7}
@@ -12,8 +13,8 @@
    (depends on s only).  box_triangle drops double-box propagator 1 and
    remains a genuine 4-point function of s and t. *)
 
-FTExampleNames[] := {"bubble", "sunrise", "banana", "box", "pentagon",
-  "box_bubble", "box_triangle", "double_box_planar"};
+FTExampleNames[] := {"bubble", "sunrise", "banana", "banana4", "kite",
+  "box", "pentagon", "box_bubble", "box_triangle", "double_box_planar"};
 
 FTExampleDoubleBoxPropagators[] := {
   -Global`l1^2,
@@ -75,6 +76,37 @@ FTExampleSpec[name_String] := Switch[name,
         1 - Global`l2^2,
         1 - Global`l3^2,
         1 - (-Global`l1 - Global`l2 - Global`l3 + Global`p)^2
+      },
+      "Replacements" -> {Global`p^2 -> -1},
+      "Dimension" -> 2 - 2*FeynmanTrick`FTeps
+    |>,
+  "banana4",
+    <|
+      "LoopMomenta" -> {Global`l1, Global`l2, Global`l3, Global`l4},
+      "ExternalMomenta" -> {Global`p},
+      "Propagators" -> {
+        1 - Global`l1^2,
+        1 - Global`l2^2,
+        1 - Global`l3^2,
+        1 - Global`l4^2,
+        1 - (-Global`l1 - Global`l2 - Global`l3 - Global`l4 + Global`p)^2
+      },
+      "Replacements" -> {Global`p^2 -> -1},
+      "Dimension" -> 2 - 2*FeynmanTrick`FTeps
+    |>,
+  (* Fully massive equal-mass two-loop kite.  This is the symmetric
+     Euclidean benchmark, rather than the separate three-mass/two-massless
+     four-dimensional kite convention. *)
+  "kite",
+    <|
+      "LoopMomenta" -> {Global`l1, Global`l2},
+      "ExternalMomenta" -> {Global`p},
+      "Propagators" -> {
+        1 - Global`l1^2,
+        1 - (Global`l1 - Global`p)^2,
+        1 - Global`l2^2,
+        1 - (Global`l2 - Global`p)^2,
+        1 - (Global`l1 - Global`l2)^2
       },
       "Replacements" -> {Global`p^2 -> -1},
       "Dimension" -> 2 - 2*FeynmanTrick`FTeps

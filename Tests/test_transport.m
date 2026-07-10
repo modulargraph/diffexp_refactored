@@ -697,6 +697,30 @@ zeroRowPlan18 = catchDE2[DiffExp2`Transport`Private`mwSaturationPlan[
 tinyResolved18 = N[10^-70, 200];
 tinyTrim18 = catchDE2[DiffExp2`Transport`Private`mwInputTrim[
   {0, {tinyResolved18, 0, 0}}, "tt18_tiny_resolved"]];
+(* Determinant valuation is part of the saturation certificate.  Pin the
+   polynomial-time Newton implementation against the former exhaustive
+   Leibniz sum at n=4, then exercise the n=16 kite-sized case that must never
+   attempt 16! permutations. *)
+legacyDet18[M_] := Module[{n = Length[M], terms, fac, out},
+  terms = DeleteCases[Table[
+    fac = Table[M[[r, perm[[r]]]], {r, n}];
+    If[AnyTrue[fac, DiffExp2`Transport`Private`mwZeroQ], Nothing,
+      DiffExp2`Transport`Private`mwScaleBy[Signature[perm],
+        Fold[DiffExp2`Transport`Private`mwMul, First[fac], Rest[fac]]]],
+    {perm, Permutations[Range[n]]}], Nothing];
+  out = Fold[DiffExp2`Transport`Private`mwAdd, First[terms], Rest[terms]];
+  DiffExp2`Transport`Private`mwCancellationTrim[
+    out, "tt18_legacy_det", terms]];
+SeedRandom[1804];
+detSmallFrames18 = Table[{0, RandomInteger[{-3, 3}, 5]}, {4}, {4}];
+detSmallOld18 = legacyDet18[detSmallFrames18];
+detSmallNew18 = catchDE2[DiffExp2`Transport`Private`mwDetFrame[
+  detSmallFrames18, "tt18_newton_det_small"]];
+detLargeFrames18 = Table[If[r === c,
+    If[r === 1, {1, {2, 0, 0, 0}}, {0, {1, 0, 0, 0, 0}}],
+    {4, {0}}], {r, 16}, {c, 16}];
+detLargeNew18 = catchDE2[DiffExp2`Transport`Private`mwDetFrame[
+  detLargeFrames18, "tt18_newton_det_kite16"]];
 assert["tt18_epsilon_lattice_saturates_to_regular_weights",
   !FailureQ[satPlan18] && satPlan18["InitialShifts"] === {0, 0} &&
   satPlan18["Steps"] === 1 && !FailureQ[satW18] &&
@@ -711,6 +735,11 @@ assert["tt18_centered_zero_row_does_not_create_noop_saturation_cycle",
 assert["tt18_zero_scale_fix_preserves_resolved_tiny_rank_data",
   !FailureQ[tinyTrim18] && tinyTrim18[[1]] === 0 &&
   tinyTrim18[[2, 1]] === tinyResolved18];
+assert["tt18_polynomial_determinant_matches_exhaustive_small_case",
+  !FailureQ[detSmallNew18] && detSmallNew18 === detSmallOld18];
+assert["tt18_polynomial_determinant_scales_to_kite_dimension_16",
+  !FailureQ[detLargeNew18] && detLargeNew18[[1]] === 1 &&
+  First[detLargeNew18[[2]]] === 2];
 
 (* TT19: after epsilon-lattice saturation, normalize an ill-conditioned
    constant match frame by the epsilon-independent right action

@@ -349,7 +349,8 @@ FeynmanTrick`SetFTOption["FThreads", 1];
 FeynmanTrick`SetFTOption["Verbosity", 0];
 FeynmanTrick`SetFTOption["WorkingPrecision", wp];
 FeynmanTrick`SetFTOption["ReductionCache", True];
-FeynmanTrick`SetFTOption["FIRETimeoutSeconds", 1800];
+FeynmanTrick`SetFTOption["FIRETimeoutSeconds",
+  ToExpression[envOrDefault["FT_FIRE_TIMEOUT_SECONDS", "1800"]]];
 
 eps = Global`eps;
 esC = DiffExp2`EpsSeries`ESCoefficient;

@@ -225,6 +225,221 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
     Do[out[[v - fb + 1 + m]] = csr[[m + 1]], {m, 0, rel}]];
   out];
 
+(* One (d x W) epsilon-frame shift.  This is shared by the ordinary sparse
+   polynomial path and the grouped rational path below, so both retain the
+   same strict lower-frame contract. *)
+shiftFrameBlock[M_, s_Integer, fb_Integer, W_Integer, cs_] := Which[
+  s === 0, M,
+  s > 0 && s < W,
+    Join[ConstantArray[0, {Length[M], s}], M[[All, 1 ;; W - s]], 2],
+  s >= W, ConstantArray[0, Dimensions[M]],
+  -s < W,
+    If[AnyTrue[Flatten[M[[All, 1 ;; -s]]], # =!= 0 &],
+      err["E4", cs, <|"FrameBase" -> fb, "Shift" -> s,
+        "Detail" -> "epsilon shift would discard nonzero lower-frame content"|>]];
+    Join[M[[All, -s + 1 ;; W]], ConstantArray[0, {Length[M], -s}], 2],
+  True,
+    If[AnyTrue[Flatten[M], # =!= 0 &],
+      err["E4", cs, <|"FrameBase" -> fb, "Shift" -> s,
+        "Detail" -> "epsilon shift lies wholly below the work frame"|>]];
+    ConstantArray[0, Dimensions[M]]];
+
+groupedEpsExactSafeQ[e_] := e === 0 || ByteCount[e] <= 500;
+
+preparedEpsCoefficient[e_] := Module[{wp2},
+  If[groupedEpsExactSafeQ[e], Return[e]];
+  wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*
+    DiffExp2`Config`CFG["WorkingPrecision"];
+  N[e, wp2]];
+
+(* Canonical epsilon-rational entry.  eps^Valuation is kept outside P/Q;
+   Q is normalized to Q(0)=1 so denominator equality is an exact grouping
+   key and coefficient division is causal on the finite frame. *)
+epsRationalData[expr_, eps_, fb_Integer, top_Integer, cs_] := Module[
+  {c, num, den, vn, vd, v, num0, den0, q0, p, q, qd},
+  c = Cancel[Together[expr]];
+  If[zeroCanQ[c], Return[<|"Zero" -> True, "Valuation" -> Infinity|>]];
+  num = Numerator[c]; den = Denominator[c];
+  vn = Exponent[num, eps, Min]; vd = Exponent[den, eps, Min];
+  v = vn - vd;
+  If[v < fb,
+    err["E4", cs, <|"Valuation" -> v, "FrameBase" -> fb,
+      "Detail" -> "eps-valuation below the work frame (buffer formula violated)"|>]];
+  If[v > top,
+    err["E4", cs, <|"Valuation" -> v, "FrameTop" -> top,
+      "Detail" -> "eps-valuation above the work frame (buffer formula violated)"|>]];
+  num0 = Cancel[num/eps^vn]; den0 = Cancel[den/eps^vd];
+  q0 = Coefficient[den0, eps, 0];
+  If[zeroCanQ[q0],
+    err["E5", cs, <|"Denominator" -> den0,
+      "Detail" -> "epsilon-unit denominator has zero constant coefficient"|>]];
+  p = Expand[Cancel[Together[num0/q0]]];
+  q = Expand[Cancel[Together[den0/q0]]];
+  If[!PolynomialQ[p, eps] || !PolynomialQ[q, eps],
+    err["E5", cs, <|"Expression" -> c,
+      "Detail" -> "prepared epsilon-rational entry is not polynomial-over-polynomial"|>]];
+  qd = Exponent[q, eps];
+  <|"Zero" -> False, "Valuation" -> v, "P" -> p, "Q" -> q,
+    "DenominatorDegree" -> qd|>];
+
+(* Q=1 entries need no second Together/series-division pass after
+   epsRationalData has already canonicalized them. *)
+polynomialEpsListFromData[data_Association, eps_, fb_Integer, W_Integer] :=
+ Module[{out = ConstantArray[0, W], v = data["Valuation"], pCoeffs, kmax},
+  pCoeffs = CoefficientList[data["P"], eps];
+  kmax = Min[Length[pCoeffs] - 1, fb + W - 1 - v];
+  Do[out[[v - fb + 1 + k]] = preparedEpsCoefficient[pCoeffs[[k + 1]]],
+    {k, 0, kmax}];
+  out];
+
+(* Let Mbar be the Laurent series of one rational entry truncated exactly to
+   [fb, top], as ratEpsList stores it.  Instead of storing all O(W) entries of
+   Mbar, store B = Q Mbar.  B consists of the finite numerator plus at most
+   deg(Q) boundary coefficients above top.  Causal division by Q after the
+   matrix application therefore reproduces Mbar.U, including the old upper
+   cutoff when U has negative epsilon powers. *)
+rationalBoundaryData[rec_List, qCoeffs_List, eps_, top_Integer] := Module[
+  {v = rec[[4]], p = rec[[5]], qd = Length[qCoeffs] - 1, rel,
+   pCoeffs, csr, coeffAt, low, boundary, n0, reason},
+  rel = top - v;
+  pCoeffs = CoefficientList[p, eps];
+  csr = ConstantArray[0, rel + 1];
+  Do[
+    n0 = If[k + 1 <= Length[pCoeffs], pCoeffs[[k + 1]], 0];
+    csr[[k + 1]] = Together[(n0 - Sum[
+      qCoeffs[[i + 1]]*csr[[k - i + 1]], {i, 1, Min[k, qd]}])/
+        qCoeffs[[1]]],
+    {k, 0, rel}];
+  coeffAt[k_Integer] := If[0 <= k <= rel, csr[[k + 1]], 0];
+  low = Table[{v + k, pCoeffs[[k + 1]]},
+    {k, 0, Min[Length[pCoeffs] - 1, rel]}];
+  boundary = Table[{top + h, Together[Sum[
+      qCoeffs[[i + 1]]*coeffAt[rel + h - i], {i, h, qd}]]},
+    {h, 1, qd}];
+  reason = Which[
+    !AllTrue[pCoeffs, groupedEpsExactSafeQ], "NumeratorByteCount",
+    !AllTrue[csr, groupedEpsExactSafeQ], "ImpulseByteCount",
+    !AllTrue[boundary[[All, 2]], groupedEpsExactSafeQ], "BoundaryByteCount",
+    True, None];
+  <|"Pairs" -> Select[Join[low, boundary], #[[2]] =!= 0 &],
+    "Safe" -> (reason === None), "RouteReason" -> reason|>];
+
+buildRationalMatrixGroup[records_List, eps_, top_Integer, d_Integer] := Module[
+  {q = records[[1, 1]], qCoeffs, boundaryData, bad, decorated,
+   shifts, mats, rules},
+  qCoeffs = CoefficientList[q, eps];
+  If[!groupedEpsExactSafeQ[q] || !AllTrue[qCoeffs, groupedEpsExactSafeQ],
+    Return[<|"GroupedSafe" -> False, "Records" -> records,
+      "RouteReason" -> "DenominatorByteCount"|>]];
+  boundaryData = rationalBoundaryData[#, qCoeffs, eps, top] & /@ records;
+  bad = SelectFirst[boundaryData, !TrueQ[#["Safe"]] &, None];
+  If[bad =!= None,
+    Return[<|"GroupedSafe" -> False, "Records" -> records,
+      "RouteReason" -> bad["RouteReason"]|>]];
+  decorated = MapThread[{#1[[2]], #1[[3]], #2["Pairs"]} &,
+    {records, boundaryData}];
+  shifts = Union @@ Map[#[[3, All, 1]] &, decorated];
+  mats = Table[
+    rules = Map[Function[rr, With[
+        {z = SelectFirst[rr[[3]], #[[1]] === s &, None]},
+        If[z === None, Nothing, {rr[[1]], rr[[2]]} -> z[[2]]]]],
+      decorated];
+    {s, SparseArray[rules, {d, d}]},
+    {s, shifts}];
+  <|"GroupedSafe" -> True, "Denominator" -> q,
+    "DenominatorCoefficients" -> qCoeffs,
+    "NumeratorSp" -> mats, "EntryCount" -> Length[records]|>];
+
+(* Hybrid preparation: epsilon-Laurent polynomials stay on the established
+   sparse-shift path.  Only entries with a genuinely nonconstant epsilon
+   denominator are grouped, avoiding a regression on charts such as banana
+   x=0 where Nhat is already finite. *)
+prepareNhatHybrid[exprs_List, eps_, fb_Integer, W_Integer, cs_] := Module[
+  {top = fb + W - 1, nj = Length[exprs], d = Length[First[exprs]],
+   polySp = {}, ratGroups = {}, valuations, stats = {}, analyzed,
+   polyL, idxs, records, builtGroups, groups, unsafeGroups,
+   legacyRecords, legacyIndices},
+  valuations = ConstantArray[Infinity, {nj, d, d}];
+  Do[
+    analyzed = Table[
+      epsRationalData[exprs[[j, r, c]], eps, fb, top, cs],
+      {r, d}, {c, d}];
+    valuations[[j]] = Map[#["Valuation"] &, analyzed, {2}];
+    records = Flatten[Table[
+      If[TrueQ[analyzed[[r, c, "Zero"]]] ||
+          analyzed[[r, c, "DenominatorDegree"]] === 0,
+        Nothing,
+        {analyzed[[r, c, "Q"]], r, c,
+          analyzed[[r, c, "Valuation"]], analyzed[[r, c, "P"]]}],
+      {r, d}, {c, d}], 1];
+    builtGroups = If[records === {}, {},
+      Map[buildRationalMatrixGroup[#, eps, top, d] &,
+        GatherBy[records, First]]];
+    groups = Select[builtGroups, TrueQ[#["GroupedSafe"]] &];
+    unsafeGroups = Select[builtGroups, !TrueQ[#["GroupedSafe"]] &];
+    legacyRecords = If[unsafeGroups === {}, {},
+      Flatten[unsafeGroups[[All, "Records"]], 1]];
+    legacyIndices = Association[Table[
+      ((rec[[2]] - 1)*d + rec[[3]]) -> True, {rec, legacyRecords}]];
+    polyL = Table[Which[
+      TrueQ[analyzed[[r, c, "Zero"]]], ConstantArray[0, W],
+      analyzed[[r, c, "DenominatorDegree"]] === 0,
+        polynomialEpsListFromData[analyzed[[r, c]], eps, fb, W],
+      KeyExistsQ[legacyIndices, (r - 1)*d + c],
+        ratEpsList[exprs[[j, r, c]], eps, fb, W],
+      True, ConstantArray[0, W]],
+      {r, d}, {c, d}];
+    idxs = Select[Range[W], Module[{i = #},
+      AnyTrue[Flatten[polyL, 1], #[[i]] =!= 0 &]] &];
+    AppendTo[polySp,
+      Table[{i + fb - 1, Map[#[[i]] &, polyL, {2}]}, {i, idxs}]];
+    AppendTo[ratGroups, groups];
+    AppendTo[stats, <|
+      "PolynomialShifts" -> Length[idxs],
+      "LegacySparseShifts" -> Length[idxs],
+      "RationalEntries" -> Length[records],
+      "GroupedRationalEntries" -> Total[Lookup[groups, "EntryCount", 0]],
+      "RationalGroups" -> Length[groups],
+      "RationalNumeratorShifts" -> Total[
+        Length[#["NumeratorSp"]] & /@ groups],
+      "LegacyRationalEntries" -> Length[legacyRecords],
+      "LegacyRationalGroups" -> Length[unsafeGroups],
+      "LegacyRouteReasons" -> If[unsafeGroups === {}, <||>,
+        Counts[unsafeGroups[[All, "RouteReason"]]]],
+      "LegacyRationalShiftUpperBound" -> If[records === {}, 0,
+        Length[Union @@ (Range[#[[4]], top] & /@ records)]],
+      "FrameWidth" -> W|>],
+    {j, nj}];
+  <|"PolynomialSp" -> polySp, "RationalGroups" -> ratGroups,
+    "Valuations" -> valuations, "Stats" -> stats|>];
+
+applyRationalMatrixGroups[groups_List, U_List, fb_Integer, W_Integer, cs_] :=
+ Module[{acc = ConstantArray[0, Dimensions[U]], rhs, q, qd, y},
+  Do[
+    rhs = ConstantArray[0, Dimensions[U]];
+    Do[rhs += sp[[2]] . shiftFrameBlock[U, sp[[1]], fb, W, cs],
+      {sp, group["NumeratorSp"]}];
+    q = group["DenominatorCoefficients"];
+    qd = Length[q] - 1;
+    y = ConstantArray[0, Dimensions[U]];
+    y[[All, 1]] = rhs[[All, 1]]/q[[1]];
+    Do[y[[All, i]] = (rhs[[All, i]] - Sum[
+        q[[h + 1]]*y[[All, i - h]], {h, 1, Min[i - 1, qd]}])/q[[1]],
+      {i, 2, W}];
+    acc += y,
+    {group, groups}];
+  acc];
+
+(* White-box benchmark/equivalence seam used by the focused tests. *)
+applyPreparedNhat[polySp_List, groups_List, U_List,
+    fb_Integer, W_Integer, cs_] := Module[
+  {acc = ConstantArray[0, Dimensions[U]]},
+  Do[acc += sp[[2]] . shiftFrameBlock[U, sp[[1]], fb, W, cs],
+    {sp, polySp}];
+  If[groups =!= {},
+    acc += applyRationalMatrixGroups[groups, U, fb, W, cs]];
+  acc];
+
 (* framed product: a, b based at fb -> product re-framed at fb.  A nonzero
    product below the physical frame is a budgeting failure, never a
    sanctioned truncation.  Exact zero and one-term frames occur pervasively
@@ -389,18 +604,15 @@ finalTransformPoleDepth[cs_, nmax_Integer] :=
     gaugeCoefficientData[cs, nmax]["EpsValuation"];
 
 prepareCleared[cs_, fb_, W_, symbolic_:Automatic] := Module[
-  {eps = DiffExp2`Config`CanonicalEps[], data, dD, dN, dL, NhatL,
+  {eps = DiffExp2`Config`CanonicalEps[], data, dD, dN, dL, nhatPrep,
    d0Expr, d0InvScalar},
   data = If[symbolic === Automatic, clearedSymbolic[cs], symbolic];
   dD = data["dD"]; dN = data["dN"];
   dL = Map[ratEpsList[#, eps, fb, W] &, data["dExpr"]];
-  NhatL = Table[
-    Map[ratEpsList[#, eps, fb, W] &, data["NhatExpr"][[j + 1]], {2}],
-    {j, 0, dN}];
-  (* sparse-offset forms.  After t-content normalization the coefficients
-     can be eps-rational; each nonzero stored order becomes an eps shift
-     paired with a scalar / d x d matrix.  The recursion then runs on whole
-     (d x W) blocks with matrix Dot + column shifts. *)
+  nhatPrep = prepareNhatHybrid[data["NhatExpr"], eps, fb, W, cs];
+  (* Sparse-offset forms.  Epsilon-Laurent-polynomial Nhat entries use the
+     established shift/matrix representation.  Nonconstant denominators use
+     finite grouped numerators plus a causal coefficient recurrence. *)
   (* d0 is an epsilon unit by the cleared-system contract.  In the common
      (and banana) case it is actually epsilon-independent.  Cache the
      reciprocal of the already-expanded coefficient so the recursion keeps
@@ -418,18 +630,17 @@ prepareCleared[cs_, fb_, W_, symbolic_:Automatic] := Module[
         err["E5", cs, <|"Detail" -> "cleared d0 is zero"|>]];
       If[NumericQ[c0], 1/c0, Together[1/c0]]],
     None];
-  Module[{dSp, NhatSp},
+  Module[{dSp},
     dSp = Table[Module[{lst = dL[[j + 1]]},
       Table[{i + fb - 1, lst[[i]]}, {i, Select[Range[W], lst[[#]] =!= 0 &]}]],
       {j, 0, dD}];
-    NhatSp = Table[Module[{idxs},
-      idxs = Select[Range[W], Module[{i = #},
-        AnyTrue[Flatten[NhatL[[j + 1]], 1], #[[i]] =!= 0 &]] &];
-      Table[{i + fb - 1, Map[#[[i]] &, NhatL[[j + 1]], {2}]}, {i, idxs}]],
-      {j, 0, dN}];
-    <|"dL" -> dL, "NhatL" -> NhatL, "dD" -> dD, "dN" -> dN,
+    <|"dL" -> dL, "dD" -> dD, "dN" -> dN,
       "d0InvScalar" -> d0InvScalar,
-      "dSp" -> dSp, "NhatSp" -> NhatSp|>]];
+      "dSp" -> dSp,
+      "NhatSp" -> nhatPrep["PolynomialSp"],
+      "NhatRationalGroups" -> nhatPrep["RationalGroups"],
+      "NhatValuations" -> nhatPrep["Valuations"],
+      "NhatStats" -> nhatPrep["Stats"]|>]];
 
 (* EpsSeries -> frame list *)
 esToFrame[s_, fb_, W_] := Module[{out = ConstantArray[0, W], m1, m2},
@@ -446,6 +657,19 @@ validMin[x_List] := If[x === {}, Infinity, Min @@ x];
 frameValuation[x_List, fb_Integer] := Module[{p},
   p = SelectFirst[Range[Length[x]], x[[#]] =!= 0 &, None];
   If[p === None, Infinity, fb + p - 1]];
+
+(* The old validity loop visited every nonzero epsilon coefficient of every
+   Nhat entry.  validShift is monotone in the shift, so its minimum is exactly
+   the entry's epsilon valuation.  This O(d^2) update is coefficient/window
+   identical and avoids restoring an O(W) loop beside the grouped product. *)
+updateNhatValidity[accValid_List, valuations_?MatrixQ,
+    inputValid_List, frameTop_Integer] := Table[
+  Min[accValid[[r]], validMin[Table[
+    If[IntegerQ[valuations[[r, c]]],
+      validShift[inputValid[[c]], valuations[[r, c]], frameTop],
+      Infinity],
+    {c, Length[inputValid]}]]],
+  {r, Length[accValid]}];
 
 (* Exact O(W) division by the affine spectral offset dA + dB eps.
    CASE T (dA != 0) is a coefficient recurrence; CASE P is an exact
@@ -523,7 +747,7 @@ blockSolveTPFrame[rhs_List, dA_, dB_, invD0_, d0InvScalar_, q_Integer,
    therefore take a maximum rather than being globally counted. *)
 runRecursionFramedSrc[args___] := runRecursion[args];
 runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module[
-  {d = cs["SystemSize"], dL = prep["dL"], NhatL = prep["NhatL"],
+  {d = cs["SystemSize"], dL = prep["dL"],
    dD = prep["dD"], dN = prep["dN"], invD0, d0InvScalar, blocks, U,
    hits = {}, n0,
    UValid, topValid, frameTop = fb + W - 1, lamL, zeroV, srcData},
@@ -553,34 +777,24 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
       UValid[[1, l + 1]] = esCM /@ init[[l + 1]],
       {l, 0, Min[P, Length[init] - 1]}]];
   (* shift a (d x W) block by s eps-slots (s > 0: content moves UP) *)
-  Module[{shB, dSp = prep["dSp"], NhatSp = prep["NhatSp"]},
-  shB[M_, s_] := Which[
-    s === 0, M,
-    s > 0 && s < W,
-      Join[ConstantArray[0, {Length[M], s}], M[[All, 1 ;; W - s]], 2],
-    s >= W, ConstantArray[0, Dimensions[M]],
-    -s < W,
-      If[AnyTrue[Flatten[M[[All, 1 ;; -s]]], # =!= 0 &],
-        err["E4", cs, <|"FrameBase" -> fb, "Shift" -> s,
-          "Detail" -> "epsilon shift would discard nonzero lower-frame content"|>]];
-      Join[M[[All, -s + 1 ;; W]], ConstantArray[0, {Length[M], -s}], 2],
-    True,
-      If[AnyTrue[Flatten[M], # =!= 0 &],
-        err["E4", cs, <|"FrameBase" -> fb, "Shift" -> s,
-          "Detail" -> "epsilon shift lies wholly below the work frame"|>]];
-      ConstantArray[0, Dimensions[M]]];
+  Module[{shB, dSp = prep["dSp"], NhatSp = prep["NhatSp"],
+      NhatRationalGroups = prep["NhatRationalGroups"],
+      NhatValuations = prep["NhatValuations"]},
+  shB[M_, s_] := shiftFrameBlock[M, s, fb, W, cs];
   Do[Module[{RData, R, RValid, rhsFull, rhsValid},
     RData = Table[Module[{acc = ConstantArray[0, {d, W}],
         accValid = ConstantArray[Infinity, d]},
       Do[If[n - j >= 0,
         Module[{Ublk = U[[n - j + 1, l + 1]]},
           Do[
-            acc += sp[[2]] . shB[Ublk, sp[[1]]];
-            Do[If[sp[[2, r, c]] =!= 0,
-              accValid[[r]] = Min[accValid[[r]],
-                validShift[UValid[[n - j + 1, l + 1, c]], sp[[1]], frameTop]]],
-              {r, d}, {c, d}],
-            {sp, NhatSp[[j + 1]]}]]],
+            acc += sp[[2]] . shB[Ublk, sp[[1]]],
+            {sp, NhatSp[[j + 1]]}];
+          If[NhatRationalGroups[[j + 1]] =!= {},
+            acc += applyRationalMatrixGroups[
+              NhatRationalGroups[[j + 1]], Ublk, fb, W, cs]];
+          accValid = updateNhatValidity[accValid,
+            NhatValuations[[j + 1]],
+            UValid[[n - j + 1, l + 1]], frameTop]]],
         {j, 1, Min[n, dN]}];
       Do[If[n - j >= 0,
         Module[{Ublk = U[[n - j + 1, l + 1]], term, a0, termValid},

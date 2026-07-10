@@ -248,6 +248,7 @@ ratEpsList[expr_, eps_, fb_, W_] := Module[
 $adaptiveLowerFrameProbe = False;
 $disableAdaptiveLowerFrames = False;   (* private parity/benchmark seam *)
 $disableRationalDenominatorFusion = False;  (* private parity/benchmark seam *)
+$disableGroupedSpectralTransform = False;   (* private parity/benchmark seam *)
 lowerFrameUnderflow[cs_, payload_Association] :=
   If[TrueQ[$adaptiveLowerFrameProbe],
     Throw[Failure["AdaptiveLowerFrame", Join[
@@ -505,6 +506,102 @@ applyPreparedNhat[polySp_List, groups_List, U_List,
     {sp, polySp}];
   If[groups =!= {},
     acc += applyRationalMatrixGroups[groups, U, fb, W, cs]];
+  acc];
+
+(* One dense epsilon-rational matrix uses the same exact denominator groups
+   and finite-top boundary corrections as Nhat.  The wrapper records the
+   actual frame because adaptive homogeneous columns can finish on different
+   lower rectangles. *)
+preparedFramedMatrixValuations[polySp_List, groups_List, d_Integer] := Module[
+  {vals = ConstantArray[Infinity, {d, d}], record},
+  record[sp_List] := Do[
+    If[sp[[2, r, c]] =!= 0,
+      vals[[r, c]] = Min[vals[[r, c]], sp[[1]]]],
+    {r, d}, {c, d}];
+  Scan[record, polySp];
+  Scan[Function[group, Scan[record, group["NumeratorSp"]]], groups];
+  vals];
+
+prepareFramedMatrix[M_?MatrixQ, eps_Symbol, fb_Integer, W_Integer, cs_] :=
+ Module[{d = Length[M], p, polySp, groups},
+  If[TrueQ[Normal[M] === IdentityMatrix[d]],
+    Return[<|"PolynomialSp" -> {{0, IdentityMatrix[d]}},
+      "RationalGroups" -> {}, "Valuations" ->
+        Table[If[r === c, 0, Infinity], {r, d}, {c, d}],
+      "FrameBase" -> fb, "FrameWidth" -> W, "Identity" -> True,
+      "Stats" -> <|"PolynomialShifts" -> 1,
+        "LegacySparseShifts" -> 1, "RationalEntries" -> 0,
+        "GroupedRationalEntries" -> 0, "RationalGroups" -> 0,
+        "RationalNumeratorShifts" -> 0, "LegacyRationalEntries" -> 0,
+        "LegacyRationalGroups" -> 0, "LegacyRouteReasons" -> <||>,
+        "LegacyRationalShiftUpperBound" -> 0, "FrameWidth" -> W|>|>]];
+  p = prepareNhatHybrid[{M}, eps, fb, W, cs];
+  polySp = First[p["PolynomialSp"]];
+  groups = First[p["RationalGroups"]];
+  <|"PolynomialSp" -> polySp, "RationalGroups" -> groups,
+    (* Match the legacy spectral contract: valuation belongs to the actual
+       prepared/Chopped finite frame, not the pre-numericization expression. *)
+    "Valuations" -> preparedFramedMatrixValuations[polySp, groups, d],
+    "FrameBase" -> fb, "FrameWidth" -> W, "Identity" -> False,
+    "Stats" -> First[p["Stats"]]|>];
+
+(* frConv checked every nonzero V_(r,c) product before summing a row.  Keep
+   that strict witness even though the grouped application below performs a
+   matrix product: exact cancellation between columns must not conceal a
+   product whose leading epsilon power lies below the work frame. *)
+framedMatrixLowerWitness[valuations_?MatrixQ, U_List,
+    fb_Integer, cs_] := Module[{uVal, d = Length[valuations], v, lead},
+  uVal = frameValuation[#, fb] & /@ U;
+  Do[
+    v = valuations[[r, c]];
+    If[IntegerQ[v] && IntegerQ[uVal[[c]]],
+      lead = v + uVal[[c]];
+      If[lead < fb,
+        lowerFrameUnderflow[cs, <|"FrameBase" -> fb,
+          "Row" -> r, "Column" -> c, "MatrixValuation" -> v,
+          "InputValuation" -> uVal[[c]], "ProductLead" -> lead,
+          "Detail" ->
+            "framed matrix product would discard nonzero lower-epsilon content"|>]]],
+    {r, d}, {c, d}];
+  uVal];
+
+(* The entrywise witness has proved every active contribution in-frame.
+   Multiply before shifting so content in a column unused by this sparse
+   coefficient matrix cannot trigger a false lower-frame refusal.  The
+   ordinary shift guard remains as a second exact assertion. *)
+matrixShiftProductAfterWitness[A_, M_, s_Integer,
+    fb_Integer, W_Integer, cs_] :=
+  shiftFrameBlock[A . M, s, fb, W, cs];
+
+rationalMatrixGroupNumeratorAfterWitness[group_Association, U_List,
+    fb_Integer, W_Integer, cs_] := Module[
+  {rhs = ConstantArray[0, Dimensions[U]]},
+  Do[rhs += matrixShiftProductAfterWitness[
+      sp[[2]], U, sp[[1]], fb, W, cs],
+    {sp, group["NumeratorSp"]}];
+  rhs];
+
+applyPreparedFramedMatrix[prep_Association, U_List,
+    fb_Integer, W_Integer, cs_] := Module[
+  {vals = prep["Valuations"], d = Length[U],
+   acc = ConstantArray[0, Dimensions[U]], rhs},
+  If[prep["FrameBase"] =!= fb || prep["FrameWidth"] =!= W ||
+      Dimensions[U] =!= {d, W} || Dimensions[vals] =!= {d, d},
+    err["E5", cs, <|"FrameBase" -> fb, "FrameWidth" -> W,
+      "InputDimensions" -> Dimensions[U],
+      "ValuationDimensions" -> Dimensions[vals],
+      "Detail" -> "prepared framed matrix metadata/dimensions mismatch"|>]];
+  If[TrueQ[Lookup[prep, "Identity", False]], Return[U]];
+  framedMatrixLowerWitness[vals, U, fb, cs];
+  Do[acc += matrixShiftProductAfterWitness[
+      sp[[2]], U, sp[[1]], fb, W, cs],
+    {sp, prep["PolynomialSp"]}];
+  Do[
+    rhs = rationalMatrixGroupNumeratorAfterWitness[
+      group, U, fb, W, cs];
+    acc += divideRationalMatrixRHS[
+      rhs, group["DenominatorCoefficients"], W],
+    {group, prep["RationalGroups"]}];
   acc];
 
 (* framed product: a, b based at fb -> product re-framed at fb.  A nonzero
@@ -1036,17 +1133,24 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
 (* ---- assembly ---- *)
 
 (* frame U -> original-frame LocalSolution with sectors (a, b, l) *)
-assembleSolution[cs_, aT_, bT_, rec_, nmax_] := Module[
+assembleSolution[cs_, aT_, bT_, rec_, nmax_, vPrep_:Automatic] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], d = cs["SystemSize"], U = rec["U"],
    UValid = rec["Validity"], P = rec["P"], fb = rec["FrameBase"], W,
-   frameTop, kminO, kmaxO, VexpL, VVal, WL, WValid, secs, ls, firstNZ},
+   frameTop, kminO, kmaxO, VexpL, VVal, WL, WValid, secs, ls, firstNZ, vp},
   W = Length[U[[1, 1, 1]]];
   frameTop = fb + W - 1;
-  VexpL = Map[ratEpsList[Together[#], eps, fb, W] &, cs["V"], {2}];
-  VVal = Map[frameValuation[#, fb] &, VexpL, {2}];
-  WL = Table[
-    Table[Sum[frConv[VexpL[[r, c]], U[[n + 1, l + 1, c]], fb, W], {c, d}], {r, d}],
-    {n, 0, nmax}, {l, 0, P}];
+  If[TrueQ[$disableGroupedSpectralTransform],
+    VexpL = Map[ratEpsList[Together[#], eps, fb, W] &, cs["V"], {2}];
+    VVal = Map[frameValuation[#, fb] &, VexpL, {2}];
+    WL = Table[
+      Table[Sum[frConv[VexpL[[r, c]], U[[n + 1, l + 1, c]], fb, W],
+        {c, d}], {r, d}], {n, 0, nmax}, {l, 0, P}],
+    vp = If[AssociationQ[vPrep], vPrep,
+      prepareFramedMatrix[cs["V"], eps, fb, W, cs]];
+    VVal = vp["Valuations"];
+    WL = Table[applyPreparedFramedMatrix[
+      vp, U[[n + 1, l + 1]], fb, W, cs],
+      {n, 0, nmax}, {l, 0, P}]];
   WValid = Table[
     Table[validMin[Table[
       If[VVal[[r, c]] === Infinity, Infinity,
@@ -1350,7 +1454,8 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
   key = {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
     req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
     TrueQ[$disableAdaptiveLowerFrames],
-    TrueQ[$disableRationalDenominatorFusion]};
+    TrueQ[$disableRationalDenominatorFusion],
+    TrueQ[$disableGroupedSpectralTransform]};
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];
@@ -1364,6 +1469,7 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
    fams = cs["Families"], colCursor = 0, wideTop, Pmax, cdMax,
    symbolic, poleDepth, singleUseDepth, spectralDepth, transformDepth,
    startFb, terminalFb, adaptiveQ, prepCache = <||>, prepFor,
+   vPrepCache = <||>, vPrepFor,
    adaptiveDiags = {}, certs = {}},
   nmax = req["TOrder"];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
@@ -1393,6 +1499,11 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
   prepFor[ff_Integer] := If[KeyExistsQ[prepCache, ff], prepCache[ff],
     AssociateTo[prepCache, ff -> prepareCleared[
       cs, ff, wideTop - ff + 1, symbolic]]; prepCache[ff]];
+  vPrepFor[ff_Integer, ww_Integer] := Module[{key = {ff, ww}},
+    If[KeyExistsQ[vPrepCache, key], vPrepCache[key],
+      AssociateTo[vPrepCache, key -> prepareFramedMatrix[
+        cs["V"], DiffExp2`Config`CanonicalEps[], ff, ww, cs]];
+      vPrepCache[key]]];
   Do[Module[{fIdx = fi, fam = fams[[fi]]},
     Do[Module[{blk, root, q},
       (* identify the block for this root via the running cursor *)
@@ -1430,7 +1541,9 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
           "FrameWidth" -> WRun,
           "TerminalFrameBase" -> terminalFb,
           "TerminalFrameWidth" -> wideTop - terminalFb + 1|>];
-        ls = assembleSolution[cs, root["a"], root["b"], rec, nmax];
+        ls = assembleSolution[cs, root["a"], root["b"], rec, nmax,
+          If[TrueQ[$disableGroupedSpectralTransform], Automatic,
+            vPrepFor[fbRun, WRun]]];
         comp = compensatePseudoColumn[cs, ls, rec["Hits"], workColumns, reqMax];
         ls = comp[[1]];
         AppendTo[certs, certifyPseudoCompensation[cs, ls, rec["Hits"],
@@ -1468,7 +1581,7 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
   {d = cs["SystemSize"], nmax, reqMin, reqMax, parts = {}, wideTop, prep,
    eps = DiffExp2`Config`CanonicalEps[], hitsAll = {}, compAll = {}, certs = {},
    homTargets = None, symbolic, poleDepth, spectralDepth,
-   inverseSpectralDepth, sourceFrameDepth},
+   inverseSpectralDepth, sourceFrameDepth, vPrepCache = <||>, vPrepFor},
   nmax = Min[req["TOrder"], source["TWindow", "CompleteMax"]];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   If[source["Sectors"] === {},
@@ -1488,6 +1601,11 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
   spectralDepth = spectralTransformPoleDepth[cs];
   inverseSpectralDepth = inverseSpectralTransformPoleDepth[cs];
   sourceFrameDepth = spectralDepth + inverseSpectralDepth;
+  vPrepFor[ff_Integer, ww_Integer] := Module[{key = {ff, ww}},
+    If[KeyExistsQ[vPrepCache, key], vPrepCache[key],
+      AssociateTo[vPrepCache, key -> prepareFramedMatrix[
+        cs["V"], eps, ff, ww, cs]];
+      vPrepCache[key]]];
   Do[Module[{aS = sec["a"], bS = sec["b"], pS = sec["p"], arr = sec["Coeffs"],
       P, srcMin, srcMax, VInvExp, VInvVal, bHat, bHatValid, srcFn, rec, ls,
       wideTop2, prep2, pseudoDepth, comp, desiredMax},
@@ -1532,7 +1650,9 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
               "Validity" -> bv[[srcN + 1]]|>, None]]];
       rec = runRecursionFramedSrc[cs, prep2, aS, bS, P, nmax, srcFn, fb2, Wd2, None]];
     hitsAll = Join[hitsAll, publicPseudoHit /@ rec["Hits"]];
-    ls = assembleSolution[cs, aS, bS, rec, nmax];
+    ls = assembleSolution[cs, aS, bS, rec, nmax,
+      If[TrueQ[$disableGroupedSpectralTransform], Automatic,
+        vPrepFor[rec["FrameBase"], Length[rec["U"][[1, 1, 1]]]]]];
     desiredMax = Min[ls["EpsWindow", "CompleteMax"], reqMax];
     If[rec["Hits"] =!= {},
       If[homTargets === None,
@@ -1610,7 +1730,10 @@ SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
   Wd = wideTop - fb + 1;
   prep = prepareCleared[cs, fb, Wd, symbolic];
   rec = runRecursion[cs, prep, 0, 0, 0, nmax, None, fb, Wd, {vals}];
-  ls = assembleSolution[cs, 0, 0, rec, nmax];
+  ls = assembleSolution[cs, 0, 0, rec, nmax,
+    If[TrueQ[$disableGroupedSpectralTransform], Automatic,
+      prepareFramedMatrix[cs["V"], DiffExp2`Config`CanonicalEps[],
+        fb, Wd, cs]]];
   ls = capWindow[cs, ls, vCM];
   ODEResidualCheck[cs, ls];
   ls];

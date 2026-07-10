@@ -46,6 +46,13 @@ legacyApply[sp_, u_, fb_Integer, W_Integer] := Module[
     {term, sp}];
   acc];
 
+legacySpectralApply[m_, u_, fb_Integer, W_Integer] := Module[{frames},
+  frames = Map[DiffExp2`Solve`Private`ratEpsList[
+      Together[#], eps, fb, W] &, m, {2}];
+  Table[Sum[DiffExp2`Solve`Private`frConv[
+      frames[[r, c]], u[[c]], fb, W], {c, Length[m]}],
+    {r, Length[m]}]];
+
 legacyValidity[sp_, inputValid_List, frameTop_Integer] := Module[
   {acc = ConstantArray[Infinity, Length[inputValid]], d = Length[inputValid]},
   Do[Do[If[term[[2, r, c]] =!= 0,
@@ -166,6 +173,110 @@ randomParity = And @@ Table[
 assert["grouped_random_exact_property_sweep_30",
   randomParity];
 
+(* The dense spectral V transform reuses the same denominator-grouped
+   finite-frame operator.  It must be coefficient-identical to the old
+   entrywise frConv grid, preserve exact entry valuations, and keep symbolic
+   analytic regulators exact. *)
+spectralPrep = catchDE2[DiffExp2`Solve`Private`prepareFramedMatrix[
+  mixed, eps, fb, W, csTest]];
+spectralOld = catchDE2[legacySpectralApply[mixed, u, fb, W]];
+spectralNew = catchDE2[DiffExp2`Solve`Private`applyPreparedFramedMatrix[
+  spectralPrep, u, fb, W, csTest]];
+spectralDenseFrames = Map[DiffExp2`Solve`Private`ratEpsList[
+    Together[#], eps, fb, W] &, mixed, {2}];
+spectralDenseValuations = Map[
+  DiffExp2`Solve`Private`frameValuation[#, fb] &, spectralDenseFrames, {2}];
+assert["spectral_grouped_mixed_exact_frame_and_valuation_parity",
+  !FailureQ[spectralOld] && !FailureQ[spectralNew] &&
+  AllTrue[Flatten[spectralOld - spectralNew], Together[#] === 0 &] &&
+  spectralPrep["Valuations"] === spectralDenseValuations &&
+  FreeQ[spectralNew, _?InexactNumberQ]];
+
+(* Spectral valuations follow the coefficients actually retained after the
+   pinned SetPrecision/Chop preparation.  A tiny exact algebraic coefficient
+   that legacy preparation resolves to zero must not manufacture an E4 from
+   its pre-preparation epsilon power. *)
+tinyAlg = Sqrt[2] - FromContinuedFraction[ContinuedFraction[Sqrt[2], 100]];
+spectralChoppedV = {{tinyAlg/eps}};
+spectralChoppedU = {{1, 2, 3, 4, 5}};
+spectralChoppedOld = catchDE2[legacySpectralApply[
+  spectralChoppedV, spectralChoppedU, -1, 5]];
+spectralChoppedPrep = catchDE2[DiffExp2`Solve`Private`prepareFramedMatrix[
+  spectralChoppedV, eps, -1, 5, csTest]];
+spectralChoppedNew = catchDE2[
+  DiffExp2`Solve`Private`applyPreparedFramedMatrix[
+    spectralChoppedPrep, spectralChoppedU, -1, 5, csTest]];
+assert["spectral_prepared_chop_controls_valuation_witness",
+  !FailureQ[spectralChoppedOld] && !FailureQ[spectralChoppedNew] &&
+  spectralChoppedPrep["Valuations"] === {{Infinity}} &&
+  spectralChoppedOld === spectralChoppedNew === {{0, 0, 0, 0, 0}}];
+
+(* Grouped row cancellation with an exact analytic regulator must stay a
+   structural zero, because firstNZ/window discovery deliberately uses the
+   exact `=== 0` contract for symbolic coefficients. *)
+spectralRegV = {{1/(1 + eps), -1/(1 + eps)}, {0, 0}};
+spectralRegU = {{rho, 1 + rho, 0, 0, 0}, {rho, 1 + rho, 0, 0, 0}};
+spectralRegOld = legacySpectralApply[spectralRegV, spectralRegU, -1, 5];
+spectralRegPrep = DiffExp2`Solve`Private`prepareFramedMatrix[
+  spectralRegV, eps, -1, 5, csTest];
+spectralRegNew = DiffExp2`Solve`Private`applyPreparedFramedMatrix[
+  spectralRegPrep, spectralRegU, -1, 5, csTest];
+assert["spectral_symbolic_regulator_cancellation_is_structural_zero",
+  spectralRegOld === spectralRegNew &&
+  AllTrue[Flatten[spectralRegNew], # === 0 &]];
+
+spectralInputValid = {4, 7, 5};
+spectralOldValid = Table[DiffExp2`Solve`Private`validMin[Table[
+    If[spectralDenseValuations[[r, c]] === Infinity, Infinity,
+      DiffExp2`Solve`Private`validShift[spectralInputValid[[c]],
+        spectralDenseValuations[[r, c]], top]], {c, 3}]], {r, 3}];
+spectralNewValid = Table[DiffExp2`Solve`Private`validMin[Table[
+    If[spectralPrep["Valuations"][[r, c]] === Infinity, Infinity,
+      DiffExp2`Solve`Private`validShift[spectralInputValid[[c]],
+        spectralPrep["Valuations"][[r, c]], top]], {c, 3}]], {r, 3}];
+assert["spectral_heterogeneous_complete_max_parity",
+  spectralOldValid === spectralNewValid &&
+  Length[DeleteDuplicates[spectralNewValid]] > 1];
+
+(* Q Vbar boundary coefficients above the stored frame top can fold back
+   when U has negative epsilon support. *)
+spectralTinyPrep = DiffExp2`Solve`Private`prepareFramedMatrix[
+  tiny, eps, fbTiny, WTiny, csTest];
+spectralTinyOld = legacySpectralApply[tiny, tinyU, fbTiny, WTiny];
+spectralTinyNew = DiffExp2`Solve`Private`applyPreparedFramedMatrix[
+  spectralTinyPrep, tinyU, fbTiny, WTiny, csTest];
+assert["spectral_grouped_finite_top_boundary_exact",
+  spectralTinyOld === spectralTinyNew &&
+  Max[spectralTinyPrep["RationalGroups"][[1, "NumeratorSp", All, 1]]] >
+    topTiny];
+
+(* Entrywise underflow remains strict before a row sum: equal unsafe
+   contributions may not cancel their witnesses.  Conversely an unsafe
+   input column unused by V must not cause a false refusal. *)
+spectralCancelV = {{eps^-1, -eps^-1}, {0, 0}};
+spectralCancelU = {{1, 2, 3, 4, 5}, {1, 2, 3, 4, 5}};
+spectralCancelPrep = DiffExp2`Solve`Private`prepareFramedMatrix[
+  spectralCancelV, eps, -1, 5, csTest];
+spectralCancelOld = catchDE2[legacySpectralApply[
+  spectralCancelV, spectralCancelU, -1, 5]];
+spectralCancelNew = catchDE2[
+  DiffExp2`Solve`Private`applyPreparedFramedMatrix[
+    spectralCancelPrep, spectralCancelU, -1, 5, csTest]];
+spectralInactiveV = {{eps^-1, 0}, {0, 0}};
+spectralInactiveU = {{0, 2, 3, 4, 5}, {1, 2, 3, 4, 5}};
+spectralInactivePrep = DiffExp2`Solve`Private`prepareFramedMatrix[
+  spectralInactiveV, eps, -1, 5, csTest];
+spectralInactiveOld = catchDE2[legacySpectralApply[
+  spectralInactiveV, spectralInactiveU, -1, 5]];
+spectralInactiveNew = catchDE2[
+  DiffExp2`Solve`Private`applyPreparedFramedMatrix[
+    spectralInactivePrep, spectralInactiveU, -1, 5, csTest]];
+assert["spectral_grouped_entrywise_underflow_and_inactive_column_contract",
+  FailureQ[spectralCancelOld] && spectralCancelOld["ID"] === "E4" &&
+  FailureQ[spectralCancelNew] && spectralCancelNew["ID"] === "E4" &&
+  !FailureQ[spectralInactiveOld] && !FailureQ[spectralInactiveNew] &&
+  spectralInactiveOld === spectralInactiveNew];
+
 (* Both implementations retain the same loud lower-frame refusal. *)
 fbBad = -2; WBad = 8;
 badM = {{eps^-1/(1 + 3 eps)}};
@@ -283,10 +394,41 @@ DiffExp2`Solve`ClearSolveCaches[];
 sourceUnfused = Block[{
     DiffExp2`Solve`Private`$disableRationalDenominatorFusion = True},
   catchDE2[DiffExp2`Solve`SolveChart[sourceCS, fusionReq, sourceFusion]]];
+DiffExp2`Solve`ClearSolveCaches[];
+sourceLegacySpectral = Block[{
+    DiffExp2`Solve`Private`$disableGroupedSpectralTransform = True,
+    DiffExp2`Solve`Private`$disableRationalDenominatorFusion = False},
+  catchDE2[DiffExp2`Solve`SolveChart[sourceCS, fusionReq, sourceFusion]]];
 assert["grouped_cross_lag_inhomogeneous_exact_parity",
   !FailureQ[sourceFused] && !FailureQ[sourceUnfused] &&
+  !FailureQ[sourceLegacySpectral] &&
   sourceFused["Basis", "Columns"] === sourceUnfused["Basis", "Columns"] &&
-  sourceFused["Particular"] === sourceUnfused["Particular"]];
+  sourceFused["Particular"] === sourceUnfused["Particular"] &&
+  sourceFused["Particular"] === sourceLegacySpectral["Particular"]];
+
+(* The public regular value-transport path is the dominant identity-V case.
+   Pin exact legacy/grouped parity and the preparation no-op shortcut. *)
+regularChart = <|"ChartVar" -> t, "Center" -> 0, "Scale" -> 1,
+  "Radius" -> 1/2, "LocalRadius" -> 1/2, "Singular" -> False,
+  "Name" -> "grouped_regular_value"|>;
+regularCS = catchDE2[DiffExp2`Solve`PrepareChart[
+  <|"Matrix" -> {{(1 + eps)/(1 + x)}}, "Variable" -> x|>, regularChart]];
+regularVals = {DiffExp2`EpsSeries`ESNew[0, {1, 2, 3}]};
+regularReq = <|"EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 2|>,
+  "TOrder" -> 6|>;
+regularPrep = catchDE2[DiffExp2`Solve`Private`prepareFramedMatrix[
+  regularCS["V"], eps, -2, 7, regularCS]];
+regularGrouped = Block[{
+    DiffExp2`Solve`Private`$disableGroupedSpectralTransform = False},
+  catchDE2[DiffExp2`Solve`SolveValueRegular[
+    regularCS, regularReq, regularVals]]];
+regularLegacy = Block[{
+    DiffExp2`Solve`Private`$disableGroupedSpectralTransform = True},
+  catchDE2[DiffExp2`Solve`SolveValueRegular[
+    regularCS, regularReq, regularVals]]];
+assert["spectral_regular_value_public_path_and_identity_shortcut",
+  !FailureQ[regularGrouped] && !FailureQ[regularLegacy] &&
+  TrueQ[regularPrep["Identity"]] && regularGrouped === regularLegacy];
 
 (* Real banana L1 endpoint: the x=1 frame activates one nonconstant group
    (six entries with Q=1+5 eps), while x=0 stays polynomial.  SolveChart's
@@ -319,10 +461,17 @@ solU = Block[{
 solUUnfused = Block[{
     DiffExp2`Solve`Private`$disableRationalDenominatorFusion = True},
   catchDE2[DiffExp2`Solve`SolveChart[csU, reqU]]];
+solULegacySpectral = Block[{
+    DiffExp2`Solve`Private`$disableGroupedSpectralTransform = True,
+    DiffExp2`Solve`Private`$disableRationalDenominatorFusion = False},
+  catchDE2[DiffExp2`Solve`SolveChart[csU, reqU]]];
 assert["grouped_banana_upper_local_solution_windows_and_residual",
   !FailureQ[solU] && !FailureQ[solUUnfused] &&
+  !FailureQ[solULegacySpectral] &&
   solU["Basis", "Columns"] === solUUnfused["Basis", "Columns"] &&
+  solU["Basis", "Columns"] === solULegacySpectral["Basis", "Columns"] &&
   solU["Basis", "Specs"] === solUUnfused["Basis", "Specs"] &&
+  solU["Basis", "Diagnostics"] === solULegacySpectral["Basis", "Diagnostics"] &&
   Length[solU["Basis", "Columns"]] === 7 &&
   AllTrue[solU["Basis", "Columns"],
     #["EpsWindow", "CompleteMax"] === 2 &] &&
@@ -334,9 +483,20 @@ chartL = SelectFirst[Reverse[planL["Charts"]], TrueQ[#["Singular"]] &];
 csL = catchDE2[DiffExp2`Solve`PrepareChart[sys, chartL]];
 prepL = catchDE2[DiffExp2`Solve`Private`prepareCleared[
   csL, -20, 45, DiffExp2`Solve`Private`clearedSymbolic[csL]]];
+DiffExp2`Solve`ClearSolveCaches[];
+solL = Block[{
+    DiffExp2`Solve`Private`$disableGroupedSpectralTransform = False},
+  catchDE2[DiffExp2`Solve`SolveChart[csL, reqU]]];
+(* no clear: the spectral mode is part of the homogeneous memo key *)
+solLLegacySpectral = Block[{
+    DiffExp2`Solve`Private`$disableGroupedSpectralTransform = True},
+  catchDE2[DiffExp2`Solve`SolveChart[csL, reqU]]];
 assert["grouped_banana_lower_stays_polynomial",
   Max[prepL["NhatStats"][[All, "RationalEntries"]]] === 0 &&
-  Max[prepL["NhatStats"][[All, "PolynomialShifts"]]] <= 5];
+  Max[prepL["NhatStats"][[All, "PolynomialShifts"]]] <= 5 &&
+  !FailureQ[solL] && !FailureQ[solLLegacySpectral] &&
+  solL["Basis", "Columns"] === solLLegacySpectral["Basis", "Columns"] &&
+  solL["Basis", "Specs"] === solLLegacySpectral["Basis", "Specs"]];
 
 (* A stable benchmark seam: consumers can report these counts without
    materializing the legacy rational tail. *)

@@ -1,5 +1,65 @@
 # SpeedIdeas: measured per-chart profile and ranked levers
 
+## 2026-07-10 denominator-grouped dense spectral transform
+
+Singular solution assembly previously expanded every entry of the spectral
+matrix `V` into a width-`W` epsilon frame and evaluated every `(row,column)`
+product with scalar `frConv`.  On the banana L1 upper endpoint this was a
+dense `O(TOrder d^2 W^2)` stage; profiling assigned about 26.5% of the N20
+chart to those convolutions, with a larger share as the EO50 frame widened.
+
+`V` now uses the exact denominator-grouped finite-frame operator already
+proved for `Nhat`.  Entries are grouped only by their exact normalized
+epsilon denominator.  `Q Vbar` retains the finite-top boundary coefficients
+needed when negative-power input folds content back into the stored frame,
+and unsafe large groups retain the dense expansion.  Preparation is cached
+by the actual adaptive `{FrameBase, FrameWidth}`.  `V` and the gauge remain
+separate stages, so their sequential completeness losses are unchanged.
+
+The matrix application does not weaken the strict lower-frame contract.
+Before any row sum, it checks every nonzero `(r,c)` using the valuation of
+the actually prepared finite frame and the input-frame valuation;
+cancellation between columns therefore cannot hide an underflow.  Deriving
+that valuation after the pinned `SetPrecision`/`Chop` handoff exactly matches
+the legacy behavior for tiny algebraic coefficients.  After that proof,
+coefficient matrices multiply
+before shifting so an unused input column cannot cause a false refusal.
+`VVal`, `UValid`, and `CompleteMax` propagation remain entrywise and
+unchanged.  Symbolic analytic regulators are never numericized.  Identity
+spectral matrices take a no-op path, which removes the general preparation
+and multiplication overhead from regular charts.  A private legacy toggle is
+included in the homogeneous-solve memo key for exact A/B tests.
+
+An alternating A/B then B/A banana L1 upper-endpoint benchmark at WP100/N20,
+with one warmup per mode and a cleared solve cache before every sample, gave
+legacy `{11.038, 10.918}` s and grouped `{8.240, 8.159}` s.  The median
+speedup was 1.339x; both paired speedups agree to about 0.1%, and basis
+columns/specs/diagnostics were coefficient-identical.
+
+Earlier cold-cache exploratory scaling measurements (legacy always measured
+first, so these are useful for order scaling rather than unbiased ratios)
+were:
+
+- WP100, N10, frame width 29: 2.117 s -> 1.831 s (1.16x).
+- WP100, N20, frame width 49: 10.607 s -> 7.890 s (1.34x).
+- WP100, N30, frame width 69: 43.112 s -> 28.620 s (1.51x).
+- WP100, N50, frame width 109: 371.741 s -> 207.070 s (1.80x).
+- Production WP500/N50/epsilon-top 11, frame width 118: grouped path
+  246.701 s.  The previous fully fresh transport run measured 682.047 s for
+  the corresponding legacy upper endpoint (an observed 2.76x reduction,
+  though not a same-process A/B timing).
+
+The grouped-property suite covers heterogeneous denominators/valuations,
+finite-top folding, post-preparation valuation/Chop parity, structural
+symbolic-regulator cancellation, cancellation-masked underflow, inactive
+columns, public regular and inhomogeneous solve paths, and exact A/B parity at
+both real-banana endpoints.  The standalone
+`Scripts/bench_grouped_spectral_transform.m` benchmark accepts `GST_ORDERS`,
+`GST_WORKING_PRECISION`, `GST_EPS_ORDER`, `GST_ENDPOINTS`,
+`GST_MODE=both|legacy|grouped`, `GST_REPS`, and `GST_WARMUP`; both-mode runs
+alternate A/B and B/A order and report samples, paired ratios, structural
+parity, exact parity, and maximum relative coefficient difference.
+
 ## 2026-07-10 algebraic regular-chart numeric handoff
 
 Classic balanced segmentation can produce exact quadratic-algebraic regular

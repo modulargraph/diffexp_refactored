@@ -322,9 +322,12 @@ SourceData = <|
 
 A LocalSolution is accepted wherever a SourceData is (only these three keys
 are read).  NORMALIZATION CONTRACT: the source is in THETA form — Solve
-solves theta g = B g + s with s = the SourceData value.  A caller holding a
-d/dt-form source b (f' = A f + b) must convert s = t·b first (an exact
-a -> a+1 tag shift via SectorSeries.m).  This is stated to kill the
+accepts the source in the original physical frame.  On a rank-reduced chart
+`f = T.g`, SolveParticular forms `T^-1.s` exactly once before solving
+`theta g = B_reduced.g + T^-1.s`, and gauges the result back with `T`.  A
+caller must neither pre-apply `T^-1` nor add another factor of `t`.  A caller
+holding a d/dt-form source b (f' = A f + b) must convert s = t·b first (an
+exact a -> a+1 tag shift via SectorSeries.m).  This is stated to kill the
 off-by-one the old code encoded as `s = bLeadPow + 1`
 (Recurrence.m:641).  Source sectors may have any exact tags, including
 p > 0 and eps-Laurent coefficient windows with kmin < 0 (IBP poles).

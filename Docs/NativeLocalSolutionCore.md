@@ -191,4 +191,3 @@ The following are explicit missing pieces, not silent fallbacks:
 The narrow C++ smoke covers direct value/theta evaluation, an Acb residual
 certificate, both fractional-power rims, epsilon-exponent convolution,
 explicit-log epsilon shifting, and loud missing/conflicting prescriptions.
-

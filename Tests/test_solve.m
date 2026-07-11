@@ -439,19 +439,23 @@ assert["su18_gauge_chart_closed_form",
       Abs[Det[m]] > 10^-8 &&
       AllTrue[m, NumericQ[#[[1]]] && NumericQ[#[[2]]] &]]]];
 
-(* SU-19: final back-transforms consume epsilon completeness too.  These
-   depths deliberately exceed the historical four-slot scratch halo: the
-   old budget either rejected V below the frame or delivered a post-gauge
-   CompleteMax below the request. *)
+(* SU-19: the canonical spectral lattice clears arbitrary poles from each
+   Jordan block before recurrence.  The same depth moves into VInv, where
+   source/matching transforms must still budget it honestly; homogeneous
+   columns themselves now start finite instead of inheriting a normalization
+   pole.  Gauge poles remain an independent final-transform budget below. *)
 cs19v = pc[mkSys[{{1, 0}, {eps^-8, 0}}/x],
   mkChart[0, 1, "su19_spectral_eps_pole"]];
 r19v = catchDE2[sc[cs19v, req[0, 2, 6]]];
-assert["su19_spectral_transform_budget",
+assert["su19_spectral_primitive_lattice_budget",
   !FailureQ[r19v] &&
-  DiffExp2`Solve`Private`spectralTransformPoleDepth[cs19v] === 8 &&
-  DiffExp2`Solve`Private`finalTransformPoleDepth[cs19v, 6] === 8 &&
+  cs19v["SpectralBlockEpsShifts"] === {8, 0} &&
+  cs19v["V"] === {{eps^8, 0}, {1, 1}} &&
+  DiffExp2`Solve`Private`spectralTransformPoleDepth[cs19v] === 0 &&
+  DiffExp2`Solve`Private`inverseSpectralTransformPoleDepth[cs19v] === 8 &&
+  DiffExp2`Solve`Private`finalTransformPoleDepth[cs19v, 6] === 0 &&
   (#["EpsWindow", "CompleteMax"] & /@ r19v["Basis"]["Columns"]) === {2, 2} &&
-  Min[#["EpsWindow", "Min"] & /@ r19v["Basis"]["Columns"]] === -8];
+  Min[#["EpsWindow", "Min"] & /@ r19v["Basis"]["Columns"]] === 0];
 
 cs19t = pc[mkSys[{{0, 1/(eps^8*x^2)}, {0, 0}}],
   mkChart[0, 1, "su19_gauge_eps_pole"]];
@@ -503,8 +507,51 @@ oldFrame23 = If[col23 === None, None,
 assert["su23_collision_certificate_uses_reduced_physical_frame",
   !FailureQ[r23] && col23 =!= None &&
   r23["Basis", "Diagnostics", "PseudoCollisionsCompensated"] === True &&
-  cs23["VInv"] === {{-1/eps, 1, 0}, {1, 0, 0}, {0, 0, 1}} &&
+  cs23["VInv"] === {{-1/eps, 1, 0}, {1/eps, 0, 0}, {0, 0, 1}} &&
   Abs[N[DiffExp2`EpsSeries`ESCoefficient[oldFrame23[[1]], -1], 30]] > 10^-6];
+
+(* SU-25: a coalescing pair can make Indicial's deterministic first-entry
+   normalization meromorphic even though the exact system is epsilon-
+   regular.  Here the raw source eigenvector is (1,1/eps,0), while the
+   n=1 CASE-P target is (0,1,1).  Without a blockwise primitive scaling the
+   collision's eps^-1 certificate sees the source seed's unrelated t/eps in
+   reduced component 2 and fails.  Multiplying the whole one-vector Jordan
+   block by eps gives the equally valid seed (eps,1,0); the transformed
+   coupling also gains eps, so the exact quotient is regular rather than
+   hiding a pole behind a relaxed certificate. *)
+M025 = {{1 - 2 eps, 0, 0}, {-1, 1 - eps, 1}, {0, 0, 2 - eps}};
+N125 = {{0, 0, 0}, {1, 0, 0}, {1, 0, 0}};
+chain25 = {{1, 1/eps}, {0, 1/eps}};
+primitive25 = DiffExp2`Solve`Private`epsilonPrimitiveJordanChain[
+  chain25, eps];
+lambda25 = 1 - 2 eps;
+Vchain25 = Transpose[chain25];
+Rchain25 = Map[Cancel[Together[#]] &,
+  Vchain25.{{lambda25, 1}, {0, lambda25}}.Inverse[Vchain25], {2}];
+assert["su25_primitive_scaling_is_common_over_jordan_chain",
+  primitive25 === {{{eps, 1}, {0, 1}}, 1} &&
+  Map[Cancel[Together[#]] &,
+    Rchain25.Transpose[primitive25[[1]]] -
+      Transpose[primitive25[[1]]].{{lambda25, 1}, {0, lambda25}},
+    {2}] === ConstantArray[0, {2, 2}]];
+cs25 = pc[mkSys[(M025 + x*N125)/x],
+  mkChart[0, 1, "su25_primitive_casep_frame"]];
+r25 = catchDE2[sc[cs25, req[0, 2, 4]]];
+col25 = If[FailureQ[r25], None, SelectFirst[r25["Basis", "Columns"],
+  MemberQ[tagsOf[#], {1, -2, 0}] &]];
+assert["su25_casep_uses_epsilon_primitive_jordan_blocks",
+  !FailureQ[r25] && col25 =!= None &&
+  cs25["SpectralBlockEpsShifts"] === {0, 0, 1} &&
+  cs25["V"] === {{0, 0, eps}, {1, 1, 1}, {1, 0, 0}} &&
+  r25["Basis", "Diagnostics", "PseudoCollisionsCompensated"] === True &&
+  r25["Basis", "Diagnostics", "PseudoCollisionsHit"] === {
+    <|"n" -> 1, "Cols" -> {1}, "DeltaB" -> -1,
+      "PolarOrders" -> {}|>} &&
+  col25["EpsWindow", "Min"] === 0 &&
+  Module[{sec = First[col25["Sectors"]]},
+    rowOf[col25, sec, 0][[1 ;; 2]] ===
+      {{0, 1, 0}, {0, -1, -1}} &&
+    rowOf[col25, sec, 1][[1]] === {1, 0, 0}]];
 
 (* SU-20: a finite V can have an eps-singular inverse (det V ~ eps^8).
    Particular-source framing crosses VInv before the recurrence and must

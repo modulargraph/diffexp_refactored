@@ -157,16 +157,20 @@ PrepareChart[sys_Association, chart_Association] -> ChartSystem
 
 (DEC-7; REVIEW-math D6.)  Applies `chart["Map"]` to the loaded exact
 matrix, forms the theta matrix, calls ``Indicial`ChartIndicial``, and
-assembles the ChartSystem of 3.2: V = the full d x d matrix formed by
-concatenating ALL families' chain vectors in family order (column order =
-(family, root in descending a, chain position), eigenvector first —
+assembles the ChartSystem of 3.2: each Jordan block is first multiplied by
+the unique nonnegative epsilon monomial that clears the lowest valuation of
+all entries in that block (one COMMON factor for every member, preserving
+the unit Jordan superdiagonal); V = the full d x d matrix formed by
+concatenating these epsilon-primitive chain vectors in family order (column
+order = (family, root in descending a, chain position), eigenvector first —
 matching the column order of 3.4/3.5); VInv = exact `Inverse[V]`
 (Q(alpha)(eps) arithmetic); J = the corresponding block-diagonal Jordan
 data; per family, CollisionDepth is the executed homogeneous Taylor-layer
 budget defined below (parallel CASE-P targets at one `n` count only by the
 largest target Jordan block, while distinct positive `n` layers compose); the
-det-V collision-factor property is certified here by exact factorization
-of Det[V(eps)] (E2 on failure).  n = 0 collisions arriving from Indicial
+exact nonsingularity of V is certified here; the epsilon monomial inserted
+into its determinant by primitive normalization is explicitly accounted by
+`SpectralBlockEpsShifts` (E2 on failure).  n = 0 collisions arriving from Indicial
 canonically ordered (one record per unordered pair, Indicial.md 2.6
 step 5) are SYMMETRIZED here: the reversed pair (DeltaB negated) is added
 when absent, so the Family record of 3.2 always carries all ordered pairs
@@ -229,10 +233,11 @@ shapes VERBATIM (Docs/specs/Indicial.md 3.3/3.4 are normative; collision
 keys n/LowerIdx/UpperIdx/DeltaB/Type — this spec's former From/To/Offset
 names are renamed to those).  (ii) Solve.m BUILDS the spectral frame
 itself, once per chart inside PrepareChart: V = the full d x d matrix of
-all families' chain vectors in spec column order, VInv = exact Inverse[V]
-(Q(alpha)(eps) arithmetic), and certifies at that point that det V's
-eps -> 0 vanishing order equals the count implied by the recorded
-LaurentShift collisions (the E2 third check; failure stays E2).
+all families' epsilon-primitive chain vectors in spec column order, VInv =
+exact Inverse[V]
+(Q(alpha)(eps) arithmetic), certifies exact nonsingularity, and records the
+known eps -> 0 determinant valuation inserted by the blockwise primitive
+shifts (the E2 third check; failure stays E2).
 (iii) CollisionDepth is computed from executed homogeneous CASE-P layers:
 for each source root, discard `n=0` LaurentShift records, group its remaining
 records by positive Taylor order `n`, sum the maximum target BlockSize in
@@ -262,8 +267,11 @@ ChartSystem = <|
                    ResonantRecurrence.m:1489 bVecG = TInv.bVec and
                    :1497 fGeneral = T.gGeneral),
   "Residue" -> M0(eps) = B(0,eps) exact,
+  "SpectralBlockEpsShifts" -> one nonnegative integer per Jordan block,
+         recording the common eps monomial applied to every chain member,
   "V" -> V(eps), "VInv" -> V^(-1)(eps): full d x d, exact in eps,
-         M0·V = V·J, BUILT BY PrepareChart from the families' Chains
+         M0·V = V·J, BUILT BY PrepareChart from epsilon-primitive versions
+         of the families' Chains
          (column order = (family, root in descending a, chain position),
          eigenvector first),
   "J" -> block-diagonal Jordan data in the same column order: per root i
@@ -296,9 +304,9 @@ Family = <|
 
 Requirements certified at PrepareChart assembly (violations are E2):
 char-poly factorization already certified by Indicial (I1 contract);
-det V(eps) vanishes at eps = 0 only through the collision factors
-Π (b_i−b_j)·eps recorded in "Collisions" (exact factorization of
-Det[V(eps)], 2.5); Σ BlockSizes = SystemSize; ThetaMatrix entries have no
+Det[V(eps)] is not identically zero and the monomial valuation deliberately
+inserted by primitive normalization is `Sum[q_i shift_i]`;
+Σ BlockSizes = SystemSize; ThetaMatrix entries have no
 t-pole (exact check on the rational form).  SolveHomogeneous/
 SolveParticular re-assert cheaply on receipt (Σ BlockSizes, t-pole).
 
@@ -576,6 +584,15 @@ POLAR PART γ(eps) = Σ_{k<0} γ_k eps^k along the block-i chain directions
 (a size-`q` target can consume `q` orders at that layer; distinct executed
 Taylor layers can compose).  The joint rule:
 
+0. The spectral seeds are the epsilon-primitive Jordan blocks constructed by
+   PrepareChart (2.5).  Indicial's deterministic first-entry normalization
+   may be meromorphic when affine eigenvalues coalesce at eps=0; leaving that
+   arbitrary pole in a source seed makes a value-finiteness certificate
+   indistinguishable from a failed collision.  Multiplying a whole block by
+   eps^s changes only the basis normalization, moves the inverse factor into
+   VInv, and preserves every Jordan identity.  Consequently any negative
+   order inspected below was created by the recurrence/collision rather than
+   inherited from an arbitrary eigenvector normalization.
 1. Keep the full Laurent quotient in û (the recursion continues with it;
    EpsSeries windows track honestly).
 2. REGISTER the compensation term  −Σ γ-polar(eps) × (family column of root
@@ -597,8 +614,9 @@ Taylor layers can compose).  The joint rule:
    mapped through the exact epsilon valuations of its target column in `V`,
    and the corresponding reduced-component polar coefficients are checked.
    Applying `VInv` in the certificate is forbidden: when the spectral frame
-   is epsilon-singular (banana L2 at x = 0 is the minimal example), a finite
-   physical value has legitimate polar spectral coordinates.  Probe radii
+   has an epsilon-singular inverse (banana L2 at x = 0 is the minimal
+   example), a finite physical value has legitimate polar spectral
+   coordinates.  Probe radii
    are chosen deterministically inside the disk so the unmatched top Taylor
    tail of a finite-order compensated target lies below `laurentLeadTol`.
    Every checked coefficient includes its own significance uncertainty.
@@ -681,8 +699,9 @@ requested-vs-available windows where applicable.  Enumerated conditions:
   owns rank reduction; Solve refuses rather than reducing again.  Old
   analogue: ResonantRecurrence.m:1465-1472.)
 - E2 SPECTRAL DATA MISMATCH: Σ BlockSizes ≠ SystemSize; or M0·V − V·J ≠ 0
-  (exact); or det V(eps) has an eps=0 zero not accounted by the recorded
-  collision factors.  Message: chart + family roots + which check failed.
+  (exact); or V is identically singular; or a recorded primitive block
+  shift does not clear all negative valuations with minimum zero.  Message:
+  chart + family roots + which check failed.
 - E3 DEGENERATE CLEARED DENOMINATOR: d_0(eps)|_{eps=0} = 0 after content
   normalization (a singularity location degenerating onto the chart origin
   at eps = 0).  Message: chart + the offending denominator factor.  (Old
@@ -1018,6 +1037,11 @@ Error tests assert via `Catch[..., "DiffExp2Error"]` returning the
   a degree-3 rational 4x4 chart at TOrder 200, count EpsSeries
   multiply-adds per t-order (instrumented private counter): must be
   bounded by a constant in n (L1/R6 mechanism), not grow linearly.
+- SU-25 `epsilon_primitive_casep_frame`: the exact epsilon-regular 3x3
+  residue has raw source eigenvector `(1,1/eps,0)`, a coalescing partner,
+  and an offset-one pseudo target `(0,1,1)`.  Assert PrepareChart records
+  block shifts `{0,0,1}`, the source seed becomes `(eps,1,0)`, the CASE-P
+  quotient is regular, and the uncompromised two-probe certificate passes.
 
 ---
 
@@ -1083,7 +1107,7 @@ finite width (R6 benchmark fails without it).
 
 - OQ1 — DELETED at M0 review (subsumed by the §3.2 RESOLUTION and
   PrepareChart, 2.5: Solve consumes Indicial's shapes verbatim, builds
-  V/VInv itself, and certifies the det-V collision-factor property here;
+  epsilon-primitive V/VInv itself, and certifies exact nonsingularity here;
   REVIEW-minimalism defect 15, REVIEW-math D6, DEC-7).
 - OQ2 Algebraic (non-rational) a, b (R2): collision tests remain exact, but
   EpsSeries arrays with algebraic-number tag arithmetic in δ-divisions may

@@ -33,15 +33,14 @@ struct PreparedRationalTaylorMultiplier {
   std::uint32_t center_pole_order = 0;
   std::vector<std::vector<Scalar>> kernels;  // [epsilon][Taylor]
   std::string exact_identity;
+  // Exact preparation provenance, never a conclusion drawn from a numeric
+  // slab.  An Acb tensor whose entries currently enclose exact zero remains
+  // active unless the rational multiplier was proved structurally zero
+  // before specialization.
+  bool proven_zero = false;
 
   [[nodiscard]] bool structurally_zero() const {
-    return std::all_of(kernels.begin(), kernels.end(),
-        [](const auto& row) {
-          return std::all_of(row.begin(), row.end(),
-              [](const Scalar& value) {
-                return ScalarTraits<Scalar>::is_zero(value);
-              });
-        });
+    return proven_zero;
   }
 };
 
@@ -427,16 +426,10 @@ std::optional<LocalSolution<Scalar>> apply_prepared_sparse_local_matrix(
         product, entry.row, matrix.rows));
   }
   if (terms.empty()) return std::nullopt;
-  auto combined = combine_local_solutions(terms,
+  return combine_local_solutions(terms,
       checkpoint_identity.empty()
           ? input.checkpoint_identity + ":matrix:" + matrix.exact_identity
           : std::move(checkpoint_identity));
-  if (std::none_of(combined.sectors.begin(), combined.sectors.end(),
-      [](const auto& sector) {
-        return local_detail::material_sector(sector);
-      }))
-    return std::nullopt;
-  return combined;
 }
 
 }  // namespace diffexp2

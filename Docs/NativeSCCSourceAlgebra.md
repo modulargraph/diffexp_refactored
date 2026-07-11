@@ -39,7 +39,7 @@ never filled with assumed zeros.
 A prepared sparse matrix stores `(target row, source column, multiplier)`
 records.  Application selects only the referenced source component, performs
 the prepared rational convolution, embeds it into the target component, and
-combines all nonzero terms.  Combination uses
+combines every entry proved nonzero by exact preparation.  Combination uses
 
 ```text
 min power    = minimum input min power
@@ -51,6 +51,12 @@ with explicit epsilon-power alignment.  Identical exact `(a,b,p)` tags are
 merged.  Integer-spaced `a` towers are deliberately not compacted yet:
 compaction is optional, and doing it safely requires proving both the exact
 integer difference and that a finite Taylor shift discards no nonzero tail.
+
+Source presence is structural provenance.  A prepared multiplier carries an
+explicit `proven_zero` fact from exact Wolfram preparation; C++ never infers
+absence from an all-zero Acb slab.  A numerically zero term from an exact
+nonzero coupling still participates in the honest-window intersection,
+matching the Wolfram rule that inexact zeros remain active.
 
 The algebra rejects nonempty error envelopes for now.  Dropping an incoming
 certificate would be incorrect; the future native transport certificate must

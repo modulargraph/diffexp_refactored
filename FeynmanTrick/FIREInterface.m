@@ -696,7 +696,10 @@ Module[{dir, name, fireBin, intFile, result, masters, tablesFile, pn},
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Running FIRE6 to find basis for ", name, "..."];
   ];
-  runFIRE6[fireBin, dir, name];
+  If[runFIRE6[fireBin, dir, name] =!= 0,
+    Print["Error: FIRE6 basis discovery failed."];
+    Return[$Failed];
+  ];
 
   (* Load tables and extract masters *)
   tablesFile = FileNameJoin[{dir, name <> ".tables"}];
@@ -759,7 +762,10 @@ Module[{dir, fireBin, intContent, allSectors, tablesFile, masters, results},
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Running FIRE6 to find basis for ", Length[topologies], " topologies..."];
   ];
-  runFIRE6[fireBin, dir, "batch_basis"];
+  If[runFIRE6[fireBin, dir, "batch_basis"] =!= 0,
+    Print["Error: FIRE6 batch basis discovery failed."];
+    Return[$Failed];
+  ];
 
   (* Load results *)
   tablesFile = FileNameJoin[{dir, "batch_basis.tables"}];
@@ -870,7 +876,10 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
     Print["Reducing ", Length[missingIntegrals], " integrals..."];
   ];
-  runFIRE6[fireBin, dir, name <> "_reduce"];
+  If[runFIRE6[fireBin, dir, name <> "_reduce"] =!= 0,
+    Print["Error: FIRE6 integral reduction failed."];
+    Return[$Failed];
+  ];
 
   (* Load results *)
   tablesFile = FileNameJoin[{dir, name <> "_reduce.tables"}];
@@ -981,7 +990,10 @@ Module[{dir, fireBin, intContent, tablesFile, rules, results, allIntegrals},
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Reducing integrals for ", Length[topoIntegralPairs], " topologies..."];
   ];
-  runFIRE6[fireBin, dir, "batch_reduce"];
+  If[runFIRE6[fireBin, dir, "batch_reduce"] =!= 0,
+    Print["Error: FIRE6 batch integral reduction failed."];
+    Return[$Failed];
+  ];
 
   (* Load results *)
   tablesFile = FileNameJoin[{dir, "batch_reduce.tables"}];

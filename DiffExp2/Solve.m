@@ -16,6 +16,7 @@ BeginPackage["DiffExp2`Solve`",
 
 PrepareChart::usage = "PrepareChart[sys, chart] applies the chart map, runs ChartIndicial, and assembles the ChartSystem (theta matrix, gauge, V/VInv spectral frame, families).";
 SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the FundamentalSystem: one LocalSolution column per indicial sector spec.";
+PrewarmHomogeneousBatch::usage = "PrewarmHomogeneousBatch[{chartSystem1, ...}, req] batches the C++ recurrence work for several boundary-independent chart bases into one native task pool, verifies and assembles each result through the ordinary SolveHomogeneous path, and populates its memo cache. All chart systems must belong to one system/configuration; there is no Wolfram fallback.";
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
@@ -1553,18 +1554,45 @@ cppRunRecursion[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
     cppRunRecursionCore[cs, prep, aT, bT, P, nmax, srcHat, fb, W,
       init, vPrep, responseOverride]]];
 
+(* A Wolfram kernel cannot advance two TransportLine evaluations while a
+   LibraryLink call is blocking.  Homogeneous chart bases are nevertheless
+   independent of the incoming boundary, so the two endpoint arms can
+   collect their already-prepared recurrence requests and execute those in
+   one native task pool.  Capture/injection is deliberately below every
+   exact structural decision: the normal solve is run twice (request pass,
+   then verified assembly pass), and only the native response is supplied
+   on the second pass.  Thus resonance, frame, analytic-regulator, residual,
+   and strict no-fallback semantics remain owned by the ordinary path. *)
+$cppHomogeneousBatchCapture = False;
+$cppHomogeneousBatchInjection = None;
+$cppHomogeneousBatchInjectionUses = 0;
+$cppHomogeneousBatchTag = "DiffExp2CppHomogeneousBatch";
+
+cppConfiguredThreads[count_Integer] := Module[{threads},
+  threads = Quiet[Check[ToExpression[Environment["DE2_CPP_THREADS"]], 4]];
+  If[!IntegerQ[threads] || threads < 1, threads = 4];
+  Min[threads, Max[1, count]]];
+
 cppBatchRecurrences[cs_, prep_, tasks_List, nmax_Integer, fb_Integer,
     W_Integer, vPrep_] := Module[
   {requests, threads, response, results, started = SessionTime[]},
-  threads = Quiet[Check[ToExpression[Environment["DE2_CPP_THREADS"]], 4]];
-  If[!IntegerQ[threads] || threads < 1, threads = 4];
-  threads = Min[threads, Length[tasks]];
+  threads = cppConfiguredThreads[Length[tasks]];
   requests = Map[Function[task,
     Block[{$cppBuildRequestOnly = True},
       cppRunRecursion[cs, prep, task["a"], task["b"], task["P"],
         nmax, None, fb, W, task["Init"], vPrep]]], tasks];
-  response = DiffExp2`CppBackend`RunRequest[
-    <|"batch" -> requests, "threads" -> threads|>];
+  If[TrueQ[$cppHomogeneousBatchCapture],
+    Throw[<|"Requests" -> requests|>, $cppHomogeneousBatchTag]];
+  response = If[AssociationQ[$cppHomogeneousBatchInjection],
+    If[Lookup[$cppHomogeneousBatchInjection, "Requests", None] =!= requests ||
+        !ListQ[Lookup[$cppHomogeneousBatchInjection, "Results", None]],
+      err["E5", cs, <|
+        "Detail" -> "prewarmed C++ recurrence request did not reproduce exactly during verified assembly"|>]];
+    $cppHomogeneousBatchInjectionUses++;
+    <|"status" -> "ok",
+      "results" -> $cppHomogeneousBatchInjection["Results"]|>,
+    DiffExp2`CppBackend`RunRequest[
+      <|"batch" -> requests, "threads" -> threads|>]];
   If[FailureQ[response] || Lookup[response, "status", "error"] =!= "ok" ||
       !ListQ[Lookup[response, "results", None]] ||
       Length[response["results"]] =!= Length[tasks],
@@ -1921,19 +1949,94 @@ certifyPseudoCompensation[cs_, ls_, hits_List, label_] := Module[
    ODEResidualCheck rerun: the identical result already passed it when
    computed. *)
 $shCache = <||>; $shSysTag = None; $shCacheMax = 64;
-SolveHomogeneous[cs_Association, req_Association] := Module[
-  {tag = Lookup[cs, "SystemHash", None], key},
-  key = {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
+homogeneousCacheKey[cs_Association, req_Association] :=
+  {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
     req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
     cfg["RecurrenceBackend"],
     TrueQ[$disableAdaptiveLowerFrames],
     TrueQ[$disableRationalDenominatorFusion],
     TrueQ[$disableGroupedSpectralTransform],
     TrueQ[$disablePolynomialNhatTransform]};
+SolveHomogeneous[cs_Association, req_Association] := Module[
+  {tag = Lookup[cs, "SystemHash", None], key},
+  key = homogeneousCacheKey[cs, req];
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];
   $shCache[key] = solveHomogeneousCore[cs, req]];
+
+PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
+  {systems, tag, keys, uncached, captures, requests, lengths, response,
+   results, offsets, assembled, threads, started = SessionTime[]},
+  If[chartSystems === {}, Return[{}, Module]];
+  If[!AllTrue[chartSystems, AssociationQ],
+    err["E6", <|"Center" -> "homogeneous-batch"|>, <|
+      "Detail" -> "homogeneous batch entries must be prepared ChartSystem associations"|>]];
+  If[cfg["RecurrenceBackend"] =!= "Cpp",
+    err["E6", First[chartSystems], <|
+      "Detail" -> "PrewarmHomogeneousBatch requires RecurrenceBackend -> Cpp; no alternate solver is selected"|>]];
+  If[TrueQ[$disableGroupedSpectralTransform],
+    err["E6", First[chartSystems], <|
+      "Detail" -> "homogeneous native batching requires the production grouped spectral-transform path"|>]];
+  tag = Lookup[First[chartSystems], "SystemHash", None];
+  If[!AllTrue[chartSystems, Lookup[#, "SystemHash", None] === tag &],
+    err["E6", First[chartSystems], <|
+      "Detail" -> "one homogeneous native batch cannot mix different differential systems"|>]];
+  If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
+  (* SolveHomogeneous's key is the authoritative identity.  This also drops
+     the shared anchor chart appearing in both endpoint plans. *)
+  systems = DeleteDuplicatesBy[chartSystems, homogeneousCacheKey[#, req] &];
+  keys = homogeneousCacheKey[#, req] & /@ systems;
+  uncached = Pick[systems, Not /@ (KeyExistsQ[$shCache, #] & /@ keys)];
+  If[uncached === {}, Return[SolveHomogeneous[#, req] & /@ systems, Module]];
+  If[Length[$shCache] + Length[uncached] > $shCacheMax,
+    err["E6", First[uncached], <|
+      "Charts" -> Length[uncached], "CacheLimit" -> $shCacheMax,
+      "Detail" -> "homogeneous batch would exceed the bounded chart cache; submit smaller waves"|>]];
+  captures = Map[Function[cs,
+    Module[{captured = Catch[
+        Block[{$cppHomogeneousBatchCapture = True},
+          SolveHomogeneous[cs, req]], $cppHomogeneousBatchTag]},
+      If[!AssociationQ[captured] ||
+          !ListQ[Lookup[captured, "Requests", None]],
+        err["E5", cs, <|
+          "Detail" -> "homogeneous solve did not yield a capturable C++ recurrence batch"|>]];
+      captured]], uncached];
+  lengths = Length[# ["Requests"]] & /@ captures;
+  If[AnyTrue[lengths, # < 1 &],
+    err["E5", First[uncached], <|
+      "Detail" -> "captured homogeneous recurrence batch was empty"|>]];
+  requests = Flatten[# ["Requests"] & /@ captures, 1];
+  threads = cppConfiguredThreads[Length[requests]];
+  response = DiffExp2`CppBackend`RunRequest[
+    <|"batch" -> requests, "threads" -> threads|>];
+  If[FailureQ[response] || Lookup[response, "status", "error"] =!= "ok" ||
+      !ListQ[Lookup[response, "results", None]] ||
+      Length[response["results"]] =!= Length[requests],
+    err["E5", First[uncached], <|"BackendResponse" -> response,
+      "Detail" -> "combined homogeneous recurrence batch failed"|>]];
+  results = response["results"];
+  offsets = FoldList[Plus, 0, lengths];
+  assembled = MapIndexed[Function[{cs, idx}, Module[
+      {i = First[idx], injection, uses, solved},
+      injection = <|"Requests" -> captures[[i, "Requests"]],
+        "Results" -> Take[results, {offsets[[i]] + 1, offsets[[i + 1]]}]|>;
+      uses = 0;
+      solved = Block[{$cppHomogeneousBatchInjection = injection,
+          $cppHomogeneousBatchInjectionUses = 0},
+        Module[{value = SolveHomogeneous[cs, req]},
+          uses = $cppHomogeneousBatchInjectionUses; value]];
+      If[uses =!= 1,
+        err["E5", cs, <|"InjectionUses" -> uses,
+          "Detail" -> "prewarmed recurrence response was not consumed exactly once"|>]];
+      solved]], uncached];
+  If[Environment["DEBUG_CPP_RECURRENCE"] === "1",
+    Print["CPPARM BATCH ", <|"Charts" -> Length[uncached],
+      "Tasks" -> Length[requests], "Threads" -> threads,
+      "Seconds" -> N[SessionTime[] - started, 6]|>]];
+  (* Return in the caller's deduplicated order; cached entries and the newly
+     verified entries are indistinguishable at this point. *)
+  SolveHomogeneous[#, req] & /@ systems];
 
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;

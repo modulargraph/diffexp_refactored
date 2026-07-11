@@ -11,6 +11,7 @@ tests=(
   "Tests/test_sectorseries.m"
   "Tests/test_solve.m"
   "Tests/test_transport.m"
+  "Tests/test_path_planner_algebraic.m"
   "Tests/test_integrate.m"
   "Tests/test_api.m"
   "Tests/test_pins.m"
@@ -27,6 +28,8 @@ tests=(
   Tests/test_integration_log_depth.m
   Tests/test_multisector_fit.m
   Tests/test_feynmantrick_algebra.m
+  Tests/test_ft_example_specs.m
+  Tests/test_feynmantrick_failure_semantics.m
   Tests/test_feynmantrick_fire.m
   Tests/test_feynmantrick_iteration.m
   Tests/test_feynmantrick_integration_edge_cases.m

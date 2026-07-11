@@ -51,6 +51,8 @@ Run the Wolfram-side parity suite after building:
 ```sh
 DE2_REQUIRE_CPP=1 DE2_CPP_THREADS=4 \
   wolframscript -file Tests/test_cpp_backend.m
+DE2_REQUIRE_CPP=1 DE2_CPP_THREADS=2 \
+  wolframscript -file Tests/test_cpp_arm_batch.m
 ```
 
 `DE2_REQUIRE_CPP=1` makes an unavailable library a test failure instead of a
@@ -90,6 +92,86 @@ It defaults to 4, is clamped to the number of tasks, and does not consume
 additional Wolfram licenses. Use 1 or 2 when memory is tighter. Inhomogeneous
 recurrences are not independent-column batches, and exact symbolic-regulator
 batches currently run single-threaded.
+
+### Lower/upper endpoint arms in one Wolfram kernel
+
+`run_ft_stepwise2.m` can also batch the boundary-independent homogeneous bases
+for corresponding lower/upper endpoint charts. Enable the experimental path
+with `FT_CPP_BATCH_ENDPOINT_ARMS=1` together with
+`DE2_RECURRENCE_BACKEND=Cpp`.
+There is still only one Wolfram evaluator: planning, matching, transport state,
+endpoint limits, integration, and checkpoint writes remain sequential. Before
+the marches, Wolfram prepares one chart from each arm and sends their recurrence
+requests through the same native task pool. The responses are replayed through
+the ordinary `SolveHomogeneous` assembly and ODE certificates and then retained
+in its bounded memo cache. This fills otherwise idle workers for scalar or
+small systems and reduces LibraryLink round trips; a chart that already has at
+least `DE2_CPP_THREADS` independent columns generally cannot gain much from
+cross-arm batching.
+
+The runner submits pair-sized waves, so `DE2_CPP_THREADS` remains the total
+native worker budget rather than multiplying per arm. It only enables this
+schedule when the level dimension is smaller than that budget, and skips a
+single unpaired tail chart or the identical shared anchor: those cases expose
+no idle native worker and the request-collection pass would be pure overhead.
+No subkernel or second Wolfram license is opened. Native
+prewarming is pure cache state and never records a completed arm: the lower
+transport is still written atomically before the upper march, and a resumed
+checkpoint computes only its missing arm. Boundary-dependent value transport
+(`DE2_VALUE_TRANSPORT=1`) intentionally uses the sequential route.
+
+Exact analytic regulators retain the same contract. If a collected request
+uses the symbolic rational-function field, the native dispatcher keeps that
+batch single-threaded; it does not specialize the regulator or fall back to a
+numeric/Wolfram solve.
+
+The scheduling heuristic is measurement-driven. With two native workers, a
+scalar two-endpoint fixture at WP 500, expansion order 50, and epsilon order 5
+took 0.526 s for sequential chart bases and 0.309 s with paired prewarming
+(1.70x). Conversely, forcing the same mechanism on the `banana_L1` fixture
+(`d = 7`) at WP 100, expansion order 20, epsilon order 5, and four workers took
+44.281 s sequentially versus 59.915 s batched (0.74x): each individual chart
+already filled the pool, while request capture/replay added work. Both runs had
+identical sector structure and zero displayed coefficient difference at 114
+and 519 decimal places, respectively. `Scripts/bench_cpp_arm_batch.m`
+reproduces these comparisons.
+
+### Unequal-mass three-loop banana comparison
+
+At the Euclidean point
+
+```text
+m_i^2 = {2, 3/2, 4/3, 1},  p^2 = -1,  d = 2 - 2 eps,
+```
+
+the legacy 15-master route and the Feynman-trick route agree on the scalar
+`I[1,1,1,1]`.  Legacy component 11 uses
+
+```text
+J11 = eps (1 + 3 eps) (1 + 4 eps) Exp[3 EulerGamma eps] I_FT.
+```
+
+The independent two-dimensional Bessel oracle is
+
+```text
+5.83402729266214946740741989567969814964058746213209...
+```
+
+Measured warm-solve results on the development Mac were:
+
+| Route | Numerical settings | Timed scope | Seconds | Finite scalar | Oracle agreement |
+| --- | --- | --- | ---: | --- | ---: |
+| Legacy 15-master C++ | WP250, EO50, eps through 4, CP34, division 3 | exact slice audit, matrix reconstruction, planning, transport | 46.770 | `5.8340272926621494708226551820` | 18.2 digits |
+| Feynman trick C++ | WP500, EO70, finite eps order, extra order 10, halos `0,4,7`, division 3 | analytic deepest boundary and full transport/integration ladder from prepared cache | 390.286 | `5.8340272926621494674057011919652946916` | 20.8 digits |
+
+These are deliberately scoped warm timings. The legacy row excludes FIRE
+matrix generation and generation of its frozen 38-digit equal-mass seed. The
+FT row excludes FIRE/IBP preparation (`FTPREP CACHE HIT`). The legacy run also
+delivers four positive epsilon orders while the FT timing targets the finite
+coefficient, so the rows are not identical workloads; they establish route
+agreement and the practical compiled-transport timing rather than a claim of
+perfectly normalized end-to-end benchmarking. The direct benchmark is
+reproduced by `Scripts/bench_unequal_banana_cpp.m`.
 
 ## Architecture and correctness contract
 

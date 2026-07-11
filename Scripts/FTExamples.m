@@ -4,6 +4,10 @@
    All kinematics are baked in numerically (Euclidean region):
      - bubble/sunrise/banana/banana4/kite: massive lines (m=1),
        p^2 = -1, d = 2-2eps
+     - banana_unequal: squared masses {2,3/2,4/3,1},
+       p^2 = -1, d = 2-2eps
+     - banana4_unequal: squared masses {2,3/2,4/3,5/4,1},
+       p^2 = -1, d = 2-2eps
      - box family + pentagon: massless on-shell legs, d = 4-2eps
        box/box_bubble/box_triangle/double_box_planar: s = -1, t = -1/3
        pentagon: {s12,s23,s34,s45,s15} = {-1,-2,-3,-5,-7}
@@ -13,8 +17,9 @@
    (depends on s only).  box_triangle drops double-box propagator 1 and
    remains a genuine 4-point function of s and t. *)
 
-FTExampleNames[] := {"bubble", "sunrise", "banana", "banana4", "kite",
-  "box", "pentagon", "box_bubble", "box_triangle", "double_box_planar"};
+FTExampleNames[] := {"bubble", "sunrise", "banana", "banana_unequal",
+  "banana4", "banana4_unequal", "kite", "box", "pentagon", "box_bubble",
+  "box_triangle", "double_box_planar"};
 
 FTExampleDoubleBoxPropagators[] := {
   -Global`l1^2,
@@ -80,6 +85,22 @@ FTExampleSpec[name_String] := Switch[name,
       "Replacements" -> {Global`p^2 -> -1},
       "Dimension" -> 2 - 2*FeynmanTrick`FTeps
     |>,
+  (* The constants are squared masses: FIRE and the FT algebra use the
+     propagator convention D_j = m_j^2 - q_j^2.  This is the Euclidean
+     point mm={2,3/2,4/3,1}, psq=-1 of the legacy unequal-mass family. *)
+  "banana_unequal",
+    <|
+      "LoopMomenta" -> {Global`l1, Global`l2, Global`l3},
+      "ExternalMomenta" -> {Global`p},
+      "Propagators" -> {
+        2 - Global`l1^2,
+        3/2 - Global`l2^2,
+        4/3 - Global`l3^2,
+        1 - (-Global`l1 - Global`l2 - Global`l3 + Global`p)^2
+      },
+      "Replacements" -> {Global`p^2 -> -1},
+      "Dimension" -> 2 - 2*FeynmanTrick`FTeps
+    |>,
   "banana4",
     <|
       "LoopMomenta" -> {Global`l1, Global`l2, Global`l3, Global`l4},
@@ -89,6 +110,22 @@ FTExampleSpec[name_String] := Switch[name,
         1 - Global`l2^2,
         1 - Global`l3^2,
         1 - Global`l4^2,
+        1 - (-Global`l1 - Global`l2 - Global`l3 - Global`l4 + Global`p)^2
+      },
+      "Replacements" -> {Global`p^2 -> -1},
+      "Dimension" -> 2 - 2*FeynmanTrick`FTeps
+    |>,
+  (* Four-loop unequal-mass Euclidean showcase.  As above, these constants
+     are squared masses in D_j = m_j^2-q_j^2. *)
+  "banana4_unequal",
+    <|
+      "LoopMomenta" -> {Global`l1, Global`l2, Global`l3, Global`l4},
+      "ExternalMomenta" -> {Global`p},
+      "Propagators" -> {
+        2 - Global`l1^2,
+        3/2 - Global`l2^2,
+        4/3 - Global`l3^2,
+        5/4 - Global`l4^2,
         1 - (-Global`l1 - Global`l2 - Global`l3 - Global`l4 + Global`p)^2
       },
       "Replacements" -> {Global`p^2 -> -1},

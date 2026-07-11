@@ -342,20 +342,30 @@ pipelineResult[plan_Association, process_Association] := Module[
     "StandardOutput" -> stdout, "StandardError" -> stderr
   |>];
 
-runPlan[plan_, asynchronous_] := Module[{process},
+processCommand[plan_Association] := Module[{envProgram, assignments},
+  envProgram = If[$OperatingSystem === "Windows", None, "/usr/bin/env"];
+  If[!StringQ[envProgram] || !FileExistsQ[envProgram],
+    Return[failure[
+      "the pipeline facade currently requires /usr/bin/env for inherited-environment execution",
+      <|"OperatingSystem" -> $OperatingSystem|>], Module]];
+  assignments = KeyValueMap[#1 <> "=" <> #2 &,
+    KeySort[plan["Environment"]]];
+  Join[{envProgram}, assignments, plan["Command"]]];
+
+runPlan[plan_, asynchronous_] := Module[{process, command},
   If[FailureQ[plan], Return[plan, Module]];
+  command = processCommand[plan];
+  If[FailureQ[command], Return[command, Module]];
   If[TrueQ[asynchronous],
-    process = Quiet[Check[StartProcess[plan["Command"],
-      ProcessDirectory -> plan["WorkingDirectory"],
-      ProcessEnvironment -> plan["Environment"]], $Failed]];
+    process = Quiet[Check[StartProcess[command,
+      ProcessDirectory -> plan["WorkingDirectory"]], $Failed]];
     If[Head[process] =!= ProcessObject,
       Return[failure["could not start the pipeline subprocess",
         <|"Plan" -> plan|>], Module]];
     <|"Schema" -> $pipelineProcessSchema, "Status" -> "Running",
       "Process" -> process, "Plan" -> plan|>,
-    process = Quiet[Check[RunProcess[plan["Command"], All,
-      ProcessDirectory -> plan["WorkingDirectory"],
-      ProcessEnvironment -> plan["Environment"]], $Failed]];
+    process = Quiet[Check[RunProcess[command, All,
+      ProcessDirectory -> plan["WorkingDirectory"]], $Failed]];
     If[!AssociationQ[process],
       Return[failure["pipeline subprocess could not be executed",
         <|"Plan" -> plan|>], Module]];

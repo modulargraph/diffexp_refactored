@@ -47,6 +47,13 @@ assert["epsilon coefficient",
 assert["epsilon coefficient list",
   DiffExp2`EpsilonCoefficientList[epsValue, -1, 1] === {2, 3, 5}];
 
+aliasSystem = DiffExp2`LoadSystem[<|
+  "Matrix" -> {{Global`\[Epsilon]/(1 - Global`x)}},
+  "Variable" -> Global`x|>];
+assert["public ingestion canonicalizes epsilon aliases",
+  FreeQ[aliasSystem["Matrix"], Global`\[Epsilon]] &&
+  !FreeQ[aliasSystem["Matrix"], Global`eps]];
+
 ls = <|
   "Center" -> 0,
   "ChartMap" -> <|"Center" -> 0, "Scale" -> 1|>,
@@ -86,6 +93,8 @@ assert["piecewise solution is inspectable",
   piecewise["Schema"] === "DiffExp2.PiecewiseSolution/v1" &&
   Length[piecewise["Segments"]] === 1 &&
   Head[piecewise["Function"]] === Function];
+assert["transport result exposes its honest epsilon window",
+  DiffExp2`EpsilonWindow[mockResult] === ls["EpsWindow"]];
 
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Exit[1], Exit[0]];

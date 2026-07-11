@@ -36,7 +36,19 @@ assert["fast transport settings are explicit",
 assert["epsilon halos serialize deterministically",
   plan["Environment", "FT_LEVEL_EPS_HALOS"] === "0,4"];
 assert["argv does not use a shell",
-  ListQ[plan["Command"]] && plan["Command"][[2]] === "-file"];
+  ListQ[plan["Command"]] && plan["Command"][[1]] === "wolframscript" &&
+    plan["Command"][[2]] === "-file"];
+
+storageDirectory = FileNameJoin[{$TemporaryDirectory,
+  "ft-pipeline-storage-plan"}];
+storagePlan = FeynmanTrick`PipelinePlan["bubble",
+  "PersistentFIREStorage" -> True,
+  "FIREStorageDirectory" -> storageDirectory];
+assert["persistent FIRE storage is represented in the typed plan",
+  AssociationQ[storagePlan] &&
+    storagePlan["Environment", "FT_PERSISTENT_FIRE_STORAGE"] === "1" &&
+    storagePlan["Environment", "FT_FIRE_STORAGE_DIR"] ===
+      ExpandFileName[storageDirectory]];
 
 checkpoint = CreateTemporary[];
 resume = FeynmanTrick`PipelinePlan["bubble",

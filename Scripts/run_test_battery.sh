@@ -38,6 +38,7 @@ tests=(
   Tests/test_feynmantrick_iteration.m
   Tests/test_feynmantrick_integration_edge_cases.m
   Tests/test_feynmantrick_pipeline.m
+  Tests/test_ft_pipeline_process.m
   Tests/test_feynmantrick_endtoend.m
 )
 

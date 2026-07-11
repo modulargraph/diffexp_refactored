@@ -43,6 +43,9 @@ de2Error[id_String, detail_, payload_:<||>] :=
   DiffExp2`Tolerances`DE2Error[id, Join[
     <|"Module" -> "PublicAPI", "Detail" -> detail|>, payload]];
 
+canonicalizeEps[expr_] := expr /.
+  Global`\[Epsilon] -> DiffExp2`Config`CanonicalEps[];
+
 (* Configuration is stateful by design, but only Config.m owns the state.
    The low-level implementation loader retains its Wolfram-reference default
    for its focused tests.  The RELEASE umbrella injects Cpp unless the user
@@ -97,12 +100,12 @@ loadSystemFile[file_String, variable_] := Module[{var},
   var = Replace[variable, Automatic :> variableFromFullFile[file]];
   If[!MatchQ[var, _Symbol],
     de2Error["E6", "\"Variable\" must be a Symbol", <|"Variable" -> var|>]];
-  systemRecord[DiffExp2`API`LoadSystem[
-    <|"FullMatrixFile" -> ExpandFileName[file], "Variable" -> var|>],
+  systemRecord[canonicalizeEps[DiffExp2`API`LoadSystem[
+    <|"FullMatrixFile" -> ExpandFileName[file], "Variable" -> var|>]],
     ExpandFileName[file]]];
 
 DiffExp2`LoadSystem[spec_Association, OptionsPattern[]] := Module[{sys},
-  sys = DiffExp2`API`LoadSystem[spec];
+  sys = canonicalizeEps[DiffExp2`API`LoadSystem[spec]];
   systemRecord[sys, Lookup[spec, "FullMatrixFile", "InMemory"]]];
 
 DiffExp2`LoadSystem[path_String, OptionsPattern[]] := Module[{fullFiles},
@@ -124,7 +127,7 @@ systemWithExtraFactors[sys_Association, extra_] := Module[{var, clean},
   If[!ListQ[extra],
     de2Error["E8", "\"ExtraSingularFactors\" must be a list",
       <|"Value" -> extra|>]];
-  clean = Select[extra, !FreeQ[#, var] &];
+  clean = canonicalizeEps[Select[extra, !FreeQ[#, var] &]];
   Join[sys, <|"ExtraSingularFactors" -> clean|>]];
 
 DiffExp2`PlanLine[sys_Association, {from_, to_}, OptionsPattern[]] := Module[
@@ -140,7 +143,8 @@ Options[DiffExp2`TransportLine] = Options[DiffExp2`PlanLine];
 transportResult[sys_, boundary_, plan_] := Module[{transportSystem, raw},
   transportSystem = systemWithExtraFactors[sys,
     Lookup[plan, "ExtraSingularFactors", {}]];
-  raw = DiffExp2`Transport`TransportLine[transportSystem, boundary, plan];
+  raw = DiffExp2`Transport`TransportLine[transportSystem,
+    canonicalizeEps[boundary], plan];
   Join[raw, <|
     "Schema" -> "DiffExp2.TransportResult/v1",
     "From" -> plan["From"], "To" -> plan["To"], "Plan" -> plan
@@ -256,7 +260,8 @@ DiffExp2`EndpointLimit[result_Association, weights_:Automatic] := Module[{ls},
 Options[DiffExp2`IntegrateLine] = Options[DiffExp2`API`LineIntegral];
 DiffExp2`IntegrateLine[sys_Association, boundary_, from_, {lo_, hi_},
     coefficients_List, opts:OptionsPattern[]] :=
-  DiffExp2`API`LineIntegral[sys, boundary, from, {lo, hi}, coefficients, opts];
+  DiffExp2`API`LineIntegral[sys, canonicalizeEps[boundary], from, {lo, hi},
+    canonicalizeEps[coefficients], opts];
 
 (* ---- honest epsilon-window accessors ---- *)
 
@@ -267,6 +272,10 @@ epsValue[obj_] := Which[
   True, obj];
 
 DiffExp2`EpsilonWindow[obj_List] := DiffExp2`EpsilonWindow /@ obj;
+DiffExp2`EpsilonWindow[obj_Association] /;
+    KeyExistsQ[obj, "EpsWindow"] := obj["EpsWindow"];
+DiffExp2`EpsilonWindow[obj_Association] /;
+    KeyExistsQ[obj, "Final"] := DiffExp2`EpsilonWindow[obj["Final"]];
 DiffExp2`EpsilonWindow[obj_] := Module[{value = epsValue[obj]},
   If[!DiffExp2`EpsSeries`ESQ[value],
     de2Error["ERR-WINDOW-READ", "object is not an EpsSeries or evaluation record"]];

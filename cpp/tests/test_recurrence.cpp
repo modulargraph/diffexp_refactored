@@ -152,6 +152,64 @@ void test_symbolic_rational_field() {
         rate.str().find("rho") != std::string::npos);
 }
 
+boost::json::object json_request(const std::string& request) {
+  return boost::json::parse(diffexp2::run_recurrence_json(request)).as_object();
+}
+
+void test_persistent_operator_session() {
+  const auto created = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"rational",
+    "output_digits":30,"analytic":{"regulators":[],"branch":"euclidean"}
+  })json");
+  const auto session = std::string(created.at("session").as_string());
+  const auto prepared = json_request(std::string(R"json({
+    "schema":2,"op":"chart.prepare","session":")json") + session + R"json(",
+    "key":"exp@0[-2,8]","identity":"exact-exp-v1",
+    "analytic":{"prescription":"none"},
+    "scc":{"components":[[0]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0],"coupling_depth":0},
+    "problem":{"domain":"rational","d":1,"fb":-2,"w":8,
+      "d_lags":[[{"s":0,"v":"1"}]],"denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],"val":[null]},
+        {"poly":[{"s":0,"e":[[0,0,"1"]]}],"rat":[],"val":[0]}],
+      "d0_inverse":"1","blocks":[[0]],"assembly":null,
+      "chop_digits":10}
+  })json");
+  const auto chart = std::string(prepared.at("chart").as_string());
+  const auto solved = json_request(std::string(R"json({
+    "schema":2,"op":"chart.solve","session":")json") + session +
+    R"json(","chart":")json" + chart + R"json(","run":{
+      "nmax":2,"p":0,"has_initial":true,"adaptive_probe":false,
+      "a_target":"0","b_target":"0","a_shift_min":0,
+      "a_shifts":["0","1","2"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}],
+        [{"case":"T","da":"1","db":"0"}],
+        [{"case":"T","da":"2","db":"0"}]],
+      "initial":["0","0","1","0","0","0","0","0"],
+      "initial_validity":[5],"source":null,"return_u":true}
+  })json");
+  const auto stats = json_request(std::string(R"json({
+    "schema":2,"op":"session.stats","session":")json") + session + "\"}");
+  check("persistent typed operator prepares and solves without static copies",
+        prepared.at("status") == "ok" && solved.at("status") == "ok" &&
+        solved.at("persistent").as_object().at("static_tensor_copies") == 0 &&
+        stats.at("runs") == 1 && stats.at("static_tensor_copies") == 0);
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") + session + "\"}");
+
+  const auto acb = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"acb",
+    "precision_bits":128,"output_digits":30})json");
+  const auto incompatible = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"acb",
+    "precision_bits":256,"output_digits":30})json");
+  check("persistent Acb sessions reject incompatible simultaneous precision",
+        acb.at("status") == "ok" && incompatible.at("status") == "error");
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") +
+    std::string(acb.at("session").as_string()) + "\"}");
+}
+
 }  // namespace
 
 int main() {
@@ -161,6 +219,7 @@ int main() {
   test_json_error_contract();
   test_malformed_tensor_is_typed_error();
   test_symbolic_rational_field();
+  test_persistent_operator_session();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

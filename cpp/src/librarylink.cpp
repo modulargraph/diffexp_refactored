@@ -32,7 +32,9 @@ DLLEXPORT mint WolframLibrary_getVersion() { return WolframLibraryVersion; }
 DLLEXPORT int WolframLibrary_initialize(WolframLibraryData) {
   return LIBRARY_NO_ERROR;
 }
-DLLEXPORT void WolframLibrary_uninitialize(WolframLibraryData) {}
+DLLEXPORT void WolframLibrary_uninitialize(WolframLibraryData) {
+  diffexp2::reset_solver_sessions();
+}
 
 DLLEXPORT int de2BackendInfo(WolframLibraryData lib_data, mint,
                              MArgument*, MArgument result) {

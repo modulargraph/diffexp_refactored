@@ -128,6 +128,56 @@ struct RecurrenceProblem {
   bool return_u = true;
 };
 
+/* Immutable chart/window data shared by every recurrence run for that
+   prepared operator.  Keeping this separate from RecurrenceProblem is
+   load-bearing for persistent sessions: high-precision coefficient tensors
+   must not be copied once per homogeneous column or SCC source sector. */
+template <typename Scalar>
+struct PreparedRecurrenceOperator {
+  std::uint32_t dimension = 0;
+  std::int32_t frame_base = 0;
+  std::uint32_t frame_width = 0;
+  std::vector<std::vector<ScalarShift<Scalar>>> d_lags;
+  std::vector<PreparedLag<Scalar>> nhat_lags;
+  std::vector<std::vector<Scalar>> rational_denominators;
+  std::optional<Scalar> d0_inverse_scalar;
+  std::vector<JordanBlock> blocks;
+  std::optional<PreparedMatrix<Scalar>> assembly_matrix;
+  std::int32_t chop_digits = 0;
+};
+
+template <typename Scalar>
+struct RecurrenceOperatorView {
+  std::uint32_t dimension;
+  std::int32_t frame_base;
+  std::uint32_t frame_width;
+  const std::vector<std::vector<ScalarShift<Scalar>>>& d_lags;
+  const std::vector<PreparedLag<Scalar>>& nhat_lags;
+  const std::vector<std::vector<Scalar>>& rational_denominators;
+  const std::optional<Scalar>& d0_inverse_scalar;
+  const std::vector<JordanBlock>& blocks;
+  const std::optional<PreparedMatrix<Scalar>>& assembly_matrix;
+  std::int32_t chop_digits;
+};
+
+template <typename Scalar>
+RecurrenceOperatorView<Scalar> recurrence_operator_view(
+    const RecurrenceProblem<Scalar>& problem) {
+  return {problem.dimension, problem.frame_base, problem.frame_width,
+          problem.d_lags, problem.nhat_lags,
+          problem.rational_denominators, problem.d0_inverse_scalar,
+          problem.blocks, problem.assembly_matrix, problem.chop_digits};
+}
+
+template <typename Scalar>
+RecurrenceOperatorView<Scalar> recurrence_operator_view(
+    const PreparedRecurrenceOperator<Scalar>& prepared) {
+  return {prepared.dimension, prepared.frame_base, prepared.frame_width,
+          prepared.d_lags, prepared.nhat_lags,
+          prepared.rational_denominators, prepared.d0_inverse_scalar,
+          prepared.blocks, prepared.assembly_matrix, prepared.chop_digits};
+}
+
 template <typename Scalar>
 struct PseudoHit {
   std::uint32_t n = 0;
@@ -276,13 +326,14 @@ FrameBlock<Scalar> apply_matrix(const MatrixShift<Scalar>& matrix,
 template <typename Scalar>
 FrameBlock<Scalar> matrix_shift_product(const MatrixShift<Scalar>& matrix,
                                         const FrameBlock<Scalar>& input,
-                                        const RecurrenceProblem<Scalar>& p) {
-  if (p.adaptive_lower_frame_probe && matrix.shift < 0) {
-    return shift_block(apply_matrix(matrix, input, p.dimension), matrix.shift,
-                       p.frame_base);
+                                        const RecurrenceOperatorView<Scalar>& op,
+                                        bool adaptive_lower_frame_probe) {
+  if (adaptive_lower_frame_probe && matrix.shift < 0) {
+    return shift_block(apply_matrix(matrix, input, op.dimension), matrix.shift,
+                       op.frame_base);
   }
   return apply_matrix(matrix,
-      shift_block(input, matrix.shift, p.frame_base), p.dimension);
+      shift_block(input, matrix.shift, op.frame_base), op.dimension);
 }
 
 template <typename Scalar>
@@ -292,38 +343,38 @@ FrameBlock<Scalar> divide_rational(const FrameBlock<Scalar>& rhs,
 template <typename Scalar>
 FrameBlock<Scalar> apply_prepared_matrix(
     const PreparedMatrix<Scalar>& matrix, const FrameBlock<Scalar>& input,
-    const RecurrenceProblem<Scalar>& p) {
+    const RecurrenceOperatorView<Scalar>& op) {
   if (matrix.identity) return input;
-  std::vector<std::int32_t> input_valuations(p.dimension, kCompleteInfinity);
-  for (std::uint32_t c = 0; c < p.dimension; ++c)
-    input_valuations[c] = frame_valuation(input[c], p.frame_base);
-  for (std::uint32_t r = 0; r < p.dimension; ++r) {
-    for (std::uint32_t c = 0; c < p.dimension; ++c) {
-      const auto mv = matrix.valuations[static_cast<std::size_t>(r) * p.dimension + c];
+  std::vector<std::int32_t> input_valuations(op.dimension, kCompleteInfinity);
+  for (std::uint32_t c = 0; c < op.dimension; ++c)
+    input_valuations[c] = frame_valuation(input[c], op.frame_base);
+  for (std::uint32_t r = 0; r < op.dimension; ++r) {
+    for (std::uint32_t c = 0; c < op.dimension; ++c) {
+      const auto mv = matrix.valuations[static_cast<std::size_t>(r) * op.dimension + c];
       const auto uv = input_valuations[c];
       if (mv != kCompleteInfinity && uv != kCompleteInfinity &&
-          static_cast<std::int64_t>(mv) + uv < p.frame_base) {
+          static_cast<std::int64_t>(mv) + uv < op.frame_base) {
         throw RecurrenceError("E4",
             "prepared matrix product would discard lower-epsilon content",
-            p.frame_base, mv);
+            op.frame_base, mv);
       }
     }
   }
-  auto out = zero_block<Scalar>(p.dimension, p.frame_width);
+  auto out = zero_block<Scalar>(op.dimension, op.frame_width);
   for (const auto& shifted_matrix : matrix.polynomial) {
-    auto value = apply_matrix(shifted_matrix, input, p.dimension);
-    value = shift_block(value, shifted_matrix.shift, p.frame_base);
+    auto value = apply_matrix(shifted_matrix, input, op.dimension);
+    value = shift_block(value, shifted_matrix.shift, op.frame_base);
     add_block_inplace(out, value);
   }
   for (const auto& group : matrix.rational) {
-    auto numerator = zero_block<Scalar>(p.dimension, p.frame_width);
+    auto numerator = zero_block<Scalar>(op.dimension, op.frame_width);
     for (const auto& shifted_matrix : group.numerator) {
-      auto value = apply_matrix(shifted_matrix, input, p.dimension);
-      value = shift_block(value, shifted_matrix.shift, p.frame_base);
+      auto value = apply_matrix(shifted_matrix, input, op.dimension);
+      value = shift_block(value, shifted_matrix.shift, op.frame_base);
       add_block_inplace(numerator, value);
     }
     add_block_inplace(out, divide_rational(numerator,
-        p.rational_denominators.at(group.denominator_index)));
+        op.rational_denominators.at(group.denominator_index)));
   }
   return out;
 }
@@ -503,14 +554,23 @@ template <typename Scalar>
 class RecurrenceSolver {
  public:
   explicit RecurrenceSolver(const RecurrenceProblem<Scalar>& problem)
-      : p_(problem), d_(problem.dimension), nmax_(problem.nmax),
-        logs_(0), width_(problem.frame_width),
+      : RecurrenceSolver(problem, recurrence_operator_view(problem)) {}
+
+  RecurrenceSolver(const RecurrenceProblem<Scalar>& problem,
+                   const PreparedRecurrenceOperator<Scalar>& prepared)
+      : RecurrenceSolver(problem, recurrence_operator_view(prepared)) {}
+
+ private:
+  RecurrenceSolver(const RecurrenceProblem<Scalar>& problem,
+                   RecurrenceOperatorView<Scalar> op)
+      : p_(problem), op_(op), d_(op.dimension), nmax_(problem.nmax),
+        logs_(0), width_(op.frame_width),
         frame_top_(0), result_{} {
     validate_problem();
     logs_ = problem.log_max + 2;
     frame_top_ = static_cast<std::int32_t>(
-        static_cast<std::int64_t>(problem.frame_base) +
-        static_cast<std::int64_t>(problem.frame_width) - 1);
+        static_cast<std::int64_t>(op_.frame_base) +
+        static_cast<std::int64_t>(op_.frame_width) - 1);
     const auto u_count = checked_tensor_size(
         {static_cast<std::size_t>(nmax_) + 1, logs_, d_, width_},
         "recurrence coefficient tensor");
@@ -520,22 +580,23 @@ class RecurrenceSolver {
     result_.u.assign(u_count, ScalarTraits<Scalar>::zero());
     result_.validity.assign(validity_count, kCompleteInfinity);
     result_.top_valid = kCompleteInfinity;
-    if (!p_.d0_inverse_scalar.has_value()) {
+    if (!op_.d0_inverse_scalar.has_value()) {
       Frame<Scalar> d0(width_, ScalarTraits<Scalar>::zero());
-      for (const auto& item : p_.d_lags.front()) {
+      for (const auto& item : op_.d_lags.front()) {
         const auto index = static_cast<std::int64_t>(item.shift) -
-                           p_.frame_base;
+                           op_.frame_base;
         if (index < 0 || index >= static_cast<std::int64_t>(width_)) {
           throw RecurrenceError("E5", "d0 shift outside work frame");
         }
         d0[static_cast<std::size_t>(index)] = item.value;
       }
-      inv_d0_frame_ = detail::invert_frame(d0, p_.frame_base);
+      inv_d0_frame_ = detail::invert_frame(d0, op_.frame_base);
     } else {
       inv_d0_frame_ = detail::zero_frame<Scalar>(width_);
     }
   }
 
+ public:
   RecurrenceResult<Scalar> run() {
     seed_initial();
     const std::uint32_t n0 = p_.has_initial ? 1 : 0;
@@ -609,17 +670,19 @@ class RecurrenceSolver {
                                     const FrameBlock<Scalar>& input) const {
     auto out = detail::zero_block<Scalar>(d_, width_);
     for (const auto& matrix : lag.polynomial) {
-      detail::add_block_inplace(out, detail::matrix_shift_product(matrix, input, p_));
+      detail::add_block_inplace(out, detail::matrix_shift_product(
+          matrix, input, op_, p_.adaptive_lower_frame_probe));
     }
     for (const auto& group : lag.rational) {
       auto numerator = detail::zero_block<Scalar>(d_, width_);
       for (const auto& matrix : group.numerator) {
         detail::add_block_inplace(numerator,
-            detail::matrix_shift_product(matrix, input, p_));
+            detail::matrix_shift_product(
+                matrix, input, op_, p_.adaptive_lower_frame_probe));
       }
       detail::add_block_inplace(out,
           detail::divide_rational(numerator,
-              p_.rational_denominators.at(group.denominator_index)));
+              op_.rational_denominators.at(group.denominator_index)));
     }
     return out;
   }
@@ -666,22 +729,22 @@ class RecurrenceSolver {
     // fuse equal denominators across lags in a later optimization; this form
     // is coefficient-identical and keeps every per-contribution underflow
     // witness before any cancellation.
-    const auto max_nhat = std::min<std::uint32_t>(n, p_.nhat_lags.size() - 1);
+    const auto max_nhat = std::min<std::uint32_t>(n, op_.nhat_lags.size() - 1);
     for (std::uint32_t j = 1; j <= max_nhat; ++j) {
       const auto input = get_block(n - j, log);
-      detail::add_block_inplace(acc, apply_nhat_lag(p_.nhat_lags[j], input));
-      update_nhat_validity(acc_valid, p_.nhat_lags[j], get_validity(n - j, log));
+      detail::add_block_inplace(acc, apply_nhat_lag(op_.nhat_lags[j], input));
+      update_nhat_validity(acc_valid, op_.nhat_lags[j], get_validity(n - j, log));
     }
 
-    const auto max_d = std::min<std::uint32_t>(n, p_.d_lags.size() - 1);
+    const auto max_d = std::min<std::uint32_t>(n, op_.d_lags.size() - 1);
     for (std::uint32_t j = 1; j <= max_d; ++j) {
       const auto input = get_block(n - j, log);
       const auto above = get_block(n - j, log + 1);
       auto term = detail::scale_block(input, a_shift(static_cast<std::int32_t>(n - j)));
       detail::add_block_inplace(term,
-          detail::shift_block(detail::scale_block(input, p_.b_target), 1, p_.frame_base));
+          detail::shift_block(detail::scale_block(input, p_.b_target), 1, op_.frame_base));
       detail::add_block_inplace(term,
-          detail::shift_block(above, 1, p_.frame_base));
+          detail::shift_block(above, 1, op_.frame_base));
 
       const auto input_valid = get_validity(n - j, log);
       const auto above_valid = get_validity(n - j, log + 1);
@@ -697,8 +760,8 @@ class RecurrenceSolver {
         term_valid[r] = std::min({va, vb, vl});
       }
 
-      for (const auto& scalar_shift : p_.d_lags[j]) {
-        auto shifted = detail::shift_block(term, scalar_shift.shift, p_.frame_base);
+      for (const auto& scalar_shift : op_.d_lags[j]) {
+        auto shifted = detail::shift_block(term, scalar_shift.shift, op_.frame_base);
         shifted = detail::scale_block(shifted, scalar_shift.value);
         detail::sub_block_inplace(acc, shifted);
         for (std::uint32_t r = 0; r < d_; ++r) {
@@ -713,9 +776,9 @@ class RecurrenceSolver {
         if (n < j) continue;
         auto source = source_at(n - j, log);
         if (!source.has_value()) continue;
-        for (const auto& scalar_shift : p_.d_lags[j]) {
+        for (const auto& scalar_shift : op_.d_lags[j]) {
           auto shifted = detail::shift_block(source->first,
-                                              scalar_shift.shift, p_.frame_base);
+                                              scalar_shift.shift, op_.frame_base);
           shifted = detail::scale_block(shifted, scalar_shift.value);
           detail::add_block_inplace(acc, shifted);
           for (std::uint32_t r = 0; r < d_; ++r) {
@@ -736,9 +799,9 @@ class RecurrenceSolver {
     const auto above = get_block(n, log + 1);
     const auto above_valid = get_validity(n, log + 1);
     const auto eps_above = detail::shift_block(
-        detail::shift_block(above, 1, p_.frame_base), 0, p_.frame_base);
-    for (const auto& scalar_shift : p_.d_lags.front()) {
-      auto shifted = detail::shift_block(eps_above, scalar_shift.shift, p_.frame_base);
+        detail::shift_block(above, 1, op_.frame_base), 0, op_.frame_base);
+    for (const auto& scalar_shift : op_.d_lags.front()) {
+      auto shifted = detail::shift_block(eps_above, scalar_shift.shift, op_.frame_base);
       shifted = detail::scale_block(shifted, scalar_shift.value);
       detail::sub_block_inplace(rhs, shifted);
       for (std::uint32_t r = 0; r < d_; ++r) {
@@ -749,8 +812,8 @@ class RecurrenceSolver {
 
     auto current = get_block(n, log);
     auto current_valid = get_validity(n, log);
-    for (std::size_t bi = 0; bi < p_.blocks.size(); ++bi) {
-      const auto& block = p_.blocks[bi];
+    for (std::size_t bi = 0; bi < op_.blocks.size(); ++bi) {
+      const auto& block = op_.blocks[bi];
       const auto& step = p_.schedule[n][bi];
       if (step.kind == StepCase::Resonant) continue;
       FrameBlock<Scalar> block_rhs;
@@ -760,7 +823,7 @@ class RecurrenceSolver {
         block_valid.push_back(rhs_valid[col]);
       }
       const auto solved = detail::solve_jordan(block_rhs, step,
-          p_.d0_inverse_scalar, inv_d0_frame_, p_.frame_base);
+          op_.d0_inverse_scalar, inv_d0_frame_, op_.frame_base);
       for (std::size_t r = 0; r < block.columns.size(); ++r) {
         current[block.columns[r]] = solved[r];
         std::int32_t solved_valid = kCompleteInfinity;
@@ -795,8 +858,8 @@ class RecurrenceSolver {
   void solve_resonant(std::uint32_t n,
                       const std::vector<FrameBlock<Scalar>>& r_blocks,
                       const std::vector<std::vector<std::int32_t>>& r_valid) {
-    for (std::size_t bi = 0; bi < p_.blocks.size(); ++bi) {
-      const auto& block = p_.blocks[bi];
+    for (std::size_t bi = 0; bi < op_.blocks.size(); ++bi) {
+      const auto& block = op_.blocks[bi];
       if (p_.schedule[n][bi].kind != StepCase::Resonant) continue;
       const auto q = block.columns.size();
       std::vector<FrameBlock<Scalar>> rt;
@@ -808,8 +871,8 @@ class RecurrenceSolver {
           selected.push_back(r_blocks[log][col]);
           selected_valid.push_back(r_valid[log][col]);
         }
-        rt.push_back(detail::apply_inv_d0(selected, p_.d0_inverse_scalar,
-                                          inv_d0_frame_, p_.frame_base));
+        rt.push_back(detail::apply_inv_d0(selected, op_.d0_inverse_scalar,
+                                          inv_d0_frame_, op_.frame_base));
         rtv.push_back(std::move(selected_valid));
       }
 
@@ -824,7 +887,7 @@ class RecurrenceSolver {
 
       for (std::uint32_t log = 0; log < p_.log_max; ++log) {
         assigned[log + 1][q - 1] =
-            detail::divide_epsilon(rt[log][q - 1], p_.frame_base);
+            detail::divide_epsilon(rt[log][q - 1], op_.frame_base);
         assigned_valid[log + 1][q - 1] =
             detail::valid_shift(rtv[log][q - 1], -1, frame_top_);
         present[log + 1][q - 1] = 1;
@@ -880,7 +943,7 @@ class RecurrenceSolver {
     if (d_ == 0 || width_ == 0) throw RecurrenceError("E5", "zero recurrence dimension");
     if (p_.log_max > std::numeric_limits<std::uint32_t>::max() - 2)
       throw RecurrenceError("E5", "logarithmic depth exceeds uint32 range");
-    const auto frame_top = static_cast<std::int64_t>(p_.frame_base) +
+    const auto frame_top = static_cast<std::int64_t>(op_.frame_base) +
                            static_cast<std::int64_t>(width_) - 1;
     if (frame_top < std::numeric_limits<std::int32_t>::min() ||
         frame_top > std::numeric_limits<std::int32_t>::max())
@@ -889,9 +952,9 @@ class RecurrenceSolver {
         {static_cast<std::size_t>(nmax_) + 1,
          static_cast<std::size_t>(p_.log_max) + 2, d_, width_},
         "recurrence coefficient tensor");
-    if (p_.d_lags.empty() || p_.nhat_lags.empty())
+    if (op_.d_lags.empty() || op_.nhat_lags.empty())
       throw RecurrenceError("E5", "missing prepared recurrence lags");
-    if (p_.d_lags.front().empty())
+    if (op_.d_lags.front().empty())
       throw RecurrenceError("E5", "prepared d0 lag is empty");
     if (p_.a_shift_min > 0 ||
         static_cast<std::int64_t>(p_.a_shift_min) +
@@ -901,7 +964,7 @@ class RecurrenceSolver {
     if (p_.schedule.size() != nmax_ + 1)
       throw RecurrenceError("E5", "invalid block-step schedule height");
     for (const auto& row : p_.schedule) {
-      if (row.size() != p_.blocks.size())
+      if (row.size() != op_.blocks.size())
         throw RecurrenceError("E5", "invalid block-step schedule width");
     }
     if (p_.has_initial) {
@@ -941,32 +1004,32 @@ class RecurrenceSolver {
     };
     const auto validate_groups = [&](const auto& owner) {
       for (const auto& group : owner.rational) {
-        if (group.denominator_index >= p_.rational_denominators.size())
+        if (group.denominator_index >= op_.rational_denominators.size())
           throw RecurrenceError("E5", "rational group denominator index is out of range");
       }
     };
-    for (const auto& denominator : p_.rational_denominators) {
+    for (const auto& denominator : op_.rational_denominators) {
       if (denominator.empty() || ScalarTraits<Scalar>::is_zero(denominator.front()))
         throw RecurrenceError("E5", "rational denominator has zero constant term");
     }
-    for (const auto& lag : p_.d_lags)
+    for (const auto& lag : op_.d_lags)
       for (const auto& item : lag) validate_shift(item.shift);
-    for (const auto& lag : p_.nhat_lags) {
+    for (const auto& lag : op_.nhat_lags) {
       if (lag.valuations.size() != matrix_size)
         throw RecurrenceError("E5", "malformed Nhat valuation tensor");
       validate_groups(lag);
       validate_matrix_shifts(lag);
     }
-    if (p_.assembly_matrix.has_value()) {
-      if (p_.assembly_matrix->valuations.size() != matrix_size)
+    if (op_.assembly_matrix.has_value()) {
+      if (op_.assembly_matrix->valuations.size() != matrix_size)
         throw RecurrenceError("E5", "malformed assembly valuation tensor");
-      validate_groups(*p_.assembly_matrix);
-      validate_matrix_shifts(*p_.assembly_matrix);
+      validate_groups(*op_.assembly_matrix);
+      validate_matrix_shifts(*op_.assembly_matrix);
     } else if (!p_.return_u) {
       throw RecurrenceError("E5", "request suppresses U without compiled assembly");
     }
     std::vector<std::uint8_t> covered(d_, 0);
-    for (const auto& block : p_.blocks) {
+    for (const auto& block : op_.blocks) {
       if (block.columns.empty()) throw RecurrenceError("E5", "empty Jordan block");
       for (const auto col : block.columns) {
         if (col >= d_)
@@ -997,6 +1060,7 @@ class RecurrenceSolver {
   }
 
   const RecurrenceProblem<Scalar>& p_;
+  RecurrenceOperatorView<Scalar> op_;
   std::uint32_t d_, nmax_, logs_, width_;
   std::int32_t frame_top_;
   RecurrenceResult<Scalar> result_;
@@ -1004,57 +1068,59 @@ class RecurrenceSolver {
 };
 
 template <typename Scalar>
-AssembledResult<Scalar> assemble_recurrence(
-    const RecurrenceProblem<Scalar>& p, const RecurrenceResult<Scalar>& result) {
-  if (!p.assembly_matrix.has_value())
+AssembledResult<Scalar> assemble_recurrence_with_operator(
+    const RecurrenceOperatorView<Scalar>& op,
+    const RecurrenceProblem<Scalar>& p,
+    const RecurrenceResult<Scalar>& result) {
+  if (!op.assembly_matrix.has_value())
     throw RecurrenceError("E5", "compiled assembly matrix is missing");
-  const auto& matrix = *p.assembly_matrix;
+  const auto& matrix = *op.assembly_matrix;
   const std::uint32_t logs = p.log_max + 2;
   const std::int32_t frame_top =
-      p.frame_base + static_cast<std::int32_t>(p.frame_width) - 1;
+      op.frame_base + static_cast<std::int32_t>(op.frame_width) - 1;
   const auto u_index = [&](std::uint32_t n, std::uint32_t log,
                            std::uint32_t component, std::uint32_t eps) {
-    return ((((static_cast<std::size_t>(n) * logs) + log) * p.dimension +
-             component) * p.frame_width + eps);
+    return ((((static_cast<std::size_t>(n) * logs) + log) * op.dimension +
+             component) * op.frame_width + eps);
   };
   const auto v_index = [&](std::uint32_t n, std::uint32_t log,
                            std::uint32_t component) {
-    return ((static_cast<std::size_t>(n) * logs + log) * p.dimension + component);
+    return ((static_cast<std::size_t>(n) * logs + log) * op.dimension + component);
   };
 
   // Store transformed frames only for the physical log levels 0..P.
   std::vector<Scalar> transformed(
       static_cast<std::size_t>(p.nmax + 1) * (p.log_max + 1) *
-          p.dimension * p.frame_width,
+          op.dimension * op.frame_width,
       ScalarTraits<Scalar>::zero());
   std::vector<std::int32_t> transformed_validity(
-      static_cast<std::size_t>(p.nmax + 1) * (p.log_max + 1) * p.dimension,
+      static_cast<std::size_t>(p.nmax + 1) * (p.log_max + 1) * op.dimension,
       kCompleteInfinity);
   const auto t_index = [&](std::uint32_t n, std::uint32_t log,
                            std::uint32_t component, std::uint32_t eps) {
     return ((((static_cast<std::size_t>(n) * (p.log_max + 1)) + log) *
-             p.dimension + component) * p.frame_width + eps);
+             op.dimension + component) * op.frame_width + eps);
   };
   const auto tv_index = [&](std::uint32_t n, std::uint32_t log,
                             std::uint32_t component) {
     return ((static_cast<std::size_t>(n) * (p.log_max + 1) + log) *
-            p.dimension + component);
+            op.dimension + component);
   };
 
   std::int32_t complete_max = kCompleteInfinity;
   for (std::uint32_t n = 0; n <= p.nmax; ++n) {
     for (std::uint32_t log = 0; log <= p.log_max; ++log) {
-      auto input = detail::zero_block<Scalar>(p.dimension, p.frame_width);
-      for (std::uint32_t c = 0; c < p.dimension; ++c)
-        for (std::uint32_t k = 0; k < p.frame_width; ++k)
+      auto input = detail::zero_block<Scalar>(op.dimension, op.frame_width);
+      for (std::uint32_t c = 0; c < op.dimension; ++c)
+        for (std::uint32_t k = 0; k < op.frame_width; ++k)
           input[c][k] = result.u[u_index(n, log, c, k)];
-      const auto output = detail::apply_prepared_matrix(matrix, input, p);
-      for (std::uint32_t r = 0; r < p.dimension; ++r) {
-        for (std::uint32_t k = 0; k < p.frame_width; ++k)
+      const auto output = detail::apply_prepared_matrix(matrix, input, op);
+      for (std::uint32_t r = 0; r < op.dimension; ++r) {
+        for (std::uint32_t k = 0; k < op.frame_width; ++k)
           transformed[t_index(n, log, r, k)] = output[r][k];
         std::int32_t row_valid = kCompleteInfinity;
-        for (std::uint32_t c = 0; c < p.dimension; ++c) {
-          const auto mv = matrix.valuations[static_cast<std::size_t>(r) * p.dimension + c];
+        for (std::uint32_t c = 0; c < op.dimension; ++c) {
+          const auto mv = matrix.valuations[static_cast<std::size_t>(r) * op.dimension + c];
           if (mv != kCompleteInfinity) {
             row_valid = std::min(row_valid, detail::valid_shift(
                 result.validity[v_index(n, log, c)], mv, frame_top));
@@ -1068,12 +1134,12 @@ AssembledResult<Scalar> assemble_recurrence(
   if (complete_max == kCompleteInfinity) complete_max = frame_top;
 
   std::optional<std::uint32_t> first_nonzero;
-  for (std::uint32_t k = 0; k < p.frame_width && !first_nonzero.has_value(); ++k) {
+  for (std::uint32_t k = 0; k < op.frame_width && !first_nonzero.has_value(); ++k) {
     for (std::uint32_t n = 0; n <= p.nmax && !first_nonzero.has_value(); ++n) {
       for (std::uint32_t log = 0; log <= p.log_max && !first_nonzero.has_value(); ++log) {
-        for (std::uint32_t r = 0; r < p.dimension; ++r) {
+        for (std::uint32_t r = 0; r < op.dimension; ++r) {
           if (!ScalarTraits<Scalar>::certified_zero(
-                  transformed[t_index(n, log, r, k)], p.chop_digits)) {
+                  transformed[t_index(n, log, r, k)], op.chop_digits)) {
             first_nonzero = k;
             break;
           }
@@ -1082,12 +1148,12 @@ AssembledResult<Scalar> assemble_recurrence(
     }
   }
   const std::int32_t min_power = first_nonzero.has_value()
-      ? p.frame_base + static_cast<std::int32_t>(*first_nonzero)
+      ? op.frame_base + static_cast<std::int32_t>(*first_nonzero)
       : complete_max;
   if (first_nonzero.has_value() && complete_max < min_power) {
     throw RecurrenceError("E6",
         "compiled assembly exhausted completeness below stored content",
-        p.frame_base, 0);
+        op.frame_base, 0);
   }
 
   AssembledResult<Scalar> assembled;
@@ -1096,22 +1162,38 @@ AssembledResult<Scalar> assemble_recurrence(
   const auto count = static_cast<std::size_t>(complete_max - min_power + 1);
   assembled.coefficients.reserve(
       static_cast<std::size_t>(p.log_max + 1) * count *
-      (p.nmax + 1) * p.dimension);
+      (p.nmax + 1) * op.dimension);
   for (std::uint32_t log = 0; log <= p.log_max; ++log) {
     for (std::int32_t power = min_power; power <= complete_max; ++power) {
-      const auto k = power - p.frame_base;
+      const auto k = power - op.frame_base;
       for (std::uint32_t n = 0; n <= p.nmax; ++n) {
-        for (std::uint32_t r = 0; r < p.dimension; ++r) {
+        for (std::uint32_t r = 0; r < op.dimension; ++r) {
           Scalar value = ScalarTraits<Scalar>::zero();
-          if (k >= 0 && k < static_cast<std::int32_t>(p.frame_width))
+          if (k >= 0 && k < static_cast<std::int32_t>(op.frame_width))
             value = transformed[t_index(n, log, r, static_cast<std::uint32_t>(k))];
           assembled.coefficients.push_back(
-              ScalarTraits<Scalar>::canonicalized(value, p.chop_digits));
+              ScalarTraits<Scalar>::canonicalized(value, op.chop_digits));
         }
       }
     }
   }
   return assembled;
+}
+
+template <typename Scalar>
+AssembledResult<Scalar> assemble_recurrence(
+    const RecurrenceProblem<Scalar>& p, const RecurrenceResult<Scalar>& result) {
+  return assemble_recurrence_with_operator(
+      recurrence_operator_view(p), p, result);
+}
+
+template <typename Scalar>
+AssembledResult<Scalar> assemble_recurrence(
+    const PreparedRecurrenceOperator<Scalar>& prepared,
+    const RecurrenceProblem<Scalar>& p,
+    const RecurrenceResult<Scalar>& result) {
+  return assemble_recurrence_with_operator(
+      recurrence_operator_view(prepared), p, result);
 }
 
 }  // namespace diffexp2

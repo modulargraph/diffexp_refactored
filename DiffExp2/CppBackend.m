@@ -16,12 +16,15 @@ RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-graine
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
 RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
+PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
+PersistentSCCStatistics::usage = "PersistentSCCStatistics[handle] returns statistics and exact metadata for a retained native SCC chart.";
+ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
-ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart-handle registry.";
+ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart and SCC handle registries.";
 PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
 DecodeScalar::usage = "DecodeScalar[encoded, precision] reconstructs a Wolfram scalar from a C++ rational or Acb midpoint/radius record with honest Accuracy.";
 DecodeScalars::usage = "DecodeScalars[encodedList, precision] reconstructs a list of C++ rational or Acb scalar records in bounded parser batches, preserving DecodeScalar semantics and falling back elementwise for mixed or malformed input.";
@@ -36,8 +39,10 @@ $runFunction = None;
 $infoFunction = None;
 $persistentSessionCache = <||>;
 $persistentChartCache = <||>;
+$persistentSCCCache = <||>;
 $persistentPreparedTokenCache = <||>;
 $persistentChartCacheMax = 1024;
+$persistentSCCCacheMax = 128;
 
 libraryCandidates[] := DeleteDuplicates[Select[{
     Quiet[Environment["DE2_CPP_LIBRARY"]],
@@ -360,15 +365,18 @@ ReleasePersistentPreparedToken[token_String] := Module[{keys},
   Null];
 
 persistentCloseSessionHandle[handle_String] := Module[
-  {sessionKeys, chartKeys, activeTokens},
+  {sessionKeys, chartKeys, sccKeys, activeTokens},
   Quiet[Check[RunRequest[<|"schema" -> 2, "op" -> "session.close",
       "session" -> handle|>], Null]];
   sessionKeys = Keys@Select[$persistentSessionCache,
     Lookup[#, "Handle", None] === handle &];
   chartKeys = Keys@Select[$persistentChartCache,
     Lookup[#, "Session", None] === handle &];
+  sccKeys = Keys@Select[$persistentSCCCache,
+    Lookup[#, "Session", None] === handle &];
   KeyDropFrom[$persistentSessionCache, sessionKeys];
   KeyDropFrom[$persistentChartCache, chartKeys];
+  KeyDropFrom[$persistentSCCCache, sccKeys];
   activeTokens = DeleteDuplicates@Select[
     Lookup[Values[$persistentChartCache], "PreparedToken", None], StringQ];
   $persistentPreparedTokenCache = KeyTake[
@@ -389,7 +397,8 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
   {missingStatic, missingRun, domain, symbols, precisionBits, outputDigits,
    systemIdentity, sessionAnalytic, chartAnalytic, scc, static, run,
    sessionSignature, sessionKey, sessionEntry, sessionResponse, session,
-   chartIdentity, chartSignature, chartKey, chartEntry, chartResponse, chart,
+   chartIdentity, chartIdentityString, chartSignature, chartKey, chartEntry,
+   chartResponse, chart,
    preparedToken, createRequest, prepareRequest},
   missingStatic = Complement[$persistentStaticKeys, Keys[request]];
   missingRun = Complement[$persistentRunKeys, Keys[request]];
@@ -426,6 +435,7 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     createRequest = Join[<|"schema" -> 2, "op" -> "session.create",
         "domain" -> domain, "output_digits" -> outputDigits,
         "chart_capacity" -> $persistentChartCacheMax,
+        "scc_capacity" -> $persistentSCCCacheMax,
         "analytic" -> sessionAnalytic|>,
       If[domain === "acb", <|"precision_bits" -> precisionBits|>, <||>],
       If[domain === "symbolic", <|"symbols" -> symbols|>, <||>]];
@@ -439,6 +449,7 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
   static = KeyTake[request, $persistentStaticKeys];
   run = KeyTake[request, $persistentRunKeys];
   chartIdentity = metadata["ChartIdentity"];
+  chartIdentityString = persistentIdentityString[chartIdentity];
   preparedToken = Lookup[metadata, "PreparedToken", None];
   (* Solve's static-payload cache supplies a stable content token only after
      proving equality against its complete prepared tensor.  This module also
@@ -462,7 +473,7 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     prepareRequest = <|"schema" -> 2, "op" -> "chart.prepare",
       "session" -> session,
       "key" -> ("chart:" <> IntegerString[chartKey, 16, 64]),
-      "identity" -> persistentIdentityString[chartIdentity],
+      "identity" -> chartIdentityString,
       "analytic" -> chartAnalytic, "scc" -> scc,
       "problem" -> static|>;
     chartResponse = RunRequest[prepareRequest];
@@ -470,11 +481,15 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     chart = chartResponse["chart"];
     AssociateTo[$persistentChartCache, chartKey -> <|
       "Signature" -> chartSignature, "Session" -> session,
-      "Handle" -> chart, "PreparedToken" -> preparedToken|>],
+      "Handle" -> chart, "Identity" -> chartIdentityString,
+      "PreparedToken" -> preparedToken|>],
     chartEntry = persistentTouchChart[chartKey, chartEntry];
-    chart = chartEntry["Handle"]];
+    chart = chartEntry["Handle"];
+    chartIdentityString = Lookup[chartEntry, "Identity",
+      chartIdentityString]];
 
   <|"Session" -> session, "Chart" -> chart, "Run" -> run,
+    "ChartIdentity" -> chartIdentityString,
     "Static" -> static, "OutputDigits" -> outputDigits|>];
 
 RunPersistentRequest[request_Association, metadata_Association] := Module[
@@ -537,7 +552,8 @@ preparePersistentRequestGroup[group_Association] := Module[
   jobs = Map[<|"chart" -> prepared["Chart"],
       "run" -> KeyTake[#, $persistentRunKeys],
       "output_digits" -> outputDigits|> &, requests];
-  <|"Session" -> prepared["Session"], "Jobs" -> jobs|>];
+  <|"Session" -> prepared["Session"], "Chart" -> prepared["Chart"],
+    "ChartIdentity" -> prepared["ChartIdentity"], "Jobs" -> jobs|>];
 
 RunPersistentRequestGroups[groups_List, threads_Integer] := Module[
   {prepared, failures, sessions, jobs},
@@ -559,6 +575,137 @@ RunPersistentRequestGroups[groups_List, threads_Integer] := Module[
   RunRequest[<|"schema" -> 2, "op" -> "session.solve_many",
     "session" -> First[sessions], "threads" -> threads,
     "jobs" -> jobs|>]];
+
+(* Native SCC keys are hashes of the complete JSON-bound manifest, including
+   the actual retained chart handles and exact chart identity strings.  Sort
+   object keys recursively so caller Association insertion order cannot
+   perturb that key. *)
+persistentCanonicalJSONValue[value_Association] := Association@Map[
+  Function[key, key -> persistentCanonicalJSONValue[value[key]]],
+  Sort[Keys[value]]];
+persistentCanonicalJSONValue[value_List] :=
+  persistentCanonicalJSONValue /@ value;
+persistentCanonicalJSONValue[value_] := value;
+
+persistentSCCOpaqueHandle[entry_Association] := <|
+  "Session" -> entry["Session"], "SCC" -> entry["Handle"],
+  "Key" -> entry["NativeKey"]|>;
+
+persistentSCCHandles[handle_Association] := Module[{session, scc},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  scc = Lookup[handle, "scc", Lookup[handle, "SCC", None]];
+  If[!StringQ[session] || !StringQ[scc],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC handle requires exact session and SCC tokens"|>],
+      Module]];
+  <|"Session" -> session, "SCC" -> scc|>];
+
+PreparePersistentSCC[groups_List, manifest_Association] := Module[
+  {requiredKeys = {"identity", "parent", "blocks", "couplings"},
+   reservedBlockKeys = {"chart", "principal_identity"}, blocks,
+   badBlockPositions, preparedGroups = {}, prepared, sessions, session,
+   filledBlocks, filledManifest, canonicalManifest, manifestJSON,
+   nativeKey, cacheKey, cacheSignature, cacheEntry, response, scc},
+  If[groups === {} || !AllTrue[groups, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC preparation requires a nonempty list of request groups"|>],
+      Module]];
+  If[Sort[Keys[manifest]] =!= Sort[requiredKeys],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC manifest must contain exactly the lowercase native fields",
+      "ExpectedKeys" -> requiredKeys, "ActualKeys" -> Keys[manifest]|>],
+      Module]];
+  blocks = manifest["blocks"];
+  If[!StringQ[manifest["identity"]] ||
+      StringLength[manifest["identity"]] == 0 ||
+      !AssociationQ[manifest["parent"]] || !ListQ[blocks] ||
+      !AllTrue[blocks, AssociationQ] || !ListQ[manifest["couplings"]],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC identity, parent, blocks, or couplings has the wrong native JSON type"|>],
+      Module]];
+  If[Length[blocks] =!= Length[groups],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC requires exactly one request group per manifest block",
+      "Groups" -> Length[groups], "Blocks" -> Length[blocks]|>], Module]];
+  badBlockPositions = Select[Range[Length[blocks]], Function[index,
+    AnyTrue[reservedBlockKeys,
+      Function[key, KeyExistsQ[blocks[[index]], key]]]]];
+  If[badBlockPositions =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC input blocks must omit chart and principal_identity",
+      "BlockPositions" -> badBlockPositions|>], Module]];
+
+  Do[
+    prepared = preparePersistentRequestGroup[group];
+    If[FailureQ[prepared] || !AssociationQ[prepared] ||
+        !StringQ[Lookup[prepared, "Session", None]] ||
+        !StringQ[Lookup[prepared, "Chart", None]] ||
+        !StringQ[Lookup[prepared, "ChartIdentity", None]],
+      Return[prepared, Module]];
+    preparedGroups = Append[preparedGroups, prepared],
+    {group, groups}];
+  sessions = DeleteDuplicates[preparedGroups[[All, "Session"]]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "all persistent SCC diagonal charts must belong to one solver session",
+      "Sessions" -> sessions|>], Module]];
+  session = First[sessions];
+  filledBlocks = MapThread[Join[#1, <|"chart" -> #2["Chart"],
+        "principal_identity" -> #2["ChartIdentity"]|>] &,
+    {blocks, preparedGroups}];
+  filledManifest = <|"identity" -> manifest["identity"],
+    "parent" -> manifest["parent"], "blocks" -> filledBlocks,
+    "couplings" -> manifest["couplings"]|>;
+  canonicalManifest = persistentCanonicalJSONValue[filledManifest];
+  manifestJSON = Quiet[Check[ExportString[canonicalManifest, "RawJSON",
+      "Compact" -> True], $Failed]];
+  If[manifestJSON === $Failed,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "could not serialize the complete persistent SCC manifest"|>], Module]];
+  nativeKey = "scc-manifest:" <>
+    IntegerString[Hash[manifestJSON, "SHA256"], 16, 64];
+  cacheKey = Hash[{session, nativeKey}, "SHA256"];
+  cacheSignature = {session, nativeKey, manifestJSON};
+  cacheEntry = persistentCacheLookup[$persistentSCCCache, cacheKey,
+    cacheSignature, "SCC"];
+  If[FailureQ[cacheEntry], Return[cacheEntry, Module]];
+  If[AssociationQ[cacheEntry],
+    Return[persistentSCCOpaqueHandle[cacheEntry], Module]];
+  (* SCC handles are public lifetime tokens.  Do not invalidate an older
+     opaque handle by silently evicting it as the internal chart cache does. *)
+  If[Length[$persistentSCCCache] >= $persistentSCCCacheMax,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC cache capacity is exhausted; release an SCC handle before preparing another",
+      "Capacity" -> $persistentSCCCacheMax|>], Module]];
+  response = RunRequest[Join[<|"schema" -> 2, "op" -> "scc.prepare",
+      "session" -> session, "key" -> nativeKey|>, canonicalManifest]];
+  If[!persistentCommandOKQ[response], Return[response, Module]];
+  scc = Lookup[response, "scc", None];
+  If[!StringQ[scc],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC preparation returned no native SCC handle"|>], Module]];
+  cacheEntry = <|"Signature" -> cacheSignature, "Session" -> session,
+    "Handle" -> scc, "NativeKey" -> nativeKey|>;
+  AssociateTo[$persistentSCCCache, cacheKey -> cacheEntry];
+  persistentSCCOpaqueHandle[cacheEntry]];
+
+PersistentSCCStatistics[handle_Association] := Module[
+  {tokens = persistentSCCHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "scc.stats",
+    "session" -> tokens["Session"], "scc" -> tokens["SCC"]|>]];
+
+ReleasePersistentSCC[handle_Association] := Module[
+  {tokens = persistentSCCHandles[handle], response, keys},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  response = RunRequest[<|"schema" -> 2, "op" -> "scc.release",
+    "session" -> tokens["Session"], "scc" -> tokens["SCC"]|>];
+  If[persistentCommandOKQ[response],
+    keys = Keys@Select[$persistentSCCCache,
+      Lookup[#, "Session", None] === tokens["Session"] &&
+        Lookup[#, "Handle", None] === tokens["SCC"] &];
+    KeyDropFrom[$persistentSCCCache, keys]];
+  response];
 
 (* A native local handle is deliberately represented only by its owning
    session and process-local local token.  Accept both the lower-case native
@@ -617,6 +764,7 @@ ClearPersistentSessions[] := Module[{handles},
       "op" -> "session.close", "session" -> handle|>], Null]]], handles];
   $persistentSessionCache = <||>;
   $persistentChartCache = <||>;
+  $persistentSCCCache = <||>;
   $persistentPreparedTokenCache = <||>;
   Null];
 

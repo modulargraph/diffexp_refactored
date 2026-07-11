@@ -549,6 +549,10 @@ FiniteLaurentVector<Scalar> solve_finite_laurent_system(
     }
 
     for (std::size_t row = position + 1; row < size; ++row) {
+      const auto below_pivot = finite_laurent_leading_power(
+          matrix[row][position],
+          context + ": below-pivot elimination entry");
+      if (!below_pivot.has_value()) continue;
       const auto factor = finite_laurent_quotient(
           matrix[row][position], matrix[position][position],
           context + ": elimination quotient");

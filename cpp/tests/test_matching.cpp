@@ -95,6 +95,20 @@ void quotient_and_solve_smoke() {
             weights[1].coefficient(0) == Rational(1) &&
             reconstructed[0].coefficient(0) == Rational(2) &&
             reconstructed[1].coefficient(1) == Rational(1));
+
+  const auto wide_one = frame(0, {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+  const auto wide_zero = frame(0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+  const auto short_zero = frame(0, {0, 0, 0, 0, 0});
+  const auto triangular = diffexp2::solve_finite_laurent_system<Rational>(
+      {{wide_one, wide_zero}, {short_zero, wide_one}},
+      {frame(0, {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
+       frame(0, {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})},
+      "certified-zero triangular smoke");
+  check("certified-zero below pivot does not shorten completeness",
+        triangular[0].complete_max() == 10 &&
+            triangular[1].complete_max() == 10 &&
+            triangular[0].coefficient(0) == Rational(1) &&
+            triangular[1].coefficient(0) == Rational(2));
 }
 
 void ambiguous_acb_pivot_smoke() {
@@ -119,6 +133,6 @@ int main() {
   transformation_support_smoke();
   quotient_and_solve_smoke();
   ambiguous_acb_pivot_smoke();
-  std::cout << "Results: " << (6 - failed) << " / 6 tests passed\n";
+  std::cout << "Results: " << (7 - failed) << " / 7 tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

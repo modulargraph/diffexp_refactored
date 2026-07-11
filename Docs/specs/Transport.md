@@ -25,8 +25,8 @@ where sector tags collide, asserting ord_eps det F = 0 afterwards), applies
 the explicit crossing operator (phase times unipotent log-chain mixing,
 convention pinned to the old principal-branch-far-side rules) when the path
 passes a singular chart center, runs the two-point full-vs-reduced-order
-error probe per segment, and maintains honest EpsWindow/TWindow/
-ErrorEstimate metadata end-to-end with no silent fallback anywhere.
+tail probe per segment, and maintains honest EpsWindow/TWindow plus explicitly
+labelled heuristic-tail metadata end-to-end with no silent fallback anywhere.
 
 ---
 
@@ -272,9 +272,9 @@ Loop body per chart (in plan order):
    GetLargestTerm/MaxCouplingOrder discount, LineSegmentation.m:109-113,
    is waived in the LessonsLedger as "subsumed: exact polynomial
    recursion + ErrorEstimate covers it").
-5. `SegmentErrorProbe` (2.10); accumulate additively into the running
-   ErrorEstimate array; LOUD ERROR E10 when any entry > 1
-   (old Transport.m:991-993).
+5. `SegmentErrorProbe` (2.10); retain its epsilon window and accumulate the
+   heuristic tail by epsilon power.  It is diagnostic by default, not a
+   rigorous transported-error certificate and not an unconditional abort.
 6. Advance.  At a singular chart the marching continues on the far side;
    the side flip is recorded so step 2 of the NEXT chart applies the
    crossing.
@@ -506,20 +506,23 @@ Transport.m:905-993:
   The 0.51 radius is deliberately outside the planner/API's accepted
   half-radius envelope and never the chart center, where log-bearing terms
   vanish spuriously.
-- The per-epsorder error is `|full - reduced|`; the marching call takes the
+- The per-epsorder diagnostic is `|full - reduced|`; the marching call takes the
   maximum over the two regular-chart signs before accumulation.
-- Accumulation across segments is ADDITIVE into
-  `TransportResult["ErrorEstimate"]` (old Transport.m:980-984); abort > 1 is
-  E10.  Seeding: when `boundary` carries no error data the seed is exact 0
-  with `"ErrorSeeded" -> False` metadata — the old Accuracy[]-based seeding
-  and PadRight zero-padding (Transport.m:583-591) are FORBIDDEN (F11).
+- Accumulation across segments is additive and aligned by the explicit
+  epsilon power, never by raw list position.  The output is labelled
+  `"HeuristicFullVsReduced"` and carries `"ErrorEstimateWindow"`.  The old
+  dimensionless `Max[accumulated] > 1` abort is not retained: the proxy is
+  absolute, is not propagated by a transfer sensitivity, and is therefore
+  not a proof of transport failure.  Seeding from input `Accuracy[]` remains
+  forbidden.
 - Per-segment digit check: when AccuracyGoalValidate is enabled (any
   non-False value; default False per DEC-5) and AccuracyGoal is numeric,
   the per-segment error must satisfy err <= 10^-DigitsNeeded; violation =
   LOUD ERROR E11 naming the segment and the order increase that would be
-  needed.  (DEC-11: AccuracyGoalValidate is demoted to validation-only;
+  requested.  (DEC-11: AccuracyGoalValidate is demoted to validation-only;
   the old adaptive Before/After machinery is NOT ported — Config's table
-  records the waiver "replaced by exact recursion + ErrorEstimate gate".
+  records the waiver "replaced by exact recurrence plus explicit opt-in
+  post-hoc tail validation".
   See section 9 cuts.)
 
 ---
@@ -541,9 +544,8 @@ LocalSolution = <|
               new core — recursion matrices are exact polynomials; the
               old MaxCouplingOrder/ISafetyExpansionSubtract discount is
               waived in the LessonsLedger *)
-  "ErrorEstimate" -> per (eps-order) accumulated error (two-point
-              full-vs-reduced-order probe, additive across segments,
-              abort > 1 — ported old machinery, user-facing),
+  "ErrorEstimate" -> local per-epsilon metadata aligned to this object's
+              EpsWindow,
   "Prescriptions" -> LIST of <|"Factor", "Sign", "Multiplicity",
               "LeadingCoeffSign"|> with the derived chart Im-sign;
               consistency-checked at construction (even multiplicity = no
@@ -612,7 +614,9 @@ SegmentPlan = <|
 TransportResult = <|
   "Values"   -> vals[[integral, epsorder]]      (* regular endpoint *)
    | "Solution" -> LocalSolution,               (* singular endpoint *)
-  "ErrorEstimate" -> errs[[integral, epsorder]] (* additive, per 2.10 *),
+  "ErrorEstimate" -> epsilon-aligned accumulated full-vs-reduced heuristic,
+  "ErrorEstimateWindow" -> <|"Min", "CompleteMax"|>,
+  "ErrorEstimateKind" -> "HeuristicFullVsReduced",
   "ErrorSeeded" -> True | False,
   "EpsWindow" -> as 3.1, "TWindow" -> as 3.1,
   "SegmentCount" -> n
@@ -663,7 +667,8 @@ I8  Precision: after input raising (section 6, L1), every numeric input has
     Accuracy >= 2*WP at entry, and all evaluation blocks run under
     $MinPrecision = WP (old Pade.m:34,70,80) with $MaxExtraPrecision
     headroom (old Mobius.m:39).
-I9  ErrorEstimate entries are monotone nondecreasing across segments.
+I9  ErrorEstimate entries are monotone nondecreasing for each explicitly
+    aligned epsilon power across segments.
 I10 Regular chart <=> exactly one sector (a=0, b=0, p=0) PER HOMOGENEOUS
     basis column (RewritePlan 3.1, scope per math finding 8: ODE solutions
     only).  DEC-6 alignment: at a regular chart Indicial returns ONE
@@ -749,10 +754,9 @@ E8  PRESCRIPTION CONFLICT OR MISSING.  Fires when the chart is multivalued
 E9  CROSSING WITHOUT SIGN.  ApplyCrossing invoked with CrossSign None on a
     chart with multivalued content (should be unreachable given E8; kept as
     a cheap assert).  Carries: chart label, sector tags.
-E10 ERROR ESTIMATE > 1.  Any accumulated ErrorEstimate entry exceeds 1.
-    Carries: chart label of the segment that tipped it, the (integral,
-    eps-order) entry, the per-segment and accumulated values.  (Port of old
-    Transport.m:991-993.)
+E10 NON-FINITE ERROR DIAGNOSTIC.  Reserved for a malformed/non-finite tail
+    diagnostic.  A finite full-vs-reduced proxy exceeding the dimensionless
+    constant 1 is not an error.
 E11 SEGMENT ACCURACY MISS.  AccuracyGoalValidate enabled (DEC-11
     validation-only semantics; DEC-5 default False), AccuracyGoal numeric,
     and a segment's probe error > 10^-DigitsNeeded.  Carries: chart label,
@@ -852,10 +856,10 @@ F15 Falling back from the exact `FindSingularities` root set to a numeric
 | DiffExp/Transport.m:635-655, 679, 1041-1046 | predivision pole intervals at ±RoC/DivisionOrder | match-point placement, 2.3 |
 | DiffExp/Transport.m:1124-1136 | FixWithin midpoint clipping before a singular chart | preserved, 2.3 |
 | DiffExp/Transport.m:1147-1168 | regular-step next center via FindNextCenterPointL/R | `NextCenter` (2.4) |
-| DiffExp/Transport.m:776-841, 1191-1213 | AccuracyGoalValidate "Before" adaptive order search / "After" redo | NOT ported; replaced by E11 (DEC-11 validation-only; Config's table records the waiver "replaced by exact recursion + ErrorEstimate gate") |
+| DiffExp/Transport.m:776-841, 1191-1213 | AccuracyGoalValidate "Before" adaptive order search / "After" redo | NOT ported; replaced by opt-in E11 post-hoc validation (DEC-11); no silent order change |
 | DiffExp/Transport.m:287-441 (in IntegrateSystem) | boundary fixing: equations, LinearSolve, least-squares rescue, NullSpace free params | `MatchWeights` (2.7) + E5/E6/E7; rescue/NullSpace forbidden F6/F7 |
 | DiffExp/Transport.m:317-327 | FixAt != 0 coefficient extraction by differentiation through nested SeriesData | obsolete: exact tags + SectorSeries evaluation |
-| DiffExp/Transport.m:905-993 | SEval1/SEval2 evaluation + two-point error probe + per-indeterminate errors + abort > 1 | `SegmentErrorProbe` (2.10) + E10 |
+| DiffExp/Transport.m:905-993 | SEval1/SEval2 evaluation + two-point error probe + per-indeterminate errors + abort > 1 | `SegmentErrorProbe` (2.10); epsilon-aligned heuristic retained, unconditional absolute abort retired |
 | DiffExp/Transport.m:947-962 | ComputeErrorsPerIndeterminate | inside 2.10 |
 | DiffExp/Transport.m:1234-1246 | return association | TransportResult (3.4) via API.m |
 | DiffExp/LineSegmentation.m:65-106 `FindMatrixSingularities` | factor collection, Quiet Solve, chop dedup, ghost projection | `FindSingularities` (2.1); F3/F4 |
@@ -1088,9 +1092,11 @@ T16 `test_error_probe_closed_form`
     Sum[(1/3)^n, {n, 8, 10}] == 13/59049 exactly (relative to evaluation
     precision).  With boundary data v + c*w (symbolic c): separate error
     entries for the c-coefficient and the constant part.
-T17 `test_error_abort`
-    Inject a segment error of 2 (test hook on the probe): E10 fires naming
-    the segment and the (integral, eps-order) entry.
+T17 `test_error_window_alignment_and_opt_in_validation`
+    Combine two probe records with different epsilon minima and assert each
+    power is accumulated in the correct row.  With default
+    `AccuracyGoalValidate -> False`, a finite proxy of 2 is recorded without
+    abort.  With an explicit numeric goal and validation enabled, E11 fires.
 T18 `test_twindow_coupling`
     Solve metadata CouplingDepth = 3 at ExpansionOrder 20:
     TWindow["CompleteMax"] == 18; probe decrement == Ceiling[0.7*3] + 2

@@ -17,7 +17,7 @@ TransportLine::usage = "TransportLine[sys, boundary, plan] runs the marching loo
 ValidatePlan::usage = "ValidatePlan[plan] statically audits the chart chain: every incoming match point (the shared chartMatchPoint formula) must lie inside both adjacent physical disks and their half-radius error-probe envelopes; singular handoffs must approach from the correct side. Loud E8 on violation; returns the plan.";
 MatchWeights::usage = "MatchWeights[basisValues, incoming, label] solves the eps-graded (Laurent) weight system with loud residual asserts.";
 ApplyCrossing::usage = "ApplyCrossing[ls, sigma] applies the crossing operator (phase times unipotent log-chain mixing) so the far side evaluates at positive chart coordinate.";
-SegmentErrorProbe::usage = "SegmentErrorProbe[ls, tOut, couplingDepth] gives the full-vs-reduced evaluation error per eps order.";
+SegmentErrorProbe::usage = "SegmentErrorProbe[ls, tOut, couplingDepth] gives the heuristic full-vs-reduced evaluation difference per eps order. Transport retains its explicit epsilon window and does not treat the proxy as a rigorous certificate by default.";
 
 Begin["`Private`"];
 
@@ -1676,20 +1676,39 @@ MatchWeights[Fmat_List, vIn_List, label_String] := Module[
 
 (* ---- 2.10 probe ---- *)
 
-SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
+segmentErrorProbeRecord[ls_Association, tOut_, couplingDepth_Integer] := Module[
   {dec = DiffExp2`Tolerances`EvalErrorSeriesDecrease[Max[couplingDepth, 1]],
-   full, red},
+   full, red, min, max, values},
   full = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "UsePade" -> False,
     "ImSign" -> sigmaFor[ls, tOut], "ComputeTailEstimates" -> False];
   red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "ImSign" -> sigmaFor[ls, tOut],
     "UsePade" -> False, "TOrderReduction" -> dec,
     "ComputeTailEstimates" -> False];
-  Table[Module[{kf = esCoeff[full["Value"], k],
+  min = esMin[full["Value"]]; max = esCM[full["Value"]];
+  values = Table[Module[{kf = esCoeff[full["Value"], k],
       kr = If[esMin[red["Value"]] <= k <= esCM[red["Value"]],
         esCoeff[red["Value"], k], 0*esCoeff[full["Value"], k]]},
     Max[0, Sequence @@ (Last[numMagBounds[#, 20]] & /@
       Select[Flatten[{kf - kr}], NumericQ])]],
-    {k, esMin[full["Value"]], esCM[full["Value"]]}]];
+    {k, min, max}];
+  <|"Min" -> min, "CompleteMax" -> max, "Values" -> values,
+    "Kind" -> "HeuristicFullVsReduced", "TOrderReduction" -> dec|>];
+
+SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] :=
+  segmentErrorProbeRecord[ls, tOut, couplingDepth]["Values"];
+
+errorRecordCombine[records_List, combine_] := Module[
+  {active = Select[records, AssociationQ], min, max, aligned},
+  If[active === {}, Return[None, Module]];
+  min = Min[active[[All, "Min"]]];
+  max = Max[active[[All, "CompleteMax"]]];
+  aligned = Map[Function[record,
+    Table[If[record["Min"] <= k <= record["CompleteMax"],
+      record["Values"][[k - record["Min"] + 1]], 0], {k, min, max}]],
+    active];
+  <|"Min" -> min, "CompleteMax" -> max,
+    "Values" -> Fold[MapThread[combine, {#1, #2}] &, First[aligned],
+      Rest[aligned]], "Kind" -> "HeuristicFullVsReduced"|>];
 
 (* ---- 2.6 marching ---- *)
 
@@ -1991,14 +2010,25 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           !(TrueQ[plan["EndpointIsSingular"]] && ci === Length[charts]));
       points = If[twoSidedQ,
         {-raw, raw}, {sgn*raw}];
-      probes = SegmentErrorProbe[ls, #, couplingDepth] & /@ points;
-      If[Length[probes] === 1, First[probes], MapThread[Max, probes]]];
+      probes = segmentErrorProbeRecord[ls, #, couplingDepth] & /@ points;
+      errorRecordCombine[probes, Max]];
     errAcc = If[errAcc === None, probeErrs,
-      Module[{l1 = Length[errAcc], l2 = Length[probeErrs]},
-        PadRight[errAcc, Max[l1, l2]] + PadRight[probeErrs, Max[l1, l2]]]];
-    If[Max[errAcc] > 1,
-      err["E10", <|"Chart" -> chart["Name"], "Errors" -> N[errAcc, 4],
-        "Detail" -> "accumulated error estimate exceeds 1; transport aborted"|>]];
+      errorRecordCombine[{errAcc, probeErrs}, Plus]];
+    (* A decimated-series difference is a useful tail diagnostic, but it is
+       not a rigorous propagated error bound: its absolute size depends on
+       the coefficient scale and the old additive rule omitted transfer
+       sensitivities.  Production therefore records it without an
+       unconditional dimensionless abort.  Users who explicitly request the
+       legacy-style post-hoc absolute validation retain a loud per-segment
+       failure against their configured AccuracyGoal. *)
+    If[TrueQ[cfg["AccuracyGoalValidate"]] &&
+        IntegerQ[cfg["AccuracyGoal"]] &&
+        Max[probeErrs["Values"]] > 10^-cfg["AccuracyGoal"],
+      err["E11", <|"Chart" -> chart["Name"],
+        "EpsWindow" -> KeyTake[probeErrs, {"Min", "CompleteMax"}],
+        "Errors" -> N[probeErrs["Values"], 4],
+        "AccuracyGoal" -> cfg["AccuracyGoal"],
+        "Detail" -> "heuristic full-vs-reduced segment difference exceeds the explicitly requested absolute accuracy goal"|>]];
     current = ls;
     AppendTo[kept, <|"Chart" -> chart, "LocalSolution" -> ls|>];
     lastSingular = TrueQ[chart["Singular"]];
@@ -2008,7 +2038,10 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     "Charts" -> kept,
     "SegmentCount" -> Length[kept],
     "EndpointIsSingular" -> plan["EndpointIsSingular"],
-    "ErrorEstimate" -> errAcc,
+    "ErrorEstimate" -> If[AssociationQ[errAcc], errAcc["Values"], None],
+    "ErrorEstimateWindow" -> If[AssociationQ[errAcc],
+      KeyTake[errAcc, {"Min", "CompleteMax"}], None],
+    "ErrorEstimateKind" -> "HeuristicFullVsReduced",
     "Value" -> If[plan["EndpointIsSingular"], None,
       Module[{tFinal = Together[(plan["To"] - current["Center"])/
           current["ChartMap", "Scale"]]},

@@ -992,6 +992,24 @@ assert["tt19_centered_zero_default_and_strict_uncertainty_modes",
   ambiguous19 === True &&
   FailureQ[strictAmbiguous19] && strictAmbiguous19["ID"] === "E5"];
 
+(* TT20: full-vs-reduced tail diagnostics carry their Laurent origin.  Raw
+   PadRight addition silently mixed different epsilon powers at singular
+   handoffs; union-window alignment must precede either the two-arm maximum
+   or the across-chart sum. *)
+errRecord20a = <|"Min" -> -2, "CompleteMax" -> 1,
+  "Values" -> {1, 2, 3, 4}|>;
+errRecord20b = <|"Min" -> 0, "CompleteMax" -> 2,
+  "Values" -> {10, 20, 30}|>;
+errSum20 = DiffExp2`Transport`Private`errorRecordCombine[
+  {errRecord20a, errRecord20b}, Plus];
+errMax20 = DiffExp2`Transport`Private`errorRecordCombine[
+  {errRecord20a, errRecord20b}, Max];
+assert["tt20_error_probe_records_align_by_epsilon_power",
+  KeyTake[errSum20, {"Min", "CompleteMax"}] ===
+    <|"Min" -> -2, "CompleteMax" -> 2|> &&
+  errSum20["Values"] === {1, 2, 13, 24, 30} &&
+  errMax20["Values"] === {1, 2, 10, 20, 30}];
+
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Print["Some tests FAILED."]; Exit[1],
   Print["All tests PASSED!"]; Exit[0]];

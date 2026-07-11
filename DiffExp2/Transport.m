@@ -1389,9 +1389,10 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
   {dec = DiffExp2`Tolerances`EvalErrorSeriesDecrease[Max[couplingDepth, 1]],
    full, red},
   full = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "UsePade" -> False,
-    "ImSign" -> sigmaFor[ls]];
+    "ImSign" -> sigmaFor[ls], "ComputeTailEstimates" -> False];
   red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "ImSign" -> sigmaFor[ls],
-    "UsePade" -> False, "TOrderReduction" -> dec];
+    "UsePade" -> False, "TOrderReduction" -> dec,
+    "ComputeTailEstimates" -> False];
   Table[Module[{kf = esCoeff[full["Value"], k],
       kr = If[esMin[red["Value"]] <= k <= esCM[red["Value"]],
         esCoeff[red["Value"], k], 0*esCoeff[full["Value"], k]]},
@@ -1603,7 +1604,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           tIn = -tIn]];  (* a reflected far side evaluates at positive u *)
       valuesAt[tt_] := Module[{ev, vv, d2 = cs["SystemSize"]},
         ev = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tt,
-          "UsePade" -> False, "ImSign" -> sigmaFor[current]];
+          "UsePade" -> False, "ImSign" -> sigmaFor[current],
+          "ComputeTailEstimates" -> False];
         vv = ev["Value"];
         Table[esNew[esMin[vv], numHandoff[Table[esCoeff[vv, k][[c]],
           {k, esMin[vv], esCM[vv]}]]], {c, d2}]];
@@ -1639,7 +1641,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           basisValues, pre},
         basisValues[bb_List] := Module[{Feval},
           Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
-            tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#]]["Value"] &, bb];
+            tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#],
+            "ComputeTailEstimates" -> False]["Value"] &, bb];
           Table[esNew[esMin[Feval[[i]]],
             numHandoff[Table[esCoeff[Feval[[i]], k][[c]],
               {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]]],
@@ -1733,7 +1736,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       DiffExp2`SectorSeries`EvaluateLocalSolution[current,
         Together[(plan["To"] - current["Center"])/
           current["ChartMap", "Scale"]], "UsePade" -> False,
-        "ImSign" -> sigmaFor[current]]["Value"]]|>];
+        "ImSign" -> sigmaFor[current],
+        "ComputeTailEstimates" -> False]["Value"]]|>];
 
 End[];
 EndPackage[];

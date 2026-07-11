@@ -1323,7 +1323,7 @@ spectralProbeValue[cs_, ls_, t0_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], value, fcomps,
    H, hTop, out},
   value = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, t0,
-    "UsePade" -> False]["Value"];
+    "UsePade" -> False, "ComputeTailEstimates" -> False]["Value"];
   fcomps = Table[esNew[esMin[value],
       Table[esCoeff[value, k][[c]], {k, esMin[value], esCM[value]}]],
     {c, cs["SystemSize"]}];
@@ -1346,7 +1346,7 @@ reducedProbeValue[cs_, ls_, t0_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], value, fcomps,
    H, hTop, out},
   value = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, t0,
-    "UsePade" -> False]["Value"];
+    "UsePade" -> False, "ComputeTailEstimates" -> False]["Value"];
   fcomps = Table[esNew[esMin[value],
       Table[esCoeff[value, k][[c]], {k, esMin[value], esCM[value]}]],
     {c, cs["SystemSize"]}];
@@ -1820,10 +1820,10 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
       Print["RESID col window=", ls["EpsWindow"], " tags=",
         {#["a"], #["b"], #["p"]} & /@ ls["Sectors"]]];
     f = numV[DiffExp2`SectorSeries`EvaluateLocalSolution[ls, t0,
-      "UsePade" -> False]["Value"]];
+      "UsePade" -> False, "ComputeTailEstimates" -> False]["Value"]];
     df = numV[DiffExp2`SectorSeries`EvaluateLocalSolution[
       DiffExp2`SectorSeries`DifferentiateLocalSolution[ls], t0,
-      "UsePade" -> False]["Value"]];
+      "UsePade" -> False, "ComputeTailEstimates" -> False]["Value"]];
     (* Coefficients below an EpsSeries Min are certified zero.  Residuals
        must therefore start at the UNION of supports, not their intersection;
        otherwise a low-order B.f term can be hidden by a zero derivative. *)
@@ -1850,7 +1850,8 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
             "Prescriptions" -> cs["Prescriptions"],
             "EpsWindow" -> source["EpsWindow"], "TWindow" -> source["TWindow"]|>,
             <|"Sectors" -> source["Sectors"]|>]},
-          DiffExp2`SectorSeries`EvaluateLocalSolution[sLS, t0, "UsePade" -> False]["Value"]],
+          DiffExp2`SectorSeries`EvaluateLocalSolution[sLS, t0,
+            "UsePade" -> False, "ComputeTailEstimates" -> False]["Value"]],
         None];
       Do[Module[{tf = esCoeff[thetaF, k], bfk, sv, residualEntries,
           badEntries, rv, sc},

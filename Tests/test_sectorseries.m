@@ -67,6 +67,25 @@ ls5 = mkls[{{{0, 0, 0}, <|0 -> Table[1/n!, {n, 0, 20}]|>}}, 0, 0, 21];
 r5 = eval[ls5, 1/10, "UsePade" -> False];
 assert["t05_eval_regular_exp",
   Abs[N[esC[r5["Value"], 0][[1]] - Exp[1/10], 30]] < 10^-20];
+r5NoTails = eval[ls5, 1/10, "UsePade" -> False,
+  "ComputeTailEstimates" -> False];
+assert["t05_eval_tail_fastpath_value_parity_and_default_unchanged",
+  r5NoTails["Value"] === r5["Value"] &&
+    r5NoTails["PadeFallbacks"] === r5["PadeFallbacks"] &&
+    ListQ[r5["TailEstimates"]] && Max[r5["TailEstimates"]] > 0 &&
+    r5NoTails["TailEstimates"] === Missing["NotComputed"]];
+tailScanDefault = Catch[Block[{
+    DiffExp2`SectorSeries`Private`numMagBounds =
+      Function[{z, wp}, Throw["tail-scan", "tail-scan"]]},
+    eval[ls5, 1/10, "UsePade" -> False]], "tail-scan"];
+tailScanOff = Catch[Block[{
+    DiffExp2`SectorSeries`Private`numMagBounds =
+      Function[{z, wp}, Throw["tail-scan", "tail-scan"]]},
+    eval[ls5, 1/10, "UsePade" -> False,
+      "ComputeTailEstimates" -> False]], "tail-scan"];
+assert["t05_eval_tail_fastpath_skips_magnitude_scan",
+  tailScanDefault === "tail-scan" && AssociationQ[tailScanOff] &&
+    tailScanOff["Value"] === r5["Value"]];
 
 ls5uncertain = mkls[{{{0, 0, 0}, <|0 -> {0``17}, 1 -> {1}|>}},
   0, 1, 1];

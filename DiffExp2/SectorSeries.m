@@ -9,7 +9,7 @@ BeginPackage["DiffExp2`SectorSeries`",
 ValidateLocalSolution::usage = "ValidateLocalSolution[ls] checks every structural invariant and returns ls unchanged; loud error otherwise.";
 CanonicalizeLocalSolution::usage = "CanonicalizeLocalSolution[ls] merges identical and integer-spaced same-(b,p) sectors, drops syntactically zero sectors, sorts by (a,b,p).";
 ChartImSign::usage = "ChartImSign[ls] derives the chart Im-sign (+1|-1|None) from the Prescriptions list; conflicting odd-multiplicity entries are a loud error. THE one sign derivation in DiffExp2.";
-EvaluateLocalSolution::usage = "EvaluateLocalSolution[ls, tval, opts] evaluates at the chart point tval. Options: \"UsePade\", \"TOrderReduction\", \"ImSign\". Returns <|\"Value\" -> EpsSeries, \"PadeFallbacks\" -> ..., \"TailEstimates\" -> ...|>.";
+EvaluateLocalSolution::usage = "EvaluateLocalSolution[ls, tval, opts] evaluates at the chart point tval. Options: \"UsePade\", \"TOrderReduction\", \"ImSign\"; the internal \"ComputeTailEstimates\" option defaults True. Returns <|\"Value\" -> EpsSeries, \"PadeFallbacks\" -> ..., \"TailEstimates\" -> list|Missing[\"NotComputed\"]|>.";
 MultiplyRational::usage = "MultiplyRational[ls, c] multiplies by a rational c(t, eps): center poles shift a, far poles fold into Taylor parts, interior poles are a loud error, eps-denominators shift the windows.";
 ReexpandLocalSolution::usage = "ReexpandLocalSolution[ls, newCenter, targetOrder, opts] re-expands around a regular point inside the chart, producing a single-(0,0,0)-sector LocalSolution with the explicit truncation contract.";
 DifferentiateLocalSolution::usage = "DifferentiateLocalSolution[ls] gives the exact chart-coordinate derivative via tag algebra.";
@@ -163,7 +163,11 @@ ChartImSign[ls_Association] := Module[{odd, sigmas},
 (* ---- 2.4 evaluation ---- *)
 
 Options[EvaluateLocalSolution] = {"UsePade" -> Automatic,
-  "TOrderReduction" -> 0, "ImSign" -> Automatic};
+  "TOrderReduction" -> 0, "ImSign" -> Automatic,
+  (* Internal performance seam.  Public/default evaluation still computes
+     advisory tails exactly as before; solver/transport callers that consume
+     only "Value" may opt out of the last-column magnitude scan. *)
+  "ComputeTailEstimates" -> True};
 
 (* private: diagonal Pade evaluation of one coefficient vector at point *)
 padeEvaluate[coeffs_List, point_, ctx_] := Module[{u, mm, poly, pa},
@@ -179,10 +183,11 @@ padeEvaluate[coeffs_List, point_, ctx_] := Module[{u, mm, poly, pa},
 
 EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
   {ls = ValidateLocalSolution[ls0], usePade, tred, sigma, wp, secs, ncols,
-   ncomp, kmin, kmax, Lv, fallbacks = {}, needsBranch},
+   ncomp, kmin, kmax, Lv, fallbacks = {}, needsBranch, computeTails},
   wp = cfg["WorkingPrecision"];
   usePade = OptionValue["UsePade"] /. Automatic :> cfg["UsePade"];
   tred = OptionValue["TOrderReduction"];
+  computeTails = TrueQ[OptionValue["ComputeTailEstimates"]];
   If[!(NumericQ[tval] && Im[tval] == 0),
     err["radius", <|"Chart" -> chartName[ls], "Point" -> tval,
       "Detail" -> "evaluation point must be real numeric (v1)"|>]];
@@ -217,7 +222,8 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
       valueMin2 = Min[valueMin2, firstRow + sec["p"]]],
       {sec, secs}];
     value = ConstantArray[0, {valueCM - valueMin2 + 1, ncomp}];
-    tails = ConstantArray[0, valueCM - valueMin2 + 1];
+    tails = If[computeTails,
+      ConstantArray[0, valueCM - valueMin2 + 1], Missing["NotComputed"]];
     Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"],
         ta, alphas},
       ta = If[TrueQ[tval < 0], (-tval)^a*Exp[I*Pi*sigma*a],
@@ -246,7 +252,7 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
           value[[K - valueMin2 + 1]] += ta*pow[Lv, p]/p!*Kc]],
         {K, kmin + p, valueCM}];
       (* tail estimate: geometric at the actual point *)
-      If[ls["Radius"] =!= Infinity && TrueQ[Abs[tval] > 0],
+      If[computeTails && ls["Radius"] =!= Infinity && TrueQ[Abs[tval] > 0],
         Do[Module[{nums, topc, q},
           nums = Select[Flatten[arr[[k - kmin + 1, ncols]]], NumericQ];
           topc = If[nums === {}, 0,

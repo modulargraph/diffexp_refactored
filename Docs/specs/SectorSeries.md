@@ -189,10 +189,13 @@ invariants).
 TailEstimates on EVALUATION results (minimalism review 29): per eps order,
 `Max over comp of |c[k, ntop, comp] * tval^ntop| * q/(1-q)` with
 `q = |tval|/Radius` and `ntop` the last used t-column — the geometric tail
-at the actual evaluation point.  Computed always (cheap); Missing[] never
-occurs on the evaluation path (the §3.4 Missing[] option applies only to
-objects that bypassed evaluation).  Transport's probe (its 2.10) remains the
-authoritative error feed; TailEstimates is advisory metadata.
+at the actual evaluation point.  Public/default evaluation always computes
+this list.  Internal callers that consume only `"Value"` may pass
+`"ComputeTailEstimates" -> False`; this skips only the advisory last-column
+magnitude scan and returns `Missing["NotComputed"]`, with identical value,
+window, validation, and Pade-fallback semantics.  Transport's full-vs-reduced
+probe (its 2.10) remains the authoritative error feed; TailEstimates is
+advisory metadata and is not part of that difference.
 
 Evaluation at `tval == 0`:
 - regular chart (single `(0,0,0)` sector): exact, returns the `n = 0` column.
@@ -617,9 +620,9 @@ both ends; everything else is min-arithmetic).
                           each coefficient v is a length-Ncomp numeric List),
        "PadeFallbacks" -> { <|"Sector" -> {a,b,p}, "EpsRow" -> k,
                              "Component" -> comp|> .. },
-       "TailEstimates" -> per-eps-order list (always computed on the
-                          evaluation path, 2.4.1; Missing[] only on objects
-                          that bypassed evaluation) |>
+       "TailEstimates" -> per-eps-order list (public/default evaluation), or
+                          Missing["NotComputed"] for the internal
+                          "ComputeTailEstimates" -> False fast path (2.4.1) |>
 
 Evaluation metadata is a SIBLING of the series value, never carried inside
 the EpsSeries object.  API.md's user-facing LaurentValue

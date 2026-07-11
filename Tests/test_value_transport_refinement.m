@@ -77,6 +77,29 @@ assert["vt_refine_half_radius_tiles_cover_integral",
   !FailureQ[tileIntegral] &&
     Abs[N[DiffExp2`EpsSeries`ESCoefficient[tileIntegral, 0] - 3/4, 30]] < 10^-20];
 
+(* SegmentErrorProbe's authoritative full-vs-reduced definition is unchanged:
+   only the advisory tail scans inside its two evaluations are suppressed. *)
+probeLS = valueRes["Charts"][[1, "LocalSolution"]];
+probePoint = probeLS["Radius"]/5;
+probeDec = DiffExp2`Tolerances`EvalErrorSeriesDecrease[1];
+probeFull = DiffExp2`SectorSeries`EvaluateLocalSolution[probeLS, probePoint,
+  "UsePade" -> False];
+probeReduced = DiffExp2`SectorSeries`EvaluateLocalSolution[probeLS, probePoint,
+  "UsePade" -> False, "TOrderReduction" -> probeDec];
+probeLegacy = Table[Module[
+    {kf = DiffExp2`EpsSeries`ESCoefficient[probeFull["Value"], k], kr},
+    kr = If[DiffExp2`EpsSeries`ESMinPower[probeReduced["Value"]] <= k <=
+        DiffExp2`EpsSeries`ESCompleteMax[probeReduced["Value"]],
+      DiffExp2`EpsSeries`ESCoefficient[probeReduced["Value"], k], 0*kf];
+    Max[0, Sequence @@ (Last[
+      DiffExp2`Transport`Private`numMagBounds[#, 20]] & /@
+        Select[Flatten[{kf - kr}], NumericQ])]],
+  {k, DiffExp2`EpsSeries`ESMinPower[probeFull["Value"]],
+    DiffExp2`EpsSeries`ESCompleteMax[probeFull["Value"]]}];
+probeFast = DiffExp2`Transport`SegmentErrorProbe[probeLS, probePoint, 0];
+assert["vt_tail_fastpath_segment_probe_semantics_unchanged",
+  probeFast === probeLegacy];
+
 (* Refinement may add regular charts but must not add, remove, or reorder
    singular charts.  The existing singular FixWithin records still validate. *)
 sysSing = <|"Matrix" -> {{eps/x}}, "Variable" -> x,

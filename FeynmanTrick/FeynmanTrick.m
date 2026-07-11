@@ -28,13 +28,16 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "MatrixExport.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "EpsPrefactors.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FeynmanTrickIteration.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "BoundaryConditions.m"}]];
-Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExpIntegration.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "LevelReduction.m"}]];
+(* The development tree retains the DiffExp 1 bridge for compatibility.
+   Clean DiffExp 2 releases intentionally omit it. *)
+Module[{legacyBridge = FileNameJoin[{
+    DirectoryName[$InputFileName], "DiffExpIntegration.m"}]},
+  If[FileExistsQ[legacyBridge], Get[legacyBridge]]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExp2Pipeline.m"}]];
 
-(* Declare the root facade only AFTER the implementation subpackages have
-   created their own RunIntegrationPipeline symbols.  Declaring this earlier
-   would let BeginPackage dependency lookup capture the root symbol inside
-   DiffExpIntegration -- the classic Wolfram context-shadowing trap. *)
+(* Declare the root facade only after implementation subpackages have
+   created their own symbols, avoiding Wolfram context capture. *)
 FeynmanTrick`PipelinePlan::usage = "PipelinePlan[example, opts] builds a reproducible DiffExp2 Feynman-trick run plan without executing it.";
 FeynmanTrick`RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] builds and runs a DiffExp2 Feynman-trick plan. RunIntegrationPipeline[plan] executes an existing PipelinePlan record.";
 FeynmanTrick`ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[example, checkpoint, opts] resumes the DiffExp2 Feynman-trick ladder from an atomic checkpoint.";

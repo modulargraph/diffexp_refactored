@@ -38,13 +38,13 @@ assert["invalid FIRE paths fail in the parent plan",
 assert["malformed typed plans fail before process construction",
   FailureQ[FeynmanTrick`RunIntegrationPipeline[
     <|"Schema" -> "FeynmanTrick.PipelinePlan/v1"|>]]];
-assert["root facade and legacy implementation keep separate contexts",
+assert["root facade and native level-reduction seam load independently",
   Context[FeynmanTrick`RunIntegrationPipeline] === "FeynmanTrick`" &&
-  Context[FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline] ===
-    "FeynmanTrick`DiffExpIntegration`" &&
+  Context[FeynmanTrick`LevelReduction`PrepareLevelIBPBatch] ===
+    "FeynmanTrick`LevelReduction`" &&
   Length[DownValues[FeynmanTrick`RunIntegrationPipeline]] > 0 &&
   Length[DownValues[
-    FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline]] > 0];
+    FeynmanTrick`LevelReduction`PrepareLevelIBPBatch]] > 0];
 assert["pipeline plan schema",
   plan["Schema"] === "FeynmanTrick.PipelinePlan/v1"];
 assert["C++ recurrence is the facade default",

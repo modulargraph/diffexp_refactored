@@ -15,10 +15,13 @@ assert[label_String, condition_] := If[TrueQ[condition],
   passed++; Print["  PASS: ", label],
   failed++; Print["  FAIL: ", label]];
 
-Module[{topology, ftData, changedFtData, transport, calls = {}, baseline,
+Module[{topology, ftData, changedFtData, calls = {}, baseline, baselineBatch,
         baselineCalls, batch, optimized, optimizedCalls, keyAgain, changedKey,
         keyAfterGlobalOptionChange, badBatch, tamperedBatch,
-        oldReductionCacheOption, oldAutoDetectRestrictions, dumpSource},
+        poleBatch, poleBudget, regulatorBatch, fractionalBatch,
+        fractionalBudget,
+        oldReductionCacheOption, oldAutoDetectRestrictions,
+        levelReductionSource, runnerSource},
   topology = FeynmanTrick`FIREInterface`DefineTopology[
     "level_batch_stub", {Global`l1}, {},
     {1 - Global`l1^2, 2 - Global`l1^2}, {}];
@@ -44,12 +47,6 @@ Module[{topology, ftData, changedFtData, transport, calls = {}, baseline,
       "DiffMatrix" -> {{0}}
     |>
   |>|>;
-  transport = <|
-    "SegmentData" -> {},
-    "EpsPrefactorsAbove" -> {0},
-    "EpsilonOrder" -> 1,
-    "BoundaryValuesAbove" -> {{1, 0}}
-  |>;
   oldReductionCacheOption = Lookup[
     FeynmanTrick`Private`$FTConfig, "ReductionCache", True];
   FeynmanTrick`SetFTOption["ReductionCache", False];
@@ -59,26 +56,28 @@ Module[{topology, ftData, changedFtData, transport, calls = {}, baseline,
       AppendTo[calls, integrals];
       AssociationMap[2 Global`G[1, {0, 0}] &, integrals]);
 
+    baselineBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
+      ftData, 1];
     baseline = {
-      FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
+      FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
         ftData, 1],
-      FeynmanTrick`DiffExpIntegration`Private`RequiredTransportEpsilonOrder[
+      FeynmanTrick`LevelReduction`RequiredTransportEpsilonOrder[
         ftData, 1, 1, {0}],
-      FeynmanTrick`DiffExpIntegration`ComputeLevelBoundary[
-        ftData, 0, transport, 1]
+      baselineBatch["Reductions"],
+      baselineBatch["CoefficientVectors"]
     };
     baselineCalls = calls;
 
     calls = {};
-    batch = FeynmanTrick`DiffExpIntegration`Private`PrepareLevelIBPBatch[
+    batch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
       ftData, 1];
     optimized = {
-      FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
+      FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
         ftData, 1, batch],
-      FeynmanTrick`DiffExpIntegration`Private`RequiredTransportEpsilonOrder[
+      FeynmanTrick`LevelReduction`RequiredTransportEpsilonOrder[
         ftData, 1, 1, {0}, batch],
-      FeynmanTrick`DiffExpIntegration`ComputeLevelBoundary[
-        ftData, 0, transport, 1, batch]
+      batch["Reductions"],
+      batch["CoefficientVectors"]
     };
     optimizedCalls = calls;
   ];
@@ -87,19 +86,63 @@ Module[{topology, ftData, changedFtData, transport, calls = {}, baseline,
     baselineCalls === {{{0, 0}}, {{0, 0}}, {{0, 0}}}];
   assert["explicit level bundle performs one FIRE reduction request",
     optimizedCalls === {{{0, 0}}}];
-  assert["bundled singular-factor budget and boundary outputs are exact parity",
-    optimized === baseline && AssociationQ[optimized[[3]]] &&
-      optimized[[3, "BoundaryValues"]] === {{2, 0}}];
+  assert["bundled factors, epsilon budget, and boundary reduction are exact parity",
+    optimized === baseline && optimized[[1]] === {} &&
+      optimized[[2]] === 1 &&
+      optimized[[4]][{0, 0}] === {2}];
+
+  (* Epsilon budgeting is exact bookkeeping, not numerical cleanup.  A tiny
+     but nonzero exact pole must deepen the requested frame, analytic
+     regulators must remain symbolic, and unsupported fractional epsilon
+     frames must fail rather than being floored. *)
+  Block[{FeynmanTrick`FIREInterface`ReduceIntegrals},
+    FeynmanTrick`FIREInterface`ReduceIntegrals[_, integrals_List] :=
+      AssociationMap[
+        Global`G[1, {0, 0}]/(10^100 (Global`d - 4)) &,
+        integrals];
+    poleBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, 1];
+    poleBudget = FeynmanTrick`LevelReduction`RequiredTransportEpsilonOrder[
+      ftData, 1, 1, {0}, poleBatch];
+  ];
+  assert["tiny exact epsilon pole is never chopped from the budget",
+    AssociationQ[poleBatch] && poleBudget === 2];
+
+  Block[{FeynmanTrick`FIREInterface`ReduceIntegrals},
+    FeynmanTrick`FIREInterface`ReduceIntegrals[_, integrals_List] :=
+      AssociationMap[
+        (1 + Global`analyticRegulator) Global`G[1, {0, 0}]/
+          (Global`d - 4) &,
+        integrals];
+    regulatorBatch =
+      FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, 1];
+  ];
+  assert["analytic regulator remains exact in the shared coefficient vector",
+    AssociationQ[regulatorBatch] &&
+      regulatorBatch["CoefficientVectors"][{0, 0}] ===
+        {(1 + Global`analyticRegulator)/(Global`d - 4)}];
+
+  Block[{FeynmanTrick`FIREInterface`ReduceIntegrals},
+    FeynmanTrick`FIREInterface`ReduceIntegrals[_, integrals_List] :=
+      AssociationMap[
+        Sqrt[FeynmanTrick`FTeps] Global`G[1, {0, 0}] &,
+        integrals];
+    fractionalBatch =
+      FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, 1];
+    fractionalBudget =
+      FeynmanTrick`LevelReduction`RequiredTransportEpsilonOrder[
+        ftData, 1, 1, {0}, fractionalBatch];
+  ];
+  assert["fractional epsilon frame is rejected instead of silently floored",
+    AssociationQ[fractionalBatch] && fractionalBudget === $Failed];
 
   keyAgain =
-    FeynmanTrick`DiffExpIntegration`Private`levelIBPBatchSpec[
+    FeynmanTrick`LevelReduction`LevelIBPBatchSpec[
       ftData, 1]["Key"];
   changedFtData = ftData;
   changedFtData["Levels"][1]["Topology"]["SetupFingerprintRecord"]
     ["StartFileSHA256"] = "changed-level-batch-start";
-  changedKey =
-    FeynmanTrick`DiffExpIntegration`Private`levelIBPBatchSpec[
-      changedFtData, 1]["Key"];
+  changedKey = FeynmanTrick`LevelReduction`LevelIBPBatchSpec[
+    changedFtData, 1]["Key"];
   assert["level bundle key is deterministic for identical exact inputs",
     batch["Key"] === keyAgain];
   assert["level bundle key changes with exact topology content",
@@ -109,8 +152,7 @@ Module[{topology, ftData, changedFtData, transport, calls = {}, baseline,
   FeynmanTrick`SetFTOption[
     "AutoDetectRestrictions", !TrueQ[oldAutoDetectRestrictions]];
   keyAfterGlobalOptionChange =
-    FeynmanTrick`DiffExpIntegration`Private`levelIBPBatchSpec[
-      ftData, 1]["Key"];
+    FeynmanTrick`LevelReduction`LevelIBPBatchSpec[ftData, 1]["Key"];
   FeynmanTrick`SetFTOption[
     "AutoDetectRestrictions", oldAutoDetectRestrictions];
   assert["bundle key uses setup-time restrictions, not current global state",
@@ -118,25 +160,23 @@ Module[{topology, ftData, changedFtData, transport, calls = {}, baseline,
 
   badBatch = Join[batch, <|"Key" -> "stale"|>];
   assert["mismatched level bundle is rejected instead of reused",
-    FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
+    FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
       ftData, 1, badBatch] === $Failed];
   tamperedBatch = batch;
   tamperedBatch["CoefficientVectors"][{0, 0}] = {3};
   assert["same-shape coefficient payload mutation is rejected",
-    FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
+    FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
       ftData, 1, tamperedBatch] === $Failed];
-  dumpSource = Import[
-    FileNameJoin[{repoRoot, "Scripts", "dump_transport_checkpoints.m"}],
-    "Text"];
-  assert["cache-disabled checkpoint dumper threads one level batch",
-    StringContainsQ[dumpSource,
-      "Private`PrepareLevelIBPBatch[\n        ftData, level]"] &&
-    StringContainsQ[dumpSource,
-      "currentPrefactors, levelIBPBatch"] &&
-    StringContainsQ[dumpSource,
-      "ftData, level, levelIBPBatch"] &&
-    StringContainsQ[dumpSource,
-      "dtcFTEpsOrder, levelIBPBatch"]];
+  levelReductionSource = Import[FileNameJoin[{
+    repoRoot, "FeynmanTrick", "LevelReduction.m"}], "Text"];
+  runnerSource = Import[FileNameJoin[{
+    repoRoot, "Scripts", "run_ft_stepwise2.m"}], "Text"];
+  assert["release level-reduction seam has no legacy package dependency",
+    !StringContainsQ[levelReductionSource, "DiffExp`"] &&
+      !StringContainsQ[runnerSource,
+        "FeynmanTrick`DiffExpIntegration`"] &&
+      StringContainsQ[runnerSource,
+        "FeynmanTrick`LevelReduction`PrepareLevelIBPBatch"]];
   FeynmanTrick`SetFTOption["ReductionCache", oldReductionCacheOption];
 ];
 

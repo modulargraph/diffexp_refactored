@@ -868,17 +868,15 @@ dtcRunFTExample[name_String] := Module[
   currentBCs = deepBoundary["BoundaryValues"];
   currentPrefactors = deepBoundary["EpsPrefactors"];
   Do[
-    levelIBPBatch =
-      FeynmanTrick`DiffExpIntegration`Private`PrepareLevelIBPBatch[
-        ftData, level];
+    levelIBPBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
+      ftData, level];
     If[levelIBPBatch === $Failed,
       dtcFail[name, ": FIRE boundary reduction batch failed at level ", level]];
     (* Carry the full boundary depth, run_ft_stepwise.m:154-172 (the
        c0b24f3 budget lesson: single-level RequiredTransportEpsilonOrder
        underestimates deep towers). *)
-    requiredOrder =
-      FeynmanTrick`DiffExpIntegration`Private`RequiredTransportEpsilonOrder[
-        ftData, level, dtcFTEpsOrder, currentPrefactors, levelIBPBatch];
+    requiredOrder = FeynmanTrick`LevelReduction`RequiredTransportEpsilonOrder[
+      ftData, level, dtcFTEpsOrder, currentPrefactors, levelIBPBatch];
     If[requiredOrder === $Failed,
       dtcFail[name, ": stale FIRE boundary reduction batch at level ", level]];
     transportOrder = Length[First[currentBCs]] - 1;
@@ -894,7 +892,7 @@ dtcRunFTExample[name_String] := Module[
       "Level_" <> ToString[level] <> "_Matrices"}];
     dtcAssertMatrixDir[matrixDir];
     extraSingularFactors =
-      FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
+      FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
         ftData, level, levelIBPBatch
       ];
     If[extraSingularFactors === $Failed,

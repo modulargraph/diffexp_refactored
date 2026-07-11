@@ -114,7 +114,7 @@ requiredReductionKeys[data_] := Flatten[Table[
   Module[{ld = data["Levels"][level], below = data["Levels"][level - 1],
       topo, reqs},
     topo = ld["Topology"];
-    reqs = FeynmanTrick`DiffExpIntegration`Private`BoundaryRequestRecords[
+    reqs = FeynmanTrick`LevelReduction`BoundaryRequestRecords[
       below["Masters"], ld["CombinedPositions"]];
     Map[Function[req,
       FeynmanTrick`FIREInterface`Private`reductionCacheKey[topo,
@@ -315,7 +315,7 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
     belowData = data["Levels"][level - 1];
     mastersBelow = belowData["Masters"];
     currentRequests =
-      FeynmanTrick`DiffExpIntegration`Private`BoundaryRequestRecords[
+      FeynmanTrick`LevelReduction`BoundaryRequestRecords[
         mastersBelow, levelData["CombinedPositions"]];
     If[Lookup[payload, "Variable", None] =!= levelData["FeynmanParameter"] ||
         Lookup[payload, "MastersBelow", None] =!= mastersBelow ||
@@ -526,15 +526,14 @@ runExample[name_String] := Module[
       sys = catch2[DiffExp2`API`LoadSystem[
         <|"Matrix" -> A, "Variable" -> var|>]];
       If[FailureQ[sys], Print["LOAD FAIL ", sys]; Return[$Failed, Module]];
-      levelIBPBatch =
-        FeynmanTrick`DiffExpIntegration`Private`PrepareLevelIBPBatch[
-          ftData, level];
+      levelIBPBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
+        ftData, level];
       If[levelIBPBatch === $Failed,
         Print["FIRE FAIL"]; Return[$Failed, Module]];
       requests = levelIBPBatch["BoundaryRequests"];
       reductions = levelIBPBatch["Reductions"];
       rawExtraFacs =
-        FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
+        FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
           ftData, level, levelIBPBatch];
       If[rawExtraFacs === $Failed,
         Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];

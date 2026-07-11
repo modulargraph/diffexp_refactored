@@ -139,7 +139,7 @@ levelData = <|"Masters" -> mastersHere, "FeynmanParameter" -> z,
   "CombinedPositions" -> {1, 2}|>;
 data = <|"NumLevels" -> 1, "Levels" -> <|
   0 -> <|"Masters" -> mastersBelow|>, 1 -> levelData|>|>;
-requests = FeynmanTrick`DiffExpIntegration`Private`BoundaryRequestRecords[
+requests = FeynmanTrick`LevelReduction`BoundaryRequestRecords[
   mastersBelow, levelData["CombinedPositions"]];
 reductions = Association[requests[[1, "NeededVec"]] -> 1];
 low = <|"Charts" -> {<|"Arm" -> "lower"|>},

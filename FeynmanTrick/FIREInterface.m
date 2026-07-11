@@ -468,22 +468,35 @@ Module[{exitCode, result, logFile, cmd, stdoutFile, stderrFile,
   ];
 
   cmd = StringJoin[
-    "cd ", shellQuote[runDir], " && ",
+    (* Keep the FIRE binary itself as $!, rather than backgrounding the whole
+       `cd && FIRE` compound command and monitoring an extra subshell. *)
+    "cd ", shellQuote[runDir], " || exit 125; ",
     fireBinQ, " -c ", configQ, " > ", stdoutQ, " 2> ", stderrQ, " & ",
     "fire_pid=$!; ",
     "start=$(date +%s); timeout=", ToString[timeoutSeconds], "; ",
+    (* A two-second poll made every successful short reduction take at least
+       two seconds.  Poll quickly while startup-sized FIRE jobs normally
+       finish, then back off so long reductions do not wake the shell often. *)
+    "poll_interval=0.05; poll_count=0; ",
     "while kill -0 $fire_pid 2>/dev/null; do ",
       "now=$(date +%s); ",
       "if [ $((now-start)) -ge $timeout ]; then ",
-        "pkill -TERM -P $fire_pid 2>/dev/null || true; ",
+        (* Capture direct workers before their parent is terminated and they
+           are reparented.  `pkill -P pid` without a pattern is not portable
+           (and is a no-op on macOS), so signal the exact PIDs instead. *)
+        "child_pids=$(pgrep -P $fire_pid 2>/dev/null || true); ",
+        "if [ -n \"$child_pids\" ]; then kill -TERM $child_pids 2>/dev/null || true; fi; ",
         "kill -TERM $fire_pid 2>/dev/null || true; ",
         "sleep 2; ",
-        "pkill -KILL -P $fire_pid 2>/dev/null || true; ",
+        "if [ -n \"$child_pids\" ]; then kill -KILL $child_pids 2>/dev/null || true; fi; ",
         "kill -KILL $fire_pid 2>/dev/null || true; ",
+        "wait $fire_pid 2>/dev/null || true; ",
         "echo ", shellQuote["FIRE6 timeout after " <> ToString[timeoutSeconds] <> "s"], " >> ", stderrQ, "; ",
         "exit 124; ",
       "fi; ",
-      "sleep 2; ",
+      "sleep $poll_interval; ",
+      "poll_count=$((poll_count+1)); ",
+      "if [ $poll_count -eq 40 ]; then poll_interval=0.25; fi; ",
     "done; ",
     "wait $fire_pid; ",
     "exit $?"

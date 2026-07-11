@@ -1,5 +1,5 @@
-(* Process-free regression tests for safe, invocation-local FIRE reuse.
-   A fake FIRE runner records the exact request file; no FIRE executable,
+(* Regression tests for safe, invocation-local FIRE reuse and the FIRE
+   process wrapper.  Fake runners are used throughout, so no FIRE executable,
    database, or license seat is used. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
@@ -161,6 +161,74 @@ Module[{dir, topology, unverifiedTopology, otherTopology, verifiedTopology,
 
   FeynmanTrick`FIREInterface`Private`$ReductionCache = oldCache;
   FeynmanTrick`SetFTOption["ReductionCache", oldReductionCacheOption];
+  Quiet[DeleteDirectory[dir, DeleteContents -> True]];
+];
+
+Module[{dir, quickBin, slowBin, pidFile, oldTimeout, chmodResults,
+        quickExit, quickSeconds, quickLog, slowExit, slowSeconds, slowLog,
+        pids = {}, orphanFree},
+  dir = FileNameJoin[{$TemporaryDirectory,
+    "ft_fire_runner_polling_" <> ToString[$ProcessID]}];
+  If[DirectoryQ[dir], DeleteDirectory[dir, DeleteContents -> True]];
+  CreateDirectory[dir, CreateIntermediateDirectories -> True];
+  quickBin = FileNameJoin[{dir, "fake_FIRE6_quick"}];
+  slowBin = FileNameJoin[{dir, "fake_FIRE6_slow"}];
+  pidFile = FileNameJoin[{dir, "slow_pids.txt"}];
+
+  Export[quickBin,
+    "#!/bin/sh\nprintf 'quick fake FIRE completed\\n'\nexit 0\n", "Text"];
+  Export[slowBin, StringJoin[
+    "#!/bin/sh\n",
+    "sleep 10 &\n",
+    "child=$!\n",
+    "printf '%s %s\\n' \"$$\" \"$child\" > \"", pidFile, "\"\n",
+    "wait \"$child\"\n"
+  ], "Text"];
+  chmodResults = Lookup[
+    RunProcess[{"/bin/chmod", "+x", #}], "ExitCode", -1] & /@
+      {quickBin, slowBin};
+  assert["fake FIRE runners are executable", chmodResults === {0, 0}];
+
+  oldTimeout = Lookup[
+    FeynmanTrick`Private`$FTConfig, "FIRETimeoutSeconds", 600];
+  FeynmanTrick`SetFTOption["FIRETimeoutSeconds", 5];
+  quickSeconds = First@AbsoluteTiming[
+    quickExit =
+      FeynmanTrick`FIREInterface`Private`runFIRE6Once[
+        quickBin, dir, "quick"]];
+  quickLog = FeynmanTrick`FIREInterface`Private`safeReadString[
+    FileNameJoin[{dir, "fire_stdout.log"}]];
+  assert["short FIRE process does not pay the former two-second poll",
+    quickExit === 0 && quickSeconds < 1.5];
+  assert["short FIRE process output is preserved",
+    StringContainsQ[quickLog, "quick fake FIRE completed"]];
+
+  FeynmanTrick`SetFTOption["FIRETimeoutSeconds", 1];
+  slowSeconds = First@AbsoluteTiming[
+    slowExit =
+      FeynmanTrick`FIREInterface`Private`runFIRE6Once[
+        slowBin, dir, "slow"]];
+  slowLog = FeynmanTrick`FIREInterface`Private`safeReadString[
+    FileNameJoin[{dir, "fire_stdout.log"}]];
+  If[FileExistsQ[pidFile],
+    pids = Quiet[ToExpression /@ StringSplit[
+      StringTrim[Import[pidFile, "Text"]]]]];
+  (* Give init a moment to reap a just-terminated child before probing with
+     kill -0; a zombie is already dead but is still addressable briefly. *)
+  Pause[0.2];
+  orphanFree = Length[pids] === 2 && AllTrue[pids,
+    Function[pid, Lookup[
+      RunProcess[{"/bin/kill", "-0", ToString[pid]}],
+      "ExitCode", 0] =!= 0]];
+  assert["FIRE timeout keeps exit code and exact diagnostic",
+    slowExit === 124 &&
+      StringContainsQ[slowLog, "FIRE6 timeout after 1s"] &&
+      slowSeconds < 4.5];
+  assert["FIRE timeout cleans parent and child processes", orphanFree];
+  assert["FIRE runner removes isolated attempt directories",
+    FileNames["run_*", dir] === {}];
+
+  FeynmanTrick`SetFTOption["FIRETimeoutSeconds", oldTimeout];
   Quiet[DeleteDirectory[dir, DeleteContents -> True]];
 ];
 

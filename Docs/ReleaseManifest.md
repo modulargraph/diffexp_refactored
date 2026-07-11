@@ -32,7 +32,7 @@ then should a release branch be assembled from the allowlist below.
 | ``DiffExp2/`` | release | recurrence solver, transport, integration, API, configuration, C++ bridge |
 | ``cpp/`` | release | C++20/FLINT recurrence engine and native unit tests |
 | ``CMakeLists.txt`` | release | top-level compiled-backend build |
-| ``FeynmanTrick.m`` and ``FeynmanTrick/*.m`` | release | topology, FIRE, iteration, exact matrix, boundary, and bridge code |
+| ``FeynmanTrick.m`` and selected ``FeynmanTrick/*.m`` | release | topology, FIRE, iteration, exact matrix, boundary, DiffExp2-native level reduction, and facade code; the checker enumerates every file exactly |
 | ``Examples/`` | release | curated direct and Feynman-trick examples from this prototype |
 | selected ``Docs/*.md`` | release | the user-doc allowlist in the next table |
 | ``Scripts/run_ft_stepwise2.m`` | release, transitional | runtime dependency of the public facade's current subprocess implementation |
@@ -107,6 +107,7 @@ archive tag:
 | --- | --- |
 | ``DiffExp/`` | modularized DiffExp 1/reference implementation; not part of the DiffExp 2 product |
 | root ``DiffExp.m`` in its current form | currently loads the old package; replace with a DiffExp 2 loader on release |
+| ``FeynmanTrick/DiffExpIntegration.m`` | legacy DiffExp 1 transport/integration bridge; the release runner uses ``FeynmanTrick/LevelReduction.m`` plus the DiffExp 2 umbrella instead |
 | ``Reference/`` | original monolithic source and historical examples |
 | ``Docs/ExportDisposition.md`` | exhaustive old-export migration ledger |
 | legacy ``Scripts/run_ft_stepwise.m`` | old-core Feynman-trick runner |

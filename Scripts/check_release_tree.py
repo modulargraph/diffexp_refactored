@@ -22,12 +22,54 @@ ROOT_FILES = {
     "README.md",
 }
 
-WHOLE_PREFIXES = (
-    "DiffExp2/",
-    "cpp/",
-    "FeynmanTrick/",
-    "Examples/",
-)
+DIFFEXP2_FILES = {
+    "DiffExp2/API.m",
+    "DiffExp2/Config.m",
+    "DiffExp2/CppBackend.m",
+    "DiffExp2/DiffExp2.m",
+    "DiffExp2/EpsSeries.m",
+    "DiffExp2/Indicial.m",
+    "DiffExp2/Integrate.m",
+    "DiffExp2/PublicAPI.m",
+    "DiffExp2/SectorSeries.m",
+    "DiffExp2/Solve.m",
+    "DiffExp2/Tolerances.m",
+    "DiffExp2/Transport.m",
+}
+
+FEYNMAN_TRICK_FILES = {
+    "FeynmanTrick/BoundaryConditions.m",
+    "FeynmanTrick/DiffExp2Pipeline.m",
+    "FeynmanTrick/EpsPrefactors.m",
+    "FeynmanTrick/FIREInterface.m",
+    "FeynmanTrick/FeynmanTrick.m",
+    "FeynmanTrick/FeynmanTrickIteration.m",
+    "FeynmanTrick/LevelReduction.m",
+    "FeynmanTrick/MatrixExport.m",
+    "FeynmanTrick/PropagatorAlgebra.m",
+}
+
+CPP_FILES = {
+    "cpp/CMakeLists.txt",
+    "cpp/include/diffexp2/json_codec.hpp",
+    "cpp/include/diffexp2/recurrence.hpp",
+    "cpp/include/diffexp2/scalar.hpp",
+    "cpp/src/json_codec.cpp",
+    "cpp/src/librarylink.cpp",
+    "cpp/tests/test_recurrence.cpp",
+}
+
+EXAMPLE_FILES = {
+    "Examples/Direct/MinimalTransport.wl",
+    "Examples/Direct/SingularEndpointAndSegments.wl",
+    "Examples/FeynmanTrick/BoxBubble.sh",
+    "Examples/FeynmanTrick/Bubble.sh",
+    "Examples/FeynmanTrick/FourLoopUnequalBanana.sh",
+    "Examples/FeynmanTrick/Kite.sh",
+    "Examples/FeynmanTrick/README.md",
+    "Examples/FeynmanTrick/Sunrise.sh",
+    "Examples/FeynmanTrick/UnequalBanana.sh",
+}
 
 DOC_FILES = {
     "Docs/API.md",
@@ -86,7 +128,17 @@ FIXTURE_FILES = {
     "Tests/refs/oracle_logs/l2_bubsun.log",
 }
 
-EXACT_FILES = ROOT_FILES | DOC_FILES | SCRIPT_FILES | TEST_FILES | FIXTURE_FILES
+EXACT_FILES = (
+    ROOT_FILES
+    | DIFFEXP2_FILES
+    | FEYNMAN_TRICK_FILES
+    | CPP_FILES
+    | EXAMPLE_FILES
+    | DOC_FILES
+    | SCRIPT_FILES
+    | TEST_FILES
+    | FIXTURE_FILES
+)
 REQUIRED_FILES = EXACT_FILES
 
 
@@ -98,7 +150,7 @@ def tracked_files() -> set[str]:
 
 
 def allowed(path: str) -> bool:
-    return path in EXACT_FILES or path.startswith(WHOLE_PREFIXES)
+    return path in EXACT_FILES
 
 
 def main() -> int:

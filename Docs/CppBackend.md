@@ -221,7 +221,7 @@ recurrence. Choose `"Wolfram"` explicitly if that is the desired backend.
   `Q`. Algebraic functions, transcendental dependence, symbolic complex
   coefficients, and mixed inexact symbolic expressions are rejected.
 - Extra analytic-regulator symbols are currently collected from Wolfram's
-  `Global` context. The canonical dimensional regulator epsilon is handled
+  global symbol context. The canonical dimensional regulator epsilon is handled
   by the framed Laurent representation and is not one of those coefficient
   field variables.
 - The independent symbolic-regulator ODE residual is a five-point rational
@@ -277,7 +277,7 @@ Common problems:
   `PKG_CONFIG_PATH` (FLINT) and `CMAKE_PREFIX_PATH` (Boost), then configure a
   fresh build directory.
 - **Rebuilt library is not picked up:** evaluate
-  `DiffExp2`CppBackend`ResetBackend[]` after all calls have finished, or
+  ``DiffExp2`CppBackend`ResetBackend[]`` after all calls have finished, or
   restart the kernel, before loading the rebuilt binary.
 - **E5 unsupported scalar:** keep regulator dependence exact and rational,
   remove undeclared/algebraic symbolic coefficients, or explicitly use the

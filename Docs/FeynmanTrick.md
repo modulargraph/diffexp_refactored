@@ -1,0 +1,181 @@
+# Feynman Trick
+
+The Feynman-trick workflow recursively combines propagators,
+
+```text
+1/(D_i^a D_j^b)
+  = Gamma[a+b]/(Gamma[a] Gamma[b])
+    Integral_0^1 dx x^(a-1) (1-x)^(b-1)
+    / (x D_i + (1-x) D_j)^(a+b),
+```
+
+until the deepest level has analytic tadpole-type boundary data.  FIRE builds
+the master bases, IBP reductions, and exact differential matrix at each level.
+DiffExp 2 transports that data to both endpoints and applies a sector-aware
+limit or integral to obtain the next level's boundary.
+
+## Current supported entry point
+
+The verified DiffExp 2 driver is:
+
+```sh
+wolframscript -file Scripts/run_ft_stepwise2.m
+```
+
+It is an end-to-end implementation, but it is still a repository script.  A
+stable public Wolfram Language function such as `RunFeynmanTrick[...]` has not
+yet been implemented.  The example scripts below wrap the real driver and do
+not invent such a facade.
+
+## Small first run
+
+```sh
+DE2_RECURRENCE_BACKEND=Cpp \
+DE2_CPP_THREADS=4 \
+FT_EXAMPLES=bubble \
+FT_WORKING_PRECISION=300 \
+FT_EXPANSION_ORDER=40 \
+FT_EPS_ORDER=0 \
+FT_BOUNDARY_EXTRA_ORDER=10 \
+FT_DIVISION_ORDER=3 \
+FT_RADIUS_OF_CONVERGENCE=1 \
+FT_PREP_CACHE_DIR="$HOME/.cache/diffexp2/fire" \
+FT_LADDER_CHECKPOINT_DIR="$HOME/.cache/diffexp2/ladder/bubble" \
+wolframscript -file Scripts/run_ft_stepwise2.m
+```
+
+The first run prepares FIRE data and writes a reusable preparation snapshot.
+Later runs print `FTPREP CACHE HIT` and skip that work.
+
+## Built-in Euclidean examples
+
+The current fixtures in `Scripts/FTExamples.m` are:
+
+| Name | Integral and point | Dimension |
+| --- | --- | --- |
+| `bubble` | equal-mass one-loop bubble, `p^2=-1` | `2-2 eps` |
+| `sunrise` | equal-mass two-loop sunrise, `p^2=-1` | `2-2 eps` |
+| `banana` | equal-mass three-loop banana, `p^2=-1` | `2-2 eps` |
+| `banana_unequal` | squared masses `{2,3/2,4/3,1}`, `p^2=-1` | `2-2 eps` |
+| `banana4` | equal-mass four-loop banana, `p^2=-1` | `2-2 eps` |
+| `banana4_unequal` | squared masses `{2,3/2,4/3,5/4,1}`, `p^2=-1` | `2-2 eps` |
+| `kite` | fully massive equal-mass two-loop kite, `p^2=-1` | `2-2 eps` |
+| `box` | massless on-shell box, `s=-1`, `t=-1/3` | `4-2 eps` |
+| `box_bubble` | massless two-loop three-point subfamily, same Euclidean invariants | `4-2 eps` |
+| `box_triangle` | massless two-loop four-point subfamily | `4-2 eps` |
+| `double_box_planar` | massless planar double box | `4-2 eps` |
+| `pentagon` | massless pentagon at fixed negative adjacent invariants | `4-2 eps` |
+
+Release examples are in [Examples/FeynmanTrick](../Examples/FeynmanTrick/README.md).
+`bubble`, `sunrise`, and `banana_unequal` are the recommended progression.
+The four-loop unequal banana is intentionally marked experimental because a
+complete DiffExp 2 ladder result was not present in the source snapshot used
+for this documentation prototype.
+
+## Numerical controls
+
+| Environment variable | Meaning |
+| --- | --- |
+| `DE2_RECURRENCE_BACKEND` | `Cpp` for the release path, or explicit `Wolfram` reference mode |
+| `DE2_CPP_THREADS` | native recurrence worker budget; no extra Wolfram kernels or licenses |
+| `FT_WORKING_PRECISION` | working precision for transport and level handoffs |
+| `FT_EXPANSION_ORDER` | Taylor order retained in every local chart |
+| `FT_EPS_ORDER` | highest final epsilon coefficient requested |
+| `FT_BOUNDARY_EXTRA_ORDER` | extra internal epsilon lookahead at each level |
+| `FT_LEVEL_EPS_HALOS` | comma-separated extra lookahead by level, listed from level 1 upward |
+| `FT_DIVISION_ORDER` | coupled chart placement/matching divisor; adjacent regular charts meet at `+1/k` and `-1/k` |
+| `FT_RADIUS_OF_CONVERGENCE` | affine local-coordinate radius normalization |
+| `FT_FIRE_TIMEOUT_SECONDS` | watchdog timeout for one FIRE run |
+| `FT_CPP_BATCH_ENDPOINT_ARMS` | opt-in paired C++ prewarming for small lower/upper chart bases |
+| `DE2_VALUE_TRANSPORT` | experimental regular-chart value transport; off by default |
+
+More precision does not replace sufficient expansion order.  Conversely, a
+large epsilon halo does not increase the requested final order; it only
+supplies internal coefficients consumed by Laurent shifts, resonances, and
+endpoint integrations.  If an honest window is too short, the runner stops
+with `FTLADDER INCOMPLETE` instead of padding it.
+
+## Preparation cache and ladder checkpoints
+
+`FT_PREP_CACHE_DIR` stores completed Feynman-trick/FIRE preparation and the
+reduction cache.  Its key covers the topology, combination sequence,
+dimension, and FeynmanTrick sources.  Solver or runner changes intentionally do
+not force FIRE to rerun.
+
+`FT_LADDER_CHECKPOINT_DIR` stores two kinds of checkpoint:
+
+- a transport checkpoint after each completed lower or upper endpoint arm;
+- a boundary checkpoint after the next level's boundary vector is assembled.
+
+Resume explicitly:
+
+```sh
+FT_RESUME_LADDER_CHECKPOINT=/absolute/path/to/example_level2_boundary.mx \
+DE2_RECURRENCE_BACKEND=Cpp \
+FT_EXAMPLES=example \
+wolframscript -file Scripts/run_ft_stepwise2.m
+```
+
+The checkpoint records the example, backend, precision, expansion and epsilon
+settings, prepared-data key, level metadata, and a source fingerprint.
+Stale/unversioned checkpoints are rejected unless
+`FT_ALLOW_STALE_LADDER_CHECKPOINT=1` is set; descendants of an explicitly
+accepted stale checkpoint remain marked tainted.
+
+## Lower and upper endpoint scheduling
+
+A single Wolfram kernel cannot execute two Wolfram marching loops at once.
+With `FT_CPP_BATCH_ENDPOINT_ARMS=1`, however, small boundary-independent
+homogeneous bases from the two arms can be submitted together to the native
+worker pool.  Planning, matching, analytic continuation, integration, and
+checkpoint writes remain sequential.  The runner skips this schedule when a
+single chart already fills the thread budget or when value transport makes the
+recurrence boundary-dependent.
+
+## Output
+
+The runner prints machine-readable records:
+
+```text
+STEPWISE {"Example":...,"Level":...,"Master":...,"RawMinPower":...,"Coefficients":...}
+FINAL {"Example":...,"Finite":...,"RawMinPower":...}
+```
+
+Use the `STEPWISE` rows for Laurent coefficients and intermediate-level
+audits.  Historical logs used `"Finite"` inconsistently when a result had
+poles; [Results](Results.md) reports coefficients explicitly and does not rely
+on that label alone.
+
+## Adding a topology today
+
+The implemented building blocks are:
+
+```mathematica
+FeynmanTrick`FIREInterface`DefineTopology[...]
+FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[...]
+FeynmanTrick`FeynmanTrickIteration`RunFullIteration[...]
+```
+
+but the DiffExp 2 ladder around them currently lives in
+`Scripts/run_ft_stepwise2.m`.  Therefore a new release-quality example must
+either:
+
+1. add a named exact fixture to `Scripts/FTExamples.m` and use the driver; or
+2. extract and stabilize a public ladder function first.
+
+The second option is the intended API direction.  Copying the runner's private
+helpers into user notebooks is not recommended.
+
+## Failure and reproducibility rules
+
+- FIRE failure, timeout, or incomplete master data aborts preparation.
+- A requested C++ backend never falls back silently.
+- Missing analytic continuation prescriptions for material multivalued
+  sectors are errors.
+- Incomplete epsilon windows are errors.
+- Exact propagator definitions, squared-mass conventions, dimensions, and
+  Euclidean points must be recorded with every result.
+- Warm transport timings must be distinguished from cold runs that include
+  FIRE preparation.
+
+Verified values and timing scopes are summarized in [Results](Results.md).

@@ -1,0 +1,138 @@
+# Verified Results
+
+This page separates mathematical values, numerical settings, and timed scope.
+It is a curated release summary, not a benchmark claim for every machine.
+Cold Feynman-trick runs include FIRE preparation; warm runs begin from a
+prepared cache.  Those scopes are never mixed in one timing row.
+
+## Small Euclidean fixtures
+
+The repository contains parity-oracle logs for equal-mass examples in
+``D=2-2 eps`` at ``p^2=-1``:
+
+| Example | Reported epsilon-zero coefficient | Provenance |
+| --- | ---: | --- |
+| one-loop bubble | ``0.8608178819280080777765623653643473221`` | stored old-core parity oracle |
+| two-loop sunrise | ``2.2367927002126465108229117827758723767`` | stored old-core parity oracle; displayed imaginary part about ``3.1e-21`` |
+| three-loop equal-mass banana | ``8.2681045358689687593219901952256396`` | stored completed ladder log; displayed imaginary part about ``9.4e-17`` |
+
+The corresponding records are
+[bubble/sunrise](../Tests/refs/oracle_logs/l2_bubsun.log) and
+[banana](../Tests/refs/oracle_logs/l2_banana.log).  The bubble and sunrise
+files are parity artifacts rather than surviving independent pySecDec runs;
+that distinction is recorded in
+[their manifest](../Tests/refs/oracle_logs/MANIFEST.md).
+
+## Unequal-mass three-loop banana
+
+At
+
+```text
+m_i^2 = {2, 3/2, 4/3, 1},  p^2 = -1,  D = 2 - 2 eps,
+```
+
+the independent two-dimensional Bessel oracle is
+
+```text
+5.83402729266214946740741989567969814964058746213209...
+```
+
+Two compiled routes were compared on the development Mac:
+
+| Route | Settings | Timed scope | Seconds | Scalar | Oracle agreement |
+| --- | --- | --- | ---: | ---: | ---: |
+| direct 15-master transport | WP250, EO50, epsilon through 4, division 3 | exact slice audit, reconstruction, planning, transport | 46.770 | ``5.8340272926621494708226551820`` | 18.2 digits |
+| Feynman-trick ladder | WP500, EO70, finite coefficient, extra order 10, halos ``0,4,7`` | analytic deepest boundary and full warm ladder | 390.286 | ``5.8340272926621494674057011919652947`` | 20.8 digits |
+
+The direct timing excludes FIRE matrix generation and its frozen seed
+generation.  The Feynman-trick timing excludes FIRE/IBP preparation.  The
+direct route also returns four positive epsilon orders while the ladder row
+targets the finite coefficient, so the table establishes agreement rather
+than an identical-workload race.  Details and reproduction commands are in
+[C++ Recurrence Backend](CppBackend.md#unequal-mass-three-loop-banana-comparison).
+
+## Box-bubble
+
+For the massless two-loop ``box_bubble`` fixture at ``s=-1``, ``t=-1/3`` in
+``D=4-2 eps``, a from-scratch run at WP300, expansion order 40, division order
+3, and boundary extra order 16 completed FIRE preparation and four DiffExp 2
+levels in about 55 seconds on the development machine:
+
+```text
+eps^-3    0.4999999999999719409794842591023
+eps^-2    0.4227843350986460144608829749893
+eps^-1    0.3562795605799888368173675114533
+eps^0    -4.877139662454516944362515776161
+```
+
+Every displayed coefficient agrees with the stored oracle to about
+``1.4e-12`` absolute or better.  The detailed validation record is
+[Additional Euclidean FeynmanTrick topologies](FeynmanTrickAdditionalTopologies.md#diffexp2-box-bubble-validation).
+
+## Massive kite
+
+The ``kite`` fixture is the fully massive equal-mass five-propagator kite in
+``D=2-2 eps`` at ``p^2=-1``.  With WP300, expansion order 40, division order 3,
+boundary extra order 16, and halos ``0,4,7,7``, the completed result was:
+
+```text
+eps^-1   -9.8559958318033201e-21
+eps^0     0.223983919107444028404077222049
+```
+
+An independent direct Feynman-parameter integration gave
+``0.223983917019259`` with a conservative ``1.8e-7`` error estimate.  This is
+a useful normalization check, but it does not certify every displayed digit.
+
+## Four-loop banana status
+
+For the equal-mass five-line banana in ``D=2`` at ``p^2=-1``, the independent
+configuration-space Bessel moment is
+
+```text
+16 Integral_0^Infinity r J0(r) K0(r)^5 dr
+  = 39.6555268342976525299928230469335811564460602187101868181...
+```
+
+The standalone evaluator is
+[Scripts/banana4_bessel_oracle.m](../Scripts/banana4_bessel_oracle.m).  In the
+snapshot used for this release-docs prototype, this number is an independent
+epsilon-zero oracle, not evidence that the complete DiffExp 2 four-loop ladder
+finished.
+
+The unequal-mass fixture with squared masses
+``{2,3/2,4/3,5/4,1}`` is present as ``banana4_unequal``.  No completed,
+source-controlled ladder result was present in the prototype snapshot, so the
+release example is explicitly experimental and this page does not publish a
+solver value for it.
+
+## Recurrence-kernel speedup
+
+On the committed seven-master ``banana_L1`` chart fixture:
+
+| Case | Wolfram recurrence | C++ recurrence | Speedup |
+| --- | ---: | ---: | ---: |
+| WP100, EO50, epsilon order 5 | 81.268 s | 4.380 s | 18.6x |
+| WP500, EO50, epsilon order 11 | about 246.7 s | 11.492 s | about 21.5x |
+
+These rows time the recurrence-oriented chart workload, not FIRE or an entire
+Feynman-trick computation.  Small systems can be dominated by Wolfram
+preparation, JSON/LibraryLink transfer, and validation.
+
+## Reproducibility checklist
+
+A release result should record:
+
+- propagators and whether each mass entry is a mass or squared mass;
+- loop/external momenta, invariant replacements, and the dimension convention;
+- master normalization and any epsilon prefactor;
+- backend and thread count;
+- working precision, expansion order, epsilon order, division order, radius,
+  boundary lookahead, and per-level halos;
+- whether the run was cold, warm-prepared, or resumed;
+- the independent oracle and its own uncertainty;
+- full Laurent coefficients, not only a field named ``Finite``.
+
+Development campaign logs and large oracle dumps belong on the development
+branch.  A clean release should retain only curated pins needed by shipped
+tests plus this summary; see [Release Manifest](ReleaseManifest.md).

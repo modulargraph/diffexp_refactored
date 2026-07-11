@@ -62,7 +62,7 @@ RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
    batch, rebuild, allowStale, fireTimeout, resume, checkpointDir, prepRoot,
-   persistentStorage, fireStorageDir, values},
+   values},
   backend = envOrDefault["DE2_RECURRENCE_BACKEND", "Cpp"];
   If[!MemberQ[{"Cpp", "Wolfram"}, backend],
     Return[failure["DE2_RECURRENCE_BACKEND must be Cpp or Wolfram",
@@ -92,8 +92,6 @@ RunnerSettingsFromEnvironment[] := Module[
       envOrDefault["FT_REBUILD_PREP", "0"]],
     allowStale = parseFlag["FT_ALLOW_STALE_LADDER_CHECKPOINT",
       envOrDefault["FT_ALLOW_STALE_LADDER_CHECKPOINT", "0"]],
-    persistentStorage = parseFlag["FT_PERSISTENT_FIRE_STORAGE",
-      envOrDefault["FT_PERSISTENT_FIRE_STORAGE", "0"]],
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
@@ -109,7 +107,6 @@ RunnerSettingsFromEnvironment[] := Module[
     If[resume === "", "", DirectoryName[ExpandFileName[resume]]]];
   prepRoot = envOrDefault["FT_PREP_CACHE_DIR",
     FileNameJoin[{$TemporaryDirectory, "DiffExp2_FT_Prepared"}]];
-  fireStorageDir = envOrDefault["FT_FIRE_STORAGE_DIR", ""];
   <|
     "RecurrenceBackend" -> backend, "CppThreads" -> threads,
     "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
@@ -126,9 +123,7 @@ RunnerSettingsFromEnvironment[] := Module[
     "BatchEndpointArms" -> (batch && backend === "Cpp"),
     "PrepCacheRoot" -> prepRoot, "ForcePrepRebuild" -> rebuild,
     "ResumeCheckpoint" -> resume, "CheckpointDirectory" -> checkpointDir,
-    "AllowStaleCheckpoint" -> allowStale,
-    "PersistentFIREStorage" -> persistentStorage,
-    "FIREStorageDirectory" -> fireStorageDir
+    "AllowStaleCheckpoint" -> allowStale
   |>];
 
 Options[PipelinePlan] = {
@@ -151,8 +146,6 @@ Options[PipelinePlan] = {
   "AllowStaleCheckpoint" -> False,
   "StopAfterBoundaryLevel" -> None,
   "FIRETimeoutSeconds" -> 1800,
-  "PersistentFIREStorage" -> False,
-  "FIREStorageDirectory" -> Automatic,
   "Runner" -> Automatic,
   "WolframScript" -> Automatic,
   "WorkingDirectory" -> Automatic,
@@ -194,21 +187,18 @@ validatePlanOptions[settings_Association] := Module[{checks},
     IntegerQ[settings["CppThreads"]] && settings["CppThreads"] >= 1,
     And @@ (boolQ[settings[#]] & /@ {
       "ValueTransport", "BatchEndpointArms", "SingularMatchPrecondition",
-      "RebuildPreparation", "AllowStaleCheckpoint", "PersistentFIREStorage",
-      "Asynchronous"}),
+      "RebuildPreparation", "AllowStaleCheckpoint", "Asynchronous"}),
     IntegerQ[settings["FIRETimeoutSeconds"]] &&
       settings["FIRETimeoutSeconds"] >= 1,
     AssociationQ[settings["ExtraEnvironment"]] &&
       AllTrue[Keys[settings["ExtraEnvironment"]], StringQ] &&
-      AllTrue[Values[settings["ExtraEnvironment"]], StringQ],
-    StringQ[settings["FIREStorageDirectory"]]
+      AllTrue[Values[settings["ExtraEnvironment"]], StringQ]
   };
   If[And @@ checks, True,
     failure["one or more pipeline options are invalid", <|"Settings" -> settings|>]]];
 
 PipelinePlan[example_String, OptionsPattern[]] := Module[
   {threads, runner, executable, workdir, prep, checkpoint, resume, stop,
-   fireStorage,
    settings, valid, env},
   If[StringLength[StringTrim[example]] === 0 || StringContainsQ[example, ","],
     Return[failure["example must be one nonempty registry name",
@@ -224,9 +214,6 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
   checkpoint = ExpandFileName[Replace[OptionValue["CheckpointDirectory"],
     Automatic :> FileNameJoin[{$TemporaryDirectory,
       "DiffExp2_FT_Checkpoints", example}]]];
-  fireStorage = Replace[OptionValue["FIREStorageDirectory"], {
-    Automatic -> "",
-    path_String :> ExpandFileName[path]}];
   resume = OptionValue["ResumeFrom"];
   If[resume =!= None,
     If[!StringQ[resume] || !FileExistsQ[resume],
@@ -251,8 +238,6 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "SingularMatchPrecondition" -> OptionValue["SingularMatchPrecondition"],
     "RebuildPreparation" -> OptionValue["RebuildPreparation"],
     "AllowStaleCheckpoint" -> OptionValue["AllowStaleCheckpoint"],
-    "PersistentFIREStorage" -> OptionValue["PersistentFIREStorage"],
-    "FIREStorageDirectory" -> fireStorage,
     "FIRETimeoutSeconds" -> OptionValue["FIRETimeoutSeconds"],
     "Asynchronous" -> OptionValue["Asynchronous"],
     "ExtraEnvironment" -> OptionValue["ExtraEnvironment"]
@@ -293,11 +278,8 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "FT_REBUILD_PREP" -> boolString[settings["RebuildPreparation"]],
     "FT_ALLOW_STALE_LADDER_CHECKPOINT" ->
       boolString[settings["AllowStaleCheckpoint"]],
-    "FT_PERSISTENT_FIRE_STORAGE" ->
-      boolString[settings["PersistentFIREStorage"]],
     "FT_FIRE_TIMEOUT_SECONDS" -> inputString[settings["FIRETimeoutSeconds"]]
   |>;
-  If[fireStorage =!= "", env["FT_FIRE_STORAGE_DIR"] = fireStorage];
   If[resume =!= None, env["FT_RESUME_LADDER_CHECKPOINT"] = resume];
   If[stop =!= None,
     env["FT_STOP_AFTER_BOUNDARY_LEVEL"] = inputString[stop]];

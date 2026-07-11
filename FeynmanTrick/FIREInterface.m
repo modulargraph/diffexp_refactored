@@ -291,253 +291,6 @@ safeReadString[path_String] := Module[{txt},
   If[StringQ[txt], txt, ""]
 ];
 
-(* Persistent FIRE database generations.  FIRE's .tables output contains only
-   the requested reductions; the expensive sector database is a separate,
-   internal artifact.  This seam is deliberately opt-in and content addressed.
-   A committed generation is never passed to FIRE directly: every invocation
-   receives an attempt-local clone, and only a successfully parsed reduction
-   may advance the atomic CURRENT pointer. *)
-$fireStorageSchema = "FeynmanTrick.FIREStorage/v1";
-
-fireStorageEnabledQ[] := TrueQ[Lookup[
-  FeynmanTrick`Private`$FTConfig, "PersistentFIREStorage", False]];
-
-fileSHA256[path_String] := If[FileExistsQ[path],
-  IntegerString[FileHash[path, "SHA256"], 16, 64], Missing["NotFound"]];
-
-safeFileNames[pattern_, directory_String, levels_:1] :=
-  If[DirectoryQ[directory], FileNames[pattern, directory, levels], {}];
-
-fireBuildFingerprint[fireBin_String] := Module[
-  {root = ParentDirectory[DirectoryName[ExpandFileName[fireBin]]], candidates},
-  candidates = DeleteDuplicates[ExpandFileName /@ Join[
-    {fireBin,
-      FileNameJoin[{root, "FIRE6.m"}],
-      FileNameJoin[{root, "poly", "FIRE6"}],
-      FileNameJoin[{root, "bin", "FLAME6"}],
-      FileNameJoin[{root, "extra", "fuel", "extra", "ferm64", "fer64"}],
-      FileNameJoin[{root, "extra", "fuel", "libraryBinarySettings"}]},
-    safeFileNames["libkyotocabinet*", FileNameJoin[{root, "usr", "lib"}]],
-    safeFileNames["libfuel*", FileNameJoin[{root, "usr", "lib"}]],
-    safeFileNames["libfuel*", FileNameJoin[{root, "extra", "fuel"}], Infinity]
-  ]];
-  candidates = Sort[Select[candidates, FileExistsQ]];
-  If[!FileExistsQ[ExpandFileName[fireBin]], Return[$Failed, Module]];
-  ({StringReplace[#, StartOfString ~~ (root <> $PathnameSeparator) -> ""],
-      fileSHA256[#]} &) /@ candidates
-];
-
-fireStorageCompatibility[topology_Association, fireBin_String] := Module[
-  {startFile, build, vars, optionKeys, options},
-  startFile = FileNameJoin[{topology["WorkDirectory"],
-    topology["Name"] <> ".start"}];
-  If[!FileExistsQ[startFile], Return[$Failed, Module]];
-  build = fireBuildFingerprint[fireBin];
-  If[build === $Failed, Return[$Failed, Module]];
-  vars = DeleteDuplicates[Join[
-    {FeynmanTrick`Private`$FTConfig["DimensionVariable"]},
-    topology["Variables"]]];
-  optionKeys = {"Threads", "FThreads", "AutoDetectRestrictions"};
-  options = AssociationMap[
-    Lookup[FeynmanTrick`Private`$FTConfig, #, Missing["Unset"]] &,
-    optionKeys];
-  <|
-    "Schema" -> $fireStorageSchema,
-    "StartFile" -> FileNameTake[startFile],
-    "StartSHA256" -> fileSHA256[startFile],
-    "FIREBuild" -> build,
-    "Variables" -> (SymbolName /@ vars),
-    "ProblemNumber" -> topology["ProblemNumber"],
-    "TopologyName" -> topology["Name"],
-    "NumPropagators" -> topology["NumPropagators"],
-    "Options" -> options,
-    "KeepAll" -> True,
-    "SystemID" -> $SystemID,
-    "SystemWordLength" -> $SystemWordLength,
-    "ByteOrdering" -> $ByteOrdering
-  |>
-];
-
-fireStorageRoot[] := Module[{configured = Lookup[
-    FeynmanTrick`Private`$FTConfig, "FIREStorageDirectory", Automatic]},
-  Which[
-    configured === Automatic,
-      FileNameJoin[{FeynmanTrick`Private`$FTConfig["WorkDirectory"],
-        "PersistentFIREStorage"}],
-    StringQ[configured] && StringLength[StringTrim[configured]] > 0,
-      ExpandFileName[configured],
-    True, $Failed
-  ]
-];
-
-ensureDirectory[path_String] := DirectoryQ[path] || Quiet[Check[
-  CreateDirectory[path, CreateIntermediateDirectories -> True]; True,
-  DirectoryQ[path]]];
-
-fireStorageKey[compat_Association] :=
-  IntegerString[Hash[compat, "SHA256"], 16, 64];
-
-currentFIREStorageGeneration[keyDir_String] := Module[
-  {pointer = FileNameJoin[{keyDir, "CURRENT"}], name, generation,
-   manifestFile, manifest},
-  If[!FileExistsQ[pointer], Return[None, Module]];
-  name = StringTrim[safeReadString[pointer]];
-  If[!StringMatchQ[name, RegularExpression["gen-[0-9a-f]{32}"]],
-    Return[None, Module]];
-  generation = FileNameJoin[{keyDir, "generations", name}];
-  manifestFile = FileNameJoin[{generation, "manifest.json"}];
-  If[!DirectoryQ[FileNameJoin[{generation, "storage"}]] ||
-      !FileExistsQ[manifestFile], Return[None, Module]];
-  manifest = Quiet[Check[Import[manifestFile, "RawJSON"], $Failed]];
-  If[AssociationQ[manifest] &&
-      Lookup[manifest, "Schema", None] === $fireStorageSchema &&
-      Lookup[manifest, "Key", None] === FileNameTake[keyDir],
-    generation,
-    None
-  ]
-];
-
-acquireFIREStorageLock[keyDir_String, key_String] := Module[
-  {lockDir = FileNameJoin[{keyDir, "LOCK"}], owner, wrote},
-  If[!ensureDirectory[keyDir], Return[$Failed, Module]];
-  If[!Quiet[Check[CreateDirectory[lockDir]; True, False]],
-    Print["Error: persistent FIRE storage is already locked for key ", key,
-      ". Refusing concurrent database mutation."];
-    Return[$Failed, Module]
-  ];
-  owner = <|"Schema" -> $fireStorageSchema, "Key" -> key,
-    "ProcessID" -> $ProcessID, "KernelID" -> $KernelID,
-    "AcquiredAt" -> DateString["ISODateTime"]|>;
-  wrote = Quiet[Check[
-    Export[FileNameJoin[{lockDir, "owner.json"}], owner, "RawJSON"];
-    FileExistsQ[FileNameJoin[{lockDir, "owner.json"}]], False]];
-  If[!TrueQ[wrote], Quiet[DeleteDirectory[lockDir, DeleteContents -> True]];
-    Return[$Failed, Module]];
-  lockDir
-];
-
-cloneFIREStorageGeneration[source_String, destination_String] := Module[
-  {copied = False, proc},
-  If[DirectoryQ[destination],
-    Quiet[DeleteDirectory[destination, DeleteContents -> True]]];
-  If[$OperatingSystem === "MacOSX" && FileExistsQ["/bin/cp"],
-    proc = Quiet[Check[
-      RunProcess[{"/bin/cp", "-cR", source, destination}], $Failed]];
-    copied = AssociationQ[proc] && Lookup[proc, "ExitCode", 1] === 0 &&
-      DirectoryQ[destination]
-  ];
-  If[!copied,
-    If[DirectoryQ[destination],
-      Quiet[DeleteDirectory[destination, DeleteContents -> True]]];
-    copied = Quiet[Check[CopyDirectory[source, destination];
-      DirectoryQ[destination], False]]
-  ];
-  TrueQ[copied]
-];
-
-beginFIREStorageSession[topology_Association, fireBin_String] := Module[
-  {compat, root, key, keyDir, lockDir, base, token, attemptDir},
-  If[!fireStorageEnabledQ[], Return[None, Module]];
-  compat = fireStorageCompatibility[topology, fireBin];
-  root = fireStorageRoot[];
-  If[compat === $Failed || root === $Failed || !ensureDirectory[root],
-    Print["Error: could not construct persistent FIRE storage identity."];
-    Return[$Failed, Module]
-  ];
-  key = fireStorageKey[compat];
-  keyDir = FileNameJoin[{root, key}];
-  If[!ensureDirectory[FileNameJoin[{keyDir, "generations"}]] ||
-      !ensureDirectory[FileNameJoin[{keyDir, "attempts"}]],
-    Return[$Failed, Module]];
-  lockDir = acquireFIREStorageLock[keyDir, key];
-  If[lockDir === $Failed, Return[$Failed, Module]];
-  base = currentFIREStorageGeneration[keyDir];
-  token = ToLowerCase[StringReplace[CreateUUID[], "-" -> ""]];
-  attemptDir = FileNameJoin[{keyDir, "attempts",
-    "attempt-" <> ToString[$ProcessID] <> "-" <> token}];
-  If[!ensureDirectory[attemptDir],
-    Quiet[DeleteDirectory[lockDir, DeleteContents -> True]];
-    Return[$Failed, Module]];
-  <|"Schema" -> $fireStorageSchema, "Key" -> key,
-    "Compatibility" -> compat, "KeyDirectory" -> keyDir,
-    "LockDirectory" -> lockDir, "BaseGeneration" -> base,
-    "AttemptDirectory" -> attemptDir,
-    "AttemptStorage" -> FileNameJoin[{attemptDir, "storage"}]|>
-];
-
-resetFIREStorageAttempt[session_Association] := Module[
-  {destination = session["AttemptStorage"], base = session["BaseGeneration"],
-   source},
-  If[DirectoryQ[destination],
-    Quiet[DeleteDirectory[destination, DeleteContents -> True]]];
-  If[StringQ[base],
-    source = FileNameJoin[{base, "storage"}];
-    If[!DirectoryQ[source], Return[False, Module]];
-    cloneFIREStorageGeneration[source, destination],
-    ensureDirectory[destination]
-  ]
-];
-
-abortFIREStorageSession[session_Association] := Module[{},
-  If[DirectoryQ[session["AttemptDirectory"]],
-    Quiet[DeleteDirectory[session["AttemptDirectory"],
-      DeleteContents -> True]]];
-  If[DirectoryQ[session["LockDirectory"]],
-    Quiet[DeleteDirectory[session["LockDirectory"],
-      DeleteContents -> True]]];
-  Null
-];
-abortFIREStorageSession[_] := Null;
-
-publishFIREStorageSession[session_Association] := Module[
-  {keyDir = session["KeyDirectory"], generationsDir, generationName,
-   generationDir, manifestFile, pointer, pointerTmp, wrote, renamed,
-   oldGenerations},
-  If[!DirectoryQ[session["AttemptStorage"]], Return[False, Module]];
-  generationsDir = FileNameJoin[{keyDir, "generations"}];
-  generationName = "gen-" <>
-    ToLowerCase[StringReplace[CreateUUID[], "-" -> ""]];
-  generationDir = FileNameJoin[{generationsDir, generationName}];
-  If[!Quiet[Check[CreateDirectory[generationDir]; True, False]],
-    Return[False, Module]];
-  renamed = Quiet[Check[
-    RenameDirectory[session["AttemptStorage"],
-      FileNameJoin[{generationDir, "storage"}]]; True, False]];
-  If[!TrueQ[renamed],
-    Quiet[DeleteDirectory[generationDir, DeleteContents -> True]];
-    Return[False, Module]];
-  manifestFile = FileNameJoin[{generationDir, "manifest.json"}];
-  wrote = Quiet[Check[Export[manifestFile, <|
-      "Schema" -> $fireStorageSchema, "Key" -> session["Key"],
-      "Compatibility" -> session["Compatibility"],
-      "PublishedAt" -> DateString["ISODateTime"]|>, "RawJSON"];
-    FileExistsQ[manifestFile], False]];
-  If[!TrueQ[wrote],
-    Quiet[DeleteDirectory[generationDir, DeleteContents -> True]];
-    Return[False, Module]];
-  pointer = FileNameJoin[{keyDir, "CURRENT"}];
-  pointerTmp = pointer <> ".tmp-" <> ToString[$ProcessID] <> "-" <>
-    StringReplace[CreateUUID[], "-" -> ""];
-  wrote = Quiet[Check[Export[pointerTmp, generationName <> "\n", "Text"];
-    FileExistsQ[pointerTmp], False]];
-  renamed = TrueQ[wrote] && Quiet[Check[
-    RenameFile[pointerTmp, pointer, OverwriteTarget -> True]; True, False]];
-  If[!TrueQ[renamed],
-    If[FileExistsQ[pointerTmp], Quiet[DeleteFile[pointerTmp]]];
-    Quiet[DeleteDirectory[generationDir, DeleteContents -> True]];
-    Return[False, Module]];
-  If[DirectoryQ[session["AttemptDirectory"]],
-    Quiet[DeleteDirectory[session["AttemptDirectory"],
-      DeleteContents -> True]]];
-  oldGenerations = DeleteCases[
-    Select[FileNames["gen-*", generationsDir], DirectoryQ], generationDir];
-  Scan[Quiet[DeleteDirectory[#, DeleteContents -> True]] &, oldGenerations];
-  If[DirectoryQ[session["LockDirectory"]],
-    Quiet[DeleteDirectory[session["LockDirectory"],
-      DeleteContents -> True]]];
-  True
-];
-
 cleanupFIREProcesses[fireBin_String, configName_String] :=
 Module[{fireDir, flameBin, fermatBin},
   fireDir = DirectoryName[fireBin];
@@ -572,19 +325,11 @@ cleanupFIREWorkDir[dir_String] := Module[{tempDir},
 (* runFIRE6 - helper to run FIRE6 binary robustly               *)
 (* ============================================================ *)
 
-runFIRE6[fireBin_String, dir_String, configName_String,
-         storageSession_:None] :=
+runFIRE6[fireBin_String, dir_String, configName_String] :=
 Module[{exitCode, maxRetries = 3, attempt},
   Do[
     cleanupFIREProcesses[fireBin, configName];
     cleanupFIREWorkDir[dir];
-    (* A failed FIRE invocation may leave a logically inconsistent database.
-       Retry only from the last committed immutable generation. *)
-    If[AssociationQ[storageSession] &&
-        !TrueQ[resetFIREStorageAttempt[storageSession]],
-      Print["Error: could not prepare attempt-local FIRE storage."];
-      Return[125, Module]
-    ];
     exitCode = runFIRE6Once[fireBin, dir, configName];
     If[exitCode === 0, Return[0, Module]];
     If[attempt < maxRetries,
@@ -663,12 +408,9 @@ Module[{exitCode, result, logFile, cmd, stdoutFile, stderrFile,
 
   (* Copy generated table outputs back to the canonical topology directory. *)
   tableFiles = FileNames["*.tables", runDir];
-  If[exitCode === 0,
-    Scan[
-      Quiet[CopyFile[#,
-        FileNameJoin[{dir, FileNameTake[#]}], OverwriteTarget -> True]] &,
-      tableFiles
-    ]
+  Scan[
+    Quiet[CopyFile[#, FileNameJoin[{dir, FileNameTake[#]}], OverwriteTarget -> True]] &,
+    tableFiles
   ];
 
   (* Read output *)
@@ -891,10 +633,8 @@ Module[{vars, content, threads, fthreads, problemLines, allVars},
 
 (* Write single-problem config (for backwards compatibility) *)
 writeSingleProblemConfig[topology_Association, dir_String, configName_String,
-                         integralsFile_String:"", outputFile_String:"",
-                         storageSession_:None] :=
-Module[{vars, content, threads, fthreads, intFile, outFile, name, pn,
-        storageLines},
+                         integralsFile_String:"", outputFile_String:""] :=
+Module[{vars, content, threads, fthreads, intFile, outFile, name, pn},
   name = topology["Name"];
   pn = topology["ProblemNumber"];
   threads = FeynmanTrick`Private`$FTConfig["Threads"];
@@ -907,19 +647,11 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name, pn,
 
   intFile = If[integralsFile === "", name <> ".m", integralsFile];
   outFile = If[outputFile === "", name <> ".tables", outputFile];
-  storageLines = If[AssociationQ[storageSession],
-    StringJoin[
-      "#storage           !", storageSession["AttemptStorage"], "\n",
-      "#keepall\n"
-    ],
-    ""
-  ];
 
   content = StringJoin[
     "#threads           ", ToString[threads], "\n",
     "#fthreads          ", ToString[fthreads], "\n",
     "#variables         ", StringRiffle[SymbolName /@ vars, ","], "\n",
-    storageLines,
     "#start\n",
     "#problem           ", ToString[pn], " ", name, ".start\n",
     "#integrals         ", intFile, "\n",
@@ -1069,12 +801,10 @@ Module[{dir, fireBin, intContent, allSectors, tablesFile, masters, results},
 (* ============================================================ *)
 
 ReduceIntegralsDetailed[topology_Association, integrals_List] :=
-Module[{dir, name, fireBin, intFile, intPath, configPath, tablesFile, rules,
-        intContent, result,
+Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
         pn, masters = {}, fireIntegrals, cacheEntries, missingPositions,
         missingFireIntegrals, missingIntegrals, newReductions = {},
-        computedReductions, allEntries, allMasters, cacheEnabled,
-        storageSession = None, storageResult},
+        computedReductions, allEntries, allMasters, cacheEnabled},
 
   If[!topology["StartFileReady"],
     Print["Error: Must call SetupFIRE before ReduceIntegrals."];
@@ -1123,167 +853,87 @@ Module[{dir, name, fireBin, intFile, intPath, configPath, tablesFile, rules,
   pn = topology["ProblemNumber"];
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
-  storageSession = beginFIREStorageSession[topology, fireBin];
-  If[storageSession === $Failed, Return[$Failed, Module]];
+  missingFireIntegrals = fireIntegrals[[missingPositions]];
+  missingIntegrals = integrals[[missingPositions]];
 
-  storageResult = Internal`WithLocalSettings[
-    Null,
-    Module[{parsed, masterRecords, referencedMasters},
-      missingFireIntegrals = fireIntegrals[[missingPositions]];
-      missingIntegrals = integrals[[missingPositions]];
-
-      (* Write integrals file with problem number. *)
-      intContent = StringJoin[
-        "{",
-        StringRiffle[
-          ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@
-            missingFireIntegrals,
-          ",\n"
-        ],
-        "}\n"
-      ];
-      intFile = name <> "_reduce.m";
-      intPath = FileNameJoin[{dir, intFile}];
-      If[FileExistsQ[intPath], Quiet[DeleteFile[intPath]]];
-      If[!TrueQ[Quiet[Check[
-          Export[intPath, intContent, "Text"];
-          FileExistsQ[intPath], False]]],
-        Print["Error: could not write FIRE reduction input."];
-        Return[$Failed, Module];
-      ];
-
-      (* #storage points at an attempt-local clone, never at CURRENT. *)
-      configPath = FileNameJoin[{dir, name <> "_reduce.config"}];
-      If[FileExistsQ[configPath], Quiet[DeleteFile[configPath]]];
-      If[!TrueQ[Quiet[Check[
-          writeSingleProblemConfig[topology, dir, name <> "_reduce.config",
-            intFile, name <> "_reduce.tables", storageSession];
-          FileExistsQ[configPath], False]]],
-        Print["Error: could not write FIRE reduction configuration."];
-        Return[$Failed, Module];
-      ];
-
-      (* A previous successful invocation may have left a canonical table.
-         Remove it before launching so a zero-exit/no-output anomaly cannot
-         parse stale rules and publish the new database under false pretences. *)
-      tablesFile = FileNameJoin[{dir, name <> "_reduce.tables"}];
-      If[FileExistsQ[tablesFile], Quiet[DeleteFile[tablesFile]]];
-      If[FileExistsQ[tablesFile],
-        Print["Error: could not remove stale FIRE reduction output."];
-        Return[$Failed, Module];
-      ];
-
-      If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-        Print["Reducing ", Length[missingIntegrals], " integrals..."];
-      ];
-      If[runFIRE6[fireBin, dir, name <> "_reduce", storageSession] =!= 0,
-        Print["Error: FIRE6 integral reduction failed."];
-        Return[$Failed, Module];
-      ];
-
-      If[!FileExistsQ[tablesFile],
-        Print["Error: FIRE6 reduction did not produce output."];
-        Return[$Failed, Module];
-      ];
-
-      (* Database publication is contingent on both FIRE success and strict
-         parsing of the resulting table. *)
-      parsed = Quiet[Check[
-        {FIRE`Tables2Rules[tablesFile], FIRE`Tables2Masters[tablesFile]},
-        $Failed
-      ]];
-      If[parsed === $Failed || !MatchQ[parsed, {_List, _List}],
-        Print["Error: FIRE6 reduction tables could not be parsed."];
-        Return[$Failed, Module];
-      ];
-      {rules, masterRecords} = parsed;
-      masters = Cases[masterRecords, {pn, indices_List} :> indices];
-
-      (* FIRE uses G[problemNumber, indices].  Public reductions consistently
-         use problem number 1, including identities cached for returned
-         masters that were not explicit inputs to this invocation. *)
-      newReductions = Quiet[Check[
-        ((Global`G[pn, #] /. rules) &) /@ missingFireIntegrals,
-        $Failed
-      ]];
-      If[newReductions === $Failed || !ListQ[newReductions] ||
-          Length[newReductions] =!= Length[missingFireIntegrals],
-        Print["Error: FIRE6 reduction rules could not be applied."];
-        Return[$Failed, Module];
-      ];
-      newReductions = newReductions /.
-        Global`G[pn, idx_] :> Global`G[1, idx];
-      referencedMasters = DeleteDuplicates[
-        Cases[newReductions, Global`G[1, idx_List] :> idx, Infinity]
-      ];
-      If[!AllTrue[referencedMasters, MemberQ[masters, #] &],
-        Print["Error: FIRE6 tables left an integral not reported as a master."];
-        Return[$Failed, Module];
-      ];
-
-      If[AssociationQ[storageSession],
-        If[fireStorageCompatibility[topology, fireBin] =!=
-            storageSession["Compatibility"],
-          Print["Error: FIRE storage compatibility inputs changed during reduction."];
-          Return[$Failed, Module];
-        ];
-        If[!TrueQ[publishFIREStorageSession[storageSession]],
-          Print["Error: could not atomically publish persistent FIRE storage."];
-          Return[$Failed, Module];
-        ];
-        (* Publication normally performs this cleanup itself; repeat it here
-           before dropping the session handle so a transient delete failure
-           cannot strand the per-key writer lock. *)
-        abortFIREStorageSession[storageSession];
-        storageSession = None;
-      ];
-
-      Scan[
-        cacheReduction[topology, #, Global`G[1, #], masters] &,
-        masters
-      ];
-      MapThread[
-        cacheReduction[topology, #1, #2, masters] &,
-        {missingFireIntegrals, newReductions}
-      ];
-
-      computedReductions = Association[
-        MapThread[Rule, {missingFireIntegrals, newReductions}]
-      ];
-      allEntries = (cachedReduction[topology, #] &) /@ fireIntegrals;
-
-      result = Association[
-        MapThread[
-          Function[{orig, fire, entry},
-            orig -> If[AssociationQ[entry],
-              entry["Reduction"],
-              computedReductions[fire]
-            ]
-          ],
-          {integrals, fireIntegrals, allEntries}
-        ]
-      ];
-
-      allMasters = DeleteDuplicates[
-        Join[
-          masters,
-          Flatten[
-            Cases[allEntries, assoc_Association :> assoc["Masters"]], 1]
-        ]
-      ];
-
-      <|
-        "Reductions" -> result,
-        "Masters" -> allMasters,
-        "Rules" -> rules,
-        "TablesFile" -> tablesFile
-      |>
+  (* Write integrals file with problem number *)
+  intContent = StringJoin[
+    "{",
+    StringRiffle[
+      ("{" <> ToString[pn] <> "," <> ToString[#, InputForm] <> "}") & /@ missingFireIntegrals,
+      ",\n"
     ],
-    If[AssociationQ[storageSession],
-      abortFIREStorageSession[storageSession]
+    "}\n"
+  ];
+  intFile = name <> "_reduce.m";
+  Export[FileNameJoin[{dir, intFile}], intContent, "Text"];
+
+  (* Write config *)
+  writeSingleProblemConfig[topology, dir, name <> "_reduce.config",
+                           intFile, name <> "_reduce.tables"];
+
+  (* Run FIRE6 *)
+  If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
+    Print["Reducing ", Length[missingIntegrals], " integrals..."];
+  ];
+  If[runFIRE6[fireBin, dir, name <> "_reduce"] =!= 0,
+    Print["Error: FIRE6 integral reduction failed."];
+    Return[$Failed];
+  ];
+
+  (* Load results *)
+  tablesFile = FileNameJoin[{dir, name <> "_reduce.tables"}];
+  If[!FileExistsQ[tablesFile],
+    Print["Error: FIRE6 reduction did not produce output."];
+    Return[$Failed];
+  ];
+
+  rules = FIRE`Tables2Rules[tablesFile];
+  masters = Cases[FIRE`Tables2Masters[tablesFile],
+    {pn, indices_List} :> indices
+  ];
+
+  (* Convert to our format *)
+  (* FIRE uses G[problemNumber, indices] *)
+  newReductions = ((Global`G[pn, #] /. rules) &) /@ missingFireIntegrals;
+  (* Replace G[pn, ...] with G[1, ...] for consistency *)
+  newReductions = newReductions /. Global`G[pn, idx_] :> Global`G[1, idx];
+
+  MapThread[
+    cacheReduction[topology, #1, #2, masters] &,
+    {missingFireIntegrals, newReductions}
+  ];
+
+  computedReductions = Association[
+    MapThread[Rule, {missingFireIntegrals, newReductions}]
+  ];
+  allEntries = (cachedReduction[topology, #] &) /@ fireIntegrals;
+
+  result = Association[
+    MapThread[
+      Function[{orig, fire, entry},
+        orig -> If[AssociationQ[entry],
+          entry["Reduction"],
+          computedReductions[fire]
+        ]
+      ],
+      {integrals, fireIntegrals, allEntries}
     ]
   ];
-  storageResult
+
+  allMasters = DeleteDuplicates[
+    Join[
+      masters,
+      Flatten[Cases[allEntries, assoc_Association :> assoc["Masters"]], 1]
+    ]
+  ];
+
+  <|
+    "Reductions" -> result,
+    "Masters" -> allMasters,
+    "Rules" -> rules,
+    "TablesFile" -> tablesFile
+  |>
 ];
 
 ReduceIntegrals[topology_Association, integrals_List] :=

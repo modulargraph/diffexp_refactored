@@ -56,12 +56,6 @@ $FTConfig = <|
   "FIRETimeoutSeconds" -> 600,  (* watchdog timeout for a single FIRE6 run *)
   "AutoDetectRestrictions" -> False,
   "ReductionCache" -> True,
-  (* Experimental, opt-in persistence of FIRE's internal sector databases
-     across successive reduction requests for one exact topology.  The
-     implementation uses content-addressed immutable generations; Automatic
-     keeps them below the package temporary root. *)
-  "PersistentFIREStorage" -> False,
-  "FIREStorageDirectory" -> Automatic,
   "WorkingPrecision" -> 500,
   (* Extra epsilon orders requested from each level transport beyond the
      orders needed by the IBP coefficients alone.  Regularized endpoint

@@ -36,7 +36,7 @@ CollectLevelIBPSingularFactors::usage =
     "CollectLevelIBPSingularFactors[ftData, level] collects Feynman-parameter \
 denominator factors from the IBP reductions needed to integrate from level to level-1.";
 
-RunIntegrationPipeline::usage =
+FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline::usage =
     "RunIntegrationPipeline[ftData, outputDir, epsOrder, opts] runs the full bottom-up \
 integration pipeline: computes matrices at all levels, evaluates boundary at deepest \
 level, transports and integrates level by level. Returns final boundary conditions for level 0.";
@@ -1660,7 +1660,8 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
 (* Full Integration Pipeline                                     *)
 (* ============================================================ *)
 
-RunIntegrationPipeline[ftData_Association, outputDir_String, epsOrder_Integer:4,
+FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline[
+    ftData_Association, outputDir_String, epsOrder_Integer:4,
     opts:OptionsPattern[{
       "WorkingPrecision" -> 500,
       "ExpansionOrder" -> 50,

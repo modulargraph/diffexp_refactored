@@ -12,52 +12,45 @@ SetDirectory[repoRoot];
 $Path = DeleteDuplicates[Prepend[$Path, repoRoot]];
 
 Quiet[Get["FeynmanTrick/FeynmanTrick.m"], {General::shdw, Symbol::shdw}];
-Get[FileNameJoin[{repoRoot, "DiffExp2", "DiffExp2.m"}]];
+(* FeynmanTrick.m loads the root DiffExp2 umbrella (and therefore every
+   implementation module) exactly once.  Reloading the implementation here
+   would reset configuration and risks same-name context capture. *)
 Get[FileNameJoin[{repoRoot, "Scripts", "FTExamples.m"}]];
 
 envOrDefault[name_, default_] := Module[{value = Environment[name]},
   If[StringQ[value] && StringLength[StringTrim[value]] > 0, value, default]];
 
-singularMatchPrecondition =
-  envOrDefault["DE2_SINGULAR_MATCH_PRECONDITION", "0"] === "1";
-recurrenceBackend = envOrDefault["DE2_RECURRENCE_BACKEND", "Wolfram"];
-cppBatchEndpointArms =
-  envOrDefault["FT_CPP_BATCH_ENDPOINT_ARMS", "0"] === "1";
-cppArmThreadBudget = Quiet[Check[
-  ToExpression[envOrDefault["DE2_CPP_THREADS", "4"]], 4]];
-If[!IntegerQ[cppArmThreadBudget] || cppArmThreadBudget < 1,
-  cppArmThreadBudget = 4];
+(* The package facade and this script share one strict parser/default set.
+   In particular, Cpp is now the release default; the Wolfram recurrence is
+   still available only by explicit selection. *)
+runnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+If[FailureQ[runnerSettings],
+  Print["Invalid Feynman-trick runner environment: ", runnerSettings];
+  Exit[2]];
+
+singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
+recurrenceBackend = runnerSettings["RecurrenceBackend"];
+cppBatchEndpointArms = runnerSettings["BatchEndpointArms"];
+cppArmThreadBudget = runnerSettings["CppThreads"];
 DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
   singularMatchPrecondition;
 If[singularMatchPrecondition,
   Print["DE2 singular match precondition enabled"]];
-If[cppBatchEndpointArms && recurrenceBackend =!= "Cpp",
-  cppBatchEndpointArms = False];
-
-wp = ToExpression[envOrDefault["FT_WORKING_PRECISION", "500"]];
-epsOrder = ToExpression[envOrDefault["FT_EPS_ORDER", "0"]];
-expansionOrder = ToExpression[envOrDefault["FT_EXPANSION_ORDER", "50"]];
-boundaryExtraOrder = ToExpression[envOrDefault["FT_BOUNDARY_EXTRA_ORDER", "4"]];
-divisionOrder = ToExpression[envOrDefault["FT_DIVISION_ORDER", "3"]];
-stopAfterBoundaryLevel = envOrDefault["FT_STOP_AFTER_BOUNDARY_LEVEL", ""];
-stopAfterBoundaryLevel = If[StringLength[StringTrim[stopAfterBoundaryLevel]] > 0,
-  ToExpression[stopAfterBoundaryLevel], Missing["NotSet"]];
-radiusOfConvergence = ToExpression[
-  envOrDefault["FT_RADIUS_OF_CONVERGENCE", "1"]];
-stepDivisionOrder = ToExpression[envOrDefault["FT_STEP_DIVISION_ORDER",
-  ToString[divisionOrder, InputForm]]];
-If[stepDivisionOrder =!= divisionOrder,
-  Print["FT_STEP_DIVISION_ORDER=", stepDivisionOrder,
+wp = runnerSettings["WorkingPrecision"];
+epsOrder = runnerSettings["EpsilonOrder"];
+expansionOrder = runnerSettings["ExpansionOrder"];
+boundaryExtraOrder = runnerSettings["BoundaryExtraOrder"];
+divisionOrder = runnerSettings["DivisionOrder"];
+stopAfterBoundaryLevel = runnerSettings["StopAfterBoundaryLevel"];
+radiusOfConvergence = runnerSettings["RadiusOfConvergence"];
+stepDivisionOrder = runnerSettings["StepDivisionOrder"];
+If[runnerSettings["RequestedStepDivisionOrder"] =!= divisionOrder,
+  Print["FT_STEP_DIVISION_ORDER=",
+    runnerSettings["RequestedStepDivisionOrder"],
     " overridden by classic coupled segmentation; using FT_DIVISION_ORDER=",
-    divisionOrder, " for both placement and +/-1/k matching"];
-  stepDivisionOrder = divisionOrder];
-levelEpsilonHalos = Quiet[Check[
-  ToExpression["{" <> envOrDefault["FT_LEVEL_EPS_HALOS", "0"] <> "}"],
-  $Failed]];
-If[!ListQ[levelEpsilonHalos] ||
-    !AllTrue[levelEpsilonHalos, IntegerQ[#] && # >= 0 &],
-  Print["FT_LEVEL_EPS_HALOS must be a comma-separated list of nonnegative integers"];
-  Exit[2]];
+    divisionOrder, " for both placement and +/-1/k matching"]];
+levelEpsilonHalos = runnerSettings["LevelEpsilonHalos"];
 levelEpsilonHalo[level_Integer] := If[1 <= level <= Length[levelEpsilonHalos],
   levelEpsilonHalos[[level]], 0];
 requestedEpsilonOrder[level_Integer] := Max[
@@ -80,14 +73,11 @@ levelDeltaPrescriptions[var_Symbol, sys_Association, extra_List] := Module[
 
 anchor = 11/23;
 inputPrecision = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
-prepCacheRoot = envOrDefault["FT_PREP_CACHE_DIR",
-  FileNameJoin[{$TemporaryDirectory, "DiffExp2_FT_Prepared"}]];
-forcePrepRebuild = envOrDefault["FT_REBUILD_PREP", "0"] === "1";
-resumeLadderFile = envOrDefault["FT_RESUME_LADDER_CHECKPOINT", ""];
-ladderCheckpointDir = envOrDefault["FT_LADDER_CHECKPOINT_DIR",
-  If[resumeLadderFile === "", "", DirectoryName[ExpandFileName[resumeLadderFile]]]];
-allowStaleLadderCheckpoint =
-  envOrDefault["FT_ALLOW_STALE_LADDER_CHECKPOINT", "0"] === "1";
+prepCacheRoot = runnerSettings["PrepCacheRoot"];
+forcePrepRebuild = runnerSettings["ForcePrepRebuild"];
+resumeLadderFile = runnerSettings["ResumeCheckpoint"];
+ladderCheckpointDir = runnerSettings["CheckpointDirectory"];
+allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
 
 (* RunFullIteration is FIRE-dominated but independent of DiffExp2's
    transport settings.  Persist both the populated ftData and FIRE's
@@ -384,10 +374,9 @@ FeynmanTrick`SetFTOption["Verbosity", 0];
 FeynmanTrick`SetFTOption["WorkingPrecision", wp];
 FeynmanTrick`SetFTOption["ReductionCache", True];
 FeynmanTrick`SetFTOption["FIRETimeoutSeconds",
-  ToExpression[envOrDefault["FT_FIRE_TIMEOUT_SECONDS", "1800"]]];
-persistentFIREStorage =
-  envOrDefault["FT_PERSISTENT_FIRE_STORAGE", "0"] === "1";
-fireStorageDirectory = envOrDefault["FT_FIRE_STORAGE_DIR", ""];
+  runnerSettings["FIRETimeoutSeconds"]];
+persistentFIREStorage = runnerSettings["PersistentFIREStorage"];
+fireStorageDirectory = runnerSettings["FIREStorageDirectory"];
 FeynmanTrick`SetFTOption["PersistentFIREStorage", persistentFIREStorage];
 If[fireStorageDirectory =!= "",
   FeynmanTrick`SetFTOption["FIREStorageDirectory",

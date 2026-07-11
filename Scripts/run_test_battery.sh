@@ -15,6 +15,8 @@ tests=(
   "Tests/test_path_planner_algebraic.m"
   "Tests/test_integrate.m"
   "Tests/test_api.m"
+  "Tests/test_public_api.m"
+  "Tests/test_ft_pipeline_facade.m"
   "Tests/test_pins.m"
   Tests/test_package_loading.m
   Tests/test_symbols_namespacing.m

@@ -1,6 +1,6 @@
-(* DiffExp2 loader: Get the modules in dependency order.
-   Later milestones append SectorSeries, Indicial, Solve, Transport,
-   Integrate, API. *)
+(* DiffExp2 implementation loader: Get the modules in dependency order.
+   The release/user loader is ../DiffExp2.m, which adds PublicAPI.m and
+   installs the validated defaults. *)
 Module[{dir = DirectoryName[$InputFileName]},
   Get[FileNameJoin[{dir, "Tolerances.m"}]];
   Get[FileNameJoin[{dir, "Config.m"}]];

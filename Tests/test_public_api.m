@@ -1,0 +1,91 @@
+(* Contract tests for the DiffExp2` release umbrella.  These tests exercise
+   only object accessors and local evaluation; no recurrence backend, FIRE,
+   or transport solve is launched. *)
+
+repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
+Get[FileNameJoin[{repoRoot, "DiffExp2.m"}]];
+
+passed = 0; failed = 0;
+assert[label_String, condition_] := If[TrueQ[condition],
+  passed++; Print["  PASS: ", label],
+  failed++; Print["  FAIL: ", label]];
+
+exports = {
+  DiffExp2`LoadConfiguration, DiffExp2`UpdateConfiguration,
+  DiffExp2`CurrentConfiguration, DiffExp2`LoadSystem,
+  DiffExp2`PlanLine, DiffExp2`TransportEndpoint, DiffExp2`TransportLine,
+  DiffExp2`LineSegments, DiffExp2`LineSegment, DiffExp2`EvaluateLine,
+  DiffExp2`PiecewiseSolution, DiffExp2`EvaluateLocal,
+  DiffExp2`LocalBehavior, DiffExp2`ExactSectors, DiffExp2`EndpointLimit,
+  DiffExp2`IntegrateLine, DiffExp2`EpsilonWindow,
+  DiffExp2`EpsilonCoefficient, DiffExp2`EpsilonCoefficientList
+};
+assert["umbrella exports have usage text",
+  AllTrue[exports, StringQ[MessageName[#, "usage"]] &]];
+assert["compiled backend is the release default",
+  DiffExp2`CurrentConfiguration[]["RecurrenceBackend"] === "Cpp"];
+loadSystemDefinitions = DownValues[DiffExp2`LoadSystem];
+Get[FileNameJoin[{repoRoot, "DiffExp2.m"}]];
+assert["root loader is idempotent and keeps only the umbrella context",
+  DownValues[DiffExp2`LoadSystem] === loadSystemDefinitions &&
+  First[$ContextPath] === "DiffExp2`" &&
+  !MemberQ[$ContextPath, "DiffExp2`API`"]];
+
+DiffExp2`LoadConfiguration["RecurrenceBackend" -> "Wolfram"];
+assert["explicit Wolfram diagnostic selection is respected",
+  DiffExp2`CurrentConfiguration[]["RecurrenceBackend"] === "Wolfram"];
+DiffExp2`LoadConfiguration["WorkingPrecision" -> 100];
+assert["release default is reinjected on configuration reset",
+  DiffExp2`CurrentConfiguration[]["RecurrenceBackend"] === "Cpp"];
+
+epsValue = DiffExp2`EpsSeries`ESNew[-1, {2, 3, 5}];
+assert["honest epsilon window",
+  DiffExp2`EpsilonWindow[epsValue] ===
+    <|"Min" -> -1, "CompleteMax" -> 1|>];
+assert["epsilon coefficient",
+  DiffExp2`EpsilonCoefficient[epsValue, 0] === 3];
+assert["epsilon coefficient list",
+  DiffExp2`EpsilonCoefficientList[epsValue, -1, 1] === {2, 3, 5}];
+
+ls = <|
+  "Center" -> 0,
+  "ChartMap" -> <|"Center" -> 0, "Scale" -> 1|>,
+  "Radius" -> 2,
+  "Sectors" -> {<|
+    "a" -> -1/2, "b" -> 3, "p" -> 1,
+    "Coeffs" -> {{{7}}, {{11}}}|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 1|>,
+  "TWindow" -> <|"CompleteMax" -> 0|>,
+  "ErrorEstimate" -> {0, 0},
+  "Prescriptions" -> {}
+|>;
+
+behavior = DiffExp2`LocalBehavior[ls];
+sectors = DiffExp2`ExactSectors[ls];
+assert["local behavior keeps exact tags",
+  KeyTake[behavior["Sectors"][[1]], {"a", "b", "p"}] ===
+    <|"a" -> -1/2, "b" -> 3, "p" -> 1|>];
+assert["exact x^(a+b eps) exponent is exposed",
+  Together[sectors[[1, "Exponent"]] - (-1/2 + 3 Global`eps)] === 0 &&
+  sectors[[1, "LogPower"]] === 1];
+
+mockResult = <|
+  "Schema" -> "DiffExp2.TransportResult/v1", "From" -> 0, "To" -> 1,
+  "Plan" -> <|"From" -> 0, "To" -> 1|>,
+  "Charts" -> {<|"Chart" -> <|"Center" -> 0, "Radius" -> 2|>,
+    "LocalSolution" -> ls|>},
+  "Final" -> ls, "EndpointIsSingular" -> False
+|>;
+segments = DiffExp2`LineSegments[mockResult];
+piecewise = DiffExp2`PiecewiseSolution[mockResult];
+assert["named line segment schema",
+  Length[segments] === 1 &&
+  segments[[1, "Schema"]] === "DiffExp2.LineSegment/v1" &&
+  segments[[1, "Domain"]] === {0, 1}];
+assert["piecewise solution is inspectable",
+  piecewise["Schema"] === "DiffExp2.PiecewiseSolution/v1" &&
+  Length[piecewise["Segments"]] === 1 &&
+  Head[piecewise["Function"]] === Function];
+
+Print["Results: ", passed, " / ", passed + failed, " tests passed"];
+If[failed > 0, Exit[1], Exit[0]];

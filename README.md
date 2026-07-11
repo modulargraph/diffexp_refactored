@@ -1,8 +1,11 @@
-# DiffExp Refactored
+# DiffExp 2
 
 DiffExp is a Mathematica package for integrating Feynman integrals in terms of series expansions, using differential equations.
 
-This repository is an experimental, AI-assisted refactoring and upgrade project based on the original DiffExp code. The original reference repository remains at [gitlab.com/hiddingm/diffexp](https://gitlab.com/hiddingm/diffexp).
+This repository develops DiffExp 2: a recurrence-based successor to DiffExp
+with exact local sectors, analytic regularization, Feynman-trick recursion,
+and a compiled C++/FLINT recurrence backend. The original reference
+repository remains at [gitlab.com/hiddingm/diffexp](https://gitlab.com/hiddingm/diffexp).
 
 ## Version
 
@@ -18,7 +21,7 @@ This refactored repository is version 2.0.
 
 The recurrence methods are still an active experimental upgrade. The older Wronskian/Frobenius strategies remain available, but recurrence failures should be reported directly rather than silently hidden by fallback behavior when `UseRationalRecurrence -> True`.
 
-DiffExp2 also has an opt-in C++/FLINT recurrence backend. It keeps indicial,
+DiffExp2 uses its C++/FLINT recurrence backend by default. It keeps indicial,
 resonance, epsilon-window, and analytic-continuation decisions in Wolfram
 Language while accelerating the finite-width coefficient recurrence through
 LibraryLink. See [Docs/CppBackend.md](Docs/CppBackend.md) for build instructions,
@@ -29,10 +32,14 @@ the analytic-regularization contract, tests, and current limitations.
 From Mathematica or Wolfram Engine:
 
 ```mathematica
-Get["/path/to/diffexp_refactored/DiffExp.m"]
+Get["/path/to/diffexp_refactored/DiffExp2.m"]
 ```
 
-The package prints its version on load.
+This installs the small `DiffExp2`` umbrella API and a validated C++-default
+configuration. See [Docs/PublicAPI.md](Docs/PublicAPI.md) for systems, line
+plans, transports, piecewise/local inspection, endpoint limits, honest
+epsilon windows, and exact `x^(a+b eps)` sectors. `DiffExp.m` remains the
+legacy/refactoring loader during the release transition.
 
 ## DiffExp2 Feynman-Trick runner
 
@@ -52,10 +59,10 @@ FT_RADIUS_OF_CONVERGENCE=1 \
 wolframscript -file Scripts/run_ft_stepwise2.m
 ```
 
-After building the optional compiled backend, add
-`DE2_RECURRENCE_BACKEND=Cpp DE2_CPP_THREADS=4` to this command. The Wolfram
-recurrence remains the default, and a requested C++ backend fails loudly
-rather than silently falling back.
+The runner selects C++ by default. `DE2_CPP_THREADS=4` changes its native
+worker budget; `DE2_RECURRENCE_BACKEND=Wolfram` explicitly selects the
+reference recurrence for diagnostics. Neither backend silently falls back to
+the other.
 
 `FT_EXAMPLES` is a comma-separated list (default `bubble`); available names
 are `bubble`, `sunrise`, `banana`, `box`, `pentagon`, `box_bubble`,
@@ -69,10 +76,9 @@ respectively. Adjacent regular charts meet at
 legacy `FT_STEP_DIVISION_ORDER` value. A halo computes extra internal
 coefficients without raising the downstream requested order; it compensates
 only certified finite-window losses such as analytic log/Laurent basis
-width. `DE2_VALUE_TRANSPORT=1` opts
-into the experimental regular-chart
-value-transport path.  It is a prototype, is off by default, and retains its
-safety fallbacks to basis transport.
+width. The package facade enables the regular-chart value-transport path by
+default; the low-level script retains the explicit `DE2_VALUE_TRANSPORT`
+switch.
 
 The runner also supports persistent caches and restart checkpoints:
 

@@ -11,6 +11,14 @@ FTeps::usage = "Dimensional regulator symbol. By default d = 4 - 2*FTeps.";
 FTConfiguration::usage = "FTConfiguration[] returns the current FeynmanTrick configuration.";
 SetFTOption::usage = "SetFTOption[key, value] sets a configuration option.";
 
+(* The Feynman-trick release surface is defined in terms of DiffExp2.  Load
+   the root/umbrella package once here; legacy DiffExp remains independent. *)
+Module[{root = ParentDirectory[DirectoryName[$InputFileName]]},
+  If[!ValueQ[DiffExp2`$DiffExp2Version],
+    Block[{$ContextPath},
+      Quiet[Get[FileNameJoin[{root, "DiffExp2.m"}]],
+        {General::shdw, Symbol::shdw}]]]];
+
 (* Load subpackages *)
 Get[FileNameJoin[{DirectoryName[$InputFileName], "PropagatorAlgebra.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FIREInterface.m"}]];
@@ -19,6 +27,15 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "EpsPrefactors.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FeynmanTrickIteration.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "BoundaryConditions.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExpIntegration.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExp2Pipeline.m"}]];
+
+(* Declare the root facade only AFTER the implementation subpackages have
+   created their own RunIntegrationPipeline symbols.  Declaring this earlier
+   would let BeginPackage dependency lookup capture the root symbol inside
+   DiffExpIntegration -- the classic Wolfram context-shadowing trap. *)
+FeynmanTrick`PipelinePlan::usage = "PipelinePlan[example, opts] builds a reproducible DiffExp2 Feynman-trick run plan without executing it.";
+FeynmanTrick`RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] runs the Feynman-trick ladder through DiffExp2 with the C++ recurrence backend by default.";
+FeynmanTrick`ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[example, checkpoint, opts] resumes the DiffExp2 Feynman-trick ladder from an atomic checkpoint.";
 
 Begin["`Private`"];
 
@@ -60,6 +77,21 @@ $FTConfig = <|
 FTConfiguration[] := $FTConfig;
 
 SetFTOption[key_String, value_] := ($FTConfig[key] = value);
+
+(* Stable root-context facade; implementation details stay in the named
+   DiffExp2Pipeline subcontext. *)
+Options[FeynmanTrick`PipelinePlan] =
+  Options[FeynmanTrick`DiffExp2Pipeline`PipelinePlan];
+FeynmanTrick`PipelinePlan[args___] :=
+  FeynmanTrick`DiffExp2Pipeline`PipelinePlan[args];
+Options[FeynmanTrick`RunIntegrationPipeline] =
+  Options[FeynmanTrick`DiffExp2Pipeline`RunIntegrationPipeline];
+FeynmanTrick`RunIntegrationPipeline[args___] :=
+  FeynmanTrick`DiffExp2Pipeline`RunIntegrationPipeline[args];
+Options[FeynmanTrick`ResumeIntegrationPipeline] =
+  Options[FeynmanTrick`DiffExp2Pipeline`ResumeIntegrationPipeline];
+FeynmanTrick`ResumeIntegrationPipeline[args___] :=
+  FeynmanTrick`DiffExp2Pipeline`ResumeIntegrationPipeline[args];
 
 DimensionExpression[] := Module[
   {expr = Lookup[$FTConfig, "DimensionExpression", Automatic],

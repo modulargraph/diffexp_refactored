@@ -1,13 +1,17 @@
 # C++ Recurrence Backend
 
-DiffExp2 has an optional compiled backend for the finite-width recurrence
+DiffExp2 has a compiled backend for the finite-width recurrence
 inside `SolveChart` and `SolveParticular`. It is an accelerator for the
 recurrence kernel, not a separate implementation of the whole package.
 Chart construction, singularity analysis, analytic-continuation choices,
 transport, integration, and result validation remain in Wolfram Language.
 
-The backend is experimental and opt-in. The default is
-`"RecurrenceBackend" -> "Wolfram"`.
+The release default is `"RecurrenceBackend" -> "Cpp"`. The Wolfram
+recurrence remains available as an explicit diagnostic/reference selection;
+the selected backend never silently falls back to the other one.
+The low-level `DiffExp2/DiffExp2.m` implementation loader retains the
+Wolfram-reference default for focused module tests; users load the root
+`DiffExp2.m` umbrella, which injects the release default.
 
 ## Build
 
@@ -58,17 +62,16 @@ DE2_REQUIRE_CPP=1 DE2_CPP_THREADS=2 \
 `DE2_REQUIRE_CPP=1` makes an unavailable library a test failure instead of a
 skip; it is a test-runner switch, not a solver option.
 
-## Enable the backend
+## Select the backend
 
-For direct DiffExp2 use, select it in the normal configuration:
+The root release loader selects C++ by default:
 
 ```mathematica
-Get[FileNameJoin[{repoRoot, "DiffExp2", "DiffExp2.m"}]];
-DiffExp2`Config`LoadConfiguration[{
+Get[FileNameJoin[{repoRoot, "DiffExp2.m"}]];
+DiffExp2`LoadConfiguration[
   "WorkingPrecision" -> 500,
-  "ExpansionOrder" -> 50,
-  "RecurrenceBackend" -> "Cpp"
-}];
+  "ExpansionOrder" -> 50
+];
 ```
 
 The Feynman-trick runner exposes the same setting through the environment:

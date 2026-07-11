@@ -32,6 +32,39 @@ assert["tt2_singular_endpoint_weight",
     sec =!= Missing["NotFound"] &&
     Abs[N[sec["Coeffs"][[-f["EpsWindow", "Min"] + 1, 1, 1]] - 1, 20]] < 10^-20]];
 
+(* The same singular endpoint approached on its negative local arm needs an
+   explicit sheet even though no far-side crossing follows.  The leading
+   x^eps weight carries both the affine chart scale and the prescribed
+   negative-axis phase. *)
+negativeEndpointResult[sg_] := Module[{p, r},
+  catchDE2[DiffExp2`Config`UpdateConfiguration[{
+    "DeltaPrescriptions" -> {{x, sg}}}]];
+  p = DiffExp2`Transport`SegmentLine[sys2, {-1, 0}];
+  r = catchDE2[DiffExp2`Transport`TransportLine[
+    sys2, {{1, 0, 0}}, p]];
+  r];
+res2negPlus = negativeEndpointResult[1];
+res2negMinus = negativeEndpointResult[-1];
+negativeEndpointLeading[r_] := Module[{f = r["Final"], sec},
+  sec = SelectFirst[f["Sectors"], PossibleZeroQ[# ["b"] - 1] &];
+  Table[sec["Coeffs"][[k - f["EpsWindow", "Min"] + 1, 1, 1]],
+    {k, 0, 2}]];
+assert["tt2_negative_arm_endpoint_plus_minus_i0",
+  !FailureQ[res2negPlus] && !FailureQ[res2negMinus] &&
+    Module[{cp = negativeEndpointLeading[res2negPlus],
+        cm = negativeEndpointLeading[res2negMinus], qp, qm},
+      qp = Log[2] - I Pi; qm = Log[2] + I Pi;
+      And @@ Table[
+        Abs[N[cp[[k + 1]] - qp^k/k!, 50]] < 10^-15 &&
+        Abs[N[cm[[k + 1]] - qm^k/k!, 50]] < 10^-15,
+        {k, 0, 2}]]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "DeltaPrescriptions" -> {}}]];
+res2negMissing = catchDE2[DiffExp2`Transport`TransportLine[
+  sys2, {{1, 0, 0}}, DiffExp2`Transport`SegmentLine[sys2, {-1, 0}]]];
+assert["tt2_negative_arm_endpoint_missing_prescription_loud",
+  FailureQ[res2negMissing] && res2negMissing["ID"] === "E8"];
+
 (* TT3: regular line with a far singularity: f' = f/(x-2): f = c(x-2);
    f(0) = 1/2 -> c = -1/4 -> f(1) = 1/4 *)
 sys3 = <|"Matrix" -> {{1/(x - 2)}}, "Variable" -> x, "SingularFactors" -> {x - 2}|>;
@@ -219,6 +252,25 @@ assert["tt5b_leftward_crossing_phase_once",
       q = I Pi},
     And @@ Table[Abs[N[DiffExp2`EpsSeries`ESCoefficient[v, k][[1]] -
       q^k/k!, 50]] < 10^-8, {k, 0, 2}]]];
+
+(* End-to-end noninteger-a crossing: this is the direct fractional-power
+   analogue of the b eps phase above, and pins both physical sheets. *)
+sys5bFrac = <|"Matrix" -> {{1/(2 (x - 1/2))}}, "Variable" -> x,
+  "SingularFactors" -> {x - 1/2}|>;
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "DeltaPrescriptions" -> {{x - 1/2, 1}}}]];
+res5bFracPlus = catchDE2[DiffExp2`API`TransportEndpoint[
+  sys5bFrac, {{1, 0, 0}}, 1/4, 3/4]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "DeltaPrescriptions" -> {{x - 1/2, -1}}}]];
+res5bFracMinus = catchDE2[DiffExp2`API`TransportEndpoint[
+  sys5bFrac, {{1, 0, 0}}, 1/4, 3/4]];
+assert["tt5b_fractional_crossing_plus_minus_i0",
+  !FailureQ[res5bFracPlus] && !FailureQ[res5bFracMinus] &&
+    Abs[N[DiffExp2`EpsSeries`ESCoefficient[
+      res5bFracPlus["Value"], 0][[1]] + I, 40]] < 10^-15 &&
+    Abs[N[DiffExp2`EpsSeries`ESCoefficient[
+      res5bFracMinus["Value"], 0][[1]] - I, 40]] < 10^-15];
 catchDE2[DiffExp2`Config`UpdateConfiguration[{
   "DeltaPrescriptions" -> {}}]];
 res5bMissing = catchDE2[DiffExp2`API`TransportEndpoint[

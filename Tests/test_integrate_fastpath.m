@@ -147,8 +147,10 @@ assert["same_positive_pole_combined_windows_p0_to_p3", sameSignOK];
 sameNegativeOK = And @@ Table[Module[{rows, ls, got,
     l1 = N[Log[1/5], 200], l2 = N[Log[1/4], 200], expected0},
   rows = Table[{{Boole[k === 0]}}, {k, 0, 4}];
-  ls = mkLS[<|"a" -> -1, "b" -> 2, "p" -> p,
-    "Coeffs" -> rows|>, 4];
+  ls = Join[mkLS[<|"a" -> -1, "b" -> 2, "p" -> p,
+    "Coeffs" -> rows|>, 4], <|"Prescriptions" -> {
+      <|"Factor" -> Global`t, "Sign" -> 1, "Multiplicity" -> 1,
+        "LeadingCoeffSign" -> 1|>}|>];
   got = DiffExp2`Integrate`IntegrateLocalSolution[ls, {-1/4, -1/5}]["Values"][[1]];
   expected0 = -((l2 + I Pi)^(p + 1) - (l1 + I Pi)^(p + 1))/
     (p!*(p + 1));

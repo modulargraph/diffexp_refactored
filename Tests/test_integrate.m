@@ -98,6 +98,34 @@ assert["ils_interior_zero_fractional_sector_inactive",
   !FailureQ[ri2zeroFrac] &&
     eqQ[esC[ri2zeroFrac["Values"][[1]], 0], 3/4]];
 
+(* A material fractional-a, b=0 sector is branch-sensitive even though it
+   has no epsilon-dependent exponent.  Its negative-arm primitive must use
+   the prescribed full power phase; no real-PV fallback is valid. *)
+AFrac = 1/5; BFrac = 1/4;
+ls2fracPlus = Join[
+  mk1[{<|"a" -> 1/2, "b" -> 0, "p" -> 0,
+    "Coeffs" -> {{{1}, {0}, {0}}}|>}, 0, 0, 3],
+  <|"Prescriptions" -> {<|"Factor" -> Global`t, "Sign" -> 1,
+    "Multiplicity" -> 1, "LeadingCoeffSign" -> 1|>}|>];
+ls2fracMinus = Join[ls2fracPlus, <|"Prescriptions" ->
+  {<|"Factor" -> Global`t, "Sign" -> -1,
+    "Multiplicity" -> 1, "LeadingCoeffSign" -> 1|>}|>];
+ri2fracPlus = catchDE2[DiffExp2`Integrate`IntegrateLocalSolution[
+  ls2fracPlus, {-AFrac, BFrac}]];
+ri2fracMinus = catchDE2[DiffExp2`Integrate`IntegrateLocalSolution[
+  ls2fracMinus, {-AFrac, BFrac}]];
+fracExpected[sg_] := (BFrac^(3/2) -
+  Exp[I*Pi*sg*3/2]*AFrac^(3/2))/(3/2);
+assert["ils_interior_fractional_a_sigma_plus_minus",
+  !FailureQ[ri2fracPlus] && !FailureQ[ri2fracMinus] &&
+    Abs[N[esC[ri2fracPlus["Values"][[1]], 0] - fracExpected[1], 60]] < 10^-50 &&
+    Abs[N[esC[ri2fracMinus["Values"][[1]], 0] - fracExpected[-1], 60]] < 10^-50];
+ri2fracMissing = catchDE2[DiffExp2`Integrate`IntegrateLocalSolution[
+  mk1[{<|"a" -> 1/2, "b" -> 0, "p" -> 0,
+    "Coeffs" -> {{{1}, {0}, {0}}}|>}, 0, 0, 3], {-AFrac, BFrac}]];
+assert["ils_interior_fractional_a_missing_prescription_loud",
+  FailureQ[ri2fracMissing] && ri2fracMissing["ID"] === "E3"];
+
 (* Interior i-delta pairing: the m=-1,b!=0 cell is a SINGLE regular
    epsilon series.  Exercise the generic p formula at several log depths;
    in every case the separate-arm eps^-1 pole is absent. *)
@@ -107,6 +135,15 @@ phasePrescription[sg_] := {<|"Factor" -> Global`t, "Sign" -> sg,
   "Multiplicity" -> 1, "LeadingCoeffSign" -> 1|>};
 nearQ[x_, y_] := TrueQ[Abs[N[x - y, 60]] < 10^-50];
 A0 = 1/5; B0 = 1/4; b0 = 2; kPhase = 3;
+ls2PVPlus = Join[ls2, <|"Prescriptions" -> phasePrescription[1]|>];
+ls2PVMinus = Join[ls2, <|"Prescriptions" -> phasePrescription[-1]|>];
+ri2PVPlus = DiffExp2`Integrate`IntegrateLocalSolution[
+  ls2PVPlus, {-1/4, 1/2}];
+ri2PVMinus = DiffExp2`Integrate`IntegrateLocalSolution[
+  ls2PVMinus, {-1/4, 1/2}];
+assert["ils_interior_meromorphic_real_pv_independent_of_delta_sign",
+  eqQ[esC[ri2PVPlus["Values"][[1]], 0], Log[2]] &&
+    eqQ[esC[ri2PVMinus["Values"][[1]], 0], Log[2]]];
 Do[
   lsPhase = Join[mk1[{<|"a" -> -1, "b" -> b0, "p" -> pp,
       "Coeffs" -> unitRows[kPhase, 3]|>}, 0, kPhase, 3],
@@ -139,6 +176,21 @@ riPhaseMissing = catchDE2[DiffExp2`Integrate`IntegrateLocalSolution[
   lsPhaseMissing, {-A0, B0}]];
 assert["ils_interior_idelta_missing_prescription_loud",
   FailureQ[riPhaseMissing] && riPhaseMissing["ID"] === "E3"];
+
+(* A wholly negative interval and a negative-arm endpoint use the same
+   strict branch contract as a straddling interval; neither may silently
+   turn a missing prescription into principal +i0. *)
+lsNegativeMissing = mk1[{<|"a" -> 0, "b" -> b0, "p" -> 0,
+  "Coeffs" -> unitRows[kPhase, 3]|>}, 0, kPhase, 3];
+riNegativeMissing = catchDE2[DiffExp2`Integrate`IntegrateLocalSolution[
+  lsNegativeMissing, {-1/4, -1/5}]];
+riNegativeEndpointMissing = catchDE2[
+  DiffExp2`Integrate`IntegrateLocalSolution[
+    lsNegativeMissing, {-1/4, 0}]];
+assert["ils_negative_arm_missing_prescription_loud",
+  FailureQ[riNegativeMissing] && riNegativeMissing["ID"] === "E3" &&
+    FailureQ[riNegativeEndpointMissing] &&
+      riNegativeEndpointMissing["ID"] === "E3"];
 
 (* Away from m=-1, the same branch-resolved antiderivative difference
    supplies the full phase (including b eps) without a pole special case. *)

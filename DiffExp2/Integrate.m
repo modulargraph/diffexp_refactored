@@ -217,12 +217,17 @@ IntegrateLocalSolution[ls0_Association, {t1_, t2_}] := Module[
     "EpsWindow" -> <|"Min" -> Min[esMin /@ vals], "CompleteMax" -> Min[esCM /@ vals]|>,
     "TWindowUsed" -> ncols - 1|>];
 
+branchSensitiveContentQ[ls_] := AnyTrue[ls["Sectors"], Function[sec,
+  (!IntegerQ[sec["a"]] || !zeroQ[sec["b"]] || sec["p"] > 0) &&
+    !AllTrue[Flatten[sec["Coeffs"]], # === 0 &]]];
+
 resolveSigma[ls_] := Module[{sg = DiffExp2`SectorSeries`ChartImSign[ls]},
-  (* prescriptions when derivable, else the SAME fixed +1 convention the
-     transport matching used (Transport`sigmaFor): the weights were fitted
-     under +1, so the crossing must use +1 - phases cancel in the real
-     Euclidean combination *)
-  If[MemberQ[{1, -1}, sg], sg, 1]];
+  If[MemberQ[{1, -1}, sg], Return[sg, Module]];
+  If[branchSensitiveContentQ[ls],
+    err["E3", <|"Center" -> ls["Center"],
+      "Prescriptions" -> ls["Prescriptions"],
+      "Detail" -> "negative-arm multivalued integration requires a derivable i-delta prescription sign"|>]];
+  1];
 
 (* Contract many coefficient slabs with their primitive epsilon series in
    one pass.  The former implementation constructed one EpsSeries per
@@ -339,7 +344,7 @@ interiorSigma[ls_] := Module[{sg = DiffExp2`SectorSeries`ChartImSign[ls]},
   If[!MemberQ[{1, -1}, sg],
     err["E3", <|"Center" -> ls["Center"],
       "Prescriptions" -> ls["Prescriptions"],
-      "Detail" -> "b != 0 interior crossing requires a derivable i-delta prescription sign"|>]];
+      "Detail" -> "branch-sensitive interior crossing requires a derivable i-delta prescription sign"|>]];
   sg];
 
 (* The pole cell m=-1 must be paired BEFORE epsilon-window arithmetic.  With
@@ -375,26 +380,28 @@ pairedRegularIntegral[m_, b_, p_, A_, B_, sigma_, kMaxOut_] := Module[
     Exp[sigma*I*Pi*(m + 1)], kMaxOut];
   esAdd[pos, esScale[-1, neg]]];
 
-(* Single-owner interior pairing.  b=0 retains the real-log PV/Hadamard
-   finite-part convention exactly.  b!=0 uses the chart prescription on the
-   negative arm, with the m=-1 pole cell expanded in its combined regular
-   form above rather than as two independently shifted Laurent series. *)
+(* Single-owner interior pairing.  Integer-a, b=0 sectors retain the
+   real-log PV/Hadamard finite-part convention exactly.  A noninteger-a
+   sector is already multivalued at b=0 and therefore uses the chart
+   prescription on the negative arm, just like b!=0.  The m=-1,b!=0 pole
+   cell is expanded in its combined regular form rather than as two
+   independently shifted Laurent series. *)
 sumInteriorPaired[ls_, A_, B_, kmin_, kmax_, ncols_, ncomp_] := Module[
   {sigma = None, needSigma, span = kmax - kmin, harvested, terms},
   needSigma = AnyTrue[ls["Sectors"], Function[sec,
-    !zeroQ[sec["b"]] && !AllTrue[Flatten[sec["Coeffs"]], # === 0 &]]];
+    (!zeroQ[sec["b"]] || !IntegerQ[sec["a"]]) &&
+      !AllTrue[Flatten[sec["Coeffs"]], # === 0 &]]];
   If[needSigma, sigma = interiorSigma[ls]];
   harvested = Reap[
     Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"]},
-      If[zeroQ[b] && !IntegerQ[a] &&
-          !AllTrue[Flatten[arr], # === 0 &],
-        err["E8", <|"a" -> a,
-          "Detail" -> "real-log PV for a fractional-a b=0 sector is undefined"|>]];
       Do[Module[{m = Together[a + n], base},
         (* An exact-zero coefficient slab is structurally inactive: it neither
            requires a branch sign nor constrains the result window. *)
         If[!AllTrue[Flatten[arr[[All, n + 1, All]]], # === 0 &],
           base = Which[
+            zeroQ[b] && !IntegerQ[a],
+              pairedRegularIntegral[m, 0, p, A, B, sigma,
+                p + span + 3],
             zeroQ[b] && zeroQ[m + 1],
               esShift[esNew[0, PadRight[{
                 (pow[Log[B], p + 1] - pow[Log[A], p + 1])/((p + 1)*p!)},

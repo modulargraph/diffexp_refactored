@@ -114,6 +114,14 @@ assert["t08_eval_beps_tower",
   esCM[r8["Value"]] === 5 &&
   AllTrue[Range[0, 5],
     Simplify[esC[r8["Value"], #][[1]] - (2 Log[1/3])^#/#!] === 0 &]];
+r8p = eval[ls8, -1/3, "UsePade" -> False, "ImSign" -> 1];
+r8m = eval[ls8, -1/3, "UsePade" -> False, "ImSign" -> -1];
+assert["t08_eval_beps_tower_negative_plus_minus_i0",
+  AllTrue[Range[0, 5], Function[q,
+    Simplify[esC[r8p["Value"], q][[1]] -
+      (2 (Log[1/3] + I Pi))^q/q!] === 0 &&
+    Simplify[esC[r8m["Value"], q][[1]] -
+      (2 (Log[1/3] - I Pi))^q/q!] === 0]]];
 
 (* t09: resonant kmin = -p *)
 ls9 = mkls[{{{0, 0, 2}, <|-2 -> {1}|>}}, -2, -2, 1];
@@ -138,12 +146,21 @@ assert["t12_eval_branch_missing",
   failsWith[catchDE2[eval[ls12a, -1/10, "UsePade" -> False]], "branchmissing"] &&
   !FailureQ[catchDE2[eval[ls12b, -1/10, "UsePade" -> False]]]];
 
+(* A single-valued negative integer power needs no prescription.  In
+   particular, the internal None sentinel must never leak into its phase. *)
+ls12c = mkls[{{{3, 0, 0}, <|0 -> {2}|>}}, 0, 0, 1];
+r12c = catchDE2[eval[ls12c, -1/10, "UsePade" -> False]];
+assert["t12_eval_negative_integer_without_prescription",
+  !FailureQ[r12c] && Simplify[esC[r12c["Value"], 0][[1]] + 1/500] === 0 &&
+    FreeQ[r12c, None]];
+
 (* t13 *)
 mkPresc[entries_] := Append[ls12b, "Prescriptions" ->
   Map[<|"Factor" -> #[[1]], "Sign" -> #[[2]], "Multiplicity" -> #[[3]],
     "LeadingCoeffSign" -> #[[4]]|> &, entries]];
 assert["t13_chart_imsign",
   imsign[mkPresc[{{Global`x, -1, 1, -1}}]] === 1 &&
+  imsign[mkPresc[{{Global`x, -1, 3, -1}}]] === 1 &&
   imsign[mkPresc[{{Global`x, -1, 1, -1}, {Global`y, 1, 2, 1}}]] === 1 &&
   failsWith[catchDE2[imsign[mkPresc[{{Global`x, -1, 1, -1}, {Global`y, -1, 1, 1}}]]],
     "branchconflict"]];
@@ -219,6 +236,11 @@ assert["t24_reexpand_singular_source",
   r24["Radius"] === 1/4 && r24["Prescriptions"] === {} &&
   Table[Simplify[r24["Sectors"][[1]]["Coeffs"][[1, m + 1, 1]] - (-1)^m 4^(m + 1)],
     {m, 0, 10}] === ConstantArray[0, 11]];
+r24negative = catchDE2[reex[ls24, -1/4, 4]];
+assert["t24_reexpand_negative_integer_pole_without_prescription",
+  !FailureQ[r24negative] && FreeQ[r24negative, None] &&
+    Flatten[r24negative["Sectors"][[1]]["Coeffs"][[1, All, 1]]] ===
+      {-4, -16, -64, -256, -1024}];
 
 ls24scaled = Join[ls24, <|"Center" -> 2,
   "ChartMap" -> <|"Center" -> 2, "Scale" -> 1/5|>|>];

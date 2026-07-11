@@ -209,7 +209,13 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
   If[TrueQ[tval < 0] && needsBranch && !MemberQ[{1, -1}, sigma],
     err["branchmissing", <|"Chart" -> chartName[ls], "Point" -> tval,
       "Detail" -> "negative point on a multivalued chart with no derivable Im-sign"|>]];
-  Lv = If[TrueQ[tval < 0], Log[-tval] + I*Pi*sigma, If[TrueQ[tval == 0], 0, Log[tval]]];
+  (* A wholly single-valued LocalSolution has no chart Im-sign, and none is
+     needed: every active tag then has integer a, b=0, p=0.  Do not let the
+     sentinel None enter ordinary negative integer powers.  Multivalued
+     solutions have already passed the strict sign check above. *)
+  Lv = If[TrueQ[tval < 0],
+    If[MemberQ[{1, -1}, sigma], Log[-tval] + I*Pi*sigma, Log[-tval]],
+    If[TrueQ[tval == 0], 0, Log[tval]]];
   (* value window: each sector is complete to (kmax + p); honest min/max *)
   Module[{valueCM, valueMin2, value, tails},
     valueCM = Min @@ (kmax + #["p"] & /@ secs);
@@ -226,7 +232,8 @@ EvaluateLocalSolution[ls0_Association, tval_, OptionsPattern[]] := Module[
       ConstantArray[0, valueCM - valueMin2 + 1], Missing["NotComputed"]];
     Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"],
         ta, alphas},
-      ta = If[TrueQ[tval < 0], (-tval)^a*Exp[I*Pi*sigma*a],
+      ta = If[TrueQ[tval < 0],
+        If[MemberQ[{1, -1}, sigma], (-tval)^a*Exp[I*Pi*sigma*a], tval^a],
         If[TrueQ[tval == 0], If[a === 0, 1, 0], tval^a]];
       Module[{tpows = Table[pow[tval, nn], {nn, 0, ncols - 1}]},
       alphas = If[TrueQ[usePade],
@@ -370,7 +377,7 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
 Options[ReexpandLocalSolution] = {"ImSign" -> Automatic};
 ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Module[
   {ls = ValidateLocalSolution[ls0], eps, sigma, kmin, kmax, ncols, ncomp,
-   singularQ, rho, LogD, w, out, tails, divOrd, newCenter, chartScale,
+   singularQ, needsBranch, rho, LogD, w, out, tails, divOrd, newCenter, chartScale,
    newChartMap},
   eps = DiffExp2`Config`CanonicalEps[];
   kmin = lsMin[ls]; kmax = lsCM[ls];
@@ -378,6 +385,8 @@ ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Mod
   ncomp = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]];
   singularQ = AnyTrue[ls["Sectors"],
     !IntegerQ[#["a"]] || #["a"] < 0 || !zeroQ[#["b"]] || #["p"] > 0 &];
+  needsBranch = AnyTrue[ls["Sectors"],
+    !IntegerQ[#["a"]] || !zeroQ[#["b"]] || #["p"] > 0 &];
   If[TrueQ[Dc == 0] && singularQ,
     err["resingular", <|"Chart" -> chartName[ls],
       "Detail" -> "re-expansion around the singular center is forbidden; tags come only from fresh Frobenius"|>]];
@@ -385,10 +394,12 @@ ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Mod
     err["radius", <|"Chart" -> chartName[ls], "Point" -> Dc,
       "Radius" -> ls["Radius"], "Detail" -> "new center outside the chart"|>]];
   sigma = OptionValue["ImSign"] /. Automatic :> ChartImSign[ls];
-  If[TrueQ[Dc < 0] && singularQ && !MemberQ[{1, -1}, sigma],
+  If[TrueQ[Dc < 0] && needsBranch && !MemberQ[{1, -1}, sigma],
     err["branchmissing", <|"Chart" -> chartName[ls], "Point" -> Dc,
       "Detail" -> "negative re-expansion center on a multivalued chart"|>]];
-  LogD = If[TrueQ[Dc < 0], Log[-Dc] + I*Pi*sigma, Log[Dc]];
+  LogD = If[TrueQ[Dc < 0],
+    If[MemberQ[{1, -1}, sigma], Log[-Dc] + I*Pi*sigma, Log[-Dc]],
+    Log[Dc]];
   rho = Min[ls["Radius"] - Abs[Dc], If[singularQ, Abs[Dc], Infinity]];
   (* assemble per sector via factored (eps-order, w-power) tables:
      value = Da * e^{b eps LogD} * (1+w)^(a+b eps) * (eps(LogD+Log[1+w]))^p/p!
@@ -398,7 +409,9 @@ ReexpandLocalSolution[ls0_Association, Dc_, NN_Integer, OptionsPattern[]] := Mod
     out = ConstantArray[0, {kmax - kmin + 1, NN + 1, ncomp}];
     Do[Module[{a = sec["a"], b = sec["b"], p = sec["p"], arr = sec["Coeffs"],
         Da, P3, G, binTab, Bj2m, j2max},
-      Da = If[TrueQ[Dc < 0], (-Dc)^a*Exp[I*Pi*sigma*a], Dc^a];
+      Da = If[TrueQ[Dc < 0],
+        If[MemberQ[{1, -1}, sigma], (-Dc)^a*Exp[I*Pi*sigma*a], Dc^a],
+        Dc^a];
       (* P3[[m+1]]: w-coeffs of (LogD + Log[1+w])^p / p! *)
       P3 = Module[{acc = ConstantArray[0, NN + 1]},
         acc[[1]] = 1;

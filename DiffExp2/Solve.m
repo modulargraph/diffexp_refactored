@@ -19,7 +19,7 @@ SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the Fundamen
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
-ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
+ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-clearing, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -95,7 +95,28 @@ tLaurent[e_, t_, k_Integer] := Module[{c, v, num, den, nc, dc, ord, csr},
 
 (* ---- PrepareChart ---- *)
 
-$pcCache = <||>;
+(* A system-level exact clearing pair is expensive but affine-chart
+   independent.  Register the exact matrix once and compute the pair lazily
+   only if a regular chart asks for it.  The SHA-256 key is accompanied by an
+   exact equality check, so a hash collision is loud rather than contaminating
+   another system. *)
+$pcCache = <||>; $systemClearRegistry = <||>; $globalClearedCache = <||>;
+$chartClearedCache = <||>;
+systemClearKey[sys_Association] := Module[{vtag = Replace[
+    sys["Variable"], s_Symbol :> {Context[s], SymbolName[s]}]},
+  {Hash[{sys["Matrix"], sys["Variable"]}, "SHA256"],
+    Dimensions[sys["Matrix"]], Sequence @@ vtag}];
+registerSystemClearInput[sys_Association] := Module[
+  {key = systemClearKey[sys], old},
+  old = If[KeyExistsQ[$systemClearRegistry, key],
+    $systemClearRegistry[key], None];
+  If[old =!= None &&
+      !(old["Variable"] === sys["Variable"] && old["Matrix"] === sys["Matrix"]),
+    err["E6", <|"Center" -> "system-clear-registry"|>,
+      <|"Key" -> key, "Detail" -> "system clearing cache key collision"|>]];
+  If[old === None, AssociateTo[$systemClearRegistry, key ->
+    <|"Variable" -> sys["Variable"], "Matrix" -> sys["Matrix"]|>]];
+  key];
 familyCollisionDepth[roots_List, collisions_List] := Module[{perRoot},
   perRoot = Table[Module[{events, layers},
     (* Homogeneous recursion starts at n=1; same-a n=0 symmetrization is
@@ -108,13 +129,14 @@ familyCollisionDepth[roots_List, collisions_List] := Module[{perRoot},
   If[perRoot === {}, 0, Max[perRoot]]];
 
 PrepareChart[sys_Association, chart_Association] := Module[
-  {pcKey = {Hash[sys["Matrix"]], chart["Center"], Lookup[chart, "Scale", 1],
+  {sysClearKey = registerSystemClearInput[sys], pcKey},
+  pcKey = {sysClearKey, chart["Center"], Lookup[chart, "Scale", 1],
     Lookup[chart, "Radius", None], Lookup[chart, "LocalRadius", None],
-    Lookup[chart, "Prescriptions", {}]}},
+    Lookup[chart, "Prescriptions", {}]};
   If[KeyExistsQ[$pcCache, pcKey], Return[$pcCache[pcKey]]];
-  $pcCache[pcKey] = prepareChartCore[sys, chart]];
+  $pcCache[pcKey] = prepareChartCore[sys, chart, sysClearKey]];
 
-prepareChartCore[sys_Association, chart_Association] := Module[
+prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t, x0, beta, A, Achart, idata, d,
    cols, V, VInv, fams, detV, colIdx},
   t = chart["ChartVar"]; x0 = chart["Center"]; beta = Lookup[chart, "Scale", 1];
@@ -158,6 +180,7 @@ prepareChartCore[sys_Association, chart_Association] := Module[
     (* LocalSolution evaluation is in t, not the physical line variable. *)
     "Radius" -> Lookup[chart, "LocalRadius", chart["Radius"]],
     "SystemHash" -> Hash[sys["Matrix"]],   (* solve-cache flush tag *)
+    "SystemClearKey" -> sysClearKey,
     "Prescriptions" -> Lookup[chart, "Prescriptions", {}],
     "SystemSize" -> d,
     "ThetaMatrix" -> idata["Reduction"]["ThetaMatrix"],
@@ -679,10 +702,18 @@ epsValuation[e_, eps_] := Module[{c = Cancel[Together[e]]},
    before the d0(eps=0) check: a global 1/eps coefficient is a legitimate
    Laurent multiplier, while a moving factor such as (t-eps) still fails
    E3 because its primitive d0 vanishes at eps=0. *)
-clearedSymbolic[cs_] := Module[
+clearedSymbolicLegacy[cs_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], den,
-   denCoeffs, denContent, num, d0, dD, dN, dExpr, NhatExpr},
+   denCoeffs, denContent, num, d0, dD, dN, dExpr, NhatExpr,
+   phaseQ, phaseTime, phase, identityVQ},
+  phaseQ = Environment["DEBUG_SOLVE_PHASES"] === "1";
+  phaseTime = SessionTime[];
+  phase[label_String] := If[phaseQ, Module[{now = SessionTime[]},
+    Print["SOLVEPHASE center=", cs["Center"], " phase=cleared-", label,
+      " dt=", N[now - phaseTime, 6]];
+    phaseTime = now]];
   den = Together[PolynomialLCM @@ (Denominator[Together[#]] & /@ Flatten[cs["ThetaMatrix"]])];
+  phase["denominator-lcm"];
   denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
   If[denCoeffs === {},
     err["E3", cs, <|"Denominator" -> den,
@@ -690,7 +721,9 @@ clearedSymbolic[cs_] := Module[
   denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
     Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
   den = Cancel[Together[den/denContent]];
+  phase["denominator-content"];
   num = Map[Cancel[Together[#*den]] &, cs["ThetaMatrix"], {2}];
+  phase["numerators"];
   d0 = Together[den /. t -> 0];
   If[zeroQ[d0 /. eps -> 0],
     err["E3", cs, <|"Denominator" -> den,
@@ -698,12 +731,114 @@ clearedSymbolic[cs_] := Module[
   dD = Exponent[den, t];
   dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
   dExpr = Table[Cancel[Together[Coefficient[den, t, j]]], {j, 0, dD}];
+  phase["denominator-coefficients"];
+  identityVQ = !TrueQ[$disableIdentityNhatShortcut] &&
+    TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+    TrueQ[Normal[cs["V"]] === IdentityMatrix[cs["SystemSize"]]] &&
+    TrueQ[Normal[cs["VInv"]] === IdentityMatrix[cs["SystemSize"]]];
   NhatExpr = Table[Module[{Nj},
     Nj = Map[Coefficient[#, t, j] &, num, {2}];
-    Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}]],
+    Map[Cancel[Together[#]] &,
+      If[identityVQ, Nj, cs["VInv"] . Nj . cs["V"]], {2}]],
     {j, 0, dN}];
+  phase["nhat-coefficients"];
   <|"dExpr" -> dExpr, "NhatExpr" -> NhatExpr,
     "dD" -> dD, "dN" -> dN|>];
+
+$disableGlobalClearedHoist = False;
+$disableIdentityNhatShortcut = False;
+
+regularIdentityFrameQ[cs_Association] :=
+  TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+  TrueQ[cs["Gauge"] === IdentityMatrix[cs["SystemSize"]]] &&
+  TrueQ[Normal[cs["V"]] === IdentityMatrix[cs["SystemSize"]]] &&
+  TrueQ[Normal[cs["VInv"]] === IdentityMatrix[cs["SystemSize"]]];
+
+(* Exact clearing in the original system variable.  Affine substitution is a
+   field automorphism, so the LCM of canceled entry denominators may be shifted
+   to every regular chart instead of recomputed after the algebraic shift. *)
+globalClearedSystem[systemKey_] := Module[
+  {cached, input, x, A, den, denCoeffs, denContent, num, phaseQ, phaseTime},
+  cached = If[KeyExistsQ[$globalClearedCache, systemKey],
+    $globalClearedCache[systemKey], None];
+  If[cached =!= None, Return[cached, Module]];
+  input = If[KeyExistsQ[$systemClearRegistry, systemKey],
+    $systemClearRegistry[systemKey], None];
+  If[input === None,
+    err["E6", <|"Center" -> "global-system-clear"|>,
+      <|"Key" -> systemKey,
+        "Detail" -> "chart references an unregistered exact system"|>]];
+  x = input["Variable"];
+  phaseQ = Environment["DEBUG_SOLVE_PHASES"] === "1";
+  phaseTime = SessionTime[];
+  A = Map[Cancel[Together[#]] &, input["Matrix"], {2}];
+  den = Together[PolynomialLCM @@
+    (Denominator[Together[#]] & /@ Flatten[A])];
+  If[phaseQ, Print["SOLVEPHASE phase=global-denominator-lcm dt=",
+    N[SessionTime[] - phaseTime, 6]]];
+  denCoeffs = Select[CoefficientList[den, x], !zeroCanQ[#] &];
+  If[denCoeffs === {},
+    err["E3", <|"Center" -> "global-system-clear"|>,
+      <|"Denominator" -> den,
+        "Detail" -> "global cleared denominator is identically zero"|>]];
+  denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
+    Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
+  den = Cancel[Together[den/denContent]];
+  num = Map[Cancel[Together[#*den]] &, A, {2}];
+  cached = <|"Variable" -> x, "Denominator" -> den,
+    "Numerator" -> num, "Dimension" -> Length[A]|>;
+  AssociateTo[$globalClearedCache, systemKey -> cached];
+  cached];
+
+regularClearedFromGlobal[cs_Association] := Module[
+  {systemKey = cs["SystemClearKey"], key, cached, global, x,
+   t = cs["ChartVar"], center = cs["Center"], beta = cs["ChartMap", "Scale"],
+   den, denCoeffs, denContent, num, d0, dD, dN, dExpr, NhatExpr,
+   phaseQ, phaseTime, phase},
+  key = {systemKey, center, beta, t};
+  cached = If[KeyExistsQ[$chartClearedCache, key],
+    $chartClearedCache[key], None];
+  If[cached =!= None, Return[cached, Module]];
+  global = globalClearedSystem[systemKey];
+  x = global["Variable"];
+  phaseQ = Environment["DEBUG_SOLVE_PHASES"] === "1";
+  phaseTime = SessionTime[];
+  phase[label_String] := If[phaseQ, Module[{now = SessionTime[]},
+    Print["SOLVEPHASE center=", center, " phase=hoist-", label,
+      " dt=", N[now - phaseTime, 6]];
+    phaseTime = now]];
+  den = Cancel[Together[global["Denominator"] /. x -> center + beta*t]];
+  denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
+  If[denCoeffs === {},
+    err["E3", cs, <|"Denominator" -> den,
+      "Detail" -> "affine-shifted global denominator is identically zero"|>]];
+  denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
+    Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
+  den = Cancel[Together[den/denContent]];
+  num = Map[Cancel[Together[beta*t*(# /. x -> center + beta*t)/denContent]] &,
+    global["Numerator"], {2}];
+  phase["affine-pair"];
+  d0 = Together[den /. t -> 0];
+  If[zeroQ[d0 /. DiffExp2`Config`CanonicalEps[] -> 0],
+    err["E3", cs, <|"Denominator" -> den,
+      "Detail" -> "cleared denominator degenerates onto the chart origin at eps = 0"|>]];
+  dD = Exponent[den, t];
+  dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
+  dExpr = Table[Cancel[Together[Coefficient[den, t, j]]], {j, 0, dD}];
+  NhatExpr = Table[
+    Map[Cancel[Together[#]] &, Map[Coefficient[#, t, j] &, num, {2}], {2}],
+    {j, 0, dN}];
+  phase["coefficients"];
+  cached = <|"dExpr" -> dExpr, "NhatExpr" -> NhatExpr,
+    "dD" -> dD, "dN" -> dN|>;
+  AssociateTo[$chartClearedCache, key -> cached];
+  cached];
+
+clearedSymbolic[cs_Association] := If[
+  !TrueQ[$disableGlobalClearedHoist] && regularIdentityFrameQ[cs] &&
+    KeyExistsQ[cs, "SystemClearKey"],
+  regularClearedFromGlobal[cs],
+  clearedSymbolicLegacy[cs]];
 
 (* A negative-valued j-th Taylor multiplier can be used again after every
    j Taylor steps.  The old one-hit epsPoleDepth misses this composition.
@@ -711,7 +846,9 @@ clearedSymbolic[cs_] := Module[
    worst pole when the pole occurs only at j>1. *)
 recurrencePoleDepth[data_Association, nmax_Integer] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], dD = data["dD"],
-   dN = data["dN"], maxJ, stepCost, depth},
+   dN = data["dN"], maxJ, stepCost, depth, phaseQ, phaseTime},
+  phaseQ = Environment["DEBUG_SOLVE_PHASES"] === "1";
+  phaseTime = SessionTime[];
   If[nmax <= 0, Return[0]];
   maxJ = Min[nmax, Max[dD, dN]];
   If[maxJ <= 0, Return[0]];
@@ -722,10 +859,15 @@ recurrencePoleDepth[data_Association, nmax_Integer] := Module[
       vals = Select[vals, IntegerQ];
       If[vals === {}, 0, Max[0, -Min[vals]]]],
     {j, 1, maxJ}];
+  If[phaseQ, Print["SOLVEPHASE phase=pole-depth-valuations dt=",
+    N[SessionTime[] - phaseTime, 6], " maxLag=", maxJ]];
+  phaseTime = SessionTime[];
   depth = ConstantArray[0, nmax + 1];
   Do[depth[[n + 1]] = Max[Join[{0}, Table[
       depth[[n - j + 1]] + stepCost[[j]], {j, 1, Min[n, maxJ]}]]],
     {n, 1, nmax}];
+  If[phaseQ, Print["SOLVEPHASE phase=pole-depth-dp dt=",
+    N[SessionTime[] - phaseTime, 6], " result=", depth[[-1]]]];
   depth[[-1]]];
 
 (* Deepest pole of ONE prepared Taylor multiplier, without composing it
@@ -1461,7 +1603,9 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];
   $shCache[key] = solveHomogeneousCore[cs, req]];
 
-ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;);
+ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
+  $systemClearRegistry = <||>; $globalClearedCache = <||>;
+  $chartClearedCache = <||>;);
 
 solveHomogeneousCore[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,
@@ -1699,7 +1843,8 @@ SolveChart[cs_Association, req_Association, source_:None] := Module[{basis, part
    ODE residual check runs on the propagated solution itself. *)
 SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
   {d = cs["SystemSize"], nmax, vMin, vCM, fb, wideTop, Wd, prep, rec, ls,
-   symbolic, poleDepth},
+   symbolic, poleDepth, numericInputQ, phaseQ, phaseTime, phase,
+   preparedNums},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "SolveValueRegular requires a regular chart (pole order 0); singular charts keep the basis+matching path"|>]];
@@ -1708,6 +1853,19 @@ SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
       "Detail" -> "value vector must be d EpsSeries components"|>]];
   nmax = req["TOrder"];
   vMin = Min[esMin /@ vals]; vCM = Min[esCM /@ vals];
+  numericInputQ = AnyTrue[vals, Function[v,
+    !FreeQ[Table[esCoeff[v, k], {k, esMin[v], esCM[v]}],
+      _?InexactNumberQ]]];
+  phaseQ = Environment["DEBUG_SOLVE_PHASES"] === "1";
+  phaseTime = SessionTime[];
+  phase[label_String, meta_:None] := If[phaseQ, Module[{now = SessionTime[]},
+    Print["SOLVEPHASE center=", cs["Center"], " phase=", label,
+      " dt=", N[now - phaseTime, 6],
+      If[meta === None, "", " meta=" <> ToString[meta, InputForm]]];
+    phaseTime = now]];
+  If[phaseQ,
+    Print["SOLVEPHASE center=", cs["Center"], " phase=start",
+      " nmax=", nmax, " inputNumeric=", numericInputQ]];
   If[AllTrue[vals, Function[v,
       AllTrue[Table[esCoeff[v, k], {k, esMin[v], esCM[v]}], # === 0 &]]],
     (* exactly-zero incoming value: the propagated solution is zero *)
@@ -1722,20 +1880,33 @@ SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
   (* frame: the SolveHomogeneous work-window shape with Pmax = cdMax = 0
      (regular chart), based on the INCOMING window instead of req *)
   symbolic = clearedSymbolic[cs];
+  phase["cleared-symbolic"];
   poleDepth = recurrencePoleDepth[symbolic, nmax];
+  phase["pole-depth"];
   fb = Min[vMin, 0] - 2;
   wideTop = vCM + 2 - Min[0, vMin - 2];
   fb = Min[fb, vMin - poleDepth];
   wideTop = Max[wideTop, vCM + poleDepth];
   Wd = wideTop - fb + 1;
   prep = prepareCleared[cs, fb, Wd, symbolic];
+  If[phaseQ,
+    preparedNums = Cases[{prep["dL"], prep["NhatSp"],
+        prep["NhatRationalDenominators"]}, _?NumericQ, Infinity]];
+  phase["prepare-cleared", <|"fb" -> fb, "width" -> Wd,
+    "exactNumericCount" -> If[phaseQ,
+      Count[preparedNums, z_ /; Precision[z] === Infinity], Missing["NotScanned"]],
+    "inexactCount" -> If[phaseQ,
+      Count[preparedNums, _?InexactNumberQ], Missing["NotScanned"]]|>];
   rec = runRecursion[cs, prep, 0, 0, 0, nmax, None, fb, Wd, {vals}];
+  phase["run-recursion"];
   ls = assembleSolution[cs, 0, 0, rec, nmax,
     If[TrueQ[$disableGroupedSpectralTransform], Automatic,
       prepareFramedMatrix[cs["V"], DiffExp2`Config`CanonicalEps[],
         fb, Wd, cs]]];
   ls = capWindow[cs, ls, vCM];
+  phase["assemble-cap"];
   ODEResidualCheck[cs, ls];
+  phase["ode-residual"];
   ls];
 
 (* honesty cap: nothing above the incoming CompleteMax is complete (the

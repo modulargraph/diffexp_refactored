@@ -213,13 +213,17 @@ Module[{dir, quickBin, slowBin, pidFile, oldTimeout, chmodResults,
   If[FileExistsQ[pidFile],
     pids = Quiet[ToExpression /@ StringSplit[
       StringTrim[Import[pidFile, "Text"]]]]];
-  processGoneQ[pid_] := Lookup[
-    RunProcess[{"/bin/kill", "-0", ToString[pid]}],
-    "ExitCode", 0] =!= 0;
+  processGoneQ[pid_] := Module[{probe, state},
+    probe = RunProcess[{"/bin/ps", "-o", "state=", "-p", ToString[pid]}];
+    state = StringTrim[Lookup[probe, "StandardOutput", ""]];
+    Lookup[probe, "ExitCode", 0] =!= 0 || state === "" ||
+      StringStartsQ[state, "Z"]
+  ];
   (* A terminated grandchild can remain visible as an init-owned zombie for
      a scheduler tick after the monitored parent has been explicitly reaped.
-     Allow bounded OS reaping time, but a genuinely leaked ten-second worker
-     still fails this assertion. *)
+     A zombie is already dead and holds no FIRE/license resources, so accept
+     that state while allowing bounded OS reaping time. A genuinely live
+     leaked ten-second worker still fails this assertion. *)
   orphanFree = False;
   Do[
     orphanFree = Length[pids] === 2 && AllTrue[pids, processGoneQ];

@@ -77,8 +77,9 @@ assert["regular_global_clear_preserves_exact_analytic_regulator",
     DiffExp2`Solve`Private`recurrencePoleDepth[regLegacy, 12] ===
       DiffExp2`Solve`Private`recurrencePoleDepth[regHoist, 12]];
 
-(* Singular/gauged charts are deliberately outside the optimized dispatch;
-   their legacy cleared construction must remain byte-for-byte identical. *)
+(* Singular/gauged charts remain outside the system-global affine hoist and
+   use the chart-local cleared construction.  Its polynomial spectral
+   transform is covered independently by test_polynomial_nhat_transform.m. *)
 gaugeSys = <|"Matrix" -> {{0, x^-2}, {0, 0}}, "Variable" -> x|>;
 gaugeChart = catchDE2[DiffExp2`Solve`PrepareChart[gaugeSys,
   chart[0, 1, "singular-gauged-legacy"]]];

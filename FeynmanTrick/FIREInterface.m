@@ -481,15 +481,22 @@ Module[{exitCode, result, logFile, cmd, stdoutFile, stderrFile,
     "while kill -0 $fire_pid 2>/dev/null; do ",
       "now=$(date +%s); ",
       "if [ $((now-start)) -ge $timeout ]; then ",
-        (* Capture direct workers before their parent is terminated and they
-           are reparented.  `pkill -P pid` without a pattern is not portable
-           (and is a no-op on macOS), so signal the exact PIDs instead. *)
-        "child_pids=$(pgrep -P $fire_pid 2>/dev/null || true); ",
+        (* Capture the complete worker tree before its parent is terminated
+           and descendants are reparented. Descendants are signalled first,
+           giving FIRE a short chance to reap them before its own TERM. *)
+        "collect_descendants() ( ",
+          "for descendant in $(pgrep -P \"$1\" 2>/dev/null); do ",
+            "collect_descendants \"$descendant\"; echo \"$descendant\"; ",
+          "done; ",
+        "); ",
+        "child_pids=$(collect_descendants \"$fire_pid\"); ",
         "if [ -n \"$child_pids\" ]; then kill -TERM $child_pids 2>/dev/null || true; fi; ",
+        "sleep 0.1; ",
         "kill -TERM $fire_pid 2>/dev/null || true; ",
         "sleep 2; ",
         "if [ -n \"$child_pids\" ]; then kill -KILL $child_pids 2>/dev/null || true; fi; ",
         "kill -KILL $fire_pid 2>/dev/null || true; ",
+        (* Reap the monitored parent before reporting the timeout. *)
         "wait $fire_pid 2>/dev/null || true; ",
         "echo ", shellQuote["FIRE6 timeout after " <> ToString[timeoutSeconds] <> "s"], " >> ", stderrQ, "; ",
         "exit 124; ",

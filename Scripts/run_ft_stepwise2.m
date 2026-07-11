@@ -64,8 +64,10 @@ requestedEpsilonOrder[level_Integer] := Max[
    otherwise Transport receives an empty Prescriptions record and loses the
    branch sheet after crossing an interior singularity. *)
 levelDeltaPrescriptions[var_Symbol, sys_Association, extra_List] := Module[
-  {raw, factors},
-  raw = Join[{var, 1 - var}, Lookup[sys, "SingularFactors", {}], extra];
+  {raw, factors, projectedExtra},
+  projectedExtra = DiffExp2`Transport`EpsilonZeroSingularFactors[extra, var];
+  raw = Join[{var, 1 - var}, Lookup[sys, "SingularFactors", {}],
+    projectedExtra];
   factors = Flatten[Map[Module[{fl = FactorList[Factor[Numerator[Together[#]]]]},
       First /@ Select[fl, !FreeQ[First[#], var] &]] &, raw]];
   factors = DeleteDuplicates[factors,
@@ -92,7 +94,7 @@ $ftPrepCacheVersion = 2;
 $ftPrepSourceFingerprint = Hash[
   ({#, FileHash[#, "SHA256"]} & /@ Sort[FileNames["*.m",
     FileNameJoin[{repoRoot, "FeynmanTrick"}], Infinity]]), "SHA256"];
-$ftLadderCheckpointVersion = 1;
+$ftLadderCheckpointVersion = 2;
 $ftLadderSourceFingerprint = Hash[
   ({#, FileHash[#, "SHA256"]} & /@ Sort[Join[
     FileNames["*.m", FileNameJoin[{repoRoot, "DiffExp2"}], Infinity],
@@ -219,6 +221,121 @@ saveLadderCheckpoint[file_, payload_] := Module[
 ladderCheckpointReject[file_, detail_] :=
   (Print["FTLADDER RESUME REJECT ", file, ": ", detail]; $Failed);
 
+(* FIRE returns differential equations in its physical master basis I.  Some
+   otherwise regular systems contain epsilon poles in that basis.  Transport
+   the exactly equivalent basis J_i = eps^k_i I_i instead:
+
+       A_J = D A_I D^-1,  D = DiagonalMatrix[eps^k_i].
+
+   FindEpsPrefactors fixes only the relative k_i.  Its common offset is chosen
+   here so that every conversion from the incoming finite boundary basis is a
+   nonnegative coefficient shift.  The plain DiffExp2 boundary seam has one
+   common complete upper order, so we deliberately retain exactly the input
+   width.  Relative shifts can consume physical upper orders; they must be
+   supplied by explicit lookahead/halos and are never filled with assumed
+   zeros. *)
+ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
+    boundaryPrefactors_List, epsSymbol_Symbol] := Module[
+  {d, widths, inputTop, rawPoleOrders, canonical, commonOffset,
+   effective, boundaryShifts, normalized, normalizedPoleOrders,
+   shiftedBoundary, record, hasRawPoles},
+  d = Length[matrix];
+  If[!MatrixQ[matrix] || Dimensions[matrix] =!= {d, d} || d === 0,
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "level matrix must be a nonempty square matrix",
+      "Dimensions" -> Dimensions[matrix]|>], Module]];
+  If[Length[boundaryValues] =!= d ||
+      Length[boundaryPrefactors] =!= d ||
+      !AllTrue[boundaryValues, ListQ] ||
+      !AllTrue[boundaryPrefactors, IntegerQ],
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "boundary values/prefactors do not match the level matrix",
+      "Dimension" -> d, "BoundaryRows" -> Length[boundaryValues],
+      "Prefactors" -> boundaryPrefactors|>], Module]];
+  widths = Length /@ boundaryValues;
+  If[MemberQ[widths, 0] || Length[DeleteDuplicates[widths]] =!= 1,
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "epsilon boundary rows must have one nonempty common window",
+      "Widths" -> widths|>], Module]];
+  inputTop = First[widths] - 1;
+  rawPoleOrders =
+    FeynmanTrick`EpsPrefactors`MatrixPoleOrders[matrix, epsSymbol];
+  hasRawPoles = Max[Flatten[rawPoleOrders]] > 0;
+  (* Avoid a second full MatrixPoleOrders pass inside FindEpsPrefactors for
+     the overwhelmingly common no-op level. *)
+  canonical = If[hasRawPoles,
+    FeynmanTrick`EpsPrefactors`FindEpsPrefactors[matrix, epsSymbol],
+    ConstantArray[0, d]];
+  If[!ListQ[canonical] || Length[canonical] =!= d ||
+      !AllTrue[canonical, IntegerQ],
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "could not determine an exact integer epsilon basis",
+      "Candidate" -> canonical|>], Module]];
+  commonOffset = Max[boundaryPrefactors - canonical];
+  effective = canonical + commonOffset;
+  boundaryShifts = effective - boundaryPrefactors;
+  If[!AllTrue[boundaryShifts, IntegerQ[#] && # >= 0 &],
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "epsilon basis would require an unknown negative boundary shift",
+      "InputPrefactors" -> boundaryPrefactors,
+      "EffectivePrefactors" -> effective|>], Module]];
+  normalized = FeynmanTrick`EpsPrefactors`ApplyEpsPrefactors[
+    matrix, effective, epsSymbol];
+  normalizedPoleOrders = If[hasRawPoles,
+    FeynmanTrick`EpsPrefactors`MatrixPoleOrders[normalized, epsSymbol],
+    (* canonical is zero here, so effective is a common shift and A is
+       exactly unchanged. *)
+    rawPoleOrders];
+  If[Max[Flatten[normalizedPoleOrders]] > 0,
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "diagonal epsilon normalization did not remove every matrix pole",
+      "CanonicalPrefactors" -> canonical,
+      "EffectivePrefactors" -> effective,
+      "RemainingPoleOrders" -> normalizedPoleOrders|>], Module]];
+  shiftedBoundary = MapThread[
+    Function[{shift, row},
+      Table[If[n < shift, 0, row[[n - shift + 1]]],
+        {n, 0, inputTop}]],
+    {boundaryShifts, boundaryValues}];
+  record = <|
+    "Schema" -> "FeynmanTrick.EpsilonBasis/v1",
+    "CanonicalPrefactors" -> canonical,
+    "Prefactors" -> effective,
+    "RawPoleOrders" -> rawPoleOrders,
+    "NormalizedPoleOrders" -> normalizedPoleOrders,
+    "CompleteMax" -> inputTop,
+    "NormalizedMatrixHash" -> Hash[normalized, "SHA256"],
+    "PoleFree" -> True|>;
+  <|
+    "Matrix" -> normalized,
+    "BoundaryValues" -> shiftedBoundary,
+    "BoundaryPrefactors" -> effective,
+    "BoundaryShifts" -> boundaryShifts,
+    "InputPrefactors" -> boundaryPrefactors,
+    "InputCompleteMax" -> inputTop,
+    "CompleteMax" -> inputTop,
+    "CheckpointRecord" -> record|>];
+
+ft2EpsilonBasisCheckpointQ[payload_Association] := Module[
+  {record = Lookup[payload, "EpsilonBasis", None], system, values,
+   prefactors, matrix, widths},
+  system = Lookup[payload, "System", None];
+  values = Lookup[payload, "BoundaryValues", None];
+  prefactors = Lookup[payload, "BoundaryPrefactors", None];
+  If[!AssociationQ[record] || !AssociationQ[system] || !ListQ[values] ||
+      !ListQ[prefactors] || !AllTrue[values, ListQ], Return[False, Module]];
+  widths = Length /@ values;
+  If[MemberQ[widths, 0] || Length[DeleteDuplicates[widths]] =!= 1,
+    Return[False, Module]];
+  matrix = Lookup[system, "Matrix", None];
+  TrueQ[Lookup[record, "Schema", None] ===
+      "FeynmanTrick.EpsilonBasis/v1"] &&
+    TrueQ[Lookup[record, "PoleFree", False]] &&
+    Lookup[record, "Prefactors", None] === prefactors &&
+    Lookup[record, "CompleteMax", None] === First[widths] - 1 &&
+    Lookup[record, "NormalizedMatrixHash", None] ===
+      Hash[matrix, "SHA256"]];
+
 (* A transport checkpoint is updated after each successful endpoint arm.
    In particular, the lower arm reaches disk before the upper arm starts, so
    an interrupted upper solve can resume without repeating the lower one.
@@ -327,6 +444,7 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
       Return[ladderCheckpointReject[file,
         "requested epsilon window does not match"], Module]];
     If[!AssociationQ[Lookup[payload, "System", None]] ||
+        !ft2EpsilonBasisCheckpointQ[payload] ||
         !AssociationQ[Lookup[payload, "Reductions", None]] ||
         !AllTrue[currentRequests,
           KeyExistsQ[payload["Reductions"], #["NeededVec"]] &] ||
@@ -336,7 +454,8 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
             Lookup[payload, "TransportHigh", None]},
           (# === None || AssociationQ[#]) &],
       Return[ladderCheckpointReject[file,
-        "transport payload is incomplete"], Module]];
+        "transport payload is incomplete or has inconsistent epsilon-basis metadata"],
+        Module]];
     needInt = AnyTrue[currentRequests, #["Case"] === "integrate" &];
     needLo = needInt || AnyTrue[currentRequests, #["Case"] === "limitLower" &];
     needHi = needInt || AnyTrue[currentRequests, #["Case"] === "limitUpper" &];
@@ -495,7 +614,8 @@ runExample[name_String] := Module[
      transportCheckpointFile, saveTransportProgress, completedArms,
      transportSys = None, planLo = None, planHi = None, armReq,
      loPlanCharts, hiPlanCharts, armRounds, armBatchResult,
-     armUniqueCharts, armCacheCapacity, levelIBPBatch, rawExtraFacs},
+     armUniqueCharts, armCacheCapacity, levelIBPBatch, rawExtraFacs,
+     epsilonBasis, epsilonBasisRecord},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -511,6 +631,28 @@ runExample[name_String] := Module[
     resumeTransport = AssociationQ[resumeCheckpoint] &&
       resumeCheckpoint["Kind"] === "Transport" &&
       level === resumeCheckpoint["Level"];
+    epsilonBasis = ft2NormalizeEpsilonBasis[
+      A, currentBCs, currentPrefactors, Global`eps];
+    If[FailureQ[epsilonBasis],
+      Print["FTLADDER EPS BASIS FAIL level=", level, " ", epsilonBasis];
+      Throw[$Failed, "FT2Abort"]];
+    A = epsilonBasis["Matrix"];
+    currentBCs = epsilonBasis["BoundaryValues"];
+    currentPrefactors = epsilonBasis["BoundaryPrefactors"];
+    epsilonBasisRecord = epsilonBasis["CheckpointRecord"];
+    If[resumeTransport,
+      If[Lookup[resumeCheckpoint, "EpsilonBasis", None] =!=
+          epsilonBasisRecord,
+        Print["FTLADDER RESUME REJECT: epsilon basis does not match level matrix"];
+        Throw[$Failed, "FT2Abort"]],
+      If[Max[Flatten[epsilonBasisRecord["RawPoleOrders"]]] > 0 ||
+          Max[epsilonBasis["BoundaryShifts"]]> 0,
+        Print["FTLADDER EPS BASIS level=", level,
+          " canonical=", epsilonBasisRecord["CanonicalPrefactors"],
+          " prefactors=", currentPrefactors,
+          " boundaryShifts=", epsilonBasis["BoundaryShifts"],
+          " completeMax=", epsilonBasis["CompleteMax"],
+          " poleFree=", epsilonBasisRecord["PoleFree"]]]];
     levelExpansionOrder = If[resumeTransport,
       resumeCheckpoint["SourceExpansionOrder"], expansionOrder];
     If[resumeTransport,
@@ -580,6 +722,7 @@ runExample[name_String] := Module[
         "PrepKey" -> prepKey, "System" -> sys,
         "Variable" -> var, "BoundaryValues" -> currentBCs,
         "BoundaryPrefactors" -> currentPrefactors,
+        "EpsilonBasis" -> epsilonBasisRecord,
         "MastersHere" -> mastersHere, "MastersBelow" -> mastersBelow,
         "Requests" -> requests,
         "Reductions" -> AssociationMap[normalizeFT, reductions],
@@ -703,7 +846,9 @@ runExample[name_String] := Module[
     If[Environment["DEBUG_WINPROG"] === "1",
       Print["WINPROG level=", level,
         " reqEpsOrder=", requestedEpsilonOrder[level],
-        " bcMinPow=", Min @@ currentPrefactors, "..", Max @@ currentPrefactors,
+        " basisPrefactors=", Min @@ currentPrefactors, "..",
+          Max @@ currentPrefactors,
+        " basisCompleteMax=", epsilonBasis["CompleteMax"],
         " trLoFinalWin=", If[trLoCache === None, None,
           trLoCache["Final"]["EpsWindow"]],
         " trHiFinalWin=", If[trHiCache === None, None,

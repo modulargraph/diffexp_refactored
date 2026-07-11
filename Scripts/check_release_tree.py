@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when a clean DiffExp 2 release tracks files outside its allowlist."""
+"""Fail when a Git checkout or source archive differs from the release allowlist."""
 
 from __future__ import annotations
 
@@ -141,12 +141,40 @@ EXACT_FILES = (
 )
 REQUIRED_FILES = EXACT_FILES
 
+# A source archive has no Git index. These paths are never release payload;
+# they may nevertheless exist after an out-of-source-style local build or
+# after the user installs the external FIRE dependency beside the sources.
+ARCHIVE_IGNORED_TOP_LEVEL = {".git", "build", "Dependencies"}
+ARCHIVE_IGNORED_PARTS = {"__pycache__"}
+ARCHIVE_IGNORED_SUFFIXES = {".pyc", ".pyo"}
+
+
+def archive_files() -> set[str]:
+    files: set[str] = set()
+    for path in ROOT.rglob("*"):
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        relative = path.relative_to(ROOT)
+        if (relative.parts[0] in ARCHIVE_IGNORED_TOP_LEVEL or
+                any(part in ARCHIVE_IGNORED_PARTS for part in relative.parts) or
+                path.suffix in ARCHIVE_IGNORED_SUFFIXES):
+            continue
+        files.add(relative.as_posix())
+    return files
+
 
 def tracked_files() -> set[str]:
-    raw = subprocess.check_output(
-        ["git", "ls-files", "-z"], cwd=ROOT
-    ).decode("utf-8")
-    return {item for item in raw.split("\0") if item}
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if probe.returncode == 0:
+        raw = subprocess.check_output(
+            ["git", "ls-files", "-z"], cwd=ROOT
+        ).decode("utf-8")
+        return {item for item in raw.split("\0") if item}
+    return archive_files()
 
 
 def allowed(path: str) -> bool:
@@ -169,7 +197,7 @@ def main() -> int:
 
     if unexpected or missing:
         return 1
-    print(f"Release tree allowlist passed ({len(tracked)} tracked files).")
+    print(f"Release tree allowlist passed ({len(tracked)} source files).")
     return 0
 
 

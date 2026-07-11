@@ -95,7 +95,7 @@ int main() {
         "source_vertex":0,"target_vertex":1,
         "exact_original_entry":"g","exact_theta_entry":"theta-g",
         "multiplier":{"epsilon_shift":-1,"center_pole_order":0,
-          "kernels":[["1","0","0","0","0","0","0"],
+          "kernels":[["0","1","0","0","0","0","0"],
                      ["0","0","0","0","0","0","0"]],
           "exact_identity":"theta-g","proven_zero":false}}]}]
   })json");
@@ -113,7 +113,8 @@ int main() {
   const bool ok = prepared.at("status") == "ok" &&
       prepared.at("blocks") == 2 &&
       prepared.at("active_coupling_entries") == 1 &&
-      prepared.at("execution_implemented") == false &&
+      prepared.at("execution_implemented") == true &&
+      prepared.at("scalar_block_dag_column_execution") == true &&
       prepared.at("min_coupling_shift") == -1 &&
       stats.at("status") == "ok" &&
       std::string(stats.at("scc").as_string()) == scc &&

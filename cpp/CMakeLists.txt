@@ -69,4 +69,13 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_persistent_scc_prepare PRIVATE diffexp2_core)
   add_test(NAME cpp_persistent_scc_prepare
     COMMAND test_diffexp2_persistent_scc_prepare)
+
+  add_executable(test_diffexp2_persistent_scc_solve_column
+    tests/test_persistent_scc_solve_column.cpp)
+  target_compile_features(test_diffexp2_persistent_scc_solve_column
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_scc_solve_column
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_scc_solve_column
+    COMMAND test_diffexp2_persistent_scc_solve_column)
 endif()

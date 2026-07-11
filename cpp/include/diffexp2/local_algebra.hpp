@@ -324,6 +324,99 @@ LocalSolution<Scalar> multiply_prepared_rational(
   return canonicalize_identical_local_sectors(std::move(output));
 }
 
+// Restrict a finite local slab to a target recurrence frame.  Discarding
+// known upper coefficients is safe because the target never consumes them.
+// Discarding lower coefficients is only safe when every discarded exact
+// coefficient is zero: nonzero lower content means the caller did not retain
+// enough Laurent halo for the signed multiplier shift.
+template <typename Scalar>
+LocalSolution<Scalar> restrict_local_epsilon_frame_strict_lower(
+    const LocalSolution<Scalar>& input, std::int32_t target_min,
+    std::int32_t target_complete_max,
+    std::string checkpoint_identity = {}) {
+  validate_local_solution(input, false);
+  if (!input.error.empty())
+    throw std::invalid_argument(
+        "native epsilon-frame restriction needs explicit error-envelope propagation");
+  if (target_complete_max < target_min)
+    throw std::invalid_argument("empty target epsilon frame");
+
+  if (input.epsilon.min_power < target_min) {
+    const auto discarded_max = std::min<std::int32_t>(
+        input.epsilon.complete_max,
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(target_min) - 1,
+            "lower epsilon-frame boundary"));
+    for (const auto& sector : input.sectors)
+      for (std::int64_t power = input.epsilon.min_power;
+           power <= discarded_max; ++power) {
+        const auto epsilon_index = static_cast<std::size_t>(
+            power - input.epsilon.min_power);
+        for (std::size_t n = 0; n < input.taylor_width(); ++n)
+          for (std::uint32_t component = 0;
+               component < input.dimension; ++component)
+            if (!ScalarTraits<Scalar>::is_zero(
+                    sector.coefficients[local_algebra_detail::flat_index(
+                        epsilon_index, n, component, input.taylor_width(),
+                        input.dimension)]))
+              throw std::invalid_argument(
+                  "signed epsilon shift has nonzero content below the target frame; insufficient lower halo");
+      }
+  }
+
+  if (input.epsilon.complete_max < target_min)
+    throw std::invalid_argument(
+        "signed epsilon shift leaves no complete coefficient in the target frame");
+
+  const bool structurally_zero_on_target =
+      input.epsilon.min_power > target_complete_max;
+  const EpsilonWindow output_window = structurally_zero_on_target
+      ? EpsilonWindow{target_min, target_complete_max}
+      : EpsilonWindow{
+            std::max(input.epsilon.min_power, target_min),
+            std::min(input.epsilon.complete_max, target_complete_max)};
+
+  LocalSolution<Scalar> output;
+  output.chart = input.chart;
+  output.epsilon = output_window;
+  output.taylor_complete_max = input.taylor_complete_max;
+  output.dimension = input.dimension;
+  output.prescriptions = input.prescriptions;
+  output.checkpoint_identity = checkpoint_identity.empty()
+      ? input.checkpoint_identity + ":epsilon-frame"
+      : std::move(checkpoint_identity);
+  output.sectors.reserve(input.sectors.size());
+  for (const auto& sector : input.sectors) {
+    LocalSector<Scalar> restricted;
+    restricted.a = sector.a;
+    restricted.b = sector.b;
+    restricted.log_power = sector.log_power;
+    restricted.coefficients.assign(output.sector_size(),
+                                    ScalarTraits<Scalar>::zero());
+    if (!structurally_zero_on_target) {
+      for (std::int64_t power = output.epsilon.min_power;
+           power <= output.epsilon.complete_max; ++power) {
+        const auto input_epsilon = static_cast<std::size_t>(
+            power - input.epsilon.min_power);
+        const auto output_epsilon = static_cast<std::size_t>(
+            power - output.epsilon.min_power);
+        for (std::size_t n = 0; n < output.taylor_width(); ++n)
+          for (std::uint32_t component = 0;
+               component < output.dimension; ++component)
+            restricted.coefficients[local_algebra_detail::flat_index(
+                output_epsilon, n, component, output.taylor_width(),
+                output.dimension)] = sector.coefficients[
+                    local_algebra_detail::flat_index(
+                        input_epsilon, n, component, input.taylor_width(),
+                        input.dimension)];
+      }
+    }
+    output.sectors.push_back(std::move(restricted));
+  }
+  validate_local_solution(output, false);
+  return output;
+}
+
 template <typename Scalar>
 LocalSolution<Scalar> combine_local_solutions(
     const std::vector<LocalSolution<Scalar>>& inputs,

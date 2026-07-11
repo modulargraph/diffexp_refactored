@@ -26,6 +26,27 @@ assert["integration_algebraic_coordinate_grounded_at_2x_wp",
    Int_0^1 f dx = 1/(1+eps) = 1 - eps + eps^2 - eps^3 *)
 sys = DiffExp2`API`LoadSystem[<|"Matrix" -> {{eps/x}}, "Variable" -> x|>];
 assert["load_system", sys["SingularFactors"] === {x}];
+
+(* LoadSystem retains the full exact matrix/factor data for solving, while
+   exposing a separate eps-zero alphabet to the line planner.  In
+   particular, the eps-only denominator valuation must not erase x=0. *)
+epsAlphabetMatrix = {{1/(eps*(x + eps))}};
+epsAlphabetSys = DiffExp2`API`LoadSystem[<|
+  "Matrix" -> epsAlphabetMatrix, "Variable" -> x|>];
+assert["load_system_epsilon_zero_alphabet_keeps_exact_matrix",
+  epsAlphabetSys["Matrix"] === epsAlphabetMatrix &&
+  epsAlphabetSys["SingularFactorsExact"] === {x + eps} &&
+  epsAlphabetSys["SingularFactors"] === {x}];
+epsAlphabetSings = DiffExp2`Transport`FindSingularities[epsAlphabetSys];
+assert["load_system_epsilon_zero_alphabet_drives_planner",
+  Keys[epsAlphabetSings["Factors"]] === {x} &&
+  epsAlphabetSings["All"] === {0}];
+epsMovingOnlySys = DiffExp2`API`LoadSystem[<|
+  "Matrix" -> {{1/(x + eps)}}, "Variable" -> x|>];
+epsMovingEndpoint = catchDE2[DiffExp2`API`TransportEndpoint[
+  epsMovingOnlySys, {{1, 0, 0, 0}}, 1/2, 0]];
+assert["moving_matrix_pole_at_projected_chart_center_is_loud",
+  FailureQ[epsMovingEndpoint] && epsMovingEndpoint["ID"] === "E3"];
 bvals = Transpose[Table[{SeriesCoefficient[(11/23)^eps, {eps, 0, k}]}, {k, 0, 3}]];
 li = catchDE2[DiffExp2`API`LineIntegral[sys, bvals, 11/23, {0, 1}, {1}]];
 assert["line_integral_x_to_eps",

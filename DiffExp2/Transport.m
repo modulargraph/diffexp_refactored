@@ -9,6 +9,7 @@ BeginPackage["DiffExp2`Transport`",
    "DiffExp2`SectorSeries`", "DiffExp2`Indicial`", "DiffExp2`Solve`"}];
 
 FindSingularities::usage = "FindSingularities[sys] gives <|\"All\", \"Real\", \"Factors\"|>: exact deduplicated roots of the matrix singular factors plus per-call ExtraSingularFactors.";
+EpsilonZeroSingularFactors::usage = "EpsilonZeroSingularFactors[factors, x] gives the exact planner/prescription alphabet obtained from each factor's first nonzero epsilon coefficient after removing its overall epsilon valuation. Epsilon-independent factors are preserved verbatim. This changes line geometry only; a matrix pole that degenerates onto a chart center can still be rejected by the local solver.";
 ChartRadius::usage = "ChartRadius[center, allSingularities] gives the exact/numeric complex-plane distance to the nearest OTHER singularity.";
 SegmentLine::usage = "SegmentLine[sys, {from, to}] gives the SegmentPlan: charts, radii, match points, digit budget.";
 TransportLine::usage = "TransportLine[sys, boundary, plan] runs the marching loop and returns the TransportResult.";
@@ -325,6 +326,54 @@ centerValueDatumQ[_] := False;
 
 (* ---- 2.1 singularities ---- *)
 
+(* Segmentation follows the eps -> 0 singular alphabet used by classic
+   DiffExp, but a literal replacement is not enough: eps (x + eps) would
+   collapse to zero and lose the finite root.  Work in the exact rational
+   function field in eps, remove the numerator/denominator eps valuations,
+   and take the resulting unit's exact leading coefficient.  Only its
+   numerator is a zero locus.  The full matrix and exact factor alphabet are
+   deliberately left untouched for chart preparation and indicial work. *)
+epsilonZeroFactor[factor_, var_Symbol, eps_Symbol] := Module[
+  {canonical, num, den, numValuation, denValuation, lead, zeroLocus},
+  If[!FreeQ[factor, _?InexactNumberQ],
+    err["E1", <|"Factor" -> factor,
+      "Detail" -> "singular factors must be exact before epsilon-zero projection"|>]];
+  (* Preserve the old/no-eps alphabet structurally, including orientation.
+     This is both backwards-compatible and avoids even canonicalizing the
+     potentially large algebraic factors on the ordinary planner path. *)
+  If[AllTrue[DiffExp2`Config`EpsSymbols[], FreeQ[factor, #] &],
+    If[zeroQ[factor],
+      err["E1", <|"Factor" -> factor,
+        "Detail" -> "the zero polynomial is not a singular factor"|>]];
+    Return[If[FreeQ[factor, var], {}, {factor}], Module]];
+  canonical = Together[factor /. Global`\[Epsilon] -> eps];
+  If[zeroQ[canonical],
+    err["E1", <|"Factor" -> factor,
+      "Detail" -> "the zero polynomial is not a singular factor"|>]];
+  num = Numerator[canonical];
+  den = Denominator[canonical];
+  If[!PolynomialQ[num, eps] || !PolynomialQ[den, eps],
+    err["E1", <|"Factor" -> factor,
+      "Detail" -> "singular factor is not rational in the epsilon regulator"|>]];
+  numValuation = Exponent[num, eps, Min];
+  denValuation = Exponent[den, eps, Min];
+  lead = Cancel[Together[
+    Coefficient[num, eps, numValuation]/
+      Coefficient[den, eps, denValuation]]];
+  If[zeroQ[lead] || !FreeQ[lead, eps],
+    err["E1", <|"Factor" -> factor, "LeadingCoefficient" -> lead,
+      "Detail" -> "could not extract a finite nonzero epsilon-leading coefficient"|>]];
+  zeroLocus = Factor[Numerator[Together[lead]]];
+  If[zeroQ[zeroLocus],
+    err["E1", <|"Factor" -> factor, "LeadingCoefficient" -> lead,
+      "Detail" -> "epsilon-leading coefficient has an invalid zero numerator"|>]];
+  If[FreeQ[zeroLocus, var], {}, {zeroLocus}]];
+
+EpsilonZeroSingularFactors[factors_List, var_Symbol] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[]},
+  DeleteDuplicates[Flatten[
+    epsilonZeroFactor[#, var, eps] & /@ factors, 1]]];
+
 projectComplexRoots[all_List, real_List] := Module[{data, projected},
   (* Port the old DiffExp ghost-waypoint construction faithfully, but keep
      the true complex roots as the sole convergence-radius alphabet.  For a
@@ -363,10 +412,12 @@ projectComplexRoots[all_List, real_List] := Module[{data, projected},
     pointOrderSign[#1, #2, 70] < 0 &]];
 
 FindSingularities[sys_Association] := Module[
-  {var = sys["Variable"], facs, extra, all, roots, real},
-  facs = Lookup[sys, "SingularFactors", {}];
+  {var = sys["Variable"], exactFactors, facs, extra, all, roots, real},
+  exactFactors = Lookup[sys, "SingularFactorsExact",
+    Lookup[sys, "SingularFactors", {}]];
   extra = Lookup[sys, "ExtraSingularFactors", {}];
-  facs = DeleteDuplicates[Join[facs, extra]];
+  facs = EpsilonZeroSingularFactors[
+    DeleteDuplicates[Join[exactFactors, extra]], var];
   roots = plannerProfile["FindRoots",
     Map[# -> DeleteDuplicates[var /. Solve[# == 0, var]] &, facs]];
   all = plannerProfile["DeduplicateRoots",
@@ -381,23 +432,33 @@ FindSingularities[sys_Association] := Module[
 
 chartPrescriptions[center_, var_Symbol] := Module[
   {entries = cfg["DeltaPrescriptions"], t = Global`t, out = {}},
-  Do[Module[{poly = entry[[1]], sign = entry[[2]], shifted, mult, lead,
-      leadSign},
-    shifted = Together[poly /. s_Symbol /;
-        SymbolName[s] === SymbolName[var] :> center + t];
-    If[zeroQ[shifted /. t -> 0],
-      If[!PolynomialQ[shifted, t],
-        err["E8", <|"Center" -> center, "Factor" -> poly,
-          "Detail" -> "prescription did not become a polynomial in the chart coordinate"|>]];
-      mult = Exponent[shifted, t, Min];
-      lead = RootReduce[Coefficient[shifted, t, mult]];
-      leadSign = Sign[lead];
-      If[!MemberQ[{1, -1}, leadSign],
-        err["E8", <|"Center" -> center, "Factor" -> poly,
-          "LeadingCoefficient" -> lead,
-          "Detail" -> "could not derive a real nonzero leading-coefficient sign for DeltaPrescriptions"|>]];
-      AppendTo[out, <|"Factor" -> poly, "Sign" -> sign,
-        "Multiplicity" -> mult, "LeadingCoeffSign" -> leadSign|>]]],
+  Do[Module[{exactPoly = entry[[1]], sign = entry[[2]], projected},
+    (* Geometry is built from the epsilon-zero alphabet, so branch metadata
+       must use that identical alphabet.  Keeping an exact factor x+eps here
+       while planning its limiting root x=0 would silently lose the i-delta
+       sign because x+eps does not literally vanish at the chart center. *)
+    projected = EpsilonZeroSingularFactors[{exactPoly}, var];
+    Do[Module[{shifted, mult, lead, leadSign, record},
+      shifted = Together[poly /. s_Symbol /;
+          SymbolName[s] === SymbolName[var] :> center + t];
+      If[zeroQ[shifted /. t -> 0],
+        If[!PolynomialQ[shifted, t],
+          err["E8", <|"Center" -> center, "Factor" -> poly,
+            "ExactFactor" -> exactPoly,
+            "Detail" -> "prescription did not become a polynomial in the chart coordinate"|>]];
+        mult = Exponent[shifted, t, Min];
+        lead = RootReduce[Coefficient[shifted, t, mult]];
+        leadSign = Sign[lead];
+        If[!MemberQ[{1, -1}, leadSign],
+          err["E8", <|"Center" -> center, "Factor" -> poly,
+            "ExactFactor" -> exactPoly, "LeadingCoefficient" -> lead,
+            "Detail" -> "could not derive a real nonzero leading-coefficient sign for DeltaPrescriptions"|>]];
+        record = <|"Factor" -> poly, "Sign" -> sign,
+          "Multiplicity" -> mult, "LeadingCoeffSign" -> leadSign|>;
+        If[!zeroQ[Together[poly - exactPoly]],
+          record = Append[record, "ExactFactor" -> exactPoly]];
+        AppendTo[out, record]]],
+      {poly, projected}]],
     {entry, entries}];
   out];
 

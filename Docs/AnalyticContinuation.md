@@ -18,6 +18,23 @@ Their classic real projections, `Re[z]` and `Re[z] +/- Im[z]`, can also appear
 as regular planning waypoints.  A projected waypoint is not marked singular
 unless it is itself an exact real root.
 
+Line geometry uses an exact epsilon-zero alphabet, not the moving roots of a
+finite regulator.  Before finding roots, the planner removes each factor's
+overall epsilon valuation and takes its first nonzero epsilon coefficient.
+For example, `eps (x + eps)` projects to `x`; `1 + eps x` projects to a
+constant and therefore has no finite root.  This projection never modifies
+the differential matrix: `LoadSystem` retains the full factors as
+`SingularFactorsExact` and exposes the planner factors as `SingularFactors`.
+The same projection is applied to `DeltaPrescriptions` before attaching branch
+metadata to a chart, so an exact prescription for `x + eps` is not lost when
+the limiting chart lies at `x = 0`.
+
+This is a geometry and branch-metadata projection, not an assertion that every
+moving matrix pole has a local Frobenius expansion in the current solver.  If
+such a pole degenerates exactly onto a chart center, denominator clearing
+returns the documented loud `E3` failure rather than expanding in `t/eps` or
+silently treating the point as ordinary.
+
 This distinction matters for stable matching: projection points can force a
 better chart layout without fabricating Frobenius behavior on the real line.
 

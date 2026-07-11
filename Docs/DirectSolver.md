@@ -65,13 +65,24 @@ decisions require the full epsilon-rational matrix.
   "Schema" -> "DiffExp2.System/v1",
   "Matrix" -> A,
   "Variable" -> x,
-  "SingularFactors" -> {...},
+  "SingularFactors" -> {...},       (* epsilon-zero planner alphabet *)
+  "SingularFactorsExact" -> {...},  (* full epsilon-dependent factors *)
   "Dimension" -> Length[A],
   "Source" -> ...
 |>
 ```
 
-and clears solver caches belonging to the previous system.
+and clears solver caches belonging to the previous system.  `Matrix` is the
+unchanged exact epsilon-rational matrix.  For segmentation only, each exact
+singular factor is projected to its first nonzero epsilon coefficient after
+removing any overall epsilon valuation.  Thus both `x + eps` and
+`eps (x + eps)` place the limiting singularity at `x = 0`, while
+`1 + eps x` contributes no finite planner root.  The unprojected factors stay
+available in `SingularFactorsExact` for local and indicial calculations.
+If a projected moving matrix pole itself becomes a required chart center, the
+current finite-width local ansatz rejects the degenerating cleared denominator
+with `E3`; the projection prevents incorrect line geometry but does not invent
+unsupported `x/eps` asymptotics.
 
 ## 3. Supply boundary values
 

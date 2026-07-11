@@ -93,6 +93,93 @@ assert["tt3a_affine_roc_transport_invariant",
 catchDE2[DiffExp2`Config`UpdateConfiguration[{
   "RadiusOfConvergence" -> 1}]];
 
+(* TT3-eps: planning uses the first nonzero eps coefficient of each exact
+   singular factor, after stripping any overall eps valuation.  This is a
+   planner projection only: it prevents regulator-dependent moving roots
+   from entering line geometry while retaining their eps=0 limit exactly. *)
+epsValuationFactors3 = DiffExp2`Transport`EpsilonZeroSingularFactors[
+  {eps*(x + eps)}, x];
+epsValuationSings3 = DiffExp2`Transport`FindSingularities[<|
+  "Matrix" -> {{0}}, "Variable" -> x, "SingularFactors" -> {},
+  "ExtraSingularFactors" -> {eps*(x + eps)}|>];
+assert["tt3_eps_overall_valuation_keeps_first_nonzero_coefficient",
+  epsValuationFactors3 === {x} &&
+  Keys[epsValuationSings3["Factors"]] === {x} &&
+  epsValuationSings3["All"] === {0}];
+
+epsShiftSings3 = DiffExp2`Transport`FindSingularities[<|
+  "Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {x + eps}|>];
+assert["tt3_eps_shifted_root_projects_exactly_to_zero",
+  Keys[epsShiftSings3["Factors"]] === {x} &&
+  epsShiftSings3["All"] === {0} && epsShiftSings3["Real"] === {0}];
+
+assert["tt3_epsilon_alias_projects_to_the_same_alphabet",
+  DiffExp2`Transport`EpsilonZeroSingularFactors[
+    {x + Global`\[Epsilon]}, x] === {x}];
+assert["tt3_non_epsilon_regulator_is_not_specialized",
+  DiffExp2`Transport`EpsilonZeroSingularFactors[
+    {x + Global`etaReg}, x] === {x + Global`etaReg}];
+
+epsLegacyPrecedence3 = DiffExp2`Transport`FindSingularities[<|
+  "Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {x - 1},
+  "SingularFactorsExact" -> {x + eps}|>];
+assert["tt3_exact_factor_metadata_wins_over_legacy_planner_field",
+  Keys[epsLegacyPrecedence3["Factors"]] === {x} &&
+    epsLegacyPrecedence3["All"] === {0}];
+
+projectedPrescription3[sg_] := Module[{p, final},
+  catchDE2[DiffExp2`Config`UpdateConfiguration[{
+    "DeltaPrescriptions" -> {{x + eps, sg}}}]];
+  p = catchDE2[DiffExp2`Transport`SegmentLine[<|
+    "Matrix" -> {{0}}, "Variable" -> x, "SingularFactors" -> {},
+    "ExtraSingularFactors" -> {x + eps}|>, {1/2, 0}]];
+  final = If[FailureQ[p], None,
+    SelectFirst[p["Charts"], # ["Center"] === 0 &, None]];
+  final];
+epsPrescriptionPlus3 = projectedPrescription3[1];
+epsPrescriptionMinus3 = projectedPrescription3[-1];
+assert["tt3_projected_extra_factor_keeps_plus_minus_idelta_sheet",
+  And @@ MapThread[Function[{chart, sg},
+    AssociationQ[chart] && Length[chart["Prescriptions"]] === 1 &&
+      chart["Prescriptions"][[1, "Factor"]] === x &&
+      chart["Prescriptions"][[1, "ExactFactor"]] === x + eps &&
+      chart["Prescriptions"][[1, "Sign"]] === sg &&
+      chart["Prescriptions"][[1, "Multiplicity"]] === 1 &&
+      chart["Prescriptions"][[1, "LeadingCoeffSign"]] === 1],
+    {{epsPrescriptionPlus3, epsPrescriptionMinus3}, {1, -1}}]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "DeltaPrescriptions" -> {}}]];
+
+epsOutsideSys3 = <|"Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {x - 2 + eps}|>;
+epsOutsideSings3 = DiffExp2`Transport`FindSingularities[epsOutsideSys3];
+epsOutsidePlan3 = catchDE2[
+  DiffExp2`Transport`SegmentLine[epsOutsideSys3, {0, 1}]];
+assert["tt3_eps_moving_root_outside_line_uses_limit_root",
+  Keys[epsOutsideSings3["Factors"]] === {x - 2} &&
+  epsOutsideSings3["All"] === {2} &&
+  !FailureQ[epsOutsidePlan3] &&
+  AllTrue[epsOutsidePlan3["Charts"], !TrueQ[# ["Singular"]] &]];
+
+epsInfinitySings3 = DiffExp2`Transport`FindSingularities[<|
+  "Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {1 + eps*x}|>];
+assert["tt3_eps_degree_drop_sends_root_to_infinity",
+  DiffExp2`Transport`EpsilonZeroSingularFactors[{1 + eps*x}, x] === {} &&
+  epsInfinitySings3["All"] === {} &&
+  epsInfinitySings3["Factors"] === <||>];
+
+noEpsSings3 = DiffExp2`Transport`FindSingularities[<|
+  "Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {x^2 - 1}|>];
+assert["tt3_epsilon_independent_factor_parity",
+  DiffExp2`Transport`EpsilonZeroSingularFactors[{x^2 - 1}, x] ===
+    {x^2 - 1} &&
+  Keys[noEpsSings3["Factors"]] === {x^2 - 1} &&
+  Sort[noEpsSings3["All"]] === {-1, 1}];
+
 (* TT3b: faithfully retain the old DiffExp Re(z)+/-Im(z) real projection
    waypoints while true complex roots alone determine convergence radii.
    The ghosts are regular centers, never fake singular charts. *)

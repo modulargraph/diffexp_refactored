@@ -67,6 +67,113 @@ test["checkpoint replacement requests atomic overwrite",
     "RenameFile[tmp, file, OverwriteTarget -> True]"]];
 test["prepared snapshot schema invalidates legacy reduction keys",
   $ftPrepCacheVersion === 2, $ftPrepCacheVersion];
+test["epsilon-basis transport bumps the checkpoint schema",
+  $ftLadderCheckpointVersion === 2, $ftLadderCheckpointVersion];
+
+(* A two-link raw 1/eps chain is the minimal form of the double-box L3
+   failure.  The exact diagonal basis must remove both poles, shift the
+   incoming finite arrays without inventing coefficients, and remain
+   idempotent when a transport checkpoint is resumed. *)
+chainEps = Global`eps;
+chainZ = Global`zBasis;
+chainMatrix = {
+  {0, 1/(chainEps*chainZ), 0},
+  {0, 0, 1/(chainEps*chainZ)},
+  {0, 0, 0}};
+chainBoundary = Table[
+  Table[Global`bc[i, k], {k, 0, 4}], {i, 1, 3}];
+chainInputPrefactors = {2, 2, 2};
+chainBasis = ft2NormalizeEpsilonBasis[
+  chainMatrix, chainBoundary, chainInputPrefactors, chainEps];
+test["raw 1/eps chain receives the exact relative normalization",
+  AssociationQ[chainBasis] &&
+    chainBasis["CheckpointRecord", "CanonicalPrefactors"] === {0, -1, -2} &&
+    chainBasis["BoundaryPrefactors"] === {4, 3, 2} &&
+    chainBasis["BoundaryShifts"] === {2, 1, 0}, chainBasis];
+test["normalized chain matrix is exactly pole-free",
+  AssociationQ[chainBasis] &&
+    And @@ MapThread[TrueQ[PossibleZeroQ[Together[#1 - #2]]] &,
+      {Flatten[chainBasis["Matrix"]],
+       Flatten[{{0, 1/chainZ, 0}, {0, 0, 1/chainZ}, {0, 0, 0}}]}] &&
+    !FeynmanTrick`EpsPrefactors`CheckEpsPoles[
+      chainBasis["Matrix"], chainEps], chainBasis];
+test["basis conversion retains, but never widens, the common boundary window",
+  AssociationQ[chainBasis] &&
+    chainBasis["InputCompleteMax"] === 4 &&
+    chainBasis["CompleteMax"] === 4 &&
+    Length /@ chainBasis["BoundaryValues"] === {5, 5, 5} &&
+    chainBasis["BoundaryValues"] === {
+      {0, 0, Global`bc[1, 0], Global`bc[1, 1], Global`bc[1, 2]},
+      {0, Global`bc[2, 0], Global`bc[2, 1], Global`bc[2, 2], Global`bc[2, 3]},
+      chainBoundary[[3]]}, chainBasis];
+chainPhysicalBefore = MapThread[
+  DiffExp2`EpsSeries`ESShift[DiffExp2`EpsSeries`ESNew[0, #1], -#2] &,
+  {chainBoundary, chainInputPrefactors}];
+chainPhysicalAfter = MapThread[
+  DiffExp2`EpsSeries`ESShift[DiffExp2`EpsSeries`ESNew[0, #1], -#2] &,
+  {chainBasis["BoundaryValues"], chainBasis["BoundaryPrefactors"]}];
+test["physical boundary is unchanged on every certified handoff order",
+  And @@ MapThread[DiffExp2`EpsSeries`ESSameQ,
+    {chainPhysicalBefore, chainPhysicalAfter}],
+  {DiffExp2`EpsSeries`ESWindow /@ chainPhysicalBefore,
+   DiffExp2`EpsSeries`ESWindow /@ chainPhysicalAfter}];
+test["relative basis shifts honestly reduce physical upper windows",
+  DiffExp2`EpsSeries`ESCompleteMax /@ chainPhysicalBefore === {2, 2, 2} &&
+    DiffExp2`EpsSeries`ESCompleteMax /@ chainPhysicalAfter === {0, 1, 2},
+  {DiffExp2`EpsSeries`ESWindow /@ chainPhysicalBefore,
+   DiffExp2`EpsSeries`ESWindow /@ chainPhysicalAfter}];
+chainReductionCoefficients = {1 + chainEps, 2 - chainEps, 3 + chainEps^2};
+chainReducedValue[rows_, prefactors_] := Module[{terms},
+  terms = MapThread[
+    DiffExp2`EpsSeries`ESTimes[
+      DiffExp2`EpsSeries`ESFromExpression[
+        Together[#1/chainEps^#3], chainEps, 4],
+      DiffExp2`EpsSeries`ESNew[0, #2]] &,
+    {chainReductionCoefficients, rows, prefactors}];
+  Fold[DiffExp2`EpsSeries`ESAdd, First[terms], Rest[terms]]];
+chainReducedBefore = chainReducedValue[chainBoundary, chainInputPrefactors];
+chainReducedAfter = chainReducedValue[
+  chainBasis["BoundaryValues"], chainBasis["BoundaryPrefactors"]];
+test["IBP reduction is unchanged on its certified normalized-basis window",
+  DiffExp2`EpsSeries`ESSameQ[chainReducedBefore, chainReducedAfter] &&
+    DiffExp2`EpsSeries`ESCompleteMax[chainReducedAfter] <=
+      DiffExp2`EpsSeries`ESCompleteMax[chainReducedBefore],
+  {DiffExp2`EpsSeries`ESWindow[chainReducedBefore],
+   DiffExp2`EpsSeries`ESWindow[chainReducedAfter]}];
+chainBasisAgain = ft2NormalizeEpsilonBasis[chainMatrix,
+  chainBasis["BoundaryValues"], chainBasis["BoundaryPrefactors"], chainEps];
+test["checkpoint resume does not apply the diagonal shift twice",
+  AssociationQ[chainBasisAgain] &&
+    chainBasisAgain["BoundaryShifts"] === {0, 0, 0} &&
+    chainBasisAgain["BoundaryValues"] === chainBasis["BoundaryValues"] &&
+    chainBasisAgain["BoundaryPrefactors"] === chainBasis["BoundaryPrefactors"] &&
+    chainBasisAgain["CheckpointRecord"] === chainBasis["CheckpointRecord"],
+  chainBasisAgain];
+test["nonuniform boundary windows fail instead of being padded",
+  FailureQ[ft2NormalizeEpsilonBasis[{{0, 1/chainEps}, {0, 0}},
+    {{1, 2}, {3}}, {0, 0}, chainEps]]];
+noPoleBoundary = {{Global`u0, Global`u1}, {Global`v0, Global`v1}};
+noPoleBasis = ft2NormalizeEpsilonBasis[
+  {{chainZ, 0}, {0, -chainZ}}, noPoleBoundary, {3, 3}, chainEps];
+test["pole-free levels with a common incoming prefactor remain exact no-ops",
+  AssociationQ[noPoleBasis] &&
+    noPoleBasis["Matrix"] === {{chainZ, 0}, {0, -chainZ}} &&
+    noPoleBasis["BoundaryValues"] === noPoleBoundary &&
+    noPoleBasis["BoundaryPrefactors"] === {3, 3} &&
+    noPoleBasis["BoundaryShifts"] === {0, 0}, noPoleBasis];
+test["IBP reductions are expressed in the active normalized basis",
+  StringContainsQ[runnerSource,
+    "eps^currentPrefactors[[j]]"] &&
+    StringContainsQ[runnerSource,
+      "currentPrefactors = epsilonBasis[\"BoundaryPrefactors\"]"]];
+projectedRunnerPrescriptions = levelDeltaPrescriptions[chainZ,
+  <|"SingularFactors" -> {}|>, {chainZ - 1/3 + chainEps}];
+test["runner projects extra factors before constructing delta prescriptions",
+  AnyTrue[projectedRunnerPrescriptions,
+    FreeQ[First[#], chainEps] &&
+      TrueQ[PossibleZeroQ[First[#] /. chainZ -> 1/3]] && Last[#] === 1 &] &&
+    AllTrue[projectedRunnerPrescriptions, FreeQ[First[#], chainEps] &],
+  projectedRunnerPrescriptions];
 
 cacheTopology = FeynmanTrick`FIREInterface`DefineTopology[
   "snapshot-key", {Global`l1}, {},
@@ -147,13 +254,17 @@ low = <|"Charts" -> {<|"Arm" -> "lower"|>},
 high = <|"Charts" -> {<|"Arm" -> "upper"|>},
   "Final" -> <|"Endpoint" -> 1|>|>;
 file = FileNameJoin[{tmpDir, "fixture_level1_transport.mx"}];
+fixtureBasis = ft2NormalizeEpsilonBasis[{{0}}, {{1}}, {0}, Global`eps];
 
 basePayload = <|
   "Kind" -> "Transport", "Example" -> name, "Level" -> 1,
   "PrepKey" -> prepKey,
-  "System" -> <|"Variable" -> z, "Matrix" -> {{0}}|>,
+  "System" -> <|"Variable" -> z, "Matrix" -> fixtureBasis["Matrix"],
+    "SingularFactors" -> {z}, "SingularFactorsExact" -> {z + Global`eps}|>,
   "Variable" -> z, "BoundaryValues" -> {{1}},
-  "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
+  "BoundaryPrefactors" -> {0},
+  "EpsilonBasis" -> fixtureBasis["CheckpointRecord"],
+  "MastersHere" -> mastersHere,
   "MastersBelow" -> mastersBelow, "Requests" -> requests,
   "Reductions" -> reductions, "ExtraSingularFactors" -> {},
   "Anchor" -> anchor, "WorkingPrecision" -> wp,
@@ -175,7 +286,9 @@ test["lower-arm checkpoint writes", writeResult === file && FileExistsQ[file],
 loaded = loadLadderCheckpoint[file, name, data, prepKey];
 test["lower-only checkpoint is resumable",
   AssociationQ[loaded] && AssociationQ[loaded["TransportLow"]] &&
-    loaded["TransportHigh"] === None, loaded];
+    loaded["TransportHigh"] === None &&
+    loaded["System", "SingularFactors"] === {z} &&
+    loaded["System", "SingularFactorsExact"] === {z + Global`eps}, loaded];
 
 (* Updating the same destination exercises atomic OverwriteTarget replacement. *)
 writeResult = saveLadderCheckpoint[file, Join[basePayload, <|
@@ -204,6 +317,15 @@ saveLadderCheckpoint[badArmsFile, Join[basePayload, <|
   "TransportHigh" -> None, "CompletedArms" -> {"Upper"}|>]];
 test["inconsistent completed-arm metadata is rejected",
   loadLadderCheckpoint[badArmsFile, name, data, prepKey] === $Failed];
+
+badBasisFile = FileNameJoin[{tmpDir, "bad-epsilon-basis.mx"}];
+saveLadderCheckpoint[badBasisFile, Join[basePayload, <|
+  "EpsilonBasis" -> Join[fixtureBasis["CheckpointRecord"],
+    <|"Prefactors" -> {1}|>],
+  "ChartCache" -> low["Charts"], "TransportLow" -> low,
+  "TransportHigh" -> None, "CompletedArms" -> {"Lower"}|>]];
+test["inconsistent epsilon-basis checkpoint metadata is rejected",
+  loadLadderCheckpoint[badBasisFile, name, data, prepKey] === $Failed];
 
 badChartsFile = FileNameJoin[{tmpDir, "bad-charts.mx"}];
 saveLadderCheckpoint[badChartsFile, Join[basePayload, <|

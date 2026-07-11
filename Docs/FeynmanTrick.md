@@ -141,6 +141,16 @@ supplies internal coefficients consumed by Laurent shifts, resonances, and
 endpoint integrations.  If an honest window is too short, the runner stops
 with `FTLADDER INCOMPLETE` instead of padding it.
 
+At each level the runner also checks the exact FIRE differential matrix for
+epsilon poles.  When needed it transports the diagonal basis
+`J_i = eps^k_i I_i`, using `FindEpsPrefactors` and `ApplyEpsPrefactors`, and
+converts the incoming boundary arrays and IBP coefficients by the same
+per-master powers.  A common shift keeps every boundary conversion finite;
+the stored complete epsilon ceiling is not extended.  Consequently a relative
+basis shift can consume upper physical orders.  Supply those orders with
+`FT_BOUNDARY_EXTRA_ORDER` or `FT_LEVEL_EPS_HALOS`; the runner reports an
+incomplete handoff rather than assuming the missing coefficients vanish.
+
 ## Preparation cache and ladder checkpoints
 
 `FT_PREP_CACHE_DIR` stores completed Feynman-trick/FIRE preparation and the
@@ -163,7 +173,8 @@ wolframscript -file Scripts/run_ft_stepwise2.m
 ```
 
 The checkpoint records the example, backend, precision, expansion and epsilon
-settings, prepared-data key, level metadata, and a source fingerprint.
+settings, prepared-data key, level metadata, the exact per-master epsilon
+basis and normalized-matrix hash, and a source fingerprint.
 Stale/unversioned checkpoints are rejected unless
 `FT_ALLOW_STALE_LADDER_CHECKPOINT=1` is set; descendants of an explicitly
 accepted stale checkpoint remain marked tainted.

@@ -62,3 +62,53 @@ at `p^2 = -1`.  Its physical propagators are the four massive loop lines and
 the massive closing line carrying `-l1-l2-l3-l4+p`.  FIRE completes the five
 physical denominators with irreducible-numerator slots for the remaining
 loop scalar products; those auxiliaries are restricted from positive powers.
+
+At `eps = 0`, Wick rotation of the package normalization
+`d^2 l/(i pi)` gives `d^2 k/pi` for each loop, without an additional sign.
+Writing `Q^2 = -p^2 = 1`, the physical integral is therefore
+
+```text
+I4 = Integral Product[a=1..4, d^2 k_a/pi]
+     / (Product[a=1..4, (k_a^2+1)] ((Q-Sum[k_a])^2+1)).
+```
+
+The two-dimensional Fourier transform
+
+```text
+Integral d^2 k/(2 pi)^2 Exp[i k.r]/(k^2+1) = K0(r)/(2 pi)
+```
+
+reduces the four convolutions to the one-dimensional Bessel moment
+
+```text
+I4 = 16 Integral_0^Infinity r J0(r) K0(r)^5 dr
+   = 39.6555268342976525299928230469335811564460602187101868181...
+```
+
+The factor is `2^4`: `d^2 k/pi = 4 pi d^2 k/(2 pi)^2`, so each
+loop convolution contributes `2 K0`; the final `K0/(2 pi)` and angular
+integral supply the remaining factors.  Equivalently, the normalized
+Feynman-parameter representation is
+
+```text
+I4 = Integral_Delta4 d^5 x delta(1-Sum[x_i])/(U+P),
+U = Sum_i Product_(j!=i) x_j,   P = Product_i x_i.
+```
+
+Here `Gamma(5-4 D/2)=Gamma(1)`, the power of `U` is zero, and
+`p^2=-1` gives `F=U+P`.  As a normalization cross-check, the same
+coordinate-space formula for the established four-line banana gives
+`8.268104535868968731543015345479988868728618483845...`, matching the
+stored equal-mass checkpoint.
+
+The standalone oracle uses direct and logarithmic-coordinate quadratures,
+plus analytic bounds on both truncated tails.  Its default target is 50
+significant digits:
+
+```sh
+wolframscript -file Scripts/banana4_bessel_oracle.m
+BANANA4_BESSEL_DIGITS=70 wolframscript -file Scripts/banana4_bessel_oracle.m
+```
+
+This value is an independent `D=2`, `eps^0` oracle.  It is not a claim that
+the full `banana4` DiffExp2 ladder has completed.

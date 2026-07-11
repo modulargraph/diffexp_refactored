@@ -563,12 +563,15 @@ cachedBasisCenters[] := SortBy[
    dependent (including a rational 1/(2-eps) entry), and the boundary starts
    at eps^1.  Thus both paths must preserve the nontrivial honest window
    [1,2], not merely agree at eps^0.  A structural complex pair supplies
-   regular projected waypoints; at EO100 value mode should build a
-   fundamental basis only at the anchor. *)
+   regular projected waypoints; at EO100 value-aware planning should need no
+   fundamental basis at all, including at the center-evaluable anchor. *)
 DiffExp2`Config`UpdateConfiguration[{"ExpansionOrder" -> 100}];
 sys15 = <|"Matrix" -> {{1 + eps, eps/3}, {-eps/5, 1/(2 - eps)}},
   "Variable" -> x, "SingularFactors" -> {x^2 + 1}|>;
-plan15 = DiffExp2`Transport`SegmentLine[sys15, {0, 3/2}];
+plan15 = withValueTransport[False,
+  DiffExp2`Transport`SegmentLine[sys15, {0, 3/2}]];
+plan15Value = withValueTransport[True,
+  DiffExp2`Transport`SegmentLine[sys15, {0, 3/2}]];
 bv15 = {{0, 1, -2}, {0, 3, 1/2}};
 DiffExp2`Solve`ClearSolveCaches[];
 basis15 = withValueTransport[False,
@@ -576,13 +579,14 @@ basis15 = withValueTransport[False,
 basisCenters15 = cachedBasisCenters[];
 DiffExp2`Solve`ClearSolveCaches[];
 value15 = withValueTransport[True,
-  catchDE2[DiffExp2`Transport`TransportLine[sys15, bv15, plan15]]];
+  catchDE2[DiffExp2`Transport`TransportLine[sys15, bv15, plan15Value]]];
 valueCenters15 = cachedBasisCenters[];
 assert["tt15_value_mode_regular_multichart_exercised",
   Length[plan15["Charts"]] >= 3 &&
-  AllTrue[plan15["Charts"], !TrueQ[#["Singular"]] &] &&
+  Length[plan15Value["Charts"]] >= Length[plan15["Charts"]] &&
+  AllTrue[plan15Value["Charts"], !TrueQ[#["Singular"]] &] &&
   Length[basisCenters15] === Length[plan15["Charts"]] &&
-  valueCenters15 === {0}];
+  valueCenters15 === {}];
 assert["tt15_value_mode_preserves_epsilon_window",
   !FailureQ[basis15] && !FailureQ[value15] &&
   basis15["Value", "EpsWindow"] ===
@@ -597,28 +601,29 @@ assert["tt15_value_mode_matches_basis_mode",
    from TT4.  The extra x=1/2 singularity is structural geometry rather than
    a pole of the scalar ODE, so crossing is single-valued and has an exact
    reference.  Value mode must still use a basis at the marked singular
-   chart; the 3/4 regular chart lies on the strict center-handoff margin and
-   exercises the conservative basis fallback, while other regular charts
-   remain eligible for value propagation. *)
-(* EO50 gives the production structural center margin (~0.309): the first
-   far-side center is at 0.25 of the singular chart radius and is eligible,
-   while the following receding center remains a basis fallback. *)
+   chart.  Value-aware planning refines any receding regular hop that would
+   exceed the strict center margin, while the singular chart itself remains a
+   basis solve with the same crossing prescription. *)
+(* EO50 gives the production structural center margin (~0.309). *)
 DiffExp2`Config`UpdateConfiguration[{"ExpansionOrder" -> 50}];
 sys16 = Join[sys4, <|"ExtraSingularFactors" -> {x - 1/2}|>];
+plan16Value = withValueTransport[True,
+  DiffExp2`Transport`SegmentLine[sys16, {11/23, 1}]];
 DiffExp2`Solve`ClearSolveCaches[];
 basis16 = withValueTransport[False,
   catchDE2[DiffExp2`Transport`TransportLine[sys16, bv4, plan4]]];
 basisCenters16 = cachedBasisCenters[];
 DiffExp2`Solve`ClearSolveCaches[];
 value16 = withValueTransport[True,
-  catchDE2[DiffExp2`Transport`TransportLine[sys16, bv4, plan4]]];
+  catchDE2[DiffExp2`Transport`TransportLine[sys16, bv4, plan16Value]]];
 valueCenters16 = cachedBasisCenters[];
-singPos16 = FirstPosition[plan4["Charts"],
+singPos16 = FirstPosition[plan16Value["Charts"],
   c_ /; TrueQ[c["Singular"]] && c["Center"] === 1/2, Missing["NotFound"]];
 assert["tt16_value_mode_singular_crossing_chain_exercised",
-  singPos16 =!= Missing["NotFound"] && First[singPos16] < Length[plan4["Charts"]] &&
-  !TrueQ[plan4["Charts"][[First[singPos16] + 1, "Singular"]]] &&
-  plan4["Charts"][[First[singPos16] + 1, "Center"]] > 1/2];
+  singPos16 =!= Missing["NotFound"] &&
+  First[singPos16] < Length[plan16Value["Charts"]] &&
+  !TrueQ[plan16Value["Charts"][[First[singPos16] + 1, "Singular"]]] &&
+  plan16Value["Charts"][[First[singPos16] + 1, "Center"]] > 1/2];
 assert["tt16_value_mode_singular_and_margin_fallbacks",
   !FailureQ[value16] && MemberQ[valueCenters16, 1/2] &&
   Length[valueCenters16] <= Length[basisCenters16] &&
@@ -663,7 +668,7 @@ value17 = withValueTransport[True,
 valueCenters17 = cachedBasisCenters[];
 assert["tt17_low_significance_value_handoff_uses_basis",
   !FailureQ[value17] && Length[plan17["Charts"]] >= 2 &&
-  MemberQ[valueCenters17, h17] && Length[valueCenters17] > 1];
+  valueCenters17 === {h17}];
 
 (* TT18: a genuine epsilon-adic rank defect is repaired by a column-lattice
    saturation, while an ordinary resolved but ill-conditioned constant

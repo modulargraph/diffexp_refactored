@@ -109,6 +109,79 @@ valueCenterMargin[expansionOrder_Integer] := Min[9/10,
   N[(DiffExp2`Tolerances`Tol["LaurentLeadTol"]/100)^
     (1/(expansionOrder + 1)), 30]];
 
+(* The classic +1/k,-1/k handoff keeps basis matching well conditioned, but
+   its adjacent CENTERS can be much farther apart than a truncated solution
+   may safely be evaluated for value-vector propagation.  In value mode only,
+   refine regular receivers until both contracts hold:
+
+     (1) the receiver center is strictly inside the producing chart's
+         truncation-tail margin; and
+     (2) a balanced ordinary match point lies in the 1/k class of BOTH disks,
+         so the certified basis path remains available if the value datum
+         later fails its significance check.
+
+   Singular receivers are never changed: their canonical FixWithin point,
+   sector decomposition, and crossing semantics remain owned by the original
+   planner.  Midpoints of exact centers are exact (RootReduce); the inexact
+   branch is rationalized before it can become a chart center. *)
+valueRefineRegularChain[charts_List, all_List, dir_, k_Integer,
+    lineCap_] := Module[
+  {margin = valueCenterMargin[cfg["ExpansionOrder"]], safety = 99/100,
+   radius, exactCenter, fallbackPoint, hopSafeQ, refinePair, out},
+  radius[c_] := Min[ChartRadius[c, all], lineCap];
+  exactCenter[z_] := If[FreeQ[z, _?InexactNumberQ], RootReduce[z],
+    Rationalize[N[z, 40], Max[10^-40, Abs[N[z, 40]]*10^-35]]];
+  fallbackPoint[left_, right_] := Module[
+    {cl = left["Center"], cr = right["Center"], rl, rr},
+    rl = radius[cl]; rr = radius[cr];
+    RootReduce[(cl*rr + cr*rl)/(rl + rr)]];
+  hopSafeQ[left_, right_] := Module[
+    {cl = left["Center"], cr = right["Center"], rl, rr, gap},
+    rl = radius[cl]; rr = radius[cr];
+    gap = numericDistance[cr, cl, 40];
+    TrueQ[dir*(N[cr, 40] - N[cl, 40]) > 0] &&
+      TrueQ[gap < safety*margin*N[rl, 40]] &&
+      (* This is stronger than the half-disk condition audited by
+         ValidatePlan and pins the fallback to the established design class. *)
+      TrueQ[gap <= N[(rl + rr)/k, 40]]];
+  refinePair[left_, right_, depth_Integer] := Module[
+    {mid, bridge, tail, p},
+    If[hopSafeQ[left, right],
+      p = fallbackPoint[left, right];
+      Return[{Join[right, <|"IncomingMatchPoint" -> p,
+        "SymmetricMatch" -> False|>]}, Module]];
+    If[depth >= 64,
+      err["E8", <|"LeftCenter" -> left["Center"],
+        "RightCenter" -> right["Center"], "Margin" -> margin,
+        "Detail" -> "value-aware regular chart refinement exceeded 64 bisections"|>]];
+    mid = exactCenter[(left["Center"] + right["Center"])/2];
+    If[TrueQ[PossibleZeroQ[RootReduce[mid - left["Center"]]]] ||
+        TrueQ[PossibleZeroQ[RootReduce[mid - right["Center"]]]],
+      err["E8", <|"LeftCenter" -> left["Center"],
+        "RightCenter" -> right["Center"], "Midpoint" -> mid,
+        "Detail" -> "value-aware refinement could not construct a distinct exact midpoint"|>]];
+    bridge = <|"Center" -> mid, "Singular" -> False|>;
+    tail = refinePair[left, bridge, depth + 1];
+    Join[tail, refinePair[Last[tail], right, depth + 1]]];
+  out = {First[charts]};
+  Do[
+    If[TrueQ[right["Singular"]],
+      AppendTo[out, right],
+      out = Join[out, refinePair[Last[out], right, 0]]],
+    {right, Rest[charts]}];
+  out];
+
+(* EvaluateLocalSolution's origin rule is intentionally strict for tagged
+   powers.  Admit the first anchor to value mode only when its incoming object
+   is manifestly center-evaluable: nonnegative integer Taylor powers, no
+   epsilon-dependent exponent, and no logarithm.  Plain boundary matrices are
+   wrapped as the single (0,0,0) sector and therefore qualify. *)
+centerValueDatumQ[ls_Association] := KeyExistsQ[ls, "Sectors"] &&
+  AllTrue[ls["Sectors"], Function[sec,
+    IntegerQ[sec["a"]] && TrueQ[sec["a"] >= 0] &&
+      zeroQ[sec["b"]] && sec["p"] === 0]];
+centerValueDatumQ[_] := False;
+
 (* ---- 2.1 singularities ---- *)
 
 projectComplexRoots[all_List] := Module[{data, projected},
@@ -470,6 +543,12 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
       prevRad = radTarget;
       prevMatchRad = projectionRadius[target, projected, lineCap]],
       {ti, Length[targets]}]];
+  (* Value propagation needs Cauchy data at the next chart CENTER.  The
+     classic chart chain was designed for +/-1/k matching points instead, so
+     refine it only under the prototype flag.  Flag-off plans remain exactly
+     the pre-existing plans, including centers and match points. *)
+  If[Environment["DE2_VALUE_TRANSPORT"] === "1",
+    charts = valueRefineRegularChain[charts, all, dir, k, lineCap]];
   (* attach radii, match points, names; radii capped at line scale
      (a validity bound: capping is conservative; uncapped Infinity poisons
      the match-point arithmetic on singularity-free systems) *)
@@ -1439,19 +1518,27 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
        backstop) — and that value is the t^0 Cauchy datum of ONE
        d-dimensional recursion (Solve`SolveValueRegular), replacing the
        d-column basis + MatchWeights + CombineLocalSolutions.  Singular
-       charts and the first chart (anchor-only incoming data) keep the
-       basis+matching path unchanged. *)
-    valueMode = Environment["DE2_VALUE_TRANSPORT"] === "1" && ci > 1 &&
+       charts keep the basis+matching path unchanged.  The first regular
+       chart may use the value path when the incoming object is manifestly an
+       evaluable Cauchy datum at that same center. *)
+    valueMode = Environment["DE2_VALUE_TRANSPORT"] === "1" &&
       !TrueQ[chart["Singular"]] &&
       TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
-      (* conservative geometry pre-check: the center must sit WELL inside
-         the previous object's disk and ratio^(ExpansionOrder+1) must stay
-         two decades below LaurentLeadTol.  This applies to every stride
-         mode: receding-leg gaps can be large even under classic geometry. *)
       Module[{margin = valueCenterMargin[cfg["ExpansionOrder"]],
-          currentScale = current["ChartMap", "Scale"]},
-        TrueQ[Abs[N[(chart["Center"] - current["Center"])/currentScale, 30]] <
-          margin*N[current["Radius"], 30]]];
+          currentScale = current["ChartMap", "Scale"], sameCenter},
+        sameCenter = TrueQ[PossibleZeroQ[RootReduce[Together[
+          chart["Center"] - current["Center"]]]]];
+        If[ci === 1,
+          (* A plain boundary is already the exact Cauchy value at the anchor;
+             no fundamental matrix or matching solve is needed there. *)
+          sameCenter && centerValueDatumQ[current],
+          (* conservative geometry pre-check: the center must sit WELL inside
+             the previous object's disk and ratio^(ExpansionOrder+1) must stay
+             two decades below LaurentLeadTol.  Value-aware SegmentLine plans
+             refine regular hops to satisfy this strictly; retain the runtime
+             check as a loud planner/foreign-plan backstop. *)
+          TrueQ[Abs[N[(chart["Center"] - current["Center"])/currentScale, 30]] <
+            margin*N[current["Radius"], 30]]]];
     (* match point: the boundary anchor for the FIRST chart (the incoming
        object is only valid at its anchor); thereafter the shared
        chartMatchPoint formula — radius/k of THIS chart on the incoming

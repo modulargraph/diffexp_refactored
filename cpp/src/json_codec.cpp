@@ -389,7 +389,7 @@ void parse_run_state(const json::object& run,
     problem.source = std::move(source);
   }
   problem.return_u = run.at("return_u").as_bool();
-  if (!problem.return_u && !problem.assembly_matrix.has_value())
+  if (!problem.return_u && !prepared.assembly_matrix.has_value())
     throw std::invalid_argument(
         "persistent run suppresses U without a prepared assembly matrix");
 }

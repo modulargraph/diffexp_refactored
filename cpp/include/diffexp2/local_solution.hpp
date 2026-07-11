@@ -474,7 +474,7 @@ EpsilonVector evaluate_value(const LocalSolution<Scalar>& solution,
                              const RealEvaluationPoint& point,
                              const EvaluationOptions& options,
                              std::optional<std::int32_t>* used_sign) {
-  validate_local_solution(solution, true);
+  local_detail::validate_local_solution(solution, true);
   if (point.sign < -1 || point.sign > 1)
     throw std::invalid_argument("evaluation point sign must be -1, 0 or +1");
   if (!exactly_real(point.modulus) ||
@@ -658,7 +658,7 @@ EpsilonVector evaluate_value(const LocalSolution<Scalar>& solution,
 
 template <typename Scalar>
 LocalSolution<ComplexBall> theta_solution(const LocalSolution<Scalar>& input) {
-  validate_local_solution(input, true);
+  local_detail::validate_local_solution(input, true);
   LocalSolution<ComplexBall> output;
   output.chart = input.chart;
   output.epsilon = input.epsilon;

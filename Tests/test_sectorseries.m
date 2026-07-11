@@ -219,6 +219,36 @@ assert["t20_mul_eps_laurent_shift",
   r20b["EpsWindow"] === <|"Min" -> 0, "CompleteMax" -> 3|> &&
   Table[r20b["Sectors"][[1]]["Coeffs"][[k + 1, 1, 1]], {k, 0, 3}] === {1, -1, 1, -1}];
 
+(* Prepared rational kernels are coefficient-independent.  Two different
+   LocalSolutions with the same structural chart/window shape must share one
+   cache entry and remain byte-for-byte equal to an uncached application. *)
+DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
+cacheInputA = mkls[{{{0, 0, 0}, <|0 -> {1, 2, 3, 4},
+    1 -> {2, 0, 1, 0}, 2 -> {0, 1, 0, 1}, 3 -> {3, 2, 1, 0}|>}}, 0, 3, 4];
+cacheInputB = mkls[{{{0, 0, 0}, <|0 -> {4, 3, 2, 1},
+    1 -> {1, 1, 0, 0}, 2 -> {2, 0, 2, 0}, 3 -> {0, 1, 1, 0}|>}}, 0, 3, 4];
+cacheMultiplier = (1 + Global`eps Global`t)/(1 - Global`t + Global`eps);
+cacheResultA = mul[cacheInputA, cacheMultiplier, Global`t];
+cacheResultB = mul[cacheInputB, cacheMultiplier, Global`t];
+cacheEntriesAfterTwo = Length[
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache];
+DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
+cacheResultBUncached = mul[cacheInputB, cacheMultiplier, Global`t];
+assert["t20_mul_prepared_kernel_cache_exact_parity",
+  cacheEntriesAfterTwo === 1 && cacheResultB === cacheResultBUncached &&
+  AssociationQ[cacheResultA]];
+DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
+contextGlobalResult = mul[cacheInputA, 1/(1 - Global`t), Global`t];
+contextOtherResult = mul[cacheInputA, 1/(1 - Global`t), Other`t];
+contextCacheEntries = Length[
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache];
+assert["t20_mul_prepared_cache_keys_full_symbol_context",
+  contextCacheEntries === 2 &&
+  contextGlobalResult =!= contextOtherResult];
+DiffExp2`Solve`ClearSolveCaches[];
+assert["t20_mul_prepared_cache_clears_with_system_caches",
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache === <||>];
+
 (* t21 *)
 assert["t21_mul_interior_pole",
   failsWith[catchDE2[mul[ls19, 1/(Global`t - 1/2), Global`t]], "interiorpole"]];

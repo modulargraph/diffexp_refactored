@@ -568,6 +568,13 @@ uncertainZeroWeights = {esT[0, {1, 0``17, 0}]};
 uncertainZeroMatch = catchDE2[
   DiffExp2`Transport`Private`matchingResidualAssert[
     unitF, unitV, uncertainZeroWeights, "tt11_uncertain_zero"]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "StrictMatchingUncertainty" -> True}]];
+strictUncertainZeroMatch = catchDE2[
+  DiffExp2`Transport`Private`matchingResidualAssert[
+    unitF, unitV, uncertainZeroWeights, "tt11_strict_uncertain_zero"]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "StrictMatchingUncertainty" -> False}]];
 assert["tt11_residual_below_laurent_floor_accepted", smallFloorMatch === Null];
 assert["tt11_residual_above_laurent_floor_loud",
   FailureQ[largeFloorMatch] && largeFloorMatch["ID"] === "E6" &&
@@ -580,7 +587,9 @@ assert["tt11_residual_uses_true_complex_modulus",
   FailureQ[diagonalOrderMatch] && diagonalOrderMatch["ID"] === "E6" &&
   diagonalOrderMatch["EpsOrder"] === 1 &&
   insideDiagonalMatch === Null &&
-  FailureQ[uncertainZeroMatch] && uncertainZeroMatch["ID"] === "E6"];
+  uncertainZeroMatch === Null &&
+  FailureQ[strictUncertainZeroMatch] &&
+  strictUncertainZeroMatch["ID"] === "E6"];
 
 (* TT12: matrix dimension alone must not relax the structural proof.  Even
    in a 7-column identity system only one term is active here; accepting the
@@ -612,8 +621,8 @@ assert["tt13_inexact_symbolic_residual_loud",
 (* TT14: matching input elimination owns a RankTol decision domain.  At high
    WP, resolved coefficients far below the fixed LaurentLeadTol structural
    floor are still rank information.  After input classification, row
-   cancellation is suffix-invariant and only a certified centered zero may
-   advance the formal epsilon valuation. *)
+   cancellation is suffix-invariant and only a centered zero may advance the
+   formal epsilon valuation. *)
 catchDE2[DiffExp2`Config`LoadConfiguration[{"WorkingPrecision" -> 500}]];
 rankDelta = 10^-40;
 rankOne = esT[0, {1, 0, 0, 0}];
@@ -647,6 +656,13 @@ exactCancellation = DiffExp2`Transport`Private`mwCancellationTrim[
 uncertainCancellation = catchDE2[
   DiffExp2`Transport`Private`mwCancellationTrim[
     {2, {0``10, suffixLead}}, "tt14_uncertain_cancellation"]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "StrictMatchingUncertainty" -> True}]];
+strictUncertainCancellation = catchDE2[
+  DiffExp2`Transport`Private`mwCancellationTrim[
+    {2, {0``10, suffixLead}}, "tt14_strict_uncertain_cancellation"]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "StrictMatchingUncertainty" -> False}]];
 rankW = catchDE2[DiffExp2`Transport`MatchWeights[
   rankF, rankV, "tt14_rank_matching"]];
 assert["tt14_matching_trim_uses_ranktol_not_laurent_floor",
@@ -658,7 +674,9 @@ assert["tt14_matching_trim_uses_ranktol_not_laurent_floor",
   suffixSolo[[1]] === 2 && suffixGrown[[1]] === 2 &&
   First[suffixGrown[[2]]] === suffixLead &&
   exactCancellation[[1]] === 3 &&
-  FailureQ[uncertainCancellation] && uncertainCancellation["ID"] === "E5" &&
+  uncertainCancellation[[1]] === 3 &&
+  FailureQ[strictUncertainCancellation] &&
+  strictUncertainCancellation["ID"] === "E5" &&
   !FailureQ[rankW] &&
   DiffExp2`EpsSeries`ESCoefficient[rankW[[1]], 0] === 0 &&
   DiffExp2`EpsSeries`ESCoefficient[rankW[[2]], 0] === 1];
@@ -954,18 +972,25 @@ crossExact19[pair_] := Module[{kmin, kmax},
 assert["tt19_crossing_fractional_sigma_minus_and_log_chain",
   crossExact19[fracCross19] && crossExact19[logCross19]];
 
-(* Cancellation trimming may discard only a certified centered zero.  A
-   resolved tiny nonzero remains formal pivot data even below 10^-24, while
-   a centered value whose uncertainty exceeds the cancellation contract is
-   loud rather than becoming a pivot. *)
+(* Production cancellation trimming follows the stored central value.  A
+   resolved tiny nonzero remains formal pivot data even below 10^-24.  The
+   uncertainty-ball diagnostic remains available as an explicit strict
+   configuration mode. *)
 resolvedTiny19 = N[10^-40, 80];
 underresolved19 = 0``10;
 ambiguous19 = catchDE2[DiffExp2`Transport`Private`mwCenteredZeroQ[
   underresolved19, "tt19_uncertainty_overlap"]];
-assert["tt19_centered_zero_gate_keeps_tiny_and_rejects_overlap",
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "StrictMatchingUncertainty" -> True}]];
+strictAmbiguous19 = catchDE2[DiffExp2`Transport`Private`mwCenteredZeroQ[
+  underresolved19, "tt19_strict_uncertainty_overlap"]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "StrictMatchingUncertainty" -> False}]];
+assert["tt19_centered_zero_default_and_strict_uncertainty_modes",
   !DiffExp2`Transport`Private`mwCenteredZeroQ[
     resolvedTiny19, "tt19_resolved_tiny"] &&
-  FailureQ[ambiguous19] && ambiguous19["ID"] === "E5"];
+  ambiguous19 === True &&
+  FailureQ[strictAmbiguous19] && strictAmbiguous19["ID"] === "E5"];
 
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Print["Some tests FAILED."]; Exit[1],

@@ -14,6 +14,7 @@ EncodeScalar::usage = "EncodeScalar[z, digits] converts a numeric scalar to the 
 EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact rational function of named analytic regulators to the FLINT symbolic coefficient-field syntax.";
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
 DecodeScalar::usage = "DecodeScalar[encoded, precision] reconstructs a Wolfram scalar from a C++ rational or Acb midpoint/radius record with honest Accuracy.";
+DecodeScalars::usage = "DecodeScalars[encodedList, precision] reconstructs a list of C++ rational or Acb scalar records in bounded parser batches, preserving DecodeScalar semantics and falling back elementwise for mixed or malformed input.";
 ResetBackend::usage = "ResetBackend[] unloads the cached LibraryFunction handles so a rebuilt library can be loaded.";
 
 Begin["`Private`"];
@@ -201,6 +202,73 @@ DecodeScalar[data_List, precision_Integer] /; Length[data] === 4 := Module[
     I applyBallAccuracy[im, imRadius, precision]];
 DecodeScalar[x_, _Integer] := Failure["CppBackend", <|
   "Detail" -> "malformed scalar record returned by compiled backend", "Scalar" -> x|>];
+
+(* Parsing every returned coefficient with a separate ToExpression call is
+   disproportionately expensive for the large framed tensors produced by the
+   native recurrence.  Keep batches bounded: this amortizes parser setup
+   without constructing a single potentially enormous Wolfram expression at
+   high working precision.  A failed/shape-changing batch is deliberately
+   retried through DecodeScalar so malformed public input retains the scalar
+   decoder's diagnostics instead of poisoning neighbouring records. *)
+$decodeScalarBatchSize = 2048;
+
+parseExpressionBatch[strings_List] := Module[{values},
+  values = Quiet[Check[ToExpression[
+      "{" <> StringRiffle[strings, ","] <> "}"], $Failed]];
+  If[ListQ[values] && Length[values] === Length[strings], values, $Failed]];
+
+parseDecimalBatch[strings_List, precision_Integer] := Module[
+  {held, values},
+  held = StringReplace[strings,
+    {"e+" -> "*^", "e-" -> "*^-", "e" -> "*^"}];
+  values = parseExpressionBatch[held];
+  If[values === $Failed || !AllTrue[values, NumericQ], Return[$Failed, Module]];
+  SetPrecision[#, precision] & /@ values];
+
+parseRadiusExponentBatch[strings_List] := Module[
+  {values = ConstantArray[-Infinity, Length[strings]], positions, parsed},
+  positions = Flatten[Position[strings, s_String /; s =!= "zero", {1}]];
+  If[positions === {}, Return[values, Module]];
+  parsed = parseExpressionBatch[strings[[positions]]];
+  If[parsed === $Failed || !AllTrue[parsed, IntegerQ], Return[$Failed, Module]];
+  values[[positions]] = parsed;
+  values];
+
+decodeExactBatch[strings_List, precision_Integer] := Module[{values},
+  values = parseExpressionBatch[strings];
+  If[values === $Failed,
+    DecodeScalar[#, precision] & /@ strings,
+    values]];
+
+decodeAcbBatch[records_List, precision_Integer] := Module[
+  {n = Length[records], midpoints, radii, re, im, reRadius, imRadius,
+   decodedRe, decodedIm},
+  midpoints = parseDecimalBatch[
+    Join[records[[All, 1]], records[[All, 2]]], precision];
+  radii = parseRadiusExponentBatch[
+    Join[records[[All, 3]], records[[All, 4]]]];
+  If[midpoints === $Failed || radii === $Failed,
+    Return[DecodeScalar[#, precision] & /@ records, Module]];
+  re = Take[midpoints, n];
+  im = Take[midpoints, -n];
+  reRadius = Take[radii, n];
+  imRadius = Take[radii, -n];
+  decodedRe = MapThread[applyBallAccuracy[#1, #2, precision] &,
+    {re, reRadius}];
+  decodedIm = MapThread[applyBallAccuracy[#1, #2, precision] &,
+    {im, imRadius}];
+  decodedRe + I decodedIm];
+
+DecodeScalars[encoded_List, precision_Integer] := Module[{decoder},
+  If[encoded === {}, Return[{}, Module]];
+  decoder = Which[
+    AllTrue[encoded, StringQ], decodeExactBatch,
+    AllTrue[encoded, MatchQ[#, {_String, _String, _String, _String}] &],
+      decodeAcbBatch,
+    True, Function[{batch, ignoredPrecision},
+      DecodeScalar[#, ignoredPrecision] & /@ batch]];
+  Join @@ (decoder[#, precision] & /@
+    Partition[encoded, UpTo[$decodeScalarBatchSize]])];
 
 RunRequest[request_Association] := Module[{json, bytes, result},
   If[!loadBackend[], Return[BackendInformation[], Module]];

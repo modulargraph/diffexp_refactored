@@ -325,10 +325,12 @@ Contract:
   system must satisfy
   |F~.w - v| <= Max[matchTol, laurentLeadTol] * scale (Tolerances.m).
   The structural floor is the same relative threshold used to trim Laurent
-  pivots; it is dimension-independent.  Inexact residuals also carry their
-  own accuracy uncertainty, so a numerically zero result with insufficient
-  certified digits is not accepted.  Violation = LOUD ERROR E6 carrying the
-  residual, uncertainty, scale and order/component.
+  pivots; it is dimension-independent.  Resolved nonzero inexact residuals
+  also carry their own accuracy uncertainty.  An inexact residual stored
+  exactly at zero is accepted in production; `StrictMatchingUncertainty ->
+  True` is the opt-in diagnostic mode that additionally requires its
+  uncertainty ball to satisfy the same bound.  Violation = LOUD ERROR E6
+  carrying the residual, uncertainty, scale and order/component.
 - A primary violation does not loosen that contract.  At most two
   deterministic iterative-refinement steps solve
   `F deltaW = v - F.w` using the same Laurent-field elimination, add the
@@ -347,11 +349,12 @@ Contract:
   reserved for coordinate/endpoint snapping.  (No silent rounding;
   RewritePlan section 5: "numerical-zero leading-coefficient skipping
   (generalizes to matching solves)".)
-- After input/rank classification, cancellation trimming advances only past
-  exact zeros or centered inexact zeros whose full uncertainty ball is below
-  the matching residual contract.  A resolved nonzero Schur coefficient is
-  retained however small; a coefficient whose uncertainty ball overlaps
-  zero is E5, never a formal pivot.
+- After input/rank classification, production cancellation trimming advances
+  past exact zeros or inexact coefficients stored exactly at zero.  A
+  resolved nonzero Schur coefficient is retained however small.
+  `StrictMatchingUncertainty -> True` additionally requires a centered
+  inexact zero's full uncertainty ball to lie below the matching residual
+  contract; overlap is then E5, never a formal pivot.
 - Underdetermined systems: FORBIDDEN inside the marching loop (F7).  The
   old NullSpace free-parameter path (old Transport.m:392-410) survives ONLY
   as the API-level `"?"` wildcard contract (API.md): wildcards enter

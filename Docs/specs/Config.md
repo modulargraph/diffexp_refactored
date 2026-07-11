@@ -135,6 +135,7 @@ Kept keys, their DiffExp2 meaning, type, default, and the old-code anchor:
 | "SaveExpansionsCompress" | Boolean | False | compress saved segment series (old Transport.m:852-865,1278-1287) | State.m:124 |
 | "SaveExpansionsCompressDirectory" | String or None | None | spill compressed segments to files (old Transport.m:854-855,1070-1071; old code probed this key with `!FEC[...] === "?"` against an ABSENT key — declared default kills that pattern, see F-h) | Transport.m:854 |
 | "SaveExpansionsOrder" | Integer or None | None | truncation order applied when saving (old Transport.m:853,1069: KeyExistsQ-gated) | Transport.m:853 |
+| "StrictMatchingUncertainty" | Boolean | False | False: an inexact matching cancellation or residual whose stored central value is exactly zero is accepted; resolved nonzero residuals remain checked. True: diagnostic mode additionally requires the zero-centered uncertainty ball to fit inside the matching tolerance. | DiffExp2 Transport matching diagnostics |
 | "AbortOnAnalyticContinuationFail" | Boolean | True | True: missing/conflicting prescription at a chart that needs one is a hard abort; False: downgrade to warning + flagged, FT pipeline mode (old Transport.m:470-478; FT sets False at DiffExpIntegration.m:413,468). Old default was IMPLICIT (key absent -> `Missing =!= False` -> abort-ish branch); now declared.  (False softens the FINAL chart only; mid-path failures always abort — Transport.md E8; REVIEW-math D14/DEC-15) | Transport.m:471 |
 
 Dropped keys — `UpdateConfiguration`/`CFG` reject each with a DEDICATED error
@@ -405,6 +406,7 @@ C1  `test_defaults_complete`: after `LoadConfiguration[{}]` (which MUST
     "RadiusOfConvergence" -> 1, "SegmentationStrategy" -> "Predivision",
     "UsePade" -> False, "Verbosity" -> 1,
     "AccuracyGoal" -> "?", "AccuracyGoalValidate" -> False,
+    "StrictMatchingUncertainty" -> False,
     "AbortOnAnalyticContinuationFail" -> True.
 C2  `test_read_unknown_key_loud`: `CFG["RationalizationTollerance"]` (typo)
     aborts with E1 listing valid keys.

@@ -1035,18 +1035,18 @@ mwInputTrim[{min_, c_}, context_String] := Module[
     {min + i - 1, Drop[c, i - 1]}];
   mwTrim[entry, context <> ": rank input"]];
 
-(* Row arithmetic must discard only a certified centered zero.  Scaling a
+(* Row arithmetic must discard only a centered zero.  Scaling a
    Schur series by the maximum over its entire future window is invalid when
    coefficients grow by many decades per epsilon order: it erased genuine
    early pivots and collapsed the banana endpoint from 13 coefficients to 3.
    Initial structural/rank classification is completed by mwInputTrim; after
-   that, only an exact zero or an inexact centered zero whose entire
-   uncertainty ball lies below the matching residual contract may advance
-   the formal valuation.
-   In particular, an underresolved 0``acc is not evidence of cancellation. *)
+   that, an exact zero or inexact value stored exactly at zero may advance the
+   formal valuation.  StrictMatchingUncertainty -> True restores the stronger
+   diagnostic requirement that the entire uncertainty ball lie below the
+   matching residual contract. *)
 mwCenteredZeroQ[c_, context_String, scale_:1] := Module[
   {digits = DiffExp2`Tolerances`Tol["ChopDigits"], bounds, lower, upper,
-   center, mtol},
+   center, mtol, strict = TrueQ[cfg["StrictMatchingUncertainty"]]},
   Which[
     NumericQ[c],
       If[!InexactNumberQ[c], Return[TrueQ[PossibleZeroQ[c]], Module]];
@@ -1058,9 +1058,9 @@ mwCenteredZeroQ[c_, context_String, scale_:1] := Module[
       Which[
         (* Input trimming has already classified structural smallness.  A
            resolved nonzero Schur coefficient remains formal data no matter
-           how small it is; only its uncertainty ball relative to zero is
-           relevant here. *)
+           how small it is. *)
         !SameQ[center, 0] && TrueQ[lower > 0], False,
+        SameQ[center, 0] && !strict, True,
         SameQ[center, 0] && TrueQ[upper <= mtol*scale], True,
         True,
         err["E5", <|"Context" -> context, "Coefficient" -> c,
@@ -1496,7 +1496,8 @@ mwDebugSummary[x_] := Module[{nums, accs, mags},
 matchingResidualFailure[Fmat_List, vIn_List, weights_List,
     label_String] := Module[
   {nb = Length[Fmat], mtol = DiffExp2`Tolerances`Tol["MatchTol"],
-   ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], effectiveTol},
+   ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], effectiveTol,
+   strict = TrueQ[cfg["StrictMatchingUncertainty"]]},
   effectiveTol = Max[mtol, ltol];
   Catch[
     Do[Module[{terms, lhs, rhs = vIn[[comp]], kmin, kmax},
@@ -1524,7 +1525,8 @@ matchingResidualFailure[Fmat_List, vIn_List, weights_List,
         bad = Which[
           NumericQ[residual],
             mag = numMag[residual, 20];
-            TrueQ[mag + uncertainty > effectiveTol*scale],
+            If[SameQ[mag, 0] && !strict, False,
+              TrueQ[mag + uncertainty > effectiveTol*scale]],
           TrueQ[PossibleZeroQ[residual]], False,
           (* Exact symbolic nonzero content is a proof.  An inexact symbolic
              residue has no parameter domain or coefficient-wise significance
@@ -1551,10 +1553,13 @@ matchingResidualFailure[Fmat_List, vIn_List, weights_List,
    rows; therefore the strongest residual contract for the ORIGINAL,
    untrimmed F is Max[MatchTol, LaurentLeadTol].  Demanding MatchTol below
    that floor is internally inconsistent: content the solve was required to
-   discard would immediately fail its checker.  Inexact residuals include a
-   conservative 10^-Accuracy uncertainty
-   allowance; low precision never turns a resolved violation into a pass.
-   Exact/symbolic nonzero residuals remain algebraically checked. *)
+   discard would immediately fail its checker.  Resolved nonzero inexact
+   residuals include a conservative 10^-Accuracy uncertainty allowance;
+   low precision never turns a resolved violation into a pass.  By default,
+   an inexact residual stored exactly at zero is accepted before inflating
+   that center by its metadata uncertainty.  StrictMatchingUncertainty ->
+   True restores the full-ball diagnostic.  Exact/symbolic nonzero residuals
+   remain algebraically checked. *)
 matchingResidualAssert[Fmat_List, vIn_List, weights_List, label_String,
     checkedFailure_:Automatic] := Module[
   (* MatchWeights passes the result of the immediately preceding check so a

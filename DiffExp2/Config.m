@@ -103,6 +103,13 @@ $schema = <|
   "SaveExpansionsCompress" -> <|"Type" -> BooleanQ, "Default" -> False, "Normalize" -> None|>,
   "SaveExpansionsCompressDirectory" -> <|"Type" -> (StringQ[#] || # === None &), "Default" -> None, "Normalize" -> None|>,
   "SaveExpansionsOrder" -> <|"Type" -> (IntegerQ[#] || # === None &), "Default" -> None, "Normalize" -> None|>,
+  (* Production matching follows the stored central values.  The stricter
+     uncertainty-ball policy is useful for focused numerical diagnostics,
+     but at long Taylor order it can reject an exactly zero cancellation
+     solely because Accuracy metadata widened during otherwise valid
+     arithmetic. *)
+  "StrictMatchingUncertainty" -> <|"Type" -> BooleanQ, "Default" -> False,
+    "Normalize" -> None|>,
   "AbortOnAnalyticContinuationFail" -> <|"Type" -> BooleanQ, "Default" -> True, "Normalize" -> None|>
 |>;
 

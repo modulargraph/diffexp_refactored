@@ -21,7 +21,7 @@ HomogeneousCacheCapacity::usage = "HomogeneousCacheCapacity[] gives the bounded 
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source supplied in the original physical frame.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
-ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-clearing, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
+ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -103,7 +103,8 @@ tLaurent[e_, t_, k_Integer] := Module[{c, v, num, den, nc, dc, ord, csr},
    exact equality check, so a hash collision is loud rather than contaminating
    another system. *)
 $pcCache = <||>; $systemClearRegistry = <||>; $globalClearedCache = <||>;
-$chartClearedCache = <||>;
+$chartClearedCache = <||>; $exactSCCStructureCache = <||>;
+$suppressIntermediateODEResidualChecks = False;
 systemClearKey[sys_Association] := Module[{vtag = Replace[
     sys["Variable"], s_Symbol :> {Context[s], SymbolName[s]}]},
   {Hash[{sys["Matrix"], sys["Variable"]}, "SHA256"],
@@ -147,10 +148,14 @@ deterministicTopologicalOrder[components_List, edges_List] := Module[
       "Detail" -> "SCC condensation graph is cyclic"|>]];
   order];
 
+(* Private instrumentation seam used by the focused cache contract.  It
+   counts actual graph/certificate constructions, not cache lookups. *)
+$exactSCCStructureCoreCalls = 0;
 exactSCCStructure[m_?MatrixQ] := Module[
   {d = Length[m], normalized, pattern, edgePairs, graph, rawComponents,
    rawVertexToComponent, rawCondensation, topo, oldToNew, components,
    vertexToComponent, condensation, outgoing, depths, certificateQ},
+  $exactSCCStructureCoreCalls++;
   If[d === 0 || Dimensions[m] =!= {d, d},
     err["E6", <|"Center" -> "integration-sequence"|>, <|
       "Dimensions" -> Dimensions[m],
@@ -222,6 +227,27 @@ exactSCCStructure[m_?MatrixQ] := Module[
       "StrongConnectivity" -> True, "AcyclicTopologicalOrder" -> True,
       "EdgeCoverage" -> True|>|>];
 
+(* An invertible affine substitution x -> x0 + beta t and multiplication by
+   the nonzero monomial beta t are injective on the exact rational-function
+   field.  They therefore preserve the entrywise structural-zero pattern.
+   Build the SCC graph/certificate once from the original exact system and
+   reuse it at every chart of that system/level.  The SHA key is only an
+   index: registerSystemClearInput has just rechecked the complete exact input
+   against $systemClearRegistry, so a hash collision is loud without doing a
+   second full-matrix comparison here.  MatrixHash is chart-local metadata
+   and is replaced by prepareChartCore after ThetaOriginal has been formed. *)
+exactSCCStructureForSystem[sys_Association, key_] := Module[
+  {structure},
+  If[!KeyExistsQ[$systemClearRegistry, key],
+    err["E6", <|"Center" -> "integration-sequence-cache"|>, <|
+      "Key" -> key,
+      "Detail" -> "exact SCC structure key was not collision-certified"|>]];
+  If[KeyExistsQ[$exactSCCStructureCache, key],
+    Return[$exactSCCStructureCache[key], Module]];
+  structure = exactSCCStructure[sys["Matrix"]];
+  AssociateTo[$exactSCCStructureCache, key -> structure];
+  structure];
+
 familyCollisionDepth[roots_List, collisions_List] := Module[{perRoot},
   perRoot = Table[Module[{events, layers},
     (* Homogeneous recursion starts at n=1; same-a n=0 symmetrization is
@@ -276,11 +302,22 @@ prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
   Achart = Map[Cancel[Together[#]] &,
     beta*(A /. sys["Variable"] -> x0 + beta*t), {2}];
   thetaOriginal = Map[Cancel[Together[t*#]] &, Achart, {2}];
+  If[zeroCanQ[Cancel[Together[beta]]],
+    err["E1", chart, <|
+      "Detail" -> "affine chart Scale must be nonzero for SCC analysis"|>]];
+  (* Preserve the previous exact-input contract.  The reusable graph is
+     proved from the exact original system, while ThetaOriginal remains the
+     chart-local matrix used by recurrences and residual checks. *)
+  If[!FreeQ[thetaOriginal, _?InexactNumberQ],
+    err["E1", chart, <|
+      "Detail" -> "SCC decisions require the full exact chart matrix"|>]];
   (* The integration sequence belongs to the original master basis.  A
      full-system rank-reduction gauge or spectral frame may mix components
      and must not be allowed to densify/change the physical dependency DAG.
      Every diagonal SCC is prepared independently later. *)
-  integrationSequence = exactSCCStructure[thetaOriginal];
+  integrationSequence = Join[
+    exactSCCStructureForSystem[sys, sysClearKey],
+    <|"MatrixHash" -> Hash[thetaOriginal, "SHA256"]|>];
   d = Length[Achart];
   If[TrueQ[Lookup[chart, "UseSCCSkeleton", False]] &&
       Length[integrationSequence["Components"]] > 1,
@@ -1653,14 +1690,16 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
   If[KeyExistsQ[response, "assembled"],
     Module[{amin = response["assembled", "min"],
         amax = response["assembled", "max"], coeffs},
-      coeffs = decode /@ response["assembled", "coefficients"];
+      coeffs = DiffExp2`CppBackend`DecodeScalars[
+        response["assembled", "coefficients"], outputDigits];
       If[AnyTrue[coeffs, FailureQ],
         err["E5", cs, <|"Detail" ->
           "compiled recurrence returned an undecodable assembled coefficient"|>]];
       assembledData = <|"Min" -> amin, "CompleteMax" -> amax,
         "Coefficients" -> ArrayReshape[coeffs,
           {P + 1, amax - amin + 1, nmax + 1, d}]|>],
-    decodedU = decode /@ response["u"];
+    decodedU = DiffExp2`CppBackend`DecodeScalars[
+      response["u"], outputDigits];
     If[AnyTrue[decodedU, FailureQ],
       err["E5", cs, <|"Detail" ->
         "compiled recurrence returned an undecodable coefficient"|>]];
@@ -1670,7 +1709,8 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
       {nmax + 1, P + 2, d}]];
   hits = Map[Function[hit, Module[{hf, hv, cols},
       cols = hit["cols"] + 1;
-      hf = ArrayReshape[decode /@ hit["frames"], {Length[cols], W}];
+      hf = ArrayReshape[DiffExp2`CppBackend`DecodeScalars[
+        hit["frames"], outputDigits], {Length[cols], W}];
       hv = Replace[hit["validity"], Null -> Infinity, {1}];
       <|"n" -> hit["n"], "Cols" -> cols,
         "DeltaB" -> decode[hit["delta_b"]], "FrameBase" -> fb,
@@ -2348,7 +2388,8 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
 
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
-  $chartClearedCache = <||>;);
+  $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;);
 
 solveHomogeneousCore[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,
@@ -2632,7 +2673,7 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
       vPrepCache[key]]];
   Do[Module[{aS = sec["a"], bS = sec["b"], pS = sec["p"], arr = sec["Coeffs"],
       P, srcMin, srcMax, VInvExp, VInvVal, bHat, bHatValid, srcFn, rec, ls,
-      wideTop2, prep2, pseudoDepth, comp, desiredMax},
+      wideTop2, prep2, pseudoDepth, comp, desiredMax, assemblyPrep},
     P = logCeiling[cs, aS, bS, pS, True];  (* sources: Z>=0 incl. the same-a hit *)
     pseudoDepth = pseudoDepthForTag[cs, aS, bS, 0];
     srcMin = reducedSource["EpsWindow", "Min"];
@@ -2684,12 +2725,19 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
           If[srcL === pp && srcN + 1 <= Length[bb],
             <|"Frames" -> bb[[srcN + 1]],
               "Validity" -> bv[[srcN + 1]]|>, None]]];
+      (* The native recurrence already supports applying V before returning
+         its result.  Particular solves previously omitted this payload,
+         decoded the much wider J-frame U tensor, and then performed the
+         same V convolution in Wolfram.  Supplying the existing prepared V
+         keeps the exact frame/window decisions unchanged while returning
+         only the assembled physical coefficients. *)
+      assemblyPrep = If[TrueQ[$disableGroupedSpectralTransform], Automatic,
+        vPrepFor[fb2, Wd2]];
       rec = runRecursionFramedSrc[
-        cs, prep2, aS, bS, P, nmax, srcFn, fb2, Wd2, None]];
+        cs, prep2, aS, bS, P, nmax, srcFn, fb2, Wd2, None,
+        assemblyPrep]];
     hitsAll = Join[hitsAll, publicPseudoHit /@ rec["Hits"]];
-    ls = assembleSolution[cs, aS, bS, rec, nmax,
-      If[TrueQ[$disableGroupedSpectralTransform], Automatic,
-        vPrepFor[rec["FrameBase"], Length[rec["U"][[1, 1, 1]]]]]];
+    ls = assembleSolution[cs, aS, bS, rec, nmax, assemblyPrep];
     desiredMax = Min[ls["EpsWindow", "CompleteMax"], reqMax];
     If[rec["Hits"] =!= {},
       If[homTargets === None,
@@ -2955,16 +3003,19 @@ solveSCCBasisAtTop[cs_Association, req_Association, blockSystems_List,
   workReq = Join[req, <|"EpsWindow" ->
     Join[req["EpsWindow"], <|"CompleteMax" -> workTop|>],
     "TOrder" -> workTOrder|>];
-  blockBases = If[cfg["RecurrenceBackend"] === "Cpp" &&
-      !TrueQ[$disableGroupedSpectralTransform] &&
-      cfg["Variables"] === {} &&
-      Length[blockSystems] <= HomogeneousCacheCapacity[],
-    (* Diagonal SCC homogeneous problems are independent and share the
-       parent's SolveCacheTag.  Submit their native recurrence payloads as
-       one batch; the surrounding transient cache then supplies the ordinary
-       SolveHomogeneous reads below without persistent block entries. *)
-    PrewarmHomogeneousBatch[blockSystems, workReq],
-    SolveHomogeneous[#, workReq] & /@ blockSystems];
+  blockBases = Block[{$suppressIntermediateODEResidualChecks = True},
+    If[cfg["RecurrenceBackend"] === "Cpp" &&
+        !TrueQ[$disableGroupedSpectralTransform] &&
+        cfg["Variables"] === {} &&
+        Length[blockSystems] <= HomogeneousCacheCapacity[],
+      (* Diagonal SCC homogeneous problems are independent and share the
+         parent's SolveCacheTag.  Submit their native recurrence payloads as
+         one batch; the surrounding transient cache then supplies the
+         ordinary SolveHomogeneous reads below without persistent block
+         entries.  Their per-block ODE proofs are subsumed by the mandatory
+         original-system proof after all columns are assembled. *)
+      PrewarmHomogeneousBatch[blockSystems, workReq],
+      SolveHomogeneous[#, workReq] & /@ blockSystems]];
   Do[
     recombine = Join[recombine,
       sccBlockRecombineRecords[blockSystems[[block]], blockBases[[block]],
@@ -2977,7 +3028,8 @@ solveSCCBasisAtTop[cs_Association, req_Association, blockSystems_List,
       Do[
         source = sccBlockCouplingSource[cs, target, state];
         If[AssociationQ[source] && !sccSourceZeroQ[source],
-          part = SolveParticular[blockSystems[[target]], source, workReq];
+          part = Block[{$suppressIntermediateODEResidualChecks = True},
+            SolveParticular[blockSystems[[target]], source, workReq]];
           diagnostics = Append[diagnostics,
             Lookup[part, "Diagnostics", <||>]];
           AssociateTo[state, target -> sccReframeLocalSolution[part, cs]]],
@@ -3053,7 +3105,8 @@ solveSCCParticularAtTop[cs_Association, source_Association,
     total = sccCombineSources[cs, {external, coupling},
       Length[seq["Components"][[block]]]];
     If[AssociationQ[total] && !sccSourceZeroQ[total],
-      part = SolveParticular[blockSystems[[block]], total, workReq];
+      part = Block[{$suppressIntermediateODEResidualChecks = True},
+        SolveParticular[blockSystems[[block]], total, workReq]];
       AssociateTo[state, block -> sccReframeLocalSolution[part, cs]]],
     {block, nb}];
   If[state === <||>, Return[<|"Solution" ->
@@ -3272,6 +3325,12 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
    formalSymbols, candidateRules, regularSpecializationQ, sampleCandidates,
    sampleRules, sampleResiduals, requiredSamples = 5,
    regulatorProbeValues},
+  (* SCC diagonal bases and coupling particulars are implementation
+     intermediates.  Their assembled columns receive one mandatory residual
+     proof against the original full system; repeating the same proof on
+     every block/source is mathematically redundant and dominated L3 wall
+     time.  The dynamic flag is scoped only around those internal calls. *)
+  If[TrueQ[$suppressIntermediateODEResidualChecks], Return[0, Module]];
   rtol = DiffExp2`Tolerances`Tol["ResidTol"];
   sols = If[KeyExistsQ[sol, "Columns"], sol["Columns"], {sol}];
   (* Exact analytic-regulator coefficients remain formal throughout the

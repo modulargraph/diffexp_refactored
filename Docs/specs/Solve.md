@@ -128,12 +128,17 @@ SolveChart[cs_Association, req_Association, source_:None]
 
 The Transport-facing wrapper (`cs` = a ChartSystem from PrepareChart, 2.5)
 implements the old `InitializeIntegrationSequence` role as an exact,
-certified SCC decomposition.  The graph is built from `ThetaOriginal`, the
-original physical theta-form matrix `t beta A(x0 + beta t)`, BEFORE any
-full-system rank-reduction gauge or spectral frame can mix components.  An
+certified SCC decomposition.  The graph is built once per exact differential
+system from the original physical matrix `A(x)`, BEFORE any full-system
+rank-reduction gauge or spectral frame can mix components.  Every nonzero
+affine chart map `x = x0 + beta t` is an invertible substitution, and the
+additional factor `beta t` preserves this structural-zero pattern, so the
+certified Components/edges/depth are reused by all charts at that system and
+level.  `ThetaOriginal = t beta A(x0 + beta t)` itself remains chart-local,
+and the certificate's `MatrixHash` is the hash of that chart-local matrix. An
 equation-row/component-column entry gives the dependency edge `c -> r` iff
-`Cancel[Together[ThetaOriginal[[r,c]]]]` is exactly nonzero.  The input must
-be exact.  In particular, eps-only and analytic-regulator-only entries remain
+the corresponding exact original-matrix entry is nonzero.  The input must be
+exact.  In particular, eps-only and analytic-regulator-only entries remain
 edges: eps and all analytic regulators are left symbolic and there is no
 zero-point, generic-point, or other regulator specialization.
 

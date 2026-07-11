@@ -38,6 +38,7 @@ assert["test_defaults_complete",
   cfg["SegmentationStrategy"] === "Predivision" && cfg["UsePade"] === False &&
   cfg["Verbosity"] === 1 && cfg["AccuracyGoal"] === "?" &&
   cfg["AccuracyGoalValidate"] === False &&
+  cfg["StrictMatchingUncertainty"] === False &&
   cfg["AbortOnAnalyticContinuationFail"] === True];
 assert["test_configured_q_after_load", DiffExp2`Config`ConfiguredQ[] === True];
 

@@ -29,6 +29,16 @@ numMag = DiffExp2`Tolerances`NumericMagnitude;
 numMagBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
 $ForcePadeFail = False;
 
+(* SCC source propagation repeatedly applies the same exact chart-local
+   rational multipliers to different basis columns.  Their epsilon quotient,
+   pole certificate, and Taylor quotient depend only on the multiplier and
+   the structural LocalSolution window/geometry, not on its coefficients.
+   Keep a bounded prepared-kernel cache so those exact O(W^2 + W N^2)
+   constructions are paid once per chart shape.  Full signatures are stored
+   and checked after the hash lookup; a collision can never change algebra. *)
+$multiplyRationalPreparedCache = <||>;
+$multiplyRationalPreparedCacheMax = 256;
+
 exactQ[e_] := FreeQ[e, _?InexactNumberQ];
 pow[x_, 0] := 1;   (* 0^0 = 1 convention for the empty product *)
 pow[x_, n_] := x^n;
@@ -284,7 +294,8 @@ tValuation[e_, t_] := Module[{c = Cancel[Together[e]]},
 MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
   {ls = ValidateLocalSolution[ls0], eps = DiffExp2`Config`CanonicalEps[],
    cT, num, den, nv, dv, jmin, jcount, cj, d0, troots, wp, M, Q, secs,
-   kmin, kmax, ncols, ncomp, newSecs},
+   kmin, kmax, ncols, ncomp, newSecs, prepSignature, prepKey, prepared,
+   cacheHit},
   wp = cfg["WorkingPrecision"];
   cT = Together[c /. var -> var];
   If[!PolynomialQ[Numerator[cT], {var, eps}] || !PolynomialQ[Denominator[cT], {var, eps}],
@@ -297,9 +308,20 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
   kmin = lsMin[ls]; kmax = lsCM[ls];
   ncols = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2]];
   ncomp = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]];
+  jcount = kmax - kmin + 1;
+  prepSignature = {cT, {Context[var], SymbolName[var]},
+    {Context[eps], SymbolName[eps]}, kmin, kmax, ncols, ls["Radius"], wp,
+    cfg["ChopPrecision"], DiffExp2`Tolerances`$InputPrecisionFactor};
+  prepKey = Hash[prepSignature, "SHA256"];
+  prepared = Lookup[$multiplyRationalPreparedCache, prepKey, None];
+  cacheHit = AssociationQ[prepared] &&
+    SameQ[Lookup[prepared, "Signature", None], prepSignature];
+  If[cacheHit,
+    jmin = prepared["EpsilonShift"];
+    M = prepared["CenterPoleOrder"];
+    Q = prepared["TaylorKernels"],
   nv = epsValPoly[num, eps]; dv = epsValPoly[den, eps];
   jmin = nv - dv;
-  jcount = kmax - kmin + 1;
   (* eps-Laurent coefficients c_j(t), j = jmin .. jmin + jcount - 1 *)
   Module[{Nc, Dc},
     Nc = Table[Coefficient[num, eps, nv + i], {i, 0, jcount - 1}];
@@ -352,6 +374,12 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
            swell or hit the kernel's small default extra-precision limit. *)
         Map[groundTaylorCoefficient[#, wp] &, csr]]],
     {j, 1, jcount}];
+  If[Length[$multiplyRationalPreparedCache] >=
+      $multiplyRationalPreparedCacheMax,
+    $multiplyRationalPreparedCache = <||>];
+  AssociateTo[$multiplyRationalPreparedCache, prepKey -> <|
+    "Signature" -> prepSignature, "EpsilonShift" -> jmin,
+    "CenterPoleOrder" -> M, "TaylorKernels" -> Q|>]];
   (* convolve into each sector; a -> a - M; windows shift by jmin *)
   newSecs = Map[Module[{arr = #["Coeffs"], out},
     (* vectorized t-convolution: per (kp, jrow) one ListConvolve per

@@ -17,9 +17,7 @@
    (depends on s only).  box_triangle drops double-box propagator 1 and
    remains a genuine 4-point function of s and t. *)
 
-FTExampleNames[] := {"bubble", "sunrise", "banana", "banana_unequal",
-  "banana4", "banana4_unequal", "kite", "box", "pentagon", "box_bubble",
-  "box_triangle", "double_box_planar"};
+FTExampleNames[] := FeynmanTrick`SupportedExamples[];
 
 FTExampleDoubleBoxPropagators[] := {
   -Global`l1^2,

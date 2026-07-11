@@ -2,7 +2,9 @@
 
 These shell examples invoke the implemented DiffExp 2 ladder in
 ``Scripts/run_ft_stepwise2.m``.  They require FIRE for a cold preparation and
-the compiled recurrence backend.  Run them from any directory with ``sh``.
+the compiled recurrence backend.  Run the commands below from the repository
+root with ``sh``.  The scripts themselves may also be invoked by absolute path
+from another directory.
 
 | Example | Command | Status in the documentation snapshot |
 | --- | --- | --- |
@@ -17,6 +19,9 @@ Every script:
 
 - selects ``DE2_RECURRENCE_BACKEND=Cpp`` explicitly;
 - accepts an existing ``DE2_CPP_THREADS`` value or uses four workers;
+- enables regular-chart value transport with ``DE2_VALUE_TRANSPORT=1``;
+- enables paired C++ endpoint-arm prewarming with
+  ``FT_CPP_BATCH_ENDPOINT_ARMS=1``;
 - keeps FIRE preparation under
   ``${DIFFEXP2_CACHE_DIR:-$HOME/.cache/diffexp2}/fire``;
 - keeps resumable ladder checkpoints in an example-specific subdirectory;
@@ -30,6 +35,9 @@ DIFFEXP2_CACHE_DIR=/fast/local/cache \
 DE2_CPP_THREADS=8 \
 sh Examples/FeynmanTrick/UnequalBanana.sh
 ```
+
+Set `FT_FIRE_PATH=/absolute/path/to/FIRE6` when FIRE is not installed at
+`Dependencies/fire/FIRE6`; the wrappers preserve that environment variable.
 
 To force a new FIRE preparation, add ``FT_REBUILD_PREP=1`` to the environment.
 That is normally unnecessary: solver-source changes do not invalidate the

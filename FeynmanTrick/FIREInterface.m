@@ -169,13 +169,100 @@ normalizeIntegralIndex[topology_Association, integral_List] := Module[
 normalizeIntegralIndices[topology_Association, integrals_List] :=
   normalizeIntegralIndex[topology, #] & /@ integrals;
 
+$reductionCacheSchema = "FeynmanTrick.ReductionCache/v2";
+$fireSetupFingerprintSchema = "FeynmanTrick.FIRESetup/v1";
+
+fileSHA256[path_String] := If[FileExistsQ[path],
+  IntegerString[FileHash[path, "SHA256"], 16, 64], Missing["NotFound"]];
+
+currentFIRERuntimeFingerprintRecord[] := Module[{firePath},
+  firePath = ExpandFileName[FeynmanTrick`Private`$FTConfig["FIREPath"]];
+  <|
+    "FIREPath" -> firePath,
+    "FIREBinarySHA256" -> fileSHA256[
+      FileNameJoin[{firePath, "bin", "FIRE6"}]],
+    "FIRESourceSHA256" -> fileSHA256[
+      FileNameJoin[{firePath, "FIRE6.m"}]],
+    "SystemID" -> $SystemID,
+    "DimensionVariable" ->
+      FeynmanTrick`Private`$FTConfig["DimensionVariable"]
+  |>
+];
+
+fallbackSetupFingerprintRecord[topology_Association] := <|
+  "Schema" -> $fireSetupFingerprintSchema,
+  "VerifiedStartFile" -> False,
+  (* Unverified/test topology objects stay scoped to their exact setup
+     instance as well as their mathematical content. *)
+  "LegacyScope" -> Lookup[topology, {
+    "WorkDirectory", "Name", "ProblemNumber"}, Missing["Absent"]],
+  "Topology" -> Lookup[topology, {
+    "LoopMomenta", "ExternalMomenta", "Propagators", "Replacements",
+    "NumPropagators", "OriginalNumPropagators", "EliminatedPositions",
+    "NumeratorPositions"}, Missing["Absent"]],
+  "AutoDetectRestrictions" -> Lookup[
+    FeynmanTrick`Private`$FTConfig, "AutoDetectRestrictions",
+    Missing["Unset"]],
+  "DimensionVariable" -> Lookup[
+    FeynmanTrick`Private`$FTConfig, "DimensionVariable", Missing["Unset"]]
+|>;
+
+reductionSetupFingerprintRecord[topology_Association] :=
+  Lookup[topology, "SetupFingerprintRecord",
+    fallbackSetupFingerprintRecord[topology]];
+
+cachedTopologySemanticCompatibleQ[topology_Association] := Module[
+  {stored, storedDimension, currentDimension},
+  stored = Lookup[topology, "SetupFingerprintRecord", Missing["Absent"]];
+  (* Unverified topology keys already embed the current dimension through the
+     fallback setup record, so a changed dimension cannot produce a hit. *)
+  If[!AssociationQ[stored], Return[True, Module]];
+  storedDimension = Lookup[stored, "DimensionVariable", Missing["Absent"]];
+  currentDimension =
+    FeynmanTrick`Private`$FTConfig["DimensionVariable"];
+  If[storedDimension =!= currentDimension,
+    Print["Error: cached FIRE reduction dimension variable ",
+      storedDimension, " does not match current ", currentDimension,
+      ". Restore the setup configuration or rerun SetupFIRE."];
+    Return[False, Module]];
+  True
+];
+
+preparedTopologyCompatibleQ[topology_Association] := Module[
+  {stored, current, startFile, keys, mismatches},
+  stored = Lookup[topology, "SetupFingerprintRecord", Missing["Absent"]];
+  If[!AssociationQ[stored],
+    Print["Error: prepared topology has no setup fingerprint; rerun SetupFIRE."];
+    Return[False, Module]];
+  startFile = FileNameJoin[{topology["WorkDirectory"],
+    topology["Name"] <> ".start"}];
+  current = Join[currentFIRERuntimeFingerprintRecord[], <|
+    "StartFileSHA256" -> fileSHA256[startFile]|>];
+  keys = {"FIREPath", "FIREBinarySHA256", "FIRESourceSHA256", "SystemID",
+    "DimensionVariable", "StartFileSHA256"};
+  mismatches = Select[keys,
+    Lookup[stored, #, Missing["StoredAbsent"]] =!=
+      Lookup[current, #, Missing["CurrentAbsent"]] &];
+  If[!TrueQ[Lookup[stored, "VerifiedStartFile", False]] ||
+      !FileExistsQ[startFile],
+    mismatches = DeleteDuplicates[Append[mismatches, "StartFile"]]];
+  If[mismatches =!= {},
+    Print["Error: prepared FIRE setup is incompatible with current runtime: ",
+      mismatches, ". Rerun SetupFIRE."];
+    Return[False, Module]];
+  True
+];
+
 reductionCacheKey[topology_Association, fireIntegral_List] := {
-  topology["WorkDirectory"],
-  topology["Name"],
-  topology["ProblemNumber"],
-  topology["NumPropagators"],
+  $reductionCacheSchema,
+  reductionSetupFingerprintRecord[topology],
   fireIntegral
 };
+
+(* The exact setup record is part of the key, not merely its digest.  This
+   keeps cache hits deterministic and collision-safe while allowing identical
+   prepared content to reuse exact reductions even if its transient FIRE
+   problem number differs. *)
 
 cacheReduction[topology_Association, fireIntegral_List, reduction_, masters_List] :=
 Module[{key},
@@ -461,7 +548,9 @@ Module[{exitCode, result, logFile, cmd, stdoutFile, stderrFile,
 
 SetupFIRE[topology_Association, workDir_String:""] :=
 Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions,
-        squares, completedFireProps, originalFirePropCount, numeratorPositions},
+        squares, completedFireProps, originalFirePropCount, numeratorPositions,
+        autoDetectRestrictions, startFile, fireVariables,
+        runtimeFingerprintRecord, setupFingerprintRecord},
   name = topology["Name"];
 
   (* Determine working directory *)
@@ -535,6 +624,12 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions,
   ];
   FIRE`RESTRICTIONS = restrictions;
 
+  (* Capture the option actually used to build this .start.  Reading the
+     mutable global later would make cache identity depend on current state
+     rather than the prepared FIRE problem. *)
+  autoDetectRestrictions =
+    FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"];
+
   (* Prepare IBP relations *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Setting up FIRE for topology: ", name, " (problem ", pn, ")"];
@@ -546,8 +641,7 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions,
 
   (* Prepare sector basis - this should now say "Prepared" not "Already prepared" *)
   FIRE`Prepare[
-    AutoDetectRestrictions ->
-      FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"]
+    AutoDetectRestrictions -> autoDetectRestrictions
   ];
 
   (* Save start file *)
@@ -569,8 +663,34 @@ Module[{dir, name, result, fireSubst, fireProps, fireRepls, pn, restrictions,
   result["Propagators"] = fireProps;
   result["NumPropagators"] = Length[fireProps];
   result["NumeratorPositions"] = numeratorPositions;
-  result["Variables"] = extractVariables[
+  fireVariables = extractVariables[
     fireProps, fireRepls, topology["LoopMomenta"], topology["ExternalMomenta"]];
+  result["Variables"] = fireVariables;
+
+  (* Content-address the exact prepared problem.  The full record is retained
+     and used in cache keys; the digest is only a compact diagnostic. *)
+  startFile = FileNameJoin[{dir, name <> ".start"}];
+  runtimeFingerprintRecord = currentFIRERuntimeFingerprintRecord[];
+  setupFingerprintRecord = Join[<|
+    "Schema" -> $fireSetupFingerprintSchema,
+    "VerifiedStartFile" -> FileExistsQ[startFile],
+    "StartFileSHA256" -> fileSHA256[startFile],
+    "AutoDetectRestrictions" -> autoDetectRestrictions
+  |>, runtimeFingerprintRecord, <|
+    "LoopMomenta" -> topology["LoopMomenta"],
+    "ExternalMomenta" -> topology["ExternalMomenta"],
+    "Propagators" -> fireProps,
+    "Replacements" -> fireRepls,
+    "OriginalNumPropagators" -> result["OriginalNumPropagators"],
+    "NumPropagators" -> result["NumPropagators"],
+    "EliminatedPositions" -> topologyEliminatedPositions[topology],
+    "NumeratorPositions" -> numeratorPositions,
+    "Restrictions" -> restrictions,
+    "Variables" -> fireVariables
+  |>];
+  result["SetupFingerprintRecord"] = setupFingerprintRecord;
+  result["SetupFingerprint"] = IntegerString[
+    Hash[setupFingerprintRecord, "SHA256"], 16, 64];
 
   (* Store in global registry *)
   $SetupTopologies[name] = result;
@@ -803,7 +923,7 @@ Module[{dir, fireBin, intContent, allSectors, tablesFile, masters, results},
 ReduceIntegralsDetailed[topology_Association, integrals_List] :=
 Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
         pn, masters = {}, fireIntegrals, cacheEntries, missingPositions,
-        missingFireIntegrals, missingIntegrals, newReductions = {},
+        missingFireIntegrals, newReductions = {},
         computedReductions, allEntries, allMasters, cacheEnabled},
 
   If[!topology["StartFileReady"],
@@ -829,6 +949,11 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   ];
 
   If[missingPositions === {},
+    (* Cached rational functions still carry the setup-time dimension symbol.
+       Reject a semantic mismatch before a caller can expand, for example,
+       1/(d-4) as though the active regulator lived in a different symbol. *)
+    If[!TrueQ[cachedTopologySemanticCompatibleQ[topology]],
+      Return[$Failed, Module]];
     result = Association[
       MapThread[Rule, {integrals, ((#["Reduction"] &) /@ cacheEntries)}]
     ];
@@ -846,6 +971,12 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
     ];
   ];
 
+  (* A cache miss launches the current FIRE binary against the prepared
+     .start.  Refuse that launch if the start file, FIRE runtime, or dimension
+     variable no longer matches the setup-time fingerprint carried by the
+     topology.  Exact cache hits need no FIRE runtime and remain usable. *)
+  If[!TrueQ[preparedTopologyCompatibleQ[topology]], Return[$Failed, Module]];
+
   ensureFIRELoaded[];
 
   dir = topology["WorkDirectory"];
@@ -853,8 +984,14 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   pn = topology["ProblemNumber"];
   fireBin = FileNameJoin[{FeynmanTrick`Private`$FTConfig["FIREPath"], "bin", "FIRE6"}];
 
-  missingFireIntegrals = fireIntegrals[[missingPositions]];
-  missingIntegrals = integrals[[missingPositions]];
+  (* Different public indices can become identical after zero-padding, and a
+     caller may also repeat an index verbatim.  FIRE accepts both but repeats
+     the same reduction work.  Stable de-duplication preserves the first-seen
+     request order and the result is still expanded back to every original
+     key below. *)
+  missingFireIntegrals = DeleteDuplicates[
+    fireIntegrals[[missingPositions]]
+  ];
 
   (* Write integrals file with problem number *)
   intContent = StringJoin[
@@ -874,7 +1011,7 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
 
   (* Run FIRE6 *)
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
-    Print["Reducing ", Length[missingIntegrals], " integrals..."];
+    Print["Reducing ", Length[missingFireIntegrals], " integrals..."];
   ];
   If[runFIRE6[fireBin, dir, name <> "_reduce"] =!= 0,
     Print["Error: FIRE6 integral reduction failed."];
@@ -898,6 +1035,16 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   newReductions = ((Global`G[pn, #] /. rules) &) /@ missingFireIntegrals;
   (* Replace G[pn, ...] with G[1, ...] for consistency *)
   newReductions = newReductions /. Global`G[pn, idx_] :> Global`G[1, idx];
+
+  (* FIRE has already proved that each returned master reduces to itself.
+     Cache those identities immediately: the adaptive derivative-closure loop
+     often asks for one of them in its next wave, and launching FIRE again for
+     that request is pure overhead.  This uses only the existing in-kernel,
+     exact-key cache; no FIRE database is retained or shared across runs. *)
+  Scan[
+    cacheReduction[topology, #, Global`G[1, #], masters] &,
+    DeleteDuplicates[masters]
+  ];
 
   MapThread[
     cacheReduction[topology, #1, #2, masters] &,

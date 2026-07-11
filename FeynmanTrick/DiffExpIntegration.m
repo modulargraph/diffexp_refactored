@@ -1323,10 +1323,124 @@ Module[{posI, posJ},
   ]
 ];
 
-CollectLevelIBPSingularFactors[ftData_Association, level_Integer] :=
+(* One transport level has one exact set of boundary-reduction requests, but
+   three consumers need it: epsilon budgeting, singular-factor discovery, and
+   the boundary assembly itself.  Keep the shared result in this explicit
+   invocation-local bundle rather than relying on FIRE's mutable cache (or on
+   any persistent FIRE database). *)
+$levelIBPBatchSchema = "FeynmanTrick.LevelIBPBatch/v1";
+
+levelIBPBatchPayloadKey[reductions_Association,
+    coefficientVectors_Association] := IntegerString[
+  Hash[{reductions, coefficientVectors}, "SHA256"], 16, 64];
+
+levelIBPBatchSpec[ftData_Association, upperLevel_Integer] := Module[
+  {levelAbove, levelBelow, topology, mastersAbove, mastersBelow,
+   combinedPositions, requests, neededIntegrals, normalizedNeededIntegrals,
+   setupFingerprintRecord, keyRecord, key},
+  If[upperLevel <= 0 || !KeyExistsQ[ftData["Levels"], upperLevel] ||
+      !KeyExistsQ[ftData["Levels"], upperLevel - 1],
+    Return[$Failed, Module]];
+  levelAbove = ftData["Levels"][upperLevel];
+  levelBelow = ftData["Levels"][upperLevel - 1];
+  topology = levelAbove["Topology"];
+  mastersAbove = levelAbove["Masters"];
+  mastersBelow = levelBelow["Masters"];
+  combinedPositions = levelAbove["CombinedPositions"];
+  requests = BoundaryRequestRecords[mastersBelow, combinedPositions];
+  neededIntegrals = DeleteDuplicates[#["NeededVec"] & /@ requests];
+  normalizedNeededIntegrals =
+    FeynmanTrick`FIREInterface`Private`normalizeIntegralIndices[
+      topology, neededIntegrals];
+  If[MemberQ[normalizedNeededIntegrals, $Failed], Return[$Failed, Module]];
+  normalizedNeededIntegrals = Sort[DeleteDuplicates[normalizedNeededIntegrals]];
+  setupFingerprintRecord =
+    FeynmanTrick`FIREInterface`Private`reductionSetupFingerprintRecord[
+      topology];
+  (* A content key, not a work-directory or process key.  It is recomputed
+     before reuse and covers every exact input that selects the reductions or
+     their ordered master coefficients. *)
+  keyRecord = {
+    $levelIBPBatchSchema, upperLevel,
+    setupFingerprintRecord,
+    levelAbove["FeynmanParameter"], combinedPositions,
+    mastersBelow, mastersAbove, normalizedNeededIntegrals
+  };
+  key = IntegerString[Hash[keyRecord, "SHA256"], 16, 64];
+  <|
+    "Schema" -> $levelIBPBatchSchema,
+    "Key" -> key,
+    "KeyRecord" -> keyRecord,
+    "UpperLevel" -> upperLevel,
+    "Topology" -> topology,
+    "MastersAbove" -> mastersAbove,
+    "BoundaryRequests" -> requests,
+    "NeededIntegrals" -> neededIntegrals
+  |>
+];
+
+PrepareLevelIBPBatch[ftData_Association, upperLevel_Integer] := Module[
+  {spec, reductions, coefficientVectors, mastersAbove, payloadKey},
+  spec = levelIBPBatchSpec[ftData, upperLevel];
+  If[spec === $Failed, Return[$Failed, Module]];
+  reductions = If[spec["NeededIntegrals"] === {}, <||>,
+    FeynmanTrick`FIREInterface`ReduceIntegrals[
+      spec["Topology"], spec["NeededIntegrals"]]];
+  If[reductions === $Failed || !AssociationQ[reductions] ||
+      !AllTrue[spec["NeededIntegrals"], KeyExistsQ[reductions, #] &],
+    Return[$Failed, Module]];
+  mastersAbove = spec["MastersAbove"];
+  coefficientVectors = AssociationMap[
+    Function[integral, Table[
+      Coefficient[reductions[integral], Global`G[1, mastersAbove[[j]]]],
+      {j, Length[mastersAbove]}]],
+    spec["NeededIntegrals"]];
+  payloadKey = levelIBPBatchPayloadKey[reductions, coefficientVectors];
+  Join[spec, <|
+    "Reductions" -> reductions,
+    "CoefficientVectors" -> coefficientVectors,
+    "PayloadKey" -> payloadKey
+  |>]
+];
+
+validLevelIBPBatchQ[batch_, ftData_Association, upperLevel_Integer] := Module[
+  {spec = levelIBPBatchSpec[ftData, upperLevel], needed},
+  If[spec === $Failed || !AssociationQ[batch], Return[False, Module]];
+  needed = spec["NeededIntegrals"];
+  TrueQ[Lookup[batch, "Schema", None] === $levelIBPBatchSchema &&
+    Lookup[batch, "Key", None] === spec["Key"] &&
+    Lookup[batch, "KeyRecord", None] === spec["KeyRecord"] &&
+    Lookup[batch, "UpperLevel", None] === upperLevel &&
+    Lookup[batch, "BoundaryRequests", None] === spec["BoundaryRequests"] &&
+    Lookup[batch, "NeededIntegrals", None] === needed &&
+    AssociationQ[Lookup[batch, "Reductions", None]] &&
+    AssociationQ[Lookup[batch, "CoefficientVectors", None]] &&
+    Lookup[batch, "PayloadKey", None] === levelIBPBatchPayloadKey[
+      batch["Reductions"], batch["CoefficientVectors"]] &&
+    AllTrue[needed, KeyExistsQ[batch["Reductions"], #] &&
+      KeyExistsQ[batch["CoefficientVectors"], #] &&
+      ListQ[batch["CoefficientVectors"][#]] &&
+      Length[batch["CoefficientVectors"][#]] ===
+        Length[spec["MastersAbove"]] &]]
+];
+
+resolveLevelIBPBatch[ftData_Association, upperLevel_Integer, batch_] := Which[
+  batch === Automatic,
+    PrepareLevelIBPBatch[ftData, upperLevel],
+  validLevelIBPBatchQ[batch, ftData, upperLevel],
+    batch,
+  True,
+    If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
+      Print["Error: stale or mismatched level IBP batch for level ",
+        upperLevel]];
+    $Failed
+];
+
+CollectLevelIBPSingularFactors[ftData_Association, level_Integer,
+    suppliedBatch_:Automatic] :=
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
-        combinedPositions, posI, posJ, topologyAbove, feynmanParamAbove,
-        varName, factors = {}, boundaryRequests, neededVecs, reductions},
+        feynmanParamAbove,
+        varName, factors = {}, boundaryRequests, reductions, batch},
 
   If[level <= 0 || !KeyExistsQ[ftData["Levels"], level] ||
      !KeyExistsQ[ftData["Levels"], level - 1],
@@ -1337,29 +1451,20 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
   levelAbove = ftData["Levels"][level];
   mastersAtLevel = levelData["Masters"];
   mastersAbove = levelAbove["Masters"];
-  combinedPositions = levelAbove["CombinedPositions"];
-  {posI, posJ} = combinedPositions;
-  topologyAbove = levelAbove["Topology"];
   feynmanParamAbove = levelAbove["FeynmanParameter"];
   varName = SymbolName[feynmanParamAbove];
-  boundaryRequests = BoundaryRequestRecords[mastersAtLevel, combinedPositions];
-  neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
-  reductions = If[neededVecs === {},
-    <||>,
-    FeynmanTrick`FIREInterface`ReduceIntegrals[topologyAbove, neededVecs]
-  ];
-  If[reductions === $Failed, Return[{}]];
+  batch = resolveLevelIBPBatch[ftData, level, suppliedBatch];
+  If[batch === $Failed,
+    Return[If[suppliedBatch === Automatic, {}, $Failed], Module]];
+  boundaryRequests = batch["BoundaryRequests"];
+  reductions = batch["Reductions"];
 
   Do[
-    Module[{request, neededVec, expr, ibpCoeffs},
+    Module[{request, neededVec, ibpCoeffs},
       request = boundaryRequests[[masterIdx]];
       neededVec = request["NeededVec"];
       If[!KeyExistsQ[reductions, neededVec], Continue[]];
-      expr = reductions[neededVec];
-      ibpCoeffs = Table[
-        Coefficient[expr, Global`G[1, mastersAbove[[j]]]],
-        {j, Length[mastersAbove]}
-      ];
+      ibpCoeffs = batch["CoefficientVectors"][neededVec];
 
       factors = Join[
         factors,
@@ -1391,11 +1496,10 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
 ];
 
 RequiredTransportEpsilonOrder[ftData_Association, level_Integer,
-    epsOrder_Integer, epsPrefactors_List:{}] :=
+    epsOrder_Integer, epsPrefactors_List:{}, suppliedBatch_:Automatic] :=
 Module[{levelData, levelBelow, mastersBelow, mastersAbove,
-        combinedPositions, posI, posJ, topologyAbove, prefacs,
-        required = epsOrder, maxProbe, boundaryRequests, neededVecs,
-        reductions, integrationPoleAllowance},
+        combinedPositions, prefacs, required = epsOrder, maxProbe,
+        boundaryRequests, reductions, integrationPoleAllowance, batch},
 
   If[level <= 0 || !KeyExistsQ[ftData["Levels"], level] ||
      !KeyExistsQ[ftData["Levels"], level - 1],
@@ -1410,8 +1514,6 @@ Module[{levelData, levelBelow, mastersBelow, mastersAbove,
   mastersBelow = levelBelow["Masters"];
   mastersAbove = levelData["Masters"];
   combinedPositions = levelData["CombinedPositions"];
-  {posI, posJ} = combinedPositions;
-  topologyAbove = levelData["Topology"];
   prefacs = If[ListQ[epsPrefactors] && Length[epsPrefactors] == Length[mastersAbove],
     epsPrefactors,
     Table[0, {Length[mastersAbove]}]
@@ -1434,23 +1536,19 @@ Module[{levelData, levelBelow, mastersBelow, mastersAbove,
     0
   ];
   required = Max[required, epsOrder + integrationPoleAllowance];
-  neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
-  reductions = If[neededVecs === {},
-    <||>,
-    FeynmanTrick`FIREInterface`ReduceIntegrals[topologyAbove, neededVecs]
-  ];
-  If[reductions === $Failed, Return[Max[0, Ceiling[required]]]];
+  batch = resolveLevelIBPBatch[ftData, level, suppliedBatch];
+  If[batch === $Failed,
+    Return[If[suppliedBatch === Automatic,
+      Max[0, Ceiling[required]], $Failed], Module]];
+  boundaryRequests = batch["BoundaryRequests"];
+  reductions = batch["Reductions"];
 
   Do[
-    Module[{request, neededVec, expr, ibpCoeffs, coeffLaurent},
+    Module[{request, neededVec, ibpCoeffs, coeffLaurent},
       request = boundaryRequests[[masterIdx]];
       neededVec = request["NeededVec"];
       If[!KeyExistsQ[reductions, neededVec], Continue[]];
-      expr = reductions[neededVec];
-      ibpCoeffs = Table[
-        Coefficient[expr, Global`G[1, mastersAbove[[j]]]],
-        {j, Length[mastersAbove]}
-      ];
+      ibpCoeffs = batch["CoefficientVectors"][neededVec];
 
       Do[
         If[ibpCoeffs[[j]] =!= 0,
@@ -1471,12 +1569,13 @@ Module[{levelData, levelBelow, mastersBelow, mastersAbove,
 ];
 
 ComputeLevelBoundary[ftData_Association, level_Integer,
-    transportResult_Association, epsOrder_Integer] :=
+    transportResult_Association, epsOrder_Integer,
+    suppliedBatch_:Automatic] :=
 Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
-        combinedPositions, posI, posJ, topologyAbove, bcValues,
+        combinedPositions, posI, posJ, bcValues,
         feynmanParamAbove, epsPrefactorsAbove, shiftedBoundary,
-        workingMaxPower, boundaryRequests, neededVecs, reductions,
-        preparedTransportResult},
+        workingMaxPower, boundaryRequests, reductions,
+        preparedTransportResult, batch},
 
   levelData = ftData["Levels"][level];
   levelAbove = ftData["Levels"][level + 1];
@@ -1484,7 +1583,6 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
   mastersAbove = levelAbove["Masters"];
   combinedPositions = levelAbove["CombinedPositions"];
   {posI, posJ} = combinedPositions;
-  topologyAbove = levelAbove["Topology"];
 
   (* Get the Feynman parameter for the level above - needed for IBP coefficient expansion *)
   feynmanParamAbove = levelAbove["FeynmanParameter"];
@@ -1513,18 +1611,15 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
     "EpsilonOrder",
     epsOrder + Max[epsPrefactorsAbove]
   ];
-  boundaryRequests = BoundaryRequestRecords[mastersAtLevel, combinedPositions];
-  neededVecs = DeleteDuplicates[#["NeededVec"] & /@ boundaryRequests];
-  reductions = If[neededVecs === {},
-    <||>,
-    FeynmanTrick`FIREInterface`ReduceIntegrals[topologyAbove, neededVecs]
-  ];
-  If[reductions === $Failed,
+  batch = resolveLevelIBPBatch[ftData, level + 1, suppliedBatch];
+  If[batch === $Failed,
     If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
       Print["  Warning: IBP batch reduction failed for level ", level];
     ];
     Return[$Failed];
   ];
+  boundaryRequests = batch["BoundaryRequests"];
+  reductions = batch["Reductions"];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["Computing boundary for level ", level, " from level ", level + 1];
@@ -1540,8 +1635,7 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
 
   (* For each master at the current level *)
   bcValues = Table[
-    Module[{masterVec, vi, vj, neededVec, case, reduction, expr,
-            ibpCoeffs, totalBC},
+    Module[{masterVec, vi, vj, neededVec, case, ibpCoeffs, totalBC},
 
       Module[{request = boundaryRequests[[masterIdx]]},
         masterVec = request["MasterVec"];
@@ -1563,14 +1657,8 @@ Module[{levelData, levelAbove, mastersAtLevel, mastersAbove,
         Return[LaurentZero[0, workingMaxPower], Module];
       ];
 
-      (* Extract the reduction expression *)
-      expr = reductions[neededVec];
-
-      (* Extract coefficient of each master G[1, masters_j] *)
-      ibpCoeffs = Table[
-        Coefficient[expr, Global`G[1, mastersAbove[[j]]]],
-        {j, Length[mastersAbove]}
-      ];
+      (* Reuse the coefficient vector extracted once with the FIRE request. *)
+      ibpCoeffs = batch["CoefficientVectors"][neededVec];
 
       If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
         Print["    IBP coefficients: ", ibpCoeffs];
@@ -1678,7 +1766,7 @@ FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline[
         updatedFtData, transportEpsOrder, boundaryWorkingOrder,
         finalBoundary, extraSingularFactors, homogeneousSolve,
         useRationalRecurrence, integrationStrategy, estimateError, checkpointDir,
-        stopAfterBoundaryLevel, divisionOrder},
+        stopAfterBoundaryLevel, divisionOrder, levelIBPBatch},
 
   precision = OptionValue["WorkingPrecision"];
   expOrder = OptionValue["ExpansionOrder"];
@@ -1755,10 +1843,18 @@ FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline[
       Print["\n  Processing level ", level, "..."];
     ];
 
+    (* Resolve the complete per-level boundary request set once.  The three
+       consumers below share this exact in-memory result even when the general
+       FIRE reduction cache is disabled. *)
+    levelIBPBatch = PrepareLevelIBPBatch[updatedFtData, level];
+    If[levelIBPBatch === $Failed,
+      Print["Error: FIRE boundary reduction batch failed at level ", level];
+      Return[$Failed]];
+
     (* Get matrix directory for this level *)
     matrixDir = FileNameJoin[{outputDir, "Level_" <> ToString[level] <> "_Matrices"}];
     Module[{requiredOrder = RequiredTransportEpsilonOrder[
-        updatedFtData, level, epsOrder, currentPrefactors
+        updatedFtData, level, epsOrder, currentPrefactors, levelIBPBatch
       ]},
       transportEpsOrder = Min[Length[First[currentBCs]] - 1, requiredOrder];
       If[transportEpsOrder < requiredOrder,
@@ -1786,7 +1882,11 @@ FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline[
       Return[$Failed];
     ];
 
-    extraSingularFactors = CollectLevelIBPSingularFactors[updatedFtData, level];
+    extraSingularFactors = CollectLevelIBPSingularFactors[
+      updatedFtData, level, levelIBPBatch];
+    If[extraSingularFactors === $Failed,
+      Print["Error: stale FIRE boundary reduction batch at level ", level];
+      Return[$Failed]];
     If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2 &&
        Length[extraSingularFactors] > 0,
       Print["  Extra IBP segmentation factors: ", extraSingularFactors];
@@ -1818,7 +1918,7 @@ FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline[
 
     (* Compute boundary for level-1 by integration *)
     levelBoundary = ComputeLevelBoundary[
-      updatedFtData, level - 1, transportResult, epsOrder
+      updatedFtData, level - 1, transportResult, epsOrder, levelIBPBatch
     ];
 
     If[AssociationQ[levelBoundary],

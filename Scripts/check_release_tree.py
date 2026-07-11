@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Fail when a clean DiffExp 2 release tracks files outside its allowlist."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+ROOT_FILES = {
+    ".gitignore",
+    "CITATION.cff",
+    "CHANGELOG.md",
+    "CMakeLists.txt",
+    "DiffExp2.m",
+    "FeynmanTrick.m",
+    "LICENSE",
+    "PacletInfo.wl",
+    "README.md",
+}
+
+WHOLE_PREFIXES = (
+    "DiffExp2/",
+    "cpp/",
+    "FeynmanTrick/",
+    "Examples/",
+)
+
+DOC_FILES = {
+    "Docs/API.md",
+    "Docs/AnalyticContinuation.md",
+    "Docs/Citation.md",
+    "Docs/CppBackend.md",
+    "Docs/DirectSolver.md",
+    "Docs/FeynmanTrick.md",
+    "Docs/Installation.md",
+    "Docs/Migration.md",
+    "Docs/QuickStart.md",
+    "Docs/ReleaseManifest.md",
+    "Docs/Results.md",
+}
+
+SCRIPT_FILES = {
+    "Scripts/FTExamples.m",
+    "Scripts/banana4_bessel_oracle.m",
+    "Scripts/check_release_tree.py",
+    "Scripts/run_ft_stepwise2.m",
+    "Scripts/run_release_tests.sh",
+}
+
+TEST_FILES = {
+    "Tests/test_api.m",
+    "Tests/test_banana4_bessel_oracle.m",
+    "Tests/test_config.m",
+    "Tests/test_cpp_arm_batch.m",
+    "Tests/test_cpp_backend.m",
+    "Tests/test_eps_series.m",
+    "Tests/test_feynmantrick_algebra.m",
+    "Tests/test_feynmantrick_failure_semantics.m",
+    "Tests/test_fire_inmemory_reduction_cache.m",
+    "Tests/test_fire_level_reduction_batch.m",
+    "Tests/test_feynmantrick_fire.m",
+    "Tests/test_feynmantrick_iteration.m",
+    "Tests/test_ft_example_specs.m",
+    "Tests/test_ft_pipeline_facade.m",
+    "Tests/test_ft_pipeline_process.m",
+    "Tests/test_ft_ladder_checkpointing.m",
+    "Tests/test_indicial.m",
+    "Tests/test_integrate.m",
+    "Tests/test_path_planner_algebraic.m",
+    "Tests/test_paclet_metadata.m",
+    "Tests/test_public_api.m",
+    "Tests/test_sectorseries.m",
+    "Tests/test_solve.m",
+    "Tests/test_tolerances.m",
+    "Tests/test_transport.m",
+}
+
+FIXTURE_FILES = {
+    "Tests/refs/bench/banana_L1.m",
+    "Tests/refs/oracle_logs/MANIFEST.md",
+    "Tests/refs/oracle_logs/l2_banana.log",
+    "Tests/refs/oracle_logs/l2_bubsun.log",
+}
+
+EXACT_FILES = ROOT_FILES | DOC_FILES | SCRIPT_FILES | TEST_FILES | FIXTURE_FILES
+REQUIRED_FILES = EXACT_FILES
+
+
+def tracked_files() -> set[str]:
+    raw = subprocess.check_output(
+        ["git", "ls-files", "-z"], cwd=ROOT
+    ).decode("utf-8")
+    return {item for item in raw.split("\0") if item}
+
+
+def allowed(path: str) -> bool:
+    return path in EXACT_FILES or path.startswith(WHOLE_PREFIXES)
+
+
+def main() -> int:
+    tracked = tracked_files()
+    unexpected = sorted(path for path in tracked if not allowed(path))
+    missing = sorted(REQUIRED_FILES - tracked)
+
+    if unexpected:
+        print("Unexpected tracked release files:", file=sys.stderr)
+        for path in unexpected:
+            print(f"  {path}", file=sys.stderr)
+    if missing:
+        print("Missing required release files:", file=sys.stderr)
+        for path in missing:
+            print(f"  {path}", file=sys.stderr)
+
+    if unexpected or missing:
+        return 1
+    print(f"Release tree allowlist passed ({len(tracked)} tracked files).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

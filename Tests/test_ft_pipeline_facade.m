@@ -14,9 +14,30 @@ plan = FeynmanTrick`PipelinePlan["bubble",
   "WorkingPrecision" -> 250,
   "ExpansionOrder" -> 40,
   "CppThreads" -> 6,
+  "FIREPath" -> FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}],
   "LevelEpsilonHalos" -> {0, 4}];
 
+rootFacadeDefinitions = DownValues[FeynmanTrick`PipelinePlan];
+Get[FileNameJoin[{repoRoot, "FeynmanTrick.m"}]];
+
 assert["pipeline plan is an association", AssociationQ[plan]];
+assert["Feynman-trick release version is exported",
+  StringQ[FeynmanTrick`$FeynmanTrickVersion] &&
+  StringQ[FeynmanTrick`$FeynmanTrickVersion::usage]];
+assert["root Feynman-trick loader is idempotent",
+  DownValues[FeynmanTrick`PipelinePlan] === rootFacadeDefinitions &&
+  First[$ContextPath] === "FeynmanTrick`"];
+assert["supported example registry is centralized",
+  ContainsAll[FeynmanTrick`SupportedExamples[],
+    {"bubble", "banana_unequal", "banana4_unequal", "kite"}]];
+assert["unknown examples fail before launching a child",
+  FailureQ[FeynmanTrick`PipelinePlan["definitely_not_an_example"]]];
+assert["invalid FIRE paths fail in the parent plan",
+  FailureQ[FeynmanTrick`PipelinePlan["bubble", "FIREPath" -> ""]] &&
+  FailureQ[FeynmanTrick`PipelinePlan["bubble", "FIREPath" -> 17]]];
+assert["malformed typed plans fail before process construction",
+  FailureQ[FeynmanTrick`RunIntegrationPipeline[
+    <|"Schema" -> "FeynmanTrick.PipelinePlan/v1"|>]]];
 assert["root facade and legacy implementation keep separate contexts",
   Context[FeynmanTrick`RunIntegrationPipeline] === "FeynmanTrick`" &&
   Context[FeynmanTrick`DiffExpIntegration`RunIntegrationPipeline] ===
@@ -31,8 +52,12 @@ assert["C++ recurrence is the facade default",
   plan["Environment", "DE2_RECURRENCE_BACKEND"] === "Cpp"];
 assert["fast transport settings are explicit",
   plan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
-  plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&
-  plan["Environment", "DE2_CPP_THREADS"] === "6"];
+    plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&
+    plan["Environment", "DE2_CPP_THREADS"] === "6"];
+assert["FIRE installation path is explicit and reproducible",
+  plan["Environment", "FT_FIRE_PATH"] ===
+    ExpandFileName[FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}]] &&
+  plan["Settings", "FIREPath"] === plan["Environment", "FT_FIRE_PATH"]];
 assert["epsilon halos serialize deterministically",
   plan["Environment", "FT_LEVEL_EPS_HALOS"] === "0,4"];
 assert["argv does not use a shell",

@@ -33,6 +33,8 @@ tests=(
   Tests/test_feynmantrick_algebra.m
   Tests/test_ft_example_specs.m
   Tests/test_feynmantrick_failure_semantics.m
+  Tests/test_fire_inmemory_reduction_cache.m
+  Tests/test_fire_level_reduction_batch.m
   Tests/test_feynmantrick_fire.m
   Tests/test_feynmantrick_iteration.m
   Tests/test_feynmantrick_integration_edge_cases.m

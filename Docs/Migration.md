@@ -12,33 +12,32 @@ Old:
 Get["/path/to/DiffExp/DiffExp.m"];
 ```
 
-Current DiffExp 2 snapshot:
+DiffExp 2:
 
 ```mathematica
-Get["/path/to/DiffExp2/DiffExp2/DiffExp2.m"];
+Get["/path/to/diffexp2/DiffExp2.m"];
 ```
 
-The repository-root ``DiffExp.m`` still loads the legacy modular package in
-the prototype snapshot.  A clean release must replace it with a DiffExp 2
-loader or remove the ambiguity; the documentation does not pretend this has
-already happened.
+During development, repository-root ``DiffExp.m`` still loads the legacy
+modular package. Load ``DiffExp2.m`` explicitly; the clean release removes
+that ambiguity.
 
 ## Workflow mapping
 
 | DiffExp 1 concept | DiffExp 2 replacement |
 | --- | --- |
-| ``LoadConfiguration`` | ``DiffExp2`Config`LoadConfiguration`` |
-| matrix directory with epsilon slices | ``DiffExp2`API`LoadSystem`` with an exact matrix or ``d<var>_full.m`` |
-| ``PrepareBoundaryConditions`` | finite coefficient array at a regular anchor; a friendly closed-form wrapper is still missing |
-| ``TransportTo`` | ``DiffExp2`API`TransportEndpoint`` |
-| explicit line segmentation | ``SegmentLine`` followed by ``TransportLine`` |
-| saved segment expansions | ``transport["Charts"]`` with one exact ``LocalSolution`` per chart |
-| ``DefiniteIntegral`` / prefactor variants | ``DiffExp2`API`LineIntegral`` |
-| singular endpoint limit | ``DiffExp2`API`EndpointLimitValues`` |
-| ``DecomposeSingularity`` | ``DiffExp2`SectorSeries`SectorDecomposition`` |
-| ordinary epsilon ``SeriesData`` | ``DiffExp2`EpsSeries`` with an honest Laurent window |
+| ``LoadConfiguration`` | ``DiffExp2`LoadConfiguration`` |
+| matrix directory with epsilon slices | ``DiffExp2`LoadSystem`` with an exact matrix or ``d<var>_full.m`` |
+| ``PrepareBoundaryConditions`` | ``DiffExp2`PrepareBoundary`` for finite regular-anchor expressions |
+| ``TransportTo`` | ``DiffExp2`TransportEndpoint`` |
+| explicit line segmentation | ``PlanLine`` followed by ``TransportLine`` |
+| saved segment expansions | ``LineSegments[result]`` with one exact ``LocalSolution`` per chart |
+| ``DefiniteIntegral`` / prefactor variants | ``DiffExp2`IntegrateLine`` |
+| singular endpoint limit | ``DiffExp2`EndpointLimit`` |
+| ``DecomposeSingularity`` | ``DiffExp2`LocalBehavior`` / ``ExactSectors`` |
+| ordinary epsilon ``SeriesData`` | honest ``EpsilonWindow`` and coefficient accessors |
 | Wronskian/VOP/recurrence strategy selection | one strict recurrence solver, with C++ or Wolfram execution backend |
-| ``ToPiecewise`` / plot helpers | inspect and evaluate ``result["Charts"]``; convenience wrappers are not yet ported |
+| ``ToPiecewise`` / plot helpers | ``PiecewiseSolution`` and ``LineSegments`` |
 
 ## Configuration changes
 
@@ -70,8 +69,8 @@ segmentation and Mobius chart maps are not part of the current solver.
 ## Boundary values
 
 DiffExp 1 accepted several convenient closed-form and wildcard boundary
-formats.  The current direct DiffExp 2 API expects a finite rectangular array
-at a regular anchor:
+formats. The direct DiffExp 2 API accepts a finite rectangular array at a
+regular anchor:
 
 ```text
 boundary[[master, k+1]] = coefficient of eps^k.
@@ -89,10 +88,10 @@ boundary = Transpose@Table[
 ];
 ```
 
-A release-friendly wrapper that accepts closed expressions and exposes their
-normalization is still needed.  Do not emulate missing data by inserting zero
-coefficients: DiffExp 2's ``EpsSeries`` window exists specifically to prevent
-that ambiguity.
+For finite expressions, ``PrepareBoundary[{f1[eps],f2[eps]}]`` constructs the
+same array at the configured epsilon order. Pole-normalized boundaries still
+need an explicit ``LocalSolution`` so their negative lower window is not
+discarded. Do not emulate missing data by inserting zero coefficients.
 
 ## Matrix format
 
@@ -100,10 +99,9 @@ DiffExp 1 commonly loaded files such as ``dx_0.m``, ``dx_1.m``, and so on.
 DiffExp 2 requires the exact epsilon-rational matrix:
 
 ```mathematica
-DiffExp2`API`LoadSystem[<|
-  "FullMatrixFile" -> "/path/to/dx_full.m",
-  "Variable" -> Global`x
-|>]
+DiffExp2`LoadSystem[
+  "/path/to/dx_full.m", "Variable" -> Global`x
+]
 ```
 
 This is required for exact indicial exponents, resonance decisions, Laurent
@@ -138,16 +136,16 @@ result["Charts"]
 result["ErrorEstimate"]
 ```
 
-Read values with ``ESCoefficient`` and retain the window metadata until final
+Read values with ``EpsilonCoefficient`` and retain the window metadata until final
 presentation.  To inspect exact singular behavior:
 
 ```mathematica
-DiffExp2`SectorSeries`SectorDecomposition[result["Final"]]
+DiffExp2`ExactSectors[result]
 ```
 
 ## Integration
 
-``LineIntegral`` takes a coefficient vector with one rational function per
+``IntegrateLine`` takes a coefficient vector with one rational function per
 master and combines the scalar observable before endpoint regularization.  If
 an IBP coefficient introduces additional poles, pass their factors through
 ``"ExtraSingularFactors"`` so segmentation sees them before multiplication.
@@ -158,23 +156,24 @@ computed and added manually when only their combination is finite.
 
 ## Feynman-trick migration
 
-Use ``Scripts/run_ft_stepwise2.m``, not the legacy
-``Scripts/run_ft_stepwise.m``.  The DiffExp 2 runner consumes the exact
+Use ``FeynmanTrick`RunIntegrationPipeline`` (or its underlying
+``Scripts/run_ft_stepwise2.m`` runner), not the legacy
+``Scripts/run_ft_stepwise.m``. The DiffExp 2 runner consumes the exact
 in-memory differential matrix, transports exact local sectors, supports
 separate FIRE preparation caches and ladder checkpoints, and refuses
 incomplete epsilon windows.
 
-The current CLI remains more mature than the public Wolfram facade.  Existing
-research notebooks should invoke a named example or extract a stable public
-driver before release, rather than calling private runner helpers.
+The public facade accepts one named registry example and preserves the runner's
+prepared FIRE cache and atomic ladder checkpoints. Custom topology objects
+still use the lower-level iteration API.
 
 ## Features not yet restored as friendly wrappers
 
-- closed-form boundary preparation and ``"?"`` wildcard handling;
-- high-level full-line and arbitrary line-chain convenience functions;
-- ``ToPiecewise`` and plot helpers;
-- a top-level namespace with short names;
-- a one-call Feynman-trick API;
+- ``"?"`` wildcard boundary handling and pole-normalized closed-form
+  boundaries (finite regular-anchor expressions are supported);
+- arbitrary multi-leg line-chain convenience functions;
+- a dedicated plotting-style helper (piecewise evaluation is supported);
+- custom-topology objects in the one-call Feynman-trick facade;
 - automatic rationalizing transformations for square roots in the input
   basis.
 

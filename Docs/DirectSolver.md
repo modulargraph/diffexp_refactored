@@ -13,17 +13,16 @@ a certified chain of affine charts.
 ## 1. Load the package and configuration
 
 ```mathematica
-Get["/absolute/path/to/DiffExp2/DiffExp2/DiffExp2.m"];
+Get["/absolute/path/to/diffexp2/DiffExp2.m"];
 
-DiffExp2`Config`LoadConfiguration[{
-  "RecurrenceBackend" -> "Cpp",
+DiffExp2`LoadConfiguration[
   "WorkingPrecision" -> 200,
   "ExpansionOrder" -> 50,
   "EpsilonOrder" -> 4,
   "DivisionOrder" -> 3,
   "RadiusOfConvergence" -> 1,
   "DeltaPrescriptions" -> {}
-}];
+];
 ```
 
 `LoadConfiguration` resets every key to its schema default and then applies
@@ -38,7 +37,7 @@ From a Wolfram expression:
 x = Global`x;
 eps = Global`eps;
 
-sys = DiffExp2`API`LoadSystem[<|
+sys = DiffExp2`LoadSystem[<|
   "Matrix" -> {
     {0, 1/x},
     {eps/(1 - x), 0}
@@ -50,10 +49,9 @@ sys = DiffExp2`API`LoadSystem[<|
 Or from an exact full-matrix export:
 
 ```mathematica
-sys = DiffExp2`API`LoadSystem[<|
-  "FullMatrixFile" -> "/absolute/path/to/dx_full.m",
-  "Variable" -> x
-|>];
+sys = DiffExp2`LoadSystem[
+  "/absolute/path/to/dx_full.m", "Variable" -> x
+];
 ```
 
 The file must evaluate to a matrix.  Truncated `dx_0.m`, `dx_1.m`, … slice
@@ -64,9 +62,12 @@ decisions require the full epsilon-rational matrix.
 
 ```text
 <|
+  "Schema" -> "DiffExp2.System/v1",
   "Matrix" -> A,
   "Variable" -> x,
-  "SingularFactors" -> {...}
+  "SingularFactors" -> {...},
+  "Dimension" -> Length[A],
+  "Source" -> ...
 |>
 ```
 
@@ -84,7 +85,16 @@ For a finite boundary at `x0`, use a rectangular list:
 }
 ```
 
-For example:
+For example, closed expressions can be expanded without manually transposing
+coefficient tables:
+
+```mathematica
+boundary = DiffExp2`PrepareBoundary[
+  {1, 2^(1-eps)}, "EpsilonOrder" -> 4
+];
+```
+
+The equivalent explicit array is:
 
 ```mathematica
 boundary = {
@@ -104,7 +114,7 @@ use finite arrays at regular anchors.
 The short form is:
 
 ```mathematica
-result = DiffExp2`API`TransportEndpoint[
+result = DiffExp2`TransportEndpoint[
   sys, boundary, x0, x1,
   "ExtraSingularFactors" -> extraFactors
 ];
@@ -118,16 +128,11 @@ in segmentation before it is multiplied into a local solution.
 To inspect or reuse the segmentation:
 
 ```mathematica
-transportSystem = Join[sys, <|
-  "ExtraSingularFactors" -> extraFactors
-|>];
-
-singularities = DiffExp2`Transport`FindSingularities[transportSystem];
-plan = DiffExp2`Transport`SegmentLine[transportSystem, {x0, x1}];
-DiffExp2`Transport`ValidatePlan[plan];
-
-result = DiffExp2`Transport`TransportLine[
-  transportSystem, boundary, plan
+plan = DiffExp2`PlanLine[
+  sys, {x0, x1}, "ExtraSingularFactors" -> extraFactors
+];
+result = DiffExp2`TransportLine[
+  sys, boundary, plan
 ];
 ```
 
@@ -142,6 +147,8 @@ The implemented result record contains:
 
 | Key | Meaning |
 | --- | --- |
+| `"Schema"` | `"DiffExp2.TransportResult/v1"` |
+| `"Plan"` | the validated line plan used for this transport |
 | `"Value"` | `EpsSeries` of the vector at a regular endpoint; `None` at a singular endpoint |
 | `"Final"` | final `LocalSolution`, including exact sectors |
 | `"Charts"` | ordered list of `<|"Chart", "LocalSolution"|>` records |
@@ -152,14 +159,14 @@ The implemented result record contains:
 Read a coefficient without discarding window metadata:
 
 ```mathematica
-eps0Vector = DiffExp2`EpsSeries`ESCoefficient[result["Value"], 0];
-window = DiffExp2`EpsSeries`ESWindow[result["Value"]];
+eps0Vector = DiffExp2`EpsilonCoefficient[result, 0];
+window = DiffExp2`EpsilonWindow[result];
 ```
 
 Convert to a plain expression only at an API or presentation boundary:
 
 ```mathematica
-plain = DiffExp2`EpsSeries`ESToExpression[result["Value"], eps];
+plain = DiffExp2`EpsilonExpression[result["Value"], eps];
 ```
 
 ## 5. Inspect segments and evaluate a chart
@@ -174,23 +181,22 @@ t = (x - chartCenter) / chartScale.
 Evaluate a retained local solution inside its radius:
 
 ```mathematica
-entry = First[result["Charts"]];
-chart = entry["Chart"];
-local = entry["LocalSolution"];
-t = (probeX - chart["Center"])/chart["Scale"];
+segment = First[DiffExp2`LineSegments[result]];
+local = segment["LocalSolution"];
+t = (probeX - segment["Center"])/segment["Scale"];
 
-evaluated = DiffExp2`SectorSeries`EvaluateLocalSolution[local, t];
-probeVector = DiffExp2`EpsSeries`ESCoefficient[
-  evaluated["Value"], 0
-];
+evaluated = DiffExp2`EvaluateLocal[local, t];
+probeVector = DiffExp2`EpsilonCoefficient[evaluated, 0];
 ```
 
-`EvaluateLocalSolution` refuses points outside the chart radius.  It also
+`EvaluateLocal` refuses points outside the chart radius. It also
 refuses a negative point on a multivalued chart unless an unambiguous
 prescription supplies the imaginary side.
 
-There is not yet a public `PlotSolution` convenience function.  The release
-example builds a plot from these records without private symbols:
+`DiffExp2`PiecewiseSolution[result]["Function"]` is suitable for sampling in
+`Plot` or for building custom data. There is no dedicated `PlotSolution`
+styling wrapper. The release example builds a singular-endpoint plot from the
+same public records:
 [SingularEndpointAndSegments.wl](../Examples/Direct/SingularEndpointAndSegments.wl).
 
 ## 6. Exact local behavior and singular endpoints
@@ -198,8 +204,8 @@ example builds a plot from these records without private symbols:
 At a singular chart, use:
 
 ```mathematica
-decomposition = DiffExp2`SectorSeries`SectorDecomposition[result["Final"]];
-tags = KeyTake[#, {"a", "b", "p"}] & /@ decomposition["Sectors"];
+sectors = DiffExp2`ExactSectors[result];
+tags = KeyTake[#, {"a", "b", "p", "Exponent", "LogPower"}] & /@ sectors;
 ```
 
 A sector represents
@@ -214,7 +220,7 @@ indicial/log-chain data.
 For an epsilon-independent scalar observable at a singular endpoint:
 
 ```mathematica
-limit = DiffExp2`API`EndpointLimitValues[result, coefficientVector];
+limit = DiffExp2`EndpointLimit[result, coefficientVector];
 ```
 
 The components are combined before the dimensional-regularization drop rule
@@ -226,7 +232,7 @@ objects; the current public API does not yet wrap that expert operation.
 ## 7. Integrate over a line
 
 ```mathematica
-integral = DiffExp2`API`LineIntegral[
+integral = DiffExp2`IntegrateLine[
   sys,
   boundary,
   anchor,
@@ -250,8 +256,8 @@ order is deliberate: divergent component integrals may cancel in the requested
 observable.
 
 If transports were already computed, `"PrecomputedCharts" -> charts` reuses
-their chart records.  This option is implemented for the Feynman-trick ladder;
-ordinary callers should normally let `LineIntegral` plan the interval.
+their chart records. This is primarily an expert/Feynman-trick optimization;
+ordinary callers should normally let `IntegrateLine` plan the interval.
 
 ## Failure semantics
 

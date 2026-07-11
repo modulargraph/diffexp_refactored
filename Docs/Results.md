@@ -41,7 +41,7 @@ Two compiled routes were compared on the development Mac:
 
 | Route | Settings | Timed scope | Seconds | Scalar | Oracle agreement |
 | --- | --- | --- | ---: | ---: | ---: |
-| direct 15-master transport | WP250, EO50, epsilon through 4, division 3 | exact slice audit, reconstruction, planning, transport | 46.770 | ``5.8340272926621494708226551820`` | 18.2 digits |
+| direct differential system (15 masters) | WP250, EO50, epsilon through 4, division 3 | exact slice audit, reconstruction, planning, transport | 46.770 | ``5.8340272926621494708226551820`` | 18.2 digits |
 | Feynman-trick ladder | WP500, EO70, finite coefficient, extra order 10, halos ``0,4,7`` | analytic deepest boundary and full warm ladder | 390.286 | ``5.8340272926621494674057011919652947`` | 20.8 digits |
 
 The direct timing excludes FIRE matrix generation and its frozen seed
@@ -66,8 +66,8 @@ eps^0    -4.877139662454516944362515776161
 ```
 
 Every displayed coefficient agrees with the stored oracle to about
-``1.4e-12`` absolute or better.  The detailed validation record is
-[Additional Euclidean FeynmanTrick topologies](FeynmanTrickAdditionalTopologies.md#diffexp2-box-bubble-validation).
+``1.4e-12`` absolute or better. The full development audit records the same
+coefficients and normalization; this page keeps the curated release pin.
 
 ## Massive kite
 
@@ -95,14 +95,14 @@ configuration-space Bessel moment is
 ```
 
 The standalone evaluator is
-[Scripts/banana4_bessel_oracle.m](../Scripts/banana4_bessel_oracle.m).  In the
-snapshot used for this release-docs prototype, this number is an independent
+[Scripts/banana4_bessel_oracle.m](../Scripts/banana4_bessel_oracle.m). This
+number is an independent
 epsilon-zero oracle, not evidence that the complete DiffExp 2 four-loop ladder
 finished.
 
 The unequal-mass fixture with squared masses
-``{2,3/2,4/3,5/4,1}`` is present as ``banana4_unequal``.  No completed,
-source-controlled ladder result was present in the prototype snapshot, so the
+``{2,3/2,4/3,5/4,1}`` is present as ``banana4_unequal``. No completed,
+source-controlled ladder result is currently present, so the
 release example is explicitly experimental and this page does not publish a
 solver value for it.
 

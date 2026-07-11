@@ -99,9 +99,8 @@ batches currently run single-threaded.
 ### Lower/upper endpoint arms in one Wolfram kernel
 
 `run_ft_stepwise2.m` can also batch the boundary-independent homogeneous bases
-for corresponding lower/upper endpoint charts. Enable the experimental path
-with `FT_CPP_BATCH_ENDPOINT_ARMS=1` together with
-`DE2_RECURRENCE_BACKEND=Cpp`.
+for corresponding lower/upper endpoint charts. The release runner requests
+this schedule by default; set `FT_CPP_BATCH_ENDPOINT_ARMS=0` to disable it.
 There is still only one Wolfram evaluator: planning, matching, transport state,
 endpoint limits, integration, and checkpoint writes remain sequential. Before
 the marches, Wolfram prepares one chart from each arm and sends their recurrence
@@ -121,7 +120,13 @@ No subkernel or second Wolfram license is opened. Native
 prewarming is pure cache state and never records a completed arm: the lower
 transport is still written atomically before the upper march, and a resumed
 checkpoint computes only its missing arm. Boundary-dependent value transport
-(`DE2_VALUE_TRANSPORT=1`) intentionally uses the sequential route.
+(`DE2_VALUE_TRANSPORT=1`) intentionally uses the sequential value route, so
+requesting both defaults does not mean the homogeneous prewarm is active.
+
+Native C++ workers do not consume extra Wolfram licenses. The public
+Feynman-trick facade does launch the runner in a separate `wolframscript`
+process, however, so calling it from an already running kernel can occupy a
+second Wolfram seat.
 
 Exact analytic regulators retain the same contract. If a collected request
 uses the symbolic rational-function field, the native dispatcher keeps that

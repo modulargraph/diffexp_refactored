@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: >-
+  If you use DiffExp 2, please cite this software and the method papers listed
+  in Docs/Citation.md.
+title: DiffExp 2
+type: software
+authors:
+  - family-names: Hidding
+    given-names: Martijn
+version: 2.0.0-dev
+license: GPL-3.0-or-later
+repository-code: https://github.com/modulargraph/diffexp_refactored
+url: https://github.com/modulargraph/diffexp_refactored
+keywords:
+  - Feynman integrals
+  - differential equations
+  - dimensional regularization
+  - Wolfram Language
+  - C++

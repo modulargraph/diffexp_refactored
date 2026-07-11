@@ -16,6 +16,10 @@ FrontEnd/*
 *.tmp
 *~
 
+# Python
+__pycache__/
+*.py[cod]
+
 # External packages (cloned repos)
 kira/
 Dependencies/

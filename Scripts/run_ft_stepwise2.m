@@ -29,6 +29,8 @@ If[FailureQ[runnerSettings],
   Print["Invalid Feynman-trick runner environment: ", runnerSettings];
   Exit[2]];
 
+FeynmanTrick`SetFTOption["FIREPath", runnerSettings["FIREPath"]];
+
 singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
 recurrenceBackend = runnerSettings["RecurrenceBackend"];
 cppBatchEndpointArms = runnerSettings["BatchEndpointArms"];
@@ -83,9 +85,10 @@ allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
    transport settings.  Persist both the populated ftData and FIRE's
    in-memory reduction cache so a fresh Wolfram process can resume at the
    transport ladder.  The key covers topology/sequence/dimension and every
-   FeynmanTrick source file; edits to this runner or DiffExp2 intentionally
+   FeynmanTrick source file, while each exact reduction key embeds the
+   setup-time FIRE fingerprint.  Edits to this runner or DiffExp2 intentionally
    do not invalidate preparation.  FT_REBUILD_PREP=1 forces a rebuild. *)
-$ftPrepCacheVersion = 1;
+$ftPrepCacheVersion = 2;
 $ftPrepSourceFingerprint = Hash[
   ({#, FileHash[#, "SHA256"]} & /@ Sort[FileNames["*.m",
     FileNameJoin[{repoRoot, "FeynmanTrick"}], Infinity]]), "SHA256"];
@@ -113,9 +116,10 @@ requiredReductionKeys[data_] := Flatten[Table[
     topo = ld["Topology"];
     reqs = FeynmanTrick`DiffExpIntegration`Private`BoundaryRequestRecords[
       below["Masters"], ld["CombinedPositions"]];
-    Map[Function[req, {topo["WorkDirectory"], topo["Name"],
-      topo["ProblemNumber"], topo["NumPropagators"],
-      PadRight[req["NeededVec"], topo["NumPropagators"], 0]}], reqs]],
+    Map[Function[req,
+      FeynmanTrick`FIREInterface`Private`reductionCacheKey[topo,
+        FeynmanTrick`FIREInterface`Private`normalizeIntegralIndex[
+          topo, req["NeededVec"]]]], reqs]],
   {level, 1, data["NumLevels"]}], 1];
 
 preparedReductionCacheQ[data_, rc_] := AssociationQ[rc] &&
@@ -128,7 +132,9 @@ ftPrepKey[name_, topology_, sequence_] := Hash[{
   $ftPrepCacheVersion, $Version, name, topology, sequence,
   FeynmanTrick`Private`DimensionExpression[],
   Lookup[FeynmanTrick`Private`$FTConfig,
-    {"DimensionVariable", "EpsilonSymbol", "FixedParameterValue"}],
+    {"DimensionVariable", "EpsilonSymbol", "FixedParameterValue",
+      "AutoDetectRestrictions"}],
+  FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[],
   $ftPrepSourceFingerprint}, "SHA256"];
 
 ftPrepFile[name_, key_] := FileNameJoin[{prepCacheRoot,
@@ -482,14 +488,14 @@ runExample[name_String] := Module[
   abortRes = Catch[
   Do[Module[
     {levelData = ftData["Levels"][level], levelBelow = ftData["Levels"][level - 1],
-     var, A, sys, mastersBelow, mastersHere, requests, neededVecs, reductions,
+     var, A, sys, mastersBelow, mastersHere, requests, reductions,
      extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop, ftEps, dimVar,
      dimExpr, normalizeFT, trLoCache, trHiCache, chartCache,
      resumeTransport, levelExpansionOrder, needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
      transportSys = None, planLo = None, planHi = None, armReq,
      loPlanCharts, hiPlanCharts, armRounds, armBatchResult,
-     armUniqueCharts, armCacheCapacity},
+     armUniqueCharts, armCacheCapacity, levelIBPBatch, rawExtraFacs},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -520,15 +526,20 @@ runExample[name_String] := Module[
       sys = catch2[DiffExp2`API`LoadSystem[
         <|"Matrix" -> A, "Variable" -> var|>]];
       If[FailureQ[sys], Print["LOAD FAIL ", sys]; Return[$Failed, Module]];
-      requests = FeynmanTrick`DiffExpIntegration`Private`BoundaryRequestRecords[
-        mastersBelow, levelData["CombinedPositions"]];
-      neededVecs = DeleteDuplicates[#["NeededVec"] & /@ requests];
-      reductions = FeynmanTrick`FIREInterface`ReduceIntegrals[
-        levelData["Topology"], neededVecs];
-      If[reductions === $Failed, Print["FIRE FAIL"]; Return[$Failed, Module]];
-      extraFacs = normalizeFT[
+      levelIBPBatch =
+        FeynmanTrick`DiffExpIntegration`Private`PrepareLevelIBPBatch[
+          ftData, level];
+      If[levelIBPBatch === $Failed,
+        Print["FIRE FAIL"]; Return[$Failed, Module]];
+      requests = levelIBPBatch["BoundaryRequests"];
+      reductions = levelIBPBatch["Reductions"];
+      rawExtraFacs =
         FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
-          ftData, level]]];
+          ftData, level, levelIBPBatch];
+      If[rawExtraFacs === $Failed,
+        Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];
+      extraFacs = normalizeFT[rawExtraFacs];
+    ];
     (* configure DiffExp2 for this level *)
     catch2[DiffExp2`Config`LoadConfiguration[{
       "WorkingPrecision" -> wp, "ExpansionOrder" -> levelExpansionOrder,

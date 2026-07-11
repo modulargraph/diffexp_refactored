@@ -16,6 +16,7 @@ CurrentConfiguration::usage = "CurrentConfiguration[] returns the resolved, Stri
 
 LoadSystem::usage = "LoadSystem[spec] loads an exact epsilon-rational differential system. spec may be an Association, a d<var>_full.m file, or a directory containing exactly one such file.";
 BackendInformation::usage = "BackendInformation[] reports the compiled recurrence backend version and availability.";
+PrepareBoundary::usage = "PrepareBoundary[expressions, opts] expands one closed-form expression per master into the finite regular-anchor coefficient array accepted by TransportEndpoint and TransportLine. Options: \"EpsilonSymbol\" and \"EpsilonOrder\".";
 
 PlanLine::usage = "PlanLine[sys, {from, to}, opts] constructs and validates a transport plan without solving it. Option: \"ExtraSingularFactors\".";
 TransportEndpoint::usage = "TransportEndpoint[sys, boundary, from, to, opts] transports boundary data to one endpoint and returns a named TransportResult.";
@@ -34,10 +35,11 @@ IntegrateLine::usage = "IntegrateLine[sys, boundary, from, {lo, hi}, coefficient
 EpsilonWindow::usage = "EpsilonWindow[value] returns its honest Laurent window <|\"Min\", \"CompleteMax\"|>. It accepts EpsSeries values, evaluation records, transport results, and lists thereof.";
 EpsilonCoefficient::usage = "EpsilonCoefficient[value, k] returns the coefficient of eps^k, loudly rejecting reads above the complete window.";
 EpsilonCoefficientList::usage = "EpsilonCoefficientList[value, k1, k2] returns coefficients eps^k1 through eps^k2 with the honest-window drop guard.";
+EpsilonExpression::usage = "EpsilonExpression[value, eps] converts a complete EpsSeries value or list of values to an ordinary Laurent expression for presentation. Honest-window metadata is intentionally lost.";
 
 Begin["`Private`"];
 
-$DiffExp2Version = "2.0.0-prototype";
+$DiffExp2Version = "2.0.0-dev";
 
 de2Error[id_String, detail_, payload_:<||>] :=
   DiffExp2`Tolerances`DE2Error[id, Join[
@@ -74,6 +76,38 @@ DiffExp2`CurrentConfiguration[] :=
 
 DiffExp2`BackendInformation[] :=
   DiffExp2`CppBackend`BackendInformation[];
+
+(* A friendly regular-anchor boundary seam.  The transport core's plain
+   matrix convention starts at eps^0; pole-normalised boundaries should be
+   supplied as an explicit LocalSolution so their lower window is retained. *)
+Options[DiffExp2`PrepareBoundary] = {
+  "EpsilonSymbol" -> Automatic,
+  "EpsilonOrder" -> Automatic
+};
+
+DiffExp2`PrepareBoundary[expressions_List, OptionsPattern[]] := Module[
+  {eps, order, series},
+  If[expressions === {},
+    de2Error["E6", "PrepareBoundary requires at least one master expression"]];
+  eps = Replace[OptionValue["EpsilonSymbol"],
+    Automatic :> DiffExp2`Config`CanonicalEps[]];
+  If[eps === Global`\[Epsilon], eps = DiffExp2`Config`CanonicalEps[]];
+  order = Replace[OptionValue["EpsilonOrder"],
+    Automatic :> DiffExp2`CurrentConfiguration[]["EpsilonOrder"]];
+  If[!MatchQ[eps, _Symbol],
+    de2Error["E6", "\"EpsilonSymbol\" must be a Symbol",
+      <|"Value" -> eps|>]];
+  If[!IntegerQ[order] || order < 0,
+    de2Error["E6", "\"EpsilonOrder\" must be a nonnegative integer",
+      <|"Value" -> order|>]];
+  series = DiffExp2`EpsSeries`ESFromExpression[
+      canonicalizeEps[#], eps, order] & /@ expressions;
+  If[AnyTrue[series, DiffExp2`EpsSeries`ESMinPower[#] < 0 &],
+    de2Error["E6",
+      "PrepareBoundary only accepts boundaries finite at eps=0; pass an explicit LocalSolution to preserve a Laurent lower window",
+      <|"Windows" -> (DiffExp2`EpsSeries`ESWindow /@ series)|>]];
+  Table[DiffExp2`EpsSeries`ESCoefficient[series[[i]], k],
+    {i, Length[series]}, {k, 0, order}]];
 
 (* ---- systems ---- *)
 
@@ -295,6 +329,18 @@ DiffExp2`EpsilonCoefficientList[obj_, k1_Integer, k2_Integer] :=
   If[!DiffExp2`EpsSeries`ESQ[value],
     de2Error["ERR-WINDOW-READ", "object is not an EpsSeries or evaluation record"]];
   DiffExp2`EpsSeries`ESCoefficientList[value, k1, k2]];
+
+DiffExp2`EpsilonExpression[obj_List, eps_:Automatic] :=
+  DiffExp2`EpsilonExpression[#, eps] & /@ obj;
+DiffExp2`EpsilonExpression[obj_, eps_:Automatic] := Module[
+  {value = epsValue[obj], symbol},
+  symbol = Replace[eps, Automatic :> DiffExp2`Config`CanonicalEps[]];
+  If[!MatchQ[symbol, _Symbol],
+    de2Error["ERR-WINDOW-READ", "epsilon presentation variable must be a Symbol",
+      <|"Value" -> symbol|>]];
+  If[!DiffExp2`EpsSeries`ESQ[value],
+    de2Error["ERR-WINDOW-READ", "object is not an EpsSeries or evaluation record"]];
+  DiffExp2`EpsSeries`ESToExpression[value, symbol]];
 
 End[];
 EndPackage[];

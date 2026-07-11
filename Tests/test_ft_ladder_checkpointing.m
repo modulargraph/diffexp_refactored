@@ -65,6 +65,70 @@ test["native arm prewarm does not replace synchronous arm checkpoints",
 test["checkpoint replacement requests atomic overwrite",
   StringContainsQ[runnerSource,
     "RenameFile[tmp, file, OverwriteTarget -> True]"]];
+test["prepared snapshot schema invalidates legacy reduction keys",
+  $ftPrepCacheVersion === 2, $ftPrepCacheVersion];
+
+cacheTopology = FeynmanTrick`FIREInterface`DefineTopology[
+  "snapshot-key", {Global`l1}, {},
+  {1 - Global`l1^2, 2 - Global`l1^2}, {}];
+cacheTopology["WorkDirectory"] = tmpDir;
+cacheTopology["ProblemNumber"] = 41;
+cacheTopology["StartFileReady"] = True;
+cacheTopology["SetupFingerprintRecord"] = <|
+  "Schema" -> "FeynmanTrick.FIRESetup/v1",
+  "StartFileSHA256" -> "snapshot-start",
+  "Restrictions" -> {{-1, -1}}|>;
+oldAutoDetectRestrictions =
+  FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"];
+prepIdentityKey = ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}];
+FeynmanTrick`SetFTOption[
+  "AutoDetectRestrictions", !TrueQ[oldAutoDetectRestrictions]];
+prepChangedOptionKey = ftPrepKey[
+  "snapshot-key", cacheTopology, {{1, 2}}];
+FeynmanTrick`SetFTOption[
+  "AutoDetectRestrictions", oldAutoDetectRestrictions];
+test["prepared snapshot key covers setup-affecting FIRE options",
+  prepIdentityKey =!= prepChangedOptionKey,
+  {prepIdentityKey, prepChangedOptionKey}];
+prepRuntimeA = Block[{
+    FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},
+  FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[] :=
+    <|"Runtime" -> "A"|>;
+  ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}]];
+prepRuntimeB = Block[{
+    FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},
+  FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[] :=
+    <|"Runtime" -> "B"|>;
+  ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}]];
+test["prepared snapshot key covers FIRE runtime identity",
+  prepRuntimeA =!= prepRuntimeB, {prepRuntimeA, prepRuntimeB}];
+cacheData = <|"NumLevels" -> 1, "Levels" -> <|
+  0 -> <|"Masters" -> {{1, 1}}|>,
+  1 -> <|"Masters" -> {{2, 0}}, "CombinedPositions" -> {1, 2},
+    "Topology" -> cacheTopology, "Computed" -> True,
+    "DiffMatrix" -> {{0}}|>|>|>;
+cacheNeeded = {2, 0};
+cacheExpectedKey =
+  FeynmanTrick`FIREInterface`Private`reductionCacheKey[
+    cacheTopology, cacheNeeded];
+test["prepared snapshots use FIREInterface's hardened reduction key",
+  requiredReductionKeys[cacheData] === {cacheExpectedKey},
+  requiredReductionKeys[cacheData]];
+oldReductionCache = FeynmanTrick`FIREInterface`Private`$ReductionCache;
+FeynmanTrick`FIREInterface`Private`$ReductionCache = Association[
+  cacheExpectedKey -> <|"Reduction" -> 1, "Masters" -> {{2, 0}}|>];
+prepSnapshotFile = FileNameJoin[{tmpDir, "hardened-prep.mx"}];
+prepSnapshotWrite = savePreparedFT[
+  prepSnapshotFile, 24680, cacheData];
+FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
+prepSnapshotLoad = loadPreparedFT[prepSnapshotFile, 24680];
+test["hardened reduction keys survive prepared snapshot round-trip",
+  prepSnapshotWrite === prepSnapshotFile &&
+    AssociationQ[prepSnapshotLoad] &&
+    preparedReductionCacheQ[prepSnapshotLoad,
+      FeynmanTrick`FIREInterface`Private`$ReductionCache],
+  {prepSnapshotWrite, prepSnapshotLoad}];
+FeynmanTrick`FIREInterface`Private`$ReductionCache = oldReductionCache;
 
 name = "checkpoint-fixture";
 prepKey = 112358;

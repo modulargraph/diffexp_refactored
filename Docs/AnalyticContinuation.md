@@ -28,14 +28,13 @@ Configure a physical side before planning:
 ```mathematica
 x = Global`x;
 
-DiffExp2`Config`LoadConfiguration[{
-  "RecurrenceBackend" -> "Cpp",
+DiffExp2`LoadConfiguration[
   "DeltaPrescriptions" -> {
     {x, 1},
     {x - 1/2, -1},
     {1 - x, 1}
   }
-}];
+];
 ```
 
 Each pair is `{polynomial, sign}`, with `sign` equal to `1` or `-1`.  The
@@ -79,8 +78,9 @@ remain distinct even when they collide at `eps = 0`.
 Read this structure directly:
 
 ```mathematica
-decomposition = DiffExp2`SectorSeries`SectorDecomposition[localSolution];
-tags = KeyTake[#, {"a", "b", "p"}] & /@ decomposition["Sectors"];
+behavior = DiffExp2`LocalBehavior[localSolution];
+sectors = DiffExp2`ExactSectors[localSolution];
+tags = KeyTake[#, {"a", "b", "p", "Exponent"}] & /@ sectors;
 ```
 
 This is the exact replacement for the original `DecomposeSingularity`
@@ -90,7 +90,7 @@ solver and endpoint integration.
 ## Evaluating either side of a chart
 
 ```mathematica
-evaluation = DiffExp2`SectorSeries`EvaluateLocalSolution[
+evaluation = DiffExp2`EvaluateLocal[
   localSolution,
   tValue,
   "ImSign" -> Automatic,
@@ -105,8 +105,8 @@ outside the local radius or if a multivalued negative point lacks a branch
 side.
 
 Do not evaluate a multivalued sector at `t=0`.  Use
-`EndpointLimitValues`/`EndpointSectorLimit`, which implements the dimensional
-regularization endpoint rule and checks for uncancelled divergences.
+`EndpointLimit`, which implements the dimensional-regularization endpoint
+rule and checks for uncancelled divergences.
 
 ## Crossing an interior singularity
 
@@ -130,8 +130,8 @@ denominator beginning at epsilon order one shifts both edges of an
 `EpsSeries` window.
 
 For `b == 0`, a genuine power or logarithmic divergence is rejected unless it
-cancels after the requested master combination is formed.  `LineIntegral` and
-`EndpointLimitValues` combine components before applying this gate.
+cancels after the requested master combination is formed. `IntegrateLine` and
+`EndpointLimit` combine components before applying this gate.
 
 ## Verified limitation: roots in the input basis
 
@@ -163,9 +163,9 @@ exact transformed system.
 
 - Automatic prescriptions derived from square roots in the input matrix do not
   exist because that matrix class is rejected.
-- There is no top-level branch-plot convenience function; use chart records as
-  shown in the direct example.
-- `EndpointLimitValues` accepts epsilon-free endpoint scalars.  General
+- There is no dedicated branch-plot styling function; use `LineSegments` or
+  `PiecewiseSolution` as shown in the direct example.
+- Weighted `EndpointLimit` accepts epsilon-free endpoint scalars. General
   rational endpoint coefficients are supported by the lower-level
   `MultiplyRational` plus combination path, but do not yet have a dedicated
   public wrapper.

@@ -14,20 +14,55 @@ the master bases, IBP reductions, and exact differential matrix at each level.
 DiffExp 2 transports that data to both endpoints and applies a sector-aware
 limit or integral to obtain the next level's boundary.
 
-## Current supported entry point
+## Public pipeline facade
 
-The verified DiffExp 2 driver is:
+Load the root package and inspect the exact registry names:
 
-```sh
-wolframscript -file Scripts/run_ft_stepwise2.m
+```mathematica
+Get["/absolute/path/to/diffexp2/FeynmanTrick.m"];
+FeynmanTrick`$FeynmanTrickVersion
+FeynmanTrick`SupportedExamples[]
 ```
 
-It is an end-to-end implementation, but it is still a repository script.  A
-stable public Wolfram Language function such as `RunFeynmanTrick[...]` has not
-yet been implemented.  The example scripts below wrap the real driver and do
-not invent such a facade.
+Build a reproducible plan without starting FIRE or another kernel, then run
+that same plan:
 
-## Small first run
+```mathematica
+plan = FeynmanTrick`PipelinePlan["bubble",
+  "WorkingPrecision" -> 300,
+  "ExpansionOrder" -> 40,
+  "BoundaryExtraOrder" -> 10,
+  "CppThreads" -> 4
+];
+
+result = FeynmanTrick`RunIntegrationPipeline[plan];
+```
+
+The result has schema `FeynmanTrick.PipelineResult/v1` and records status,
+exit code, parsed `FINAL`/`STEPWISE` rows, stdout/stderr, and the complete plan.
+Resume an atomic checkpoint with:
+
+```mathematica
+result = FeynmanTrick`ResumeIntegrationPipeline[
+  "bubble", "/absolute/path/to/bubble_level0_boundary.mx"
+];
+```
+
+`"Asynchronous" -> True` returns a
+`FeynmanTrick.PipelineProcess/v1` record containing the process object and
+plan. The facade accepts one validated registry name at a time. The underlying
+CLI accepts comma-separated names, and custom topology objects continue to use
+the lower-level iteration API.
+
+The facade runs `Scripts/run_ft_stepwise2.m` in a clean `wolframscript`
+subprocess. Its argv and environment are explicit in `PipelinePlan`; no shell
+string is constructed. The current process launcher uses `/usr/bin/env`, so
+the facade is presently supported on macOS/Linux/Unix. The direct DiffExp 2
+solver itself has no such platform restriction. Calling the facade from an
+already running kernel can occupy a second Wolfram license seat; its native
+C++ worker threads do not consume additional seats.
+
+## Command-line alternative
 
 ```sh
 DE2_RECURRENCE_BACKEND=Cpp \
@@ -44,7 +79,9 @@ FT_LADDER_CHECKPOINT_DIR="$HOME/.cache/diffexp2/ladder/bubble" \
 wolframscript -file Scripts/run_ft_stepwise2.m
 ```
 
-The first run prepares FIRE data and writes a reusable preparation snapshot.
+This is the command generated conceptually by the facade and remains useful
+for terminals and batch systems. The first run prepares FIRE data and writes a
+reusable preparation snapshot.
 Later runs print `FTPREP CACHE HIT` and skip that work.
 
 ## Built-in Euclidean examples
@@ -69,8 +106,16 @@ The current fixtures in `Scripts/FTExamples.m` are:
 Release examples are in [Examples/FeynmanTrick](../Examples/FeynmanTrick/README.md).
 `bubble`, `sunrise`, and `banana_unequal` are the recommended progression.
 The four-loop unequal banana is intentionally marked experimental because a
-complete DiffExp 2 ladder result was not present in the source snapshot used
-for this documentation prototype.
+complete, source-controlled DiffExp 2 ladder result is not yet present.
+
+## Facade defaults
+
+The typed facade defaults to C++, working precision 500, expansion order 50,
+epsilon order 0, boundary lookahead 4, halos `{0}`, division order 3, radius
+1, value transport enabled, and endpoint-arm batching requested. Native thread
+count is `Min[10,$ProcessorCount]` with a floor of one. Every setting can be
+overridden by a named `PipelinePlan` option and is serialized into its
+`"Environment"` record.
 
 ## Numerical controls
 
@@ -86,8 +131,9 @@ for this documentation prototype.
 | `FT_DIVISION_ORDER` | coupled chart placement/matching divisor; adjacent regular charts meet at `+1/k` and `-1/k` |
 | `FT_RADIUS_OF_CONVERGENCE` | affine local-coordinate radius normalization |
 | `FT_FIRE_TIMEOUT_SECONDS` | watchdog timeout for one FIRE run |
-| `FT_CPP_BATCH_ENDPOINT_ARMS` | opt-in paired C++ prewarming for small lower/upper chart bases |
-| `DE2_VALUE_TRANSPORT` | experimental regular-chart value transport; off by default |
+| `FT_FIRE_PATH` | FIRE6 installation path; facade option `"FIREPath"` |
+| `FT_CPP_BATCH_ENDPOINT_ARMS` | request paired C++ prewarming for small lower/upper chart bases; CLI default on |
+| `DE2_VALUE_TRANSPORT` | regular-chart value transport; facade default on, direct CLI default off |
 
 More precision does not replace sufficient expansion order.  Conversely, a
 large epsilon halo does not increase the requested final order; it only
@@ -128,9 +174,10 @@ A single Wolfram kernel cannot execute two Wolfram marching loops at once.
 With `FT_CPP_BATCH_ENDPOINT_ARMS=1`, however, small boundary-independent
 homogeneous bases from the two arms can be submitted together to the native
 worker pool.  Planning, matching, analytic continuation, integration, and
-checkpoint writes remain sequential.  The runner skips this schedule when a
+checkpoint writes remain sequential. The runner skips this schedule when a
 single chart already fills the thread budget or when value transport makes the
-recurrence boundary-dependent.
+recurrence boundary-dependent. Therefore the facade requesting both value
+transport and arm batching does not imply that homogeneous prewarming runs.
 
 ## Output
 
@@ -156,15 +203,15 @@ FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[...]
 FeynmanTrick`FeynmanTrickIteration`RunFullIteration[...]
 ```
 
-but the DiffExp 2 ladder around them currently lives in
-`Scripts/run_ft_stepwise2.m`.  Therefore a new release-quality example must
+The public facade delegates its numerical ladder to
+`Scripts/run_ft_stepwise2.m`. Therefore a new release-quality example must
 either:
 
 1. add a named exact fixture to `Scripts/FTExamples.m` and use the driver; or
-2. extract and stabilize a public ladder function first.
+2. use the lower-level iteration objects directly until the facade gains a
+   custom-topology plan schema.
 
-The second option is the intended API direction.  Copying the runner's private
-helpers into user notebooks is not recommended.
+Copying the runner's private helpers into user notebooks is not recommended.
 
 ## Failure and reproducibility rules
 

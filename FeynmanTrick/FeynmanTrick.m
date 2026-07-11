@@ -5,11 +5,13 @@
 BeginPackage["FeynmanTrick`"];
 
 (* --- Public symbols --- *)
+$FeynmanTrickVersion::usage = "$FeynmanTrickVersion is the public FeynmanTrick package version string.";
 xx::usage = "Feynman parameter variable used in FeynmanTrick (avoids conflict with DiffExp's x).";
 FTeps::usage = "Dimensional regulator symbol. By default d = 4 - 2*FTeps.";
 
 FTConfiguration::usage = "FTConfiguration[] returns the current FeynmanTrick configuration.";
 SetFTOption::usage = "SetFTOption[key, value] sets a configuration option.";
+SupportedExamples::usage = "SupportedExamples[] returns the exact registry names accepted by the DiffExp2 Feynman-trick pipeline facade.";
 
 (* The Feynman-trick release surface is defined in terms of DiffExp2.  Load
    the root/umbrella package once here; legacy DiffExp remains independent. *)
@@ -34,10 +36,12 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExp2Pipeline.m"}]];
    would let BeginPackage dependency lookup capture the root symbol inside
    DiffExpIntegration -- the classic Wolfram context-shadowing trap. *)
 FeynmanTrick`PipelinePlan::usage = "PipelinePlan[example, opts] builds a reproducible DiffExp2 Feynman-trick run plan without executing it.";
-FeynmanTrick`RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] runs the Feynman-trick ladder through DiffExp2 with the C++ recurrence backend by default.";
+FeynmanTrick`RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] builds and runs a DiffExp2 Feynman-trick plan. RunIntegrationPipeline[plan] executes an existing PipelinePlan record.";
 FeynmanTrick`ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[example, checkpoint, opts] resumes the DiffExp2 Feynman-trick ladder from an atomic checkpoint.";
 
 Begin["`Private`"];
+
+FeynmanTrick`$FeynmanTrickVersion = "2.0.0-dev";
 
 (* --- Configuration --- *)
 $FTConfig = <|
@@ -68,6 +72,14 @@ $FTConfig = <|
   "Verbosity" -> 1
 |>;
 
+$supportedExamples = {
+  "bubble", "sunrise", "banana", "banana_unequal", "banana4",
+  "banana4_unequal", "kite", "box", "pentagon", "box_bubble",
+  "box_triangle", "double_box_planar"
+};
+
+FeynmanTrick`SupportedExamples[] := $supportedExamples;
+
 FTConfiguration[] := $FTConfig;
 
 SetFTOption[key_String, value_] := ($FTConfig[key] = value);
@@ -95,5 +107,3 @@ DimensionExpression[] := Module[
 
 End[];
 EndPackage[];
-
-Print["FeynmanTrick package loaded."];

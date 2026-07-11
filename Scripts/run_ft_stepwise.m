@@ -111,7 +111,8 @@ runExample[name_String] := Module[
   {
     topology, ftData, outputDir, nLevels, boundaryOrder, deepBoundary,
     currentBCs, currentPrefactors, transportOrder, matrixDir,
-    extraSingularFactors, transportResult, levelBoundary, finalBoundary
+    extraSingularFactors, transportResult, levelBoundary, finalBoundary,
+    levelIBPBatch, requiredOrder
   },
   Print["EXAMPLE ", name];
   FeynmanTrick`SetFTOption["DimensionExpression", FTExampleDimension[name]];
@@ -152,6 +153,10 @@ runExample[name_String] := Module[
   currentBCs = deepBoundary["BoundaryValues"];
   currentPrefactors = deepBoundary["EpsPrefactors"];
   Do[
+    levelIBPBatch =
+      FeynmanTrick`DiffExpIntegration`Private`PrepareLevelIBPBatch[
+        ftData, level];
+    If[levelIBPBatch === $Failed, Return[$Failed, Module]];
     (* Carry ALL available boundary depth through the chain: the
        single-level RequiredTransportEpsilonOrder underestimates deep
        towers (each level's IBP eps-poles and prefactor shifts consume
@@ -159,16 +164,15 @@ runExample[name_String] := Module[
        (observed: box_bubble L2 capped at eps order 2 while needing 9
        despite a generous deepest-level budget).  requiredOrder is kept
        as a lower-bound diagnostic only. *)
-    Module[{requiredOrder =
-        FeynmanTrick`DiffExpIntegration`Private`RequiredTransportEpsilonOrder[
-          ftData, level, epsOrder, currentPrefactors
-        ]},
-      transportOrder = Length[First[currentBCs]] - 1;
-      If[transportOrder < requiredOrder,
-        Print["WARNING level ", level, " transport depth ", transportOrder,
-          " is below the single-level requirement ", requiredOrder,
-          "; increase FT_BOUNDARY_EXTRA_ORDER."];
-      ];
+    requiredOrder =
+      FeynmanTrick`DiffExpIntegration`Private`RequiredTransportEpsilonOrder[
+        ftData, level, epsOrder, currentPrefactors, levelIBPBatch];
+    If[requiredOrder === $Failed, Return[$Failed, Module]];
+    transportOrder = Length[First[currentBCs]] - 1;
+    If[transportOrder < requiredOrder,
+      Print["WARNING level ", level, " transport depth ", transportOrder,
+        " is below the single-level requirement ", requiredOrder,
+        "; increase FT_BOUNDARY_EXTRA_ORDER."];
     ];
     FeynmanTrick`FeynmanTrickIteration`ExportLevel[
       ftData, level, outputDir, "diffexp", transportOrder
@@ -176,8 +180,9 @@ runExample[name_String] := Module[
     matrixDir = FileNameJoin[{outputDir, "Level_" <> ToString[level] <> "_Matrices"}];
     extraSingularFactors =
       FeynmanTrick`DiffExpIntegration`CollectLevelIBPSingularFactors[
-        ftData, level
+        ftData, level, levelIBPBatch
       ];
+    If[extraSingularFactors === $Failed, Return[$Failed, Module]];
     Print["EXTRA_SINGULAR_FACTORS level ", level, ": ",
       InputForm[extraSingularFactors]];
     transportResult = FeynmanTrick`DiffExpIntegration`TransportLevel[
@@ -212,7 +217,7 @@ runExample[name_String] := Module[
       ];
     ];
     levelBoundary = FeynmanTrick`DiffExpIntegration`ComputeLevelBoundary[
-      ftData, level - 1, transportResult, epsOrder
+      ftData, level - 1, transportResult, epsOrder, levelIBPBatch
     ];
     If[!AssociationQ[levelBoundary], Return[$Failed]];
     printBoundaryRows[

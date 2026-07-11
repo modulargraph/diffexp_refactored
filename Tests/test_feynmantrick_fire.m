@@ -87,6 +87,14 @@ Module[{topo, workDir, setupTopo, basisTopo, masters, reductions, diffMat},
   test["ProblemNumber assigned", IntegerQ[setupTopo["ProblemNumber"]], True];
   testTrue[".start file exists",
     FileExistsQ[FileNameJoin[{workDir, "box.start"}]]];
+  testTrue["setup fingerprint records the exact prepared start",
+    AssociationQ[setupTopo["SetupFingerprintRecord"]] &&
+    TrueQ[setupTopo["SetupFingerprintRecord", "VerifiedStartFile"]] &&
+    StringQ[setupTopo["SetupFingerprintRecord", "StartFileSHA256"]] &&
+    StringLength[setupTopo["SetupFingerprintRecord", "StartFileSHA256"]] === 64];
+  testTrue["setup fingerprint digest matches its exact record",
+    setupTopo["SetupFingerprint"] === IntegerString[
+      Hash[setupTopo["SetupFingerprintRecord"], "SHA256"], 16, 64]];
   (* Note: .config file is now written when FIRE is run, not during setup *)
 
   (* ============================================================ *)

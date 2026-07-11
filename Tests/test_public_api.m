@@ -13,12 +13,14 @@ assert[label_String, condition_] := If[TrueQ[condition],
 exports = {
   DiffExp2`LoadConfiguration, DiffExp2`UpdateConfiguration,
   DiffExp2`CurrentConfiguration, DiffExp2`LoadSystem,
+  DiffExp2`PrepareBoundary,
   DiffExp2`PlanLine, DiffExp2`TransportEndpoint, DiffExp2`TransportLine,
   DiffExp2`LineSegments, DiffExp2`LineSegment, DiffExp2`EvaluateLine,
   DiffExp2`PiecewiseSolution, DiffExp2`EvaluateLocal,
   DiffExp2`LocalBehavior, DiffExp2`ExactSectors, DiffExp2`EndpointLimit,
   DiffExp2`IntegrateLine, DiffExp2`EpsilonWindow,
-  DiffExp2`EpsilonCoefficient, DiffExp2`EpsilonCoefficientList
+  DiffExp2`EpsilonCoefficient, DiffExp2`EpsilonCoefficientList,
+  DiffExp2`EpsilonExpression
 };
 assert["umbrella exports have usage text",
   AllTrue[exports, StringQ[MessageName[#, "usage"]] &]];
@@ -46,6 +48,24 @@ assert["epsilon coefficient",
   DiffExp2`EpsilonCoefficient[epsValue, 0] === 3];
 assert["epsilon coefficient list",
   DiffExp2`EpsilonCoefficientList[epsValue, -1, 1] === {2, 3, 5}];
+assert["epsilon presentation expression",
+  Expand[DiffExp2`EpsilonExpression[epsValue, Global`z]] ===
+    2/Global`z + 3 + 5 Global`z];
+
+preparedBoundary = DiffExp2`PrepareBoundary[
+  {Exp[Global`eps], (1/2)^Global`\[Epsilon]},
+  "EpsilonOrder" -> 2];
+assert["closed-form regular boundary preparation",
+  preparedBoundary === {
+    {1, 1, 1/2}, {1, -Log[2], Log[2]^2/2}}];
+poleBoundary = Catch[
+  DiffExp2`PrepareBoundary[{1/Global`eps}, "EpsilonOrder" -> 2],
+  "DiffExp2Error"];
+assert["closed-form boundary preparation preserves the Laurent guard",
+  FailureQ[poleBoundary]];
+emptyBoundary = Catch[DiffExp2`PrepareBoundary[{}], "DiffExp2Error"];
+assert["empty closed-form boundaries fail at the public seam",
+  FailureQ[emptyBoundary]];
 
 aliasSystem = DiffExp2`LoadSystem[<|
   "Matrix" -> {{Global`\[Epsilon]/(1 - Global`x)}},

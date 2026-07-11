@@ -1,6 +1,6 @@
 (* DiffExp 2: minimal direct transport.
 
-   Run from any directory with:
+   Run from the repository root with:
      wolframscript -file Examples/Direct/MinimalTransport.wl
 
    The release path uses the compiled recurrence backend. *)
@@ -9,13 +9,13 @@ repoRoot = ParentDirectory[
   ParentDirectory[DirectoryName[ExpandFileName[$InputFileName]]]
 ];
 
-Get[FileNameJoin[{repoRoot, "DiffExp2", "DiffExp2.m"}]];
+Get[FileNameJoin[{repoRoot, "DiffExp2.m"}]];
 
 SetAttributes[catchDiffExp2, HoldFirst];
 catchDiffExp2[expr_] := Quiet[Catch[expr, "DiffExp2Error"]];
 
 configuration = catchDiffExp2[
-  DiffExp2`Config`LoadConfiguration[{
+  DiffExp2`LoadConfiguration[{
     "RecurrenceBackend" -> "Cpp",
     "WorkingPrecision" -> 100,
     "ExpansionOrder" -> 30,
@@ -35,17 +35,17 @@ eps = Global`eps;
 
 (* f'(x) = f(x)/(x-2), f(0)=1/2, hence f(1)=1/4. *)
 system = catchDiffExp2[
-  DiffExp2`API`LoadSystem[<|
+  DiffExp2`LoadSystem[<|
     "Matrix" -> {{1/(x - 2)}},
     "Variable" -> x
   |>]
 ];
 
-boundary = {{1/2, 0, 0}};
+boundary = DiffExp2`PrepareBoundary[{1/2}];
 
 result = If[FailureQ[system], system,
   catchDiffExp2[
-    DiffExp2`API`TransportEndpoint[system, boundary, 0, 1]
+    DiffExp2`TransportEndpoint[system, boundary, 0, 1]
   ]
 ];
 
@@ -55,11 +55,13 @@ If[FailureQ[result],
 ];
 
 value = result["Value"];
-eps0 = DiffExp2`EpsSeries`ESCoefficient[value, 0];
+window = DiffExp2`EpsilonWindow[value];
+eps0 = DiffExp2`EpsilonCoefficient[value, 0];
+plain = DiffExp2`EpsilonExpression[value, eps];
 
 Print["segments = ", result["SegmentCount"]];
-Print["epsilon window = ", DiffExp2`EpsSeries`ESWindow[value]];
-Print["value = ", DiffExp2`EpsSeries`ESToExpression[value, eps]];
+Print["epsilon window = ", window];
+Print["value = ", plain];
 Print["eps^0 vector = ", eps0];
 
 If[!TrueQ[Abs[N[First[eps0] - 1/4, 50]] < 10^-30],

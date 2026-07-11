@@ -10,7 +10,7 @@
 BeginPackage["FeynmanTrick`DiffExp2Pipeline`"];
 
 PipelinePlan::usage = "PipelinePlan[example, opts] returns the reproducible command/environment/checkpoint plan for the DiffExp2 Feynman-trick ladder without running it.";
-RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] runs the DiffExp2 Feynman-trick ladder with the C++ recurrence backend by default and returns a PipelineResult (or PipelineProcess when Asynchronous -> True).";
+RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] runs the DiffExp2 Feynman-trick ladder with the C++ recurrence backend by default. RunIntegrationPipeline[plan] executes an existing PipelinePlan. It returns a PipelineResult (or PipelineProcess when Asynchronous -> True).";
 ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[example, checkpoint, opts] resumes the DiffExp2 ladder from an atomic transport or boundary checkpoint.";
 RunnerSettingsFromEnvironment::usage = "RunnerSettingsFromEnvironment[] parses and validates the runner environment. It is shared by the package facade and Scripts/run_ft_stepwise2.m.";
 
@@ -61,7 +61,7 @@ parseHalos[text_String] := Module[{parts, values},
 RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
-   batch, rebuild, allowStale, fireTimeout, resume, checkpointDir, prepRoot,
+   batch, rebuild, allowStale, fireTimeout, firePath, resume, checkpointDir, prepRoot,
    values},
   backend = envOrDefault["DE2_RECURRENCE_BACKEND", "Cpp"];
   If[!MemberQ[{"Cpp", "Wolfram"}, backend],
@@ -107,12 +107,15 @@ RunnerSettingsFromEnvironment[] := Module[
     If[resume === "", "", DirectoryName[ExpandFileName[resume]]]];
   prepRoot = envOrDefault["FT_PREP_CACHE_DIR",
     FileNameJoin[{$TemporaryDirectory, "DiffExp2_FT_Prepared"}]];
+  firePath = ExpandFileName[envOrDefault["FT_FIRE_PATH",
+    FileNameJoin[{$packageRoot, "Dependencies", "fire", "FIRE6"}]]];
   <|
     "RecurrenceBackend" -> backend, "CppThreads" -> threads,
     "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
     "ExpansionOrder" -> expansionOrder,
     "BoundaryExtraOrder" -> boundaryExtraOrder,
     "FIRETimeoutSeconds" -> fireTimeout,
+    "FIREPath" -> firePath,
     "DivisionOrder" -> divisionOrder,
     "RequestedStepDivisionOrder" -> requestedStepDivisionOrder,
     (* The classic planner couples placement and +/-1/k matching. *)
@@ -140,6 +143,7 @@ Options[PipelinePlan] = {
   "BatchEndpointArms" -> True,
   "SingularMatchPrecondition" -> False,
   "PreparedCacheDirectory" -> Automatic,
+  "FIREPath" -> Automatic,
   "CheckpointDirectory" -> Automatic,
   "ResumeFrom" -> None,
   "RebuildPreparation" -> False,
@@ -192,17 +196,24 @@ validatePlanOptions[settings_Association] := Module[{checks},
       settings["FIRETimeoutSeconds"] >= 1,
     AssociationQ[settings["ExtraEnvironment"]] &&
       AllTrue[Keys[settings["ExtraEnvironment"]], StringQ] &&
-      AllTrue[Values[settings["ExtraEnvironment"]], StringQ]
+      AllTrue[Values[settings["ExtraEnvironment"]], StringQ],
+    StringQ[settings["FIREPath"]] &&
+      StringLength[StringTrim[settings["FIREPath"]]] > 0
   };
   If[And @@ checks, True,
     failure["one or more pipeline options are invalid", <|"Settings" -> settings|>]]];
 
 PipelinePlan[example_String, OptionsPattern[]] := Module[
-  {threads, runner, executable, workdir, prep, checkpoint, resume, stop,
+  {threads, runner, executable, workdir, prep, firePath, firePathOption,
+   checkpoint, resume, stop,
    settings, valid, env},
   If[StringLength[StringTrim[example]] === 0 || StringContainsQ[example, ","],
     Return[failure["example must be one nonempty registry name",
       <|"Example" -> example|>], Module]];
+  If[!MemberQ[FeynmanTrick`SupportedExamples[], example],
+    Return[failure["example is not present in the Feynman-trick registry",
+      <|"Example" -> example,
+        "SupportedExamples" -> FeynmanTrick`SupportedExamples[]|>], Module]];
   threads = Replace[OptionValue["CppThreads"], Automatic :>
     Max[1, Min[10, $ProcessorCount]]];
   runner = ExpandFileName[Replace[OptionValue["Runner"], Automatic :>
@@ -211,6 +222,12 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     Automatic -> $packageRoot]];
   prep = ExpandFileName[Replace[OptionValue["PreparedCacheDirectory"],
     Automatic :> FileNameJoin[{$TemporaryDirectory, "DiffExp2_FT_Prepared"}]]];
+  firePathOption = Replace[OptionValue["FIREPath"],
+    Automatic :> FileNameJoin[{$packageRoot, "Dependencies", "fire", "FIRE6"}]];
+  If[!StringQ[firePathOption] || StringLength[StringTrim[firePathOption]] === 0,
+    Return[failure["\"FIREPath\" must be a nonempty path string",
+      <|"Value" -> OptionValue["FIREPath"]|>], Module]];
+  firePath = ExpandFileName[StringTrim[firePathOption]];
   checkpoint = ExpandFileName[Replace[OptionValue["CheckpointDirectory"],
     Automatic :> FileNameJoin[{$TemporaryDirectory,
       "DiffExp2_FT_Checkpoints", example}]]];
@@ -238,6 +255,7 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "SingularMatchPrecondition" -> OptionValue["SingularMatchPrecondition"],
     "RebuildPreparation" -> OptionValue["RebuildPreparation"],
     "AllowStaleCheckpoint" -> OptionValue["AllowStaleCheckpoint"],
+    "FIREPath" -> firePath,
     "FIRETimeoutSeconds" -> OptionValue["FIRETimeoutSeconds"],
     "Asynchronous" -> OptionValue["Asynchronous"],
     "ExtraEnvironment" -> OptionValue["ExtraEnvironment"]
@@ -274,6 +292,7 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "FT_RADIUS_OF_CONVERGENCE" ->
       inputString[settings["RadiusOfConvergence"]],
     "FT_PREP_CACHE_DIR" -> prep,
+    "FT_FIRE_PATH" -> firePath,
     "FT_LADDER_CHECKPOINT_DIR" -> checkpoint,
     "FT_REBUILD_PREP" -> boolString[settings["RebuildPreparation"]],
     "FT_ALLOW_STALE_LADDER_CHECKPOINT" ->
@@ -357,6 +376,23 @@ Options[RunIntegrationPipeline] = Options[PipelinePlan];
 RunIntegrationPipeline[example_String, opts:OptionsPattern[]] := Module[{plan},
   plan = PipelinePlan[example, opts];
   runPlan[plan, OptionValue["Asynchronous"]]];
+
+RunIntegrationPipeline[plan_Association] := Module[
+  {schema, asynchronous, required, missing},
+  schema = Lookup[plan, "Schema", Missing["NotAvailable"]];
+  If[schema =!= $pipelinePlanSchema,
+    Return[failure["RunIntegrationPipeline requires a PipelinePlan/v1 record",
+      <|"Schema" -> schema|>], Module]];
+  required = {"Command", "WorkingDirectory", "Environment", "Settings"};
+  missing = Select[required, !KeyExistsQ[plan, #] &];
+  If[missing =!= {} || !MatchQ[plan["Command"], {_String ..}] ||
+      !StringQ[plan["WorkingDirectory"]] ||
+      !AssociationQ[plan["Environment"]] || !AssociationQ[plan["Settings"]],
+    Return[failure["PipelinePlan record is malformed",
+      <|"MissingKeys" -> missing|>], Module]];
+  asynchronous = TrueQ[Lookup[Lookup[plan, "Settings", <||>],
+    "Asynchronous", False]];
+  runPlan[plan, asynchronous]];
 
 Options[ResumeIntegrationPipeline] = Options[PipelinePlan];
 ResumeIntegrationPipeline[example_String, checkpoint_String,

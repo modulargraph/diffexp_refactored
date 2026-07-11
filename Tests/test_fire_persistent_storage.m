@@ -20,6 +20,7 @@ publishSession = FeynmanTrick`FIREInterface`Private`publishFIREStorageSession;
 abortSession = FeynmanTrick`FIREInterface`Private`abortFIREStorageSession;
 safeRead = FeynmanTrick`FIREInterface`Private`safeReadString;
 cachedReduction = FeynmanTrick`FIREInterface`Private`cachedReduction;
+storageKey = FeynmanTrick`FIREInterface`Private`fireStorageKey;
 oldConfig = FeynmanTrick`FTConfiguration[];
 root = FileNameJoin[{$TemporaryDirectory,
   "ft-fire-storage-test-" <> ToString[$ProcessID] <> "-" <>
@@ -61,6 +62,11 @@ FeynmanTrick`SetFTOption["PersistentFIREStorage", True];
 session1 = beginSession[topology, fireBin];
 assert["session starts with a content key", AssociationQ[session1] &&
   StringLength[session1["Key"]] === 64];
+v1Compatibility = ReplacePart[session1["Compatibility"],
+  "Schema" -> "FeynmanTrick.FIREStorage/v1"];
+assert["v2 schema invalidates unsafe v1 storage",
+  session1["Schema"] === "FeynmanTrick.FIREStorage/v2" &&
+  storageKey[v1Compatibility] =!= session1["Key"]];
 assert["first attempt starts from an empty database",
   resetAttempt[session1] &&
   DirectoryQ[session1["AttemptStorage"]]];
@@ -137,7 +143,8 @@ pointerAfterSuccess = StringTrim[
   safeRead[FileNameJoin[{keyDir, "CURRENT"}]]];
 masterCache = cachedReduction[topology, master];
 assert["config opts into FIRE storage and keepall",
-  StringContainsQ[configObserved, "#storage           !"] &&
+  StringContainsQ[configObserved, "#storage           "] &&
+  !StringContainsQ[configObserved, "#storage           !"] &&
   StringContainsQ[configObserved, "#keepall"]];
 assert["parsed reduction is returned",
   AssociationQ[result] &&

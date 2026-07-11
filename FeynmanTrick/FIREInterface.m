@@ -297,7 +297,7 @@ safeReadString[path_String] := Module[{txt},
    A committed generation is never passed to FIRE directly: every invocation
    receives an attempt-local clone, and only a successfully parsed reduction
    may advance the atomic CURRENT pointer. *)
-$fireStorageSchema = "FeynmanTrick.FIREStorage/v1";
+$fireStorageSchema = "FeynmanTrick.FIREStorage/v2";
 
 fireStorageEnabledQ[] := TrueQ[Lookup[
   FeynmanTrick`Private`$FTConfig, "PersistentFIREStorage", False]];
@@ -909,7 +909,7 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name, pn,
   outFile = If[outputFile === "", name <> ".tables", outputFile];
   storageLines = If[AssociationQ[storageSession],
     StringJoin[
-      "#storage           !", storageSession["AttemptStorage"], "\n",
+      "#storage           ", storageSession["AttemptStorage"], "\n",
       "#keepall\n"
     ],
     ""
@@ -1152,7 +1152,9 @@ Module[{dir, name, fireBin, intFile, intPath, configPath, tablesFile, rules,
         Return[$Failed, Module];
       ];
 
-      (* #storage points at an attempt-local clone, never at CURRENT. *)
+      (* #storage points at an attempt-local clone, never at CURRENT.  Do not
+         use FIRE's ! modifier here: it overwrites the reusable forward DB
+         after substitution with state tailored to the current request set. *)
       configPath = FileNameJoin[{dir, name <> "_reduce.config"}];
       If[FileExistsQ[configPath], Quiet[DeleteFile[configPath]]];
       If[!TrueQ[Quiet[Check[

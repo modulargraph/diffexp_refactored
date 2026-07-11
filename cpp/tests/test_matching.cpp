@@ -18,8 +18,10 @@ using diffexp2::Rational;
 namespace {
 
 int failed = 0;
+int checked = 0;
 
 void check(const std::string& label, bool condition) {
+  ++checked;
   std::cout << "  " << (condition ? "PASS: " : "FAIL: ") << label << '\n';
   if (!condition) ++failed;
 }
@@ -111,6 +113,67 @@ void quotient_and_solve_smoke() {
             triangular[1].coefficient(0) == Rational(2));
 }
 
+void epsilon_lattice_saturation_smoke() {
+  const auto one = frame(0, {1, 0, 0});
+  const auto zero = frame(0, {0, 0, 0});
+  const auto epsilon = frame(0, {0, 1, 0});
+  const FiniteLaurentMatrix<Rational> basis = {
+      {one, one}, {zero, epsilon}};
+  const auto saturated = diffexp2::saturate_finite_laurent_basis(
+      basis, "one-action saturation witness");
+
+  check("epsilon-lattice witness has one certified saturation action",
+        saturated.diagnostics.normalized_determinant_valuation == 1 &&
+            saturated.diagnostics.initial_leading_rank == 1 &&
+            saturated.diagnostics.final_leading_rank == 2 &&
+            saturated.diagnostics.actions.size() == 1 &&
+            saturated.diagnostics.actions.front().target_column == 1);
+  check("saturation action records the deterministic null relation",
+        saturated.diagnostics.actions.front().null_relation[0] ==
+                Rational(-1) &&
+            saturated.diagnostics.actions.front().null_relation[1] ==
+                Rational(1));
+
+  const auto& product = saturated.basis_times_transformation;
+  check("saturation makes the epsilon-zero leading frame invertible",
+        product[0][0].coefficient(0) == Rational(1) &&
+            product[0][1].coefficient(0) == Rational(0) &&
+            product[1][0].coefficient(0) == Rational(0) &&
+            product[1][1].coefficient(0) == Rational(1));
+
+  const auto& transformation = saturated.transformation;
+  check("exact-support T retains both shift and column-combination semantics",
+        transformation[0][0].coefficient(0) == Rational(1) &&
+            transformation[0][1].coefficient(-1) == Rational(-1) &&
+            transformation[1][0].is_zero() &&
+            transformation[1][1].coefficient(-1) == Rational(1));
+
+  const auto independently_multiplied =
+      diffexp2::right_multiply_finite_by_exact_laurent(basis,
+                                                        transformation);
+  check("returned transformed basis agrees coefficientwise with F*T",
+        independently_multiplied[0][0].coefficient(0) ==
+                product[0][0].coefficient(0) &&
+            independently_multiplied[0][1].coefficient(0) ==
+                product[0][1].coefficient(0) &&
+            independently_multiplied[1][0].coefficient(0) ==
+                product[1][0].coefficient(0) &&
+            independently_multiplied[1][1].coefficient(0) ==
+                product[1][1].coefficient(0));
+
+  const auto shifted = diffexp2::saturate_finite_laurent_basis<Rational>(
+      {{frame(2, {1, 0, 0})}}, "initial shift witness");
+  check("initial column valuation is accumulated as the same monomial in T",
+        shifted.diagnostics.initial_column_valuations ==
+                std::vector<std::int32_t>{2} &&
+            shifted.diagnostics.initial_column_shifts ==
+                std::vector<std::int32_t>{-2} &&
+            shifted.diagnostics.actions.empty() &&
+            shifted.transformation[0][0].coefficient(-2) == Rational(1) &&
+            shifted.basis_times_transformation[0][0].coefficient(0) ==
+                Rational(1));
+}
+
 void ambiguous_acb_pivot_smoke() {
   ComplexBall::set_precision(256);
   ComplexBall ambiguous;
@@ -125,6 +188,20 @@ void ambiguous_acb_pivot_smoke() {
                error.epsilon_power == 0;
   }
   check("Acb zero-enclosing Laurent divisor is loud", rejected);
+
+  bool saturation_rejected = false;
+  try {
+    (void)diffexp2::saturate_finite_laurent_basis<ComplexBall>(
+        {{EpsilonFrame<ComplexBall>(
+            0, {ambiguous, ComplexBall(1), ComplexBall(0)})}},
+        "Acb saturation ambiguity smoke");
+  } catch (const MatchingArithmeticError& error) {
+    saturation_rejected =
+        error.code == MatchingArithmeticErrorCode::AmbiguousZero &&
+        error.epsilon_power == 0;
+  }
+  check("Acb zero-overlap in saturation valuation is loud",
+        saturation_rejected);
 }
 
 }  // namespace
@@ -132,7 +209,9 @@ void ambiguous_acb_pivot_smoke() {
 int main() {
   transformation_support_smoke();
   quotient_and_solve_smoke();
+  epsilon_lattice_saturation_smoke();
   ambiguous_acb_pivot_smoke();
-  std::cout << "Results: " << (7 - failed) << " / 7 tests passed\n";
+  std::cout << "Results: " << (checked - failed) << " / " << checked
+            << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

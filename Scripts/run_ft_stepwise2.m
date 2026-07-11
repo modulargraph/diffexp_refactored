@@ -381,6 +381,18 @@ FeynmanTrick`SetFTOption["WorkingPrecision", wp];
 FeynmanTrick`SetFTOption["ReductionCache", True];
 FeynmanTrick`SetFTOption["FIRETimeoutSeconds",
   ToExpression[envOrDefault["FT_FIRE_TIMEOUT_SECONDS", "1800"]]];
+persistentFIREStorage =
+  envOrDefault["FT_PERSISTENT_FIRE_STORAGE", "0"] === "1";
+fireStorageDirectory = envOrDefault["FT_FIRE_STORAGE_DIR", ""];
+FeynmanTrick`SetFTOption["PersistentFIREStorage", persistentFIREStorage];
+If[fireStorageDirectory =!= "",
+  FeynmanTrick`SetFTOption["FIREStorageDirectory",
+    ExpandFileName[fireStorageDirectory]]
+];
+If[persistentFIREStorage,
+  Print["Persistent FIRE storage enabled",
+    If[fireStorageDirectory === "", "", ": " <> ExpandFileName[fireStorageDirectory]]]
+];
 
 eps = Global`eps;
 esC = DiffExp2`EpsSeries`ESCoefficient;

@@ -62,33 +62,59 @@ BackendInformation[] := If[loadBackend[],
   Failure["CppBackend", <|"Detail" -> "compiled backend library was not found or could not be loaded",
     "Candidates" -> libraryCandidates[]|>]];
 
-decimalString[x_?InexactNumberQ, digits_Integer] := Module[
-  {available, used, y, sign, ds, exponent},
+decimalRecord[x_?InexactNumberQ, digits_Integer] := Module[
+  {available, used, y, sign, ds, exponent, rd, tail},
   available = Precision[x];
   used = If[NumericQ[available], Max[1, Min[digits, Floor[available]]], digits];
-  y = N[x, used];
-  If[TrueQ[y == 0], Return["0", Module]];
-  sign = If[TrueQ[y < 0], "-", ""];
-  {ds, exponent} = RealDigits[Abs[y], 10, used];
-  If[!VectorQ[ds, IntegerQ], Return[Failure["UnsupportedScalar", <|
-    "Scalar" -> x, "Detail" ->
-      "could not obtain a finite fixed-precision decimal expansion"|>], Module]];
-  sign <> ToString[First[ds]] <> "." <>
-    StringJoin[ToString /@ Rest[ds]] <> "e" <> ToString[exponent - 1]];
+  (* A BigReal may report p reliable binary-derived decimal digits while
+     RealDigits at exactly Floor[p] exposes one or more uncertain tail cells
+     as Indeterminate.  Retry monotonically at a shorter honest midpoint;
+     never replace those cells or stamp the requested precision onto them. *)
+  While[used >= 1,
+    y = N[x, used];
+    If[TrueQ[y == 0], Return[<|"String" -> "0", "Digits" -> used,
+      "Exponent" -> 0, "DecimalErrorExponent" -> -Infinity|>, Module]];
+    sign = If[TrueQ[y < 0], "-", ""];
+    rd = Quiet[Check[RealDigits[Abs[y], 10, used], $Failed]];
+    If[MatchQ[rd, {_List, _Integer}],
+      {ds, exponent} = rd;
+      If[VectorQ[ds, IntegerQ],
+        tail = If[Rest[ds] === {}, "0",
+          StringJoin[ToString /@ Rest[ds]]];
+        Return[<|"String" -> sign <> ToString[First[ds]] <> "." <>
+            tail <> "e" <> ToString[exponent - 1],
+          "Digits" -> used, "Exponent" -> exponent,
+          (* The decimal midpoint differs from x by at most one unit at
+             the first omitted base-10 place. *)
+          "DecimalErrorExponent" -> exponent - used|>, Module]]];
+    used--];
+  Failure["UnsupportedScalar", <|"Scalar" -> x, "Detail" ->
+    "could not obtain a finite fixed-precision decimal expansion"|>]];
+
+decimalString[x_?InexactNumberQ, digits_Integer] := Module[{record},
+  record = decimalRecord[x, digits];
+  If[FailureQ[record], record, record["String"]]];
 
 arbInexactString[x_?InexactNumberQ, digits_Integer] := Module[
-  {midpoint, accuracy, radiusExponent, radius},
-  midpoint = decimalString[x, digits];
-  If[FailureQ[midpoint], Return[midpoint, Module]];
+  {record, midpoint, accuracy, sourceRadiusExponent,
+   radiusExponent, radius},
+  record = decimalRecord[x, digits];
+  If[FailureQ[record], Return[record, Module]];
+  midpoint = record["String"];
   accuracy = Accuracy[x];
-  If[accuracy === Infinity, Return[midpoint, Module]];
-  If[!NumericQ[accuracy], Return[Failure["UnsupportedScalar", <|
+  If[accuracy =!= Infinity && !NumericQ[accuracy],
+    Return[Failure["UnsupportedScalar", <|
     "Scalar" -> x, "Detail" ->
       "inexact coefficient has no finite accuracy estimate"|>], Module]];
   (* Arb interval syntax preserves the uncertainty already tracked by the
-     Wolfram handoff.  The factor two covers midpoint decimalization as well
-     as the conventional 10^-Accuracy source-radius estimate. *)
-  radiusExponent = -Floor[accuracy];
+     Wolfram handoff.  A shortened retry midpoint may have a larger decimal
+     rounding error than the source radius; include the larger exponent.
+     The factor two bounds the sum of both contributions. *)
+  sourceRadiusExponent = If[accuracy === Infinity,
+    -Infinity, -Floor[accuracy]];
+  radiusExponent = Max[sourceRadiusExponent,
+    record["DecimalErrorExponent"]];
+  If[radiusExponent === -Infinity, Return[midpoint, Module]];
   radius = "2e" <> If[radiusExponent >= 0, "+", ""] <>
     ToString[radiusExponent];
   "[" <> midpoint <> " +/- " <> radius <> "]"];

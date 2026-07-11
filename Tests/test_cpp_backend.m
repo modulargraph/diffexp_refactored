@@ -69,6 +69,30 @@ assert["cpp_lower_precision_handoff_preserves_uncertainty_without_indeterminate"
   Max[Abs[N[lowPiCoeffs - Table[lowPi/n!, {n, 0, 4}], 40]]] < 10^-40 &&
   40 < Accuracy[First[lowPiCoeffs]] < 60];
 
+(* A production L2 handoff exposed an edge BigReal whose nominal final
+   decimal cells are Indeterminate to RealDigits.  The bridge must shorten
+   the midpoint and enlarge (never shrink) its Arb interval to cover the
+   omitted decimal places. *)
+uncertainTailWitness =
+  0.99999999999999018886135733657392966823529940615593`207.40966701248306;
+uncertainTailInitialDigits = Floor[Precision[uncertainTailWitness]];
+uncertainTailRaw = Quiet[RealDigits[
+  Abs[N[uncertainTailWitness, uncertainTailInitialDigits]], 10,
+  uncertainTailInitialDigits]];
+uncertainTailRecord = DiffExp2`CppBackend`Private`decimalRecord[
+  uncertainTailWitness, 1000];
+uncertainTailEncoded = DiffExp2`CppBackend`Private`arbInexactString[
+  uncertainTailWitness, 1000];
+assert["cpp_uncertain_decimal_tail_retries_with_covering_interval",
+  MatchQ[uncertainTailRaw, {_List, _Integer}] &&
+  !VectorQ[First[uncertainTailRaw], IntegerQ] &&
+  AssociationQ[uncertainTailRecord] &&
+  uncertainTailRecord["Digits"] < uncertainTailInitialDigits &&
+  StringQ[uncertainTailEncoded] &&
+  StringStartsQ[uncertainTailEncoded, "["] &&
+  uncertainTailRecord["DecimalErrorExponent"] >=
+    -Floor[Accuracy[uncertainTailWitness]]];
+
 rMachineComplex = catchDE2[DiffExp2`Solve`SolveValueRegular[
   csExp, req[0, 0, 4],
   {DiffExp2`EpsSeries`ESNew[0, {1.25 + 0.5 I}]}]];

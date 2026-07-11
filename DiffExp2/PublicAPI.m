@@ -39,7 +39,7 @@ EpsilonExpression::usage = "EpsilonExpression[value, eps] converts a complete Ep
 
 Begin["`Private`"];
 
-$DiffExp2Version = "2.0.0-dev";
+$DiffExp2Version = "2.0.0";
 
 de2Error[id_String, detail_, payload_:<||>] :=
   DiffExp2`Tolerances`DE2Error[id, Join[

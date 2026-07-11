@@ -1,5 +1,4 @@
 (* DiffExp2/Integrate.m — exact per-sector definite integrals.
-   Spec: Docs/specs/Integrate.md (binding); DECISIONS-M0.md.
    The dimreg lower boundary t^(m+1+b eps) Log^q t |_{t=0} := 0 for b != 0
    (the drop rule's integral counterpart) makes every old IBP-step /
    subtraction regularization a single closed form. *)
@@ -45,8 +44,7 @@ pow[x_, 0] := 1; pow[x_, n_] := x^n;
    MEMOIZED on the exact argument tuple (+ WP, which sets the numeric log):
    a tile's base towers are identical across components, masters and cvec
    entries — LineIntegral re-integrates the same tile once per nonzero
-   coefficient, and the per-n towers dominated the tile profile
-   (Docs/SpeedIdeas.md R1).  Pure function of exact inputs: same values,
+   coefficient, and the per-n towers dominated the tile profile. Pure function of exact inputs: same values,
    bounded cache (flush at cap, the $shCache pattern). *)
 $adCache = <||>; $adCacheMax = 4096;
 antiderivativeAt[m_, b_, p_, T_, kMaxOut_] := Module[
@@ -122,7 +120,7 @@ SectorMonomialIntegral[m_, b_, p_Integer, T_, kMaxOut_Integer] := Module[{},
   DiffExp2`EpsSeries`ESTruncate[antiderivativeAt[m, b, p, T, kMaxOut],
     kMaxOut]];
 
-(* ---- the cancellation gate (DEC-4) ----
+(* ---- the cancellation gate ----
    merged coefficient of a divergent (b=0, m+1<=0, any p) monomial across
    ALL sectors, per eps row; scale = max |coeff| of the merged combination
    at that row *)

@@ -1,8 +1,5 @@
-(* DiffExp2/API.m — user/FT-facing entry points.
-   Spec: Docs/specs/API.md (with its in-file pending-amendments header);
-   DECISIONS-M0.md (DEC-10, DEC-23).  v1 surface: the FT-cutover needs
-   (LoadSystem full-format/closed-form, TransportEndpoint, LineIntegral,
-   EndpointLimitValues).  Classic-compat wrappers grow at M6. *)
+(* DiffExp2/API.m — typed implementation entry points shared by the public
+   umbrella and Feynman-trick runtime. *)
 
 BeginPackage["DiffExp2`API`",
   {"DiffExp2`Tolerances`", "DiffExp2`Config`", "DiffExp2`EpsSeries`",

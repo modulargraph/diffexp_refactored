@@ -1,6 +1,4 @@
-(* Unit tests for DiffExp2/Config.m per Docs/specs/Config.md section 8.
-   E12 waiver: untestable until API.m LoadSystem exists (M5); the
-   adopt-or-error rule is enforced through a Config-side check then. *)
+(* Focused unit tests for DiffExp2/Config.m. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -171,7 +169,7 @@ assert["test_dead_keys_dropped",
     failsWith[catchDE2[upd[{# -> 1}]], "E9"] &] &&
   failsWith[catchDE2[upd[{"UseMobius" -> False}]], "E9"]];
 
-(* C21 — sign-aware dedup (DEC-16) *)
+(* C21 — sign-aware dedup *)
 catchDE2[load[{"Variables" -> {Global`s, Global`m},
   "DeltaPrescriptions" -> {{Global`m^2 - Global`s, -1}, {Global`s - Global`m^2, +1}}}]];
 dp2 = cfg["DeltaPrescriptions"];

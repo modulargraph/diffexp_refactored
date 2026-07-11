@@ -1,4 +1,4 @@
-(* Unit tests for DiffExp2/Tolerances.m per Docs/specs/Tolerances.md section 8. *)
+(* Focused unit tests for DiffExp2/Tolerances.m. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];

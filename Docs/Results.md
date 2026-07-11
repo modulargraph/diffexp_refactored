@@ -133,6 +133,6 @@ A release result should record:
 - the independent oracle and its own uncertainty;
 - full Laurent coefficients, not only a field named ``Finite``.
 
-Development campaign logs and large oracle dumps belong on the development
-branch.  A clean release should retain only curated pins needed by shipped
-tests plus this summary; see [Release Manifest](ReleaseManifest.md).
+Development campaign logs and large oracle dumps remain on the development
+branch. This release retains only the curated provenance above and the focused
+fixtures needed by its tests; see [Release Manifest](ReleaseManifest.md).

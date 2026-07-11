@@ -1,7 +1,5 @@
-(* Unit tests for DiffExp2/Indicial.m per Docs/specs/Indicial.md section 8.
-   T-15..T-17 (vendored campaign matrices) activate when
-   Tests/refs/banana_l1_dxx1_full.m / box_l2_full.m exist (DEC-25:
-   regenerated at the consuming milestone); skipped loudly otherwise. *)
+(* Focused unit tests for DiffExp2/Indicial.m. Optional campaign-matrix pins
+   are skipped loudly when their development fixtures are absent. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -207,7 +205,7 @@ assert["test_eps_zero_degeneracy",
 (* T-15..T-17 placeholders: vendored campaign matrices *)
 If[FileExistsQ[FileNameJoin[{repoRoot, "Tests", "refs", "banana_l1_dxx1_full.m"}]],
   Print["  (T-15/T-16 banana matrices found - implement pins)"],
-  Print["  SKIP: T-15..T-17 (campaign matrices not yet vendored; DEC-25 regeneration pending)"]];
+  Print["  SKIP: T-15..T-17 (optional development campaign matrices are not shipped)"]];
 
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Print["Some tests FAILED."]; Exit[1],

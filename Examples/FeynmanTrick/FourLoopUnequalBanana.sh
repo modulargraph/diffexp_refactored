@@ -9,7 +9,7 @@ mkdir -p "$cache_root/fire" "$cache_root/ladder/banana4-unequal"
 cd "$repo_root"
 
 # Experimental/high-cost example.  Squared masses
-# {2,3/2,4/3,5/4,1}, p^2=-1, D=2-2 eps.  This prototype does not claim a
+# {2,3/2,4/3,5/4,1}, p^2=-1, D=2-2 eps.  This example does not claim a
 # completed source-controlled four-loop ladder result.
 exec env \
   DE2_RECURRENCE_BACKEND=Cpp \

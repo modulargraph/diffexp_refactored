@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
-project(DiffExp2Cpp LANGUAGES CXX)
+project(DiffExp2Cpp VERSION 2.0.0 LANGUAGES CXX)
 
 option(DE2_BUILD_TESTS "Build the C++ recurrence tests" ON)
 if(DE2_BUILD_TESTS)

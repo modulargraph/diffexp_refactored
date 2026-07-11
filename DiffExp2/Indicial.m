@@ -1,13 +1,12 @@
 (* DiffExp2/Indicial.m — exact sector-tag derivation at a chart center.
-   Spec: Docs/specs/Indicial.md (binding); decisions: Docs/specs/DECISIONS-M0.md.
-   EXACT algebra only: no numerics, no tolerances, no fallbacks (I-8). *)
+   Exact algebra only: no numerics, no tolerances, no fallbacks. *)
 
 BeginPackage["DiffExp2`Indicial`", {"DiffExp2`Tolerances`", "DiffExp2`Config`"}];
 
-ChartIndicial::usage = "ChartIndicial[A, t, eps, chartRef] classifies the chart-local system f' = A.f exactly: pole data, rank reduction, affine spectrum (I1 contract), Jordan chains, resonance families. Returns IndicialData.";
+ChartIndicial::usage = "ChartIndicial[A, t, eps, chartRef] classifies the chart-local system f' = A.f exactly: pole data, rank reduction, an epsilon-affine spectrum, Jordan chains, and resonance families. Returns IndicialData.";
 MatrixPoleData::usage = "MatrixPoleData[A, t] gives <|\"PoleOrder\" -> r, \"Coefficients\" -> <|-r -> A_-r, ..., -1 -> A_-1|>|> exactly.";
 FuchsianReduce::usage = "FuchsianReduce[A, t, eps, chartRef] reduces a pole order r >= 2 system to Fuchsian form by an exact Moser/shearing gauge transform. Returns ReductionData.";
-EpsDegenerateFamilies::usage = "EpsDegenerateFamilies[indicialData] selects the families whose eps -> 0 eigenvectors collide (EpsZeroDegeneracy > 0), for Transport's RecombineBasis (DEC-7).";
+EpsDegenerateFamilies::usage = "EpsDegenerateFamilies[indicialData] selects the families whose eps -> 0 eigenvectors collide (EpsZeroDegeneracy > 0), for Transport's RecombineBasis.";
 
 Begin["`Private`"];
 
@@ -160,7 +159,7 @@ FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module
     "Trimmed" -> trimmed,
     "GaugeValuation" -> matMinValuation[T, t]|>];
 
-(* ---- AffineSpectrum: the I1 contract ---- *)
+(* ---- exact epsilon-affine spectrum ---- *)
 
 AffineSpectrum[R_?MatrixQ, eps_Symbol, chartRef_Association] := Module[
   {lam, chi, coeffs, lcm, chiC, facs, recs = {}, roots, b, a, merged, lc, closure},
@@ -187,7 +186,7 @@ AffineSpectrum[R_?MatrixQ, eps_Symbol, chartRef_Association] := Module[
     bb = Together[D[r0, eps]];
     If[!zeroQ[D[bb, eps]],
       err["E2", chartRef, <|"CharPoly" -> chiC, "Root" -> r0,
-        "Detail" -> "eigenvalue is not affine in eps (I1 contract; risk R1 fallback documented, not implemented)"|>]];
+        "Detail" -> "indicial eigenvalue is not affine in epsilon; nonlinear epsilon exponents are unsupported"|>]];
     aa = Together[r0 /. eps -> 0];
     If[!zeroQ[r0 - (aa + bb*eps)],
       err["E2", chartRef, <|"CharPoly" -> chiC, "Root" -> r0,
@@ -333,7 +332,7 @@ validateExact[A_, chartRef_] := Module[{pos},
   pos = Position[A, _SeriesData, {0, Infinity}, 1];
   If[pos =!= {},
     err["E1", chartRef, <|"Position" -> First[pos],
-      "Detail" -> "SeriesData entry: eps-truncated slice exports cannot certify the I1 contract; use the exact full export d<var>_full.m (ExportGeneralMatrix)"|>]];];
+      "Detail" -> "SeriesData entry: epsilon-truncated slice exports cannot certify the exact indicial spectrum; use the exact full export d<var>_full.m (ExportGeneralMatrix)"|>]];];
 
 ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
   {d = Length[A], pole, red, R, spec, fams, idMat, regular, Anorm},
@@ -363,7 +362,7 @@ ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
     red = FuchsianReduce[Anorm, t, eps, chartRef]];
   R = red["Residue"];
   If[regular,
-    (* DEC-6: one (0,0,0) family with d-dimensional coefficient space *)
+    (* one (0,0,0) family with d-dimensional coefficient space *)
     spec = {<|"a" -> 0, "b" -> 0, "Multiplicity" -> d,
       "BlockSizes" -> ConstantArray[1, d],
       "Chains" -> Table[{idMat[[i]]}, {i, d}]|>};

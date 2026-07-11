@@ -1,5 +1,4 @@
-(* Unit tests for DiffExp2/Solve.m per Docs/specs/Solve.md section 8
-   (closed-form subset; SU-15..17 fixture tests activate at M4/M5). *)
+(* Focused closed-form unit tests for DiffExp2/Solve.m. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];

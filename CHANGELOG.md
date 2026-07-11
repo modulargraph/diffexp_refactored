@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 — unreleased
+## 2.0.0 — 2026-07-11
 
 - Replaced the strategy/fallback stack with one strict finite-width recurrence
   solver for ordinary, regular-singular, resonant, logarithmic, fractional,

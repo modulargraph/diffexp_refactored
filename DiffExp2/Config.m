@@ -1,6 +1,5 @@
 (* DiffExp2/Config.m — the single validated option store.
-   Spec: Docs/specs/Config.md (binding); decisions: Docs/specs/DECISIONS-M0.md.
-   May call ONLY DiffExp2`Tolerances`. *)
+   May call only DiffExp2`Tolerances`. *)
 
 BeginPackage["DiffExp2`Config`", {"DiffExp2`Tolerances`"}];
 
@@ -29,7 +28,7 @@ CanonicalEps[] := Global`eps;
 
 pinAll[expr_] := expr /. s_Symbol /; Context[s] =!= "System`" :> PinnedVariable[s];
 
-(* DeltaPrescriptions: parse, validate, sign-aware canonicalization (spec 3.3, DEC-16). *)
+(* DeltaPrescriptions: parse, validate, and canonicalize with side awareness. *)
 parseOnePrescription[{poly_, sign_}] := {pinAll[poly], sign};
 parseOnePrescription[expr_] := Module[{d = Global`\[Delta], c, poly},
   If[!PolynomialQ[expr, d] || Exponent[expr, d] =!= 1,
@@ -63,7 +62,7 @@ parsePrescriptions[list_List] := Module[{norm, grouped},
   norm = canonOrient[validatePrescription[parseOnePrescription[#]]] & /@ list;
   grouped = GatherBy[norm, First];
   Map[(If[Length[DeleteDuplicates[#[[All, 2]]]] > 1,
-    err["E7", <|"Elements" -> #, "Message" -> "same canonical factor with OPPOSITE i-delta sides (sign-aware dedup, DEC-16)"|>]];
+    err["E7", <|"Elements" -> #, "Message" -> "same canonical factor with opposite i-delta sides"|>]];
     First[#]) &, grouped]];
 parsePrescriptions[x_] := err["E3", <|"Key" -> "DeltaPrescriptions", "Value" -> x, "Expected" -> "a List"|>];
 
@@ -107,7 +106,7 @@ $schema = <|
 |>;
 
 $droppedReasons = <|
-  "IntegrationStrategy" -> "the strategy stack is deleted (RewritePlan I2); DiffExp2 has ONE solver",
+  "IntegrationStrategy" -> "DiffExp2 has one recurrence solver and no selectable strategy stack",
   "UseRationalRecurrence" -> "the denominator-cleared recursion is the only path in Solve.m",
   "InvWronskSolver" -> "the Wronskian machinery is deleted",
   "HomogeneousSolve" -> "symbolic-eps Frobenius has one homogeneous path",
@@ -117,7 +116,7 @@ $droppedReasons = <|
   "CrosscheckLevel" -> "DiffExp2 invariants are always-on and not configurable",
   "CrosscheckFlags" -> "DiffExp2 invariants are always-on and not configurable",
   "LogFile" -> "no in-repo consumer; session logging is the shell's job",
-  "UseMobius" -> "Mobius chart maps are dropped (DEC-18): every DiffExp2 chart is affine; RoC rescaling survives as RadiusOfConvergence"
+  "UseMobius" -> "Mobius chart maps are unsupported: every DiffExp2 chart is affine; radius-of-convergence rescaling remains available"
 |>;
 
 $store = None;
@@ -166,7 +165,7 @@ doUpdate[base_Association, rules_] := Module[
     Function[{k, v}, k -> If[$schema[k, "Normalize"] === None, v, $schema[k, "Normalize"][v]]], assoc]];
   Do[
     If[n === "SegmentationStrategy" && assoc[n] === "Dynamic",
-      err["E10", <|"Key" -> n, "Message" -> "Dynamic segmentation is not ported in DiffExp2 v1 (RewritePlan 3.2); use Predivision"|>]];
+      err["E10", <|"Key" -> n, "Message" -> "Dynamic segmentation is unsupported; use Predivision"|>]];
     If[!TrueQ[$schema[n, "Type"][assoc[n]]],
       err["E3", <|"Key" -> n, "Value" -> assoc[n], "Message" -> "invalid value (after normalization) for " <> n|>]],
     {n, names}];

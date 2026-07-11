@@ -1,5 +1,4 @@
 (* DiffExp2/SectorSeries.m — the LocalSolution object and its closed algebra.
-   Spec: Docs/specs/SectorSeries.md (binding); decisions: DECISIONS-M0.md.
    Tags are exact data, never inferred; numeric smallness never changes a
    tag, a window, or a sector count. *)
 
@@ -171,7 +170,7 @@ Options[EvaluateLocalSolution] = {"UsePade" -> Automatic,
 
 (* private: diagonal Pade evaluation of one coefficient vector at point *)
 padeEvaluate[coeffs_List, point_, ctx_] := Module[{u, mm, poly, pa},
-  mm = Floor[Length[coeffs]/2];   (* [m/m] from 2m+1 <= ncoeffs (DEC-12) *)
+  mm = Floor[Length[coeffs]/2];   (* [m/m] from 2m+1 <= ncoeffs *)
   poly = Sum[coeffs[[n + 1]]*u^n, {n, 0, Length[coeffs] - 1}];
   pa = If[TrueQ[$ForcePadeFail], PadeApproximant[Unevaluated[Sequence[]]],
     PadeApproximant[poly, {u, 0, {mm, mm}}]];

@@ -1,5 +1,4 @@
 (* DiffExp2/EpsSeries.m — truncated eps-Laurent arrays with honest windows.
-   Spec: Docs/specs/EpsSeries.md (binding); decisions: Docs/specs/DECISIONS-M0.md.
    May call only Tolerances (predicates, DE2Error) and Config (pinned eps symbols). *)
 
 BeginPackage["DiffExp2`EpsSeries`", {"DiffExp2`Tolerances`", "DiffExp2`Config`"}];
@@ -7,7 +6,7 @@ BeginPackage["DiffExp2`EpsSeries`", {"DiffExp2`Tolerances`", "DiffExp2`Config`"}
 ESNew::usage = "ESNew[kmin, coeffs] builds the EpsSeries Σ coeffs[[k-kmin+1]] eps^k with CompleteMax = kmin + Length[coeffs] - 1.";
 ESZero::usage = "ESZero[kmax] gives the canonical zero series known complete through kmax.";
 ESQ::usage = "ESQ[expr] gives True if expr is a structurally valid EpsSeries.";
-ESWindow::usage = "ESWindow[s] gives <|\"Min\" -> kmin, \"CompleteMax\" -> kmax|> verbatim in the RewritePlan 3.1 shape.";
+ESWindow::usage = "ESWindow[s] gives <|\"Min\" -> kmin, \"CompleteMax\" -> kmax|>, the certified Laurent window.";
 ESMinPower::usage = "ESMinPower[s] gives the window Min.";
 ESCompleteMax::usage = "ESCompleteMax[s] gives the window CompleteMax.";
 ESCoefficient::usage = "ESCoefficient[s, k] gives the eps^k coefficient: stored in window, exact 0 below Min (the zero guarantee), LOUD ERROR above CompleteMax.";
@@ -241,7 +240,7 @@ ESFromExpression[expr_, epsSym_Symbol, kmax_Integer] := Module[
   If[den =!= 1,
     esError["ERR-EXPAND-FAIL", <|"Expression" -> StringTake[ToString[expr, InputForm], UpTo[200]],
       "EpsSymbol" -> epsSym, "LeadingPower" -> nmin/den,
-      "Detail" -> "fractional eps-power expansion (old code Floor-ed this; forbidden F7)"|>]];
+      "Detail" -> "fractional epsilon powers are unsupported by EpsSeries and cannot be rounded to an integer Laurent frame"|>]];
   raw = PadRight[ser[[3]], nmax - nmin, 0];
   cm = Min[nmax - 1, kmax];
   If[cm < nmin, Return[ESZero[cm]]];

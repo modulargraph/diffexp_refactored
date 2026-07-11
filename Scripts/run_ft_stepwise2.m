@@ -1,4 +1,4 @@
-(* DiffExp2 FT cutover runner: the M5 ladder.
+(* DiffExp 2 Feynman-trick ladder runner.
    Mirrors Scripts/run_ft_stepwise.m but the transport/integration chain is
    DiffExp2 (sector-native, no fitting): per level the in-memory exact
    DiffMatrix is loaded directly (no slice export round-trip), boundary

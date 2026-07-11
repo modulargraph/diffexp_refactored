@@ -44,7 +44,7 @@ FeynmanTrick`ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[examp
 
 Begin["`Private`"];
 
-FeynmanTrick`$FeynmanTrickVersion = "2.0.0-dev";
+FeynmanTrick`$FeynmanTrickVersion = "2.0.0";
 
 (* --- Configuration --- *)
 $FTConfig = <|

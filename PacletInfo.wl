@@ -1,6 +1,6 @@
 PacletObject[<|
   "Name" -> "DiffExp2",
-  "Version" -> "2.0.0-dev",
+  "Version" -> "2.0.0",
   "WolframVersion" -> "15.0+",
   "Creator" -> "Martijn Hidding",
   "Description" -> "Recurrence-based transport and Feynman-trick integration for dimensionally regularized Feynman integrals.",

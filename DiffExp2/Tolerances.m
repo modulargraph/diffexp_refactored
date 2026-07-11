@@ -1,6 +1,5 @@
 (* DiffExp2/Tolerances.m — the single home for every numeric threshold.
-   Spec: Docs/specs/Tolerances.md (binding); decisions: Docs/specs/DECISIONS-M0.md.
-   Bottom module: depends on NOTHING. *)
+   Bottom module: depends on nothing. *)
 
 BeginPackage["DiffExp2`Tolerances`"];
 
@@ -12,12 +11,12 @@ InputSnapTol::usage = "InputSnapTol[v] gives the input-scaled snap tolerance 10^
 RankTol::usage = "RankTol[wp] gives the relative rank/nullspace threshold 10^(-Floor[wp/4]).";
 GeomGuardTol::usage = "GeomGuardTol[wp] gives the radius-vs-pole comparison guard 10^(-Floor[wp/2]).";
 ChopReserve::usage = "ChopReserve[wp, chopDigits] gives the digit reserve wp - chopDigits.";
-LaurentLeadTol::usage = "LaurentLeadTol[chopDigits] gives the RELATIVE leading-coefficient zero tolerance Max[10^(-Floor[chopDigits/2]), 10^-24]; the 10^-24 floor is a hard constant (DEC-2).";
+LaurentLeadTol::usage = "LaurentLeadTol[chopDigits] gives the relative leading-coefficient zero tolerance Max[10^(-Floor[chopDigits/2]), 10^-24].";
 ResidTol::usage = "ResidTol[wp] gives the relative ODE-residual spot-check threshold 10^(-Floor[wp/10]).";
 NumericMagnitude::usage = "NumericMagnitude[c, digits] gives a stable Euclidean magnitude of the numeric scalar c without allowing an uncertain zero complex component to poison the resolved component.";
 NumericMagnitudeBounds::usage = "NumericMagnitudeBounds[c, digits] gives conservative componentwise-uncertainty {lower, upper} bounds on the modulus of numeric scalar c.";
 NumericallyZeroQ::usage = "NumericallyZeroQ[c, scale, tol, context, bandDecades, binaryFloor] is THE library-wide uncertainty-aware zero classification: True | False | loud ambiguity error; Laurent callers explicitly pass binaryFloor=True for the 10^-24 floor.";
-DE2Error::usage = "DE2Error[id, payload] prints a one-line summary and throws Failure[\"DiffExp2\", payload] on tag \"DiffExp2Error\". The library-wide error primitive (DEC-1).";
+DE2Error::usage = "DE2Error[id, payload] prints a one-line summary and throws Failure[\"DiffExp2\", payload] on tag \"DiffExp2Error\".";
 InstallToleranceState::usage = "InstallToleranceState[assoc] atomically installs the nine-key tolerance record (called by Config.m only).";
 Tol::usage = "Tol[name] is the validated read of the installed tolerance state. Unknown name or no installed state is a loud error, never a default.";
 ToleranceStateInstalledQ::usage = "ToleranceStateInstalledQ[] gives True if a tolerance state is installed.";

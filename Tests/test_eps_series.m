@@ -1,4 +1,4 @@
-(* Unit tests for DiffExp2/EpsSeries.m per Docs/specs/EpsSeries.md section 8. *)
+(* Focused unit tests for DiffExp2/EpsSeries.m. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -137,7 +137,7 @@ assert["exact_rational_passthrough",
   AllTrue[q13["Coeffs"], MemberQ[{Integer, Rational}, Head[#]] &] &&
   coeff[q13, 0] === -2/33 && coeff[q13, 1] === 587/231];
 
-(* 14 — 300-digit chain vs exact (M1 gate) *)
+(* 14 — 300-digit chain vs exact *)
 n14 = {N[1/3, 300], N[22/7, 300], N[-5/11, 300], N[2, 300]};
 qn = div[times[add[es[0, n14[[{1, 2}]]], es[0, n14[[{3, 4}]]]], es[0, {N[1, 300], N[1, 300]}]],
   es[0, {N[2, 300], N[1, 300]}]];

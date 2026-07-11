@@ -1,6 +1,4 @@
-(* Unit tests for DiffExp2/SectorSeries.m per Docs/specs/SectorSeries.md
-   section 8.  Cut items per the taken M0 cuts: t17 (multi-point form cut 3),
-   t23/t29 Coordinates->Main variants (cut 1: chart-coordinate checks). *)
+(* Focused unit tests for DiffExp2/SectorSeries.m. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];

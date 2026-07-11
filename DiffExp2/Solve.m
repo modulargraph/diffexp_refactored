@@ -1,6 +1,5 @@
-(* DiffExp2/Solve.m — THE one local solver: symbolic-eps Frobenius with
-   EpsSeries coefficient arithmetic.  Spec: Docs/specs/Solve.md (binding);
-   decisions: DECISIONS-M0.md.
+(* DiffExp2/Solve.m — the one local solver: symbolic-eps Frobenius with
+   EpsSeries coefficient arithmetic.
    True resonance -> explicit log-chain ladder (CASE R); pseudo-resonance ->
    exact Laurent shift (CASE P); regular charts run the SAME recursion
    (CASE T only, V = I).
@@ -20,7 +19,7 @@ PrewarmHomogeneousBatch::usage = "PrewarmHomogeneousBatch[{chartSystem1, ...}, r
 HomogeneousCacheCapacity::usage = "HomogeneousCacheCapacity[] gives the bounded number of verified chart bases retained by SolveHomogeneous. It is intended for transport schedulers that must preflight a complete prewarm before submitting any batch.";
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
-SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
+SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming value vector (one EpsSeries per component at chart center t = 0) through a regular chart with one d-dimensional recursion, without constructing a basis or matching matrix. The delivered epsilon window is capped by the incoming window. Non-regular charts fail loudly.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-clearing, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
@@ -1088,7 +1087,7 @@ affineDivFrame[rhs_List, dA_, dB_, fb_Integer, W_Integer] := Module[
       invB*frDivEps[rhs],
     True,
       err["E5", <|"Center" -> "(frame)"|>,
-        <|"Detail" -> "zero affine divisor belongs to CASE R"|>]]];
+        <|"Detail" -> "zero affine divisor requires the resonant log-chain branch"|>]]];
 
 applyInvD0Frame[v_List, invD0_, d0InvScalar_, fb_Integer, W_Integer] :=
   If[d0InvScalar === None, frConv[v, invD0, fb, W], d0InvScalar*v];
@@ -1104,7 +1103,7 @@ blockSolveTPFrame[rhs_List, dA_, dB_, invD0_, d0InvScalar_, q_Integer,
       <|"Detail" -> "malformed affine/Jordan block frame"|>]];
   If[zeroCanQ[dA] && zeroCanQ[dB],
     err["E5", <|"Center" -> "(frame)"|>,
-      <|"Detail" -> "zero affine divisor belongs to CASE R"|>]];
+      <|"Detail" -> "zero affine divisor requires the resonant log-chain branch"|>]];
   If[zeroCanQ[dA],
     (* Preserve the strict legacy underflow contract before bottom-up sums
        can conceal an individually out-of-frame rhs_j/eps^j term.  The old
@@ -2328,7 +2327,7 @@ SolveChart[cs_Association, req_Association, source_:None] := Module[{basis, part
   part = If[source === None, None, SolveParticular[cs, source, req]];
   <|"Basis" -> basis, "Particular" -> part, "CouplingDepth" -> 0|>];
 
-(* ---- value-vector propagation (regular charts; prototype) ----
+(* ---- value-vector propagation for regular charts ----
    The incoming VALUE at the chart center is the t^0 Cauchy datum of the
    transported solution: ONE runRecursion with init = vals replaces the
    d-column basis + MatchWeights + CombineLocalSolutions of the basis
@@ -2437,7 +2436,7 @@ capWindow[cs_, ls_, capCM_] := Module[
    evaluated f / theta-f VALUES feeding the d^2 esTimes grid numericize at
    2x WP.  Exact evaluation outputs otherwise compound into exact-rational
    giants across the grid (measured: the check was ~3.1 s of a 13 s chart
-   at d = 7, Docs/SpeedIdeas.md §2).  Values only — the residual compare
+   at d = 7). Values only — the residual compare
    below is numeric by construction and uses componentwise uncertainty
    bounds; windows untouched. *)
 numV[s_] := esNew[esMin[s],

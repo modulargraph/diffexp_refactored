@@ -1,4 +1,4 @@
-(* Smoke tests for DiffExp2/Transport.m (M4 parity suite grows at M5). *)
+(* Focused tests for DiffExp2/Transport.m. *)
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
 Get[FileNameJoin[{repoRoot, "DiffExp2", "DiffExp2.m"}]];
@@ -525,7 +525,7 @@ assert["tt14_matching_trim_uses_ranktol_not_laurent_floor",
   DiffExp2`EpsSeries`ESCoefficient[rankW[[2]], 0] === 1];
 catchDE2[DiffExp2`Config`LoadConfiguration[{"WorkingPrecision" -> 100}]];
 
-(* The value-vector transport prototype is intentionally environment-gated.
+(* The value-vector transport path is intentionally environment-gated.
    Keep each A/B run local even when this test file is launched from a shell
    that already defines DE2_VALUE_TRANSPORT.  SetEnvironment accepts None to
    remove a variable, which faithfully restores an initially-unset state. *)

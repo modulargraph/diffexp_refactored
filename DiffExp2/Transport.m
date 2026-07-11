@@ -1,6 +1,5 @@
 (* DiffExp2/Transport.m — segmentation, marching, eps-graded matching,
-   crossing.  Spec: Docs/specs/Transport.md (binding); DECISIONS-M0.md.
-   V1 notes (recorded): MatchWeights implements the honest Laurent-graded
+   and analytic-continuation crossings. MatchWeights implements the honest Laurent-graded
    solve; the marching path applies tag recombination plus determinant-series
    epsilon-lattice saturation before matching.  The error probe is the
    full-vs-reduced evaluation at the outgoing match point. *)
@@ -208,14 +207,14 @@ numericDistance[a_, b_, digits_Integer:40] := Module[
 
 (* Pipeline numeric handoff: evaluated VALUES entering the matching seam
    numericize at 2x WP — the pinned $InputPrecisionFactor policy and the
-   runner's boundary/level-handoff policy (M5c).  The extra headroom is
+   runner's boundary/level-handoff policy. The extra headroom is
    essential for ill-conditioned honest Laurent bases: matching may lose
    many digits while still meeting MatchTol at the configured precision.
    applied inside the marching loop.  EvaluateLocalSolution itself stays
    exact-in/exact-out (a module contract, pinned by test_sectorseries);
    but exact evaluation outputs fed into MatchWeights/Combine grind
    exact-giant field arithmetic (measured d = 7 hot spot: 430/560 exact
-   coefficients, MatchWeights 3.0 s -> see Docs/SpeedIdeas.md §2).
+   coefficients, MatchWeights 3.0 s).
    Values only; tags, windows and structural decisions untouched;
    symbols pass through N unchanged; idempotent on bignums. *)
 numHandoff[x_] := N[x,
@@ -729,7 +728,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
       {ti, Length[targets]}]];
   (* Value propagation needs Cauchy data at the next chart CENTER.  The
      classic chart chain was designed for +/-1/k matching points instead, so
-     refine it only under the prototype flag.  Flag-off plans remain exactly
+     refine it only under the opt-in flag. Flag-off plans remain exactly
      the pre-existing plans, including centers and match points. *)
   If[Environment["DE2_VALUE_TRANSPORT"] === "1",
     charts = valueRefineRegularChain[charts, all, dir, k, lineCap]];
@@ -803,7 +802,7 @@ ApplyCrossing[ls_Association, sigma_] := Module[
 
 (* ---- 2.8 RecombineBasis: remove eps=0 degeneracy of the fundamental
    matrix (the log x = (x^(2eps)-1)/(2eps) class).  Tag-driven off
-   Indicial`EpsDegenerateFamilies (DEC-7): per degenerate family, ordered
+   Indicial`EpsDegenerateFamilies: per degenerate family, ordered
    by b: B_1 = S_1, B_m = (S_m - S_1)/((b_m - b_1) eps); recursively on
    {B_2, ...} up to the family's recorded degeneracy depth.
 
@@ -1695,8 +1694,7 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     If[Environment["DEBUG_CHART"] === "1",
       Print["CHART ", chart["Name"], " prep start t=", SessionTime[]]];
     cs = DiffExp2`Solve`PrepareChart[sys, chart];
-    (* PROTOTYPE (env-gated, default off): value-vector propagation for
-       REGULAR interior charts (Docs/PerfGapAnalysis.md lever 1).  The
+    (* Optional value-vector propagation for regular interior charts. The
        incoming object is evaluated AT THIS CHART'S CENTER — inside the
        previous chart's disk (the classic +1/k,-1/k construction keeps
        ordinary handoffs safely interior; EvaluateLocalSolution's radius assert is the loud

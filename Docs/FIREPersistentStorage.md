@@ -1,20 +1,26 @@
 # Persistent FIRE Storage
 
+> **Status: NO-GO (2026-07-11).** Real FIRE 6.5.2 cold/warm parity fails.
+> FIRE's `#storage` databases are not a safe extensible cache across separate
+> invocations with new integral requests. Do not enable or integrate this
+> prototype. The code and benchmark remain only as negative research evidence.
+
 Successive `CloseLevelMasterBasis` iterations often ask FIRE for derivatives
 of masters discovered by the preceding reduction.  The exact integral cache
 cannot predict those masters, while FIRE's default temporary database is
 discarded after every invocation.  Rebuilding that database dominated the
 observed unequal-mass banana preparation time.
 
-`PersistentFIREStorage` is an experimental, opt-in configuration switch that
-reuses FIRE's internal sector database across those successive requests:
+The prototype added an opt-in configuration switch intended to reuse FIRE's
+internal sector database across those successive requests:
 
 ```mathematica
 FeynmanTrick`SetFTOption["PersistentFIREStorage", True];
 FeynmanTrick`SetFTOption["FIREStorageDirectory", "/fast/local/cache"];
 ```
 
-For `Scripts/run_ft_stepwise2.m`, the equivalent environment settings are:
+The research runner exposes equivalent environment settings, but they must not
+be used for production calculations:
 
 ```sh
 FT_PERSISTENT_FIRE_STORAGE=1 \
@@ -71,10 +77,6 @@ table readers.  It checks generation cloning, key invalidation, writer
 serialization, successful publication, master-identity caching, and rollback
 after both FIRE-exit and table-parse failures without starting FIRE itself.
 
-Before making this mode the default, run an actual FIRE parity/performance
-trial from a cold cache, then repeat from the populated cache.  The reductions
-and master set must agree exactly with persistence disabled.
-
 The repository includes a bounded real-FIRE microbenchmark for this purpose.
 It uses two disjoint request batches for a fixed Euclidean one-loop bubble and
 disables the in-memory reduction cache:
@@ -85,3 +87,45 @@ wolframscript -file Scripts/bench_fire_persistent_storage.m
 ```
 
 Set `FT_FIRE_STORAGE_BENCH_KEEP=1` to preserve its logs and generated storage.
+The benchmark intentionally exits nonzero when it reproduces the no-go.
+
+### Real FIRE 6.5.2 result
+
+The fixed Euclidean one-loop bubble used disjoint closure-like batches:
+
+```text
+round 1 = {{1,1}, {2,1}, {1,2}}
+round 2 = {{3,1}, {2,2}, {1,3}}
+```
+
+Persistence-off and persistence-on cold round 1 agreed exactly, with master
+set `{{0,1},{1,0},{1,1}}`. The warm round loaded four database files (11 copy
+events total) and FIRE reported every sector as `nothing to do`, proving that
+storage was consumed. Nevertheless, its table contained invalid virtual point
+identifiers such as `80-10-1`. The strict unresolved-master guard rejected the
+table, discarded the attempt, and left `CURRENT` on the cold generation.
+
+| configuration | off R1 | off R2 | on cold R1 | on warm R2 | result |
+|---|---:|---:|---:|---:|---|
+| wall seconds, plain storage + keepall | 2.098626 | 2.093978 | 2.663787 | 2.168900 | warm rejected |
+| FIRE seconds, plain storage + keepall | 0.134010 | 0.125736 | 0.196977 | 0.182933 | warm rejected |
+| FIRE seconds, cumulative R1 union R2 | 0.132988 | 0.121922 | 0.184110 | 0.179930 | same invalid virtual points |
+| FIRE seconds, plain storage without keepall | 0.134768 | 0.127994 | 0.205186 | 0.200028 | silently wrong |
+
+Removing `#keepall` is worse: warm round 2 completes and publishes, but returns
+the three requested integrals as identities and reports them as masters:
+
+```text
+G[1,{3,1}], G[1,{2,2}], G[1,{1,3}]
+```
+
+The correct persistence-off reductions instead use the master set
+`{{0,1},{1,0},{1,1}}`. Explicitly supplying `round 1 union round 2` on the warm
+invocation does not repair the virtual points. The `!` storage modifier also
+fails. Thus neither request accumulation nor storage-mode selection makes the
+internal databases safe across FIRE processes, and there is no measured speed
+benefit even in the failing cases.
+
+The exact correct and invalid warm FIRE tables are frozen in
+`Tests/refs/fire_persistent_storage/`. The recommended optimization direction
+is one-invocation closure batching, not cross-invocation database reuse.

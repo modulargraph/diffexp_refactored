@@ -1,5 +1,9 @@
 (* Real FIRE cold/warm parity microbenchmark for PersistentFIREStorage.
 
+   STATUS: this is a frozen NO-GO reproducer.  FIRE 6.5.2 warm reuse fails
+   exact round-2 parity; success would indicate that FIRE or the integration
+   strategy changed and deserves a fresh audit.  The expected current exit is 1.
+
    The topology is a fixed Euclidean one-loop massive bubble.  Two disjoint
    request batches mimic successive basis-closure rounds.  ReductionCache is
    disabled so the second batch can only benefit from FIRE's persisted sector
@@ -9,6 +13,8 @@
      FT_FIRE_PATH                  FIRE6 installation root
      FT_FIRE_STORAGE_BENCH_ROOT    artifact directory
      FT_FIRE_STORAGE_BENCH_KEEP=1  preserve artifacts after success
+     FT_FIRE_STORAGE_BENCH_EXPLICIT_ENVELOPE=1
+                                   diagnostic: explicitly union both rounds
 *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
@@ -28,6 +34,8 @@ benchRoot = ExpandFileName[envOrDefault["FT_FIRE_STORAGE_BENCH_ROOT",
     "ft-fire-storage-real-" <> ToString[$ProcessID] <> "-" <>
       StringReplace[CreateUUID[], "-" -> ""]}]]];
 keepArtifacts = envOrDefault["FT_FIRE_STORAGE_BENCH_KEEP", "0"] === "1";
+explicitWarmEnvelope =
+  envOrDefault["FT_FIRE_STORAGE_BENCH_EXPLICIT_ENVELOPE", "0"] === "1";
 offDir = FileNameJoin[{benchRoot, "off"}];
 onDir = FileNameJoin[{benchRoot, "on"}];
 storageDir = FileNameJoin[{benchRoot, "storage"}];
@@ -66,6 +74,9 @@ sameExactReductions[_, _] := False;
 reductionRows[result_] := If[AssociationQ[result],
   ({#, ToString[result["Reductions"][#], InputForm]} &) /@
     Keys[result["Reductions"]], {}];
+restrictDetailedResult[result_, keys_List] := If[AssociationQ[result],
+  Join[result, <|"Reductions" -> Association[
+    (# -> result["Reductions"][#]) & /@ keys]|>], result];
 fireReportedSeconds[log_String] := Module[{matches},
   matches = StringCases[log,
     RegularExpression["Total time: ([0-9.]+)"] -> "$1"];
@@ -118,6 +129,8 @@ onTopology["WorkDirectory"] = onDir;
 
 round1 = {{1, 1}, {2, 1}, {1, 2}};
 round2 = {{3, 1}, {2, 2}, {1, 3}};
+warmInput = If[explicitWarmEnvelope,
+  DeleteDuplicates[Join[round1, round2]], round2];
 
 {offTime1, offResult1} = AbsoluteTiming[
   FeynmanTrick`FIREInterface`ReduceIntegralsDetailed[offTopology, round1]];
@@ -136,8 +149,9 @@ onLog1 = readText[FileNameJoin[{onDir, "fire_stdout.log"}]];
 snapshotRunArtifacts[onDir, "on-cold-round1"];
 coldStorage = storageSnapshot[];
 coldPointer = currentPointer[];
-{onTime2, onResult2} = AbsoluteTiming[
-  FeynmanTrick`FIREInterface`ReduceIntegralsDetailed[onTopology, round2]];
+{onTime2, onFullResult2} = AbsoluteTiming[
+  FeynmanTrick`FIREInterface`ReduceIntegralsDetailed[onTopology, warmInput]];
+onResult2 = restrictDetailedResult[onFullResult2, round2];
 onLog2 = readText[FileNameJoin[{onDir, "fire_stdout.log"}]];
 snapshotRunArtifacts[onDir, "on-warm-round2"];
 warmStorage = storageSnapshot[];
@@ -173,6 +187,7 @@ summary = <|
   "Topology" -> "fixed Euclidean one-loop massive bubble",
   "Round1" -> round1,
   "Round2" -> round2,
+  "WarmInput" -> warmInput,
   "Seconds" -> <|
     "OffRound1" -> offTime1,
     "OffRound2" -> offTime2,

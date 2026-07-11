@@ -1,0 +1,50 @@
+{
+  "date": "2026-07-11",
+  "fire_version": "6.5.2",
+  "topology": "fixed Euclidean one-loop massive bubble",
+  "round1": [[1, 1], [2, 1], [1, 2]],
+  "round2": [[3, 1], [2, 2], [1, 3]],
+  "correct_master_set": [[0, 1], [1, 0], [1, 1]],
+  "plain_keepall": {
+    "wall_seconds": {
+      "off_round1": 2.098626,
+      "off_round2": 2.093978,
+      "on_cold_round1": 2.663787,
+      "on_warm_round2": 2.168900
+    },
+    "fire_seconds": {
+      "off_round1": 0.134010,
+      "off_round2": 0.125736,
+      "on_cold_round1": 0.196977,
+      "on_warm_round2": 0.182933
+    },
+    "warm_storage_files_loaded": 4,
+    "warm_copy_events": 11,
+    "round1_exact_parity": true,
+    "round2_exact_parity": false,
+    "warm_publication_rejected": true,
+    "current_pointer_unchanged": true,
+    "invalid_point_id": "80-10-1"
+  },
+  "cumulative_request_envelope": {
+    "round2_exact_parity": false,
+    "failure": "same invalid virtual points"
+  },
+  "plain_without_keepall": {
+    "fire_seconds": {
+      "off_round1": 0.134768,
+      "off_round2": 0.127994,
+      "on_cold_round1": 0.205186,
+      "on_warm_round2": 0.200028
+    },
+    "round2_exact_parity": false,
+    "silently_wrong": true,
+    "wrong_master_set": [[1, 3], [2, 2], [3, 1]],
+    "wrong_reductions": ["G[1,{3,1}]", "G[1,{2,2}]", "G[1,{1,3}]"]
+  },
+  "storage_bang_keepall": {
+    "round2_exact_parity": false,
+    "failure": "invalid virtual points rejected"
+  },
+  "conclusion": "NO-GO: FIRE #storage is not a safe extensible cache across invocations"
+}

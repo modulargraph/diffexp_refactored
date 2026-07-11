@@ -10,6 +10,8 @@ ValidateLocalSolution::usage = "ValidateLocalSolution[ls] checks every structura
 CanonicalizeLocalSolution::usage = "CanonicalizeLocalSolution[ls] merges identical and integer-spaced same-(b,p) sectors, drops syntactically zero sectors, sorts by (a,b,p).";
 ChartImSign::usage = "ChartImSign[ls] derives the chart Im-sign (+1|-1|None) from the Prescriptions list; conflicting odd-multiplicity entries are a loud error. THE one sign derivation in DiffExp2.";
 EvaluateLocalSolution::usage = "EvaluateLocalSolution[ls, tval, opts] evaluates at the chart point tval. Options: \"UsePade\", \"TOrderReduction\", \"ImSign\"; the internal \"ComputeTailEstimates\" option defaults True. Returns <|\"Value\" -> EpsSeries, \"PadeFallbacks\" -> ..., \"TailEstimates\" -> list|Missing[\"NotComputed\"]|>.";
+PrepareRationalMultiplier::usage = "PrepareRationalMultiplier[shape, c, var] classifies and prepares the exact rational multiplier c(var,eps) for a LocalSolution (or a shape association with EpsWindow, TWindow, Radius, and optional Dimension). It returns the epsilon shift, center-pole order, finite Taylor kernels, collision-proof exact identity, and an explicit ProvenZero structural certificate.";
+ExactExpressionIdentity::usage = "ExactExpressionIdentity[expr, var] returns the deterministic context-explicit recursive-AST certificate used by exact multiplier and SCC matrix identities.";
 MultiplyRational::usage = "MultiplyRational[ls, c] multiplies by a rational c(t, eps): center poles shift a, far poles fold into Taylor parts, interior poles are a loud error, eps-denominators shift the windows.";
 ReexpandLocalSolution::usage = "ReexpandLocalSolution[ls, newCenter, targetOrder, opts] re-expands around a regular point inside the chart, producing a single-(0,0,0)-sector LocalSolution with the explicit truncation contract.";
 DifferentiateLocalSolution::usage = "DifferentiateLocalSolution[ls] gives the exact chart-coordinate derivative via tag algebra.";
@@ -291,35 +293,110 @@ tValuation[e_, t_] := Module[{c = Cancel[Together[e]]},
   If[zeroCanQ[c], Infinity,
     Exponent[Numerator[c], t, Min] - Exponent[Denominator[c], t, Min]]];
 
-MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
-  {ls = ValidateLocalSolution[ls0], eps = DiffExp2`Config`CanonicalEps[],
-   cT, num, den, nv, dv, jmin, jcount, cj, d0, troots, wp, M, Q, secs,
-   kmin, kmax, ncols, ncomp, newSecs, prepSignature, prepKey, prepared,
-   cacheHit},
+multiplierShape[shape_Association] := Module[
+  {ls, win, tmax, ncols, radius, center, dimension},
+  If[KeyExistsQ[shape, "Sectors"],
+    ls = ValidateLocalSolution[shape];
+    win = ls["EpsWindow"];
+    ncols = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2]];
+    radius = ls["Radius"];
+    center = Lookup[ls, "Center", "(shape)"];
+    dimension = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]],
+    win = Lookup[shape, "EpsWindow", None];
+    tmax = If[AssociationQ[Lookup[shape, "TWindow", None]],
+      Lookup[shape["TWindow"], "CompleteMax", None], None];
+    radius = Lookup[shape, "Radius", None];
+    center = Lookup[shape, "Center", "(shape)"];
+    dimension = Lookup[shape, "Dimension", None];
+    If[!AssociationQ[win] ||
+        !AllTrue[{"Min", "CompleteMax"}, KeyExistsQ[win, #] &] ||
+        !IntegerQ[win["Min"]] || !IntegerQ[win["CompleteMax"]] ||
+        win["Min"] > win["CompleteMax"] || !IntegerQ[tmax] || tmax < 0 ||
+        radius === None,
+      err["window", <|"Chart" -> ToString[center, InputForm],
+        "Shape" -> shape,
+        "Detail" -> "rational-multiplier preparation needs an ordered epsilon window, a nonnegative complete Taylor order, and a radius"|>]];
+    ncols = tmax + 1];
+  <|"EpsMin" -> win["Min"], "EpsMax" -> win["CompleteMax"],
+    "TaylorWidth" -> ncols, "Radius" -> radius, "Center" -> center,
+    "Dimension" -> dimension|>];
+
+(* InputForm is useful diagnostics, but it is not a collision certificate:
+   its qualification of symbols depends on $ContextPath.  Every atom below
+   is represented by a string-valued typed record, every Symbol retains its
+   context and bare name, and compound expressions retain their ordered AST.
+   Compact RawJSON is therefore stable across context paths and is also
+   directly embeddable in the native exact manifests. *)
+exactIdentityAST[s_Symbol] := <|"node" -> "symbol",
+  "context" -> Context[s], "name" -> SymbolName[s]|>;
+exactIdentityAST[e_?AtomQ] := <|"node" -> "atom",
+  "head" -> exactIdentityAST[Head[e]],
+  "value" -> ToString[e, InputForm]|>;
+exactIdentityAST[e_] := <|"node" -> "expression",
+  "head" -> exactIdentityAST[Head[e]],
+  "arguments" -> (exactIdentityAST /@ (List @@ e))|>;
+
+ExactExpressionIdentity[entry_, var_Symbol] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], canonical = Together[entry]},
+  ExportString[<|"schema" -> "diffexp2-exact-expression-v1",
+    "variable" -> exactIdentityAST[var],
+    "epsilon" -> exactIdentityAST[eps],
+    "expression" -> exactIdentityAST[canonical]|>,
+    "RawJSON", "Compact" -> True]];
+
+PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], shapeData, cT, num, den, nv, dv,
+   jmin, jcount, cj, d0, troots, wp, M, Q, kmin, kmax, ncols,
+   prepSignature, prepKey, cached, prepared, provenZero, exactIdentity,
+   storePrepared},
+  shapeData = multiplierShape[shape];
   wp = cfg["WorkingPrecision"];
   cT = Together[c /. var -> var];
   If[!PolynomialQ[Numerator[cT], {var, eps}] || !PolynomialQ[Denominator[cT], {var, eps}],
-    err["nonrational", <|"Chart" -> chartName[ls], "Expression" -> cT,
+    err["nonrational", <|"Chart" -> ToString[shapeData["Center"], InputForm],
+      "Expression" -> cT,
       "Detail" -> "multiplier must be rational in (chart variable, eps)"|>]];
   num = Numerator[cT]; den = Denominator[cT];
   If[!exactQ[den],
-    err["inexactdenominator", <|"Chart" -> chartName[ls],
+    err["inexactdenominator", <|
+      "Chart" -> ToString[shapeData["Center"], InputForm],
       "Detail" -> "denominator must be exact for pole classification"|>]];
-  kmin = lsMin[ls]; kmax = lsCM[ls];
-  ncols = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2]];
-  ncomp = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]];
+  kmin = shapeData["EpsMin"]; kmax = shapeData["EpsMax"];
+  ncols = shapeData["TaylorWidth"];
   jcount = kmax - kmin + 1;
   prepSignature = {cT, {Context[var], SymbolName[var]},
-    {Context[eps], SymbolName[eps]}, kmin, kmax, ncols, ls["Radius"], wp,
+    {Context[eps], SymbolName[eps]}, kmin, kmax, ncols,
+    shapeData["Radius"], wp,
     cfg["ChopPrecision"], DiffExp2`Tolerances`$InputPrecisionFactor};
   prepKey = Hash[prepSignature, "SHA256"];
-  prepared = Lookup[$multiplyRationalPreparedCache, prepKey, None];
-  cacheHit = AssociationQ[prepared] &&
-    SameQ[Lookup[prepared, "Signature", None], prepSignature];
-  If[cacheHit,
-    jmin = prepared["EpsilonShift"];
-    M = prepared["CenterPoleOrder"];
-    Q = prepared["TaylorKernels"],
+  cached = Lookup[$multiplyRationalPreparedCache, prepKey, None];
+  If[AssociationQ[cached],
+    If[!SameQ[Lookup[cached, "Signature", None], prepSignature],
+      err["cachecollision", <|
+        "Chart" -> ToString[shapeData["Center"], InputForm],
+        "CacheKey" -> prepKey,
+        "Detail" -> "rational-multiplier preparation cache key collided with an unequal full signature"|>]];
+    Return[cached["Prepared"], Module]];
+  exactIdentity = ExactExpressionIdentity[cT, var];
+  provenZero = structuralZeroQ[cT];
+  storePrepared[] := Module[{},
+    prepared = <|"EpsilonShift" -> jmin, "CenterPoleOrder" -> M,
+      "TaylorKernels" -> Q, "ExactIdentity" -> exactIdentity,
+      "ProvenZero" -> provenZero|>;
+    If[Length[$multiplyRationalPreparedCache] >=
+        $multiplyRationalPreparedCacheMax,
+      $multiplyRationalPreparedCache = <||>];
+    AssociateTo[$multiplyRationalPreparedCache, prepKey -> <|
+      "Signature" -> prepSignature, "Prepared" -> prepared|>];
+    prepared];
+  (* Exact zero is a structural certificate.  An inexact zero remains an
+     active multiplier: retain it as the leading finite kernel so native SCC
+     algebra cannot discard its honest window constraint. *)
+  If[zeroCanQ[cT],
+    jmin = 0; M = 0;
+    Q = ConstantArray[0, {jcount, ncols}];
+    If[!provenZero, Q[[1, 1]] = cT];
+    Return[storePrepared[], Module]];
   nv = epsValPoly[num, eps]; dv = epsValPoly[den, eps];
   jmin = nv - dv;
   (* eps-Laurent coefficients c_j(t), j = jmin .. jmin + jcount - 1 *)
@@ -336,21 +413,44 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
   Module[{dred = Cancel[d0/var^Exponent[d0, var, Min]]},
     troots = If[FreeQ[dred, var], {},
       DeleteDuplicates[var /. Solve[dred == 0, var]]];
-    Do[Module[{exact = exactQ[r0] && exactQ[ls["Radius"]], absr, rad, diff, interior},
+    Do[Module[{exact = exactQ[r0] && exactQ[shapeData["Radius"]],
+        absr, rad, diff, interior, interiorProof, farProof,
+        exactAbs, exactRadius},
       If[exact,
-        (* exact comparison decides; |t_i| == Radius counts as FAR (other chart) *)
-        interior = TrueQ[RootReduce[Abs[r0]] < ls["Radius"]] &&
-          !TrueQ[PossibleZeroQ[RootReduce[Abs[r0]] - ls["Radius"]]],
-        absr = numMag[r0, wp]; rad = N[ls["Radius"], wp];
+        (* Exact-but-parametric does not mean orderable.  A regulator may
+           leave |t_i| versus Radius undecidable; silently treating that as
+           FAR would make the retained Taylor kernel unsound.  Equality is
+           certified by GreaterEqual and belongs to the neighbouring chart. *)
+        exactAbs = Quiet[Check[RootReduce[Abs[r0]], Abs[r0]]];
+        exactRadius = Quiet[Check[RootReduce[shapeData["Radius"]],
+          shapeData["Radius"]]];
+        interiorProof = TrueQ[Quiet[exactAbs < exactRadius]];
+        farProof = TrueQ[Quiet[exactAbs >= exactRadius]];
+        If[!interiorProof && !farProof,
+          interiorProof = TrueQ[Quiet[Check[
+            FullSimplify[exactAbs < exactRadius], False]]];
+          farProof = TrueQ[Quiet[Check[
+            FullSimplify[exactAbs >= exactRadius], False]]]];
+        If[interiorProof === farProof,
+          err["geomambiguous", <|
+            "Chart" -> ToString[shapeData["Center"], InputForm],
+            "Pole" -> r0, "Radius" -> shapeData["Radius"],
+            "InteriorPredicate" -> (exactAbs < exactRadius),
+            "FarPredicate" -> (exactAbs >= exactRadius),
+            "Detail" -> "exact pole modulus vs radius is not provably interior or provably at/outside the chart"|>]];
+        interior = interiorProof,
+        absr = numMag[r0, wp]; rad = N[shapeData["Radius"], wp];
         diff = absr - rad;
         If[Abs[diff] < DiffExp2`Tolerances`GeomGuardTol[wp]*Max[absr, rad],
-          err["geomambiguous", <|"Chart" -> chartName[ls], "Pole" -> r0,
-            "Radius" -> ls["Radius"],
+          err["geomambiguous", <|
+            "Chart" -> ToString[shapeData["Center"], InputForm],
+            "Pole" -> r0, "Radius" -> shapeData["Radius"],
             "Detail" -> "pole modulus vs radius numerically ambiguous"|>]];
         interior = diff < 0];
       If[interior && !TrueQ[PossibleZeroQ[r0]],
-        err["interiorpole", <|"Chart" -> chartName[ls], "Pole" -> r0,
-          "Radius" -> ls["Radius"],
+        err["interiorpole", <|
+          "Chart" -> ToString[shapeData["Center"], InputForm],
+          "Pole" -> r0, "Radius" -> shapeData["Radius"],
           "Detail" -> "interior pole: segmentation must place a chart here (no radius-shrink fallback)"|>]]],
       {r0, troots}]];
   (* center-pole order and analytic Taylor parts *)
@@ -359,7 +459,7 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
      per order is prohibitively slow on big rationals), then numericize at
      2x WP (structure already decided on exact data) *)
   Q = Table[Module[{qj = Cancel[Together[cj[[j]]*var^M]], num1, den1, nc, dc, csr},
-      If[zeroCanQ[qj], ConstantArray[0, ncols],
+      If[structuralZeroQ[qj], ConstantArray[0, ncols],
         num1 = Numerator[qj]; den1 = Denominator[qj];
         nc = Table[Coefficient[num1, var, n], {n, 0, ncols - 1}];
         dc = Table[Coefficient[den1, var, n], {n, 0, ncols - 1}];
@@ -374,12 +474,19 @@ MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
            swell or hit the kernel's small default extra-precision limit. *)
         Map[groundTaylorCoefficient[#, wp] &, csr]]],
     {j, 1, jcount}];
-  If[Length[$multiplyRationalPreparedCache] >=
-      $multiplyRationalPreparedCacheMax,
-    $multiplyRationalPreparedCache = <||>];
-  AssociateTo[$multiplyRationalPreparedCache, prepKey -> <|
-    "Signature" -> prepSignature, "EpsilonShift" -> jmin,
-    "CenterPoleOrder" -> M, "TaylorKernels" -> Q|>]];
+  storePrepared[]];
+
+MultiplyRational[ls0_Association, c_, var_Symbol] := Module[
+  {ls = ls0, prepared, jmin, M, Q, kmin, kmax,
+   ncols, ncomp, jcount, newSecs},
+  prepared = PrepareRationalMultiplier[ls, c, var];
+  jmin = prepared["EpsilonShift"];
+  M = prepared["CenterPoleOrder"];
+  Q = prepared["TaylorKernels"];
+  kmin = lsMin[ls]; kmax = lsCM[ls];
+  ncols = Dimensions[First[ls["Sectors"]]["Coeffs"]][[2]];
+  ncomp = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]];
+  jcount = kmax - kmin + 1;
   (* convolve into each sector; a -> a - M; windows shift by jmin *)
   newSecs = Map[Module[{arr = #["Coeffs"], out},
     (* vectorized t-convolution: per (kp, jrow) one ListConvolve per

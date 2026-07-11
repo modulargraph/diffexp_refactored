@@ -22,6 +22,7 @@ SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE pa
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
 SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
+PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
@@ -2385,6 +2386,358 @@ certifyPseudoCompensation[cs_, ls_, hits_List, label_] := Module[
    No coefficient is sampled or specialized to decide whether it is zero. *)
 sccStructuralZeroQ[e_] :=
   FreeQ[e, _?InexactNumberQ] && zeroQ[e];
+
+sccSymbolIdentity[s_Symbol] := <|"context" -> Context[s],
+  "name" -> SymbolName[s]|>;
+
+(* Coupling preparation must serialize in exactly the field retained by its
+   parent native session.  Inference from Config`Variables is unsound after
+   chart pruning: it can reorder or enlarge the field relative to the live
+   session.  The present native codec exports bare names, so non-Global
+   contexts, duplicate bare names, and collisions with the chart/epsilon
+   binders are rejected until an explicit context-to-native-name map exists. *)
+sccSerializationField[spec_, cs_Association] := Module[
+  {field, domain, symbols, names, binders,
+   eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"]},
+  field = If[spec === Automatic,
+    <|"domain" -> $cppSerializationDomain,
+      "symbols" -> $cppSerializationSymbols|>, spec];
+  If[!AssociationQ[field] ||
+      Sort[Keys[field]] =!= Sort[{"domain", "symbols"}],
+    err["E5", cs, <|"Serialization" -> field,
+      "Detail" -> "SCC coupling serialization must contain exactly domain and symbols"|>]];
+  domain = field["domain"];
+  symbols = field["symbols"];
+  If[!MemberQ[{"acb", "rational", "symbolic"}, domain] ||
+      !ListQ[symbols] || !AllTrue[symbols,
+        MatchQ[#, _Symbol] && !NumericQ[#] &],
+    err["E5", cs, <|"Serialization" -> field,
+      "Detail" -> "SCC coupling serialization field is malformed"|>]];
+  If[Length[DeleteDuplicates[symbols, SameQ]] =!= Length[symbols],
+    err["E5", cs, <|"Symbols" -> (sccSymbolIdentity /@ symbols),
+      "Detail" -> "SCC coupling serialization contains duplicate exact symbols"|>]];
+  names = SymbolName /@ symbols;
+  If[Length[DeleteDuplicates[names]] =!= Length[names],
+    err["E5", cs, <|"Symbols" -> (sccSymbolIdentity /@ symbols),
+      "Detail" -> "native bare regulator names are duplicated across symbol contexts"|>]];
+  If[!AllTrue[symbols, Context[#] === "Global`" &],
+    err["E5", cs, <|"Symbols" -> (sccSymbolIdentity /@ symbols),
+      "Detail" -> "native bare-name symbolic serialization cannot preserve non-Global regulator contexts"|>]];
+  binders = SymbolName /@ {eps, t};
+  If[Intersection[names, binders] =!= {},
+    err["E5", cs, <|"Symbols" -> (sccSymbolIdentity /@ symbols),
+      "Binders" -> (sccSymbolIdentity /@ {eps, t}),
+      "Detail" -> "native regulator name collides with the epsilon or chart-variable binder"|>]];
+  If[(domain === "symbolic") =!= (symbols =!= {}),
+    err["E5", cs, <|"Serialization" -> field,
+      "Detail" -> "symbolic serialization requires a nonempty symbol list and numeric/rational serialization requires none"|>]];
+  <|"domain" -> domain, "symbols" -> symbols,
+    "symbol_identities" -> (sccSymbolIdentity /@ symbols)|>];
+
+cppPreparedRationalMultiplierJSON[prepared_Association,
+    inputDigits_Integer, cs_Association] := <|
+  (* epsilon_shift is deliberately signed.  scc.prepare retains it and the
+     later execution work contract proves that work_min supplies its halo. *)
+  "epsilon_shift" -> prepared["EpsilonShift"],
+  "center_pole_order" -> prepared["CenterPoleOrder"],
+  "kernels" -> Map[cppScalar[#, inputDigits, cs] &,
+    prepared["TaylorKernels"], {2}],
+  "exact_identity" -> prepared["ExactIdentity"],
+  "proven_zero" -> TrueQ[prepared["ProvenZero"]]|>;
+
+(* THE canonical exact cell record shared by the future parent system/theta
+   manifests and every sparse cross-edge binding.  ProvenZero is decided in
+   the exact Wolfram field; an inexact or specialized numerical zero remains
+   active. *)
+sccExactCellRecord[entry_, var_Symbol] := Module[
+  {canonical = Together[entry]},
+  <|"exact" ->
+      DiffExp2`SectorSeries`ExactExpressionIdentity[canonical, var],
+    "proven_zero" -> sccStructuralZeroQ[canonical]|>];
+
+sccExactMatrixRecord[matrix_, var_Symbol, cs_Association] := Module[
+  {dense = Normal[matrix], dims, cache = <||>, record},
+  dims = Dimensions[dense];
+  If[Length[dims] =!= 2 || dims[[1]] =!= dims[[2]],
+    err["E6", cs, <|"Dimensions" -> dims,
+      "Detail" -> "parent exact matrix record requires one square D by D matrix"|>]];
+  record[entry_] := Module[
+    {canonical = Together[entry], signature, key, cached, cell},
+    signature = {canonical, sccSymbolIdentity[var]};
+    key = Hash[signature, "SHA256"];
+    cached = Lookup[cache, key, None];
+    If[AssociationQ[cached] &&
+        SameQ[cached["Signature"], signature],
+      Return[cached["Cell"], Module]];
+    If[cached =!= None,
+      err["E6", cs, <|"CacheKey" -> key,
+        "Detail" -> "parent exact-cell cache key collided with an unequal full signature"|>]];
+    cell = sccExactCellRecord[canonical, var];
+    AssociateTo[cache, key -> <|"Signature" -> signature,
+      "Cell" -> cell|>];
+    cell];
+  Map[record, dense, {2}]];
+
+(* Built exactly once for the top-level scc.prepare manifest.  Coupling
+   groups carry only their indexed cells; duplicating both D by D records in
+   every group would weaken ownership and bloat the handoff. *)
+sccParentExactRecords[cs_Association] := Module[
+  {clearKey = Lookup[cs, "SystemClearKey", None], parentInput,
+   originalMatrix, originalVariable, thetaMatrix, thetaVariable,
+   d = Lookup[cs, "SystemSize", None]},
+  If[clearKey === None || !KeyExistsQ[$systemClearRegistry, clearKey],
+    err["E6", cs, <|"SystemClearKey" -> clearKey,
+      "Detail" -> "parent exact records require the registered original physical matrix"|>]];
+  parentInput = $systemClearRegistry[clearKey];
+  originalMatrix = Lookup[parentInput, "Matrix", None];
+  originalVariable = Lookup[parentInput, "Variable", None];
+  thetaMatrix = Lookup[cs, "ThetaOriginal", None];
+  thetaVariable = Lookup[cs, "ChartVar", None];
+  If[!MatchQ[originalVariable, _Symbol] ||
+      !MatchQ[thetaVariable, _Symbol] ||
+      Dimensions[originalMatrix] =!= {d, d} ||
+      Dimensions[thetaMatrix] =!= {d, d},
+    err["E6", cs, <|"SystemDimensions" -> Dimensions[originalMatrix],
+      "ThetaDimensions" -> Dimensions[thetaMatrix], "Expected" -> {d, d},
+      "Detail" -> "parent exact records do not bind two full D by D matrices and explicit variables"|>]];
+  <|"exact_system_record" ->
+      sccExactMatrixRecord[originalMatrix, originalVariable, cs],
+    "exact_theta_record" ->
+      sccExactMatrixRecord[thetaMatrix, thetaVariable, cs]|>];
+
+sccPrescriptionIdentity[records_List, var_Symbol] := Map[
+  Function[record, <|
+    "factor" -> DiffExp2`SectorSeries`ExactExpressionIdentity[
+      Lookup[record, "ExactFactor", Lookup[record, "Factor", None]], var],
+    "sign" -> Lookup[record, "Sign", None],
+    "multiplicity" -> Lookup[record, "Multiplicity", None],
+    "leading_coefficient_sign" ->
+      Lookup[record, "LeadingCoeffSign", None]|>], records];
+
+PrepareSCCCouplingMatrix[cs_Association, sourceBlock_Integer,
+    targetBlock_Integer, sourceShape_Association,
+    serialization_:Automatic] := Module[
+  {seq = Lookup[cs, "IntegrationSequence", None], components, nb,
+   sourceVertices, targetVertices, sourceDimension, checkedShape,
+   preparationShape, matrix, expectedEdges, rawEntries, actualEdges,
+   serializationField, symbols, domain, inputDigits, encodedEntries,
+   matrixIdentity, matrixIdentityPayload,
+   clearKey = Lookup[cs, "SystemClearKey", None], parentInput,
+   originalMatrix, originalVariable, shapeCenter, shapeScale, shapeMap,
+   requiredShapeKeys, missingShapeKeys, epsWindow, tWindow, sourceNCols,
+   parentDimension = Lookup[cs, "SystemSize", None],
+   t = Lookup[cs, "ChartVar", None]},
+  If[!AssociationQ[seq] || !MatchQ[t, _Symbol] ||
+      !MatrixQ[Lookup[cs, "ThetaOriginal", None]] ||
+      !AssociationQ[Lookup[cs, "ChartMap", None]] ||
+      !AllTrue[{"Center", "Radius", "Prescriptions"},
+        KeyExistsQ[cs, #] &] || !KeyExistsQ[cs["ChartMap"], "Scale"],
+    err["E6", cs, <|"Detail" ->
+      "SCC coupling preparation requires an exact SCC chart envelope"|>]];
+  serializationField = sccSerializationField[serialization, cs];
+  domain = serializationField["domain"];
+  symbols = serializationField["symbols"];
+  components = seq["Components"];
+  nb = Length[components];
+  If[!Between[sourceBlock, {1, nb}] || !Between[targetBlock, {1, nb}] ||
+      sourceBlock === targetBlock ||
+      !MemberQ[seq["CondensationEdges"], {sourceBlock, targetBlock}],
+    err["E8", cs, <|"SourceBlock" -> sourceBlock,
+      "TargetBlock" -> targetBlock,
+      "CondensationEdges" -> seq["CondensationEdges"],
+      "Detail" -> "requested SCC coupling is not a certified cross-block condensation edge"|>]];
+  sourceVertices = components[[sourceBlock]];
+  targetVertices = components[[targetBlock]];
+  If[clearKey === None || !KeyExistsQ[$systemClearRegistry, clearKey],
+    err["E6", cs, <|"SystemClearKey" -> clearKey,
+      "Detail" -> "SCC coupling preparation cannot bind the registered original physical matrix"|>]];
+  parentInput = $systemClearRegistry[clearKey];
+  originalMatrix = Lookup[parentInput, "Matrix", None];
+  originalVariable = Lookup[parentInput, "Variable", None];
+  If[!MatchQ[originalVariable, _Symbol] ||
+      Dimensions[originalMatrix] =!= {parentDimension, parentDimension},
+    err["E6", cs, <|"OriginalVariable" -> originalVariable,
+      "OriginalDimensions" -> Dimensions[originalMatrix],
+      "Expected" -> {parentDimension, parentDimension},
+      "Detail" -> "registered original SCC parent matrix/variable is malformed"|>]];
+  requiredShapeKeys = {"Center", "ChartMap", "Radius",
+    "Prescriptions", "EpsWindow", "TWindow"};
+  missingShapeKeys = Select[requiredShapeKeys,
+    !KeyExistsQ[sourceShape, #] &];
+  If[missingShapeKeys =!= {},
+    err["E8", cs, <|"MissingKeys" -> missingShapeKeys,
+      "Detail" -> "SCC coupling source shape must carry full chart geometry, prescriptions, and windows"|>]];
+  shapeMap = sourceShape["ChartMap"];
+  epsWindow = sourceShape["EpsWindow"];
+  tWindow = sourceShape["TWindow"];
+  If[!AssociationQ[shapeMap] || !KeyExistsQ[shapeMap, "Scale"] ||
+      !AssociationQ[epsWindow] ||
+      !AllTrue[{"Min", "CompleteMax"}, KeyExistsQ[epsWindow, #] &] ||
+      !IntegerQ[epsWindow["Min"]] ||
+      !IntegerQ[epsWindow["CompleteMax"]] ||
+      epsWindow["Min"] > epsWindow["CompleteMax"] ||
+      !AssociationQ[tWindow] ||
+      !KeyExistsQ[tWindow, "CompleteMax"] ||
+      !IntegerQ[tWindow["CompleteMax"]] ||
+      tWindow["CompleteMax"] < 0 ||
+      !ListQ[sourceShape["Prescriptions"]],
+    err["E8", cs, <|"SourceGeometry" ->
+        KeyTake[sourceShape, requiredShapeKeys],
+      "Detail" -> "SCC coupling source geometry/window contract is malformed"|>]];
+  shapeCenter = sourceShape["Center"];
+  shapeScale = shapeMap["Scale"];
+  If[!SameQ[sourceShape["Radius"], cs["Radius"]],
+    err["E8", cs, <|"SourceRadius" -> sourceShape["Radius"],
+      "ChartRadius" -> cs["Radius"],
+      "Detail" -> "SCC coupling source shape belongs to a different chart radius"|>]];
+  If[!SameQ[shapeCenter, cs["Center"]],
+    err["E8", cs, <|"SourceCenter" -> shapeCenter,
+      "ChartCenter" -> cs["Center"],
+      "Detail" -> "SCC coupling source shape belongs to a different exact chart center"|>]];
+  If[KeyExistsQ[shapeMap, "Center"] &&
+      !SameQ[shapeMap["Center"], shapeCenter],
+    err["E8", cs, <|"SourceCenter" -> shapeCenter,
+      "ChartMapCenter" -> shapeMap["Center"],
+      "Detail" -> "SCC coupling source top-level and ChartMap centers disagree"|>]];
+  If[!SameQ[shapeScale, cs["ChartMap", "Scale"]],
+    err["E8", cs, <|"SourceScale" -> shapeScale,
+      "ChartScale" -> cs["ChartMap", "Scale"],
+      "Detail" -> "SCC coupling source shape belongs to a different exact chart scale"|>]];
+  If[!SameQ[sourceShape["Prescriptions"], cs["Prescriptions"]],
+    err["E8", cs, <|"SourcePrescriptions" -> sourceShape["Prescriptions"],
+      "ChartPrescriptions" -> cs["Prescriptions"],
+      "Detail" -> "SCC coupling source shape has different analytic-continuation prescriptions"|>]];
+  If[KeyExistsQ[sourceShape, "Sectors"],
+    checkedShape = DiffExp2`SectorSeries`ValidateLocalSolution[sourceShape];
+    sourceDimension = Dimensions[
+      First[checkedShape["Sectors"]]["Coeffs"]][[3]];
+    sourceNCols = Dimensions[
+      First[checkedShape["Sectors"]]["Coeffs"]][[2]];
+    If[tWindow["CompleteMax"] =!= sourceNCols - 1 ||
+        (KeyExistsQ[sourceShape, "Dimension"] &&
+          sourceShape["Dimension"] =!= sourceDimension),
+      err["E8", cs, <|"SourceDimension" -> sourceDimension,
+        "DeclaredDimension" -> Lookup[sourceShape, "Dimension", None],
+        "TaylorColumns" -> sourceNCols, "TWindow" -> tWindow,
+        "Detail" -> "SCC coupling LocalSolution has a contradictory dimension or Taylor window"|>]];
+    preparationShape = <|"Center" -> checkedShape["Center"],
+      "ChartMap" -> checkedShape["ChartMap"],
+      "Radius" -> checkedShape["Radius"],
+      "Prescriptions" -> checkedShape["Prescriptions"],
+      "EpsWindow" -> checkedShape["EpsWindow"],
+      "TWindow" -> checkedShape["TWindow"],
+      "Dimension" -> sourceDimension|>,
+    sourceDimension = Lookup[sourceShape, "Dimension", None];
+    If[!IntegerQ[sourceDimension] || sourceDimension < 1,
+      err["E8", cs, <|"SourceDimension" -> sourceDimension,
+        "Detail" -> "SCC coupling metadata shape requires an explicit positive integer Dimension"|>]];
+    preparationShape = sourceShape];
+  If[sourceDimension =!= Length[sourceVertices],
+    err["E8", cs, <|"SourceDimension" -> sourceDimension,
+      "ExpectedDimension" -> Length[sourceVertices],
+      "SourceVertices" -> sourceVertices,
+      "Detail" -> "SCC coupling source shape has the wrong component dimension"|>]];
+  matrix = Map[Cancel[Together[#]] &,
+    cs["ThetaOriginal"][[targetVertices, sourceVertices]], {2}];
+  expectedEdges = Sort[Select[seq["DependencyEdges"],
+    MemberQ[sourceVertices, #[[1]]] &&
+      MemberQ[targetVertices, #[[2]]] &]];
+  rawEntries = Flatten[Table[
+    Module[{coefficient = matrix[[row, column]], originalCoefficient,
+        prepared, edge, originalCell, thetaCell},
+      If[sccStructuralZeroQ[coefficient], {},
+        edge = {sourceVertices[[column]], targetVertices[[row]]};
+        originalCoefficient = originalMatrix[[
+          targetVertices[[row]], sourceVertices[[column]]]];
+        originalCell = sccExactCellRecord[
+          originalCoefficient, originalVariable];
+        thetaCell = sccExactCellRecord[coefficient, t];
+        If[TrueQ[originalCell["proven_zero"]] ||
+            TrueQ[thetaCell["proven_zero"]],
+          err["E6", cs, <|"GlobalEdge" -> edge,
+            "OriginalCell" -> originalCell, "ThetaCell" -> thetaCell,
+            "Detail" -> "active SCC coupling edge is marked proven zero in its exact parent cell record"|>]];
+        prepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
+          preparationShape, coefficient, t];
+        If[TrueQ[prepared["ProvenZero"]] ||
+            prepared["ExactIdentity"] =!= thetaCell["exact"],
+          err["E6", cs, <|"GlobalEdge" -> edge,
+            "PreparedIdentity" -> prepared["ExactIdentity"],
+            "PreparedProvenZero" -> prepared["ProvenZero"],
+            "ThetaCell" -> thetaCell,
+            "Detail" -> "active prepared multiplier does not equal its nonzero exact ThetaOriginal cell"|>]];
+        {<|"GlobalEdge" -> edge, "Row" -> row - 1,
+          "Column" -> column - 1,
+          "SourceVertex" -> sourceVertices[[column]] - 1,
+          "TargetVertex" -> targetVertices[[row]] - 1,
+          "ExactOriginalEntry" -> originalCell["exact"],
+          "ExactThetaEntry" -> thetaCell["exact"],
+          "Prepared" -> prepared|>}]],
+    {row, Length[targetVertices]}, {column, Length[sourceVertices]}], 2];
+  actualEdges = Sort[Lookup[rawEntries, "GlobalEdge", {}]];
+  If[actualEdges =!= expectedEdges,
+    err["E6", cs, <|"SourceBlock" -> sourceBlock,
+      "TargetBlock" -> targetBlock, "ExpectedEdges" -> expectedEdges,
+      "PreparedEdges" -> actualEdges,
+      "Detail" -> "prepared coupling nonzeros do not bind one-to-one to the exact SCC dependency graph"|>]];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*
+    cfg["WorkingPrecision"];
+  encodedEntries = Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = symbols},
+    Map[<|"row" -> #["Row"], "column" -> #["Column"],
+        "source_vertex" -> #["SourceVertex"],
+        "target_vertex" -> #["TargetVertex"],
+        "exact_original_entry" -> #["ExactOriginalEntry"],
+        "exact_theta_entry" -> #["ExactThetaEntry"],
+        "multiplier" -> cppPreparedRationalMultiplierJSON[
+          #["Prepared"], inputDigits, cs]|> &, rawEntries]];
+  (* A compact JSON string keeps the native field scalar while making its
+     collision certificate fully structural.  No matrix InputForm string is
+     trusted: every retained entry is the same context-explicit AST identity
+     used in the full parent D by D records. *)
+  matrixIdentityPayload = <|
+    "schema" -> "diffexp2-scc-coupling-v1",
+    "source_block" -> sourceBlock - 1,
+    "target_block" -> targetBlock - 1,
+    "source_vertices" -> (sourceVertices - 1),
+    "target_vertices" -> (targetVertices - 1),
+    "rows" -> Length[targetVertices],
+    "columns" -> Length[sourceVertices],
+    "source_shape" -> <|
+      "center" -> DiffExp2`SectorSeries`ExactExpressionIdentity[
+        shapeCenter, t],
+      "scale" -> DiffExp2`SectorSeries`ExactExpressionIdentity[
+        shapeScale, t],
+      "radius" -> DiffExp2`SectorSeries`ExactExpressionIdentity[
+        sourceShape["Radius"], t],
+      "prescriptions" -> sccPrescriptionIdentity[
+        sourceShape["Prescriptions"], t],
+      "eps_min" -> epsWindow["Min"],
+      "eps_complete_max" -> epsWindow["CompleteMax"],
+      "t_complete_max" -> tWindow["CompleteMax"],
+      "dimension" -> sourceDimension|>,
+    "serialization" -> <|"domain" -> domain,
+      "symbols" -> serializationField["symbol_identities"]|>,
+    "entries" -> Map[<|"row" -> #["row"],
+        "column" -> #["column"],
+        "source_vertex" -> #["source_vertex"],
+        "target_vertex" -> #["target_vertex"],
+        "exact_original_entry" -> #["exact_original_entry"],
+        "exact_theta_entry" -> #["exact_theta_entry"],
+        "multiplier_exact_identity" -> #["multiplier", "exact_identity"],
+        "epsilon_shift" -> #["multiplier", "epsilon_shift"],
+        "center_pole_order" -> #["multiplier", "center_pole_order"],
+        "proven_zero" -> #["multiplier", "proven_zero"]|> &,
+      encodedEntries]|>;
+  matrixIdentity = ExportString[matrixIdentityPayload,
+    "RawJSON", "Compact" -> True];
+  <|"source_block" -> sourceBlock - 1,
+    "target_block" -> targetBlock - 1,
+    "source_vertices" -> (sourceVertices - 1),
+    "target_vertices" -> (targetVertices - 1),
+    "rows" -> Length[targetVertices], "columns" -> Length[sourceVertices],
+    "entries" -> encodedEntries, "exact_identity" -> matrixIdentity,
+    "domain" -> domain, "symbols" -> (SymbolName /@ symbols)|>];
 
 sccSourceZeroQ[None] := True;
 sccSourceZeroQ[source_Association] :=

@@ -129,6 +129,31 @@ familyCollisionDepth[roots_List, collisions_List] := Module[{perRoot},
     {i, Length[roots]}];
   If[perRoot === {}, 0, Max[perRoot]]];
 
+(* Jordan chains are defined only up to one nonzero scalar in eps per
+   block.  Indicial's deterministic first-entry normalization can make that
+   scalar meromorphic when several affine eigenvalues coalesce at eps=0.
+   A CASE-P certificate is a statement about poles CREATED by the collision;
+   it must not be asked to cancel an arbitrary pole already present in the
+   chosen seed vector.  Put every block in its epsilon-primitive lattice by
+   clearing the common lowest valuation.  The same monomial multiplies every
+   member of a Jordan chain, so (R-lambda I)v_j=v_{j-1} and the unit Jordan
+   superdiagonal are unchanged.  Different blocks may be scaled
+   independently because the spectral Jordan matrix is block diagonal. *)
+epsilonPrimitiveJordanChain[chain_List, eps_Symbol] := Module[
+  {vals, shift, normalized, normalizedVals},
+  vals = Select[tVal[#, eps] & /@ Flatten[chain], IntegerQ];
+  If[vals === {},
+    err["E2", <|"Center" -> "spectral-normalization"|>,
+      <|"Detail" -> "Jordan chain has no nonzero entry"|>]];
+  shift = Max[0, -Min[vals]];
+  normalized = Map[Cancel[Together[eps^shift*#]] &, chain, {2}];
+  normalizedVals = Select[tVal[#, eps] & /@ Flatten[normalized], IntegerQ];
+  If[AnyTrue[normalizedVals, # < 0 &] || Min[normalizedVals] =!= 0,
+    err["E2", <|"Center" -> "spectral-normalization"|>,
+      <|"Shift" -> shift, "Valuations" -> normalizedVals,
+        "Detail" -> "epsilon-primitive Jordan block invariant failed"|>]];
+  {normalized, shift}];
+
 PrepareChart[sys_Association, chart_Association] := Module[
   {sysClearKey = registerSystemClearInput[sys], pcKey},
   pcKey = {sysClearKey, chart["Center"], Lookup[chart, "Scale", 1],
@@ -139,7 +164,7 @@ PrepareChart[sys_Association, chart_Association] := Module[
 
 prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t, x0, beta, A, Achart, idata, d,
-   cols, V, VInv, fams, detV, colIdx},
+   cols, V, VInv, fams, detV, colIdx, blockEpsShifts},
   t = chart["ChartVar"]; x0 = chart["Center"]; beta = Lookup[chart, "Scale", 1];
   A = sys["Matrix"];
   Achart = Map[Cancel[Together[#]] &,
@@ -148,11 +173,14 @@ prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
     <|"Name" -> Lookup[chart, "Name", "chart@" <> ToString[x0, InputForm]],
       "Center" -> x0, "Variable" -> sys["Variable"]|>];
   d = idata["Dimension"];
-  cols = {}; fams = {}; colIdx = 0;
+  cols = {}; fams = {}; colIdx = 0; blockEpsShifts = {};
   Do[Module[{members, roots = {}, colRange0 = colIdx + 1, collisions = {}},
     members = Reverse[SortBy[fam["Members"], {#["a"], #["b"]} &]];
     Do[
-      Do[Module[{chain = mem["Chains"][[ci]]},
+      Do[Module[{chain = mem["Chains"][[ci]], normalized},
+        normalized = epsilonPrimitiveJordanChain[chain, eps];
+        chain = normalized[[1]];
+        AppendTo[blockEpsShifts, normalized[[2]]];
         AppendTo[roots, <|"a" -> mem["a"], "b" -> mem["b"],
           "BlockSize" -> Length[chain]|>];
         Do[AppendTo[cols, chain[[q]]]; colIdx++, {q, Length[chain]}]],
@@ -192,6 +220,7 @@ prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
     "Gauge" -> idata["Reduction"]["Gauge"],
     "GaugeInverse" -> idata["Reduction"]["GaugeInverse"],
     "Residue" -> idata["Residue"],
+    "SpectralBlockEpsShifts" -> blockEpsShifts,
     "V" -> V, "VInv" -> VInv, "Families" -> fams,
     "IndicialData" -> idata|>];
 

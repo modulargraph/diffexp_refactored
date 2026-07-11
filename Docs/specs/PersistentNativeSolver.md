@@ -231,6 +231,42 @@ fields are rejected rather than numerically sampled.
 A retained local solution survives `chart.release`; `session.close` releases
 both charts and locals.
 
+#### Wolfram production seam
+
+``DiffExp2`CppBackend` `` exposes the schema-2 lifecycle without exposing the
+prepared-chart cache internals:
+
+```wl
+created = RunPersistentLocalSolve[request, persistentMetadata, localMetadata];
+value = EvaluatePersistentLocal[created, <|"exact" -> "-1/2"|>,
+  <|"imaginary_sign" -> -1, "tail_estimate" -> False|>, 80];
+stats = PersistentLocalStatistics[created];
+ReleasePersistentLocal[created];
+```
+
+The solve wrapper goes through the same full-signature/session/chart
+collision certificates as `RunPersistentRequest`; it does not construct a
+second chart registry.  The three lifecycle wrappers accept either the raw
+`local.solve` response or an association containing exact `Session` and
+`Local` tokens.
+
+``DiffExp2`Solve`SolveNativeLocalFamily[cs, req,
+<|"a"->a,"b"->b,"p"->p|>, init]`` is the first narrow solver-level entry.
+It builds the ordinary framed recurrence request, retains the assembled
+result in C++, and returns an opaque handle/summary association with no
+coefficient slab.  `p` remains the exact nonnegative integer `run.p`; `a`
+and `b` are separately serialized as exact descriptors with an Acb
+specialization (or as exact rationals in rational parity mode).
+
+This entry is deliberately not a replacement for `SolveHomogeneous` yet. It
+requires one non-SCC ChartSystem, the grouped spectral transform, an exact
+identity gauge, a chart family without pseudo-resonant compensation, and a
+fully specialized numeric coefficient field.  In particular it rejects an
+unresolved analytic regulator instead of sampling it.  Rank-reduced charts
+must wait for a native *sequential* `V`-then-gauge assembly-chain operator:
+composing the two matrices is not equivalent to the existing epsilon/Taylor
+completeness accounting when exact or near cancellations occur.
+
 ### Inspect and destroy
 
 ```json

@@ -15,6 +15,10 @@ EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact r
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
+RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
+EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
+PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
+ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
 ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart-handle registry.";
 PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
@@ -506,6 +510,56 @@ RunPersistentRequests[requests_List, metadata_Association,
     "output_digits" -> outputDigits, "threads" -> threads,
     "runs" -> runs|>];
   response];
+
+(* A native local handle is deliberately represented only by its owning
+   session and process-local local token.  Accept both the lower-case native
+   response and the capitalized record used by Solve's opaque seam, but never
+   guess either token from chart/cache identity. *)
+persistentLocalHandles[handle_Association] := Module[{session, local},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  local = Lookup[handle, "local", Lookup[handle, "Local", None]];
+  If[!StringQ[session] || !StringQ[local],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent local handle requires exact session and local tokens"|>],
+      Module]];
+  <|"Session" -> session, "Local" -> local|>];
+
+RunPersistentLocalSolve[request_Association, metadata_Association,
+    localMetadata_Association] := Module[{prepared, response},
+  prepared = preparePersistentRequest[request, metadata];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  response = RunRequest[<|"schema" -> 2, "op" -> "local.solve",
+    "session" -> prepared["Session"], "chart" -> prepared["Chart"],
+    "run" -> prepared["Run"], "metadata" -> localMetadata|>];
+  response];
+
+EvaluatePersistentLocal[handle_Association, point_Association,
+    options_Association:<||>, outputDigits_:Automatic] := Module[
+  {tokens = persistentLocalHandles[handle], request},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[outputDigits =!= Automatic &&
+      (!IntegerQ[outputDigits] || outputDigits < 1),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent local output digits must be a positive integer"|>], Module]];
+  request = <|"schema" -> 2, "op" -> "local.evaluate",
+    "session" -> tokens["Session"], "local" -> tokens["Local"],
+    "point" -> point, "options" -> options|>;
+  If[IntegerQ[outputDigits],
+    request = Append[request, "output_digits" -> outputDigits]];
+  RunRequest[request]];
+
+PersistentLocalStatistics[handle_Association] := Module[
+  {tokens = persistentLocalHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "local.stats",
+    "session" -> tokens["Session"], "local" -> tokens["Local"]|>]];
+
+ReleasePersistentLocal[handle_Association] := Module[
+  {tokens = persistentLocalHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "local.release",
+    "session" -> tokens["Session"], "local" -> tokens["Local"]|>]];
 
 ClearPersistentSessions[] := Module[{handles},
   handles = DeleteDuplicates[

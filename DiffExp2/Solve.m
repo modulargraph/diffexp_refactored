@@ -21,6 +21,7 @@ HomogeneousCacheCapacity::usage = "HomogeneousCacheCapacity[] gives the bounded 
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source supplied in the original physical frame.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
+SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
@@ -1572,6 +1573,113 @@ cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
         (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>,
     "SCC" -> cppPersistentSCC[cs]|>];
 
+(* Exact metadata for session-owned native LocalSolutions.  Unlike the Acb
+   recurrence payload, these fields are structural facts: canonical forms,
+   integer/sign predicates, chart geometry, and branch prescriptions are
+   never inferred from a numerical enclosure. *)
+cppExactTruth[value_] := Which[TrueQ[value], "yes",
+  TrueQ[!value], "no", True, "unknown"];
+cppExactSign[value_] := Which[TrueQ[value === -1], "negative",
+  TrueQ[value === 0], "zero", TrueQ[value === 1], "positive",
+  True, "unknown"];
+
+cppNativeExactDescriptor[value_, inputDigits_Integer, cs_] := Module[
+  {canonical, rationalQ, zeroFact, integerFact, signFact, specialization},
+  If[!FreeQ[value, _?InexactNumberQ] ||
+      !FreeQ[value, DiffExp2`Config`CanonicalEps[]],
+    err["E5", cs, <|"Tag" -> value, "Detail" ->
+      "native local sector tags must be exact and epsilon-independent"|>]];
+  canonical = Quiet[Check[RootReduce[Together[value]], $Failed]];
+  If[canonical === $Failed || !NumericQ[canonical],
+    err["E5", cs, <|"Tag" -> value, "Detail" ->
+      "native local sector tag contains an unresolved analytic regulator"|>]];
+  If[!zeroCanQ[RootReduce[Im[canonical]]],
+    err["E5", cs, <|"Tag" -> value, "Detail" ->
+      "native local sector tags must be exact real scalars"|>]];
+  canonical = RootReduce[Re[canonical]];
+  rationalQ = IntegerQ[canonical] || Head[canonical] === Rational;
+  If[!rationalQ && !TrueQ[Quiet[FullSimplify[
+      Element[canonical, Algebraics]]]],
+    err["E5", cs, <|"Tag" -> canonical, "Detail" ->
+      "native local exact tag lies outside the rational/algebraic descriptor domains"|>]];
+  zeroFact = zeroCanQ[canonical];
+  integerFact = Quiet[Check[FullSimplify[Element[canonical, Integers]],
+    Indeterminate]];
+  signFact = Quiet[Check[Sign[canonical], Indeterminate]];
+  specialization = DiffExp2`CppBackend`EncodeScalar[canonical, inputDigits];
+  If[FailureQ[specialization],
+    err["E5", cs, <|"Tag" -> canonical,
+      "BackendFailure" -> specialization,
+      "Detail" -> "native local exact tag has no Acb specialization"|>]];
+  If[rationalQ,
+    <|"domain" -> "rational", "canonical" ->
+        ToString[canonical, InputForm],
+      "is_zero" -> cppExactTruth[zeroFact],
+      "is_integer" -> cppExactTruth[integerFact],
+      "sign" -> cppExactSign[signFact],
+      "specialization" -> specialization|>,
+    <|"domain" -> "algebraic", "canonical" ->
+        ToString[canonical, InputForm],
+      "is_zero" -> cppExactTruth[zeroFact],
+      "is_integer" -> cppExactTruth[integerFact],
+      "sign" -> cppExactSign[signFact],
+      "specialization" -> specialization|>]];
+
+cppNativeChartMetadata[cs_Association, inputDigits_Integer] := Module[
+  {center = cs["Center"], scale = cs["ChartMap", "Scale"],
+   radius = cs["Radius"], encodedRadius},
+  If[!FreeQ[{center, scale}, _?InexactNumberQ] ||
+      !AllTrue[{center, scale}, NumericQ],
+    err["E5", cs, <|"Geometry" -> {center, scale}, "Detail" ->
+      "native local chart center and scale must be exact numeric scalars"|>]];
+  If[!zeroCanQ[RootReduce[Im[center]]] ||
+      !zeroCanQ[RootReduce[Im[scale]]] || zeroCanQ[scale],
+    err["E5", cs, <|"Geometry" -> {center, scale}, "Detail" ->
+      "native local chart requires real center and nonzero real scale"|>]];
+  If[radius === Infinity,
+    <|"center_exact" -> ToString[RootReduce[Re[center]], InputForm],
+      "scale_exact" -> ToString[RootReduce[Re[scale]], InputForm],
+      "infinite_radius" -> True|>,
+    If[!NumericQ[radius] || !TrueQ[N[radius, 30] > 0] ||
+        !zeroCanQ[RootReduce[Im[radius]]],
+      err["E5", cs, <|"Radius" -> radius, "Detail" ->
+        "native local chart radius must be a positive real scalar"|>]];
+    encodedRadius = DiffExp2`CppBackend`EncodeScalar[radius, inputDigits];
+    If[FailureQ[encodedRadius],
+      err["E5", cs, <|"Radius" -> radius,
+        "BackendFailure" -> encodedRadius,
+        "Detail" -> "native local chart radius is not Acb-encodable"|>]];
+    <|"center_exact" -> ToString[RootReduce[Re[center]], InputForm],
+      "scale_exact" -> ToString[RootReduce[Re[scale]], InputForm],
+      "radius" -> encodedRadius, "infinite_radius" -> False|>]];
+
+cppNativePrescriptions[cs_Association] := Map[Function[record, Module[
+    {factor = Lookup[record, "ExactFactor", Lookup[record, "Factor", None]],
+     sign = Lookup[record, "Sign", None],
+     multiplicity = Lookup[record, "Multiplicity", None],
+     leading = Lookup[record, "LeadingCoeffSign", None]},
+    If[factor === None || !FreeQ[factor, _?InexactNumberQ] ||
+        !MemberQ[{-1, 1}, sign] || !IntegerQ[multiplicity] ||
+        multiplicity < 1 || !MemberQ[{-1, 1}, leading],
+      err["E5", cs, <|"Prescription" -> record, "Detail" ->
+        "native local analytic-continuation prescription is malformed"|>]];
+    <|"factor_exact" -> ToString[factor, InputForm], "sign" -> sign,
+      "multiplicity" -> multiplicity,
+      "leading_coefficient_sign" -> leading|>]],
+  Lookup[cs, "Prescriptions", {}]];
+
+cppNativeLocalMetadata[cs_Association, a_, b_, p_Integer,
+    inputDigits_Integer, checkpointIdentity_String] := <|
+  "chart" -> cppNativeChartMetadata[cs, inputDigits],
+  "tag" -> <|"a" -> cppNativeExactDescriptor[a, inputDigits, cs],
+    "b" -> cppNativeExactDescriptor[b, inputDigits, cs],
+    (* The native parser binds a,b to the recurrence targets.  p is already
+       a strict nonnegative integer in run[\"p\"]; retain its canonical fact
+       beside them for checkpoint/audit consumers. *)
+    "p" -> <|"domain" -> "integer", "canonical" -> ToString[p]|>|>,
+  "prescriptions" -> cppNativePrescriptions[cs],
+  "checkpoint_identity" -> checkpointIdentity|>;
+
 cppScalar[e_, digits_Integer, cs_] := Module[{encoded},
   encoded = If[$cppSerializationDomain === "symbolic",
     DiffExp2`CppBackend`EncodeSymbolicScalar[e, $cppSerializationSymbols],
@@ -2514,6 +2622,169 @@ ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $cppStaticOperatorCache = <||>;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
   DiffExp2`CppBackend`ClearPersistentSessions[];);
+
+(* First production seam for a session-owned native LocalSolution.  It is
+   intentionally narrower than SolveHomogeneous: no SCC orchestration,
+   pseudo-resonant compensation, or rank-reduction gauge is hidden behind
+   the opaque handle.  Those operations still require Wolfram tensors until
+   their native counterparts preserve the same sequential completeness
+   contract. *)
+SolveNativeLocalFamily[cs_Association, req_Association,
+    tag_Association, init_List] := Module[
+  {d = Lookup[cs, "SystemSize", 0], a, b, p, nmax, reqMin, reqMax,
+   matchingFamilies, matchingBlocks, allowedP, blocks, fams, pMax,
+   pBudget, cdMax, symbolic,
+   poleDepth, spectralDepth, transformDepth, wideTop, fb, W, prep, vPrep,
+   symbols, domain, wp, inputDigits, precisionBits, staticRecord, request,
+   persistentMetadata, checkpointIdentity, localMetadata, response,
+   backendID},
+  If[cfg["RecurrenceBackend"] =!= "Cpp" ||
+      !TrueQ[$cppUsePersistentSessions] ||
+      Environment["DE2_CPP_PERSISTENT"] === "0",
+    err["E5", cs, <|"Detail" ->
+      "SolveNativeLocalFamily requires the persistent C++ recurrence backend; no fallback is permitted"|>]];
+  If[TrueQ[Lookup[cs, "SCCSkeleton", False]],
+    err["E6", cs, <|"Detail" ->
+      "native local family solve does not yet orchestrate an SCC skeleton"|>]];
+  If[d < 1 || !MatrixQ[Lookup[cs, "Gauge", None]] ||
+      cs["Gauge"] =!= IdentityMatrix[d],
+    err["E5", cs, <|"Detail" ->
+      "native local family solve requires Gauge === IdentityMatrix[d]; a native sequential V-then-Gauge assembly chain is not implemented yet"|>]];
+  If[TrueQ[$disableGroupedSpectralTransform],
+    err["E5", cs, <|"Detail" ->
+      "native local family solve requires the grouped native assembly path"|>]];
+  If[!AllTrue[{"a", "b", "p"}, KeyExistsQ[tag, #] &],
+    err["E8", cs, <|"Tag" -> tag, "Detail" ->
+      "native local family tag requires exact a, b, and p fields"|>]];
+  {a, b, p} = Lookup[tag, {"a", "b", "p"}];
+  If[!IntegerQ[p] || p < 0,
+    err["E8", cs, <|"Tag" -> tag, "Detail" ->
+      "native local family p must be a nonnegative exact integer"|>]];
+  If[!FreeQ[{a, b}, _?InexactNumberQ] ||
+      !FreeQ[{a, b}, DiffExp2`Config`CanonicalEps[]] ||
+      !AllTrue[{a, b}, NumericQ],
+    err["E5", cs, <|"Tag" -> tag, "Detail" ->
+      "native local family a and b must be exact, epsilon-independent, and fully specialized"|>]];
+  If[!AllTrue[{"TOrder", "EpsWindow"}, KeyExistsQ[req, #] &] ||
+      !AssociationQ[Lookup[req, "EpsWindow", None]] ||
+      !AllTrue[{"Min", "CompleteMax"},
+        KeyExistsQ[req["EpsWindow"], #] &],
+    err["E8", cs, <|"Request" -> req, "Detail" ->
+      "native local family request has no complete Taylor/epsilon window"|>]];
+  nmax = req["TOrder"];
+  reqMin = req["EpsWindow", "Min"];
+  reqMax = req["EpsWindow", "CompleteMax"];
+  If[!IntegerQ[nmax] || nmax < 0 || !IntegerQ[reqMin] ||
+      !IntegerQ[reqMax] || reqMin > reqMax,
+    err["E8", cs, <|"Request" -> req, "Detail" ->
+      "native local family request windows must be finite ordered integers"|>]];
+  If[Length[init] =!= p + 1 || !AllTrue[init,
+      ListQ[#] && Length[#] === d &&
+        AllTrue[#, DiffExp2`EpsSeries`ESQ] &],
+    err["E8", cs, <|"Tag" -> tag, "InitialDimensions" ->
+      Quiet[Check[Dimensions[init], Missing["Ragged"]]],
+      "Expected" -> {p + 1, d}, "Detail" ->
+      "native local family initial ladder must contain p+1 rows of d EpsSeries values"|>]];
+
+  fams = Lookup[cs, "Families", {}];
+  matchingFamilies = Select[fams, AnyTrue[Lookup[#, "Roots", {}],
+      zeroQ[a - # ["a"]] && zeroQ[b - # ["b"]] &] &];
+  If[matchingFamilies === {},
+    err["E8", cs, <|"Tag" -> tag, "Detail" ->
+      "native local family tag is not an exact indicial root of this chart"|>]];
+  If[AnyTrue[matchingFamilies, Lookup[#, "Collisions", {}] =!= {} &],
+    err["E5", cs, <|"Tag" -> tag, "Detail" ->
+      "native local handle cannot yet represent Wolfram pseudo-resonant family compensation"|>]];
+
+  blocks = blockList[cs];
+  matchingBlocks = Select[blocks,
+    zeroQ[a - # ["a"]] && zeroQ[b - # ["b"]] &];
+  allowedP = DeleteDuplicates[Flatten[Table[
+      logCeiling[cs, block["a"], block["b"], qpos],
+      {block, matchingBlocks}, {qpos, 0, block["q"] - 1}]]];
+  If[!MemberQ[allowedP, p],
+    err["E8", cs, <|"Tag" -> tag, "AllowedLogPowers" -> allowedP,
+      "Detail" ->
+        "native local family p is not an exact log ceiling of the selected indicial root"|>]];
+  pMax = Max[Join[{0}, Table[
+      logCeiling[cs, block["a"], block["b"], block["q"] - 1],
+      {block, blocks}]]];
+  pBudget = Max[p, pMax];
+  cdMax = Max[Join[{0}, Lookup[fams, "CollisionDepth", {}]]];
+  symbolic = clearedSymbolic[cs];
+  poleDepth = recurrencePoleDepth[symbolic, nmax];
+  spectralDepth = spectralTransformPoleDepth[cs];
+  transformDepth = finalTransformPoleDepth[cs, nmax];
+  wideTop = reqMax + pBudget + cdMax + 2 -
+    Min[0, reqMin - pBudget - 2];
+  wideTop = Max[wideTop,
+    reqMax + pBudget + cdMax + poleDepth] + transformDepth;
+  fb = Min[Min[reqMin, 0] - pBudget - cdMax - 2,
+      reqMin - pBudget - cdMax - poleDepth] - spectralDepth;
+  W = wideTop - fb + 1;
+  prep = prepareCleared[cs, fb, W, symbolic];
+  vPrep = prepareFramedMatrix[cs["V"],
+    DiffExp2`Config`CanonicalEps[], fb, W, cs];
+  symbols = cppRegulatorSymbols[cs, prep, a, b, p, nmax,
+    None, init, vPrep];
+  If[symbols =!= {},
+    err["E5", cs, <|"Tag" -> tag,
+      "RegulatorSymbols" -> (SymbolName /@ symbols), "Detail" ->
+      "native local handle rejects unresolved analytic regulators; specialize them before solving"|>]];
+
+  domain = If[TrueQ[$cppExactDomain], "rational", "acb"];
+  wp = cfg["WorkingPrecision"];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = {}},
+    staticRecord = cppStaticOperatorPayload[cs, prep, blocks, fb, W,
+      vPrep, inputDigits, precisionBits];
+    request = Block[{$cppStaticRecordOverride = staticRecord,
+        $cppBuildRequestOnly = True},
+      cppRunRecursionCore[cs, prep, a, b, p, nmax, None, fb, W,
+        init, vPrep]];
+    persistentMetadata = Append[cppPersistentMetadata[cs, fb, W],
+      "PreparedToken" -> staticRecord["Token"]];
+    checkpointIdentity = "de2-native-local-" <>
+      IntegerString[Hash[{persistentMetadata["SystemIdentity"],
+        persistentMetadata["ChartIdentity"], cs["ChartMap"],
+        cs["Radius"], cs["Prescriptions"], {a, b, p}, req, init,
+        staticRecord["Token"]}, "SHA256"],
+        16, 64];
+    localMetadata = cppNativeLocalMetadata[cs, a, b, p, inputDigits,
+      checkpointIdentity];
+    response = DiffExp2`CppBackend`RunPersistentLocalSolve[
+      request, persistentMetadata, localMetadata]];
+  If[FailureQ[response],
+    err["E5", cs, <|"BackendFailure" -> response, "Detail" ->
+      "persistent native local solve failed"|>]];
+  If[Lookup[response, "status", "error"] =!= "ok",
+    backendID = Lookup[response, "id", "E5"];
+    err[If[MemberQ[{"E4", "E5", "E6"}, backendID], backendID, "E5"],
+      cs, <|"BackendID" -> backendID,
+        "Detail" -> Lookup[response, "detail",
+          "persistent native local solve returned an error"]|>]];
+  If[Lookup[response, "epsilon_max", reqMin - 1] < reqMax,
+    Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
+    err["E6", cs, <|"Tag" -> tag, "RequestedCompleteMax" -> reqMax,
+      "AvailableCompleteMax" -> Lookup[response, "epsilon_max",
+        Missing["NotAvailable"]],
+      "Detail" ->
+        "native local family work budget did not reach the requested epsilon order"|>]];
+  <|"Type" -> "DiffExp2NativeLocalFamily",
+    "Session" -> response["session"], "Local" -> response["local"],
+    "NativeChart" -> response["chart"],
+    "Tag" -> <|"a" -> a, "b" -> b, "p" -> p|>,
+    "Chart" -> <|"Center" -> cs["Center"],
+      "ChartMap" -> cs["ChartMap"], "Radius" -> cs["Radius"],
+      "Prescriptions" -> cs["Prescriptions"]|>,
+    "EpsWindow" -> <|"Min" -> response["epsilon_min"],
+      "CompleteMax" -> response["epsilon_max"]|>,
+    "TWindow" -> <|"CompleteMax" -> response["taylor_complete_max"]|>,
+    "CheckpointIdentity" -> checkpointIdentity,
+    "NativeSummary" -> KeyDrop[response,
+      {"status", "session", "local", "chart", "metadata"}]|>];
 
 solveHomogeneousCore[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,

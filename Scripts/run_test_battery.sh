@@ -31,6 +31,7 @@ tests=(
   Tests/test_feynmantrick_algebra.m
   Tests/test_ft_example_specs.m
   Tests/test_feynmantrick_failure_semantics.m
+  Tests/test_fire_persistent_storage.m
   Tests/test_feynmantrick_fire.m
   Tests/test_feynmantrick_iteration.m
   Tests/test_feynmantrick_integration_edge_cases.m

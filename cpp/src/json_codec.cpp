@@ -1725,6 +1725,115 @@ json::object run_session_command(const json::object& root) {
         {"elapsed_ms", elapsed_ms}};
   }
 
+  if (operation == "session.solve_many") {
+    const auto& raw_jobs = as_array(
+        root.at("jobs"), "persistent cross-chart recurrence jobs");
+    const auto requested_threads = root.if_contains("threads")
+        ? as_u32(root.at("threads"), "batch threads") : 1;
+    if (requested_threads == 0)
+      throw std::invalid_argument("batch threads must be positive");
+
+    struct PendingJob {
+      std::string chart_handle;
+      const json::value* run = nullptr;
+      int output_digits = 0;
+    };
+    std::vector<PendingJob> pending;
+    pending.reserve(raw_jobs.size());
+    for (std::size_t index = 0; index < raw_jobs.size(); ++index) {
+      const auto& job = as_object(
+          raw_jobs[index], "persistent cross-chart recurrence job");
+      const auto* raw_run = job.if_contains("run");
+      if (raw_run == nullptr)
+        throw std::invalid_argument(
+            "session.solve_many job " + std::to_string(index) +
+            " is missing its complete run record");
+      const auto output_digits = job.if_contains("output_digits")
+          ? static_cast<int>(as_i64(
+                job.at("output_digits"), "job output digits"))
+          : session->output_digits;
+      if (output_digits < 1)
+        throw std::invalid_argument("job output digits must be positive");
+      pending.push_back(PendingJob{
+          required_string(job, "chart"), raw_run, output_digits});
+    }
+
+    struct ResolvedJob {
+      std::shared_ptr<PreparedChartBase> chart;
+      const json::value* run = nullptr;
+      int output_digits = 0;
+    };
+    std::vector<ResolvedJob> jobs;
+    jobs.reserve(pending.size());
+    {
+      // Resolve the complete handle set before any worker exists.  Apart
+      // from making cross-session/released handles loud, the shared_ptrs
+      // retain every selected chart for the whole batch even if a concurrent
+      // chart.release follows this validation boundary.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      for (std::size_t index = 0; index < pending.size(); ++index) {
+        const auto found = session->charts.find(pending[index].chart_handle);
+        if (found == session->charts.end())
+          throw std::invalid_argument(
+              "unknown or released persistent chart in session.solve_many "
+              "job " + std::to_string(index) + ": " +
+              pending[index].chart_handle);
+        jobs.push_back(ResolvedJob{
+            found->second, pending[index].run, pending[index].output_digits});
+      }
+    }
+
+    const bool symbolic_serialized = session->domain == "symbolic";
+    const auto bounded_threads = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads), jobs.size()});
+    const auto worker_count = symbolic_serialized && bounded_threads != 0
+        ? std::size_t{1} : bounded_threads;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<json::object> results(jobs.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        const auto index = next.fetch_add(1);
+        if (index >= jobs.size()) return;
+        const auto& job = jobs[index];
+        results[index] = solve_prepared_chart_safe(
+            job.chart, *job.run, job.output_digits, session->handle);
+      }
+    };
+    // If construction of a later worker fails, jthread destruction requests
+    // stop and joins every worker that already started.  No joinable native
+    // thread can escape into the host Wolfram kernel.
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i)
+      workers.emplace_back(worker);
+    for (auto& thread : workers) thread.join();
+
+    std::size_t succeeded = 0;
+    json::array encoded;
+    encoded.reserve(results.size());
+    for (auto& result : results) {
+      if (result.if_contains("status") != nullptr &&
+          result.at("status") == "ok")
+        ++succeeded;
+      encoded.push_back(std::move(result));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"results", std::move(encoded)}, {"attempted", jobs.size()},
+        {"succeeded", succeeded}, {"failed", jobs.size() - succeeded},
+        {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"symbolic_serialized", symbolic_serialized},
+        {"elapsed_ms", elapsed_ms}};
+  }
+
   if (operation == "local.solve") {
     const auto chart_handle = required_string(root, "chart");
     std::shared_ptr<PreparedChartBase> chart;

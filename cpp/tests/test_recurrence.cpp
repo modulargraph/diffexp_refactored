@@ -192,8 +192,21 @@ void test_persistent_operator_session() {
     "schema":2,"op":"session.stats","session":")json") + session + "\"}");
   check("persistent typed operator prepares and solves without static copies",
         prepared.at("status") == "ok" && solved.at("status") == "ok" &&
+        prepared.at("scc_components") == 1 &&
+        prepared.at("scc_structural_edges") == 0 &&
+        prepared.at("scc_condensation_edges") == 0 &&
+        prepared.at("scc_topological_order").as_array().size() == 1 &&
+        prepared.at("scc_topological_order").as_array()[0] == 0 &&
         solved.at("persistent").as_object().at("static_tensor_copies") == 0 &&
         stats.at("runs") == 1 && stats.at("static_tensor_copies") == 0);
+  const auto& retained_scc =
+      stats.at("chart_stats").as_array()[0].as_object();
+  check("persistent stats retain typed SCC graph order",
+        retained_scc.at("scc_components") == 1 &&
+        retained_scc.at("scc_structural_edges") == 0 &&
+        retained_scc.at("scc_condensation_edges") == 0 &&
+        retained_scc.at("scc_topological_order").as_array()[0] == 0 &&
+        retained_scc.at("scc_coupling_depth") == 0);
   (void)json_request(std::string(R"json({
     "schema":2,"op":"session.close","session":")json") + session + "\"}");
 

@@ -504,6 +504,11 @@ json::object run_typed(const json::object& root, int digits) {
 struct SCCCertificate {
   std::uint32_t component_count = 0;
   std::uint32_t coupling_depth = 0;
+  std::vector<std::vector<std::uint32_t>> components;
+  std::vector<std::uint32_t> component_of;
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> structural_edges;
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> condensation_edges;
+  std::vector<std::uint32_t> topological_order;
   std::string exact_record;
 };
 
@@ -649,7 +654,25 @@ SCCCertificate validate_scc_certificate(const json::value& raw,
     throw std::invalid_argument(
         "SCC coupling depth does not match the exact condensation graph");
 
-  return {block_count, coupling_depth, json::serialize(raw)};
+  SCCCertificate certificate;
+  certificate.component_count = block_count;
+  certificate.coupling_depth = coupling_depth;
+  certificate.components = std::move(components);
+  certificate.component_of = std::move(component_of);
+  certificate.structural_edges.assign(
+      structural_edges.begin(), structural_edges.end());
+  certificate.condensation_edges.assign(
+      derived_condensation.begin(), derived_condensation.end());
+  certificate.topological_order = std::move(topological_order);
+  certificate.exact_record = json::serialize(raw);
+  return certificate;
+}
+
+json::array encode_indices(const std::vector<std::uint32_t>& values) {
+  json::array encoded;
+  encoded.reserve(values.size());
+  for (const auto value : values) encoded.push_back(value);
+  return encoded;
 }
 
 std::vector<std::string> parse_symbols(const json::object& object) {
@@ -1060,6 +1083,12 @@ json::object run_session_command(const json::object& root) {
                         {"frame_base", chart->frame_base()},
                         {"frame_width", chart->frame_width()},
                         {"scc_components", chart->scc().component_count},
+                        {"scc_structural_edges",
+                         chart->scc().structural_edges.size()},
+                        {"scc_condensation_edges",
+                         chart->scc().condensation_edges.size()},
+                        {"scc_topological_order",
+                         encode_indices(chart->scc().topological_order)},
                         {"scc_coupling_depth", chart->scc().coupling_depth}};
   }
 
@@ -1121,6 +1150,12 @@ json::object run_session_command(const json::object& root) {
           {"dimension", chart->dimension()},
           {"frame_base", chart->frame_base()},
           {"frame_width", chart->frame_width()}, {"runs", stats.runs},
+          {"scc_components", chart->scc().component_count},
+          {"scc_structural_edges", chart->scc().structural_edges.size()},
+          {"scc_condensation_edges", chart->scc().condensation_edges.size()},
+          {"scc_topological_order",
+           encode_indices(chart->scc().topological_order)},
+          {"scc_coupling_depth", chart->scc().coupling_depth},
           {"prepare_parse_ms", stats.prepare_parse_ms},
           {"run_parse_ms", stats.run_parse_ms},
           {"kernel_ms", stats.kernel_ms}});

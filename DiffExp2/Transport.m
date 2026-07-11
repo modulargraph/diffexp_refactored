@@ -813,6 +813,11 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
     Join[c, <|"Radius" -> rad, "ChartVar" -> Global`t,
       "MatchRadius" -> matchRad, "Scale" -> scale,
       "LocalRadius" -> localRad,
+      (* Transport consumes SolveChart's exact SCC orchestration and never
+         needs a redundant full-system spectral frame.  PrepareChart treats
+         this as an internal lazy-preparation request; direct callers retain
+         the complete ChartSystem contract. *)
+      "UseSCCSkeleton" -> True,
       "Name" -> "seg" <> ToString[First[#2]] <> "@" <>
         ToString[N[c["Center"], 6]],
       "Prescriptions" -> chartPrescriptions[c["Center"], var]|>]] &, charts];
@@ -877,7 +882,7 @@ ApplyCrossing[ls_Association, sigma_] := Module[
    columns are catastrophically ill-conditioned. *)
 
 recombineDegenerate[cs_, basis_List, specs_List, diagnostics_:<||>] := Module[
-  {degs, newBasis = basis, width,
+  {degs, newBasis = basis, width, sccGroups, applyGroup,
    hits = If[AssociationQ[diagnostics] &&
        KeyExistsQ[diagnostics, "PseudoCollisionsHit"],
      diagnostics["PseudoCollisionsHit"], Missing["NotAvailable"]],
@@ -888,33 +893,42 @@ recombineDegenerate[cs_, basis_List, specs_List, diagnostics_:<||>] := Module[
      joint-compensation certificate. *)
   If[!ListQ[hits] || (hits =!= {} && !compensated),
     Return[newBasis]];
-  degs = DiffExp2`Indicial`EpsDegenerateFamilies[cs["IndicialData"]];
-  If[degs === {}, Return[newBasis]];
   width = 4 + Max[0, Max[Map[#["EpsWindow", "CompleteMax"] -
     #["EpsWindow", "Min"] &, basis]]];
-  Do[Module[{fi = rec["FamilyIndex"], r0 = rec["EpsZeroDegeneracy"], cols, bs},
+  applyGroup[grp_List, r0_Integer] := Module[
+    {bs = SortBy[grp, N[specs[[#]]["b"], 20] &], active, pass = 0},
+    active = bs;
+    While[Length[active] >= 2 && pass < Max[r0, 1],
+      Module[{base = First[active], rest = Rest[active]},
+        Do[Module[{m = rest[[ri]], db, wPlus, wMinus},
+          db = Together[specs[[m]]["b"] - specs[[base]]["b"]];
+          If[!zeroCanQ[db],
+            wPlus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{1/db}, width]];
+            wMinus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{-1/db}, width]];
+            newBasis[[m]] = DiffExp2`SectorSeries`CombineLocalSolutions[
+              {wPlus, wMinus}, {newBasis[[m]], newBasis[[base]]}]]],
+          {ri, Length[rest]}];
+        active = rest; pass++]]];
+  (* A block-sequential basis owns independent indicial frames per diagonal
+     SCC.  Global IndicialData can mix them through off-diagonal residues, so
+     SolveChart supplies the exact block-local column groups explicitly. *)
+  sccGroups = If[AssociationQ[diagnostics],
+    Lookup[diagnostics, "SCCRecombineGroups", Missing["NotAvailable"]],
+    Missing["NotAvailable"]];
+  If[ListQ[sccGroups],
+    Do[applyGroup[rec["Columns"], rec["EpsZeroDegeneracy"]],
+      {rec, sccGroups}];
+    Return[newBasis, Module]];
+  degs = DiffExp2`Indicial`EpsDegenerateFamilies[cs["IndicialData"]];
+  If[degs === {}, Return[newBasis]];
+  Do[Module[{fi = rec["FamilyIndex"], r0 = rec["EpsZeroDegeneracy"], cols},
     cols = Select[Range[Length[specs]], specs[[#]]["Family"] === fi &];
     (* value-level degeneracy pairs columns with the SAME exact a and
-       DISTINCT b (different-a columns are different functions); per
-       same-a group, the recursive (S_m - S_1)/((b_m - b_1) eps) ladder *)
-    Module[{groups},
-      groups = GatherBy[Select[cols, specs[[#]]["ChainPos"] === 0 &],
-        Together[specs[[#]]["a"]] &];
-      Do[Module[{bs = SortBy[grp, N[specs[[#]]["b"], 20] &], active, pass = 0},
-        active = bs;
-        While[Length[active] >= 2 && pass < Max[r0, 1],
-          Module[{base = First[active], rest = Rest[active]},
-            Do[Module[{m = rest[[ri]], db, wPlus, wMinus},
-              db = Together[specs[[m]]["b"] - specs[[base]]["b"]];
-              (* exact tag difference, already Together'd *)
-              If[!zeroCanQ[db],
-                wPlus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{1/db}, width]];
-                wMinus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{-1/db}, width]];
-                newBasis[[m]] = DiffExp2`SectorSeries`CombineLocalSolutions[
-                  {wPlus, wMinus}, {newBasis[[m]], newBasis[[base]]}]]],
-              {ri, Length[rest]}];
-            active = rest; pass++]]],
-        {grp, Select[groups, Length[#] >= 2 &]}]]],
+       DISTINCT b (different-a columns are different functions). *)
+    Do[applyGroup[grp, r0],
+      {grp, Select[GatherBy[
+        Select[cols, specs[[#]]["ChainPos"] === 0 &],
+        Together[specs[[#]]["a"]] &], Length[#] >= 2 &]}]],
     {rec, degs}];
   newBasis];
 

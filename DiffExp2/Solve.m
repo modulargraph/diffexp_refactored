@@ -119,6 +119,109 @@ registerSystemClearInput[sys_Association] := Module[
   If[old === None, AssociateTo[$systemClearRegistry, key ->
     <|"Variable" -> sys["Variable"], "Matrix" -> sys["Matrix"]|>]];
   key];
+
+(* Exact replacement for the old InitializeIntegrationSequence sparsity
+   analysis.  Equation row r depends on component c when B[[r,c]] is a
+   nonzero element of the full exact coefficient field, so the dependency
+   edge is c -> r.  In particular, epsilon- or analytic-regulator-only
+   couplings are edges: no specialization is permitted while constructing
+   the graph.  Components are returned in a deterministic source-first
+   topological order and accompanied by a certificate which is rechecked
+   here before any block solve can consume it. *)
+deterministicTopologicalOrder[components_List, edges_List] := Module[
+  {n = Length[components], indegree, outgoing, ready, order = {}, u},
+  indegree = Table[Count[edges, {_, i}], {i, n}];
+  outgoing = Table[Sort[Cases[edges, {i, j_} :> j]], {i, n}];
+  ready = SortBy[Select[Range[n], indegree[[#]] === 0 &],
+    First[components[[#]]] &];
+  While[ready =!= {},
+    u = First[ready]; ready = Rest[ready]; AppendTo[order, u];
+    Do[
+      indegree[[v]]--;
+      If[indegree[[v]] === 0,
+        ready = SortBy[Append[ready, v], First[components[[#]]] &]],
+      {v, outgoing[[u]]}]];
+  If[Length[order] =!= n,
+    err["E6", <|"Center" -> "integration-sequence"|>, <|
+      "CondensationEdges" -> edges,
+      "Detail" -> "SCC condensation graph is cyclic"|>]];
+  order];
+
+exactSCCStructure[m_?MatrixQ] := Module[
+  {d = Length[m], normalized, pattern, edgePairs, graph, rawComponents,
+   rawVertexToComponent, rawCondensation, topo, oldToNew, components,
+   vertexToComponent, condensation, outgoing, depths, certificateQ},
+  If[d === 0 || Dimensions[m] =!= {d, d},
+    err["E6", <|"Center" -> "integration-sequence"|>, <|
+      "Dimensions" -> Dimensions[m],
+      "Detail" -> "SCC analysis requires a nonempty square matrix"|>]];
+  If[!FreeQ[m, _?InexactNumberQ],
+    err["E1", <|"Center" -> "integration-sequence"|>, <|
+      "Detail" -> "SCC decisions require the full exact matrix"|>]];
+  normalized = Map[Cancel[Together[#]] &, m, {2}];
+  pattern = Map[If[zeroCanQ[#], 0, 1] &, normalized, {2}];
+  edgePairs = Flatten[Table[
+    If[pattern[[r, c]] === 1, {{c, r}}, {}], {r, d}, {c, d}], 2];
+  graph = Graph[Range[d], DirectedEdge @@@ edgePairs,
+    DirectedEdges -> True];
+  (* On the supported Wolfram kernel ConnectedComponents of a directed graph
+     is the strong-component operation (WeaklyConnectedComponents is the
+     distinct weak operation).  Its component numbering is not an API
+     contract.  Number the condensation
+     deterministically after constructing all cross-component edges. *)
+  rawComponents = Sort /@ ConnectedComponents[graph];
+  rawVertexToComponent = ConstantArray[0, d];
+  Do[Scan[(rawVertexToComponent[[#]] = i) &, rawComponents[[i]]],
+    {i, Length[rawComponents]}];
+  rawCondensation = Sort[DeleteDuplicates[Select[
+    ({rawVertexToComponent[[#[[1]]]], rawVertexToComponent[[#[[2]]]]} & /@
+      edgePairs), #[[1]] =!= #[[2]] &]]];
+  topo = deterministicTopologicalOrder[rawComponents, rawCondensation];
+  oldToNew = AssociationThread[topo, Range[Length[topo]]];
+  components = rawComponents[[topo]];
+  vertexToComponent = oldToNew /@ rawVertexToComponent;
+  condensation = Sort[DeleteDuplicates[
+    ({oldToNew[#[[1]]], oldToNew[#[[2]]]} & /@ rawCondensation)]];
+  outgoing = Table[Sort[Cases[condensation, {i, j_} :> j]],
+    {i, Length[components]}];
+  (* CouplingDepth counts blocks on the longest dependency chain, matching
+     classic MaxCouplingOrder and Transport's decrement heuristic.  The
+     one-SCC SolveChart fast path reports 0 separately. *)
+  depths = ConstantArray[1, Length[components]];
+  Do[Do[depths[[v]] = Max[depths[[v]], depths[[u]] + 1],
+      {v, outgoing[[u]]}], {u, Length[components]}];
+  certificateQ =
+    Sort[Flatten[components]] === Range[d] &&
+    Total[Length /@ components] === d &&
+    AllTrue[Range[Length[components]], Function[i, Module[
+      {sub = Subgraph[graph, components[[i]]], root = First[components[[i]]]},
+      Sort[VertexOutComponent[sub, root]] === components[[i]] &&
+        Sort[VertexOutComponent[ReverseGraph[sub], root]] ===
+          components[[i]]]]] &&
+    AllTrue[condensation, #[[1]] < #[[2]] &] &&
+    AllTrue[edgePairs, Function[e,
+      With[{a = vertexToComponent[[e[[1]]]],
+          b = vertexToComponent[[e[[2]]]]},
+        a === b || MemberQ[condensation, {a, b}]]]];
+  If[!TrueQ[certificateQ],
+    err["E6", <|"Center" -> "integration-sequence"|>, <|
+      "Components" -> components, "CondensationEdges" -> condensation,
+      "Detail" -> "exact SCC/topological certificate failed"|>]];
+  <|"Schema" -> "DiffExp2.IntegrationSequence/v1",
+    "Exact" -> True, "RegulatorSpecialization" -> None,
+    "MatrixHash" -> Hash[normalized, "SHA256"],
+    "PatternHash" -> Hash[pattern, "SHA256"],
+    "NonzeroPattern" -> pattern, "DependencyEdges" -> edgePairs,
+    "Components" -> components,
+    "VertexToComponent" -> vertexToComponent,
+    "CondensationEdges" -> condensation,
+    "TopologicalOrder" -> Range[Length[components]],
+    "BlockDepths" -> depths,
+    "CouplingDepth" -> If[depths === {}, 0, Max[depths]],
+    "Certificate" -> <|"Partition" -> True,
+      "StrongConnectivity" -> True, "AcyclicTopologicalOrder" -> True,
+      "EdgeCoverage" -> True|>|>];
+
 familyCollisionDepth[roots_List, collisions_List] := Module[{perRoot},
   perRoot = Table[Module[{events, layers},
     (* Homogeneous recursion starts at n=1; same-a n=0 symmetrization is
@@ -159,17 +262,48 @@ PrepareChart[sys_Association, chart_Association] := Module[
   {sysClearKey = registerSystemClearInput[sys], pcKey},
   pcKey = {sysClearKey, chart["Center"], Lookup[chart, "Scale", 1],
     Lookup[chart, "Radius", None], Lookup[chart, "LocalRadius", None],
-    Lookup[chart, "Prescriptions", {}]};
+    Lookup[chart, "Prescriptions", {}],
+    TrueQ[Lookup[chart, "UseSCCSkeleton", False]]};
   If[KeyExistsQ[$pcCache, pcKey], Return[$pcCache[pcKey]]];
   $pcCache[pcKey] = prepareChartCore[sys, chart, sysClearKey]];
 
 prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t, x0, beta, A, Achart, idata, d,
-   cols, V, VInv, fams, detV, colIdx, blockEpsShifts},
+   cols, V, VInv, fams, detV, colIdx, blockEpsShifts,
+   integrationSequence, thetaOriginal, regularOriginal},
   t = chart["ChartVar"]; x0 = chart["Center"]; beta = Lookup[chart, "Scale", 1];
   A = sys["Matrix"];
   Achart = Map[Cancel[Together[#]] &,
     beta*(A /. sys["Variable"] -> x0 + beta*t), {2}];
+  thetaOriginal = Map[Cancel[Together[t*#]] &, Achart, {2}];
+  (* The integration sequence belongs to the original master basis.  A
+     full-system rank-reduction gauge or spectral frame may mix components
+     and must not be allowed to densify/change the physical dependency DAG.
+     Every diagonal SCC is prepared independently later. *)
+  integrationSequence = exactSCCStructure[thetaOriginal];
+  d = Length[Achart];
+  If[TrueQ[Lookup[chart, "UseSCCSkeleton", False]] &&
+      Length[integrationSequence["Components"]] > 1,
+    (* A full spectral preparation before preparing every diagonal SCC defeats
+       the integration sequence (the double-box full ChartIndicial alone is
+       minute-scale).  Transport and the SCC solver need only the original
+       exact theta matrix, chart metadata, dimension, and the ordinary/singular
+       classification.  Each diagonal block below receives its own complete
+       PrepareChart, including any rank reduction and spectral frame. *)
+    regularOriginal = AllTrue[Flatten[Achart],
+      With[{v = tVal[#, t]}, v === Infinity || TrueQ[v >= 0]] &];
+    Return[<|"ChartVar" -> t, "Center" -> x0,
+      "ChartMap" -> <|"Center" -> x0, "Scale" -> beta|>,
+      "Radius" -> Lookup[chart, "LocalRadius", chart["Radius"]],
+      "SystemHash" -> Hash[sys["Matrix"]],
+      "SystemClearKey" -> sysClearKey,
+      "Prescriptions" -> Lookup[chart, "Prescriptions", {}],
+      "SystemSize" -> d, "ThetaOriginal" -> thetaOriginal,
+      "IntegrationSequence" -> integrationSequence,
+      "IndicialData" -> <|"Regular" -> regularOriginal,
+        "Dimension" -> d, "SCCSkeleton" -> True|>,
+      "SCCSkeleton" -> True,
+      "ChartSystemKind" -> "SCCEnvelope"|>, Module]];
   idata = DiffExp2`Indicial`ChartIndicial[Achart, t, eps,
     <|"Name" -> Lookup[chart, "Name", "chart@" <> ToString[x0, InputForm]],
       "Center" -> x0, "Variable" -> sys["Variable"]|>];
@@ -217,9 +351,10 @@ prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
     (* original theta matrix t*A(chart): the residual check runs on the
        GAUGED-BACK solution f = T.g, which solves the ORIGINAL system -
        checking it against the reduced B would fail every gauge chart *)
-    "ThetaOriginal" -> Map[Cancel[Together[t*#]] &, Achart, {2}],
+    "ThetaOriginal" -> thetaOriginal,
     "Gauge" -> idata["Reduction"]["Gauge"],
     "GaugeInverse" -> idata["Reduction"]["GaugeInverse"],
+    "IntegrationSequence" -> integrationSequence,
     "Residue" -> idata["Residue"],
     "SpectralBlockEpsShifts" -> blockEpsShifts,
     "V" -> V, "VInv" -> VInv, "Families" -> fams,
@@ -1961,6 +2096,108 @@ certifyPseudoCompensation[cs_, ls_, hits_List, label_] := Module[
     {t0, probes}];
   True];
 
+(* ---- exact component/source algebra for SCC orchestration ------------
+   Couplings are multiplied in the ORIGINAL theta-form frame.  These helpers
+   deliberately reuse SectorSeries`MultiplyRational, so fractional powers,
+   logarithms, epsilon Laurent windows, analytic prescriptions, and center
+   pole shifts follow the same implementation as every other solver source.
+   No coefficient is sampled or specialized to decide whether it is zero. *)
+sccStructuralZeroQ[e_] :=
+  FreeQ[e, _?InexactNumberQ] && zeroQ[e];
+
+sccSourceZeroQ[None] := True;
+sccSourceZeroQ[source_Association] :=
+  Lookup[source, "Sectors", {}] === {} ||
+    AllTrue[Flatten[Lookup[source, "Sectors", {}][[All, "Coeffs"]]],
+      sccStructuralZeroQ];
+
+sccReframeLocalSolution[ls_Association, cs_Association] := Join[ls, <|
+  "Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+  "Radius" -> cs["Radius"], "Prescriptions" -> cs["Prescriptions"]|>];
+
+sccSelectComponents[ls_Association, indices_List] := Module[{secs},
+  secs = Map[Append[#, "Coeffs" -> # ["Coeffs"][[All, All, indices]]] &,
+    ls["Sectors"]];
+  Join[ls, <|"Sectors" -> secs|>]];
+
+sccEmbedComponents[ls_Association, indices_List, dimension_Integer] := Module[
+  {secs},
+  secs = Map[Function[sec, Module[{arr = sec["Coeffs"], out},
+      out = ConstantArray[0,
+        {Length[arr], Length[arr[[1]]], dimension}];
+      Do[out[[All, All, indices[[j]]]] = arr[[All, All, j]],
+        {j, Length[indices]}];
+      Append[sec, "Coeffs" -> out]]], ls["Sectors"]];
+  Join[ls, <|"Sectors" -> secs|>]];
+
+sccSourceToLocalSolution[cs_Association, source_Association,
+    dimension_Integer] := Module[{secs = Lookup[source, "Sectors", {}],
+   win = source["EpsWindow"], tw = source["TWindow"], dims},
+  If[secs === {},
+    Return[<|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+      "Radius" -> cs["Radius"],
+      "Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+        "Coeffs" -> ConstantArray[0,
+          {1, tw["CompleteMax"] + 1, dimension}]|>},
+      "EpsWindow" -> <|"Min" -> win["CompleteMax"],
+        "CompleteMax" -> win["CompleteMax"]|>,
+      "TWindow" -> tw, "ErrorEstimate" -> {0},
+      "Prescriptions" -> cs["Prescriptions"]|>, Module]];
+  dims = Dimensions[First[secs]["Coeffs"]];
+  If[Length[dims] =!= 3 || Last[dims] =!= dimension ||
+      !AllTrue[secs, Dimensions[# ["Coeffs"]][[3]] === dimension &],
+    err["E8", cs, <|"SourceDimensions" -> (Dimensions[# ["Coeffs"]] & /@ secs),
+      "ExpectedComponents" -> dimension,
+      "Detail" -> "SCC source component dimension mismatch"|>]];
+  <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+    "Radius" -> cs["Radius"], "Sectors" -> secs,
+    "EpsWindow" -> win, "TWindow" -> tw,
+    "ErrorEstimate" -> ConstantArray[0,
+      win["CompleteMax"] - win["Min"] + 1],
+    "Prescriptions" -> cs["Prescriptions"]|>];
+
+sccLocalSolutionSource[ls_Association] := KeyTake[ls,
+  {"Sectors", "EpsWindow", "TWindow"}];
+
+sccProjectSource[source_Association, indices_List] := Module[{secs},
+  If[Lookup[source, "Sectors", {}] === {}, Return[source, Module]];
+  secs = Map[Append[#, "Coeffs" -> # ["Coeffs"][[All, All, indices]]] &,
+    source["Sectors"]];
+  Join[source, <|"Sectors" -> If[
+    AllTrue[Flatten[secs[[All, "Coeffs"]]], sccStructuralZeroQ], {}, secs]|>]];
+
+sccMatrixTimesLocalSolution[cs_Association, matrix_?MatrixQ,
+    ls_Association] := Module[
+  {nr = Length[matrix], nc, inputComponents, terms = {}, t = cs["ChartVar"],
+   coeff, one, product},
+  nc = If[nr === 0, 0, Length[First[matrix]]];
+  inputComponents = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]];
+  If[nc =!= inputComponents,
+    err["E8", cs, <|"MatrixDimensions" -> Dimensions[matrix],
+      "InputComponents" -> inputComponents,
+      "Detail" -> "SCC coupling matrix/component mismatch"|>]];
+  Do[
+    coeff = Cancel[Together[matrix[[r, c]]]];
+    If[!sccStructuralZeroQ[coeff],
+      one = sccSelectComponents[ls, {c}];
+      product = DiffExp2`SectorSeries`MultiplyRational[one, coeff, t];
+      AppendTo[terms, sccEmbedComponents[product, {r}, nr]]],
+    {r, nr}, {c, nc}];
+  If[terms === {}, None,
+    If[Length[terms] === 1, First[terms],
+      DiffExp2`SectorSeries`CombineLocalSolutions[
+        ConstantArray[1, Length[terms]], terms]]]];
+
+sccCombineSources[cs_Association, sources_List, dimension_Integer] := Module[
+  {active, lss, combined},
+  active = Select[sources, AssociationQ[#] && !sccSourceZeroQ[#] &];
+  If[active === {}, Return[None, Module]];
+  lss = sccSourceToLocalSolution[cs, #, dimension] & /@ active;
+  combined = If[Length[lss] === 1, First[lss],
+    DiffExp2`SectorSeries`CombineLocalSolutions[
+      ConstantArray[1, Length[lss]], lss]];
+  sccLocalSolutionSource[combined]];
+
 (* ---- public functions ---- *)
 
 (* SolveHomogeneous memo: the fundamental basis depends ONLY on the
@@ -1991,16 +2228,37 @@ homogeneousCacheKey[cs_Association, req_Association] :=
     TrueQ[$disableGroupedSpectralTransform],
     TrueQ[$disablePolynomialNhatTransform]};
 SolveHomogeneous[cs_Association, req_Association] := Module[
-  {tag = Lookup[cs, "SystemHash", None], key},
+  {tag = Lookup[cs, "SolveCacheTag", Lookup[cs, "SystemHash", None]], key},
   key = homogeneousCacheKey[cs, req];
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];
-  $shCache[key] = solveHomogeneousCore[cs, req]];
+  $shCache[key] = If[TrueQ[Lookup[cs, "SCCSkeleton", False]] &&
+      AssociationQ[Lookup[cs, "IntegrationSequence", None]] &&
+      Length[cs["IntegrationSequence", "Components"]] > 1,
+    (* Diagonal block bases are implementation scratch for this assembled
+       parent basis.  Isolate their memo entries dynamically so a six-block
+       chart still occupies exactly one persistent cache slot and cannot
+       evict an already-prewarmed arm. *)
+    Block[{$shCache = <||>, $shSysTag = tag},
+      Module[{blocks, execution, fullcs, fs},
+        blocks = sccBlockChartSystem[cs, #] & /@
+          Range[Length[cs["IntegrationSequence", "Components"]]];
+        execution = sccExecutionPlan[cs, req, blocks];
+        If[execution["Mode"] === "MonolithicStrict",
+          fullcs = sccTryMonolithicChartSystem[cs];
+          If[FailureQ[fullcs],
+            fs = solveSCCBasis[cs, req, blocks];
+            sccAnnotateDeclinedBasis[fs, cs, execution, fullcs],
+            fs = solveHomogeneousCore[fullcs, req];
+            sccAnnotateCoarsenedBasis[fs, cs, execution, fullcs]],
+          solveSCCBasis[cs, req, blocks]]]],
+    solveHomogeneousCore[cs, req]]];
 
 PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
   {systems, tag, keys, uncached, captures, requests, lengths, response,
-   results, offsets, assembled, threads, started = SessionTime[]},
+   results, offsets, assembled, threads, started = SessionTime[], allSystems,
+   sccSystems, ordinaryInput},
   If[chartSystems === {}, Return[{}, Module]];
   If[!AllTrue[chartSystems, AssociationQ],
     err["E6", <|"Center" -> "homogeneous-batch"|>, <|
@@ -2011,14 +2269,31 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
   If[TrueQ[$disableGroupedSpectralTransform],
     err["E6", First[chartSystems], <|
       "Detail" -> "homogeneous native batching requires the production grouped spectral-transform path"|>]];
-  tag = Lookup[First[chartSystems], "SystemHash", None];
-  If[!AllTrue[chartSystems, Lookup[#, "SystemHash", None] === tag &],
-    err["E6", First[chartSystems], <|
+  allSystems = DeleteDuplicatesBy[chartSystems,
+    homogeneousCacheKey[#, req] &];
+  sccSystems = Select[allSystems,
+    TrueQ[Lookup[#, "SCCSkeleton", False]] &];
+  (* A skeleton expands into several independently prepared native requests;
+     the existing capture/injection protocol is one request-pool per original
+     ChartSystem.  Prewarm those systems through their ordinary strict SCC
+     solve (still cached), then batch only genuine one-frame systems. *)
+  If[sccSystems =!= {},
+    Block[{$cppHomogeneousBatchCapture = False},
+      SolveHomogeneous[#, req] & /@ sccSystems]];
+  ordinaryInput = Select[allSystems,
+    !TrueQ[Lookup[#, "SCCSkeleton", False]] &];
+  If[ordinaryInput === {},
+    Return[SolveHomogeneous[#, req] & /@ allSystems, Module]];
+  tag = Lookup[First[ordinaryInput], "SolveCacheTag",
+    Lookup[First[ordinaryInput], "SystemHash", None]];
+  If[!AllTrue[ordinaryInput,
+      Lookup[#, "SolveCacheTag", Lookup[#, "SystemHash", None]] === tag &],
+    err["E6", First[ordinaryInput], <|
       "Detail" -> "one homogeneous native batch cannot mix different differential systems"|>]];
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   (* SolveHomogeneous's key is the authoritative identity.  This also drops
      the shared anchor chart appearing in both endpoint plans. *)
-  systems = DeleteDuplicatesBy[chartSystems, homogeneousCacheKey[#, req] &];
+  systems = ordinaryInput;
   keys = homogeneousCacheKey[#, req] & /@ systems;
   uncached = Pick[systems, Not /@ (KeyExistsQ[$shCache, #] & /@ keys)];
   If[uncached === {}, Return[SolveHomogeneous[#, req] & /@ systems, Module]];
@@ -2069,7 +2344,7 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
       "Seconds" -> N[SessionTime[] - started, 6]|>]];
   (* Return in the caller's deduplicated order; cached entries and the newly
      verified entries are indistinguishable at this point. *)
-  SolveHomogeneous[#, req] & /@ systems];
+  SolveHomogeneous[#, req] & /@ allSystems];
 
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
@@ -2310,8 +2585,24 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
   {d = cs["SystemSize"], nmax, reqMin, reqMax, parts = {}, wideTop, prep,
    eps = DiffExp2`Config`CanonicalEps[], hitsAll = {}, compAll = {}, certs = {},
    homTargets = None, symbolic, poleDepth, spectralDepth,
-   inverseSpectralDepth, sourceFrameDepth, reducedSource,
-   vPrepCache = <||>, vPrepFor},
+   inverseSpectralDepth, sourceFrameDepth, singleUseDepth, reducedSource,
+   vPrepCache = <||>, vPrepFor, blockSystems, execution, fullcs, result},
+  If[TrueQ[Lookup[cs, "SCCSkeleton", False]] &&
+      AssociationQ[Lookup[cs, "IntegrationSequence", None]] &&
+      Length[cs["IntegrationSequence", "Components"]] > 1,
+    blockSystems = sccBlockChartSystem[cs, #] & /@
+      Range[Length[cs["IntegrationSequence", "Components"]]];
+    execution = sccExecutionPlan[cs, req, blockSystems];
+    If[execution["Mode"] === "MonolithicStrict",
+      fullcs = sccTryMonolithicChartSystem[cs];
+      If[FailureQ[fullcs],
+        result = solveSCCParticular[cs, source, req, blockSystems];
+        Return[sccAnnotateDeclinedParticular[
+          result, cs, execution, fullcs], Module],
+        result = SolveParticular[fullcs, source, req];
+        Return[sccAnnotateCoarsenedParticular[
+          result, cs, execution], Module]],
+      Return[solveSCCParticular[cs, source, req, blockSystems], Module]]];
   nmax = Min[req["TOrder"], source["TWindow", "CompleteMax"]];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   If[source["Sectors"] === {},
@@ -2330,6 +2621,7 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
   nmax = Min[req["TOrder"], reducedSource["TWindow", "CompleteMax"]];
   symbolic = clearedSymbolic[cs];
   poleDepth = recurrencePoleDepth[symbolic, nmax];
+  singleUseDepth = recurrenceSingleUsePoleDepth[symbolic];
   spectralDepth = spectralTransformPoleDepth[cs];
   inverseSpectralDepth = inverseSpectralTransformPoleDepth[cs];
   sourceFrameDepth = spectralDepth + inverseSpectralDepth;
@@ -2346,10 +2638,11 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
     srcMin = reducedSource["EpsWindow", "Min"];
     srcMax = reducedSource["EpsWindow", "CompleteMax"];
     wideTop2 = srcMax + P + pseudoDepth + 2 - Min[0, srcMin - P - 2];
-    wideTop2 = Max[wideTop2, srcMax + P + pseudoDepth + poleDepth];
+    wideTop2 = Max[wideTop2,
+      srcMax + P + pseudoDepth + poleDepth + 2 singleUseDepth];
     wideTop2 += sourceFrameDepth;
     Module[{fb2 = Min[Min[srcMin, 0] - P - pseudoDepth - 2 - 2,
-          srcMin - P - pseudoDepth - poleDepth], Wd2},
+          srcMin - P - pseudoDepth - poleDepth - 2 singleUseDepth], Wd2},
       (* The source first crosses VInv, then the solved coefficient crosses
          V on assembly.  Both matrices live in the shared frame, so their
          lower pole depths and upper scratch losses add. *)
@@ -2359,11 +2652,21 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
       VInvExp = Map[ratEpsList[Together[#], eps, fb2, Wd2] &, cs["VInv"], {2}];
       VInvVal = Map[frameValuation[#, fb2] &, VInvExp, {2}];
       (* J-frame source as FRAME LISTS: bHat[n+1][r] *)
-      bHat = Table[Module[{vc = Table[Module[{fl = ConstantArray[0, Wd2]},
-          Do[If[1 <= k - fb2 + 1 <= Wd2,
-            fl[[k - fb2 + 1]] = arr[[k - srcMin + 1, n + 1, c]]],
-            {k, srcMin, srcMax}]; fl], {c, d}]},
-        Table[Sum[frConv[VInvExp[[r, c]], vc[[c]], fb2, Wd2], {c, d}], {r, d}]],
+      bHat = Table[
+        Module[{vc = Table[
+            Module[{fl = ConstantArray[0, Wd2]},
+              Do[
+                If[1 <= k - fb2 + 1 <= Wd2,
+                  fl[[k - fb2 + 1]] =
+                    arr[[k - srcMin + 1, n + 1, c]]],
+                {k, srcMin, srcMax}];
+              fl],
+            {c, d}]},
+          Table[
+            certifiedFrameChop /@
+              Sum[frConv[VInvExp[[r, c]], vc[[c]], fb2, Wd2],
+                {c, d}],
+            {r, d}]],
         {n, 0, Min[nmax, Length[arr[[1]]] - 1]}];
       (* The source is finite data: zero frame slots above srcMax are
          unknown, not an extension of completeness.  Transform its actual
@@ -2381,7 +2684,8 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
           If[srcL === pp && srcN + 1 <= Length[bb],
             <|"Frames" -> bb[[srcN + 1]],
               "Validity" -> bv[[srcN + 1]]|>, None]]];
-      rec = runRecursionFramedSrc[cs, prep2, aS, bS, P, nmax, srcFn, fb2, Wd2, None]];
+      rec = runRecursionFramedSrc[
+        cs, prep2, aS, bS, P, nmax, srcFn, fb2, Wd2, None]];
     hitsAll = Join[hitsAll, publicPseudoHit /@ rec["Hits"]];
     ls = assembleSolution[cs, aS, bS, rec, nmax,
       If[TrueQ[$disableGroupedSpectralTransform], Automatic,
@@ -2413,10 +2717,413 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
     ODEResidualCheck[cs, ls, source];
     ls]];
 
-SolveChart[cs_Association, req_Association, source_:None] := Module[{basis, part},
+(* ---- exact SCC/block integration sequence ---------------------------- *)
+sccBlockChartSystem[cs_Association, block_Integer] := Module[
+  {seq = cs["IntegrationSequence"], indices, t = cs["ChartVar"],
+   parentInput, sys, chart, sub, clearKey = cs["SystemClearKey"]},
+  indices = seq["Components"][[block]];
+  If[!KeyExistsQ[$systemClearRegistry, clearKey],
+    err["E6", cs, <|"SystemClearKey" -> clearKey,
+      "Detail" -> "SCC envelope references an unregistered original system"|>]];
+  parentInput = $systemClearRegistry[clearKey];
+  (* Prepare each diagonal block from the original physical system and the
+     original affine chart.  Besides avoiding a synthetic theta/t system,
+     this gives every center of the same block one shared global-clearing
+     cache key. *)
+  sys = <|"Variable" -> parentInput["Variable"],
+    "Matrix" -> parentInput["Matrix"][[indices, indices]]|>;
+  chart = <|"Center" -> cs["ChartMap", "Center"],
+    "Scale" -> cs["ChartMap", "Scale"],
+    "Radius" -> cs["Radius"], "LocalRadius" -> cs["Radius"],
+    "ChartVar" -> t,
+    "Name" -> "scc" <> ToString[block] <> "@" <>
+      ToString[cs["Center"], InputForm],
+    "Prescriptions" -> cs["Prescriptions"]|>;
+  sub = PrepareChart[sys, chart];
+  Join[sub, <|"SolveCacheTag" -> Lookup[cs, "SystemHash", None],
+    "SCCParentHash" -> seq["MatrixHash"], "SCCBlock" -> block,
+    "SCCIndices" -> indices|>]];
+
+(* SCC propagation is advantageous only while an off-diagonal source can be
+   carried through a target block at finite epsilon width.  A negative
+   epsilon recurrence multiplier at such a target makes every upstream
+   column fund future epsilon orders repeatedly.  Coarsen that chart to one
+   original-system recurrence instead: this is the same strict solver and
+   exact matrix, not a fallback to a different integration algorithm.  The
+   exact SCC certificate remains attached as planning/diagnostic metadata. *)
+sccMonolithicChartSystem[cs_Association] := Module[
+  {clearKey = cs["SystemClearKey"], parentInput, chart, full},
+  If[!KeyExistsQ[$systemClearRegistry, clearKey],
+    err["E6", cs, <|"SystemClearKey" -> clearKey,
+      "Detail" -> "SCC envelope references an unregistered original system"|>]];
+  parentInput = $systemClearRegistry[clearKey];
+  chart = <|"Center" -> cs["ChartMap", "Center"],
+    "Scale" -> cs["ChartMap", "Scale"],
+    "Radius" -> cs["Radius"], "LocalRadius" -> cs["Radius"],
+    "ChartVar" -> cs["ChartVar"],
+    "Name" -> "scc-monolithic@" <> ToString[cs["Center"], InputForm],
+    "Prescriptions" -> cs["Prescriptions"],
+    "UseSCCSkeleton" -> False|>;
+  full = PrepareChart[parentInput, chart];
+  Join[full, <|"SolveCacheTag" -> Lookup[cs, "SystemHash", None]|>]];
+
+(* A monolithic full-frame preparation is only a performance candidate.
+   Catch precisely that preparation attempt so an unsupported global
+   indicial frame can decline coarsening without swallowing any later strict
+   block solve failure.  Its printed DE2 error is replaced by the retained
+   Failure object in the execution diagnostics. *)
+sccTryMonolithicChartSystem[cs_Association] :=
+  Block[{Print = Function[Null]},
+    Quiet[Catch[sccMonolithicChartSystem[cs], "DiffExp2Error"]]];
+
+sccExecutionPlan[cs_Association, req_Association,
+    blockSystems_List] := Module[
+  {seq = cs["IntegrationSequence"], targets, nmax, records, offending,
+   incoming},
+  targets = Sort[DeleteDuplicates[
+    If[seq["CondensationEdges"] === {}, {},
+      seq["CondensationEdges"][[All, 2]]]]];
+  nmax = sccWorkTOrder[cs, req];
+  incoming[block_] := Sort[Cases[
+    seq["CondensationEdges"], {source_, block} :> source]];
+  records = Table[<|"TargetBlock" -> block,
+      "IncomingBlocks" -> incoming[block],
+      "Indices" -> seq["Components"][[block]],
+      "RecurrencePoleDepth" -> recurrencePoleDepth[
+        clearedSymbolic[blockSystems[[block]]], nmax]|>,
+    {block, targets}];
+  offending = Select[records, # ["RecurrencePoleDepth"] > 0 &];
+  If[offending === {},
+    <|"Mode" -> "BlockSequentialStrict", "WorkTOrder" -> nmax,
+      "DownstreamTargets" -> records|>,
+    <|"Mode" -> "MonolithicStrict",
+      "Reason" -> "DownstreamRecurrencePoleDepth",
+      "WorkTOrder" -> nmax, "OffendingTargets" -> offending|>]];
+
+sccCoarseningDiagnostics[cs_Association, execution_Association] := <|
+  "SCCSolved" -> False,
+  "SCCExecutionMode" -> "MonolithicStrict",
+  "SCCExecutionReason" -> execution["Reason"],
+  "SCCExecutionPlan" -> execution,
+  "SCCCertificate" -> cs["IntegrationSequence"],
+  "CouplingDepth" -> cs["IntegrationSequence", "CouplingDepth"]|>;
+
+sccAnnotateCoarsenedBasis[fs_Association, cs_Association,
+    execution_Association, fullcs_Association] := Module[{groups},
+  (* Recombination must use the actual monolithic indicial frame.  The lazy
+     SCC envelope intentionally has no global Families and therefore cannot
+     serve as Transport's fallback source of degeneracy groups. *)
+  groups = sccBlockRecombineRecords[
+    Join[fullcs, <|"SCCBlock" -> "MonolithicStrict"|>], fs, 0];
+  Join[fs, <|"Diagnostics" -> Join[
+    Lookup[fs, "Diagnostics", <||>],
+    sccCoarseningDiagnostics[cs, execution],
+    <|"SCCRecombineGroups" -> groups|>]|>]];
+
+sccAnnotateCoarsenedParticular[ls_Association, cs_Association,
+    execution_Association] := Join[ls, <|"Diagnostics" -> Join[
+      Lookup[ls, "Diagnostics", <||>],
+      sccCoarseningDiagnostics[cs, execution]]|>];
+
+sccDeclinedDiagnostics[cs_Association, execution_Association,
+    failure_?FailureQ] := <|
+  "SCCExecutionMode" -> "BlockSequentialStrict",
+  "SCCExecutionReason" -> "CoarseningDeclined",
+  "SCCCoarseningCandidate" -> execution,
+  "CoarseningDeclined" -> failure,
+  "SCCCertificate" -> cs["IntegrationSequence"],
+  "CouplingDepth" -> cs["IntegrationSequence", "CouplingDepth"]|>;
+
+sccAnnotateDeclinedBasis[fs_Association, cs_Association,
+    execution_Association, failure_?FailureQ] := Join[fs, <|
+  "Diagnostics" -> Join[Lookup[fs, "Diagnostics", <||>],
+    sccDeclinedDiagnostics[cs, execution, failure]]|>];
+
+sccAnnotateDeclinedParticular[ls_Association, cs_Association,
+    execution_Association, failure_?FailureQ] := Join[ls, <|
+  "Diagnostics" -> Join[Lookup[ls, "Diagnostics", <||>],
+    sccDeclinedDiagnostics[cs, execution, failure]]|>];
+
+sccBlockCouplingSource[cs_Association, target_Integer,
+    state_Association] := Module[
+  {components = cs["IntegrationSequence", "Components"], targetIndices,
+   pieces = {}, sourceBlock, mat, product},
+  targetIndices = components[[target]];
+  Do[
+    sourceBlock = key;
+    mat = cs["ThetaOriginal"][[targetIndices, components[[sourceBlock]]]];
+    If[AnyTrue[Flatten[mat], !sccStructuralZeroQ[Cancel[Together[#]]] &],
+      product = sccMatrixTimesLocalSolution[cs, mat, state[key]];
+      If[AssociationQ[product],
+        AppendTo[pieces, sccLocalSolutionSource[product]]]],
+    {key, Sort[Keys[state]]}];
+  sccCombineSources[cs, pieces, Length[targetIndices]]];
+
+sccCombineBlockState[cs_Association, state_Association] := Module[
+  {components = cs["IntegrationSequence", "Components"], terms},
+  terms = Map[Function[key,
+    sccEmbedComponents[state[key], components[[key]], cs["SystemSize"]]],
+    Sort[Keys[state]]];
+  If[terms === {},
+    err["E6", cs, <|"Detail" -> "SCC block state is empty"|>]];
+  If[Length[terms] === 1, First[terms],
+    DiffExp2`SectorSeries`CombineLocalSolutions[
+      ConstantArray[1, Length[terms]], terms]]];
+
+sccBlockRecombineRecords[subcs_Association, fs_Association,
+    columnOffset_Integer] := Module[{records = {}, specs = fs["Specs"], cols},
+  Do[
+    cols = Select[Range[Length[specs]],
+      specs[[#]]["Family"] === rec["FamilyIndex"] &&
+        specs[[#]]["ChainPos"] === 0 &];
+    Do[If[Length[group] >= 2,
+      AppendTo[records, <|"Columns" -> (columnOffset + group),
+        "EpsZeroDegeneracy" -> rec["EpsZeroDegeneracy"],
+        "SCCBlock" -> subcs["SCCBlock"]|>]],
+      {group, GatherBy[cols, Together[specs[[#]]["a"]] &]}],
+    {rec, DiffExp2`Indicial`EpsDegenerateFamilies[subcs["IndicialData"]]}];
+  records];
+
+sccParticularBlockCost[target_Association, nmax_Integer:0] :=
+  spectralTransformPoleDepth[target] +
+    inverseSpectralTransformPoleDepth[target] +
+    matrixEpsPoleDepth[target["Gauge"]] +
+    matrixEpsPoleDepth[target["GaugeInverse"]] +
+    recurrencePoleDepth[clearedSymbolic[target], nmax] +
+    2 recurrenceSingleUsePoleDepth[clearedSymbolic[target]] +
+    (* The canonical particular/log ladder can consume one honest source
+       order per target Jordan position even for a regular zero diagonal. *)
+    target["SystemSize"] +
+    Max[0, Sequence @@ (# ["CollisionDepth"] & /@ target["Families"])];
+
+sccInitialWorkHalo[cs_Association, blockSystems_List, nmax_Integer:0] := Module[
+  {seq = cs["IntegrationSequence"], nb, edgeCost, incoming, path},
+  nb = Length[seq["Components"]];
+  edgeCost[{u_, v_}] := Module[{mat, target = blockSystems[[v]]},
+    mat = cs["ThetaOriginal"][[seq["Components"][[v]],
+      seq["Components"][[u]]]];
+    matrixEpsPoleDepth[mat] + sccParticularBlockCost[target, nmax]];
+  incoming = Table[Cases[seq["CondensationEdges"], {u_, v} :> u],
+    {v, nb}];
+  path = ConstantArray[0, nb];
+  Do[If[incoming[[v]] =!= {},
+    path[[v]] = Max[(path[[#]] + edgeCost[{#, v}]) & /@ incoming[[v]]]],
+    {v, nb}];
+  If[path === {}, 0, Max[path]]];
+
+(* An external source, unlike a homogeneous seed column, must first pass
+   through the particular kernel of the block where it enters.  Fund that
+   first solve as well as the downstream coupling path.  The adaptive audit
+   below remains authoritative: this is only the deterministic first width. *)
+sccParticularInitialWorkHalo[cs_Association, blockSystems_List,
+    nmax_Integer:0] :=
+  sccInitialWorkHalo[cs, blockSystems, nmax] +
+    Max[0, Sequence @@ (sccParticularBlockCost[#, nmax] & /@ blockSystems)];
+
+sccWorkTOrder[cs_Association, req_Association] :=
+  req["TOrder"] + 2 + 2 cs["IntegrationSequence", "CouplingDepth"];
+
+sccAggregateDiagnostics[records_List, seq_Association,
+    recombine_List] := Module[{diags, getLists, compensated},
+  diags = Select[records, AssociationQ];
+  getLists[key_] := Flatten[
+    Map[If[ListQ[#], #, {#}] &, Lookup[diags, key, {}]], 1];
+  compensated = And @@ (TrueQ[Lookup[#,
+      "PseudoCollisionsCompensated", True]] & /@ diags);
+  <|"PseudoCollisionsHit" -> getLists["PseudoCollisionsHit"],
+    "PseudoCompensations" -> getLists["PseudoCompensations"],
+    "PseudoCollisionsCompensated" -> compensated,
+    "AdaptiveLowerFrames" -> getLists["AdaptiveLowerFrames"],
+    "SCCSolved" -> True,
+    "SCCExecutionMode" -> "BlockSequentialStrict",
+    "SCCCertificate" -> seq,
+    "SCCRecombineGroups" -> recombine,
+    "CouplingDepth" -> seq["CouplingDepth"]|>];
+
+solveSCCBasisAtTop[cs_Association, req_Association, blockSystems_List,
+    workTop_Integer] := Module[
+  {seq = cs["IntegrationSequence"], nb, workReq, blockBases, columns = {},
+   specs = {}, diagnostics = {}, recombine = {}, familyOffset = 0,
+   columnOffset = 0, state, source, part, full, minDelivered, workTOrder},
+  nb = Length[seq["Components"]];
+  (* Block particulars can be individually ill-scaled even though their
+     assembled physical column is well-conditioned.  Extra Taylor guard rows
+     keep the mandatory intermediate residual probe clear of their finite
+     tail.  Triangular recurrences make the retained rows independent of this
+     halo; the final full-system proof is rerun after capping to the public N. *)
+  workTOrder = sccWorkTOrder[cs, req];
+  workReq = Join[req, <|"EpsWindow" ->
+    Join[req["EpsWindow"], <|"CompleteMax" -> workTop|>],
+    "TOrder" -> workTOrder|>];
+  blockBases = If[cfg["RecurrenceBackend"] === "Cpp" &&
+      !TrueQ[$disableGroupedSpectralTransform] &&
+      cfg["Variables"] === {} &&
+      Length[blockSystems] <= HomogeneousCacheCapacity[],
+    (* Diagonal SCC homogeneous problems are independent and share the
+       parent's SolveCacheTag.  Submit their native recurrence payloads as
+       one batch; the surrounding transient cache then supplies the ordinary
+       SolveHomogeneous reads below without persistent block entries. *)
+    PrewarmHomogeneousBatch[blockSystems, workReq],
+    SolveHomogeneous[#, workReq] & /@ blockSystems];
+  Do[
+    recombine = Join[recombine,
+      sccBlockRecombineRecords[blockSystems[[block]], blockBases[[block]],
+        columnOffset]];
+    diagnostics = Append[diagnostics,
+      blockBases[[block]]["Diagnostics"]];
+    Do[
+      state = <|block -> sccReframeLocalSolution[
+        blockBases[[block]]["Columns"][[localColumn]], cs]|>;
+      Do[
+        source = sccBlockCouplingSource[cs, target, state];
+        If[AssociationQ[source] && !sccSourceZeroQ[source],
+          part = SolveParticular[blockSystems[[target]], source, workReq];
+          diagnostics = Append[diagnostics,
+            Lookup[part, "Diagnostics", <||>]];
+          AssociateTo[state, target -> sccReframeLocalSolution[part, cs]]],
+        {target, block + 1, nb}];
+      full = sccCombineBlockState[cs, state];
+      AppendTo[columns, full];
+      AppendTo[specs, Join[blockBases[[block]]["Specs"][[localColumn]], <|
+        "Family" -> (familyOffset +
+          blockBases[[block]]["Specs"][[localColumn]]["Family"]),
+        "SCCBlock" -> block|>]],
+      {localColumn, Length[blockBases[[block]]["Columns"]]}];
+    familyOffset += Length[blockSystems[[block]]["Families"]];
+    columnOffset += Length[blockBases[[block]]["Columns"]],
+    {block, nb}];
+  minDelivered = Min[# ["EpsWindow", "CompleteMax"] & /@ columns];
+  <|"Columns" -> columns, "Specs" -> specs,
+    "DiagnosticsRecords" -> diagnostics,
+    "RecombineGroups" -> recombine,
+    "MinDelivered" -> minDelivered|>];
+
+solveSCCBasis[cs_Association, req_Association,
+    blockSystems_List] := Module[
+  {seq = cs["IntegrationSequence"], requested = req["EpsWindow", "CompleteMax"],
+   workTop, attempt = 0, maxAttempts, built, deficit, columns, fs},
+  workTop = requested + sccInitialWorkHalo[
+    cs, blockSystems, sccWorkTOrder[cs, req]];
+  maxAttempts = Length[blockSystems] + 3;
+  While[True,
+    attempt++;
+    built = solveSCCBasisAtTop[cs, req, blockSystems, workTop];
+    deficit = requested - built["MinDelivered"];
+    If[deficit <= 0, Break[]];
+    If[attempt >= maxAttempts,
+      err["E6", cs, <|"RequestedCompleteMax" -> requested,
+        "DeliveredCompleteMax" -> built["MinDelivered"],
+        "WorkCompleteMax" -> workTop, "Attempts" -> attempt,
+        "Detail" -> "SCC source propagation exhausted the deterministic epsilon halo"|>]];
+    (* Every retry stays on the same strict recurrence path.  The measured
+       honest deficit is monotone and contains no assumed-zero coefficients. *)
+    workTop += Max[1, deficit]];
+  columns = capTWindow[
+      capWindow[cs, #, requested], req["TOrder"]] & /@ built["Columns"];
+  fs = <|"Columns" -> columns, "Specs" -> built["Specs"],
+    "Diagnostics" -> sccAggregateDiagnostics[
+      built["DiagnosticsRecords"], seq, built["RecombineGroups"]]|>;
+  ODEResidualCheck[cs, fs];
+  fs];
+
+sccZeroParticular[cs_Association, source_Association,
+    req_Association] := Module[{nmax, min, max, d = cs["SystemSize"]},
+  nmax = Min[req["TOrder"], source["TWindow", "CompleteMax"]];
+  min = req["EpsWindow", "Min"]; max = req["EpsWindow", "CompleteMax"];
+  <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+    "Radius" -> cs["Radius"],
+    "Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+      "Coeffs" -> ConstantArray[0, {max - min + 1, nmax + 1, d}]|>},
+    "EpsWindow" -> <|"Min" -> min, "CompleteMax" -> max|>,
+    "TWindow" -> <|"CompleteMax" -> nmax|>,
+    "ErrorEstimate" -> ConstantArray[0, max - min + 1],
+    "Prescriptions" -> cs["Prescriptions"]|>];
+
+solveSCCParticularAtTop[cs_Association, source_Association,
+    req_Association, blockSystems_List, workTop_Integer] := Module[
+  {seq = cs["IntegrationSequence"], nb, state = <||>, external, coupling,
+   total, part, full, workReq},
+  nb = Length[seq["Components"]];
+  workReq = Join[req, <|"EpsWindow" ->
+    Join[req["EpsWindow"], <|"CompleteMax" -> workTop|>],
+    "TOrder" -> sccWorkTOrder[cs, req]|>];
+  Do[
+    external = sccProjectSource[source, seq["Components"][[block]]];
+    coupling = sccBlockCouplingSource[cs, block, state];
+    total = sccCombineSources[cs, {external, coupling},
+      Length[seq["Components"][[block]]]];
+    If[AssociationQ[total] && !sccSourceZeroQ[total],
+      part = SolveParticular[blockSystems[[block]], total, workReq];
+      AssociateTo[state, block -> sccReframeLocalSolution[part, cs]]],
+    {block, nb}];
+  If[state === <||>, Return[<|"Solution" ->
+      sccZeroParticular[cs, source, workReq],
+    "MinDelivered" -> workTop|>, Module]];
+  full = sccCombineBlockState[cs, state];
+  <|"Solution" -> full,
+    "MinDelivered" -> full["EpsWindow", "CompleteMax"]|>];
+
+solveSCCParticular[cs_Association, source_Association, req_Association,
+    blockSystems_List] := Module[
+  {requested = req["EpsWindow", "CompleteMax"], workTop, attempt = 0,
+   maxAttempts, built, deficit, full, sourceTop,
+   requestedWindowNotReached = None},
+  (* Validate the physical source dimension before slicing it. *)
+  sccSourceToLocalSolution[cs, source, cs["SystemSize"]];
+  If[sccSourceZeroQ[source], Return[sccZeroParticular[cs, source, req], Module]];
+  workTop = requested + sccParticularInitialWorkHalo[
+    cs, blockSystems, sccWorkTOrder[cs, req]];
+  sourceTop = source["EpsWindow", "CompleteMax"];
+  maxAttempts = Length[blockSystems] + 3;
+  While[True,
+    attempt++;
+    built = solveSCCParticularAtTop[
+      cs, source, req, blockSystems, workTop];
+    deficit = requested - built["MinDelivered"];
+    If[deficit <= 0, Break[]];
+    (* An inhomogeneous finite source is allowed to deliver a narrower honest
+       epsilon window than requested.  Retry only while unused source halo can
+       actually fund a wider solve; asking beyond its certified top cannot
+       manufacture future coefficients. *)
+    If[attempt >= maxAttempts || workTop >= sourceTop,
+      requestedWindowNotReached = <|
+        "RequestedCompleteMax" -> requested,
+        "DeliveredCompleteMax" -> built["MinDelivered"],
+        "SourceCompleteMax" -> sourceTop,
+        "WorkCompleteMax" -> workTop, "Attempts" -> attempt|>;
+      Break[]];
+    workTop += Min[Max[1, deficit], sourceTop - workTop]];
+  full = capTWindow[
+    capWindow[cs, built["Solution"], requested], req["TOrder"]];
+  If[full["EpsWindow", "CompleteMax"] < full["EpsWindow", "Min"],
+    err["E6", cs, <|"EpsWindow" -> full["EpsWindow"],
+      "Detail" -> "SCC particular propagation produced an empty epsilon window"|>]];
+  full = Join[full, <|"Diagnostics" -> Join[
+    Lookup[full, "Diagnostics", <||>], <|
+      "SCCSolved" -> True,
+      "SCCExecutionMode" -> "BlockSequentialStrict",
+      "SCCCertificate" -> cs["IntegrationSequence"],
+      "CouplingDepth" -> cs["IntegrationSequence", "CouplingDepth"]|>]|>];
+  If[AssociationQ[requestedWindowNotReached],
+    full = Join[full, <|"Diagnostics" -> Join[
+      Lookup[full, "Diagnostics", <||>],
+      <|"RequestedWindowNotReached" -> requestedWindowNotReached|>]|>]];
+  ODEResidualCheck[cs, full, source];
+  full];
+
+SolveChart[cs_Association, req_Association, source_:None] := Module[
+  {seq = Lookup[cs, "IntegrationSequence", None], basis, part, multiQ},
+  multiQ = AssociationQ[seq] && Length[seq["Components"]] > 1;
+  If[!multiQ,
+    basis = SolveHomogeneous[cs, req];
+    part = If[source === None, None, SolveParticular[cs, source, req]];
+    Return[<|"Basis" -> basis, "Particular" -> part,
+      "CouplingDepth" -> 0|>, Module]];
   basis = SolveHomogeneous[cs, req];
   part = If[source === None, None, SolveParticular[cs, source, req]];
-  <|"Basis" -> basis, "Particular" -> part, "CouplingDepth" -> 0|>];
+  <|"Basis" -> basis, "Particular" -> part,
+    "CouplingDepth" -> seq["CouplingDepth"],
+    "IntegrationSequence" -> seq|>];
 
 (* ---- value-vector propagation (regular charts; prototype) ----
    The incoming VALUE at the chart center is the t^0 Cauchy datum of the
@@ -2434,6 +3141,23 @@ SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
   {d = cs["SystemSize"], nmax, vMin, vCM, fb, wideTop, Wd, prep, rec, ls,
    symbolic, poleDepth, numericInputQ, phaseQ, phaseTime, phase,
    preparedNums, vPrep},
+  If[TrueQ[Lookup[cs, "SCCSkeleton", False]] &&
+      TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    (* At an ordinary point the exact residue is zero, so the physical frame
+       itself is already a valid identity spectral/gauge frame.  Materialize
+       that frame only for this value recursion: the cached SCC envelope stays
+       skeletal and never pays global ChartIndicial/spectral preparation. *)
+    Return[SolveValueRegular[Join[cs, <|
+      "SCCSkeleton" -> False,
+      "ThetaMatrix" -> cs["ThetaOriginal"],
+      "Gauge" -> IdentityMatrix[d],
+      "GaugeInverse" -> IdentityMatrix[d],
+      "Residue" -> ConstantArray[0, {d, d}],
+      "V" -> IdentityMatrix[d], "VInv" -> IdentityMatrix[d],
+      "Families" -> {<|
+        "Roots" -> Table[<|"a" -> 0, "b" -> 0, "BlockSize" -> 1|>, d],
+        "ColumnRange" -> Range[d], "Collisions" -> {},
+        "CollisionDepth" -> 0|>}|>], req, vals], Module]];
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "SolveValueRegular requires a regular chart (pole order 0); singular charts keep the basis+matching path"|>]];
@@ -2521,6 +3245,14 @@ capWindow[cs_, ls_, capCM_] := Module[
       Take[PadRight[ls["ErrorEstimate"], kmax - kmin + 1], keep],
       ls["ErrorEstimate"]]|>]];
 
+capTWindow[ls_Association, cap_Integer] := Module[
+  {current = ls["TWindow", "CompleteMax"]},
+  If[current <= cap, Return[ls, Module]];
+  Join[ls, <|
+    "Sectors" -> Map[Append[#, "Coeffs" ->
+      #["Coeffs"][[All, 1 ;; cap + 1, All]]] &, ls["Sectors"]],
+    "TWindow" -> <|"CompleteMax" -> cap|>|>]];
+
 (* ---- residual check ---- *)
 
 (* Residual-check numeric handoff (the Transport`numHandoff policy): the
@@ -2591,8 +3323,8 @@ ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic
         If[source === None, None, source /. rules], probe]],
       {sample, requiredSamples}];
     Return[Max[sampleResiduals], Module]];
-  (* truncation-aware probe: the residual of a degree-nmax truncation is
-     O((t0/R)^(nmax+1)); place t0 so that tail sits below rtol/100 *)
+  (* truncation-aware probe: the common sector prefactor t^a cancels in the
+     relative residual, so the degree-N tail scales as (t0/R)^(N+1). *)
   t0 = If[probe === Automatic,
     Module[{nmaxS, frac, fracRaw, raw},
       nmaxS = Min[#["TWindow", "CompleteMax"] & /@ sols];

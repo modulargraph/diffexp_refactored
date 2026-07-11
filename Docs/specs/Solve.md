@@ -122,32 +122,169 @@ ODEResidualCheck[chart_Association, sol_Association, source_:None,
 ```
 SolveChart[cs_Association, req_Association, source_:None]
   -> <|"Basis" -> FundamentalSystem, "Particular" -> LocalSolution | None,
-       "CouplingDepth" -> _Integer|>
+       "CouplingDepth" -> _Integer,
+       "IntegrationSequence" -> _Association (* multi-SCC only *)|>
 ```
 
-The Transport-facing wrapper (`cs` = a ChartSystem from PrepareChart, 2.5).
-POLICY (binding, ratified DEC-9): the chart system is solved
-BLOCK-SEQUENTIALLY along the exact block-triangular structure of
-ThetaMatrix (blocks = strongly connected components of the entry-sparsity
-graph, topologically ordered — the old InitializeIntegrationSequence role,
-DiffExp/MatrixLoading.m:357-385).  Per block: SolveHomogeneous on the
-diagonal block; the coupling submatrix times already-solved lower-block
-LocalSolutions (SectorSeries rational-multiply, exact polynomial
-coefficients) forms the SourceData for SolveParticular.  An external
-`source` (a SourceData, 3.3), when supplied, is added to the per-block
-sources (its sectors route to the blocks of their components).
-"CouplingDepth" = longest chain in the block dependency DAG.  "Particular"
-is None for a chart whose system is a single block with no external source
-(then transport is purely homogeneous).  T-ORDER NOTE (binding on
-Transport.md; RATIFIED DEC-9): because the coupling coefficients are exact
-polynomials, a particular built from a lower-block solution complete to
-TOrder is itself complete to TOrder — there is NO (couplingDepth-1)
-degradation in the new core (the old degradation was a numeric-matrix
-artifact); Transport's `TWindow["CompleteMax"] = expansionOrder`, TWindow
-stays in the object as the truncation-order record only, and the
-LessonsLedger MaxCouplingOrder entry reads "subsumed: exact polynomial
-recursion + ErrorEstimate covers it".  The probe decrement formula of
-Transport.md 2.10 keeps couplingDepth as input unchanged (heuristic only).
+The Transport-facing wrapper (`cs` = a ChartSystem from PrepareChart, 2.5)
+implements the old `InitializeIntegrationSequence` role as an exact,
+certified SCC decomposition.  The graph is built from `ThetaOriginal`, the
+original physical theta-form matrix `t beta A(x0 + beta t)`, BEFORE any
+full-system rank-reduction gauge or spectral frame can mix components.  An
+equation-row/component-column entry gives the dependency edge `c -> r` iff
+`Cancel[Together[ThetaOriginal[[r,c]]]]` is exactly nonzero.  The input must
+be exact.  In particular, eps-only and analytic-regulator-only entries remain
+edges: eps and all analytic regulators are left symbolic and there is no
+zero-point, generic-point, or other regulator specialization.
+
+The resulting certificate has the implemented schema
+
+```
+<|"Schema" -> "DiffExp2.IntegrationSequence/v1",
+  "Exact" -> True, "RegulatorSpecialization" -> None,
+  "MatrixHash" -> ..., "PatternHash" -> ...,
+  "NonzeroPattern" -> {{0|1, ...}, ...},
+  "DependencyEdges" -> {{sourceComponent, targetEquation}, ...},
+  "Components" -> {{masterIndex, ...}, ...},
+  "VertexToComponent" -> {...},
+  "CondensationEdges" -> {{sourceBlock, targetBlock}, ...},
+  "TopologicalOrder" -> Range[numberOfBlocks],
+  "BlockDepths" -> {...}, "CouplingDepth" -> _Integer,
+  "Certificate" -> <|"Partition" -> True,
+    "StrongConnectivity" -> True,
+    "AcyclicTopologicalOrder" -> True,
+    "EdgeCoverage" -> True|>|>
+```
+
+Every SCC's master indices are sorted.  SCCs are renumbered in a
+deterministic source-first topological order, with the smallest master index
+as the ready-queue tie break.  Construction rechecks the partition, forward
+and reverse reachability inside every SCC, topological order of every
+condensation edge, and coverage of every original dependency edge.
+`CouplingDepth` counts blocks on the longest condensation-DAG path.  The
+one-SCC direct path reports `CouplingDepth -> 0`; a multi-SCC result returns
+the certificate as `IntegrationSequence`.
+
+Before executing a multi-SCC plan, Solve prepares the diagonal block systems
+and audits every block which is the TARGET of a condensation edge.  At the
+guarded work order
+
+```
+workTOrder = req["TOrder"] + 2 + 2 CouplingDepth
+```
+
+it evaluates the exact `recurrencePoleDepth` of each target's cleared
+finite-width recurrence.  If all recorded depths are zero, execution remains
+blockwise.  If any target has positive depth, propagating an upstream source
+would repeatedly consume future eps orders, so the whole chart is coarsened:
+the lazy envelope fully prepares the registered original physical system at
+the same affine chart with `UseSCCSkeleton -> False`, then runs one monolithic
+strict recurrence.  This is the same configured recurrence solver acting on
+the same exact system, not an alternate-solver fallback.  The exact SCC
+certificate remains the planner metadata even though its blocks are not used
+as the execution units.
+
+The coarsened basis and particular diagnostics contain
+
+```
+<|"SCCSolved" -> False,
+  "SCCExecutionMode" -> "MonolithicStrict",
+  "SCCExecutionReason" -> "DownstreamRecurrencePoleDepth",
+  "SCCExecutionPlan" -> <|
+    "Mode" -> "MonolithicStrict",
+    "Reason" -> "DownstreamRecurrencePoleDepth",
+    "WorkTOrder" -> workTOrder,
+    "OffendingTargets" ->
+      {<|"TargetBlock" -> _Integer, "IncomingBlocks" -> {...},
+          "Indices" -> {...},
+          "RecurrencePoleDepth" -> _Integer|>, ...}|>,
+  "SCCCertificate" -> IntegrationSequence,
+  "CouplingDepth" -> IntegrationSequence["CouplingDepth"]|>
+```
+
+The monolithic basis additionally carries an explicit
+`"SCCRecombineGroups"` list derived from the ACTUAL lazily prepared full
+ChartSystem and its returned basis specs.  Transport never tries to infer
+global epsilon-degeneracy data from the deliberately incomplete SCC envelope.
+
+Full-system preparation is a performance candidate, not a new capability
+requirement.  Solve catches only a Failure raised by that preparation attempt.
+It then runs the strict block path and records
+
+```
+<|"SCCExecutionMode" -> "BlockSequentialStrict",
+  "SCCExecutionReason" -> "CoarseningDeclined",
+  "SCCCoarseningCandidate" -> theMonolithicPlan,
+  "CoarseningDeclined" -> thePreparationFailure, ...|>
+```
+
+A subsequent block preparation or solve Failure is not caught or converted.
+Thus the heuristic cannot make a block-solvable chart into a capability
+regression.
+
+The monolithic core retains the caller's public window caps and the mandatory
+full original-system residual check.
+
+For the depth-zero/blockwise execution mode, the following is the implemented
+contract:
+
+1. Each diagonal block is prepared from the corresponding principal
+   submatrix of the registered ORIGINAL physical system, using its original
+   variable and the same affine chart.  It is not reconstructed as a
+   synthetic `ThetaOriginal/t` system.  Consequently each block receives its
+   own complete rank reduction and spectral preparation while retaining a
+   stable physical-submatrix clearing identity across chart centers.
+2. Each diagonal homogeneous system is solved strictly.  For every basis
+   column, downstream responses are then solved in source-first block order.
+   The source from block `u` to block `v` is the exact original-frame product
+   `ThetaOriginal[[component[v], component[u]]] . solution[u]`, formed by
+   `SectorSeries` rational multiplication.  Fractional powers, log sectors,
+   eps windows, prescriptions, and center-pole tag shifts are therefore
+   preserved.  No coefficient is sampled to decide that a coupling vanishes.
+3. An external theta-form source is projected by physical component, combined
+   with the incoming off-diagonal sources, and solved in the same order.  SCC
+   orchestration never pre-applies a block gauge.  `SolveParticular` applies
+   the target block's `T^-1` exactly once at its public boundary and gauges
+   the answer back once, as required by the rank-reduced SourceData contract
+   in 3.3.
+4. Intermediate solves use deterministic work halos.  Their Taylor order is
+   the guarded `workTOrder` above.  The initial upper-eps halo is the
+   longest exact DAG-path cost, including eps-pole valuations of the
+   off-diagonal coupling, spectral transforms, rank-reduction gauges,
+   finite-width recurrence denominators, target dimension, and collision
+   depth.  An external particular also funds its first block solve.  Honest
+   delivered-window deficits trigger bounded monotone widening on the same
+   strict recurrence path while unused certified source halo remains; no
+   missing frame is treated as zero.  A finite external source that cannot
+   fund the requested top returns its nonempty honest lower window with a
+   `"RequestedWindowNotReached"` diagnostic (requested, delivered, source,
+   and work tops plus attempt count).  Only an empty delivered window is E6.
+5. The persistent homogeneous cache contains only the assembled parent SCC
+   basis.  Diagonal-block cache entries live in a dynamically scoped scratch
+   cache and are discarded after assembly, so one multi-block chart consumes
+   one persistent slot.  In blockwise mode with `RecurrenceBackend -> Cpp`,
+   diagonal homogeneous requests are submitted as one native batch only when
+   the grouped spectral transform is enabled, no analytic-regulator variables
+   are configured, and the block count fits `HomogeneousCacheCapacity[]`.
+   The batch additionally enforces one parent solve tag and exact one-time
+   response consumption.  If a guard is false, the same configured backend
+   runs the block solves sequentially; it does not select a fallback
+   recurrence solver.  `MonolithicStrict` mode invokes that configured backend on the
+   single lazily full-prepared chart.
+6. The assembled solutions are restored to original component order, then
+   capped to the caller's eps `CompleteMax` and public `TOrder`.  Only after
+   that cap does `ODEResidualCheck` verify the FULL original theta-form system
+   (and the full external source, when present).  Thus diagonal-block checks
+   are not accepted as a substitute for the final recombination proof.
+
+Successful blockwise basis and particular results explicitly record
+`"SCCExecutionMode" -> "BlockSequentialStrict"`.  In that mode, `Basis`
+contains all downstream particular responses needed
+to make each seeded block column solve the full homogeneous system.  In
+`MonolithicStrict` mode it is the ordinary full-system strict basis.  `Particular` is
+`None` exactly when no external `source` was supplied; otherwise it is the
+canonical particular produced by the selected execution mode, including the
+structurally zero case.
 
 ### 2.5 PrepareChart
 
@@ -155,9 +292,20 @@ Transport.md 2.10 keeps couplingDepth as input unchanged (heuristic only).
 PrepareChart[sys_Association, chart_Association] -> ChartSystem
 ```
 
-(DEC-7; REVIEW-math D6.)  Applies `chart["Map"]` to the loaded exact
-matrix, forms the theta matrix, calls ``Indicial`ChartIndicial``, and
-assembles the ChartSystem of 3.2: each Jordan block is first multiplied by
+(DEC-7; REVIEW-math D6.)  Applies the exact affine chart to the loaded
+matrix and forms `ThetaOriginal = t beta A(x0 + beta t)`.  It always builds
+and certifies the `IntegrationSequence` of 2.4 at this point, before any
+global indicial reduction.  With `"UseSCCSkeleton" -> True` and more than
+one SCC, PrepareChart returns the lazy SCC envelope of 3.2 without calling a
+full-system ``Indicial`ChartIndicial``; each diagonal physical submatrix is
+fully prepared only when the SCC solver needs it.  Transport requests this
+mode.  The execution audit of 2.4 may later full-prepare that original system
+lazily when a downstream target has positive recurrence pole depth.  With one
+SCC, or without the skeleton flag, PrepareChart constructs the full
+ChartSystem immediately as before.
+
+For a full ChartSystem it calls ``Indicial`ChartIndicial`` and assembles the
+data of 3.2: each Jordan block is first multiplied by
 the unique nonnegative epsilon monomial that clears the lowest valuation of
 all entries in that block (one COMMON factor for every member, preserving
 the unit Jordan superdiagonal); V = the full d x d matrix formed by
@@ -247,7 +395,8 @@ at one `n` are not added, while divisions at distinct Taylor layers compose.
 the review's Transport-assembly variant): chart geometry fields from
 Transport's chart record (Transport.md 3.2) + IndicialData fields, with
 "ThetaMatrix"/"Gauge"/"GaugeInverse"/"Residue" lifted from
-IndicialData["Reduction"].
+IndicialData["Reduction"].  (v) `ThetaOriginal` and its exact
+`IntegrationSequence` are recorded before that reduction.  The full form is:
 
 ```
 ChartSystem = <|
@@ -256,6 +405,9 @@ ChartSystem = <|
   "Radius" -> exact/numeric complex-plane distance,
   "Prescriptions" -> (RewritePlan 3.1 list; passed through),
   "SystemSize" -> d_Integer,
+  "ThetaOriginal" -> t beta A(x0 + beta t), exact in the original
+                   physical master basis,
+  "IntegrationSequence" -> the exact certificate of 2.4,
   "ThetaMatrix" -> B(t,eps): d x d, exact rational in (t, eps),
                    HOLOMORPHIC at t = 0   (* theta f = B f; B = t·A after
                    Indicial's rank reduction; Solve NEVER sees a pole order
@@ -302,13 +454,38 @@ Family = <|
 |>
 ```
 
+When `UseSCCSkeleton -> True` discovers more than one SCC, the lazy form is
+instead
+
+```
+SCCEnvelope = <|
+  "ChartVar", "Center", "ChartMap", "Radius", "Prescriptions",
+  "SystemHash", "SystemClearKey", "SystemSize",
+  "ThetaOriginal" -> exact original theta-form matrix,
+  "IntegrationSequence" -> exact certificate of 2.4,
+  "IndicialData" -> <|"Regular" -> True|False,
+                       "Dimension" -> d, "SCCSkeleton" -> True|>,
+  "SCCSkeleton" -> True, "ChartSystemKind" -> "SCCEnvelope"
+|>
+```
+
+The envelope deliberately has no global `ThetaMatrix`, gauge, residue,
+spectral frame, or families.  It retains `SystemClearKey` so diagonal blocks
+can be rebuilt from the registered original physical matrix, and
+`SystemHash` supplies their shared parent solve-cache tag.  A regular value
+transport may materialize a transient identity gauge/frame, but the cached
+envelope remains skeletal.
+
 Requirements certified at PrepareChart assembly (violations are E2):
 char-poly factorization already certified by Indicial (I1 contract);
 Det[V(eps)] is not identically zero and the monomial valuation deliberately
 inserted by primitive normalization is `Sum[q_i shift_i]`;
 Σ BlockSizes = SystemSize; ThetaMatrix entries have no
-t-pole (exact check on the rational form).  SolveHomogeneous/
-SolveParticular re-assert cheaply on receipt (Σ BlockSizes, t-pole).
+t-pole (exact check on the rational form).  These spectral requirements
+apply to a full ChartSystem and independently to every prepared diagonal SCC;
+the lazy envelope instead certifies the exact graph invariants in 2.4 and its
+ordinary/singular classification.  SolveHomogeneous/SolveParticular re-assert
+the full-chart invariants cheaply on receipt (Σ BlockSizes, t-pole).
 
 ### 3.3 SourceData (consumed)
 

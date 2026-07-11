@@ -241,15 +241,21 @@ the forbidden pattern).
 
 Loop body per chart (in plan order):
 1. `cs = DiffExp2`Solve`PrepareChart[sys, chart]` — Solve.m assembles the
-   ChartSystem (chart map applied to the loaded exact matrix, theta form,
-   ``Indicial`ChartIndicial``, per-family V/VInv/J, collision data;
+   lazy exact-SCC envelope (chart map applied to the loaded exact matrix and
+   original theta form; diagonal indicial frames are prepared on demand;
    DEC-7, Solve.md §2).  Then `sol = DiffExp2`Solve`SolveChart[cs, req]`
    -> `<|"Basis" -> fundamental LocalSolution basis, "Particular" ->
    LocalSolution | None, "CouplingDepth" -> _Integer|>`, solved
-   BLOCK-SEQUENTIALLY along the exact block-triangular structure of
-   ThetaMatrix (DEC-9; Solve.md §2.4; CouplingDepth = longest chain in
-   the block dependency DAG — old proxy `MaxCouplingOrder` = largest
-   coupled block, MatrixLoading.m:357-385, esp. :383).
+   from the exact original-theta SCC plan.  Depth-zero downstream recurrence
+   targets use `SCCExecutionMode -> "BlockSequentialStrict"`.  If a target
+   has positive recurrence-pole depth at the guarded work Taylor order, Solve
+   lazily full-prepares the same original system and uses
+   `"MonolithicStrict"` to avoid repeatedly propagating future epsilon
+   orders.  Both modes use the configured strict recurrence solver; this is
+   execution coarsening, not an alternate-solver fallback (DEC-9; Solve.md
+   §2.4).  `CouplingDepth` remains the longest chain in the exact block
+   dependency DAG (old proxy `MaxCouplingOrder` = largest coupled block,
+   MatrixLoading.m:357-385, esp. :383).
 2. v = incoming data evaluated at chart's MatchIn point (SectorSeries
    evaluate on the previous chart's LocalSolution).  After a singular
    previous chart, `ApplyCrossing` is used exactly when that point has
@@ -968,9 +974,10 @@ Transport.m MAY call:
   18).
 - Indicial.m: per-chart sector specs, Prescriptions derivation inputs,
   EpsDegenerateFamilies (DEC-7).
-- Solve.m: PrepareChart (ChartSystem assembly from Indicial output:
-  V, VInv, J, collision data — DEC-7) and SolveChart (block-sequential
-  fundamental basis + particular + CouplingDepth — DEC-9).
+- Solve.m: PrepareChart (lazy exact-SCC envelope plus on-demand diagonal or
+  full indicial preparation — DEC-7) and SolveChart (strict
+  `BlockSequentialStrict` or cost-coarsened `MonolithicStrict` fundamental
+  basis + particular + exact CouplingDepth — DEC-9).
 
 Transport.m MUST NOT call: Integrate.m (sibling — no calls in EITHER
 direction; the shared branch convention is SectorSeries' sigma rule, not

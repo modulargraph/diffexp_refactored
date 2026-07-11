@@ -67,6 +67,7 @@ The implemented recurrence-session commands are:
 | `chart.prepare` | Parse and retain one chart/frame recurrence operator and its SCC certificate. |
 | `chart.solve` | Run one recurrence against a retained operator. |
 | `chart.solve_batch` | Run an ordered bounded batch of columns/sectors sharing one operator. |
+| `session.solve_many` | Run one ordered worker pool across several retained charts in the same session. |
 | `chart.release` | Release one retained operator. |
 | `local.solve` | Run recurrence plus assembly and retain the typed local sector family without coefficient JSON. |
 | `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics. |

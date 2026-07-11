@@ -152,6 +152,29 @@ The worker count is bounded by the request size and the native limit.
 Symbolic-rational batches are deliberately serialized until the shared FLINT
 coefficient context has a separately verified parallel ownership model.
 
+Independent runs spanning several already-retained charts in one session use
+`session.solve_many`:
+
+```json
+{
+  "schema": 2,
+  "op": "session.solve_many",
+  "session": "s:1",
+  "threads": 10,
+  "jobs": [
+    {"chart": "c:1", "run": {}, "output_digits": 520},
+    {"chart": "c:2", "run": {}, "output_digits": 520}
+  ]
+}
+```
+
+Every `run` is complete as above.  All chart handles are resolved under the
+session lock before workers start, so an invalid job fails before partial
+execution and a concurrent release cannot invalidate an accepted job.
+Results preserve job order and carry per-slot typed errors.  This is the
+native primitive for concurrent lower/upper-arm prewarming; it must not be
+replaced by the old schema-1 batch, which reparses every static operator.
+
 ### Retain and evaluate a local solution
 
 `local.solve` runs recurrence plus the retained assembly matrix and moves the

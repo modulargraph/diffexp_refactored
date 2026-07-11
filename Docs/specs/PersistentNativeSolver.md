@@ -290,9 +290,13 @@ source propagation. It retains typed diagonal-chart pointers and typed
 coupling multipliers; type erasure occurs only in the session registry.
 General SCC execution remains disabled, but the deliberately narrow
 `scc.solve_column` operation is enabled when stats certify
-`exact-rational-regular-scalar-block-dag-column-v1`.  All other retained
-composites report `execution_implemented: false` and fail loudly if submitted
-to that operation.
+`exact-rational-regular-scalar-block-dag-column-v1` or the multidimensional
+`exact-rational-regular-block-dag-column-v2`. The latter requires a regular
+singleton recurrence partition inside every retained diagonal block. The
+explicit Wolfram `SolveNativeSCCBasisColumn` migration seam currently accepts
+only scalar v1; unsupported retained composites report
+`execution_implemented: false` and fail loudly if submitted to the native
+operation.
 
 The parent manifest carries two machine-checkable `D` by `D` row-major exact
 matrix records. Every cell has the shape

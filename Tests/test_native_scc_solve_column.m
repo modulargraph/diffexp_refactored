@@ -23,7 +23,7 @@ chart = <|"ChartVar" -> t, "Center" -> 0, "Scale" -> 1,
 
 result = Block[{DiffExp2`Solve`Private`$cppExactDomain = True},
   catchDE2[DiffExp2`Config`LoadConfiguration[{
-    "WorkingPrecision" -> 80, "ExpansionOrder" -> 8,
+    "WorkingPrecision" -> 80, "ExpansionOrder" -> 10,
     "EpsilonOrder" -> 1, "RecurrenceBackend" -> "Cpp",
     "Variables" -> {}}]];
   DiffExp2`Solve`ClearSolveCaches[];

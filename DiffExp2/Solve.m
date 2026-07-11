@@ -3836,6 +3836,7 @@ sccNativeCompositeExecutionDescriptorQ[entry_Association,
 
 sccNativeCompositeStatisticsQ[stats_, handle_Association] :=
   AssociationQ[stats] && Lookup[stats, "status", "error"] === "ok" &&
+    Lookup[stats, "session", None] === Lookup[handle, "Session", None] &&
     Lookup[stats, "scc", None] === Lookup[handle, "SCC", None] &&
     Lookup[stats, "key", None] === Lookup[handle, "Key", None];
 
@@ -4373,7 +4374,9 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
         execution["ParentIdentity"] ||
       Lookup[provenance, "seed_block", None] =!= seedBlock - 1 ||
       Lookup[provenance, "basis_index", None] =!=
-        First[components[[seedBlock]]] - 1,
+        First[components[[seedBlock]]] - 1 ||
+      !StringQ[Lookup[provenance, "exact_column_identity", None]] ||
+      StringLength[Lookup[provenance, "exact_column_identity", ""]] === 0,
     Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
     err["E6", cs, <|"BackendResponse" -> response,
       "ForbiddenPayloadKeys" -> forbiddenPayloadKeys,

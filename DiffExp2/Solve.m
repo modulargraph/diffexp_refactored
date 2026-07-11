@@ -705,7 +705,8 @@ epsValuation[e_, eps_] := Module[{c = Cancel[Together[e]]},
 clearedSymbolicLegacy[cs_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], den,
    denCoeffs, denContent, num, d0, dD, dN, dExpr, NhatExpr,
-   phaseQ, phaseTime, phase, identityVQ},
+   phaseQ, phaseTime, phase, identityVQ, rightPolynomial,
+   transformedPolynomial, coefficientLists},
   phaseQ = Environment["DEBUG_SOLVE_PHASES"] === "1";
   phaseTime = SessionTime[];
   phase[label_String] := If[phaseQ, Module[{now = SessionTime[]},
@@ -736,17 +737,55 @@ clearedSymbolicLegacy[cs_] := Module[
     TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
     TrueQ[Normal[cs["V"]] === IdentityMatrix[cs["SystemSize"]]] &&
     TrueQ[Normal[cs["VInv"]] === IdentityMatrix[cs["SystemSize"]]];
-  NhatExpr = Table[Module[{Nj},
-    Nj = Map[Coefficient[#, t, j] &, num, {2}];
-    Map[Cancel[Together[#]] &,
-      If[identityVQ, Nj, cs["VInv"] . Nj . cs["V"]], {2}]],
-    {j, 0, dN}];
-  phase["nhat-coefficients"];
+  NhatExpr = Which[
+    identityVQ,
+      Table[Map[Cancel[Together[#]] &,
+        Map[Coefficient[#, t, j] &, num, {2}], {2}], {j, 0, dN}],
+    TrueQ[$disablePolynomialNhatTransform],
+      Table[Module[{Nj},
+        Nj = Map[Coefficient[#, t, j] &, num, {2}];
+        Map[Cancel[Together[#]] &, cs["VInv"] . Nj . cs["V"], {2}]],
+        {j, 0, dN}],
+    True,
+      (* V and VInv are residue-frame matrices and therefore t-independent.
+         Linearity of exact coefficient extraction then permits ONE
+         polynomial similarity transform instead of dN+1 scalar transforms:
+           [t^j](VInv.num.V) = VInv.[t^j]num.V.
+         Keep the multiplication explicitly right-first; the final
+         coefficient canonicalization remains identical to the legacy
+         contract used by epsilon valuation and preparation. *)
+      If[!FreeQ[{cs["V"], cs["VInv"]}, t],
+        err["E5", cs, <|
+          "Detail" -> "spectral frame depends on the chart variable during polynomial Nhat transform"|>]];
+      If[!AllTrue[Flatten[num], PolynomialQ[#, t] &],
+        err["E5", cs, <|
+          "Detail" -> "cleared numerator is not polynomial in the chart variable"|>]];
+      rightPolynomial = num . cs["V"];
+      phase["nhat-polynomial-right"];
+      transformedPolynomial = cs["VInv"] . rightPolynomial;
+      phase["nhat-polynomial-left"];
+      transformedPolynomial = Map[Cancel[Together[#]] &,
+        transformedPolynomial, {2}];
+      phase["nhat-polynomial-canonicalize"];
+      If[!AllTrue[Flatten[transformedPolynomial], PolynomialQ[#, t] &],
+        err["E5", cs, <|
+          "Detail" -> "spectrally transformed numerator is not polynomial in the chart variable"|>]];
+      coefficientLists = Map[CoefficientList[#, t] &,
+        transformedPolynomial, {2}];
+      phase["nhat-coefficient-lists"];
+      Table[Map[Cancel[Together[#]] &,
+        Map[If[j + 1 <= Length[#], #[[j + 1]], 0] &,
+          coefficientLists, {2}], {2}], {j, 0, dN}]
+    ];
+  phase[If[identityVQ, "nhat-identity-final",
+    If[TrueQ[$disablePolynomialNhatTransform], "nhat-legacy-final",
+      "nhat-final-canonicalize"]]];
   <|"dExpr" -> dExpr, "NhatExpr" -> NhatExpr,
     "dD" -> dD, "dN" -> dN|>];
 
 $disableGlobalClearedHoist = False;
 $disableIdentityNhatShortcut = False;
+$disablePolynomialNhatTransform = False;
 
 regularIdentityFrameQ[cs_Association] :=
   TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
@@ -1597,7 +1636,8 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
     req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
     TrueQ[$disableAdaptiveLowerFrames],
     TrueQ[$disableRationalDenominatorFusion],
-    TrueQ[$disableGroupedSpectralTransform]};
+    TrueQ[$disableGroupedSpectralTransform],
+    TrueQ[$disablePolynomialNhatTransform]};
   If[tag =!= $shSysTag, $shCache = <||>; $shSysTag = tag];
   If[KeyExistsQ[$shCache, key], Return[$shCache[key]]];
   If[Length[$shCache] >= $shCacheMax, $shCache = <||>];

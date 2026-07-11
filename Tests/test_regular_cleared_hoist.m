@@ -51,8 +51,10 @@ randomParity = And @@ Table[Module[
     If[AnyTrue[{legacy, hoist, legacyDense}, FailureQ], Return[False, Module]];
     depthLegacy = DiffExp2`Solve`Private`recurrencePoleDepth[legacy, 12];
     depthHoist = DiffExp2`Solve`Private`recurrencePoleDepth[hoist, 12];
-    sameClearedEquationQ[legacy, hoist] && legacy === legacyDense &&
-      depthLegacy === depthHoist],
+    sameClearedEquationQ[legacy, hoist] &&
+      sameClearedEquationQ[legacy, legacyDense] &&
+      depthLegacy === depthHoist && depthLegacy ===
+        DiffExp2`Solve`Private`recurrencePoleDepth[legacyDense, 12]],
   {seed, 1, 8}];
 assert["regular_global_clear_random_affine_exact_equivalence_8",
   randomParity];

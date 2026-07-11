@@ -1693,7 +1693,10 @@ json::object run_session_command(const json::object& root) {
             chart, runs[index], output_digits, session->handle);
       }
     };
-    std::vector<std::thread> workers;
+    // jthread guarantees already-started workers are joined if a later
+    // thread construction throws; destroying a joinable std::thread here
+    // would otherwise terminate the host Wolfram kernel.
+    std::vector<std::jthread> workers;
     workers.reserve(worker_count);
     for (std::size_t i = 0; i < worker_count; ++i)
       workers.emplace_back(worker);
@@ -2022,7 +2025,7 @@ std::string run_recurrence_json(std::string_view input) {
               as_object(requests[index], "batch request"));
         }
       };
-      std::vector<std::thread> workers;
+      std::vector<std::jthread> workers;
       workers.reserve(thread_count);
       for (std::uint32_t i = 0; i < thread_count; ++i)
         workers.emplace_back(worker);

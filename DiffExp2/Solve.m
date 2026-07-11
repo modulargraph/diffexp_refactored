@@ -1524,6 +1524,53 @@ $cppExactDomain = False;  (* focused exact-parity seam; Acb is production *)
 $cppBuildRequestOnly = False;
 $cppSerializationDomain = "acb";
 $cppSerializationSymbols = {};
+$cppStaticRecordOverride = None;
+$cppUsePersistentSessions = True;
+
+(* Schema-2 stores the exact SCC certificate with every retained native
+   operator.  Wolfram's certificate is one-based and counts vertices on the
+   longest path; the C++ protocol is zero-based and counts coupling edges. *)
+cppPersistentSCC[cs_Association] := Module[
+  {seq = Lookup[cs, "IntegrationSequence", None]},
+  If[!AssociationQ[seq],
+    err["E6", cs, <|"Detail" ->
+      "persistent C++ chart is missing its exact SCC certificate"|>]];
+  <|"components" -> ((# - 1) & /@ seq["Components"]),
+    "structural_edges" -> ((# - 1) & /@ seq["DependencyEdges"]),
+    "condensation_edges" -> ((# - 1) & /@ seq["CondensationEdges"]),
+    "topological_order" -> (seq["TopologicalOrder"] - 1),
+    "coupling_depth" -> Max[0, seq["CouplingDepth"] - 1]|>];
+
+cppPersistentPrescription[record_Association] := <|
+  "factor_exact" -> ToString[
+    Lookup[record, "ExactFactor", record["Factor"]], InputForm],
+  "sign" -> record["Sign"],
+  "multiplicity" -> record["Multiplicity"],
+  "leading_coefficient_sign" -> record["LeadingCoeffSign"]|>;
+
+cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
+  {systemIdentity, chartIdentity},
+  (* SolveCacheTag joins diagonal SCC blocks back under the parent level's
+     one native session.  Ordinary charts use their collision-certified
+     exact system key.  The complete prepared operator is independently
+     stored in the chart signature, so this grouping cannot alias unequal
+     recurrence tensors. *)
+  systemIdentity = Lookup[cs, "SolveCacheTag",
+    Lookup[cs, "SystemClearKey", Lookup[cs, "SystemHash", None]]];
+  chartIdentity = {Lookup[cs, "SystemClearKey", None],
+    Lookup[cs, "Center", None], Lookup[cs, "ChartMap", None],
+    Lookup[cs, "SCCBlock", None], fb, W};
+  <|"SystemIdentity" -> systemIdentity,
+    "ChartIdentity" -> chartIdentity,
+    "SessionAnalytic" -> <|
+      "RegulatorSymbols" -> (SymbolName /@ $cppSerializationSymbols),
+      "Policy" -> "exact-structure-prescription-specialized"|>,
+    "ChartAnalytic" -> <|
+      "PrescriptionIdentity" ->
+        ToString[Lookup[cs, "Prescriptions", {}], InputForm],
+      "Prescriptions" ->
+        (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>,
+    "SCC" -> cppPersistentSCC[cs]|>];
 
 cppScalar[e_, digits_Integer, cs_] := Module[{encoded},
   encoded = If[$cppSerializationDomain === "symbolic",
@@ -1551,28 +1598,29 @@ cppMatrixShift[sp_List, digits_Integer, cs_] := Module[
     {r, d}, {c, d}], 2];
   <|"s" -> shift, "e" -> entries|>];
 
-cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
-    srcHat_, fb_Integer, W_Integer, init_, vPrep_:Automatic,
-    responseOverride_:Automatic] := Module[
-  {d = cs["SystemSize"], wp = cfg["WorkingPrecision"], inputDigits,
-   outputDigits, precisionBits, blocks, schedule, dLags, nLags,
-   denominators, initFrames, initValidity, request, response, decodedU,
-   decodedValidity, hits, decode, topValid,
-   timingQ = Environment["DEBUG_CPP_RECURRENCE"] === "1", t0, tRequest,
-   tCall, tDone, assembly = Null, assemblyGroups, assemblyBase,
-   assembledData = None, sourceRecords, sourcePayload},
-  t0 = SessionTime[];
-  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
-  outputDigits = wp + 20;
-  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
-  blocks = blockList[cs];
-  schedule = Table[Map[Function[blk, Module[{dA, dB, kind},
-      dA = Together[aT + n - blk["a"]];
-      dB = Together[bT - blk["b"]];
-      kind = Which[!zeroCanQ[dA], "T", !zeroCanQ[dB], "P", True, "R"];
-      <|"case" -> kind, "da" -> cppScalar[dA, inputDigits, cs],
-        "db" -> cppScalar[dB, inputDigits, cs]|>]], blocks],
-    {n, 0, nmax}];
+$cppStaticOperatorCache = <||>;
+$cppStaticOperatorCacheMax = 1024;
+
+(* Decimal encoding of every prepared lag dominated the Wolfram side of
+   repeated persistent solves if rebuilt per homogeneous column/SCC source.
+   Cache the complete schema-1-compatible static payload once per exact
+   prepared frame.  The hash is only an index and every hit compares the full
+   structural signature; the opaque token then gives CppBackend a lightweight
+   identity for the already collision-certified payload. *)
+cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
+    vPrep_, inputDigits_Integer, precisionBits_Integer] := Module[
+  {d = cs["SystemSize"], signature, key, cached, dLags, denominators,
+   nLags, assembly = Null, assemblyGroups, assemblyBase, payload, record},
+  signature = {$cppSerializationDomain, $cppSerializationSymbols,
+    inputDigits, precisionBits, d, fb, W, prep, blocks,
+    If[AssociationQ[vPrep], vPrep, Automatic], cfg["ChopPrecision"]};
+  key = Hash[signature, "SHA256"];
+  cached = Lookup[$cppStaticOperatorCache, key, None];
+  If[AssociationQ[cached] && SameQ[cached["Signature"], signature],
+    Return[cached, Module]];
+  If[cached =!= None,
+    err["E5", cs, <|"Detail" ->
+      "C++ static operator cache-key collision with unequal full identity"|>]];
   dLags = Map[Function[lag, Map[Function[sp,
       <|"s" -> sp[[1]], "v" -> cppScalar[sp[[2]], inputDigits, cs]|>], lag]],
     prep["dSp"]];
@@ -1603,6 +1651,53 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
       "val" -> (cppValidity /@ Flatten[vals])|>],
     {prep["NhatSp"], prep["NhatRationalGroups"],
       prep["NhatValuations"]}];
+  payload = <|"domain" -> $cppSerializationDomain,
+    "symbols" -> (SymbolName /@ $cppSerializationSymbols),
+    "precision_bits" -> precisionBits,
+    "d" -> d, "fb" -> fb, "w" -> W,
+    "d_lags" -> dLags, "denominators" -> denominators,
+    "nhat_lags" -> nLags,
+    "d0_inverse" -> If[prep["d0InvScalar"] === None, Null,
+      cppScalar[prep["d0InvScalar"], inputDigits, cs]],
+    "blocks" -> Map[(#["Cols"] - 1) &, blocks],
+    "assembly" -> assembly, "chop_digits" -> cfg["ChopPrecision"]|>;
+  (* Stable content identity prevents an evicted Wolfram serialization cache
+     entry from duplicating an already-retained native chart.  The digest is
+     only an index: both caches retain and compare the complete certificate. *)
+  record = <|"Signature" -> signature, "Payload" -> payload,
+    "Token" -> ("de2-operator-" <> IntegerString[key, 16, 64])|>;
+  If[Length[$cppStaticOperatorCache] >= $cppStaticOperatorCacheMax,
+    KeyDropFrom[$cppStaticOperatorCache,
+      First[Keys[$cppStaticOperatorCache]]]];
+  AssociateTo[$cppStaticOperatorCache, key -> record];
+  record];
+
+cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
+    srcHat_, fb_Integer, W_Integer, init_, vPrep_:Automatic,
+    responseOverride_:Automatic] := Module[
+  {d = cs["SystemSize"], wp = cfg["WorkingPrecision"], inputDigits,
+   outputDigits, precisionBits, blocks, schedule, staticRecord,
+   initFrames, initValidity, request, response, decodedU,
+   decodedValidity, hits, decode, topValid,
+   timingQ = Environment["DEBUG_CPP_RECURRENCE"] === "1", t0, tRequest,
+   tCall, tDone,
+   assembledData = None, sourceRecords, sourcePayload},
+  t0 = SessionTime[];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+  outputDigits = wp + 20;
+  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  blocks = blockList[cs];
+  schedule = Table[Map[Function[blk, Module[{dA, dB, kind},
+      dA = Together[aT + n - blk["a"]];
+      dB = Together[bT - blk["b"]];
+      kind = Which[!zeroCanQ[dA], "T", !zeroCanQ[dB], "P", True, "R"];
+      <|"case" -> kind, "da" -> cppScalar[dA, inputDigits, cs],
+        "db" -> cppScalar[dB, inputDigits, cs]|>]], blocks],
+    {n, 0, nmax}];
+  staticRecord = If[AssociationQ[$cppStaticRecordOverride],
+    $cppStaticRecordOverride,
+    cppStaticOperatorPayload[cs, prep, blocks, fb, W,
+      vPrep, inputDigits, precisionBits]];
   initFrames = Table[If[init =!= None && l + 1 <= Length[init],
       Map[esToFrame[#, fb, W] &, init[[l + 1]]],
       ConstantArray[0, {d, W}]], {l, 0, P}];
@@ -1636,11 +1731,9 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
       "validity" -> (cppValidity /@
         Flatten[Map[# ["Validity"] &, sourceRecords, {2}]]),
       "present" -> Flatten[Map[TrueQ[# ["Present"]] &, sourceRecords, {2}]]|>];
-  request = <|
-    "schema" -> 1, "domain" -> $cppSerializationDomain,
-    "symbols" -> (SymbolName /@ $cppSerializationSymbols),
-    "precision_bits" -> precisionBits, "output_digits" -> outputDigits,
-    "d" -> d, "nmax" -> nmax, "p" -> P, "fb" -> fb, "w" -> W,
+  request = Join[staticRecord["Payload"], <|
+    "schema" -> 1, "output_digits" -> outputDigits,
+    "nmax" -> nmax, "p" -> P,
     "has_initial" -> (init =!= None),
     "adaptive_probe" -> TrueQ[$adaptiveLowerFrameProbe],
     "a_target" -> cppScalar[aT, inputDigits, cs],
@@ -1648,21 +1741,20 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
     "a_shift_min" -> 0,
     "a_shifts" -> Table[cppScalar[Together[aT + m], inputDigits, cs],
       {m, 0, nmax}],
-    "d_lags" -> dLags, "denominators" -> denominators,
-    "nhat_lags" -> nLags,
-    "d0_inverse" -> If[prep["d0InvScalar"] === None, Null,
-      cppScalar[prep["d0InvScalar"], inputDigits, cs]],
-    "blocks" -> Map[(#["Cols"] - 1) &, blocks],
     "schedule" -> schedule,
     "initial" -> (cppScalar[#, inputDigits, cs] & /@ Flatten[initFrames]),
     "initial_validity" -> (cppValidity /@ Flatten[initValidity]),
-    "source" -> sourcePayload, "assembly" -> assembly,
-    "chop_digits" -> cfg["ChopPrecision"],
-    "return_u" -> !AssociationQ[vPrep]|>;
+    "source" -> sourcePayload,
+    "return_u" -> !AssociationQ[vPrep]|>];
   If[TrueQ[$cppBuildRequestOnly], Return[request, Module]];
   tRequest = SessionTime[];
   response = If[AssociationQ[responseOverride], responseOverride,
-    DiffExp2`CppBackend`RunRequest[request]];
+    If[TrueQ[$cppUsePersistentSessions] &&
+        Environment["DE2_CPP_PERSISTENT"] =!= "0",
+      DiffExp2`CppBackend`RunPersistentRequest[request,
+        Append[cppPersistentMetadata[cs, fb, W],
+          "PreparedToken" -> staticRecord["Token"]]],
+      DiffExp2`CppBackend`RunRequest[request]]];
   tCall = SessionTime[];
   If[FailureQ[response],
     err["E5", cs, <|"BackendFailure" -> response,
@@ -1727,8 +1819,10 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
     "KernelMilliseconds" -> response["elapsed_ms"]|>]];
   Join[<|"Hits" -> hits,
     "P" -> P, "FrameBase" -> fb, "TopValid" -> topValid,
-    "BackendDiagnostics" -> <|"Backend" -> "Cpp",
-      "KernelMilliseconds" -> response["elapsed_ms"]|>|>,
+    "BackendDiagnostics" -> Join[<|"Backend" -> "Cpp",
+      "KernelMilliseconds" -> response["elapsed_ms"]|>,
+      If[AssociationQ[Lookup[response, "persistent", None]],
+        <|"Persistent" -> response["persistent"]|>, <||>]]|>,
     If[assembledData === None,
       <|"U" -> decodedU, "Validity" -> decodedValidity|>,
       <|"CppAssembled" -> assembledData|>]]];
@@ -1780,38 +1874,66 @@ cppConfiguredThreads[count_Integer] := Module[{threads},
 
 cppBatchRecurrences[cs_, prep_, tasks_List, nmax_Integer, fb_Integer,
     W_Integer, vPrep_] := Module[
-  {requests, threads, response, results, started = SessionTime[]},
+  {requests, threads, response, results, started = SessionTime[], wp,
+   inputDigits, precisionBits, staticRecord, metadata, symbols, domain},
   threads = cppConfiguredThreads[Length[tasks]];
-  requests = Map[Function[task,
-    Block[{$cppBuildRequestOnly = True},
-      cppRunRecursion[cs, prep, task["a"], task["b"], task["P"],
-        nmax, None, fb, W, task["Init"], vPrep]]], tasks];
-  If[TrueQ[$cppHomogeneousBatchCapture],
-    Throw[<|"Requests" -> requests|>, $cppHomogeneousBatchTag]];
-  response = If[AssociationQ[$cppHomogeneousBatchInjection],
-    If[Lookup[$cppHomogeneousBatchInjection, "Requests", None] =!= requests ||
-        !ListQ[Lookup[$cppHomogeneousBatchInjection, "Results", None]],
-      err["E5", cs, <|
-        "Detail" -> "prewarmed C++ recurrence request did not reproduce exactly during verified assembly"|>]];
-    $cppHomogeneousBatchInjectionUses++;
-    <|"status" -> "ok",
-      "results" -> $cppHomogeneousBatchInjection["Results"]|>,
-    DiffExp2`CppBackend`RunRequest[
-      <|"batch" -> requests, "threads" -> threads|>]];
-  If[FailureQ[response] || Lookup[response, "status", "error"] =!= "ok" ||
-      !ListQ[Lookup[response, "results", None]] ||
-      Length[response["results"]] =!= Length[tasks],
-    err["E5", cs, <|"BackendResponse" -> response,
-      "Detail" -> "compiled recurrence batch call failed"|>]];
-  results = MapThread[Function[{task, raw},
-    cppRunRecursion[cs, prep, task["a"], task["b"], task["P"],
-      nmax, None, fb, W, task["Init"], vPrep, raw]],
-    {tasks, response["results"]}];
-  If[Environment["DEBUG_CPP_RECURRENCE"] === "1",
-    Print["CPPBATCH ", <|"Tasks" -> Length[tasks], "Threads" -> threads,
-      "FrameBase" -> fb, "FrameWidth" -> W,
-      "Seconds" -> N[SessionTime[] - started, 6]|>]];
-  results];
+  (* One native batch has one coefficient field.  Derive that field from the
+     union of every run before entering the serialization Block and keep the
+     Block live through request construction, persistent preparation, replay,
+     and decoded assembly.  In particular, never recompute a symbolic static
+     operator after cppRunRecursion's per-call Block has unwound to Acb. *)
+  symbols = SortBy[DeleteDuplicates[Flatten[
+    cppRegulatorSymbols[cs, prep, # ["a"], # ["b"], # ["P"], nmax,
+      None, # ["Init"], vPrep] & /@ tasks]], SymbolName];
+  domain = Which[symbols =!= {}, "symbolic",
+    TrueQ[$cppExactDomain], "rational", True, "acb"];
+  wp = cfg["WorkingPrecision"];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = symbols},
+    (* Build/certify the immutable operator once.  Every task then shares the
+       same association and token instead of re-hashing prep/vPrep. *)
+    staticRecord = cppStaticOperatorPayload[cs, prep, blockList[cs], fb, W,
+      vPrep, inputDigits, precisionBits];
+    Block[{$cppStaticRecordOverride = staticRecord},
+      requests = Map[Function[task,
+        Block[{$cppBuildRequestOnly = True},
+          cppRunRecursionCore[cs, prep, task["a"], task["b"], task["P"],
+            nmax, None, fb, W, task["Init"], vPrep]]], tasks];
+      If[TrueQ[$cppHomogeneousBatchCapture],
+        Throw[<|"Requests" -> requests|>, $cppHomogeneousBatchTag]];
+      response = If[AssociationQ[$cppHomogeneousBatchInjection],
+        If[Lookup[$cppHomogeneousBatchInjection, "Requests", None] =!= requests ||
+            !ListQ[Lookup[$cppHomogeneousBatchInjection, "Results", None]],
+          err["E5", cs, <|
+            "Detail" -> "prewarmed C++ recurrence request did not reproduce exactly during verified assembly"|>]];
+        $cppHomogeneousBatchInjectionUses++;
+        <|"status" -> "ok",
+          "results" -> $cppHomogeneousBatchInjection["Results"]|>,
+        (* Capture/replay above never touches the native session. *)
+        metadata = Append[cppPersistentMetadata[cs, fb, W],
+          "PreparedToken" -> staticRecord["Token"]];
+        If[TrueQ[$cppUsePersistentSessions] &&
+            Environment["DE2_CPP_PERSISTENT"] =!= "0",
+          DiffExp2`CppBackend`RunPersistentRequests[
+            requests, metadata, threads],
+          DiffExp2`CppBackend`RunRequest[
+            <|"batch" -> requests, "threads" -> threads|>]]];
+      If[FailureQ[response] || Lookup[response, "status", "error"] =!= "ok" ||
+          !ListQ[Lookup[response, "results", None]] ||
+          Length[response["results"]] =!= Length[tasks],
+        err["E5", cs, <|"BackendResponse" -> response,
+          "Detail" -> "compiled recurrence batch call failed"|>]];
+      results = MapThread[Function[{task, raw},
+        cppRunRecursionCore[cs, prep, task["a"], task["b"], task["P"],
+          nmax, None, fb, W, task["Init"], vPrep, raw]],
+        {tasks, response["results"]}];
+      If[Environment["DEBUG_CPP_RECURRENCE"] === "1",
+        Print["CPPBATCH ", <|"Tasks" -> Length[tasks], "Threads" -> threads,
+          "FrameBase" -> fb, "FrameWidth" -> W,
+          "Seconds" -> N[SessionTime[] - started, 6]|>]];
+      results]]];
 
 runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_,
     vPrep_:Automatic] :=
@@ -2389,7 +2511,9 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
   $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
-  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;);
+  $cppStaticOperatorCache = <||>;
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
+  DiffExp2`CppBackend`ClearPersistentSessions[];);
 
 solveHomogeneousCore[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,

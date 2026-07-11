@@ -13,6 +13,11 @@ BackendInformation::usage = "BackendInformation[] returns the compiled backend v
 EncodeScalar::usage = "EncodeScalar[z, digits] converts a numeric scalar to the canonical C++ JSON pair of Arb scalar strings, retaining inexact input uncertainty. Non-numeric analytic regulators are rejected.";
 EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact rational function of named analytic regulators to the FLINT symbolic coefficient-field syntax.";
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
+RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
+RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
+ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
+ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart-handle registry.";
+PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
 DecodeScalar::usage = "DecodeScalar[encoded, precision] reconstructs a Wolfram scalar from a C++ rational or Acb midpoint/radius record with honest Accuracy.";
 DecodeScalars::usage = "DecodeScalars[encodedList, precision] reconstructs a list of C++ rational or Acb scalar records in bounded parser batches, preserving DecodeScalar semantics and falling back elementwise for mixed or malformed input.";
 ResetBackend::usage = "ResetBackend[] unloads the cached LibraryFunction handles so a rebuilt library can be loaded.";
@@ -24,6 +29,10 @@ $repositoryRoot = ParentDirectory[$moduleDirectory];
 $backendLibrary = None;
 $runFunction = None;
 $infoFunction = None;
+$persistentSessionCache = <||>;
+$persistentChartCache = <||>;
+$persistentPreparedTokenCache = <||>;
+$persistentChartCacheMax = 1024;
 
 libraryCandidates[] := DeleteDuplicates[Select[{
     Quiet[Environment["DE2_CPP_LIBRARY"]],
@@ -48,6 +57,7 @@ loadBackend[] := Module[{lib},
     False]]];
 
 ResetBackend[] := Module[{},
+  Quiet[ClearPersistentSessions[]];
   If[Head[$runFunction] === LibraryFunction, Quiet[LibraryFunctionUnload[$runFunction]]];
   If[Head[$infoFunction] === LibraryFunction, Quiet[LibraryFunctionUnload[$infoFunction]]];
   $runFunction = None; $infoFunction = None; $backendLibrary = None; Null];
@@ -281,6 +291,237 @@ RunRequest[request_Association] := Module[{json, bytes, result},
   result = Quiet[Check[bytesToJSON[bytes], $Failed]];
   If[!AssociationQ[result], Failure["CppBackend", <|
     "Detail" -> "compiled recurrence returned malformed JSON"|>], result]];
+
+(* ---- persistent schema-2 recurrence sessions -------------------------
+   A recurrence request has a large immutable prepared operator and a much
+   smaller per-column/per-source state.  Retain the former as typed FLINT/Arb
+   data in C++ and send only the latter after the first solve.  Hashes are
+   cache indices only: every hit is checked against its complete signature. *)
+
+$persistentStaticKeys = {"domain", "symbols", "precision_bits", "d", "fb",
+  "w", "d_lags", "denominators", "nhat_lags", "d0_inverse", "blocks",
+  "assembly", "chop_digits"};
+$persistentRunKeys = {"nmax", "p", "has_initial", "adaptive_probe",
+  "a_target", "b_target", "a_shift_min", "a_shifts", "schedule",
+  "initial", "initial_validity", "source", "return_u"};
+
+persistentCacheLookup[cache_Association, key_, signature_, label_String] :=
+  Module[{entry = Lookup[cache, key, None]},
+    Which[
+      entry === None, None,
+      AssociationQ[entry] && SameQ[entry["Signature"], signature], entry,
+      True, Failure["CppBackend", <|"Detail" ->
+        ("persistent " <> label <>
+          " cache-key collision with unequal full identity"),
+        "Key" -> key|>]]];
+
+persistentCommandOKQ[response_] := AssociationQ[response] &&
+  Lookup[response, "status", "error"] === "ok";
+
+persistentIdentityString[value_] := ToString[value, InputForm];
+
+persistentPreparedTokenCertificate[token_String, static_Association] := Module[
+  {certified = Lookup[$persistentPreparedTokenCache, token, None]},
+  Which[
+    certified === None,
+      AssociateTo[$persistentPreparedTokenCache, token -> static]; token,
+    SameQ[certified, static], token,
+    True, Failure["CppBackend", <|"Detail" ->
+      "persistent prepared token was reused with unequal static operator data",
+      "PreparedToken" -> token|>]]];
+
+persistentReleaseChartKey[key_] := Module[
+  {entry = Lookup[$persistentChartCache, key, None], token},
+  If[!AssociationQ[entry], Return[Null, Module]];
+  Quiet[Check[RunRequest[<|"schema" -> 2, "op" -> "chart.release",
+      "session" -> entry["Session"], "chart" -> entry["Handle"]|>], Null]];
+  token = Lookup[entry, "PreparedToken", None];
+  KeyDropFrom[$persistentChartCache, key];
+  If[StringQ[token] && !AnyTrue[Values[$persistentChartCache],
+      Lookup[#, "PreparedToken", None] === token &],
+    KeyDropFrom[$persistentPreparedTokenCache, token]];
+  Null];
+
+persistentTouchChart[key_, entry_Association] := (
+  KeyDropFrom[$persistentChartCache, key];
+  AssociateTo[$persistentChartCache, key -> entry];
+  entry);
+
+ReleasePersistentPreparedToken[token_String] := Module[{keys},
+  keys = Keys@Select[$persistentChartCache,
+    Lookup[#, "PreparedToken", None] === token &];
+  Scan[persistentReleaseChartKey, keys];
+  KeyDropFrom[$persistentPreparedTokenCache, token];
+  Null];
+
+persistentCloseSessionHandle[handle_String] := Module[
+  {sessionKeys, chartKeys, activeTokens},
+  Quiet[Check[RunRequest[<|"schema" -> 2, "op" -> "session.close",
+      "session" -> handle|>], Null]];
+  sessionKeys = Keys@Select[$persistentSessionCache,
+    Lookup[#, "Handle", None] === handle &];
+  chartKeys = Keys@Select[$persistentChartCache,
+    Lookup[#, "Session", None] === handle &];
+  KeyDropFrom[$persistentSessionCache, sessionKeys];
+  KeyDropFrom[$persistentChartCache, chartKeys];
+  activeTokens = DeleteDuplicates@Select[
+    Lookup[Values[$persistentChartCache], "PreparedToken", None], StringQ];
+  $persistentPreparedTokenCache = KeyTake[
+    $persistentPreparedTokenCache, activeTokens];
+  Null];
+
+persistentCloseIncompatibleSymbolicSessions[symbols_List] := Module[
+  {entries, handles},
+  entries = Select[Values[$persistentSessionCache],
+    Module[{sig = Lookup[#, "Signature", {}]},
+      Length[sig] >= 3 && sig[[1]] === "symbolic" &&
+        sig[[3]] =!= symbols] &];
+  handles = DeleteDuplicates[Lookup[entries, "Handle", {}]];
+  Scan[persistentCloseSessionHandle, handles];
+  Null];
+
+preparePersistentRequest[request_Association, metadata_Association] := Module[
+  {missingStatic, missingRun, domain, symbols, precisionBits, outputDigits,
+   systemIdentity, sessionAnalytic, chartAnalytic, scc, static, run,
+   sessionSignature, sessionKey, sessionEntry, sessionResponse, session,
+   chartIdentity, chartSignature, chartKey, chartEntry, chartResponse, chart,
+   preparedToken, createRequest, prepareRequest},
+  missingStatic = Complement[$persistentStaticKeys, Keys[request]];
+  missingRun = Complement[$persistentRunKeys, Keys[request]];
+  If[missingStatic =!= {} || missingRun =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent recurrence request is missing required fields",
+      "MissingStatic" -> missingStatic, "MissingRun" -> missingRun|>], Module]];
+  If[!KeyExistsQ[metadata, "SystemIdentity"] ||
+      !KeyExistsQ[metadata, "ChartIdentity"] ||
+      !AssociationQ[Lookup[metadata, "SCC", None]],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent recurrence metadata requires SystemIdentity, ChartIdentity, and SCC"|>], Module]];
+  domain = request["domain"];
+  symbols = Lookup[request, "symbols", {}];
+  precisionBits = Lookup[request, "precision_bits", 256];
+  outputDigits = Lookup[request, "output_digits", 50];
+  systemIdentity = metadata["SystemIdentity"];
+  sessionAnalytic = Lookup[metadata, "SessionAnalytic", <||>];
+  chartAnalytic = Lookup[metadata, "ChartAnalytic", <||>];
+  scc = metadata["SCC"];
+
+  sessionSignature = {domain, precisionBits, symbols, systemIdentity,
+    sessionAnalytic};
+  (* SymbolicRational owns one FLINT multivariate context.  Values prepared
+     in a different variable field must be destroyed before that context can
+     be reconfigured; keep same-field sessions, close only incompatible ones. *)
+  If[domain === "symbolic",
+    persistentCloseIncompatibleSymbolicSessions[symbols]];
+  sessionKey = Hash[sessionSignature, "SHA256"];
+  sessionEntry = persistentCacheLookup[$persistentSessionCache, sessionKey,
+    sessionSignature, "session"];
+  If[FailureQ[sessionEntry], Return[sessionEntry, Module]];
+  If[sessionEntry === None,
+    createRequest = Join[<|"schema" -> 2, "op" -> "session.create",
+        "domain" -> domain, "output_digits" -> outputDigits,
+        "chart_capacity" -> $persistentChartCacheMax,
+        "analytic" -> sessionAnalytic|>,
+      If[domain === "acb", <|"precision_bits" -> precisionBits|>, <||>],
+      If[domain === "symbolic", <|"symbols" -> symbols|>, <||>]];
+    sessionResponse = RunRequest[createRequest];
+    If[!persistentCommandOKQ[sessionResponse], Return[sessionResponse, Module]];
+    session = sessionResponse["session"];
+    AssociateTo[$persistentSessionCache, sessionKey -> <|
+      "Signature" -> sessionSignature, "Handle" -> session|>],
+    session = sessionEntry["Handle"]];
+
+  static = KeyTake[request, $persistentStaticKeys];
+  run = KeyTake[request, $persistentRunKeys];
+  chartIdentity = metadata["ChartIdentity"];
+  preparedToken = Lookup[metadata, "PreparedToken", None];
+  (* Solve's static-payload cache supplies a stable content token only after
+     proving equality against its complete prepared tensor.  This module also
+     binds every token to the full encoded static record, so even a direct
+     caller cannot reuse a token for unequal operator data.  Callers without
+     such a token retain the full-signature path. *)
+  If[StringQ[preparedToken],
+    preparedToken = persistentPreparedTokenCertificate[
+      preparedToken, static];
+    If[FailureQ[preparedToken], Return[preparedToken, Module]]];
+  chartSignature = If[StringQ[preparedToken],
+    {session, preparedToken, chartIdentity, chartAnalytic, scc},
+    {session, static, chartIdentity, chartAnalytic, scc}];
+  chartKey = Hash[chartSignature, "SHA256"];
+  chartEntry = persistentCacheLookup[$persistentChartCache, chartKey,
+    chartSignature, "chart"];
+  If[FailureQ[chartEntry], Return[chartEntry, Module]];
+  If[chartEntry === None,
+    If[Length[$persistentChartCache] >= $persistentChartCacheMax,
+      persistentReleaseChartKey[First[Keys[$persistentChartCache]]]];
+    prepareRequest = <|"schema" -> 2, "op" -> "chart.prepare",
+      "session" -> session,
+      "key" -> ("chart:" <> IntegerString[chartKey, 16, 64]),
+      "identity" -> persistentIdentityString[chartIdentity],
+      "analytic" -> chartAnalytic, "scc" -> scc,
+      "problem" -> static|>;
+    chartResponse = RunRequest[prepareRequest];
+    If[!persistentCommandOKQ[chartResponse], Return[chartResponse, Module]];
+    chart = chartResponse["chart"];
+    AssociateTo[$persistentChartCache, chartKey -> <|
+      "Signature" -> chartSignature, "Session" -> session,
+      "Handle" -> chart, "PreparedToken" -> preparedToken|>],
+    chartEntry = persistentTouchChart[chartKey, chartEntry];
+    chart = chartEntry["Handle"]];
+
+  <|"Session" -> session, "Chart" -> chart, "Run" -> run,
+    "Static" -> static, "OutputDigits" -> outputDigits|>];
+
+RunPersistentRequest[request_Association, metadata_Association] := Module[
+  {prepared = preparePersistentRequest[request, metadata]},
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "chart.solve",
+    "session" -> prepared["Session"], "chart" -> prepared["Chart"],
+    "output_digits" -> prepared["OutputDigits"],
+    "run" -> prepared["Run"]|>]];
+
+RunPersistentRequests[requests_List, metadata_Association,
+    threads_Integer] := Module[
+  {first, prepared, static, outputDigits, incompatible, runs, response},
+  If[requests === {}, Return[<|"status" -> "ok", "results" -> {}|>, Module]];
+  If[threads < 1 || !AllTrue[requests, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent recurrence batch requires associations and a positive thread count"|>], Module]];
+  first = First[requests];
+  static = KeyTake[first, $persistentStaticKeys];
+  outputDigits = Lookup[first, "output_digits", 50];
+  incompatible = Select[Rest[requests],
+    !SameQ[KeyTake[#, $persistentStaticKeys], static] ||
+      Lookup[#, "output_digits", 50] =!= outputDigits &];
+  If[incompatible =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "one persistent recurrence batch cannot mix prepared operators or output precision"|>], Module]];
+  prepared = preparePersistentRequest[first, metadata];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  runs = KeyTake[#, $persistentRunKeys] & /@ requests;
+  response = RunRequest[<|"schema" -> 2, "op" -> "chart.solve_batch",
+    "session" -> prepared["Session"], "chart" -> prepared["Chart"],
+    "output_digits" -> outputDigits, "threads" -> threads,
+    "runs" -> runs|>];
+  response];
+
+ClearPersistentSessions[] := Module[{handles},
+  handles = DeleteDuplicates[
+    (Lookup[#, "Handle"] & /@ Values[$persistentSessionCache])];
+  Scan[Function[handle, Quiet[Check[RunRequest[<|"schema" -> 2,
+      "op" -> "session.close", "session" -> handle|>], Null]]], handles];
+  $persistentSessionCache = <||>;
+  $persistentChartCache = <||>;
+  $persistentPreparedTokenCache = <||>;
+  Null];
+
+PersistentSessionInformation[] := Module[{handles},
+  handles = DeleteDuplicates[
+    (Lookup[#, "Handle"] & /@ Values[$persistentSessionCache])];
+  AssociationMap[RunRequest[<|"schema" -> 2, "op" -> "session.stats",
+      "session" -> #|>] &, handles]];
 
 End[];
 EndPackage[];

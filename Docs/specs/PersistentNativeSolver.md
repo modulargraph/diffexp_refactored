@@ -40,10 +40,12 @@ entry point.
 }
 ```
 
-The result contains an opaque process-local handle such as `s:1`.  All live
-Acb sessions currently must use the same precision.  This permits concurrent
-upper/lower-arm solves at that precision while preventing future
-process-global FLINT precision state from invalidating retained objects.
+The result contains an opaque process-local handle such as `s:1`.  Acb
+precision is installed per worker through a guarded thread-local lease, so
+sessions at the same precision may run concurrently and cached sessions at
+different precisions may coexist.  Operations requiring incompatible live
+precision state are serialized by the lease; changing Wolfram
+`WorkingPrecision` does not require manual cache destruction.
 
 For `domain: "symbolic"`, `symbols` is mandatory and names the exact
 rational-function coefficient field.  A different field cannot be selected
@@ -127,6 +129,84 @@ previous column's seed, source, or resonance schedule.  The ordinary schema
 1 result is returned with a `persistent` diagnostic containing preparation
 time, run-parse time, run number, SCC size/depth, and
 `static_tensor_copies: 0`.
+
+Several independent columns or source sectors sharing the same prepared
+operator may be submitted in one ordered batch:
+
+```json
+{
+  "schema": 2,
+  "op": "chart.solve_batch",
+  "session": "s:1",
+  "chart": "c:1",
+  "output_digits": 520,
+  "threads": 4,
+  "runs": [{"nmax": 50}, {"nmax": 50}]
+}
+```
+
+Each entry of `runs` has the complete dynamic shape of `chart.solve`'s
+`run` object; the abbreviated objects above are illustrative only.  Results
+remain in input order and each slot carries its own success or error record.
+The worker count is bounded by the request size and the native limit.
+Symbolic-rational batches are deliberately serialized until the shared FLINT
+coefficient context has a separately verified parallel ownership model.
+
+### Retain and evaluate a local solution
+
+`local.solve` runs recurrence plus the retained assembly matrix and moves the
+result directly into a session-owned typed `LocalSolution`.  It returns an
+opaque `l:N` handle and summary metadata, never the coefficient slab.  Exact
+chart geometry, exact `(a,b)` descriptors, normalized prescription records,
+and checkpoint identity are mandatory and are bound to the recurrence target.
+
+```json
+{
+  "schema": 2,
+  "op": "local.solve",
+  "session": "s:1",
+  "chart": "c:1",
+  "run": {"nmax": 50},
+  "metadata": {
+    "chart": {
+      "center_exact": "0",
+      "scale_exact": "1",
+      "radius": "2",
+      "infinite_radius": false
+    },
+    "tag": {
+      "a": {"domain": "rational", "canonical": "1/2"},
+      "b": {"domain": "rational", "canonical": "0"}
+    },
+    "prescriptions": [{
+      "factor_exact": "t",
+      "sign": 1,
+      "multiplicity": 1,
+      "leading_coefficient_sign": 1
+    }],
+    "checkpoint_identity": "exact-local-identity"
+  }
+}
+```
+
+The abbreviated `run` above is illustrative; it has the same complete
+dynamic shape as `chart.solve`.  `local.evaluate` accepts an exact rational
+real point and returns epsilon-framed value and theta-value vectors.  Its
+optional explicit imaginary sign selects the requested rim; otherwise the
+stored normalized prescriptions derive it.  Unresolved symbolic coefficient
+fields are rejected rather than numerically sampled.
+
+```json
+{"schema":2,"op":"local.evaluate","session":"s:1","local":"l:1",
+ "point":{"exact":"-1/2"},
+ "options":{"imaginary_sign":-1,"t_order_reduction":0,
+            "tail_estimate":false}}
+{"schema":2,"op":"local.stats","session":"s:1","local":"l:1"}
+{"schema":2,"op":"local.release","session":"s:1","local":"l:1"}
+```
+
+A retained local solution survives `chart.release`; `session.close` releases
+both charts and locals.
 
 ### Inspect and destroy
 

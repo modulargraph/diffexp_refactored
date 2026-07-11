@@ -60,7 +60,17 @@ while any symbolic values in the previous field remain alive.
   "session": "s:1",
   "key": "system/chart/frame cache key",
   "identity": "collision-certified canonical identity",
-  "analytic": {"delta_sign": -1, "branch_signature": "..."},
+  "analytic": {
+    "delta_sign": -1,
+    "branch_signature": "...",
+    "geometry": {
+      "center_exact": "0",
+      "scale_exact": "1",
+      "radius_exact": "2",
+      "infinite_radius": false,
+      "prescriptions": []
+    }
+  },
   "scc": {
     "components": [[0, 2], [1]],
     "structural_edges": [[0, 2], [2, 0], [0, 1]],
@@ -92,6 +102,12 @@ certificate that is merely plausible but not identical.
 
 The frame base and width are part of the prepared-operator identity.  A
 different work rectangle requires a different prepared chart handle.
+
+`analytic.geometry` is optional for compatibility with recurrence-only
+charts, but mandatory when a chart is referenced by a native composite SCC
+object.  Composite preparation compares the complete canonical JSON record;
+it never infers chart equality from Acb midpoint overlap or from a principal
+operator hash.
 
 `key` is only an index.  Reuse is allowed only if the complete static
 operator JSON, `identity`, SCC certificate, session analytic identity, and

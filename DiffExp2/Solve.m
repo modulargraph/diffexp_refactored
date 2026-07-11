@@ -1549,6 +1549,14 @@ cppPersistentPrescription[record_Association] := <|
   "multiplicity" -> record["Multiplicity"],
   "leading_coefficient_sign" -> record["LeadingCoeffSign"]|>;
 
+cppPersistentGeometry[cs_Association] := <|
+  "center_exact" -> ToString[cs["Center"], InputForm],
+  "scale_exact" -> ToString[cs["ChartMap", "Scale"], InputForm],
+  "radius_exact" -> ToString[cs["Radius"], InputForm],
+  "infinite_radius" -> TrueQ[cs["Radius"] === Infinity],
+  "prescriptions" ->
+    (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>;
+
 cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
   {systemIdentity, chartIdentity},
   (* SolveCacheTag joins diagonal SCC blocks back under the parent level's
@@ -1570,7 +1578,8 @@ cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
       "PrescriptionIdentity" ->
         ToString[Lookup[cs, "Prescriptions", {}], InputForm],
       "Prescriptions" ->
-        (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>,
+        (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}]),
+      "geometry" -> cppPersistentGeometry[cs]|>,
     "SCC" -> cppPersistentSCC[cs]|>];
 
 (* Exact metadata for session-owned native LocalSolutions.  Unlike the Acb

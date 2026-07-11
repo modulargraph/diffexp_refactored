@@ -872,6 +872,33 @@ std::shared_ptr<SolverSession> find_session(const std::string& handle) {
   return found->second;
 }
 
+json::object solve_prepared_chart_safe(
+    const std::shared_ptr<PreparedChartBase>& chart,
+    const json::value& raw_run, int output_digits,
+    const std::string& session_handle) {
+  try {
+    auto result = chart->solve(
+        as_object(raw_run, "persistent recurrence run"), output_digits);
+    result["session"] = session_handle;
+    result["chart"] = chart->handle();
+    return result;
+  } catch (const RecurrenceError& error) {
+    return json::object{{"status", "error"}, {"id", error.id},
+                        {"detail", error.what()},
+                        {"frame_base", error.frame_base},
+                        {"shift", error.shift},
+                        {"session", session_handle},
+                        {"chart", chart->handle()}};
+  } catch (const std::exception& error) {
+    return json::object{{"status", "error"}, {"id", "CPP"},
+                        {"detail", error.what()},
+                        {"session", session_handle},
+                        {"chart", chart->handle()}};
+  }
+}
+
+constexpr std::uint32_t kMaxPersistentBatchThreads = 64;
+
 std::string static_problem_signature(const json::object& problem,
                                      const json::value& analytic,
                                      const SCCCertificate& scc,
@@ -1112,6 +1139,73 @@ json::object run_session_command(const json::object& root) {
     result["session"] = session->handle;
     result["chart"] = chart->handle();
     return result;
+  }
+
+  if (operation == "chart.solve_batch") {
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      chart = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    const auto& runs = as_array(root.at("runs"), "persistent recurrence runs");
+    const auto requested_threads = root.if_contains("threads")
+        ? as_u32(root.at("threads"), "batch threads") : 1;
+    if (requested_threads == 0)
+      throw std::invalid_argument("batch threads must be positive");
+
+    const bool symbolic_serialized = session->domain == "symbolic";
+    const auto bounded_threads = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads), runs.size()});
+    const auto worker_count = symbolic_serialized && bounded_threads != 0
+        ? std::size_t{1} : bounded_threads;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<json::object> results(runs.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&]() {
+      while (true) {
+        const auto index = next.fetch_add(1);
+        if (index >= runs.size()) return;
+        results[index] = solve_prepared_chart_safe(
+            chart, runs[index], output_digits, session->handle);
+      }
+    };
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i)
+      workers.emplace_back(worker);
+    for (auto& thread : workers) thread.join();
+
+    std::size_t succeeded = 0;
+    json::array encoded;
+    encoded.reserve(results.size());
+    for (auto& result : results) {
+      if (result.if_contains("status") != nullptr &&
+          result.at("status") == "ok")
+        ++succeeded;
+      encoded.push_back(std::move(result));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"chart", chart->handle()}, {"results", std::move(encoded)},
+        {"attempted", runs.size()}, {"succeeded", succeeded},
+        {"failed", runs.size() - succeeded},
+        {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"symbolic_serialized", symbolic_serialized},
+        {"elapsed_ms", elapsed_ms}};
   }
 
   if (operation == "chart.release") {

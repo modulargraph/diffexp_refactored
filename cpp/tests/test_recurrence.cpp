@@ -188,6 +188,25 @@ void test_persistent_operator_session() {
       "initial":["0","0","1","0","0","0","0","0"],
       "initial_validity":[5],"source":null,"return_u":true}
   })json");
+  const auto batched = json_request(std::string(R"json({
+    "schema":2,"op":"chart.solve_batch","session":")json") + session +
+    R"json(","chart":")json" + chart + R"json(","threads":32,"runs":[{
+      "nmax":0,"p":0,"has_initial":true,"adaptive_probe":false,
+      "a_target":"0","b_target":"0","a_shift_min":0,
+      "a_shifts":["0"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}]],
+      "initial":["0","0","1","0","0","0","0","0"],
+      "initial_validity":[5],"source":null,"return_u":true
+    },{
+      "nmax":"malformed"
+    },{
+      "nmax":0,"p":0,"has_initial":true,"adaptive_probe":false,
+      "a_target":"0","b_target":"0","a_shift_min":0,
+      "a_shifts":["0"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}]],
+      "initial":["0","0","3","0","0","0","0","0"],
+      "initial_validity":[5],"source":null,"return_u":true
+    }]})json");
   const auto stats = json_request(std::string(R"json({
     "schema":2,"op":"session.stats","session":")json") + session + "\"}");
   check("persistent typed operator prepares and solves without static copies",
@@ -198,7 +217,18 @@ void test_persistent_operator_session() {
         prepared.at("scc_topological_order").as_array().size() == 1 &&
         prepared.at("scc_topological_order").as_array()[0] == 0 &&
         solved.at("persistent").as_object().at("static_tensor_copies") == 0 &&
-        stats.at("runs") == 1 && stats.at("static_tensor_copies") == 0);
+        stats.at("runs") == 3 && stats.at("static_tensor_copies") == 0);
+  const auto& batch_results = batched.at("results").as_array();
+  check("persistent batch preserves order, typed errors, and run statistics",
+        batched.at("status") == "ok" && batched.at("attempted") == 3 &&
+        batched.at("succeeded") == 2 && batched.at("failed") == 1 &&
+        batched.at("worker_threads") == 3 &&
+        batch_results[0].as_object().at("status") == "ok" &&
+        batch_results[0].as_object().at("u").as_array()[2] == "1" &&
+        batch_results[1].as_object().at("status") == "error" &&
+        batch_results[1].as_object().at("id") == "CPP" &&
+        batch_results[2].as_object().at("status") == "ok" &&
+        batch_results[2].as_object().at("u").as_array()[2] == "3");
   const auto& retained_scc =
       stats.at("chart_stats").as_array()[0].as_object();
   check("persistent stats retain typed SCC graph order",

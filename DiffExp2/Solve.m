@@ -1549,13 +1549,14 @@ cppPersistentPrescription[record_Association] := <|
   "multiplicity" -> record["Multiplicity"],
   "leading_coefficient_sign" -> record["LeadingCoeffSign"]|>;
 
-cppPersistentGeometry[cs_Association] := <|
-  "center_exact" -> ToString[cs["Center"], InputForm],
-  "scale_exact" -> ToString[cs["ChartMap", "Scale"], InputForm],
-  "radius_exact" -> ToString[cs["Radius"], InputForm],
-  "infinite_radius" -> TrueQ[cs["Radius"] === Infinity],
-  "prescriptions" ->
-    (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>;
+cppPersistentGeometry[cs_Association] := Join[<|
+    "center_exact" -> ToString[cs["Center"], InputForm],
+    "scale_exact" -> ToString[cs["ChartMap", "Scale"], InputForm],
+    "infinite_radius" -> TrueQ[cs["Radius"] === Infinity],
+    "prescriptions" ->
+      (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>,
+  If[TrueQ[cs["Radius"] === Infinity], <||>,
+    <|"radius_exact" -> ToString[cs["Radius"], InputForm]|>]];
 
 cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
   {systemIdentity, chartIdentity},

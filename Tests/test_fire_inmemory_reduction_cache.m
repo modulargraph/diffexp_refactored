@@ -166,7 +166,7 @@ Module[{dir, topology, unverifiedTopology, otherTopology, verifiedTopology,
 
 Module[{dir, quickBin, slowBin, pidFile, oldTimeout, chmodResults,
         quickExit, quickSeconds, quickLog, slowExit, slowSeconds, slowLog,
-        pids = {}, orphanFree},
+        pids = {}, processGoneQ, orphanFree},
   dir = FileNameJoin[{$TemporaryDirectory,
     "ft_fire_runner_polling_" <> ToString[$ProcessID]}];
   If[DirectoryQ[dir], DeleteDirectory[dir, DeleteContents -> True]];
@@ -213,13 +213,20 @@ Module[{dir, quickBin, slowBin, pidFile, oldTimeout, chmodResults,
   If[FileExistsQ[pidFile],
     pids = Quiet[ToExpression /@ StringSplit[
       StringTrim[Import[pidFile, "Text"]]]]];
-  (* Give init a moment to reap a just-terminated child before probing with
-     kill -0; a zombie is already dead but is still addressable briefly. *)
-  Pause[0.2];
-  orphanFree = Length[pids] === 2 && AllTrue[pids,
-    Function[pid, Lookup[
-      RunProcess[{"/bin/kill", "-0", ToString[pid]}],
-      "ExitCode", 0] =!= 0]];
+  processGoneQ[pid_] := Lookup[
+    RunProcess[{"/bin/kill", "-0", ToString[pid]}],
+    "ExitCode", 0] =!= 0;
+  (* A terminated grandchild can remain visible as an init-owned zombie for
+     a scheduler tick after the monitored parent has been explicitly reaped.
+     Allow bounded OS reaping time, but a genuinely leaked ten-second worker
+     still fails this assertion. *)
+  orphanFree = False;
+  Do[
+    orphanFree = Length[pids] === 2 && AllTrue[pids, processGoneQ];
+    If[TrueQ[orphanFree], Break[]];
+    Pause[0.05],
+    {40}
+  ];
   assert["FIRE timeout keeps exit code and exact diagnostic",
     slowExit === 124 &&
       StringContainsQ[slowLog, "FIRE6 timeout after 1s"] &&

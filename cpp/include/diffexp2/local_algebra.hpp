@@ -419,19 +419,24 @@ std::optional<LocalSolution<Scalar>> apply_prepared_sparse_local_matrix(
         input.checkpoint_identity + ":matrix-entry:" +
             std::to_string(entry.row) + ":" +
             std::to_string(entry.column));
-    if (std::none_of(product.sectors.begin(), product.sectors.end(),
-        [](const auto& sector) {
-          return local_detail::material_sector(sector);
-        }))
-      continue;
+    // Keep a zero finite slab from an exact nonzero matrix entry: in the
+    // Wolfram algebra it still constrains the honest intersection window
+    // when another entry of the same matrix product is nonzero.  Only the
+    // fully combined matrix result may be discarded as a structural source.
     terms.push_back(local_algebra_detail::embedded_component(
         product, entry.row, matrix.rows));
   }
   if (terms.empty()) return std::nullopt;
-  return combine_local_solutions(terms,
+  auto combined = combine_local_solutions(terms,
       checkpoint_identity.empty()
           ? input.checkpoint_identity + ":matrix:" + matrix.exact_identity
           : std::move(checkpoint_identity));
+  if (std::none_of(combined.sectors.begin(), combined.sectors.end(),
+      [](const auto& sector) {
+        return local_detail::material_sector(sector);
+      }))
+    return std::nullopt;
+  return combined;
 }
 
 }  // namespace diffexp2

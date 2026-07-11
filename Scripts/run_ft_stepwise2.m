@@ -23,6 +23,9 @@ epsOrder = ToExpression[envOrDefault["FT_EPS_ORDER", "0"]];
 expansionOrder = ToExpression[envOrDefault["FT_EXPANSION_ORDER", "50"]];
 boundaryExtraOrder = ToExpression[envOrDefault["FT_BOUNDARY_EXTRA_ORDER", "4"]];
 divisionOrder = ToExpression[envOrDefault["FT_DIVISION_ORDER", "3"]];
+stopAfterBoundaryLevel = envOrDefault["FT_STOP_AFTER_BOUNDARY_LEVEL", ""];
+stopAfterBoundaryLevel = If[StringLength[StringTrim[stopAfterBoundaryLevel]] > 0,
+  ToExpression[stopAfterBoundaryLevel], Missing["NotSet"]];
 radiusOfConvergence = ToExpression[
   envOrDefault["FT_RADIUS_OF_CONVERGENCE", "1"]];
 stepDivisionOrder = ToExpression[envOrDefault["FT_STEP_DIVISION_ORDER",
@@ -703,7 +706,11 @@ runExample[name_String] := Module[
           "SourceExpansionOrder" -> levelExpansionOrder,
           "RequestedEpsilonOrder" -> nextReq,
           "Tainted" -> If[AssociationQ[resumeCheckpoint],
-            TrueQ[Lookup[resumeCheckpoint, "Tainted", False]], False]|>]],
+            TrueQ[Lookup[resumeCheckpoint, "Tainted", False]], False]|>]];
+      If[IntegerQ[stopAfterBoundaryLevel] &&
+          level - 1 === stopAfterBoundaryLevel,
+        Print["STOPPED_AFTER_BOUNDARY_LEVEL ", stopAfterBoundaryLevel];
+        Throw["Stopped", "FT2Abort"]],
       (* At the terminal level there is no downstream halo to populate. *)
       If[AnyTrue[kmaxAvail, # < epsOrder &],
         Print["FTLADDER INCOMPLETE FINAL requiredTop=", epsOrder,
@@ -711,7 +718,8 @@ runExample[name_String] := Module[
         Throw[$Failed, "FT2Abort"]]];
     finalRaw = rawES],
     {level, startLevel, 1, -1}], "FT2Abort"];
-  If[abortRes === $Failed, Return[$Failed]]];
+  If[abortRes === $Failed, Return[$Failed]];
+  If[abortRes === "Stopped", Return[True]]];
   If[finalRaw === None || MemberQ[finalRaw, $Failed], Return[$Failed]];
 
   Print["FINAL ", ExportString[<|

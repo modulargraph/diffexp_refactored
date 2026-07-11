@@ -385,10 +385,33 @@ native-proved here, against the retained identity assembly operator;
 certificates which a future execution operation must re-prove or refuse.
 Stats label that distinction explicitly. All diagonal charts must share the
 scalar domain, geometry, work frame, and exact SCC principal graph. This
-first slice accepts only exact rational scale and finite radius (the latter
-strictly positive); unsupported algebraic geometry is loud. Signed epsilon
+first slice accepts only exact rational center/scale and finite radius (the
+scale is nonzero and radius strictly positive); unsupported algebraic
+geometry is loud. Signed epsilon
 shifts are retained, and execution must prove that `work_min` supplies enough
 lower halo.
+
+The first Wolfram producer is
+``Solve`PrepareNativeSCCComposite[sccEnvelope, req]``.  It captures each
+diagonal block through the existing grouped homogeneous request builder under
+isolated Solve caches and stops before execution.  The producer accepts only
+regular, collision-free blocks with exact identity gauge and spectral
+transforms.  Every captured group must share one scalar field and identical
+`fb`, `w`, and guarded `nmax`; no alternate preparation is used to force a
+common rectangle.  It enriches each block's ordinary `chart.prepare`
+analytic record with `geometry`, the nested exact `principal_matrix`, and
+`native_scc_capabilities`, then supplies the handle-free parent/block/coupling
+manifest to ``CppBackend`PreparePersistentSCC``.  The bridge alone injects
+opaque chart handles and exact prepared-chart identities.
+
+This explicit API always describes `BlockSequentialStrict`; it neither
+consults nor executes the older Wolfram monolithic-coarsening performance
+heuristic, and no production solve dispatch uses the returned handle yet.
+Its bounded Solve-level cache compares the full parent chart/request/config
+signature after a hash lookup, validates a hit through `scc.stats`, rebuilds a
+directly released stale handle, and refuses capacity exhaustion rather than
+evicting a live public SCC object.  `ClearSolveCaches[]` clears that cache and
+closes the native sessions.
 
 ```json
 {"schema":2,"op":"scc.stats","session":"s:1","scc":"scc:1"}

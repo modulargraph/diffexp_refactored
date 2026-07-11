@@ -23,7 +23,8 @@ SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"P
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
 SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
 PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
-ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
+PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
+ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -1559,8 +1560,57 @@ cppPersistentGeometry[cs_Association] := Join[<|
   If[TrueQ[cs["Radius"] === Infinity], <||>,
     <|"radius_exact" -> ToString[cs["Radius"], InputForm]|>]];
 
+(* Exact producer certificates for the deliberately narrow first composite
+   slice.  These are structural predicates, never numerical enclosure tests.
+   C++ independently proves identity_v from the retained assembly operator;
+   the other facts remain collision-bound until native execution rechecks
+   them. *)
+sccExactIdentityMatrixQ[matrix_, dimension_Integer] := Module[{delta},
+  If[!MatrixQ[matrix] || Dimensions[matrix] =!= {dimension, dimension} ||
+      !FreeQ[matrix, _?InexactNumberQ], Return[False, Module]];
+  delta = Map[Cancel[Together[#]] &,
+    Normal[matrix] - IdentityMatrix[dimension], {2}];
+  AllTrue[Flatten[delta], # === 0 &]];
+
+sccNoFamilyCollisionQ[cs_Association] := Module[
+  {families = Lookup[cs, "Families", None], collisions, depths},
+  If[!ListQ[families], Return[False, Module]];
+  collisions = Flatten[Lookup[families, "Collisions", {}], 1];
+  depths = Lookup[families, "CollisionDepth", {}];
+  collisions === {} && AllTrue[depths, # === 0 &]];
+
+sccNativeBlockCapabilities[cs_Association] := Module[
+  {dimension = Lookup[cs, "SystemSize", 0]},
+  <|"regular" -> TrueQ[Lookup[
+      Lookup[cs, "IndicialData", <||>], "Regular", False]],
+    "identity_gauge" ->
+      (sccExactIdentityMatrixQ[Lookup[cs, "Gauge", None], dimension] &&
+       sccExactIdentityMatrixQ[
+         Lookup[cs, "GaugeInverse", None], dimension]),
+    "identity_v" ->
+      (sccExactIdentityMatrixQ[Lookup[cs, "V", None], dimension] &&
+       sccExactIdentityMatrixQ[Lookup[cs, "VInv", None], dimension]),
+    "no_pseudo" -> sccNoFamilyCollisionQ[cs]|>];
+
+sccBlockPrincipalMatrixRecord[cs_Association] := Module[
+  {clearKey = Lookup[cs, "SystemClearKey", None], parentInput, matrix,
+   variable, dimension = Lookup[cs, "SystemSize", None]},
+  If[!IntegerQ[Lookup[cs, "SCCBlock", None]] || clearKey === None ||
+      !KeyExistsQ[$systemClearRegistry, clearKey],
+    err["E6", cs, <|"SystemClearKey" -> clearKey,
+      "Detail" -> "native SCC principal metadata requires a registered diagonal block chart"|>]];
+  parentInput = $systemClearRegistry[clearKey];
+  matrix = Lookup[parentInput, "Matrix", None];
+  variable = Lookup[parentInput, "Variable", None];
+  If[!MatchQ[variable, _Symbol] ||
+      Dimensions[matrix] =!= {dimension, dimension},
+    err["E6", cs, <|"Dimensions" -> Dimensions[matrix],
+      "Expected" -> {dimension, dimension},
+      "Detail" -> "native SCC principal matrix registry entry is malformed"|>]];
+  sccExactMatrixRecord[matrix, variable, cs]];
+
 cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
-  {systemIdentity, chartIdentity},
+  {systemIdentity, chartIdentity, chartAnalytic},
   (* SolveCacheTag joins diagonal SCC blocks back under the parent level's
      one native session.  Ordinary charts use their collision-certified
      exact system key.  The complete prepared operator is independently
@@ -1571,17 +1621,22 @@ cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
   chartIdentity = {Lookup[cs, "SystemClearKey", None],
     Lookup[cs, "Center", None], Lookup[cs, "ChartMap", None],
     Lookup[cs, "SCCBlock", None], fb, W};
+  chartAnalytic = <|
+    "PrescriptionIdentity" ->
+      ToString[Lookup[cs, "Prescriptions", {}], InputForm],
+    "Prescriptions" ->
+      (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}]),
+    "geometry" -> cppPersistentGeometry[cs]|>;
+  If[IntegerQ[Lookup[cs, "SCCBlock", None]],
+    chartAnalytic = Join[chartAnalytic, <|
+      "principal_matrix" -> sccBlockPrincipalMatrixRecord[cs],
+      "native_scc_capabilities" -> sccNativeBlockCapabilities[cs]|>]];
   <|"SystemIdentity" -> systemIdentity,
     "ChartIdentity" -> chartIdentity,
     "SessionAnalytic" -> <|
       "RegulatorSymbols" -> (SymbolName /@ $cppSerializationSymbols),
       "Policy" -> "exact-structure-prescription-specialized"|>,
-    "ChartAnalytic" -> <|
-      "PrescriptionIdentity" ->
-        ToString[Lookup[cs, "Prescriptions", {}], InputForm],
-      "Prescriptions" ->
-        (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}]),
-      "geometry" -> cppPersistentGeometry[cs]|>,
+    "ChartAnalytic" -> chartAnalytic,
     "SCC" -> cppPersistentSCC[cs]|>];
 
 (* Exact metadata for session-owned native LocalSolutions.  Unlike the Acb
@@ -2987,7 +3042,7 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
   $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
-  $cppStaticOperatorCache = <||>;
+  $cppStaticOperatorCache = <||>; $nativeSCCCompositeCache = <||>;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
   DiffExp2`CppBackend`ClearPersistentSessions[];);
 
@@ -3738,6 +3793,313 @@ sccParticularInitialWorkHalo[cs_Association, blockSystems_List,
 
 sccWorkTOrder[cs_Association, req_Association] :=
   req["TOrder"] + 2 + 2 cs["IntegrationSequence", "CouplingDepth"];
+
+(* ---- strict native composite SCC preparation ------------------------
+   This is a preparation/capture seam only.  It deliberately does not alter
+   SolveHomogeneous's production dispatch and it never selects the existing
+   monolithic coarsening candidate. *)
+$nativeSCCCompositeCache = <||>;
+$nativeSCCCompositeCacheMax = 32;
+
+sccAllSameQ[values_List] := values =!= {} &&
+  AllTrue[Rest[values], SameQ[#, First[values]] &];
+
+sccNativeCompositeCacheSignature[cs_Association, req_Association] := {
+  cs, req, cfg["WorkingPrecision"], cfg["ChopPrecision"],
+  cfg["Variables"], cfg["RecurrenceBackend"],
+  DiffExp2`Tolerances`$InputPrecisionFactor,
+  TrueQ[$cppExactDomain], TrueQ[$cppUsePersistentSessions],
+  TrueQ[$numericizeAllPreparedNumbers],
+  TrueQ[$disableGlobalClearedHoist],
+  TrueQ[$disableIdentityNhatShortcut],
+  TrueQ[$disableAdaptiveLowerFrames],
+  TrueQ[$adaptiveLowerFrameProbe],
+  TrueQ[$disableRationalDenominatorFusion],
+  TrueQ[$disableGroupedSpectralTransform],
+  TrueQ[$disablePolynomialNhatTransform],
+  Environment["DE2_CPP_PERSISTENT"]};
+
+sccCaptureHomogeneousGroup[blockcs_Association,
+    workReq_Association] := Module[{captured},
+  captured = Catch[
+    Block[{$cppHomogeneousBatchCapture = True,
+        $cppHomogeneousBatchInjection = None,
+        $cppHomogeneousBatchInjectionUses = 0,
+        $cppBuildRequestOnly = True},
+      solveHomogeneousCore[blockcs, workReq]],
+    $cppHomogeneousBatchTag];
+  If[!AssociationQ[captured] ||
+      !ListQ[Lookup[captured, "Requests", None]] ||
+      Lookup[captured, "Requests", {}] === {} ||
+      !AllTrue[captured["Requests"], AssociationQ] ||
+      !AssociationQ[Lookup[captured, "Metadata", None]],
+    err["E5", blockcs, <|
+      "Detail" -> "diagonal SCC homogeneous solve did not yield one nonempty captured native request group"|>]];
+  captured];
+
+sccCapturedCompositeContract[captures_List, cs_Association,
+    expectedNMax_Integer] := Module[
+  {requests, frameRecords, fieldRecords, sessionRecords, domain, names,
+   symbols, serialization},
+  If[captures === {} || !AllTrue[captures, AssociationQ],
+    err["E5", cs, <|"Detail" ->
+      "native SCC capture produced no diagonal request groups"|>]];
+  requests = Flatten[Lookup[captures, "Requests", {}], 1];
+  If[requests === {} || !AllTrue[requests, AssociationQ],
+    err["E5", cs, <|"Detail" ->
+      "native SCC capture produced no recurrence requests"|>]];
+  frameRecords = Map[{
+      Lookup[#, "fb", None], Lookup[#, "w", None],
+      Lookup[#, "nmax", None]} &, requests];
+  If[!sccAllSameQ[frameRecords] ||
+      !MatchQ[First[frameRecords], {_Integer, _Integer, _Integer}] ||
+      First[frameRecords][[2]] < 1 ||
+      First[frameRecords][[3]] =!= expectedNMax,
+    err["E6", cs, <|"CapturedFrames" -> DeleteDuplicates[frameRecords],
+      "ExpectedNMax" -> expectedNMax,
+      "Detail" -> "native SCC first slice requires identical fb/w/nmax across every captured block request"|>]];
+  fieldRecords = Map[{
+      Lookup[#, "domain", None], Lookup[#, "symbols", None],
+      Lookup[#, "precision_bits", None],
+      Lookup[#, "output_digits", None]} &, requests];
+  If[!sccAllSameQ[fieldRecords] ||
+      !MemberQ[{"acb", "rational", "symbolic"},
+        First[fieldRecords][[1]]] ||
+      !ListQ[First[fieldRecords][[2]]] ||
+      !AllTrue[First[fieldRecords][[2]], StringQ] ||
+      !IntegerQ[First[fieldRecords][[3]]] ||
+      First[fieldRecords][[3]] < 1 ||
+      !IntegerQ[First[fieldRecords][[4]]] ||
+      First[fieldRecords][[4]] < 1,
+    err["E5", cs, <|"CapturedFields" -> DeleteDuplicates[fieldRecords],
+      "Detail" -> "native SCC first slice requires one identical captured scalar domain, symbol list, and precision"|>]];
+  domain = First[fieldRecords][[1]];
+  names = First[fieldRecords][[2]];
+  sessionRecords = Map[{
+      Lookup[#["Metadata"], "SystemIdentity", None],
+      Lookup[#["Metadata"], "SessionAnalytic", None]} &, captures];
+  If[!sccAllSameQ[sessionRecords] ||
+      !AllTrue[captures,
+        Lookup[Lookup[#["Metadata"], "SessionAnalytic", <||>],
+          "RegulatorSymbols", None] === names &],
+    err["E5", cs, <|"Detail" ->
+      "captured diagonal blocks do not belong to one persistent session analytic identity"|>]];
+  symbols = (Symbol["Global`" <> #] & /@ names);
+  serialization = sccSerializationField[
+    <|"domain" -> domain, "symbols" -> symbols|>, cs];
+  <|"FrameBase" -> First[frameRecords][[1]],
+    "FrameWidth" -> First[frameRecords][[2]],
+    "NMax" -> First[frameRecords][[3]],
+    "Domain" -> domain, "SymbolNames" -> names,
+    "Serialization" -> KeyTake[serialization, {"domain", "symbols"}]|>];
+
+sccNativeSourceShape[cs_Association, dimension_Integer,
+    fb_Integer, completeMax_Integer, tOrder_Integer] := <|
+  "Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+  "Radius" -> cs["Radius"], "Prescriptions" -> cs["Prescriptions"],
+  "EpsWindow" -> <|"Min" -> fb, "CompleteMax" -> completeMax|>,
+  "TWindow" -> <|"CompleteMax" -> tOrder|>,
+  "Dimension" -> dimension|>;
+
+sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
+    seq_Association, blockcs_Association, captured_Association,
+    capabilities_Association, block_Integer] := Module[
+  {vertices = seq["Components"][[block]], expectedPrincipal,
+   analytic, principal, capturedCapabilities, capturedGeometry,
+   capturedIdentity},
+  expectedPrincipal = parentSystemRecord[[vertices, vertices]];
+  analytic = Lookup[captured["Metadata"], "ChartAnalytic", None];
+  If[!AssociationQ[analytic],
+    err["E5", blockcs, <|"Detail" ->
+      "captured diagonal block is missing persistent chart analytic metadata"|>]];
+  principal = Lookup[analytic, "principal_matrix", None];
+  capturedCapabilities = Lookup[
+    analytic, "native_scc_capabilities", None];
+  capturedGeometry = Lookup[analytic, "geometry", None];
+  If[!SameQ[principal, expectedPrincipal] ||
+      !SameQ[capturedCapabilities, capabilities] ||
+      !SameQ[capturedGeometry, parentGeometry],
+    err["E6", blockcs, <|
+      "Block" -> block, "ExpectedPrincipal" -> expectedPrincipal,
+      "CapturedPrincipal" -> principal,
+      "ExpectedCapabilities" -> capabilities,
+      "CapturedCapabilities" -> capturedCapabilities,
+      "Detail" -> "captured diagonal chart metadata does not bind its indexed parent principal block and geometry"|>]];
+  If[!KeyExistsQ[captured["Metadata"], "ChartIdentity"],
+    err["E6", blockcs, <|"Block" -> block,
+      "Detail" -> "captured diagonal chart is missing its exact principal identity"|>]];
+  capturedIdentity = ToString[
+    captured["Metadata", "ChartIdentity"], InputForm];
+  If[!StringQ[capturedIdentity] || StringLength[capturedIdentity] === 0,
+    err["E6", blockcs, <|"Block" -> block,
+      "Detail" -> "captured diagonal chart has no exact principal identity"|>]];
+  <|"block" -> block - 1, "vertices" -> (vertices - 1),
+    "regular" -> capabilities["regular"],
+    "identity_gauge" -> capabilities["identity_gauge"],
+    "identity_v" -> capabilities["identity_v"],
+    "no_pseudo" -> capabilities["no_pseudo"]|>];
+
+sccNativeCompositeIdentity[parent_Association, blocks_List,
+    couplings_List, domain_String, symbolNames_List] := Module[
+  {couplingIdentities, identity},
+  couplingIdentities = Map[KeyTake[#,
+      {"source_block", "target_block", "source_vertices",
+       "target_vertices", "rows", "columns", "exact_identity",
+       "domain", "symbols"}] &, couplings];
+  identity = Quiet[Check[ExportString[<|
+      "schema" -> "diffexp2-native-scc-composite-v1",
+      "parent" -> parent,
+      "blocks" -> blocks,
+      "couplings" -> couplingIdentities,
+      "serialization" -> <|"domain" -> domain,
+        "symbols" -> symbolNames|>|>,
+    "RawJSON", "Compact" -> True], $Failed]];
+  identity];
+
+PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
+  {seq = Lookup[cs, "IntegrationSequence", None], epsWindow,
+   requestedMin, requestedMax, publicTOrder, workTOrder, plannedTop,
+   workReq, signature, cacheKey, cached, cacheStats, blockSystems,
+   capabilities, badBlocks, captures, capturedContract, fb, width, workTop,
+   parentRecords, parentGeometry, parent, blockRecords, serialization,
+   couplings, identity, manifest, prepared, result, scale, radius,
+   center, missingReq, components, condensation},
+  missingReq = Select[{"TOrder", "EpsWindow"},
+    !KeyExistsQ[req, #] &];
+  epsWindow = Lookup[req, "EpsWindow", None];
+  If[missingReq =!= {} || !AssociationQ[epsWindow] ||
+      !AllTrue[{"Min", "CompleteMax"},
+        KeyExistsQ[epsWindow, #] &] ||
+      !IntegerQ[Lookup[req, "TOrder", None]] || req["TOrder"] < 0 ||
+      !IntegerQ[Lookup[epsWindow, "Min", None]] ||
+      !IntegerQ[Lookup[epsWindow, "CompleteMax", None]] ||
+      epsWindow["Min"] > epsWindow["CompleteMax"],
+    err["E6", cs, <|"Request" -> req,
+      "Detail" -> "native SCC preparation requires an ordered integer epsilon window and nonnegative Taylor order"|>]];
+  If[!TrueQ[Lookup[cs, "SCCSkeleton", False]] ||
+      !AssociationQ[seq] ||
+      Length[Lookup[seq, "Components", {}]] <= 1,
+    err["E6", cs, <|"Detail" ->
+      "native SCC preparation requires a multi-block SCC skeleton envelope"|>]];
+  If[cfg["RecurrenceBackend"] =!= "Cpp" ||
+      TrueQ[$disableGroupedSpectralTransform] ||
+      !TrueQ[$cppUsePersistentSessions] ||
+      Environment["DE2_CPP_PERSISTENT"] === "0",
+    err["E6", cs, <|"Detail" ->
+      "native SCC preparation requires the persistent grouped C++ recurrence backend"|>]];
+  If[DownValues[DiffExp2`CppBackend`PreparePersistentSCC] === {} ||
+      DownValues[DiffExp2`CppBackend`PersistentSCCStatistics] === {},
+    err["E5", cs, <|"Detail" ->
+      "CppBackend persistent SCC prepare/statistics bridge is not available"|>]];
+  center = Lookup[cs, "Center", None];
+  scale = Lookup[Lookup[cs, "ChartMap", <||>], "Scale", None];
+  radius = Lookup[cs, "Radius", None];
+  If[!FreeQ[{center, scale, radius}, _?InexactNumberQ] ||
+      !(IntegerQ[center] || Head[center] === Rational) ||
+      !((IntegerQ[scale] || Head[scale] === Rational) && scale =!= 0) ||
+      radius === Infinity ||
+      !((IntegerQ[radius] || Head[radius] === Rational) && radius > 0),
+    err["E6", cs, <|"Scale" -> scale, "Radius" -> radius,
+      "Detail" -> "native SCC first slice requires a rational center, nonzero rational scale, and positive finite rational radius"|>]];
+
+  signature = sccNativeCompositeCacheSignature[cs, req];
+  cacheKey = Hash[signature, "SHA256"];
+  cached = Lookup[$nativeSCCCompositeCache, cacheKey, None];
+  If[AssociationQ[cached] && SameQ[cached["Signature"], signature],
+    cacheStats = DiffExp2`CppBackend`PersistentSCCStatistics[
+      cached["Result"]];
+    If[AssociationQ[cacheStats] &&
+        Lookup[cacheStats, "status", "error"] === "ok",
+      Return[cached["Result"], Module]];
+    (* Direct native release/session clearing can invalidate an otherwise
+       exact Solve cache entry.  Drop only that proved-stale entry and rebuild
+       it; never evict a live public handle as a cache policy. *)
+    KeyDropFrom[$nativeSCCCompositeCache, cacheKey];
+    cached = None];
+  If[cached =!= None,
+    err["E6", cs, <|"CacheKey" -> cacheKey,
+      "Detail" -> "native SCC composite cache key collided with an unequal full signature"|>]];
+  If[Length[$nativeSCCCompositeCache] >= $nativeSCCCompositeCacheMax,
+    err["E6", cs, <|"Capacity" -> $nativeSCCCompositeCacheMax,
+      "Detail" -> "native SCC composite cache capacity is exhausted; clear solver caches before preparing another public handle"|>]];
+
+  components = seq["Components"];
+  condensation = seq["CondensationEdges"];
+  blockSystems = sccBlockChartSystem[cs, #] & /@
+    Range[Length[components]];
+  capabilities = sccNativeBlockCapabilities /@ blockSystems;
+  badBlocks = Select[Range[Length[blockSystems]],
+    !TrueQ[And @@ Values[capabilities[[#]]]] &];
+  If[badBlocks =!= {},
+    err["E6", cs, <|"UnsupportedBlocks" -> Map[
+        <|"Block" -> #, "Capabilities" -> capabilities[[#]]|> &,
+        badBlocks],
+      "Detail" -> "native SCC first slice requires regular collision-free diagonal blocks with exact identity Gauge/GaugeInverse and V/VInv"|>]];
+  requestedMin = epsWindow["Min"];
+  requestedMax = epsWindow["CompleteMax"];
+  publicTOrder = req["TOrder"];
+  workTOrder = sccWorkTOrder[cs, req];
+  plannedTop = requestedMax + sccInitialWorkHalo[
+    cs, blockSystems, workTOrder];
+  workReq = Join[req, <|
+    "EpsWindow" -> Join[epsWindow, <|"CompleteMax" -> plannedTop|>],
+    "TOrder" -> workTOrder|>];
+  captures = Block[{$shCache = <||>, $shSysTag = None,
+      $cppStaticOperatorCache = <||>},
+    sccCaptureHomogeneousGroup[#, workReq] & /@ blockSystems];
+  capturedContract = sccCapturedCompositeContract[
+    captures, cs, workTOrder];
+  fb = capturedContract["FrameBase"];
+  width = capturedContract["FrameWidth"];
+  workTop = fb + width - 1;
+  If[!(fb <= requestedMin <= requestedMax <= workTop),
+    err["E6", cs, <|"FrameBase" -> fb, "FrameWidth" -> width,
+      "RequestedWindow" -> epsWindow,
+      "Detail" -> "captured native SCC work frame does not contain the requested epsilon window"|>]];
+
+  parentRecords = sccParentExactRecords[cs];
+  parentGeometry = cppPersistentGeometry[cs];
+  parent = Join[<|"dimension" -> cs["SystemSize"]|>,
+    parentRecords, <|
+      "chart" -> parentGeometry,
+      "scc" -> cppPersistentSCC[cs],
+      "execution" -> <|"mode" -> "BlockSequentialStrict",
+        "work_t_order" -> workTOrder|>,
+      "work_contract" -> <|"work_min" -> fb,
+        "requested_min" -> requestedMin,
+        "requested_max" -> requestedMax,
+        "work_complete_max" -> workTop,
+        "public_t_order" -> publicTOrder,
+        "wolfram_coupling_depth" -> seq["CouplingDepth"]|>|>];
+  blockRecords = MapThread[
+    sccCapturedBlockRecord[parentRecords["exact_system_record"],
+      parentGeometry, seq, #1, #2, #3, #4] &,
+    {blockSystems, captures, capabilities,
+      Range[Length[blockSystems]]}];
+  serialization = capturedContract["Serialization"];
+  couplings = Map[
+    PrepareSCCCouplingMatrix[cs, #[[1]], #[[2]],
+      sccNativeSourceShape[cs, Length[components[[#[[1]]]]],
+        fb, workTop, workTOrder], serialization] &,
+    condensation];
+  identity = sccNativeCompositeIdentity[parent, blockRecords, couplings,
+    capturedContract["Domain"], capturedContract["SymbolNames"]];
+  If[!StringQ[identity],
+    err["E6", cs, <|"Detail" ->
+      "native SCC exact parent identity could not be serialized"|>]];
+  manifest = <|"identity" -> identity, "parent" -> parent,
+    "blocks" -> blockRecords, "couplings" -> couplings|>;
+  prepared = DiffExp2`CppBackend`PreparePersistentSCC[captures, manifest];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !StringQ[Lookup[prepared, "Session", None]] ||
+      !StringQ[Lookup[prepared, "SCC", None]] ||
+      !StringQ[Lookup[prepared, "Key", None]],
+    err["E5", cs, <|"BackendFailure" -> prepared,
+      "Detail" -> "persistent native SCC preparation failed"|>]];
+  result = prepared;
+  AssociateTo[$nativeSCCCompositeCache, cacheKey -> <|
+    "Signature" -> signature, "Result" -> result|>];
+  result];
 
 sccAggregateDiagnostics[records_List, seq_Association,
     recombine_List] := Module[{diags, getLists, compensated},

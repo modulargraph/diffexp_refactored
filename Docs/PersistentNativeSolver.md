@@ -79,6 +79,19 @@ The implemented recurrence-session commands are:
 | `session.stats` | Return preparation/run timings and retained-object counters. |
 | `session.close` | Release the session deterministically. |
 
+The current Wolfram preparation seam is
+``Solve`PrepareNativeSCCComposite[sccEnvelope, req]``.  It captures each
+diagonal block's ordinary grouped homogeneous request without executing it,
+requires one shared coefficient field and work rectangle, builds the exact
+parent/block/coupling manifest, and calls
+``CppBackend`PreparePersistentSCC[groups, manifest]``.  This first slice is
+strictly limited to regular collision-free blocks with identity gauge and
+spectral transforms.  It always prepares `BlockSequentialStrict`; it never
+constructs a monolithic alternative and is not yet used by production
+`SolveHomogeneous` or transport.  A bounded collision-checked Solve cache
+reuses live handles, checks native stats before an early hit, and fails loudly
+at capacity rather than evicting a public SCC object.
+
 Subsequent milestones extend the same session with complete multi-sector
 composition plus `transport.*`, `endpoint.*`, `integration.*`, and
 `checkpoint.*` operations; they do not introduce a second stateless

@@ -36,10 +36,11 @@ Taylor), not a separate strategy.
 
 ## 2. PUBLIC SYMBOLS
 
-Exactly five exported symbols (M0 review: SolveChart added per
-REVIEW-minimalism defect 3, ratified DEC-9; PrepareChart added per
-REVIEW-math D6, ratified DEC-7).  Everything else is `Private`` (unit tests
-may reach into the private context; nothing else may).
+The core solver API is accompanied by explicit native-migration seams.  The
+latter are named preparation/handle operations and do not silently replace a
+production solve path.  Everything not carrying a `::usage` declaration is
+`Private`` (focused tests may reach into the private context; nothing else
+may).
 
 ### 2.1 SolveHomogeneous
 
@@ -330,6 +331,67 @@ when absent, so the Family record of 3.2 always carries all ordered pairs
 with integer offset >= 0.  +~40 lines against the §9 budget (the former
 OQ1 reserved +20 for the det-V certification; the remaining 20 funded by
 taking part of §9 cut 1).
+
+### 2.6 PrepareNativeSCCComposite
+
+```
+PrepareNativeSCCComposite[sccEnvelope_Association, req_Association]
+  -> <|"Session" -> _String, "SCC" -> _String, "Key" -> _String|>
+```
+
+This is the first strict Wolfram producer for the typed persistent
+`scc.prepare` boundary.  It is preparation-only: `SolveHomogeneous`,
+`SolveParticular`, and `SolveChart` do not dispatch through the returned
+handle yet.
+
+The accepted slice is deliberately narrow and loud.  The input must be a
+lazy multi-block SCC envelope, the configured backend must be persistent C++
+with grouped spectral assembly, every diagonal block must be regular, and
+`Gauge`, `GaugeInverse`, `V`, and `VInv` must each be the exact identity.
+Every family collision/pseudo-compensation record must be absent.  This
+explicit composite API fixes `BlockSequentialStrict` and does not consult the
+old Wolfram `sccExecutionPlan` performance heuristic: a positive recurrence
+pole-depth suggestion does not authorize monolithic preparation, and no
+monolithic chart is built.  First-slice chart geometry has exact rational
+center, exact nonzero rational scale, and exact positive finite rational
+radius.
+
+For each diagonal block the function calls the ordinary
+`solveHomogeneousCore` under dynamically isolated homogeneous/static caches,
+with the established grouped-request capture flag and a request-only guard.
+The capture throws before any native solve.  All resulting request groups
+must have one identical scalar domain, ordered regulator-name list,
+precision, frame base, frame width, and `nmax`; that `nmax` must equal
+
+```
+req["TOrder"] + 2 + 2 IntegrationSequence["CouplingDepth"] .
+```
+
+No second recurrence-preparation path widens or coerces unequal block frames.
+An unequal capture is an unsupported E6.
+
+The composite work bounds come from the captured static rectangle:
+`work_min = fb` and `work_complete_max = fb + w - 1`.  The public requested
+bounds remain those in `req`.  The parent manifest contains the complete
+context-explicit original/theta matrix records, normalized chart geometry,
+the exact zero-based SCC certificate, the block-sequential execution/work
+contract, and deterministic condensation-edge coupling groups prepared by
+`PrepareSCCCouplingMatrix` in the captured coefficient field.  Each captured
+diagonal chart's `ChartAnalytic` record additionally carries its nested exact
+principal submatrix and the four producer capabilities `regular`,
+`identity_gauge`, `identity_v`, and `no_pseudo`; ordinary chart metadata is
+unchanged.
+
+The completed groups and handle-free manifest are passed once to
+``CppBackend`PreparePersistentSCC``.  A bounded Solve-level cache stores the
+opaque result against a SHA-indexed but full-`SameQ` parent
+chart/request/configuration signature, so an identical second call returns
+before block preparation or capture.  A cache hit first performs the cheap
+native SCC stats lookup; a directly released/stale handle is removed and
+rebuilt.  Live public handles are never silently evicted: exhausted Solve
+cache capacity is loud.  `ClearSolveCaches[]` clears the cache and closes the
+owning persistent sessions.  Hashes are indices only and no monolithic
+fallback or production dispatch change is part of this seam.
 
 NOT exported (deliberately): no SolveGeneral convenience wrapper (Transport
 assembles general solutions from columns + particular + matching weights);

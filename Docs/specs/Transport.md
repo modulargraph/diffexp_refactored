@@ -43,15 +43,30 @@ number, `Root`), never a float.
 ### 2.1 `FindSingularities[sys_Association] -> Association`
 
 Input: the LoadSystem record (API.md contract); the fields consumed are
-`sys["SingularFactors"]` (the irreducible x-dependent factors of all matrix
-denominators, the analogue of `DiffExp`State`MatricesIrreducibleFactors`,
-old MatrixLoading.m:217-231) and `sys["ExtraSingularFactors"]` (threaded
+`sys["SingularFactorsExact"]` (the full epsilon-dependent, irreducible
+x-dependent factors of all matrix denominators; legacy records may instead
+supply `sys["SingularFactors"]`) and `sys["ExtraSingularFactors"]` (threaded
 PER CALL from the "ExtraSingularFactors" option of TransportTo and
 IntegrateOverLine — DEC-10, REVIEW-math D20; NOT system state and NOT a
 config key: the FT layer's IBP-coefficient denominators, old
 FeynmanTrick/DiffExpIntegration.m:204-222 `appendMatrixFactors` and
 :1326-1385 `CollectLevelIBPSingularFactors`, cannot place charts without
 it).
+
+Before root finding, every matrix and extra factor is mapped to its exact
+epsilon-zero zero locus: remove the overall epsilon valuation of the exact
+rational factor, take its first nonzero epsilon coefficient, and use the
+numerator of that coefficient.  Epsilon-independent factors are preserved
+verbatim; a constant leading coefficient is dropped (the corresponding root
+moves to infinity).  This projection affects only segmentation.  It never
+changes `sys["Matrix"]` or `sys["SingularFactorsExact"]`, which remain the
+source of truth for chart preparation and indicial analysis.
+
+`DeltaPrescriptions` are projected by the identical rule before chart
+attachment.  Otherwise a prescribed factor such as `x + eps` would plan a
+limiting chart at `x = 0` but fail the literal vanishing test there, losing its
+branch sign.  This projection does not override Solve's `E3` contract for a
+moving matrix denominator that degenerates onto the chart origin.
 
 Output:
 ```

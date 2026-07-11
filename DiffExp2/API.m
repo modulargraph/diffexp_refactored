@@ -9,7 +9,7 @@ BeginPackage["DiffExp2`API`",
    "DiffExp2`SectorSeries`", "DiffExp2`Indicial`", "DiffExp2`Solve`",
    "DiffExp2`Transport`", "DiffExp2`Integrate`"}];
 
-LoadSystem::usage = "LoadSystem[spec] loads an exact eps-rational system: <|\"Matrix\" -> m, \"Variable\" -> x|> (closed form), or <|\"FullMatrixFile\" -> path, \"Variable\" -> x|> (the d<var>_full.m exact export). Returns the system record with SingularFactors.";
+LoadSystem::usage = "LoadSystem[spec] loads an exact eps-rational system: <|\"Matrix\" -> m, \"Variable\" -> x|> (closed form), or <|\"FullMatrixFile\" -> path, \"Variable\" -> x|> (the d<var>_full.m exact export). Returns the unchanged exact Matrix with SingularFactors (the epsilon-zero planner alphabet) and SingularFactorsExact (the full epsilon-dependent denominator factors).";
 TransportEndpoint::usage = "TransportEndpoint[sys, bvals, from, to, opts] transports plain boundary values from a regular anchor to `to` (singular endpoints return the LocalSolution). Options: \"ExtraSingularFactors\".";
 LineIntegral::usage = "LineIntegral[sys, bvals, from, {lo, hi}, c, opts] gives Integrate[c(x, eps) . f(x), {x, lo, hi}] for the transported solution vector f: chart tiling, per-chart rational multiply, exact sector integrals. c is a coefficient VECTOR (one rational function per component).";
 EndpointLimitValues::usage = "EndpointLimitValues[transportResult, cvec] gives the dimreg endpoint limit of c . f at a singular endpoint (drop rule + divergence gate). cvec entries are epsilon-free endpoint scalars; substitute the line variable before calling.";
@@ -55,8 +55,8 @@ singularFactorsOf[A_, var_] := Module[{dens},
     FactorList[Denominator[Together[#]]][[All, 1]] &, Flatten[A]]]];
   Select[dens, !FreeQ[#, var] &]];
 
-LoadSystem[spec_Association] := Module[{A, var, eps},
-  eps = DiffExp2`Config`CanonicalEps[];
+LoadSystem[spec_Association] := Module[
+  {A, var, exactFactors, plannerFactors},
   var = spec["Variable"];
   A = Which[
     KeyExistsQ[spec, "Matrix"], spec["Matrix"],
@@ -75,8 +75,12 @@ LoadSystem[spec_Association] := Module[{A, var, eps},
      caches (PrepareChart, SolveHomogeneous): entries for previous systems
      are dead weight from here on *)
   DiffExp2`Solve`ClearSolveCaches[];
+  exactFactors = singularFactorsOf[A, var];
+  plannerFactors = DiffExp2`Transport`EpsilonZeroSingularFactors[
+    exactFactors, var];
   <|"Matrix" -> A, "Variable" -> var,
-    "SingularFactors" -> singularFactorsOf[A, var]|>];
+    "SingularFactors" -> plannerFactors,
+    "SingularFactorsExact" -> exactFactors|>];
 
 (* ---- TransportEndpoint ---- *)
 

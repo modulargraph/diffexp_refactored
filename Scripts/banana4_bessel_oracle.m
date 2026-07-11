@@ -10,9 +10,12 @@ b4EnvOrDefault[name_, default_] := Module[{value = Environment[name]},
   If[StringQ[value] && StringLength[StringTrim[value]] > 0, value, default]];
 
 b4BesselPrefactor[n_Integer?Positive] := 2^(n - 1);
-b4BesselDensity[r_] := 16 r BesselJ[0, r] BesselK[0, r]^5;
-b4SquaredDensity[0] = 0;
-b4SquaredDensity[t_?NumericQ] := 2 t b4BesselDensity[t^2];
+b4BesselDensityN[n_Integer?Positive, r_] :=
+  b4BesselPrefactor[n] r BesselJ[0, r] BesselK[0, r]^n;
+b4BesselDensity[r_] := b4BesselDensityN[5, r];
+b4SquaredDensityN[n_Integer?Positive, t_?NumericQ] := If[t == 0, 0,
+  2 t b4BesselDensityN[n, t^2]];
+b4SquaredDensity[t_?NumericQ] := b4SquaredDensityN[5, t];
 b4LogDensity[u_?NumericQ] := Exp[u] b4BesselDensity[Exp[u]];
 
 (* K0(r) < Sqrt[Pi/(2 r)] Exp[-r] gives this rigorous r>R bound. *)
@@ -33,7 +36,9 @@ b4NumberString[value_, digits_Integer] := ToString[
 
 runBanana4BesselOracle[] := Module[
   {digits, wp, goal, cutoff, umin, rmin, rCuts, tCuts, uCuts,
-    direct, logValue, upper, lower, delta, elapsed, status, record},
+    direct, logValue, normalization, normalizationReference,
+    normalizationDigits, normalizationDelta, upper, lower, delta, elapsed,
+    status, record},
   digits = Quiet[Check[
     ToExpression[b4EnvOrDefault["BANANA4_BESSEL_DIGITS", "50"], InputForm],
     $Failed]];
@@ -63,15 +68,24 @@ runBanana4BesselOracle[] := Module[
       Evaluate[Prepend[uCuts, u]], WorkingPrecision -> wp,
       AccuracyGoal -> goal, PrecisionGoal -> goal, MaxRecursion -> 40,
       Method -> {"GlobalAdaptive", "SymbolicProcessing" -> 0}], $Failed];
+    normalization = Check[NIntegrate[b4SquaredDensityN[4, t],
+      Evaluate[Prepend[tCuts, t]], WorkingPrecision -> wp,
+      AccuracyGoal -> goal, PrecisionGoal -> goal, MaxRecursion -> 40,
+      Method -> {"GlobalAdaptive", "SymbolicProcessing" -> 0}], $Failed];
   ];
-  If[direct === $Failed || logValue === $Failed,
+  If[direct === $Failed || logValue === $Failed || normalization === $Failed,
     Print["BESSEL_ORACLE integration failed"];
     Exit[1]];
 
+  normalizationReference = N[
+    8268104535868968731543015345479988868728618483845/10^48, wp];
+  normalizationDigits = Min[40, Max[8, digits - 5]];
+  normalizationDelta = Abs[normalization - normalizationReference];
   upper = N[b4UpperTailBound[cutoff], wp];
   lower = N[b4LowerTailBound[rmin], wp];
   delta = Abs[direct - logValue];
-  status = If[b4OracleAcceptQ[direct, logValue, upper, lower, digits],
+  status = If[b4OracleAcceptQ[direct, logValue, upper, lower, digits] &&
+      normalizationDelta < 10^-normalizationDigits,
     "PASS", "FAIL"];
   record = <|
     "Example" -> "banana4", "Level" -> 0,
@@ -83,6 +97,10 @@ runBanana4BesselOracle[] := Module[
     "Cutoff" -> cutoff, "Value" -> b4NumberString[direct, digits],
     "LogChartValue" -> b4NumberString[logValue, digits],
     "CrosscheckAbs" -> b4NumberString[delta, digits],
+    "FourLineValue" -> b4NumberString[normalization, digits],
+    "FourLineReference" -> b4NumberString[normalizationReference, digits],
+    "FourLineAbsDifference" -> b4NumberString[normalizationDelta, digits],
+    "NormalizationDigits" -> normalizationDigits,
     "UpperTailBound" -> b4NumberString[upper, digits],
     "LowerTailBound" -> b4NumberString[lower, digits],
     "ElapsedSeconds" -> N[elapsed, 6], "Status" -> status|>;

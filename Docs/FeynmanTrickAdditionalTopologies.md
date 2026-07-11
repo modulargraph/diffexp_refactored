@@ -91,7 +91,7 @@ integral supply the remaining factors.  Equivalently, the normalized
 Feynman-parameter representation is
 
 ```text
-I4 = Integral_Delta4 d^5 x delta(1-Sum[x_i])/(U+P),
+I4 = Integral_(x_i>=0) d^5 x delta(1-Sum[x_i])/(U+P),
 U = Sum_i Product_(j!=i) x_j,   P = Product_i x_i.
 ```
 
@@ -99,7 +99,8 @@ Here `Gamma(5-4 D/2)=Gamma(1)`, the power of `U` is zero, and
 `p^2=-1` gives `F=U+P`.  As a normalization cross-check, the same
 coordinate-space formula for the established four-line banana gives
 `8.268104535868968731543015345479988868728618483845...`, matching the
-stored equal-mass checkpoint.
+stored equal-mass checkpoint.  The CLI evaluates this moment as an
+independent 40-digit normalization gate in its default configuration.
 
 The standalone oracle uses direct and logarithmic-coordinate quadratures,
 plus analytic bounds on both truncated tails.  Its default target is 50

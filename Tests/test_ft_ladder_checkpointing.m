@@ -23,16 +23,38 @@ test[name_, condition_, detail_: None] :=
 runnerSource = Import[
   FileNameJoin[{repoRoot, "Scripts", "run_ft_stepwise2.m"}], "Text"];
 lowerPos = First@First@StringPosition[runnerSource,
-  "sys, currentBCs, anchor, 0, \"ExtraSingularFactors\""];
+  "Print[\"FTLADDER TRANSPORT ARM level=\", level, \" endpoint=lower\"]"];
 lowerSavePos = First@First@StringPosition[runnerSource,
   "(* This write must finish before the expensive upper solve starts. *)"];
 upperPos = First@First@StringPosition[runnerSource,
-  "sys, currentBCs, anchor, 1, \"ExtraSingularFactors\""];
+  "Print[\"FTLADDER TRANSPORT ARM level=\", level, \" endpoint=upper\"]"];
 test["lower arm is saved before upper transport starts",
   lowerPos < lowerSavePos < upperPos, {lowerPos, lowerSavePos, upperPos}];
 test["resume computes only missing endpoint arms",
   StringContainsQ[runnerSource, "needLo && !AssociationQ[trLoCache]"] &&
     StringContainsQ[runnerSource, "needHi && !AssociationQ[trHiCache]"]];
+test["one-kernel C++ arm batching requires both missing arms",
+  StringContainsQ[runnerSource,
+    "needLo && needHi && !AssociationQ[trLoCache] &&"] &&
+    StringContainsQ[runnerSource,
+      "!AssociationQ[trHiCache]"] &&
+    StringContainsQ[runnerSource,
+      "DiffExp2`Solve`PrewarmHomogeneousBatch[roundSystems, armReq]"]];
+test["arm batching only fills genuinely idle native workers",
+  StringContainsQ[runnerSource,
+    "Length[A] < cppArmThreadBudget"] &&
+    StringContainsQ[runnerSource,
+      "Length[roundSystems] === 2"] &&
+    StringContainsQ[runnerSource,
+      "roundSystems[[1]] =!= roundSystems[[2]]"]];
+test["arm batching opens no Wolfram subkernels",
+  And @@ (!StringContainsQ[runnerSource, #] & /@
+    {"ParallelSubmit", "ParallelMap", "LaunchKernels", "ParallelNeeds"})];
+test["native arm prewarm does not replace synchronous arm checkpoints",
+  StringContainsQ[runnerSource,
+    "This prewarm is pure cache state: it never marks an arm complete."] &&
+    StringContainsQ[runnerSource,
+      "saveTransportProgress[]];\n    If[needHi"]];
 test["checkpoint replacement requests atomic overwrite",
   StringContainsQ[runnerSource,
     "RenameFile[tmp, file, OverwriteTarget -> True]"]];

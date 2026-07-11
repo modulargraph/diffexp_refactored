@@ -23,6 +23,14 @@ Begin["`Private`"];
 err[id_, payload_] := DiffExp2`Tolerances`DE2Error[id,
   Join[<|"Module" -> "Transport"|>, payload]];
 cfg = DiffExp2`Config`CFG;
+SetAttributes[plannerProfile, HoldRest];
+plannerProfile[label_String, expr_] := If[
+  Environment["DE2_PLANNER_PROFILE"] === "1",
+  Module[{time, value},
+    time = First@AbsoluteTiming[value = expr];
+    Print["DE2PLAN ", label, " ", N[time, 8]];
+    value],
+  expr];
 (* zeroQ: exact-first (see Solve.m).  Together-canonical rational functions
    over Q(i) in non-numeric symbols: === 0 decides; inexact/radical/
    numeric-constant forms (RootReduce'd radii etc.) keep the PossibleZeroQ
@@ -105,23 +113,71 @@ mwMaybeDumpMatchFixture[basis_List, Fmat_List, vIn_List, tLoc_,
 (* Stable true modulus shared by all coefficient/residual decisions. *)
 numMag = DiffExp2`Tolerances`NumericMagnitude;
 numMagBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
-(* Numerically compare algebraic points by evaluating each endpoint first.
-   N[a-b] can demand thousands of extra digits merely to recognize a close
-   cancellation between two different Root representations (N::meprec),
-   even though the planner only needs a stable 40-digit distance. *)
-numericDistance[a_, b_, digits_Integer:40] := Module[{delta, value},
-  If[FreeQ[{a, b}, _?InexactNumberQ],
-    delta = Quiet[RootReduce[Together[a - b]]];
-    If[delta === 0, Return[0, Module]];
+(* Exact point identity is used only after a numeric candidate prefilter.
+   This is the singularity-dedup contract from Transport.md 2.1: a numeric
+   key may nominate a pair, but only RootReduce may merge it.  The structural
+   and rational exits cover nearly every ordinary center without entering an
+   algebraic number field. *)
+exactSamePointQ[a_, b_] := SameQ[a, b] || Module[{delta = Together[a - b]},
+  delta === 0 || (!ratExprQ[delta] &&
+    TrueQ[PossibleZeroQ[RootReduce[delta]]])];
+
+(* At 70 probe digits, the 10^-50 relative window is wide enough to catch
+   separately represented equal algebraic numbers, yet merely makes very
+   close distinct roots exact-comparison CANDIDATES.  It can never merge
+   them.  Keeping this threshold independent of WorkingPrecision also keeps
+   pure planner cost independent of a recurrence precision such as WP1000. *)
+numericSameCandidateQ[a_, b_] := Module[{na, nb, scale},
+  If[SameQ[a, b], Return[True, Module]];
+  {na, nb} = Quiet[Check[N[{a, b}, 70], {$Failed, $Failed}]];
+  If[!And[NumericQ[na], NumericQ[nb]], Return[True, Module]];
+  scale = Max[1, Abs[na], Abs[nb]];
+  TrueQ[Abs[na - nb] <= 10^-50 scale]];
+
+exactDeduplicatePoints[points_List] := Module[{out = {}},
+  Do[If[!AnyTrue[Select[out, numericSameCandidateQ[p, #] &],
+        exactSamePointQ[p, #] &], AppendTo[out, p]], {p, points}];
+  out];
+
+exactPointMemberQ[p_, points_List] := MemberQ[points, p] ||
+  AnyTrue[Select[points, numericSameCandidateQ[p, #] &],
+    exactSamePointQ[p, #] &];
+
+(* Numerically compare planner points by evaluating the endpoints first.
+   The previous unconditional RootReduce[a-b] made an O(n^2) spacing scan
+   build a fresh degree-8 number field for every pair.  Rational differences
+   remain exact (pinning the 10^-100 regression); algebraic expressions are
+   evaluated separately, which avoids catastrophic symbolic cancellation.
+   Exact zero decisions never use this helper. *)
+numericDistance[a_, b_, digits_Integer:40] := Module[
+  {delta = Together[a - b], value, reduced},
+  If[delta === 0, Return[0, Module]];
+  If[ratExprQ[delta] && NumericQ[delta],
+    Return[Abs[N[delta, digits]], Module]];
+  value = Quiet[Check[Block[{$MaxExtraPrecision = Max[1000,
+        2*DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]]},
+      Abs[N[a, digits + 20] - N[b, digits + 20]]], $Failed]];
+  If[value === $Failed || !NumericQ[value],
+    err["E8", <|"PointA" -> a, "PointB" -> b,
+      "ExactDifference" -> delta,
+      "Detail" -> "could not resolve an exact algebraic planner distance"|>]];
+  (* Rare close-cancellation fallback.  Endpoint-first evaluation is fast for
+     separated points, but two distinct algebraic numbers can agree through
+     all probe digits.  Low output precision nominates that pair for the
+     expensive exact reduction; it does not make a zero decision. *)
+  If[FreeQ[{a, b}, _?InexactNumberQ] &&
+      (TrueQ[PossibleZeroQ[value]] || !NumericQ[Precision[value]] ||
+        TrueQ[Precision[value] < digits]),
+    reduced = Quiet[RootReduce[delta]];
+    If[reduced === 0, Return[0, Module]];
     value = Quiet[Check[Block[{$MaxExtraPrecision = Max[1000,
           2*DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"]]},
-        N[Abs[delta], digits]], $Failed]];
+        N[Abs[reduced], digits]], $Failed]];
     If[value === $Failed || !NumericQ[value],
       err["E8", <|"PointA" -> a, "PointB" -> b,
-        "ExactDifference" -> delta,
-        "Detail" -> "could not resolve an exact algebraic planner distance"|>]];
-    value,
-    Abs[N[a, digits] - N[b, digits]]]];
+        "ExactDifference" -> reduced,
+        "Detail" -> "could not resolve a close exact algebraic planner distance"|>]]];
+  N[value, digits]];
 
 (* Pipeline numeric handoff: evaluated VALUES entering the matching seam
    numericize at 2x WP — the pinned $InputPrecisionFactor policy and the
@@ -243,7 +299,7 @@ centerValueDatumQ[_] := False;
 
 (* ---- 2.1 singularities ---- *)
 
-projectComplexRoots[all_List] := Module[{data, projected},
+projectComplexRoots[all_List, real_List] := Module[{data, projected},
   (* Port the old DiffExp ghost-waypoint construction faithfully, but keep
      the true complex roots as the sole convergence-radius alphabet.  For a
      conjugate pair z=re+/-i h this contributes the real waypoints
@@ -252,10 +308,22 @@ projectComplexRoots[all_List] := Module[{data, projected},
      fake poles; they stabilize the real march around a nearby complex pair
      and carry no indicial/branch semantics of their own. *)
   data = Map[Function[root, Module[{z = root, re, im, h},
-      re = RootReduce[(z + Conjugate[z])/2];
-      im = RootReduce[(z - Conjugate[z])/(2 I)];
-      h = If[TrueQ[N[im, 50] < 0], -im, im];
-      {z, re, h, N[re, 50], Abs[N[h, 50]]}]], all];
+      (* Keep exact algebraic projections as unevaluated field expressions.
+         RootReduce here is unnecessary: these are numericized/rationalized
+         before becoming regular chart centers.  For conjugate Root pairs,
+         Wolfram canonical arithmetic makes the resulting re,h expressions
+         structurally identical, so the cheap DeleteDuplicates below removes
+         them before the exact-candidate fallback. *)
+      re = (z + Conjugate[z])/2;
+      im = (z - Conjugate[z])/(2 I);
+      h = If[exactPointMemberQ[z, real], 0,
+        If[TrueQ[Re[N[im, 70]] < 0], -im, im]];
+      (* Independent numerical evaluations of conjugate Root objects can
+         leave a harmless 10^-p imaginary center in an exactly real re.
+         Strip that numerical noise only in the occupancy key; the exact re
+         expression above is retained in the returned waypoint. *)
+      {z, re, h, Re[N[re, 70]], Abs[N[h, 70]]}]], all];
+  data = DeleteDuplicatesBy[data, {#[[2]], #[[3]]} &];
   projected = Flatten[Map[Function[row, Module[{re = row[[2]], h = row[[3]],
         reN = row[[4]], hN = row[[5]], leftOccupied, rightOccupied},
       If[TrueQ[PossibleZeroQ[h]], {re},
@@ -263,24 +331,26 @@ projectComplexRoots[all_List] := Module[{data, projected},
           Function[other, TrueQ[reN - hN < other[[4]] < reN]]];
         rightOccupied = AnyTrue[data,
           Function[other, TrueQ[reN < other[[4]] < reN + hN]]];
-        Join[If[leftOccupied, {}, {RootReduce[re - h]}], {re},
-          If[rightOccupied, {}, {RootReduce[re + h]}]]]]], data]];
-  Sort[DeleteDuplicates[projected,
-      TrueQ[PossibleZeroQ[RootReduce[#1 - #2]]] &],
-    N[#1, 50] < N[#2, 50] &]];
+        Join[If[leftOccupied, {}, {re - h}], {re},
+          If[rightOccupied, {}, {re + h}]]]]], data]];
+  SortBy[exactDeduplicatePoints[DeleteDuplicates[projected]],
+    Re[N[#, 70]] &]];
 
 FindSingularities[sys_Association] := Module[
   {var = sys["Variable"], facs, extra, all, roots, real},
   facs = Lookup[sys, "SingularFactors", {}];
   extra = Lookup[sys, "ExtraSingularFactors", {}];
   facs = DeleteDuplicates[Join[facs, extra]];
-  roots = Map[# -> DeleteDuplicates[var /. Solve[# == 0, var]] &, facs];
-  all = DeleteDuplicates[Flatten[Last /@ roots],
-    TrueQ[PossibleZeroQ[RootReduce[#1 - #2]]] &];
-  real = Select[all, zeroQ[Im[RootReduce[#]]] &];
+  roots = plannerProfile["FindRoots",
+    Map[# -> DeleteDuplicates[var /. Solve[# == 0, var]] &, facs]];
+  all = plannerProfile["DeduplicateRoots",
+    exactDeduplicatePoints[Flatten[Last /@ roots]]];
+  real = plannerProfile["ClassifyRealRoots",
+    Select[all, zeroQ[Im[RootReduce[#]]] &]];
   <|"All" -> all,
     "Real" -> real,
-    "Projected" -> projectComplexRoots[all],
+    "Projected" -> plannerProfile["ProjectComplexRoots",
+      projectComplexRoots[all, real]],
     "Factors" -> Association[roots]|>];
 
 chartPrescriptions[center_, var_Symbol] := Module[
@@ -306,29 +376,39 @@ chartPrescriptions[center_, var_Symbol] := Module[
   out];
 
 ChartRadius[center_, all_List] := Module[
-  {others = Select[all, !TrueQ[PossibleZeroQ[RootReduce[# - center]]] &], diffs},
+  {others, diffs, digits = cfg["WorkingPrecision"]},
+  (* Exact membership is candidate-filtered: far algebraic roots never need
+     a number-field reduction, while a separately represented equal point is
+     still excluded only after exact RootReduce confirmation. *)
+  others = Select[all, !exactPointMemberQ[#, {center}] &];
   If[others === {}, Infinity,
-    (* EXACT distances when inputs are exact: inexact radii leak into match
-       points and destroy precision through symbolic-log numericization *)
-    diffs = Map[If[FreeQ[{#, center}, _?InexactNumberQ],
-      RootReduce[Abs[# - center]], numMag[# - center, 40]] &, others];
+    (* Transport.md 2.2 permits a >=WP numerical radius when the exact
+       algebraic modulus is expensive.  Rational/radical distances stay
+       exact (pinning the classic +/-1/k formulas); a Root-valued distance is
+       evaluated from its exact endpoints at WP instead of constructing the
+       often enormous number field of Abs[root-center].  Radius is geometry
+       metadata only: regular chart Scale continues to come from the small
+       exact/rationalized projection alphabet. *)
+    diffs = Map[If[FreeQ[{#, center}, _Root | _?InexactNumberQ],
+      RootReduce[Abs[# - center]], numericDistance[#, center, digits]] &,
+      others];
     Min[diffs]]];
 
 simpleProjectionWaypoints[projected_List, real_List, lineCap_] := Module[
-  {pts},
+  {pts, numericProjected = N[projected, 70]},
   pts = Map[Function[p,
-    If[AnyTrue[real, Function[r,
-        TrueQ[PossibleZeroQ[RootReduce[r - p]]]]], p,
+    If[exactPointMemberQ[p, real], p,
       Module[{seps, tol, cand},
-        seps = Select[numericDistance[p, #, 40] & /@ projected, # > 0 &];
+        (* projected is already exactly deduplicated.  This scan chooses only
+           a rationalization tolerance, so one cached numeric vector is the
+           faithful old DiffExp operation and avoids O(n^2) RootReduce. *)
+        seps = Select[Abs[N[p, 70] - #] & /@ numericProjected, # > 0 &];
         tol = Min[N[lineCap, 40], If[seps === {}, N[lineCap, 40], Min[seps]]]/64;
         cand = Rationalize[N[p, 30], tol];
-        If[AnyTrue[real, Function[r,
-            TrueQ[PossibleZeroQ[RootReduce[r - cand]]]]],
+        If[exactPointMemberQ[cand, real],
           Rationalize[N[p, 30], tol/64], cand]]]], projected];
-  Sort[DeleteDuplicates[pts,
-      TrueQ[PossibleZeroQ[RootReduce[#1 - #2]]] &],
-    N[#1, 40] < N[#2, 40] &]];
+  SortBy[exactDeduplicatePoints[DeleteDuplicates[pts]],
+    Re[N[#, 70]] &]];
 
 projectionRadius[center_, projected_List, lineCap_] := Module[{others},
   others = Select[projected,
@@ -475,7 +555,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
   {sings, real, projected, dir, k = cfg["DivisionOrder"], charts,
    cur, interior, endpointSingular, all, guard = 0, lineCap, prevRad,
    prevMatchRad, var = sys["Variable"]},
-  sings = FindSingularities[sys];
+  sings = plannerProfile["FindSingularities", FindSingularities[sys]];
   all = sings["All"]; real = sings["Real"];
   dir = Sign[to - from];
   If[dir === 0, err["E1", <|"From" -> from, "To" -> to, "Detail" -> "empty line"|>]];
@@ -484,7 +564,8 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
     err["E1", <|"From" -> from,
       "Detail" -> "transport FROM a singular point requires a singular boundary object (not supported in v1 marching start)"|>]];
   lineCap = 2*Abs[to - from];
-  projected = simpleProjectionWaypoints[sings["Projected"], real, lineCap];
+  projected = plannerProfile["SimpleProjectionWaypoints",
+    simpleProjectionWaypoints[sings["Projected"], real, lineCap]];
   interior = Sort[Select[projected, TrueQ[dir*(N[#, 40] - N[from, 40]) > 0] &&
       TrueQ[dir*(N[to, 40] - N[#, 40]) > 0] &], dir*N[#1 - #2, 40] < 0 &];
   (* the ANCHOR CHART sits exactly at `from` (regular by the check above):

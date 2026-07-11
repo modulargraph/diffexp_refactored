@@ -583,6 +583,11 @@ Module[{result = ftData, k, dir, nLevels},
         Length[result["Levels"][k]["SeedMasters"]]];
     ];
     result = ComputeLevelData[result, k];
+    If[!TrueQ[result["Levels"][k]["Computed"]],
+      Print["Error: full iteration aborted because level ", k,
+            " was not computed successfully."];
+      Return[$Failed, Module];
+    ];
     ExportLevel[result, k, dir, "both"];
   , {k, 1, nLevels}];
 

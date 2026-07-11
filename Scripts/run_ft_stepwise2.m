@@ -21,10 +21,18 @@ envOrDefault[name_, default_] := Module[{value = Environment[name]},
 singularMatchPrecondition =
   envOrDefault["DE2_SINGULAR_MATCH_PRECONDITION", "0"] === "1";
 recurrenceBackend = envOrDefault["DE2_RECURRENCE_BACKEND", "Wolfram"];
+cppBatchEndpointArms =
+  envOrDefault["FT_CPP_BATCH_ENDPOINT_ARMS", "0"] === "1";
+cppArmThreadBudget = Quiet[Check[
+  ToExpression[envOrDefault["DE2_CPP_THREADS", "4"]], 4]];
+If[!IntegerQ[cppArmThreadBudget] || cppArmThreadBudget < 1,
+  cppArmThreadBudget = 4];
 DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
   singularMatchPrecondition;
 If[singularMatchPrecondition,
   Print["DE2 singular match precondition enabled"]];
+If[cppBatchEndpointArms && recurrenceBackend =!= "Cpp",
+  cppBatchEndpointArms = False];
 
 wp = ToExpression[envOrDefault["FT_WORKING_PRECISION", "500"]];
 epsOrder = ToExpression[envOrDefault["FT_EPS_ORDER", "0"]];
@@ -484,7 +492,9 @@ runExample[name_String] := Module[
      extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop, ftEps, dimVar,
      dimExpr, normalizeFT, trLoCache, trHiCache, chartCache,
      resumeTransport, levelExpansionOrder, needInt, needLo, needHi,
-     transportCheckpointFile, saveTransportProgress, completedArms},
+     transportCheckpointFile, saveTransportProgress, completedArms,
+     transportSys = None, planLo = None, planHi = None, armReq,
+     loPlanCharts, hiPlanCharts, armRounds, armBatchResult},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -586,10 +596,72 @@ runExample[name_String] := Module[
         "RequestedEpsilonOrder" -> esCMxLevel|>];
       If[saved === $Failed, Throw[$Failed, "FT2Abort"]];
       saved];
+    (* One Wolfram kernel cannot evaluate two marching loops concurrently,
+       but their homogeneous chart bases do not depend on the incoming
+       boundary.  For the C++ backend, collect one lower/upper chart pair at
+       a time into a single native request pool.  The ordinary solve is then
+       replayed with those responses, including all residual certificates,
+       and its memo cache makes the subsequent marches cheap.  Pair-sized
+       waves bound bridge memory and DE2_CPP_THREADS remains the sole native
+       worker budget (no second Wolfram kernel/license and no oversubscription).
+
+       This prewarm is pure cache state: it never marks an arm complete.
+       The lower transport result is still synchronously checkpointed before
+       the upper march starts, and a resume still computes only a missing
+       arm.  Value-vector transport has boundary-dependent recurrences, so it
+       intentionally keeps the established sequential path. *)
+    If[cppBatchEndpointArms && recurrenceBackend === "Cpp" &&
+        Environment["DE2_VALUE_TRANSPORT"] =!= "1" &&
+        Length[A] < cppArmThreadBudget &&
+        needLo && needHi && !AssociationQ[trLoCache] &&
+        !AssociationQ[trHiCache],
+      transportSys = Join[sys, <|"ExtraSingularFactors" ->
+        Select[extraFacs, !FreeQ[#, var] &]|>];
+      planLo = catch2[DiffExp2`Transport`SegmentLine[
+        transportSys, {anchor, 0}]];
+      planHi = catch2[DiffExp2`Transport`SegmentLine[
+        transportSys, {anchor, 1}]];
+      If[FailureQ[planLo] || FailureQ[planHi],
+        Print["TRANSPORT PLAN FAIL ", {planLo, planHi}];
+        Throw[$Failed, "FT2Abort"]];
+      loPlanCharts = planLo["Charts"];
+      hiPlanCharts = planHi["Charts"];
+      armReq = <|"EpsWindow" -> <|"Min" -> 0,
+          "CompleteMax" -> esCMxLevel|>,
+        "TOrder" -> levelExpansionOrder|>;
+      armRounds = Max[Length[loPlanCharts], Length[hiPlanCharts]];
+      Print["FTLADDER CPP ARM BATCH level=", level,
+        " lowerCharts=", Length[loPlanCharts],
+        " upperCharts=", Length[hiPlanCharts],
+        " rounds=", armRounds];
+      Do[Module[{roundCharts, roundSystems},
+        roundCharts = Join[
+          If[ri <= Length[loPlanCharts], {loPlanCharts[[ri]]}, {}],
+          If[ri <= Length[hiPlanCharts], {hiPlanCharts[[ri]]}, {}]];
+        roundSystems = catch2[
+          DiffExp2`Solve`PrepareChart[transportSys, #] & /@ roundCharts];
+        If[FailureQ[roundSystems],
+          Print["CPP ARM PREP FAIL round=", ri, " ", roundSystems];
+          Throw[$Failed, "FT2Abort"]];
+        (* A single tail chart, or the identical shared anchor, has no idle
+           sibling work to fill.  Let the ordinary lower-first march own it
+           instead of paying the two-pass collection overhead. *)
+        If[Length[roundSystems] === 2 &&
+            roundSystems[[1]] =!= roundSystems[[2]],
+          armBatchResult = catch2[
+            DiffExp2`Solve`PrewarmHomogeneousBatch[roundSystems, armReq]];
+          If[FailureQ[armBatchResult],
+            Print["CPP ARM BATCH FAIL round=", ri, " ", armBatchResult];
+            Throw[$Failed, "FT2Abort"]]]],
+        {ri, armRounds}]];
     If[needLo && !AssociationQ[trLoCache],
       Print["FTLADDER TRANSPORT ARM level=", level, " endpoint=lower"];
-      trLoCache = catch2[DiffExp2`API`TransportEndpoint[
-        sys, currentBCs, anchor, 0, "ExtraSingularFactors" -> extraFacs]];
+      trLoCache = catch2[If[AssociationQ[planLo],
+        DiffExp2`Transport`TransportLine[
+          transportSys, currentBCs, planLo],
+        DiffExp2`API`TransportEndpoint[
+          sys, currentBCs, anchor, 0,
+          "ExtraSingularFactors" -> extraFacs]]];
       If[FailureQ[trLoCache],
         Print["TRANSPORT FAIL lower ", trLoCache];
         Throw[$Failed, "FT2Abort"]];
@@ -597,8 +669,12 @@ runExample[name_String] := Module[
       saveTransportProgress[]];
     If[needHi && !AssociationQ[trHiCache],
       Print["FTLADDER TRANSPORT ARM level=", level, " endpoint=upper"];
-      trHiCache = catch2[DiffExp2`API`TransportEndpoint[
-        sys, currentBCs, anchor, 1, "ExtraSingularFactors" -> extraFacs]];
+      trHiCache = catch2[If[AssociationQ[planHi],
+        DiffExp2`Transport`TransportLine[
+          transportSys, currentBCs, planHi],
+        DiffExp2`API`TransportEndpoint[
+          sys, currentBCs, anchor, 1,
+          "ExtraSingularFactors" -> extraFacs]]];
       If[FailureQ[trHiCache],
         Print["TRANSPORT FAIL upper ", trHiCache];
         Throw[$Failed, "FT2Abort"]];

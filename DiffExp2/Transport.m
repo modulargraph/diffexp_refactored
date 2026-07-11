@@ -858,11 +858,38 @@ recombineDegenerate[cs_, basis_List, specs_List, diagnostics_:<||>] := Module[
 
 (* ---- 2.7 matching ---- *)
 
-(* endpoint-matching log-branch convention: prescriptions when derivable,
-   else the fixed +1 convention (weights absorb it; Euclidean FT results
-   stay real - verified against the oracle) *)
-sigmaFor[ls_] := Module[{s = DiffExp2`SectorSeries`ChartImSign[ls]},
-  If[MemberQ[{1, -1}, s], s, 1]];
+(* A missing sign is harmless only for a single-valued evaluation.  Keep the
+   same magnitude-aware material test as the crossing gate: an apparent
+   multivalued sector with certified-zero weight does not manufacture a
+   branch requirement, while ambiguous numerical content remains material. *)
+materialMultivaluedQ[ls_Association] := Module[
+  {secs = ls["Sectors"], scale, coeffZeroCertifiedQ, ltol, floorQ, zeroLimit},
+  scale = Max[1*^-300, Sequence @@ (numMag[#, 20] & /@
+    Select[Flatten[# ["Coeffs"] & /@ secs], NumericQ])];
+  ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"];
+  floorQ = SameQ[ltol, 10^-24];
+  zeroLimit = ltol*scale/If[floorQ, 1,
+    10^DiffExp2`Tolerances`$AmbiguityBandDecades];
+  coeffZeroCertifiedQ[z_] := Which[
+    FreeQ[z, _?InexactNumberQ] && TrueQ[PossibleZeroQ[z]], True,
+    NumericQ[z], With[{upper = Last[numMagBounds[z, 20]]},
+      If[floorQ, TrueQ[upper <= zeroLimit], TrueQ[upper < zeroLimit]]],
+    True, False];
+  AnyTrue[secs, Function[sec,
+    (!IntegerQ[sec["a"]] || !zeroQ[sec["b"]] || sec["p"] > 0) &&
+      !AllTrue[Flatten[sec["Coeffs"]], coeffZeroCertifiedQ]]]];
+
+(* Endpoint/matching evaluation is strict on a negative local arm.  A
+   positive point does not use the sign, so retain +1 there as an inert
+   implementation value. *)
+sigmaFor[ls_, t_:Automatic] := Module[
+  {s = DiffExp2`SectorSeries`ChartImSign[ls]},
+  If[MemberQ[{1, -1}, s], Return[s, Module]];
+  If[t =!= Automatic && TrueQ[t < 0] && materialMultivaluedQ[ls],
+    err["E8", <|"Chart" -> Lookup[ls, "Center", "(unknown)"],
+      "Point" -> t,
+      "Detail" -> "negative-arm multivalued evaluation without a derivable Im-sign (missing DeltaPrescriptions)"|>]];
+  1];
 
 (* ===================== MATCHWEIGHTS FRAME KERNELS =====================
    Gaussian elimination over the eps-Laurent field on PLAIN WINDOWED
@@ -1572,8 +1599,8 @@ SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
   {dec = DiffExp2`Tolerances`EvalErrorSeriesDecrease[Max[couplingDepth, 1]],
    full, red},
   full = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "UsePade" -> False,
-    "ImSign" -> sigmaFor[ls], "ComputeTailEstimates" -> False];
-  red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "ImSign" -> sigmaFor[ls],
+    "ImSign" -> sigmaFor[ls, tOut], "ComputeTailEstimates" -> False];
+  red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "ImSign" -> sigmaFor[ls, tOut],
     "UsePade" -> False, "TOrderReduction" -> dec,
     "ComputeTailEstimates" -> False];
   Table[Module[{kf = esCoeff[full["Value"], k],
@@ -1759,34 +1786,17 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
              7/11 has a t^(-1+eps) sector of physically zero weight; the
              syntactic tag test alone would E8 every such crossing).
              Ambiguous magnitudes stay material -> still loud. *)
-          Module[{secs = current["Sectors"], scale, materialQ,
-              coeffZeroCertifiedQ, ltol, floorQ, zeroLimit},
-            scale = Max[1*^-300, Sequence @@ (numMag[#, 20] & /@
-              Select[Flatten[#["Coeffs"] & /@ secs], NumericQ])];
-            ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"];
-            floorQ = SameQ[ltol, 10^-24];
-            zeroLimit = ltol*scale/If[floorQ, 1,
-              10^DiffExp2`Tolerances`$AmbiguityBandDecades];
-            coeffZeroCertifiedQ[z_] := Which[
-              FreeQ[z, _?InexactNumberQ] && TrueQ[PossibleZeroQ[z]], True,
-              NumericQ[z], With[{upper = Last[numMagBounds[z, 20]]},
-                If[floorQ, TrueQ[upper <= zeroLimit],
-                  TrueQ[upper < zeroLimit]]],
-              True, False];
-            materialQ[sec_] := !AllTrue[Flatten[sec["Coeffs"]],
-              coeffZeroCertifiedQ];
-            If[AnyTrue[Select[secs, materialQ],
-                !IntegerQ[#["a"]] || !zeroQ[#["b"]] || #["p"] > 0 &],
-              err["E8", <|"Chart" -> chart["Name"],
-                "Detail" -> "crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"|>],
-              sigma = 1]]];
+          If[materialMultivaluedQ[current],
+            err["E8", <|"Chart" -> chart["Name"],
+              "Detail" -> "crossing a multivalued singular chart without a derivable Im-sign (missing DeltaPrescriptions)"|>],
+            sigma = 1]];
         If[TrueQ[N[tIn, 30] < 0],
           current = ApplyCrossing[current, sigma];
           crossed = True;
           tIn = -tIn]];  (* a reflected far side evaluates at positive u *)
       valuesAt[tt_] := Module[{ev, vv, d2 = cs["SystemSize"]},
         ev = DiffExp2`SectorSeries`EvaluateLocalSolution[current, tt,
-          "UsePade" -> False, "ImSign" -> sigmaFor[current],
+          "UsePade" -> False, "ImSign" -> sigmaFor[current, tt],
           "ComputeTailEstimates" -> False];
         vv = ev["Value"];
         Table[esNew[esMin[vv], numHandoff[Table[esCoeff[vv, k][[c]],
@@ -1823,7 +1833,7 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           basisValues, pre},
         basisValues[bb_List] := Module[{Feval},
           Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
-            tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#],
+            tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#, tLoc],
             "ComputeTailEstimates" -> False]["Value"] &, bb];
           Table[esNew[esMin[Feval[[i]]],
             numHandoff[Table[esCoeff[Feval[[i]], k][[c]],
@@ -1918,11 +1928,12 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     "EndpointIsSingular" -> plan["EndpointIsSingular"],
     "ErrorEstimate" -> errAcc,
     "Value" -> If[plan["EndpointIsSingular"], None,
-      DiffExp2`SectorSeries`EvaluateLocalSolution[current,
-        Together[(plan["To"] - current["Center"])/
-          current["ChartMap", "Scale"]], "UsePade" -> False,
-        "ImSign" -> sigmaFor[current],
-        "ComputeTailEstimates" -> False]["Value"]]|>];
+      Module[{tFinal = Together[(plan["To"] - current["Center"])/
+          current["ChartMap", "Scale"]]},
+        DiffExp2`SectorSeries`EvaluateLocalSolution[current,
+          tFinal, "UsePade" -> False,
+          "ImSign" -> sigmaFor[current, tFinal],
+          "ComputeTailEstimates" -> False]["Value"]]]|>];
 
 End[];
 EndPackage[];

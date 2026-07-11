@@ -190,19 +190,29 @@ LocalSolution<Scalar> with_selected_component(
 }
 
 template <typename Scalar>
-LocalSolution<Scalar> embedded_component(const LocalSolution<Scalar>& input,
-                                         std::uint32_t component,
-                                         std::uint32_t dimension) {
-  if (input.dimension != 1 || component >= dimension || dimension == 0)
+LocalSolution<Scalar> embedded_components(
+    const LocalSolution<Scalar>& input,
+    const std::vector<std::uint32_t>& components,
+    std::uint32_t dimension) {
+  if (input.dimension == 0 || input.dimension != components.size() ||
+      dimension == 0)
     throw std::invalid_argument("invalid local component embedding");
+  std::vector<std::uint8_t> seen(dimension, 0);
+  for (const auto component : components) {
+    if (component >= dimension || seen[component])
+      throw std::invalid_argument("invalid local component embedding");
+    seen[component] = 1;
+  }
   LocalSolution<Scalar> output;
   output.chart = input.chart;
   output.epsilon = input.epsilon;
   output.taylor_complete_max = input.taylor_complete_max;
   output.dimension = dimension;
   output.prescriptions = input.prescriptions;
-  output.checkpoint_identity = input.checkpoint_identity + ":embedded:" +
-      std::to_string(component) + ":" + std::to_string(dimension);
+  output.checkpoint_identity = input.checkpoint_identity + ":embedded-block:" +
+      std::to_string(input.dimension) + ":" + std::to_string(dimension);
+  for (const auto component : components)
+    output.checkpoint_identity += ":" + std::to_string(component);
   output.sectors.reserve(input.sectors.size());
   for (const auto& sector : input.sectors) {
     LocalSector<Scalar> embedded;
@@ -213,11 +223,24 @@ LocalSolution<Scalar> embedded_component(const LocalSolution<Scalar>& input,
                                  ScalarTraits<Scalar>::zero());
     for (std::size_t ei = 0; ei < input.epsilon.width(); ++ei)
       for (std::size_t n = 0; n < input.taylor_width(); ++n)
-        embedded.coefficients[flat_index(
-            ei, n, component, output.taylor_width(), dimension)] =
-            sector.coefficients[flat_index(ei, n, 0, input.taylor_width(), 1)];
+        for (std::uint32_t local = 0; local < input.dimension; ++local)
+          embedded.coefficients[flat_index(
+              ei, n, components[local], output.taylor_width(), dimension)] =
+              sector.coefficients[flat_index(
+                  ei, n, local, input.taylor_width(), input.dimension)];
     output.sectors.push_back(std::move(embedded));
   }
+  return output;
+}
+
+template <typename Scalar>
+LocalSolution<Scalar> embedded_component(const LocalSolution<Scalar>& input,
+                                         std::uint32_t component,
+                                         std::uint32_t dimension) {
+  auto output = embedded_components(
+      input, std::vector<std::uint32_t>{component}, dimension);
+  output.checkpoint_identity = input.checkpoint_identity + ":embedded:" +
+      std::to_string(component) + ":" + std::to_string(dimension);
   return output;
 }
 

@@ -24,6 +24,7 @@ SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates
 SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
 PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
+SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock] executes one strict exact-rational regular scalar-block SCC basis column through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. seedBlock is one-based. This explicit migration seam is not used by SolveHomogeneous or transport.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
@@ -1693,7 +1694,7 @@ cppNativeExactDescriptor[value_, inputDigits_Integer, cs_] := Module[
 
 cppNativeChartMetadata[cs_Association, inputDigits_Integer] := Module[
   {center = cs["Center"], scale = cs["ChartMap", "Scale"],
-   radius = cs["Radius"], encodedRadius},
+   radius = cs["Radius"], encodedRadius, realRadius},
   If[!FreeQ[{center, scale}, _?InexactNumberQ] ||
       !AllTrue[{center, scale}, NumericQ],
     err["E5", cs, <|"Geometry" -> {center, scale}, "Detail" ->
@@ -1710,7 +1711,14 @@ cppNativeChartMetadata[cs_Association, inputDigits_Integer] := Module[
         !zeroCanQ[RootReduce[Im[radius]]],
       err["E5", cs, <|"Radius" -> radius, "Detail" ->
         "native local chart radius must be a positive real scalar"|>]];
-    encodedRadius = DiffExp2`CppBackend`EncodeScalar[radius, inputDigits];
+    (* Retain an exact rational radius as the native scalar string itself.
+       Besides avoiding an unnecessary Acb pair, this makes local metadata
+       byte-for-byte comparable with a composite's exact retained geometry.
+       Algebraic/non-rational callers keep the ordinary enclosing encoding. *)
+    realRadius = RootReduce[Re[radius]];
+    encodedRadius = If[IntegerQ[realRadius] || Head[realRadius] === Rational,
+      ToString[realRadius, InputForm],
+      DiffExp2`CppBackend`EncodeScalar[radius, inputDigits]];
     If[FailureQ[encodedRadius],
       err["E5", cs, <|"Radius" -> radius,
         "BackendFailure" -> encodedRadius,
@@ -3800,6 +3808,36 @@ sccWorkTOrder[cs_Association, req_Association] :=
    monolithic coarsening candidate. *)
 $nativeSCCCompositeCache = <||>;
 $nativeSCCCompositeCacheMax = 32;
+$nativeSCCColumnRunKeys = {"nmax", "p", "has_initial",
+  "adaptive_probe", "a_target", "b_target", "a_shift_min",
+  "a_shifts", "schedule", "initial", "initial_validity", "source",
+  "return_u"};
+
+(* The compact execution descriptor lives inside the cache record whose
+   complete parent signature is compared with SameQ.  Binding its exact
+   public handle as well prevents a later explicit column solve from
+   consuming run records belonging to another native composite without
+   duplicating the (large) full signature or static operator tensors. *)
+sccNativeCompositeExecutionDescriptorQ[entry_Association,
+    signature_] := Module[{descriptor = Lookup[entry, "Execution", None]},
+  AssociationQ[descriptor] &&
+    SameQ[Lookup[entry, "Signature", None], signature] &&
+    SameQ[Lookup[descriptor, "PublicHandle", None],
+      Lookup[entry, "Result", None]] &&
+    ListQ[Lookup[descriptor, "BlockDimensions", None]] &&
+    ListQ[Lookup[descriptor, "Runs", None]] &&
+    AssociationQ[Lookup[descriptor, "Contract", None]] &&
+    StringQ[Lookup[descriptor, "ParentIdentity", None]] &&
+    ListQ[Lookup[descriptor, "Components", None]] &&
+    ListQ[Lookup[descriptor, "CondensationEdges", None]] &&
+    ListQ[Lookup[descriptor, "TopologicalOrder", None]] &&
+    IntegerQ[Lookup[descriptor, "InputDigits", None]] &&
+    AssociationQ[Lookup[descriptor, "NativeStatistics", None]]];
+
+sccNativeCompositeStatisticsQ[stats_, handle_Association] :=
+  AssociationQ[stats] && Lookup[stats, "status", "error"] === "ok" &&
+    Lookup[stats, "scc", None] === Lookup[handle, "SCC", None] &&
+    Lookup[stats, "key", None] === Lookup[handle, "Key", None];
 
 sccAllSameQ[values_List] := values =!= {} &&
   AllTrue[Rest[values], SameQ[#, First[values]] &];
@@ -3963,7 +4001,8 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    capabilities, badBlocks, captures, capturedContract, fb, width, workTop,
    parentRecords, parentGeometry, parent, blockRecords, serialization,
    couplings, identity, manifest, prepared, result, scale, radius,
-   center, missingReq, components, condensation},
+   center, missingReq, components, condensation, executionDescriptor,
+   inputDigits, runRecords, blockDimensions},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -4006,10 +4045,15 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   cacheKey = Hash[signature, "SHA256"];
   cached = Lookup[$nativeSCCCompositeCache, cacheKey, None];
   If[AssociationQ[cached] && SameQ[cached["Signature"], signature],
+    If[!sccNativeCompositeExecutionDescriptorQ[cached, signature],
+      err["E6", cs, <|"CacheKey" -> cacheKey,
+        "Detail" -> "native SCC cached execution descriptor is not bound to its complete composite signature and public handle"|>]];
     cacheStats = DiffExp2`CppBackend`PersistentSCCStatistics[
       cached["Result"]];
-    If[AssociationQ[cacheStats] &&
-        Lookup[cacheStats, "status", "error"] === "ok",
+    If[sccNativeCompositeStatisticsQ[cacheStats, cached["Result"]],
+      cached["Execution"] = Join[cached["Execution"],
+        <|"NativeStatistics" -> cacheStats|>];
+      AssociateTo[$nativeSCCCompositeCache, cacheKey -> cached];
       Return[cached["Result"], Module]];
     (* Direct native release/session clearing can invalidate an otherwise
        exact Solve cache entry.  Drop only that proved-stale entry and rebuild
@@ -4097,9 +4141,260 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     err["E5", cs, <|"BackendFailure" -> prepared,
       "Detail" -> "persistent native SCC preparation failed"|>]];
   result = prepared;
+  cacheStats = DiffExp2`CppBackend`PersistentSCCStatistics[result];
+  If[FailureQ[cacheStats] ||
+      !sccNativeCompositeStatisticsQ[cacheStats, result],
+    Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[result]];
+    err["E5", cs, <|"BackendFailure" -> cacheStats,
+      "Detail" -> "new persistent native SCC could not be inspected before caching"|>]];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*
+    cfg["WorkingPrecision"];
+  runRecords = Map[Function[capture,
+      KeyTake[#, $nativeSCCColumnRunKeys] & /@ capture["Requests"]],
+    captures];
+  If[!AllTrue[Flatten[runRecords, 1], AssociationQ[#] &&
+        Sort[Keys[#]] === Sort[$nativeSCCColumnRunKeys] &],
+    Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[result]];
+    err["E6", cs, <|"Detail" ->
+      "captured native SCC run records are incomplete after static-payload compaction"|>]];
+  blockDimensions = Lookup[blockSystems, "SystemSize", None];
+  executionDescriptor = <|
+    "PublicHandle" -> result, "BlockDimensions" -> blockDimensions,
+    "Runs" -> runRecords, "Contract" -> capturedContract,
+    "ParentIdentity" -> identity, "Components" -> components,
+    "CondensationEdges" -> condensation,
+    "TopologicalOrder" -> seq["TopologicalOrder"],
+    "InputDigits" -> inputDigits, "NativeStatistics" -> cacheStats|>;
   AssociateTo[$nativeSCCCompositeCache, cacheKey -> <|
-    "Signature" -> signature, "Result" -> result|>];
+    "Signature" -> signature, "Result" -> result,
+    "Execution" -> executionDescriptor|>];
   result];
+
+sccNativeCanonicalScalarScheduleQ[schedule_, nmax_Integer] :=
+  ListQ[schedule] && Length[schedule] === nmax + 1 &&
+    And @@ MapIndexed[Function[{row, index}, Module[
+      {n = First[index] - 1, step},
+      If[!ListQ[row] || Length[row] =!= 1 ||
+          !AssociationQ[First[row]], Return[False, Module]];
+      step = First[row];
+      Sort[Keys[step]] === Sort[{"case", "da", "db"}] &&
+        Lookup[step, "case", None] === If[n === 0, "R", "T"] &&
+        Lookup[step, "da", None] === ToString[n, InputForm] &&
+        Lookup[step, "db", None] === "0"]], schedule];
+
+(* Certify the exact request that the ordinary homogeneous builder captured;
+   execution never fabricates a seed schedule independently of that builder.
+   This v1 domain is intentionally only the exact eps^0 scalar family. *)
+sccNativeCanonicalScalarHomogeneousRequestQ[request_Association,
+    contract_Association] := Module[
+  {fb = Lookup[contract, "FrameBase", None],
+   width = Lookup[contract, "FrameWidth", None],
+   nmax = Lookup[contract, "NMax", None], frameTop, unitIndex, initial},
+  If[!MatchQ[{fb, width, nmax}, {_Integer, _Integer, _Integer}] ||
+      width < 1 || nmax < 0 ||
+      Sort[Keys[request]] =!= Sort[$nativeSCCColumnRunKeys],
+    Return[False, Module]];
+  frameTop = fb + width - 1;
+  unitIndex = 1 - fb;
+  initial = Lookup[request, "initial", None];
+  Lookup[request, "nmax", None] === nmax &&
+    Lookup[request, "p", None] === 0 &&
+    TrueQ[Lookup[request, "has_initial", False]] &&
+    TrueQ[!Lookup[request, "adaptive_probe", True]] &&
+    Lookup[request, "a_target", None] === "0" &&
+    Lookup[request, "b_target", None] === "0" &&
+    Lookup[request, "a_shift_min", None] === 0 &&
+    Lookup[request, "a_shifts", None] ===
+      (ToString[#, InputForm] & /@ Range[0, nmax]) &&
+    sccNativeCanonicalScalarScheduleQ[
+      Lookup[request, "schedule", None], nmax] &&
+    ListQ[initial] && Length[initial] === width &&
+    1 <= unitIndex <= width &&
+    And @@ MapIndexed[
+      If[First[#2] === unitIndex, #1 === "1", #1 === "0"] &,
+      initial] &&
+    Lookup[request, "initial_validity", None] === {frameTop} &&
+    Lookup[request, "source", Missing["Source"]] === Null &&
+    TrueQ[!Lookup[request, "return_u", True]]];
+
+sccNativeColumnRun[request_Association] :=
+  KeyTake[request, $nativeSCCColumnRunKeys];
+
+sccNativeParticularRunTemplate[request_Association] := Module[
+  {run = sccNativeColumnRun[request], initial},
+  initial = Lookup[run, "initial", {}];
+  Join[run, <|"p" -> 0, "has_initial" -> False,
+    "adaptive_probe" -> False, "a_target" -> "0",
+    "b_target" -> "0", "a_shift_min" -> 0,
+    "initial" -> ConstantArray["0", Length[initial]],
+    "initial_validity" -> {Null}, "source" -> Null,
+    "return_u" -> False|>]];
+
+sccNativeReachableTargetBlocks[components_List, edges_List,
+    topological_List, seedBlock_Integer, cs_Association] := Module[
+  {count = Length[components], positions, reachable, outgoing},
+  If[Sort[topological] =!= Range[count] ||
+      !AllTrue[edges, MatchQ[#, {_Integer, _Integer}] &&
+        1 <= #[[1]] <= count && 1 <= #[[2]] <= count &],
+    err["E6", cs, <|"TopologicalOrder" -> topological,
+      "CondensationEdges" -> edges,
+      "Detail" -> "cached native SCC execution graph is malformed"|>]];
+  positions = AssociationThread[topological, Range[count]];
+  If[!AllTrue[edges,
+      positions[#[[1]]] < positions[#[[2]]] &],
+    err["E6", cs, <|"TopologicalOrder" -> topological,
+      "CondensationEdges" -> edges,
+      "Detail" -> "cached native SCC condensation edges violate their exact topological order"|>]];
+  reachable = ConstantArray[False, count];
+  reachable[[seedBlock]] = True;
+  outgoing[block_Integer] := Cases[edges, {block, target_} :> target];
+  Do[If[TrueQ[reachable[[block]]],
+    Scan[(reachable[[#]] = True) &, outgoing[block]]],
+    {block, topological}];
+  Select[topological, # =!= seedBlock && TrueQ[reachable[[#]]] &]];
+
+SolveNativeSCCBasisColumn[cs_Association, req_Association,
+    seedBlock_Integer] := Module[
+  {prepared, signature, cacheKey, cached, execution, blockDimensions,
+   runRecords, contract, canonicalRequests, badBlocks, components, edges,
+   topological, targetBlocks, seedRun, targetRuns, inputDigits,
+   checkpointIdentity, checkpointDigest, seed, targets, stats, response,
+   backendID, provenance, forbiddenPayloadKeys},
+  If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumn] === {},
+    err["E5", cs, <|"Detail" ->
+      "CppBackend persistent SCC column bridge is not available"|>]];
+  prepared = PrepareNativeSCCComposite[cs, req];
+  signature = sccNativeCompositeCacheSignature[cs, req];
+  cacheKey = Hash[signature, "SHA256"];
+  cached = Lookup[$nativeSCCCompositeCache, cacheKey, None];
+  If[!AssociationQ[cached] ||
+      !sccNativeCompositeExecutionDescriptorQ[cached, signature] ||
+      !SameQ[Lookup[cached, "Result", None], prepared],
+    err["E6", cs, <|"CacheKey" -> cacheKey,
+      "Detail" -> "native SCC execution data is absent or not collision-bound to the prepared public handle"|>]];
+  execution = cached["Execution"];
+  blockDimensions = execution["BlockDimensions"];
+  runRecords = execution["Runs"];
+  contract = execution["Contract"];
+  components = execution["Components"];
+  edges = execution["CondensationEdges"];
+  topological = execution["TopologicalOrder"];
+  If[Length[blockDimensions] < 2 ||
+      Length[runRecords] =!= Length[blockDimensions] ||
+      Length[components] =!= Length[blockDimensions] ||
+      !AllTrue[blockDimensions, # === 1 &] ||
+      !AllTrue[components, ListQ[#] && Length[#] === 1 &] ||
+      Lookup[contract, "Domain", None] =!= "rational" ||
+      Lookup[contract, "SymbolNames", None] =!= {},
+    err["E6", cs, <|"Contract" -> contract,
+      "BlockDimensions" -> blockDimensions,
+      "Detail" -> "native SCC column v1 requires two or more exact-rational scalar blocks with no regulator field"|>]];
+  If[seedBlock < 1 || seedBlock > Length[blockDimensions],
+    err["E6", cs, <|"SeedBlock" -> seedBlock,
+      "Blocks" -> Length[blockDimensions],
+      "Detail" -> "native SCC seed block is outside the one-based block range"|>]];
+  If[!AllTrue[runRecords,
+      ListQ[#] && Length[#] === 1 && AssociationQ[First[#]] &],
+    err["E6", cs, <|"Detail" ->
+      "native SCC column requires exactly one captured homogeneous request per scalar block"|>]];
+  canonicalRequests = First /@ runRecords;
+  badBlocks = Select[Range[Length[canonicalRequests]],
+    !sccNativeCanonicalScalarHomogeneousRequestQ[
+      canonicalRequests[[#]], contract] &];
+  If[badBlocks =!= {},
+    err["E6", cs, <|"UnsupportedBlocks" -> badBlocks,
+      "Detail" -> "captured scalar block request is not the canonical exact eps^0 regular homogeneous run"|>]];
+  targetBlocks = sccNativeReachableTargetBlocks[components, edges,
+    topological, seedBlock, cs];
+  seedRun = sccNativeColumnRun[canonicalRequests[[seedBlock]]];
+  targetRuns = sccNativeParticularRunTemplate /@
+    canonicalRequests[[targetBlocks]];
+  inputDigits = execution["InputDigits"];
+  If[!IntegerQ[inputDigits] || inputDigits < 1,
+    err["E6", cs, <|"InputDigits" -> inputDigits,
+      "Detail" -> "cached native SCC local-metadata precision is malformed"|>]];
+  checkpointDigest = Hash[{cacheKey,
+      execution["ParentIdentity"], prepared, seedBlock, seedRun,
+      MapThread[Rule, {targetBlocks, targetRuns}]}, "SHA256"];
+  checkpointIdentity = "de2-native-scc-column-" <>
+    IntegerString[checkpointDigest, 16, 64];
+  seed = <|"block" -> seedBlock - 1, "run" -> seedRun,
+    "metadata" -> cppNativeLocalMetadata[cs, 0, 0, 0, inputDigits,
+      checkpointIdentity <> ":seed:" <> ToString[seedBlock - 1]]|>;
+  targets = MapThread[Function[{block, run}, <|
+      "block" -> block - 1, "run" -> run,
+      "metadata" -> cppNativeLocalMetadata[cs, 0, 0, 0, inputDigits,
+        checkpointIdentity <> ":target:" <> ToString[block - 1]]|>],
+    {targetBlocks, targetRuns}];
+  stats = Lookup[execution, "NativeStatistics", None];
+  If[FailureQ[stats] ||
+      !sccNativeCompositeStatisticsQ[stats, prepared] ||
+      !TrueQ[Lookup[stats, "execution_implemented", False]] ||
+      Lookup[stats, "execution_scope", None] =!=
+        "exact-rational-regular-scalar-block-dag-column-v1",
+    err["E6", cs, <|"NativeStatistics" -> stats,
+      "Detail" -> "retained native SCC does not advertise the strict scalar-DAG column capability"|>]];
+  response = DiffExp2`CppBackend`RunPersistentSCCColumn[
+    prepared, seed, targets, checkpointIdentity];
+  If[FailureQ[response],
+    err["E5", cs, <|"BackendFailure" -> response,
+      "Detail" -> "persistent native SCC basis-column solve failed"|>]];
+  If[!AssociationQ[response] ||
+      Lookup[response, "status", "error"] =!= "ok",
+    backendID = Lookup[response, "id", "E5"];
+    err[If[MemberQ[{"E4", "E5", "E6"}, backendID], backendID, "E5"],
+      cs, <|"BackendID" -> backendID,
+        "Detail" -> Lookup[response, "detail",
+          "persistent native SCC basis-column solve returned an error"]|>]];
+  provenance = Lookup[response, "column_provenance", None];
+  forbiddenPayloadKeys = Intersection[Keys[response],
+    {"assembled", "coefficients", "u", "validity"}];
+  If[!StringQ[Lookup[response, "session", None]] ||
+      !StringQ[Lookup[response, "local", None]] ||
+      Lookup[response, "session", None] =!= prepared["Session"] ||
+      Lookup[response, "scc", None] =!= prepared["SCC"] ||
+      Lookup[response, "chart", None] =!= prepared["SCC"] ||
+      Lookup[response, "dimension", None] =!= cs["SystemSize"] ||
+      !IntegerQ[Lookup[response, "epsilon_min", None]] ||
+      Lookup[response, "epsilon_min", 1] >
+        req["EpsWindow", "CompleteMax"] ||
+      Lookup[response, "epsilon_max", None] =!=
+        req["EpsWindow", "CompleteMax"] ||
+      Lookup[response, "taylor_complete_max", None] =!= req["TOrder"] ||
+      Lookup[response, "checkpoint_identity", None] =!= checkpointIdentity ||
+      !TrueQ[Lookup[response, "native_retained", False]] ||
+      Lookup[response, "json_coefficients", None] =!= 0 ||
+      Lookup[response, "execution_capability", None] =!=
+        "exact-rational-regular-scalar-block-dag-column-v1" ||
+      Lookup[response, "pseudo_hit_count", None] =!= 0 ||
+      forbiddenPayloadKeys =!= {} || !AssociationQ[provenance] ||
+      Lookup[provenance, "scc", None] =!= prepared["SCC"] ||
+      Lookup[provenance, "scc_exact_identity", None] =!=
+        execution["ParentIdentity"] ||
+      Lookup[provenance, "seed_block", None] =!= seedBlock - 1 ||
+      Lookup[provenance, "basis_index", None] =!=
+        First[components[[seedBlock]]] - 1,
+    Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
+    err["E6", cs, <|"BackendResponse" -> response,
+      "ForbiddenPayloadKeys" -> forbiddenPayloadKeys,
+      "Detail" -> "native SCC basis-column summary violated its opaque retained-local or exact-provenance contract"|>]];
+  <|"Type" -> "DiffExp2NativeSCCBasisColumn",
+    "Session" -> response["session"], "Local" -> response["local"],
+    "NativeSCC" -> response["scc"], "NativeChart" -> response["chart"],
+    "SeedBlock" -> seedBlock,
+    "BasisIndex" -> Lookup[provenance, "basis_index"] + 1,
+    "Chart" -> <|"Center" -> cs["Center"],
+      "ChartMap" -> cs["ChartMap"], "Radius" -> cs["Radius"],
+      "Prescriptions" -> cs["Prescriptions"]|>,
+    "EpsWindow" -> <|"Min" -> response["epsilon_min"],
+      "CompleteMax" -> response["epsilon_max"]|>,
+    "TWindow" -> <|"CompleteMax" ->
+      response["taylor_complete_max"]|>,
+    "CheckpointIdentity" -> checkpointIdentity,
+    "ColumnProvenance" -> provenance,
+    "NativeSummary" -> KeyDrop[response,
+      {"status", "session", "local", "scc", "chart", "metadata",
+       "column_provenance"}]|>];
 
 sccAggregateDiagnostics[records_List, seq_Association,
     recombine_List] := Module[{diags, getLists, compensated},

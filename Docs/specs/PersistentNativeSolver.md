@@ -287,9 +287,12 @@ completeness accounting when exact or near cancellations occur.
 
 `scc.prepare` is the schema-2 preparation boundary for native block-sequential
 source propagation. It retains typed diagonal-chart pointers and typed
-coupling multipliers; type erasure occurs only in the session registry. This
-milestone deliberately has no `scc.solve` operation, and its stats report
-`execution_implemented: false`.
+coupling multipliers; type erasure occurs only in the session registry.
+General SCC execution remains disabled, but the deliberately narrow
+`scc.solve_column` operation is enabled when stats certify
+`exact-rational-regular-scalar-block-dag-column-v1`.  All other retained
+composites report `execution_implemented: false` and fail loudly if submitted
+to that operation.
 
 The parent manifest carries two machine-checkable `D` by `D` row-major exact
 matrix records. Every cell has the shape
@@ -382,14 +385,13 @@ analytic records into the ordinary chart collision signature:
 The first slice requires all four capabilities true. Only `identity_v` is
 native-proved here, against the retained identity assembly operator;
 `regular`, `identity_gauge`, and `no_pseudo` remain collision-bound producer
-certificates which a future execution operation must re-prove or refuse.
-Stats label that distinction explicitly. All diagonal charts must share the
-scalar domain, geometry, work frame, and exact SCC principal graph. This
-first slice accepts only exact rational center/scale and finite radius (the
-scale is nonzero and radius strictly positive); unsupported algebraic
-geometry is loud. Signed epsilon
-shifts are retained, and execution must prove that `work_min` supplies enough
-lower halo.
+certificates which execution revalidates or refuses.  Stats label that
+distinction explicitly. All diagonal charts must share the scalar domain,
+geometry, work frame, and exact SCC principal graph. This first slice accepts
+only exact rational center/scale and finite radius (the scale is nonzero and
+radius strictly positive); unsupported algebraic geometry is loud. Signed
+epsilon shifts are retained, and execution proves that `work_min` supplies
+enough lower halo.
 
 The first Wolfram producer is
 ``Solve`PrepareNativeSCCComposite[sccEnvelope, req]``.  It captures each
@@ -411,7 +413,40 @@ Its bounded Solve-level cache compares the full parent chart/request/config
 signature after a hash lookup, validates a hit through `scc.stats`, rebuilds a
 directly released stale handle, and refuses capacity exhaustion rather than
 evicting a live public SCC object.  `ClearSolveCaches[]` clears that cache and
-closes the native sessions.
+closes the native sessions.  Its compact private execution descriptor is
+accepted only within that full-signature cache entry and binds the same public
+handle.  It retains run-only block records, scalar dimensions, graph,
+field/frame contract, identity, precision, and last checked stats; large
+captured static operators and block systems are released after preparation.
+The public preparation result remains opaque.
+
+``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock]`` is the first
+consumer.  It requires scalar blocks and one certified canonical rational
+homogeneous run per block (`p=0`, `a=b=0`, eps^0 unit seed, fixed frame, and
+the exact regular `R/T` schedule).  It sends the seed's captured dynamic run
+unchanged.  For every reachable descendant in the certified topological
+order it derives an exact-zero/no-initial run from that descendant's captured
+run.  C++ multiplies and combines retained predecessor locals, injects the
+source directly into the target recurrence, embeds each scalar result into
+the parent dimension, caps to the public window, and retains the final local.
+The response contains an opaque local handle and exact SCC/seed/basis
+provenance with `json_coefficients: 0`; there is no coefficient slab
+roundtrip.  Parent chart geometry and ordered analytic prescriptions are
+rechecked on every local metadata record.  This explicit column API is not a
+`SolveHomogeneous` or transport dispatch path.
+
+```json
+{
+  "schema":2, "op":"scc.solve_column", "session":"s:1", "scc":"scc:1",
+  "checkpoint_identity":"exact column checkpoint",
+  "seed":{"block":0,"run":{"...":"canonical captured run"},
+          "metadata":{"...":"exact parent local metadata"}},
+  "targets":[
+    {"block":1,"run":{"...":"derived zero-initial run"},
+     "metadata":{"...":"exact parent local metadata"}}
+  ]
+}
+```
 
 ```json
 {"schema":2,"op":"scc.stats","session":"s:1","scc":"scc:1"}

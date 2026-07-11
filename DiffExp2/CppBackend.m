@@ -18,6 +18,7 @@ RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata,
 RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
 PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
 PersistentSCCStatistics::usage = "PersistentSCCStatistics[handle] returns statistics and exact metadata for a retained native SCC chart.";
+RunPersistentSCCColumn::usage = "RunPersistentSCCColumn[handle, seed, targets, checkpointIdentity] executes one strict schema-2 native SCC basis column and returns an opaque retained local-solution summary. seed and every target contain exactly block, run, and metadata; no coefficient slab is returned.";
 ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
@@ -694,6 +695,33 @@ PersistentSCCStatistics[handle_Association] := Module[
   If[FailureQ[tokens], Return[tokens, Module]];
   RunRequest[<|"schema" -> 2, "op" -> "scc.stats",
     "session" -> tokens["Session"], "scc" -> tokens["SCC"]|>]];
+
+RunPersistentSCCColumn[handle_Association, seed_Association,
+    targets_List, checkpointIdentity_String] := Module[
+  {tokens = persistentSCCHandles[handle], entries, badEntries},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[StringLength[checkpointIdentity] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC column checkpoint identity must be nonempty"|>],
+      Module]];
+  entries = Prepend[targets, seed];
+  badEntries = Select[Range[Length[entries]], Function[index,
+    !AssociationQ[entries[[index]]] ||
+      Sort[Keys[entries[[index]]]] =!= Sort[{"block", "run", "metadata"}] ||
+      !IntegerQ[Lookup[entries[[index]], "block", None]] ||
+      Lookup[entries[[index]], "block", -1] < 0 ||
+      !AssociationQ[Lookup[entries[[index]], "run", None]] ||
+      Sort[Keys[Lookup[entries[[index]], "run", <||>]]] =!=
+        Sort[$persistentRunKeys] ||
+      !AssociationQ[Lookup[entries[[index]], "metadata", None]]]];
+  If[badEntries =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent SCC column entries require exactly a zero-based block, canonical recurrence run, and local metadata",
+      "EntryPositions" -> badEntries|>], Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "scc.solve_column",
+    "session" -> tokens["Session"], "scc" -> tokens["SCC"],
+    "seed" -> seed, "targets" -> targets,
+    "checkpoint_identity" -> checkpointIdentity|>]];
 
 ReleasePersistentSCC[handle_Association] := Module[
   {tokens = persistentSCCHandles[handle], response, keys},

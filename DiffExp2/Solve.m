@@ -2009,8 +2009,11 @@ cppBatchRecurrences[cs_, prep_, tasks_List, nmax_Integer, fb_Integer,
         Block[{$cppBuildRequestOnly = True},
           cppRunRecursionCore[cs, prep, task["a"], task["b"], task["P"],
             nmax, None, fb, W, task["Init"], vPrep]]], tasks];
+      metadata = Append[cppPersistentMetadata[cs, fb, W],
+        "PreparedToken" -> staticRecord["Token"]];
       If[TrueQ[$cppHomogeneousBatchCapture],
-        Throw[<|"Requests" -> requests|>, $cppHomogeneousBatchTag]];
+        Throw[<|"Requests" -> requests, "Metadata" -> metadata|>,
+          $cppHomogeneousBatchTag]];
       response = If[AssociationQ[$cppHomogeneousBatchInjection],
         If[Lookup[$cppHomogeneousBatchInjection, "Requests", None] =!= requests ||
             !ListQ[Lookup[$cppHomogeneousBatchInjection, "Results", None]],
@@ -2020,8 +2023,6 @@ cppBatchRecurrences[cs_, prep_, tasks_List, nmax_Integer, fb_Integer,
         <|"status" -> "ok",
           "results" -> $cppHomogeneousBatchInjection["Results"]|>,
         (* Capture/replay above never touches the native session. *)
-        metadata = Append[cppPersistentMetadata[cs, fb, W],
-          "PreparedToken" -> staticRecord["Token"]];
         If[TrueQ[$cppUsePersistentSessions] &&
             Environment["DE2_CPP_PERSISTENT"] =!= "0",
           DiffExp2`CppBackend`RunPersistentRequests[
@@ -2576,7 +2577,8 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
         Block[{$cppHomogeneousBatchCapture = True},
           SolveHomogeneous[cs, req]], $cppHomogeneousBatchTag]},
       If[!AssociationQ[captured] ||
-          !ListQ[Lookup[captured, "Requests", None]],
+          !ListQ[Lookup[captured, "Requests", None]] ||
+          !AssociationQ[Lookup[captured, "Metadata", None]],
         err["E5", cs, <|
           "Detail" -> "homogeneous solve did not yield a capturable C++ recurrence batch"|>]];
       captured]], uncached];
@@ -2586,8 +2588,11 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
       "Detail" -> "captured homogeneous recurrence batch was empty"|>]];
   requests = Flatten[# ["Requests"] & /@ captures, 1];
   threads = cppConfiguredThreads[Length[requests]];
-  response = DiffExp2`CppBackend`RunRequest[
-    <|"batch" -> requests, "threads" -> threads|>];
+  response = If[TrueQ[$cppUsePersistentSessions] &&
+      Environment["DE2_CPP_PERSISTENT"] =!= "0",
+    DiffExp2`CppBackend`RunPersistentRequestGroups[captures, threads],
+    DiffExp2`CppBackend`RunRequest[
+      <|"batch" -> requests, "threads" -> threads|>]];
   If[FailureQ[response] || Lookup[response, "status", "error"] =!= "ok" ||
       !ListQ[Lookup[response, "results", None]] ||
       Length[response["results"]] =!= Length[requests],
@@ -2692,9 +2697,14 @@ SolveNativeLocalFamily[cs_Association, req_Association,
   If[matchingFamilies === {},
     err["E8", cs, <|"Tag" -> tag, "Detail" ->
       "native local family tag is not an exact indicial root of this chart"|>]];
-  If[AnyTrue[matchingFamilies, Lookup[#, "Collisions", {}] =!= {} &],
+  (* local.solve currently assembles recurrence output but does not expose
+     RecurrenceResult::hits for the Wolfram compensation transaction.  Be
+     conservative across the whole prepared frame: a hit against any family
+     must keep using the ordinary compensated path until compensation itself
+     is session-owned. *)
+  If[AnyTrue[fams, Lookup[#, "Collisions", {}] =!= {} &],
     err["E5", cs, <|"Tag" -> tag, "Detail" ->
-      "native local handle cannot yet represent Wolfram pseudo-resonant family compensation"|>]];
+      "native local handle cannot yet represent Wolfram pseudo-resonant family compensation anywhere in the prepared frame"|>]];
 
   blocks = blockList[cs];
   matchingBlocks = Select[blocks,

@@ -260,8 +260,8 @@ specialization (or as exact rationals in rational parity mode).
 
 This entry is deliberately not a replacement for `SolveHomogeneous` yet. It
 requires one non-SCC ChartSystem, the grouped spectral transform, an exact
-identity gauge, a chart family without pseudo-resonant compensation, and a
-fully specialized numeric coefficient field.  In particular it rejects an
+identity gauge, a prepared frame with no pseudo-resonant compensation, and
+a fully specialized numeric coefficient field.  In particular it rejects an
 unresolved analytic regulator instead of sampling it.  Rank-reduced charts
 must wait for a native *sequential* `V`-then-gauge assembly-chain operator:
 composing the two matrices is not equivalent to the existing epsilon/Taylor

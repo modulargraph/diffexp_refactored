@@ -15,6 +15,7 @@ EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact r
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
+RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
@@ -510,6 +511,54 @@ RunPersistentRequests[requests_List, metadata_Association,
     "output_digits" -> outputDigits, "threads" -> threads,
     "runs" -> runs|>];
   response];
+
+preparePersistentRequestGroup[group_Association] := Module[
+  {requests = Lookup[group, "Requests", None],
+   metadata = Lookup[group, "Metadata", None], first, static,
+   outputDigits, incompatible, prepared, jobs},
+  If[!ListQ[requests] || requests === {} ||
+      !AllTrue[requests, AssociationQ] || !AssociationQ[metadata],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent request group requires nonempty Requests and Metadata"|>],
+      Module]];
+  first = First[requests];
+  static = KeyTake[first, $persistentStaticKeys];
+  outputDigits = Lookup[first, "output_digits", 50];
+  incompatible = Select[Rest[requests],
+    !SameQ[KeyTake[#, $persistentStaticKeys], static] ||
+      Lookup[#, "output_digits", 50] =!= outputDigits &];
+  If[incompatible =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "one persistent request group cannot mix prepared operators or output precision"|>],
+      Module]];
+  prepared = preparePersistentRequest[first, metadata];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  jobs = Map[<|"chart" -> prepared["Chart"],
+      "run" -> KeyTake[#, $persistentRunKeys],
+      "output_digits" -> outputDigits|> &, requests];
+  <|"Session" -> prepared["Session"], "Jobs" -> jobs|>];
+
+RunPersistentRequestGroups[groups_List, threads_Integer] := Module[
+  {prepared, failures, sessions, jobs},
+  If[groups === {}, Return[<|"status" -> "ok", "results" -> {}|>, Module]];
+  If[threads < 1 || !AllTrue[groups, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent request groups require associations and a positive thread count"|>],
+      Module]];
+  prepared = preparePersistentRequestGroup /@ groups;
+  failures = Select[prepared, FailureQ[#] || !AssociationQ[#] ||
+      !KeyExistsQ[#, "Session"] &];
+  If[failures =!= {}, Return[First[failures], Module]];
+  sessions = DeleteDuplicates[prepared[[All, "Session"]]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "one cross-chart persistent batch must belong to exactly one solver session",
+      "Sessions" -> sessions|>], Module]];
+  jobs = Flatten[prepared[[All, "Jobs"]], 1];
+  RunRequest[<|"schema" -> 2, "op" -> "session.solve_many",
+    "session" -> First[sessions], "threads" -> threads,
+    "jobs" -> jobs|>]];
 
 (* A native local handle is deliberately represented only by its owning
    session and process-local local token.  Accept both the lower-case native

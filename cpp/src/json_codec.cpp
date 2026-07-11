@@ -1,5 +1,6 @@
 #include "diffexp2/json_codec.hpp"
 
+#include "diffexp2/local_solution.hpp"
 #include "diffexp2/recurrence.hpp"
 
 #include <boost/json.hpp>
@@ -10,6 +11,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -343,6 +345,9 @@ void parse_run_state(const json::object& run,
                      RecurrenceProblem<Scalar>& problem) {
   // These fields are deliberately all required.  A persistent solve must
   // never inherit a previous column's seed, source, or resonance schedule.
+  problem.dimension = prepared.dimension;
+  problem.frame_base = prepared.frame_base;
+  problem.frame_width = prepared.frame_width;
   problem.nmax = as_u32(run.at("nmax"), "nmax");
   problem.log_max = as_u32(run.at("p"), "log maximum");
   problem.has_initial = run.at("has_initial").as_bool();
@@ -694,12 +699,222 @@ std::string required_string(const json::object& object, const char* key) {
   return std::string(value.as_string());
 }
 
+TruthValue parse_truth_value(const json::value& value, const char* label) {
+  if (!value.is_string())
+    throw std::invalid_argument(std::string(label) + " must be yes, no or unknown");
+  const auto text = std::string(value.as_string());
+  if (text == "yes") return TruthValue::Yes;
+  if (text == "no") return TruthValue::No;
+  if (text == "unknown") return TruthValue::Unknown;
+  throw std::invalid_argument(std::string(label) + " must be yes, no or unknown");
+}
+
+ExactSign parse_exact_sign(const json::value& value, const char* label) {
+  if (!value.is_string())
+    throw std::invalid_argument(
+        std::string(label) + " must be negative, zero, positive or unknown");
+  const auto text = std::string(value.as_string());
+  if (text == "negative") return ExactSign::Negative;
+  if (text == "zero") return ExactSign::Zero;
+  if (text == "positive") return ExactSign::Positive;
+  if (text == "unknown") return ExactSign::Unknown;
+  throw std::invalid_argument(
+      std::string(label) + " must be negative, zero, positive or unknown");
+}
+
+void verify_optional_truth(const json::object& object, const char* key,
+                           TruthValue expected) {
+  if (const auto* raw = object.if_contains(key);
+      raw != nullptr && parse_truth_value(*raw, key) != expected)
+    throw std::invalid_argument(
+        std::string("contradictory rational exact-tag fact: ") + key);
+}
+
+void verify_optional_sign(const json::object& object, const char* key,
+                          ExactSign expected) {
+  if (const auto* raw = object.if_contains(key);
+      raw != nullptr && parse_exact_sign(*raw, key) != expected)
+    throw std::invalid_argument(
+        std::string("contradictory rational exact-tag fact: ") + key);
+}
+
+ExactScalarDescriptor parse_exact_descriptor(const json::value& raw,
+                                              const char* label) {
+  const auto& object = as_object(raw, label);
+  const auto domain = required_string(object, "domain");
+  const auto canonical = required_string(object, "canonical");
+  if (domain == "rational") {
+    auto descriptor = ExactScalarDescriptor::rational(canonical);
+    verify_optional_truth(object, "is_zero", descriptor.is_zero);
+    verify_optional_truth(object, "is_integer", descriptor.is_integer);
+    verify_optional_sign(object, "sign", descriptor.sign);
+    if (const auto* raw_specialization = object.if_contains("specialization")) {
+      const auto specialization = parse_scalar<ComplexBall>(*raw_specialization);
+      if (!acb_equal(specialization.raw(), descriptor.numeric().raw()))
+        throw std::invalid_argument(
+            std::string(label) + " specialization contradicts exact rational tag");
+    }
+    return descriptor;
+  }
+
+  const auto zero = parse_truth_value(object.at("is_zero"), "is_zero");
+  const auto integer = parse_truth_value(object.at("is_integer"), "is_integer");
+  const auto sign = parse_exact_sign(object.at("sign"), "sign");
+  std::optional<ComplexBall> specialization;
+  if (const auto* raw_specialization = object.if_contains("specialization"))
+    specialization = parse_scalar<ComplexBall>(*raw_specialization);
+  if (domain == "symbolic-rational") {
+    std::vector<std::string> symbols;
+    for (const auto& symbol : as_array(object.at("symbols"), "tag symbols")) {
+      if (!symbol.is_string() || symbol.as_string().empty())
+        throw std::invalid_argument("tag symbols must be nonempty strings");
+      symbols.emplace_back(symbol.as_string());
+    }
+    return ExactScalarDescriptor::symbolic(
+        canonical, std::move(symbols), zero, integer, sign,
+        std::move(specialization));
+  }
+  if (domain == "algebraic") {
+    if (!specialization.has_value())
+      throw std::invalid_argument(
+          std::string(label) + " algebraic tag requires a specialization");
+    return ExactScalarDescriptor::algebraic(
+        canonical, zero, integer, sign, std::move(*specialization));
+  }
+  throw std::invalid_argument(
+      std::string(label) + " has unsupported exact domain: " + domain);
+}
+
+const char* encode_truth_value(TruthValue value) {
+  if (value == TruthValue::Yes) return "yes";
+  if (value == TruthValue::No) return "no";
+  return "unknown";
+}
+
+const char* encode_exact_sign(ExactSign value) {
+  if (value == ExactSign::Negative) return "negative";
+  if (value == ExactSign::Zero) return "zero";
+  if (value == ExactSign::Positive) return "positive";
+  return "unknown";
+}
+
+json::object encode_exact_descriptor(const ExactScalarDescriptor& descriptor) {
+  const char* domain = descriptor.domain == ExactDomain::Rational
+      ? "rational"
+      : descriptor.domain == ExactDomain::SymbolicRational
+          ? "symbolic-rational" : "algebraic";
+  json::array symbols;
+  for (const auto& symbol : descriptor.symbols) symbols.emplace_back(symbol);
+  return json::object{{"domain", domain}, {"canonical", descriptor.canonical},
+                      {"symbols", std::move(symbols)},
+                      {"is_zero", encode_truth_value(descriptor.is_zero)},
+                      {"is_integer", encode_truth_value(descriptor.is_integer)},
+                      {"sign", encode_exact_sign(descriptor.sign)},
+                      {"has_specialization",
+                       descriptor.specialization.has_value()}};
+}
+
+struct LocalMetadata {
+  ChartGeometry chart;
+  ExactScalarDescriptor a;
+  ExactScalarDescriptor b;
+  std::vector<Prescription> prescriptions;
+  std::string checkpoint_identity;
+};
+
+LocalMetadata parse_local_metadata(const json::object& metadata) {
+  LocalMetadata out;
+  const auto& chart = as_object(metadata.at("chart"), "local chart metadata");
+  out.chart.center_exact = required_string(chart, "center_exact");
+  out.chart.scale_exact = required_string(chart, "scale_exact");
+  out.chart.infinite_radius = chart.at("infinite_radius").as_bool();
+  if (const auto* radius = chart.if_contains("radius"))
+    out.chart.radius = parse_scalar<ComplexBall>(*radius);
+  else if (!out.chart.infinite_radius)
+    throw std::invalid_argument("finite local chart requires a radius");
+  if (!out.chart.infinite_radius &&
+      (!local_detail::exactly_real(out.chart.radius) ||
+       !arb_is_positive(acb_realref(out.chart.radius.raw()))))
+    throw std::invalid_argument(
+        "finite local chart radius must be a provably positive real ball");
+
+  const auto& tag = as_object(metadata.at("tag"), "local exact tag");
+  out.a = parse_exact_descriptor(tag.at("a"), "local a tag");
+  out.b = parse_exact_descriptor(tag.at("b"), "local b tag");
+  for (const auto* descriptor : {&out.a, &out.b})
+    if (descriptor->specialization.has_value() &&
+        !local_detail::exactly_real(*descriptor->specialization))
+      throw std::invalid_argument(
+          "local exact-tag specialization must be real");
+  for (const auto& raw_prescription : as_array(
+           metadata.at("prescriptions"), "local prescriptions")) {
+    const auto& prescription = as_object(
+        raw_prescription, "local prescription");
+    Prescription parsed{
+        required_string(prescription, "factor_exact"),
+        as_i32(prescription.at("sign"), "prescription sign"),
+        as_u32(prescription.at("multiplicity"), "prescription multiplicity"),
+        as_i32(prescription.at("leading_coefficient_sign"),
+               "prescription leading coefficient sign")};
+    if ((parsed.sign != -1 && parsed.sign != 1) ||
+        (parsed.leading_coefficient_sign != -1 &&
+         parsed.leading_coefficient_sign != 1) ||
+        parsed.multiplicity == 0)
+      throw std::invalid_argument(
+          "malformed analytic-continuation prescription");
+    out.prescriptions.push_back(std::move(parsed));
+  }
+  out.checkpoint_identity = required_string(metadata, "checkpoint_identity");
+  return out;
+}
+
+template <typename Scalar>
+void verify_tag_binding(const ExactScalarDescriptor& descriptor,
+                        const Scalar& target, const char* label);
+
+template <>
+void verify_tag_binding<Rational>(const ExactScalarDescriptor& descriptor,
+                                  const Rational& target,
+                                  const char* label) {
+  if (descriptor.domain != ExactDomain::Rational ||
+      !(Rational(descriptor.canonical) == target))
+    throw std::invalid_argument(
+        std::string(label) + " exact tag does not equal recurrence target");
+}
+
+template <>
+void verify_tag_binding<SymbolicRational>(
+    const ExactScalarDescriptor& descriptor,
+    const SymbolicRational& target, const char* label) {
+  if (descriptor.domain == ExactDomain::Algebraic ||
+      !(SymbolicRational(descriptor.canonical) == target))
+    throw std::invalid_argument(
+        std::string(label) + " exact tag does not equal recurrence target");
+}
+
+template <>
+void verify_tag_binding<ComplexBall>(const ExactScalarDescriptor& descriptor,
+                                     const ComplexBall& target,
+                                     const char* label) {
+  if (!descriptor.specialization.has_value())
+    throw std::invalid_argument(
+        std::string(label) + " exact tag needs a numeric specialization");
+  if (!acb_equal(descriptor.specialization->raw(), target.raw()))
+    throw std::invalid_argument(
+        std::string(label) + " specialization does not equal recurrence target");
+}
+
 struct ChartStats {
   std::uint64_t runs = 0;
+  std::uint64_t local_runs = 0;
   double prepare_parse_ms = 0.0;
   double run_parse_ms = 0.0;
   double kernel_ms = 0.0;
+  double local_run_parse_ms = 0.0;
+  double local_kernel_ms = 0.0;
 };
+
+class StoredLocalBase;
 
 class PreparedChartBase {
  public:
@@ -712,6 +927,9 @@ class PreparedChartBase {
   virtual ~PreparedChartBase() = default;
 
   virtual json::object solve(const json::object& run, int output_digits) = 0;
+  virtual std::shared_ptr<StoredLocalBase> solve_local(
+      const std::string& local_handle, const json::object& run,
+      const json::object& metadata) = 0;
   virtual std::uint32_t dimension() const = 0;
   virtual std::int32_t frame_base() const = 0;
   virtual std::uint32_t frame_width() const = 0;
@@ -770,6 +988,230 @@ class AcbPrecisionLease {
   AcbExecutionState& state_;
 };
 
+json::object encode_epsilon_vector(const EpsilonVector& vector, int digits) {
+  json::array coefficients;
+  coefficients.reserve(vector.coefficients.size());
+  for (const auto& coefficient : vector.coefficients)
+    coefficients.push_back(encode_scalar(coefficient, digits));
+  json::object encoded{{"min", vector.epsilon.min_power},
+                       {"max", vector.epsilon.complete_max},
+                       {"dimension", vector.dimension},
+                       {"coefficients", std::move(coefficients)}};
+  if (!vector.error.empty()) {
+    json::array upper;
+    upper.reserve(vector.error.absolute.size());
+    for (const auto& bound : vector.error.absolute)
+      upper.push_back(bound.approximate_upper());
+    const char* guarantee = vector.error.guarantee == ErrorGuarantee::Certified
+        ? "certified"
+        : vector.error.guarantee == ErrorGuarantee::Advisory
+            ? "advisory" : "none";
+    encoded["error"] = json::object{
+        {"min", vector.error.frame.min_power},
+        {"max", vector.error.frame.complete_max},
+        {"guarantee", guarantee},
+        {"absolute_upper_approx", std::move(upper)},
+        {"bound_encoding", "approximate-double"},
+        {"provenance", vector.error.provenance}};
+  }
+  return encoded;
+}
+
+struct StoredLocalStats {
+  std::uint64_t evaluations = 0;
+  double evaluate_ms = 0.0;
+  double create_parse_ms = 0.0;
+  double create_kernel_ms = 0.0;
+  std::size_t coefficient_count = 0;
+};
+
+class StoredLocalBase {
+ public:
+  StoredLocalBase(std::string handle, std::string source_chart,
+                  double create_parse_ms, double create_kernel_ms)
+      : handle_(std::move(handle)), source_chart_(std::move(source_chart)),
+        create_parse_ms_(create_parse_ms),
+        create_kernel_ms_(create_kernel_ms) {}
+  virtual ~StoredLocalBase() = default;
+
+  virtual json::object evaluate(const json::object& request,
+                                int output_digits) = 0;
+  virtual json::object summary() const = 0;
+  virtual json::object stats_json() const = 0;
+  virtual StoredLocalStats stats() const = 0;
+
+  const std::string& handle() const { return handle_; }
+  const std::string& source_chart() const { return source_chart_; }
+
+ protected:
+  std::string handle_;
+  std::string source_chart_;
+  double create_parse_ms_ = 0.0;
+  double create_kernel_ms_ = 0.0;
+};
+
+template <typename Scalar>
+class StoredLocal final : public StoredLocalBase {
+ public:
+  StoredLocal(std::string handle, std::string source_chart,
+              LocalSolution<Scalar>&& solution, slong precision_bits,
+              double create_parse_ms, double create_kernel_ms)
+      : StoredLocalBase(std::move(handle), std::move(source_chart),
+                        create_parse_ms, create_kernel_ms),
+        solution_(std::move(solution)), precision_bits_(precision_bits) {
+    validate_local_solution(solution_, false);
+  }
+
+  json::object evaluate(const json::object& request,
+                        int output_digits) override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "local.evaluate rejects unresolved symbolic coefficients; solve a "
+          "numerically specialized chart before native evaluation");
+    } else {
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
+      const auto& point_object = as_object(
+          request.at("point"), "local evaluation point");
+      const auto point = RealEvaluationPoint::rational(
+          required_string(point_object, "exact"));
+      EvaluationOptions options;
+      if (const auto* raw_options = request.if_contains("options")) {
+        const auto& object = as_object(*raw_options, "local evaluation options");
+        if (const auto* raw_sign = object.if_contains("imaginary_sign");
+            raw_sign != nullptr && !raw_sign->is_null()) {
+          const auto sign = as_i32(*raw_sign, "imaginary sign");
+          if (sign != -1 && sign != 1)
+            throw std::invalid_argument("imaginary sign must be +1 or -1");
+          options.imaginary_sign = sign;
+        }
+        if (const auto* reduction = object.if_contains("t_order_reduction"))
+          options.t_order_reduction = as_u32(
+              *reduction, "Taylor-order reduction");
+        if (const auto* tail = object.if_contains("tail_estimate"))
+          options.compute_tail_estimate = tail->as_bool();
+      }
+      const auto started = std::chrono::steady_clock::now();
+      auto result = evaluate_local_solution(solution_, point, options);
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      evaluations_.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        evaluate_ms_ += elapsed;
+      }
+      return json::object{
+          {"point_exact", point.exact_coordinate},
+          {"imaginary_sign", result.imaginary_sign.has_value()
+               ? json::value(*result.imaginary_sign) : json::value(nullptr)},
+          {"arithmetic_enclosed", result.arithmetic_enclosed},
+          {"elapsed_ms", elapsed},
+          {"value", encode_epsilon_vector(result.value, output_digits)},
+          {"theta", encode_epsilon_vector(result.theta_value, output_digits)}};
+    }
+  }
+
+  json::object summary() const override {
+    return json::object{
+        {"local", handle_}, {"chart", source_chart_},
+        {"dimension", solution_.dimension},
+        {"epsilon_min", solution_.epsilon.min_power},
+        {"epsilon_max", solution_.epsilon.complete_max},
+        {"taylor_complete_max", solution_.taylor_complete_max},
+        {"sectors", solution_.sectors.size()},
+        {"coefficient_count", coefficient_count()},
+        {"checkpoint_identity", solution_.checkpoint_identity},
+        {"metadata", metadata_json()},
+        {"create_parse_ms", create_parse_ms_},
+        {"create_kernel_ms", create_kernel_ms_}};
+  }
+
+  json::object stats_json() const override {
+    auto out = summary();
+    const auto current = stats();
+    out["evaluations"] = current.evaluations;
+    out["evaluate_ms"] = current.evaluate_ms;
+    return out;
+  }
+
+  StoredLocalStats stats() const override {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return {evaluations_.load(), evaluate_ms_, create_parse_ms_,
+            create_kernel_ms_, coefficient_count()};
+  }
+
+ private:
+  json::object metadata_json() const {
+    json::array prescriptions;
+    for (const auto& prescription : solution_.prescriptions) {
+      prescriptions.push_back(json::object{
+          {"factor_exact", prescription.factor_exact},
+          {"sign", prescription.sign},
+          {"multiplicity", prescription.multiplicity},
+          {"leading_coefficient_sign",
+           prescription.leading_coefficient_sign}});
+    }
+    const auto& sector = solution_.sectors.front();
+    return json::object{
+        {"chart", json::object{
+            {"center_exact", solution_.chart.center_exact},
+            {"scale_exact", solution_.chart.scale_exact},
+            {"infinite_radius", solution_.chart.infinite_radius},
+            {"radius_ball", encode_scalar(solution_.chart.radius, 30)}}},
+        {"tag", json::object{{"a", encode_exact_descriptor(sector.a)},
+                             {"b", encode_exact_descriptor(sector.b)}}},
+        {"prescriptions", std::move(prescriptions)}};
+  }
+
+  std::size_t coefficient_count() const {
+    std::size_t count = 0;
+    for (const auto& sector : solution_.sectors)
+      count += sector.coefficients.size();
+    return count;
+  }
+
+  LocalSolution<Scalar> solution_;
+  slong precision_bits_ = 256;
+  std::atomic<std::uint64_t> evaluations_{0};
+  mutable std::mutex stats_mutex_;
+  double evaluate_ms_ = 0.0;
+};
+
+template <typename Scalar>
+LocalSolution<Scalar> make_local_solution(
+    const RecurrenceProblem<Scalar>& problem,
+    AssembledResult<Scalar>&& assembled, LocalMetadata&& metadata) {
+  LocalSolution<Scalar> solution;
+  solution.chart = std::move(metadata.chart);
+  solution.epsilon = {assembled.min_power, assembled.complete_max};
+  solution.taylor_complete_max = problem.nmax;
+  solution.dimension = problem.dimension;
+  solution.prescriptions = std::move(metadata.prescriptions);
+  solution.checkpoint_identity = std::move(metadata.checkpoint_identity);
+
+  const auto sector_size = solution.sector_size();
+  const auto sector_count = static_cast<std::size_t>(problem.log_max) + 1;
+  if (sector_size > std::numeric_limits<std::size_t>::max() / sector_count ||
+      assembled.coefficients.size() != sector_size * sector_count)
+    throw std::invalid_argument(
+        "assembled recurrence tensor cannot form the declared local sectors");
+  auto cursor = assembled.coefficients.begin();
+  for (std::uint32_t log = 0; log <= problem.log_max; ++log) {
+    LocalSector<Scalar> sector;
+    sector.a = metadata.a;
+    sector.b = metadata.b;
+    sector.log_power = log;
+    sector.coefficients.reserve(sector_size);
+    auto end = cursor + static_cast<std::ptrdiff_t>(sector_size);
+    sector.coefficients.insert(
+        sector.coefficients.end(), std::make_move_iterator(cursor),
+        std::make_move_iterator(end));
+    cursor = end;
+    solution.sectors.push_back(std::move(sector));
+  }
+  return solution;
+}
+
 template <typename Scalar>
 class PreparedChart final : public PreparedChartBase {
  public:
@@ -817,12 +1259,69 @@ class PreparedChart final : public PreparedChartBase {
     return result;
   }
 
+  std::shared_ptr<StoredLocalBase> solve_local(
+      const std::string& local_handle, const json::object& run,
+      const json::object& metadata_object) override {
+    if (precision_bits_ < 64)
+      throw std::invalid_argument(
+          "native local solutions require at least 64 bits of Acb precision");
+    // LocalSolution always carries numeric chart geometry and exact-tag
+    // specializations even when its coefficient field is exact.  Lease the
+    // output precision before parsing any such ball.
+    AcbPrecisionLease acb_lease(precision_bits_);
+    ComplexBall::set_precision(precision_bits_);
+    std::unique_lock<std::mutex> symbolic_lock;
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      symbolic_lock = std::unique_lock<std::mutex>(symbolic_run_mutex());
+      SymbolicRational::configure(symbols_);
+    }
+
+    const auto parse_started = std::chrono::steady_clock::now();
+    RecurrenceProblem<Scalar> problem;
+    parse_run_state(run, prepared_, problem);
+    if (!prepared_.assembly_matrix.has_value())
+      throw std::invalid_argument(
+          "local.solve requires a retained chart with native assembly");
+    auto metadata = parse_local_metadata(metadata_object);
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      for (const auto* descriptor : {&metadata.a, &metadata.b})
+        if (descriptor->domain == ExactDomain::SymbolicRational &&
+            descriptor->symbols != symbols_)
+          throw std::invalid_argument(
+              "local exact-tag regulator field differs from its chart session");
+    }
+    verify_tag_binding(metadata.a, problem.a_target, "local a");
+    verify_tag_binding(metadata.b, problem.b_target, "local b");
+    const auto parse_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - parse_started).count();
+
+    const auto kernel_started = std::chrono::steady_clock::now();
+    auto recurrence = RecurrenceSolver<Scalar>(problem, prepared_).run();
+    auto assembled = assemble_recurrence(prepared_, problem, recurrence);
+    auto solution = make_local_solution(
+        problem, std::move(assembled), std::move(metadata));
+    const auto kernel_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - kernel_started).count();
+    auto local = std::make_shared<StoredLocal<Scalar>>(
+        local_handle, handle_, std::move(solution), precision_bits_,
+        parse_ms, kernel_ms);
+    local_runs_.fetch_add(1);
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      local_run_parse_ms_ += parse_ms;
+      local_kernel_ms_ += kernel_ms;
+    }
+    return local;
+  }
+
   std::uint32_t dimension() const override { return prepared_.dimension; }
   std::int32_t frame_base() const override { return prepared_.frame_base; }
   std::uint32_t frame_width() const override { return prepared_.frame_width; }
   ChartStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
-    return {runs_.load(), prepare_parse_ms_, run_parse_ms_, kernel_ms_};
+    return {runs_.load(), local_runs_.load(), prepare_parse_ms_,
+            run_parse_ms_, kernel_ms_, local_run_parse_ms_,
+            local_kernel_ms_};
   }
 
  private:
@@ -830,9 +1329,12 @@ class PreparedChart final : public PreparedChartBase {
   slong precision_bits_ = 256;
   std::vector<std::string> symbols_;
   std::atomic<std::uint64_t> runs_{0};
+  std::atomic<std::uint64_t> local_runs_{0};
   mutable std::mutex stats_mutex_;
   double run_parse_ms_ = 0.0;
   double kernel_ms_ = 0.0;
+  double local_run_parse_ms_ = 0.0;
+  double local_kernel_ms_ = 0.0;
 };
 
 struct SolverSession {
@@ -843,10 +1345,18 @@ struct SolverSession {
   std::vector<std::string> symbols;
   std::string analytic_identity;
   std::size_t chart_capacity = 256;
+  std::size_t local_capacity = 1024;
   std::uint64_t next_chart = 1;
+  std::uint64_t next_local = 1;
+  std::size_t pending_local_solves = 0;
+  std::uint64_t total_local_solves = 0;
+  double total_local_run_parse_ms = 0.0;
+  double total_local_kernel_ms = 0.0;
+  bool closed = false;
   mutable std::mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
   std::unordered_map<std::string, std::string> handles_by_key;
+  std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>> locals;
 };
 
 struct SessionRegistry {
@@ -976,29 +1486,27 @@ json::object run_session_command(const json::object& root) {
         throw std::invalid_argument("chart capacity must lie in 1..4096");
       session->chart_capacity = capacity;
     }
+    if (root.if_contains("local_capacity")) {
+      const auto capacity = as_u32(root.at("local_capacity"), "local capacity");
+      if (capacity == 0 || capacity > 16384)
+        throw std::invalid_argument("local capacity must lie in 1..16384");
+      session->local_capacity = capacity;
+    }
 
     auto& registry = session_registry();
     {
       std::lock_guard<std::mutex> lock(registry.mutex);
-      // ComplexBall's configured precision is thread-local in this backend,
-      // so equal-precision sessions can execute concurrently.  Retaining one
-      // precision across all live sessions also protects any future FLINT
-      // helper that acquires process-global precision state.
-      if (domain == "acb") {
-        for (const auto& [ignored, existing] : registry.sessions) {
-          if (existing->domain == "acb" &&
-              existing->precision_bits != session->precision_bits)
-            throw std::invalid_argument(
-                "simultaneous Acb sessions must use one working precision");
-        }
-      }
+      // Precision is thread-local, and every Acb solve/evaluation acquires a
+      // lease and installs its session precision.  Live sessions may retain
+      // different precisions; unequal active operations serialize as needed.
       session->handle = "s:" + std::to_string(registry.next_session++);
       registry.sessions.emplace(session->handle, session);
     }
     return json::object{{"status", "ok"}, {"session", session->handle},
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
-                        {"chart_capacity", session->chart_capacity}};
+                        {"chart_capacity", session->chart_capacity},
+                        {"local_capacity", session->local_capacity}};
   }
 
   if (operation == "session.close") {
@@ -1013,15 +1521,21 @@ json::object run_session_command(const json::object& root) {
       removed = std::move(found->second);
       registry.sessions.erase(found);
     }
-    std::size_t charts = 0;
+    std::size_t charts = 0, locals = 0;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
+      removed->closed = true;
+      // In-flight local.solve calls own these reservations and decrement them
+      // on exactly one completion path.  Do not reset pending_local_solves.
       charts = removed->charts.size();
+      locals = removed->locals.size();
+      removed->locals.clear();
       removed->charts.clear();
       removed->handles_by_key.clear();
     }
     return json::object{{"status", "ok"}, {"closed", handle},
-                        {"released_charts", charts}};
+                        {"released_charts", charts},
+                        {"released_locals", locals}};
   }
 
   const auto session = find_session(required_string(root, "session"));
@@ -1208,6 +1722,112 @@ json::object run_session_command(const json::object& root) {
         {"elapsed_ms", elapsed_ms}};
   }
 
+  if (operation == "local.solve") {
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    std::string local_handle;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument("persistent local capacity is exhausted");
+      chart = found->second;
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    std::shared_ptr<StoredLocalBase> local;
+    try {
+      local = chart->solve_local(
+          local_handle, as_object(root.at("run"), "recurrence run"),
+          as_object(root.at("metadata"), "local metadata"));
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error("native local reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error("native local reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during local solve");
+      session->locals.emplace(local_handle, local);
+      const auto local_stats = local->stats();
+      ++session->total_local_solves;
+      session->total_local_run_parse_ms += local_stats.create_parse_ms;
+      session->total_local_kernel_ms += local_stats.create_kernel_ms;
+    }
+    auto result = local->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["native_retained"] = true;
+    result["json_coefficients"] = 0;
+    return result;
+  }
+
+  if (operation == "local.evaluate") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument("unknown or released native local solution");
+      local = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = local->evaluate(root, output_digits);
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["local"] = local->handle();
+    result["chart"] = local->source_chart();
+    return result;
+  }
+
+  if (operation == "local.release") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or already released native local solution");
+      removed = std::move(found->second);
+      session->locals.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", local_handle},
+                        {"chart", removed->source_chart()}};
+  }
+
+  if (operation == "local.stats") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument("unknown or released native local solution");
+      local = found->second;
+    }
+    auto result = local->stats_json();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
   if (operation == "chart.release") {
     const auto chart_handle = required_string(root, "chart");
     std::shared_ptr<PreparedChartBase> removed;
@@ -1225,10 +1845,20 @@ json::object run_session_command(const json::object& root) {
 
   if (operation == "session.stats") {
     std::vector<std::shared_ptr<PreparedChartBase>> charts;
+    std::vector<std::shared_ptr<StoredLocalBase>> locals;
+    std::size_t pending_local_solves = 0;
+    std::uint64_t total_local_solves = 0;
+    double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
       for (const auto& [ignored, chart] : session->charts)
         charts.push_back(chart);
+      for (const auto& [ignored, local] : session->locals)
+        locals.push_back(local);
+      pending_local_solves = session->pending_local_solves;
+      total_local_solves = session->total_local_solves;
+      total_local_run_parse_ms = session->total_local_run_parse_ms;
+      total_local_kernel_ms = session->total_local_kernel_ms;
     }
     std::uint64_t runs = 0;
     double prepare_parse_ms = 0.0, run_parse_ms = 0.0, kernel_ms = 0.0;
@@ -1244,6 +1874,7 @@ json::object run_session_command(const json::object& root) {
           {"dimension", chart->dimension()},
           {"frame_base", chart->frame_base()},
           {"frame_width", chart->frame_width()}, {"runs", stats.runs},
+          {"local_solves", stats.local_runs},
           {"scc_components", chart->scc().component_count},
           {"scc_structural_edges", chart->scc().structural_edges.size()},
           {"scc_condensation_edges", chart->scc().condensation_edges.size()},
@@ -1252,17 +1883,39 @@ json::object run_session_command(const json::object& root) {
           {"scc_coupling_depth", chart->scc().coupling_depth},
           {"prepare_parse_ms", stats.prepare_parse_ms},
           {"run_parse_ms", stats.run_parse_ms},
-          {"kernel_ms", stats.kernel_ms}});
+          {"kernel_ms", stats.kernel_ms},
+          {"local_run_parse_ms", stats.local_run_parse_ms},
+          {"local_kernel_ms", stats.local_kernel_ms}});
+    }
+    std::uint64_t local_evaluations = 0;
+    std::size_t local_coefficients = 0;
+    double local_evaluate_ms = 0.0;
+    json::array local_stats;
+    for (const auto& local : locals) {
+      const auto stats = local->stats();
+      local_evaluations += stats.evaluations;
+      local_coefficients += stats.coefficient_count;
+      local_evaluate_ms += stats.evaluate_ms;
+      local_stats.push_back(local->stats_json());
     }
     return json::object{{"status", "ok"}, {"session", session->handle},
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
                         {"charts", charts.size()}, {"runs", runs},
+                        {"locals", locals.size()},
+                        {"pending_local_solves", pending_local_solves},
+                        {"local_solves", total_local_solves},
+                        {"local_evaluations", local_evaluations},
+                        {"local_coefficient_count", local_coefficients},
                         {"static_tensor_copies", 0},
                         {"prepare_parse_ms", prepare_parse_ms},
                         {"run_parse_ms", run_parse_ms},
                         {"kernel_ms", kernel_ms},
-                        {"chart_stats", std::move(chart_stats)}};
+                        {"local_run_parse_ms", total_local_run_parse_ms},
+                        {"local_kernel_ms", total_local_kernel_ms},
+                        {"local_evaluate_ms", local_evaluate_ms},
+                        {"chart_stats", std::move(chart_stats)},
+                        {"local_stats", std::move(local_stats)}};
   }
 
   throw std::invalid_argument("unknown persistent solver operation: " + operation);
@@ -1407,6 +2060,7 @@ std::string backend_info_json() {
   return json::serialize(json::object{{"schema", 1},
                                       {"schemas", json::array{1, 2}},
                                       {"persistent_sessions", true},
+                                      {"persistent_local_solutions", true},
                                       {"backend", "DiffExp2 C++"},
                                       {"flint", flint_version},
                                       {"librarylink", true}});

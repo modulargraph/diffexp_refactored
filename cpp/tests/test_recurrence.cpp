@@ -243,14 +243,17 @@ void test_persistent_operator_session() {
   const auto acb = json_request(R"json({
     "schema":2,"op":"session.create","domain":"acb",
     "precision_bits":128,"output_digits":30})json");
-  const auto incompatible = json_request(R"json({
+  const auto other_precision = json_request(R"json({
     "schema":2,"op":"session.create","domain":"acb",
     "precision_bits":256,"output_digits":30})json");
-  check("persistent Acb sessions reject incompatible simultaneous precision",
-        acb.at("status") == "ok" && incompatible.at("status") == "error");
+  check("persistent Acb sessions retain independent idle precisions",
+        acb.at("status") == "ok" && other_precision.at("status") == "ok");
   (void)json_request(std::string(R"json({
     "schema":2,"op":"session.close","session":")json") +
     std::string(acb.at("session").as_string()) + "\"}");
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") +
+    std::string(other_precision.at("session").as_string()) + "\"}");
 }
 
 }  // namespace

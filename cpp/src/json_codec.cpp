@@ -1,5 +1,6 @@
 #include "diffexp2/json_codec.hpp"
 
+#include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
 #include "diffexp2/recurrence.hpp"
 
@@ -699,6 +700,95 @@ std::string required_string(const json::object& object, const char* key) {
   return std::string(value.as_string());
 }
 
+std::string canonical_chart_geometry_record(const json::value& raw) {
+  const auto& geometry = as_object(raw, "exact chart geometry");
+  const auto center = required_string(geometry, "center_exact");
+  const auto scale = required_string(geometry, "scale_exact");
+  if (scale == "0")
+    throw std::invalid_argument(
+        "exact chart geometry requires a nonzero scale");
+  const auto infinite = geometry.at("infinite_radius").as_bool();
+
+  json::array prescriptions;
+  for (const auto& raw_prescription : as_array(
+           geometry.at("prescriptions"), "exact chart prescriptions")) {
+    const auto& prescription = as_object(
+        raw_prescription, "exact chart prescription");
+    const auto factor = required_string(prescription, "factor_exact");
+    const auto sign = as_i32(prescription.at("sign"), "prescription sign");
+    const auto multiplicity = as_u32(
+        prescription.at("multiplicity"), "prescription multiplicity");
+    const auto leading = as_i32(
+        prescription.at("leading_coefficient_sign"),
+        "prescription leading coefficient sign");
+    if ((sign != -1 && sign != 1) || multiplicity == 0 ||
+        (leading != -1 && leading != 1))
+      throw std::invalid_argument(
+          "malformed exact chart prescription");
+    prescriptions.push_back(json::object{
+        {"factor_exact", factor}, {"sign", sign},
+        {"multiplicity", multiplicity},
+        {"leading_coefficient_sign", leading}});
+  }
+
+  json::object canonical{{"center_exact", center},
+                         {"scale_exact", scale},
+                         {"infinite_radius", infinite}};
+  if (infinite) {
+    if (const auto* radius = geometry.if_contains("radius_exact");
+        radius != nullptr && !radius->is_null() &&
+        (!radius->is_string() || radius->as_string() != "Infinity"))
+      throw std::invalid_argument(
+          "infinite exact chart geometry radius identity must be Infinity");
+    // The Wolfram producer historically emitted radius_exact even for an
+    // infinite chart.  Canonicalize both its explicit form and an omitted
+    // field to the same exact record so composite preparation remains
+    // backward compatible without accepting a finite-radius mismatch.
+    canonical["radius_exact"] = "Infinity";
+  } else {
+    canonical["radius_exact"] = required_string(geometry, "radius_exact");
+  }
+  canonical["prescriptions"] = std::move(prescriptions);
+  return json::serialize(canonical);
+}
+
+void validate_first_slice_rational_geometry(const json::value& raw) {
+  const auto& geometry = as_object(raw, "exact chart geometry");
+  Rational scale;
+  try {
+    scale = Rational(required_string(geometry, "scale_exact"));
+  } catch (const std::invalid_argument&) {
+    throw std::invalid_argument(
+        "native SCC first slice requires an exact rational chart scale");
+  }
+  if (scale.is_zero())
+    throw std::invalid_argument(
+        "native SCC first slice requires a nonzero chart scale");
+  if (geometry.at("infinite_radius").as_bool()) return;
+
+  Rational radius;
+  try {
+    radius = Rational(required_string(geometry, "radius_exact"));
+  } catch (const std::invalid_argument&) {
+    throw std::invalid_argument(
+        "native SCC first slice requires an exact rational finite radius");
+  }
+  const auto canonical_radius = radius.str();
+  if (radius.is_zero() || canonical_radius.front() == '-')
+    throw std::invalid_argument(
+        "native SCC first slice requires a positive finite radius");
+}
+
+std::string canonical_native_scc_capabilities(const json::value& raw) {
+  const auto& capabilities = as_object(
+      raw, "native SCC chart capabilities");
+  return json::serialize(json::object{
+      {"regular", capabilities.at("regular").as_bool()},
+      {"identity_gauge", capabilities.at("identity_gauge").as_bool()},
+      {"identity_v", capabilities.at("identity_v").as_bool()},
+      {"no_pseudo", capabilities.at("no_pseudo").as_bool()}});
+}
+
 TruthValue parse_truth_value(const json::value& value, const char* label) {
   if (!value.is_string())
     throw std::invalid_argument(std::string(label) + " must be yes, no or unknown");
@@ -919,10 +1009,18 @@ class StoredLocalBase;
 class PreparedChartBase {
  public:
   PreparedChartBase(std::string handle, std::string key,
-                    std::string signature, SCCCertificate scc,
-                    double prepare_parse_ms)
+                    std::string exact_identity, std::string signature,
+                    std::optional<std::string> geometry_record,
+                    std::optional<std::string> principal_matrix_record,
+                    std::optional<std::string> native_scc_capabilities,
+                    SCCCertificate scc, double prepare_parse_ms)
       : handle_(std::move(handle)), key_(std::move(key)),
-        signature_(std::move(signature)), scc_(std::move(scc)),
+        exact_identity_(std::move(exact_identity)),
+        signature_(std::move(signature)),
+        geometry_record_(std::move(geometry_record)),
+        principal_matrix_record_(std::move(principal_matrix_record)),
+        native_scc_capabilities_(std::move(native_scc_capabilities)),
+        scc_(std::move(scc)),
         prepare_parse_ms_(prepare_parse_ms) {}
   virtual ~PreparedChartBase() = default;
 
@@ -937,20 +1035,57 @@ class PreparedChartBase {
 
   const std::string& handle() const { return handle_; }
   const std::string& key() const { return key_; }
+  const std::string& exact_identity() const { return exact_identity_; }
   const std::string& signature() const { return signature_; }
+  const std::optional<std::string>& geometry_record() const {
+    return geometry_record_;
+  }
+  const std::optional<std::string>& principal_matrix_record() const {
+    return principal_matrix_record_;
+  }
+  const std::optional<std::string>& native_scc_capabilities() const {
+    return native_scc_capabilities_;
+  }
   const SCCCertificate& scc() const { return scc_; }
 
  protected:
   std::string handle_;
   std::string key_;
+  std::string exact_identity_;
   std::string signature_;
+  std::optional<std::string> geometry_record_;
+  std::optional<std::string> principal_matrix_record_;
+  std::optional<std::string> native_scc_capabilities_;
   SCCCertificate scc_;
   double prepare_parse_ms_ = 0.0;
 };
 
-std::mutex& symbolic_run_mutex() {
-  static std::mutex mutex;
+std::recursive_mutex& symbolic_run_mutex() {
+  static std::recursive_mutex mutex;
   return mutex;
+}
+
+template <typename Scalar, typename Object, typename... Arguments>
+std::shared_ptr<Object> make_retained_typed_shared(Arguments&&... arguments) {
+  if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+    // SymbolicRational destruction touches the process-global FLINT context
+    // and live-object count.  The deleter travels with the shared_ptr control
+    // block through base conversions and dynamic casts, so releases, session
+    // close, library reset, and delayed in-flight holders all serialize.  A
+    // recursive mutex is required because destroying a composite can release
+    // its last typed chart pointers under this same deleter.
+    std::lock_guard<std::recursive_mutex> construction_lock(
+        symbolic_run_mutex());
+    return std::shared_ptr<Object>(
+        new Object(std::forward<Arguments>(arguments)...),
+        [](Object* object) {
+          std::lock_guard<std::recursive_mutex> lock(symbolic_run_mutex());
+          delete object;
+        });
+  } else {
+    return std::make_shared<Object>(
+        std::forward<Arguments>(arguments)...);
+  }
 }
 
 struct AcbExecutionState {
@@ -1025,6 +1160,19 @@ struct StoredLocalStats {
   std::size_t coefficient_count = 0;
 };
 
+struct NativeLocalDiagnostics {
+  std::int32_t top_valid = kCompleteInfinity;
+  double parse_ms = 0.0;
+  double kernel_ms = 0.0;
+};
+
+template <typename Scalar>
+struct NativeLocalRun {
+  LocalSolution<Scalar> solution;
+  std::vector<PseudoHit<Scalar>> pseudo_hits;
+  NativeLocalDiagnostics diagnostics;
+};
+
 class StoredLocalBase {
  public:
   StoredLocalBase(std::string handle, std::string source_chart,
@@ -1055,10 +1203,12 @@ class StoredLocal final : public StoredLocalBase {
  public:
   StoredLocal(std::string handle, std::string source_chart,
               LocalSolution<Scalar>&& solution, slong precision_bits,
-              double create_parse_ms, double create_kernel_ms)
+              std::vector<PseudoHit<Scalar>>&& pseudo_hits,
+              NativeLocalDiagnostics diagnostics)
       : StoredLocalBase(std::move(handle), std::move(source_chart),
-                        create_parse_ms, create_kernel_ms),
-        solution_(std::move(solution)), precision_bits_(precision_bits) {
+                        diagnostics.parse_ms, diagnostics.kernel_ms),
+        solution_(std::move(solution)), precision_bits_(precision_bits),
+        pseudo_hits_(std::move(pseudo_hits)), top_valid_(diagnostics.top_valid) {
     validate_local_solution(solution_, false);
   }
 
@@ -1120,6 +1270,8 @@ class StoredLocal final : public StoredLocalBase {
         {"taylor_complete_max", solution_.taylor_complete_max},
         {"sectors", solution_.sectors.size()},
         {"coefficient_count", coefficient_count()},
+        {"pseudo_hit_count", pseudo_hits_.size()},
+        {"top_valid", encode_validity(top_valid_)},
         {"checkpoint_identity", solution_.checkpoint_identity},
         {"metadata", metadata_json()},
         {"create_parse_ms", create_parse_ms_},
@@ -1138,6 +1290,11 @@ class StoredLocal final : public StoredLocalBase {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return {evaluations_.load(), evaluate_ms_, create_parse_ms_,
             create_kernel_ms_, coefficient_count()};
+  }
+
+  const LocalSolution<Scalar>& solution() const { return solution_; }
+  const std::vector<PseudoHit<Scalar>>& pseudo_hits() const {
+    return pseudo_hits_;
   }
 
  private:
@@ -1172,6 +1329,8 @@ class StoredLocal final : public StoredLocalBase {
 
   LocalSolution<Scalar> solution_;
   slong precision_bits_ = 256;
+  std::vector<PseudoHit<Scalar>> pseudo_hits_;
+  std::int32_t top_valid_ = kCompleteInfinity;
   std::atomic<std::uint64_t> evaluations_{0};
   mutable std::mutex stats_mutex_;
   double evaluate_ms_ = 0.0;
@@ -1215,13 +1374,20 @@ LocalSolution<Scalar> make_local_solution(
 template <typename Scalar>
 class PreparedChart final : public PreparedChartBase {
  public:
-  PreparedChart(std::string handle, std::string key, std::string signature,
+  PreparedChart(std::string handle, std::string key,
+                std::string exact_identity, std::string signature,
+                std::optional<std::string> geometry_record,
+                std::optional<std::string> principal_matrix_record,
+                std::optional<std::string> native_scc_capabilities,
                 SCCCertificate scc,
                 PreparedRecurrenceOperator<Scalar>&& prepared,
                 slong precision_bits, std::vector<std::string> symbols,
                 double prepare_parse_ms)
       : PreparedChartBase(std::move(handle), std::move(key),
-                          std::move(signature), std::move(scc),
+                          std::move(exact_identity), std::move(signature),
+                          std::move(geometry_record),
+                          std::move(principal_matrix_record),
+                          std::move(native_scc_capabilities), std::move(scc),
                           prepare_parse_ms),
         prepared_(std::move(prepared)), precision_bits_(precision_bits),
         symbols_(std::move(symbols)) {}
@@ -1233,9 +1399,10 @@ class PreparedChart final : public PreparedChartBase {
       acb_lease = std::make_unique<AcbPrecisionLease>(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
     }
-    std::unique_lock<std::mutex> symbolic_lock;
+    std::unique_lock<std::recursive_mutex> symbolic_lock;
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
-      symbolic_lock = std::unique_lock<std::mutex>(symbolic_run_mutex());
+      symbolic_lock =
+          std::unique_lock<std::recursive_mutex>(symbolic_run_mutex());
       SymbolicRational::configure(symbols_);
     }
     RecurrenceProblem<Scalar> problem;
@@ -1259,9 +1426,8 @@ class PreparedChart final : public PreparedChartBase {
     return result;
   }
 
-  std::shared_ptr<StoredLocalBase> solve_local(
-      const std::string& local_handle, const json::object& run,
-      const json::object& metadata_object) override {
+  NativeLocalRun<Scalar> solve_native(
+      const json::object& run, const json::object& metadata_object) {
     if (precision_bits_ < 64)
       throw std::invalid_argument(
           "native local solutions require at least 64 bits of Acb precision");
@@ -1270,9 +1436,10 @@ class PreparedChart final : public PreparedChartBase {
     // output precision before parsing any such ball.
     AcbPrecisionLease acb_lease(precision_bits_);
     ComplexBall::set_precision(precision_bits_);
-    std::unique_lock<std::mutex> symbolic_lock;
+    std::unique_lock<std::recursive_mutex> symbolic_lock;
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
-      symbolic_lock = std::unique_lock<std::mutex>(symbolic_run_mutex());
+      symbolic_lock =
+          std::unique_lock<std::recursive_mutex>(symbolic_run_mutex());
       SymbolicRational::configure(symbols_);
     }
 
@@ -1300,16 +1467,26 @@ class PreparedChart final : public PreparedChartBase {
     auto assembled = assemble_recurrence(prepared_, problem, recurrence);
     auto solution = make_local_solution(
         problem, std::move(assembled), std::move(metadata));
+    validate_local_solution(solution, false);
+    auto pseudo_hits = std::move(recurrence.hits);
     const auto kernel_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - kernel_started).count();
-    auto local = std::make_shared<StoredLocal<Scalar>>(
-        local_handle, handle_, std::move(solution), precision_bits_,
-        parse_ms, kernel_ms);
+    return {std::move(solution), std::move(pseudo_hits),
+            {recurrence.top_valid, parse_ms, kernel_ms}};
+  }
+
+  std::shared_ptr<StoredLocalBase> solve_local(
+      const std::string& local_handle, const json::object& run,
+      const json::object& metadata_object) override {
+    auto native = solve_native(run, metadata_object);
+    auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+        local_handle, handle_, std::move(native.solution), precision_bits_,
+        std::move(native.pseudo_hits), native.diagnostics);
     local_runs_.fetch_add(1);
     {
       std::lock_guard<std::mutex> lock(stats_mutex_);
-      local_run_parse_ms_ += parse_ms;
-      local_kernel_ms_ += kernel_ms;
+      local_run_parse_ms_ += native.diagnostics.parse_ms;
+      local_kernel_ms_ += native.diagnostics.kernel_ms;
     }
     return local;
   }
@@ -1317,6 +1494,10 @@ class PreparedChart final : public PreparedChartBase {
   std::uint32_t dimension() const override { return prepared_.dimension; }
   std::int32_t frame_base() const override { return prepared_.frame_base; }
   std::uint32_t frame_width() const override { return prepared_.frame_width; }
+  bool has_identity_assembly() const {
+    return prepared_.assembly_matrix.has_value() &&
+           prepared_.assembly_matrix->identity;
+  }
   ChartStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return {runs_.load(), local_runs_.load(), prepare_parse_ms_,
@@ -1337,6 +1518,154 @@ class PreparedChart final : public PreparedChartBase {
   double local_kernel_ms_ = 0.0;
 };
 
+class CompositeSCCChartBase {
+ public:
+  CompositeSCCChartBase(std::string handle, std::string key,
+                        std::string exact_identity, std::string signature)
+      : handle_(std::move(handle)), key_(std::move(key)),
+        exact_identity_(std::move(exact_identity)),
+        signature_(std::move(signature)) {}
+  virtual ~CompositeSCCChartBase() = default;
+
+  virtual json::object stats_json() const = 0;
+  const std::string& handle() const { return handle_; }
+  const std::string& key() const { return key_; }
+  const std::string& exact_identity() const { return exact_identity_; }
+  const std::string& signature() const { return signature_; }
+
+ protected:
+  std::string handle_;
+  std::string key_;
+  std::string exact_identity_;
+  std::string signature_;
+};
+
+struct CompositeWorkContract {
+  std::int32_t work_min = 0;
+  std::int32_t requested_min = 0;
+  std::int32_t requested_max = 0;
+  std::int32_t work_complete_max = 0;
+  std::uint32_t public_t_order = 0;
+  std::uint32_t work_t_order = 0;
+  std::uint32_t wolfram_coupling_depth = 0;
+};
+
+template <typename Scalar>
+struct CompositeSCCBlock {
+  std::uint32_t block = 0;
+  std::vector<std::uint32_t> vertices;
+  std::string source_handle;
+  std::string principal_identity;
+  std::shared_ptr<PreparedChart<Scalar>> chart;
+};
+
+struct CompositeCouplingIdentity {
+  std::uint32_t source_vertex = 0;
+  std::uint32_t target_vertex = 0;
+  std::string exact_original_entry;
+  std::string exact_theta_entry;
+  bool proven_zero = false;
+};
+
+template <typename Scalar>
+struct CompositeSCCCoupling {
+  std::uint32_t source_block = 0;
+  std::uint32_t target_block = 0;
+  std::string producer_identity;
+  PreparedSparseLocalMultiplierMatrix<Scalar> matrix;
+  std::vector<CompositeCouplingIdentity> identities;
+};
+
+template <typename Scalar>
+class CompositeSCCChart final : public CompositeSCCChartBase {
+ public:
+  CompositeSCCChart(std::string handle, std::string key,
+                    std::string exact_identity, std::string signature,
+                    std::uint32_t dimension, SCCCertificate graph,
+                    std::string exact_system_record,
+                    std::string exact_theta_record,
+                    std::string geometry_record,
+                    CompositeWorkContract work,
+                    std::vector<CompositeSCCBlock<Scalar>> blocks,
+                    std::vector<CompositeSCCCoupling<Scalar>> couplings)
+      : CompositeSCCChartBase(std::move(handle), std::move(key),
+                              std::move(exact_identity),
+                              std::move(signature)),
+        dimension_(dimension), graph_(std::move(graph)),
+        exact_system_record_(std::move(exact_system_record)),
+        exact_theta_record_(std::move(exact_theta_record)),
+        geometry_record_(std::move(geometry_record)), work_(work),
+        blocks_(std::move(blocks)), couplings_(std::move(couplings)) {}
+
+  json::object stats_json() const override {
+    std::size_t active_entries = 0, proven_zero_entries = 0;
+    std::optional<std::int32_t> min_coupling_shift;
+    std::optional<std::int32_t> max_coupling_shift;
+    json::array block_handles;
+    block_handles.reserve(blocks_.size());
+    for (const auto& block : blocks_) {
+      block_handles.push_back(json::object{
+          {"block", block.block}, {"chart", block.source_handle},
+          {"dimension", block.chart->dimension()},
+          {"principal_identity", block.principal_identity}});
+    }
+    for (const auto& coupling : couplings_)
+      for (std::size_t index = 0; index < coupling.identities.size(); ++index) {
+        const auto& identity = coupling.identities[index];
+        identity.proven_zero ? ++proven_zero_entries : ++active_entries;
+        if (!identity.proven_zero) {
+          const auto shift = coupling.matrix.entries[index]
+                                 .multiplier.epsilon_shift;
+          min_coupling_shift = min_coupling_shift.has_value()
+              ? std::min(*min_coupling_shift, shift) : shift;
+          max_coupling_shift = max_coupling_shift.has_value()
+              ? std::max(*max_coupling_shift, shift) : shift;
+        }
+      }
+    return json::object{
+        {"scc", handle_}, {"key", key_}, {"identity", exact_identity_},
+        {"dimension", dimension_}, {"blocks", blocks_.size()},
+        {"coupling_groups", couplings_.size()},
+        {"coupling_entries", active_entries + proven_zero_entries},
+        {"active_coupling_entries", active_entries},
+        {"proven_zero_coupling_entries", proven_zero_entries},
+        {"frame_base", work_.work_min},
+        {"frame_width", static_cast<std::uint32_t>(
+             static_cast<std::int64_t>(work_.work_complete_max) -
+             work_.work_min + 1)},
+        {"requested_min", work_.requested_min},
+        {"requested_max", work_.requested_max},
+        {"work_complete_max", work_.work_complete_max},
+        {"public_t_order", work_.public_t_order},
+        {"work_t_order", work_.work_t_order},
+        {"wolfram_coupling_depth", work_.wolfram_coupling_depth},
+        {"native_coupling_depth", graph_.coupling_depth},
+        {"min_coupling_shift", min_coupling_shift.has_value()
+             ? json::value(*min_coupling_shift) : json::value(nullptr)},
+        {"max_coupling_shift", max_coupling_shift.has_value()
+             ? json::value(*max_coupling_shift) : json::value(nullptr)},
+        {"execution_mode", "BlockSequentialStrict"},
+        {"execution_implemented", false},
+        {"capability_evidence", json::object{
+             {"identity_v", "native-retained-assembly"},
+             {"regular", "collision-bound-producer-certificate"},
+             {"identity_gauge", "collision-bound-producer-certificate"},
+             {"no_pseudo", "collision-bound-producer-certificate"}}},
+        {"execution_must_revalidate_producer_capabilities", true},
+        {"block_charts", std::move(block_handles)}};
+  }
+
+ private:
+  std::uint32_t dimension_ = 0;
+  SCCCertificate graph_;
+  std::string exact_system_record_;
+  std::string exact_theta_record_;
+  std::string geometry_record_;
+  CompositeWorkContract work_;
+  std::vector<CompositeSCCBlock<Scalar>> blocks_;
+  std::vector<CompositeSCCCoupling<Scalar>> couplings_;
+};
+
 struct SolverSession {
   std::string handle;
   std::string domain;
@@ -1346,8 +1675,10 @@ struct SolverSession {
   std::string analytic_identity;
   std::size_t chart_capacity = 256;
   std::size_t local_capacity = 1024;
+  std::size_t scc_capacity = 128;
   std::uint64_t next_chart = 1;
   std::uint64_t next_local = 1;
+  std::uint64_t next_scc = 1;
   std::size_t pending_local_solves = 0;
   std::uint64_t total_local_solves = 0;
   double total_local_run_parse_ms = 0.0;
@@ -1357,7 +1688,503 @@ struct SolverSession {
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
   std::unordered_map<std::string, std::string> handles_by_key;
   std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>> locals;
+  std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>> sccs;
+  std::unordered_map<std::string, std::string> scc_handles_by_key;
 };
+
+std::vector<std::uint32_t> parse_index_vector(
+    const json::value& raw, std::uint32_t bound, const char* label) {
+  std::vector<std::uint32_t> values;
+  for (const auto& value : as_array(raw, label)) {
+    const auto index = as_u32(value, label);
+    if (index >= bound)
+      throw std::invalid_argument(std::string(label) + " is outside range");
+    values.push_back(index);
+  }
+  return values;
+}
+
+struct ExactParentMatrix {
+  struct Cell {
+    std::string exact;
+    bool proven_zero = false;
+  };
+  std::uint32_t dimension = 0;
+  std::vector<Cell> cells;  // row (target), then column (source)
+  std::string canonical_record;
+
+  const Cell& at(std::uint32_t row, std::uint32_t column) const {
+    return cells.at(static_cast<std::size_t>(row) * dimension + column);
+  }
+};
+
+ExactParentMatrix parse_exact_parent_matrix(
+    const json::value& raw, std::uint32_t dimension, const char* label) {
+  const auto& rows = as_array(raw, label);
+  if (rows.size() != dimension)
+    throw std::invalid_argument(
+        std::string(label) + " must have parent-dimension rows");
+  ExactParentMatrix result;
+  result.dimension = dimension;
+  result.cells.reserve(static_cast<std::size_t>(dimension) * dimension);
+  json::array canonical_rows;
+  canonical_rows.reserve(dimension);
+  for (std::uint32_t row = 0; row < dimension; ++row) {
+    const auto& columns = as_array(rows[row], label);
+    if (columns.size() != dimension)
+      throw std::invalid_argument(
+          std::string(label) + " must be a square parent-dimension matrix");
+    json::array canonical_columns;
+    canonical_columns.reserve(dimension);
+    for (std::uint32_t column = 0; column < dimension; ++column) {
+      const auto& cell = as_object(columns[column], "exact parent matrix cell");
+      const auto exact = required_string(cell, "exact");
+      const auto proven_zero = cell.at("proven_zero").as_bool();
+      result.cells.push_back({exact, proven_zero});
+      canonical_columns.push_back(json::object{
+          {"exact", exact}, {"proven_zero", proven_zero}});
+    }
+    canonical_rows.push_back(std::move(canonical_columns));
+  }
+  result.canonical_record = json::serialize(canonical_rows);
+  return result;
+}
+
+std::string canonical_exact_submatrix(
+    const ExactParentMatrix& matrix,
+    const std::vector<std::uint32_t>& vertices) {
+  json::array rows;
+  rows.reserve(vertices.size());
+  for (const auto target : vertices) {
+    json::array columns;
+    columns.reserve(vertices.size());
+    for (const auto source : vertices) {
+      const auto& cell = matrix.at(target, source);
+      columns.push_back(json::object{
+          {"exact", cell.exact}, {"proven_zero", cell.proven_zero}});
+    }
+    rows.push_back(std::move(columns));
+  }
+  return json::serialize(rows);
+}
+
+std::string derived_coupling_identity(
+    std::uint32_t source_block, std::uint32_t target_block,
+    const std::vector<std::uint32_t>& source_vertices,
+    const std::vector<std::uint32_t>& target_vertices,
+    const ExactParentMatrix& original, const ExactParentMatrix& theta) {
+  auto rectangular_record = [&](const ExactParentMatrix& matrix) {
+    json::array rows;
+    rows.reserve(target_vertices.size());
+    for (const auto target : target_vertices) {
+      json::array columns;
+      columns.reserve(source_vertices.size());
+      for (const auto source : source_vertices) {
+        const auto& cell = matrix.at(target, source);
+        columns.push_back(json::object{
+            {"exact", cell.exact}, {"proven_zero", cell.proven_zero}});
+      }
+      rows.push_back(std::move(columns));
+    }
+    return rows;
+  };
+  return json::serialize(json::object{
+      {"schema", "diffexp2-native-scc-coupling-v1"},
+      {"source_block", source_block}, {"target_block", target_block},
+      {"source_vertices", encode_indices(source_vertices)},
+      {"target_vertices", encode_indices(target_vertices)},
+      {"exact_original", rectangular_record(original)},
+      {"exact_theta", rectangular_record(theta)}});
+}
+
+template <typename Scalar>
+std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
+    const std::shared_ptr<SolverSession>& session, const json::object& root,
+    const std::string& handle, const std::string& key,
+    const std::string& exact_identity, std::string signature,
+    const std::vector<std::shared_ptr<PreparedChartBase>>& erased_charts) {
+  std::unique_ptr<AcbPrecisionLease> acb_lease;
+  if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+    acb_lease = std::make_unique<AcbPrecisionLease>(session->precision_bits);
+    ComplexBall::set_precision(session->precision_bits);
+  }
+  std::unique_lock<std::recursive_mutex> symbolic_lock;
+  if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+    symbolic_lock =
+        std::unique_lock<std::recursive_mutex>(symbolic_run_mutex());
+    SymbolicRational::configure(session->symbols);
+  }
+
+  const auto& parent = as_object(root.at("parent"), "SCC parent manifest");
+  const auto dimension = as_u32(parent.at("dimension"), "parent dimension");
+  if (dimension == 0)
+    throw std::invalid_argument("SCC parent dimension must be positive");
+  const auto exact_system = parse_exact_parent_matrix(
+      parent.at("exact_system_record"), dimension,
+      "exact parent system record");
+  const auto exact_theta = parse_exact_parent_matrix(
+      parent.at("exact_theta_record"), dimension,
+      "exact parent theta record");
+  validate_first_slice_rational_geometry(parent.at("chart"));
+  const auto geometry_record = canonical_chart_geometry_record(
+      parent.at("chart"));
+  auto graph = validate_scc_certificate(parent.at("scc"), dimension);
+  const std::set<std::pair<std::uint32_t, std::uint32_t>> structural_edges(
+      graph.structural_edges.begin(), graph.structural_edges.end());
+  for (std::uint32_t target = 0; target < dimension; ++target) {
+    for (std::uint32_t source = 0; source < dimension; ++source) {
+      const auto original_zero = exact_system.at(target, source).proven_zero;
+      const auto theta_zero = exact_theta.at(target, source).proven_zero;
+      if (original_zero != theta_zero)
+        throw std::invalid_argument(
+            "parent original/theta structural-zero facts disagree");
+      const auto graph_zero = !structural_edges.contains({source, target});
+      if (original_zero != graph_zero)
+        throw std::invalid_argument(
+            "parent exact matrix zero facts do not reproduce the structural graph");
+    }
+  }
+
+  const auto& execution = as_object(
+      parent.at("execution"), "SCC execution contract");
+  if (required_string(execution, "mode") != "BlockSequentialStrict")
+    throw std::invalid_argument(
+        "native SCC preparation only supports BlockSequentialStrict");
+  CompositeWorkContract work;
+  work.work_t_order = as_u32(
+      execution.at("work_t_order"), "SCC work Taylor order");
+  const auto& work_object = as_object(
+      parent.at("work_contract"), "SCC work contract");
+  work.work_min = as_i32(
+      work_object.at("work_min"), "work epsilon minimum");
+  work.requested_min = as_i32(
+      work_object.at("requested_min"), "requested epsilon minimum");
+  work.requested_max = as_i32(
+      work_object.at("requested_max"), "requested epsilon maximum");
+  work.work_complete_max = as_i32(
+      work_object.at("work_complete_max"), "work epsilon maximum");
+  work.public_t_order = as_u32(
+      work_object.at("public_t_order"), "public Taylor order");
+  work.wolfram_coupling_depth = as_u32(
+      work_object.at("wolfram_coupling_depth"),
+      "Wolfram coupling depth");
+  if (work.work_min > work.requested_min ||
+      work.requested_min > work.requested_max ||
+      work.requested_max > work.work_complete_max)
+    throw std::invalid_argument(
+        "SCC epsilon work contract has inconsistent ordered bounds");
+  if (work.wolfram_coupling_depth != graph.coupling_depth + 1)
+    throw std::invalid_argument(
+        "Wolfram coupling depth must equal native edge depth plus one");
+  const auto expected_work_t_order =
+      static_cast<std::uint64_t>(work.public_t_order) + 2 +
+      2 * static_cast<std::uint64_t>(work.wolfram_coupling_depth);
+  if (expected_work_t_order > std::numeric_limits<std::uint32_t>::max() ||
+      work.work_t_order != expected_work_t_order)
+    throw std::invalid_argument(
+        "SCC work Taylor order does not match the exact depth budget");
+  const auto frame_width_i64 =
+      static_cast<std::int64_t>(work.work_complete_max) -
+      work.work_min + 1;
+  if (frame_width_i64 <= 0 ||
+      frame_width_i64 > std::numeric_limits<std::uint32_t>::max())
+    throw std::invalid_argument("SCC work frame width is invalid");
+  const auto frame_width = static_cast<std::uint32_t>(frame_width_i64);
+
+  const auto& raw_blocks = as_array(root.at("blocks"), "SCC blocks");
+  if (raw_blocks.size() != graph.component_count ||
+      erased_charts.size() != raw_blocks.size())
+    throw std::invalid_argument(
+        "SCC preparation requires exactly one chart per component");
+  std::vector<CompositeSCCBlock<Scalar>> blocks(graph.component_count);
+  std::vector<std::uint8_t> block_seen(graph.component_count, 0);
+  std::set<std::string> chart_handles;
+  for (std::size_t index = 0; index < raw_blocks.size(); ++index) {
+    const auto& raw_block = as_object(raw_blocks[index], "SCC block");
+    const auto block = as_u32(raw_block.at("block"), "SCC block index");
+    if (block != index || block >= graph.component_count || block_seen[block])
+      throw std::invalid_argument(
+          "SCC blocks must be in deterministic component order");
+    block_seen[block] = 1;
+    const auto declared_capabilities =
+        canonical_native_scc_capabilities(raw_block);
+    if (!raw_block.at("regular").as_bool())
+      throw std::invalid_argument(
+          "native SCC preparation does not yet support singular blocks");
+    if (!raw_block.at("identity_gauge").as_bool())
+      throw std::invalid_argument(
+          "native SCC preparation requires an exact identity gauge");
+    if (!raw_block.at("identity_v").as_bool())
+      throw std::invalid_argument(
+          "native SCC preparation requires an exact identity spectral transform");
+    if (!raw_block.at("no_pseudo").as_bool())
+      throw std::invalid_argument(
+          "native SCC preparation does not yet execute pseudo compensation");
+
+    auto vertices = parse_index_vector(
+        raw_block.at("vertices"), dimension, "SCC block vertex");
+    if (vertices != graph.components[block])
+      throw std::invalid_argument(
+          "SCC block vertices do not equal their parent component in exact order");
+
+    // This is the only type-erasure boundary for a composite.  Every later
+    // execution method owns typed pointers directly and performs no casts.
+    auto chart = std::dynamic_pointer_cast<PreparedChart<Scalar>>(
+        erased_charts[index]);
+    if (!chart)
+      throw std::invalid_argument(
+          "SCC block chart scalar domain differs from its session");
+    const auto source_handle = required_string(raw_block, "chart");
+    if (chart->handle() != source_handle ||
+        !chart_handles.insert(source_handle).second)
+      throw std::invalid_argument(
+          "SCC block chart handles must be exact and one-to-one");
+    const auto principal_identity = required_string(
+        raw_block, "principal_identity");
+    if (chart->exact_identity() != principal_identity)
+      throw std::invalid_argument(
+          "SCC principal identity differs from its prepared chart identity");
+    if (!chart->native_scc_capabilities().has_value())
+      throw std::invalid_argument(
+          "SCC block chart lacks analytic.native_scc_capabilities metadata");
+    if (*chart->native_scc_capabilities() != declared_capabilities)
+      throw std::invalid_argument(
+          "SCC block capability claims differ from the retained chart metadata");
+    if (!chart->has_identity_assembly())
+      throw std::invalid_argument(
+          "SCC identity_v capability contradicts the retained assembly operator");
+    if (!chart->geometry_record().has_value())
+      throw std::invalid_argument(
+          "SCC block chart lacks analytic.geometry preparation metadata");
+    if (*chart->geometry_record() != geometry_record)
+      throw std::invalid_argument(
+          "SCC block chart geometry differs from the parent manifest");
+    if (!chart->principal_matrix_record().has_value())
+      throw std::invalid_argument(
+          "SCC block chart lacks analytic.principal_matrix metadata");
+    if (*chart->principal_matrix_record() !=
+        canonical_exact_submatrix(exact_system, vertices))
+      throw std::invalid_argument(
+          "SCC principal chart matrix differs from the indexed parent submatrix");
+    if (chart->dimension() != vertices.size())
+      throw std::invalid_argument(
+          "SCC block chart dimension differs from its vertex count");
+    if (chart->frame_base() != work.work_min ||
+        chart->frame_width() != frame_width)
+      throw std::invalid_argument(
+          "SCC block chart frame differs from the exact work contract");
+
+    const auto& local_graph = chart->scc();
+    std::vector<std::uint32_t> local_vertices(vertices.size());
+    for (std::uint32_t local = 0; local < vertices.size(); ++local)
+      local_vertices[local] = local;
+    if (local_graph.component_count != 1 ||
+        local_graph.components.size() != 1 ||
+        local_graph.components.front() != local_vertices ||
+        local_graph.coupling_depth != 0)
+      throw std::invalid_argument(
+          "SCC principal chart must be exactly one retained component");
+    std::vector<std::uint32_t> local_of(dimension,
+        std::numeric_limits<std::uint32_t>::max());
+    for (std::uint32_t local = 0; local < vertices.size(); ++local)
+      local_of[vertices[local]] = local;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> expected_intra;
+    for (const auto [source, target] : graph.structural_edges)
+      if (graph.component_of[source] == block &&
+          graph.component_of[target] == block)
+        expected_intra.insert({local_of[source], local_of[target]});
+    const std::set<std::pair<std::uint32_t, std::uint32_t>> supplied_intra(
+        local_graph.structural_edges.begin(),
+        local_graph.structural_edges.end());
+    if (supplied_intra != expected_intra)
+      throw std::invalid_argument(
+          "SCC principal chart graph does not cover its exact intra-component edges");
+
+    blocks[block] = CompositeSCCBlock<Scalar>{
+        block, std::move(vertices), source_handle, principal_identity,
+        std::move(chart)};
+  }
+
+  std::set<std::pair<std::uint32_t, std::uint32_t>> expected_cross;
+  for (const auto edge : graph.structural_edges)
+    if (graph.component_of[edge.first] != graph.component_of[edge.second])
+      expected_cross.insert(edge);
+  const std::set<std::pair<std::uint32_t, std::uint32_t>>
+      expected_condensation(graph.condensation_edges.begin(),
+                            graph.condensation_edges.end());
+  std::set<std::pair<std::uint32_t, std::uint32_t>> supplied_condensation;
+  std::set<std::pair<std::uint32_t, std::uint32_t>> active_edges;
+  std::set<std::pair<std::uint32_t, std::uint32_t>> prepared_pairs;
+  std::vector<CompositeSCCCoupling<Scalar>> couplings;
+  const auto& raw_couplings = as_array(
+      root.at("couplings"), "SCC couplings");
+  if (raw_couplings.size() != graph.condensation_edges.size())
+    throw std::invalid_argument(
+        "SCC coupling groups must equal the condensation edge count");
+  couplings.reserve(raw_couplings.size());
+  for (std::size_t coupling_index = 0;
+       coupling_index < raw_couplings.size(); ++coupling_index) {
+    const auto& raw_value = raw_couplings[coupling_index];
+    const auto& raw = as_object(raw_value, "SCC coupling");
+    const auto source_block = as_u32(
+        raw.at("source_block"), "source SCC block");
+    const auto target_block = as_u32(
+        raw.at("target_block"), "target SCC block");
+    if (source_block >= graph.component_count ||
+        target_block >= graph.component_count || source_block == target_block)
+      throw std::invalid_argument("invalid cross-SCC coupling block pair");
+    const auto block_pair = std::make_pair(source_block, target_block);
+    if (block_pair != graph.condensation_edges[coupling_index])
+      throw std::invalid_argument(
+          "SCC coupling groups must use deterministic condensation-edge order");
+    if (!supplied_condensation.insert(block_pair).second ||
+        !expected_condensation.contains(block_pair))
+      throw std::invalid_argument(
+          "SCC coupling groups must match condensation edges one-to-one");
+    const auto source_vertices = parse_index_vector(
+        raw.at("source_vertices"), dimension, "coupling source vertex");
+    const auto target_vertices = parse_index_vector(
+        raw.at("target_vertices"), dimension, "coupling target vertex");
+    if (source_vertices != blocks[source_block].vertices ||
+        target_vertices != blocks[target_block].vertices)
+      throw std::invalid_argument(
+          "SCC coupling vertex bases differ from their block manifests");
+    const auto columns = as_u32(raw.at("columns"), "coupling columns");
+    const auto rows = as_u32(raw.at("rows"), "coupling rows");
+    if (columns != source_vertices.size() || rows != target_vertices.size())
+      throw std::invalid_argument(
+          "SCC coupling matrix dimensions disagree with its blocks");
+    if (raw.if_contains("symbols") == nullptr ||
+        required_string(raw, "domain") != session->domain ||
+        parse_symbols(raw) != session->symbols)
+      throw std::invalid_argument(
+          "SCC coupling coefficient field differs from its session");
+
+    CompositeSCCCoupling<Scalar> coupling;
+    coupling.source_block = source_block;
+    coupling.target_block = target_block;
+    coupling.producer_identity = required_string(raw, "exact_identity");
+    coupling.matrix.rows = rows;
+    coupling.matrix.columns = columns;
+    coupling.matrix.exact_identity = derived_coupling_identity(
+        source_block, target_block, source_vertices, target_vertices,
+        exact_system, exact_theta);
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> previous_local;
+    for (const auto& raw_entry_value : as_array(
+             raw.at("entries"), "SCC coupling entries")) {
+      const auto& raw_entry = as_object(
+          raw_entry_value, "SCC coupling entry");
+      const auto row = as_u32(raw_entry.at("row"), "coupling row");
+      const auto column = as_u32(
+          raw_entry.at("column"), "coupling column");
+      if (row >= rows || column >= columns)
+        throw std::invalid_argument("SCC coupling entry is out of range");
+      const auto local_pair = std::make_pair(row, column);
+      if (previous_local.has_value() && *previous_local >= local_pair)
+        throw std::invalid_argument(
+            "SCC coupling entries must use deterministic row-column order");
+      previous_local = local_pair;
+      const auto source_vertex = as_u32(
+          raw_entry.at("source_vertex"), "coupling source vertex");
+      const auto target_vertex = as_u32(
+          raw_entry.at("target_vertex"), "coupling target vertex");
+      if (source_vertex != source_vertices[column] ||
+          target_vertex != target_vertices[row] ||
+          graph.component_of[source_vertex] != source_block ||
+          graph.component_of[target_vertex] != target_block)
+        throw std::invalid_argument(
+            "SCC coupling local/global vertex identities disagree");
+      const auto edge = std::make_pair(source_vertex, target_vertex);
+      if (!prepared_pairs.insert(edge).second)
+        throw std::invalid_argument(
+            "SCC coupling contains a duplicate global matrix entry");
+      const auto exact_original_entry = required_string(
+          raw_entry, "exact_original_entry");
+      const auto exact_theta_entry = required_string(
+          raw_entry, "exact_theta_entry");
+      const auto& parent_original = exact_system.at(
+          target_vertex, source_vertex);
+      const auto& parent_theta = exact_theta.at(
+          target_vertex, source_vertex);
+      if (exact_original_entry != parent_original.exact ||
+          exact_theta_entry != parent_theta.exact)
+        throw std::invalid_argument(
+            "SCC coupling exact entries differ from their indexed parent cells");
+      const auto& raw_multiplier = as_object(
+          raw_entry.at("multiplier"), "prepared SCC multiplier");
+      PreparedRationalTaylorMultiplier<Scalar> multiplier;
+      multiplier.epsilon_shift = as_i32(
+          raw_multiplier.at("epsilon_shift"), "multiplier epsilon shift");
+      const auto shifted_work_min = static_cast<std::int64_t>(work.work_min) +
+          multiplier.epsilon_shift;
+      const auto shifted_work_max =
+          static_cast<std::int64_t>(work.work_complete_max) +
+          multiplier.epsilon_shift;
+      if (shifted_work_min < std::numeric_limits<std::int32_t>::min() ||
+          shifted_work_min > std::numeric_limits<std::int32_t>::max() ||
+          shifted_work_max < std::numeric_limits<std::int32_t>::min() ||
+          shifted_work_max > std::numeric_limits<std::int32_t>::max())
+        throw std::invalid_argument(
+            "SCC multiplier shift overflows the retained epsilon frame");
+      multiplier.center_pole_order = as_u32(
+          raw_multiplier.at("center_pole_order"),
+          "multiplier center-pole order");
+      multiplier.exact_identity = required_string(
+          raw_multiplier, "exact_identity");
+      if (multiplier.exact_identity != exact_theta_entry)
+        throw std::invalid_argument(
+            "prepared multiplier identity differs from the exact theta entry");
+      multiplier.proven_zero = raw_multiplier.at("proven_zero").as_bool();
+      if (multiplier.proven_zero != parent_original.proven_zero)
+        throw std::invalid_argument(
+            "prepared multiplier structural-zero fact differs from its exact parent cell");
+      for (const auto& raw_kernel : as_array(
+               raw_multiplier.at("kernels"), "multiplier epsilon kernels")) {
+        std::vector<Scalar> kernel;
+        for (const auto& coefficient : as_array(
+                 raw_kernel, "multiplier Taylor kernel"))
+          kernel.push_back(parse_scalar<Scalar>(coefficient));
+        multiplier.kernels.push_back(std::move(kernel));
+      }
+      if (!multiplier.proven_zero) {
+        if (multiplier.kernels.size() != frame_width ||
+            std::any_of(multiplier.kernels.begin(), multiplier.kernels.end(),
+                [&](const auto& kernel) {
+                  return kernel.size() !=
+                      static_cast<std::size_t>(work.work_t_order) + 1;
+                }))
+          throw std::invalid_argument(
+              "active SCC multiplier kernels do not cover the exact work rectangle");
+        if (!expected_cross.contains(edge))
+          throw std::invalid_argument(
+              "active SCC multiplier lacks an exact parent structural edge");
+        active_edges.insert(edge);
+      } else if (expected_cross.contains(edge)) {
+        throw std::invalid_argument(
+            "a proven-zero SCC multiplier contradicts a parent structural edge");
+      }
+      coupling.identities.push_back(CompositeCouplingIdentity{
+          source_vertex, target_vertex, exact_original_entry,
+          exact_theta_entry, multiplier.proven_zero});
+      coupling.matrix.entries.push_back(
+          typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry{
+              row, column, std::move(multiplier)});
+    }
+    couplings.push_back(std::move(coupling));
+  }
+  if (supplied_condensation != expected_condensation)
+    throw std::invalid_argument(
+        "SCC coupling groups do not cover the condensation graph exactly");
+  if (active_edges != expected_cross)
+    throw std::invalid_argument(
+        "active SCC coupling entries do not cover cross-component structural edges exactly");
+
+  return make_retained_typed_shared<Scalar, CompositeSCCChart<Scalar>>(
+      handle, key, exact_identity, std::move(signature), dimension,
+      std::move(graph), exact_system.canonical_record,
+      exact_theta.canonical_record,
+      geometry_record, work, std::move(blocks), std::move(couplings));
+}
 
 struct SessionRegistry {
   std::mutex mutex;
@@ -1409,6 +2236,36 @@ json::object solve_prepared_chart_safe(
 
 constexpr std::uint32_t kMaxPersistentBatchThreads = 64;
 
+json::value canonical_json_value(const json::value& value) {
+  if (value.is_array()) {
+    json::array output;
+    output.reserve(value.as_array().size());
+    for (const auto& item : value.as_array())
+      output.push_back(canonical_json_value(item));
+    return output;
+  }
+  if (value.is_object()) {
+    std::vector<std::string> keys;
+    keys.reserve(value.as_object().size());
+    for (const auto& item : value.as_object())
+      keys.emplace_back(item.key());
+    std::sort(keys.begin(), keys.end());
+    json::object output;
+    for (const auto& key : keys)
+      output[key] = canonical_json_value(value.as_object().at(key));
+    return output;
+  }
+  return value;
+}
+
+std::string composite_scc_signature(const json::object& root) {
+  json::object exact{{"identity", root.at("identity")},
+                     {"parent", root.at("parent")},
+                     {"blocks", root.at("blocks")},
+                     {"couplings", root.at("couplings")}};
+  return json::serialize(canonical_json_value(exact));
+}
+
 std::string static_problem_signature(const json::object& problem,
                                      const json::value& analytic,
                                      const SCCCertificate& scc,
@@ -1429,7 +2286,12 @@ template <typename Scalar>
 std::shared_ptr<PreparedChartBase> parse_prepared_chart(
     const std::shared_ptr<SolverSession>& session, const json::object& root,
     const std::string& handle, const std::string& key,
-    SCCCertificate scc, std::string signature) {
+    const std::string& exact_identity,
+    std::optional<std::string> geometry_record,
+    std::optional<std::string> principal_matrix_record,
+    std::optional<std::string> native_scc_capabilities,
+    SCCCertificate scc,
+    std::string signature) {
   const auto started = std::chrono::steady_clock::now();
   const auto& problem = as_object(root.at("problem"), "prepared problem");
   std::unique_ptr<AcbPrecisionLease> acb_lease;
@@ -1437,17 +2299,20 @@ std::shared_ptr<PreparedChartBase> parse_prepared_chart(
     acb_lease = std::make_unique<AcbPrecisionLease>(session->precision_bits);
     ComplexBall::set_precision(session->precision_bits);
   }
-  std::unique_lock<std::mutex> symbolic_lock;
+  std::unique_lock<std::recursive_mutex> symbolic_lock;
   if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
-    symbolic_lock = std::unique_lock<std::mutex>(symbolic_run_mutex());
+    symbolic_lock =
+        std::unique_lock<std::recursive_mutex>(symbolic_run_mutex());
     SymbolicRational::configure(session->symbols);
   }
   auto prepared = parse_prepared_operator<Scalar>(problem);
   const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
-  return std::make_shared<PreparedChart<Scalar>>(
-      handle, key, std::move(signature), std::move(scc),
-      std::move(prepared), session->precision_bits, session->symbols, elapsed);
+  return make_retained_typed_shared<Scalar, PreparedChart<Scalar>>(
+      handle, key, exact_identity, std::move(signature),
+      std::move(geometry_record), std::move(principal_matrix_record),
+      std::move(native_scc_capabilities), std::move(scc), std::move(prepared),
+      session->precision_bits, session->symbols, elapsed);
 }
 
 json::object run_session_command(const json::object& root) {
@@ -1492,6 +2357,12 @@ json::object run_session_command(const json::object& root) {
         throw std::invalid_argument("local capacity must lie in 1..16384");
       session->local_capacity = capacity;
     }
+    if (root.if_contains("scc_capacity")) {
+      const auto capacity = as_u32(root.at("scc_capacity"), "SCC capacity");
+      if (capacity == 0 || capacity > 4096)
+        throw std::invalid_argument("SCC capacity must lie in 1..4096");
+      session->scc_capacity = capacity;
+    }
 
     auto& registry = session_registry();
     {
@@ -1506,7 +2377,8 @@ json::object run_session_command(const json::object& root) {
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
                         {"chart_capacity", session->chart_capacity},
-                        {"local_capacity", session->local_capacity}};
+                        {"local_capacity", session->local_capacity},
+                        {"scc_capacity", session->scc_capacity}};
   }
 
   if (operation == "session.close") {
@@ -1521,7 +2393,7 @@ json::object run_session_command(const json::object& root) {
       removed = std::move(found->second);
       registry.sessions.erase(found);
     }
-    std::size_t charts = 0, locals = 0;
+    std::size_t charts = 0, locals = 0, sccs = 0;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
       removed->closed = true;
@@ -1529,13 +2401,17 @@ json::object run_session_command(const json::object& root) {
       // on exactly one completion path.  Do not reset pending_local_solves.
       charts = removed->charts.size();
       locals = removed->locals.size();
+      sccs = removed->sccs.size();
       removed->locals.clear();
+      removed->sccs.clear();
+      removed->scc_handles_by_key.clear();
       removed->charts.clear();
       removed->handles_by_key.clear();
     }
     return json::object{{"status", "ok"}, {"closed", handle},
                         {"released_charts", charts},
-                        {"released_locals", locals}};
+                        {"released_locals", locals},
+                        {"released_scc_charts", sccs}};
   }
 
   const auto session = find_session(required_string(root, "session"));
@@ -1559,6 +2435,23 @@ json::object run_session_command(const json::object& root) {
           "prepared problem regulator field differs from its solver session");
     const auto analytic = root.if_contains("analytic")
         ? root.at("analytic") : json::value(nullptr);
+    std::optional<std::string> geometry_record;
+    std::optional<std::string> principal_matrix_record;
+    std::optional<std::string> native_scc_capabilities;
+    if (analytic.is_object()) {
+      const auto& analytic_object = analytic.as_object();
+      if (const auto* geometry = analytic_object.if_contains("geometry"))
+        geometry_record = canonical_chart_geometry_record(*geometry);
+      if (const auto* principal =
+              analytic_object.if_contains("principal_matrix"))
+        principal_matrix_record = parse_exact_parent_matrix(
+            *principal, as_u32(problem.at("d"), "dimension"),
+            "prepared chart principal matrix").canonical_record;
+      if (const auto* capabilities =
+              analytic_object.if_contains("native_scc_capabilities"))
+        native_scc_capabilities =
+            canonical_native_scc_capabilities(*capabilities);
+    }
     json::object combined_analytic;
     combined_analytic["session"] = json::parse(session->analytic_identity);
     combined_analytic["chart"] = analytic;
@@ -1592,15 +2485,18 @@ json::object run_session_command(const json::object& root) {
     std::shared_ptr<PreparedChartBase> chart;
     if (session->domain == "rational")
       chart = parse_prepared_chart<Rational>(
-          session, root, chart_handle, key,
+          session, root, chart_handle, key, identity, geometry_record,
+          principal_matrix_record, native_scc_capabilities,
           std::move(scc), std::move(signature));
     else if (session->domain == "acb")
       chart = parse_prepared_chart<ComplexBall>(
-          session, root, chart_handle, key,
+          session, root, chart_handle, key, identity, geometry_record,
+          principal_matrix_record, native_scc_capabilities,
           std::move(scc), std::move(signature));
     else
       chart = parse_prepared_chart<SymbolicRational>(
-          session, root, chart_handle, key,
+          session, root, chart_handle, key, identity, geometry_record,
+          principal_matrix_record, native_scc_capabilities,
           std::move(scc), std::move(signature));
     {
       std::lock_guard<std::mutex> lock(session->mutex);
@@ -1631,6 +2527,92 @@ json::object run_session_command(const json::object& root) {
                         {"scc_topological_order",
                          encode_indices(chart->scc().topological_order)},
                         {"scc_coupling_depth", chart->scc().coupling_depth}};
+  }
+
+  if (operation == "scc.prepare") {
+    const auto key = required_string(root, "key");
+    const auto identity = required_string(root, "identity");
+    const auto signature = composite_scc_signature(root);
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (const auto found = session->scc_handles_by_key.find(key);
+          found != session->scc_handles_by_key.end()) {
+        const auto composite = session->sccs.at(found->second);
+        if (composite->signature() != signature)
+          throw std::invalid_argument(
+              "persistent SCC cache key collision with unequal exact identity");
+        auto result = composite->stats_json();
+        result["status"] = "ok";
+        result["session"] = session->handle;
+        result["reused"] = true;
+        return result;
+      }
+      if (session->sccs.size() >= session->scc_capacity)
+        throw std::invalid_argument("persistent SCC capacity is exhausted");
+    }
+
+    const auto& raw_blocks = as_array(root.at("blocks"), "SCC blocks");
+    std::vector<std::shared_ptr<PreparedChartBase>> erased_charts;
+    erased_charts.reserve(raw_blocks.size());
+    std::string scc_handle;
+    {
+      // Resolve and strongly retain the complete diagonal handle set before
+      // leaving the session lock.  The composite remains valid if the public
+      // chart handles are released after this preparation boundary.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      for (const auto& raw_block_value : raw_blocks) {
+        const auto& raw_block = as_object(raw_block_value, "SCC block");
+        const auto chart_handle = required_string(raw_block, "chart");
+        const auto found = session->charts.find(chart_handle);
+        if (found == session->charts.end())
+          throw std::invalid_argument(
+              "SCC preparation references an unknown or released chart");
+        erased_charts.push_back(found->second);
+      }
+      scc_handle = "scc:" + std::to_string(session->next_scc++);
+    }
+
+    std::shared_ptr<CompositeSCCChartBase> composite;
+    if (session->domain == "rational")
+      composite = parse_composite_scc_chart<Rational>(
+          session, root, scc_handle, key, identity, signature,
+          erased_charts);
+    else if (session->domain == "acb")
+      composite = parse_composite_scc_chart<ComplexBall>(
+          session, root, scc_handle, key, identity, signature,
+          erased_charts);
+    else
+      composite = parse_composite_scc_chart<SymbolicRational>(
+          session, root, scc_handle, key, identity, signature,
+          erased_charts);
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during SCC preparation");
+      if (const auto found = session->scc_handles_by_key.find(key);
+          found != session->scc_handles_by_key.end()) {
+        const auto existing = session->sccs.at(found->second);
+        if (existing->signature() != composite->signature())
+          throw std::invalid_argument(
+              "concurrent SCC cache key collision with unequal exact identity");
+        composite = existing;
+      } else {
+        if (session->sccs.size() >= session->scc_capacity)
+          throw std::invalid_argument(
+              "persistent SCC capacity was exhausted during preparation");
+        session->sccs.emplace(composite->handle(), composite);
+        session->scc_handles_by_key.emplace(key, composite->handle());
+      }
+    }
+    auto result = composite->stats_json();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["reused"] = composite->handle() != scc_handle;
+    return result;
   }
 
   if (operation == "chart.solve") {
@@ -1940,6 +2922,39 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "scc.stats") {
+    const auto scc_handle = required_string(root, "scc");
+    std::shared_ptr<CompositeSCCChartBase> composite;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->sccs.find(scc_handle);
+      if (found == session->sccs.end())
+        throw std::invalid_argument(
+            "unknown or released persistent SCC chart");
+      composite = found->second;
+    }
+    auto result = composite->stats_json();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "scc.release") {
+    const auto scc_handle = required_string(root, "scc");
+    std::shared_ptr<CompositeSCCChartBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->sccs.find(scc_handle);
+      if (found == session->sccs.end())
+        throw std::invalid_argument(
+            "unknown or already released persistent SCC chart");
+      removed = std::move(found->second);
+      session->scc_handles_by_key.erase(removed->key());
+      session->sccs.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", scc_handle}};
+  }
+
   if (operation == "chart.release") {
     const auto chart_handle = required_string(root, "chart");
     std::shared_ptr<PreparedChartBase> removed;
@@ -1958,6 +2973,7 @@ json::object run_session_command(const json::object& root) {
   if (operation == "session.stats") {
     std::vector<std::shared_ptr<PreparedChartBase>> charts;
     std::vector<std::shared_ptr<StoredLocalBase>> locals;
+    std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
     std::size_t pending_local_solves = 0;
     std::uint64_t total_local_solves = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
@@ -1967,6 +2983,8 @@ json::object run_session_command(const json::object& root) {
         charts.push_back(chart);
       for (const auto& [ignored, local] : session->locals)
         locals.push_back(local);
+      for (const auto& [ignored, composite] : session->sccs)
+        sccs.push_back(composite);
       pending_local_solves = session->pending_local_solves;
       total_local_solves = session->total_local_solves;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
@@ -2010,11 +3028,15 @@ json::object run_session_command(const json::object& root) {
       local_evaluate_ms += stats.evaluate_ms;
       local_stats.push_back(local->stats_json());
     }
+    json::array scc_stats;
+    for (const auto& composite : sccs)
+      scc_stats.push_back(composite->stats_json());
     return json::object{{"status", "ok"}, {"session", session->handle},
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
                         {"charts", charts.size()}, {"runs", runs},
                         {"locals", locals.size()},
+                        {"scc_charts", sccs.size()},
                         {"pending_local_solves", pending_local_solves},
                         {"local_solves", total_local_solves},
                         {"local_evaluations", local_evaluations},
@@ -2027,7 +3049,8 @@ json::object run_session_command(const json::object& root) {
                         {"local_kernel_ms", total_local_kernel_ms},
                         {"local_evaluate_ms", local_evaluate_ms},
                         {"chart_stats", std::move(chart_stats)},
-                        {"local_stats", std::move(local_stats)}};
+                        {"local_stats", std::move(local_stats)},
+                        {"scc_stats", std::move(scc_stats)}};
   }
 
   throw std::invalid_argument("unknown persistent solver operation: " + operation);
@@ -2049,7 +3072,7 @@ json::object run_one(const json::object& root) {
     return run_typed<ComplexBall>(root, digits);
   }
   if (domain == "symbolic") {
-    std::lock_guard<std::mutex> lock(symbolic_run_mutex());
+    std::lock_guard<std::recursive_mutex> lock(symbolic_run_mutex());
     std::vector<std::string> variables;
     for (const auto& value : as_array(root.at("symbols"), "symbolic variables")) {
       if (!value.is_string())
@@ -2173,6 +3196,8 @@ std::string backend_info_json() {
                                       {"schemas", json::array{1, 2}},
                                       {"persistent_sessions", true},
                                       {"persistent_local_solutions", true},
+                                      {"persistent_scc_prepare", true},
+                                      {"persistent_scc_execute", false},
                                       {"backend", "DiffExp2 C++"},
                                       {"flint", flint_version},
                                       {"librarylink", true}});

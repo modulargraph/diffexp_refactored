@@ -73,6 +73,9 @@ The implemented recurrence-session commands are:
 | `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics. |
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
+| `scc.prepare` | Validate and retain a typed composite SCC chart; execution is not enabled yet. |
+| `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
+| `scc.release` | Release one retained composite SCC chart. |
 | `session.stats` | Return preparation/run timings and retained-object counters. |
 | `session.close` | Release the session deterministically. |
 

@@ -283,6 +283,118 @@ must wait for a native *sequential* `V`-then-gauge assembly-chain operator:
 composing the two matrices is not equivalent to the existing epsilon/Taylor
 completeness accounting when exact or near cancellations occur.
 
+### Prepare a typed composite SCC chart
+
+`scc.prepare` is the schema-2 preparation boundary for native block-sequential
+source propagation. It retains typed diagonal-chart pointers and typed
+coupling multipliers; type erasure occurs only in the session registry. This
+milestone deliberately has no `scc.solve` operation, and its stats report
+`execution_implemented: false`.
+
+The parent manifest carries two machine-checkable `D` by `D` row-major exact
+matrix records. Every cell has the shape
+`{"exact": string, "proven_zero": bool}`. Original and theta zero facts must
+agree and reproduce the supplied source-to-target structural graph exactly.
+No zero decision is made from an Acb coefficient slab.
+
+```json
+{
+  "schema": 2, "op": "scc.prepare", "session": "s:1",
+  "key": "collision-certified composite key",
+  "identity": "exact parent identity",
+  "parent": {
+    "dimension": 2,
+    "exact_system_record": [
+      [{"exact":"0","proven_zero":true},
+       {"exact":"0","proven_zero":true}],
+      [{"exact":"g","proven_zero":false},
+       {"exact":"0","proven_zero":true}]],
+    "exact_theta_record": [
+      [{"exact":"0","proven_zero":true},
+       {"exact":"0","proven_zero":true}],
+      [{"exact":"theta-g","proven_zero":false},
+       {"exact":"0","proven_zero":true}]],
+    "chart": {
+      "center_exact": "0", "scale_exact": "1",
+      "radius_exact": "2", "infinite_radius": false,
+      "prescriptions": []
+    },
+    "scc": {
+      "components": [[0],[1]], "structural_edges": [[0,1]],
+      "condensation_edges": [[0,1]], "topological_order": [0,1],
+      "coupling_depth": 1
+    },
+    "execution": {"mode":"BlockSequentialStrict", "work_t_order":50},
+    "work_contract": {
+      "work_min": -4, "requested_min": -2, "requested_max": 6,
+      "work_complete_max": 20, "public_t_order": 44,
+      "wolfram_coupling_depth": 2
+    }
+  },
+  "blocks": [
+    {"block": 0, "vertices": [0], "chart": "c:1",
+     "principal_identity": "exact diagonal identity 0",
+     "regular": true, "identity_gauge": true,
+     "identity_v": true, "no_pseudo": true},
+    {"block": 1, "vertices": [1], "chart": "c:2",
+     "principal_identity": "exact diagonal identity 1",
+     "regular": true, "identity_gauge": true,
+     "identity_v": true, "no_pseudo": true}],
+  "couplings": [{
+    "source_block": 0, "target_block": 1,
+    "source_vertices": [0], "target_vertices": [1],
+    "rows": 1, "columns": 1,
+    "exact_identity": "exact coupling matrix identity",
+    "domain": "rational", "symbols": [],
+    "entries": [{
+      "row": 0, "column": 0,
+      "source_vertex": 0, "target_vertex": 1,
+      "exact_original_entry": "g", "exact_theta_entry": "theta-g",
+      "multiplier": {
+        "epsilon_shift": -1, "center_pole_order": 0,
+        "kernels": [], "exact_identity": "theta-g",
+        "proven_zero": false
+      }
+    }]
+  }]
+}
+```
+
+The matrices and kernels above are abbreviated: both parent matrices are
+square of size `dimension`, active multiplier kernels cover the complete
+epsilon/Taylor work rectangle, and the SCC certificate has its ordinary full
+schema. Blocks, coupling groups, and entries are in deterministic
+block/edge/row-column order. Each entry's global and local indices, exact
+parent cells, theta identity, coefficient domain, and structural-zero fact
+are checked one-to-one.
+The coupling group's caller `exact_identity` remains part of the collision
+signature only. C++ derives the authoritative retained matrix identity from
+the validated source/target bases and indexed parent original/theta cells.
+
+Composite-capable `chart.prepare` requests additionally bind these optional
+analytic records into the ordinary chart collision signature:
+
+- `analytic.geometry`, byte-equal to the normalized parent chart record;
+- `analytic.principal_matrix`, the indexed local original-matrix subblock;
+- `analytic.native_scc_capabilities` with `regular`, `identity_gauge`,
+  `identity_v`, and `no_pseudo` facts.
+
+The first slice requires all four capabilities true. Only `identity_v` is
+native-proved here, against the retained identity assembly operator;
+`regular`, `identity_gauge`, and `no_pseudo` remain collision-bound producer
+certificates which a future execution operation must re-prove or refuse.
+Stats label that distinction explicitly. All diagonal charts must share the
+scalar domain, geometry, work frame, and exact SCC principal graph. This
+first slice accepts only exact rational scale and finite radius (the latter
+strictly positive); unsupported algebraic geometry is loud. Signed epsilon
+shifts are retained, and execution must prove that `work_min` supplies enough
+lower halo.
+
+```json
+{"schema":2,"op":"scc.stats","session":"s:1","scc":"scc:1"}
+{"schema":2,"op":"scc.release","session":"s:1","scc":"scc:1"}
+```
+
 ### Inspect and destroy
 
 ```json

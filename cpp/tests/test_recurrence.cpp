@@ -1,0 +1,167 @@
+#include "diffexp2/json_codec.hpp"
+#include "diffexp2/recurrence.hpp"
+
+#include <boost/json.hpp>
+
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
+using diffexp2::BlockStep;
+using diffexp2::JordanBlock;
+using diffexp2::MatrixEntry;
+using diffexp2::MatrixShift;
+using diffexp2::PreparedLag;
+using diffexp2::Rational;
+using diffexp2::RecurrenceProblem;
+using diffexp2::RecurrenceSolver;
+using diffexp2::ScalarShift;
+using diffexp2::StepCase;
+using diffexp2::SymbolicRational;
+
+namespace {
+
+int passed = 0;
+int failed = 0;
+
+void check(const std::string& label, bool condition) {
+  if (condition) {
+    ++passed;
+    std::cout << "  PASS: " << label << '\n';
+  } else {
+    ++failed;
+    std::cout << "  FAIL: " << label << '\n';
+  }
+}
+
+RecurrenceProblem<Rational> exponential_problem(std::uint32_t nmax) {
+  RecurrenceProblem<Rational> p;
+  p.dimension = 1;
+  p.nmax = nmax;
+  p.log_max = 0;
+  p.frame_base = -2;
+  p.frame_width = 8;
+  p.a_target = Rational(0);
+  p.b_target = Rational(0);
+  p.a_shift_min = 0;
+  for (std::uint32_t n = 0; n <= nmax; ++n) p.a_shifts.emplace_back(n);
+  p.d_lags = {{{0, Rational(1)}}};
+  p.nhat_lags.resize(2);
+  p.nhat_lags[0].valuations = {diffexp2::kCompleteInfinity};
+  MatrixShift<Rational> identity;
+  identity.shift = 0;
+  identity.entries.push_back(MatrixEntry<Rational>{0, 0, Rational(1)});
+  p.nhat_lags[1].polynomial.push_back(identity);
+  p.nhat_lags[1].valuations = {0};
+  p.d0_inverse_scalar = Rational(1);
+  p.blocks = {JordanBlock{{0}}};
+  p.schedule.resize(nmax + 1);
+  for (std::uint32_t n = 0; n <= nmax; ++n) {
+    p.schedule[n] = {{n == 0 ? StepCase::Resonant : StepCase::Taylor,
+                      Rational(n), Rational(0)}};
+  }
+  p.initial.assign(p.frame_width, Rational(0));
+  p.initial[-p.frame_base] = Rational(1);
+  p.initial_validity = {5};
+  return p;
+}
+
+void test_exponential() {
+  auto result = RecurrenceSolver<Rational>(exponential_problem(8)).run();
+  Rational factorial(1);
+  bool equal = true;
+  for (std::uint32_t n = 0; n <= 8; ++n) {
+    if (n > 0) factorial *= Rational(n);
+    const auto index = (((static_cast<std::size_t>(n) * 2) * 1) * 8) + 2;
+    equal = equal && result.u[index] == Rational(1) / factorial;
+  }
+  check("regular exponential exact coefficients", equal);
+  check("regular exponential honest validity", result.top_valid == 5);
+}
+
+void test_epsilon_denominator() {
+  // (1+eps) theta g = t g gives u_n = u_{n-1}/(n(1+eps)).
+  auto p = exponential_problem(4);
+  p.d_lags[0] = {{0, Rational(1)}, {1, Rational(1)}};
+  p.d0_inverse_scalar.reset();
+  auto result = RecurrenceSolver<Rational>(p).run();
+  const auto at = [&](std::uint32_t n, std::uint32_t eps_index) -> const Rational& {
+    return result.u[(((static_cast<std::size_t>(n) * 2) * 1) * 8) + eps_index];
+  };
+  check("epsilon denominator leading coefficient", at(1, 2) == Rational(1));
+  check("epsilon denominator alternating coefficients",
+        at(1, 3) == Rational(-1) && at(1, 4) == Rational(1) &&
+        at(1, 5) == Rational(-1));
+  check("epsilon denominator second Taylor coefficient",
+        at(2, 2) == Rational("1/2") && at(2, 3) == Rational(-1));
+}
+
+void test_lower_frame_guard() {
+  auto p = exponential_problem(1);
+  p.nhat_lags[1].polynomial[0].shift = -3;
+  bool loud = false;
+  try {
+    (void)RecurrenceSolver<Rational>(p).run();
+  } catch (const diffexp2::RecurrenceError& error) {
+    loud = error.id == "E4";
+  }
+  check("negative epsilon shift underflow is loud", loud);
+}
+
+void test_json_error_contract() {
+  const auto value = boost::json::parse(diffexp2::run_recurrence_json("{}"));
+  check("malformed JSON request returns typed error",
+        value.as_object().at("status") == "error" &&
+        value.as_object().at("id") == "CPP");
+}
+
+void test_malformed_tensor_is_typed_error() {
+  // This is otherwise a valid 1x1 request, but the assembly valuation tensor
+  // is empty. It must be rejected before any unchecked native indexing; a
+  // malformed public request must never be able to terminate WolframKernel.
+  const std::string request = R"json({
+    "schema":1,"domain":"rational","output_digits":30,
+    "d":1,"nmax":0,"p":0,"fb":-1,"w":3,
+    "has_initial":true,"adaptive_probe":false,
+    "a_target":"0","b_target":"0","a_shift_min":0,
+    "a_shifts":["0"],
+    "d_lags":[[{"s":0,"v":"1"}]],
+    "denominators":[],
+    "nhat_lags":[{"poly":[],"rat":[],"val":[null]}],
+    "d0_inverse":"1","blocks":[[0]],
+    "schedule":[[{"case":"R","da":"0","db":"0"}]],
+    "initial":["0","1","0"],"initial_validity":[1],
+    "source":null,
+    "assembly":{"identity":true,"poly":[],"rat":[],"val":[]},
+    "chop_digits":10,"return_u":false
+  })json";
+  const auto value = boost::json::parse(diffexp2::run_recurrence_json(request));
+  check("malformed native tensor returns typed error without crashing",
+        value.as_object().at("status") == "error" &&
+        value.as_object().at("id") == "E5");
+}
+
+void test_symbolic_rational_field() {
+  SymbolicRational::configure({"rho"});
+  const SymbolicRational rho("rho");
+  const SymbolicRational rate("(1+rho)/(2-rho)");
+  const auto identity = rate * SymbolicRational("2-rho") -
+                        SymbolicRational("1+rho");
+  check("symbolic rational field canonical cancellation", identity.is_zero());
+  check("symbolic rational field retains regulator",
+        rate.str().find("rho") != std::string::npos);
+}
+
+}  // namespace
+
+int main() {
+  test_exponential();
+  test_epsilon_denominator();
+  test_lower_frame_guard();
+  test_json_error_contract();
+  test_malformed_tensor_is_typed_error();
+  test_symbolic_rational_field();
+  std::cout << "Results: " << passed << " / " << (passed + failed)
+            << " tests passed\n";
+  return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}

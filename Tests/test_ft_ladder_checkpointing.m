@@ -64,6 +64,7 @@ basePayload = <|
   "MastersBelow" -> mastersBelow, "Requests" -> requests,
   "Reductions" -> reductions, "ExtraSingularFactors" -> {},
   "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "RecurrenceBackend" -> recurrenceBackend,
   "DivisionOrder" -> divisionOrder,
   "RadiusOfConvergence" -> radiusOfConvergence,
   "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
@@ -126,6 +127,14 @@ saveLadderCheckpoint[configFile, Join[basePayload, <|
 test["transport configuration fingerprint remains enforced",
   loadLadderCheckpoint[configFile, name, data, prepKey] === $Failed];
 
+backendFile = FileNameJoin[{tmpDir, "bad-recurrence-backend.mx"}];
+saveLadderCheckpoint[backendFile, Join[basePayload, <|
+  "RecurrenceBackend" -> If[recurrenceBackend === "Cpp", "Wolfram", "Cpp"],
+  "ChartCache" -> low["Charts"], "TransportLow" -> low,
+  "TransportHigh" -> None, "CompletedArms" -> {"Lower"}|>]];
+test["recurrence backend mismatch is rejected",
+  loadLadderCheckpoint[backendFile, name, data, prepKey] === $Failed];
+
 preconditionFile = FileNameJoin[{tmpDir, "bad-precondition-mode.mx"}];
 saveLadderCheckpoint[preconditionFile, Join[basePayload, <|
   "SingularMatchPrecondition" -> !singularMatchPrecondition,
@@ -148,6 +157,7 @@ saveLadderCheckpoint[highOrderBoundaryFile, <|
   "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
   "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
   "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "RecurrenceBackend" -> recurrenceBackend,
   "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
   "LevelEpsilonHalos" -> levelEpsilonHalos,
   "SourceExpansionOrder" -> expansionOrder + 10,

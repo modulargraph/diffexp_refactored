@@ -66,6 +66,9 @@
    Env knobs:
      BENCH_FIXTURES=sunrise_L1,banana_L1   which fixtures
      BENCH_WP=120 BENCH_EXP_ORDER=40 BENCH_EPS_ORDER=5 BENCH_REPS=3
+     BENCH_BACKEND=Wolfram|Cpp  recurrence backend (default Wolfram;
+                               build the LibraryLink library before Cpp)
+     DE2_CPP_THREADS=4          independent C++ homogeneous-column workers
      BENCH_SINGULAR=1   also time the singular endpoint chart (1 rep)
      BENCH_TRANSPORT=1  additionally run ONE full TransportLine over the
                         plan (1 rep; adds minutes for banana — opt in)
@@ -86,6 +89,7 @@ envOr[name_, default_] := Module[{v = Environment[name]},
 wp = ToExpression[envOr["BENCH_WP", "120"]];
 expOrd = ToExpression[envOr["BENCH_EXP_ORDER", "40"]];
 epsOrd = ToExpression[envOr["BENCH_EPS_ORDER", "5"]];
+backend = envOr["BENCH_BACKEND", "Wolfram"];
 reps = ToExpression[envOr["BENCH_REPS", "3"]];
 doSing = envOr["BENCH_SINGULAR", "1"] === "1";
 doTransport = envOr["BENCH_TRANSPORT", "0"] === "1";
@@ -128,7 +132,8 @@ benchFixture[fname_String] := Module[
   catch2[DiffExp2`Config`LoadConfiguration[{
     "WorkingPrecision" -> wp, "ExpansionOrder" -> expOrd,
     "EpsilonOrder" -> epsOrd, "DivisionOrder" -> 4,
-    "StepDivisionOrder" -> 4, "Variables" -> {}}]];
+    "StepDivisionOrder" -> 4, "RecurrenceBackend" -> backend,
+    "Variables" -> {}}]];
   sys = catch2[DiffExp2`API`LoadSystem[
     <|"Matrix" -> fix["Matrix"], "Variable" -> var|>]];
   If[FailureQ[sys], Print["LOAD FAIL ", sys]; Quit[1]];
@@ -142,7 +147,7 @@ benchFixture[fname_String] := Module[
   row[fname, "Plan", tPlan, <|"Charts" -> Length[charts],
     "SingularCharts" -> Count[charts, c_ /; TrueQ[c["Singular"]]],
     "d" -> Length[fix["Matrix"]], "WP" -> wp, "ExpansionOrder" -> expOrd,
-    "EpsilonOrder" -> epsOrd|>];
+    "EpsilonOrder" -> epsOrd, "Backend" -> backend|>];
 
   (* bench chart: first interior REGULAR chart (the marching steady state) *)
   chart = SelectFirst[Rest[charts], !TrueQ[#["Singular"]] &, First[charts]];

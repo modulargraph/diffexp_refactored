@@ -89,6 +89,8 @@ $schema = <|
   "EpsilonOrder" -> <|"Type" -> (IntegerQ[#] && # >= 0 &), "Default" -> 4, "Normalize" -> None|>,
   "EstimateError" -> <|"Type" -> (MemberQ[{False, True, "Fast"}, #] &), "Default" -> "Fast", "Normalize" -> None|>,
   "ExpansionOrder" -> <|"Type" -> (IntegerQ[#] && # >= DiffExp2`Tolerances`$MinExpansionOrder &), "Default" -> 50, "Normalize" -> None|>,
+  "RecurrenceBackend" -> <|"Type" -> (MemberQ[{"Wolfram", "Cpp"}, #] &),
+    "Default" -> "Wolfram", "Normalize" -> None|>,
   "LineParameter" -> <|"Type" -> (MatchQ[#, _Symbol] &), "Default" -> Global`x, "Normalize" -> PinnedVariable|>,
   "MatrixDirectory" -> <|"Type" -> StringQ, "Default" -> "", "Normalize" -> None|>,
   "RadiusOfConvergence" -> <|"Type" -> exactPosQ, "Default" -> 1, "Normalize" -> None|>,

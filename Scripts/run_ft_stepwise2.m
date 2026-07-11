@@ -20,6 +20,7 @@ envOrDefault[name_, default_] := Module[{value = Environment[name]},
 
 singularMatchPrecondition =
   envOrDefault["DE2_SINGULAR_MATCH_PRECONDITION", "0"] === "1";
+recurrenceBackend = envOrDefault["DE2_RECURRENCE_BACKEND", "Wolfram"];
 DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
   singularMatchPrecondition;
 If[singularMatchPrecondition,
@@ -94,6 +95,9 @@ $ftLadderCheckpointVersion = 1;
 $ftLadderSourceFingerprint = Hash[
   ({#, FileHash[#, "SHA256"]} & /@ Sort[Join[
     FileNames["*.m", FileNameJoin[{repoRoot, "DiffExp2"}], Infinity],
+    Select[FileNames["*", FileNameJoin[{repoRoot, "cpp"}], Infinity],
+      FileType[#] === File &],
+    {FileNameJoin[{repoRoot, "CMakeLists.txt"}]},
     {ExpandFileName[$InputFileName]}]]), "SHA256"];
 
 preparedFTDataQ[data_] := AssociationQ[data] &&
@@ -246,6 +250,10 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
     Return[ladderCheckpointReject[file, "example does not match"], Module]];
   If[Lookup[payload, "WorkingPrecision", None] =!= wp,
     Return[ladderCheckpointReject[file, "WorkingPrecision does not match"], Module]];
+  If[KeyExistsQ[payload, "RecurrenceBackend"] &&
+      payload["RecurrenceBackend"] =!= recurrenceBackend,
+    Return[ladderCheckpointReject[file,
+      "recurrence backend mode does not match"], Module]];
   If[Lookup[payload, "Anchor", None] =!= anchor,
     Return[ladderCheckpointReject[file, "anchor does not match"], Module]];
   If[KeyExistsQ[payload, "PrepKey"] && payload["PrepKey"] =!= prepKey,
@@ -525,6 +533,7 @@ runExample[name_String] := Module[
       (* The restored classic predivision planner couples placement and
          matching: adjacent regular segments meet at +1/k and -1/k. *)
       "StepDivisionOrder" -> stepDivisionOrder,
+      "RecurrenceBackend" -> recurrenceBackend,
       "DeltaPrescriptions" -> levelDeltaPrescriptions[var, sys, extraFacs],
       "Variables" -> {}}]];
     (* One pair of endpoint transports per level serves every master.  Each
@@ -566,6 +575,7 @@ runExample[name_String] := Module[
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
         "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+        "RecurrenceBackend" -> recurrenceBackend,
         "SingularMatchPrecondition" -> singularMatchPrecondition,
         "EpsilonOrder" -> epsOrder,
         "BoundaryExtraOrder" -> boundaryExtraOrder,
@@ -713,6 +723,7 @@ runExample[name_String] := Module[
           "BoundaryPrefactors" -> currentPrefactors,
           "MastersHere" -> mastersBelow, "Anchor" -> anchor,
           "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
+          "RecurrenceBackend" -> recurrenceBackend,
           "BoundaryExtraOrder" -> boundaryExtraOrder,
           "LevelEpsilonHalos" -> levelEpsilonHalos,
           "SourceExpansionOrder" -> levelExpansionOrder,

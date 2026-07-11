@@ -12,7 +12,7 @@
 
 BeginPackage["DiffExp2`Solve`",
   {"DiffExp2`Tolerances`", "DiffExp2`Config`", "DiffExp2`EpsSeries`",
-   "DiffExp2`SectorSeries`", "DiffExp2`Indicial`"}];
+   "DiffExp2`SectorSeries`", "DiffExp2`Indicial`", "DiffExp2`CppBackend`"}];
 
 PrepareChart::usage = "PrepareChart[sys, chart] applies the chart map, runs ChartIndicial, and assembles the ChartSystem (theta matrix, gauge, V/VInv spectral frame, families).";
 SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the FundamentalSystem: one LocalSolution column per indicial sector spec.";
@@ -1131,7 +1131,7 @@ blockSolveTPFrame[rhs_List, dA_, dB_, invD0_, d0InvScalar_, q_Integer,
    dependency DAG; pseudo/log divisions at parallel blocks or log levels
    therefore take a maximum rather than being globally counted. *)
 runRecursionFramedSrc[args___] := runRecursion[args];
-runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module[
+runRecursionWolfram[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module[
   {d = cs["SystemSize"], dL = prep["dL"],
    dD = prep["dD"], dN = prep["dN"], invD0, d0InvScalar, blocks, U,
    hits = {}, n0,
@@ -1311,13 +1311,304 @@ runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_] := Module
   <|"U" -> U, "Validity" -> UValid, "Hits" -> hits, "P" -> P,
     "FrameBase" -> fb, "TopValid" -> topValid|>];
 
+(* ---- compiled framed-recurrence seam ---------------------------------
+   Wolfram retains every exact structural decision.  In particular the
+   T/P/R schedule is serialized explicitly; the Acb backend never decides
+   resonance from a numerical enclosure.  A forced Cpp backend is strict:
+   unsupported coefficient fields or bridge failures are loud and never
+   fall back to runRecursionWolfram. *)
+$cppExactDomain = False;  (* focused exact-parity seam; Acb is production *)
+$cppBuildRequestOnly = False;
+$cppSerializationDomain = "acb";
+$cppSerializationSymbols = {};
+
+cppScalar[e_, digits_Integer, cs_] := Module[{encoded},
+  encoded = If[$cppSerializationDomain === "symbolic",
+    DiffExp2`CppBackend`EncodeSymbolicScalar[e, $cppSerializationSymbols],
+    DiffExp2`CppBackend`EncodeScalar[e, digits]];
+  If[FailureQ[encoded],
+    err["E5", cs, <|"Coefficient" -> e,
+      "BackendFailure" -> encoded,
+      "Detail" -> "C++ recurrence cannot represent a prepared coefficient"|>]];
+  If[$cppSerializationDomain === "rational",
+    If[!((IntegerQ[e] || Head[e] === Rational) && TrueQ[Im[e] === 0]),
+      err["E5", cs, <|"Coefficient" -> e,
+        "Detail" -> "exact C++ parity mode requires rational coefficients"|>]];
+    First[encoded],
+    encoded]];
+
+cppValidity[k_] := If[k === Infinity, Null, k];
+
+cppMatrixShift[sp_List, digits_Integer, cs_] := Module[
+  {shift = sp[[1]], matrix = Normal[sp[[2]]], d, entries},
+  d = Length[matrix];
+  entries = Flatten[Table[
+    If[matrix[[r, c]] =!= 0,
+      {{r - 1, c - 1, cppScalar[matrix[[r, c]], digits, cs]}}, {}],
+    {r, d}, {c, d}], 2];
+  <|"s" -> shift, "e" -> entries|>];
+
+cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
+    srcHat_, fb_Integer, W_Integer, init_, vPrep_:Automatic,
+    responseOverride_:Automatic] := Module[
+  {d = cs["SystemSize"], wp = cfg["WorkingPrecision"], inputDigits,
+   outputDigits, precisionBits, blocks, schedule, dLags, nLags,
+   denominators, initFrames, initValidity, request, response, decodedU,
+   decodedValidity, hits, decode, topValid,
+   timingQ = Environment["DEBUG_CPP_RECURRENCE"] === "1", t0, tRequest,
+   tCall, tDone, assembly = Null, assemblyGroups, assemblyBase,
+   assembledData = None, sourceRecords, sourcePayload},
+  t0 = SessionTime[];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+  outputDigits = wp + 20;
+  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  blocks = blockList[cs];
+  schedule = Table[Map[Function[blk, Module[{dA, dB, kind},
+      dA = Together[aT + n - blk["a"]];
+      dB = Together[bT - blk["b"]];
+      kind = Which[!zeroCanQ[dA], "T", !zeroCanQ[dB], "P", True, "R"];
+      <|"case" -> kind, "da" -> cppScalar[dA, inputDigits, cs],
+        "db" -> cppScalar[dB, inputDigits, cs]|>]], blocks],
+    {n, 0, nmax}];
+  dLags = Map[Function[lag, Map[Function[sp,
+      <|"s" -> sp[[1]], "v" -> cppScalar[sp[[2]], inputDigits, cs]|>], lag]],
+    prep["dSp"]];
+  denominators = Map[Function[den,
+      cppScalar[#, inputDigits, cs] & /@ den["DenominatorCoefficients"]],
+    prep["NhatRationalDenominators"]];
+  If[AssociationQ[vPrep],
+    assemblyGroups = vPrep["RationalGroups"];
+    assemblyBase = Length[denominators];
+    denominators = Join[denominators,
+      Map[(cppScalar[#, inputDigits, cs] & /@
+          #["DenominatorCoefficients"]) &, assemblyGroups]];
+    assembly = <|
+      "identity" -> TrueQ[Lookup[vPrep, "Identity", False]],
+      "poly" -> (cppMatrixShift[#, inputDigits, cs] & /@
+        vPrep["PolynomialSp"]),
+      "rat" -> MapIndexed[Function[{group, idx}, <|
+        "q" -> assemblyBase + First[idx] - 1,
+        "num" -> (cppMatrixShift[#, inputDigits, cs] & /@
+          group["NumeratorSp"])|>], assemblyGroups],
+      "val" -> (cppValidity /@ Flatten[vPrep["Valuations"]])|>];
+  nLags = MapThread[Function[{poly, groups, vals}, <|
+      "poly" -> (cppMatrixShift[#, inputDigits, cs] & /@ poly),
+      "rat" -> Map[Function[group, <|
+        "q" -> group["DenominatorIndex"] - 1,
+        "num" -> (cppMatrixShift[#, inputDigits, cs] & /@
+          group["NumeratorSp"])|>], groups],
+      "val" -> (cppValidity /@ Flatten[vals])|>],
+    {prep["NhatSp"], prep["NhatRationalGroups"],
+      prep["NhatValuations"]}];
+  initFrames = Table[If[init =!= None && l + 1 <= Length[init],
+      Map[esToFrame[#, fb, W] &, init[[l + 1]]],
+      ConstantArray[0, {d, W}]], {l, 0, P}];
+  initValidity = Table[If[init =!= None && l + 1 <= Length[init],
+      esCM /@ init[[l + 1]], ConstantArray[Infinity, d]], {l, 0, P}];
+  sourcePayload = If[srcHat === None, Null,
+    sourceRecords = Table[Module[{sv = srcHat[n, l], frames, validity},
+      Which[
+        sv === None,
+          <|"Present" -> False, "Frames" -> ConstantArray[0, {d, W}],
+            "Validity" -> ConstantArray[Infinity, d]|>,
+        AssociationQ[sv] && KeyExistsQ[sv, "Frames"] &&
+            KeyExistsQ[sv, "Validity"],
+          <|"Present" -> True, "Frames" -> sv["Frames"],
+            "Validity" -> sv["Validity"]|>,
+        ListQ[sv] && Length[sv] === d &&
+            AllTrue[sv, ListQ[#] && Length[#] === W &],
+          <|"Present" -> True, "Frames" -> sv,
+            "Validity" -> ConstantArray[fb + W - 1, d]|>,
+        ListQ[sv] && Length[sv] === d &&
+            AllTrue[sv, DiffExp2`EpsSeries`ESQ],
+          <|"Present" -> True,
+            "Frames" -> (esToFrame[#, fb, W] & /@ sv),
+            "Validity" -> (esCM /@ sv)|>,
+        True,
+          err["E5", cs, <|"SourceIndex" -> {n, l},
+            "Detail" -> "C++ recurrence received a malformed materialized source frame"|>]]],
+      {n, 0, nmax}, {l, 0, P}];
+    <|"frames" -> (cppScalar[#, inputDigits, cs] & /@
+        Flatten[Map[# ["Frames"] &, sourceRecords, {2}]]),
+      "validity" -> (cppValidity /@
+        Flatten[Map[# ["Validity"] &, sourceRecords, {2}]]),
+      "present" -> Flatten[Map[TrueQ[# ["Present"]] &, sourceRecords, {2}]]|>];
+  request = <|
+    "schema" -> 1, "domain" -> $cppSerializationDomain,
+    "symbols" -> (SymbolName /@ $cppSerializationSymbols),
+    "precision_bits" -> precisionBits, "output_digits" -> outputDigits,
+    "d" -> d, "nmax" -> nmax, "p" -> P, "fb" -> fb, "w" -> W,
+    "has_initial" -> (init =!= None),
+    "adaptive_probe" -> TrueQ[$adaptiveLowerFrameProbe],
+    "a_target" -> cppScalar[aT, inputDigits, cs],
+    "b_target" -> cppScalar[bT, inputDigits, cs],
+    "a_shift_min" -> 0,
+    "a_shifts" -> Table[cppScalar[Together[aT + m], inputDigits, cs],
+      {m, 0, nmax}],
+    "d_lags" -> dLags, "denominators" -> denominators,
+    "nhat_lags" -> nLags,
+    "d0_inverse" -> If[prep["d0InvScalar"] === None, Null,
+      cppScalar[prep["d0InvScalar"], inputDigits, cs]],
+    "blocks" -> Map[(#["Cols"] - 1) &, blocks],
+    "schedule" -> schedule,
+    "initial" -> (cppScalar[#, inputDigits, cs] & /@ Flatten[initFrames]),
+    "initial_validity" -> (cppValidity /@ Flatten[initValidity]),
+    "source" -> sourcePayload, "assembly" -> assembly,
+    "chop_digits" -> cfg["ChopPrecision"],
+    "return_u" -> !AssociationQ[vPrep]|>;
+  If[TrueQ[$cppBuildRequestOnly], Return[request, Module]];
+  tRequest = SessionTime[];
+  response = If[AssociationQ[responseOverride], responseOverride,
+    DiffExp2`CppBackend`RunRequest[request]];
+  tCall = SessionTime[];
+  If[FailureQ[response],
+    err["E5", cs, <|"BackendFailure" -> response,
+      "Detail" -> "compiled recurrence backend call failed"|>]];
+  If[Lookup[response, "status", "error"] =!= "ok",
+    If[TrueQ[$adaptiveLowerFrameProbe] &&
+        Lookup[response, "id", ""] === "E4" &&
+        AnyTrue[{"below the work frame", "lower-frame", "lowest framed",
+          "epsilon shift", "framed convolution", "pseudo Jordan"},
+          StringContainsQ[Lookup[response, "detail", ""], #] &],
+      Throw[Failure["AdaptiveLowerFrame", <|
+        "ID" -> "AdaptiveLowerFrame", "FrameBase" -> fb,
+        "Shift" -> Lookup[response, "shift", 0],
+        "Detail" -> Lookup[response, "detail",
+          "compiled recurrence lower-frame underflow"]|>],
+        "DiffExp2AdaptiveLowerFrame"]];
+    err[If[MemberQ[{"E4", "E5", "E6"}, Lookup[response, "id", ""]],
+        response["id"], "E5"], cs,
+      <|"BackendID" -> Lookup[response, "id", "CPP"],
+        "FrameBase" -> Lookup[response, "frame_base", fb],
+        "Shift" -> Lookup[response, "shift", 0],
+        "Detail" -> Lookup[response, "detail",
+          "compiled recurrence returned an error"]|>]];
+  decode = DiffExp2`CppBackend`DecodeScalar[#, outputDigits] &;
+  If[KeyExistsQ[response, "assembled"],
+    Module[{amin = response["assembled", "min"],
+        amax = response["assembled", "max"], coeffs},
+      coeffs = decode /@ response["assembled", "coefficients"];
+      If[AnyTrue[coeffs, FailureQ],
+        err["E5", cs, <|"Detail" ->
+          "compiled recurrence returned an undecodable assembled coefficient"|>]];
+      assembledData = <|"Min" -> amin, "CompleteMax" -> amax,
+        "Coefficients" -> ArrayReshape[coeffs,
+          {P + 1, amax - amin + 1, nmax + 1, d}]|>],
+    decodedU = decode /@ response["u"];
+    If[AnyTrue[decodedU, FailureQ],
+      err["E5", cs, <|"Detail" ->
+        "compiled recurrence returned an undecodable coefficient"|>]];
+    decodedU = ArrayReshape[decodedU, {nmax + 1, P + 2, d, W}];
+    decodedValidity = ArrayReshape[
+      Replace[response["validity"], Null -> Infinity, {1}],
+      {nmax + 1, P + 2, d}]];
+  hits = Map[Function[hit, Module[{hf, hv, cols},
+      cols = hit["cols"] + 1;
+      hf = ArrayReshape[decode /@ hit["frames"], {Length[cols], W}];
+      hv = Replace[hit["validity"], Null -> Infinity, {1}];
+      <|"n" -> hit["n"], "Cols" -> cols,
+        "DeltaB" -> decode[hit["delta_b"]], "FrameBase" -> fb,
+        "GammaFrames" -> hf, "GammaValidity" -> hv|>]],
+    response["hits"]];
+  topValid = Replace[response["top_valid"], Null -> Infinity];
+  tDone = SessionTime[];
+  If[timingQ, Print["CPPREC ", <|
+    "Chart" -> ToString[Lookup[cs, "Center", "?"], InputForm],
+    "d" -> d, "nmax" -> nmax, "P" -> P, "W" -> W,
+    "PrepareSeconds" -> N[tRequest - t0, 6],
+    "BridgeSeconds" -> N[tCall - tRequest, 6],
+    "DecodeSeconds" -> N[tDone - tCall, 6],
+    "KernelMilliseconds" -> response["elapsed_ms"]|>]];
+  Join[<|"Hits" -> hits,
+    "P" -> P, "FrameBase" -> fb, "TopValid" -> topValid,
+    "BackendDiagnostics" -> <|"Backend" -> "Cpp",
+      "KernelMilliseconds" -> response["elapsed_ms"]|>|>,
+    If[assembledData === None,
+      <|"U" -> decodedU, "Validity" -> decodedValidity|>,
+      <|"CppAssembled" -> assembledData|>]]];
+
+cppRegulatorSymbols[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
+    srcHat_, init_, vPrep_] := Module[{sourceProbe, data, symbols},
+  sourceProbe = If[srcHat === None, {},
+    Table[Quiet[srcHat[n, l]], {n, 0, nmax}, {l, 0, P}]];
+  data = {aT, bT, prep["dL"], prep["NhatSp"],
+    prep["NhatRationalDenominators"], init, sourceProbe,
+    If[AssociationQ[vPrep], {vPrep["PolynomialSp"],
+      vPrep["RationalGroups"]}, {}]};
+  symbols = DeleteDuplicates[Cases[data,
+    s_Symbol /; Context[s] === "Global`" &&
+      s =!= DiffExp2`Config`CanonicalEps[] &&
+      s =!= Lookup[cs, "ChartVar", None] && !NumericQ[s], Infinity]];
+  SortBy[symbols, SymbolName]];
+
+cppRunRecursion[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
+    srcHat_, fb_Integer, W_Integer, init_, vPrep_:Automatic,
+    responseOverride_:Automatic] := Module[{symbols, domain},
+  symbols = cppRegulatorSymbols[cs, prep, aT, bT, P, nmax,
+    srcHat, init, vPrep];
+  domain = Which[symbols =!= {}, "symbolic",
+    TrueQ[$cppExactDomain], "rational", True, "acb"];
+  Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = symbols},
+    cppRunRecursionCore[cs, prep, aT, bT, P, nmax, srcHat, fb, W,
+      init, vPrep, responseOverride]]];
+
+cppBatchRecurrences[cs_, prep_, tasks_List, nmax_Integer, fb_Integer,
+    W_Integer, vPrep_] := Module[
+  {requests, threads, response, results, started = SessionTime[]},
+  threads = Quiet[Check[ToExpression[Environment["DE2_CPP_THREADS"]], 4]];
+  If[!IntegerQ[threads] || threads < 1, threads = 4];
+  threads = Min[threads, Length[tasks]];
+  requests = Map[Function[task,
+    Block[{$cppBuildRequestOnly = True},
+      cppRunRecursion[cs, prep, task["a"], task["b"], task["P"],
+        nmax, None, fb, W, task["Init"], vPrep]]], tasks];
+  response = DiffExp2`CppBackend`RunRequest[
+    <|"batch" -> requests, "threads" -> threads|>];
+  If[FailureQ[response] || Lookup[response, "status", "error"] =!= "ok" ||
+      !ListQ[Lookup[response, "results", None]] ||
+      Length[response["results"]] =!= Length[tasks],
+    err["E5", cs, <|"BackendResponse" -> response,
+      "Detail" -> "compiled recurrence batch call failed"|>]];
+  results = MapThread[Function[{task, raw},
+    cppRunRecursion[cs, prep, task["a"], task["b"], task["P"],
+      nmax, None, fb, W, task["Init"], vPrep, raw]],
+    {tasks, response["results"]}];
+  If[Environment["DEBUG_CPP_RECURRENCE"] === "1",
+    Print["CPPBATCH ", <|"Tasks" -> Length[tasks], "Threads" -> threads,
+      "FrameBase" -> fb, "FrameWidth" -> W,
+      "Seconds" -> N[SessionTime[] - started, 6]|>]];
+  results];
+
+runRecursion[cs_, prep_, aT_, bT_, P_, nmax_, srcHat_, fb_, W_, init_,
+    vPrep_:Automatic] :=
+  If[cfg["RecurrenceBackend"] === "Cpp",
+    cppRunRecursion[cs, prep, aT, bT, P, nmax, srcHat, fb, W, init, vPrep],
+    runRecursionWolfram[cs, prep, aT, bT, P, nmax, srcHat, fb, W, init]];
+
 (* ---- assembly ---- *)
 
 (* frame U -> original-frame LocalSolution with sectors (a, b, l) *)
 assembleSolution[cs_, aT_, bT_, rec_, nmax_, vPrep_:Automatic] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], d = cs["SystemSize"], U = rec["U"],
    UValid = rec["Validity"], P = rec["P"], fb = rec["FrameBase"], W,
-   frameTop, kminO, kmaxO, VexpL, VVal, WL, WValid, secs, ls, firstNZ, vp},
+   frameTop, kminO, kmaxO, VexpL, VVal, WL, WValid, secs, ls, firstNZ, vp,
+   assembled},
+  If[KeyExistsQ[rec, "CppAssembled"],
+    assembled = rec["CppAssembled"];
+    kminO = assembled["Min"];
+    kmaxO = assembled["CompleteMax"];
+    secs = Table[<|"a" -> aT, "b" -> bT, "p" -> l,
+      "Coeffs" -> assembled["Coefficients"][[l + 1]]|>,
+      {l, 0, rec["P"]}];
+    ls = <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+      "Radius" -> cs["Radius"], "Sectors" -> secs,
+      "EpsWindow" -> <|"Min" -> kminO, "CompleteMax" -> kmaxO|>,
+      "TWindow" -> <|"CompleteMax" -> nmax|>,
+      "ErrorEstimate" -> ConstantArray[0, kmaxO - kminO + 1],
+      "Prescriptions" -> cs["Prescriptions"]|>;
+    ls = applyGauge[cs, ls, nmax];
+    Return[DiffExp2`SectorSeries`CanonicalizeLocalSolution[ls], Module]];
   W = Length[U[[1, 1, 1]]];
   frameTop = fb + W - 1;
   If[TrueQ[$disableGroupedSpectralTransform],
@@ -1634,6 +1925,7 @@ SolveHomogeneous[cs_Association, req_Association] := Module[
   {tag = Lookup[cs, "SystemHash", None], key},
   key = {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
     req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
+    cfg["RecurrenceBackend"],
     TrueQ[$disableAdaptiveLowerFrames],
     TrueQ[$disableRationalDenominatorFusion],
     TrueQ[$disableGroupedSpectralTransform],
@@ -1654,7 +1946,11 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
    symbolic, poleDepth, singleUseDepth, spectralDepth, transformDepth,
    startFb, terminalFb, adaptiveQ, prepCache = <||>, prepFor,
    vPrepCache = <||>, vPrepFor,
-   adaptiveDiags = {}, certs = {}},
+   adaptiveDiags = {}, certs = {}, cppTimingQ, solveStarted, residualStarted,
+   knownAdaptiveFb, cppBatchQ, cppTasks = {}, cppBatchResults = {},
+   cppBatchCursor = 0, taskCursor},
+  cppTimingQ = Environment["DEBUG_CPP_RECURRENCE"] === "1";
+  solveStarted = SessionTime[];
   nmax = req["TOrder"];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   Pmax = Max[0, Max[Table[logCeiling[cs, b["a"], b["b"], b["q"] - 1], {b, blocks}]]];
@@ -1680,6 +1976,11 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
   adaptiveQ = !TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
     startFb > terminalFb && !TrueQ[$disableAdaptiveLowerFrames];
   If[!adaptiveQ, startFb = terminalFb];
+  (* Once any column proves that a wider lower rectangle is required, every
+     later column starts from that already-certified width.  A wider frame is
+     algebraically identical and avoids repeating the same failed narrow
+     probes (especially costly across a LibraryLink boundary). *)
+  knownAdaptiveFb = startFb;
   prepFor[ff_Integer] := If[KeyExistsQ[prepCache, ff], prepCache[ff],
     AssociateTo[prepCache, ff -> prepareCleared[
       cs, ff, wideTop - ff + 1, symbolic]]; prepCache[ff]];
@@ -1688,12 +1989,41 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
       AssociateTo[vPrepCache, key -> prepareFramedMatrix[
         cs["V"], DiffExp2`Config`CanonicalEps[], ff, ww, cs]];
       vPrepCache[key]]];
+  cppBatchQ = cfg["RecurrenceBackend"] === "Cpp" &&
+    !TrueQ[$disableGroupedSpectralTransform];
+  If[cppBatchQ,
+    taskCursor = 0;
+    Do[Module[{fam = fams[[fi]], root, q, taskP, taskInit},
+      Do[
+        root = fam["Roots"][[ri]];
+        q = root["BlockSize"];
+        Do[
+          taskP = logCeiling[cs, root["a"], root["b"], qpos];
+          taskInit = Table[
+            Module[{vv = Table[esZero[wideTop], {d}]},
+              If[l <= qpos,
+                vv[[taskCursor + (qpos + 1 - l)]] =
+                  esShift[esNew[0, PadRight[{1}, wideTop + 1 + l]], -l]];
+              vv], {l, 0, taskP}];
+          AppendTo[cppTasks, <|"a" -> root["a"], "b" -> root["b"],
+            "P" -> taskP, "Init" -> taskInit|>],
+          {qpos, 0, q - 1}];
+        taskCursor += q,
+        {ri, Length[fam["Roots"]]}]],
+      {fi, Length[fams]}];
+    cppBatchResults = cppBatchRecurrences[cs, prepFor[terminalFb],
+      cppTasks, nmax, terminalFb, wideTop - terminalFb + 1,
+      vPrepFor[terminalFb, wideTop - terminalFb + 1]];
+    knownAdaptiveFb = terminalFb];
   Do[Module[{fIdx = fi, fam = fams[[fi]]},
     Do[Module[{blk, root, q},
       (* identify the block for this root via the running cursor *)
       root = fam["Roots"][[ri]]; q = root["BlockSize"];
       Do[Module[{P, init, rec, ls, comp, fbRun = startFb, WRun,
-          attempts = 0, underflow, used, nextUsed},
+          attempts = 0, underflow, used, nextUsed, tColumn, tRec, tAssembly,
+          tCompensation, tCertificate, certificate},
+        tColumn = SessionTime[];
+        fbRun = knownAdaptiveFb;
         P = logCeiling[cs, root["a"], root["b"], qpos];
         (* init ladder: U[0, l] = e_{qpos+1-l} eps^{-l}, l = 0..qpos *)
         init = Table[
@@ -1703,21 +2033,29 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
                 esShift[esNew[0, PadRight[{1}, wideTop + 1 + l]], -l]];
             vv],
           {l, 0, P}];
-        While[True,
-          WRun = wideTop - fbRun + 1;
-          attempts++;
-          underflow = Catch[
-            Block[{$adaptiveLowerFrameProbe = adaptiveQ && fbRun > terminalFb},
-              runRecursion[cs, prepFor[fbRun], root["a"], root["b"],
-                P, nmax, None, fbRun, WRun, init]],
-            "DiffExp2AdaptiveLowerFrame"];
-          If[!FailureQ[underflow], rec = underflow; Break[]];
-          (* Monotone geometric widening.  Since terminalFb is exactly the
-             previous scalar bound, termination and the old error behavior
-             are preserved even for scalar/idempotent repeated poles. *)
-          used = startFb - fbRun;
-          nextUsed = If[used === 0, Max[1, singleUseDepth], 2 used];
-          fbRun = Max[terminalFb, startFb - nextUsed]];
+        If[cppBatchQ,
+          cppBatchCursor++;
+          rec = cppBatchResults[[cppBatchCursor]];
+          fbRun = terminalFb;
+          WRun = wideTop - terminalFb + 1;
+          attempts = 1,
+          While[True,
+            WRun = wideTop - fbRun + 1;
+            attempts++;
+            underflow = Catch[
+              Block[{$adaptiveLowerFrameProbe = adaptiveQ && fbRun > terminalFb},
+                runRecursion[cs, prepFor[fbRun], root["a"], root["b"],
+                  P, nmax, None, fbRun, WRun, init, Automatic]],
+              "DiffExp2AdaptiveLowerFrame"];
+            If[!FailureQ[underflow], rec = underflow; Break[]];
+            (* Monotone geometric widening.  Since terminalFb is exactly the
+               previous scalar bound, termination and the old error behavior
+               are preserved even for scalar/idempotent repeated poles. *)
+            used = startFb - fbRun;
+            nextUsed = If[used === 0, Max[1, singleUseDepth], 2 used];
+            fbRun = Max[terminalFb, startFb - nextUsed]]];
+        knownAdaptiveFb = Min[knownAdaptiveFb, fbRun];
+        tRec = SessionTime[];
         AppendTo[adaptiveDiags, <|
           "Tag" -> {root["a"], root["b"], qpos},
           "Adaptive" -> adaptiveQ, "Attempts" -> attempts,
@@ -1728,11 +2066,21 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
         ls = assembleSolution[cs, root["a"], root["b"], rec, nmax,
           If[TrueQ[$disableGroupedSpectralTransform], Automatic,
             vPrepFor[fbRun, WRun]]];
+        tAssembly = SessionTime[];
         comp = compensatePseudoColumn[cs, ls, rec["Hits"], workColumns, reqMax];
         ls = comp[[1]];
-        AppendTo[certs, certifyPseudoCompensation[cs, ls, rec["Hits"],
+        tCompensation = SessionTime[];
+        certificate = certifyPseudoCompensation[cs, ls, rec["Hits"],
           <|"Kind" -> "Homogeneous", "Tag" ->
-            {root["a"], root["b"], qpos}|>]];
+            {root["a"], root["b"], qpos}|>];
+        AppendTo[certs, certificate];
+        tCertificate = SessionTime[];
+        If[cppTimingQ, Print["CPPCOL ", <|
+          "Tag" -> {root["a"], root["b"], qpos},
+          "RecurrenceSeconds" -> N[tRec - tColumn, 6],
+          "AssemblySeconds" -> N[tAssembly - tRec, 6],
+          "CompensationSeconds" -> N[tCompensation - tAssembly, 6],
+          "CertificateSeconds" -> N[tCertificate - tCompensation, 6]|>]];
         compAll = Join[compAll, Map[Append[#, "SourceColumn" ->
           (Length[workColumns] + 1)] &, comp[[2]]]];
         hitsAll = Join[hitsAll, publicPseudoHit /@ rec["Hits"]];
@@ -1758,7 +2106,11 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
         "PseudoCollisionsCompensated" -> And @@ certs,
         "AdaptiveLowerFrames" -> adaptiveDiags,
         "CouplingDepth" -> 0|>|>},
+    residualStarted = SessionTime[];
     ODEResidualCheck[cs, fs];
+    If[cppTimingQ, Print["CPPSOLVE ", <|
+      "BeforeResidualSeconds" -> N[residualStarted - solveStarted, 6],
+      "ResidualSeconds" -> N[SessionTime[] - residualStarted, 6]|>]];
     fs]];
 
 SolveParticular[cs_Association, source_Association, req_Association] := Module[
@@ -1884,7 +2236,7 @@ SolveChart[cs_Association, req_Association, source_:None] := Module[{basis, part
 SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
   {d = cs["SystemSize"], nmax, vMin, vCM, fb, wideTop, Wd, prep, rec, ls,
    symbolic, poleDepth, numericInputQ, phaseQ, phaseTime, phase,
-   preparedNums},
+   preparedNums, vPrep},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "SolveValueRegular requires a regular chart (pole order 0); singular charts keep the basis+matching path"|>]];
@@ -1937,12 +2289,13 @@ SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
       Count[preparedNums, z_ /; Precision[z] === Infinity], Missing["NotScanned"]],
     "inexactCount" -> If[phaseQ,
       Count[preparedNums, _?InexactNumberQ], Missing["NotScanned"]]|>];
-  rec = runRecursion[cs, prep, 0, 0, 0, nmax, None, fb, Wd, {vals}];
+  vPrep = If[TrueQ[$disableGroupedSpectralTransform], Automatic,
+    prepareFramedMatrix[cs["V"], DiffExp2`Config`CanonicalEps[],
+      fb, Wd, cs]];
+  rec = runRecursion[cs, prep, 0, 0, 0, nmax, None, fb, Wd, {vals},
+    If[cfg["RecurrenceBackend"] === "Cpp", vPrep, Automatic]];
   phase["run-recursion"];
-  ls = assembleSolution[cs, 0, 0, rec, nmax,
-    If[TrueQ[$disableGroupedSpectralTransform], Automatic,
-      prepareFramedMatrix[cs["V"], DiffExp2`Config`CanonicalEps[],
-        fb, Wd, cs]]];
+  ls = assembleSolution[cs, 0, 0, rec, nmax, vPrep];
   ls = capWindow[cs, ls, vCM];
   phase["assemble-cap"];
   ODEResidualCheck[cs, ls];
@@ -1986,9 +2339,61 @@ numV[s_] := esNew[esMin[s],
 
 ODEResidualCheck[cs_Association, sol_Association, source_:None, probe_:Automatic] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], t0, sols, maxRel = 0,
-   Bsub, bMinVal, bt0Cache = <||>, bt0For, win, rtol},
+   Bsub, bMinVal, bt0Cache = <||>, bt0For, win, rtol, formalData,
+   formalSymbols, candidateRules, regularSpecializationQ, sampleCandidates,
+   sampleRules, sampleResiduals, requiredSamples = 5,
+   regulatorProbeValues},
   rtol = DiffExp2`Tolerances`Tol["ResidTol"];
   sols = If[KeyExistsQ[sol, "Columns"], sol["Columns"], {sol}];
+  (* Exact analytic-regulator coefficients remain formal throughout the
+     recurrence.  The ordinary numeric residual handoff below intentionally
+     N[]s coefficient arrays; on a formal field that turns harmless Taylor
+     truncation tails into nonnumeric expressions such as 10^-30 rho^n.
+     Spot-check such a solution at several deterministic small rational field
+     specializations instead.  Candidate rules that land on a coefficient
+     pole are skipped.  This specializes only the independent residual check
+     -- never the solve, epsilon lattice, indicial decisions, or delivered
+     symbolic coefficients.  Like the ordinary one-t probe below this is a
+     diagnostic spot-check, not an identity proof in the regulator field. *)
+  formalData = {Lookup[cs, "ThetaOriginal", cs["ThetaMatrix"]],
+    Map[{#["a"], #["b"], #["Coeffs"]} &,
+      Flatten[Lookup[sols, "Sectors", {}]]],
+    If[source === None, {}, Lookup[source, "Sectors", {}]]};
+  formalSymbols = SortBy[DeleteDuplicates[Cases[formalData,
+    s_Symbol /; Context[s] === "Global`" && s =!= eps && s =!= t &&
+      !NumericQ[s], Infinity]], SymbolName];
+  If[formalSymbols =!= {},
+    (* Include separated O(1) points rather than only reciprocals tending to
+       zero: a valid rational coefficient can have a pole near zero and make
+       a finite Taylor residual spuriously ill-conditioned at every such
+       sample. The first legacy point is retained as a pole-skip regression. *)
+    regulatorProbeValues = {1/43, -1, 1, -2, 2, -1/2, 1/2,
+      -3/2, 3/2, -1/3, 1/3, -3, 3, -2/3, 2/3};
+    candidateRules[sample_Integer] := MapIndexed[
+      (#1 -> If[sample <= Length[regulatorProbeValues],
+        regulatorProbeValues[[1 + Mod[sample - 1 + 2 (First[#2] - 1),
+          Length[regulatorProbeValues]]]],
+        (-1)^(sample + First[#2])*
+          Prime[10 + sample + 2 First[#2]]/
+          Prime[11 + sample + 3 First[#2]]]) &, formalSymbols];
+    regularSpecializationQ[rules_List] := Module[{specialized},
+      specialized = Quiet[Check[formalData /. rules, $Failed]];
+      specialized =!= $Failed &&
+        FreeQ[specialized, Indeterminate | ComplexInfinity |
+          DirectedInfinity[___] | _Failure]];
+    sampleCandidates = Select[Range[1, 128],
+      regularSpecializationQ[candidateRules[#]] &, requiredSamples];
+    If[Length[sampleCandidates] < requiredSamples,
+      err["E7", cs, <|"Regulators" -> formalSymbols,
+        "RegularSamplesFound" -> Length[sampleCandidates],
+        "SamplesRequired" -> requiredSamples,
+        "Detail" -> "could not find enough regular rational specializations for the symbolic ODE residual spot-check"|>]];
+    sampleRules = candidateRules /@ Take[sampleCandidates, requiredSamples];
+    sampleResiduals = Table[With[{rules = sampleRules[[sample]]},
+      ODEResidualCheck[cs /. rules, sol /. rules,
+        If[source === None, None, source /. rules], probe]],
+      {sample, requiredSamples}];
+    Return[Max[sampleResiduals], Module]];
   (* truncation-aware probe: the residual of a degree-nmax truncation is
      O((t0/R)^(nmax+1)); place t0 so that tail sits below rtol/100 *)
   t0 = If[probe === Automatic,

@@ -18,6 +18,12 @@ This refactored repository is version 2.0.
 
 The recurrence methods are still an active experimental upgrade. The older Wronskian/Frobenius strategies remain available, but recurrence failures should be reported directly rather than silently hidden by fallback behavior when `UseRationalRecurrence -> True`.
 
+DiffExp2 also has an opt-in C++/FLINT recurrence backend. It keeps indicial,
+resonance, epsilon-window, and analytic-continuation decisions in Wolfram
+Language while accelerating the finite-width coefficient recurrence through
+LibraryLink. See [Docs/CppBackend.md](Docs/CppBackend.md) for build instructions,
+the analytic-regularization contract, tests, and current limitations.
+
 ## Loading
 
 From Mathematica or Wolfram Engine:
@@ -45,6 +51,11 @@ FT_DIVISION_ORDER=3 \
 FT_RADIUS_OF_CONVERGENCE=1 \
 wolframscript -file Scripts/run_ft_stepwise2.m
 ```
+
+After building the optional compiled backend, add
+`DE2_RECURRENCE_BACKEND=Cpp DE2_CPP_THREADS=4` to this command. The Wolfram
+recurrence remains the default, and a requested C++ backend fails loudly
+rather than silently falling back.
 
 `FT_EXAMPLES` is a comma-separated list (default `bubble`); available names
 are `bubble`, `sunrise`, `banana`, `box`, `pentagon`, `box_bubble`,

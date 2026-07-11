@@ -20,3 +20,6 @@ FrontEnd/*
 kira/
 Dependencies/
 Papers/
+
+# Local compiled backend artifacts
+build/

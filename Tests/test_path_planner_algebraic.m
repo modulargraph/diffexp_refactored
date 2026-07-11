@@ -103,6 +103,20 @@ nearSings = DiffExp2`Transport`FindSingularities[nearSys];
 assert["planner_nearby_exact_roots_never_numeric_merged",
   Length[nearSings["All"]] === 2 &&
   Sort[nearSings["All"]] === {0, 10^-80}];
+nearRouteSys = <|"Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {x - 1, 10^80*(x - 1) - 1}|>;
+SetEnvironment["DE2_VALUE_TRANSPORT" -> "0"];
+nearRoute = TimeConstrained[
+  DiffExp2`Transport`SegmentLine[nearRouteSys,
+    {1 - 10^-80, 1 + 2*10^-80}], 10, $Failed];
+SetEnvironment["DE2_VALUE_TRANSPORT" -> "1"];
+nearCenters = If[AssociationQ[nearRoute],
+  Select[nearRoute["Charts"], TrueQ[# ["Singular"]] &][[All, "Center"]],
+  {}];
+assert["planner_segmentline_orders_ultraclose_exact_poles",
+  AssociationQ[nearRoute] && nearCenters === {1, 1 + 10^-80} &&
+    !FailureQ[Catch[
+      DiffExp2`Transport`ValidatePlan[nearRoute], "DiffExp2Error"]]];
 closeAlgebraicDistance = DiffExp2`Transport`Private`numericDistance[
   Sqrt[2 + 10^-200], Sqrt[2], 40];
 closeAlgebraicReference = N[

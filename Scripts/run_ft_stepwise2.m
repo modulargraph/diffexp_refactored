@@ -289,12 +289,16 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
     Lookup[payload, "SourceExpansionOrder", None]];
   If[!IntegerQ[savedEO] || savedEO < 1,
     Return[ladderCheckpointReject[file, "missing source ExpansionOrder"], Module]];
-  (* Transport checkpoints contain order-specific chart series.  Boundary
-     checkpoints contain only endpoint Laurent data, so a boundary produced
-     at a higher x-expansion order is safe to reuse in a lower-order run. *)
-  If[kind === "Transport" && expansionOrder < savedEO,
+  (* Transport checkpoints contain order-specific chart series and therefore
+     require exact order parity.  Boundary checkpoints contain only endpoint
+     Laurent data: a higher-order source may safely seed a lower-order run,
+     but lower-order data must never silently downgrade the requested order. *)
+  If[kind === "Transport" && expansionOrder =!= savedEO,
     Return[ladderCheckpointReject[file,
-      "requested ExpansionOrder is lower than the checkpoint order"], Module]];
+      "transport ExpansionOrder does not match"], Module]];
+  If[kind === "Boundary" && savedEO < expansionOrder,
+    Return[ladderCheckpointReject[file,
+      "boundary source ExpansionOrder is lower than requested"], Module]];
   If[kind === "Transport",
     If[KeyExistsQ[payload, "DivisionOrder"] &&
         payload["DivisionOrder"] =!= divisionOrder,
@@ -494,7 +498,8 @@ runExample[name_String] := Module[
      resumeTransport, levelExpansionOrder, needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
      transportSys = None, planLo = None, planHi = None, armReq,
-     loPlanCharts, hiPlanCharts, armRounds, armBatchResult},
+     loPlanCharts, hiPlanCharts, armRounds, armBatchResult,
+     armUniqueCharts, armCacheCapacity},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -630,30 +635,41 @@ runExample[name_String] := Module[
           "CompleteMax" -> esCMxLevel|>,
         "TOrder" -> levelExpansionOrder|>;
       armRounds = Max[Length[loPlanCharts], Length[hiPlanCharts]];
-      Print["FTLADDER CPP ARM BATCH level=", level,
-        " lowerCharts=", Length[loPlanCharts],
-        " upperCharts=", Length[hiPlanCharts],
-        " rounds=", armRounds];
-      Do[Module[{roundCharts, roundSystems},
-        roundCharts = Join[
-          If[ri <= Length[loPlanCharts], {loPlanCharts[[ri]]}, {}],
-          If[ri <= Length[hiPlanCharts], {hiPlanCharts[[ri]]}, {}]];
-        roundSystems = catch2[
-          DiffExp2`Solve`PrepareChart[transportSys, #] & /@ roundCharts];
-        If[FailureQ[roundSystems],
-          Print["CPP ARM PREP FAIL round=", ri, " ", roundSystems];
-          Throw[$Failed, "FT2Abort"]];
-        (* A single tail chart, or the identical shared anchor, has no idle
-           sibling work to fill.  Let the ordinary lower-first march own it
-           instead of paying the two-pass collection overhead. *)
-        If[Length[roundSystems] === 2 &&
-            roundSystems[[1]] =!= roundSystems[[2]],
-          armBatchResult = catch2[
-            DiffExp2`Solve`PrewarmHomogeneousBatch[roundSystems, armReq]];
-          If[FailureQ[armBatchResult],
-            Print["CPP ARM BATCH FAIL round=", ri, " ", armBatchResult];
-            Throw[$Failed, "FT2Abort"]]]],
-        {ri, armRounds}]];
+      (* Preflight the complete prewarm before submitting its first wave.
+         Otherwise a long pair of arms can fill the bounded homogeneous
+         cache, abort a later wave, or clear all prewarmed entries when the
+         ordinary march asks for its first uncached tail chart.  The chart
+         count is a conservative upper bound (shared anchors are removed). *)
+      armUniqueCharts = DeleteDuplicates[Join[loPlanCharts, hiPlanCharts]];
+      armCacheCapacity = DiffExp2`Solve`HomogeneousCacheCapacity[];
+      If[Length[armUniqueCharts] > armCacheCapacity,
+        Print["FTLADDER CPP ARM BATCH SKIP level=", level,
+          " uniqueCharts=", Length[armUniqueCharts],
+          " cacheCapacity=", armCacheCapacity],
+        Print["FTLADDER CPP ARM BATCH level=", level,
+          " lowerCharts=", Length[loPlanCharts],
+          " upperCharts=", Length[hiPlanCharts],
+          " rounds=", armRounds];
+        Do[Module[{roundCharts, roundSystems},
+          roundCharts = Join[
+            If[ri <= Length[loPlanCharts], {loPlanCharts[[ri]]}, {}],
+            If[ri <= Length[hiPlanCharts], {hiPlanCharts[[ri]]}, {}]];
+          roundSystems = catch2[
+            DiffExp2`Solve`PrepareChart[transportSys, #] & /@ roundCharts];
+          If[FailureQ[roundSystems],
+            Print["CPP ARM PREP FAIL round=", ri, " ", roundSystems];
+            Throw[$Failed, "FT2Abort"]];
+          (* A single tail chart, or the identical shared anchor, has no idle
+             sibling work to fill.  Let the ordinary lower-first march own it
+             instead of paying the two-pass collection overhead. *)
+          If[Length[roundSystems] === 2 &&
+              roundSystems[[1]] =!= roundSystems[[2]],
+            armBatchResult = catch2[
+              DiffExp2`Solve`PrewarmHomogeneousBatch[roundSystems, armReq]];
+            If[FailureQ[armBatchResult],
+              Print["CPP ARM BATCH FAIL round=", ri, " ", armBatchResult];
+              Throw[$Failed, "FT2Abort"]]]],
+          {ri, armRounds}]]];
     If[needLo && !AssociationQ[trLoCache],
       Print["FTLADDER TRANSPORT ARM level=", level, " endpoint=lower"];
       trLoCache = catch2[If[AssociationQ[planLo],

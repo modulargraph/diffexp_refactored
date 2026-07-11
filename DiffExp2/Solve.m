@@ -17,6 +17,7 @@ BeginPackage["DiffExp2`Solve`",
 PrepareChart::usage = "PrepareChart[sys, chart] applies the chart map, runs ChartIndicial, and assembles the ChartSystem (theta matrix, gauge, V/VInv spectral frame, families).";
 SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the FundamentalSystem: one LocalSolution column per indicial sector spec.";
 PrewarmHomogeneousBatch::usage = "PrewarmHomogeneousBatch[{chartSystem1, ...}, req] batches the C++ recurrence work for several boundary-independent chart bases into one native task pool, verifies and assembles each result through the ordinary SolveHomogeneous path, and populates its memo cache. All chart systems must belong to one system/configuration; there is no Wolfram fallback.";
+HomogeneousCacheCapacity::usage = "HomogeneousCacheCapacity[] gives the bounded number of verified chart bases retained by SolveHomogeneous. It is intended for transport schedulers that must preflight a complete prewarm before submitting any batch.";
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
@@ -1949,10 +1950,13 @@ certifyPseudoCompensation[cs_, ls_, hits_List, label_] := Module[
    ODEResidualCheck rerun: the identical result already passed it when
    computed. *)
 $shCache = <||>; $shSysTag = None; $shCacheMax = 64;
+HomogeneousCacheCapacity[] := $shCacheMax;
 homogeneousCacheKey[cs_Association, req_Association] :=
   {Hash[cs], req["TOrder"], req["EpsWindow", "Min"],
     req["EpsWindow", "CompleteMax"], cfg["WorkingPrecision"],
+    cfg["ChopPrecision"],
     cfg["RecurrenceBackend"],
+    TrueQ[$cppExactDomain],
     TrueQ[$disableAdaptiveLowerFrames],
     TrueQ[$disableRationalDenominatorFusion],
     TrueQ[$disableGroupedSpectralTransform],

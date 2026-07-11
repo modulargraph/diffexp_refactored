@@ -10,6 +10,7 @@ tests=(
   "Tests/test_indicial.m"
   "Tests/test_sectorseries.m"
   "Tests/test_solve.m"
+  "Tests/test_cpp_arm_batch.m"
   "Tests/test_transport.m"
   "Tests/test_path_planner_algebraic.m"
   "Tests/test_integrate.m"

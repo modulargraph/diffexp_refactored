@@ -47,6 +47,13 @@ test["arm batching only fills genuinely idle native workers",
       "Length[roundSystems] === 2"] &&
     StringContainsQ[runnerSource,
       "roundSystems[[1]] =!= roundSystems[[2]]"]];
+test["arm batching preflights the complete bounded cache",
+  StringContainsQ[runnerSource,
+    "DiffExp2`Solve`HomogeneousCacheCapacity[]"] &&
+    StringContainsQ[runnerSource,
+      "Length[armUniqueCharts] > armCacheCapacity"] &&
+    StringContainsQ[runnerSource,
+      "FTLADDER CPP ARM BATCH SKIP"]];
 test["arm batching opens no Wolfram subkernels",
   And @@ (!StringContainsQ[runnerSource, #] & /@
     {"ParallelSubmit", "ParallelMap", "LaunchKernels", "ParallelNeeds"})];
@@ -173,6 +180,14 @@ saveLadderCheckpoint[highOrderTransportFile, Join[basePayload, <|
 test["higher-order transport checkpoint remains order-specific",
   loadLadderCheckpoint[highOrderTransportFile, name, data, prepKey] === $Failed];
 
+lowOrderTransportFile = FileNameJoin[{tmpDir, "low-order-transport.mx"}];
+saveLadderCheckpoint[lowOrderTransportFile, Join[basePayload, <|
+  "ExpansionOrder" -> expansionOrder - 10,
+  "ChartCache" -> low["Charts"], "TransportLow" -> low,
+  "TransportHigh" -> None, "CompletedArms" -> {"Lower"}|>]];
+test["lower-order transport checkpoint cannot downgrade the run",
+  loadLadderCheckpoint[lowOrderTransportFile, name, data, prepKey] === $Failed];
+
 highOrderBoundaryFile = FileNameJoin[{tmpDir, "high-order-boundary.mx"}];
 saveLadderCheckpoint[highOrderBoundaryFile, <|
   "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
@@ -188,6 +203,20 @@ loaded = loadLadderCheckpoint[highOrderBoundaryFile, name, data, prepKey];
 test["higher-order boundary checkpoint may seed a lower-order run",
   AssociationQ[loaded] &&
     loaded["SourceExpansionOrder"] === expansionOrder + 10, loaded];
+
+lowOrderBoundaryFile = FileNameJoin[{tmpDir, "low-order-boundary.mx"}];
+saveLadderCheckpoint[lowOrderBoundaryFile, <|
+  "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
+  "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
+  "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
+  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "RecurrenceBackend" -> recurrenceBackend,
+  "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
+  "LevelEpsilonHalos" -> levelEpsilonHalos,
+  "SourceExpansionOrder" -> expansionOrder - 10,
+  "RequestedEpsilonOrder" -> requestedEpsilonOrder[1]|>];
+test["lower-order boundary checkpoint cannot downgrade the run",
+  loadLadderCheckpoint[lowOrderBoundaryFile, name, data, prepKey] === $Failed];
 
 (* Rewrite a valid snapshot's source provenance to exercise stale opt-in. *)
 staleFile = FileNameJoin[{tmpDir, "stale.mx"}];

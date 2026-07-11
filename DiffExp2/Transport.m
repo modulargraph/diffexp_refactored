@@ -143,6 +143,33 @@ exactPointMemberQ[p_, points_List] := MemberQ[points, p] ||
   AnyTrue[Select[points, numericSameCandidateQ[p, #] &],
     exactSamePointQ[p, #] &];
 
+(* Order exact real planner points without imposing a fixed absolute
+   resolution.  Separated points take the cheap endpoint-first numeric path;
+   only an ambiguous pair enters RootReduce/sign isolation.  In particular,
+   1 and 1+10^-80 must not become equal merely because a 40-digit rendering
+   rounds both endpoints to the same decimal. *)
+pointOrderSign[a_, b_, digits_Integer:40] := Module[
+  {delta = Together[a - b], na, nb, nd, scale, reduced, sgn},
+  If[delta === 0, Return[0, Module]];
+  If[ratExprQ[delta] && NumericQ[delta], Return[Sign[delta], Module]];
+  {na, nb} = Quiet[Check[N[{a, b}, digits + 20], {$Failed, $Failed}]];
+  If[And[NumericQ[na], NumericQ[nb]],
+    nd = na - nb;
+    scale = Max[1, Abs[na], Abs[nb]];
+    If[TrueQ[Abs[nd] > 10^-digits scale],
+      sgn = Quiet[Sign[Re[nd]]];
+      If[MemberQ[{-1, 1}, sgn], Return[sgn, Module]]]];
+  reduced = Quiet[RootReduce[delta]];
+  If[reduced === 0, Return[0, Module]];
+  sgn = Quiet[Sign[reduced]];
+  If[MemberQ[{-1, 1}, sgn], Return[sgn, Module]];
+  nd = Quiet[Check[N[reduced, digits], $Failed]];
+  sgn = If[NumericQ[nd], Quiet[Sign[Re[nd]]], $Failed];
+  If[MemberQ[{-1, 1}, sgn], sgn,
+    err["E8", <|"PointA" -> a, "PointB" -> b,
+      "ExactDifference" -> reduced,
+      "Detail" -> "could not order exact real planner points"|>]]];
+
 (* Numerically compare planner points by evaluating the endpoints first.
    The previous unconditional RootReduce[a-b] made an O(n^2) spacing scan
    build a fresh degree-8 number field for every pair.  Rational differences
@@ -254,7 +281,7 @@ valueRefineRegularChain[charts_List, all_List, dir_, k_Integer,
     {cl = left["Center"], cr = right["Center"], rl, rr, gap},
     rl = radius[cl]; rr = radius[cr];
     gap = numericDistance[cr, cl, 40];
-    TrueQ[dir*(N[cr, 40] - N[cl, 40]) > 0] &&
+    TrueQ[dir*pointOrderSign[cr, cl] > 0] &&
       TrueQ[gap < safety*margin*N[rl, 40]] &&
       (* This is stronger than the half-disk condition audited by
          ValidatePlan and pins the fallback to the established design class. *)
@@ -333,8 +360,8 @@ projectComplexRoots[all_List, real_List] := Module[{data, projected},
           Function[other, TrueQ[reN < other[[4]] < reN + hN]]];
         Join[If[leftOccupied, {}, {re - h}], {re},
           If[rightOccupied, {}, {re + h}]]]]], data]];
-  SortBy[exactDeduplicatePoints[DeleteDuplicates[projected]],
-    Re[N[#, 70]] &]];
+  Sort[exactDeduplicatePoints[DeleteDuplicates[projected]],
+    pointOrderSign[#1, #2, 70] < 0 &]];
 
 FindSingularities[sys_Association] := Module[
   {var = sys["Variable"], facs, extra, all, roots, real},
@@ -407,8 +434,8 @@ simpleProjectionWaypoints[projected_List, real_List, lineCap_] := Module[
         cand = Rationalize[N[p, 30], tol];
         If[exactPointMemberQ[cand, real],
           Rationalize[N[p, 30], tol/64], cand]]]], projected];
-  SortBy[exactDeduplicatePoints[DeleteDuplicates[pts]],
-    Re[N[#, 70]] &]];
+  Sort[exactDeduplicatePoints[DeleteDuplicates[pts]],
+    pointOrderSign[#1, #2, 70] < 0 &]];
 
 projectionRadius[center_, projected_List, lineCap_] := Module[{others},
   others = Select[projected,
@@ -453,11 +480,11 @@ matchOffset[matchRadius_, trueRadius_, k_Integer] :=
    segment, instead of accumulating one-sided, ill-conditioned matches. *)
 classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
     matchTarget_] := Module[
-  {r, q, left, right, steps, g, xnew, targetGap},
+  {r, q, left, right, steps, g, xnew},
   r = projectionRadius[xb, projected, lineCap];
   q = xb + dir*r/k;
-  left = Select[projected, TrueQ[N[# - q, 40] < 0] &];
-  right = Select[projected, TrueQ[N[# - q, 40] > 0] &];
+  left = Select[projected, pointOrderSign[#, q] < 0 &];
+  right = Select[projected, pointOrderSign[#, q] > 0 &];
   left = If[left === {}, -Infinity, Last[left]];
   right = If[right === {}, Infinity, First[right]];
   steps = If[dir > 0,
@@ -467,8 +494,8 @@ classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
       If[right === Infinity, Infinity, (right - q)/(k - 1)]}, Infinity]];
   g = If[steps === {}, lineCap/k, Min[steps]];
   xnew = q + dir*g;
-  targetGap = dir*N[matchTarget - xb, 40];
-  If[TrueQ[targetGap > 0] && TrueQ[dir*N[xnew - matchTarget, 40] >= 0],
+  If[TrueQ[dir*pointOrderSign[matchTarget, xb] > 0] &&
+      TrueQ[dir*pointOrderSign[xnew, matchTarget] >= 0],
     xnew = matchTarget];
   (* All non-real projections were simplified to nearby rationals above;
      retain exact real singularities verbatim and keep ordinary centers in
@@ -510,14 +537,29 @@ classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
    the least distance from m* to a constraint boundary, so (a) and (b)
    survive rationalization with 7/8 of their slack. *)
 singularMatchPoint[prevCenter_, prevRad_, z_, radTarget_, dir_] := Module[
-  {margin = 9/10, gap, den, mstar, bnd},
-  gap = dir*(N[z, 40] - N[prevCenter, 40]);
+  {margin = 9/10, gap, den, offset, bnd, offsetRat, exactGap, exactDen},
+  If[dir*pointOrderSign[z, prevCenter] <= 0, Return[None, Module]];
+  If[AllTrue[{prevCenter, prevRad, z, radTarget},
+      ratExprQ[#] && NumericQ[#] &],
+    exactGap = dir*(z - prevCenter);
+    exactDen = margin*prevRad + radTarget;
+    If[TrueQ[0 < exactGap < exactDen],
+      Return[Together[prevCenter +
+        (z - prevCenter)*margin*prevRad/exactDen], Module],
+      Return[None, Module]]];
+  gap = numericDistance[z, prevCenter, 40];
   den = margin*N[prevRad, 40] + N[radTarget, 40];
   If[!TrueQ[0 < gap < den], Return[None]];
-  mstar = N[prevCenter, 40] + dir*gap*margin*N[prevRad, 40]/den;
+  offset = gap*margin*N[prevRad, 40]/den;
   bnd = Min[Min[margin*N[prevRad, 40], N[radTarget, 40]]*(den - gap),
     gap*N[radTarget, 40]]/den;
-  Rationalize[N[mstar, 20], N[bnd, 20]/8]];
+  (* Rationalize the small RELATIVE offset before adding it to an exact
+     center.  Rationalizing an absolute number such as 1+10^-80 at fixed
+     precision erases the displacement and can make the planner loop. *)
+  offsetRat = Rationalize[N[offset, 20], N[bnd, 20]/8];
+  If[FreeQ[prevCenter, _?InexactNumberQ],
+    RootReduce[prevCenter + dir*offsetRat],
+    N[prevCenter, 40] + dir*N[offset, 40]]];
 
 (* chartMatchPoint: THE incoming-match-point formula — the single source
    shared by TransportLine (evaluation), SegmentLine (cover target), and
@@ -566,8 +608,10 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
   lineCap = 2*Abs[to - from];
   projected = plannerProfile["SimpleProjectionWaypoints",
     simpleProjectionWaypoints[sings["Projected"], real, lineCap]];
-  interior = Sort[Select[projected, TrueQ[dir*(N[#, 40] - N[from, 40]) > 0] &&
-      TrueQ[dir*(N[to, 40] - N[#, 40]) > 0] &], dir*N[#1 - #2, 40] < 0 &];
+  interior = Sort[Select[projected,
+      dir*pointOrderSign[#, from] > 0 &&
+      dir*pointOrderSign[to, #] > 0 &],
+    dir*pointOrderSign[#1, #2] < 0 &];
   (* the ANCHOR CHART sits exactly at `from` (regular by the check above):
      the boundary is matched at t = 0 — exact and perfectly conditioned —
      and the chart is plan-independent, so the lo/hi endpoint transports
@@ -616,7 +660,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
         If[matchTarget =!= None && !TrueQ[Last[charts]["Singular"]] &&
            (TrueQ[numericDistance[matchTarget, cur, 40] <=
                 N[matchOffset[prevMatchRad, prevRad, k], 40]] ||
-            TrueQ[dir*(N[cur, 40] - N[matchTarget, 40]) >= 0]) &&
+            TrueQ[dir*pointOrderSign[cur, matchTarget] >= 0]) &&
            (!targetSingular ||
              TrueQ[numericDistance[matchTarget, target, 40] <= N[radTarget, 40]/2]),
           If[targetSingular,

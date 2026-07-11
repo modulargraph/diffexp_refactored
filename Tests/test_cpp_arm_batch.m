@@ -42,6 +42,22 @@ sys = catchDE2[DiffExp2`API`LoadSystem[
 csLo = catchDE2[DiffExp2`Solve`PrepareChart[sys, chart["batch-lo", 0]]];
 csHi = catchDE2[DiffExp2`Solve`PrepareChart[sys, chart["batch-hi", 1/3]]];
 
+assert["cpp_arm_batch_exposes_bounded_cache_capacity",
+  DiffExp2`Solve`HomogeneousCacheCapacity[] === 64];
+baseKey = DiffExp2`Solve`Private`homogeneousCacheKey[csLo, req];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{"ChopPrecision" -> 20}]];
+chopKey = DiffExp2`Solve`Private`homogeneousCacheKey[csLo, req];
+assert["homogeneous_cache_key_tracks_chop_precision",
+  baseKey =!= chopKey];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "ChopPrecision" -> Automatic}]];
+oldExactDomain = DiffExp2`Solve`Private`$cppExactDomain;
+DiffExp2`Solve`Private`$cppExactDomain = !TrueQ[oldExactDomain];
+exactDomainKey = DiffExp2`Solve`Private`homogeneousCacheKey[csLo, req];
+DiffExp2`Solve`Private`$cppExactDomain = oldExactDomain;
+assert["homogeneous_cache_key_tracks_cpp_exact_domain_seam",
+  baseKey =!= exactDomainKey];
+
 clearHomogeneous[];
 sequential = catchDE2[
   DiffExp2`Solve`SolveHomogeneous[#, req] & /@ {csLo, csHi}];
@@ -70,6 +86,30 @@ duplicate = catchDE2[
 assert["cpp_arm_batch_deduplicates_shared_anchor_chart",
   ListQ[duplicate] && Length[duplicate] === 1 &&
     Length[DiffExp2`Solve`Private`$shCache] === 1];
+
+(* A partially warmed pair must submit only its missing chart and retain the
+   verified first chart under the same authoritative cache identity. *)
+clearHomogeneous[];
+firstWarm = catchDE2[DiffExp2`Solve`SolveHomogeneous[csLo, req]];
+partialBatch = catchDE2[
+  DiffExp2`Solve`PrewarmHomogeneousBatch[{csLo, csHi}, req]];
+assert["cpp_arm_batch_extends_a_partially_warmed_cache",
+  AssociationQ[firstWarm] && ListQ[partialBatch] &&
+    Length[partialBatch] === 2 &&
+    Length[DiffExp2`Solve`Private`$shCache] === 2 &&
+    SameQ[First[partialBatch], firstWarm]];
+
+(* Capacity remains a strict lower-level guard.  The FT scheduler preflights
+   the complete arm set so production never reaches this failure midway. *)
+oldCacheMax = DiffExp2`Solve`Private`$shCacheMax;
+DiffExp2`Solve`Private`$shCacheMax = 1;
+clearHomogeneous[];
+overCapacity = catchDE2[
+  DiffExp2`Solve`PrewarmHomogeneousBatch[{csLo, csHi}, req]];
+DiffExp2`Solve`Private`$shCacheMax = oldCacheMax;
+clearHomogeneous[];
+assert["cpp_arm_batch_capacity_guard_is_loud_and_no_fallback",
+  FailureQ[overCapacity] && overCapacity["ID"] === "E6"];
 
 (* An extra analytic regulator is retained over FLINT's exact rational
    coefficient field.  The native dispatcher deliberately serializes such

@@ -43,6 +43,65 @@ esTimes = DiffExp2`EpsSeries`ESTimes; esShift = DiffExp2`EpsSeries`ESShift;
 esCoeff = DiffExp2`EpsSeries`ESCoefficient; esMin = DiffExp2`EpsSeries`ESMinPower;
 esCM = DiffExp2`EpsSeries`ESCompleteMax;
 
+(* Private, default-off parity seam.  The constant right-frame
+   normalization is already the production path for regular charts.  Its
+   singular extension is kept gated while the real banana match and tagged
+   resonant/log frames are exercised: it changes only the basis coordinates,
+   never a tolerance, epsilon valuation, or transport point. *)
+$enableSingularMatchPrecondition = False;
+mwUseConstantMatchPreconditionQ[cs_Association] :=
+  TrueQ[Lookup[cs["IndicialData"], "Regular", False]] ||
+    TrueQ[$enableSingularMatchPrecondition];
+
+(* Opt-in replay seam for expensive matches.  The path is read at the last
+   point before any constant preconditioning or Laurent solve, after the
+   actual LocalSolution basis has passed epsilon-lattice saturation.  A
+   same-directory temporary plus overwrite rename keeps an interrupted write
+   from destroying the previous replay.  With no environment path this is a
+   pure no-op and creates neither globals nor files. *)
+$matchFixtureSchema = "DiffExp2.MatchFixture/v1";
+mwMaybeDumpMatchFixture[basis_List, Fmat_List, vIn_List, tLoc_,
+    requiredTop_Integer, chart_Association, matchPoint_] := Module[
+  {file = Quiet[Environment["DE2_MATCH_FIXTURE_FILE"]], dir, tmp, payload,
+   wrote, renamed},
+  If[!StringQ[file] || StringLength[StringTrim[file]] == 0,
+    Return[Null, Module]];
+  file = ExpandFileName[file];
+  dir = DirectoryName[file];
+  If[!DirectoryQ[dir],
+    Quiet[Check[CreateDirectory[dir, CreateIntermediateDirectories -> True],
+      err["E5", <|"Chart" -> Lookup[chart, "Name", "(unknown)"],
+        "FixtureFile" -> file,
+        "Detail" -> "could not create match-fixture directory"|>]]]];
+  payload = <|
+    "Schema" -> $matchFixtureSchema,
+    "Label" -> Lookup[chart, "Name", "(unknown)"],
+    "Chart" -> KeyTake[chart, {"Name", "Center", "Scale", "Radius",
+      "LocalRadius", "MatchRadius", "Singular", "IncomingMatchPoint"}],
+    "MatchPoint" -> matchPoint, "LocalCoordinate" -> tLoc,
+    "RequiredTop" -> requiredTop,
+    "Config" -> AssociationMap[Function[key, cfg[key]],
+      {"WorkingPrecision", "ExpansionOrder", "EpsilonOrder",
+       "DivisionOrder", "StepDivisionOrder", "RadiusOfConvergence"}],
+    "Basis" -> basis, "F" -> Fmat, "V" -> vIn|>;
+  Global`$DE2MatchFixture = payload;
+  tmp = file <> ".tmp-" <> ToString[$ProcessID] <> "-" <>
+    StringReplace[CreateUUID[], "-" -> ""] <> ".mx";
+  wrote = Quiet[Check[
+    DumpSave[tmp, Global`$DE2MatchFixture]; FileExistsQ[tmp], False]];
+  Clear[Global`$DE2MatchFixture];
+  If[!TrueQ[wrote],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    err["E5", <|"Chart" -> payload["Label"], "FixtureFile" -> file,
+      "Detail" -> "could not write atomic match fixture"|>]];
+  renamed = Quiet[Check[
+    RenameFile[tmp, file, OverwriteTarget -> True]; True, False]];
+  If[!TrueQ[renamed],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    err["E5", <|"Chart" -> payload["Label"], "FixtureFile" -> file,
+      "Detail" -> "could not install atomic match fixture"|>]];
+  file];
+
 (* Stable true modulus shared by all coefficient/residual decisions. *)
 numMag = DiffExp2`Tolerances`NumericMagnitude;
 numMagBounds = DiffExp2`Tolerances`NumericMagnitudeBounds;
@@ -1666,13 +1725,16 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
               "VerificationShifts" -> satVerify["InitialShifts"],
               "VerificationSteps" -> satVerify["Steps"],
               "Detail" -> "transformed LocalSolution basis did not verify as a regular epsilon lattice"|>]]];
-        (* Ordinary charts all share the single Taylor-sector window, so the
-           constant frame normalization is window-trivial there and removes
-           the artificial center-to-edge conditioning seen in long banana
-           marches.  Singular/resonant frames remain on the certified
-           epsilon-saturated path: mixing their unequal tagged windows is
-           algebraically valid but can impose an unnecessary common top. *)
-        If[TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+        mwMaybeDumpMatchFixture[basis, F, vvals, tLoc,
+          req["EpsWindow", "CompleteMax"], chart, matchPt];
+        (* Ordinary charts use constant right-frame normalization in
+           production.  The private seam extends the same certified GL(d),
+           epsilon-independent coordinate change to singular/resonant
+           charts.  CombineLocalSolutions intersects unequal operand tops,
+           so mwConstantMatchPrecondition proves that the common honest top
+           still covers the requested window, re-evaluates the actual tagged
+           objects, and re-runs epsilon-lattice saturation before matching. *)
+        If[mwUseConstantMatchPreconditionQ[cs],
           pre = mwConstantMatchPrecondition[basis, F, basisValues,
             req["EpsWindow", "CompleteMax"], chart["Name"]];
           basis = pre["Basis"];

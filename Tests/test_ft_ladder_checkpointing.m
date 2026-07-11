@@ -67,6 +67,7 @@ basePayload = <|
   "DivisionOrder" -> divisionOrder,
   "RadiusOfConvergence" -> radiusOfConvergence,
   "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+  "SingularMatchPrecondition" -> singularMatchPrecondition,
   "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
   "LevelEpsilonHalos" -> levelEpsilonHalos,
   "ExpansionOrder" -> expansionOrder,
@@ -124,6 +125,14 @@ saveLadderCheckpoint[configFile, Join[basePayload, <|
   "TransportHigh" -> None, "CompletedArms" -> {"Lower"}|>]];
 test["transport configuration fingerprint remains enforced",
   loadLadderCheckpoint[configFile, name, data, prepKey] === $Failed];
+
+preconditionFile = FileNameJoin[{tmpDir, "bad-precondition-mode.mx"}];
+saveLadderCheckpoint[preconditionFile, Join[basePayload, <|
+  "SingularMatchPrecondition" -> !singularMatchPrecondition,
+  "ChartCache" -> low["Charts"], "TransportLow" -> low,
+  "TransportHigh" -> None, "CompletedArms" -> {"Lower"}|>]];
+test["singular precondition mode mismatch is rejected",
+  loadLadderCheckpoint[preconditionFile, name, data, prepKey] === $Failed];
 
 highOrderTransportFile = FileNameJoin[{tmpDir, "high-order-transport.mx"}];
 saveLadderCheckpoint[highOrderTransportFile, Join[basePayload, <|

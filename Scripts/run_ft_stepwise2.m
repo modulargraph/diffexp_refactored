@@ -18,6 +18,13 @@ Get[FileNameJoin[{repoRoot, "Scripts", "FTExamples.m"}]];
 envOrDefault[name_, default_] := Module[{value = Environment[name]},
   If[StringQ[value] && StringLength[StringTrim[value]] > 0, value, default]];
 
+singularMatchPrecondition =
+  envOrDefault["DE2_SINGULAR_MATCH_PRECONDITION", "0"] === "1";
+DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
+  singularMatchPrecondition;
+If[singularMatchPrecondition,
+  Print["DE2 singular match precondition enabled"]];
+
 wp = ToExpression[envOrDefault["FT_WORKING_PRECISION", "500"]];
 epsOrder = ToExpression[envOrDefault["FT_EPS_ORDER", "0"]];
 expansionOrder = ToExpression[envOrDefault["FT_EXPANSION_ORDER", "50"]];
@@ -285,6 +292,10 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
         payload["ValueTransportMode"] =!= Environment["DE2_VALUE_TRANSPORT"],
       Return[ladderCheckpointReject[file,
         "DE2_VALUE_TRANSPORT mode does not match"], Module]];
+    If[KeyExistsQ[payload, "SingularMatchPrecondition"] &&
+        payload["SingularMatchPrecondition"] =!= singularMatchPrecondition,
+      Return[ladderCheckpointReject[file,
+        "singular match precondition mode does not match"], Module]];
     belowData = data["Levels"][level - 1];
     mastersBelow = belowData["Masters"];
     currentRequests =
@@ -555,6 +566,7 @@ runExample[name_String] := Module[
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
         "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+        "SingularMatchPrecondition" -> singularMatchPrecondition,
         "EpsilonOrder" -> epsOrder,
         "BoundaryExtraOrder" -> boundaryExtraOrder,
         "LevelEpsilonHalos" -> levelEpsilonHalos,

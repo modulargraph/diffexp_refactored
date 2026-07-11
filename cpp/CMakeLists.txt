@@ -56,4 +56,10 @@ if(DE2_BUILD_TESTS)
   target_compile_features(test_diffexp2_session_solve_many PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_session_solve_many PRIVATE diffexp2_core)
   add_test(NAME cpp_session_solve_many COMMAND test_diffexp2_session_solve_many)
+
+  add_executable(test_diffexp2_local_algebra
+    tests/test_local_algebra.cpp)
+  target_compile_features(test_diffexp2_local_algebra PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_local_algebra PRIVATE diffexp2_core)
+  add_test(NAME cpp_local_algebra COMMAND test_diffexp2_local_algebra)
 endif()

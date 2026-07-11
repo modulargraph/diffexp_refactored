@@ -438,6 +438,104 @@ assert["su18_gauge_chart_closed_form",
       Abs[Det[m]] > 10^-8 &&
       AllTrue[m, NumericQ[#[[1]]] && NumericQ[#[[2]]] &]]]];
 
+(* SU-26: an inhomogeneous source is supplied in the original physical
+   theta frame.  This 3x3 system has the exact SCC source {1}->{2,3}; its
+   rank-reduced target gauge is T=diag(1,t^-1,1).  For the physical source
+   s=(0,1,0), T^-1.s=(0,t,0), and the canonical exact particular is
+   f=(0,-1,-t).  Omitting T^-1 gives a wrong answer that the original-frame
+   residual catches. *)
+A26 = {{0, 0, 0}, {1/x, 0, 1/x^2}, {0, 1, 0}};
+cs26 = pc[mkSys[A26], mkChart[0, 1, "su26_rank_source"]];
+src26 = <|"Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+    "Coeffs" -> Table[If[k === 0 && n === 0, {0, 1, 0}, {0, 0, 0}],
+      {k, 0, 3}, {n, 0, 5}]|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 3|>,
+  "TWindow" -> <|"CompleteMax" -> 5|>|>;
+red26 = catchDE2[DiffExp2`Solve`Private`reduceParticularSource[cs26, src26]];
+p26 = catchDE2[sp[cs26, src26, req[0, 2, 5]]];
+ev26 = If[FailureQ[p26], None,
+  DiffExp2`SectorSeries`EvaluateLocalSolution[p26, 1/3,
+    "UsePade" -> False]["Value"]];
+res26 = If[FailureQ[p26], p26,
+  catchDE2[DiffExp2`Solve`ODEResidualCheck[cs26, p26, src26, 1/3]]];
+assert["su26_rank_reduced_particular_source_exact_frame_transform",
+  !FailureQ[red26] && cs26["Gauge"] === DiagonalMatrix[{1, t^-1, 1}] &&
+  cs26["GaugeInverse"] === DiagonalMatrix[{1, t, 1}] &&
+  red26["EpsWindow"] === src26["EpsWindow"] &&
+  Dimensions[red26["Sectors"][[1, "Coeffs"]]][[3]] === 3 &&
+  red26["Sectors"][[1, "Coeffs", 1, 2]] === {0, 1, 0}];
+assert["su26_rank_reduced_particular_closed_form_and_original_residual",
+  !FailureQ[p26] && !FailureQ[res26] && NumericQ[res26] && res26 < 10^-50 &&
+  Max[Abs[N[DiffExp2`EpsSeries`ESCoefficient[ev26, 0] -
+      {0, -1, -1/3}, 60]]] < 10^-50];
+
+(* Identity charts must not canonicalize or otherwise rewrite source data at
+   the new seam; this pins ordinary-chart behavior byte-for-byte. *)
+assert["su26_identity_gauge_source_parity",
+  SameQ[DiffExp2`Solve`Private`reduceParticularSource[cs8, src8], src8]];
+
+(* An algebraically zero, but syntactically uncancelled, source component is
+   inactive.  A pole in the corresponding inverse-gauge entry must not
+   lower its honest epsilon window. *)
+zero26 = (Global`rho^2 - 1)/(Global`rho - 1) - (Global`rho + 1);
+src26z = ReplacePart[src8,
+  {"Sectors", 1, "Coeffs", 1, 1, 1} -> zero26];
+cs26z = Join[cs8, <|"Gauge" -> {{eps^5}},
+  "GaugeInverse" -> {{eps^-5}}|>];
+assert["su26_rank_source_uncancelled_exact_zero_is_inactive",
+  zero26 =!= 0 && Together[zero26] === 0 &&
+  SameQ[DiffExp2`Solve`Private`reduceParticularSource[cs26z, src26z], src26z]];
+
+(* SU-27: tags and honest windows survive the same transform.  Here
+   T^-1=diag(eps^2 t,1): an eps^-2 fractional/log source becomes finite,
+   keeps (a,b,p)=(1/2,3,2), and gains one analytic Taylor power.  The direct
+   particular solve additionally exercises both source framing and the
+   existing physical Gauge back-transform. *)
+cs27 = pc[mkSys[{{0, 1/(eps^2*x^2)}, {0, 0}}],
+  mkChart[0, 1, "su27_rank_source_tags"]];
+src27 = <|"Sectors" -> {<|"a" -> 1/2, "b" -> 3, "p" -> 2,
+    "Coeffs" -> Table[If[k === -2 && n === 0, {7, 0}, {0, 0}],
+      {k, -2, 5}, {n, 0, 4}]|>},
+  "EpsWindow" -> <|"Min" -> -2, "CompleteMax" -> 5|>,
+  "TWindow" -> <|"CompleteMax" -> 4|>|>;
+red27 = catchDE2[DiffExp2`Solve`Private`reduceParticularSource[cs27, src27]];
+p27 = catchDE2[sp[cs27, src27, req[-2, 2, 4]]];
+assert["su27_rank_source_preserves_fractional_log_and_laurent_contract",
+  !FailureQ[red27] && cs27["GaugeInverse"] === DiagonalMatrix[{eps^2*t, 1}] &&
+  red27["EpsWindow"] === <|"Min" -> 0, "CompleteMax" -> 7|> &&
+  ({#["a"], #["b"], #["p"]} & /@ red27["Sectors"]) === {{1/2, 3, 2}} &&
+  Dimensions[red27["Sectors"][[1, "Coeffs"]]] === {8, 5, 2} &&
+  red27["Sectors"][[1, "Coeffs", 1, 2]] === {7, 0} &&
+  !FailureQ[p27] && p27["EpsWindow", "CompleteMax"] >= 2];
+
+(* SU-28: a non-monomial rank gauge must be Taylor-expanded without losing
+   its honest finite source width.  Fuchsian reduction gives
+   T^-1=diag(t/(1+t),1); multiplying the constant physical source produces
+   t-t^2+t^3-... in the reduced frame.  The physical canonical particular
+   is nevertheless exactly (Log[t],0). *)
+cs28 = pc[mkSys[{{0, (1 + x)/x^2}, {0, 0}}],
+  mkChart[0, 1/2, "su28_nonmonomial_rank_source"]];
+src28 = <|"Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+    "Coeffs" -> Table[If[k === 0 && n === 0, {1, 0}, {0, 0}],
+      {k, 0, 3}, {n, 0, 5}]|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 3|>,
+  "TWindow" -> <|"CompleteMax" -> 5|>|>;
+red28 = catchDE2[DiffExp2`Solve`Private`reduceParticularSource[cs28, src28]];
+p28 = catchDE2[sp[cs28, src28, req[0, 2, 5]]];
+ev28 = If[FailureQ[p28], None,
+  DiffExp2`SectorSeries`EvaluateLocalSolution[p28, 1/4,
+    "UsePade" -> False]["Value"]];
+assert["su28_nonmonomial_rank_source_window_and_direct_particular",
+  !FailureQ[red28] && cs28["GaugeInverse"] ===
+    DiagonalMatrix[{t/(1 + t), 1}] &&
+  red28["TWindow"] === src28["TWindow"] &&
+  red28["EpsWindow"] === src28["EpsWindow"] &&
+  red28["Sectors"][[1, "Coeffs", 1, All, 1]] === {0, 1, -1, 1, -1, 1} &&
+  !FailureQ[p28] &&
+  Abs[N[DiffExp2`EpsSeries`ESCoefficient[ev28, 0][[1]] - Log[1/4], 60]] <
+    10^-50 &&
+  Abs[N[DiffExp2`EpsSeries`ESCoefficient[ev28, 0][[2]], 60]] < 10^-50];
+
 (* SU-19: the canonical spectral lattice clears arbitrary poles from each
    Jordan block before recurrence.  The same depth moves into VInv, where
    source/matching transforms must still budget it honestly; homogeneous

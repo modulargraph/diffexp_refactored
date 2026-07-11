@@ -132,6 +132,37 @@ assert["cpp_inhomogeneous_resonant_source_tensor",
   rSource["EpsWindow", "Min"] === -1 &&
   Abs[N[sourceLog["Coeffs"][[1, 1, 1]] - 1, 70]] < 10^-70];
 
+(* Rank-reduced inhomogeneous parity, including the source-frame seam.
+   Fuchsian reduction produces T^-1=diag(t/(1+t),1), so the physical
+   theta source must be rationally multiplied before either backend sees
+   its materialized recurrence tensor. *)
+csRankSource = DiffExp2`Solve`PrepareChart[
+  <|"Matrix" -> {{0, (1 + x)/x^2}, {0, 0}}, "Variable" -> x|>,
+  <|"ChartVar" -> t, "Center" -> 0, "Radius" -> 1/2,
+    "Name" -> "cpp-rank-source"|>];
+rankSource = <|"Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
+    "Coeffs" -> Table[If[k === 0 && n === 0, {1, 0}, {0, 0}],
+      {k, 0, 3}, {n, 0, 5}]|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 3|>,
+  "TWindow" -> <|"CompleteMax" -> 5|>|>;
+catchDE2[DiffExp2`Config`UpdateConfiguration[
+  {"RecurrenceBackend" -> "Wolfram"}]];
+rankSourceW = catchDE2[DiffExp2`Solve`SolveParticular[
+  csRankSource, rankSource, req[0, 2, 5]]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[
+  {"RecurrenceBackend" -> "Cpp"}]];
+rankSourceC = catchDE2[DiffExp2`Solve`SolveParticular[
+  csRankSource, rankSource, req[0, 2, 5]]];
+rankSourceDiff = If[FailureQ[rankSourceW] || FailureQ[rankSourceC] ||
+    tags[rankSourceW] =!= tags[rankSourceC], Infinity,
+  Max[Abs[Flatten[N[rankSourceW["Sectors"][[All, "Coeffs"]] -
+    rankSourceC["Sectors"][[All, "Coeffs"]], 70]]]]];
+assert["cpp_rank_reduced_nonmonomial_source_wolfram_parity",
+  !FailureQ[rankSourceW] && !FailureQ[rankSourceC] &&
+  csRankSource["GaugeInverse"] === DiagonalMatrix[{t/(1 + t), 1}] &&
+  rankSourceW["EpsWindow"] === rankSourceC["EpsWindow"] &&
+  tags[rankSourceW] === tags[rankSourceC] && rankSourceDiff < 10^-80];
+
 (* Extra symbolic analytic regulators use FLINT's exact multivariate
    rational-function field. Epsilon remains the independent Laurent axis;
    rho is neither sampled nor numerically specialized by the solve. *)

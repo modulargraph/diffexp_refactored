@@ -17,7 +17,7 @@ PrepareChart::usage = "PrepareChart[sys, chart] applies the chart map, runs Char
 SolveHomogeneous::usage = "SolveHomogeneous[chartSystem, req] gives the FundamentalSystem: one LocalSolution column per indicial sector spec.";
 PrewarmHomogeneousBatch::usage = "PrewarmHomogeneousBatch[{chartSystem1, ...}, req] batches the C++ recurrence work for several boundary-independent chart bases into one native task pool, verifies and assembles each result through the ordinary SolveHomogeneous path, and populates its memo cache. All chart systems must belong to one system/configuration; there is no Wolfram fallback.";
 HomogeneousCacheCapacity::usage = "HomogeneousCacheCapacity[] gives the bounded number of verified chart bases retained by SolveHomogeneous. It is intended for transport schedulers that must preflight a complete prewarm before submitting any batch.";
-SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source.";
+SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source supplied in the original physical frame.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming value vector (one EpsSeries per component at chart center t = 0) through a regular chart with one d-dimensional recursion, without constructing a basis or matching matrix. The delivered epsilon window is capped by the incoming window. Non-regular charts fail loudly.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-clearing, and SolveHomogeneous memo caches. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
@@ -2248,11 +2248,69 @@ solveHomogeneousCore[cs_Association, req_Association] := Module[
       "ResidualSeconds" -> N[SessionTime[] - residualStarted, 6]|>]];
     fs]];
 
+(* A caller supplies a theta-form source in the ORIGINAL physical frame,
+   theta f = B_original.f + s_f.  On a rank-reduced chart f = T.g, hence
+
+       theta g = B_reduced.g + T^-1.s_f.
+
+   This transform is deliberately performed once, at the SolveParticular
+   boundary.  In particular there is no additional factor of t (the source
+   is already in theta form), and SCC/block callers must not pre-transform
+   their physical coupling sources.
+
+   Use SectorSeries' rational multiplier so center t-poles become exact
+   shifts of the sector's a tag (analytic factors remain Taylor series),
+   while b/log tags and honest epsilon windows follow the existing closed
+   algebra.  Structurally zero source components
+   are skipped: a pole in an unused T^-1 entry must not consume completeness.
+   The result is still SourceData (only the three source keys are exposed). *)
+sourceLocalSolution[cs_, source_] := Module[{ls, d = cs["SystemSize"], ncomp},
+  ls = <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+    "Radius" -> cs["Radius"], "Sectors" -> source["Sectors"],
+    "EpsWindow" -> source["EpsWindow"], "TWindow" -> source["TWindow"],
+    "ErrorEstimate" -> ConstantArray[0,
+      source["EpsWindow", "CompleteMax"] - source["EpsWindow", "Min"] + 1],
+    "Prescriptions" -> cs["Prescriptions"]|>;
+  ls = DiffExp2`SectorSeries`ValidateLocalSolution[ls];
+  ncomp = Dimensions[First[ls["Sectors"]]["Coeffs"]][[3]];
+  If[ncomp =!= d,
+    err["E9", cs, <|"SourceComponents" -> ncomp, "SystemSize" -> d,
+      "Detail" -> "particular source component dimension does not match the chart system"|>]];
+  ls];
+
+reduceParticularSource[cs_, source_] := Module[
+  {d = cs["SystemSize"], t = cs["ChartVar"], TInv = cs["GaugeInverse"],
+   ls, active, terms, out},
+  (* SameQ identity is load-bearing parity: ordinary charts retain their
+     SourceData byte-for-byte and pay no wrapper/canonicalization churn. *)
+  If[TInv === IdentityMatrix[d], Return[source]];
+  ls = sourceLocalSolution[cs, source];
+  active = Table[AnyTrue[ls["Sectors"], Function[sec,
+      AnyTrue[Flatten[sec["Coeffs"][[All, All, c]]],
+        !(FreeQ[#, _?InexactNumberQ] && zeroQ[#]) &]]], {c, d}];
+  terms = Flatten[Table[
+    If[zeroQ[TInv[[r, c]]] || !TrueQ[active[[c]]], {},
+      {DiffExp2`SectorSeries`MultiplyRational[
+        Append[ls, "Sectors" -> Map[Function[sec,
+          Append[sec, "Coeffs" -> Map[
+            Function[v, ReplacePart[ConstantArray[0, d], r -> v[[c]]]],
+            sec["Coeffs"], {2}]]], ls["Sectors"]]],
+        TInv[[r, c]], t]}],
+    {r, d}, {c, d}], 2];
+  (* A nonempty SourceData can still have structurally zero coefficient
+     slabs.  Its value is frame-independent, so preserve the input window. *)
+  If[terms === {}, Return[source]];
+  out = If[Length[terms] === 1, First[terms],
+    DiffExp2`SectorSeries`CombineLocalSolutions[
+      ConstantArray[1, Length[terms]], terms]];
+  KeyTake[out, {"Sectors", "EpsWindow", "TWindow"}]];
+
 SolveParticular[cs_Association, source_Association, req_Association] := Module[
   {d = cs["SystemSize"], nmax, reqMin, reqMax, parts = {}, wideTop, prep,
    eps = DiffExp2`Config`CanonicalEps[], hitsAll = {}, compAll = {}, certs = {},
    homTargets = None, symbolic, poleDepth, spectralDepth,
-   inverseSpectralDepth, sourceFrameDepth, vPrepCache = <||>, vPrepFor},
+   inverseSpectralDepth, sourceFrameDepth, reducedSource,
+   vPrepCache = <||>, vPrepFor},
   nmax = Min[req["TOrder"], source["TWindow", "CompleteMax"]];
   reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
   If[source["Sectors"] === {},
@@ -2264,9 +2322,11 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
       "TWindow" -> <|"CompleteMax" -> nmax|>,
       "ErrorEstimate" -> ConstantArray[0, reqMax - reqMin + 1],
       "Prescriptions" -> cs["Prescriptions"]|>]];
-  If[cs["Gauge"] =!= IdentityMatrix[cs["SystemSize"]],
-    err["E8", cs, <|"Detail" ->
-      "nonzero particular sources on a rank-reduced chart require the GaugeInverse source transform, which is not implemented"|>]];
+  reducedSource = reduceParticularSource[cs, source];
+  (* Rational source multiplication currently preserves the finite Taylor
+     width, but derive the recursion bound from the transformed contract:
+     this stays correct if that algebra later returns a stricter window. *)
+  nmax = Min[req["TOrder"], reducedSource["TWindow", "CompleteMax"]];
   symbolic = clearedSymbolic[cs];
   poleDepth = recurrencePoleDepth[symbolic, nmax];
   spectralDepth = spectralTransformPoleDepth[cs];
@@ -2282,7 +2342,8 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
       wideTop2, prep2, pseudoDepth, comp, desiredMax},
     P = logCeiling[cs, aS, bS, pS, True];  (* sources: Z>=0 incl. the same-a hit *)
     pseudoDepth = pseudoDepthForTag[cs, aS, bS, 0];
-    srcMin = source["EpsWindow", "Min"]; srcMax = source["EpsWindow", "CompleteMax"];
+    srcMin = reducedSource["EpsWindow", "Min"];
+    srcMax = reducedSource["EpsWindow", "CompleteMax"];
     wideTop2 = srcMax + P + pseudoDepth + 2 - Min[0, srcMin - P - 2];
     wideTop2 = Max[wideTop2, srcMax + P + pseudoDepth + poleDepth];
     wideTop2 += sourceFrameDepth;
@@ -2329,7 +2390,7 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
       If[homTargets === None,
         Module[{hreq = Join[req, <|"EpsWindow" ->
             Join[req["EpsWindow"], <|"CompleteMax" ->
-              Max[reqMax, source["EpsWindow", "CompleteMax"]]|>]|>]},
+              Max[reqMax, reducedSource["EpsWindow", "CompleteMax"]]|>]|>]},
           homTargets = SolveHomogeneous[cs, hreq]["Columns"]]];
       comp = compensatePseudoColumn[cs, ls, rec["Hits"], homTargets, desiredMax];
       ls = comp[[1]];
@@ -2339,7 +2400,7 @@ SolveParticular[cs_Association, source_Association, req_Association] := Module[
         <|"Kind" -> "Particular", "Tag" -> {aS, bS, pS}|>]],
       AppendTo[certs, True]];
     AppendTo[parts, ls]],
-    {sec, source["Sectors"]}];
+    {sec, reducedSource["Sectors"]}];
   Module[{ls = If[Length[parts] === 1, First[parts],
       DiffExp2`SectorSeries`CombineLocalSolutions[
         ConstantArray[1, Length[parts]], parts]]},

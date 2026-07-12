@@ -211,6 +211,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_scc_plan_match
     COMMAND test_diffexp2_persistent_scc_plan_match)
 
+  add_executable(test_diffexp2_persistent_rational_row
+    tests/test_persistent_rational_row.cpp)
+  target_compile_features(test_diffexp2_persistent_rational_row
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_rational_row
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_rational_row
+    COMMAND test_diffexp2_persistent_rational_row)
+
   add_executable(test_diffexp2_path_planner tests/test_path_planner.cpp)
   target_compile_features(test_diffexp2_path_planner PRIVATE cxx_std_20)
   target_include_directories(test_diffexp2_path_planner PRIVATE

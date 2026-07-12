@@ -28,6 +28,7 @@ RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, reque
 RunPersistentAcbLocalMatch::usage = "RunPersistentAcbLocalMatch[basis, incoming, request] evaluates retained Acb locals at one exact physical point and retains an exact-Rational-lattice-guided Laurent match with bounded refinement and residual diagnostics. request supplies exact_lattice and refinement records in addition to chart, branch, checkpoint, point, and epsilon identities.";
 RunPersistentPlannedMatch::usage = "RunPersistentPlannedMatch[plan, arm, index, basis, incoming, policy] performs one plan-derived retained Rational or Acb match. The one-based match index selects exact physical/local coordinates and branch data from the plan; policy supplies epsilon/checkpoint fields and, for Acb, exact_lattice/refinement.";
 MaterializePersistentLocalMatch::usage = "MaterializePersistentLocalMatch[match, checkpointIdentity] combines a retained plan-driven match's Laurent weights with its strongly owned receiving basis entirely in C++ and returns the next opaque retained local without coefficient JSON.";
+ApplyPersistentRationalRow::usage = "ApplyPersistentRationalRow[local, row, checkpointIdentity] applies one JSON-ready exact rational coefficient row to a retained Rational or Acb vector local entirely in C++. The prepared row carries one multiplier per active zero-based component, exact epsilon/Taylor coverage, and structural identities; the result is an opaque retained scalar local with unchanged chart prescriptions and no coefficient slab.";
 PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] returns the opaque summary and exact provenance of one retained native local match.";
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
 RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] applies the native sector endpoint gate to a retained local and returns an opaque session-owned endpoint-result handle. request explicitly binds source/result checkpoint identities, approach_direction, cancellation mode, and optional rim; no coefficient slab is returned.";
@@ -1145,6 +1146,24 @@ MaterializePersistentLocalMatch[match_Association,
       Module]];
   RunRequest[<|"schema" -> 2, "op" -> "match.materialize_local",
     "session" -> tokens["Session"], "match" -> tokens["Match"],
+    "checkpoint_identity" -> checkpointIdentity|>]];
+
+ApplyPersistentRationalRow[local_Association, row_Association,
+    checkpointIdentity_String] := Module[
+  {tokens = persistentLocalHandles[local], sourceCheckpoint, rowKeys},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  sourceCheckpoint = Lookup[local, "checkpoint_identity",
+    Lookup[local, "CheckpointIdentity", None]];
+  rowKeys = {"schema", "columns", "exact_identity", "entries"};
+  If[!StringQ[sourceCheckpoint] || StringLength[sourceCheckpoint] == 0 ||
+      StringLength[checkpointIdentity] == 0 ||
+      Sort[Keys[row]] =!= Sort[rowKeys],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent rational-row application requires nonempty source/result checkpoint identities and exactly schema, columns, exact_identity, entries in its prepared row"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "local.apply_rational_row",
+    "session" -> tokens["Session"], "local" -> tokens["Local"],
+    "row" -> row, "source_checkpoint_identity" -> sourceCheckpoint,
     "checkpoint_identity" -> checkpointIdentity|>]];
 
 ReleasePersistentTilePlan[handle_Association] := Module[

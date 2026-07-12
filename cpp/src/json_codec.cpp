@@ -2687,6 +2687,243 @@ class StoredLocal final : public StoredLocalBase {
 
 constexpr const char* kRetainedEndpointLimitCapability =
     "retained-native-endpoint-sector-limit-v1";
+constexpr const char* kRetainedRationalRowCapability =
+    "retained-native-rational-row-local-application-v1";
+
+template <typename Scalar>
+PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
+    const json::value& raw, const LocalSolution<Scalar>& source) {
+  const auto& row = as_object(raw, "prepared rational local row");
+  require_exact_keys(row,
+      {"schema", "columns", "exact_identity", "entries"},
+      "prepared rational local row");
+  if (required_string(row, "schema") !=
+      "diffexp2-prepared-rational-local-row-v1")
+    throw std::invalid_argument(
+        "unsupported prepared rational local-row schema");
+  const auto columns = as_u32(
+      row.at("columns"), "prepared rational local-row columns");
+  if (columns == 0 || columns != source.dimension)
+    throw std::invalid_argument(
+        "prepared rational local-row dimension differs from its retained local");
+
+  PreparedSparseLocalMultiplierMatrix<Scalar> matrix;
+  matrix.rows = 1;
+  matrix.columns = columns;
+  matrix.exact_identity = required_string(row, "exact_identity");
+  if (matrix.exact_identity.empty())
+    throw std::invalid_argument(
+        "prepared rational local-row identity must be nonempty");
+
+  std::optional<std::uint32_t> previous_column;
+  for (const auto& raw_entry : as_array(
+           row.at("entries"), "prepared rational local-row entries")) {
+    const auto& entry = as_object(
+        raw_entry, "prepared rational local-row entry");
+    require_exact_keys(entry, {"column", "multiplier"},
+                       "prepared rational local-row entry");
+    const auto column = as_u32(
+        entry.at("column"), "prepared rational local-row column");
+    if (column >= columns ||
+        (previous_column.has_value() && *previous_column >= column))
+      throw std::invalid_argument(
+          "prepared rational local-row columns must be unique, in range, and strictly increasing");
+    previous_column = column;
+
+    const auto& raw_multiplier = as_object(
+        entry.at("multiplier"), "prepared rational local-row multiplier");
+    require_exact_keys(raw_multiplier,
+        {"epsilon_shift", "center_pole_order", "kernels",
+         "exact_identity", "proven_zero"},
+        "prepared rational local-row multiplier");
+    if (!raw_multiplier.at("proven_zero").is_bool())
+      throw std::invalid_argument(
+          "prepared rational local-row structural-zero fact must be boolean");
+    if (raw_multiplier.at("proven_zero").as_bool())
+      throw std::invalid_argument(
+          "structurally zero rational-row entries must be omitted");
+
+    PreparedRationalTaylorMultiplier<Scalar> multiplier;
+    multiplier.epsilon_shift = as_i32(
+        raw_multiplier.at("epsilon_shift"),
+        "prepared rational local-row epsilon shift");
+    multiplier.center_pole_order = as_u32(
+        raw_multiplier.at("center_pole_order"),
+        "prepared rational local-row center-pole order");
+    multiplier.exact_identity = required_string(
+        raw_multiplier, "exact_identity");
+    if (multiplier.exact_identity.empty())
+      throw std::invalid_argument(
+          "prepared rational local-row multiplier identity must be nonempty");
+    multiplier.proven_zero = false;
+
+    const auto& raw_kernels = as_array(
+        raw_multiplier.at("kernels"),
+        "prepared rational local-row epsilon kernels");
+    if (raw_kernels.size() != source.epsilon.width())
+      throw std::invalid_argument(
+          "prepared rational local-row multiplier does not cover the exact source epsilon width");
+    multiplier.kernels.reserve(raw_kernels.size());
+    for (const auto& raw_kernel : raw_kernels) {
+      const auto& coefficients = as_array(
+          raw_kernel, "prepared rational local-row Taylor kernel");
+      if (coefficients.size() != source.taylor_width())
+        throw std::invalid_argument(
+            "prepared rational local-row multiplier does not cover the exact source Taylor width");
+      std::vector<Scalar> kernel;
+      kernel.reserve(coefficients.size());
+      for (const auto& coefficient : coefficients)
+        kernel.push_back(parse_scalar<Scalar>(coefficient));
+      multiplier.kernels.push_back(std::move(kernel));
+    }
+    matrix.entries.push_back(
+        typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry{
+            0, column, std::move(multiplier)});
+  }
+  return matrix;
+}
+
+template <typename Scalar>
+LocalSolution<Scalar> exact_zero_scalar_local_like(
+    const LocalSolution<Scalar>& source,
+    const std::string& checkpoint_identity) {
+  auto result = local_algebra_detail::with_selected_component(source, 0);
+  for (auto& sector : result.sectors)
+    std::fill(sector.coefficients.begin(), sector.coefficients.end(),
+              ScalarTraits<Scalar>::zero());
+  result.checkpoint_identity = checkpoint_identity;
+  validate_local_solution(result, false);
+  return result;
+}
+
+std::int32_t shifted_local_validity(std::int32_t validity,
+                                    std::int32_t shift) {
+  if (validity == kCompleteInfinity) return kCompleteInfinity;
+  return local_algebra_detail::checked_i32(
+      static_cast<std::int64_t>(validity) + shift,
+      "rational-row output validity");
+}
+
+template <typename Scalar>
+std::shared_ptr<StoredLocalBase> build_rational_row_local(
+    const std::string& local_handle, const json::object& request,
+    slong precision_bits,
+    const std::shared_ptr<StoredLocal<Scalar>>& source,
+    const std::shared_ptr<StoredLocalBase>& erased_source) {
+  if (source == nullptr || erased_source == nullptr ||
+      source.get() != erased_source.get())
+    throw std::logic_error(
+        "retained rational-row application lost typed source ownership");
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  const auto source_checkpoint_identity = required_string(
+      request, "source_checkpoint_identity");
+  if (checkpoint_identity.empty() || source_checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "retained rational-row checkpoint identities must be nonempty");
+  if (source_checkpoint_identity != source->checkpoint_identity())
+    throw std::invalid_argument(
+        "rational-row source checkpoint identity differs from its retained local");
+  if (!source->solution().error.empty())
+    throw std::domain_error(
+        "native rational-row application requires explicit source error-envelope propagation");
+
+  std::unique_ptr<AcbPrecisionLease> acb_lease;
+  if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+    acb_lease = std::make_unique<AcbPrecisionLease>(precision_bits);
+    ComplexBall::set_precision(precision_bits);
+  }
+  const auto started = std::chrono::steady_clock::now();
+  auto matrix = parse_prepared_rational_row<Scalar>(
+      request.at("row"), source->solution());
+
+  json::array entry_provenance;
+  entry_provenance.reserve(matrix.entries.size());
+  std::int32_t output_top_valid = matrix.entries.empty()
+      ? source->top_valid() : kCompleteInfinity;
+  for (const auto& entry : matrix.entries) {
+    output_top_valid = std::min(
+        output_top_valid,
+        shifted_local_validity(source->top_valid(),
+                               entry.multiplier.epsilon_shift));
+    entry_provenance.push_back(json::object{
+        {"column", entry.column},
+        {"epsilon_shift", entry.multiplier.epsilon_shift},
+        {"center_pole_order", entry.multiplier.center_pole_order},
+        {"exact_identity", entry.multiplier.exact_identity}});
+  }
+
+  auto applied = apply_prepared_sparse_local_matrix(
+      matrix, source->solution(), checkpoint_identity);
+  auto solution = applied.has_value()
+      ? std::move(*applied)
+      : exact_zero_scalar_local_like(
+            source->solution(), checkpoint_identity);
+  output_top_valid = std::min(
+      output_top_valid, solution.epsilon.complete_max);
+  if (output_top_valid < solution.epsilon.min_power)
+    throw std::domain_error(
+        "rational-row application has no valid output epsilon coefficient");
+  if (output_top_valid < solution.epsilon.complete_max)
+    solution = restrict_local_epsilon_frame_strict_lower(
+        solution, solution.epsilon.min_power, output_top_valid,
+        checkpoint_identity);
+  if (solution.dimension != 1)
+    throw std::logic_error(
+        "rational-row application did not produce a scalar local solution");
+
+  json::object derivation{
+      {"schema", "diffexp2-retained-rational-row-local-application-v1"},
+      {"capability", kRetainedRationalRowCapability},
+      {"source", json::object{
+           {"local", source->handle()},
+           {"chart", source->source_chart()},
+           {"source_operator_identity",
+            source->source_operator_identity()},
+           {"checkpoint_identity", source_checkpoint_identity},
+           {"dimension", source->solution().dimension},
+           {"epsilon", json::object{
+                {"min", source->solution().epsilon.min_power},
+                {"max", source->solution().epsilon.complete_max}}},
+           {"taylor_complete_max",
+            source->solution().taylor_complete_max}}},
+      {"row", json::object{
+           {"exact_identity", matrix.exact_identity},
+           {"columns", matrix.columns},
+           {"active_entries", std::move(entry_provenance)},
+           {"structurally_zero", matrix.entries.empty()}}},
+      {"output", json::object{
+           {"checkpoint_identity", checkpoint_identity},
+           {"dimension", solution.dimension},
+           {"epsilon", json::object{
+                {"min", solution.epsilon.min_power},
+                {"max", solution.epsilon.complete_max}}},
+           {"taylor_complete_max", solution.taylor_complete_max}}},
+      {"analytic_prescriptions", "preserved-exactly"},
+      {"coefficient_transport", "native-retained-only"}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(derivation));
+  derivation["provenance_identity"] = provenance_identity;
+
+  json::object operator_provenance{
+      {"schema", "diffexp2-rational-row-derived-operator-v1"},
+      {"source_operator_identity", source->source_operator_identity()},
+      {"row_exact_identity", matrix.exact_identity},
+      {"provenance_identity", provenance_identity}};
+  const auto derived_operator_identity = json::serialize(
+      canonical_json_value(operator_provenance));
+  const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  NativeLocalDiagnostics diagnostics;
+  diagnostics.top_valid = output_top_valid;
+  diagnostics.kernel_ms = elapsed_ms;
+  return make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+      local_handle, source->source_chart(), derived_operator_identity,
+      std::move(solution), precision_bits,
+      std::vector<PseudoHit<Scalar>>{}, diagnostics, std::nullopt,
+      std::move(derivation),
+      std::static_pointer_cast<void>(erased_source));
+}
 
 struct ParsedEndpointLimitPolicy {
   EndpointLimitOptions options;
@@ -11357,6 +11594,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedPlannedMatchMaterializationCapability},
+                        {"rational_row_application_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedRationalRowCapability},
                         {"line_integration_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -12516,6 +12757,86 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "local.apply_rational_row") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "local", "row",
+         "source_checkpoint_identity", "checkpoint_identity"},
+        "native local.apply_rational_row request");
+    if (session->domain == "symbolic")
+      throw std::domain_error(
+          "native rational-row application requires exact Rational or specialized Acb coefficients");
+    const auto source_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> source;
+    std::string local_handle;
+    {
+      // Materialization runs outside the registry lock, but owns the source
+      // for its full lifetime.  The derived scalar local also retains that
+      // source as provenance after publication.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->locals.find(source_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released retained local for rational-row application");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument("persistent local capacity is exhausted");
+      source = found->second;
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    std::shared_ptr<StoredLocalBase> local;
+    try {
+      if (session->domain == "rational") {
+        const auto typed =
+            std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+        if (!typed)
+          throw std::logic_error(
+              "rational-row source local differs from its Rational session");
+        local = build_rational_row_local<Rational>(
+            local_handle, root, session->precision_bits, typed, source);
+      } else {
+        const auto typed =
+            std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+        if (!typed)
+          throw std::logic_error(
+              "rational-row source local differs from its Acb session");
+        local = build_rational_row_local<ComplexBall>(
+            local_handle, root, session->precision_bits, typed, source);
+      }
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native rational-row reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native rational-row reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during rational-row application");
+      if (!session->locals.emplace(local_handle, local).second)
+        throw std::logic_error(
+            "native rational-row application produced a duplicate local handle");
+    }
+    auto result = local->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["source_local"] = source_handle;
+    result["application_capability"] = kRetainedRationalRowCapability;
+    result["native_retained"] = true;
+    result["json_coefficients"] = 0;
+    return result;
+  }
+
   if (operation == "local.endpoint_limit") {
     if (root.if_contains("output_digits") != nullptr ||
         root.if_contains("include_coefficients") != nullptr)
@@ -13241,6 +13562,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedPlannedMatchMaterializationCapability},
+                        {"rational_row_application_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedRationalRowCapability},
                         {"line_integration_capability",
                          session->domain == "symbolic"
                              ? "unsupported"

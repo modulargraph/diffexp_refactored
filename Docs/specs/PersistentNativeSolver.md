@@ -591,6 +591,44 @@ not a `SolveHomogeneous` or transport dispatch path.
 {"schema":2,"op":"scc.release","session":"s:1","scc":"scc:1"}
 ```
 
+### Retained rational-row projection
+
+`local.apply_rational_row` applies a chart-local rational coefficient row to
+an already retained vector local and publishes a retained scalar local.  Each
+active zero-based column carries the same exact prepared multiplier record
+used by native SCC source propagation: signed epsilon shift, center-pole
+order, the complete epsilon-by-Taylor kernel rectangle, and a collision-bound
+exact identity.  The rectangle must match the source local exactly;
+structurally zero columns are omitted, while a nonzero exact expression whose
+Acb specialization encloses zero remains active.  Rational sessions convolve
+in the exact field and Acb sessions use their leased precision throughout.
+
+```json
+{"schema":2,"op":"local.apply_rational_row","session":"s:1",
+ "local":"l:1","source_checkpoint_identity":"vector-at-chart",
+ "checkpoint_identity":"scalar-integrand-at-chart",
+ "row":{"schema":"diffexp2-prepared-rational-local-row-v1",
+        "columns":2,"exact_identity":"exact row identity",
+        "entries":[
+          {"column":0,"multiplier":{
+            "epsilon_shift":-1,"center_pole_order":0,
+            "kernels":[["1","0"],["0","0"]],
+            "exact_identity":"exact c0 identity","proven_zero":false}}]}}
+```
+
+The result retains no coefficient JSON.  It preserves the source chart and
+normalized analytic prescriptions, shifts sector powers for exact center
+poles, intersects all active epsilon windows honestly, and strongly owns its
+source provenance.  It can therefore be passed directly to
+`integration.line`, including after the public source-local token is
+released.  The prepared row is `c(center + scale t, eps)`; it must not include
+the affine Jacobian, because `integration.line` applies `dx = scale dt`
+exactly once.  Unresolved symbolic coefficients, incomplete multiplier
+rectangles, source error envelopes without a propagation rule, and malformed
+or duplicate columns fail loudly; no legacy multiplication fallback exists.
+The low-level Wolfram entry is
+`CppBackend`ApplyPersistentRationalRow[local, preparedRow, checkpoint]`.
+
 ### Native checkpoint core (schema 2)
 
 The native checkpoint persists a quiescent session's prepared chart

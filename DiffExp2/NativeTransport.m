@@ -44,6 +44,160 @@ exactRationalQ[value_] := IntegerQ[value] || Head[value] === Rational;
 nativeNonemptyStringQ[value_] := StringQ[value] &&
   StringLength[StringTrim[value]] > 0;
 
+(* The retained exact path planner deliberately accepts geometry over Q
+   only.  SegmentLine can nevertheless produce an ordinary chart whose
+   center and local convergence radius are rational while its positive
+   affine scale is a real algebraic number.  A lower dyadic floor is a safe
+   bridge for precisely that case: it keeps the center, orientation, and
+   branch data exact while making the represented physical disk strictly
+   smaller.  No approximate comparison or RootApproximant inference enters
+   this certificate. *)
+$nativeScaleFloorBits = 64;
+
+exactAlgebraicTruthQ[condition_] := TrueQ[Quiet[Check[
+  FullSimplify[RootReduce[condition]], False]]];
+
+exactRealAlgebraicQ[value_] := Module[{canonical},
+  If[!FreeQ[value, _?InexactNumberQ], Return[False, Module]];
+  canonical = Quiet[Check[RootReduce[value], $Failed]];
+  canonical =!= $Failed && NumericQ[canonical] &&
+    TrueQ[Quiet[Check[Element[canonical, Algebraics], False]]] &&
+    exactAlgebraicTruthQ[Im[canonical] == 0]];
+
+nativeInwardScaleFloor[scale_] := Module[{canonical, floor},
+  canonical = Quiet[Check[RootReduce[scale], $Failed]];
+  If[canonical === $Failed || !exactRealAlgebraicQ[canonical] ||
+      exactRationalQ[canonical] ||
+      !exactAlgebraicTruthQ[canonical > 0], Return[$Failed, Module]];
+  floor = Floor[2^$nativeScaleFloorBits*canonical]/
+    2^$nativeScaleFloorBits;
+  If[exactRationalQ[floor] &&
+      exactAlgebraicTruthQ[0 < floor < canonical], floor, $Failed]];
+
+nativeScaleBridgePrerequisiteQ[chart_Association] := Module[
+  {scale = Lookup[chart, "Scale", None],
+   center = Lookup[chart, "Center", None],
+   localRadius = Lookup[chart, "LocalRadius", None],
+   radius = Lookup[chart, "Radius", None],
+   matchRadius = Lookup[chart, "MatchRadius", None],
+   roc = cfg["RadiusOfConvergence"], floor},
+  If[exactRationalQ[scale],
+    Return[exactRationalQ[center] && exactRationalQ[localRadius] &&
+      exactRationalQ[radius] && exactRationalQ[matchRadius] &&
+      scale =!= 0 && localRadius > 0 && radius > 0 && matchRadius > 0,
+      Module]];
+  floor = nativeInwardScaleFloor[scale];
+  Lookup[chart, "Singular", Missing["Absent"]] === False &&
+    exactRationalQ[center] && exactRationalQ[localRadius] &&
+    localRadius > 0 && exactRationalQ[roc] && roc > 0 &&
+    floor =!= $Failed && exactRealAlgebraicQ[radius] &&
+    exactRealAlgebraicQ[matchRadius] &&
+    exactAlgebraicTruthQ[radius == scale*localRadius] &&
+    exactAlgebraicTruthQ[matchRadius == scale*roc]];
+
+bridgeNativeRegularChartScale[chart_Association, index_Integer] := Module[
+  {scale = Lookup[chart, "Scale", None], center, localRadius, radius,
+   matchRadius, roc = cfg["RadiusOfConvergence"], nativeScale,
+   nativeRadius, nativeMatchRadius, certificate},
+  If[exactRationalQ[scale], Return[chart, Module]];
+  center = Lookup[chart, "Center", None];
+  localRadius = Lookup[chart, "LocalRadius", None];
+  radius = Lookup[chart, "Radius", None];
+  matchRadius = Lookup[chart, "MatchRadius", None];
+  If[Lookup[chart, "Singular", Missing["Absent"]] =!= False,
+    err["E6", <|"ChartIndex" -> index, "Center" -> center,
+      "Scale" -> scale,
+      "Detail" -> "nonrational native scale bridging is supported only for explicitly regular charts"|>]];
+  If[!exactRationalQ[center] || !exactRationalQ[localRadius] ||
+      !TrueQ[localRadius > 0] || !exactRationalQ[roc] ||
+      !TrueQ[roc > 0],
+    err["E6", <|"ChartIndex" -> index, "Center" -> center,
+      "Scale" -> scale, "LocalRadius" -> localRadius,
+      "Detail" -> "an algebraic native scale bridge requires an unchanged rational center and positive rational local radius"|>]];
+  nativeScale = nativeInwardScaleFloor[scale];
+  If[nativeScale === $Failed || !exactRealAlgebraicQ[radius] ||
+      !exactRealAlgebraicQ[matchRadius] ||
+      !exactAlgebraicTruthQ[radius == scale*localRadius] ||
+      !exactAlgebraicTruthQ[matchRadius == scale*roc],
+    err["E6", <|"ChartIndex" -> index, "Center" -> center,
+      "Scale" -> scale, "Radius" -> radius,
+      "MatchRadius" -> matchRadius, "LocalRadius" -> localRadius,
+      "Detail" -> "regular algebraic scale geometry lacks the exact affine Radius=Scale LocalRadius and MatchRadius=Scale RadiusOfConvergence certificate"|>]];
+  nativeRadius = Together[nativeScale*localRadius];
+  nativeMatchRadius = Together[nativeScale*roc];
+  If[!AllTrue[{nativeScale, nativeRadius, nativeMatchRadius},
+        exactRationalQ] ||
+      !exactAlgebraicTruthQ[0 < nativeRadius < radius] ||
+      !exactAlgebraicTruthQ[0 < nativeMatchRadius < matchRadius],
+    err["E6", <|"ChartIndex" -> index, "Center" -> center,
+      "Scale" -> scale, "NativeScale" -> nativeScale,
+      "Detail" -> "the exact lower rational scale did not produce a strict inward physical chart"|>]];
+  certificate = <|
+    "Schema" -> "diffexp2-native-inward-rational-scale-v1",
+    "FloorBits" -> $nativeScaleFloorBits,
+    "OriginalScale" -> scale, "NativeScale" -> nativeScale,
+    "OriginalPhysicalRadius" -> radius,
+    "NativePhysicalRadius" -> nativeRadius,
+    "LocalRadius" -> localRadius,
+    "CenterPreserved" -> center|>;
+  Join[chart, <|"Scale" -> nativeScale, "Radius" -> nativeRadius,
+    "MatchRadius" -> nativeMatchRadius,
+    "NativeRationalScaleBridge" -> certificate|>]];
+
+bridgeNativeRegularPlanScales[plan_Association] := Module[
+  {charts = Lookup[plan, "Charts", None], bridged, records},
+  If[!ListQ[charts] || charts === {},
+    err["E8", <|"Detail" ->
+      "native algebraic-scale normalization requires a nonempty chart chain"|>]];
+  bridged = MapIndexed[bridgeNativeRegularChartScale[#1, First[#2]] &,
+    charts];
+  records = Cases[bridged,
+    chart_Association /; KeyExistsQ[chart, "NativeRationalScaleBridge"] :>
+      chart["NativeRationalScaleBridge"]];
+  If[records === {}, plan,
+    (* IncomingMatchPoint was built for the original affine scales.  The
+       retained C++ planner owns fresh exact handoffs for the shrunken
+       charts; never let stale Wolfram points masquerade as that proof. *)
+    bridged = KeyDrop[#, {"IncomingMatchPoint", "SymmetricMatch"}] & /@
+      bridged;
+    Join[plan, <|"Charts" -> bridged,
+      "NativeRationalScaleBridges" -> records,
+      "NativeHandoffAuthority" -> "CppExactTilePlanner"|>]]];
+
+nativePlannerScale[chart_Association] := Module[
+  {scale = Lookup[chart, "Scale", None]},
+  If[exactRationalQ[scale], scale, nativeInwardScaleFloor[scale]]];
+
+nativeBridgedPlanPreflightQ[plan_Association] := Quiet[Check[Module[
+  {charts = Lookup[plan, "Charts", None],
+   from = Lookup[plan, "From", None], to = Lookup[plan, "To", None],
+   dir = Lookup[plan, "Direction", None], k = cfg["DivisionOrder"],
+   scales, reaches, centers, finalRadius},
+  If[!ListQ[charts] || charts === {} || !MemberQ[{-1, 1}, dir] ||
+      !IntegerQ[k] || k < 2, Return[False, Module]];
+  scales = nativePlannerScale /@ charts;
+  If[!AllTrue[scales, exactRationalQ[#] && # =!= 0 &] ||
+      Length[DeleteDuplicates[Sign /@ scales]] =!= 1 ||
+      !AllTrue[Lookup[charts, "LocalRadius", None],
+        exactRationalQ[#] && # > 0 &], Return[False, Module]];
+  centers = Lookup[charts, "Center", None];
+  If[!AllTrue[centers, exactRationalQ] ||
+      !exactAlgebraicTruthQ[First[centers] == from] ||
+      !AllTrue[centers,
+        exactAlgebraicTruthQ[dir*(# - from) >= 0] &&
+          exactAlgebraicTruthQ[dir*(to - #) >= 0] &],
+    Return[False, Module]];
+  reaches = MapThread[
+    Abs[#1]*Min[1/k, #2/2] &,
+    {scales, Lookup[charts, "LocalRadius"]}];
+  If[!And @@ Table[exactAlgebraicTruthQ[
+        0 < dir*(centers[[i + 1]] - centers[[i]]) <=
+          reaches[[i]] + reaches[[i + 1]]],
+      {i, Length[centers] - 1}], Return[False, Module]];
+  finalRadius = Abs[Last[scales]]*Last[Lookup[charts, "LocalRadius"]];
+  exactAlgebraicTruthQ[Abs[to - Last[centers]] < finalRadius]
+  ], False]];
+
 nativeRationalEpsilonShift[expression_, physicalVar_Symbol] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], canonical, numerator,
    denominator, numeratorValuation, denominatorValuation},
@@ -257,9 +411,9 @@ nativeTopologyProtocolQ[plan_Association] := Quiet[Check[Module[
 
 NativeRegularIndependentArmPlansSupportedQ[lower_Association,
     upper_Association] := Quiet[Check[Module[
-  {lowerAnchor, upperAnchor, charts, geometryKeys =
-      {"Center", "Radius", "MatchRadius", "Scale", "LocalRadius"},
-   geometry},
+  {lowerAnchor, upperAnchor, charts, commonRadius, commonMatchRadius,
+   commonScale, commonAnchor, lowerOverlay, upperOverlay,
+   roc = cfg["RadiusOfConvergence"]},
   If[Lookup[lower, "Direction", None] =!= -1 ||
       Lookup[upper, "Direction", None] =!= 1 ||
       !sameExactQ[Lookup[lower, "From", None],
@@ -277,19 +431,32 @@ NativeRegularIndependentArmPlansSupportedQ[lower_Association,
         Lookup[upperAnchor, "Center", None]] ||
       !SameQ[Lookup[lowerAnchor, "Prescriptions", {}],
         Lookup[upperAnchor, "Prescriptions", {}]] ||
-      !exactRationalQ[cfg["RadiusOfConvergence"]],
+      !exactRationalQ[roc] ||
+      !AllTrue[{Lookup[lowerAnchor, "Radius", None],
+          Lookup[upperAnchor, "Radius", None],
+          Lookup[lowerAnchor, "MatchRadius", None],
+          Lookup[upperAnchor, "MatchRadius", None]}, exactRationalQ],
     Return[False, Module]];
   charts = Join[lower["Charts"], upper["Charts"]];
   If[!AllTrue[charts, AssociationQ[#] &&
       Lookup[#, "Singular", Missing["Absent"]] === False &],
     Return[False, Module]];
-  geometry = Flatten[Map[Lookup[#, geometryKeys, None] &, charts]];
-  If[!AllTrue[geometry, exactRationalQ], Return[False, Module]];
-  If[!AllTrue[Cases[charts,
-      chart_Association /; KeyExistsQ[chart, "IncomingMatchPoint"] :>
-        chart["IncomingMatchPoint"]], exactRationalQ],
+  If[!AllTrue[charts, nativeScaleBridgePrerequisiteQ],
     Return[False, Module]];
-  nativeTopologyProtocolQ[lower] && nativeTopologyProtocolQ[upper]
+  commonRadius = Max[lowerAnchor["Radius"], upperAnchor["Radius"]];
+  commonMatchRadius = Max[lowerAnchor["MatchRadius"],
+    upperAnchor["MatchRadius"]];
+  commonScale = Together[commonMatchRadius/roc];
+  commonAnchor = Join[lowerAnchor, <|"Radius" -> commonRadius,
+    "MatchRadius" -> commonMatchRadius, "Scale" -> commonScale,
+    "LocalRadius" -> Together[commonRadius/commonScale]|>];
+  lowerOverlay = Join[lower, <|"Charts" ->
+    ReplacePart[lower["Charts"], 1 -> commonAnchor]|>];
+  upperOverlay = Join[upper, <|"Charts" ->
+    ReplacePart[upper["Charts"], 1 -> commonAnchor]|>];
+  nativeTopologyProtocolQ[lower] && nativeTopologyProtocolQ[upper] &&
+    nativeBridgedPlanPreflightQ[lowerOverlay] &&
+    nativeBridgedPlanPreflightQ[upperOverlay]
   ], False]];
 NativeRegularIndependentArmPlansSupportedQ[___] := False;
 
@@ -527,7 +694,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   {plans, lower, upper, dimension = Length[sys["Matrix"]], values,
    epsMin, epsMax, req, anchorSystem, anchor = None, prepareArm, lowerData,
    upperData, sessions, anchorOwner, lowerOwners, upperOwners, planIdentity,
-   nativePlan = None, sessionInfo, sessionStats, domain, integrand,
+   nativePlan = None, geometryAudit = None, sessionInfo, sessionStats,
+   domain, integrand,
    preparedShift, halo, targetMax, targetOption =
      OptionValue["TargetCompleteMax"], availableMax,
    cleanup, output, preparedBases = {},
@@ -541,6 +709,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   targetMax = If[targetOption === Automatic,
     cfg["EpsilonOrder"], targetOption];
   plans = normalizeSharedAnchor[lowerPlan, upperPlan];
+  plans = bridgeNativeRegularPlanScales /@ plans;
   {lower, upper} = plans;
   values = nativeBoundaryValues[boundary, dimension];
   integrand = OptionValue["Integrand"];
@@ -635,14 +804,36 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     nativeArmRequest[lower, lowerOwners],
     nativeArmRequest[upper, upperOwners], planIdentity,
     cfg["DivisionOrder"]];
-  If[FailureQ[nativePlan] || !AssociationQ[nativePlan],
+  If[FailureQ[nativePlan] || !AssociationQ[nativePlan] ||
+      Lookup[nativePlan, "status", "error"] =!= "ok" ||
+      !nativeNonemptyStringQ[Lookup[nativePlan, "session", None]] ||
+      !nativeNonemptyStringQ[Lookup[nativePlan, "tile_plan", None]] ||
+      !AssociationQ[Lookup[nativePlan, "lower", None]] ||
+      !AssociationQ[Lookup[nativePlan, "upper", None]],
     err["E5", <|"BackendFailure" -> nativePlan,
       "Detail" -> "persistent native independent-arm planning failed"|>]];
+  (* A successful tile.plan response is published only after C++
+     validate_exact_arm_plan has proved every exact match and tile endpoint
+     strictly inside its retained rational chart.  Each bridge certificate
+     above proves 0 < native Scale < original Scale with center and positive
+     LocalRadius unchanged, so those native disks are exact subsets of the
+     original algebraic disks.  This composes the two proofs without a
+     duplicate Wolfram geometry walk. *)
+  geometryAudit = <|
+    "Schema" -> "diffexp2-native-exact-geometry-proof-v1",
+    "BackendExactPlanValidated" -> True,
+    "NativeDisksContainedInOriginal" -> True,
+    "HandoffAuthority" -> "CppExactTilePlanner",
+    "LowerBridgeCount" -> Length[Lookup[lower,
+      "NativeRationalScaleBridges", {}]],
+    "UpperBridgeCount" -> Length[Lookup[upper,
+      "NativeRationalScaleBridges", {}]]|>;
   <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
     "Session" -> First[sessions], "Domain" -> domain,
     "Dimension" -> dimension,
     "Request" -> req, "Anchor" -> anchor, "Plan" -> nativePlan,
     "Lower" -> lowerData, "Upper" -> upperData,
+    "NativeGeometryAudit" -> geometryAudit,
     "ContainsSingularReceivingCharts" ->
       containsSingularReceivingCharts,
     "TargetCompleteMax" -> targetMax,

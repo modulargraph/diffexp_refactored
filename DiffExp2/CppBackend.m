@@ -1181,7 +1181,7 @@ RunPersistentWeightedPlannedEndpointLimit[plan_Association, arm_String,
 CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
     checkpointIdentity_String, divisionOrder_:3] := Module[
   {session = persistentCheckpointSession[owner], required,
-   malformed},
+   malformed, response},
   If[FailureQ[session], Return[session, Module]];
   If[StringLength[checkpointIdentity] == 0 || !IntegerQ[divisionOrder] ||
       divisionOrder < 2,
@@ -1194,10 +1194,16 @@ CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
     Return[Failure["CppBackend", <|"Detail" ->
       "each native tile arm must contain exactly from_exact, to_exact, charts, and topology"|>],
       Module]];
-  RunRequest[<|"schema" -> 2, "op" -> "tile.plan",
+  response = RunRequest[<|"schema" -> 2, "op" -> "tile.plan",
     "session" -> session, "checkpoint_identity" -> checkpointIdentity,
     "division_order" -> divisionOrder, "lower" -> lower,
-    "upper" -> upper|>]];
+    "upper" -> upper|>];
+  Which[
+    FailureQ[response], response,
+    persistentCommandOKQ[response], response,
+    True, Failure["CppBackend", <|
+      "Operation" -> "tile.plan", "BackendResponse" -> response,
+      "Detail" -> "persistent native tile planning returned a non-ok backend status"|>]]];
 
 CreatePersistentArmTilePlan[owner_, arm_Association,
     checkpointIdentity_String, divisionOrder_:3] := Module[

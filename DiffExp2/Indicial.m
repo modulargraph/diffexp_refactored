@@ -157,6 +157,9 @@ FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module
   <|"PoleOrder" -> r, "Gauge" -> T, "GaugeInverse" -> TInv,
     "ThetaMatrix" -> B, "Residue" -> residue, "Steps" -> steps,
     "Trimmed" -> trimmed,
+    "GaugeInverseCertified" -> True,
+    "GaugeInverseCertificateSchema" ->
+      "diffexp2-indicial-exact-gauge-inverse-v1",
     "GaugeValuation" -> matMinValuation[T, t]|>];
 
 (* ---- exact epsilon-affine spectrum ---- *)
@@ -352,12 +355,18 @@ ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
     red = <|"PoleOrder" -> 0, "Gauge" -> idMat, "GaugeInverse" -> idMat,
       "ThetaMatrix" -> Map[Cancel[Together[#]] &, t*Anorm, {2}],
       "Residue" -> ConstantArray[0, {d, d}], "Steps" -> 0,
-      "Trimmed" -> False, "GaugeValuation" -> 0|>,
+      "Trimmed" -> False, "GaugeInverseCertified" -> True,
+      "GaugeInverseCertificateSchema" ->
+        "diffexp2-indicial-exact-gauge-inverse-v1",
+      "GaugeValuation" -> 0|>,
     pole["PoleOrder"] == 1,
     red = <|"PoleOrder" -> 1, "Gauge" -> idMat, "GaugeInverse" -> idMat,
       "ThetaMatrix" -> Map[Cancel[Together[#]] &, t*Anorm, {2}],
       "Residue" -> pole["Coefficients"][-1], "Steps" -> 0,
-      "Trimmed" -> False, "GaugeValuation" -> 0|>,
+      "Trimmed" -> False, "GaugeInverseCertified" -> True,
+      "GaugeInverseCertificateSchema" ->
+        "diffexp2-indicial-exact-gauge-inverse-v1",
+      "GaugeValuation" -> 0|>,
     True,
     red = FuchsianReduce[Anorm, t, eps, chartRef]];
   R = red["Residue"];

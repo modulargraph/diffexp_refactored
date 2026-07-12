@@ -95,7 +95,10 @@ audit = <|"Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
   "DeliverableCompleteMax" -> ledger["DeliverableCompleteMax"],
   "RequiredRawTop" -> ledger["DownstreamRawTop"],
   "CoefficientHalo" -> ledger["CoefficientHalo"],
-  "IntegrationHalo" -> ledger["IntegrationHalo"]|>;
+  "IntegrationHalo" -> ledger["IntegrationHalo"],
+  "MatchEpsilonPadding" ->
+    ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
+      ledger["TargetCompleteMax"]|>;
 checkpointIdentity = "native-resume-state";
 nativeStateFile = FileNameJoin[{tmpDir,
   name <> "_level1_native_transport.de2cp"}];
@@ -152,7 +155,8 @@ boundaryAudit = Join[audit, <|
   "TargetCompleteMax" -> requiredRaw,
   "DeliverableCompleteMax" -> requiredRaw,
   "RequiredRawTop" -> requiredRaw,
-  "CoefficientHalo" -> 0, "IntegrationHalo" -> 0|>];
+  "CoefficientHalo" -> 0, "IntegrationHalo" -> 0,
+  "MatchEpsilonPadding" -> 0|>];
 boundaryFile = FileNameJoin[{tmpDir, name <> "_level1_boundary.mx"}];
 saveLadderCheckpoint[boundaryFile, <|"Kind" -> "Boundary",
   "Example" -> name, "Level" -> 1, "PrepKey" -> prepKey,

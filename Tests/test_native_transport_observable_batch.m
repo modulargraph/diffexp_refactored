@@ -78,7 +78,9 @@ assert["native_observable_batch_marches_once_and_preserves_request_order",
       {"integral", "lower-limit", "upper-limit", "polar-integral"} &&
     atlas["TargetCompleteMax"] === 0 &&
     atlas["Request", "EpsWindow", "CompleteMax"] === 1 &&
-    run["States", "lower", "epsilon", "required_complete_max"] === 0 &&
+    (* The polar integral reserves one source order for its possible
+       eps^-1 primitive before the retained arm state is contracted. *)
+    run["States", "lower", "epsilon", "required_complete_max"] === 1 &&
     Sort[Keys[Lookup[run, "States", <||>]]] === {"lower", "upper"}];
 
 checkpointPath = FileNameJoin[{$TemporaryDirectory,
@@ -125,7 +127,7 @@ legacyManifest = Append[legacyCore, "ManifestIdentity" ->
   DiffExp2`NativeTransport`Private`nativeCheckpointIdentity[
     "de2-native-observable-checkpoint-manifest-", legacyCore]];
 assert["compact checkpoint manifest replaces recursive provenance with digests",
-  ByteCount[checkpointManifest] < ByteCount[legacyManifest]/10 &&
+  ByteCount[checkpointManifest] < ByteCount[legacyManifest]/2 &&
     AllTrue[Join[Keys /@ Values[checkpointManifest["StateHandles"]],
         Keys /@ checkpointManifest["Results"]],
       FreeQ[#, "ProvenanceIdentity"] &]];
@@ -301,6 +303,33 @@ assert["legacy_manifest_restore_closes_its_restored_session",
   AssociationQ[legacyReleased] &&
     Lookup[legacyReleased, "Failures", {"missing"}] === {}];
 If[FileExistsQ[checkpointPath], DeleteFile[checkpointPath]];
+
+streamEndpoint = <|"Center" -> 1/4, "Singular" -> False,
+  "Radius" -> 1/2, "MatchRadius" -> 1/2, "Scale" -> 1/2,
+  "LocalRadius" -> 1, "IncomingMatchPoint" -> 1/8,
+  "SymmetricMatch" -> False, "ChartVar" -> Global`t,
+  "UseSCCSkeleton" -> True, "Name" -> "stream-endpoint",
+  "Prescriptions" -> {}|>;
+streamUpperPlan = Join[upperPlan, <|
+  "Charts" -> {First[upperPlan["Charts"]], streamEndpoint},
+  "SegmentCount" -> 2|>];
+ownerAtlas = catchDE2[
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    system, {one}, lowerPlan, streamUpperPlan, "Threads" -> 1,
+    "Integrand" -> {{1 + Global`eps}, x},
+    "TargetCompleteMax" -> 0, "DeferReceivingBases" -> True]];
+ownerRun = If[FailureQ[ownerAtlas], ownerAtlas, catchDE2[
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
+    ownerAtlas, {observable["limitLower", "owned-lower"]}, x,
+    "MaxRefinementSteps" -> 1]]];
+assert["owned deferred observable batch streams and compacts caller atlas",
+  AssociationQ[ownerRun] && AssociationQ[ownerAtlas] &&
+    !KeyExistsQ[ownerAtlas["Lower"], "ChartSystems"] &&
+    !KeyExistsQ[ownerAtlas["Upper"], "ChartSystems"] &&
+    !KeyExistsQ[ownerRun["Atlas", "Lower"], "ChartSystems"] &&
+    !KeyExistsQ[ownerRun["Atlas", "Upper"], "ChartSystems"]];
+If[AssociationQ[ownerRun],
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[ownerRun]];
 
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];

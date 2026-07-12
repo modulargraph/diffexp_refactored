@@ -300,7 +300,9 @@ int main() {
     if (one.at("status") != "ok" || one.at("observables") != 1 ||
         one.at("lines").as_array().size() != 1 ||
         one.at("combination") != "negative-lower-plus-upper" ||
-        one.at("max_parallel_arms") != 2 ||
+        one.at("max_parallel_arms") != 1 ||
+        one.at("concurrent_arms") != false ||
+        one.at("streaming_tile_contraction") != true ||
         one.at("no_remarching") != true || one.at("no_rematching") != true)
       throw std::runtime_error(
           "one-observable pair contraction failed: " + json::serialize(one));
@@ -444,11 +446,21 @@ int main() {
     for (const auto& raw : payload.at("retained_line_results").as_array()) {
       const auto& record = raw.as_object();
       if (record.at("schema") !=
-              "diffexp2-retained-transport-pair-observable-line-v1" ||
+              "diffexp2-retained-transport-pair-observable-line-v2" ||
           record.at("provenance").as_object().at("aggregate").as_object()
                   .if_contains("components") != nullptr)
         throw std::runtime_error(
             "paired checkpoint emitted a noncompact line record");
+      const auto& provenance = record.at("provenance").as_object();
+      const auto& source = provenance.at("source").as_object();
+      for (const auto* side_name : {"lower", "upper"}) {
+        const auto& side = source.at(side_name).as_object();
+        const auto& state = side.at("transport_state").as_object();
+        if (side.if_contains("tile_plan_provenance_identity") != nullptr ||
+            state.if_contains("provenance_identity") != nullptr)
+          throw std::runtime_error(
+              "paired checkpoint recursively embedded owner provenance");
+      }
     }
 
     const auto restored = request(json::object{

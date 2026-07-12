@@ -29,7 +29,9 @@ PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, re
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. Singular Acb execution is restricted to exact schedules without CASE-P collisions. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
 SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
+PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSystem,req] prepares the lightweight retained equation owner needed by exact tile planning without retaining a complete regular basis. Multi-block systems return their SCC composite; a monolithic system retains one unit-column witness whose chart owner is shared by later basis solves.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
+DropWolframPreparationCaches::usage = "DropWolframPreparationCaches[] drops only Wolfram-side chart/operator/multiplier preparation memo state while preserving every retained native session, chart, SCC, local, match, and tile-plan handle.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -1703,20 +1705,72 @@ sccSpectralFrameCertificate[cs_Association] := Module[
   det = Quiet[Check[Cancel[Together[Det[v]]], $Failed]];
   detValuation = If[det === $Failed, $Failed,
     Quiet[Check[epsValuation[det, eps], $Failed]]];
-  If[det === $Failed || detValuation =!= 0,
+  If[det === $Failed || !IntegerQ[detValuation],
     Return[fail[
-      "persistent CompositeSCC requires val_eps(det(V)) == 0",
+      "persistent CompositeSCC requires a finite Laurent determinant valuation",
       <|"det_epsilon_valuation" -> detValuation|>], Module]];
   identityV = sccExactIdentityMatrixQ[v, dimension] &&
     sccExactIdentityMatrixQ[vInv, dimension];
   <|"admissible" -> True, "identity_v" -> identityV,
-    "dimension" -> dimension, "det_epsilon_valuation" -> 0,
+    "dimension" -> dimension,
+    "det_epsilon_valuation" -> detValuation,
     "v_exact_identity" ->
       DiffExp2`SectorSeries`ExactExpressionIdentity[v, t],
     "vinv_exact_identity" ->
       DiffExp2`SectorSeries`ExactExpressionIdentity[vInv, t],
     "det_exact_identity" ->
       DiffExp2`SectorSeries`ExactExpressionIdentity[det, t]|>];
+
+sccGaugeFrameCertificate[cs_Association] := Module[
+  {dimension = Lookup[cs, "SystemSize", None],
+   t = Lookup[cs, "ChartVar", None], gauge, inverse, reduction,
+   identityGauge, gaugeIdentity, inverseIdentity, pairIdentity,
+   matrixIdentity, fail},
+  fail[detail_, extra_:<||>] := Join[<|"admissible" -> False,
+      "identity_gauge" -> False, "detail" -> detail|>, extra];
+  (* Preserve SparseArray structure here.  The SCC gauge is commonly an
+     identity plus one rational-function column; densifying it before the
+     exact two-sided product caused multi-gigabyte intermediate expansion. *)
+  gauge = Quiet[Check[Lookup[cs, "Gauge", None], $Failed]];
+  inverse = Quiet[Check[Lookup[cs, "GaugeInverse", None], $Failed]];
+  If[!IntegerQ[dimension] || dimension < 1 || !MatchQ[t, _Symbol] ||
+      gauge === $Failed || inverse === $Failed ||
+      !MatrixQ[gauge] || !MatrixQ[inverse] ||
+      Dimensions[gauge] =!= {dimension, dimension} ||
+      Dimensions[inverse] =!= {dimension, dimension},
+    Return[fail["Gauge/GaugeInverse are not exact square matrices"],
+      Module]];
+  If[!FreeQ[{gauge, inverse}, _?InexactNumberQ],
+    Return[fail["Gauge/GaugeInverse contain inexact coefficients"], Module]];
+  reduction = Lookup[Lookup[cs, "IndicialData", <||>],
+    "Reduction", <||>];
+  If[!TrueQ[Lookup[reduction, "GaugeInverseCertified", False]] ||
+      Lookup[reduction, "GaugeInverseCertificateSchema", None] =!=
+        "diffexp2-indicial-exact-gauge-inverse-v1",
+    Return[fail[
+      "Gauge/GaugeInverse lack the exact indicial producer certificate"],
+      Module]];
+  (* FuchsianReduce proved T.TInv==I over the exact rational-function
+     field before retaining this chart.  For a square matrix this proves
+     invertibility and the reverse identity.  Repeating dense products here
+     caused multi-gigabyte expression swell on the L1 banana gauge. *)
+  identityGauge = sccExactIdentityMatrixQ[gauge, dimension] &&
+    sccExactIdentityMatrixQ[inverse, dimension];
+  matrixIdentity[matrix_, role_] := ExportString[<|
+      "schema" -> "diffexp2-exact-gauge-matrix-v1", "role" -> role,
+      "dimension" -> dimension,
+      "entries" -> Map[
+        DiffExp2`SectorSeries`ExactExpressionIdentity[#, t] &,
+        Normal[matrix], {2}]|>, "RawJSON", "Compact" -> True];
+  gaugeIdentity = matrixIdentity[gauge, "Gauge"];
+  inverseIdentity = matrixIdentity[inverse, "GaugeInverse"];
+  pairIdentity = "de2-exact-two-sided-gauge-" <>
+    IntegerString[Hash[{gaugeIdentity, inverseIdentity}, "SHA256"], 16, 64];
+  <|"admissible" -> True, "identity_gauge" -> identityGauge,
+    "dimension" -> dimension,
+    "gauge_exact_identity" -> gaugeIdentity,
+    "gauge_inverse_exact_identity" -> inverseIdentity,
+    "gauge_det_exact_identity" -> pairIdentity|>];
 
 sccNoFamilyCollisionQ[cs_Association] := Module[
   {families = Lookup[cs, "Families", None], collisions, depths},
@@ -1726,19 +1780,23 @@ sccNoFamilyCollisionQ[cs_Association] := Module[
   collisions === {} && AllTrue[depths, # === 0 &]];
 
 sccNativeBlockCapabilities[cs_Association,
-    spectralFrame_:Automatic] := Module[
-  {dimension = Lookup[cs, "SystemSize", 0], frame = spectralFrame},
+    spectralFrame_:Automatic, gaugeFrameInput_:Automatic] := Module[
+  {dimension = Lookup[cs, "SystemSize", 0], frame = spectralFrame,
+   gaugeFrame = gaugeFrameInput},
   If[frame === Automatic, frame = sccSpectralFrameCertificate[cs]];
+  If[gaugeFrame === Automatic, gaugeFrame = sccGaugeFrameCertificate[cs]];
   <|"regular" -> TrueQ[Lookup[
       Lookup[cs, "IndicialData", <||>], "Regular", False]],
     "identity_gauge" ->
       (sccExactIdentityMatrixQ[Lookup[cs, "Gauge", None], dimension] &&
        sccExactIdentityMatrixQ[
          Lookup[cs, "GaugeInverse", None], dimension]),
+    "exact_gauge" -> TrueQ[Lookup[gaugeFrame, "admissible", False]],
     "identity_v" -> TrueQ[Lookup[frame, "identity_v", False]],
     "epsilon_unimodular_v" ->
       TrueQ[Lookup[frame, "admissible", False]],
     "no_pseudo" -> sccNoFamilyCollisionQ[cs]|>];
+
 
 sccBlockPrincipalMatrixRecord[cs_Association] := Module[
   {clearKey = Lookup[cs, "SystemClearKey", None], parentInput, matrix,
@@ -3345,6 +3403,17 @@ ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
   DiffExp2`CppBackend`ClearPersistentSessions[];);
 
+DropWolframPreparationCaches[] := Module[{},
+  $pcCache = <||>; $shCache = <||>; $shSysTag = None;
+  $systemClearRegistry = <||>; $globalClearedCache = <||>;
+  $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
+  $physicalClearedODECache = <||>; $cppStaticOperatorCache = <||>;
+  $nativeSCCCompositeCache = <||>;
+  $homogeneousFramePlanOverride = None;
+  $cppHomogeneousFrameOverride = None;
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
+  Null];
+
 (* The exact homogeneous work rectangle is needed both by the ordinary
    column builder and by persistent SCC preparation.  Keeping the arithmetic
    in one helper lets a composite take the union of heterogeneous Jordan
@@ -4120,7 +4189,8 @@ sccParticularBlockCost[target_Association, nmax_Integer:0] :=
     Max[0, Sequence @@ (# ["CollisionDepth"] & /@ target["Families"])];
 
 sccInitialWorkHalo[cs_Association, blockSystems_List, nmax_Integer:0] := Module[
-  {seq = cs["IntegrationSequence"], nb, edgeCost, incoming, path},
+  {seq = cs["IntegrationSequence"], nb, edgeCost, incoming, path,
+   seedGaugeCost},
   nb = Length[seq["Components"]];
   edgeCost[{u_, v_}] := Module[{mat, target = blockSystems[[v]]},
     mat = cs["ThetaOriginal"][[seq["Components"][[v]],
@@ -4132,7 +4202,9 @@ sccInitialWorkHalo[cs_Association, blockSystems_List, nmax_Integer:0] := Module[
   Do[If[incoming[[v]] =!= {},
     path[[v]] = Max[(path[[#]] + edgeCost[{#, v}]) & /@ incoming[[v]]]],
     {v, nb}];
-  If[path === {}, 0, Max[path]]];
+  seedGaugeCost = Max[0, Sequence @@
+    (matrixEpsPoleDepth[# ["Gauge"]] & /@ blockSystems)];
+  seedGaugeCost + If[path === {}, 0, Max[path]]];
 
 (* An external source, unlike a homogeneous seed column, must first pass
    through the particular kernel of the block where it enters.  Fund that
@@ -4309,7 +4381,7 @@ PrepareSCCSpectralSourceTransform[blockcs_Association,
    identityPayload, identity, epsWindow, tWindow},
   If[!TrueQ[Lookup[certificate, "admissible", False]],
     err["E6", blockcs, <|"SpectralFrame" -> certificate,
-      "Detail" -> "target spectral source transform is not exact epsilon-unimodular"|>]];
+      "Detail" -> "target spectral source transform is not exact Laurent-unimodular"|>]];
   dimension = certificate["dimension"];
   epsWindow = Lookup[sourceShape, "EpsWindow", None];
   tWindow = Lookup[sourceShape, "TWindow", None];
@@ -4366,7 +4438,8 @@ PrepareSCCSpectralSourceTransform[blockcs_Association,
     "dimension" -> dimension,
     "identity" -> certificate["identity_v"],
     "epsilon_unimodular" -> True,
-    "det_epsilon_valuation" -> 0,
+    "det_epsilon_valuation" ->
+      certificate["det_epsilon_valuation"],
     "v_exact_identity" -> certificate["v_exact_identity"],
     "vinv_exact_identity" -> certificate["vinv_exact_identity"],
     "det_exact_identity" -> certificate["det_exact_identity"],
@@ -4385,13 +4458,151 @@ PrepareSCCSpectralSourceTransform[blockcs_Association,
   <|"schema" -> "diffexp2-scc-spectral-source-transform-v1",
     "rows" -> dimension, "columns" -> dimension,
     "identity" -> certificate["identity_v"],
-    "epsilon_unimodular" -> True, "det_epsilon_valuation" -> 0,
+    "epsilon_unimodular" -> True,
+    "det_epsilon_valuation" -> certificate["det_epsilon_valuation"],
     "v_exact_identity" -> certificate["v_exact_identity"],
     "vinv_exact_identity" -> certificate["vinv_exact_identity"],
     "det_exact_identity" -> certificate["det_exact_identity"],
     "exact_identity" -> identity, "domain" -> domain,
     "symbols" -> (SymbolName /@ symbols),
     "entries" -> encodedEntries|>];
+
+PrepareSCCGaugeMultiplier[sourceShape_Association, entry_, t_Symbol,
+    exactIdentity_String] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], epsWindow, tWindow, frameWidth,
+   tmax, valuation, centerPoleOrder, coefficients, valuations, jmin,
+   jtop, epsilonFrames, kernels},
+  epsWindow = sourceShape["EpsWindow"];
+  tWindow = sourceShape["TWindow"];
+  frameWidth = epsWindow["CompleteMax"] - epsWindow["Min"] + 1;
+  tmax = tWindow["CompleteMax"];
+  valuation = tVal[entry, t];
+  If[valuation === Infinity,
+    Return[<|"EpsilonShift" -> 0, "CenterPoleOrder" -> 0,
+      "TaylorKernels" -> ConstantArray[0, {frameWidth, tmax + 1}],
+      "ExactIdentity" -> exactIdentity, "ProvenZero" -> True|>, Module]];
+  centerPoleOrder = Max[0, -valuation];
+  (* The native gauge schema consumes only this finite kernel rectangle.
+     Expand in t first so rational functions of t never survive into a long
+     epsilon quotient recurrence. *)
+  coefficients = Table[tLaurent[entry, t, n - centerPoleOrder],
+    {n, 0, tmax}];
+  valuations = Select[epsValuation[#, eps] & /@ coefficients, IntegerQ];
+  If[valuations === {},
+    Return[<|"EpsilonShift" -> 0,
+      "CenterPoleOrder" -> centerPoleOrder,
+      "TaylorKernels" -> ConstantArray[0, {frameWidth, tmax + 1}],
+      (* The exact entry may first appear above the retained Taylor window;
+         keep its structural row/column and honest zero finite kernel. *)
+      "ExactIdentity" -> exactIdentity, "ProvenZero" -> False|>, Module]];
+  jmin = Min[valuations];
+  jtop = jmin + frameWidth - 1;
+  epsilonFrames = Map[Function[coefficient, Module[{v},
+      If[zeroCanQ[coefficient], Return[ConstantArray[0, frameWidth], Module]];
+      v = epsValuation[coefficient, eps];
+      If[!IntegerQ[v],
+        err["E4", sourceShape, <|"Entry" -> exactIdentity,
+          "Detail" -> "gauge Taylor coefficient has no finite epsilon valuation"|>]];
+      If[v > jtop, ConstantArray[0, frameWidth],
+        ratEpsList[coefficient, eps, jmin, frameWidth]]]], coefficients];
+  kernels = Transpose[epsilonFrames];
+  <|"EpsilonShift" -> jmin, "CenterPoleOrder" -> centerPoleOrder,
+    "TaylorKernels" -> kernels, "ExactIdentity" -> exactIdentity,
+    "ProvenZero" -> False|>];
+
+PrepareSCCGaugeTransform[blockcs_Association, role_String,
+    sourceShape_Association, serialization_:Automatic,
+    certificateInput_:Automatic] := Module[
+  {certificate = certificateInput, dimension,
+   t = Lookup[blockcs, "ChartVar", None], matrix, field, domain, symbols,
+   inputDigits, rawEntries, encodedEntries, activeRows, activeColumns,
+   identityPayload, identity, epsWindow, tWindow, nonzeroRules},
+  If[certificate === Automatic,
+    certificate = sccGaugeFrameCertificate[blockcs]];
+  If[!MemberQ[{"to_physical", "to_reduced"}, role] ||
+      !TrueQ[Lookup[certificate, "admissible", False]],
+    err["E6", blockcs, <|"Role" -> role, "GaugeFrame" -> certificate,
+      "Detail" -> "SCC gauge transform requires an exact two-sided Gauge/GaugeInverse certificate"|>]];
+  dimension = certificate["dimension"];
+  epsWindow = Lookup[sourceShape, "EpsWindow", None];
+  tWindow = Lookup[sourceShape, "TWindow", None];
+  If[Lookup[sourceShape, "Dimension", None] =!= dimension ||
+      !AssociationQ[epsWindow] || !AssociationQ[tWindow] ||
+      !IntegerQ[Lookup[epsWindow, "Min", None]] ||
+      !IntegerQ[Lookup[epsWindow, "CompleteMax", None]] ||
+      epsWindow["Min"] > epsWindow["CompleteMax"] ||
+      !IntegerQ[Lookup[tWindow, "CompleteMax", None]] ||
+      tWindow["CompleteMax"] < 0,
+    err["E8", blockcs, <|"SourceShape" -> sourceShape,
+      "Detail" -> "SCC gauge transform requires the complete native work rectangle"|>]];
+  field = sccSerializationField[serialization, blockcs];
+  domain = field["domain"]; symbols = field["symbols"];
+  matrix = If[role === "to_physical",
+    blockcs["Gauge"], blockcs["GaugeInverse"]];
+  nonzeroRules = Select[Most[ArrayRules[SparseArray[matrix]]],
+    MatchQ[First[#], {_Integer, _Integer}] &&
+      !TrueQ[PossibleZeroQ[Last[#]]] &];
+  If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+    Print["DE2 SCC GAUGE PREP start block=", Lookup[blockcs, "SCCBlock", None],
+      " role=", role, " entries=", Length[nonzeroRules],
+      " eps=", {epsWindow["Min"], epsWindow["CompleteMax"]},
+      " tmax=", tWindow["CompleteMax"], " memory=", MemoryInUse[]]];
+  rawEntries = Map[Function[rule, Module[
+      {position = First[rule], entry = Cancel[Together[Last[rule]]],
+       row, column, prepared, exactEntry},
+      row = First[position]; column = Last[position];
+      exactEntry = DiffExp2`SectorSeries`ExactExpressionIdentity[entry, t];
+      prepared = PrepareSCCGaugeMultiplier[
+        sourceShape, entry, t, exactEntry];
+      If[TrueQ[prepared["ProvenZero"]], {},
+        If[prepared["ExactIdentity"] =!= exactEntry,
+          err["E6", blockcs, <|"Role" -> role, "Row" -> row,
+            "Column" -> column,
+            "Detail" -> "prepared gauge multiplier changed its exact entry identity"|>]];
+        <|"Row" -> row - 1, "Column" -> column - 1,
+          "ExactEntry" -> exactEntry, "Prepared" -> prepared|>]]],
+    nonzeroRules];
+  rawEntries = DeleteCases[rawEntries, {}];
+  activeRows = DeleteDuplicates[Lookup[rawEntries, "Row", {}]];
+  activeColumns = DeleteDuplicates[Lookup[rawEntries, "Column", {}]];
+  If[Sort[activeRows] =!= Range[0, dimension - 1] ||
+      Sort[activeColumns] =!= Range[0, dimension - 1],
+    err["E6", blockcs, <|"Role" -> role,
+      "Detail" -> "certified gauge transform has an empty structural row or column"|>]];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*cfg["WorkingPrecision"];
+  encodedEntries = Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = symbols},
+    Map[<|"row" -> #["Row"], "column" -> #["Column"],
+        "exact_entry" -> #["ExactEntry"],
+        "multiplier" -> cppPreparedRationalMultiplierJSON[
+          #["Prepared"], inputDigits, blockcs]|> &, rawEntries]];
+  If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+    Print["DE2 SCC GAUGE PREP done block=", Lookup[blockcs, "SCCBlock", None],
+      " role=", role, " memory=", MemoryInUse[]]];
+  identityPayload = <|
+    "schema" -> "diffexp2-scc-gauge-transform-identity-v1",
+    "role" -> role, "dimension" -> dimension,
+    "identity" -> certificate["identity_gauge"],
+    "gauge_exact_identity" -> certificate["gauge_exact_identity"],
+    "gauge_inverse_exact_identity" -> certificate["gauge_inverse_exact_identity"],
+    "gauge_det_exact_identity" -> certificate["gauge_det_exact_identity"],
+    "source_window" -> <|"epsilon_min" -> epsWindow["Min"],
+      "epsilon_complete_max" -> epsWindow["CompleteMax"],
+      "taylor_complete_max" -> tWindow["CompleteMax"]|>,
+    "entries" -> Map[<|"row" -> #["row"], "column" -> #["column"],
+        "exact_entry" -> #["exact_entry"],
+        "epsilon_shift" -> #["multiplier", "epsilon_shift"],
+        "center_pole_order" -> #["multiplier", "center_pole_order"]|> &,
+      encodedEntries]|>;
+  identity = ExportString[identityPayload, "RawJSON", "Compact" -> True];
+  <|"schema" -> "diffexp2-scc-gauge-transform-v1", "role" -> role,
+    "rows" -> dimension, "columns" -> dimension,
+    "identity" -> certificate["identity_gauge"],
+    "gauge_exact_identity" -> certificate["gauge_exact_identity"],
+    "gauge_inverse_exact_identity" -> certificate["gauge_inverse_exact_identity"],
+    "gauge_det_exact_identity" -> certificate["gauge_det_exact_identity"],
+    "exact_identity" -> identity, "domain" -> domain,
+    "symbols" -> (SymbolName /@ symbols), "entries" -> encodedEntries|>];
 
 (* Retain the exact affine-Jordan proof used to classify every singular Acb
    recurrence.  This record contains only exact Rational task data and the
@@ -4430,7 +4641,7 @@ sccExactAffineJordanIndicialRecord[blockcs_Association] := Module[
 sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
     seq_Association, blockcs_Association, captured_Association,
     capabilities_Association, block_Integer,
-    sourceTransform_] := Module[
+    sourceTransform_, gaugeTransforms_] := Module[
   {vertices = seq["Components"][[block]], expectedPrincipal,
    analytic, principal, capturedCapabilities, capturedGeometry,
    capturedIdentity, exactIndicial},
@@ -4464,11 +4675,13 @@ sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
   Join[<|"block" -> block - 1, "vertices" -> (vertices - 1),
     "regular" -> capabilities["regular"],
     "identity_gauge" -> capabilities["identity_gauge"],
+    "exact_gauge" -> capabilities["exact_gauge"],
     "identity_v" -> capabilities["identity_v"],
     "epsilon_unimodular_v" -> capabilities["epsilon_unimodular_v"],
     "no_pseudo" -> capabilities["no_pseudo"]|>,
     If[AssociationQ[sourceTransform],
       <|"source_transform" -> sourceTransform|>, <||>],
+    If[AssociationQ[gaugeTransforms], gaugeTransforms, <||>],
     If[AssociationQ[exactIndicial],
       <|"exact_affine_jordan_indicial" -> exactIndicial|>, <||>]]];
 
@@ -4488,6 +4701,82 @@ sccNativeCompositeIdentity[parent_Association, blocks_List,
         "symbols" -> symbolNames|>|>,
     "RawJSON", "Compact" -> True], $Failed]];
   identity];
+
+(* Domain-independent identity for an exact Rational SCC shadow and its Acb
+   specialization.  Numeric coefficient encodings and session handles are
+   deliberately excluded; the complete original/theta matrices, geometry,
+   work rectangle, Jordan partitions, spectral frames, and coupling
+   expressions remain proof obligations. *)
+sccRationalShadowIdentity[parent_Association, blocks_List,
+    couplings_List] := Module[{blockProofs, couplingProofs, payload, encoded},
+  blockProofs = Map[<|
+      "block" -> # ["block"], "vertices" -> # ["vertices"],
+      "regular" -> # ["regular"],
+      "identity_gauge" -> # ["identity_gauge"],
+      "exact_gauge" -> # ["exact_gauge"],
+      "identity_v" -> # ["identity_v"],
+      "epsilon_unimodular_v" -> # ["epsilon_unimodular_v"],
+      "no_pseudo" -> # ["no_pseudo"],
+      "exact_affine_jordan_indicial" ->
+        Lookup[#, "exact_affine_jordan_indicial", Null],
+      "source_transform" -> If[AssociationQ[
+          Lookup[#, "source_transform", None]],
+        Join[KeyTake[# ["source_transform"], {"identity",
+          "det_epsilon_valuation", "v_exact_identity",
+          "vinv_exact_identity", "det_exact_identity"}],
+          <|"entries" -> Map[<|"row" -> # ["row"],
+              "column" -> # ["column"],
+              "exact_entry" -> # ["exact_entry"],
+              "epsilon_shift" -> # ["multiplier", "epsilon_shift"],
+              "center_pole_order" ->
+                # ["multiplier", "center_pole_order"]|> &,
+            # ["source_transform", "entries"]]|>], Null],
+      "to_physical" -> If[AssociationQ[Lookup[#, "to_physical", None]],
+        Join[KeyTake[# ["to_physical"], {"role", "identity",
+          "gauge_exact_identity", "gauge_inverse_exact_identity",
+          "gauge_det_exact_identity"}], <|"entries" -> Map[
+            <|"row" -> # ["row"], "column" -> # ["column"],
+              "exact_entry" -> # ["exact_entry"],
+              "epsilon_shift" -> # ["multiplier", "epsilon_shift"],
+              "center_pole_order" -> # ["multiplier", "center_pole_order"]|> &,
+            # ["to_physical", "entries"]]|>], Null],
+      "to_reduced" -> If[AssociationQ[Lookup[#, "to_reduced", None]],
+        Join[KeyTake[# ["to_reduced"], {"role", "identity",
+          "gauge_exact_identity", "gauge_inverse_exact_identity",
+          "gauge_det_exact_identity"}], <|"entries" -> Map[
+            <|"row" -> # ["row"], "column" -> # ["column"],
+              "exact_entry" -> # ["exact_entry"],
+              "epsilon_shift" -> # ["multiplier", "epsilon_shift"],
+              "center_pole_order" -> # ["multiplier", "center_pole_order"]|> &,
+            # ["to_reduced", "entries"]]|>], Null]|> &, blocks];
+  couplingProofs = Map[<|
+      "source_block" -> # ["source_block"],
+      "target_block" -> # ["target_block"],
+      "source_vertices" -> # ["source_vertices"],
+      "target_vertices" -> # ["target_vertices"],
+      "rows" -> # ["rows"], "columns" -> # ["columns"],
+      "entries" -> Map[<|"row" -> # ["row"],
+          "column" -> # ["column"],
+          "source_vertex" -> # ["source_vertex"],
+          "target_vertex" -> # ["target_vertex"],
+          "exact_original_entry" -> # ["exact_original_entry"],
+          "exact_theta_entry" -> # ["exact_theta_entry"],
+          "epsilon_shift" -> # ["multiplier", "epsilon_shift"],
+          "center_pole_order" ->
+            # ["multiplier", "center_pole_order"],
+          "multiplier_exact_identity" ->
+            # ["multiplier", "exact_identity"],
+          "proven_zero" -> # ["multiplier", "proven_zero"]|> &,
+        # ["entries"]]|> &, couplings];
+  payload = <|"schema" -> "diffexp2-scc-rational-shadow-v1",
+    "parent" -> KeyTake[parent, {"dimension", "exact_system_record",
+      "exact_theta_record", "chart", "scc", "execution",
+      "work_contract"}], "blocks" -> blockProofs,
+    "couplings" -> couplingProofs|>;
+  encoded = ExportString[payload, "RawJSON", "Compact" -> True];
+  If[!StringQ[encoded], Return[$Failed, Module]];
+  "de2-rational-shadow-" <>
+    IntegerString[Hash[encoded, "SHA256"], 16, 64]];
 
 (* The composite owner must retain one equation in the full original-master
    basis.  Diagonal chart payloads are intentionally not reused: their q/C
@@ -4525,7 +4814,8 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    center, missingReq, components, condensation, executionDescriptor,
    inputDigits, runRecords, taskRecords, columnPlans, blockDimensions,
    framePlans, forcedFrame, physicalPayload, spectralFrames,
-   sourceTransforms},
+   sourceTransforms, gaugeTransforms, gaugeFrames, gaugePrepStart,
+   gaugePrepMemory, gaugeProbeRecord},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -4594,11 +4884,25 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
       "Detail" -> "native SCC composite cache capacity is exhausted; clear solver caches before preparing another public handle"|>]];
 
   condensation = seq["CondensationEdges"];
+  If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+    Print["DE2 SCC BLOCK SYSTEMS start center=", center,
+      " memory=", MemoryInUse[]]];
   blockSystems = sccBlockChartSystem[cs, #] & /@
     Range[Length[components]];
+  If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+    Print["DE2 SCC BLOCK SYSTEMS done center=", center,
+      " memory=", MemoryInUse[]]];
   spectralFrames = sccSpectralFrameCertificate /@ blockSystems;
+  If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+    Print["DE2 SCC SPECTRAL FRAMES done center=", center,
+      " memory=", MemoryInUse[]]];
+  gaugeFrames = sccGaugeFrameCertificate /@ blockSystems;
+  If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+    Print["DE2 SCC GAUGE FRAMES done center=", center,
+      " identity=", Lookup[gaugeFrames, "identity_gauge", None],
+      " memory=", MemoryInUse[]]];
   capabilities = MapThread[sccNativeBlockCapabilities,
-    {blockSystems, spectralFrames}];
+    {blockSystems, spectralFrames, gaugeFrames}];
   badBlocks = Select[Range[Length[blockSystems]],
     Function[block, Module[{record = capabilities[[block]]},
       (* "regular" is a classification, not an admission predicate.  The
@@ -4608,7 +4912,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
          classes here while continuing to require the exact producer facts
          which the current composite representation actually depends on. *)
       !MemberQ[{True, False}, Lookup[record, "regular", None]] ||
-        !TrueQ[Lookup[record, "identity_gauge", False]] ||
+        !TrueQ[Lookup[record, "exact_gauge", False]] ||
         !TrueQ[Lookup[record, "epsilon_unimodular_v", False]] ||
         !MemberQ[{True, False},
           Lookup[record, "no_pseudo", None]]]]];
@@ -4617,7 +4921,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
         <|"Block" -> #, "Capabilities" -> capabilities[[#]],
           "SpectralFrame" -> spectralFrames[[#]]|> &,
         badBlocks],
-      "Detail" -> "native SCC preparation requires regular or exact affine-Jordan diagonal blocks with exact identity Gauge/GaugeInverse and an exact t-independent epsilon-unimodular V/VInv pair; no_pseudo is retained provenance, not an admission decision"|>]];
+      "Detail" -> "native SCC preparation requires regular or exact affine-Jordan diagonal blocks with exact invertible Gauge/GaugeInverse and an exact t-independent epsilon-unimodular V/VInv pair; no_pseudo is retained provenance, not an admission decision"|>]];
   requestedMin = epsWindow["Min"];
   requestedMax = epsWindow["CompleteMax"];
   publicTOrder = req["TOrder"];
@@ -4671,11 +4975,41 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
         sccNativeSourceShape[cs, #2, fb, workTop, workTOrder],
         serialization]] &,
     {blockSystems, Length /@ components, spectralFrames}];
+  gaugePrepStart = AbsoluteTime[];
+  gaugePrepMemory = MemoryInUse[];
+  gaugeTransforms = MapThread[
+    If[TrueQ[Lookup[#3, "identity_gauge", False]], None,
+      <|"to_physical" -> PrepareSCCGaugeTransform[#1, "to_physical",
+          sccNativeSourceShape[cs, #2, fb, workTop, workTOrder],
+          serialization, #4],
+        "to_reduced" -> PrepareSCCGaugeTransform[#1, "to_reduced",
+          sccNativeSourceShape[cs, #2, fb, workTop, workTOrder],
+          serialization, #4]|>] &,
+    {blockSystems, Length /@ components, capabilities, gaugeFrames}];
+  If[Environment["DE2_SCC_GAUGE_PREP_PROBE"] === "1" &&
+      AnyTrue[gaugeTransforms, AssociationQ],
+    gaugeProbeRecord = <|
+      "schema" -> "diffexp2-scc-gauge-prep-probe-v1",
+      "elapsed_seconds" -> N[AbsoluteTime[] - gaugePrepStart],
+      "memory_before" -> gaugePrepMemory,
+      "memory_after" -> MemoryInUse[],
+      "max_memory_used" -> MaxMemoryUsed[],
+      "certified" -> AllTrue[gaugeFrames,
+        TrueQ[Lookup[#, "admissible", False]] &],
+      "transforms" -> Map[If[AssociationQ[#],
+          AssociationMap[<|"entries" -> Length[Lookup[#, "entries", {}]],
+              "kernel_shapes" -> DeleteDuplicates[
+                Dimensions[Lookup[Lookup[#, "multiplier", <||>],
+                    "kernels", {}]] & /@ Lookup[#, "entries", {}]]|> &,
+            #], <||>] &, gaugeTransforms]|>;
+    Print["DE2 SCC GAUGE PREP PROBE ", InputForm[gaugeProbeRecord]];
+    err["E6", cs, <|"GaugePrepProbe" -> gaugeProbeRecord,
+      "Detail" -> "requested SCC gauge preparation probe completed before block capture"|>]];
   blockRecords = MapThread[
     sccCapturedBlockRecord[parentRecords["exact_system_record"],
-      parentGeometry, seq, #1, #2, #3, #4, #5] &,
+      parentGeometry, seq, #1, #2, #3, #4, #5, #6] &,
     {blockSystems, captures, capabilities,
-      Range[Length[blockSystems]], sourceTransforms}];
+      Range[Length[blockSystems]], sourceTransforms, gaugeTransforms}];
   couplings = Map[
     PrepareSCCCouplingMatrix[cs, #[[1]], #[[2]],
       sccNativeSourceShape[cs, Length[components[[#[[1]]]]],
@@ -4690,7 +5024,10 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     cfg["WorkingPrecision"];
   physicalPayload = sccParentPhysicalODEPayload[
     cs, identity, serialization, inputDigits];
-  manifest = <|"identity" -> identity, "parent" -> parent,
+  manifest = <|"identity" -> identity,
+    "rational_shadow_identity" ->
+      sccRationalShadowIdentity[parent, blockRecords, couplings],
+    "parent" -> parent,
     "blocks" -> blockRecords, "couplings" -> couplings,
     "physical_ode" -> physicalPayload|>;
   runRecords = Map[Function[capture,
@@ -4858,18 +5195,19 @@ sccNativeCanonicalRegularBlockComponent[request_Association,
    the native executor rechecks them as exact Arb objects. *)
 sccNativeCanonicalEncodedRegularBlockComponent[
     request_Association, task_Association, contract_Association,
-    dimension_Integer, zero_, one_, integers_List] := Module[
+    dimension_Integer, zero_, one_, encodedATarget_, encodedBTarget_,
+    encodedAShifts_List] := Module[
   {fb = Lookup[contract, "FrameBase", None],
    width = Lookup[contract, "FrameWidth", None],
    nmax = Lookup[contract, "NMax", None], frameTop, unitIndex,
    initial, validity, schedule, zeroFrame, unitFrame, frames, selected},
   If[dimension < 1 ||
       !MatchQ[{fb, width, nmax}, {_Integer, _Integer, _Integer}] ||
-      width < 1 || nmax < 0 || Length[integers] =!= nmax + 1 ||
+      width < 1 || nmax < 0 || Length[encodedAShifts] =!= nmax + 1 ||
       Sort[Keys[request]] =!= Sort[$nativeSCCColumnRunKeys] ||
       Sort[Keys[task]] =!= Sort[{"a", "b", "P"}] ||
-      !TrueQ[zeroCanQ[task["a"]]] ||
-      !TrueQ[zeroCanQ[task["b"]]] || task["P"] =!= 0,
+      !FreeQ[{task["a"], task["b"]}, _?InexactNumberQ] ||
+      task["P"] =!= 0,
     Return[None, Module]];
   frameTop = fb + width - 1;
   unitIndex = 1 - fb;
@@ -4880,19 +5218,17 @@ sccNativeCanonicalEncodedRegularBlockComponent[
       Lookup[request, "p", None] =!= 0 ||
       !TrueQ[Lookup[request, "has_initial", False]] ||
       TrueQ[Lookup[request, "adaptive_probe", True]] ||
-      Lookup[request, "a_target", None] =!= zero ||
-      Lookup[request, "b_target", None] =!= zero ||
+      Lookup[request, "a_target", None] =!= encodedATarget ||
+      Lookup[request, "b_target", None] =!= encodedBTarget ||
       Lookup[request, "a_shift_min", None] =!= 0 ||
-      Lookup[request, "a_shifts", None] =!= integers ||
+      Lookup[request, "a_shifts", None] =!= encodedAShifts ||
       !ListQ[schedule] || Length[schedule] =!= nmax + 1 ||
-      !(And @@ MapIndexed[Function[{row, index}, Module[
-          {n = First[index] - 1},
-          ListQ[row] && Length[row] === dimension &&
-            AllTrue[row, AssociationQ[#] &&
-              Sort[Keys[#]] === Sort[{"case", "da", "db"}] &&
-              Lookup[#, "case", None] === If[n === 0, "R", "T"] &&
-              Lookup[#, "da", None] === integers[[n + 1]] &&
-              Lookup[#, "db", None] === zero &]]], schedule]) ||
+      !AllTrue[schedule, ListQ[#] && Length[#] === dimension &&
+          AllTrue[#, AssociationQ[#] &&
+            Sort[Keys[#]] === Sort[{"case", "da", "db"}] &&
+            MemberQ[{"R", "T", "P"}, Lookup[#, "case", None]] &&
+            MatchQ[Lookup[#, "da", None], {_String, _String}] &&
+            MatchQ[Lookup[#, "db", None], {_String, _String}] &] &] ||
       !ListQ[initial] || Length[initial] =!= dimension width ||
       !ListQ[validity] ||
       validity =!= ConstantArray[frameTop, dimension] ||
@@ -5129,8 +5465,12 @@ sccNativeRegularBlockStatisticsQ[stats_, handle_Association,
       "native-retained-spectral-assembly-and-target-inverse" &&
     Lookup[evidence, "regular", None] ===
       "collision-bound-producer-certificate" &&
-    Lookup[evidence, "identity_gauge", None] ===
-      "collision-bound-producer-certificate" &&
+    (Lookup[evidence, "identity_gauge", None] ===
+        "collision-bound-producer-certificate" ||
+      (Lookup[evidence, "identity_gauge", None] ===
+          "optional-fast-path-exact-directional-gauge-frame" &&
+       Lookup[evidence, "exact_gauge", None] ===
+          "retained-gauge-and-gauge-inverse-multiplier-certificates")) &&
     Lookup[evidence, "no_pseudo", None] ===
       "collision-bound-producer-certificate"];
 
@@ -5148,7 +5488,7 @@ sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
       "acb-regular-singular-jordan-block-dag-column-v1"],
     _, Return[False, Module]];
   expectedNoPseudo = If[domain === "acb",
-    "producer-proven-and-exact-schedule-revalidated-no-case-p",
+    "runtime-exact-schedule-case-p-gate",
     "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate"];
   expectedPseudoExecution = If[domain === "acb",
     "exact-rational-certificate-case-p-rejected-for-acb",
@@ -5181,8 +5521,12 @@ sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
       "native-retained-spectral-assembly-and-target-inverse" &&
     Lookup[evidence, "regular_or_regular_singular", None] ===
       "collision-bound-producer-certificate" &&
-    Lookup[evidence, "identity_gauge", None] ===
-      "collision-bound-producer-certificate" &&
+    (Lookup[evidence, "identity_gauge", None] ===
+        "collision-bound-producer-certificate" ||
+      (Lookup[evidence, "identity_gauge", None] ===
+          "optional-fast-path-exact-directional-gauge-frame" &&
+       Lookup[evidence, "exact_gauge", None] ===
+          "retained-gauge-and-gauge-inverse-multiplier-certificates")) &&
     Lookup[evidence, "jordan_indicial", None] ===
       "retained-exact-rational-full-matrix-certificate" &&
     Lookup[evidence, "no_pseudo", None] === expectedNoPseudo &&
@@ -5273,7 +5617,7 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
    selectedSeedLocalComponent, expectedBasisIndex, expectedCapability,
    expectedProvenanceSchema, columnPlans, selectedPlan,
    singularExecution, seedTag, targetTags, plannedTargetBlocks,
-   provenanceLocalComponent, encodedZero, encodedOne, encodedIntegers},
+   provenanceLocalComponent, encodedZero, encodedOne},
   If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumn] === {},
     err["E5", cs, <|"Detail" ->
       "CppBackend persistent SCC column bridge is not available"|>]];
@@ -5408,13 +5752,15 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
           $cppSerializationSymbols = {}},
         encodedZero = cppScalar[0, inputDigits, cs];
         encodedOne = cppScalar[1, inputDigits, cs];
-        encodedIntegers = Table[cppScalar[n, inputDigits, cs],
-          {n, 0, contract["NMax"]}]];
       componentMaps = MapThread[Function[{runs, tasks, dimension},
-          MapThread[sccNativeCanonicalEncodedRegularBlockComponent[
-              #1, #2, contract, dimension, encodedZero, encodedOne,
-              encodedIntegers] &, {runs, tasks}]],
-        {runRecords, taskRecords, blockDimensions}];
+          MapThread[Function[{run, task},
+            sccNativeCanonicalEncodedRegularBlockComponent[
+              run, task, contract, dimension, encodedZero, encodedOne,
+              cppScalar[task["a"], inputDigits, cs],
+              cppScalar[task["b"], inputDigits, cs],
+              Table[cppScalar[task["a"] + n, inputDigits, cs],
+                {n, 0, contract["NMax"]}]]], {runs, tasks}]],
+        {runRecords, taskRecords, blockDimensions}]];
       badBlocks = Select[Range[Length[componentMaps]], Function[block,
         MemberQ[componentMaps[[block]], None] ||
           Sort[componentMaps[[block]]] =!=
@@ -5778,6 +6124,42 @@ SolveNativeRegularBasis[cs_Association, req_Association,
         "retained-regular-monolithic-unit-basis-v1",
       "columns" -> d, "worker_threads" -> 1,
       "json_coefficients" -> 0|>|>];
+
+(* Exact tile geometry needs every receiving equation owner before marching,
+   but it does not need the corresponding d-column solution slab.  Preparing
+   a monolithic chart through one ordinary unit column is deliberately kept
+   on the same persistent request/cache path as SolveNativeRegularBasis, so a
+   later streamed full solve reuses the identical chart owner.  A decomposed
+   regular system already has a lightweight SCC-composite preparation API. *)
+PrepareNativeRegularBasisOwner[cs_Association, req_Association] := Module[
+  {seq = Lookup[cs, "IntegrationSequence", None], d = cs["SystemSize"],
+   epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax, physical,
+   unitValues, witness},
+  If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    err["E8", cs, <|"Detail" ->
+      "PrepareNativeRegularBasisOwner requires a regular chart"|>]];
+  If[AssociationQ[seq] && Length[Lookup[seq, "Components", {}]] > 1,
+    Return[PrepareNativeSCCComposite[cs, req], Module]];
+  If[!AssociationQ[epsWindow] ||
+      !IntegerQ[Lookup[epsWindow, "Min", None]] ||
+      !IntegerQ[Lookup[epsWindow, "CompleteMax", None]],
+    err["E8", cs, <|"Request" -> req,
+      "Detail" -> "native regular owner requires a finite epsilon window"|>]];
+  epsMin = epsWindow["Min"];
+  epsMax = epsWindow["CompleteMax"];
+  If[epsMin > 0 || epsMax < 0,
+    err["E6", cs, <|"EpsWindow" -> epsWindow,
+      "Detail" -> "native regular owner normalization requires eps^0 inside the requested window"|>]];
+  physical = regularPhysicalChartSystem[cs];
+  unitValues = Table[DiffExp2`EpsSeries`ESNew[epsMin,
+      Table[If[component === 1 && power === 0, 1, 0],
+        {power, epsMin, epsMax}]], {component, d}];
+  witness = SolveNativeLocalFamily[physical, req,
+    <|"a" -> 0, "b" -> 0, "p" -> 0|>, {unitValues}];
+  <|"Type" -> "DiffExp2NativeRegularBasisOwner",
+    "Session" -> witness["Session"],
+    "NativeChart" -> witness["NativeChart"],
+    "Witness" -> witness|>];
 
 sccAggregateDiagnostics[records_List, seq_Association,
     recombine_List] := Module[{diags, getLists, compensated},

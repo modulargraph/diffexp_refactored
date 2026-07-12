@@ -1235,16 +1235,18 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
       StringLength[record["NativeEpsilonPlanIdentity"]] > 0)) &&
   AllTrue[Lookup[record, {"SourceCompleteMax", "TargetCompleteMax",
       "DeliverableCompleteMax", "RequiredRawTop",
-      "CoefficientHalo", "IntegrationHalo"},
+      "CoefficientHalo", "IntegrationHalo", "MatchEpsilonPadding"},
     None], IntegerQ] &&
   With[{source = record["SourceCompleteMax"],
       target = record["TargetCompleteMax"],
       deliverable = record["DeliverableCompleteMax"],
       required = record["RequiredRawTop"],
       coefficientHalo = record["CoefficientHalo"],
-      integrationHalo = record["IntegrationHalo"]},
-    coefficientHalo >= 0 && MemberQ[{0, 1}, integrationHalo] &&
-      target === source - coefficientHalo &&
+      integrationHalo = record["IntegrationHalo"],
+      matchPadding = record["MatchEpsilonPadding"]},
+    coefficientHalo >= 0 && matchPadding >= 0 &&
+      MemberQ[{0, 1}, integrationHalo] &&
+      target + matchPadding === source - coefficientHalo &&
       source >= target >= deliverable >= required];
 
 ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
@@ -1776,6 +1778,12 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
      the honest source reservoir instead: with available work edge S,
      Prepare's maximal public target is T=S-HC.  Per-entry exact capacities
      are S+s for direct/limits and S+s-1 for native integration. *)
+  (* Preserve every coefficient that the exact source/row contract can
+     honestly deliver.  The downstream floor remains the public requirement;
+     surplus coefficients are carried to the next FT level as an internal
+     reservoir for later singularly perturbed matches.  Discarding that
+     reservoir here defeats BoundaryExtraOrder and can leave a later exact
+     CASE-P lattice transformation with too little finite epsilon width. *)
   targetMax = availableSourceMax - coefficientHalo;
   outputMins = Association@Map[Function[entry,
     entry["MasterIndex"] -> If[entry["Case"] === "integrate",
@@ -1855,9 +1863,11 @@ ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     sys, boundary, lower, upper, "Threads" -> threads,
     "Integrands" -> {coefficientVectors, physicalVar},
-    "TargetCompleteMax" -> targetMax];
-ft2NativeRun[atlas_, observables_, physicalVar_] :=
-  DiffExp2`NativeTransport`RunNativeTransportObservableBatch[
+    "TargetCompleteMax" -> targetMax,
+    "DeferReceivingBases" -> True];
+SetAttributes[ft2NativeRun, HoldFirst];
+ft2NativeRun[atlas_Symbol, observables_, physicalVar_] :=
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
     atlas, observables, physicalVar];
 ft2NativeExport[batch_, digits_] :=
   DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
@@ -1873,6 +1883,11 @@ ft2NativeReleaseBatch[batch_] :=
 ft2NativeReleaseAtlas[atlas_] :=
   DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[atlas];
 
+ft2NativeStageTiming[fields___] := If[
+  Environment["DE2_NATIVE_STAGE_TIMING"] === "1",
+  Print["FTLADDER NATIVE STAGE ", fields, " t=", SessionTime[],
+    " memory=", MemoryInUse[]]];
+
 ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     entries_List, ledger_Association, physicalVar_Symbol, anchor_,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
@@ -1880,6 +1895,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     checkpointSpec_:None] :=
  Module[
   {deliverableMax = ledger["DeliverableCompleteMax"],
+   publicRequiredTop = ledger["DownstreamRawTop"],
    integrationHalo = ledger["IntegrationHalo"], directRequiredTop =
      ledger["DeliverableCompleteMax"], provenZeroEntries, activeEntries,
    directEntries, nonDirectEntries, nativeEntries, directValues = <||>,
@@ -1973,7 +1989,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "DeliverableCompleteMax" -> deliverableMax,
     "RequiredRawTop" -> ledger["DownstreamRawTop"],
     "CoefficientHalo" -> ledger["CoefficientHalo"],
-    "IntegrationHalo" -> integrationHalo|>;
+    "IntegrationHalo" -> integrationHalo,
+    "MatchEpsilonPadding" -> If[AssociationQ[atlas],
+      Lookup[atlas, "MatchEpsilonPadding", 0], 0]|>;
   provenZeroEntries = Select[entries,
     TrueQ[Lookup[#, "ProvenZero", False]] &];
   activeEntries = Select[entries,
@@ -2024,7 +2042,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       upperPlan = catch2[
         ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
       If[FailureQ[lowerPlan] || FailureQ[upperPlan],
-        Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]]];
+        Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
+      ft2NativeStageTiming["plans-ready charts=",
+        Length /@ {lowerPlan["Charts"], upperPlan["Charts"]}]];
     paddedBoundary = If[integrationHalo === 0,
       DiffExp2`EpsSeries`ESNew[0, #] & /@ currentBCs,
       DiffExp2`EpsSeries`ESNew[-integrationHalo,
@@ -2036,13 +2056,13 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         "CoefficientVector" -> entry["CoefficientVector"],
         "Epsilon" -> <|"Min" -> entry["OutputMin"],
           "Max" -> deliverableMax,
-          "RequiredCompleteMax" -> deliverableMax|>|>;
+          "RequiredCompleteMax" -> publicRequiredTop|>|>;
       If[entry["Case"] === "integrate",
-        (* Request a rigorous full-local tail whenever the retained chart
-           supports one, but never turn an unsupported singular tile into a
-           production-stopping accuracy guard.  The exported result records
-           whether the aggregate promoted or remained stored truncation. *)
-        Append[observable, "TailPolicy" -> "attempt"], observable]]],
+        (* Production transport returns the honest stored Taylor truncation.
+           Full-local tail models are an optional certification product and
+           can multiply memory across every projected tile; they are not
+           needed for the finite-order FT ladder or analytic regularization. *)
+        Append[observable, "TailPolicy" -> "stored"], observable]]],
       nativeEntries];
     nativeBatchMatchesQ[candidate_, expectedAtlas_] :=
       AssociationQ[candidate] &&
@@ -2087,6 +2107,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         nativeCheckpointState = resumeCore["State"];
         batch = catch2[ft2NativeRestoreCheckpoint[nativeCheckpointState]];
         restoredNativeQ = True,
+        ft2NativeStageTiming["atlas-prepare-start"];
         atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
           lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
           physicalVar, ledger["TargetCompleteMax"], threads]];
@@ -2098,6 +2119,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           Throw[If[FailureQ[atlas], atlas,
             ft2NativeFailure["native atlas preparation returned a malformed result",
               <|"Result" -> atlas|>]], dispatchTag]];
+        ft2NativeStageTiming["atlas-prepare-done"];
         atlasPlanIdentity = atlas["PlanCheckpointIdentity"];
         nativeBatchPayloadIdentity = ft2CanonicalIdentity[
           "ft2-native-observable-payload-",
@@ -2105,7 +2127,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
             Map[KeyTake[#, {"Operation", "Identity",
                 "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
               observables]}];
+        ft2NativeStageTiming["observable-run-start"];
         batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
+        ft2NativeStageTiming["observable-run-done"];
         If[checkpointMode === "Save",
           If[FailureQ[batch] || !nativeBatchMatchesQ[batch, atlas],
             Throw[If[FailureQ[batch], batch,
@@ -2181,13 +2205,18 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       Return[ft2NativeFailure[
         "native observable export changed request order or value shape"],
         Module]];
-    exportedValues = Map[If[esCMx[#] > deliverableMax,
-        DiffExp2`EpsSeries`ESTruncate[#, deliverableMax], #] &,
-      Lookup[exportedResults, "Value"]];
-    If[AnyTrue[exportedValues, esCMx[#] < deliverableMax &],
+    exportedValues = Lookup[exportedResults, "Value"];
+    If[AnyTrue[exportedValues, esCMx[#] < publicRequiredTop &],
       Return[ft2NativeFailure[
-        "native observable export is incomplete at the common retained raw edge"],
-        Module]];
+        "native observable export is incomplete at the required downstream raw edge"],
+      Module]];
+    With[{commonTop = Min[deliverableMax, Min[esCMx /@ exportedValues]]},
+      exportedValues = Map[Which[
+          esMn[#] > commonTop, DiffExp2`EpsSeries`ESZero[commonTop],
+          esCMx[#] > commonTop,
+            DiffExp2`EpsSeries`ESTruncate[#, commonTop],
+          True, #] &,
+        exportedValues]];
     nativeValues = AssociationThread[
       Lookup[nativeEntries, "MasterIndex"],
       exportedValues]];
@@ -2201,6 +2230,16 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     Return[ft2NativeFailure[
       "native/direct result merge did not cover every lower master",
       <|"Missing" -> Cases[values, _Missing]|>], Module]];
+  With[{commonTop = Min[esCMx /@ values]},
+    If[commonTop < publicRequiredTop,
+      Return[ft2NativeFailure[
+        "native/direct result merge lost the required downstream epsilon edge"],
+        Module]];
+    values = Map[Which[
+        esMn[#] > commonTop, DiffExp2`EpsSeries`ESZero[commonTop],
+        esCMx[#] > commonTop,
+          DiffExp2`EpsSeries`ESTruncate[#, commonTop],
+        True, #] &, values]];
   certifications = Map[Function[entry,
       ft2CertificationForEntry[entry,
         Lookup[nativeResultByMaster, entry["MasterIndex"], None]]],
@@ -2405,6 +2444,7 @@ runExample[name_String] := Module[
     currentBCs = epsilonBasis["BoundaryValues"];
     currentPrefactors = epsilonBasis["BoundaryPrefactors"];
     epsilonBasisRecord = epsilonBasis["CheckpointRecord"];
+    ft2NativeStageTiming["level=", level, " epsilon-basis-ready"];
     If[resumeTransport || resumeNativeTransport,
       If[Lookup[resumeCheckpoint, "EpsilonBasis", None] =!=
           epsilonBasisRecord,
@@ -2432,6 +2472,7 @@ runExample[name_String] := Module[
       Print["FIRE FAIL"]; Return[$Failed, Module]];
     requests = levelIBPBatch["BoundaryRequests"];
     reductions = levelIBPBatch["Reductions"];
+    ft2NativeStageTiming["level=", level, " ibp-batch-ready"];
     rowCertifications = Map[Function[request,
       Switch[Lookup[request, "Case", None],
         "integrate", ft2NotApplicableCertification["integrate",
@@ -2449,6 +2490,8 @@ runExample[name_String] := Module[
     If[rawExtraFacs === $Failed,
       Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];
     extraFacs = normalizeFT[rawExtraFacs];
+    ft2NativeStageTiming["level=", level,
+      " singular-factors-ready"];
     If[resumeTransport || resumeNativeTransport,
       sys = resumeCheckpoint["System"];
       If[Lookup[sys, "Variable", None] =!= var ||
@@ -2582,6 +2625,8 @@ runExample[name_String] := Module[
                   nativeEpsilonExecution["Identity"],
                 "Tainted" -> False|>]]|>,
         True, None];
+      ft2NativeStageTiming["level=", level,
+        " native-dispatch-ready"];
       nativeDispatch = ft2RunNativeBoundaryDispatch[
         sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
         extraFacs, deltaPrescriptions, cppArmThreadBudget, wp,
@@ -2860,7 +2905,12 @@ runExample[name_String] := Module[
       If[recurrenceBackend === "Cpp",
         nextReq = nativeEpsilonPlan["Levels"][level - 1]
           ["RequiredRawTop"];
-        needTop = Min[kmaxAvail],
+        (* Carry a bounded certified reservoir to the next level.  The
+           independently planned floor is mandatory; BoundaryExtraOrder is
+           the explicit budget for later matching/CASE-P lattice losses.
+           Propagating every deep-level halo can turn a modest public request
+           into dozens of unnecessary epsilon orders and an OOM contraction. *)
+        needTop = Min[Min[kmaxAvail], nextReq + boundaryExtraOrder],
         nextReq = requestedEpsilonOrder[level - 1];
         needTop = nextReq - shift];
       If[(recurrenceBackend === "Cpp" && needTop < nextReq) ||
@@ -2906,7 +2956,8 @@ runExample[name_String] := Module[
           "PreservedSourceCompleteMax" -> If[
             recurrenceBackend === "Cpp", needTop + shift, None],
           "NativeObservableBatch" -> If[recurrenceBackend === "Cpp",
-            nativeDispatch["CheckpointRecord"], None],
+            Join[nativeDispatch["CheckpointRecord"],
+              <|"DeliverableCompleteMax" -> needTop|>], None],
           "NativeEpsilonPlan" -> If[recurrenceBackend === "Cpp",
             nativeEpsilonExecution["Record"], None],
           "NativeEpsilonPlanIdentity" -> If[

@@ -564,8 +564,7 @@ bool run_domain(const std::string& domain) {
       std::string(upper_materialized.at("chart").as_string()) ==
           upper_chart &&
       lower_materialized.at("epsilon_min") == 0 &&
-      lower_materialized.at("epsilon_max") ==
-          (domain == "rational" ? 2 : 1) &&
+      lower_materialized.at("epsilon_max") == 2 &&
       lower_materialized.at("strong_derivation_ownership") == true &&
       lower_materialized.at("residual_binding").as_object().at("status") ==
           "available" &&
@@ -576,7 +575,7 @@ bool run_domain(const std::string& domain) {
       materialized_derivation.at("coefficient_transport") ==
           "native-retained-only" &&
       materialized_derivation.at("match_certified_complete_max") ==
-          (domain == "rational" ? 2 : 1) &&
+          2 &&
       materialized_derivation.at("whole_arm_complete") == false &&
       std::string(materialized_output.at("chart").as_string()) ==
           lower_chart &&

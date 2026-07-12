@@ -846,9 +846,11 @@ int main() {
         unsigned_value(
             three_contract.at("lines").as_array()[2].as_object()
                 .at("epsilon").as_object(),
-            "max") != 3)
+            "max") != 2 ||
+        three_contract.at("streaming_tile_contraction") != true)
       throw std::runtime_error(
-          "attempt-tail downgrade or shifted output epsilon contract was not preserved");
+          "attempt-tail downgrade or shifted output epsilon contract was not preserved: " +
+          json::serialize(three_contract));
     const auto after_success_state = request(json::object{
         {"schema", 2}, {"op", "transport.stats"}, {"session", session},
         {"transport_state", transport_state}});
@@ -1072,6 +1074,15 @@ int main() {
     const auto& retained_state_record =
         saved_payload.at("retained_transport_states").as_array().front()
             .as_object();
+    const auto& retained_state_provenance =
+        retained_state_record.at("provenance").as_object();
+    const auto& retained_state_plan =
+        retained_state_provenance.at("tile_plan").as_object();
+    bool recursive_match_provenance = false;
+    for (const auto& raw_match :
+         retained_state_provenance.at("matches").as_array())
+      recursive_match_provenance |=
+          raw_match.as_object().if_contains("provenance_identity") != nullptr;
     if (!contains_record(
             saved_payload.at("retained_transport_states").as_array(),
             "handle", transport_state) ||
@@ -1086,7 +1097,9 @@ int main() {
         !contains_record(saved_payload.at("retained_locals").as_array(),
                          "handle", transport_final) ||
         retained_state_record.at("schema") !=
-            "diffexp2-retained-transport-arm-state-v2" ||
+            "diffexp2-retained-transport-arm-state-v3" ||
+        retained_state_plan.if_contains("provenance_identity") != nullptr ||
+        recursive_match_provenance ||
         unsigned_value(retained_state_record.at("runtime_stats").as_object(),
                        "contraction_operations") != 3 ||
         unsigned_value(retained_state_record.at("runtime_stats").as_object(),
@@ -1101,7 +1114,7 @@ int main() {
         if (line.at("handle").as_string() != line_handle) continue;
         found_compact =
             line.at("schema") ==
-                "diffexp2-retained-transport-observable-line-v1" &&
+                "diffexp2-retained-transport-observable-line-v2" &&
             line.at("provenance").as_object().at("aggregate").as_object()
                     .if_contains("components") == nullptr;
       }

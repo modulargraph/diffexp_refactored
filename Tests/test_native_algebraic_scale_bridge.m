@@ -64,8 +64,45 @@ eligibleQ = TrueQ[
 singularBridge = catchDE2[
   DiffExp2`NativeTransport`Private`bridgeNativeRegularChartScale[
     Join[endpoint, <|"Singular" -> True|>], 2]];
-singularScopeQ = FailureQ[singularBridge] &&
-  endpoint["Center"] === 1/2 && endpoint["Scale"] === goldenScale;
+singularScopeQ = AssociationQ[singularBridge] &&
+  TrueQ[singularBridge["Singular"]] &&
+  singularBridge["Center"] === 1/2 &&
+  singularBridge["Scale"] === nativeScale &&
+  singularBridge["Prescriptions"] === endpoint["Prescriptions"] &&
+  TrueQ[FullSimplify[RootReduce[
+    0 < singularBridge["Radius"] < endpoint["Radius"]]]];
+
+inexactRadiusSource = Sqrt[41/4];
+inexactRadiusChart = <|"Center" -> 0, "Singular" -> False,
+  "Radius" -> N[inexactRadiusSource, 80], "MatchRadius" -> 1/11,
+  "Scale" -> 1/11, "LocalRadius" -> N[11 inexactRadiusSource, 80],
+  "UseSCCSkeleton" -> True, "Name" -> "certified-inexact-radius",
+  "Prescriptions" -> {minusDeltaPrescription}|>;
+inexactRadiusBridge = catchDE2[
+  DiffExp2`NativeTransport`Private`bridgeNativeRegularChartScale[
+    inexactRadiusChart, 3]];
+inexactRadiusCertificate = If[AssociationQ[inexactRadiusBridge],
+  Lookup[inexactRadiusBridge, "NativeRationalScaleBridge", <||>], <||>];
+inexactRadiusBridgeQ = AssociationQ[inexactRadiusBridge] &&
+  Lookup[inexactRadiusCertificate, "Schema", None] ===
+    "diffexp2-native-inward-rational-radius-v1" &&
+  inexactRadiusBridge["Center"] === inexactRadiusChart["Center"] &&
+  inexactRadiusBridge["Scale"] === inexactRadiusChart["Scale"] &&
+  inexactRadiusBridge["MatchRadius"] ===
+    inexactRadiusChart["MatchRadius"] &&
+  inexactRadiusBridge["Prescriptions"] ===
+    inexactRadiusChart["Prescriptions"] &&
+  IntegerQ[Numerator[inexactRadiusBridge["Radius"]]] &&
+  IntegerQ[Denominator[inexactRadiusBridge["Radius"]]] &&
+  IntegerQ[Numerator[inexactRadiusBridge["LocalRadius"]]] &&
+  IntegerQ[Denominator[inexactRadiusBridge["LocalRadius"]]] &&
+  TrueQ[0 < inexactRadiusBridge["Radius"] < inexactRadiusSource] &&
+  TrueQ[inexactRadiusBridge["Radius"] +
+      inexactRadiusCertificate["OriginalRadiusUncertainty"] <=
+    inexactRadiusCertificate["OriginalRadiusMidpoint"]] &&
+  inexactRadiusBridge["LocalRadius"] ===
+    Together[inexactRadiusBridge["Radius"]/
+      Abs[inexactRadiusChart["Scale"]]];
 
 (* Exact-equality overlap is not stable under two strict inward floors.  The
    public eligibility gate must reject this atlas before native preparation. *)
@@ -87,6 +124,29 @@ tightRejectedQ = tightOriginalEqualityQ &&
       tightLowerPlan, tightUpperPlan]] &&
   !TrueQ[DiffExp2`NativeTransport`Private`nativeBridgedPlanPreflightQ[
     tightUpperPlan]];
+
+projectionRoot = Sqrt[2] + I*Sqrt[3];
+projectionPlan = <|"From" -> -1, "To" -> 4,
+  "Singularities" -> <|
+    "All" -> {projectionRoot, Conjugate[projectionRoot]},
+    "Real" -> {},
+    "Projected" -> {Sqrt[2] - Sqrt[3], Sqrt[2], Sqrt[2] + Sqrt[3]},
+    "ProjectionWaypoints" -> {}|>|>;
+projectionRecords = catchDE2[
+  DiffExp2`NativeTransport`Private`nativeComplexProjections[
+    projectionPlan]];
+projectionBridgeQ = ListQ[projectionRecords] &&
+  Length[projectionRecords] === 1 &&
+  Module[{record = First[projectionRecords], re, h},
+    re = ToExpression[record["real_part_exact"], InputForm];
+    h = ToExpression[record["imaginary_magnitude_exact"], InputForm];
+    (IntegerQ[re] || Head[re] === Rational) &&
+      (IntegerQ[h] || Head[h] === Rational) && h > 0 &&
+      TrueQ[record["retain_minus_imaginary"]] &&
+      TrueQ[record["retain_real_part"]] &&
+      TrueQ[record["retain_plus_imaginary"]] &&
+      Abs[N[re, 70] - N[Sqrt[2], 70]] < 10^-60 &&
+      Abs[N[h, 70] - N[Sqrt[3], 70]] < 10^-60];
 
 exactNativeValue[string_String] := ToExpression[string, InputForm];
 originalPhysicalRadius[chart_Association] := Module[
@@ -229,7 +289,9 @@ loudStatusQ = FailureQ[loudFailure] &&
   AssociationQ[Lookup[loudData, "BackendResponse", None]] &&
   Lookup[loudData["BackendResponse"], "status", "ok"] === "error";
 
-ok = exactFloorQ && eligibleQ && singularScopeQ && tightRejectedQ &&
+ok = exactFloorQ && eligibleQ && singularScopeQ &&
+  inexactRadiusBridgeQ && tightRejectedQ &&
+  projectionBridgeQ &&
   TrueQ[rationalResult["OK"]] &&
   TrueQ[acbResult["OK"]] && loudStatusQ;
 
@@ -237,6 +299,7 @@ If[TrueQ[ok],
   Print["PASS: exact regular algebraic-scale native bridge"],
   Print["FAIL: ", InputForm[<|"ExactFloor" -> exactFloorQ,
     "Eligible" -> eligibleQ, "SingularScope" -> singularScopeQ,
+    "InexactRadiusBridge" -> inexactRadiusBridgeQ,
     "TightRejected" -> tightRejectedQ,
     "Rational" -> rationalResult,
     "Acb" -> acbResult, "LoudFailure" -> loudFailure,

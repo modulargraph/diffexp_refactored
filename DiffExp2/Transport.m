@@ -538,6 +538,45 @@ matchOffset[matchRadius_, trueRadius_, k_Integer] :=
    exactly centerNext-dir rNext/k.  Thus every regular-to-regular match is
    evaluated at +1/k in the producing segment and -1/k in the receiving
    segment, instead of accumulating one-sided, ill-conditioned matches. *)
+regularRationalCenter[value_, from_, ceiling_, dir_, scale_] := Module[
+  {digits = Min[300, Max[80, 2 cfg["WorkingPrecision"]]], numeric,
+   gap, tolerance, shifted, candidate, ceilingActive, attempt},
+  If[ratExprQ[value] && NumericQ[value],
+    Return[Together[value], Module]];
+  numeric = N[value, digits];
+  If[!TrueQ[Im[numeric] == 0],
+    err["E8", <|"Center" -> value,
+      "Detail" -> "regular chart center is not exactly real"|>]];
+  ceilingActive = TrueQ[dir*pointOrderSign[ceiling, value, digits] >= 0];
+  gap = Min[Select[
+      {numericDistance[value, from, digits],
+       If[ceilingActive, numericDistance[ceiling, value, digits], Infinity],
+       Abs[N[scale, digits]]}, NumericQ[#] && # > 0 &]];
+  If[!NumericQ[gap] || !TrueQ[gap > 0],
+    err["E8", <|"Center" -> value, "From" -> from,
+      "Ceiling" -> ceiling,
+      "Detail" -> "could not establish a positive rationalization margin for a regular chart center"|>]];
+  tolerance = gap/2^32;
+  Do[
+    (* If the exact candidate lies on the forward ceiling, move by a tiny
+       certified interior amount before rationalizing.  This prevents a
+       rounded rational from crossing a singular handoff or endpoint. *)
+    shifted = numeric - If[
+      TrueQ[PossibleZeroQ[RootReduce[value - ceiling]]],
+      dir*tolerance, 0];
+    candidate = Rationalize[shifted, tolerance/8];
+    If[ratExprQ[candidate] && NumericQ[candidate] &&
+        TrueQ[dir*pointOrderSign[candidate, from, digits] > 0] &&
+        (!ceilingActive ||
+          TrueQ[dir*pointOrderSign[ceiling, candidate, digits] >= 0]) &&
+        TrueQ[numericDistance[candidate, value, digits] < gap/2^16],
+      Return[Together[candidate], Module]];
+    tolerance /= 2^16,
+    {attempt, 1, 4}];
+  err["E8", <|"Center" -> value, "From" -> from,
+    "Ceiling" -> ceiling,
+    "Detail" -> "could not rationalize a regular chart center inside its exact ordered interval"|>]];
+
 classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
     matchTarget_] := Module[
   {r, q, left, right, steps, g, xnew},
@@ -557,11 +596,11 @@ classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
   If[TrueQ[dir*pointOrderSign[matchTarget, xb] > 0] &&
       TrueQ[dir*pointOrderSign[xnew, matchTarget] >= 0],
     xnew = matchTarget];
-  (* All non-real projections were simplified to nearby rationals above;
-     retain exact real singularities verbatim and keep ordinary centers in
-     the same small exact field as the old predivision formulas. *)
-  If[FreeQ[xnew, _?InexactNumberQ], RootReduce[xnew],
-    Rationalize[N[xnew, 30], Max[10^-30, Abs[N[g, 30]]/256]]]];
+  (* A real algebraic singularity can feed an algebraic offset into the next
+     ORDINARY center.  The center is a free coordinate choice, so select a
+     nearby rational point before any chart system is prepared.  Singular
+     target centers themselves remain exact and untouched. *)
+  regularRationalCenter[RootReduce[xnew], xb, matchTarget, dir, g]];
 
 (* singularMatchPoint: the incoming match point of a SINGULAR chart
    approached from the producing chart (prevCenter, prevRad) — the

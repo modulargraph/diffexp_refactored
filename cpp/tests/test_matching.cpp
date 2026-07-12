@@ -69,6 +69,15 @@ EpsilonFrame<ComplexBall> ball_epsilon_frame(const std::string& value,
   return EpsilonFrame<ComplexBall>(0, std::move(coefficients));
 }
 
+EpsilonFrame<ComplexBall> ball_value_frame(const ComplexBall& value,
+                                            std::size_t width = 6) {
+  std::vector<ComplexBall> coefficients;
+  coefficients.reserve(width);
+  coefficients.push_back(value);
+  for (std::size_t i = 1; i < width; ++i) coefficients.emplace_back(0);
+  return EpsilonFrame<ComplexBall>(0, std::move(coefficients));
+}
+
 void transformation_support_smoke() {
   const auto input = frame(0, {1, 2, 3});
   const auto constant = ExactLaurentPolynomial<Rational>::monomial(
@@ -331,6 +340,45 @@ void refined_acb_ambiguous_pivot_smoke() {
         rejected);
 }
 
+void refined_acb_ambiguous_off_pivot_smoke() {
+  ComplexBall::set_precision(256);
+  ComplexBall two(2);
+  ComplexBall a;
+  acb_sqrt(a.raw(), two.raw(), 256);
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis<Rational>(
+      {{rational_constant_frame("1"), rational_constant_frame("0"),
+        rational_constant_frame("0")},
+       {rational_constant_frame("0"), rational_constant_frame("1"),
+        rational_constant_frame("0")},
+       {rational_constant_frame("0"), rational_constant_frame("0"),
+        rational_constant_frame("1")}},
+      "exact ambiguous-off-pivot control record");
+  const auto a_plus_two = a + ComplexBall(2);
+  const auto a_plus_five = a + ComplexBall(5);
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-50");
+  options.required_complete_max = 4;
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      {{ball_value_frame(a), ball_constant_frame("1"),
+        ball_constant_frame("0")},
+       {ball_value_frame(a), ball_constant_frame("1"),
+        ball_constant_frame("1")},
+       {ball_constant_frame("0"), ball_constant_frame("1"),
+        ball_constant_frame("1")}},
+      {ball_value_frame(a_plus_two), ball_value_frame(a_plus_five),
+       ball_constant_frame("5")},
+      exact_record, options, "ambiguous off-pivot Acb match", true);
+  check("certified pivot plan tolerates an ambiguous exact Schur zero",
+        matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            (matched.weights[0].coefficient(0) - ComplexBall(1))
+                .contains_zero() &&
+            (matched.weights[1].coefficient(0) - ComplexBall(2))
+                .contains_zero() &&
+            (matched.weights[2].coefficient(0) - ComplexBall(3))
+                .contains_zero());
+}
+
 }  // namespace
 
 int main() {
@@ -341,6 +389,7 @@ int main() {
   refined_acb_match_smoke();
   ill_scaled_refinement_smoke();
   refined_acb_ambiguous_pivot_smoke();
+  refined_acb_ambiguous_off_pivot_smoke();
   std::cout << "Results: " << (checked - failed) << " / " << checked
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

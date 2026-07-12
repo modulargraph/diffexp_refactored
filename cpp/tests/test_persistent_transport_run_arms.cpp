@@ -38,6 +38,12 @@ json::array prescriptions() {
       {"multiplicity", 1}, {"leading_coefficient_sign", 1}}};
 }
 
+json::object epsilon_rational_one() {
+  return json::object{{"zero", false}, {"valuation", 0},
+                      {"numerator", json::array{"1"}},
+                      {"denominator", json::array{"1"}}};
+}
+
 std::string prepare_chart(const std::string& session,
                           const std::string& name,
                           const std::string& center) {
@@ -53,9 +59,13 @@ std::string prepare_chart(const std::string& session,
   d_lags.push_back(std::move(d_lag));
   json::array blocks;
   blocks.push_back(std::move(component));
+  const auto owner = "de2-operator-" + name;
+  const auto one = epsilon_rational_one();
+  json::array physical_c;
+  physical_c.push_back(json::array{});
   const auto prepared = request(json::object{
       {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
-      {"key", name}, {"identity", name + ":identity"},
+      {"key", name}, {"identity", owner},
       {"analytic", json::object{
            {"geometry", json::object{
                 {"center_exact", center}, {"scale_exact", "1"},
@@ -84,6 +94,14 @@ std::string prepare_chart(const std::string& session,
            {"assembly", json::object{
                 {"identity", true}, {"poly", json::array{}},
                 {"rat", json::array{}}, {"val", json::array{0}}}},
+           {"physical_ode", json::object{
+                {"schema", "diffexp2-physical-cleared-ode-v1"},
+                {"basis", "physical-original-master"},
+                {"theta_coordinate", "local-t"},
+                {"owner_signature_identity", owner},
+                {"payload_identity", "de2-physical-ode-" + name},
+                {"q", json::array{one}},
+                {"c", std::move(physical_c)}}},
            {"chop_digits", 0}}}});
   require_ok(prepared, "chart.prepare");
   return std::string(prepared.at("chart").as_string());
@@ -183,6 +201,73 @@ json::object run_pair(const std::string& session,
       {"upper", receiving_basis(upper_basis)}});
 }
 
+json::object run_consuming_pair(const std::string& session,
+                                const std::string& plan,
+                                const std::string& anchor,
+                                const std::string& lower_basis,
+                                const std::string& upper_basis,
+                                const std::string& root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.run_arms_consuming"},
+      {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
+      {"tile_plan_checkpoint_identity", "consuming-state-plan"},
+      {"anchor_checkpoint_identity", "consuming-state-anchor"},
+      {"epsilon", epsilon_contract()}, {"refinement", refinement()},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", root}}},
+      {"lower", receiving_basis(lower_basis)},
+      {"upper", receiving_basis(upper_basis)}});
+}
+
+json::object consume_hop(const std::string& session,
+                         const std::string& plan,
+                         const std::string& arm_name,
+                         const std::string& incoming,
+                         const std::string& incoming_checkpoint,
+                         const std::string& basis,
+                         const std::string& root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.consume_hop"},
+      {"session", session}, {"tile_plan", plan},
+      {"tile_plan_checkpoint_identity", "streaming-state-plan"},
+      {"arm", arm_name}, {"match", 0},
+      {"receiving_basis", json::array{basis}},
+      {"incoming", incoming},
+      {"incoming_checkpoint_identity", incoming_checkpoint},
+      {"epsilon", json::object{{"min", 0}, {"max", 2},
+                                  {"required_complete_max", 2}}},
+      {"refinement", refinement()},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", root}}}});
+}
+
+json::object published_side(const std::string& anchor,
+                            const json::object& hop) {
+  const auto next = hop.at("next_local").as_object().at("local");
+  return json::object{
+      {"tile_sources", json::array{anchor, next}}};
+}
+
+json::object publish_consumed_states(
+    const std::string& session, const std::string& plan,
+    const std::string& anchor, const json::object& lower,
+    const json::object& upper, const std::string& root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.publish_consumed_states"},
+      {"session", session}, {"tile_plan", plan},
+      {"tile_plan_checkpoint_identity", "streaming-state-plan"},
+      {"anchor", anchor},
+      {"anchor_checkpoint_identity", "streaming-state-anchor"},
+      {"epsilon", epsilon_contract()}, {"refinement", refinement()},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", root}}},
+      {"lower", published_side(anchor, lower)},
+      {"upper", published_side(anchor, upper)}});
+}
+
 json::object run_single(const std::string& session,
                         const std::string& plan,
                         const std::string& anchor,
@@ -276,6 +361,251 @@ void release_state(const std::string& session, const std::string& state) {
       "transport.release");
 }
 
+void test_streaming_consumed_transport() {
+  const std::string checkpoint =
+      "/tmp/diffexp2-streaming-consumed-roundtrip.de2cp";
+  std::remove(checkpoint.c_str());
+  std::string session;
+  std::string restored;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "rational"}, {"output_digits", 40},
+        {"chart_capacity", 6}, {"local_capacity", 12},
+        {"match_capacity", 4}, {"tile_plan_capacity", 2},
+        {"transport_state_capacity", 4}, {"line_result_capacity", 4}});
+    require_ok(created, "streaming session.create");
+    session = std::string(created.at("session").as_string());
+    const auto anchor_chart = prepare_chart(
+        session, "streaming-anchor-chart", "0");
+    const auto lower_chart = prepare_chart(
+        session, "streaming-lower-chart", "-2/3");
+    const auto upper_chart = prepare_chart(
+        session, "streaming-upper-chart", "2/3");
+    const auto anchor = solve_local(
+        session, anchor_chart, "0", "streaming-state-anchor", "2");
+    const auto lower_basis = solve_local(
+        session, lower_chart, "-2/3", "streaming-lower-basis", "1");
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", "streaming-state-plan"},
+        {"division_order", 3},
+        {"lower", arm("-2/3", anchor_chart, lower_chart)},
+        {"upper", arm("2/3", anchor_chart, upper_chart)}});
+    require_ok(planned, "streaming tile.plan");
+    const auto plan = std::string(planned.at("tile_plan").as_string());
+
+    const auto lower_before = session_stats(session);
+    const auto lower = consume_hop(
+        session, plan, "lower", anchor, "streaming-state-anchor",
+        lower_basis, "streaming-state-success");
+    require_ok(lower, "streaming lower consume_hop");
+    const auto lower_after = session_stats(session);
+    if (lower_after.at("locals") != 2 ||
+        lower_after.at("matches") != 0 ||
+        lower.at("consumed_basis_handles").as_array().size() != 1 ||
+        counter(lower_after, "local_coefficient_count") >
+            counter(lower_before, "local_coefficient_count"))
+      throw std::runtime_error(
+          "streaming lower hop retained its consumed basis slab: " +
+          json::serialize(lower_after));
+    if (request(json::object{
+            {"schema", 2}, {"op", "local.stats"}, {"session", session},
+            {"local", lower_basis}}).at("status") != "error")
+      throw std::runtime_error(
+          "streaming lower basis remained publicly visible");
+
+    // The upper basis is not solved until the lower basis has been consumed.
+    const auto upper_basis = solve_local(
+        session, upper_chart, "2/3", "streaming-upper-basis", "1");
+    const auto upper_ready = session_stats(session);
+    if (upper_ready.at("locals") != 3 ||
+        counter(upper_ready, "local_coefficient_count") <
+            counter(lower_after, "local_coefficient_count"))
+      throw std::runtime_error(
+          "streaming fixture did not admit exactly one next receiving basis");
+    const auto upper = consume_hop(
+        session, plan, "upper", anchor, "streaming-state-anchor",
+        upper_basis, "streaming-state-success");
+    require_ok(upper, "streaming upper consume_hop");
+    const auto upper_after = session_stats(session);
+    if (upper_after.at("locals") != 3 ||
+        upper_after.at("matches") != 0 ||
+        request(json::object{
+            {"schema", 2}, {"op", "local.stats"}, {"session", session},
+            {"local", upper_basis}}).at("status") != "error")
+      throw std::runtime_error(
+          "streaming upper hop retained its consumed basis slab");
+
+    const auto published = publish_consumed_states(
+        session, plan, anchor, lower, upper, "streaming-state-success");
+    require_ok(published, "transport.publish_consumed_states");
+    const auto after_publish = session_stats(session);
+    if (after_publish.at("locals") != 1 ||
+        after_publish.at("transport_states") != 2 ||
+        counter(after_publish, "transport_arm_marches") !=
+            counter(upper_after, "transport_arm_marches") + 2 ||
+        published.at("consumed_tile_local_handles").as_array().size() != 2)
+      throw std::runtime_error(
+          "streaming state publication did not consume its tile-local tokens: " +
+          json::serialize(after_publish));
+    const auto& states = published.at("states").as_object();
+    const auto lower_state = states.at("lower").as_object();
+    const auto lower_value = contract_and_export(
+        session, lower_state, "streaming-before-checkpoint");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", plan}}), "streaming tile.release");
+    release_local(session, anchor);
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+        {"path", checkpoint},
+        {"checkpoint_identity", "streaming-roundtrip"}}),
+        "streaming checkpoint.save");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", session}}),
+        "streaming session.close");
+    session.clear();
+    const auto restored_record = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"}, {"path", checkpoint},
+        {"expected_identity", "streaming-roundtrip"}});
+    require_ok(restored_record, "streaming checkpoint.restore");
+    restored = std::string(restored_record.at("session").as_string());
+    if (restored_record.at("transport_states").as_array().size() != 2 ||
+        restored_record.at("planned_match_hops").as_array().size() != 0 ||
+        contract_and_export(restored, lower_state,
+                            "streaming-after-checkpoint") != lower_value)
+      throw std::runtime_error(
+          "streaming compact checkpoint roundtrip changed contraction output");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", restored}}),
+        "streaming restored session.close");
+    restored.clear();
+    std::remove(checkpoint.c_str());
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    if (!restored.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored}});
+    std::remove(checkpoint.c_str());
+    throw;
+  }
+}
+
+void test_consuming_transport() {
+  const std::string checkpoint =
+      "/tmp/diffexp2-consuming-transport-roundtrip.de2cp";
+  std::remove(checkpoint.c_str());
+  std::string session;
+  std::string restored;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "rational"}, {"output_digits", 40},
+        {"chart_capacity", 6}, {"local_capacity", 24},
+        {"match_capacity", 12}, {"tile_plan_capacity", 2},
+        {"transport_state_capacity", 8}, {"line_result_capacity", 8}});
+    require_ok(created, "consuming session.create");
+    session = std::string(created.at("session").as_string());
+    const auto anchor_chart = prepare_chart(
+        session, "consuming-anchor-chart", "0");
+    const auto lower_chart = prepare_chart(
+        session, "consuming-lower-chart", "-2/3");
+    const auto upper_chart = prepare_chart(
+        session, "consuming-upper-chart", "2/3");
+    const auto anchor = solve_local(
+        session, anchor_chart, "0", "consuming-state-anchor", "2");
+    const auto lower_basis = solve_local(
+        session, lower_chart, "-2/3", "consuming-lower-basis", "1");
+    const auto upper_basis = solve_local(
+        session, upper_chart, "2/3", "consuming-upper-basis", "1");
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", "consuming-state-plan"},
+        {"division_order", 3},
+        {"lower", arm("-2/3", anchor_chart, lower_chart)},
+        {"upper", arm("2/3", anchor_chart, upper_chart)}});
+    require_ok(planned, "consuming tile.plan");
+    const auto plan = std::string(planned.at("tile_plan").as_string());
+    const auto before = session_stats(session);
+    const auto consumed = run_consuming_pair(
+        session, plan, anchor, lower_basis, upper_basis,
+        "consuming-state-success");
+    require_ok(consumed, "transport.run_arms_consuming");
+    const auto after = session_stats(session);
+    const auto& diagnostics = consumed.at("consumption").as_array();
+    if (diagnostics.size() != 2 ||
+        diagnostics[0].as_object().at("session_locals_after_hop") != 2 ||
+        diagnostics[1].as_object().at("session_locals_after_hop") != 1 ||
+        counter(diagnostics[0].as_object(),
+                "session_local_coefficient_count_after_hop") >=
+            counter(before, "local_coefficient_count") ||
+        counter(diagnostics[1].as_object(),
+                "session_local_coefficient_count_after_hop") >=
+            counter(diagnostics[0].as_object(),
+                    "session_local_coefficient_count_after_hop") ||
+        after.at("locals") != 1 ||
+        consumed.at("consuming_basis_handles") != true ||
+        consumed.at("workers") != 1)
+      throw std::runtime_error(
+          "consuming transport did not monotonically release basis slabs: " +
+          json::serialize(consumed) + " / " + json::serialize(after));
+    for (const auto& handle : {lower_basis, upper_basis}) {
+      const auto released = request(json::object{
+          {"schema", 2}, {"op", "local.stats"}, {"session", session},
+          {"local", handle}});
+      if (released.at("status") != "error")
+        throw std::runtime_error(
+            "consumed basis handle remained publicly visible");
+    }
+    const auto& states = consumed.at("states").as_object();
+    const auto lower_state = states.at("lower").as_object();
+    const auto lower_value = contract_and_export(
+        session, lower_state, "consuming-before-checkpoint");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", plan}}), "consuming tile.release");
+    release_local(session, anchor);
+    const auto saved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", checkpoint},
+        {"checkpoint_identity", "consuming-roundtrip"}});
+    require_ok(saved, "consuming checkpoint.save");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", session}}),
+        "consuming session.close");
+    session.clear();
+    const auto restored_record = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint},
+        {"expected_identity", "consuming-roundtrip"}});
+    require_ok(restored_record, "consuming checkpoint.restore");
+    restored = std::string(restored_record.at("session").as_string());
+    if (restored_record.at("transport_states").as_array().size() != 2 ||
+        restored_record.at("planned_match_hops").as_array().size() != 0 ||
+        contract_and_export(restored, lower_state,
+                            "consuming-after-checkpoint") != lower_value)
+      throw std::runtime_error(
+          "consuming compact checkpoint roundtrip changed retained state");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", restored}}),
+        "consuming restored session.close");
+    restored.clear();
+    std::remove(checkpoint.c_str());
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    if (!restored.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored}});
+    std::remove(checkpoint.c_str());
+    throw;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -289,6 +619,8 @@ int main() {
   std::string restored_first;
   std::string restored_second;
   try {
+    test_streaming_consumed_transport();
+    test_consuming_transport();
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "rational"}, {"output_digits", 40},

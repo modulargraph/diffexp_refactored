@@ -403,14 +403,27 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
   nv = epsValPoly[num, eps]; dv = epsValPoly[den, eps];
   jmin = nv - dv;
   (* eps-Laurent coefficients c_j(t), j = jmin .. jmin + jcount - 1 *)
-  Module[{Nc, Dc},
+  Module[{Nc, Dc, reducedDenominator, finiteNumeratorTop},
     Nc = Table[Coefficient[num, eps, nv + i], {i, 0, jcount - 1}];
     Dc = Table[Coefficient[den, eps, dv + i], {i, 0, jcount - 1}];
     cj = Table[0, {jcount}];
-    cj[[1]] = Together[Nc[[1]]/Dc[[1]]];
-    Do[cj[[m + 1]] = Together[
-        (Nc[[m + 1]] - Sum[Dc[[l + 1]]*cj[[m - l + 1]], {l, 1, m}])/Dc[[1]]],
-      {m, 1, jcount - 1}];
+    reducedDenominator = Cancel[den/eps^dv];
+    If[FreeQ[reducedDenominator, eps],
+      (* A denominator independent of eps makes the Laurent quotient
+         finite whenever the numerator is finite.  Gauge/GaugeInverse
+         entries have precisely this form.  Do not execute a long formal
+         division recurrence which repeatedly Together[]s exact zeros
+         through the entire honest work frame. *)
+      finiteNumeratorTop = Min[jcount - 1,
+        Max[0, Exponent[num, eps] - nv]];
+      Do[cj[[m + 1]] = If[structuralZeroQ[Nc[[m + 1]]], 0,
+          Together[Nc[[m + 1]]/Dc[[1]]]],
+        {m, 0, finiteNumeratorTop}],
+      cj[[1]] = Together[Nc[[1]]/Dc[[1]]];
+      Do[cj[[m + 1]] = Together[
+          (Nc[[m + 1]] - Sum[Dc[[l + 1]]*cj[[m - l + 1]],
+            {l, 1, m}])/Dc[[1]]],
+        {m, 1, jcount - 1}]];
     d0 = Dc[[1]]];
   (* classify t-poles of the leading eps denominator *)
   Module[{dred = Cancel[d0/var^Exponent[d0, var, Min]]},
@@ -445,11 +458,19 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
         absr = numMag[r0, wp]; rad = N[shapeData["Radius"], wp];
         diff = absr - rad;
         If[Abs[diff] < DiffExp2`Tolerances`GeomGuardTol[wp]*Max[absr, rad],
-          err["geomambiguous", <|
-            "Chart" -> ToString[shapeData["Center"], InputForm],
-            "Pole" -> r0, "Radius" -> shapeData["Radius"],
-            "Detail" -> "pole modulus vs radius numerically ambiguous"|>]];
-        interior = diff < 0];
+          (* Segment radii are sometimes the finite-precision image of this
+             exact algebraic pole modulus.  In that case the uncertainty
+             interval for the difference contains only zero: equality is a
+             chart-boundary pole and therefore belongs to the neighbouring
+             chart, just like the exact GreaterEqual branch above.  A
+             genuinely unresolved nonzero difference remains a loud error. *)
+          If[TrueQ[PossibleZeroQ[diff]],
+            interior = False,
+            err["geomambiguous", <|
+              "Chart" -> ToString[shapeData["Center"], InputForm],
+              "Pole" -> r0, "Radius" -> shapeData["Radius"],
+              "Detail" -> "pole modulus vs radius numerically ambiguous"|>]],
+          interior = diff < 0]];
       If[interior && !TrueQ[PossibleZeroQ[r0]],
         err["interiorpole", <|
           "Chart" -> ToString[shapeData["Center"], InputForm],

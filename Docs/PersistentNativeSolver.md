@@ -74,7 +74,7 @@ The implemented recurrence-session commands are:
 | `local.certify_residual` | Certify the retained local's stored-truncation theta residual with native Arb magnitudes. |
 | `local.match` | Exact-match retained regular locals and retain the Laurent lattice transformation and weights without coefficient JSON. |
 | `local.match_acb` | Evaluate retained Acb locals at an exact common physical point, apply an exact-Rational saturation transformation, and retain bounded-refinement residual diagnostics without coefficient JSON. |
-| `local.endpoint_limit` | Apply the native sector endpoint gate to one retained local and retain the specialized endpoint vector without coefficient JSON. |
+| `local.endpoint_limit` | Unplanned low-level endpoint gate with caller-supplied approach direction and optional rim; retained for compatibility. |
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
 | `endpoint.stats` | Inspect one retained endpoint result and its exact analytic/branch provenance. |
@@ -84,6 +84,7 @@ The implemented recurrence-session commands are:
 | `tile.match_interval` | Read one exact physical handoff and its opposite-sign producing/receiving local coordinates from a retained plan. |
 | `tile.integration_interval` | Read one exact physical/local tile interval and its affine Jacobian from a retained plan. |
 | `tile.match_advance` | Derive one Rational/Acb match entirely from a retained plan and retain the receiving-basis weights with strong plan/local ownership. |
+| `tile.endpoint_limit` | Derive the final endpoint chart, local approach side, and nullable exact rim from one retained arm, then retain its Rational/Acb endpoint limit with strong plan/local ownership. |
 | `tile.stats` / `tile.release` | Inspect or release one retained independent-arm plan. |
 | `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector; optional `certify_tail:true` promotes only after proof. |
 | `integration.run_arms` | Concurrently march both retained arms through hidden rational-row projection, live-window matching/materialization, tile integration, and native per-arm plus lower-to-upper aggregation; publish only two final locals and three opaque line aggregates after both workers succeed. |
@@ -217,7 +218,9 @@ binding are part of the retained provenance.  The low-level Wolfram entry is
 `RunPersistentAcbLocalMatch`; `match.stats` and `match.release` are shared by
 both match kinds.
 
-`local.endpoint_limit` is a separate retained-result lifecycle.  Admission
+`local.endpoint_limit` is the unplanned, low-level retained-result lifecycle.
+It remains available for compatibility and deliberately exposes
+caller-supplied direction/rim fields. Admission
 strongly owns its source local, so concurrent `local.release` cannot invalidate
 an in-flight limit, and session close prevents a completed in-flight result
 from being published.  The request must bind both checkpoint identities, the
@@ -232,6 +235,21 @@ zero decision, and non-rational unregulated powers fail loudly.  The opaque
 result records every sector tag, prescription, effective rim, and source
 checkpoint; coefficients cross the bridge only through the explicit
 final-compatibility `endpoint.export` call.
+
+The plan-bound entry is `tile.endpoint_limit`, exposed to Wolfram as
+`RunPersistentPlannedEndpointLimit`. Its request contains only a retained tile
+plan, `lower`/`upper`, the final retained local, source/plan/result checkpoint
+identities, and the cancellation policy—there is no caller direction or rim.
+C++ takes the final tile and chart from the immutable arm, proves that the
+physical endpoint is exactly the final chart center and that the local binds
+that chart and its complete prescription record, then derives the local
+approach side as `-arm.direction sign(chart.scale)`. The rim is nullable and
+comes only from consistent exact odd-multiplicity final-chart prescriptions;
+an unprescribed chart stays `null` and is never published as an implicit
+`+i0`. The retained result strongly owns both plan and local. Checkpoint save
+serializes that closure even after their public tokens are released, and
+restore re-derives and cross-checks the endpoint, chart, side, rim, and full
+provenance before exposing the endpoint handle.
 
 `tile.plan` is the first retained native path/integration lifecycle.  The
 request names retained prepared charts only; C++ reads their authoritative
@@ -497,14 +515,15 @@ unknown explicitly optional sections may be skipped.
 The implemented schema-2 checkpoint covers quiescent prepared chart operators
 and composite SCC graphs, retained Rational/Acb local solutions, ordinary and
 plan-driven exact-rational or exact-lattice-guided Acb matches,
-match-materialized receiving locals, endpoint results, exact tile plans, and
+match-materialized receiving locals, raw and plan-bound endpoint results,
+exact tile plans, and
 completed line results. Local tensors, exact
 tag specializations, pseudo-hit state, error envelopes, match
 weights/residuals, and every coefficient-level refinement diagnostic use exact
 FLINT/Arb dump encodings; presentation decimals are never used for restart
 state. The serialized ownership closure includes released locals,
 planned-match hops, plans, and prepared charts still strongly owned by a
-retained match, materialized local, or line, while a separate visibility
+retained match, materialized local, plan-bound endpoint, or line, while a separate visibility
 manifest prevents those dependency-only handles from becoming public again
 after restore. Plan-driven records retain their typed exact/Acb match payload,
 exact handoff, branch prescription, plan/checkpoint provenance, and

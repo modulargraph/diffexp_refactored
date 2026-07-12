@@ -31,7 +31,8 @@ MaterializePersistentLocalMatch::usage = "MaterializePersistentLocalMatch[match,
 ApplyPersistentRationalRow::usage = "ApplyPersistentRationalRow[local, row, checkpointIdentity] applies one JSON-ready exact rational coefficient row to a retained Rational or Acb vector local entirely in C++. The prepared row carries one multiplier per active zero-based component, exact epsilon/Taylor coverage, and structural identities; the result is an opaque retained scalar local with unchanged chart prescriptions and no coefficient slab.";
 PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] returns the opaque summary and exact provenance of one retained native local match.";
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
-RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] applies the native sector endpoint gate to a retained local and returns an opaque session-owned endpoint-result handle. request explicitly binds source/result checkpoint identities, approach_direction, cancellation mode, and optional rim; no coefficient slab is returned.";
+RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] is the unplanned low-level endpoint seam. It applies the native sector endpoint gate to a retained local using caller-supplied approach_direction and optional rim, and returns an opaque session-owned endpoint-result handle. Prefer RunPersistentPlannedEndpointLimit for retained transport arms.";
+RunPersistentPlannedEndpointLimit::usage = "RunPersistentPlannedEndpointLimit[plan, arm, local, policy] applies the native endpoint gate to the final retained local of arm \"lower\" or \"upper\". The retained tile plan alone supplies the endpoint, final chart, local approach side, and nullable exact prescription rim; policy contains exactly checkpoint_identity and cancellation. No caller direction/rim or coefficient slab is accepted.";
 PersistentEndpointStatistics::usage = "PersistentEndpointStatistics[handle] returns the opaque endpoint summary, analytic-regularization/branch provenance, and export counters.";
 ExportPersistentEndpoint::usage = "ExportPersistentEndpoint[handle, checkpointIdentity, outputDigits] explicitly exports the retained specialized Acb epsilon vector for final compatibility.";
 ReleasePersistentEndpoint::usage = "ReleasePersistentEndpoint[handle] releases one retained native endpoint result. A second release is a loud native error.";
@@ -47,7 +48,7 @@ ExportPersistentLineIntegral::usage = "ExportPersistentLineIntegral[handle, chec
 ReleasePersistentLineIntegral::usage = "ReleasePersistentLineIntegral[handle] releases one retained line-integral result. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
-SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for prepared charts/SCCs, retained Rational or Acb locals, ordinary and plan-driven exact/Acb matches, match-materialized locals, endpoint results, exact tile plans, and completed line results. The complete strong-owner closure is serialized separately from public registry visibility; symbolic locals remain the sole deferred scalar kind.";
+SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for prepared charts/SCCs, retained Rational or Acb locals, ordinary and plan-driven exact/Acb matches, match-materialized locals, raw and plan-bound endpoint results, exact tile plans, and completed line results. The complete strong-owner closure is serialized separately from public registry visibility; symbolic locals remain the sole deferred scalar kind.";
 RestorePersistentCheckpoint::usage = "RestorePersistentCheckpoint[path, expectedIdentity] validates and restores an opaque native checkpoint into a new persistent C++ session without replaying Wolfram preprocessing. It returns stable public chart, SCC, local, ordinary/planned-match, endpoint, tile-plan, and line-result handle maps while restoring dependency-only owners without making them public.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
 ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart and SCC handle registries.";
@@ -1044,6 +1045,32 @@ persistentTilePlanHandles[handle_Association] := Module[
       Module]];
   <|"Session" -> session, "TilePlan" -> plan,
     "CheckpointIdentity" -> checkpoint|>];
+
+RunPersistentPlannedEndpointLimit[plan_Association, arm_String,
+    local_Association, policy_Association] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   localTokens = persistentLocalHandles[local], sourceCheckpoint},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[localTokens], Return[localTokens, Module]];
+  sourceCheckpoint = Lookup[local, "checkpoint_identity",
+    Lookup[local, "CheckpointIdentity", None]];
+  If[planTokens["Session"] =!= localTokens["Session"] ||
+      !MemberQ[{"lower", "upper"}, arm] ||
+      !StringQ[sourceCheckpoint] || StringLength[sourceCheckpoint] == 0 ||
+      Sort[Keys[policy]] =!= Sort[{"checkpoint_identity", "cancellation"}] ||
+      !StringQ[Lookup[policy, "checkpoint_identity", None]] ||
+      StringLength[Lookup[policy, "checkpoint_identity", ""]] == 0 ||
+      !AssociationQ[Lookup[policy, "cancellation", None]],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "plan-bound endpoint evaluation requires one session, arm lower/upper, a retained local checkpoint, and exactly checkpoint_identity plus cancellation policy fields"|>], Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.endpoint_limit",
+    "session" -> planTokens["Session"],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "arm" -> arm, "local" -> localTokens["Local"],
+    "source_checkpoint_identity" -> sourceCheckpoint,
+    "checkpoint_identity" -> policy["checkpoint_identity"],
+    "cancellation" -> policy["cancellation"]|>]];
 
 CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
     checkpointIdentity_String, divisionOrder_:3] := Module[

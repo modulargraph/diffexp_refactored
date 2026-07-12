@@ -1077,6 +1077,7 @@ struct ChartStats {
 };
 
 class StoredLocalBase;
+class StoredTilePlan;
 
 class PreparedChartBase {
  public:
@@ -3094,6 +3095,8 @@ class StoredLocal final : public StoredLocalBase {
 
 constexpr const char* kRetainedEndpointLimitCapability =
     "retained-native-endpoint-sector-limit-v1";
+constexpr const char* kRetainedPlannedEndpointLimitCapability =
+    "retained-native-plan-bound-endpoint-sector-limit-v1";
 constexpr const char* kRetainedRationalRowCapability =
     "retained-native-rational-row-local-application-v1";
 
@@ -3338,6 +3341,33 @@ struct ParsedEndpointLimitPolicy {
   std::optional<std::int32_t> requested_rim;
 };
 
+struct ParsedEndpointCancellationPolicy {
+  bool allow_certified_numeric_cancellation = false;
+  std::string cancellation_mode;
+};
+
+ParsedEndpointCancellationPolicy parse_endpoint_cancellation_policy(
+    const json::object& request) {
+  ParsedEndpointCancellationPolicy parsed;
+  const auto& cancellation = as_object(
+      request.at("cancellation"), "endpoint cancellation policy");
+  parsed.cancellation_mode = required_string(cancellation, "mode");
+  if (parsed.cancellation_mode == "exact-coefficient-field") {
+    parsed.allow_certified_numeric_cancellation = false;
+  } else if (parsed.cancellation_mode == "exact-or-acb-singleton") {
+    parsed.allow_certified_numeric_cancellation = true;
+  } else {
+    throw std::invalid_argument(
+        "endpoint cancellation mode must be exact-coefficient-field or "
+        "exact-or-acb-singleton");
+  }
+  if (cancellation.size() != 1)
+    throw std::invalid_argument(
+        "endpoint cancellation policy accepts only its exact mode; "
+        "tolerance-based cancellation is unsupported");
+  return parsed;
+}
+
 ParsedEndpointLimitPolicy parse_endpoint_limit_policy(
     const json::object& request) {
   ParsedEndpointLimitPolicy parsed;
@@ -3357,22 +3387,10 @@ ParsedEndpointLimitPolicy parse_endpoint_limit_policy(
     parsed.options.imaginary_sign = rim;
   }
 
-  const auto& cancellation = as_object(
-      request.at("cancellation"), "endpoint cancellation policy");
-  parsed.cancellation_mode = required_string(cancellation, "mode");
-  if (parsed.cancellation_mode == "exact-coefficient-field") {
-    parsed.options.allow_certified_numeric_cancellation = false;
-  } else if (parsed.cancellation_mode == "exact-or-acb-singleton") {
-    parsed.options.allow_certified_numeric_cancellation = true;
-  } else {
-    throw std::invalid_argument(
-        "endpoint cancellation mode must be exact-coefficient-field or "
-        "exact-or-acb-singleton");
-  }
-  if (cancellation.size() != 1)
-    throw std::invalid_argument(
-        "endpoint cancellation policy accepts only its exact mode; "
-        "tolerance-based cancellation is unsupported");
+  const auto cancellation = parse_endpoint_cancellation_policy(request);
+  parsed.cancellation_mode = cancellation.cancellation_mode;
+  parsed.options.allow_certified_numeric_cancellation =
+      cancellation.allow_certified_numeric_cancellation;
   return parsed;
 }
 
@@ -3410,7 +3428,11 @@ class StoredEndpointResult {
       std::string source_domain, std::int32_t approach_direction,
       std::optional<std::int32_t> requested_rim,
       std::string cancellation_mode, json::object analytic_metadata,
-      EndpointLimitResult&& result, double elapsed_ms)
+      EndpointLimitResult&& result, double elapsed_ms,
+      std::optional<json::object> planned_source = std::nullopt,
+      std::optional<std::int32_t> planned_effective_rim = std::nullopt,
+      std::shared_ptr<StoredTilePlan> plan_owner = nullptr,
+      std::shared_ptr<StoredLocalBase> local_owner = nullptr)
       : handle_(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
         provenance_identity_(std::move(provenance_identity)),
@@ -3423,9 +3445,18 @@ class StoredEndpointResult {
         requested_rim_(requested_rim),
         cancellation_mode_(std::move(cancellation_mode)),
         analytic_metadata_(std::move(analytic_metadata)),
-        result_(std::move(result)), elapsed_ms_(elapsed_ms) {
+        result_(std::move(result)), elapsed_ms_(elapsed_ms),
+        planned_source_(std::move(planned_source)),
+        planned_effective_rim_(planned_effective_rim),
+        plan_owner_(std::move(plan_owner)),
+        local_owner_(std::move(local_owner)) {
     // Validate the retained public frame once, before publishing its handle.
     (void)endpoint_value_window(result_);
+    if (planned_source_.has_value()
+            ? (plan_owner_ == nullptr || local_owner_ == nullptr)
+            : (plan_owner_ != nullptr || local_owner_ != nullptr))
+      throw std::invalid_argument(
+          "plan-bound endpoint result must retain both its plan and local owners");
   }
 
   const std::string& handle() const { return handle_; }
@@ -3436,6 +3467,13 @@ class StoredEndpointResult {
     return provenance_identity_;
   }
   double elapsed_ms() const { return elapsed_ms_; }
+  bool plan_bound() const { return planned_source_.has_value(); }
+  const std::shared_ptr<StoredTilePlan>& plan_owner() const {
+    return plan_owner_;
+  }
+  const std::shared_ptr<StoredLocalBase>& local_owner() const {
+    return local_owner_;
+  }
 
   json::object summary() const {
     const auto window = endpoint_value_window(result_);
@@ -3444,28 +3482,32 @@ class StoredEndpointResult {
         : cancellation_mode_ == "exact-or-acb-singleton"
             ? "acb-exact-singleton-zero"
             : "exact-coefficient-field-only";
-    return json::object{
+    json::object source{
+        {"local", source_local_}, {"chart", source_chart_},
+        {"source_operator_identity", source_operator_identity_},
+        {"checkpoint_identity", source_checkpoint_},
+        {"coefficient_domain", source_domain_}};
+    if (planned_source_.has_value()) source = *planned_source_;
+    json::object result{
         {"endpoint", handle_},
-        {"capability", kRetainedEndpointLimitCapability},
+        {"capability", plan_bound()
+             ? kRetainedPlannedEndpointLimitCapability
+             : kRetainedEndpointLimitCapability},
         {"native_retained", true},
         {"retained_state", "specialized-acb-epsilon-vector"},
         {"json_coefficients", 0},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
-        {"source", json::object{
-             {"local", source_local_}, {"chart", source_chart_},
-             {"source_operator_identity", source_operator_identity_},
-             {"checkpoint_identity", source_checkpoint_},
-             {"coefficient_domain", source_domain_}}},
+        {"execution_scope", plan_bound()
+             ? "plan-bound-final-arm-endpoint"
+             : "unplanned-low-level"},
+        {"source", std::move(source)},
         {"dimension", result_.values.size()},
         {"epsilon_min", window.min_power},
         {"epsilon_max", window.complete_max},
         {"coefficient_field", "acb-specialized"},
         {"arithmetic_enclosed", true},
         {"approach_direction", approach_direction_},
-        {"requested_rim", requested_rim_.has_value()
-             ? json::value(*requested_rim_) : json::value(nullptr)},
-        {"effective_rim", result_.imaginary_sign},
         {"cancellation", json::object{
              {"mode", cancellation_mode_},
              {"effective_scope", cancellation_scope},
@@ -3476,10 +3518,24 @@ class StoredEndpointResult {
               "exact-zero-fact; certified-nonzero symbolic slopes allowed"},
              {"unregulated_power_scope", "exact-rational"},
              {"endpoint_rule", "drop-exact-nonzero-regulator-slope"},
-             {"dropped_regulated_sectors",
-              result_.dropped_regulated_sectors},
-             {"metadata", analytic_metadata_}}},
+              {"dropped_regulated_sectors",
+               result_.dropped_regulated_sectors},
+              {"metadata", analytic_metadata_}}},
         {"elapsed_ms", elapsed_ms_}};
+    result["requested_rim"] = requested_rim_.has_value()
+        ? json::value(*requested_rim_) : json::value(nullptr);
+    if (plan_bound()) {
+      result["derived_rim"] = planned_effective_rim_.has_value()
+          ? json::value(*planned_effective_rim_) : json::value(nullptr);
+      result["effective_rim"] = planned_effective_rim_.has_value()
+          ? json::value(*planned_effective_rim_) : json::value(nullptr);
+      result["rim_source"] =
+          "final-chart-exact-odd-multiplicity-prescriptions";
+    } else {
+      result["effective_rim"] = result_.imaginary_sign;
+      result["rim_source"] = "unplanned-caller-or-principal-default";
+    }
+    return result;
   }
 
   json::object stats_json() const {
@@ -3496,31 +3552,45 @@ class StoredEndpointResult {
     for (const auto& value : result_.values)
       values.push_back(checkpoint_epsilon_frame_record(value));
     std::lock_guard<std::mutex> lock(stats_mutex_);
-    return json::object{
-        {"schema", "diffexp2-retained-endpoint-result-v2"},
+    json::object source{
+        {"local", source_local_}, {"chart", source_chart_},
+        {"source_operator_identity", source_operator_identity_},
+        {"checkpoint_identity", source_checkpoint_},
+        {"coefficient_domain", source_domain_}};
+    if (planned_source_.has_value()) source = *planned_source_;
+    json::object record{
+        {"schema", plan_bound()
+             ? "diffexp2-retained-plan-bound-endpoint-result-v1"
+             : "diffexp2-retained-endpoint-result-v2"},
         {"handle", handle_},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
-        {"source", json::object{
-            {"local", source_local_}, {"chart", source_chart_},
-            {"source_operator_identity", source_operator_identity_},
-            {"checkpoint_identity", source_checkpoint_},
-            {"coefficient_domain", source_domain_}}},
+        {"source", std::move(source)},
         {"approach_direction", approach_direction_},
-        {"requested_rim", requested_rim_.has_value()
-             ? json::value(*requested_rim_) : json::value(nullptr)},
         {"cancellation_mode", cancellation_mode_},
         {"analytic_metadata", analytic_metadata_},
         {"result", json::object{
             {"values", std::move(values)},
             {"dropped_regulated_sectors",
              result_.dropped_regulated_sectors},
-            {"cancelled_divergent_coefficients",
-             result_.cancelled_divergent_coefficients},
-            {"imaginary_sign", result_.imaginary_sign}}},
+             {"cancelled_divergent_coefficients",
+              result_.cancelled_divergent_coefficients},
+            {"imaginary_sign", plan_bound()
+                 ? (planned_effective_rim_.has_value()
+                       ? json::value(*planned_effective_rim_)
+                       : json::value(nullptr))
+                 : json::value(result_.imaginary_sign)}}},
         {"elapsed_ms", elapsed_ms_},
         {"runtime_stats", json::object{{"exports", exports_},
                                         {"export_ms", export_ms_}}}};
+    if (plan_bound()) {
+      record["derived_rim"] = planned_effective_rim_.has_value()
+          ? json::value(*planned_effective_rim_) : json::value(nullptr);
+    } else {
+      record["requested_rim"] = requested_rim_.has_value()
+          ? json::value(*requested_rim_) : json::value(nullptr);
+    }
+    return record;
   }
 
   void restore_runtime_stats(std::uint64_t exports, double export_ms) {
@@ -3572,6 +3642,10 @@ class StoredEndpointResult {
   json::object analytic_metadata_;
   EndpointLimitResult result_;
   double elapsed_ms_ = 0.0;
+  std::optional<json::object> planned_source_;
+  std::optional<std::int32_t> planned_effective_rim_;
+  std::shared_ptr<StoredTilePlan> plan_owner_;
+  std::shared_ptr<StoredLocalBase> local_owner_;
   mutable std::mutex stats_mutex_;
   std::uint64_t exports_ = 0;
   double export_ms_ = 0.0;
@@ -10288,6 +10362,139 @@ json::value optional_plan_rim_json(
   return rim.has_value() ? json::value(*rim) : json::value(nullptr);
 }
 
+struct ResolvedPlannedEndpointBinding {
+  json::object source;
+  std::int32_t approach_direction = 0;
+  std::optional<std::int32_t> rim;
+};
+
+ResolvedPlannedEndpointBinding resolve_planned_endpoint_binding(
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::string& arm_name,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  if (!plan || !local)
+    throw std::invalid_argument(
+        "plan-bound endpoint evaluation requires retained plan and local owners");
+  const auto& arm = plan->arm(arm_name);
+  if (arm.exact.tiles.empty() || arm.charts.empty())
+    throw std::invalid_argument(
+        "plan-bound endpoint arm has no final tile/chart");
+  const auto final_tile_index = arm.exact.tiles.size() - 1;
+  const auto& final_tile = arm.exact.tiles.back();
+  if (final_tile.chart >= arm.charts.size())
+    throw std::logic_error(
+        "plan-bound endpoint final tile has an invalid chart index");
+  const auto& final_chart = arm.charts[final_tile.chart];
+  if (!(final_tile.physical_end == arm.exact.to) ||
+      !(final_chart.geometry.center == arm.exact.to) ||
+      !final_tile.local_end.is_zero())
+    throw std::invalid_argument(
+        "plan-bound endpoint requires the final tile to end at the exact center of its retained final chart");
+  if (arm.exact.direction != -1 && arm.exact.direction != 1)
+    throw std::logic_error(
+        "plan-bound endpoint arm has an invalid exact direction");
+  if (final_chart.geometry.scale.is_zero())
+    throw std::invalid_argument(
+        "plan-bound endpoint final chart has a zero exact scale");
+  if (local->source_chart() != final_chart.handle)
+    throw std::invalid_argument(
+        "plan-bound endpoint local does not name the retained final chart");
+  local->require_exact_plan_binding(
+      final_chart.geometry, final_chart.prescriptions,
+      "plan-bound endpoint final local");
+
+  ResolvedPlannedEndpointBinding resolved;
+  resolved.approach_direction =
+      -arm.exact.direction * final_chart.geometry.scale.sign();
+  resolved.rim = exact_plan_rim(
+      final_chart.prescriptions, final_chart.geometry.scale);
+  resolved.source = json::object{
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+      {"tile_plan_provenance_identity", plan->provenance_identity()},
+      {"arm", arm_name},
+      {"endpoint_exact", arm.exact.to.str()},
+      {"direction", arm.exact.direction},
+      {"final_tile", final_tile_index},
+      {"final_chart_index", final_tile.chart},
+      {"final_chart", final_chart.handle},
+      {"final_chart_identity", final_chart.exact_identity},
+      {"local", local->handle()},
+      {"chart", local->source_chart()},
+      {"source_operator_identity", local->source_operator_identity()},
+      {"checkpoint_identity", local->checkpoint_identity()},
+      {"coefficient_domain", local->scalar_domain()},
+      {"prescriptions", encode_plan_prescriptions(
+           final_chart.prescriptions)}};
+  return resolved;
+}
+
+json::object planned_endpoint_provenance(
+    const std::string& checkpoint_identity,
+    const ResolvedPlannedEndpointBinding& binding,
+    const std::string& cancellation_mode,
+    const json::object& analytic_metadata) {
+  return json::object{
+      {"schema",
+       "diffexp2-retained-native-plan-bound-endpoint-sector-limit-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"source", binding.source},
+      {"approach_direction", binding.approach_direction},
+      {"rim", optional_plan_rim_json(binding.rim)},
+      {"cancellation", json::object{{"mode", cancellation_mode}}},
+      {"analytic_metadata", analytic_metadata}};
+}
+
+std::shared_ptr<StoredEndpointResult> build_planned_endpoint_limit(
+    const std::string& endpoint_handle, const json::object& request,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  const auto expected_plan_checkpoint = required_string(
+      request, "tile_plan_checkpoint_identity");
+  const auto expected_source_checkpoint = required_string(
+      request, "source_checkpoint_identity");
+  if (checkpoint_identity.empty() || expected_plan_checkpoint.empty() ||
+      expected_source_checkpoint.empty())
+    throw std::invalid_argument(
+        "plan-bound endpoint checkpoint identities must be nonempty");
+  if (expected_plan_checkpoint != plan->checkpoint_identity())
+    throw std::invalid_argument(
+        "plan-bound endpoint tile-plan checkpoint identity is stale or mismatched");
+  if (expected_source_checkpoint != local->checkpoint_identity())
+    throw std::invalid_argument(
+        "plan-bound endpoint source checkpoint identity is stale or mismatched");
+  const auto arm_name = required_string(request, "arm");
+  const auto binding = resolve_planned_endpoint_binding(
+      plan, arm_name, local);
+  const auto cancellation = parse_endpoint_cancellation_policy(request);
+  auto analytic_metadata = local->exact_analytic_metadata();
+  const auto provenance = planned_endpoint_provenance(
+      checkpoint_identity, binding, cancellation.cancellation_mode,
+      analytic_metadata);
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+
+  EndpointLimitOptions options;
+  options.approach_direction = binding.approach_direction;
+  options.imaginary_sign = binding.rim;
+  options.allow_certified_numeric_cancellation =
+      cancellation.allow_certified_numeric_cancellation;
+  const auto started = std::chrono::steady_clock::now();
+  auto result = local->endpoint_limit(options);
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredEndpointResult>(
+      endpoint_handle, checkpoint_identity, provenance_identity,
+      local->handle(), local->source_chart(),
+      local->source_operator_identity(), expected_source_checkpoint,
+      local->scalar_domain(), binding.approach_direction, std::nullopt,
+      cancellation.cancellation_mode, std::move(analytic_metadata),
+      std::move(result), elapsed, binding.source, binding.rim,
+      plan, local);
+}
+
 json::object planned_match_handoff_record(
     const std::shared_ptr<StoredTilePlan>& plan,
     const std::string& arm_name, std::size_t match_index,
@@ -11674,6 +11881,157 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
   return plan;
 }
 
+std::shared_ptr<StoredEndpointResult>
+restore_checkpoint_planned_endpoint_record(
+    const json::value& raw, const std::string& expected_domain,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto& object = as_object(
+      raw, "checkpoint retained plan-bound endpoint");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "source", "approach_direction", "derived_rim",
+       "cancellation_mode", "analytic_metadata", "result", "elapsed_ms",
+       "runtime_stats"},
+      "checkpoint retained plan-bound endpoint");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-plan-bound-endpoint-result-v1")
+    throw std::invalid_argument(
+        "unsupported retained plan-bound endpoint checkpoint schema");
+  if (!plan || !local)
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint lost a strongly owned plan or local");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint contains an empty identity");
+  if (std::string(local->scalar_domain()) != expected_domain ||
+      (expected_domain != "rational" && expected_domain != "acb"))
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint coefficient domain differs from its session/local");
+
+  const auto& source = as_object(
+      object.at("source"), "checkpoint plan-bound endpoint source");
+  const auto arm_name = required_string(source, "arm");
+  const auto binding = resolve_planned_endpoint_binding(
+      plan, arm_name, local);
+  if (source != binding.source)
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint source differs from its exact plan/local owners");
+  const auto approach_direction = as_i32(
+      object.at("approach_direction"),
+      "checkpoint plan-bound endpoint approach direction");
+  if (approach_direction != binding.approach_direction)
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint approach side differs from its exact arm/chart orientation");
+  std::optional<std::int32_t> derived_rim;
+  if (!object.at("derived_rim").is_null()) {
+    derived_rim = as_i32(object.at("derived_rim"),
+                         "checkpoint plan-bound endpoint rim");
+    if (*derived_rim != -1 && *derived_rim != 1)
+      throw std::invalid_argument(
+          "checkpoint plan-bound endpoint rim must be +1 or -1");
+  }
+  if (derived_rim != binding.rim)
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint rim differs from its final-chart prescriptions");
+  const auto cancellation_mode = required_string(
+      object, "cancellation_mode");
+  if (cancellation_mode != "exact-coefficient-field" &&
+      cancellation_mode != "exact-or-acb-singleton")
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint cancellation mode is unsupported");
+  auto analytic_metadata = as_object(
+      object.at("analytic_metadata"),
+      "checkpoint plan-bound endpoint analytic metadata");
+  validate_checkpoint_exact_analytic_metadata(analytic_metadata);
+  if (analytic_metadata != local->exact_analytic_metadata())
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint analytic metadata differs from its local owner");
+  const auto provenance = planned_endpoint_provenance(
+      checkpoint_identity, binding, cancellation_mode, analytic_metadata);
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint provenance identity is inconsistent");
+
+  const auto& raw_result = as_object(
+      object.at("result"), "checkpoint plan-bound endpoint result");
+  require_exact_keys(
+      raw_result,
+      {"values", "dropped_regulated_sectors",
+       "cancelled_divergent_coefficients", "imaginary_sign"},
+      "checkpoint plan-bound endpoint result");
+  EndpointLimitResult result;
+  for (const auto& raw_value : as_array(
+           raw_result.at("values"),
+           "checkpoint plan-bound endpoint values"))
+    result.values.push_back(parse_checkpoint_epsilon_frame<ComplexBall>(
+        raw_value, "checkpoint plan-bound endpoint value"));
+  if (result.values.empty())
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint result has no components");
+  const auto checked_size = [](const json::value& value,
+                               const char* label) {
+    const auto parsed = as_u64(value, label);
+    if (parsed > std::numeric_limits<std::size_t>::max())
+      throw std::invalid_argument(std::string(label) + " exceeds size_t");
+    return static_cast<std::size_t>(parsed);
+  };
+  result.dropped_regulated_sectors = checked_size(
+      raw_result.at("dropped_regulated_sectors"),
+      "checkpoint plan-bound dropped regulated sectors");
+  result.cancelled_divergent_coefficients = checked_size(
+      raw_result.at("cancelled_divergent_coefficients"),
+      "checkpoint plan-bound cancelled divergent coefficients");
+  std::optional<std::int32_t> result_rim;
+  if (!raw_result.at("imaginary_sign").is_null()) {
+    result_rim = as_i32(raw_result.at("imaginary_sign"),
+                        "checkpoint plan-bound endpoint result rim");
+    if (*result_rim != -1 && *result_rim != 1)
+      throw std::invalid_argument(
+          "checkpoint plan-bound endpoint result rim must be +1 or -1");
+  }
+  if (result_rim != binding.rim)
+    throw std::invalid_argument(
+        "checkpoint plan-bound endpoint result rim differs from its derived branch");
+  // The endpoint kernel's limit classification is branch independent.  It
+  // currently carries an internal integer diagnostic, while the plan-bound
+  // public/checkpoint contract deliberately keeps an unprescribed rim null.
+  result.imaginary_sign = binding.rim.value_or(1);
+  (void)endpoint_value_window(result);
+
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"),
+      "checkpoint plan-bound endpoint elapsed time");
+  const auto& stats = as_object(
+      object.at("runtime_stats"),
+      "checkpoint plan-bound endpoint runtime stats");
+  require_exact_keys(stats, {"exports", "export_ms"},
+                     "checkpoint plan-bound endpoint runtime stats");
+  const auto exports = as_u64(
+      stats.at("exports"), "checkpoint plan-bound endpoint exports");
+  const auto export_ms = checkpoint_nonnegative_double(
+      stats.at("export_ms"),
+      "checkpoint plan-bound endpoint export time");
+  auto endpoint = std::make_shared<StoredEndpointResult>(
+      handle, checkpoint_identity, provenance_identity,
+      local->handle(), local->source_chart(),
+      local->source_operator_identity(), local->checkpoint_identity(),
+      local->scalar_domain(), approach_direction, std::nullopt,
+      cancellation_mode, std::move(analytic_metadata), std::move(result),
+      elapsed_ms, binding.source, binding.rim,
+      plan, local);
+  endpoint->restore_runtime_stats(exports, export_ms);
+  return endpoint;
+}
+
 std::size_t checkpoint_size_t(const json::value& raw, const char* label);
 
 std::shared_ptr<StoredPlannedMatchHop>
@@ -12639,6 +12997,15 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& [ignored, plan] : session.tile_plans) add_tile(plan);
   for (const auto& [ignored, local] : session.locals) add_local(local);
   for (const auto& [ignored, match] : session.matches) add_match(match);
+  for (const auto& [ignored, endpoint] : session.endpoints) {
+    if (!endpoint->plan_bound()) continue;
+    const auto& plan = endpoint->plan_owner();
+    if (!plan || !endpoint->local_owner())
+      throw std::logic_error(
+          "checkpoint plan-bound endpoint lost a strong plan/local owner");
+    add_tile(plan);
+    add_local(endpoint->local_owner());
+  }
   for (const auto& [ignored, line] : session.line_results) {
     add_tile(line->plan_owner());
     for (const auto& local : line->local_owners()) add_local(local);
@@ -13630,20 +13997,40 @@ json::object restore_checkpoint(const std::string& path,
           throw std::invalid_argument(
               "checkpoint endpoint handles are not in strict creation order");
         largest_endpoint = id;
-        auto endpoint = restore_checkpoint_endpoint_record(item,
-                                                            restored->domain);
         const auto& source = as_object(item.at("source"),
                                        "checkpoint endpoint source");
-        const auto found = restored->locals.find(required_string(source, "local"));
-        if (found != restored->locals.end() &&
-            (found->second->source_chart() != required_string(source, "chart") ||
-             found->second->source_operator_identity() !=
-                 required_string(source, "source_operator_identity") ||
-             found->second->checkpoint_identity() !=
-                 required_string(source, "checkpoint_identity") ||
-             found->second->exact_analytic_metadata() != item.at("analytic_metadata")))
-          throw std::invalid_argument(
-              "checkpoint endpoint provenance disagrees with its restored source local");
+        std::shared_ptr<StoredEndpointResult> endpoint;
+        const auto endpoint_schema = required_string(item, "schema");
+        if (endpoint_schema ==
+            "diffexp2-retained-plan-bound-endpoint-result-v1") {
+          const auto plan_found = restored->tile_plans.find(
+              required_string(source, "tile_plan"));
+          const auto local_found = restored->locals.find(
+              required_string(source, "local"));
+          if (plan_found == restored->tile_plans.end() ||
+              local_found == restored->locals.end())
+            throw std::invalid_argument(
+                "checkpoint plan-bound endpoint lost a strongly owned plan or local");
+          endpoint = restore_checkpoint_planned_endpoint_record(
+              item, restored->domain, plan_found->second,
+              local_found->second);
+        } else {
+          endpoint = restore_checkpoint_endpoint_record(
+              item, restored->domain);
+          const auto found = restored->locals.find(
+              required_string(source, "local"));
+          if (found != restored->locals.end() &&
+              (found->second->source_chart() !=
+                   required_string(source, "chart") ||
+               found->second->source_operator_identity() !=
+                   required_string(source, "source_operator_identity") ||
+               found->second->checkpoint_identity() !=
+                   required_string(source, "checkpoint_identity") ||
+               found->second->exact_analytic_metadata() !=
+                   item.at("analytic_metadata")))
+            throw std::invalid_argument(
+                "checkpoint endpoint provenance disagrees with its restored source local");
+        }
         if (endpoint->checkpoint_record() != raw_item ||
             !restored->endpoints.emplace(handle, endpoint).second)
           throw std::invalid_argument(
@@ -14011,6 +14398,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedEndpointLimitCapability},
+                        {"planned_endpoint_limit_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedEndpointLimitCapability},
                         {"tile_plan_capability", kRetainedTilePlanCapability},
                         {"planned_match_hop_capability",
                          domain == "symbolic"
@@ -14938,6 +15329,79 @@ json::object run_session_command(const json::object& root) {
         {"combined_line_result", std::move(combined_summary)},
         {"elapsed_ms", std::chrono::duration<double, std::milli>(
              std::chrono::steady_clock::now() - operation_started).count()}};
+  }
+
+  if (operation == "tile.endpoint_limit") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "tile_plan",
+         "tile_plan_checkpoint_identity", "arm", "local",
+         "source_checkpoint_identity", "checkpoint_identity",
+         "cancellation"},
+        "native tile.endpoint_limit request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native plan-bound endpoint evaluation requires rational or Acb coefficients");
+    const auto plan_handle = required_string(root, "tile_plan");
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredTilePlan> plan;
+    std::shared_ptr<StoredLocalBase> local;
+    std::string endpoint_handle;
+    {
+      // Admission acquires strong ownership of both immutable dependencies.
+      // Releasing either public token after this point cannot invalidate the
+      // retained endpoint result or its checkpoint closure.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto plan_found = session->tile_plans.find(plan_handle);
+      if (plan_found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or released tile plan for plan-bound endpoint limit");
+      const auto local_found = session->locals.find(local_handle);
+      if (local_found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released final local for plan-bound endpoint limit");
+      if (session->endpoints.size() + session->pending_endpoint_limits >=
+          session->endpoint_capacity)
+        throw std::invalid_argument(
+            "persistent endpoint result capacity is exhausted");
+      plan = plan_found->second;
+      local = local_found->second;
+      endpoint_handle = "e:" +
+          std::to_string(session->next_endpoint++);
+      ++session->pending_endpoint_limits;
+    }
+
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    try {
+      endpoint = build_planned_endpoint_limit(
+          endpoint_handle, root, plan, local);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits == 0)
+        throw std::logic_error(
+            "native plan-bound endpoint reservation accounting underflow");
+      --session->pending_endpoint_limits;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits == 0)
+        throw std::logic_error(
+            "native plan-bound endpoint reservation accounting underflow");
+      --session->pending_endpoint_limits;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during plan-bound endpoint limit");
+      session->endpoints.emplace(endpoint_handle, endpoint);
+      ++session->total_endpoint_limits;
+      session->total_endpoint_limit_ms += endpoint->elapsed_ms();
+    }
+    auto response = endpoint->summary();
+    response["status"] = "ok";
+    response["session"] = session->handle;
+    return response;
   }
 
   if (operation == "integration.line") {
@@ -16561,6 +17025,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedEndpointLimitCapability},
+                        {"planned_endpoint_limit_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedEndpointLimitCapability},
                         {"tile_plan_capability", kRetainedTilePlanCapability},
                         {"planned_match_hop_capability",
                          session->domain == "symbolic"
@@ -16803,6 +17271,10 @@ std::string backend_info_json() {
                                       {"persistent_endpoint_limits", true},
                                       {"persistent_endpoint_limit_capability",
                                        kRetainedEndpointLimitCapability},
+                                      {"persistent_plan_bound_endpoint_limits",
+                                       true},
+                                      {"persistent_plan_bound_endpoint_limit_capability",
+                                       kRetainedPlannedEndpointLimitCapability},
                                       {"persistent_symbolic_endpoint_limits",
                                        false},
                                       {"persistent_exact_tile_plans", true},

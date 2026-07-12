@@ -219,14 +219,19 @@ transport and arm batching does not imply that homogeneous prewarming runs.
 The runner prints machine-readable records:
 
 ```text
-STEPWISE {"Example":...,"Level":...,"Master":...,"RawMinPower":...,"Coefficients":...}
-FINAL {"Example":...,"Finite":...,"RawMinPower":...}
+STEPWISE {"Example":...,"Level":...,"Master":...,"RawMinPower":...,"Coefficients":...,"Certification":...}
+FINAL {"Example":...,"Finite":...,"RawMinPower":...,"Certification":...}
 ```
 
 Use the `STEPWISE` rows for Laurent coefficients and intermediate-level
 audits.  Historical logs used `"Finite"` inconsistently when a result had
 poles; [Results](Results.md) reports coefficients explicitly and does not rely
-on that label alone.
+on that label alone.  Native integral rows carry the exported `Scope`,
+`ErrorGuarantee`, and `ErrorEnvelope`; a `stored_truncation` scope is reported
+honestly with no guarantee and is not a run failure.  Endpoint limits, direct
+handoffs, proved-zero observables, and the initial deepest boundary instead
+carry an explicit `"Applicability":"not-applicable"` record.  The terminal
+`FINAL` row repeats the certification of its corresponding level-zero master.
 
 ## Adding a topology today
 

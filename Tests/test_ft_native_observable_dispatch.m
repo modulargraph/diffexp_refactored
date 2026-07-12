@@ -120,6 +120,24 @@ assert["Cpp handoff retains the common certified raw edge and records its width"
 
 newCounts[] := <|"segment" -> 0, "prepare" -> 0, "run" -> 0,
   "export" -> 0, "releaseBatch" -> 0, "releaseAtlas" -> 0|>;
+fixtureCertifiedEnvelope = <|"guarantee" -> "certified",
+  "absolute_upper_approx" -> {1.*^-30},
+  "bound_encoding" -> "approximate-double",
+  "provenance" -> "definitions-only-fixture"|>;
+fixtureExportResults[results_List] := MapIndexed[Function[{observable, pos},
+  Module[{exported = Append[observable,
+      "Value" -> DiffExp2`EpsSeries`ESZero[
+        observable["Epsilon", "RequiredCompleteMax"]]]},
+    Switch[observable["Operation"],
+      "integrate",
+        If[First[pos] === 1,
+          Join[exported, <|
+            "Scope" -> "full_local_with_certified_tail",
+            "ErrorGuarantee" -> "certified",
+            "ErrorEnvelope" -> fixtureCertifiedEnvelope|>],
+          Join[exported, <|"Scope" -> "stored_truncation",
+            "ErrorGuarantee" -> "none", "ErrorEnvelope" -> None|>]],
+      _, exported]]], results];
 counts = newCounts[];
 capturedPrepare = None;
 capturedObservables = None;
@@ -145,10 +163,8 @@ mixed = Block[{
       counts["export"]++;
       Join[nativeBatch, <|"CompatibilityExports" ->
           Length[nativeBatch["Results"]],
-        "ExportedResults" -> Map[
-          Append[#, "Value" -> DiffExp2`EpsSeries`ESZero[
-            #["Epsilon", "RequiredCompleteMax"]]] &,
-          nativeBatch["Results"]]|>]],
+        "ExportedResults" ->
+          fixtureExportResults[nativeBatch["Results"]]|>]],
     ft2NativeReleaseBatch = Function[nativeBatch,
       counts["releaseBatch"]++;
       <|"Released" -> 1, "Failures" -> {}|>],
@@ -201,6 +217,26 @@ assert["direct and proven-zero results merge in original master order",
     DiffExp2`EpsSeries`ESCompleteMax[mixed["Values"][[5]]] === 8 &&
     DiffExp2`EpsSeries`ESMinPower[mixed["Values"][[1]]] === 8,
   DiffExp2`EpsSeries`ESWindow /@ mixed["Values"]];
+assert["dispatch preserves per-master certification and explicit non-applicability",
+  Length[mixed["Certifications"]] === 6 &&
+    mixed["Certifications"][[1]] === <|
+      "Applicability" -> "applicable", "Operation" -> "integrate",
+      "Scope" -> "full_local_with_certified_tail",
+      "ErrorGuarantee" -> "certified",
+      "ErrorEnvelope" -> fixtureCertifiedEnvelope|> &&
+    mixed["Certifications"][[2]] ===
+      ft2NotApplicableCertification["limitLower", "endpoint-limit"] &&
+    mixed["Certifications"][[3]] ===
+      ft2NotApplicableCertification["limitUpper", "endpoint-limit"] &&
+    mixed["Certifications"][[4]] ===
+      ft2NotApplicableCertification["direct", "direct"] &&
+    mixed["Certifications"][[5]] ===
+      ft2NotApplicableCertification["integrate", "proven-zero"] &&
+    mixed["Certifications"][[6]] === <|
+      "Applicability" -> "applicable", "Operation" -> "integrate",
+      "Scope" -> "stored_truncation", "ErrorGuarantee" -> "none",
+      "ErrorEnvelope" -> Null|>,
+  mixed["Certifications"]];
 assert["checkpoint audit record binds requests, coefficients, prescriptions, atlas, and payload",
   ft2NativeCheckpointRecordQ[mixed["CheckpointRecord"]] &&
     mixed["CheckpointRecord", "AtlasPlanIdentity"] ===
@@ -241,10 +277,8 @@ checkpointed = Block[{
       AppendTo[checkpointEvents, "export"];
       Join[nativeBatch, <|"CompatibilityExports" ->
           Length[nativeBatch["Results"]],
-        "ExportedResults" -> Map[
-          Append[#, "Value" -> DiffExp2`EpsSeries`ESZero[
-            #["Epsilon", "RequiredCompleteMax"]]] &,
-          nativeBatch["Results"]]|>]],
+        "ExportedResults" ->
+          fixtureExportResults[nativeBatch["Results"]]|>]],
     ft2NativeReleaseBatch = Function[nativeBatch,
       AppendTo[checkpointEvents, "release"];
       <|"Released" -> 1, "Failures" -> {}|>],
@@ -283,10 +317,8 @@ restoredDispatch = Block[{
       restoreCounts["export"]++;
       Join[nativeBatch, <|"CompatibilityExports" ->
           Length[nativeBatch["Results"]],
-        "ExportedResults" -> Map[
-          Append[#, "Value" -> DiffExp2`EpsSeries`ESZero[
-            #["Epsilon", "RequiredCompleteMax"]]] &,
-          nativeBatch["Results"]]|>]],
+        "ExportedResults" ->
+          fixtureExportResults[nativeBatch["Results"]]|>]],
     ft2NativeReleaseBatch = Function[nativeBatch,
       <|"Released" -> 1, "Failures" -> {}|>],
     ft2NativeReleaseAtlas = Function[atlas,
@@ -307,6 +339,10 @@ assert["resume dispatch restores and exports without replanning or remarching",
     And @@ MapThread[DiffExp2`EpsSeries`ESSameQ,
       {restoredDispatch["Values"], checkpointed["Values"]}],
   {restoreCounts, restoredDispatch}];
+assert["fresh and restored dispatch preserve identical certification records",
+  restoredDispatch["Certifications"] === checkpointed["Certifications"] &&
+    restoredDispatch["Certifications"] === mixed["Certifications"],
+  {restoredDispatch["Certifications"], checkpointed["Certifications"]}];
 
 directRequests = {
   request[1, "direct", 0, 0, {14}],
@@ -349,6 +385,9 @@ assert["direct-only and proven-zero work skips atlas, march, export, and release
     DiffExp2`EpsSeries`ESCoefficient[
       directOnly["Values"][[1]], 0] === 5 &&
     directLedger["IntegrationHalo"] === 0 &&
+    directOnly["Certifications"] === {
+      ft2NotApplicableCertification["direct", "direct"],
+      ft2NotApplicableCertification["integrate", "proven-zero"]} &&
     ft2NativeCheckpointRecordQ[directOnly["CheckpointRecord"]],
   {counts, directOnly}];
 
@@ -381,6 +420,50 @@ assert["malformed published batch falls back to releasing its atlas owner",
     counts === <|"segment" -> 2, "prepare" -> 1, "run" -> 1,
       "export" -> 0, "releaseBatch" -> 0, "releaseAtlas" -> 1|>,
   {counts, malformedBatch}];
+
+printedRows = printRows["certification-fixture", 0, {{1, 1}},
+  {mixed["Values"][[1]]}, {0}, {mixed["Certifications"][[1]]}];
+certifiedStepRow = ft2StepwiseRow["certification-fixture", 0, {1, 1},
+  mixed["Values"][[1]], 0, mixed["Certifications"][[1]]];
+storedStepRow = ft2StepwiseRow["certification-fixture", 0, {2, 0},
+  mixed["Values"][[6]], 0, mixed["Certifications"][[6]]];
+directStepRow = ft2StepwiseRow["certification-fixture", 0, {0, 0},
+  mixed["Values"][[4]], 0, mixed["Certifications"][[4]]];
+certifiedFinalRow = ft2FinalRow["certification-fixture",
+  mixed["Values"][[1]], mixed["Certifications"][[1]]];
+syntheticOutput = StringRiffle[{
+  ft2OutputLine["STEPWISE ", certifiedStepRow],
+  ft2OutputLine["STEPWISE ", storedStepRow],
+  ft2OutputLine["STEPWISE ", directStepRow],
+  ft2OutputLine["FINAL ", certifiedFinalRow]}, "\n"];
+parsedPipeline = FeynmanTrick`DiffExp2Pipeline`Private`pipelineResult[
+  <|"Schema" -> "definitions-only-plan"|>,
+  <|"StandardOutput" -> syntheticOutput, "StandardError" -> "",
+    "ExitCode" -> 0|>];
+assert["STEPWISE printer retains one compact certification per master",
+  ListQ[printedRows] && Length[printedRows] === 1 &&
+    printedRows[[1, "Certification"]] === mixed["Certifications"][[1]] &&
+    StringStartsQ[ft2OutputLine["STEPWISE ", printedRows[[1]]],
+      "STEPWISE {"] &&
+    FailureQ[printRows["bad-length", 0, {{1}},
+      {mixed["Values"][[1]]}, {0}, {}]],
+  printedRows];
+assert["facade parser preserves certified stored and not-applicable records",
+  AssociationQ[parsedPipeline] && parsedPipeline["Status"] === "Succeeded" &&
+    Length[parsedPipeline["Stepwise"]] === 3 &&
+    parsedPipeline["Stepwise"][[1, "Certification", "Scope"]] ===
+      "full_local_with_certified_tail" &&
+    parsedPipeline["Stepwise"][[1, "Certification", "ErrorEnvelope",
+      "guarantee"]] === "certified" &&
+    parsedPipeline["Stepwise"][[2, "Certification"]] === <|
+      "Applicability" -> "applicable", "Operation" -> "integrate",
+      "Scope" -> "stored_truncation", "ErrorGuarantee" -> "none",
+      "ErrorEnvelope" -> Null|> &&
+    parsedPipeline["Stepwise"][[3, "Certification"]] ===
+      ft2NotApplicableCertification["direct", "direct"] &&
+    parsedPipeline["Final", "Certification"] ===
+      parsedPipeline["Stepwise"][[1, "Certification"]],
+  parsedPipeline];
 
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> None];
 SetEnvironment["DE2_RECURRENCE_BACKEND" -> None];

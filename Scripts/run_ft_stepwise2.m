@@ -1055,16 +1055,117 @@ cleanNumber[value_] := Module[{n = N[value, 50], re, im},
   re = Re[n]; im = Im[n];
   If[Abs[im] < 10^-30, re, <|"Re" -> re, "Im" -> im|>]];
 
-printRows[example_, level_, masters_, rawES_List, prefactors_] := Module[{},
-  Do[Module[{r = rawES[[i]], rowMin},
-    rowMin = esMn[r];
-    Print["STEPWISE ", ExportString[<|
-      "Example" -> example, "Level" -> level, "Master" -> masters[[i]],
-      "EpsPrefactor" -> prefactors[[i]], "RawMinPower" -> rowMin,
-      "Coefficients" -> Table[{p, cleanNumber[esC[r, p]]},
-        {p, rowMin, Min[0, esCMx[r]]}]|> /. x_Rational :> N[x, 50],
-      "RawJSON", "Compact" -> True]]],
-    {i, Length[masters]}]];
+ft2NotApplicableCertification[operation_String, reason_String] := <|
+  "Applicability" -> "not-applicable", "Operation" -> operation,
+  "Reason" -> reason|>;
+
+ft2OutputCertificationQ[record_] := AssociationQ[record] && Switch[
+  Lookup[record, "Applicability", None],
+  "applicable",
+    Sort[Keys[record]] === Sort[{"Applicability", "Operation", "Scope",
+        "ErrorGuarantee", "ErrorEnvelope"}] &&
+      Lookup[record, "Operation", None] === "integrate" &&
+      (Which[
+        Lookup[record, "Scope", None] ===
+            "full_local_with_certified_tail",
+          Lookup[record, "ErrorGuarantee", None] === "certified" &&
+            AssociationQ[Lookup[record, "ErrorEnvelope", None]] &&
+            Lookup[record["ErrorEnvelope"], "guarantee", None] ===
+              "certified",
+        Lookup[record, "Scope", None] === "stored_truncation",
+          Lookup[record, "ErrorGuarantee", None] === "none" &&
+            Lookup[record, "ErrorEnvelope", None] === Null,
+        True, False]),
+  "not-applicable",
+    Sort[Keys[record]] ===
+      Sort[{"Applicability", "Operation", "Reason"}] &&
+      StringQ[Lookup[record, "Operation", None]] &&
+      StringQ[Lookup[record, "Reason", None]],
+  _, False];
+
+ft2NativeIntegrationCertification[exportedResult_] := Module[
+  {scope, guarantee, envelope, record},
+  If[!AssociationQ[exportedResult] ||
+      !And @@ (KeyExistsQ[exportedResult, #] & /@
+        {"Scope", "ErrorGuarantee", "ErrorEnvelope"}),
+    Return[ft2NativeFailure[
+      "native integral export omitted its certification record"], Module]];
+  scope = exportedResult["Scope"];
+  guarantee = exportedResult["ErrorGuarantee"];
+  envelope = exportedResult["ErrorEnvelope"];
+  (* None is the native in-kernel sentinel.  JSON has no representation for
+     an arbitrary Wolfram symbol, so expose the same absence as JSON null. *)
+  If[envelope === None, envelope = Null];
+  record = <|"Applicability" -> "applicable",
+    "Operation" -> "integrate", "Scope" -> scope,
+    "ErrorGuarantee" -> guarantee, "ErrorEnvelope" -> envelope|>;
+  If[ft2OutputCertificationQ[record], record,
+    ft2NativeFailure[
+      "native integral export returned malformed certification metadata",
+      <|"Certification" -> record|>]]];
+
+ft2CertificationForEntry[entry_Association, exportedResult_] := Which[
+  TrueQ[Lookup[entry, "ProvenZero", False]],
+    ft2NotApplicableCertification[Lookup[entry, "Case", "unknown"],
+      "proven-zero"],
+  Lookup[entry, "Case", None] === "integrate",
+    ft2NativeIntegrationCertification[exportedResult],
+  MemberQ[{"limitLower", "limitUpper"}, Lookup[entry, "Case", None]],
+    ft2NotApplicableCertification[entry["Case"], "endpoint-limit"],
+  Lookup[entry, "Case", None] === "direct",
+    ft2NotApplicableCertification["direct", "direct"],
+  True,
+    ft2NativeFailure["cannot classify native output certification",
+      <|"Entry" -> entry|>]];
+
+ft2StepwiseRow[example_, level_, master_, raw_, prefactor_,
+    certification_] := Module[{rowMin},
+  If[!ft2OutputCertificationQ[certification],
+    Return[Failure["FeynmanTrickOutputCertification", <|
+      "Detail" -> "STEPWISE certification is malformed",
+      "Certification" -> certification|>], Module]];
+  rowMin = esMn[raw];
+  <|"Example" -> example, "Level" -> level, "Master" -> master,
+    "EpsPrefactor" -> prefactor, "RawMinPower" -> rowMin,
+    "Coefficients" -> Table[{p, cleanNumber[esC[raw, p]]},
+      {p, rowMin, Min[0, esCMx[raw]]}],
+    "Certification" -> certification|>];
+
+ft2FinalRow[example_, raw_, certification_] :=
+  If[!ft2OutputCertificationQ[certification],
+    Failure["FeynmanTrickOutputCertification", <|
+      "Detail" -> "FINAL certification is malformed",
+      "Certification" -> certification|>],
+    <|"Example" -> example,
+      "Finite" -> cleanNumber[esC[raw, 0]],
+      "RawMinPower" -> esMn[raw],
+      "Certification" -> certification|>];
+
+ft2OutputLine[prefix_String, row_Association] := Module[{json},
+  json = Quiet[Check[ExportString[
+    row /. x_Rational :> N[x, 50], "RawJSON", "Compact" -> True],
+    $Failed]];
+  If[StringQ[json], prefix <> json,
+    Failure["FeynmanTrickOutputCertification", <|
+      "Detail" -> "output row is not JSON serializable", "Row" -> row|>]]];
+
+printRows[example_, level_, masters_, rawES_List, prefactors_,
+    certifications_List] := Module[{rows, lines},
+  If[Length[masters] =!= Length[rawES] ||
+      Length[masters] =!= Length[prefactors] ||
+      Length[masters] =!= Length[certifications],
+    Return[Failure["FeynmanTrickOutputCertification", <|
+      "Detail" -> "STEPWISE row inputs have inconsistent lengths"|>],
+      Module]];
+  rows = MapThread[ft2StepwiseRow,
+    {ConstantArray[example, Length[masters]],
+      ConstantArray[level, Length[masters]], masters, rawES, prefactors,
+      certifications}];
+  If[AnyTrue[rows, FailureQ], Return[First[Select[rows, FailureQ]], Module]];
+  lines = ft2OutputLine["STEPWISE ", #] & /@ rows;
+  If[AnyTrue[lines, FailureQ], Return[First[Select[lines, FailureQ]], Module]];
+  Scan[Print, lines];
+  rows];
 
 (* combined endpoint limit: lim Sum_j c_j(x) f_j(x) at the chart center.
    Assemble the scalar combination first: testing each master separately
@@ -1784,7 +1885,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
    directEntries, nonDirectEntries, nativeEntries, directValues = <||>,
    nativeValues = <||>, zeroValues = <||>, transportSystem, lowerPlan,
    upperPlan, paddedBoundary, observables, atlas = None, batch = None,
-   exported = None, exportedResults, exportedValues,
+   exported = None, exportedResults = {}, exportedValues,
    cleanupResult = None, result,
    dispatchTag = Unique["ft2NativeDispatch"], values, releaseOKQ,
    directRules, masterIndices, batchKeys, batchPayloadKeys,
@@ -1795,7 +1896,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
    checkpointContractIdentity = None, checkpointIdentity = None,
    nativeCheckpointState = None, nativeResumeRecord = None,
    restoredNativeQ = False, resumeCore, checkpointAuditRecord = None,
-   publishResult = None, makeCheckpointAuditRecord, nativeBatchMatchesQ},
+   publishResult = None, makeCheckpointAuditRecord, nativeBatchMatchesQ,
+   nativeResultByMaster = <||>, certifications},
   masterIndices = Lookup[entries, "MasterIndex", {}];
   batchKeys = DeleteDuplicates[Lookup[entries, "BatchKey", {}]];
   batchPayloadKeys =
@@ -2089,6 +2191,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     nativeValues = AssociationThread[
       Lookup[nativeEntries, "MasterIndex"],
       exportedValues]];
+    nativeResultByMaster = AssociationThread[
+      Lookup[nativeEntries, "MasterIndex"], exportedResults];
   values = Map[Function[masterIndex,
       Lookup[Join[directValues, zeroValues, nativeValues], masterIndex,
         Missing["MissingBoundaryValue", masterIndex]]],
@@ -2097,9 +2201,15 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     Return[ft2NativeFailure[
       "native/direct result merge did not cover every lower master",
       <|"Missing" -> Cases[values, _Missing]|>], Module]];
+  certifications = Map[Function[entry,
+      ft2CertificationForEntry[entry,
+        Lookup[nativeResultByMaster, entry["MasterIndex"], None]]],
+    entries];
+  If[AnyTrue[certifications, FailureQ],
+    Return[First[Select[certifications, FailureQ]], Module]];
   If[checkpointAuditRecord === None,
     checkpointAuditRecord = makeCheckpointAuditRecord[]];
-  <|"Values" -> values,
+  <|"Values" -> values, "Certifications" -> certifications,
     "NativeBatchCalls" -> If[nativeEntries === {} || restoredNativeQ, 0, 1],
     "NativeMarches" -> If[AssociationQ[exported],
       Lookup[exported, "NativeMarches", Missing["NotReported"]], 0],
@@ -2112,7 +2222,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
 runExample[name_String] := Module[
   {topology, sequence, prepContract, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
-   resumeCheckpoint = None, startLevel, finalRaw = None, ftEps, dimVar,
+   resumeCheckpoint = None, startLevel, finalRaw = None,
+   finalCertification = None, ftEps, dimVar,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
    nativeEpsilonExecution = None, initialDeepPrefactors,
    deepRelativeGauge, deepGaugeOffset, deepBoundaryWindow,
@@ -2242,11 +2353,15 @@ runExample[name_String] := Module[
        of exact-symbolic (Log/Gamma giants grind the Laurent-field algebra) *)
     currentBCs = N[deepBoundary["BoundaryValues"], inputPrecision];
     currentPrefactors = deepBoundary["EpsPrefactors"];
-    printRows[name, nLevels, ftData["Levels"][nLevels]["Masters"],
+    If[FailureQ[printRows[name, nLevels,
+      ftData["Levels"][nLevels]["Masters"],
       Table[DiffExp2`EpsSeries`ESShift[
         DiffExp2`EpsSeries`ESNew[0, currentBCs[[i]]], -currentPrefactors[[i]]],
         {i, Length[currentBCs]}],
-      currentPrefactors]];
+      currentPrefactors,
+      ConstantArray[ft2NotApplicableCertification[
+        "deepestBoundary", "initial-boundary"], Length[currentBCs]]]],
+      Return[$Failed]]];
 
   Module[{abortRes},
   abortRes = Catch[
@@ -2266,7 +2381,7 @@ runExample[name_String] := Module[
      esCMxLevel, configResult, deltaPrescriptions, plannedLevel = None,
      runtimePlanCheck, nativeTransportContract = None,
      nativeCheckpointSpec = None, nativeStateFile, nativeSidecarFile,
-     nativeConfigurationRecord},
+     nativeConfigurationRecord, rowCertifications},
     var = levelData["FeynmanParameter"];
     If[recurrenceBackend === "Cpp",
       plannedLevel = nativeEpsilonPlan["Levels"][level]];
@@ -2317,6 +2432,17 @@ runExample[name_String] := Module[
       Print["FIRE FAIL"]; Return[$Failed, Module]];
     requests = levelIBPBatch["BoundaryRequests"];
     reductions = levelIBPBatch["Reductions"];
+    rowCertifications = Map[Function[request,
+      Switch[Lookup[request, "Case", None],
+        "integrate", ft2NotApplicableCertification["integrate",
+          "native-certification-unavailable"],
+        "limitLower", ft2NotApplicableCertification["limitLower",
+          "endpoint-limit"],
+        "limitUpper", ft2NotApplicableCertification["limitUpper",
+          "endpoint-limit"],
+        "direct", ft2NotApplicableCertification["direct", "direct"],
+        _, ft2NotApplicableCertification["unknown", "unclassified"]]],
+      requests];
     rawExtraFacs =
       FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
         ftData, level, levelIBPBatch];
@@ -2473,6 +2599,7 @@ runExample[name_String] := Module[
         Print["FTLADDER NATIVE CHECKPOINT READY level=", level,
           " file=", nativeSidecarFile]];
       rawES = nativeDispatch["Values"];
+      rowCertifications = nativeDispatch["Certifications"];
       Print["FTLADDER NATIVE BATCH level=", level,
         " requests=", Length[nativeEntries],
         " batchCalls=", nativeDispatch["NativeBatchCalls"],
@@ -2721,8 +2848,10 @@ runExample[name_String] := Module[
     ];
     If[MemberQ[rawES, $Failed], Throw[$Failed, "FT2Abort"]];
     rawES = DiffExp2`EpsSeries`ESTrim /@ rawES;
-    printRows[name, level - 1, mastersBelow, rawES,
-      ConstantArray[0, Length[mastersBelow]]];
+    If[FailureQ[printRows[name, level - 1, mastersBelow, rawES,
+        ConstantArray[0, Length[mastersBelow]], rowCertifications]],
+      Print["FTLADDER OUTPUT CERTIFICATION FAIL level=", level - 1];
+      Throw[$Failed, "FT2Abort"]];
     (* shift to finite for the next level's transport *)
     rawMin = Min[esMn /@ rawES];
     shift = Max[0, -rawMin];
@@ -2794,17 +2923,21 @@ runExample[name_String] := Module[
         Print["FTLADDER INCOMPLETE FINAL requiredTop=", epsOrder,
           " availableTops=", kmaxAvail];
         Throw[$Failed, "FT2Abort"]]];
-    finalRaw = rawES],
+    finalRaw = rawES;
+    finalCertification = First[rowCertifications]],
     {level, startLevel, 1, -1}], "FT2Abort"];
   If[abortRes === $Failed, Return[$Failed]];
   If[abortRes === "Stopped", Return[True]]];
   If[finalRaw === None || MemberQ[finalRaw, $Failed], Return[$Failed]];
 
-  Print["FINAL ", ExportString[<|
-    "Example" -> name,
-    "Finite" -> cleanNumber[esC[finalRaw[[1]], 0]],
-    "RawMinPower" -> esMn[finalRaw[[1]]]|> /. x_Rational :> N[x, 50],
-    "RawJSON", "Compact" -> True]];
+  Module[{finalRow, finalLine},
+    finalRow = ft2FinalRow[name, finalRaw[[1]], finalCertification];
+    If[FailureQ[finalRow], Print["FINAL OUTPUT FAIL ", finalRow];
+      Return[$Failed, Module]];
+    finalLine = ft2OutputLine["FINAL ", finalRow];
+    If[FailureQ[finalLine], Print["FINAL OUTPUT FAIL ", finalLine];
+      Return[$Failed, Module]];
+    Print[finalLine]];
   True];
 
 (* Let the focused checkpoint tests load these definitions without starting

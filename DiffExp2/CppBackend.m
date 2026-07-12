@@ -41,6 +41,7 @@ PersistentTileMatchInterval::usage = "PersistentTileMatchInterval[handle, arm, i
 PersistentTileIntegrationInterval::usage = "PersistentTileIntegrationInterval[handle, arm, index] returns one exact physical/local tile interval selected by the retained native plan. Wolfram indices are one-based.";
 ReleasePersistentTilePlan::usage = "ReleasePersistentTilePlan[handle] releases one public native tile-plan token. Already-retained line results keep strong ownership of their immutable plan snapshot.";
 RunPersistentTileIntegral::usage = "RunPersistentTileIntegral[plan, arm, tile, local, epsilon, checkpointIdentity, certifyTail] integrates the retained local over the exact tile selected by plan and applies the exact affine Jacobian. With certifyTail True (the seventh Boolean argument), an attached regular-tail model may promote the result to FullLocalWithCertifiedTail; unsupported or inconclusive requests remain StoredTruncation. Wolfram tile indices are one-based.";
+RunPersistentNativeArms::usage = "RunPersistentNativeArms[plan, anchor, arms, epsilon, checkpointRoot, certifyTail] marches both retained tile-plan arms concurrently inside one persistent C++ request. arms has exactly lower/upper records, each with receiving_basis (one retained-local basis list per match) and match_policies. Matching, materialization, tile integration, per-arm aggregation, and the combined (-lower+upper) integral remain native; only opaque final-local/line handles and timing are returned.";
 PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, stored-or-certified-tail scope diagnostics, and export counters.";
 ExportPersistentLineIntegral::usage = "ExportPersistentLineIntegral[handle, checkpointIdentity, outputDigits] explicitly exports one retained physical-tile epsilon vector for compatibility.";
 ReleasePersistentLineIntegral::usage = "ReleasePersistentLineIntegral[handle] releases one retained line-integral result. A second release is a loud native error.";
@@ -1198,6 +1199,69 @@ RunPersistentTileIntegral[plan_Association, arm_String, tile_Integer,
     "tile" -> tile - 1, "epsilon" -> epsilon,
     "source_checkpoint_identity" -> sourceCheckpoint,
     "checkpoint_identity" -> checkpointIdentity|>;
+  If[TrueQ[certifyTail], request = Append[request, "certify_tail" -> True]];
+  RunRequest[request]];
+
+RunPersistentNativeArms[plan_Association, anchor_Association,
+    arms_Association, epsilon_Association, checkpointRoot_String,
+    certifyTail_:False] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   anchorTokens = persistentLocalHandles[anchor], normalizeArm,
+   normalized, sessions, request},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[anchorTokens], Return[anchorTokens, Module]];
+  If[Sort[Keys[arms]] =!= Sort[{"lower", "upper"}] ||
+      Sort[Keys[epsilon]] =!=
+        Sort[{"min", "max", "required_complete_max"}] ||
+      StringLength[checkpointRoot] == 0 || !BooleanQ[certifyTail],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "native arm marching requires exact lower/upper arm records, an epsilon min/max/required_complete_max contract, a nonempty checkpoint root, and a Boolean certifyTail request"|>], Module]];
+  normalizeArm[raw_Association] := Module[
+    {sets, policies, tokens, bad},
+    If[Sort[Keys[raw]] =!= Sort[{"receiving_basis", "match_policies"}] ||
+        !ListQ[raw["receiving_basis"]] ||
+        !ListQ[raw["match_policies"]] ||
+        Length[raw["receiving_basis"]] =!=
+          Length[raw["match_policies"]],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "each native arm requires equally sized receiving_basis and match_policies lists"|>], Module]];
+    sets = raw["receiving_basis"];
+    If[!AllTrue[sets, ListQ[#] && # =!= {} &&
+          AllTrue[#, AssociationQ] &],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "every native receiving basis must be a nonempty list of retained-local associations"|>], Module]];
+    tokens = Map[persistentLocalHandles, sets, {2}];
+    bad = Cases[tokens, _Failure, Infinity];
+    If[bad =!= {}, Return[First[bad], Module]];
+    <|"receiving_basis" -> Map[Lookup[#, "Local"] &, tokens],
+      "match_policies" -> raw["match_policies"],
+      "sessions" -> Flatten[Map[Lookup[#, "Session"] &, tokens]]|>];
+  normalized = AssociationMap[normalizeArm, arms];
+  If[AnyTrue[Values[normalized], FailureQ],
+    Return[First[Select[Values[normalized], FailureQ]], Module]];
+  sessions = DeleteDuplicates[Join[
+    {planTokens["Session"], anchorTokens["Session"]},
+    normalized["lower", "sessions"],
+    normalized["upper", "sessions"]]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "the retained plan, anchor, and every receiving basis local must belong to one persistent session",
+      "Sessions" -> sessions|>], Module]];
+  request = <|"schema" -> 2, "op" -> "integration.run_arms",
+    "session" -> First[sessions],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" ->
+      planTokens["CheckpointIdentity"],
+    "anchor" -> anchorTokens["Local"],
+    "anchor_checkpoint_identity" ->
+      Lookup[anchor, "checkpoint_identity",
+        Lookup[anchor, "CheckpointIdentity", ""]],
+    "epsilon" -> epsilon,
+    "checkpoint_policy" -> <|
+      "schema" -> "diffexp2-deterministic-arm-checkpoints-v1",
+      "root" -> checkpointRoot|>,
+    "lower" -> KeyDrop[normalized["lower"], "sessions"],
+    "upper" -> KeyDrop[normalized["upper"], "sessions"]|>;
   If[TrueQ[certifyTail], request = Append[request, "certify_tail" -> True]];
   RunRequest[request]];
 

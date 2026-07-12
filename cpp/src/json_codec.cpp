@@ -12,6 +12,7 @@
 
 #include <boost/json.hpp>
 
+#include <array>
 #include <chrono>
 #include <atomic>
 #include <algorithm>
@@ -3429,6 +3430,9 @@ class StoredEndpointResult {
   const std::string& handle() const { return handle_; }
   const std::string& checkpoint_identity() const {
     return checkpoint_identity_;
+  }
+  const std::string& provenance_identity() const {
+    return provenance_identity_;
   }
   double elapsed_ms() const { return elapsed_ms_; }
 
@@ -8702,6 +8706,10 @@ constexpr const char* kRetainedStoredLineCapability =
     "retained-native-stored-truncation-physical-tile-integral-v1";
 constexpr const char* kRetainedCertifiedLineCapability =
     "retained-native-certified-full-local-physical-tile-integral-v1";
+constexpr const char* kRetainedParallelArmCapability =
+    "retained-native-concurrent-two-arm-march-v1";
+constexpr const char* kRetainedLineAggregateCapability =
+    "retained-native-line-aggregate-v1";
 
 const char* line_integration_scope_name(LineIntegrationScope scope) {
   switch (scope) {
@@ -9421,26 +9429,60 @@ class StoredLineResult {
         source_checkpoint_(std::move(source_checkpoint)),
         result_(std::move(result)), elapsed_ms_(elapsed_ms),
         plan_owner_(std::move(plan_owner)),
-        local_owner_(std::move(local_owner)) {}
+        local_owners_{std::move(local_owner)} {}
+
+  StoredLineResult(std::string handle, std::string checkpoint_identity,
+                   std::string provenance_identity,
+                   StoredLineIntegral result, double elapsed_ms,
+                   std::shared_ptr<StoredTilePlan> plan_owner,
+                   std::vector<std::shared_ptr<StoredLocalBase>> local_owners,
+                   json::object aggregate_provenance)
+      : handle_(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        result_(std::move(result)), elapsed_ms_(elapsed_ms),
+        plan_owner_(std::move(plan_owner)),
+        local_owners_(std::move(local_owners)),
+        aggregate_provenance_(std::move(aggregate_provenance)) {
+    if (!plan_owner_ || local_owners_.empty() ||
+        std::any_of(local_owners_.begin(), local_owners_.end(),
+                    [](const auto& owner) { return owner == nullptr; }))
+      throw std::invalid_argument(
+          "retained line aggregate requires its plan and local owners");
+    if (json::serialize(canonical_json_value(*aggregate_provenance_)) !=
+        provenance_identity_)
+      throw std::invalid_argument(
+          "retained line aggregate provenance identity is inconsistent");
+  }
 
   const std::string& handle() const { return handle_; }
   const std::string& checkpoint_identity() const {
     return checkpoint_identity_;
   }
+  const std::string& provenance_identity() const {
+    return provenance_identity_;
+  }
   double elapsed_ms() const { return elapsed_ms_; }
+  const StoredLineIntegral& result() const { return result_; }
+  bool is_aggregate() const { return aggregate_provenance_.has_value(); }
 
   const std::shared_ptr<StoredTilePlan>& plan_owner() const {
     return plan_owner_;
   }
   const std::shared_ptr<StoredLocalBase>& local_owner() const {
-    return local_owner_;
+    return local_owners_.front();
+  }
+  const std::vector<std::shared_ptr<StoredLocalBase>>& local_owners() const {
+    return local_owners_;
   }
 
   json::object summary() const {
     const auto& diagnostics = result_.diagnostics;
-    return json::object{
+    json::object output{
         {"line", handle_},
-        {"capability", result_.scope ==
+        {"capability", is_aggregate()
+             ? kRetainedLineAggregateCapability
+             : result_.scope ==
                            LineIntegrationScope::FullLocalWithCertifiedTail
              ? kRetainedCertifiedLineCapability
              : kRetainedStoredLineCapability},
@@ -9448,14 +9490,6 @@ class StoredLineResult {
         {"scope", line_integration_scope_name(result_.scope)},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
-        {"source", json::object{
-             {"tile_plan", plan_owner_->handle()},
-             {"tile_plan_checkpoint_identity",
-              plan_owner_->checkpoint_identity()},
-             {"local", local_owner_->handle()},
-             {"chart", local_owner_->source_chart()},
-             {"local_checkpoint_identity", source_checkpoint_}}},
-        {"arm", arm_}, {"tile", tile_index_}, {"interval", interval_},
         {"dimension", result_.value.dimension},
         {"epsilon_min", result_.value.epsilon.min_power},
         {"epsilon_max", result_.value.epsilon.complete_max},
@@ -9485,6 +9519,26 @@ class StoredLineResult {
                         diagnostics.tail_witness_radius_exact)},
              {"detail", diagnostics.detail}}},
         {"elapsed_ms", elapsed_ms_}};
+    if (aggregate_provenance_.has_value()) {
+      output["source"] = aggregate_provenance_->at("source");
+      output["arm"] = aggregate_provenance_->at("arm");
+      output["tile"] = nullptr;
+      output["interval"] = aggregate_provenance_->at("interval");
+      output["aggregate"] = aggregate_provenance_->at("aggregate");
+    } else {
+      const auto& owner = local_owners_.front();
+      output["source"] = json::object{
+          {"tile_plan", plan_owner_->handle()},
+          {"tile_plan_checkpoint_identity",
+           plan_owner_->checkpoint_identity()},
+          {"local", owner->handle()},
+          {"chart", owner->source_chart()},
+          {"local_checkpoint_identity", source_checkpoint_}};
+      output["arm"] = arm_;
+      output["tile"] = tile_index_;
+      output["interval"] = interval_;
+    }
+    return output;
   }
 
   json::object stats_json() const {
@@ -9522,6 +9576,49 @@ class StoredLineResult {
   json::object checkpoint_record() const {
     const auto& diagnostics = result_.diagnostics;
     std::lock_guard<std::mutex> lock(stats_mutex_);
+    if (aggregate_provenance_.has_value()) {
+      return json::object{
+          {"schema", "diffexp2-retained-line-aggregate-v1"},
+          {"handle", handle_},
+          {"checkpoint_identity", checkpoint_identity_},
+          {"provenance_identity", provenance_identity_},
+          {"provenance", *aggregate_provenance_},
+          {"result",
+           json::object{
+               {"value", checkpoint_epsilon_vector_record(result_.value)},
+               {"scope", line_integration_scope_name(result_.scope)},
+               {"imaginary_sign", result_.imaginary_sign.has_value()
+                    ? json::value(*result_.imaginary_sign)
+                    : json::value(nullptr)},
+               {"diagnostics",
+                json::object{
+                    {"input_monomial_cells",
+                     diagnostics.input_monomial_cells},
+                    {"grouped_monomials", diagnostics.grouped_monomials},
+                    {"zero_groups_skipped",
+                     diagnostics.zero_groups_skipped},
+                    {"cancelled_divergent_groups",
+                     diagnostics.cancelled_divergent_groups},
+                    {"primitive_evaluations",
+                     diagnostics.primitive_evaluations},
+                    {"primitive_component_applications",
+                     diagnostics.primitive_component_applications},
+                    {"primitive_component_reuses",
+                     diagnostics.primitive_component_reuses},
+                    {"has_center_endpoint",
+                     diagnostics.has_center_endpoint},
+                    {"tail_certificate_requested",
+                     diagnostics.tail_certificate_requested},
+                    {"tail_certificate_status",
+                     diagnostics.tail_certificate_status},
+                    {"tail_witness_radius_exact",
+                     diagnostics.tail_witness_radius_exact},
+                    {"detail", diagnostics.detail}}}}},
+          {"elapsed_ms", elapsed_ms_},
+          {"runtime_stats",
+           json::object{{"exports", exports_}, {"export_ms", export_ms_}}}};
+    }
+    const auto& owner = local_owners_.front();
     return json::object{
         {"schema", "diffexp2-retained-line-result-v2"},
         {"handle", handle_},
@@ -9535,14 +9632,14 @@ class StoredLineResult {
              {"tile_plan", plan_owner_->handle()},
              {"tile_plan_checkpoint_identity",
               plan_owner_->checkpoint_identity()},
-             {"local", local_owner_->handle()},
-             {"chart", local_owner_->source_chart()},
+             {"local", owner->handle()},
+             {"chart", owner->source_chart()},
              {"source_operator_identity",
-              local_owner_->source_operator_identity()},
+              owner->source_operator_identity()},
              {"local_checkpoint_identity", source_checkpoint_},
-             {"coefficient_domain", local_owner_->scalar_domain()},
+             {"coefficient_domain", owner->scalar_domain()},
              {"analytic_metadata",
-              local_owner_->exact_analytic_metadata()}}},
+              owner->exact_analytic_metadata()}}},
         {"result",
          json::object{
              {"value", checkpoint_epsilon_vector_record(result_.value)},
@@ -9598,7 +9695,8 @@ class StoredLineResult {
   StoredLineIntegral result_;
   double elapsed_ms_ = 0.0;
   std::shared_ptr<StoredTilePlan> plan_owner_;
-  std::shared_ptr<StoredLocalBase> local_owner_;
+  std::vector<std::shared_ptr<StoredLocalBase>> local_owners_;
+  std::optional<json::object> aggregate_provenance_;
   mutable std::mutex stats_mutex_;
   std::uint64_t exports_ = 0;
   double export_ms_ = 0.0;
@@ -10163,6 +10261,233 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
       handle, checkpoint_identity, provenance_identity, arm_name, tile_index,
       std::move(interval), source_checkpoint, std::move(result), elapsed,
       plan, local);
+}
+
+std::size_t checked_diagnostic_sum(std::size_t left, std::size_t right,
+                                   const char* label) {
+  if (right > std::numeric_limits<std::size_t>::max() - left)
+    throw std::overflow_error(std::string(label) + " overflow");
+  return left + right;
+}
+
+StoredLineIntegral aggregate_retained_lines(
+    const std::vector<std::shared_ptr<StoredLineResult>>& components,
+    const std::vector<std::int32_t>& signs, const std::string& detail) {
+  if (components.empty() || components.size() != signs.size())
+    throw std::invalid_argument(
+        "native line aggregation requires a nonempty signed component list");
+  for (const auto sign : signs)
+    if (sign != -1 && sign != 1)
+      throw std::invalid_argument(
+          "native line aggregation signs must be +1 or -1");
+
+  auto epsilon_min = components.front()->result().value.epsilon.min_power;
+  auto epsilon_max =
+      components.front()->result().value.epsilon.complete_max;
+  const auto dimension = components.front()->result().value.dimension;
+  for (const auto& component : components) {
+    const auto& value = component->result().value;
+    if (value.dimension != dimension)
+      throw std::invalid_argument(
+          "native line aggregate component dimensions differ");
+    epsilon_min = std::max(epsilon_min, value.epsilon.min_power);
+    epsilon_max = std::min(epsilon_max, value.epsilon.complete_max);
+  }
+  if (epsilon_min > epsilon_max)
+    throw std::domain_error(
+        "native line aggregate components have no common complete epsilon window");
+
+  StoredLineIntegral result;
+  result.value.epsilon = {epsilon_min, epsilon_max};
+  result.value.dimension = dimension;
+  result.value.coefficients.reserve(
+      result.value.epsilon.width() * dimension);
+  for (std::int64_t raw_power = epsilon_min; raw_power <= epsilon_max;
+       ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component_index = 0;
+         component_index < dimension; ++component_index) {
+      ComplexBall sum(0);
+      for (std::size_t index = 0; index < components.size(); ++index) {
+        const auto& coefficient =
+            components[index]->result().value.at(power, component_index);
+        sum += signs[index] == 1 ? coefficient : -coefficient;
+      }
+      result.value.coefficients.push_back(std::move(sum));
+    }
+  }
+
+  bool all_error_envelopes = true;
+  bool all_certified_errors = true;
+  bool any_advisory_error = false;
+  json::array error_sources;
+  for (std::size_t index = 0; index < components.size(); ++index) {
+    const auto& error = components[index]->result().value.error;
+    if (error.empty() || error.frame.min_power > epsilon_min ||
+        error.frame.complete_max < epsilon_max) {
+      all_error_envelopes = false;
+      break;
+    }
+    all_certified_errors &= error.guarantee == ErrorGuarantee::Certified;
+    any_advisory_error |= error.guarantee == ErrorGuarantee::Advisory;
+    error_sources.push_back(json::object{
+        {"sign", signs[index]},
+        {"guarantee", error_guarantee_name(error.guarantee)},
+        {"provenance", error.provenance}});
+  }
+  if (all_error_envelopes) {
+    result.value.error.frame = result.value.epsilon;
+    result.value.error.guarantee = all_certified_errors
+        ? ErrorGuarantee::Certified
+        : any_advisory_error ? ErrorGuarantee::Advisory
+                             : ErrorGuarantee::None;
+    result.value.error.absolute.reserve(result.value.epsilon.width());
+    for (std::int64_t raw_power = epsilon_min; raw_power <= epsilon_max;
+         ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      auto error_sum = Magnitude::zero();
+      for (const auto& component : components) {
+        const auto& error = component->result().value.error;
+        error_sum += error.absolute.at(static_cast<std::size_t>(
+            power - error.frame.min_power));
+      }
+      result.value.error.absolute.push_back(std::move(error_sum));
+    }
+    result.value.error.provenance = json::serialize(json::object{
+        {"schema", "diffexp2-native-line-error-sum-v1"},
+        {"components", std::move(error_sources)}});
+  }
+
+  bool all_full_local = true;
+  auto& diagnostics = result.diagnostics;
+  diagnostics.detail = detail;
+  diagnostics.tail_certificate_requested = true;
+  diagnostics.tail_certificate_status = "aggregate-certified";
+  for (const auto& component : components) {
+    const auto& input = component->result();
+    all_full_local &=
+        input.scope == LineIntegrationScope::FullLocalWithCertifiedTail;
+    const auto& source = input.diagnostics;
+    diagnostics.input_monomial_cells = checked_diagnostic_sum(
+        diagnostics.input_monomial_cells, source.input_monomial_cells,
+        "aggregate input monomial count");
+    diagnostics.grouped_monomials = checked_diagnostic_sum(
+        diagnostics.grouped_monomials, source.grouped_monomials,
+        "aggregate grouped monomial count");
+    diagnostics.zero_groups_skipped = checked_diagnostic_sum(
+        diagnostics.zero_groups_skipped, source.zero_groups_skipped,
+        "aggregate skipped-zero count");
+    diagnostics.cancelled_divergent_groups = checked_diagnostic_sum(
+        diagnostics.cancelled_divergent_groups,
+        source.cancelled_divergent_groups,
+        "aggregate cancelled-divergence count");
+    diagnostics.primitive_evaluations = checked_diagnostic_sum(
+        diagnostics.primitive_evaluations, source.primitive_evaluations,
+        "aggregate primitive evaluation count");
+    diagnostics.primitive_component_applications = checked_diagnostic_sum(
+        diagnostics.primitive_component_applications,
+        source.primitive_component_applications,
+        "aggregate primitive application count");
+    diagnostics.primitive_component_reuses = checked_diagnostic_sum(
+        diagnostics.primitive_component_reuses,
+        source.primitive_component_reuses,
+        "aggregate primitive reuse count");
+    diagnostics.has_center_endpoint |= source.has_center_endpoint;
+    diagnostics.tail_certificate_requested &=
+        source.tail_certificate_requested;
+  }
+  if (all_full_local && result.value.error.guarantee ==
+                            ErrorGuarantee::Certified) {
+    result.scope = LineIntegrationScope::FullLocalWithCertifiedTail;
+  } else {
+    result.scope = LineIntegrationScope::StoredTruncation;
+    diagnostics.tail_certificate_status = all_full_local
+        ? "aggregate-missing-certified-error-envelope"
+        : "aggregate-has-stored-truncation-component";
+  }
+  result.imaginary_sign = std::nullopt;
+  return result;
+}
+
+std::vector<std::shared_ptr<StoredLocalBase>> unique_line_local_owners(
+    const std::vector<std::shared_ptr<StoredLocalBase>>& owners) {
+  std::set<std::string> seen;
+  std::vector<std::shared_ptr<StoredLocalBase>> unique;
+  unique.reserve(owners.size());
+  for (const auto& owner : owners) {
+    if (!owner)
+      throw std::logic_error("native line aggregate lost a local owner");
+    if (seen.insert(owner->handle()).second) unique.push_back(owner);
+  }
+  return unique;
+}
+
+json::array line_aggregate_source_records(
+    const std::vector<std::shared_ptr<StoredLocalBase>>& owners) {
+  json::array records;
+  records.reserve(owners.size());
+  for (const auto& owner : owners)
+    records.push_back(json::object{
+        {"local", owner->handle()}, {"chart", owner->source_chart()},
+        {"source_operator_identity", owner->source_operator_identity()},
+        {"checkpoint_identity", owner->checkpoint_identity()},
+        {"coefficient_domain", owner->scalar_domain()},
+        {"analytic_metadata", owner->exact_analytic_metadata()}});
+  return records;
+}
+
+std::shared_ptr<StoredLineResult> build_retained_line_aggregate(
+    const std::string& handle, const std::string& checkpoint_identity,
+    const std::string& arm_name, json::object interval,
+    json::object aggregate_record,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    std::vector<std::shared_ptr<StoredLocalBase>> local_owners,
+    const std::vector<std::shared_ptr<StoredLineResult>>& components,
+    const std::vector<std::int32_t>& signs, double elapsed_ms) {
+  if (checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "native line aggregate checkpoint identity cannot be empty");
+  local_owners = unique_line_local_owners(local_owners);
+  auto result = aggregate_retained_lines(
+      components, signs, "native retained line aggregate");
+  json::array component_records;
+  component_records.reserve(components.size());
+  for (std::size_t index = 0; index < components.size(); ++index) {
+    const auto summary = components[index]->summary();
+    component_records.push_back(json::object{
+        {"index", index}, {"sign", signs[index]},
+        {"checkpoint_identity", components[index]->checkpoint_identity()},
+        {"provenance_identity", components[index]->provenance_identity()},
+        {"scope", summary.at("scope")},
+        {"source", summary.at("source")},
+        {"interval", summary.at("interval")},
+        {"epsilon", json::object{
+             {"min", components[index]->result().value.epsilon.min_power},
+             {"max", components[index]->result().value.epsilon.complete_max}}},
+        {"error", summary.at("error")}});
+  }
+  aggregate_record["component_count"] = components.size();
+  aggregate_record["components"] = std::move(component_records);
+  json::object provenance{
+      {"schema", "diffexp2-retained-native-line-aggregate-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"arm", arm_name},
+      {"interval", std::move(interval)},
+      {"source", json::object{
+           {"tile_plan", plan->handle()},
+           {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+           {"locals", line_aggregate_source_records(local_owners)}}},
+      {"aggregate", std::move(aggregate_record)},
+      {"epsilon", json::object{{"min", result.value.epsilon.min_power},
+                                {"max", result.value.epsilon.complete_max}}},
+      {"scope", line_integration_scope_name(result.scope)},
+      {"error_guarantee",
+       error_guarantee_name(result.value.error.guarantee)}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  return std::make_shared<StoredLineResult>(
+      handle, checkpoint_identity, provenance_identity, std::move(result),
+      elapsed_ms, plan, std::move(local_owners), std::move(provenance));
 }
 
 std::vector<std::uint32_t> parse_index_vector(
@@ -11361,6 +11686,209 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
   return stored;
 }
 
+std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
+    const json::value& raw,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    std::vector<std::shared_ptr<StoredLocalBase>> local_owners) {
+  const auto& object = as_object(raw, "checkpoint retained line aggregate");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "provenance", "result", "elapsed_ms", "runtime_stats"},
+      "checkpoint retained line aggregate");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-line-aggregate-v1")
+    throw std::invalid_argument(
+        "unsupported retained line-aggregate checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty() || !plan || local_owners.empty())
+    throw std::invalid_argument(
+        "checkpoint line aggregate lost an identity or strong owner");
+  local_owners = unique_line_local_owners(local_owners);
+
+  const auto& provenance = as_object(
+      object.at("provenance"), "checkpoint line aggregate provenance");
+  require_exact_keys(
+      provenance,
+      {"schema", "checkpoint_identity", "arm", "interval", "source",
+       "aggregate", "epsilon", "scope", "error_guarantee"},
+      "checkpoint line aggregate provenance");
+  if (required_string(provenance, "schema") !=
+          "diffexp2-retained-native-line-aggregate-v1" ||
+      required_string(provenance, "checkpoint_identity") !=
+          checkpoint_identity ||
+      json::serialize(canonical_json_value(provenance)) !=
+          provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint line aggregate provenance identity is inconsistent");
+  const auto& source = as_object(
+      provenance.at("source"), "checkpoint line aggregate source");
+  require_exact_keys(source,
+      {"tile_plan", "tile_plan_checkpoint_identity", "locals"},
+      "checkpoint line aggregate source");
+  if (required_string(source, "tile_plan") != plan->handle() ||
+      required_string(source, "tile_plan_checkpoint_identity") !=
+          plan->checkpoint_identity() ||
+      source.at("locals") != line_aggregate_source_records(local_owners))
+    throw std::invalid_argument(
+        "checkpoint line aggregate source disagrees with its strong owners");
+  for (const auto& owner : local_owners) {
+    if (std::string(owner->scalar_domain()) == "symbolic")
+      throw std::invalid_argument(
+          "checkpoint line aggregate cannot own a symbolic local");
+    validate_checkpoint_exact_analytic_metadata(
+        owner->exact_analytic_metadata());
+  }
+  const auto& aggregate = as_object(
+      provenance.at("aggregate"), "checkpoint line aggregate recipe");
+  const auto& components = as_array(
+      aggregate.at("components"), "checkpoint line aggregate components");
+  if (checkpoint_size_t(aggregate.at("component_count"),
+                        "checkpoint line aggregate component count") !=
+      components.size() ||
+      components.empty())
+    throw std::invalid_argument(
+        "checkpoint line aggregate component manifest is inconsistent");
+  for (std::size_t index = 0; index < components.size(); ++index) {
+    const auto& component = as_object(
+        components[index], "checkpoint line aggregate component");
+    require_exact_keys(
+        component,
+        {"index", "sign", "checkpoint_identity", "provenance_identity",
+         "scope", "source", "interval", "epsilon", "error"},
+        "checkpoint line aggregate component");
+    const auto sign = as_i32(component.at("sign"),
+                             "checkpoint line aggregate sign");
+    if (checkpoint_size_t(component.at("index"),
+                          "checkpoint line aggregate component index") !=
+            index ||
+        (sign != -1 && sign != 1) ||
+        required_string(component, "checkpoint_identity").empty() ||
+        required_string(component, "provenance_identity").empty())
+      throw std::invalid_argument(
+          "checkpoint line aggregate component provenance is malformed");
+  }
+
+  const auto& raw_result = as_object(
+      object.at("result"), "checkpoint line aggregate result");
+  require_exact_keys(raw_result,
+      {"value", "scope", "imaginary_sign", "diagnostics"},
+      "checkpoint line aggregate result");
+  StoredLineIntegral result;
+  result.value = parse_checkpoint_epsilon_vector(
+      raw_result.at("value"), "checkpoint line aggregate epsilon vector");
+  const auto scope = required_string(raw_result, "scope");
+  if (scope == "stored_truncation")
+    result.scope = LineIntegrationScope::StoredTruncation;
+  else if (scope == "full_local_with_certified_tail")
+    result.scope = LineIntegrationScope::FullLocalWithCertifiedTail;
+  else
+    throw std::invalid_argument(
+        "checkpoint line aggregate has an unsupported integration scope");
+  if (!raw_result.at("imaginary_sign").is_null())
+    throw std::invalid_argument(
+        "checkpoint multi-chart line aggregate cannot carry one effective rim");
+  result.imaginary_sign = std::nullopt;
+  const auto& epsilon = as_object(
+      provenance.at("epsilon"), "checkpoint line aggregate epsilon");
+  require_exact_keys(epsilon, {"min", "max"},
+                     "checkpoint line aggregate epsilon");
+  if (result.value.epsilon.min_power !=
+          as_i32(epsilon.at("min"), "checkpoint aggregate epsilon minimum") ||
+      result.value.epsilon.complete_max !=
+          as_i32(epsilon.at("max"), "checkpoint aggregate epsilon maximum") ||
+      required_string(provenance, "scope") != scope ||
+      required_string(provenance, "error_guarantee") !=
+          error_guarantee_name(result.value.error.guarantee))
+    throw std::invalid_argument(
+        "checkpoint line aggregate result differs from its provenance");
+  const auto expected_dimension = as_u32(
+      local_owners.front()->summary().at("dimension"),
+      "checkpoint line aggregate source dimension");
+  if (result.value.dimension != expected_dimension ||
+      std::any_of(local_owners.begin(), local_owners.end(),
+                  [&](const auto& owner) {
+                    return as_u32(owner->summary().at("dimension"),
+                                  "checkpoint aggregate owner dimension") !=
+                           expected_dimension;
+                  }))
+    throw std::invalid_argument(
+        "checkpoint line aggregate dimensions disagree with its owners");
+  if (result.scope == LineIntegrationScope::FullLocalWithCertifiedTail &&
+      result.value.error.guarantee != ErrorGuarantee::Certified)
+    throw std::invalid_argument(
+        "checkpoint certified line aggregate lost its certified error envelope");
+
+  const auto& diagnostics = as_object(
+      raw_result.at("diagnostics"),
+      "checkpoint line aggregate diagnostics");
+  require_exact_keys(
+      diagnostics,
+      {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+       "cancelled_divergent_groups", "primitive_evaluations",
+       "primitive_component_applications", "primitive_component_reuses",
+       "has_center_endpoint", "tail_certificate_requested",
+       "tail_certificate_status", "tail_witness_radius_exact", "detail"},
+      "checkpoint line aggregate diagnostics");
+  result.diagnostics.input_monomial_cells = checkpoint_size_t(
+      diagnostics.at("input_monomial_cells"),
+      "checkpoint aggregate input monomials");
+  result.diagnostics.grouped_monomials = checkpoint_size_t(
+      diagnostics.at("grouped_monomials"),
+      "checkpoint aggregate grouped monomials");
+  result.diagnostics.zero_groups_skipped = checkpoint_size_t(
+      diagnostics.at("zero_groups_skipped"),
+      "checkpoint aggregate skipped zero groups");
+  result.diagnostics.cancelled_divergent_groups = checkpoint_size_t(
+      diagnostics.at("cancelled_divergent_groups"),
+      "checkpoint aggregate cancelled divergent groups");
+  result.diagnostics.primitive_evaluations = checkpoint_size_t(
+      diagnostics.at("primitive_evaluations"),
+      "checkpoint aggregate primitive evaluations");
+  result.diagnostics.primitive_component_applications = checkpoint_size_t(
+      diagnostics.at("primitive_component_applications"),
+      "checkpoint aggregate primitive applications");
+  result.diagnostics.primitive_component_reuses = checkpoint_size_t(
+      diagnostics.at("primitive_component_reuses"),
+      "checkpoint aggregate primitive reuses");
+  if (!diagnostics.at("has_center_endpoint").is_bool() ||
+      !diagnostics.at("tail_certificate_requested").is_bool())
+    throw std::invalid_argument(
+        "checkpoint line aggregate diagnostic flags must be Boolean");
+  result.diagnostics.has_center_endpoint =
+      diagnostics.at("has_center_endpoint").as_bool();
+  result.diagnostics.tail_certificate_requested =
+      diagnostics.at("tail_certificate_requested").as_bool();
+  result.diagnostics.tail_certificate_status = required_string(
+      diagnostics, "tail_certificate_status");
+  if (!diagnostics.at("tail_witness_radius_exact").is_string())
+    throw std::invalid_argument(
+        "checkpoint aggregate tail witness radius must be a string");
+  result.diagnostics.tail_witness_radius_exact = std::string(
+      diagnostics.at("tail_witness_radius_exact").as_string());
+  result.diagnostics.detail = required_string(diagnostics, "detail");
+
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint line aggregate elapsed time");
+  const auto& stats = as_object(object.at("runtime_stats"),
+                                "checkpoint line aggregate runtime stats");
+  require_exact_keys(stats, {"exports", "export_ms"},
+                     "checkpoint line aggregate runtime stats");
+  auto stored = std::make_shared<StoredLineResult>(
+      handle, checkpoint_identity, provenance_identity, std::move(result),
+      elapsed_ms, plan, std::move(local_owners), provenance);
+  stored->restore_runtime_stats(
+      as_u64(stats.at("exports"), "checkpoint aggregate exports"),
+      checkpoint_nonnegative_double(stats.at("export_ms"),
+                                    "checkpoint aggregate export time"));
+  return stored;
+}
+
 json::array encode_strings(const std::vector<std::string>& values) {
   json::array output;
   output.reserve(values.size());
@@ -11561,11 +12089,16 @@ json::array checkpoint_line_identity_manifest(const json::array& items) {
   manifest.reserve(items.size());
   for (const auto& value : items) {
     const auto& item = as_object(value, "checkpoint retained line result");
+    const auto& source = required_string(item, "schema") ==
+            "diffexp2-retained-line-aggregate-v1"
+        ? as_object(item.at("provenance"),
+                    "checkpoint line aggregate provenance").at("source")
+        : item.at("source");
     manifest.push_back(json::object{
         {"handle", item.at("handle")},
         {"checkpoint_identity", item.at("checkpoint_identity")},
         {"provenance_identity", item.at("provenance_identity")},
-        {"source", item.at("source")}});
+        {"source", source}});
   }
   return manifest;
 }
@@ -11731,7 +12264,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& [ignored, match] : session.matches) add_match(match);
   for (const auto& [ignored, line] : session.line_results) {
     add_tile(line->plan_owner());
-    add_local(line->local_owner());
+    for (const auto& local : line->local_owners()) add_local(local);
   }
   for (const auto& [ignored, plan] : tile_closure) {
     for (const auto& composite : plan->dependency_sccs()) add_scc(composite);
@@ -12759,18 +13292,46 @@ json::object restore_checkpoint(const std::string& path,
           throw std::invalid_argument(
               "checkpoint line-result handles are not in strict creation order");
         largest_line_result = id;
-        const auto& source = as_object(item.at("source"),
-                                       "checkpoint line source");
+        const auto schema = required_string(item, "schema");
+        const json::object* source = nullptr;
+        if (schema == "diffexp2-retained-line-aggregate-v1")
+          source = &as_object(
+              as_object(item.at("provenance"),
+                        "checkpoint line aggregate provenance").at("source"),
+              "checkpoint line aggregate source");
+        else
+          source = &as_object(item.at("source"), "checkpoint line source");
         const auto plan = restored->tile_plans.find(
-            required_string(source, "tile_plan"));
-        const auto local = restored->locals.find(
-            required_string(source, "local"));
-        if (plan == restored->tile_plans.end() ||
-            local == restored->locals.end())
+            required_string(*source, "tile_plan"));
+        if (plan == restored->tile_plans.end())
           throw std::invalid_argument(
-              "checkpoint line result lost a strongly owned plan or local");
-        auto line = restore_checkpoint_line_result_record(
-            item, plan->second, local->second);
+              "checkpoint line result lost its strongly owned plan");
+        std::shared_ptr<StoredLineResult> line;
+        if (schema == "diffexp2-retained-line-aggregate-v1") {
+          std::vector<std::shared_ptr<StoredLocalBase>> owners;
+          for (const auto& raw_owner : as_array(
+                   source->at("locals"),
+                   "checkpoint line aggregate local owners")) {
+            const auto& owner = as_object(
+                raw_owner, "checkpoint line aggregate local owner");
+            const auto local = restored->locals.find(
+                required_string(owner, "local"));
+            if (local == restored->locals.end())
+              throw std::invalid_argument(
+                  "checkpoint line aggregate lost a strongly owned local");
+            owners.push_back(local->second);
+          }
+          line = restore_checkpoint_line_aggregate_record(
+              item, plan->second, std::move(owners));
+        } else {
+          const auto local = restored->locals.find(
+              required_string(*source, "local"));
+          if (local == restored->locals.end())
+            throw std::invalid_argument(
+                "checkpoint line result lost its strongly owned local");
+          line = restore_checkpoint_line_result_record(
+              item, plan->second, local->second);
+        }
         if (line->checkpoint_record() != raw_item ||
             !restored->line_results.emplace(handle, line).second)
           throw std::invalid_argument(
@@ -13090,6 +13651,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedStoredLineCapability},
+                        {"parallel_arm_march_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedParallelArmCapability},
                         {"certified_tail_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -13420,6 +13985,523 @@ json::object run_session_command(const json::object& root) {
     response["status"] = "ok";
     response["session"] = session->handle;
     return response;
+  }
+
+  if (operation == "integration.run_arms") {
+    if (root.if_contains("certify_tail") != nullptr)
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan", "anchor",
+           "tile_plan_checkpoint_identity", "anchor_checkpoint_identity",
+           "epsilon", "checkpoint_policy", "lower", "upper",
+           "certify_tail"},
+          "native integration.run_arms request");
+    else
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan", "anchor",
+           "tile_plan_checkpoint_identity", "anchor_checkpoint_identity",
+           "epsilon", "checkpoint_policy", "lower", "upper"},
+          "native integration.run_arms request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native whole-arm marching requires rational or Acb coefficients");
+    const bool certify_tail = root.if_contains("certify_tail") != nullptr
+        ? root.at("certify_tail").as_bool()
+        : false;
+
+    const auto& raw_epsilon = as_object(
+        root.at("epsilon"), "native whole-arm epsilon contract");
+    require_exact_keys(raw_epsilon,
+        {"min", "max", "required_complete_max"},
+        "native whole-arm epsilon contract");
+    const EpsilonWindow work_epsilon{
+        as_i32(raw_epsilon.at("min"), "whole-arm epsilon minimum"),
+        as_i32(raw_epsilon.at("max"), "whole-arm epsilon maximum")};
+    (void)work_epsilon.width();
+    const auto required_complete_max = as_i32(
+        raw_epsilon.at("required_complete_max"),
+        "whole-arm required epsilon maximum");
+    if (required_complete_max < work_epsilon.min_power ||
+        required_complete_max > work_epsilon.complete_max)
+      throw std::invalid_argument(
+          "whole-arm required epsilon maximum must lie in its work window");
+
+    const auto& checkpoint_policy = as_object(
+        root.at("checkpoint_policy"),
+        "native whole-arm checkpoint policy");
+    require_exact_keys(checkpoint_policy, {"schema", "root"},
+                       "native whole-arm checkpoint policy");
+    if (required_string(checkpoint_policy, "schema") !=
+        "diffexp2-deterministic-arm-checkpoints-v1")
+      throw std::invalid_argument(
+          "unsupported native whole-arm checkpoint policy schema");
+    const auto checkpoint_root = required_string(checkpoint_policy, "root");
+    if (checkpoint_root.empty())
+      throw std::invalid_argument(
+          "native whole-arm checkpoint root cannot be empty");
+
+    struct PendingArmMarch {
+      std::string name;
+      std::vector<std::vector<std::string>> basis_handles;
+      std::vector<json::object> match_policies;
+      std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis;
+      std::vector<std::string> match_handles;
+      std::vector<std::string> local_handles;
+      std::string aggregate_handle;
+    };
+    const auto parse_pending_arm = [&](const char* name) {
+      const auto& raw_arm = as_object(root.at(name),
+                                      "native whole-arm arm request");
+      require_exact_keys(raw_arm, {"receiving_basis", "match_policies"},
+                         "native whole-arm arm request");
+      PendingArmMarch arm;
+      arm.name = name;
+      const auto& raw_basis_sets = as_array(
+          raw_arm.at("receiving_basis"),
+          "native whole-arm receiving basis sets");
+      arm.basis_handles.reserve(raw_basis_sets.size());
+      for (const auto& raw_set : raw_basis_sets) {
+        const auto& values = as_array(
+            raw_set, "native whole-arm receiving basis set");
+        if (values.empty())
+          throw std::invalid_argument(
+              "native whole-arm receiving basis sets cannot be empty");
+        std::set<std::string> unique;
+        std::vector<std::string> handles;
+        handles.reserve(values.size());
+        for (const auto& raw_handle : values) {
+          if (!raw_handle.is_string() || raw_handle.as_string().empty())
+            throw std::invalid_argument(
+                "native whole-arm basis handles must be nonempty strings");
+          std::string handle(raw_handle.as_string());
+          if (!unique.insert(handle).second)
+            throw std::invalid_argument(
+                "native whole-arm basis handles must be pairwise distinct");
+          handles.push_back(std::move(handle));
+        }
+        arm.basis_handles.push_back(std::move(handles));
+      }
+      const auto& raw_policies = as_array(
+          raw_arm.at("match_policies"),
+          "native whole-arm match policies");
+      arm.match_policies.reserve(raw_policies.size());
+      for (const auto& raw_policy_value : raw_policies) {
+        const auto& raw_policy = as_object(
+            raw_policy_value, "native whole-arm match policy");
+        if (session->domain == "rational") {
+          require_exact_keys(raw_policy, {},
+                             "rational whole-arm match policy");
+        } else {
+          require_exact_keys(raw_policy, {"exact_lattice", "refinement"},
+                             "Acb whole-arm match policy");
+        }
+        arm.match_policies.push_back(raw_policy);
+      }
+      return arm;
+    };
+    std::array<PendingArmMarch, 2> arms{
+        parse_pending_arm("lower"), parse_pending_arm("upper")};
+
+    const auto plan_handle = required_string(root, "tile_plan");
+    const auto anchor_handle = required_string(root, "anchor");
+    std::shared_ptr<StoredTilePlan> plan;
+    std::shared_ptr<StoredLocalBase> anchor;
+    std::string combined_handle;
+    const std::size_t total_matches =
+        arms[0].basis_handles.size() + arms[1].basis_handles.size();
+    std::size_t total_tiles = 0;
+    constexpr std::size_t published_line_results = 3;
+    bool reservation_live = false;
+    {
+      // Resolve every source token and reserve the complete publication set
+      // before either worker exists.  Subsequent public releases cannot
+      // invalidate the acquired strong owners.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto plan_found = session->tile_plans.find(plan_handle);
+      if (plan_found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or released tile plan for whole-arm marching");
+      plan = plan_found->second;
+      if (required_string(root, "tile_plan_checkpoint_identity") !=
+          plan->checkpoint_identity())
+        throw std::invalid_argument(
+            "whole-arm tile-plan checkpoint token is stale");
+      const auto anchor_found = session->locals.find(anchor_handle);
+      if (anchor_found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released anchor local for whole-arm marching");
+      anchor = anchor_found->second;
+      if (required_string(root, "anchor_checkpoint_identity") !=
+          anchor->checkpoint_identity())
+        throw std::invalid_argument(
+            "whole-arm anchor checkpoint token is stale");
+
+      for (auto& arm : arms) {
+        const auto& retained = plan->arm(arm.name);
+        if (retained.exact.matches.size() != arm.basis_handles.size() ||
+            arm.match_policies.size() != arm.basis_handles.size() ||
+            retained.exact.tiles.size() != arm.basis_handles.size() + 1)
+          throw std::invalid_argument(
+              "whole-arm basis/policy counts do not reproduce the retained plan topology for " +
+              arm.name);
+        total_tiles = checked_diagnostic_sum(
+            total_tiles, retained.exact.tiles.size(),
+            "whole-arm tile count");
+        arm.basis.reserve(arm.basis_handles.size());
+        for (const auto& handles : arm.basis_handles) {
+          std::vector<std::shared_ptr<StoredLocalBase>> resolved;
+          resolved.reserve(handles.size());
+          for (const auto& handle : handles) {
+            const auto found = session->locals.find(handle);
+            if (found == session->locals.end())
+              throw std::invalid_argument(
+                  "unknown or released native local in whole-arm receiving basis: " +
+                  handle);
+            resolved.push_back(found->second);
+          }
+          arm.basis.push_back(std::move(resolved));
+        }
+      }
+
+      if (total_matches > session->match_capacity -
+                              std::min(session->match_capacity,
+                                       session->matches.size() +
+                                           session->pending_matches))
+        throw std::invalid_argument(
+            "persistent local match capacity is exhausted by whole-arm marching");
+      if (total_matches > session->local_capacity -
+                              std::min(session->local_capacity,
+                                       session->locals.size() +
+                                           session->pending_local_solves))
+        throw std::invalid_argument(
+            "persistent local capacity is exhausted by whole-arm marching");
+      if (published_line_results > session->line_result_capacity -
+              std::min(session->line_result_capacity,
+                       session->line_results.size() +
+                           session->pending_line_integrations))
+        throw std::invalid_argument(
+            "persistent line-result capacity is exhausted by whole-arm marching");
+
+      for (auto& arm : arms) {
+        arm.match_handles.reserve(arm.basis_handles.size());
+        arm.local_handles.reserve(arm.basis_handles.size());
+        for (std::size_t index = 0; index < arm.basis_handles.size(); ++index) {
+          arm.match_handles.push_back(
+              "m:" + std::to_string(session->next_match++));
+          arm.local_handles.push_back(
+              "l:" + std::to_string(session->next_local++));
+        }
+        arm.aggregate_handle =
+            "line:" + std::to_string(session->next_line_result++);
+      }
+      combined_handle =
+          "line:" + std::to_string(session->next_line_result++);
+      session->pending_matches += total_matches;
+      session->pending_local_solves += total_matches;
+      session->pending_line_integrations += published_line_results;
+      reservation_live = true;
+    }
+    const auto release_reservation = [&]() {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (!reservation_live) return;
+      if (session->pending_matches < total_matches ||
+          session->pending_local_solves < total_matches ||
+          session->pending_line_integrations < published_line_results)
+        throw std::logic_error(
+            "native whole-arm reservation accounting underflow");
+      session->pending_matches -= total_matches;
+      session->pending_local_solves -= total_matches;
+      session->pending_line_integrations -= published_line_results;
+      reservation_live = false;
+    };
+
+    struct CompletedArmMarch {
+      std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches;
+      std::vector<std::shared_ptr<StoredLocalBase>> materialized;
+      std::vector<std::shared_ptr<StoredLineResult>> tile_lines;
+      std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
+      std::shared_ptr<StoredLocalBase> final_local;
+      std::shared_ptr<StoredLineResult> aggregate;
+      double elapsed_ms = 0.0;
+    };
+    std::array<CompletedArmMarch, 2> completed;
+    std::array<std::exception_ptr, 2> failures;
+    std::atomic<std::size_t> active_workers{0};
+    std::atomic<std::size_t> max_active_workers{0};
+    std::mutex start_mutex;
+    std::condition_variable start_changed;
+    std::size_t workers_ready = 0;
+    bool workers_start = false;
+    bool workers_cancel = false;
+    const auto operation_started = std::chrono::steady_clock::now();
+    std::unique_ptr<AcbPrecisionLease> whole_arm_acb_lease;
+    if (session->domain == "acb") {
+      whole_arm_acb_lease =
+          std::make_unique<AcbPrecisionLease>(session->precision_bits);
+      ComplexBall::set_precision(session->precision_bits);
+    }
+
+    const auto update_max_active = [&](std::size_t candidate) {
+      auto observed = max_active_workers.load();
+      while (observed < candidate &&
+             !max_active_workers.compare_exchange_weak(observed, candidate)) {
+      }
+    };
+    const auto checkpoint_for = [&](const std::string& arm,
+                                    const char* kind,
+                                    std::size_t one_based_index) {
+      return checkpoint_root + ":" + arm + ":" + kind + ":" +
+             std::to_string(one_based_index);
+    };
+
+    const auto run_arm = [&](std::size_t arm_index) {
+      auto active = active_workers.fetch_add(1) + 1;
+      update_max_active(active);
+      {
+        std::unique_lock<std::mutex> lock(start_mutex);
+        ++workers_ready;
+        start_changed.notify_all();
+        start_changed.wait(lock, [&] { return workers_start; });
+        if (workers_cancel) {
+          active_workers.fetch_sub(1);
+          return;
+        }
+      }
+      try {
+        const auto started = std::chrono::steady_clock::now();
+        auto& input = arms[arm_index];
+        auto& output = completed[arm_index];
+        const auto& retained = plan->arm(input.name);
+        std::shared_ptr<StoredLocalBase> current = anchor;
+        output.matches.reserve(retained.exact.matches.size());
+        output.materialized.reserve(retained.exact.matches.size());
+        output.tile_lines.reserve(retained.exact.tiles.size());
+        output.tile_sources.reserve(retained.exact.tiles.size());
+        for (std::size_t tile = 0; tile < retained.exact.tiles.size(); ++tile) {
+          output.tile_sources.push_back(current);
+          json::object line_request{
+              {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+              {"source_checkpoint_identity", current->checkpoint_identity()},
+              {"checkpoint_identity",
+               checkpoint_for(input.name, "tile", tile + 1)},
+              {"arm", input.name}, {"tile", tile},
+              {"epsilon", json::object{{"min", work_epsilon.min_power},
+                                        {"max", work_epsilon.complete_max}}}};
+          if (certify_tail) line_request["certify_tail"] = true;
+          output.tile_lines.push_back(build_planned_line_result(
+              "private:" + checkpoint_for(input.name, "tile", tile + 1),
+              line_request, plan, current));
+          if (tile == retained.exact.matches.size()) continue;
+
+          const auto match_checkpoint =
+              checkpoint_for(input.name, "match", tile + 1);
+          json::object match_request{
+              {"arm", input.name}, {"match", tile},
+              {"epsilon", json::object{
+                   {"min", work_epsilon.min_power},
+                   {"max", work_epsilon.complete_max},
+                   {"required_complete_max", required_complete_max}}},
+              {"checkpoint_identity", match_checkpoint}};
+          if (session->domain == "acb") {
+            match_request["exact_lattice"] =
+                input.match_policies[tile].at("exact_lattice");
+            match_request["refinement"] =
+                input.match_policies[tile].at("refinement");
+          }
+          auto match = build_planned_match_hop(
+              input.match_handles[tile], match_request, session->domain,
+              session->precision_bits, plan, input.basis_handles[tile],
+              input.basis[tile], current->handle(), current);
+          auto next = match->materialize(
+              input.local_handles[tile],
+              checkpoint_for(input.name, "local", tile + 1),
+              session->precision_bits, match);
+          output.matches.push_back(std::move(match));
+          output.materialized.push_back(next);
+          current = std::move(next);
+        }
+        output.final_local = current;
+        const auto aggregate_started = std::chrono::steady_clock::now();
+        std::vector<std::int32_t> signs(output.tile_lines.size(), 1);
+        output.aggregate = build_retained_line_aggregate(
+            input.aggregate_handle,
+            checkpoint_root + ":" + input.name + ":aggregate",
+            input.name,
+            json::object{{"from_exact", retained.exact.from.str()},
+                         {"to_exact", retained.exact.to.str()}},
+            json::object{{"kind", "complete-retained-arm"},
+                         {"combination", "sum-physical-tiles"},
+                         {"certify_tail_requested", certify_tail}},
+            plan, output.tile_sources, output.tile_lines, signs,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - aggregate_started).count());
+        output.elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+      } catch (...) {
+        failures[arm_index] = std::current_exception();
+      }
+      active_workers.fetch_sub(1);
+    };
+
+    std::vector<std::jthread> workers;
+    workers.reserve(2);
+    try {
+      workers.emplace_back([&] { run_arm(0); });
+      workers.emplace_back([&] { run_arm(1); });
+    } catch (...) {
+      {
+        std::lock_guard<std::mutex> lock(start_mutex);
+        workers_cancel = true;
+        workers_start = true;
+      }
+      start_changed.notify_all();
+      for (auto& worker : workers)
+        if (worker.joinable()) worker.join();
+      release_reservation();
+      throw;
+    }
+    {
+      std::unique_lock<std::mutex> lock(start_mutex);
+      start_changed.wait(lock, [&] { return workers_ready == 2; });
+      workers_start = true;
+    }
+    start_changed.notify_all();
+    for (auto& worker : workers) worker.join();
+
+    if (failures[0] || failures[1]) {
+      release_reservation();
+      // No worker result has entered a session registry.  Prefer the lower
+      // failure only for deterministic reporting when both arms fail.
+      std::rethrow_exception(failures[0] ? failures[0] : failures[1]);
+    }
+
+    std::vector<std::shared_ptr<StoredLineResult>> arm_lines{
+        completed[0].aggregate, completed[1].aggregate};
+    std::vector<std::shared_ptr<StoredLocalBase>> combined_owners =
+        completed[0].tile_sources;
+    combined_owners.insert(combined_owners.end(),
+                           completed[1].tile_sources.begin(),
+                           completed[1].tile_sources.end());
+    const auto combined_started = std::chrono::steady_clock::now();
+    auto combined = build_retained_line_aggregate(
+        combined_handle, checkpoint_root + ":combined", "combined",
+        json::object{
+            {"from_exact", plan->arm("lower").exact.to.str()},
+            {"to_exact", plan->arm("upper").exact.to.str()}},
+        json::object{
+            {"kind", "complete-lower-to-upper-line"},
+            {"combination", "negative-lower-anchor-arm-plus-upper-anchor-arm"},
+            {"certify_tail_requested", certify_tail}},
+        plan, std::move(combined_owners), arm_lines,
+        std::vector<std::int32_t>{-1, 1},
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - combined_started).count());
+
+    try {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches < total_matches ||
+          session->pending_local_solves < total_matches ||
+          session->pending_line_integrations < published_line_results)
+        throw std::logic_error(
+            "native whole-arm reservation accounting underflow");
+      session->pending_matches -= total_matches;
+      session->pending_local_solves -= total_matches;
+      session->pending_line_integrations -= published_line_results;
+      reservation_live = false;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during whole-arm marching");
+
+      session->matches.reserve(session->matches.size() + total_matches);
+      session->locals.reserve(session->locals.size() + total_matches);
+      session->line_results.reserve(
+          session->line_results.size() + published_line_results);
+      std::vector<std::string> inserted_matches;
+      std::vector<std::string> inserted_locals;
+      std::vector<std::string> inserted_lines;
+      try {
+        for (std::size_t arm_index = 0; arm_index < 2; ++arm_index) {
+          for (const auto& match : completed[arm_index].matches) {
+            if (!session->matches.emplace(match->handle(), match).second)
+              throw std::logic_error(
+                  "whole-arm match handle collision at publication");
+            inserted_matches.push_back(match->handle());
+          }
+          for (const auto& local : completed[arm_index].materialized) {
+            if (!session->locals.emplace(local->handle(), local).second)
+              throw std::logic_error(
+                  "whole-arm local handle collision at publication");
+            inserted_locals.push_back(local->handle());
+          }
+          const auto& line = completed[arm_index].aggregate;
+          if (!session->line_results.emplace(line->handle(), line).second)
+            throw std::logic_error(
+                "whole-arm aggregate handle collision at publication");
+          inserted_lines.push_back(line->handle());
+        }
+        if (!session->line_results.emplace(combined->handle(), combined).second)
+          throw std::logic_error(
+              "whole-arm combined handle collision at publication");
+        inserted_lines.push_back(combined->handle());
+      } catch (...) {
+        for (const auto& handle : inserted_lines)
+          session->line_results.erase(handle);
+        for (const auto& handle : inserted_locals)
+          session->locals.erase(handle);
+        for (const auto& handle : inserted_matches)
+          session->matches.erase(handle);
+        throw;
+      }
+
+      for (std::size_t arm_index = 0; arm_index < 2; ++arm_index) {
+        for (const auto& match : completed[arm_index].matches) {
+          ++session->total_local_matches;
+          session->total_local_match_ms += match->elapsed_ms();
+          plan->note_match_advance(arms[arm_index].name);
+        }
+        for (const auto& line : completed[arm_index].tile_lines) {
+          ++session->total_line_integrations;
+          session->total_line_integration_ms += line->elapsed_ms();
+          plan->note_integration();
+        }
+      }
+    } catch (...) {
+      if (reservation_live) release_reservation();
+      throw;
+    }
+
+    json::object arm_response;
+    for (std::size_t index = 0; index < 2; ++index) {
+      auto final_local = completed[index].final_local->summary();
+      final_local["session"] = session->handle;
+      auto line = completed[index].aggregate->summary();
+      line["session"] = session->handle;
+      arm_response[arms[index].name] = json::object{
+          {"final_local", std::move(final_local)},
+          {"line_result", std::move(line)},
+          {"matches", completed[index].matches.size()},
+          {"tiles", completed[index].tile_lines.size()},
+          {"elapsed_ms", completed[index].elapsed_ms}};
+    }
+    auto combined_summary = combined->summary();
+    combined_summary["session"] = session->handle;
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", kRetainedParallelArmCapability},
+        {"native_retained", true}, {"json_coefficients", 0},
+        {"atomic_publication", true},
+        {"workers", 2},
+        {"max_parallel_arms", max_active_workers.load()},
+        {"worker_overlap", max_active_workers.load() == 2},
+        {"checkpoint_policy", checkpoint_policy},
+        {"epsilon", raw_epsilon},
+        {"arms", std::move(arm_response)},
+        {"combined_line_result", std::move(combined_summary)},
+        {"elapsed_ms", std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - operation_started).count()}};
   }
 
   if (operation == "integration.line") {

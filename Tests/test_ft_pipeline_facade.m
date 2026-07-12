@@ -20,6 +20,8 @@ minusPlan = FeynmanTrick`PipelinePlan["bubble",
   "DeltaPrescriptionSign" -> -1];
 invalidSignPlan = FeynmanTrick`PipelinePlan["bubble",
   "DeltaPrescriptionSign" -> 0];
+migrationPlan = FeynmanTrick`PipelinePlan["bubble",
+  "MigrateLegacyPreparation" -> True];
 
 SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "+1"];
 plusRunnerSettings =
@@ -80,6 +82,11 @@ assert["delta prescription sign carries strict -1 through plan and runner",
     minusPlan["Environment"] =!= plan["Environment"]];
 assert["delta prescription sign rejects zero in both public seams",
   FailureQ[invalidSignPlan] && FailureQ[invalidRunnerSettings]];
+assert["legacy preparation migration is explicit in plan and environment",
+  AssociationQ[migrationPlan] &&
+    TrueQ[migrationPlan["Settings", "MigrateLegacyPreparation"]] &&
+    migrationPlan["Environment", "FT_MIGRATE_LEGACY_PREP"] === "1" &&
+    plan["Environment", "FT_MIGRATE_LEGACY_PREP"] === "0"];
 assert["fast transport settings are explicit",
   plan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
     plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&

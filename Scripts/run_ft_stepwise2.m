@@ -86,6 +86,7 @@ anchor = 11/23;
 inputPrecision = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
 prepCacheRoot = runnerSettings["PrepCacheRoot"];
 forcePrepRebuild = runnerSettings["ForcePrepRebuild"];
+migrateLegacyPrep = runnerSettings["MigrateLegacyPreparation"];
 resumeLadderFile = runnerSettings["ResumeCheckpoint"];
 ladderCheckpointDir = runnerSettings["CheckpointDirectory"];
 allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
@@ -93,14 +94,83 @@ allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
 (* RunFullIteration is FIRE-dominated but independent of DiffExp2's
    transport settings.  Persist both the populated ftData and FIRE's
    in-memory reduction cache so a fresh Wolfram process can resume at the
-   transport ladder.  The key covers topology/sequence/dimension and every
-   FeynmanTrick source file, while each exact reduction key embeds the
-   setup-time FIRE fingerprint.  Edits to this runner or DiffExp2 intentionally
-   do not invalidate preparation.  FT_REBUILD_PREP=1 forces a rebuild. *)
-$ftPrepCacheVersion = 2;
-$ftPrepSourceFingerprint = Hash[
-  ({#, FileHash[#, "SHA256"]} & /@ Sort[FileNames["*.m",
-    FileNameJoin[{repoRoot, "FeynmanTrick"}], Infinity]]), "SHA256"];
+   transport ladder.  Preparation has a deliberately narrow, exact contract:
+   topology, combination sequence, dimension, preparation-affecting options,
+   FIRE/Wolfram runtime, and only the three modules that construct levels,
+   FIRE problems, bases, reductions, and differential matrices.  Paths in the
+   source manifest are repository-relative; runner, facade, boundary,
+   transport, and export-only edits therefore cannot invalidate expensive
+   FIRE data.  The complete contract is stored beside the digest and compared
+   exactly on load, so the digest is never the sole stale-data guard.
+
+   FT_REBUILD_PREP=1 forces a rebuild.  Legacy v2 snapshots have no exact
+   preparation-source manifest and are rejected by default.  The explicit
+   FT_MIGRATE_LEGACY_PREP=1 escape hatch accepts exactly one legacy candidate
+   only after exact input/runtime/level/reduction-key validation and rewrites
+   it immediately as v3; ambiguous candidates remain rejected. *)
+$ftPrepCacheVersion = 3;
+$ftPrepContractSchema = "FeynmanTrick.PreparedFTContract/v3";
+$ftPrepPreparationSourcePaths = {
+  "FeynmanTrick/PropagatorAlgebra.m",
+  "FeynmanTrick/FIREInterface.m",
+  "FeynmanTrick/FeynmanTrickIteration.m"
+};
+
+(* Why this manifest is intentionally only three files:
+   - FeynmanTrick.m supplies configuration plumbing, but every value that can
+     affect preparation is evaluated into PreparationConfiguration or
+     DimensionExpression below.
+   - MatrixExport.m only serializes diagnostic artifacts after a level has
+     already been computed; it does not mutate the retained FTData.
+   - LevelReduction.m classifies transport-time boundary requests.  It does
+     not construct FTData, and every request must still find its exact,
+     setup-fingerprinted reduction key before a snapshot can load.
+   - BoundaryConditions.m, DiffExp2Pipeline.m, and this runner act only after
+     preparation.  Their broader provenance belongs to ladder checkpoints,
+     not the FIRE preparation cache. *)
+
+ftPrepRelativeSourceIdentity[relativePath_String] := Module[{path},
+  path = FileNameJoin[Prepend[FileNameSplit[relativePath], repoRoot]];
+  If[!FileExistsQ[path], Return[Failure["FeynmanTrickPreparationSource", <|
+    "Detail" -> "preparation source is missing",
+    "RelativePath" -> relativePath|>], Module]];
+  <|"RelativePath" -> relativePath,
+    "SHA256" -> IntegerString[FileHash[path, "SHA256"], 16, 64]|>];
+
+$ftPrepPreparationSourceIdentities =
+  ftPrepRelativeSourceIdentity /@ $ftPrepPreparationSourcePaths;
+
+ftPrepSelectPreparationSourceIdentities[sourceMap_Association] :=
+  Lookup[sourceMap, $ftPrepPreparationSourcePaths,
+    Missing["PreparationSourceAbsent"]];
+
+ftPrepConfigurationRecord[] := Module[{cfg = FeynmanTrick`Private`$FTConfig},
+  <|
+    "DimensionVariable" -> Lookup[cfg, "DimensionVariable", Missing["Unset"]],
+    "EpsilonSymbol" -> Lookup[cfg, "EpsilonSymbol", Missing["Unset"]],
+    "FixedParameterValue" ->
+      Lookup[cfg, "FixedParameterValue", Missing["Unset"]],
+    "AutoDetectRestrictions" ->
+      Lookup[cfg, "AutoDetectRestrictions", Missing["Unset"]]
+  |>];
+
+ftPrepContractRecord[name_String, topology_Association, sequence_List] := <|
+  "Schema" -> $ftPrepContractSchema,
+  "CacheVersion" -> $ftPrepCacheVersion,
+  "Example" -> name,
+  "Topology" -> topology,
+  "CombinationSequence" -> sequence,
+  "NumericalPoint" -> {},
+  "DimensionExpression" -> FeynmanTrick`Private`DimensionExpression[],
+  "PreparationConfiguration" -> ftPrepConfigurationRecord[],
+  "WolframRuntime" -> <|"Version" -> $Version, "SystemID" -> $SystemID|>,
+  "FIRERuntime" ->
+    FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[],
+  "PreparationSources" -> $ftPrepPreparationSourceIdentities
+|>;
+
+ftPrepContractKey[contract_Association] := Hash[contract, "SHA256"];
+
 $ftLadderCheckpointVersion = 2;
 $ftLadderSourceFingerprint = Hash[
   ({#, FileHash[#, "SHA256"]} & /@ Sort[Join[
@@ -118,6 +188,41 @@ preparedFTDataQ[data_] := AssociationQ[data] &&
       masters = Lookup[ld, "Masters", {}]; mat = Lookup[ld, "DiffMatrix", {}];
       TrueQ[Lookup[ld, "Computed", False]] && masters =!= {} &&
         MatrixQ[mat] && Dimensions[mat] === {Length[masters], Length[masters]}]]];
+
+ftPrepRuntimeRecordCompatibleQ[stored_, expected_Association] :=
+  AssociationQ[stored] &&
+    KeyTake[stored, Keys[expected]] === expected;
+
+preparedFTDataMatchesContractQ[data_, contract_Association] := Module[
+  {nLevels, levels, config, runtime},
+  If[!preparedFTDataQ[data] ||
+      Lookup[contract, "Schema", None] =!= $ftPrepContractSchema,
+    Return[False, Module]];
+  nLevels = Lookup[data, "NumLevels", None];
+  levels = Lookup[data, "Levels", <||>];
+  config = Lookup[contract, "PreparationConfiguration", <||>];
+  runtime = Lookup[contract, "FIRERuntime", <||>];
+  TrueQ[
+    Lookup[data, "TopTopology", Missing["Absent"]] ===
+      Lookup[contract, "Topology", Missing["Absent"]] &&
+    Lookup[data, "CombinationSequence", Missing["Absent"]] ===
+      Lookup[contract, "CombinationSequence", Missing["Absent"]] &&
+    Lookup[data, "NumericalPoint", Missing["Absent"]] ===
+      Lookup[contract, "NumericalPoint", Missing["Absent"]] &&
+    Lookup[data, "FixedParamValue", Missing["Absent"]] ===
+      Lookup[config, "FixedParameterValue", Missing["Unset"]] &&
+    nLevels === Length[Lookup[contract, "CombinationSequence", {}]] &&
+    AssociationQ[runtime] && runtime =!= <||> &&
+    AllTrue[Range[nLevels], Function[level,
+      Module[{topology, setup},
+        topology = Lookup[levels[level], "Topology", <||>];
+        setup = Lookup[topology, "SetupFingerprintRecord", None];
+        ftPrepRuntimeRecordCompatibleQ[setup, runtime] &&
+          Lookup[setup, "AutoDetectRestrictions", Missing["Unset"]] ===
+            Lookup[config, "AutoDetectRestrictions", Missing["Unset"]]
+      ]]]
+  ]
+];
 
 requiredReductionKeys[data_] := Flatten[Table[
   Module[{ld = data["Levels"][level], below = data["Levels"][level - 1],
@@ -137,20 +242,17 @@ preparedReductionCacheQ[data_, rc_] := AssociationQ[rc] &&
       AssociationQ[entry] && KeyExistsQ[entry, "Reduction"] &&
         KeyExistsQ[entry, "Masters"]]]];
 
-ftPrepKey[name_, topology_, sequence_] := Hash[{
-  $ftPrepCacheVersion, $Version, name, topology, sequence,
-  FeynmanTrick`Private`DimensionExpression[],
-  Lookup[FeynmanTrick`Private`$FTConfig,
-    {"DimensionVariable", "EpsilonSymbol", "FixedParameterValue",
-      "AutoDetectRestrictions"}],
-  FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[],
-  $ftPrepSourceFingerprint}, "SHA256"];
+ftPrepKey[name_String, topology_Association, sequence_List] :=
+  ftPrepContractKey[ftPrepContractRecord[name, topology, sequence]];
 
 ftPrepFile[name_, key_] := FileNameJoin[{prepCacheRoot,
   name <> "_" <> IntegerString[Abs[key], 16] <> ".mx"}];
 
-savePreparedFT[file_, key_, data_] := Module[{payload, tmp, ok},
-  If[!preparedFTDataQ[data], Return[$Failed, Module]];
+savePreparedFT[file_String, contract_Association, data_] := Module[
+  {payload, tmp, ok, key = ftPrepContractKey[contract]},
+  If[!preparedFTDataMatchesContractQ[data, contract],
+    Print["FTPREP CACHE CONTRACT MISMATCH; not saving ", file];
+    Return[$Failed, Module]];
   If[!preparedReductionCacheQ[data,
       FeynmanTrick`FIREInterface`Private`$ReductionCache],
     Print["FTPREP CACHE INCOMPLETE; not saving ", file];
@@ -158,7 +260,8 @@ savePreparedFT[file_, key_, data_] := Module[{payload, tmp, ok},
   If[!DirectoryQ[DirectoryName[file]],
     CreateDirectory[DirectoryName[file], CreateIntermediateDirectories -> True]];
   payload = <|
-    "Version" -> $ftPrepCacheVersion, "Key" -> key, "FTData" -> data,
+    "Version" -> $ftPrepCacheVersion, "Key" -> key,
+    "Contract" -> contract, "FTData" -> data,
     "ReductionCache" -> KeyTake[
       FeynmanTrick`FIREInterface`Private`$ReductionCache,
       requiredReductionKeys[data]]|>;
@@ -175,7 +278,7 @@ savePreparedFT[file_, key_, data_] := Module[{payload, tmp, ok},
   Print["FTPREP CACHE WRITE ", file];
   file];
 
-loadPreparedFT[file_, key_] := Module[{payload, ok},
+readPreparedFTPayload[file_String] := Module[{payload, ok},
   If[!FileExistsQ[file], Return[$Failed, Module]];
   Clear[Global`$FT2PreparedSnapshot];
   ok = Quiet[Check[Get[file]; True, False]];
@@ -183,17 +286,82 @@ loadPreparedFT[file_, key_] := Module[{payload, ok},
     Return[$Failed, Module]];
   payload = Global`$FT2PreparedSnapshot;
   Clear[Global`$FT2PreparedSnapshot];
-  If[!AssociationQ[payload] || Lookup[payload, "Version", None] =!=
-      $ftPrepCacheVersion || Lookup[payload, "Key", None] =!= key ||
-      !preparedFTDataQ[Lookup[payload, "FTData", None]] ||
-      !preparedReductionCacheQ[Lookup[payload, "FTData", None],
-        Lookup[payload, "ReductionCache", <||>]],
+  If[AssociationQ[payload], payload, $Failed]];
+
+loadPreparedFT[file_String, contract_Association] := Module[
+  {payload, data, reductionCache, key = ftPrepContractKey[contract], reason},
+  If[!FileExistsQ[file], Return[$Failed, Module]];
+  payload = readPreparedFTPayload[file];
+  If[!AssociationQ[payload],
+    Print["FTPREP CACHE REJECT ", file, ": unreadable payload"];
+    Return[$Failed, Module]];
+  data = Lookup[payload, "FTData", None];
+  reductionCache = Lookup[payload, "ReductionCache", <||>];
+  reason = Which[
+    Lookup[payload, "Version", None] =!= $ftPrepCacheVersion,
+      "unsupported snapshot version",
+    Lookup[payload, "Contract", None] =!= contract,
+      "preparation contract differs",
+    Lookup[payload, "Key", None] =!= key,
+      "contract digest differs",
+    !preparedFTDataMatchesContractQ[data, contract],
+      "prepared level data does not match the exact contract",
+    !preparedReductionCacheQ[data, reductionCache],
+      "required exact reduction keys are absent or malformed",
+    True, None];
+  If[StringQ[reason],
+    Print["FTPREP CACHE REJECT ", file, ": ", reason];
     Return[$Failed, Module]];
   FeynmanTrick`FIREInterface`Private`$ReductionCache =
     Join[FeynmanTrick`FIREInterface`Private`$ReductionCache,
-      Lookup[payload, "ReductionCache", <||>]];
+      reductionCache];
   Print["FTPREP CACHE HIT ", file];
-  payload["FTData"]];
+  data];
+
+legacyPreparedFTPayloadCompatibleQ[payload_, contract_Association] := Module[
+  {data, reductionCache},
+  If[!AssociationQ[payload] ||
+      Lookup[payload, "Version", None] =!= 2 ||
+      !IntegerQ[Lookup[payload, "Key", None]],
+    Return[False, Module]];
+  data = Lookup[payload, "FTData", None];
+  reductionCache = Lookup[payload, "ReductionCache", <||>];
+  TrueQ[preparedFTDataMatchesContractQ[data, contract] &&
+    preparedReductionCacheQ[data, reductionCache]]
+];
+
+migrateLegacyPreparedFT[name_String, targetFile_String,
+    contract_Association] := Module[
+  {candidates, valid = {}, payload, sourceFile, oldReductionCache, wrote},
+  candidates = DeleteCases[
+    Sort[FileNames[name <> "_*.mx", prepCacheRoot]], targetFile];
+  Scan[Function[file,
+    payload = readPreparedFTPayload[file];
+    If[AssociationQ[payload] && Lookup[payload, "Version", None] === 2,
+      If[legacyPreparedFTPayloadCompatibleQ[payload, contract],
+        AppendTo[valid, {file, payload}],
+        Print["FTPREP LEGACY REJECT ", file,
+          ": exact input/runtime/level/reduction validation failed"]]]],
+    candidates];
+  If[valid === {},
+    Print["FTPREP LEGACY MIGRATION NONE for ", name];
+    Return[$Failed, Module]];
+  If[Length[valid] =!= 1,
+    Print["FTPREP LEGACY MIGRATION REJECT ", name,
+      ": ambiguous validated snapshots ", First /@ valid];
+    Return[$Failed, Module]];
+  {sourceFile, payload} = First[valid];
+  oldReductionCache = FeynmanTrick`FIREInterface`Private`$ReductionCache;
+  FeynmanTrick`FIREInterface`Private`$ReductionCache = Join[
+    oldReductionCache, payload["ReductionCache"]];
+  wrote = savePreparedFT[targetFile, contract, payload["FTData"]];
+  If[wrote === $Failed,
+    FeynmanTrick`FIREInterface`Private`$ReductionCache = oldReductionCache;
+    Print["FTPREP LEGACY MIGRATION WRITE FAILED ", sourceFile];
+    Return[$Failed, Module]];
+  Print["FTPREP LEGACY MIGRATED ", sourceFile, " -> ", targetFile];
+  payload["FTData"]
+];
 
 saveLadderCheckpoint[file_, payload_] := Module[
   {tmp, saved, wrote, renamed},
@@ -1752,7 +1920,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "CheckpointRecord" -> checkpointAuditRecord|>];
 
 runExample[name_String] := Module[
-  {topology, sequence, prepKey, prepFile, ftData, outputDir, nLevels,
+  {topology, sequence, prepContract, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
    resumeCheckpoint = None, startLevel, finalRaw = None, ftEps, dimVar,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
@@ -1765,9 +1933,17 @@ runExample[name_String] := Module[
   topology = FTExampleTopology[name, "step"];
   If[topology === $Failed, Return[$Failed]];
   sequence = FTExampleSequence[name];
-  prepKey = ftPrepKey[name, topology, sequence];
+  prepContract = ftPrepContractRecord[name, topology, sequence];
+  If[!AssociationQ[prepContract] ||
+      AnyTrue[Lookup[prepContract, "PreparationSources", {}], FailureQ],
+    Print["FTPREP CONTRACT BUILD FAILED ", prepContract];
+    Return[$Failed]];
+  prepKey = ftPrepContractKey[prepContract];
   prepFile = ftPrepFile[name, prepKey];
-  ftData = If[forcePrepRebuild, $Failed, loadPreparedFT[prepFile, prepKey]];
+  ftData = If[forcePrepRebuild, $Failed,
+    loadPreparedFT[prepFile, prepContract]];
+  If[ftData === $Failed && !forcePrepRebuild && migrateLegacyPrep,
+    ftData = migrateLegacyPreparedFT[name, prepFile, prepContract]];
   If[ftData === $Failed,
     Print["FTPREP CACHE MISS ", prepFile];
     ftData = FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
@@ -1777,7 +1953,8 @@ runExample[name_String] := Module[
     If[DirectoryQ[outputDir], DeleteDirectory[outputDir, DeleteContents -> True]];
     CreateDirectory[outputDir, CreateIntermediateDirectories -> True];
     ftData = FeynmanTrick`FeynmanTrickIteration`RunFullIteration[ftData, outputDir];
-    If[preparedFTDataQ[ftData], savePreparedFT[prepFile, prepKey, ftData]]];
+    If[preparedFTDataQ[ftData],
+      savePreparedFT[prepFile, prepContract, ftData]]];
   If[ftData === $Failed, Return[$Failed]];
   nLevels = ftData["NumLevels"];
   ftEps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];

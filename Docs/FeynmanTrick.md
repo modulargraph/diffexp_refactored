@@ -154,9 +154,26 @@ incomplete handoff rather than assuming the missing coefficients vanish.
 ## Preparation cache and ladder checkpoints
 
 `FT_PREP_CACHE_DIR` stores completed Feynman-trick/FIRE preparation and the
-reduction cache.  Its key covers the topology, combination sequence,
-dimension, and FeynmanTrick sources.  Solver or runner changes intentionally do
-not force FIRE to rerun.
+reduction cache.  Its v3 contract records the exact topology, combination
+sequence, dimension, preparation-affecting configuration, Wolfram/FIRE
+runtime, and repository-relative hashes of the three preparation modules:
+`PropagatorAlgebra.m`, `FIREInterface.m`, and `FeynmanTrickIteration.m`.
+`FeynmanTrick.m` configuration semantics are represented by their evaluated
+contract values; `MatrixExport.m` writes artifacts only; and
+`LevelReduction.m` derives transport-time requests whose exact hardened
+reduction keys are revalidated on every load.  Consequently facade, runner,
+boundary, LevelReduction, DiffExp2 solver, and transport-only changes do not
+force FIRE to rerun.  A snapshot stores and exactly rechecks the full contract
+and all required reduction keys, rather than trusting its digest alone.
+
+Legacy v2 snapshots are rejected by default because they do not contain that
+source contract.  A one-time migration can be requested explicitly with
+`FT_MIGRATE_LEGACY_PREP=1` (or the facade option
+`"MigrateLegacyPreparation" -> True`).  Migration succeeds only when exactly
+one candidate passes the current topology, sequence, configuration, runtime,
+prepared-level, and hardened reduction-key checks; otherwise it rejects the
+snapshot and preparation runs normally.  Legacy v1 snapshots predate hardened
+reduction keys and are never migrated.
 
 `FT_LADDER_CHECKPOINT_DIR` stores two kinds of checkpoint:
 

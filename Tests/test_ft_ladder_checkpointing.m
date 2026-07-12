@@ -53,7 +53,7 @@ test["checkpoint replacement requests atomic overwrite",
   StringContainsQ[runnerSource,
     "RenameFile[tmp, file, OverwriteTarget -> True]"]];
 test["prepared snapshot schema invalidates legacy reduction keys",
-  $ftPrepCacheVersion === 2, $ftPrepCacheVersion];
+  $ftPrepCacheVersion === 3, $ftPrepCacheVersion];
 test["epsilon-basis transport bumps the checkpoint schema",
   $ftLadderCheckpointVersion === 2, $ftLadderCheckpointVersion];
 
@@ -162,23 +162,29 @@ test["runner projects extra factors before constructing delta prescriptions",
     AllTrue[projectedRunnerPrescriptions, FreeQ[First[#], chainEps] &],
   projectedRunnerPrescriptions];
 
-cacheTopology = FeynmanTrick`FIREInterface`DefineTopology[
+cacheInputTopology = FeynmanTrick`FIREInterface`DefineTopology[
   "snapshot-key", {Global`l1}, {},
   {1 - Global`l1^2, 2 - Global`l1^2}, {}];
+cacheTopology = cacheInputTopology;
 cacheTopology["WorkDirectory"] = tmpDir;
 cacheTopology["ProblemNumber"] = 41;
 cacheTopology["StartFileReady"] = True;
-cacheTopology["SetupFingerprintRecord"] = <|
+cacheRuntime =
+  FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[];
+cacheTopology["SetupFingerprintRecord"] = Join[<|
   "Schema" -> "FeynmanTrick.FIRESetup/v1",
   "StartFileSHA256" -> "snapshot-start",
-  "Restrictions" -> {{-1, -1}}|>;
+  "Restrictions" -> {{-1, -1}},
+  "AutoDetectRestrictions" ->
+    FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"]|>, cacheRuntime];
 oldAutoDetectRestrictions =
   FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"];
-prepIdentityKey = ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}];
+prepIdentityKey = ftPrepKey[
+  "snapshot-key", cacheInputTopology, {{1, 2}}];
 FeynmanTrick`SetFTOption[
   "AutoDetectRestrictions", !TrueQ[oldAutoDetectRestrictions]];
 prepChangedOptionKey = ftPrepKey[
-  "snapshot-key", cacheTopology, {{1, 2}}];
+  "snapshot-key", cacheInputTopology, {{1, 2}}];
 FeynmanTrick`SetFTOption[
   "AutoDetectRestrictions", oldAutoDetectRestrictions];
 test["prepared snapshot key covers setup-affecting FIRE options",
@@ -188,15 +194,18 @@ prepRuntimeA = Block[{
     FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},
   FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[] :=
     <|"Runtime" -> "A"|>;
-  ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}]];
+  ftPrepKey["snapshot-key", cacheInputTopology, {{1, 2}}]];
 prepRuntimeB = Block[{
     FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},
   FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[] :=
     <|"Runtime" -> "B"|>;
-  ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}]];
+  ftPrepKey["snapshot-key", cacheInputTopology, {{1, 2}}]];
 test["prepared snapshot key covers FIRE runtime identity",
   prepRuntimeA =!= prepRuntimeB, {prepRuntimeA, prepRuntimeB}];
-cacheData = <|"NumLevels" -> 1, "Levels" -> <|
+cacheData = <|"TopTopology" -> cacheInputTopology,
+  "CombinationSequence" -> {{1, 2}}, "NumericalPoint" -> {},
+  "FixedParamValue" -> FeynmanTrick`Private`$FTConfig["FixedParameterValue"],
+  "NumLevels" -> 1, "Levels" -> <|
   0 -> <|"Masters" -> {{1, 1}}|>,
   1 -> <|"Masters" -> {{2, 0}}, "CombinedPositions" -> {1, 2},
     "Topology" -> cacheTopology, "Computed" -> True,
@@ -212,10 +221,12 @@ oldReductionCache = FeynmanTrick`FIREInterface`Private`$ReductionCache;
 FeynmanTrick`FIREInterface`Private`$ReductionCache = Association[
   cacheExpectedKey -> <|"Reduction" -> 1, "Masters" -> {{2, 0}}|>];
 prepSnapshotFile = FileNameJoin[{tmpDir, "hardened-prep.mx"}];
+prepSnapshotContract = ftPrepContractRecord[
+  "snapshot-key", cacheInputTopology, {{1, 2}}];
 prepSnapshotWrite = savePreparedFT[
-  prepSnapshotFile, 24680, cacheData];
+  prepSnapshotFile, prepSnapshotContract, cacheData];
 FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
-prepSnapshotLoad = loadPreparedFT[prepSnapshotFile, 24680];
+prepSnapshotLoad = loadPreparedFT[prepSnapshotFile, prepSnapshotContract];
 test["hardened reduction keys survive prepared snapshot round-trip",
   prepSnapshotWrite === prepSnapshotFile &&
     AssociationQ[prepSnapshotLoad] &&

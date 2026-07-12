@@ -71,7 +71,8 @@ parseHalos[text_String] := Module[{parts, values},
 RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
-   deltaPrescriptionSign, batch, rebuild, allowStale, fireTimeout, firePath,
+   deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
+   fireTimeout, firePath,
    resume, checkpointDir, prepRoot, values},
   backend = envOrDefault["DE2_RECURRENCE_BACKEND", "Cpp"];
   If[!MemberQ[{"Cpp", "Wolfram"}, backend],
@@ -103,6 +104,8 @@ RunnerSettingsFromEnvironment[] := Module[
       envOrDefault["FT_CPP_BATCH_ENDPOINT_ARMS", "1"]],
     rebuild = parseFlag["FT_REBUILD_PREP",
       envOrDefault["FT_REBUILD_PREP", "0"]],
+    migrateLegacyPrep = parseFlag["FT_MIGRATE_LEGACY_PREP",
+      envOrDefault["FT_MIGRATE_LEGACY_PREP", "0"]],
     allowStale = parseFlag["FT_ALLOW_STALE_LADDER_CHECKPOINT",
       envOrDefault["FT_ALLOW_STALE_LADDER_CHECKPOINT", "0"]],
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
@@ -139,6 +142,7 @@ RunnerSettingsFromEnvironment[] := Module[
     "DeltaPrescriptionSign" -> deltaPrescriptionSign,
     "BatchEndpointArms" -> (batch && backend === "Cpp"),
     "PrepCacheRoot" -> prepRoot, "ForcePrepRebuild" -> rebuild,
+    "MigrateLegacyPreparation" -> migrateLegacyPrep,
     "ResumeCheckpoint" -> resume, "CheckpointDirectory" -> checkpointDir,
     "AllowStaleCheckpoint" -> allowStale
   |>];
@@ -162,6 +166,7 @@ Options[PipelinePlan] = {
   "CheckpointDirectory" -> Automatic,
   "ResumeFrom" -> None,
   "RebuildPreparation" -> False,
+  "MigrateLegacyPreparation" -> False,
   "AllowStaleCheckpoint" -> False,
   "StopAfterBoundaryLevel" -> None,
   "FIRETimeoutSeconds" -> 1800,
@@ -207,7 +212,8 @@ validatePlanOptions[settings_Association] := Module[{checks},
     IntegerQ[settings["CppThreads"]] && settings["CppThreads"] >= 1,
     And @@ (boolQ[settings[#]] & /@ {
       "ValueTransport", "BatchEndpointArms", "SingularMatchPrecondition",
-      "RebuildPreparation", "AllowStaleCheckpoint", "Asynchronous"}),
+      "RebuildPreparation", "MigrateLegacyPreparation",
+      "AllowStaleCheckpoint", "Asynchronous"}),
     IntegerQ[settings["FIRETimeoutSeconds"]] &&
       settings["FIRETimeoutSeconds"] >= 1,
     AssociationQ[settings["ExtraEnvironment"]] &&
@@ -271,6 +277,8 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "SingularMatchPrecondition" -> OptionValue["SingularMatchPrecondition"],
     "DeltaPrescriptionSign" -> OptionValue["DeltaPrescriptionSign"],
     "RebuildPreparation" -> OptionValue["RebuildPreparation"],
+    "MigrateLegacyPreparation" ->
+      OptionValue["MigrateLegacyPreparation"],
     "AllowStaleCheckpoint" -> OptionValue["AllowStaleCheckpoint"],
     "FIREPath" -> firePath,
     "FIRETimeoutSeconds" -> OptionValue["FIRETimeoutSeconds"],
@@ -314,6 +322,8 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "FT_FIRE_PATH" -> firePath,
     "FT_LADDER_CHECKPOINT_DIR" -> checkpoint,
     "FT_REBUILD_PREP" -> boolString[settings["RebuildPreparation"]],
+    "FT_MIGRATE_LEGACY_PREP" ->
+      boolString[settings["MigrateLegacyPreparation"]],
     "FT_ALLOW_STALE_LADDER_CHECKPOINT" ->
       boolString[settings["AllowStaleCheckpoint"]],
     "FT_FIRE_TIMEOUT_SECONDS" -> inputString[settings["FIRETimeoutSeconds"]]

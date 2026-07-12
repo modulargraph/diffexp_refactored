@@ -24,6 +24,14 @@ json::object request(json::object value) {
       .as_object();
 }
 
+std::uint64_t unsigned_value(const json::object& object, const char* key) {
+  const auto& value = object.at(key);
+  if (value.is_uint64()) return value.as_uint64();
+  if (value.is_int64() && value.as_int64() >= 0)
+    return static_cast<std::uint64_t>(value.as_int64());
+  throw std::runtime_error(std::string("expected nonnegative counter: ") + key);
+}
+
 json::object geometry(const std::string& center) {
   return json::object{{"center_exact", center}, {"scale_exact", "1"},
                       {"radius_exact", "2"},
@@ -419,6 +427,62 @@ json::object run_zero_match_transport_arm(
            {"root", checkpoint_root}}}});
 }
 
+json::object observable(const std::string& identity,
+                        const std::string& checkpoint_identity,
+                        const std::string& tail_policy = "stored",
+                        bool malformed_second_row = false,
+                        bool shifted_output_window = false) {
+  json::array rows{
+      integrand_row(identity + ":tile:0"),
+      integrand_row(identity + ":tile:1")};
+  if (malformed_second_row)
+    rows[1].as_object()["columns"] = 2;
+  if (shifted_output_window)
+    for (auto& raw_row : rows)
+      raw_row.as_object().at("entries").as_array().front().as_object()
+          .at("multiplier").as_object()["epsilon_shift"] = 1;
+  return json::object{
+      {"identity", identity},
+      {"checkpoint_identity", checkpoint_identity},
+      {"integrand_rows", std::move(rows)},
+      {"epsilon", json::object{{"min", shifted_output_window ? 0 : -1},
+                                {"max", shifted_output_window ? 3 : 2},
+                                {"required_complete_max", 1}}},
+      {"tail_policy", tail_policy}};
+}
+
+json::object contract_observables(
+    const std::string& session, const std::string& state,
+    const std::string& state_checkpoint,
+    const std::string& state_provenance, json::array observables,
+    const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.contract"},
+      {"session", session}, {"transport_state", state},
+      {"transport_state_checkpoint_identity", state_checkpoint},
+      {"transport_state_provenance_identity", state_provenance},
+      {"checkpoint_policy", json::object{
+           {"schema",
+            "diffexp2-deterministic-transport-contraction-checkpoints-v1"},
+           {"root", checkpoint_root}}},
+      {"observables", std::move(observables)}});
+}
+
+json::object line_stats(const std::string& session,
+                        const std::string& line) {
+  return request(json::object{{"schema", 2}, {"op", "integration.stats"},
+                              {"session", session}, {"line", line}});
+}
+
+json::object line_export(const std::string& session, const std::string& line,
+                         const std::string& checkpoint_identity) {
+  return request(json::object{
+      {"schema", 2}, {"op", "integration.export"},
+      {"session", session}, {"line", line},
+      {"checkpoint_identity", checkpoint_identity},
+      {"output_digits", 30}});
+}
+
 json::object direct_singular_match_request(
     const std::string& session, const std::string& scc,
     const std::string& basis, const std::string& incoming) {
@@ -643,6 +707,10 @@ int main() {
           "transport.run_arm: " + json::serialize(transported));
     const auto transport_state =
         std::string(transported.at("transport_state").as_string());
+    const auto transport_checkpoint = std::string(
+        transported.at("checkpoint_identity").as_string());
+    const auto transport_provenance = std::string(
+        transported.at("provenance_identity").as_string());
     const auto transport_final = std::string(
         transported.at("final_local").as_object().at("local").as_string());
     const auto transport_stats = request(json::object{
@@ -653,6 +721,237 @@ int main() {
             transport_final)
       throw std::runtime_error(
           "transport.stats: " + json::serialize(transport_stats));
+
+    std::vector<std::pair<std::string, std::string>> contracted_lines;
+    json::value compact_export_value;
+    const auto before_empty_contract = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto before_empty_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    const auto empty_contract = contract_observables(
+        session, transport_state, transport_checkpoint,
+        transport_provenance, json::array{}, "contract-empty");
+    const auto after_empty_contract = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto after_empty_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    const auto after_empty_state = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    if (empty_contract.at("status") != "ok" ||
+        empty_contract.at("observables") != 0 ||
+        !empty_contract.at("lines").as_array().empty() ||
+        before_empty_contract.at("locals") != after_empty_contract.at("locals") ||
+        before_empty_contract.at("matches") != after_empty_contract.at("matches") ||
+        before_empty_contract.at("line_results") !=
+            after_empty_contract.at("line_results") ||
+        before_empty_contract.at("line_integrations") !=
+            after_empty_contract.at("line_integrations") ||
+        unsigned_value(after_empty_contract, "transport_contractions") !=
+            unsigned_value(before_empty_contract, "transport_contractions") + 1 ||
+        before_empty_contract.at("transport_observables") !=
+            after_empty_contract.at("transport_observables") ||
+        before_empty_plan.at("integrations") != after_empty_plan.at("integrations") ||
+        unsigned_value(after_empty_state, "contraction_operations") != 1 ||
+        unsigned_value(after_empty_state, "contracted_observables") != 0)
+      throw std::runtime_error(
+          "zero-observable contraction was not a handle-free batch no-op: " +
+          json::serialize(empty_contract) + " / " +
+          json::serialize(after_empty_contract) + " / " +
+          json::serialize(after_empty_state));
+
+    json::array one_observable;
+    one_observable.push_back(observable(
+        "observable-one", "observable-one-checkpoint"));
+    const auto before_one_contract = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto one_contract = contract_observables(
+        session, transport_state, transport_checkpoint,
+        transport_provenance, std::move(one_observable), "contract-one");
+    const auto after_one_contract = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    if (one_contract.at("status") != "ok" ||
+        one_contract.at("observables") != 1 ||
+        one_contract.at("json_coefficients") != 0 ||
+        one_contract.at("no_rematching") != true ||
+        one_contract.at("lines").as_array().size() != 1 ||
+        before_one_contract.at("locals") != after_one_contract.at("locals") ||
+        before_one_contract.at("matches") != after_one_contract.at("matches") ||
+        unsigned_value(after_one_contract, "line_results") !=
+            unsigned_value(before_one_contract, "line_results") + 1 ||
+        unsigned_value(after_one_contract, "line_integrations") !=
+            unsigned_value(before_one_contract, "line_integrations") + 2 ||
+        before_one_contract.at("local_matches") !=
+            after_one_contract.at("local_matches"))
+      throw std::runtime_error(
+          "one-observable contraction did not publish one compact line: " +
+          json::serialize(one_contract) + " / " +
+          json::serialize(after_one_contract));
+    const auto& one_line = one_contract.at("lines").as_array().front().as_object();
+    if (one_line.at("request_index") != 0 ||
+        one_line.at("observable_identity") != "observable-one" ||
+        one_line.at("session").as_string() != session)
+      throw std::runtime_error(
+          "one-observable contraction lost ordered public identity");
+    contracted_lines.emplace_back(
+        std::string(one_line.at("line").as_string()),
+        std::string(one_line.at("checkpoint_identity").as_string()));
+
+    json::array three_observables;
+    for (int index = 0; index < 3; ++index)
+      three_observables.push_back(observable(
+          "observable-three-" + std::to_string(index),
+          "observable-three-checkpoint-" + std::to_string(index),
+          index == 1 ? "attempt" : "stored", false, index == 2));
+    const auto before_three_contract = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto three_contract = contract_observables(
+        session, transport_state, transport_checkpoint,
+        transport_provenance, std::move(three_observables), "contract-three");
+    const auto after_three_contract = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    if (three_contract.at("status") != "ok" ||
+        three_contract.at("observables") != 3 ||
+        three_contract.at("lines").as_array().size() != 3 ||
+        before_three_contract.at("locals") != after_three_contract.at("locals") ||
+        before_three_contract.at("matches") != after_three_contract.at("matches") ||
+        unsigned_value(after_three_contract, "line_results") !=
+            unsigned_value(before_three_contract, "line_results") + 3 ||
+        unsigned_value(after_three_contract, "line_integrations") !=
+            unsigned_value(before_three_contract, "line_integrations") + 6 ||
+        before_three_contract.at("local_matches") !=
+            after_three_contract.at("local_matches"))
+      throw std::runtime_error(
+          "three-observable contraction did not publish three compact lines: " +
+          json::serialize(three_contract) + " / " +
+          json::serialize(after_three_contract));
+    for (std::size_t index = 0;
+         index < three_contract.at("lines").as_array().size(); ++index) {
+      const auto& line =
+          three_contract.at("lines").as_array()[index].as_object();
+      if (unsigned_value(line, "request_index") != index ||
+          line.at("observable_identity").as_string() !=
+              "observable-three-" + std::to_string(index) ||
+          line.at("session").as_string() != session)
+        throw std::runtime_error(
+            "three-observable contraction reordered its outputs");
+      contracted_lines.emplace_back(
+          std::string(line.at("line").as_string()),
+          std::string(line.at("checkpoint_identity").as_string()));
+    }
+    if (three_contract.at("lines").as_array()[1].as_object().at("scope") !=
+            "stored_truncation" ||
+        unsigned_value(
+            three_contract.at("lines").as_array()[2].as_object()
+                .at("epsilon").as_object(),
+            "max") != 3)
+      throw std::runtime_error(
+          "attempt-tail downgrade or shifted output epsilon contract was not preserved");
+    const auto after_success_state = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    if (unsigned_value(after_success_state, "contraction_operations") != 3 ||
+        unsigned_value(after_success_state, "contracted_observables") != 4)
+      throw std::runtime_error(
+          "successful contraction counters are inconsistent: " +
+          json::serialize(after_success_state));
+
+    json::array malformed_observables;
+    malformed_observables.push_back(observable(
+        "malformed-prefix-good", "malformed-prefix-good-checkpoint"));
+    malformed_observables.push_back(observable(
+        "malformed-row", "malformed-row-checkpoint", "stored", true));
+    const auto before_malformed = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto before_malformed_state = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    const auto before_malformed_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    const auto malformed_contract = contract_observables(
+        session, transport_state, transport_checkpoint,
+        transport_provenance, std::move(malformed_observables),
+        "contract-malformed");
+    const auto after_malformed = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto after_malformed_state = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    const auto after_malformed_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    if (malformed_contract.at("status") != "error" ||
+        std::string(malformed_contract.at("detail").as_string()).find(
+            "dimension differs") == std::string::npos ||
+        before_malformed.at("locals") != after_malformed.at("locals") ||
+        before_malformed.at("matches") != after_malformed.at("matches") ||
+        before_malformed.at("line_results") != after_malformed.at("line_results") ||
+        before_malformed.at("line_integrations") !=
+            after_malformed.at("line_integrations") ||
+        before_malformed.at("transport_contractions") !=
+            after_malformed.at("transport_contractions") ||
+        before_malformed.at("transport_observables") !=
+            after_malformed.at("transport_observables") ||
+        before_malformed_state.at("contraction_operations") !=
+            after_malformed_state.at("contraction_operations") ||
+        before_malformed_state.at("contracted_observables") !=
+            after_malformed_state.at("contracted_observables") ||
+        before_malformed_plan.at("integrations") !=
+            after_malformed_plan.at("integrations") ||
+        after_malformed.at("pending_line_integrations") != 0)
+      throw std::runtime_error(
+          "malformed observable contraction was not rolled back atomically: " +
+          json::serialize(malformed_contract) + " / " +
+          json::serialize(after_malformed));
+
+    json::array require_observable;
+    require_observable.push_back(observable(
+        "require-tail", "require-tail-checkpoint", "require"));
+    const auto before_require = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto before_require_state = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    const auto before_require_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    const auto require_contract = contract_observables(
+        session, transport_state, transport_checkpoint,
+        transport_provenance, std::move(require_observable),
+        "contract-require-tail");
+    const auto after_require = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto after_require_state = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    const auto after_require_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    if (require_contract.at("status") != "error" ||
+        std::string(require_contract.at("detail").as_string()).find(
+            "requires a certified full-local tail") == std::string::npos ||
+        before_require.at("locals") != after_require.at("locals") ||
+        before_require.at("line_results") != after_require.at("line_results") ||
+        before_require.at("line_integrations") !=
+            after_require.at("line_integrations") ||
+        before_require.at("transport_contractions") !=
+            after_require.at("transport_contractions") ||
+        before_require.at("transport_observables") !=
+            after_require.at("transport_observables") ||
+        before_require_state.at("contraction_operations") !=
+            after_require_state.at("contraction_operations") ||
+        before_require_state.at("contracted_observables") !=
+            after_require_state.at("contracted_observables") ||
+        before_require_plan.at("integrations") !=
+            after_require_plan.at("integrations") ||
+        after_require.at("pending_line_integrations") != 0)
+      throw std::runtime_error(
+          "required-tail contraction did not fail atomically and honestly: " +
+          json::serialize(require_contract) + " / " +
+          json::serialize(after_require));
 
     const auto released_plan = request(json::object{
         {"schema", 2}, {"op", "tile.release"}, {"session", session},
@@ -718,6 +1017,29 @@ int main() {
           json::serialize(released_zero_state) + " / " +
           json::serialize(released_zero_plan));
 
+    const auto released_transport = request(json::object{
+        {"schema", 2}, {"op", "transport.release"}, {"session", session},
+        {"transport_state", transport_state}});
+    const auto hidden_transport = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    const auto compact_stats = line_stats(
+        session, contracted_lines.front().first);
+    const auto compact_export = line_export(
+        session, contracted_lines.front().first,
+        contracted_lines.front().second);
+    if (released_transport.at("status") != "ok" ||
+        hidden_transport.at("status") != "error" ||
+        compact_stats.at("status") != "ok" ||
+        compact_export.at("status") != "ok" ||
+        compact_export.at("json_coefficients") == 0)
+      throw std::runtime_error(
+          "compact observable line did not survive transport-state release: " +
+          json::serialize(released_transport) + " / " +
+          json::serialize(compact_stats) + " / " +
+          json::serialize(compact_export));
+    compact_export_value = compact_export.at("value");
+
     const auto saved = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
         {"path", checkpoint},
@@ -744,12 +1066,17 @@ int main() {
           return true;
       return false;
     };
-    if (saved_payload.at("retained_transport_states").as_array().size() != 1 ||
-        !contains_record(
+    if (saved_payload.at("retained_transport_states").as_array().size() != 1)
+      throw std::runtime_error(
+          "checkpoint did not retain exactly one hidden transport state");
+    const auto& retained_state_record =
+        saved_payload.at("retained_transport_states").as_array().front()
+            .as_object();
+    if (!contains_record(
             saved_payload.at("retained_transport_states").as_array(),
             "handle", transport_state) ||
-        !contains_string(saved_visibility.at("transport_states").as_array(),
-                         transport_state) ||
+        contains_string(saved_visibility.at("transport_states").as_array(),
+                        transport_state) ||
         contains_string(saved_visibility.at("tile_plans").as_array(),
                         single_plan) ||
         contains_string(saved_visibility.at("locals").as_array(),
@@ -757,9 +1084,37 @@ int main() {
         !contains_record(saved_payload.at("retained_tile_plans").as_array(),
                          "handle", single_plan) ||
         !contains_record(saved_payload.at("retained_locals").as_array(),
-                         "handle", transport_final))
+                         "handle", transport_final) ||
+        retained_state_record.at("schema") !=
+            "diffexp2-retained-transport-arm-state-v2" ||
+        unsigned_value(retained_state_record.at("runtime_stats").as_object(),
+                       "contraction_operations") != 3 ||
+        unsigned_value(retained_state_record.at("runtime_stats").as_object(),
+                       "contracted_observables") != 4)
       throw std::runtime_error(
           "checkpoint did not separate transport-owned closure from registry visibility");
+    for (const auto& [line_handle, ignored] : contracted_lines) {
+      bool found_compact = false;
+      for (const auto& raw_line :
+           saved_payload.at("retained_line_results").as_array()) {
+        const auto& line = raw_line.as_object();
+        if (line.at("handle").as_string() != line_handle) continue;
+        found_compact =
+            line.at("schema") ==
+                "diffexp2-retained-transport-observable-line-v1" &&
+            line.at("provenance").as_object().at("aggregate").as_object()
+                    .if_contains("components") == nullptr;
+      }
+      if (!found_compact)
+        throw std::runtime_error(
+            "transport observable checkpoint retained projected component state");
+    }
+    for (const auto& raw_local :
+         saved_payload.at("retained_locals").as_array())
+      if (std::string(raw_local.as_object().at("handle").as_string())
+              .starts_with("private:"))
+        throw std::runtime_error(
+            "transport observable checkpoint retained a private projected local");
     const auto [singular_proof, ordinary_proof] = proof_schemas(checkpoint);
 
     const auto restored = request(json::object{
@@ -778,14 +1133,21 @@ int main() {
     const auto restored_hidden_plan = request(json::object{
         {"schema", 2}, {"op", "tile.stats"},
         {"session", restored_session}, {"tile_plan", single_plan}});
-    if (restored_transport_stats.at("status") != "ok" ||
-        restored_transport_stats.at("tile_plan").as_string() != single_plan ||
-        restored_transport_stats.at("final_local").as_object().at("local").as_string() !=
-            transport_final || restored_hidden_plan.at("status") != "error")
+    const auto restored_compact_stats = line_stats(
+        restored_session, contracted_lines.front().first);
+    const auto restored_compact_export = line_export(
+        restored_session, contracted_lines.front().first,
+        contracted_lines.front().second);
+    if (restored_transport_stats.at("status") != "error" ||
+        restored_hidden_plan.at("status") != "error" ||
+        restored_compact_stats.at("status") != "ok" ||
+        restored_compact_export.at("status") != "ok" ||
+        restored_compact_export.at("value") != compact_export_value)
       throw std::runtime_error(
-          "transport state checkpoint closure/visibility did not restore: " +
+          "hidden transport-owned compact line did not restore exactly: " +
           json::serialize(restored_transport_stats) + " / " +
-          json::serialize(restored_hidden_plan));
+          json::serialize(restored_hidden_plan) + " / " +
+          json::serialize(restored_compact_export));
     const auto saved_second = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
         {"session", restored_session}, {"path", checkpoint_second},
@@ -811,31 +1173,23 @@ int main() {
         {"schema", 2}, {"op", "transport.stats"},
         {"session", restored_session},
         {"transport_state", transport_state}});
-    const auto released_transport = request(json::object{
-        {"schema", 2}, {"op", "transport.release"},
-        {"session", restored_session},
-        {"transport_state", transport_state}});
-    const auto released_transport_again = request(json::object{
-        {"schema", 2}, {"op", "transport.release"},
-        {"session", restored_session},
-        {"transport_state", transport_state}});
-    const auto released_transport_stats = request(json::object{
-        {"schema", 2}, {"op", "transport.stats"},
-        {"session", restored_session},
-        {"transport_state", transport_state}});
+    const auto second_compact_stats = line_stats(
+        restored_session, contracted_lines.front().first);
+    const auto second_compact_export = line_export(
+        restored_session, contracted_lines.front().first,
+        contracted_lines.front().second);
     const auto after_transport_release = request(json::object{
         {"schema", 2}, {"op", "session.stats"},
         {"session", restored_session}});
-    if (second_transport_stats.at("status") != "ok" ||
-        released_transport.at("status") != "ok" ||
-        released_transport_again.at("status") != "error" ||
-        released_transport_stats.at("status") != "error" ||
+    if (second_transport_stats.at("status") != "error" ||
+        second_compact_stats.at("status") != "ok" ||
+        second_compact_export.at("status") != "ok" ||
+        second_compact_export.at("value") != compact_export_value ||
         after_transport_release.at("transport_states") != 0)
       throw std::runtime_error(
-          "restored transport release was not observable and terminal: " +
-          json::serialize(released_transport) + " / " +
-          json::serialize(released_transport_again) + " / " +
-          json::serialize(released_transport_stats) + " / " +
+          "second-generation compact transport line was not stable: " +
+          json::serialize(second_transport_stats) + " / " +
+          json::serialize(second_compact_export) + " / " +
           json::serialize(after_transport_release));
     (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                {"session", restored_session}});

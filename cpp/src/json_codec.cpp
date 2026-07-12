@@ -9482,6 +9482,8 @@ constexpr const char* kRetainedParallelArmCapability =
     "retained-native-concurrent-two-arm-march-v1";
 constexpr const char* kRetainedTransportArmStateCapability =
     "retained-native-transport-arm-state-v1";
+constexpr const char* kRetainedTransportArmContractionCapability =
+    "retained-native-transport-arm-contraction-v1";
 constexpr const char* kRetainedLineAggregateCapability =
     "retained-native-line-aggregate-v1";
 
@@ -10358,6 +10360,26 @@ class StoredTransportArmState {
   const std::shared_ptr<StoredLocalBase>& final_local() const {
     return tile_sources_.back();
   }
+  std::int32_t public_required_complete_max() const {
+    return public_required_complete_max_;
+  }
+
+  void require_contraction_counter_capacity(
+      std::size_t observables) const {
+    const auto operation_count = contraction_operations_.load();
+    const auto observable_count = contracted_observables_.load();
+    if (operation_count == std::numeric_limits<std::uint64_t>::max() ||
+        observables > std::numeric_limits<std::uint64_t>::max() -
+                          observable_count)
+      throw std::overflow_error(
+          "retained transport-arm contraction counter overflow");
+  }
+
+  void note_contraction_success(std::size_t observables) noexcept {
+    contraction_operations_.fetch_add(1);
+    contracted_observables_.fetch_add(
+        static_cast<std::uint64_t>(observables));
+  }
 
   json::object summary() const {
     return json::object{
@@ -10373,6 +10395,8 @@ class StoredTransportArmState {
         {"arm", arm_},
         {"matches", matches_.size()},
         {"tiles", tile_sources_.size()},
+        {"contraction_operations", contraction_operations_.load()},
+        {"contracted_observables", contracted_observables_.load()},
         {"epsilon", epsilon_record()},
         {"refinement", refinement_},
         {"final_local", local_reference(final_local())},
@@ -10392,18 +10416,26 @@ class StoredTransportArmState {
 
   json::object checkpoint_record() const {
     return json::object{
-        {"schema", "diffexp2-retained-transport-arm-state-v1"},
+        {"schema", "diffexp2-retained-transport-arm-state-v2"},
         {"handle", handle_},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
         {"provenance", provenance_record()},
         {"elapsed_ms", elapsed_ms_},
         {"runtime_stats",
-         json::object{{"stats_queries", stats_queries_.load()}}}};
+         json::object{{"stats_queries", stats_queries_.load()},
+                      {"contraction_operations",
+                       contraction_operations_.load()},
+                      {"contracted_observables",
+                       contracted_observables_.load()}}}};
   }
 
-  void restore_runtime_stats(std::uint64_t stats_queries) {
+  void restore_runtime_stats(std::uint64_t stats_queries,
+                             std::uint64_t contraction_operations,
+                             std::uint64_t contracted_observables) {
     stats_queries_.store(stats_queries);
+    contraction_operations_.store(contraction_operations);
+    contracted_observables_.store(contracted_observables);
   }
 
  private:
@@ -10582,6 +10614,8 @@ class StoredTransportArmState {
   json::object refinement_;
   double elapsed_ms_ = 0.0;
   mutable std::atomic<std::uint64_t> stats_queries_{0};
+  std::atomic<std::uint64_t> contraction_operations_{0};
+  std::atomic<std::uint64_t> contracted_observables_{0};
 };
 
 class StoredLineResult {
@@ -10608,23 +10642,48 @@ class StoredLineResult {
                    StoredLineIntegral result, double elapsed_ms,
                    std::shared_ptr<StoredTilePlan> plan_owner,
                    std::vector<std::shared_ptr<StoredLocalBase>> local_owners,
-                   json::object aggregate_provenance)
+                   json::object aggregate_provenance,
+                   std::shared_ptr<StoredTransportArmState> transport_owner =
+                       nullptr)
       : handle_(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
         provenance_identity_(std::move(provenance_identity)),
         result_(std::move(result)), elapsed_ms_(elapsed_ms),
         plan_owner_(std::move(plan_owner)),
         local_owners_(std::move(local_owners)),
-        aggregate_provenance_(std::move(aggregate_provenance)) {
-    if (!plan_owner_ || local_owners_.empty() ||
+        aggregate_provenance_(std::move(aggregate_provenance)),
+        transport_owner_(std::move(transport_owner)) {
+    if (!plan_owner_ || (local_owners_.empty() && !transport_owner_) ||
         std::any_of(local_owners_.begin(), local_owners_.end(),
                     [](const auto& owner) { return owner == nullptr; }))
       throw std::invalid_argument(
-          "retained line aggregate requires its plan and local owners");
+          "retained line aggregate requires its plan and strong source owners");
     if (json::serialize(canonical_json_value(*aggregate_provenance_)) !=
         provenance_identity_)
       throw std::invalid_argument(
           "retained line aggregate provenance identity is inconsistent");
+    const auto& aggregate = as_object(
+        aggregate_provenance_->at("aggregate"),
+        "retained line aggregate recipe");
+    const auto* raw_transport = aggregate.if_contains("transport_state");
+    if ((raw_transport == nullptr) != (transport_owner_ == nullptr))
+      throw std::invalid_argument(
+          "retained line aggregate transport ownership differs from its provenance");
+    if (raw_transport != nullptr) {
+      const auto& reference = as_object(
+          *raw_transport, "retained line aggregate transport reference");
+      require_exact_keys(reference,
+                         {"handle", "checkpoint_identity",
+                          "provenance_identity"},
+                         "retained line aggregate transport reference");
+      if (required_string(reference, "handle") != transport_owner_->handle() ||
+          required_string(reference, "checkpoint_identity") !=
+              transport_owner_->checkpoint_identity() ||
+          required_string(reference, "provenance_identity") !=
+              transport_owner_->provenance_identity())
+        throw std::invalid_argument(
+            "retained line aggregate transport reference is stale");
+    }
   }
 
   const std::string& handle() const { return handle_; }
@@ -10642,17 +10701,25 @@ class StoredLineResult {
     return plan_owner_;
   }
   const std::shared_ptr<StoredLocalBase>& local_owner() const {
+    if (local_owners_.empty())
+      throw std::logic_error(
+          "compact transport observable line has no retained local owner");
     return local_owners_.front();
   }
   const std::vector<std::shared_ptr<StoredLocalBase>>& local_owners() const {
     return local_owners_;
+  }
+  const std::shared_ptr<StoredTransportArmState>& transport_owner() const {
+    return transport_owner_;
   }
 
   json::object summary() const {
     const auto& diagnostics = result_.diagnostics;
     json::object output{
         {"line", handle_},
-        {"capability", is_aggregate()
+        {"capability", transport_owner_
+             ? kRetainedTransportArmContractionCapability
+             : is_aggregate()
              ? kRetainedLineAggregateCapability
              : result_.scope ==
                            LineIntegrationScope::FullLocalWithCertifiedTail
@@ -10750,7 +10817,9 @@ class StoredLineResult {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     if (aggregate_provenance_.has_value()) {
       return json::object{
-          {"schema", "diffexp2-retained-line-aggregate-v1"},
+          {"schema", transport_owner_
+               ? "diffexp2-retained-transport-observable-line-v1"
+               : "diffexp2-retained-line-aggregate-v1"},
           {"handle", handle_},
           {"checkpoint_identity", checkpoint_identity_},
           {"provenance_identity", provenance_identity_},
@@ -10869,6 +10938,7 @@ class StoredLineResult {
   std::shared_ptr<StoredTilePlan> plan_owner_;
   std::vector<std::shared_ptr<StoredLocalBase>> local_owners_;
   std::optional<json::object> aggregate_provenance_;
+  std::shared_ptr<StoredTransportArmState> transport_owner_;
   mutable std::mutex stats_mutex_;
   std::uint64_t exports_ = 0;
   double export_ms_ = 0.0;
@@ -10910,6 +10980,8 @@ struct SolverSession {
   std::uint64_t total_endpoint_exports = 0;
   std::uint64_t total_tile_plans = 0;
   std::uint64_t total_transport_arm_marches = 0;
+  std::uint64_t total_transport_contractions = 0;
+  std::uint64_t total_transport_observables = 0;
   std::uint64_t total_line_integrations = 0;
   std::uint64_t total_line_exports = 0;
   double total_local_run_parse_ms = 0.0;
@@ -10922,6 +10994,7 @@ struct SolverSession {
   double total_endpoint_export_ms = 0.0;
   double total_tile_plan_ms = 0.0;
   double total_transport_arm_ms = 0.0;
+  double total_transport_contraction_ms = 0.0;
   double total_line_integration_ms = 0.0;
   double total_line_export_ms = 0.0;
   bool closed = false;
@@ -11817,6 +11890,29 @@ struct WholeArmEpsilonContract {
   std::int32_t match_required_complete_max = 0;
 };
 
+struct ObservableEpsilonContract {
+  EpsilonWindow requested;
+  std::int32_t required_complete_max = 0;
+};
+
+ObservableEpsilonContract parse_observable_epsilon_contract(
+    const json::value& raw, const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(object, {"min", "max", "required_complete_max"},
+                     label);
+  ObservableEpsilonContract result{
+      {as_i32(object.at("min"), "observable epsilon minimum"),
+       as_i32(object.at("max"), "observable epsilon maximum")},
+      as_i32(object.at("required_complete_max"),
+             "observable required epsilon maximum")};
+  (void)result.requested.width();
+  if (result.required_complete_max < result.requested.min_power ||
+      result.required_complete_max > result.requested.complete_max)
+    throw std::invalid_argument(
+        "observable required epsilon maximum must lie in its exact output window");
+  return result;
+}
+
 WholeArmEpsilonContract parse_whole_arm_epsilon_contract(
     const json::value& raw, const char* label) {
   const auto& object = as_object(raw, label);
@@ -12153,6 +12249,227 @@ std::shared_ptr<StoredLineResult> build_retained_line_aggregate(
   return std::make_shared<StoredLineResult>(
       handle, checkpoint_identity, provenance_identity, std::move(result),
       elapsed_ms, plan, std::move(local_owners), std::move(provenance));
+}
+
+std::shared_ptr<StoredLineResult> build_compact_transport_observable_line(
+    const std::string& handle, const std::string& checkpoint_identity,
+    const std::string& arm_name, json::object interval,
+    json::object aggregate_record,
+    const std::shared_ptr<StoredTransportArmState>& transport_state,
+    const std::vector<std::shared_ptr<StoredLineResult>>& tile_lines,
+    double elapsed_ms) {
+  if (!transport_state || checkpoint_identity.empty() || tile_lines.empty())
+    throw std::invalid_argument(
+        "compact transport observable requires its state, checkpoint, and tile values");
+  auto result = aggregate_retained_lines(
+      tile_lines, std::vector<std::int32_t>(tile_lines.size(), 1),
+      "compact native transport observable aggregate");
+  aggregate_record["tile_count"] = tile_lines.size();
+  json::object provenance{
+      {"schema", "diffexp2-retained-native-transport-observable-line-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"arm", arm_name},
+      {"interval", std::move(interval)},
+      {"source", json::object{
+           {"tile_plan", transport_state->plan_owner()->handle()},
+           {"tile_plan_checkpoint_identity",
+            transport_state->plan_owner()->checkpoint_identity()},
+           {"transport_state", transport_state->handle()},
+           {"transport_state_checkpoint_identity",
+            transport_state->checkpoint_identity()},
+           {"transport_state_provenance_identity",
+            transport_state->provenance_identity()}}},
+      {"aggregate", std::move(aggregate_record)},
+      {"epsilon", json::object{{"min", result.value.epsilon.min_power},
+                                {"max", result.value.epsilon.complete_max}}},
+      {"scope", line_integration_scope_name(result.scope)},
+      {"error_guarantee",
+       error_guarantee_name(result.value.error.guarantee)}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  return std::make_shared<StoredLineResult>(
+      handle, checkpoint_identity, provenance_identity, std::move(result),
+      elapsed_ms, transport_state->plan_owner(),
+      std::vector<std::shared_ptr<StoredLocalBase>>{}, std::move(provenance),
+      transport_state);
+}
+
+enum class TransportTailPolicy { Stored, Attempt, Require };
+
+TransportTailPolicy parse_transport_tail_policy(const json::value& raw,
+                                                 const char* label) {
+  if (!raw.is_string())
+    throw std::invalid_argument(std::string(label) + " must be a string");
+  const std::string value(raw.as_string());
+  if (value == "stored") return TransportTailPolicy::Stored;
+  if (value == "attempt") return TransportTailPolicy::Attempt;
+  if (value == "require") return TransportTailPolicy::Require;
+  throw std::invalid_argument(
+      std::string(label) + " must be stored, attempt, or require");
+}
+
+const char* transport_tail_policy_name(TransportTailPolicy policy) {
+  switch (policy) {
+    case TransportTailPolicy::Stored:
+      return "stored";
+    case TransportTailPolicy::Attempt:
+      return "attempt";
+    case TransportTailPolicy::Require:
+      return "require";
+  }
+  throw std::logic_error("unknown transport tail policy");
+}
+
+struct TransportObservableContractionInput {
+  std::string identity;
+  std::string checkpoint_identity;
+  std::string checkpoint_root;
+  std::vector<json::object> rows;
+  ObservableEpsilonContract epsilon;
+  json::object epsilon_record;
+  TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
+  std::vector<std::string> projected_local_handles;
+  std::string aggregate_handle;
+  json::object aggregate_record;
+};
+
+struct TransportObservableContractionResult {
+  std::string identity;
+  std::vector<std::shared_ptr<StoredLocalBase>> projected;
+  std::vector<std::shared_ptr<StoredLineResult>> tile_lines;
+  std::shared_ptr<StoredLineResult> aggregate;
+  std::size_t tile_integrations = 0;
+  double tile_integration_ms = 0.0;
+  double elapsed_ms = 0.0;
+};
+
+std::vector<TransportObservableContractionResult> contract_transport_arm(
+    const std::string& domain, slong precision_bits,
+    const std::shared_ptr<StoredTilePlan>& plan, const std::string& arm_name,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& tile_sources,
+    const std::vector<TransportObservableContractionInput>& observables,
+    const std::shared_ptr<StoredTransportArmState>& transport_owner =
+        nullptr) {
+  if ((domain != "rational" && domain != "acb") || !plan)
+    throw std::invalid_argument(
+        "native transport contraction requires a numeric domain and retained plan");
+  const auto& retained = plan->arm(arm_name);
+  if (tile_sources.size() != retained.exact.tiles.size() ||
+      tile_sources.empty())
+    throw std::invalid_argument(
+        "native transport contraction sources do not reproduce the retained arm tiles");
+  if (domain == "acb") ComplexBall::set_precision(precision_bits);
+
+  std::vector<TransportObservableContractionResult> results;
+  results.reserve(observables.size());
+  for (const auto& observable : observables) {
+    if (observable.identity.empty() || observable.checkpoint_identity.empty() ||
+        observable.checkpoint_root.empty() ||
+        observable.aggregate_handle.empty() ||
+        observable.rows.size() != tile_sources.size() ||
+        observable.projected_local_handles.size() != tile_sources.size())
+      throw std::invalid_argument(
+          "native observable contraction does not reproduce its retained tile topology or identities");
+    const auto started = std::chrono::steady_clock::now();
+    TransportObservableContractionResult output;
+    output.identity = observable.identity;
+    output.projected.reserve(tile_sources.size());
+    output.tile_lines.reserve(tile_sources.size());
+    for (std::size_t tile = 0; tile < tile_sources.size(); ++tile) {
+      const auto& source = tile_sources[tile];
+      const auto row_identity = required_string(
+          observable.rows[tile], "exact_identity");
+      json::object row_request{
+          {"row", observable.rows[tile]},
+          {"source_checkpoint_identity", source->checkpoint_identity()},
+          {"checkpoint_identity",
+           arm_checkpoint_identity(observable.checkpoint_root, arm_name,
+                                   "integrand", tile + 1) +
+               ":" + row_identity}};
+      std::shared_ptr<StoredLocalBase> projected;
+      if (domain == "rational") {
+        const auto typed =
+            std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+        if (!typed)
+          throw std::logic_error(
+              "transport contraction Rational source changed coefficient domain");
+        projected = build_rational_row_local<Rational>(
+            observable.projected_local_handles[tile], row_request,
+            precision_bits, typed, source);
+      } else {
+        const auto typed =
+            std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+        if (!typed)
+          throw std::logic_error(
+              "transport contraction Acb source changed coefficient domain");
+        projected = build_rational_row_local<ComplexBall>(
+            observable.projected_local_handles[tile], row_request,
+            precision_bits, typed, source);
+      }
+      const auto line_epsilon = live_line_epsilon_intersection(
+          observable.epsilon.requested,
+          observable.epsilon.required_complete_max, projected);
+      output.projected.push_back(projected);
+      json::object line_request{
+          {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+          {"source_checkpoint_identity", projected->checkpoint_identity()},
+          {"checkpoint_identity",
+           arm_checkpoint_identity(observable.checkpoint_root, arm_name,
+                                   "tile", tile + 1)},
+          {"arm", arm_name},
+          {"tile", tile},
+          {"epsilon", json::object{{"min", line_epsilon.min_power},
+                                    {"max", line_epsilon.complete_max}}}};
+      if (observable.tail_policy != TransportTailPolicy::Stored)
+        line_request["certify_tail"] = true;
+      output.tile_lines.push_back(build_planned_line_result(
+          "private:" + arm_checkpoint_identity(
+                           observable.checkpoint_root, arm_name, "tile",
+                           tile + 1),
+          line_request, plan, projected));
+      output.tile_integration_ms += output.tile_lines.back()->elapsed_ms();
+    }
+    output.tile_integrations = output.tile_lines.size();
+    const auto aggregate_started = std::chrono::steady_clock::now();
+    const auto interval = json::object{
+        {"from_exact", retained.exact.from.str()},
+        {"to_exact", retained.exact.to.str()}};
+    if (transport_owner) {
+      output.aggregate = build_compact_transport_observable_line(
+          observable.aggregate_handle, observable.checkpoint_identity,
+          arm_name, interval, observable.aggregate_record, transport_owner,
+          output.tile_lines,
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - aggregate_started)
+              .count());
+    } else {
+      output.aggregate = build_retained_line_aggregate(
+          observable.aggregate_handle, observable.checkpoint_identity,
+          arm_name, interval, observable.aggregate_record, plan,
+          output.projected, output.tile_lines,
+          std::vector<std::int32_t>(output.tile_lines.size(), 1),
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - aggregate_started)
+              .count());
+    }
+    if (output.aggregate->result().value.epsilon.complete_max <
+        observable.epsilon.required_complete_max)
+      throw std::domain_error(
+          "native observable aggregate does not cover its required epsilon maximum");
+    if (observable.tail_policy == TransportTailPolicy::Require &&
+        output.aggregate->result().scope !=
+            LineIntegrationScope::FullLocalWithCertifiedTail)
+      throw std::domain_error(
+          "native observable contraction requires a certified full-local tail but certification was unavailable");
+    output.elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (transport_owner) {
+      output.tile_lines.clear();
+      output.projected.clear();
+    }
+    results.push_back(std::move(output));
+  }
+  return results;
 }
 
 std::vector<std::uint32_t> parse_index_vector(
@@ -12771,7 +13088,7 @@ std::string static_problem_signature(const json::object& problem,
 
 constexpr const char* kCheckpointFormat =
     "diffexp2-persistent-native-session";
-constexpr std::uint32_t kCheckpointPayloadSchema = 3;
+constexpr std::uint32_t kCheckpointPayloadSchema = 4;
 
 json::object run_session_command(const json::object& root);
 
@@ -13365,7 +13682,7 @@ restore_checkpoint_transport_arm_state_record(
        "provenance", "elapsed_ms", "runtime_stats"},
       "checkpoint retained transport-arm state");
   if (required_string(object, "schema") !=
-      "diffexp2-retained-transport-arm-state-v1")
+      "diffexp2-retained-transport-arm-state-v2")
     throw std::invalid_argument(
         "unsupported retained transport-arm checkpoint schema");
   const auto handle = required_string(object, "handle");
@@ -13552,11 +13869,17 @@ restore_checkpoint_transport_arm_state_record(
   const auto& stats = as_object(
       object.at("runtime_stats"),
       "checkpoint transport-arm runtime stats");
-  require_exact_keys(stats, {"stats_queries"},
+  require_exact_keys(stats,
+                     {"stats_queries", "contraction_operations",
+                      "contracted_observables"},
                      "checkpoint transport-arm runtime stats");
-  state->restore_runtime_stats(as_u64(
-      stats.at("stats_queries"),
-      "checkpoint transport-arm statistics queries"));
+  state->restore_runtime_stats(
+      as_u64(stats.at("stats_queries"),
+             "checkpoint transport-arm statistics queries"),
+      as_u64(stats.at("contraction_operations"),
+             "checkpoint transport-arm contraction operations"),
+      as_u64(stats.at("contracted_observables"),
+             "checkpoint transport-arm contracted observables"));
   if (state->checkpoint_record() != raw)
     throw std::invalid_argument(
         "restored transport-arm state does not reproduce its exact retained state");
@@ -13859,15 +14182,18 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
 std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
     const json::value& raw,
     const std::shared_ptr<StoredTilePlan>& plan,
-    std::vector<std::shared_ptr<StoredLocalBase>> local_owners) {
+    std::vector<std::shared_ptr<StoredLocalBase>> local_owners,
+    std::shared_ptr<StoredTransportArmState> transport_owner = nullptr) {
   const auto& object = as_object(raw, "checkpoint retained line aggregate");
   require_exact_keys(
       object,
       {"schema", "handle", "checkpoint_identity", "provenance_identity",
        "provenance", "result", "elapsed_ms", "runtime_stats"},
       "checkpoint retained line aggregate");
-  if (required_string(object, "schema") !=
-      "diffexp2-retained-line-aggregate-v1")
+  const auto schema = required_string(object, "schema");
+  const bool compact_transport =
+      schema == "diffexp2-retained-transport-observable-line-v1";
+  if (!compact_transport && schema != "diffexp2-retained-line-aggregate-v1")
     throw std::invalid_argument(
         "unsupported retained line-aggregate checkpoint schema");
   const auto handle = required_string(object, "handle");
@@ -13876,7 +14202,8 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   const auto provenance_identity = required_string(
       object, "provenance_identity");
   if (handle.empty() || checkpoint_identity.empty() ||
-      provenance_identity.empty() || !plan || local_owners.empty())
+      provenance_identity.empty() || !plan ||
+      (local_owners.empty() && !compact_transport))
     throw std::invalid_argument(
         "checkpoint line aggregate lost an identity or strong owner");
   local_owners = unique_line_local_owners(local_owners);
@@ -13889,7 +14216,9 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
        "aggregate", "epsilon", "scope", "error_guarantee"},
       "checkpoint line aggregate provenance");
   if (required_string(provenance, "schema") !=
-          "diffexp2-retained-native-line-aggregate-v1" ||
+          (compact_transport
+               ? "diffexp2-retained-native-transport-observable-line-v1"
+               : "diffexp2-retained-native-line-aggregate-v1") ||
       required_string(provenance, "checkpoint_identity") !=
           checkpoint_identity ||
       json::serialize(canonical_json_value(provenance)) !=
@@ -13898,15 +14227,36 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
         "checkpoint line aggregate provenance identity is inconsistent");
   const auto& source = as_object(
       provenance.at("source"), "checkpoint line aggregate source");
-  require_exact_keys(source,
-      {"tile_plan", "tile_plan_checkpoint_identity", "locals"},
-      "checkpoint line aggregate source");
+  if (compact_transport)
+    require_exact_keys(
+        source,
+        {"tile_plan", "tile_plan_checkpoint_identity", "transport_state",
+         "transport_state_checkpoint_identity",
+         "transport_state_provenance_identity"},
+        "checkpoint compact transport line source");
+  else
+    require_exact_keys(source,
+        {"tile_plan", "tile_plan_checkpoint_identity", "locals"},
+        "checkpoint line aggregate source");
   if (required_string(source, "tile_plan") != plan->handle() ||
       required_string(source, "tile_plan_checkpoint_identity") !=
           plan->checkpoint_identity() ||
-      source.at("locals") != line_aggregate_source_records(local_owners))
+      (!compact_transport &&
+       source.at("locals") != line_aggregate_source_records(local_owners)))
     throw std::invalid_argument(
         "checkpoint line aggregate source disagrees with its strong owners");
+  if (compact_transport &&
+      (!transport_owner ||
+       required_string(source, "transport_state") !=
+           transport_owner->handle() ||
+       required_string(source, "transport_state_checkpoint_identity") !=
+           transport_owner->checkpoint_identity() ||
+       required_string(source, "transport_state_provenance_identity") !=
+           transport_owner->provenance_identity() ||
+       transport_owner->plan_owner().get() != plan.get() ||
+       transport_owner->arm_name() != required_string(provenance, "arm")))
+    throw std::invalid_argument(
+        "checkpoint compact transport line lost its exact retained state owner");
   for (const auto& owner : local_owners) {
     if (std::string(owner->scalar_domain()) == "symbolic")
       throw std::invalid_argument(
@@ -13917,35 +14267,103 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   const auto& aggregate = as_object(
       provenance.at("aggregate"), "checkpoint line aggregate recipe");
   std::optional<WholeArmEpsilonContract> whole_arm_epsilon_contract;
-  if (const auto* raw_contract = aggregate.if_contains("epsilon_contract"))
-    whole_arm_epsilon_contract = parse_whole_arm_epsilon_contract(
-        *raw_contract, "checkpoint whole-arm epsilon contract");
-  const auto& components = as_array(
-      aggregate.at("components"), "checkpoint line aggregate components");
-  if (checkpoint_size_t(aggregate.at("component_count"),
-                        "checkpoint line aggregate component count") !=
-      components.size() ||
-      components.empty())
-    throw std::invalid_argument(
-        "checkpoint line aggregate component manifest is inconsistent");
-  for (std::size_t index = 0; index < components.size(); ++index) {
-    const auto& component = as_object(
-        components[index], "checkpoint line aggregate component");
+  std::optional<ObservableEpsilonContract> observable_epsilon_contract;
+  std::optional<TransportTailPolicy> transport_tail_policy;
+  if (!compact_transport) {
+    const auto* raw_contract = aggregate.if_contains("epsilon_contract");
+    if (raw_contract != nullptr)
+      whole_arm_epsilon_contract = parse_whole_arm_epsilon_contract(
+          *raw_contract, "checkpoint whole-arm epsilon contract");
+  }
+  if (compact_transport) {
     require_exact_keys(
-        component,
-        {"index", "sign", "checkpoint_identity", "provenance_identity",
-         "scope", "source", "interval", "epsilon", "error"},
-        "checkpoint line aggregate component");
-    const auto sign = as_i32(component.at("sign"),
-                             "checkpoint line aggregate sign");
-    if (checkpoint_size_t(component.at("index"),
-                          "checkpoint line aggregate component index") !=
-            index ||
-        (sign != -1 && sign != 1) ||
-        required_string(component, "checkpoint_identity").empty() ||
-        required_string(component, "provenance_identity").empty())
+        aggregate,
+        {"kind", "combination", "request_index", "observable_identity",
+         "observable_checkpoint_identity", "transport_state",
+         "output_epsilon_contract", "tail_policy", "rows", "tile_count"},
+        "checkpoint compact transport observable recipe");
+    if (required_string(aggregate, "kind") !=
+            "transport-state-observable-arm" ||
+        required_string(aggregate, "combination") !=
+            "sum-physical-tiles" ||
+        required_string(aggregate, "observable_identity").empty() ||
+        required_string(aggregate, "observable_checkpoint_identity") !=
+            checkpoint_identity)
       throw std::invalid_argument(
-          "checkpoint line aggregate component provenance is malformed");
+          "checkpoint compact transport observable identity is inconsistent");
+    (void)checkpoint_size_t(aggregate.at("request_index"),
+                            "checkpoint observable request index");
+    const auto& state_reference = as_object(
+        aggregate.at("transport_state"),
+        "checkpoint observable transport state reference");
+    require_exact_keys(state_reference,
+                       {"handle", "checkpoint_identity",
+                        "provenance_identity"},
+                       "checkpoint observable transport state reference");
+    if (!transport_owner ||
+        required_string(state_reference, "handle") !=
+            transport_owner->handle() ||
+        required_string(state_reference, "checkpoint_identity") !=
+            transport_owner->checkpoint_identity() ||
+        required_string(state_reference, "provenance_identity") !=
+            transport_owner->provenance_identity())
+      throw std::invalid_argument(
+          "checkpoint observable recipe names a different transport state");
+    observable_epsilon_contract = parse_observable_epsilon_contract(
+        aggregate.at("output_epsilon_contract"),
+        "checkpoint observable output epsilon contract");
+    transport_tail_policy = parse_transport_tail_policy(
+        aggregate.at("tail_policy"),
+        "checkpoint observable tail policy");
+    const auto& rows = as_array(
+        aggregate.at("rows"), "checkpoint observable prepared rows");
+    if (rows.size() != transport_owner->tile_sources().size() ||
+        checkpoint_size_t(aggregate.at("tile_count"),
+                          "checkpoint observable tile count") != rows.size())
+      throw std::invalid_argument(
+          "checkpoint observable rows do not reproduce its transport topology");
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      const auto& row = as_object(rows[index],
+                                  "checkpoint observable prepared row");
+      require_exact_keys(row, {"tile", "exact_identity", "prepared_row"},
+                         "checkpoint observable prepared row");
+      const auto& prepared = as_object(
+          row.at("prepared_row"), "checkpoint observable rational row");
+      if (checkpoint_size_t(row.at("tile"),
+                            "checkpoint observable row tile") != index ||
+          required_string(row, "exact_identity") !=
+              required_string(prepared, "exact_identity"))
+        throw std::invalid_argument(
+            "checkpoint observable prepared rows are out of order or stale");
+    }
+  } else {
+    const auto& components = as_array(
+        aggregate.at("components"), "checkpoint line aggregate components");
+    if (checkpoint_size_t(aggregate.at("component_count"),
+                          "checkpoint line aggregate component count") !=
+            components.size() ||
+        components.empty())
+      throw std::invalid_argument(
+          "checkpoint line aggregate component manifest is inconsistent");
+    for (std::size_t index = 0; index < components.size(); ++index) {
+      const auto& component = as_object(
+          components[index], "checkpoint line aggregate component");
+      require_exact_keys(
+          component,
+          {"index", "sign", "checkpoint_identity", "provenance_identity",
+           "scope", "source", "interval", "epsilon", "error"},
+          "checkpoint line aggregate component");
+      const auto sign = as_i32(component.at("sign"),
+                               "checkpoint line aggregate sign");
+      if (checkpoint_size_t(component.at("index"),
+                            "checkpoint line aggregate component index") !=
+              index ||
+          (sign != -1 && sign != 1) ||
+          required_string(component, "checkpoint_identity").empty() ||
+          required_string(component, "provenance_identity").empty())
+        throw std::invalid_argument(
+            "checkpoint line aggregate component provenance is malformed");
+    }
   }
 
   const auto& raw_result = as_object(
@@ -13986,16 +14404,28 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
           whole_arm_epsilon_contract->public_required_complete_max)
     throw std::invalid_argument(
         "checkpoint whole-arm aggregate no longer covers its public required epsilon maximum");
-  const auto expected_dimension = as_u32(
-      local_owners.front()->summary().at("dimension"),
-      "checkpoint line aggregate source dimension");
+  if (observable_epsilon_contract.has_value() &&
+      result.value.epsilon.complete_max <
+          observable_epsilon_contract->required_complete_max)
+    throw std::invalid_argument(
+        "checkpoint observable aggregate no longer covers its required epsilon maximum");
+  if (transport_tail_policy == TransportTailPolicy::Require &&
+      result.scope != LineIntegrationScope::FullLocalWithCertifiedTail)
+    throw std::invalid_argument(
+        "checkpoint required-tail observable is not certified full-local");
+  const auto expected_dimension = compact_transport
+      ? 1u
+      : as_u32(local_owners.front()->summary().at("dimension"),
+               "checkpoint line aggregate source dimension");
   if (result.value.dimension != expected_dimension ||
-      std::any_of(local_owners.begin(), local_owners.end(),
-                  [&](const auto& owner) {
-                    return as_u32(owner->summary().at("dimension"),
-                                  "checkpoint aggregate owner dimension") !=
-                           expected_dimension;
-                  }))
+      (!compact_transport &&
+       std::any_of(local_owners.begin(), local_owners.end(),
+                   [&](const auto& owner) {
+                     return as_u32(
+                                owner->summary().at("dimension"),
+                                "checkpoint aggregate owner dimension") !=
+                            expected_dimension;
+                   })))
     throw std::invalid_argument(
         "checkpoint line aggregate dimensions disagree with its owners");
   if (result.scope == LineIntegrationScope::FullLocalWithCertifiedTail &&
@@ -14060,7 +14490,8 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
                      "checkpoint line aggregate runtime stats");
   auto stored = std::make_shared<StoredLineResult>(
       handle, checkpoint_identity, provenance_identity, std::move(result),
-      elapsed_ms, plan, std::move(local_owners), provenance);
+      elapsed_ms, plan, std::move(local_owners), provenance,
+      std::move(transport_owner));
   stored->restore_runtime_stats(
       as_u64(stats.at("exports"), "checkpoint aggregate exports"),
       checkpoint_nonnegative_double(stats.at("export_ms"),
@@ -14291,8 +14722,10 @@ json::array checkpoint_line_identity_manifest(const json::array& items) {
   manifest.reserve(items.size());
   for (const auto& value : items) {
     const auto& item = as_object(value, "checkpoint retained line result");
-    const auto& source = required_string(item, "schema") ==
-            "diffexp2-retained-line-aggregate-v1"
+    const auto schema = required_string(item, "schema");
+    const auto& source = (schema == "diffexp2-retained-line-aggregate-v1" ||
+                          schema ==
+                              "diffexp2-retained-transport-observable-line-v1")
         ? as_object(item.at("provenance"),
                     "checkpoint line aggregate provenance").at("source")
         : item.at("source");
@@ -14503,6 +14936,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& [ignored, line] : session.line_results) {
     add_tile(line->plan_owner());
     for (const auto& local : line->local_owners()) add_local(local);
+    if (line->transport_owner()) add_transport(line->transport_owner());
   }
   for (const auto& [ignored, plan] : tile_closure) {
     for (const auto& composite : plan->dependency_sccs()) add_scc(composite);
@@ -14693,6 +15127,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"total_endpoint_exports", session.total_endpoint_exports},
       {"total_tile_plans", session.total_tile_plans},
       {"total_transport_arm_marches", session.total_transport_arm_marches},
+      {"total_transport_contractions",
+       session.total_transport_contractions},
+      {"total_transport_observables", session.total_transport_observables},
       {"total_line_integrations", session.total_line_integrations},
       {"total_line_exports", session.total_line_exports},
       {"total_local_run_parse_ms", session.total_local_run_parse_ms},
@@ -14702,6 +15139,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"total_endpoint_export_ms", session.total_endpoint_export_ms},
       {"total_tile_plan_ms", session.total_tile_plan_ms},
       {"total_transport_arm_ms", session.total_transport_arm_ms},
+      {"total_transport_contraction_ms",
+       session.total_transport_contraction_ms},
       {"total_line_integration_ms", session.total_line_integration_ms},
       {"total_line_export_ms", session.total_line_export_ms},
       {"checkpoint_generation", generation},
@@ -15607,7 +16046,10 @@ json::object restore_checkpoint(const std::string& path,
         largest_line_result = id;
         const auto schema = required_string(item, "schema");
         const json::object* source = nullptr;
-        if (schema == "diffexp2-retained-line-aggregate-v1")
+        const bool aggregate_line =
+            schema == "diffexp2-retained-line-aggregate-v1" ||
+            schema == "diffexp2-retained-transport-observable-line-v1";
+        if (aggregate_line)
           source = &as_object(
               as_object(item.at("provenance"),
                         "checkpoint line aggregate provenance").at("source"),
@@ -15620,22 +16062,33 @@ json::object restore_checkpoint(const std::string& path,
           throw std::invalid_argument(
               "checkpoint line result lost its strongly owned plan");
         std::shared_ptr<StoredLineResult> line;
-        if (schema == "diffexp2-retained-line-aggregate-v1") {
+        if (aggregate_line) {
           std::vector<std::shared_ptr<StoredLocalBase>> owners;
-          for (const auto& raw_owner : as_array(
-                   source->at("locals"),
-                   "checkpoint line aggregate local owners")) {
-            const auto& owner = as_object(
-                raw_owner, "checkpoint line aggregate local owner");
-            const auto local = restored->locals.find(
-                required_string(owner, "local"));
-            if (local == restored->locals.end())
+          std::shared_ptr<StoredTransportArmState> transport_owner;
+          if (schema == "diffexp2-retained-line-aggregate-v1") {
+            for (const auto& raw_owner : as_array(
+                     source->at("locals"),
+                     "checkpoint line aggregate local owners")) {
+              const auto& owner = as_object(
+                  raw_owner, "checkpoint line aggregate local owner");
+              const auto local = restored->locals.find(
+                  required_string(owner, "local"));
+              if (local == restored->locals.end())
+                throw std::invalid_argument(
+                    "checkpoint line aggregate lost a strongly owned local");
+              owners.push_back(local->second);
+            }
+          } else {
+            const auto state = restored->transport_states.find(
+                required_string(*source, "transport_state"));
+            if (state == restored->transport_states.end())
               throw std::invalid_argument(
-                  "checkpoint line aggregate lost a strongly owned local");
-            owners.push_back(local->second);
+                  "checkpoint compact transport line lost its strongly owned state");
+            transport_owner = state->second;
           }
           line = restore_checkpoint_line_aggregate_record(
-              item, plan->second, std::move(owners));
+              item, plan->second, std::move(owners),
+              std::move(transport_owner));
         } else {
           const auto local = restored->locals.find(
               required_string(*source, "local"));
@@ -15698,11 +16151,13 @@ json::object restore_checkpoint(const std::string& path,
          "total_local_matches", "total_endpoint_limits",
          "total_endpoint_exports", "total_tile_plans",
          "total_transport_arm_marches",
+         "total_transport_contractions", "total_transport_observables",
          "total_line_integrations", "total_line_exports",
          "total_local_run_parse_ms",
          "total_local_kernel_ms", "total_local_match_ms",
          "total_endpoint_limit_ms", "total_endpoint_export_ms",
          "total_tile_plan_ms", "total_transport_arm_ms",
+         "total_transport_contraction_ms",
          "total_line_integration_ms",
          "total_line_export_ms",
          "checkpoint_generation", "checkpoint_restore_count"},
@@ -15760,6 +16215,12 @@ json::object restore_checkpoint(const std::string& path,
       restored->total_transport_arm_marches = as_u64(
           counters.at("total_transport_arm_marches"),
           "total transport-arm marches");
+      restored->total_transport_contractions = as_u64(
+          counters.at("total_transport_contractions"),
+          "total transport contractions");
+      restored->total_transport_observables = as_u64(
+          counters.at("total_transport_observables"),
+          "total transport observables");
       restored->total_line_integrations = as_u64(
           counters.at("total_line_integrations"),
           "total line integrations");
@@ -15785,6 +16246,10 @@ json::object restore_checkpoint(const std::string& path,
       restored->total_transport_arm_ms = checkpoint_nonnegative_double(
           counters.at("total_transport_arm_ms"),
           "total transport-arm time");
+      restored->total_transport_contraction_ms =
+          checkpoint_nonnegative_double(
+              counters.at("total_transport_contraction_ms"),
+              "total transport-contraction time");
       restored->total_line_integration_ms = checkpoint_nonnegative_double(
           counters.at("total_line_integration_ms"),
           "total line-integration time");
@@ -16007,6 +16472,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedTransportArmStateCapability},
+                        {"transport_arm_contraction_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportArmContractionCapability},
                         {"certified_tail_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -16732,6 +17201,287 @@ json::object run_session_command(const json::object& root) {
         {"checkpoint_identity", removed->checkpoint_identity()}};
   }
 
+  if (operation == "transport.contract") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "transport_state",
+         "transport_state_checkpoint_identity",
+         "transport_state_provenance_identity", "checkpoint_policy",
+         "observables"},
+        "native transport.contract request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native transport contraction requires rational or Acb coefficients");
+    const auto state_handle = required_string(root, "transport_state");
+    const auto& checkpoint_policy = as_object(
+        root.at("checkpoint_policy"),
+        "native transport contraction checkpoint policy");
+    require_exact_keys(checkpoint_policy, {"schema", "root"},
+                       "native transport contraction checkpoint policy");
+    if (required_string(checkpoint_policy, "schema") !=
+        "diffexp2-deterministic-transport-contraction-checkpoints-v1")
+      throw std::invalid_argument(
+          "unsupported native transport contraction checkpoint policy schema");
+    const auto checkpoint_root = required_string(checkpoint_policy, "root");
+    if (checkpoint_root.empty())
+      throw std::invalid_argument(
+          "native transport contraction checkpoint root cannot be empty");
+
+    struct PendingObservable {
+      std::string identity;
+      std::string checkpoint_identity;
+      std::vector<json::object> rows;
+      ObservableEpsilonContract epsilon;
+      json::object epsilon_record;
+      TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
+    };
+    std::vector<PendingObservable> pending_observables;
+    const auto& raw_observables = as_array(
+        root.at("observables"), "native transport observables");
+    pending_observables.reserve(raw_observables.size());
+    std::set<std::string> observable_identities;
+    std::set<std::string> observable_checkpoints;
+    for (const auto& raw_observable : raw_observables) {
+      const auto& observable = as_object(
+          raw_observable, "native transport observable");
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "integrand_rows", "epsilon",
+           "tail_policy"},
+          "native transport observable");
+      PendingObservable parsed;
+      parsed.identity = required_string(observable, "identity");
+      parsed.checkpoint_identity = required_string(
+          observable, "checkpoint_identity");
+      if (parsed.identity.empty() || parsed.checkpoint_identity.empty() ||
+          !observable_identities.insert(parsed.identity).second ||
+          !observable_checkpoints.insert(parsed.checkpoint_identity).second)
+        throw std::invalid_argument(
+            "native transport observable identities and checkpoints must be nonempty and pairwise unique");
+      const auto& raw_rows = as_array(
+          observable.at("integrand_rows"),
+          "native transport observable rows");
+      parsed.rows.reserve(raw_rows.size());
+      for (const auto& raw_row : raw_rows)
+        parsed.rows.push_back(as_object(
+            raw_row, "native transport observable rational row"));
+      parsed.epsilon = parse_observable_epsilon_contract(
+          observable.at("epsilon"),
+          "native transport observable output epsilon contract");
+      parsed.epsilon_record = as_object(
+          observable.at("epsilon"),
+          "native transport observable output epsilon contract");
+      parsed.tail_policy = parse_transport_tail_policy(
+          observable.at("tail_policy"),
+          "native transport observable tail policy");
+      pending_observables.push_back(std::move(parsed));
+    }
+
+    std::shared_ptr<StoredTransportArmState> state;
+    std::vector<TransportObservableContractionInput> contraction_inputs;
+    bool reservation_live = false;
+    const auto observable_count = pending_observables.size();
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->transport_states.find(state_handle);
+      if (found == session->transport_states.end())
+        throw std::invalid_argument(
+            "unknown or released native transport-arm state for contraction");
+      state = found->second;
+      if (required_string(root, "transport_state_checkpoint_identity") !=
+              state->checkpoint_identity() ||
+          required_string(root, "transport_state_provenance_identity") !=
+              state->provenance_identity())
+        throw std::invalid_argument(
+            "native transport contraction state binding is stale");
+      state->require_contraction_counter_capacity(observable_count);
+      const auto tile_count = state->tile_sources().size();
+      for (const auto& observable : pending_observables) {
+        if (observable.rows.size() != tile_count)
+          throw std::invalid_argument(
+              "native transport observable must provide one prepared rational row per retained tile");
+        if (observable.epsilon.required_complete_max >
+            state->public_required_complete_max())
+          throw std::invalid_argument(
+              "native transport observable required epsilon maximum exceeds the state public target");
+      }
+      if (observable_count > session->line_result_capacity -
+                                 std::min(
+                                     session->line_result_capacity,
+                                     session->line_results.size() +
+                                         session->pending_line_integrations))
+        throw std::invalid_argument(
+            "persistent line-result capacity is exhausted by transport contraction");
+
+      contraction_inputs.reserve(observable_count);
+      for (std::size_t index = 0; index < observable_count; ++index) {
+        const auto& observable = pending_observables[index];
+        TransportObservableContractionInput input;
+        input.identity = observable.identity;
+        input.checkpoint_identity = observable.checkpoint_identity;
+        input.checkpoint_root = checkpoint_root + ":observable:" +
+                                std::to_string(index + 1);
+        input.rows = observable.rows;
+        input.epsilon = observable.epsilon;
+        input.epsilon_record = observable.epsilon_record;
+        input.tail_policy = observable.tail_policy;
+        input.aggregate_handle =
+            "line:" + std::to_string(session->next_line_result++);
+        input.projected_local_handles.reserve(tile_count);
+        json::array row_records;
+        row_records.reserve(tile_count);
+        for (std::size_t tile = 0; tile < tile_count; ++tile) {
+          input.projected_local_handles.push_back(
+              "private:" + arm_checkpoint_identity(
+                               input.checkpoint_root, state->arm_name(),
+                               "projected", tile + 1));
+          const auto row_identity = required_string(
+              observable.rows[tile], "exact_identity");
+          row_records.push_back(json::object{
+              {"tile", tile}, {"exact_identity", row_identity},
+              {"prepared_row", observable.rows[tile]}});
+        }
+        input.aggregate_record = json::object{
+            {"kind", "transport-state-observable-arm"},
+            {"combination", "sum-physical-tiles"},
+            {"request_index", index},
+            {"observable_identity", observable.identity},
+            {"observable_checkpoint_identity",
+             observable.checkpoint_identity},
+            {"transport_state", json::object{
+                 {"handle", state->handle()},
+                 {"checkpoint_identity", state->checkpoint_identity()},
+                 {"provenance_identity", state->provenance_identity()}}},
+            {"output_epsilon_contract", observable.epsilon_record},
+            {"tail_policy",
+             transport_tail_policy_name(observable.tail_policy)},
+            {"rows", std::move(row_records)}};
+        contraction_inputs.push_back(std::move(input));
+      }
+      session->pending_line_integrations += observable_count;
+      reservation_live = true;
+    }
+
+    const auto release_reservation = [&]() {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (!reservation_live) return;
+      if (session->pending_line_integrations < observable_count)
+        throw std::logic_error(
+            "native transport contraction reservation accounting underflow");
+      session->pending_line_integrations -= observable_count;
+      reservation_live = false;
+    };
+    struct TransportContractionReservationGuard final {
+      decltype(release_reservation)& release;
+      bool& live;
+      ~TransportContractionReservationGuard() noexcept {
+        if (!live) return;
+        try {
+          release();
+        } catch (...) {
+          std::terminate();
+        }
+      }
+    } reservation_guard{release_reservation, reservation_live};
+
+    const auto operation_started = std::chrono::steady_clock::now();
+    std::unique_ptr<AcbPrecisionLease> acb_lease;
+    if (session->domain == "acb") {
+      acb_lease = std::make_unique<AcbPrecisionLease>(
+          session->precision_bits);
+      ComplexBall::set_precision(session->precision_bits);
+    }
+    auto contracted = contract_transport_arm(
+        session->domain, session->precision_bits, state->plan_owner(),
+        state->arm_name(), state->tile_sources(), contraction_inputs, state);
+    const auto contraction_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - operation_started).count();
+
+    try {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_line_integrations < observable_count)
+        throw std::logic_error(
+            "native transport contraction reservation accounting underflow");
+      session->pending_line_integrations -= observable_count;
+      reservation_live = false;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during transport contraction");
+      state->require_contraction_counter_capacity(observable_count);
+      session->line_results.reserve(
+          session->line_results.size() + observable_count);
+      std::vector<std::string> inserted;
+      inserted.reserve(observable_count);
+      try {
+        for (const auto& result : contracted) {
+          if (!session->line_results.emplace(
+                  result.aggregate->handle(), result.aggregate).second)
+            throw std::logic_error(
+                "transport contraction line handle collided during publication");
+          inserted.push_back(result.aggregate->handle());
+        }
+      } catch (...) {
+        for (const auto& handle : inserted)
+          session->line_results.erase(handle);
+        throw;
+      }
+      state->note_contraction_success(observable_count);
+      ++session->total_transport_contractions;
+      session->total_transport_observables += observable_count;
+      session->total_transport_contraction_ms += contraction_ms;
+      for (const auto& result : contracted) {
+        session->total_line_integrations += result.tile_integrations;
+        session->total_line_integration_ms += result.tile_integration_ms;
+        for (std::size_t tile = 0; tile < result.tile_integrations; ++tile)
+          state->plan_owner()->note_integration();
+      }
+    } catch (...) {
+      if (reservation_live) release_reservation();
+      throw;
+    }
+
+    json::array output_lines;
+    output_lines.reserve(contracted.size());
+    for (std::size_t index = 0; index < contracted.size(); ++index) {
+      const auto& result = contracted[index];
+      output_lines.push_back(json::object{
+          {"request_index", index},
+          {"observable_identity", result.identity},
+          {"session", session->handle},
+          {"line", result.aggregate->handle()},
+          {"checkpoint_identity", result.aggregate->checkpoint_identity()},
+          {"provenance_identity", result.aggregate->provenance_identity()},
+          {"scope", line_integration_scope_name(
+                        result.aggregate->result().scope)},
+          {"epsilon", json::object{
+               {"min", result.aggregate->result().value.epsilon.min_power},
+               {"max",
+                result.aggregate->result().value.epsilon.complete_max}}},
+          {"error", encode_error_envelope_summary(
+                        result.aggregate->result().value.error)},
+          {"tiles", result.tile_integrations},
+          {"elapsed_ms", result.elapsed_ms}});
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", kRetainedTransportArmContractionCapability},
+        {"native_retained", true}, {"json_coefficients", 0},
+        {"transport_state", state->handle()},
+        {"transport_state_checkpoint_identity",
+         state->checkpoint_identity()},
+        {"transport_state_provenance_identity",
+         state->provenance_identity()},
+        {"arm", state->arm_name()},
+        {"observables", observable_count},
+        {"lines", std::move(output_lines)},
+        {"no_rematching", true}, {"atomic_publication", true},
+        {"compact_outputs", true},
+        {"checkpoint_policy", checkpoint_policy},
+        {"elapsed_ms", contraction_ms}};
+  }
+
   if (operation == "integration.run_arms") {
     if (root.if_contains("certify_tail") != nullptr)
       require_exact_keys(
@@ -16984,7 +17734,6 @@ json::object run_session_command(const json::object& root) {
 
     struct CompletedArmMarch {
       RetainedArmMarchResult march;
-      std::vector<std::shared_ptr<StoredLocalBase>> projected;
       std::vector<std::shared_ptr<StoredLineResult>> tile_lines;
       std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
       std::shared_ptr<StoredLineResult> aggregate;
@@ -17034,7 +17783,6 @@ json::object run_session_command(const json::object& root) {
         const auto started = std::chrono::steady_clock::now();
         auto& input = arms[arm_index];
         auto& output = completed[arm_index];
-        const auto& retained = plan->arm(input.name);
         RetainedArmMarchInput march_input{
             input.name, input.basis_handles, input.basis,
             input.match_handles, input.local_handles};
@@ -17043,74 +17791,38 @@ json::object run_session_command(const json::object& root) {
             active_session_configuration_identity, plan, anchor,
             march_input, work_epsilon, match_required_complete_max,
             refinement, checkpoint_root);
-        output.projected.reserve(retained.exact.tiles.size());
-        output.tile_lines.reserve(retained.exact.tiles.size());
-        output.tile_sources.reserve(retained.exact.tiles.size());
-        for (std::size_t tile = 0; tile < retained.exact.tiles.size(); ++tile) {
-          const auto& current = output.march.tile_sources[tile];
-          const auto row_identity = required_string(
-              input.integrand_rows[tile], "exact_identity");
-          json::object row_request{
-              {"row", input.integrand_rows[tile]},
-              {"source_checkpoint_identity", current->checkpoint_identity()},
-              {"checkpoint_identity",
-               arm_checkpoint_identity(checkpoint_root, input.name,
-                                       "integrand", tile + 1) + ":" +
-                   row_identity}};
-          std::shared_ptr<StoredLocalBase> projected;
-          if (session->domain == "rational") {
-            const auto typed =
-                std::dynamic_pointer_cast<StoredLocal<Rational>>(current);
-            if (!typed)
-              throw std::logic_error(
-                  "whole-arm Rational integrand source changed coefficient domain");
-            projected = build_rational_row_local<Rational>(
-                input.row_local_handles[tile], row_request,
-                session->precision_bits, typed, current);
-          } else {
-            const auto typed =
-                std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(current);
-            if (!typed)
-              throw std::logic_error(
-                  "whole-arm Acb integrand source changed coefficient domain");
-            projected = build_rational_row_local<ComplexBall>(
-                input.row_local_handles[tile], row_request,
-                session->precision_bits, typed, current);
-          }
-          const auto line_epsilon = live_line_epsilon_intersection(
-              work_epsilon, required_complete_max, projected);
-          output.projected.push_back(projected);
-          output.tile_sources.push_back(projected);
-          json::object line_request{
-              {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
-              {"source_checkpoint_identity", projected->checkpoint_identity()},
-              {"checkpoint_identity",
-               arm_checkpoint_identity(checkpoint_root, input.name,
-                                       "tile", tile + 1)},
-              {"arm", input.name}, {"tile", tile},
-              {"epsilon", json::object{{"min", line_epsilon.min_power},
-                                        {"max", line_epsilon.complete_max}}}};
-          if (certify_tail) line_request["certify_tail"] = true;
-          output.tile_lines.push_back(build_planned_line_result(
-              "private:" + arm_checkpoint_identity(
-                  checkpoint_root, input.name, "tile", tile + 1),
-              line_request, plan, projected));
-        }
-        const auto aggregate_started = std::chrono::steady_clock::now();
-        std::vector<std::int32_t> signs(output.tile_lines.size(), 1);
-        output.aggregate = build_retained_line_aggregate(
-            input.aggregate_handle,
-            checkpoint_root + ":" + input.name + ":aggregate",
-            input.name,
-            json::object{{"from_exact", retained.exact.from.str()},
-                         {"to_exact", retained.exact.to.str()}},
-            json::object{{"kind", "complete-retained-arm"},
-                         {"combination", "sum-physical-tiles"},
-                         {"epsilon_contract", raw_epsilon},
-                         {"certify_tail_requested", certify_tail}},
-            plan, output.tile_sources, output.tile_lines, signs,
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - aggregate_started).count());
+        TransportObservableContractionInput observable;
+        observable.identity = checkpoint_root + ":" + input.name;
+        observable.checkpoint_identity =
+            checkpoint_root + ":" + input.name + ":aggregate";
+        observable.checkpoint_root = checkpoint_root;
+        observable.rows = input.integrand_rows;
+        observable.epsilon = {work_epsilon, required_complete_max};
+        observable.epsilon_record = json::object{
+            {"min", work_epsilon.min_power},
+            {"max", work_epsilon.complete_max},
+            {"required_complete_max", required_complete_max}};
+        observable.tail_policy = certify_tail
+            ? TransportTailPolicy::Attempt
+            : TransportTailPolicy::Stored;
+        observable.projected_local_handles = input.row_local_handles;
+        observable.aggregate_handle = input.aggregate_handle;
+        observable.aggregate_record = json::object{
+            {"kind", "complete-retained-arm"},
+            {"combination", "sum-physical-tiles"},
+            {"epsilon_contract", raw_epsilon},
+            {"certify_tail_requested", certify_tail}};
+        auto contractions = contract_transport_arm(
+            session->domain, session->precision_bits, plan, input.name,
+            output.march.tile_sources,
+            std::vector<TransportObservableContractionInput>{observable});
+        if (contractions.size() != 1)
+          throw std::logic_error(
+              "whole-arm contraction kernel returned the wrong result count");
+        auto contracted = std::move(contractions.front());
+        output.tile_sources = std::move(contracted.projected);
+        output.tile_lines = std::move(contracted.tile_lines);
+        output.aggregate = std::move(contracted.aggregate);
         output.elapsed_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
       } catch (...) {
@@ -18811,6 +19523,8 @@ json::object run_session_command(const json::object& root) {
     std::uint64_t total_endpoint_exports = 0;
     std::uint64_t total_tile_plans = 0;
     std::uint64_t total_transport_arm_marches = 0;
+    std::uint64_t total_transport_contractions = 0;
+    std::uint64_t total_transport_observables = 0;
     std::uint64_t total_line_integrations = 0;
     std::uint64_t total_line_exports = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
@@ -18819,6 +19533,7 @@ json::object run_session_command(const json::object& root) {
     double total_endpoint_export_ms = 0.0;
     double total_tile_plan_ms = 0.0;
     double total_transport_arm_ms = 0.0;
+    double total_transport_contraction_ms = 0.0;
     double total_line_integration_ms = 0.0;
     double total_line_export_ms = 0.0;
     {
@@ -18852,6 +19567,8 @@ json::object run_session_command(const json::object& root) {
       total_endpoint_exports = session->total_endpoint_exports;
       total_tile_plans = session->total_tile_plans;
       total_transport_arm_marches = session->total_transport_arm_marches;
+      total_transport_contractions = session->total_transport_contractions;
+      total_transport_observables = session->total_transport_observables;
       total_line_integrations = session->total_line_integrations;
       total_line_exports = session->total_line_exports;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
@@ -18865,6 +19582,8 @@ json::object run_session_command(const json::object& root) {
       total_endpoint_export_ms = session->total_endpoint_export_ms;
       total_tile_plan_ms = session->total_tile_plan_ms;
       total_transport_arm_ms = session->total_transport_arm_ms;
+      total_transport_contraction_ms =
+          session->total_transport_contraction_ms;
       total_line_integration_ms = session->total_line_integration_ms;
       total_line_export_ms = session->total_line_export_ms;
     }
@@ -18973,6 +19692,10 @@ json::object run_session_command(const json::object& root) {
                         {"tile_plans_created", total_tile_plans},
                         {"transport_arm_marches",
                          total_transport_arm_marches},
+                        {"transport_contractions",
+                         total_transport_contractions},
+                        {"transport_observables",
+                         total_transport_observables},
                         {"line_integrations", total_line_integrations},
                         {"line_exports", total_line_exports},
                         {"local_match_capability",
@@ -19014,6 +19737,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedTransportArmStateCapability},
+                        {"transport_arm_contraction_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportArmContractionCapability},
                         {"certified_tail_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -19063,6 +19790,8 @@ json::object run_session_command(const json::object& root) {
                         {"endpoint_export_ms", total_endpoint_export_ms},
                         {"tile_plan_ms", total_tile_plan_ms},
                         {"transport_arm_ms", total_transport_arm_ms},
+                        {"transport_contraction_ms",
+                         total_transport_contraction_ms},
                         {"line_integration_ms", total_line_integration_ms},
                         {"line_export_ms", total_line_export_ms},
                         {"chart_stats", std::move(chart_stats)},
@@ -19273,6 +20002,10 @@ std::string backend_info_json() {
                                       {"persistent_transport_arm_state", true},
                                       {"persistent_transport_arm_state_capability",
                                        kRetainedTransportArmStateCapability},
+                                      {"persistent_transport_arm_contraction",
+                                       true},
+                                      {"persistent_transport_arm_contraction_capability",
+                                       kRetainedTransportArmContractionCapability},
                                       {"persistent_certified_tail_majorant",
                                        true},
                                       {"persistent_certified_tail_majorant_capability",

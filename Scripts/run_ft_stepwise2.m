@@ -1936,7 +1936,11 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           "Max" -> deliverableMax,
           "RequiredCompleteMax" -> deliverableMax|>|>;
       If[entry["Case"] === "integrate",
-        Append[observable, "TailPolicy" -> "stored"], observable]]],
+        (* Request a rigorous full-local tail whenever the retained chart
+           supports one, but never turn an unsupported singular tile into a
+           production-stopping accuracy guard.  The exported result records
+           whether the aggregate promoted or remained stored truncation. *)
+        Append[observable, "TailPolicy" -> "attempt"], observable]]],
       nativeEntries];
     nativeBatchMatchesQ[candidate_, expectedAtlas_] :=
       AssociationQ[candidate] &&

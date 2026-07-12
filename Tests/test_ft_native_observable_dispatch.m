@@ -185,6 +185,9 @@ assert["observable order and operation-specific epsilon windows are stable",
       {8, 8, 8, 8} &&
     Lookup[Lookup[capturedObservables, "Epsilon"],
       "RequiredCompleteMax"] === {8, 8, 8, 8} &&
+    Lookup[Select[capturedObservables,
+        #["Operation"] === "integrate" &], "TailPolicy"] ===
+      {"attempt", "attempt"} &&
     Keys[capturedObservables[[1]]] ===
       {"Operation", "Identity", "CheckpointIdentity",
        "CoefficientVector", "Epsilon", "TailPolicy"}];

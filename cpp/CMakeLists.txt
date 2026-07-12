@@ -120,4 +120,13 @@ if(DE2_BUILD_TESTS)
     PRIVATE diffexp2_core)
   add_test(NAME cpp_persistent_checkpoint
     COMMAND test_diffexp2_persistent_checkpoint)
+
+  add_executable(test_diffexp2_persistent_endpoint_limit
+    tests/test_persistent_endpoint_limit.cpp)
+  target_compile_features(test_diffexp2_persistent_endpoint_limit
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_endpoint_limit
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_endpoint_limit
+    COMMAND test_diffexp2_persistent_endpoint_limit)
 endif()

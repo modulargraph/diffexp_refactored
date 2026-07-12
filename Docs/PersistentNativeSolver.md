@@ -73,8 +73,12 @@ The implemented recurrence-session commands are:
 | `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics. |
 | `local.certify_residual` | Certify the retained local's stored-truncation theta residual with native Arb magnitudes. |
 | `local.match` | Exact-match retained regular locals and retain the Laurent lattice transformation and weights without coefficient JSON. |
+| `local.endpoint_limit` | Apply the native sector endpoint gate to one retained local and retain the specialized endpoint vector without coefficient JSON. |
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
+| `endpoint.stats` | Inspect one retained endpoint result and its exact analytic/branch provenance. |
+| `endpoint.export` | Explicitly export a final specialized Acb epsilon vector for compatibility. |
+| `endpoint.release` | Release one retained endpoint result. |
 | `match.stats` | Inspect one retained native match and its exact provenance. |
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
@@ -140,6 +144,22 @@ matching in C++, verifies an exact stored-truncation residual through the
 requested CompleteMax, and retains the transformation and weights behind an
 opaque match handle. Acb matching and iterative numerical refinement remain a
 separate milestone; they are not silently routed through this exact path.
+
+`local.endpoint_limit` is a separate retained-result lifecycle.  Admission
+strongly owns its source local, so concurrent `local.release` cannot invalidate
+an in-flight limit, and session close prevents a completed in-flight result
+from being published.  The request must bind both checkpoint identities, the
+exact approach direction, an optional `+1`/`-1` rim, and one of two explicit
+cancellation policies: `exact-coefficient-field` or
+`exact-or-acb-singleton`.  The latter accepts an Acb divergent sum only when
+it is the exact singleton zero; no smallness tolerance is supported.  Any
+regulator slope certified exactly nonzero is dropped by dimensional analytic
+continuation, including an exact symbolic regulator tag without sampling.
+Unresolved symbolic coefficient fields, regulator slopes without an exact
+zero decision, and non-rational unregulated powers fail loudly.  The opaque
+result records every sector tag, prescription, effective rim, and source
+checkpoint; coefficients cross the bridge only through the explicit
+final-compatibility `endpoint.export` call.
 
 Subsequent milestones extend the same session with complete multi-sector
 composition plus `transport.*`, `endpoint.*`, `integration.*`, and

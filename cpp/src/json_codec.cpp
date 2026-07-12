@@ -1314,8 +1314,10 @@ json::array encode_magnitude_diagnostics(
 struct StoredLocalStats {
   std::uint64_t evaluations = 0;
   std::uint64_t residual_certifications = 0;
+  std::uint64_t endpoint_limits = 0;
   double evaluate_ms = 0.0;
   double residual_certify_ms = 0.0;
+  double endpoint_limit_ms = 0.0;
   double create_parse_ms = 0.0;
   double create_kernel_ms = 0.0;
   std::size_t coefficient_count = 0;
@@ -1368,6 +1370,11 @@ class StoredLocalBase {
                                 int output_digits) = 0;
   virtual json::object certify_residual(const json::object& request,
                                         int output_digits) = 0;
+  virtual EndpointLimitResult endpoint_limit(
+      const EndpointLimitOptions& options) = 0;
+  virtual json::object endpoint_metadata() const = 0;
+  virtual const std::string& checkpoint_identity() const = 0;
+  virtual const char* scalar_domain() const = 0;
   virtual json::object summary() const = 0;
   virtual json::object stats_json() const = 0;
   virtual StoredLocalStats stats() const = 0;
@@ -1535,6 +1542,40 @@ class StoredLocal final : public StoredLocalBase {
     }
   }
 
+  EndpointLimitResult endpoint_limit(
+      const EndpointLimitOptions& options) override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "local.endpoint_limit rejects unresolved symbolic coefficients; "
+          "solve an explicitly specialized chart before endpoint evaluation");
+    } else {
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
+      const auto started = std::chrono::steady_clock::now();
+      auto result = endpoint_sector_limit(solution_, options);
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      endpoint_limits_.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        endpoint_limit_ms_ += elapsed;
+      }
+      return result;
+    }
+  }
+
+  json::object endpoint_metadata() const override { return metadata_json(); }
+
+  const std::string& checkpoint_identity() const override {
+    return solution_.checkpoint_identity;
+  }
+
+  const char* scalar_domain() const override {
+    if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
+    return "symbolic";
+  }
+
   json::object summary() const override {
     json::object result{
         {"local", handle_}, {"chart", source_chart_},
@@ -1560,16 +1601,19 @@ class StoredLocal final : public StoredLocalBase {
     const auto current = stats();
     out["evaluations"] = current.evaluations;
     out["residual_certifications"] = current.residual_certifications;
+    out["endpoint_limits"] = current.endpoint_limits;
     out["evaluate_ms"] = current.evaluate_ms;
     out["residual_certify_ms"] = current.residual_certify_ms;
+    out["endpoint_limit_ms"] = current.endpoint_limit_ms;
     return out;
   }
 
   StoredLocalStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return {evaluations_.load(), residual_certifications_.load(),
-            evaluate_ms_, residual_certify_ms_, create_parse_ms_,
-            create_kernel_ms_, coefficient_count()};
+            endpoint_limits_.load(), evaluate_ms_, residual_certify_ms_,
+            endpoint_limit_ms_, create_parse_ms_, create_kernel_ms_,
+            coefficient_count()};
   }
 
   const LocalSolution<Scalar>& solution() const { return solution_; }
@@ -1588,6 +1632,13 @@ class StoredLocal final : public StoredLocalBase {
           {"leading_coefficient_sign",
            prescription.leading_coefficient_sign}});
     }
+    json::array sectors;
+    sectors.reserve(solution_.sectors.size());
+    for (const auto& sector : solution_.sectors)
+      sectors.push_back(json::object{
+          {"a", encode_exact_descriptor(sector.a)},
+          {"b", encode_exact_descriptor(sector.b)},
+          {"log_power", sector.log_power}});
     const auto& sector = solution_.sectors.front();
     return json::object{
         {"chart", json::object{
@@ -1597,6 +1648,7 @@ class StoredLocal final : public StoredLocalBase {
             {"radius_ball", encode_scalar(solution_.chart.radius, 30)}}},
         {"tag", json::object{{"a", encode_exact_descriptor(sector.a)},
                              {"b", encode_exact_descriptor(sector.b)}}},
+        {"sectors", std::move(sectors)},
         {"prescriptions", std::move(prescriptions)}};
   }
 
@@ -1613,10 +1665,255 @@ class StoredLocal final : public StoredLocalBase {
   std::int32_t top_valid_ = kCompleteInfinity;
   std::atomic<std::uint64_t> evaluations_{0};
   std::atomic<std::uint64_t> residual_certifications_{0};
+  std::atomic<std::uint64_t> endpoint_limits_{0};
   mutable std::mutex stats_mutex_;
   double evaluate_ms_ = 0.0;
   double residual_certify_ms_ = 0.0;
+  double endpoint_limit_ms_ = 0.0;
 };
+
+constexpr const char* kRetainedEndpointLimitCapability =
+    "retained-native-endpoint-sector-limit-v1";
+
+struct ParsedEndpointLimitPolicy {
+  EndpointLimitOptions options;
+  std::string cancellation_mode;
+  std::optional<std::int32_t> requested_rim;
+};
+
+ParsedEndpointLimitPolicy parse_endpoint_limit_policy(
+    const json::object& request) {
+  ParsedEndpointLimitPolicy parsed;
+  parsed.options.approach_direction = as_i32(
+      request.at("approach_direction"), "endpoint approach direction");
+  if (parsed.options.approach_direction != 1 &&
+      parsed.options.approach_direction != -1)
+    throw std::invalid_argument(
+        "endpoint approach direction must be exactly +1 or -1");
+
+  if (const auto* raw_rim = request.if_contains("rim");
+      raw_rim != nullptr && !raw_rim->is_null()) {
+    const auto rim = as_i32(*raw_rim, "endpoint rim");
+    if (rim != 1 && rim != -1)
+      throw std::invalid_argument("endpoint rim must be exactly +1 or -1");
+    parsed.requested_rim = rim;
+    parsed.options.imaginary_sign = rim;
+  }
+
+  const auto& cancellation = as_object(
+      request.at("cancellation"), "endpoint cancellation policy");
+  parsed.cancellation_mode = required_string(cancellation, "mode");
+  if (parsed.cancellation_mode == "exact-coefficient-field") {
+    parsed.options.allow_certified_numeric_cancellation = false;
+  } else if (parsed.cancellation_mode == "exact-or-acb-singleton") {
+    parsed.options.allow_certified_numeric_cancellation = true;
+  } else {
+    throw std::invalid_argument(
+        "endpoint cancellation mode must be exact-coefficient-field or "
+        "exact-or-acb-singleton");
+  }
+  if (cancellation.size() != 1)
+    throw std::invalid_argument(
+        "endpoint cancellation policy accepts only its exact mode; "
+        "tolerance-based cancellation is unsupported");
+  return parsed;
+}
+
+EpsilonWindow endpoint_value_window(const EndpointLimitResult& result) {
+  if (result.values.empty())
+    throw std::logic_error("retained endpoint result has no components");
+  const auto window = result.values.front().window();
+  for (const auto& component : result.values)
+    if (component.window().min_power != window.min_power ||
+        component.window().complete_max != window.complete_max)
+      throw std::logic_error(
+          "retained endpoint components have unequal epsilon windows");
+  return window;
+}
+
+EpsilonVector endpoint_values_vector(const EndpointLimitResult& result) {
+  const auto window = endpoint_value_window(result);
+  EpsilonVector vector;
+  vector.epsilon = window;
+  vector.dimension = static_cast<std::uint32_t>(result.values.size());
+  vector.coefficients.reserve(window.width() * vector.dimension);
+  for (std::size_t ei = 0; ei < window.width(); ++ei)
+    for (const auto& component : result.values)
+      vector.coefficients.push_back(component.coefficients().at(ei));
+  return vector;
+}
+
+class StoredEndpointResult {
+ public:
+  StoredEndpointResult(
+      std::string handle, std::string checkpoint_identity,
+      std::string provenance_identity, std::string source_local,
+      std::string source_chart, std::string source_checkpoint,
+      std::string source_domain, std::int32_t approach_direction,
+      std::optional<std::int32_t> requested_rim,
+      std::string cancellation_mode, json::object analytic_metadata,
+      EndpointLimitResult&& result, double elapsed_ms)
+      : handle_(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        source_local_(std::move(source_local)),
+        source_chart_(std::move(source_chart)),
+        source_checkpoint_(std::move(source_checkpoint)),
+        source_domain_(std::move(source_domain)),
+        approach_direction_(approach_direction),
+        requested_rim_(requested_rim),
+        cancellation_mode_(std::move(cancellation_mode)),
+        analytic_metadata_(std::move(analytic_metadata)),
+        result_(std::move(result)), elapsed_ms_(elapsed_ms) {
+    // Validate the retained public frame once, before publishing its handle.
+    (void)endpoint_value_window(result_);
+  }
+
+  const std::string& handle() const { return handle_; }
+  const std::string& checkpoint_identity() const {
+    return checkpoint_identity_;
+  }
+  double elapsed_ms() const { return elapsed_ms_; }
+
+  json::object summary() const {
+    const auto window = endpoint_value_window(result_);
+    const auto cancellation_scope = source_domain_ == "rational"
+        ? "exact-rational"
+        : cancellation_mode_ == "exact-or-acb-singleton"
+            ? "acb-exact-singleton-zero"
+            : "exact-coefficient-field-only";
+    return json::object{
+        {"endpoint", handle_},
+        {"capability", kRetainedEndpointLimitCapability},
+        {"native_retained", true},
+        {"retained_state", "specialized-acb-epsilon-vector"},
+        {"json_coefficients", 0},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"source", json::object{
+             {"local", source_local_}, {"chart", source_chart_},
+             {"checkpoint_identity", source_checkpoint_},
+             {"coefficient_domain", source_domain_}}},
+        {"dimension", result_.values.size()},
+        {"epsilon_min", window.min_power},
+        {"epsilon_max", window.complete_max},
+        {"coefficient_field", "acb-specialized"},
+        {"arithmetic_enclosed", true},
+        {"approach_direction", approach_direction_},
+        {"requested_rim", requested_rim_.has_value()
+             ? json::value(*requested_rim_) : json::value(nullptr)},
+        {"effective_rim", result_.imaginary_sign},
+        {"cancellation", json::object{
+             {"mode", cancellation_mode_},
+             {"effective_scope", cancellation_scope},
+             {"numeric_singleton_cancellations",
+              result_.cancelled_divergent_coefficients}}},
+        {"analytic_regularization", json::object{
+             {"regulator_slope_scope",
+              "exact-zero-fact; certified-nonzero symbolic slopes allowed"},
+             {"unregulated_power_scope", "exact-rational"},
+             {"endpoint_rule", "drop-exact-nonzero-regulator-slope"},
+             {"dropped_regulated_sectors",
+              result_.dropped_regulated_sectors},
+             {"metadata", analytic_metadata_}}},
+        {"elapsed_ms", elapsed_ms_}};
+  }
+
+  json::object stats_json() const {
+    auto out = summary();
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    out["exports"] = exports_;
+    out["export_ms"] = export_ms_;
+    return out;
+  }
+
+  json::object export_values(const std::string& expected_checkpoint,
+                             int output_digits) {
+    if (expected_checkpoint.empty())
+      throw std::invalid_argument(
+          "endpoint export checkpoint identity must be nonempty");
+    if (expected_checkpoint != checkpoint_identity_)
+      throw std::invalid_argument(
+          "endpoint export checkpoint identity does not match retained state");
+    const auto started = std::chrono::steady_clock::now();
+    auto encoded = encode_epsilon_vector(
+        endpoint_values_vector(result_), output_digits);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      ++exports_;
+      export_ms_ += elapsed;
+    }
+    return json::object{
+        {"endpoint", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"compatibility_export", true},
+        {"coefficient_field", "acb-specialized"},
+        {"json_coefficients", encoded.at("coefficients").as_array().size()},
+        {"value", std::move(encoded)},
+        {"elapsed_ms", elapsed}};
+  }
+
+ private:
+  std::string handle_;
+  std::string checkpoint_identity_;
+  std::string provenance_identity_;
+  std::string source_local_;
+  std::string source_chart_;
+  std::string source_checkpoint_;
+  std::string source_domain_;
+  std::int32_t approach_direction_ = 1;
+  std::optional<std::int32_t> requested_rim_;
+  std::string cancellation_mode_;
+  json::object analytic_metadata_;
+  EndpointLimitResult result_;
+  double elapsed_ms_ = 0.0;
+  mutable std::mutex stats_mutex_;
+  std::uint64_t exports_ = 0;
+  double export_ms_ = 0.0;
+};
+
+std::shared_ptr<StoredEndpointResult> build_endpoint_limit(
+    const std::string& endpoint_handle, const json::object& request,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  const auto expected_source_checkpoint = required_string(
+      request, "source_checkpoint_identity");
+  if (checkpoint_identity.empty() || expected_source_checkpoint.empty())
+    throw std::invalid_argument(
+        "endpoint checkpoint identities must be nonempty");
+  if (expected_source_checkpoint != local->checkpoint_identity())
+    throw std::invalid_argument(
+        "endpoint source checkpoint identity does not match retained local");
+  const auto policy = parse_endpoint_limit_policy(request);
+  auto analytic_metadata = local->endpoint_metadata();
+  json::object provenance{
+      {"schema", "diffexp2-retained-native-endpoint-sector-limit-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"source", json::object{
+           {"local", local->handle()}, {"chart", local->source_chart()},
+           {"checkpoint_identity", expected_source_checkpoint},
+           {"coefficient_domain", local->scalar_domain()}}},
+      {"approach_direction", policy.options.approach_direction},
+      {"rim", policy.requested_rim.has_value()
+           ? json::value(*policy.requested_rim) : json::value(nullptr)},
+      {"cancellation", json::object{{"mode", policy.cancellation_mode}}},
+      {"analytic_metadata", analytic_metadata}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  const auto started = std::chrono::steady_clock::now();
+  auto result = local->endpoint_limit(policy.options);
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredEndpointResult>(
+      endpoint_handle, checkpoint_identity, provenance_identity,
+      local->handle(), local->source_chart(), expected_source_checkpoint,
+      local->scalar_domain(), policy.options.approach_direction,
+      policy.requested_rim, policy.cancellation_mode,
+      std::move(analytic_metadata), std::move(result), elapsed);
+}
 
 constexpr const char* kExactRegularLocalMatchCapability =
     "exact-rational-regular-local-match-v1";
@@ -3317,27 +3614,36 @@ struct SolverSession {
   std::size_t local_capacity = 1024;
   std::size_t scc_capacity = 128;
   std::size_t match_capacity = 1024;
+  std::size_t endpoint_capacity = 1024;
   std::uint64_t next_chart = 1;
   std::uint64_t next_local = 1;
   std::uint64_t next_scc = 1;
   std::uint64_t next_match = 1;
+  std::uint64_t next_endpoint = 1;
   std::size_t pending_local_solves = 0;
   std::size_t pending_matches = 0;
+  std::size_t pending_endpoint_limits = 0;
   std::uint64_t total_local_solves = 0;
   std::uint64_t total_scc_column_solves = 0;
   std::uint64_t total_local_matches = 0;
+  std::uint64_t total_endpoint_limits = 0;
+  std::uint64_t total_endpoint_exports = 0;
   double total_local_run_parse_ms = 0.0;
   double total_local_kernel_ms = 0.0;
   double total_local_match_ms = 0.0;
   std::uint64_t checkpoint_generation = 0;
   std::uint64_t checkpoint_restore_count = 0;
   std::string restored_from_checkpoint_identity;
+  double total_endpoint_limit_ms = 0.0;
+  double total_endpoint_export_ms = 0.0;
   bool closed = false;
   mutable std::mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
   std::unordered_map<std::string, std::string> handles_by_key;
   std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>> locals;
   std::unordered_map<std::string, std::shared_ptr<StoredMatchBase>> matches;
+  std::unordered_map<std::string, std::shared_ptr<StoredEndpointResult>>
+      endpoints;
   std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>> sccs;
   std::unordered_map<std::string, std::string> scc_handles_by_key;
 };
@@ -3993,7 +4299,8 @@ json::object checkpoint_configuration_record(const SolverSession& session) {
       {"chart_capacity", session.chart_capacity},
       {"local_capacity", session.local_capacity},
       {"scc_capacity", session.scc_capacity},
-      {"match_capacity", session.match_capacity}};
+      {"match_capacity", session.match_capacity},
+      {"endpoint_capacity", session.endpoint_capacity}};
 }
 
 std::string checkpoint_configuration_identity(const SolverSession& session) {
@@ -4078,12 +4385,14 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     SolverSession& session, const std::string& checkpoint_identity) {
   if (session.closed)
     throw std::invalid_argument("cannot checkpoint a closed solver session");
-  if (session.pending_local_solves != 0 || session.pending_matches != 0)
+  if (session.pending_local_solves != 0 || session.pending_matches != 0 ||
+      session.pending_endpoint_limits != 0)
     throw std::invalid_argument(
-        "checkpoint requires a quiescent session with no pending local solve or match");
-  if (!session.locals.empty() || !session.matches.empty())
+        "checkpoint requires a quiescent session with no pending local solve, match, or endpoint limit");
+  if (!session.locals.empty() || !session.matches.empty() ||
+      !session.endpoints.empty())
     throw std::invalid_argument(
-        "checkpoint schema v1 does not serialize retained local or match handles; release them before saving");
+        "checkpoint schema v1 does not serialize retained local, match, or endpoint handles; release them before saving");
 
   std::vector<std::shared_ptr<PreparedChartBase>> charts;
   charts.reserve(session.charts.size());
@@ -4134,12 +4443,17 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"next_local", session.next_local},
       {"next_scc", session.next_scc},
       {"next_match", session.next_match},
+      {"next_endpoint", session.next_endpoint},
       {"total_local_solves", session.total_local_solves},
       {"total_scc_column_solves", session.total_scc_column_solves},
       {"total_local_matches", session.total_local_matches},
+      {"total_endpoint_limits", session.total_endpoint_limits},
+      {"total_endpoint_exports", session.total_endpoint_exports},
       {"total_local_run_parse_ms", session.total_local_run_parse_ms},
       {"total_local_kernel_ms", session.total_local_kernel_ms},
       {"total_local_match_ms", session.total_local_match_ms},
+      {"total_endpoint_limit_ms", session.total_endpoint_limit_ms},
+      {"total_endpoint_export_ms", session.total_endpoint_export_ms},
       {"checkpoint_generation", generation},
       {"checkpoint_restore_count", session.checkpoint_restore_count}};
   json::object session_record{
@@ -4278,7 +4592,8 @@ json::object restore_checkpoint(const std::string& path,
   require_exact_keys(configuration,
       {"domain", "precision_bits", "output_digits", "symbols", "analytic",
        "chart_capacity", "local_capacity", "scc_capacity",
-       "match_capacity"}, "checkpoint configuration");
+       "match_capacity", "endpoint_capacity"},
+      "checkpoint configuration");
   json::object create{
       {"schema", 2}, {"op", "session.create"},
       {"domain", configuration.at("domain")},
@@ -4289,7 +4604,8 @@ json::object restore_checkpoint(const std::string& path,
       {"chart_capacity", configuration.at("chart_capacity")},
       {"local_capacity", configuration.at("local_capacity")},
       {"scc_capacity", configuration.at("scc_capacity")},
-      {"match_capacity", configuration.at("match_capacity")}};
+      {"match_capacity", configuration.at("match_capacity")},
+      {"endpoint_capacity", configuration.at("endpoint_capacity")}};
   const auto created = run_session_command(create);
   const auto restored_handle = required_string(created, "session");
   bool live = true;
@@ -4388,20 +4704,25 @@ json::object restore_checkpoint(const std::string& path,
                                      "checkpoint counters");
     require_exact_keys(counters,
         {"next_chart", "next_local", "next_scc", "next_match",
+         "next_endpoint",
          "total_local_solves", "total_scc_column_solves",
-         "total_local_matches", "total_local_run_parse_ms",
+         "total_local_matches", "total_endpoint_limits",
+         "total_endpoint_exports", "total_local_run_parse_ms",
          "total_local_kernel_ms", "total_local_match_ms",
+         "total_endpoint_limit_ms", "total_endpoint_export_ms",
          "checkpoint_generation", "checkpoint_restore_count"},
         "checkpoint counters");
     const auto next_chart = as_u64(counters.at("next_chart"), "next chart");
     const auto next_scc = as_u64(counters.at("next_scc"), "next SCC");
     const auto next_local = as_u64(counters.at("next_local"), "next local");
     const auto next_match = as_u64(counters.at("next_match"), "next match");
+    const auto next_endpoint = as_u64(
+        counters.at("next_endpoint"), "next endpoint");
     const auto restore_count = as_u64(
         counters.at("checkpoint_restore_count"),
         "checkpoint restore count");
     if (next_chart <= largest_chart || next_scc <= largest_scc ||
-        next_local == 0 || next_match == 0)
+        next_local == 0 || next_match == 0 || next_endpoint == 0)
       throw std::invalid_argument(
           "checkpoint next-handle counters do not follow retained handles");
     if (restore_count == std::numeric_limits<std::uint64_t>::max())
@@ -4412,6 +4733,7 @@ json::object restore_checkpoint(const std::string& path,
       restored->next_local = next_local;
       restored->next_scc = next_scc;
       restored->next_match = next_match;
+      restored->next_endpoint = next_endpoint;
       restored->total_local_solves = as_u64(
           counters.at("total_local_solves"), "total local solves");
       restored->total_scc_column_solves = as_u64(
@@ -4419,6 +4741,10 @@ json::object restore_checkpoint(const std::string& path,
           "total SCC column solves");
       restored->total_local_matches = as_u64(
           counters.at("total_local_matches"), "total local matches");
+      restored->total_endpoint_limits = as_u64(
+          counters.at("total_endpoint_limits"), "total endpoint limits");
+      restored->total_endpoint_exports = as_u64(
+          counters.at("total_endpoint_exports"), "total endpoint exports");
       restored->total_local_run_parse_ms = as_double(
           counters.at("total_local_run_parse_ms"),
           "total local parse time");
@@ -4428,6 +4754,12 @@ json::object restore_checkpoint(const std::string& path,
       restored->total_local_match_ms = as_double(
           counters.at("total_local_match_ms"),
           "total local match time");
+      restored->total_endpoint_limit_ms = as_double(
+          counters.at("total_endpoint_limit_ms"),
+          "total endpoint limit time");
+      restored->total_endpoint_export_ms = as_double(
+          counters.at("total_endpoint_export_ms"),
+          "total endpoint export time");
       restored->checkpoint_generation = as_u64(
           counters.at("checkpoint_generation"), "checkpoint generation");
       restored->checkpoint_restore_count = restore_count + 1;
@@ -4555,6 +4887,14 @@ json::object run_session_command(const json::object& root) {
             "local match capacity must lie in 1..16384");
       session->match_capacity = capacity;
     }
+    if (root.if_contains("endpoint_capacity")) {
+      const auto capacity = as_u32(root.at("endpoint_capacity"),
+                                   "endpoint result capacity");
+      if (capacity == 0 || capacity > 16384)
+        throw std::invalid_argument(
+            "endpoint result capacity must lie in 1..16384");
+      session->endpoint_capacity = capacity;
+    }
 
     auto& registry = session_registry();
     {
@@ -4572,10 +4912,15 @@ json::object run_session_command(const json::object& root) {
                         {"local_capacity", session->local_capacity},
                         {"scc_capacity", session->scc_capacity},
                         {"match_capacity", session->match_capacity},
+                        {"endpoint_capacity", session->endpoint_capacity},
                         {"local_match_capability",
                          domain == "rational"
                              ? kExactRegularLocalMatchCapability
-                             : "unsupported"}};
+                             : "unsupported"},
+                        {"endpoint_limit_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedEndpointLimitCapability}};
   }
 
   if (operation == "session.close") {
@@ -4590,16 +4935,19 @@ json::object run_session_command(const json::object& root) {
       removed = std::move(found->second);
       registry.sessions.erase(found);
     }
-    std::size_t charts = 0, locals = 0, matches = 0, sccs = 0;
+    std::size_t charts = 0, locals = 0, matches = 0, endpoints = 0, sccs = 0;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
       removed->closed = true;
-      // In-flight solve/match calls own their reservations and decrement them
-      // on exactly one completion path.  Do not reset pending counters.
+      // In-flight solve/match/endpoint calls own their reservations and
+      // decrement them on exactly one completion path.  Do not reset pending
+      // counters.
       charts = removed->charts.size();
       locals = removed->locals.size();
       matches = removed->matches.size();
+      endpoints = removed->endpoints.size();
       sccs = removed->sccs.size();
+      removed->endpoints.clear();
       removed->matches.clear();
       removed->locals.clear();
       removed->sccs.clear();
@@ -4611,6 +4959,7 @@ json::object run_session_command(const json::object& root) {
                         {"released_charts", charts},
                         {"released_locals", locals},
                         {"released_matches", matches},
+                        {"released_endpoints", endpoints},
                         {"released_scc_charts", sccs}};
   }
 
@@ -5148,6 +5497,65 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "local.endpoint_limit") {
+    if (root.if_contains("output_digits") != nullptr ||
+        root.if_contains("include_coefficients") != nullptr)
+      throw std::invalid_argument(
+          "local.endpoint_limit never exports coefficients; use the explicit "
+          "endpoint.export compatibility operation");
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    std::string endpoint_handle;
+    {
+      // Strong ownership is acquired under the session lock.  Public
+      // local.release may remove the registry token after admission without
+      // invalidating this endpoint computation.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released native local for endpoint limit");
+      if (session->endpoints.size() + session->pending_endpoint_limits >=
+          session->endpoint_capacity)
+        throw std::invalid_argument(
+            "persistent endpoint result capacity is exhausted");
+      local = found->second;
+      endpoint_handle = "e:" + std::to_string(session->next_endpoint++);
+      ++session->pending_endpoint_limits;
+    }
+
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    try {
+      endpoint = build_endpoint_limit(endpoint_handle, root, local);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits == 0)
+        throw std::logic_error(
+            "native endpoint reservation accounting underflow");
+      --session->pending_endpoint_limits;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits == 0)
+        throw std::logic_error(
+            "native endpoint reservation accounting underflow");
+      --session->pending_endpoint_limits;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during endpoint limit");
+      session->endpoints.emplace(endpoint_handle, endpoint);
+      ++session->total_endpoint_limits;
+      session->total_endpoint_limit_ms += endpoint->elapsed_ms();
+    }
+    auto result = endpoint->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
   if (operation == "local.match") {
     if (session->domain != "rational")
       throw std::invalid_argument(
@@ -5286,6 +5694,69 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "endpoint.stats") {
+    const auto endpoint_handle = required_string(root, "endpoint");
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->endpoints.find(endpoint_handle);
+      if (found == session->endpoints.end())
+        throw std::invalid_argument(
+            "unknown or released native endpoint result");
+      endpoint = found->second;
+    }
+    auto result = endpoint->stats_json();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "endpoint.export") {
+    const auto endpoint_handle = required_string(root, "endpoint");
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->endpoints.find(endpoint_handle);
+      if (found == session->endpoints.end())
+        throw std::invalid_argument(
+            "unknown or released native endpoint result");
+      endpoint = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = endpoint->export_values(
+        required_string(root, "checkpoint_identity"), output_digits);
+    const auto export_ms = result.at("elapsed_ms").as_double();
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      ++session->total_endpoint_exports;
+      session->total_endpoint_export_ms += export_ms;
+    }
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "endpoint.release") {
+    const auto endpoint_handle = required_string(root, "endpoint");
+    std::shared_ptr<StoredEndpointResult> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->endpoints.find(endpoint_handle);
+      if (found == session->endpoints.end())
+        throw std::invalid_argument(
+            "unknown or already released native endpoint result");
+      removed = std::move(found->second);
+      session->endpoints.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", endpoint_handle},
+                        {"checkpoint_identity",
+                         removed->checkpoint_identity()}};
+  }
+
   if (operation == "match.stats") {
     const auto match_handle = required_string(root, "match");
     std::shared_ptr<StoredMatchBase> match;
@@ -5402,17 +5873,23 @@ json::object run_session_command(const json::object& root) {
     std::vector<std::shared_ptr<PreparedChartBase>> charts;
     std::vector<std::shared_ptr<StoredLocalBase>> locals;
     std::vector<std::shared_ptr<StoredMatchBase>> matches;
+    std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
     std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
     std::size_t pending_local_solves = 0;
     std::size_t pending_matches = 0;
+    std::size_t pending_endpoint_limits = 0;
     std::uint64_t total_local_solves = 0;
     std::uint64_t total_scc_column_solves = 0;
     std::uint64_t total_local_matches = 0;
     std::uint64_t checkpoint_generation = 0;
     std::uint64_t checkpoint_restore_count = 0;
     std::string restored_from_checkpoint_identity;
+    std::uint64_t total_endpoint_limits = 0;
+    std::uint64_t total_endpoint_exports = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
     double total_local_match_ms = 0.0;
+    double total_endpoint_limit_ms = 0.0;
+    double total_endpoint_export_ms = 0.0;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
       for (const auto& [ignored, chart] : session->charts)
@@ -5421,13 +5898,18 @@ json::object run_session_command(const json::object& root) {
         locals.push_back(local);
       for (const auto& [ignored, match] : session->matches)
         matches.push_back(match);
+      for (const auto& [ignored, endpoint] : session->endpoints)
+        endpoints.push_back(endpoint);
       for (const auto& [ignored, composite] : session->sccs)
         sccs.push_back(composite);
       pending_local_solves = session->pending_local_solves;
       pending_matches = session->pending_matches;
+      pending_endpoint_limits = session->pending_endpoint_limits;
       total_local_solves = session->total_local_solves;
       total_scc_column_solves = session->total_scc_column_solves;
       total_local_matches = session->total_local_matches;
+      total_endpoint_limits = session->total_endpoint_limits;
+      total_endpoint_exports = session->total_endpoint_exports;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
       total_local_kernel_ms = session->total_local_kernel_ms;
       total_local_match_ms = session->total_local_match_ms;
@@ -5435,6 +5917,8 @@ json::object run_session_command(const json::object& root) {
       checkpoint_restore_count = session->checkpoint_restore_count;
       restored_from_checkpoint_identity =
           session->restored_from_checkpoint_identity;
+      total_endpoint_limit_ms = session->total_endpoint_limit_ms;
+      total_endpoint_export_ms = session->total_endpoint_export_ms;
     }
     std::uint64_t runs = 0;
     double prepare_parse_ms = 0.0, run_parse_ms = 0.0, kernel_ms = 0.0;
@@ -5465,16 +5949,20 @@ json::object run_session_command(const json::object& root) {
     }
     std::uint64_t local_evaluations = 0;
     std::uint64_t local_residual_certifications = 0;
+    std::uint64_t local_endpoint_limits = 0;
     std::size_t local_coefficients = 0;
     double local_evaluate_ms = 0.0, local_residual_certify_ms = 0.0;
+    double local_endpoint_limit_ms = 0.0;
     json::array local_stats;
     for (const auto& local : locals) {
       const auto stats = local->stats();
       local_evaluations += stats.evaluations;
       local_residual_certifications += stats.residual_certifications;
+      local_endpoint_limits += stats.endpoint_limits;
       local_coefficients += stats.coefficient_count;
       local_evaluate_ms += stats.evaluate_ms;
       local_residual_certify_ms += stats.residual_certify_ms;
+      local_endpoint_limit_ms += stats.endpoint_limit_ms;
       local_stats.push_back(local->stats_json());
     }
     json::array scc_stats;
@@ -5483,25 +5971,37 @@ json::object run_session_command(const json::object& root) {
     json::array match_stats;
     for (const auto& match : matches)
       match_stats.push_back(match->summary());
+    json::array endpoint_stats;
+    for (const auto& endpoint : endpoints)
+      endpoint_stats.push_back(endpoint->stats_json());
     return json::object{{"status", "ok"}, {"session", session->handle},
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
                         {"charts", charts.size()}, {"runs", runs},
                         {"locals", locals.size()},
                         {"matches", matches.size()},
+                        {"endpoints", endpoints.size()},
                         {"scc_charts", sccs.size()},
                         {"pending_local_solves", pending_local_solves},
                         {"pending_matches", pending_matches},
+                        {"pending_endpoint_limits", pending_endpoint_limits},
                         {"local_solves", total_local_solves},
                         {"local_matches", total_local_matches},
+                        {"endpoint_limits", total_endpoint_limits},
+                        {"endpoint_exports", total_endpoint_exports},
                         {"local_match_capability",
                          session->domain == "rational"
                              ? kExactRegularLocalMatchCapability
                              : "unsupported"},
+                        {"endpoint_limit_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedEndpointLimitCapability},
                         {"scc_column_solves", total_scc_column_solves},
                         {"local_evaluations", local_evaluations},
                         {"local_residual_certifications",
                          local_residual_certifications},
+                        {"local_endpoint_limits", local_endpoint_limits},
                         {"local_coefficient_count", local_coefficients},
                         {"static_tensor_copies", 0},
                         {"prepare_parse_ms", prepare_parse_ms},
@@ -5512,6 +6012,7 @@ json::object run_session_command(const json::object& root) {
                         {"local_evaluate_ms", local_evaluate_ms},
                         {"local_residual_certify_ms",
                          local_residual_certify_ms},
+                        {"local_endpoint_limit_ms", local_endpoint_limit_ms},
                         {"local_match_ms", total_local_match_ms},
                         {"checkpoint_generation", checkpoint_generation},
                         {"checkpoint_restore_count",
@@ -5521,9 +6022,12 @@ json::object run_session_command(const json::object& root) {
                              ? json::value(nullptr)
                              : json::value(
                                    restored_from_checkpoint_identity)},
+                        {"endpoint_limit_ms", total_endpoint_limit_ms},
+                        {"endpoint_export_ms", total_endpoint_export_ms},
                         {"chart_stats", std::move(chart_stats)},
                         {"local_stats", std::move(local_stats)},
                         {"match_stats", std::move(match_stats)},
+                        {"endpoint_stats", std::move(endpoint_stats)},
                         {"scc_stats", std::move(scc_stats)}};
   }
 
@@ -5643,6 +6147,16 @@ std::string run_recurrence_json(std::string_view input) {
                                           {"results", std::move(encoded)}});
     }
     return json::serialize(run_one_safe(root));
+  } catch (const NativeIntegrationError& error) {
+    json::object result{{"status", "error"}, {"id", error.id},
+                        {"detail", error.what()}};
+    if (!error.absolute_power.empty()) {
+      result["absolute_power"] = error.absolute_power;
+      result["log_power"] = error.log_power;
+      result["epsilon_power"] = error.epsilon_power;
+      result["component"] = error.component;
+    }
+    return json::serialize(result);
   } catch (const RecurrenceError& error) {
     return json::serialize(json::object{{"status", "error"}, {"id", error.id},
       {"detail", error.what()}, {"frame_base", error.frame_base}, {"shift", error.shift}});
@@ -5680,6 +6194,11 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_exact_regular_local_match",
                                        true},
+                                      {"persistent_endpoint_limits", true},
+                                      {"persistent_endpoint_limit_capability",
+                                       kRetainedEndpointLimitCapability},
+                                      {"persistent_symbolic_endpoint_limits",
+                                       false},
                                       {"persistent_acb_local_match", false},
                                       {"persistent_checkpoint", true},
                                       {"persistent_checkpoint_schema", 1},

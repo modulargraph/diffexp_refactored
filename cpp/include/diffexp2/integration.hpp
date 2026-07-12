@@ -253,6 +253,7 @@ struct EndpointLimitResult {
   std::vector<EpsilonFrame<ComplexBall>> values;
   std::size_t dropped_regulated_sectors = 0;
   std::size_t cancelled_divergent_coefficients = 0;
+  std::int32_t imaginary_sign = 1;
 };
 
 namespace integration_detail {
@@ -756,6 +757,8 @@ EndpointLimitResult endpoint_sector_limit(
   std::map<std::pair<std::string, std::uint32_t>, std::vector<CellRef>>
       divergent;
   EndpointLimitResult result;
+  result.imaginary_sign = options.imaginary_sign.value_or(
+      derived_sigma.value_or(1));
   const auto taylor_width = solution.taylor_width();
   for (const auto& sector : solution.sectors) {
     if (sector.b.is_zero == TruthValue::No) {

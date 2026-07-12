@@ -26,6 +26,10 @@ CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, 
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
 PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] returns the opaque summary and exact provenance of one retained native local match.";
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
+RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] applies the native sector endpoint gate to a retained local and returns an opaque session-owned endpoint-result handle. request explicitly binds source/result checkpoint identities, approach_direction, cancellation mode, and optional rim; no coefficient slab is returned.";
+PersistentEndpointStatistics::usage = "PersistentEndpointStatistics[handle] returns the opaque endpoint summary, analytic-regularization/branch provenance, and export counters.";
+ExportPersistentEndpoint::usage = "ExportPersistentEndpoint[handle, checkpointIdentity, outputDigits] explicitly exports the retained specialized Acb epsilon vector for final compatibility.";
+ReleasePersistentEndpoint::usage = "ReleasePersistentEndpoint[handle] releases one retained native endpoint result. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for the prepared charts and retained SCC graph in owner's persistent session. Active local, match, endpoint, line, or tile handles are rejected by checkpoint schema v1.";
@@ -869,6 +873,67 @@ ReleasePersistentLocalMatch[handle_Association] := Module[
   If[FailureQ[tokens], Return[tokens, Module]];
   RunRequest[<|"schema" -> 2, "op" -> "match.release",
     "session" -> tokens["Session"], "match" -> tokens["Match"]|>]];
+
+RunPersistentEndpointLimit[handle_Association,
+    endpointRequest_Association] := Module[
+  {tokens = persistentLocalHandles[handle], reserved, required, missing,
+   request},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  reserved = Intersection[Keys[endpointRequest],
+    {"schema", "op", "session", "local", "output_digits",
+      "include_coefficients"}];
+  required = {"source_checkpoint_identity", "checkpoint_identity",
+    "approach_direction", "cancellation"};
+  missing = Select[required, !KeyExistsQ[endpointRequest, #] &];
+  If[reserved =!= {} || missing =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent endpoint request is missing required fields or contains reserved protocol keys",
+      "Missing" -> missing, "Reserved" -> reserved|>], Module]];
+  request = Join[endpointRequest, <|"schema" -> 2,
+    "op" -> "local.endpoint_limit", "session" -> tokens["Session"],
+    "local" -> tokens["Local"]|>];
+  RunRequest[request]];
+
+persistentEndpointHandles[handle_Association] := Module[{session, endpoint},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  endpoint = Lookup[handle, "endpoint", Lookup[handle, "Endpoint", None]];
+  If[!StringQ[session] || !StringQ[endpoint],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent endpoint handle requires exact session and endpoint tokens"|>],
+      Module]];
+  <|"Session" -> session, "Endpoint" -> endpoint|>];
+
+PersistentEndpointStatistics[handle_Association] := Module[
+  {tokens = persistentEndpointHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "endpoint.stats",
+    "session" -> tokens["Session"],
+    "endpoint" -> tokens["Endpoint"]|>]];
+
+ExportPersistentEndpoint[handle_Association, checkpointIdentity_String,
+    outputDigits_:Automatic] := Module[
+  {tokens = persistentEndpointHandles[handle], request},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[StringLength[checkpointIdentity] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "endpoint export checkpoint identity must be nonempty"|>], Module]];
+  If[outputDigits =!= Automatic &&
+      (!IntegerQ[outputDigits] || outputDigits < 1),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "endpoint export digits must be a positive integer"|>], Module]];
+  request = <|"schema" -> 2, "op" -> "endpoint.export",
+    "session" -> tokens["Session"], "endpoint" -> tokens["Endpoint"],
+    "checkpoint_identity" -> checkpointIdentity|>;
+  If[IntegerQ[outputDigits],
+    request = Append[request, "output_digits" -> outputDigits]];
+  RunRequest[request]];
+
+ReleasePersistentEndpoint[handle_Association] := Module[
+  {tokens = persistentEndpointHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "endpoint.release",
+    "session" -> tokens["Session"],
+    "endpoint" -> tokens["Endpoint"]|>]];
 
 PersistentLocalStatistics[handle_Association] := Module[
   {tokens = persistentLocalHandles[handle]},

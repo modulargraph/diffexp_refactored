@@ -11,8 +11,11 @@ using diffexp2::EpsilonFrame;
 using diffexp2::ExactLaurentMatrix;
 using diffexp2::ExactLaurentPolynomial;
 using diffexp2::FiniteLaurentMatrix;
+using diffexp2::AcbLaurentRefinementOptions;
+using diffexp2::AcbMatchingResidualVerdict;
 using diffexp2::MatchingArithmeticError;
 using diffexp2::MatchingArithmeticErrorCode;
+using diffexp2::Magnitude;
 using diffexp2::Rational;
 
 namespace {
@@ -32,6 +35,38 @@ EpsilonFrame<Rational> frame(std::int32_t minimum,
   coefficients.reserve(values.size());
   for (const auto value : values) coefficients.emplace_back(value);
   return EpsilonFrame<Rational>(minimum, std::move(coefficients));
+}
+
+EpsilonFrame<Rational> rational_constant_frame(const std::string& value,
+                                                std::size_t width = 6) {
+  std::vector<Rational> coefficients;
+  coefficients.reserve(width);
+  coefficients.emplace_back(value);
+  for (std::size_t i = 1; i < width; ++i) coefficients.emplace_back(0);
+  return EpsilonFrame<Rational>(0, std::move(coefficients));
+}
+
+EpsilonFrame<ComplexBall> ball_constant_frame(const std::string& value,
+                                               std::size_t width = 6) {
+  std::vector<ComplexBall> coefficients;
+  coefficients.reserve(width);
+  coefficients.push_back(ComplexBall::from_strings(value));
+  for (std::size_t i = 1; i < width; ++i) coefficients.emplace_back(0);
+  return EpsilonFrame<ComplexBall>(0, std::move(coefficients));
+}
+
+EpsilonFrame<Rational> rational_epsilon_frame(const std::string& value,
+                                               std::size_t width = 6) {
+  std::vector<Rational> coefficients(width, Rational(0));
+  coefficients[1] = Rational(value);
+  return EpsilonFrame<Rational>(0, std::move(coefficients));
+}
+
+EpsilonFrame<ComplexBall> ball_epsilon_frame(const std::string& value,
+                                              std::size_t width = 6) {
+  std::vector<ComplexBall> coefficients(width, ComplexBall(0));
+  coefficients[1] = ComplexBall::from_strings(value);
+  return EpsilonFrame<ComplexBall>(0, std::move(coefficients));
 }
 
 void transformation_support_smoke() {
@@ -204,6 +239,98 @@ void ambiguous_acb_pivot_smoke() {
         saturation_rejected);
 }
 
+void refined_acb_match_smoke() {
+  ComplexBall::set_precision(256);
+  const FiniteLaurentMatrix<Rational> exact_basis = {
+      {rational_constant_frame("1"), rational_constant_frame("1")},
+      {rational_constant_frame("0"), rational_epsilon_frame("1")}};
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis(
+      exact_basis, "exact nontrivial-T Acb match record");
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-50");
+  options.required_complete_max = 3;
+  options.max_refinement_steps = 2;
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      {{ball_constant_frame("1"), ball_constant_frame("1")},
+       {ball_constant_frame("0"), ball_epsilon_frame("1")}},
+      {ball_constant_frame("3"), ball_epsilon_frame("2")}, exact_record,
+      options, "nontrivial-T refined Acb match");
+  check("exact saturation T drives a certified Acb match",
+        exact_record.diagnostics.actions.size() == 1 &&
+        matched.refinement_steps == 0 &&
+            matched.residual_history.size() == 1 &&
+            matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            matched.residual_history.back().complete_through_required &&
+            matched.weights[0].complete_max() >= 3 &&
+            matched.weights[1].complete_max() >= 3 &&
+            (matched.weights[0].coefficient(0) - ComplexBall(1)).is_zero() &&
+            (matched.weights[1].coefficient(0) - ComplexBall(2)).is_zero());
+}
+
+void ill_scaled_refinement_smoke() {
+  ComplexBall::set_precision(256);
+  const std::string big =
+      "1000000000000000000000000000000000000000000000000000000000000";
+  const std::string twice_over_big = "2/" + big;
+  const FiniteLaurentMatrix<Rational> exact_basis = {
+      {rational_constant_frame(big), rational_constant_frame("1")},
+      {rational_constant_frame("1"),
+       rational_constant_frame(twice_over_big)}};
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis(
+      exact_basis, "ill-scaled exact saturation record");
+
+  AcbLaurentRefinementOptions options;
+  // A zero tolerance deliberately cannot accept a nonzero-radius enclosure.
+  // This exercises the bounded correction replay and must remain honest by
+  // returning Inconclusive rather than manufacturing a numerical zero.
+  options.relative_tolerance = Magnitude::zero();
+  options.required_complete_max = 4;
+  options.max_refinement_steps = 2;
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      {{ball_constant_frame(big), ball_constant_frame("1")},
+       {ball_constant_frame("1"), ball_constant_frame(twice_over_big)}},
+      {ball_constant_frame("0"), ball_constant_frame("-1")}, exact_record,
+      options, "ill-scaled refined Acb match");
+  const auto expected_large = ComplexBall::from_strings("-" + big);
+  check("ill-scaled Acb solve reuses bounded refinement honestly",
+        matched.refinement_steps == 2 &&
+            matched.residual_history.size() == 3 &&
+            matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            matched.residual_history.back().complete_through_required &&
+            (matched.weights[0].coefficient(0) - ComplexBall(1))
+                .contains_zero() &&
+            (matched.weights[1].coefficient(0) - expected_large)
+                .contains_zero());
+}
+
+void refined_acb_ambiguous_pivot_smoke() {
+  ComplexBall::set_precision(256);
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis<Rational>(
+      {{rational_constant_frame("1")}},
+      "exact ambiguous-pivot control record");
+  ComplexBall ambiguous;
+  arb_add_error_2exp_si(acb_realref(ambiguous.raw()), 0);
+  std::vector<ComplexBall> coefficients;
+  coefficients.push_back(std::move(ambiguous));
+  for (std::size_t i = 1; i < 6; ++i) coefficients.emplace_back(0);
+  bool rejected = false;
+  try {
+    AcbLaurentRefinementOptions options;
+    options.required_complete_max = 4;
+    (void)diffexp2::refine_acb_finite_laurent_match(
+        {{EpsilonFrame<ComplexBall>(0, std::move(coefficients))}},
+        {ball_constant_frame("1")}, exact_record, options,
+        "ambiguous refined Acb pivot");
+  } catch (const MatchingArithmeticError& error) {
+    rejected = error.code == MatchingArithmeticErrorCode::AmbiguousZero &&
+               error.epsilon_power == 0;
+  }
+  check("exact T never licenses an Acb pivot whose enclosure overlaps zero",
+        rejected);
+}
+
 }  // namespace
 
 int main() {
@@ -211,6 +338,9 @@ int main() {
   quotient_and_solve_smoke();
   epsilon_lattice_saturation_smoke();
   ambiguous_acb_pivot_smoke();
+  refined_acb_match_smoke();
+  ill_scaled_refinement_smoke();
+  refined_acb_ambiguous_pivot_smoke();
   std::cout << "Results: " << (checked - failed) << " / " << checked
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -469,6 +469,27 @@ FiniteLaurentMatrix<Scalar> right_multiply_finite_by_exact_laurent(
   return result;
 }
 
+// Specialize an exact-rational Laurent transformation coefficientwise while
+// retaining its exact support.  In particular, absence from `terms()` remains
+// structural zero; an inexact Acb coefficient is never used to decide whether
+// a monomial exists.
+inline ExactLaurentMatrix<ComplexBall>
+specialize_exact_rational_laurent_matrix_to_acb(
+    const ExactLaurentMatrix<Rational>& exact) {
+  const auto columns = matching_detail::rectangular_columns(
+      exact, "exact-rational Laurent transformation");
+  ExactLaurentMatrix<ComplexBall> result(
+      exact.size(),
+      std::vector<ExactLaurentPolynomial<ComplexBall>>(columns));
+  for (std::size_t row = 0; row < exact.size(); ++row)
+    for (std::size_t column = 0; column < columns; ++column)
+      for (const auto& [power, coefficient] :
+           exact[row][column].terms())
+        result[row][column].add_term(
+            power, ComplexBall::from_strings(coefficient.str()));
+  return result;
+}
+
 template <typename Scalar>
 struct EpsilonLatticeSaturationAction {
   std::size_t leading_rank_before = 0;
@@ -1004,23 +1025,41 @@ FiniteLaurentVector<Scalar> apply_finite_laurent_matrix(
   return result;
 }
 
-// Deterministic full-pivot Gaussian elimination over finite Laurent frames.
-// It is intentionally only an arithmetic primitive: epsilon-lattice
-// saturation, tolerance policy, refinement and residual certification belong
-// to the future matching orchestration.  Pivots are ordered by exact Laurent
-// valuation; ties use row/column order.  Any Acb zero ambiguity encountered
-// while deciding a valuation is loud.
 template <typename Scalar>
-FiniteLaurentVector<Scalar> solve_finite_laurent_system(
+struct FiniteLaurentFactorization {
+  struct Elimination {
+    std::size_t row = 0;
+    EpsilonFrame<Scalar> factor;
+  };
+
+  struct Step {
+    std::size_t row_swap = 0;
+    std::size_t column_swap = 0;
+    std::vector<Elimination> eliminations;
+  };
+
+  FiniteLaurentMatrix<Scalar> upper;
+  std::vector<std::size_t> column_permutation;
+  std::vector<Step> steps;
+};
+
+// Deterministic full-pivot Gaussian elimination over finite Laurent frames.
+// Pivots are ordered by certified Laurent valuation; ties use row/column
+// order.  For Acb, a candidate leading coefficient must exclude zero.  An
+// enclosure overlapping zero is never classified from its midpoint and is
+// rejected loudly.  The recorded row operations can be replayed for several
+// right-hand sides, which is the factorization contract needed by iterative
+// refinement.
+template <typename Scalar>
+FiniteLaurentFactorization<Scalar> factor_finite_laurent_system(
     FiniteLaurentMatrix<Scalar> matrix,
-    FiniteLaurentVector<Scalar> right_hand_side,
-    const std::string& context = "finite Laurent linear solve") {
+    const std::string& context = "finite Laurent factorization") {
   const auto size = matching_detail::rectangular_columns(
       matrix, "finite Laurent coefficient matrix");
-  if (matrix.size() != size || right_hand_side.size() != size)
+  if (matrix.size() != size)
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::DimensionMismatch,
-        context + ": coefficient matrix must be square and match the rhs");
+        context + ": coefficient matrix must be square");
 
   for (std::size_t row = 0; row < size; ++row)
     for (std::size_t column = 0; column < size; ++column)
@@ -1029,6 +1068,8 @@ FiniteLaurentVector<Scalar> solve_finite_laurent_system(
 
   std::vector<std::size_t> column_permutation(size);
   for (std::size_t i = 0; i < size; ++i) column_permutation[i] = i;
+  std::vector<typename FiniteLaurentFactorization<Scalar>::Step> steps;
+  steps.reserve(size);
 
   for (std::size_t position = 0; position < size; ++position) {
     struct Pivot {
@@ -1054,9 +1095,11 @@ FiniteLaurentVector<Scalar> solve_finite_laurent_system(
               "windows",
           position, position);
 
+    typename FiniteLaurentFactorization<Scalar>::Step step;
+    step.row_swap = pivot->row;
+    step.column_swap = pivot->column;
     if (pivot->row != position) {
       std::swap(matrix[position], matrix[pivot->row]);
-      std::swap(right_hand_side[position], right_hand_side[pivot->row]);
     }
     if (pivot->column != position) {
       for (auto& row : matrix)
@@ -1073,13 +1116,60 @@ FiniteLaurentVector<Scalar> solve_finite_laurent_system(
       const auto factor = finite_laurent_quotient(
           matrix[row][position], matrix[position][position],
           context + ": elimination quotient");
-      for (std::size_t column = position; column < size; ++column) {
+      // This entry is zero by the defining quotient recurrence, coefficient
+      // by coefficient.  Re-evaluating A - (A/pivot)*pivot with independent
+      // Acb balls only destroys that dependency and manufactures an
+      // ambiguous enclosure around zero.  Retain exactly the complete top of
+      // the finite cancellation, then record the proved eliminated entry as
+      // structural zero.  Other Schur entries do not have this identity and
+      // still pass through certified leading-coefficient decisions below.
+      const auto eliminated =
+          matrix[row][position] - factor * matrix[position][position];
+      matrix[row][position] =
+          EpsilonFrame<Scalar>::zero(eliminated.complete_max());
+      for (std::size_t column = position + 1; column < size; ++column) {
         matrix[row][column] = matching_detail::canonical_leading_frame(
             matrix[row][column] - factor * matrix[position][column],
             context + ": Schur cancellation", row, column);
       }
-      right_hand_side[row] =
-          right_hand_side[row] - factor * right_hand_side[position];
+      step.eliminations.push_back({row, factor});
+    }
+    steps.push_back(std::move(step));
+  }
+
+  return {std::move(matrix), std::move(column_permutation),
+          std::move(steps)};
+}
+
+template <typename Scalar>
+FiniteLaurentVector<Scalar> solve_factorized_finite_laurent_system(
+    const FiniteLaurentFactorization<Scalar>& factorization,
+    FiniteLaurentVector<Scalar> right_hand_side,
+    const std::string& context = "factorized finite Laurent solve") {
+  const auto size = factorization.upper.size();
+  if (size == 0 || right_hand_side.size() != size ||
+      factorization.column_permutation.size() != size ||
+      factorization.steps.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": factorization and rhs dimensions disagree");
+
+  for (std::size_t position = 0; position < size; ++position) {
+    const auto& step = factorization.steps[position];
+    if (step.row_swap >= size || step.column_swap >= size)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::DimensionMismatch,
+          context + ": malformed factorization permutation");
+    if (step.row_swap != position)
+      std::swap(right_hand_side[position], right_hand_side[step.row_swap]);
+    for (const auto& elimination : step.eliminations) {
+      if (elimination.row <= position || elimination.row >= size)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::DimensionMismatch,
+            context + ": malformed factorization elimination row");
+      right_hand_side[elimination.row] =
+          right_hand_side[elimination.row] -
+          elimination.factor * right_hand_side[position];
     }
   }
 
@@ -1088,18 +1178,296 @@ FiniteLaurentVector<Scalar> solve_finite_laurent_system(
   for (std::size_t reverse = size; reverse-- > 0;) {
     auto residual = right_hand_side[reverse];
     for (std::size_t column = reverse + 1; column < size; ++column)
-      residual = residual - matrix[reverse][column] *
+      residual = residual - factorization.upper[reverse][column] *
                                 permuted_solution[column];
     permuted_solution[reverse] = finite_laurent_quotient(
-        residual, matrix[reverse][reverse],
+        residual, factorization.upper[reverse][reverse],
         context + ": back-substitution quotient");
   }
 
   FiniteLaurentVector<Scalar> solution(size, permuted_solution.front());
   for (std::size_t current = 0; current < size; ++current)
-    solution[column_permutation[current]] =
+    solution[factorization.column_permutation[current]] =
         std::move(permuted_solution[current]);
   return solution;
+}
+
+// One-shot convenience wrapper.  Refinement callers should retain the
+// factorization and call solve_factorized_finite_laurent_system repeatedly.
+template <typename Scalar>
+FiniteLaurentVector<Scalar> solve_finite_laurent_system(
+    FiniteLaurentMatrix<Scalar> matrix,
+    FiniteLaurentVector<Scalar> right_hand_side,
+    const std::string& context = "finite Laurent linear solve") {
+  auto factorization = factor_finite_laurent_system(
+      std::move(matrix), context + ": factor");
+  return solve_factorized_finite_laurent_system(
+      factorization, std::move(right_hand_side), context + ": solve");
+}
+
+enum class AcbMatchingResidualVerdict : std::uint8_t {
+  Pass,
+  Fail,
+  Inconclusive
+};
+
+struct AcbMatchingCoefficientResidual {
+  std::size_t row = 0;
+  std::int32_t epsilon_power = 0;
+  Magnitude residual_lower;
+  Magnitude residual_upper;
+  Magnitude scale_lower;
+  Magnitude scale_upper;
+  AcbMatchingResidualVerdict verdict =
+      AcbMatchingResidualVerdict::Inconclusive;
+};
+
+struct AcbMatchingResidualDiagnostics {
+  AcbMatchingResidualVerdict verdict =
+      AcbMatchingResidualVerdict::Inconclusive;
+  EpsilonWindow complete_window;
+  std::int32_t required_complete_max = 0;
+  bool complete_through_required = false;
+  std::vector<AcbMatchingCoefficientResidual> coefficients;
+  std::string detail;
+};
+
+struct AcbLaurentRefinementOptions {
+  Magnitude relative_tolerance = Magnitude::decimal("1e-30");
+  std::int32_t required_complete_max = 0;
+  std::size_t max_refinement_steps = 2;
+};
+
+struct RefinedAcbLaurentMatch {
+  // Coordinates in the exactly saturated basis F*T.
+  FiniteLaurentVector<ComplexBall> transformed_weights;
+  // Coordinates in the caller's original basis F, equal to T times the
+  // transformed weights with honest finite-window loss.
+  FiniteLaurentVector<ComplexBall> weights;
+  FiniteLaurentVector<ComplexBall> residual;
+  std::vector<AcbMatchingResidualDiagnostics> residual_history;
+  std::size_t refinement_steps = 0;
+};
+
+namespace matching_detail {
+
+struct AcbResidualEvaluation {
+  FiniteLaurentVector<ComplexBall> residual;
+  AcbMatchingResidualDiagnostics diagnostics;
+};
+
+inline AcbResidualEvaluation evaluate_acb_matching_residual(
+    const FiniteLaurentMatrix<ComplexBall>& matrix,
+    const FiniteLaurentVector<ComplexBall>& weights,
+    const FiniteLaurentVector<ComplexBall>& right_hand_side,
+    const AcbLaurentRefinementOptions& options,
+    const std::string& context) {
+  const auto columns = rectangular_columns(matrix,
+                                            "Acb matching residual matrix");
+  if (matrix.size() != right_hand_side.size() || columns != weights.size())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": residual dimensions disagree");
+  if (!options.relative_tolerance.is_finite())
+    throw std::invalid_argument(
+        context + ": residual tolerance must be finite");
+
+  std::vector<std::vector<EpsilonFrame<ComplexBall>>> contributions(
+      matrix.size());
+  FiniteLaurentVector<ComplexBall> residual;
+  residual.reserve(matrix.size());
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    auto& row_terms = contributions[row];
+    row_terms.reserve(columns);
+    for (std::size_t column = 0; column < columns; ++column)
+      row_terms.push_back(matrix[row][column] * weights[column]);
+    auto reconstructed = row_terms.front();
+    for (std::size_t column = 1; column < columns; ++column)
+      reconstructed = reconstructed + row_terms[column];
+    residual.push_back(right_hand_side[row] - reconstructed);
+  }
+
+  auto common_min = residual.front().min_power();
+  auto common_max = residual.front().complete_max();
+  for (const auto& row : residual) {
+    common_min = std::min(common_min, row.min_power());
+    common_max = std::min(common_max, row.complete_max());
+  }
+  if (common_max < common_min)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        context + ": residual rows have no common complete window");
+
+  AcbMatchingResidualDiagnostics diagnostics;
+  diagnostics.complete_window = {common_min, common_max};
+  diagnostics.required_complete_max = options.required_complete_max;
+  diagnostics.complete_through_required =
+      common_max >= options.required_complete_max;
+  diagnostics.coefficients.reserve(
+      diagnostics.complete_window.width() * matrix.size());
+
+  bool any_fail = false;
+  bool all_pass = true;
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    for (std::int64_t power64 = common_min; power64 <= common_max;
+         ++power64) {
+      const auto power = static_cast<std::int32_t>(power64);
+      const auto residual_value = residual[row].coefficient(power);
+      auto scale_lower = Magnitude::one();
+      auto scale_upper = Magnitude::one();
+      const auto rhs_value = right_hand_side[row].coefficient(power);
+      scale_lower = Magnitude::maximum(
+          scale_lower, Magnitude::lower_abs(rhs_value));
+      scale_upper = Magnitude::maximum(
+          scale_upper, Magnitude::upper_abs(rhs_value));
+      for (const auto& contribution : contributions[row]) {
+        const auto value = contribution.coefficient(power);
+        scale_lower = Magnitude::maximum(
+            scale_lower, Magnitude::lower_abs(value));
+        scale_upper = Magnitude::maximum(
+            scale_upper, Magnitude::upper_abs(value));
+      }
+
+      const auto residual_lower = Magnitude::lower_abs(residual_value);
+      const auto residual_upper = Magnitude::upper_abs(residual_value);
+      const auto pass_bound =
+          scale_lower * options.relative_tolerance;
+      const auto fail_bound =
+          scale_upper * options.relative_tolerance;
+      AcbMatchingResidualVerdict verdict =
+          AcbMatchingResidualVerdict::Inconclusive;
+      if (residual_upper <= pass_bound)
+        verdict = AcbMatchingResidualVerdict::Pass;
+      else if (residual_lower > fail_bound)
+        verdict = AcbMatchingResidualVerdict::Fail;
+      if (power <= options.required_complete_max) {
+        any_fail = any_fail || verdict == AcbMatchingResidualVerdict::Fail;
+        all_pass = all_pass && verdict == AcbMatchingResidualVerdict::Pass;
+      }
+      diagnostics.coefficients.push_back(
+          {row, power, residual_lower, residual_upper, scale_lower,
+           scale_upper, verdict});
+    }
+  }
+
+  if (any_fail) {
+    diagnostics.verdict = AcbMatchingResidualVerdict::Fail;
+    diagnostics.detail =
+        "a certified residual lower bound exceeds the tolerance-scaled "
+        "contribution upper bound";
+  } else if (all_pass && diagnostics.complete_through_required) {
+    diagnostics.verdict = AcbMatchingResidualVerdict::Pass;
+    diagnostics.detail =
+        "every coefficient in the required complete window satisfies the "
+        "certified residual bound";
+  } else {
+    diagnostics.verdict = AcbMatchingResidualVerdict::Inconclusive;
+    diagnostics.detail = diagnostics.complete_through_required
+        ? "at least one residual enclosure overlaps the requested tolerance"
+        : "the honest residual window does not reach the required complete "
+          "epsilon power";
+  }
+  return {std::move(residual), std::move(diagnostics)};
+}
+
+inline void require_complete_exact_saturation_record(
+    const EpsilonLatticeSaturationResult<Rational>& record,
+    std::size_t dimension, const std::string& context) {
+  const auto transformation_columns = rectangular_columns(
+      record.transformation, "exact saturation transformation");
+  const auto transformed_columns = rectangular_columns(
+      record.basis_times_transformation,
+      "exact saturation transformed basis");
+  const auto& diagnostics = record.diagnostics;
+  if (record.transformation.size() != dimension ||
+      transformation_columns != dimension ||
+      record.basis_times_transformation.size() != dimension ||
+      transformed_columns != dimension ||
+      diagnostics.initial_column_valuations.size() != dimension ||
+      diagnostics.initial_column_shifts.size() != dimension ||
+      diagnostics.final_leading_rank != dimension ||
+      diagnostics.normalized_determinant_valuation < 0 ||
+      diagnostics.actions.size() != static_cast<std::size_t>(
+          diagnostics.normalized_determinant_valuation))
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InvalidSaturationLattice,
+        context + ": exact saturation record is incomplete or inconsistent");
+  for (const auto& action : diagnostics.actions)
+    if (action.target_column >= dimension ||
+        action.null_relation.size() != dimension)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InvalidSaturationLattice,
+          context + ": exact saturation action dimensions are inconsistent");
+}
+
+}  // namespace matching_detail
+
+// Certified finite Acb matching after exact epsilon-lattice saturation.
+//
+// The structural phase is deliberately not repeated numerically: `record`
+// must have been produced by exact Rational saturation and supplies T plus
+// the completed rank/action proof.  Acb is used only to specialize the exact
+// coefficients, apply F*T, and certify that every chosen solve pivot excludes
+// zero.  One Laurent factorization is replayed for all residual corrections.
+// The returned windows remain the honest EpsilonFrame windows; refinement
+// never pads a coefficient lost to finite Laurent arithmetic.  This arithmetic
+// primitive intentionally does not bind provenance between the exact and Acb
+// bases; the retaining session/checkpoint layer must establish that identity.
+inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
+    const FiniteLaurentMatrix<ComplexBall>& basis,
+    const FiniteLaurentVector<ComplexBall>& right_hand_side,
+    const EpsilonLatticeSaturationResult<Rational>& exact_saturation_record,
+    const AcbLaurentRefinementOptions& options,
+    const std::string& context = "refined Acb finite Laurent match") {
+  const auto dimension = matching_detail::rectangular_columns(
+      basis, "Acb matching basis");
+  if (basis.size() != dimension || right_hand_side.size() != dimension)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": basis must be square and match the rhs");
+  matching_detail::require_complete_exact_saturation_record(
+      exact_saturation_record, dimension, context);
+
+  const auto transformation =
+      specialize_exact_rational_laurent_matrix_to_acb(
+          exact_saturation_record.transformation);
+  auto transformed_basis =
+      right_multiply_finite_by_exact_laurent(basis, transformation);
+  const auto factorization = factor_finite_laurent_system(
+      std::move(transformed_basis),
+      context + ": certified transformed factorization");
+  auto transformed_weights = solve_factorized_finite_laurent_system(
+      factorization, right_hand_side, context + ": initial solve");
+
+  RefinedAcbLaurentMatch result;
+  for (;;) {
+    auto weights = apply_exact_laurent_matrix(
+        transformation, transformed_weights);
+    auto residual = matching_detail::evaluate_acb_matching_residual(
+        basis, weights, right_hand_side, options,
+        context + ": residual#" +
+            std::to_string(result.residual_history.size()));
+    result.residual_history.push_back(residual.diagnostics);
+    result.weights = std::move(weights);
+    result.residual = std::move(residual.residual);
+
+    const auto& latest = result.residual_history.back();
+    if (latest.verdict == AcbMatchingResidualVerdict::Pass ||
+        !latest.complete_through_required ||
+        result.refinement_steps >= options.max_refinement_steps)
+      break;
+
+    auto correction = solve_factorized_finite_laurent_system(
+        factorization, result.residual,
+        context + ": correction#" +
+            std::to_string(result.refinement_steps + 1));
+    for (std::size_t column = 0; column < dimension; ++column)
+      transformed_weights[column] =
+          transformed_weights[column] + correction[column];
+    ++result.refinement_steps;
+  }
+  result.transformed_weights = std::move(transformed_weights);
+  return result;
 }
 
 }  // namespace diffexp2

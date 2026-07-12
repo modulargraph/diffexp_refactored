@@ -19,7 +19,7 @@ nativeOKQ[value_] := AssociationQ[value] &&
 DiffExp2`LoadConfiguration[{
   "RecurrenceBackend" -> "Cpp", "WorkingPrecision" -> 60,
   "ChopPrecision" -> 30, "ExpansionOrder" -> 10,
-  "EpsilonOrder" -> 0, "DivisionOrder" -> 2,
+  "EpsilonOrder" -> 1, "DivisionOrder" -> 2,
   "Variables" -> {}, "Verbosity" -> 0}];
 
 x = Global`x;
@@ -30,7 +30,8 @@ one = DiffExp2`EpsSeries`ESNew[0, {1, 0}];
 atlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     system, {one}, lowerPlan, upperPlan, "Threads" -> 1,
-    "Integrands" -> {{{1}, {1/Global`eps}}, x}]];
+    "Integrands" -> {{{1}, {1/Global`eps}}, x},
+    "TargetCompleteMax" -> 0]];
 
 epsilon = <|"Min" -> -1, "Max" -> 0,
   "RequiredCompleteMax" -> -1|>;
@@ -73,6 +74,8 @@ assert["native_observable_batch_marches_once_and_preserves_request_order",
     Lookup[results, "RequestIndex"] === {0, 1, 2, 3} &&
     Lookup[results, "Identity"] ===
       {"integral", "lower-limit", "upper-limit", "polar-integral"} &&
+    atlas["TargetCompleteMax"] === 0 &&
+    atlas["Request", "EpsWindow", "CompleteMax"] === 1 &&
     run["States", "lower", "epsilon", "required_complete_max"] === 0 &&
     Sort[Keys[Lookup[run, "States", <||>]]] === {"lower", "upper"}];
 

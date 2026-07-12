@@ -8,7 +8,7 @@ BeginPackage["DiffExp2`NativeTransport`",
    "DiffExp2`CppBackend`"}];
 
 PrepareNativeRegularIndependentArms::usage =
-  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var}, or mutually exclusive Integrands->{cvecs,var}, derives the honest global epsilon halo required by polar coefficient rows. It returns only opaque native locals/bases and exact atlas metadata.";
+  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var}, or mutually exclusive Integrands->{cvecs,var}, derives the honest global epsilon halo required by polar coefficient rows. TargetCompleteMax->Automatic uses the configured EpsilonOrder; a nonnegative integer selects the public atlas target before the coefficient halo is added to the source solve. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 RunNativeTransportObservableBatch::usage =
@@ -516,7 +516,7 @@ nativeReleaseResponseHandles[atlas_Association, response_] := Module[
 
 Options[PrepareNativeRegularIndependentArms] = {
   "Threads" -> Automatic, "Integrand" -> Automatic,
-  "Integrands" -> Automatic};
+  "Integrands" -> Automatic, "TargetCompleteMax" -> Automatic};
 
 PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     lowerPlan_Association, upperPlan_Association, OptionsPattern[]] := Module[
@@ -524,11 +524,18 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
    epsMin, epsMax, req, anchorSystem, anchor = None, prepareArm, lowerData,
    upperData, sessions, anchorOwner, lowerOwners, upperOwners, planIdentity,
    nativePlan = None, sessionInfo, sessionStats, domain, integrand,
-   preparedShift, halo, targetMax = cfg["EpsilonOrder"], availableMax,
+   preparedShift, halo, targetMax, targetOption =
+     OptionValue["TargetCompleteMax"], availableMax,
    cleanup, output, preparedBases = {},
    containsSingularReceivingCharts = False,
    integrands = OptionValue["Integrands"],
    threads = OptionValue["Threads"]},
+  If[targetOption =!= Automatic &&
+      (!IntegerQ[targetOption] || targetOption < 0),
+    err["E8", <|"TargetCompleteMax" -> targetOption,
+      "Detail" -> "TargetCompleteMax must be Automatic or a nonnegative integer"|>]];
+  targetMax = If[targetOption === Automatic,
+    cfg["EpsilonOrder"], targetOption];
   plans = normalizeSharedAnchor[lowerPlan, upperPlan];
   {lower, upper} = plans;
   values = nativeBoundaryValues[boundary, dimension];

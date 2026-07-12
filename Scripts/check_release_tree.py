@@ -101,6 +101,7 @@ TEST_FILES = {
     "Tests/test_cpp_backend.m",
     "Tests/test_eps_series.m",
     "Tests/test_feynmantrick_algebra.m",
+    "Tests/test_fast_tadpole_boundary.m",
     "Tests/test_feynmantrick_failure_semantics.m",
     "Tests/test_fire_inmemory_reduction_cache.m",
     "Tests/test_fire_level_reduction_batch.m",

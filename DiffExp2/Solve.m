@@ -3051,8 +3051,60 @@ ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
   $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
   $cppStaticOperatorCache = <||>; $nativeSCCCompositeCache = <||>;
+  $homogeneousFramePlanOverride = None;
+  $cppHomogeneousFrameOverride = None;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
   DiffExp2`CppBackend`ClearPersistentSessions[];);
+
+(* The exact homogeneous work rectangle is needed both by the ordinary
+   column builder and by persistent SCC preparation.  Keeping the arithmetic
+   in one helper lets a composite take the union of heterogeneous Jordan
+   block rectangles before any native operator is serialized.  A temporary
+   override passes the already-computed plan into the capture call, avoiding
+   a second denominator clear/pole-depth scan. *)
+$homogeneousFramePlanOverride = None;
+$cppHomogeneousFrameOverride = None;
+
+homogeneousFramePlan[cs_Association, req_Association] := Module[
+  {blocks = blockList[cs], fams = cs["Families"], nmax, reqMin, reqMax,
+   pMax, cdMax, symbolic, poleDepth, singleUseDepth, spectralDepth,
+   transformDepth, wideTop, terminalFb, startFb, adaptiveQ},
+  nmax = req["TOrder"];
+  reqMin = req["EpsWindow", "Min"];
+  reqMax = req["EpsWindow", "CompleteMax"];
+  pMax = Max[0, Max[Table[
+      logCeiling[cs, b["a"], b["b"], b["q"] - 1], {b, blocks}]]];
+  cdMax = Max[0, Max[#["CollisionDepth"] & /@ fams]];
+  symbolic = clearedSymbolic[cs];
+  poleDepth = recurrencePoleDepth[symbolic, nmax];
+  singleUseDepth = recurrenceSingleUsePoleDepth[symbolic];
+  spectralDepth = spectralTransformPoleDepth[cs];
+  transformDepth = finalTransformPoleDepth[cs, nmax];
+  wideTop = reqMax + pMax + cdMax + 2 -
+    Min[0, reqMin - pMax - 2];
+  wideTop = Max[wideTop,
+    reqMax + pMax + cdMax + poleDepth] + transformDepth;
+  terminalFb = Min[Min[reqMin, 0] - pMax - cdMax - 2,
+      reqMin - pMax - cdMax - poleDepth] - spectralDepth;
+  startFb = Min[Min[reqMin, 0] - pMax - cdMax - 2,
+      reqMin - pMax - cdMax - singleUseDepth] - spectralDepth;
+  adaptiveQ = !TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+    startFb > terminalFb && !TrueQ[$disableAdaptiveLowerFrames];
+  If[!adaptiveQ, startFb = terminalFb];
+  <|"Identity" -> {cs, req}, "PMax" -> pMax,
+    "CollisionDepthMax" -> cdMax, "Symbolic" -> symbolic,
+    "PoleDepth" -> poleDepth, "SingleUseDepth" -> singleUseDepth,
+    "SpectralDepth" -> spectralDepth,
+    "TransformDepth" -> transformDepth, "FrameTop" -> wideTop,
+    "TerminalFrameBase" -> terminalFb, "StartFrameBase" -> startFb,
+    "Adaptive" -> adaptiveQ|>];
+
+homogeneousFramePlanFor[cs_Association, req_Association] :=
+  If[AssociationQ[$homogeneousFramePlanOverride] &&
+      SameQ[Lookup[$homogeneousFramePlanOverride, "Identity", None],
+        {cs, req}],
+    $homogeneousFramePlanOverride,
+    homogeneousFramePlan[cs, req]];
 
 (* First production seam for a session-owned native LocalSolution.  It is
    intentionally narrower than SolveHomogeneous: no SCC orchestration,
@@ -3223,42 +3275,39 @@ SolveNativeLocalFamily[cs_Association, req_Association,
       {"status", "session", "local", "chart", "metadata"}]|>];
 
 solveHomogeneousCore[cs_Association, req_Association] := Module[
-  {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMin, reqMax,
+  {d = cs["SystemSize"], blocks = blockList[cs], nmax, reqMax,
    columns = {}, workColumns = {}, specs = {}, hitsAll = {}, compAll = {},
-   fams = cs["Families"], colCursor = 0, wideTop, Pmax, cdMax,
-   symbolic, poleDepth, singleUseDepth, spectralDepth, transformDepth,
+   fams = cs["Families"], colCursor = 0, wideTop,
+   symbolic, singleUseDepth,
    startFb, terminalFb, adaptiveQ, prepCache = <||>, prepFor,
    vPrepCache = <||>, vPrepFor,
    adaptiveDiags = {}, certs = {}, cppTimingQ, solveStarted, residualStarted,
    knownAdaptiveFb, cppBatchQ, cppTasks = {}, cppBatchResults = {},
-   cppBatchCursor = 0, taskCursor},
+   cppBatchCursor = 0, taskCursor, framePlan, forcedFrame},
   cppTimingQ = Environment["DEBUG_CPP_RECURRENCE"] === "1";
   solveStarted = SessionTime[];
   nmax = req["TOrder"];
-  reqMin = req["EpsWindow", "Min"]; reqMax = req["EpsWindow", "CompleteMax"];
-  Pmax = Max[0, Max[Table[logCeiling[cs, b["a"], b["b"], b["q"] - 1], {b, blocks}]]];
-  cdMax = Max[0, Max[#["CollisionDepth"] & /@ fams]];
-  symbolic = clearedSymbolic[cs];
-  poleDepth = recurrencePoleDepth[symbolic, nmax];
-  singleUseDepth = recurrenceSingleUsePoleDepth[symbolic];
-  spectralDepth = spectralTransformPoleDepth[cs];
-  transformDepth = finalTransformPoleDepth[cs, nmax];
-  wideTop = reqMax + Pmax + cdMax + 2 - Min[0, reqMin - Pmax - 2];
-  (* Keep the established scratch halo, enlarging it only when the exact
-     longest recurrence path composes more negative-eps shifts. *)
-  wideTop = Max[wideTop, reqMax + Pmax + cdMax + poleDepth];
-  wideTop += transformDepth;
-  terminalFb = Min[Min[reqMin, 0] - Pmax - cdMax - 2,
-      reqMin - Pmax - cdMax - poleDepth] - spectralDepth;
-  startFb = Min[Min[reqMin, 0] - Pmax - cdMax - 2,
-      reqMin - Pmax - cdMax - singleUseDepth] - spectralDepth;
-  (* The upper frame remains the proven scalar longest-path budget, so
-     CompleteMax/UValid are unchanged.  Only singular homogeneous lower
-     support is adaptive.  The terminal retry is the former rectangle and
-     uses the same strict recurrence -- never an alternate solver. *)
-  adaptiveQ = !TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
-    startFb > terminalFb && !TrueQ[$disableAdaptiveLowerFrames];
-  If[!adaptiveQ, startFb = terminalFb];
+  reqMax = req["EpsWindow", "CompleteMax"];
+  framePlan = homogeneousFramePlanFor[cs, req];
+  symbolic = framePlan["Symbolic"];
+  singleUseDepth = framePlan["SingleUseDepth"];
+  wideTop = framePlan["FrameTop"];
+  terminalFb = framePlan["TerminalFrameBase"];
+  startFb = framePlan["StartFrameBase"];
+  adaptiveQ = TrueQ[framePlan["Adaptive"]];
+  forcedFrame = $cppHomogeneousFrameOverride;
+  If[AssociationQ[forcedFrame],
+    If[!IntegerQ[Lookup[forcedFrame, "FrameBase", None]] ||
+        !IntegerQ[Lookup[forcedFrame, "FrameTop", None]] ||
+        forcedFrame["FrameBase"] > terminalFb ||
+        forcedFrame["FrameTop"] < wideTop,
+      err["E6", cs, <|"RequiredFrame" -> {terminalFb, wideTop},
+        "ForcedFrame" -> forcedFrame,
+        "Detail" -> "forced homogeneous capture frame does not contain the exact chart work rectangle"|>]];
+    terminalFb = forcedFrame["FrameBase"];
+    startFb = terminalFb;
+    wideTop = forcedFrame["FrameTop"];
+    adaptiveQ = False];
   (* Once any column proves that a wider lower rectangle is required, every
      later column starts from that already-certified width.  A wider frame is
      algebraically identical and avoids repeating the same failed narrow
@@ -3859,9 +3908,13 @@ sccNativeCompositeCacheSignature[cs_Association, req_Association] := {
   Environment["DE2_CPP_PERSISTENT"]};
 
 sccCaptureHomogeneousGroup[blockcs_Association,
-    workReq_Association] := Module[{captured},
+    workReq_Association, framePlan_:Automatic,
+    forcedFrame_:None] := Module[{captured},
   captured = Catch[
-    Block[{$cppHomogeneousBatchCapture = True,
+    Block[{$homogeneousFramePlanOverride =
+          If[AssociationQ[framePlan], framePlan, None],
+        $cppHomogeneousFrameOverride = forcedFrame,
+        $cppHomogeneousBatchCapture = True,
         $cppHomogeneousBatchInjection = None,
         $cppHomogeneousBatchInjectionUses = 0,
         $cppBuildRequestOnly = True},
@@ -4003,7 +4056,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    parentRecords, parentGeometry, parent, blockRecords, serialization,
    couplings, identity, manifest, prepared, result, scale, radius,
    center, missingReq, components, condensation, executionDescriptor,
-   inputDigits, runRecords, blockDimensions},
+   inputDigits, runRecords, blockDimensions, framePlans, forcedFrame},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -4074,12 +4127,22 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     Range[Length[components]];
   capabilities = sccNativeBlockCapabilities /@ blockSystems;
   badBlocks = Select[Range[Length[blockSystems]],
-    !TrueQ[And @@ Values[capabilities[[#]]]] &];
+    Function[block, Module[{record = capabilities[[block]]},
+      (* "regular" is a classification, not an admission predicate.  The
+         retained C++ chart proves the complete exact affine-Jordan
+         indicial operator for a singular block and revalidates every T/P/R
+         schedule at execution.  Wolfram must therefore admit both Boolean
+         classes here while continuing to require the exact producer facts
+         which the current composite representation actually depends on. *)
+      !MemberQ[{True, False}, Lookup[record, "regular", None]] ||
+        !TrueQ[Lookup[record, "identity_gauge", False]] ||
+        !TrueQ[Lookup[record, "identity_v", False]] ||
+        !TrueQ[Lookup[record, "no_pseudo", False]]]]];
   If[badBlocks =!= {},
     err["E6", cs, <|"UnsupportedBlocks" -> Map[
         <|"Block" -> #, "Capabilities" -> capabilities[[#]]|> &,
         badBlocks],
-      "Detail" -> "native SCC first slice requires regular collision-free diagonal blocks with exact identity Gauge/GaugeInverse and V/VInv"|>]];
+      "Detail" -> "native SCC preparation requires collision-free regular or exact affine-Jordan diagonal blocks with exact identity Gauge/GaugeInverse and V/VInv"|>]];
   requestedMin = epsWindow["Min"];
   requestedMax = epsWindow["CompleteMax"];
   publicTOrder = req["TOrder"];
@@ -4089,14 +4152,24 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   workReq = Join[req, <|
     "EpsWindow" -> Join[epsWindow, <|"CompleteMax" -> plannedTop|>],
     "TOrder" -> workTOrder|>];
+  framePlans = homogeneousFramePlan[#, workReq] & /@ blockSystems;
+  fb = Min[Lookup[framePlans, "TerminalFrameBase"]];
+  workTop = Max[Lookup[framePlans, "FrameTop"]];
+  forcedFrame = <|"FrameBase" -> fb, "FrameTop" -> workTop|>;
   captures = Block[{$shCache = <||>, $shSysTag = None,
       $cppStaticOperatorCache = <||>},
-    sccCaptureHomogeneousGroup[#, workReq] & /@ blockSystems];
+    MapThread[sccCaptureHomogeneousGroup[
+        #1, workReq, #2, forcedFrame] &,
+      {blockSystems, framePlans}]];
   capturedContract = sccCapturedCompositeContract[
     captures, cs, workTOrder];
-  fb = capturedContract["FrameBase"];
+  If[capturedContract["FrameBase"] =!= fb ||
+      capturedContract["FrameWidth"] =!= workTop - fb + 1,
+    err["E6", cs, <|"PlannedFrame" -> forcedFrame,
+      "CapturedFrame" -> {capturedContract["FrameBase"],
+        capturedContract["FrameWidth"]},
+      "Detail" -> "native SCC capture did not preserve the exact union work rectangle"|>]];
   width = capturedContract["FrameWidth"];
-  workTop = fb + width - 1;
   If[!(fb <= requestedMin <= requestedMax <= workTop),
     err["E6", cs, <|"FrameBase" -> fb, "FrameWidth" -> width,
       "RequestedWindow" -> epsWindow,

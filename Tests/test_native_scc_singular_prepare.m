@@ -42,7 +42,7 @@ exactTagEntryQ[entry_] := Module[{run, metadata, tag, a, b, p},
 x = Global`x; t = Global`t; eps = Global`eps;
 lambda = 1/2 + eps/3;
 request = <|"EpsWindow" -> <|"Min" -> -3, "CompleteMax" -> 0|>,
-  "TOrder" -> 0|>;
+  "TOrder" -> 2|>;
 chart = <|"ChartVar" -> t, "Center" -> 0, "Scale" -> 1,
   "Radius" -> 2, "LocalRadius" -> 2,
   "Name" -> "native-singular-jordan-scc-prepare",
@@ -91,6 +91,7 @@ ok = !AnyTrue[{cs, prepared, stats, solved, evaluated}, FailureQ] &&
   Lookup[solved, "Type", None] === "DiffExp2NativeSCCBasisColumn" &&
   Lookup[solved, "SeedLocalComponent", None] === 2 &&
   Lookup[solved, "BasisIndex", None] === 2 &&
+  Lookup[solved["TWindow"], "CompleteMax", None] === 2 &&
   Lookup[solved["NativeSummary"], "execution_capability", None] ===
     "exact-rational-regular-singular-jordan-block-dag-column-v2" &&
   Lookup[evaluated, "status", "error"] === "ok" &&
@@ -155,9 +156,12 @@ acbOk = !AnyTrue[acbResult, FailureQ] &&
   Lookup[acbBasis["NativeSummary"], "worker_threads", None] === 2 &&
   TrueQ[Lookup[acbBasis["NativeSummary"], "atomic_retention", False]] &&
   Lookup[acbColumn, "SeedLocalComponent", None] === 2 &&
+  Lookup[acbColumn["TWindow"], "CompleteMax", None] === 2 &&
   Lookup[acbColumn["NativeSummary"], "execution_capability", None] ===
     "acb-regular-singular-jordan-block-dag-column-v1" &&
-  Length[acbSourceRecords] === 1 && AssociationQ[acbIdentity] &&
+  Length[acbSourceRecords] === 1 &&
+  Lookup[First[acbSourceRecords], "result_taylor_max", 0] >= 2 &&
+  AssociationQ[acbIdentity] &&
   exactTagEntryQ[Lookup[acbIdentity, "seed", None]] &&
   AllTrue[Lookup[acbIdentity, "targets", {}], exactTagEntryQ] &&
   Length[rationalValue] > 0 && Length[acbValue] === Length[rationalValue] &&

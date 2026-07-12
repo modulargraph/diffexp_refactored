@@ -670,6 +670,7 @@ struct LeadingNullRelation {
   std::size_t rank = 0;
   std::optional<std::vector<Scalar>> vector;
   std::optional<std::size_t> target_column;
+  std::vector<std::size_t> pivot_rows;
 };
 
 // Full-pivot elimination at epsilon^0.  The first proved nonzero entry in
@@ -681,18 +682,22 @@ template <typename Scalar>
 LeadingNullRelation<Scalar> leading_null_relation(
     DenseScalarMatrix<Scalar> matrix, const std::string& context) {
   const auto size = rectangular_columns(matrix, "leading coefficient matrix");
-  if (matrix.size() != size)
+  const auto row_count = matrix.size();
+  if (row_count < size)
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::DimensionMismatch,
-        context + ": leading coefficient matrix must be square");
+        context +
+            ": leading coefficient matrix must have at least as many rows as columns");
   const auto original = matrix;
   std::vector<std::size_t> column_permutation(size);
   for (std::size_t i = 0; i < size; ++i) column_permutation[i] = i;
+  std::vector<std::size_t> row_permutation(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) row_permutation[i] = i;
 
   std::size_t rank = 0;
   for (std::size_t position = 0; position < size; ++position) {
     std::optional<std::pair<std::size_t, std::size_t>> pivot;
-    for (std::size_t row = position; row < size; ++row) {
+    for (std::size_t row = position; row < row_count; ++row) {
       for (std::size_t column = position; column < size; ++column) {
         const auto decision = zero_decision(matrix[row][column]);
         if (decision == ZeroDecision::Ambiguous)
@@ -707,8 +712,10 @@ LeadingNullRelation<Scalar> leading_null_relation(
     }
     if (!pivot.has_value()) break;
 
-    if (pivot->first != position)
+    if (pivot->first != position) {
       std::swap(matrix[position], matrix[pivot->first]);
+      std::swap(row_permutation[position], row_permutation[pivot->first]);
+    }
     if (pivot->second != position) {
       for (auto& row : matrix)
         std::swap(row[position], row[pivot->second]);
@@ -716,7 +723,7 @@ LeadingNullRelation<Scalar> leading_null_relation(
                 column_permutation[pivot->second]);
     }
 
-    for (std::size_t row = position + 1; row < size; ++row) {
+    for (std::size_t row = position + 1; row < row_count; ++row) {
       const auto decision = zero_decision(matrix[row][position]);
       if (decision == ZeroDecision::Ambiguous)
         throw MatchingArithmeticError(
@@ -734,7 +741,11 @@ LeadingNullRelation<Scalar> leading_null_relation(
     ++rank;
   }
 
-  if (rank == size) return LeadingNullRelation<Scalar>{rank, {}, {}};
+  std::vector<std::size_t> pivot_rows(row_permutation.begin(),
+                                      row_permutation.begin() + rank);
+  if (rank == size)
+    return LeadingNullRelation<Scalar>{rank, {}, {},
+                                       std::move(pivot_rows)};
 
   std::vector<Scalar> permuted(size, ScalarTraits<Scalar>::zero());
   permuted[rank] = ScalarTraits<Scalar>::one();
@@ -750,7 +761,7 @@ LeadingNullRelation<Scalar> leading_null_relation(
     relation[column_permutation[column]] = std::move(permuted[column]);
   const auto target = column_permutation[rank];
 
-  for (std::size_t row = 0; row < size; ++row) {
+  for (std::size_t row = 0; row < row_count; ++row) {
     auto residual = ScalarTraits<Scalar>::zero();
     for (std::size_t column = 0; column < size; ++column)
       residual += original[row][column] * relation[column];
@@ -767,7 +778,8 @@ LeadingNullRelation<Scalar> leading_null_relation(
           context + ": computed saturation relation is not in the nullspace",
           row, std::nullopt, 0);
   }
-  return LeadingNullRelation<Scalar>{rank, std::move(relation), target};
+  return LeadingNullRelation<Scalar>{rank, std::move(relation), target,
+                                     std::move(pivot_rows)};
 }
 
 enum class FullRankProofResult : std::uint8_t {
@@ -840,6 +852,41 @@ FullRankProofResult certified_full_rank_search(
 }
 
 template <typename Scalar>
+std::optional<std::vector<std::pair<std::size_t, std::size_t>>>
+certified_full_rank_plan(DenseScalarMatrix<Scalar> matrix,
+                         std::size_t position) {
+  const auto size = matrix.size();
+  if (position == size)
+    return std::vector<std::pair<std::size_t, std::size_t>>{};
+  for (std::size_t pivot_row = position; pivot_row < size; ++pivot_row) {
+    for (std::size_t pivot_column = position; pivot_column < size;
+         ++pivot_column) {
+      if (zero_decision(matrix[pivot_row][pivot_column]) !=
+          ZeroDecision::Nonzero)
+        continue;
+      auto next = matrix;
+      if (pivot_row != position)
+        std::swap(next[position], next[pivot_row]);
+      if (pivot_column != position)
+        for (auto& row : next)
+          std::swap(row[position], row[pivot_column]);
+      for (std::size_t row = position + 1; row < size; ++row) {
+        const auto factor = next[row][position] /
+                            next[position][position];
+        next[row][position] = ScalarTraits<Scalar>::zero();
+        for (std::size_t column = position + 1; column < size; ++column)
+          next[row][column] -= factor * next[position][column];
+      }
+      auto tail = certified_full_rank_plan(std::move(next), position + 1);
+      if (!tail.has_value()) continue;
+      tail->insert(tail->begin(), {pivot_row, pivot_column});
+      return tail;
+    }
+  }
+  return std::nullopt;
+}
+
+template <typename Scalar>
 std::size_t certify_full_rank_by_nonzero_pivots(
     DenseScalarMatrix<Scalar> matrix, const std::string& context) {
   const auto size = rectangular_columns(
@@ -864,11 +911,12 @@ template <typename Scalar>
 DenseScalarMatrix<Scalar> epsilon_zero_matrix(
     const FiniteLaurentMatrix<Scalar>& matrix,
     const std::string& context) {
-  const auto size = matrix.size();
+  const auto columns = rectangular_columns(matrix, "epsilon-zero matrix");
   DenseScalarMatrix<Scalar> result(
-      size, std::vector<Scalar>(size, ScalarTraits<Scalar>::zero()));
-  for (std::size_t row = 0; row < size; ++row) {
-    for (std::size_t column = 0; column < size; ++column) {
+      matrix.size(),
+      std::vector<Scalar>(columns, ScalarTraits<Scalar>::zero()));
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    for (std::size_t column = 0; column < columns; ++column) {
       const auto& entry = matrix[row][column];
       if (entry.complete_max() < 0)
         throw MatchingArithmeticError(
@@ -955,18 +1003,22 @@ EpsilonFrame<Scalar> saturation_divide(
 // The same right actions are accumulated in the exact-support Laurent matrix
 // T, maintaining the invariant `basis_times_transformation == F*T`.
 template <typename Scalar>
-EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
+EpsilonLatticeSaturationResult<Scalar>
+saturate_rectangular_finite_laurent_basis(
     const FiniteLaurentMatrix<Scalar>& basis,
-    const std::string& context = "finite Laurent basis saturation") {
+    const std::string& context =
+        "rectangular finite Laurent basis saturation") {
   const auto size = matching_detail::rectangular_columns(
       basis, "finite Laurent saturation basis");
-  if (basis.size() != size)
+  const auto row_count = basis.size();
+  if (row_count < size)
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::DimensionMismatch,
-        context + ": saturation basis must be square");
+        context +
+            ": saturation basis must have at least as many rows as columns");
 
   auto transformed = basis;
-  for (std::size_t row = 0; row < size; ++row)
+  for (std::size_t row = 0; row < row_count; ++row)
     for (std::size_t column = 0; column < size; ++column)
       transformed[row][column] = matching_detail::canonical_leading_frame(
           transformed[row][column], context + ": input valuation", row,
@@ -977,7 +1029,7 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
   auto transformation = identity_exact_laurent_matrix<Scalar>(size);
   for (std::size_t column = 0; column < size; ++column) {
     std::optional<std::int32_t> valuation;
-    for (std::size_t row = 0; row < size; ++row) {
+    for (std::size_t row = 0; row < row_count; ++row) {
       const auto candidate = finite_laurent_leading_power(
           transformed[row][column], context + ": column valuation");
       if (candidate.has_value() &&
@@ -997,7 +1049,7 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
     transformation[column][column] =
         ExactLaurentPolynomial<Scalar>::monomial(
             shifts[column], ScalarTraits<Scalar>::one());
-    for (std::size_t row = 0; row < size; ++row) {
+    for (std::size_t row = 0; row < row_count; ++row) {
       const auto shifted_min = matching_detail::checked_power(
           static_cast<std::int64_t>(
               transformed[row][column].min_power()) + shifts[column],
@@ -1021,20 +1073,25 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
     }
   }
 
-  auto determinant = matching_detail::nonnegative_determinant_frame(
-      transformed, context);
-  const auto determinant_valuation = finite_laurent_leading_power(
-      determinant, context + ": normalized determinant");
-  if (!determinant_valuation.has_value())
-    throw MatchingArithmeticError(
-        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
-        context +
-            ": determinant is unresolved in the complete epsilon window");
-  if (*determinant_valuation < 0)
-    throw MatchingArithmeticError(
-        MatchingArithmeticErrorCode::InvalidSaturationLattice,
-        context + ": normalized determinant retained an epsilon pole",
-        std::nullopt, std::nullopt, *determinant_valuation);
+  const auto initial_normalized = transformed;
+
+  // Every elementary action contains the old target column with coefficient
+  // one and then divides it by epsilon.  Consequently the target's common
+  // complete top drops by at least one.  The sum below is therefore a strict,
+  // finite progress measure independent of any determinant-minor guess.
+  std::size_t maximum_steps = 0;
+  for (std::size_t column = 0; column < size; ++column) {
+    std::int32_t common_top = std::numeric_limits<std::int32_t>::max();
+    for (std::size_t row = 0; row < row_count; ++row)
+      common_top = std::min(common_top,
+                            transformed[row][column].complete_max());
+    if (common_top < 0)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+          context + ": normalized column is incomplete through epsilon^0",
+          std::nullopt, column, common_top);
+    maximum_steps += static_cast<std::size_t>(common_top) + 1;
+  }
 
   std::vector<EpsilonLatticeSaturationAction<Scalar>> actions;
   auto relation = matching_detail::leading_null_relation(
@@ -1043,11 +1100,11 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
   const auto initial_rank = relation.rank;
   std::size_t steps = 0;
   while (relation.rank != size) {
-    if (steps >= static_cast<std::size_t>(*determinant_valuation))
+    if (steps >= maximum_steps)
       throw MatchingArithmeticError(
           MatchingArithmeticErrorCode::SaturationFailure,
           context +
-              ": determinant valuation was consumed before full rank");
+              ": complete epsilon windows were consumed before full rank");
     if (!relation.vector.has_value() ||
         !relation.target_column.has_value())
       throw MatchingArithmeticError(
@@ -1056,7 +1113,7 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
 
     const auto& null_vector = *relation.vector;
     const auto target = *relation.target_column;
-    for (std::size_t row = 0; row < size; ++row)
+    for (std::size_t row = 0; row < row_count; ++row)
       transformed[row][target] = matching_detail::saturation_divide(
           transformed[row], null_vector,
           context + "#sat" + std::to_string(steps + 1) + "/row" +
@@ -1076,11 +1133,29 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
         context + "#sat" + std::to_string(steps));
   }
 
+  if (relation.pivot_rows.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InvalidSaturationLattice,
+        context + ": final full-rank proof did not retain all pivot rows");
+
+  FiniteLaurentMatrix<Scalar> determinant_minor;
+  determinant_minor.reserve(size);
+  for (const auto row : relation.pivot_rows)
+    determinant_minor.push_back(initial_normalized[row]);
+  auto determinant = matching_detail::nonnegative_determinant_frame(
+      determinant_minor, context + ": pivot-row determinant witness");
+  const auto determinant_valuation = finite_laurent_leading_power(
+      determinant, context + ": normalized pivot-row determinant");
+  if (!determinant_valuation.has_value() || *determinant_valuation < 0)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+        context +
+            ": pivot-row determinant is unresolved in the complete epsilon window");
   if (steps != static_cast<std::size_t>(*determinant_valuation))
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::SaturationFailure,
         context +
-            ": full rank did not consume the determinant valuation exactly");
+            ": exact pivot-row determinant valuation disagrees with the number of epsilon divisions");
 
   EpsilonLatticeSaturationDiagnostics<Scalar> diagnostics{
       std::move(valuations),
@@ -1092,6 +1167,19 @@ EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
       std::move(actions)};
   return {std::move(transformed), std::move(transformation),
           std::move(diagnostics)};
+}
+
+template <typename Scalar>
+EpsilonLatticeSaturationResult<Scalar> saturate_finite_laurent_basis(
+    const FiniteLaurentMatrix<Scalar>& basis,
+    const std::string& context = "finite Laurent basis saturation") {
+  const auto size = matching_detail::rectangular_columns(
+      basis, "finite Laurent saturation basis");
+  if (basis.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": saturation basis must be square");
+  return saturate_rectangular_finite_laurent_basis(basis, context);
 }
 
 template <typename Scalar>
@@ -1229,6 +1317,113 @@ FiniteLaurentFactorization<Scalar> factor_finite_laurent_system(
 
   return {std::move(matrix), std::move(column_permutation),
           std::move(steps)};
+}
+
+// Factor a basis whose exact provenance proves that every negative epsilon
+// coefficient vanishes.  Rebuild every entry at epsilon^0 before invoking
+// the ordinary certified Laurent factorization.  The latter deliberately
+// remains free to choose positive-valuation pivots: singular perturbations
+// need not have a full-rank epsilon^0 value at a fixed matching point.
+template <typename Scalar>
+FiniteLaurentFactorization<Scalar>
+factor_exact_nonnegative_finite_laurent_system(
+    FiniteLaurentMatrix<Scalar> matrix,
+    const std::string& context =
+        "exact valuation-zero finite Laurent factorization") {
+  const auto size = matching_detail::rectangular_columns(
+      matrix, "exact valuation-zero coefficient matrix");
+  if (matrix.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": coefficient matrix must be square");
+
+  for (std::size_t row = 0; row < size; ++row) {
+    for (std::size_t column = 0; column < size; ++column) {
+      const auto& frame = matrix[row][column];
+      if (frame.complete_max() < 0)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            context + ": transformed basis is incomplete through epsilon^0",
+            row, column, frame.complete_max());
+      std::vector<Scalar> nonnegative;
+      nonnegative.reserve(
+          static_cast<std::size_t>(frame.complete_max()) + 1);
+      for (std::int64_t power = 0; power <= frame.complete_max(); ++power)
+        nonnegative.push_back(frame.coefficient(
+            static_cast<std::int32_t>(power)));
+      matrix[row][column] = EpsilonFrame<Scalar>(0,
+                                                  std::move(nonnegative));
+    }
+  }
+
+  // When the epsilon^0 value already has a certified full-pivot plan, replay
+  // that plan on the complete Laurent frames.  The dense certificate permits
+  // ambiguous off-pivot balls: they are arbitrary entries, not zero claims.
+  // This matters for an exact Rational-shadow CASE-P basis, where Schur
+  // subtraction can enclose an algebraically exact zero even at arbitrarily
+  // high Acb precision.  Re-canonicalizing every Schur entry would demand an
+  // unnecessary zero decision and reject a matrix whose nonzero pivot path
+  // already proves invertibility.
+  auto pivot_plan = matching_detail::certified_full_rank_plan(
+      matching_detail::epsilon_zero_matrix(matrix, context), 0);
+  if (pivot_plan.has_value()) {
+    std::vector<std::size_t> column_permutation(size);
+    for (std::size_t index = 0; index < size; ++index)
+      column_permutation[index] = index;
+    std::vector<typename FiniteLaurentFactorization<Scalar>::Step> steps;
+    steps.reserve(size);
+    for (std::size_t position = 0; position < size; ++position) {
+      const auto [pivot_row, pivot_column] = (*pivot_plan)[position];
+      typename FiniteLaurentFactorization<Scalar>::Step step;
+      step.row_swap = pivot_row;
+      step.column_swap = pivot_column;
+      if (pivot_row != position)
+        std::swap(matrix[position], matrix[pivot_row]);
+      if (pivot_column != position) {
+        for (auto& row : matrix)
+          std::swap(row[position], row[pivot_column]);
+        std::swap(column_permutation[position],
+                  column_permutation[pivot_column]);
+      }
+      // The epsilon^0 dense plan proves this pivot excludes zero.  The
+      // finite quotient therefore has a certified denominator even when a
+      // below-pivot numerator overlaps zero.
+      (void)matching_detail::trim_leading_certified_zeros(
+          matrix[position][position],
+          context + ": planned pivot", position, position);
+      for (std::size_t row = position + 1; row < size; ++row) {
+        const auto structural_zero = std::all_of(
+            matrix[row][position].coefficients().begin(),
+            matrix[row][position].coefficients().end(),
+            [](const Scalar& value) {
+              return matching_detail::zero_decision(value) ==
+                  matching_detail::ZeroDecision::Zero;
+            });
+        if (structural_zero) {
+          matrix[row][position] = EpsilonFrame<Scalar>::zero(
+              matrix[row][position].complete_max());
+          continue;
+        }
+        const auto factor = finite_laurent_quotient(
+            matrix[row][position], matrix[position][position],
+            context + ": planned elimination quotient");
+        const auto eliminated =
+            matrix[row][position] - factor * matrix[position][position];
+        matrix[row][position] =
+            EpsilonFrame<Scalar>::zero(eliminated.complete_max());
+        for (std::size_t column = position + 1; column < size; ++column)
+          matrix[row][column] =
+              matrix[row][column] - factor * matrix[position][column];
+        step.eliminations.push_back({row, factor});
+      }
+      steps.push_back(std::move(step));
+    }
+    return {std::move(matrix), std::move(column_permutation),
+            std::move(steps)};
+  }
+
+  return factor_finite_laurent_system(
+      std::move(matrix), context + ": certified Laurent pivots");
 }
 
 template <typename Scalar>
@@ -1471,7 +1666,7 @@ inline void require_complete_exact_saturation_record(
   const auto& diagnostics = record.diagnostics;
   if (record.transformation.size() != dimension ||
       transformation_columns != dimension ||
-      record.basis_times_transformation.size() != dimension ||
+      record.basis_times_transformation.size() < dimension ||
       transformed_columns != dimension ||
       diagnostics.initial_column_valuations.size() != dimension ||
       diagnostics.initial_column_shifts.size() != dimension ||
@@ -1508,7 +1703,8 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     const FiniteLaurentVector<ComplexBall>& right_hand_side,
     const EpsilonLatticeSaturationResult<Rational>& exact_saturation_record,
     const AcbLaurentRefinementOptions& options,
-    const std::string& context = "refined Acb finite Laurent match") {
+    const std::string& context = "refined Acb finite Laurent match",
+    bool exact_formal_negative_coefficients_are_zero = false) {
   const auto dimension = matching_detail::rectangular_columns(
       basis, "Acb matching basis");
   if (basis.size() != dimension || right_hand_side.size() != dimension)
@@ -1523,9 +1719,13 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
           exact_saturation_record.transformation);
   auto transformed_basis =
       right_multiply_finite_by_exact_laurent(basis, transformation);
-  const auto factorization = factor_finite_laurent_system(
-      std::move(transformed_basis),
-      context + ": certified transformed factorization");
+  const auto factorization = exact_formal_negative_coefficients_are_zero
+      ? factor_exact_nonnegative_finite_laurent_system(
+            std::move(transformed_basis),
+            context + ": certified transformed valuation-zero factorization")
+      : factor_finite_laurent_system(
+            std::move(transformed_basis),
+            context + ": certified transformed factorization");
   auto transformed_weights = solve_factorized_finite_laurent_system(
       factorization, right_hand_side, context + ": initial solve");
 

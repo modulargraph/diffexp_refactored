@@ -117,6 +117,45 @@ json::object source_transform(const std::string& role,
               {"proven_zero", false}}}}}}};
 }
 
+json::object gauge_transform(const std::string& frame,
+                             const std::string& role,
+                             const std::string& gauge,
+                             const std::string& inverse,
+                             const std::string& multiplier,
+                             const std::string& domain) {
+  const auto gauge_identity = frame + ":Gauge=" + gauge;
+  const auto inverse_identity = frame + ":GaugeInverse=" + inverse;
+  const auto determinant_identity = frame + ":det=" + gauge;
+  const auto entry_identity = frame + ":" + role + "=" + multiplier;
+  const auto proof = json::serialize(json::object{
+      {"schema", "diffexp2-scc-gauge-transform-identity-v1"},
+      {"role", role}, {"dimension", 1}, {"identity", false},
+      {"gauge_exact_identity", gauge_identity},
+      {"gauge_inverse_exact_identity", inverse_identity},
+      {"gauge_det_exact_identity", determinant_identity},
+      {"source_window", json::object{{"epsilon_min", 0},
+          {"epsilon_complete_max", 3},
+          {"taylor_complete_max", kWorkTaylorOrder}}},
+      {"entries", json::array{json::object{{"row", 0}, {"column", 0},
+          {"exact_entry", entry_identity}, {"epsilon_shift", 0},
+          {"center_pole_order", 0}}}}});
+  return json::object{
+      {"schema", "diffexp2-scc-gauge-transform-v1"}, {"role", role},
+      {"rows", 1}, {"columns", 1}, {"identity", false},
+      {"gauge_exact_identity", gauge_identity},
+      {"gauge_inverse_exact_identity", inverse_identity},
+      {"gauge_det_exact_identity", determinant_identity},
+      {"exact_identity", proof}, {"domain", domain},
+      {"symbols", json::array{}},
+      {"entries", json::array{json::object{{"row", 0}, {"column", 0},
+          {"exact_entry", entry_identity},
+          {"multiplier", json::object{{"epsilon_shift", 0},
+              {"center_pole_order", 0},
+              {"kernels", constant_kernels(multiplier)},
+              {"exact_identity", entry_identity},
+              {"proven_zero", false}}}}}}};
+}
+
 json::object dense_source_transform(const std::string& role,
                                     const Matrix2& v,
                                     const Matrix2& vinv,
@@ -310,7 +349,8 @@ std::string prepare_chart(const std::string& session,
                           const std::string& domain,
                           const std::string& role,
                           const std::string& v,
-                          bool identity = false) {
+                          bool identity = false,
+                          bool identity_gauge = true) {
   auto response = request(json::object{
       {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
       {"key", domain + ":" + role + ":key"},
@@ -323,7 +363,8 @@ std::string prepare_chart(const std::string& session,
           {"principal_matrix", json::array{
               nested(json::array{exact_cell("0", true)})}},
           {"native_scc_capabilities", json::object{
-              {"regular", true}, {"identity_gauge", true},
+              {"regular", true}, {"identity_gauge", identity_gauge},
+              {"exact_gauge", true},
               {"identity_v", identity},
               {"epsilon_unimodular_v", true},
               {"no_pseudo", true}}}}},
@@ -728,6 +769,7 @@ bool run_domain(const std::string& domain, bool test_rejections) {
       manifest(domain, first, second, identity));
 
   json::object determinant_rejected{{"status", "skipped"}};
+  json::object laurent_accepted{{"status", "skipped"}};
   json::object binding_rejected{{"status", "skipped"}};
   json::object identity_rejected{{"status", "skipped"}};
   if (test_rejections) {
@@ -737,6 +779,18 @@ bool run_domain(const std::string& domain, bool test_rejections) {
         .at("source_transform").as_object()["det_epsilon_valuation"] = 1;
     determinant_rejected = prepare_scc(
         session, domain + ":nonunimodular-key", std::move(nonunimodular));
+
+    auto laurent = manifest(
+        domain, first, second, domain + ":laurent-parent");
+    auto& laurent_transform = laurent.at("blocks").as_array()[1]
+        .as_object().at("source_transform").as_object();
+    laurent_transform["det_epsilon_valuation"] = 1;
+    auto laurent_identity = json::parse(
+        laurent_transform.at("exact_identity").as_string()).as_object();
+    laurent_identity["det_epsilon_valuation"] = 1;
+    laurent_transform["exact_identity"] = json::serialize(laurent_identity);
+    laurent_accepted = prepare_scc(
+        session, domain + ":laurent-key", std::move(laurent));
 
     auto mismatched = manifest(
         domain, first, second, domain + ":mismatched-v-parent");
@@ -813,11 +867,20 @@ bool run_domain(const std::string& domain, bool test_rejections) {
       const auto container = diffexp2::checkpoint::read(checkpoint);
       const auto payload = json::parse(container.payload_json).as_object();
       const auto& retained = payload.at("prepared_scc").as_array();
-      if (retained.size() != 1) {
+      const json::object* spectral_record = nullptr;
+      for (const auto& raw_record : retained) {
+        const auto& record = raw_record.as_object();
+        const auto& request = record.at("request").as_object();
+        if (std::string(request.at("identity").as_string()) ==
+            domain + ":spectral-parent-v1") {
+          spectral_record = &record;
+          break;
+        }
+      }
+      if (spectral_record == nullptr) {
         checkpoint_ok = false;
       } else {
-        const auto& blocks = retained.front().as_object()
-                                 .at("request").as_object()
+        const auto& blocks = spectral_record->at("request").as_object()
                                  .at("blocks").as_array();
         checkpoint_ok = blocks.size() == 2 &&
             blocks[0].as_object().at("source_transform").as_object()
@@ -853,7 +916,8 @@ bool run_domain(const std::string& domain, bool test_rejections) {
   const bool rejection_ok = !test_rejections ||
       (determinant_rejected.at("status") == "error" &&
        std::string(determinant_rejected.at("detail").as_string())
-               .find("val_eps(det(V)) == 0") != std::string::npos &&
+               .find("exact structural identity") != std::string::npos &&
+       laurent_accepted.at("status") == "ok" &&
        binding_rejected.at("status") == "error" &&
        std::string(binding_rejected.at("detail").as_string())
                .find("retained assembly operator") != std::string::npos &&
@@ -874,12 +938,85 @@ bool run_domain(const std::string& domain, bool test_rejections) {
               << json::serialize(evaluated) << '\n'
               << domain << " determinant rejection: "
               << json::serialize(determinant_rejected) << '\n'
+              << domain << " Laurent admission: "
+              << json::serialize(laurent_accepted) << '\n'
               << domain << " V binding rejection: "
               << json::serialize(binding_rejected) << '\n'
               << domain << " identity fast-path rejection: "
               << json::serialize(identity_rejected) << '\n'
               << domain << " stats: " << json::serialize(stats) << '\n';
   }
+  (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                              {"session", session}});
+  return ok;
+}
+
+bool run_gauge_domain(const std::string& domain) {
+  auto created = request(json::object{
+      {"schema", 2}, {"op", "session.create"}, {"domain", domain},
+      {"precision_bits", 256}, {"output_digits", 40},
+      {"chart_capacity", 2}, {"scc_capacity", 1}, {"local_capacity", 1}});
+  if (created.at("status") != "ok") return false;
+  const auto session = std::string(created.at("session").as_string());
+  const auto first = prepare_chart(session, domain, "gauge-source", "2",
+                                   false, false);
+  const auto second = prepare_chart(session, domain, "gauge-target", "3",
+                                    false, false);
+  const auto identity = domain + ":gauge-parent-v1";
+  auto payload = manifest(domain, first, second, identity);
+  auto& blocks = payload.at("blocks").as_array();
+  blocks[0].as_object()["principal_identity"] =
+      domain + ":gauge-source:principal";
+  blocks[1].as_object()["principal_identity"] =
+      domain + ":gauge-target:principal";
+  blocks[0].as_object()["source_transform"] = source_transform(
+      "gauge-source", "2", "1/2", domain);
+  blocks[1].as_object()["source_transform"] = source_transform(
+      "gauge-target", "3", "1/3", domain);
+  for (auto& value : blocks) {
+    value.as_object()["identity_gauge"] = false;
+    value.as_object()["exact_gauge"] = true;
+  }
+  blocks[0].as_object()["to_physical"] = gauge_transform(
+      "gauge-source", "to_physical", "7", "1/7", "7", domain);
+  blocks[0].as_object()["to_reduced"] = gauge_transform(
+      "gauge-source", "to_reduced", "7", "1/7", "1/7", domain);
+  blocks[1].as_object()["to_physical"] = gauge_transform(
+      "gauge-target", "to_physical", "11", "1/11", "11", domain);
+  blocks[1].as_object()["to_reduced"] = gauge_transform(
+      "gauge-target", "to_reduced", "11", "1/11", "1/11", domain);
+  const auto prepared = prepare_scc(
+      session, domain + ":gauge-key", std::move(payload));
+  json::object solved{{"status", "not-run"}}, evaluated{{"status", "not-run"}};
+  if (prepared.at("status") == "ok") {
+    solved = request(json::object{
+        {"schema", 2}, {"op", "scc.solve_column"}, {"session", session},
+        {"scc", prepared.at("scc")}, {"checkpoint_identity", "gauge-column"},
+        {"seed", json::object{{"block", 0}, {"run", regular_run(true)},
+            {"metadata", metadata("gauge-seed")}}},
+        {"targets", json::array{json::object{{"block", 1},
+            {"run", regular_run(false)},
+            {"metadata", metadata("gauge-target")}}}}});
+    if (solved.at("status") == "ok")
+      evaluated = request(json::object{
+          {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+          {"local", solved.at("local")},
+          {"point", json::object{{"exact", "1/2"}}},
+          {"options", json::object{{"tail_estimate", false}}}});
+  }
+  bool ok = false;
+  if (evaluated.at("status") == "ok") {
+    const auto& coefficients = evaluated.at("value").as_object()
+                                   .at("coefficients").as_array();
+    ok = coefficients.size() >= 2 &&
+        std::abs(real_midpoint(coefficients[0]) - 14.0) < 1e-25 &&
+        std::abs(real_midpoint(coefficients[1]) - 35.0) < 1e-25;
+  }
+  if (!ok)
+    std::cerr << domain << " gauge prepared: " << json::serialize(prepared)
+              << '\n' << domain << " gauge solved: " << json::serialize(solved)
+              << '\n' << domain << " gauge evaluated: "
+              << json::serialize(evaluated) << '\n';
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                               {"session", session}});
   return ok;
@@ -892,9 +1029,12 @@ int main() {
   const bool acb = run_domain("acb", false);
   const bool dense_rational = run_dense_domain("rational");
   const bool dense_acb = run_dense_domain("acb");
-  const bool ok = rational && acb && dense_rational && dense_acb;
+  const bool gauge_rational = run_gauge_domain("rational");
+  const bool gauge_acb = run_gauge_domain("acb");
+  const bool ok = rational && acb && dense_rational && dense_acb &&
+      gauge_rational && gauge_acb;
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": nonidentity epsilon-unimodular CompositeSCC spectral frames"
+            << ": nonidentity Laurent-unimodular CompositeSCC spectral frames"
             << '\n';
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

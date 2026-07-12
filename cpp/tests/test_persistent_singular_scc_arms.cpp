@@ -846,9 +846,11 @@ int main() {
         unsigned_value(
             three_contract.at("lines").as_array()[2].as_object()
                 .at("epsilon").as_object(),
-            "max") != 3)
+            "max") != 2 ||
+        three_contract.at("streaming_tile_contraction") != true)
       throw std::runtime_error(
-          "attempt-tail downgrade or shifted output epsilon contract was not preserved");
+          "attempt-tail downgrade or shifted output epsilon contract was not preserved: " +
+          json::serialize(three_contract));
     const auto after_success_state = request(json::object{
         {"schema", 2}, {"op", "transport.stats"}, {"session", session},
         {"transport_state", transport_state}});

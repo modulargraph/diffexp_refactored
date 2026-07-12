@@ -300,7 +300,9 @@ int main() {
     if (one.at("status") != "ok" || one.at("observables") != 1 ||
         one.at("lines").as_array().size() != 1 ||
         one.at("combination") != "negative-lower-plus-upper" ||
-        one.at("max_parallel_arms") != 2 ||
+        one.at("max_parallel_arms") != 1 ||
+        one.at("concurrent_arms") != false ||
+        one.at("streaming_tile_contraction") != true ||
         one.at("no_remarching") != true || one.at("no_rematching") != true)
       throw std::runtime_error(
           "one-observable pair contraction failed: " + json::serialize(one));

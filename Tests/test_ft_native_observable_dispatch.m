@@ -112,7 +112,8 @@ assert["native floor excludes the consumable boundary-extra reservoir",
       Max[epsOrder + 2 + levelEpsilonHalo[2], 1] &&
     requestedEpsilonOrder[2] >= nativeRequiredRawTop[2]];
 assert["Cpp handoff retains the common certified raw edge and records its width",
-  StringContainsQ[runnerSource, "needTop = Min[kmaxAvail]"] &&
+  StringContainsQ[runnerSource,
+      "needTop = Min[Min[kmaxAvail], nextReq + boundaryExtraOrder]"] &&
     StringContainsQ[runnerSource,
       "\"PreservedRawCompleteMax\" -> If[recurrenceBackend === \"Cpp\""] &&
     StringContainsQ[runnerSource,
@@ -127,7 +128,7 @@ fixtureCertifiedEnvelope = <|"guarantee" -> "certified",
 fixtureExportResults[results_List] := MapIndexed[Function[{observable, pos},
   Module[{exported = Append[observable,
       "Value" -> DiffExp2`EpsSeries`ESZero[
-        observable["Epsilon", "RequiredCompleteMax"]]]},
+        observable["Epsilon", "Max"]]]},
     Switch[observable["Operation"],
       "integrate",
         If[First[pos] === 1,
@@ -200,10 +201,10 @@ assert["observable order and operation-specific epsilon windows are stable",
     Lookup[Lookup[capturedObservables, "Epsilon"], "Max"] ===
       {8, 8, 8, 8} &&
     Lookup[Lookup[capturedObservables, "Epsilon"],
-      "RequiredCompleteMax"] === {8, 8, 8, 8} &&
+      "RequiredCompleteMax"] === {7, 7, 7, 7} &&
     Lookup[Select[capturedObservables,
         #["Operation"] === "integrate" &], "TailPolicy"] ===
-      {"attempt", "attempt"} &&
+      {"stored", "stored"} &&
     Keys[capturedObservables[[1]]] ===
       {"Operation", "Identity", "CheckpointIdentity",
        "CoefficientVector", "Epsilon", "TailPolicy"}];

@@ -187,6 +187,7 @@ int main() {
   const auto prepared = request(std::string(R"json({
     "schema":2,"op":"scc.prepare","session":")json") + session +
     R"json(","key":"casep-composite-key","identity":"casep-parent-v1",
+    "rational_shadow_identity":"casep-shadow-v1",
     "parent":{"dimension":4,
       "exact_system_record":[
         [{"exact":"1/t","proven_zero":false},
@@ -345,6 +346,7 @@ int main() {
       tail_tags == std::set<std::string>{"0", "1"} && evaluated_finite &&
       stats.at("execution_scope") ==
           "exact-rational-regular-singular-jordan-block-dag-column-v2" &&
+      stats.at("rational_shadow_identity") == "casep-shadow-v1" &&
       stats.at("capability_evidence").as_object()
           .at("pseudo_schedule_execution") ==
           "exact-rational-joint-compensation-and-formal-overlap-certificate";

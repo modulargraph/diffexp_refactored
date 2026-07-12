@@ -304,6 +304,33 @@ assert["legacy_manifest_restore_closes_its_restored_session",
     Lookup[legacyReleased, "Failures", {"missing"}] === {}];
 If[FileExistsQ[checkpointPath], DeleteFile[checkpointPath]];
 
+streamEndpoint = <|"Center" -> 1/4, "Singular" -> False,
+  "Radius" -> 1/2, "MatchRadius" -> 1/2, "Scale" -> 1/2,
+  "LocalRadius" -> 1, "IncomingMatchPoint" -> 1/8,
+  "SymmetricMatch" -> False, "ChartVar" -> Global`t,
+  "UseSCCSkeleton" -> True, "Name" -> "stream-endpoint",
+  "Prescriptions" -> {}|>;
+streamUpperPlan = Join[upperPlan, <|
+  "Charts" -> {First[upperPlan["Charts"]], streamEndpoint},
+  "SegmentCount" -> 2|>];
+ownerAtlas = catchDE2[
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    system, {one}, lowerPlan, streamUpperPlan, "Threads" -> 1,
+    "Integrand" -> {{1 + Global`eps}, x},
+    "TargetCompleteMax" -> 0, "DeferReceivingBases" -> True]];
+ownerRun = If[FailureQ[ownerAtlas], ownerAtlas, catchDE2[
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
+    ownerAtlas, {observable["limitLower", "owned-lower"]}, x,
+    "MaxRefinementSteps" -> 1]]];
+assert["owned deferred observable batch streams and compacts caller atlas",
+  AssociationQ[ownerRun] && AssociationQ[ownerAtlas] &&
+    !KeyExistsQ[ownerAtlas["Lower"], "ChartSystems"] &&
+    !KeyExistsQ[ownerAtlas["Upper"], "ChartSystems"] &&
+    !KeyExistsQ[ownerRun["Atlas", "Lower"], "ChartSystems"] &&
+    !KeyExistsQ[ownerRun["Atlas", "Upper"], "ChartSystems"]];
+If[AssociationQ[ownerRun],
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[ownerRun]];
+
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];
 

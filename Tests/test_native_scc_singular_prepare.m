@@ -127,6 +127,10 @@ acbResult = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
       acbCs, request, 2]]];
   acbColumn = If[FailureQ[acbBasis], acbBasis,
     acbBasis["Columns"][[2]]];
+  If[!FailureQ[acbColumn],
+    DiffExp2`Solve`DropWolframPreparationCaches[];
+    ClearSystemCache[];
+    Share[]];
   acbEvaluated = If[FailureQ[acbColumn], acbColumn,
     DiffExp2`CppBackend`EvaluatePersistentLocal[acbColumn,
       <|"exact" -> "1/4"|>, <|"tail_estimate" -> False|>, 60]];
@@ -219,11 +223,79 @@ pseudoOk = !AnyTrue[Take[pseudoResult, 3], FailureQ] &&
   Lookup[pseudoSolved[[2]], "ID", None] === "E5" &&
   StringContainsQ[
     Lookup[pseudoSolved[[2]], "Detail", ""], "CASE-P"];
+
+automaticShadowBasis = catchDE2[
+  DiffExp2`NativeTransport`Private`nativeReceivingBasis[
+    pseudoCs, pseudoRequest, 2]];
+automaticShadowOk = AssociationQ[automaticShadowBasis] &&
+  Lookup[automaticShadowBasis, "Type", None] ===
+    "DiffExp2NativeSCCBasis" &&
+  Lookup[automaticShadowBasis, "Dimension", None] === 4 &&
+  Lookup[Lookup[automaticShadowBasis, "NativeSummary", <||>],
+    "specialization_capability", None] ===
+      "exact-rational-shadow-to-acb-local-v1" &&
+  Lookup[Lookup[automaticShadowBasis, "Columns", {}],
+    "BasisIndex", {}] === Range[4];
+If[AssociationQ[automaticShadowBasis] &&
+    ListQ[Lookup[automaticShadowBasis, "Columns", None]],
+  Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+    automaticShadowBasis["Columns"]]];
+
+(* The exact Rational CASE-P solver is a proof-producing shadow for this one
+   SCC only.  Import its completed columns into the already prepared Acb SCC,
+   close the Rational session, and verify that the Acb locals remain live. *)
+shadowResult = Block[{DiffExp2`Solve`Private`$cppExactDomain = True},
+  shadowCs = catchDE2[DiffExp2`Solve`PrepareChart[
+    pseudoSystem, pseudoChart]];
+  shadowPrepared = If[FailureQ[shadowCs], shadowCs,
+    catchDE2[DiffExp2`Solve`PrepareNativeSCCComposite[
+      shadowCs, pseudoRequest]]];
+  shadowStats = If[FailureQ[shadowPrepared], shadowPrepared,
+    DiffExp2`CppBackend`PersistentSCCStatistics[shadowPrepared]];
+  shadowBasis = If[FailureQ[shadowPrepared], shadowPrepared,
+    catchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
+      shadowCs, pseudoRequest, 2]]];
+  {shadowCs, shadowPrepared, shadowStats, shadowBasis}];
+shadowIdentity = If[AssociationQ[pseudoStats],
+  Lookup[pseudoStats, "rational_shadow_identity", None], None];
+shadowImports = If[AssociationQ[shadowBasis] &&
+    ListQ[Lookup[shadowBasis, "Columns", None]] &&
+    StringQ[shadowIdentity],
+  MapIndexed[DiffExp2`CppBackend`SpecializePersistentRationalSCCColumn[
+      #1, pseudoPrepared, shadowIdentity,
+      "native-scc-shadow-import:" <> ToString[First[#2]]] &,
+    shadowBasis["Columns"]], {}];
+badShadowImport = If[AssociationQ[shadowBasis] &&
+    ListQ[Lookup[shadowBasis, "Columns", None]],
+  DiffExp2`CppBackend`SpecializePersistentRationalSCCColumn[
+    First[shadowBasis["Columns"]], pseudoPrepared, "mismatched-shadow",
+    "native-scc-shadow-import:bad"], None];
+shadowClosed = If[AssociationQ[shadowPrepared],
+  DiffExp2`CppBackend`ClosePersistentSession[shadowPrepared], None];
+shadowEvaluated = Map[
+  DiffExp2`CppBackend`EvaluatePersistentLocal[#,
+      <|"exact" -> "1/4"|>, <|"tail_estimate" -> False|>, 60] &,
+  shadowImports];
+shadowImportOk = Length[shadowImports] === 4 &&
+  AllTrue[shadowImports, AssociationQ[#] &&
+      Lookup[#, "status", "error"] === "ok" &&
+      Lookup[#, "specialization_capability", None] ===
+        "exact-rational-shadow-to-acb-local-v1" &&
+      Lookup[#, "rational_shadow_identity", None] === shadowIdentity &] &&
+  AssociationQ[badShadowImport] &&
+  Lookup[badShadowImport, "status", "ok"] === "error" &&
+  AssociationQ[shadowClosed] &&
+  AllTrue[shadowEvaluated, AssociationQ[#] &&
+      Lookup[#, "status", "error"] === "ok" &&
+      Lookup[Lookup[#, "value", <||>], "dimension", None] === 4 &];
+Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+  shadowImports];
 If[AssociationQ[pseudoPrepared] &&
     StringQ[Lookup[pseudoPrepared, "SCC", None]],
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[pseudoPrepared]]];
 DiffExp2`Solve`ClearSolveCaches[];
-ok = TrueQ[ok] && TrueQ[acbOk] && TrueQ[pseudoOk];
+ok = TrueQ[ok] && TrueQ[acbOk] && TrueQ[pseudoOk] &&
+  TrueQ[automaticShadowOk] && TrueQ[shadowImportOk];
 
 Print[If[ok, "PASS", "FAIL"],
   ": Rational/Acb singular Jordan SCC parity, source propagation, and CASE-P guard"];
@@ -241,5 +313,17 @@ If[!ok, Print[InputForm[{
   "PseudoStats" -> If[AssociationQ[pseudoStats],
     KeyTake[pseudoStats, {"execution_implemented", "execution_scope",
       "block_charts"}], pseudoStats],
-  "PseudoSolved" -> pseudoSolved}]]];
+  "PseudoSolved" -> pseudoSolved,
+  "AutomaticShadowBasis" -> If[AssociationQ[automaticShadowBasis],
+    KeyTake[automaticShadowBasis,
+      {"Type", "Dimension", "NativeSummary"}], automaticShadowBasis],
+  "ShadowFailures" -> Select[shadowResult, FailureQ],
+  "ShadowIdentity" -> shadowIdentity,
+  "ShadowImports" -> (If[AssociationQ[#],
+      KeyTake[#, {"status", "session", "local", "scc",
+        "specialization_capability", "rational_shadow_identity"}], #] & /@
+    shadowImports),
+  "BadShadowImport" -> badShadowImport,
+  "ShadowClosed" -> shadowClosed,
+  "ShadowEvaluatedStatus" -> Lookup[shadowEvaluated, "status", None]}]]];
 Exit[If[ok, 0, 1]];

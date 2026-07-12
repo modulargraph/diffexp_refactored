@@ -13,6 +13,8 @@ RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 RunNativeTransportObservableBatch::usage =
   "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
+RunNativeTransportObservableBatchOwned::usage =
+  "RunNativeTransportObservableBatchOwned[atlasSymbol,observables,var] is the ownership-taking batch entry point. It compacts atlasSymbol after preparing the observable rows, before allocating native transport states, so large Wolfram ChartSystems are no longer retained at the march peak.";
 SaveNativeTransportObservableBatchCheckpoint::usage =
   "SaveNativeTransportObservableBatchCheckpoint[batch,path,identity] atomically saves one completed retained observable batch through the schema-2 native checkpoint protocol. The returned compact manifest binds the stable line, endpoint, and transport-state handles by SHA-256 provenance digests together with the pre-save transport-arm march counter.";
 RestoreNativeTransportObservableBatchCheckpoint::usage =
@@ -79,6 +81,43 @@ nativeInwardScaleFloor[scale_] := Module[{canonical, floor},
   If[exactRationalQ[floor] &&
       exactAlgebraicTruthQ[0 < floor < canonical], floor, $Failed]];
 
+nativeAlgebraicRationalApprox[value_] := Module[
+  {canonical, digits, approximation},
+  canonical = Quiet[Check[RootReduce[value], $Failed]];
+  If[canonical === $Failed || !exactRealAlgebraicQ[canonical],
+    Return[$Failed, Module]];
+  If[exactRationalQ[canonical], Return[canonical, Module]];
+  digits = Min[300, Max[80, 2 cfg["WorkingPrecision"]]];
+  approximation = Quiet[Check[
+    Rationalize[N[canonical, digits], 0], $Failed]];
+  If[exactRationalQ[approximation], approximation, $Failed]];
+
+nativeCertifiedInexactRadiusFloor[value_] := Module[
+  {precision = Precision[value], midpoint, exponent, precisionBits,
+   uncertainty, lower, floor},
+  If[Head[value] =!= Real || !TrueQ[0 < value < Infinity] ||
+      !NumberQ[precision] || precision === Infinity || precision < 32,
+    Return[$Failed, Module]];
+  midpoint = Quiet[Check[Rationalize[value, 0], $Failed]];
+  exponent = Quiet[Check[Last[MantissaExponent[Abs[value], 2]],
+      $Failed]];
+  If[!exactRationalQ[midpoint] || !IntegerQ[exponent],
+    Return[$Failed, Module]];
+  (* A Mathematica p-digit Real carries an uncertainty of roughly one last
+     binary place.  Sixteen ulps is deliberately conservative and gives an
+     exact interval certificate independent of later SetPrecision calls. *)
+  precisionBits = Floor[precision*Log[2, 10]];
+  uncertainty = 2^(exponent - precisionBits + 4);
+  lower = midpoint - uncertainty;
+  floor = Floor[2^$nativeScaleFloorBits*lower]/
+    2^$nativeScaleFloorBits;
+  If[!exactRationalQ[uncertainty] || !exactRationalQ[floor] ||
+      !TrueQ[0 < floor <= lower < midpoint],
+    Return[$Failed, Module]];
+  <|"Floor" -> floor, "Midpoint" -> midpoint,
+    "Uncertainty" -> uncertainty, "PrecisionDigits" -> precision,
+    "PrecisionBits" -> precisionBits|>];
+
 nativeScaleBridgePrerequisiteQ[chart_Association] := Module[
   {scale = Lookup[chart, "Scale", None],
    center = Lookup[chart, "Center", None],
@@ -92,7 +131,7 @@ nativeScaleBridgePrerequisiteQ[chart_Association] := Module[
       scale =!= 0 && localRadius > 0 && radius > 0 && matchRadius > 0,
       Module]];
   floor = nativeInwardScaleFloor[scale];
-  Lookup[chart, "Singular", Missing["Absent"]] === False &&
+  BooleanQ[Lookup[chart, "Singular", Missing["Absent"]]] &&
     exactRationalQ[center] && exactRationalQ[localRadius] &&
     localRadius > 0 && exactRationalQ[roc] && roc > 0 &&
     floor =!= $Failed && exactRealAlgebraicQ[radius] &&
@@ -103,16 +142,46 @@ nativeScaleBridgePrerequisiteQ[chart_Association] := Module[
 bridgeNativeRegularChartScale[chart_Association, index_Integer] := Module[
   {scale = Lookup[chart, "Scale", None], center, localRadius, radius,
    matchRadius, roc = cfg["RadiusOfConvergence"], nativeScale,
-   nativeRadius, nativeMatchRadius, certificate},
-  If[exactRationalQ[scale], Return[chart, Module]];
+   nativeRadius, nativeMatchRadius, certificate, radiusFloor},
+  If[exactRationalQ[scale],
+    radius = Lookup[chart, "Radius", None];
+    If[exactRationalQ[radius], Return[chart, Module]];
+    center = Lookup[chart, "Center", None];
+    matchRadius = Lookup[chart, "MatchRadius", None];
+    radiusFloor = nativeCertifiedInexactRadiusFloor[radius];
+    If[!exactRationalQ[center] || scale === 0 ||
+        radiusFloor === $Failed || !exactRationalQ[matchRadius] ||
+        !TrueQ[0 < matchRadius < radiusFloor["Floor"]],
+      err["E6", <|"ChartIndex" -> index, "Center" -> center,
+        "Scale" -> scale, "Radius" -> radius,
+        "MatchRadius" -> matchRadius,
+        "Detail" -> "inexact native radius has no certified positive inward rational disk containing its exact match disk"|>]];
+    nativeRadius = radiusFloor["Floor"];
+    localRadius = Together[nativeRadius/Abs[scale]];
+    certificate = <|
+      "Schema" -> "diffexp2-native-inward-rational-radius-v1",
+      "FloorBits" -> $nativeScaleFloorBits,
+      "OriginalRadiusMidpoint" -> radiusFloor["Midpoint"],
+      "OriginalRadiusUncertainty" -> radiusFloor["Uncertainty"],
+      "OriginalRadiusPrecisionDigits" -> radiusFloor["PrecisionDigits"],
+      "OriginalRadiusPrecisionBits" -> radiusFloor["PrecisionBits"],
+      "CertifiedOriginalRadiusLower" ->
+        radiusFloor["Midpoint"] - radiusFloor["Uncertainty"],
+      "NativePhysicalRadius" -> nativeRadius,
+      "NativeLocalRadius" -> localRadius,
+      "ScalePreserved" -> scale, "CenterPreserved" -> center,
+      "PrescriptionsPreserved" -> True|>;
+    Return[Join[chart, <|"Radius" -> nativeRadius,
+      "LocalRadius" -> localRadius,
+      "NativeRationalScaleBridge" -> certificate|>], Module]];
   center = Lookup[chart, "Center", None];
   localRadius = Lookup[chart, "LocalRadius", None];
   radius = Lookup[chart, "Radius", None];
   matchRadius = Lookup[chart, "MatchRadius", None];
-  If[Lookup[chart, "Singular", Missing["Absent"]] =!= False,
+  If[!BooleanQ[Lookup[chart, "Singular", Missing["Absent"]]],
     err["E6", <|"ChartIndex" -> index, "Center" -> center,
       "Scale" -> scale,
-      "Detail" -> "nonrational native scale bridging is supported only for explicitly regular charts"|>]];
+      "Detail" -> "nonrational native scale bridging requires an explicit regular/singular chart classification"|>]];
   If[!exactRationalQ[center] || !exactRationalQ[localRadius] ||
       !TrueQ[localRadius > 0] || !exactRationalQ[roc] ||
       !TrueQ[roc > 0],
@@ -144,6 +213,7 @@ bridgeNativeRegularChartScale[chart_Association, index_Integer] := Module[
     "OriginalPhysicalRadius" -> radius,
     "NativePhysicalRadius" -> nativeRadius,
     "LocalRadius" -> localRadius,
+    "Singular" -> chart["Singular"],
     "CenterPreserved" -> center|>;
   Join[chart, <|"Scale" -> nativeScale, "Radius" -> nativeRadius,
     "MatchRadius" -> nativeMatchRadius,
@@ -334,8 +404,12 @@ nativeComplexProjections[plan_Association] := Module[
   relevant = Select[pairs, Function[pair,
     AnyTrue[{pair[[1]] - pair[[2]], pair[[1]], pair[[1]] + pair[[2]]},
       inClosedArmQ[#, from, to] &]]];
-  Map[Function[pair, Module[{re = pair[[1]], h = pair[[2]], flags},
-    If[!exactRationalQ[re] || !exactRationalQ[h] || !TrueQ[h > 0],
+  Map[Function[pair, Module[{re = pair[[1]], h = pair[[2]], flags,
+      nativeRe, nativeH},
+    nativeRe = nativeAlgebraicRationalApprox[re];
+    nativeH = nativeAlgebraicRationalApprox[h];
+    If[nativeRe === $Failed || nativeH === $Failed ||
+        !TrueQ[nativeH > 0],
       err["E6", <|"Projection" -> pair,
         "Detail" -> "an on-arm complex projection is not representable by the current rational native path protocol"|>]];
     flags = {AnyTrue[projected, sameExactQ[#, re - h] &],
@@ -343,9 +417,10 @@ nativeComplexProjections[plan_Association] := Module[
       AnyTrue[projected, sameExactQ[#, re + h] &]};
     <|"source_identity" -> ("complex-projection:" <>
         IntegerString[Hash[{re, h}, "SHA256"], 16, 64]),
-      "real_part_exact" -> exactRationalString[re, "projection real part"],
+      "real_part_exact" ->
+        exactRationalString[nativeRe, "projection real part"],
       "imaginary_magnitude_exact" ->
-        exactRationalString[h, "projection imaginary magnitude"],
+        exactRationalString[nativeH, "projection imaginary magnitude"],
       "retain_minus_imaginary" -> First[flags],
       "retain_real_part" -> flags[[2]],
       "retain_plus_imaginary" -> Last[flags]|>]], relevant]];
@@ -400,9 +475,11 @@ nativeTopologyProtocolQ[plan_Association] := Quiet[Check[Module[
   relevant = Select[pairs, Function[pair,
     AnyTrue[{pair[[1]] - pair[[2]], pair[[1]], pair[[1]] + pair[[2]]},
       inClosedArmQ[#, from, to] &]]];
-  If[!AllTrue[relevant,
-      exactRationalQ[#[[1]]] && exactRationalQ[#[[2]]] &&
-        TrueQ[#[[2]] > 0] &], Return[False, Module]];
+  If[!AllTrue[relevant, Module[{re, h},
+      re = nativeAlgebraicRationalApprox[#[[1]]];
+      h = nativeAlgebraicRationalApprox[#[[2]]];
+      re =!= $Failed && h =!= $Failed && TrueQ[h > 0]] &],
+    Return[False, Module]];
   records = Flatten[Lookup[Lookup[plan, "Charts", {}],
     "Prescriptions", {}], 1];
   If[!AllTrue[records, AssociationQ[#] &&
@@ -467,17 +544,130 @@ NativeRegularIndependentArmPlansSupportedQ[___] := False;
 
 nativeBasisOwner[basis_Association] := Module[{owner},
   owner = Lookup[basis, "NativeSCC",
-    Lookup[basis, "NativeChart", None]];
+    Lookup[basis, "NativeChart", Lookup[basis, "SCC", None]]];
   If[!StringQ[owner] || StringLength[owner] == 0,
     err["E6", <|"Basis" -> KeyTake[basis,
         {"Type", "Session", "NativeSCC", "NativeChart"}],
       "Detail" -> "retained receiving basis exposes no native chart/SCC owner"|>]];
   owner];
 
+SetAttributes[nativeCatchDE2, HoldFirst];
+nativeCatchDE2[expression_] := Catch[expression, "DiffExp2Error"];
+
+nativeAcbCasePFailureQ[failure_] := Module[{needle},
+  If[!FailureQ[failure], Return[False, Module]];
+  needle = {
+    "native Acb regular-singular SCC execution rejects exact CASE-P collisions",
+    "native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source"};
+  !FreeQ[Unevaluated[failure],
+    text_String /; AnyTrue[needle, StringContainsQ[text, #] &], Infinity]];
+
+nativeShadowColumn[source_Association, targetSCC_Association,
+    shadowIdentity_String, system_Association] := Module[
+  {checkpointIdentity, response, provenance, result},
+  checkpointIdentity = nativeCheckpointIdentity[
+    "de2-native-acb-rational-shadow-", {
+      source["CheckpointIdentity"], shadowIdentity,
+      targetSCC["Session"], targetSCC["SCC"]}];
+  response = DiffExp2`CppBackend`SpecializePersistentRationalSCCColumn[
+    source, targetSCC, shadowIdentity, checkpointIdentity];
+  If[FailureQ[response] || !AssociationQ[response] ||
+      Lookup[response, "status", "error"] =!= "ok" ||
+      Lookup[response, "session", None] =!= targetSCC["Session"] ||
+      Lookup[response, "scc", None] =!= targetSCC["SCC"] ||
+      Lookup[response, "json_coefficients", None] =!= 0 ||
+      !StringQ[Lookup[response, "local", None]],
+    If[AssociationQ[response] &&
+        Lookup[response, "status", "error"] === "ok" &&
+        StringQ[Lookup[response, "local", None]],
+      Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]]];
+    err["E5", <|"BackendFailure" -> response,
+      "Detail" -> "exact Rational CASE-P shadow could not be specialized into its paired Acb SCC"|>]];
+  provenance = Lookup[response, "column_provenance", None];
+  If[!AssociationQ[provenance] ||
+      Lookup[provenance, "basis_index", None] =!=
+        source["BasisIndex"] - 1 ||
+      !StringQ[Lookup[provenance, "exact_column_identity", None]],
+    Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
+    err["E6", <|"BackendResponse" -> response,
+      "Detail" -> "specialized CASE-P shadow lost its exact physical-column provenance"|>]];
+  result = <|"Type" -> "DiffExp2NativeSCCBasisColumn",
+    "Session" -> response["session"], "Local" -> response["local"],
+    "NativeSCC" -> response["scc"],
+    "NativeChart" -> response["chart"],
+    "SeedBlock" -> source["SeedBlock"],
+    "BasisIndex" -> source["BasisIndex"],
+    "Chart" -> <|"Center" -> system["Center"],
+      "ChartMap" -> system["ChartMap"], "Radius" -> system["Radius"],
+      "Prescriptions" -> system["Prescriptions"]|>,
+    "EpsWindow" -> <|"Min" -> response["epsilon_min"],
+      "CompleteMax" -> response["epsilon_max"]|>,
+    "TWindow" -> <|"CompleteMax" ->
+      response["taylor_complete_max"]|>,
+    "CheckpointIdentity" -> checkpointIdentity,
+    "ColumnProvenance" -> provenance,
+    "NativeSummary" -> KeyDrop[response,
+      {"status", "session", "local", "scc", "chart", "metadata",
+       "column_provenance"}]|>;
+  If[KeyExistsQ[source, "SeedLocalComponent"],
+    Append[result, "SeedLocalComponent" -> source["SeedLocalComponent"]],
+    result]];
+
+nativeRationalShadowBasis[system_Association, req_Association, threads_,
+    targetSCC_Association] := Module[
+  {targetStats, shadowIdentity, rationalBasis, imported = {}, cleanup,
+   result},
+  targetStats = DiffExp2`CppBackend`PersistentSCCStatistics[targetSCC];
+  shadowIdentity = If[AssociationQ[targetStats],
+    Lookup[targetStats, "rational_shadow_identity", None], None];
+  If[!StringQ[shadowIdentity] || StringLength[shadowIdentity] == 0,
+    err["E6", <|"BackendStatistics" -> targetStats,
+      "Detail" -> "Acb CASE-P SCC exposes no domain-independent Rational-shadow identity"|>]];
+  rationalBasis = Block[{DiffExp2`Solve`Private`$cppExactDomain = True},
+    nativeCatchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
+      system, req, threads]]];
+  If[FailureQ[rationalBasis] || !AssociationQ[rationalBasis] ||
+      Lookup[rationalBasis, "Type", None] =!= "DiffExp2NativeSCCBasis" ||
+      Lookup[rationalBasis, "Dimension", None] =!= system["SystemSize"],
+    If[FailureQ[rationalBasis],
+      Throw[rationalBasis, "DiffExp2Error"],
+      err["E6", <|"RationalBasis" -> rationalBasis,
+        "Detail" -> "exact CASE-P shadow did not produce one complete Rational SCC basis"|>]]];
+  cleanup[] := Module[{},
+    Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+      imported];
+    Quiet[DiffExp2`CppBackend`ClosePersistentSession[rationalBasis]];
+    Null];
+  result = Catch[
+    Do[AppendTo[imported,
+      nativeShadowColumn[column, targetSCC, shadowIdentity, system]],
+      {column, rationalBasis["Columns"]}];
+    If[Lookup[imported, "BasisIndex", {}] =!=
+        Range[system["SystemSize"]],
+      err["E6", <|"BasisIndices" -> Lookup[imported, "BasisIndex", {}],
+        "Detail" -> "specialized CASE-P shadow basis is not in complete physical order"|>]];
+    <|"Type" -> "DiffExp2NativeSCCBasis",
+      "Session" -> targetSCC["Session"],
+      "NativeSCC" -> targetSCC["SCC"],
+      "Columns" -> imported, "Dimension" -> system["SystemSize"],
+      "Chart" -> <|"Center" -> system["Center"],
+        "ChartMap" -> system["ChartMap"], "Radius" -> system["Radius"],
+        "Prescriptions" -> system["Prescriptions"]|>,
+      "EpsWindow" -> req["EpsWindow"],
+      "TWindow" -> <|"CompleteMax" -> req["TOrder"]|>,
+      "NativeSummary" -> <|
+        "specialization_capability" ->
+          "exact-rational-shadow-to-acb-local-v1",
+        "rational_shadow_identity" -> shadowIdentity|>|>,
+    "DiffExp2Error", Function[{failure, tag}, cleanup[];
+      Throw[failure, tag]]];
+  Quiet[DiffExp2`CppBackend`ClosePersistentSession[rationalBasis]];
+  result];
+
 nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
-   sequence, components, built, expectedTypes},
+   sequence, components, built, expectedTypes, targetSCC, attempt},
   If[regular,
     built = DiffExp2`Solve`SolveNativeRegularBasis[
       system, req, threads];
@@ -495,8 +685,14 @@ nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
     (* SolveNativeSCCBasis is the strict admission gate for singular data.
        It accepts only a certified exact affine-Jordan block DAG (including
        one SCC) and propagates every unsupported/CASE-P failure unchanged. *)
-    built = DiffExp2`Solve`SolveNativeSCCBasis[
-      system, req, threads];
+    targetSCC = DiffExp2`Solve`PrepareNativeSCCComposite[system, req];
+    attempt = nativeCatchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
+      system, req, threads]];
+    built = Which[
+      !FailureQ[attempt], attempt,
+      nativeAcbCasePFailureQ[attempt],
+        nativeRationalShadowBasis[system, req, threads, targetSCC],
+      True, Throw[attempt, "DiffExp2Error"]];
     expectedTypes = {"DiffExp2NativeSCCBasis"}];
   If[!AssociationQ[built] ||
       !MemberQ[expectedTypes, Lookup[built, "Type", None]] ||
@@ -653,7 +849,12 @@ nativePreparedArmRows[atlas_Association, data_Association, cvec_List,
     var_Symbol] := Module[{systems, bases, shapes, rows},
   systems = data["ChartSystems"];
   bases = Rest[data["Bases"]];
-  shapes = Prepend[nativeBasisEnvelopeShape /@ bases,
+  shapes = Prepend[
+    If[AllTrue[bases, AssociationQ],
+      nativeBasisEnvelopeShape /@ bases,
+      ConstantArray[<|"EpsWindow" -> atlas["Request", "EpsWindow"],
+        "TWindow" -> <|"CompleteMax" -> atlas["Request", "TOrder"]|>,
+        "Dimension" -> atlas["Dimension"]|>, Length[bases]]],
     nativePreparationShape[atlas["Anchor"], atlas["Dimension"]]];
   If[Length[systems] =!= Length[shapes],
     err["E6", <|"ChartCount" -> Length[systems],
@@ -729,7 +930,8 @@ nativeReleaseResponseHandles[atlas_Association, response_] := Module[
 
 Options[PrepareNativeRegularIndependentArms] = {
   "Threads" -> Automatic, "Integrand" -> Automatic,
-  "Integrands" -> Automatic, "TargetCompleteMax" -> Automatic};
+  "Integrands" -> Automatic, "TargetCompleteMax" -> Automatic,
+  "DeferReceivingBases" -> False};
 
 PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     lowerPlan_Association, upperPlan_Association, OptionsPattern[]] := Module[
@@ -740,10 +942,12 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
    domain, integrand,
    preparedShift, halo, targetMax, targetOption =
      OptionValue["TargetCompleteMax"], availableMax,
-   cleanup, output, preparedBases = {},
+   minimumSolveMax, matchEpsilonPadding,
+   cleanup, output, preparedBases = {}, preparedOwners = {},
    containsSingularReceivingCharts = False,
    integrands = OptionValue["Integrands"],
-   threads = OptionValue["Threads"]},
+   threads = OptionValue["Threads"],
+   deferReceivingBases = TrueQ[OptionValue["DeferReceivingBases"]]},
   If[targetOption =!= Automatic &&
       (!IntegerQ[targetOption] || targetOption < 0),
     err["E8", <|"TargetCompleteMax" -> targetOption,
@@ -774,13 +978,20 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   halo = Max[0, -preparedShift];
   epsMin = Min[0, Min[esMin /@ values]];
   availableMax = Min[esCM /@ values];
-  epsMax = targetMax + halo;
-  If[availableMax < epsMax,
+  minimumSolveMax = targetMax + halo;
+  If[availableMax < minimumSolveMax,
     err["E6", <|"BoundaryCompleteMax" -> availableMax,
       "RequestedCompleteMax" -> targetMax,
       "IntegrandEpsilonShift" -> preparedShift,
-      "RequiredSolveCompleteMax" -> epsMax,
+      "RequiredSolveCompleteMax" -> minimumSolveMax,
       "Detail" -> "native regular-arm boundary data does not contain the epsilon halo required by its integrand pole"|>]];
+  (* Retain the already available boundary reservoir as internal match work.
+     Singularly perturbed receiving bases can have a positive determinant
+     valuation even after exact negative-power saturation.  That valuation
+     consumes solve coefficients, but must not inflate the public or residual
+     target: those remain bound to TargetCompleteMax below. *)
+  epsMax = availableMax;
+  matchEpsilonPadding = epsMax - minimumSolveMax;
   req = <|"EpsWindow" -> <|"Min" -> epsMin,
       "CompleteMax" -> epsMax|>,
     "TOrder" -> cfg["ExpansionOrder"]|>;
@@ -794,6 +1005,13 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
         Cases[{anchor}, _Association]],
       Lookup[#, "local", Lookup[#, "Local", ToString[#, InputForm]]] &];
     Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, locals];
+    Scan[Function[record,
+      If[AssociationQ[Lookup[record, "Witness", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[
+          record["Witness"]]]];
+      If[StringQ[Lookup[record, "SCC", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[record]]]],
+      preparedOwners];
     Null];
   output = Catch[
   nativeStageTiming["anchor-prepare-start"];
@@ -804,7 +1022,9 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "Detail" -> "native independent-arm anchor is not regular"|>]];
   anchor = DiffExp2`Solve`SolveNativeValueRegular[
     anchorSystem, req, values];
-  nativeStageTiming["anchor-solve-done"];
+  nativeStageTiming["anchor-solve-done boundaryMax=", availableMax,
+    " request=", req["EpsWindow"], " anchor=",
+    Lookup[anchor, "EpsWindow", None]];
   sessionInfo = DiffExp2`CppBackend`PersistentSessionInformation[];
   sessionStats = Lookup[sessionInfo, anchor["Session"], None];
   domain = If[AssociationQ[sessionStats],
@@ -812,8 +1032,9 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   If[!MemberQ[{"acb", "rational"}, domain],
     err["E5", <|"Domain" -> domain,
       "Detail" -> "native independent-arm atlas requires Acb or Rational retained locals"|>]];
+  anchorOwner = anchor["NativeChart"];
   prepareArm[plan_Association] := Module[
-    {systems, bases, built, prepared, kinds},
+    {systems, bases, built, prepared, kinds, ownerRecords, owners},
     systems = Prepend[
       MapIndexed[Function[{chart, index},
         nativeStageTiming["chart-prepare-start index=", First[index]];
@@ -827,28 +1048,41 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       Rest[systems]], "Anchor"];
     If[MemberQ[kinds, "SingularSCC"],
       containsSingularReceivingCharts = True];
-    bases = Prepend[MapIndexed[
-      Function[{system, index},
-        nativeStageTiming["basis-solve-start index=", First[index]];
-        built = nativeReceivingBasis[system, req, threads];
-        AppendTo[preparedBases, built];
-        nativeStageTiming["basis-solve-done index=", First[index]];
-        built], Rest[systems]], None];
+    If[deferReceivingBases,
+      ownerRecords = MapIndexed[Function[{system, index},
+        nativeStageTiming["owner-prepare-start index=", First[index]];
+        built = If[TrueQ[Lookup[Lookup[system, "IndicialData", <||>],
+              "Regular", False]],
+          DiffExp2`Solve`PrepareNativeRegularBasisOwner[system, req],
+          DiffExp2`Solve`PrepareNativeSCCComposite[system, req]];
+        AppendTo[preparedOwners, built];
+        nativeStageTiming["owner-prepare-done index=", First[index]];
+        built], Rest[systems]];
+      owners = Prepend[nativeBasisOwner /@ ownerRecords, anchorOwner];
+      bases = ConstantArray[None, Length[systems]],
+      ownerRecords = {};
+      bases = Prepend[MapIndexed[
+        Function[{system, index},
+          nativeStageTiming["basis-solve-start index=", First[index]];
+          built = nativeReceivingBasis[system, req, threads];
+          AppendTo[preparedBases, built];
+          nativeStageTiming["basis-solve-done index=", First[index]];
+          built], Rest[systems]], None];
+      owners = Prepend[nativeBasisOwner /@ Rest[bases], anchorOwner]];
     <|"Plan" -> plan, "ChartSystems" -> systems,
-      "Bases" -> bases, "BasisKinds" -> kinds|>];
+      "Bases" -> bases, "BasisKinds" -> kinds,
+      "Owners" -> owners, "OwnerRecords" -> ownerRecords|>];
   lowerData = prepareArm[lower];
   upperData = prepareArm[upper];
   sessions = DeleteDuplicates@Join[{anchor["Session"]},
-    Cases[Join[Rest[lowerData["Bases"]], Rest[upperData["Bases"]]],
+    Cases[Join[Rest[lowerData["Bases"]], Rest[upperData["Bases"]],
+      lowerData["OwnerRecords"], upperData["OwnerRecords"]],
       b_Association :> b["Session"]]];
   If[Length[sessions] =!= 1,
     err["E6", <|"Sessions" -> sessions,
       "Detail" -> "prepared native atlas was split across solver sessions"|>]];
-  anchorOwner = anchor["NativeChart"];
-  lowerOwners = Prepend[nativeBasisOwner /@ Rest[lowerData["Bases"]],
-    anchorOwner];
-  upperOwners = Prepend[nativeBasisOwner /@ Rest[upperData["Bases"]],
-    anchorOwner];
+  lowerOwners = lowerData["Owners"];
+  upperOwners = upperData["Owners"];
   planIdentity = nativeCheckpointIdentity["de2-native-independent-arms-", {
     lower, upper, lowerOwners, upperOwners, req,
     cfg["DivisionOrder"]}];
@@ -880,6 +1114,16 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "NativeRationalScaleBridges", {}]],
     "UpperBridgeCount" -> Length[Lookup[upper,
       "NativeRationalScaleBridges", {}]]|>;
+  (* The tile plan now strongly owns every equation owner.  Unit-column
+     witnesses existed only to put monolithic regular charts in that owner
+     graph; retaining their coefficient slabs would defeat streamed basis
+     preparation. *)
+  If[deferReceivingBases,
+    Scan[Function[record, If[AssociationQ[Lookup[record, "Witness", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[
+          record["Witness"]]]]], preparedOwners]];
+  lowerData = KeyDrop[lowerData, "OwnerRecords"];
+  upperData = KeyDrop[upperData, "OwnerRecords"];
   <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
     "Session" -> First[sessions], "Domain" -> domain,
     "Dimension" -> dimension,
@@ -888,7 +1132,10 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     "NativeGeometryAudit" -> geometryAudit,
     "ContainsSingularReceivingCharts" ->
       containsSingularReceivingCharts,
+    "DeferredReceivingBases" -> deferReceivingBases,
     "TargetCompleteMax" -> targetMax,
+    "MatchEpsilonPadding" -> matchEpsilonPadding,
+    "Threads" -> threads,
     "PreparedIntegrandEpsilonShift" -> preparedShift,
     "PlanCheckpointIdentity" -> planIdentity|>,
   "DiffExp2Error", Function[{failure, tag},
@@ -1127,12 +1374,63 @@ nativeBatchReleasePublished[states_, pair_, lowerEndpoints_,
       Select[Values[states], AssociationQ]]];
   Null];
 
-Options[RunNativeTransportObservableBatch] = {
-  "MaxRefinementSteps" -> 2};
+nativeStreamTransportArm[atlas_Association, data_Association,
+    arm_String, epsilon_Association, checkpointRoot_String,
+    refinement_Association] := Module[
+  {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
+   tiles = {atlas["Anchor"]}, hopEpsilon, basis, response, next, output},
+  hopEpsilon = <|"min" -> epsilon["min"], "max" -> epsilon["max"],
+    "required_complete_max" -> epsilon["match_required_complete_max"]|>;
+  output = Catch[
+    Do[
+      nativeStageTiming["stream-basis-start arm=", arm,
+        " index=", index];
+      basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
+        Lookup[atlas, "Threads", Automatic]];
+      nativeStageTiming["stream-basis-done arm=", arm,
+        " index=", index];
+      response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
+        atlas["Plan"], arm, index, basis["Columns"], current,
+        hopEpsilon, checkpointRoot, refinement];
+      If[FailureQ[response] || !AssociationQ[response] ||
+          Lookup[response, "status", "error"] =!= "ok",
+        If[AssociationQ[basis],
+          Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+            Lookup[basis, "Columns", {}]]];
+        err["E5", <|"Arm" -> arm, "Match" -> index,
+          "BackendFailure" -> response,
+          "Detail" -> "streamed native transport hop failed"|>]];
+      next = Lookup[response, "next_local", None];
+      If[AssociationQ[next] && !KeyExistsQ[next, "session"],
+        next = Append[next, "session" -> atlas["Session"]]];
+      If[!nativeOpaqueLocalHandleQ[next, atlas["Session"]] ||
+          !ListQ[Lookup[response, "consumed_basis_handles", None]],
+        err["E5", <|"Arm" -> arm, "Match" -> index,
+          "BackendResponse" -> response,
+          "Detail" -> "streamed native transport hop returned a malformed consumed-local result"|>]];
+      AppendTo[tiles, next];
+      current = next;
+      basis = None;
+      ClearSystemCache[];
+      nativeStageTiming["stream-hop-done arm=", arm,
+        " index=", index],
+      {index, Length[systems]}];
+    <|"tile_sources" -> tiles|>,
+    "DiffExp2Error", Function[{failure, tag},
+      Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+        Rest[tiles]];
+      Throw[failure, tag]]];
+  output];
 
-RunNativeTransportObservableBatch[atlas_Association, observables_List,
+Options[RunNativeTransportObservableBatch] = {
+  "MaxRefinementSteps" -> 2,
+  "ConsumeReceivingBases" -> False,
+  "AtlasCompactor" -> Identity};
+
+RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     var_Symbol, OptionsPattern[]] := Module[
-  {maxSteps = OptionValue["MaxRefinementSteps"], normalized, identities,
+  {atlas = atlasIn,
+   maxSteps = OptionValue["MaxRefinementSteps"], normalized, identities,
    checkpoints, prepared, sourceMin, availableMax, projectedRequired,
    contractionRequired, statePublicRequired,
    matchRequired, preparedShift, declaredShift, epsilon, refinement,
@@ -1141,7 +1439,11 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
    pair = None, lowerEndpoints = None, upperEndpoints = None,
    pairRecords = {}, lowerRecords = {}, upperRecords = {},
    pairByIdentity = <||>, lowerByIdentity = <||>, upperByIdentity = <||>,
-   resultRecords, prepareRows, output},
+   resultRecords, prepareRows, output, cacheMemoryBefore,
+   cacheMemoryAfter, workingAtlas = atlas,
+   atlasCompactor = OptionValue["AtlasCompactor"],
+   consumeReceivingBases = TrueQ[OptionValue["ConsumeReceivingBases"]],
+   deferredReceivingBases, streamedArms = <||>},
   If[Lookup[atlas, "Type", None] =!=
         "DiffExp2NativeRegularIndependentArmAtlas" ||
       !IntegerQ[maxSteps] || !TrueQ[0 <= maxSteps <= 32],
@@ -1168,8 +1470,38 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
       "upper", nativePreparedArmRows[atlas, atlas["Upper"],
         coefficients, var]];
   prepared = nativePrepareBatchObservable[#, prepareRows] & /@ normalized;
-  sourceMin = atlas["Request", "EpsWindow", "Min"];
-  availableMax = atlas["Request", "EpsWindow", "CompleteMax"];
+  deferredReceivingBases = TrueQ[
+    Lookup[atlas, "DeferredReceivingBases", False]];
+  workingAtlas = If[deferredReceivingBases, atlas, Join[atlas, <|
+    "Lower" -> KeyDrop[atlas["Lower"], "ChartSystems"],
+    "Upper" -> KeyDrop[atlas["Upper"], "ChartSystems"]|>]];
+  If[Head[atlasCompactor] =!= Function && atlasCompactor =!= Identity,
+    err["E8", <|"Detail" ->
+      "AtlasCompactor must be Identity or a one-argument Function"|>]];
+  atlasCompactor[workingAtlas];
+  (* Keep the large input association in exactly one short-lived local.
+     Using the pattern argument throughout this Module substitutes the full
+     atlas into the evaluated body, so neither the caller compactor nor cache
+     clearing can reclaim ChartSystems before the native march allocation. *)
+  atlas = workingAtlas;
+  Clear[prepareRows];
+  If[Head[atlasCompactor] === Function,
+    nativeStageTiming["atlas-owner-compacted"]];
+  (* Every integrand row is now self-contained and every chart/SCC/local
+     needed by the march is strongly retained in C++.  Drop only duplicate
+     Wolfram preparation memo state before the two-arm allocation peak;
+     never close a session or release an opaque native owner here. *)
+  cacheMemoryBefore = MemoryInUse[];
+  If[!deferredReceivingBases,
+    DiffExp2`Solve`DropWolframPreparationCaches[]];
+  ClearSystemCache[];
+  Share[];
+  cacheMemoryAfter = MemoryInUse[];
+  nativeStageTiming["post-atlas-cache-drop before=", cacheMemoryBefore,
+    " after=", cacheMemoryAfter,
+    " released=", cacheMemoryBefore - cacheMemoryAfter];
+  sourceMin = workingAtlas["Request", "EpsWindow", "Min"];
+  availableMax = workingAtlas["Request", "EpsWindow", "CompleteMax"];
   projectedRequired = Max[Lookup[Lookup[prepared, "Epsilon"],
     "RequiredCompleteMax"]];
   (* Retain the unprojected source through every downstream contraction.
@@ -1207,11 +1539,13 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
   refinement = <|"relative_tolerance" ->
       ("1e-" <> ToString[DiffExp2`Tolerances`Tol["MatchDigits"]]),
     "max_steps" -> maxSteps|>;
-  lowerBasis = Lookup[Rest[atlas["Lower", "Bases"]], "Columns", {}];
-  upperBasis = Lookup[Rest[atlas["Upper", "Bases"]], "Columns", {}];
+  lowerBasis = If[deferredReceivingBases, {},
+    Lookup[Rest[workingAtlas["Lower", "Bases"]], "Columns", {}]];
+  upperBasis = If[deferredReceivingBases, {},
+    Lookup[Rest[workingAtlas["Upper", "Bases"]], "Columns", {}]];
   checkpointRoot = nativeCheckpointIdentity["de2-native-observable-batch-", {
-    atlas["PlanCheckpointIdentity"], atlas["Domain"],
-    nativeOpaqueCheckpoint[atlas["Anchor"], "anchor"], epsilon,
+    workingAtlas["PlanCheckpointIdentity"], workingAtlas["Domain"],
+    nativeOpaqueCheckpoint[workingAtlas["Anchor"], "anchor"], epsilon,
     refinement, Map[KeyTake[#, {"Operation", "Identity",
       "CheckpointIdentity", "Epsilon", "TailPolicy",
       "MinimumEpsilonShift"}] &,
@@ -1220,17 +1554,32 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
       Flatten[Join[Lookup[prepared, "LowerRows"],
         Lookup[prepared, "UpperRows"]], 1]]}];
   output = Catch[
-    march = DiffExp2`CppBackend`RunPersistentTransportArms[
-      atlas["Plan"], atlas["Anchor"], <|
-        "lower" -> <|"receiving_basis" -> lowerBasis|>,
-        "upper" -> <|"receiving_basis" -> upperBasis|>|>,
-      epsilon, checkpointRoot <> ":march", refinement];
+    march = If[deferredReceivingBases,
+      streamedArms = <|
+        "lower" -> nativeStreamTransportArm[workingAtlas,
+          workingAtlas["Lower"], "lower", epsilon,
+          checkpointRoot <> ":march", refinement],
+        "upper" -> nativeStreamTransportArm[workingAtlas,
+          workingAtlas["Upper"], "upper", epsilon,
+          checkpointRoot <> ":march", refinement]|>;
+      nativeStageTiming["transport-state-publish-start"];
+      DiffExp2`CppBackend`PublishPersistentConsumedTransportStates[
+        workingAtlas["Plan"], workingAtlas["Anchor"], streamedArms,
+        epsilon, checkpointRoot <> ":march", refinement],
+      If[consumeReceivingBases,
+        DiffExp2`CppBackend`RunPersistentConsumingTransportArms,
+        DiffExp2`CppBackend`RunPersistentTransportArms][
+        workingAtlas["Plan"], workingAtlas["Anchor"], <|
+          "lower" -> <|"receiving_basis" -> lowerBasis|>,
+          "upper" -> <|"receiving_basis" -> upperBasis|>|>,
+        epsilon, checkpointRoot <> ":march", refinement]];
+    nativeStageTiming["transport-state-publish-done"];
     states = If[AssociationQ[march] &&
         AssociationQ[Lookup[march, "states", None]],
       march["states"], <||>];
     If[FailureQ[march] || !AssociationQ[march] ||
         Lookup[march, "status", "error"] =!= "ok" ||
-        Lookup[march, "session", None] =!= atlas["Session"] ||
+        Lookup[march, "session", None] =!= workingAtlas["Session"] ||
         !TrueQ[Lookup[march, "native_retained", False]] ||
         Lookup[march, "json_coefficients", None] =!= 0,
       err["E5", <|"BackendFailure" -> march,
@@ -1238,16 +1587,28 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
     lowerState = Lookup[states, "lower", <||>];
     upperState = Lookup[states, "upper", <||>];
     If[Sort[Keys[states]] =!= {"lower", "upper"} ||
-        !nativeTransportStateHandleQ[lowerState, atlas["Session"],
+        !nativeTransportStateHandleQ[lowerState, workingAtlas["Session"],
           "lower"] ||
-        !nativeTransportStateHandleQ[upperState, atlas["Session"],
+        !nativeTransportStateHandleQ[upperState, workingAtlas["Session"],
           "upper"],
       err["E5", <|"BackendResponse" -> march,
         "Detail" -> "two-arm observable-batch march did not return exact lower/upper retained states"|>]];
+    If[consumeReceivingBases || deferredReceivingBases,
+      workingAtlas = Join[workingAtlas, <|
+        "Lower" -> Join[KeyDrop[workingAtlas["Lower"], "ChartSystems"],
+          <|"Bases" -> {None}|>],
+        "Upper" -> Join[KeyDrop[workingAtlas["Upper"], "ChartSystems"],
+          <|"Bases" -> {None}|>]|>];
+      atlas = workingAtlas;
+      atlasCompactor[workingAtlas];
+      If[deferredReceivingBases,
+        DiffExp2`Solve`DropWolframPreparationCaches[]]];
     integrates = Select[prepared, #["Operation"] === "integrate" &];
     lowerLimits = Select[prepared, #["Operation"] === "limitLower" &];
     upperLimits = Select[prepared, #["Operation"] === "limitUpper" &];
     If[integrates =!= {},
+      nativeStageTiming["paired-contraction-start observables=",
+        Length[integrates]];
       pair = DiffExp2`CppBackend`ContractPersistentTransportPairObservables[
         lowerState, upperState,
         Map[<|"Identity" -> #["Identity"],
@@ -1257,12 +1618,13 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
             "Epsilon" -> #["Epsilon"],
             "TailPolicy" -> #["TailPolicy"]|> &, integrates],
         checkpointRoot <> ":integrals"];
+      nativeStageTiming["paired-contraction-done"];
       If[FailureQ[pair] || !AssociationQ[pair] ||
           Lookup[pair, "status", "error"] =!= "ok",
         err["E5", <|"BackendFailure" -> pair,
           "Detail" -> "native paired observable contraction failed"|>]];
       pairRecords = nativeOrderedObservableOutputs[
-        pair, integrates, atlas["Session"], "line"];
+        pair, integrates, workingAtlas["Session"], "line"];
       pairByIdentity = AssociationThread[Lookup[integrates, "Identity"],
         pairRecords]];
     If[lowerLimits =!= {},
@@ -1279,7 +1641,7 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
         err["E5", <|"BackendFailure" -> lowerEndpoints,
           "Detail" -> "native lower endpoint observable batch failed"|>]];
       lowerRecords = nativeOrderedObservableOutputs[
-        lowerEndpoints, lowerLimits, atlas["Session"], "endpoint"];
+        lowerEndpoints, lowerLimits, workingAtlas["Session"], "endpoint"];
       lowerByIdentity = AssociationThread[Lookup[lowerLimits, "Identity"],
         lowerRecords]];
     If[upperLimits =!= {},
@@ -1296,7 +1658,7 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
         err["E5", <|"BackendFailure" -> upperEndpoints,
           "Detail" -> "native upper endpoint observable batch failed"|>]];
       upperRecords = nativeOrderedObservableOutputs[
-        upperEndpoints, upperLimits, atlas["Session"], "endpoint"];
+        upperEndpoints, upperLimits, workingAtlas["Session"], "endpoint"];
       upperByIdentity = AssociationThread[Lookup[upperLimits, "Identity"],
         upperRecords]];
     resultRecords = MapIndexed[Function[{observable, position},
@@ -1312,7 +1674,7 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
             "limitUpper", upperByIdentity[observable["Identity"]]]|>]],
       prepared];
     <|"Type" -> "DiffExp2NativeTransportObservableBatch",
-      "Atlas" -> atlas, "States" -> states,
+      "Atlas" -> workingAtlas, "States" -> states,
       "Results" -> resultRecords, "NativeMarches" -> 2,
       "CompatibilityExports" -> 0,
       "NativeSummary" -> <|
@@ -1325,8 +1687,23 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
           KeyDrop[upperEndpoints, {"status", "endpoints"}], None]|>|>,
     "DiffExp2Error", Function[{failure, tag},
       nativeBatchReleasePublished[states, pair, lowerEndpoints,
-        upperEndpoints]; Throw[failure, tag]]];
+        upperEndpoints];
+      If[AssociationQ[streamedArms],
+        Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+          Flatten[Rest[Lookup[#, "tile_sources", {}]] & /@
+            Select[Values[streamedArms], AssociationQ], 1]]];
+      Throw[failure, tag]]];
   output];
+
+SetAttributes[RunNativeTransportObservableBatchOwned, HoldFirst];
+Options[RunNativeTransportObservableBatchOwned] = {
+  "MaxRefinementSteps" -> 2};
+RunNativeTransportObservableBatchOwned[owner_Symbol, observables_List,
+    var_Symbol, OptionsPattern[]] :=
+  RunNativeTransportObservableBatch[owner, observables, var,
+    "MaxRefinementSteps" -> OptionValue["MaxRefinementSteps"],
+    "ConsumeReceivingBases" -> True,
+    "AtlasCompactor" -> Function[compactAtlas, owner = compactAtlas]];
 
 nativeDecodeBatchExport[exported_Association, outputDigits_Integer,
     requiredCompleteMax_Integer] := Module[
@@ -1780,8 +2157,8 @@ ReleaseNativeRegularIndependentArms[obj_Association] := Module[
       matches = Join[run["Lower", "Matches"],
         run["Upper", "Matches"]]]];
   bases = Flatten[Map[Lookup[#, "Columns", {}] &,
-    Join[Rest[atlas["Lower", "Bases"]],
-      Rest[atlas["Upper", "Bases"]]]], 1];
+    Select[Join[Rest[atlas["Lower", "Bases"]],
+      Rest[atlas["Upper", "Bases"]]], AssociationQ]], 1];
   releaseAll[fn_, items_List, key_] := Scan[Function[item,
     AppendTo[responses, Quiet[fn[item]]]],
     DeleteDuplicatesBy[Select[items, AssociationQ],

@@ -9677,7 +9677,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
              {"identity_gauge", "collision-bound-producer-certificate"},
              {"no_pseudo", regular_singular_ready
                   ? (std::is_same_v<Scalar, ComplexBall>
-                        ? "producer-proven-and-exact-schedule-revalidated-no-case-p"
+                        ? "runtime-exact-schedule-case-p-gate"
                         : "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate")
                   : "collision-bound-producer-certificate"},
              {"jordan_indicial",
@@ -9977,12 +9977,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                    !block.exact_jordan_indicial.has_value();
           }))
         return false;
-      if constexpr (std::is_same_v<Scalar, ComplexBall>)
-        if (std::any_of(blocks_.begin(), blocks_.end(),
-                        [](const auto& block) {
-                          return !block.no_pseudo;
-                        }))
-          return false;
+      // Acb admission is schedule-specific, not producer-global.  A block
+      // may advertise possible family collisions even when the submitted
+      // finite Taylor schedule contains no CASE-P step.  checked_column_run
+      // reconstructs every affine offset exactly and rejects an actual
+      // CASE-P before any Acb recurrence executes.
       return std::all_of(
           couplings_.begin(), couplings_.end(), [&](const auto& coupling) {
             return sector_preserving_coupling_ready(coupling);

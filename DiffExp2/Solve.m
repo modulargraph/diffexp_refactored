@@ -4858,18 +4858,19 @@ sccNativeCanonicalRegularBlockComponent[request_Association,
    the native executor rechecks them as exact Arb objects. *)
 sccNativeCanonicalEncodedRegularBlockComponent[
     request_Association, task_Association, contract_Association,
-    dimension_Integer, zero_, one_, integers_List] := Module[
+    dimension_Integer, zero_, one_, encodedATarget_, encodedBTarget_,
+    encodedAShifts_List] := Module[
   {fb = Lookup[contract, "FrameBase", None],
    width = Lookup[contract, "FrameWidth", None],
    nmax = Lookup[contract, "NMax", None], frameTop, unitIndex,
    initial, validity, schedule, zeroFrame, unitFrame, frames, selected},
   If[dimension < 1 ||
       !MatchQ[{fb, width, nmax}, {_Integer, _Integer, _Integer}] ||
-      width < 1 || nmax < 0 || Length[integers] =!= nmax + 1 ||
+      width < 1 || nmax < 0 || Length[encodedAShifts] =!= nmax + 1 ||
       Sort[Keys[request]] =!= Sort[$nativeSCCColumnRunKeys] ||
       Sort[Keys[task]] =!= Sort[{"a", "b", "P"}] ||
-      !TrueQ[zeroCanQ[task["a"]]] ||
-      !TrueQ[zeroCanQ[task["b"]]] || task["P"] =!= 0,
+      !FreeQ[{task["a"], task["b"]}, _?InexactNumberQ] ||
+      task["P"] =!= 0,
     Return[None, Module]];
   frameTop = fb + width - 1;
   unitIndex = 1 - fb;
@@ -4880,19 +4881,17 @@ sccNativeCanonicalEncodedRegularBlockComponent[
       Lookup[request, "p", None] =!= 0 ||
       !TrueQ[Lookup[request, "has_initial", False]] ||
       TrueQ[Lookup[request, "adaptive_probe", True]] ||
-      Lookup[request, "a_target", None] =!= zero ||
-      Lookup[request, "b_target", None] =!= zero ||
+      Lookup[request, "a_target", None] =!= encodedATarget ||
+      Lookup[request, "b_target", None] =!= encodedBTarget ||
       Lookup[request, "a_shift_min", None] =!= 0 ||
-      Lookup[request, "a_shifts", None] =!= integers ||
+      Lookup[request, "a_shifts", None] =!= encodedAShifts ||
       !ListQ[schedule] || Length[schedule] =!= nmax + 1 ||
-      !(And @@ MapIndexed[Function[{row, index}, Module[
-          {n = First[index] - 1},
-          ListQ[row] && Length[row] === dimension &&
-            AllTrue[row, AssociationQ[#] &&
-              Sort[Keys[#]] === Sort[{"case", "da", "db"}] &&
-              Lookup[#, "case", None] === If[n === 0, "R", "T"] &&
-              Lookup[#, "da", None] === integers[[n + 1]] &&
-              Lookup[#, "db", None] === zero &]]], schedule]) ||
+      !AllTrue[schedule, ListQ[#] && Length[#] === dimension &&
+          AllTrue[#, AssociationQ[#] &&
+            Sort[Keys[#]] === Sort[{"case", "da", "db"}] &&
+            MemberQ[{"R", "T", "P"}, Lookup[#, "case", None]] &&
+            MatchQ[Lookup[#, "da", None], {_String, _String}] &&
+            MatchQ[Lookup[#, "db", None], {_String, _String}] &] &] ||
       !ListQ[initial] || Length[initial] =!= dimension width ||
       !ListQ[validity] ||
       validity =!= ConstantArray[frameTop, dimension] ||
@@ -5148,7 +5147,7 @@ sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
       "acb-regular-singular-jordan-block-dag-column-v1"],
     _, Return[False, Module]];
   expectedNoPseudo = If[domain === "acb",
-    "producer-proven-and-exact-schedule-revalidated-no-case-p",
+    "runtime-exact-schedule-case-p-gate",
     "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate"];
   expectedPseudoExecution = If[domain === "acb",
     "exact-rational-certificate-case-p-rejected-for-acb",
@@ -5273,7 +5272,7 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
    selectedSeedLocalComponent, expectedBasisIndex, expectedCapability,
    expectedProvenanceSchema, columnPlans, selectedPlan,
    singularExecution, seedTag, targetTags, plannedTargetBlocks,
-   provenanceLocalComponent, encodedZero, encodedOne, encodedIntegers},
+   provenanceLocalComponent, encodedZero, encodedOne},
   If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumn] === {},
     err["E5", cs, <|"Detail" ->
       "CppBackend persistent SCC column bridge is not available"|>]];
@@ -5408,13 +5407,15 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
           $cppSerializationSymbols = {}},
         encodedZero = cppScalar[0, inputDigits, cs];
         encodedOne = cppScalar[1, inputDigits, cs];
-        encodedIntegers = Table[cppScalar[n, inputDigits, cs],
-          {n, 0, contract["NMax"]}]];
       componentMaps = MapThread[Function[{runs, tasks, dimension},
-          MapThread[sccNativeCanonicalEncodedRegularBlockComponent[
-              #1, #2, contract, dimension, encodedZero, encodedOne,
-              encodedIntegers] &, {runs, tasks}]],
-        {runRecords, taskRecords, blockDimensions}];
+          MapThread[Function[{run, task},
+            sccNativeCanonicalEncodedRegularBlockComponent[
+              run, task, contract, dimension, encodedZero, encodedOne,
+              cppScalar[task["a"], inputDigits, cs],
+              cppScalar[task["b"], inputDigits, cs],
+              Table[cppScalar[task["a"] + n, inputDigits, cs],
+                {n, 0, contract["NMax"]}]]], {runs, tasks}]],
+        {runRecords, taskRecords, blockDimensions}]];
       badBlocks = Select[Range[Length[componentMaps]], Function[block,
         MemberQ[componentMaps[[block]], None] ||
           Sort[componentMaps[[block]]] =!=

@@ -78,3 +78,15 @@ slabs native, form each target source with this algebra, and invoke the target
 particular recurrence without returning an intermediate slab to Wolfram.
 Pseudo-resonant compensation remains a mandatory part of that transaction;
 it cannot be deferred until after a truncated source has crossed the API.
+
+The first regular-singular execution slice closes one exact subset of this
+transaction: scalar Rational diagonal blocks in identity frames,
+center-pole-zero couplings, captured exact T/R schedules, and no pseudo
+collisions. Constant couplings are allowed, so a source that hits the
+retained scalar indicial root is carried through the native resonant ladder
+and may produce a logarithmic sector. C++ derives that root from the retained
+`Nhat_0 d_0^-1` coefficients rather than accepting self-consistent caller
+offsets. An exact nonzero right-hand side at the highest captured scalar log
+level is E5, proving that an undersized log ceiling cannot be silently
+truncated. Nonidentity `V^-1` source transformation and general Jordan-block
+image tests remain prerequisites for the next singular scope.

@@ -15,6 +15,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -2177,6 +2178,47 @@ class PreparedChart final : public PreparedChartBase {
     }
     return true;
   }
+  std::size_t jordan_block_count() const {
+    return prepared_.blocks.size();
+  }
+  std::optional<std::pair<Rational, Rational>>
+  exact_scalar_affine_indicial_root() const {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      return std::nullopt;
+    } else {
+      if (prepared_.dimension != 1 || prepared_.nhat_lags.empty() ||
+          !prepared_.d0_inverse_scalar.has_value() ||
+          !prepared_.nhat_lags.front().rational.empty())
+        return std::nullopt;
+      std::map<std::int32_t, Rational> coefficients;
+      for (const auto& matrix : prepared_.nhat_lags.front().polynomial) {
+        for (const auto& entry : matrix.entries) {
+          if (entry.row != 0 || entry.col != 0) return std::nullopt;
+          auto found = coefficients.try_emplace(
+              matrix.shift, Rational(0)).first;
+          found->second += entry.value;
+        }
+      }
+      for (auto iterator = coefficients.begin();
+           iterator != coefficients.end();) {
+        iterator->second *= *prepared_.d0_inverse_scalar;
+        if (iterator->second.is_zero())
+          iterator = coefficients.erase(iterator);
+        else
+          ++iterator;
+      }
+      if (std::any_of(coefficients.begin(), coefficients.end(),
+                      [](const auto& item) {
+                        return item.first != 0 && item.first != 1;
+                      }))
+        return std::nullopt;
+      const auto coefficient = [&](std::int32_t shift) {
+        const auto found = coefficients.find(shift);
+        return found == coefficients.end() ? Rational(0) : found->second;
+      };
+      return std::make_pair(coefficient(0), coefficient(1));
+    }
+  }
   ChartStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return {runs_.load(), local_runs_.load(), prepare_parse_ms_,
@@ -2310,6 +2352,7 @@ struct CompositeSCCBlock {
   std::vector<std::uint32_t> vertices;
   std::string source_handle;
   std::string principal_identity;
+  bool regular = true;
   std::shared_ptr<PreparedChart<Scalar>> chart;
 };
 
@@ -2487,9 +2530,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           "native SCC column execution currently supports only exact rational coefficients");
     } else {
       const auto started = std::chrono::steady_clock::now();
-      if (!regular_block_column_ready())
+      const bool regular_execution = regular_block_column_ready();
+      const bool regular_singular_execution =
+          regular_singular_scalar_column_ready();
+      if (!regular_execution && !regular_singular_execution)
         throw std::invalid_argument(
-            "retained SCC chart does not satisfy the exact-rational regular block-DAG column capability");
+            "retained SCC chart does not satisfy a native exact-rational SCC column capability");
       const auto checkpoint_identity = required_string(
           request, "checkpoint_identity");
       const auto& seed_request = as_object(
@@ -2530,9 +2576,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       aggregate.top_valid = kCompleteInfinity;
 
       const auto& seed_run = checked_column_run(
-          seed_request, seed_block, true, nullptr);
+          seed_request, seed_block, true, nullptr,
+          regular_singular_execution);
       const auto seed_local_component = seed_component_from_run(
-          seed_run, seed_block);
+          seed_run, seed_block, regular_singular_execution);
       const auto basis_index =
           blocks_[seed_block].vertices[seed_local_component];
       auto seed_native = blocks_[seed_block].chart->solve_native(
@@ -2557,7 +2604,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           if (coupling.target_block != target_block ||
               !state[coupling.source_block].has_value())
             continue;
-          validate_regular_coupling(coupling);
+          validate_column_coupling(
+              coupling, regular_singular_execution);
           auto contribution = apply_prepared_sparse_local_matrix(
               coupling.matrix, *state[coupling.source_block],
               checkpoint_identity + ":source:" +
@@ -2586,7 +2634,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                 std::to_string(target_block));
         require_work_local(source, "combined coupling source");
         const auto& target_run = checked_column_run(
-            target_request, target_block, false, &source);
+            target_request, target_block, false, &source,
+            regular_singular_execution);
         require_source_tag_matches_run(source, target_run);
         auto source_data = local_solution_source_data(
             source, as_u32(target_run.at("nmax"), "target nmax"),
@@ -2628,9 +2677,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       validate_local_solution(parent, false);
       const auto scalar_execution = scalar_block_shape();
       json::object column_identity_record{
-          {"schema", scalar_execution
-               ? "diffexp2-native-scc-column-v1"
-               : "diffexp2-native-scc-column-v2"},
+          {"schema", regular_singular_execution
+               ? "diffexp2-native-scc-regular-singular-scalar-column-v1"
+               : (scalar_execution
+                     ? "diffexp2-native-scc-column-v1"
+                     : "diffexp2-native-scc-column-v2")},
           {"scc_exact_identity", exact_identity_},
           {"basis_index", basis_index},
           {"seed", seed_request},
@@ -2664,6 +2715,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
   const char* column_execution_capability() const override {
+    if (regular_singular_scalar_column_ready())
+      return "exact-rational-regular-singular-scalar-block-dag-column-v1";
+    if (!regular_block_column_ready())
+      return "unsupported-native-scc-column";
     return scalar_block_shape()
         ? "exact-rational-regular-scalar-block-dag-column-v1"
         : "exact-rational-regular-block-dag-column-v2";
@@ -2676,10 +2731,17 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     json::array block_handles;
     block_handles.reserve(blocks_.size());
     for (const auto& block : blocks_) {
-      block_handles.push_back(json::object{
+      json::object block_record{
           {"block", block.block}, {"chart", block.source_handle},
           {"dimension", block.chart->dimension()},
-          {"principal_identity", block.principal_identity}});
+          {"regular", block.regular},
+          {"principal_identity", block.principal_identity}};
+      if (const auto root =
+              block.chart->exact_scalar_affine_indicial_root();
+          root.has_value())
+        block_record["affine_indicial_root"] = json::object{
+            {"a", root->first.str()}, {"b", root->second.str()}};
+      block_handles.push_back(std::move(block_record));
     }
     for (const auto& coupling : couplings_)
       for (std::size_t index = 0; index < coupling.identities.size(); ++index) {
@@ -2695,6 +2757,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         }
       }
     const auto regular_ready = regular_block_column_ready();
+    const auto regular_singular_ready =
+        regular_singular_scalar_column_ready();
+    const auto execution_ready = regular_ready || regular_singular_ready;
     const auto scalar_shape = scalar_block_shape();
     const auto scalar_ready = scalar_column_ready();
     json::object result{
@@ -2720,20 +2785,31 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"max_coupling_shift", max_coupling_shift.has_value()
              ? json::value(*max_coupling_shift) : json::value(nullptr)},
         {"execution_mode", "BlockSequentialStrict"},
-        {"execution_implemented", regular_ready},
-        {"execution_scope",
-         scalar_shape
-             ? "exact-rational-regular-scalar-block-dag-column-v1"
-             : "exact-rational-regular-block-dag-column-v2"},
+        {"execution_implemented", execution_ready},
+        {"execution_scope", regular_singular_ready
+             ? "exact-rational-regular-singular-scalar-block-dag-column-v1"
+             : (regular_ready
+                   ? (scalar_shape
+                         ? "exact-rational-regular-scalar-block-dag-column-v1"
+                         : "exact-rational-regular-block-dag-column-v2")
+                   : "unsupported")},
         {"general_scc_execution", false},
         {"scalar_block_dag_column_execution", scalar_ready},
+        {"regular_singular_scalar_block_dag_column_execution",
+         regular_singular_ready},
         {"scc_column_solves", column_solves_.load()},
         {"scc_column_solve_ms", column_solve_ms()},
         {"capability_evidence", json::object{
              {"identity_v", "native-retained-assembly"},
-             {"regular", "collision-bound-producer-certificate"},
+             {"regular", regular_ready
+                  ? "collision-bound-producer-certificate"
+                  : "not-required-by-selected-scope"},
+             {"regular_or_regular_singular",
+              "collision-bound-producer-certificate"},
              {"identity_gauge", "collision-bound-producer-certificate"},
-             {"no_pseudo", "collision-bound-producer-certificate"}}},
+             {"no_pseudo", "collision-bound-producer-certificate"},
+             {"resonance_schedule",
+              "retained-affine-root-verified-exact-captured-run"}}},
         {"execution_must_revalidate_producer_capabilities", true},
         {"block_charts", std::move(block_handles)}};
     if (!scalar_shape)
@@ -2749,7 +2825,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       if (blocks_.size() < 2 || work_.work_min > 0 ||
           work_.requested_max < 0 || work_.work_complete_max < 0 ||
           std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
-            return block.vertices.empty() ||
+            return !block.regular || block.vertices.empty() ||
                    block.chart->dimension() != block.vertices.size() ||
                    !block.chart->has_identity_assembly() ||
                    !block.chart->has_regular_singleton_partition();
@@ -2766,6 +2842,31 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     return regular_block_column_ready() && scalar_block_shape();
   }
 
+  bool regular_singular_scalar_column_ready() const {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      return false;
+    } else {
+      if (blocks_.size() < 2 || work_.work_min > 0 ||
+          work_.requested_max < 0 || work_.work_complete_max < 0 ||
+          !scalar_block_shape() ||
+          std::none_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
+            return !block.regular;
+          }) ||
+          std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
+            return block.chart->dimension() != 1 ||
+                   !block.chart->has_identity_assembly() ||
+                   !block.chart->has_regular_singleton_partition() ||
+                   block.chart->jordan_block_count() != 1 ||
+                   !block.chart->exact_scalar_affine_indicial_root().has_value();
+          }))
+        return false;
+      return std::all_of(
+          couplings_.begin(), couplings_.end(), [&](const auto& coupling) {
+            return sector_preserving_coupling_ready(coupling);
+          });
+    }
+  }
+
   bool scalar_block_shape() const {
     return std::all_of(
         blocks_.begin(), blocks_.end(), [](const auto& block) {
@@ -2774,6 +2875,21 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
   bool regular_coupling_ready(
+      const CompositeSCCCoupling<Scalar>& coupling) const {
+    if (!sector_preserving_coupling_ready(coupling)) return false;
+    for (const auto& entry : coupling.matrix.entries) {
+      if (entry.multiplier.proven_zero) continue;
+      if (std::any_of(entry.multiplier.kernels.begin(),
+                      entry.multiplier.kernels.end(),
+                      [](const auto& kernel) {
+                        return !ScalarTraits<Scalar>::is_zero(kernel.front());
+                      }))
+        return false;
+    }
+    return true;
+  }
+
+  bool sector_preserving_coupling_ready(
       const CompositeSCCCoupling<Scalar>& coupling) const {
     if (coupling.source_block >= blocks_.size() ||
         coupling.target_block >= blocks_.size() ||
@@ -2794,8 +2910,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           std::any_of(entry.multiplier.kernels.begin(),
                       entry.multiplier.kernels.end(),
                       [](const auto& kernel) {
-                        return kernel.empty() ||
-                            !ScalarTraits<Scalar>::is_zero(kernel.front());
+                        return kernel.empty();
                       }))
         return false;
     }
@@ -2804,11 +2919,18 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
   const json::object& checked_column_run(
       const json::object& entry, std::uint32_t block_index, bool seed,
-      const LocalSolution<Scalar>* source) const {
+      const LocalSolution<Scalar>* source,
+      bool regular_singular_execution) const {
     if (block_index >= blocks_.size())
       throw std::invalid_argument("native SCC run block is out of range");
     const auto block_dimension = blocks_[block_index].chart->dimension();
     const auto frame_width = blocks_[block_index].chart->frame_width();
+    const auto retained_root = regular_singular_execution
+        ? blocks_[block_index].chart->exact_scalar_affine_indicial_root()
+        : std::nullopt;
+    if (regular_singular_execution && !retained_root.has_value())
+      throw std::invalid_argument(
+          "native regular-singular SCC chart has no retained exact affine scalar indicial root");
     const auto& run = as_object(entry.at("run"), "native SCC recurrence run");
     validate_metadata_geometry(as_object(
         entry.at("metadata"), "native SCC local metadata"));
@@ -2817,7 +2939,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           "native SCC column rejects caller-supplied recurrence source data");
     if (run.at("adaptive_probe").as_bool())
       throw std::invalid_argument(
-          "native SCC regular block column requires a fixed retained lower frame");
+          "native SCC column requires a fixed retained lower frame");
     if (run.at("return_u").as_bool())
       throw std::invalid_argument(
           "native SCC column requires retained assembly without U JSON");
@@ -2826,12 +2948,22 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     if (nmax != work_.work_t_order)
       throw std::invalid_argument(
           "native SCC run Taylor order differs from its retained work contract");
-    if (log_max != 0 ||
-        !parse_scalar<Rational>(run.at("a_target")).is_zero() ||
-        !parse_scalar<Rational>(run.at("b_target")).is_zero() ||
-        as_i32(run.at("a_shift_min"), "native SCC a-shift minimum") != 0)
+    const auto a_target = parse_scalar<Rational>(run.at("a_target"));
+    const auto b_target = parse_scalar<Rational>(run.at("b_target"));
+    if (as_i32(run.at("a_shift_min"),
+               "native SCC a-shift minimum") != 0)
       throw std::invalid_argument(
-          "native SCC regular block runs require p=0, a=b=0 and zero a-shift origin");
+          "native SCC column requires a zero exact a-shift origin");
+    if (!regular_singular_execution &&
+        (log_max != 0 || !a_target.is_zero() || !b_target.is_zero()))
+      throw std::invalid_argument(
+          "native SCC regular block runs require p=0 and a=b=0");
+    if (regular_singular_execution &&
+        (block_dimension != 1 ||
+         blocks_[block_index].chart->jordan_block_count() != 1 ||
+         (seed && log_max != 0)))
+      throw std::invalid_argument(
+          "native regular-singular SCC execution requires scalar blocks and a canonical log-zero homogeneous seed");
     const auto& a_shifts = as_array(
         run.at("a_shifts"), "native SCC exact a-shift schedule");
     if (a_shifts.size() != static_cast<std::size_t>(nmax) + 1)
@@ -2839,9 +2971,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           "native SCC regular block run has an incomplete a-shift schedule");
     for (std::size_t n = 0; n < a_shifts.size(); ++n)
       if (!(parse_scalar<Rational>(a_shifts[n]) ==
-            Rational(std::to_string(n))))
+            a_target + Rational(std::to_string(n))))
         throw std::invalid_argument(
-            "native SCC regular block a-shift schedule must equal the Taylor index");
+            "native SCC a-shift schedule must equal a_target plus the exact Taylor index");
     if (seed) {
       if (!run.at("has_initial").as_bool())
         throw std::invalid_argument(
@@ -2903,18 +3035,39 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         const auto kind = required_string(step, "case");
         const auto da = parse_scalar<Rational>(step.at("da"));
         const auto db = parse_scalar<Rational>(step.at("db"));
-        const auto expected_kind = n == 0 ? "R" : "T";
-        if (kind != expected_kind || !db.is_zero() ||
-            !(da == Rational(std::to_string(n))))
-          throw std::invalid_argument(
-              "native SCC regular block schedule must be resonant at zero and Taylor by exact index for every Jordan singleton");
+        if (regular_singular_execution) {
+          const auto expected_da =
+              a_target + Rational(std::to_string(n)) - retained_root->first;
+          const auto expected_db = b_target - retained_root->second;
+          const auto expected_kind = !da.is_zero() ? "T"
+              : !db.is_zero() ? "P" : "R";
+          if (!(da == expected_da) || !(db == expected_db))
+            throw std::invalid_argument(
+                "native regular-singular SCC schedule offsets differ from the retained exact affine indicial root");
+          if (kind != expected_kind)
+            throw std::invalid_argument(
+                "native regular-singular SCC schedule case contradicts its exact da/db offsets");
+          if (kind == "P")
+            throw std::invalid_argument(
+                "native regular-singular SCC scalar execution does not yet implement pseudo-resonant compensation");
+          if (seed && n == 0 && kind != "R")
+            throw std::invalid_argument(
+                "native regular-singular SCC seed must begin at its exact indicial root");
+        } else {
+          const auto expected_kind = n == 0 ? "R" : "T";
+          if (kind != expected_kind || !db.is_zero() ||
+              !(da == Rational(std::to_string(n))))
+            throw std::invalid_argument(
+                "native SCC regular block schedule must be resonant at zero and Taylor by exact index for every Jordan singleton");
+        }
       }
     }
     return run;
   }
 
   std::uint32_t seed_component_from_run(
-      const json::object& run, std::uint32_t block_index) const {
+      const json::object& run, std::uint32_t block_index,
+      bool regular_singular_execution) const {
     const auto dimension = blocks_[block_index].chart->dimension();
     const auto frame_width = blocks_[block_index].chart->frame_width();
     const auto& initial = as_array(
@@ -2922,6 +3075,25 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     const auto& validity = as_array(
         run.at("initial_validity"), "native SCC seed initial validity");
     const auto unit_index_i64 = -static_cast<std::int64_t>(work_.work_min);
+    if (regular_singular_execution) {
+      if (dimension != 1 || unit_index_i64 < 0 ||
+          unit_index_i64 >= frame_width ||
+          initial.size() != frame_width || validity.size() != 1 ||
+          validity.front().is_null() ||
+          as_i32(validity.front(), "native SCC seed validity") !=
+              work_.work_complete_max)
+        throw std::invalid_argument(
+            "native regular-singular SCC seed requires one honest scalar eps^0 unit frame");
+      const auto unit_index = static_cast<std::size_t>(unit_index_i64);
+      for (std::size_t epsilon = 0; epsilon < frame_width; ++epsilon) {
+        const auto coefficient = parse_scalar<Rational>(initial[epsilon]);
+        if ((epsilon == unit_index && !(coefficient == Rational(1))) ||
+            (epsilon != unit_index && !coefficient.is_zero()))
+          throw std::invalid_argument(
+              "native regular-singular SCC seed is not the captured canonical eps^0 scalar normalization");
+      }
+      return 0;
+    }
     if (unit_index_i64 < 0 || unit_index_i64 >= frame_width ||
         dimension > std::numeric_limits<std::size_t>::max() / frame_width ||
         initial.size() != static_cast<std::size_t>(dimension) * frame_width ||
@@ -3039,14 +3211,20 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       if (sector.a.domain != ExactDomain::Rational ||
           sector.b.domain != ExactDomain::Rational)
         throw std::invalid_argument(
-            "native SCC first execution slice requires exact rational sector tags");
+            "native SCC column execution requires exact rational sector tags");
   }
 
-  void validate_regular_coupling(
-      const CompositeSCCCoupling<Scalar>& coupling) const {
-    if (!regular_coupling_ready(coupling))
+  void validate_column_coupling(
+      const CompositeSCCCoupling<Scalar>& coupling,
+      bool regular_singular_execution) const {
+    const bool ready = regular_singular_execution
+        ? sector_preserving_coupling_ready(coupling)
+        : regular_coupling_ready(coupling);
+    if (!ready)
       throw std::invalid_argument(
-          "native SCC column requires a dimension-matched exact pole-free coupling matrix whose active entries vanish at chart center");
+          regular_singular_execution
+              ? "native regular-singular SCC column requires a dimension-matched exact coupling matrix which preserves the sector tag"
+              : "native SCC column requires a dimension-matched exact pole-free coupling matrix whose active entries vanish at chart center");
   }
 
   void require_source_tag_matches_run(
@@ -3363,9 +3541,7 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
     block_seen[block] = 1;
     const auto declared_capabilities =
         canonical_native_scc_capabilities(raw_block);
-    if (!raw_block.at("regular").as_bool())
-      throw std::invalid_argument(
-          "native SCC preparation does not yet support singular blocks");
+    const bool regular = raw_block.at("regular").as_bool();
     if (!raw_block.at("identity_gauge").as_bool())
       throw std::invalid_argument(
           "native SCC preparation requires an exact identity gauge");
@@ -3457,7 +3633,7 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
 
     blocks[block] = CompositeSCCBlock<Scalar>{
         block, std::move(vertices), source_handle, principal_identity,
-        std::move(chart)};
+        regular, std::move(chart)};
   }
 
   std::set<std::pair<std::uint32_t, std::uint32_t>> expected_cross;
@@ -4915,6 +5091,8 @@ std::string backend_info_json() {
                                       {"persistent_exact_regular_local_match",
                                        true},
                                       {"persistent_acb_local_match", false},
+                                      {"persistent_scc_regular_singular_scalar_block_dag_column",
+                                       true},
                                       {"backend", "DiffExp2 C++"},
                                       {"flint", flint_version},
                                       {"librarylink", true}});

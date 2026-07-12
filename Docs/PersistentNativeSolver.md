@@ -74,7 +74,7 @@ The implemented recurrence-session commands are:
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
-| `scc.solve_column` | Execute one exact-rational regular block-DAG basis column and retain the parent local without coefficient JSON. |
+| `scc.solve_column` | Execute one retained exact-rational SCC basis column in a certified regular scope, or in the narrow scalar regular-singular identity-frame scope, and retain the parent local without coefficient JSON. |
 | `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
 | `scc.release` | Release one retained composite SCC chart. |
 | `session.stats` | Return preparation/run timings and retained-object counters. |
@@ -107,6 +107,27 @@ opaque local handle plus exact column provenance.  Exact parent geometry and
 analytic prescriptions are preserved.  The three-argument scalar-v1 wire
 request and returned record are unchanged, and neither scope is connected to
 production `SolveHomogeneous` or transport dispatch.
+
+The native protocol also advertises
+`exact-rational-regular-singular-scalar-block-dag-column-v1` for a narrower
+C++-only migration slice. At least one diagonal block is singular; every
+block is scalar, has exact identity gauge/assembly and no pseudo-resonant
+family collision, and every active coupling has center pole order zero so it
+preserves the exact `(a,b,p)` sector family. Couplings may have a nonzero
+constant Taylor coefficient, allowing an exact source resonance to create a
+new log member, and signed epsilon shifts retain the ordinary strict lower
+frame guard.
+
+This capability does not trust a caller-consistent schedule. For each
+retained Rational chart, C++ reconstructs the affine indicial root `(a_i,b_i)`
+from the exact scalar `Nhat_0 d_0^-1` operator, accepting only epsilon support
+zero and one. Submitted captured steps must then satisfy exactly
+`da=a_target+n-a_i` and `db=b_target-b_i`; the seed's resonant `n=0` step
+therefore binds its tag to the retained root, and every descendant tag is
+also checked against its in-memory predecessor source. Pseudo steps,
+nonidentity spectral frames, center-pole tag shifts, and multidimensional
+singular blocks are loud unsupported cases. The existing Wolfram producer
+still emits only the regular capability; production dispatch is unchanged.
 
 Subsequent milestones extend the same session with complete multi-sector
 composition plus `transport.*`, `endpoint.*`, `integration.*`, and

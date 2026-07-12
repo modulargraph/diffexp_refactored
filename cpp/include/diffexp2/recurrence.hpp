@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -874,6 +875,27 @@ class RecurrenceSolver {
         rt.push_back(detail::apply_inv_d0(selected, op_.d0_inverse_scalar,
                                           inv_d0_frame_, op_.frame_base));
         rtv.push_back(std::move(selected_valid));
+      }
+
+      // For a scalar true-resonant block the equation at the highest
+      // retained log level is 0 = R[P]: only the absent P+1 member could
+      // absorb a nonzero right-hand side.  Silently ignoring that row would
+      // turn an insufficient captured log ceiling into a plausible-looking
+      // truncated solution.  The general Jordan ladder needs a rank-aware
+      // image test; the scalar SCC capability below deliberately relies only
+      // on this exact case and fails loudly when its captured ceiling is too
+      // small.
+      if constexpr (std::is_same_v<Scalar, Rational>) {
+        if (q == 1 && std::any_of(
+                          rt[p_.log_max][0].begin(),
+                          rt[p_.log_max][0].end(),
+                          [](const Scalar& value) {
+                            return !ScalarTraits<Scalar>::is_zero(value);
+                          })) {
+          throw RecurrenceError(
+              "E5",
+              "scalar resonant recurrence has nonzero content above the captured log ceiling");
+        }
       }
 
       std::vector<std::vector<Frame<Scalar>>> assigned(

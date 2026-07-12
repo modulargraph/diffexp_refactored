@@ -321,8 +321,17 @@ General SCC execution remains disabled, but the deliberately narrow
 `exact-rational-regular-block-dag-column-v2`. The latter requires a regular
 singleton recurrence partition inside every retained diagonal block. The
 explicit Wolfram `SolveNativeSCCBasisColumn` migration seam accepts both
-scopes, validates the corresponding statistics/capability string, and fails
-loudly for any other retained composite.
+regular scopes and validates their corresponding statistics, capability, and
+full column provenance. The native-only
+`exact-rational-regular-singular-scalar-block-dag-column-v1` scope also
+accepts scalar singular blocks when every chart has identity gauge/assembly,
+the coupling preserves sector tags, and no pseudo step is present. C++
+derives each affine scalar indicial root from retained exact
+`Nhat_0 d_0^-1` coefficients and verifies every captured T/R offset against
+it; a self-consistent caller schedule is not evidence. Unsupported retained
+composites report
+`execution_implemented: false` and fail loudly if submitted to the native
+operation.
 
 The parent manifest carries two machine-checkable `D` by `D` row-major exact
 matrix records. Every cell has the shape
@@ -412,7 +421,10 @@ analytic records into the ordinary chart collision signature:
 - `analytic.native_scc_capabilities` with `regular`, `identity_gauge`,
   `identity_v`, and `no_pseudo` facts.
 
-The first slice requires all four capabilities true. Only `identity_v` is
+The first Wolfram-produced slice requires all four capabilities true. The
+native regular-singular scalar scope permits `regular:false`; all other
+facts remain required, and exact retained-root verification replaces trust
+in the submitted singular schedule. Only `identity_v` is
 native-proved here, against the retained identity assembly operator;
 `regular`, `identity_gauge`, and `no_pseudo` remain collision-bound producer
 certificates which execution revalidates or refuses.  Stats label that

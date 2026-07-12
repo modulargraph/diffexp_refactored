@@ -31,6 +31,47 @@ assert["cpp_backend_librarylink_flint_available",
   AssociationQ[info] && info["schema"] === 1 &&
   StringQ[info["flint"]]];
 
+(* Large recurrence responses must use the bounded bulk parser without
+   changing exact values, symbolic regulator identity, Acb accuracy, or the
+   scalar decoder's diagnostics on malformed/mixed public input. *)
+decodePrecision = 120;
+exactEncoded = {"0", "-7/13", "123456789012345678901234567890/37",
+  "(1 + Global`rho)/(2 - Global`rho)"};
+exactScalarDecoded =
+  DiffExp2`CppBackend`DecodeScalar[#, decodePrecision] & /@ exactEncoded;
+exactBulkDecoded = DiffExp2`CppBackend`DecodeScalars[
+  exactEncoded, decodePrecision];
+assert["cpp_bulk_decode_exact_and_symbolic_parity",
+  SameQ[exactBulkDecoded, exactScalarDecoded]];
+
+acbEncoded = {
+  {"1.2345678901234567890123456789e+3", "-2.5e-1", "-250", "zero"},
+  {"0", "3.141592653589793238462643383279e+0", "zero", "-180"},
+  {"-9.5e-20", "0", "-120", "zero"}};
+acbScalarDecoded =
+  DiffExp2`CppBackend`DecodeScalar[#, decodePrecision] & /@ acbEncoded;
+acbBulkDecoded = DiffExp2`CppBackend`DecodeScalars[
+  acbEncoded, decodePrecision];
+assert["cpp_bulk_decode_acb_value_precision_accuracy_parity",
+  SameQ[acbBulkDecoded, acbScalarDecoded]];
+
+malformedAcbEncoded = Join[acbEncoded[[1 ;; 2]],
+  {{"not-a-decimal", "0", "zero", "zero"}}];
+malformedAcbDecoded = DiffExp2`CppBackend`DecodeScalars[
+  malformedAcbEncoded, decodePrecision];
+assert["cpp_bulk_decode_malformed_acb_falls_back_elementwise",
+  SameQ[malformedAcbDecoded[[1 ;; 2]], acbScalarDecoded[[1 ;; 2]]] &&
+  FailureQ[malformedAcbDecoded[[3]]]];
+
+mixedEncoded = {"5/11", First[acbEncoded], {"malformed"}};
+mixedBulkDecoded = DiffExp2`CppBackend`DecodeScalars[
+  mixedEncoded, decodePrecision];
+mixedScalarDecoded =
+  DiffExp2`CppBackend`DecodeScalar[#, decodePrecision] & /@ mixedEncoded;
+assert["cpp_bulk_decode_mixed_records_preserves_scalar_fallback",
+  SameQ[mixedBulkDecoded, mixedScalarDecoded] &&
+  FailureQ[Last[mixedBulkDecoded]]];
+
 catchDE2[DiffExp2`Config`LoadConfiguration[{"WorkingPrecision" -> 100}]];
 assert["cpp_backend_default_preserves_wolfram_reference",
   DiffExp2`Config`CFG["RecurrenceBackend"] === "Wolfram"];
@@ -162,6 +203,67 @@ assert["cpp_rank_reduced_nonmonomial_source_wolfram_parity",
   csRankSource["GaugeInverse"] === DiagonalMatrix[{t/(1 + t), 1}] &&
   rankSourceW["EpsWindow"] === rankSourceC["EpsWindow"] &&
   tags[rankSourceW] === tags[rankSourceC] && rankSourceDiff < 10^-80];
+
+(* Particular solves must apply a nonidentity epsilon-rational spectral V in
+   the native recurrence before returning the physical tensor.  This is the
+   direct parity pin for the compact native-assembly path. *)
+csSpectralSource = DiffExp2`Solve`PrepareChart[
+  <|"Matrix" -> {{0, eps^-8}, {0, 1}}/x, "Variable" -> x|>,
+  chart["cpp-particular-spectral-v"]];
+spectralSource = <|"Sectors" -> {<|"a" -> 1/2, "b" -> 0, "p" -> 0,
+    "Coeffs" -> Table[If[k === 0 && n === 0, {1, 0}, {0, 0}],
+      {k, 0, 10}, {n, 0, 6}]|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 10|>,
+  "TWindow" -> <|"CompleteMax" -> 6|>|>;
+catchDE2[DiffExp2`Config`UpdateConfiguration[
+  {"RecurrenceBackend" -> "Wolfram"}]];
+spectralSourceW = catchDE2[DiffExp2`Solve`SolveParticular[
+  csSpectralSource, spectralSource, req[0, 2, 6]]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[
+  {"RecurrenceBackend" -> "Cpp"}]];
+spectralSourceC = catchDE2[DiffExp2`Solve`SolveParticular[
+  csSpectralSource, spectralSource, req[0, 2, 6]]];
+spectralSourceDiff = If[FailureQ[spectralSourceW] ||
+    FailureQ[spectralSourceC] || tags[spectralSourceW] =!= tags[spectralSourceC],
+  Infinity,
+  Max[Abs[Flatten[N[spectralSourceW["Sectors"][[All, "Coeffs"]] -
+    spectralSourceC["Sectors"][[All, "Coeffs"]], 70]]]]];
+assert["cpp_particular_native_nonidentity_spectral_v_parity",
+  !FailureQ[spectralSourceW] && !FailureQ[spectralSourceC] &&
+  csSpectralSource["V"] =!= IdentityMatrix[2] &&
+  spectralSourceW["EpsWindow"] === spectralSourceC["EpsWindow"] &&
+  tags[spectralSourceW] === tags[spectralSourceC] &&
+  spectralSourceDiff < 10^-80];
+
+catchDE2[DiffExp2`Config`UpdateConfiguration[{
+  "Variables" -> {rho}, "RecurrenceBackend" -> "Wolfram"}]];
+csSymbolicSpectralSource = DiffExp2`Solve`PrepareChart[
+  <|"Matrix" -> {{0, (1 + rho)/eps^2}, {0, 1}}/x,
+    "Variable" -> x|>, chart["cpp-particular-symbolic-spectral-v"]];
+symbolicSpectralSource = <|"Sectors" -> {<|
+    "a" -> 1/2, "b" -> 0, "p" -> 0,
+    "Coeffs" -> Table[If[k === 0 && n === 0, {0, 1}, {0, 0}],
+      {k, 0, 6}, {n, 0, 4}]|>},
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 6|>,
+  "TWindow" -> <|"CompleteMax" -> 4|>|>;
+symbolicSpectralSourceW = catchDE2[DiffExp2`Solve`SolveParticular[
+  csSymbolicSpectralSource, symbolicSpectralSource, req[0, 1, 4]]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[
+  {"RecurrenceBackend" -> "Cpp"}]];
+symbolicSpectralSourceC = catchDE2[DiffExp2`Solve`SolveParticular[
+  csSymbolicSpectralSource, symbolicSpectralSource, req[0, 1, 4]]];
+symbolicSpectralParity = !FailureQ[symbolicSpectralSourceW] &&
+  !FailureQ[symbolicSpectralSourceC] &&
+  symbolicSpectralSourceW["EpsWindow"] ===
+    symbolicSpectralSourceC["EpsWindow"] &&
+  tags[symbolicSpectralSourceW] === tags[symbolicSpectralSourceC] &&
+  AllTrue[Flatten[symbolicSpectralSourceW["Sectors"][[All, "Coeffs"]] -
+    symbolicSpectralSourceC["Sectors"][[All, "Coeffs"]]],
+    Cancel[Together[#]] === 0 &];
+assert["cpp_particular_native_symbolic_regulator_spectral_v_parity",
+  symbolicSpectralParity &&
+  csSymbolicSpectralSource["V"] =!= IdentityMatrix[2]];
+catchDE2[DiffExp2`Config`UpdateConfiguration[{"Variables" -> {}}]];
 
 (* Extra symbolic analytic regulators use FLINT's exact multivariate
    rational-function field. Epsilon remains the independent Laurent axis;

@@ -218,10 +218,65 @@ request, lower-frame underflow, load failure, or compiled-kernel failure is
 reported as a DiffExp2 error. It never silently falls back to the Wolfram
 recurrence. Choose `"Wolfram"` explicitly if that is the desired backend.
 
+### Retained Acb matching bridge
+
+`RunPersistentAcbLocalMatch[basis, incoming, request]` is the explicit
+low-level bridge to `local.match_acb`.  All handles must belong to one Acb
+session.  Besides chart, point, epsilon, and checkpoint identities, `request`
+contains an exact Rational `exact_lattice` witness and a bounded `refinement`
+policy.  C++ derives `T` only from that exact witness, evaluates the retained
+locals at the proved common physical point, rejects every pivot enclosure that
+overlaps zero, and reuses one factorization for residual corrections.  The
+returned handle has no coefficient slab; inspect it with
+`PersistentLocalMatchStatistics` and release it with
+`ReleasePersistentLocalMatch`.  This is a migration seam and is not yet the
+automatic transport dispatcher.
+
+### Retained exact tile and line-integration bridge
+
+`CreatePersistentTilePlan[owner, lower, upper, checkpointIdentity, 3]`
+passes retained chart handles and exact path topology to C++.  The native
+planner reads chart geometry and analytic-continuation prescriptions from the
+prepared objects themselves, constructs independent immutable lower/upper
+arms, and retains the resulting exact match and tile intervals.  Inspect them
+with `PersistentTilePlanStatistics`, `PersistentTileMatchInterval`, and
+`PersistentTileIntegrationInterval`; these wrappers do not reproduce the
+segmentation algorithm in Wolfram.
+
+`RunPersistentTileIntegral[plan, arm, tile, local, epsilon,
+checkpointIdentity]` consumes a one-based Wolfram tile index, but the endpoint
+coordinates come only from the retained plan.  C++ verifies chart,
+prescription, branch, and source-checkpoint provenance, integrates the typed
+stored local, applies the exact affine Jacobian and orientation, and returns
+an opaque line-result handle.  The current scope is deliberately
+`StoredTruncation`: it rejects any input error envelope and reports no unseen
+Taylor-tail guarantee.  Use `PersistentLineIntegralStatistics`,
+`ExportPersistentLineIntegral`, and `ReleasePersistentLineIntegral` for the
+result lifecycle.  Lower and upper calls admitted from the same session can
+execute concurrently because the plan and local snapshots are immutable.
+
+`RunPersistentNativeArms[plan, anchor, arms, epsilon, checkpointRoot,
+refinement, certifyTail]` performs the complete pair in one schema-2 call.
+Each `arms["lower"|"upper"]` record contains `receiving_basis` and
+`integrand_rows`; there is one basis-handle set per match and one prepared
+rational row per tile.  The backend derives live match windows and, for an
+ordinary Acb basis, evaluates the actual basis at each match and certifies
+identity saturation from exact-zero negative powers plus a full-rank
+epsilon-zero leading frame.  The epsilon contract keeps
+`match_required_complete_max` as the source/match halo while
+`required_complete_max` is the projected-line/public target; the former must
+be at least the latter.  It keeps row locals and intermediate hops
+hidden, aggregates every tile natively, and atomically returns the two final
+locals plus lower, upper, and combined line-result handles.  No coefficient
+slab is returned before an explicit final `ExportPersistentLineIntegral`.
+
 ## Current scope and limitations
 
-- This is a recurrence-kernel port, not yet a C++ port of segmentation,
-  matching, transport, regularized integration, FIRE, or FeynmanTrick.
+- The production path is still primarily a recurrence-kernel port.  Exact and
+  Acb retained matching, endpoint limits, and retained exact tile/line seams
+  now exist, but automatic match-to-next-chart orchestration, whole-arm result
+  aggregation with propagated tail certificates, FIRE, and FeynmanTrick are
+  not yet wholly native.
 - Symbolic regulator coefficients must be exact rational functions over
   `Q`. Algebraic functions, transcendental dependence, symbolic complex
   coefficients, and mixed inexact symbolic expressions are rejected.

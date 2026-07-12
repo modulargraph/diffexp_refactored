@@ -35,6 +35,7 @@ class Rational {
   }
 
   [[nodiscard]] bool is_zero() const { return fmpq_is_zero(value_); }
+  [[nodiscard]] int sign() const { return fmpq_sgn(value_); }
   [[nodiscard]] std::string str() const {
     char* raw = fmpq_get_str(nullptr, 10, value_);
     if (raw == nullptr) throw std::bad_alloc();
@@ -84,6 +85,18 @@ class Rational {
   friend bool operator==(const Rational& a, const Rational& b) {
     return fmpq_equal(a.value_, b.value_);
   }
+  friend bool operator<(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) < 0;
+  }
+  friend bool operator<=(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) <= 0;
+  }
+  friend bool operator>(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) > 0;
+  }
+  friend bool operator>=(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) >= 0;
+  }
 
  private:
   fmpq_t value_;
@@ -94,6 +107,10 @@ class SymbolicRational {
   static void configure(const std::vector<std::string>& variables) {
     auto& holder = context_holder();
     if (holder.initialized && holder.names == variables) return;
+    if (holder.initialized && holder.live_objects != 0) {
+      throw std::logic_error(
+          "cannot change symbolic coefficient field while values are alive");
+    }
     if (holder.initialized) fmpz_mpoly_ctx_clear(holder.context);
     holder.names = variables;
     holder.c_names.clear();
@@ -107,6 +124,7 @@ class SymbolicRational {
   SymbolicRational() {
     ensure_context();
     fmpz_mpoly_q_init(value_, context_holder().context);
+    ++context_holder().live_objects;
   }
   explicit SymbolicRational(long value) : SymbolicRational() {
     fmpz_mpoly_q_set_si(value_, value, context_holder().context);
@@ -127,6 +145,7 @@ class SymbolicRational {
   }
   ~SymbolicRational() {
     fmpz_mpoly_q_clear(value_, context_holder().context);
+    --context_holder().live_objects;
   }
 
   SymbolicRational& operator=(SymbolicRational other) noexcept {
@@ -198,6 +217,7 @@ class SymbolicRational {
   struct ContextHolder {
     fmpz_mpoly_ctx_t context;
     bool initialized = false;
+    std::size_t live_objects = 0;
     std::vector<std::string> names;
     std::vector<const char*> c_names;
     ~ContextHolder() {

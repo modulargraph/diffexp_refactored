@@ -16,6 +16,23 @@ plan = FeynmanTrick`PipelinePlan["bubble",
   "CppThreads" -> 6,
   "FIREPath" -> FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}],
   "LevelEpsilonHalos" -> {0, 4}];
+minusPlan = FeynmanTrick`PipelinePlan["bubble",
+  "DeltaPrescriptionSign" -> -1];
+invalidSignPlan = FeynmanTrick`PipelinePlan["bubble",
+  "DeltaPrescriptionSign" -> 0];
+migrationPlan = FeynmanTrick`PipelinePlan["bubble",
+  "MigrateLegacyPreparation" -> True];
+
+SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "+1"];
+plusRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "-1"];
+minusRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "0"];
+invalidRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> None];
 
 rootFacadeDefinitions = DownValues[FeynmanTrick`PipelinePlan];
 Get[FileNameJoin[{repoRoot, "FeynmanTrick.m"}]];
@@ -50,6 +67,26 @@ assert["pipeline plan schema",
 assert["C++ recurrence is the facade default",
   plan["Settings", "RecurrenceBackend"] === "Cpp" &&
   plan["Environment", "DE2_RECURRENCE_BACKEND"] === "Cpp"];
+assert["delta prescription sign defaults to deterministic +1",
+  plan["Settings", "DeltaPrescriptionSign"] === 1 &&
+    plan["Environment", "FT_DELTA_PRESCRIPTION_SIGN"] === "1" &&
+    AssociationQ[plusRunnerSettings] &&
+    plusRunnerSettings["DeltaPrescriptionSign"] === 1];
+assert["delta prescription sign carries strict -1 through plan and runner",
+  AssociationQ[minusPlan] &&
+    minusPlan["Settings", "DeltaPrescriptionSign"] === -1 &&
+    minusPlan["Environment", "FT_DELTA_PRESCRIPTION_SIGN"] === "-1" &&
+    AssociationQ[minusRunnerSettings] &&
+    minusRunnerSettings["DeltaPrescriptionSign"] === -1 &&
+    minusPlan["Settings"] =!= plan["Settings"] &&
+    minusPlan["Environment"] =!= plan["Environment"]];
+assert["delta prescription sign rejects zero in both public seams",
+  FailureQ[invalidSignPlan] && FailureQ[invalidRunnerSettings]];
+assert["legacy preparation migration is explicit in plan and environment",
+  AssociationQ[migrationPlan] &&
+    TrueQ[migrationPlan["Settings", "MigrateLegacyPreparation"]] &&
+    migrationPlan["Environment", "FT_MIGRATE_LEGACY_PREP"] === "1" &&
+    plan["Environment", "FT_MIGRATE_LEGACY_PREP"] === "0"];
 assert["fast transport settings are explicit",
   plan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
     plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&

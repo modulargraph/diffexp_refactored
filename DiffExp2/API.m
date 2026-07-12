@@ -4,7 +4,8 @@
 BeginPackage["DiffExp2`API`",
   {"DiffExp2`Tolerances`", "DiffExp2`Config`", "DiffExp2`EpsSeries`",
    "DiffExp2`SectorSeries`", "DiffExp2`Indicial`", "DiffExp2`Solve`",
-   "DiffExp2`Transport`", "DiffExp2`Integrate`"}];
+   "DiffExp2`Transport`", "DiffExp2`NativeTransport`",
+   "DiffExp2`Integrate`"}];
 
 LoadSystem::usage = "LoadSystem[spec] loads an exact eps-rational system: <|\"Matrix\" -> m, \"Variable\" -> x|> (closed form), or <|\"FullMatrixFile\" -> path, \"Variable\" -> x|> (the d<var>_full.m exact export). Returns the unchanged exact Matrix with SingularFactors (the epsilon-zero planner alphabet) and SingularFactorsExact (the full epsilon-dependent denominator factors).";
 TransportEndpoint::usage = "TransportEndpoint[sys, bvals, from, to, opts] transports plain boundary values from a regular anchor to `to` (singular endpoints return the LocalSolution). Options: \"ExtraSingularFactors\".";
@@ -137,18 +138,78 @@ halfRadiusTiles[kept_List, lo_, hi_] := Module[
     {i, Length[cs]}];
   Table[{ordered[[i]], bps[[i]], bps[[i + 1]]}, {i, Length[cs]}]];
 
+nativeExactRationalPolynomialQ[poly_, vars_List] := Module[{rules},
+  If[!PolynomialQ[poly, vars], Return[False, Module]];
+  rules = CoefficientRules[Expand[poly], vars];
+  AllTrue[Last /@ rules, IntegerQ[#] || Head[#] === Rational &]];
+
+nativeExactRationalFunctionQ[expression_, var_Symbol] := Module[
+  {canonical = Together[expression],
+   eps = DiffExp2`Config`CanonicalEps[],
+   numerator, denominator},
+  If[!FreeQ[canonical, _?InexactNumberQ], Return[False, Module]];
+  numerator = Numerator[canonical];
+  denominator = Denominator[canonical];
+  nativeExactRationalPolynomialQ[numerator, {var, eps}] &&
+    nativeExactRationalPolynomialQ[denominator, {var, eps}]];
+
+(* Native selection is intentionally a one-way boundary.  Unsupported
+   public features retain the established orchestration, but after this
+   record says PersistentNative no error is caught and no alternate solve is
+   attempted.  In particular a recurrence/match/certification failure can
+   never be disguised as a successful legacy result. *)
+lineIntegralDispatchDecision[sys_Association, cvec_List, from_, {lo_, hi_},
+    precomputed_] := Module[{legacy, lower, upper, exactRationalQ},
+  legacy[reason_String] := <|
+    "Mode" -> "EstablishedOrchestration", "Reason" -> reason|>;
+  exactRationalQ[value_] := IntegerQ[value] || Head[value] === Rational;
+  Which[
+    cfg["RecurrenceBackend"] =!= "Cpp",
+      legacy["RecurrenceBackendNotCpp"],
+    precomputed =!= None,
+      legacy["PrecomputedChartsOwnTheIntegrationChain"],
+    !AllTrue[{lo, from, hi}, exactRationalQ],
+      legacy["NonRationalLineGeometry"],
+    !TrueQ[lo < from < hi],
+      legacy["AnchorNotStrictlyInterior"],
+    !AllTrue[cvec, nativeExactRationalFunctionQ[#, sys["Variable"]] &],
+      legacy["IntegrandOutsideExactRationalNativeProtocol"],
+    True,
+      lower = DiffExp2`Transport`SegmentLine[sys, {from, lo}];
+      upper = DiffExp2`Transport`SegmentLine[sys, {from, hi}];
+      If[TrueQ[
+          DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
+            lower, upper]],
+        <|"Mode" -> "PersistentNative", "LowerPlan" -> lower,
+          "UpperPlan" -> upper|>,
+        legacy["ArmPlansOutsideRegularRationalNativeProtocol"]]]];
+
 Options[LineIntegral] = {"ExtraSingularFactors" -> {},
   "PrecomputedCharts" -> None};
 LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     OptionsPattern[]] := Module[
   {sys2, var = sys["Variable"], res, tiles, total = None,
-   planLo, planHi, keptAll},
+   planLo, planHi, keptAll, dispatch, native},
   If[Length[cvec] =!= Length[sys["Matrix"]],
     err["E9", <|"Detail" -> "line-integral coefficient vector has the wrong dimension",
       "Coefficients" -> Length[cvec], "SystemSize" -> Length[sys["Matrix"]]|>]];
   sys2 = Join[sys, <|"ExtraSingularFactors" ->
     Select[OptionValue["ExtraSingularFactors"], !FreeQ[#, var] &]|>];
   keptAll = OptionValue["PrecomputedCharts"];
+  dispatch = lineIntegralDispatchDecision[sys2, cvec, from, {lo, hi},
+    keptAll];
+  If[Lookup[dispatch, "Mode", None] === "PersistentNative",
+    native = DiffExp2`NativeTransport`NativeRegularLineIntegral[
+      sys2, bvals, from, {lo, hi}, cvec,
+      "ArmPlans" -> {dispatch["LowerPlan"], dispatch["UpperPlan"]},
+      "RetainNativeState" -> False];
+    If[!AssociationQ[native] ||
+        Lookup[native, "Type", None] =!=
+          "DiffExp2NativeRegularLineIntegral" ||
+        !esQ[Lookup[native, "Value", None]],
+      err["E5", <|"NativeResult" -> native,
+        "Detail" -> "selected persistent native line integration returned a malformed compatibility result"|>]];
+    Return[native["Value"], Module]];
   If[keptAll === None,
   (* transport BOTH ways from the anchor to cover [lo, hi] *)
   keptAll = {};

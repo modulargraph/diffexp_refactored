@@ -1,11 +1,14 @@
-(* Focused tests for the stepwise runner's resumable endpoint-arm snapshots.
-   The runner is loaded definition-only: no FIRE preparation or transport is
-   performed here. *)
+(* Focused tests for the stepwise runner's legacy Wolfram endpoint-arm
+   snapshots.  Completed retained-native checkpoint/restore is covered by
+   test_ft_native_checkpoint_resume.m.  The runner is loaded definition-only:
+   no FIRE preparation or transport is performed here. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
 
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> "1"];
+(* Legacy partial-arm snapshots are an explicit Wolfram-backend feature. *)
+SetEnvironment["DE2_RECURRENCE_BACKEND" -> "Wolfram"];
 tmpDir = CreateDirectory[FileNameJoin[{$TemporaryDirectory,
   "DiffExp2_ft_checkpoint_test_" <> ToString[$ProcessID]}]];
 SetEnvironment["FT_LADDER_CHECKPOINT_DIR" -> tmpDir];
@@ -33,40 +36,24 @@ test["lower arm is saved before upper transport starts",
 test["resume computes only missing endpoint arms",
   StringContainsQ[runnerSource, "needLo && !AssociationQ[trLoCache]"] &&
     StringContainsQ[runnerSource, "needHi && !AssociationQ[trHiCache]"]];
-test["one-kernel C++ arm batching requires both missing arms",
-  StringContainsQ[runnerSource,
-    "needLo && needHi && !AssociationQ[trLoCache] &&"] &&
-    StringContainsQ[runnerSource,
-      "!AssociationQ[trHiCache]"] &&
-    StringContainsQ[runnerSource,
-      "DiffExp2`Solve`PrewarmHomogeneousBatch[roundSystems, armReq]"]];
-test["arm batching only fills genuinely idle native workers",
-  StringContainsQ[runnerSource,
-    "Length[A] < cppArmThreadBudget"] &&
-    StringContainsQ[runnerSource,
-      "Length[roundSystems] === 2"] &&
-    StringContainsQ[runnerSource,
-      "roundSystems[[1]] =!= roundSystems[[2]]"]];
-test["arm batching preflights the complete bounded cache",
-  StringContainsQ[runnerSource,
-    "DiffExp2`Solve`HomogeneousCacheCapacity[]"] &&
-    StringContainsQ[runnerSource,
-      "Length[armUniqueCharts] > armCacheCapacity"] &&
-    StringContainsQ[runnerSource,
-      "FTLADDER CPP ARM BATCH SKIP"]];
-test["arm batching opens no Wolfram subkernels",
+test["runner opens no Wolfram subkernels",
   And @@ (!StringContainsQ[runnerSource, #] & /@
     {"ParallelSubmit", "ParallelMap", "LaunchKernels", "ParallelNeeds"})];
-test["native arm prewarm does not replace synchronous arm checkpoints",
+test["retained native branch uses the observable batch dispatcher",
   StringContainsQ[runnerSource,
-    "This prewarm is pure cache state: it never marks an arm complete."] &&
+    "nativeDispatch = ft2RunNativeBoundaryDispatch["] &&
+    StringContainsQ[runnerSource,
+      "rawES = nativeDispatch[\"Values\"]"]];
+test["legacy synchronous arm checkpoints remain in the Wolfram branch",
+  StringContainsQ[runnerSource,
+    "This write must finish before the expensive upper solve starts."] &&
     StringContainsQ[runnerSource,
       "saveTransportProgress[]];\n    If[needHi"]];
 test["checkpoint replacement requests atomic overwrite",
   StringContainsQ[runnerSource,
     "RenameFile[tmp, file, OverwriteTarget -> True]"]];
 test["prepared snapshot schema invalidates legacy reduction keys",
-  $ftPrepCacheVersion === 2, $ftPrepCacheVersion];
+  $ftPrepCacheVersion === 3, $ftPrepCacheVersion];
 test["epsilon-basis transport bumps the checkpoint schema",
   $ftLadderCheckpointVersion === 2, $ftLadderCheckpointVersion];
 
@@ -175,23 +162,29 @@ test["runner projects extra factors before constructing delta prescriptions",
     AllTrue[projectedRunnerPrescriptions, FreeQ[First[#], chainEps] &],
   projectedRunnerPrescriptions];
 
-cacheTopology = FeynmanTrick`FIREInterface`DefineTopology[
+cacheInputTopology = FeynmanTrick`FIREInterface`DefineTopology[
   "snapshot-key", {Global`l1}, {},
   {1 - Global`l1^2, 2 - Global`l1^2}, {}];
+cacheTopology = cacheInputTopology;
 cacheTopology["WorkDirectory"] = tmpDir;
 cacheTopology["ProblemNumber"] = 41;
 cacheTopology["StartFileReady"] = True;
-cacheTopology["SetupFingerprintRecord"] = <|
+cacheRuntime =
+  FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[];
+cacheTopology["SetupFingerprintRecord"] = Join[<|
   "Schema" -> "FeynmanTrick.FIRESetup/v1",
   "StartFileSHA256" -> "snapshot-start",
-  "Restrictions" -> {{-1, -1}}|>;
+  "Restrictions" -> {{-1, -1}},
+  "AutoDetectRestrictions" ->
+    FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"]|>, cacheRuntime];
 oldAutoDetectRestrictions =
   FeynmanTrick`Private`$FTConfig["AutoDetectRestrictions"];
-prepIdentityKey = ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}];
+prepIdentityKey = ftPrepKey[
+  "snapshot-key", cacheInputTopology, {{1, 2}}];
 FeynmanTrick`SetFTOption[
   "AutoDetectRestrictions", !TrueQ[oldAutoDetectRestrictions]];
 prepChangedOptionKey = ftPrepKey[
-  "snapshot-key", cacheTopology, {{1, 2}}];
+  "snapshot-key", cacheInputTopology, {{1, 2}}];
 FeynmanTrick`SetFTOption[
   "AutoDetectRestrictions", oldAutoDetectRestrictions];
 test["prepared snapshot key covers setup-affecting FIRE options",
@@ -201,15 +194,18 @@ prepRuntimeA = Block[{
     FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},
   FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[] :=
     <|"Runtime" -> "A"|>;
-  ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}]];
+  ftPrepKey["snapshot-key", cacheInputTopology, {{1, 2}}]];
 prepRuntimeB = Block[{
     FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},
   FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[] :=
     <|"Runtime" -> "B"|>;
-  ftPrepKey["snapshot-key", cacheTopology, {{1, 2}}]];
+  ftPrepKey["snapshot-key", cacheInputTopology, {{1, 2}}]];
 test["prepared snapshot key covers FIRE runtime identity",
   prepRuntimeA =!= prepRuntimeB, {prepRuntimeA, prepRuntimeB}];
-cacheData = <|"NumLevels" -> 1, "Levels" -> <|
+cacheData = <|"TopTopology" -> cacheInputTopology,
+  "CombinationSequence" -> {{1, 2}}, "NumericalPoint" -> {},
+  "FixedParamValue" -> FeynmanTrick`Private`$FTConfig["FixedParameterValue"],
+  "NumLevels" -> 1, "Levels" -> <|
   0 -> <|"Masters" -> {{1, 1}}|>,
   1 -> <|"Masters" -> {{2, 0}}, "CombinedPositions" -> {1, 2},
     "Topology" -> cacheTopology, "Computed" -> True,
@@ -225,10 +221,12 @@ oldReductionCache = FeynmanTrick`FIREInterface`Private`$ReductionCache;
 FeynmanTrick`FIREInterface`Private`$ReductionCache = Association[
   cacheExpectedKey -> <|"Reduction" -> 1, "Masters" -> {{2, 0}}|>];
 prepSnapshotFile = FileNameJoin[{tmpDir, "hardened-prep.mx"}];
+prepSnapshotContract = ftPrepContractRecord[
+  "snapshot-key", cacheInputTopology, {{1, 2}}];
 prepSnapshotWrite = savePreparedFT[
-  prepSnapshotFile, 24680, cacheData];
+  prepSnapshotFile, prepSnapshotContract, cacheData];
 FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
-prepSnapshotLoad = loadPreparedFT[prepSnapshotFile, 24680];
+prepSnapshotLoad = loadPreparedFT[prepSnapshotFile, prepSnapshotContract];
 test["hardened reduction keys survive prepared snapshot round-trip",
   prepSnapshotWrite === prepSnapshotFile &&
     AssociationQ[prepSnapshotLoad] &&
@@ -310,6 +308,9 @@ loaded = loadLadderCheckpoint[file, name, data, prepKey];
 test["completed two-arm checkpoint remains resumable",
   AssociationQ[loaded] && AssociationQ[loaded["TransportLow"]] &&
     AssociationQ[loaded["TransportHigh"]], loaded];
+test["native backend rejects legacy partial-arm transport snapshots",
+  Block[{recurrenceBackend = "Cpp"},
+    loadLadderCheckpoint[file, name, data, prepKey] === $Failed]];
 
 badArmsFile = FileNameJoin[{tmpDir, "bad-arms.mx"}];
 saveLadderCheckpoint[badArmsFile, Join[basePayload, <|
@@ -427,6 +428,7 @@ SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> None];
 SetEnvironment["FT_LADDER_CHECKPOINT_DIR" -> None];
 SetEnvironment["FT_RESUME_LADDER_CHECKPOINT" -> None];
 SetEnvironment["FT_ALLOW_STALE_LADDER_CHECKPOINT" -> None];
+SetEnvironment["DE2_RECURRENCE_BACKEND" -> None];
 
 Print["\n", passes, " passed, ", failures, " failed."];
 If[failures > 0, Quit[1], Quit[0]];

@@ -154,9 +154,33 @@ incomplete handoff rather than assuming the missing coefficients vanish.
 ## Preparation cache and ladder checkpoints
 
 `FT_PREP_CACHE_DIR` stores completed Feynman-trick/FIRE preparation and the
-reduction cache.  Its key covers the topology, combination sequence,
-dimension, and FeynmanTrick sources.  Solver or runner changes intentionally do
-not force FIRE to rerun.
+reduction cache.  Its v3 contract records the exact topology, combination
+sequence, dimension, preparation-affecting configuration, Wolfram/FIRE
+runtime, and repository-relative hashes of the three preparation modules:
+`PropagatorAlgebra.m`, `FIREInterface.m`, and `FeynmanTrickIteration.m`.
+`FeynmanTrick.m` configuration semantics are represented by their evaluated
+contract values; `MatrixExport.m` writes artifacts only; and
+`LevelReduction.m` derives transport-time requests whose exact hardened
+reduction keys are revalidated on every load.  Consequently facade, runner,
+boundary, LevelReduction, DiffExp2 solver, and transport-only changes do not
+force FIRE to rerun.  A snapshot stores and exactly rechecks the full contract
+and all required reduction keys, rather than trusting its digest alone.
+
+Legacy v1/v2 snapshots are rejected by default because they do not contain
+that source contract.  A one-time migration can be requested explicitly with
+`FT_MIGRATE_LEGACY_PREP=1` (or the facade option
+`"MigrateLegacyPreparation" -> True`).  Migration succeeds only when exactly
+one candidate passes the current topology, sequence, configuration,
+prepared-level, and reduction-key checks; otherwise it rejects the snapshot
+and preparation runs normally.  V2 must additionally carry FIRE setup records
+matching the current runtime.  V1 predates those records and hardened keys: its
+old tuple keys must identify exactly one retained level topology, are
+normalized and re-keyed with the full current fallback topology/configuration
+record, and must cover every current boundary request without a nonidentical
+collision.  The migrated v3 snapshot records that its historical FIRE setup
+and source provenance remain unverified.  Exact re-keyed cache hits never
+launch FIRE; any future missing reduction is still rejected because no
+verified setup record was fabricated.
 
 `FT_LADDER_CHECKPOINT_DIR` stores two kinds of checkpoint:
 
@@ -195,14 +219,19 @@ transport and arm batching does not imply that homogeneous prewarming runs.
 The runner prints machine-readable records:
 
 ```text
-STEPWISE {"Example":...,"Level":...,"Master":...,"RawMinPower":...,"Coefficients":...}
-FINAL {"Example":...,"Finite":...,"RawMinPower":...}
+STEPWISE {"Example":...,"Level":...,"Master":...,"RawMinPower":...,"Coefficients":...,"Certification":...}
+FINAL {"Example":...,"Finite":...,"RawMinPower":...,"Certification":...}
 ```
 
 Use the `STEPWISE` rows for Laurent coefficients and intermediate-level
 audits.  Historical logs used `"Finite"` inconsistently when a result had
 poles; [Results](Results.md) reports coefficients explicitly and does not rely
-on that label alone.
+on that label alone.  Native integral rows carry the exported `Scope`,
+`ErrorGuarantee`, and `ErrorEnvelope`; a `stored_truncation` scope is reported
+honestly with no guarantee and is not a run failure.  Endpoint limits, direct
+handoffs, proved-zero observables, and the initial deepest boundary instead
+carry an explicit `"Applicability":"not-applicable"` record.  The terminal
+`FINAL` row repeats the certification of its corresponding level-zero master.
 
 ## Adding a topology today
 

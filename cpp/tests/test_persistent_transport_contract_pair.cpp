@@ -1,0 +1,515 @@
+#include "diffexp2/checkpoint.hpp"
+#include "diffexp2/json_codec.hpp"
+
+#include <boost/json.hpp>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace json = boost::json;
+
+namespace {
+
+json::object request(json::object value) {
+  return json::parse(diffexp2::run_recurrence_json(json::serialize(value)))
+      .as_object();
+}
+
+std::uint64_t counter(const json::object& object, const char* key) {
+  const auto& value = object.at(key);
+  if (value.is_uint64()) return value.as_uint64();
+  if (value.is_int64() && value.as_int64() >= 0)
+    return static_cast<std::uint64_t>(value.as_int64());
+  throw std::runtime_error(std::string("invalid counter: ") + key);
+}
+
+json::array prescriptions() {
+  return json::array{json::object{
+      {"factor_exact", "t"}, {"sign", -1}, {"multiplicity", 1},
+      {"leading_coefficient_sign", 1}}};
+}
+
+std::string prepare_anchor_chart(const std::string& session) {
+  auto value = json::parse(R"json({
+    "schema":2,"op":"chart.prepare","session":"placeholder",
+    "key":"pair-anchor-chart","identity":"pair-anchor-operator",
+    "analytic":{
+      "geometry":{"center_exact":"0","scale_exact":"1",
+        "radius_exact":"2","infinite_radius":false,
+        "prescriptions":[{"factor_exact":"t","sign":-1,
+          "multiplicity":1,"leading_coefficient_sign":1}]},
+      "principal_matrix":[[{"exact":"0","proven_zero":true}]],
+      "native_scc_capabilities":{"regular":true,"identity_gauge":true,
+        "identity_v":true,"no_pseudo":true}},
+    "scc":{"components":[[0]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0],
+      "coupling_depth":0},
+    "problem":{"domain":"rational","d":1,"fb":0,"w":3,
+      "d_lags":[[{"s":0,"v":"1"}]],"denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],"val":[null]}],
+      "d0_inverse":"1","blocks":[[0]],
+      "assembly":{"identity":true,"poly":[],"rat":[],"val":[0]},
+      "chop_digits":0}
+  })json").as_object();
+  value["session"] = session;
+  const auto prepared = request(std::move(value));
+  if (prepared.at("status") != "ok")
+    throw std::runtime_error("chart.prepare: " + json::serialize(prepared));
+  return std::string(prepared.at("chart").as_string());
+}
+
+std::string solve_anchor(const std::string& session,
+                         const std::string& chart) {
+  auto value = json::parse(R"json({
+    "schema":2,"op":"local.solve","session":"placeholder",
+    "chart":"placeholder",
+    "run":{"nmax":0,"p":0,"has_initial":true,
+      "adaptive_probe":false,"a_target":"0","b_target":"0",
+      "a_shift_min":0,"a_shifts":["0"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}]],
+      "initial":["1","0","0"],"initial_validity":[2],
+      "source":null,"return_u":false},
+    "metadata":{"chart":{"center_exact":"0","scale_exact":"1",
+        "radius":"2","infinite_radius":false},
+      "tag":{"a":{"domain":"rational","canonical":"0"},
+        "b":{"domain":"rational","canonical":"0"}},
+      "prescriptions":[{"factor_exact":"t","sign":-1,
+        "multiplicity":1,"leading_coefficient_sign":1}],
+      "checkpoint_identity":"pair-common-anchor"}
+  })json").as_object();
+  value["session"] = session;
+  value["chart"] = chart;
+  const auto solved = request(std::move(value));
+  if (solved.at("status") != "ok")
+    throw std::runtime_error("local.solve: " + json::serialize(solved));
+  return std::string(solved.at("local").as_string());
+}
+
+json::object topology() {
+  return json::object{
+      {"singular_points", json::array{}},
+      {"boundary_points", json::array{}},
+      {"complex_projections", json::array{}},
+      {"branch_sheets", json::array{
+           json::object{{"factor_exact", "t"}, {"sign", -1}}}}};
+}
+
+json::object one_chart_arm(const std::string& endpoint,
+                           const std::string& chart) {
+  return json::object{
+      {"from_exact", "0"}, {"to_exact", endpoint},
+      {"charts", json::array{chart}}, {"topology", topology()}};
+}
+
+json::object prepare_plan(const std::string& session,
+                          const std::string& checkpoint,
+                          const std::string& endpoint,
+                          const std::string& chart) {
+  return request(json::object{
+      {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+      {"checkpoint_identity", checkpoint}, {"division_order", 3},
+      {"arm", one_chart_arm(endpoint, chart)}});
+}
+
+json::object run_state(const std::string& session,
+                       const json::object& plan,
+                       const std::string& plan_checkpoint,
+                       const std::string& anchor,
+                       const std::string& arm,
+                       const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.run_arm"},
+      {"session", session},
+      {"tile_plan", plan.at("tile_plan")}, {"anchor", anchor},
+      {"tile_plan_checkpoint_identity", plan_checkpoint},
+      {"anchor_checkpoint_identity", "pair-common-anchor"},
+      {"arm", arm}, {"receiving_basis", json::array{}},
+      {"epsilon", json::object{
+           {"min", 0}, {"max", 2}, {"required_complete_max", 0},
+           {"match_required_complete_max", 2}}},
+      {"refinement", json::object{
+           {"relative_tolerance", "1e-30"}, {"max_steps", 0}}},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", checkpoint_root}}}});
+}
+
+json::object multiplier(const std::string& identity) {
+  return json::object{
+      {"epsilon_shift", 0}, {"center_pole_order", 0},
+      {"kernels", json::array{
+           json::array{"1"}, json::array{"0"}, json::array{"0"}}},
+      {"exact_identity", identity}, {"proven_zero", false}};
+}
+
+json::object row(const std::string& identity, bool malformed = false) {
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", malformed ? 2 : 1}, {"exact_identity", identity},
+      {"entries", json::array{json::object{
+           {"column", 0}, {"multiplier", multiplier(identity)}}}}};
+}
+
+json::object observable(const std::string& identity,
+                        const std::string& checkpoint,
+                        const std::string& tail = "stored",
+                        bool malformed_upper = false) {
+  return json::object{
+      {"identity", identity}, {"checkpoint_identity", checkpoint},
+      {"lower_integrand_rows", json::array{row(identity + ":lower")}},
+      {"upper_integrand_rows",
+       json::array{row(identity + ":upper", malformed_upper)}},
+      {"epsilon", json::object{
+           {"min", 0}, {"max", 0}, {"required_complete_max", 0}}},
+      {"tail_policy", tail}};
+}
+
+json::object state_reference(const json::object& state) {
+  return json::object{
+      {"transport_state", state.at("transport_state")},
+      {"checkpoint_identity", state.at("checkpoint_identity")},
+      {"provenance_identity", state.at("provenance_identity")}};
+}
+
+json::object contract_pair(const std::string& session,
+                           const json::object& lower,
+                           const json::object& upper,
+                           json::array observables,
+                           const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.contract_pair"},
+      {"session", session}, {"lower", state_reference(lower)},
+      {"upper", state_reference(upper)},
+      {"checkpoint_policy", json::object{
+           {"schema",
+            "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+           {"root", checkpoint_root}}},
+      {"observables", std::move(observables)}});
+}
+
+json::object session_stats(const std::string& session) {
+  return request(json::object{{"schema", 2}, {"op", "session.stats"},
+                              {"session", session}});
+}
+
+json::object state_stats(const std::string& session,
+                         const json::object& state) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+      {"transport_state", state.at("transport_state")}});
+}
+
+json::object export_line(const std::string& session,
+                         const json::object& line) {
+  return request(json::object{
+      {"schema", 2}, {"op", "integration.export"},
+      {"session", session}, {"line", line.at("line")},
+      {"checkpoint_identity", line.at("checkpoint_identity")},
+      {"output_digits", 50}});
+}
+
+double midpoint(const json::object& exported) {
+  const auto& coefficient = exported.at("value").as_object()
+      .at("coefficients").as_array().front().as_array();
+  return std::stod(std::string(coefficient.front().as_string()));
+}
+
+bool payload_has_handle(const json::array& records,
+                        const std::string& handle) {
+  for (const auto& raw : records)
+    if (raw.as_object().at("handle").as_string() == handle) return true;
+  return false;
+}
+
+}  // namespace
+
+int main() {
+  const std::string checkpoint =
+      "/tmp/diffexp2-transport-contract-pair.de2cp";
+  const std::string checkpoint_second =
+      "/tmp/diffexp2-transport-contract-pair-second.de2cp";
+  std::remove(checkpoint.c_str());
+  std::remove(checkpoint_second.c_str());
+  std::string session;
+  std::string restored_session;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "rational"}, {"output_digits", 50},
+        {"chart_capacity", 2}, {"local_capacity", 4},
+        {"match_capacity", 2}, {"tile_plan_capacity", 2},
+        {"transport_state_capacity", 2}, {"line_result_capacity", 8}});
+    session = std::string(created.at("session").as_string());
+    const auto chart = prepare_anchor_chart(session);
+    const auto anchor = solve_anchor(session, chart);
+    const auto lower_plan = prepare_plan(
+        session, "pair-lower-plan", "-1/3", chart);
+    const auto upper_plan = prepare_plan(
+        session, "pair-upper-plan", "1/2", chart);
+    if (lower_plan.at("status") != "ok" ||
+        upper_plan.at("status") != "ok" ||
+        lower_plan.at("tile_plan") == upper_plan.at("tile_plan") ||
+        lower_plan.at("arm_name") != "lower" ||
+        upper_plan.at("arm_name") != "upper")
+      throw std::runtime_error(
+          "independent single-arm plans were not retained exactly");
+    const auto lower = run_state(
+        session, lower_plan, "pair-lower-plan", anchor, "lower",
+        "pair-lower-state");
+    const auto upper = run_state(
+        session, upper_plan, "pair-upper-plan", anchor, "upper",
+        "pair-upper-state");
+    if (lower.at("status") != "ok" || upper.at("status") != "ok" ||
+        lower.at("tiles") != 1 || upper.at("tiles") != 1)
+      throw std::runtime_error(
+          "paired retained states were not prepared: " +
+          json::serialize(lower) + " / " + json::serialize(upper));
+
+    const auto before = session_stats(session);
+    const auto zero = contract_pair(
+        session, lower, upper, json::array{}, "pair-zero");
+    const auto after_zero = session_stats(session);
+    const auto lower_after_zero = state_stats(session, lower);
+    const auto upper_after_zero = state_stats(session, upper);
+    if (zero.at("status") != "ok" || zero.at("observables") != 0 ||
+        !zero.at("lines").as_array().empty() ||
+        zero.at("max_parallel_arms") != 0 ||
+        before.at("line_results") != after_zero.at("line_results") ||
+        before.at("line_integrations") != after_zero.at("line_integrations") ||
+        before.at("locals") != after_zero.at("locals") ||
+        before.at("matches") != after_zero.at("matches") ||
+        counter(after_zero, "transport_contractions") !=
+            counter(before, "transport_contractions") + 2 ||
+        counter(after_zero, "transport_pair_contractions") !=
+            counter(before, "transport_pair_contractions") + 1 ||
+        counter(lower_after_zero, "contraction_operations") != 1 ||
+        counter(upper_after_zero, "contraction_operations") != 1)
+      throw std::runtime_error(
+          "zero-observable pair contraction changed allocation or counters incorrectly");
+
+    const auto one = contract_pair(
+        session, lower, upper,
+        json::array{observable("pair-one", "pair-one-checkpoint")},
+        "pair-one-root");
+    if (one.at("status") != "ok" || one.at("observables") != 1 ||
+        one.at("lines").as_array().size() != 1 ||
+        one.at("combination") != "negative-lower-plus-upper" ||
+        one.at("max_parallel_arms") != 2 ||
+        one.at("no_remarching") != true || one.at("no_rematching") != true)
+      throw std::runtime_error(
+          "one-observable pair contraction failed: " + json::serialize(one));
+    const auto one_export = export_line(
+        session, one.at("lines").as_array().front().as_object());
+    if (one_export.at("status") != "ok" ||
+        std::abs(midpoint(one_export) - 5.0 / 6.0) > 1e-40)
+      throw std::runtime_error(
+          "fixed -lower+upper value is incorrect: " +
+          json::serialize(one_export));
+
+    json::array many_observables;
+    for (int index = 0; index < 3; ++index)
+      many_observables.push_back(observable(
+          "pair-many-" + std::to_string(index),
+          "pair-many-checkpoint-" + std::to_string(index)));
+    const auto many = contract_pair(
+        session, lower, upper, std::move(many_observables),
+        "pair-many-root");
+    std::set<std::string> many_handles;
+    if (many.at("status") != "ok" ||
+        many.at("lines").as_array().size() != 3)
+      throw std::runtime_error(
+          "many-observable pair contraction failed: " +
+          json::serialize(many));
+    for (std::size_t index = 0; index < 3; ++index) {
+      const auto& line = many.at("lines").as_array()[index].as_object();
+      if (counter(line, "request_index") != index ||
+          std::string(line.at("observable_identity").as_string()) !=
+              "pair-many-" + std::to_string(index) ||
+          !many_handles.insert(std::string(line.at("line").as_string())).second)
+        throw std::runtime_error(
+            "many-observable pair order or handles changed");
+    }
+
+    const auto before_malformed = session_stats(session);
+    const auto lower_before_malformed = state_stats(session, lower);
+    const auto upper_before_malformed = state_stats(session, upper);
+    const auto malformed = contract_pair(
+        session, lower, upper,
+        json::array{
+            observable("pair-valid-prefix", "pair-valid-prefix-checkpoint"),
+            observable("pair-malformed", "pair-malformed-checkpoint",
+                       "stored", true)},
+        "pair-malformed-root");
+    const auto after_malformed = session_stats(session);
+    const auto lower_after_malformed = state_stats(session, lower);
+    const auto upper_after_malformed = state_stats(session, upper);
+    if (malformed.at("status") != "error" ||
+        before_malformed.at("line_results") !=
+            after_malformed.at("line_results") ||
+        before_malformed.at("line_integrations") !=
+            after_malformed.at("line_integrations") ||
+        before_malformed.at("transport_pair_contractions") !=
+            after_malformed.at("transport_pair_contractions") ||
+        lower_before_malformed.at("contraction_operations") !=
+            lower_after_malformed.at("contraction_operations") ||
+        upper_before_malformed.at("contraction_operations") !=
+            upper_after_malformed.at("contraction_operations") ||
+        after_malformed.at("pending_line_integrations") != 0)
+      throw std::runtime_error(
+          "malformed upper arm did not roll back atomically: " +
+          json::serialize(malformed));
+
+    const auto before_require = session_stats(session);
+    const auto require = contract_pair(
+        session, lower, upper,
+        json::array{observable("pair-require", "pair-require-checkpoint",
+                               "require")},
+        "pair-require-root");
+    const auto after_require = session_stats(session);
+    if (require.at("status") != "error" ||
+        before_require.at("line_results") != after_require.at("line_results") ||
+        before_require.at("line_integrations") !=
+            after_require.at("line_integrations") ||
+        before_require.at("transport_pair_contractions") !=
+            after_require.at("transport_pair_contractions") ||
+        after_require.at("pending_line_integrations") != 0)
+      throw std::runtime_error(
+          "required pair tail did not fail atomically: " +
+          json::serialize(require));
+
+    const auto after_success = session_stats(session);
+    const auto lower_after_success = state_stats(session, lower);
+    const auto upper_after_success = state_stats(session, upper);
+    if (counter(after_success, "transport_pair_contractions") != 3 ||
+        counter(after_success, "transport_pair_observables") != 4 ||
+        counter(after_success, "transport_contractions") != 6 ||
+        counter(after_success, "transport_observables") != 8 ||
+        counter(after_success, "line_integrations") != 8 ||
+        counter(lower_after_success, "contraction_operations") != 3 ||
+        counter(upper_after_success, "contraction_operations") != 3 ||
+        counter(lower_after_success, "contracted_observables") != 4 ||
+        counter(upper_after_success, "contracted_observables") != 4)
+      throw std::runtime_error(
+          "successful pair counters are not additive and honest");
+
+    std::vector<json::object> lines;
+    lines.push_back(one.at("lines").as_array().front().as_object());
+    for (const auto& raw : many.at("lines").as_array())
+      lines.push_back(raw.as_object());
+    const auto first_export_value = one_export.at("value");
+    for (const auto& state : {lower, upper})
+      if (request(json::object{
+              {"schema", 2}, {"op", "transport.release"},
+              {"session", session},
+              {"transport_state", state.at("transport_state")}})
+              .at("status") != "ok")
+        throw std::runtime_error("transport state release failed");
+    for (const auto& plan : {lower_plan, upper_plan})
+      if (request(json::object{
+              {"schema", 2}, {"op", "tile.release"},
+              {"session", session}, {"tile_plan", plan.at("tile_plan")}})
+              .at("status") != "ok")
+        throw std::runtime_error("tile plan release failed");
+    if (request(json::object{
+            {"schema", 2}, {"op", "local.release"},
+            {"session", session}, {"local", anchor}}).at("status") != "ok")
+      throw std::runtime_error("common anchor release failed");
+    for (const auto& line : lines)
+      if (export_line(session, line).at("status") != "ok")
+        throw std::runtime_error(
+            "paired line did not survive public owner release");
+
+    const auto saved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+        {"path", checkpoint}, {"checkpoint_identity", "pair-roundtrip"}});
+    if (saved.at("status") != "ok")
+      throw std::runtime_error("checkpoint.save: " + json::serialize(saved));
+    const auto container = diffexp2::checkpoint::read(checkpoint);
+    const auto payload = json::parse(container.payload_json).as_object();
+    if (payload.at("schema") != 8 ||
+        payload.at("retained_transport_states").as_array().size() != 2 ||
+        !payload_has_handle(payload.at("retained_transport_states").as_array(),
+                            std::string(lower.at("transport_state").as_string())) ||
+        !payload_has_handle(payload.at("retained_transport_states").as_array(),
+                            std::string(upper.at("transport_state").as_string())) ||
+        container.payload_json.find("private:") != std::string::npos)
+      throw std::runtime_error(
+          "paired checkpoint retained scratch objects or lost its two-state closure");
+    for (const auto& raw : payload.at("retained_line_results").as_array()) {
+      const auto& record = raw.as_object();
+      if (record.at("schema") !=
+              "diffexp2-retained-transport-pair-observable-line-v1" ||
+          record.at("provenance").as_object().at("aggregate").as_object()
+                  .if_contains("components") != nullptr)
+        throw std::runtime_error(
+            "paired checkpoint emitted a noncompact line record");
+    }
+
+    const auto restored = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint}, {"expected_identity", "pair-roundtrip"}});
+    restored_session = std::string(restored.at("session").as_string());
+    const auto restored_stats = session_stats(restored_session);
+    const auto restored_export = export_line(restored_session, lines.front());
+    if (restored.at("status") != "ok" ||
+        restored_stats.at("transport_states") != 0 ||
+        restored_stats.at("tile_plans") != 0 ||
+        restored_stats.at("locals") != 0 ||
+        restored_stats.at("line_results") != 4 ||
+        restored_export.at("value") != first_export_value)
+      throw std::runtime_error(
+          "first paired hidden-owner restore changed visibility or value");
+    const auto saved_second = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", restored_session}, {"path", checkpoint_second},
+        {"checkpoint_identity", "pair-roundtrip-second"}});
+    if (saved_second.at("status") != "ok")
+      throw std::runtime_error("second checkpoint save failed");
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", restored_session}});
+    restored_session.clear();
+    const auto restored_second = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint_second},
+        {"expected_identity", "pair-roundtrip-second"}});
+    restored_session =
+        std::string(restored_second.at("session").as_string());
+    const auto second_stats = session_stats(restored_session);
+    const auto second_export = export_line(restored_session, lines.front());
+    if (restored_second.at("status") != "ok" ||
+        second_stats.at("transport_states") != 0 ||
+        second_stats.at("tile_plans") != 0 ||
+        second_export.at("value") != first_export_value)
+      throw std::runtime_error(
+          "second paired hidden-owner restore changed visibility or value");
+
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", restored_session}});
+    restored_session.clear();
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", session}});
+    session.clear();
+    std::remove(checkpoint.c_str());
+    std::remove(checkpoint_second.c_str());
+    std::cout << "PASS: retained transport-pair contraction\n";
+    return EXIT_SUCCESS;
+  } catch (const std::exception& error) {
+    if (!restored_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored_session}});
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    std::remove(checkpoint.c_str());
+    std::remove(checkpoint_second.c_str());
+    std::cerr << "FAIL: retained transport-pair contraction: "
+              << error.what() << '\n';
+    return EXIT_FAILURE;
+  }
+}

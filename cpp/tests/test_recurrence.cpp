@@ -108,6 +108,73 @@ void test_lower_frame_guard() {
   check("negative epsilon shift underflow is loud", loud);
 }
 
+RecurrenceProblem<Rational> resonant_jordan_source_problem(
+    const Rational& top_first_component) {
+  RecurrenceProblem<Rational> p;
+  p.dimension = 2;
+  p.nmax = 0;
+  p.log_max = 1;
+  p.frame_base = -1;
+  p.frame_width = 4;
+  p.has_initial = false;
+  p.a_target = Rational(0);
+  p.b_target = Rational(0);
+  p.a_shift_min = 0;
+  p.a_shifts = {Rational(0)};
+  p.d_lags = {{{0, Rational(1)}}};
+  p.nhat_lags.resize(1);
+  p.nhat_lags[0].valuations.assign(4, diffexp2::kCompleteInfinity);
+  p.d0_inverse_scalar = Rational(1);
+  p.blocks = {JordanBlock{{0, 1}}};
+  p.schedule = {{{StepCase::Resonant, Rational(0), Rational(0)}}};
+
+  diffexp2::SourceData<Rational> source;
+  source.present = {1, 1};
+  source.validity.assign(4, 2);
+  source.frames.assign(16, Rational(0));
+  const auto at = [&](std::uint32_t log, std::uint32_t component,
+                      std::int32_t power) -> Rational& {
+    const auto point = static_cast<std::size_t>(log);
+    const auto epsilon = static_cast<std::size_t>(power - p.frame_base);
+    return source.frames[
+        (point * p.dimension + component) * p.frame_width + epsilon];
+  };
+  // The last-row log-zero equation fixes y[1,1] = 2.  Consequently the
+  // highest-log first-row equation requires Rtilde[1,0] = -2 exactly.
+  at(0, 0, 0) = Rational(3);
+  at(0, 1, 1) = Rational(2);
+  at(1, 0, 0) = top_first_component;
+  p.source = std::move(source);
+  return p;
+}
+
+void test_resonant_jordan_log_ceiling_compatibility() {
+  const auto compatible =
+      RecurrenceSolver<Rational>(resonant_jordan_source_problem(Rational(-2)))
+          .run();
+  const auto coefficient = [&](std::uint32_t log, std::uint32_t component,
+                               std::int32_t power) -> const Rational& {
+    const auto epsilon = static_cast<std::size_t>(power + 1);
+    return compatible.u[
+        ((static_cast<std::size_t>(log) * 2 + component) * 4) + epsilon];
+  };
+  check("resonant Jordan ladder accepts an exactly compatible log ceiling",
+        coefficient(1, 1, 0) == Rational(2) &&
+            coefficient(0, 1, 0) == Rational(-3));
+
+  bool loud = false;
+  try {
+    (void)RecurrenceSolver<Rational>(
+        resonant_jordan_source_problem(Rational(-1))).run();
+  } catch (const diffexp2::RecurrenceError& error) {
+    loud = error.id == "E5" &&
+        std::string(error.what()).find("captured log ceiling") !=
+            std::string::npos;
+  }
+  check("resonant Jordan ladder rejects a hidden cross-log inconsistency",
+        loud);
+}
+
 void test_json_error_contract() {
   const auto value = boost::json::parse(diffexp2::run_recurrence_json("{}"));
   check("malformed JSON request returns typed error",
@@ -152,15 +219,168 @@ void test_symbolic_rational_field() {
         rate.str().find("rho") != std::string::npos);
 }
 
+boost::json::object json_request(const std::string& request) {
+  return boost::json::parse(diffexp2::run_recurrence_json(request)).as_object();
+}
+
+void test_persistent_operator_session() {
+  const auto created = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"rational",
+    "output_digits":30,"analytic":{"regulators":[],"branch":"euclidean"}
+  })json");
+  const auto session = std::string(created.at("session").as_string());
+  const auto prepared = json_request(std::string(R"json({
+    "schema":2,"op":"chart.prepare","session":")json") + session + R"json(",
+    "key":"exp@0[-2,8]","identity":"exact-exp-v1",
+    "analytic":{"prescription":"none"},
+    "scc":{"components":[[0]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0],"coupling_depth":0},
+    "problem":{"domain":"rational","d":1,"fb":-2,"w":8,
+      "d_lags":[[{"s":0,"v":"1"}]],"denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],"val":[null]},
+        {"poly":[{"s":0,"e":[[0,0,"1"]]}],"rat":[],"val":[0]}],
+      "d0_inverse":"1","blocks":[[0]],"assembly":null,
+      "chop_digits":10}
+  })json");
+  const auto chart = std::string(prepared.at("chart").as_string());
+  const auto solved = json_request(std::string(R"json({
+    "schema":2,"op":"chart.solve","session":")json") + session +
+    R"json(","chart":")json" + chart + R"json(","run":{
+      "nmax":2,"p":0,"has_initial":true,"adaptive_probe":false,
+      "a_target":"0","b_target":"0","a_shift_min":0,
+      "a_shifts":["0","1","2"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}],
+        [{"case":"T","da":"1","db":"0"}],
+        [{"case":"T","da":"2","db":"0"}]],
+      "initial":["0","0","1","0","0","0","0","0"],
+      "initial_validity":[5],"source":null,"return_u":true}
+  })json");
+  const auto batched = json_request(std::string(R"json({
+    "schema":2,"op":"chart.solve_batch","session":")json") + session +
+    R"json(","chart":")json" + chart + R"json(","threads":32,"runs":[{
+      "nmax":0,"p":0,"has_initial":true,"adaptive_probe":false,
+      "a_target":"0","b_target":"0","a_shift_min":0,
+      "a_shifts":["0"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}]],
+      "initial":["0","0","1","0","0","0","0","0"],
+      "initial_validity":[5],"source":null,"return_u":true
+    },{
+      "nmax":"malformed"
+    },{
+      "nmax":0,"p":0,"has_initial":true,"adaptive_probe":false,
+      "a_target":"0","b_target":"0","a_shift_min":0,
+      "a_shifts":["0"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}]],
+      "initial":["0","0","3","0","0","0","0","0"],
+      "initial_validity":[5],"source":null,"return_u":true
+    }]})json");
+  const auto stats = json_request(std::string(R"json({
+    "schema":2,"op":"session.stats","session":")json") + session + "\"}");
+  check("persistent typed operator prepares and solves without static copies",
+        prepared.at("status") == "ok" && solved.at("status") == "ok" &&
+        prepared.at("scc_components") == 1 &&
+        prepared.at("scc_structural_edges") == 0 &&
+        prepared.at("scc_condensation_edges") == 0 &&
+        prepared.at("scc_topological_order").as_array().size() == 1 &&
+        prepared.at("scc_topological_order").as_array()[0] == 0 &&
+        solved.at("persistent").as_object().at("static_tensor_copies") == 0 &&
+        stats.at("runs") == 3 && stats.at("static_tensor_copies") == 0);
+  const auto& batch_results = batched.at("results").as_array();
+  check("persistent batch preserves order, typed errors, and run statistics",
+        batched.at("status") == "ok" && batched.at("attempted") == 3 &&
+        batched.at("succeeded") == 2 && batched.at("failed") == 1 &&
+        batched.at("worker_threads") == 3 &&
+        batch_results[0].as_object().at("status") == "ok" &&
+        batch_results[0].as_object().at("u").as_array()[2] == "1" &&
+        batch_results[1].as_object().at("status") == "error" &&
+        batch_results[1].as_object().at("id") == "CPP" &&
+        batch_results[2].as_object().at("status") == "ok" &&
+        batch_results[2].as_object().at("u").as_array()[2] == "3");
+  const auto& retained_scc =
+      stats.at("chart_stats").as_array()[0].as_object();
+  check("persistent stats retain typed SCC graph order",
+        retained_scc.at("scc_components") == 1 &&
+        retained_scc.at("scc_structural_edges") == 0 &&
+        retained_scc.at("scc_condensation_edges") == 0 &&
+        retained_scc.at("scc_topological_order").as_array()[0] == 0 &&
+        retained_scc.at("scc_coupling_depth") == 0);
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") + session + "\"}");
+
+  const auto acb = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"acb",
+    "precision_bits":128,"output_digits":30})json");
+  const auto other_precision = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"acb",
+    "precision_bits":256,"output_digits":30})json");
+  check("persistent Acb sessions retain independent idle precisions",
+        acb.at("status") == "ok" && other_precision.at("status") == "ok");
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") +
+    std::string(acb.at("session").as_string()) + "\"}");
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") +
+    std::string(other_precision.at("session").as_string()) + "\"}");
+}
+
+void test_persistent_framed_d0_inverse() {
+  const auto created = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"rational",
+    "output_digits":30,"analytic":{"regulators":[],"branch":"euclidean"}
+  })json");
+  const auto session = std::string(created.at("session").as_string());
+  const auto prepared = json_request(std::string(R"json({
+    "schema":2,"op":"chart.prepare","session":")json") + session + R"json(",
+    "key":"exp-eps@0[-2,8]","identity":"exact-exp-eps-v1",
+    "analytic":{"prescription":"none"},
+    "scc":{"components":[[0]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0],"coupling_depth":0},
+    "problem":{"domain":"rational","d":1,"fb":-2,"w":8,
+      "d_lags":[[{"s":0,"v":"1"},{"s":1,"v":"1"}]],
+      "denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],"val":[null]},
+        {"poly":[{"s":0,"e":[[0,0,"1"]]}],"rat":[],"val":[0]}],
+      "d0_inverse":null,"blocks":[[0]],"assembly":null,
+      "chop_digits":10}
+  })json");
+  const auto chart = std::string(prepared.at("chart").as_string());
+  const auto run = std::string(R"json({"schema":2,"op":"chart.solve","session":")json") +
+      session + R"json(","chart":")json" + chart + R"json(","run":{
+        "nmax":1,"p":0,"has_initial":true,"adaptive_probe":false,
+        "a_target":"0","b_target":"0","a_shift_min":0,
+        "a_shifts":["0","1"],
+        "schedule":[[{"case":"R","da":"0","db":"0"}],
+          [{"case":"T","da":"1","db":"0"}]],
+        "initial":["0","0","1","0","0","0","0","0"],
+        "initial_validity":[5],"source":null,"return_u":true}})json";
+  const auto first = json_request(run);
+  const auto second = json_request(run);
+  const auto stats = json_request(std::string(R"json({
+    "schema":2,"op":"session.stats","session":")json") + session + "\"}");
+  const auto& coefficients = first.at("u").as_array();
+  const auto& chart_stats = stats.at("chart_stats").as_array().front().as_object();
+  check("persistent chart retains one framed d0 inverse across runs",
+        prepared.at("d0_inverse_mode") == "retained-frame" &&
+            first.at("status") == "ok" && second.at("status") == "ok" &&
+            coefficients[18] == "1" && coefficients[19] == "-1" &&
+            chart_stats.at("runs") == 2 &&
+            chart_stats.at("d0_inverse_mode") == "retained-frame");
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") + session + "\"}");
+}
+
 }  // namespace
 
 int main() {
   test_exponential();
   test_epsilon_denominator();
   test_lower_frame_guard();
+  test_resonant_jordan_log_ceiling_compatibility();
   test_json_error_contract();
   test_malformed_tensor_is_typed_error();
   test_symbolic_rational_field();
+  test_persistent_operator_session();
+  test_persistent_framed_d0_inverse();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

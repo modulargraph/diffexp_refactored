@@ -10,6 +10,7 @@ Module[{dir = DirectoryName[$InputFileName]},
   Get[FileNameJoin[{dir, "CppBackend.m"}]];
   Get[FileNameJoin[{dir, "Solve.m"}]];
   Get[FileNameJoin[{dir, "Transport.m"}]];
+  Get[FileNameJoin[{dir, "NativeTransport.m"}]];
   Get[FileNameJoin[{dir, "Integrate.m"}]];
   Get[FileNameJoin[{dir, "API.m"}]];
 ];

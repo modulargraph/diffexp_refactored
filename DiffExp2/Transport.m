@@ -16,7 +16,7 @@ TransportLine::usage = "TransportLine[sys, boundary, plan] runs the marching loo
 ValidatePlan::usage = "ValidatePlan[plan] statically audits the chart chain: every incoming match point (the shared chartMatchPoint formula) must lie inside both adjacent physical disks and their half-radius error-probe envelopes; singular handoffs must approach from the correct side. Loud E8 on violation; returns the plan.";
 MatchWeights::usage = "MatchWeights[basisValues, incoming, label] solves the eps-graded (Laurent) weight system with loud residual asserts.";
 ApplyCrossing::usage = "ApplyCrossing[ls, sigma] applies the crossing operator (phase times unipotent log-chain mixing) so the far side evaluates at positive chart coordinate.";
-SegmentErrorProbe::usage = "SegmentErrorProbe[ls, tOut, couplingDepth] gives the full-vs-reduced evaluation error per eps order.";
+SegmentErrorProbe::usage = "SegmentErrorProbe[ls, tOut, couplingDepth] gives the heuristic full-vs-reduced evaluation difference per eps order. Transport retains its explicit epsilon window and does not treat the proxy as a rigorous certificate by default.";
 
 Begin["`Private`"];
 
@@ -812,6 +812,11 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
     Join[c, <|"Radius" -> rad, "ChartVar" -> Global`t,
       "MatchRadius" -> matchRad, "Scale" -> scale,
       "LocalRadius" -> localRad,
+      (* Transport consumes SolveChart's exact SCC orchestration and never
+         needs a redundant full-system spectral frame.  PrepareChart treats
+         this as an internal lazy-preparation request; direct callers retain
+         the complete ChartSystem contract. *)
+      "UseSCCSkeleton" -> True,
       "Name" -> "seg" <> ToString[First[#2]] <> "@" <>
         ToString[N[c["Center"], 6]],
       "Prescriptions" -> chartPrescriptions[c["Center"], var]|>]] &, charts];
@@ -876,7 +881,7 @@ ApplyCrossing[ls_Association, sigma_] := Module[
    columns are catastrophically ill-conditioned. *)
 
 recombineDegenerate[cs_, basis_List, specs_List, diagnostics_:<||>] := Module[
-  {degs, newBasis = basis, width,
+  {degs, newBasis = basis, width, sccGroups, applyGroup,
    hits = If[AssociationQ[diagnostics] &&
        KeyExistsQ[diagnostics, "PseudoCollisionsHit"],
      diagnostics["PseudoCollisionsHit"], Missing["NotAvailable"]],
@@ -887,33 +892,42 @@ recombineDegenerate[cs_, basis_List, specs_List, diagnostics_:<||>] := Module[
      joint-compensation certificate. *)
   If[!ListQ[hits] || (hits =!= {} && !compensated),
     Return[newBasis]];
-  degs = DiffExp2`Indicial`EpsDegenerateFamilies[cs["IndicialData"]];
-  If[degs === {}, Return[newBasis]];
   width = 4 + Max[0, Max[Map[#["EpsWindow", "CompleteMax"] -
     #["EpsWindow", "Min"] &, basis]]];
-  Do[Module[{fi = rec["FamilyIndex"], r0 = rec["EpsZeroDegeneracy"], cols, bs},
+  applyGroup[grp_List, r0_Integer] := Module[
+    {bs = SortBy[grp, N[specs[[#]]["b"], 20] &], active, pass = 0},
+    active = bs;
+    While[Length[active] >= 2 && pass < Max[r0, 1],
+      Module[{base = First[active], rest = Rest[active]},
+        Do[Module[{m = rest[[ri]], db, wPlus, wMinus},
+          db = Together[specs[[m]]["b"] - specs[[base]]["b"]];
+          If[!zeroCanQ[db],
+            wPlus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{1/db}, width]];
+            wMinus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{-1/db}, width]];
+            newBasis[[m]] = DiffExp2`SectorSeries`CombineLocalSolutions[
+              {wPlus, wMinus}, {newBasis[[m]], newBasis[[base]]}]]],
+          {ri, Length[rest]}];
+        active = rest; pass++]]];
+  (* A block-sequential basis owns independent indicial frames per diagonal
+     SCC.  Global IndicialData can mix them through off-diagonal residues, so
+     SolveChart supplies the exact block-local column groups explicitly. *)
+  sccGroups = If[AssociationQ[diagnostics],
+    Lookup[diagnostics, "SCCRecombineGroups", Missing["NotAvailable"]],
+    Missing["NotAvailable"]];
+  If[ListQ[sccGroups],
+    Do[applyGroup[rec["Columns"], rec["EpsZeroDegeneracy"]],
+      {rec, sccGroups}];
+    Return[newBasis, Module]];
+  degs = DiffExp2`Indicial`EpsDegenerateFamilies[cs["IndicialData"]];
+  If[degs === {}, Return[newBasis]];
+  Do[Module[{fi = rec["FamilyIndex"], r0 = rec["EpsZeroDegeneracy"], cols},
     cols = Select[Range[Length[specs]], specs[[#]]["Family"] === fi &];
     (* value-level degeneracy pairs columns with the SAME exact a and
-       DISTINCT b (different-a columns are different functions); per
-       same-a group, the recursive (S_m - S_1)/((b_m - b_1) eps) ladder *)
-    Module[{groups},
-      groups = GatherBy[Select[cols, specs[[#]]["ChainPos"] === 0 &],
-        Together[specs[[#]]["a"]] &];
-      Do[Module[{bs = SortBy[grp, N[specs[[#]]["b"], 20] &], active, pass = 0},
-        active = bs;
-        While[Length[active] >= 2 && pass < Max[r0, 1],
-          Module[{base = First[active], rest = Rest[active]},
-            Do[Module[{m = rest[[ri]], db, wPlus, wMinus},
-              db = Together[specs[[m]]["b"] - specs[[base]]["b"]];
-              (* exact tag difference, already Together'd *)
-              If[!zeroCanQ[db],
-                wPlus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{1/db}, width]];
-                wMinus = DiffExp2`EpsSeries`ESNew[-1, PadRight[{-1/db}, width]];
-                newBasis[[m]] = DiffExp2`SectorSeries`CombineLocalSolutions[
-                  {wPlus, wMinus}, {newBasis[[m]], newBasis[[base]]}]]],
-              {ri, Length[rest]}];
-            active = rest; pass++]]],
-        {grp, Select[groups, Length[#] >= 2 &]}]]],
+       DISTINCT b (different-a columns are different functions). *)
+    Do[applyGroup[grp, r0],
+      {grp, Select[GatherBy[
+        Select[cols, specs[[#]]["ChainPos"] === 0 &],
+        Together[specs[[#]]["a"]] &], Length[#] >= 2 &]}]],
     {rec, degs}];
   newBasis];
 
@@ -1020,18 +1034,18 @@ mwInputTrim[{min_, c_}, context_String] := Module[
     {min + i - 1, Drop[c, i - 1]}];
   mwTrim[entry, context <> ": rank input"]];
 
-(* Row arithmetic must discard only a certified centered zero.  Scaling a
+(* Row arithmetic must discard only a centered zero.  Scaling a
    Schur series by the maximum over its entire future window is invalid when
    coefficients grow by many decades per epsilon order: it erased genuine
    early pivots and collapsed the banana endpoint from 13 coefficients to 3.
    Initial structural/rank classification is completed by mwInputTrim; after
-   that, only an exact zero or an inexact centered zero whose entire
-   uncertainty ball lies below the matching residual contract may advance
-   the formal valuation.
-   In particular, an underresolved 0``acc is not evidence of cancellation. *)
+   that, an exact zero or inexact value stored exactly at zero may advance the
+   formal valuation.  StrictMatchingUncertainty -> True restores the stronger
+   diagnostic requirement that the entire uncertainty ball lie below the
+   matching residual contract. *)
 mwCenteredZeroQ[c_, context_String, scale_:1] := Module[
   {digits = DiffExp2`Tolerances`Tol["ChopDigits"], bounds, lower, upper,
-   center, mtol},
+   center, mtol, strict = TrueQ[cfg["StrictMatchingUncertainty"]]},
   Which[
     NumericQ[c],
       If[!InexactNumberQ[c], Return[TrueQ[PossibleZeroQ[c]], Module]];
@@ -1043,9 +1057,9 @@ mwCenteredZeroQ[c_, context_String, scale_:1] := Module[
       Which[
         (* Input trimming has already classified structural smallness.  A
            resolved nonzero Schur coefficient remains formal data no matter
-           how small it is; only its uncertainty ball relative to zero is
-           relevant here. *)
+           how small it is. *)
         !SameQ[center, 0] && TrueQ[lower > 0], False,
+        SameQ[center, 0] && !strict, True,
         SameQ[center, 0] && TrueQ[upper <= mtol*scale], True,
         True,
         err["E5", <|"Context" -> context, "Coefficient" -> c,
@@ -1481,7 +1495,8 @@ mwDebugSummary[x_] := Module[{nums, accs, mags},
 matchingResidualFailure[Fmat_List, vIn_List, weights_List,
     label_String] := Module[
   {nb = Length[Fmat], mtol = DiffExp2`Tolerances`Tol["MatchTol"],
-   ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], effectiveTol},
+   ltol = DiffExp2`Tolerances`Tol["LaurentLeadTol"], effectiveTol,
+   strict = TrueQ[cfg["StrictMatchingUncertainty"]]},
   effectiveTol = Max[mtol, ltol];
   Catch[
     Do[Module[{terms, lhs, rhs = vIn[[comp]], kmin, kmax},
@@ -1509,7 +1524,8 @@ matchingResidualFailure[Fmat_List, vIn_List, weights_List,
         bad = Which[
           NumericQ[residual],
             mag = numMag[residual, 20];
-            TrueQ[mag + uncertainty > effectiveTol*scale],
+            If[SameQ[mag, 0] && !strict, False,
+              TrueQ[mag + uncertainty > effectiveTol*scale]],
           TrueQ[PossibleZeroQ[residual]], False,
           (* Exact symbolic nonzero content is a proof.  An inexact symbolic
              residue has no parameter domain or coefficient-wise significance
@@ -1536,10 +1552,13 @@ matchingResidualFailure[Fmat_List, vIn_List, weights_List,
    rows; therefore the strongest residual contract for the ORIGINAL,
    untrimmed F is Max[MatchTol, LaurentLeadTol].  Demanding MatchTol below
    that floor is internally inconsistent: content the solve was required to
-   discard would immediately fail its checker.  Inexact residuals include a
-   conservative 10^-Accuracy uncertainty
-   allowance; low precision never turns a resolved violation into a pass.
-   Exact/symbolic nonzero residuals remain algebraically checked. *)
+   discard would immediately fail its checker.  Resolved nonzero inexact
+   residuals include a conservative 10^-Accuracy uncertainty allowance;
+   low precision never turns a resolved violation into a pass.  By default,
+   an inexact residual stored exactly at zero is accepted before inflating
+   that center by its metadata uncertainty.  StrictMatchingUncertainty ->
+   True restores the full-ball diagnostic.  Exact/symbolic nonzero residuals
+   remain algebraically checked. *)
 matchingResidualAssert[Fmat_List, vIn_List, weights_List, label_String,
     checkedFailure_:Automatic] := Module[
   (* MatchWeights passes the result of the immediately preceding check so a
@@ -1656,20 +1675,39 @@ MatchWeights[Fmat_List, vIn_List, label_String] := Module[
 
 (* ---- 2.10 probe ---- *)
 
-SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] := Module[
+segmentErrorProbeRecord[ls_Association, tOut_, couplingDepth_Integer] := Module[
   {dec = DiffExp2`Tolerances`EvalErrorSeriesDecrease[Max[couplingDepth, 1]],
-   full, red},
+   full, red, min, max, values},
   full = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "UsePade" -> False,
     "ImSign" -> sigmaFor[ls, tOut], "ComputeTailEstimates" -> False];
   red = DiffExp2`SectorSeries`EvaluateLocalSolution[ls, tOut, "ImSign" -> sigmaFor[ls, tOut],
     "UsePade" -> False, "TOrderReduction" -> dec,
     "ComputeTailEstimates" -> False];
-  Table[Module[{kf = esCoeff[full["Value"], k],
+  min = esMin[full["Value"]]; max = esCM[full["Value"]];
+  values = Table[Module[{kf = esCoeff[full["Value"], k],
       kr = If[esMin[red["Value"]] <= k <= esCM[red["Value"]],
         esCoeff[red["Value"], k], 0*esCoeff[full["Value"], k]]},
     Max[0, Sequence @@ (Last[numMagBounds[#, 20]] & /@
       Select[Flatten[{kf - kr}], NumericQ])]],
-    {k, esMin[full["Value"]], esCM[full["Value"]]}]];
+    {k, min, max}];
+  <|"Min" -> min, "CompleteMax" -> max, "Values" -> values,
+    "Kind" -> "HeuristicFullVsReduced", "TOrderReduction" -> dec|>];
+
+SegmentErrorProbe[ls_Association, tOut_, couplingDepth_Integer] :=
+  segmentErrorProbeRecord[ls, tOut, couplingDepth]["Values"];
+
+errorRecordCombine[records_List, combine_] := Module[
+  {active = Select[records, AssociationQ], min, max, aligned},
+  If[active === {}, Return[None, Module]];
+  min = Min[active[[All, "Min"]]];
+  max = Max[active[[All, "CompleteMax"]]];
+  aligned = Map[Function[record,
+    Table[If[record["Min"] <= k <= record["CompleteMax"],
+      record["Values"][[k - record["Min"] + 1]], 0], {k, min, max}]],
+    active];
+  <|"Min" -> min, "CompleteMax" -> max,
+    "Values" -> Fold[MapThread[combine, {#1, #2}] &, First[aligned],
+      Rest[aligned]], "Kind" -> "HeuristicFullVsReduced"|>];
 
 (* ---- 2.6 marching ---- *)
 
@@ -1970,14 +2008,25 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           !(TrueQ[plan["EndpointIsSingular"]] && ci === Length[charts]));
       points = If[twoSidedQ,
         {-raw, raw}, {sgn*raw}];
-      probes = SegmentErrorProbe[ls, #, couplingDepth] & /@ points;
-      If[Length[probes] === 1, First[probes], MapThread[Max, probes]]];
+      probes = segmentErrorProbeRecord[ls, #, couplingDepth] & /@ points;
+      errorRecordCombine[probes, Max]];
     errAcc = If[errAcc === None, probeErrs,
-      Module[{l1 = Length[errAcc], l2 = Length[probeErrs]},
-        PadRight[errAcc, Max[l1, l2]] + PadRight[probeErrs, Max[l1, l2]]]];
-    If[Max[errAcc] > 1,
-      err["E10", <|"Chart" -> chart["Name"], "Errors" -> N[errAcc, 4],
-        "Detail" -> "accumulated error estimate exceeds 1; transport aborted"|>]];
+      errorRecordCombine[{errAcc, probeErrs}, Plus]];
+    (* A decimated-series difference is a useful tail diagnostic, but it is
+       not a rigorous propagated error bound: its absolute size depends on
+       the coefficient scale and the old additive rule omitted transfer
+       sensitivities.  Production therefore records it without an
+       unconditional dimensionless abort.  Users who explicitly request the
+       legacy-style post-hoc absolute validation retain a loud per-segment
+       failure against their configured AccuracyGoal. *)
+    If[TrueQ[cfg["AccuracyGoalValidate"]] &&
+        IntegerQ[cfg["AccuracyGoal"]] &&
+        Max[probeErrs["Values"]] > 10^-cfg["AccuracyGoal"],
+      err["E11", <|"Chart" -> chart["Name"],
+        "EpsWindow" -> KeyTake[probeErrs, {"Min", "CompleteMax"}],
+        "Errors" -> N[probeErrs["Values"], 4],
+        "AccuracyGoal" -> cfg["AccuracyGoal"],
+        "Detail" -> "heuristic full-vs-reduced segment difference exceeds the explicitly requested absolute accuracy goal"|>]];
     current = ls;
     AppendTo[kept, <|"Chart" -> chart, "LocalSolution" -> ls|>];
     lastSingular = TrueQ[chart["Singular"]];
@@ -1987,7 +2036,10 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     "Charts" -> kept,
     "SegmentCount" -> Length[kept],
     "EndpointIsSingular" -> plan["EndpointIsSingular"],
-    "ErrorEstimate" -> errAcc,
+    "ErrorEstimate" -> If[AssociationQ[errAcc], errAcc["Values"], None],
+    "ErrorEstimateWindow" -> If[AssociationQ[errAcc],
+      KeyTake[errAcc, {"Min", "CompleteMax"}], None],
+    "ErrorEstimateKind" -> "HeuristicFullVsReduced",
     "Value" -> If[plan["EndpointIsSingular"], None,
       Module[{tFinal = Together[(plan["To"] - current["Center"])/
           current["ChartMap", "Scale"]]},

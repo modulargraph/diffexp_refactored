@@ -10530,7 +10530,7 @@ class StoredLineResult {
         {"result",
          json::object{
              {"value", checkpoint_epsilon_vector_record(result_.value)},
-             {"scope", "stored_truncation"},
+             {"scope", line_integration_scope_name(result_.scope)},
              {"imaginary_sign", result_.imaginary_sign.has_value()
                   ? json::value(*result_.imaginary_sign)
                   : json::value(nullptr)},
@@ -13023,13 +13023,17 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
   require_exact_keys(raw_result, {"value", "scope", "imaginary_sign",
                                   "diagnostics"},
                      "checkpoint line result state");
-  if (required_string(raw_result, "scope") != "stored_truncation")
+  const auto scope = required_string(raw_result, "scope");
+  StoredLineIntegral result;
+  if (scope == "stored_truncation")
+    result.scope = LineIntegrationScope::StoredTruncation;
+  else if (scope == "full_local_with_certified_tail")
+    result.scope = LineIntegrationScope::FullLocalWithCertifiedTail;
+  else
     throw std::invalid_argument(
         "checkpoint line result has an unsupported integration scope");
-  StoredLineIntegral result;
   result.value = parse_checkpoint_epsilon_vector(
       raw_result.at("value"), "checkpoint line epsilon vector");
-  result.scope = LineIntegrationScope::StoredTruncation;
   if (!raw_result.at("imaginary_sign").is_null()) {
     result.imaginary_sign = as_i32(raw_result.at("imaginary_sign"),
                                    "checkpoint line rim");
@@ -13042,10 +13046,6 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
   if (result.imaginary_sign != expected_rim)
     throw std::invalid_argument(
         "checkpoint line rim differs from its exact branch prescriptions");
-  if (!result.value.error.empty() ||
-      result.value.error.guarantee != ErrorGuarantee::None)
-    throw std::invalid_argument(
-        "checkpoint stored-truncation line unexpectedly carries an error guarantee");
   if (result.value.dimension !=
       as_u32(local->summary().at("dimension"),
              "checkpoint line source dimension"))
@@ -13120,6 +13120,59 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
   }
   result.diagnostics.detail = required_string(diagnostics, "detail");
 
+  const auto& error = result.value.error;
+  const auto& line_epsilon = result.value.epsilon;
+  const auto& tail = result.diagnostics;
+  if (!tail.tail_witness_radius_exact.empty()) {
+    try {
+      const Rational witness(tail.tail_witness_radius_exact);
+      const auto begin_modulus = tile.local_begin.sign() < 0
+          ? -tile.local_begin : tile.local_begin;
+      const auto end_modulus = tile.local_end.sign() < 0
+          ? -tile.local_end : tile.local_end;
+      const auto outer = begin_modulus < end_modulus
+          ? end_modulus : begin_modulus;
+      if (!(outer < witness) || !(witness < binding.geometry.radius))
+        throw std::invalid_argument("tail witness lies outside its annulus");
+    } catch (const std::invalid_argument&) {
+      throw std::invalid_argument(
+          "checkpoint line tail witness radius must be an exact rational "
+          "strictly outside its tile and inside its chart");
+    }
+  }
+  if (result.scope == LineIntegrationScope::StoredTruncation) {
+    if (!error.empty() || error.guarantee != ErrorGuarantee::None)
+      throw std::invalid_argument(
+          "checkpoint stored-truncation line cannot carry an error "
+          "envelope or guarantee");
+    if (tail.tail_certificate_requested) {
+      if (tail.tail_certificate_status != "unsupported" &&
+          tail.tail_certificate_status != "inconclusive")
+        throw std::invalid_argument(
+            "checkpoint stored-truncation line has an inconsistent "
+            "tail-certificate status");
+    } else if (tail.tail_certificate_status != "not-requested" ||
+               !tail.tail_witness_radius_exact.empty()) {
+      throw std::invalid_argument(
+          "checkpoint stored-truncation line has unsolicited "
+          "tail-certificate diagnostics");
+    }
+  } else {
+    if (error.empty() || error.guarantee != ErrorGuarantee::Certified ||
+        error.frame.min_power != line_epsilon.min_power ||
+        error.frame.complete_max != line_epsilon.complete_max ||
+        error.provenance.empty())
+      throw std::invalid_argument(
+          "checkpoint full-local line requires a frame-aligned certified "
+          "error envelope");
+    if (!tail.tail_certificate_requested ||
+        tail.tail_certificate_status != "certified" ||
+        tail.tail_witness_radius_exact.empty())
+      throw std::invalid_argument(
+          "checkpoint full-local line requires complete certified-tail "
+          "diagnostics");
+  }
+
   json::object legacy_provenance{
       {"schema",
        "diffexp2-retained-native-stored-truncation-physical-tile-integral-v1"},
@@ -13165,7 +13218,9 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
   const auto legacy_identity =
       json::serialize(canonical_json_value(legacy_provenance));
   if (provenance_identity != current_identity &&
-      provenance_identity != legacy_identity)
+      (has_tail_requested ||
+       result.scope != LineIntegrationScope::StoredTruncation ||
+       provenance_identity != legacy_identity))
     throw std::invalid_argument(
         "checkpoint line provenance identity is inconsistent");
   const auto elapsed_ms = checkpoint_nonnegative_double(

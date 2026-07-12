@@ -169,9 +169,212 @@ Module[{rescaled, params, rules},
 (* Generalized Tadpole Evaluation                               *)
 (* ============================================================ *)
 
+finitePositiveRealNumericalQ[value_] := Module[{numeric},
+  If[
+    !NumericQ[value] ||
+      !FreeQ[value, Indeterminate | ComplexInfinity | _DirectedInfinity],
+    Return[False]
+  ];
+  numeric = Quiet[Check[N[value], $Failed]];
+  numeric =!= $Failed && TrueQ[Im[numeric] == 0] && TrueQ[Re[numeric] > 0]
+];
+
+
+exactAffineDimensionData[dimension_, eps_] := Module[
+  {polynomial, constant, slope},
+  polynomial = Quiet[Check[Expand[Cancel[Together[dimension]]], $Failed]];
+  If[
+    polynomial === $Failed || !FreeQ[polynomial, _Real] ||
+      !PolynomialQ[polynomial, eps] || !TrueQ[Exponent[polynomial, eps] <= 1],
+    Return[$Failed]
+  ];
+  constant = Together[Coefficient[polynomial, eps, 0]];
+  slope = Together[Coefficient[polynomial, eps, 1]];
+  If[
+    !FreeQ[{constant, slope}, eps] ||
+      !And @@ (NumericQ /@ {constant, slope}) ||
+      !FreeQ[{constant, slope}, _Real | _DirectedInfinity] ||
+      !And @@ (TrueQ[Im[N[#, 20]] == 0] & /@ {constant, slope}),
+    Return[$Failed]
+  ];
+  {constant, slope}
+];
+
+
+multiplyLinearCoefficientVector[
+    coefficients_List, constant_, slope_, maxDegree_Integer] := Module[
+  {output, inputDegree, outputDegree, degree},
+  inputDegree = Length[coefficients] - 1;
+  outputDegree = Min[maxDegree, inputDegree + 1];
+  output = ConstantArray[0, outputDegree + 1];
+  Do[
+    output[[degree + 1]] += constant * coefficients[[degree + 1]];
+    If[degree + 1 <= outputDegree,
+      output[[degree + 2]] += slope * coefficients[[degree + 1]]
+    ],
+    {degree, 0, Min[inputDegree, maxDegree]}
+  ];
+  output
+];
+
+
+truncatedCoefficientConvolution[left_List, right_List, maxDegree_Integer] := Module[
+  {leftPadded, rightPadded},
+  leftPadded = PadRight[Take[left, UpTo[maxDegree + 1]], maxDegree + 1, 0];
+  rightPadded = PadRight[Take[right, UpTo[maxDegree + 1]], maxDegree + 1, 0];
+  Table[
+    leftPadded[[1 ;; degree + 1]] .
+      Reverse[rightPadded[[1 ;; degree + 1]]],
+    {degree, 0, maxDegree}
+  ]
+];
+
+
+(* Fast numerical Laurent expansion for the branch-insensitive Euclidean case.
+   Write d=d0+d1 eps and
+
+     Gamma[a+b eps] U^(c+u eps) / F^(a+b eps)
+
+   as a finite integer Gamma shift times Gamma[1+b eps] Exp[lambda eps].
+   The latter exponential is generated from its log coefficients in O(N^2),
+   avoiding Mathematica's much more expensive symbolic Gamma Series. *)
+fastNumericalTadpoleBoundary[
+    Uval_, Fval_, v_Integer, numLoops_Integer, epsOrder_Integer,
+    eps_, dimension_, precision_Integer] := Module[
+  {dimensionData, d0, d1, a, b, c, uSlope, guardDigits, workPrecision,
+   uWorking, fWorking, lambda, minPow, maxAnalyticDegree,
+   logCoefficients, exponentialCoefficients, shiftCoefficients,
+   denominatorCoefficients, reciprocalCoefficients, analyticCoefficients,
+   constant, m, degree, k},
+
+  If[
+    v <= 0 || numLoops < 0 || epsOrder < 0 ||
+      !finitePositiveRealNumericalQ[Uval] ||
+      !finitePositiveRealNumericalQ[Fval],
+    Return[$Failed]
+  ];
+  dimensionData = exactAffineDimensionData[dimension, eps];
+  If[dimensionData === $Failed, Return[$Failed]];
+  {d0, d1} = dimensionData;
+
+  a = Together[v - numLoops*d0/2];
+  b = Together[-numLoops*d1/2];
+  c = Together[v - (numLoops + 1)*d0/2];
+  uSlope = Together[-(numLoops + 1)*d1/2];
+  If[
+    !IntegerQ[a] || !And @@ (NumericQ /@ {b, c, uSlope}) ||
+      !And @@ (TrueQ[Im[N[#, 20]] == 0] & /@ {b, c, uSlope}) ||
+      (a <= 0 && TrueQ[PossibleZeroQ[b]]),
+    Return[$Failed]
+  ];
+
+  guardDigits = Max[20, 10 + Ceiling[Log[10, Max[2, epsOrder + 2]]]];
+  workPrecision = precision + guardDigits;
+  uWorking = N[SetPrecision[Uval, workPrecision], workPrecision];
+  fWorking = N[SetPrecision[Fval, workPrecision], workPrecision];
+  lambda = N[uSlope*Log[uWorking] - b*Log[fWorking], workPrecision];
+
+  minPow = If[a <= 0, -1, 0];
+  maxAnalyticDegree = epsOrder - minPow;
+  logCoefficients = N[
+    Table[
+      If[degree == 1,
+        lambda - b*EulerGamma,
+        (-1)^degree*Zeta[degree]*b^degree/degree
+      ],
+      {degree, 1, maxAnalyticDegree}
+    ],
+    workPrecision
+  ];
+  exponentialCoefficients = ConstantArray[0, maxAnalyticDegree + 1];
+  exponentialCoefficients[[1]] = SetPrecision[1, workPrecision];
+  Do[
+    exponentialCoefficients[[degree + 1]] =
+      ((Range[degree]*logCoefficients[[1 ;; degree]]) .
+        Reverse[exponentialCoefficients[[1 ;; degree]]])/degree,
+    {degree, 1, maxAnalyticDegree}
+  ];
+
+  If[a >= 1,
+    shiftCoefficients = {1};
+    Do[
+      shiftCoefficients = multiplyLinearCoefficientVector[
+        shiftCoefficients, k, b, maxAnalyticDegree],
+      {k, 1, a - 1}
+    ];
+    shiftCoefficients = N[shiftCoefficients, workPrecision],
+
+    (* For a=-m, factor the simple pole explicitly:
+       Gamma[-m+b eps] = eps^-1 Gamma[1+b eps] /
+         (b Product[b eps-j,{j,1,m}]). *)
+    m = -a;
+    denominatorCoefficients = {b};
+    Do[
+      denominatorCoefficients = multiplyLinearCoefficientVector[
+        denominatorCoefficients, -k, b, maxAnalyticDegree],
+      {k, 1, m}
+    ];
+    denominatorCoefficients = N[denominatorCoefficients, workPrecision];
+    reciprocalCoefficients = ConstantArray[0, maxAnalyticDegree + 1];
+    reciprocalCoefficients[[1]] = 1/denominatorCoefficients[[1]];
+    Do[
+      reciprocalCoefficients[[degree + 1]] =
+        -Total[Table[
+          denominatorCoefficients[[k + 1]] *
+            reciprocalCoefficients[[degree - k + 1]],
+          {k, 1, Min[degree, Length[denominatorCoefficients] - 1]}
+        ]]/denominatorCoefficients[[1]],
+      {degree, 1, maxAnalyticDegree}
+    ];
+    shiftCoefficients = reciprocalCoefficients
+  ];
+
+  analyticCoefficients = truncatedCoefficientConvolution[
+    exponentialCoefficients, shiftCoefficients, maxAnalyticDegree];
+  constant = N[
+    uWorking^c/(Gamma[v]*fWorking^a),
+    workPrecision
+  ];
+  {minPow, SetPrecision[constant*analyticCoefficients, precision]}
+];
+
+
+seriesTadpoleBoundary[
+    Uval_, Fval_, v_Integer, numLoops_Integer, epsOrder_Integer,
+    eps_, dExpr_, precision_Integer] :=
+Module[{gammaArg, UPow, FPow, fullExpr, series, coeffs, minPow},
+
+  gammaArg = v - numLoops * dExpr / 2;
+  UPow = v - (numLoops + 1) * dExpr / 2;
+  FPow = v - numLoops * dExpr / 2;
+
+  (* Keep this expression and Series path as the exact fallback for complex,
+     nonpositive, non-affine, or otherwise branch-sensitive inputs. *)
+  Module[{uTerm, fTerm},
+    uTerm = If[Chop[Uval - 1, 10^(-precision/2)] === 0,
+      1,
+      SetPrecision[Uval, precision]^UPow
+    ];
+    fTerm = If[Chop[Fval - 1, 10^(-precision/2)] === 0,
+      1,
+      SetPrecision[Fval, precision]^FPow
+    ];
+    fullExpr = Gamma[gammaArg] / Gamma[v] * uTerm / fTerm;
+  ];
+
+  series = Series[fullExpr, {eps, 0, epsOrder}];
+  If[Head[series] === SeriesData,
+    minPow = series[[4]];
+    coeffs = PadRight[series[[3]], epsOrder - minPow + 1, 0],
+    minPow = 0;
+    coeffs = {series}
+  ];
+  {minPow, coeffs}
+];
+
+
 EvaluateTadpoleBoundary[Uval_?NumericQ, Fval_?NumericQ, v_Integer, numLoops_Integer, epsOrder_Integer] :=
-Module[{eps, gammaArg, gammaPrefactor, UPow, FPow, fullExpr, series, coeffs, minPow,
-        precision, dExpr},
+Module[{eps, coeffs, minPow, precision, dExpr, result},
 
   precision = FeynmanTrick`Private`$FTConfig["WorkingPrecision"];
   If[!IntegerQ[precision] || precision < 50, precision = 200];
@@ -179,46 +382,20 @@ Module[{eps, gammaArg, gammaPrefactor, UPow, FPow, fullExpr, series, coeffs, min
   eps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
   dExpr = FeynmanTrick`Private`DimensionExpression[];
 
-  (* Arguments *)
-  gammaArg = v - numLoops * dExpr / 2;
-  UPow = v - (numLoops + 1) * dExpr / 2;
-  FPow = v - numLoops * dExpr / 2;
-
-  (* Build the expression symbolically.
-     Handle U=1 and F=1 cases explicitly: 1.0^(symbolic) doesn't simplify in Mathematica,
-     which prevents Series from expanding properly. *)
-  Module[{uTerm, fTerm},
-    uTerm = If[Chop[Uval - 1, 10^(-precision/2)] === 0,
-      1,  (* U=1 for 1-loop; avoid 1.^(symbolic) which doesn't simplify *)
-      SetPrecision[Uval, precision]^UPow
-    ];
-    fTerm = If[Chop[Fval - 1, 10^(-precision/2)] === 0,
-      1,  (* F=1; same issue as U=1 *)
-      SetPrecision[Fval, precision]^FPow
-    ];
-    fullExpr = Gamma[gammaArg] / Gamma[v] * uTerm / fTerm;
+  result = fastNumericalTadpoleBoundary[
+    Uval, Fval, v, numLoops, epsOrder, eps, dExpr, precision];
+  If[result === $Failed,
+    result = seriesTadpoleBoundary[
+      Uval, Fval, v, numLoops, epsOrder, eps, dExpr, precision]
   ];
-
-  (* Series expand in eps around 0 *)
-  series = Series[fullExpr, {eps, 0, epsOrder}];
-
-  (* Extract the minimum power and coefficients *)
-  If[Head[series] === SeriesData,
-    minPow = series[[4]];  (* Minimum power of eps *)
-    coeffs = series[[3]];  (* Coefficients *)
-    (* Pad with zeros if needed *)
-    coeffs = PadRight[coeffs, epsOrder - minPow + 1, 0];
-    ,
-    minPow = 0;
-    coeffs = {series};
-  ];
+  {minPow, coeffs} = result;
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
     Print["  Tadpole boundary: min eps power = ", minPow];
     Print["  Leading coefficient = ", coeffs[[1]]];
   ];
 
-  {minPow, coeffs}
+  result
 ];
 
 

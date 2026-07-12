@@ -12317,11 +12317,22 @@ class StoredLineResult {
     const auto& diagnostics = result_.diagnostics;
     std::lock_guard<std::mutex> lock(stats_mutex_);
     if (aggregate_provenance_.has_value()) {
+      const auto aggregate_schema = required_string(
+          *aggregate_provenance_, "schema");
+      const bool compact_v2 =
+          aggregate_schema ==
+              "diffexp2-retained-native-transport-observable-line-v2" ||
+          aggregate_schema ==
+              "diffexp2-retained-native-transport-pair-observable-line-v2";
       return json::object{
           {"schema", transport_owners_.size() == 2
-               ? "diffexp2-retained-transport-pair-observable-line-v1"
+               ? compact_v2
+                   ? "diffexp2-retained-transport-pair-observable-line-v2"
+                   : "diffexp2-retained-transport-pair-observable-line-v1"
                : transport_owners_.size() == 1
-               ? "diffexp2-retained-transport-observable-line-v1"
+               ? compact_v2
+                   ? "diffexp2-retained-transport-observable-line-v2"
+                   : "diffexp2-retained-transport-observable-line-v1"
                : "diffexp2-retained-line-aggregate-v1"},
           {"handle", handle_},
           {"checkpoint_identity", checkpoint_identity_},
@@ -12432,16 +12443,21 @@ class StoredLineResult {
   static void validate_transport_reference(
       const json::value& raw,
       const std::shared_ptr<StoredTransportArmState>& owner,
-      const char* label) {
+      const char* label, bool compact_v2 = false) {
     const auto& reference = as_object(raw, label);
-    require_exact_keys(reference,
-                       {"handle", "checkpoint_identity",
-                        "provenance_identity"}, label);
+    if (compact_v2)
+      require_exact_keys(reference, {"handle", "checkpoint_identity"},
+                         label);
+    else
+      require_exact_keys(reference,
+                         {"handle", "checkpoint_identity",
+                          "provenance_identity"}, label);
     if (!owner || required_string(reference, "handle") != owner->handle() ||
         required_string(reference, "checkpoint_identity") !=
             owner->checkpoint_identity() ||
-        required_string(reference, "provenance_identity") !=
-            owner->provenance_identity())
+        (!compact_v2 &&
+         required_string(reference, "provenance_identity") !=
+             owner->provenance_identity()))
       throw std::invalid_argument(
           std::string(label) + " is stale");
   }
@@ -12469,18 +12485,24 @@ class StoredLineResult {
         aggregate_provenance_->at("aggregate"),
         "retained line aggregate recipe");
     if (schema ==
-        "diffexp2-retained-native-transport-observable-line-v1") {
+            "diffexp2-retained-native-transport-observable-line-v1" ||
+        schema ==
+            "diffexp2-retained-native-transport-observable-line-v2") {
+      const bool compact_v2 = schema.ends_with("-v2");
       if (plan_owners_.size() != 1 || transport_owners_.size() != 1 ||
           !local_owners_.empty())
         throw std::invalid_argument(
             "compact transport line requires one plan and state owner");
       validate_transport_reference(
           aggregate.at("transport_state"), transport_owners_.front(),
-          "retained line aggregate transport reference");
+          "retained line aggregate transport reference", compact_v2);
       return;
     }
     if (schema ==
-        "diffexp2-retained-native-transport-pair-observable-line-v1") {
+            "diffexp2-retained-native-transport-pair-observable-line-v1" ||
+        schema ==
+            "diffexp2-retained-native-transport-pair-observable-line-v2") {
+      const bool compact_v2 = schema.ends_with("-v2");
       if (plan_owners_.size() != 2 || transport_owners_.size() != 2 ||
           !local_owners_.empty())
         throw std::invalid_argument(
@@ -12500,20 +12522,20 @@ class StoredLineResult {
           source.at("upper"), "compact transport-pair upper source");
       validate_transport_reference(
           lower_source.at("transport_state"), transport_owners_[0],
-          "compact transport-pair lower state reference");
+          "compact transport-pair lower state reference", compact_v2);
       validate_transport_reference(
           upper_source.at("transport_state"), transport_owners_[1],
-          "compact transport-pair upper state reference");
+          "compact transport-pair upper state reference", compact_v2);
       const auto& lower_recipe = as_object(
           aggregate.at("lower"), "compact transport-pair lower recipe");
       const auto& upper_recipe = as_object(
           aggregate.at("upper"), "compact transport-pair upper recipe");
       validate_transport_reference(
           lower_recipe.at("transport_state"), transport_owners_[0],
-          "compact transport-pair lower recipe state");
+          "compact transport-pair lower recipe state", compact_v2);
       validate_transport_reference(
           upper_recipe.at("transport_state"), transport_owners_[1],
-          "compact transport-pair upper recipe state");
+          "compact transport-pair upper recipe state", compact_v2);
       return;
     }
     if (schema != "diffexp2-retained-native-line-aggregate-v1" ||
@@ -14033,7 +14055,7 @@ std::shared_ptr<StoredLineResult> build_compact_transport_observable_line(
       "compact native transport observable aggregate");
   aggregate_record["tile_count"] = tile_lines.size();
   json::object provenance{
-      {"schema", "diffexp2-retained-native-transport-observable-line-v1"},
+      {"schema", "diffexp2-retained-native-transport-observable-line-v2"},
       {"checkpoint_identity", checkpoint_identity},
       {"arm", arm_name},
       {"interval", std::move(interval)},
@@ -14043,9 +14065,7 @@ std::shared_ptr<StoredLineResult> build_compact_transport_observable_line(
             transport_state->plan_owner()->checkpoint_identity()},
            {"transport_state", transport_state->handle()},
            {"transport_state_checkpoint_identity",
-            transport_state->checkpoint_identity()},
-           {"transport_state_provenance_identity",
-            transport_state->provenance_identity()}}},
+            transport_state->checkpoint_identity()}}},
       {"aggregate", std::move(aggregate_record)},
       {"epsilon", json::object{{"min", result.value.epsilon.min_power},
                                 {"max", result.value.epsilon.complete_max}}},
@@ -14068,8 +14088,7 @@ json::object compact_transport_state_reference(
         "compact transport reference requires a retained state");
   return json::object{
       {"handle", state->handle()},
-      {"checkpoint_identity", state->checkpoint_identity()},
-      {"provenance_identity", state->provenance_identity()}};
+      {"checkpoint_identity", state->checkpoint_identity()}};
 }
 
 json::object compact_transport_pair_source_side(
@@ -14078,8 +14097,6 @@ json::object compact_transport_pair_source_side(
       {"tile_plan", state->plan_owner()->handle()},
       {"tile_plan_checkpoint_identity",
        state->plan_owner()->checkpoint_identity()},
-      {"tile_plan_provenance_identity",
-       state->plan_owner()->provenance_identity()},
       {"transport_state", compact_transport_state_reference(state)}};
 }
 
@@ -14107,7 +14124,7 @@ build_compact_transport_pair_observable_line(
       upper_state->plan_owner()->arm("upper").exact;
   json::object provenance{
       {"schema",
-       "diffexp2-retained-native-transport-pair-observable-line-v1"},
+       "diffexp2-retained-native-transport-pair-observable-line-v2"},
       {"checkpoint_identity", checkpoint_identity},
       {"arm", "combined"},
       {"interval", json::object{
@@ -16284,12 +16301,18 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
       "checkpoint retained line aggregate");
   const auto schema = required_string(object, "schema");
   const bool compact_single_transport =
-      schema == "diffexp2-retained-transport-observable-line-v1";
+      schema == "diffexp2-retained-transport-observable-line-v1" ||
+      schema == "diffexp2-retained-transport-observable-line-v2";
   const bool compact_pair_transport =
       schema ==
-          "diffexp2-retained-transport-pair-observable-line-v1";
+          "diffexp2-retained-transport-pair-observable-line-v1" ||
+      schema ==
+          "diffexp2-retained-transport-pair-observable-line-v2";
   const bool compact_transport =
       compact_single_transport || compact_pair_transport;
+  const bool compact_v2 =
+      schema == "diffexp2-retained-transport-observable-line-v2" ||
+      schema == "diffexp2-retained-transport-pair-observable-line-v2";
   if (!compact_transport && schema != "diffexp2-retained-line-aggregate-v1")
     throw std::invalid_argument(
         "unsupported retained line-aggregate checkpoint schema");
@@ -16316,9 +16339,13 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
       "checkpoint line aggregate provenance");
   if (required_string(provenance, "schema") !=
           (compact_pair_transport
-               ? "diffexp2-retained-native-transport-pair-observable-line-v1"
+               ? compact_v2
+                   ? "diffexp2-retained-native-transport-pair-observable-line-v2"
+                   : "diffexp2-retained-native-transport-pair-observable-line-v1"
                : compact_single_transport
-               ? "diffexp2-retained-native-transport-observable-line-v1"
+               ? compact_v2
+                   ? "diffexp2-retained-native-transport-observable-line-v2"
+                   : "diffexp2-retained-native-transport-observable-line-v1"
                : "diffexp2-retained-native-line-aggregate-v1") ||
       required_string(provenance, "checkpoint_identity") !=
           checkpoint_identity ||
@@ -16329,12 +16356,19 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   const auto& source = as_object(
       provenance.at("source"), "checkpoint line aggregate source");
   if (compact_single_transport)
-    require_exact_keys(
-        source,
-        {"tile_plan", "tile_plan_checkpoint_identity", "transport_state",
-         "transport_state_checkpoint_identity",
-         "transport_state_provenance_identity"},
-        "checkpoint compact transport line source");
+    if (compact_v2)
+      require_exact_keys(
+          source,
+          {"tile_plan", "tile_plan_checkpoint_identity", "transport_state",
+           "transport_state_checkpoint_identity"},
+          "checkpoint compact transport line source");
+    else
+      require_exact_keys(
+          source,
+          {"tile_plan", "tile_plan_checkpoint_identity", "transport_state",
+           "transport_state_checkpoint_identity",
+           "transport_state_provenance_identity"},
+          "checkpoint compact transport line source");
   else if (compact_pair_transport)
     require_exact_keys(
         source, {"lower", "upper", "common_anchor"},
@@ -16358,8 +16392,9 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
            transport_owners.front()->handle() ||
        required_string(source, "transport_state_checkpoint_identity") !=
            transport_owners.front()->checkpoint_identity() ||
-       required_string(source, "transport_state_provenance_identity") !=
-           transport_owners.front()->provenance_identity() ||
+       (!compact_v2 &&
+        required_string(source, "transport_state_provenance_identity") !=
+            transport_owners.front()->provenance_identity()) ||
        transport_owners.front()->plan_owner().get() != plans.front().get() ||
        transport_owners.front()->arm_name() !=
            required_string(provenance, "arm")))
@@ -16377,30 +16412,42 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
                                    const std::shared_ptr<StoredTransportArmState>& state,
                                    const char* label) {
       const auto& side = as_object(raw_side, label);
-      require_exact_keys(
-          side,
-          {"tile_plan", "tile_plan_checkpoint_identity",
-           "tile_plan_provenance_identity", "transport_state"},
-          label);
+      if (compact_v2)
+        require_exact_keys(
+            side,
+            {"tile_plan", "tile_plan_checkpoint_identity",
+             "transport_state"}, label);
+      else
+        require_exact_keys(
+            side,
+            {"tile_plan", "tile_plan_checkpoint_identity",
+             "tile_plan_provenance_identity", "transport_state"},
+            label);
       if (required_string(side, "tile_plan") != plan->handle() ||
           required_string(side, "tile_plan_checkpoint_identity") !=
               plan->checkpoint_identity() ||
-          required_string(side, "tile_plan_provenance_identity") !=
-              plan->provenance_identity() ||
+          (!compact_v2 &&
+           required_string(side, "tile_plan_provenance_identity") !=
+               plan->provenance_identity()) ||
           state->plan_owner().get() != plan.get())
         throw std::invalid_argument(
             std::string(label) + " differs from its retained plan owner");
       const auto& state_reference = as_object(
           side.at("transport_state"), label);
-      require_exact_keys(
-          state_reference,
-          {"handle", "checkpoint_identity", "provenance_identity"},
-          label);
+      if (compact_v2)
+        require_exact_keys(
+            state_reference, {"handle", "checkpoint_identity"}, label);
+      else
+        require_exact_keys(
+            state_reference,
+            {"handle", "checkpoint_identity", "provenance_identity"},
+            label);
       if (required_string(state_reference, "handle") != state->handle() ||
           required_string(state_reference, "checkpoint_identity") !=
               state->checkpoint_identity() ||
-          required_string(state_reference, "provenance_identity") !=
-              state->provenance_identity())
+          (!compact_v2 &&
+           required_string(state_reference, "provenance_identity") !=
+               state->provenance_identity()))
         throw std::invalid_argument(
             std::string(label) + " differs from its retained state owner");
     };
@@ -16491,18 +16538,24 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
     const auto& state_reference = as_object(
         aggregate.at("transport_state"),
         "checkpoint observable transport state reference");
-    require_exact_keys(state_reference,
-                       {"handle", "checkpoint_identity",
-                        "provenance_identity"},
-                       "checkpoint observable transport state reference");
+    if (compact_v2)
+      require_exact_keys(
+          state_reference, {"handle", "checkpoint_identity"},
+          "checkpoint observable transport state reference");
+    else
+      require_exact_keys(state_reference,
+                         {"handle", "checkpoint_identity",
+                          "provenance_identity"},
+                         "checkpoint observable transport state reference");
     const auto& transport_owner = transport_owners.front();
     if (!transport_owner ||
         required_string(state_reference, "handle") !=
             transport_owner->handle() ||
         required_string(state_reference, "checkpoint_identity") !=
             transport_owner->checkpoint_identity() ||
-        required_string(state_reference, "provenance_identity") !=
-            transport_owner->provenance_identity())
+        (!compact_v2 &&
+         required_string(state_reference, "provenance_identity") !=
+             transport_owner->provenance_identity()))
       throw std::invalid_argument(
           "checkpoint observable recipe names a different transport state");
     observable_epsilon_contract = parse_observable_epsilon_contract(
@@ -16556,14 +16609,19 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
           side, {"transport_state", "rows", "tile_count"}, label);
       const auto& reference = as_object(
           side.at("transport_state"), label);
-      require_exact_keys(reference,
-                         {"handle", "checkpoint_identity",
-                          "provenance_identity"}, label);
+      if (compact_v2)
+        require_exact_keys(reference, {"handle", "checkpoint_identity"},
+                           label);
+      else
+        require_exact_keys(reference,
+                           {"handle", "checkpoint_identity",
+                            "provenance_identity"}, label);
       if (required_string(reference, "handle") != owner->handle() ||
           required_string(reference, "checkpoint_identity") !=
               owner->checkpoint_identity() ||
-          required_string(reference, "provenance_identity") !=
-              owner->provenance_identity())
+          (!compact_v2 &&
+           required_string(reference, "provenance_identity") !=
+               owner->provenance_identity()))
         throw std::invalid_argument(
             std::string(label) + " names a different transport state");
       validate_observable_rows(side.at("rows"), side.at("tile_count"),
@@ -16986,7 +17044,11 @@ json::array checkpoint_line_identity_manifest(const json::array& items) {
                           schema ==
                               "diffexp2-retained-transport-observable-line-v1" ||
                           schema ==
-                              "diffexp2-retained-transport-pair-observable-line-v1")
+                              "diffexp2-retained-transport-observable-line-v2" ||
+                          schema ==
+                              "diffexp2-retained-transport-pair-observable-line-v1" ||
+                          schema ==
+                              "diffexp2-retained-transport-pair-observable-line-v2")
         ? as_object(item.at("provenance"),
                     "checkpoint line aggregate provenance").at("source")
         : item.at("source");
@@ -18386,10 +18448,13 @@ json::object restore_checkpoint(const std::string& path,
         const json::object* source = nullptr;
         const bool compact_pair_line =
             schema ==
-                "diffexp2-retained-transport-pair-observable-line-v1";
+                "diffexp2-retained-transport-pair-observable-line-v1" ||
+            schema ==
+                "diffexp2-retained-transport-pair-observable-line-v2";
         const bool aggregate_line =
             schema == "diffexp2-retained-line-aggregate-v1" ||
             schema == "diffexp2-retained-transport-observable-line-v1" ||
+            schema == "diffexp2-retained-transport-observable-line-v2" ||
             compact_pair_line;
         if (aggregate_line)
           source = &as_object(
@@ -20168,10 +20233,8 @@ json::object run_session_command(const json::object& root) {
             {"observable_identity", observable.identity},
             {"observable_checkpoint_identity",
              observable.checkpoint_identity},
-            {"transport_state", json::object{
-                 {"handle", state->handle()},
-                 {"checkpoint_identity", state->checkpoint_identity()},
-                 {"provenance_identity", state->provenance_identity()}}},
+            {"transport_state",
+             compact_transport_state_reference(state)},
             {"output_epsilon_contract", observable.epsilon_record},
             {"tail_policy",
              transport_tail_policy_name(observable.tail_policy)},

@@ -444,11 +444,21 @@ int main() {
     for (const auto& raw : payload.at("retained_line_results").as_array()) {
       const auto& record = raw.as_object();
       if (record.at("schema") !=
-              "diffexp2-retained-transport-pair-observable-line-v1" ||
+              "diffexp2-retained-transport-pair-observable-line-v2" ||
           record.at("provenance").as_object().at("aggregate").as_object()
                   .if_contains("components") != nullptr)
         throw std::runtime_error(
             "paired checkpoint emitted a noncompact line record");
+      const auto& provenance = record.at("provenance").as_object();
+      const auto& source = provenance.at("source").as_object();
+      for (const auto* side_name : {"lower", "upper"}) {
+        const auto& side = source.at(side_name).as_object();
+        const auto& state = side.at("transport_state").as_object();
+        if (side.if_contains("tile_plan_provenance_identity") != nullptr ||
+            state.if_contains("provenance_identity") != nullptr)
+          throw std::runtime_error(
+              "paired checkpoint recursively embedded owner provenance");
+      }
     }
 
     const auto restored = request(json::object{

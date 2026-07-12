@@ -1101,7 +1101,7 @@ int main() {
         if (line.at("handle").as_string() != line_handle) continue;
         found_compact =
             line.at("schema") ==
-                "diffexp2-retained-transport-observable-line-v1" &&
+                "diffexp2-retained-transport-observable-line-v2" &&
             line.at("provenance").as_object().at("aggregate").as_object()
                     .if_contains("components") == nullptr;
       }

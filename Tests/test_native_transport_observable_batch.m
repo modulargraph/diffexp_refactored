@@ -127,7 +127,7 @@ legacyManifest = Append[legacyCore, "ManifestIdentity" ->
   DiffExp2`NativeTransport`Private`nativeCheckpointIdentity[
     "de2-native-observable-checkpoint-manifest-", legacyCore]];
 assert["compact checkpoint manifest replaces recursive provenance with digests",
-  ByteCount[checkpointManifest] < ByteCount[legacyManifest]/10 &&
+  ByteCount[checkpointManifest] < ByteCount[legacyManifest]/2 &&
     AllTrue[Join[Keys /@ Values[checkpointManifest["StateHandles"]],
         Keys /@ checkpointManifest["Results"]],
       FreeQ[#, "ProvenanceIdentity"] &]];

@@ -24,6 +24,7 @@ SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates
 SolveNativeValueRegular::usage = "SolveNativeValueRegular[chartSystem, req, vals] propagates a regular center-value vector as one retained C++ local solution. It accepts an SCC skeleton by materializing the exact identity physical frame for this single value recursion, caps delivery to the honest incoming epsilon window, and never returns a coefficient tensor.";
 SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
 PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
+PrepareNativeRationalRow::usage = "PrepareNativeRationalRow[chartSystem, sourceShape, cvec, physicalVariable, serialization] prepares cvec(center+scale t,eps) as the strict JSON-ready rational row consumed by CppBackend`ApplyPersistentRationalRow. sourceShape supplies the retained local's exact EpsWindow, TWindow, and Dimension; serialization is Automatic or <|\"domain\"->\"acb\"|\"rational\",\"symbols\"->{}|>. The affine dx Jacobian is deliberately not included.";
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or an exact-Rational regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
@@ -2516,6 +2517,85 @@ cppPreparedRationalMultiplierJSON[prepared_Association,
     prepared["TaylorKernels"], {2}],
   "exact_identity" -> prepared["ExactIdentity"],
   "proven_zero" -> TrueQ[prepared["ProvenZero"]]|>;
+
+(* Prepare the user-facing coefficient row in precisely the same finite
+   multiplier representation used by native SCC propagation.  The retained
+   local, rather than a requested outer window, owns the rectangle: after a
+   match or epsilon shift its honest CompleteMax may be smaller. *)
+PrepareNativeRationalRow[cs_Association, sourceShape_Association,
+    cvec_List, physicalVar_Symbol, serialization_:Automatic] := Module[
+  {d = Lookup[cs, "SystemSize", None], epsWindow, tWindow, dimension,
+   shape, field, domain, symbols, inputDigits, t, localExpressions,
+   prepared, active, encodedEntries, identityPayload, identity},
+  epsWindow = Lookup[sourceShape, "EpsWindow", None];
+  tWindow = Lookup[sourceShape, "TWindow", None];
+  dimension = Lookup[sourceShape, "Dimension", None];
+  If[!IntegerQ[d] || d < 1 || Length[cvec] =!= d ||
+      !AssociationQ[Lookup[cs, "ChartMap", None]] ||
+      !MatchQ[Lookup[cs, "ChartVar", None], _Symbol] ||
+      !AssociationQ[epsWindow] ||
+      Sort[Keys[epsWindow]] =!= Sort[{"Min", "CompleteMax"}] ||
+      !IntegerQ[epsWindow["Min"]] ||
+      !IntegerQ[epsWindow["CompleteMax"]] ||
+      epsWindow["Min"] > epsWindow["CompleteMax"] ||
+      !AssociationQ[tWindow] ||
+      Sort[Keys[tWindow]] =!= {"CompleteMax"} ||
+      !IntegerQ[tWindow["CompleteMax"]] ||
+      tWindow["CompleteMax"] < 0 || dimension =!= d,
+    err["E8", cs, <|"SourceShape" -> sourceShape,
+      "CoefficientCount" -> Length[cvec], "Dimension" -> d,
+      "Detail" -> "native rational-row preparation requires the retained local's exact epsilon/Taylor windows and one coefficient per physical component"|>]];
+  field = sccSerializationField[serialization, cs];
+  domain = field["domain"];
+  symbols = field["symbols"];
+  If[!MemberQ[{"acb", "rational"}, domain] || symbols =!= {},
+    err["E5", cs, <|"Serialization" -> field,
+      "Detail" -> "retained rational-row application supports only specialized Acb or exact Rational sessions; unresolved analytic regulators must be specialized before transport"|>]];
+  t = cs["ChartVar"];
+  shape = <|"Center" -> cs["Center"], "ChartMap" -> cs["ChartMap"],
+    "Radius" -> cs["Radius"],
+    "Prescriptions" -> Lookup[cs, "Prescriptions", {}],
+    "EpsWindow" -> epsWindow, "TWindow" -> tWindow,
+    "Dimension" -> d|>;
+  localExpressions = Map[Cancel[Together[# /. physicalVar ->
+      cs["Center"] + cs["ChartMap", "Scale"]*t]] &, cvec];
+  prepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
+      shape, #, t] & /@ localExpressions;
+  active = Select[Range[d],
+    !TrueQ[prepared[[#]]["ProvenZero"]] &];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*
+    cfg["WorkingPrecision"];
+  encodedEntries = Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = symbols},
+    Map[<|"column" -> # - 1,
+        "multiplier" -> cppPreparedRationalMultiplierJSON[
+          prepared[[#]], inputDigits, cs]|> &, active]];
+  identityPayload = <|
+    "schema" -> "diffexp2-prepared-rational-local-row-identity-v1",
+    "chart" -> <|
+      "center" -> DiffExp2`SectorSeries`ExactExpressionIdentity[
+        cs["Center"], t],
+      "scale" -> DiffExp2`SectorSeries`ExactExpressionIdentity[
+        cs["ChartMap", "Scale"], t]|>,
+    "source_shape" -> <|"epsilon_min" -> epsWindow["Min"],
+      "epsilon_complete_max" -> epsWindow["CompleteMax"],
+      "taylor_complete_max" -> tWindow["CompleteMax"],
+      "dimension" -> d|>,
+    "physical_variable" -> sccSymbolIdentity[physicalVar],
+    "serialization" -> <|"domain" -> domain, "symbols" -> {}|>,
+    "entries" -> MapIndexed[<|
+        "column" -> First[#2] - 1,
+        "physical_exact_identity" ->
+          DiffExp2`SectorSeries`ExactExpressionIdentity[#1, physicalVar],
+        "local_exact_identity" -> prepared[[First[#2]]]["ExactIdentity"],
+        "proven_zero" -> TrueQ[prepared[[First[#2]]]["ProvenZero"]],
+        "epsilon_shift" -> prepared[[First[#2]]]["EpsilonShift"],
+        "center_pole_order" ->
+          prepared[[First[#2]]]["CenterPoleOrder"]|> &, cvec]|>;
+  identity = ExportString[identityPayload, "RawJSON", "Compact" -> True];
+  <|"schema" -> "diffexp2-prepared-rational-local-row-v1",
+    "columns" -> d, "exact_identity" -> identity,
+    "entries" -> encodedEntries|>];
 
 (* THE canonical exact cell record shared by the future parent system/theta
    manifests and every sparse cross-edge binding.  ProvenZero is decided in

@@ -803,6 +803,11 @@ CertifiedStoredLineIntegral integrate_regular_local_line_with_certified_tail(
   result.tail = certify_regular_taylor_line_tail(
       model, lower, upper, witness_radius_exact,
       options.delivered_epsilon);
+  result.integral.diagnostics.tail_certificate_requested = true;
+  result.integral.diagnostics.tail_certificate_status =
+      status_prefix(result.tail.status);
+  result.integral.diagnostics.tail_witness_radius_exact =
+      witness_radius_exact;
   if (result.tail.status == TailMajorantStatus::Certified) {
     result.integral.value.error = result.tail.integral;
     result.integral.scope =

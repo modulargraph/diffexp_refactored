@@ -39,8 +39,8 @@ PersistentTilePlanStatistics::usage = "PersistentTilePlanStatistics[handle] retu
 PersistentTileMatchInterval::usage = "PersistentTileMatchInterval[handle, arm, index] returns one exact native match handoff for arm \"lower\" or \"upper\". Wolfram indices are one-based.";
 PersistentTileIntegrationInterval::usage = "PersistentTileIntegrationInterval[handle, arm, index] returns one exact physical/local tile interval selected by the retained native plan. Wolfram indices are one-based.";
 ReleasePersistentTilePlan::usage = "ReleasePersistentTilePlan[handle] releases one public native tile-plan token. Already-retained line results keep strong ownership of their immutable plan snapshot.";
-RunPersistentTileIntegral::usage = "RunPersistentTileIntegral[plan, arm, tile, local, epsilon, checkpointIdentity] integrates the retained local over the exact tile selected by plan, applies the exact affine Jacobian, and retains a StoredTruncation result with no unseen-tail claim. Wolfram tile indices are one-based.";
-PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, StoredTruncation diagnostics, and export counters.";
+RunPersistentTileIntegral::usage = "RunPersistentTileIntegral[plan, arm, tile, local, epsilon, checkpointIdentity, certifyTail] integrates the retained local over the exact tile selected by plan and applies the exact affine Jacobian. With certifyTail True (the seventh Boolean argument), an attached regular-tail model may promote the result to FullLocalWithCertifiedTail; unsupported or inconclusive requests remain StoredTruncation. Wolfram tile indices are one-based.";
+PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, stored-or-certified-tail scope diagnostics, and export counters.";
 ExportPersistentLineIntegral::usage = "ExportPersistentLineIntegral[handle, checkpointIdentity, outputDigits] explicitly exports one retained physical-tile epsilon vector for compatibility.";
 ReleasePersistentLineIntegral::usage = "ReleasePersistentLineIntegral[handle] releases one retained line-integral result. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
@@ -1156,9 +1156,9 @@ ReleasePersistentTilePlan[handle_Association] := Module[
 
 RunPersistentTileIntegral[plan_Association, arm_String, tile_Integer,
     local_Association, epsilon_Association,
-    checkpointIdentity_String] := Module[
+    checkpointIdentity_String, certifyTail_:False] := Module[
   {planTokens = persistentTilePlanHandles[plan],
-   localTokens = persistentLocalHandles[local], sourceCheckpoint},
+   localTokens = persistentLocalHandles[local], sourceCheckpoint, request},
   If[FailureQ[planTokens], Return[planTokens, Module]];
   If[FailureQ[localTokens], Return[localTokens, Module]];
   sourceCheckpoint = Lookup[local, "checkpoint_identity",
@@ -1167,18 +1167,20 @@ RunPersistentTileIntegral[plan_Association, arm_String, tile_Integer,
       !MemberQ[{"lower", "upper"}, arm] || tile < 1 ||
       Sort[Keys[epsilon]] =!= Sort[{"min", "max"}] ||
       !StringQ[sourceCheckpoint] || StringLength[sourceCheckpoint] == 0 ||
-      StringLength[checkpointIdentity] == 0,
+      StringLength[checkpointIdentity] == 0 || !BooleanQ[certifyTail],
     Return[Failure["CppBackend", <|"Detail" ->
-      "persistent tile integration requires one session, arm lower/upper, a positive one-based tile, exact min/max epsilon window, and nonempty source/result checkpoint identities"|>],
+      "persistent tile integration requires one session, arm lower/upper, a positive one-based tile, exact min/max epsilon window, nonempty source/result checkpoint identities, and a Boolean certifyTail request"|>],
       Module]];
-  RunRequest[<|"schema" -> 2, "op" -> "integration.line",
+  request = <|"schema" -> 2, "op" -> "integration.line",
     "session" -> planTokens["Session"],
     "tile_plan" -> planTokens["TilePlan"],
     "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
     "local" -> localTokens["Local"], "arm" -> arm,
     "tile" -> tile - 1, "epsilon" -> epsilon,
     "source_checkpoint_identity" -> sourceCheckpoint,
-    "checkpoint_identity" -> checkpointIdentity|>]];
+    "checkpoint_identity" -> checkpointIdentity|>;
+  If[TrueQ[certifyTail], request = Append[request, "certify_tail" -> True]];
+  RunRequest[request]];
 
 persistentLineIntegralHandles[handle_Association] := Module[
   {session, line, checkpoint},

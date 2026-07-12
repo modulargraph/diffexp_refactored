@@ -8,6 +8,7 @@
 #include "diffexp2/path_planner.hpp"
 #include "diffexp2/recurrence.hpp"
 #include "diffexp2/singular_indicial.hpp"
+#include "diffexp2/tail_majorant.hpp"
 
 #include <boost/json.hpp>
 
@@ -1221,6 +1222,85 @@ json::object encode_epsilon_vector(const EpsilonVector& vector, int digits) {
   return encoded;
 }
 
+constexpr const char* kRegularTailMajorantCapability =
+    "retained-regular-homogeneous-gronwall-cauchy-tail-v1";
+
+const char* tail_majorant_status_name(TailMajorantStatus status) {
+  switch (status) {
+    case TailMajorantStatus::Certified:
+      return "certified";
+    case TailMajorantStatus::Inconclusive:
+      return "inconclusive";
+    case TailMajorantStatus::Unsupported:
+      return "unsupported";
+  }
+  throw std::logic_error("unknown tail-majorant status");
+}
+
+RegularTaylorTailModelResult unavailable_tail_model(std::string detail) {
+  return {TailMajorantStatus::Unsupported, std::nullopt,
+          std::move(detail)};
+}
+
+json::object encode_tail_model_status(
+    const RegularTaylorTailModelResult& result) {
+  json::object encoded{
+      {"capability", kRegularTailMajorantCapability},
+      {"status", tail_majorant_status_name(result.status)},
+      {"attached", result.model.has_value()},
+      {"detail", result.detail},
+      {"checkpoint_serialized", false}};
+  if (result.model.has_value()) {
+    encoded["operator_identity"] = result.model->operator_identity;
+    encoded["local_checkpoint_identity"] =
+        result.model->local_checkpoint_identity;
+    encoded["epsilon"] = json::object{
+        {"min", result.model->epsilon.min_power},
+        {"max", result.model->epsilon.complete_max}};
+    encoded["taylor_complete_max"] =
+        result.model->taylor_complete_max;
+    encoded["provenance"] = result.model->provenance;
+  }
+  return encoded;
+}
+
+std::optional<std::string> parse_certified_tail_witness(
+    const json::object& request) {
+  const auto* raw_options = request.if_contains("options");
+  if (raw_options == nullptr) return std::nullopt;
+  const auto& options = as_object(*raw_options, "local evaluation options");
+  const auto* raw_radius =
+      options.if_contains("certified_tail_radius_exact");
+  if (raw_radius == nullptr || raw_radius->is_null()) return std::nullopt;
+  if (!raw_radius->is_string() || raw_radius->as_string().empty())
+    throw std::invalid_argument(
+        "certified tail radius must be a nonempty exact rational string");
+  const std::string radius(raw_radius->as_string());
+  const Rational parsed(radius);
+  if (parsed.sign() <= 0)
+    throw std::invalid_argument("certified tail radius must be positive");
+  return parsed.str();
+}
+
+json::object encode_point_tail_certificate(
+    const RegularTaylorPointTailCertificate& certificate,
+    const std::string& witness_radius) {
+  json::object result{
+      {"capability", kRegularTailMajorantCapability},
+      {"requested", true},
+      {"status", tail_majorant_status_name(certificate.status)},
+      {"witness_radius_exact", witness_radius},
+      {"detail", certificate.detail}};
+  if (certificate.disk.status == TailMajorantStatus::Certified) {
+    result["q_lower_approx"] =
+        certificate.disk.q_lower.approximate_upper();
+    result["ode_norm_upper_approx"] =
+        certificate.disk.ode_norm_upper.approximate_upper();
+    result["bound_encoding"] = "approximate-double-diagnostics";
+  }
+  return result;
+}
+
 EvaluationOptions parse_local_evaluation_options(
     const json::object& request, bool default_tail_estimate) {
   EvaluationOptions options;
@@ -1332,6 +1412,10 @@ struct StoredLocalStats {
   double create_parse_ms = 0.0;
   double create_kernel_ms = 0.0;
   std::size_t coefficient_count = 0;
+  std::uint64_t tail_certificate_requests = 0;
+  std::uint64_t tail_certificate_certified = 0;
+  std::uint64_t tail_certificate_inconclusive = 0;
+  std::uint64_t tail_certificate_unsupported = 0;
 };
 
 struct NativeLocalDiagnostics {
@@ -1909,6 +1993,8 @@ struct NativeLocalRun {
   LocalSolution<Scalar> solution;
   std::vector<PseudoHit<Scalar>> pseudo_hits;
   NativeLocalDiagnostics diagnostics;
+  RegularTaylorTailModelResult tail_model = unavailable_tail_model(
+      "tail model was not prepared for this native local run");
 };
 
 json::value canonical_json_value(const json::value& value);
@@ -1957,7 +2043,8 @@ class StoredLocalBase {
       const std::vector<Prescription>& prescriptions,
       const Rational& local_begin, const Rational& local_end,
       const EpsilonWindow& delivered_epsilon,
-      std::optional<std::int32_t> exact_rim) = 0;
+      std::optional<std::int32_t> exact_rim,
+      bool certify_tail) = 0;
   virtual json::object endpoint_metadata() const = 0;
   virtual json::object exact_analytic_metadata() const = 0;
   virtual void require_exact_plan_binding(
@@ -2001,7 +2088,10 @@ class StoredLocal final : public StoredLocalBase {
                   std::nullopt,
               std::optional<json::object> retained_derivation =
                   std::nullopt,
-              std::shared_ptr<void> retained_owner = nullptr)
+              std::shared_ptr<void> retained_owner = nullptr,
+              RegularTaylorTailModelResult tail_model =
+                  unavailable_tail_model(
+                      "tail model is unavailable for this retained local"))
       : StoredLocalBase(std::move(handle), std::move(source_chart),
                         std::move(source_operator_identity),
                         diagnostics.parse_ms, diagnostics.kernel_ms,
@@ -2009,7 +2099,8 @@ class StoredLocal final : public StoredLocalBase {
         solution_(std::move(solution)), precision_bits_(precision_bits),
         pseudo_hits_(std::move(pseudo_hits)), top_valid_(diagnostics.top_valid),
         retained_derivation_(std::move(retained_derivation)),
-        retained_owner_(std::move(retained_owner)) {
+        retained_owner_(std::move(retained_owner)),
+        tail_model_(std::move(tail_model)) {
     validate_local_solution(solution_, false);
   }
 
@@ -2023,17 +2114,47 @@ class StoredLocal final : public StoredLocalBase {
       AcbPrecisionLease lease(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
       const auto point = parse_local_evaluation_point(request);
-      const auto options = parse_local_evaluation_options(request, true);
+      auto options = parse_local_evaluation_options(request, true);
+      const auto tail_witness = parse_certified_tail_witness(request);
+      if (tail_witness.has_value())
+        options.compute_tail_estimate = false;
       const auto started = std::chrono::steady_clock::now();
-      auto result = evaluate_local_solution(solution_, point, options);
+      LocalEvaluation result;
+      std::optional<RegularTaylorPointTailCertificate> tail_certificate;
+      TailMajorantStatus requested_tail_status = tail_model_.status;
+      std::string requested_tail_detail = tail_model_.detail;
+      if (tail_witness.has_value() && tail_model_.model.has_value()) {
+        auto certified = evaluate_local_solution_with_certified_tail(
+            solution_, *tail_model_.model, point, *tail_witness, options);
+        result = std::move(certified.evaluation);
+        requested_tail_status = certified.tail.status;
+        requested_tail_detail = certified.tail.detail;
+        tail_certificate = std::move(certified.tail);
+      } else {
+        result = evaluate_local_solution(solution_, point, options);
+      }
       const auto elapsed = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       evaluations_.fetch_add(1);
+      if (tail_witness.has_value()) {
+        tail_certificate_requests_.fetch_add(1);
+        switch (requested_tail_status) {
+          case TailMajorantStatus::Certified:
+            tail_certificate_certified_.fetch_add(1);
+            break;
+          case TailMajorantStatus::Inconclusive:
+            tail_certificate_inconclusive_.fetch_add(1);
+            break;
+          case TailMajorantStatus::Unsupported:
+            tail_certificate_unsupported_.fetch_add(1);
+            break;
+        }
+      }
       {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         evaluate_ms_ += elapsed;
       }
-      return json::object{
+      json::object response{
           {"point_exact", point.exact_coordinate},
           {"imaginary_sign", result.imaginary_sign.has_value()
                ? json::value(*result.imaginary_sign) : json::value(nullptr)},
@@ -2041,6 +2162,21 @@ class StoredLocal final : public StoredLocalBase {
           {"elapsed_ms", elapsed},
           {"value", encode_epsilon_vector(result.value, output_digits)},
           {"theta", encode_epsilon_vector(result.theta_value, output_digits)}};
+      if (tail_witness.has_value()) {
+        if (tail_certificate.has_value()) {
+          response["tail_certificate"] = encode_point_tail_certificate(
+              *tail_certificate, *tail_witness);
+        } else {
+          response["tail_certificate"] = json::object{
+              {"capability", kRegularTailMajorantCapability},
+              {"requested", true},
+              {"status", tail_majorant_status_name(requested_tail_status)},
+              {"model_status", tail_majorant_status_name(tail_model_.status)},
+              {"witness_radius_exact", *tail_witness},
+              {"detail", requested_tail_detail}};
+        }
+      }
+      return response;
     }
   }
 
@@ -2172,7 +2308,8 @@ class StoredLocal final : public StoredLocalBase {
       const std::vector<Prescription>& prescriptions,
       const Rational& local_begin, const Rational& local_end,
       const EpsilonWindow& delivered_epsilon,
-      std::optional<std::int32_t> exact_rim) override {
+      std::optional<std::int32_t> exact_rim,
+      bool certify_tail) override {
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       throw std::domain_error(
           "native planned line integration rejects unresolved symbolic "
@@ -2214,9 +2351,41 @@ class StoredLocal final : public StoredLocalBase {
       const auto& primitive_end =
           reverse_local_orientation ? local_begin : local_end;
       const auto started = std::chrono::steady_clock::now();
-      auto result = integrate_stored_local_line(
-          solution_, RealEvaluationPoint::rational(primitive_begin.str()),
-          RealEvaluationPoint::rational(primitive_end.str()), options);
+      const auto begin_point =
+          RealEvaluationPoint::rational(primitive_begin.str());
+      const auto end_point =
+          RealEvaluationPoint::rational(primitive_end.str());
+      StoredLineIntegral result;
+      if (certify_tail && tail_model_.model.has_value()) {
+        const auto begin_modulus = primitive_begin.sign() < 0
+            ? -primitive_begin : primitive_begin;
+        const auto end_modulus = primitive_end.sign() < 0
+            ? -primitive_end : primitive_end;
+        const auto outer = begin_modulus < end_modulus
+            ? end_modulus : begin_modulus;
+        if (!(outer < chart.radius))
+          throw std::invalid_argument(
+              "planned line endpoint is not strictly inside its exact chart radius");
+        const auto witness =
+            (outer + chart.radius) / Rational(2);
+        auto certified = integrate_regular_local_line_with_certified_tail(
+            solution_, *tail_model_.model, begin_point, end_point,
+            options, witness.str());
+        result = std::move(certified.integral);
+      } else {
+        result = integrate_stored_local_line(
+            solution_, begin_point, end_point, options);
+        if (certify_tail) {
+          result.diagnostics.tail_certificate_requested = true;
+          result.diagnostics.tail_certificate_status =
+              tail_majorant_status_name(tail_model_.status);
+          result.value.error.provenance =
+              std::string(tail_majorant_status_name(tail_model_.status)) +
+              ": " + tail_model_.detail +
+              "; returned value remains stored Taylor truncation only";
+          result.diagnostics.detail = result.value.error.provenance;
+        }
+      }
       // integrate_stored_local_line is deliberately a local-coordinate
       // primitive.  A retained physical tile has dx = scale dt, so apply the
       // exact affine Jacobian before publishing the physical line result.
@@ -2226,6 +2395,13 @@ class StoredLocal final : public StoredLocalBase {
           ComplexBall::from_strings(oriented_jacobian.str());
       for (auto& coefficient : result.value.coefficients)
         coefficient *= jacobian;
+      if (!result.value.error.empty()) {
+        const auto jacobian_upper = Magnitude::upper_abs(jacobian);
+        for (auto& bound : result.value.error.absolute)
+          bound = bound * jacobian_upper;
+        result.value.error.provenance +=
+            "; physical_jacobian_exact=" + oriented_jacobian.str();
+      }
       const auto elapsed = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       line_integrations_.fetch_add(1);
@@ -2302,6 +2478,7 @@ class StoredLocal final : public StoredLocalBase {
         {"pseudo_hit_count", pseudo_hits_.size()},
         {"top_valid", encode_validity(top_valid_)},
         {"checkpoint_identity", solution_.checkpoint_identity},
+        {"tail_majorant", encode_tail_model_status(tail_model_)},
         {"metadata", metadata_json()},
         {"create_parse_ms", create_parse_ms_},
         {"create_kernel_ms", create_kernel_ms_}};
@@ -2326,6 +2503,13 @@ class StoredLocal final : public StoredLocalBase {
     out["residual_certify_ms"] = current.residual_certify_ms;
     out["endpoint_limit_ms"] = current.endpoint_limit_ms;
     out["line_integration_ms"] = current.line_integration_ms;
+    out["tail_certificate_requests"] = tail_certificate_requests_.load();
+    out["tail_certificate_certified"] =
+        tail_certificate_certified_.load();
+    out["tail_certificate_inconclusive"] =
+        tail_certificate_inconclusive_.load();
+    out["tail_certificate_unsupported"] =
+        tail_certificate_unsupported_.load();
     return out;
   }
 
@@ -2334,7 +2518,11 @@ class StoredLocal final : public StoredLocalBase {
     return {evaluations_.load(), residual_certifications_.load(),
             endpoint_limits_.load(), line_integrations_.load(), evaluate_ms_,
             residual_certify_ms_, endpoint_limit_ms_, line_integration_ms_,
-            create_parse_ms_, create_kernel_ms_, coefficient_count()};
+            create_parse_ms_, create_kernel_ms_, coefficient_count(),
+            tail_certificate_requests_.load(),
+            tail_certificate_certified_.load(),
+            tail_certificate_inconclusive_.load(),
+            tail_certificate_unsupported_.load()};
   }
 
   json::object checkpoint_record() const override {
@@ -2369,10 +2557,23 @@ class StoredLocal final : public StoredLocalBase {
                       {"residual_certify_ms", current.residual_certify_ms},
                       {"endpoint_limit_ms", current.endpoint_limit_ms},
                       {"line_integration_ms", current.line_integration_ms},
-                      {"coefficient_count", current.coefficient_count}}},
+                      {"coefficient_count", current.coefficient_count},
+                      {"tail_certificate_requests",
+                       current.tail_certificate_requests},
+                      {"tail_certificate_certified",
+                       current.tail_certificate_certified},
+                      {"tail_certificate_inconclusive",
+                       current.tail_certificate_inconclusive},
+                      {"tail_certificate_unsupported",
+                       current.tail_certificate_unsupported}}},
         {"column_provenance", column_provenance_.has_value()
              ? json::value(column_provenance_->encode())
-             : json::value(nullptr)}};
+             : json::value(nullptr)},
+        {"tail_model_restore", json::object{
+             {"capability", kRegularTailMajorantCapability},
+             {"serialized", false},
+             {"status", tail_majorant_status_name(tail_model_.status)},
+             {"attached_before_save", tail_model_.model.has_value()}}}};
     }
   }
 
@@ -2384,6 +2585,11 @@ class StoredLocal final : public StoredLocalBase {
     residual_certifications_.store(state.residual_certifications);
     endpoint_limits_.store(state.endpoint_limits);
     line_integrations_.store(state.line_integrations);
+    tail_certificate_requests_.store(state.tail_certificate_requests);
+    tail_certificate_certified_.store(state.tail_certificate_certified);
+    tail_certificate_inconclusive_.store(
+        state.tail_certificate_inconclusive);
+    tail_certificate_unsupported_.store(state.tail_certificate_unsupported);
     std::lock_guard<std::mutex> lock(stats_mutex_);
     evaluate_ms_ = state.evaluate_ms;
     residual_certify_ms_ = state.residual_certify_ms;
@@ -2441,10 +2647,16 @@ class StoredLocal final : public StoredLocalBase {
   std::int32_t top_valid_ = kCompleteInfinity;
   std::optional<json::object> retained_derivation_;
   std::shared_ptr<void> retained_owner_;
+  RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(
+      "tail model is unavailable for this retained local");
   std::atomic<std::uint64_t> evaluations_{0};
   std::atomic<std::uint64_t> residual_certifications_{0};
   std::atomic<std::uint64_t> endpoint_limits_{0};
   std::atomic<std::uint64_t> line_integrations_{0};
+  std::atomic<std::uint64_t> tail_certificate_requests_{0};
+  std::atomic<std::uint64_t> tail_certificate_certified_{0};
+  std::atomic<std::uint64_t> tail_certificate_inconclusive_{0};
+  std::atomic<std::uint64_t> tail_certificate_unsupported_{0};
   mutable std::mutex stats_mutex_;
   double evaluate_ms_ = 0.0;
   double residual_certify_ms_ = 0.0;
@@ -4160,12 +4372,21 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     const json::value& raw, const std::string& expected_domain,
     slong expected_precision_bits) {
   const auto& object = as_object(raw, "checkpoint retained local");
-  require_exact_keys(object,
-      {"schema", "handle", "source_chart", "source_operator_identity",
-       "scalar_domain",
-       "precision_bits", "solution", "pseudo_hits", "diagnostics",
-       "runtime_stats", "column_provenance"},
-      "checkpoint retained local");
+  const bool has_tail_restore =
+      object.if_contains("tail_model_restore") != nullptr;
+  if (has_tail_restore)
+    require_exact_keys(object,
+        {"schema", "handle", "source_chart", "source_operator_identity",
+         "scalar_domain", "precision_bits", "solution", "pseudo_hits",
+         "diagnostics", "runtime_stats", "column_provenance",
+         "tail_model_restore"},
+        "checkpoint retained local");
+  else
+    require_exact_keys(object,
+        {"schema", "handle", "source_chart", "source_operator_identity",
+         "scalar_domain", "precision_bits", "solution", "pseudo_hits",
+         "diagnostics", "runtime_stats", "column_provenance"},
+        "checkpoint retained local");
   if (required_string(object, "schema") != "diffexp2-retained-local-v2")
     throw std::invalid_argument("unsupported retained-local checkpoint schema");
   const auto scalar_domain = required_string(object, "scalar_domain");
@@ -4207,14 +4428,45 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
   if (!object.at("column_provenance").is_null())
     column_provenance = parse_checkpoint_column_provenance(
         object.at("column_provenance"));
+  std::string saved_tail_status = "unrecorded";
+  if (has_tail_restore) {
+    const auto& tail = as_object(
+        object.at("tail_model_restore"),
+        "checkpoint tail-model restore marker");
+    require_exact_keys(tail,
+        {"capability", "serialized", "status", "attached_before_save"},
+        "checkpoint tail-model restore marker");
+    if (required_string(tail, "capability") !=
+            kRegularTailMajorantCapability ||
+        tail.at("serialized").as_bool())
+      throw std::invalid_argument(
+          "checkpoint tail-model restore marker is incompatible");
+    (void)tail.at("attached_before_save").as_bool();
+    saved_tail_status = required_string(tail, "status");
+    if (saved_tail_status != "certified" &&
+        saved_tail_status != "inconclusive" &&
+        saved_tail_status != "unsupported")
+      throw std::invalid_argument(
+          "checkpoint tail-model restore marker has an unknown status");
+  }
 
   const auto& stats = as_object(object.at("runtime_stats"),
                                 "checkpoint local runtime stats");
-  require_exact_keys(stats,
-      {"evaluations", "residual_certifications", "endpoint_limits",
-       "line_integrations", "evaluate_ms", "residual_certify_ms",
-       "endpoint_limit_ms", "line_integration_ms",
-       "coefficient_count"}, "checkpoint local runtime stats");
+  if (has_tail_restore)
+    require_exact_keys(stats,
+        {"evaluations", "residual_certifications", "endpoint_limits",
+         "line_integrations", "evaluate_ms", "residual_certify_ms",
+         "endpoint_limit_ms", "line_integration_ms",
+         "coefficient_count", "tail_certificate_requests",
+         "tail_certificate_certified", "tail_certificate_inconclusive",
+         "tail_certificate_unsupported"},
+        "checkpoint local runtime stats");
+  else
+    require_exact_keys(stats,
+        {"evaluations", "residual_certifications", "endpoint_limits",
+         "line_integrations", "evaluate_ms", "residual_certify_ms",
+         "endpoint_limit_ms", "line_integration_ms",
+         "coefficient_count"}, "checkpoint local runtime stats");
   StoredLocalStats restored_stats;
   restored_stats.evaluations = as_u64(stats.at("evaluations"),
                                      "checkpoint local evaluations");
@@ -4244,11 +4496,30 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
         "checkpoint local coefficient count exceeds size_t");
   restored_stats.coefficient_count =
       static_cast<std::size_t>(coefficient_count);
+  if (has_tail_restore) {
+    restored_stats.tail_certificate_requests = as_u64(
+        stats.at("tail_certificate_requests"),
+        "checkpoint tail certificate requests");
+    restored_stats.tail_certificate_certified = as_u64(
+        stats.at("tail_certificate_certified"),
+        "checkpoint certified tail certificates");
+    restored_stats.tail_certificate_inconclusive = as_u64(
+        stats.at("tail_certificate_inconclusive"),
+        "checkpoint inconclusive tail certificates");
+    restored_stats.tail_certificate_unsupported = as_u64(
+        stats.at("tail_certificate_unsupported"),
+        "checkpoint unsupported tail certificates");
+  }
 
   auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
       handle, source_chart, source_operator_identity, std::move(solution),
       expected_precision_bits,
-      std::move(pseudo_hits), native, std::move(column_provenance));
+      std::move(pseudo_hits), native, std::move(column_provenance),
+      std::nullopt, nullptr,
+      unavailable_tail_model(
+          "checkpoint schema v2 does not serialize regular tail models; "
+          "saved model status was " + saved_tail_status +
+          "; re-solve the retained local to reattach certification state"));
   local->restore_runtime_stats(restored_stats);
   return local;
 }
@@ -5123,7 +5394,7 @@ class PreparedChart final : public PreparedChartBase {
 
   NativeLocalRun<Scalar> solve_native(
       const json::object& run, const json::object& metadata_object) {
-    return solve_native_impl(run, metadata_object, std::nullopt);
+    return solve_native_impl(run, metadata_object, std::nullopt, false);
   }
 
   NativeLocalRun<Scalar> solve_native_with_source(
@@ -5133,7 +5404,7 @@ class PreparedChart final : public PreparedChartBase {
       throw std::invalid_argument(
           "native SCC source injection rejects caller-supplied source data");
     return solve_native_impl(
-        run, metadata_object, std::move(source));
+        run, metadata_object, std::move(source), false);
   }
 
   void record_native_local_success(
@@ -5188,7 +5459,8 @@ class PreparedChart final : public PreparedChartBase {
  private:
   NativeLocalRun<Scalar> solve_native_impl(
       const json::object& run, const json::object& metadata_object,
-      std::optional<SourceData<Scalar>> native_source) {
+      std::optional<SourceData<Scalar>> native_source,
+      bool attach_tail_model) {
     if (precision_bits_ < 64)
       throw std::invalid_argument(
           "native local solutions require at least 64 bits of Acb precision");
@@ -5235,21 +5507,35 @@ class PreparedChart final : public PreparedChartBase {
     auto solution = make_local_solution(
         problem, std::move(assembled), std::move(metadata));
     validate_local_solution(solution, false);
+    auto tail_model = unavailable_tail_model(
+        attach_tail_model
+            ? "symbolic coefficient locals do not support numeric certified tail bounds"
+            : "tail model was not requested for this internal native block run");
+    if (attach_tail_model) {
+      if constexpr (std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>)
+        tail_model = prepare_regular_homogeneous_tail_model(
+            prepared_, problem, solution, exact_identity_);
+    }
     auto pseudo_hits = std::move(recurrence.hits);
     const auto kernel_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - kernel_started).count();
     return {std::move(solution), std::move(pseudo_hits),
-            {recurrence.top_valid, parse_ms, kernel_ms}};
+            {recurrence.top_valid, parse_ms, kernel_ms},
+            std::move(tail_model)};
   }
 
   std::shared_ptr<StoredLocalBase> solve_local(
       const std::string& local_handle, const json::object& run,
       const json::object& metadata_object) override {
-    auto native = solve_native(run, metadata_object);
+    auto native = solve_native_impl(
+        run, metadata_object, std::nullopt, true);
     auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
         local_handle, handle_, exact_identity_, std::move(native.solution),
         precision_bits_,
-        std::move(native.pseudo_hits), native.diagnostics);
+        std::move(native.pseudo_hits), native.diagnostics, std::nullopt,
+        std::nullopt, nullptr,
+        std::move(native.tail_model));
     record_native_local_success(native.diagnostics);
     return local;
   }
@@ -7212,6 +7498,47 @@ constexpr const char* kRetainedPlannedMatchMaterializationCapability =
     "retained-native-plan-match-local-materialization-v1";
 constexpr const char* kRetainedStoredLineCapability =
     "retained-native-stored-truncation-physical-tile-integral-v1";
+constexpr const char* kRetainedCertifiedLineCapability =
+    "retained-native-certified-full-local-physical-tile-integral-v1";
+
+const char* line_integration_scope_name(LineIntegrationScope scope) {
+  switch (scope) {
+    case LineIntegrationScope::StoredTruncation:
+      return "stored_truncation";
+    case LineIntegrationScope::FullLocalWithCertifiedTail:
+      return "full_local_with_certified_tail";
+  }
+  throw std::logic_error("unknown line integration scope");
+}
+
+const char* error_guarantee_name(ErrorGuarantee guarantee) {
+  switch (guarantee) {
+    case ErrorGuarantee::None:
+      return "none";
+    case ErrorGuarantee::Advisory:
+      return "advisory";
+    case ErrorGuarantee::Certified:
+      return "certified";
+  }
+  throw std::logic_error("unknown error guarantee");
+}
+
+json::object encode_error_envelope_summary(const ErrorEnvelope& error) {
+  json::object result{
+      {"guarantee", error_guarantee_name(error.guarantee)},
+      {"provenance", error.provenance}};
+  if (!error.empty()) {
+    json::array upper;
+    upper.reserve(error.absolute.size());
+    for (const auto& bound : error.absolute)
+      upper.push_back(bound.approximate_upper());
+    result["epsilon_min"] = error.frame.min_power;
+    result["epsilon_max"] = error.frame.complete_max;
+    result["absolute_upper_approx"] = std::move(upper);
+    result["bound_encoding"] = "approximate-double-diagnostics";
+  }
+  return result;
+}
 
 struct RetainedPlanChartBinding {
   std::string handle;
@@ -7772,9 +8099,13 @@ class StoredLineResult {
   json::object summary() const {
     const auto& diagnostics = result_.diagnostics;
     return json::object{
-        {"line", handle_}, {"capability", kRetainedStoredLineCapability},
+        {"line", handle_},
+        {"capability", result_.scope ==
+                           LineIntegrationScope::FullLocalWithCertifiedTail
+             ? kRetainedCertifiedLineCapability
+             : kRetainedStoredLineCapability},
         {"native_retained", true}, {"json_coefficients", 0},
-        {"scope", "stored_truncation"},
+        {"scope", line_integration_scope_name(result_.scope)},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
         {"source", json::object{
@@ -7790,9 +8121,7 @@ class StoredLineResult {
         {"epsilon_max", result_.value.epsilon.complete_max},
         {"effective_rim", result_.imaginary_sign.has_value()
              ? json::value(*result_.imaginary_sign) : json::value(nullptr)},
-        {"error", json::object{
-             {"guarantee", "none"},
-             {"provenance", result_.value.error.provenance}}},
+        {"error", encode_error_envelope_summary(result_.value.error)},
         {"diagnostics", json::object{
              {"input_monomial_cells", diagnostics.input_monomial_cells},
              {"grouped_monomials", diagnostics.grouped_monomials},
@@ -7805,6 +8134,15 @@ class StoredLineResult {
              {"primitive_component_reuses",
               diagnostics.primitive_component_reuses},
              {"has_center_endpoint", diagnostics.has_center_endpoint},
+             {"tail_certificate_requested",
+              diagnostics.tail_certificate_requested},
+             {"tail_certificate_status",
+              diagnostics.tail_certificate_status},
+             {"tail_witness_radius_exact",
+              diagnostics.tail_witness_radius_exact.empty()
+                  ? json::value(nullptr)
+                  : json::value(
+                        diagnostics.tail_witness_radius_exact)},
              {"detail", diagnostics.detail}}},
         {"elapsed_ms", elapsed_ms_}};
   }
@@ -7834,8 +8172,9 @@ class StoredLineResult {
     return json::object{
         {"line", handle_}, {"checkpoint_identity", checkpoint_identity_},
         {"compatibility_export", true},
-        {"scope", "stored_truncation"},
-        {"error_guarantee", "none"},
+        {"scope", line_integration_scope_name(result_.scope)},
+        {"error_guarantee",
+         error_guarantee_name(result_.value.error.guarantee)},
         {"json_coefficients", value.at("coefficients").as_array().size()},
         {"value", std::move(value)}, {"elapsed_ms", elapsed}};
   }
@@ -8358,11 +8697,20 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
                                   "planned line epsilon window");
   const auto delivered = parse_epsilon_window(
       epsilon, "planned line epsilon window");
+  const bool certify_tail =
+      request.if_contains("certify_tail") != nullptr &&
+      request.at("certify_tail").as_bool();
   auto interval = encode_plan_tile(arm, tile_index);
   const auto rim = exact_plan_rim(binding.prescriptions);
+  const auto started = std::chrono::steady_clock::now();
+  auto result = local->integrate_planned_line(
+      binding.geometry, binding.prescriptions, tile.local_begin,
+      tile.local_end, delivered, rim, certify_tail);
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
   json::object provenance{
       {"schema",
-       "diffexp2-retained-native-stored-truncation-physical-tile-integral-v1"},
+       "diffexp2-retained-native-physical-tile-integral-v2"},
       {"checkpoint_identity", checkpoint_identity},
       {"tile_plan", plan->handle()},
       {"tile_plan_checkpoint_identity", expected_plan_checkpoint},
@@ -8373,16 +8721,19 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
            {"checkpoint_identity", source_checkpoint}}},
       {"epsilon", json::object{{"min", delivered.min_power},
                                 {"max", delivered.complete_max}}},
-      {"scope", "stored_truncation"},
-      {"error_guarantee", "none"}};
+      {"tail_certificate_requested", certify_tail},
+      {"tail_certificate_status",
+       result.diagnostics.tail_certificate_status},
+      {"tail_witness_radius_exact",
+       result.diagnostics.tail_witness_radius_exact.empty()
+           ? json::value(nullptr)
+           : json::value(result.diagnostics.tail_witness_radius_exact)},
+      {"scope", line_integration_scope_name(result.scope)},
+      {"error_guarantee",
+       error_guarantee_name(result.value.error.guarantee)},
+      {"error_provenance", result.value.error.provenance}};
   const auto provenance_identity = json::serialize(
       canonical_json_value(provenance));
-  const auto started = std::chrono::steady_clock::now();
-  auto result = local->integrate_planned_line(
-      binding.geometry, binding.prescriptions, tile.local_begin,
-      tile.local_end, delivered, rim);
-  const auto elapsed = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - started).count();
   return std::make_shared<StoredLineResult>(
       handle, checkpoint_identity, provenance_identity, arm_name, tile_index,
       std::move(interval), source_checkpoint, std::move(result), elapsed,
@@ -10797,7 +11148,15 @@ json::object run_session_command(const json::object& root) {
                         {"line_integration_capability",
                          domain == "symbolic"
                              ? "unsupported"
-                             : kRetainedStoredLineCapability}};
+                             : kRetainedStoredLineCapability},
+                        {"certified_tail_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRegularTailMajorantCapability},
+                        {"certified_line_integration_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedCertifiedLineCapability}};
   }
 
   if (operation == "session.close") {
@@ -11117,11 +11476,19 @@ json::object run_session_command(const json::object& root) {
   }
 
   if (operation == "integration.line") {
-    require_exact_keys(root,
-        {"schema", "op", "session", "tile_plan", "local", "arm",
-         "tile", "epsilon", "source_checkpoint_identity",
-         "tile_plan_checkpoint_identity", "checkpoint_identity"},
-        "native integration.line request");
+    if (root.if_contains("certify_tail") != nullptr)
+      require_exact_keys(root,
+          {"schema", "op", "session", "tile_plan", "local", "arm",
+           "tile", "epsilon", "source_checkpoint_identity",
+           "tile_plan_checkpoint_identity", "checkpoint_identity",
+           "certify_tail"},
+          "native integration.line request");
+    else
+      require_exact_keys(root,
+          {"schema", "op", "session", "tile_plan", "local", "arm",
+           "tile", "epsilon", "source_checkpoint_identity",
+           "tile_plan_checkpoint_identity", "checkpoint_identity"},
+          "native integration.line request");
     if (session->domain == "symbolic")
       throw std::invalid_argument(
           "native planned line integration requires rational or Acb coefficients");
@@ -12570,6 +12937,10 @@ json::object run_session_command(const json::object& root) {
     std::uint64_t local_residual_certifications = 0;
     std::uint64_t local_endpoint_limits = 0;
     std::uint64_t local_line_integrations = 0;
+    std::uint64_t local_tail_certificate_requests = 0;
+    std::uint64_t local_tail_certificate_certified = 0;
+    std::uint64_t local_tail_certificate_inconclusive = 0;
+    std::uint64_t local_tail_certificate_unsupported = 0;
     std::size_t local_coefficients = 0;
     double local_evaluate_ms = 0.0, local_residual_certify_ms = 0.0;
     double local_endpoint_limit_ms = 0.0;
@@ -12581,12 +12952,19 @@ json::object run_session_command(const json::object& root) {
       local_residual_certifications += stats.residual_certifications;
       local_endpoint_limits += stats.endpoint_limits;
       local_line_integrations += stats.line_integrations;
+      local_tail_certificate_requests += stats.tail_certificate_requests;
+      local_tail_certificate_certified += stats.tail_certificate_certified;
+      local_tail_certificate_inconclusive +=
+          stats.tail_certificate_inconclusive;
+      local_tail_certificate_unsupported +=
+          stats.tail_certificate_unsupported;
       local_coefficients += stats.coefficient_count;
       local_evaluate_ms += stats.evaluate_ms;
       local_residual_certify_ms += stats.residual_certify_ms;
       local_endpoint_limit_ms += stats.endpoint_limit_ms;
       local_line_integration_ms += stats.line_integration_ms;
-      local_stats.push_back(local->stats_json());
+      auto encoded = local->stats_json();
+      local_stats.push_back(std::move(encoded));
     }
     json::array scc_stats;
     for (const auto& composite : sccs)
@@ -12651,6 +13029,14 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedStoredLineCapability},
+                        {"certified_tail_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRegularTailMajorantCapability},
+                        {"certified_line_integration_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedCertifiedLineCapability},
                         {"scc_column_solves", total_scc_column_solves},
                         {"local_evaluations", local_evaluations},
                         {"local_residual_certifications",
@@ -12658,6 +13044,14 @@ json::object run_session_command(const json::object& root) {
                         {"local_endpoint_limits", local_endpoint_limits},
                         {"local_line_integrations",
                          local_line_integrations},
+                        {"local_tail_certificate_requests",
+                         local_tail_certificate_requests},
+                        {"local_tail_certificate_certified",
+                         local_tail_certificate_certified},
+                        {"local_tail_certificate_inconclusive",
+                         local_tail_certificate_inconclusive},
+                        {"local_tail_certificate_unsupported",
+                         local_tail_certificate_unsupported},
                         {"local_coefficient_count", local_coefficients},
                         {"static_tensor_copies", 0},
                         {"prepare_parse_ms", prepare_parse_ms},
@@ -12877,6 +13271,12 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_stored_line_integration_capability",
                                        kRetainedStoredLineCapability},
+                                      {"persistent_certified_tail_majorant",
+                                       true},
+                                      {"persistent_certified_tail_majorant_capability",
+                                       kRegularTailMajorantCapability},
+                                      {"persistent_certified_line_integration_capability",
+                                       kRetainedCertifiedLineCapability},
                                       {"persistent_symbolic_line_integration",
                                        false},
                                       {"persistent_acb_local_match", true},

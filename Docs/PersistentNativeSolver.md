@@ -70,7 +70,7 @@ The implemented recurrence-session commands are:
 | `session.solve_many` | Run one ordered worker pool across several retained charts in the same session. |
 | `chart.release` | Release one retained operator. |
 | `local.solve` | Run recurrence plus assembly and retain the typed local sector family without coefficient JSON. |
-| `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics. |
+| `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics; an exact `certified_tail_radius_exact` may request the attached regular-tail proof. |
 | `local.certify_residual` | Certify the retained local's stored-truncation theta residual with native Arb magnitudes. |
 | `local.match` | Exact-match retained regular locals and retain the Laurent lattice transformation and weights without coefficient JSON. |
 | `local.match_acb` | Evaluate retained Acb locals at an exact common physical point, apply an exact-Rational saturation transformation, and retain bounded-refinement residual diagnostics without coefficient JSON. |
@@ -85,7 +85,7 @@ The implemented recurrence-session commands are:
 | `tile.integration_interval` | Read one exact physical/local tile interval and its affine Jacobian from a retained plan. |
 | `tile.match_advance` | Derive one Rational/Acb match entirely from a retained plan and retain the receiving-basis weights with strong plan/local ownership. |
 | `tile.stats` / `tile.release` | Inspect or release one retained independent-arm plan. |
-| `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector. |
+| `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector; optional `certify_tail:true` promotes only after proof. |
 | `integration.stats` / `integration.export` / `integration.release` | Inspect, explicitly export, or release one retained tile integral. |
 | `match.stats` | Inspect one retained native match and its exact provenance. |
 | `match.materialize_local` | Apply a plan-driven match's retained Laurent weights to its receiving basis and publish the next retained local without coefficient JSON. |
@@ -239,11 +239,35 @@ The plan itself feeds both `tile.match_interval` and
 `integration.line` accepts no endpoint coordinates.  It selects the retained
 tile, verifies the local's chart and checkpoint identity plus its complete
 prescription record, integrates the stored Taylor truncation, and applies the
-exact `dx = scale dt` Jacobian with path orientation.  The opaque line result
-states `ErrorGuarantee -> None` and explicitly says that no unseen-tail
-majorant is present.  It rejects a nonempty input error envelope, incomplete
-epsilon halo, nonintegrable unseen center monomial, and merely-small Acb
-cancellation.  Coefficients cross JSON only through `integration.export`.
+exact `dx = scale dt` Jacobian with path orientation.  Without
+`certify_tail:true`, the opaque line result remains `StoredTruncation` with
+`ErrorGuarantee -> None` as before.
+
+Eligible direct Rational and Acb `local.solve` calls now attach the regular
+homogeneous Gronwall/Cauchy model described in
+[Native local-solution core](NativeLocalSolutionCore.md).  A
+`local.evaluate` request can provide
+`options.certified_tail_radius_exact` as an exact positive rational.  Its
+value and theta frames carry `Certified` error envelopes only if that disk is
+proved; otherwise the top-level `tail_certificate` is explicitly
+`inconclusive` or `unsupported` and no envelope is published.  `local.stats`
+records the attached-model status and request outcome counters.
+
+For `integration.line` with `certify_tail:true`, C++ derives an exact witness
+radius strictly between the tile's outer local endpoint and its exact chart
+radius.  A successful proof promotes the result to
+`FullLocalWithCertifiedTail`, then multiplies both coefficients and error
+bounds by the exact physical Jacobian.  Failed/unsupported attempts remain
+`StoredTruncation` and retain the non-promotion reason.  The integrator still
+rejects a nonempty input error envelope, incomplete epsilon halo,
+nonintegrable unseen center monomial, and merely-small Acb cancellation.
+Coefficients cross JSON only through `integration.export`.
+
+Tail-model checkpoint serialization is deliberately not part of schema v2.
+Local summaries expose `checkpoint_serialized:false`; a restored local reports
+the model unavailable and must be re-solved before certified-tail promotion.
+This is explicit non-promotion, never reconstruction from presentation
+digits or fallback to the advisory last-column estimate.
 Successful results strongly own their local and plan snapshots, so releasing
 the public source handles does not invalidate inspection or export.
 

@@ -43,6 +43,9 @@ struct StoredLineIntegrationDiagnostics {
   std::size_t primitive_component_applications = 0;
   std::size_t primitive_component_reuses = 0;
   bool has_center_endpoint = false;
+  bool tail_certificate_requested = false;
+  std::string tail_certificate_status = "not-requested";
+  std::string tail_witness_radius_exact;
   std::string detail;
 };
 

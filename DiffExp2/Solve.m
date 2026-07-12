@@ -4203,10 +4203,14 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
       epsWindow["Min"] > epsWindow["CompleteMax"],
     err["E6", cs, <|"Request" -> req,
       "Detail" -> "native SCC preparation requires an ordered integer epsilon window and nonnegative Taylor order"|>]];
-  If[!AssociationQ[seq] ||
-      Length[Lookup[seq, "Components", {}]] < 1,
+  components = If[AssociationQ[seq],
+    Lookup[seq, "Components", {}], {}];
+  If[!ListQ[components] || Length[components] < 1 ||
+      (Length[components] === 1 &&
+        TrueQ[Lookup[Lookup[cs, "IndicialData", <||>],
+          "Regular", False]]),
     err["E6", cs, <|"Detail" ->
-      "native SCC preparation requires a chart with a nonempty exact SCC certificate"|>]];
+      "native SCC preparation requires a multi-block exact SCC certificate or a singular one-block certificate"|>]];
   If[cfg["RecurrenceBackend"] =!= "Cpp" ||
       TrueQ[$disableGroupedSpectralTransform] ||
       !TrueQ[$cppUsePersistentSessions] ||
@@ -4254,7 +4258,6 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     err["E6", cs, <|"Capacity" -> $nativeSCCCompositeCacheMax,
       "Detail" -> "native SCC composite cache capacity is exhausted; clear solver caches before preparing another public handle"|>]];
 
-  components = seq["Components"];
   condensation = seq["CondensationEdges"];
   blockSystems = sccBlockChartSystem[cs, #] & /@
     Range[Length[components]];
@@ -5286,18 +5289,24 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
 
 SolveNativeSCCBasis[cs_Association, req_Association,
     threads_:Automatic] := Module[
-  {seq = Lookup[cs, "IntegrationSequence", None], seeds, specs,
+  {seq = Lookup[cs, "IntegrationSequence", None], components,
+   seeds, specs,
    prepared, workerCount, requestColumns, batch, raw, columns, cleanup,
    forbiddenPayloadKeys},
-  If[!AssociationQ[seq] || Length[Lookup[seq, "Components", {}]] < 1,
+  components = If[AssociationQ[seq],
+    Lookup[seq, "Components", {}], {}];
+  If[!ListQ[components] || Length[components] < 1 ||
+      (Length[components] === 1 &&
+        TrueQ[Lookup[Lookup[cs, "IndicialData", <||>],
+          "Regular", False]]),
     err["E6", cs, <|"Detail" ->
-      "native SCC basis batch requires a nonempty exact SCC certificate"|>]];
+      "native SCC basis batch requires a multi-block exact SCC certificate or a singular one-block certificate"|>]];
   If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumns] === {},
     err["E5", cs, <|"Detail" ->
       "CppBackend persistent SCC column-batch bridge is not available"|>]];
   seeds = Flatten[Table[{block, component},
-      {block, Length[seq["Components"]]},
-      {component, Length[seq["Components"][[block]]]}], 1];
+      {block, Length[components]},
+      {component, Length[components[[block]]]}], 1];
   specs = sccNativeBuildColumnRequest[cs, req, #[[1]], #[[2]]] & /@
     seeds;
   If[Length[specs] =!= cs["SystemSize"] ||

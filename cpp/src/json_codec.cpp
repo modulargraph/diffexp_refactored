@@ -1337,6 +1337,10 @@ struct NativeLocalDiagnostics {
   std::int32_t top_valid = kCompleteInfinity;
   double parse_ms = 0.0;
   double kernel_ms = 0.0;
+  std::uint64_t pseudo_hits = 0;
+  std::uint64_t pseudo_compensations = 0;
+  std::uint32_t max_pseudo_depth = 0;
+  bool pseudo_value_certified = true;
 };
 
 template <typename Scalar>
@@ -3526,6 +3530,490 @@ SourceData<Scalar> local_solution_source_data(
   return data;
 }
 
+bool exact_nonnegative_integer(const Rational& value, bool include_zero) {
+  if (value.sign() < 0 || (!include_zero && value.is_zero())) return false;
+  return value.str().find('/') == std::string::npos;
+}
+
+std::uint32_t exact_log_ceiling(
+    const ExactJordanIndicialCertificate& indicial,
+    const Rational& a, const Rational& b, std::uint32_t base,
+    bool include_zero_offset) {
+  std::uint64_t result = base;
+  for (const auto& block : indicial.blocks) {
+    if (!(block.root.b == b)) continue;
+    const auto offset = block.root.a - a;
+    if (exact_nonnegative_integer(offset, include_zero_offset))
+      result += block.size();
+  }
+  if (result > std::numeric_limits<std::uint32_t>::max())
+    throw RecurrenceError(
+        "E5", "derived exact Jordan log ceiling exceeds uint32 range");
+  return static_cast<std::uint32_t>(result);
+}
+
+json::object exact_derived_run(
+    const json::object& prototype, const PreparedChart<Rational>& chart,
+    const Rational& a, const Rational& b, std::uint32_t base_log,
+    bool homogeneous, std::optional<std::uint32_t> seed_component) {
+  const auto& indicial = chart.exact_jordan_indicial();
+  if (!indicial.has_value())
+    throw RecurrenceError(
+        "E5", "cannot derive a pseudo-compensation run without an exact Jordan certificate");
+  const auto nmax = as_u32(prototype.at("nmax"),
+                           "derived pseudo-compensation Taylor order");
+  const auto dimension = chart.dimension();
+  const auto frame_base = chart.frame_base();
+  const auto frame_width = chart.frame_width();
+  const auto frame_top_i64 = static_cast<std::int64_t>(frame_base) +
+                             frame_width - 1;
+  if (frame_top_i64 < std::numeric_limits<std::int32_t>::min() ||
+      frame_top_i64 > std::numeric_limits<std::int32_t>::max())
+    throw RecurrenceError(
+        "E5", "derived pseudo-compensation frame exceeds int32 range");
+  const auto frame_top = static_cast<std::int32_t>(frame_top_i64);
+
+  std::uint32_t position = 0;
+  if (homogeneous) {
+    if (!seed_component.has_value() || *seed_component >= dimension)
+      throw RecurrenceError(
+          "E5", "derived pseudo-compensation seed component is out of range");
+    position = indicial->position_in_block[*seed_component];
+    base_log = std::max(base_log, position);
+  } else if (seed_component.has_value()) {
+    throw RecurrenceError(
+        "E5", "derived particular run unexpectedly carries a seed component");
+  }
+  const auto log_max = exact_log_ceiling(
+      *indicial, a, b, base_log, !homogeneous);
+
+  json::array a_shifts;
+  json::array schedule;
+  a_shifts.reserve(static_cast<std::size_t>(nmax) + 1);
+  schedule.reserve(static_cast<std::size_t>(nmax) + 1);
+  for (std::uint32_t n = 0; n <= nmax; ++n) {
+    const auto a_n = a + Rational(std::to_string(n));
+    a_shifts.push_back(json::string(a_n.str()));
+    json::array row;
+    row.reserve(indicial->blocks.size());
+    for (const auto& block : indicial->blocks) {
+      const auto d_a = a_n - block.root.a;
+      const auto d_b = b - block.root.b;
+      const auto step = singular_indicial_detail::classify_step(d_a, d_b);
+      row.push_back(json::object{
+          {"case", singular_indicial_detail::step_name(step)},
+          {"da", d_a.str()}, {"db", d_b.str()}});
+    }
+    schedule.push_back(std::move(row));
+  }
+
+  json::array initial;
+  json::array validity;
+  const auto points = static_cast<std::size_t>(log_max) + 1;
+  if (points > std::numeric_limits<std::size_t>::max() / dimension ||
+      points * dimension >
+          std::numeric_limits<std::size_t>::max() / frame_width)
+    throw RecurrenceError(
+        "E5", "derived pseudo-compensation seed tensor size overflows");
+  initial.reserve(points * dimension * frame_width);
+  validity.reserve(points * dimension);
+  for (std::uint32_t log = 0; log <= log_max; ++log) {
+    std::optional<std::uint32_t> expected_component;
+    std::optional<std::size_t> expected_epsilon;
+    if (homogeneous && log <= position) {
+      const auto block_index = indicial->block_of_column[*seed_component];
+      const auto& block = indicial->blocks[block_index];
+      expected_component = block.columns[position - log];
+      const auto epsilon_i64 = -static_cast<std::int64_t>(log) - frame_base;
+      if (epsilon_i64 < 0 || epsilon_i64 >= frame_width)
+        throw RecurrenceError(
+            "E4", "derived canonical Jordan seed exceeds the retained lower epsilon frame",
+            frame_base, -static_cast<std::int32_t>(log));
+      expected_epsilon = static_cast<std::size_t>(epsilon_i64);
+    }
+    for (std::uint32_t component = 0; component < dimension; ++component) {
+      for (std::uint32_t epsilon = 0; epsilon < frame_width; ++epsilon) {
+        const bool unit = expected_component.has_value() &&
+                          component == *expected_component &&
+                          epsilon == *expected_epsilon;
+        initial.push_back(unit ? "1" : "0");
+      }
+      validity.push_back(homogeneous ? json::value(frame_top)
+                                     : json::value(nullptr));
+    }
+  }
+
+  auto run = prototype;
+  run["p"] = log_max;
+  run["has_initial"] = homogeneous;
+  run["adaptive_probe"] = false;
+  run["a_target"] = a.str();
+  run["b_target"] = b.str();
+  run["a_shift_min"] = 0;
+  run["a_shifts"] = std::move(a_shifts);
+  run["schedule"] = std::move(schedule);
+  run["initial"] = std::move(initial);
+  run["initial_validity"] = std::move(validity);
+  run["source"] = nullptr;
+  run["return_u"] = false;
+  return run;
+}
+
+json::object exact_derived_metadata(
+    const json::object& prototype, const Rational& a, const Rational& b,
+    std::uint32_t log_max, const std::string& suffix) {
+  auto metadata = prototype;
+  auto& tag = metadata.at("tag").as_object();
+  tag["a"] = json::object{{"domain", "rational"},
+                           {"canonical", a.str()}};
+  tag["b"] = json::object{{"domain", "rational"},
+                           {"canonical", b.str()}};
+  tag["p"] = json::object{{"domain", "integer"},
+                           {"canonical", std::to_string(log_max)}};
+  metadata["checkpoint_identity"] =
+      required_string(prototype, "checkpoint_identity") + suffix;
+  return metadata;
+}
+
+struct ExactFormalKey {
+  std::string t_power;
+  std::int32_t epsilon_power = 0;
+  std::uint32_t log_power = 0;
+  std::uint32_t component = 0;
+
+  friend bool operator<(const ExactFormalKey& left,
+                        const ExactFormalKey& right) {
+    return std::tie(left.t_power, left.epsilon_power, left.log_power,
+                    left.component) <
+           std::tie(right.t_power, right.epsilon_power, right.log_power,
+                    right.component);
+  }
+};
+
+// Expand an exact local slab in the formal basis
+//
+//   t^(a+n) eps^K Log(t)^p
+//
+// using t^(b eps) = Sum_j (b eps Log(t))^j/j!.  This is the
+// Rational-domain CASE-P certificate: neither an Acb midpoint nor a
+// tolerance can decide whether a polar coefficient cancels.  The optional
+// t ceiling removes only the unmatched high-Taylor tail introduced when a
+// target root starts n>0 orders above the source; every overlapping stored
+// coefficient remains an exact proof obligation.
+void add_exact_formal_below(
+    const LocalSolution<Rational>& solution, std::int32_t exclusive_top,
+    const std::optional<Rational>& maximum_t_power,
+    std::map<ExactFormalKey, Rational>& coefficients) {
+  validate_local_solution(solution, false);
+  for (const auto& sector : solution.sectors) {
+    if (sector.a.domain != ExactDomain::Rational ||
+        sector.b.domain != ExactDomain::Rational)
+      throw RecurrenceError(
+          "E5", "exact pseudo-compensation certificate requires rational sector tags");
+    const Rational a(sector.a.canonical);
+    const Rational b(sector.b.canonical);
+    Rational log_normalization(1);
+    for (std::uint32_t divisor = 2; divisor <= sector.log_power; ++divisor)
+      log_normalization =
+          log_normalization / Rational(std::to_string(divisor));
+    for (std::size_t n = 0; n < solution.taylor_width(); ++n) {
+      const auto total_t_power = a + Rational(std::to_string(n));
+      if (maximum_t_power.has_value() &&
+          total_t_power > *maximum_t_power)
+        continue;
+      for (std::int64_t epsilon = solution.epsilon.min_power;
+           epsilon <= solution.epsilon.complete_max; ++epsilon) {
+        const auto epsilon_index = static_cast<std::size_t>(
+            epsilon - solution.epsilon.min_power);
+        const auto base_power_i64 = epsilon + sector.log_power;
+        if (base_power_i64 >= exclusive_top) continue;
+        if (base_power_i64 < std::numeric_limits<std::int32_t>::min())
+          throw RecurrenceError(
+              "E5", "exact pseudo-compensation epsilon power underflows int32");
+        for (std::uint32_t component = 0;
+             component < solution.dimension; ++component) {
+          const auto& value = sector.coefficients[
+              local_algebra_detail::flat_index(
+                  epsilon_index, n, component, solution.taylor_width(),
+                  solution.dimension)];
+          if (value.is_zero()) continue;
+          Rational exponential_factor(1);
+          for (std::uint64_t j = 0;
+               base_power_i64 + static_cast<std::int64_t>(j) <
+                   exclusive_top;
+               ++j) {
+            if (j > std::numeric_limits<std::uint32_t>::max() -
+                        sector.log_power)
+              throw RecurrenceError(
+                  "E5", "exact pseudo-compensation log degree overflows uint32");
+            ExactFormalKey key{
+                total_t_power.str(),
+                static_cast<std::int32_t>(base_power_i64 +
+                                          static_cast<std::int64_t>(j)),
+                sector.log_power + static_cast<std::uint32_t>(j),
+                component};
+            auto found = coefficients.try_emplace(key, Rational(0)).first;
+            found->second += value * log_normalization * exponential_factor;
+            if (found->second.is_zero()) coefficients.erase(found);
+            if (b.is_zero()) break;
+            if (j == std::numeric_limits<std::uint32_t>::max())
+              throw RecurrenceError(
+                  "E5", "exact pseudo-compensation exponential order overflows uint32");
+            exponential_factor = exponential_factor * b /
+                Rational(std::to_string(j + 1));
+          }
+        }
+      }
+    }
+  }
+}
+
+std::int32_t exact_formal_value_floor(
+    const LocalSolution<Rational>& solution) {
+  std::map<ExactFormalKey, Rational> coefficients;
+  add_exact_formal_below(solution, 0, std::nullopt, coefficients);
+  if (coefficients.empty()) return 0;
+  return std::min_element(
+      coefficients.begin(), coefficients.end(),
+      [](const auto& left, const auto& right) {
+        return left.first.epsilon_power < right.first.epsilon_power;
+      })->first.epsilon_power;
+}
+
+void certify_exact_pseudo_value_floor(
+    const LocalSolution<Rational>& solution, std::int32_t allowed_floor,
+    const Rational& source_a, std::uint32_t source_taylor_max) {
+  // Homogeneous targets pass floor 0.  Particulars pass the exact formal
+  // floor already present in their source tag, so CASE-P may preserve a
+  // genuine dimensional pole but may never manufacture a deeper one.
+  const auto checked_top = std::min<std::int32_t>(0, allowed_floor);
+  std::map<ExactFormalKey, Rational> coefficients;
+  add_exact_formal_below(
+      solution, checked_top,
+      source_a + Rational(std::to_string(source_taylor_max)), coefficients);
+  if (coefficients.empty()) return;
+  const auto& witness = coefficients.begin()->first;
+  std::string sector_witnesses;
+  for (const auto& sector : solution.sectors) {
+    auto single = solution;
+    single.sectors = {sector};
+    std::map<ExactFormalKey, Rational> part;
+    add_exact_formal_below(
+        single, checked_top,
+        source_a + Rational(std::to_string(source_taylor_max)), part);
+    const auto found = part.find(witness);
+    if (found != part.end()) {
+      if (!sector_witnesses.empty()) sector_witnesses += ";";
+      sector_witnesses += "a=" + sector.a.canonical + ",b=" +
+          sector.b.canonical + ",p=" +
+          std::to_string(sector.log_power) + ":" + found->second.str();
+    }
+  }
+  throw RecurrenceError(
+      "E5", "exact CASE-P compensation leaves a value pole below the input floor at eps^" +
+                std::to_string(witness.epsilon_power) + ", t_power=" +
+                witness.t_power + ", log_power=" +
+                std::to_string(witness.log_power) + ", component=" +
+                std::to_string(witness.component) + ", coefficient=" +
+                coefficients.begin()->second.str() + ", sectors=[" +
+                sector_witnesses + "]");
+}
+
+std::vector<LocalSolution<Rational>> split_exact_rational_tags(
+    const LocalSolution<Rational>& source, const std::string& identity) {
+  validate_local_solution(source, false);
+  std::map<std::pair<std::string, std::string>,
+           std::vector<LocalSector<Rational>>> grouped;
+  for (const auto& sector : source.sectors) {
+    if (sector.a.domain != ExactDomain::Rational ||
+        sector.b.domain != ExactDomain::Rational)
+      throw RecurrenceError(
+          "E5", "native SCC pseudo propagation requires exact rational source tags");
+    grouped[{Rational(sector.a.canonical).str(),
+             Rational(sector.b.canonical).str()}].push_back(sector);
+  }
+  std::vector<LocalSolution<Rational>> result;
+  result.reserve(grouped.size());
+  for (auto& [tag, sectors] : grouped) {
+    auto group = source;
+    group.sectors = std::move(sectors);
+    group.checkpoint_identity = identity + ":tag:" + tag.first + ":" +
+                                tag.second;
+    result.push_back(canonicalize_identical_local_sectors(std::move(group)));
+  }
+  return result;
+}
+
+class ExactPseudoCompensator {
+ public:
+  ExactPseudoCompensator(PreparedChart<Rational>& chart,
+                         std::string identity)
+      : chart_(chart), identity_(std::move(identity)) {}
+
+  NativeLocalRun<Rational> solve(
+      const json::object& run, const json::object& metadata,
+      std::optional<SourceData<Rational>> source,
+      std::int32_t allowed_value_floor) {
+    NativeLocalDiagnostics diagnostics;
+    auto result = solve_impl(run, metadata, std::move(source),
+                             allowed_value_floor, diagnostics);
+    result.diagnostics = diagnostics;
+    return result;
+  }
+
+ private:
+  static void accumulate(NativeLocalDiagnostics& total,
+                         const NativeLocalDiagnostics& current) {
+    total.top_valid = std::min(total.top_valid, current.top_valid);
+    total.parse_ms += current.parse_ms;
+    total.kernel_ms += current.kernel_ms;
+    total.pseudo_hits += current.pseudo_hits;
+    total.pseudo_compensations += current.pseudo_compensations;
+    total.max_pseudo_depth = std::max(
+        total.max_pseudo_depth, current.max_pseudo_depth);
+    total.pseudo_value_certified =
+        total.pseudo_value_certified && current.pseudo_value_certified;
+  }
+
+  std::optional<PreparedRationalTaylorMultiplier<Rational>> polar_weight(
+      const PseudoHit<Rational>& hit, std::size_t row,
+      const LocalSolution<Rational>& target) const {
+    if (row >= hit.gamma_frames.size() || row >= hit.gamma_validity.size())
+      throw RecurrenceError(
+          "E5", "CASE-P hit has inconsistent gamma frame dimensions");
+    if (hit.gamma_validity[row] != kCompleteInfinity &&
+        hit.gamma_validity[row] < -1)
+      throw RecurrenceError(
+          "E4", "CASE-P polar frame is not complete through eps^-1",
+          chart_.frame_base(), hit.gamma_validity[row]);
+    const auto& gamma = hit.gamma_frames[row];
+    if (gamma.size() != chart_.frame_width())
+      throw RecurrenceError(
+          "E5", "CASE-P gamma frame differs from its retained chart width");
+    std::optional<std::int32_t> minimum;
+    for (std::size_t index = 0; index < gamma.size(); ++index) {
+      const auto power = chart_.frame_base() +
+                         static_cast<std::int32_t>(index);
+      if (power >= 0) break;
+      if (!gamma[index].is_zero()) {
+        minimum = power;
+        break;
+      }
+    }
+    if (!minimum.has_value()) return std::nullopt;
+    PreparedRationalTaylorMultiplier<Rational> multiplier;
+    multiplier.epsilon_shift = *minimum;
+    multiplier.center_pole_order = 0;
+    multiplier.exact_identity = identity_ + ":casep:" +
+        std::to_string(hit.n) + ":" + std::to_string(row);
+    multiplier.kernels.assign(
+        target.epsilon.width(),
+        std::vector<Rational>(target.taylor_width(), Rational(0)));
+    for (std::size_t kernel = 0; kernel < multiplier.kernels.size();
+         ++kernel) {
+      const auto power = static_cast<std::int64_t>(*minimum) +
+                         static_cast<std::int64_t>(kernel);
+      if (power >= 0) break;
+      const auto gamma_index = power - chart_.frame_base();
+      if (gamma_index < 0 ||
+          gamma_index >= static_cast<std::int64_t>(gamma.size()))
+        throw RecurrenceError(
+            "E4", "CASE-P polar weight lies outside its retained gamma frame",
+            chart_.frame_base(), static_cast<std::int32_t>(power));
+      multiplier.kernels[kernel][0] =
+          -gamma[static_cast<std::size_t>(gamma_index)];
+    }
+    return multiplier;
+  }
+
+  const LocalSolution<Rational>& homogeneous_target(
+      std::uint32_t component, const json::object& prototype_run,
+      const json::object& prototype_metadata,
+      NativeLocalDiagnostics& diagnostics) {
+    if (const auto found = homogeneous_cache_.find(component);
+        found != homogeneous_cache_.end())
+      return found->second;
+    if (!active_components_.insert(component).second)
+      throw RecurrenceError(
+          "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
+    const auto& indicial = chart_.exact_jordan_indicial();
+    if (!indicial.has_value() || component >= indicial->dimension)
+      throw RecurrenceError(
+          "E5", "CASE-P target component has no retained exact Jordan root");
+    const auto& block =
+        indicial->blocks[indicial->block_of_column[component]];
+    auto run = exact_derived_run(
+        prototype_run, chart_, block.root.a, block.root.b,
+        indicial->position_in_block[component], true, component);
+    auto metadata = exact_derived_metadata(
+        prototype_metadata, block.root.a, block.root.b,
+        as_u32(run.at("p"), "derived homogeneous log maximum"),
+        ":casep-target:" + std::to_string(component));
+    auto solved = solve_impl(run, metadata, std::nullopt, 0, diagnostics);
+    active_components_.erase(component);
+    auto [stored, inserted] = homogeneous_cache_.emplace(
+        component, std::move(solved.solution));
+    if (!inserted)
+      throw std::logic_error("CASE-P homogeneous target cache insertion failed");
+    return stored->second;
+  }
+
+  NativeLocalRun<Rational> solve_impl(
+      const json::object& run, const json::object& metadata,
+      std::optional<SourceData<Rational>> source,
+      std::int32_t allowed_value_floor,
+      NativeLocalDiagnostics& diagnostics) {
+    auto raw = source.has_value()
+        ? chart_.solve_native_with_source(
+              run, metadata, std::move(*source))
+        : chart_.solve_native(run, metadata);
+    accumulate(diagnostics, raw.diagnostics);
+    if (raw.pseudo_hits.empty()) return raw;
+
+    const auto source_a = parse_scalar<Rational>(run.at("a_target"));
+    const auto nmax = as_u32(run.at("nmax"),
+                             "CASE-P certificate Taylor order");
+    diagnostics.pseudo_hits += raw.pseudo_hits.size();
+    std::vector<LocalSolution<Rational>> terms;
+    terms.push_back(std::move(raw.solution));
+    for (const auto& hit : raw.pseudo_hits) {
+      diagnostics.max_pseudo_depth = std::max<std::uint32_t>(
+          diagnostics.max_pseudo_depth,
+          static_cast<std::uint32_t>(hit.columns.size()));
+      if (hit.columns.size() != hit.gamma_frames.size() ||
+          hit.columns.size() != hit.gamma_validity.size())
+        throw RecurrenceError(
+            "E5", "CASE-P hit target and gamma dimensions disagree");
+      for (std::size_t row = 0; row < hit.columns.size(); ++row) {
+        const auto& target = homogeneous_target(
+            hit.columns[row], run, metadata, diagnostics);
+        auto multiplier = polar_weight(hit, row, target);
+        if (!multiplier.has_value()) continue;
+        auto product = multiply_prepared_rational(
+            target, *multiplier,
+            identity_ + ":casep-product:" + std::to_string(hit.n) + ":" +
+                std::to_string(hit.columns[row]));
+        terms.push_back(std::move(product));
+        ++diagnostics.pseudo_compensations;
+      }
+    }
+    auto compensated = terms.size() == 1
+        ? std::move(terms.front())
+        : combine_local_solutions(
+              terms, identity_ + ":casep-compensated");
+    certify_exact_pseudo_value_floor(
+        compensated, allowed_value_floor, source_a, nmax);
+    raw.solution = std::move(compensated);
+    raw.pseudo_hits.clear();
+    return raw;
+  }
+
+  PreparedChart<Rational>& chart_;
+  std::string identity_;
+  std::map<std::uint32_t, LocalSolution<Rational>> homogeneous_cache_;
+  std::set<std::uint32_t> active_components_;
+};
+
 template <typename Scalar>
 class CompositeSCCChart final : public CompositeSCCChartBase {
  public:
@@ -3601,6 +4089,18 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       json::array diagnostics;
       NativeLocalDiagnostics aggregate;
       aggregate.top_valid = kCompleteInfinity;
+      std::vector<std::unique_ptr<ExactPseudoCompensator>>
+          pseudo_compensators(blocks_.size());
+      const auto pseudo_compensator = [&](std::uint32_t block)
+          -> ExactPseudoCompensator& {
+        if (!pseudo_compensators[block])
+          pseudo_compensators[block] =
+              std::make_unique<ExactPseudoCompensator>(
+                  *blocks_[block].chart,
+                  checkpoint_identity + ":block:" +
+                      std::to_string(block));
+        return *pseudo_compensators[block];
+      };
 
       const auto& seed_run = checked_column_run(
           seed_request, seed_block, true, nullptr,
@@ -3609,9 +4109,15 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           seed_run, seed_block, regular_singular_execution);
       const auto basis_index =
           blocks_[seed_block].vertices[seed_local_component];
-      auto seed_native = blocks_[seed_block].chart->solve_native(
-          seed_run, as_object(seed_request.at("metadata"),
-                              "native SCC seed metadata"));
+      auto seed_native = regular_singular_execution
+          ? pseudo_compensator(seed_block).solve(
+                seed_run,
+                as_object(seed_request.at("metadata"),
+                          "native SCC seed metadata"),
+                std::nullopt, 0)
+          : blocks_[seed_block].chart->solve_native(
+                seed_run, as_object(seed_request.at("metadata"),
+                                    "native SCC seed metadata"));
       validate_block_result(seed_native, seed_block, true,
                             regular_singular_execution);
       blocks_[seed_block].chart->record_native_local_success(
@@ -3661,29 +4167,121 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             checkpoint_identity + ":source-frame:" +
                 std::to_string(target_block));
         require_work_local(source, "combined coupling source");
-        const auto& target_run = checked_column_run(
-            target_request, target_block, false, &source,
-            regular_singular_execution);
-        require_source_tag_matches_run(source, target_run);
-        auto source_data = local_solution_source_data(
-            source, as_u32(target_run.at("nmax"), "target nmax"),
-            as_u32(target_run.at("p"), "target log maximum"),
-            blocks_[target_block].chart->frame_base(),
-            blocks_[target_block].chart->frame_width());
-        auto target_native = blocks_[target_block].chart->solve_native_with_source(
-            target_run,
-            as_object(target_request.at("metadata"),
-                      "native SCC target metadata"),
-            std::move(source_data));
-        validate_block_result(target_native, target_block, false,
-                              regular_singular_execution);
-        blocks_[target_block].chart->record_native_local_success(
-            target_native.diagnostics);
-        accumulate_diagnostics(aggregate, target_native.diagnostics);
-        diagnostics.push_back(block_diagnostic(
-            target_block, "particular", predecessors, &source,
-            target_native));
-        state[target_block] = std::move(target_native.solution);
+        if (!regular_singular_execution) {
+          const auto& target_run = checked_column_run(
+              target_request, target_block, false, &source, false);
+          require_source_tag_matches_run(source, target_run);
+          auto source_data = local_solution_source_data(
+              source, as_u32(target_run.at("nmax"), "target nmax"),
+              as_u32(target_run.at("p"), "target log maximum"),
+              blocks_[target_block].chart->frame_base(),
+              blocks_[target_block].chart->frame_width());
+          auto target_native =
+              blocks_[target_block].chart->solve_native_with_source(
+                  target_run,
+                  as_object(target_request.at("metadata"),
+                            "native SCC target metadata"),
+                  std::move(source_data));
+          validate_block_result(target_native, target_block, false, false);
+          blocks_[target_block].chart->record_native_local_success(
+              target_native.diagnostics);
+          accumulate_diagnostics(aggregate, target_native.diagnostics);
+          diagnostics.push_back(block_diagnostic(
+              target_block, "particular", predecessors, &source,
+              target_native));
+          state[target_block] = std::move(target_native.solution);
+          continue;
+        }
+
+        // CASE-P compensation introduces homogeneous target-root sectors.
+        // They are linearly independent exact tags and must remain separate
+        // through every later SCC edge.  Solve one exact particular per tag,
+        // then recombine; collapsing them into a single recurrence would
+        // silently apply the wrong affine schedule to all but one sector.
+        auto groups = split_exact_rational_tags(
+            source, checkpoint_identity + ":source-groups:" +
+                        std::to_string(target_block));
+        const auto& submitted_run = as_object(
+            target_request.at("run"), "native SCC target run");
+        const Rational submitted_a =
+            parse_scalar<Rational>(submitted_run.at("a_target"));
+        const Rational submitted_b =
+            parse_scalar<Rational>(submitted_run.at("b_target"));
+        bool submitted_used = false;
+        std::vector<LocalSolution<Rational>> target_parts;
+        target_parts.reserve(groups.size());
+        for (std::size_t group_index = 0; group_index < groups.size();
+             ++group_index) {
+          auto& group = groups[group_index];
+          if (group.sectors.empty())
+            throw std::logic_error("exact SCC source tag group is empty");
+          const Rational group_a(group.sectors.front().a.canonical);
+          const Rational group_b(group.sectors.front().b.canonical);
+          const bool use_submitted = group_a == submitted_a &&
+                                     group_b == submitted_b;
+          json::object derived_entry;
+          const json::object* entry = &target_request;
+          if (!use_submitted) {
+            std::uint32_t source_log = 0;
+            for (const auto& sector : group.sectors)
+              source_log = std::max(source_log, sector.log_power);
+            auto run = exact_derived_run(
+                submitted_run, *blocks_[target_block].chart,
+                group_a, group_b, source_log, false, std::nullopt);
+            auto metadata = exact_derived_metadata(
+                as_object(target_request.at("metadata"),
+                          "native SCC target metadata"),
+                group_a, group_b,
+                as_u32(run.at("p"), "derived particular log maximum"),
+                ":derived-tag:" + std::to_string(group_index));
+            derived_entry = json::object{
+                {"block", target_block}, {"run", std::move(run)},
+                {"metadata", std::move(metadata)}};
+            entry = &derived_entry;
+          } else {
+            if (submitted_used)
+              throw std::logic_error(
+                  "exact SCC source contains duplicate submitted tag groups");
+            submitted_used = true;
+          }
+
+          const auto& target_run = checked_column_run(
+              *entry, target_block, false, &group, true);
+          require_source_tag_matches_run(group, target_run);
+          const auto allowed_floor = exact_formal_value_floor(group);
+          auto source_data = local_solution_source_data(
+              group, as_u32(target_run.at("nmax"), "target nmax"),
+              as_u32(target_run.at("p"), "target log maximum"),
+              blocks_[target_block].chart->frame_base(),
+              blocks_[target_block].chart->frame_width());
+          auto target_native = pseudo_compensator(target_block).solve(
+              target_run,
+              as_object(entry->at("metadata"),
+                        "native SCC target metadata"),
+              std::move(source_data), allowed_floor);
+          validate_block_result(target_native, target_block, false, true);
+          blocks_[target_block].chart->record_native_local_success(
+              target_native.diagnostics);
+          accumulate_diagnostics(aggregate, target_native.diagnostics);
+          auto diagnostic = block_diagnostic(
+              target_block, "particular-tag", predecessors, &group,
+              target_native);
+          diagnostic["source_a"] = group_a.str();
+          diagnostic["source_b"] = group_b.str();
+          diagnostics.push_back(std::move(diagnostic));
+          target_parts.push_back(std::move(target_native.solution));
+        }
+        if (!submitted_used)
+          throw std::invalid_argument(
+              "native SCC submitted target tag is absent from the exact propagated source groups");
+        auto target_state = target_parts.size() == 1
+            ? std::move(target_parts.front())
+            : combine_local_solutions(
+                  target_parts,
+                  checkpoint_identity + ":target-tag-sum:" +
+                      std::to_string(target_block));
+        require_work_local(target_state, "combined target tag particulars");
+        state[target_block] = std::move(target_state);
       }
 
       std::vector<LocalSolution<Scalar>> embedded;
@@ -3720,6 +4318,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       if (!scalar_execution)
         column_identity_record["seed_local_component"] =
             seed_local_component;
+      column_identity_record["pseudo_compensation"] =
+          aggregate.pseudo_hits == 0
+              ? "none"
+              : "exact-rational-derived-jordan-targets-v1";
       SCCColumnProvenance column_provenance{
           handle_, exact_identity_, seed_block,
           basis_index,
@@ -3868,13 +4470,16 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               "collision-bound-producer-certificate"},
              {"identity_gauge", "collision-bound-producer-certificate"},
              {"no_pseudo", regular_singular_ready
-                  ? "producer-claim-execution-revalidated-by-exact-schedule-certificate"
+                  ? "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate"
                   : "collision-bound-producer-certificate"},
              {"jordan_indicial",
               regular_singular_ready
                   ? "retained-exact-rational-full-matrix-certificate"
                   : "not-required-by-selected-scope"},
-             {"pseudo_schedule_execution", "unsupported-rejected-exactly"},
+             {"pseudo_schedule_execution",
+              regular_singular_ready
+                  ? "exact-rational-joint-compensation-and-formal-overlap-certificate"
+                  : "not-required-by-selected-scope"},
              {"resonance_schedule",
               regular_singular_ready
                   ? "retained-affine-jordan-verified-exact-captured-run"
@@ -4125,17 +4730,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       exact_schedule.push_back(std::move(exact_row));
     }
     if (regular_singular_execution) {
-      const auto certified = certify_exact_affine_jordan_schedule(
+      (void)certify_exact_affine_jordan_schedule(
           *retained_indicial, a_target, b_target, exact_schedule);
-      if (certified.contains_pseudo)
-        throw RecurrenceError(
-            "E5",
-            "native regular-singular SCC execution classified an exact "
-            "pseudo-resonant step requiring up to eps^(-" +
-                std::to_string(
-                    certified.max_pseudo_epsilon_pole_depth) +
-                ") Jordan inversion; native SCC pseudo compensation is "
-                "not implemented");
     }
     return run;
   }
@@ -4417,7 +5013,13 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"result_epsilon_max", result.solution.epsilon.complete_max},
         {"result_taylor_max", result.solution.taylor_complete_max},
         {"result_sectors", result.solution.sectors.size()},
-        {"pseudo_hit_count", result.pseudo_hits.size()},
+        {"pseudo_hit_count", result.diagnostics.pseudo_hits},
+        {"pseudo_compensation_count",
+         result.diagnostics.pseudo_compensations},
+        {"max_pseudo_depth", result.diagnostics.max_pseudo_depth},
+        {"pseudo_value_certified",
+         result.diagnostics.pseudo_value_certified},
+        {"uncompensated_pseudo_hit_count", result.pseudo_hits.size()},
         {"top_valid", encode_validity(result.diagnostics.top_valid)},
         {"parse_ms", result.diagnostics.parse_ms},
         {"kernel_ms", result.diagnostics.kernel_ms}};
@@ -5355,9 +5957,11 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
     if (!raw_block.at("identity_v").as_bool())
       throw std::invalid_argument(
           "native SCC preparation requires an exact identity spectral transform");
-    if (!raw_block.at("no_pseudo").as_bool())
-      throw std::invalid_argument(
-          "native SCC preparation does not yet execute pseudo compensation");
+    // `no_pseudo` is retained as producer provenance, not an admission
+    // decision.  Exact Rational execution reconstructs every T/P/R branch
+    // from the retained affine Jordan certificate; a producer may therefore
+    // truthfully advertise false here without disabling native execution.
+    (void)raw_block.at("no_pseudo").as_bool();
 
     auto vertices = parse_index_vector(
         raw_block.at("vertices"), dimension, "SCC block vertex");

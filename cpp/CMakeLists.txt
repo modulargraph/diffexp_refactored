@@ -110,6 +110,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_scc_solve_singular_column
     COMMAND test_diffexp2_persistent_scc_solve_singular_column)
 
+  add_executable(test_diffexp2_persistent_scc_pseudo_compensation
+    tests/test_persistent_scc_pseudo_compensation.cpp)
+  target_compile_features(
+    test_diffexp2_persistent_scc_pseudo_compensation PRIVATE cxx_std_20)
+  target_link_libraries(
+    test_diffexp2_persistent_scc_pseudo_compensation PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_scc_pseudo_compensation
+    COMMAND test_diffexp2_persistent_scc_pseudo_compensation)
+
   add_executable(test_diffexp2_matching tests/test_matching.cpp)
   target_compile_features(test_diffexp2_matching PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_matching PRIVATE diffexp2_core)

@@ -340,14 +340,17 @@ bool multidimensional_jordan_case(const std::string& session) {
           certificate.at("blocks").as_array().size() == 1;
     }
   }
+  // This request changes a homogeneous seed tag away from its retained
+  // indicial root.  CASE-P is now supported for genuine particular/source
+  // collisions, but a fabricated non-root homogeneous seed remains loud.
   const bool ok = solved.at("status") == "ok" &&
       solved.at("execution_capability") ==
           "exact-rational-regular-singular-jordan-block-dag-column-v2" &&
       solved.at("dimension") == 3 &&
       solved.at("column_provenance").as_object().at("basis_index") == 1 &&
-      pseudo.at("status") == "error" && pseudo.at("id") == "E5" &&
+      pseudo.at("status") == "error" && pseudo.at("id") == "CPP" &&
       std::string(pseudo.at("detail").as_string()).find(
-          "pseudo-resonant step requiring up to eps^(-2)") !=
+          "seed tag is not the exact affine root") !=
               std::string::npos &&
       stats.at("execution_scope") ==
           "exact-rational-regular-singular-jordan-block-dag-column-v2" &&

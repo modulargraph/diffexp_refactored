@@ -99,6 +99,54 @@ strongOwnershipQ = Length[sccReleases] === 2 &&
   AssociationQ[columnAfterSCCRelease] &&
   Lookup[columnAfterSCCRelease, "status", "error"] === "ok";
 
+lowerReceivingBasis = If[FailureQ[atlas], {},
+  Lookup[Rest[atlas["Lower", "Bases"]], "Columns", {}]];
+transportEpsilon = If[FailureQ[atlas], <||>, <|
+  "min" -> atlas["Request", "EpsWindow", "Min"],
+  "max" -> atlas["Request", "EpsWindow", "CompleteMax"],
+  "required_complete_max" -> atlas["TargetCompleteMax"],
+  "match_required_complete_max" -> atlas["TargetCompleteMax"]|>];
+transport = If[FailureQ[atlas], atlas,
+  DiffExp2`CppBackend`RunPersistentTransportArm[
+    atlas["Plan"], "lower", atlas["Anchor"], lowerReceivingBasis,
+    transportEpsilon, "mixed-atlas-retained-lower",
+    <|"relative_tolerance" -> "1e-25", "max_steps" -> 2|>]];
+transportFinalRelease = If[AssociationQ[transport] &&
+    Lookup[transport, "status", "error"] === "ok",
+  DiffExp2`CppBackend`ReleasePersistentLocal[transport["final_local"]],
+  transport];
+transportStats = If[AssociationQ[transport] &&
+    Lookup[transport, "status", "error"] === "ok",
+  DiffExp2`CppBackend`PersistentTransportArmStatistics[transport],
+  transport];
+transportRelease = If[AssociationQ[transport] &&
+    Lookup[transport, "status", "error"] === "ok",
+  DiffExp2`CppBackend`ReleasePersistentTransportArm[transport], transport];
+transportAfterRelease = If[AssociationQ[transport] &&
+    Lookup[transport, "status", "error"] === "ok",
+  DiffExp2`CppBackend`PersistentTransportArmStatistics[transport], transport];
+afterTransport = If[FailureQ[atlas], <||>,
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    atlas["Session"], <||>]];
+transportQ = AssociationQ[transport] &&
+  Lookup[transport, "status", "error"] === "ok" &&
+  Lookup[transport, "native_retained", False] === True &&
+  Lookup[transport, "json_coefficients", None] === 0 &&
+  Lookup[transport, "matches", None] === 1 &&
+  Lookup[transport, "tiles", None] === 2 &&
+  AssociationQ[transportFinalRelease] &&
+  Lookup[transportFinalRelease, "status", "error"] === "ok" &&
+  AssociationQ[transportStats] &&
+  Lookup[transportStats, "status", "error"] === "ok" &&
+  Lookup[transportStats, "final_local", <||>]["local"] ===
+    transport["final_local", "local"] &&
+  AssociationQ[transportRelease] &&
+  Lookup[transportRelease, "status", "error"] === "ok" &&
+  AssociationQ[transportAfterRelease] &&
+  Lookup[transportAfterRelease, "status", "ok"] === "error" &&
+  Lookup[afterTransport, "locals", -1] === 5 &&
+  Lookup[afterTransport, "transport_states", -1] === 0;
+
 run = If[FailureQ[atlas], atlas, catchDE2[
   DiffExp2`NativeTransport`RunNativeRegularIndependentArms[
     atlas, {1, 0}, x]]];
@@ -131,7 +179,8 @@ afterRun = If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
     atlas["Session"], <||>]];
 nativeExecutionQ = runQ &&
-  Lookup[afterRun, "local_matches", -1] === 2 &&
+  Lookup[afterRun, "local_matches", -1] === 3 &&
+  Lookup[afterRun, "transport_states", -1] === 0 &&
   Lookup[afterRun, "line_integrations", 0] > 0 &&
   Lookup[afterRun, "line_exports", -1] === 1;
 
@@ -164,14 +213,14 @@ cleanupQ = AssociationQ[released] &&
   Lookup[after, "tile_plans", -1] === 0 &&
   Lookup[after, "line_results", -1] === 0 &&
   Lookup[after, "scc_charts", -1] === 0 &&
-  Lookup[after, "local_matches", -1] === 2 &&
+  Lookup[after, "local_matches", -1] === 3 &&
   Lookup[after, "line_integrations", 0] > 0;
 
 DiffExp2`Solve`ClearSolveCaches[];
 closedQ = DiffExp2`CppBackend`PersistentSessionInformation[] === <||>;
 
 ok = preparedQ && opaqueBasisQ && planOwnsSCCQ && strongOwnershipQ &&
-  nativeExecutionQ && cleanupQ && closedQ;
+  transportQ && nativeExecutionQ && cleanupQ && closedQ;
 
 If[TrueQ[ok],
   Print["PASS: mixed regular/singular native atlas execution"],
@@ -192,6 +241,12 @@ If[TrueQ[ok],
     "ColumnAfterSCCRelease" -> If[AssociationQ[columnAfterSCCRelease],
       KeyTake[columnAfterSCCRelease, {"status", "session", "local"}],
       columnAfterSCCRelease],
+    "Transport" -> If[AssociationQ[transport],
+      KeyTake[transport, {"status", "session", "transport_state",
+        "matches", "tiles", "final_local"}], transport],
+    "TransportStats" -> transportStats,
+    "TransportRelease" -> transportRelease,
+    "AfterTransport" -> afterTransport,
     "Run" -> If[AssociationQ[run],
       KeyTake[run, {"Type", "Lower", "Upper", "NativeSummary"}], run],
     "Exported" -> If[AssociationQ[exported],
@@ -202,5 +257,5 @@ If[TrueQ[ok],
     "EpsilonZero" -> epsilonZero, "Expected" -> expected,
     "AfterRun" -> afterRun, "Released" -> released, "After" -> after,
     "Checks" -> {preparedQ, opaqueBasisQ, planOwnsSCCQ,
-      strongOwnershipQ, nativeExecutionQ, cleanupQ, closedQ}|>]];
+      strongOwnershipQ, transportQ, nativeExecutionQ, cleanupQ, closedQ}|>]];
   Exit[1]];

@@ -45,13 +45,16 @@ PersistentTileIntegrationInterval::usage = "PersistentTileIntegrationInterval[ha
 ReleasePersistentTilePlan::usage = "ReleasePersistentTilePlan[handle] releases one public native tile-plan token. Already-retained line results keep strong ownership of their immutable plan snapshot.";
 RunPersistentTileIntegral::usage = "RunPersistentTileIntegral[plan, arm, tile, local, epsilon, checkpointIdentity, certifyTail] integrates the retained local over the exact tile selected by plan and applies the exact affine Jacobian. With certifyTail True (the seventh Boolean argument), an attached regular-tail model may promote the result to FullLocalWithCertifiedTail; unsupported or inconclusive requests remain StoredTruncation. Wolfram tile indices are one-based.";
 RunPersistentNativeArms::usage = "RunPersistentNativeArms[plan, anchor, arms, epsilon, checkpointRoot, refinement, certifyTail] marches both retained tile-plan arms concurrently inside one persistent C++ request. arms has exactly lower/upper records, each with receiving_basis (one retained-local basis list per match) and one precomputed integrand_rows entry per tile. epsilon contains min, max, required_complete_max for projected/public lines, and match_required_complete_max for the source/match halo. C++ derives every live match window and, for ordinary Acb bases, certifies identity saturation from the actual evaluated basis (exact-zero negative powers and a certified full-rank epsilon-zero frame); it applies each rational row to a hidden scalar local, matches the unprojected vector local, integrates and aggregates natively, and returns only opaque final-local/line handles plus timing.";
+RunPersistentTransportArm::usage = "RunPersistentTransportArm[plan,arm,anchor,receivingBasis,epsilon,checkpointRoot,refinement] marches one retained lower or upper arm entirely in C++ without projecting or integrating observables. It returns an opaque transport-state handle that strongly owns its plan, anchor, receiving bases, hidden planned matches, one unprojected source local per tile, and final local; no coefficient slab is serialized.";
+PersistentTransportArmStatistics::usage = "PersistentTransportArmStatistics[state] returns the opaque retained arm-state topology, exact provenance, ownership counts, epsilon/refinement contract, final-local handle, and statistics.";
+ReleasePersistentTransportArm::usage = "ReleasePersistentTransportArm[state] releases one public transport-state token. A second release is a loud native error; independently published final locals remain governed by their own tokens.";
 PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, stored-or-certified-tail scope diagnostics, and export counters.";
 ExportPersistentLineIntegral::usage = "ExportPersistentLineIntegral[handle, checkpointIdentity, outputDigits] explicitly exports one retained physical-tile epsilon vector for compatibility.";
 ReleasePersistentLineIntegral::usage = "ReleasePersistentLineIntegral[handle] releases one retained line-integral result. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
-SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for prepared charts/SCCs, retained Rational or Acb locals, ordinary and plan-driven exact/Acb matches, match-materialized locals, raw and plan-bound endpoint results, exact tile plans, and completed line results. The complete strong-owner closure is serialized separately from public registry visibility; symbolic locals remain the sole deferred scalar kind.";
-RestorePersistentCheckpoint::usage = "RestorePersistentCheckpoint[path, expectedIdentity] validates and restores an opaque native checkpoint into a new persistent C++ session without replaying Wolfram preprocessing. It returns stable public chart, SCC, local, ordinary/planned-match, endpoint, tile-plan, and line-result handle maps while restoring dependency-only owners without making them public.";
+SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for prepared charts/SCCs, retained Rational or Acb locals, ordinary and plan-driven exact/Acb matches, match-materialized locals, raw and plan-bound endpoint results, exact tile plans, retained transport-arm states, and completed line results. The complete strong-owner closure is serialized separately from public registry visibility; symbolic locals remain the sole deferred scalar kind.";
+RestorePersistentCheckpoint::usage = "RestorePersistentCheckpoint[path, expectedIdentity] validates and restores an opaque native checkpoint into a new persistent C++ session without replaying Wolfram preprocessing. It returns stable public chart, SCC, local, ordinary/planned-match, endpoint, tile-plan, transport-state, and line-result handle maps while restoring dependency-only owners without making them public.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
 ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart and SCC handle registries.";
 PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
@@ -1048,6 +1051,21 @@ persistentTilePlanHandles[handle_Association] := Module[
   <|"Session" -> session, "TilePlan" -> plan,
     "CheckpointIdentity" -> checkpoint|>];
 
+persistentTransportArmHandles[handle_Association] := Module[
+  {session, state, checkpoint},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  state = Lookup[handle, "transport_state",
+    Lookup[handle, "TransportState", None]];
+  checkpoint = Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", None]];
+  If[!StringQ[session] || !StringQ[state] || !StringQ[checkpoint] ||
+      StringLength[checkpoint] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent transport-arm handle requires exact session, state, and checkpoint tokens"|>],
+      Module]];
+  <|"Session" -> session, "TransportState" -> state,
+    "CheckpointIdentity" -> checkpoint|>];
+
 RunPersistentPlannedEndpointLimit[plan_Association, arm_String,
     local_Association, policy_Association] := Module[
   {planTokens = persistentTilePlanHandles[plan],
@@ -1383,6 +1401,72 @@ RunPersistentNativeArms[plan_Association, anchor_Association,
     "upper" -> KeyDrop[normalized["upper"], "sessions"]|>;
   If[TrueQ[certifyTail], request = Append[request, "certify_tail" -> True]];
   RunRequest[request]];
+
+RunPersistentTransportArm[plan_Association, arm_String,
+    anchor_Association, receivingBasis_List, epsilon_Association,
+    checkpointRoot_String, refinement_Association] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   anchorTokens = persistentLocalHandles[anchor], basisTokens, bad,
+   sessions, anchorCheckpoint, epsilonKeys, refinementKeys},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[anchorTokens], Return[anchorTokens, Module]];
+  epsilonKeys = {"min", "max", "required_complete_max",
+    "match_required_complete_max"};
+  refinementKeys = {"relative_tolerance", "max_steps"};
+  anchorCheckpoint = Lookup[anchor, "checkpoint_identity",
+    Lookup[anchor, "CheckpointIdentity", None]];
+  If[!MemberQ[{"lower", "upper"}, arm] ||
+      !AllTrue[receivingBasis,
+        ListQ[#] && # =!= {} && AllTrue[#, AssociationQ] &] ||
+      Sort[Keys[epsilon]] =!= Sort[epsilonKeys] ||
+      !AllTrue[Lookup[epsilon, epsilonKeys], IntegerQ] ||
+      !TrueQ[epsilon["min"] <= epsilon["required_complete_max"] <=
+        epsilon["match_required_complete_max"] <= epsilon["max"]] ||
+      Sort[Keys[refinement]] =!= Sort[refinementKeys] ||
+      !StringQ[Lookup[refinement, "relative_tolerance", None]] ||
+      StringLength[Lookup[refinement, "relative_tolerance", ""]] == 0 ||
+      !IntegerQ[Lookup[refinement, "max_steps", None]] ||
+      !TrueQ[0 <= refinement["max_steps"] <= 32] ||
+      !StringQ[anchorCheckpoint] || StringLength[anchorCheckpoint] == 0 ||
+      StringLength[checkpointRoot] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "retained transport marching requires lower/upper, zero or more complete retained-local bases, ordered integer epsilon bounds, bounded refinement, and nonempty source/run checkpoint identities"|>], Module]];
+  basisTokens = Map[persistentLocalHandles, receivingBasis, {2}];
+  bad = Cases[basisTokens, _Failure, Infinity];
+  If[bad =!= {}, Return[First[bad], Module]];
+  sessions = DeleteDuplicates[Join[
+    {planTokens["Session"], anchorTokens["Session"]},
+    Flatten[Map[Lookup[#, "Session"] &, basisTokens, {2}]]]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "the retained plan, anchor, and every receiving-basis local must belong to one persistent session",
+      "Sessions" -> sessions|>], Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "transport.run_arm",
+    "session" -> First[sessions],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "anchor" -> anchorTokens["Local"],
+    "anchor_checkpoint_identity" -> anchorCheckpoint,
+    "arm" -> arm,
+    "receiving_basis" -> Map[Lookup[#, "Local"] &, basisTokens, {2}],
+    "epsilon" -> epsilon, "refinement" -> refinement,
+    "checkpoint_policy" -> <|
+      "schema" -> "diffexp2-deterministic-arm-checkpoints-v1",
+      "root" -> checkpointRoot|>|>]];
+
+PersistentTransportArmStatistics[handle_Association] := Module[
+  {tokens = persistentTransportArmHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "transport.stats",
+    "session" -> tokens["Session"],
+    "transport_state" -> tokens["TransportState"]|>]];
+
+ReleasePersistentTransportArm[handle_Association] := Module[
+  {tokens = persistentTransportArmHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "transport.release",
+    "session" -> tokens["Session"],
+    "transport_state" -> tokens["TransportState"]|>]];
 
 persistentLineIntegralHandles[handle_Association] := Module[
   {session, line, checkpoint},

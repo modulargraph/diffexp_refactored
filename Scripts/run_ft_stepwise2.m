@@ -396,20 +396,21 @@ ft2EpsilonBasisCheckpointQ[payload_Association] := Module[
     Lookup[record, "NormalizedMatrixHash", None] ===
       Hash[matrix, "SHA256"]];
 
-(* A transport checkpoint is updated after each successful endpoint arm.
-   In particular, the lower arm reaches disk before the upper arm starts, so
-   an interrupted upper solve can resume without repeating the lower one.
-   The same schema accepts either arm (or both) and computes only what is
-   missing before replaying boundary assembly.  A boundary checkpoint starts
-   directly at the named lower level.  Unversioned/stale files require an
-   explicit opt-in: they may contain mathematically valid data, but source
-   provenance cannot be proved. *)
+(* The explicit Wolfram backend updates a legacy Transport checkpoint after
+   each successful endpoint arm.  Cpp instead saves a completed schema-2
+   NativeTransport session plus an atomic MX sidecar before compatibility
+   export; restoring that state reuses its retained line/endpoint results and
+   never interprets partial Wolfram arms as native ownership.  A Boundary
+   checkpoint starts directly at the named lower level.  Legacy stale data
+   requires explicit opt-in, while native state always requires exact current
+   source provenance. *)
 loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
   {payload, ok, kind, level, levelData, belowData, mastersHere, mastersBelow,
    currentRequests, savedEO, savedFingerprint, stale, needInt, needLo, needHi,
    cachedArms, recordedArms, expectedCharts, boundaryWidths, boundaryShift,
    requiredRaw, preservedRaw, preservedSource, nativeRecord,
-   nativePlanRecord, nativePlanIdentity},
+   nativePlanRecord, nativePlanIdentity, transportKindQ,
+   nativeTransportRecord, nativeContract},
   If[!FileExistsQ[file],
     Return[ladderCheckpointReject[file, "file does not exist"], Module]];
   Clear[Global`$FT2LadderCheckpoint];
@@ -424,12 +425,17 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
       payload["CheckpointVersion"] =!= $ftLadderCheckpointVersion,
     Return[ladderCheckpointReject[file, "unsupported checkpoint version"], Module]];
   kind = Lookup[payload, "Kind", "Transport"];
-  If[!MemberQ[{"Transport", "Boundary"}, kind],
+  If[!MemberQ[{"Transport", "NativeTransport", "Boundary"}, kind],
     Return[ladderCheckpointReject[file, "unknown checkpoint kind"], Module]];
   If[kind === "Transport" && recurrenceBackend === "Cpp",
     Return[ladderCheckpointReject[file,
       "legacy partial-arm Transport snapshots cannot resume the retained native observable batch; resume from a numeric Boundary checkpoint"],
       Module]];
+  If[kind === "NativeTransport" && recurrenceBackend =!= "Cpp",
+    Return[ladderCheckpointReject[file,
+      "native retained Transport snapshots require the Cpp recurrence backend"],
+      Module]];
+  transportKindQ = MemberQ[{"Transport", "NativeTransport"}, kind];
   level = Lookup[payload, "Level", None];
   If[!IntegerQ[level] || level < 1 || level > data["NumLevels"],
     Return[ladderCheckpointReject[file, "invalid resume level"], Module]];
@@ -468,7 +474,7 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
       Length[payload["BoundaryPrefactors"]] =!= Length[mastersHere],
     Return[ladderCheckpointReject[file, "boundary vector has the wrong dimension"],
       Module]];
-  savedEO = If[kind === "Transport", Lookup[payload, "ExpansionOrder", None],
+  savedEO = If[transportKindQ, Lookup[payload, "ExpansionOrder", None],
     Lookup[payload, "SourceExpansionOrder", None]];
   If[!IntegerQ[savedEO] || savedEO < 1,
     Return[ladderCheckpointReject[file, "missing source ExpansionOrder"], Module]];
@@ -476,13 +482,13 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
      require exact order parity.  Boundary checkpoints contain only endpoint
      Laurent data: a higher-order source may safely seed a lower-order run,
      but lower-order data must never silently downgrade the requested order. *)
-  If[kind === "Transport" && expansionOrder =!= savedEO,
+  If[transportKindQ && expansionOrder =!= savedEO,
     Return[ladderCheckpointReject[file,
       "transport ExpansionOrder does not match"], Module]];
   If[kind === "Boundary" && savedEO < expansionOrder,
     Return[ladderCheckpointReject[file,
       "boundary source ExpansionOrder is lower than requested"], Module]];
-  If[kind === "Transport",
+  If[transportKindQ,
     If[KeyExistsQ[payload, "DivisionOrder"] &&
         payload["DivisionOrder"] =!= divisionOrder,
       Return[ladderCheckpointReject[file,
@@ -509,8 +515,11 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
         Lookup[payload, "Requests", None] =!= currentRequests,
       Return[ladderCheckpointReject[file,
         "transport level metadata does not match prepared FT data"], Module]];
-    If[Lookup[payload, "RequestedEpsilonOrder", None] =!=
-        requestedEpsilonOrder[level],
+    requiredRaw = If[kind === "NativeTransport" &&
+        ft2NativeEpsilonPlanQ[nativePlan],
+      nativePlan["Levels"][level]["RequiredRawTop"],
+      requestedEpsilonOrder[level]];
+    If[Lookup[payload, "RequestedEpsilonOrder", None] =!= requiredRaw,
       Return[ladderCheckpointReject[file,
         "requested epsilon window does not match"], Module]];
     If[!AssociationQ[Lookup[payload, "System", None]] ||
@@ -518,35 +527,68 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
         !AssociationQ[Lookup[payload, "Reductions", None]] ||
         !AllTrue[currentRequests,
           KeyExistsQ[payload["Reductions"], #["NeededVec"]] &] ||
-        !ListQ[Lookup[payload, "ExtraSingularFactors", None]] ||
-        !ListQ[Lookup[payload, "ChartCache", None]] ||
-        !AllTrue[{Lookup[payload, "TransportLow", None],
-            Lookup[payload, "TransportHigh", None]},
-          (# === None || AssociationQ[#]) &],
+        !ListQ[Lookup[payload, "ExtraSingularFactors", None]],
       Return[ladderCheckpointReject[file,
         "transport payload is incomplete or has inconsistent epsilon-basis metadata"],
         Module]];
-    needInt = AnyTrue[currentRequests, #["Case"] === "integrate" &];
-    needLo = needInt || AnyTrue[currentRequests, #["Case"] === "limitLower" &];
-    needHi = needInt || AnyTrue[currentRequests, #["Case"] === "limitUpper" &];
-    cachedArms = Pick[{"Lower", "Upper"},
-      AssociationQ /@ {payload["TransportLow"], payload["TransportHigh"]}];
-    recordedArms = Lookup[payload, "CompletedArms", cachedArms];
-    If[recordedArms =!= cachedArms,
-      Return[ladderCheckpointReject[file,
-        "completed-arm metadata does not match transport payload"], Module]];
-    expectedCharts = Join[
-      If[AssociationQ[payload["TransportLow"]],
-        Lookup[payload["TransportLow"], "Charts", {}], {}],
-      If[AssociationQ[payload["TransportHigh"]],
-        Lookup[payload["TransportHigh"], "Charts", {}], {}]];
-    If[payload["ChartCache"] =!= expectedCharts,
-      Return[ladderCheckpointReject[file,
-        "chart cache does not match completed transport arms"], Module]];
-    If[(needLo || needHi) && cachedArms === {},
-      Print["FTLADDER RESUME transport has no completed endpoint arms; ",
-        "both required arms will be computed"]],
-    If[recurrenceBackend === "Cpp",
+    If[kind === "Transport",
+      If[!ListQ[Lookup[payload, "ChartCache", None]] ||
+          !AllTrue[{Lookup[payload, "TransportLow", None],
+              Lookup[payload, "TransportHigh", None]},
+            (# === None || AssociationQ[#]) &],
+        Return[ladderCheckpointReject[file,
+          "legacy transport payload has malformed arm snapshots"], Module]];
+      needInt = AnyTrue[currentRequests, #["Case"] === "integrate" &];
+      needLo = needInt || AnyTrue[currentRequests, #["Case"] === "limitLower" &];
+      needHi = needInt || AnyTrue[currentRequests, #["Case"] === "limitUpper" &];
+      cachedArms = Pick[{"Lower", "Upper"},
+        AssociationQ /@ {payload["TransportLow"], payload["TransportHigh"]}];
+      recordedArms = Lookup[payload, "CompletedArms", cachedArms];
+      If[recordedArms =!= cachedArms,
+        Return[ladderCheckpointReject[file,
+          "completed-arm metadata does not match transport payload"], Module]];
+      expectedCharts = Join[
+        If[AssociationQ[payload["TransportLow"]],
+          Lookup[payload["TransportLow"], "Charts", {}], {}],
+        If[AssociationQ[payload["TransportHigh"]],
+          Lookup[payload["TransportHigh"], "Charts", {}], {}]];
+      If[payload["ChartCache"] =!= expectedCharts,
+        Return[ladderCheckpointReject[file,
+          "chart cache does not match completed transport arms"], Module]];
+      If[(needLo || needHi) && cachedArms === {},
+        Print["FTLADDER RESUME transport has no completed endpoint arms; ",
+          "both required arms will be computed"]],
+      nativeTransportRecord = Lookup[payload,
+        "NativeTransportCheckpoint", None];
+      nativeContract = Lookup[payload, "NativeTransportContract", None];
+      nativeRecord = Lookup[payload, "NativeObservableBatch", None];
+      nativePlanRecord = Lookup[payload, "NativeEpsilonPlan", None];
+      nativePlanIdentity = Lookup[payload,
+        "NativeEpsilonPlanIdentity", None];
+      If[!ft2NativeTransportResumeRecordQ[nativeTransportRecord] ||
+          !ft2NativeTransportContractQ[nativeContract] ||
+          nativeTransportRecord["ContractIdentity"] =!=
+            nativeContract["Identity"] ||
+          nativeContract["Record", "SourceFingerprint"] =!=
+            $ftLadderSourceFingerprint ||
+          nativeContract["Record", "Example"] =!= name ||
+          nativeContract["Record", "Level"] =!= level ||
+          nativeContract["Record", "PrepKey"] =!= prepKey ||
+          !ft2NativeCheckpointRecordQ[nativeRecord] ||
+          !AssociationQ[Lookup[payload, "NativeLedger", None]] ||
+          !ft2NativeEpsilonExecutionRecordQ[nativePlanRecord,
+            nativePlanIdentity, nativePlan] ||
+          nativeContract["Record", "NativeEpsilonPlanIdentity"] =!=
+            nativePlanIdentity ||
+          nativeRecord["NativeEpsilonPlanIdentity"] =!= nativePlanIdentity ||
+          nativeRecord["AtlasPlanIdentity"] =!=
+            nativeTransportRecord["AtlasPlanIdentity"] ||
+          !StringQ[Lookup[nativeTransportRecord["State"], "Path", None]] ||
+          !FileExistsQ[nativeTransportRecord["State", "Path"]],
+        Return[ladderCheckpointReject[file,
+          "native transport checkpoint contract, batch, or epsilon-plan identity is inconsistent"],
+          Module]]]];
+    If[kind === "Boundary" && recurrenceBackend === "Cpp",
       boundaryWidths = If[AllTrue[payload["BoundaryValues"], ListQ],
         Length /@ payload["BoundaryValues"], {}];
       boundaryShift = If[payload["BoundaryPrefactors"] =!= {} &&
@@ -585,14 +627,19 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
         Return[ladderCheckpointReject[file,
           "native Boundary checkpoint has an inconsistent required floor, preserved source width, shift, or observable-batch identity"],
           Module]],
-      If[KeyExistsQ[payload, "RequestedEpsilonOrder"] &&
+      If[kind === "Boundary" &&
+          KeyExistsQ[payload, "RequestedEpsilonOrder"] &&
           payload["RequestedEpsilonOrder"] =!=
             requestedEpsilonOrder[level],
         Return[ladderCheckpointReject[file,
-          "requested epsilon window does not match"], Module]]]];
+          "requested epsilon window does not match"], Module]]];
   savedFingerprint = Lookup[payload, "SourceFingerprint", Missing["Unversioned"]];
   stale = savedFingerprint =!= $ftLadderSourceFingerprint ||
     TrueQ[Lookup[payload, "Tainted", False]];
+  If[kind === "NativeTransport" && stale,
+    Return[ladderCheckpointReject[file,
+      "native retained transport state requires exact current source provenance"],
+      Module]];
   If[stale && !allowStaleLadderCheckpoint,
     Return[ladderCheckpointReject[file,
       "source provenance is stale/unversioned; set FT_ALLOW_STALE_LADDER_CHECKPOINT=1 to opt in"],
@@ -601,6 +648,38 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
     Print["FTLADDER RESUME WARNING stale/unversioned checkpoint explicitly accepted"]];
   Join[payload, <|"Kind" -> kind, "Tainted" -> stale,
     "SourceExpansionOrder" -> savedEO|>]];
+
+ft2DiscoveredLadderCheckpoint[name_String, data_, prepKey_, nativePlan_] :=
+ Module[{records, record, loaded, levelFromFile, add},
+  If[ladderCheckpointDir === "" || !DirectoryQ[ladderCheckpointDir],
+    Return[None, Module]];
+  levelFromFile[file_String, suffix_String] := Module[{matches},
+    matches = StringCases[FileNameTake[file],
+      RegularExpression["^.*_level([0-9]+)_" <> suffix <> "\\.mx$"] ->
+        "$1"];
+    If[Length[matches] === 1, FromDigits[First[matches]], Infinity]];
+  add[pattern_String, kind_String, suffix_String, phase_Integer] :=
+    Map[<|"File" -> #, "Kind" -> kind,
+        "Level" -> levelFromFile[#, suffix], "Phase" -> phase,
+        "Date" -> Quiet[Check[AbsoluteTime[FileDate[#]], 0]]|> &,
+      FileNames[pattern, ladderCheckpointDir]];
+  records = Join[
+    add[name <> "_level*_native_transport.mx", "NativeTransport",
+      "native_transport", 2],
+    If[recurrenceBackend === "Cpp", {},
+      add[name <> "_level*_transport.mx", "Transport", "transport", 1]],
+    add[name <> "_level*_boundary.mx", "Boundary", "boundary", 0]];
+  records = SortBy[Select[records, IntegerQ[#["Level"]] &],
+    {#["Level"], -#["Phase"], -#["Date"]} &];
+  Do[
+    loaded = loadLadderCheckpoint[record["File"], name, data, prepKey,
+      nativePlan];
+    If[AssociationQ[loaded],
+      Print["FTLADDER AUTO RESUME kind=", loaded["Kind"],
+        " level=", loaded["Level"], " file=", record["File"]];
+      Return[loaded, Module]],
+    {record, records}];
+  None];
 
 FeynmanTrick`SetFTOption["Threads", 1];
 FeynmanTrick`SetFTOption["FThreads", 1];
@@ -712,6 +791,60 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
     coefficientHalo >= 0 && MemberQ[{0, 1}, integrationHalo] &&
       target === source - coefficientHalo &&
       source >= target >= deliverable >= required];
+
+ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
+    boundaryValues_, boundaryPrefactors_, entries_List, ledger_Association,
+    configuration_Association, deltaPrescriptions_List,
+    extraSingularFactors_List, nativePlanIdentity_String] := Module[
+  {record},
+  record = <|
+    "Schema" -> "FeynmanTrick.NativeTransportContract/v1",
+    "SourceFingerprint" -> $ftLadderSourceFingerprint,
+    "Example" -> name, "Level" -> level, "PrepKey" -> prepKey,
+    "SystemIdentity" -> ft2CanonicalIdentity[
+      "ft2-native-system-", sys],
+    "BoundaryIdentity" -> ft2CanonicalIdentity[
+      "ft2-native-boundary-", {boundaryValues, boundaryPrefactors}],
+    "BatchIdentity" -> ft2CanonicalIdentity[
+      "ft2-native-batch-", Map[KeyTake[#,
+        {"MasterIndex", "Case", "RequestIdentity", "CoefficientIdentity",
+          "Identity", "CheckpointIdentity"}] &, entries]],
+    "LedgerIdentity" -> ft2CanonicalIdentity[
+      "ft2-native-ledger-", ledger],
+    "ConfigurationIdentity" -> ft2CanonicalIdentity[
+      "ft2-native-configuration-", configuration],
+    "BranchIdentity" -> ft2CanonicalIdentity[
+      "ft2-native-branch-",
+      {deltaPrescriptions, extraSingularFactors}],
+    "NativeEpsilonPlanIdentity" -> nativePlanIdentity|>;
+  <|"Record" -> record, "Identity" -> ft2CanonicalIdentity[
+    "ft2-native-transport-contract-", record]|>];
+
+ft2NativeTransportContractQ[contract_] := AssociationQ[contract] &&
+  Sort[Keys[contract]] === {"Identity", "Record"} &&
+  AssociationQ[contract["Record"]] &&
+  Lookup[contract["Record"], "Schema", None] ===
+    "FeynmanTrick.NativeTransportContract/v1" &&
+  StringQ[Lookup[contract["Record"], "NativeEpsilonPlanIdentity", None]] &&
+  contract["Identity"] === ft2CanonicalIdentity[
+    "ft2-native-transport-contract-", contract["Record"]];
+
+ft2NativeTransportResumeRecordQ[record_] := Module[{core},
+  If[!AssociationQ[record] || Sort[Keys[record]] =!= Sort[{
+      "Schema", "ContractIdentity", "AtlasPlanIdentity",
+      "NativeBatchPayloadIdentity", "CheckpointIdentity",
+      "State", "Identity"}], Return[False, Module]];
+  core = KeyDrop[record, "Identity"];
+  TrueQ[record["Schema"] ===
+      "FeynmanTrick.NativeTransportResume/v1"] &&
+    AllTrue[Lookup[record, {"ContractIdentity", "AtlasPlanIdentity",
+        "NativeBatchPayloadIdentity", "CheckpointIdentity"}],
+      StringQ[#] && StringLength[#] > 0 &] &&
+    AssociationQ[record["State"]] &&
+    Lookup[record["State"], "CheckpointIdentity", None] ===
+      record["CheckpointIdentity"] &&
+    record["Identity"] === ft2CanonicalIdentity[
+      "ft2-native-transport-resume-", core]];
 
 ft2ExactEpsilonValuation[expression_, physicalVar_Symbol,
     epsSymbol_Symbol] := Module[
@@ -1274,6 +1407,12 @@ ft2NativeRun[atlas_, observables_, physicalVar_] :=
 ft2NativeExport[batch_, digits_] :=
   DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
     batch, digits];
+ft2NativeSaveCheckpoint[batch_, path_, identity_] :=
+  DiffExp2`NativeTransport`SaveNativeTransportObservableBatchCheckpoint[
+    batch, path, identity];
+ft2NativeRestoreCheckpoint[manifest_] :=
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    manifest];
 ft2NativeReleaseBatch[batch_] :=
   DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[batch];
 ft2NativeReleaseAtlas[atlas_] :=
@@ -1282,7 +1421,8 @@ ft2NativeReleaseAtlas[atlas_] :=
 ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     entries_List, ledger_Association, physicalVar_Symbol, anchor_,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
-    outputDigits_Integer, nativePlanIdentity_:None] :=
+    outputDigits_Integer, nativePlanIdentity_:None,
+    checkpointSpec_:None] :=
  Module[
   {deliverableMax = ledger["DeliverableCompleteMax"],
    integrationHalo = ledger["IntegrationHalo"], directRequiredTop =
@@ -1297,7 +1437,11 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
    identities, checkpointIdentities, requestIdentities,
    coefficientIdentities,
    prescriptionIdentity, extraFactorsIdentity, atlasPlanIdentity = None,
-   nativeBatchPayloadIdentity, publishedBatchQ},
+   nativeBatchPayloadIdentity, publishedBatchQ, checkpointMode = None,
+   checkpointContractIdentity = None, checkpointIdentity = None,
+   nativeCheckpointState = None, nativeResumeRecord = None,
+   restoredNativeQ = False, resumeCore, checkpointAuditRecord = None,
+   publishResult = None, makeCheckpointAuditRecord, nativeBatchMatchesQ},
   masterIndices = Lookup[entries, "MasterIndex", {}];
   batchKeys = DeleteDuplicates[Lookup[entries, "BatchKey", {}]];
   batchPayloadKeys =
@@ -1319,15 +1463,61 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         MemberQ[{"integrate", "limitLower", "limitUpper", "direct"}, #] &] ||
       !(nativePlanIdentity === None ||
         (StringQ[nativePlanIdentity] &&
-          StringLength[nativePlanIdentity] > 0)),
+          StringLength[nativePlanIdentity] > 0)) ||
+      !(checkpointSpec === None || AssociationQ[checkpointSpec]),
     Return[ft2NativeFailure[
       "native boundary dispatch received inconsistent master, batch, case, or identity metadata",
       <|"MasterIndices" -> masterIndices, "BatchKeys" -> batchKeys,
         "BatchPayloadKeys" -> batchPayloadKeys|>], Module]];
+  If[AssociationQ[checkpointSpec],
+    checkpointMode = Lookup[checkpointSpec, "Mode", None];
+    checkpointContractIdentity = Lookup[checkpointSpec,
+      "ContractIdentity", None];
+    If[!MemberQ[{"Save", "Restore"}, checkpointMode] ||
+        !StringQ[checkpointContractIdentity] ||
+        StringLength[checkpointContractIdentity] === 0 ||
+        (checkpointMode === "Save" &&
+          (Sort[Keys[checkpointSpec]] =!=
+              Sort[{"Mode", "Path", "ContractIdentity", "Publish"}] ||
+            !StringQ[checkpointSpec["Path"]] ||
+            StringLength[checkpointSpec["Path"]] === 0 ||
+            Head[checkpointSpec["Publish"]] =!= Function)) ||
+        (checkpointMode === "Restore" &&
+          (Sort[Keys[checkpointSpec]] =!=
+              Sort[{"Mode", "Record", "ContractIdentity"}] ||
+            !ft2NativeTransportResumeRecordQ[
+              checkpointSpec["Record"]] ||
+            checkpointSpec["Record", "ContractIdentity"] =!=
+              checkpointContractIdentity)),
+      Return[ft2NativeFailure[
+        "native checkpoint specification is malformed or contract-mismatched"],
+        Module]]];
   prescriptionIdentity = ft2CanonicalIdentity[
     "ft2-delta-prescriptions-", deltaPrescriptions];
   extraFactorsIdentity = ft2CanonicalIdentity[
     "ft2-extra-singular-factors-", extraSingularFactors];
+  makeCheckpointAuditRecord[] := <|
+    "Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
+    "BatchKey" -> First[batchKeys],
+    "BatchPayloadKey" -> First[batchPayloadKeys],
+    "RequestIdentities" -> Lookup[entries, "RequestIdentity"],
+    "CoefficientIdentities" -> Lookup[entries, "CoefficientIdentity"],
+    "ObservableIdentities" -> If[nativeEntries === {}, {},
+      Lookup[nativeEntries, "Identity"]],
+    "ObservableCheckpointIdentities" -> If[nativeEntries === {}, {},
+      Lookup[nativeEntries, "CheckpointIdentity"]],
+    "DeltaPrescriptions" -> deltaPrescriptions,
+    "DeltaPrescriptionIdentity" -> prescriptionIdentity,
+    "ExtraSingularFactorsIdentity" -> extraFactorsIdentity,
+    "AtlasPlanIdentity" -> atlasPlanIdentity,
+    "NativeBatchPayloadIdentity" -> nativeBatchPayloadIdentity,
+    "NativeEpsilonPlanIdentity" -> nativePlanIdentity,
+    "SourceCompleteMax" -> ledger["SourceCompleteMax"],
+    "TargetCompleteMax" -> ledger["TargetCompleteMax"],
+    "DeliverableCompleteMax" -> deliverableMax,
+    "RequiredRawTop" -> ledger["DownstreamRawTop"],
+    "CoefficientHalo" -> ledger["CoefficientHalo"],
+    "IntegrationHalo" -> integrationHalo|>;
   provenZeroEntries = Select[entries,
     TrueQ[Lookup[#, "ProvenZero", False]] &];
   activeEntries = Select[entries,
@@ -1344,6 +1534,10 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
      by that shift.  Clamping Min to D asks native transport to prove the
      zero row if the whole observable really starts later. *)
   nativeEntries = nonDirectEntries;
+  If[checkpointMode === "Restore" && nativeEntries === {},
+    Return[ft2NativeFailure[
+      "native transport restore was requested for a level with no retained transport observables"],
+      Module]];
   directRules = Map[Function[entry, Module[{value},
       value = ft2DirectBoundaryValue[entry, currentBCs, physicalVar,
         anchor, Global`eps, directRequiredTop];
@@ -1368,12 +1562,13 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
   If[nativeEntries =!= {},
     transportSystem = Join[sys, <|"ExtraSingularFactors" ->
       Select[extraSingularFactors, !FreeQ[#, physicalVar] &]|>];
-    lowerPlan = catch2[
-      ft2NativeSegmentLine[transportSystem, {anchor, 0}]];
-    upperPlan = catch2[
-      ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
-    If[FailureQ[lowerPlan] || FailureQ[upperPlan],
-      Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
+    If[checkpointMode =!= "Restore",
+      lowerPlan = catch2[
+        ft2NativeSegmentLine[transportSystem, {anchor, 0}]];
+      upperPlan = catch2[
+        ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
+      If[FailureQ[lowerPlan] || FailureQ[upperPlan],
+        Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]]];
     paddedBoundary = If[integrationHalo === 0,
       DiffExp2`EpsSeries`ESNew[0, #] & /@ currentBCs,
       DiffExp2`EpsSeries`ESNew[-integrationHalo,
@@ -1389,31 +1584,108 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       If[entry["Case"] === "integrate",
         Append[observable, "TailPolicy" -> "stored"], observable]]],
       nativeEntries];
+    nativeBatchMatchesQ[candidate_, expectedAtlas_] :=
+      AssociationQ[candidate] &&
+      Lookup[candidate, "Type", None] ===
+        "DiffExp2NativeTransportObservableBatch" &&
+      Lookup[candidate, "Atlas", None] === expectedAtlas &&
+      ListQ[Lookup[candidate, "Results", None]] &&
+      Length[candidate["Results"]] === Length[observables] &&
+      Lookup[candidate["Results"], "Operation"] ===
+        Lookup[observables, "Operation"] &&
+      Lookup[candidate["Results"], "Identity"] ===
+        Lookup[observables, "Identity"] &&
+      Lookup[candidate["Results"], "CheckpointIdentity"] ===
+        Lookup[observables, "CheckpointIdentity"] &&
+      Lookup[candidate["Results"], "Epsilon"] ===
+        Lookup[observables, "Epsilon"];
     result = Catch[Internal`WithLocalSettings[
       Null,
-      atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
-        lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
-        physicalVar, ledger["TargetCompleteMax"], threads]];
-      If[FailureQ[atlas] || !AssociationQ[atlas] ||
-          Lookup[atlas, "Type", None] =!=
-            "DiffExp2NativeRegularIndependentArmAtlas" ||
-          !StringQ[Lookup[atlas, "PlanCheckpointIdentity", None]] ||
-          StringLength[atlas["PlanCheckpointIdentity"]] === 0,
-        Throw[If[FailureQ[atlas], atlas,
-          ft2NativeFailure["native atlas preparation returned a malformed result",
-            <|"Result" -> atlas|>]], dispatchTag]];
-      atlasPlanIdentity = atlas["PlanCheckpointIdentity"];
-      nativeBatchPayloadIdentity = ft2CanonicalIdentity[
-        "ft2-native-observable-payload-",
-        {nativeBatchPayloadIdentity, atlasPlanIdentity,
-          Map[KeyTake[#, {"Operation", "Identity",
-              "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
-            observables]}];
-      batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
-      If[FailureQ[batch] || !AssociationQ[batch] ||
-          Lookup[batch, "Type", None] =!=
-            "DiffExp2NativeTransportObservableBatch" ||
-          Lookup[batch, "Atlas", None] =!= atlas,
+      If[checkpointMode === "Restore",
+        resumeCore = checkpointSpec["Record"];
+        nativeResumeRecord = resumeCore;
+        atlasPlanIdentity = resumeCore["AtlasPlanIdentity"];
+        nativeBatchPayloadIdentity = ft2CanonicalIdentity[
+          "ft2-native-observable-payload-",
+          {nativeBatchPayloadIdentity, atlasPlanIdentity,
+            Map[KeyTake[#, {"Operation", "Identity",
+                "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+              observables]}];
+        checkpointIdentity = ft2CanonicalIdentity[
+          "ft2-native-transport-state-",
+          {checkpointContractIdentity, atlasPlanIdentity,
+            nativeBatchPayloadIdentity,
+            Map[KeyTake[#, {"Operation", "Identity",
+                "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+              observables]}];
+        If[resumeCore["NativeBatchPayloadIdentity"] =!=
+              nativeBatchPayloadIdentity ||
+            resumeCore["CheckpointIdentity"] =!= checkpointIdentity,
+          Throw[ft2NativeFailure[
+            "native checkpoint identities do not match the reconstructed observable batch"],
+            dispatchTag]];
+        nativeCheckpointState = resumeCore["State"];
+        batch = catch2[ft2NativeRestoreCheckpoint[nativeCheckpointState]];
+        restoredNativeQ = True,
+        atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
+          lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
+          physicalVar, ledger["TargetCompleteMax"], threads]];
+        If[FailureQ[atlas] || !AssociationQ[atlas] ||
+            Lookup[atlas, "Type", None] =!=
+              "DiffExp2NativeRegularIndependentArmAtlas" ||
+            !StringQ[Lookup[atlas, "PlanCheckpointIdentity", None]] ||
+            StringLength[atlas["PlanCheckpointIdentity"]] === 0,
+          Throw[If[FailureQ[atlas], atlas,
+            ft2NativeFailure["native atlas preparation returned a malformed result",
+              <|"Result" -> atlas|>]], dispatchTag]];
+        atlasPlanIdentity = atlas["PlanCheckpointIdentity"];
+        nativeBatchPayloadIdentity = ft2CanonicalIdentity[
+          "ft2-native-observable-payload-",
+          {nativeBatchPayloadIdentity, atlasPlanIdentity,
+            Map[KeyTake[#, {"Operation", "Identity",
+                "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+              observables]}];
+        batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
+        If[checkpointMode === "Save",
+          If[FailureQ[batch] || !nativeBatchMatchesQ[batch, atlas],
+            Throw[If[FailureQ[batch], batch,
+              ft2NativeFailure[
+                "native observable batch was malformed before checkpoint save",
+                <|"Result" -> batch|>]], dispatchTag]];
+          checkpointIdentity = ft2CanonicalIdentity[
+            "ft2-native-transport-state-",
+            {checkpointContractIdentity, atlasPlanIdentity,
+              nativeBatchPayloadIdentity,
+              Map[KeyTake[#, {"Operation", "Identity",
+                  "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+                observables]}];
+          nativeCheckpointState = catch2[ft2NativeSaveCheckpoint[
+            batch, checkpointSpec["Path"], checkpointIdentity]];
+          If[FailureQ[nativeCheckpointState],
+            Throw[nativeCheckpointState, dispatchTag]];
+          resumeCore = <|
+            "Schema" -> "FeynmanTrick.NativeTransportResume/v1",
+            "ContractIdentity" -> checkpointContractIdentity,
+            "AtlasPlanIdentity" -> atlasPlanIdentity,
+            "NativeBatchPayloadIdentity" -> nativeBatchPayloadIdentity,
+            "CheckpointIdentity" -> checkpointIdentity,
+            "State" -> nativeCheckpointState|>;
+          nativeResumeRecord = Append[resumeCore,
+            "Identity" -> ft2CanonicalIdentity[
+              "ft2-native-transport-resume-", resumeCore]];
+          checkpointAuditRecord = makeCheckpointAuditRecord[];
+          If[!ft2NativeTransportResumeRecordQ[nativeResumeRecord] ||
+              !ft2NativeCheckpointRecordQ[checkpointAuditRecord],
+            Throw[ft2NativeFailure[
+              "native checkpoint save produced an inconsistent resume or audit manifest"],
+              dispatchTag]];
+          publishResult = checkpointSpec["Publish"][
+            nativeResumeRecord, checkpointAuditRecord];
+          If[publishResult === $Failed || FailureQ[publishResult],
+            Throw[ft2NativeFailure[
+              "native checkpoint state was saved but its atomic ladder sidecar could not be published",
+              <|"PublishResult" -> publishResult|>], dispatchTag]]]];
+      If[FailureQ[batch] || !nativeBatchMatchesQ[batch, atlas],
         Throw[If[FailureQ[batch], batch,
           ft2NativeFailure["native observable batch returned a malformed result",
             <|"Result" -> batch|>]], dispatchTag]];
@@ -1467,35 +1739,17 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     Return[ft2NativeFailure[
       "native/direct result merge did not cover every lower master",
       <|"Missing" -> Cases[values, _Missing]|>], Module]];
+  If[checkpointAuditRecord === None,
+    checkpointAuditRecord = makeCheckpointAuditRecord[]];
   <|"Values" -> values,
-    "NativeBatchCalls" -> If[nativeEntries === {}, 0, 1],
+    "NativeBatchCalls" -> If[nativeEntries === {} || restoredNativeQ, 0, 1],
     "NativeMarches" -> If[AssociationQ[exported],
       Lookup[exported, "NativeMarches", Missing["NotReported"]], 0],
+    "RestoredNativeTransport" -> restoredNativeQ,
+    "NativeTransportCheckpoint" -> nativeResumeRecord,
     "CompatibilityExports" -> If[AssociationQ[exported],
       Lookup[exported, "CompatibilityExports", Length[nativeEntries]], 0],
-    "CheckpointRecord" -> <|
-      "Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
-      "BatchKey" -> First[batchKeys],
-      "BatchPayloadKey" -> First[batchPayloadKeys],
-      "RequestIdentities" -> Lookup[entries, "RequestIdentity"],
-      "CoefficientIdentities" -> Lookup[entries, "CoefficientIdentity"],
-      "ObservableIdentities" -> If[nativeEntries === {}, {},
-        Lookup[nativeEntries, "Identity"]],
-      "ObservableCheckpointIdentities" ->
-        If[nativeEntries === {}, {},
-          Lookup[nativeEntries, "CheckpointIdentity"]],
-      "DeltaPrescriptions" -> deltaPrescriptions,
-      "DeltaPrescriptionIdentity" -> prescriptionIdentity,
-      "ExtraSingularFactorsIdentity" -> extraFactorsIdentity,
-      "AtlasPlanIdentity" -> atlasPlanIdentity,
-      "NativeBatchPayloadIdentity" -> nativeBatchPayloadIdentity,
-      "NativeEpsilonPlanIdentity" -> nativePlanIdentity,
-      "SourceCompleteMax" -> ledger["SourceCompleteMax"],
-      "TargetCompleteMax" -> ledger["TargetCompleteMax"],
-      "DeliverableCompleteMax" -> deliverableMax,
-      "RequiredRawTop" -> ledger["DownstreamRawTop"],
-      "CoefficientHalo" -> ledger["CoefficientHalo"],
-      "IntegrationHalo" -> integrationHalo|>|>];
+    "CheckpointRecord" -> checkpointAuditRecord|>];
 
 runExample[name_String] := Module[
   {topology, sequence, prepKey, prepFile, ftData, outputDir, nLevels,
@@ -1504,7 +1758,8 @@ runExample[name_String] := Module[
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
    nativeEpsilonExecution = None, initialDeepPrefactors,
    deepRelativeGauge, deepGaugeOffset, deepBoundaryWindow,
-   deepRequiredSourceCompleteMax, deepBoundaryDeficit},
+   deepRequiredSourceCompleteMax, deepBoundaryDeficit,
+   discoveredCheckpoint},
   Print["EXAMPLE ", name];
   FeynmanTrick`SetFTOption["DimensionExpression", FTExampleDimension[name]];
   topology = FTExampleTopology[name, "step"];
@@ -1545,7 +1800,11 @@ runExample[name_String] := Module[
   If[resumeLadderFile =!= "",
     resumeCheckpoint = loadLadderCheckpoint[ExpandFileName[resumeLadderFile],
       name, ftData, prepKey, nativeEpsilonPlan];
-    If[resumeCheckpoint === $Failed, Return[$Failed]]];
+    If[resumeCheckpoint === $Failed, Return[$Failed]],
+    discoveredCheckpoint = ft2DiscoveredLadderCheckpoint[
+      name, ftData, prepKey, nativeEpsilonPlan];
+    If[AssociationQ[discoveredCheckpoint],
+      resumeCheckpoint = discoveredCheckpoint]];
   If[AssociationQ[resumeCheckpoint],
     startLevel = resumeCheckpoint["Level"];
     currentBCs = resumeCheckpoint["BoundaryValues"];
@@ -1629,7 +1888,8 @@ runExample[name_String] := Module[
      var, A, sys, mastersBelow, mastersHere, requests, reductions,
      extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop,
      trLoCache, trHiCache, chartCache,
-     resumeTransport, levelExpansionOrder, needInt, needLo, needHi,
+     resumeTransport, resumeNativeTransport, levelExpansionOrder,
+     needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
      transportSys = None, planLo = None, planHi = None, armReq,
      loPlanCharts, hiPlanCharts, armRounds, armBatchResult,
@@ -1637,7 +1897,9 @@ runExample[name_String] := Module[
      epsilonBasis, epsilonBasisRecord, nativeEntries = None,
      nativeLedger = None, nativeDispatch = None, downstreamFiniteTop,
      esCMxLevel, configResult, deltaPrescriptions, plannedLevel = None,
-     runtimePlanCheck},
+     runtimePlanCheck, nativeTransportContract = None,
+     nativeCheckpointSpec = None, nativeStateFile, nativeSidecarFile,
+     nativeConfigurationRecord},
     var = levelData["FeynmanParameter"];
     If[recurrenceBackend === "Cpp",
       plannedLevel = nativeEpsilonPlan["Levels"][level]];
@@ -1647,6 +1909,9 @@ runExample[name_String] := Module[
     mastersBelow = levelBelow["Masters"];
     resumeTransport = AssociationQ[resumeCheckpoint] &&
       resumeCheckpoint["Kind"] === "Transport" &&
+      level === resumeCheckpoint["Level"];
+    resumeNativeTransport = AssociationQ[resumeCheckpoint] &&
+      resumeCheckpoint["Kind"] === "NativeTransport" &&
       level === resumeCheckpoint["Level"];
     epsilonBasis = ft2NormalizeEpsilonBasis[
       A, currentBCs, currentPrefactors, Global`eps,
@@ -1658,7 +1923,7 @@ runExample[name_String] := Module[
     currentBCs = epsilonBasis["BoundaryValues"];
     currentPrefactors = epsilonBasis["BoundaryPrefactors"];
     epsilonBasisRecord = epsilonBasis["CheckpointRecord"];
-    If[resumeTransport,
+    If[resumeTransport || resumeNativeTransport,
       If[Lookup[resumeCheckpoint, "EpsilonBasis", None] =!=
           epsilonBasisRecord,
         Print["FTLADDER RESUME REJECT: epsilon basis does not match level matrix"];
@@ -1671,13 +1936,13 @@ runExample[name_String] := Module[
           " boundaryShifts=", epsilonBasis["BoundaryShifts"],
           " completeMax=", epsilonBasis["CompleteMax"],
           " poleFree=", epsilonBasisRecord["PoleFree"]]]];
-    levelExpansionOrder = If[resumeTransport,
+    levelExpansionOrder = If[resumeTransport || resumeNativeTransport,
       resumeCheckpoint["SourceExpansionOrder"], expansionOrder];
     (* CoefficientVectors are part of the production transport contract.
-       Rebuild/revalidate the one batched FIRE payload even when the Wolfram
-       backend resumes a legacy arm snapshot; native Transport snapshots were
-       rejected at the loader and can never be reinterpreted as retained
-       state. *)
+       Rebuild/revalidate the one batched FIRE payload for every resume.  A
+       schema-2 native state is restored only after these exact request and
+       coefficient identities reproduce its saved contract; legacy partial
+       arms remain confined to the explicit Wolfram branch. *)
     levelIBPBatch = If[AssociationQ[plannedLevel],
       plannedLevel["Batch"],
       FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, level]];
@@ -1691,7 +1956,7 @@ runExample[name_String] := Module[
     If[rawExtraFacs === $Failed,
       Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];
     extraFacs = normalizeFT[rawExtraFacs];
-    If[resumeTransport,
+    If[resumeTransport || resumeNativeTransport,
       sys = resumeCheckpoint["System"];
       If[Lookup[sys, "Variable", None] =!= var ||
           Lookup[sys, "Matrix", None] =!= A,
@@ -1704,7 +1969,7 @@ runExample[name_String] := Module[
             extraFacs,
         Print["FTLADDER RESUME REJECT: saved transport does not match the revalidated level IBP batch"];
         Throw[$Failed, "FT2Abort"]];
-      DiffExp2`Solve`ClearSolveCaches[],
+      If[resumeTransport, DiffExp2`Solve`ClearSolveCaches[]],
       sys = catch2[DiffExp2`API`LoadSystem[
         <|"Matrix" -> A, "Variable" -> var|>]];
       If[FailureQ[sys], Print["LOAD FAIL ", sys]; Return[$Failed, Module]]];
@@ -1748,19 +2013,104 @@ runExample[name_String] := Module[
       Throw[$Failed, "FT2Abort"]];
     deltaPrescriptions = configResult["DeltaPrescriptions"];
     If[recurrenceBackend === "Cpp",
+      nativeConfigurationRecord = <|
+        "WorkingPrecision" -> wp,
+        "ExpansionOrder" -> levelExpansionOrder,
+        "EpsilonOrder" -> esCMxLevel,
+        "DivisionOrder" -> divisionOrder,
+        "RadiusOfConvergence" -> radiusOfConvergence,
+        "StepDivisionOrder" -> stepDivisionOrder,
+        "RecurrenceBackend" -> recurrenceBackend,
+        "SingularMatchPrecondition" -> singularMatchPrecondition,
+        "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+        "CppThreads" -> cppArmThreadBudget|>;
+      nativeTransportContract = ft2NativeTransportContract[
+        name, level, prepKey, sys, currentBCs, currentPrefactors,
+        nativeEntries, nativeLedger, nativeConfigurationRecord,
+        deltaPrescriptions, extraFacs, nativeEpsilonExecution["Identity"]];
+      If[!ft2NativeTransportContractQ[nativeTransportContract],
+        Print["FTLADDER NATIVE CHECKPOINT CONTRACT FAIL level=", level];
+        Throw[$Failed, "FT2Abort"]];
+      nativeStateFile = If[ladderCheckpointDir === "", "",
+        FileNameJoin[{ladderCheckpointDir,
+          name <> "_level" <> ToString[level] <>
+            "_native_transport.de2cp"}]];
+      nativeSidecarFile = If[ladderCheckpointDir === "", "",
+        FileNameJoin[{ladderCheckpointDir,
+          name <> "_level" <> ToString[level] <>
+            "_native_transport.mx"}]];
+      nativeCheckpointSpec = Which[
+        resumeNativeTransport,
+          If[nativeTransportContract =!=
+              resumeCheckpoint["NativeTransportContract"],
+            Print["FTLADDER NATIVE CHECKPOINT CONTRACT MISMATCH level=",
+              level];
+            Throw[$Failed, "FT2Abort"]];
+          <|"Mode" -> "Restore",
+            "Record" -> resumeCheckpoint["NativeTransportCheckpoint"],
+            "ContractIdentity" -> nativeTransportContract["Identity"]|>,
+        nativeStateFile =!= "",
+          <|"Mode" -> "Save", "Path" -> nativeStateFile,
+            "ContractIdentity" -> nativeTransportContract["Identity"],
+            "Publish" -> Function[{resumeRecord, auditRecord},
+              saveLadderCheckpoint[nativeSidecarFile, <|
+                "Kind" -> "NativeTransport", "Example" -> name,
+                "Level" -> level, "PrepKey" -> prepKey,
+                "System" -> sys, "Variable" -> var,
+                "BoundaryValues" -> currentBCs,
+                "BoundaryPrefactors" -> currentPrefactors,
+                "EpsilonBasis" -> epsilonBasisRecord,
+                "MastersHere" -> mastersHere,
+                "MastersBelow" -> mastersBelow,
+                "Requests" -> requests,
+                "Reductions" -> AssociationMap[normalizeFT, reductions],
+                "ExtraSingularFactors" -> extraFacs,
+                "Anchor" -> anchor, "WorkingPrecision" -> wp,
+                "DivisionOrder" -> divisionOrder,
+                "RadiusOfConvergence" -> radiusOfConvergence,
+                "ValueTransportMode" ->
+                  Environment["DE2_VALUE_TRANSPORT"],
+                "RecurrenceBackend" -> recurrenceBackend,
+                "SingularMatchPrecondition" ->
+                  singularMatchPrecondition,
+                "DeltaPrescriptionSign" -> deltaPrescriptionSign,
+                "EpsilonOrder" -> epsOrder,
+                "BoundaryExtraOrder" -> boundaryExtraOrder,
+                "LevelEpsilonHalos" -> levelEpsilonHalos,
+                "ExpansionOrder" -> levelExpansionOrder,
+                "RequestedEpsilonOrder" ->
+                  plannedLevel["RequiredRawTop"],
+                "NativeLedger" -> nativeLedger,
+                "NativeObservableBatch" -> auditRecord,
+                "NativeTransportContract" -> nativeTransportContract,
+                "NativeTransportCheckpoint" -> resumeRecord,
+                "NativeEpsilonPlan" -> nativeEpsilonExecution["Record"],
+                "NativeEpsilonPlanIdentity" ->
+                  nativeEpsilonExecution["Identity"],
+                "Tainted" -> False|>]]|>,
+        True, None];
       nativeDispatch = ft2RunNativeBoundaryDispatch[
         sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
         extraFacs, deltaPrescriptions, cppArmThreadBudget, wp,
-        nativeEpsilonExecution["Identity"]];
+        nativeEpsilonExecution["Identity"], nativeCheckpointSpec];
       If[FailureQ[nativeDispatch],
         Print["FTLADDER NATIVE BATCH FAIL level=", level, " ",
           nativeDispatch];
         Throw[$Failed, "FT2Abort"]];
+      If[!resumeNativeTransport && nativeStateFile =!= "" &&
+          AssociationQ[nativeDispatch["NativeTransportCheckpoint"]],
+        If[!ft2NativeTransportResumeRecordQ[
+            nativeDispatch["NativeTransportCheckpoint"]],
+          Print["FTLADDER NATIVE CHECKPOINT MANIFEST FAIL level=", level];
+          Throw[$Failed, "FT2Abort"]];
+        Print["FTLADDER NATIVE CHECKPOINT READY level=", level,
+          " file=", nativeSidecarFile]];
       rawES = nativeDispatch["Values"];
       Print["FTLADDER NATIVE BATCH level=", level,
         " requests=", Length[nativeEntries],
         " batchCalls=", nativeDispatch["NativeBatchCalls"],
         " armMarches=", nativeDispatch["NativeMarches"],
+        " restored=", nativeDispatch["RestoredNativeTransport"],
         " exports=", nativeDispatch["CompatibilityExports"],
         " HC=", nativeLedger["CoefficientHalo"],
         " HI=", nativeLedger["IntegrationHalo"],

@@ -206,6 +206,105 @@ assert["checkpoint audit record binds requests, coefficients, prescriptions, atl
     Length[mixed["CheckpointRecord", "CoefficientIdentities"]] === 6,
   mixed["CheckpointRecord"]];
 
+checkpointEvents = {};
+publishedResume = None;
+publishedAudit = None;
+checkpointContractIdentity = "synthetic-native-contract";
+checkpointSpec = <|"Mode" -> "Save",
+  "Path" -> FileNameJoin[{$TemporaryDirectory,
+    "synthetic-native-state.checkpoint"}],
+  "ContractIdentity" -> checkpointContractIdentity,
+  "Publish" -> Function[{resumeRecord, auditRecord},
+    AppendTo[checkpointEvents, "publish"];
+    publishedResume = resumeRecord; publishedAudit = auditRecord;
+    "published-before-export"]|>;
+checkpointed = Block[{
+    ft2NativeSegmentLine = Function[{system, path}, <|"Path" -> path|>],
+    ft2NativePrepare = Function[
+      {system, boundary, lower, upper, coefficientVectors, variable,
+       targetMax, threads},
+      <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
+        "PlanCheckpointIdentity" -> "checkpoint-atlas-plan"|>],
+    ft2NativeRun = Function[{atlas, observables, variable},
+      AppendTo[checkpointEvents, "run"];
+      <|"Type" -> "DiffExp2NativeTransportObservableBatch",
+        "Atlas" -> atlas, "NativeMarches" -> 2,
+        "Results" -> observables|>],
+    ft2NativeSaveCheckpoint = Function[{nativeBatch, path, identity},
+      AppendTo[checkpointEvents, "save"];
+      <|"CheckpointIdentity" -> identity,
+        "TransportArmMarches" -> 2|>],
+    ft2NativeExport = Function[{nativeBatch, digits},
+      AppendTo[checkpointEvents, "export"];
+      Join[nativeBatch, <|"CompatibilityExports" ->
+          Length[nativeBatch["Results"]],
+        "ExportedResults" -> Map[
+          Append[#, "Value" -> DiffExp2`EpsSeries`ESZero[
+            #["Epsilon", "RequiredCompleteMax"]]] &,
+          nativeBatch["Results"]]|>]],
+    ft2NativeReleaseBatch = Function[nativeBatch,
+      AppendTo[checkpointEvents, "release"];
+      <|"Released" -> 1, "Failures" -> {}|>],
+    ft2NativeReleaseAtlas = Function[atlas,
+      <|"Released" -> 1, "Failures" -> {}|>]},
+  ft2RunNativeBoundaryDispatch[
+    <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
+    sourceRows, entries, ledger, x, 11/23, {x, 1 - x},
+    {{x, 1}, {1 - x, 1}}, 6, 50, "synthetic-epsilon-plan",
+    checkpointSpec]];
+assert["native sidecar publisher runs synchronously after schema-2 save and before export",
+  AssociationQ[checkpointed] &&
+    checkpointEvents === {"run", "save", "publish", "export", "release"} &&
+    ft2NativeTransportResumeRecordQ[publishedResume] &&
+    ft2NativeCheckpointRecordQ[publishedAudit] &&
+    checkpointed["NativeTransportCheckpoint"] === publishedResume,
+  {checkpointEvents, publishedResume}];
+
+restoreCounts = <|"segment" -> 0, "prepare" -> 0, "run" -> 0,
+  "restore" -> 0, "export" -> 0|>;
+restoredDispatch = Block[{
+    ft2NativeSegmentLine = Function[{system, path},
+      restoreCounts["segment"]++; $Failed],
+    ft2NativePrepare = Function[
+      {system, boundary, lower, upper, coefficientVectors, variable,
+       targetMax, threads}, restoreCounts["prepare"]++; $Failed],
+    ft2NativeRun = Function[{atlas, observables, variable},
+      restoreCounts["run"]++; $Failed],
+    ft2NativeRestoreCheckpoint = Function[manifest,
+      restoreCounts["restore"]++;
+      <|"Type" -> "DiffExp2NativeTransportObservableBatch",
+        "Atlas" -> None, "NativeMarches" -> 0,
+        "RestoredNativeMarches" -> 2,
+        "Results" -> capturedObservables|>],
+    ft2NativeExport = Function[{nativeBatch, digits},
+      restoreCounts["export"]++;
+      Join[nativeBatch, <|"CompatibilityExports" ->
+          Length[nativeBatch["Results"]],
+        "ExportedResults" -> Map[
+          Append[#, "Value" -> DiffExp2`EpsSeries`ESZero[
+            #["Epsilon", "RequiredCompleteMax"]]] &,
+          nativeBatch["Results"]]|>]],
+    ft2NativeReleaseBatch = Function[nativeBatch,
+      <|"Released" -> 1, "Failures" -> {}|>],
+    ft2NativeReleaseAtlas = Function[atlas,
+      <|"Released" -> 1, "Failures" -> {}|>]},
+  ft2RunNativeBoundaryDispatch[
+    <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
+    sourceRows, entries, ledger, x, 11/23, {x, 1 - x},
+    {{x, 1}, {1 - x, 1}}, 6, 50, "synthetic-epsilon-plan",
+    <|"Mode" -> "Restore", "Record" -> publishedResume,
+      "ContractIdentity" -> checkpointContractIdentity|>]];
+assert["resume dispatch restores and exports without replanning or remarching",
+  AssociationQ[restoredDispatch] &&
+    restoreCounts === <|"segment" -> 0, "prepare" -> 0, "run" -> 0,
+      "restore" -> 1, "export" -> 1|> &&
+    restoredDispatch["NativeBatchCalls"] === 0 &&
+    restoredDispatch["NativeMarches"] === 0 &&
+    TrueQ[restoredDispatch["RestoredNativeTransport"]] &&
+    And @@ MapThread[DiffExp2`EpsSeries`ESSameQ,
+      {restoredDispatch["Values"], checkpointed["Values"]}],
+  {restoreCounts, restoredDispatch}];
+
 directRequests = {
   request[1, "direct", 0, 0, {14}],
   request[2, "integrate", 1, 1, {15}]};

@@ -1,14 +1,13 @@
-(* Focused tests for the stepwise runner's Wolfram endpoint-arm snapshots
-   and the retained-native rejection boundary.  The runner is loaded
-   definition-only: no FIRE preparation or transport is performed here. *)
+(* Focused tests for the stepwise runner's legacy Wolfram endpoint-arm
+   snapshots.  Completed retained-native checkpoint/restore is covered by
+   test_ft_native_checkpoint_resume.m.  The runner is loaded definition-only:
+   no FIRE preparation or transport is performed here. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
 
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> "1"];
-(* Legacy partial-arm snapshots are an explicit Wolfram-backend feature.
-   The retained C++ observable batch owns opaque native state and resumes
-   only from completed numeric Boundary checkpoints. *)
+(* Legacy partial-arm snapshots are an explicit Wolfram-backend feature. *)
 SetEnvironment["DE2_RECURRENCE_BACKEND" -> "Wolfram"];
 tmpDir = CreateDirectory[FileNameJoin[{$TemporaryDirectory,
   "DiffExp2_ft_checkpoint_test_" <> ToString[$ProcessID]}]];

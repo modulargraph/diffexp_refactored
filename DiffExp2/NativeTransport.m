@@ -13,6 +13,10 @@ RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 RunNativeTransportObservableBatch::usage =
   "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
+SaveNativeTransportObservableBatchCheckpoint::usage =
+  "SaveNativeTransportObservableBatchCheckpoint[batch,path,identity] atomically saves one completed retained observable batch through the schema-2 native checkpoint protocol. The returned exact manifest binds the stable line, endpoint, and transport-state handles together with the pre-save transport-arm march counter.";
+RestoreNativeTransportObservableBatchCheckpoint::usage =
+  "RestoreNativeTransportObservableBatchCheckpoint[manifest] restores one completed retained observable batch without replaying chart preparation, matching, or transport. It validates the stable public handle manifest and transport-arm march counter before returning an exportable opaque batch.";
 ReleaseNativeTransportObservableBatch::usage =
   "ReleaseNativeTransportObservableBatch[batch] releases every public line, endpoint, and retained transport-state token produced by RunNativeTransportObservableBatch, then releases its atlas anchor, bases, and tile plan. Strongly owned hidden matches and locals are reclaimed without exposing coefficient tensors.";
 ExportNativeTransportObservableBatch::usage =
@@ -1124,13 +1128,282 @@ ExportNativeTransportObservableBatch[batch_Association,
   Join[batch, <|"ExportedResults" -> exported,
     "CompatibilityExports" -> Length[exported]|>]];
 
+nativeObservableCheckpointResult[result_Association,
+    session_String] := Module[
+  {operation, kind, handle, token, checkpoint, provenance},
+  operation = Lookup[result, "Operation", None];
+  {kind, handle} = Switch[operation,
+    "integrate", {"line", Lookup[result, "Line", None]},
+    "limitLower" | "limitUpper",
+      {"endpoint", Lookup[result, "Endpoint", None]},
+    _, err["E8", <|"Operation" -> operation,
+      "Detail" -> "completed native checkpoint contains an unsupported observable operation"|>]];
+  checkpoint = Lookup[result, "CheckpointIdentity", None];
+  token = Switch[kind,
+    "line",
+      If[!nativeOpaqueLineHandleQ[handle, session],
+        err["E8", <|"Result" -> result,
+          "Detail" -> "completed native checkpoint contains a malformed line handle"|>]];
+      Lookup[handle, "line", Lookup[handle, "Line", None]],
+    "endpoint",
+      If[!nativeOpaqueEndpointHandleQ[handle, session],
+        err["E8", <|"Result" -> result,
+          "Detail" -> "completed native checkpoint contains a malformed endpoint handle"|>]];
+      Lookup[handle, "endpoint", Lookup[handle, "Endpoint", None]]];
+  If[Lookup[handle, "checkpoint_identity",
+        Lookup[handle, "CheckpointIdentity", None]] =!= checkpoint,
+    err["E8", <|"Result" -> result,
+      "Detail" -> "observable and retained-result checkpoint identities differ"|>]];
+  provenance = Lookup[handle, "provenance_identity",
+    Lookup[handle, "ProvenanceIdentity", None]];
+  If[!nativeNonemptyStringQ[provenance],
+    err["E8", <|"Result" -> result,
+      "Detail" -> "completed native checkpoint result has no exact provenance identity"|>]];
+  <|"RequestIndex" -> result["RequestIndex"],
+    "Operation" -> operation, "Identity" -> result["Identity"],
+    "CheckpointIdentity" -> checkpoint, "Epsilon" -> result["Epsilon"],
+    "Kind" -> kind, "Handle" -> token,
+    "ProvenanceIdentity" -> provenance|>];
+
+nativeObservableCheckpointManifestQ[manifest_] := Module[
+  {keys = {"Schema", "Path", "CheckpointIdentity", "ManifestIdentity",
+      "TransportArmMarches", "StateHandles", "Results"}, core, results,
+   resultKeys = {"RequestIndex", "Operation", "Identity",
+      "CheckpointIdentity", "Epsilon", "Kind", "Handle",
+      "ProvenanceIdentity"}},
+  If[!AssociationQ[manifest] || Sort[Keys[manifest]] =!= Sort[keys],
+    Return[False, Module]];
+  core = KeyDrop[manifest, "ManifestIdentity"];
+  results = manifest["Results"];
+  TrueQ[manifest["Schema"] ===
+      "DiffExp2.NativeTransportObservableCheckpoint/v1"] &&
+    StringQ[manifest["Path"]] && StringLength[manifest["Path"]] > 0 &&
+    nativeNonemptyStringQ[manifest["CheckpointIdentity"]] &&
+    manifest["ManifestIdentity"] === nativeCheckpointIdentity[
+      "de2-native-observable-checkpoint-manifest-", core] &&
+    IntegerQ[manifest["TransportArmMarches"]] &&
+    manifest["TransportArmMarches"] >= 2 &&
+    AssociationQ[manifest["StateHandles"]] &&
+    Sort[Keys[manifest["StateHandles"]]] === {"lower", "upper"} &&
+    AllTrue[Values[manifest["StateHandles"]], AssociationQ[#] &&
+      Sort[Keys[#]] === Sort[{"Handle", "CheckpointIdentity",
+        "ProvenanceIdentity"}] &&
+      nativeNonemptyStringQ[#["Handle"]] &&
+      StringStartsQ[#["Handle"], "transport:"] &&
+      nativeNonemptyStringQ[#["CheckpointIdentity"]] &&
+      nativeNonemptyStringQ[#["ProvenanceIdentity"]] &] &&
+    DuplicateFreeQ[Lookup[Values[manifest["StateHandles"]], "Handle"]] &&
+    DuplicateFreeQ[Lookup[Values[manifest["StateHandles"]],
+      "CheckpointIdentity"]] &&
+    DuplicateFreeQ[Lookup[Values[manifest["StateHandles"]],
+      "ProvenanceIdentity"]] &&
+    ListQ[results] && results =!= {} &&
+    AllTrue[results, AssociationQ[#] &&
+      Sort[Keys[#]] === Sort[resultKeys] &] &&
+    Lookup[results, "RequestIndex"] === Range[0, Length[results] - 1] &&
+    DuplicateFreeQ[Lookup[results, "Identity"]] &&
+    DuplicateFreeQ[Lookup[results, "CheckpointIdentity"]] &&
+    DuplicateFreeQ[Lookup[results, "Handle"]] &&
+    DuplicateFreeQ[Lookup[results, "ProvenanceIdentity"]] &&
+    AllTrue[results, Function[result,
+      nativeNonemptyStringQ[result["Identity"]] &&
+      nativeNonemptyStringQ[result["CheckpointIdentity"]] &&
+      nativeNonemptyStringQ[result["Handle"]] &&
+      nativeNonemptyStringQ[result["ProvenanceIdentity"]] &&
+      AssociationQ[result["Epsilon"]] &&
+      Sort[Keys[result["Epsilon"]]] ===
+        Sort[{"Min", "Max", "RequiredCompleteMax"}] &&
+      AllTrue[Lookup[result["Epsilon"],
+          {"Min", "Max", "RequiredCompleteMax"}], IntegerQ] &&
+      result["Epsilon", "Min"] <=
+        result["Epsilon", "RequiredCompleteMax"] <=
+        result["Epsilon", "Max"] &&
+      Switch[result["Operation"],
+        "integrate", result["Kind"] === "line" &&
+          StringStartsQ[result["Handle"], "line:"],
+        "limitLower" | "limitUpper", result["Kind"] === "endpoint" &&
+          StringStartsQ[result["Handle"], "e:"],
+        _, False]]]];
+
+SaveNativeTransportObservableBatchCheckpoint[batch_Association,
+    path_String, identity_String] := Module[
+  {atlas, session, results, states, stateHandles, stats, saved, expanded,
+   core},
+  atlas = Lookup[batch, "Atlas", None];
+  results = Lookup[batch, "Results", None];
+  states = Lookup[batch, "States", None];
+  session = If[AssociationQ[atlas], Lookup[atlas, "Session", None], None];
+  If[Lookup[batch, "Type", None] =!=
+        "DiffExp2NativeTransportObservableBatch" ||
+      !nativeNonemptyStringQ[session] || !ListQ[results] || results === {} ||
+      !AssociationQ[states] || Sort[Keys[states]] =!= {"lower", "upper"} ||
+      !nativeNonemptyStringQ[identity],
+    err["E8", <|"Detail" ->
+      "native observable checkpoint save requires one completed nonempty two-arm batch and a nonempty identity"|>]];
+  If[!nativeTransportStateHandleQ[states["lower"], session, "lower"] ||
+      !nativeTransportStateHandleQ[states["upper"], session, "upper"],
+    err["E8", <|"Detail" ->
+      "native observable checkpoint save received malformed lower/upper transport states"|>]];
+  stateHandles = AssociationMap[<|
+      "Handle" -> Lookup[states[#], "transport_state",
+        Lookup[states[#], "TransportState", None]],
+      "CheckpointIdentity" -> Lookup[states[#], "checkpoint_identity",
+        Lookup[states[#], "CheckpointIdentity", None]],
+      "ProvenanceIdentity" -> Lookup[states[#], "provenance_identity",
+        Lookup[states[#], "ProvenanceIdentity", None]]|> &,
+    {"lower", "upper"}];
+  stats = DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
+    "op" -> "session.stats", "session" -> session|>];
+  If[FailureQ[stats] || !AssociationQ[stats] ||
+      Lookup[stats, "status", "error"] =!= "ok" ||
+      !IntegerQ[Lookup[stats, "transport_arm_marches", None]],
+    err["E5", <|"BackendFailure" -> stats,
+      "Detail" -> "could not inspect native transport counters before checkpoint save"|>]];
+  expanded = ExpandFileName[path];
+  If[!DirectoryQ[DirectoryName[expanded]],
+    Quiet[Check[CreateDirectory[DirectoryName[expanded],
+      CreateIntermediateDirectories -> True], Null]]];
+  If[!DirectoryQ[DirectoryName[expanded]],
+    err["E5", <|"Path" -> expanded,
+      "Detail" -> "native observable checkpoint directory could not be created"|>]];
+  saved = DiffExp2`CppBackend`SavePersistentCheckpoint[
+    session, expanded, identity];
+  If[FailureQ[saved] || !AssociationQ[saved] ||
+      Lookup[saved, "status", "error"] =!= "ok" ||
+      Lookup[saved, "path", None] =!= expanded ||
+      Lookup[saved, "checkpoint_identity", None] =!= identity ||
+      !TrueQ[Lookup[saved, "atomic", False]],
+    err["E5", <|"BackendFailure" -> saved,
+      "Detail" -> "schema-2 native observable checkpoint save failed"|>]];
+  core = <|"Schema" ->
+      "DiffExp2.NativeTransportObservableCheckpoint/v1",
+    "Path" -> expanded, "CheckpointIdentity" -> identity,
+    "TransportArmMarches" -> stats["transport_arm_marches"],
+    "StateHandles" -> stateHandles,
+    "Results" -> (nativeObservableCheckpointResult[#, session] & /@
+      results)|>;
+  Append[core, "ManifestIdentity" -> nativeCheckpointIdentity[
+    "de2-native-observable-checkpoint-manifest-", core]]];
+
+RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
+ Module[{restored, session = None, close, expectedLines, expectedEndpoints,
+   expectedStates, stats, results, restoredHandles, restoredRecordMap,
+   lineMap, endpointMap, stateMap, restoredResultIdentitiesQ,
+   restoredStateIdentitiesQ},
+  If[!nativeObservableCheckpointManifestQ[manifest],
+    err["E8", <|"Detail" ->
+      "native observable checkpoint manifest is malformed or self-inconsistent"|>]];
+  If[!FileExistsQ[manifest["Path"]],
+    err["E8", <|"Path" -> manifest["Path"],
+      "Detail" -> "native observable checkpoint file does not exist"|>]];
+  restored = DiffExp2`CppBackend`RestorePersistentCheckpoint[
+    manifest["Path"], manifest["CheckpointIdentity"]];
+  If[FailureQ[restored] || !AssociationQ[restored] ||
+      Lookup[restored, "status", "error"] =!= "ok" ||
+      !nativeNonemptyStringQ[Lookup[restored, "session", None]],
+    err["E5", <|"BackendFailure" -> restored,
+      "Detail" -> "schema-2 native observable checkpoint restore failed"|>]];
+  session = restored["session"];
+  close[] := Quiet[DiffExp2`CppBackend`ClosePersistentSession[session]];
+  expectedLines = Lookup[
+    Select[manifest["Results"], # ["Kind"] === "line" &], "Handle"];
+  expectedEndpoints = Lookup[
+    Select[manifest["Results"], # ["Kind"] === "endpoint" &], "Handle"];
+  expectedStates = Lookup[Values[manifest["StateHandles"]], "Handle"];
+  restoredHandles[collection_, key_String] := If[ListQ[collection],
+    Map[If[AssociationQ[#], Lookup[#, key, None], #] &, collection], {}];
+  restoredRecordMap[collection_, key_String] := If[ListQ[collection] &&
+      AllTrue[collection, AssociationQ],
+    Association@Map[Lookup[#, key, None] -> # &, collection], <||>];
+  lineMap = restoredRecordMap[Lookup[restored, "line_results", {}],
+    "line"];
+  endpointMap = restoredRecordMap[Lookup[restored, "endpoints", {}],
+    "endpoint"];
+  stateMap = restoredRecordMap[Lookup[restored, "transport_states", {}],
+    "transport_state"];
+  restoredResultIdentitiesQ = AllTrue[manifest["Results"],
+    Function[result, Module[{record = Lookup[
+        If[result["Kind"] === "line", lineMap, endpointMap],
+        result["Handle"], None]},
+      AssociationQ[record] &&
+        Lookup[record, "checkpoint_identity", None] ===
+          result["CheckpointIdentity"] &&
+        Lookup[record, "provenance_identity", None] ===
+          result["ProvenanceIdentity"]]]];
+  restoredStateIdentitiesQ = AllTrue[Values[manifest["StateHandles"]],
+    Function[state, Module[{record = Lookup[stateMap,
+        state["Handle"], None]},
+      AssociationQ[record] &&
+        Lookup[record, "checkpoint_identity", None] ===
+          state["CheckpointIdentity"] &&
+        Lookup[record, "provenance_identity", None] ===
+          state["ProvenanceIdentity"]]]];
+  If[Lookup[restored, "checkpoint_identity", None] =!=
+        manifest["CheckpointIdentity"] ||
+      !TrueQ[Lookup[restored, "replayed_wolfram_preprocessing", True] ===
+        False] ||
+      Sort[restoredHandles[Lookup[restored, "line_results", {}],
+          "line"]] =!= Sort[expectedLines] ||
+      Sort[restoredHandles[Lookup[restored, "endpoints", {}],
+          "endpoint"]] =!= Sort[expectedEndpoints] ||
+      Sort[restoredHandles[Lookup[restored, "transport_states", {}],
+          "transport_state"]] =!=
+        Sort[expectedStates] || !TrueQ[restoredResultIdentitiesQ] ||
+      !TrueQ[restoredStateIdentitiesQ],
+    close[];
+    err["E5", <|
+      "RestoredLineHandles" -> restoredHandles[
+        Lookup[restored, "line_results", {}], "line"],
+      "RestoredEndpointHandles" -> restoredHandles[
+        Lookup[restored, "endpoints", {}], "endpoint"],
+      "RestoredTransportStateHandles" -> restoredHandles[
+        Lookup[restored, "transport_states", {}], "transport_state"],
+      "Detail" -> "restored native checkpoint visibility differs from the completed observable manifest"|>]];
+  stats = DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
+    "op" -> "session.stats", "session" -> session|>];
+  If[FailureQ[stats] || !AssociationQ[stats] ||
+      Lookup[stats, "status", "error"] =!= "ok" ||
+      Lookup[stats, "transport_arm_marches", None] =!=
+        manifest["TransportArmMarches"],
+    close[];
+    err["E5", <|"BackendFailure" -> stats,
+      "ExpectedTransportArmMarches" -> manifest["TransportArmMarches"],
+      "Detail" -> "native checkpoint restore changed the transport-arm march counter"|>]];
+  results = Map[Function[result,
+    Join[KeyTake[result, {"RequestIndex", "Operation", "Identity",
+        "CheckpointIdentity", "Epsilon"}],
+      <|If[result["Kind"] === "line", "Line", "Endpoint"] ->
+        <|"session" -> session, result["Kind"] -> result["Handle"],
+          "request_index" -> result["RequestIndex"],
+          "observable_identity" -> result["Identity"],
+          "checkpoint_identity" -> result["CheckpointIdentity"],
+          "provenance_identity" -> result["ProvenanceIdentity"]|>|>]],
+    manifest["Results"]];
+  <|"Type" -> "DiffExp2NativeTransportObservableBatch",
+    "Atlas" -> None, "States" -> <||>, "Results" -> results,
+    "NativeMarches" -> 0,
+    "RestoredNativeMarches" -> manifest["TransportArmMarches"],
+    "CompatibilityExports" -> 0, "RestoredCheckpoint" -> True,
+    "RestoredSession" -> session, "CheckpointManifest" -> manifest|>];
+
 ReleaseNativeTransportObservableBatch[batch_Association] := Module[
   {results, lines, endpoints, states, responses = {}, atlasResponse,
-   failures, releaseOKQ},
+   failures, releaseOKQ, restoredSession, closed},
   If[Lookup[batch, "Type", None] =!=
       "DiffExp2NativeTransportObservableBatch",
     err["E8", <|"Type" -> Lookup[batch, "Type", None],
       "Detail" -> "native transport batch release requires one completed observable batch"|>]];
+  If[TrueQ[Lookup[batch, "RestoredCheckpoint", False]],
+    restoredSession = Lookup[batch, "RestoredSession", None];
+    If[!nativeNonemptyStringQ[restoredSession],
+      err["E8", <|"Detail" ->
+        "restored native transport batch has no exact session token"|>]];
+    closed = DiffExp2`CppBackend`ClosePersistentSession[restoredSession];
+    Return[<|"Released" -> If[AssociationQ[closed] &&
+          Lookup[closed, "status", "error"] === "ok", 1, 0],
+      "Failures" -> If[AssociationQ[closed] &&
+          Lookup[closed, "status", "error"] === "ok", {}, {closed}]|>,
+      Module]];
   results = Lookup[batch, "Results", {}];
   lines = Cases[Lookup[results, "Line", None], _Association];
   endpoints = Cases[Lookup[results, "Endpoint", None], _Association];

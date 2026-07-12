@@ -59,6 +59,7 @@ PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns st
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for prepared charts/SCCs, retained Rational or Acb locals, ordinary and plan-driven exact/Acb matches, match-materialized locals, raw and plan-bound endpoint results, exact tile plans, retained transport-arm states, and completed line results. The complete strong-owner closure is serialized separately from public registry visibility; symbolic locals remain the sole deferred scalar kind.";
 RestorePersistentCheckpoint::usage = "RestorePersistentCheckpoint[path, expectedIdentity] validates and restores an opaque native checkpoint into a new persistent C++ session without replaying Wolfram preprocessing. It returns stable public chart, SCC, local, ordinary/planned-match, endpoint, tile-plan, transport-state, and line-result handle maps while restoring dependency-only owners without making them public.";
+ClosePersistentSession::usage = "ClosePersistentSession[owner] closes exactly one persistent native session and removes its process-local restored-session registration. owner may be a session token or any opaque handle carrying that session.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
 ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart and SCC handle registries.";
 PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
@@ -403,10 +404,8 @@ ReleasePersistentPreparedToken[token_String] := Module[{keys},
   KeyDropFrom[$persistentPreparedTokenCache, token];
   Null];
 
-persistentCloseSessionHandle[handle_String] := Module[
+persistentForgetSessionHandle[handle_String] := Module[
   {sessionKeys, chartKeys, sccKeys, activeTokens},
-  Quiet[Check[RunRequest[<|"schema" -> 2, "op" -> "session.close",
-      "session" -> handle|>], Null]];
   sessionKeys = Keys@Select[$persistentSessionCache,
     Lookup[#, "Handle", None] === handle &];
   chartKeys = Keys@Select[$persistentChartCache,
@@ -422,6 +421,11 @@ persistentCloseSessionHandle[handle_String] := Module[
   $persistentPreparedTokenCache = KeyTake[
     $persistentPreparedTokenCache, activeTokens];
   Null];
+
+persistentCloseSessionHandle[handle_String] := (
+  Quiet[Check[RunRequest[<|"schema" -> 2, "op" -> "session.close",
+      "session" -> handle|>], Null]];
+  persistentForgetSessionHandle[handle]);
 
 persistentCloseIncompatibleSymbolicSessions[symbols_List] := Module[
   {entries, handles},
@@ -1995,6 +1999,14 @@ RestorePersistentCheckpoint[path_String, expectedIdentity_String] := Module[
     session = Lookup[response, "session", None];
     If[StringQ[session],
       AssociateTo[$persistentRestoredSessionHandles, session -> True]]];
+  response];
+
+ClosePersistentSession[owner_] := Module[
+  {session = persistentCheckpointSession[owner], response},
+  If[FailureQ[session], Return[session, Module]];
+  response = RunRequest[<|"schema" -> 2, "op" -> "session.close",
+    "session" -> session|>];
+  If[persistentCommandOKQ[response], persistentForgetSessionHandle[session]];
   response];
 
 ClearPersistentSessions[] := Module[{handles},

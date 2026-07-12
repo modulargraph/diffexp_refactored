@@ -30,12 +30,13 @@ one = DiffExp2`EpsSeries`ESNew[0, {1, 0}];
 atlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     system, {one}, lowerPlan, upperPlan, "Threads" -> 1,
-    "Integrands" -> {{{1}, {1/Global`eps}}, x},
+    "Integrands" -> {{{1 + Global`eps},
+      {1/Global`eps + 1}}, x},
     "TargetCompleteMax" -> 0]];
 
 epsilon = <|"Min" -> -1, "Max" -> 0,
   "RequiredCompleteMax" -> -1|>;
-observable[operation_, identity_, coefficients_:{1}] := <|
+observable[operation_, identity_, coefficients_:{1 + Global`eps}] := <|
   "Operation" -> operation, "Identity" -> identity,
   "CheckpointIdentity" -> identity <> ":checkpoint",
   "CoefficientVector" -> coefficients, "Epsilon" -> epsilon|>;
@@ -43,7 +44,8 @@ observables = {
   Append[observable["integrate", "integral"], "TailPolicy" -> "stored"],
   observable["limitLower", "lower-limit"],
   observable["limitUpper", "upper-limit"],
-  Append[observable["integrate", "polar-integral", {1/Global`eps}],
+  Append[observable["integrate", "polar-integral",
+      {1/Global`eps + 1}],
     "TailPolicy" -> "stored"]};
 sessionStats[] := If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
@@ -78,6 +80,25 @@ assert["native_observable_batch_marches_once_and_preserves_request_order",
     atlas["Request", "EpsWindow", "CompleteMax"] === 1 &&
     run["States", "lower", "epsilon", "required_complete_max"] === 0 &&
     Sort[Keys[Lookup[run, "States", <||>]]] === {"lower", "upper"}];
+
+checkpointPath = FileNameJoin[{$TemporaryDirectory,
+  "de2-native-observable-batch-" <> ToString[$ProcessID] <> ".checkpoint"}];
+If[FileExistsQ[checkpointPath], DeleteFile[checkpointPath]];
+checkpointManifest = If[AssociationQ[run], catchDE2[
+  DiffExp2`NativeTransport`SaveNativeTransportObservableBatchCheckpoint[
+    run, checkpointPath, "native-observable-batch-roundtrip"]], run];
+assert["native_observable_batch_checkpoint_is_atomic_and_manifest_bound",
+  AssociationQ[checkpointManifest] && FileExistsQ[checkpointPath] &&
+    Lookup[checkpointManifest, "Schema", None] ===
+      "DiffExp2.NativeTransportObservableCheckpoint/v1" &&
+    Lookup[checkpointManifest, "TransportArmMarches", -1] === 2 &&
+    Lookup[Lookup[checkpointManifest, "Results", {}], "Identity"] ===
+      Lookup[results, "Identity"] &&
+    AllTrue[Values[Lookup[checkpointManifest, "StateHandles", <||>]],
+      AssociationQ[#] && Sort[Keys[#]] ===
+        Sort[{"Handle", "CheckpointIdentity", "ProvenanceIdentity"}] &] &&
+    DuplicateFreeQ[Lookup[checkpointManifest["Results"],
+      "ProvenanceIdentity"]]];
 
 exportedRun = If[AssociationQ[run], catchDE2[
   DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[run, 50]],
@@ -118,6 +139,65 @@ assert["native_observable_batch_releases_complete_owner_closure",
     Lookup[afterRelease, "locals", -1] === 0 &&
     Lookup[afterRelease, "matches", -1] === 0 &&
     Lookup[afterRelease, "tile_plans", -1] === 0];
+
+tamperedResults = checkpointManifest["Results"];
+tamperedResults[[{1, 4}, "Handle"]] =
+  Reverse[tamperedResults[[{1, 4}, "Handle"]]];
+tamperedCore = Join[KeyDrop[checkpointManifest, "ManifestIdentity"],
+  <|"Results" -> tamperedResults|>];
+tamperedManifest = Append[tamperedCore, "ManifestIdentity" ->
+  ("de2-native-observable-checkpoint-manifest-" <>
+    IntegerString[Hash[tamperedCore, "SHA256"], 16, 64])];
+tamperedRestore = catchDE2[
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    tamperedManifest]];
+assert["checkpoint_restore_rejects_swapped_per_handle_observable_identity",
+  FailureQ[tamperedRestore]];
+
+tamperedStates = checkpointManifest["StateHandles"];
+tamperedStates["lower", "CheckpointIdentity"] =
+  "tampered-lower-state-checkpoint";
+tamperedStateCore = Join[KeyDrop[checkpointManifest, "ManifestIdentity"],
+  <|"StateHandles" -> tamperedStates|>];
+tamperedStateManifest = Append[tamperedStateCore, "ManifestIdentity" ->
+  ("de2-native-observable-checkpoint-manifest-" <>
+    IntegerString[Hash[tamperedStateCore, "SHA256"], 16, 64])];
+tamperedStateRestore = catchDE2[
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    tamperedStateManifest]];
+assert["checkpoint_restore_binds_each_transport_state_checkpoint_and_provenance",
+  FailureQ[tamperedStateRestore]];
+
+restoredRun = If[AssociationQ[checkpointManifest], catchDE2[
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    checkpointManifest]], checkpointManifest];
+restoredSession = If[AssociationQ[restoredRun],
+  Lookup[restoredRun, "RestoredSession", None], None];
+restoredStatsBefore = If[StringQ[restoredSession],
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    restoredSession, <||>], <||>];
+restoredExport = If[AssociationQ[restoredRun], catchDE2[
+  DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
+    restoredRun, 50]], restoredRun];
+restoredStatsAfter = If[StringQ[restoredSession],
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    restoredSession, <||>], <||>];
+assert["checkpoint_restore_export_does_not_repeat_transport_arm_marches",
+  AssociationQ[restoredExport] &&
+    Lookup[restoredStatsBefore, "transport_arm_marches", -1] === 2 &&
+    Lookup[restoredStatsAfter, "transport_arm_marches", -2] ===
+      Lookup[restoredStatsBefore, "transport_arm_marches", -1] &&
+    Lookup[Lookup[restoredExport, "ExportedResults", {}], "Value"] ===
+      Lookup[exportedResults, "Value"]];
+restoredReleased = If[AssociationQ[restoredExport],
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[
+    restoredExport], restoredExport];
+assert["restored_native_observable_batch_closes_only_its_restored_session",
+  AssociationQ[restoredReleased] &&
+    Lookup[restoredReleased, "Failures", {"missing"}] === {} &&
+    !KeyExistsQ[DiffExp2`CppBackend`PersistentSessionInformation[],
+      restoredSession]];
+If[FileExistsQ[checkpointPath], DeleteFile[checkpointPath]];
 
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];

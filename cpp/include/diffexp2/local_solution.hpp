@@ -184,6 +184,33 @@ class Magnitude {
     mag_div(out.value_, a.value_, b.value_);
     return out;
   }
+  // The following helpers deliberately name the direction of their
+  // enclosure.  In particular, positive_difference_lower is used when a
+  // triangle inequality proves a denominator is separated from zero; feeding
+  // that lower bound to reciprocal_upper then gives a safe upper bound.
+  static Magnitude positive_difference_lower(const Magnitude& a,
+                                             const Magnitude& b) {
+    Magnitude out;
+    mag_sub_lower(out.value_, a.value_, b.value_);
+    return out;
+  }
+  [[nodiscard]] Magnitude reciprocal_upper() const {
+    if (is_zero())
+      throw std::domain_error("magnitude reciprocal of zero lower bound");
+    Magnitude out;
+    mag_inv(out.value_, value_);
+    return out;
+  }
+  [[nodiscard]] Magnitude exponential_upper() const {
+    Magnitude out;
+    mag_exp(out.value_, value_);
+    return out;
+  }
+  [[nodiscard]] Magnitude power_upper(ulong exponent) const {
+    Magnitude out;
+    mag_pow_ui(out.value_, value_, exponent);
+    return out;
+  }
   Magnitude& operator+=(const Magnitude& b) {
     mag_add(value_, value_, b.value_);
     return *this;

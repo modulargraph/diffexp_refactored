@@ -102,11 +102,38 @@ optional source.  Acb upper and lower magnitude bounds yield three outcomes:
 - `Fail`: the lower residual bound is above `tol * scaleUpper`;
 - `Inconclusive`: the enclosures overlap the threshold.
 
-This is a genuine enclosure for the **stored truncation**.  A request to
-certify the full local analytic solution remains inconclusive until a
-rigorous recurrence majorant replaces the current heuristic Taylor tail.
-This distinction prevents the existing full-versus-reduced error heuristic
-from being mislabeled as a proof.
+This is a genuine enclosure for the **stored truncation**.  The generic
+full-local residual request remains inconclusive; in particular it never uses
+the geometric top-column estimate as a proof.
+
+`cpp/include/diffexp2/tail_majorant.hpp` provides one deliberately narrow
+full-function exception.  For a retained ordinary homogeneous chart it first
+proves all of the following from the prepared operator and run:
+
+- `a=b=0`, no log sector, no source, identity assembly, and singleton zero
+  indicial blocks;
+- every retained epsilon shift in `q` and `N` is exactly zero (Rational and
+  Acb coefficient fields are both supported);
+- `N(0)=0`, so `q(t) theta f=N(t)f` is an ordinary regular ODE;
+- the stored Taylor tensor forward-encloses the recurrence from the parsed
+  initial frame through its claimed complete order.
+
+For an exact rational witness radius `R` strictly inside the chart, it proves
+`q` is separated from zero using
+`lower(|q0|)-sum_(j>0) upper(|qj|) R^j > 0`.  An infinity-norm ODE bound and
+Gronwall then bound the solution on `|t|=R`; Cauchy's coefficient estimate
+certifies the unseen value, theta-value, and integrated line tails at strict
+subradius points.  The resulting `ErrorEnvelope` is marked `Certified` and
+retains the operator identity, local checkpoint identity, witness disk, and
+analytic-prescription provenance.  A line result is promoted from
+`StoredTruncation` to `FullLocalWithCertifiedTail` only after that envelope is
+installed.
+
+A disk on which the triangle bound cannot separate `q` is
+`Inconclusive`.  Singular/logarithmic or regulator-dependent powers,
+epsilon-coupled operators, nonidentity assemblies, sourced recurrences, and
+epsilon rows outside the retained model are explicitly `Unsupported`.  These
+outcomes are load-bearing: none falls back to the advisory last-column model.
 
 Evaluation at `t=0` is deliberately strict.  Only known nonnegative integer
 `a`, identically zero `b`, and `p=0` are admitted.  Negative integer powers
@@ -162,10 +189,12 @@ The following are explicit missing pieces, not silent fallbacks:
    bounded refinement and the original-system match residual proof still live
    in Wolfram.  These should be moved together; porting only the linear solve
    would omit the banana-critical lattice normalization.
-8. **Full error proof.**  Acb encloses roundoff and represented-polynomial
-   residuals, but the geometric Taylor tail is advisory.  A rigorous
-   coefficient majorant (or another validated analytic remainder) is needed
-   before full-solution residual/error certification can return `Pass`.
+8. **General full error proof.**  The regular homogeneous, epsilon-decoupled
+   strict-subradius slice now has a rigorous Gronwall/Cauchy tail envelope.
+   Singular/log sectors, inhomogeneous source tails, epsilon coupling,
+   nonidentity assembly, and promotion of the generic theta-residual API still
+   need corresponding majorants.  Outside the implemented slice, the
+   geometric Taylor tail remains advisory.
 9. **Endpoint and integration.**  Endpoint limits, analytic-regularized
    primitives, interior pairing and line/tile accumulation are a separate
    native layer built on these shared types.
@@ -188,6 +217,8 @@ The following are explicit missing pieces, not silent fallbacks:
 7. Replace the advisory tail model with a rigorous majorant, then enable
    full-solution certificates.
 
-The narrow C++ smoke covers direct value/theta evaluation, an Acb residual
+The narrow C++ smokes cover direct value/theta evaluation, an Acb residual
 certificate, both fractional-power rims, epsilon-exponent convolution,
-explicit-log epsilon shifting, and loud missing/conflicting prescriptions.
+explicit-log epsilon shifting, loud missing/conflicting prescriptions, and a
+Rational/Acb regular-tail vertical slice whose point and line envelopes are
+checked against `exp(t)`.

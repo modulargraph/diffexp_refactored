@@ -21,7 +21,10 @@ namespace diffexp2 {
 // LocalSolution.  It deliberately makes no statement about the unseen Taylor
 // tail: a future line/tile driver may attach a separate tail majorant without
 // weakening the finite-frame contract implemented here.
-enum class LineIntegrationScope : std::uint8_t { StoredTruncation };
+enum class LineIntegrationScope : std::uint8_t {
+  StoredTruncation,
+  FullLocalWithCertifiedTail
+};
 
 struct StoredLineIntegrationOptions {
   // The caller, rather than the primitive, owns the epsilon delivery contract.

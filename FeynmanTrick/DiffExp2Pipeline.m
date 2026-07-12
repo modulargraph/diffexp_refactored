@@ -52,6 +52,16 @@ parseFlag[name_String, text_String] := Switch[StringTrim[text],
   _, failure["environment flag must be 0 or 1",
     <|"Name" -> name, "Value" -> text|>]];
 
+parseDeltaPrescriptionSign[name_String, text_String] := Module[
+  {trim = StringTrim[text], value},
+  If[!StringMatchQ[trim, RegularExpression["[+-]?1"]],
+    Return[failure["environment delta-prescription sign must be +1 or -1",
+      <|"Name" -> name, "Value" -> text|>], Module]];
+  value = ToExpression[trim];
+  If[MemberQ[{-1, 1}, value], value,
+    failure["environment delta-prescription sign must be +1 or -1",
+      <|"Name" -> name, "Value" -> text|>]]];
+
 parseHalos[text_String] := Module[{parts, values},
   parts = StringTrim /@ StringSplit[text, ","];
   If[parts === {""}, Return[{}, Module]];
@@ -61,8 +71,8 @@ parseHalos[text_String] := Module[{parts, values},
 RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
-   batch, rebuild, allowStale, fireTimeout, firePath, resume, checkpointDir, prepRoot,
-   values},
+   deltaPrescriptionSign, batch, rebuild, allowStale, fireTimeout, firePath,
+   resume, checkpointDir, prepRoot, values},
   backend = envOrDefault["DE2_RECURRENCE_BACKEND", "Cpp"];
   If[!MemberQ[{"Cpp", "Wolfram"}, backend],
     Return[failure["DE2_RECURRENCE_BACKEND must be Cpp or Wolfram",
@@ -86,6 +96,9 @@ RunnerSettingsFromEnvironment[] := Module[
       envOrDefault["FT_RADIUS_OF_CONVERGENCE", "1"]],
     singular = parseFlag["DE2_SINGULAR_MATCH_PRECONDITION",
       envOrDefault["DE2_SINGULAR_MATCH_PRECONDITION", "0"]],
+    deltaPrescriptionSign = parseDeltaPrescriptionSign[
+      "FT_DELTA_PRESCRIPTION_SIGN",
+      envOrDefault["FT_DELTA_PRESCRIPTION_SIGN", "1"]],
     batch = parseFlag["FT_CPP_BATCH_ENDPOINT_ARMS",
       envOrDefault["FT_CPP_BATCH_ENDPOINT_ARMS", "1"]],
     rebuild = parseFlag["FT_REBUILD_PREP",
@@ -123,6 +136,7 @@ RunnerSettingsFromEnvironment[] := Module[
     "RadiusOfConvergence" -> radius, "LevelEpsilonHalos" -> halos,
     "StopAfterBoundaryLevel" -> stop,
     "SingularMatchPrecondition" -> singular,
+    "DeltaPrescriptionSign" -> deltaPrescriptionSign,
     "BatchEndpointArms" -> (batch && backend === "Cpp"),
     "PrepCacheRoot" -> prepRoot, "ForcePrepRebuild" -> rebuild,
     "ResumeCheckpoint" -> resume, "CheckpointDirectory" -> checkpointDir,
@@ -142,6 +156,7 @@ Options[PipelinePlan] = {
   "ValueTransport" -> True,
   "BatchEndpointArms" -> True,
   "SingularMatchPrecondition" -> False,
+  "DeltaPrescriptionSign" -> 1,
   "PreparedCacheDirectory" -> Automatic,
   "FIREPath" -> Automatic,
   "CheckpointDirectory" -> Automatic,
@@ -188,6 +203,7 @@ validatePlanOptions[settings_Association] := Module[{checks},
       Head[settings["RadiusOfConvergence"]] === Rational) &&
       settings["RadiusOfConvergence"] > 0,
     MemberQ[{"Cpp", "Wolfram"}, settings["RecurrenceBackend"]],
+    MemberQ[{-1, 1}, settings["DeltaPrescriptionSign"]],
     IntegerQ[settings["CppThreads"]] && settings["CppThreads"] >= 1,
     And @@ (boolQ[settings[#]] & /@ {
       "ValueTransport", "BatchEndpointArms", "SingularMatchPrecondition",
@@ -253,6 +269,7 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "ValueTransport" -> OptionValue["ValueTransport"],
     "BatchEndpointArms" -> OptionValue["BatchEndpointArms"],
     "SingularMatchPrecondition" -> OptionValue["SingularMatchPrecondition"],
+    "DeltaPrescriptionSign" -> OptionValue["DeltaPrescriptionSign"],
     "RebuildPreparation" -> OptionValue["RebuildPreparation"],
     "AllowStaleCheckpoint" -> OptionValue["AllowStaleCheckpoint"],
     "FIREPath" -> firePath,
@@ -279,6 +296,8 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "DE2_VALUE_TRANSPORT" -> boolString[settings["ValueTransport"]],
     "DE2_SINGULAR_MATCH_PRECONDITION" ->
       boolString[settings["SingularMatchPrecondition"]],
+    "FT_DELTA_PRESCRIPTION_SIGN" ->
+      inputString[settings["DeltaPrescriptionSign"]],
     "FT_CPP_BATCH_ENDPOINT_ARMS" ->
       boolString[settings["BatchEndpointArms"]],
     "FT_WORKING_PRECISION" -> inputString[settings["WorkingPrecision"]],

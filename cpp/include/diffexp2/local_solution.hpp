@@ -486,11 +486,29 @@ bool material_sector(const LocalSector<Scalar>& sector) {
 template <typename Scalar>
 std::optional<std::int32_t> chart_imaginary_sign(
     const LocalSolution<Scalar>& solution) {
+  if (solution.prescriptions.empty()) return std::nullopt;
+  Rational scale;
+  try {
+    scale = Rational(solution.chart.scale_exact);
+  } catch (const std::invalid_argument&) {
+    throw std::domain_error(
+        "analytic-continuation rim derivation requires an exact rational "
+        "chart scale");
+  }
+  if (scale.is_zero())
+    throw std::domain_error(
+        "analytic-continuation rim derivation requires a nonzero chart "
+        "scale");
+  const auto scale_sign = scale.sign();
   std::optional<std::int32_t> derived;
   for (const auto& prescription : solution.prescriptions) {
-    if ((prescription.multiplicity & 1U) == 0) continue;
+    if ((prescription.multiplicity & 1U) == 0)
+      throw std::domain_error(
+          "even-multiplicity prescribed factor is tangential in this chart; "
+          "a one-sided real-axis rim is not defined");
     const auto candidate = prescription.sign *
-                           prescription.leading_coefficient_sign;
+                           prescription.leading_coefficient_sign *
+                           scale_sign;
     if (derived.has_value() && *derived != candidate)
       throw std::domain_error(
           "conflicting odd-multiplicity analytic-continuation prescriptions");

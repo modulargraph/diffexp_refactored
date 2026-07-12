@@ -254,6 +254,14 @@ std::optional<std::int32_t> first_nonzero_power(
 }
 
 template <typename Scalar>
+bool material_group(const MonomialGroup<Scalar>& group) {
+  return std::any_of(group.coefficients.begin(), group.coefficients.end(),
+                     [](const Scalar& value) {
+                       return !exact_singleton_zero(value);
+                     });
+}
+
+template <typename Scalar>
 [[noreturn]] void throw_divergent_group(
     const LocalSolution<Scalar>& solution,
     const MonomialGroup<Scalar>& group,
@@ -352,8 +360,19 @@ StoredLineIntegral integrate_stored_local_line(
   auto effective_sign = options.imaginary_sign.has_value()
                             ? options.imaginary_sign
                             : chart_sign;
-  if (has_negative_arm && !effective_sign.has_value())
-    effective_sign = 1;  // Mathematica-compatible principal +i0 rim.
+  const bool material_branch_sensitive_negative_arm =
+      has_negative_arm &&
+      std::any_of(groups.begin(), groups.end(), [](const auto& entry) {
+        const auto& group = entry.second;
+        return material_group(group) &&
+               integration_detail::branch_sensitive_on_negative_arm(
+                   group.tag);
+      });
+  if (material_branch_sensitive_negative_arm && !effective_sign.has_value())
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+        "negative branch-sensitive line integration has no derivable "
+        "imaginary sign");
   result.imaginary_sign = effective_sign;
 
   for (const auto& [key, group] : groups) {

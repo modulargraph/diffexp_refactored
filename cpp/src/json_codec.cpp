@@ -8143,12 +8143,21 @@ json::object encode_retained_arm(const RetainedArmPlan& arm) {
 }
 
 std::optional<std::int32_t> exact_plan_rim(
-    const std::vector<Prescription>& prescriptions) {
+    const std::vector<Prescription>& prescriptions,
+    const Rational& chart_scale) {
+  if (chart_scale.is_zero())
+    throw std::invalid_argument(
+        "prepared tile chart has a zero exact scale");
+  const auto scale_sign = chart_scale.sign();
   std::optional<std::int32_t> rim;
   for (const auto& prescription : prescriptions) {
-    if ((prescription.multiplicity & 1U) == 0) continue;
+    if ((prescription.multiplicity & 1U) == 0)
+      throw std::invalid_argument(
+          "prepared tile chart has an even-multiplicity tangential "
+          "prescription; a one-sided real-axis rim is not defined");
     const auto candidate =
-        prescription.sign * prescription.leading_coefficient_sign;
+        prescription.sign * prescription.leading_coefficient_sign *
+        scale_sign;
     if (rim.has_value() && *rim != candidate)
       throw std::invalid_argument(
           "prepared tile chart has conflicting exact odd-multiplicity prescriptions");
@@ -8813,6 +8822,15 @@ class StoredLineResult {
                    diagnostics.primitive_component_reuses},
                   {"has_center_endpoint",
                    diagnostics.has_center_endpoint},
+                  {"tail_certificate_requested",
+                   diagnostics.tail_certificate_requested},
+                  {"tail_certificate_status",
+                   diagnostics.tail_certificate_status},
+                  {"tail_witness_radius_exact",
+                   diagnostics.tail_witness_radius_exact.empty()
+                       ? json::value(nullptr)
+                       : json::value(
+                             diagnostics.tail_witness_radius_exact)},
                   {"detail", diagnostics.detail}}}}},
         {"elapsed_ms", elapsed_ms_},
         {"runtime_stats",
@@ -9062,7 +9080,7 @@ RetainedPlanChartBinding bind_plan_chart(
       throw std::invalid_argument(
           "native tile topology does not reproduce a prepared chart branch prescription");
   }
-  (void)exact_plan_rim(binding.prescriptions);
+  (void)exact_plan_rim(binding.prescriptions, binding.geometry.scale);
   return binding;
 }
 
@@ -9173,8 +9191,10 @@ json::object planned_match_handoff_record(
   const auto& exact_match = arm.exact.matches[match_index];
   const auto& producing = arm.charts.at(exact_match.producing_chart);
   const auto& receiving = arm.charts.at(exact_match.receiving_chart);
-  const auto producing_rim = exact_plan_rim(producing.prescriptions);
-  const auto receiving_rim = exact_plan_rim(receiving.prescriptions);
+  const auto producing_rim = exact_plan_rim(
+      producing.prescriptions, producing.geometry.scale);
+  const auto receiving_rim = exact_plan_rim(
+      receiving.prescriptions, receiving.geometry.scale);
   json::array basis_sources;
   basis_sources.reserve(basis.size());
   for (std::size_t column = 0; column < basis.size(); ++column)
@@ -9284,8 +9304,10 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
       {"incoming_checkpoint_identity", incoming->checkpoint_identity()},
       {"checkpoint_identity", result_checkpoint}};
 
-  const auto producing_rim = exact_plan_rim(producing.prescriptions);
-  const auto receiving_rim = exact_plan_rim(receiving.prescriptions);
+  const auto producing_rim = exact_plan_rim(
+      producing.prescriptions, producing.geometry.scale);
+  const auto receiving_rim = exact_plan_rim(
+      receiving.prescriptions, receiving.geometry.scale);
   std::shared_ptr<StoredMatchBase> native_match;
   if (domain == "rational") {
     native_match = build_exact_regular_match(
@@ -9359,7 +9381,8 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
       request.if_contains("certify_tail") != nullptr &&
       request.at("certify_tail").as_bool();
   auto interval = encode_plan_tile(arm, tile_index);
-  const auto rim = exact_plan_rim(binding.prescriptions);
+  const auto rim = exact_plan_rim(
+      binding.prescriptions, binding.geometry.scale);
   const auto started = std::chrono::steady_clock::now();
   auto result = local->integrate_planned_line(
       binding.geometry, binding.prescriptions, tile.local_begin,
@@ -10425,7 +10448,8 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
       throw std::invalid_argument(
           "checkpoint line rim must be +1 or -1");
   }
-  const auto expected_rim = exact_plan_rim(binding.prescriptions);
+  const auto expected_rim = exact_plan_rim(
+      binding.prescriptions, binding.geometry.scale);
   if (result.imaginary_sign != expected_rim)
     throw std::invalid_argument(
         "checkpoint line rim differs from its exact branch prescriptions");
@@ -10440,13 +10464,33 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
         "checkpoint line result dimension differs from its local owner");
   const auto& diagnostics = as_object(raw_result.at("diagnostics"),
                                       "checkpoint line diagnostics");
-  require_exact_keys(
-      diagnostics,
-      {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
-       "cancelled_divergent_groups", "primitive_evaluations",
-       "primitive_component_applications", "primitive_component_reuses",
-       "has_center_endpoint", "detail"},
-      "checkpoint line diagnostics");
+  const bool has_tail_requested =
+      diagnostics.if_contains("tail_certificate_requested") != nullptr;
+  const bool has_tail_status =
+      diagnostics.if_contains("tail_certificate_status") != nullptr;
+  const bool has_tail_witness =
+      diagnostics.if_contains("tail_witness_radius_exact") != nullptr;
+  if (has_tail_requested != has_tail_status ||
+      has_tail_requested != has_tail_witness)
+    throw std::invalid_argument(
+        "checkpoint line tail diagnostics are incomplete");
+  if (has_tail_requested)
+    require_exact_keys(
+        diagnostics,
+        {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+         "cancelled_divergent_groups", "primitive_evaluations",
+         "primitive_component_applications", "primitive_component_reuses",
+         "has_center_endpoint", "tail_certificate_requested",
+         "tail_certificate_status", "tail_witness_radius_exact", "detail"},
+        "checkpoint line diagnostics");
+  else
+    require_exact_keys(
+        diagnostics,
+        {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+         "cancelled_divergent_groups", "primitive_evaluations",
+         "primitive_component_applications", "primitive_component_reuses",
+         "has_center_endpoint", "detail"},
+        "checkpoint line diagnostics");
   result.diagnostics.input_monomial_cells = checkpoint_size_t(
       diagnostics.at("input_monomial_cells"),
       "checkpoint line input monomials");
@@ -10473,9 +10517,21 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
         "checkpoint line center-endpoint flag must be Boolean");
   result.diagnostics.has_center_endpoint =
       diagnostics.at("has_center_endpoint").as_bool();
+  if (has_tail_requested) {
+    if (!diagnostics.at("tail_certificate_requested").is_bool())
+      throw std::invalid_argument(
+          "checkpoint line tail-request flag must be Boolean");
+    result.diagnostics.tail_certificate_requested =
+        diagnostics.at("tail_certificate_requested").as_bool();
+    result.diagnostics.tail_certificate_status = required_string(
+        diagnostics, "tail_certificate_status");
+    if (!diagnostics.at("tail_witness_radius_exact").is_null())
+      result.diagnostics.tail_witness_radius_exact = required_string(
+          diagnostics, "tail_witness_radius_exact");
+  }
   result.diagnostics.detail = required_string(diagnostics, "detail");
 
-  json::object provenance{
+  json::object legacy_provenance{
       {"schema",
        "diffexp2-retained-native-stored-truncation-physical-tile-integral-v1"},
       {"checkpoint_identity", checkpoint_identity},
@@ -10490,8 +10546,37 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
                                 {"max", result.value.epsilon.complete_max}}},
       {"scope", "stored_truncation"},
       {"error_guarantee", "none"}};
-  if (json::serialize(canonical_json_value(provenance)) !=
-      provenance_identity)
+  json::object provenance{
+      {"schema",
+       "diffexp2-retained-native-physical-tile-integral-v2"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+      {"arm", arm_name}, {"tile", tile_index},
+      {"interval", interval},
+      {"source", json::object{
+           {"local", local->handle()}, {"chart", local->source_chart()},
+           {"checkpoint_identity", local->checkpoint_identity()}}},
+      {"epsilon", json::object{{"min", result.value.epsilon.min_power},
+                                {"max", result.value.epsilon.complete_max}}},
+      {"tail_certificate_requested",
+       result.diagnostics.tail_certificate_requested},
+      {"tail_certificate_status",
+       result.diagnostics.tail_certificate_status},
+      {"tail_witness_radius_exact",
+       result.diagnostics.tail_witness_radius_exact.empty()
+           ? json::value(nullptr)
+           : json::value(result.diagnostics.tail_witness_radius_exact)},
+      {"scope", line_integration_scope_name(result.scope)},
+      {"error_guarantee",
+       error_guarantee_name(result.value.error.guarantee)},
+      {"error_provenance", result.value.error.provenance}};
+  const auto current_identity =
+      json::serialize(canonical_json_value(provenance));
+  const auto legacy_identity =
+      json::serialize(canonical_json_value(legacy_provenance));
+  if (provenance_identity != current_identity &&
+      provenance_identity != legacy_identity)
     throw std::invalid_argument(
         "checkpoint line provenance identity is inconsistent");
   const auto elapsed_ms = checkpoint_nonnegative_double(

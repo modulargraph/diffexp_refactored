@@ -202,6 +202,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_tile_line
     COMMAND test_diffexp2_persistent_tile_line)
 
+  add_executable(test_diffexp2_persistent_analytic_prescription
+    tests/test_persistent_analytic_prescription.cpp)
+  target_compile_features(test_diffexp2_persistent_analytic_prescription
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_analytic_prescription
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_analytic_prescription
+    COMMAND test_diffexp2_persistent_analytic_prescription)
+
   add_executable(test_diffexp2_persistent_plan_match_hop
     tests/test_persistent_plan_match_hop.cpp)
   target_compile_features(test_diffexp2_persistent_plan_match_hop

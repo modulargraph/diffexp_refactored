@@ -71,8 +71,12 @@ The implemented recurrence-session commands are:
 | `chart.release` | Release one retained operator. |
 | `local.solve` | Run recurrence plus assembly and retain the typed local sector family without coefficient JSON. |
 | `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics. |
+| `local.certify_residual` | Certify the retained local's stored-truncation theta residual with native Arb magnitudes. |
+| `local.match` | Exact-match retained regular locals and retain the Laurent lattice transformation and weights without coefficient JSON. |
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
+| `match.stats` | Inspect one retained native match and its exact provenance. |
+| `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
 | `scc.solve_column` | Execute one retained exact-rational SCC basis column in a certified regular scope, or in the narrow scalar regular-singular identity-frame scope, and retain the parent local without coefficient JSON. |
 | `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
@@ -128,6 +132,14 @@ also checked against its in-memory predecessor source. Pseudo steps,
 nonidentity spectral frames, center-pole tag shifts, and multidimensional
 singular blocks are loud unsupported cases. The existing Wolfram producer
 still emits only the regular capability; production dispatch is unchanged.
+
+The exact-rational `local.match` migration seam consumes retained regular
+locals from one session. It proves that the two chart coordinates name the
+same rational physical point, performs finite Laurent lattice saturation and
+matching in C++, verifies an exact stored-truncation residual through the
+requested CompleteMax, and retains the transformation and weights behind an
+opaque match handle. Acb matching and iterative numerical refinement remain a
+separate milestone; they are not silently routed through this exact path.
 
 Subsequent milestones extend the same session with complete multi-sector
 composition plus `transport.*`, `endpoint.*`, `integration.*`, and

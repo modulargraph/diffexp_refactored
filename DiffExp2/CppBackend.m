@@ -23,6 +23,9 @@ ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retaine
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
 CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies its native Acb theta residual against the supplied epsilon-framed theta operator and optional source. request carries point, relative_tolerance, operator_identity, checkpoint_identity, and theta_operator; no solution coefficient slab crosses the bridge.";
+RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
+PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] returns the opaque summary and exact provenance of one retained native local match.";
+ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
@@ -803,6 +806,65 @@ CertifyPersistentLocalResidual[handle_Association,
   If[IntegerQ[outputDigits],
     request = Append[request, "output_digits" -> outputDigits]];
   RunRequest[request]];
+
+RunPersistentLocalMatch[basis_List, incoming_Association,
+    matchRequest_Association] := Module[
+  {basisTokens, incomingTokens = persistentLocalHandles[incoming], bad,
+   sessions, reserved, required, missing, request},
+  If[basis === {} || !AllTrue[basis, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent local matching requires a nonempty list of local handles"|>],
+      Module]];
+  basisTokens = persistentLocalHandles /@ basis;
+  bad = Select[Range[Length[basisTokens]],
+    FailureQ[basisTokens[[#]]] &];
+  If[bad =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent local match basis contains malformed handles",
+      "Positions" -> bad|>], Module]];
+  If[FailureQ[incomingTokens], Return[incomingTokens, Module]];
+  sessions = DeleteDuplicates[Join[Lookup[basisTokens, "Session"],
+    {incomingTokens["Session"]}]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent local matching requires every local in one native session",
+      "Sessions" -> sessions|>], Module]];
+  reserved = Intersection[Keys[matchRequest],
+    {"schema", "op", "session", "basis", "incoming"}];
+  required = {"basis_chart", "incoming_chart", "basis_point",
+    "incoming_point", "epsilon", "basis_checkpoint_identities",
+    "incoming_checkpoint_identity", "checkpoint_identity"};
+  missing = Select[required, !KeyExistsQ[matchRequest, #] &];
+  If[reserved =!= {} || missing =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent local match request is missing required fields or contains reserved protocol keys",
+      "Missing" -> missing, "Reserved" -> reserved|>], Module]];
+  request = Join[matchRequest, <|"schema" -> 2, "op" -> "local.match",
+    "session" -> First[sessions],
+    "basis" -> Lookup[basisTokens, "Local"],
+    "incoming" -> incomingTokens["Local"]|>];
+  RunRequest[request]];
+
+persistentMatchHandles[handle_Association] := Module[{session, match},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  match = Lookup[handle, "match", Lookup[handle, "Match", None]];
+  If[!StringQ[session] || !StringQ[match],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent match handle requires exact session and match tokens"|>],
+      Module]];
+  <|"Session" -> session, "Match" -> match|>];
+
+PersistentLocalMatchStatistics[handle_Association] := Module[
+  {tokens = persistentMatchHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "match.stats",
+    "session" -> tokens["Session"], "match" -> tokens["Match"]|>]];
+
+ReleasePersistentLocalMatch[handle_Association] := Module[
+  {tokens = persistentMatchHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "match.release",
+    "session" -> tokens["Session"], "match" -> tokens["Match"]|>]];
 
 PersistentLocalStatistics[handle_Association] := Module[
   {tokens = persistentLocalHandles[handle]},

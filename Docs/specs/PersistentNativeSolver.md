@@ -293,6 +293,39 @@ second chart registry.  The three lifecycle wrappers accept either the raw
 `Local` tokens. Residual certification additionally requires explicit operator
 and checkpoint identities, and a source identity whenever a source is present.
 
+#### Exact retained regular matching
+
+`local.match` is the first native matching scope. It accepts exactly `d`
+retained rational regular basis columns and one retained `d`-component
+incoming local. Every local must have the single exact `(a,b,p)=(0,0,0)`
+sector and no error envelope. The operation independently computes
+`center + scale localPoint` for both charts and requires the same exact
+rational physical point. It then saturates the finite epsilon lattice, solves
+for weights, maps them back through the exact Laurent transformation, and
+requires an exact zero `F w - v` residual through `required_complete_max`.
+The transformation and weights stay in the session; the response contains no
+coefficient slab. Acb matching is explicitly unsupported until refinement and
+zero-overlap policies are installed.
+
+```json
+{"schema":2,"op":"local.match","session":"s:1",
+ "basis":["l:1","l:2"],"incoming":"l:3",
+ "basis_chart":"c:2","incoming_chart":"c:1",
+ "basis_point":{"exact":"-1/3"},
+ "incoming_point":{"exact":"1/3"},
+ "epsilon":{"min":-2,"max":8,"required_complete_max":4},
+ "basis_checkpoint_identities":["basis-0","basis-1"],
+ "incoming_checkpoint_identity":"incoming",
+ "checkpoint_identity":"match-state-v1"}
+{"schema":2,"op":"match.stats","session":"s:1","match":"m:1"}
+{"schema":2,"op":"match.release","session":"s:1","match":"m:1"}
+```
+
+The low-level Wolfram lifecycle is `RunPersistentLocalMatch`,
+`PersistentLocalMatchStatistics`, and `ReleasePersistentLocalMatch`. As with
+the native operation, it is explicit and is not yet production transport
+dispatch.
+
 ``DiffExp2`Solve`SolveNativeLocalFamily[cs, req,
 <|"a"->a,"b"->b,"p"->p|>, init]`` is the first narrow solver-level entry.
 It builds the ordinary framed recurrence request, retains the assembled

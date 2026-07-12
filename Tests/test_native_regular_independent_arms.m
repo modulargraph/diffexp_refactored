@@ -21,6 +21,13 @@ result = Catch[
     {1 + Global`eps*Global`x^2}, "Threads" -> 10],
   "DiffExp2Error"];
 
+released = If[AssociationQ[result],
+  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[
+    result["Run"]], <||>];
+sessionStats = If[AssociationQ[result],
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    result["Atlas", "Session"], <||>], <||>];
+
 ok = !FailureQ[result] && AssociationQ[result] &&
   Lookup[result, "Type", None] ===
     "DiffExp2NativeRegularLineIntegral" &&
@@ -37,7 +44,12 @@ ok = !FailureQ[result] && AssociationQ[result] &&
       Length[result["Run", "Upper", "Lines"]] &&
   AllTrue[Join[result["Run", "Lower", "ProjectedLocals"],
       result["Run", "Upper", "ProjectedLocals"]],
-    Lookup[#, "json_coefficients", None] === 0 &];
+    Lookup[#, "json_coefficients", None] === 0 &] &&
+  Lookup[released, "Failures", {"missing"}] === {} &&
+  Lookup[sessionStats, "locals", -1] === 0 &&
+  Lookup[sessionStats, "matches", -1] === 0 &&
+  Lookup[sessionStats, "tile_plans", -1] === 0 &&
+  Lookup[sessionStats, "line_results", -1] === 0;
 
 DiffExp2`CppBackend`ClearPersistentSessions[];
 

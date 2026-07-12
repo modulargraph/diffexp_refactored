@@ -11,6 +11,8 @@ PrepareNativeRegularIndependentArms::usage =
   "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared retained anchor, every regular receiving basis, and one exact lower/upper native tile plan. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] marches both prepared regular arms using retained plan-derived matches, materializes each receiving local in C++, applies cvec(center+scale t,eps) natively, and integrates every planned tile. The current bridge executes arms sequentially; the retained atlas is compatible with the native concurrent-arm runner.";
+ReleaseNativeRegularIndependentArms::usage =
+  "ReleaseNativeRegularIndependentArms[runOrAtlas] releases public line, projected-local, materialized-local, match, basis, anchor, and tile-plan handles created by the explicit native regular-arm seam. Prepared chart/SCC caches remain session-owned and reusable.";
 NativeRegularLineIntegral::usage =
   "NativeRegularLineIntegral[sys,boundary,from,{lo,hi},cvec] runs the explicit persistent-native regular-arm seam and returns an association whose Value is the compatibility EpsSeries integral. The anchor must lie strictly inside {lo,hi}; unsupported singular/nonrational geometry fails loudly without fallback.";
 
@@ -408,6 +410,45 @@ RunNativeRegularIndependentArms[atlas_Association, cvec_List,
     "Atlas" -> atlas, "Lower" -> runArm["lower", atlas["Lower"]],
     "Upper" -> runArm["upper", atlas["Upper"]]|>];
 
+ReleaseNativeRegularIndependentArms[obj_Association] := Module[
+  {atlas, run, lines = {}, projected = {}, materialized = {}, matches = {},
+   bases, locals, responses = {}, failures, releaseAll, releaseOKQ},
+  {atlas, run} = Which[
+    Lookup[obj, "Type", None] ===
+        "DiffExp2NativeRegularIndependentArmRun", {obj["Atlas"], obj},
+    Lookup[obj, "Type", None] ===
+        "DiffExp2NativeRegularIndependentArmAtlas", {obj, None},
+    True, err["E8", <|"Type" -> Lookup[obj, "Type", None],
+      "Detail" -> "native arm release requires an atlas or completed arm run"|>]];
+  If[AssociationQ[run],
+    lines = Join[run["Lower", "Lines"], run["Upper", "Lines"]];
+    projected = Join[run["Lower", "ProjectedLocals"],
+      run["Upper", "ProjectedLocals"]];
+    materialized = Join[run["Lower", "MaterializedLocals"],
+      run["Upper", "MaterializedLocals"]];
+    matches = Join[run["Lower", "Matches"], run["Upper", "Matches"]]];
+  bases = Flatten[Map[Lookup[#, "Columns", {}] &,
+    Join[Rest[atlas["Lower", "Bases"]],
+      Rest[atlas["Upper", "Bases"]]]], 1];
+  releaseAll[fn_, items_List, key_] := Scan[Function[item,
+    AppendTo[responses, Quiet[fn[item]]]],
+    DeleteDuplicatesBy[Select[items, AssociationQ],
+      Lookup[#, key, Lookup[#, ToUpperCase[StringTake[key, 1]] <>
+          StringDrop[key, 1], None]] &]];
+  releaseAll[DiffExp2`CppBackend`ReleasePersistentLineIntegral,
+    lines, "line"];
+  locals = Join[projected, materialized, bases, {atlas["Anchor"]}];
+  releaseAll[DiffExp2`CppBackend`ReleasePersistentLocal, locals, "local"];
+  releaseAll[DiffExp2`CppBackend`ReleasePersistentLocalMatch,
+    matches, "match"];
+  AppendTo[responses,
+    Quiet[DiffExp2`CppBackend`ReleasePersistentTilePlan[atlas["Plan"]]]];
+  releaseOKQ[response_] := AssociationQ[response] &&
+    Lookup[response, "status", "error"] === "ok";
+  failures = Select[responses, !TrueQ[releaseOKQ[#]] &];
+  <|"Released" -> Length[responses] - Length[failures],
+    "Failures" -> failures|>];
+
 decodeLineValue[line_Association, outputDigits_Integer] := Module[
   {exported, value, coefficients, decoded},
   exported = DiffExp2`CppBackend`ExportPersistentLineIntegral[line,
@@ -425,12 +466,17 @@ decodeLineValue[line_Association, outputDigits_Integer] := Module[
   esNew[value["min"], decoded]];
 
 Options[NativeRegularLineIntegral] = {"Threads" -> Automatic,
-  "CertifyTail" -> False, "MaxRefinementSteps" -> 2};
+  "CertifyTail" -> False, "MaxRefinementSteps" -> 2,
+  "RetainNativeState" -> True};
 
 NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
     cvec_List, OptionsPattern[]] := Module[
   {lower, upper, atlas, run, digits, lowerValues, upperValues,
-   lowerTotal, upperTotal, value},
+   lowerTotal, upperTotal, value, result, retain},
+  retain = OptionValue["RetainNativeState"];
+  If[!BooleanQ[retain],
+    err["E8", <|"RetainNativeState" -> retain,
+      "Detail" -> "RetainNativeState must be True or False"|>]];
   If[!TrueQ[lo < from < hi],
     err["E8", <|"Range" -> {lo, hi}, "Anchor" -> from,
       "Detail" -> "explicit native independent-arm line integral requires an interior anchor"|>]];
@@ -447,9 +493,13 @@ NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
   lowerTotal = Fold[esAdd, First[lowerValues], Rest[lowerValues]];
   upperTotal = Fold[esAdd, First[upperValues], Rest[upperValues]];
   value = esAdd[esScale[-1, lowerTotal], upperTotal];
-  <|"Type" -> "DiffExp2NativeRegularLineIntegral",
+  result = <|"Type" -> "DiffExp2NativeRegularLineIntegral",
     "Value" -> value, "Atlas" -> atlas, "Run" -> run,
-    "CompatibilityExports" -> Length[lowerValues] + Length[upperValues]|>];
+    "CompatibilityExports" -> Length[lowerValues] + Length[upperValues]|>;
+  If[retain, result,
+    ReleaseNativeRegularIndependentArms[run];
+    KeyDrop[Append[result, "ReleasedNativeState" -> True],
+      {"Atlas", "Run"}]]];
 
 End[];
 EndPackage[];

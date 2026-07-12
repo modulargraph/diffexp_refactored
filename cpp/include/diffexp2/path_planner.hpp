@@ -119,6 +119,11 @@ enum class ExactMatchKind : std::uint8_t {
   // Unequal/clipped geometry: the common point balances the two exact safe
   // reaches while retaining the same <=1/k and <=radius/2 envelope.
   BalancedSafeOverlap,
+  // A singular receiving chart uses the exact FixWithin balance retained by
+  // the Wolfram planner.  The producer remains in its ordinary 1/k/half-
+  // radius envelope; the singular receiver is bounded by the half-radius
+  // error-probe envelope and approached from the physical near side.
+  SingularBalancedApproach,
   // The balanced/symmetric candidate was a declared singular/boundary point;
   // a deterministic exact interior rational was selected instead.
   ForbiddenPointAvoidance
@@ -302,6 +307,37 @@ inline Rational safe_physical_reach(const ExactAffineChart& chart,
   return abs(chart.scale) * safe_local_limit(chart, division_order);
 }
 
+inline Rational physical_radius(const ExactAffineChart& chart) {
+  return abs(chart.scale) * chart.radius;
+}
+
+// Exact rational counterpart of Transport`singularMatchPoint.  Its 9/10
+// producing radius retains truncation headroom while the full receiving
+// radius minimizes the worse of the two normalized evaluation distances.
+// Admission below still caps both sides at the half-radius error envelope
+// and keeps the producer in its ordinary 1/k design class.
+inline Rational singular_balanced_approach(
+    const ExactAffineChart& left, const ExactAffineChart& right,
+    std::int32_t direction) {
+  const auto y_left = directed(left.center, direction);
+  const auto y_right = directed(right.center, direction);
+  const auto gap = y_right - y_left;
+  const Rational margin("9/10");
+  const auto left_radius = physical_radius(left);
+  const auto right_radius = physical_radius(right);
+  const auto denominator = margin * left_radius + right_radius;
+  if (!(gap > Rational(0)) || !(gap < denominator))
+    throw ExactPathPlanningError(
+        ExactPathPlanningErrorCode::UnsafeGeometry,
+        "singular receiving chart has no exact balanced approach interval");
+  return directed(y_left + gap * margin * left_radius / denominator,
+                  direction);
+}
+
+inline bool at_or_inside_safe_envelope(const ExactAffineChart& chart,
+                                       const Rational& local,
+                                       std::uint32_t division_order);
+
 inline std::vector<Rational> forbidden_matches(const ExactArmRequest& request) {
   std::vector<Rational> out = request.topology.singular_points;
   out.insert(out.end(), request.topology.boundary_points.begin(),
@@ -360,6 +396,25 @@ inline ExactMatchPoint plan_match(const ExactArmRequest& request,
   result.producing_chart = left_index;
   result.receiving_chart = left_index + 1;
   result.branch_sheets = request.topology.branch_sheets;
+  if (right.singular_center) {
+    if (left.singular_center)
+      throw ExactPathPlanningError(
+          ExactPathPlanningErrorCode::UnsafeGeometry,
+          "a singular receiving chart requires a regular producing chart");
+    result.physical = singular_balanced_approach(left, right, direction);
+    result.producing_local = local_coordinate(left, result.physical);
+    result.receiving_local = local_coordinate(right, result.physical);
+    if (!at_or_inside_safe_envelope(left, result.producing_local,
+                                    division_order) ||
+        abs(result.receiving_local) > right.radius / Rational(2) ||
+        contains(forbidden, result.physical))
+      throw ExactPathPlanningError(
+          ExactPathPlanningErrorCode::UnsafeGeometry,
+          "canonical singular approach lies outside the producing 1/k or "
+          "two half-radius envelopes");
+    result.kind = ExactMatchKind::SingularBalancedApproach;
+    return result;
+  }
   if (preferred_from_left == preferred_from_right &&
       abs(preferred_left_local) <= left.radius / Rational(2) &&
       abs(preferred_right_local) <= right.radius / Rational(2) &&
@@ -415,6 +470,32 @@ inline bool at_or_inside_safe_envelope(const ExactAffineChart& chart,
                                        const Rational& local,
                                        std::uint32_t division_order) {
   return abs(local) <= safe_local_limit(chart, division_order);
+}
+
+inline bool valid_match_envelopes(const ExactAffineChart& left,
+                                  const ExactAffineChart& right,
+                                  const ExactMatchPoint& match,
+                                  std::uint32_t division_order,
+                                  std::int32_t direction) {
+  const bool singular_approach =
+      match.kind == ExactMatchKind::SingularBalancedApproach;
+  if (right.singular_center != singular_approach) return false;
+  if (!singular_approach)
+    return at_or_inside_safe_envelope(left, match.producing_local,
+                                      division_order) &&
+           at_or_inside_safe_envelope(right, match.receiving_local,
+                                      division_order);
+  if (left.singular_center || !right.singular_center ||
+      !at_or_inside_safe_envelope(left, match.producing_local,
+                                  division_order) ||
+      abs(match.receiving_local) > right.radius / Rational(2))
+    return false;
+  try {
+    return match.physical ==
+           singular_balanced_approach(left, right, direction);
+  } catch (const ExactPathPlanningError&) {
+    return false;
+  }
 }
 
 }  // namespace exact_path_detail
@@ -499,10 +580,8 @@ inline void validate_exact_arm_plan(const ExactArmPlan& plan) {
         match.producing_local.sign() * match.receiving_local.sign() >= 0 ||
         !strictly_inside(left, match.producing_local) ||
         !strictly_inside(right, match.receiving_local) ||
-        !at_or_inside_safe_envelope(left, match.producing_local,
-                                    plan.division_order) ||
-        !at_or_inside_safe_envelope(right, match.receiving_local,
-                                    plan.division_order) ||
+        !valid_match_envelopes(left, right, match, plan.division_order,
+                               plan.direction) ||
         !same_branch_sheets(match.branch_sheets,
                             plan.topology.branch_sheets))
       throw ExactPathPlanningError(

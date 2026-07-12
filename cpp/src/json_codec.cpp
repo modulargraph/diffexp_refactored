@@ -10793,6 +10793,8 @@ const char* exact_match_kind_name(ExactMatchKind kind) {
       return "symmetric-division-point";
     case ExactMatchKind::BalancedSafeOverlap:
       return "balanced-safe-overlap";
+    case ExactMatchKind::SingularBalancedApproach:
+      return "singular-balanced-approach";
     case ExactMatchKind::ForbiddenPointAvoidance:
       return "forbidden-point-avoidance";
   }

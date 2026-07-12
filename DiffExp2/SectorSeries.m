@@ -485,10 +485,16 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
      recurrence through every stored Taylor coefficient, and then uses a
      denominator-separation bound on its chosen witness circle. *)
   analyticRationals = Map[Module[
-      {qj = Cancel[Together[#*var^M]], num1, den1},
+      {qj = Cancel[Together[#*var^M]], num1, den1, numCoefficients,
+       denCoefficients},
       num1 = Numerator[qj]; den1 = Denominator[qj];
-      <|"NumeratorCoefficients" -> CoefficientList[num1, var],
-        "DenominatorCoefficients" -> CoefficientList[den1, var]|>] &,
+      numCoefficients = CoefficientList[num1, var];
+      denCoefficients = CoefficientList[den1, var];
+      (* CoefficientList[0,var] is {}, but the native polynomial-division
+         contract represents the exact zero polynomial explicitly. *)
+      <|"NumeratorCoefficients" -> If[numCoefficients === {}, {0},
+          numCoefficients],
+        "DenominatorCoefficients" -> denCoefficients|>] &,
     cj];
   storePrepared[]];
 

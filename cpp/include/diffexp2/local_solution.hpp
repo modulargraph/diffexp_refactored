@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -146,6 +147,26 @@ class Magnitude {
   [[nodiscard]] bool is_zero() const { return mag_is_zero(value_); }
   [[nodiscard]] bool is_finite() const { return !mag_is_inf(value_); }
   [[nodiscard]] double approximate_upper() const { return mag_get_d(value_); }
+
+  // FLINT's dump/load representation preserves the exact mag exponent and
+  // mantissa.  Checkpoints must use this instead of a diagnostic double so a
+  // restored certificate is neither weakened nor accidentally strengthened.
+  [[nodiscard]] std::string dump_exact() const {
+    char* raw = mag_dump_str(value_);
+    if (raw == nullptr) throw std::bad_alloc();
+    std::string output(raw);
+    flint_free(raw);
+    return output;
+  }
+
+  static Magnitude from_exact_dump(const std::string& dump) {
+    if (dump.empty())
+      throw std::invalid_argument("empty exact magnitude checkpoint dump");
+    Magnitude output;
+    if (mag_load_str(output.value_, dump.c_str()) != 0)
+      throw std::invalid_argument("invalid exact magnitude checkpoint dump");
+    return output;
+  }
 
   friend Magnitude operator+(const Magnitude& a, const Magnitude& b) {
     Magnitude out;

@@ -209,10 +209,10 @@ int main() {
       ambiguous_result.at("status") == "error" &&
       std::string(ambiguous_result.at("detail").as_string())
           .find("overlaps zero") != std::string::npos;
-  const bool checkpoint_rejected =
-      live_checkpoint.at("status") == "error" &&
-      std::string(live_checkpoint.at("detail").as_string())
-          .find("match") != std::string::npos;
+  const bool checkpoint_serialized =
+      live_checkpoint.at("status") == "ok" &&
+      live_checkpoint.at("acb_matches") == 1 &&
+      live_checkpoint.at("locals") == 0;
 
   const auto released = request(json::object{
       {"schema", 2}, {"op", "match.release"}, {"session", session},
@@ -255,7 +255,7 @@ int main() {
       retained.at("status") == "ok" &&
       std::string(retained.at("match").as_string()) == match &&
       retained.at("provenance_identity") == matched.at("provenance_identity") &&
-      ambiguous_rejected && checkpoint_rejected &&
+      ambiguous_rejected && checkpoint_serialized &&
       released.at("status") == "ok" &&
       released_again.at("status") == "error" &&
       saved.at("status") == "ok" && stats.at("locals") == 0 &&

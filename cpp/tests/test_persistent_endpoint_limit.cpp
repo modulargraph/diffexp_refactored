@@ -114,7 +114,7 @@ int main() {
       {"endpoint", endpoint_handle}});
   const auto stats = request(json::object{
       {"schema", 2}, {"op", "session.stats"}, {"session", session}});
-  const auto rejected_checkpoint = request(json::object{
+  const auto saved_checkpoint = request(json::object{
       {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
       {"path", checkpoint_path},
       {"checkpoint_identity", "must-not-drop-live-endpoint"}});
@@ -149,10 +149,9 @@ int main() {
       stats.at("endpoint_limits") == 1 &&
       stats.at("endpoint_exports") == 1 &&
       stats.at("pending_endpoint_limits") == 0 &&
-      rejected_checkpoint.at("status") == "error" &&
-      std::string(rejected_checkpoint.at("detail").as_string()).find(
-          "endpoint handles") != std::string::npos &&
-      !std::filesystem::exists(checkpoint_path) &&
+      saved_checkpoint.at("status") == "ok" &&
+      saved_checkpoint.at("endpoints") == 1 &&
+      std::filesystem::exists(checkpoint_path) &&
       stats.at("endpoint_limit_capability") ==
           "retained-native-endpoint-sector-limit-v1";
 
@@ -161,8 +160,8 @@ int main() {
               << "before export: " << json::serialize(before_export) << '\n'
               << "export: " << json::serialize(exported) << '\n'
               << "after export: " << json::serialize(after_export) << '\n'
-              << "checkpoint rejection: "
-              << json::serialize(rejected_checkpoint) << '\n'
+              << "checkpoint save: "
+              << json::serialize(saved_checkpoint) << '\n'
               << "session stats: " << json::serialize(stats) << '\n';
   }
 

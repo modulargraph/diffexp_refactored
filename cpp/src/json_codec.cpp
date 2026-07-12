@@ -14,6 +14,7 @@
 #include <chrono>
 #include <atomic>
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -1343,6 +1344,349 @@ struct NativeLocalDiagnostics {
   bool pseudo_value_certified = true;
 };
 
+void require_exact_keys(const json::object& object,
+                        std::initializer_list<std::string_view> expected,
+                        const char* label);
+
+json::object checkpoint_ball_record(const ComplexBall& value) {
+  const auto dump = checkpoint::dump_complex_ball_exact(value);
+  return json::object{{"real", dump.real}, {"imaginary", dump.imaginary}};
+}
+
+ComplexBall parse_checkpoint_ball(const json::value& raw,
+                                  const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(object, {"real", "imaginary"}, label);
+  return checkpoint::load_complex_ball_exact(
+      {required_string(object, "real"),
+       required_string(object, "imaginary")});
+}
+
+template <typename Scalar>
+json::value checkpoint_scalar_record(const Scalar& value);
+
+template <>
+json::value checkpoint_scalar_record<Rational>(const Rational& value) {
+  return json::string(value.str());
+}
+
+template <>
+json::value checkpoint_scalar_record<ComplexBall>(const ComplexBall& value) {
+  return checkpoint_ball_record(value);
+}
+
+template <typename Scalar>
+Scalar parse_checkpoint_scalar(const json::value& raw, const char* label);
+
+template <>
+Rational parse_checkpoint_scalar<Rational>(const json::value& raw,
+                                            const char* label) {
+  if (!raw.is_string())
+    throw std::invalid_argument(std::string(label) +
+                                " must be an exact rational string");
+  return Rational(std::string(raw.as_string()));
+}
+
+template <>
+ComplexBall parse_checkpoint_scalar<ComplexBall>(const json::value& raw,
+                                                  const char* label) {
+  return parse_checkpoint_ball(raw, label);
+}
+
+json::object checkpoint_exact_descriptor_record(
+    const ExactScalarDescriptor& descriptor) {
+  auto output = encode_exact_descriptor(descriptor);
+  output.erase("has_specialization");
+  output["specialization"] = descriptor.specialization.has_value()
+      ? json::value(checkpoint_ball_record(*descriptor.specialization))
+      : json::value(nullptr);
+  return output;
+}
+
+ExactScalarDescriptor parse_checkpoint_exact_descriptor(
+    const json::value& raw, const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(object,
+      {"domain", "canonical", "symbols", "is_zero", "is_integer",
+       "sign", "specialization"}, label);
+  const auto domain = required_string(object, "domain");
+  const auto canonical = required_string(object, "canonical");
+  if (canonical.empty())
+    throw std::invalid_argument(std::string(label) +
+                                " canonical form is empty");
+  std::vector<std::string> symbols;
+  for (const auto& raw_symbol : as_array(object.at("symbols"), label)) {
+    if (!raw_symbol.is_string() || raw_symbol.as_string().empty())
+      throw std::invalid_argument(std::string(label) +
+                                  " symbols must be nonempty strings");
+    symbols.emplace_back(raw_symbol.as_string());
+  }
+  const auto zero = parse_truth_value(object.at("is_zero"), "is_zero");
+  const auto integer = parse_truth_value(object.at("is_integer"),
+                                         "is_integer");
+  const auto sign = parse_exact_sign(object.at("sign"), "sign");
+  std::optional<ComplexBall> specialization;
+  if (!object.at("specialization").is_null())
+    specialization = parse_checkpoint_ball(object.at("specialization"),
+                                           "exact tag specialization");
+
+  if (domain == "rational") {
+    if (!symbols.empty())
+      throw std::invalid_argument(std::string(label) +
+                                  " rational tag cannot name symbols");
+    auto result = ExactScalarDescriptor::rational(canonical);
+    if (result.is_zero != zero || result.is_integer != integer ||
+        result.sign != sign)
+      throw std::invalid_argument(std::string(label) +
+                                  " rational facts contradict its value");
+    fmpq_t exact;
+    fmpq_init(exact);
+    const auto parse_status = fmpq_set_str(exact, canonical.c_str(), 10);
+    if (parse_status == 0) fmpq_canonicalise(exact);
+    const bool consistent = parse_status == 0 && specialization.has_value() &&
+        acb_contains_fmpq(specialization->raw(), exact);
+    fmpq_clear(exact);
+    if (!consistent)
+      throw std::invalid_argument(std::string(label) +
+                                  " rational specialization is missing or inconsistent");
+    result.specialization = std::move(specialization);
+    return result;
+  }
+  if (domain == "symbolic-rational")
+    return ExactScalarDescriptor::symbolic(
+        canonical, std::move(symbols), zero, integer, sign,
+        std::move(specialization));
+  if (domain == "algebraic") {
+    if (!symbols.empty())
+      throw std::invalid_argument(std::string(label) +
+                                  " algebraic tag cannot name regulator symbols");
+    if (!specialization.has_value())
+      throw std::invalid_argument(std::string(label) +
+                                  " algebraic tag lost its specialization");
+    return ExactScalarDescriptor::algebraic(
+        canonical, zero, integer, sign, std::move(*specialization));
+  }
+  throw std::invalid_argument(std::string(label) +
+                              " has an unsupported exact domain");
+}
+
+const char* checkpoint_error_guarantee_name(ErrorGuarantee guarantee) {
+  if (guarantee == ErrorGuarantee::Certified) return "certified";
+  if (guarantee == ErrorGuarantee::Advisory) return "advisory";
+  return "none";
+}
+
+json::object checkpoint_error_envelope_record(
+    const ErrorEnvelope& envelope) {
+  json::array absolute;
+  absolute.reserve(envelope.absolute.size());
+  for (const auto& magnitude : envelope.absolute)
+    absolute.emplace_back(magnitude.dump_exact());
+  return json::object{
+      {"frame", json::object{{"min", envelope.frame.min_power},
+                              {"max", envelope.frame.complete_max}}},
+      {"guarantee", checkpoint_error_guarantee_name(envelope.guarantee)},
+      {"absolute_exact", std::move(absolute)},
+      {"provenance", envelope.provenance}};
+}
+
+ErrorEnvelope parse_checkpoint_error_envelope(const json::value& raw) {
+  const auto& object = as_object(raw, "checkpoint error envelope");
+  require_exact_keys(object,
+      {"frame", "guarantee", "absolute_exact", "provenance"},
+      "checkpoint error envelope");
+  const auto& frame = as_object(object.at("frame"),
+                                "checkpoint error frame");
+  require_exact_keys(frame, {"min", "max"}, "checkpoint error frame");
+  ErrorEnvelope result;
+  result.frame = {as_i32(frame.at("min"), "checkpoint error minimum"),
+                  as_i32(frame.at("max"), "checkpoint error maximum")};
+  (void)result.frame.width();
+  const auto guarantee = required_string(object, "guarantee");
+  result.guarantee = guarantee == "none" ? ErrorGuarantee::None
+      : guarantee == "advisory" ? ErrorGuarantee::Advisory
+      : guarantee == "certified" ? ErrorGuarantee::Certified
+      : throw std::invalid_argument(
+            "checkpoint error guarantee is unsupported");
+  for (const auto& magnitude : as_array(
+           object.at("absolute_exact"), "checkpoint error magnitudes")) {
+    if (!magnitude.is_string())
+      throw std::invalid_argument(
+          "checkpoint error magnitudes must be exact dump strings");
+    result.absolute.push_back(Magnitude::from_exact_dump(
+        std::string(magnitude.as_string())));
+  }
+  if (!object.at("provenance").is_string())
+    throw std::invalid_argument(
+        "checkpoint error provenance must be a string");
+  result.provenance = std::string(object.at("provenance").as_string());
+  if (!result.absolute.empty() &&
+      result.absolute.size() != result.frame.width())
+    throw std::invalid_argument(
+        "checkpoint error envelope width is inconsistent");
+  if (result.absolute.empty() && result.guarantee != ErrorGuarantee::None)
+    throw std::invalid_argument(
+        "empty checkpoint error envelope cannot claim a guarantee");
+  return result;
+}
+
+template <typename Scalar>
+json::object checkpoint_epsilon_frame_record(
+    const EpsilonFrame<Scalar>& frame) {
+  json::array coefficients;
+  coefficients.reserve(frame.coefficients().size());
+  for (const auto& coefficient : frame.coefficients())
+    coefficients.push_back(checkpoint_scalar_record<Scalar>(coefficient));
+  return json::object{{"min", frame.min_power()},
+                      {"max", frame.complete_max()},
+                      {"coefficients", std::move(coefficients)}};
+}
+
+template <typename Scalar>
+EpsilonFrame<Scalar> parse_checkpoint_epsilon_frame(
+    const json::value& raw, const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(object, {"min", "max", "coefficients"}, label);
+  EpsilonWindow window{as_i32(object.at("min"), label),
+                       as_i32(object.at("max"), label)};
+  const auto& raw_coefficients = as_array(object.at("coefficients"), label);
+  if (raw_coefficients.size() != window.width())
+    throw std::invalid_argument(std::string(label) +
+                                " coefficient count is inconsistent");
+  std::vector<Scalar> coefficients;
+  coefficients.reserve(raw_coefficients.size());
+  for (const auto& coefficient : raw_coefficients)
+    coefficients.push_back(parse_checkpoint_scalar<Scalar>(coefficient,
+                                                             label));
+  return EpsilonFrame<Scalar>(window, std::move(coefficients));
+}
+
+template <typename Scalar>
+json::array checkpoint_frame_vector_record(
+    const FiniteLaurentVector<Scalar>& frames) {
+  json::array output;
+  output.reserve(frames.size());
+  for (const auto& frame : frames)
+    output.push_back(checkpoint_epsilon_frame_record(frame));
+  return output;
+}
+
+template <typename Scalar>
+FiniteLaurentVector<Scalar> parse_checkpoint_frame_vector(
+    const json::value& raw, std::size_t expected_size, const char* label) {
+  const auto& values = as_array(raw, label);
+  if (values.size() != expected_size)
+    throw std::invalid_argument(std::string(label) +
+                                " dimension is inconsistent");
+  FiniteLaurentVector<Scalar> output;
+  output.reserve(values.size());
+  for (const auto& value : values)
+    output.push_back(parse_checkpoint_epsilon_frame<Scalar>(value, label));
+  return output;
+}
+
+template <typename Scalar>
+json::object checkpoint_local_analytic_metadata_record(
+    const LocalSolution<Scalar>& solution) {
+  json::array sectors;
+  sectors.reserve(solution.sectors.size());
+  for (const auto& sector : solution.sectors)
+    sectors.push_back(json::object{
+        {"a", checkpoint_exact_descriptor_record(sector.a)},
+        {"b", checkpoint_exact_descriptor_record(sector.b)},
+        {"log_power", sector.log_power}});
+  json::array prescriptions;
+  prescriptions.reserve(solution.prescriptions.size());
+  for (const auto& prescription : solution.prescriptions)
+    prescriptions.push_back(json::object{
+        {"factor_exact", prescription.factor_exact},
+        {"sign", prescription.sign},
+        {"multiplicity", prescription.multiplicity},
+        {"leading_coefficient_sign",
+         prescription.leading_coefficient_sign}});
+  return json::object{
+      {"schema", "diffexp2-exact-local-analytic-metadata-v2"},
+      {"chart", json::object{
+          {"center_exact", solution.chart.center_exact},
+          {"scale_exact", solution.chart.scale_exact},
+          {"radius_exact_ball", checkpoint_ball_record(solution.chart.radius)},
+          {"infinite_radius", solution.chart.infinite_radius}}},
+      {"sectors", std::move(sectors)},
+      {"prescriptions", std::move(prescriptions)}};
+}
+
+template <typename Scalar>
+json::object checkpoint_local_solution_record(
+    const LocalSolution<Scalar>& solution) {
+  json::array sectors;
+  sectors.reserve(solution.sectors.size());
+  for (const auto& sector : solution.sectors) {
+    json::array coefficients;
+    coefficients.reserve(sector.coefficients.size());
+    for (const auto& coefficient : sector.coefficients)
+      coefficients.push_back(checkpoint_scalar_record<Scalar>(coefficient));
+    sectors.push_back(json::object{
+        {"a", checkpoint_exact_descriptor_record(sector.a)},
+        {"b", checkpoint_exact_descriptor_record(sector.b)},
+        {"log_power", sector.log_power},
+        {"coefficients", std::move(coefficients)}});
+  }
+  json::array prescriptions;
+  prescriptions.reserve(solution.prescriptions.size());
+  for (const auto& prescription : solution.prescriptions)
+    prescriptions.push_back(json::object{
+        {"factor_exact", prescription.factor_exact},
+        {"sign", prescription.sign},
+        {"multiplicity", prescription.multiplicity},
+        {"leading_coefficient_sign",
+         prescription.leading_coefficient_sign}});
+  return json::object{
+      {"chart", json::object{
+          {"center_exact", solution.chart.center_exact},
+          {"scale_exact", solution.chart.scale_exact},
+          {"radius_exact_ball", checkpoint_ball_record(solution.chart.radius)},
+          {"infinite_radius", solution.chart.infinite_radius}}},
+      {"epsilon", json::object{{"min", solution.epsilon.min_power},
+                                {"max", solution.epsilon.complete_max}}},
+      {"taylor_complete_max", solution.taylor_complete_max},
+      {"dimension", solution.dimension},
+      {"sectors", std::move(sectors)},
+      {"prescriptions", std::move(prescriptions)},
+      {"error", checkpoint_error_envelope_record(solution.error)},
+      {"checkpoint_identity", solution.checkpoint_identity}};
+}
+
+template <typename Scalar>
+json::array checkpoint_pseudo_hits_record(
+    const std::vector<PseudoHit<Scalar>>& hits) {
+  json::array output;
+  output.reserve(hits.size());
+  for (const auto& hit : hits) {
+    json::array columns;
+    columns.reserve(hit.columns.size());
+    for (const auto column : hit.columns) columns.emplace_back(column);
+    json::array frames;
+    frames.reserve(hit.gamma_frames.size());
+    for (const auto& frame : hit.gamma_frames) {
+      json::array coefficients;
+      coefficients.reserve(frame.size());
+      for (const auto& coefficient : frame)
+        coefficients.push_back(checkpoint_scalar_record<Scalar>(coefficient));
+      frames.push_back(std::move(coefficients));
+    }
+    json::array validity;
+    validity.reserve(hit.gamma_validity.size());
+    for (const auto value : hit.gamma_validity)
+      validity.push_back(encode_validity(value));
+    output.push_back(json::object{
+        {"n", hit.n}, {"columns", std::move(columns)},
+        {"delta_b", checkpoint_scalar_record<Scalar>(hit.delta_b)},
+        {"gamma_frames", std::move(frames)},
+        {"gamma_validity", std::move(validity)}});
+  }
+  return output;
+}
+
 template <typename Scalar>
 struct NativeLocalRun {
   LocalSolution<Scalar> solution;
@@ -1374,10 +1718,12 @@ struct SCCColumnProvenance {
 class StoredLocalBase {
  public:
   StoredLocalBase(std::string handle, std::string source_chart,
+                  std::string source_operator_identity,
                   double create_parse_ms, double create_kernel_ms,
                   std::optional<SCCColumnProvenance> column_provenance =
                       std::nullopt)
       : handle_(std::move(handle)), source_chart_(std::move(source_chart)),
+        source_operator_identity_(std::move(source_operator_identity)),
         create_parse_ms_(create_parse_ms),
         create_kernel_ms_(create_kernel_ms),
         column_provenance_(std::move(column_provenance)) {}
@@ -1396,14 +1742,19 @@ class StoredLocalBase {
       const EpsilonWindow& delivered_epsilon,
       std::optional<std::int32_t> exact_rim) = 0;
   virtual json::object endpoint_metadata() const = 0;
+  virtual json::object exact_analytic_metadata() const = 0;
   virtual const std::string& checkpoint_identity() const = 0;
   virtual const char* scalar_domain() const = 0;
   virtual json::object summary() const = 0;
   virtual json::object stats_json() const = 0;
   virtual StoredLocalStats stats() const = 0;
+  virtual json::object checkpoint_record() const = 0;
 
   const std::string& handle() const { return handle_; }
   const std::string& source_chart() const { return source_chart_; }
+  const std::string& source_operator_identity() const {
+    return source_operator_identity_;
+  }
   const std::optional<SCCColumnProvenance>& column_provenance() const {
     return column_provenance_;
   }
@@ -1411,6 +1762,7 @@ class StoredLocalBase {
  protected:
   std::string handle_;
   std::string source_chart_;
+  std::string source_operator_identity_;
   double create_parse_ms_ = 0.0;
   double create_kernel_ms_ = 0.0;
   std::optional<SCCColumnProvenance> column_provenance_;
@@ -1420,12 +1772,14 @@ template <typename Scalar>
 class StoredLocal final : public StoredLocalBase {
  public:
   StoredLocal(std::string handle, std::string source_chart,
+              std::string source_operator_identity,
               LocalSolution<Scalar>&& solution, slong precision_bits,
               std::vector<PseudoHit<Scalar>>&& pseudo_hits,
               NativeLocalDiagnostics diagnostics,
               std::optional<SCCColumnProvenance> column_provenance =
                   std::nullopt)
       : StoredLocalBase(std::move(handle), std::move(source_chart),
+                        std::move(source_operator_identity),
                         diagnostics.parse_ms, diagnostics.kernel_ms,
                         std::move(column_provenance)),
         solution_(std::move(solution)), precision_bits_(precision_bits),
@@ -1659,6 +2013,15 @@ class StoredLocal final : public StoredLocalBase {
 
   json::object endpoint_metadata() const override { return metadata_json(); }
 
+  json::object exact_analytic_metadata() const override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "exact checkpoint analytic metadata does not serialize symbolic coefficients");
+    } else {
+      return checkpoint_local_analytic_metadata_record(solution_);
+    }
+  }
+
   const std::string& checkpoint_identity() const override {
     return solution_.checkpoint_identity;
   }
@@ -1672,6 +2035,7 @@ class StoredLocal final : public StoredLocalBase {
   json::object summary() const override {
     json::object result{
         {"local", handle_}, {"chart", source_chart_},
+        {"source_operator_identity", source_operator_identity_},
         {"dimension", solution_.dimension},
         {"epsilon_min", solution_.epsilon.min_power},
         {"epsilon_max", solution_.epsilon.complete_max},
@@ -1709,6 +2073,53 @@ class StoredLocal final : public StoredLocalBase {
             endpoint_limits_.load(), line_integrations_.load(), evaluate_ms_,
             residual_certify_ms_, endpoint_limit_ms_, line_integration_ms_,
             create_parse_ms_, create_kernel_ms_, coefficient_count()};
+  }
+
+  json::object checkpoint_record() const override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "checkpoint schema v2 does not serialize symbolic-coefficient local state");
+    } else {
+      const auto current = stats();
+      return json::object{
+        {"schema", "diffexp2-retained-local-v2"},
+        {"handle", handle_},
+        {"source_chart", source_chart_},
+        {"source_operator_identity", source_operator_identity_},
+        {"scalar_domain", scalar_domain()},
+        {"precision_bits", precision_bits_},
+        {"solution", checkpoint_local_solution_record(solution_)},
+        {"pseudo_hits", checkpoint_pseudo_hits_record(pseudo_hits_)},
+        {"diagnostics",
+         json::object{{"top_valid", encode_validity(top_valid_)},
+                      {"create_parse_ms", create_parse_ms_},
+                      {"create_kernel_ms", create_kernel_ms_}}},
+        {"runtime_stats",
+         json::object{{"evaluations", current.evaluations},
+                      {"residual_certifications",
+                       current.residual_certifications},
+                      {"endpoint_limits", current.endpoint_limits},
+                      {"evaluate_ms", current.evaluate_ms},
+                      {"residual_certify_ms", current.residual_certify_ms},
+                      {"endpoint_limit_ms", current.endpoint_limit_ms},
+                      {"coefficient_count", current.coefficient_count}}},
+        {"column_provenance", column_provenance_.has_value()
+             ? json::value(column_provenance_->encode())
+             : json::value(nullptr)}};
+    }
+  }
+
+  void restore_runtime_stats(const StoredLocalStats& state) {
+    if (state.coefficient_count != coefficient_count())
+      throw std::invalid_argument(
+          "checkpoint local coefficient count does not match its tensor");
+    evaluations_.store(state.evaluations);
+    residual_certifications_.store(state.residual_certifications);
+    endpoint_limits_.store(state.endpoint_limits);
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    evaluate_ms_ = state.evaluate_ms;
+    residual_certify_ms_ = state.residual_certify_ms;
+    endpoint_limit_ms_ = state.endpoint_limit_ms;
   }
 
   const LocalSolution<Scalar>& solution() const { return solution_; }
@@ -1845,7 +2256,8 @@ class StoredEndpointResult {
   StoredEndpointResult(
       std::string handle, std::string checkpoint_identity,
       std::string provenance_identity, std::string source_local,
-      std::string source_chart, std::string source_checkpoint,
+      std::string source_chart, std::string source_operator_identity,
+      std::string source_checkpoint,
       std::string source_domain, std::int32_t approach_direction,
       std::optional<std::int32_t> requested_rim,
       std::string cancellation_mode, json::object analytic_metadata,
@@ -1855,6 +2267,7 @@ class StoredEndpointResult {
         provenance_identity_(std::move(provenance_identity)),
         source_local_(std::move(source_local)),
         source_chart_(std::move(source_chart)),
+        source_operator_identity_(std::move(source_operator_identity)),
         source_checkpoint_(std::move(source_checkpoint)),
         source_domain_(std::move(source_domain)),
         approach_direction_(approach_direction),
@@ -1889,6 +2302,7 @@ class StoredEndpointResult {
         {"provenance_identity", provenance_identity_},
         {"source", json::object{
              {"local", source_local_}, {"chart", source_chart_},
+             {"source_operator_identity", source_operator_identity_},
              {"checkpoint_identity", source_checkpoint_},
              {"coefficient_domain", source_domain_}}},
         {"dimension", result_.values.size()},
@@ -1922,6 +2336,45 @@ class StoredEndpointResult {
     out["exports"] = exports_;
     out["export_ms"] = export_ms_;
     return out;
+  }
+
+  json::object checkpoint_record() const {
+    json::array values;
+    values.reserve(result_.values.size());
+    for (const auto& value : result_.values)
+      values.push_back(checkpoint_epsilon_frame_record(value));
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return json::object{
+        {"schema", "diffexp2-retained-endpoint-result-v2"},
+        {"handle", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"source", json::object{
+            {"local", source_local_}, {"chart", source_chart_},
+            {"source_operator_identity", source_operator_identity_},
+            {"checkpoint_identity", source_checkpoint_},
+            {"coefficient_domain", source_domain_}}},
+        {"approach_direction", approach_direction_},
+        {"requested_rim", requested_rim_.has_value()
+             ? json::value(*requested_rim_) : json::value(nullptr)},
+        {"cancellation_mode", cancellation_mode_},
+        {"analytic_metadata", analytic_metadata_},
+        {"result", json::object{
+            {"values", std::move(values)},
+            {"dropped_regulated_sectors",
+             result_.dropped_regulated_sectors},
+            {"cancelled_divergent_coefficients",
+             result_.cancelled_divergent_coefficients},
+            {"imaginary_sign", result_.imaginary_sign}}},
+        {"elapsed_ms", elapsed_ms_},
+        {"runtime_stats", json::object{{"exports", exports_},
+                                        {"export_ms", export_ms_}}}};
+  }
+
+  void restore_runtime_stats(std::uint64_t exports, double export_ms) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    exports_ = exports;
+    export_ms_ = export_ms;
   }
 
   json::object export_values(const std::string& expected_checkpoint,
@@ -1958,6 +2411,7 @@ class StoredEndpointResult {
   std::string provenance_identity_;
   std::string source_local_;
   std::string source_chart_;
+  std::string source_operator_identity_;
   std::string source_checkpoint_;
   std::string source_domain_;
   std::int32_t approach_direction_ = 1;
@@ -1985,12 +2439,14 @@ std::shared_ptr<StoredEndpointResult> build_endpoint_limit(
     throw std::invalid_argument(
         "endpoint source checkpoint identity does not match retained local");
   const auto policy = parse_endpoint_limit_policy(request);
-  auto analytic_metadata = local->endpoint_metadata();
+  auto analytic_metadata = local->exact_analytic_metadata();
   json::object provenance{
-      {"schema", "diffexp2-retained-native-endpoint-sector-limit-v1"},
+      {"schema", "diffexp2-retained-native-endpoint-sector-limit-v2"},
       {"checkpoint_identity", checkpoint_identity},
       {"source", json::object{
            {"local", local->handle()}, {"chart", local->source_chart()},
+           {"source_operator_identity",
+            local->source_operator_identity()},
            {"checkpoint_identity", expected_source_checkpoint},
            {"coefficient_domain", local->scalar_domain()}}},
       {"approach_direction", policy.options.approach_direction},
@@ -2006,7 +2462,8 @@ std::shared_ptr<StoredEndpointResult> build_endpoint_limit(
       std::chrono::steady_clock::now() - started).count();
   return std::make_shared<StoredEndpointResult>(
       endpoint_handle, checkpoint_identity, provenance_identity,
-      local->handle(), local->source_chart(), expected_source_checkpoint,
+      local->handle(), local->source_chart(),
+      local->source_operator_identity(), expected_source_checkpoint,
       local->scalar_domain(), policy.options.approach_direction,
       policy.requested_rim, policy.cancellation_mode,
       std::move(analytic_metadata), std::move(result), elapsed);
@@ -2025,6 +2482,7 @@ class StoredMatchBase {
   virtual ~StoredMatchBase() = default;
 
   virtual json::object summary() const = 0;
+  virtual json::object checkpoint_record() const = 0;
   const std::string& handle() const { return handle_; }
 
  protected:
@@ -2136,6 +2594,11 @@ class StoredExactRegularMatch final : public StoredMatchBase {
   }
 
   double elapsed_ms() const { return elapsed_ms_; }
+
+  json::object checkpoint_record() const override {
+    throw std::domain_error(
+        "checkpoint schema v2 does not yet serialize retained exact-rational match state");
+  }
 
  private:
   std::string checkpoint_identity_;
@@ -2491,6 +2954,31 @@ json::object encode_acb_match_residual_diagnostics(
       {"detail", diagnostics.detail}};
 }
 
+json::object checkpoint_acb_match_residual_record(
+    const AcbMatchingResidualDiagnostics& diagnostics) {
+  json::array coefficients;
+  coefficients.reserve(diagnostics.coefficients.size());
+  for (const auto& coefficient : diagnostics.coefficients)
+    coefficients.push_back(json::object{
+        {"row", coefficient.row},
+        {"epsilon_power", coefficient.epsilon_power},
+        {"residual_lower_exact", coefficient.residual_lower.dump_exact()},
+        {"residual_upper_exact", coefficient.residual_upper.dump_exact()},
+        {"scale_lower_exact", coefficient.scale_lower.dump_exact()},
+        {"scale_upper_exact", coefficient.scale_upper.dump_exact()},
+        {"verdict", acb_match_verdict_name(coefficient.verdict)}});
+  return json::object{
+      {"verdict", acb_match_verdict_name(diagnostics.verdict)},
+      {"complete_window",
+       json::object{{"min", diagnostics.complete_window.min_power},
+                    {"max", diagnostics.complete_window.complete_max}}},
+      {"required_complete_max", diagnostics.required_complete_max},
+      {"complete_through_required",
+       diagnostics.complete_through_required},
+      {"coefficients", std::move(coefficients)},
+      {"detail", diagnostics.detail}};
+}
+
 class StoredRefinedAcbMatch final : public StoredMatchBase {
  public:
   StoredRefinedAcbMatch(
@@ -2640,6 +3128,52 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
   }
 
   double elapsed_ms() const { return elapsed_ms_; }
+
+  json::object checkpoint_record() const override {
+    if (refined_.residual_history.empty())
+      throw std::logic_error(
+          "cannot checkpoint an Acb match without residual history");
+    json::array basis;
+    basis.reserve(basis_sources_.size());
+    for (const auto& source : basis_sources_) basis.push_back(source);
+    json::array history;
+    history.reserve(refined_.residual_history.size());
+    for (const auto& residual : refined_.residual_history)
+      history.push_back(checkpoint_acb_match_residual_record(residual));
+    return json::object{
+        {"schema", "diffexp2-retained-acb-match-v2"},
+        {"handle", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"exact_lattice_identity", exact_lattice_identity_},
+        {"exact_lattice_provenance_identity",
+         exact_lattice_provenance_identity_},
+        {"exact_lattice_canonical_witness",
+         exact_lattice_witness_record_},
+        {"basis_sources", std::move(basis)},
+        {"incoming_source", incoming_source_},
+        {"basis_chart", basis_chart_},
+        {"incoming_chart", incoming_chart_},
+        {"basis_point_exact", basis_point_},
+        {"incoming_point_exact", incoming_point_},
+        {"physical_match_point_exact", physical_point_},
+        {"epsilon",
+         json::object{{"min", requested_window_.min_power},
+                      {"max", requested_window_.complete_max},
+                      {"required_complete_max", required_complete_max_}}},
+        {"dimension", dimension_},
+        {"relative_tolerance", relative_tolerance_},
+        {"max_refinement_steps", max_refinement_steps_},
+        {"refined",
+         json::object{
+             {"transformed_weights",
+              checkpoint_frame_vector_record(refined_.transformed_weights)},
+             {"weights", checkpoint_frame_vector_record(refined_.weights)},
+             {"residual", checkpoint_frame_vector_record(refined_.residual)},
+             {"residual_history", std::move(history)},
+             {"refinement_steps", refined_.refinement_steps}}},
+        {"elapsed_ms", elapsed_ms_}};
+  }
 
  private:
   std::string checkpoint_identity_;
@@ -3012,12 +3546,14 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     json::object source{
         {"column", column}, {"local", basis_handles[column]},
         {"chart", basis_chart},
+        {"source_operator_identity",
+         basis[column]->source_operator_identity()},
         {"checkpoint_identity", basis_checkpoints[column]},
         {"requested_imaginary_sign",
          optional_match_sign_json(requested_basis_sign)},
         {"effective_imaginary_sign",
          optional_match_sign_json(effective_basis_signs[column])},
-        {"analytic_metadata", basis[column]->endpoint_metadata()}};
+        {"analytic_metadata", basis[column]->exact_analytic_metadata()}};
     if (basis[column]->column_provenance().has_value())
       source["column_provenance"] =
           basis[column]->column_provenance()->encode();
@@ -3025,12 +3561,14 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   }
   json::object incoming_source{
       {"local", incoming_handle}, {"chart", incoming_chart},
+      {"source_operator_identity",
+       incoming->source_operator_identity()},
       {"checkpoint_identity", expected_incoming_checkpoint},
       {"requested_imaginary_sign",
        optional_match_sign_json(requested_incoming_sign)},
       {"effective_imaginary_sign",
        optional_match_sign_json(incoming_evaluation.imaginary_sign)},
-      {"analytic_metadata", incoming->endpoint_metadata()}};
+      {"analytic_metadata", incoming->exact_analytic_metadata()}};
   if (incoming->column_provenance().has_value())
     incoming_source["column_provenance"] =
         incoming->column_provenance()->encode();
@@ -3090,6 +3628,858 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       required_complete_max, dimension, relative_tolerance,
       max_refinement_steps, std::move(exact_lattice.saturation),
       std::move(refined), elapsed_ms);
+}
+
+double checkpoint_nonnegative_double(const json::value& raw,
+                                     const char* label) {
+  const auto value = as_double(raw, label);
+  if (!std::isfinite(value) || value < 0.0)
+    throw std::invalid_argument(std::string(label) +
+                                " must be finite and nonnegative");
+  return value;
+}
+
+SCCColumnProvenance parse_checkpoint_column_provenance(
+    const json::value& raw) {
+  const auto& object = as_object(raw, "checkpoint SCC-column provenance");
+  require_exact_keys(object,
+      {"scc", "scc_exact_identity", "seed_block", "basis_index",
+       "exact_column_identity"}, "checkpoint SCC-column provenance");
+  SCCColumnProvenance result{
+      required_string(object, "scc"),
+      required_string(object, "scc_exact_identity"),
+      as_u32(object.at("seed_block"), "checkpoint seed block"),
+      as_u32(object.at("basis_index"), "checkpoint basis index"),
+      required_string(object, "exact_column_identity")};
+  if (result.scc_handle.empty() || result.scc_exact_identity.empty() ||
+      result.exact_column_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint SCC-column provenance contains an empty identity");
+  return result;
+}
+
+template <typename Scalar>
+LocalSolution<Scalar> parse_checkpoint_local_solution(
+    const json::value& raw) {
+  const auto& object = as_object(raw, "checkpoint local solution");
+  require_exact_keys(object,
+      {"chart", "epsilon", "taylor_complete_max", "dimension", "sectors",
+       "prescriptions", "error", "checkpoint_identity"},
+      "checkpoint local solution");
+  LocalSolution<Scalar> solution;
+  const auto& chart = as_object(object.at("chart"),
+                                "checkpoint local chart");
+  require_exact_keys(chart,
+      {"center_exact", "scale_exact", "radius_exact_ball",
+       "infinite_radius"}, "checkpoint local chart");
+  solution.chart.center_exact = required_string(chart, "center_exact");
+  solution.chart.scale_exact = required_string(chart, "scale_exact");
+  if (solution.chart.center_exact.empty() || solution.chart.scale_exact.empty())
+    throw std::invalid_argument(
+        "checkpoint local chart lost exact center or scale provenance");
+  solution.chart.radius = parse_checkpoint_ball(
+      chart.at("radius_exact_ball"), "checkpoint chart radius");
+  if (!chart.at("infinite_radius").is_bool())
+    throw std::invalid_argument(
+        "checkpoint infinite-radius flag must be boolean");
+  solution.chart.infinite_radius = chart.at("infinite_radius").as_bool();
+
+  const auto& epsilon = as_object(object.at("epsilon"),
+                                  "checkpoint local epsilon window");
+  require_exact_keys(epsilon, {"min", "max"},
+                     "checkpoint local epsilon window");
+  solution.epsilon = {
+      as_i32(epsilon.at("min"), "checkpoint local epsilon minimum"),
+      as_i32(epsilon.at("max"), "checkpoint local epsilon maximum")};
+  (void)solution.epsilon.width();
+  solution.taylor_complete_max = as_u32(
+      object.at("taylor_complete_max"), "checkpoint Taylor complete maximum");
+  solution.dimension = as_u32(object.at("dimension"),
+                              "checkpoint local dimension");
+  if (solution.dimension == 0)
+    throw std::invalid_argument("checkpoint local dimension is zero");
+  const auto expected = checked_flat_count(
+      checked_flat_count(solution.epsilon.width(), solution.taylor_width(),
+                         "checkpoint local tensor"),
+      solution.dimension, "checkpoint local tensor");
+
+  for (const auto& raw_sector : as_array(object.at("sectors"),
+                                          "checkpoint local sectors")) {
+    const auto& sector_object = as_object(raw_sector,
+                                          "checkpoint local sector");
+    require_exact_keys(sector_object,
+        {"a", "b", "log_power", "coefficients"},
+        "checkpoint local sector");
+    LocalSector<Scalar> sector;
+    sector.a = parse_checkpoint_exact_descriptor(
+        sector_object.at("a"), "checkpoint local a tag");
+    sector.b = parse_checkpoint_exact_descriptor(
+        sector_object.at("b"), "checkpoint local b tag");
+    sector.log_power = as_u32(sector_object.at("log_power"),
+                              "checkpoint local log power");
+    const auto& coefficients = as_array(
+        sector_object.at("coefficients"), "checkpoint sector coefficients");
+    if (coefficients.size() != expected)
+      throw std::invalid_argument(
+          "checkpoint sector coefficient tensor has the wrong size");
+    sector.coefficients.reserve(coefficients.size());
+    for (const auto& coefficient : coefficients)
+      sector.coefficients.push_back(parse_checkpoint_scalar<Scalar>(
+          coefficient, "checkpoint local coefficient"));
+    solution.sectors.push_back(std::move(sector));
+  }
+  if (solution.sectors.empty())
+    throw std::invalid_argument("checkpoint local solution has no sectors");
+
+  for (const auto& raw_prescription : as_array(
+           object.at("prescriptions"), "checkpoint prescriptions")) {
+    const auto& prescription = as_object(raw_prescription,
+                                         "checkpoint prescription");
+    require_exact_keys(prescription,
+        {"factor_exact", "sign", "multiplicity",
+         "leading_coefficient_sign"}, "checkpoint prescription");
+    solution.prescriptions.push_back(Prescription{
+        required_string(prescription, "factor_exact"),
+        as_i32(prescription.at("sign"), "checkpoint prescription sign"),
+        as_u32(prescription.at("multiplicity"),
+               "checkpoint prescription multiplicity"),
+        as_i32(prescription.at("leading_coefficient_sign"),
+               "checkpoint leading-coefficient sign")});
+  }
+  solution.error = parse_checkpoint_error_envelope(object.at("error"));
+  solution.checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  if (solution.checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint local solution identity is empty");
+  validate_local_solution(solution, false);
+  return solution;
+}
+
+template <typename Scalar>
+std::vector<PseudoHit<Scalar>> parse_checkpoint_pseudo_hits(
+    const json::value& raw, std::uint32_t dimension,
+    std::uint32_t taylor_complete_max) {
+  std::vector<PseudoHit<Scalar>> result;
+  for (const auto& raw_hit : as_array(raw, "checkpoint pseudo hits")) {
+    const auto& object = as_object(raw_hit, "checkpoint pseudo hit");
+    require_exact_keys(object,
+        {"n", "columns", "delta_b", "gamma_frames", "gamma_validity"},
+        "checkpoint pseudo hit");
+    PseudoHit<Scalar> hit;
+    hit.n = as_u32(object.at("n"), "checkpoint pseudo-hit Taylor order");
+    if (hit.n > taylor_complete_max)
+      throw std::invalid_argument(
+          "checkpoint pseudo hit lies above the retained Taylor window");
+    std::set<std::uint32_t> unique_columns;
+    for (const auto& raw_column : as_array(object.at("columns"),
+                                            "checkpoint pseudo columns")) {
+      const auto column = as_u32(raw_column, "checkpoint pseudo column");
+      if (column >= dimension || !unique_columns.insert(column).second)
+        throw std::invalid_argument(
+            "checkpoint pseudo-hit columns are invalid or duplicated");
+      hit.columns.push_back(column);
+    }
+    if (hit.columns.empty())
+      throw std::invalid_argument(
+          "checkpoint pseudo hit has an empty Jordan block");
+    hit.delta_b = parse_checkpoint_scalar<Scalar>(
+        object.at("delta_b"), "checkpoint pseudo delta-b");
+    const auto& frames = as_array(object.at("gamma_frames"),
+                                  "checkpoint pseudo gamma frames");
+    const auto& validity = as_array(object.at("gamma_validity"),
+                                    "checkpoint pseudo validity");
+    if (frames.size() != hit.columns.size() ||
+        validity.size() != hit.columns.size())
+      throw std::invalid_argument(
+          "checkpoint pseudo-hit block dimensions are inconsistent");
+    std::optional<std::size_t> frame_width;
+    for (const auto& raw_frame : frames) {
+      const auto& coefficients = as_array(raw_frame,
+                                          "checkpoint pseudo gamma frame");
+      if (coefficients.empty() ||
+          (frame_width.has_value() && *frame_width != coefficients.size()))
+        throw std::invalid_argument(
+            "checkpoint pseudo gamma frames have inconsistent widths");
+      frame_width = coefficients.size();
+      Frame<Scalar> frame;
+      frame.reserve(coefficients.size());
+      for (const auto& coefficient : coefficients)
+        frame.push_back(parse_checkpoint_scalar<Scalar>(
+            coefficient, "checkpoint pseudo gamma coefficient"));
+      hit.gamma_frames.push_back(std::move(frame));
+    }
+    for (const auto& raw_validity : validity)
+      hit.gamma_validity.push_back(parse_validity(raw_validity));
+    result.push_back(std::move(hit));
+  }
+  return result;
+}
+
+template <typename Scalar>
+std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
+    const json::value& raw, const std::string& expected_domain,
+    slong expected_precision_bits) {
+  const auto& object = as_object(raw, "checkpoint retained local");
+  require_exact_keys(object,
+      {"schema", "handle", "source_chart", "source_operator_identity",
+       "scalar_domain",
+       "precision_bits", "solution", "pseudo_hits", "diagnostics",
+       "runtime_stats", "column_provenance"},
+      "checkpoint retained local");
+  if (required_string(object, "schema") != "diffexp2-retained-local-v2")
+    throw std::invalid_argument("unsupported retained-local checkpoint schema");
+  const auto scalar_domain = required_string(object, "scalar_domain");
+  const char* compile_domain = std::is_same_v<Scalar, Rational>
+      ? "rational" : "acb";
+  if (scalar_domain != compile_domain || scalar_domain != expected_domain)
+    throw std::invalid_argument(
+        "checkpoint local scalar domain is incompatible with its session");
+  const auto precision_bits = as_i64(object.at("precision_bits"),
+                                     "checkpoint local precision");
+  if (precision_bits != expected_precision_bits)
+    throw std::invalid_argument(
+        "checkpoint local precision differs from its session precision");
+  const auto handle = required_string(object, "handle");
+  const auto source_chart = required_string(object, "source_chart");
+  const auto source_operator_identity = required_string(
+      object, "source_operator_identity");
+  if (handle.empty() || source_chart.empty() ||
+      source_operator_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint local lost its handle or source-chart provenance");
+  auto solution = parse_checkpoint_local_solution<Scalar>(
+      object.at("solution"));
+  auto pseudo_hits = parse_checkpoint_pseudo_hits<Scalar>(
+      object.at("pseudo_hits"), solution.dimension,
+      solution.taylor_complete_max);
+  const auto& diagnostics = as_object(object.at("diagnostics"),
+                                      "checkpoint local diagnostics");
+  require_exact_keys(diagnostics,
+      {"top_valid", "create_parse_ms", "create_kernel_ms"},
+      "checkpoint local diagnostics");
+  NativeLocalDiagnostics native{
+      parse_validity(diagnostics.at("top_valid")),
+      checkpoint_nonnegative_double(diagnostics.at("create_parse_ms"),
+                                    "checkpoint local parse time"),
+      checkpoint_nonnegative_double(diagnostics.at("create_kernel_ms"),
+                                    "checkpoint local kernel time")};
+  std::optional<SCCColumnProvenance> column_provenance;
+  if (!object.at("column_provenance").is_null())
+    column_provenance = parse_checkpoint_column_provenance(
+        object.at("column_provenance"));
+
+  const auto& stats = as_object(object.at("runtime_stats"),
+                                "checkpoint local runtime stats");
+  require_exact_keys(stats,
+      {"evaluations", "residual_certifications", "endpoint_limits",
+       "evaluate_ms", "residual_certify_ms", "endpoint_limit_ms",
+       "coefficient_count"}, "checkpoint local runtime stats");
+  StoredLocalStats restored_stats;
+  restored_stats.evaluations = as_u64(stats.at("evaluations"),
+                                     "checkpoint local evaluations");
+  restored_stats.residual_certifications = as_u64(
+      stats.at("residual_certifications"),
+      "checkpoint local residual certifications");
+  restored_stats.endpoint_limits = as_u64(
+      stats.at("endpoint_limits"), "checkpoint local endpoint limits");
+  restored_stats.evaluate_ms = checkpoint_nonnegative_double(
+      stats.at("evaluate_ms"), "checkpoint local evaluation time");
+  restored_stats.residual_certify_ms = checkpoint_nonnegative_double(
+      stats.at("residual_certify_ms"),
+      "checkpoint local residual-certification time");
+  restored_stats.endpoint_limit_ms = checkpoint_nonnegative_double(
+      stats.at("endpoint_limit_ms"), "checkpoint local endpoint time");
+  restored_stats.create_parse_ms = native.parse_ms;
+  restored_stats.create_kernel_ms = native.kernel_ms;
+  const auto coefficient_count = as_u64(
+      stats.at("coefficient_count"), "checkpoint local coefficient count");
+  if (coefficient_count > std::numeric_limits<std::size_t>::max())
+    throw std::invalid_argument(
+        "checkpoint local coefficient count exceeds size_t");
+  restored_stats.coefficient_count =
+      static_cast<std::size_t>(coefficient_count);
+
+  auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+      handle, source_chart, source_operator_identity, std::move(solution),
+      expected_precision_bits,
+      std::move(pseudo_hits), native, std::move(column_provenance));
+  local->restore_runtime_stats(restored_stats);
+  return local;
+}
+
+AcbMatchingResidualVerdict parse_checkpoint_acb_match_verdict(
+    const json::value& raw, const char* label) {
+  if (!raw.is_string())
+    throw std::invalid_argument(std::string(label) + " must be a string");
+  const auto value = std::string(raw.as_string());
+  if (value == "pass") return AcbMatchingResidualVerdict::Pass;
+  if (value == "fail") return AcbMatchingResidualVerdict::Fail;
+  if (value == "inconclusive")
+    return AcbMatchingResidualVerdict::Inconclusive;
+  throw std::invalid_argument(std::string(label) +
+                              " has an unsupported verdict");
+}
+
+Magnitude parse_checkpoint_magnitude(const json::value& raw,
+                                     const char* label) {
+  if (!raw.is_string())
+    throw std::invalid_argument(std::string(label) +
+                                " must be an exact dump string");
+  auto result = Magnitude::from_exact_dump(std::string(raw.as_string()));
+  if (!result.is_finite())
+    throw std::invalid_argument(std::string(label) +
+                                " must be finite");
+  return result;
+}
+
+AcbMatchingResidualDiagnostics parse_checkpoint_acb_match_residual(
+    const json::value& raw, std::uint32_t dimension,
+    std::int32_t expected_required_complete_max) {
+  const auto& object = as_object(raw, "checkpoint Acb match residual");
+  require_exact_keys(object,
+      {"verdict", "complete_window", "required_complete_max",
+       "complete_through_required", "coefficients", "detail"},
+      "checkpoint Acb match residual");
+  AcbMatchingResidualDiagnostics result;
+  result.verdict = parse_checkpoint_acb_match_verdict(
+      object.at("verdict"), "checkpoint Acb residual verdict");
+  const auto& window = as_object(object.at("complete_window"),
+                                 "checkpoint Acb residual window");
+  require_exact_keys(window, {"min", "max"},
+                     "checkpoint Acb residual window");
+  result.complete_window = {
+      as_i32(window.at("min"), "checkpoint Acb residual minimum"),
+      as_i32(window.at("max"), "checkpoint Acb residual maximum")};
+  const auto width = result.complete_window.width();
+  result.required_complete_max = as_i32(
+      object.at("required_complete_max"),
+      "checkpoint Acb required complete maximum");
+  if (result.required_complete_max != expected_required_complete_max)
+    throw std::invalid_argument(
+        "checkpoint Acb residual requirement changed across history");
+  if (!object.at("complete_through_required").is_bool())
+    throw std::invalid_argument(
+        "checkpoint Acb residual completeness flag must be boolean");
+  result.complete_through_required =
+      object.at("complete_through_required").as_bool();
+  if (result.complete_through_required !=
+      (result.complete_window.complete_max >= result.required_complete_max))
+    throw std::invalid_argument(
+        "checkpoint Acb residual completeness flag contradicts its window");
+  const auto& coefficients = as_array(object.at("coefficients"),
+                                      "checkpoint Acb residual coefficients");
+  if (coefficients.size() != checked_flat_count(
+          dimension, width, "checkpoint Acb residual diagnostics"))
+    throw std::invalid_argument(
+        "checkpoint Acb residual coefficient history is incomplete");
+  bool any_fail = false;
+  bool all_pass = true;
+  result.coefficients.reserve(coefficients.size());
+  for (std::size_t index = 0; index < coefficients.size(); ++index) {
+    const auto& coefficient = as_object(
+        coefficients[index], "checkpoint Acb residual coefficient");
+    require_exact_keys(coefficient,
+        {"row", "epsilon_power", "residual_lower_exact",
+         "residual_upper_exact", "scale_lower_exact", "scale_upper_exact",
+         "verdict"}, "checkpoint Acb residual coefficient");
+    const auto row = as_u64(coefficient.at("row"),
+                            "checkpoint Acb residual row");
+    const auto power = as_i32(coefficient.at("epsilon_power"),
+                              "checkpoint Acb residual power");
+    const auto expected_row = index / width;
+    const auto expected_power = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(result.complete_window.min_power) +
+        static_cast<std::int64_t>(index % width));
+    if (row != expected_row || power != expected_power)
+      throw std::invalid_argument(
+          "checkpoint Acb residual coefficients are not a complete row-major history");
+    AcbMatchingCoefficientResidual parsed;
+    parsed.row = static_cast<std::size_t>(row);
+    parsed.epsilon_power = power;
+    parsed.residual_lower = parse_checkpoint_magnitude(
+        coefficient.at("residual_lower_exact"),
+        "checkpoint residual lower bound");
+    parsed.residual_upper = parse_checkpoint_magnitude(
+        coefficient.at("residual_upper_exact"),
+        "checkpoint residual upper bound");
+    parsed.scale_lower = parse_checkpoint_magnitude(
+        coefficient.at("scale_lower_exact"),
+        "checkpoint residual scale lower bound");
+    parsed.scale_upper = parse_checkpoint_magnitude(
+        coefficient.at("scale_upper_exact"),
+        "checkpoint residual scale upper bound");
+    parsed.verdict = parse_checkpoint_acb_match_verdict(
+        coefficient.at("verdict"),
+        "checkpoint Acb coefficient verdict");
+    if (power <= result.required_complete_max) {
+      any_fail = any_fail ||
+          parsed.verdict == AcbMatchingResidualVerdict::Fail;
+      all_pass = all_pass &&
+          parsed.verdict == AcbMatchingResidualVerdict::Pass;
+    }
+    result.coefficients.push_back(std::move(parsed));
+  }
+  const auto derived_verdict = any_fail
+      ? AcbMatchingResidualVerdict::Fail
+      : (all_pass && result.complete_through_required)
+          ? AcbMatchingResidualVerdict::Pass
+          : AcbMatchingResidualVerdict::Inconclusive;
+  if (derived_verdict != result.verdict)
+    throw std::invalid_argument(
+        "checkpoint Acb residual aggregate verdict is inconsistent");
+  result.detail = required_string(object, "detail");
+  if (result.detail.empty())
+    throw std::invalid_argument(
+        "checkpoint Acb residual history lost its diagnostic detail");
+  return result;
+}
+
+void validate_checkpoint_exact_analytic_metadata(const json::value& raw) {
+  const auto& metadata = as_object(
+      raw, "checkpoint exact local analytic metadata");
+  require_exact_keys(metadata,
+      {"schema", "chart", "sectors", "prescriptions"},
+      "checkpoint exact local analytic metadata");
+  if (required_string(metadata, "schema") !=
+      "diffexp2-exact-local-analytic-metadata-v2")
+    throw std::invalid_argument(
+        "unsupported checkpoint local analytic metadata schema");
+  const auto& chart = as_object(metadata.at("chart"),
+                                "checkpoint exact analytic chart");
+  require_exact_keys(chart,
+      {"center_exact", "scale_exact", "radius_exact_ball",
+       "infinite_radius"}, "checkpoint exact analytic chart");
+  (void)required_string(chart, "center_exact");
+  (void)required_string(chart, "scale_exact");
+  (void)parse_checkpoint_ball(chart.at("radius_exact_ball"),
+                              "checkpoint exact analytic radius");
+  if (!chart.at("infinite_radius").is_bool())
+    throw std::invalid_argument(
+        "checkpoint exact analytic radius flag must be boolean");
+  const auto& sectors = as_array(metadata.at("sectors"),
+                                 "checkpoint exact analytic sectors");
+  if (sectors.empty())
+    throw std::invalid_argument(
+        "checkpoint exact analytic metadata has no sectors");
+  for (const auto& raw_sector : sectors) {
+    const auto& sector = as_object(raw_sector,
+                                   "checkpoint exact analytic sector");
+    require_exact_keys(sector, {"a", "b", "log_power"},
+                       "checkpoint exact analytic sector");
+    (void)parse_checkpoint_exact_descriptor(
+        sector.at("a"), "checkpoint exact analytic a tag");
+    (void)parse_checkpoint_exact_descriptor(
+        sector.at("b"), "checkpoint exact analytic b tag");
+    (void)as_u32(sector.at("log_power"),
+                 "checkpoint exact analytic log power");
+  }
+  for (const auto& raw_prescription : as_array(
+           metadata.at("prescriptions"),
+           "checkpoint exact analytic prescriptions")) {
+    const auto& prescription = as_object(
+        raw_prescription, "checkpoint exact analytic prescription");
+    require_exact_keys(prescription,
+        {"factor_exact", "sign", "multiplicity",
+         "leading_coefficient_sign"},
+        "checkpoint exact analytic prescription");
+    (void)required_string(prescription, "factor_exact");
+    const auto sign = as_i32(prescription.at("sign"),
+                             "checkpoint analytic prescription sign");
+    const auto leading = as_i32(
+        prescription.at("leading_coefficient_sign"),
+        "checkpoint analytic leading sign");
+    const auto multiplicity = as_u32(
+        prescription.at("multiplicity"),
+        "checkpoint analytic prescription multiplicity");
+    if ((sign != -1 && sign != 1) ||
+        (leading != -1 && leading != 1) || multiplicity == 0)
+      throw std::invalid_argument(
+          "checkpoint exact analytic prescription is malformed");
+  }
+}
+
+std::shared_ptr<StoredEndpointResult> restore_checkpoint_endpoint_record(
+    const json::value& raw, const std::string& expected_domain) {
+  const auto& object = as_object(raw, "checkpoint retained endpoint");
+  require_exact_keys(object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "source", "approach_direction", "requested_rim",
+       "cancellation_mode", "analytic_metadata", "result", "elapsed_ms",
+       "runtime_stats"}, "checkpoint retained endpoint");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-endpoint-result-v2")
+    throw std::invalid_argument(
+        "unsupported retained endpoint checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  const auto& source = as_object(object.at("source"),
+                                 "checkpoint endpoint source");
+  require_exact_keys(source,
+      {"local", "chart", "source_operator_identity",
+       "checkpoint_identity", "coefficient_domain"},
+      "checkpoint endpoint source");
+  const auto source_local = required_string(source, "local");
+  const auto source_chart = required_string(source, "chart");
+  const auto source_operator_identity = required_string(
+      source, "source_operator_identity");
+  const auto source_checkpoint = required_string(
+      source, "checkpoint_identity");
+  const auto source_domain = required_string(source, "coefficient_domain");
+  if (source_domain != expected_domain ||
+      (source_domain != "rational" && source_domain != "acb"))
+    throw std::invalid_argument(
+        "checkpoint endpoint coefficient domain is incompatible with its session");
+  const auto approach_direction = as_i32(
+      object.at("approach_direction"),
+      "checkpoint endpoint approach direction");
+  if (approach_direction != -1 && approach_direction != 1)
+    throw std::invalid_argument(
+        "checkpoint endpoint approach direction must be +1 or -1");
+  std::optional<std::int32_t> requested_rim;
+  if (!object.at("requested_rim").is_null()) {
+    requested_rim = as_i32(object.at("requested_rim"),
+                           "checkpoint endpoint requested rim");
+    if (*requested_rim != -1 && *requested_rim != 1)
+      throw std::invalid_argument(
+          "checkpoint endpoint rim must be +1 or -1");
+  }
+  const auto cancellation_mode = required_string(
+      object, "cancellation_mode");
+  if (cancellation_mode != "exact-coefficient-field" &&
+      cancellation_mode != "exact-or-acb-singleton")
+    throw std::invalid_argument(
+        "checkpoint endpoint cancellation mode is unsupported");
+  auto analytic_metadata = as_object(
+      object.at("analytic_metadata"),
+      "checkpoint endpoint analytic metadata");
+  validate_checkpoint_exact_analytic_metadata(analytic_metadata);
+
+  json::object provenance{
+      {"schema", "diffexp2-retained-native-endpoint-sector-limit-v2"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"source", source},
+      {"approach_direction", approach_direction},
+      {"rim", requested_rim.has_value()
+           ? json::value(*requested_rim) : json::value(nullptr)},
+      {"cancellation", json::object{{"mode", cancellation_mode}}},
+      {"analytic_metadata", analytic_metadata}};
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint endpoint provenance identity is inconsistent");
+
+  const auto& raw_result = as_object(object.at("result"),
+                                     "checkpoint endpoint result");
+  require_exact_keys(raw_result,
+      {"values", "dropped_regulated_sectors",
+       "cancelled_divergent_coefficients", "imaginary_sign"},
+      "checkpoint endpoint result");
+  EndpointLimitResult result;
+  for (const auto& raw_value : as_array(raw_result.at("values"),
+                                        "checkpoint endpoint values"))
+    result.values.push_back(parse_checkpoint_epsilon_frame<ComplexBall>(
+        raw_value, "checkpoint endpoint value"));
+  if (result.values.empty())
+    throw std::invalid_argument(
+        "checkpoint endpoint result has no components");
+  const auto checked_size = [](const json::value& value,
+                               const char* label) {
+    const auto parsed = as_u64(value, label);
+    if (parsed > std::numeric_limits<std::size_t>::max())
+      throw std::invalid_argument(std::string(label) +
+                                  " exceeds size_t");
+    return static_cast<std::size_t>(parsed);
+  };
+  result.dropped_regulated_sectors = checked_size(
+      raw_result.at("dropped_regulated_sectors"),
+      "checkpoint dropped regulated sectors");
+  result.cancelled_divergent_coefficients = checked_size(
+      raw_result.at("cancelled_divergent_coefficients"),
+      "checkpoint cancelled divergent coefficients");
+  result.imaginary_sign = as_i32(raw_result.at("imaginary_sign"),
+                                 "checkpoint endpoint effective rim");
+  if (result.imaginary_sign != -1 && result.imaginary_sign != 1)
+    throw std::invalid_argument(
+        "checkpoint endpoint effective rim must be +1 or -1");
+  (void)endpoint_value_window(result);
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint endpoint elapsed time");
+  const auto& stats = as_object(object.at("runtime_stats"),
+                                "checkpoint endpoint runtime stats");
+  require_exact_keys(stats, {"exports", "export_ms"},
+                     "checkpoint endpoint runtime stats");
+  const auto exports = as_u64(stats.at("exports"),
+                              "checkpoint endpoint exports");
+  const auto export_ms = checkpoint_nonnegative_double(
+      stats.at("export_ms"), "checkpoint endpoint export time");
+  auto endpoint = std::make_shared<StoredEndpointResult>(
+      handle, checkpoint_identity, provenance_identity, source_local,
+      source_chart, source_operator_identity, source_checkpoint,
+      source_domain, approach_direction, requested_rim, cancellation_mode,
+      std::move(analytic_metadata), std::move(result), elapsed_ms);
+  endpoint->restore_runtime_stats(exports, export_ms);
+  return endpoint;
+}
+
+void validate_checkpoint_match_source(const json::object& source,
+                                      bool basis,
+                                      std::size_t expected_column = 0) {
+  const bool has_column_provenance =
+      source.if_contains("column_provenance") != nullptr;
+  if (basis) {
+    if (has_column_provenance)
+      require_exact_keys(source,
+          {"column", "local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "analytic_metadata", "column_provenance"},
+          "checkpoint Acb basis source");
+    else
+      require_exact_keys(source,
+          {"column", "local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "analytic_metadata"}, "checkpoint Acb basis source");
+    if (as_u64(source.at("column"), "checkpoint Acb basis column") !=
+        expected_column)
+      throw std::invalid_argument(
+          "checkpoint Acb basis sources are not in column order");
+  } else {
+    if (has_column_provenance)
+      require_exact_keys(source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "analytic_metadata", "column_provenance"},
+          "checkpoint Acb incoming source");
+    else
+      require_exact_keys(source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "analytic_metadata"}, "checkpoint Acb incoming source");
+  }
+  if (required_string(source, "local").empty() ||
+      required_string(source, "chart").empty() ||
+      required_string(source, "source_operator_identity").empty() ||
+      required_string(source, "checkpoint_identity").empty())
+    throw std::invalid_argument(
+        "checkpoint Acb match source has empty provenance");
+  for (const auto* key : {"requested_imaginary_sign",
+                          "effective_imaginary_sign"}) {
+    if (source.at(key).is_null()) continue;
+    const auto sign = as_i32(source.at(key), key);
+    if (sign != -1 && sign != 1)
+      throw std::invalid_argument(
+          "checkpoint Acb match source has an invalid branch sign");
+  }
+  validate_checkpoint_exact_analytic_metadata(
+      source.at("analytic_metadata"));
+  if (has_column_provenance)
+    (void)parse_checkpoint_column_provenance(
+        source.at("column_provenance"));
+}
+
+std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
+    const json::value& raw) {
+  const auto& object = as_object(raw, "checkpoint retained Acb match");
+  require_exact_keys(object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "exact_lattice_identity", "exact_lattice_provenance_identity",
+       "exact_lattice_canonical_witness", "basis_sources",
+       "incoming_source", "basis_chart", "incoming_chart",
+       "basis_point_exact", "incoming_point_exact",
+       "physical_match_point_exact", "epsilon", "dimension",
+       "relative_tolerance", "max_refinement_steps", "refined",
+       "elapsed_ms"}, "checkpoint retained Acb match");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-acb-match-v2")
+    throw std::invalid_argument(
+        "unsupported retained Acb-match checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  const auto exact_lattice_identity = required_string(
+      object, "exact_lattice_identity");
+  const auto exact_lattice_provenance_identity = required_string(
+      object, "exact_lattice_provenance_identity");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty() || exact_lattice_identity.empty() ||
+      exact_lattice_provenance_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint retained Acb match contains an empty identity");
+  const auto basis_chart = required_string(object, "basis_chart");
+  const auto incoming_chart = required_string(object, "incoming_chart");
+  const auto basis_point = required_string(object, "basis_point_exact");
+  const auto incoming_point = required_string(object,
+                                               "incoming_point_exact");
+  const auto physical_point = required_string(
+      object, "physical_match_point_exact");
+  if (basis_chart.empty() || incoming_chart.empty() || basis_point.empty() ||
+      incoming_point.empty() || physical_point.empty())
+    throw std::invalid_argument(
+        "checkpoint Acb match lost chart or point provenance");
+  const auto& raw_epsilon = as_object(object.at("epsilon"),
+                                      "checkpoint Acb match epsilon window");
+  require_exact_keys(raw_epsilon,
+      {"min", "max", "required_complete_max"},
+      "checkpoint Acb match epsilon window");
+  const EpsilonWindow window{
+      as_i32(raw_epsilon.at("min"), "checkpoint match epsilon minimum"),
+      as_i32(raw_epsilon.at("max"), "checkpoint match epsilon maximum")};
+  (void)window.width();
+  const auto required_complete_max = as_i32(
+      raw_epsilon.at("required_complete_max"),
+      "checkpoint match required complete maximum");
+  if (required_complete_max < window.min_power ||
+      required_complete_max > window.complete_max)
+    throw std::invalid_argument(
+        "checkpoint Acb match requirement lies outside its work window");
+  const auto dimension = as_u32(object.at("dimension"),
+                                "checkpoint Acb match dimension");
+  if (dimension == 0)
+    throw std::invalid_argument("checkpoint Acb match dimension is zero");
+  const auto relative_tolerance = required_string(
+      object, "relative_tolerance");
+  auto parsed_tolerance = Magnitude::decimal(relative_tolerance);
+  if (!parsed_tolerance.is_finite())
+    throw std::invalid_argument(
+        "checkpoint Acb match tolerance is not finite");
+  const auto max_refinement_steps = as_u64(
+      object.at("max_refinement_steps"),
+      "checkpoint Acb maximum refinement steps");
+  if (max_refinement_steps > 32)
+    throw std::invalid_argument(
+        "checkpoint Acb maximum refinement steps exceeds 32");
+
+  std::vector<json::object> basis_sources;
+  const auto& raw_basis_sources = as_array(
+      object.at("basis_sources"), "checkpoint Acb basis sources");
+  if (raw_basis_sources.size() != dimension)
+    throw std::invalid_argument(
+        "checkpoint Acb match basis source count differs from its dimension");
+  basis_sources.reserve(raw_basis_sources.size());
+  for (std::size_t column = 0; column < raw_basis_sources.size(); ++column) {
+    auto source = as_object(raw_basis_sources[column],
+                            "checkpoint Acb basis source");
+    validate_checkpoint_match_source(source, true, column);
+    basis_sources.push_back(std::move(source));
+  }
+  auto incoming_source = as_object(object.at("incoming_source"),
+                                   "checkpoint Acb incoming source");
+  validate_checkpoint_match_source(incoming_source, false);
+
+  const auto exact_lattice_witness_record = required_string(
+      object, "exact_lattice_canonical_witness");
+  if (exact_lattice_witness_record.empty())
+    throw std::invalid_argument(
+        "checkpoint Acb match lost its exact lattice witness");
+  auto exact_lattice = parse_exact_evaluated_lattice(
+      json::parse(exact_lattice_witness_record), dimension, window,
+      checkpoint_identity + ":checkpoint-restore");
+  if (exact_lattice.identity != exact_lattice_identity ||
+      exact_lattice.canonical_witness != exact_lattice_witness_record)
+    throw std::invalid_argument(
+        "checkpoint exact lattice identity or canonical witness is inconsistent");
+
+  json::array exact_binding_basis;
+  for (const auto& source : basis_sources)
+    exact_binding_basis.push_back(source);
+  json::object exact_lattice_provenance{
+      {"schema", "diffexp2-retained-exact-lattice-binding-v1"},
+      {"witness_schema", kExactEvaluatedLatticeSchema},
+      {"witness_identity", exact_lattice_identity},
+      {"basis", std::move(exact_binding_basis)},
+      {"basis_point_exact", basis_point},
+      {"physical_match_point_exact", physical_point},
+      {"epsilon", json::object{{"min", window.min_power},
+                                {"max", window.complete_max}}}};
+  if (json::serialize(canonical_json_value(exact_lattice_provenance)) !=
+      exact_lattice_provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint exact lattice provenance identity is inconsistent");
+
+  json::array provenance_basis;
+  for (const auto& source : basis_sources)
+    provenance_basis.push_back(source);
+  json::object provenance{
+      {"schema", "diffexp2-native-refined-acb-local-match-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"basis", std::move(provenance_basis)},
+      {"incoming", incoming_source},
+      {"basis_point_exact", basis_point},
+      {"incoming_point_exact", incoming_point},
+      {"physical_match_point_exact", physical_point},
+      {"epsilon", json::object{{"min", window.min_power},
+                                {"max", window.complete_max},
+                                {"required_complete_max",
+                                 required_complete_max}}},
+      {"exact_lattice_provenance_identity",
+       exact_lattice_provenance_identity},
+      {"refinement", json::object{{"relative_tolerance",
+                                    relative_tolerance},
+                                   {"max_steps",
+                                    max_refinement_steps}}}};
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint retained Acb match provenance identity is inconsistent");
+
+  const auto& raw_refined = as_object(object.at("refined"),
+                                      "checkpoint refined Acb state");
+  require_exact_keys(raw_refined,
+      {"transformed_weights", "weights", "residual", "residual_history",
+       "refinement_steps"}, "checkpoint refined Acb state");
+  RefinedAcbLaurentMatch refined;
+  refined.transformed_weights = parse_checkpoint_frame_vector<ComplexBall>(
+      raw_refined.at("transformed_weights"), dimension,
+      "checkpoint transformed Acb weights");
+  refined.weights = parse_checkpoint_frame_vector<ComplexBall>(
+      raw_refined.at("weights"), dimension, "checkpoint Acb weights");
+  refined.residual = parse_checkpoint_frame_vector<ComplexBall>(
+      raw_refined.at("residual"), dimension, "checkpoint Acb residual");
+  refined.refinement_steps = static_cast<std::size_t>(as_u64(
+      raw_refined.at("refinement_steps"),
+      "checkpoint Acb refinement steps"));
+  if (refined.refinement_steps > max_refinement_steps)
+    throw std::invalid_argument(
+        "checkpoint Acb refinement count exceeds its policy");
+  for (const auto& raw_history : as_array(
+           raw_refined.at("residual_history"),
+           "checkpoint Acb residual history"))
+    refined.residual_history.push_back(parse_checkpoint_acb_match_residual(
+        raw_history, dimension, required_complete_max));
+  if (refined.residual_history.size() != refined.refinement_steps + 1)
+    throw std::invalid_argument(
+        "checkpoint Acb residual history does not cover every refinement step");
+  auto residual_min = refined.residual.front().min_power();
+  auto residual_max = refined.residual.front().complete_max();
+  for (const auto& row : refined.residual) {
+    residual_min = std::min(residual_min, row.min_power());
+    residual_max = std::min(residual_max, row.complete_max());
+  }
+  const auto& final_diagnostics = refined.residual_history.back();
+  if (final_diagnostics.complete_window.min_power != residual_min ||
+      final_diagnostics.complete_window.complete_max != residual_max)
+    throw std::invalid_argument(
+        "checkpoint final Acb residual diagnostics do not match the retained residual frame");
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint Acb match elapsed time");
+  return std::make_shared<StoredRefinedAcbMatch>(
+      handle, checkpoint_identity, provenance_identity,
+      exact_lattice_identity, exact_lattice_provenance_identity,
+      exact_lattice_witness_record, std::move(basis_sources),
+      std::move(incoming_source), basis_chart, incoming_chart, basis_point,
+      incoming_point, physical_point, window, required_complete_max,
+      dimension, relative_tolerance,
+      static_cast<std::size_t>(max_refinement_steps),
+      std::move(exact_lattice.saturation), std::move(refined), elapsed_ms);
 }
 
 template <typename Scalar>
@@ -3317,7 +4707,8 @@ class PreparedChart final : public PreparedChartBase {
       const json::object& metadata_object) override {
     auto native = solve_native(run, metadata_object);
     auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
-        local_handle, handle_, std::move(native.solution), precision_bits_,
+        local_handle, handle_, exact_identity_, std::move(native.solution),
+        precision_bits_,
         std::move(native.pseudo_hits), native.diagnostics);
     record_native_local_success(native.diagnostics);
     return local;
@@ -4327,7 +5718,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           basis_index,
           json::serialize(canonical_json_value(column_identity_record))};
       auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
-          local_handle, handle_, std::move(parent),
+          local_handle, handle_, exact_identity_, std::move(parent),
           blocks_[seed_block].chart->precision_bits(),
           std::vector<PseudoHit<Scalar>>{}, aggregate,
           std::move(column_provenance));
@@ -6327,7 +7718,7 @@ std::string static_problem_signature(const json::object& problem,
 
 constexpr const char* kCheckpointFormat =
     "diffexp2-persistent-native-session";
-constexpr std::uint32_t kCheckpointPayloadSchema = 1;
+constexpr std::uint32_t kCheckpointPayloadSchema = 2;
 
 json::object run_session_command(const json::object& root);
 
@@ -6459,12 +7850,60 @@ json::array checkpoint_identity_manifest(const json::array& items) {
   return manifest;
 }
 
+json::array checkpoint_local_identity_manifest(const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(value, "checkpoint retained local");
+    const auto& solution = as_object(item.at("solution"),
+                                     "checkpoint local solution");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"source_chart", item.at("source_chart")},
+        {"source_operator_identity", item.at("source_operator_identity")},
+        {"scalar_domain", item.at("scalar_domain")},
+        {"checkpoint_identity", solution.at("checkpoint_identity")}});
+  }
+  return manifest;
+}
+
+json::array checkpoint_match_identity_manifest(const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(value, "checkpoint retained Acb match");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"checkpoint_identity", item.at("checkpoint_identity")},
+        {"provenance_identity", item.at("provenance_identity")},
+        {"exact_lattice_identity", item.at("exact_lattice_identity")}});
+  }
+  return manifest;
+}
+
+json::array checkpoint_endpoint_identity_manifest(const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(value, "checkpoint retained endpoint");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"checkpoint_identity", item.at("checkpoint_identity")},
+        {"provenance_identity", item.at("provenance_identity")},
+        {"source", item.at("source")}});
+  }
+  return manifest;
+}
+
 struct SessionCheckpointSnapshot {
   json::object header;
   json::object payload;
   std::uint64_t generation = 0;
   std::size_t charts = 0;
   std::size_t sccs = 0;
+  std::size_t locals = 0;
+  std::size_t acb_matches = 0;
+  std::size_t endpoints = 0;
 };
 
 SessionCheckpointSnapshot make_checkpoint_snapshot(
@@ -6477,12 +7916,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       session.pending_line_integrations != 0)
     throw std::invalid_argument(
         "checkpoint requires a quiescent session with no pending local solve, match, endpoint limit, tile plan, or line integration");
-  if (!session.locals.empty() || !session.matches.empty() ||
-      !session.endpoints.empty() || !session.tile_plans.empty() ||
-      !session.line_results.empty())
+  if (!session.tile_plans.empty() || !session.line_results.empty())
     throw std::invalid_argument(
-        "checkpoint schema v1 does not serialize retained local, match, endpoint, tile-plan, or line-result handles; release them before saving");
-
+        "checkpoint schema v2 does not serialize retained tile-plan or line-result handles; release them before saving");
   std::vector<std::shared_ptr<PreparedChartBase>> charts;
   charts.reserve(session.charts.size());
   for (const auto& [ignored, chart] : session.charts) charts.push_back(chart);
@@ -6499,6 +7935,33 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
                                          const auto& right) {
     return scoped_handle_id(left->handle(), "scc:", "SCC") <
            scoped_handle_id(right->handle(), "scc:", "SCC");
+  });
+  std::vector<std::shared_ptr<StoredLocalBase>> locals;
+  locals.reserve(session.locals.size());
+  for (const auto& [ignored, local] : session.locals)
+    locals.push_back(local);
+  std::sort(locals.begin(), locals.end(), [](const auto& left,
+                                             const auto& right) {
+    return scoped_handle_id(left->handle(), "l:", "local") <
+           scoped_handle_id(right->handle(), "l:", "local");
+  });
+  std::vector<std::shared_ptr<StoredMatchBase>> matches;
+  matches.reserve(session.matches.size());
+  for (const auto& [ignored, match] : session.matches)
+    matches.push_back(match);
+  std::sort(matches.begin(), matches.end(), [](const auto& left,
+                                               const auto& right) {
+    return scoped_handle_id(left->handle(), "m:", "match") <
+           scoped_handle_id(right->handle(), "m:", "match");
+  });
+  std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
+  endpoints.reserve(session.endpoints.size());
+  for (const auto& [ignored, endpoint] : session.endpoints)
+    endpoints.push_back(endpoint);
+  std::sort(endpoints.begin(), endpoints.end(), [](const auto& left,
+                                                   const auto& right) {
+    return scoped_handle_id(left->handle(), "e:", "endpoint") <
+           scoped_handle_id(right->handle(), "e:", "endpoint");
   });
 
   json::array chart_items;
@@ -6521,6 +7984,18 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     }
     scc_items.push_back(std::move(item));
   }
+  json::array local_items;
+  local_items.reserve(locals.size());
+  for (const auto& local : locals)
+    local_items.push_back(local->checkpoint_record());
+  json::array match_items;
+  match_items.reserve(matches.size());
+  for (const auto& match : matches)
+    match_items.push_back(match->checkpoint_record());
+  json::array endpoint_items;
+  endpoint_items.reserve(endpoints.size());
+  for (const auto& endpoint : endpoints)
+    endpoint_items.push_back(endpoint->checkpoint_record());
 
   if (session.checkpoint_generation ==
       std::numeric_limits<std::uint64_t>::max())
@@ -6554,10 +8029,15 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"schema", kCheckpointPayloadSchema},
       {"session", std::move(session_record)},
       {"prepared_charts", chart_items},
-      {"prepared_scc", scc_items}};
+      {"prepared_scc", scc_items},
+      {"retained_locals", local_items},
+      {"retained_acb_matches", match_items},
+      {"retained_endpoints", endpoint_items}};
   json::array mandatory_sections{"session", "prepared_charts",
-                                  "prepared_scc"};
-  json::array deferred_kinds{"local", "match", "endpoint", "line", "tile"};
+                                  "prepared_scc", "retained_locals",
+                                  "retained_acb_matches",
+                                  "retained_endpoints"};
+  json::array deferred_kinds{"exact-rational-match", "line", "tile"};
   json::object header{
       {"format", kCheckpointFormat},
       {"schema", kCheckpointPayloadSchema},
@@ -6571,9 +8051,15 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"deferred_handle_kinds", std::move(deferred_kinds)},
       {"chart_identities", checkpoint_identity_manifest(chart_items)},
       {"scc_identities", checkpoint_identity_manifest(scc_items)},
+      {"local_identities", checkpoint_local_identity_manifest(local_items)},
+      {"acb_match_identities",
+       checkpoint_match_identity_manifest(match_items)},
+      {"endpoint_identities",
+       checkpoint_endpoint_identity_manifest(endpoint_items)},
       {"generation", generation}};
   return {std::move(header), std::move(payload), generation,
-          charts.size(), sccs.size()};
+          charts.size(), sccs.size(), locals.size(), matches.size(),
+          endpoints.size()};
 }
 
 std::vector<std::string> checkpoint_string_array(const json::value& raw,
@@ -6595,9 +8081,11 @@ void validate_checkpoint_envelope(const json::object& header,
       {"format", "schema", "build", "flint", "checkpoint_identity",
        "configuration_identity", "analytic_identity", "mandatory_sections",
        "optional_sections", "deferred_handle_kinds", "chart_identities",
-       "scc_identities", "generation"}, "checkpoint header");
+       "scc_identities", "local_identities", "acb_match_identities",
+       "endpoint_identities", "generation"}, "checkpoint header");
   require_exact_keys(payload,
-      {"schema", "session", "prepared_charts", "prepared_scc"},
+      {"schema", "session", "prepared_charts", "prepared_scc",
+       "retained_locals", "retained_acb_matches", "retained_endpoints"},
       "checkpoint payload");
   if (required_string(header, "format") != kCheckpointFormat ||
       as_u32(header.at("schema"), "checkpoint header schema") !=
@@ -6618,7 +8106,8 @@ void validate_checkpoint_envelope(const json::object& header,
       header.at("mandatory_sections"), "mandatory checkpoint sections");
   std::sort(mandatory.begin(), mandatory.end());
   const std::vector<std::string> expected_sections{
-      "prepared_charts", "prepared_scc", "session"};
+      "prepared_charts", "prepared_scc", "retained_acb_matches",
+      "retained_endpoints", "retained_locals", "session"};
   if (mandatory != expected_sections)
     throw std::invalid_argument(
         "native checkpoint contains unknown or missing mandatory sections");
@@ -6626,6 +8115,15 @@ void validate_checkpoint_envelope(const json::object& header,
                 "optional checkpoint sections").empty())
     throw std::invalid_argument(
         "native checkpoint declares unsupported optional sections");
+  auto deferred = checkpoint_string_array(
+      header.at("deferred_handle_kinds"),
+      "deferred checkpoint handle kinds");
+  std::sort(deferred.begin(), deferred.end());
+  const std::vector<std::string> expected_deferred{
+      "exact-rational-match", "line", "tile"};
+  if (deferred != expected_deferred)
+    throw std::invalid_argument(
+        "native checkpoint deferred-state contract is incompatible");
 
   const auto& session = as_object(payload.at("session"),
                                   "checkpoint session section");
@@ -6649,12 +8147,29 @@ void validate_checkpoint_envelope(const json::object& header,
                                      "checkpoint prepared charts");
   const auto& scc_items = as_array(payload.at("prepared_scc"),
                                    "checkpoint prepared SCC charts");
+  const auto& local_items = as_array(payload.at("retained_locals"),
+                                     "checkpoint retained locals");
+  const auto& match_items = as_array(
+      payload.at("retained_acb_matches"),
+      "checkpoint retained Acb matches");
+  const auto& endpoint_items = as_array(
+      payload.at("retained_endpoints"),
+      "checkpoint retained endpoints");
   if (checkpoint_identity_manifest(chart_items) !=
           as_array(header.at("chart_identities"),
                    "checkpoint chart identities") ||
       checkpoint_identity_manifest(scc_items) !=
           as_array(header.at("scc_identities"),
-                   "checkpoint SCC identities"))
+                   "checkpoint SCC identities") ||
+      checkpoint_local_identity_manifest(local_items) !=
+          as_array(header.at("local_identities"),
+                   "checkpoint local identities") ||
+      checkpoint_match_identity_manifest(match_items) !=
+          as_array(header.at("acb_match_identities"),
+                   "checkpoint Acb match identities") ||
+      checkpoint_endpoint_identity_manifest(endpoint_items) !=
+          as_array(header.at("endpoint_identities"),
+                   "checkpoint endpoint identities"))
     throw std::invalid_argument(
         "checkpoint retained identity manifest is inconsistent");
   if (as_u64(header.at("generation"), "checkpoint generation") !=
@@ -6789,6 +8304,235 @@ json::object restore_checkpoint(const std::string& path,
           {"identity", item.at("identity")}});
     }
 
+    std::unique_ptr<AcbPrecisionLease> checkpoint_acb_lease;
+    if (restored->domain == "acb") {
+      checkpoint_acb_lease =
+          std::make_unique<AcbPrecisionLease>(restored->precision_bits);
+      ComplexBall::set_precision(restored->precision_bits);
+    }
+
+    json::array restored_locals;
+    std::uint64_t largest_local = 0;
+    json::array restored_matches;
+    std::uint64_t largest_match = 0;
+    json::array restored_endpoints;
+    std::uint64_t largest_endpoint = 0;
+    {
+      // The newly allocated session is already in the process registry, so
+      // reconstruct all direct (non-command) retained state under its mutex.
+      // No partially restored local or match may become observable even if a
+      // concurrent caller guesses the fresh session token.
+      std::lock_guard<std::mutex> restore_state_lock(restored->mutex);
+      const auto& saved_locals = as_array(
+          payload.at("retained_locals"), "checkpoint retained locals");
+    if (saved_locals.size() > restored->local_capacity)
+      throw std::invalid_argument(
+          "checkpoint retained locals exceed the restored session capacity");
+    for (const auto& raw_item : saved_locals) {
+      const auto& item = as_object(raw_item, "checkpoint retained local");
+      const auto old_handle = required_string(item, "handle");
+      const auto handle_id = scoped_handle_id(old_handle, "l:", "local");
+      if (handle_id <= largest_local)
+        throw std::invalid_argument(
+            "checkpoint local handles are not in strict creation order");
+      largest_local = handle_id;
+      std::shared_ptr<StoredLocalBase> local;
+      if (restored->domain == "rational")
+        local = restore_checkpoint_local_record<Rational>(
+            item, restored->domain, restored->precision_bits);
+      else if (restored->domain == "acb")
+        local = restore_checkpoint_local_record<ComplexBall>(
+            item, restored->domain, restored->precision_bits);
+      else
+        throw std::invalid_argument(
+            "checkpoint schema v2 cannot restore symbolic local state");
+      if (local->handle() != old_handle ||
+          local->checkpoint_record() != raw_item)
+        throw std::invalid_argument(
+            "restored local does not reproduce its exact retained state");
+      const auto& source = local->source_chart();
+      if (source.starts_with("c:")) {
+        (void)scoped_handle_id(source, "c:", "local source chart");
+        const auto found = restored->charts.find(source);
+        if (found != restored->charts.end() &&
+            found->second->exact_identity() !=
+                local->source_operator_identity())
+          throw std::invalid_argument(
+              "checkpoint local source identity disagrees with its restored chart");
+      } else if (source.starts_with("scc:")) {
+        (void)scoped_handle_id(source, "scc:", "local source SCC");
+        const auto found = restored->sccs.find(source);
+        if (found != restored->sccs.end() &&
+            found->second->exact_identity() !=
+                local->source_operator_identity())
+          throw std::invalid_argument(
+              "checkpoint local source identity disagrees with its restored SCC");
+      } else {
+        throw std::invalid_argument(
+            "checkpoint local source is neither a chart nor an SCC handle");
+      }
+      if (local->column_provenance().has_value()) {
+        const auto& column = *local->column_provenance();
+        (void)scoped_handle_id(column.scc_handle, "scc:",
+                               "local column SCC");
+        const auto found = restored->sccs.find(column.scc_handle);
+        if (found != restored->sccs.end() &&
+            found->second->exact_identity() != column.scc_exact_identity)
+          throw std::invalid_argument(
+              "checkpoint local column provenance names a different retained SCC identity");
+        if (column.scc_handle != local->source_chart() ||
+            column.scc_exact_identity !=
+                local->source_operator_identity())
+          throw std::invalid_argument(
+              "checkpoint local source and SCC-column provenance disagree");
+      }
+      if (!restored->locals.emplace(old_handle, local).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate retained local handles");
+      restored_locals.push_back(json::object{
+          {"local", old_handle}, {"chart", source},
+          {"source_operator_identity",
+           local->source_operator_identity()},
+          {"checkpoint_identity", local->checkpoint_identity()},
+          {"generation", header.at("generation")}});
+    }
+
+      const auto& saved_matches = as_array(
+          payload.at("retained_acb_matches"),
+          "checkpoint retained Acb matches");
+    if (saved_matches.size() > restored->match_capacity)
+      throw std::invalid_argument(
+          "checkpoint retained matches exceed the restored session capacity");
+    if (!saved_matches.empty() && restored->domain != "acb")
+      throw std::invalid_argument(
+          "retained Acb match state requires an Acb checkpoint session");
+    for (const auto& raw_item : saved_matches) {
+      const auto& item = as_object(raw_item,
+                                   "checkpoint retained Acb match");
+      const auto old_handle = required_string(item, "handle");
+      const auto handle_id = scoped_handle_id(old_handle, "m:", "match");
+      if (handle_id <= largest_match)
+        throw std::invalid_argument(
+            "checkpoint match handles are not in strict creation order");
+      largest_match = handle_id;
+      auto match = restore_checkpoint_acb_match_record(item);
+      if (match->handle() != old_handle ||
+          match->checkpoint_record() != raw_item)
+        throw std::invalid_argument(
+            "restored Acb match does not reproduce its exact retained state");
+
+      const auto cross_check_source = [&](const json::object& source,
+                                          const char* label) {
+        const auto source_handle = required_string(source, "local");
+        (void)scoped_handle_id(source_handle, "l:", label);
+        const auto found = restored->locals.find(source_handle);
+        if (found == restored->locals.end()) return;
+        if (found->second->checkpoint_identity() !=
+                required_string(source, "checkpoint_identity") ||
+            found->second->source_chart() !=
+                required_string(source, "chart") ||
+            found->second->source_operator_identity() !=
+                required_string(source, "source_operator_identity") ||
+            found->second->exact_analytic_metadata() !=
+                source.at("analytic_metadata"))
+          throw std::invalid_argument(
+              std::string("checkpoint Acb match ") + label +
+              " provenance disagrees with its restored local");
+      };
+      for (const auto& source : as_array(item.at("basis_sources"),
+                                         "checkpoint Acb basis sources"))
+        cross_check_source(as_object(source, "checkpoint Acb basis source"),
+                           "basis source");
+      cross_check_source(
+          as_object(item.at("incoming_source"),
+                    "checkpoint Acb incoming source"),
+          "incoming source");
+      if (!restored->matches.emplace(old_handle, match).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate retained match handles");
+      restored_matches.push_back(json::object{
+          {"match", old_handle},
+          {"checkpoint_identity", item.at("checkpoint_identity")},
+          {"provenance_identity", item.at("provenance_identity")},
+          {"generation", header.at("generation")}});
+    }
+
+      const auto& saved_endpoints = as_array(
+          payload.at("retained_endpoints"),
+          "checkpoint retained endpoints");
+      if (saved_endpoints.size() > restored->endpoint_capacity)
+        throw std::invalid_argument(
+            "checkpoint retained endpoints exceed the restored session capacity");
+      for (const auto& raw_item : saved_endpoints) {
+        const auto& item = as_object(raw_item,
+                                     "checkpoint retained endpoint");
+        const auto old_handle = required_string(item, "handle");
+        const auto handle_id = scoped_handle_id(old_handle, "e:",
+                                                "endpoint");
+        if (handle_id <= largest_endpoint)
+          throw std::invalid_argument(
+              "checkpoint endpoint handles are not in strict creation order");
+        largest_endpoint = handle_id;
+        auto endpoint = restore_checkpoint_endpoint_record(
+            item, restored->domain);
+        if (endpoint->handle() != old_handle ||
+            endpoint->checkpoint_record() != raw_item)
+          throw std::invalid_argument(
+              "restored endpoint does not reproduce its exact retained state");
+        const auto& source = as_object(item.at("source"),
+                                       "checkpoint endpoint source");
+        const auto source_handle = required_string(source, "local");
+        (void)scoped_handle_id(source_handle, "l:",
+                               "endpoint source local");
+        const auto source_chart = required_string(source, "chart");
+        if (source_chart.starts_with("c:")) {
+          (void)scoped_handle_id(source_chart, "c:",
+                                 "endpoint source chart");
+          const auto chart = restored->charts.find(source_chart);
+          if (chart != restored->charts.end() &&
+              chart->second->exact_identity() !=
+                  required_string(source, "source_operator_identity"))
+            throw std::invalid_argument(
+                "checkpoint endpoint source identity disagrees with its restored chart");
+        } else if (source_chart.starts_with("scc:")) {
+          (void)scoped_handle_id(source_chart, "scc:",
+                                 "endpoint source SCC");
+          const auto scc = restored->sccs.find(source_chart);
+          if (scc != restored->sccs.end() &&
+              scc->second->exact_identity() !=
+                  required_string(source, "source_operator_identity"))
+            throw std::invalid_argument(
+                "checkpoint endpoint source identity disagrees with its restored SCC");
+        } else {
+          throw std::invalid_argument(
+              "checkpoint endpoint source is neither a chart nor an SCC handle");
+        }
+        const auto found = restored->locals.find(source_handle);
+        if (found != restored->locals.end()) {
+          if (found->second->source_chart() !=
+                  required_string(source, "chart") ||
+              found->second->source_operator_identity() !=
+                  required_string(source, "source_operator_identity") ||
+              found->second->checkpoint_identity() !=
+                  required_string(source, "checkpoint_identity") ||
+              found->second->scalar_domain() !=
+                  required_string(source, "coefficient_domain") ||
+              found->second->exact_analytic_metadata() !=
+                  item.at("analytic_metadata"))
+            throw std::invalid_argument(
+                "checkpoint endpoint provenance disagrees with its restored source local");
+        }
+        if (!restored->endpoints.emplace(old_handle, endpoint).second)
+          throw std::invalid_argument(
+              "checkpoint contains duplicate retained endpoint handles");
+        restored_endpoints.push_back(json::object{
+            {"endpoint", old_handle},
+            {"checkpoint_identity", item.at("checkpoint_identity")},
+            {"provenance_identity", item.at("provenance_identity")},
+            {"generation", header.at("generation")}});
+      }
+    }
+
     const auto& counters = as_object(saved_session.at("counters"),
                                      "checkpoint counters");
     require_exact_keys(counters,
@@ -6811,7 +8555,8 @@ json::object restore_checkpoint(const std::string& path,
         counters.at("checkpoint_restore_count"),
         "checkpoint restore count");
     if (next_chart <= largest_chart || next_scc <= largest_scc ||
-        next_local == 0 || next_match == 0 || next_endpoint == 0)
+        next_local <= largest_local || next_match <= largest_match ||
+        next_endpoint <= largest_endpoint)
       throw std::invalid_argument(
           "checkpoint next-handle counters do not follow retained handles");
     if (restore_count == std::numeric_limits<std::uint64_t>::max())
@@ -6864,6 +8609,9 @@ json::object restore_checkpoint(const std::string& path,
         {"analytic_identity", header.at("analytic_identity")},
         {"charts", std::move(restored_charts)},
         {"sccs", std::move(restored_sccs)},
+        {"locals", std::move(restored_locals)},
+        {"acb_matches", std::move(restored_matches)},
+        {"endpoints", std::move(restored_endpoints)},
         {"deferred_handle_kinds", header.at("deferred_handle_kinds")},
         {"replayed_wolfram_preprocessing", false}};
   } catch (...) {
@@ -7089,9 +8837,13 @@ json::object run_session_command(const json::object& root) {
         {"path", path}, {"checkpoint_identity", checkpoint_identity},
         {"generation", snapshot.generation},
         {"charts", snapshot.charts}, {"sccs", snapshot.sccs},
-        {"serialized_handle_kinds", json::array{"chart", "scc"}},
+        {"locals", snapshot.locals},
+        {"acb_matches", snapshot.acb_matches},
+        {"endpoints", snapshot.endpoints},
+        {"serialized_handle_kinds",
+         json::array{"chart", "scc", "local", "acb-match", "endpoint"}},
         {"deferred_handle_kinds",
-         json::array{"local", "match", "endpoint", "line", "tile"}},
+         json::array{"exact-rational-match", "line", "tile"}},
         {"atomic", true}};
   }
 

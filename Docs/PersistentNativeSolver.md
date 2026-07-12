@@ -391,13 +391,18 @@ Writes use `temporary -> fsync -> atomic rename`.  Restore validates every
 identity before exposing a session handle.  Unknown mandatory sections fail;
 unknown explicitly optional sections may be skipped.
 
-The implemented schema-1 checkpoint core now covers quiescent prepared chart
-operators and composite SCC graphs, including exact analytic-regularization
-metadata and cumulative session counters.  It reconstructs the typed state
-inside C++ and verifies exact signatures without replaying Wolfram
-preprocessing.  Retained local/match/endpoint, tile-plan, and completed line
-state remain mandatory future sections; schema 1 rejects such live or pending
-state rather than emitting a checkpoint that only appears resumable.
+The implemented schema-2 checkpoint covers quiescent prepared chart operators
+and composite SCC graphs, retained Rational/Acb local solutions, and retained
+exact-lattice-guided Acb matches and endpoint results. Local tensors, exact
+tag specializations, pseudo-hit state, error envelopes, match
+weights/residuals, and every coefficient-level refinement diagnostic use exact
+FLINT/Arb dump encodings; presentation decimals are never used for restart
+state. Restore reproduces stable scoped handles, verifies exact
+source/result/checkpoint provenance, and advances monotone counters before
+exposing the new session. Symbolic locals, exact-rational matches, retained
+tile plans, and completed line results remain deferred and are rejected loudly
+rather than silently omitted; pending tile/line operations also prevent a
+quiescent checkpoint.
 
 ## Migration milestones
 

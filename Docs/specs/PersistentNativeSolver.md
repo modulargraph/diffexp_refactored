@@ -374,9 +374,10 @@ no coefficient JSON.
 
 The Wolfram entry is `RunPersistentAcbLocalMatch`; both numerical and exact
 matches use `PersistentLocalMatchStatistics` and
-`ReleasePersistentLocalMatch`.  Checkpoint schema v1 deliberately refuses a
-live handle of either kind because it serializes only prepared charts and the
-SCC graph.
+`ReleasePersistentLocalMatch`.  Checkpoint schema v2 serializes the complete
+retained Acb match, including its exact lattice witness, exact Arb weights and
+residual, and coefficient-level refinement history.  Exact-rational match
+state remains a loud deferred kind.
 
 ``DiffExp2`Solve`SolveNativeLocalFamily[cs, req,
 <|"a"->a,"b"->b,"p"->p|>, init]`` is the first narrow solver-level entry.
@@ -590,10 +591,11 @@ not a `SolveHomogeneous` or transport dispatch path.
 {"schema":2,"op":"scc.release","session":"s:1","scc":"scc:1"}
 ```
 
-### Native checkpoint core (schema 1)
+### Native checkpoint core (schema 2)
 
-The first native checkpoint schema persists a quiescent session's prepared
-chart operators and retained composite SCC graph.  The file is an opaque
+The native checkpoint persists a quiescent session's prepared chart
+operators, retained composite SCC graph, Rational/Acb local solutions, and
+exact-lattice-guided Acb matches and endpoint results.  The file is an opaque
 binary `DE2CP001` container with big-endian lengths and independent CRC32
 checksums for its small JSON header and canonical native payload.  Writes use
 a mode-0600 temporary file, `fsync`, atomic rename, and containing-directory
@@ -615,28 +617,44 @@ The payload contains the exact session domain, precision, declared regulator
 field, analytic/branch identity, capacities, monotone handle/cumulative work
 counters, every retained chart's complete static operator signature and SCC
 certificate, and every retained composite's exact parent matrices, graph,
-work contract, block identities, and prepared coupling kernels.  Restore runs
-that canonical material directly through the C++ preparation parsers, keeps
-the scoped chart/SCC tokens stable in the new session, and then rechecks each
-reconstructed signature byte-for-byte.  Wolfram does not rebuild matrices,
-SCCs, or prepared multipliers.  A schema/build/FLINT/configuration/checkpoint,
-analytic, chart, or SCC identity mismatch is a loud failure; unknown
-mandatory sections are never skipped.
+work contract, block identities, and prepared coupling kernels.  Retained
+locals add their complete sector tensor, exact descriptor specializations,
+prescriptions, pseudo hits, error envelope, runtime counters, and optional SCC
+column provenance.  Retained Acb matches add the canonical exact lattice
+witness and binding identity, exact Arb transformed/original weights and
+residual, and exact magnitude bounds for every coefficient at every
+refinement step.  Arb and magnitude values use FLINT dump/load strings, never
+the midpoint/radius presentation bridge.  Endpoint sections retain their
+specialized epsilon vector, exact analytic/source provenance, cancellation
+policy and counts, branch rim, and export counters.
+
+Restore runs canonical prepared material directly through the C++ parsers,
+keeps chart/SCC/local/match/endpoint tokens stable in the new session, reconstructs the
+typed live states, and byte-for-byte re-emits every local/match checkpoint
+record before exposing it.  Source locals that remain live are cross-checked
+against each match's chart, analytic, and checkpoint identities; provenance
+for already released source locals remains self-contained in the match.
+Monotone next-handle counters must exceed every restored handle, so a resumed
+solve cannot reuse a token.  Wolfram does not rebuild matrices, SCCs,
+prepared multipliers, local tensors, or match state.  A
+schema/build/FLINT/configuration/checkpoint, analytic, chart, SCC, local,
+exact-lattice, match-provenance, or residual-history mismatch is a loud
+failure; unknown mandatory sections are never skipped.
 
 The Wolfram lifecycle is
 ``CppBackend`SavePersistentCheckpoint[owner, path, identity]`` and
 ``CppBackend`RestorePersistentCheckpoint[path, expectedIdentity]``.  Restore
-returns the new session and exact chart/SCC handle maps and registers that
+returns the new session and exact chart/SCC/local/Acb-match/endpoint handle maps and registers that
 session for `ClearPersistentSessions[]`.  It intentionally does not recreate
 Wolfram's process-local cache keys; native resume uses the returned handles.
 
-This schema is deliberately narrower than the final checkpoint contract.  It
-rejects active or retained local and match state.  Endpoint, line, and tile
-handles are also declared as deferred handle kinds; they must gain typed
-sections before a checkpoint can represent an in-flight transport arm.  An
-SCC whose public diagonal chart handle was already released is likewise
-rejected, because schema 1 has no independent content-addressed chart section.
-These cases fail instead of silently writing a partial restart state.
+This schema is deliberately narrower than the final checkpoint contract.
+Symbolic-coefficient locals, exact-rational matches, and line/tile handles are
+declared as deferred kinds and fail loudly.  An SCC
+whose public diagonal chart handle was already released is likewise rejected,
+because its operator table is not yet an independent content-addressed
+section.  These cases fail instead of silently writing a partial restart
+state.
 
 ### Inspect and destroy
 

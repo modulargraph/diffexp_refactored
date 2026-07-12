@@ -235,11 +235,30 @@ optional explicit imaginary sign selects the requested rim; otherwise the
 stored normalized prescriptions derive it.  Unresolved symbolic coefficient
 fields are rejected rather than numerically sampled.
 
+`local.certify_residual` evaluates the retained local internally and applies
+the native Acb theta-residual certifier to a caller-supplied epsilon-framed
+theta operator and optional inhomogeneous value at that point. The response is
+`pass`, `fail`, or `inconclusive`; it is explicitly scoped to the stored Taylor
+truncation unless a future certified tail majorant permits a full-local
+conclusion. Operator, source, and checkpoint identities remain in the response
+provenance. By default no solution or residual coefficient slab crosses the
+bridge; the reported double bounds are diagnostics, while the verdict is
+decided from native Arb magnitudes.
+
 ```json
 {"schema":2,"op":"local.evaluate","session":"s:1","local":"l:1",
  "point":{"exact":"-1/2"},
  "options":{"imaginary_sign":-1,"t_order_reduction":0,
             "tail_estimate":false}}
+{"schema":2,"op":"local.certify_residual","session":"s:1","local":"l:1",
+ "point":{"exact":"-1/2"},
+ "options":{"imaginary_sign":-1,"tail_estimate":false},
+ "theta_operator":{"min":0,"max":0,"dimension":1,
+                   "coefficients":["1/2"]},
+ "source":null,"relative_tolerance":"1e-60",
+ "scope":"stored_truncation","include_residual":false,
+ "operator_identity":"theta-at-minus-half-v1",
+ "checkpoint_identity":"residual-check-v1"}
 {"schema":2,"op":"local.stats","session":"s:1","local":"l:1"}
 {"schema":2,"op":"local.release","session":"s:1","local":"l:1"}
 ```
@@ -256,6 +275,13 @@ prepared-chart cache internals:
 created = RunPersistentLocalSolve[request, persistentMetadata, localMetadata];
 value = EvaluatePersistentLocal[created, <|"exact" -> "-1/2"|>,
   <|"imaginary_sign" -> -1, "tail_estimate" -> False|>, 80];
+certificate = CertifyPersistentLocalResidual[created, <|
+  "point" -> <|"exact" -> "-1/2"|>,
+  "theta_operator" -> <|"min" -> 0, "max" -> 0, "dimension" -> 1,
+    "coefficients" -> {"1/2"}|>,
+  "relative_tolerance" -> "1e-60",
+  "operator_identity" -> "theta-at-minus-half-v1",
+  "checkpoint_identity" -> "residual-check-v1"|>];
 stats = PersistentLocalStatistics[created];
 ReleasePersistentLocal[created];
 ```
@@ -264,7 +290,8 @@ The solve wrapper goes through the same full-signature/session/chart
 collision certificates as `RunPersistentRequest`; it does not construct a
 second chart registry.  The three lifecycle wrappers accept either the raw
 `local.solve` response or an association containing exact `Session` and
-`Local` tokens.
+`Local` tokens. Residual certification additionally requires explicit operator
+and checkpoint identities, and a source identity whenever a source is present.
 
 ``DiffExp2`Solve`SolveNativeLocalFamily[cs, req,
 <|"a"->a,"b"->b,"p"->p|>, init]`` is the first narrow solver-level entry.
@@ -477,7 +504,8 @@ chart and participates in cache collision certification.  Exact regulator
 coefficients may use the symbolic rational domain; prescribed numerical
 coefficients may use Acb.  A later native matching/evaluation milestone must
 consume the same stored analytic identity rather than re-derive it on the
-real axis.
+real axis. Native evaluation and stored-truncation residual certification now
+do so through the retained local; matching must preserve the same rule.
 
 ## Wolfram integration sequence
 
@@ -492,6 +520,6 @@ real axis.
    the large source tensor no longer returns to Wolfram between blocks.
 
 The next native milestones extend the retained session rather than adding
-new stateless calls: matching/refinement and residual certification, then
-endpoint limits and line/tile integration, and finally native checkpoint
-state.
+new stateless calls: matching/refinement, promotion from stored-truncation to
+certified full-local residuals once rigorous tail majorants exist, endpoint
+limits and line/tile integration, and finally native checkpoint state.

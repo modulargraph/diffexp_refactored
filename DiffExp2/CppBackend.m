@@ -22,6 +22,7 @@ RunPersistentSCCColumn::usage = "RunPersistentSCCColumn[handle, seed, targets, c
 ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
+CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies its native Acb theta residual against the supplied epsilon-framed theta operator and optional source. request carries point, relative_tolerance, operator_identity, checkpoint_identity, and theta_operator; no solution coefficient slab crosses the bridge.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
@@ -769,6 +770,36 @@ EvaluatePersistentLocal[handle_Association, point_Association,
   request = <|"schema" -> 2, "op" -> "local.evaluate",
     "session" -> tokens["Session"], "local" -> tokens["Local"],
     "point" -> point, "options" -> options|>;
+  If[IntegerQ[outputDigits],
+    request = Append[request, "output_digits" -> outputDigits]];
+  RunRequest[request]];
+
+CertifyPersistentLocalResidual[handle_Association,
+    certificateRequest_Association, outputDigits_:Automatic] := Module[
+  {tokens = persistentLocalHandles[handle], reserved, missing, payload,
+   request},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[outputDigits =!= Automatic &&
+      (!IntegerQ[outputDigits] || outputDigits < 1),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent residual output digits must be a positive integer"|>],
+      Module]];
+  reserved = Intersection[Keys[certificateRequest],
+    {"schema", "op", "session", "local", "output_digits"}];
+  missing = Select[{"point", "theta_operator", "relative_tolerance",
+      "operator_identity", "checkpoint_identity"},
+    !KeyExistsQ[certificateRequest, #] &];
+  If[reserved =!= {} || missing =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent residual request is missing required fields or contains reserved protocol keys",
+      "Missing" -> missing, "Reserved" -> reserved|>], Module]];
+  payload = Join[<|"source" -> Null, "scope" -> "stored_truncation",
+      "include_residual" -> False,
+      "options" -> <|"tail_estimate" -> False|>|>,
+    certificateRequest];
+  request = Join[payload, <|"schema" -> 2,
+    "op" -> "local.certify_residual", "session" -> tokens["Session"],
+    "local" -> tokens["Local"]|>];
   If[IntegerQ[outputDigits],
     request = Append[request, "output_digits" -> outputDigits]];
   RunRequest[request]];

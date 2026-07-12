@@ -70,6 +70,18 @@ int main() {
     "point":{"exact":"-1/2"},
     "options":{"imaginary_sign":-1,"tail_estimate":false}
   })json");
+  const auto residual = request(std::string(R"json({
+    "schema":2,"op":"local.certify_residual","session":")json") +
+    session + R"json(","local":")json" + local + R"json(",
+    "point":{"exact":"-1/2"},
+    "options":{"imaginary_sign":-1,"tail_estimate":false},
+    "theta_operator":{"min":0,"max":0,"dimension":1,
+      "coefficients":["1/2"]},
+    "source":null,"relative_tolerance":"1e-60",
+    "scope":"stored_truncation","include_residual":false,
+    "operator_identity":"theta-half-v1",
+    "checkpoint_identity":"sqrt-local-residual-v1"
+  })json");
   const auto stats = request(std::string(R"json({
     "schema":2,"op":"session.stats","session":")json") + session + "\"}");
   const auto local_stats = request(std::string(R"json({
@@ -95,13 +107,21 @@ int main() {
       stats.at("charts") == 0 && stats.at("locals") == 1 &&
       stats.at("local_solves") == 1 &&
       stats.at("local_evaluations") == 2 &&
+      stats.at("local_residual_certifications") == 1 &&
+      residual.at("status") == "ok" && residual.at("verdict") == "pass" &&
+      residual.at("scope") == "stored_truncation" &&
+      residual.at("json_coefficients") == 0 &&
+      residual.at("checkpoint_identity") == "sqrt-local-residual-v1" &&
+      residual.if_contains("residual") == nullptr &&
       local_stats.at("status") == "ok" &&
-      local_stats.at("evaluations") == 2;
+      local_stats.at("evaluations") == 2 &&
+      local_stats.at("residual_certifications") == 1;
 
   if (!ok) {
     std::cerr << "local.solve: " << json::serialize(local_result) << '\n'
               << "+i0 evaluate: " << json::serialize(plus) << '\n'
               << "-i0 evaluate: " << json::serialize(minus) << '\n'
+              << "residual: " << json::serialize(residual) << '\n'
               << "stats: " << json::serialize(stats) << '\n';
   }
 

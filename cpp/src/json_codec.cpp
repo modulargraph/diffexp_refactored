@@ -1194,9 +1194,110 @@ json::object encode_epsilon_vector(const EpsilonVector& vector, int digits) {
   return encoded;
 }
 
+EvaluationOptions parse_local_evaluation_options(
+    const json::object& request, bool default_tail_estimate) {
+  EvaluationOptions options;
+  options.compute_tail_estimate = default_tail_estimate;
+  if (const auto* raw_options = request.if_contains("options")) {
+    const auto& object = as_object(*raw_options, "local evaluation options");
+    if (const auto* raw_sign = object.if_contains("imaginary_sign");
+        raw_sign != nullptr && !raw_sign->is_null()) {
+      const auto sign = as_i32(*raw_sign, "imaginary sign");
+      if (sign != -1 && sign != 1)
+        throw std::invalid_argument("imaginary sign must be +1 or -1");
+      options.imaginary_sign = sign;
+    }
+    if (const auto* reduction = object.if_contains("t_order_reduction"))
+      options.t_order_reduction = as_u32(
+          *reduction, "Taylor-order reduction");
+    if (const auto* tail = object.if_contains("tail_estimate"))
+      options.compute_tail_estimate = tail->as_bool();
+  }
+  return options;
+}
+
+RealEvaluationPoint parse_local_evaluation_point(const json::object& request) {
+  const auto& point_object = as_object(
+      request.at("point"), "local evaluation point");
+  return RealEvaluationPoint::rational(
+      required_string(point_object, "exact"));
+}
+
+EpsilonWindow parse_epsilon_window(const json::object& object,
+                                   const char* label) {
+  EpsilonWindow window{as_i32(object.at("min"), label),
+                       as_i32(object.at("max"), label)};
+  (void)window.width();
+  return window;
+}
+
+std::size_t checked_flat_count(std::size_t left, std::size_t right,
+                               const char* label) {
+  if (right != 0 && left > std::numeric_limits<std::size_t>::max() / right)
+    throw std::overflow_error(std::string(label) + " size overflow");
+  return left * right;
+}
+
+EpsilonMatrix parse_epsilon_matrix(const json::value& raw,
+                                   const char* label) {
+  const auto& object = as_object(raw, label);
+  EpsilonMatrix matrix;
+  matrix.epsilon = parse_epsilon_window(object, label);
+  matrix.dimension = as_u32(object.at("dimension"), label);
+  if (matrix.dimension == 0)
+    throw std::invalid_argument(std::string(label) +
+                                " dimension must be positive");
+  const auto matrix_size = checked_flat_count(
+      matrix.dimension, matrix.dimension, label);
+  const auto expected = checked_flat_count(
+      matrix.epsilon.width(), matrix_size, label);
+  const auto& coefficients = as_array(object.at("coefficients"), label);
+  if (coefficients.size() != expected)
+    throw std::invalid_argument(std::string(label) +
+                                " coefficient tensor has the wrong size");
+  matrix.coefficients.reserve(expected);
+  for (const auto& coefficient : coefficients)
+    matrix.coefficients.push_back(parse_scalar<ComplexBall>(coefficient));
+  return matrix;
+}
+
+EpsilonVector parse_epsilon_vector(const json::value& raw,
+                                   const char* label) {
+  const auto& object = as_object(raw, label);
+  EpsilonVector vector;
+  vector.epsilon = parse_epsilon_window(object, label);
+  vector.dimension = as_u32(object.at("dimension"), label);
+  if (vector.dimension == 0)
+    throw std::invalid_argument(std::string(label) +
+                                " dimension must be positive");
+  const auto expected = checked_flat_count(
+      vector.epsilon.width(), vector.dimension, label);
+  const auto& coefficients = as_array(object.at("coefficients"), label);
+  if (coefficients.size() != expected)
+    throw std::invalid_argument(std::string(label) +
+                                " coefficient tensor has the wrong size");
+  vector.coefficients.reserve(expected);
+  for (const auto& coefficient : coefficients)
+    vector.coefficients.push_back(parse_scalar<ComplexBall>(coefficient));
+  return vector;
+}
+
+json::array encode_magnitude_diagnostics(
+    const std::vector<Magnitude>& magnitudes) {
+  json::array encoded;
+  encoded.reserve(magnitudes.size());
+  for (const auto& magnitude : magnitudes)
+    encoded.push_back(magnitude.is_finite()
+                          ? json::value(magnitude.approximate_upper())
+                          : json::value(nullptr));
+  return encoded;
+}
+
 struct StoredLocalStats {
   std::uint64_t evaluations = 0;
+  std::uint64_t residual_certifications = 0;
   double evaluate_ms = 0.0;
+  double residual_certify_ms = 0.0;
   double create_parse_ms = 0.0;
   double create_kernel_ms = 0.0;
   std::size_t coefficient_count = 0;
@@ -1247,6 +1348,8 @@ class StoredLocalBase {
 
   virtual json::object evaluate(const json::object& request,
                                 int output_digits) = 0;
+  virtual json::object certify_residual(const json::object& request,
+                                        int output_digits) = 0;
   virtual json::object summary() const = 0;
   virtual json::object stats_json() const = 0;
   virtual StoredLocalStats stats() const = 0;
@@ -1291,26 +1394,8 @@ class StoredLocal final : public StoredLocalBase {
     } else {
       AcbPrecisionLease lease(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
-      const auto& point_object = as_object(
-          request.at("point"), "local evaluation point");
-      const auto point = RealEvaluationPoint::rational(
-          required_string(point_object, "exact"));
-      EvaluationOptions options;
-      if (const auto* raw_options = request.if_contains("options")) {
-        const auto& object = as_object(*raw_options, "local evaluation options");
-        if (const auto* raw_sign = object.if_contains("imaginary_sign");
-            raw_sign != nullptr && !raw_sign->is_null()) {
-          const auto sign = as_i32(*raw_sign, "imaginary sign");
-          if (sign != -1 && sign != 1)
-            throw std::invalid_argument("imaginary sign must be +1 or -1");
-          options.imaginary_sign = sign;
-        }
-        if (const auto* reduction = object.if_contains("t_order_reduction"))
-          options.t_order_reduction = as_u32(
-              *reduction, "Taylor-order reduction");
-        if (const auto* tail = object.if_contains("tail_estimate"))
-          options.compute_tail_estimate = tail->as_bool();
-      }
+      const auto point = parse_local_evaluation_point(request);
+      const auto options = parse_local_evaluation_options(request, true);
       const auto started = std::chrono::steady_clock::now();
       auto result = evaluate_local_solution(solution_, point, options);
       const auto elapsed = std::chrono::duration<double, std::milli>(
@@ -1328,6 +1413,107 @@ class StoredLocal final : public StoredLocalBase {
           {"elapsed_ms", elapsed},
           {"value", encode_epsilon_vector(result.value, output_digits)},
           {"theta", encode_epsilon_vector(result.theta_value, output_digits)}};
+    }
+  }
+
+  json::object certify_residual(const json::object& request,
+                                int output_digits) override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "local.certify_residual rejects unresolved symbolic coefficients; "
+          "solve a numerically specialized chart first");
+    } else {
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
+      const auto checkpoint_identity = required_string(
+          request, "checkpoint_identity");
+      const auto operator_identity = required_string(
+          request, "operator_identity");
+      if (checkpoint_identity.empty() || operator_identity.empty())
+        throw std::invalid_argument(
+            "native residual identities must be nonempty");
+      const auto point = parse_local_evaluation_point(request);
+      const auto options = parse_local_evaluation_options(request, false);
+      if (options.compute_tail_estimate)
+        throw std::invalid_argument(
+            "stored-truncation residual certification rejects advisory tail estimates");
+      const auto theta_operator = parse_epsilon_matrix(
+          request.at("theta_operator"), "theta operator");
+      std::optional<EpsilonVector> source;
+      std::optional<std::string> source_identity;
+      if (const auto* raw_source = request.if_contains("source");
+          raw_source != nullptr && !raw_source->is_null()) {
+        source = parse_epsilon_vector(*raw_source, "residual source");
+        source_identity = required_string(request, "source_identity");
+        if (source_identity->empty())
+          throw std::invalid_argument(
+              "native residual source identity must be nonempty");
+      } else if (const auto* raw_identity =
+                     request.if_contains("source_identity");
+                 raw_identity != nullptr && !raw_identity->is_null()) {
+        throw std::invalid_argument(
+            "source_identity requires an explicit residual source");
+      }
+      const auto tolerance_text = required_string(
+          request, "relative_tolerance");
+      const auto tolerance = Magnitude::decimal(tolerance_text);
+      const auto scope_text = required_string(request, "scope");
+      const auto scope = scope_text == "stored_truncation"
+          ? ResidualScope::StoredTruncation
+          : scope_text == "full_local_solution"
+              ? ResidualScope::FullLocalSolution
+              : throw std::invalid_argument(
+                    "residual scope must be stored_truncation or full_local_solution");
+      const auto include_residual =
+          request.if_contains("include_residual") != nullptr &&
+          request.at("include_residual").as_bool();
+
+      const auto started = std::chrono::steady_clock::now();
+      const auto evaluation = evaluate_local_solution(solution_, point, options);
+      auto certificate = certify_theta_residual(
+          evaluation, theta_operator, source, tolerance, scope);
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      residual_certifications_.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        residual_certify_ms_ += elapsed;
+      }
+
+      const char* verdict = certificate.verdict == ResidualVerdict::Pass
+          ? "pass"
+          : certificate.verdict == ResidualVerdict::Fail
+              ? "fail" : "inconclusive";
+      json::object result{
+          {"point_exact", point.exact_coordinate},
+          {"imaginary_sign", evaluation.imaginary_sign.has_value()
+               ? json::value(*evaluation.imaginary_sign)
+               : json::value(nullptr)},
+          {"arithmetic_enclosed", evaluation.arithmetic_enclosed},
+          {"scope", scope_text}, {"verdict", verdict},
+          {"detail", certificate.detail},
+          {"relative_tolerance", tolerance_text},
+          {"checkpoint_identity", checkpoint_identity},
+          {"operator_identity", operator_identity},
+          {"source_identity", source_identity.has_value()
+               ? json::value(*source_identity) : json::value(nullptr)},
+          {"epsilon_min", certificate.residual.epsilon.min_power},
+          {"epsilon_max", certificate.residual.epsilon.complete_max},
+          {"dimension", certificate.residual.dimension},
+          {"residual_upper_approx",
+           encode_magnitude_diagnostics(certificate.residual_upper)},
+          {"scale_lower_approx",
+           encode_magnitude_diagnostics(certificate.scale_lower)},
+          {"relative_upper_approx",
+           encode_magnitude_diagnostics(certificate.relative_upper)},
+          {"bound_encoding", "approximate-double-diagnostics"},
+          {"json_coefficients", include_residual
+               ? certificate.residual.coefficients.size() : 0},
+          {"elapsed_ms", elapsed}};
+      if (include_residual)
+        result["residual"] = encode_epsilon_vector(
+            certificate.residual, output_digits);
+      return result;
     }
   }
 
@@ -1355,13 +1541,16 @@ class StoredLocal final : public StoredLocalBase {
     auto out = summary();
     const auto current = stats();
     out["evaluations"] = current.evaluations;
+    out["residual_certifications"] = current.residual_certifications;
     out["evaluate_ms"] = current.evaluate_ms;
+    out["residual_certify_ms"] = current.residual_certify_ms;
     return out;
   }
 
   StoredLocalStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
-    return {evaluations_.load(), evaluate_ms_, create_parse_ms_,
+    return {evaluations_.load(), residual_certifications_.load(),
+            evaluate_ms_, residual_certify_ms_, create_parse_ms_,
             create_kernel_ms_, coefficient_count()};
   }
 
@@ -1405,8 +1594,10 @@ class StoredLocal final : public StoredLocalBase {
   std::vector<PseudoHit<Scalar>> pseudo_hits_;
   std::int32_t top_valid_ = kCompleteInfinity;
   std::atomic<std::uint64_t> evaluations_{0};
+  std::atomic<std::uint64_t> residual_certifications_{0};
   mutable std::mutex stats_mutex_;
   double evaluate_ms_ = 0.0;
+  double residual_certify_ms_ = 0.0;
 };
 
 template <typename Scalar>
@@ -3763,6 +3954,30 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "local.certify_residual") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released native local solution");
+      local = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = local->certify_residual(root, output_digits);
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["local"] = local->handle();
+    result["chart"] = local->source_chart();
+    return result;
+  }
+
   if (operation == "local.release") {
     const auto local_handle = required_string(root, "local");
     std::shared_ptr<StoredLocalBase> removed;
@@ -3893,14 +4108,17 @@ json::object run_session_command(const json::object& root) {
           {"local_kernel_ms", stats.local_kernel_ms}});
     }
     std::uint64_t local_evaluations = 0;
+    std::uint64_t local_residual_certifications = 0;
     std::size_t local_coefficients = 0;
-    double local_evaluate_ms = 0.0;
+    double local_evaluate_ms = 0.0, local_residual_certify_ms = 0.0;
     json::array local_stats;
     for (const auto& local : locals) {
       const auto stats = local->stats();
       local_evaluations += stats.evaluations;
+      local_residual_certifications += stats.residual_certifications;
       local_coefficients += stats.coefficient_count;
       local_evaluate_ms += stats.evaluate_ms;
+      local_residual_certify_ms += stats.residual_certify_ms;
       local_stats.push_back(local->stats_json());
     }
     json::array scc_stats;
@@ -3916,6 +4134,8 @@ json::object run_session_command(const json::object& root) {
                         {"local_solves", total_local_solves},
                         {"scc_column_solves", total_scc_column_solves},
                         {"local_evaluations", local_evaluations},
+                        {"local_residual_certifications",
+                         local_residual_certifications},
                         {"local_coefficient_count", local_coefficients},
                         {"static_tensor_copies", 0},
                         {"prepare_parse_ms", prepare_parse_ms},
@@ -3924,6 +4144,8 @@ json::object run_session_command(const json::object& root) {
                         {"local_run_parse_ms", total_local_run_parse_ms},
                         {"local_kernel_ms", total_local_kernel_ms},
                         {"local_evaluate_ms", local_evaluate_ms},
+                        {"local_residual_certify_ms",
+                         local_residual_certify_ms},
                         {"chart_stats", std::move(chart_stats)},
                         {"local_stats", std::move(local_stats)},
                         {"scc_stats", std::move(scc_stats)}};
@@ -4072,6 +4294,8 @@ std::string backend_info_json() {
                                       {"schemas", json::array{1, 2}},
                                       {"persistent_sessions", true},
                                       {"persistent_local_solutions", true},
+                                      {"persistent_local_residual_certification",
+                                       true},
                                       {"persistent_scc_prepare", true},
                                       {"persistent_scc_execute", false},
                                       {"persistent_scc_scalar_block_dag_column",

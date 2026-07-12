@@ -31,6 +31,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 namespace diffexp2 {
 namespace json = boost::json;
@@ -5572,6 +5573,9 @@ class CompositeSCCChartBase {
   virtual CompositeColumnSolveResult solve_column(
       const std::string& local_handle, const json::object& request) = 0;
   virtual const char* column_execution_capability() const = 0;
+  virtual const std::string& geometry_record() const = 0;
+  virtual std::vector<std::shared_ptr<PreparedChartBase>>
+  dependency_charts() const = 0;
   const std::string& handle() const { return handle_; }
   const std::string& key() const { return key_; }
   const std::string& exact_identity() const { return exact_identity_; }
@@ -6576,6 +6580,18 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     return regular_column_capability();
   }
 
+  const std::string& geometry_record() const override {
+    return geometry_record_;
+  }
+
+  std::vector<std::shared_ptr<PreparedChartBase>>
+  dependency_charts() const override {
+    std::vector<std::shared_ptr<PreparedChartBase>> result;
+    result.reserve(blocks_.size());
+    for (const auto& block : blocks_) result.push_back(block.chart);
+    return result;
+  }
+
   json::object stats_json() const override {
     std::size_t active_entries = 0, proven_zero_entries = 0;
     std::optional<std::int32_t> min_coupling_shift;
@@ -7541,11 +7557,14 @@ json::object encode_error_envelope_summary(const ErrorEnvelope& error) {
 }
 
 struct RetainedPlanChartBinding {
+  using Owner = std::variant<std::shared_ptr<PreparedChartBase>,
+                             std::shared_ptr<CompositeSCCChartBase>>;
+
   std::string handle;
   std::string exact_identity;
   ExactAffineChart geometry;
   std::vector<Prescription> prescriptions;
-  std::shared_ptr<PreparedChartBase> owner;
+  Owner owner;
 };
 
 struct RetainedArmPlan {
@@ -7762,8 +7781,34 @@ class StoredTilePlan {
   std::vector<std::shared_ptr<PreparedChartBase>> dependency_charts() const {
     std::vector<std::shared_ptr<PreparedChartBase>> result;
     result.reserve(lower_.charts.size() + upper_.charts.size());
-    for (const auto& binding : lower_.charts) result.push_back(binding.owner);
-    for (const auto& binding : upper_.charts) result.push_back(binding.owner);
+    const auto append = [&](const RetainedPlanChartBinding& binding) {
+      std::visit(
+          [&](const auto& owner) {
+            using Owner = typename std::decay_t<decltype(owner)>::element_type;
+            if constexpr (std::is_same_v<Owner, PreparedChartBase>) {
+              result.push_back(owner);
+            } else {
+              auto dependencies = owner->dependency_charts();
+              result.insert(result.end(), dependencies.begin(),
+                            dependencies.end());
+            }
+          },
+          binding.owner);
+    };
+    for (const auto& binding : lower_.charts) append(binding);
+    for (const auto& binding : upper_.charts) append(binding);
+    return result;
+  }
+
+  std::vector<std::shared_ptr<CompositeSCCChartBase>> dependency_sccs() const {
+    std::vector<std::shared_ptr<CompositeSCCChartBase>> result;
+    const auto append = [&](const RetainedPlanChartBinding& binding) {
+      if (const auto* owner = std::get_if<
+              std::shared_ptr<CompositeSCCChartBase>>(&binding.owner))
+        result.push_back(*owner);
+    };
+    for (const auto& binding : lower_.charts) append(binding);
+    for (const auto& binding : upper_.charts) append(binding);
     return result;
   }
 
@@ -8378,13 +8423,57 @@ ExactPathTopology parse_exact_path_topology(const json::value& raw) {
   return topology;
 }
 
+std::string retained_plan_owner_handle(
+    const RetainedPlanChartBinding::Owner& owner) {
+  return std::visit(
+      [](const auto& typed) {
+        if (typed == nullptr)
+          throw std::logic_error(
+              "native tile planning received a null retained owner");
+        return typed->handle();
+      },
+      owner);
+}
+
+std::string retained_plan_owner_identity(
+    const RetainedPlanChartBinding::Owner& owner) {
+  return std::visit(
+      [](const auto& typed) {
+        if (typed == nullptr)
+          throw std::logic_error(
+              "native tile planning received a null retained owner");
+        return typed->exact_identity();
+      },
+      owner);
+}
+
+std::string retained_plan_owner_geometry_record(
+    const RetainedPlanChartBinding::Owner& owner) {
+  return std::visit(
+      [](const auto& typed) -> std::string {
+        using Owner = typename std::decay_t<decltype(typed)>::element_type;
+        if (typed == nullptr)
+          throw std::logic_error(
+              "native tile planning received a null retained owner");
+        if constexpr (std::is_same_v<Owner, PreparedChartBase>) {
+          if (!typed->geometry_record().has_value())
+            throw std::invalid_argument(
+                "native tile planning requires retained exact chart geometry");
+          return *typed->geometry_record();
+        } else {
+          return typed->geometry_record();
+        }
+      },
+      owner);
+}
+
 RetainedPlanChartBinding bind_plan_chart(
-    const std::shared_ptr<PreparedChartBase>& chart,
+    const RetainedPlanChartBinding::Owner& owner,
     const ExactPathTopology& topology) {
-  if (!chart->geometry_record().has_value())
-    throw std::invalid_argument(
-        "native tile planning requires retained exact chart geometry");
-  const auto geometry_value = json::parse(*chart->geometry_record());
+  const auto handle = retained_plan_owner_handle(owner);
+  const auto exact_identity = retained_plan_owner_identity(owner);
+  const auto geometry_value = json::parse(
+      retained_plan_owner_geometry_record(owner));
   const auto& geometry = as_object(
       geometry_value, "retained native tile chart geometry");
   if (geometry.at("infinite_radius").as_bool())
@@ -8392,10 +8481,10 @@ RetainedPlanChartBinding bind_plan_chart(
         "native exact tile planning currently requires finite chart radii");
 
   RetainedPlanChartBinding binding;
-  binding.handle = chart->handle();
-  binding.exact_identity = chart->exact_identity();
-  binding.owner = chart;
-  binding.geometry.identity = chart->exact_identity();
+  binding.handle = handle;
+  binding.exact_identity = exact_identity;
+  binding.owner = owner;
+  binding.geometry.identity = exact_identity;
   binding.geometry.center = parse_exact_path_rational(
       geometry.at("center_exact"), "tile chart center");
   binding.geometry.scale = parse_exact_path_rational(
@@ -8451,7 +8540,7 @@ std::vector<std::string> parse_plan_chart_handles(const json::object& arm) {
 std::pair<ExactArmRequest, std::vector<RetainedPlanChartBinding>>
 parse_retained_arm_request(
     const json::object& arm,
-    const std::vector<std::shared_ptr<PreparedChartBase>>& charts) {
+    const std::vector<RetainedPlanChartBinding::Owner>& charts) {
   require_exact_keys(arm, {"from_exact", "to_exact", "charts", "topology"},
                      "native tile arm");
   const auto handles = parse_plan_chart_handles(arm);
@@ -8468,7 +8557,7 @@ parse_retained_arm_request(
   bindings.reserve(charts.size());
   request.charts.reserve(charts.size());
   for (std::size_t index = 0; index < charts.size(); ++index) {
-    if (charts[index]->handle() != handles[index])
+    if (retained_plan_owner_handle(charts[index]) != handles[index])
       throw std::logic_error("resolved tile chart handle changed");
     auto binding = bind_plan_chart(charts[index], request.topology);
     request.charts.push_back(binding.geometry);
@@ -8479,8 +8568,8 @@ parse_retained_arm_request(
 
 std::shared_ptr<StoredTilePlan> build_tile_plan(
     const std::string& handle, const json::object& request,
-    const std::vector<std::shared_ptr<PreparedChartBase>>& lower_charts,
-    const std::vector<std::shared_ptr<PreparedChartBase>>& upper_charts) {
+    const std::vector<RetainedPlanChartBinding::Owner>& lower_charts,
+    const std::vector<RetainedPlanChartBinding::Owner>& upper_charts) {
   const auto checkpoint_identity = required_string(
       request, "checkpoint_identity");
   const auto division_order = as_u32(
@@ -9381,6 +9470,8 @@ parse_checkpoint_retained_arm(
     const json::value& raw,
     const std::unordered_map<std::string,
                              std::shared_ptr<PreparedChartBase>>& charts,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<CompositeSCCChartBase>>& sccs,
     const char* label) {
   const auto& object = as_object(raw, label);
   require_exact_keys(object,
@@ -9406,14 +9497,30 @@ parse_checkpoint_retained_arm(
       throw std::invalid_argument(std::string(label) +
                                   " chart bindings are not in index order");
     const auto handle = required_string(raw_chart, "chart");
-    const auto found = charts.find(handle);
-    if (found == charts.end())
-      throw std::invalid_argument(std::string(label) +
-                                  " references an absent prepared chart owner");
-    auto binding = bind_plan_chart(found->second, request.topology);
+    RetainedPlanChartBinding::Owner owner;
+    if (handle.starts_with("c:")) {
+      const auto found = charts.find(handle);
+      if (found == charts.end())
+        throw std::invalid_argument(
+            std::string(label) +
+            " references an absent prepared-chart owner");
+      owner = found->second;
+    } else if (handle.starts_with("scc:")) {
+      const auto found = sccs.find(handle);
+      if (found == sccs.end())
+        throw std::invalid_argument(
+            std::string(label) +
+            " references an absent composite-SCC owner");
+      owner = found->second;
+    } else {
+      throw std::invalid_argument(
+          std::string(label) +
+          " chart binding is neither a prepared-chart nor composite-SCC handle");
+    }
+    auto binding = bind_plan_chart(owner, request.topology);
     if (encode_plan_chart(binding, index) != raw_chart)
       throw std::invalid_argument(std::string(label) +
-                                  " chart binding differs from its exact prepared owner");
+                                  " chart binding differs from its exact retained owner");
     request.charts.push_back(binding.geometry);
     bindings.push_back(std::move(binding));
   }
@@ -9429,7 +9536,9 @@ parse_checkpoint_retained_arm(
 std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
     const json::value& raw,
     const std::unordered_map<std::string,
-                             std::shared_ptr<PreparedChartBase>>& charts) {
+                             std::shared_ptr<PreparedChartBase>>& charts,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<CompositeSCCChartBase>>& sccs) {
   const auto& object = as_object(raw, "checkpoint retained tile plan");
   require_exact_keys(
       object,
@@ -9453,9 +9562,9 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
   const auto division_order = as_u32(
       object.at("division_order"), "checkpoint tile division order");
   auto [lower_request, lower_bindings] = parse_checkpoint_retained_arm(
-      object.at("lower"), charts, "checkpoint lower tile arm");
+      object.at("lower"), charts, sccs, "checkpoint lower tile arm");
   auto [upper_request, upper_bindings] = parse_checkpoint_retained_arm(
-      object.at("upper"), charts, "checkpoint upper tile arm");
+      object.at("upper"), charts, sccs, "checkpoint upper tile arm");
   if (lower_bindings.front().handle != upper_bindings.front().handle)
     throw std::invalid_argument(
         "checkpoint independent tile arms lost their shared anchor owner");
@@ -9890,11 +9999,14 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
         "checkpoint requires a quiescent session with no pending local solve, match, endpoint limit, tile plan, or line integration");
 
   // Serialize the strong-ownership closure, not only the public registries.
-  // A retained line deliberately survives local.release/tile.release, so its
-  // source snapshots must remain present without becoming public again after
-  // restore.  Visibility is recorded separately below.
+  // Retained lines and tile plans deliberately survive release of their
+  // source locals, prepared charts, or composite SCCs.  Those snapshots must
+  // remain present without becoming public again after restore, so visibility
+  // is recorded separately below.
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>>
       chart_closure = session.charts;
+  std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>>
+      scc_closure = session.sccs;
   std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>>
       local_closure = session.locals;
   std::unordered_map<std::string, std::shared_ptr<StoredTilePlan>>
@@ -9915,6 +10027,17 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       throw std::logic_error(
           "checkpoint ownership closure contains distinct locals with one handle");
   };
+  const auto add_scc = [&](
+      const std::shared_ptr<CompositeSCCChartBase>& composite) {
+    if (!composite)
+      throw std::logic_error(
+          "checkpoint ownership closure contains a null SCC");
+    const auto [found, inserted] =
+        scc_closure.emplace(composite->handle(), composite);
+    if (!inserted && found->second.get() != composite.get())
+      throw std::logic_error(
+          "checkpoint ownership closure contains distinct SCCs with one handle");
+  };
   const auto add_tile = [&](const std::shared_ptr<StoredTilePlan>& plan) {
     if (!plan)
       throw std::logic_error("checkpoint ownership closure contains a null tile plan");
@@ -9934,8 +10057,12 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     add_tile(line->plan_owner());
     add_local(line->local_owner());
   }
-  for (const auto& [ignored, plan] : tile_closure)
+  for (const auto& [ignored, plan] : tile_closure) {
+    for (const auto& composite : plan->dependency_sccs()) add_scc(composite);
     for (const auto& chart : plan->dependency_charts()) add_chart(chart);
+  }
+  for (const auto& [ignored, composite] : scc_closure)
+    for (const auto& chart : composite->dependency_charts()) add_chart(chart);
 
   std::vector<std::shared_ptr<PreparedChartBase>> charts;
   charts.reserve(chart_closure.size());
@@ -9946,8 +10073,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
            scoped_handle_id(right->handle(), "c:", "chart");
   });
   std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
-  sccs.reserve(session.sccs.size());
-  for (const auto& [ignored, composite] : session.sccs)
+  sccs.reserve(scc_closure.size());
+  for (const auto& [ignored, composite] : scc_closure)
     sccs.push_back(composite);
   std::sort(sccs.begin(), sccs.end(), [](const auto& left,
                                          const auto& right) {
@@ -10052,6 +10179,10 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& chart : charts)
     if (session.charts.contains(chart->handle()))
       visible_charts.emplace_back(chart->handle());
+  json::array visible_sccs;
+  for (const auto& composite : sccs)
+    if (session.sccs.contains(composite->handle()))
+      visible_sccs.emplace_back(composite->handle());
   json::array visible_locals;
   for (const auto& local : locals)
     if (session.locals.contains(local->handle()))
@@ -10062,6 +10193,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       visible_tiles.emplace_back(plan->handle());
   json::object registry_visibility{
       {"charts", std::move(visible_charts)},
+      {"sccs", std::move(visible_sccs)},
       {"locals", std::move(visible_locals)},
       {"tile_plans", std::move(visible_tiles)}};
 
@@ -10147,7 +10279,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
        checkpoint_line_identity_manifest(line_items)},
       {"generation", generation}};
   return {std::move(header), std::move(payload), generation,
-          session.charts.size(), sccs.size(), session.locals.size(),
+          session.charts.size(), session.sccs.size(), session.locals.size(),
           exact_match_items.size(), acb_match_items.size(), endpoints.size(),
           session.tile_plans.size(), line_results.size()};
 }
@@ -10227,10 +10359,20 @@ void validate_checkpoint_envelope(const json::object& header,
        "registry_visibility", "counters"}, "checkpoint session section");
   const auto& visibility = as_object(
       session.at("registry_visibility"), "checkpoint registry visibility");
-  require_exact_keys(visibility, {"charts", "locals", "tile_plans"},
-                     "checkpoint registry visibility");
+  if (visibility.if_contains("sccs") != nullptr)
+    require_exact_keys(visibility,
+                       {"charts", "sccs", "locals", "tile_plans"},
+                       "checkpoint registry visibility");
+  else
+    // Schema-v2 checkpoints predating SCC ownership closure serialized every
+    // SCC as public and therefore had no separate SCC visibility field.
+    require_exact_keys(visibility, {"charts", "locals", "tile_plans"},
+                       "checkpoint registry visibility");
   (void)checkpoint_string_array(visibility.at("charts"),
                                 "visible checkpoint charts");
+  if (const auto* visible_sccs = visibility.if_contains("sccs"))
+    (void)checkpoint_string_array(*visible_sccs,
+                                  "visible checkpoint SCCs");
   (void)checkpoint_string_array(visibility.at("locals"),
                                 "visible checkpoint locals");
   (void)checkpoint_string_array(visibility.at("tile_plans"),
@@ -10337,6 +10479,19 @@ json::object restore_checkpoint(const std::string& path,
     return result;
   };
   const auto visible_charts = visibility_set("charts", "c:");
+  const auto visible_sccs = [&]() {
+    if (raw_visibility.if_contains("sccs") != nullptr)
+      return visibility_set("sccs", "scc:");
+    std::set<std::string> result;
+    for (const auto& raw_item : as_array(
+             payload.at("prepared_scc"), "checkpoint prepared SCC charts")) {
+      const auto handle = required_string(
+          as_object(raw_item, "checkpoint SCC item"), "handle");
+      (void)scoped_handle_id(handle, "scc:", "visible SCC");
+      result.insert(handle);
+    }
+    return result;
+  }();
   const auto visible_locals = visibility_set("locals", "l:");
   const auto visible_tiles = visibility_set("tile_plans", "tile:");
   const auto configured_chart_capacity = static_cast<std::size_t>(as_u64(
@@ -10345,6 +10500,12 @@ json::object restore_checkpoint(const std::string& path,
   if (visible_charts.size() > configured_chart_capacity)
     throw std::invalid_argument(
         "checkpoint visible charts exceed the restored session capacity");
+  const auto configured_scc_capacity = static_cast<std::size_t>(as_u64(
+      configuration.at("scc_capacity"),
+      "checkpoint configured SCC capacity"));
+  if (visible_sccs.size() > configured_scc_capacity)
+    throw std::invalid_argument(
+        "checkpoint visible SCCs exceed the restored session capacity");
   json::object create{
       {"schema", 2}, {"op", "session.create"},
       {"domain", configuration.at("domain")},
@@ -10363,15 +10524,20 @@ json::object restore_checkpoint(const std::string& path,
   try {
     const auto restored = find_session(restored_handle);
     {
-      // Dependency-only chart owners are replayed briefly so tile plans can
-      // acquire their strong pointers, then removed from the public map.
-      // Their closure may legitimately exceed the public chart capacity.
-      const auto closure_size = as_array(
+      // Dependency-only chart/SCC owners are replayed briefly so tile plans
+      // can acquire their strong pointers, then removed from the public maps.
+      // Their closure may legitimately exceed the public capacities.
+      const auto chart_closure_size = as_array(
           payload.at("prepared_charts"),
           "checkpoint prepared chart closure").size();
+      const auto scc_closure_size = as_array(
+          payload.at("prepared_scc"),
+          "checkpoint prepared SCC closure").size();
       std::lock_guard<std::mutex> lock(restored->mutex);
       restored->chart_capacity =
-          std::max(configured_chart_capacity, closure_size);
+          std::max(configured_chart_capacity, chart_closure_size);
+      restored->scc_capacity =
+          std::max(configured_scc_capacity, scc_closure_size);
     }
     const auto source_handle = required_string(saved_session, "source_handle");
     json::array restored_charts;
@@ -10428,6 +10594,7 @@ json::object restore_checkpoint(const std::string& path,
           "checkpoint chart visibility names an absent ownership object");
 
     json::array restored_sccs;
+    std::set<std::string> all_scc_handles;
     std::uint64_t largest_scc = 0;
     for (const auto& raw_item : as_array(
              payload.at("prepared_scc"), "checkpoint prepared SCC charts")) {
@@ -10436,6 +10603,9 @@ json::object restore_checkpoint(const std::string& path,
           {"handle", "key", "identity", "signature", "request"},
           "checkpoint SCC item");
       const auto old_handle = required_string(item, "handle");
+      if (!all_scc_handles.insert(old_handle).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate retained SCC handles");
       const auto handle_id = scoped_handle_id(old_handle, "scc:", "SCC");
       if (handle_id <= largest_scc)
         throw std::invalid_argument(
@@ -10466,10 +10636,15 @@ json::object restore_checkpoint(const std::string& path,
           throw std::invalid_argument(
               "restored SCC does not reproduce its exact graph/operator identity");
       }
-      restored_sccs.push_back(json::object{
-          {"scc", old_handle}, {"key", item.at("key")},
-          {"identity", item.at("identity")}});
+      if (visible_sccs.contains(old_handle))
+        restored_sccs.push_back(json::object{
+            {"scc", old_handle}, {"key", item.at("key")},
+            {"identity", item.at("identity")}});
     }
+    if (!std::includes(all_scc_handles.begin(), all_scc_handles.end(),
+                       visible_sccs.begin(), visible_sccs.end()))
+      throw std::invalid_argument(
+          "checkpoint SCC visibility names an absent ownership object");
 
     std::unique_ptr<AcbPrecisionLease> checkpoint_acb_lease;
     if (restored->domain == "acb") {
@@ -10786,7 +10961,7 @@ json::object restore_checkpoint(const std::string& path,
               "checkpoint tile-plan handles are not in strict creation order");
         largest_tile_plan = handle_id;
         auto plan = restore_checkpoint_tile_plan_record(
-            item, restored->charts);
+            item, restored->charts, restored->sccs);
         if (plan->handle() != old_handle ||
             plan->checkpoint_record() != raw_item)
           throw std::invalid_argument(
@@ -10864,6 +11039,15 @@ json::object restore_checkpoint(const std::string& path,
           iterator = restored->locals.erase(iterator);
         }
       }
+      for (auto iterator = restored->sccs.begin();
+           iterator != restored->sccs.end();) {
+        if (visible_sccs.contains(iterator->first)) {
+          ++iterator;
+        } else {
+          restored->scc_handles_by_key.erase(iterator->second->key());
+          iterator = restored->sccs.erase(iterator);
+        }
+      }
       for (auto iterator = restored->charts.begin();
            iterator != restored->charts.end();) {
         if (visible_charts.contains(iterator->first)) {
@@ -10923,6 +11107,7 @@ json::object restore_checkpoint(const std::string& path,
       restored->next_tile_plan = next_tile_plan;
       restored->next_line_result = next_line_result;
       restored->chart_capacity = configured_chart_capacity;
+      restored->scc_capacity = configured_scc_capacity;
       restored->total_local_solves = as_u64(
           counters.at("total_local_solves"), "total local solves");
       restored->total_scc_column_solves = as_u64(
@@ -11250,13 +11435,14 @@ json::object run_session_command(const json::object& root) {
         root.at("upper"), "upper native tile arm");
     const auto lower_handles = parse_plan_chart_handles(lower_request);
     const auto upper_handles = parse_plan_chart_handles(upper_request);
-    std::vector<std::shared_ptr<PreparedChartBase>> lower_charts;
-    std::vector<std::shared_ptr<PreparedChartBase>> upper_charts;
+    std::vector<RetainedPlanChartBinding::Owner> lower_charts;
+    std::vector<RetainedPlanChartBinding::Owner> upper_charts;
     std::string plan_handle;
     {
-      // Resolve every chart and acquire strong ownership in one admission
-      // section.  Public chart.release cannot invalidate either independently
-      // executable arm after this point.
+      // Resolve every prepared-chart or composite-SCC owner and acquire strong
+      // typed ownership in one admission section.  Public chart.release or
+      // scc.release cannot invalidate either independently executable arm
+      // after this point.
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->closed)
         throw std::invalid_argument("persistent solver session is closed");
@@ -11264,22 +11450,25 @@ json::object run_session_command(const json::object& root) {
           session->tile_plan_capacity)
         throw std::invalid_argument(
             "persistent native tile-plan capacity is exhausted");
-      for (const auto& handle : lower_handles) {
-        const auto found = session->charts.find(handle);
-        if (found == session->charts.end())
-          throw std::invalid_argument(
-              "unknown or released chart in lower native tile arm: " +
-              handle);
-        lower_charts.push_back(found->second);
-      }
-      for (const auto& handle : upper_handles) {
-        const auto found = session->charts.find(handle);
-        if (found == session->charts.end())
-          throw std::invalid_argument(
-              "unknown or released chart in upper native tile arm: " +
-              handle);
-        upper_charts.push_back(found->second);
-      }
+      const auto resolve_owner = [&](const std::string& handle,
+                                     const char* arm_name)
+          -> RetainedPlanChartBinding::Owner {
+        if (handle.starts_with("c:")) {
+          const auto found = session->charts.find(handle);
+          if (found != session->charts.end()) return found->second;
+        } else if (handle.starts_with("scc:")) {
+          const auto found = session->sccs.find(handle);
+          if (found != session->sccs.end()) return found->second;
+        }
+        throw std::invalid_argument(
+            std::string(
+                "unknown or released prepared-chart/composite-SCC owner in ") +
+            arm_name + " native tile arm: " + handle);
+      };
+      for (const auto& handle : lower_handles)
+        lower_charts.push_back(resolve_owner(handle, "lower"));
+      for (const auto& handle : upper_handles)
+        upper_charts.push_back(resolve_owner(handle, "upper"));
       plan_handle = "tile:" +
           std::to_string(session->next_tile_plan++);
       ++session->pending_tile_plans;

@@ -90,15 +90,45 @@ checkpointManifest = If[AssociationQ[run], catchDE2[
 assert["native_observable_batch_checkpoint_is_atomic_and_manifest_bound",
   AssociationQ[checkpointManifest] && FileExistsQ[checkpointPath] &&
     Lookup[checkpointManifest, "Schema", None] ===
-      "DiffExp2.NativeTransportObservableCheckpoint/v1" &&
+      "DiffExp2.NativeTransportObservableCheckpoint/v2" &&
     Lookup[checkpointManifest, "TransportArmMarches", -1] === 2 &&
     Lookup[Lookup[checkpointManifest, "Results", {}], "Identity"] ===
       Lookup[results, "Identity"] &&
     AllTrue[Values[Lookup[checkpointManifest, "StateHandles", <||>]],
       AssociationQ[#] && Sort[Keys[#]] ===
-        Sort[{"Handle", "CheckpointIdentity", "ProvenanceIdentity"}] &] &&
+        Sort[{"Handle", "CheckpointIdentity", "ProvenanceSHA256"}] &&
+        StringMatchQ[# ["ProvenanceSHA256"],
+          RegularExpression["[0-9a-f]{64}"]] &] &&
     DuplicateFreeQ[Lookup[checkpointManifest["Results"],
-      "ProvenanceIdentity"]]];
+      "ProvenanceSHA256"]] &&
+    AllTrue[Lookup[checkpointManifest["Results"], "ProvenanceSHA256"],
+      StringMatchQ[#, RegularExpression["[0-9a-f]{64}"]] &]];
+
+(* Preserve one exact v1 fixture before releasing the live session.  V2 is
+   what new sidecars persist; the legacy manifest remains loadable against
+   the same schema-2 native checkpoint. *)
+legacySchema = "DiffExp2.NativeTransportObservableCheckpoint/v1";
+legacyStateHandles = AssociationMap[Function[side, <|
+    "Handle" -> run["States", side, "transport_state"],
+    "CheckpointIdentity" -> run["States", side, "checkpoint_identity"],
+    "ProvenanceIdentity" -> run["States", side, "provenance_identity"]|>],
+  {"lower", "upper"}];
+legacyCore = <|"Schema" -> legacySchema,
+  "Path" -> checkpointManifest["Path"],
+  "CheckpointIdentity" -> checkpointManifest["CheckpointIdentity"],
+  "TransportArmMarches" -> checkpointManifest["TransportArmMarches"],
+  "StateHandles" -> legacyStateHandles,
+  "Results" ->
+    (DiffExp2`NativeTransport`Private`nativeObservableCheckpointResult[
+        #, run["Atlas", "Session"], legacySchema] & /@ results)|>;
+legacyManifest = Append[legacyCore, "ManifestIdentity" ->
+  DiffExp2`NativeTransport`Private`nativeCheckpointIdentity[
+    "de2-native-observable-checkpoint-manifest-", legacyCore]];
+assert["compact checkpoint manifest replaces recursive provenance with digests",
+  ByteCount[checkpointManifest] < ByteCount[legacyManifest]/10 &&
+    AllTrue[Join[Keys /@ Values[checkpointManifest["StateHandles"]],
+        Keys /@ checkpointManifest["Results"]],
+      FreeQ[#, "ProvenanceIdentity"] &]];
 
 exportedRun = If[AssociationQ[run], catchDE2[
   DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[run, 50]],
@@ -202,6 +232,23 @@ tamperedStateRestore = catchDE2[
 assert["checkpoint_restore_binds_each_transport_state_checkpoint_and_provenance",
   FailureQ[tamperedStateRestore]];
 
+tamperedProvenanceResults = checkpointManifest["Results"];
+tamperedProvenanceResults[[1, "ProvenanceSHA256"]] =
+  StringRepeat["0", 64];
+tamperedProvenanceCore = Join[
+  KeyDrop[checkpointManifest, "ManifestIdentity"],
+  <|"Results" -> tamperedProvenanceResults|>];
+tamperedProvenanceManifest = Append[tamperedProvenanceCore,
+  "ManifestIdentity" ->
+    DiffExp2`NativeTransport`Private`nativeCheckpointIdentity[
+      "de2-native-observable-checkpoint-manifest-",
+      tamperedProvenanceCore]];
+tamperedProvenanceRestore = catchDE2[
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    tamperedProvenanceManifest]];
+assert["checkpoint_restore_rejects_recomputed_manifest_with_wrong_provenance_digest",
+  FailureQ[tamperedProvenanceRestore]];
+
 restoredRun = If[AssociationQ[checkpointManifest], catchDE2[
   DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
     checkpointManifest]], checkpointManifest];
@@ -236,6 +283,23 @@ assert["restored_native_observable_batch_closes_only_its_restored_session",
     Lookup[restoredReleased, "Failures", {"missing"}] === {} &&
     !KeyExistsQ[DiffExp2`CppBackend`PersistentSessionInformation[],
       restoredSession]];
+
+legacyRestored = catchDE2[
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    legacyManifest]];
+legacyExport = If[AssociationQ[legacyRestored], catchDE2[
+  DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
+    legacyRestored, 50]], legacyRestored];
+assert["checkpoint_restore_remains_backward_compatible_with_v1_full_provenance_manifest",
+  AssociationQ[legacyExport] &&
+    Lookup[Lookup[legacyExport, "ExportedResults", {}], "Value"] ===
+      Lookup[exportedResults, "Value"]];
+legacyReleased = If[AssociationQ[legacyExport],
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[
+    legacyExport], legacyExport];
+assert["legacy_manifest_restore_closes_its_restored_session",
+  AssociationQ[legacyReleased] &&
+    Lookup[legacyReleased, "Failures", {"missing"}] === {}];
 If[FileExistsQ[checkpointPath], DeleteFile[checkpointPath]];
 
 DiffExp2`Solve`ClearSolveCaches[];

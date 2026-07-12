@@ -3757,7 +3757,12 @@ sccBlockChartSystem[cs_Association, block_Integer] := Module[
       ToString[cs["Center"], InputForm],
     "Prescriptions" -> cs["Prescriptions"]|>;
   sub = PrepareChart[sys, chart];
-  Join[sub, <|"SolveCacheTag" -> Lookup[cs, "SystemHash", None],
+  (* Use the parent's collision-certified exact system key, matching ordinary
+     charts of the same physical system.  This lets a regular anchor and a
+     singular composite receiving chart coexist in one retained session;
+     the old machine-sized SystemHash tag unnecessarily split that atlas. *)
+  Join[sub, <|"SolveCacheTag" -> Lookup[cs, "SystemClearKey",
+      Lookup[cs, "SystemHash", None]],
     "SCCParentHash" -> seq["MatrixHash"], "SCCBlock" -> block,
     "SCCIndices" -> indices|>]];
 
@@ -3782,7 +3787,8 @@ sccMonolithicChartSystem[cs_Association] := Module[
     "Prescriptions" -> cs["Prescriptions"],
     "UseSCCSkeleton" -> False|>;
   full = PrepareChart[parentInput, chart];
-  Join[full, <|"SolveCacheTag" -> Lookup[cs, "SystemHash", None]|>]];
+  Join[full, <|"SolveCacheTag" -> Lookup[cs, "SystemClearKey",
+    Lookup[cs, "SystemHash", None]]|>]];
 
 (* A monolithic full-frame preparation is only a performance candidate.
    Catch precisely that preparation attempt so an unsupported global
@@ -5654,7 +5660,11 @@ regularPhysicalChartSystem[cs_Association] := Module[
   If[TrueQ[Lookup[cs, "SCCSkeleton", False]] &&
       TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     Join[cs, <|"SCCSkeleton" -> False,
-      "SolveCacheTag" -> Lookup[cs, "SystemHash", None],
+      (* Recombining the exact SCC skeleton must not invent a second session
+         identity.  Use the same collision-certified parent system key as
+         ordinary and composite charts in a mixed retained atlas. *)
+      "SolveCacheTag" -> Lookup[cs, "SystemClearKey",
+        Lookup[cs, "SystemHash", None]],
       "ThetaMatrix" -> cs["ThetaOriginal"],
       "Gauge" -> IdentityMatrix[d],
       "GaugeInverse" -> IdentityMatrix[d],

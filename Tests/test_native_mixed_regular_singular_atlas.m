@@ -1,0 +1,159 @@
+(* Preparation-only mixed regular/singular persistent native atlas. *)
+
+repo = DirectoryName[DirectoryName[$InputFileName]];
+Get[FileNameJoin[{repo, "DiffExp2.m"}]];
+
+If[!TrueQ[DiffExp2`CppBackend`BackendAvailableQ[]],
+  Print["SKIP: compiled DiffExp2 backend is not available"];
+  Exit[If[Environment["DE2_REQUIRE_CPP"] === "1", 1, 0]]];
+
+SetAttributes[catchDE2, HoldFirst];
+catchDE2[expression_] := Quiet[Catch[expression, "DiffExp2Error"]];
+
+DiffExp2`LoadConfiguration[{
+  "RecurrenceBackend" -> "Cpp",
+  "WorkingPrecision" -> 80,
+  "ChopPrecision" -> 40,
+  "ExpansionOrder" -> 10,
+  "EpsilonOrder" -> 0,
+  "DivisionOrder" -> 3,
+  "Variables" -> {},
+  "Verbosity" -> 0}];
+
+x = Global`x; eps = Global`eps;
+lambda = 1/2 + eps/3;
+system = DiffExp2`LoadSystem[<|
+  (* Two exact SCCs at every chart: a singular scalar affine family and a
+     regular scalar family with a pole-free source edge. *)
+  "Matrix" -> {{lambda/x, 1}, {0, 0}},
+  "Variable" -> x|>];
+lowerPlan = DiffExp2`Transport`SegmentLine[system, {1/2, 0}];
+upperPlan = DiffExp2`Transport`SegmentLine[system, {1/2, 1}];
+
+zero = DiffExp2`EpsSeries`ESNew[-3, {0, 0, 0, 0}];
+one = DiffExp2`EpsSeries`ESNew[-3, {0, 0, 0, 1}];
+atlas = catchDE2[
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    system, {one, zero}, lowerPlan, upperPlan, "Threads" -> 2]];
+
+receivingBases = If[FailureQ[atlas], {}, Join[
+  Rest[atlas["Lower", "Bases"]], Rest[atlas["Upper", "Bases"]]]];
+sccBases = Select[receivingBases,
+  Lookup[#, "Type", None] === "DiffExp2NativeSCCBasis" &];
+singularBasis = If[FailureQ[atlas], atlas,
+  SelectFirst[Rest[atlas["Lower", "Bases"]],
+    Lookup[#, "Type", None] === "DiffExp2NativeSCCBasis" &,
+    Missing["NotFound"]]];
+regularSCCBasis = If[FailureQ[atlas], atlas,
+  SelectFirst[Rest[atlas["Upper", "Bases"]],
+    Lookup[#, "Type", None] === "DiffExp2NativeSCCBasis" &,
+    Missing["NotFound"]]];
+planStats = If[FailureQ[atlas], atlas,
+  DiffExp2`CppBackend`PersistentTilePlanStatistics[atlas["Plan"]]];
+before = If[FailureQ[atlas], <||>,
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    atlas["Session"], <||>]];
+
+columns = If[AssociationQ[singularBasis],
+  Lookup[singularBasis, "Columns", {}], {}];
+forbidden = {"assembled", "coefficients", "u", "validity", "Sectors"};
+opaqueBasisQ = AssociationQ[singularBasis] &&
+  Lookup[singularBasis, "Dimension", None] === 2 &&
+  Lookup[columns, "BasisIndex", {}] === {1, 2} &&
+  AllTrue[columns, AssociationQ[#] &&
+      Lookup[#, "Session", None] === atlas["Session"] &&
+      Lookup[#, "NativeSCC", None] === singularBasis["NativeSCC"] &&
+      StringQ[Lookup[#, "Local", None]] &&
+      Intersection[Keys[#], forbidden] === {} &];
+
+lowerCharts = If[AssociationQ[planStats],
+  Lookup[Lookup[planStats, "lower", <||>], "charts", {}], {}];
+upperCharts = If[AssociationQ[planStats],
+  Lookup[Lookup[planStats, "upper", <||>], "charts", {}], {}];
+planOwnsSCCQ = Length[lowerCharts] >= 2 &&
+  Lookup[Last[lowerCharts], "chart", None] ===
+    Lookup[singularBasis, "NativeSCC", None] &&
+  TrueQ[Lookup[Last[lowerCharts], "singular_center", False]] &&
+  Length[upperCharts] >= 2 &&
+  Lookup[Last[upperCharts], "chart", None] ===
+    Lookup[regularSCCBasis, "NativeSCC", None] &&
+  !TrueQ[Lookup[Last[upperCharts], "singular_center", True]];
+
+(* Remove the public SCC registry token.  The immutable tile plan and the
+   already-retained opaque columns must keep typed strong ownership. *)
+sccReleases = If[sccBases === {}, {Missing["NoSCCBasis"]},
+  DiffExp2`CppBackend`ReleasePersistentSCC[<|
+      "Session" -> #["Session"], "SCC" -> #["NativeSCC"]|>] & /@
+    DeleteDuplicatesBy[sccBases, Lookup[#, "NativeSCC", None] &]];
+planAfterSCCRelease = If[FailureQ[atlas], atlas,
+  DiffExp2`CppBackend`PersistentTilePlanStatistics[atlas["Plan"]]];
+columnAfterSCCRelease = If[columns === {}, Missing["NoColumn"],
+  DiffExp2`CppBackend`PersistentLocalStatistics[First[columns]]];
+
+strongOwnershipQ = Length[sccReleases] === 2 &&
+  AllTrue[sccReleases, AssociationQ[#] &&
+      Lookup[#, "status", "error"] === "ok" &] &&
+  AssociationQ[planAfterSCCRelease] &&
+  Lookup[planAfterSCCRelease, "status", "error"] === "ok" &&
+  AssociationQ[columnAfterSCCRelease] &&
+  Lookup[columnAfterSCCRelease, "status", "error"] === "ok";
+
+released = If[FailureQ[atlas], atlas,
+  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[atlas]];
+after = If[FailureQ[atlas], <||>,
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    atlas["Session"], <||>]];
+
+preparedQ = AssociationQ[atlas] &&
+  Lookup[atlas, "Type", None] ===
+    "DiffExp2NativeRegularIndependentArmAtlas" &&
+  TrueQ[Lookup[atlas, "ContainsSingularReceivingCharts", False]] &&
+  atlas["Lower", "BasisKinds"] === {"Anchor", "SingularSCC"} &&
+  atlas["Upper", "BasisKinds"] === {"Anchor", "Regular"} &&
+  Length[sccBases] === 2 &&
+  AllTrue[sccBases, Lookup[#, "Session", None] === atlas["Session"] &] &&
+  Lookup[before, "tile_plans", 0] === 1 &&
+  Lookup[before, "scc_charts", 0] === 2 &&
+  Lookup[before, "locals", 0] === 5 &&
+  Lookup[before, "local_matches", -1] === 0 &&
+  Lookup[before, "line_integrations", -1] === 0;
+
+cleanupQ = AssociationQ[released] &&
+  Lookup[released, "Failures", {"missing"}] === {} &&
+  Lookup[after, "locals", -1] === 0 &&
+  Lookup[after, "matches", -1] === 0 &&
+  Lookup[after, "tile_plans", -1] === 0 &&
+  Lookup[after, "line_results", -1] === 0 &&
+  Lookup[after, "scc_charts", -1] === 0 &&
+  Lookup[after, "local_matches", -1] === 0 &&
+  Lookup[after, "line_integrations", -1] === 0;
+
+DiffExp2`Solve`ClearSolveCaches[];
+closedQ = DiffExp2`CppBackend`PersistentSessionInformation[] === <||>;
+
+ok = preparedQ && opaqueBasisQ && planOwnsSCCQ && strongOwnershipQ &&
+  cleanupQ && closedQ;
+
+If[TrueQ[ok],
+  Print["PASS: mixed regular/singular native atlas preparation"],
+  Print["FAIL: ", InputForm[<|
+    "Atlas" -> If[AssociationQ[atlas],
+      KeyTake[atlas, {"Type", "Session", "ContainsSingularReceivingCharts"}],
+      atlas],
+    "Basis" -> If[AssociationQ[singularBasis],
+      KeyTake[singularBasis,
+        {"Type", "Session", "NativeSCC", "Dimension"}], singularBasis],
+    "PlanStats" -> If[AssociationQ[planStats],
+      KeyTake[planStats, {"status", "session", "tile_plan",
+        "lower_matches", "upper_matches"}], planStats],
+    "Before" -> before, "SCCReleases" -> sccReleases,
+    "PlanAfterSCCRelease" -> If[AssociationQ[planAfterSCCRelease],
+      KeyTake[planAfterSCCRelease, {"status", "session", "tile_plan"}],
+      planAfterSCCRelease],
+    "ColumnAfterSCCRelease" -> If[AssociationQ[columnAfterSCCRelease],
+      KeyTake[columnAfterSCCRelease, {"status", "session", "local"}],
+      columnAfterSCCRelease],
+    "Released" -> released, "After" -> after,
+    "Checks" -> {preparedQ, opaqueBasisQ, planOwnsSCCQ,
+      strongOwnershipQ, cleanupQ, closedQ}|>]];
+  Exit[1]];

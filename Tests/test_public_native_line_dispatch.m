@@ -26,7 +26,7 @@ nearQ[a_, b_] := TrueQ[Abs[N[a - b, 40]] < 10^-30];
 DiffExp2`CppBackend`ClearPersistentSessions[];
 nativeValue = Catch[
   DiffExp2`IntegrateLine[sys, boundary, 0, {-1, 1}, coefficients,
-    "ExtraSingularFactors" -> {x - 2}],
+    "ExtraSingularFactors" -> {x - 6/5}],
   "DiffExp2Error"];
 nativeSessionInfo = DiffExp2`CppBackend`PersistentSessionInformation[];
 nativeStats = Values[nativeSessionInfo];
@@ -37,6 +37,7 @@ nativeOK = !FailureQ[nativeValue] &&
   nearQ[coefficient[nativeValue, 2], 0] &&
   Length[nativeStats] === 1 &&
   Lookup[First[nativeStats], "tile_plans_created", 0] === 1 &&
+  Lookup[First[nativeStats], "local_matches", 0] > 0 &&
   Lookup[First[nativeStats], "line_integrations", 0] > 0 &&
   Lookup[First[nativeStats], "line_exports", 0] === 1 &&
   Lookup[First[nativeStats], "tile_plans", -1] === 0 &&

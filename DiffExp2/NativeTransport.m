@@ -8,9 +8,9 @@ BeginPackage["DiffExp2`NativeTransport`",
    "DiffExp2`CppBackend`"}];
 
 PrepareNativeRegularIndependentArms::usage =
-  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared retained anchor, every regular receiving basis, and one exact lower/upper native tile plan. Option Integrand->{cvec,var} derives and solves the honest epsilon halo required by polar coefficient rows. It returns only opaque native locals/bases and exact atlas metadata.";
+  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var} derives and solves the honest epsilon halo required by polar coefficient rows. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
-  "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
+  "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published. Mixed atlases containing singular receiving charts remain preparation-only until structural singular matching saturation is admitted.";
 NativeRegularIndependentArmPlansSupportedQ::usage =
   "NativeRegularIndependentArmPlansSupportedQ[lower,upper] is the side-effect-free public-dispatch eligibility predicate for the current exact-rational native path protocol. It accepts only a shared interior anchor, entirely regular charts, and topology/geometry representable by the retained native tile planner.";
 ReleaseNativeRegularIndependentArms::usage =
@@ -287,8 +287,49 @@ nativeBasisOwner[basis_Association] := Module[{owner},
   If[!StringQ[owner] || StringLength[owner] == 0,
     err["E6", <|"Basis" -> KeyTake[basis,
         {"Type", "Session", "NativeSCC", "NativeChart"}],
-      "Detail" -> "retained regular basis exposes no native chart/SCC owner"|>]];
+      "Detail" -> "retained receiving basis exposes no native chart/SCC owner"|>]];
   owner];
+
+nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
+  {regular = TrueQ[Lookup[
+      Lookup[system, "IndicialData", <||>], "Regular", False]],
+   sequence, components, built, expectedTypes},
+  If[regular,
+    built = DiffExp2`Solve`SolveNativeRegularBasis[
+      system, req, threads];
+    expectedTypes = {
+      "DiffExp2NativeRegularBasis", "DiffExp2NativeSCCBasis"},
+    sequence = Lookup[system, "IntegrationSequence", None];
+    components = If[AssociationQ[sequence],
+      Lookup[sequence, "Components", None], None];
+    If[!ListQ[components] || components === {} ||
+        !AllTrue[components, ListQ] ||
+        Sort[Flatten[components]] =!= Range[system["SystemSize"]],
+      err["E8", <|"Center" -> Lookup[system, "Center", None],
+        "IntegrationSequence" -> sequence,
+        "Detail" -> "singular native receiving chart has no complete exact SCC certificate; no alternate basis solver is selected"|>]];
+    (* SolveNativeSCCBasis is the strict admission gate for singular data.
+       It accepts only a certified exact affine-Jordan block DAG (including
+       one SCC) and propagates every unsupported/CASE-P failure unchanged. *)
+    built = DiffExp2`Solve`SolveNativeSCCBasis[
+      system, req, threads];
+    expectedTypes = {"DiffExp2NativeSCCBasis"}];
+  If[!AssociationQ[built] ||
+      !MemberQ[expectedTypes, Lookup[built, "Type", None]] ||
+      Lookup[built, "Dimension", None] =!= system["SystemSize"] ||
+      !ListQ[Lookup[built, "Columns", None]] ||
+      Length[built["Columns"]] =!= system["SystemSize"] ||
+      Lookup[built["Columns"], "BasisIndex", {}] =!=
+        Range[system["SystemSize"]],
+    If[AssociationQ[built] && ListQ[Lookup[built, "Columns", None]],
+      Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+        built["Columns"]]];
+    err["E6", <|"Center" -> Lookup[system, "Center", None],
+      "Basis" -> If[AssociationQ[built],
+        KeyTake[built, {"Type", "Dimension", "Session",
+          "NativeChart", "NativeSCC"}], built],
+      "Detail" -> "native receiving-chart dispatcher did not return one complete ordered opaque basis"|>]];
+  built];
 
 nativeArmRequest[plan_Association, owners_List] := Module[{},
   If[Length[owners] =!= Length[plan["Charts"]] ||
@@ -476,6 +517,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
    nativePlan = None, sessionInfo, sessionStats, domain, integrand,
    preparedShift, halo, targetMax = cfg["EpsilonOrder"], availableMax,
    cleanup, output, preparedBases = {},
+   containsSingularReceivingCharts = False,
    threads = OptionValue["Threads"]},
   plans = normalizeSharedAnchor[lowerPlan, upperPlan];
   {lower, upper} = plans;
@@ -525,23 +567,24 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     Lookup[sessionStats, "domain", None], None];
   If[!MemberQ[{"acb", "rational"}, domain],
     err["E5", <|"Domain" -> domain,
-      "Detail" -> "native regular arm requires Acb or Rational retained locals"|>]];
-  prepareArm[plan_Association] := Module[{systems, bases, built},
+      "Detail" -> "native independent-arm atlas requires Acb or Rational retained locals"|>]];
+  prepareArm[plan_Association] := Module[{systems, bases, built, kinds},
     systems = Prepend[
       DiffExp2`Solve`PrepareChart[sys, #] & /@ Rest[plan["Charts"]],
       anchorSystem];
-    If[!AllTrue[systems,
-        TrueQ[Lookup[# ["IndicialData"], "Regular", False]] &],
-      err["E8", <|"Centers" -> Lookup[systems, "Center"],
-        "Detail" -> "explicit native regular-arm seam encountered a singular chart"|>]];
+    kinds = Prepend[Map[
+      If[TrueQ[Lookup[Lookup[#, "IndicialData", <||>],
+          "Regular", False]], "Regular", "SingularSCC"] &,
+      Rest[systems]], "Anchor"];
+    If[MemberQ[kinds, "SingularSCC"],
+      containsSingularReceivingCharts = True];
     bases = Prepend[Map[
       Function[system,
-        built = DiffExp2`Solve`SolveNativeRegularBasis[
-          system, req, threads];
+        built = nativeReceivingBasis[system, req, threads];
         AppendTo[preparedBases, built];
         built], Rest[systems]], None];
     <|"Plan" -> plan, "ChartSystems" -> systems,
-      "Bases" -> bases|>];
+      "Bases" -> bases, "BasisKinds" -> kinds|>];
   lowerData = prepareArm[lower];
   upperData = prepareArm[upper];
   sessions = DeleteDuplicates@Join[{anchor["Session"]},
@@ -570,6 +613,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     "Dimension" -> dimension,
     "Request" -> req, "Anchor" -> anchor, "Plan" -> nativePlan,
     "Lower" -> lowerData, "Upper" -> upperData,
+    "ContainsSingularReceivingCharts" ->
+      containsSingularReceivingCharts,
     "TargetCompleteMax" -> targetMax,
     "PreparedIntegrandEpsilonShift" -> preparedShift,
     "PlanCheckpointIdentity" -> planIdentity|>,
@@ -594,6 +639,9 @@ RunNativeRegularIndependentArms[atlas_Association, cvec_List,
     err["E8", <|"AtlasType" -> Lookup[atlas, "Type", None],
       "CertifyTail" -> certify, "MaxRefinementSteps" -> maxSteps,
       "Detail" -> "native arm execution options or atlas are malformed"|>]];
+  If[TrueQ[Lookup[atlas, "ContainsSingularReceivingCharts", False]],
+    err["E8", <|"Detail" ->
+      "native singular receiving-chart atlases are preparation-only until structural singular matching saturation is admitted; no regular matching fallback is selected"|>]];
   lower = nativeArmExecution[atlas, atlas["Lower"], cvec, var];
   upper = nativeArmExecution[atlas, atlas["Upper"], cvec, var];
   rowShift = Min[nativePreparedRowsMinimumShift[

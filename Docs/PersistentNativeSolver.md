@@ -447,20 +447,25 @@ identity before exposing a session handle.  Unknown mandatory sections fail;
 unknown explicitly optional sections may be skipped.
 
 The implemented schema-2 checkpoint covers quiescent prepared chart operators
-and composite SCC graphs, retained Rational/Acb local solutions, and retained
-exact-rational and exact-lattice-guided Acb matches, endpoint results, exact
-tile plans, and completed line results. Local tensors, exact
+and composite SCC graphs, retained Rational/Acb local solutions, ordinary and
+plan-driven exact-rational or exact-lattice-guided Acb matches,
+match-materialized receiving locals, endpoint results, exact tile plans, and
+completed line results. Local tensors, exact
 tag specializations, pseudo-hit state, error envelopes, match
 weights/residuals, and every coefficient-level refinement diagnostic use exact
 FLINT/Arb dump encodings; presentation decimals are never used for restart
-state. The serialized ownership closure includes released locals, plans, and
-prepared charts still strongly owned by a retained match or line, while a
-separate visibility manifest prevents those dependency-only handles from
-becoming public again after restore. Restore reproduces stable scoped handles,
+state. The serialized ownership closure includes released locals,
+planned-match hops, plans, and prepared charts still strongly owned by a
+retained match, materialized local, or line, while a separate visibility
+manifest prevents those dependency-only handles from becoming public again
+after restore. Plan-driven records retain their typed exact/Acb match payload,
+exact handoff, branch prescription, plan/checkpoint provenance, and
+materialization owner lineage; an unknown embedded match kind fails instead
+of degrading to another solver path. Restore reproduces stable scoped handles,
 runtime and next-handle counters, exact branch sheets/rims, and exact
 source/result/checkpoint provenance before exposing the new session. Symbolic
-locals remain a loud deferred kind; pending tile/line operations still prevent
-a quiescent checkpoint.
+locals remain the sole deferred scalar kind; pending tile/line operations still
+prevent a quiescent checkpoint.
 
 ## Migration milestones
 

@@ -1,17 +1,22 @@
+#include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
 #include "diffexp2/local_algebra.hpp"
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <future>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace json = boost::json;
 
@@ -190,6 +195,13 @@ double value_midpoint(const json::object& evaluation,
             coefficient.as_array().front().as_string()));
 }
 
+bool contains_string(const json::array& values, const std::string& expected) {
+  return std::any_of(values.begin(), values.end(), [&](const auto& value) {
+    return value.is_string() &&
+        std::string(value.as_string()) == expected;
+  });
+}
+
 bool finite_laurent_pole_materialization() {
   diffexp2::LocalSolution<diffexp2::Rational> column;
   column.chart.center_exact = "0";
@@ -226,8 +238,8 @@ bool run_domain(const std::string& domain) {
   const auto created = request(json::object{
       {"schema", 2}, {"op", "session.create"}, {"domain", domain},
       {"precision_bits", 256}, {"output_digits", 30},
-      {"chart_capacity", 3}, {"local_capacity", 5},
-      {"match_capacity", 2}, {"tile_plan_capacity", 1}});
+      {"chart_capacity", 6}, {"local_capacity", 8},
+      {"match_capacity", 4}, {"tile_plan_capacity", 2}});
   const auto session = std::string(created.at("session").as_string());
   const auto anchor = prepare_chart(session, domain, domain + "-anchor", "0");
   const auto lower_chart = prepare_chart(
@@ -296,6 +308,9 @@ bool run_domain(const std::string& domain) {
       {"schema", 2}, {"op", "tile.stats"}, {"session", session},
       {"tile_plan", plan}});
 
+  const auto retained_lower = request(json::object{
+      {"schema", 2}, {"op", "match.stats"}, {"session", session},
+      {"match", lower_match}});
   for (const auto& local : {incoming, lower_basis, upper_basis})
     (void)request(json::object{
         {"schema", 2}, {"op", "local.release"}, {"session", session},
@@ -303,13 +318,15 @@ bool run_domain(const std::string& domain) {
   (void)request(json::object{
       {"schema", 2}, {"op", "tile.release"}, {"session", session},
       {"tile_plan", plan}});
-  const auto retained_lower = request(json::object{
-      {"schema", 2}, {"op", "match.stats"}, {"session", session},
-      {"match", lower_match}});
   for (const auto& match : {lower_match, upper_match})
     (void)request(json::object{
         {"schema", 2}, {"op", "match.release"}, {"session", session},
         {"match", match}});
+  for (const auto& chart : {anchor, lower_chart, upper_chart})
+    (void)request(json::object{
+        {"schema", 2}, {"op", "chart.release"}, {"session", session},
+        {"chart", chart}});
+
   const auto lower_evaluation = request(json::object{
       {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
       {"local", lower_local},
@@ -320,12 +337,117 @@ bool run_domain(const std::string& domain) {
       {"local", upper_local},
       {"point", json::object{{"exact", "-1/5"}}},
       {"options", json::object{{"tail_estimate", false}}}});
-  const auto checkpoint_rejection = request(json::object{
+
+  const auto base = std::filesystem::temp_directory_path() /
+      ("diffexp2-plan-match-hop-" + domain + "-" +
+       std::to_string(::getpid()));
+  const auto path = base.string() + ".de2cp";
+  const auto resaved_path = base.string() + "-resaved.de2cp";
+  const auto corrupt_path = base.string() + "-corrupt.de2cp";
+  const auto checkpoint_identity = domain + "-planned-hop-session-v2";
+  const auto saved = request(json::object{
       {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
-      {"path", "/tmp/diffexp2-plan-match-hop.chk"},
-      {"checkpoint_identity", domain + "-must-retain-hop"}});
+      {"path", path}, {"checkpoint_identity", checkpoint_identity}});
+  const auto container = diffexp2::checkpoint::read(path);
+  const auto saved_header = json::parse(container.header_json).as_object();
+  const auto saved_payload = json::parse(container.payload_json).as_object();
+  const auto& saved_visibility = saved_payload.at("session").as_object()
+      .at("registry_visibility").as_object();
+  const auto& planned_records =
+      saved_payload.at("retained_planned_match_hops").as_array();
+  const json::object* lower_planned = nullptr;
+  for (const auto& record : planned_records) {
+    const auto& object = record.as_object();
+    if (std::string(object.at("handle").as_string()) == lower_match)
+      lower_planned = &object;
+  }
+  if (lower_planned == nullptr)
+    throw std::runtime_error("checkpoint omitted the lower planned match hop");
+  const auto& embedded_native = lower_planned->at("native_match").as_object();
+  const auto expected_native_schema = domain == "rational"
+      ? "diffexp2-retained-exact-rational-match-v2"
+      : "diffexp2-retained-acb-match-v2";
+
+  json::object corruption{{"status", "ok"}};
+  if (domain == "rational") {
+    auto corrupt_header = saved_header;
+    auto corrupt_payload = saved_payload;
+    auto& corrupt_native = corrupt_payload
+        .at("retained_planned_match_hops").as_array().front().as_object()
+        .at("native_match").as_object();
+    corrupt_native["schema"] = "diffexp2-retained-unknown-match-v9";
+    corrupt_header.at("planned_match_identities").as_array().front()
+        .as_object()["native_match_schema"] = corrupt_native.at("schema");
+    diffexp2::checkpoint::write_atomic(
+        corrupt_path, json::serialize(corrupt_header),
+        json::serialize(corrupt_payload));
+    corruption = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", corrupt_path}, {"expected_identity", checkpoint_identity}});
+  }
+
+  (void)request(json::object{
+      {"schema", 2}, {"op", "session.close"}, {"session", session}});
+  const auto restored = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"}, {"path", path},
+      {"expected_identity", checkpoint_identity}});
+  const auto restored_session =
+      std::string(restored.at("session").as_string());
+  const auto restored_lower_evaluation = request(json::object{
+      {"schema", 2}, {"op", "local.evaluate"},
+      {"session", restored_session}, {"local", lower_local},
+      {"point", json::object{{"exact", "1/5"}}},
+      {"options", json::object{{"tail_estimate", false}}}});
+  const auto restored_upper_evaluation = request(json::object{
+      {"schema", 2}, {"op", "local.evaluate"},
+      {"session", restored_session}, {"local", upper_local},
+      {"point", json::object{{"exact", "-1/5"}}},
+      {"options", json::object{{"tail_estimate", false}}}});
+  const auto restored_local_stats = request(json::object{
+      {"schema", 2}, {"op", "local.stats"},
+      {"session", restored_session}, {"local", lower_local}});
+  const auto hidden_match = request(json::object{
+      {"schema", 2}, {"op", "match.stats"},
+      {"session", restored_session}, {"match", lower_match}});
+  const auto hidden_plan = request(json::object{
+      {"schema", 2}, {"op", "tile.stats"},
+      {"session", restored_session}, {"tile_plan", plan}});
+  const auto hidden_source = request(json::object{
+      {"schema", 2}, {"op", "local.stats"},
+      {"session", restored_session}, {"local", incoming}});
+  const auto resaved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"},
+      {"session", restored_session}, {"path", resaved_path},
+      {"checkpoint_identity", domain + "-planned-hop-resaved-v2"}});
+  const auto resaved_payload = json::parse(
+      diffexp2::checkpoint::read(resaved_path).payload_json).as_object();
+
+  // The saved next-handle counters include every released strong owner.
+  const auto next_anchor = prepare_chart(
+      restored_session, domain, domain + "-next-anchor", "0");
+  const auto next_lower_chart = prepare_chart(
+      restored_session, domain, domain + "-next-lower", "-2/3");
+  const auto next_upper_chart = prepare_chart(
+      restored_session, domain, domain + "-next-upper", "2/3");
+  const auto next_incoming = solve_local(
+      restored_session, next_anchor, "0", domain + "-next-incoming", "2");
+  const auto next_basis = solve_local(
+      restored_session, next_lower_chart, "-2/3",
+      domain + "-next-lower-basis", "1");
+  const auto next_planned = request(json::object{
+      {"schema", 2}, {"op", "tile.plan"}, {"session", restored_session},
+      {"checkpoint_identity", domain + "-next-tile-plan"},
+      {"division_order", 3},
+      {"lower", arm("-2/3", next_anchor, next_lower_chart)},
+      {"upper", arm("2/3", next_anchor, next_upper_chart)}});
+  const auto next_plan =
+      std::string(next_planned.at("tile_plan").as_string());
+  const auto next_match_result = request(hop_request(
+      domain, restored_session, next_plan, "lower", next_basis,
+      next_incoming, domain + "-next-hop"));
   const auto stats = request(json::object{
-      {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+      {"schema", 2}, {"op", "session.stats"},
+      {"session", restored_session}});
 
   const auto& lower_hop = lower.at("planned_hop").as_object();
   const auto& upper_hop = upper.at("planned_hop").as_object();
@@ -410,11 +532,60 @@ bool run_domain(const std::string& domain) {
       upper_evaluation.at("status") == "ok" &&
       std::abs(value_midpoint(lower_evaluation, 0) - 2.0) < 1e-25 &&
       std::abs(value_midpoint(upper_evaluation, 0) - 2.0) < 1e-25 &&
-      checkpoint_rejection.at("status") == "error" &&
-      std::string(checkpoint_rejection.at("detail").as_string()).find(
-          "materialized local") != std::string::npos &&
-      stats.at("locals") == 2 && stats.at("tile_plans") == 0 &&
-      stats.at("matches") == 0 && stats.at("local_matches") == 2 &&
+      saved.at("status") == "ok" && saved.at("locals") == 2 &&
+      saved.at("planned_match_hops") == 2 &&
+      saved.at("exact_matches") == 0 && saved.at("acb_matches") == 0 &&
+      saved.at("tile_plans") == 0 &&
+      saved.at("deferred_handle_kinds").as_array() ==
+          json::array{"symbolic-local"} &&
+      saved_payload.at("prepared_charts").as_array().size() == 3 &&
+      saved_payload.at("retained_locals").as_array().size() == 5 &&
+      planned_records.size() == 2 &&
+      saved_payload.at("retained_tile_plans").as_array().size() == 1 &&
+      saved_visibility.at("charts").as_array().empty() &&
+      saved_visibility.at("locals").as_array().size() == 2 &&
+      contains_string(saved_visibility.at("locals").as_array(), lower_local) &&
+      contains_string(saved_visibility.at("locals").as_array(), upper_local) &&
+      saved_visibility.at("matches").as_array().empty() &&
+      saved_visibility.at("tile_plans").as_array().empty() &&
+      lower_planned->at("schema") ==
+          "diffexp2-retained-planned-match-hop-v2" &&
+      embedded_native.at("schema") == expected_native_schema &&
+      lower_planned->at("handoff") == lower.at("planned_hop") &&
+      lower_planned->at("provenance_identity") ==
+          lower.at("planned_hop_provenance_identity") &&
+      (domain != "rational" ||
+       (corruption.at("status") == "error" &&
+        std::string(corruption.at("detail").as_string()).find(
+            "unsupported native match kind") != std::string::npos)) &&
+      restored.at("status") == "ok" &&
+      restored.at("charts").as_array().empty() &&
+      restored.at("locals").as_array().size() == 2 &&
+      restored.at("exact_matches").as_array().empty() &&
+      restored.at("acb_matches").as_array().empty() &&
+      restored.at("planned_match_hops").as_array().empty() &&
+      restored.at("tile_plans").as_array().empty() &&
+      restored_lower_evaluation.at("status") == "ok" &&
+      restored_upper_evaluation.at("status") == "ok" &&
+      std::abs(value_midpoint(restored_lower_evaluation, 0) - 2.0) < 1e-25 &&
+      std::abs(value_midpoint(restored_upper_evaluation, 0) - 2.0) < 1e-25 &&
+      restored_local_stats.at("strong_derivation_ownership") == true &&
+      std::string(restored_local_stats.at("retained_derivation").as_object()
+                      .at("source_match").as_string()) == lower_match &&
+      hidden_match.at("status") == "error" &&
+      hidden_plan.at("status") == "error" &&
+      hidden_source.at("status") == "error" &&
+      resaved.at("status") == "ok" &&
+      resaved.at("planned_match_hops") == 2 &&
+      resaved_payload.at("retained_locals").as_array().size() == 5 &&
+      resaved_payload.at("retained_planned_match_hops").as_array().size() == 2 &&
+      resaved_payload.at("retained_tile_plans").as_array().size() == 1 &&
+      next_anchor == "c:4" && next_lower_chart == "c:5" &&
+      next_upper_chart == "c:6" && next_incoming == "l:6" &&
+      next_basis == "l:7" && next_plan == "tile:2" &&
+      next_match_result.at("match") == "m:3" &&
+      stats.at("locals") == 4 && stats.at("tile_plans") == 1 &&
+      stats.at("matches") == 1 && stats.at("local_matches") == 3 &&
       stats.at("pending_matches") == 0;
 
   if (!ok)
@@ -431,16 +602,23 @@ bool run_domain(const std::string& domain) {
               << domain << " plan stats: " << json::serialize(plan_stats)
               << '\n' << domain << " retained: "
               << json::serialize(retained_lower) << '\n'
-              << domain << " checkpoint: "
-              << json::serialize(checkpoint_rejection) << '\n'
+              << domain << " saved: " << json::serialize(saved) << '\n'
+              << domain << " restored: " << json::serialize(restored) << '\n'
+              << domain << " restored local: "
+              << json::serialize(restored_local_stats) << '\n'
+              << domain << " corruption: " << json::serialize(corruption)
+              << '\n'
+              << domain << " next match: "
+              << json::serialize(next_match_result) << '\n'
               << domain << " stats: " << json::serialize(stats) << '\n';
 
-  for (const auto& local : {lower_local, upper_local})
-    (void)request(json::object{
-        {"schema", 2}, {"op", "local.release"}, {"session", session},
-        {"local", local}});
   (void)request(json::object{
-      {"schema", 2}, {"op", "session.close"}, {"session", session}});
+      {"schema", 2}, {"op", "session.close"},
+      {"session", restored_session}});
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  std::filesystem::remove(resaved_path, ignored);
+  std::filesystem::remove(corrupt_path, ignored);
   return ok;
 }
 
@@ -452,6 +630,6 @@ int main() {
   const bool acb = run_domain("acb");
   const bool ok = finite_pole && rational && acb;
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": retained plan-driven rational/Acb match materialization\n";
+            << ": plan-driven rational/Acb checkpoint ownership roundtrip\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

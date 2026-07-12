@@ -36,6 +36,12 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_recurrence PRIVATE diffexp2_core)
   add_test(NAME cpp_recurrence COMMAND test_diffexp2_recurrence)
 
+  add_executable(test_diffexp2_singular_indicial
+    tests/test_singular_indicial.cpp)
+  target_compile_features(test_diffexp2_singular_indicial PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_singular_indicial PRIVATE diffexp2_core)
+  add_test(NAME cpp_singular_indicial COMMAND test_diffexp2_singular_indicial)
+
   add_executable(test_diffexp2_local_solution tests/test_local_solution.cpp)
   target_compile_features(test_diffexp2_local_solution PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_local_solution PRIVATE diffexp2_core)

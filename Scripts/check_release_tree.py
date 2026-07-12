@@ -171,6 +171,7 @@ TEST_FILES = {
     "Tests/test_indicial.m",
     "Tests/test_integrate.m",
     "Tests/test_native_algebraic_scale_bridge.m",
+    "Tests/test_native_checkpoint_single_visibility.m",
     "Tests/test_native_mixed_regular_singular_atlas.m",
     "Tests/test_native_rational_row_tail_payload.m",
     "Tests/test_native_regular_independent_arms.m",

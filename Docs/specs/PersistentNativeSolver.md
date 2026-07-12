@@ -410,10 +410,13 @@ the singular Jordan scope instead retains a complete exact affine-Jordan
 certificate for every block. The explicit Wolfram
 `SolveNativeSCCBasisColumn` seam accepts all four scopes and validates their
 statistics, capability, and full column provenance. Singular execution
-requires identity gauge/assembly, sector-preserving couplings, and no pseudo
-step. C++ derives the complete affine Jordan operator from retained exact
-`Nhat_0 d_0^-1` coefficients and verifies every captured T/P/R offset against
-it; a self-consistent caller schedule is not evidence. Unsupported retained
+requires identity gauge/assembly and sector-preserving couplings. C++ derives
+the complete affine Jordan operator from retained exact `Nhat_0 d_0^-1`
+coefficients and verifies every captured T/P/R offset against it. Exact P
+steps trigger certificate-derived Jordan compensation columns, formal
+Laurent/log cancellation over the stored Taylor overlap, and exact-tag source
+splitting through every downstream SCC; a self-consistent caller schedule is
+not evidence. Unsupported retained
 composites report
 `execution_implemented: false` and fail loudly if submitted to the native
 operation.
@@ -506,13 +509,14 @@ analytic records into the ordinary chart collision signature:
 - `analytic.native_scc_capabilities` with `regular`, `identity_gauge`,
   `identity_v`, and `no_pseudo` facts.
 
-The first Wolfram-produced slice requires all four capabilities true. The
-native regular-singular scalar scope permits `regular:false`; all other
-facts remain required, and exact retained-root verification replaces trust
-in the submitted singular schedule. Only `identity_v` is
+`regular` and `no_pseudo` are retained producer classifications, not admission
+predicates. Regular-singular scopes permit `regular:false`, and exact
+retained-root/schedule verification replaces trust in the submitted singular
+schedule. A truthful `no_pseudo:false` enables the same exact compensation
+path; it does not disable execution. Only `identity_v` is
 native-proved here, against the retained identity assembly operator;
 `regular`, `identity_gauge`, and `no_pseudo` remain collision-bound producer
-certificates which execution revalidates or refuses.  Stats label that
+provenance which execution revalidates or refuses. Stats label that
 distinction explicitly. All diagonal charts must share the scalar domain,
 geometry, work frame, and exact SCC principal graph. This first slice accepts
 only exact rational center/scale and finite radius (the scale is nonzero and
@@ -524,10 +528,10 @@ The first Wolfram producer is
 ``Solve`PrepareNativeSCCComposite[sccEnvelope, req]``.  It captures each
 diagonal block through the existing grouped homogeneous request builder under
 isolated Solve caches and stops before execution.  The producer accepts only
-regular, collision-free blocks with exact identity gauge and spectral
-transforms.  Every captured group must share one scalar field and identical
-`fb`, `w`, and guarded `nmax`; no alternate preparation is used to force a
-common rectangle.  It enriches each block's ordinary `chart.prepare`
+regular or exact affine-Jordan blocks with exact identity gauge and spectral
+transforms. Every captured group shares one scalar field and guarded `nmax`;
+the producer computes each block's exact rectangle once and captures every
+operator in their minimum-base/maximum-top union. It enriches each block's ordinary `chart.prepare`
 analytic record with `geometry`, the nested exact `principal_matrix`, and
 `native_scc_capabilities`, then supplies the handle-free parent/block/coupling
 manifest to ``CppBackend`PreparePersistentSCC``.  The bridge alone injects

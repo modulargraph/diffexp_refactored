@@ -429,8 +429,10 @@ eps^0 unit in each flattened log-zero tensor and proves that the group covers
 a complete permutation; it does not trust capture order. Regular blocks use
 the established `a=b=p=0` singleton schedules. Singular blocks are admitted
 only when C++ retains a complete exact affine-Jordan certificate for every
-diagonal operator. Analytic-regulator fields, pseudo collisions, nonidentity
-assembly, and noncanonical Jordan operators are loud.
+diagonal operator. Analytic-regulator fields, nonidentity assembly, and
+noncanonical Jordan operators are loud. `no_pseudo` remains exact producer
+provenance; a false value is admissible because native execution reclassifies
+every step and performs exact Rational compensation.
 
 The selected seed uses its captured run byte-for-byte after dropping immutable
 operator fields. Reachable descendants are listed in exact SCC topological
@@ -442,6 +444,11 @@ target's Jordan blocks. The zero initial tensor has
 pair. `source=null` remains in JSON because the typed C++ composite injects
 the in-memory predecessor `LocalSolution` directly. C++ independently
 re-certifies the schedule and source tag. No coefficient JSON roundtrip occurs.
+For CASE P, C++ derives and caches the required homogeneous Jordan-chain
+columns, applies the exact negative Laurent polar weights, proves the formal
+value-pole cancellation over the complete stored Taylor overlap, then splits
+the compensated state by exact `(a,b)` tag before continuing through the DAG.
+Any uncompensated hit, incomplete polar window, or cyclic dependency is loud.
 
 Local metadata is built with the seed/target's exact `(a,b,p)`, the retained
 parent chart geometry, and the complete ordered analytic prescriptions. Exact rational

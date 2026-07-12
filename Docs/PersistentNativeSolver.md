@@ -102,7 +102,7 @@ requires one shared coefficient field, takes the exact union of each
 diagonal block's independently proved work rectangle, builds the exact
 parent/block/coupling manifest, and calls
 ``CppBackend`PreparePersistentSCC[groups, manifest]``.  This first slice is
-limited to collision-free regular or exact affine-Jordan blocks with identity
+limited to regular or exact affine-Jordan blocks with identity
 gauge and spectral transforms.  C++ reconstructs and retains the complete
 Rational Jordan indicial certificate; `regular` is a classification rather
 than an admission predicate. It always prepares `BlockSequentialStrict`; it
@@ -122,7 +122,7 @@ derives every component from its exact flattened eps^0 unit tensor, selects the
 requested seed without trusting capture order, orders reachable targets by the
 exact SCC certificate, and propagates the exact log ceiling through the DAG.
 Each target's zero-initial particular request and complete T/P/R schedule are
-pieces are built once from that target's exact Jordan data, then independently
+built once from that target's exact Jordan data, then independently
 re-certified by C++. Native coupling and
 recurrence operate on retained `LocalSolution` values and return only an
 opaque local handle plus exact column provenance.  Exact parent geometry and
@@ -133,9 +133,10 @@ production `SolveHomogeneous` or transport dispatch.
 The native protocol advertises both
 `exact-rational-regular-singular-scalar-block-dag-column-v1` and
 `exact-rational-regular-singular-jordan-block-dag-column-v2`. At least one
-diagonal block is singular; every block has exact identity gauge/assembly and
-no pseudo-resonant family collision, and every active coupling has center pole
-order zero so it preserves the exact `(a,b,p)` sector family. Couplings may
+diagonal block is singular; every block has exact identity gauge/assembly, and
+every active coupling has center pole order zero so it preserves the exact
+`(a,b,p)` sector family. `no_pseudo` is retained as truthful producer
+provenance, not used as an admission decision. Couplings may
 have a nonzero constant Taylor coefficient, allowing an exact source resonance
 to create a new log member, and signed epsilon shifts retain the ordinary
 strict lower-frame guard.
@@ -147,9 +148,13 @@ the declared block partition, equal roots, unit superdiagonal, and zero
 off-block entries. Submitted captured steps must then satisfy exactly
 `da=a_target+n-a_i` and `db=b_target-b_i`; the seed's resonant `n=0` step
 therefore binds its tag to the retained root, and every descendant tag is
-also checked against its in-memory predecessor source. Pseudo steps,
-nonidentity spectral frames, and center-pole tag shifts remain loud unsupported
-cases. The Wolfram producer executes both scalar and multidimensional Jordan
+also checked against its in-memory predecessor source. Exact CASE-P hits are
+compensated by certificate-derived homogeneous Jordan columns; their negative
+Laurent weights are proved over the stored Taylor overlap, and the resulting
+exact `(a,b)` sectors are split, propagated, and recombined through every
+downstream SCC. Incomplete polar windows, cyclic compensation dependencies,
+nonidentity spectral frames, and center-pole tag shifts remain loud errors.
+The Wolfram producer executes both scalar and multidimensional Jordan
 scopes through the explicit seam; production dispatch is unchanged.
 
 The exact-rational `local.match` migration seam consumes retained regular

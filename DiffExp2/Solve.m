@@ -4151,12 +4151,13 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
       !MemberQ[{True, False}, Lookup[record, "regular", None]] ||
         !TrueQ[Lookup[record, "identity_gauge", False]] ||
         !TrueQ[Lookup[record, "identity_v", False]] ||
-        !TrueQ[Lookup[record, "no_pseudo", False]]]]];
+        !MemberQ[{True, False},
+          Lookup[record, "no_pseudo", None]]]]];
   If[badBlocks =!= {},
     err["E6", cs, <|"UnsupportedBlocks" -> Map[
         <|"Block" -> #, "Capabilities" -> capabilities[[#]]|> &,
         badBlocks],
-      "Detail" -> "native SCC preparation requires collision-free regular or exact affine-Jordan diagonal blocks with exact identity Gauge/GaugeInverse and V/VInv"|>]];
+      "Detail" -> "native SCC preparation requires regular or exact affine-Jordan diagonal blocks with exact identity Gauge/GaugeInverse and V/VInv; no_pseudo is retained provenance, not an admission decision"|>]];
   requestedMin = epsWindow["Min"];
   requestedMax = epsWindow["CompleteMax"];
   publicTOrder = req["TOrder"];
@@ -4620,8 +4621,30 @@ sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
       "collision-bound-producer-certificate" &&
     Lookup[evidence, "jordan_indicial", None] ===
       "retained-exact-rational-full-matrix-certificate" &&
+    Lookup[evidence, "no_pseudo", None] ===
+      "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate" &&
+    Lookup[evidence, "pseudo_schedule_execution", None] ===
+      "exact-rational-joint-compensation-and-formal-overlap-certificate" &&
     Lookup[evidence, "resonance_schedule", None] ===
       "retained-affine-jordan-verified-exact-captured-run"];
+
+sccNativePseudoDiagnosticsQ[response_Association] := Module[
+  {records = Lookup[response, "block_diagnostics", None]},
+  ListQ[records] && records =!= {} && AllTrue[records, Function[record,
+    Module[{hits, compensations, depth, uncompensated},
+      If[!AssociationQ[record], Return[False, Module]];
+      hits = Lookup[record, "pseudo_hit_count", None];
+      compensations = Lookup[record, "pseudo_compensation_count", None];
+      depth = Lookup[record, "max_pseudo_depth", None];
+      uncompensated = Lookup[record,
+        "uncompensated_pseudo_hit_count", None];
+      And[IntegerQ[hits], hits >= 0,
+        IntegerQ[compensations], compensations >= 0,
+        IntegerQ[depth], depth >= 0,
+        uncompensated === 0,
+        If[hits === 0, True,
+          compensations > 0 && depth > 0 &&
+            TrueQ[Lookup[record, "pseudo_value_certified", False]]]]]]]];
 
 sccNativeCanonicalJSONValue[value_Association] := Association@Map[
   Function[key, key -> sccNativeCanonicalJSONValue[value[key]]],
@@ -4906,6 +4929,8 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
       Lookup[response, "execution_capability", None] =!=
         expectedCapability ||
       Lookup[response, "pseudo_hit_count", None] =!= 0 ||
+      (singularExecution &&
+        !sccNativePseudoDiagnosticsQ[response]) ||
       forbiddenPayloadKeys =!= {} || !AssociationQ[provenance] ||
       Lookup[provenance, "scc", None] =!= prepared["SCC"] ||
       Lookup[provenance, "scc_exact_identity", None] =!=

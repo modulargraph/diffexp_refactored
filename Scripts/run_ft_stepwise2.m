@@ -103,11 +103,14 @@ allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
    FIRE data.  The complete contract is stored beside the digest and compared
    exactly on load, so the digest is never the sole stale-data guard.
 
-   FT_REBUILD_PREP=1 forces a rebuild.  Legacy v2 snapshots have no exact
+   FT_REBUILD_PREP=1 forces a rebuild.  Legacy snapshots have no exact
    preparation-source manifest and are rejected by default.  The explicit
-   FT_MIGRATE_LEGACY_PREP=1 escape hatch accepts exactly one legacy candidate
-   only after exact input/runtime/level/reduction-key validation and rewrites
-   it immediately as v3; ambiguous candidates remain rejected. *)
+   FT_MIGRATE_LEGACY_PREP=1 escape hatch accepts exactly one candidate only
+   after exact input/level/reduction-key validation and rewrites it immediately
+   as v3; ambiguous candidates remain rejected.  V2 also proves its retained
+   FIRE setup record.  V1 cannot: its old tuple keys are uniquely bound to the
+   retained level topologies and re-keyed with the current exact fallback
+   setup record, while provenance remains explicitly marked unverified. *)
 $ftPrepCacheVersion = 3;
 $ftPrepContractSchema = "FeynmanTrick.PreparedFTContract/v3";
 $ftPrepPreparationSourcePaths = {
@@ -171,6 +174,42 @@ ftPrepContractRecord[name_String, topology_Association, sequence_List] := <|
 
 ftPrepContractKey[contract_Association] := Hash[contract, "SHA256"];
 
+$ftPrepProvenanceSchema = "FeynmanTrick.PreparedFTProvenance/v1";
+
+ftPrepFreshProvenance[] := <|
+  "Schema" -> $ftPrepProvenanceSchema,
+  "Kind" -> "PreparedV3",
+  "SourceSnapshotVersion" -> $ftPrepCacheVersion,
+  "VerifiedFIRESetupProvenance" -> True,
+  "VerifiedPreparationSourceProvenance" -> True
+|>;
+
+ftPrepProvenanceQ[provenance_] := AssociationQ[provenance] &&
+  Lookup[provenance, "Schema", None] === $ftPrepProvenanceSchema &&
+  Switch[Lookup[provenance, "Kind", None],
+    "PreparedV3",
+      Lookup[provenance, "SourceSnapshotVersion", None] === 3 &&
+        TrueQ[Lookup[provenance, "VerifiedFIRESetupProvenance", False]] &&
+        TrueQ[Lookup[provenance,
+          "VerifiedPreparationSourceProvenance", False]],
+    "LegacyV2Validated",
+      Lookup[provenance, "SourceSnapshotVersion", None] === 2 &&
+        TrueQ[Lookup[provenance, "VerifiedFIRESetupProvenance", False]] &&
+        TrueQ[Lookup[provenance,
+          "VerifiedPreparationSourceProvenance", True] === False],
+    "LegacyV1Rekeyed",
+      Lookup[provenance, "SourceSnapshotVersion", None] === 1 &&
+        TrueQ[Lookup[provenance,
+          "VerifiedFIRESetupProvenance", True] === False] &&
+        TrueQ[Lookup[provenance,
+          "VerifiedPreparationSourceProvenance", True] === False] &&
+        Lookup[provenance, "ReductionKeyMigration", None] ===
+          "LegacyTupleToFallbackSetup/v1" &&
+        IntegerQ[Lookup[provenance, "RekeyedEntries", None]] &&
+        Lookup[provenance, "RekeyedEntries", -1] >= 0 &&
+        StringQ[Lookup[provenance, "SourceSnapshotSHA256", None]],
+    _, False];
+
 $ftLadderCheckpointVersion = 2;
 $ftLadderSourceFingerprint = Hash[
   ({#, FileHash[#, "SHA256"]} & /@ Sort[Join[
@@ -193,11 +232,16 @@ ftPrepRuntimeRecordCompatibleQ[stored_, expected_Association] :=
   AssociationQ[stored] &&
     KeyTake[stored, Keys[expected]] === expected;
 
-preparedFTDataMatchesContractQ[data_, contract_Association] := Module[
-  {nLevels, levels, config, runtime},
+preparedFTDataMatchesContractQ[data_, contract_Association,
+    provenance_:Automatic] := Module[
+  {nLevels, levels, config, runtime, provenanceRecord, legacyV1Q},
   If[!preparedFTDataQ[data] ||
       Lookup[contract, "Schema", None] =!= $ftPrepContractSchema,
     Return[False, Module]];
+  provenanceRecord = Replace[provenance, Automatic :> ftPrepFreshProvenance[]];
+  If[!ftPrepProvenanceQ[provenanceRecord], Return[False, Module]];
+  legacyV1Q = Lookup[provenanceRecord, "Kind", None] ===
+    "LegacyV1Rekeyed";
   nLevels = Lookup[data, "NumLevels", None];
   levels = Lookup[data, "Levels", <||>];
   config = Lookup[contract, "PreparationConfiguration", <||>];
@@ -217,9 +261,24 @@ preparedFTDataMatchesContractQ[data_, contract_Association] := Module[
       Module[{topology, setup},
         topology = Lookup[levels[level], "Topology", <||>];
         setup = Lookup[topology, "SetupFingerprintRecord", None];
-        ftPrepRuntimeRecordCompatibleQ[setup, runtime] &&
-          Lookup[setup, "AutoDetectRestrictions", Missing["Unset"]] ===
-            Lookup[config, "AutoDetectRestrictions", Missing["Unset"]]
+        If[legacyV1Q,
+          (* Historical v1 topologies contain no SetupFingerprintRecord.
+             Never fabricate one: exact reductions are re-keyed below with
+             FIREInterface's full fallback topology/config record, and any
+             later cache miss remains unable to launch FIRE. *)
+          !AssociationQ[setup] &&
+            Lookup[
+              FeynmanTrick`FIREInterface`Private`fallbackSetupFingerprintRecord[
+                topology],
+              {"AutoDetectRestrictions", "DimensionVariable"},
+              Missing["Unset"]] ===
+            Lookup[config,
+              {"AutoDetectRestrictions", "DimensionVariable"},
+              Missing["Unset"]],
+          ftPrepRuntimeRecordCompatibleQ[setup, runtime] &&
+            Lookup[setup, "AutoDetectRestrictions", Missing["Unset"]] ===
+              Lookup[config, "AutoDetectRestrictions", Missing["Unset"]]
+        ]
       ]]]
   ]
 ];
@@ -248,9 +307,12 @@ ftPrepKey[name_String, topology_Association, sequence_List] :=
 ftPrepFile[name_, key_] := FileNameJoin[{prepCacheRoot,
   name <> "_" <> IntegerString[Abs[key], 16] <> ".mx"}];
 
-savePreparedFT[file_String, contract_Association, data_] := Module[
-  {payload, tmp, ok, key = ftPrepContractKey[contract]},
-  If[!preparedFTDataMatchesContractQ[data, contract],
+savePreparedFT[file_String, contract_Association, data_,
+    provenance_:Automatic] := Module[
+  {payload, tmp, ok, key = ftPrepContractKey[contract], provenanceRecord},
+  provenanceRecord = Replace[provenance, Automatic :> ftPrepFreshProvenance[]];
+  If[!ftPrepProvenanceQ[provenanceRecord] ||
+      !preparedFTDataMatchesContractQ[data, contract, provenanceRecord],
     Print["FTPREP CACHE CONTRACT MISMATCH; not saving ", file];
     Return[$Failed, Module]];
   If[!preparedReductionCacheQ[data,
@@ -261,7 +323,8 @@ savePreparedFT[file_String, contract_Association, data_] := Module[
     CreateDirectory[DirectoryName[file], CreateIntermediateDirectories -> True]];
   payload = <|
     "Version" -> $ftPrepCacheVersion, "Key" -> key,
-    "Contract" -> contract, "FTData" -> data,
+    "Contract" -> contract, "Provenance" -> provenanceRecord,
+    "FTData" -> data,
     "ReductionCache" -> KeyTake[
       FeynmanTrick`FIREInterface`Private`$ReductionCache,
       requiredReductionKeys[data]]|>;
@@ -289,7 +352,8 @@ readPreparedFTPayload[file_String] := Module[{payload, ok},
   If[AssociationQ[payload], payload, $Failed]];
 
 loadPreparedFT[file_String, contract_Association] := Module[
-  {payload, data, reductionCache, key = ftPrepContractKey[contract], reason},
+  {payload, data, reductionCache, provenance,
+   key = ftPrepContractKey[contract], reason},
   If[!FileExistsQ[file], Return[$Failed, Module]];
   payload = readPreparedFTPayload[file];
   If[!AssociationQ[payload],
@@ -297,6 +361,7 @@ loadPreparedFT[file_String, contract_Association] := Module[
     Return[$Failed, Module]];
   data = Lookup[payload, "FTData", None];
   reductionCache = Lookup[payload, "ReductionCache", <||>];
+  provenance = Lookup[payload, "Provenance", None];
   reason = Which[
     Lookup[payload, "Version", None] =!= $ftPrepCacheVersion,
       "unsupported snapshot version",
@@ -304,7 +369,9 @@ loadPreparedFT[file_String, contract_Association] := Module[
       "preparation contract differs",
     Lookup[payload, "Key", None] =!= key,
       "contract digest differs",
-    !preparedFTDataMatchesContractQ[data, contract],
+    !ftPrepProvenanceQ[provenance],
+      "preparation provenance is absent or malformed",
+    !preparedFTDataMatchesContractQ[data, contract, provenance],
       "prepared level data does not match the exact contract",
     !preparedReductionCacheQ[data, reductionCache],
       "required exact reduction keys are absent or malformed",
@@ -318,49 +385,168 @@ loadPreparedFT[file_String, contract_Association] := Module[
   Print["FTPREP CACHE HIT ", file];
   data];
 
-legacyPreparedFTPayloadCompatibleQ[payload_, contract_Association] := Module[
-  {data, reductionCache},
+legacyV1TopologyIdentity[topology_Association] := Lookup[topology,
+  {"WorkDirectory", "Name", "ProblemNumber", "NumPropagators"},
+  Missing["Absent"]];
+
+legacyV1RekeyReductionCache[data_Association, oldCache_Association] := Module[
+  {levels, topologies, topologyIdentities, rekeyed = <||>, result,
+   oldKey, entry, matches, topology, integral, newKey, existing},
+  levels = Lookup[data, "Levels", <||>];
+  topologies = Lookup[levels[#], "Topology", <||>] & /@
+    Range[Lookup[data, "NumLevels", 0]];
+  If[!AllTrue[topologies, AssociationQ],
+    Return[Failure["LegacyPreparationMigration", <|
+      "Detail" -> "v1 prepared levels do not all contain topologies"|>],
+      Module]];
+  topologyIdentities = legacyV1TopologyIdentity /@ topologies;
+  If[!DuplicateFreeQ[topologyIdentities],
+    Return[Failure["LegacyPreparationMigration", <|
+      "Detail" -> "v1 level topology identities are ambiguous",
+      "Identities" -> topologyIdentities|>], Module]];
+  result = Catch[
+    Scan[Function[rule,
+      oldKey = First[rule]; entry = Last[rule];
+      If[!MatchQ[oldKey, {_, _String, _Integer, _Integer, _List}] ||
+          !AssociationQ[entry] ||
+          !KeyExistsQ[entry, "Reduction"] ||
+          !ListQ[Lookup[entry, "Masters", None]],
+        Throw[Failure["LegacyPreparationMigration", <|
+          "Detail" -> "v1 reduction entry or tuple key is malformed",
+          "Key" -> oldKey|>], "LegacyV1Rekey"]];
+      matches = Pick[topologies,
+        SameQ[#, Take[oldKey, 4]] & /@ topologyIdentities, True];
+      If[Length[matches] =!= 1,
+        Throw[Failure["LegacyPreparationMigration", <|
+          "Detail" -> "v1 reduction key does not identify exactly one level",
+          "Key" -> oldKey, "MatchingLevels" -> Length[matches]|>],
+          "LegacyV1Rekey"]];
+      topology = First[matches];
+      integral =
+        FeynmanTrick`FIREInterface`Private`normalizeIntegralIndex[
+          topology, Last[oldKey]];
+      If[integral === $Failed,
+        Throw[Failure["LegacyPreparationMigration", <|
+          "Detail" -> "v1 reduction integral cannot be normalized",
+          "Key" -> oldKey|>], "LegacyV1Rekey"]];
+      newKey = FeynmanTrick`FIREInterface`Private`reductionCacheKey[
+        topology, integral];
+      existing = Lookup[rekeyed, Key[newKey], Missing["Absent"]];
+      If[MissingQ[existing],
+        AssociateTo[rekeyed, newKey -> entry],
+        If[existing =!= entry,
+          Throw[Failure["LegacyPreparationMigration", <|
+            "Detail" -> "nonidentical v1 entries collide after exact re-key",
+            "OldKey" -> oldKey, "NewKey" -> newKey|>],
+            "LegacyV1Rekey"]]]
+    ], Normal[oldCache]];
+    rekeyed,
+    "LegacyV1Rekey"];
+  If[FailureQ[result], Return[result, Module]];
+  If[!preparedReductionCacheQ[data, result],
+    Return[Failure["LegacyPreparationMigration", <|
+      "Detail" ->
+        "re-keyed v1 cache does not cover every current exact boundary key"|>],
+      Module]];
+  result
+];
+
+legacyPreparedFTCandidate[payload_, contract_Association,
+    sourceFile_String] := Module[
+  {version, data, reductionCache, provenance},
   If[!AssociationQ[payload] ||
-      Lookup[payload, "Version", None] =!= 2 ||
-      !IntegerQ[Lookup[payload, "Key", None]],
-    Return[False, Module]];
+      !IntegerQ[Lookup[payload, "Key", None]], Return[$Failed, Module]];
+  version = Lookup[payload, "Version", None];
   data = Lookup[payload, "FTData", None];
   reductionCache = Lookup[payload, "ReductionCache", <||>];
-  TrueQ[preparedFTDataMatchesContractQ[data, contract] &&
+  Switch[version,
+    2,
+      provenance = <|
+        "Schema" -> $ftPrepProvenanceSchema,
+        "Kind" -> "LegacyV2Validated",
+        "SourceSnapshotVersion" -> 2,
+        "VerifiedFIRESetupProvenance" -> True,
+        "VerifiedPreparationSourceProvenance" -> False|>;
+      If[preparedFTDataMatchesContractQ[data, contract, provenance] &&
+          preparedReductionCacheQ[data, reductionCache],
+        <|"Data" -> data, "ReductionCache" -> reductionCache,
+          "Provenance" -> provenance|>, $Failed],
+    1,
+      If[!preparedFTDataQ[data] || !AssociationQ[reductionCache],
+        Return[$Failed, Module]];
+      reductionCache = legacyV1RekeyReductionCache[data, reductionCache];
+      If[FailureQ[reductionCache], Return[$Failed, Module]];
+      provenance = <|
+        "Schema" -> $ftPrepProvenanceSchema,
+        "Kind" -> "LegacyV1Rekeyed",
+        "SourceSnapshotVersion" -> 1,
+        "VerifiedFIRESetupProvenance" -> False,
+        "VerifiedPreparationSourceProvenance" -> False,
+        "ReductionKeyMigration" -> "LegacyTupleToFallbackSetup/v1",
+        "RekeyedEntries" -> Length[reductionCache],
+        "SourceSnapshotSHA256" -> IntegerString[
+          FileHash[sourceFile, "SHA256"], 16, 64]|>;
+      If[preparedFTDataMatchesContractQ[data, contract, provenance] &&
+          preparedReductionCacheQ[data, reductionCache],
+        <|"Data" -> data, "ReductionCache" -> reductionCache,
+          "Provenance" -> provenance|>, $Failed],
+    _, $Failed]
+];
+
+legacyPreparedFTPayloadCompatibleQ[payload_, contract_Association] := Module[
+  {version = Lookup[payload, "Version", None], provenance, data,
+   reductionCache},
+  (* Definitions-only compatibility seam retained for focused v2 tests.  V1
+     validation additionally needs the source file hash and exact key re-map,
+     so it is exercised through legacyPreparedFTCandidate. *)
+  If[version =!= 2, Return[False, Module]];
+  provenance = <|"Schema" -> $ftPrepProvenanceSchema,
+    "Kind" -> "LegacyV2Validated", "SourceSnapshotVersion" -> 2,
+    "VerifiedFIRESetupProvenance" -> True,
+    "VerifiedPreparationSourceProvenance" -> False|>;
+  data = Lookup[payload, "FTData", None];
+  reductionCache = Lookup[payload, "ReductionCache", <||>];
+  TrueQ[IntegerQ[Lookup[payload, "Key", None]] &&
+    preparedFTDataMatchesContractQ[data, contract, provenance] &&
     preparedReductionCacheQ[data, reductionCache]]
 ];
 
 migrateLegacyPreparedFT[name_String, targetFile_String,
     contract_Association] := Module[
-  {candidates, valid = {}, payload, sourceFile, oldReductionCache, wrote},
+  {candidates, valid = {}, payload, candidate, sourceFile,
+   oldReductionCache, wrote},
   candidates = DeleteCases[
     Sort[FileNames[name <> "_*.mx", prepCacheRoot]], targetFile];
   Scan[Function[file,
     payload = readPreparedFTPayload[file];
-    If[AssociationQ[payload] && Lookup[payload, "Version", None] === 2,
-      If[legacyPreparedFTPayloadCompatibleQ[payload, contract],
-        AppendTo[valid, {file, payload}],
+    If[AssociationQ[payload] &&
+        MemberQ[{1, 2}, Lookup[payload, "Version", None]],
+      candidate = legacyPreparedFTCandidate[payload, contract, file];
+      If[AssociationQ[candidate],
+        AppendTo[valid, Join[<|"SourceFile" -> file|>, candidate]],
         Print["FTPREP LEGACY REJECT ", file,
-          ": exact input/runtime/level/reduction validation failed"]]]],
+          ": exact input/level/reduction validation failed"]]]],
     candidates];
   If[valid === {},
     Print["FTPREP LEGACY MIGRATION NONE for ", name];
     Return[$Failed, Module]];
   If[Length[valid] =!= 1,
     Print["FTPREP LEGACY MIGRATION REJECT ", name,
-      ": ambiguous validated snapshots ", First /@ valid];
+      ": ambiguous validated snapshots ", Lookup[valid, "SourceFile"]];
     Return[$Failed, Module]];
-  {sourceFile, payload} = First[valid];
+  candidate = First[valid];
+  sourceFile = candidate["SourceFile"];
   oldReductionCache = FeynmanTrick`FIREInterface`Private`$ReductionCache;
   FeynmanTrick`FIREInterface`Private`$ReductionCache = Join[
-    oldReductionCache, payload["ReductionCache"]];
-  wrote = savePreparedFT[targetFile, contract, payload["FTData"]];
+    oldReductionCache, candidate["ReductionCache"]];
+  wrote = savePreparedFT[targetFile, contract, candidate["Data"],
+    candidate["Provenance"]];
   If[wrote === $Failed,
     FeynmanTrick`FIREInterface`Private`$ReductionCache = oldReductionCache;
     Print["FTPREP LEGACY MIGRATION WRITE FAILED ", sourceFile];
     Return[$Failed, Module]];
   Print["FTPREP LEGACY MIGRATED ", sourceFile, " -> ", targetFile];
-  payload["FTData"]
+  candidate["Data"]
 ];
 
 saveLadderCheckpoint[file_, payload_] := Module[

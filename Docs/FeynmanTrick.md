@@ -166,14 +166,21 @@ boundary, LevelReduction, DiffExp2 solver, and transport-only changes do not
 force FIRE to rerun.  A snapshot stores and exactly rechecks the full contract
 and all required reduction keys, rather than trusting its digest alone.
 
-Legacy v2 snapshots are rejected by default because they do not contain that
-source contract.  A one-time migration can be requested explicitly with
+Legacy v1/v2 snapshots are rejected by default because they do not contain
+that source contract.  A one-time migration can be requested explicitly with
 `FT_MIGRATE_LEGACY_PREP=1` (or the facade option
 `"MigrateLegacyPreparation" -> True`).  Migration succeeds only when exactly
-one candidate passes the current topology, sequence, configuration, runtime,
-prepared-level, and hardened reduction-key checks; otherwise it rejects the
-snapshot and preparation runs normally.  Legacy v1 snapshots predate hardened
-reduction keys and are never migrated.
+one candidate passes the current topology, sequence, configuration,
+prepared-level, and reduction-key checks; otherwise it rejects the snapshot
+and preparation runs normally.  V2 must additionally carry FIRE setup records
+matching the current runtime.  V1 predates those records and hardened keys: its
+old tuple keys must identify exactly one retained level topology, are
+normalized and re-keyed with the full current fallback topology/configuration
+record, and must cover every current boundary request without a nonidentical
+collision.  The migrated v3 snapshot records that its historical FIRE setup
+and source provenance remain unverified.  Exact re-keyed cache hits never
+launch FIRE; any future missing reduction is still rejected because no
+verified setup record was fabricated.
 
 `FT_LADDER_CHECKPOINT_DIR` stores two kinds of checkpoint:
 

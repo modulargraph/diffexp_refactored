@@ -115,10 +115,9 @@ runtimeB = Block[{
 test["exact FIRE runtime invalidates prep identity",
   runtimeA =!= runtimeB, {runtimeA, runtimeB}];
 
-(* Synthetic v2 migration uses the same full structural and reduction-key
-   checks as a real snapshot.  Existing prepared files in this workspace are
-   v1 (their reduction keys predate the hardened setup fingerprint), so they
-   are intentionally not eligible for this v2-only migration path. *)
+(* Synthetic v2 migration uses the same full structural, retained FIRE-setup,
+   and reduction-key checks as a real snapshot.  The v1 fixture below exercises
+   the separate explicit tuple-key re-map without inventing setup provenance. *)
 runtime = baseContract["FIRERuntime"];
 preparedTopology = inputTopology;
 preparedTopology["WorkDirectory"] = tmpDir;
@@ -162,12 +161,78 @@ test["explicit v2 migration rewrites one fully validated snapshot as v3",
   AssociationQ[migrated] && FileExistsQ[targetFile] &&
     migratedPayload["Version"] === 3 &&
     migratedPayload["Contract"] === baseContract &&
+    migratedPayload["Provenance", "Kind"] === "LegacyV2Validated" &&
     migratedPayload["Key"] === baseKey,
   migratedPayload];
 badLegacy = Join[legacyPayload, <|"FTData" -> Join[preparedData,
   <|"CombinationSequence" -> {{2, 1}}|>]|>];
 test["legacy migration rejects structurally stale prepared data",
   !legacyPreparedFTPayloadCompatibleQ[badLegacy, baseContract]];
+
+v1Name = "prep-v1";
+v1Contract = ftPrepContractRecord[v1Name, inputTopology, sequence];
+v1Topology = KeyDrop[preparedTopology, {"SetupFingerprintRecord",
+  "SetupFingerprint"}];
+v1Data = Join[preparedData, <|"Levels" -> <|
+  0 -> preparedData["Levels", 0],
+  1 -> Join[preparedData["Levels", 1],
+    <|"Topology" -> v1Topology|>]|>|>];
+v1OldKey = Join[legacyV1TopologyIdentity[v1Topology], {{2, 0}}];
+v1Payload = <|"Version" -> 1, "Key" -> 131313,
+  "FTData" -> v1Data, "ReductionCache" -> Association[
+    v1OldKey -> <|"Reduction" -> Global`G[1, {2, 0}],
+      "Masters" -> {{2, 0}}|>]|>;
+v1File = FileNameJoin[{tmpDir, v1Name <> "_legacy.mx"}];
+Global`$FT2PreparedSnapshot = v1Payload;
+DumpSave[v1File, Global`$FT2PreparedSnapshot];
+Clear[Global`$FT2PreparedSnapshot];
+v1TargetFile = ftPrepFile[v1Name, ftPrepContractKey[v1Contract]];
+v1Migrated = migrateLegacyPreparedFT[
+  v1Name, v1TargetFile, v1Contract];
+Clear[Global`$FT2PreparedSnapshot]; Get[v1TargetFile];
+v1MigratedPayload = Global`$FT2PreparedSnapshot;
+Clear[Global`$FT2PreparedSnapshot];
+test["explicit v1 migration exactly re-keys legacy tuple reductions",
+  AssociationQ[v1Migrated] &&
+    v1MigratedPayload["Provenance", "Kind"] === "LegacyV1Rekeyed" &&
+    TrueQ[v1MigratedPayload["Provenance",
+      "VerifiedFIRESetupProvenance"] === False] &&
+    preparedReductionCacheQ[v1Data,
+      v1MigratedPayload["ReductionCache"]],
+  v1MigratedPayload];
+
+FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
+v1Reloaded = loadPreparedFT[v1TargetFile, v1Contract];
+fireLaunchObserved = False;
+v1ExactHit = Block[{
+    FeynmanTrick`FIREInterface`Private`preparedTopologyCompatibleQ,
+    FeynmanTrick`FIREInterface`Private`ensureFIRELoaded,
+    FeynmanTrick`FIREInterface`Private`runFIRE6},
+  FeynmanTrick`FIREInterface`Private`preparedTopologyCompatibleQ[___] :=
+    (fireLaunchObserved = True; False);
+  FeynmanTrick`FIREInterface`Private`ensureFIRELoaded[___] :=
+    (fireLaunchObserved = True; $Failed);
+  FeynmanTrick`FIREInterface`Private`runFIRE6[___] :=
+    (fireLaunchObserved = True; 99);
+  FeynmanTrick`FIREInterface`ReduceIntegrals[v1Topology, {{2, 0}}]
+];
+test["migrated v1 exact cache hit cannot enter any FIRE launch seam",
+  AssociationQ[v1Reloaded] && !TrueQ[fireLaunchObserved] &&
+    AssociationQ[v1ExactHit] &&
+    v1ExactHit[{2, 0}] === Global`G[1, {2, 0}],
+  {fireLaunchObserved, v1ExactHit}];
+v1CollisionCache = Association[
+  Join[legacyV1TopologyIdentity[v1Topology], {{2}}] -> <|
+    "Reduction" -> 1, "Masters" -> {{2, 0}}|>,
+  Join[legacyV1TopologyIdentity[v1Topology], {{2, 0}}] -> <|
+    "Reduction" -> 2, "Masters" -> {{2, 0}}|>];
+test["v1 re-key rejects nonidentical normalized-key collisions",
+  FailureQ[legacyV1RekeyReductionCache[v1Data, v1CollisionCache]]];
+v1IncompleteCache = Association[
+  Join[legacyV1TopologyIdentity[v1Topology], {{1, 0}}] -> <|
+    "Reduction" -> 1, "Masters" -> {{2, 0}}|>];
+test["v1 re-key rejects caches missing a current exact boundary key",
+  FailureQ[legacyV1RekeyReductionCache[v1Data, v1IncompleteCache]]];
 
 SetEnvironment["FT_MIGRATE_LEGACY_PREP" -> "1"];
 migrationSettings =

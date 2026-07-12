@@ -35,6 +35,7 @@ singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
 recurrenceBackend = runnerSettings["RecurrenceBackend"];
 cppBatchEndpointArms = runnerSettings["BatchEndpointArms"];
 cppArmThreadBudget = runnerSettings["CppThreads"];
+deltaPrescriptionSign = runnerSettings["DeltaPrescriptionSign"];
 DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
   singularMatchPrecondition;
 If[singularMatchPrecondition,
@@ -55,11 +56,14 @@ If[runnerSettings["RequestedStepDivisionOrder"] =!= divisionOrder,
 levelEpsilonHalos = runnerSettings["LevelEpsilonHalos"];
 levelEpsilonHalo[level_Integer] := If[1 <= level <= Length[levelEpsilonHalos],
   levelEpsilonHalos[[level]], 0];
+ft2UserRawFloor[epsilonOrder_Integer, halos_List,
+    level_Integer] := If[level === 0, epsilonOrder,
+  Max[epsilonOrder + level +
+    If[1 <= level <= Length[halos], halos[[level]], 0], 1]];
 requestedEpsilonOrder[level_Integer] := Max[
   epsOrder + level + boundaryExtraOrder + levelEpsilonHalo[level], 1];
-nativeRequiredRawTop[lowerLevel_Integer] := If[lowerLevel === 0,
-  epsOrder,
-  Max[epsOrder + lowerLevel + levelEpsilonHalo[lowerLevel], 1]];
+nativeRequiredRawTop[lowerLevel_Integer] :=
+  ft2UserRawFloor[epsOrder, levelEpsilonHalos, lowerLevel];
 
 (* Old FeynmanTrick/DiffExp prescribed both endpoints and every matrix/IBP
    segmentation factor with a consistent +i delta side.  DiffExp2's config
@@ -76,7 +80,7 @@ levelDeltaPrescriptions[var_Symbol, sys_Association, extra_List] := Module[
   factors = DeleteDuplicates[factors,
     TrueQ[PossibleZeroQ[Expand[#1 - #2]]] ||
       TrueQ[PossibleZeroQ[Expand[#1 + #2]]] &];
-  {#, 1} & /@ factors];
+  {#, deltaPrescriptionSign} & /@ factors];
 
 anchor = 11/23;
 inputPrecision = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
@@ -224,6 +228,56 @@ saveLadderCheckpoint[file_, payload_] := Module[
 ladderCheckpointReject[file_, detail_] :=
   (Print["FTLADDER RESUME REJECT ", file, ": ", detail]; $Failed);
 
+(* The matrix fixes only a relative epsilon gauge.  Capture that exact gauge
+   once so the full-ladder planner and the runtime normalization use the same
+   pole-free basis without repeating MatrixPoleOrders/FindEpsPrefactors. *)
+ft2RelativeEpsilonGauge[matrix_, epsSymbol_Symbol] := Module[
+  {d, rawPoleOrders, hasRawPoles, canonical, relative, normalized,
+   normalizedPoleOrders, record},
+  d = Length[matrix];
+  If[!MatrixQ[matrix] || Dimensions[matrix] =!= {d, d} || d === 0,
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "level matrix must be a nonempty square matrix",
+      "Dimensions" -> Dimensions[matrix]|>], Module]];
+  rawPoleOrders =
+    FeynmanTrick`EpsPrefactors`MatrixPoleOrders[matrix, epsSymbol];
+  hasRawPoles = Max[Flatten[rawPoleOrders]] > 0;
+  canonical = If[hasRawPoles,
+    FeynmanTrick`EpsPrefactors`FindEpsPrefactors[matrix, epsSymbol],
+    ConstantArray[0, d]];
+  If[!ListQ[canonical] || Length[canonical] =!= d ||
+      !AllTrue[canonical, IntegerQ],
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "could not determine an exact integer epsilon basis",
+      "Candidate" -> canonical|>], Module]];
+  relative = canonical - Min[canonical];
+  normalized = FeynmanTrick`EpsPrefactors`ApplyEpsPrefactors[
+    matrix, relative, epsSymbol];
+  normalizedPoleOrders = If[hasRawPoles,
+    FeynmanTrick`EpsPrefactors`MatrixPoleOrders[normalized, epsSymbol],
+    rawPoleOrders];
+  If[Max[Flatten[normalizedPoleOrders]] > 0,
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "diagonal epsilon normalization did not remove every matrix pole",
+      "CanonicalPrefactors" -> canonical,
+      "RelativePrefactors" -> relative,
+      "RemainingPoleOrders" -> normalizedPoleOrders|>], Module]];
+  record = <|
+    "Schema" -> "FeynmanTrick.RelativeEpsilonGauge/v1",
+    "InputMatrixHash" -> Hash[matrix, "SHA256"],
+    "CanonicalPrefactors" -> canonical,
+    "RelativePrefactors" -> relative,
+    "RawPoleOrders" -> rawPoleOrders,
+    "NormalizedPoleOrders" -> normalizedPoleOrders,
+    "NormalizedMatrixHash" -> Hash[normalized, "SHA256"],
+    "PoleFree" -> True|>;
+  <|"Matrix" -> normalized, "CanonicalPrefactors" -> canonical,
+    "RelativePrefactors" -> relative, "RawPoleOrders" -> rawPoleOrders,
+    "NormalizedPoleOrders" -> normalizedPoleOrders,
+    "Record" -> record,
+    "Identity" -> ft2CanonicalIdentity["ft2-relative-epsilon-gauge-",
+      record]|>];
+
 (* FIRE returns differential equations in its physical master basis I.  Some
    otherwise regular systems contain epsilon poles in that basis.  Transport
    the exactly equivalent basis J_i = eps^k_i I_i instead:
@@ -238,10 +292,11 @@ ladderCheckpointReject[file_, detail_] :=
    supplied by explicit lookahead/halos and are never filled with assumed
    zeros. *)
 ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
-    boundaryPrefactors_List, epsSymbol_Symbol] := Module[
-  {d, widths, inputTop, rawPoleOrders, canonical, commonOffset,
-   effective, boundaryShifts, normalized, normalizedPoleOrders,
-   shiftedBoundary, record, hasRawPoles},
+    boundaryPrefactors_List, epsSymbol_Symbol,
+    suppliedGauge_:Automatic] := Module[
+  {d, widths, inputTop, gauge, rawPoleOrders, canonical, relative,
+   commonOffset, effective, boundaryShifts, normalized,
+   normalizedPoleOrders, shiftedBoundary, record},
   d = Length[matrix];
   If[!MatrixQ[matrix] || Dimensions[matrix] =!= {d, d} || d === 0,
     Return[Failure["FeynmanTrickEpsilonBasis", <|
@@ -261,19 +316,32 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
       "Detail" -> "epsilon boundary rows must have one nonempty common window",
       "Widths" -> widths|>], Module]];
   inputTop = First[widths] - 1;
-  rawPoleOrders =
-    FeynmanTrick`EpsPrefactors`MatrixPoleOrders[matrix, epsSymbol];
-  hasRawPoles = Max[Flatten[rawPoleOrders]] > 0;
-  (* Avoid a second full MatrixPoleOrders pass inside FindEpsPrefactors for
-     the overwhelmingly common no-op level. *)
-  canonical = If[hasRawPoles,
-    FeynmanTrick`EpsPrefactors`FindEpsPrefactors[matrix, epsSymbol],
-    ConstantArray[0, d]];
-  If[!ListQ[canonical] || Length[canonical] =!= d ||
-      !AllTrue[canonical, IntegerQ],
+  gauge = If[suppliedGauge === Automatic,
+    ft2RelativeEpsilonGauge[matrix, epsSymbol], suppliedGauge];
+  If[FailureQ[gauge], Return[gauge, Module]];
+  If[!AssociationQ[gauge] ||
+      Lookup[Lookup[gauge, "Record", <||>], "InputMatrixHash", None] =!=
+        Hash[matrix, "SHA256"] ||
+      !TrueQ[Lookup[Lookup[gauge, "Record", <||>], "PoleFree", False]] ||
+      Lookup[gauge, "Identity", None] =!=
+        ft2CanonicalIdentity["ft2-relative-epsilon-gauge-",
+          Lookup[gauge, "Record", None]],
     Return[Failure["FeynmanTrickEpsilonBasis", <|
-      "Detail" -> "could not determine an exact integer epsilon basis",
-      "Candidate" -> canonical|>], Module]];
+      "Detail" -> "supplied relative epsilon gauge does not match the level matrix"|>],
+    Module]];
+  canonical = gauge["CanonicalPrefactors"];
+  relative = gauge["RelativePrefactors"];
+  rawPoleOrders = gauge["RawPoleOrders"];
+  normalizedPoleOrders = gauge["NormalizedPoleOrders"];
+  normalized = gauge["Matrix"];
+  If[Length[canonical] =!= d || Length[relative] =!= d ||
+      !AllTrue[Join[canonical, relative], IntegerQ] ||
+      Min[relative] =!= 0 ||
+      Hash[normalized, "SHA256"] =!=
+        gauge["Record", "NormalizedMatrixHash"],
+    Return[Failure["FeynmanTrickEpsilonBasis", <|
+      "Detail" -> "relative epsilon gauge has inconsistent dimensions or hashes"|>],
+    Module]];
   commonOffset = Max[boundaryPrefactors - canonical];
   effective = canonical + commonOffset;
   boundaryShifts = effective - boundaryPrefactors;
@@ -282,19 +350,6 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
       "Detail" -> "epsilon basis would require an unknown negative boundary shift",
       "InputPrefactors" -> boundaryPrefactors,
       "EffectivePrefactors" -> effective|>], Module]];
-  normalized = FeynmanTrick`EpsPrefactors`ApplyEpsPrefactors[
-    matrix, effective, epsSymbol];
-  normalizedPoleOrders = If[hasRawPoles,
-    FeynmanTrick`EpsPrefactors`MatrixPoleOrders[normalized, epsSymbol],
-    (* canonical is zero here, so effective is a common shift and A is
-       exactly unchanged. *)
-    rawPoleOrders];
-  If[Max[Flatten[normalizedPoleOrders]] > 0,
-    Return[Failure["FeynmanTrickEpsilonBasis", <|
-      "Detail" -> "diagonal epsilon normalization did not remove every matrix pole",
-      "CanonicalPrefactors" -> canonical,
-      "EffectivePrefactors" -> effective,
-      "RemainingPoleOrders" -> normalizedPoleOrders|>], Module]];
   shiftedBoundary = MapThread[
     Function[{shift, row},
       Table[If[n < shift, 0, row[[n - shift + 1]]],
@@ -303,11 +358,13 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
   record = <|
     "Schema" -> "FeynmanTrick.EpsilonBasis/v1",
     "CanonicalPrefactors" -> canonical,
+    "RelativePrefactors" -> relative,
     "Prefactors" -> effective,
     "RawPoleOrders" -> rawPoleOrders,
     "NormalizedPoleOrders" -> normalizedPoleOrders,
     "CompleteMax" -> inputTop,
     "NormalizedMatrixHash" -> Hash[normalized, "SHA256"],
+    "RelativeGaugeIdentity" -> gauge["Identity"],
     "PoleFree" -> True|>;
   <|
     "Matrix" -> normalized,
@@ -347,11 +404,12 @@ ft2EpsilonBasisCheckpointQ[payload_Association] := Module[
    directly at the named lower level.  Unversioned/stale files require an
    explicit opt-in: they may contain mathematically valid data, but source
    provenance cannot be proved. *)
-loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
+loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
   {payload, ok, kind, level, levelData, belowData, mastersHere, mastersBelow,
    currentRequests, savedEO, savedFingerprint, stale, needInt, needLo, needHi,
    cachedArms, recordedArms, expectedCharts, boundaryWidths, boundaryShift,
-   requiredRaw, preservedRaw, preservedSource, nativeRecord},
+   requiredRaw, preservedRaw, preservedSource, nativeRecord,
+   nativePlanRecord, nativePlanIdentity},
   If[!FileExistsQ[file],
     Return[ladderCheckpointReject[file, "file does not exist"], Module]];
   Clear[Global`$FT2LadderCheckpoint];
@@ -396,6 +454,10 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
   If[KeyExistsQ[payload, "LevelEpsilonHalos"] &&
       payload["LevelEpsilonHalos"] =!= levelEpsilonHalos,
     Return[ladderCheckpointReject[file, "level epsilon halos do not match"], Module]];
+  If[Lookup[payload, "DeltaPrescriptionSign", 1] =!=
+      deltaPrescriptionSign,
+    Return[ladderCheckpointReject[file,
+      "delta prescription sign does not match"], Module]];
   levelData = data["Levels"][level];
   mastersHere = levelData["Masters"];
   If[Lookup[payload, "MastersHere", mastersHere] =!= mastersHere,
@@ -492,11 +554,16 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
           IntegerQ[First[payload["BoundaryPrefactors"]]] &&
           First[payload["BoundaryPrefactors"]] >= 0,
         First[payload["BoundaryPrefactors"]], None];
-      requiredRaw = nativeRequiredRawTop[level];
+      requiredRaw = If[ft2NativeEpsilonPlanQ[nativePlan],
+        nativePlan["Levels"][level]["RequiredRawTop"],
+        nativeRequiredRawTop[level]];
       preservedRaw = Lookup[payload, "PreservedRawCompleteMax", None];
       preservedSource =
         Lookup[payload, "PreservedSourceCompleteMax", None];
       nativeRecord = Lookup[payload, "NativeObservableBatch", None];
+      nativePlanRecord = Lookup[payload, "NativeEpsilonPlan", None];
+      nativePlanIdentity = Lookup[payload,
+        "NativeEpsilonPlanIdentity", None];
       If[boundaryWidths === {} || MemberQ[boundaryWidths, 0] ||
           Length[DeleteDuplicates[boundaryWidths]] =!= 1 ||
           !IntegerQ[boundaryShift] ||
@@ -509,7 +576,12 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
           preservedSource =!= First[boundaryWidths] - 1 ||
           !ft2NativeCheckpointRecordQ[nativeRecord] ||
           nativeRecord["RequiredRawTop"] =!= requiredRaw ||
-          nativeRecord["DeliverableCompleteMax"] =!= preservedRaw,
+          nativeRecord["DeliverableCompleteMax"] =!= preservedRaw ||
+          (ft2NativeEpsilonPlanQ[nativePlan] &&
+            (!ft2NativeEpsilonExecutionRecordQ[nativePlanRecord,
+                nativePlanIdentity, nativePlan] ||
+              Lookup[nativeRecord, "NativeEpsilonPlanIdentity", None] =!=
+                nativePlanIdentity)),
         Return[ladderCheckpointReject[file,
           "native Boundary checkpoint has an inconsistent required floor, preserved source width, shift, or observable-batch identity"],
           Module]],
@@ -624,6 +696,9 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
   (Lookup[record, "AtlasPlanIdentity", None] === None ||
     (StringQ[record["AtlasPlanIdentity"]] &&
       StringLength[record["AtlasPlanIdentity"]] > 0)) &&
+  (Lookup[record, "NativeEpsilonPlanIdentity", None] === None ||
+    (StringQ[record["NativeEpsilonPlanIdentity"]] &&
+      StringLength[record["NativeEpsilonPlanIdentity"]] > 0)) &&
   AllTrue[Lookup[record, {"SourceCompleteMax", "TargetCompleteMax",
       "DeliverableCompleteMax", "RequiredRawTop",
       "CoefficientHalo", "IntegrationHalo"},
@@ -696,8 +771,8 @@ ft2PrepareBoundaryEntries[level_Integer, batch_Association,
           Lookup[requests, "MasterIndex", {}], None]|>], Module]];
   entries = MapIndexed[Function[{request, position}, Module[
       {masterIndex = First[position], needed, raw, base, coefficients,
-       shifts, case, expectedCase, vi, vj, requestIdentity,
-       coefficientIdentity, identityHash},
+       nonzeroCoefficients, provenZero, shifts, case, expectedCase, vi,
+       vj, requestIdentity, coefficientIdentity, identityHash},
       needed = Lookup[request, "NeededVec", Missing["NoNeededVector"]];
       case = Lookup[request, "Case", None];
       vi = Lookup[request, "Vi", None];
@@ -728,8 +803,14 @@ ft2PrepareBoundaryEntries[level_Integer, batch_Association,
             Gamma[vi + vj]/(Gamma[vi]*Gamma[vj])*
             physicalVar^(vi - 1)*(1 - physicalVar)^(vj - 1)*#] & /@ base),
         base];
+      (* Zero entries have infinite epsilon valuation and therefore do not
+         participate in a nonzero row minimum.  Retain the conventional zero
+         shift only for a row proved identically zero. *)
+      nonzeroCoefficients = Select[coefficients,
+        !TrueQ[PossibleZeroQ[Together[#]]] &];
+      provenZero = nonzeroCoefficients === {};
       shifts = ft2ExactEpsilonValuation[#, physicalVar, epsSymbol] & /@
-        coefficients;
+        nonzeroCoefficients;
       If[AnyTrue[shifts, FailureQ],
         Return[First[Select[shifts, FailureQ]], Module]];
       requestIdentity = ft2CanonicalIdentity["ft2-request-",
@@ -746,14 +827,272 @@ ft2PrepareBoundaryEntries[level_Integer, batch_Association,
         "RequestIdentity" -> requestIdentity,
         "CoefficientIdentity" -> coefficientIdentity,
         "CoefficientVector" -> coefficients,
-        "ProvenZero" -> AllTrue[coefficients,
-          TrueQ[PossibleZeroQ[Together[#]]] &],
-        "MinimumEpsilonShift" -> Min[shifts],
+        "ProvenZero" -> provenZero,
+        "MinimumEpsilonShift" -> If[provenZero, 0, Min[shifts]],
         "Identity" -> ("ft2-level-" <> ToString[level] <> "-master-" <>
           ToString[masterIndex] <> "-" <> identityHash),
         "CheckpointIdentity" -> ("ft2-level-" <> ToString[level] <>
           "-observable-checkpoint-" <> identityHash)|>]], requests];
   If[AnyTrue[entries, FailureQ], First[Select[entries, FailureQ]], entries]];
+
+(* Exact full-ladder epsilon planning in the relative matrix gauge.  If the
+   incoming finite representation carries one common prefactor q, then its
+   source edge is S=D+q while every prepared row shift is s=sbar-q.  Hence
+
+                  S + s - delta = D + sbar - delta,
+
+   so q cancels and must never be recursively charged as a new halo. *)
+ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
+    halos_List, normalize_, suppliedBatches_:Automatic] := Module[
+  {levels = Lookup[ftData, "Levels", None], nLevels, previousRequired,
+   levelRecords = {}, runtimeLevels = <||>, levelData, matrix, gauge,
+   batch, entries, active, entryLosses, intrinsicLoss, userFloor,
+   required, record, identity},
+  nLevels = Lookup[ftData, "NumLevels", If[AssociationQ[levels],
+    Length[Select[Keys[levels], IntegerQ[#] && # > 0 &]], None]];
+  If[!AssociationQ[levels] || !IntegerQ[nLevels] || nLevels < 1 ||
+      epsilonOrder < 0 || !AllTrue[halos, IntegerQ[#] && # >= 0 &],
+    Return[ft2NativeFailure[
+      "native epsilon preplanner received invalid levels, epsilon order, or level halos"],
+      Module]];
+  previousRequired = epsilonOrder;
+  Do[
+    If[!KeyExistsQ[levels, level],
+      Return[ft2NativeFailure[
+        "native epsilon preplanner is missing a positive FT level",
+        <|"Level" -> level|>], Module]];
+    levelData = levels[level];
+    matrix = normalize[Lookup[levelData, "DiffMatrix", None]];
+    gauge = ft2RelativeEpsilonGauge[matrix, Global`eps];
+    If[FailureQ[gauge], Return[gauge, Module]];
+    batch = If[suppliedBatches === Automatic,
+      FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, level],
+      If[AssociationQ[suppliedBatches] &&
+          KeyExistsQ[suppliedBatches, level], suppliedBatches[level],
+        $Failed]];
+    If[batch === $Failed || !AssociationQ[batch],
+      Return[ft2NativeFailure[
+        "native epsilon preplanner could not obtain the exact level IBP batch",
+        <|"Level" -> level|>], Module]];
+    entries = ft2PrepareBoundaryEntries[level, batch,
+      gauge["RelativePrefactors"],
+      Lookup[levelData, "FeynmanParameter", Missing["NoVariable"]],
+      Global`eps, normalize];
+    If[FailureQ[entries], Return[entries, Module]];
+    active = Select[entries,
+      !TrueQ[Lookup[#, "ProvenZero", False]] &];
+    entryLosses = Association@Map[Function[entry,
+      entry["MasterIndex"] -> Max[0,
+        If[entry["Case"] === "integrate", 1, 0] -
+          entry["MinimumEpsilonShift"]]], active];
+    intrinsicLoss = If[entryLosses === <||>, 0,
+      Max[Values[entryLosses]]];
+    userFloor = ft2UserRawFloor[epsilonOrder, halos, level];
+    required = Max[userFloor, previousRequired + intrinsicLoss];
+    record = <|
+      "Schema" -> "FeynmanTrick.NativeEpsilonPlanLevel/v1",
+      "Level" -> level,
+      "GaugeIdentity" -> gauge["Identity"],
+      "GaugeRecord" -> gauge["Record"],
+      "RelativeGauge" -> gauge["RelativePrefactors"],
+      "BatchKey" -> Lookup[batch, "Key", None],
+      "BatchPayloadKey" -> Lookup[batch, "PayloadKey", None],
+      "RequestIdentities" -> Lookup[entries, "RequestIdentity"],
+      "RelativeCoefficientIdentities" ->
+        Lookup[entries, "CoefficientIdentity"],
+      "ProvenZero" -> Lookup[entries, "ProvenZero"],
+      "RelativeMinimumEpsilonShifts" ->
+        Lookup[entries, "MinimumEpsilonShift"],
+      "EntryLosses" -> entryLosses,
+      "IntrinsicLoss" -> intrinsicLoss,
+      "UserRawFloor" -> userFloor,
+      "RequiredOutputRawTop" -> previousRequired,
+      "RequiredRawTop" -> required|>;
+    AppendTo[levelRecords, record];
+    AssociateTo[runtimeLevels, level -> <|
+      "Record" -> record, "Gauge" -> gauge, "Batch" -> batch,
+      "RelativeEntries" -> entries,
+      "RequiredOutputRawTop" -> previousRequired,
+      "RequiredRawTop" -> required|>];
+    previousRequired = required,
+    {level, 1, nLevels}];
+  record = <|
+    "Schema" -> "FeynmanTrick.NativeEpsilonPlan/v1",
+    "EpsilonOrder" -> epsilonOrder,
+    "LevelEpsilonHalos" -> halos,
+    "NumLevels" -> nLevels,
+    "Levels" -> levelRecords,
+    "DeepRequiredRawTop" -> previousRequired|>;
+  identity = ft2CanonicalIdentity["ft2-native-epsilon-plan-", record];
+  <|"Schema" -> record["Schema"], "Identity" -> identity,
+    "Record" -> record, "Levels" -> runtimeLevels,
+    "NumLevels" -> nLevels,
+    "DeepRequiredRawTop" -> previousRequired|>];
+
+ft2NativeEpsilonPlanQ[plan_] := Module[
+  {record, levels, nLevels, levelRecords, deepRequired},
+  If[!AssociationQ[plan], Return[False, Module]];
+  record = Lookup[plan, "Record", None];
+  levels = Lookup[plan, "Levels", None];
+  nLevels = Lookup[plan, "NumLevels", None];
+  If[Lookup[plan, "Schema", None] =!=
+        "FeynmanTrick.NativeEpsilonPlan/v1" ||
+      !AssociationQ[record] || !AssociationQ[levels] ||
+      !IntegerQ[nLevels] || nLevels < 1 ||
+      Lookup[record, "Schema", None] =!=
+        "FeynmanTrick.NativeEpsilonPlan/v1" ||
+      Lookup[record, "NumLevels", None] =!= nLevels ||
+      Lookup[plan, "Identity", None] =!=
+        ft2CanonicalIdentity["ft2-native-epsilon-plan-", record],
+    Return[False, Module]];
+  levelRecords = Lookup[record, "Levels", None];
+  deepRequired = Lookup[record, "DeepRequiredRawTop", None];
+  If[!ListQ[levelRecords] || Length[levelRecords] =!= nLevels ||
+      Sort[Keys[levels]] =!= Range[nLevels] ||
+      !IntegerQ[deepRequired] ||
+      Lookup[plan, "DeepRequiredRawTop", None] =!= deepRequired ||
+      Lookup[Last[levelRecords], "RequiredRawTop", None] =!= deepRequired,
+    Return[False, Module]];
+  AllTrue[Range[nLevels], Function[level,
+    With[{runtime = levels[level], saved = levelRecords[[level]]},
+      AssociationQ[runtime] && AssociationQ[saved] &&
+        Lookup[saved, "Schema", None] ===
+          "FeynmanTrick.NativeEpsilonPlanLevel/v1" &&
+        Lookup[saved, "Level", None] === level &&
+        Lookup[runtime, "Record", None] === saved &&
+        AssociationQ[Lookup[runtime, "Gauge", None]] &&
+        AssociationQ[Lookup[runtime, "Batch", None]] &&
+        ListQ[Lookup[runtime, "RelativeEntries", None]] &&
+        Lookup[runtime, "RequiredOutputRawTop", None] ===
+          Lookup[saved, "RequiredOutputRawTop", None] &&
+        Lookup[runtime, "RequiredRawTop", None] ===
+          Lookup[saved, "RequiredRawTop", None] &&
+        IntegerQ[Lookup[saved, "RequiredOutputRawTop", None]] &&
+        IntegerQ[Lookup[saved, "RequiredRawTop", None]] &&
+        IntegerQ[Lookup[saved, "IntrinsicLoss", None]] &&
+        Lookup[saved, "IntrinsicLoss", -1] >= 0]]]
+  ];
+
+ft2FinalizeNativeEpsilonPlan[plan_Association, deepPrefactors_List,
+    boundaryOrder_Integer] := Module[
+  {deepLevel, relative, gaugeOffset, requiredBoundaryOrder, record,
+   identity},
+  If[!ft2NativeEpsilonPlanQ[plan],
+    Return[ft2NativeFailure[
+      "cannot finalize a malformed native epsilon plan"], Module]];
+  deepLevel = plan["Levels"][plan["NumLevels"]];
+  relative = deepLevel["Gauge", "RelativePrefactors"];
+  If[Length[deepPrefactors] =!= Length[relative] ||
+      !AllTrue[deepPrefactors, IntegerQ],
+    Return[ft2NativeFailure[
+      "deepest boundary prefactors do not match the planned relative gauge",
+      <|"DeepPrefactors" -> deepPrefactors,
+        "RelativeGauge" -> relative|>], Module]];
+  gaugeOffset = Max[deepPrefactors - relative];
+  requiredBoundaryOrder = plan["DeepRequiredRawTop"] + gaugeOffset;
+  If[boundaryOrder < requiredBoundaryOrder,
+    Return[ft2NativeFailure[
+      "deepest boundary order is below its exact planned gauge requirement",
+      <|"BoundaryOrder" -> boundaryOrder,
+        "RequiredBoundaryOrder" -> requiredBoundaryOrder|>], Module]];
+  record = <|
+    "Schema" -> "FeynmanTrick.NativeEpsilonExecutionPlan/v1",
+    "BasePlanIdentity" -> plan["Identity"],
+    "BasePlanRecord" -> plan["Record"],
+    "DeepBoundaryPrefactors" -> deepPrefactors,
+    "DeepGaugeOffset" -> gaugeOffset,
+    "DeepRequiredBoundaryOrder" -> requiredBoundaryOrder,
+    "DeepBoundaryOrder" -> boundaryOrder,
+    "DeepBoundarySurplus" -> boundaryOrder - requiredBoundaryOrder|>;
+  identity = ft2CanonicalIdentity[
+    "ft2-native-epsilon-execution-plan-", record];
+  <|"Record" -> record, "Identity" -> identity,
+    "DeepGaugeOffset" -> gaugeOffset,
+    "DeepRequiredBoundaryOrder" -> requiredBoundaryOrder,
+    "DeepBoundaryOrder" -> boundaryOrder|>];
+
+ft2NativeEpsilonExecutionRecordQ[record_, identity_, plan_] := Module[
+  {relative, deepPrefactors, gaugeOffset, requiredOrder},
+  If[!ft2NativeEpsilonPlanQ[plan] || !AssociationQ[record] ||
+      Lookup[record, "Schema", None] =!=
+        "FeynmanTrick.NativeEpsilonExecutionPlan/v1" ||
+      identity =!= ft2CanonicalIdentity[
+        "ft2-native-epsilon-execution-plan-", record] ||
+      Lookup[record, "BasePlanIdentity", None] =!= plan["Identity"] ||
+      Lookup[record, "BasePlanRecord", None] =!= plan["Record"],
+    Return[False, Module]];
+  relative = plan["Levels"][plan["NumLevels"]]["Gauge",
+    "RelativePrefactors"];
+  deepPrefactors = Lookup[record, "DeepBoundaryPrefactors", None];
+  If[!ListQ[deepPrefactors] || Length[deepPrefactors] =!= Length[relative] ||
+      !AllTrue[deepPrefactors, IntegerQ], Return[False, Module]];
+  gaugeOffset = Max[deepPrefactors - relative];
+  requiredOrder = plan["DeepRequiredRawTop"] + gaugeOffset;
+  TrueQ[Lookup[record, "DeepGaugeOffset", None] === gaugeOffset &&
+    Lookup[record, "DeepRequiredBoundaryOrder", None] === requiredOrder &&
+    IntegerQ[Lookup[record, "DeepBoundaryOrder", None]] &&
+    record["DeepBoundaryOrder"] >= requiredOrder &&
+    Lookup[record, "DeepBoundarySurplus", None] ===
+      record["DeepBoundaryOrder"] - requiredOrder]
+  ];
+
+ft2ValidateNativePlanRuntimeLevel[planned_Association,
+    currentPrefactors_List, entries_List, epsSymbol_Symbol] := Module[
+  {relative = planned["Gauge", "RelativePrefactors"], offsets,
+   commonOffset, relativeEntries = planned["RelativeEntries"],
+   coefficientParity, expectedShifts},
+  If[Length[currentPrefactors] =!= Length[relative] ||
+      !AllTrue[currentPrefactors, IntegerQ] ||
+      Length[entries] =!= Length[relativeEntries],
+    Return[ft2NativeFailure[
+      "runtime epsilon basis does not match its planned level"], Module]];
+  offsets = currentPrefactors - relative;
+  If[!SameQ @@ offsets,
+    Return[ft2NativeFailure[
+      "runtime epsilon basis differs from the relative gauge by a noncommon shift",
+      <|"RuntimePrefactors" -> currentPrefactors,
+        "RelativeGauge" -> relative|>], Module]];
+  commonOffset = First[offsets];
+  coefficientParity = And @@ MapThread[Function[{runtime, plannedEntry},
+    And @@ MapThread[TrueQ[PossibleZeroQ[Together[
+        #1*epsSymbol^commonOffset - #2]]] &,
+      {runtime["CoefficientVector"],
+       plannedEntry["CoefficientVector"]}]],
+    {entries, relativeEntries}];
+  expectedShifts = MapThread[If[TrueQ[#2], 0, #1 - commonOffset] &,
+    {Lookup[relativeEntries, "MinimumEpsilonShift"],
+     Lookup[relativeEntries, "ProvenZero"]}];
+  If[Lookup[entries, "BatchKey"] =!= Lookup[relativeEntries, "BatchKey"] ||
+      Lookup[entries, "BatchPayloadKey"] =!=
+        Lookup[relativeEntries, "BatchPayloadKey"] ||
+      Lookup[entries, "RequestIdentity"] =!=
+        Lookup[relativeEntries, "RequestIdentity"] ||
+      Lookup[entries, "ProvenZero"] =!=
+        Lookup[relativeEntries, "ProvenZero"] ||
+      Lookup[entries, "MinimumEpsilonShift"] =!=
+        expectedShifts ||
+      !TrueQ[coefficientParity],
+    Return[ft2NativeFailure[
+      "runtime FIRE rows do not reproduce the planned common-shift invariant",
+      <|"CommonOffset" -> commonOffset,
+        "BatchKeyParity" ->
+          (Lookup[entries, "BatchKey"] ===
+            Lookup[relativeEntries, "BatchKey"]),
+        "BatchPayloadParity" ->
+          (Lookup[entries, "BatchPayloadKey"] ===
+            Lookup[relativeEntries, "BatchPayloadKey"]),
+        "RequestParity" ->
+          (Lookup[entries, "RequestIdentity"] ===
+            Lookup[relativeEntries, "RequestIdentity"]),
+        "ZeroParity" ->
+          (Lookup[entries, "ProvenZero"] ===
+            Lookup[relativeEntries, "ProvenZero"]),
+        "ShiftParity" ->
+          (Lookup[entries, "MinimumEpsilonShift"] ===
+            expectedShifts),
+        "CoefficientParity" -> coefficientParity|>], Module]];
+  <|"CommonOffset" -> commonOffset,
+    "PlannedIntrinsicLoss" -> planned["Record", "IntrinsicLoss"]|>];
 
 ft2NativeEpsilonLedger[entries_List, currentBCs_List,
     downstreamFiniteTop_Integer] := Module[
@@ -872,7 +1211,7 @@ ft2NativeReleaseAtlas[atlas_] :=
 ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     entries_List, ledger_Association, physicalVar_Symbol, anchor_,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
-    outputDigits_Integer] :=
+    outputDigits_Integer, nativePlanIdentity_:None] :=
  Module[
   {deliverableMax = ledger["DeliverableCompleteMax"],
    integrationHalo = ledger["IntegrationHalo"], directRequiredTop =
@@ -906,7 +1245,10 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           coefficientIdentities],
         StringQ[#] && StringLength[#] > 0 &] ||
       !AllTrue[Lookup[entries, "Case", {}],
-        MemberQ[{"integrate", "limitLower", "limitUpper", "direct"}, #] &],
+        MemberQ[{"integrate", "limitLower", "limitUpper", "direct"}, #] &] ||
+      !(nativePlanIdentity === None ||
+        (StringQ[nativePlanIdentity] &&
+          StringLength[nativePlanIdentity] > 0)),
     Return[ft2NativeFailure[
       "native boundary dispatch received inconsistent master, batch, case, or identity metadata",
       <|"MasterIndices" -> masterIndices, "BatchKeys" -> batchKeys,
@@ -951,7 +1293,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       KeyTake[ledger, {"SourceCompleteMax", "CoefficientHalo",
         "IntegrationHalo", "TargetCompleteMax",
         "DeliverableCompleteMax", "DownstreamRawTop"}],
-      prescriptionIdentity, extraFactorsIdentity}];
+      prescriptionIdentity, extraFactorsIdentity, nativePlanIdentity}];
   If[nativeEntries =!= {},
     transportSystem = Join[sys, <|"ExtraSingularFactors" ->
       Select[extraSingularFactors, !FreeQ[#, physicalVar] &]|>];
@@ -1076,6 +1418,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       "ExtraSingularFactorsIdentity" -> extraFactorsIdentity,
       "AtlasPlanIdentity" -> atlasPlanIdentity,
       "NativeBatchPayloadIdentity" -> nativeBatchPayloadIdentity,
+      "NativeEpsilonPlanIdentity" -> nativePlanIdentity,
       "SourceCompleteMax" -> ledger["SourceCompleteMax"],
       "TargetCompleteMax" -> ledger["TargetCompleteMax"],
       "DeliverableCompleteMax" -> deliverableMax,
@@ -1086,7 +1429,10 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
 runExample[name_String] := Module[
   {topology, sequence, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
-   resumeCheckpoint = None, startLevel, finalRaw = None},
+   resumeCheckpoint = None, startLevel, finalRaw = None, ftEps, dimVar,
+   dimExpr, normalizeFT, nativeEpsilonPlan = None,
+   nativeEpsilonExecution = None, initialDeepPrefactors,
+   deepRelativeGauge, deepGaugeOffset, exactDeepBoundaryOrder},
   Print["EXAMPLE ", name];
   FeynmanTrick`SetFTOption["DimensionExpression", FTExampleDimension[name]];
   topology = FTExampleTopology[name, "step"];
@@ -1107,23 +1453,76 @@ runExample[name_String] := Module[
     If[preparedFTDataQ[ftData], savePreparedFT[prepFile, prepKey, ftData]]];
   If[ftData === $Failed, Return[$Failed]];
   nLevels = ftData["NumLevels"];
+  ftEps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
+  dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
+  dimExpr = FeynmanTrick`Private`DimensionExpression[];
+  normalizeFT[e_] := ((e /. dimVar -> dimExpr /. Global`d -> dimExpr) /.
+    ftEps -> Global`eps);
+  If[recurrenceBackend === "Cpp",
+    nativeEpsilonPlan = ft2BuildNativeEpsilonPlan[
+      ftData, epsOrder, levelEpsilonHalos, normalizeFT];
+    If[FailureQ[nativeEpsilonPlan],
+      Print["FTLADDER NATIVE EPSILON PLAN FAIL ", nativeEpsilonPlan];
+      Return[$Failed]];
+    Print["FTLADDER NATIVE EPSILON PLAN identity=",
+      nativeEpsilonPlan["Identity"],
+      " losses=", Lookup[nativeEpsilonPlan["Record", "Levels"],
+        "IntrinsicLoss"],
+      " required=", Lookup[nativeEpsilonPlan["Record", "Levels"],
+        "RequiredRawTop"]]];
   If[resumeLadderFile =!= "",
     resumeCheckpoint = loadLadderCheckpoint[ExpandFileName[resumeLadderFile],
-      name, ftData, prepKey];
+      name, ftData, prepKey, nativeEpsilonPlan];
     If[resumeCheckpoint === $Failed, Return[$Failed]]];
   If[AssociationQ[resumeCheckpoint],
     startLevel = resumeCheckpoint["Level"];
     currentBCs = resumeCheckpoint["BoundaryValues"];
     currentPrefactors = resumeCheckpoint["BoundaryPrefactors"];
+    If[recurrenceBackend === "Cpp",
+      nativeEpsilonExecution = <|
+        "Record" -> resumeCheckpoint["NativeEpsilonPlan"],
+        "Identity" -> resumeCheckpoint["NativeEpsilonPlanIdentity"]|>];
     Print["FTLADDER RESUME kind=", resumeCheckpoint["Kind"],
       " level=", startLevel,
       " savedEO=", resumeCheckpoint["SourceExpansionOrder"],
       " requestedLowerEO=", expansionOrder],
     startLevel = nLevels;
-    boundaryOrder = requestedEpsilonOrder[nLevels];
+    boundaryOrder = If[recurrenceBackend === "Cpp",
+      nativeEpsilonPlan["DeepRequiredRawTop"] + boundaryExtraOrder,
+      requestedEpsilonOrder[nLevels]];
     deepBoundary = FeynmanTrick`BoundaryConditions`DeepestLevelBoundary[
       ftData, boundaryOrder];
     If[!AssociationQ[deepBoundary], Return[$Failed]];
+    If[recurrenceBackend === "Cpp",
+      initialDeepPrefactors = deepBoundary["EpsPrefactors"];
+      deepRelativeGauge = nativeEpsilonPlan["Levels"][nLevels]
+        ["Gauge"]["RelativePrefactors"];
+      If[Length[initialDeepPrefactors] =!= Length[deepRelativeGauge] ||
+          !AllTrue[initialDeepPrefactors, IntegerQ],
+        Print["FTLADDER NATIVE DEEP PREFAC FAIL prefactors=",
+          initialDeepPrefactors, " gauge=", deepRelativeGauge];
+        Return[$Failed]];
+      deepGaugeOffset = Max[initialDeepPrefactors - deepRelativeGauge];
+      exactDeepBoundaryOrder =
+        nativeEpsilonPlan["DeepRequiredRawTop"] + deepGaugeOffset;
+      If[boundaryOrder < exactDeepBoundaryOrder,
+        Print["FTLADDER NATIVE DEEP RETRY initial=", boundaryOrder,
+          " exact=", exactDeepBoundaryOrder,
+          " gaugeOffset=", deepGaugeOffset];
+        boundaryOrder = exactDeepBoundaryOrder;
+        deepBoundary =
+          FeynmanTrick`BoundaryConditions`DeepestLevelBoundary[
+            ftData, boundaryOrder];
+        If[!AssociationQ[deepBoundary] ||
+            deepBoundary["EpsPrefactors"] =!= initialDeepPrefactors,
+          Print["FTLADDER NATIVE DEEP RETRY FAIL"];
+          Return[$Failed]]];
+      nativeEpsilonExecution = ft2FinalizeNativeEpsilonPlan[
+        nativeEpsilonPlan, deepBoundary["EpsPrefactors"], boundaryOrder];
+      If[FailureQ[nativeEpsilonExecution],
+        Print["FTLADDER NATIVE EPSILON FINALIZE FAIL ",
+          nativeEpsilonExecution];
+        Return[$Failed]]];
     (* coefficients are the only numerics (tags stay exact): numericize the
        deep boundary at 2x WP so the chain runs at arbitrary precision instead
        of exact-symbolic (Log/Gamma giants grind the Laurent-field algebra) *)
@@ -1140,8 +1539,8 @@ runExample[name_String] := Module[
   Do[Module[
     {levelData = ftData["Levels"][level], levelBelow = ftData["Levels"][level - 1],
      var, A, sys, mastersBelow, mastersHere, requests, reductions,
-     extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop, ftEps, dimVar,
-     dimExpr, normalizeFT, trLoCache, trHiCache, chartCache,
+     extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop,
+     trLoCache, trHiCache, chartCache,
      resumeTransport, levelExpansionOrder, needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
      transportSys = None, planLo = None, planHi = None, armReq,
@@ -1149,15 +1548,11 @@ runExample[name_String] := Module[
      armUniqueCharts, armCacheCapacity, levelIBPBatch, rawExtraFacs,
      epsilonBasis, epsilonBasisRecord, nativeEntries = None,
      nativeLedger = None, nativeDispatch = None, downstreamFiniteTop,
-     esCMxLevel, configResult, deltaPrescriptions},
+     esCMxLevel, configResult, deltaPrescriptions, plannedLevel = None,
+     runtimePlanCheck},
     var = levelData["FeynmanParameter"];
-    (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
-       FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
-    ftEps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
-    dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
-    dimExpr = FeynmanTrick`Private`DimensionExpression[];
-    normalizeFT[e_] := ((e /. dimVar -> dimExpr /. Global`d -> dimExpr) /.
-      ftEps -> Global`eps);
+    If[recurrenceBackend === "Cpp",
+      plannedLevel = nativeEpsilonPlan["Levels"][level]];
     A = normalizeFT[levelData["DiffMatrix"]];
     Print["LEVEL ", level, " var=", var, " d=", Length[A]];
     mastersHere = levelData["Masters"];
@@ -1166,7 +1561,8 @@ runExample[name_String] := Module[
       resumeCheckpoint["Kind"] === "Transport" &&
       level === resumeCheckpoint["Level"];
     epsilonBasis = ft2NormalizeEpsilonBasis[
-      A, currentBCs, currentPrefactors, Global`eps];
+      A, currentBCs, currentPrefactors, Global`eps,
+      If[AssociationQ[plannedLevel], plannedLevel["Gauge"], Automatic]];
     If[FailureQ[epsilonBasis],
       Print["FTLADDER EPS BASIS FAIL level=", level, " ", epsilonBasis];
       Throw[$Failed, "FT2Abort"]];
@@ -1194,8 +1590,9 @@ runExample[name_String] := Module[
        backend resumes a legacy arm snapshot; native Transport snapshots were
        rejected at the loader and can never be reinterpreted as retained
        state. *)
-    levelIBPBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
-      ftData, level];
+    levelIBPBatch = If[AssociationQ[plannedLevel],
+      plannedLevel["Batch"],
+      FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, level]];
     If[levelIBPBatch === $Failed,
       Print["FIRE FAIL"]; Return[$Failed, Module]];
     requests = levelIBPBatch["BoundaryRequests"];
@@ -1230,8 +1627,13 @@ runExample[name_String] := Module[
         Print["FTLADDER NATIVE COEFFICIENT FAIL level=", level, " ",
           nativeEntries];
         Throw[$Failed, "FT2Abort"]];
-      downstreamFiniteTop = If[level > 1,
-        nativeRequiredRawTop[level - 1], nativeRequiredRawTop[0]];
+      runtimePlanCheck = ft2ValidateNativePlanRuntimeLevel[
+        plannedLevel, currentPrefactors, nativeEntries, Global`eps];
+      If[FailureQ[runtimePlanCheck],
+        Print["FTLADDER NATIVE PLAN PARITY FAIL level=", level, " ",
+          runtimePlanCheck];
+        Throw[$Failed, "FT2Abort"]];
+      downstreamFiniteTop = plannedLevel["RequiredOutputRawTop"];
       nativeLedger = ft2NativeEpsilonLedger[
         nativeEntries, currentBCs, downstreamFiniteTop];
       If[FailureQ[nativeLedger],
@@ -1260,7 +1662,8 @@ runExample[name_String] := Module[
     If[recurrenceBackend === "Cpp",
       nativeDispatch = ft2RunNativeBoundaryDispatch[
         sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
-        extraFacs, deltaPrescriptions, cppArmThreadBudget, wp];
+        extraFacs, deltaPrescriptions, cppArmThreadBudget, wp,
+        nativeEpsilonExecution["Identity"]];
       If[FailureQ[nativeDispatch],
         Print["FTLADDER NATIVE BATCH FAIL level=", level, " ",
           nativeDispatch];
@@ -1320,6 +1723,7 @@ runExample[name_String] := Module[
         "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
         "RecurrenceBackend" -> recurrenceBackend,
         "SingularMatchPrecondition" -> singularMatchPrecondition,
+        "DeltaPrescriptionSign" -> deltaPrescriptionSign,
         "EpsilonOrder" -> epsOrder,
         "BoundaryExtraOrder" -> boundaryExtraOrder,
         "LevelEpsilonHalos" -> levelEpsilonHalos,
@@ -1520,7 +1924,8 @@ runExample[name_String] := Module[
     kmaxAvail = esCMx /@ rawES;
     If[level > 1,
       If[recurrenceBackend === "Cpp",
-        nextReq = nativeRequiredRawTop[level - 1];
+        nextReq = nativeEpsilonPlan["Levels"][level - 1]
+          ["RequiredRawTop"];
         needTop = Min[kmaxAvail],
         nextReq = requestedEpsilonOrder[level - 1];
         needTop = nextReq - shift];
@@ -1554,6 +1959,7 @@ runExample[name_String] := Module[
           "MastersHere" -> mastersBelow, "Anchor" -> anchor,
           "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
           "RecurrenceBackend" -> recurrenceBackend,
+          "DeltaPrescriptionSign" -> deltaPrescriptionSign,
           "BoundaryExtraOrder" -> boundaryExtraOrder,
           "LevelEpsilonHalos" -> levelEpsilonHalos,
           "SourceExpansionOrder" -> levelExpansionOrder,
@@ -1567,6 +1973,11 @@ runExample[name_String] := Module[
             recurrenceBackend === "Cpp", needTop + shift, None],
           "NativeObservableBatch" -> If[recurrenceBackend === "Cpp",
             nativeDispatch["CheckpointRecord"], None],
+          "NativeEpsilonPlan" -> If[recurrenceBackend === "Cpp",
+            nativeEpsilonExecution["Record"], None],
+          "NativeEpsilonPlanIdentity" -> If[
+            recurrenceBackend === "Cpp",
+            nativeEpsilonExecution["Identity"], None],
           "Tainted" -> If[AssociationQ[resumeCheckpoint],
             TrueQ[Lookup[resumeCheckpoint, "Tainted", False]], False]|>]];
       If[IntegerQ[stopAfterBoundaryLevel] &&

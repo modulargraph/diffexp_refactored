@@ -318,6 +318,13 @@ json::object arm(const std::string& endpoint, const std::string& anchor,
                       {"topology", topology(singular)}};
 }
 
+json::object zero_match_arm(const std::string& endpoint,
+                            const std::string& anchor) {
+  return json::object{{"from_exact", "0"}, {"to_exact", endpoint},
+                      {"charts", json::array{anchor}},
+                      {"topology", topology(false)}};
+}
+
 json::object integrand_row(const std::string& identity) {
   const json::array one{"1", "0", "0", "0", "0"};
   const json::array zero{"0", "0", "0", "0", "0"};
@@ -366,6 +373,50 @@ json::object run_arms(const std::string& session, const std::string& plan,
            {"root", checkpoint_root}}},
       {"lower", execution(lower_basis, checkpoint_root + ":lower")},
       {"upper", execution(upper_basis, checkpoint_root + ":upper")}});
+}
+
+json::object run_transport_arm(
+    const std::string& session, const std::string& plan,
+    const std::string& plan_checkpoint, const std::string& anchor,
+    const std::string& basis, const std::string& checkpoint_root) {
+  json::array basis_set;
+  basis_set.emplace_back(basis);
+  json::array receiving_basis;
+  receiving_basis.push_back(std::move(basis_set));
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.run_arm"},
+      {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
+      {"tile_plan_checkpoint_identity", plan_checkpoint},
+      {"anchor_checkpoint_identity", "singular-arm-anchor"},
+      {"arm", "lower"},
+      {"receiving_basis", std::move(receiving_basis)},
+      {"epsilon", json::object{
+           {"min", -1}, {"max", 2}, {"required_complete_max", 1},
+           {"match_required_complete_max", 2}}},
+      {"refinement", json::object{
+           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", checkpoint_root}}}});
+}
+
+json::object run_zero_match_transport_arm(
+    const std::string& session, const std::string& plan,
+    const std::string& anchor, const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.run_arm"},
+      {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
+      {"tile_plan_checkpoint_identity", "zero-state-plan"},
+      {"anchor_checkpoint_identity", "singular-arm-anchor"},
+      {"arm", "lower"}, {"receiving_basis", json::array{}},
+      {"epsilon", json::object{
+           {"min", -1}, {"max", 2}, {"required_complete_max", 1},
+           {"match_required_complete_max", 2}}},
+      {"refinement", json::object{
+           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", checkpoint_root}}}});
 }
 
 json::object direct_singular_match_request(
@@ -542,6 +593,131 @@ int main() {
     if (marched.at("status") != "ok")
       throw std::runtime_error("integration.run_arms: " +
                                json::serialize(marched));
+
+    const auto single_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", "singular-state-plan"},
+        {"division_order", 3},
+        {"arm", arm("-2/3", anchor_chart, singular_scc, true)}});
+    if (single_planned.at("status") != "ok" ||
+        single_planned.at("arm_name") != "lower" ||
+        single_planned.at("matches") != 1)
+      throw std::runtime_error(
+          "single-arm tile.plan_arm: " + json::serialize(single_planned));
+    const auto single_plan =
+        std::string(single_planned.at("tile_plan").as_string());
+
+    const auto before_transport_rejection = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto transport_rejected = run_transport_arm(
+        session, single_plan, "singular-state-plan", anchor,
+        foreign_singular, "singular-state-rejected");
+    const auto after_transport_rejection = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const bool transport_rejected_atomically =
+        transport_rejected.at("status") == "error" &&
+        std::string(transport_rejected.at("detail").as_string()).find(
+            "basis chart provenance mismatch") != std::string::npos &&
+        before_transport_rejection.at("locals") ==
+            after_transport_rejection.at("locals") &&
+        before_transport_rejection.at("matches") ==
+            after_transport_rejection.at("matches") &&
+        before_transport_rejection.at("transport_states") ==
+            after_transport_rejection.at("transport_states") &&
+        after_transport_rejection.at("pending_local_solves") == 0 &&
+        after_transport_rejection.at("pending_matches") == 0 &&
+        after_transport_rejection.at("pending_transport_states") == 0;
+    if (!transport_rejected_atomically)
+      throw std::runtime_error(
+          "foreign singular transport basis was not rejected atomically: " +
+          json::serialize(transport_rejected) + " / " +
+          json::serialize(after_transport_rejection));
+
+    const auto transported = run_transport_arm(
+        session, single_plan, "singular-state-plan", anchor,
+        good_singular, "singular-state-success");
+    if (transported.at("status") != "ok" ||
+        transported.at("matches") != 1 || transported.at("tiles") != 2 ||
+        transported.at("atomic_publication") != true)
+      throw std::runtime_error(
+          "transport.run_arm: " + json::serialize(transported));
+    const auto transport_state =
+        std::string(transported.at("transport_state").as_string());
+    const auto transport_final = std::string(
+        transported.at("final_local").as_object().at("local").as_string());
+    const auto transport_stats = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"}, {"session", session},
+        {"transport_state", transport_state}});
+    if (transport_stats.at("status") != "ok" ||
+        transport_stats.at("final_local").as_object().at("local").as_string() !=
+            transport_final)
+      throw std::runtime_error(
+          "transport.stats: " + json::serialize(transport_stats));
+
+    const auto released_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", single_plan}});
+    const auto released_final = request(json::object{
+        {"schema", 2}, {"op", "local.release"}, {"session", session},
+        {"local", transport_final}});
+    if (released_plan.at("status") != "ok" ||
+        released_final.at("status") != "ok")
+      throw std::runtime_error(
+          "transport closure dependency release failed: " +
+          json::serialize(released_plan) + " / " +
+          json::serialize(released_final));
+    const auto hidden_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"}, {"session", session},
+        {"tile_plan", single_plan}});
+    if (hidden_plan.at("status") != "error")
+      throw std::runtime_error(
+          "released transport-owned tile plan remained public: " +
+          json::serialize(hidden_plan));
+
+    const auto zero_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", "zero-state-plan"}, {"division_order", 3},
+        {"arm", zero_match_arm("-1/3", anchor_chart)}});
+    if (zero_planned.at("status") != "ok" ||
+        zero_planned.at("arm_name") != "lower" ||
+        zero_planned.at("matches") != 0 || zero_planned.at("tiles") != 1)
+      throw std::runtime_error(
+          "zero-match tile.plan_arm: " + json::serialize(zero_planned));
+    const auto zero_plan =
+        std::string(zero_planned.at("tile_plan").as_string());
+    const auto before_zero_transport = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto zero_transport = run_zero_match_transport_arm(
+        session, zero_plan, anchor, "zero-state-success");
+    const auto after_zero_transport = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    if (zero_transport.at("status") != "ok" ||
+        zero_transport.at("matches") != 0 || zero_transport.at("tiles") != 1 ||
+        zero_transport.at("final_local").as_object().at("local").as_string() !=
+            anchor ||
+        before_zero_transport.at("locals") != after_zero_transport.at("locals") ||
+        before_zero_transport.at("matches") != after_zero_transport.at("matches") ||
+        after_zero_transport.at("transport_states").as_int64() !=
+            before_zero_transport.at("transport_states").as_int64() + 1)
+      throw std::runtime_error(
+          "zero-match transport did not retain the anchor without publishing a local/match: " +
+          json::serialize(zero_transport) + " / " +
+          json::serialize(after_zero_transport));
+    const auto zero_state =
+        std::string(zero_transport.at("transport_state").as_string());
+    const auto released_zero_state = request(json::object{
+        {"schema", 2}, {"op", "transport.release"}, {"session", session},
+        {"transport_state", zero_state}});
+    const auto released_zero_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", zero_plan}});
+    if (released_zero_state.at("status") != "ok" ||
+        released_zero_plan.at("status") != "ok")
+      throw std::runtime_error(
+          "zero-match transport release failed: " +
+          json::serialize(released_zero_state) + " / " +
+          json::serialize(released_zero_plan));
+
     const auto saved = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
         {"path", checkpoint},
@@ -549,6 +725,41 @@ int main() {
     if (saved.at("status") != "ok")
       throw std::runtime_error("checkpoint.save: " +
                                json::serialize(saved));
+    const auto saved_payload = json::parse(
+        diffexp2::checkpoint::read(checkpoint).payload_json).as_object();
+    const auto& saved_visibility = saved_payload.at("session").as_object()
+        .at("registry_visibility").as_object();
+    const auto contains_string = [](const json::array& values,
+                                    const std::string& expected) {
+      for (const auto& value : values)
+        if (value.is_string() && value.as_string() == expected) return true;
+      return false;
+    };
+    const auto contains_record = [](const json::array& values,
+                                    const char* key,
+                                    const std::string& expected) {
+      for (const auto& value : values)
+        if (value.is_object() && value.as_object().at(key).as_string() ==
+                                     expected)
+          return true;
+      return false;
+    };
+    if (saved_payload.at("retained_transport_states").as_array().size() != 1 ||
+        !contains_record(
+            saved_payload.at("retained_transport_states").as_array(),
+            "handle", transport_state) ||
+        !contains_string(saved_visibility.at("transport_states").as_array(),
+                         transport_state) ||
+        contains_string(saved_visibility.at("tile_plans").as_array(),
+                        single_plan) ||
+        contains_string(saved_visibility.at("locals").as_array(),
+                        transport_final) ||
+        !contains_record(saved_payload.at("retained_tile_plans").as_array(),
+                         "handle", single_plan) ||
+        !contains_record(saved_payload.at("retained_locals").as_array(),
+                         "handle", transport_final))
+      throw std::runtime_error(
+          "checkpoint did not separate transport-owned closure from registry visibility");
     const auto [singular_proof, ordinary_proof] = proof_schemas(checkpoint);
 
     const auto restored = request(json::object{
@@ -560,6 +771,21 @@ int main() {
     if (restored.at("status") != "ok")
       throw std::runtime_error("checkpoint.restore: " +
                                json::serialize(restored));
+    const auto restored_transport_stats = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"},
+        {"session", restored_session},
+        {"transport_state", transport_state}});
+    const auto restored_hidden_plan = request(json::object{
+        {"schema", 2}, {"op", "tile.stats"},
+        {"session", restored_session}, {"tile_plan", single_plan}});
+    if (restored_transport_stats.at("status") != "ok" ||
+        restored_transport_stats.at("tile_plan").as_string() != single_plan ||
+        restored_transport_stats.at("final_local").as_object().at("local").as_string() !=
+            transport_final || restored_hidden_plan.at("status") != "error")
+      throw std::runtime_error(
+          "transport state checkpoint closure/visibility did not restore: " +
+          json::serialize(restored_transport_stats) + " / " +
+          json::serialize(restored_hidden_plan));
     const auto saved_second = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
         {"session", restored_session}, {"path", checkpoint_second},
@@ -581,6 +807,36 @@ int main() {
     if (restored_second.at("status") != "ok")
       throw std::runtime_error("second checkpoint.restore: " +
                                json::serialize(restored_second));
+    const auto second_transport_stats = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"},
+        {"session", restored_session},
+        {"transport_state", transport_state}});
+    const auto released_transport = request(json::object{
+        {"schema", 2}, {"op", "transport.release"},
+        {"session", restored_session},
+        {"transport_state", transport_state}});
+    const auto released_transport_again = request(json::object{
+        {"schema", 2}, {"op", "transport.release"},
+        {"session", restored_session},
+        {"transport_state", transport_state}});
+    const auto released_transport_stats = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"},
+        {"session", restored_session},
+        {"transport_state", transport_state}});
+    const auto after_transport_release = request(json::object{
+        {"schema", 2}, {"op", "session.stats"},
+        {"session", restored_session}});
+    if (second_transport_stats.at("status") != "ok" ||
+        released_transport.at("status") != "ok" ||
+        released_transport_again.at("status") != "error" ||
+        released_transport_stats.at("status") != "error" ||
+        after_transport_release.at("transport_states") != 0)
+      throw std::runtime_error(
+          "restored transport release was not observable and terminal: " +
+          json::serialize(released_transport) + " / " +
+          json::serialize(released_transport_again) + " / " +
+          json::serialize(released_transport_stats) + " / " +
+          json::serialize(after_transport_release));
     (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                {"session", restored_session}});
     restored_session.clear();

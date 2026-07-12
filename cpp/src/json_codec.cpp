@@ -2717,7 +2717,7 @@ class StoredLocal final : public StoredLocalBase {
   json::object checkpoint_record() const override {
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       throw std::domain_error(
-          "checkpoint schema v2 does not serialize symbolic-coefficient local state");
+          "native checkpoint does not serialize symbolic-coefficient local state");
     } else {
       AcbPrecisionLease lease(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
@@ -2730,7 +2730,7 @@ class StoredLocal final : public StoredLocalBase {
             schema !=
                 "diffexp2-retained-rational-row-local-application-v1")
           throw std::domain_error(
-              "checkpoint schema v2 does not yet serialize this retained local derivation kind");
+              "native checkpoint does not serialize this retained local derivation kind");
         if (retained_owner_ == nullptr)
           throw std::logic_error(
               "derived local lost its strong derivation owner before checkpointing");
@@ -9480,6 +9480,8 @@ constexpr const char* kRetainedCertifiedLineCapability =
     "retained-native-certified-full-local-physical-tile-integral-v1";
 constexpr const char* kRetainedParallelArmCapability =
     "retained-native-concurrent-two-arm-march-v1";
+constexpr const char* kRetainedTransportArmStateCapability =
+    "retained-native-transport-arm-state-v1";
 constexpr const char* kRetainedLineAggregateCapability =
     "retained-native-line-aggregate-v1";
 
@@ -10299,6 +10301,289 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   std::atomic<std::uint64_t> materializations_{0};
 };
 
+class StoredTransportArmState {
+ public:
+  StoredTransportArmState(
+      std::string handle, std::string checkpoint_identity,
+      std::string arm, std::shared_ptr<StoredTilePlan> plan_owner,
+      std::shared_ptr<StoredLocalBase> anchor_owner,
+      std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis_owners,
+      std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches,
+      std::vector<std::shared_ptr<StoredLocalBase>> tile_sources,
+      EpsilonWindow work_epsilon,
+      std::int32_t public_required_complete_max,
+      std::int32_t match_required_complete_max,
+      json::object refinement, double elapsed_ms)
+      : handle_(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        arm_(std::move(arm)), plan_owner_(std::move(plan_owner)),
+        anchor_owner_(std::move(anchor_owner)),
+        basis_owners_(std::move(basis_owners)),
+        matches_(std::move(matches)),
+        tile_sources_(std::move(tile_sources)),
+        work_epsilon_(work_epsilon),
+        public_required_complete_max_(public_required_complete_max),
+        match_required_complete_max_(match_required_complete_max),
+        refinement_(std::move(refinement)), elapsed_ms_(elapsed_ms) {
+    validate();
+    provenance_identity_ = json::serialize(
+        canonical_json_value(provenance_record()));
+  }
+
+  const std::string& handle() const { return handle_; }
+  const std::string& checkpoint_identity() const {
+    return checkpoint_identity_;
+  }
+  const std::string& provenance_identity() const {
+    return provenance_identity_;
+  }
+  const std::string& arm_name() const { return arm_; }
+  double elapsed_ms() const { return elapsed_ms_; }
+  const std::shared_ptr<StoredTilePlan>& plan_owner() const {
+    return plan_owner_;
+  }
+  const std::shared_ptr<StoredLocalBase>& anchor_owner() const {
+    return anchor_owner_;
+  }
+  const std::vector<std::vector<std::shared_ptr<StoredLocalBase>>>&
+  basis_owners() const {
+    return basis_owners_;
+  }
+  const std::vector<std::shared_ptr<StoredPlannedMatchHop>>& matches() const {
+    return matches_;
+  }
+  const std::vector<std::shared_ptr<StoredLocalBase>>& tile_sources() const {
+    return tile_sources_;
+  }
+  const std::shared_ptr<StoredLocalBase>& final_local() const {
+    return tile_sources_.back();
+  }
+
+  json::object summary() const {
+    return json::object{
+        {"transport_state", handle_},
+        {"capability", kRetainedTransportArmStateCapability},
+        {"native_retained", true},
+        {"json_coefficients", 0},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"tile_plan", plan_owner_->handle()},
+        {"tile_plan_checkpoint_identity",
+         plan_owner_->checkpoint_identity()},
+        {"arm", arm_},
+        {"matches", matches_.size()},
+        {"tiles", tile_sources_.size()},
+        {"epsilon", epsilon_record()},
+        {"refinement", refinement_},
+        {"final_local", local_reference(final_local())},
+        {"strong_ownership", json::object{
+             {"tile_plan", true}, {"anchor", true},
+             {"basis_locals", basis_owner_count()},
+             {"matches", matches_.size()},
+             {"tile_sources", tile_sources_.size()}}},
+        {"elapsed_ms", elapsed_ms_}};
+  }
+
+  json::object stats_json() const {
+    auto result = summary();
+    result["stats_queries"] = stats_queries_.fetch_add(1) + 1;
+    return result;
+  }
+
+  json::object checkpoint_record() const {
+    return json::object{
+        {"schema", "diffexp2-retained-transport-arm-state-v1"},
+        {"handle", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"provenance", provenance_record()},
+        {"elapsed_ms", elapsed_ms_},
+        {"runtime_stats",
+         json::object{{"stats_queries", stats_queries_.load()}}}};
+  }
+
+  void restore_runtime_stats(std::uint64_t stats_queries) {
+    stats_queries_.store(stats_queries);
+  }
+
+ private:
+  static json::object local_reference(
+      const std::shared_ptr<StoredLocalBase>& local) {
+    if (!local)
+      throw std::logic_error(
+          "transport-arm state contains a null local owner");
+    return json::object{
+        {"local", local->handle()}, {"chart", local->source_chart()},
+        {"source_operator_identity", local->source_operator_identity()},
+        {"checkpoint_identity", local->checkpoint_identity()},
+        {"coefficient_domain", local->scalar_domain()}};
+  }
+
+  json::array basis_reference() const {
+    json::array result;
+    result.reserve(basis_owners_.size());
+    for (const auto& basis : basis_owners_) {
+      json::array columns;
+      columns.reserve(basis.size());
+      for (const auto& column : basis)
+        columns.push_back(local_reference(column));
+      result.push_back(std::move(columns));
+    }
+    return result;
+  }
+
+  json::array match_reference() const {
+    json::array result;
+    result.reserve(matches_.size());
+    for (std::size_t index = 0; index < matches_.size(); ++index)
+      result.push_back(json::object{
+          {"index", index}, {"match", matches_[index]->handle()},
+          {"checkpoint_identity", matches_[index]->checkpoint_identity()},
+          {"provenance_identity", matches_[index]->provenance_identity()}});
+    return result;
+  }
+
+  json::array tile_source_reference() const {
+    json::array result;
+    result.reserve(tile_sources_.size());
+    for (std::size_t index = 0; index < tile_sources_.size(); ++index) {
+      auto record = local_reference(tile_sources_[index]);
+      record["tile"] = index;
+      result.push_back(std::move(record));
+    }
+    return result;
+  }
+
+  json::object epsilon_record() const {
+    return json::object{
+        {"min", work_epsilon_.min_power},
+        {"max", work_epsilon_.complete_max},
+        {"required_complete_max", public_required_complete_max_},
+        {"match_required_complete_max", match_required_complete_max_}};
+  }
+
+  json::object provenance_record() const {
+    return json::object{
+        {"schema", "diffexp2-retained-native-transport-arm-state-v1"},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"tile_plan", json::object{
+             {"handle", plan_owner_->handle()},
+             {"checkpoint_identity", plan_owner_->checkpoint_identity()},
+             {"provenance_identity", plan_owner_->provenance_identity()}}},
+        {"arm", arm_},
+        {"anchor", local_reference(anchor_owner_)},
+        {"receiving_basis", basis_reference()},
+        {"matches", match_reference()},
+        {"tile_sources", tile_source_reference()},
+        {"final_local", local_reference(final_local())},
+        {"epsilon", epsilon_record()},
+        {"refinement", refinement_}};
+  }
+
+  std::size_t basis_owner_count() const {
+    std::size_t result = 0;
+    for (const auto& basis : basis_owners_) {
+      if (basis.size() > std::numeric_limits<std::size_t>::max() - result)
+        throw std::overflow_error(
+            "transport-arm basis owner count overflow");
+      result += basis.size();
+    }
+    return result;
+  }
+
+  void validate() const {
+    if (handle_.empty() || checkpoint_identity_.empty() ||
+        !plan_owner_ || !anchor_owner_ || elapsed_ms_ < 0.0 ||
+        !std::isfinite(elapsed_ms_))
+      throw std::invalid_argument(
+          "retained transport-arm state lost an identity or strong owner");
+    const auto& retained = plan_owner_->arm(arm_);
+    if (basis_owners_.size() != retained.exact.matches.size() ||
+        matches_.size() != retained.exact.matches.size() ||
+        tile_sources_.size() != retained.exact.tiles.size() ||
+        tile_sources_.size() != matches_.size() + 1)
+      throw std::invalid_argument(
+          "retained transport-arm state does not reproduce its plan topology");
+    if (tile_sources_.empty() || tile_sources_.front().get() !=
+                                     anchor_owner_.get())
+      throw std::invalid_argument(
+          "retained transport-arm state lost its anchor tile source");
+    (void)work_epsilon_.width();
+    if (public_required_complete_max_ < work_epsilon_.min_power ||
+        match_required_complete_max_ < public_required_complete_max_ ||
+        match_required_complete_max_ > work_epsilon_.complete_max)
+      throw std::invalid_argument(
+          "retained transport-arm epsilon contract is inconsistent");
+    require_exact_keys(refinement_, {"relative_tolerance", "max_steps"},
+                       "retained transport-arm refinement policy");
+    if (required_string(refinement_, "relative_tolerance").empty() ||
+        as_u32(refinement_.at("max_steps"),
+               "retained transport-arm refinement steps") > 32)
+      throw std::invalid_argument(
+          "retained transport-arm refinement policy is invalid");
+
+    for (std::size_t tile = 0; tile < tile_sources_.size(); ++tile) {
+      const auto& source = tile_sources_[tile];
+      if (!source)
+        throw std::invalid_argument(
+            "retained transport-arm state contains a null tile source");
+      const auto& exact_tile = retained.exact.tiles[tile];
+      const auto& chart = retained.charts.at(exact_tile.chart);
+      if (source->source_chart() != chart.handle)
+        throw std::invalid_argument(
+            "retained transport-arm tile source belongs to a different chart");
+      source->require_exact_plan_binding(
+          chart.geometry, chart.prescriptions,
+          "retained transport-arm tile source");
+    }
+    for (std::size_t index = 0; index < matches_.size(); ++index) {
+      const auto& match = matches_[index];
+      const auto& basis = basis_owners_[index];
+      if (!match || basis.empty() ||
+          std::any_of(basis.begin(), basis.end(),
+                      [](const auto& owner) { return owner == nullptr; }) ||
+          match->plan_owner().get() != plan_owner_.get() ||
+          match->incoming_owner().get() != tile_sources_[index].get() ||
+          match->basis_owners().size() != basis.size())
+        throw std::invalid_argument(
+            "retained transport-arm match lost its exact owner set");
+      for (std::size_t column = 0; column < basis.size(); ++column)
+        if (match->basis_owners()[column].get() != basis[column].get())
+          throw std::invalid_argument(
+              "retained transport-arm basis differs from its match owner");
+      const auto& handoff = match->handoff();
+      if (required_string(handoff, "arm") != arm_ ||
+          as_u64(handoff.at("match"),
+                 "retained transport-arm match index") != index)
+        throw std::invalid_argument(
+            "retained transport-arm match provenance is out of order");
+      const auto& next = tile_sources_[index + 1];
+      if (!next->retained_derivation().has_value() ||
+          next->retained_derivation_owner().get() != match.get() ||
+          required_string(*next->retained_derivation(), "source_match") !=
+              match->handle())
+        throw std::invalid_argument(
+            "retained transport-arm tile source is not materialized from its match");
+    }
+  }
+
+  std::string handle_;
+  std::string checkpoint_identity_;
+  std::string provenance_identity_;
+  std::string arm_;
+  std::shared_ptr<StoredTilePlan> plan_owner_;
+  std::shared_ptr<StoredLocalBase> anchor_owner_;
+  std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis_owners_;
+  std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches_;
+  std::vector<std::shared_ptr<StoredLocalBase>> tile_sources_;
+  EpsilonWindow work_epsilon_;
+  std::int32_t public_required_complete_max_ = 0;
+  std::int32_t match_required_complete_max_ = 0;
+  json::object refinement_;
+  double elapsed_ms_ = 0.0;
+  mutable std::atomic<std::uint64_t> stats_queries_{0};
+};
+
 class StoredLineResult {
  public:
   StoredLineResult(std::string handle, std::string checkpoint_identity,
@@ -10602,6 +10887,7 @@ struct SolverSession {
   std::size_t match_capacity = 1024;
   std::size_t endpoint_capacity = 1024;
   std::size_t tile_plan_capacity = 256;
+  std::size_t transport_state_capacity = 256;
   std::size_t line_result_capacity = 2048;
   std::uint64_t next_chart = 1;
   std::uint64_t next_local = 1;
@@ -10609,11 +10895,13 @@ struct SolverSession {
   std::uint64_t next_match = 1;
   std::uint64_t next_endpoint = 1;
   std::uint64_t next_tile_plan = 1;
+  std::uint64_t next_transport_state = 1;
   std::uint64_t next_line_result = 1;
   std::size_t pending_local_solves = 0;
   std::size_t pending_matches = 0;
   std::size_t pending_endpoint_limits = 0;
   std::size_t pending_tile_plans = 0;
+  std::size_t pending_transport_states = 0;
   std::size_t pending_line_integrations = 0;
   std::uint64_t total_local_solves = 0;
   std::uint64_t total_scc_column_solves = 0;
@@ -10621,6 +10909,7 @@ struct SolverSession {
   std::uint64_t total_endpoint_limits = 0;
   std::uint64_t total_endpoint_exports = 0;
   std::uint64_t total_tile_plans = 0;
+  std::uint64_t total_transport_arm_marches = 0;
   std::uint64_t total_line_integrations = 0;
   std::uint64_t total_line_exports = 0;
   double total_local_run_parse_ms = 0.0;
@@ -10632,6 +10921,7 @@ struct SolverSession {
   double total_endpoint_limit_ms = 0.0;
   double total_endpoint_export_ms = 0.0;
   double total_tile_plan_ms = 0.0;
+  double total_transport_arm_ms = 0.0;
   double total_line_integration_ms = 0.0;
   double total_line_export_ms = 0.0;
   bool closed = false;
@@ -10643,6 +10933,8 @@ struct SolverSession {
   std::unordered_map<std::string, std::shared_ptr<StoredEndpointResult>>
       endpoints;
   std::unordered_map<std::string, std::shared_ptr<StoredTilePlan>> tile_plans;
+  std::unordered_map<std::string, std::shared_ptr<StoredTransportArmState>>
+      transport_states;
   std::unordered_map<std::string, std::shared_ptr<StoredLineResult>>
       line_results;
   std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>> sccs;
@@ -11683,6 +11975,115 @@ NativeAcbSaturationBinding native_acb_saturation_binding(
           {"receiving_rim", optional_plan_rim_json(receiving_rim)}}};
 }
 
+struct RetainedArmMarchInput {
+  std::string name;
+  std::vector<std::vector<std::string>> basis_handles;
+  std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis;
+  std::vector<std::string> match_handles;
+  std::vector<std::string> local_handles;
+};
+
+struct RetainedArmMarchResult {
+  std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches;
+  std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
+  double elapsed_ms = 0.0;
+
+  const std::shared_ptr<StoredLocalBase>& final_local() const {
+    if (tile_sources.empty())
+      throw std::logic_error(
+          "retained arm march has no tile source");
+    return tile_sources.back();
+  }
+};
+
+std::string arm_checkpoint_identity(const std::string& root,
+                                    const std::string& arm,
+                                    const char* kind,
+                                    std::size_t one_based_index) {
+  return root + ":" + arm + ":" + kind + ":" +
+         std::to_string(one_based_index);
+}
+
+RetainedArmMarchResult march_retained_arm(
+    const std::string& domain, slong precision_bits,
+    const std::string& session_configuration_identity,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& anchor,
+    const RetainedArmMarchInput& input, EpsilonWindow work_epsilon,
+    std::int32_t match_required_complete_max,
+    const json::object& refinement, const std::string& checkpoint_root) {
+  if ((domain != "rational" && domain != "acb") || !plan || !anchor ||
+      session_configuration_identity.empty() || checkpoint_root.empty())
+    throw std::invalid_argument(
+        "retained arm march requires a numeric domain, session identity, plan, anchor, and checkpoint root");
+  const auto& retained = plan->arm(input.name);
+  const auto match_count = retained.exact.matches.size();
+  if (input.basis_handles.size() != match_count ||
+      input.basis.size() != match_count ||
+      input.match_handles.size() != match_count ||
+      input.local_handles.size() != match_count)
+    throw std::invalid_argument(
+        "retained arm march input does not reproduce its plan match count");
+  require_exact_keys(refinement, {"relative_tolerance", "max_steps"},
+                     "retained arm march refinement policy");
+  if (required_string(refinement, "relative_tolerance").empty() ||
+      as_u32(refinement.at("max_steps"),
+             "retained arm march refinement steps") > 32)
+    throw std::invalid_argument(
+        "retained arm march refinement policy is invalid");
+  (void)work_epsilon.width();
+  if (domain == "acb") ComplexBall::set_precision(precision_bits);
+
+  const auto started = std::chrono::steady_clock::now();
+  RetainedArmMarchResult output;
+  output.matches.reserve(match_count);
+  output.tile_sources.reserve(retained.exact.tiles.size());
+  output.tile_sources.push_back(anchor);
+  std::shared_ptr<StoredLocalBase> current = anchor;
+  for (std::size_t match_index = 0; match_index < match_count;
+       ++match_index) {
+    const auto match_checkpoint = arm_checkpoint_identity(
+        checkpoint_root, input.name, "match", match_index + 1);
+    const auto match_epsilon = live_match_epsilon_intersection(
+        work_epsilon, match_required_complete_max, current,
+        input.basis[match_index]);
+    json::object match_request{
+        {"arm", input.name}, {"match", match_index},
+        {"epsilon", json::object{
+             {"min", match_epsilon.min_power},
+             {"max", match_epsilon.complete_max},
+             {"required_complete_max", match_required_complete_max}}},
+        {"checkpoint_identity", match_checkpoint}};
+    if (domain == "acb") {
+      auto saturation = native_acb_saturation_binding(
+          plan, session_configuration_identity, input.name, match_index,
+          match_checkpoint);
+      match_request[saturation.request_key] =
+          std::move(saturation.request);
+      match_request["refinement"] = refinement;
+    }
+    auto match = build_planned_match_hop(
+        input.match_handles[match_index], match_request, domain,
+        precision_bits, session_configuration_identity, plan,
+        input.basis_handles[match_index], input.basis[match_index],
+        current->handle(), current);
+    auto next = match->materialize(
+        input.local_handles[match_index],
+        arm_checkpoint_identity(checkpoint_root, input.name, "local",
+                                match_index + 1),
+        precision_bits, match);
+    output.matches.push_back(std::move(match));
+    output.tile_sources.push_back(next);
+    current = std::move(next);
+  }
+  if (output.tile_sources.size() != retained.exact.tiles.size())
+    throw std::logic_error(
+        "retained arm march did not produce one source local per tile");
+  output.elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return output;
+}
+
 json::array line_aggregate_source_records(
     const std::vector<std::shared_ptr<StoredLocalBase>>& owners) {
   json::array records;
@@ -12370,7 +12771,7 @@ std::string static_problem_signature(const json::object& problem,
 
 constexpr const char* kCheckpointFormat =
     "diffexp2-persistent-native-session";
-constexpr std::uint32_t kCheckpointPayloadSchema = 2;
+constexpr std::uint32_t kCheckpointPayloadSchema = 3;
 
 json::object run_session_command(const json::object& root);
 
@@ -12947,6 +13348,221 @@ std::size_t checkpoint_size_t(const json::value& raw, const char* label) {
   return static_cast<std::size_t>(value);
 }
 
+std::shared_ptr<StoredTransportArmState>
+restore_checkpoint_transport_arm_state_record(
+    const json::value& raw,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<StoredTilePlan>>& plans,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<StoredLocalBase>>& locals,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<StoredMatchBase>>& matches) {
+  const auto& object = as_object(
+      raw, "checkpoint retained transport-arm state");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "provenance", "elapsed_ms", "runtime_stats"},
+      "checkpoint retained transport-arm state");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-transport-arm-state-v1")
+    throw std::invalid_argument(
+        "unsupported retained transport-arm checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint transport-arm state contains an empty identity");
+  const auto& provenance = as_object(
+      object.at("provenance"),
+      "checkpoint transport-arm state provenance");
+  require_exact_keys(
+      provenance,
+      {"schema", "checkpoint_identity", "tile_plan", "arm", "anchor",
+       "receiving_basis", "matches", "tile_sources", "final_local",
+       "epsilon", "refinement"},
+      "checkpoint transport-arm state provenance");
+  if (required_string(provenance, "schema") !=
+          "diffexp2-retained-native-transport-arm-state-v1" ||
+      required_string(provenance, "checkpoint_identity") !=
+          checkpoint_identity ||
+      json::serialize(canonical_json_value(provenance)) !=
+          provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint transport-arm provenance identity is inconsistent");
+
+  const auto& plan_reference = as_object(
+      provenance.at("tile_plan"),
+      "checkpoint transport-arm tile-plan reference");
+  require_exact_keys(
+      plan_reference,
+      {"handle", "checkpoint_identity", "provenance_identity"},
+      "checkpoint transport-arm tile-plan reference");
+  const auto plan_found = plans.find(
+      required_string(plan_reference, "handle"));
+  if (plan_found == plans.end() || !plan_found->second ||
+      required_string(plan_reference, "checkpoint_identity") !=
+          plan_found->second->checkpoint_identity() ||
+      required_string(plan_reference, "provenance_identity") !=
+          plan_found->second->provenance_identity())
+    throw std::invalid_argument(
+        "checkpoint transport-arm state lost its retained tile plan");
+  const auto plan = plan_found->second;
+  const auto arm_name = required_string(provenance, "arm");
+  (void)plan->arm(arm_name);
+
+  const auto resolve_local_reference = [&](const json::value& raw_reference,
+                                           const char* label,
+                                           bool has_tile) {
+    const auto& reference = as_object(raw_reference, label);
+    if (has_tile)
+      require_exact_keys(
+          reference,
+          {"tile", "local", "chart", "source_operator_identity",
+           "checkpoint_identity", "coefficient_domain"},
+          label);
+    else
+      require_exact_keys(
+          reference,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity", "coefficient_domain"},
+          label);
+    const auto found = locals.find(required_string(reference, "local"));
+    if (found == locals.end() || !found->second ||
+        required_string(reference, "chart") !=
+            found->second->source_chart() ||
+        required_string(reference, "source_operator_identity") !=
+            found->second->source_operator_identity() ||
+        required_string(reference, "checkpoint_identity") !=
+            found->second->checkpoint_identity() ||
+        required_string(reference, "coefficient_domain") !=
+            found->second->scalar_domain())
+      throw std::invalid_argument(
+          std::string(label) + " disagrees with its retained local owner");
+    return found->second;
+  };
+
+  auto anchor = resolve_local_reference(
+      provenance.at("anchor"),
+      "checkpoint transport-arm anchor reference", false);
+  std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis;
+  for (const auto& raw_basis : as_array(
+           provenance.at("receiving_basis"),
+           "checkpoint transport-arm receiving bases")) {
+    std::vector<std::shared_ptr<StoredLocalBase>> columns;
+    for (const auto& raw_column : as_array(
+             raw_basis, "checkpoint transport-arm receiving basis"))
+      columns.push_back(resolve_local_reference(
+          raw_column, "checkpoint transport-arm basis reference", false));
+    if (columns.empty())
+      throw std::invalid_argument(
+          "checkpoint transport-arm receiving basis cannot be empty");
+    basis.push_back(std::move(columns));
+  }
+
+  std::vector<std::shared_ptr<StoredPlannedMatchHop>> planned_matches;
+  const auto& raw_matches = as_array(
+      provenance.at("matches"), "checkpoint transport-arm matches");
+  planned_matches.reserve(raw_matches.size());
+  for (std::size_t index = 0; index < raw_matches.size(); ++index) {
+    const auto& reference = as_object(
+        raw_matches[index], "checkpoint transport-arm match reference");
+    require_exact_keys(
+        reference,
+        {"index", "match", "checkpoint_identity", "provenance_identity"},
+        "checkpoint transport-arm match reference");
+    if (checkpoint_size_t(reference.at("index"),
+                          "checkpoint transport-arm match index") != index)
+      throw std::invalid_argument(
+          "checkpoint transport-arm matches are out of order");
+    const auto found = matches.find(required_string(reference, "match"));
+    if (found == matches.end())
+      throw std::invalid_argument(
+          "checkpoint transport-arm state lost a planned match");
+    auto match = std::dynamic_pointer_cast<StoredPlannedMatchHop>(
+        found->second);
+    if (!match ||
+        required_string(reference, "checkpoint_identity") !=
+            match->checkpoint_identity() ||
+        required_string(reference, "provenance_identity") !=
+            match->provenance_identity())
+      throw std::invalid_argument(
+          "checkpoint transport-arm match reference is inconsistent");
+    planned_matches.push_back(std::move(match));
+  }
+
+  std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
+  const auto& raw_sources = as_array(
+      provenance.at("tile_sources"),
+      "checkpoint transport-arm tile sources");
+  tile_sources.reserve(raw_sources.size());
+  for (std::size_t tile = 0; tile < raw_sources.size(); ++tile) {
+    const auto& reference = as_object(
+        raw_sources[tile], "checkpoint transport-arm tile-source reference");
+    if (checkpoint_size_t(reference.at("tile"),
+                          "checkpoint transport-arm tile index") != tile)
+      throw std::invalid_argument(
+          "checkpoint transport-arm tile sources are out of order");
+    tile_sources.push_back(resolve_local_reference(
+        raw_sources[tile],
+        "checkpoint transport-arm tile-source reference", true));
+  }
+  auto final_local = resolve_local_reference(
+      provenance.at("final_local"),
+      "checkpoint transport-arm final-local reference", false);
+  if (tile_sources.empty() || tile_sources.back().get() != final_local.get())
+    throw std::invalid_argument(
+        "checkpoint transport-arm final local differs from its last tile source");
+
+  const auto& epsilon = as_object(
+      provenance.at("epsilon"), "checkpoint transport-arm epsilon contract");
+  require_exact_keys(
+      epsilon,
+      {"min", "max", "required_complete_max",
+       "match_required_complete_max"},
+      "checkpoint transport-arm epsilon contract");
+  EpsilonWindow work_epsilon{
+      as_i32(epsilon.at("min"), "checkpoint transport-arm epsilon minimum"),
+      as_i32(epsilon.at("max"), "checkpoint transport-arm epsilon maximum")};
+  (void)work_epsilon.width();
+  const auto public_required_complete_max = as_i32(
+      epsilon.at("required_complete_max"),
+      "checkpoint transport-arm public epsilon maximum");
+  const auto match_required_complete_max = as_i32(
+      epsilon.at("match_required_complete_max"),
+      "checkpoint transport-arm match epsilon maximum");
+  const auto refinement = as_object(
+      provenance.at("refinement"),
+      "checkpoint transport-arm refinement policy");
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint transport-arm elapsed time");
+  auto state = std::make_shared<StoredTransportArmState>(
+      handle, checkpoint_identity, arm_name, plan, anchor,
+      std::move(basis), std::move(planned_matches),
+      std::move(tile_sources), work_epsilon,
+      public_required_complete_max, match_required_complete_max,
+      refinement, elapsed_ms);
+  if (state->provenance_identity() != provenance_identity)
+    throw std::invalid_argument(
+        "restored transport-arm state changed its exact provenance");
+  const auto& stats = as_object(
+      object.at("runtime_stats"),
+      "checkpoint transport-arm runtime stats");
+  require_exact_keys(stats, {"stats_queries"},
+                     "checkpoint transport-arm runtime stats");
+  state->restore_runtime_stats(as_u64(
+      stats.at("stats_queries"),
+      "checkpoint transport-arm statistics queries"));
+  if (state->checkpoint_record() != raw)
+    throw std::invalid_argument(
+        "restored transport-arm state does not reproduce its exact retained state");
+  return state;
+}
+
 std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
     const json::value& raw,
     const std::shared_ptr<StoredTilePlan>& plan,
@@ -13470,7 +14086,8 @@ json::object checkpoint_configuration_record(const SolverSession& session) {
       {"local_capacity", session.local_capacity},
       {"scc_capacity", session.scc_capacity},
       {"match_capacity", session.match_capacity},
-      {"endpoint_capacity", session.endpoint_capacity}};
+      {"endpoint_capacity", session.endpoint_capacity},
+      {"transport_state_capacity", session.transport_state_capacity}};
 }
 
 std::string checkpoint_configuration_identity(const SolverSession& session) {
@@ -13647,6 +14264,28 @@ json::array checkpoint_tile_identity_manifest(const json::array& items) {
   return manifest;
 }
 
+json::array checkpoint_transport_state_identity_manifest(
+    const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(
+        value, "checkpoint retained transport-arm state");
+    const auto& provenance = as_object(
+        item.at("provenance"),
+        "checkpoint transport-arm state provenance");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"checkpoint_identity", item.at("checkpoint_identity")},
+        {"provenance_identity", item.at("provenance_identity")},
+        {"tile_plan", provenance.at("tile_plan")},
+        {"arm", provenance.at("arm")},
+        {"anchor", provenance.at("anchor")},
+        {"final_local", provenance.at("final_local")}});
+  }
+  return manifest;
+}
+
 json::array checkpoint_line_identity_manifest(const json::array& items) {
   json::array manifest;
   manifest.reserve(items.size());
@@ -13678,6 +14317,7 @@ struct SessionCheckpointSnapshot {
   std::size_t planned_matches = 0;
   std::size_t endpoints = 0;
   std::size_t tile_plans = 0;
+  std::size_t transport_states = 0;
   std::size_t line_results = 0;
 };
 
@@ -13688,9 +14328,10 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   if (session.pending_local_solves != 0 || session.pending_matches != 0 ||
       session.pending_endpoint_limits != 0 ||
       session.pending_tile_plans != 0 ||
+      session.pending_transport_states != 0 ||
       session.pending_line_integrations != 0)
     throw std::invalid_argument(
-        "checkpoint requires a quiescent session with no pending local solve, match, endpoint limit, tile plan, or line integration");
+        "checkpoint requires a quiescent session with no pending local solve, match, endpoint limit, tile plan, transport arm, or line integration");
 
   // Serialize the strong-ownership closure, not only the public registries.
   // Retained lines, tile plans, matches, and materialized locals deliberately
@@ -13706,10 +14347,14 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       tile_closure;
   std::unordered_map<std::string, std::shared_ptr<StoredMatchBase>>
       match_closure;
+  std::unordered_map<std::string, std::shared_ptr<StoredTransportArmState>>
+      transport_closure;
   std::function<void(const std::shared_ptr<PreparedChartBase>&)> add_chart;
   std::function<void(const std::shared_ptr<StoredTilePlan>&)> add_tile;
   std::function<void(const std::shared_ptr<StoredLocalBase>&)> add_local;
   std::function<void(const std::shared_ptr<StoredMatchBase>&)> add_match;
+  std::function<void(const std::shared_ptr<StoredTransportArmState>&)>
+      add_transport;
   std::function<void(const std::shared_ptr<CompositeSCCChartBase>&)> add_scc;
   add_chart = [&](const std::shared_ptr<PreparedChartBase>& chart) {
     if (!chart)
@@ -13792,7 +14437,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           schema !=
               "diffexp2-retained-rational-row-local-application-v1")
         throw std::domain_error(
-            "checkpoint schema v2 does not yet serialize this retained local derivation kind");
+            "native checkpoint does not serialize this retained local derivation kind");
       const auto opaque = local->retained_derivation_owner();
       if (!opaque)
         throw std::logic_error(
@@ -13821,10 +14466,31 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           "checkpoint primitive local unexpectedly retains a derivation owner");
     }
   };
+  add_transport = [&](const std::shared_ptr<StoredTransportArmState>& state) {
+    if (!state)
+      throw std::logic_error(
+          "checkpoint ownership closure contains a null transport-arm state");
+    const auto [found, inserted] =
+        transport_closure.emplace(state->handle(), state);
+    if (!inserted) {
+      if (found->second.get() != state.get())
+        throw std::logic_error(
+            "checkpoint ownership closure contains distinct transport-arm states with one handle");
+      return;
+    }
+    add_tile(state->plan_owner());
+    add_local(state->anchor_owner());
+    for (const auto& basis : state->basis_owners())
+      for (const auto& local : basis) add_local(local);
+    for (const auto& match : state->matches()) add_match(match);
+    for (const auto& local : state->tile_sources()) add_local(local);
+  };
   for (const auto& [ignored, chart] : session.charts) add_chart(chart);
   for (const auto& [ignored, plan] : session.tile_plans) add_tile(plan);
   for (const auto& [ignored, local] : session.locals) add_local(local);
   for (const auto& [ignored, match] : session.matches) add_match(match);
+  for (const auto& [ignored, state] : session.transport_states)
+    add_transport(state);
   for (const auto& [ignored, endpoint] : session.endpoints) {
     if (!endpoint->plan_bound()) continue;
     const auto& plan = endpoint->plan_owner();
@@ -13897,6 +14563,17 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     return scoped_handle_id(left->handle(), "tile:", "tile plan") <
            scoped_handle_id(right->handle(), "tile:", "tile plan");
   });
+  std::vector<std::shared_ptr<StoredTransportArmState>> transport_states;
+  transport_states.reserve(transport_closure.size());
+  for (const auto& [ignored, state] : transport_closure)
+    transport_states.push_back(state);
+  std::sort(transport_states.begin(), transport_states.end(),
+            [](const auto& left, const auto& right) {
+    return scoped_handle_id(left->handle(), "transport:",
+                            "transport-arm state") <
+           scoped_handle_id(right->handle(), "transport:",
+                            "transport-arm state");
+  });
   std::vector<std::shared_ptr<StoredLineResult>> line_results;
   line_results.reserve(session.line_results.size());
   for (const auto& [ignored, line] : session.line_results)
@@ -13954,6 +14631,10 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   tile_items.reserve(tile_plans.size());
   for (const auto& plan : tile_plans)
     tile_items.push_back(plan->checkpoint_record());
+  json::array transport_items;
+  transport_items.reserve(transport_states.size());
+  for (const auto& state : transport_states)
+    transport_items.push_back(state->checkpoint_record());
   json::array line_items;
   line_items.reserve(line_results.size());
   for (const auto& line : line_results)
@@ -13979,12 +14660,17 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& plan : tile_plans)
     if (session.tile_plans.contains(plan->handle()))
       visible_tiles.emplace_back(plan->handle());
+  json::array visible_transport_states;
+  for (const auto& state : transport_states)
+    if (session.transport_states.contains(state->handle()))
+      visible_transport_states.emplace_back(state->handle());
   json::object registry_visibility{
       {"charts", std::move(visible_charts)},
       {"sccs", std::move(visible_sccs)},
       {"locals", std::move(visible_locals)},
       {"matches", std::move(visible_matches)},
-      {"tile_plans", std::move(visible_tiles)}};
+      {"tile_plans", std::move(visible_tiles)},
+      {"transport_states", std::move(visible_transport_states)}};
 
   if (session.checkpoint_generation ==
       std::numeric_limits<std::uint64_t>::max())
@@ -13998,6 +14684,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"next_match", session.next_match},
       {"next_endpoint", session.next_endpoint},
       {"next_tile_plan", session.next_tile_plan},
+      {"next_transport_state", session.next_transport_state},
       {"next_line_result", session.next_line_result},
       {"total_local_solves", session.total_local_solves},
       {"total_scc_column_solves", session.total_scc_column_solves},
@@ -14005,6 +14692,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"total_endpoint_limits", session.total_endpoint_limits},
       {"total_endpoint_exports", session.total_endpoint_exports},
       {"total_tile_plans", session.total_tile_plans},
+      {"total_transport_arm_marches", session.total_transport_arm_marches},
       {"total_line_integrations", session.total_line_integrations},
       {"total_line_exports", session.total_line_exports},
       {"total_local_run_parse_ms", session.total_local_run_parse_ms},
@@ -14013,6 +14701,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"total_endpoint_limit_ms", session.total_endpoint_limit_ms},
       {"total_endpoint_export_ms", session.total_endpoint_export_ms},
       {"total_tile_plan_ms", session.total_tile_plan_ms},
+      {"total_transport_arm_ms", session.total_transport_arm_ms},
       {"total_line_integration_ms", session.total_line_integration_ms},
       {"total_line_export_ms", session.total_line_export_ms},
       {"checkpoint_generation", generation},
@@ -14034,6 +14723,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"retained_planned_match_hops", planned_match_items},
       {"retained_endpoints", endpoint_items},
       {"retained_tile_plans", tile_items},
+      {"retained_transport_states", transport_items},
       {"retained_line_results", line_items}};
   json::array mandatory_sections{"session", "prepared_charts",
                                   "prepared_scc", "retained_locals",
@@ -14042,6 +14732,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
                                   "retained_planned_match_hops",
                                   "retained_endpoints",
                                   "retained_tile_plans",
+                                  "retained_transport_states",
                                   "retained_line_results"};
   json::array deferred_kinds{"symbolic-local"};
   json::object header{
@@ -14068,6 +14759,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
        checkpoint_endpoint_identity_manifest(endpoint_items)},
       {"tile_plan_identities",
        checkpoint_tile_identity_manifest(tile_items)},
+      {"transport_state_identities",
+       checkpoint_transport_state_identity_manifest(transport_items)},
       {"line_result_identities",
        checkpoint_line_identity_manifest(line_items)},
       {"generation", generation}};
@@ -14075,7 +14768,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           session.charts.size(), session.sccs.size(), session.locals.size(),
           exact_match_items.size(), acb_match_items.size(),
           planned_match_items.size(), endpoints.size(),
-          session.tile_plans.size(), line_results.size()};
+          session.tile_plans.size(), session.transport_states.size(),
+          line_results.size()};
 }
 
 std::vector<std::string> checkpoint_string_array(const json::value& raw,
@@ -14100,14 +14794,16 @@ void validate_checkpoint_envelope(const json::object& header,
        "scc_identities", "local_identities", "exact_match_identities",
        "acb_match_identities", "planned_match_identities",
        "endpoint_identities",
-       "tile_plan_identities", "line_result_identities", "generation"},
+       "tile_plan_identities", "transport_state_identities",
+       "line_result_identities", "generation"},
       "checkpoint header");
   require_exact_keys(payload,
       {"schema", "session", "prepared_charts", "prepared_scc",
        "retained_locals", "retained_exact_matches",
        "retained_acb_matches", "retained_planned_match_hops",
        "retained_endpoints",
-       "retained_tile_plans", "retained_line_results"},
+       "retained_tile_plans", "retained_transport_states",
+       "retained_line_results"},
       "checkpoint payload");
   if (required_string(header, "format") != kCheckpointFormat ||
       as_u32(header.at("schema"), "checkpoint header schema") !=
@@ -14132,6 +14828,7 @@ void validate_checkpoint_envelope(const json::object& header,
       "retained_endpoints", "retained_exact_matches",
       "retained_line_results", "retained_locals",
       "retained_planned_match_hops", "retained_tile_plans",
+      "retained_transport_states",
       "session"};
   if (mandatory != expected_sections)
     throw std::invalid_argument(
@@ -14156,36 +14853,23 @@ void validate_checkpoint_envelope(const json::object& header,
        "registry_visibility", "counters"}, "checkpoint session section");
   const auto& visibility = as_object(
       session.at("registry_visibility"), "checkpoint registry visibility");
-  const bool has_scc_visibility = visibility.if_contains("sccs") != nullptr;
-  const bool has_match_visibility =
-      visibility.if_contains("matches") != nullptr;
-  if (has_scc_visibility && has_match_visibility)
-    require_exact_keys(visibility,
-        {"charts", "sccs", "locals", "matches", "tile_plans"},
-        "checkpoint registry visibility");
-  else if (has_scc_visibility)
-    require_exact_keys(visibility,
-        {"charts", "sccs", "locals", "tile_plans"},
-        "checkpoint registry visibility");
-  else if (has_match_visibility)
-    require_exact_keys(visibility,
-        {"charts", "locals", "matches", "tile_plans"},
-        "checkpoint registry visibility");
-  else
-    require_exact_keys(visibility, {"charts", "locals", "tile_plans"},
-                       "checkpoint registry visibility");
+  require_exact_keys(
+      visibility,
+      {"charts", "sccs", "locals", "matches", "tile_plans",
+       "transport_states"},
+      "checkpoint registry visibility");
   (void)checkpoint_string_array(visibility.at("charts"),
                                 "visible checkpoint charts");
-  if (const auto* visible_sccs = visibility.if_contains("sccs"))
-    (void)checkpoint_string_array(*visible_sccs,
-                                  "visible checkpoint SCCs");
+  (void)checkpoint_string_array(visibility.at("sccs"),
+                                "visible checkpoint SCCs");
   (void)checkpoint_string_array(visibility.at("locals"),
                                 "visible checkpoint locals");
-  if (const auto* visible_matches = visibility.if_contains("matches"))
-    (void)checkpoint_string_array(*visible_matches,
-                                  "visible checkpoint matches");
+  (void)checkpoint_string_array(visibility.at("matches"),
+                                "visible checkpoint matches");
   (void)checkpoint_string_array(visibility.at("tile_plans"),
                                 "visible checkpoint tile plans");
+  (void)checkpoint_string_array(visibility.at("transport_states"),
+                                "visible checkpoint transport states");
   if (required_string(session, "configuration_identity") !=
       required_string(header, "configuration_identity"))
     throw std::invalid_argument(
@@ -14220,6 +14904,9 @@ void validate_checkpoint_envelope(const json::object& header,
   const auto& tile_items = as_array(
       payload.at("retained_tile_plans"),
       "checkpoint retained tile plans");
+  const auto& transport_items = as_array(
+      payload.at("retained_transport_states"),
+      "checkpoint retained transport-arm states");
   const auto& line_items = as_array(
       payload.at("retained_line_results"),
       "checkpoint retained line results");
@@ -14247,6 +14934,9 @@ void validate_checkpoint_envelope(const json::object& header,
       checkpoint_tile_identity_manifest(tile_items) !=
           as_array(header.at("tile_plan_identities"),
                    "checkpoint tile-plan identities") ||
+      checkpoint_transport_state_identity_manifest(transport_items) !=
+          as_array(header.at("transport_state_identities"),
+                   "checkpoint transport-state identities") ||
       checkpoint_line_identity_manifest(line_items) !=
           as_array(header.at("line_result_identities"),
                    "checkpoint line-result identities"))
@@ -14276,7 +14966,7 @@ json::object restore_checkpoint(const std::string& path,
   require_exact_keys(configuration,
       {"domain", "precision_bits", "output_digits", "symbols", "analytic",
        "chart_capacity", "local_capacity", "scc_capacity",
-       "match_capacity", "endpoint_capacity"},
+       "match_capacity", "endpoint_capacity", "transport_state_capacity"},
       "checkpoint configuration");
   const auto& raw_visibility = as_object(
       saved_session.at("registry_visibility"),
@@ -14294,38 +14984,12 @@ json::object restore_checkpoint(const std::string& path,
     return result;
   };
   const auto visible_charts = visibility_set("charts", "c:");
-  const auto visible_sccs = [&]() {
-    if (raw_visibility.if_contains("sccs") != nullptr)
-      return visibility_set("sccs", "scc:");
-    std::set<std::string> result;
-    for (const auto& raw_item : as_array(
-             payload.at("prepared_scc"), "checkpoint prepared SCC charts")) {
-      const auto handle = required_string(
-          as_object(raw_item, "checkpoint SCC item"), "handle");
-      (void)scoped_handle_id(handle, "scc:", "visible SCC");
-      result.insert(handle);
-    }
-    return result;
-  }();
+  const auto visible_sccs = visibility_set("sccs", "scc:");
   const auto visible_locals = visibility_set("locals", "l:");
-  const auto visible_matches = [&]() {
-    if (raw_visibility.if_contains("matches") != nullptr)
-      return visibility_set("matches", "m:");
-    std::set<std::string> result;
-    for (const auto* section : {"retained_exact_matches",
-                                "retained_acb_matches",
-                                "retained_planned_match_hops"})
-      for (const auto& raw_item : as_array(payload.at(section), section)) {
-        const auto handle = required_string(
-            as_object(raw_item, "checkpoint retained match"), "handle");
-        (void)scoped_handle_id(handle, "m:", "visible match");
-        if (!result.insert(handle).second)
-          throw std::invalid_argument(
-              "checkpoint match handle is duplicated across retained kinds");
-      }
-    return result;
-  }();
+  const auto visible_matches = visibility_set("matches", "m:");
   const auto visible_tiles = visibility_set("tile_plans", "tile:");
+  const auto visible_transport_states =
+      visibility_set("transport_states", "transport:");
   const auto configured_chart_capacity = static_cast<std::size_t>(as_u64(
       configuration.at("chart_capacity"),
       "checkpoint configured chart capacity"));
@@ -14343,6 +15007,13 @@ json::object restore_checkpoint(const std::string& path,
           "checkpoint configured match capacity")))
     throw std::invalid_argument(
         "checkpoint visible matches exceed the restored session capacity");
+  const auto configured_transport_state_capacity =
+      static_cast<std::size_t>(as_u64(
+          configuration.at("transport_state_capacity"),
+          "checkpoint configured transport-state capacity"));
+  if (visible_transport_states.size() > configured_transport_state_capacity)
+    throw std::invalid_argument(
+        "checkpoint visible transport states exceed the restored session capacity");
   json::object create{
       {"schema", 2}, {"op", "session.create"},
       {"domain", configuration.at("domain")},
@@ -14354,7 +15025,9 @@ json::object restore_checkpoint(const std::string& path,
       {"local_capacity", configuration.at("local_capacity")},
       {"scc_capacity", configuration.at("scc_capacity")},
       {"match_capacity", configuration.at("match_capacity")},
-      {"endpoint_capacity", configuration.at("endpoint_capacity")}};
+      {"endpoint_capacity", configuration.at("endpoint_capacity")},
+      {"transport_state_capacity",
+       configuration.at("transport_state_capacity")}};
   const auto created = run_session_command(create);
   const auto restored_handle = required_string(created, "session");
   bool live = true;
@@ -14496,11 +15169,13 @@ json::object restore_checkpoint(const std::string& path,
     json::array restored_exact_matches;
     json::array restored_acb_matches;
     json::array restored_planned_matches;
+    json::array restored_transport_states;
     json::array restored_endpoints;
     json::array restored_tile_plans;
     json::array restored_line_results;
     std::uint64_t largest_local = 0, largest_match = 0;
     std::uint64_t largest_endpoint = 0, largest_tile_plan = 0;
+    std::uint64_t largest_transport_state = 0;
     std::uint64_t largest_line_result = 0;
     {
       // Rebuild the ownership DAG under one publication lock. Primitive
@@ -14522,12 +15197,19 @@ json::object restore_checkpoint(const std::string& path,
       const auto& saved_planned = as_array(
           payload.at("retained_planned_match_hops"),
           "checkpoint retained planned match hops");
+      const auto& saved_transport_states = as_array(
+          payload.at("retained_transport_states"),
+          "checkpoint retained transport-arm states");
       if (visible_locals.size() > restored->local_capacity)
         throw std::invalid_argument(
             "checkpoint visible locals exceed the restored session capacity");
       if (visible_tiles.size() > restored->tile_plan_capacity)
         throw std::invalid_argument(
             "checkpoint visible tile plans exceed the restored session capacity");
+      if (visible_transport_states.size() >
+          restored->transport_state_capacity)
+        throw std::invalid_argument(
+            "checkpoint visible transport states exceed the restored session capacity");
 
       std::set<std::string> all_tile_handles;
       for (const auto& raw_item : saved_tiles) {
@@ -14612,7 +15294,7 @@ json::object restore_checkpoint(const std::string& path,
               item, restored->domain, restored->precision_bits, owner);
         else
           throw std::invalid_argument(
-              "checkpoint schema v2 cannot restore symbolic local state");
+              "native checkpoint cannot restore symbolic local state");
         if (local->checkpoint_record() != raw_item)
           throw std::invalid_argument(
               "restored local does not reproduce its exact retained state");
@@ -14815,6 +15497,41 @@ json::object restore_checkpoint(const std::string& path,
               "checkpoint local/match ownership graph has a missing dependency or cycle");
       }
 
+      std::set<std::string> all_transport_state_handles;
+      for (const auto& raw_item : saved_transport_states) {
+        const auto& item = as_object(
+            raw_item, "checkpoint retained transport-arm state");
+        const auto handle = required_string(item, "handle");
+        if (!all_transport_state_handles.insert(handle).second)
+          throw std::invalid_argument(
+              "checkpoint contains duplicate retained transport-state handles");
+        const auto id = scoped_handle_id(
+            handle, "transport:", "transport-arm state");
+        if (id <= largest_transport_state)
+          throw std::invalid_argument(
+              "checkpoint transport-state handles are not in strict creation order");
+        largest_transport_state = id;
+        auto state = restore_checkpoint_transport_arm_state_record(
+            raw_item, restored->tile_plans, restored->locals,
+            restored->matches);
+        if (state->checkpoint_record() != raw_item ||
+            !restored->transport_states.emplace(handle, state).second)
+          throw std::invalid_argument(
+              "restored transport-arm state does not reproduce its exact retained state");
+        if (visible_transport_states.contains(handle))
+          restored_transport_states.push_back(json::object{
+              {"transport_state", handle},
+              {"checkpoint_identity", item.at("checkpoint_identity")},
+              {"provenance_identity", item.at("provenance_identity")},
+              {"generation", header.at("generation")}});
+      }
+      if (!std::includes(all_transport_state_handles.begin(),
+                         all_transport_state_handles.end(),
+                         visible_transport_states.begin(),
+                         visible_transport_states.end()))
+        throw std::invalid_argument(
+            "checkpoint transport-state visibility names an absent ownership object");
+
       const auto& saved_endpoints = as_array(
           payload.at("retained_endpoints"),
           "checkpoint retained endpoints");
@@ -14939,6 +15656,10 @@ json::object restore_checkpoint(const std::string& path,
             {"generation", header.at("generation")}});
       }
 
+      for (auto it = restored->transport_states.begin();
+           it != restored->transport_states.end();)
+        it = visible_transport_states.contains(it->first)
+            ? std::next(it) : restored->transport_states.erase(it);
       for (auto it = restored->matches.begin(); it != restored->matches.end();)
         it = visible_matches.contains(it->first)
             ? std::next(it) : restored->matches.erase(it);
@@ -14971,15 +15692,18 @@ json::object restore_checkpoint(const std::string& path,
                                      "checkpoint counters");
     require_exact_keys(counters,
         {"next_chart", "next_local", "next_scc", "next_match",
-         "next_endpoint", "next_tile_plan", "next_line_result",
+         "next_endpoint", "next_tile_plan", "next_transport_state",
+         "next_line_result",
          "total_local_solves", "total_scc_column_solves",
          "total_local_matches", "total_endpoint_limits",
          "total_endpoint_exports", "total_tile_plans",
+         "total_transport_arm_marches",
          "total_line_integrations", "total_line_exports",
          "total_local_run_parse_ms",
          "total_local_kernel_ms", "total_local_match_ms",
          "total_endpoint_limit_ms", "total_endpoint_export_ms",
-         "total_tile_plan_ms", "total_line_integration_ms",
+         "total_tile_plan_ms", "total_transport_arm_ms",
+         "total_line_integration_ms",
          "total_line_export_ms",
          "checkpoint_generation", "checkpoint_restore_count"},
         "checkpoint counters");
@@ -14991,6 +15715,8 @@ json::object restore_checkpoint(const std::string& path,
         counters.at("next_endpoint"), "next endpoint");
     const auto next_tile_plan = as_u64(
         counters.at("next_tile_plan"), "next tile plan");
+    const auto next_transport_state = as_u64(
+        counters.at("next_transport_state"), "next transport state");
     const auto next_line_result = as_u64(
         counters.at("next_line_result"), "next line result");
     const auto restore_count = as_u64(
@@ -15000,6 +15726,7 @@ json::object restore_checkpoint(const std::string& path,
         next_local <= largest_local || next_match <= largest_match ||
         next_endpoint <= largest_endpoint ||
         next_tile_plan <= largest_tile_plan ||
+        next_transport_state <= largest_transport_state ||
         next_line_result <= largest_line_result)
       throw std::invalid_argument(
           "checkpoint next-handle counters do not follow retained handles");
@@ -15013,6 +15740,7 @@ json::object restore_checkpoint(const std::string& path,
       restored->next_match = next_match;
       restored->next_endpoint = next_endpoint;
       restored->next_tile_plan = next_tile_plan;
+      restored->next_transport_state = next_transport_state;
       restored->next_line_result = next_line_result;
       restored->chart_capacity = configured_chart_capacity;
       restored->scc_capacity = configured_scc_capacity;
@@ -15029,6 +15757,9 @@ json::object restore_checkpoint(const std::string& path,
           counters.at("total_endpoint_exports"), "total endpoint exports");
       restored->total_tile_plans = as_u64(
           counters.at("total_tile_plans"), "total tile plans");
+      restored->total_transport_arm_marches = as_u64(
+          counters.at("total_transport_arm_marches"),
+          "total transport-arm marches");
       restored->total_line_integrations = as_u64(
           counters.at("total_line_integrations"),
           "total line integrations");
@@ -15051,6 +15782,9 @@ json::object restore_checkpoint(const std::string& path,
           "total endpoint export time");
       restored->total_tile_plan_ms = checkpoint_nonnegative_double(
           counters.at("total_tile_plan_ms"), "total tile-plan time");
+      restored->total_transport_arm_ms = checkpoint_nonnegative_double(
+          counters.at("total_transport_arm_ms"),
+          "total transport-arm time");
       restored->total_line_integration_ms = checkpoint_nonnegative_double(
           counters.at("total_line_integration_ms"),
           "total line-integration time");
@@ -15078,6 +15812,7 @@ json::object restore_checkpoint(const std::string& path,
         {"planned_match_hops", std::move(restored_planned_matches)},
         {"endpoints", std::move(restored_endpoints)},
         {"tile_plans", std::move(restored_tile_plans)},
+        {"transport_states", std::move(restored_transport_states)},
         {"line_results", std::move(restored_line_results)},
         {"deferred_handle_kinds", header.at("deferred_handle_kinds")},
         {"replayed_wolfram_preprocessing", false}};
@@ -15199,6 +15934,15 @@ json::object run_session_command(const json::object& root) {
             "endpoint result capacity must lie in 1..16384");
       session->endpoint_capacity = capacity;
     }
+    if (root.if_contains("transport_state_capacity")) {
+      const auto capacity = as_u32(
+          root.at("transport_state_capacity"),
+          "transport-arm state capacity");
+      if (capacity == 0 || capacity > 16384)
+        throw std::invalid_argument(
+            "transport-arm state capacity must lie in 1..16384");
+      session->transport_state_capacity = capacity;
+    }
     auto& registry = session_registry();
     {
       std::lock_guard<std::mutex> lock(registry.mutex);
@@ -15217,6 +15961,8 @@ json::object run_session_command(const json::object& root) {
                         {"match_capacity", session->match_capacity},
                         {"endpoint_capacity", session->endpoint_capacity},
                         {"tile_plan_capacity", session->tile_plan_capacity},
+                        {"transport_state_capacity",
+                         session->transport_state_capacity},
                         {"line_result_capacity", session->line_result_capacity},
                         {"local_match_capability",
                          domain == "rational"
@@ -15257,6 +16003,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedParallelArmCapability},
+                        {"transport_arm_state_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportArmStateCapability},
                         {"certified_tail_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -15280,21 +16030,24 @@ json::object run_session_command(const json::object& root) {
       registry.sessions.erase(found);
     }
     std::size_t charts = 0, locals = 0, matches = 0, endpoints = 0,
-                tile_plans = 0, line_results = 0, sccs = 0;
+                tile_plans = 0, transport_states = 0,
+                line_results = 0, sccs = 0;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
       removed->closed = true;
-      // In-flight solve/match/endpoint calls own their reservations and
-      // decrement them on exactly one completion path.  Do not reset pending
-      // counters.
+      // In-flight solve/match/transport/endpoint calls own their reservations
+      // and decrement them on exactly one completion path. Do not reset
+      // pending counters.
       charts = removed->charts.size();
       locals = removed->locals.size();
       matches = removed->matches.size();
       endpoints = removed->endpoints.size();
       tile_plans = removed->tile_plans.size();
+      transport_states = removed->transport_states.size();
       line_results = removed->line_results.size();
       sccs = removed->sccs.size();
       removed->line_results.clear();
+      removed->transport_states.clear();
       removed->tile_plans.clear();
       removed->endpoints.clear();
       removed->matches.clear();
@@ -15310,6 +16063,7 @@ json::object run_session_command(const json::object& root) {
                         {"released_matches", matches},
                         {"released_endpoints", endpoints},
                         {"released_tile_plans", tile_plans},
+                        {"released_transport_states", transport_states},
                         {"released_line_results", line_results},
                         {"released_scc_charts", sccs}};
   }
@@ -15339,11 +16093,13 @@ json::object run_session_command(const json::object& root) {
         {"planned_match_hops", snapshot.planned_matches},
         {"endpoints", snapshot.endpoints},
         {"tile_plans", snapshot.tile_plans},
+        {"transport_states", snapshot.transport_states},
         {"line_results", snapshot.line_results},
         {"serialized_handle_kinds",
          json::array{"chart", "scc", "local", "exact-rational-match",
                      "acb-match", "planned-match-hop",
-                     "materialized-local", "endpoint", "tile", "line"}},
+                     "materialized-local", "endpoint", "tile",
+                     "transport-arm-state", "line"}},
         {"deferred_handle_kinds",
          json::array{"symbolic-local"}},
         {"atomic", true}};
@@ -15666,6 +16422,316 @@ json::object run_session_command(const json::object& root) {
     return response;
   }
 
+  if (operation == "transport.run_arm") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "tile_plan", "anchor",
+         "tile_plan_checkpoint_identity", "anchor_checkpoint_identity",
+         "arm", "receiving_basis", "epsilon", "refinement",
+         "checkpoint_policy"},
+        "native transport.run_arm request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native transport-arm marching requires rational or Acb coefficients");
+    const auto arm_name = required_string(root, "arm");
+    if (arm_name != "lower" && arm_name != "upper")
+      throw std::invalid_argument(
+          "native transport-arm name must be lower or upper");
+    const auto epsilon_contract = parse_whole_arm_epsilon_contract(
+        root.at("epsilon"), "native transport-arm epsilon contract");
+    const auto& refinement = as_object(
+        root.at("refinement"), "native transport-arm refinement policy");
+    require_exact_keys(refinement, {"relative_tolerance", "max_steps"},
+                       "native transport-arm refinement policy");
+    (void)required_string(refinement, "relative_tolerance");
+    if (as_u32(refinement.at("max_steps"),
+               "native transport-arm refinement steps") > 32)
+      throw std::invalid_argument(
+          "native transport-arm refinement steps must lie in 0..32");
+    const auto& checkpoint_policy = as_object(
+        root.at("checkpoint_policy"),
+        "native transport-arm checkpoint policy");
+    require_exact_keys(checkpoint_policy, {"schema", "root"},
+                       "native transport-arm checkpoint policy");
+    if (required_string(checkpoint_policy, "schema") !=
+        "diffexp2-deterministic-arm-checkpoints-v1")
+      throw std::invalid_argument(
+          "unsupported native transport-arm checkpoint policy schema");
+    const auto checkpoint_root = required_string(checkpoint_policy, "root");
+    if (checkpoint_root.empty())
+      throw std::invalid_argument(
+          "native transport-arm checkpoint root cannot be empty");
+
+    RetainedArmMarchInput input;
+    input.name = arm_name;
+    const auto& raw_basis_sets = as_array(
+        root.at("receiving_basis"),
+        "native transport-arm receiving basis sets");
+    input.basis_handles.reserve(raw_basis_sets.size());
+    for (const auto& raw_set : raw_basis_sets) {
+      const auto& values = as_array(
+          raw_set, "native transport-arm receiving basis set");
+      if (values.empty())
+        throw std::invalid_argument(
+            "native transport-arm receiving basis sets cannot be empty");
+      std::set<std::string> unique;
+      std::vector<std::string> handles;
+      handles.reserve(values.size());
+      for (const auto& raw_handle : values) {
+        if (!raw_handle.is_string() || raw_handle.as_string().empty())
+          throw std::invalid_argument(
+              "native transport-arm basis handles must be nonempty strings");
+        std::string handle(raw_handle.as_string());
+        if (!unique.insert(handle).second)
+          throw std::invalid_argument(
+              "native transport-arm basis handles must be pairwise distinct");
+        handles.push_back(std::move(handle));
+      }
+      input.basis_handles.push_back(std::move(handles));
+    }
+
+    const auto plan_handle = required_string(root, "tile_plan");
+    const auto anchor_handle = required_string(root, "anchor");
+    std::shared_ptr<StoredTilePlan> plan;
+    std::shared_ptr<StoredLocalBase> anchor;
+    std::string state_handle;
+    const auto match_count = input.basis_handles.size();
+    bool reservation_live = false;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto plan_found = session->tile_plans.find(plan_handle);
+      if (plan_found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or released tile plan for transport-arm marching");
+      plan = plan_found->second;
+      if (required_string(root, "tile_plan_checkpoint_identity") !=
+          plan->checkpoint_identity())
+        throw std::invalid_argument(
+            "transport-arm tile-plan checkpoint token is stale");
+      const auto& retained = plan->arm(arm_name);
+      if (retained.exact.matches.size() != match_count ||
+          retained.exact.tiles.size() != match_count + 1)
+        throw std::invalid_argument(
+            "transport-arm basis count does not reproduce the retained plan topology");
+      const auto anchor_found = session->locals.find(anchor_handle);
+      if (anchor_found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released anchor local for transport-arm marching");
+      anchor = anchor_found->second;
+      if (required_string(root, "anchor_checkpoint_identity") !=
+          anchor->checkpoint_identity())
+        throw std::invalid_argument(
+            "transport-arm anchor checkpoint token is stale");
+      const auto& anchor_binding = retained.charts.front();
+      if (anchor->source_chart() != anchor_binding.handle)
+        throw std::invalid_argument(
+            "transport-arm anchor belongs to a different retained chart");
+      anchor->require_exact_plan_binding(
+          anchor_binding.geometry, anchor_binding.prescriptions,
+          "transport-arm anchor");
+
+      input.basis.reserve(match_count);
+      for (const auto& handles : input.basis_handles) {
+        std::vector<std::shared_ptr<StoredLocalBase>> resolved;
+        resolved.reserve(handles.size());
+        for (const auto& handle : handles) {
+          const auto found = session->locals.find(handle);
+          if (found == session->locals.end())
+            throw std::invalid_argument(
+                "unknown or released native local in transport-arm receiving basis: " +
+                handle);
+          resolved.push_back(found->second);
+        }
+        input.basis.push_back(std::move(resolved));
+      }
+
+      if (match_count > session->match_capacity -
+                            std::min(session->match_capacity,
+                                     session->matches.size() +
+                                         session->pending_matches))
+        throw std::invalid_argument(
+            "persistent local match capacity is exhausted by transport-arm marching");
+      if (match_count > session->local_capacity -
+                            std::min(session->local_capacity,
+                                     session->locals.size() +
+                                         session->pending_local_solves))
+        throw std::invalid_argument(
+            "persistent local capacity is exhausted by transport-arm marching");
+      if (session->transport_states.size() +
+              session->pending_transport_states >=
+          session->transport_state_capacity)
+        throw std::invalid_argument(
+            "persistent transport-state capacity is exhausted");
+
+      input.match_handles.reserve(match_count);
+      input.local_handles.reserve(match_count);
+      for (std::size_t index = 0; index < match_count; ++index) {
+        input.match_handles.push_back(
+            "m:" + std::to_string(session->next_match++));
+        input.local_handles.push_back(
+            "l:" + std::to_string(session->next_local++));
+      }
+      state_handle = "transport:" +
+          std::to_string(session->next_transport_state++);
+      session->pending_matches += match_count;
+      session->pending_local_solves += match_count;
+      ++session->pending_transport_states;
+      reservation_live = true;
+    }
+    const auto release_reservation = [&]() {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (!reservation_live) return;
+      if (session->pending_matches < match_count ||
+          session->pending_local_solves < match_count ||
+          session->pending_transport_states == 0)
+        throw std::logic_error(
+            "native transport-arm reservation accounting underflow");
+      session->pending_matches -= match_count;
+      session->pending_local_solves -= match_count;
+      --session->pending_transport_states;
+      reservation_live = false;
+    };
+    struct TransportArmReservationGuard final {
+      decltype(release_reservation)& release;
+      bool& live;
+      ~TransportArmReservationGuard() noexcept {
+        if (!live) return;
+        try {
+          release();
+        } catch (...) {
+          std::terminate();
+        }
+      }
+    } reservation_guard{release_reservation, reservation_live};
+
+    const auto operation_started = std::chrono::steady_clock::now();
+    std::unique_ptr<AcbPrecisionLease> acb_lease;
+    if (session->domain == "acb") {
+      acb_lease = std::make_unique<AcbPrecisionLease>(
+          session->precision_bits);
+      ComplexBall::set_precision(session->precision_bits);
+    }
+    const auto session_configuration =
+        checkpoint_configuration_identity(*session);
+    auto marched = march_retained_arm(
+        session->domain, session->precision_bits, session_configuration,
+        plan, anchor, input, epsilon_contract.work,
+        epsilon_contract.match_required_complete_max, refinement,
+        checkpoint_root);
+    auto state = std::make_shared<StoredTransportArmState>(
+        state_handle, checkpoint_root + ":" + arm_name + ":state",
+        arm_name, plan, anchor, input.basis, marched.matches,
+        marched.tile_sources, epsilon_contract.work,
+        epsilon_contract.public_required_complete_max,
+        epsilon_contract.match_required_complete_max, refinement,
+        marched.elapsed_ms);
+    const auto final_local = state->final_local();
+
+    try {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches < match_count ||
+          session->pending_local_solves < match_count ||
+          session->pending_transport_states == 0)
+        throw std::logic_error(
+            "native transport-arm reservation accounting underflow");
+      session->pending_matches -= match_count;
+      session->pending_local_solves -= match_count;
+      --session->pending_transport_states;
+      reservation_live = false;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during transport-arm marching");
+
+      session->locals.reserve(session->locals.size() +
+                              (match_count == 0 ? 0 : 1));
+      session->transport_states.reserve(
+          session->transport_states.size() + 1);
+      bool inserted_local = false;
+      try {
+        const auto existing = session->locals.find(final_local->handle());
+        if (existing == session->locals.end()) {
+          if (!session->locals.emplace(final_local->handle(), final_local)
+                   .second)
+            throw std::logic_error(
+                "transport-arm final-local handle collision at publication");
+          inserted_local = true;
+        } else if (existing->second.get() != final_local.get()) {
+          throw std::logic_error(
+              "transport-arm final-local handle names a different retained object");
+        }
+        if (!session->transport_states.emplace(state_handle, state).second)
+          throw std::logic_error(
+              "transport-arm state handle collision at publication");
+      } catch (...) {
+        session->transport_states.erase(state_handle);
+        if (inserted_local) session->locals.erase(final_local->handle());
+        throw;
+      }
+      for (const auto& match : state->matches()) {
+        ++session->total_local_matches;
+        session->total_local_match_ms += match->elapsed_ms();
+        plan->note_match_advance(arm_name);
+      }
+      ++session->total_transport_arm_marches;
+      session->total_transport_arm_ms += state->elapsed_ms();
+    } catch (...) {
+      if (reservation_live) release_reservation();
+      throw;
+    }
+
+    auto response = state->summary();
+    auto final_summary = final_local->summary();
+    final_summary["session"] = session->handle;
+    response["final_local"] = std::move(final_summary);
+    response["status"] = "ok";
+    response["session"] = session->handle;
+    response["atomic_publication"] = true;
+    response["checkpoint_policy"] = checkpoint_policy;
+    response["operation_elapsed_ms"] = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - operation_started).count();
+    return response;
+  }
+
+  if (operation == "transport.stats" ||
+      operation == "transport.release") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "transport_state"},
+        operation == "transport.stats"
+            ? "native transport.stats request"
+            : "native transport.release request");
+    const auto state_handle = required_string(root, "transport_state");
+    if (operation == "transport.stats") {
+      std::shared_ptr<StoredTransportArmState> state;
+      {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        const auto found = session->transport_states.find(state_handle);
+        if (found == session->transport_states.end())
+          throw std::invalid_argument(
+              "unknown or released native transport-arm state");
+        state = found->second;
+      }
+      auto result = state->stats_json();
+      result["status"] = "ok";
+      result["session"] = session->handle;
+      return result;
+    }
+    std::shared_ptr<StoredTransportArmState> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->transport_states.find(state_handle);
+      if (found == session->transport_states.end())
+        throw std::invalid_argument(
+            "unknown or already released native transport-arm state");
+      removed = std::move(found->second);
+      session->transport_states.erase(found);
+    }
+    return json::object{
+        {"status", "ok"}, {"released", state_handle},
+        {"checkpoint_identity", removed->checkpoint_identity()}};
+  }
+
   if (operation == "integration.run_arms") {
     if (root.if_contains("certify_tail") != nullptr)
       require_exact_keys(
@@ -15917,12 +16983,10 @@ json::object run_session_command(const json::object& root) {
     } reservation_guard{release_reservation, reservation_live};
 
     struct CompletedArmMarch {
-      std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches;
-      std::vector<std::shared_ptr<StoredLocalBase>> materialized;
+      RetainedArmMarchResult march;
       std::vector<std::shared_ptr<StoredLocalBase>> projected;
       std::vector<std::shared_ptr<StoredLineResult>> tile_lines;
       std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
-      std::shared_ptr<StoredLocalBase> final_local;
       std::shared_ptr<StoredLineResult> aggregate;
       double elapsed_ms = 0.0;
     };
@@ -15942,6 +17006,8 @@ json::object run_session_command(const json::object& root) {
           std::make_unique<AcbPrecisionLease>(session->precision_bits);
       ComplexBall::set_precision(session->precision_bits);
     }
+    const auto active_session_configuration_identity =
+        checkpoint_configuration_identity(*session);
 
     const auto update_max_active = [&](std::size_t candidate) {
       auto observed = max_active_workers.load();
@@ -15949,13 +17015,6 @@ json::object run_session_command(const json::object& root) {
              !max_active_workers.compare_exchange_weak(observed, candidate)) {
       }
     };
-    const auto checkpoint_for = [&](const std::string& arm,
-                                    const char* kind,
-                                    std::size_t one_based_index) {
-      return checkpoint_root + ":" + arm + ":" + kind + ":" +
-             std::to_string(one_based_index);
-    };
-
     const auto run_arm = [&](std::size_t arm_index) {
       auto active = active_workers.fetch_add(1) + 1;
       update_max_active(active);
@@ -15976,20 +17035,27 @@ json::object run_session_command(const json::object& root) {
         auto& input = arms[arm_index];
         auto& output = completed[arm_index];
         const auto& retained = plan->arm(input.name);
-        std::shared_ptr<StoredLocalBase> current = anchor;
-        output.matches.reserve(retained.exact.matches.size());
-        output.materialized.reserve(retained.exact.matches.size());
+        RetainedArmMarchInput march_input{
+            input.name, input.basis_handles, input.basis,
+            input.match_handles, input.local_handles};
+        output.march = march_retained_arm(
+            session->domain, session->precision_bits,
+            active_session_configuration_identity, plan, anchor,
+            march_input, work_epsilon, match_required_complete_max,
+            refinement, checkpoint_root);
         output.projected.reserve(retained.exact.tiles.size());
         output.tile_lines.reserve(retained.exact.tiles.size());
         output.tile_sources.reserve(retained.exact.tiles.size());
         for (std::size_t tile = 0; tile < retained.exact.tiles.size(); ++tile) {
+          const auto& current = output.march.tile_sources[tile];
           const auto row_identity = required_string(
               input.integrand_rows[tile], "exact_identity");
           json::object row_request{
               {"row", input.integrand_rows[tile]},
               {"source_checkpoint_identity", current->checkpoint_identity()},
               {"checkpoint_identity",
-               checkpoint_for(input.name, "integrand", tile + 1) + ":" +
+               arm_checkpoint_identity(checkpoint_root, input.name,
+                                       "integrand", tile + 1) + ":" +
                    row_identity}};
           std::shared_ptr<StoredLocalBase> projected;
           if (session->domain == "rational") {
@@ -16019,52 +17085,17 @@ json::object run_session_command(const json::object& root) {
               {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
               {"source_checkpoint_identity", projected->checkpoint_identity()},
               {"checkpoint_identity",
-               checkpoint_for(input.name, "tile", tile + 1)},
+               arm_checkpoint_identity(checkpoint_root, input.name,
+                                       "tile", tile + 1)},
               {"arm", input.name}, {"tile", tile},
               {"epsilon", json::object{{"min", line_epsilon.min_power},
                                         {"max", line_epsilon.complete_max}}}};
           if (certify_tail) line_request["certify_tail"] = true;
           output.tile_lines.push_back(build_planned_line_result(
-              "private:" + checkpoint_for(input.name, "tile", tile + 1),
+              "private:" + arm_checkpoint_identity(
+                  checkpoint_root, input.name, "tile", tile + 1),
               line_request, plan, projected));
-          if (tile == retained.exact.matches.size()) continue;
-
-          const auto match_checkpoint =
-              checkpoint_for(input.name, "match", tile + 1);
-          const auto match_epsilon = live_match_epsilon_intersection(
-              work_epsilon, match_required_complete_max, current,
-              input.basis[tile]);
-          json::object match_request{
-              {"arm", input.name}, {"match", tile},
-              {"epsilon", json::object{
-                   {"min", match_epsilon.min_power},
-                   {"max", match_epsilon.complete_max},
-                   {"required_complete_max",
-                    match_required_complete_max}}},
-              {"checkpoint_identity", match_checkpoint}};
-          if (session->domain == "acb") {
-            auto saturation = native_acb_saturation_binding(
-                plan, checkpoint_configuration_identity(*session),
-                input.name, tile, match_checkpoint);
-            match_request[saturation.request_key] =
-                std::move(saturation.request);
-            match_request["refinement"] = refinement;
-          }
-          auto match = build_planned_match_hop(
-              input.match_handles[tile], match_request, session->domain,
-              session->precision_bits,
-              checkpoint_configuration_identity(*session), plan,
-              input.basis_handles[tile], input.basis[tile],
-              current->handle(), current);
-          auto next = match->materialize(
-              input.local_handles[tile],
-              checkpoint_for(input.name, "local", tile + 1),
-              session->precision_bits, match);
-          output.matches.push_back(std::move(match));
-          output.materialized.push_back(next);
-          current = std::move(next);
         }
-        output.final_local = current;
         const auto aggregate_started = std::chrono::steady_clock::now();
         std::vector<std::int32_t> signs(output.tile_lines.size(), 1);
         output.aggregate = build_retained_line_aggregate(
@@ -16165,7 +17196,8 @@ json::object run_session_command(const json::object& root) {
       std::vector<std::string> inserted_lines;
       try {
         for (std::size_t arm_index = 0; arm_index < 2; ++arm_index) {
-          const auto& final_local = completed[arm_index].final_local;
+          const auto& final_local =
+              completed[arm_index].march.final_local();
           const auto existing = session->locals.find(final_local->handle());
           if (existing == session->locals.end()) {
             if (!session->locals.emplace(
@@ -16196,7 +17228,7 @@ json::object run_session_command(const json::object& root) {
       }
 
       for (std::size_t arm_index = 0; arm_index < 2; ++arm_index) {
-        for (const auto& match : completed[arm_index].matches) {
+        for (const auto& match : completed[arm_index].march.matches) {
           ++session->total_local_matches;
           session->total_local_match_ms += match->elapsed_ms();
           plan->note_match_advance(arms[arm_index].name);
@@ -16214,14 +17246,14 @@ json::object run_session_command(const json::object& root) {
 
     json::object arm_response;
     for (std::size_t index = 0; index < 2; ++index) {
-      auto final_local = completed[index].final_local->summary();
+      auto final_local = completed[index].march.final_local()->summary();
       final_local["session"] = session->handle;
       auto line = completed[index].aggregate->summary();
       line["session"] = session->handle;
       arm_response[arms[index].name] = json::object{
           {"final_local", std::move(final_local)},
           {"line_result", std::move(line)},
-          {"matches", completed[index].matches.size()},
+          {"matches", completed[index].march.matches.size()},
           {"tiles", completed[index].tile_lines.size()},
           {"elapsed_ms", completed[index].elapsed_ms}};
     }
@@ -17760,12 +18792,14 @@ json::object run_session_command(const json::object& root) {
     std::vector<std::shared_ptr<StoredMatchBase>> matches;
     std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
     std::vector<std::shared_ptr<StoredTilePlan>> tile_plans;
+    std::vector<std::shared_ptr<StoredTransportArmState>> transport_states;
     std::vector<std::shared_ptr<StoredLineResult>> line_results;
     std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
     std::size_t pending_local_solves = 0;
     std::size_t pending_matches = 0;
     std::size_t pending_endpoint_limits = 0;
     std::size_t pending_tile_plans = 0;
+    std::size_t pending_transport_states = 0;
     std::size_t pending_line_integrations = 0;
     std::uint64_t total_local_solves = 0;
     std::uint64_t total_scc_column_solves = 0;
@@ -17776,6 +18810,7 @@ json::object run_session_command(const json::object& root) {
     std::uint64_t total_endpoint_limits = 0;
     std::uint64_t total_endpoint_exports = 0;
     std::uint64_t total_tile_plans = 0;
+    std::uint64_t total_transport_arm_marches = 0;
     std::uint64_t total_line_integrations = 0;
     std::uint64_t total_line_exports = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
@@ -17783,6 +18818,7 @@ json::object run_session_command(const json::object& root) {
     double total_endpoint_limit_ms = 0.0;
     double total_endpoint_export_ms = 0.0;
     double total_tile_plan_ms = 0.0;
+    double total_transport_arm_ms = 0.0;
     double total_line_integration_ms = 0.0;
     double total_line_export_ms = 0.0;
     {
@@ -17797,6 +18833,8 @@ json::object run_session_command(const json::object& root) {
         endpoints.push_back(endpoint);
       for (const auto& [ignored, plan] : session->tile_plans)
         tile_plans.push_back(plan);
+      for (const auto& [ignored, state] : session->transport_states)
+        transport_states.push_back(state);
       for (const auto& [ignored, result] : session->line_results)
         line_results.push_back(result);
       for (const auto& [ignored, composite] : session->sccs)
@@ -17805,6 +18843,7 @@ json::object run_session_command(const json::object& root) {
       pending_matches = session->pending_matches;
       pending_endpoint_limits = session->pending_endpoint_limits;
       pending_tile_plans = session->pending_tile_plans;
+      pending_transport_states = session->pending_transport_states;
       pending_line_integrations = session->pending_line_integrations;
       total_local_solves = session->total_local_solves;
       total_scc_column_solves = session->total_scc_column_solves;
@@ -17812,6 +18851,7 @@ json::object run_session_command(const json::object& root) {
       total_endpoint_limits = session->total_endpoint_limits;
       total_endpoint_exports = session->total_endpoint_exports;
       total_tile_plans = session->total_tile_plans;
+      total_transport_arm_marches = session->total_transport_arm_marches;
       total_line_integrations = session->total_line_integrations;
       total_line_exports = session->total_line_exports;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
@@ -17824,6 +18864,7 @@ json::object run_session_command(const json::object& root) {
       total_endpoint_limit_ms = session->total_endpoint_limit_ms;
       total_endpoint_export_ms = session->total_endpoint_export_ms;
       total_tile_plan_ms = session->total_tile_plan_ms;
+      total_transport_arm_ms = session->total_transport_arm_ms;
       total_line_integration_ms = session->total_line_integration_ms;
       total_line_export_ms = session->total_line_export_ms;
     }
@@ -17900,6 +18941,9 @@ json::object run_session_command(const json::object& root) {
     json::array tile_plan_stats;
     for (const auto& plan : tile_plans)
       tile_plan_stats.push_back(plan->summary(false));
+    json::array transport_state_stats;
+    for (const auto& state : transport_states)
+      transport_state_stats.push_back(state->stats_json());
     json::array line_result_stats;
     for (const auto& result : line_results)
       line_result_stats.push_back(result->stats_json());
@@ -17911,12 +18955,15 @@ json::object run_session_command(const json::object& root) {
                         {"matches", matches.size()},
                         {"endpoints", endpoints.size()},
                         {"tile_plans", tile_plans.size()},
+                        {"transport_states", transport_states.size()},
                         {"line_results", line_results.size()},
                         {"scc_charts", sccs.size()},
                         {"pending_local_solves", pending_local_solves},
                         {"pending_matches", pending_matches},
                         {"pending_endpoint_limits", pending_endpoint_limits},
                         {"pending_tile_plans", pending_tile_plans},
+                        {"pending_transport_states",
+                         pending_transport_states},
                         {"pending_line_integrations",
                          pending_line_integrations},
                         {"local_solves", total_local_solves},
@@ -17924,6 +18971,8 @@ json::object run_session_command(const json::object& root) {
                         {"endpoint_limits", total_endpoint_limits},
                         {"endpoint_exports", total_endpoint_exports},
                         {"tile_plans_created", total_tile_plans},
+                        {"transport_arm_marches",
+                         total_transport_arm_marches},
                         {"line_integrations", total_line_integrations},
                         {"line_exports", total_line_exports},
                         {"local_match_capability",
@@ -17961,6 +19010,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedStoredLineCapability},
+                        {"transport_arm_state_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportArmStateCapability},
                         {"certified_tail_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -18009,6 +19062,7 @@ json::object run_session_command(const json::object& root) {
                         {"endpoint_limit_ms", total_endpoint_limit_ms},
                         {"endpoint_export_ms", total_endpoint_export_ms},
                         {"tile_plan_ms", total_tile_plan_ms},
+                        {"transport_arm_ms", total_transport_arm_ms},
                         {"line_integration_ms", total_line_integration_ms},
                         {"line_export_ms", total_line_export_ms},
                         {"chart_stats", std::move(chart_stats)},
@@ -18016,6 +19070,8 @@ json::object run_session_command(const json::object& root) {
                         {"match_stats", std::move(match_stats)},
                         {"endpoint_stats", std::move(endpoint_stats)},
                         {"tile_plan_stats", std::move(tile_plan_stats)},
+                        {"transport_state_stats",
+                         std::move(transport_state_stats)},
                         {"line_result_stats", std::move(line_result_stats)},
                         {"scc_stats", std::move(scc_stats)}};
   }
@@ -18214,6 +19270,9 @@ std::string backend_info_json() {
                                       {"persistent_parallel_arm_march", true},
                                       {"persistent_parallel_arm_march_capability",
                                        kRetainedParallelArmCapability},
+                                      {"persistent_transport_arm_state", true},
+                                      {"persistent_transport_arm_state_capability",
+                                       kRetainedTransportArmStateCapability},
                                       {"persistent_certified_tail_majorant",
                                        true},
                                       {"persistent_certified_tail_majorant_capability",
@@ -18226,9 +19285,10 @@ std::string backend_info_json() {
                                       {"persistent_acb_local_match_capability",
                                        kRefinedAcbLocalMatchCapability},
                                       {"persistent_checkpoint", true},
-                                      {"persistent_checkpoint_schema", 1},
+                                      {"persistent_checkpoint_schema",
+                                       kCheckpointPayloadSchema},
                                       {"persistent_checkpoint_handle_scope",
-                                       "prepared-chart-and-scc"},
+                                       "complete-retained-native-ownership-closure"},
                                       {"persistent_scc_regular_singular_scalar_block_dag_column",
                                        true},
                                       {"persistent_scc_regular_singular_jordan_block_dag_column",

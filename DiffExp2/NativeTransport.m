@@ -14,9 +14,9 @@ RunNativeRegularIndependentArms::usage =
 RunNativeTransportObservableBatch::usage =
   "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
 SaveNativeTransportObservableBatchCheckpoint::usage =
-  "SaveNativeTransportObservableBatchCheckpoint[batch,path,identity] atomically saves one completed retained observable batch through the schema-2 native checkpoint protocol. The returned exact manifest binds the stable line, endpoint, and transport-state handles together with the pre-save transport-arm march counter.";
+  "SaveNativeTransportObservableBatchCheckpoint[batch,path,identity] atomically saves one completed retained observable batch through the schema-2 native checkpoint protocol. The returned compact manifest binds the stable line, endpoint, and transport-state handles by SHA-256 provenance digests together with the pre-save transport-arm march counter.";
 RestoreNativeTransportObservableBatchCheckpoint::usage =
-  "RestoreNativeTransportObservableBatchCheckpoint[manifest] restores one completed retained observable batch without replaying chart preparation, matching, or transport. It validates the stable public handle manifest and transport-arm march counter before returning an exportable opaque batch.";
+  "RestoreNativeTransportObservableBatchCheckpoint[manifest] restores one completed retained observable batch without replaying chart preparation, matching, or transport. It validates either a compact v2 digest manifest or a legacy v1 full-provenance manifest and the transport-arm march counter before returning an exportable opaque batch.";
 ReleaseNativeTransportObservableBatch::usage =
   "ReleaseNativeTransportObservableBatch[batch] releases every public line, endpoint, and retained transport-state token produced by RunNativeTransportObservableBatch, then releases its atlas anchor, bases, and tile plan. Strongly owned hidden matches and locals are reclaimed without exposing coefficient tensors.";
 ExportNativeTransportObservableBatch::usage =
@@ -522,6 +522,43 @@ nativeArmRequest[plan_Association, owners_List] := Module[{},
 
 nativeCheckpointIdentity[prefix_String, payload_] := prefix <>
   IntegerString[Hash[payload, "SHA256"], 16, 64];
+
+$nativeObservableCheckpointSchemaV1 =
+  "DiffExp2.NativeTransportObservableCheckpoint/v1";
+$nativeObservableCheckpointSchemaV2 =
+  "DiffExp2.NativeTransportObservableCheckpoint/v2";
+
+(* Native provenance identities are deliberately complete, recursively
+   auditable JSON records.  They belong in the atomic native checkpoint, but
+   copying them into the Wolfram MX sidecar can duplicate tens of megabytes
+   per result.  The compact manifest binds each restored record by SHA-256;
+   the full string is recovered from, and validated against, the native file
+   before an opaque handle is reconstructed. *)
+nativeProvenanceSHA256[identity_String] :=
+  IntegerString[Hash[identity, "SHA256"], 16, 64];
+
+nativeProvenanceSHA256Q[value_] := StringQ[value] &&
+  StringMatchQ[value, RegularExpression["[0-9a-f]{64}"]];
+
+nativeCheckpointProvenanceKey[schema_] := Switch[schema,
+  $nativeObservableCheckpointSchemaV1, "ProvenanceIdentity",
+  $nativeObservableCheckpointSchemaV2, "ProvenanceSHA256",
+  _, None];
+
+nativeCheckpointProvenanceReference[identity_String, schema_] :=
+  Switch[schema,
+    $nativeObservableCheckpointSchemaV1, identity,
+    $nativeObservableCheckpointSchemaV2, nativeProvenanceSHA256[identity],
+    _, None];
+
+nativeCheckpointProvenanceReferenceQ[value_, schema_] := Switch[schema,
+  $nativeObservableCheckpointSchemaV1, nativeNonemptyStringQ[value],
+  $nativeObservableCheckpointSchemaV2, nativeProvenanceSHA256Q[value],
+  _, False];
+
+nativeCheckpointProvenanceMatchesQ[identity_, reference_, schema_] :=
+  nativeNonemptyStringQ[identity] &&
+    nativeCheckpointProvenanceReference[identity, schema] === reference;
 
 nativeOpaqueCheckpoint[handle_Association, label_String] := Module[{value},
   value = Lookup[handle, "checkpoint_identity",
@@ -1370,9 +1407,9 @@ ExportNativeTransportObservableBatch[batch_Association,
   Join[batch, <|"ExportedResults" -> exported,
     "CompatibilityExports" -> Length[exported]|>]];
 
-nativeObservableCheckpointResult[result_Association,
-    session_String] := Module[
-  {operation, kind, handle, token, checkpoint, provenance},
+nativeObservableCheckpointResult[result_Association, session_String,
+    schema_:$nativeObservableCheckpointSchemaV2] := Module[
+  {operation, kind, handle, token, checkpoint, provenance, provenanceKey},
   operation = Lookup[result, "Operation", None];
   {kind, handle} = Switch[operation,
     "integrate", {"line", Lookup[result, "Line", None]},
@@ -1401,24 +1438,33 @@ nativeObservableCheckpointResult[result_Association,
   If[!nativeNonemptyStringQ[provenance],
     err["E8", <|"Result" -> result,
       "Detail" -> "completed native checkpoint result has no exact provenance identity"|>]];
-  <|"RequestIndex" -> result["RequestIndex"],
+  provenanceKey = nativeCheckpointProvenanceKey[schema];
+  If[provenanceKey === None,
+    err["E8", <|"Schema" -> schema,
+      "Detail" -> "native checkpoint result requested an unsupported manifest schema"|>]];
+  Join[<|"RequestIndex" -> result["RequestIndex"],
     "Operation" -> operation, "Identity" -> result["Identity"],
     "CheckpointIdentity" -> checkpoint, "Epsilon" -> result["Epsilon"],
-    "Kind" -> kind, "Handle" -> token,
-    "ProvenanceIdentity" -> provenance|>];
+    "Kind" -> kind, "Handle" -> token|>,
+    <|provenanceKey ->
+      nativeCheckpointProvenanceReference[provenance, schema]|>]];
 
 nativeObservableCheckpointManifestQ[manifest_] := Module[
   {keys = {"Schema", "Path", "CheckpointIdentity", "ManifestIdentity",
       "TransportArmMarches", "StateHandles", "Results"}, core, results,
+   schema, provenanceKey,
    resultKeys = {"RequestIndex", "Operation", "Identity",
-      "CheckpointIdentity", "Epsilon", "Kind", "Handle",
-      "ProvenanceIdentity"}},
+      "CheckpointIdentity", "Epsilon", "Kind", "Handle"}},
   If[!AssociationQ[manifest] || Sort[Keys[manifest]] =!= Sort[keys],
     Return[False, Module]];
+  schema = manifest["Schema"];
+  provenanceKey = nativeCheckpointProvenanceKey[schema];
+  If[provenanceKey === None, Return[False, Module]];
+  AppendTo[resultKeys, provenanceKey];
   core = KeyDrop[manifest, "ManifestIdentity"];
   results = manifest["Results"];
-  TrueQ[manifest["Schema"] ===
-      "DiffExp2.NativeTransportObservableCheckpoint/v1"] &&
+  TrueQ[MemberQ[{$nativeObservableCheckpointSchemaV1,
+        $nativeObservableCheckpointSchemaV2}, schema]] &&
     StringQ[manifest["Path"]] && StringLength[manifest["Path"]] > 0 &&
     nativeNonemptyStringQ[manifest["CheckpointIdentity"]] &&
     manifest["ManifestIdentity"] === nativeCheckpointIdentity[
@@ -1429,16 +1475,16 @@ nativeObservableCheckpointManifestQ[manifest_] := Module[
     Sort[Keys[manifest["StateHandles"]]] === {"lower", "upper"} &&
     AllTrue[Values[manifest["StateHandles"]], AssociationQ[#] &&
       Sort[Keys[#]] === Sort[{"Handle", "CheckpointIdentity",
-        "ProvenanceIdentity"}] &&
+        provenanceKey}] &&
       nativeNonemptyStringQ[#["Handle"]] &&
       StringStartsQ[#["Handle"], "transport:"] &&
       nativeNonemptyStringQ[#["CheckpointIdentity"]] &&
-      nativeNonemptyStringQ[#["ProvenanceIdentity"]] &] &&
+      nativeCheckpointProvenanceReferenceQ[#[provenanceKey], schema] &] &&
     DuplicateFreeQ[Lookup[Values[manifest["StateHandles"]], "Handle"]] &&
     DuplicateFreeQ[Lookup[Values[manifest["StateHandles"]],
       "CheckpointIdentity"]] &&
     DuplicateFreeQ[Lookup[Values[manifest["StateHandles"]],
-      "ProvenanceIdentity"]] &&
+      provenanceKey]] &&
     ListQ[results] && results =!= {} &&
     AllTrue[results, AssociationQ[#] &&
       Sort[Keys[#]] === Sort[resultKeys] &] &&
@@ -1446,12 +1492,13 @@ nativeObservableCheckpointManifestQ[manifest_] := Module[
     DuplicateFreeQ[Lookup[results, "Identity"]] &&
     DuplicateFreeQ[Lookup[results, "CheckpointIdentity"]] &&
     DuplicateFreeQ[Lookup[results, "Handle"]] &&
-    DuplicateFreeQ[Lookup[results, "ProvenanceIdentity"]] &&
+    DuplicateFreeQ[Lookup[results, provenanceKey]] &&
     AllTrue[results, Function[result,
       nativeNonemptyStringQ[result["Identity"]] &&
       nativeNonemptyStringQ[result["CheckpointIdentity"]] &&
       nativeNonemptyStringQ[result["Handle"]] &&
-      nativeNonemptyStringQ[result["ProvenanceIdentity"]] &&
+      nativeCheckpointProvenanceReferenceQ[
+        result[provenanceKey], schema] &&
       AssociationQ[result["Epsilon"]] &&
       Sort[Keys[result["Epsilon"]]] ===
         Sort[{"Min", "Max", "RequiredCompleteMax"}] &&
@@ -1470,7 +1517,8 @@ nativeObservableCheckpointManifestQ[manifest_] := Module[
 SaveNativeTransportObservableBatchCheckpoint[batch_Association,
     path_String, identity_String] := Module[
   {atlas, session, results, states, stateHandles, stats, saved, expanded,
-   core},
+   core, schema = $nativeObservableCheckpointSchemaV2,
+   provenanceKey},
   atlas = Lookup[batch, "Atlas", None];
   results = Lookup[batch, "Results", None];
   states = Lookup[batch, "States", None];
@@ -1486,14 +1534,17 @@ SaveNativeTransportObservableBatchCheckpoint[batch_Association,
       !nativeTransportStateHandleQ[states["upper"], session, "upper"],
     err["E8", <|"Detail" ->
       "native observable checkpoint save received malformed lower/upper transport states"|>]];
-  stateHandles = AssociationMap[<|
-      "Handle" -> Lookup[states[#], "transport_state",
-        Lookup[states[#], "TransportState", None]],
-      "CheckpointIdentity" -> Lookup[states[#], "checkpoint_identity",
-        Lookup[states[#], "CheckpointIdentity", None]],
-      "ProvenanceIdentity" -> Lookup[states[#], "provenance_identity",
-        Lookup[states[#], "ProvenanceIdentity", None]]|> &,
-    {"lower", "upper"}];
+  provenanceKey = nativeCheckpointProvenanceKey[schema];
+  stateHandles = AssociationMap[Function[side, Module[{provenance},
+      provenance = Lookup[states[side], "provenance_identity",
+        Lookup[states[side], "ProvenanceIdentity", None]];
+      Join[<|
+        "Handle" -> Lookup[states[side], "transport_state",
+          Lookup[states[side], "TransportState", None]],
+        "CheckpointIdentity" -> Lookup[states[side], "checkpoint_identity",
+          Lookup[states[side], "CheckpointIdentity", None]]|>,
+        <|provenanceKey -> nativeCheckpointProvenanceReference[
+          provenance, schema]|>]]], {"lower", "upper"}];
   stats = DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
     "op" -> "session.stats", "session" -> session|>];
   If[FailureQ[stats] || !AssociationQ[stats] ||
@@ -1517,12 +1568,11 @@ SaveNativeTransportObservableBatchCheckpoint[batch_Association,
       !TrueQ[Lookup[saved, "atomic", False]],
     err["E5", <|"BackendFailure" -> saved,
       "Detail" -> "schema-2 native observable checkpoint save failed"|>]];
-  core = <|"Schema" ->
-      "DiffExp2.NativeTransportObservableCheckpoint/v1",
+  core = <|"Schema" -> schema,
     "Path" -> expanded, "CheckpointIdentity" -> identity,
     "TransportArmMarches" -> stats["transport_arm_marches"],
     "StateHandles" -> stateHandles,
-    "Results" -> (nativeObservableCheckpointResult[#, session] & /@
+    "Results" -> (nativeObservableCheckpointResult[#, session, schema] & /@
       results)|>;
   Append[core, "ManifestIdentity" -> nativeCheckpointIdentity[
     "de2-native-observable-checkpoint-manifest-", core]]];
@@ -1531,7 +1581,7 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
  Module[{restored, session = None, close, expectedLines, expectedEndpoints,
    expectedStates, stats, results, restoredHandles, restoredRecordMap,
    lineMap, endpointMap, stateMap, restoredResultIdentitiesQ,
-   restoredStateIdentitiesQ},
+   restoredStateIdentitiesQ, schema, provenanceKey},
   If[!nativeObservableCheckpointManifestQ[manifest],
     err["E8", <|"Detail" ->
       "native observable checkpoint manifest is malformed or self-inconsistent"|>]];
@@ -1546,6 +1596,8 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
     err["E5", <|"BackendFailure" -> restored,
       "Detail" -> "schema-2 native observable checkpoint restore failed"|>]];
   session = restored["session"];
+  schema = manifest["Schema"];
+  provenanceKey = nativeCheckpointProvenanceKey[schema];
   close[] := Quiet[DiffExp2`CppBackend`ClosePersistentSession[session]];
   (* Lookup[{}, key] is Missing[KeyAbsent, key], not {}.  A completed FT
      level may legitimately contain only line integrals (or only endpoint
@@ -1573,16 +1625,18 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
       AssociationQ[record] &&
         Lookup[record, "checkpoint_identity", None] ===
           result["CheckpointIdentity"] &&
-        Lookup[record, "provenance_identity", None] ===
-          result["ProvenanceIdentity"]]]];
+        nativeCheckpointProvenanceMatchesQ[
+          Lookup[record, "provenance_identity", None],
+          result[provenanceKey], schema]]]];
   restoredStateIdentitiesQ = AllTrue[Values[manifest["StateHandles"]],
     Function[state, Module[{record = Lookup[stateMap,
         state["Handle"], None]},
       AssociationQ[record] &&
         Lookup[record, "checkpoint_identity", None] ===
           state["CheckpointIdentity"] &&
-        Lookup[record, "provenance_identity", None] ===
-          state["ProvenanceIdentity"]]]];
+        nativeCheckpointProvenanceMatchesQ[
+          Lookup[record, "provenance_identity", None],
+          state[provenanceKey], schema]]]];
   If[Lookup[restored, "checkpoint_identity", None] =!=
         manifest["CheckpointIdentity"] ||
       !TrueQ[Lookup[restored, "replayed_wolfram_preprocessing", True] ===
@@ -1614,7 +1668,9 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
     err["E5", <|"BackendFailure" -> stats,
       "ExpectedTransportArmMarches" -> manifest["TransportArmMarches"],
       "Detail" -> "native checkpoint restore changed the transport-arm march counter"|>]];
-  results = Map[Function[result,
+  results = Map[Function[result, Module[{record},
+    record = Lookup[If[result["Kind"] === "line", lineMap, endpointMap],
+      result["Handle"]];
     Join[KeyTake[result, {"RequestIndex", "Operation", "Identity",
         "CheckpointIdentity", "Epsilon"}],
       <|If[result["Kind"] === "line", "Line", "Endpoint"] ->
@@ -1622,7 +1678,7 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
           "request_index" -> result["RequestIndex"],
           "observable_identity" -> result["Identity"],
           "checkpoint_identity" -> result["CheckpointIdentity"],
-          "provenance_identity" -> result["ProvenanceIdentity"]|>|>]],
+          "provenance_identity" -> record["provenance_identity"]|>|>]]],
     manifest["Results"]];
   <|"Type" -> "DiffExp2NativeTransportObservableBatch",
     "Atlas" -> None, "States" -> <||>, "Results" -> results,

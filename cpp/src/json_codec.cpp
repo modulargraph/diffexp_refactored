@@ -3951,13 +3951,38 @@ Rational physical_match_point(const ChartGeometry& chart,
 
 FiniteLaurentVector<Rational> evaluate_exact_regular_local(
     const LocalSolution<Rational>& solution,
-    const RealEvaluationPoint& point, EpsilonWindow window) {
+    const RealEvaluationPoint& point, EpsilonWindow window,
+    const std::string& label) {
   const Rational t(point.exact_coordinate);
   std::vector<Rational> t_powers(solution.taylor_width(), Rational(1));
   for (std::size_t n = 1; n < t_powers.size(); ++n)
     t_powers[n] = t_powers[n - 1] * t;
 
   const auto& sector = solution.sectors.front();
+  const auto coefficient_at = [&](std::int32_t power,
+                                  std::uint32_t component) {
+    const auto epsilon_index = static_cast<std::size_t>(
+        static_cast<std::int64_t>(power) - solution.epsilon.min_power);
+    Rational coefficient(0);
+    for (std::size_t n = 0; n < solution.taylor_width(); ++n)
+      coefficient += sector.coefficients[local_detail::sector_index(
+                         solution, epsilon_index, n, component)] *
+                     t_powers[n];
+    return coefficient;
+  };
+  for (std::int64_t raw_power = solution.epsilon.min_power;
+       raw_power < window.min_power; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < solution.dimension;
+         ++component)
+      if (!coefficient_at(power, component).is_zero())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            label +
+                " work minimum would discard a nonzero lower epsilon coefficient",
+            component, std::nullopt, power);
+  }
+
   FiniteLaurentVector<Rational> value;
   value.reserve(solution.dimension);
   for (std::uint32_t component = 0; component < solution.dimension;
@@ -3966,14 +3991,8 @@ FiniteLaurentVector<Rational> evaluate_exact_regular_local(
     coefficients.reserve(window.width());
     for (std::int64_t power = window.min_power;
          power <= window.complete_max; ++power) {
-      const auto epsilon_index = static_cast<std::size_t>(
-          power - solution.epsilon.min_power);
-      Rational coefficient(0);
-      for (std::size_t n = 0; n < solution.taylor_width(); ++n)
-        coefficient += sector.coefficients[local_detail::sector_index(
-                           solution, epsilon_index, n, component)] *
-                       t_powers[n];
-      coefficients.push_back(std::move(coefficient));
+      coefficients.push_back(coefficient_at(
+          static_cast<std::int32_t>(power), component));
     }
     value.emplace_back(window, std::move(coefficients));
   }
@@ -4095,14 +4114,16 @@ std::shared_ptr<StoredExactRegularMatch> build_exact_regular_match(
   FiniteLaurentMatrix<Rational> evaluated_basis(
       dimension, FiniteLaurentVector<Rational>());
   for (auto& row : evaluated_basis) row.reserve(dimension);
-  for (const auto& column : basis) {
+  for (std::size_t column = 0; column < basis.size(); ++column) {
     auto value = evaluate_exact_regular_local(
-        column->solution(), basis_point, window);
+        basis[column]->solution(), basis_point, window,
+        "basis local " + basis_handles[column]);
     for (std::uint32_t component = 0; component < dimension; ++component)
       evaluated_basis[component].push_back(std::move(value[component]));
   }
   auto incoming_value = evaluate_exact_regular_local(
-      incoming->solution(), incoming_point, window);
+      incoming->solution(), incoming_point, window,
+      "incoming local " + incoming_handle);
 
   // Exact zero rows at the lower edge are certified structural zeros.  Trim
   // them once before both saturation and the final residual so honest
@@ -4717,15 +4738,14 @@ ParsedExactEvaluatedLattice certify_native_unit_saturation(
               row, column, static_cast<std::int32_t>(power));
     }
   }
-  const auto leading = matching_detail::leading_null_relation(
-      matching_detail::epsilon_zero_matrix(
-          evaluated_basis, context + ":actual-leading-frame"),
-      context + ":actual-leading-rank");
-  if (leading.rank != dimension)
-    throw MatchingArithmeticError(
-        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
-        context + ": actual Acb epsilon^0 leading matrix is rank deficient",
-        std::nullopt, std::nullopt, 0);
+  const auto leading_rank =
+      matching_detail::certify_full_rank_by_nonzero_pivots(
+          matching_detail::epsilon_zero_matrix(
+              evaluated_basis, context + ":actual-leading-frame"),
+          context + ":actual-leading-rank");
+  if (leading_rank != dimension)
+    throw std::logic_error(
+        context + ": full-rank proof returned the wrong dimension");
 
   auto native_request = validate_native_unit_saturation_request(
       raw_request, context);
@@ -10922,6 +10942,37 @@ struct RetainedLocalFrameContract {
   std::uint32_t taylor_complete_max = 0;
 };
 
+struct WholeArmEpsilonContract {
+  EpsilonWindow work;
+  std::int32_t public_required_complete_max = 0;
+  std::int32_t match_required_complete_max = 0;
+};
+
+WholeArmEpsilonContract parse_whole_arm_epsilon_contract(
+    const json::value& raw, const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(
+      object,
+      {"min", "max", "required_complete_max",
+       "match_required_complete_max"},
+      label);
+  WholeArmEpsilonContract result{
+      {as_i32(object.at("min"), "whole-arm epsilon minimum"),
+       as_i32(object.at("max"), "whole-arm epsilon maximum")},
+      as_i32(object.at("required_complete_max"),
+             "whole-arm projected/public required epsilon maximum"),
+      as_i32(object.at("match_required_complete_max"),
+             "whole-arm source/match required epsilon maximum")};
+  (void)result.work.width();
+  if (result.public_required_complete_max < result.work.min_power ||
+      result.match_required_complete_max <
+          result.public_required_complete_max ||
+      result.match_required_complete_max > result.work.complete_max)
+    throw std::invalid_argument(
+        "whole-arm public and match required epsilon maxima must lie in the work window with match_required_complete_max >= required_complete_max");
+  return result;
+}
+
 RetainedLocalFrameContract retained_local_frame_contract(
     const std::shared_ptr<StoredLocalBase>& local) {
   if (!local)
@@ -12481,6 +12532,10 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   }
   const auto& aggregate = as_object(
       provenance.at("aggregate"), "checkpoint line aggregate recipe");
+  std::optional<WholeArmEpsilonContract> whole_arm_epsilon_contract;
+  if (const auto* raw_contract = aggregate.if_contains("epsilon_contract"))
+    whole_arm_epsilon_contract = parse_whole_arm_epsilon_contract(
+        *raw_contract, "checkpoint whole-arm epsilon contract");
   const auto& components = as_array(
       aggregate.at("components"), "checkpoint line aggregate components");
   if (checkpoint_size_t(aggregate.at("component_count"),
@@ -12542,6 +12597,11 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
           error_guarantee_name(result.value.error.guarantee))
     throw std::invalid_argument(
         "checkpoint line aggregate result differs from its provenance");
+  if (whole_arm_epsilon_contract.has_value() &&
+      result.value.epsilon.complete_max <
+          whole_arm_epsilon_contract->public_required_complete_max)
+    throw std::invalid_argument(
+        "checkpoint whole-arm aggregate no longer covers its public required epsilon maximum");
   const auto expected_dimension = as_u32(
       local_owners.front()->summary().at("dimension"),
       "checkpoint line aggregate source dimension");
@@ -14780,20 +14840,13 @@ json::object run_session_command(const json::object& root) {
 
     const auto& raw_epsilon = as_object(
         root.at("epsilon"), "native whole-arm epsilon contract");
-    require_exact_keys(raw_epsilon,
-        {"min", "max", "required_complete_max"},
-        "native whole-arm epsilon contract");
-    const EpsilonWindow work_epsilon{
-        as_i32(raw_epsilon.at("min"), "whole-arm epsilon minimum"),
-        as_i32(raw_epsilon.at("max"), "whole-arm epsilon maximum")};
-    (void)work_epsilon.width();
-    const auto required_complete_max = as_i32(
-        raw_epsilon.at("required_complete_max"),
-        "whole-arm required epsilon maximum");
-    if (required_complete_max < work_epsilon.min_power ||
-        required_complete_max > work_epsilon.complete_max)
-      throw std::invalid_argument(
-          "whole-arm required epsilon maximum must lie in its work window");
+    const auto epsilon_contract = parse_whole_arm_epsilon_contract(
+        raw_epsilon, "native whole-arm epsilon contract");
+    const auto work_epsilon = epsilon_contract.work;
+    const auto required_complete_max =
+        epsilon_contract.public_required_complete_max;
+    const auto match_required_complete_max =
+        epsilon_contract.match_required_complete_max;
 
     const auto& refinement = as_object(
         root.at("refinement"), "native whole-arm refinement policy");
@@ -15128,14 +15181,15 @@ json::object run_session_command(const json::object& root) {
           const auto match_checkpoint =
               checkpoint_for(input.name, "match", tile + 1);
           const auto match_epsilon = live_match_epsilon_intersection(
-              work_epsilon, required_complete_max, current,
+              work_epsilon, match_required_complete_max, current,
               input.basis[tile]);
           json::object match_request{
               {"arm", input.name}, {"match", tile},
               {"epsilon", json::object{
                    {"min", match_epsilon.min_power},
                    {"max", match_epsilon.complete_max},
-                   {"required_complete_max", required_complete_max}}},
+                   {"required_complete_max",
+                    match_required_complete_max}}},
               {"checkpoint_identity", match_checkpoint}};
           if (session->domain == "acb") {
             match_request["native_unit_saturation"] =
@@ -15165,6 +15219,7 @@ json::object run_session_command(const json::object& root) {
                          {"to_exact", retained.exact.to.str()}},
             json::object{{"kind", "complete-retained-arm"},
                          {"combination", "sum-physical-tiles"},
+                         {"epsilon_contract", raw_epsilon},
                          {"certify_tail_requested", certify_tail}},
             plan, output.tile_sources, output.tile_lines, signs,
             std::chrono::duration<double, std::milli>(
@@ -15225,6 +15280,7 @@ json::object run_session_command(const json::object& root) {
         json::object{
             {"kind", "complete-lower-to-upper-line"},
             {"combination", "negative-lower-anchor-arm-plus-upper-anchor-arm"},
+            {"epsilon_contract", raw_epsilon},
             {"certify_tail_requested", certify_tail}},
         plan, std::move(combined_owners), arm_lines,
         std::vector<std::int32_t>{-1, 1},

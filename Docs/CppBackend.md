@@ -262,7 +262,10 @@ Each `arms["lower"|"upper"]` record contains `receiving_basis` and
 rational row per tile.  The backend derives live match windows and, for an
 ordinary Acb basis, evaluates the actual basis at each match and certifies
 identity saturation from exact-zero negative powers plus a full-rank
-epsilon-zero leading frame.  It keeps row locals and intermediate hops
+epsilon-zero leading frame.  The epsilon contract keeps
+`match_required_complete_max` as the source/match halo while
+`required_complete_max` is the projected-line/public target; the former must
+be at least the latter.  It keeps row locals and intermediate hops
 hidden, aggregates every tile natively, and atomically returns the two final
 locals plus lower, upper, and combined line-result handles.  No coefficient
 slab is returned before an explicit final `ExportPersistentLineIntegral`.

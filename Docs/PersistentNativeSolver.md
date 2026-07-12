@@ -323,12 +323,16 @@ from the live incoming/basis locals, and for Acb ordinary regular bases it
 uses the identity saturation only after evaluating the actual basis at that
 match point, proving every negative epsilon coefficient is an exact singleton
 zero, and certifying the epsilon-zero leading matrix has full rank with Acb
-pivots excluding zero.  The retained proof binds those facts to the exact
-plan, basis checkpoints, point, and epsilon window; `a=b=0, log_power=0` is
+pivots excluding zero; ambiguous off-pivot balls are allowed and eliminated
+through a certified pivot sequence.  The retained proof binds those facts to
+the exact plan, basis checkpoints, point, and epsilon window;
+`a=b=0, log_power=0` is
 only the ordinary-sector admission condition, never a substitute for the
-numeric rank proof.  A single bounded refinement policy
-and requested epsilon contract govern the request.  Row-projected scalar
-locals and intermediate match/materialization chains remain hidden but
+numeric rank proof.  A single bounded refinement policy and a four-field
+epsilon contract govern the request: `match_required_complete_max` retains
+the source/match halo through every materialization, while
+`required_complete_max` is the projected-line/public target.  Row-projected
+scalar locals and intermediate match/materialization chains remain hidden but
 strongly owned and checkpointed.  Tile frames aggregate over the union of
 their exact Laurent lower bounds and the intersection of complete upper
 bounds; absent lower rows are structural zero.  The combined result is

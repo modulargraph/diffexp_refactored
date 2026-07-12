@@ -770,6 +770,96 @@ LeadingNullRelation<Scalar> leading_null_relation(
   return LeadingNullRelation<Scalar>{rank, std::move(relation), target};
 }
 
+enum class FullRankProofResult : std::uint8_t {
+  Proved,
+  Ambiguous,
+  Deficient
+};
+
+// Full-rank certification has weaker zero-decision requirements than lattice
+// saturation: an ambiguous off-pivot entry is harmless when a sequence of
+// pivots whose balls all exclude zero proves invertibility.  Try certified
+// full pivots deterministically, backtracking only when interval widening
+// makes a later pivot unprovable.  Below-pivot balls may be arbitrary because
+// division by the certified pivot is valid for every value in its enclosure.
+template <typename Scalar>
+FullRankProofResult certified_full_rank_search(
+    DenseScalarMatrix<Scalar> matrix, std::size_t position) {
+  const auto size = matrix.size();
+  if (position == size) return FullRankProofResult::Proved;
+
+  std::vector<std::pair<std::size_t, std::size_t>> candidates;
+  bool has_ambiguous_candidate = false;
+  for (std::size_t row = position; row < size; ++row) {
+    for (std::size_t column = position; column < size; ++column) {
+      switch (zero_decision(matrix[row][column])) {
+        case ZeroDecision::Zero:
+          break;
+        case ZeroDecision::Ambiguous:
+          has_ambiguous_candidate = true;
+          break;
+        case ZeroDecision::Nonzero:
+          candidates.emplace_back(row, column);
+          break;
+      }
+    }
+  }
+  if (candidates.empty())
+    return has_ambiguous_candidate ? FullRankProofResult::Ambiguous
+                                   : FullRankProofResult::Deficient;
+
+  bool has_ambiguous_continuation = has_ambiguous_candidate;
+  for (const auto& [pivot_row, pivot_column] : candidates) {
+    auto next = matrix;
+    if (pivot_row != position)
+      std::swap(next[position], next[pivot_row]);
+    if (pivot_column != position)
+      for (auto& row : next)
+        std::swap(row[position], row[pivot_column]);
+
+    for (std::size_t row = position + 1; row < size; ++row) {
+      if (zero_decision(next[row][position]) == ZeroDecision::Zero) {
+        next[row][position] = ScalarTraits<Scalar>::zero();
+        continue;
+      }
+      const auto factor = next[row][position] / next[position][position];
+      next[row][position] = ScalarTraits<Scalar>::zero();
+      for (std::size_t column = position + 1; column < size; ++column)
+        next[row][column] -= factor * next[position][column];
+    }
+
+    const auto continuation = certified_full_rank_search(
+        std::move(next), position + 1);
+    if (continuation == FullRankProofResult::Proved)
+      return continuation;
+    has_ambiguous_continuation |=
+        continuation == FullRankProofResult::Ambiguous;
+  }
+  return has_ambiguous_continuation ? FullRankProofResult::Ambiguous
+                                    : FullRankProofResult::Deficient;
+}
+
+template <typename Scalar>
+std::size_t certify_full_rank_by_nonzero_pivots(
+    DenseScalarMatrix<Scalar> matrix, const std::string& context) {
+  const auto size = rectangular_columns(
+      matrix, "certified full-rank matrix");
+  if (size == 0 || matrix.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": full-rank certificate requires a nonempty square matrix");
+  const auto result = certified_full_rank_search(std::move(matrix), 0);
+  if (result == FullRankProofResult::Proved) return size;
+  if (result == FullRankProofResult::Ambiguous)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::AmbiguousZero,
+        context +
+            ": no certified nonzero pivot sequence proves full rank; remaining Acb enclosures overlap zero");
+  throw MatchingArithmeticError(
+      MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+      context + ": the leading matrix is certifiably rank deficient");
+}
+
 template <typename Scalar>
 DenseScalarMatrix<Scalar> epsilon_zero_matrix(
     const FiniteLaurentMatrix<Scalar>& matrix,

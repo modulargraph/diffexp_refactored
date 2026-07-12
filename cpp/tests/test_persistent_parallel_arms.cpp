@@ -1,4 +1,5 @@
 #include "diffexp2/json_codec.hpp"
+#include "diffexp2/matching.hpp"
 
 #include <boost/json.hpp>
 
@@ -29,7 +30,8 @@ std::string prepare_chart(const std::string& session,
                           const std::string& domain,
                           const std::string& name,
                           const std::string& center,
-                          bool nontrivial = false) {
+                          bool nontrivial = false,
+                          std::int32_t frame_base = 0) {
   json::array principal_row;
   principal_row.push_back(
       json::object{{"exact", nontrivial ? "t" : "0"},
@@ -78,7 +80,7 @@ std::string prepare_chart(const std::string& session,
            {"coupling_depth", 0}}},
       {"problem", json::object{
            {"domain", domain}, {"precision_bits", 256},
-           {"d", 1}, {"fb", 0}, {"w", 3},
+           {"d", 1}, {"fb", frame_base}, {"w", 3},
            {"d_lags", std::move(d_lags)},
            {"denominators", json::array{}},
            {"nhat_lags", std::move(nhat_lags)},
@@ -98,7 +100,8 @@ std::string solve_local(const std::string& session,
                         const std::string& center,
                         const std::string& checkpoint,
                         const std::string& value,
-                        std::uint32_t nmax = 0) {
+                        std::uint32_t nmax = 0,
+                        const std::string& next_epsilon_value = "0") {
   json::array shifts;
   json::array schedule;
   for (std::uint32_t n = 0; n <= nmax; ++n) {
@@ -116,7 +119,7 @@ std::string solve_local(const std::string& session,
            {"b_target", "0"}, {"a_shift_min", 0},
            {"a_shifts", std::move(shifts)},
            {"schedule", std::move(schedule)},
-           {"initial", json::array{value, "0", "0"}},
+           {"initial", json::array{value, next_epsilon_value, "0"}},
            {"initial_validity", json::array{2}}, {"source", nullptr},
            {"return_u", false}}},
       {"metadata", json::object{
@@ -191,14 +194,17 @@ json::object run_arms_request(const std::string& session,
                               const std::string& plan,
                               const std::string& anchor,
                               json::object lower, json::object upper,
-                              const std::string& root) {
+                              const std::string& root,
+                              std::int32_t match_required_complete_max = 2) {
   return json::object{
       {"schema", 2}, {"op", "integration.run_arms"},
       {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
       {"tile_plan_checkpoint_identity", "parallel-plan"},
       {"anchor_checkpoint_identity", "parallel-anchor"},
       {"epsilon", json::object{{"min", -1}, {"max", 2},
-                                {"required_complete_max", 1}}},
+                                {"required_complete_max", 1},
+                                {"match_required_complete_max",
+                                 match_required_complete_max}}},
       {"refinement", json::object{
            {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
       {"checkpoint_policy", json::object{
@@ -214,6 +220,32 @@ double exported_coefficient(const json::object& response,
   return raw.is_string()
       ? std::stod(std::string(raw.as_string()))
       : std::stod(std::string(raw.as_array().front().as_string()));
+}
+
+bool acb_full_rank_pivot_smoke() {
+  diffexp2::ComplexBall::set_precision(256);
+  using Matrix =
+      diffexp2::matching_detail::DenseScalarMatrix<diffexp2::ComplexBall>;
+  const auto uncertain = [] {
+    return diffexp2::ComplexBall::from_strings("[0 +/- 1]");
+  };
+  const Matrix triangular{{diffexp2::ComplexBall(1), uncertain()},
+                          {diffexp2::ComplexBall(0),
+                           diffexp2::ComplexBall(1)}};
+  if (diffexp2::matching_detail::certify_full_rank_by_nonzero_pivots(
+          triangular, "parallel-arm triangular Acb rank proof") != 2)
+    return false;
+
+  const Matrix ambiguous{{uncertain(), diffexp2::ComplexBall(0)},
+                         {diffexp2::ComplexBall(0),
+                          diffexp2::ComplexBall(1)}};
+  try {
+    (void)diffexp2::matching_detail::certify_full_rank_by_nonzero_pivots(
+        ambiguous, "parallel-arm ambiguous Acb rank proof");
+  } catch (const diffexp2::MatchingArithmeticError& error) {
+    return error.code == diffexp2::MatchingArithmeticErrorCode::AmbiguousZero;
+  }
+  return false;
 }
 
 bool acb_unit_leading_proof_smoke() {
@@ -285,7 +317,7 @@ bool acb_unit_leading_proof_smoke() {
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
     const bool defective_rejected = defective.at("status") == "error" &&
         std::string(defective.at("detail").as_string())
-            .find("overlaps zero") != std::string::npos &&
+            .find("overlap zero") != std::string::npos &&
         before_defective.at("locals") == after_defective.at("locals") &&
         before_defective.at("matches") == after_defective.at("matches") &&
         before_defective.at("line_results") ==
@@ -295,8 +327,8 @@ bool acb_unit_leading_proof_smoke() {
         after_defective.at("pending_line_integrations") == 0;
     const auto marched = request(run_arms_request(
         session, plan, anchor,
-        arm_execution(lower_1, lower_2, {0, 0, 0}),
-        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        arm_execution(lower_1, lower_2, {0, -1, -1}),
+        arm_execution(upper_1, upper_2, {0, -1, -1}),
         "acb-parallel-success"));
     const auto saved = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
@@ -331,7 +363,11 @@ bool acb_unit_leading_proof_smoke() {
         marched.at("worker_overlap") == true &&
         marched.at("max_parallel_arms") == 2 &&
         marched.at("json_coefficients") == 0 &&
-        marched.at("combined_line_result").as_object().at("epsilon_min") == 0;
+        marched.at("epsilon").as_object().at("required_complete_max") == 1 &&
+        marched.at("epsilon").as_object().at(
+            "match_required_complete_max") == 2 &&
+        marched.at("combined_line_result").as_object().at("epsilon_min") == -1 &&
+        marched.at("combined_line_result").as_object().at("epsilon_max") == 1;
     if (!ok)
       std::cerr << "Acb proof smoke: basis_midpoint=" << basis_midpoint
                 << " defective=" << defective.at("status")
@@ -342,7 +378,23 @@ bool acb_unit_leading_proof_smoke() {
                 << " march=" << marched.at("status")
                 << " save=" << saved.at("status")
                 << " restore=" << restored.at("status")
-                << " export=" << restored_export.at("status") << '\n';
+                << " export=" << restored_export.at("status")
+                << " combined_epsilon="
+                << marched.at("combined_line_result").as_object()
+                       .at("epsilon_min")
+                << ":"
+                << marched.at("combined_line_result").as_object()
+                       .at("epsilon_max")
+                << " defective_rejected=" << defective_rejected
+                << " maps=" << before_defective.at("locals") << "/"
+                << after_defective.at("locals") << ","
+                << before_defective.at("matches") << "/"
+                << after_defective.at("matches") << ","
+                << before_defective.at("line_results") << "/"
+                << after_defective.at("line_results") << " pending="
+                << after_defective.at("pending_matches") << ","
+                << after_defective.at("pending_local_solves") << ","
+                << after_defective.at("pending_line_integrations") << '\n';
     if (!restored_session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", restored_session}});
@@ -375,13 +427,15 @@ int main() {
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "rational"}, {"output_digits", 40},
-        {"chart_capacity", 8}, {"local_capacity", 16},
+        {"chart_capacity", 8}, {"local_capacity", 32},
         {"match_capacity", 8}, {"tile_plan_capacity", 2}});
     session = std::string(created.at("session").as_string());
     const auto anchor_chart = prepare_chart(
         session, "rational", "pair-anchor", "0");
     const auto lower_1_chart = prepare_chart(
         session, "rational", "pair-lower-1", "-2/3");
+    const auto lower_guard_chart = prepare_chart(
+        session, "rational", "pair-lower-guard", "-2/3", false, -1);
     const auto lower_2_chart = prepare_chart(
         session, "rational", "pair-lower-2", "-4/3");
     const auto upper_1_chart = prepare_chart(
@@ -392,6 +446,12 @@ int main() {
                                     "parallel-anchor", "2");
     const auto lower_1 = solve_local(session, lower_1_chart, "-2/3",
                                      "parallel-lower-basis-1", "1");
+    const auto lower_guard = solve_local(
+        session, lower_guard_chart, "-2/3",
+        "parallel-lower-nonzero-discarded-frame", "1");
+    const auto lower_guard_zero = solve_local(
+        session, lower_guard_chart, "-2/3",
+        "parallel-lower-exact-zero-discarded-frame", "0", 0, "1");
     const auto lower_2 = solve_local(session, lower_2_chart, "-4/3",
                                      "parallel-lower-basis-2", "1");
     const auto upper_1 = solve_local(session, upper_1_chart, "2/3",
@@ -406,6 +466,70 @@ int main() {
     if (planned.at("status") != "ok")
       throw std::runtime_error("plan: " + json::serialize(planned));
     const auto plan = std::string(planned.at("tile_plan").as_string());
+
+    const auto guard_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", "parallel-plan"}, {"division_order", 3},
+        {"lower", arm("-4/3", {anchor_chart, lower_guard_chart,
+                                  lower_2_chart})},
+        {"upper", arm("4/3", {anchor_chart, upper_1_chart,
+                                 upper_2_chart})}});
+    if (guard_planned.at("status") != "ok")
+      throw std::runtime_error(
+          "lower-frame guard plan: " + json::serialize(guard_planned));
+    const auto guard_plan = std::string(
+        guard_planned.at("tile_plan").as_string());
+    const auto before_lower_guard = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto discarded_lower = request(run_arms_request(
+        session, guard_plan, anchor,
+        arm_execution(lower_guard, lower_2, {0, 0, 0}),
+        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        "parallel-nonzero-discarded-lower", 1));
+    const auto after_lower_guard = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    if (discarded_lower.at("status") != "error" ||
+        std::string(discarded_lower.at("detail").as_string())
+                .find("discard a nonzero lower epsilon coefficient") ==
+            std::string::npos ||
+        before_lower_guard.at("locals") != after_lower_guard.at("locals") ||
+        before_lower_guard.at("matches") !=
+            after_lower_guard.at("matches") ||
+        before_lower_guard.at("line_results") !=
+            after_lower_guard.at("line_results") ||
+        after_lower_guard.at("pending_matches") != 0 ||
+        after_lower_guard.at("pending_local_solves") != 0 ||
+        after_lower_guard.at("pending_line_integrations") != 0)
+      throw std::runtime_error(
+          "nonzero discarded Rational lower frame was not rejected atomically: " +
+          json::serialize(discarded_lower) + " / " +
+          json::serialize(after_lower_guard));
+
+    const auto zero_discarded_lower = request(run_arms_request(
+        session, guard_plan, anchor,
+        arm_execution(lower_guard_zero, lower_2, {0, 0, 0}),
+        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        "parallel-zero-discarded-lower", 1));
+    if (zero_discarded_lower.at("status") != "ok")
+      throw std::runtime_error(
+          "exact-zero discarded Rational lower frame was rejected: " +
+          json::serialize(zero_discarded_lower));
+    const auto& zero_arms = zero_discarded_lower.at("arms").as_object();
+    for (const auto& arm_name : {"lower", "upper"}) {
+      const auto& arm_result = zero_arms.at(arm_name).as_object();
+      (void)request(json::object{
+          {"schema", 2}, {"op", "local.release"}, {"session", session},
+          {"local", arm_result.at("final_local").as_object().at("local")}});
+      (void)request(json::object{
+          {"schema", 2}, {"op", "integration.release"},
+          {"session", session},
+          {"line", arm_result.at("line_result").as_object().at("line")}});
+    }
+    (void)request(json::object{
+        {"schema", 2}, {"op", "integration.release"},
+        {"session", session},
+        {"line", zero_discarded_lower.at("combined_line_result")
+                     .as_object().at("line")}});
 
     const auto before_failure = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
@@ -433,8 +557,8 @@ int main() {
 
     const auto marched = request(run_arms_request(
         session, plan, anchor,
-        arm_execution(lower_1, lower_2, {-1, 0, 0}),
-        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        arm_execution(lower_1, lower_2, {0, -1, -1}),
+        arm_execution(upper_1, upper_2, {0, -1, -1}),
         "parallel-success"));
     if (marched.at("status") != "ok")
       throw std::runtime_error("march: " + json::serialize(marched));
@@ -450,13 +574,18 @@ int main() {
 
     // Every public source token can disappear after the single call.  The
     // returned locals and aggregates retain the complete owner chains.
-    for (const auto& local : {anchor, lower_1, lower_2, upper_1, upper_2})
+    for (const auto& local : {anchor, lower_1, lower_guard,
+                              lower_guard_zero, lower_2, upper_1, upper_2})
       (void)request(json::object{{"schema", 2}, {"op", "local.release"},
                                  {"session", session}, {"local", local}});
     (void)request(json::object{{"schema", 2}, {"op", "tile.release"},
                                {"session", session}, {"tile_plan", plan}});
+    (void)request(json::object{{"schema", 2}, {"op", "tile.release"},
+                               {"session", session},
+                               {"tile_plan", guard_plan}});
     for (const auto& chart : {anchor_chart, lower_1_chart, lower_2_chart,
-                              upper_1_chart, upper_2_chart})
+                              lower_guard_chart, upper_1_chart,
+                              upper_2_chart})
       (void)request(json::object{{"schema", 2}, {"op", "chart.release"},
                                  {"session", session}, {"chart", chart}});
 
@@ -511,7 +640,8 @@ int main() {
           ? std::stod(std::string(raw.as_string()))
           : std::stod(std::string(raw.as_array().front().as_string()));
     };
-    const bool ok = acb_unit_leading_proof_smoke() &&
+    const bool ok = acb_full_rank_pivot_smoke() &&
+        acb_unit_leading_proof_smoke() &&
         created.at("parallel_arm_march_capability") ==
             "retained-native-concurrent-two-arm-march-v1" &&
         marched.at("capability") ==
@@ -521,14 +651,17 @@ int main() {
         marched.at("max_parallel_arms") == 2 &&
         marched.at("worker_overlap") == true &&
         marched.at("json_coefficients") == 0 &&
+        marched.at("epsilon").as_object().at("required_complete_max") == 1 &&
+        marched.at("epsilon").as_object().at(
+            "match_required_complete_max") == 2 &&
         lower.at("matches") == 2 && lower.at("tiles") == 3 &&
         upper.at("matches") == 2 && upper.at("tiles") == 3 &&
         lower_line.at("capability") == "retained-native-line-aggregate-v1" &&
         lower_line.at("epsilon_min") == -1 &&
         lower_line.at("epsilon_max") == 1 &&
         upper_line.at("capability") == "retained-native-line-aggregate-v1" &&
-        upper_line.at("epsilon_min") == 0 &&
-        upper_line.at("epsilon_max") == 2 &&
+        upper_line.at("epsilon_min") == -1 &&
+        upper_line.at("epsilon_max") == 1 &&
         combined_line.at("capability") ==
             "retained-native-line-aggregate-v1" &&
         combined_line.at("epsilon_min") == -1 &&
@@ -537,19 +670,21 @@ int main() {
         upper_evaluation.at("status") == "ok" &&
         std::abs(local_value(lower_evaluation) - 2.0) < 1e-30 &&
         std::abs(local_value(upper_evaluation) - 2.0) < 1e-30 &&
-        std::abs(exported_coefficient(lower_export, 0) + 2.0 / 3.0) <
+        std::abs(exported_coefficient(lower_export, 0) + 2.0) <
             1e-30 &&
-        std::abs(exported_coefficient(lower_export, 1) + 2.0) < 1e-30 &&
-        std::abs(exported_coefficient(upper_export, 0) - 8.0 / 3.0) <
+        std::abs(exported_coefficient(lower_export, 1) + 2.0 / 3.0) <
             1e-30 &&
-        std::abs(exported_coefficient(combined_export, 0) - 2.0 / 3.0) <
+        std::abs(exported_coefficient(upper_export, 0) - 2.0) < 1e-30 &&
+        std::abs(exported_coefficient(upper_export, 1) - 2.0 / 3.0) <
             1e-30 &&
-        std::abs(exported_coefficient(combined_export, 1) - 14.0 / 3.0) <
+        std::abs(exported_coefficient(combined_export, 0) - 4.0) <
+            1e-30 &&
+        std::abs(exported_coefficient(combined_export, 1) - 4.0 / 3.0) <
             1e-30 &&
         restored_combined.at("status") == "ok" &&
-        std::abs(exported_coefficient(restored_combined, 0) - 2.0 / 3.0) <
+        std::abs(exported_coefficient(restored_combined, 0) - 4.0) <
             1e-30 &&
-        std::abs(exported_coefficient(restored_combined, 1) - 14.0 / 3.0) <
+        std::abs(exported_coefficient(restored_combined, 1) - 4.0 / 3.0) <
             1e-30;
     if (!ok) {
       std::cerr << "failed response: " << json::serialize(failed) << '\n'

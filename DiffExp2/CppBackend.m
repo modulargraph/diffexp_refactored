@@ -42,7 +42,7 @@ PersistentTileMatchInterval::usage = "PersistentTileMatchInterval[handle, arm, i
 PersistentTileIntegrationInterval::usage = "PersistentTileIntegrationInterval[handle, arm, index] returns one exact physical/local tile interval selected by the retained native plan. Wolfram indices are one-based.";
 ReleasePersistentTilePlan::usage = "ReleasePersistentTilePlan[handle] releases one public native tile-plan token. Already-retained line results keep strong ownership of their immutable plan snapshot.";
 RunPersistentTileIntegral::usage = "RunPersistentTileIntegral[plan, arm, tile, local, epsilon, checkpointIdentity, certifyTail] integrates the retained local over the exact tile selected by plan and applies the exact affine Jacobian. With certifyTail True (the seventh Boolean argument), an attached regular-tail model may promote the result to FullLocalWithCertifiedTail; unsupported or inconclusive requests remain StoredTruncation. Wolfram tile indices are one-based.";
-RunPersistentNativeArms::usage = "RunPersistentNativeArms[plan, anchor, arms, epsilon, checkpointRoot, refinement, certifyTail] marches both retained tile-plan arms concurrently inside one persistent C++ request. arms has exactly lower/upper records, each with receiving_basis (one retained-local basis list per match) and one precomputed integrand_rows entry per tile. C++ derives every live match window and, for ordinary Acb bases, certifies identity saturation from the actual evaluated basis (exact-zero negative powers and full-rank epsilon-zero frame); it applies each rational row to a hidden scalar local, matches the unprojected vector local, integrates and aggregates natively, and returns only opaque final-local/line handles plus timing.";
+RunPersistentNativeArms::usage = "RunPersistentNativeArms[plan, anchor, arms, epsilon, checkpointRoot, refinement, certifyTail] marches both retained tile-plan arms concurrently inside one persistent C++ request. arms has exactly lower/upper records, each with receiving_basis (one retained-local basis list per match) and one precomputed integrand_rows entry per tile. epsilon contains min, max, required_complete_max for projected/public lines, and match_required_complete_max for the source/match halo. C++ derives every live match window and, for ordinary Acb bases, certifies identity saturation from the actual evaluated basis (exact-zero negative powers and a certified full-rank epsilon-zero frame); it applies each rational row to a hidden scalar local, matches the unprojected vector local, integrates and aggregates natively, and returns only opaque final-local/line handles plus timing.";
 PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, stored-or-certified-tail scope diagnostics, and export counters.";
 ExportPersistentLineIntegral::usage = "ExportPersistentLineIntegral[handle, checkpointIdentity, outputDigits] explicitly exports one retained physical-tile epsilon vector for compatibility.";
 ReleasePersistentLineIntegral::usage = "ReleasePersistentLineIntegral[handle] releases one retained line-integral result. A second release is a loud native error.";
@@ -1239,7 +1239,8 @@ RunPersistentNativeArms[plan_Association, anchor_Association,
   If[FailureQ[anchorTokens], Return[anchorTokens, Module]];
   If[Sort[Keys[arms]] =!= Sort[{"lower", "upper"}] ||
       Sort[Keys[epsilon]] =!=
-        Sort[{"min", "max", "required_complete_max"}] ||
+        Sort[{"min", "max", "required_complete_max",
+          "match_required_complete_max"}] ||
       Sort[Keys[refinement]] =!=
         Sort[{"relative_tolerance", "max_steps"}] ||
       StringLength[checkpointRoot] == 0 || !BooleanQ[certifyTail],

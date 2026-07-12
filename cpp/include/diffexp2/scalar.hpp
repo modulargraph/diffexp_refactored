@@ -35,6 +35,7 @@ class Rational {
   }
 
   [[nodiscard]] bool is_zero() const { return fmpq_is_zero(value_); }
+  [[nodiscard]] int sign() const { return fmpq_sgn(value_); }
   [[nodiscard]] std::string str() const {
     char* raw = fmpq_get_str(nullptr, 10, value_);
     if (raw == nullptr) throw std::bad_alloc();
@@ -83,6 +84,18 @@ class Rational {
   }
   friend bool operator==(const Rational& a, const Rational& b) {
     return fmpq_equal(a.value_, b.value_);
+  }
+  friend bool operator<(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) < 0;
+  }
+  friend bool operator<=(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) <= 0;
+  }
+  friend bool operator>(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) > 0;
+  }
+  friend bool operator>=(const Rational& a, const Rational& b) {
+    return fmpq_cmp(a.value_, b.value_) >= 0;
   }
 
  private:

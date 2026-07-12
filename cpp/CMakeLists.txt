@@ -141,4 +141,11 @@ if(DE2_BUILD_TESTS)
     PRIVATE diffexp2_core)
   add_test(NAME cpp_persistent_endpoint_limit
     COMMAND test_diffexp2_persistent_endpoint_limit)
+
+  add_executable(test_diffexp2_path_planner tests/test_path_planner.cpp)
+  target_compile_features(test_diffexp2_path_planner PRIVATE cxx_std_20)
+  target_include_directories(test_diffexp2_path_planner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(test_diffexp2_path_planner PRIVATE PkgConfig::FLINT)
+  add_test(NAME cpp_path_planner COMMAND test_diffexp2_path_planner)
 endif()

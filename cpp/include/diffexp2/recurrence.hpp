@@ -877,27 +877,6 @@ class RecurrenceSolver {
         rtv.push_back(std::move(selected_valid));
       }
 
-      // For a scalar true-resonant block the equation at the highest
-      // retained log level is 0 = R[P]: only the absent P+1 member could
-      // absorb a nonzero right-hand side.  Silently ignoring that row would
-      // turn an insufficient captured log ceiling into a plausible-looking
-      // truncated solution.  The general Jordan ladder needs a rank-aware
-      // image test; the scalar SCC capability below deliberately relies only
-      // on this exact case and fails loudly when its captured ceiling is too
-      // small.
-      if constexpr (std::is_same_v<Scalar, Rational>) {
-        if (q == 1 && std::any_of(
-                          rt[p_.log_max][0].begin(),
-                          rt[p_.log_max][0].end(),
-                          [](const Scalar& value) {
-                            return !ScalarTraits<Scalar>::is_zero(value);
-                          })) {
-          throw RecurrenceError(
-              "E5",
-              "scalar resonant recurrence has nonzero content above the captured log ceiling");
-        }
-      }
-
       std::vector<std::vector<Frame<Scalar>>> assigned(
           p_.log_max + 2,
           std::vector<Frame<Scalar>>(q, detail::zero_frame<Scalar>(width_)));
@@ -926,6 +905,58 @@ class RecurrenceSolver {
               detail::valid_shift(assigned_valid[log + 1][r], 1, frame_top_),
               rtv[log][r]);
           present[log][r + 1] = 1;
+        }
+      }
+
+      // At a true resonance the Jordan/log ladder obeys, componentwise,
+      //
+      //   eps y[l+1,r] - y[l,r+1] = Rtilde[l,r],
+      //
+      // with y[*,q] = y[P+1,*] = 0.  The constructive ladder above chooses
+      // the free first Jordan component to be zero.  Some cells can then be
+      // reached from two directions: the skipped assignment is not redundant
+      // but an exact compatibility condition.  The old scalar-only ceiling
+      // check covered q=1 and missed these cross-log conditions for q>1.
+      // Verify the complete exact coefficient rectangle after construction.
+      // Acb enclosures require a separate residual certificate and must never
+      // be used to make this structural zero decision.
+      if constexpr (std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, SymbolicRational>) {
+        for (std::uint32_t log = 0; log <= p_.log_max; ++log) {
+          for (std::size_t r = 0; r < q; ++r) {
+            auto residual = present[log + 1][r]
+                ? detail::multiply_epsilon(assigned[log + 1][r])
+                : detail::zero_frame<Scalar>(width_);
+            auto complete = present[log + 1][r]
+                ? detail::valid_shift(
+                      assigned_valid[log + 1][r], 1, frame_top_)
+                : kCompleteInfinity;
+            if (r + 1 < q && present[log][r + 1]) {
+              for (std::size_t epsilon = 0; epsilon < width_; ++epsilon)
+                residual[epsilon] -= assigned[log][r + 1][epsilon];
+              complete = std::min(complete, assigned_valid[log][r + 1]);
+            }
+            for (std::size_t epsilon = 0; epsilon < width_; ++epsilon)
+              residual[epsilon] -= rt[log][r][epsilon];
+            complete = std::min(complete, rtv[log][r]);
+            const auto checked_top = complete == kCompleteInfinity
+                ? frame_top_ : std::min(complete, frame_top_);
+            if (checked_top < op_.frame_base) continue;
+            for (std::int64_t power = op_.frame_base;
+                 power <= checked_top; ++power) {
+              const auto epsilon = static_cast<std::size_t>(
+                  power - op_.frame_base);
+              if (!ScalarTraits<Scalar>::is_zero(residual[epsilon])) {
+                throw RecurrenceError(
+                    "E5",
+                    "resonant Jordan recurrence is incompatible with the "
+                    "captured log ceiling at n=" + std::to_string(n) +
+                    ", log=" + std::to_string(log) +
+                    ", row=" + std::to_string(r) +
+                    ", epsilon_power=" + std::to_string(power));
+              }
+            }
+          }
         }
       }
 

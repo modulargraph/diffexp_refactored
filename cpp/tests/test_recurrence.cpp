@@ -108,6 +108,73 @@ void test_lower_frame_guard() {
   check("negative epsilon shift underflow is loud", loud);
 }
 
+RecurrenceProblem<Rational> resonant_jordan_source_problem(
+    const Rational& top_first_component) {
+  RecurrenceProblem<Rational> p;
+  p.dimension = 2;
+  p.nmax = 0;
+  p.log_max = 1;
+  p.frame_base = -1;
+  p.frame_width = 4;
+  p.has_initial = false;
+  p.a_target = Rational(0);
+  p.b_target = Rational(0);
+  p.a_shift_min = 0;
+  p.a_shifts = {Rational(0)};
+  p.d_lags = {{{0, Rational(1)}}};
+  p.nhat_lags.resize(1);
+  p.nhat_lags[0].valuations.assign(4, diffexp2::kCompleteInfinity);
+  p.d0_inverse_scalar = Rational(1);
+  p.blocks = {JordanBlock{{0, 1}}};
+  p.schedule = {{{StepCase::Resonant, Rational(0), Rational(0)}}};
+
+  diffexp2::SourceData<Rational> source;
+  source.present = {1, 1};
+  source.validity.assign(4, 2);
+  source.frames.assign(16, Rational(0));
+  const auto at = [&](std::uint32_t log, std::uint32_t component,
+                      std::int32_t power) -> Rational& {
+    const auto point = static_cast<std::size_t>(log);
+    const auto epsilon = static_cast<std::size_t>(power - p.frame_base);
+    return source.frames[
+        (point * p.dimension + component) * p.frame_width + epsilon];
+  };
+  // The last-row log-zero equation fixes y[1,1] = 2.  Consequently the
+  // highest-log first-row equation requires Rtilde[1,0] = -2 exactly.
+  at(0, 0, 0) = Rational(3);
+  at(0, 1, 1) = Rational(2);
+  at(1, 0, 0) = top_first_component;
+  p.source = std::move(source);
+  return p;
+}
+
+void test_resonant_jordan_log_ceiling_compatibility() {
+  const auto compatible =
+      RecurrenceSolver<Rational>(resonant_jordan_source_problem(Rational(-2)))
+          .run();
+  const auto coefficient = [&](std::uint32_t log, std::uint32_t component,
+                               std::int32_t power) -> const Rational& {
+    const auto epsilon = static_cast<std::size_t>(power + 1);
+    return compatible.u[
+        ((static_cast<std::size_t>(log) * 2 + component) * 4) + epsilon];
+  };
+  check("resonant Jordan ladder accepts an exactly compatible log ceiling",
+        coefficient(1, 1, 0) == Rational(2) &&
+            coefficient(0, 1, 0) == Rational(-3));
+
+  bool loud = false;
+  try {
+    (void)RecurrenceSolver<Rational>(
+        resonant_jordan_source_problem(Rational(-1))).run();
+  } catch (const diffexp2::RecurrenceError& error) {
+    loud = error.id == "E5" &&
+        std::string(error.what()).find("captured log ceiling") !=
+            std::string::npos;
+  }
+  check("resonant Jordan ladder rejects a hidden cross-log inconsistency",
+        loud);
+}
+
 void test_json_error_contract() {
   const auto value = boost::json::parse(diffexp2::run_recurrence_json("{}"));
   check("malformed JSON request returns typed error",
@@ -262,6 +329,7 @@ int main() {
   test_exponential();
   test_epsilon_denominator();
   test_lower_frame_guard();
+  test_resonant_jordan_log_ceiling_compatibility();
   test_json_error_contract();
   test_malformed_tensor_is_typed_error();
   test_symbolic_rational_field();

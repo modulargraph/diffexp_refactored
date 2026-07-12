@@ -1,5 +1,7 @@
 #pragma once
 
+#include "diffexp2/scalar.hpp"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -18,6 +20,18 @@ struct Container {
   std::string header_json;
   std::string payload_json;
 };
+
+// Arb's dump/load representation preserves the exact midpoint limbs and
+// radius, unlike the deliberately presentation-oriented decimal bridge.  Live
+// numeric checkpoint sections must use this codec so restore neither loses a
+// bit nor manufactures an unjustified enclosure.
+struct ExactComplexBallDump {
+  std::string real;
+  std::string imaginary;
+};
+
+ExactComplexBallDump dump_complex_ball_exact(const ComplexBall& value);
+ComplexBall load_complex_ball_exact(const ExactComplexBallDump& dump);
 
 // The container is endian-stable and checksums its JSON header and payload
 // independently.  write_atomic performs temporary-file + fsync + rename and

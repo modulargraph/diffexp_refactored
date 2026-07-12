@@ -1,3 +1,4 @@
+#include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
 
 #include <boost/json.hpp>
@@ -101,6 +102,17 @@ std::string prepare_two_block_scc(const std::string& session,
 }  // namespace
 
 int main() {
+  diffexp2::ComplexBall::set_precision(384);
+  const auto original_ball = diffexp2::ComplexBall::from_strings(
+      "[1.234567890123456789 +/- 1e-90]",
+      "[-2.500000000000000001 +/- 1e-110]");
+  const auto ball_dump =
+      diffexp2::checkpoint::dump_complex_ball_exact(original_ball);
+  const auto restored_ball =
+      diffexp2::checkpoint::load_complex_ball_exact(ball_dump);
+  const bool exact_ball_roundtrip =
+      acb_equal(original_ball.raw(), restored_ball.raw());
+
   const std::string checkpoint_path =
       "/tmp/diffexp2_persistent_checkpoint_" +
       std::to_string(static_cast<long long>(::getpid())) + ".de2cp";
@@ -153,7 +165,7 @@ int main() {
       "source":null,"return_u":true}}
   )json");
 
-  const bool ok = saved.at("status") == "ok" &&
+  const bool ok = exact_ball_roundtrip && saved.at("status") == "ok" &&
       saved.at("atomic") == true && saved.at("charts") == 2 &&
       saved.at("sccs") == 1 && std::filesystem::exists(checkpoint_path) &&
       closed.at("status") == "ok" && wrong_identity.at("status") == "error" &&
@@ -184,6 +196,6 @@ int main() {
     restored_session + R"json("})json");
   std::filesystem::remove(checkpoint_path);
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": persistent prepared chart/SCC checkpoint restore\n";
+            << ": exact Arb state and persistent prepared chart/SCC checkpoint restore\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -39,6 +40,22 @@ std::uint32_t checksum(std::string_view bytes) {
   boost::crc_32_type crc;
   crc.process_bytes(bytes.data(), bytes.size());
   return crc.checksum();
+}
+
+std::string dump_arb_exact(const arb_t value) {
+  char* raw = arb_dump_str(value);
+  if (raw == nullptr) throw std::bad_alloc();
+  std::string output(raw);
+  flint_free(raw);
+  return output;
+}
+
+void load_arb_exact(arb_t output, const std::string& dump,
+                    const char* component) {
+  if (dump.empty() || arb_load_str(output, dump.c_str()) != 0)
+    throw std::invalid_argument(
+        std::string("invalid exact Arb checkpoint ") + component +
+        " component");
 }
 
 void append_u32(std::vector<unsigned char>& output, std::uint32_t value) {
@@ -108,6 +125,24 @@ void close_checked(int descriptor, const std::string& path) {
 }
 
 }  // namespace
+
+ExactComplexBallDump dump_complex_ball_exact(const ComplexBall& value) {
+  if (!value.is_finite())
+    throw std::invalid_argument(
+        "cannot checkpoint a non-finite complex ball");
+  return {dump_arb_exact(acb_realref(value.raw())),
+          dump_arb_exact(acb_imagref(value.raw()))};
+}
+
+ComplexBall load_complex_ball_exact(const ExactComplexBallDump& dump) {
+  ComplexBall value;
+  load_arb_exact(acb_realref(value.raw()), dump.real, "real");
+  load_arb_exact(acb_imagref(value.raw()), dump.imaginary, "imaginary");
+  if (!value.is_finite())
+    throw std::invalid_argument(
+        "exact Arb checkpoint decoded a non-finite complex ball");
+  return value;
+}
 
 void write_atomic(const std::string& path, std::string_view header_json,
                   std::string_view payload_json) {

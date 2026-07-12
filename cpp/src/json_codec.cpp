@@ -1743,6 +1743,10 @@ class StoredLocalBase {
       std::optional<std::int32_t> exact_rim) = 0;
   virtual json::object endpoint_metadata() const = 0;
   virtual json::object exact_analytic_metadata() const = 0;
+  virtual void require_exact_plan_binding(
+      const ExactAffineChart& chart,
+      const std::vector<Prescription>& prescriptions,
+      const std::string& label) const = 0;
   virtual const std::string& checkpoint_identity() const = 0;
   virtual const char* scalar_domain() const = 0;
   virtual json::object summary() const = 0;
@@ -2020,6 +2024,37 @@ class StoredLocal final : public StoredLocalBase {
     } else {
       return checkpoint_local_analytic_metadata_record(solution_);
     }
+  }
+
+  void require_exact_plan_binding(
+      const ExactAffineChart& chart,
+      const std::vector<Prescription>& prescriptions,
+      const std::string& label) const override {
+    AcbPrecisionLease lease(precision_bits_);
+    ComplexBall::set_precision(precision_bits_);
+    if (!(Rational(solution_.chart.center_exact) == chart.center) ||
+        !(Rational(solution_.chart.scale_exact) == chart.scale) ||
+        solution_.chart.infinite_radius ||
+        !acb_equal(solution_.chart.radius.raw(),
+                   ComplexBall::from_strings(chart.radius.str()).raw()))
+      throw std::invalid_argument(
+          label +
+          " retained local geometry differs from its exact tile-plan chart");
+    const auto same_prescription = [](const Prescription& left,
+                                      const Prescription& right) {
+      return left.factor_exact == right.factor_exact &&
+             left.sign == right.sign &&
+             left.multiplicity == right.multiplicity &&
+             left.leading_coefficient_sign ==
+                 right.leading_coefficient_sign;
+    };
+    if (solution_.prescriptions.size() != prescriptions.size() ||
+        !std::equal(solution_.prescriptions.begin(),
+                    solution_.prescriptions.end(), prescriptions.begin(),
+                    same_prescription))
+      throw std::invalid_argument(
+          label +
+          " retained local prescriptions differ from its exact tile-plan chart");
   }
 
   const std::string& checkpoint_identity() const override {
@@ -6666,6 +6701,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
 constexpr const char* kRetainedTilePlanCapability =
     "retained-exact-independent-arm-tile-plan-v1";
+constexpr const char* kRetainedPlannedMatchHopCapability =
+    "retained-exact-plan-driven-local-match-hop-v1";
 constexpr const char* kRetainedStoredLineCapability =
     "retained-native-stored-truncation-physical-tile-integral-v1";
 
@@ -6844,6 +6881,9 @@ class StoredTilePlan {
   const std::string& checkpoint_identity() const {
     return checkpoint_identity_;
   }
+  const std::string& provenance_identity() const {
+    return provenance_identity_;
+  }
 
   const RetainedArmPlan& arm(const std::string& name) const {
     if (name == "lower") return lower_;
@@ -6873,6 +6913,18 @@ class StoredTilePlan {
 
   void note_integration() { integrations_.fetch_add(1); }
 
+  void note_match_advance(const std::string& name) {
+    if (name == "lower") {
+      lower_match_advances_.fetch_add(1);
+      return;
+    }
+    if (name == "upper") {
+      upper_match_advances_.fetch_add(1);
+      return;
+    }
+    throw std::invalid_argument("native tile-plan arm must be lower or upper");
+  }
+
   json::object summary(bool include_intervals = true) const {
     json::object result{
         {"tile_plan", handle_}, {"capability", kRetainedTilePlanCapability},
@@ -6891,6 +6943,8 @@ class StoredTilePlan {
         {"upper_tiles", upper_.exact.tiles.size()},
         {"match_interval_queries", match_queries_.load()},
         {"tile_interval_queries", tile_queries_.load()},
+        {"lower_match_advances", lower_match_advances_.load()},
+        {"upper_match_advances", upper_match_advances_.load()},
         {"integrations", integrations_.load()},
         {"elapsed_ms", elapsed_ms_}};
     if (include_intervals) {
@@ -6910,7 +6964,72 @@ class StoredTilePlan {
   double elapsed_ms_ = 0.0;
   mutable std::atomic<std::uint64_t> match_queries_{0};
   mutable std::atomic<std::uint64_t> tile_queries_{0};
+  std::atomic<std::uint64_t> lower_match_advances_{0};
+  std::atomic<std::uint64_t> upper_match_advances_{0};
   std::atomic<std::uint64_t> integrations_{0};
+};
+
+// A plan-driven match is one exact handoff, not a completed arm.  It owns the
+// immutable plan snapshot and every local used to construct the retained
+// matching weights.  Registry release of the public plan/local tokens can
+// therefore never turn a published handoff into dangling provenance.
+class StoredPlannedMatchHop final : public StoredMatchBase {
+ public:
+  StoredPlannedMatchHop(
+      std::shared_ptr<StoredMatchBase> match,
+      std::string checkpoint_identity, std::string provenance_identity,
+      json::object handoff, double elapsed_ms,
+      std::shared_ptr<StoredTilePlan> plan_owner,
+      std::vector<std::shared_ptr<StoredLocalBase>> basis_owners,
+      std::shared_ptr<StoredLocalBase> incoming_owner)
+      : StoredMatchBase(match == nullptr ? std::string() : match->handle()),
+        match_(std::move(match)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        handoff_(std::move(handoff)), elapsed_ms_(elapsed_ms),
+        plan_owner_(std::move(plan_owner)),
+        basis_owners_(std::move(basis_owners)),
+        incoming_owner_(std::move(incoming_owner)) {
+    if (match_ == nullptr || plan_owner_ == nullptr ||
+        incoming_owner_ == nullptr || basis_owners_.empty())
+      throw std::invalid_argument(
+          "retained planned match hop requires all strong owners");
+  }
+
+  json::object summary() const override {
+    auto result = match_->summary();
+    if (required_string(result, "checkpoint_identity") !=
+        checkpoint_identity_)
+      throw std::logic_error(
+          "retained planned match checkpoint identity changed");
+    result["planned_hop_capability"] =
+        kRetainedPlannedMatchHopCapability;
+    result["plan_driven"] = true;
+    result["planned_hop_provenance_identity"] = provenance_identity_;
+    result["planned_hop"] = handoff_;
+    result["strong_ownership"] = json::object{
+        {"tile_plan", true}, {"basis_locals", basis_owners_.size()},
+        {"incoming_local", true}};
+    result["elapsed_ms"] = elapsed_ms_;
+    return result;
+  }
+
+  double elapsed_ms() const { return elapsed_ms_; }
+
+  json::object checkpoint_record() const override {
+    throw std::domain_error(
+        "checkpoint schema v2 does not yet serialize retained plan-driven match-hop state");
+  }
+
+ private:
+  std::shared_ptr<StoredMatchBase> match_;
+  std::string checkpoint_identity_;
+  std::string provenance_identity_;
+  json::object handoff_;
+  double elapsed_ms_ = 0.0;
+  std::shared_ptr<StoredTilePlan> plan_owner_;
+  std::vector<std::shared_ptr<StoredLocalBase>> basis_owners_;
+  std::shared_ptr<StoredLocalBase> incoming_owner_;
 };
 
 class StoredLineResult {
@@ -7286,6 +7405,155 @@ std::shared_ptr<StoredTilePlan> build_tile_plan(
   return std::make_shared<StoredTilePlan>(
       handle, checkpoint_identity, provenance_identity, division_order,
       std::move(lower), std::move(upper), elapsed);
+}
+
+json::value optional_plan_rim_json(
+    const std::optional<std::int32_t>& rim) {
+  return rim.has_value() ? json::value(*rim) : json::value(nullptr);
+}
+
+std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
+    const std::string& match_handle, const json::object& request,
+    const std::string& domain, slong precision_bits,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::vector<std::string>& basis_handles,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& basis,
+    const std::string& incoming_handle,
+    const std::shared_ptr<StoredLocalBase>& incoming) {
+  const auto started = std::chrono::steady_clock::now();
+  const auto arm_name = required_string(request, "arm");
+  const auto match_index = static_cast<std::size_t>(
+      as_u64(request.at("match"), "planned local match index"));
+  const auto& arm = plan->arm(arm_name);
+  if (match_index >= arm.exact.matches.size())
+    throw std::invalid_argument(
+        "planned local match index is out of range");
+  const auto& exact_match = arm.exact.matches[match_index];
+  const auto& producing = arm.charts.at(exact_match.producing_chart);
+  const auto& receiving = arm.charts.at(exact_match.receiving_chart);
+  if (basis.empty())
+    throw std::invalid_argument("planned local match basis cannot be empty");
+
+  // The plan, rather than the caller, binds every coordinate, chart,
+  // prescription, rim and source checkpoint passed to the existing matching
+  // kernels.  Locals must reproduce the prepared chart snapshot exactly.
+  incoming->require_exact_plan_binding(
+      producing.geometry, producing.prescriptions,
+      "planned incoming " + incoming_handle);
+  for (std::size_t column = 0; column < basis.size(); ++column)
+    basis[column]->require_exact_plan_binding(
+        receiving.geometry, receiving.prescriptions,
+        "planned basis " + basis_handles[column]);
+
+  json::array basis_checkpoints;
+  basis_checkpoints.reserve(basis.size());
+  for (const auto& local : basis)
+    basis_checkpoints.emplace_back(local->checkpoint_identity());
+  const auto result_checkpoint = required_string(
+      request, "checkpoint_identity");
+  if (result_checkpoint.empty())
+    throw std::invalid_argument(
+        "planned local match checkpoint identity cannot be empty");
+
+  json::object kernel_request{
+      {"basis", [&]() {
+         json::array values;
+         for (const auto& handle : basis_handles) values.emplace_back(handle);
+         return values;
+       }()},
+      {"incoming", incoming_handle},
+      {"basis_chart", receiving.handle},
+      {"incoming_chart", producing.handle},
+      {"basis_point", json::object{
+           {"exact", exact_match.receiving_local.str()}}},
+      {"incoming_point", json::object{
+           {"exact", exact_match.producing_local.str()}}},
+      {"epsilon", request.at("epsilon")},
+      {"basis_checkpoint_identities", std::move(basis_checkpoints)},
+      {"incoming_checkpoint_identity", incoming->checkpoint_identity()},
+      {"checkpoint_identity", result_checkpoint}};
+
+  const auto producing_rim = exact_plan_rim(producing.prescriptions);
+  const auto receiving_rim = exact_plan_rim(receiving.prescriptions);
+  std::shared_ptr<StoredMatchBase> native_match;
+  if (domain == "rational") {
+    native_match = build_exact_regular_match(
+        match_handle, kernel_request, basis_handles, basis, incoming_handle,
+        incoming);
+  } else if (domain == "acb") {
+    kernel_request["basis_imaginary_sign"] =
+        optional_plan_rim_json(receiving_rim);
+    kernel_request["incoming_imaginary_sign"] =
+        optional_plan_rim_json(producing_rim);
+    kernel_request["refinement"] = request.at("refinement");
+    kernel_request["exact_lattice"] = request.at("exact_lattice");
+    native_match = build_refined_acb_match(
+        match_handle, kernel_request, basis_handles, basis, incoming_handle,
+        incoming, precision_bits);
+  } else {
+    throw std::invalid_argument(
+        "plan-driven local matching requires rational or Acb coefficients");
+  }
+
+  const auto native_summary = native_match->summary();
+  if (required_string(native_summary, "physical_match_point_exact") !=
+      exact_match.physical.str())
+    throw std::logic_error(
+        "native local match physical point differs from its retained exact plan");
+
+  json::array basis_sources;
+  basis_sources.reserve(basis.size());
+  for (std::size_t column = 0; column < basis.size(); ++column)
+    basis_sources.push_back(json::object{
+        {"column", column}, {"local", basis_handles[column]},
+        {"checkpoint_identity", basis[column]->checkpoint_identity()},
+        {"source_operator_identity",
+         basis[column]->source_operator_identity()}});
+  json::object handoff{
+      {"schema", "diffexp2-retained-exact-plan-match-hop-v1"},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+      {"tile_plan_provenance_identity", plan->provenance_identity()},
+      {"arm", arm_name}, {"match", match_index},
+      {"geometry", encode_plan_match(arm, match_index)},
+      {"producing", json::object{
+           {"tile", match_index},
+           {"chart", producing.handle},
+           {"chart_identity", producing.exact_identity},
+           {"local_point_exact", exact_match.producing_local.str()},
+           {"effective_rim", optional_plan_rim_json(producing_rim)},
+           {"prescriptions",
+            encode_plan_prescriptions(producing.prescriptions)},
+           {"incoming", json::object{
+                {"local", incoming_handle},
+                {"checkpoint_identity", incoming->checkpoint_identity()},
+                {"source_operator_identity",
+                 incoming->source_operator_identity()}}}}},
+      {"receiving", json::object{
+           {"tile", match_index + 1},
+           {"chart", receiving.handle},
+           {"chart_identity", receiving.exact_identity},
+           {"local_point_exact", exact_match.receiving_local.str()},
+           {"effective_rim", optional_plan_rim_json(receiving_rim)},
+           {"prescriptions",
+            encode_plan_prescriptions(receiving.prescriptions)},
+           {"basis", std::move(basis_sources)}}},
+      {"result_checkpoint_identity", result_checkpoint},
+      {"native_match_provenance_identity",
+       required_string(native_summary, "provenance_identity")},
+      {"advance", json::object{
+           {"scope", "single-match-handoff"},
+           {"state", "retained-receiving-basis-weights"},
+           {"source_tile", match_index},
+           {"receiving_tile", match_index + 1},
+           {"whole_arm_complete", false}}}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(handoff));
+  const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredPlannedMatchHop>(
+      std::move(native_match), result_checkpoint, provenance_identity,
+      std::move(handoff), elapsed_ms, plan, basis, incoming);
 }
 
 std::shared_ptr<StoredLineResult> build_planned_line_result(
@@ -8992,6 +9260,10 @@ json::object run_session_command(const json::object& root) {
                              ? "unsupported"
                              : kRetainedEndpointLimitCapability},
                         {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"planned_match_hop_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedMatchHopCapability},
                         {"line_integration_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -9195,6 +9467,119 @@ json::object run_session_command(const json::object& root) {
     return json::object{
         {"status", "ok"}, {"released", plan_handle},
         {"checkpoint_identity", removed->checkpoint_identity()}};
+  }
+
+  if (operation == "tile.match_advance") {
+    if (session->domain == "rational")
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan", "arm", "match",
+           "basis", "incoming", "epsilon", "checkpoint_identity"},
+          "native tile.match_advance request");
+    else if (session->domain == "acb")
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan", "arm", "match",
+           "basis", "incoming", "epsilon", "refinement",
+           "exact_lattice", "checkpoint_identity"},
+          "native Acb tile.match_advance request");
+    else
+      throw std::invalid_argument(
+          "native tile.match_advance requires rational or Acb coefficients");
+
+    const auto plan_handle = required_string(root, "tile_plan");
+    const auto incoming_handle = required_string(root, "incoming");
+    const auto& raw_basis = as_array(
+        root.at("basis"), "planned local match basis");
+    if (raw_basis.empty())
+      throw std::invalid_argument(
+          "planned local match basis cannot be empty");
+    std::vector<std::string> basis_handles;
+    basis_handles.reserve(raw_basis.size());
+    std::set<std::string> unique_handles;
+    for (const auto& raw_handle : raw_basis) {
+      if (!raw_handle.is_string() || raw_handle.as_string().empty())
+        throw std::invalid_argument(
+            "planned local match basis handles must be nonempty strings");
+      std::string handle(raw_handle.as_string());
+      if (!unique_handles.insert(handle).second)
+        throw std::invalid_argument(
+            "planned local match basis handles must be pairwise distinct");
+      basis_handles.push_back(std::move(handle));
+    }
+    if (unique_handles.contains(incoming_handle))
+      throw std::invalid_argument(
+          "planned incoming local must be distinct from its basis");
+
+    std::shared_ptr<StoredTilePlan> plan;
+    std::vector<std::shared_ptr<StoredLocalBase>> basis;
+    std::shared_ptr<StoredLocalBase> incoming;
+    std::string match_handle;
+    {
+      // Admission is the only serialized section.  Each lower/upper hop owns
+      // an immutable plan snapshot and strong local references while its
+      // matching arithmetic runs independently outside the session lock.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto plan_found = session->tile_plans.find(plan_handle);
+      if (plan_found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or released tile plan for planned local matching");
+      if (session->matches.size() + session->pending_matches >=
+          session->match_capacity)
+        throw std::invalid_argument(
+            "persistent local match capacity is exhausted");
+      plan = plan_found->second;
+      for (const auto& handle : basis_handles) {
+        const auto found = session->locals.find(handle);
+        if (found == session->locals.end())
+          throw std::invalid_argument(
+              "unknown or released native local in planned match basis: " +
+              handle);
+        basis.push_back(found->second);
+      }
+      const auto incoming_found = session->locals.find(incoming_handle);
+      if (incoming_found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released incoming native local for planned match: " +
+            incoming_handle);
+      incoming = incoming_found->second;
+      match_handle = "m:" + std::to_string(session->next_match++);
+      ++session->pending_matches;
+    }
+
+    std::shared_ptr<StoredPlannedMatchHop> match;
+    try {
+      match = build_planned_match_hop(
+          match_handle, root, session->domain, session->precision_bits, plan,
+          basis_handles, basis, incoming_handle, incoming);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native planned match reservation accounting underflow");
+      --session->pending_matches;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native planned match reservation accounting underflow");
+      --session->pending_matches;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during plan-driven local matching");
+      session->matches.emplace(match_handle, match);
+      ++session->total_local_matches;
+      session->total_local_match_ms += match->elapsed_ms();
+      plan->note_match_advance(required_string(root, "arm"));
+    }
+    auto response = match->summary();
+    response["status"] = "ok";
+    response["session"] = session->handle;
+    return response;
   }
 
   if (operation == "integration.line") {
@@ -10469,6 +10854,10 @@ json::object run_session_command(const json::object& root) {
                              ? "unsupported"
                              : kRetainedEndpointLimitCapability},
                         {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"planned_match_hop_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedMatchHopCapability},
                         {"line_integration_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -10687,6 +11076,10 @@ std::string backend_info_json() {
                                       {"persistent_exact_tile_plans", true},
                                       {"persistent_exact_tile_plan_capability",
                                        kRetainedTilePlanCapability},
+                                      {"persistent_plan_driven_match_hop",
+                                       true},
+                                      {"persistent_plan_driven_match_hop_capability",
+                                       kRetainedPlannedMatchHopCapability},
                                       {"persistent_stored_line_integration",
                                        true},
                                       {"persistent_stored_line_integration_capability",

@@ -33,10 +33,33 @@ json::array prescriptions() {
       {"multiplicity", 1}, {"leading_coefficient_sign", 1}}};
 }
 
+json::object epsilon_one() {
+  return json::object{{"zero", false}, {"valuation", 0},
+                      {"numerator", json::array{"1"}},
+                      {"denominator", json::array{"1"}}};
+}
+
+json::object physical_zero_ode(const std::string& operator_identity,
+                               const std::string& payload_identity) {
+  json::array q;
+  q.push_back(epsilon_one());
+  json::array c;
+  c.push_back(json::array{});
+  return json::object{
+      {"schema", "diffexp2-physical-cleared-ode-v1"},
+      {"basis", "physical-original-master"},
+      {"theta_coordinate", "local-t"},
+      {"owner_signature_identity", operator_identity},
+      {"payload_identity", payload_identity},
+      {"q", std::move(q)},
+      {"c", std::move(c)}};
+}
+
 std::string prepare_chart(const std::string& session,
                           const std::string& domain,
                           const std::string& name,
                           const std::string& center) {
+  const auto operator_identity = "de2-operator-" + name;
   json::array d_lag;
   d_lag.push_back(json::object{{"s", 0}, {"v", "1"}});
   json::array d_lags;
@@ -63,11 +86,13 @@ std::string prepare_chart(const std::string& session,
       {"assembly", json::object{
            {"identity", true}, {"poly", json::array{}},
            {"rat", json::array{}}, {"val", json::array{0}}}},
+      {"physical_ode", physical_zero_ode(
+           operator_identity, "de2-physical-ode-" + name)},
       {"chop_digits", 0}};
   if (domain == "acb") problem["precision_bits"] = 256;
   const auto response = request(json::object{
       {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
-      {"key", name}, {"identity", name + "-identity"},
+      {"key", name}, {"identity", operator_identity},
       {"analytic", json::object{
            {"geometry", json::object{
                 {"center_exact", center}, {"scale_exact", "1"},
@@ -180,6 +205,26 @@ json::object hop_request(const std::string& domain,
         {"relative_tolerance", "1e-40"}, {"max_steps", 1}};
   }
   return value;
+}
+
+json::object residual_request(const std::string& session,
+                              const std::string& local,
+                              const json::object& binding,
+                              const std::string& point) {
+  return json::object{
+      {"schema", 2}, {"op", "local.certify_residual"},
+      {"session", session}, {"local", local},
+      {"point", json::object{{"exact", point}}},
+      {"options", json::object{{"tail_estimate", false}}},
+      {"relative_tolerance", "1e-25"},
+      {"scope", "stored_truncation"}, {"include_residual", false},
+      {"operator_identity", binding.at("operator_identity")},
+      {"source_identity", binding.at("source_identity")},
+      {"checkpoint_identity", binding.at("local_checkpoint_identity")},
+      {"analytic_metadata", binding.at("analytic_metadata")},
+      {"owner_signature_identity", binding.at("owner_signature_identity")},
+      {"physical_payload_identity", binding.at("physical_payload_identity")},
+      {"provenance_identity", binding.at("provenance_identity")}};
 }
 
 double value_midpoint(const json::object& evaluation,
@@ -337,6 +382,11 @@ bool run_domain(const std::string& domain) {
       {"local", upper_local},
       {"point", json::object{{"exact", "-1/5"}}},
       {"options", json::object{{"tail_estimate", false}}}});
+  const auto& lower_residual_binding =
+      lower_materialized.at("residual_binding").as_object()
+          .at("binding").as_object();
+  const auto lower_residual = request(residual_request(
+      session, lower_local, lower_residual_binding, "1/5"));
 
   const auto base = std::filesystem::temp_directory_path() /
       ("diffexp2-plan-match-hop-" + domain + "-" +
@@ -403,6 +453,8 @@ bool run_domain(const std::string& domain) {
       {"session", restored_session}, {"local", upper_local},
       {"point", json::object{{"exact", "-1/5"}}},
       {"options", json::object{{"tail_estimate", false}}}});
+  const auto restored_lower_residual = request(residual_request(
+      restored_session, lower_local, lower_residual_binding, "1/5"));
   const auto restored_local_stats = request(json::object{
       {"schema", 2}, {"op", "local.stats"},
       {"session", restored_session}, {"local", lower_local}});
@@ -515,6 +567,8 @@ bool run_domain(const std::string& domain) {
       lower_materialized.at("epsilon_max") ==
           (domain == "rational" ? 2 : 1) &&
       lower_materialized.at("strong_derivation_ownership") == true &&
+      lower_materialized.at("residual_binding").as_object().at("status") ==
+          "available" &&
       std::string(materialized_derivation.at("source_match").as_string()) ==
           lower_match &&
       materialized_derivation.at("planned_hop_provenance_identity") ==
@@ -530,6 +584,8 @@ bool run_domain(const std::string& domain) {
           domain + "-lower-receiving-local" &&
       lower_evaluation.at("status") == "ok" &&
       upper_evaluation.at("status") == "ok" &&
+      lower_residual.at("status") == "ok" &&
+      lower_residual.at("verdict") == "pass" &&
       std::abs(value_midpoint(lower_evaluation, 0) - 2.0) < 1e-25 &&
       std::abs(value_midpoint(upper_evaluation, 0) - 2.0) < 1e-25 &&
       saved.at("status") == "ok" && saved.at("locals") == 2 &&
@@ -567,6 +623,8 @@ bool run_domain(const std::string& domain) {
       restored.at("tile_plans").as_array().empty() &&
       restored_lower_evaluation.at("status") == "ok" &&
       restored_upper_evaluation.at("status") == "ok" &&
+      restored_lower_residual.at("status") == "ok" &&
+      restored_lower_residual.at("verdict") == "pass" &&
       std::abs(value_midpoint(restored_lower_evaluation, 0) - 2.0) < 1e-25 &&
       std::abs(value_midpoint(restored_upper_evaluation, 0) - 2.0) < 1e-25 &&
       restored_local_stats.at("strong_derivation_ownership") == true &&

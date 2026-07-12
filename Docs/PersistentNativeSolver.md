@@ -106,9 +106,10 @@ diagonal block's ordinary grouped homogeneous request without executing it,
 requires one shared coefficient field, takes the exact union of each
 diagonal block's independently proved work rectangle, builds the exact
 parent/block/coupling manifest, and calls
-``CppBackend`PreparePersistentSCC[groups, manifest]``.  This first slice is
-limited to regular or exact affine-Jordan blocks with identity
-gauge and spectral transforms.  C++ reconstructs and retains the complete
+``CppBackend`PreparePersistentSCC[groups, manifest]``.  This slice is limited
+to regular or exact affine-Jordan blocks with identity gauge and exact,
+local-coordinate-independent epsilon-unimodular spectral transforms.  C++
+reconstructs and retains the complete
 Rational Jordan indicial certificate; `regular` is a classification rather
 than an admission predicate. Singular affine-Jordan execution accepts both a
 single strongly connected block and a multi-block condensation DAG; the
@@ -125,9 +126,12 @@ The manifest also owns one exact cleared physical equation
 completed full-dimension homogeneous SCC column acquires that owner; the
 internally sourced diagonal solves are never exposed as independently
 certified parent locals.  The owner is retained strongly across SCC release
-and checkpoint restore.  Nonidentity block spectral transforms remain outside
-this SCC execution scope because a sourced target would first require an
-explicit retained `VInv` source-basis conversion.
+and checkpoint restore.  For a nonidentity spectral frame the native source
+path first sums every `C_TS g_S` contribution in the physical basis, applies
+the target block's retained exact `VInv` exactly once, and only then performs
+the single strict epsilon-frame restriction.  The independently retained
+`V`, `VInv`, determinant-valuation, and sparse-entry identities bind this
+conversion to the target assembly operator in both Rational and Acb domains.
 
 The explicit
 ``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
@@ -202,7 +206,8 @@ compensated by certificate-derived homogeneous Jordan columns; their negative
 Laurent weights are proved over the stored Taylor overlap, and the resulting
 exact `(a,b)` sectors are split, propagated, and recombined through every
 downstream SCC. Incomplete polar windows, cyclic compensation dependencies,
-nonidentity spectral frames, and center-pole tag shifts remain loud errors.
+t-dependent or epsilon-nonunimodular spectral frames, and center-pole tag
+shifts remain loud errors.
 For Acb, Wolfram builds the same exact tag and T/P/R plan from task/indicial
 metadata and serializes exact zero and one directly in the Acb field; no
 midpoint or enclosure decides structure. C++ revalidates every encoded target,
@@ -306,6 +311,16 @@ bounds the unseen Taylor tail of the outgoing receiving-chart solution; it is
 not a separate bound on finite-order matching error accumulated along an arm.
 Likewise, applying an arbitrary rational-row multiplier remains unsupported
 because the current majorant does not prove the transformed operator/tail.
+
+Independently of that tail-majorant eligibility, a plan-match materialization
+inherits the full physical homogeneous `q/C` residual owner when every
+receiving basis column has the same non-null prepared-chart or CompositeSCC
+owner.  This is valid because the retained Laurent weights depend on epsilon
+but not on the local coordinate.  Mixed or ownerless bases remain ownerless;
+rational-row projections do not inherit this equation.  A materialized SCC
+combination never acquires canonical SCC-column provenance.  Checkpoint
+restore recomputes the shared-basis-owner invariant before accepting the
+derived local's residual binding.
 
 For `integration.line` with `certify_tail:true`, C++ derives an exact witness
 radius strictly between the tile's outer local endpoint and its exact chart

@@ -2518,10 +2518,18 @@ class StoredLocal final : public StoredLocalBase {
     validate_local_solution(solution_, false);
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>) {
+      const bool homogeneous_match_derivation =
+          retained_derivation_.has_value() &&
+          required_string(*retained_derivation_, "schema") ==
+              "diffexp2-retained-plan-match-local-materialization-v1";
+      if (homogeneous_match_derivation && column_provenance_.has_value())
+        throw std::invalid_argument(
+            "a plan-match combination cannot retain canonical SCC-column provenance");
       if (equation_owner_ != nullptr && physical_equation_ != nullptr) {
-        if (retained_derivation_.has_value())
+        if (retained_derivation_.has_value() &&
+            !homogeneous_match_derivation)
           throw std::invalid_argument(
-              "source-derived local cannot acquire a homogeneous physical equation owner");
+              "only a homogeneous plan-match derivation may retain a physical equation owner");
         const auto owner_kind =
             std::string(equation_owner_->equation_owner_kind());
         if (owner_kind == "prepared-chart") {
@@ -2529,13 +2537,15 @@ class StoredLocal final : public StoredLocalBase {
             throw std::invalid_argument(
                 "SCC column local cannot acquire a primitive chart equation owner");
         } else if (owner_kind == "composite-scc") {
-          if (!column_provenance_.has_value() ||
-              column_provenance_->scc_handle !=
-                  equation_owner_->equation_owner_handle() ||
-              column_provenance_->scc_exact_identity !=
-                  equation_owner_->equation_operator_identity())
+          const bool completed_column =
+              column_provenance_.has_value() &&
+              column_provenance_->scc_handle ==
+                  equation_owner_->equation_owner_handle() &&
+              column_provenance_->scc_exact_identity ==
+                  equation_owner_->equation_operator_identity();
+          if (!completed_column && !homogeneous_match_derivation)
             throw std::invalid_argument(
-                "completed SCC parent local lacks matching full-column provenance");
+                "SCC-owned local is neither a completed full column nor a homogeneous plan-match combination");
         } else {
           throw std::invalid_argument(
               "local received an unsupported physical equation owner kind");
@@ -11168,6 +11178,25 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return provenance_identity_;
   }
 
+  std::shared_ptr<PhysicalEquationOwnerBase>
+  inheritable_basis_equation_owner() const {
+    if (basis_owners_.empty()) return nullptr;
+    auto result = basis_owners_.front()->retained_equation_owner();
+    for (const auto& basis : basis_owners_) {
+      const auto candidate = basis->retained_equation_owner();
+      if (candidate.get() != result.get()) return nullptr;
+    }
+    return result;
+  }
+
+  void validate_materialized_equation_owner(
+      const std::shared_ptr<StoredLocalBase>& local) const {
+    if (!local || local->retained_equation_owner().get() !=
+                      inheritable_basis_equation_owner().get())
+      throw std::invalid_argument(
+          "checkpoint materialized-local equation owner differs from its planned-hop basis");
+  }
+
   void validate_materialized_derivation(
       const json::object& derivation, const char* scalar_domain) const {
     const auto native_summary = match_->summary();
@@ -11308,6 +11337,7 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     const auto receiving_chart = basis_owners_.front()->source_chart();
     const auto receiving_operator =
         basis_owners_.front()->source_operator_identity();
+    auto equation_owner = inheritable_basis_equation_owner();
     for (std::size_t column = 0; column < basis_owners_.size(); ++column) {
       auto typed =
           std::dynamic_pointer_cast<StoredLocal<Scalar>>(basis_owners_[column]);
@@ -11399,6 +11429,33 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     auto tail_model = derive_materialized_regular_homogeneous_tail_model(
         basis_solutions, basis_tail_models, weights, solution,
         receiving_operator, checkpoint_identity_);
+    std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+        physical_equation;
+    if (equation_owner != nullptr) {
+      if (equation_owner->equation_owner_handle() != receiving_chart ||
+          equation_owner->equation_operator_identity() !=
+              receiving_operator ||
+          std::string(equation_owner->equation_scalar_domain()) !=
+              (std::is_same_v<Scalar, Rational> ? "rational" : "acb"))
+        throw std::logic_error(
+            "retained plan-match basis equation owner disagrees with its receiving chart");
+      const auto erased = equation_owner->physical_ode_erased();
+      if (!erased)
+        throw std::logic_error(
+            "retained plan-match basis equation owner lost its physical q/C payload");
+      physical_equation =
+          std::static_pointer_cast<const PreparedPhysicalClearedODE<Scalar>>(
+              erased);
+      physical_ode_detail::validate_ode(*physical_equation);
+      if (physical_equation->exact_payload_record !=
+              equation_owner->physical_payload_record() ||
+          physical_equation->payload_identity !=
+              equation_owner->physical_payload_identity() ||
+          physical_equation->owner_signature_identity !=
+              equation_owner->owner_signature_identity())
+        throw std::logic_error(
+            "retained plan-match physical q/C payload differs from its shared basis owner");
+    }
     const auto elapsed_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
     NativeLocalDiagnostics diagnostics;
@@ -11409,7 +11466,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         std::move(solution), precision_bits,
         std::vector<PseudoHit<Scalar>>{}, diagnostics, std::nullopt,
         std::move(derivation), std::static_pointer_cast<void>(self),
-        std::move(tail_model));
+        std::move(tail_model), std::nullopt, true, true,
+        std::move(equation_owner), std::move(physical_equation));
   }
 
   std::shared_ptr<StoredMatchBase> match_;
@@ -18065,6 +18123,7 @@ json::object restore_checkpoint(const std::string& path,
               *raw_ptr, std::static_pointer_cast<void>(hop));
           hop->validate_materialized_derivation(
               *local->retained_derivation(), local->scalar_domain());
+          hop->validate_materialized_equation_owner(local);
           raw_ptr = nullptr; --remaining; progress = true;
         }
         if (!progress)

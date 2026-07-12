@@ -13,7 +13,7 @@ namespace diffexp2::checkpoint {
 // independent of compiler timestamps so checkpoints remain usable after an
 // identical source rebuild.
 inline constexpr std::string_view kBuildIdentity =
-    "diffexp2-persistent-checkpoint-composite-epsilon-unimodular-spectral-frame-v10";
+    "diffexp2-persistent-checkpoint-matched-physical-residual-owner-v11";
 inline constexpr std::uint32_t kContainerSchema = 1;
 
 struct Container {

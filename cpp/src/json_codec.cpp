@@ -19,6 +19,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -14603,6 +14604,22 @@ json::object run_session_command(const json::object& root) {
       session->pending_line_integrations -= published_line_results;
       reservation_live = false;
     };
+    struct WholeArmReservationGuard final {
+      decltype(release_reservation)& release;
+      bool& live;
+
+      ~WholeArmReservationGuard() noexcept {
+        if (!live) return;
+        try {
+          release();
+        } catch (...) {
+          // Reservation underflow is an internal invariant failure.  It is
+          // unsafe to continue unwinding with counters that may still admit
+          // work beyond the configured capacities.
+          std::terminate();
+        }
+      }
+    } reservation_guard{release_reservation, reservation_live};
 
     struct CompletedArmMarch {
       std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches;

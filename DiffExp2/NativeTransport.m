@@ -1547,10 +1547,13 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
       "Detail" -> "schema-2 native observable checkpoint restore failed"|>]];
   session = restored["session"];
   close[] := Quiet[DiffExp2`CppBackend`ClosePersistentSession[session]];
+  (* Lookup[{}, key] is Missing[KeyAbsent, key], not {}.  A completed FT
+     level may legitimately contain only line integrals (or only endpoint
+     limits), so preserve the empty visibility class explicitly. *)
   expectedLines = Lookup[
-    Select[manifest["Results"], # ["Kind"] === "line" &], "Handle"];
+    Select[manifest["Results"], # ["Kind"] === "line" &], "Handle", {}];
   expectedEndpoints = Lookup[
-    Select[manifest["Results"], # ["Kind"] === "endpoint" &], "Handle"];
+    Select[manifest["Results"], # ["Kind"] === "endpoint" &], "Handle", {}];
   expectedStates = Lookup[Values[manifest["StateHandles"]], "Handle"];
   restoredHandles[collection_, key_String] := If[ListQ[collection],
     Map[If[AssociationQ[#], Lookup[#, key, None], #] &, collection], {}];

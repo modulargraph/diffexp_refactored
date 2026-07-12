@@ -254,7 +254,7 @@ bool rational_protocol() {
   auto malformed_row = rational_row();
   malformed_row.at("entries").as_array().front().as_object()
       .at("multiplier").as_object().at("kernels").as_array()
-      .front() = json::array{"1", "0"};
+      .front() = json::array{};
   const auto malformed = apply_row(
       session, source_handle, std::move(malformed_row),
       "row-source-rational", "malformed-row");

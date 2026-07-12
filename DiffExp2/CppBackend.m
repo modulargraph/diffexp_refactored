@@ -23,7 +23,7 @@ RunPersistentSCCColumns::usage = "RunPersistentSCCColumns[handle, columns, threa
 ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
-CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies the native Acb residual of the immutable operator/source payload owned by that local. request carries point, relative_tolerance, and the operator, homogeneous-source, local-checkpoint, analytic-metadata, and provenance identities advertised by residual_binding; caller-supplied theta operators or sources are rejected.";
+CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies the native Acb residual of its immutable physical q(t,eps), C(t,eps), and homogeneous-source payload. request carries point, relative_tolerance, and the operator, owner-signature, physical-payload, source, local-checkpoint, analytic-metadata, and provenance identities advertised by residual_binding; caller-supplied operators or sources are rejected.";
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
 RunPersistentAcbLocalMatch::usage = "RunPersistentAcbLocalMatch[basis, incoming, request] evaluates retained Acb locals at one exact physical point and retains an exact-Rational-lattice-guided Laurent match with bounded refinement and residual diagnostics. request supplies exact_lattice and refinement records in addition to chart, branch, checkpoint, point, and epsilon identities.";
 RunPersistentPlannedMatch::usage = "RunPersistentPlannedMatch[plan, arm, index, basis, incoming, policy] performs one plan-derived retained Rational or Acb match. The one-based match index selects exact physical/local coordinates and branch data from the plan; policy supplies epsilon/checkpoint fields and, for Acb, exact_lattice/refinement.";
@@ -347,7 +347,9 @@ RunRequest[request_Association] := Module[{json, bytes, result},
 
 $persistentStaticKeys = {"domain", "symbols", "precision_bits", "d", "fb",
   "w", "d_lags", "denominators", "nhat_lags", "d0_inverse", "blocks",
-  "assembly", "chop_digits"};
+  "assembly", "physical_ode", "chop_digits"};
+$persistentRequiredStaticKeys = DeleteCases[
+  $persistentStaticKeys, "physical_ode"];
 $persistentRunKeys = {"nmax", "p", "has_initial", "adaptive_probe",
   "a_target", "b_target", "a_shift_min", "a_shifts", "schedule",
   "initial", "initial_validity", "source", "return_u"};
@@ -438,7 +440,7 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
    chartIdentity, chartIdentityString, chartSignature, chartKey, chartEntry,
    chartResponse, chart,
    preparedToken, createRequest, prepareRequest},
-  missingStatic = Complement[$persistentStaticKeys, Keys[request]];
+  missingStatic = Complement[$persistentRequiredStaticKeys, Keys[request]];
   missingRun = Complement[$persistentRunKeys, Keys[request]];
   If[missingStatic =!= {} || missingRun =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
@@ -498,6 +500,11 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     preparedToken = persistentPreparedTokenCertificate[
       preparedToken, static];
     If[FailureQ[preparedToken], Return[preparedToken, Module]]];
+  (* The native chart's public exact identity is the same collision-certified
+     immutable-operator token embedded in physical_ode.  The richer Wolfram
+     ChartIdentity remains in chartSignature as an independently compared
+     structural cache certificate. *)
+  If[StringQ[preparedToken], chartIdentityString = preparedToken];
   chartSignature = If[StringQ[preparedToken],
     {session, preparedToken, chartIdentity, chartAnalytic, scc},
     {session, static, chartIdentity, chartAnalytic, scc}];
@@ -866,6 +873,7 @@ CertifyPersistentLocalResidual[handle_Association,
     {"schema", "op", "session", "local", "output_digits"}];
   missing = Select[{"point", "relative_tolerance", "operator_identity",
       "source_identity", "checkpoint_identity", "analytic_metadata",
+      "owner_signature_identity", "physical_payload_identity",
       "provenance_identity"},
     !KeyExistsQ[certificateRequest, #] &];
   If[reserved =!= {} || missing =!= {},

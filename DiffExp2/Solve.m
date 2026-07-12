@@ -29,7 +29,7 @@ PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, re
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. Singular Acb execution is restricted to exact schedules without CASE-P collisions. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
 SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
-ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
+ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -565,6 +565,96 @@ epsRationalData[expr_, eps_, fb_Integer, top_Integer, cs_] := Module[
   qd = Exponent[q, eps];
   <|"Zero" -> False, "Valuation" -> v, "P" -> p, "Q" -> q,
     "DenominatorDegree" -> qd|>];
+
+(* Frame-independent epsilon-rational data for the physical cleared ODE.
+   Unlike recurrence preparation this payload is an exact equation owner: it
+   must not acquire upper-frame boundary corrections or reject a valuation
+   merely because one particular local solve requested a narrower slab. *)
+physicalEpsRationalData[expr_, eps_, cs_] := Module[
+  {c, num, den, vn, vd, v, num0, den0, q0, p, q},
+  c = Cancel[Together[expr]];
+  If[zeroCanQ[c], Return[<|"Zero" -> True|>]];
+  num = Numerator[c]; den = Denominator[c];
+  vn = Exponent[num, eps, Min]; vd = Exponent[den, eps, Min];
+  v = vn - vd;
+  If[!IntegerQ[v],
+    err["E5", cs, <|"Expression" -> c,
+      "Detail" -> "physical ODE coefficient has a nonintegral epsilon valuation"|>]];
+  num0 = Cancel[num/eps^vn]; den0 = Cancel[den/eps^vd];
+  q0 = Coefficient[den0, eps, 0];
+  If[zeroCanQ[q0],
+    err["E5", cs, <|"Denominator" -> den0,
+      "Detail" -> "physical ODE epsilon denominator is not a causal unit"|>]];
+  p = Expand[Cancel[Together[num0/q0]]];
+  q = Expand[Cancel[Together[den0/q0]]];
+  If[!PolynomialQ[p, eps] || !PolynomialQ[q, eps] ||
+      zeroCanQ[Coefficient[p, eps, 0]] ||
+      !TrueQ[Coefficient[q, eps, 0] === 1],
+    err["E5", cs, <|"Expression" -> c,
+      "Detail" -> "physical ODE coefficient did not normalize to eps^v P/Q with P(0)!=0 and Q(0)=1"|>]];
+  <|"Zero" -> False, "Valuation" -> v, "P" -> p, "Q" -> q|>];
+
+$physicalClearedODECache = <||>;
+$physicalClearedODECacheMax = 256;
+
+(* Capture the exact equation in the delivered master basis, before any
+   spectral V/VInv recurrence frame is applied:
+
+                    q(t,eps) theta f = C(t,eps) f,
+                    C = q ThetaOriginal.
+
+   The full exact signature is retained beside its hash cache index, so a
+   collision can never substitute another physical equation. *)
+physicalClearedODEData[cs_Association] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], theta,
+   signature, key, cached, den, denCoeffs, denContent, cMatrix, qDegree,
+   cDegree, qCoeffs, cCoeffs, qData, cData, identity, data},
+  theta = Lookup[cs, "ThetaOriginal", None];
+  If[!MatrixQ[theta] || Dimensions[theta] =!=
+      {cs["SystemSize"], cs["SystemSize"]},
+    err["E5", cs, <|
+      "Detail" -> "physical residual ownership requires the exact original-master theta matrix"|>]];
+  signature = {t, theta};
+  key = Hash[signature, "SHA256"];
+  cached = Lookup[$physicalClearedODECache, key, None];
+  If[AssociationQ[cached] && SameQ[cached["Signature"], signature],
+    Return[cached["Data"], Module]];
+  If[cached =!= None,
+    err["E5", cs, <|
+      "Detail" -> "physical cleared-ODE cache-key collision with unequal exact input"|>]];
+  den = Together[PolynomialLCM @@
+    (Denominator[Together[#]] & /@ Flatten[theta])];
+  denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
+  If[denCoeffs === {},
+    err["E5", cs, <|
+      "Detail" -> "physical cleared-ODE denominator is identically zero"|>]];
+  denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
+    Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
+  den = Cancel[Together[den/denContent]];
+  cMatrix = Map[Cancel[Together[den*#]] &, theta, {2}];
+  If[!PolynomialQ[den, t] ||
+      !AllTrue[Flatten[cMatrix], PolynomialQ[#, t] &],
+    err["E5", cs, <|
+      "Detail" -> "physical cleared ODE is not polynomial in the local chart coordinate"|>]];
+  qDegree = Max[0, Exponent[den, t]];
+  cDegree = Max[0, Max[Exponent[#, t] & /@ Flatten[cMatrix]]];
+  qCoeffs = Table[Cancel[Together[Coefficient[den, t, j]]],
+    {j, 0, qDegree}];
+  cCoeffs = Table[Map[Cancel[Together[#]] &,
+      Map[Coefficient[#, t, j] &, cMatrix, {2}], {2}],
+    {j, 0, cDegree}];
+  qData = physicalEpsRationalData[#, eps, cs] & /@ qCoeffs;
+  cData = Map[physicalEpsRationalData[#, eps, cs] &, cCoeffs, {3}];
+  identity = "de2-physical-ode-" <>
+    IntegerString[Hash[{"physical-original-master", qData, cData},
+      "SHA256"], 16, 64];
+  data = <|"Identity" -> identity, "Q" -> qData, "C" -> cData|>;
+  If[Length[$physicalClearedODECache] >= $physicalClearedODECacheMax,
+    KeyDropFrom[$physicalClearedODECache,
+      First[Keys[$physicalClearedODECache]]]];
+  AssociateTo[$physicalClearedODECache, key -> <|
+    "Signature" -> signature, "Data" -> data|>];
+  data];
 
 (* Q=1 entries need no second Together/series-division pass after
    epsRationalData has already canonicalized them. *)
@@ -1784,6 +1874,30 @@ cppMatrixShift[sp_List, digits_Integer, cs_] := Module[
     {r, d}, {c, d}], 2];
   <|"s" -> shift, "e" -> entries|>];
 
+cppPhysicalRational[data_Association, digits_Integer, cs_] := If[
+  TrueQ[data["Zero"]],
+  <|"zero" -> True|>,
+  <|"zero" -> False, "valuation" -> data["Valuation"],
+    "numerator" -> (cppScalar[#, digits, cs] & /@
+      CoefficientList[data["P"], DiffExp2`Config`CanonicalEps[]]),
+    "denominator" -> (cppScalar[#, digits, cs] & /@
+      CoefficientList[data["Q"], DiffExp2`Config`CanonicalEps[]])|>];
+
+cppPhysicalODEPayload[data_Association, ownerIdentity_String,
+    digits_Integer, cs_] := Module[{d = cs["SystemSize"], c},
+  c = Map[Function[lag, Flatten[Table[
+      If[TrueQ[lag[[r, col, "Zero"]]], Nothing,
+        <|"r" -> r - 1, "c" -> col - 1,
+          "v" -> cppPhysicalRational[lag[[r, col]], digits, cs]|>],
+      {r, d}, {col, d}]]], data["C"]];
+  <|"schema" -> "diffexp2-physical-cleared-ode-v1",
+    "basis" -> "physical-original-master",
+    "theta_coordinate" -> "local-t",
+    "owner_signature_identity" -> ownerIdentity,
+    "payload_identity" -> data["Identity"],
+    "q" -> (cppPhysicalRational[#, digits, cs] & /@ data["Q"]),
+    "c" -> c|>];
+
 $cppStaticOperatorCache = <||>;
 $cppStaticOperatorCacheMax = 1024;
 
@@ -1796,11 +1910,15 @@ $cppStaticOperatorCacheMax = 1024;
 cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
     vPrep_, inputDigits_Integer, precisionBits_Integer] := Module[
   {d = cs["SystemSize"], signature, key, cached, dLags, denominators,
-   nLags, assembly = Null, assemblyGroups, assemblyBase, payload, record},
+   nLags, assembly = Null, assemblyGroups, assemblyBase, payload, record,
+   physicalData, physicalPayload, token},
+  physicalData = physicalClearedODEData[cs];
   signature = {$cppSerializationDomain, $cppSerializationSymbols,
     inputDigits, precisionBits, d, fb, W, prep, blocks,
-    If[AssociationQ[vPrep], vPrep, Automatic], cfg["ChopPrecision"]};
+    If[AssociationQ[vPrep], vPrep, Automatic], physicalData,
+    cfg["ChopPrecision"]};
   key = Hash[signature, "SHA256"];
+  token = "de2-operator-" <> IntegerString[key, 16, 64];
   cached = Lookup[$cppStaticOperatorCache, key, None];
   If[AssociationQ[cached] && SameQ[cached["Signature"], signature],
     Return[cached, Module]];
@@ -1837,6 +1955,8 @@ cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
       "val" -> (cppValidity /@ Flatten[vals])|>],
     {prep["NhatSp"], prep["NhatRationalGroups"],
       prep["NhatValuations"]}];
+  physicalPayload = cppPhysicalODEPayload[
+    physicalData, token, inputDigits, cs];
   payload = <|"domain" -> $cppSerializationDomain,
     "symbols" -> (SymbolName /@ $cppSerializationSymbols),
     "precision_bits" -> precisionBits,
@@ -1846,12 +1966,13 @@ cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
     "d0_inverse" -> If[prep["d0InvScalar"] === None, Null,
       cppScalar[prep["d0InvScalar"], inputDigits, cs]],
     "blocks" -> Map[(#["Cols"] - 1) &, blocks],
-    "assembly" -> assembly, "chop_digits" -> cfg["ChopPrecision"]|>;
+    "assembly" -> assembly, "physical_ode" -> physicalPayload,
+    "chop_digits" -> cfg["ChopPrecision"]|>;
   (* Stable content identity prevents an evicted Wolfram serialization cache
      entry from duplicating an already-retained native chart.  The digest is
      only an index: both caches retain and compare the complete certificate. *)
   record = <|"Signature" -> signature, "Payload" -> payload,
-    "Token" -> ("de2-operator-" <> IntegerString[key, 16, 64])|>;
+    "Token" -> token|>;
   If[Length[$cppStaticOperatorCache] >= $cppStaticOperatorCacheMax,
     KeyDropFrom[$cppStaticOperatorCache,
       First[Keys[$cppStaticOperatorCache]]]];
@@ -3139,7 +3260,8 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
   $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
-  $cppStaticOperatorCache = <||>; $nativeSCCCompositeCache = <||>;
+  $physicalClearedODECache = <||>; $cppStaticOperatorCache = <||>;
+  $nativeSCCCompositeCache = <||>;
   $homogeneousFramePlanOverride = None;
   $cppHomogeneousFrameOverride = None;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;

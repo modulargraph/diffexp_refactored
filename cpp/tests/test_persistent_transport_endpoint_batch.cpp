@@ -528,7 +528,7 @@ int main() {
       throw std::runtime_error("checkpoint.save: " + json::serialize(saved));
     const auto container = diffexp2::checkpoint::read(checkpoint);
     const auto payload = json::parse(container.payload_json).as_object();
-    if (payload.at("schema") != 6 ||
+    if (payload.at("schema") != 7 ||
         payload.at("retained_transport_states").as_array().size() != 2 ||
         !payload_has_handle(payload.at("retained_transport_states").as_array(),
                             std::string(centered_state.at("transport_state").as_string())) ||

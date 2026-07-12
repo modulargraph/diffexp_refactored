@@ -6,6 +6,7 @@
 #include "diffexp2/local_solution.hpp"
 #include "diffexp2/matching.hpp"
 #include "diffexp2/path_planner.hpp"
+#include "diffexp2/physical_ode.hpp"
 #include "diffexp2/recurrence.hpp"
 #include "diffexp2/singular_indicial.hpp"
 #include "diffexp2/tail_majorant.hpp"
@@ -21,6 +22,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -38,6 +40,11 @@
 namespace diffexp2 {
 namespace json = boost::json;
 namespace {
+
+json::value canonical_json_value(const json::value& value);
+void require_exact_keys(const json::object& object,
+                        std::initializer_list<std::string_view> expected,
+                        const char* label);
 
 const json::object& as_object(const json::value& value, const char* label) {
   if (!value.is_object()) throw std::invalid_argument(std::string(label) + " must be an object");
@@ -730,6 +737,80 @@ std::string required_string(const json::object& object, const char* key) {
   return std::string(value.as_string());
 }
 
+template <typename Scalar>
+ExactEpsilonRational<Scalar> parse_physical_epsilon_rational(
+    const json::value& raw, const char* label) {
+  const auto& object = as_object(raw, label);
+  if (object.if_contains("zero") == nullptr ||
+      !object.at("zero").is_bool())
+    throw std::invalid_argument(std::string(label) +
+                                " zero marker must be Boolean");
+  ExactEpsilonRational<Scalar> result;
+  result.zero = object.at("zero").as_bool();
+  if (result.zero) {
+    require_exact_keys(object, {"zero"}, label);
+  } else {
+    require_exact_keys(
+        object, {"zero", "valuation", "numerator", "denominator"}, label);
+    result.valuation = as_i32(object.at("valuation"),
+                              "physical epsilon valuation");
+    for (const auto& coefficient : as_array(
+             object.at("numerator"), "physical epsilon numerator"))
+      result.numerator.push_back(parse_scalar<Scalar>(coefficient));
+    for (const auto& coefficient : as_array(
+             object.at("denominator"), "physical epsilon denominator"))
+      result.denominator.push_back(parse_scalar<Scalar>(coefficient));
+  }
+  physical_ode_detail::validate_rational(result, label);
+  return result;
+}
+
+template <typename Scalar>
+std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+parse_prepared_physical_ode(const json::value& raw,
+                            std::uint32_t expected_dimension) {
+  const auto& object = as_object(raw, "prepared physical cleared ODE");
+  require_exact_keys(
+      object,
+      {"schema", "basis", "theta_coordinate", "owner_signature_identity",
+       "payload_identity", "q", "c"},
+      "prepared physical cleared ODE");
+  if (required_string(object, "schema") !=
+          "diffexp2-physical-cleared-ode-v1" ||
+      required_string(object, "basis") != "physical-original-master" ||
+      required_string(object, "theta_coordinate") != "local-t")
+    throw std::invalid_argument(
+        "prepared physical cleared ODE changes its equation basis or coordinate");
+  auto result = std::make_shared<PreparedPhysicalClearedODE<Scalar>>();
+  result->dimension = expected_dimension;
+  result->owner_signature_identity = required_string(
+      object, "owner_signature_identity");
+  result->payload_identity = required_string(object, "payload_identity");
+  if (!result->owner_signature_identity.starts_with("de2-operator-") ||
+      !result->payload_identity.starts_with("de2-physical-ode-"))
+    throw std::invalid_argument(
+        "prepared physical cleared ODE has malformed owner/payload identity tokens");
+  result->exact_payload_record = json::serialize(
+      canonical_json_value(object));
+  for (const auto& coefficient : as_array(object.at("q"), "physical q lags"))
+    result->q_lags.push_back(parse_physical_epsilon_rational<Scalar>(
+        coefficient, "physical q lag"));
+  for (const auto& raw_lag : as_array(object.at("c"), "physical C lags")) {
+    std::vector<PhysicalODEMatrixEntry<Scalar>> lag;
+    for (const auto& raw_entry : as_array(raw_lag, "physical C lag")) {
+      const auto& entry = as_object(raw_entry, "physical C entry");
+      require_exact_keys(entry, {"r", "c", "v"}, "physical C entry");
+      lag.push_back({as_u32(entry.at("r"), "physical C row"),
+                     as_u32(entry.at("c"), "physical C column"),
+                     parse_physical_epsilon_rational<Scalar>(
+                         entry.at("v"), "physical C value")});
+    }
+    result->c_lags.push_back(std::move(lag));
+  }
+  physical_ode_detail::validate_ode(*result);
+  return result;
+}
+
 std::string canonical_chart_geometry_record(const json::value& raw) {
   const auto& geometry = as_object(raw, "exact chart geometry");
   const auto center = required_string(geometry, "center_exact");
@@ -1080,7 +1161,24 @@ class StoredLocalBase;
 class StoredTilePlan;
 class StoredTransportArmState;
 
-class PreparedChartBase {
+// Equation ownership is deliberately independent of the current primitive
+// chart implementation.  Composite SCC owners can implement this interface
+// once they retain one full original-system q/C certificate, without changing
+// StoredLocal or its checkpoint provenance shape.
+class PhysicalEquationOwnerBase {
+ public:
+  virtual ~PhysicalEquationOwnerBase() = default;
+  virtual const std::string& equation_owner_handle() const = 0;
+  virtual const std::string& equation_operator_identity() const = 0;
+  virtual const char* equation_owner_kind() const = 0;
+  virtual const char* equation_scalar_domain() const = 0;
+  virtual std::shared_ptr<const void> physical_ode_erased() const = 0;
+  virtual const std::string& physical_payload_identity() const = 0;
+  virtual const std::string& physical_payload_record() const = 0;
+  virtual const std::string& owner_signature_identity() const = 0;
+};
+
+class PreparedChartBase : public PhysicalEquationOwnerBase {
  public:
   PreparedChartBase(std::string handle, std::string key,
                     std::string exact_identity, std::string signature,
@@ -1101,12 +1199,23 @@ class PreparedChartBase {
   virtual json::object solve(const json::object& run, int output_digits) = 0;
   virtual std::shared_ptr<StoredLocalBase> solve_local(
       const std::string& local_handle, const json::object& run,
-      const json::object& metadata) = 0;
+      const json::object& metadata,
+      std::shared_ptr<PhysicalEquationOwnerBase> equation_owner) = 0;
   virtual std::uint32_t dimension() const = 0;
   virtual std::int32_t frame_base() const = 0;
   virtual std::uint32_t frame_width() const = 0;
   virtual const char* d0_inverse_mode() const = 0;
   virtual ChartStats stats() const = 0;
+
+  const std::string& equation_owner_handle() const override {
+    return handle_;
+  }
+  const std::string& equation_operator_identity() const override {
+    return exact_identity_;
+  }
+  const char* equation_owner_kind() const override {
+    return "prepared-chart";
+  }
 
   const std::string& handle() const { return handle_; }
   const std::string& key() const { return key_; }
@@ -2198,8 +2307,8 @@ struct SCCColumnProvenance {
   }
 };
 
-constexpr const char* kOwnerBoundRegularResidualCapability =
-    "owner-bound-regular-homogeneous-residual-v1";
+constexpr const char* kOwnerBoundPhysicalResidualCapability =
+    "owner-bound-physical-homogeneous-residual-v2";
 
 struct OwnerBoundResidualBinding {
   std::string kind;
@@ -2208,7 +2317,8 @@ struct OwnerBoundResidualBinding {
   std::string source_identity;
   std::string local_checkpoint_identity;
   json::object analytic_metadata;
-  std::string prepared_payload_provenance;
+  std::string owner_signature_identity;
+  std::string physical_payload_identity;
   std::string provenance_identity;
 
   json::object encode() const {
@@ -2219,12 +2329,14 @@ struct OwnerBoundResidualBinding {
         {"source_identity", source_identity},
         {"local_checkpoint_identity", local_checkpoint_identity},
         {"analytic_metadata", analytic_metadata},
-        {"prepared_payload_provenance", prepared_payload_provenance},
+        {"owner_signature_identity", owner_signature_identity},
+        {"physical_payload_identity", physical_payload_identity},
         {"provenance_identity", provenance_identity},
-        {"equation", "q(t) theta(f) = N(t) f"},
+        {"equation", "q(t,eps) theta(f) = C(t,eps) f"},
+        {"basis", "physical-original-master"},
         {"source_kind", "homogeneous-zero"},
         {"operator_payload_owner",
-         "retained-immutable-regular-tail-model"},
+         "retained-immutable-physical-equation-owner"},
         {"supported_scopes",
          json::array{"stored_truncation", "full_local_solution-inconclusive"}}};
   }
@@ -2233,42 +2345,56 @@ struct OwnerBoundResidualBinding {
 template <typename Scalar>
 OwnerBoundResidualBinding make_owner_bound_residual_binding(
     const LocalSolution<Scalar>& solution,
-    const RegularTaylorTailModel& model,
+    const PreparedPhysicalClearedODE<Scalar>& equation,
+    const PhysicalEquationOwnerBase& owner,
     const std::string& expected_operator_identity) {
   static_assert(std::is_same_v<Scalar, Rational> ||
                     std::is_same_v<Scalar, ComplexBall>,
-                "owner-bound residual bindings support Rational or Acb "
+                "owner-bound physical residual bindings support Rational or Acb "
                 "locals only");
-  tail_majorant_detail::validate_restored_regular_taylor_tail_model(
-      model, solution, expected_operator_identity);
+  physical_ode_detail::validate_ode(equation);
+  validate_local_solution(solution, false);
+  if (equation.dimension != solution.dimension ||
+      owner.equation_operator_identity() != expected_operator_identity ||
+      owner.physical_payload_identity() != equation.payload_identity ||
+      owner.owner_signature_identity() != equation.owner_signature_identity)
+    throw std::invalid_argument(
+        "physical residual owner, equation payload, and local provenance disagree");
   auto analytic_metadata =
       checkpoint_local_analytic_metadata_record(solution);
   const json::object source_provenance{
       {"schema", "diffexp2-retained-homogeneous-zero-source-v1"},
       {"operator_identity", expected_operator_identity},
+      {"owner_signature_identity", equation.owner_signature_identity},
+      {"physical_payload_identity", equation.payload_identity},
       {"local_checkpoint_identity", solution.checkpoint_identity},
       {"analytic_metadata", analytic_metadata}};
   const auto source_identity = json::serialize(
       canonical_json_value(source_provenance));
   json::object provenance{
-      {"schema", "diffexp2-owner-bound-residual-binding-v1"},
-      {"kind", "regular-homogeneous-cleared-ode"},
-      {"capability", kOwnerBoundRegularResidualCapability},
+      {"schema", "diffexp2-owner-bound-physical-residual-binding-v2"},
+      {"kind", "physical-homogeneous-cleared-ode"},
+      {"capability", kOwnerBoundPhysicalResidualCapability},
       {"operator_identity", expected_operator_identity},
       {"source_identity", source_identity},
       {"local_checkpoint_identity", solution.checkpoint_identity},
       {"analytic_metadata", analytic_metadata},
-      {"prepared_payload_provenance", model.provenance},
-      {"equation", "q(t) theta(f) = N(t) f"},
+      {"owner_kind", owner.equation_owner_kind()},
+      {"owner_handle", owner.equation_owner_handle()},
+      {"owner_signature_identity", equation.owner_signature_identity},
+      {"physical_payload_identity", equation.payload_identity},
+      {"equation", "q(t,eps) theta(f) = C(t,eps) f"},
+      {"basis", "physical-original-master"},
       {"source_kind", "homogeneous-zero"}};
   return OwnerBoundResidualBinding{
-      "regular-homogeneous-cleared-ode",
-      kOwnerBoundRegularResidualCapability,
+      "physical-homogeneous-cleared-ode",
+      kOwnerBoundPhysicalResidualCapability,
       expected_operator_identity,
       source_identity,
       solution.checkpoint_identity,
       std::move(analytic_metadata),
-      model.provenance,
+      equation.owner_signature_identity,
+      equation.payload_identity,
       json::serialize(canonical_json_value(provenance))};
 }
 
@@ -2316,6 +2442,8 @@ class StoredLocalBase {
   virtual json::object checkpoint_record() const = 0;
   virtual const std::optional<json::object>& retained_derivation() const = 0;
   virtual std::shared_ptr<void> retained_derivation_owner() const = 0;
+  virtual std::shared_ptr<PhysicalEquationOwnerBase>
+      retained_equation_owner() const = 0;
 
   const std::string& handle() const { return handle_; }
   const std::string& source_chart() const { return source_chart_; }
@@ -2354,7 +2482,12 @@ class StoredLocal final : public StoredLocalBase {
               std::optional<TailModelCheckpointMarker>
                   tail_checkpoint_marker = std::nullopt,
               bool serialize_tail_checkpoint_fields = true,
-              bool serialize_derivation_checkpoint_fields = true)
+              bool serialize_derivation_checkpoint_fields = true,
+              std::shared_ptr<PhysicalEquationOwnerBase> equation_owner =
+                  nullptr,
+              std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+                  physical_equation = nullptr,
+              std::string residual_unavailable_reason = {})
       : StoredLocalBase(std::move(handle), std::move(source_chart),
                         std::move(source_operator_identity),
                         diagnostics.parse_ms, diagnostics.kernel_ms,
@@ -2367,18 +2500,42 @@ class StoredLocal final : public StoredLocalBase {
         tail_checkpoint_marker_(std::move(tail_checkpoint_marker)),
         serialize_tail_checkpoint_fields_(serialize_tail_checkpoint_fields),
         serialize_derivation_checkpoint_fields_(
-            serialize_derivation_checkpoint_fields) {
+            serialize_derivation_checkpoint_fields),
+        equation_owner_(std::move(equation_owner)),
+        physical_equation_(std::move(physical_equation)) {
     validate_local_solution(solution_, false);
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>) {
-      if (tail_model_.model.has_value()) {
+      if (equation_owner_ != nullptr && physical_equation_ != nullptr) {
+        if (retained_derivation_.has_value() || column_provenance_.has_value())
+          throw std::invalid_argument(
+              "derived/composite local cannot acquire a primitive physical equation owner");
+        if (equation_owner_->equation_owner_handle() != source_chart_ ||
+            equation_owner_->equation_operator_identity() !=
+                source_operator_identity_ ||
+            std::string(equation_owner_->equation_scalar_domain()) !=
+                scalar_domain())
+          throw std::invalid_argument(
+              "primitive local physical equation owner disagrees with its source provenance");
         residual_binding_ = make_owner_bound_residual_binding(
-            solution_, *tail_model_.model, source_operator_identity_);
+            solution_, *physical_equation_, *equation_owner_,
+            source_operator_identity_);
         residual_binding_detail_ =
-            "owner-bound regular homogeneous q/N payload is available";
+            "owner-bound physical homogeneous q/C payload is available";
+      } else if (equation_owner_ != nullptr || physical_equation_ != nullptr) {
+        throw std::invalid_argument(
+            "primitive residual ownership requires both owner and physical payload");
+      } else if (!residual_unavailable_reason.empty()) {
+        residual_binding_detail_ = std::move(residual_unavailable_reason);
+      } else if (retained_derivation_.has_value()) {
+        residual_binding_detail_ =
+            "owner-bound residual is unsupported for derived locals until their equation/source provenance is retained";
+      } else if (column_provenance_.has_value()) {
+        residual_binding_detail_ =
+            "owner-bound residual is unsupported for composite SCC locals until one full physical q/C certificate is retained";
       } else {
         residual_binding_detail_ =
-            "owner-bound residual is unsupported: " + tail_model_.detail;
+            "owner-bound residual is unsupported: the prepared chart has no physical q/C payload";
       }
     } else {
       residual_binding_detail_ =
@@ -2501,6 +2658,7 @@ class StoredLocal final : public StoredLocalBase {
              "relative_tolerance", "scope", "include_residual",
              "operator_identity", "source_identity",
              "checkpoint_identity", "analytic_metadata",
+             "owner_signature_identity", "physical_payload_identity",
              "provenance_identity", "output_digits"},
             "owner-bound residual request");
       else
@@ -2510,9 +2668,11 @@ class StoredLocal final : public StoredLocalBase {
              "relative_tolerance", "scope", "include_residual",
              "operator_identity", "source_identity",
              "checkpoint_identity", "analytic_metadata",
+             "owner_signature_identity", "physical_payload_identity",
              "provenance_identity"},
             "owner-bound residual request");
-      if (!residual_binding_.has_value() || !tail_model_.model.has_value())
+      if (!residual_binding_.has_value() || physical_equation_ == nullptr ||
+          equation_owner_ == nullptr)
         throw std::domain_error(residual_binding_detail_);
       const auto& binding = *residual_binding_;
       if (required_string(request, "operator_identity") !=
@@ -2521,6 +2681,10 @@ class StoredLocal final : public StoredLocalBase {
               binding.source_identity ||
           required_string(request, "checkpoint_identity") !=
               binding.local_checkpoint_identity ||
+          required_string(request, "owner_signature_identity") !=
+              binding.owner_signature_identity ||
+          required_string(request, "physical_payload_identity") !=
+              binding.physical_payload_identity ||
           required_string(request, "provenance_identity") !=
               binding.provenance_identity ||
           request.at("analytic_metadata") != binding.analytic_metadata)
@@ -2535,6 +2699,16 @@ class StoredLocal final : public StoredLocalBase {
       if (options.compute_tail_estimate)
         throw std::invalid_argument(
             "stored-truncation residual certification rejects advisory tail estimates");
+      if (!solution_.error.empty())
+        throw std::domain_error(
+            "owner-bound residual certification does not ignore a retained local error envelope");
+      if (point.sign < 0 && options.imaginary_sign.has_value()) {
+        const auto retained_sign = derive_chart_imaginary_sign(solution_);
+        if (retained_sign.has_value() &&
+            *retained_sign != *options.imaginary_sign)
+          throw std::invalid_argument(
+              "explicit residual rim disagrees with the retained analytic prescription");
+      }
       const auto tolerance_text = required_string(
           request, "relative_tolerance");
       const auto tolerance = Magnitude::decimal(tolerance_text);
@@ -2552,8 +2726,8 @@ class StoredLocal final : public StoredLocalBase {
 
       const auto started = std::chrono::steady_clock::now();
       const auto evaluation = evaluate_local_solution(solution_, point, options);
-      auto certificate = certify_regular_owner_bound_residual(
-          solution_, *tail_model_.model, evaluation, point, tolerance, scope);
+      auto certificate = certify_physical_cleared_ode_residual(
+          *physical_equation_, evaluation, point, tolerance, scope);
       const auto elapsed = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       residual_certifications_.fetch_add(1);
@@ -2581,8 +2755,11 @@ class StoredLocal final : public StoredLocalBase {
           {"operator_identity", binding.operator_identity},
           {"source_identity", binding.source_identity},
           {"provenance_identity", binding.provenance_identity},
+          {"owner_signature_identity", binding.owner_signature_identity},
+          {"physical_payload_identity", binding.physical_payload_identity},
           {"analytic_metadata", binding.analytic_metadata},
-          {"equation", "q(t) theta(f) = N(t) f"},
+          {"equation", "q(t,eps) theta(f) = C(t,eps) f"},
+          {"basis", "physical-original-master"},
           {"source_kind", "homogeneous-zero"},
           {"epsilon_min", certificate.residual.epsilon.min_power},
           {"epsilon_max", certificate.residual.epsilon.complete_max},
@@ -2809,7 +2986,7 @@ class StoredLocal final : public StoredLocalBase {
              : json::value(json::object{
                    {"status", "unsupported"},
                    {"kind", "none"},
-                   {"capability", kOwnerBoundRegularResidualCapability},
+                   {"capability", kOwnerBoundPhysicalResidualCapability},
                    {"reason", residual_binding_detail_}})},
         {"metadata", metadata_json()},
         {"create_parse_ms", create_parse_ms_},
@@ -2881,6 +3058,30 @@ class StoredLocal final : public StoredLocalBase {
         throw std::logic_error(
             "primitive local unexpectedly retains a derivation owner before checkpointing");
       }
+      json::value equation_owner_restore = nullptr;
+      if (equation_owner_ != nullptr) {
+        if (physical_equation_ == nullptr ||
+            equation_owner_->physical_payload_identity() !=
+                physical_equation_->payload_identity ||
+            equation_owner_->owner_signature_identity() !=
+                physical_equation_->owner_signature_identity ||
+            equation_owner_->physical_payload_record() !=
+                physical_equation_->exact_payload_record)
+          throw std::logic_error(
+              "primitive local physical equation owner changed before checkpointing");
+        equation_owner_restore = json::object{
+            {"owner_kind", equation_owner_->equation_owner_kind()},
+            {"owner_handle", equation_owner_->equation_owner_handle()},
+            {"operator_identity",
+             equation_owner_->equation_operator_identity()},
+            {"owner_signature_identity",
+             equation_owner_->owner_signature_identity()},
+            {"physical_payload_identity",
+             equation_owner_->physical_payload_identity()}};
+      } else if (physical_equation_ != nullptr) {
+        throw std::logic_error(
+            "primitive local lost its physical equation owner before checkpointing");
+      }
       json::value owner_lineage = nullptr;
       if (retained_derivation_.has_value()) {
         const auto& derivation = *retained_derivation_;
@@ -2921,7 +3122,7 @@ class StoredLocal final : public StoredLocalBase {
             current.tail_certificate_unsupported;
       }
       json::object record{
-        {"schema", "diffexp2-retained-local-v3"},
+        {"schema", "diffexp2-retained-local-v4"},
         {"handle", handle_},
         {"source_chart", source_chart_},
         {"source_operator_identity", source_operator_identity_},
@@ -2936,7 +3137,8 @@ class StoredLocal final : public StoredLocalBase {
         {"runtime_stats", std::move(runtime)},
         {"column_provenance", column_provenance_.has_value()
              ? json::value(column_provenance_->encode())
-             : json::value(nullptr)}};
+             : json::value(nullptr)},
+        {"equation_owner_restore", std::move(equation_owner_restore)}};
       if (serialize_derivation_checkpoint_fields_) {
         record["retained_derivation"] = retained_derivation_.has_value()
             ? json::value(*retained_derivation_) : json::value(nullptr);
@@ -2970,27 +3172,27 @@ class StoredLocal final : public StoredLocalBase {
         }
       }
       if (residual_binding_.has_value()) {
-        if (!serialize_tail_checkpoint_fields_ ||
-            !tail_model_.model.has_value())
+        if (equation_owner_ == nullptr || physical_equation_ == nullptr)
           throw std::logic_error(
-              "owner-bound residual lost its serialized q/N payload before checkpointing");
+              "owner-bound residual lost its retained physical q/C owner before checkpointing");
         const auto recomputed = make_owner_bound_residual_binding(
-            solution_, *tail_model_.model, source_operator_identity_);
+            solution_, *physical_equation_, *equation_owner_,
+            source_operator_identity_);
         if (recomputed.encode() != residual_binding_->encode())
           throw std::logic_error(
               "owner-bound residual binding changed before checkpointing");
         record["residual_operator_restore"] = json::object{
-            {"capability", kOwnerBoundRegularResidualCapability},
+            {"capability", kOwnerBoundPhysicalResidualCapability},
             {"kind", residual_binding_->kind},
             {"serialized", true},
             {"status", "available"},
             {"operator_payload_owner",
-             "retained-immutable-regular-tail-model"},
+             "retained-immutable-physical-equation-owner"},
             {"binding", residual_binding_->encode()},
             {"reason", nullptr}};
       } else {
         record["residual_operator_restore"] = json::object{
-            {"capability", kOwnerBoundRegularResidualCapability},
+            {"capability", kOwnerBoundPhysicalResidualCapability},
             {"kind", "none"},
             {"serialized", false},
             {"status", "unsupported"},
@@ -3041,6 +3243,10 @@ class StoredLocal final : public StoredLocalBase {
   }
   std::shared_ptr<void> retained_derivation_owner() const override {
     return retained_owner_;
+  }
+  std::shared_ptr<PhysicalEquationOwnerBase> retained_equation_owner()
+      const override {
+    return equation_owner_;
   }
   const std::vector<PseudoHit<Scalar>>& pseudo_hits() const {
     return pseudo_hits_;
@@ -3256,6 +3462,9 @@ class StoredLocal final : public StoredLocalBase {
   std::shared_ptr<void> retained_owner_;
   RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(
       "tail model is unavailable for this retained local");
+  std::shared_ptr<PhysicalEquationOwnerBase> equation_owner_;
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+      physical_equation_;
   std::optional<OwnerBoundResidualBinding> residual_binding_;
   std::string residual_binding_detail_ =
       "owner-bound residual payload was not prepared";
@@ -5980,7 +6189,8 @@ template <typename Scalar>
 std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     const json::value& raw, const std::string& expected_domain,
     slong expected_precision_bits,
-    std::shared_ptr<void> retained_owner = nullptr) {
+    std::shared_ptr<void> retained_owner = nullptr,
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner = nullptr) {
   AcbPrecisionLease lease(expected_precision_bits);
   ComplexBall::set_precision(expected_precision_bits);
   const auto& object = as_object(raw, "checkpoint retained local");
@@ -5995,17 +6205,18 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     throw std::invalid_argument(
         "checkpoint retained-local derivation fields are incomplete");
   const auto record_schema = required_string(object, "schema");
-  if (record_schema != "diffexp2-retained-local-v3")
+  if (record_schema != "diffexp2-retained-local-v4")
     throw std::invalid_argument("unsupported retained-local checkpoint schema");
   if (!has_residual_restore)
     throw std::invalid_argument(
-        "retained-local v3 checkpoint lacks its residual ownership record");
+        "retained-local v4 checkpoint lacks its residual ownership record");
   std::set<std::string> actual_keys;
   for (const auto& entry : object) actual_keys.emplace(entry.key());
   std::set<std::string> expected_keys{
       "schema", "handle", "source_chart", "source_operator_identity",
       "scalar_domain", "precision_bits", "solution", "pseudo_hits",
-      "diagnostics", "runtime_stats", "column_provenance"};
+      "diagnostics", "runtime_stats", "column_provenance",
+      "equation_owner_restore"};
   if (has_tail_restore) expected_keys.emplace("tail_model_restore");
   if (has_derivation_record) {
     expected_keys.emplace("retained_derivation");
@@ -6035,6 +6246,58 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       source_operator_identity.empty())
     throw std::invalid_argument(
         "checkpoint local lost its handle or source-chart provenance");
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+      physical_equation;
+  const bool saved_equation_owner =
+      !object.at("equation_owner_restore").is_null();
+  if (saved_equation_owner) {
+    if (!equation_owner)
+      throw std::invalid_argument(
+          "checkpoint primitive local lost its physical equation owner");
+    const auto& owner_record = as_object(
+        object.at("equation_owner_restore"),
+        "checkpoint local physical equation owner");
+    require_exact_keys(
+        owner_record,
+        {"owner_kind", "owner_handle", "operator_identity",
+         "owner_signature_identity", "physical_payload_identity"},
+        "checkpoint local physical equation owner");
+    if (required_string(owner_record, "owner_kind") !=
+            equation_owner->equation_owner_kind() ||
+        required_string(owner_record, "owner_handle") != source_chart ||
+        equation_owner->equation_owner_handle() != source_chart ||
+        required_string(owner_record, "operator_identity") !=
+            source_operator_identity ||
+        equation_owner->equation_operator_identity() !=
+            source_operator_identity ||
+        required_string(owner_record, "owner_signature_identity") !=
+            equation_owner->owner_signature_identity() ||
+        required_string(owner_record, "physical_payload_identity") !=
+            equation_owner->physical_payload_identity() ||
+        std::string(equation_owner->equation_scalar_domain()) !=
+            expected_domain)
+      throw std::invalid_argument(
+          "checkpoint physical equation owner differs from its retained local provenance");
+    const auto erased = equation_owner->physical_ode_erased();
+    if (!erased)
+      throw std::invalid_argument(
+          "checkpoint physical equation owner has no typed q/C payload");
+    physical_equation =
+        std::static_pointer_cast<const PreparedPhysicalClearedODE<Scalar>>(
+            erased);
+    physical_ode_detail::validate_ode(*physical_equation);
+    if (physical_equation->exact_payload_record !=
+            equation_owner->physical_payload_record() ||
+        physical_equation->payload_identity !=
+            equation_owner->physical_payload_identity() ||
+        physical_equation->owner_signature_identity !=
+            equation_owner->owner_signature_identity())
+      throw std::invalid_argument(
+          "checkpoint physical q/C payload did not round-trip byte-exactly through its owner");
+  } else if (equation_owner) {
+    throw std::invalid_argument(
+        "checkpoint local unexpectedly acquired a physical equation owner");
+  }
   auto solution = parse_checkpoint_local_solution<Scalar>(
       object.at("solution"));
   auto pseudo_hits = parse_checkpoint_pseudo_hits<Scalar>(
@@ -6392,7 +6655,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
          "operator_payload_owner", "binding", "reason"},
         "checkpoint residual-operator restore record");
     if (required_string(residual, "capability") !=
-            kOwnerBoundRegularResidualCapability ||
+            kOwnerBoundPhysicalResidualCapability ||
         !residual.at("serialized").is_bool())
       throw std::invalid_argument(
           "checkpoint residual-operator capability or serialization flag is malformed");
@@ -6401,32 +6664,40 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     const auto kind = required_string(residual, "kind");
     if (serialized) {
       if (status != "available" ||
-          kind != "regular-homogeneous-cleared-ode" ||
+          kind != "physical-homogeneous-cleared-ode" ||
           required_string(residual, "operator_payload_owner") !=
-              "retained-immutable-regular-tail-model" ||
+              "retained-immutable-physical-equation-owner" ||
           residual.at("binding").is_null() ||
           !residual.at("reason").is_null() ||
-          !restored_tail_model.model.has_value())
+          !saved_equation_owner || equation_owner == nullptr ||
+          physical_equation == nullptr)
         throw std::invalid_argument(
-            "serialized checkpoint residual binding lost its q/N payload or ownership kind");
+            "serialized checkpoint residual binding lost its physical q/C payload or ownership kind");
       const auto& binding = as_object(
           residual.at("binding"), "checkpoint residual binding");
       require_exact_keys(
           binding,
           {"kind", "capability", "operator_identity", "source_identity",
            "local_checkpoint_identity", "analytic_metadata",
-           "prepared_payload_provenance", "provenance_identity",
-           "equation", "source_kind", "operator_payload_owner",
+           "owner_signature_identity", "physical_payload_identity",
+           "provenance_identity", "equation", "basis", "source_kind",
+           "operator_payload_owner",
            "supported_scopes"},
           "checkpoint residual binding");
       if (required_string(binding, "kind") != kind ||
           required_string(binding, "capability") !=
-              kOwnerBoundRegularResidualCapability ||
+              kOwnerBoundPhysicalResidualCapability ||
           required_string(binding, "equation") !=
-              "q(t) theta(f) = N(t) f" ||
+              "q(t,eps) theta(f) = C(t,eps) f" ||
+          required_string(binding, "basis") !=
+              "physical-original-master" ||
           required_string(binding, "source_kind") != "homogeneous-zero" ||
           required_string(binding, "operator_payload_owner") !=
-              "retained-immutable-regular-tail-model")
+              "retained-immutable-physical-equation-owner" ||
+          required_string(binding, "owner_signature_identity") !=
+              equation_owner->owner_signature_identity() ||
+          required_string(binding, "physical_payload_identity") !=
+              equation_owner->physical_payload_identity())
         throw std::invalid_argument(
             "checkpoint residual binding changes its certified equation scope");
       saved_residual_available = true;
@@ -6512,12 +6783,13 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       std::move(pseudo_hits), native, std::move(column_provenance),
       std::move(retained_derivation), std::move(retained_owner),
       std::move(restored_tail_model), std::move(tail_checkpoint_marker),
-      has_tail_restore, has_derivation_record);
+      has_tail_restore, has_derivation_record, std::move(equation_owner),
+      std::move(physical_equation));
   if (saved_residual_available) {
     if (!local->residual_binding().has_value() ||
         local->residual_binding()->encode() != *saved_residual_binding)
       throw std::invalid_argument(
-          "checkpoint residual binding does not reproduce from its restored q/N owner payload");
+          "checkpoint residual binding does not reproduce from its restored physical q/C owner payload");
   } else if (has_residual_restore) {
     if (local->residual_binding().has_value() ||
         !saved_residual_reason.has_value())
@@ -7364,6 +7636,8 @@ class PreparedChart final : public PreparedChartBase {
                 std::optional<std::string> native_scc_capabilities,
                 SCCCertificate scc,
                 PreparedRecurrenceOperator<Scalar>&& prepared,
+                std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+                    physical_equation,
                 slong precision_bits, std::vector<std::string> symbols,
                 double prepare_parse_ms)
       : PreparedChartBase(std::move(handle), std::move(key),
@@ -7372,8 +7646,14 @@ class PreparedChart final : public PreparedChartBase {
                           std::move(principal_matrix_record),
                           std::move(native_scc_capabilities), std::move(scc),
                           prepare_parse_ms),
-        prepared_(std::move(prepared)), precision_bits_(precision_bits),
+        prepared_(std::move(prepared)),
+        physical_equation_(std::move(physical_equation)),
+        precision_bits_(precision_bits),
         symbols_(std::move(symbols)) {
+    if (physical_equation_ &&
+        physical_equation_->owner_signature_identity != exact_identity_)
+      throw std::invalid_argument(
+          "prepared physical q/C payload names a different chart owner identity");
     if constexpr (std::is_same_v<Scalar, Rational>) {
       try {
         exact_jordan_indicial_ =
@@ -7447,6 +7727,27 @@ class PreparedChart final : public PreparedChartBase {
   const char* d0_inverse_mode() const override {
     return prepared_.d0_inverse_scalar.has_value()
         ? "retained-scalar" : "retained-frame";
+  }
+  const char* equation_scalar_domain() const override {
+    if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
+    return "symbolic";
+  }
+  std::shared_ptr<const void> physical_ode_erased() const override {
+    return std::static_pointer_cast<const void>(physical_equation_);
+  }
+  const std::string& physical_payload_identity() const override {
+    static const std::string empty;
+    return physical_equation_ ? physical_equation_->payload_identity : empty;
+  }
+  const std::string& physical_payload_record() const override {
+    static const std::string empty;
+    return physical_equation_ ? physical_equation_->exact_payload_record : empty;
+  }
+  const std::string& owner_signature_identity() const override {
+    static const std::string empty;
+    return physical_equation_
+        ? physical_equation_->owner_signature_identity : empty;
   }
   slong precision_bits() const { return precision_bits_; }
   bool has_identity_assembly() const {
@@ -7565,19 +7866,45 @@ class PreparedChart final : public PreparedChartBase {
 
   std::shared_ptr<StoredLocalBase> solve_local(
       const std::string& local_handle, const json::object& run,
-      const json::object& metadata_object) override {
+      const json::object& metadata_object,
+      std::shared_ptr<PhysicalEquationOwnerBase> equation_owner) override {
+    if (!equation_owner || equation_owner.get() != this)
+      throw std::invalid_argument(
+          "primitive local solve received a different physical equation owner");
     auto native = solve_native_impl(
         run, metadata_object, std::nullopt, true);
+    std::shared_ptr<PhysicalEquationOwnerBase> retained_equation_owner;
+    std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+        retained_physical_equation;
+    std::string residual_unavailable_reason;
+    const bool homogeneous = run.at("source").is_null();
+    if constexpr (std::is_same_v<Scalar, Rational> ||
+                  std::is_same_v<Scalar, ComplexBall>) {
+      if (!homogeneous) {
+        residual_unavailable_reason =
+            "owner-bound residual is unsupported for sourced primitive locals until the exact physical source is retained";
+      } else if (!physical_equation_) {
+        residual_unavailable_reason =
+            "owner-bound residual is unsupported: the prepared chart predates the physical q/C payload";
+      } else {
+        retained_equation_owner = std::move(equation_owner);
+        retained_physical_equation = physical_equation_;
+      }
+    }
     auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
         local_handle, handle_, exact_identity_, std::move(native.solution),
         precision_bits_,
         std::move(native.pseudo_hits), native.diagnostics, std::nullopt,
         std::nullopt, nullptr,
-        std::move(native.tail_model));
+        std::move(native.tail_model), std::nullopt, true, true,
+        std::move(retained_equation_owner),
+        std::move(retained_physical_equation),
+        std::move(residual_unavailable_reason));
     record_native_local_success(native.diagnostics);
     return local;
   }
   PreparedRecurrenceOperator<Scalar> prepared_;
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>> physical_equation_;
   std::optional<ExactJordanIndicialCertificate> exact_jordan_indicial_;
   std::optional<std::string> exact_jordan_indicial_error_;
   slong precision_bits_ = 256;
@@ -13925,7 +14252,8 @@ std::string static_problem_signature(const json::object& problem,
   json::object exact;
   for (const auto* key : {"domain", "symbols", "precision_bits", "d", "fb",
                           "w", "d_lags", "denominators", "nhat_lags",
-                          "d0_inverse", "blocks", "assembly", "chop_digits"}) {
+                          "d0_inverse", "blocks", "assembly", "physical_ode",
+                          "chop_digits"}) {
     if (const auto* value = problem.if_contains(key)) exact[key] = *value;
   }
   exact["identity"] = identity;
@@ -13936,7 +14264,7 @@ std::string static_problem_signature(const json::object& problem,
 
 constexpr const char* kCheckpointFormat =
     "diffexp2-persistent-native-session";
-constexpr std::uint32_t kCheckpointPayloadSchema = 6;
+constexpr std::uint32_t kCheckpointPayloadSchema = 7;
 
 json::object run_session_command(const json::object& root);
 
@@ -15737,6 +16065,16 @@ json::object checkpoint_chart_item(
   if (required_string(signature, "identity") != chart->exact_identity())
     throw std::logic_error(
         "prepared chart exact identity changed after retention");
+  if (const auto* physical = signature.if_contains("physical_ode")) {
+    if (chart->physical_payload_record().empty() ||
+        json::serialize(canonical_json_value(*physical)) !=
+            chart->physical_payload_record())
+      throw std::logic_error(
+          "prepared chart physical q/C payload changed after retention");
+  } else if (!chart->physical_payload_record().empty()) {
+    throw std::logic_error(
+        "prepared chart signature lost its retained physical q/C payload");
+  }
 
   json::object problem = signature;
   problem.erase("identity");
@@ -16060,6 +16398,20 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
         throw std::logic_error(
             "checkpoint ownership closure contains distinct locals with one handle");
       return;
+    }
+    if (const auto equation_owner = local->retained_equation_owner()) {
+      const auto kind = std::string(equation_owner->equation_owner_kind());
+      if (kind == "prepared-chart") {
+        auto chart = std::dynamic_pointer_cast<PreparedChartBase>(
+            equation_owner);
+        if (!chart)
+          throw std::logic_error(
+              "checkpoint local equation owner kind is not a prepared chart");
+        add_chart(std::move(chart));
+      } else {
+        throw std::domain_error(
+            "native checkpoint does not yet serialize this physical equation owner kind");
+      }
     }
     if (local->retained_derivation().has_value()) {
       const auto schema = required_string(
@@ -16940,13 +17292,33 @@ json::object restore_checkpoint(const std::string& path,
                                std::shared_ptr<void> owner) {
         const auto& item = as_object(raw_item, "checkpoint retained local");
         const auto handle = required_string(item, "handle");
+        std::shared_ptr<PhysicalEquationOwnerBase> equation_owner;
+        if (!item.at("equation_owner_restore").is_null()) {
+          const auto& owner_record = as_object(
+              item.at("equation_owner_restore"),
+              "checkpoint local physical equation owner");
+          const auto owner_kind = required_string(owner_record, "owner_kind");
+          const auto owner_handle = required_string(owner_record, "owner_handle");
+          if (owner_kind == "prepared-chart") {
+            const auto found = restored->charts.find(owner_handle);
+            if (found == restored->charts.end())
+              throw std::invalid_argument(
+                  "checkpoint local physical equation owner chart is missing");
+            equation_owner = found->second;
+          } else {
+            throw std::invalid_argument(
+                "checkpoint local has an unsupported physical equation owner kind");
+          }
+        }
         std::shared_ptr<StoredLocalBase> local;
         if (restored->domain == "rational")
           local = restore_checkpoint_local_record<Rational>(
-              item, restored->domain, restored->precision_bits, owner);
+              item, restored->domain, restored->precision_bits, owner,
+              equation_owner);
         else if (restored->domain == "acb")
           local = restore_checkpoint_local_record<ComplexBall>(
-              item, restored->domain, restored->precision_bits, owner);
+              item, restored->domain, restored->precision_bits, owner,
+              equation_owner);
         else
           throw std::invalid_argument(
               "native checkpoint cannot restore symbolic local state");
@@ -17605,13 +17977,18 @@ std::shared_ptr<PreparedChartBase> parse_prepared_chart(
     SymbolicRational::configure(session->symbols);
   }
   auto prepared = parse_prepared_operator<Scalar>(problem);
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>> physical_equation;
+  if (const auto* raw_physical = problem.if_contains("physical_ode"))
+    physical_equation = parse_prepared_physical_ode<Scalar>(
+        *raw_physical, prepared.dimension);
   const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
   return make_retained_typed_shared<Scalar, PreparedChart<Scalar>>(
       handle, key, exact_identity, std::move(signature),
       std::move(geometry_record), std::move(principal_matrix_record),
       std::move(native_scc_capabilities), std::move(scc), std::move(prepared),
-      session->precision_bits, session->symbols, elapsed);
+      std::move(physical_equation), session->precision_bits,
+      session->symbols, elapsed);
 }
 
 json::object run_session_command(const json::object& root) {
@@ -21337,7 +21714,7 @@ json::object run_session_command(const json::object& root) {
     try {
       local = chart->solve_local(
           local_handle, as_object(root.at("run"), "recurrence run"),
-          as_object(root.at("metadata"), "local metadata"));
+          as_object(root.at("metadata"), "local metadata"), chart);
     } catch (...) {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_local_solves == 0)

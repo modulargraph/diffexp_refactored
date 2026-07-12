@@ -2653,6 +2653,9 @@ class StoredLocal final : public StoredLocalBase {
   }
 
   const LocalSolution<Scalar>& solution() const { return solution_; }
+  const RegularTaylorTailModelResult& tail_model() const {
+    return tail_model_;
+  }
   std::int32_t top_valid() const { return top_valid_; }
   const std::optional<json::object>& retained_derivation() const override {
     return retained_derivation_;
@@ -8617,6 +8620,13 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     const auto derivation_identity = json::serialize(
         canonical_json_value(derivation));
     derivation["provenance_identity"] = derivation_identity;
+    std::vector<const RegularTaylorTailModelResult*> basis_tail_models;
+    basis_tail_models.reserve(typed_basis.size());
+    for (const auto& column : typed_basis)
+      basis_tail_models.push_back(&column->tail_model());
+    auto tail_model = derive_materialized_regular_homogeneous_tail_model(
+        basis_solutions, basis_tail_models, weights, solution,
+        receiving_operator, checkpoint_identity_);
     const auto elapsed_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
     NativeLocalDiagnostics diagnostics;
@@ -8626,7 +8636,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         local_handle, receiving_chart, receiving_operator,
         std::move(solution), precision_bits,
         std::vector<PseudoHit<Scalar>>{}, diagnostics, std::nullopt,
-        std::move(derivation), std::static_pointer_cast<void>(self));
+        std::move(derivation), std::static_pointer_cast<void>(self),
+        std::move(tail_model));
   }
 
   std::shared_ptr<StoredMatchBase> match_;

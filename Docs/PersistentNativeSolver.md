@@ -88,7 +88,7 @@ The implemented recurrence-session commands are:
 | `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector; optional `certify_tail:true` promotes only after proof. |
 | `integration.stats` / `integration.export` / `integration.release` | Inspect, explicitly export, or release one retained tile integral. |
 | `match.stats` | Inspect one retained native match and its exact provenance. |
-| `match.materialize_local` | Apply a plan-driven match's retained Laurent weights to its receiving basis and publish the next retained local without coefficient JSON. |
+| `match.materialize_local` | Apply a plan-driven match's retained Laurent weights to its receiving basis and publish the next retained local without coefficient JSON; eligible ordinary homogeneous bases propagate their rigorous local-tail model. |
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
 | `scc.solve_column` | Execute one retained regular exact-Rational or Acb SCC basis column, or an exact-Rational regular-singular Jordan column, and retain the parent local without coefficient JSON. |
@@ -252,6 +252,20 @@ value and theta frames carry `Certified` error envelopes only if that disk is
 proved; otherwise the top-level `tail_certificate` is explicitly
 `inconclusive` or `unsupported` and no envelope is published.  `local.stats`
 records the attached-model status and request outcome counters.
+
+`match.materialize_local` propagates that model only for an ordinary
+homogeneous Rational/Acb receiving basis.  Every column must carry a certified
+model bound to its retained checkpoint, chart, prescriptions, Taylor/epsilon
+windows, and the same prepared operator identity and actual `q/N` enclosure
+payload.  C++ independently replays the complete Laurent-weight convolution
+against the produced local before binding a new model to the result checkpoint;
+the initial-value magnitudes and matrix norms are then recomputed rather than
+copied.  Sourced, SCC-composite, singular/log/fractional, incompatible, or
+unavailable models explicitly do not promote.  The resulting certificate
+bounds the unseen Taylor tail of the outgoing receiving-chart solution; it is
+not a separate bound on finite-order matching error accumulated along an arm.
+Likewise, applying an arbitrary rational-row multiplier remains unsupported
+because the current majorant does not prove the transformed operator/tail.
 
 For `integration.line` with `certify_tail:true`, C++ derives an exact witness
 radius strictly between the tile's outer local endpoint and its exact chart

@@ -1,11 +1,13 @@
 #pragma once
 
 #include "diffexp2/line_integration.hpp"
+#include "diffexp2/matching.hpp"
 #include "diffexp2/recurrence.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -38,6 +40,11 @@ struct RegularTaylorTailModel {
   std::uint32_t dimension = 0;
   std::uint32_t taylor_complete_max = 0;
   std::vector<ComplexBall> q_coefficients;  // exact/Acb enclosure by t lag
+  // Retain the actual prepared numerator matrices, not only their norms.
+  // Match materialization may share a tail theorem only after proving that
+  // every receiving column was certified against this same immutable
+  // operator payload.  Each lag is flattened in row-major order.
+  std::vector<std::vector<ComplexBall>> n_coefficients;
   std::vector<Magnitude> n_row_sum_upper;   // infinity norm by t lag
   std::vector<Magnitude> initial_row_upper; // one bound per epsilon row
   ChartGeometry chart;
@@ -122,6 +129,57 @@ inline bool same_epsilon_window(const EpsilonWindow& left,
                                 const EpsilonWindow& right) {
   return left.min_power == right.min_power &&
          left.complete_max == right.complete_max;
+}
+
+inline bool same_chart_geometry(const ChartGeometry& left,
+                                const ChartGeometry& right) {
+  return left.center_exact == right.center_exact &&
+      left.scale_exact == right.scale_exact &&
+      left.infinite_radius == right.infinite_radius &&
+      (left.infinite_radius ||
+       acb_equal(left.radius.raw(), right.radius.raw()));
+}
+
+inline bool same_prescriptions(const std::vector<Prescription>& left,
+                               const std::vector<Prescription>& right) {
+  if (left.size() != right.size()) return false;
+  for (std::size_t index = 0; index < left.size(); ++index)
+    if (left[index].factor_exact != right[index].factor_exact ||
+        left[index].sign != right[index].sign ||
+        left[index].multiplicity != right[index].multiplicity ||
+        left[index].leading_coefficient_sign !=
+            right[index].leading_coefficient_sign)
+      return false;
+  return true;
+}
+
+inline bool same_ball(const ComplexBall& left, const ComplexBall& right) {
+  return acb_equal(left.raw(), right.raw());
+}
+
+inline bool same_operator_payload(const RegularTaylorTailModel& left,
+                                  const RegularTaylorTailModel& right) {
+  if (left.operator_identity != right.operator_identity ||
+      left.dimension != right.dimension ||
+      left.q_coefficients.size() != right.q_coefficients.size() ||
+      left.n_coefficients.size() != right.n_coefficients.size() ||
+      !same_chart_geometry(left.chart, right.chart) ||
+      !same_prescriptions(left.prescriptions, right.prescriptions))
+    return false;
+  for (std::size_t lag = 0; lag < left.q_coefficients.size(); ++lag)
+    if (!same_ball(left.q_coefficients[lag], right.q_coefficients[lag]))
+      return false;
+  for (std::size_t lag = 0; lag < left.n_coefficients.size(); ++lag) {
+    if (left.n_coefficients[lag].size() !=
+        right.n_coefficients[lag].size())
+      return false;
+    for (std::size_t entry = 0;
+         entry < left.n_coefficients[lag].size(); ++entry)
+      if (!same_ball(left.n_coefficients[lag][entry],
+                     right.n_coefficients[lag][entry]))
+        return false;
+  }
+  return true;
 }
 
 template <typename Scalar>
@@ -212,7 +270,9 @@ inline void require_model_binding(const RegularTaylorTailModel& model,
   if (model.local_checkpoint_identity != solution.checkpoint_identity ||
       model.dimension != solution.dimension ||
       model.taylor_complete_max != solution.taylor_complete_max ||
-      !same_epsilon_window(model.epsilon, solution.epsilon))
+      !same_epsilon_window(model.epsilon, solution.epsilon) ||
+      !same_chart_geometry(model.chart, solution.chart) ||
+      !same_prescriptions(model.prescriptions, solution.prescriptions))
     throw std::invalid_argument(
         "tail-majorant model is not bound to this retained local solution");
 }
@@ -365,6 +425,7 @@ RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
 
   std::vector<std::vector<Scalar>> exact_nhat_coefficients;
   exact_nhat_coefficients.reserve(prepared.nhat_lags.size());
+  model.n_coefficients.reserve(prepared.nhat_lags.size());
   model.n_row_sum_upper.reserve(prepared.nhat_lags.size());
   for (std::size_t lag_index = 0;
        lag_index < prepared.nhat_lags.size(); ++lag_index) {
@@ -382,6 +443,11 @@ RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
       return unsupported_model(
           "N(0) is not the exact zero matrix, so theta f=N f is a "
           "regular-singular rather than ordinary regular equation");
+    std::vector<ComplexBall> enclosed_matrix;
+    enclosed_matrix.reserve(matrix.size());
+    for (const auto& entry : matrix)
+      enclosed_matrix.push_back(local_detail::to_ball(entry));
+    model.n_coefficients.push_back(std::move(enclosed_matrix));
     exact_nhat_coefficients.push_back(matrix);
     auto norm = matrix_infinity_norm_upper(matrix, prepared.dimension);
     if (!norm.is_finite())
@@ -501,6 +567,220 @@ RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
       model.local_checkpoint_identity;
   return {TailMajorantStatus::Certified, std::move(model),
           "regular homogeneous tail model prepared"};
+}
+
+// Transfer the ordinary homogeneous theorem through one retained match
+// materialization.  The Laurent weights are independent of t, so every
+// complete epsilon row of their linear combination solves the same ODE.
+// This is sound only when every receiving basis column has already been
+// forward-certified against byte-for-byte equal prepared q/N enclosures.
+// We also independently replay the finite convolution into `materialized`;
+// merely presenting compatible provenance strings is never sufficient.
+template <typename Scalar>
+RegularTaylorTailModelResult
+derive_materialized_regular_homogeneous_tail_model(
+    const std::vector<const LocalSolution<Scalar>*>& basis,
+    const std::vector<const RegularTaylorTailModelResult*>& basis_models,
+    const FiniteLaurentVector<Scalar>& weights,
+    const LocalSolution<Scalar>& materialized,
+    const std::string& expected_operator_identity,
+    const std::string& match_checkpoint_identity) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "matched regular tail models support Rational or Acb "
+                "locals only");
+  using namespace tail_majorant_detail;
+
+  validate_local_solution(materialized, false);
+  if (basis.empty() || basis.size() != weights.size() ||
+      basis.size() != basis_models.size())
+    throw std::invalid_argument(
+        "matched tail derivation requires one model and weight per basis column");
+  if (expected_operator_identity.empty() ||
+      match_checkpoint_identity.empty() ||
+      materialized.checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "matched tail derivation identities must be nonempty");
+  if (!materialized.error.empty())
+    return unsupported_model(
+        "matched regular tail model cannot absorb an existing local error envelope");
+  if (materialized.sectors.size() != 1 ||
+      materialized.sectors.front().log_power != 0 ||
+      materialized.sectors.front().a.is_zero != TruthValue::Yes ||
+      materialized.sectors.front().b.is_zero != TruthValue::Yes)
+    return unsupported_model(
+        "matched tail propagation requires one ordinary a=b=0, log=0 sector");
+
+  const RegularTaylorTailModel* reference = nullptr;
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    if (basis[column] == nullptr || basis_models[column] == nullptr)
+      throw std::invalid_argument(
+          "matched tail derivation received a null retained basis object");
+    validate_local_solution(*basis[column], false);
+    const auto& candidate = *basis_models[column];
+    if (candidate.status != TailMajorantStatus::Certified ||
+        !candidate.model.has_value()) {
+      const auto detail =
+          "receiving basis column " + std::to_string(column) +
+          " has no certified ordinary homogeneous tail model: " +
+          candidate.detail;
+      return candidate.status == TailMajorantStatus::Inconclusive
+          ? inconclusive_model(detail) : unsupported_model(detail);
+    }
+    const auto& model = *candidate.model;
+    try {
+      require_model_binding(model, *basis[column]);
+    } catch (const std::invalid_argument&) {
+      return inconclusive_model(
+          "receiving basis tail model is not immutably bound to column " +
+          std::to_string(column));
+    }
+    if (model.operator_identity != expected_operator_identity)
+      return unsupported_model(
+          "receiving basis columns do not share the requested prepared operator identity");
+    if (basis[column]->sectors.size() != 1 ||
+        basis[column]->sectors.front().log_power != 0 ||
+        basis[column]->sectors.front().a.is_zero != TruthValue::Yes ||
+        basis[column]->sectors.front().b.is_zero != TruthValue::Yes)
+      return unsupported_model(
+          "receiving basis contains a singular, fractional, or logarithmic local sector");
+    if (basis[column]->taylor_complete_max <
+        materialized.taylor_complete_max)
+      return inconclusive_model(
+          "materialized Taylor order exceeds a certified receiving basis order");
+    if (reference == nullptr) {
+      reference = &model;
+    } else if (!same_operator_payload(*reference, model)) {
+      return unsupported_model(
+          "receiving basis tail models do not share one identical prepared operator payload");
+    }
+  }
+  if (reference == nullptr)
+    throw std::logic_error("matched tail derivation lost its reference model");
+  if (!same_chart_geometry(reference->chart, materialized.chart) ||
+      !same_prescriptions(reference->prescriptions,
+                          materialized.prescriptions) ||
+      reference->dimension != materialized.dimension)
+    return unsupported_model(
+        "materialized local left the certified receiving chart/operator space");
+  if (reference->q_coefficients.empty() ||
+      reference->n_coefficients.empty())
+    return inconclusive_model(
+        "certified receiving operator payload is incomplete");
+  const auto matrix_size = static_cast<std::size_t>(reference->dimension) *
+                           reference->dimension;
+  for (const auto& matrix : reference->n_coefficients)
+    if (matrix.size() != matrix_size)
+      return inconclusive_model(
+          "certified receiving operator matrix payload is malformed");
+
+  // Check the honest product window before looking at any coefficient.
+  std::int64_t expected_min = std::numeric_limits<std::int64_t>::max();
+  std::int64_t expected_complete =
+      std::numeric_limits<std::int64_t>::max();
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    const auto product_min =
+        static_cast<std::int64_t>(basis[column]->epsilon.min_power) +
+        weights[column].min_power();
+    const auto product_complete = std::min(
+        static_cast<std::int64_t>(basis[column]->epsilon.complete_max) +
+            weights[column].min_power(),
+        static_cast<std::int64_t>(basis[column]->epsilon.min_power) +
+            weights[column].complete_max());
+    expected_min = std::min(expected_min, product_min);
+    expected_complete = std::min(expected_complete, product_complete);
+  }
+  if (materialized.epsilon.min_power != expected_min ||
+      materialized.epsilon.complete_max > expected_complete)
+    return inconclusive_model(
+        "materialized epsilon frame is not a lower-exact, upper-complete subset of its Laurent products");
+
+  // Replay the exact operation grouping used by materialize_local_basis_weights:
+  // sum each column's weight convolution first, then add the columns.  For
+  // Acb this avoids mistaking harmless reassociation widening for a mismatch.
+  const auto& output_sector = materialized.sectors.front();
+  for (std::int64_t power = materialized.epsilon.min_power;
+       power <= materialized.epsilon.complete_max; ++power) {
+    const auto output_epsilon = static_cast<std::size_t>(
+        power - materialized.epsilon.min_power);
+    for (std::uint32_t n = 0; n <= materialized.taylor_complete_max; ++n)
+      for (std::uint32_t component = 0;
+           component < materialized.dimension; ++component) {
+        auto expected = ScalarTraits<Scalar>::zero();
+        for (std::size_t column = 0; column < basis.size(); ++column) {
+          auto column_sum = ScalarTraits<Scalar>::zero();
+          const auto& source = *basis[column];
+          const auto& source_sector = source.sectors.front();
+          for (std::int64_t weight_power = weights[column].min_power();
+               weight_power <= weights[column].complete_max();
+               ++weight_power) {
+            const auto source_power = power - weight_power;
+            if (source_power < source.epsilon.min_power ||
+                source_power > source.epsilon.complete_max)
+              continue;
+            const auto scalar_weight = weights[column].coefficient(
+                static_cast<std::int32_t>(weight_power));
+            if (ScalarTraits<Scalar>::is_zero(scalar_weight)) continue;
+            const auto source_epsilon = static_cast<std::size_t>(
+                source_power - source.epsilon.min_power);
+            column_sum += scalar_weight * source_sector.coefficients[
+                local_detail::sector_index(
+                    source, source_epsilon, n, component)];
+          }
+          expected += column_sum;
+        }
+        const auto& stored = output_sector.coefficients[
+            local_detail::sector_index(
+                materialized, output_epsilon, n, component)];
+        if (!encloses_recurrence_value(stored, expected))
+          return inconclusive_model(
+              "materialized local does not enclose the retained basis/weight convolution at epsilon=" +
+              std::to_string(power) + ", n=" + std::to_string(n) +
+              ", component=" + std::to_string(component));
+      }
+  }
+
+  RegularTaylorTailModel model = *reference;
+  model.epsilon = materialized.epsilon;
+  model.taylor_complete_max = materialized.taylor_complete_max;
+  model.chart = materialized.chart;
+  model.prescriptions = materialized.prescriptions;
+  model.local_checkpoint_identity = materialized.checkpoint_identity;
+  model.n_row_sum_upper.clear();
+  model.n_row_sum_upper.reserve(model.n_coefficients.size());
+  for (const auto& matrix : model.n_coefficients)
+    model.n_row_sum_upper.push_back(
+        matrix_infinity_norm_upper(matrix, model.dimension));
+  model.initial_row_upper.assign(
+      materialized.epsilon.width(), Magnitude::zero());
+  for (std::size_t epsilon = 0;
+       epsilon < materialized.epsilon.width(); ++epsilon)
+    for (std::uint32_t component = 0;
+         component < materialized.dimension; ++component)
+      model.initial_row_upper[epsilon] = Magnitude::maximum(
+          model.initial_row_upper[epsilon],
+          Magnitude::upper_abs(local_detail::to_ball(
+              output_sector.coefficients[local_detail::sector_index(
+                  materialized, epsilon, 0, component)])));
+  if (std::any_of(model.initial_row_upper.begin(),
+                  model.initial_row_upper.end(),
+                  [](const Magnitude& value) {
+                    return !value.is_finite();
+                  }))
+    return inconclusive_model(
+        "materialized initial-value enclosure is nonfinite");
+  model.provenance =
+      "regular homogeneous tail model derived from a native retained "
+      "match materialization; every receiving basis column was bound to "
+      "the identical prepared q/N payload and the finite Laurent "
+      "convolution was replayed; this certifies the outgoing local tail, "
+      "not a separate whole-path matching-error bound; "
+      "operator_identity=" + model.operator_identity +
+      "; local_checkpoint_identity=" +
+      model.local_checkpoint_identity +
+      "; match_checkpoint_identity=" + match_checkpoint_identity;
+  return {TailMajorantStatus::Certified, std::move(model),
+          "regular homogeneous tail model propagated through retained match materialization"};
 }
 
 inline RegularTaylorDiskCertificate certify_regular_taylor_disk(

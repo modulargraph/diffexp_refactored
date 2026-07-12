@@ -194,6 +194,29 @@ void upper_halo_and_first_unseen_fail_loudly() {
         unseen_rejected);
 }
 
+void input_error_envelope_is_not_discarded() {
+  auto solution = base_solution<Rational>(1);
+  solution.sectors = {
+      sector<Rational>("0", "0", 0, {Rational(1)})};
+  solution.error.frame = {0, 0};
+  solution.error.guarantee = diffexp2::ErrorGuarantee::Advisory;
+  solution.error.absolute = {diffexp2::Magnitude::one()};
+  solution.error.provenance = "test input tail";
+  StoredLineIntegrationOptions options;
+  options.delivered_epsilon = {0, 0};
+  bool rejected = false;
+  try {
+    (void)diffexp2::integrate_stored_local_line(
+        solution, RealEvaluationPoint::rational("1/4"),
+        RealEvaluationPoint::rational("1/2"), options);
+  } catch (const NativeIntegrationError& error) {
+    rejected = error.code == NativeIntegrationErrorCode::UnsupportedExactTag &&
+        std::string(error.what()).find("error envelope") != std::string::npos;
+  }
+  check("stored line integration never silently drops an input error envelope",
+        rejected);
+}
+
 }  // namespace
 
 int main() {
@@ -202,6 +225,7 @@ int main() {
   acb_cancellation_is_exact_only();
   stored_branch_selection();
   upper_halo_and_first_unseen_fail_loudly();
+  input_error_envelope_is_not_discarded();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

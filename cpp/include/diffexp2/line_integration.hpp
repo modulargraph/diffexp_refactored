@@ -297,6 +297,11 @@ StoredLineIntegral integrate_stored_local_line(
   using namespace line_integration_detail;
 
   validate_local_solution(solution, false);
+  if (!solution.error.empty())
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+        "stored line integration cannot discard an input error envelope; "
+        "native tail/error propagation is not implemented yet");
   (void)options.delivered_epsilon.width();
   if (options.imaginary_sign.has_value() &&
       *options.imaginary_sign != 1 && *options.imaginary_sign != -1)

@@ -3166,16 +3166,16 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
     const auto& raw_kernels = as_array(
         raw_multiplier.at("kernels"),
         "prepared rational local-row epsilon kernels");
-    if (raw_kernels.size() != source.epsilon.width())
+    if (raw_kernels.size() < source.epsilon.width())
       throw std::invalid_argument(
           "prepared rational local-row multiplier does not cover the exact source epsilon width");
     multiplier.kernels.reserve(raw_kernels.size());
     for (const auto& raw_kernel : raw_kernels) {
       const auto& coefficients = as_array(
           raw_kernel, "prepared rational local-row Taylor kernel");
-      if (coefficients.size() != source.taylor_width())
+      if (coefficients.size() < source.taylor_width())
         throw std::invalid_argument(
-            "prepared rational local-row multiplier does not cover the exact source Taylor width");
+          "prepared rational local-row multiplier does not cover the exact source Taylor width");
       std::vector<Scalar> kernel;
       kernel.reserve(coefficients.size());
       for (const auto& coefficient : coefficients)
@@ -5236,7 +5236,6 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
               solution.taylor_complete_max)
         throw std::invalid_argument(
             "checkpoint rational-row output disagrees with its tensor");
-
       auto identity_input = derivation;
       const auto derivation_identity = required_string(
           derivation, "provenance_identity");
@@ -5254,7 +5253,6 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           source_operator_identity)
         throw std::invalid_argument(
             "checkpoint rational-row derived operator identity is inconsistent");
-
       const auto& lineage = as_object(
           object.at("retained_owner_lineage"),
           "checkpoint rational-row owner lineage");
@@ -5279,7 +5277,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
             "checkpoint rational-row owner lineage is inconsistent");
       retained_derivation = std::move(derivation);
     } else {
-    require_exact_keys(
+      require_exact_keys(
         derivation,
         {"schema", "capability", "source_match",
          "source_match_checkpoint_identity",
@@ -5289,7 +5287,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
          "scope", "coefficient_transport", "whole_arm_complete",
          "provenance_identity"},
         "checkpoint materialized-local derivation");
-    if (required_string(derivation, "schema") !=
+      if (required_string(derivation, "schema") !=
             "diffexp2-retained-plan-match-local-materialization-v1" ||
         required_string(derivation, "capability") !=
             "retained-native-plan-match-local-materialization-v1" ||
@@ -5370,7 +5368,8 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
             derivation.at("provenance_identity"))
       throw std::invalid_argument(
           "checkpoint materialized-local owner lineage is inconsistent");
-    retained_derivation = std::move(derivation);
+      }
+      retained_derivation = std::move(derivation);
     }
   } else if (retained_owner != nullptr) {
     throw std::invalid_argument(
@@ -10290,7 +10289,10 @@ StoredLineIntegral aggregate_retained_lines(
     if (value.dimension != dimension)
       throw std::invalid_argument(
           "native line aggregate component dimensions differ");
-    epsilon_min = std::max(epsilon_min, value.epsilon.min_power);
+    // A finite Laurent frame's lower edge is an exact structural bound:
+    // powers below it are zero, not unknown.  Aggregation therefore takes
+    // the union lower edge while still intersecting complete upper edges.
+    epsilon_min = std::min(epsilon_min, value.epsilon.min_power);
     epsilon_max = std::min(epsilon_max, value.epsilon.complete_max);
   }
   if (epsilon_min > epsilon_max)
@@ -10309,8 +10311,9 @@ StoredLineIntegral aggregate_retained_lines(
          component_index < dimension; ++component_index) {
       ComplexBall sum(0);
       for (std::size_t index = 0; index < components.size(); ++index) {
-        const auto& coefficient =
-            components[index]->result().value.at(power, component_index);
+        const auto& value = components[index]->result().value;
+        if (power < value.epsilon.min_power) continue;
+        const auto& coefficient = value.at(power, component_index);
         sum += signs[index] == 1 ? coefficient : -coefficient;
       }
       result.value.coefficients.push_back(std::move(sum));
@@ -10323,8 +10326,7 @@ StoredLineIntegral aggregate_retained_lines(
   json::array error_sources;
   for (std::size_t index = 0; index < components.size(); ++index) {
     const auto& error = components[index]->result().value.error;
-    if (error.empty() || error.frame.min_power > epsilon_min ||
-        error.frame.complete_max < epsilon_max) {
+    if (error.empty() || error.frame.complete_max < epsilon_max) {
       all_error_envelopes = false;
       break;
     }
@@ -10348,6 +10350,7 @@ StoredLineIntegral aggregate_retained_lines(
       auto error_sum = Magnitude::zero();
       for (const auto& component : components) {
         const auto& error = component->result().value.error;
+        if (power < error.frame.min_power) continue;
         error_sum += error.absolute.at(static_cast<std::size_t>(
             power - error.frame.min_power));
       }
@@ -10422,6 +10425,159 @@ std::vector<std::shared_ptr<StoredLocalBase>> unique_line_local_owners(
   return unique;
 }
 
+struct RetainedLocalFrameContract {
+  EpsilonWindow epsilon;
+  std::int32_t top_valid = kCompleteInfinity;
+  std::uint32_t dimension = 0;
+  std::uint32_t taylor_complete_max = 0;
+};
+
+RetainedLocalFrameContract retained_local_frame_contract(
+    const std::shared_ptr<StoredLocalBase>& local) {
+  if (!local)
+    throw std::invalid_argument(
+        "native arm frame intersection received a null local");
+  const auto summary = local->summary();
+  RetainedLocalFrameContract result{
+      {as_i32(summary.at("epsilon_min"), "retained epsilon minimum"),
+       as_i32(summary.at("epsilon_max"), "retained epsilon maximum")},
+      parse_validity(summary.at("top_valid")),
+      as_u32(summary.at("dimension"), "retained local dimension"),
+      as_u32(summary.at("taylor_complete_max"),
+             "retained local Taylor maximum")};
+  (void)result.epsilon.width();
+  return result;
+}
+
+EpsilonWindow live_match_epsilon_intersection(
+    EpsilonWindow requested, std::int32_t required_complete_max,
+    const std::shared_ptr<StoredLocalBase>& incoming,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& basis) {
+  if (basis.empty())
+    throw std::invalid_argument(
+        "native whole-arm match basis cannot be empty");
+  auto minimum = requested.min_power;
+  auto complete_max = requested.complete_max;
+  const auto dimension = retained_local_frame_contract(incoming).dimension;
+  if (basis.size() != dimension)
+    throw std::invalid_argument(
+        "native whole-arm match requires one receiving column per component");
+  const auto admit = [&](const std::shared_ptr<StoredLocalBase>& local) {
+    const auto frame = retained_local_frame_contract(local);
+    if (frame.dimension != dimension)
+      throw std::invalid_argument(
+          "native whole-arm matching local dimensions differ");
+    minimum = std::max(minimum, frame.epsilon.min_power);
+    complete_max = std::min(complete_max, frame.epsilon.complete_max);
+    if (frame.top_valid != kCompleteInfinity)
+      complete_max = std::min(complete_max, frame.top_valid);
+  };
+  admit(incoming);
+  for (const auto& column : basis) admit(column);
+  if (minimum > complete_max)
+    throw std::domain_error(
+        "native whole-arm match has no common complete epsilon window");
+  if (required_complete_max < minimum ||
+      required_complete_max > complete_max)
+    throw std::domain_error(
+        "native whole-arm live match intersection does not cover the globally required complete epsilon maximum");
+  return {minimum, complete_max};
+}
+
+EpsilonWindow live_line_epsilon_intersection(
+    EpsilonWindow requested, std::int32_t required_complete_max,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto frame = retained_local_frame_contract(local);
+  auto minimum = std::max(requested.min_power, frame.epsilon.min_power);
+  auto complete_max = std::min(requested.complete_max,
+                               frame.epsilon.complete_max);
+  if (frame.top_valid != kCompleteInfinity)
+    complete_max = std::min(complete_max, frame.top_valid);
+  if (minimum > complete_max || required_complete_max > complete_max)
+    throw std::domain_error(
+        "native whole-arm integrand row does not cover the globally required complete epsilon maximum");
+  return {minimum, complete_max};
+}
+
+void require_ordinary_regular_basis_for_identity_lattice(
+    const std::vector<std::shared_ptr<StoredLocalBase>>& basis) {
+  if (basis.empty())
+    throw std::invalid_argument(
+        "native ordinary identity lattice requires a nonempty basis");
+  const auto dimension = retained_local_frame_contract(basis.front()).dimension;
+  if (basis.size() != dimension)
+    throw std::invalid_argument(
+        "native ordinary identity lattice requires a square basis");
+  for (const auto& column : basis) {
+    const auto metadata = column->exact_analytic_metadata();
+    const auto& sectors = as_array(
+        metadata.at("sectors"), "ordinary identity-lattice sectors");
+    if (sectors.size() != 1)
+      throw std::domain_error(
+          "native Acb identity-lattice synthesis requires one ordinary sector per basis column");
+    const auto& sector = as_object(
+        sectors.front(), "ordinary identity-lattice sector");
+    const auto a = parse_checkpoint_exact_descriptor(
+        sector.at("a"), "ordinary identity-lattice a tag");
+    const auto b = parse_checkpoint_exact_descriptor(
+        sector.at("b"), "ordinary identity-lattice b tag");
+    if (a.domain != ExactDomain::Rational ||
+        b.domain != ExactDomain::Rational ||
+        !(Rational(a.canonical) == Rational(0)) ||
+        !(Rational(b.canonical) == Rational(0)) ||
+        as_u32(sector.at("log_power"),
+               "ordinary identity-lattice log power") != 0)
+      throw std::domain_error(
+          "native Acb identity-lattice synthesis requires exact a=b=0, log_power=0 basis tags");
+  }
+}
+
+json::object native_ordinary_identity_lattice(
+    const std::shared_ptr<StoredTilePlan>& plan, const std::string& arm,
+    std::size_t match_index, EpsilonWindow window,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& basis) {
+  require_ordinary_regular_basis_for_identity_lattice(basis);
+  if (window.min_power > 0 || window.complete_max < 0)
+    throw std::domain_error(
+        "native ordinary identity lattice requires epsilon^0 inside the live work window");
+  json::array basis_identity;
+  for (const auto& column : basis)
+    basis_identity.push_back(json::object{
+        {"local", column->handle()},
+        {"checkpoint_identity", column->checkpoint_identity()},
+        {"source_operator_identity", column->source_operator_identity()}});
+  const auto identity = json::serialize(canonical_json_value(json::object{
+      {"schema", "diffexp2-native-ordinary-lattice-identity-v1"},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_provenance_identity", plan->provenance_identity()},
+      {"arm", arm}, {"match", match_index},
+      {"epsilon", json::object{{"min", window.min_power},
+                                {"max", window.complete_max}}},
+      {"basis", std::move(basis_identity)}}));
+  const auto dimension = retained_local_frame_contract(basis.front()).dimension;
+  json::array rows;
+  rows.reserve(dimension);
+  for (std::uint32_t row = 0; row < dimension; ++row) {
+    json::array columns;
+    columns.reserve(dimension);
+    for (std::uint32_t column = 0; column < dimension; ++column) {
+      json::array coefficients;
+      coefficients.reserve(window.width());
+      for (std::int64_t power = window.min_power;
+           power <= window.complete_max; ++power)
+        coefficients.emplace_back(
+            power == 0 && row == column ? "1" : "0");
+      columns.push_back(json::object{
+          {"min", window.min_power}, {"max", window.complete_max},
+          {"coefficients", std::move(coefficients)}});
+    }
+    rows.push_back(std::move(columns));
+  }
+  return json::object{
+      {"schema", "diffexp2-exact-evaluated-epsilon-lattice-v1"},
+      {"identity", identity}, {"evaluated_basis", std::move(rows)}};
+}
+
 json::array line_aggregate_source_records(
     const std::vector<std::shared_ptr<StoredLocalBase>>& owners) {
   json::array records;
@@ -10432,7 +10588,10 @@ json::array line_aggregate_source_records(
         {"source_operator_identity", owner->source_operator_identity()},
         {"checkpoint_identity", owner->checkpoint_identity()},
         {"coefficient_domain", owner->scalar_domain()},
-        {"analytic_metadata", owner->exact_analytic_metadata()}});
+        {"analytic_metadata", owner->exact_analytic_metadata()},
+        {"retained_derivation", owner->retained_derivation().has_value()
+             ? json::value(*owner->retained_derivation())
+             : json::value(nullptr)}});
   return records;
 }
 
@@ -13993,7 +14152,7 @@ json::object run_session_command(const json::object& root) {
           root,
           {"schema", "op", "session", "tile_plan", "anchor",
            "tile_plan_checkpoint_identity", "anchor_checkpoint_identity",
-           "epsilon", "checkpoint_policy", "lower", "upper",
+           "epsilon", "refinement", "checkpoint_policy", "lower", "upper",
            "certify_tail"},
           "native integration.run_arms request");
     else
@@ -14001,7 +14160,7 @@ json::object run_session_command(const json::object& root) {
           root,
           {"schema", "op", "session", "tile_plan", "anchor",
            "tile_plan_checkpoint_identity", "anchor_checkpoint_identity",
-           "epsilon", "checkpoint_policy", "lower", "upper"},
+           "epsilon", "refinement", "checkpoint_policy", "lower", "upper"},
           "native integration.run_arms request");
     if (session->domain == "symbolic")
       throw std::invalid_argument(
@@ -14027,6 +14186,16 @@ json::object run_session_command(const json::object& root) {
       throw std::invalid_argument(
           "whole-arm required epsilon maximum must lie in its work window");
 
+    const auto& refinement = as_object(
+        root.at("refinement"), "native whole-arm refinement policy");
+    require_exact_keys(refinement, {"relative_tolerance", "max_steps"},
+                       "native whole-arm refinement policy");
+    (void)required_string(refinement, "relative_tolerance");
+    if (as_u32(refinement.at("max_steps"),
+               "native whole-arm refinement steps") > 32)
+      throw std::invalid_argument(
+          "native whole-arm refinement steps must lie in 0..32");
+
     const auto& checkpoint_policy = as_object(
         root.at("checkpoint_policy"),
         "native whole-arm checkpoint policy");
@@ -14044,16 +14213,17 @@ json::object run_session_command(const json::object& root) {
     struct PendingArmMarch {
       std::string name;
       std::vector<std::vector<std::string>> basis_handles;
-      std::vector<json::object> match_policies;
+      std::vector<json::object> integrand_rows;
       std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis;
       std::vector<std::string> match_handles;
       std::vector<std::string> local_handles;
+      std::vector<std::string> row_local_handles;
       std::string aggregate_handle;
     };
     const auto parse_pending_arm = [&](const char* name) {
       const auto& raw_arm = as_object(root.at(name),
                                       "native whole-arm arm request");
-      require_exact_keys(raw_arm, {"receiving_basis", "match_policies"},
+      require_exact_keys(raw_arm, {"receiving_basis", "integrand_rows"},
                          "native whole-arm arm request");
       PendingArmMarch arm;
       arm.name = name;
@@ -14082,22 +14252,13 @@ json::object run_session_command(const json::object& root) {
         }
         arm.basis_handles.push_back(std::move(handles));
       }
-      const auto& raw_policies = as_array(
-          raw_arm.at("match_policies"),
-          "native whole-arm match policies");
-      arm.match_policies.reserve(raw_policies.size());
-      for (const auto& raw_policy_value : raw_policies) {
-        const auto& raw_policy = as_object(
-            raw_policy_value, "native whole-arm match policy");
-        if (session->domain == "rational") {
-          require_exact_keys(raw_policy, {},
-                             "rational whole-arm match policy");
-        } else {
-          require_exact_keys(raw_policy, {"exact_lattice", "refinement"},
-                             "Acb whole-arm match policy");
-        }
-        arm.match_policies.push_back(raw_policy);
-      }
+      const auto& raw_rows = as_array(
+          raw_arm.at("integrand_rows"),
+          "native whole-arm integrand rows");
+      arm.integrand_rows.reserve(raw_rows.size());
+      for (const auto& raw_row : raw_rows)
+        arm.integrand_rows.push_back(
+            as_object(raw_row, "native whole-arm integrand row"));
       return arm;
     };
     std::array<PendingArmMarch, 2> arms{
@@ -14111,6 +14272,7 @@ json::object run_session_command(const json::object& root) {
     const std::size_t total_matches =
         arms[0].basis_handles.size() + arms[1].basis_handles.size();
     std::size_t total_tiles = 0;
+    std::size_t retained_local_reservation = 0;
     constexpr std::size_t published_line_results = 3;
     bool reservation_live = false;
     {
@@ -14142,10 +14304,10 @@ json::object run_session_command(const json::object& root) {
       for (auto& arm : arms) {
         const auto& retained = plan->arm(arm.name);
         if (retained.exact.matches.size() != arm.basis_handles.size() ||
-            arm.match_policies.size() != arm.basis_handles.size() ||
+            arm.integrand_rows.size() != retained.exact.tiles.size() ||
             retained.exact.tiles.size() != arm.basis_handles.size() + 1)
           throw std::invalid_argument(
-              "whole-arm basis/policy counts do not reproduce the retained plan topology for " +
+              "whole-arm basis/row counts do not reproduce the retained plan topology for " +
               arm.name);
         total_tiles = checked_diagnostic_sum(
             total_tiles, retained.exact.tiles.size(),
@@ -14172,7 +14334,10 @@ json::object run_session_command(const json::object& root) {
                                            session->pending_matches))
         throw std::invalid_argument(
             "persistent local match capacity is exhausted by whole-arm marching");
-      if (total_matches > session->local_capacity -
+      retained_local_reservation = checked_diagnostic_sum(
+          total_matches, total_tiles,
+          "whole-arm retained local reservation");
+      if (retained_local_reservation > session->local_capacity -
                               std::min(session->local_capacity,
                                        session->locals.size() +
                                            session->pending_local_solves))
@@ -14188,19 +14353,23 @@ json::object run_session_command(const json::object& root) {
       for (auto& arm : arms) {
         arm.match_handles.reserve(arm.basis_handles.size());
         arm.local_handles.reserve(arm.basis_handles.size());
+        arm.row_local_handles.reserve(arm.integrand_rows.size());
         for (std::size_t index = 0; index < arm.basis_handles.size(); ++index) {
           arm.match_handles.push_back(
               "m:" + std::to_string(session->next_match++));
           arm.local_handles.push_back(
               "l:" + std::to_string(session->next_local++));
         }
+        for (std::size_t index = 0; index < arm.integrand_rows.size(); ++index)
+          arm.row_local_handles.push_back(
+              "l:" + std::to_string(session->next_local++));
         arm.aggregate_handle =
             "line:" + std::to_string(session->next_line_result++);
       }
       combined_handle =
           "line:" + std::to_string(session->next_line_result++);
       session->pending_matches += total_matches;
-      session->pending_local_solves += total_matches;
+      session->pending_local_solves += retained_local_reservation;
       session->pending_line_integrations += published_line_results;
       reservation_live = true;
     }
@@ -14208,12 +14377,12 @@ json::object run_session_command(const json::object& root) {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (!reservation_live) return;
       if (session->pending_matches < total_matches ||
-          session->pending_local_solves < total_matches ||
+          session->pending_local_solves < retained_local_reservation ||
           session->pending_line_integrations < published_line_results)
         throw std::logic_error(
             "native whole-arm reservation accounting underflow");
       session->pending_matches -= total_matches;
-      session->pending_local_solves -= total_matches;
+      session->pending_local_solves -= retained_local_reservation;
       session->pending_line_integrations -= published_line_results;
       reservation_live = false;
     };
@@ -14221,6 +14390,7 @@ json::object run_session_command(const json::object& root) {
     struct CompletedArmMarch {
       std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches;
       std::vector<std::shared_ptr<StoredLocalBase>> materialized;
+      std::vector<std::shared_ptr<StoredLocalBase>> projected;
       std::vector<std::shared_ptr<StoredLineResult>> tile_lines;
       std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
       std::shared_ptr<StoredLocalBase> final_local;
@@ -14271,6 +14441,8 @@ json::object run_session_command(const json::object& root) {
         }
       }
       try {
+        if (session->domain == "acb")
+          ComplexBall::set_precision(session->precision_bits);
         const auto started = std::chrono::steady_clock::now();
         auto& input = arms[arm_index];
         auto& output = completed[arm_index];
@@ -14278,38 +14450,72 @@ json::object run_session_command(const json::object& root) {
         std::shared_ptr<StoredLocalBase> current = anchor;
         output.matches.reserve(retained.exact.matches.size());
         output.materialized.reserve(retained.exact.matches.size());
+        output.projected.reserve(retained.exact.tiles.size());
         output.tile_lines.reserve(retained.exact.tiles.size());
         output.tile_sources.reserve(retained.exact.tiles.size());
         for (std::size_t tile = 0; tile < retained.exact.tiles.size(); ++tile) {
-          output.tile_sources.push_back(current);
+          const auto row_identity = required_string(
+              input.integrand_rows[tile], "exact_identity");
+          json::object row_request{
+              {"row", input.integrand_rows[tile]},
+              {"source_checkpoint_identity", current->checkpoint_identity()},
+              {"checkpoint_identity",
+               checkpoint_for(input.name, "integrand", tile + 1) + ":" +
+                   row_identity}};
+          std::shared_ptr<StoredLocalBase> projected;
+          if (session->domain == "rational") {
+            const auto typed =
+                std::dynamic_pointer_cast<StoredLocal<Rational>>(current);
+            if (!typed)
+              throw std::logic_error(
+                  "whole-arm Rational integrand source changed coefficient domain");
+            projected = build_rational_row_local<Rational>(
+                input.row_local_handles[tile], row_request,
+                session->precision_bits, typed, current);
+          } else {
+            const auto typed =
+                std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(current);
+            if (!typed)
+              throw std::logic_error(
+                  "whole-arm Acb integrand source changed coefficient domain");
+            projected = build_rational_row_local<ComplexBall>(
+                input.row_local_handles[tile], row_request,
+                session->precision_bits, typed, current);
+          }
+          const auto line_epsilon = live_line_epsilon_intersection(
+              work_epsilon, required_complete_max, projected);
+          output.projected.push_back(projected);
+          output.tile_sources.push_back(projected);
           json::object line_request{
               {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
-              {"source_checkpoint_identity", current->checkpoint_identity()},
+              {"source_checkpoint_identity", projected->checkpoint_identity()},
               {"checkpoint_identity",
                checkpoint_for(input.name, "tile", tile + 1)},
               {"arm", input.name}, {"tile", tile},
-              {"epsilon", json::object{{"min", work_epsilon.min_power},
-                                        {"max", work_epsilon.complete_max}}}};
+              {"epsilon", json::object{{"min", line_epsilon.min_power},
+                                        {"max", line_epsilon.complete_max}}}};
           if (certify_tail) line_request["certify_tail"] = true;
           output.tile_lines.push_back(build_planned_line_result(
               "private:" + checkpoint_for(input.name, "tile", tile + 1),
-              line_request, plan, current));
+              line_request, plan, projected));
           if (tile == retained.exact.matches.size()) continue;
 
           const auto match_checkpoint =
               checkpoint_for(input.name, "match", tile + 1);
+          const auto match_epsilon = live_match_epsilon_intersection(
+              work_epsilon, required_complete_max, current,
+              input.basis[tile]);
           json::object match_request{
               {"arm", input.name}, {"match", tile},
               {"epsilon", json::object{
-                   {"min", work_epsilon.min_power},
-                   {"max", work_epsilon.complete_max},
+                   {"min", match_epsilon.min_power},
+                   {"max", match_epsilon.complete_max},
                    {"required_complete_max", required_complete_max}}},
               {"checkpoint_identity", match_checkpoint}};
           if (session->domain == "acb") {
-            match_request["exact_lattice"] =
-                input.match_policies[tile].at("exact_lattice");
-            match_request["refinement"] =
-                input.match_policies[tile].at("refinement");
+            match_request["exact_lattice"] = native_ordinary_identity_lattice(
+                plan, input.name, tile, match_epsilon, input.basis[tile]);
+            match_request["refinement"] = refinement;
           }
           auto match = build_planned_match_hop(
               input.match_handles[tile], match_request, session->domain,
@@ -14403,38 +14609,36 @@ json::object run_session_command(const json::object& root) {
     try {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_matches < total_matches ||
-          session->pending_local_solves < total_matches ||
+          session->pending_local_solves < retained_local_reservation ||
           session->pending_line_integrations < published_line_results)
         throw std::logic_error(
             "native whole-arm reservation accounting underflow");
       session->pending_matches -= total_matches;
-      session->pending_local_solves -= total_matches;
+      session->pending_local_solves -= retained_local_reservation;
       session->pending_line_integrations -= published_line_results;
       reservation_live = false;
       if (session->closed)
         throw std::invalid_argument(
             "persistent solver session closed during whole-arm marching");
 
-      session->matches.reserve(session->matches.size() + total_matches);
-      session->locals.reserve(session->locals.size() + total_matches);
+      session->locals.reserve(session->locals.size() + 2);
       session->line_results.reserve(
           session->line_results.size() + published_line_results);
-      std::vector<std::string> inserted_matches;
       std::vector<std::string> inserted_locals;
       std::vector<std::string> inserted_lines;
       try {
         for (std::size_t arm_index = 0; arm_index < 2; ++arm_index) {
-          for (const auto& match : completed[arm_index].matches) {
-            if (!session->matches.emplace(match->handle(), match).second)
+          const auto& final_local = completed[arm_index].final_local;
+          const auto existing = session->locals.find(final_local->handle());
+          if (existing == session->locals.end()) {
+            if (!session->locals.emplace(
+                    final_local->handle(), final_local).second)
               throw std::logic_error(
-                  "whole-arm match handle collision at publication");
-            inserted_matches.push_back(match->handle());
-          }
-          for (const auto& local : completed[arm_index].materialized) {
-            if (!session->locals.emplace(local->handle(), local).second)
-              throw std::logic_error(
-                  "whole-arm local handle collision at publication");
-            inserted_locals.push_back(local->handle());
+                  "whole-arm final-local handle collision at publication");
+            inserted_locals.push_back(final_local->handle());
+          } else if (existing->second.get() != final_local.get()) {
+            throw std::logic_error(
+                "whole-arm final-local handle names a different retained object");
           }
           const auto& line = completed[arm_index].aggregate;
           if (!session->line_results.emplace(line->handle(), line).second)
@@ -14451,8 +14655,6 @@ json::object run_session_command(const json::object& root) {
           session->line_results.erase(handle);
         for (const auto& handle : inserted_locals)
           session->locals.erase(handle);
-        for (const auto& handle : inserted_matches)
-          session->matches.erase(handle);
         throw;
       }
 
@@ -16384,6 +16586,9 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_stored_line_integration_capability",
                                        kRetainedStoredLineCapability},
+                                      {"persistent_parallel_arm_march", true},
+                                      {"persistent_parallel_arm_march_capability",
+                                       kRetainedParallelArmCapability},
                                       {"persistent_certified_tail_majorant",
                                        true},
                                       {"persistent_certified_tail_majorant_capability",

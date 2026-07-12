@@ -86,6 +86,7 @@ The implemented recurrence-session commands are:
 | `tile.match_advance` | Derive one Rational/Acb match entirely from a retained plan and retain the receiving-basis weights with strong plan/local ownership. |
 | `tile.stats` / `tile.release` | Inspect or release one retained independent-arm plan. |
 | `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector; optional `certify_tail:true` promotes only after proof. |
+| `integration.run_arms` | Concurrently march both retained arms through hidden rational-row projection, live-window matching/materialization, tile integration, and native per-arm plus lower-to-upper aggregation; publish only two final locals and three opaque line aggregates after both workers succeed. |
 | `integration.stats` / `integration.export` / `integration.release` | Inspect, explicitly export, or release one retained tile integral. |
 | `match.stats` | Inspect one retained native match and its exact provenance. |
 | `match.materialize_local` | Apply a plan-driven match's retained Laurent weights to its receiving basis and publish the next retained local without coefficient JSON; eligible ordinary homogeneous bases propagate their rigorous local-tail model. |
@@ -296,6 +297,20 @@ every retained Taylor coefficient before reattaching certification.
 Unsupported/inconclusive states and older marker-only records remain explicit
 non-promotion markers; they are not reconstructed into models.  SCC,
 singular, sourced, and rational-row locals remain outside this certificate.
+
+`integration.run_arms` is the coarse production lifecycle.  Each arm supplies
+one already prepared exact rational integrand row per tile and one receiving
+basis-handle set per match.  C++ derives every actual epsilon intersection
+from the live incoming/basis locals, and for Acb ordinary regular bases it
+constructs the exact identity-lattice saturation witness only after proving
+all basis tags are `a=b=0, log_power=0`.  A single bounded refinement policy
+and requested epsilon contract govern the request.  Row-projected scalar
+locals and intermediate match/materialization chains remain hidden but
+strongly owned and checkpointed.  Tile frames aggregate over the union of
+their exact Laurent lower bounds and the intersection of complete upper
+bounds; absent lower rows are structural zero.  The combined result is
+`-lower(anchor->lo) + upper(anchor->hi)`.  Publication is all-or-nothing
+across the two workers.
 Successful results strongly own their local and plan snapshots, so releasing
 the public source handles does not invalidate inspection or export.
 

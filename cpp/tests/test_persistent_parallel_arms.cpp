@@ -26,6 +26,7 @@ json::array prescriptions() {
 }
 
 std::string prepare_chart(const std::string& session,
+                          const std::string& domain,
                           const std::string& name,
                           const std::string& center) {
   json::array principal_row;
@@ -62,7 +63,8 @@ std::string prepare_chart(const std::string& session,
            {"topological_order", json::array{0}},
            {"coupling_depth", 0}}},
       {"problem", json::object{
-           {"domain", "rational"}, {"d", 1}, {"fb", 0}, {"w", 3},
+           {"domain", domain}, {"precision_bits", 256},
+           {"d", 1}, {"fb", 0}, {"w", 3},
            {"d_lags", std::move(d_lags)},
            {"denominators", json::array{}},
            {"nhat_lags", json::array{json::object{
@@ -135,12 +137,37 @@ json::object arm(const std::string& endpoint,
                       {"topology", topology()}};
 }
 
+json::object integrand_row(std::int32_t shift,
+                           const std::string& identity) {
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 1}, {"exact_identity", identity},
+      {"entries", json::array{json::object{
+           {"column", 0},
+           {"multiplier", json::object{
+                {"epsilon_shift", shift}, {"center_pole_order", 0},
+                {"kernels", json::array{json::array{"1"},
+                                        json::array{"0"},
+                                        json::array{"0"}}},
+                {"exact_identity", identity},
+                {"proven_zero", false}}}}}}};
+}
+
 json::object arm_execution(const std::string& first,
-                           const std::string& second) {
+                           const std::string& second,
+                           const std::vector<std::int32_t>& shifts) {
+  if (shifts.size() != 3)
+    throw std::invalid_argument("test arm requires three row shifts");
   return json::object{
       {"receiving_basis",
        json::array{json::array{first}, json::array{second}}},
-      {"match_policies", json::array{json::object{}, json::object{}}}};
+      {"integrand_rows", json::array{
+           integrand_row(shifts[0], "test-row-1:" +
+                                      std::to_string(shifts[0])),
+           integrand_row(shifts[1], "test-row-2:" +
+                                      std::to_string(shifts[1])),
+           integrand_row(shifts[2], "test-row-3:" +
+                                      std::to_string(shifts[2]))}}};
 }
 
 json::object run_arms_request(const std::string& session,
@@ -153,8 +180,10 @@ json::object run_arms_request(const std::string& session,
       {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
       {"tile_plan_checkpoint_identity", "parallel-plan"},
       {"anchor_checkpoint_identity", "parallel-anchor"},
-      {"epsilon", json::object{{"min", 0}, {"max", 2},
-                                {"required_complete_max", 2}}},
+      {"epsilon", json::object{{"min", -1}, {"max", 2},
+                                {"required_complete_max", 1}}},
+      {"refinement", json::object{
+           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
       {"checkpoint_policy", json::object{
            {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", root}}},
@@ -168,6 +197,66 @@ double exported_coefficient(const json::object& response,
   return raw.is_string()
       ? std::stod(std::string(raw.as_string()))
       : std::stod(std::string(raw.as_array().front().as_string()));
+}
+
+bool acb_identity_lattice_smoke() {
+  std::string session;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"}, {"domain", "acb"},
+        {"precision_bits", 256}, {"output_digits", 30},
+        {"chart_capacity", 8}, {"local_capacity", 16},
+        {"match_capacity", 8}, {"tile_plan_capacity", 2}});
+    session = std::string(created.at("session").as_string());
+    const auto anchor_chart = prepare_chart(
+        session, "acb", "acb-pair-anchor", "0");
+    const auto lower_1_chart = prepare_chart(
+        session, "acb", "acb-pair-lower-1", "-2/3");
+    const auto lower_2_chart = prepare_chart(
+        session, "acb", "acb-pair-lower-2", "-4/3");
+    const auto upper_1_chart = prepare_chart(
+        session, "acb", "acb-pair-upper-1", "2/3");
+    const auto upper_2_chart = prepare_chart(
+        session, "acb", "acb-pair-upper-2", "4/3");
+    const auto anchor = solve_local(session, anchor_chart, "0",
+                                    "parallel-anchor", "2");
+    const auto lower_1 = solve_local(session, lower_1_chart, "-2/3",
+                                     "acb-lower-basis-1", "1");
+    const auto lower_2 = solve_local(session, lower_2_chart, "-4/3",
+                                     "acb-lower-basis-2", "1");
+    const auto upper_1 = solve_local(session, upper_1_chart, "2/3",
+                                     "acb-upper-basis-1", "1");
+    const auto upper_2 = solve_local(session, upper_2_chart, "4/3",
+                                     "acb-upper-basis-2", "1");
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", "parallel-plan"}, {"division_order", 3},
+        {"lower", arm("-4/3", {anchor_chart, lower_1_chart, lower_2_chart})},
+        {"upper", arm("4/3", {anchor_chart, upper_1_chart, upper_2_chart})}});
+    if (planned.at("status") != "ok")
+      throw std::runtime_error("Acb plan: " + json::serialize(planned));
+    const auto marched = request(run_arms_request(
+        session, std::string(planned.at("tile_plan").as_string()), anchor,
+        arm_execution(lower_1, lower_2, {0, 0, 0}),
+        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        "acb-parallel-success"));
+    const bool ok = marched.at("status") == "ok" &&
+        marched.at("worker_overlap") == true &&
+        marched.at("max_parallel_arms") == 2 &&
+        marched.at("json_coefficients") == 0 &&
+        marched.at("combined_line_result").as_object().at("epsilon_min") == 0;
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", session}});
+    session.clear();
+    return ok;
+  } catch (const std::exception& error) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    std::cerr << "Acb identity-lattice smoke failed: " << error.what()
+              << '\n';
+    return false;
+  }
 }
 
 }  // namespace
@@ -185,11 +274,16 @@ int main() {
         {"chart_capacity", 8}, {"local_capacity", 16},
         {"match_capacity", 8}, {"tile_plan_capacity", 2}});
     session = std::string(created.at("session").as_string());
-    const auto anchor_chart = prepare_chart(session, "pair-anchor", "0");
-    const auto lower_1_chart = prepare_chart(session, "pair-lower-1", "-2/3");
-    const auto lower_2_chart = prepare_chart(session, "pair-lower-2", "-4/3");
-    const auto upper_1_chart = prepare_chart(session, "pair-upper-1", "2/3");
-    const auto upper_2_chart = prepare_chart(session, "pair-upper-2", "4/3");
+    const auto anchor_chart = prepare_chart(
+        session, "rational", "pair-anchor", "0");
+    const auto lower_1_chart = prepare_chart(
+        session, "rational", "pair-lower-1", "-2/3");
+    const auto lower_2_chart = prepare_chart(
+        session, "rational", "pair-lower-2", "-4/3");
+    const auto upper_1_chart = prepare_chart(
+        session, "rational", "pair-upper-1", "2/3");
+    const auto upper_2_chart = prepare_chart(
+        session, "rational", "pair-upper-2", "4/3");
     const auto anchor = solve_local(session, anchor_chart, "0",
                                     "parallel-anchor", "2");
     const auto lower_1 = solve_local(session, lower_1_chart, "-2/3",
@@ -212,11 +306,13 @@ int main() {
     const auto before_failure = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
     const auto failed = request(run_arms_request(
-        session, plan, anchor, arm_execution(lower_1, lower_2),
+        session, plan, anchor,
+        arm_execution(lower_1, lower_2, {0, 0, 0}),
         // The first upper basis is deliberately bound to the lower chart.
         // Admission succeeds, one worker may complete, but publication must
         // still be all-or-nothing after the upper plan-binding failure.
-        arm_execution(lower_1, upper_2), "parallel-failure"));
+        arm_execution(lower_1, upper_2, {0, 0, 0}),
+        "parallel-failure"));
     const auto after_failure = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
     if (failed.at("status") != "error" ||
@@ -232,8 +328,10 @@ int main() {
           json::serialize(failed) + " / " + json::serialize(after_failure));
 
     const auto marched = request(run_arms_request(
-        session, plan, anchor, arm_execution(lower_1, lower_2),
-        arm_execution(upper_1, upper_2), "parallel-success"));
+        session, plan, anchor,
+        arm_execution(lower_1, lower_2, {-1, 0, 0}),
+        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        "parallel-success"));
     if (marched.at("status") != "ok")
       throw std::runtime_error("march: " + json::serialize(marched));
     const auto& arms = marched.at("arms").as_object();
@@ -309,7 +407,7 @@ int main() {
           ? std::stod(std::string(raw.as_string()))
           : std::stod(std::string(raw.as_array().front().as_string()));
     };
-    const bool ok =
+    const bool ok = acb_identity_lattice_smoke() &&
         created.at("parallel_arm_march_capability") ==
             "retained-native-concurrent-two-arm-march-v1" &&
         marched.at("capability") ==
@@ -322,19 +420,32 @@ int main() {
         lower.at("matches") == 2 && lower.at("tiles") == 3 &&
         upper.at("matches") == 2 && upper.at("tiles") == 3 &&
         lower_line.at("capability") == "retained-native-line-aggregate-v1" &&
+        lower_line.at("epsilon_min") == -1 &&
+        lower_line.at("epsilon_max") == 1 &&
         upper_line.at("capability") == "retained-native-line-aggregate-v1" &&
+        upper_line.at("epsilon_min") == 0 &&
+        upper_line.at("epsilon_max") == 2 &&
         combined_line.at("capability") ==
             "retained-native-line-aggregate-v1" &&
+        combined_line.at("epsilon_min") == -1 &&
+        combined_line.at("epsilon_max") == 1 &&
         lower_evaluation.at("status") == "ok" &&
         upper_evaluation.at("status") == "ok" &&
         std::abs(local_value(lower_evaluation) - 2.0) < 1e-30 &&
         std::abs(local_value(upper_evaluation) - 2.0) < 1e-30 &&
-        std::abs(exported_coefficient(lower_export) + 8.0 / 3.0) < 1e-30 &&
-        std::abs(exported_coefficient(upper_export) - 8.0 / 3.0) < 1e-30 &&
-        std::abs(exported_coefficient(combined_export) - 16.0 / 3.0) <
+        std::abs(exported_coefficient(lower_export, 0) + 2.0 / 3.0) <
+            1e-30 &&
+        std::abs(exported_coefficient(lower_export, 1) + 2.0) < 1e-30 &&
+        std::abs(exported_coefficient(upper_export, 0) - 8.0 / 3.0) <
+            1e-30 &&
+        std::abs(exported_coefficient(combined_export, 0) - 2.0 / 3.0) <
+            1e-30 &&
+        std::abs(exported_coefficient(combined_export, 1) - 14.0 / 3.0) <
             1e-30 &&
         restored_combined.at("status") == "ok" &&
-        std::abs(exported_coefficient(restored_combined) - 16.0 / 3.0) <
+        std::abs(exported_coefficient(restored_combined, 0) - 2.0 / 3.0) <
+            1e-30 &&
+        std::abs(exported_coefficient(restored_combined, 1) - 14.0 / 3.0) <
             1e-30;
     if (!ok) {
       std::cerr << "failed response: " << json::serialize(failed) << '\n'

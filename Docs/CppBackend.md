@@ -255,6 +255,16 @@ Taylor-tail guarantee.  Use `PersistentLineIntegralStatistics`,
 result lifecycle.  Lower and upper calls admitted from the same session can
 execute concurrently because the plan and local snapshots are immutable.
 
+`RunPersistentNativeArms[plan, anchor, arms, epsilon, checkpointRoot,
+refinement, certifyTail]` performs the complete pair in one schema-2 call.
+Each `arms["lower"|"upper"]` record contains `receiving_basis` and
+`integrand_rows`; there is one basis-handle set per match and one prepared
+rational row per tile.  The backend derives live match windows and Acb
+ordinary identity lattices itself, keeps row locals and intermediate hops
+hidden, aggregates every tile natively, and atomically returns the two final
+locals plus lower, upper, and combined line-result handles.  No coefficient
+slab is returned before an explicit final `ExportPersistentLineIntegral`.
+
 ## Current scope and limitations
 
 - The production path is still primarily a recurrence-kernel port.  Exact and

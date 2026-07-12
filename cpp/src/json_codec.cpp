@@ -1243,6 +1243,11 @@ RegularTaylorTailModelResult unavailable_tail_model(std::string detail) {
           std::move(detail)};
 }
 
+struct TailModelCheckpointMarker {
+  std::string saved_status;
+  bool attached_before_save = false;
+};
+
 json::object encode_tail_model_status(
     const RegularTaylorTailModelResult& result) {
   json::object encoded{
@@ -2092,7 +2097,10 @@ class StoredLocal final : public StoredLocalBase {
               std::shared_ptr<void> retained_owner = nullptr,
               RegularTaylorTailModelResult tail_model =
                   unavailable_tail_model(
-                      "tail model is unavailable for this retained local"))
+                      "tail model is unavailable for this retained local"),
+              std::optional<TailModelCheckpointMarker>
+                  tail_checkpoint_marker = std::nullopt,
+              bool serialize_tail_checkpoint_fields = true)
       : StoredLocalBase(std::move(handle), std::move(source_chart),
                         std::move(source_operator_identity),
                         diagnostics.parse_ms, diagnostics.kernel_ms,
@@ -2101,7 +2109,9 @@ class StoredLocal final : public StoredLocalBase {
         pseudo_hits_(std::move(pseudo_hits)), top_valid_(diagnostics.top_valid),
         retained_derivation_(std::move(retained_derivation)),
         retained_owner_(std::move(retained_owner)),
-        tail_model_(std::move(tail_model)) {
+        tail_model_(std::move(tail_model)),
+        tail_checkpoint_marker_(std::move(tail_checkpoint_marker)),
+        serialize_tail_checkpoint_fields_(serialize_tail_checkpoint_fields) {
     validate_local_solution(solution_, false);
   }
 
@@ -2535,7 +2545,27 @@ class StoredLocal final : public StoredLocalBase {
           "checkpoint schema v2 does not serialize symbolic-coefficient local state");
     } else {
       const auto current = stats();
-      return json::object{
+      json::object runtime{
+          {"evaluations", current.evaluations},
+          {"residual_certifications", current.residual_certifications},
+          {"endpoint_limits", current.endpoint_limits},
+          {"line_integrations", current.line_integrations},
+          {"evaluate_ms", current.evaluate_ms},
+          {"residual_certify_ms", current.residual_certify_ms},
+          {"endpoint_limit_ms", current.endpoint_limit_ms},
+          {"line_integration_ms", current.line_integration_ms},
+          {"coefficient_count", current.coefficient_count}};
+      if (serialize_tail_checkpoint_fields_) {
+        runtime["tail_certificate_requests"] =
+            current.tail_certificate_requests;
+        runtime["tail_certificate_certified"] =
+            current.tail_certificate_certified;
+        runtime["tail_certificate_inconclusive"] =
+            current.tail_certificate_inconclusive;
+        runtime["tail_certificate_unsupported"] =
+            current.tail_certificate_unsupported;
+      }
+      json::object record{
         {"schema", "diffexp2-retained-local-v2"},
         {"handle", handle_},
         {"source_chart", source_chart_},
@@ -2548,33 +2578,21 @@ class StoredLocal final : public StoredLocalBase {
          json::object{{"top_valid", encode_validity(top_valid_)},
                       {"create_parse_ms", create_parse_ms_},
                       {"create_kernel_ms", create_kernel_ms_}}},
-        {"runtime_stats",
-         json::object{{"evaluations", current.evaluations},
-                      {"residual_certifications",
-                       current.residual_certifications},
-                      {"endpoint_limits", current.endpoint_limits},
-                      {"line_integrations", current.line_integrations},
-                      {"evaluate_ms", current.evaluate_ms},
-                      {"residual_certify_ms", current.residual_certify_ms},
-                      {"endpoint_limit_ms", current.endpoint_limit_ms},
-                      {"line_integration_ms", current.line_integration_ms},
-                      {"coefficient_count", current.coefficient_count},
-                      {"tail_certificate_requests",
-                       current.tail_certificate_requests},
-                      {"tail_certificate_certified",
-                       current.tail_certificate_certified},
-                      {"tail_certificate_inconclusive",
-                       current.tail_certificate_inconclusive},
-                      {"tail_certificate_unsupported",
-                       current.tail_certificate_unsupported}}},
+        {"runtime_stats", std::move(runtime)},
         {"column_provenance", column_provenance_.has_value()
              ? json::value(column_provenance_->encode())
-             : json::value(nullptr)},
-        {"tail_model_restore", json::object{
+             : json::value(nullptr)}};
+      if (serialize_tail_checkpoint_fields_)
+        record["tail_model_restore"] = json::object{
              {"capability", kRegularTailMajorantCapability},
              {"serialized", false},
-             {"status", tail_majorant_status_name(tail_model_.status)},
-             {"attached_before_save", tail_model_.model.has_value()}}}};
+             {"status", tail_checkpoint_marker_.has_value()
+                  ? tail_checkpoint_marker_->saved_status
+                  : tail_majorant_status_name(tail_model_.status)},
+             {"attached_before_save", tail_checkpoint_marker_.has_value()
+                  ? tail_checkpoint_marker_->attached_before_save
+                  : tail_model_.model.has_value()}};
+      return record;
     }
   }
 
@@ -2650,6 +2668,8 @@ class StoredLocal final : public StoredLocalBase {
   std::shared_ptr<void> retained_owner_;
   RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(
       "tail model is unavailable for this retained local");
+  std::optional<TailModelCheckpointMarker> tail_checkpoint_marker_;
+  bool serialize_tail_checkpoint_fields_ = true;
   std::atomic<std::uint64_t> evaluations_{0};
   std::atomic<std::uint64_t> residual_certifications_{0};
   std::atomic<std::uint64_t> endpoint_limits_{0};
@@ -4430,6 +4450,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     column_provenance = parse_checkpoint_column_provenance(
         object.at("column_provenance"));
   std::string saved_tail_status = "unrecorded";
+  bool saved_tail_attached = false;
   if (has_tail_restore) {
     const auto& tail = as_object(
         object.at("tail_model_restore"),
@@ -4442,7 +4463,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
         tail.at("serialized").as_bool())
       throw std::invalid_argument(
           "checkpoint tail-model restore marker is incompatible");
-    (void)tail.at("attached_before_save").as_bool();
+    saved_tail_attached = tail.at("attached_before_save").as_bool();
     saved_tail_status = required_string(tail, "status");
     if (saved_tail_status != "certified" &&
         saved_tail_status != "inconclusive" &&
@@ -4520,7 +4541,13 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       unavailable_tail_model(
           "checkpoint schema v2 does not serialize regular tail models; "
           "saved model status was " + saved_tail_status +
-          "; re-solve the retained local to reattach certification state"));
+          "; re-solve the retained local to reattach certification state"),
+      has_tail_restore
+          ? std::optional<TailModelCheckpointMarker>(
+                TailModelCheckpointMarker{saved_tail_status,
+                                          saved_tail_attached})
+          : std::nullopt,
+      has_tail_restore);
   local->restore_runtime_stats(restored_stats);
   return local;
 }

@@ -1657,15 +1657,66 @@ cppPersistentGeometry[cs_Association] := Join[<|
 
 (* Exact producer certificates for the deliberately narrow first composite
    slice.  These are structural predicates, never numerical enclosure tests.
-   C++ independently proves identity_v from the retained assembly operator;
-   the other facts remain collision-bound until native execution rechecks
-   them. *)
+   C++ binds the exact V identity below to the retained assembly operator and
+   binds the separately prepared VInv entries to the target-source transform;
+   the inverse and determinant facts remain collision-bound exact producer
+   certificates. *)
 sccExactIdentityMatrixQ[matrix_, dimension_Integer] := Module[{delta},
   If[!MatrixQ[matrix] || Dimensions[matrix] =!= {dimension, dimension} ||
       !FreeQ[matrix, _?InexactNumberQ], Return[False, Module]];
   delta = Map[Cancel[Together[#]] &,
     Normal[matrix] - IdentityMatrix[dimension], {2}];
   AllTrue[Flatten[delta], # === 0 &]];
+
+sccSpectralFrameCertificate[cs_Association] := Module[
+  {dimension = Lookup[cs, "SystemSize", None],
+   t = Lookup[cs, "ChartVar", None],
+   eps = DiffExp2`Config`CanonicalEps[], v, vInv, det,
+   detValuation, left, right, identityV, fail},
+  fail[detail_, extra_:<||>] := Join[<|"admissible" -> False,
+      "identity_v" -> False, "detail" -> detail|>, extra];
+  If[!IntegerQ[dimension] || dimension < 1 || !MatchQ[t, _Symbol],
+    Return[fail[
+      "spectral-frame certification requires a positive dimension and exact chart variable"],
+      Module]];
+  v = Quiet[Check[Normal[Lookup[cs, "V", None]], $Failed]];
+  vInv = Quiet[Check[Normal[Lookup[cs, "VInv", None]], $Failed]];
+  If[v === $Failed || vInv === $Failed || !MatrixQ[v] ||
+      !MatrixQ[vInv] || Dimensions[v] =!= {dimension, dimension} ||
+      Dimensions[vInv] =!= {dimension, dimension},
+    Return[fail["V/VInv are not exact square matrices of the block dimension"],
+      Module]];
+  If[!FreeQ[{v, vInv}, _?InexactNumberQ],
+    Return[fail["V/VInv contain inexact coefficients"], Module]];
+  If[!FreeQ[{v, vInv}, t],
+    Return[fail[
+      "persistent CompositeSCC spectral frames must be independent of the local chart variable"],
+      Module]];
+  left = Quiet[Check[Map[Cancel[Together[#]] &,
+      v . vInv - IdentityMatrix[dimension], {2}], $Failed]];
+  right = Quiet[Check[Map[Cancel[Together[#]] &,
+      vInv . v - IdentityMatrix[dimension], {2}], $Failed]];
+  If[left === $Failed || right === $Failed ||
+      !AllTrue[Flatten[left], # === 0 &] ||
+      !AllTrue[Flatten[right], # === 0 &],
+    Return[fail["V and VInv are not exact two-sided inverses"], Module]];
+  det = Quiet[Check[Cancel[Together[Det[v]]], $Failed]];
+  detValuation = If[det === $Failed, $Failed,
+    Quiet[Check[epsValuation[det, eps], $Failed]]];
+  If[det === $Failed || detValuation =!= 0,
+    Return[fail[
+      "persistent CompositeSCC requires val_eps(det(V)) == 0",
+      <|"det_epsilon_valuation" -> detValuation|>], Module]];
+  identityV = sccExactIdentityMatrixQ[v, dimension] &&
+    sccExactIdentityMatrixQ[vInv, dimension];
+  <|"admissible" -> True, "identity_v" -> identityV,
+    "dimension" -> dimension, "det_epsilon_valuation" -> 0,
+    "v_exact_identity" ->
+      DiffExp2`SectorSeries`ExactExpressionIdentity[v, t],
+    "vinv_exact_identity" ->
+      DiffExp2`SectorSeries`ExactExpressionIdentity[vInv, t],
+    "det_exact_identity" ->
+      DiffExp2`SectorSeries`ExactExpressionIdentity[det, t]|>];
 
 sccNoFamilyCollisionQ[cs_Association] := Module[
   {families = Lookup[cs, "Families", None], collisions, depths},
@@ -1674,17 +1725,19 @@ sccNoFamilyCollisionQ[cs_Association] := Module[
   depths = Lookup[families, "CollisionDepth", {}];
   collisions === {} && AllTrue[depths, # === 0 &]];
 
-sccNativeBlockCapabilities[cs_Association] := Module[
-  {dimension = Lookup[cs, "SystemSize", 0]},
+sccNativeBlockCapabilities[cs_Association,
+    spectralFrame_:Automatic] := Module[
+  {dimension = Lookup[cs, "SystemSize", 0], frame = spectralFrame},
+  If[frame === Automatic, frame = sccSpectralFrameCertificate[cs]];
   <|"regular" -> TrueQ[Lookup[
       Lookup[cs, "IndicialData", <||>], "Regular", False]],
     "identity_gauge" ->
       (sccExactIdentityMatrixQ[Lookup[cs, "Gauge", None], dimension] &&
        sccExactIdentityMatrixQ[
          Lookup[cs, "GaugeInverse", None], dimension]),
-    "identity_v" ->
-      (sccExactIdentityMatrixQ[Lookup[cs, "V", None], dimension] &&
-       sccExactIdentityMatrixQ[Lookup[cs, "VInv", None], dimension]),
+    "identity_v" -> TrueQ[Lookup[frame, "identity_v", False]],
+    "epsilon_unimodular_v" ->
+      TrueQ[Lookup[frame, "admissible", False]],
     "no_pseudo" -> sccNoFamilyCollisionQ[cs]|>];
 
 sccBlockPrincipalMatrixRecord[cs_Association] := Module[
@@ -1911,11 +1964,15 @@ cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
     vPrep_, inputDigits_Integer, precisionBits_Integer] := Module[
   {d = cs["SystemSize"], signature, key, cached, dLags, denominators,
    nLags, assembly = Null, assemblyGroups, assemblyBase, payload, record,
-   physicalData, physicalPayload, token},
+   physicalData, physicalPayload, token, assemblyExactIdentity},
   physicalData = physicalClearedODEData[cs];
+  assemblyExactIdentity = If[AssociationQ[vPrep],
+    DiffExp2`SectorSeries`ExactExpressionIdentity[
+      Normal[cs["V"]], cs["ChartVar"]], None];
   signature = {$cppSerializationDomain, $cppSerializationSymbols,
     inputDigits, precisionBits, d, fb, W, prep, blocks,
-    If[AssociationQ[vPrep], vPrep, Automatic], physicalData,
+    If[AssociationQ[vPrep], vPrep, Automatic], assemblyExactIdentity,
+    physicalData,
     cfg["ChopPrecision"]};
   key = Hash[signature, "SHA256"];
   token = "de2-operator-" <> IntegerString[key, 16, 64];
@@ -1939,6 +1996,7 @@ cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
           #["DenominatorCoefficients"]) &, assemblyGroups]];
     assembly = <|
       "identity" -> TrueQ[Lookup[vPrep, "Identity", False]],
+      "exact_identity" -> assemblyExactIdentity,
       "poly" -> (cppMatrixShift[#, inputDigits, cs] & /@
         vPrep["PolynomialSp"]),
       "rat" -> MapIndexed[Function[{group, idx}, <|
@@ -4217,6 +4275,104 @@ sccNativeSourceShape[cs_Association, dimension_Integer,
   "TWindow" -> <|"CompleteMax" -> tOrder|>,
   "Dimension" -> dimension|>;
 
+(* Native block state is g_B = V_B u_B because the retained diagonal chart
+   assembles V_B before materializing its LocalSolution.  Cross-SCC matrices
+   are intentionally kept in the physical g basis.  Prepare V_T^-1 once per
+   target block so C_TS g_S is summed in that physical basis and only then
+   converted to the target recurrence basis.  No source-side V_S belongs in
+   this payload. *)
+PrepareSCCSpectralSourceTransform[blockcs_Association,
+    sourceShape_Association, serialization_:Automatic] := Module[
+  {certificate = sccSpectralFrameCertificate[blockcs], dimension,
+   t = Lookup[blockcs, "ChartVar", None], vInv, field, domain, symbols,
+   inputDigits, rawEntries, encodedEntries, activeRows, activeColumns,
+   identityPayload, identity, epsWindow, tWindow},
+  If[!TrueQ[Lookup[certificate, "admissible", False]],
+    err["E6", blockcs, <|"SpectralFrame" -> certificate,
+      "Detail" -> "target spectral source transform is not exact epsilon-unimodular"|>]];
+  dimension = certificate["dimension"];
+  epsWindow = Lookup[sourceShape, "EpsWindow", None];
+  tWindow = Lookup[sourceShape, "TWindow", None];
+  If[Lookup[sourceShape, "Dimension", None] =!= dimension ||
+      !AssociationQ[epsWindow] ||
+      !AllTrue[{"Min", "CompleteMax"}, KeyExistsQ[epsWindow, #] &] ||
+      !IntegerQ[epsWindow["Min"]] ||
+      !IntegerQ[epsWindow["CompleteMax"]] ||
+      epsWindow["Min"] > epsWindow["CompleteMax"] ||
+      !AssociationQ[tWindow] ||
+      !IntegerQ[Lookup[tWindow, "CompleteMax", None]] ||
+      tWindow["CompleteMax"] < 0,
+    err["E8", blockcs, <|"SourceShape" -> sourceShape,
+      "ExpectedDimension" -> dimension,
+      "Detail" -> "target spectral source transform requires the complete native work rectangle"|>]];
+  field = sccSerializationField[serialization, blockcs];
+  domain = field["domain"];
+  symbols = field["symbols"];
+  vInv = Normal[blockcs["VInv"]];
+  rawEntries = Flatten[Table[Module[
+      {entry = Cancel[Together[vInv[[row, column]]]], prepared,
+       exactEntry},
+      exactEntry = DiffExp2`SectorSeries`ExactExpressionIdentity[entry, t];
+      prepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
+        sourceShape, entry, t];
+      If[TrueQ[prepared["ProvenZero"]], {},
+        If[prepared["ExactIdentity"] =!= exactEntry ||
+            prepared["CenterPoleOrder"] =!= 0,
+          err["E6", blockcs, <|"Row" -> row, "Column" -> column,
+            "Prepared" -> prepared, "ExactEntry" -> exactEntry,
+            "Detail" -> "t-independent VInv entry did not prepare as a center-regular exact multiplier"|>]];
+        {<|"Row" -> row - 1, "Column" -> column - 1,
+          "ExactEntry" -> exactEntry, "Prepared" -> prepared|>}]],
+    {row, dimension}, {column, dimension}], 2];
+  activeRows = DeleteDuplicates[Lookup[rawEntries, "Row", {}]];
+  activeColumns = DeleteDuplicates[Lookup[rawEntries, "Column", {}]];
+  If[Sort[activeRows] =!= Range[0, dimension - 1] ||
+      Sort[activeColumns] =!= Range[0, dimension - 1],
+    err["E6", blockcs, <|"ActiveRows" -> activeRows,
+      "ActiveColumns" -> activeColumns,
+      "Detail" -> "certified VInv has an empty structural row or column"|>]];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*
+    cfg["WorkingPrecision"];
+  encodedEntries = Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = symbols},
+    Map[<|"row" -> #["Row"], "column" -> #["Column"],
+        "exact_entry" -> #["ExactEntry"],
+        "multiplier" -> cppPreparedRationalMultiplierJSON[
+          #["Prepared"], inputDigits, blockcs]|> &, rawEntries]];
+  identityPayload = <|
+    "schema" -> "diffexp2-scc-spectral-source-transform-identity-v1",
+    "state_basis" -> "reduced-g-after-spectral-assembly",
+    "target_recurrence_basis" -> "spectral-u",
+    "dimension" -> dimension,
+    "identity" -> certificate["identity_v"],
+    "epsilon_unimodular" -> True,
+    "det_epsilon_valuation" -> 0,
+    "v_exact_identity" -> certificate["v_exact_identity"],
+    "vinv_exact_identity" -> certificate["vinv_exact_identity"],
+    "det_exact_identity" -> certificate["det_exact_identity"],
+    "source_window" -> <|"epsilon_min" -> epsWindow["Min"],
+      "epsilon_complete_max" -> epsWindow["CompleteMax"],
+      "taylor_complete_max" -> tWindow["CompleteMax"]|>,
+    "serialization" -> <|"domain" -> domain,
+      "symbols" -> field["symbol_identities"]|>,
+    "entries" -> Map[<|"row" -> #["row"],
+        "column" -> #["column"],
+        "exact_entry" -> #["exact_entry"],
+        "epsilon_shift" -> #["multiplier", "epsilon_shift"],
+        "center_pole_order" ->
+          #["multiplier", "center_pole_order"]|> &, encodedEntries]|>;
+  identity = ExportString[identityPayload, "RawJSON", "Compact" -> True];
+  <|"schema" -> "diffexp2-scc-spectral-source-transform-v1",
+    "rows" -> dimension, "columns" -> dimension,
+    "identity" -> certificate["identity_v"],
+    "epsilon_unimodular" -> True, "det_epsilon_valuation" -> 0,
+    "v_exact_identity" -> certificate["v_exact_identity"],
+    "vinv_exact_identity" -> certificate["vinv_exact_identity"],
+    "det_exact_identity" -> certificate["det_exact_identity"],
+    "exact_identity" -> identity, "domain" -> domain,
+    "symbols" -> (SymbolName /@ symbols),
+    "entries" -> encodedEntries|>];
+
 (* Retain the exact affine-Jordan proof used to classify every singular Acb
    recurrence.  This record contains only exact Rational task data and the
    prepared Jordan-chain partition; no serialized Acb coefficient or
@@ -4253,7 +4409,8 @@ sccExactAffineJordanIndicialRecord[blockcs_Association] := Module[
 
 sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
     seq_Association, blockcs_Association, captured_Association,
-    capabilities_Association, block_Integer] := Module[
+    capabilities_Association, block_Integer,
+    sourceTransform_] := Module[
   {vertices = seq["Components"][[block]], expectedPrincipal,
    analytic, principal, capturedCapabilities, capturedGeometry,
    capturedIdentity, exactIndicial},
@@ -4288,7 +4445,10 @@ sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
     "regular" -> capabilities["regular"],
     "identity_gauge" -> capabilities["identity_gauge"],
     "identity_v" -> capabilities["identity_v"],
+    "epsilon_unimodular_v" -> capabilities["epsilon_unimodular_v"],
     "no_pseudo" -> capabilities["no_pseudo"]|>,
+    If[AssociationQ[sourceTransform],
+      <|"source_transform" -> sourceTransform|>, <||>],
     If[AssociationQ[exactIndicial],
       <|"exact_affine_jordan_indicial" -> exactIndicial|>, <||>]]];
 
@@ -4344,7 +4504,8 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    couplings, identity, manifest, prepared, result, scale, radius,
    center, missingReq, components, condensation, executionDescriptor,
    inputDigits, runRecords, taskRecords, columnPlans, blockDimensions,
-   framePlans, forcedFrame, physicalPayload},
+   framePlans, forcedFrame, physicalPayload, spectralFrames,
+   sourceTransforms},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -4415,7 +4576,9 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   condensation = seq["CondensationEdges"];
   blockSystems = sccBlockChartSystem[cs, #] & /@
     Range[Length[components]];
-  capabilities = sccNativeBlockCapabilities /@ blockSystems;
+  spectralFrames = sccSpectralFrameCertificate /@ blockSystems;
+  capabilities = MapThread[sccNativeBlockCapabilities,
+    {blockSystems, spectralFrames}];
   badBlocks = Select[Range[Length[blockSystems]],
     Function[block, Module[{record = capabilities[[block]]},
       (* "regular" is a classification, not an admission predicate.  The
@@ -4426,14 +4589,15 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
          which the current composite representation actually depends on. *)
       !MemberQ[{True, False}, Lookup[record, "regular", None]] ||
         !TrueQ[Lookup[record, "identity_gauge", False]] ||
-        !TrueQ[Lookup[record, "identity_v", False]] ||
+        !TrueQ[Lookup[record, "epsilon_unimodular_v", False]] ||
         !MemberQ[{True, False},
           Lookup[record, "no_pseudo", None]]]]];
   If[badBlocks =!= {},
     err["E6", cs, <|"UnsupportedBlocks" -> Map[
-        <|"Block" -> #, "Capabilities" -> capabilities[[#]]|> &,
+        <|"Block" -> #, "Capabilities" -> capabilities[[#]],
+          "SpectralFrame" -> spectralFrames[[#]]|> &,
         badBlocks],
-      "Detail" -> "native SCC preparation requires regular or exact affine-Jordan diagonal blocks with exact identity Gauge/GaugeInverse and V/VInv; no_pseudo is retained provenance, not an admission decision"|>]];
+      "Detail" -> "native SCC preparation requires regular or exact affine-Jordan diagonal blocks with exact identity Gauge/GaugeInverse and an exact t-independent epsilon-unimodular V/VInv pair; no_pseudo is retained provenance, not an admission decision"|>]];
   requestedMin = epsWindow["Min"];
   requestedMax = epsWindow["CompleteMax"];
   publicTOrder = req["TOrder"];
@@ -4480,12 +4644,18 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
         "work_complete_max" -> workTop,
         "public_t_order" -> publicTOrder,
         "wolfram_coupling_depth" -> seq["CouplingDepth"]|>|>];
+  serialization = capturedContract["Serialization"];
+  sourceTransforms = MapThread[
+    If[TrueQ[Lookup[#3, "identity_v", False]], None,
+      PrepareSCCSpectralSourceTransform[#1,
+        sccNativeSourceShape[cs, #2, fb, workTop, workTOrder],
+        serialization]] &,
+    {blockSystems, Length /@ components, spectralFrames}];
   blockRecords = MapThread[
     sccCapturedBlockRecord[parentRecords["exact_system_record"],
-      parentGeometry, seq, #1, #2, #3, #4] &,
+      parentGeometry, seq, #1, #2, #3, #4, #5] &,
     {blockSystems, captures, capabilities,
-      Range[Length[blockSystems]]}];
-  serialization = capturedContract["Serialization"];
+      Range[Length[blockSystems]], sourceTransforms}];
   couplings = Map[
     PrepareSCCCouplingMatrix[cs, #[[1]], #[[2]],
       sccNativeSourceShape[cs, Length[components[[#[[1]]]]],
@@ -4935,7 +5105,8 @@ sccNativeRegularBlockStatisticsQ[stats_, handle_Association,
         StringQ[Lookup[record, "principal_identity", None]]],
       {blockCharts, Range[Length[blockDimensions]]}] &&
     AssociationQ[evidence] &&
-    Lookup[evidence, "identity_v", None] === "native-retained-assembly" &&
+    Lookup[evidence, "identity_v", None] ===
+      "native-retained-spectral-assembly-and-target-inverse" &&
     Lookup[evidence, "regular", None] ===
       "collision-bound-producer-certificate" &&
     Lookup[evidence, "identity_gauge", None] ===
@@ -4986,7 +5157,8 @@ sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
           "dimension", None] === blockDimensions[[block]]],
       {blockCharts, Range[Length[blockDimensions]]}] &&
     AssociationQ[evidence] &&
-    Lookup[evidence, "identity_v", None] === "native-retained-assembly" &&
+    Lookup[evidence, "identity_v", None] ===
+      "native-retained-spectral-assembly-and-target-inverse" &&
     Lookup[evidence, "regular_or_regular_singular", None] ===
       "collision-bound-producer-certificate" &&
     Lookup[evidence, "identity_gauge", None] ===

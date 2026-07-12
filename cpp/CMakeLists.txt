@@ -143,6 +143,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_scc_solve_block_column
     COMMAND test_diffexp2_persistent_scc_solve_block_column)
 
+  add_executable(test_diffexp2_persistent_scc_spectral_frames
+    tests/test_persistent_scc_spectral_frames.cpp)
+  target_compile_features(test_diffexp2_persistent_scc_spectral_frames
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_scc_spectral_frames
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_scc_spectral_frames
+    COMMAND test_diffexp2_persistent_scc_spectral_frames)
+
   add_executable(test_diffexp2_persistent_scc_solve_singular_column
     tests/test_persistent_scc_solve_singular_column.cpp)
   target_compile_features(

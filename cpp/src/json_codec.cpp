@@ -253,6 +253,8 @@ RecurrenceProblem<Scalar> parse_problem(const json::object& root) {
     PreparedMatrix<Scalar> matrix;
     matrix.identity = assembly_object.if_contains("identity") != nullptr &&
                       assembly_object.at("identity").as_bool();
+    if (const auto* identity = assembly_object.if_contains("exact_identity"))
+      matrix.exact_identity = std::string(identity->as_string());
     for (const auto& raw_matrix : as_array(
              assembly_object.at("poly"), "assembly polynomial matrices"))
       matrix.polynomial.push_back(
@@ -346,6 +348,8 @@ PreparedRecurrenceOperator<Scalar> parse_prepared_operator(
     PreparedMatrix<Scalar> matrix;
     matrix.identity = assembly_object.if_contains("identity") != nullptr &&
                       assembly_object.at("identity").as_bool();
+    if (const auto* identity = assembly_object.if_contains("exact_identity"))
+      matrix.exact_identity = std::string(identity->as_string());
     for (const auto& raw_matrix : as_array(
              assembly_object.at("poly"), "assembly polynomial matrices"))
       matrix.polynomial.push_back(
@@ -937,10 +941,16 @@ RetainedCompositeGeometry parse_retained_composite_geometry(
 std::string canonical_native_scc_capabilities(const json::value& raw) {
   const auto& capabilities = as_object(
       raw, "native SCC chart capabilities");
+  const bool identity_v = capabilities.at("identity_v").as_bool();
+  const bool epsilon_unimodular_v =
+      capabilities.if_contains("epsilon_unimodular_v") != nullptr
+          ? capabilities.at("epsilon_unimodular_v").as_bool()
+          : identity_v;
   return json::serialize(json::object{
       {"regular", capabilities.at("regular").as_bool()},
       {"identity_gauge", capabilities.at("identity_gauge").as_bool()},
-      {"identity_v", capabilities.at("identity_v").as_bool()},
+      {"identity_v", identity_v},
+      {"epsilon_unimodular_v", epsilon_unimodular_v},
       {"no_pseudo", capabilities.at("no_pseudo").as_bool()}});
 }
 
@@ -7776,6 +7786,14 @@ class PreparedChart final : public PreparedChartBase {
     return prepared_.assembly_matrix.has_value() &&
            prepared_.assembly_matrix->identity;
   }
+  bool has_assembly() const {
+    return prepared_.assembly_matrix.has_value();
+  }
+  const std::string& assembly_exact_identity() const {
+    static const std::string empty;
+    return prepared_.assembly_matrix.has_value()
+        ? prepared_.assembly_matrix->exact_identity : empty;
+  }
   bool has_regular_singleton_partition() const {
     if (prepared_.blocks.size() != prepared_.dimension) return false;
     std::vector<std::uint8_t> seen(prepared_.dimension, 0);
@@ -7995,6 +8013,17 @@ struct CompositeWorkContract {
 };
 
 template <typename Scalar>
+struct CompositeSpectralSourceTransform {
+  bool identity = true;
+  bool epsilon_unimodular = true;
+  std::string producer_identity;
+  std::string v_exact_identity;
+  std::string vinv_exact_identity;
+  std::string det_exact_identity;
+  PreparedSparseLocalMultiplierMatrix<Scalar> matrix;
+};
+
+template <typename Scalar>
 struct CompositeSCCBlock {
   std::uint32_t block = 0;
   std::vector<std::uint32_t> vertices;
@@ -8002,9 +8031,307 @@ struct CompositeSCCBlock {
   std::string principal_identity;
   bool regular = true;
   bool no_pseudo = false;
+  CompositeSpectralSourceTransform<Scalar> source_transform;
   std::optional<ExactJordanIndicialCertificate> exact_jordan_indicial;
   std::shared_ptr<PreparedChart<Scalar>> chart;
 };
+
+template <typename Scalar>
+CompositeSpectralSourceTransform<Scalar>
+parse_composite_spectral_source_transform(
+    const json::value& raw, std::uint32_t dimension,
+    std::uint32_t frame_width, const CompositeWorkContract& work,
+    const std::string& domain, const std::vector<std::string>& symbols,
+    bool identity_v, const std::string& assembly_exact_identity) {
+  const auto& object = as_object(
+      raw, "SCC spectral source transform");
+  require_exact_keys(object,
+      {"schema", "rows", "columns", "identity",
+       "epsilon_unimodular", "det_epsilon_valuation",
+       "v_exact_identity", "vinv_exact_identity", "det_exact_identity",
+       "exact_identity", "domain", "symbols", "entries"},
+      "SCC spectral source transform");
+  if (required_string(object, "schema") !=
+      "diffexp2-scc-spectral-source-transform-v1")
+    throw std::invalid_argument(
+        "unsupported SCC spectral source-transform schema");
+  const auto rows = as_u32(object.at("rows"),
+                           "spectral source-transform rows");
+  const auto columns = as_u32(object.at("columns"),
+                              "spectral source-transform columns");
+  if (rows != dimension || columns != dimension || dimension == 0)
+    throw std::invalid_argument(
+        "SCC spectral source-transform dimensions differ from its block");
+  if (required_string(object, "domain") != domain ||
+      parse_symbols(object) != symbols)
+    throw std::invalid_argument(
+        "SCC spectral source-transform field differs from its session");
+
+  CompositeSpectralSourceTransform<Scalar> transform;
+  transform.identity = object.at("identity").as_bool();
+  transform.epsilon_unimodular =
+      object.at("epsilon_unimodular").as_bool();
+  if (transform.identity != identity_v)
+    throw std::invalid_argument(
+        "SCC spectral source-transform identity claim differs from identity_v");
+  if (!transform.epsilon_unimodular ||
+      as_i32(object.at("det_epsilon_valuation"),
+             "spectral determinant epsilon valuation") != 0)
+    throw std::invalid_argument(
+        "SCC spectral source transform requires val_eps(det(V)) == 0");
+  transform.producer_identity = required_string(object, "exact_identity");
+  transform.v_exact_identity = required_string(
+      object, "v_exact_identity");
+  transform.vinv_exact_identity = required_string(
+      object, "vinv_exact_identity");
+  transform.det_exact_identity = required_string(
+      object, "det_exact_identity");
+  if (transform.producer_identity.empty() ||
+      transform.v_exact_identity.empty() ||
+      transform.vinv_exact_identity.empty() ||
+      transform.det_exact_identity.empty())
+    throw std::invalid_argument(
+        "SCC spectral source-transform exact identities must be nonempty");
+  if (assembly_exact_identity.empty() ||
+      transform.v_exact_identity != assembly_exact_identity)
+    throw std::invalid_argument(
+        "SCC spectral V identity differs from the retained assembly operator");
+
+  json::object producer_record;
+  try {
+    producer_record = as_object(
+        json::parse(transform.producer_identity),
+        "SCC spectral source-transform exact identity");
+  } catch (const std::exception&) {
+    throw std::invalid_argument(
+        "SCC spectral source-transform exact identity is not a valid structural JSON certificate");
+  }
+  require_exact_keys(producer_record,
+      {"schema", "state_basis", "target_recurrence_basis", "dimension",
+       "identity", "epsilon_unimodular", "det_epsilon_valuation",
+       "v_exact_identity", "vinv_exact_identity", "det_exact_identity",
+       "source_window", "serialization", "entries"},
+      "SCC spectral source-transform exact identity");
+  if (required_string(producer_record, "schema") !=
+          "diffexp2-scc-spectral-source-transform-identity-v1" ||
+      required_string(producer_record, "state_basis") !=
+          "reduced-g-after-spectral-assembly" ||
+      required_string(producer_record, "target_recurrence_basis") !=
+          "spectral-u" ||
+      as_u32(producer_record.at("dimension"),
+             "spectral identity dimension") != dimension ||
+      producer_record.at("identity").as_bool() != transform.identity ||
+      !producer_record.at("epsilon_unimodular").as_bool() ||
+      as_i32(producer_record.at("det_epsilon_valuation"),
+             "spectral identity determinant valuation") != 0 ||
+      required_string(producer_record, "v_exact_identity") !=
+          transform.v_exact_identity ||
+      required_string(producer_record, "vinv_exact_identity") !=
+          transform.vinv_exact_identity ||
+      required_string(producer_record, "det_exact_identity") !=
+          transform.det_exact_identity)
+    throw std::invalid_argument(
+        "SCC spectral source-transform fields differ from their exact structural identity");
+  const auto& source_window = as_object(
+      producer_record.at("source_window"),
+      "spectral source-transform identity window");
+  require_exact_keys(source_window,
+      {"epsilon_min", "epsilon_complete_max", "taylor_complete_max"},
+      "spectral source-transform identity window");
+  if (as_i32(source_window.at("epsilon_min"),
+             "spectral source epsilon minimum") != work.work_min ||
+      as_i32(source_window.at("epsilon_complete_max"),
+             "spectral source epsilon maximum") !=
+          work.work_complete_max ||
+      as_u32(source_window.at("taylor_complete_max"),
+             "spectral source Taylor maximum") != work.work_t_order)
+    throw std::invalid_argument(
+        "SCC spectral source-transform exact identity names a different work rectangle");
+  const auto& serialization = as_object(
+      producer_record.at("serialization"),
+      "spectral source-transform identity field");
+  require_exact_keys(serialization, {"domain", "symbols"},
+                     "spectral source-transform identity field");
+  if (required_string(serialization, "domain") != domain)
+    throw std::invalid_argument(
+        "SCC spectral source-transform exact identity names a different scalar domain");
+  const auto& identity_symbols = as_array(
+      serialization.at("symbols"),
+      "spectral source-transform identity symbols");
+  if (identity_symbols.size() != symbols.size())
+    throw std::invalid_argument(
+        "SCC spectral source-transform exact identity has a different regulator field");
+  for (std::size_t index = 0; index < symbols.size(); ++index) {
+    const auto& symbol = as_object(
+        identity_symbols[index],
+        "spectral source-transform identity symbol");
+    require_exact_keys(symbol, {"context", "name"},
+                       "spectral source-transform identity symbol");
+    if (required_string(symbol, "context") != "Global`" ||
+        required_string(symbol, "name") != symbols[index])
+      throw std::invalid_argument(
+          "SCC spectral source-transform exact identity regulator differs from its session");
+  }
+
+  transform.matrix.rows = rows;
+  transform.matrix.columns = columns;
+  transform.matrix.exact_identity = transform.producer_identity;
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> previous;
+  std::vector<std::uint8_t> active_rows(rows, 0);
+  std::vector<std::uint8_t> active_columns(columns, 0);
+  for (const auto& raw_entry_value : as_array(
+           object.at("entries"), "spectral source-transform entries")) {
+    const auto& raw_entry = as_object(
+        raw_entry_value, "spectral source-transform entry");
+    require_exact_keys(raw_entry,
+        {"row", "column", "exact_entry", "multiplier"},
+        "spectral source-transform entry");
+    const auto row = as_u32(raw_entry.at("row"),
+                            "spectral source-transform row");
+    const auto column = as_u32(raw_entry.at("column"),
+                               "spectral source-transform column");
+    const auto location = std::make_pair(row, column);
+    if (row >= rows || column >= columns ||
+        (previous.has_value() && *previous >= location))
+      throw std::invalid_argument(
+          "SCC spectral source-transform entries must be unique, in range, and row-major");
+    previous = location;
+    const auto exact_entry = required_string(raw_entry, "exact_entry");
+    if (exact_entry.empty())
+      throw std::invalid_argument(
+          "SCC spectral VInv entry identity must be nonempty");
+    const auto& raw_multiplier = as_object(
+        raw_entry.at("multiplier"),
+        "prepared spectral source-transform multiplier");
+    require_exact_keys(raw_multiplier,
+        {"epsilon_shift", "center_pole_order", "kernels",
+         "exact_identity", "proven_zero"},
+        "prepared spectral source-transform multiplier");
+    PreparedRationalTaylorMultiplier<Scalar> multiplier;
+    multiplier.epsilon_shift = as_i32(
+        raw_multiplier.at("epsilon_shift"),
+        "spectral source-transform epsilon shift");
+    const auto shifted_work_min = static_cast<std::int64_t>(work.work_min) +
+        multiplier.epsilon_shift;
+    const auto shifted_work_max =
+        static_cast<std::int64_t>(work.work_complete_max) +
+        multiplier.epsilon_shift;
+    if (shifted_work_min < std::numeric_limits<std::int32_t>::min() ||
+        shifted_work_min > std::numeric_limits<std::int32_t>::max() ||
+        shifted_work_max < std::numeric_limits<std::int32_t>::min() ||
+        shifted_work_max > std::numeric_limits<std::int32_t>::max())
+      throw std::invalid_argument(
+          "SCC spectral source-transform shift overflows the retained epsilon frame");
+    multiplier.center_pole_order = as_u32(
+        raw_multiplier.at("center_pole_order"),
+        "spectral source-transform center-pole order");
+    if (multiplier.center_pole_order != 0)
+      throw std::invalid_argument(
+          "t-independent SCC spectral VInv cannot have a center pole");
+    multiplier.exact_identity = required_string(
+        raw_multiplier, "exact_identity");
+    if (multiplier.exact_identity != exact_entry)
+      throw std::invalid_argument(
+          "prepared spectral multiplier identity differs from its exact VInv entry");
+    multiplier.proven_zero = raw_multiplier.at("proven_zero").as_bool();
+    if (multiplier.proven_zero)
+      throw std::invalid_argument(
+          "structurally zero SCC spectral source-transform entries must be omitted");
+    for (const auto& raw_kernel : as_array(
+             raw_multiplier.at("kernels"),
+             "spectral source-transform epsilon kernels")) {
+      std::vector<Scalar> kernel;
+      for (const auto& coefficient : as_array(
+               raw_kernel, "spectral source-transform Taylor kernel"))
+        kernel.push_back(parse_scalar<Scalar>(coefficient));
+      multiplier.kernels.push_back(std::move(kernel));
+    }
+    if (multiplier.kernels.size() != frame_width ||
+        std::any_of(multiplier.kernels.begin(), multiplier.kernels.end(),
+            [&](const auto& kernel) {
+              return kernel.size() !=
+                  static_cast<std::size_t>(work.work_t_order) + 1;
+            }))
+      throw std::invalid_argument(
+          "active SCC spectral source-transform kernels do not cover the exact work rectangle");
+    active_rows[row] = 1;
+    active_columns[column] = 1;
+    transform.matrix.entries.push_back(
+        typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry{
+            row, column, std::move(multiplier)});
+  }
+  if (std::any_of(active_rows.begin(), active_rows.end(),
+                  [](const auto active) { return active == 0; }) ||
+      std::any_of(active_columns.begin(), active_columns.end(),
+                  [](const auto active) { return active == 0; }))
+    throw std::invalid_argument(
+        "certified SCC spectral VInv has an empty structural row or column");
+  const auto& identity_entries = as_array(
+      producer_record.at("entries"),
+      "spectral source-transform identity entries");
+  if (identity_entries.size() != transform.matrix.entries.size())
+    throw std::invalid_argument(
+        "SCC spectral source-transform entries differ from their exact structural identity");
+  for (std::size_t index = 0; index < identity_entries.size(); ++index) {
+    const auto& identity_entry = as_object(
+        identity_entries[index],
+        "spectral source-transform identity entry");
+    require_exact_keys(identity_entry,
+        {"row", "column", "exact_entry", "epsilon_shift",
+         "center_pole_order"},
+        "spectral source-transform identity entry");
+    const auto& prepared_entry = transform.matrix.entries[index];
+    if (as_u32(identity_entry.at("row"),
+               "spectral identity entry row") != prepared_entry.row ||
+        as_u32(identity_entry.at("column"),
+               "spectral identity entry column") != prepared_entry.column ||
+        required_string(identity_entry, "exact_entry") !=
+            prepared_entry.multiplier.exact_identity ||
+        as_i32(identity_entry.at("epsilon_shift"),
+               "spectral identity epsilon shift") !=
+            prepared_entry.multiplier.epsilon_shift ||
+        as_u32(identity_entry.at("center_pole_order"),
+               "spectral identity center-pole order") !=
+            prepared_entry.multiplier.center_pole_order)
+      throw std::invalid_argument(
+          "prepared SCC spectral VInv entry differs from its exact structural identity");
+  }
+  if (transform.identity) {
+    if (transform.matrix.entries.size() != dimension)
+      throw std::invalid_argument(
+          "identity SCC spectral VInv must contain exactly one diagonal entry per component");
+    const auto one = ScalarTraits<Scalar>::one();
+    const auto scalar_identical = [&](const Scalar& left,
+                                      const Scalar& right) {
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        return acb_equal(left.raw(), right.raw());
+      else
+        return left == right;
+    };
+    for (std::uint32_t component = 0; component < dimension; ++component) {
+      const auto& entry = transform.matrix.entries[component];
+      if (entry.row != component || entry.column != component ||
+          entry.multiplier.epsilon_shift != 0 ||
+          entry.multiplier.center_pole_order != 0)
+        throw std::invalid_argument(
+            "identity SCC spectral VInv is not a shift-zero structural diagonal");
+      for (std::size_t epsilon = 0;
+           epsilon < entry.multiplier.kernels.size(); ++epsilon)
+        for (std::size_t taylor = 0;
+             taylor < entry.multiplier.kernels[epsilon].size(); ++taylor) {
+          const auto& coefficient =
+              entry.multiplier.kernels[epsilon][taylor];
+          const bool expected_one = epsilon == 0 && taylor == 0;
+          if ((expected_one && !scalar_identical(coefficient, one)) ||
+              (!expected_one &&
+               !ScalarTraits<Scalar>::is_zero(coefficient)))
+            throw std::invalid_argument(
+                "identity SCC spectral VInv contains a nonidentity retained coefficient");
+        }
+    }
+  }
+  return transform;
+}
 
 ExactJordanIndicialCertificate parse_exact_jordan_indicial_record(
     const json::value& raw, std::uint32_t expected_dimension) {
@@ -8887,9 +9214,14 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             : combine_local_solutions(
                   incoming, checkpoint_identity + ":combined-source:" +
                                 std::to_string(target_block));
+        source = target_recurrence_source(
+            std::move(source), target_block,
+            checkpoint_identity + ":target-vinv:" +
+                std::to_string(target_block));
         // A signed-shift halo is a property of the complete target source.
-        // Restricting predecessors separately would reject exact below-frame
-        // pieces which cancel only after all incoming block edges are summed.
+        // Restricting predecessors or individual VInv entries separately
+        // would reject exact below-frame pieces which cancel only after the
+        // complete physical source is summed and transformed.
         source = restrict_local_epsilon_frame_strict_lower(
             source, work_.work_min, work_.work_complete_max,
             checkpoint_identity + ":source-frame:" +
@@ -9226,7 +9558,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"scc_column_solves", column_solves_.load()},
         {"scc_column_solve_ms", column_solve_ms()},
         {"capability_evidence", json::object{
-             {"identity_v", "native-retained-assembly"},
+             {"identity_v",
+              "native-retained-spectral-assembly-and-target-inverse"},
              {"regular", regular_ready
                   ? "collision-bound-producer-certificate"
                   : "not-required-by-selected-scope"},
@@ -9396,6 +9729,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           : combine_local_solutions(
                 incoming, checkpoint_identity + ":combined-source:" +
                               std::to_string(target_block));
+      source = target_recurrence_source(
+          std::move(source), target_block,
+          checkpoint_identity + ":target-vinv:" +
+              std::to_string(target_block));
       source = restrict_local_epsilon_frame_strict_lower(
           source, work_.work_min, work_.work_complete_max,
           checkpoint_identity + ":source-frame:" +
@@ -9489,7 +9826,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
             return !block.regular || block.vertices.empty() ||
                    block.chart->dimension() != block.vertices.size() ||
-                   !block.chart->has_identity_assembly() ||
+                   !spectral_frame_ready(block) ||
                    !block.chart->has_regular_singleton_partition();
           }))
         return false;
@@ -9527,7 +9864,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
             return block.vertices.empty() ||
                    block.chart->dimension() != block.vertices.size() ||
-                   !block.chart->has_identity_assembly() ||
+                   !spectral_frame_ready(block) ||
                    !block.exact_jordan_indicial.has_value();
           }))
         return false;
@@ -9561,6 +9898,28 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         blocks_.begin(), blocks_.end(), [](const auto& block) {
           return block.vertices.size() == 1;
         });
+  }
+
+  static bool spectral_frame_ready(
+      const CompositeSCCBlock<Scalar>& block) {
+    const auto& transform = block.source_transform;
+    if (!block.chart->has_assembly() ||
+        !transform.epsilon_unimodular ||
+        transform.matrix.rows != block.chart->dimension() ||
+        transform.matrix.columns != block.chart->dimension() ||
+        transform.identity != block.chart->has_identity_assembly())
+      return false;
+    if (transform.identity)
+      return true;  // Backward-compatible identity manifests need no payload.
+    if (transform.producer_identity.empty() ||
+        transform.v_exact_identity.empty() ||
+        transform.vinv_exact_identity.empty() ||
+        transform.det_exact_identity.empty() ||
+        transform.v_exact_identity !=
+            block.chart->assembly_exact_identity() ||
+        transform.matrix.entries.empty())
+      return false;
+    return true;
   }
 
   bool regular_coupling_ready(
@@ -10057,6 +10416,30 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         solution.taylor_complete_max != work_.work_t_order)
       throw std::invalid_argument(
           std::string(label) + " lies outside the retained SCC work rectangle");
+  }
+
+  LocalSolution<Scalar> target_recurrence_source(
+      LocalSolution<Scalar> physical_source, std::uint32_t target_block,
+      std::string checkpoint_identity) const {
+    if (target_block >= blocks_.size())
+      throw std::invalid_argument(
+          "native SCC target spectral transform block is out of range");
+    const auto& block = blocks_[target_block];
+    if (!spectral_frame_ready(block))
+      throw std::invalid_argument(
+          "native SCC target lacks a certified epsilon-unimodular spectral frame");
+    if (physical_source.dimension != block.vertices.size())
+      throw std::invalid_argument(
+          "physical SCC source dimension differs from its target spectral frame");
+    if (block.source_transform.identity)
+      return physical_source;
+    auto transformed = apply_prepared_sparse_local_matrix(
+        block.source_transform.matrix, physical_source,
+        std::move(checkpoint_identity));
+    if (!transformed.has_value())
+      throw std::logic_error(
+          "certified nonidentity SCC VInv produced no structural source");
+    return std::move(*transformed);
   }
 
   void validate_block_result(const NativeLocalRun<Scalar>& native,
@@ -13979,12 +14362,17 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
         canonical_native_scc_capabilities(raw_block);
     const bool regular = raw_block.at("regular").as_bool();
     const bool no_pseudo = raw_block.at("no_pseudo").as_bool();
+    const bool identity_v = raw_block.at("identity_v").as_bool();
+    const bool epsilon_unimodular_v =
+        raw_block.if_contains("epsilon_unimodular_v") != nullptr
+            ? raw_block.at("epsilon_unimodular_v").as_bool()
+            : identity_v;
     if (!raw_block.at("identity_gauge").as_bool())
       throw std::invalid_argument(
           "native SCC preparation requires an exact identity gauge");
-    if (!raw_block.at("identity_v").as_bool())
+    if (!epsilon_unimodular_v)
       throw std::invalid_argument(
-          "native SCC preparation requires an exact identity spectral transform");
+          "native SCC preparation requires an exact t-independent epsilon-unimodular spectral frame");
     // `no_pseudo` is retained as producer provenance, not an admission
     // decision.  Exact Rational execution reconstructs every T/P/R branch
     // from the retained affine Jordan certificate; a producer may therefore
@@ -14022,7 +14410,10 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
     if (*chart->native_scc_capabilities() != declared_capabilities)
       throw std::invalid_argument(
           "SCC block capability claims differ from the retained chart metadata");
-    if (!chart->has_identity_assembly())
+    if (!chart->has_assembly())
+      throw std::invalid_argument(
+          "SCC spectral-frame capability requires a retained assembly operator");
+    if (chart->has_identity_assembly() != identity_v)
       throw std::invalid_argument(
           "SCC identity_v capability contradicts the retained assembly operator");
     if (!chart->geometry_record().has_value())
@@ -14045,6 +14436,22 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
         chart->frame_width() != frame_width)
       throw std::invalid_argument(
           "SCC block chart frame differs from the exact work contract");
+
+    CompositeSpectralSourceTransform<Scalar> source_transform;
+    source_transform.identity = true;
+    source_transform.epsilon_unimodular = true;
+    source_transform.matrix.rows = chart->dimension();
+    source_transform.matrix.columns = chart->dimension();
+    if (const auto* raw_transform =
+            raw_block.if_contains("source_transform")) {
+      source_transform = parse_composite_spectral_source_transform<Scalar>(
+          *raw_transform, chart->dimension(), frame_width, work,
+          session->domain, session->symbols, identity_v,
+          chart->assembly_exact_identity());
+    } else if (!identity_v) {
+      throw std::invalid_argument(
+          "nonidentity SCC spectral assembly requires a certified target-source VInv transform");
+    }
 
     std::optional<ExactJordanIndicialCertificate> exact_indicial;
     if (const auto* raw_indicial =
@@ -14092,7 +14499,8 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
 
     blocks[block] = CompositeSCCBlock<Scalar>{
         block, std::move(vertices), source_handle, principal_identity,
-        regular, no_pseudo, std::move(exact_indicial), std::move(chart)};
+        regular, no_pseudo, std::move(source_transform),
+        std::move(exact_indicial), std::move(chart)};
   }
 
   std::set<std::pair<std::uint32_t, std::uint32_t>> expected_cross;

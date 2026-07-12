@@ -75,6 +75,11 @@ struct PreparedLag {
 template <typename Scalar>
 struct PreparedMatrix : PreparedLag<Scalar> {
   bool identity = false;
+  // Collision-bound producer identity of the exact spectral assembly V.
+  // Ordinary recurrence requests may omit it, but a persistent CompositeSCC
+  // with a nonidentity spectral frame requires it to bind the retained
+  // assembly to the separately prepared target-source V^-1 transform.
+  std::string exact_identity;
 };
 
 struct JordanBlock {

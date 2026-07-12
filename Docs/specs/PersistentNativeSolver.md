@@ -403,16 +403,16 @@ coupling multipliers; type erasure occurs only in the session registry.
 General SCC execution remains disabled, but the deliberately narrow
 `scc.solve_column` operation is enabled when stats certify
 `exact-rational-regular-scalar-block-dag-column-v1` or the multidimensional
-`exact-rational-regular-block-dag-column-v2`. The latter requires a regular
-singleton recurrence partition inside every retained diagonal block. The
-explicit Wolfram `SolveNativeSCCBasisColumn` migration seam accepts both
-regular scopes and validates their corresponding statistics, capability, and
-full column provenance. The native-only
-`exact-rational-regular-singular-scalar-block-dag-column-v1` scope also
-accepts scalar singular blocks when every chart has identity gauge/assembly,
-the coupling preserves sector tags, and no pseudo step is present. C++
-derives each affine scalar indicial root from retained exact
-`Nhat_0 d_0^-1` coefficients and verifies every captured T/R offset against
+`exact-rational-regular-block-dag-column-v2`, or the corresponding
+`exact-rational-regular-singular-{scalar,jordan}-block-dag-column` scopes.
+The regular multidimensional scope requires a singleton recurrence partition;
+the singular Jordan scope instead retains a complete exact affine-Jordan
+certificate for every block. The explicit Wolfram
+`SolveNativeSCCBasisColumn` seam accepts all four scopes and validates their
+statistics, capability, and full column provenance. Singular execution
+requires identity gauge/assembly, sector-preserving couplings, and no pseudo
+step. C++ derives the complete affine Jordan operator from retained exact
+`Nhat_0 d_0^-1` coefficients and verifies every captured T/P/R offset against
 it; a self-consistent caller schedule is not evidence. Unsupported retained
 composites report
 `execution_implemented: false` and fail loudly if submitted to the native

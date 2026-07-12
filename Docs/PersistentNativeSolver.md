@@ -92,11 +92,15 @@ The implemented recurrence-session commands are:
 The current Wolfram preparation seam is
 ``Solve`PrepareNativeSCCComposite[sccEnvelope, req]``.  It captures each
 diagonal block's ordinary grouped homogeneous request without executing it,
-requires one shared coefficient field and work rectangle, builds the exact
+requires one shared coefficient field, takes the exact union of each
+diagonal block's independently proved work rectangle, builds the exact
 parent/block/coupling manifest, and calls
 ``CppBackend`PreparePersistentSCC[groups, manifest]``.  This first slice is
-strictly limited to regular collision-free blocks with identity gauge and
-spectral transforms.  It always prepares `BlockSequentialStrict`; it never
+limited to collision-free regular or exact affine-Jordan blocks with identity
+gauge and spectral transforms.  C++ reconstructs and retains the complete
+Rational Jordan indicial certificate; `regular` is a classification rather
+than an admission predicate. It always prepares `BlockSequentialStrict`; it
+never
 constructs a monolithic alternative and is not yet used by production
 `SolveHomogeneous` or transport.  A bounded collision-checked Solve cache
 reuses live handles, checks native stats before an early hit, and fails loudly
@@ -105,38 +109,42 @@ at capacity rather than evicting a public SCC object.
 The explicit
 ``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
 seedLocalComponent:1]`` seam consumes the compact run-only data in that cache
-for the regular scalar-v1 and multidimensional-v2 scopes.  Each block must
-provide one canonical `a=b=p=0` homogeneous run per local component.  The seam
+for the regular scalar/multidimensional and regular-singular scalar/Jordan
+scopes.  Every capture retains exact producer-side `(a,b,P)` task metadata;
+roots and log ceilings are never reconstructed from Acb values. The seam
 derives every component from its exact flattened eps^0 unit tensor, selects the
 requested seed without trusting capture order, orders reachable targets by the
-exact SCC certificate, and derives each target's correctly dimensioned
-zero-initial particular template from a captured run.  Native coupling and
+exact SCC certificate, and propagates the exact log ceiling through the DAG.
+Each target's zero-initial particular request and complete T/P/R schedule are
+pieces are built once from that target's exact Jordan data, then independently
+re-certified by C++. Native coupling and
 recurrence operate on retained `LocalSolution` values and return only an
 opaque local handle plus exact column provenance.  Exact parent geometry and
 analytic prescriptions are preserved.  The three-argument scalar-v1 wire
 request and returned record are unchanged, and neither scope is connected to
 production `SolveHomogeneous` or transport dispatch.
 
-The native protocol also advertises
-`exact-rational-regular-singular-scalar-block-dag-column-v1` for a narrower
-C++-only migration slice. At least one diagonal block is singular; every
-block is scalar, has exact identity gauge/assembly and no pseudo-resonant
-family collision, and every active coupling has center pole order zero so it
-preserves the exact `(a,b,p)` sector family. Couplings may have a nonzero
-constant Taylor coefficient, allowing an exact source resonance to create a
-new log member, and signed epsilon shifts retain the ordinary strict lower
-frame guard.
+The native protocol advertises both
+`exact-rational-regular-singular-scalar-block-dag-column-v1` and
+`exact-rational-regular-singular-jordan-block-dag-column-v2`. At least one
+diagonal block is singular; every block has exact identity gauge/assembly and
+no pseudo-resonant family collision, and every active coupling has center pole
+order zero so it preserves the exact `(a,b,p)` sector family. Couplings may
+have a nonzero constant Taylor coefficient, allowing an exact source resonance
+to create a new log member, and signed epsilon shifts retain the ordinary
+strict lower-frame guard.
 
 This capability does not trust a caller-consistent schedule. For each
-retained Rational chart, C++ reconstructs the affine indicial root `(a_i,b_i)`
-from the exact scalar `Nhat_0 d_0^-1` operator, accepting only epsilon support
-zero and one. Submitted captured steps must then satisfy exactly
+retained Rational chart, C++ reconstructs the complete affine Jordan operator
+from exact `Nhat_0 d_0^-1`, accepting only affine epsilon support and proving
+the declared block partition, equal roots, unit superdiagonal, and zero
+off-block entries. Submitted captured steps must then satisfy exactly
 `da=a_target+n-a_i` and `db=b_target-b_i`; the seed's resonant `n=0` step
 therefore binds its tag to the retained root, and every descendant tag is
 also checked against its in-memory predecessor source. Pseudo steps,
-nonidentity spectral frames, center-pole tag shifts, and multidimensional
-singular blocks are loud unsupported cases. The existing Wolfram producer
-still emits only the regular capability; production dispatch is unchanged.
+nonidentity spectral frames, and center-pole tag shifts remain loud unsupported
+cases. The Wolfram producer executes both scalar and multidimensional Jordan
+scopes through the explicit seam; production dispatch is unchanged.
 
 The exact-rational `local.match` migration seam consumes retained regular
 locals from one session. It proves that the two chart coordinates name the

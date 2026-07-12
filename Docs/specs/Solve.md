@@ -346,7 +346,8 @@ handle yet.
 
 The accepted slice is deliberately narrow and loud.  The input must be a
 lazy multi-block SCC envelope, the configured backend must be persistent C++
-with grouped spectral assembly, every diagonal block must be regular, and
+with grouped spectral assembly, every diagonal block must be regular or have
+an exact affine-Jordan indicial operator, and
 `Gauge`, `GaugeInverse`, `V`, and `VInv` must each be the exact identity.
 Every family collision/pseudo-compensation record must be absent.  This
 explicit composite API fixes `BlockSequentialStrict` and does not consult the
@@ -359,16 +360,20 @@ radius.
 For each diagonal block the function calls the ordinary
 `solveHomogeneousCore` under dynamically isolated homogeneous/static caches,
 with the established grouped-request capture flag and a request-only guard.
-The capture throws before any native solve.  All resulting request groups
-must have one identical scalar domain, ordered regulator-name list,
-precision, frame base, frame width, and `nmax`; that `nmax` must equal
+Before capture, the ordinary homogeneous frame-budget calculation runs once
+per block. The composite takes the exact union (minimum frame base, maximum
+frame top), and each capture reuses its already computed symbolic plan while
+serializing into that common rectangle. The capture throws before any native
+solve. All resulting request groups must then have one identical scalar
+domain, ordered regulator-name list, precision, frame base, frame width, and
+`nmax`; that `nmax` must equal
 
 ```
 req["TOrder"] + 2 + 2 IntegrationSequence["CouplingDepth"] .
 ```
 
-No second recurrence-preparation path widens or coerces unequal block frames.
-An unequal capture is an unsupported E6.
+The forced union must contain every independently proved block rectangle; a
+narrower override or a capture which fails to reproduce the union is E6.
 
 The composite work bounds come from the captured static rectangle:
 `work_min = fb` and `work_complete_max = fb + w - 1`.  The public requested
@@ -394,9 +399,10 @@ owning persistent sessions.  Hashes are indices only and no monolithic
 fallback or production dispatch change is part of this seam.
 
 The same full-`SameQ` cache entry retains a compact private execution
-descriptor: only each block's dynamic run records, block dimensions, exact
-graph/field/frame contract, parent identity, input precision, last checked
-native statistics, and public handle.  The large captured static operators,
+descriptor: each block's compact dynamic run records, exact producer-side
+`(a,b,P)` task metadata, precomputed per-seed descendant run plans, block
+dimensions, exact graph/field/frame contract, parent identity, input precision,
+last checked native statistics, and public handle. The large captured static operators,
 block systems, and work request are released after C++ owns them.  The
 descriptor is accepted only inside the enclosing exact-signature record and
 must reproduce its public handle, so the hash is never an execution identity.
@@ -416,33 +422,36 @@ This is an explicit, non-production execution seam over a prepared composite.
 one so the existing three-argument scalar-v1 call is byte- and
 behavior-compatible.  The function calls `PrepareNativeSCCComposite` only to
 obtain or validate the collision-bound cached entry; it does not recapture a
-live entry.  Every captured block group must contain exactly one canonical
-exact-rational regular homogeneous request per local component: `p=0`,
-`a=b=0`, fixed lower frame, one exact eps^0 unit initial tensor, and one
-`R(0,0), T(n,0)` schedule step per retained Jordan singleton.  Wolfram derives
-the seeded local component from each flattened initial tensor and proves that
-the group covers a complete permutation of the block's local components; it
-does not trust capture order.  Analytic-regulator fields, pseudo collisions,
-nonidentity assembly, singular blocks, and noncanonical roots are loud.
+live entry. Every captured block group retains its exact producer-side
+`(a,b,P)` task identity and exactly one canonical homogeneous request per
+local component. Wolfram derives the seeded local component from the unique
+eps^0 unit in each flattened log-zero tensor and proves that the group covers
+a complete permutation; it does not trust capture order. Regular blocks use
+the established `a=b=p=0` singleton schedules. Singular blocks are admitted
+only when C++ retains a complete exact affine-Jordan certificate for every
+diagonal operator. Analytic-regulator fields, pseudo collisions, nonidentity
+assembly, and noncanonical Jordan operators are loud.
 
-The selected seed uses its captured run byte-for-byte after dropping the
-immutable operator fields.  Reachable descendants are listed in the exact SCC
-topological order.  Each target run is deterministically derived from that
-target block's certified component-one run by replacing only the complete
-dimension-times-frame initial tensor with exact zero, every component validity
-with null, and `has_initial=false`; `source=null` remains in the JSON because
-the typed C++ composite injects the in-memory predecessor `LocalSolution`
-directly into the recurrence.  No coefficient JSON roundtrip occurs.
+The selected seed uses its captured run byte-for-byte after dropping immutable
+operator fields. Reachable descendants are listed in exact SCC topological
+order. Preparation propagates the seed's exact affine tag and log ceiling
+through the DAG; at each target it applies the same source-aware `logCeiling`
+rule as `SolveParticular` and builds a complete exact T/P/R schedule from that
+target's Jordan blocks. The zero initial tensor has
+`(P+1)*dimension*frameWidth` entries and null validity for every log/component
+pair. `source=null` remains in JSON because the typed C++ composite injects
+the in-memory predecessor `LocalSolution` directly. C++ independently
+re-certifies the schedule and source tag. No coefficient JSON roundtrip occurs.
 
-Local metadata is built with exact `a=b=0,p=0`, the retained parent chart
-geometry, and the complete ordered analytic prescriptions.  Exact rational
+Local metadata is built with the seed/target's exact `(a,b,p)`, the retained
+parent chart geometry, and the complete ordered analytic prescriptions. Exact rational
 radii are serialized as rational strings, not approximate Acb pairs.
 Checkpoint identities bind the cache key of the already full-`SameQ`-checked
 composite signature, parent identity, public SCC handle, seed run, and
 deterministic target templates.  The native summary must advertise exactly
 the scalar-v1 or multidimensional-v2 execution scope selected from the block
 dimensions and carry matching SCC/global-basis provenance and
-`json_coefficients=0`.  In v2 the exact column-identity record must also bind
+`json_coefficients=0`. In multidimensional v2 the exact column-identity record must also bind
 the derived zero-based seed-local component;
 otherwise the newly retained local is released and the call fails loudly.
 The returned capitalized `Session`/`Local` pair is accepted by the existing

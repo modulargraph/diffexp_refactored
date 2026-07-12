@@ -58,15 +58,16 @@ result = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
     catchDE2[DiffExp2`Solve`PrepareNativeSCCComposite[cs, request]]];
   stats = If[FailureQ[prepared], prepared,
     DiffExp2`CppBackend`PersistentSCCStatistics[prepared]];
-  propagated = If[FailureQ[prepared], prepared,
-    catchDE2[DiffExp2`Solve`SolveNativeSCCBasisColumn[
-      cs, request, 1]]];
+  basis = If[FailureQ[prepared], prepared,
+    catchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
+      cs, request, 2]]];
+  propagated = If[FailureQ[basis], basis, First[basis["Columns"]]];
   evaluated = If[FailureQ[propagated], propagated,
     DiffExp2`CppBackend`EvaluatePersistentLocal[propagated,
       <|"exact" -> "1/2"|>, <|"tail_estimate" -> False|>, 60]];
-  {cs, prepared, stats, propagated, evaluated}];
+  {cs, prepared, stats, basis, propagated, evaluated}];
 
-{cs, prepared, stats, propagated, evaluated} = result;
+{cs, prepared, stats, basis, propagated, evaluated} = result;
 value = decodeValue[evaluated];
 eps0 = coefficient[value, 0];
 eps1 = coefficient[value, 1];
@@ -77,6 +78,13 @@ ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
   TrueQ[Lookup[stats, "execution_implemented", False]] &&
   Lookup[stats, "execution_scope", None] ===
     "acb-regular-block-dag-column-v2" &&
+  Lookup[basis, "Type", None] === "DiffExp2NativeSCCBasis" &&
+  Lookup[basis, "Dimension", None] === 3 &&
+  Lookup[Lookup[basis, "Columns", {}], "BasisIndex", {}] ===
+    Range[3] &&
+  Lookup[basis["NativeSummary"], "columns", None] === 3 &&
+  Lookup[basis["NativeSummary"], "worker_threads", None] === 2 &&
+  TrueQ[Lookup[basis["NativeSummary"], "atomic_retention", False]] &&
   Length[eps0] === 3 && Length[eps1] === 3 &&
   Max[Abs[N[eps0 - {1, 0, 0}, 50]]] < 10^-40 &&
   Max[Abs[N[eps1 - {0, 1/2, 0}, 50]]] < 10^-40 &&
@@ -86,9 +94,9 @@ ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
     "acb-regular-block-dag-column-v2" &&
   Lookup[propagated["NativeSummary"], "json_coefficients", None] === 0;
 
-If[AssociationQ[propagated] &&
-    StringQ[Lookup[propagated, "Local", None]],
-  Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[propagated]]];
+If[AssociationQ[basis] && ListQ[Lookup[basis, "Columns", None]],
+  Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+    basis["Columns"]]];
 If[AssociationQ[prepared] && StringQ[Lookup[prepared, "SCC", None]],
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[prepared]]];
 DiffExp2`Solve`ClearSolveCaches[];

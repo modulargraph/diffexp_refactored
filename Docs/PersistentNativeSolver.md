@@ -136,6 +136,15 @@ analytic prescriptions are preserved.  The three-argument scalar-v1 wire
 request and returned record are unchanged, and neither scope is connected to
 production `SolveHomogeneous` or transport dispatch.
 
+``Solve`SolveNativeSCCBasis[sccEnvelope, req, threads]`` builds the same
+certified request for every physical basis index, submits them through one
+ordered `scc.solve_columns` worker pool, and returns opaque local handles
+sorted by that physical index. Native retention is atomic: a failed column
+publishes none of the batch, while successful batches never return coefficient
+slabs. This complete-basis seam is the receiving state used by native
+plan-driven matching; automatic production transport dispatch is still being
+migrated.
+
 The native protocol advertises both
 `exact-rational-regular-singular-scalar-block-dag-column-v1` and
 `exact-rational-regular-singular-jordan-block-dag-column-v2`. At least one

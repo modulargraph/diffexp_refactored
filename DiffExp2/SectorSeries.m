@@ -10,7 +10,7 @@ ValidateLocalSolution::usage = "ValidateLocalSolution[ls] checks every structura
 CanonicalizeLocalSolution::usage = "CanonicalizeLocalSolution[ls] merges identical and integer-spaced same-(b,p) sectors, drops syntactically zero sectors, sorts by (a,b,p).";
 ChartImSign::usage = "ChartImSign[ls] derives the chart Im-sign (+1|-1|None) from the Prescriptions list; conflicting odd-multiplicity entries are a loud error. THE one sign derivation in DiffExp2.";
 EvaluateLocalSolution::usage = "EvaluateLocalSolution[ls, tval, opts] evaluates at the chart point tval. Options: \"UsePade\", \"TOrderReduction\", \"ImSign\"; the internal \"ComputeTailEstimates\" option defaults True. Returns <|\"Value\" -> EpsSeries, \"PadeFallbacks\" -> ..., \"TailEstimates\" -> list|Missing[\"NotComputed\"]|>.";
-PrepareRationalMultiplier::usage = "PrepareRationalMultiplier[shape, c, var] classifies and prepares the exact rational multiplier c(var,eps) for a LocalSolution (or a shape association with EpsWindow, TWindow, Radius, and optional Dimension). It returns the epsilon shift, center-pole order, finite Taylor kernels, collision-proof exact identity, and an explicit ProvenZero structural certificate.";
+PrepareRationalMultiplier::usage = "PrepareRationalMultiplier[shape, c, var] classifies and prepares the exact rational multiplier c(var,eps) for a LocalSolution (or a shape association with EpsWindow, TWindow, Radius, and optional Dimension). It returns the epsilon shift, center-pole order, finite Taylor kernels, the complete analytic numerator/denominator polynomials behind each epsilon kernel, a collision-proof exact identity, and an explicit ProvenZero structural certificate.";
 ExactExpressionIdentity::usage = "ExactExpressionIdentity[expr, var] returns the deterministic context-explicit recursive-AST certificate used by exact multiplier and SCC matrix identities.";
 MultiplyRational::usage = "MultiplyRational[ls, c] multiplies by a rational c(t, eps): center poles shift a, far poles fold into Taylor parts, interior poles are a loud error, eps-denominators shift the windows.";
 ReexpandLocalSolution::usage = "ReexpandLocalSolution[ls, newCenter, targetOrder, opts] re-expands around a regular point inside the chart, producing a single-(0,0,0)-sector LocalSolution with the explicit truncation contract.";
@@ -348,7 +348,7 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], shapeData, cT, num, den, nv, dv,
    jmin, jcount, cj, d0, troots, wp, M, Q, kmin, kmax, ncols,
    prepSignature, prepKey, cached, prepared, provenZero, exactIdentity,
-   storePrepared},
+   analyticRationals, storePrepared},
   shapeData = multiplierShape[shape];
   wp = cfg["WorkingPrecision"];
   cT = Together[c /. var -> var];
@@ -382,6 +382,7 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
   storePrepared[] := Module[{},
     prepared = <|"EpsilonShift" -> jmin, "CenterPoleOrder" -> M,
       "TaylorKernels" -> Q, "ExactIdentity" -> exactIdentity,
+      "AnalyticRationals" -> analyticRationals,
       "ProvenZero" -> provenZero|>;
     If[Length[$multiplyRationalPreparedCache] >=
         $multiplyRationalPreparedCacheMax,
@@ -396,6 +397,9 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
     jmin = 0; M = 0;
     Q = ConstantArray[0, {jcount, ncols}];
     If[!provenZero, Q[[1, 1]] = cT];
+    analyticRationals = Table[<|
+      "NumeratorCoefficients" -> If[j == 1, {cT}, {0}],
+      "DenominatorCoefficients" -> {1}|>, {j, jcount}];
     Return[storePrepared[], Module]];
   nv = epsValPoly[num, eps]; dv = epsValPoly[den, eps];
   jmin = nv - dv;
@@ -474,6 +478,18 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
            swell or hit the kernel's small default extra-precision limit. *)
         Map[groundTaylorCoefficient[#, wp] &, csr]]],
     {j, 1, jcount}];
+  (* A finite Taylor kernel does not determine an unseen tail.  Retain the
+     complete rational function for every epsilon coefficient after removing
+     the common center pole.  The native certificate layer serializes these
+     polynomials only for public integrand rows, replays their division
+     recurrence through every stored Taylor coefficient, and then uses a
+     denominator-separation bound on its chosen witness circle. *)
+  analyticRationals = Map[Module[
+      {qj = Cancel[Together[#*var^M]], num1, den1},
+      num1 = Numerator[qj]; den1 = Denominator[qj];
+      <|"NumeratorCoefficients" -> CoefficientList[num1, var],
+        "DenominatorCoefficients" -> CoefficientList[den1, var]|>] &,
+    cj];
   storePrepared[]];
 
 MultiplyRational[ls0_Association, c_, var_Symbol] := Module[

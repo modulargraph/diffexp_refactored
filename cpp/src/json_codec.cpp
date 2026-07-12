@@ -2898,7 +2898,9 @@ class StoredLocal final : public StoredLocalBase {
       const auto end_point =
           RealEvaluationPoint::rational(primitive_end.str());
       StoredLineIntegral result;
-      if (certify_tail && tail_model_.model.has_value()) {
+      if (certify_tail && (tail_model_.model.has_value() ||
+                           (rational_row_tail_model_.has_value() &&
+                            rational_row_tail_model_->model.has_value()))) {
         const auto begin_modulus = primitive_begin.sign() < 0
             ? -primitive_begin : primitive_begin;
         const auto end_modulus = primitive_end.sign() < 0
@@ -2910,20 +2912,28 @@ class StoredLocal final : public StoredLocalBase {
               "planned line endpoint is not strictly inside its exact chart radius");
         const auto witness =
             (outer + chart.radius) / Rational(2);
-        auto certified = integrate_regular_local_line_with_certified_tail(
-            solution_, *tail_model_.model, begin_point, end_point,
-            options, witness.str());
+        auto certified = tail_model_.model.has_value()
+            ? integrate_regular_local_line_with_certified_tail(
+                  solution_, *tail_model_.model, begin_point, end_point,
+                  options, witness.str())
+            : integrate_rational_row_local_line_with_certified_tail(
+                  solution_, *rational_row_tail_model_->model,
+                  begin_point, end_point, options, witness.str());
         result = std::move(certified.integral);
       } else {
         result = integrate_stored_local_line(
             solution_, begin_point, end_point, options);
         if (certify_tail) {
+          const auto requested_status = rational_row_tail_model_.has_value()
+              ? rational_row_tail_model_->status : tail_model_.status;
+          const auto& requested_detail = rational_row_tail_model_.has_value()
+              ? rational_row_tail_model_->detail : tail_model_.detail;
           result.diagnostics.tail_certificate_requested = true;
           result.diagnostics.tail_certificate_status =
-              tail_majorant_status_name(tail_model_.status);
+              tail_majorant_status_name(requested_status);
           result.value.error.provenance =
-              std::string(tail_majorant_status_name(tail_model_.status)) +
-              ": " + tail_model_.detail +
+              std::string(tail_majorant_status_name(requested_status)) +
+              ": " + requested_detail +
               "; returned value remains stored Taylor truncation only";
           result.diagnostics.detail = result.value.error.provenance;
         }
@@ -3039,6 +3049,30 @@ class StoredLocal final : public StoredLocalBase {
       result["retained_derivation"] = *retained_derivation_;
       result["strong_derivation_ownership"] =
           retained_owner_ != nullptr;
+    }
+    if (rational_row_tail_model_.has_value()) {
+      json::object projected_tail{
+          {"capability",
+           "retained-rational-row-analytic-line-tail-v1"},
+          {"status", tail_majorant_status_name(
+                         rational_row_tail_model_->status)},
+          {"attached", rational_row_tail_model_->model.has_value()},
+          {"detail", rational_row_tail_model_->detail},
+          // The derived model is scratch state.  Completed certified line
+          // envelopes are checkpointed exactly; a fresh transport
+          // contraction after restore re-derives this model from its restored
+          // source and caller-supplied prepared row.
+          {"checkpoint_serialized", false}};
+      if (rational_row_tail_model_->model.has_value()) {
+        projected_tail["source_checkpoint_identity"] =
+            rational_row_tail_model_->model->source_checkpoint_identity;
+        projected_tail["local_checkpoint_identity"] =
+            rational_row_tail_model_->model->local_checkpoint_identity;
+        projected_tail["row_exact_identity"] =
+            rational_row_tail_model_->model->row_exact_identity;
+      }
+      result["rational_row_line_tail_majorant"] =
+          std::move(projected_tail);
     }
     return result;
   }
@@ -3269,6 +3303,21 @@ class StoredLocal final : public StoredLocalBase {
   const LocalSolution<Scalar>& solution() const { return solution_; }
   const RegularTaylorTailModelResult& tail_model() const {
     return tail_model_;
+  }
+  void attach_rational_row_line_tail_model(
+      RationalRowLineTailModelResult<Scalar> model) {
+    if (!retained_derivation_.has_value() ||
+        required_string(*retained_derivation_, "schema") !=
+            "diffexp2-retained-rational-row-local-application-v1" ||
+        retained_owner_ == nullptr || rational_row_tail_model_.has_value())
+      throw std::invalid_argument(
+          "rational-row line-tail model requires one newly derived retained scalar local");
+    if (model.model.has_value() &&
+        model.model->local_checkpoint_identity !=
+            solution_.checkpoint_identity)
+      throw std::invalid_argument(
+          "rational-row line-tail model checkpoint binding differs from its scalar local");
+    rational_row_tail_model_ = std::move(model);
   }
   const std::optional<OwnerBoundResidualBinding>& residual_binding() const {
     return residual_binding_;
@@ -3504,6 +3553,8 @@ class StoredLocal final : public StoredLocalBase {
   std::shared_ptr<void> retained_owner_;
   RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(
       "tail model is unavailable for this retained local");
+  std::optional<RationalRowLineTailModelResult<Scalar>>
+      rational_row_tail_model_;
   std::shared_ptr<PhysicalEquationOwnerBase> equation_owner_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
       physical_equation_;
@@ -3579,10 +3630,18 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
 
     const auto& raw_multiplier = as_object(
         entry.at("multiplier"), "prepared rational local-row multiplier");
-    require_exact_keys(raw_multiplier,
-        {"epsilon_shift", "center_pole_order", "kernels",
-         "exact_identity", "proven_zero"},
-        "prepared rational local-row multiplier");
+    const bool has_analytic_coefficients =
+        raw_multiplier.if_contains("analytic_coefficients") != nullptr;
+    if (has_analytic_coefficients)
+      require_exact_keys(raw_multiplier,
+          {"epsilon_shift", "center_pole_order", "kernels",
+           "exact_identity", "proven_zero", "analytic_coefficients"},
+          "prepared rational local-row multiplier");
+    else
+      require_exact_keys(raw_multiplier,
+          {"epsilon_shift", "center_pole_order", "kernels",
+           "exact_identity", "proven_zero"},
+          "prepared rational local-row multiplier");
     if (!raw_multiplier.at("proven_zero").is_bool())
       throw std::invalid_argument(
           "prepared rational local-row structural-zero fact must be boolean");
@@ -3623,6 +3682,37 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
         kernel.push_back(parse_scalar<Scalar>(coefficient));
       multiplier.kernels.push_back(std::move(kernel));
     }
+    if (has_analytic_coefficients) {
+      const auto& raw_coefficients = as_array(
+          raw_multiplier.at("analytic_coefficients"),
+          "prepared rational local-row analytic coefficients");
+      if (raw_coefficients.size() != multiplier.kernels.size())
+        throw std::invalid_argument(
+            "prepared rational local-row analytic coefficient count differs from its epsilon kernels");
+      std::vector<PreparedRationalAnalyticCoefficient<Scalar>> coefficients;
+      coefficients.reserve(raw_coefficients.size());
+      for (const auto& raw_coefficient : raw_coefficients) {
+        const auto& coefficient = as_object(
+            raw_coefficient,
+            "prepared rational local-row analytic coefficient");
+        require_exact_keys(coefficient, {"numerator", "denominator"},
+                           "prepared rational local-row analytic coefficient");
+        PreparedRationalAnalyticCoefficient<Scalar> parsed;
+        for (const auto& value : as_array(
+                 coefficient.at("numerator"),
+                 "prepared rational local-row analytic numerator"))
+          parsed.numerator.push_back(parse_scalar<Scalar>(value));
+        for (const auto& value : as_array(
+                 coefficient.at("denominator"),
+                 "prepared rational local-row analytic denominator"))
+          parsed.denominator.push_back(parse_scalar<Scalar>(value));
+        if (parsed.numerator.empty() || parsed.denominator.empty())
+          throw std::invalid_argument(
+              "prepared rational local-row analytic numerator/denominator cannot be empty");
+        coefficients.push_back(std::move(parsed));
+      }
+      multiplier.analytic_coefficients = std::move(coefficients);
+    }
     matrix.entries.push_back(
         typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry{
             0, column, std::move(multiplier)});
@@ -3656,7 +3746,8 @@ std::shared_ptr<StoredLocalBase> build_rational_row_local(
     const std::string& local_handle, const json::object& request,
     slong precision_bits,
     const std::shared_ptr<StoredLocal<Scalar>>& source,
-    const std::shared_ptr<StoredLocalBase>& erased_source) {
+    const std::shared_ptr<StoredLocalBase>& erased_source,
+    bool prepare_line_tail = true) {
   if (source == nullptr || erased_source == nullptr ||
       source.get() != erased_source.get())
     throw std::logic_error(
@@ -3759,17 +3850,25 @@ std::shared_ptr<StoredLocalBase> build_rational_row_local(
       {"provenance_identity", provenance_identity}};
   const auto derived_operator_identity = json::serialize(
       canonical_json_value(operator_provenance));
+  std::optional<RationalRowLineTailModelResult<Scalar>> rational_row_tail;
+  if (prepare_line_tail)
+    rational_row_tail = derive_rational_row_line_tail_model(
+        matrix, source->solution(), source->tail_model(), solution);
   const auto elapsed_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
   NativeLocalDiagnostics diagnostics;
   diagnostics.top_valid = output_top_valid;
   diagnostics.kernel_ms = elapsed_ms;
-  return make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+  auto retained = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
       local_handle, source->source_chart(), derived_operator_identity,
       std::move(solution), precision_bits,
       std::vector<PseudoHit<Scalar>>{}, diagnostics, std::nullopt,
       std::move(derivation),
       std::static_pointer_cast<void>(erased_source));
+  if (rational_row_tail.has_value())
+    retained->attach_rational_row_line_tail_model(
+        std::move(*rational_row_tail));
+  return retained;
 }
 
 struct ParsedEndpointLimitPolicy {
@@ -11963,10 +12062,19 @@ void validate_prepared_rational_row_structure(
           std::string(label) + " columns are not strictly ordered in range");
     previous = column;
     const auto& multiplier = as_object(entry.at("multiplier"), label);
-    require_exact_keys(
-        multiplier,
-        {"epsilon_shift", "center_pole_order", "kernels",
-         "exact_identity", "proven_zero"}, label);
+    const bool has_analytic_coefficients =
+        multiplier.if_contains("analytic_coefficients") != nullptr;
+    if (has_analytic_coefficients)
+      require_exact_keys(
+          multiplier,
+          {"epsilon_shift", "center_pole_order", "kernels",
+           "exact_identity", "proven_zero", "analytic_coefficients"},
+          label);
+    else
+      require_exact_keys(
+          multiplier,
+          {"epsilon_shift", "center_pole_order", "kernels",
+           "exact_identity", "proven_zero"}, label);
     (void)as_i32(multiplier.at("epsilon_shift"), label);
     (void)as_u32(multiplier.at("center_pole_order"), label);
     if (required_string(multiplier, "exact_identity").empty() ||
@@ -11982,6 +12090,23 @@ void validate_prepared_rational_row_structure(
       if (as_array(raw_kernel, label).empty())
         throw std::invalid_argument(
             std::string(label) + " contains an empty Taylor kernel");
+    if (has_analytic_coefficients) {
+      const auto& coefficients = as_array(
+          multiplier.at("analytic_coefficients"), label);
+      if (coefficients.size() != kernels.size())
+        throw std::invalid_argument(
+            std::string(label) +
+            " analytic coefficient count differs from its epsilon kernels");
+      for (const auto& raw_coefficient : coefficients) {
+        const auto& coefficient = as_object(raw_coefficient, label);
+        require_exact_keys(coefficient, {"numerator", "denominator"}, label);
+        if (as_array(coefficient.at("numerator"), label).empty() ||
+            as_array(coefficient.at("denominator"), label).empty())
+          throw std::invalid_argument(
+              std::string(label) +
+              " contains an empty analytic numerator or denominator");
+      }
+    }
   }
 }
 
@@ -13491,7 +13616,8 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
       throw std::logic_error(
           "transport endpoint Rational source changed coefficient domain");
     projected = build_rational_row_local<Rational>(
-        projected_handle, row_request, precision_bits, typed, source);
+        projected_handle, row_request, precision_bits, typed, source,
+        false);
   } else if (domain == "acb") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
@@ -13499,7 +13625,8 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
       throw std::logic_error(
           "transport endpoint Acb source changed coefficient domain");
     projected = build_rational_row_local<ComplexBall>(
-        projected_handle, row_request, precision_bits, typed, source);
+        projected_handle, row_request, precision_bits, typed, source,
+        false);
   } else {
     throw std::invalid_argument(
         "transport endpoint row requires one numeric coefficient domain");
@@ -14118,7 +14245,8 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
               "transport contraction Rational source changed coefficient domain");
         projected = build_rational_row_local<Rational>(
             observable.projected_local_handles[tile], row_request,
-            precision_bits, typed, source);
+            precision_bits, typed, source,
+            observable.tail_policy != TransportTailPolicy::Stored);
       } else {
         const auto typed =
             std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
@@ -14127,7 +14255,8 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
               "transport contraction Acb source changed coefficient domain");
         projected = build_rational_row_local<ComplexBall>(
             observable.projected_local_handles[tile], row_request,
-            precision_bits, typed, source);
+            precision_bits, typed, source,
+            observable.tail_policy != TransportTailPolicy::Stored);
       }
       const auto line_epsilon = live_line_epsilon_intersection(
           observable.epsilon.requested,

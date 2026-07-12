@@ -16,6 +16,19 @@
 
 namespace diffexp2 {
 
+// Full analytic completion of one epsilon coefficient of a prepared rational
+// multiplier after its common center pole has been removed.  The finite
+// Taylor kernels below are sufficient for stored algebra, but never determine
+// an unseen tail.  A caller which wants a rigorous projected-line certificate
+// may additionally retain these numerator/denominator polynomials.  The tail
+// layer independently replays polynomial division through the complete stored
+// Taylor order before trusting this completion.
+template <typename Scalar>
+struct PreparedRationalAnalyticCoefficient {
+  std::vector<Scalar> numerator;    // ascending powers of the chart variable
+  std::vector<Scalar> denominator;  // ascending powers; constant is nonzero
+};
+
 // Prepared exact rational multiplication for a finite local-sector slab.
 // Wolfram still owns exact pole classification in the first SCC milestone:
 // it expands c(t,eps) as
@@ -33,6 +46,8 @@ struct PreparedRationalTaylorMultiplier {
   std::int32_t epsilon_shift = 0;
   std::uint32_t center_pole_order = 0;
   std::vector<std::vector<Scalar>> kernels;  // [epsilon][Taylor]
+  std::optional<std::vector<PreparedRationalAnalyticCoefficient<Scalar>>>
+      analytic_coefficients;
   std::string exact_identity;
   // Exact preparation provenance, never a conclusion drawn from a numeric
   // slab.  An Acb tensor whose entries currently enclose exact zero remains

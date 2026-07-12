@@ -1,6 +1,7 @@
 #pragma once
 
 #include "diffexp2/line_integration.hpp"
+#include "diffexp2/local_algebra.hpp"
 #include "diffexp2/matching.hpp"
 #include "diffexp2/recurrence.hpp"
 
@@ -94,6 +95,42 @@ struct CertifiedStoredLineIntegral {
   RegularTaylorLineTailCertificate tail;
 };
 
+// A rational-row projection is generally not a solution of the source
+// homogeneous q/C system, so it must not inherit that equation owner.  This
+// separate model retains only what is needed to certify the scalar line tail:
+// a source full-local Cauchy model plus independently verified analytic
+// rational completions for every active multiplier epsilon coefficient.
+template <typename Scalar>
+struct RationalRowLineTailEntryModel {
+  std::uint32_t column = 0;
+  std::int32_t epsilon_shift = 0;
+  std::uint32_t center_pole_order = 0;
+  std::vector<PreparedRationalAnalyticCoefficient<Scalar>>
+      analytic_coefficients;
+  std::string exact_identity;
+};
+
+template <typename Scalar>
+struct RationalRowLineTailModel {
+  EpsilonWindow epsilon;
+  std::uint32_t taylor_complete_max = 0;
+  ChartGeometry chart;
+  std::vector<Prescription> prescriptions;
+  RegularTaylorTailModel source;
+  std::vector<RationalRowLineTailEntryModel<Scalar>> entries;
+  std::string row_exact_identity;
+  std::string source_checkpoint_identity;
+  std::string local_checkpoint_identity;
+  std::string provenance;
+};
+
+template <typename Scalar>
+struct RationalRowLineTailModelResult {
+  TailMajorantStatus status = TailMajorantStatus::Unsupported;
+  std::optional<RationalRowLineTailModel<Scalar>> model;
+  std::string detail;
+};
+
 namespace tail_majorant_detail {
 
 inline Rational abs_rational(const Rational& value) {
@@ -103,6 +140,12 @@ inline Rational abs_rational(const Rational& value) {
 template <typename Scalar>
 bool exact_scalar_zero(const Scalar& value) {
   return ScalarTraits<Scalar>::is_zero(value);
+}
+
+inline bool finite_scalar(const Rational&) { return true; }
+
+inline bool finite_scalar(const ComplexBall& value) {
+  return value.is_finite();
 }
 
 inline std::string status_prefix(TailMajorantStatus status) {
@@ -122,6 +165,18 @@ inline RegularTaylorTailModelResult unsupported_model(std::string detail) {
 }
 
 inline RegularTaylorTailModelResult inconclusive_model(std::string detail) {
+  return {TailMajorantStatus::Inconclusive, std::nullopt, std::move(detail)};
+}
+
+template <typename Scalar>
+RationalRowLineTailModelResult<Scalar> unsupported_rational_row_model(
+    std::string detail) {
+  return {TailMajorantStatus::Unsupported, std::nullopt, std::move(detail)};
+}
+
+template <typename Scalar>
+RationalRowLineTailModelResult<Scalar> inconclusive_rational_row_model(
+    std::string detail) {
   return {TailMajorantStatus::Inconclusive, std::nullopt, std::move(detail)};
 }
 
@@ -976,6 +1031,160 @@ derive_materialized_regular_homogeneous_tail_model(
           "regular homogeneous tail model propagated through retained match materialization"};
 }
 
+// Bind a prepared rational row to the full analytic source theorem without
+// pretending that the projected scalar satisfies the source vector ODE.  The
+// model is attached only at the private direct-output seam of the finite row
+// application, and each supplied rational completion must independently
+// reproduce every stored Taylor-kernel coefficient by polynomial division.
+// Missing completions leave stored integration fully available but make
+// full-local certification explicitly unsupported.
+template <typename Scalar>
+RationalRowLineTailModelResult<Scalar>
+derive_rational_row_line_tail_model(
+    const PreparedSparseLocalMultiplierMatrix<Scalar>& matrix,
+    const LocalSolution<Scalar>& source,
+    const RegularTaylorTailModelResult& source_tail,
+    const LocalSolution<Scalar>& projected) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "rational-row tail models support Rational or Acb locals only");
+  using namespace tail_majorant_detail;
+
+  validate_local_solution(source, false);
+  validate_local_solution(projected, false);
+  if (matrix.rows != 1 || matrix.columns != source.dimension ||
+      matrix.exact_identity.empty())
+    throw std::invalid_argument(
+        "rational-row tail derivation received a malformed prepared row");
+  if (source_tail.status != TailMajorantStatus::Certified ||
+      !source_tail.model.has_value()) {
+    const auto detail =
+        "rational-row line tail requires a certified ordinary source local: " +
+        source_tail.detail;
+    return source_tail.status == TailMajorantStatus::Inconclusive
+        ? inconclusive_rational_row_model<Scalar>(detail)
+        : unsupported_rational_row_model<Scalar>(detail);
+  }
+  try {
+    require_model_binding(*source_tail.model, source);
+  } catch (const std::invalid_argument&) {
+    return inconclusive_rational_row_model<Scalar>(
+        "rational-row source tail model is not immutably bound to its retained local");
+  }
+  if (!source.error.empty() || !projected.error.empty())
+    return unsupported_rational_row_model<Scalar>(
+        "rational-row tail derivation cannot discard an existing local error envelope");
+  if (projected.dimension != 1 ||
+      projected.taylor_complete_max != source.taylor_complete_max ||
+      !same_chart_geometry(projected.chart, source.chart) ||
+      !same_prescriptions(projected.prescriptions, source.prescriptions))
+    return unsupported_rational_row_model<Scalar>(
+        "rational-row projection left its source chart or complete Taylor order");
+
+  // build_rational_row_local calls this immediately on the direct output of
+  // apply_prepared_sparse_local_matrix, before either object is moved.  Do not
+  // repeat that potentially dominant convolution merely for certification;
+  // instead recheck its exact frame contract here, while the private StoredLocal
+  // attachment gate prevents this model from being assigned to any other
+  // derivation kind.  The analytic completion itself is still independently
+  // replayed coefficient by coefficient below.
+  std::int32_t expected_min = source.epsilon.min_power;
+  std::int32_t expected_complete = source.epsilon.complete_max;
+  if (!matrix.entries.empty()) {
+    expected_min = std::numeric_limits<std::int32_t>::max();
+    expected_complete = std::numeric_limits<std::int32_t>::max();
+    for (const auto& entry : matrix.entries) {
+      expected_min = std::min(expected_min,
+          local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(source.epsilon.min_power) +
+                  entry.multiplier.epsilon_shift,
+              "rational-row tail minimum"));
+      expected_complete = std::min(expected_complete,
+          local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(source.epsilon.complete_max) +
+                  entry.multiplier.epsilon_shift,
+              "rational-row tail complete maximum"));
+    }
+  }
+  if (projected.epsilon.min_power != expected_min ||
+      projected.epsilon.complete_max > expected_complete)
+    return inconclusive_rational_row_model<Scalar>(
+        "retained rational-row epsilon frame is not a complete restriction of its direct finite product");
+
+  RationalRowLineTailModel<Scalar> model;
+  model.epsilon = projected.epsilon;
+  model.taylor_complete_max = projected.taylor_complete_max;
+  model.chart = projected.chart;
+  model.prescriptions = projected.prescriptions;
+  model.source = *source_tail.model;
+  model.row_exact_identity = matrix.exact_identity;
+  model.source_checkpoint_identity = source.checkpoint_identity;
+  model.local_checkpoint_identity = projected.checkpoint_identity;
+  model.entries.reserve(matrix.entries.size());
+
+  for (const auto& entry : matrix.entries) {
+    if (entry.row != 0 || entry.column >= source.dimension)
+      throw std::invalid_argument(
+          "rational-row tail entry lies outside its scalar row");
+    const auto& multiplier = entry.multiplier;
+    if (!multiplier.analytic_coefficients.has_value())
+      return unsupported_rational_row_model<Scalar>(
+          "prepared rational-row entry has only a finite Taylor kernel; no analytic numerator/denominator completion was retained");
+    const auto& analytic = *multiplier.analytic_coefficients;
+    if (analytic.size() != multiplier.kernels.size())
+      return inconclusive_rational_row_model<Scalar>(
+          "prepared rational-row analytic completion count differs from its epsilon kernels");
+    for (std::size_t epsilon = 0; epsilon < analytic.size(); ++epsilon) {
+      const auto& rational = analytic[epsilon];
+      if (rational.numerator.empty() || rational.denominator.empty() ||
+          std::any_of(rational.numerator.begin(), rational.numerator.end(),
+                      [](const Scalar& value) {
+                        return !finite_scalar(value);
+                      }) ||
+          std::any_of(rational.denominator.begin(), rational.denominator.end(),
+                      [](const Scalar& value) {
+                        return !finite_scalar(value);
+                      }))
+        return inconclusive_rational_row_model<Scalar>(
+            "prepared rational-row analytic completion is empty or nonfinite");
+      if (divisor_contains_zero(rational.denominator.front()))
+        return inconclusive_rational_row_model<Scalar>(
+            "prepared rational-row analytic denominator contains zero at the chart center");
+      std::vector<Scalar> replayed_kernel;
+      replayed_kernel.reserve(source.taylor_width());
+      for (std::size_t n = 0; n < source.taylor_width(); ++n) {
+        auto rhs = n < rational.numerator.size()
+            ? rational.numerator[n] : ScalarTraits<Scalar>::zero();
+        const auto max_lag = std::min(n, rational.denominator.size() - 1);
+        for (std::size_t lag = 1; lag <= max_lag; ++lag)
+          rhs -= rational.denominator[lag] * replayed_kernel[n - lag];
+        auto coefficient = rhs / rational.denominator.front();
+        if (n >= multiplier.kernels[epsilon].size() ||
+            !encloses_recurrence_value(
+                multiplier.kernels[epsilon][n], coefficient))
+          return inconclusive_rational_row_model<Scalar>(
+              "prepared rational-row analytic completion does not reproduce every retained Taylor-kernel coefficient");
+        replayed_kernel.push_back(std::move(coefficient));
+      }
+    }
+    model.entries.push_back(RationalRowLineTailEntryModel<Scalar>{
+        entry.column, multiplier.epsilon_shift,
+        multiplier.center_pole_order, analytic,
+        multiplier.exact_identity});
+  }
+  model.provenance =
+      "certified rational-row line-tail model; source ordinary homogeneous "
+      "q/N Cauchy theorem retained; full analytic numerator/denominator "
+      "payload replayed through every finite multiplier kernel; projected "
+      "scalar receives no homogeneous q/C equation ownership; "
+      "source_operator_identity=" + model.source.operator_identity +
+      "; source_checkpoint_identity=" + model.source_checkpoint_identity +
+      "; row_exact_identity=" + model.row_exact_identity +
+      "; local_checkpoint_identity=" + model.local_checkpoint_identity;
+  return {TailMajorantStatus::Certified, std::move(model),
+          "rational-row analytic completion is bound to its certified source and finite projection"};
+}
+
 inline RegularTaylorDiskCertificate certify_regular_taylor_disk(
     const RegularTaylorTailModel& model,
     const std::string& witness_radius_exact) {
@@ -1257,6 +1466,241 @@ inline RegularTaylorLineTailCertificate certify_regular_taylor_line_tail(
   result.detail =
       "integrated Cauchy coefficient majorant certifies the unseen Taylor "
       "tail on the complete line interval";
+  return result;
+}
+
+template <typename Scalar>
+RegularTaylorLineTailCertificate certify_rational_row_line_tail(
+    const RationalRowLineTailModel<Scalar>& model,
+    const LocalSolution<Scalar>& projected,
+    const RealEvaluationPoint& lower_input,
+    const RealEvaluationPoint& upper_input,
+    const std::string& witness_radius_exact,
+    const EpsilonWindow& delivered_epsilon) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "rational-row line tails support Rational or Acb locals only");
+  using namespace tail_majorant_detail;
+
+  validate_local_solution(projected, false);
+  if (projected.checkpoint_identity != model.local_checkpoint_identity ||
+      projected.dimension != 1 ||
+      projected.epsilon.min_power != model.epsilon.min_power ||
+      projected.epsilon.complete_max != model.epsilon.complete_max ||
+      projected.taylor_complete_max != model.taylor_complete_max ||
+      !same_chart_geometry(projected.chart, model.chart) ||
+      !same_prescriptions(projected.prescriptions, model.prescriptions))
+    throw std::invalid_argument(
+        "rational-row line-tail model is not bound to this retained scalar local");
+  (void)delivered_epsilon.width();
+  if (delivered_epsilon.min_power < model.epsilon.min_power ||
+      delivered_epsilon.complete_max > model.epsilon.complete_max)
+    throw std::invalid_argument(
+        "rational-row line tail requests epsilon rows outside its complete projected window");
+
+  const auto lower = line_integration_detail::require_exact_rational_point(
+      lower_input, "rational-row tail-line lower");
+  const auto upper = line_integration_detail::require_exact_rational_point(
+      upper_input, "rational-row tail-line upper");
+  integration_detail::validate_interval(lower, upper);
+  const Rational radius(witness_radius_exact);
+  RegularTaylorLineTailCertificate result;
+  result.disk = certify_regular_taylor_disk(model.source, radius.str());
+  if (result.disk.status != TailMajorantStatus::Certified) {
+    result.status = result.disk.status;
+    result.detail = result.disk.detail;
+    return result;
+  }
+
+  const auto lower_modulus = abs_rational(Rational(lower.exact_coordinate));
+  const auto upper_modulus = abs_rational(Rational(upper.exact_coordinate));
+  if (!(lower_modulus < radius) || !(upper_modulus < radius)) {
+    result.status = TailMajorantStatus::Inconclusive;
+    result.detail =
+        "rational-row line endpoint is not strictly inside the tail witness disk";
+    return result;
+  }
+  const auto radius_lower = exact_rational_lower(radius);
+  const auto radius_upper = exact_rational_upper(radius);
+  if (radius_lower.is_zero()) {
+    result.status = TailMajorantStatus::Inconclusive;
+    result.detail =
+        "finite-precision rational-row witness radius has no positive lower bound";
+    return result;
+  }
+
+  const auto rational_circle_upper = [&](const auto& rational,
+                                         bool* certified) {
+    auto numerator_upper = Magnitude::zero();
+    for (std::size_t degree = 0; degree < rational.numerator.size(); ++degree)
+      numerator_upper += Magnitude::upper_abs(
+          local_detail::to_ball(rational.numerator[degree])) *
+          radius_upper.power_upper(static_cast<ulong>(degree));
+    auto denominator_remainder = Magnitude::zero();
+    for (std::size_t degree = 1; degree < rational.denominator.size(); ++degree)
+      denominator_remainder += Magnitude::upper_abs(
+          local_detail::to_ball(rational.denominator[degree])) *
+          radius_upper.power_upper(static_cast<ulong>(degree));
+    const auto denominator_lower = Magnitude::positive_difference_lower(
+        Magnitude::lower_abs(
+            local_detail::to_ball(rational.denominator.front())),
+        denominator_remainder);
+    if (denominator_lower.is_zero() || !denominator_lower.is_finite()) {
+      *certified = false;
+      return Magnitude::zero();
+    }
+    const auto bound = numerator_upper / denominator_lower;
+    if (!bound.is_finite()) {
+      *certified = false;
+      return Magnitude::zero();
+    }
+    return bound;
+  };
+
+  const auto arm_factor = [&](const Rational& arm_radius,
+                              std::uint32_t pole_order,
+                              bool* certified) {
+    if (arm_radius.is_zero()) return Magnitude::zero();
+    const auto first_exponent =
+        static_cast<std::int64_t>(model.taylor_complete_max) + 2 -
+        static_cast<std::int64_t>(pole_order);
+    if (first_exponent <= 0) {
+      *certified = false;
+      return Magnitude::zero();
+    }
+    const auto ratio = exact_rational_upper(arm_radius) / radius_lower;
+    Magnitude gap;
+    const auto geometric = geometric_tail_factor(
+        ratio, static_cast<ulong>(first_exponent), &gap);
+    if (gap.is_zero()) {
+      *certified = false;
+      return Magnitude::zero();
+    }
+    Magnitude radius_scale;
+    if (pole_order == 0) {
+      radius_scale = radius_upper;
+    } else if (pole_order == 1) {
+      radius_scale = Magnitude::one();
+    } else {
+      Rational positive_power(1);
+      for (std::uint32_t count = 1; count < pole_order; ++count)
+        positive_power *= radius;
+      const auto lower_power = exact_rational_lower(positive_power);
+      if (lower_power.is_zero()) {
+        *certified = false;
+        return Magnitude::zero();
+      }
+      radius_scale = lower_power.reciprocal_upper();
+    }
+    return radius_scale * geometric /
+           Magnitude::from_ui(static_cast<ulong>(first_exponent));
+  };
+
+  struct EntryBounds {
+    const RationalRowLineTailEntryModel<Scalar>* entry = nullptr;
+    std::vector<Magnitude> rational_circle;
+    Magnitude integral_factor = Magnitude::zero();
+  };
+  std::vector<EntryBounds> entry_bounds;
+  entry_bounds.reserve(model.entries.size());
+  bool factors_certified = true;
+  for (const auto& entry : model.entries) {
+    EntryBounds bounds;
+    bounds.entry = &entry;
+    bounds.rational_circle.reserve(entry.analytic_coefficients.size());
+    for (const auto& rational : entry.analytic_coefficients)
+      bounds.rational_circle.push_back(
+          rational_circle_upper(rational, &factors_certified));
+    if (lower.sign < 0 && upper.sign > 0) {
+      bounds.integral_factor += arm_factor(
+          lower_modulus, entry.center_pole_order, &factors_certified);
+      bounds.integral_factor += arm_factor(
+          upper_modulus, entry.center_pole_order, &factors_certified);
+    } else {
+      const auto outer = lower_modulus < upper_modulus
+          ? upper_modulus : lower_modulus;
+      bounds.integral_factor = arm_factor(
+          outer, entry.center_pole_order, &factors_certified);
+    }
+    entry_bounds.push_back(std::move(bounds));
+  }
+  if (!factors_certified) {
+    result.status = TailMajorantStatus::Inconclusive;
+    result.detail =
+        "rational-row denominator separation, endpoint ratio, or first-unseen integrability bound was inconclusive";
+    return result;
+  }
+
+  result.integral.frame = delivered_epsilon;
+  result.integral.guarantee = ErrorGuarantee::Certified;
+  result.integral.absolute.reserve(delivered_epsilon.width());
+  for (std::int64_t power64 = delivered_epsilon.min_power;
+       power64 <= delivered_epsilon.complete_max; ++power64) {
+    auto output_bound = Magnitude::zero();
+    for (const auto& bounds : entry_bounds) {
+      const auto& entry = *bounds.entry;
+      for (std::size_t epsilon = 0;
+           epsilon < bounds.rational_circle.size(); ++epsilon) {
+        const auto source_power = power64 -
+            static_cast<std::int64_t>(entry.epsilon_shift) -
+            static_cast<std::int64_t>(epsilon);
+        if (source_power < model.source.epsilon.min_power ||
+            source_power > model.source.epsilon.complete_max)
+          continue;
+        const auto source_index = static_cast<std::size_t>(
+            source_power - model.source.epsilon.min_power);
+        output_bound += bounds.rational_circle[epsilon] *
+            result.disk.cauchy_circle_upper.at(source_index) *
+            bounds.integral_factor;
+      }
+    }
+    result.integral.absolute.push_back(std::move(output_bound));
+  }
+  result.integral.provenance =
+      "certified full-local rational-row line tail; source Gronwall/Cauchy "
+      "circle bound times verified analytic rational multiplier bounds; "
+      "entry-wise center-pole integration majorant; strict epsilon "
+      "convolution; analytic prescriptions retained in absolute value; " +
+      model.provenance + "; witness_radius_exact=" + radius.str();
+  result.status = TailMajorantStatus::Certified;
+  result.detail =
+      "verified rational multiplier and source Cauchy majorants certify every unseen projected Taylor contribution to the line integral";
+  return result;
+}
+
+template <typename Scalar>
+CertifiedStoredLineIntegral
+integrate_rational_row_local_line_with_certified_tail(
+    const LocalSolution<Scalar>& projected,
+    const RationalRowLineTailModel<Scalar>& model,
+    const RealEvaluationPoint& lower,
+    const RealEvaluationPoint& upper,
+    const StoredLineIntegrationOptions& options,
+    const std::string& witness_radius_exact) {
+  CertifiedStoredLineIntegral result;
+  result.integral = integrate_stored_local_line(
+      projected, lower, upper, options);
+  result.tail = certify_rational_row_line_tail(
+      model, projected, lower, upper, witness_radius_exact,
+      options.delivered_epsilon);
+  result.integral.diagnostics.tail_certificate_requested = true;
+  result.integral.diagnostics.tail_certificate_status =
+      tail_majorant_detail::status_prefix(result.tail.status);
+  result.integral.diagnostics.tail_witness_radius_exact =
+      witness_radius_exact;
+  if (result.tail.status == TailMajorantStatus::Certified) {
+    result.integral.value.error = result.tail.integral;
+    result.integral.scope =
+        LineIntegrationScope::FullLocalWithCertifiedTail;
+    result.integral.diagnostics.detail = result.tail.detail;
+  } else {
+    result.integral.value.error.provenance =
+        tail_majorant_detail::status_prefix(result.tail.status) + ": " +
+        result.tail.detail +
+        "; returned value remains stored Taylor truncation only";
+    result.integral.diagnostics.detail =
+        result.integral.value.error.provenance;
+  }
   return result;
 }
 

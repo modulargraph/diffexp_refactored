@@ -2687,15 +2687,35 @@ sccSerializationField[spec_, cs_Association] := Module[
     "symbol_identities" -> (sccSymbolIdentity /@ symbols)|>];
 
 cppPreparedRationalMultiplierJSON[prepared_Association,
-    inputDigits_Integer, cs_Association] := <|
-  (* epsilon_shift is deliberately signed.  scc.prepare retains it and the
-     later execution work contract proves that work_min supplies its halo. *)
-  "epsilon_shift" -> prepared["EpsilonShift"],
-  "center_pole_order" -> prepared["CenterPoleOrder"],
-  "kernels" -> Map[cppScalar[#, inputDigits, cs] &,
-    prepared["TaylorKernels"], {2}],
-  "exact_identity" -> prepared["ExactIdentity"],
-  "proven_zero" -> TrueQ[prepared["ProvenZero"]]|>;
+    inputDigits_Integer, cs_Association, includeAnalyticTail_:False] := Module[
+  {encoded = <|
+      (* epsilon_shift is deliberately signed.  scc.prepare retains it and the
+         later execution work contract proves that work_min supplies its halo. *)
+      "epsilon_shift" -> prepared["EpsilonShift"],
+      "center_pole_order" -> prepared["CenterPoleOrder"],
+      "kernels" -> Map[cppScalar[#, inputDigits, cs] &,
+        prepared["TaylorKernels"], {2}],
+      "exact_identity" -> prepared["ExactIdentity"],
+      "proven_zero" -> TrueQ[prepared["ProvenZero"]]|>, rationals},
+  If[TrueQ[includeAnalyticTail],
+    rationals = Lookup[prepared, "AnalyticRationals", None];
+    If[!ListQ[rationals] || Length[rationals] =!=
+        Length[prepared["TaylorKernels"]] ||
+        !AllTrue[rationals, AssociationQ[#] &&
+          Sort[Keys[#]] === Sort[{"NumeratorCoefficients",
+            "DenominatorCoefficients"}] &&
+          ListQ[# ["NumeratorCoefficients"]] &&
+          # ["NumeratorCoefficients"] =!= {} &&
+          ListQ[# ["DenominatorCoefficients"]] &&
+          # ["DenominatorCoefficients"] =!= {} &],
+      err["E5", cs, <|"PreparedMultiplier" -> prepared,
+        "Detail" -> "native rational-row tail certification requires one nonempty analytic numerator/denominator pair per epsilon kernel"|>]];
+    encoded = Append[encoded, "analytic_coefficients" -> Map[
+      <|"numerator" -> (cppScalar[#, inputDigits, cs] & /@
+            # ["NumeratorCoefficients"]),
+        "denominator" -> (cppScalar[#, inputDigits, cs] & /@
+            # ["DenominatorCoefficients"])|> &, rationals]]];
+  encoded];
 
 (* Prepare the user-facing coefficient row in precisely the same finite
    multiplier representation used by native SCC propagation.  The retained
@@ -2748,7 +2768,7 @@ PrepareNativeRationalRow[cs_Association, sourceShape_Association,
       $cppSerializationSymbols = symbols},
     Map[<|"column" -> # - 1,
         "multiplier" -> cppPreparedRationalMultiplierJSON[
-          prepared[[#]], inputDigits, cs]|> &, active]];
+          prepared[[#]], inputDigits, cs, True]|> &, active]];
   identityPayload = <|
     "schema" -> "diffexp2-prepared-rational-local-row-identity-v1",
     "chart" -> <|

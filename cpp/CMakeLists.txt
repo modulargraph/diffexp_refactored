@@ -73,6 +73,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_tail_majorant
     COMMAND test_diffexp2_persistent_tail_majorant)
 
+  add_executable(test_diffexp2_persistent_rational_row_tail
+    tests/test_persistent_rational_row_tail.cpp)
+  target_compile_features(test_diffexp2_persistent_rational_row_tail
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_rational_row_tail
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_rational_row_tail
+    COMMAND test_diffexp2_persistent_rational_row_tail)
+
   add_executable(test_diffexp2_persistent_matched_tail_majorant
     tests/test_persistent_matched_tail_majorant.cpp)
   target_compile_features(test_diffexp2_persistent_matched_tail_majorant

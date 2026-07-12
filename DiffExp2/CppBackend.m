@@ -1564,17 +1564,26 @@ persistentTransportContractStateHandles[state_Association] := Module[
 persistentNonemptyStringQ[value_] := StringQ[value] &&
   StringLength[value] > 0;
 
-persistentPreparedRationalMultiplierQ[multiplier_] := Module[{kernels},
+persistentPreparedRationalMultiplierQ[multiplier_] := Module[
+  {kernels, keys, baseKeys = {"epsilon_shift", "center_pole_order",
+    "kernels", "exact_identity", "proven_zero"}, analytic},
+  keys = If[AssociationQ[multiplier], Sort[Keys[multiplier]], {}];
   If[!AssociationQ[multiplier] ||
-      Sort[Keys[multiplier]] =!= Sort[{
-        "epsilon_shift", "center_pole_order", "kernels",
-        "exact_identity", "proven_zero"}], Return[False, Module]];
+      !MemberQ[{Sort[baseKeys], Sort[Append[baseKeys,
+        "analytic_coefficients"]]}, keys], Return[False, Module]];
   kernels = multiplier["kernels"];
+  analytic = Lookup[multiplier, "analytic_coefficients", None];
   IntegerQ[multiplier["epsilon_shift"]] &&
     IntegerQ[multiplier["center_pole_order"]] &&
     multiplier["center_pole_order"] >= 0 &&
     ListQ[kernels] && kernels =!= {} &&
     AllTrue[kernels, ListQ[#] && # =!= {} &] &&
+    (analytic === None || (ListQ[analytic] &&
+      Length[analytic] === Length[kernels] &&
+      AllTrue[analytic, AssociationQ[#] &&
+        Sort[Keys[#]] === Sort[{"numerator", "denominator"}] &&
+        ListQ[# ["numerator"]] && # ["numerator"] =!= {} &&
+        ListQ[# ["denominator"]] && # ["denominator"] =!= {} &])) &&
     persistentNonemptyStringQ[multiplier["exact_identity"]] &&
     multiplier["proven_zero"] === False];
 

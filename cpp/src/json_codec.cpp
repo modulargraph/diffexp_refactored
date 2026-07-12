@@ -3915,10 +3915,9 @@ void require_exact_regular_local(const LocalSolution<Rational>& solution,
     throw std::invalid_argument(
         label +
         " is not an exact-rational regular (a=0,b=0,log=0) local");
-  if (requested_window.min_power < solution.epsilon.min_power ||
-      requested_window.complete_max > solution.epsilon.complete_max)
+  if (requested_window.complete_max > solution.epsilon.complete_max)
     throw std::invalid_argument(
-        label + " does not cover the requested complete epsilon window");
+        label + " does not cover the requested complete epsilon upper edge");
   if (!solution.chart.infinite_radius &&
       !arb_lt(acb_realref(point.modulus.raw()),
               acb_realref(solution.chart.radius.raw())))
@@ -3961,6 +3960,7 @@ FiniteLaurentVector<Rational> evaluate_exact_regular_local(
   const auto& sector = solution.sectors.front();
   const auto coefficient_at = [&](std::int32_t power,
                                   std::uint32_t component) {
+    if (power < solution.epsilon.min_power) return Rational(0);
     const auto epsilon_index = static_cast<std::size_t>(
         static_cast<std::int64_t>(power) - solution.epsilon.min_power);
     Rational coefficient(0);
@@ -10997,24 +10997,30 @@ EpsilonWindow live_match_epsilon_intersection(
   if (basis.empty())
     throw std::invalid_argument(
         "native whole-arm match basis cannot be empty");
-  auto minimum = requested.min_power;
+  const auto incoming_frame = retained_local_frame_contract(incoming);
+  auto union_minimum = incoming_frame.epsilon.min_power;
   auto complete_max = requested.complete_max;
-  const auto dimension = retained_local_frame_contract(incoming).dimension;
+  const auto dimension = incoming_frame.dimension;
   if (basis.size() != dimension)
     throw std::invalid_argument(
         "native whole-arm match requires one receiving column per component");
-  const auto admit = [&](const std::shared_ptr<StoredLocalBase>& local) {
-    const auto frame = retained_local_frame_contract(local);
+  const auto admit = [&](const RetainedLocalFrameContract& frame) {
     if (frame.dimension != dimension)
       throw std::invalid_argument(
           "native whole-arm matching local dimensions differ");
-    minimum = std::max(minimum, frame.epsilon.min_power);
+    // A finite Laurent lower edge is structural: coefficients below it are
+    // exact zero.  Clip the caller's lower edge only to the union of actual
+    // local frames, then let each matcher zero-pad locals which begin later.
+    // Complete upper edges still intersect.
+    union_minimum = std::min(union_minimum, frame.epsilon.min_power);
     complete_max = std::min(complete_max, frame.epsilon.complete_max);
     if (frame.top_valid != kCompleteInfinity)
       complete_max = std::min(complete_max, frame.top_valid);
   };
-  admit(incoming);
-  for (const auto& column : basis) admit(column);
+  admit(incoming_frame);
+  for (const auto& column : basis)
+    admit(retained_local_frame_contract(column));
+  const auto minimum = std::max(requested.min_power, union_minimum);
   if (minimum > complete_max)
     throw std::domain_error(
         "native whole-arm match has no common complete epsilon window");

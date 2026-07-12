@@ -190,18 +190,31 @@ json::object arm_execution(const std::string& first,
                                       std::to_string(shifts[2]))}}};
 }
 
+json::object single_hop_arm_execution(const std::string& basis) {
+  json::array basis_set;
+  basis_set.emplace_back(basis);
+  json::array receiving_basis;
+  receiving_basis.push_back(std::move(basis_set));
+  return json::object{
+      {"receiving_basis", std::move(receiving_basis)},
+      {"integrand_rows", json::array{
+           integrand_row(0, "positive-leading-row-1"),
+           integrand_row(0, "positive-leading-row-2")}}};
+}
+
 json::object run_arms_request(const std::string& session,
                               const std::string& plan,
                               const std::string& anchor,
                               json::object lower, json::object upper,
                               const std::string& root,
-                              std::int32_t match_required_complete_max = 2) {
+                              std::int32_t match_required_complete_max = 2,
+                              std::int32_t work_min = -1) {
   return json::object{
       {"schema", 2}, {"op", "integration.run_arms"},
       {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
       {"tile_plan_checkpoint_identity", "parallel-plan"},
       {"anchor_checkpoint_identity", "parallel-anchor"},
-      {"epsilon", json::object{{"min", -1}, {"max", 2},
+      {"epsilon", json::object{{"min", work_min}, {"max", 2},
                                 {"required_complete_max", 1},
                                 {"match_required_complete_max",
                                  match_required_complete_max}}},
@@ -220,6 +233,20 @@ double exported_coefficient(const json::object& response,
   return raw.is_string()
       ? std::stod(std::string(raw.as_string()))
       : std::stod(std::string(raw.as_array().front().as_string()));
+}
+
+bool exact_zero_acb_coefficient(const json::value& raw) {
+  if (!raw.is_array()) return false;
+  const auto& ball = raw.as_array();
+  return ball.size() == 4 && ball[0].is_string() && ball[1].is_string() &&
+      ball[2].is_string() && ball[3].is_string() &&
+      std::stod(std::string(ball[0].as_string())) == 0.0 &&
+      std::stod(std::string(ball[1].as_string())) == 0.0 &&
+      ball[2].as_string() == "zero" && ball[3].as_string() == "zero";
+}
+
+double acb_real_midpoint(const json::value& raw) {
+  return std::stod(std::string(raw.as_array().front().as_string()));
 }
 
 bool acb_full_rank_pivot_smoke() {
@@ -246,6 +273,133 @@ bool acb_full_rank_pivot_smoke() {
     return error.code == diffexp2::MatchingArithmeticErrorCode::AmbiguousZero;
   }
   return false;
+}
+
+bool positive_leading_match_smoke(const std::string& domain) {
+  std::string session;
+  try {
+    json::object create{
+        {"schema", 2}, {"op", "session.create"}, {"domain", domain},
+        {"output_digits", 30}, {"chart_capacity", 4},
+        {"local_capacity", 12}, {"match_capacity", 4},
+        {"tile_plan_capacity", 2}};
+    if (domain == "acb") create["precision_bits"] = 256;
+    const auto created = request(std::move(create));
+    session = std::string(created.at("session").as_string());
+    const auto anchor_chart = prepare_chart(
+        session, domain, domain + "-positive-anchor", "0", false, 1);
+    const auto lower_chart = prepare_chart(
+        session, domain, domain + "-positive-lower", "-2/3");
+    const auto upper_chart = prepare_chart(
+        session, domain, domain + "-positive-upper", "2/3");
+    const auto anchor = solve_local(
+        session, anchor_chart, "0", "parallel-anchor", "1");
+    const auto lower_basis = solve_local(
+        session, lower_chart, "-2/3", domain + "-positive-lower-basis",
+        "1");
+    const auto upper_basis = solve_local(
+        session, upper_chart, "2/3", domain + "-positive-upper-basis",
+        "1");
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", "parallel-plan"}, {"division_order", 3},
+        {"lower", arm("-2/3", {anchor_chart, lower_chart})},
+        {"upper", arm("2/3", {anchor_chart, upper_chart})}});
+    if (planned.at("status") != "ok")
+      throw std::runtime_error(
+          "positive-leading plan: " + json::serialize(planned));
+    const auto marched = request(run_arms_request(
+        session, std::string(planned.at("tile_plan").as_string()), anchor,
+        single_hop_arm_execution(lower_basis),
+        single_hop_arm_execution(upper_basis),
+        domain + "-positive-leading", 2, 0));
+    if (marched.at("status") != "ok")
+      throw std::runtime_error(
+          "positive-leading march: " + json::serialize(marched));
+    const auto& arms = marched.at("arms").as_object();
+    const auto& lower_final =
+        arms.at("lower").as_object().at("final_local").as_object();
+    const auto& upper_final =
+        arms.at("upper").as_object().at("final_local").as_object();
+    const auto& combined = marched.at("combined_line_result").as_object();
+    const auto evaluate_final = [&](const json::object& local) {
+      return request(json::object{
+          {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+          {"local", local.at("local")},
+          {"point", json::object{{"exact", "0"}}},
+          {"options", json::object{{"tail_estimate", false}}},
+          {"output_digits", 40}});
+    };
+    const auto combined_export = request(json::object{
+        {"schema", 2}, {"op", "integration.export"},
+        {"session", session}, {"line", combined.at("line")},
+        {"checkpoint_identity", combined.at("checkpoint_identity")},
+        {"output_digits", 40}});
+    bool coefficient_ok = false;
+    if (domain == "rational") {
+      coefficient_ok = lower_final.at("epsilon_min") == 1 &&
+          upper_final.at("epsilon_min") == 1 &&
+          combined.at("epsilon_min") == 1 &&
+          combined_export.at("status") == "ok" &&
+          combined_export.at("value").as_object().at("min") == 1 &&
+          std::abs(exported_coefficient(combined_export) - 4.0 / 3.0) <
+              1e-30;
+    } else {
+      const auto lower_value = evaluate_final(lower_final);
+      const auto upper_value = evaluate_final(upper_final);
+      const auto& lower_coefficients = lower_value.at("value").as_object()
+                                           .at("coefficients").as_array();
+      const auto& upper_coefficients = upper_value.at("value").as_object()
+                                           .at("coefficients").as_array();
+      const auto& combined_coefficients =
+          combined_export.at("value").as_object()
+              .at("coefficients").as_array();
+      coefficient_ok = lower_final.at("epsilon_min") == 0 &&
+          upper_final.at("epsilon_min") == 0 &&
+          combined.at("epsilon_min") == 0 &&
+          lower_value.at("status") == "ok" &&
+          upper_value.at("status") == "ok" &&
+          combined_export.at("status") == "ok" &&
+          lower_value.at("value").as_object().at("min") == 1 &&
+          upper_value.at("value").as_object().at("min") == 1 &&
+          lower_coefficients.size() >= 1 &&
+          upper_coefficients.size() >= 1 &&
+          combined_coefficients.size() >= 2 &&
+          exact_zero_acb_coefficient(combined_coefficients[0]) &&
+          std::abs(acb_real_midpoint(lower_coefficients[0]) - 1.0) <
+              1e-30 &&
+          std::abs(acb_real_midpoint(upper_coefficients[0]) - 1.0) <
+              1e-30 &&
+          std::abs(acb_real_midpoint(combined_coefficients[1]) -
+                   4.0 / 3.0) < 1e-30;
+      if (!coefficient_ok)
+        std::cerr << "Acb positive-leading coefficients: lower="
+                  << json::serialize(lower_value.at("value"))
+                  << " upper=" << json::serialize(upper_value.at("value"))
+                  << " combined="
+                  << json::serialize(combined_export.at("value")) << '\n';
+    }
+    const bool ok = coefficient_ok &&
+        arms.at("lower").as_object().at("matches") == 1 &&
+        arms.at("upper").as_object().at("matches") == 1 &&
+        combined_export.at("status") == "ok";
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", session}});
+    session.clear();
+    if (!ok)
+      std::cerr << domain << " positive-leading match failed: mins="
+                << lower_final.at("epsilon_min") << ','
+                << upper_final.at("epsilon_min") << ','
+                << combined.at("epsilon_min") << '\n';
+    return ok;
+  } catch (const std::exception& error) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    std::cerr << domain << " positive-leading match failed: "
+              << error.what() << '\n';
+    return false;
+  }
 }
 
 bool acb_unit_leading_proof_smoke() {
@@ -315,8 +469,10 @@ bool acb_unit_leading_proof_smoke() {
         "acb-parallel-defective"));
     const auto after_defective = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto* defective_detail = defective.if_contains("detail");
     const bool defective_rejected = defective.at("status") == "error" &&
-        std::string(defective.at("detail").as_string())
+        defective_detail != nullptr && defective_detail->is_string() &&
+        std::string(defective_detail->as_string())
             .find("overlap zero") != std::string::npos &&
         before_defective.at("locals") == after_defective.at("locals") &&
         before_defective.at("matches") == after_defective.at("matches") &&
@@ -330,6 +486,9 @@ bool acb_unit_leading_proof_smoke() {
         arm_execution(lower_1, lower_2, {0, -1, -1}),
         arm_execution(upper_1, upper_2, {0, -1, -1}),
         "acb-parallel-success"));
+    if (marched.at("status") != "ok")
+      throw std::runtime_error(
+          "Acb success march: " + json::serialize(marched));
     const auto saved = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
         {"session", session}, {"path", checkpoint_path},
@@ -485,7 +644,7 @@ int main() {
         session, guard_plan, anchor,
         arm_execution(lower_guard, lower_2, {0, 0, 0}),
         arm_execution(upper_1, upper_2, {0, 0, 0}),
-        "parallel-nonzero-discarded-lower", 1));
+        "parallel-nonzero-discarded-lower", 1, 0));
     const auto after_lower_guard = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
     if (discarded_lower.at("status") != "error" ||
@@ -509,7 +668,7 @@ int main() {
         session, guard_plan, anchor,
         arm_execution(lower_guard_zero, lower_2, {0, 0, 0}),
         arm_execution(upper_1, upper_2, {0, 0, 0}),
-        "parallel-zero-discarded-lower", 1));
+        "parallel-zero-discarded-lower", 1, 0));
     if (zero_discarded_lower.at("status") != "ok")
       throw std::runtime_error(
           "exact-zero discarded Rational lower frame was rejected: " +
@@ -640,7 +799,9 @@ int main() {
           ? std::stod(std::string(raw.as_string()))
           : std::stod(std::string(raw.as_array().front().as_string()));
     };
-    const bool ok = acb_full_rank_pivot_smoke() &&
+    const bool ok = positive_leading_match_smoke("rational") &&
+        positive_leading_match_smoke("acb") &&
+        acb_full_rank_pivot_smoke() &&
         acb_unit_leading_proof_smoke() &&
         created.at("parallel_arm_march_capability") ==
             "retained-native-concurrent-two-arm-march-v1" &&

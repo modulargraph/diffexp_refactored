@@ -2551,13 +2551,17 @@ class StoredLocal final : public StoredLocalBase {
     } else {
       const auto current = stats();
       if (retained_derivation_.has_value()) {
-        if (required_string(*retained_derivation_, "schema") !=
-            "diffexp2-retained-plan-match-local-materialization-v1")
+        const auto schema = required_string(
+            *retained_derivation_, "schema");
+        if (schema !=
+                "diffexp2-retained-plan-match-local-materialization-v1" &&
+            schema !=
+                "diffexp2-retained-rational-row-local-application-v1")
           throw std::domain_error(
               "checkpoint schema v2 does not yet serialize this retained local derivation kind");
         if (retained_owner_ == nullptr)
           throw std::logic_error(
-              "materialized local lost its strong derivation owner before checkpointing");
+              "derived local lost its strong derivation owner before checkpointing");
       } else if (retained_owner_ != nullptr) {
         throw std::logic_error(
             "primitive local unexpectedly retains a derivation owner before checkpointing");
@@ -2565,16 +2569,21 @@ class StoredLocal final : public StoredLocalBase {
       json::value owner_lineage = nullptr;
       if (retained_derivation_.has_value()) {
         const auto& derivation = *retained_derivation_;
-        owner_lineage = json::object{
-            {"match", derivation.at("source_match")},
-            {"match_checkpoint_identity",
-             derivation.at("source_match_checkpoint_identity")},
-            {"match_provenance_identity",
-             derivation.at("source_match_provenance_identity")},
-            {"planned_hop_provenance_identity",
-             derivation.at("planned_hop_provenance_identity")},
-            {"derivation_provenance_identity",
-             derivation.at("provenance_identity")}};
+        if (required_string(derivation, "schema") ==
+            "diffexp2-retained-plan-match-local-materialization-v1") {
+          owner_lineage = json::object{
+              {"match", derivation.at("source_match")},
+              {"match_checkpoint_identity",
+               derivation.at("source_match_checkpoint_identity")},
+              {"match_provenance_identity",
+               derivation.at("source_match_provenance_identity")},
+              {"planned_hop_provenance_identity",
+               derivation.at("planned_hop_provenance_identity")},
+              {"derivation_provenance_identity",
+               derivation.at("provenance_identity")}};
+        } else {
+          owner_lineage = rational_row_owner_lineage();
+        }
       }
       json::object runtime{
           {"evaluations", current.evaluations},
@@ -2703,6 +2712,170 @@ class StoredLocal final : public StoredLocalBase {
     for (const auto& sector : solution_.sectors)
       count += sector.coefficients.size();
     return count;
+  }
+
+  json::object rational_row_owner_lineage() const {
+    if (!retained_derivation_.has_value() || retained_owner_ == nullptr)
+      throw std::logic_error(
+          "rational-row local lost its derivation or source owner");
+    const auto& derivation = *retained_derivation_;
+    require_exact_keys(
+        derivation,
+        {"schema", "capability", "source", "row", "output",
+         "analytic_prescriptions", "coefficient_transport",
+         "provenance_identity"},
+        "retained rational-row local derivation");
+    if (required_string(derivation, "schema") !=
+            "diffexp2-retained-rational-row-local-application-v1" ||
+        required_string(derivation, "capability") !=
+            "retained-native-rational-row-local-application-v1" ||
+        required_string(derivation, "analytic_prescriptions") !=
+            "preserved-exactly" ||
+        required_string(derivation, "coefficient_transport") !=
+            "native-retained-only")
+      throw std::invalid_argument(
+          "retained rational-row derivation changes its certified scope");
+
+    auto erased_source =
+        std::static_pointer_cast<StoredLocalBase>(retained_owner_);
+    auto source = std::dynamic_pointer_cast<StoredLocal<Scalar>>(
+        erased_source);
+    if (!source || std::string(source->scalar_domain()) != scalar_domain())
+      throw std::invalid_argument(
+          "retained rational-row derivation source domain is inconsistent");
+    const auto& source_record = as_object(
+        derivation.at("source"), "retained rational-row source");
+    require_exact_keys(
+        source_record,
+        {"local", "chart", "source_operator_identity",
+         "checkpoint_identity", "dimension", "epsilon",
+         "taylor_complete_max"},
+        "retained rational-row source");
+    const auto& source_epsilon = as_object(
+        source_record.at("epsilon"), "retained rational-row source epsilon");
+    require_exact_keys(source_epsilon, {"min", "max"},
+                       "retained rational-row source epsilon");
+    if (required_string(source_record, "local") != source->handle() ||
+        required_string(source_record, "chart") != source->source_chart() ||
+        required_string(source_record, "source_operator_identity") !=
+            source->source_operator_identity() ||
+        required_string(source_record, "checkpoint_identity") !=
+            source->checkpoint_identity() ||
+        as_u32(source_record.at("dimension"),
+               "rational-row source dimension") !=
+            source->solution().dimension ||
+        as_i32(source_epsilon.at("min"),
+               "rational-row source epsilon minimum") !=
+            source->solution().epsilon.min_power ||
+        as_i32(source_epsilon.at("max"),
+               "rational-row source epsilon maximum") !=
+            source->solution().epsilon.complete_max ||
+        as_u32(source_record.at("taylor_complete_max"),
+               "rational-row source Taylor maximum") !=
+            source->solution().taylor_complete_max)
+      throw std::invalid_argument(
+          "retained rational-row source provenance disagrees with its strong owner");
+
+    const auto& row = as_object(
+        derivation.at("row"), "retained rational-row identity");
+    require_exact_keys(
+        row, {"exact_identity", "columns", "active_entries",
+              "structurally_zero"},
+        "retained rational-row identity");
+    const auto row_identity = required_string(row, "exact_identity");
+    if (as_u32(row.at("columns"), "retained rational-row columns") !=
+        source->solution().dimension)
+      throw std::invalid_argument(
+          "retained rational-row column count differs from its source");
+    if (!row.at("structurally_zero").is_bool())
+      throw std::invalid_argument(
+          "retained rational-row zero fact must be Boolean");
+    const auto& active = as_array(
+        row.at("active_entries"), "retained rational-row active entries");
+    if (row.at("structurally_zero").as_bool() != active.empty())
+      throw std::invalid_argument(
+          "retained rational-row zero fact disagrees with its active entries");
+    std::optional<std::uint32_t> previous_column;
+    for (const auto& raw_entry : active) {
+      const auto& entry = as_object(
+          raw_entry, "retained rational-row active entry");
+      require_exact_keys(
+          entry, {"column", "epsilon_shift", "center_pole_order",
+                  "exact_identity"},
+          "retained rational-row active entry");
+      const auto column = as_u32(
+          entry.at("column"), "retained rational-row active column");
+      if (column >= source->solution().dimension ||
+          (previous_column.has_value() && *previous_column >= column))
+        throw std::invalid_argument(
+            "retained rational-row active columns are not canonical");
+      previous_column = column;
+      (void)as_i32(entry.at("epsilon_shift"),
+                   "retained rational-row epsilon shift");
+      (void)as_u32(entry.at("center_pole_order"),
+                   "retained rational-row pole order");
+      (void)required_string(entry, "exact_identity");
+    }
+
+    const auto& output = as_object(
+        derivation.at("output"), "retained rational-row output");
+    require_exact_keys(
+        output, {"checkpoint_identity", "dimension", "epsilon",
+                 "taylor_complete_max"},
+        "retained rational-row output");
+    const auto& output_epsilon = as_object(
+        output.at("epsilon"), "retained rational-row output epsilon");
+    require_exact_keys(output_epsilon, {"min", "max"},
+                       "retained rational-row output epsilon");
+    if (required_string(output, "checkpoint_identity") !=
+            solution_.checkpoint_identity ||
+        as_u32(output.at("dimension"),
+               "rational-row output dimension") != solution_.dimension ||
+        as_i32(output_epsilon.at("min"),
+               "rational-row output epsilon minimum") !=
+            solution_.epsilon.min_power ||
+        as_i32(output_epsilon.at("max"),
+               "rational-row output epsilon maximum") !=
+            solution_.epsilon.complete_max ||
+        as_u32(output.at("taylor_complete_max"),
+               "rational-row output Taylor maximum") !=
+            solution_.taylor_complete_max)
+      throw std::invalid_argument(
+          "retained rational-row output provenance disagrees with its tensor");
+    if (source_chart_ != source->source_chart() ||
+        !local_algebra_detail::same_chart(
+            solution_.chart, source->solution().chart) ||
+        !local_algebra_detail::same_prescriptions(
+            solution_.prescriptions, source->solution().prescriptions))
+      throw std::invalid_argument(
+          "retained rational-row output left its source analytic chart");
+
+    auto identity_input = derivation;
+    const auto derivation_identity = required_string(
+        derivation, "provenance_identity");
+    identity_input.erase("provenance_identity");
+    if (json::serialize(canonical_json_value(identity_input)) !=
+        derivation_identity)
+      throw std::invalid_argument(
+          "retained rational-row derivation identity is inconsistent");
+    const json::object operator_provenance{
+        {"schema", "diffexp2-rational-row-derived-operator-v1"},
+        {"source_operator_identity", source->source_operator_identity()},
+        {"row_exact_identity", row_identity},
+        {"provenance_identity", derivation_identity}};
+    if (json::serialize(canonical_json_value(operator_provenance)) !=
+        source_operator_identity_)
+      throw std::invalid_argument(
+          "retained rational-row derived operator identity is inconsistent");
+
+    return json::object{
+        {"source_local", source->handle()},
+        {"source_chart", source->source_chart()},
+        {"source_operator_identity", source->source_operator_identity()},
+        {"source_checkpoint_identity", source->checkpoint_identity()},
+        {"row_exact_identity", row_identity},
+        {"derivation_provenance_identity", derivation_identity},
+        {"derived_operator_identity", source_operator_identity_}};
   }
 
   LocalSolution<Scalar> solution_;
@@ -4749,10 +4922,171 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
   if (has_derivation) {
     if (retained_owner == nullptr)
       throw std::invalid_argument(
-          "checkpoint materialized local lost its strong planned-hop owner");
+          "checkpoint derived local lost its strong owner");
     auto derivation = as_object(
         object.at("retained_derivation"),
-        "checkpoint materialized-local derivation");
+        "checkpoint retained-local derivation");
+    const auto derivation_schema = required_string(derivation, "schema");
+    if (derivation_schema ==
+        "diffexp2-retained-rational-row-local-application-v1") {
+      require_exact_keys(
+          derivation,
+          {"schema", "capability", "source", "row", "output",
+           "analytic_prescriptions", "coefficient_transport",
+           "provenance_identity"},
+          "checkpoint rational-row local derivation");
+      if (required_string(derivation, "capability") !=
+              kRetainedRationalRowCapability ||
+          required_string(derivation, "analytic_prescriptions") !=
+              "preserved-exactly" ||
+          required_string(derivation, "coefficient_transport") !=
+              "native-retained-only")
+        throw std::invalid_argument(
+            "checkpoint rational-row derivation changes its retained scope");
+      const auto& source = as_object(
+          derivation.at("source"), "checkpoint rational-row source");
+      require_exact_keys(
+          source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity", "dimension", "epsilon",
+           "taylor_complete_max"},
+          "checkpoint rational-row source");
+      (void)scoped_handle_id(required_string(source, "local"), "l:",
+                             "rational-row source local");
+      const auto source_chart_identity = required_string(source, "chart");
+      if ((!source_chart_identity.starts_with("c:") &&
+           !source_chart_identity.starts_with("scc:")) ||
+          source_chart_identity != source_chart)
+        throw std::invalid_argument(
+            "checkpoint rational-row source chart is inconsistent");
+      const auto source_operator = required_string(
+          source, "source_operator_identity");
+      (void)required_string(source, "checkpoint_identity");
+      const auto source_dimension = as_u32(
+          source.at("dimension"), "checkpoint rational-row source dimension");
+      if (source_dimension == 0)
+        throw std::invalid_argument(
+            "checkpoint rational-row source dimension is zero");
+      const auto& source_epsilon = as_object(
+          source.at("epsilon"), "checkpoint rational-row source epsilon");
+      require_exact_keys(source_epsilon, {"min", "max"},
+                         "checkpoint rational-row source epsilon");
+      (void)EpsilonWindow{
+          as_i32(source_epsilon.at("min"),
+                 "checkpoint rational-row source epsilon minimum"),
+          as_i32(source_epsilon.at("max"),
+                 "checkpoint rational-row source epsilon maximum")}.width();
+      (void)as_u32(source.at("taylor_complete_max"),
+                   "checkpoint rational-row source Taylor maximum");
+
+      const auto& row = as_object(
+          derivation.at("row"), "checkpoint rational-row identity");
+      require_exact_keys(
+          row, {"exact_identity", "columns", "active_entries",
+                "structurally_zero"},
+          "checkpoint rational-row identity");
+      const auto row_identity = required_string(row, "exact_identity");
+      if (as_u32(row.at("columns"),
+                 "checkpoint rational-row columns") != source_dimension ||
+          !row.at("structurally_zero").is_bool())
+        throw std::invalid_argument(
+            "checkpoint rational-row dimension or zero fact is malformed");
+      const auto& entries = as_array(
+          row.at("active_entries"), "checkpoint rational-row entries");
+      if (row.at("structurally_zero").as_bool() != entries.empty())
+        throw std::invalid_argument(
+            "checkpoint rational-row zero fact disagrees with its entries");
+      std::optional<std::uint32_t> previous_column;
+      for (const auto& raw_entry : entries) {
+        const auto& entry = as_object(
+            raw_entry, "checkpoint rational-row entry");
+        require_exact_keys(
+            entry, {"column", "epsilon_shift", "center_pole_order",
+                    "exact_identity"},
+            "checkpoint rational-row entry");
+        const auto column = as_u32(
+            entry.at("column"), "checkpoint rational-row entry column");
+        if (column >= source_dimension ||
+            (previous_column.has_value() && *previous_column >= column))
+          throw std::invalid_argument(
+              "checkpoint rational-row entry columns are not canonical");
+        previous_column = column;
+        (void)as_i32(entry.at("epsilon_shift"),
+                     "checkpoint rational-row epsilon shift");
+        (void)as_u32(entry.at("center_pole_order"),
+                     "checkpoint rational-row pole order");
+        (void)required_string(entry, "exact_identity");
+      }
+
+      const auto& output = as_object(
+          derivation.at("output"), "checkpoint rational-row output");
+      require_exact_keys(
+          output, {"checkpoint_identity", "dimension", "epsilon",
+                   "taylor_complete_max"},
+          "checkpoint rational-row output");
+      const auto& output_epsilon = as_object(
+          output.at("epsilon"), "checkpoint rational-row output epsilon");
+      require_exact_keys(output_epsilon, {"min", "max"},
+                         "checkpoint rational-row output epsilon");
+      if (required_string(output, "checkpoint_identity") !=
+              solution.checkpoint_identity ||
+          as_u32(output.at("dimension"),
+                 "checkpoint rational-row output dimension") !=
+              solution.dimension ||
+          as_i32(output_epsilon.at("min"),
+                 "checkpoint rational-row output epsilon minimum") !=
+              solution.epsilon.min_power ||
+          as_i32(output_epsilon.at("max"),
+                 "checkpoint rational-row output epsilon maximum") !=
+              solution.epsilon.complete_max ||
+          as_u32(output.at("taylor_complete_max"),
+                 "checkpoint rational-row output Taylor maximum") !=
+              solution.taylor_complete_max)
+        throw std::invalid_argument(
+            "checkpoint rational-row output disagrees with its tensor");
+
+      auto identity_input = derivation;
+      const auto derivation_identity = required_string(
+          derivation, "provenance_identity");
+      identity_input.erase("provenance_identity");
+      if (json::serialize(canonical_json_value(identity_input)) !=
+          derivation_identity)
+        throw std::invalid_argument(
+            "checkpoint rational-row derivation identity is inconsistent");
+      const json::object operator_provenance{
+          {"schema", "diffexp2-rational-row-derived-operator-v1"},
+          {"source_operator_identity", source_operator},
+          {"row_exact_identity", row_identity},
+          {"provenance_identity", derivation_identity}};
+      if (json::serialize(canonical_json_value(operator_provenance)) !=
+          source_operator_identity)
+        throw std::invalid_argument(
+            "checkpoint rational-row derived operator identity is inconsistent");
+
+      const auto& lineage = as_object(
+          object.at("retained_owner_lineage"),
+          "checkpoint rational-row owner lineage");
+      require_exact_keys(
+          lineage,
+          {"source_local", "source_chart", "source_operator_identity",
+           "source_checkpoint_identity", "row_exact_identity",
+           "derivation_provenance_identity", "derived_operator_identity"},
+          "checkpoint rational-row owner lineage");
+      if (lineage.at("source_local") != source.at("local") ||
+          lineage.at("source_chart") != source.at("chart") ||
+          lineage.at("source_operator_identity") !=
+              source.at("source_operator_identity") ||
+          lineage.at("source_checkpoint_identity") !=
+              source.at("checkpoint_identity") ||
+          lineage.at("row_exact_identity") != row.at("exact_identity") ||
+          lineage.at("derivation_provenance_identity") !=
+              derivation.at("provenance_identity") ||
+          required_string(lineage, "derived_operator_identity") !=
+              source_operator_identity)
+        throw std::invalid_argument(
+            "checkpoint rational-row owner lineage is inconsistent");
+      retained_derivation = std::move(derivation);
+    } else {
     require_exact_keys(
         derivation,
         {"schema", "capability", "source_match",
@@ -4845,6 +5179,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       throw std::invalid_argument(
           "checkpoint materialized-local owner lineage is inconsistent");
     retained_derivation = std::move(derivation);
+    }
   } else if (retained_owner != nullptr) {
     throw std::invalid_argument(
         "checkpoint primitive local unexpectedly acquired a derivation owner");
@@ -10924,20 +11259,37 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       return;
     }
     if (local->retained_derivation().has_value()) {
-      if (required_string(*local->retained_derivation(), "schema") !=
-          "diffexp2-retained-plan-match-local-materialization-v1")
+      const auto schema = required_string(
+          *local->retained_derivation(), "schema");
+      if (schema !=
+              "diffexp2-retained-plan-match-local-materialization-v1" &&
+          schema !=
+              "diffexp2-retained-rational-row-local-application-v1")
         throw std::domain_error(
             "checkpoint schema v2 does not yet serialize this retained local derivation kind");
       const auto opaque = local->retained_derivation_owner();
       if (!opaque)
         throw std::logic_error(
-            "checkpoint materialized local lost its planned-hop owner");
-      auto hop = std::static_pointer_cast<StoredPlannedMatchHop>(opaque);
-      if (required_string(*local->retained_derivation(), "source_match") !=
-          hop->handle())
-        throw std::logic_error(
-            "checkpoint materialized local derivation names a different owner handle");
-      add_match(std::move(hop));
+            "checkpoint derived local lost its strong owner");
+      if (schema ==
+          "diffexp2-retained-plan-match-local-materialization-v1") {
+        auto hop = std::static_pointer_cast<StoredPlannedMatchHop>(opaque);
+        if (required_string(*local->retained_derivation(), "source_match") !=
+            hop->handle())
+          throw std::logic_error(
+              "checkpoint materialized local derivation names a different owner handle");
+        add_match(std::move(hop));
+      } else {
+        auto source = std::static_pointer_cast<StoredLocalBase>(opaque);
+        const auto& source_record = as_object(
+            local->retained_derivation()->at("source"),
+            "checkpoint rational-row source");
+        if (!source || required_string(source_record, "local") !=
+                           source->handle())
+          throw std::logic_error(
+              "checkpoint rational-row derivation names a different source local");
+        add_local(std::move(source));
+      }
     } else if (local->retained_derivation_owner() != nullptr) {
       throw std::logic_error(
           "checkpoint primitive local unexpectedly retains a derivation owner");
@@ -11675,10 +12027,14 @@ json::object restore_checkpoint(const std::string& path,
       std::vector<const json::value*> pending_locals;
       auto validate_local_source = [&](const std::shared_ptr<StoredLocalBase>& local) {
         const auto& source = local->source_chart();
+        const bool rational_row_derived =
+            local->retained_derivation().has_value() &&
+            required_string(*local->retained_derivation(), "schema") ==
+                "diffexp2-retained-rational-row-local-application-v1";
         if (source.starts_with("c:")) {
           (void)scoped_handle_id(source, "c:", "local source chart");
           const auto found = restored->charts.find(source);
-          if (found != restored->charts.end() &&
+          if (!rational_row_derived && found != restored->charts.end() &&
               found->second->exact_identity() !=
                   local->source_operator_identity())
             throw std::invalid_argument(
@@ -11686,7 +12042,7 @@ json::object restore_checkpoint(const std::string& path,
         } else if (source.starts_with("scc:")) {
           (void)scoped_handle_id(source, "scc:", "local source SCC");
           const auto found = restored->sccs.find(source);
-          if (found != restored->sccs.end() &&
+          if (!rational_row_derived && found != restored->sccs.end() &&
               found->second->exact_identity() !=
                   local->source_operator_identity())
             throw std::invalid_argument(
@@ -11877,9 +12233,30 @@ json::object restore_checkpoint(const std::string& path,
         for (auto*& raw_ptr : pending_locals) {
           if (raw_ptr == nullptr) continue;
           const auto& item = as_object(*raw_ptr,
-                                       "checkpoint materialized local");
+                                       "checkpoint derived local");
+          const auto& derivation = as_object(
+              item.at("retained_derivation"),
+              "checkpoint retained-local derivation");
+          const auto derivation_schema = required_string(
+              derivation, "schema");
           const auto& lineage = as_object(item.at("retained_owner_lineage"),
                                            "checkpoint local owner lineage");
+          if (derivation_schema ==
+              "diffexp2-retained-rational-row-local-application-v1") {
+            const auto source_handle = required_string(
+                lineage, "source_local");
+            const auto source = restored->locals.find(source_handle);
+            if (source == restored->locals.end()) continue;
+            (void)install_local(
+                *raw_ptr,
+                std::static_pointer_cast<void>(source->second));
+            raw_ptr = nullptr; --remaining; progress = true;
+            continue;
+          }
+          if (derivation_schema !=
+              "diffexp2-retained-plan-match-local-materialization-v1")
+            throw std::invalid_argument(
+                "checkpoint retained local has an unsupported derivation kind");
           const auto found = restored->matches.find(
               required_string(lineage, "match"));
           if (found == restored->matches.end()) continue;

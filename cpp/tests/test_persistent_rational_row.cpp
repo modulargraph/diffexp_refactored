@@ -1,13 +1,18 @@
+#include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include <unistd.h>
 
 namespace json = boost::json;
 
@@ -148,6 +153,16 @@ json::object zero_row() {
       {"entries", json::array{}}};
 }
 
+json::object scalar_identity_row() {
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 1}, {"exact_identity", "[1]"},
+      {"entries", json::array{json::object{
+           {"column", 0},
+           {"multiplier", multiplier(
+                0, 0, json::array{"1"}, "scalar-unit")}}}}};
+}
+
 json::object apply_row(const std::string& session,
                        const std::string& local,
                        json::object row,
@@ -185,6 +200,45 @@ double coefficient_midpoint(const json::object& response,
   return std::stod(std::string(encoded.at(0).as_string()));
 }
 
+const json::object& retained_local_record(const json::object& payload,
+                                          const std::string& handle) {
+  for (const auto& raw : payload.at("retained_locals").as_array()) {
+    const auto& item = raw.as_object();
+    if (std::string(item.at("handle").as_string()) == handle)
+      return item;
+  }
+  throw std::runtime_error("checkpoint omitted retained local " + handle);
+}
+
+json::object& retained_local_record(json::object& payload,
+                                    const std::string& handle) {
+  for (auto& raw : payload.at("retained_locals").as_array()) {
+    auto& item = raw.as_object();
+    if (std::string(item.at("handle").as_string()) == handle)
+      return item;
+  }
+  throw std::runtime_error("checkpoint omitted retained local " + handle);
+}
+
+json::object checkpoint_payload(const std::string& path) {
+  return json::parse(diffexp2::checkpoint::read(path).payload_json)
+      .as_object();
+}
+
+json::object write_corrupt_row_checkpoint(
+    const std::string& source_path, const std::string& corrupt_path,
+    const std::string& derived_handle) {
+  const auto container = diffexp2::checkpoint::read(source_path);
+  auto header = json::parse(container.header_json).as_object();
+  auto payload = json::parse(container.payload_json).as_object();
+  auto& item = retained_local_record(payload, derived_handle);
+  item.at("retained_owner_lineage").as_object()["row_exact_identity"] =
+      "forged-row-identity";
+  diffexp2::checkpoint::write_atomic(
+      corrupt_path, json::serialize(header), json::serialize(payload));
+  return payload;
+}
+
 bool rational_protocol() {
   const auto created = request(json::object{
       {"schema", 2}, {"op", "session.create"},
@@ -213,6 +267,11 @@ bool rational_protocol() {
       session, source_handle, zero_row(), "row-source-rational",
       "zero-row-result");
   const auto zero_handle = std::string(zero.at("local").as_string());
+  const auto chained = apply_row(
+      session, projected_handle, scalar_identity_row(),
+      "row-result-rational", "row-chain-rational");
+  const auto chained_handle =
+      std::string(chained.at("local").as_string());
 
   const auto plan = request(json::object{
       {"schema", 2}, {"op", "tile.plan"}, {"session", session},
@@ -226,14 +285,17 @@ bool rational_protocol() {
   (void)request(json::object{{"schema", 2}, {"op", "local.release"},
                              {"session", session},
                              {"local", source_handle}});
+  (void)request(json::object{{"schema", 2}, {"op", "local.release"},
+                             {"session", session},
+                             {"local", projected_handle}});
   const auto positive = request(json::object{
       {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
-      {"local", projected_handle},
+      {"local", chained_handle},
       {"point", json::object{{"exact", "1/4"}}},
       {"options", json::object{{"tail_estimate", false}}}});
   const auto negative = request(json::object{
       {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
-      {"local", projected_handle},
+      {"local", chained_handle},
       {"point", json::object{{"exact", "-1/4"}}},
       {"options", json::object{{"tail_estimate", false}}}});
   const auto zero_value = request(json::object{
@@ -245,9 +307,9 @@ bool rational_protocol() {
   const auto line = request(json::object{
       {"schema", 2}, {"op", "integration.line"},
       {"session", session}, {"tile_plan", plan_handle},
-      {"local", projected_handle}, {"arm", "upper"}, {"tile", 0},
+      {"local", chained_handle}, {"arm", "upper"}, {"tile", 0},
       {"epsilon", json::object{{"min", 0}, {"max", 2}}},
-      {"source_checkpoint_identity", "row-result-rational"},
+      {"source_checkpoint_identity", "row-chain-rational"},
       {"tile_plan_checkpoint_identity", "row-plan"},
       {"checkpoint_identity", "row-line"}});
   const auto line_handle = std::string(line.at("line").as_string());
@@ -257,6 +319,65 @@ bool rational_protocol() {
       {"checkpoint_identity", "row-line"}, {"output_digits", 50}});
   const auto stats = request(json::object{
       {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+  (void)request(json::object{{"schema", 2}, {"op", "integration.release"},
+                             {"session", session}, {"line", line_handle}});
+
+  const auto base = std::filesystem::temp_directory_path() /
+      ("diffexp2-rational-row-rational-" + std::to_string(::getpid()));
+  const auto path = base.string() + ".de2cp";
+  const auto corrupt_path = base.string() + "-corrupt.de2cp";
+  const auto resaved_path = base.string() + "-resaved.de2cp";
+  const auto checkpoint_identity = "rational-row-roundtrip-v1";
+  const auto saved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+      {"path", path}, {"checkpoint_identity", checkpoint_identity}});
+  const auto saved_payload = checkpoint_payload(path);
+  const auto& saved_visibility = saved_payload.at("session").as_object()
+      .at("registry_visibility").as_object();
+  (void)write_corrupt_row_checkpoint(
+      path, corrupt_path, chained_handle);
+  (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                             {"session", session}});
+  const auto corruption = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", corrupt_path}, {"expected_identity", checkpoint_identity}});
+  const auto restored = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"}, {"path", path},
+      {"expected_identity", checkpoint_identity}});
+  const auto restored_session =
+      std::string(restored.at("session").as_string());
+  const auto resaved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"},
+      {"session", restored_session}, {"path", resaved_path},
+      {"checkpoint_identity", "rational-row-resaved-v1"}});
+  const auto resaved_payload = checkpoint_payload(resaved_path);
+  const auto hidden_source = request(json::object{
+      {"schema", 2}, {"op", "local.stats"},
+      {"session", restored_session}, {"local", source_handle}});
+  const auto hidden_intermediate = request(json::object{
+      {"schema", 2}, {"op", "local.stats"},
+      {"session", restored_session}, {"local", projected_handle}});
+  const auto restored_stats = request(json::object{
+      {"schema", 2}, {"op", "session.stats"},
+      {"session", restored_session}});
+  const auto restored_positive = request(json::object{
+      {"schema", 2}, {"op", "local.evaluate"},
+      {"session", restored_session}, {"local", chained_handle},
+      {"point", json::object{{"exact", "1/4"}}},
+      {"options", json::object{{"tail_estimate", false}}}});
+  const auto restored_line = request(json::object{
+      {"schema", 2}, {"op", "integration.line"},
+      {"session", restored_session}, {"tile_plan", plan_handle},
+      {"local", chained_handle}, {"arm", "upper"}, {"tile", 0},
+      {"epsilon", json::object{{"min", 0}, {"max", 2}}},
+      {"source_checkpoint_identity", "row-chain-rational"},
+      {"tile_plan_checkpoint_identity", "row-plan"},
+      {"checkpoint_identity", "row-line-restored"}});
+  const auto next_local = solve_local(
+      restored_session, anchor, "row-next-rational");
+  const auto final_stats = request(json::object{
+      {"schema", 2}, {"op", "session.stats"},
+      {"session", restored_session}});
 
   const auto projected_json = json::serialize(projected);
   const auto expected_eps0 = 2.0 / std::sqrt(3.0);
@@ -277,6 +398,11 @@ bool rational_protocol() {
       projected.at("epsilon_max") == 2 &&
       projected.at("checkpoint_identity") == "row-result-rational" &&
       projected.at("strong_derivation_ownership") == true &&
+      chained.at("status") == "ok" &&
+      chained.at("checkpoint_identity") == "row-chain-rational" &&
+      chained.at("strong_derivation_ownership") == true &&
+      chained.at("tail_majorant").as_object().at("status") ==
+          "unsupported" &&
       projected_json.find("\"kernels\"") == std::string::npos &&
       projected_json.find("\"coefficients\"") == std::string::npos &&
       zero.at("dimension") == 1 &&
@@ -291,7 +417,43 @@ bool rational_protocol() {
       exported.at("json_coefficients") == 3 &&
       std::abs(coefficient_midpoint(exported, 0) - expected_eps0) < 1e-14 &&
       std::abs(coefficient_midpoint(exported, 1) - expected_eps1) < 1e-14 &&
-      stats.at("locals") == 2 && stats.at("pending_local_solves") == 0;
+      stats.at("locals") == 2 && stats.at("pending_local_solves") == 0 &&
+      saved.at("status") == "ok" &&
+      saved_payload.at("retained_locals").as_array().size() == 4 &&
+      saved_visibility.at("locals").as_array().size() == 2 &&
+      std::find(saved_visibility.at("locals").as_array().begin(),
+                saved_visibility.at("locals").as_array().end(),
+                json::value(source_handle)) ==
+          saved_visibility.at("locals").as_array().end() &&
+      std::find(saved_visibility.at("locals").as_array().begin(),
+                saved_visibility.at("locals").as_array().end(),
+                json::value(projected_handle)) ==
+          saved_visibility.at("locals").as_array().end() &&
+      corruption.at("status") == "error" &&
+      std::string(corruption.at("detail").as_string()).find(
+          "rational-row owner lineage") != std::string::npos &&
+      restored.at("status") == "ok" &&
+      restored.at("locals").as_array().size() == 2 &&
+      resaved.at("status") == "ok" &&
+      retained_local_record(saved_payload, source_handle) ==
+          retained_local_record(resaved_payload, source_handle) &&
+      retained_local_record(saved_payload, projected_handle) ==
+          retained_local_record(resaved_payload, projected_handle) &&
+      retained_local_record(saved_payload, chained_handle) ==
+          retained_local_record(resaved_payload, chained_handle) &&
+      saved_visibility == resaved_payload.at("session").as_object()
+                              .at("registry_visibility").as_object() &&
+      hidden_source.at("status") == "error" &&
+      hidden_intermediate.at("status") == "error" &&
+      restored_stats.at("locals") == 2 &&
+      restored_stats.at("line_results") == 0 &&
+      restored_positive.at("status") == "ok" &&
+      std::abs(coefficient_midpoint(restored_positive, 0) - 2.0) < 1e-30 &&
+      restored_line.at("status") == "ok" &&
+      restored_line.at("line") == "line:2" &&
+      next_local.at("local") == "l:6" &&
+      final_stats.at("locals") == 3 &&
+      final_stats.at("line_results") == 1;
 
   if (!ok) {
     std::cerr << "malformed: " << json::serialize(malformed) << '\n'
@@ -301,11 +463,27 @@ bool rational_protocol() {
               << "zero: " << json::serialize(zero_value) << '\n'
               << "line: " << json::serialize(line) << '\n'
               << "exported: " << json::serialize(exported) << '\n'
-              << "stats: " << json::serialize(stats) << '\n';
+              << "stats: " << json::serialize(stats) << '\n'
+              << "saved: " << json::serialize(saved) << '\n'
+              << "corruption: " << json::serialize(corruption) << '\n'
+              << "restored: " << json::serialize(restored) << '\n'
+              << "resaved: " << json::serialize(resaved) << '\n'
+              << "hidden source: " << json::serialize(hidden_source) << '\n'
+              << "hidden intermediate: "
+              << json::serialize(hidden_intermediate) << '\n'
+              << "restored positive: "
+              << json::serialize(restored_positive) << '\n'
+              << "restored line: " << json::serialize(restored_line) << '\n'
+              << "next local: " << json::serialize(next_local) << '\n'
+              << "final stats: " << json::serialize(final_stats) << '\n';
   }
 
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
-                             {"session", session}});
+                             {"session", restored_session}});
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  std::filesystem::remove(corrupt_path, ignored);
+  std::filesystem::remove(resaved_path, ignored);
   return ok;
 }
 
@@ -316,6 +494,8 @@ bool acb_protocol() {
       {"local_capacity", 4}});
   const auto session = std::string(created.at("session").as_string());
   const auto chart = prepare_chart(session, "acb", "anchor", "0");
+  const auto lower = prepare_chart(session, "acb", "lower", "-2/3");
+  const auto upper = prepare_chart(session, "acb", "upper", "2/3");
   const auto source = solve_local(session, chart, "row-source-acb");
   const auto source_handle = std::string(source.at("local").as_string());
   json::array acb_leading;
@@ -338,12 +518,106 @@ bool acb_protocol() {
   }
   const auto projected_handle =
       std::string(projected.at("local").as_string());
+  const auto chained = apply_row(
+      session, projected_handle, scalar_identity_row(),
+      "row-result-acb", "row-chain-acb");
+  if (chained.at("status") != "ok") {
+    std::cerr << "Acb chained apply failed: " << json::serialize(chained)
+              << '\n';
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", session}});
+    return false;
+  }
+  const auto chained_handle =
+      std::string(chained.at("local").as_string());
+  const auto plan = request(json::object{
+      {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+      {"checkpoint_identity", "row-plan-acb"}, {"division_order", 3},
+      {"lower", arm("-2/3", chart, lower)},
+      {"upper", arm("2/3", chart, upper)}});
+  const auto plan_handle = std::string(plan.at("tile_plan").as_string());
+  (void)request(json::object{{"schema", 2}, {"op", "local.release"},
+                             {"session", session},
+                             {"local", source_handle}});
+  (void)request(json::object{{"schema", 2}, {"op", "local.release"},
+                             {"session", session},
+                             {"local", projected_handle}});
   const auto evaluated = request(json::object{
       {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
-      {"local", projected_handle},
+      {"local", chained_handle},
       {"point", json::object{{"exact", "1/4"}}},
       {"options", json::object{{"tail_estimate", false}}}});
+  const auto line = request(json::object{
+      {"schema", 2}, {"op", "integration.line"},
+      {"session", session}, {"tile_plan", plan_handle},
+      {"local", chained_handle}, {"arm", "upper"}, {"tile", 0},
+      {"epsilon", json::object{{"min", 0}, {"max", 2}}},
+      {"source_checkpoint_identity", "row-chain-acb"},
+      {"tile_plan_checkpoint_identity", "row-plan-acb"},
+      {"checkpoint_identity", "row-line-acb"}});
+  const auto line_handle = std::string(line.at("line").as_string());
+  (void)request(json::object{{"schema", 2}, {"op", "integration.release"},
+                             {"session", session}, {"line", line_handle}});
+
+  const auto base = std::filesystem::temp_directory_path() /
+      ("diffexp2-rational-row-acb-" + std::to_string(::getpid()));
+  const auto path = base.string() + ".de2cp";
+  const auto corrupt_path = base.string() + "-corrupt.de2cp";
+  const auto resaved_path = base.string() + "-resaved.de2cp";
+  const auto checkpoint_identity = "acb-rational-row-roundtrip-v1";
+  const auto saved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+      {"path", path}, {"checkpoint_identity", checkpoint_identity}});
+  const auto saved_payload = checkpoint_payload(path);
+  const auto& saved_visibility = saved_payload.at("session").as_object()
+      .at("registry_visibility").as_object();
+  (void)write_corrupt_row_checkpoint(
+      path, corrupt_path, chained_handle);
+  (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                             {"session", session}});
+  const auto corruption = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", corrupt_path}, {"expected_identity", checkpoint_identity}});
+  const auto restored = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"}, {"path", path},
+      {"expected_identity", checkpoint_identity}});
+  const auto restored_session =
+      std::string(restored.at("session").as_string());
+  const auto resaved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"},
+      {"session", restored_session}, {"path", resaved_path},
+      {"checkpoint_identity", "acb-rational-row-resaved-v1"}});
+  const auto resaved_payload = checkpoint_payload(resaved_path);
+  const auto hidden_source = request(json::object{
+      {"schema", 2}, {"op", "local.stats"},
+      {"session", restored_session}, {"local", source_handle}});
+  const auto hidden_intermediate = request(json::object{
+      {"schema", 2}, {"op", "local.stats"},
+      {"session", restored_session}, {"local", projected_handle}});
+  const auto restored_stats = request(json::object{
+      {"schema", 2}, {"op", "session.stats"},
+      {"session", restored_session}});
+  const auto restored_evaluated = request(json::object{
+      {"schema", 2}, {"op", "local.evaluate"},
+      {"session", restored_session}, {"local", chained_handle},
+      {"point", json::object{{"exact", "1/4"}}},
+      {"options", json::object{{"tail_estimate", false}}}});
+  const auto restored_line = request(json::object{
+      {"schema", 2}, {"op", "integration.line"},
+      {"session", restored_session}, {"tile_plan", plan_handle},
+      {"local", chained_handle}, {"arm", "upper"}, {"tile", 0},
+      {"epsilon", json::object{{"min", 0}, {"max", 2}}},
+      {"source_checkpoint_identity", "row-chain-acb"},
+      {"tile_plan_checkpoint_identity", "row-plan-acb"},
+      {"checkpoint_identity", "row-line-acb-restored"}});
+  const auto next_local = solve_local(
+      restored_session, chart, "row-next-acb");
+  const auto final_stats = request(json::object{
+      {"schema", 2}, {"op", "session.stats"},
+      {"session", restored_session}});
   const auto& first = evaluated.at("value").as_object()
+      .at("coefficients").as_array().front().as_array();
+  const auto& restored_first = restored_evaluated.at("value").as_object()
       .at("coefficients").as_array().front().as_array();
   const bool ok =
       created.at("rational_row_application_capability") ==
@@ -352,14 +626,70 @@ bool acb_protocol() {
       projected.at("json_coefficients") == 0 &&
       projected.at("metadata").as_object()
           .at("prescriptions").as_array().size() == 1 &&
+      projected.at("tail_majorant").as_object().at("status") ==
+          "unsupported" &&
+      chained.at("status") == "ok" &&
+      chained.at("strong_derivation_ownership") == true &&
+      chained.at("tail_majorant").as_object().at("status") ==
+          "unsupported" &&
       evaluated.at("status") == "ok" && evaluated.at("arithmetic_enclosed") == true &&
-      first.size() == 4 && first.at(2) != "zero";
+      first.size() == 4 && first.at(2) != "zero" &&
+      line.at("status") == "ok" &&
+      saved.at("status") == "ok" &&
+      saved_payload.at("retained_locals").as_array().size() == 3 &&
+      saved_visibility.at("locals").as_array().size() == 1 &&
+      saved_visibility.at("locals").as_array().front() ==
+          json::value(chained_handle) &&
+      corruption.at("status") == "error" &&
+      std::string(corruption.at("detail").as_string()).find(
+          "rational-row owner lineage") != std::string::npos &&
+      restored.at("status") == "ok" &&
+      restored.at("locals").as_array().size() == 1 &&
+      resaved.at("status") == "ok" &&
+      retained_local_record(saved_payload, source_handle) ==
+          retained_local_record(resaved_payload, source_handle) &&
+      retained_local_record(saved_payload, projected_handle) ==
+          retained_local_record(resaved_payload, projected_handle) &&
+      retained_local_record(saved_payload, chained_handle) ==
+          retained_local_record(resaved_payload, chained_handle) &&
+      saved_visibility == resaved_payload.at("session").as_object()
+                              .at("registry_visibility").as_object() &&
+      hidden_source.at("status") == "error" &&
+      hidden_intermediate.at("status") == "error" &&
+      restored_stats.at("locals") == 1 &&
+      restored_stats.at("line_results") == 0 &&
+      restored_evaluated.at("status") == "ok" &&
+      restored_evaluated.at("arithmetic_enclosed") == true &&
+      restored_first == first &&
+      restored_line.at("status") == "ok" &&
+      restored_line.at("line") == "line:2" &&
+      next_local.at("local") == "l:4" &&
+      final_stats.at("locals") == 2 &&
+      final_stats.at("line_results") == 1;
   if (!ok) {
     std::cerr << "Acb projected: " << json::serialize(projected) << '\n'
-              << "Acb evaluated: " << json::serialize(evaluated) << '\n';
+              << "Acb evaluated: " << json::serialize(evaluated) << '\n'
+              << "Acb line: " << json::serialize(line) << '\n'
+              << "Acb saved: " << json::serialize(saved) << '\n'
+              << "Acb corruption: " << json::serialize(corruption) << '\n'
+              << "Acb restored: " << json::serialize(restored) << '\n'
+              << "Acb resaved: " << json::serialize(resaved) << '\n'
+              << "Acb hidden source: " << json::serialize(hidden_source)
+              << '\n' << "Acb hidden intermediate: "
+              << json::serialize(hidden_intermediate) << '\n'
+              << "Acb restored evaluation: "
+              << json::serialize(restored_evaluated) << '\n'
+              << "Acb restored line: " << json::serialize(restored_line)
+              << '\n' << "Acb next local: " << json::serialize(next_local)
+              << '\n' << "Acb final stats: " << json::serialize(final_stats)
+              << '\n';
   }
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
-                             {"session", session}});
+                             {"session", restored_session}});
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  std::filesystem::remove(corrupt_path, ignored);
+  std::filesystem::remove(resaved_path, ignored);
   return ok;
 }
 

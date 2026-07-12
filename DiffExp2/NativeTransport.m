@@ -10,7 +10,7 @@ BeginPackage["DiffExp2`NativeTransport`",
 PrepareNativeRegularIndependentArms::usage =
   "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var} derives and solves the honest epsilon halo required by polar coefficient rows. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
-  "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published. Mixed atlases containing singular receiving charts remain preparation-only until structural singular matching saturation is admitted.";
+  "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 NativeRegularIndependentArmPlansSupportedQ::usage =
   "NativeRegularIndependentArmPlansSupportedQ[lower,upper] is the side-effect-free public-dispatch eligibility predicate for the current exact-rational native path protocol. It accepts only a shared interior anchor, entirely regular charts, and topology/geometry representable by the retained native tile planner.";
 ReleaseNativeRegularIndependentArms::usage =
@@ -639,9 +639,6 @@ RunNativeRegularIndependentArms[atlas_Association, cvec_List,
     err["E8", <|"AtlasType" -> Lookup[atlas, "Type", None],
       "CertifyTail" -> certify, "MaxRefinementSteps" -> maxSteps,
       "Detail" -> "native arm execution options or atlas are malformed"|>]];
-  If[TrueQ[Lookup[atlas, "ContainsSingularReceivingCharts", False]],
-    err["E8", <|"Detail" ->
-      "native singular receiving-chart atlases are preparation-only until structural singular matching saturation is admitted; no regular matching fallback is selected"|>]];
   lower = nativeArmExecution[atlas, atlas["Lower"], cvec, var];
   upper = nativeArmExecution[atlas, atlas["Upper"], cvec, var];
   rowShift = Min[nativePreparedRowsMinimumShift[

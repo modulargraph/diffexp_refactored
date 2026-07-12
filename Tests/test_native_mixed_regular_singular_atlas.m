@@ -1,4 +1,4 @@
-(* Preparation-only mixed regular/singular persistent native atlas. *)
+(* End-to-end mixed regular/singular persistent native atlas. *)
 
 repo = DirectoryName[DirectoryName[$InputFileName]];
 Get[FileNameJoin[{repo, "DiffExp2.m"}]];
@@ -34,7 +34,8 @@ zero = DiffExp2`EpsSeries`ESNew[-3, {0, 0, 0, 0}];
 one = DiffExp2`EpsSeries`ESNew[-3, {0, 0, 0, 1}];
 atlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
-    system, {one, zero}, lowerPlan, upperPlan, "Threads" -> 2]];
+    system, {one, zero}, lowerPlan, upperPlan, "Threads" -> 2,
+    "Integrand" -> {{1, 0}, x}]];
 
 receivingBases = If[FailureQ[atlas], {}, Join[
   Rest[atlas["Lower", "Bases"]], Rest[atlas["Upper", "Bases"]]]];
@@ -98,8 +99,46 @@ strongOwnershipQ = Length[sccReleases] === 2 &&
   AssociationQ[columnAfterSCCRelease] &&
   Lookup[columnAfterSCCRelease, "status", "error"] === "ok";
 
+run = If[FailureQ[atlas], atlas, catchDE2[
+  DiffExp2`NativeTransport`RunNativeRegularIndependentArms[
+    atlas, {1, 0}, x]]];
+exported = If[!AssociationQ[run] ||
+    Lookup[run, "Type", None] =!=
+      "DiffExp2NativeRegularIndependentArmRun", run,
+  DiffExp2`CppBackend`ExportPersistentLineIntegral[
+    run["CombinedLine"],
+    Lookup[run["CombinedLine"], "checkpoint_identity", ""], 60]];
+decoded = If[!AssociationQ[exported] ||
+    Lookup[exported, "status", "error"] =!= "ok", exported,
+  DiffExp2`CppBackend`DecodeScalars[
+    exported["value", "coefficients"], 60]];
+epsilonMin = If[AssociationQ[exported] &&
+    Lookup[exported, "status", "error"] === "ok",
+  exported["value", "min"], Missing["NoMinimum"]];
+epsilonZero = If[ListQ[decoded] && IntegerQ[epsilonMin] &&
+    1 <= 1 - epsilonMin <= Length[decoded],
+  decoded[[1 - epsilonMin]], Missing["NoEpsilonZero"]];
+expected = 2 Sqrt[2]/3;
+runQ = AssociationQ[run] &&
+  Lookup[run, "Type", None] ===
+    "DiffExp2NativeRegularIndependentArmRun" &&
+  run["Lower", "Matches"] === 1 && run["Upper", "Matches"] === 1 &&
+  AssociationQ[exported] && Lookup[exported, "status", "error"] === "ok" &&
+  ListQ[decoded] && NumberQ[epsilonZero] &&
+  TrueQ[Abs[N[epsilonZero - expected, 30]] < 10^-5];
+
+afterRun = If[FailureQ[atlas], <||>,
+  Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    atlas["Session"], <||>]];
+nativeExecutionQ = runQ &&
+  Lookup[afterRun, "local_matches", -1] === 2 &&
+  Lookup[afterRun, "line_integrations", 0] > 0 &&
+  Lookup[afterRun, "line_exports", -1] === 1;
+
 released = If[FailureQ[atlas], atlas,
-  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[atlas]];
+  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[
+    If[AssociationQ[run] && Lookup[run, "Type", None] ===
+        "DiffExp2NativeRegularIndependentArmRun", run, atlas]]];
 after = If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
     atlas["Session"], <||>]];
@@ -125,17 +164,17 @@ cleanupQ = AssociationQ[released] &&
   Lookup[after, "tile_plans", -1] === 0 &&
   Lookup[after, "line_results", -1] === 0 &&
   Lookup[after, "scc_charts", -1] === 0 &&
-  Lookup[after, "local_matches", -1] === 0 &&
-  Lookup[after, "line_integrations", -1] === 0;
+  Lookup[after, "local_matches", -1] === 2 &&
+  Lookup[after, "line_integrations", 0] > 0;
 
 DiffExp2`Solve`ClearSolveCaches[];
 closedQ = DiffExp2`CppBackend`PersistentSessionInformation[] === <||>;
 
 ok = preparedQ && opaqueBasisQ && planOwnsSCCQ && strongOwnershipQ &&
-  cleanupQ && closedQ;
+  nativeExecutionQ && cleanupQ && closedQ;
 
 If[TrueQ[ok],
-  Print["PASS: mixed regular/singular native atlas preparation"],
+  Print["PASS: mixed regular/singular native atlas execution"],
   Print["FAIL: ", InputForm[<|
     "Atlas" -> If[AssociationQ[atlas],
       KeyTake[atlas, {"Type", "Session", "ContainsSingularReceivingCharts"}],
@@ -153,7 +192,15 @@ If[TrueQ[ok],
     "ColumnAfterSCCRelease" -> If[AssociationQ[columnAfterSCCRelease],
       KeyTake[columnAfterSCCRelease, {"status", "session", "local"}],
       columnAfterSCCRelease],
-    "Released" -> released, "After" -> after,
+    "Run" -> If[AssociationQ[run],
+      KeyTake[run, {"Type", "Lower", "Upper", "NativeSummary"}], run],
+    "Exported" -> If[AssociationQ[exported],
+      <|"status" -> Lookup[exported, "status", None],
+        "min" -> Lookup[Lookup[exported, "value", <||>], "min", None],
+        "max" -> Lookup[Lookup[exported, "value", <||>], "max", None]|>,
+      exported], "Decoded" -> decoded,
+    "EpsilonZero" -> epsilonZero, "Expected" -> expected,
+    "AfterRun" -> afterRun, "Released" -> released, "After" -> after,
     "Checks" -> {preparedQ, opaqueBasisQ, planOwnsSCCQ,
-      strongOwnershipQ, cleanupQ, closedQ}|>]];
+      strongOwnershipQ, nativeExecutionQ, cleanupQ, closedQ}|>]];
   Exit[1]];

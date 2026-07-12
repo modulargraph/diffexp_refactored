@@ -120,6 +120,15 @@ constructs a monolithic alternative and is not yet used by production
 reuses live handles, checks native stats before an early hit, and fails loudly
 at capacity rather than evicting a public SCC object.
 
+The manifest also owns one exact cleared physical equation
+`q(t,eps) theta(f) = C(t,eps) f` in the full original-master basis.  Only a
+completed full-dimension homogeneous SCC column acquires that owner; the
+internally sourced diagonal solves are never exposed as independently
+certified parent locals.  The owner is retained strongly across SCC release
+and checkpoint restore.  Nonidentity block spectral transforms remain outside
+this SCC execution scope because a sourced target would first require an
+explicit retained `VInv` source-basis conversion.
+
 The explicit
 ``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
 seedLocalComponent:1]`` seam consumes the compact run-only data in that cache

@@ -768,7 +768,8 @@ ExactEpsilonRational<Scalar> parse_physical_epsilon_rational(
 template <typename Scalar>
 std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
 parse_prepared_physical_ode(const json::value& raw,
-                            std::uint32_t expected_dimension) {
+                            std::uint32_t expected_dimension,
+                            bool require_operator_token = true) {
   const auto& object = as_object(raw, "prepared physical cleared ODE");
   require_exact_keys(
       object,
@@ -786,7 +787,8 @@ parse_prepared_physical_ode(const json::value& raw,
   result->owner_signature_identity = required_string(
       object, "owner_signature_identity");
   result->payload_identity = required_string(object, "payload_identity");
-  if (!result->owner_signature_identity.starts_with("de2-operator-") ||
+  if ((require_operator_token &&
+       !result->owner_signature_identity.starts_with("de2-operator-")) ||
       !result->payload_identity.starts_with("de2-physical-ode-"))
     throw std::invalid_argument(
         "prepared physical cleared ODE has malformed owner/payload identity tokens");
@@ -2507,16 +2509,36 @@ class StoredLocal final : public StoredLocalBase {
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>) {
       if (equation_owner_ != nullptr && physical_equation_ != nullptr) {
-        if (retained_derivation_.has_value() || column_provenance_.has_value())
+        if (retained_derivation_.has_value())
           throw std::invalid_argument(
-              "derived/composite local cannot acquire a primitive physical equation owner");
+              "source-derived local cannot acquire a homogeneous physical equation owner");
+        const auto owner_kind =
+            std::string(equation_owner_->equation_owner_kind());
+        if (owner_kind == "prepared-chart") {
+          if (column_provenance_.has_value())
+            throw std::invalid_argument(
+                "SCC column local cannot acquire a primitive chart equation owner");
+        } else if (owner_kind == "composite-scc") {
+          if (!column_provenance_.has_value() ||
+              column_provenance_->scc_handle !=
+                  equation_owner_->equation_owner_handle() ||
+              column_provenance_->scc_exact_identity !=
+                  equation_owner_->equation_operator_identity())
+            throw std::invalid_argument(
+                "completed SCC parent local lacks matching full-column provenance");
+        } else {
+          throw std::invalid_argument(
+              "local received an unsupported physical equation owner kind");
+        }
         if (equation_owner_->equation_owner_handle() != source_chart_ ||
             equation_owner_->equation_operator_identity() !=
                 source_operator_identity_ ||
             std::string(equation_owner_->equation_scalar_domain()) !=
-                scalar_domain())
+                scalar_domain() ||
+            equation_owner_->physical_payload_record() !=
+                physical_equation_->exact_payload_record)
           throw std::invalid_argument(
-              "primitive local physical equation owner disagrees with its source provenance");
+              "physical equation owner disagrees with its local source or q/C provenance");
         residual_binding_ = make_owner_bound_residual_binding(
             solution_, *physical_equation_, *equation_owner_,
             source_operator_identity_);
@@ -7924,7 +7946,7 @@ struct CompositeColumnSolveResult {
   double elapsed_ms = 0.0;
 };
 
-class CompositeSCCChartBase {
+class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
  public:
   CompositeSCCChartBase(std::string handle, std::string key,
                         std::string exact_identity, std::string signature)
@@ -7935,11 +7957,21 @@ class CompositeSCCChartBase {
 
   virtual json::object stats_json() const = 0;
   virtual CompositeColumnSolveResult solve_column(
-      const std::string& local_handle, const json::object& request) = 0;
+      const std::string& local_handle, const json::object& request,
+      std::shared_ptr<CompositeSCCChartBase> equation_owner) = 0;
   virtual const char* column_execution_capability() const = 0;
   virtual const std::string& geometry_record() const = 0;
   virtual std::vector<std::shared_ptr<PreparedChartBase>>
   dependency_charts() const = 0;
+  const std::string& equation_owner_handle() const override {
+    return handle_;
+  }
+  const std::string& equation_operator_identity() const override {
+    return exact_identity_;
+  }
+  const char* equation_owner_kind() const override {
+    return "composite-scc";
+  }
   const std::string& handle() const { return handle_; }
   const std::string& key() const { return key_; }
   const std::string& exact_identity() const { return exact_identity_; }
@@ -8707,7 +8739,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                     RetainedCompositeGeometry retained_geometry,
                     CompositeWorkContract work,
                     std::vector<CompositeSCCBlock<Scalar>> blocks,
-                    std::vector<CompositeSCCCoupling<Scalar>> couplings)
+                    std::vector<CompositeSCCCoupling<Scalar>> couplings,
+                    std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+                        physical_equation)
       : CompositeSCCChartBase(std::move(handle), std::move(key),
                               std::move(exact_identity),
                               std::move(signature)),
@@ -8716,13 +8750,24 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         exact_theta_record_(std::move(exact_theta_record)),
         geometry_record_(std::move(geometry_record)),
         retained_geometry_(std::move(retained_geometry)), work_(work),
-        blocks_(std::move(blocks)), couplings_(std::move(couplings)) {}
+        blocks_(std::move(blocks)), couplings_(std::move(couplings)),
+        physical_equation_(std::move(physical_equation)) {
+    if (physical_equation_ &&
+        physical_equation_->owner_signature_identity != exact_identity_)
+      throw std::invalid_argument(
+          "composite physical q/C payload names a different full parent owner identity");
+  }
 
   CompositeColumnSolveResult solve_column(
       const std::string& local_handle,
-      const json::object& request) override {
+      const json::object& request,
+      std::shared_ptr<CompositeSCCChartBase> equation_owner) override {
+    if (!equation_owner || equation_owner.get() != this)
+      throw std::invalid_argument(
+          "completed SCC solve received a different physical equation owner");
     if constexpr (std::is_same_v<Scalar, ComplexBall>) {
-      return solve_regular_acb_column(local_handle, request);
+      return solve_regular_acb_column(
+          local_handle, request, std::move(equation_owner));
     } else if constexpr (!std::is_same_v<Scalar, Rational>) {
       throw std::invalid_argument(
           "native SCC column execution supports exact rational columns and regular Acb columns only");
@@ -9009,11 +9054,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           handle_, exact_identity_, seed_block,
           basis_index,
           json::serialize(canonical_json_value(column_identity_record))};
-      auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
-          local_handle, handle_, exact_identity_, std::move(parent),
-          blocks_[seed_block].chart->precision_bits(),
-          std::vector<PseudoHit<Scalar>>{}, aggregate,
-          std::move(column_provenance));
+      auto local = retain_completed_parent_local(
+          local_handle, seed_block, std::move(parent), aggregate,
+          std::move(column_provenance), std::move(equation_owner));
       const auto elapsed_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       column_solves_.fetch_add(1);
@@ -9040,6 +9083,33 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
   const std::string& geometry_record() const override {
     return geometry_record_;
+  }
+
+  const char* equation_scalar_domain() const override {
+    if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
+    return "symbolic";
+  }
+
+  std::shared_ptr<const void> physical_ode_erased() const override {
+    return std::static_pointer_cast<const void>(physical_equation_);
+  }
+
+  const std::string& physical_payload_identity() const override {
+    static const std::string empty;
+    return physical_equation_ ? physical_equation_->payload_identity : empty;
+  }
+
+  const std::string& physical_payload_record() const override {
+    static const std::string empty;
+    return physical_equation_
+        ? physical_equation_->exact_payload_record : empty;
+  }
+
+  const std::string& owner_signature_identity() const override {
+    static const std::string empty;
+    return physical_equation_
+        ? physical_equation_->owner_signature_identity : empty;
   }
 
   std::vector<std::shared_ptr<PreparedChartBase>>
@@ -9115,6 +9185,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     json::object result{
         {"scc", handle_}, {"key", key_}, {"identity", exact_identity_},
         {"dimension", dimension_}, {"blocks", blocks_.size()},
+        {"physical_ode_owner",
+         physical_equation_ ? "full-parent" : "unsupported"},
+        {"physical_payload_identity",
+         physical_equation_
+             ? json::value(physical_equation_->payload_identity)
+             : json::value(nullptr)},
         {"coupling_groups", couplings_.size()},
         {"coupling_entries", active_entries + proven_zero_entries},
         {"active_coupling_entries", active_entries},
@@ -9184,8 +9260,39 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
  private:
+  std::shared_ptr<StoredLocalBase> retain_completed_parent_local(
+      const std::string& local_handle, std::uint32_t seed_block,
+      LocalSolution<Scalar> parent, const NativeLocalDiagnostics& diagnostics,
+      SCCColumnProvenance column_provenance,
+      std::shared_ptr<CompositeSCCChartBase> equation_owner) {
+    std::shared_ptr<PhysicalEquationOwnerBase> retained_owner;
+    std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+        retained_equation;
+    std::string unavailable_reason;
+    if constexpr (std::is_same_v<Scalar, Rational> ||
+                  std::is_same_v<Scalar, ComplexBall>) {
+      if (physical_equation_) {
+        retained_owner = std::move(equation_owner);
+        retained_equation = physical_equation_;
+      } else {
+        unavailable_reason =
+            "owner-bound residual is unsupported: retained composite SCC has no full parent physical q/C payload";
+      }
+    }
+    return make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+        local_handle, handle_, exact_identity_, std::move(parent),
+        blocks_.at(seed_block).chart->precision_bits(),
+        std::vector<PseudoHit<Scalar>>{}, diagnostics,
+        std::move(column_provenance), std::nullopt, nullptr,
+        unavailable_tail_model(
+            "tail model is unavailable for an assembled SCC parent local"),
+        std::nullopt, true, true, std::move(retained_owner),
+        std::move(retained_equation), std::move(unavailable_reason));
+  }
+
   CompositeColumnSolveResult solve_regular_acb_column(
-      const std::string& local_handle, const json::object& request) {
+      const std::string& local_handle, const json::object& request,
+      std::shared_ptr<CompositeSCCChartBase> equation_owner) {
     static_assert(std::is_same_v<Scalar, ComplexBall>);
     const bool regular_singular_execution =
         regular_singular_jordan_column_ready();
@@ -9360,11 +9467,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     SCCColumnProvenance column_provenance{
         handle_, exact_identity_, seed_block, basis_index,
         json::serialize(canonical_json_value(column_identity_record))};
-    auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
-        local_handle, handle_, exact_identity_, std::move(parent),
-        blocks_[seed_block].chart->precision_bits(),
-        std::vector<PseudoHit<Scalar>>{}, aggregate,
-        std::move(column_provenance));
+    auto local = retain_completed_parent_local(
+        local_handle, seed_block, std::move(parent), aggregate,
+        std::move(column_provenance), std::move(equation_owner));
     const auto elapsed_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
     column_solves_.fetch_add(1);
@@ -10063,6 +10168,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   CompositeWorkContract work_;
   std::vector<CompositeSCCBlock<Scalar>> blocks_;
   std::vector<CompositeSCCCoupling<Scalar>> couplings_;
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+      physical_equation_;
   std::atomic<std::uint64_t> column_solves_{0};
   mutable std::mutex column_stats_mutex_;
   double column_solve_ms_ = 0.0;
@@ -13774,6 +13881,11 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
   const auto dimension = as_u32(parent.at("dimension"), "parent dimension");
   if (dimension == 0)
     throw std::invalid_argument("SCC parent dimension must be positive");
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
+      physical_equation;
+  if (const auto* raw_physical = root.if_contains("physical_ode"))
+    physical_equation = parse_prepared_physical_ode<Scalar>(
+        *raw_physical, dimension, false);
   const auto exact_system = parse_exact_parent_matrix(
       parent.at("exact_system_record"), dimension,
       "exact parent system record");
@@ -14162,7 +14274,8 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
       std::move(graph), exact_system.canonical_record,
       exact_theta.canonical_record,
       geometry_record, std::move(retained_geometry), work,
-      std::move(blocks), std::move(couplings));
+      std::move(blocks), std::move(couplings),
+      std::move(physical_equation));
 }
 
 struct SessionRegistry {
@@ -14242,6 +14355,8 @@ std::string composite_scc_signature(const json::object& root) {
                      {"parent", root.at("parent")},
                      {"blocks", root.at("blocks")},
                      {"couplings", root.at("couplings")}};
+  if (const auto* physical = root.if_contains("physical_ode"))
+    exact["physical_ode"] = *physical;
   return json::serialize(canonical_json_value(exact));
 }
 
@@ -14264,7 +14379,7 @@ std::string static_problem_signature(const json::object& problem,
 
 constexpr const char* kCheckpointFormat =
     "diffexp2-persistent-native-session";
-constexpr std::uint32_t kCheckpointPayloadSchema = 7;
+constexpr std::uint32_t kCheckpointPayloadSchema = 8;
 
 json::object run_session_command(const json::object& root);
 
@@ -16102,6 +16217,18 @@ json::object checkpoint_scc_item(
   if (required_string(signature, "identity") != composite->exact_identity())
     throw std::logic_error(
         "retained SCC exact identity changed after retention");
+  if (const auto* physical = signature.if_contains("physical_ode")) {
+    if (composite->physical_payload_record().empty() ||
+        json::serialize(canonical_json_value(*physical)) !=
+            composite->physical_payload_record() ||
+        composite->owner_signature_identity() !=
+            composite->exact_identity())
+      throw std::logic_error(
+          "retained SCC full-parent physical q/C payload changed after retention");
+  } else if (!composite->physical_payload_record().empty()) {
+    throw std::logic_error(
+        "retained SCC signature lost its full-parent physical q/C payload");
+  }
   json::object request = signature;
   request["schema"] = 2;
   request["op"] = "scc.prepare";
@@ -16408,6 +16535,13 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           throw std::logic_error(
               "checkpoint local equation owner kind is not a prepared chart");
         add_chart(std::move(chart));
+      } else if (kind == "composite-scc") {
+        auto composite = std::dynamic_pointer_cast<CompositeSCCChartBase>(
+            equation_owner);
+        if (!composite)
+          throw std::logic_error(
+              "checkpoint local equation owner kind is not a CompositeSCC");
+        add_scc(std::move(composite));
       } else {
         throw std::domain_error(
             "native checkpoint does not yet serialize this physical equation owner kind");
@@ -17304,6 +17438,12 @@ json::object restore_checkpoint(const std::string& path,
             if (found == restored->charts.end())
               throw std::invalid_argument(
                   "checkpoint local physical equation owner chart is missing");
+            equation_owner = found->second;
+          } else if (owner_kind == "composite-scc") {
+            const auto found = restored->sccs.find(owner_handle);
+            if (found == restored->sccs.end())
+              throw std::invalid_argument(
+                  "checkpoint local physical equation owner SCC is missing");
             equation_owner = found->second;
           } else {
             throw std::invalid_argument(
@@ -21473,7 +21613,7 @@ json::object run_session_command(const json::object& root) {
 
     CompositeColumnSolveResult column;
     try {
-      column = composite->solve_column(local_handle, root);
+      column = composite->solve_column(local_handle, root, composite);
     } catch (...) {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_local_solves == 0)
@@ -21576,7 +21716,8 @@ json::object run_session_command(const json::object& root) {
         try {
           columns[index] = composite->solve_column(
               local_handles[index],
-              as_object(raw_columns[index], "native SCC batch column"));
+              as_object(raw_columns[index], "native SCC batch column"),
+              composite);
         } catch (...) {
           errors[index] = std::current_exception();
         }

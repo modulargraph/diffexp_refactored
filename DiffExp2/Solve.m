@@ -25,7 +25,7 @@ SolveNativeValueRegular::usage = "SolveNativeValueRegular[chartSystem, req, vals
 SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
 PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
 PrepareNativeRationalRow::usage = "PrepareNativeRationalRow[chartSystem, sourceShape, cvec, physicalVariable, serialization] prepares cvec(center+scale t,eps) as the strict JSON-ready rational row consumed by CppBackend`ApplyPersistentRationalRow. sourceShape supplies the retained local's exact EpsWindow, TWindow, and Dimension; serialization is Automatic or <|\"domain\"->\"acb\"|\"rational\",\"symbols\"->{}|>. The affine dx Jacobian is deliberately not included.";
-PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
+PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest with one full original-master physical q/C owner, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. Singular Acb execution is restricted to exact schedules without CASE-P collisions. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
 SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
@@ -4309,6 +4309,32 @@ sccNativeCompositeIdentity[parent_Association, blocks_List,
     "RawJSON", "Compact" -> True], $Failed]];
   identity];
 
+(* The composite owner must retain one equation in the full original-master
+   basis.  Diagonal chart payloads are intentionally not reused: their q/C
+   records have block dimension and cannot certify a sourced propagation
+   after the completed parent has been assembled.  The already collision-
+   checked composite exact identity is also the physical owner signature. *)
+sccParentPhysicalODEPayload[cs_Association, ownerIdentity_String,
+    serialization_Association, inputDigits_Integer] := Module[
+  {field, data, payload},
+  If[StringLength[ownerIdentity] == 0 || inputDigits < 1,
+    err["E6", cs, <|"Detail" ->
+      "parent physical ODE capture requires a nonempty composite identity and positive input precision"|>]];
+  field = sccSerializationField[serialization, cs];
+  data = physicalClearedODEData[cs];
+  payload = Block[{
+      $cppSerializationDomain = field["domain"],
+      $cppSerializationSymbols = field["symbols"]},
+    cppPhysicalODEPayload[data, ownerIdentity, inputDigits, cs]];
+  If[!AssociationQ[payload] ||
+      Lookup[payload, "owner_signature_identity", None] =!=
+        ownerIdentity ||
+      !StringQ[Lookup[payload, "payload_identity", None]] ||
+      Length[Lookup[payload, "c", {}]] < 1,
+    err["E6", cs, <|"Detail" ->
+      "parent physical q/C payload did not retain its full composite owner identity"|>]];
+  payload];
+
 PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], epsWindow,
    requestedMin, requestedMax, publicTOrder, workTOrder, plannedTop,
@@ -4318,7 +4344,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    couplings, identity, manifest, prepared, result, scale, radius,
    center, missingReq, components, condensation, executionDescriptor,
    inputDigits, runRecords, taskRecords, columnPlans, blockDimensions,
-   framePlans, forcedFrame},
+   framePlans, forcedFrame, physicalPayload},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -4470,10 +4496,13 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   If[!StringQ[identity],
     err["E6", cs, <|"Detail" ->
       "native SCC exact parent identity could not be serialized"|>]];
-  manifest = <|"identity" -> identity, "parent" -> parent,
-    "blocks" -> blockRecords, "couplings" -> couplings|>;
   inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*
     cfg["WorkingPrecision"];
+  physicalPayload = sccParentPhysicalODEPayload[
+    cs, identity, serialization, inputDigits];
+  manifest = <|"identity" -> identity, "parent" -> parent,
+    "blocks" -> blockRecords, "couplings" -> couplings,
+    "physical_ode" -> physicalPayload|>;
   runRecords = Map[Function[capture,
       KeyTake[#, $nativeSCCColumnRunKeys] & /@ capture["Requests"]],
     captures];

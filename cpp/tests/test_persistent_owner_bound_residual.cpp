@@ -657,7 +657,7 @@ int main() {
       is_error(analytic_rejected) && is_error(checkpoint_rejected) &&
       is_error(tail_rejected) &&
       restored_valid.at("verdict") == "pass" &&
-      original_payload.at("schema") == 7 &&
+      original_payload.at("schema") == 8 &&
       original_local.at("schema") == "diffexp2-retained-local-v4" &&
       !original_local.at("equation_owner_restore").is_null() &&
       original_local.at("equation_owner_restore") ==

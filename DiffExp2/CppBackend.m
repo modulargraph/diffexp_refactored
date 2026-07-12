@@ -16,7 +16,7 @@ RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-graine
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
 RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
-PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
+PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts and one full-parent physical q/C equation owner into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
 PersistentSCCStatistics::usage = "PersistentSCCStatistics[handle] returns statistics and exact metadata for a retained native SCC chart.";
 RunPersistentSCCColumn::usage = "RunPersistentSCCColumn[handle, seed, targets, checkpointIdentity] executes one strict schema-2 native SCC basis column and returns an opaque retained local-solution summary. seed and every target contain exactly block, run, and metadata; no coefficient slab is returned.";
 RunPersistentSCCColumns::usage = "RunPersistentSCCColumns[handle, columns, threads] executes an ordered all-or-nothing batch of retained SCC basis columns through one native worker pool. Each column contains Seed, Targets, and CheckpointIdentity; successful locals are retained atomically and no coefficient slab is returned.";
@@ -646,7 +646,8 @@ persistentSCCHandles[handle_Association] := Module[{session, scc},
   <|"Session" -> session, "SCC" -> scc|>];
 
 PreparePersistentSCC[groups_List, manifest_Association] := Module[
-  {requiredKeys = {"identity", "parent", "blocks", "couplings"},
+  {requiredKeys = {"identity", "parent", "blocks", "couplings",
+      "physical_ode"},
    reservedBlockKeys = {"chart", "principal_identity"}, blocks,
    badBlockPositions, preparedGroups = {}, prepared, sessions, session,
    filledBlocks, filledManifest, canonicalManifest, manifestJSON,
@@ -664,9 +665,10 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
   If[!StringQ[manifest["identity"]] ||
       StringLength[manifest["identity"]] == 0 ||
       !AssociationQ[manifest["parent"]] || !ListQ[blocks] ||
-      !AllTrue[blocks, AssociationQ] || !ListQ[manifest["couplings"]],
+      !AllTrue[blocks, AssociationQ] || !ListQ[manifest["couplings"]] ||
+      !AssociationQ[manifest["physical_ode"]],
     Return[Failure["CppBackend", <|"Detail" ->
-      "persistent SCC identity, parent, blocks, or couplings has the wrong native JSON type"|>],
+      "persistent SCC identity, parent, blocks, couplings, or physical ODE has the wrong native JSON type"|>],
       Module]];
   If[Length[blocks] =!= Length[groups],
     Return[Failure["CppBackend", <|"Detail" ->
@@ -700,7 +702,8 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
     {blocks, preparedGroups}];
   filledManifest = <|"identity" -> manifest["identity"],
     "parent" -> manifest["parent"], "blocks" -> filledBlocks,
-    "couplings" -> manifest["couplings"]|>;
+    "couplings" -> manifest["couplings"],
+    "physical_ode" -> manifest["physical_ode"]|>;
   canonicalManifest = persistentCanonicalJSONValue[filledManifest];
   manifestJSON = Quiet[Check[ExportString[canonicalManifest, "RawJSON",
       "Compact" -> True], $Failed]];

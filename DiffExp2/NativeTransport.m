@@ -40,6 +40,11 @@ esCM = DiffExp2`EpsSeries`ESCompleteMax;
 esZero = DiffExp2`EpsSeries`ESZero;
 esTruncate = DiffExp2`EpsSeries`ESTruncate;
 
+nativeStageTiming[fields___] := If[
+  Environment["DE2_NATIVE_STAGE_TIMING"] === "1",
+  Print["DE2 NATIVE STAGE ", fields, " t=", SessionTime[],
+    " memory=", MemoryInUse[]]];
+
 exactRationalQ[value_] := IntegerQ[value] || Head[value] === Rational;
 nativeNonemptyStringQ[value_] := StringQ[value] &&
   StringLength[StringTrim[value]] > 0;
@@ -791,12 +796,15 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, locals];
     Null];
   output = Catch[
+  nativeStageTiming["anchor-prepare-start"];
   anchorSystem = DiffExp2`Solve`PrepareChart[sys, First[lower["Charts"]]];
+  nativeStageTiming["anchor-prepare-done"];
   If[!TrueQ[Lookup[anchorSystem["IndicialData"], "Regular", False]],
     err["E8", <|"Center" -> anchorSystem["Center"],
       "Detail" -> "native independent-arm anchor is not regular"|>]];
   anchor = DiffExp2`Solve`SolveNativeValueRegular[
     anchorSystem, req, values];
+  nativeStageTiming["anchor-solve-done"];
   sessionInfo = DiffExp2`CppBackend`PersistentSessionInformation[];
   sessionStats = Lookup[sessionInfo, anchor["Session"], None];
   domain = If[AssociationQ[sessionStats],
@@ -804,9 +812,14 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   If[!MemberQ[{"acb", "rational"}, domain],
     err["E5", <|"Domain" -> domain,
       "Detail" -> "native independent-arm atlas requires Acb or Rational retained locals"|>]];
-  prepareArm[plan_Association] := Module[{systems, bases, built, kinds},
+  prepareArm[plan_Association] := Module[
+    {systems, bases, built, prepared, kinds},
     systems = Prepend[
-      DiffExp2`Solve`PrepareChart[sys, #] & /@ Rest[plan["Charts"]],
+      MapIndexed[Function[{chart, index},
+        nativeStageTiming["chart-prepare-start index=", First[index]];
+        prepared = DiffExp2`Solve`PrepareChart[sys, chart];
+        nativeStageTiming["chart-prepare-done index=", First[index]];
+        prepared], Rest[plan["Charts"]]],
       anchorSystem];
     kinds = Prepend[Map[
       If[TrueQ[Lookup[Lookup[#, "IndicialData", <||>],
@@ -814,10 +827,12 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       Rest[systems]], "Anchor"];
     If[MemberQ[kinds, "SingularSCC"],
       containsSingularReceivingCharts = True];
-    bases = Prepend[Map[
-      Function[system,
+    bases = Prepend[MapIndexed[
+      Function[{system, index},
+        nativeStageTiming["basis-solve-start index=", First[index]];
         built = nativeReceivingBasis[system, req, threads];
         AppendTo[preparedBases, built];
+        nativeStageTiming["basis-solve-done index=", First[index]];
         built], Rest[systems]], None];
     <|"Plan" -> plan, "ChartSystems" -> systems,
       "Bases" -> bases, "BasisKinds" -> kinds|>];

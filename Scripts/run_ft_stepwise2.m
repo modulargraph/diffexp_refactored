@@ -1873,6 +1873,11 @@ ft2NativeReleaseBatch[batch_] :=
 ft2NativeReleaseAtlas[atlas_] :=
   DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[atlas];
 
+ft2NativeStageTiming[fields___] := If[
+  Environment["DE2_NATIVE_STAGE_TIMING"] === "1",
+  Print["FTLADDER NATIVE STAGE ", fields, " t=", SessionTime[],
+    " memory=", MemoryInUse[]]];
+
 ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     entries_List, ledger_Association, physicalVar_Symbol, anchor_,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
@@ -2024,7 +2029,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       upperPlan = catch2[
         ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
       If[FailureQ[lowerPlan] || FailureQ[upperPlan],
-        Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]]];
+        Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
+      ft2NativeStageTiming["plans-ready charts=",
+        Length /@ {lowerPlan["Charts"], upperPlan["Charts"]}]];
     paddedBoundary = If[integrationHalo === 0,
       DiffExp2`EpsSeries`ESNew[0, #] & /@ currentBCs,
       DiffExp2`EpsSeries`ESNew[-integrationHalo,
@@ -2087,6 +2094,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         nativeCheckpointState = resumeCore["State"];
         batch = catch2[ft2NativeRestoreCheckpoint[nativeCheckpointState]];
         restoredNativeQ = True,
+        ft2NativeStageTiming["atlas-prepare-start"];
         atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
           lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
           physicalVar, ledger["TargetCompleteMax"], threads]];
@@ -2098,6 +2106,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           Throw[If[FailureQ[atlas], atlas,
             ft2NativeFailure["native atlas preparation returned a malformed result",
               <|"Result" -> atlas|>]], dispatchTag]];
+        ft2NativeStageTiming["atlas-prepare-done"];
         atlasPlanIdentity = atlas["PlanCheckpointIdentity"];
         nativeBatchPayloadIdentity = ft2CanonicalIdentity[
           "ft2-native-observable-payload-",
@@ -2105,7 +2114,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
             Map[KeyTake[#, {"Operation", "Identity",
                 "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
               observables]}];
+        ft2NativeStageTiming["observable-run-start"];
         batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
+        ft2NativeStageTiming["observable-run-done"];
         If[checkpointMode === "Save",
           If[FailureQ[batch] || !nativeBatchMatchesQ[batch, atlas],
             Throw[If[FailureQ[batch], batch,
@@ -2405,6 +2416,7 @@ runExample[name_String] := Module[
     currentBCs = epsilonBasis["BoundaryValues"];
     currentPrefactors = epsilonBasis["BoundaryPrefactors"];
     epsilonBasisRecord = epsilonBasis["CheckpointRecord"];
+    ft2NativeStageTiming["level=", level, " epsilon-basis-ready"];
     If[resumeTransport || resumeNativeTransport,
       If[Lookup[resumeCheckpoint, "EpsilonBasis", None] =!=
           epsilonBasisRecord,
@@ -2432,6 +2444,7 @@ runExample[name_String] := Module[
       Print["FIRE FAIL"]; Return[$Failed, Module]];
     requests = levelIBPBatch["BoundaryRequests"];
     reductions = levelIBPBatch["Reductions"];
+    ft2NativeStageTiming["level=", level, " ibp-batch-ready"];
     rowCertifications = Map[Function[request,
       Switch[Lookup[request, "Case", None],
         "integrate", ft2NotApplicableCertification["integrate",
@@ -2449,6 +2462,8 @@ runExample[name_String] := Module[
     If[rawExtraFacs === $Failed,
       Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];
     extraFacs = normalizeFT[rawExtraFacs];
+    ft2NativeStageTiming["level=", level,
+      " singular-factors-ready"];
     If[resumeTransport || resumeNativeTransport,
       sys = resumeCheckpoint["System"];
       If[Lookup[sys, "Variable", None] =!= var ||
@@ -2582,6 +2597,8 @@ runExample[name_String] := Module[
                   nativeEpsilonExecution["Identity"],
                 "Tainted" -> False|>]]|>,
         True, None];
+      ft2NativeStageTiming["level=", level,
+        " native-dispatch-ready"];
       nativeDispatch = ft2RunNativeBoundaryDispatch[
         sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
         extraFacs, deltaPrescriptions, cppArmThreadBudget, wp,

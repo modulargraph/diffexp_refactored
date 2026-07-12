@@ -1072,6 +1072,15 @@ int main() {
     const auto& retained_state_record =
         saved_payload.at("retained_transport_states").as_array().front()
             .as_object();
+    const auto& retained_state_provenance =
+        retained_state_record.at("provenance").as_object();
+    const auto& retained_state_plan =
+        retained_state_provenance.at("tile_plan").as_object();
+    bool recursive_match_provenance = false;
+    for (const auto& raw_match :
+         retained_state_provenance.at("matches").as_array())
+      recursive_match_provenance |=
+          raw_match.as_object().if_contains("provenance_identity") != nullptr;
     if (!contains_record(
             saved_payload.at("retained_transport_states").as_array(),
             "handle", transport_state) ||
@@ -1086,7 +1095,9 @@ int main() {
         !contains_record(saved_payload.at("retained_locals").as_array(),
                          "handle", transport_final) ||
         retained_state_record.at("schema") !=
-            "diffexp2-retained-transport-arm-state-v2" ||
+            "diffexp2-retained-transport-arm-state-v3" ||
+        retained_state_plan.if_contains("provenance_identity") != nullptr ||
+        recursive_match_provenance ||
         unsigned_value(retained_state_record.at("runtime_stats").as_object(),
                        "contraction_operations") != 3 ||
         unsigned_value(retained_state_record.at("runtime_stats").as_object(),

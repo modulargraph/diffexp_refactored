@@ -11594,7 +11594,8 @@ class StoredTransportArmState {
       EpsilonWindow work_epsilon,
       std::int32_t public_required_complete_max,
       std::int32_t match_required_complete_max,
-      json::object refinement, double elapsed_ms)
+      json::object refinement, double elapsed_ms,
+      bool compact_provenance = true)
       : handle_(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
         arm_(std::move(arm)), plan_owner_(std::move(plan_owner)),
@@ -11605,7 +11606,8 @@ class StoredTransportArmState {
         work_epsilon_(work_epsilon),
         public_required_complete_max_(public_required_complete_max),
         match_required_complete_max_(match_required_complete_max),
-        refinement_(std::move(refinement)), elapsed_ms_(elapsed_ms) {
+        refinement_(std::move(refinement)), elapsed_ms_(elapsed_ms),
+        compact_provenance_(compact_provenance) {
     validate();
     provenance_identity_ = json::serialize(
         canonical_json_value(provenance_record()));
@@ -11711,7 +11713,9 @@ class StoredTransportArmState {
 
   json::object checkpoint_record() const {
     return json::object{
-        {"schema", "diffexp2-retained-transport-arm-state-v2"},
+        {"schema", compact_provenance_
+             ? "diffexp2-retained-transport-arm-state-v3"
+             : "diffexp2-retained-transport-arm-state-v2"},
         {"handle", handle_},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
@@ -11769,11 +11773,15 @@ class StoredTransportArmState {
   json::array match_reference() const {
     json::array result;
     result.reserve(matches_.size());
-    for (std::size_t index = 0; index < matches_.size(); ++index)
-      result.push_back(json::object{
+    for (std::size_t index = 0; index < matches_.size(); ++index) {
+      auto reference = json::object{
           {"index", index}, {"match", matches_[index]->handle()},
-          {"checkpoint_identity", matches_[index]->checkpoint_identity()},
-          {"provenance_identity", matches_[index]->provenance_identity()}});
+          {"checkpoint_identity", matches_[index]->checkpoint_identity()}};
+      if (!compact_provenance_)
+        reference["provenance_identity"] =
+            matches_[index]->provenance_identity();
+      result.push_back(std::move(reference));
+    }
     return result;
   }
 
@@ -11797,13 +11805,18 @@ class StoredTransportArmState {
   }
 
   json::object provenance_record() const {
+    auto plan_reference = json::object{
+        {"handle", plan_owner_->handle()},
+        {"checkpoint_identity", plan_owner_->checkpoint_identity()}};
+    if (!compact_provenance_)
+      plan_reference["provenance_identity"] =
+          plan_owner_->provenance_identity();
     return json::object{
-        {"schema", "diffexp2-retained-native-transport-arm-state-v1"},
+        {"schema", compact_provenance_
+             ? "diffexp2-retained-native-transport-arm-state-v2"
+             : "diffexp2-retained-native-transport-arm-state-v1"},
         {"checkpoint_identity", checkpoint_identity_},
-        {"tile_plan", json::object{
-             {"handle", plan_owner_->handle()},
-             {"checkpoint_identity", plan_owner_->checkpoint_identity()},
-             {"provenance_identity", plan_owner_->provenance_identity()}}},
+        {"tile_plan", std::move(plan_reference)},
         {"arm", arm_},
         {"anchor", local_reference(anchor_owner_)},
         {"receiving_basis", basis_reference()},
@@ -11915,6 +11928,7 @@ class StoredTransportArmState {
   std::int32_t match_required_complete_max_ = 0;
   json::object refinement_;
   double elapsed_ms_ = 0.0;
+  bool compact_provenance_ = true;
   mutable std::atomic<std::uint64_t> stats_queries_{0};
   std::atomic<std::uint64_t> contraction_operations_{0};
   std::atomic<std::uint64_t> contracted_observables_{0};
@@ -15784,7 +15798,10 @@ restore_checkpoint_transport_arm_state_record(
       {"schema", "handle", "checkpoint_identity", "provenance_identity",
        "provenance", "elapsed_ms", "runtime_stats"},
       "checkpoint retained transport-arm state");
-  if (required_string(object, "schema") !=
+  const auto checkpoint_schema = required_string(object, "schema");
+  const bool compact_provenance =
+      checkpoint_schema == "diffexp2-retained-transport-arm-state-v3";
+  if (!compact_provenance && checkpoint_schema !=
       "diffexp2-retained-transport-arm-state-v2")
     throw std::invalid_argument(
         "unsupported retained transport-arm checkpoint schema");
@@ -15807,7 +15824,9 @@ restore_checkpoint_transport_arm_state_record(
        "epsilon", "refinement"},
       "checkpoint transport-arm state provenance");
   if (required_string(provenance, "schema") !=
-          "diffexp2-retained-native-transport-arm-state-v1" ||
+          (compact_provenance
+               ? "diffexp2-retained-native-transport-arm-state-v2"
+               : "diffexp2-retained-native-transport-arm-state-v1") ||
       required_string(provenance, "checkpoint_identity") !=
           checkpoint_identity ||
       json::serialize(canonical_json_value(provenance)) !=
@@ -15818,17 +15837,23 @@ restore_checkpoint_transport_arm_state_record(
   const auto& plan_reference = as_object(
       provenance.at("tile_plan"),
       "checkpoint transport-arm tile-plan reference");
-  require_exact_keys(
-      plan_reference,
-      {"handle", "checkpoint_identity", "provenance_identity"},
-      "checkpoint transport-arm tile-plan reference");
+  if (compact_provenance)
+    require_exact_keys(
+        plan_reference, {"handle", "checkpoint_identity"},
+        "checkpoint transport-arm tile-plan reference");
+  else
+    require_exact_keys(
+        plan_reference,
+        {"handle", "checkpoint_identity", "provenance_identity"},
+        "checkpoint transport-arm tile-plan reference");
   const auto plan_found = plans.find(
       required_string(plan_reference, "handle"));
   if (plan_found == plans.end() || !plan_found->second ||
       required_string(plan_reference, "checkpoint_identity") !=
           plan_found->second->checkpoint_identity() ||
-      required_string(plan_reference, "provenance_identity") !=
-          plan_found->second->provenance_identity())
+      (!compact_provenance &&
+       required_string(plan_reference, "provenance_identity") !=
+           plan_found->second->provenance_identity()))
     throw std::invalid_argument(
         "checkpoint transport-arm state lost its retained tile plan");
   const auto plan = plan_found->second;
@@ -15891,10 +15916,15 @@ restore_checkpoint_transport_arm_state_record(
   for (std::size_t index = 0; index < raw_matches.size(); ++index) {
     const auto& reference = as_object(
         raw_matches[index], "checkpoint transport-arm match reference");
-    require_exact_keys(
-        reference,
-        {"index", "match", "checkpoint_identity", "provenance_identity"},
-        "checkpoint transport-arm match reference");
+    if (compact_provenance)
+      require_exact_keys(
+          reference, {"index", "match", "checkpoint_identity"},
+          "checkpoint transport-arm match reference");
+    else
+      require_exact_keys(
+          reference,
+          {"index", "match", "checkpoint_identity", "provenance_identity"},
+          "checkpoint transport-arm match reference");
     if (checkpoint_size_t(reference.at("index"),
                           "checkpoint transport-arm match index") != index)
       throw std::invalid_argument(
@@ -15908,8 +15938,9 @@ restore_checkpoint_transport_arm_state_record(
     if (!match ||
         required_string(reference, "checkpoint_identity") !=
             match->checkpoint_identity() ||
-        required_string(reference, "provenance_identity") !=
-            match->provenance_identity())
+        (!compact_provenance &&
+         required_string(reference, "provenance_identity") !=
+             match->provenance_identity()))
       throw std::invalid_argument(
           "checkpoint transport-arm match reference is inconsistent");
     planned_matches.push_back(std::move(match));
@@ -15965,7 +15996,7 @@ restore_checkpoint_transport_arm_state_record(
       std::move(basis), std::move(planned_matches),
       std::move(tile_sources), work_epsilon,
       public_required_complete_max, match_required_complete_max,
-      refinement, elapsed_ms);
+      refinement, elapsed_ms, compact_provenance);
   if (state->provenance_identity() != provenance_identity)
     throw std::invalid_argument(
         "restored transport-arm state changed its exact provenance");

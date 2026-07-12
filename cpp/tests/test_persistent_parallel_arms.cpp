@@ -28,10 +28,12 @@ json::array prescriptions() {
 std::string prepare_chart(const std::string& session,
                           const std::string& domain,
                           const std::string& name,
-                          const std::string& center) {
+                          const std::string& center,
+                          bool nontrivial = false) {
   json::array principal_row;
   principal_row.push_back(
-      json::object{{"exact", "0"}, {"proven_zero", true}});
+      json::object{{"exact", nontrivial ? "t" : "0"},
+                   {"proven_zero", !nontrivial}});
   json::array principal_matrix;
   principal_matrix.push_back(std::move(principal_row));
   json::array component;
@@ -44,6 +46,18 @@ std::string prepare_chart(const std::string& session,
   d_lags.push_back(std::move(d_lag));
   json::array blocks;
   blocks.push_back(std::move(component));
+  json::array nhat_lags;
+  nhat_lags.push_back(json::object{
+      {"poly", json::array{}}, {"rat", json::array{}},
+      {"val", json::array{nullptr}}});
+  if (nontrivial) {
+    json::array exponent;
+    exponent.push_back(json::array{0, 0, "1"});
+    nhat_lags.push_back(json::object{
+        {"poly", json::array{json::object{
+             {"s", 0}, {"e", std::move(exponent)}}}},
+        {"rat", json::array{}}, {"val", json::array{0}}});
+  }
   const auto response = request(json::object{
       {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
       {"key", name}, {"identity", name + "-identity"},
@@ -67,9 +81,7 @@ std::string prepare_chart(const std::string& session,
            {"d", 1}, {"fb", 0}, {"w", 3},
            {"d_lags", std::move(d_lags)},
            {"denominators", json::array{}},
-           {"nhat_lags", json::array{json::object{
-                {"poly", json::array{}}, {"rat", json::array{}},
-                {"val", json::array{nullptr}}}}},
+           {"nhat_lags", std::move(nhat_lags)},
            {"d0_inverse", "1"},
            {"blocks", std::move(blocks)},
            {"assembly", json::object{
@@ -85,20 +97,24 @@ std::string solve_local(const std::string& session,
                         const std::string& chart,
                         const std::string& center,
                         const std::string& checkpoint,
-                        const std::string& value) {
-  json::array schedule_row;
-  schedule_row.push_back(json::object{
-      {"case", "R"}, {"da", "0"}, {"db", "0"}});
+                        const std::string& value,
+                        std::uint32_t nmax = 0) {
+  json::array shifts;
   json::array schedule;
-  schedule.push_back(std::move(schedule_row));
+  for (std::uint32_t n = 0; n <= nmax; ++n) {
+    shifts.emplace_back(std::to_string(n));
+    schedule.push_back(json::array{json::object{
+        {"case", n == 0 ? "R" : "T"},
+        {"da", std::to_string(n)}, {"db", "0"}}});
+  }
   const auto response = request(json::object{
       {"schema", 2}, {"op", "local.solve"}, {"session", session},
       {"chart", chart},
       {"run", json::object{
-           {"nmax", 0}, {"p", 0}, {"has_initial", true},
+           {"nmax", nmax}, {"p", 0}, {"has_initial", true},
            {"adaptive_probe", false}, {"a_target", "0"},
            {"b_target", "0"}, {"a_shift_min", 0},
-           {"a_shifts", json::array{"0"}},
+           {"a_shifts", std::move(shifts)},
            {"schedule", std::move(schedule)},
            {"initial", json::array{value, "0", "0"}},
            {"initial_validity", json::array{2}}, {"source", nullptr},
@@ -139,6 +155,8 @@ json::object arm(const std::string& endpoint,
 
 json::object integrand_row(std::int32_t shift,
                            const std::string& identity) {
+  const json::array one_kernel{"1", "0", "0", "0", "0"};
+  const json::array zero_kernel{"0", "0", "0", "0", "0"};
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
       {"columns", 1}, {"exact_identity", identity},
@@ -146,9 +164,8 @@ json::object integrand_row(std::int32_t shift,
            {"column", 0},
            {"multiplier", json::object{
                 {"epsilon_shift", shift}, {"center_pole_order", 0},
-                {"kernels", json::array{json::array{"1"},
-                                        json::array{"0"},
-                                        json::array{"0"}}},
+                {"kernels", json::array{one_kernel, zero_kernel,
+                                        zero_kernel}},
                 {"exact_identity", identity},
                 {"proven_zero", false}}}}}}};
 }
@@ -199,8 +216,12 @@ double exported_coefficient(const json::object& response,
       : std::stod(std::string(raw.as_array().front().as_string()));
 }
 
-bool acb_identity_lattice_smoke() {
+bool acb_unit_leading_proof_smoke() {
+  const std::string checkpoint_path =
+      "/tmp/diffexp2-persistent-parallel-arms-acb.de2cp";
+  std::remove(checkpoint_path.c_str());
   std::string session;
+  std::string restored_session;
   try {
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"}, {"domain", "acb"},
@@ -209,25 +230,28 @@ bool acb_identity_lattice_smoke() {
         {"match_capacity", 8}, {"tile_plan_capacity", 2}});
     session = std::string(created.at("session").as_string());
     const auto anchor_chart = prepare_chart(
-        session, "acb", "acb-pair-anchor", "0");
+        session, "acb", "acb-pair-anchor", "0", true);
     const auto lower_1_chart = prepare_chart(
-        session, "acb", "acb-pair-lower-1", "-2/3");
+        session, "acb", "acb-pair-lower-1", "-2/3", true);
     const auto lower_2_chart = prepare_chart(
-        session, "acb", "acb-pair-lower-2", "-4/3");
+        session, "acb", "acb-pair-lower-2", "-4/3", true);
     const auto upper_1_chart = prepare_chart(
-        session, "acb", "acb-pair-upper-1", "2/3");
+        session, "acb", "acb-pair-upper-1", "2/3", true);
     const auto upper_2_chart = prepare_chart(
-        session, "acb", "acb-pair-upper-2", "4/3");
+        session, "acb", "acb-pair-upper-2", "4/3", true);
     const auto anchor = solve_local(session, anchor_chart, "0",
-                                    "parallel-anchor", "2");
+                                    "parallel-anchor", "2", 4);
     const auto lower_1 = solve_local(session, lower_1_chart, "-2/3",
-                                     "acb-lower-basis-1", "1");
+                                     "acb-lower-basis-1", "1", 4);
     const auto lower_2 = solve_local(session, lower_2_chart, "-4/3",
-                                     "acb-lower-basis-2", "1");
+                                     "acb-lower-basis-2", "1", 4);
+    const auto defective_lower_1 = solve_local(
+        session, lower_1_chart, "-2/3", "acb-lower-defective-1",
+        "[0 +/- 1]", 4);
     const auto upper_1 = solve_local(session, upper_1_chart, "2/3",
-                                     "acb-upper-basis-1", "1");
+                                     "acb-upper-basis-1", "1", 4);
     const auto upper_2 = solve_local(session, upper_2_chart, "4/3",
-                                     "acb-upper-basis-2", "1");
+                                     "acb-upper-basis-2", "1", 4);
     const auto planned = request(json::object{
         {"schema", 2}, {"op", "tile.plan"}, {"session", session},
         {"checkpoint_identity", "parallel-plan"}, {"division_order", 3},
@@ -235,25 +259,105 @@ bool acb_identity_lattice_smoke() {
         {"upper", arm("4/3", {anchor_chart, upper_1_chart, upper_2_chart})}});
     if (planned.at("status") != "ok")
       throw std::runtime_error("Acb plan: " + json::serialize(planned));
+    const auto plan = std::string(planned.at("tile_plan").as_string());
+    const auto lower_match = request(json::object{
+        {"schema", 2}, {"op", "tile.match_interval"},
+        {"session", session}, {"tile_plan", plan},
+        {"arm", "lower"}, {"match", 0}});
+    const auto evaluated_basis = request(json::object{
+        {"schema", 2}, {"op", "local.evaluate"},
+        {"session", session}, {"local", lower_1},
+        {"point", json::object{{"exact",
+             lower_match.at("receiving_local_exact")}}},
+        {"options", json::object{{"tail_estimate", false}}}});
+    const auto& basis_coefficient = evaluated_basis.at("value").as_object()
+        .at("coefficients").as_array().front();
+    const auto basis_midpoint = std::stod(std::string(
+        basis_coefficient.as_array().front().as_string()));
+    const auto before_defective = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const auto defective = request(run_arms_request(
+        session, plan, anchor,
+        arm_execution(defective_lower_1, lower_2, {0, 0, 0}),
+        arm_execution(upper_1, upper_2, {0, 0, 0}),
+        "acb-parallel-defective"));
+    const auto after_defective = request(json::object{
+        {"schema", 2}, {"op", "session.stats"}, {"session", session}});
+    const bool defective_rejected = defective.at("status") == "error" &&
+        std::string(defective.at("detail").as_string())
+            .find("overlaps zero") != std::string::npos &&
+        before_defective.at("locals") == after_defective.at("locals") &&
+        before_defective.at("matches") == after_defective.at("matches") &&
+        before_defective.at("line_results") ==
+            after_defective.at("line_results") &&
+        after_defective.at("pending_matches") == 0 &&
+        after_defective.at("pending_local_solves") == 0 &&
+        after_defective.at("pending_line_integrations") == 0;
     const auto marched = request(run_arms_request(
-        session, std::string(planned.at("tile_plan").as_string()), anchor,
+        session, plan, anchor,
         arm_execution(lower_1, lower_2, {0, 0, 0}),
         arm_execution(upper_1, upper_2, {0, 0, 0}),
         "acb-parallel-success"));
-    const bool ok = marched.at("status") == "ok" &&
+    const auto saved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", checkpoint_path},
+        {"checkpoint_identity", "acb-parallel-roundtrip"}});
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", session}});
+    session.clear();
+    const auto restored = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint_path},
+        {"expected_identity", "acb-parallel-roundtrip"}});
+    if (restored.at("status") == "ok")
+      restored_session = std::string(restored.at("session").as_string());
+    const auto restored_export = restored_session.empty()
+        ? json::object{{"status", "error"}}
+        : request(json::object{
+              {"schema", 2}, {"op", "integration.export"},
+              {"session", restored_session},
+              {"line", marched.at("combined_line_result").as_object()
+                           .at("line")},
+              {"checkpoint_identity",
+               marched.at("combined_line_result").as_object()
+                   .at("checkpoint_identity")},
+              {"output_digits", 30}});
+    const bool ok = defective_rejected &&
+        evaluated_basis.at("status") == "ok" &&
+        std::abs(basis_midpoint - 1.0) > 1e-8 &&
+        marched.at("status") == "ok" && saved.at("status") == "ok" &&
+        restored.at("status") == "ok" &&
+        restored_export.at("status") == "ok" &&
         marched.at("worker_overlap") == true &&
         marched.at("max_parallel_arms") == 2 &&
         marched.at("json_coefficients") == 0 &&
         marched.at("combined_line_result").as_object().at("epsilon_min") == 0;
-    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
-                               {"session", session}});
-    session.clear();
+    if (!ok)
+      std::cerr << "Acb proof smoke: basis_midpoint=" << basis_midpoint
+                << " defective=" << defective.at("status")
+                << " detail="
+                << (defective.if_contains("detail") != nullptr
+                        ? std::string(defective.at("detail").as_string())
+                        : std::string("<none>"))
+                << " march=" << marched.at("status")
+                << " save=" << saved.at("status")
+                << " restore=" << restored.at("status")
+                << " export=" << restored_export.at("status") << '\n';
+    if (!restored_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored_session}});
+    restored_session.clear();
+    std::remove(checkpoint_path.c_str());
     return ok;
   } catch (const std::exception& error) {
     if (!session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", session}});
-    std::cerr << "Acb identity-lattice smoke failed: " << error.what()
+    if (!restored_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored_session}});
+    std::remove(checkpoint_path.c_str());
+    std::cerr << "Acb unit-leading proof smoke failed: " << error.what()
               << '\n';
     return false;
   }
@@ -407,7 +511,7 @@ int main() {
           ? std::stod(std::string(raw.as_string()))
           : std::stod(std::string(raw.as_array().front().as_string()));
     };
-    const bool ok = acb_identity_lattice_smoke() &&
+    const bool ok = acb_unit_leading_proof_smoke() &&
         created.at("parallel_arm_march_capability") ==
             "retained-native-concurrent-two-arm-march-v1" &&
         marched.at("capability") ==

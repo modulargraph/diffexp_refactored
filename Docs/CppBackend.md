@@ -259,8 +259,10 @@ execute concurrently because the plan and local snapshots are immutable.
 refinement, certifyTail]` performs the complete pair in one schema-2 call.
 Each `arms["lower"|"upper"]` record contains `receiving_basis` and
 `integrand_rows`; there is one basis-handle set per match and one prepared
-rational row per tile.  The backend derives live match windows and Acb
-ordinary identity lattices itself, keeps row locals and intermediate hops
+rational row per tile.  The backend derives live match windows and, for an
+ordinary Acb basis, evaluates the actual basis at each match and certifies
+identity saturation from exact-zero negative powers plus a full-rank
+epsilon-zero leading frame.  It keeps row locals and intermediate hops
 hidden, aggregates every tile natively, and atomically returns the two final
 locals plus lower, upper, and combined line-result handles.  No coefficient
 slab is returned before an explicit final `ExportPersistentLineIntegral`.

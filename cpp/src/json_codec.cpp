@@ -3626,6 +3626,10 @@ constexpr const char* kRefinedAcbLocalMatchCapability =
     "exact-lattice-guided-acb-local-match-v1";
 constexpr const char* kExactEvaluatedLatticeSchema =
     "diffexp2-exact-evaluated-epsilon-lattice-v1";
+constexpr const char* kNativeUnitSaturationRequestSchema =
+    "diffexp2-native-acb-unit-leading-saturation-request-v1";
+constexpr const char* kNativeUnitSaturationProofSchema =
+    "diffexp2-native-acb-unit-leading-saturation-proof-v1";
 
 class StoredMatchBase {
  public:
@@ -4193,6 +4197,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
       std::string provenance_identity, std::string exact_lattice_identity,
       std::string exact_lattice_provenance_identity,
       std::string exact_lattice_witness_record,
+      std::string saturation_witness_schema,
       std::vector<json::object> basis_sources, json::object incoming_source,
       std::string basis_chart, std::string incoming_chart,
       std::string basis_point, std::string incoming_point,
@@ -4209,6 +4214,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
             std::move(exact_lattice_provenance_identity)),
         exact_lattice_witness_record_(
             std::move(exact_lattice_witness_record)),
+        saturation_witness_schema_(
+            std::move(saturation_witness_schema)),
         basis_sources_(std::move(basis_sources)),
         incoming_source_(std::move(incoming_source)),
         basis_chart_(std::move(basis_chart)),
@@ -4301,7 +4308,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
                       {"required_complete_max", required_complete_max_}}},
         {"exact_lattice",
          json::object{
-             {"schema", kExactEvaluatedLatticeSchema},
+             {"schema", saturation_witness_schema_},
              {"identity", exact_lattice_identity_},
              {"provenance_identity",
               exact_lattice_provenance_identity_},
@@ -4399,6 +4406,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
   std::string exact_lattice_identity_;
   std::string exact_lattice_provenance_identity_;
   std::string exact_lattice_witness_record_;
+  std::string saturation_witness_schema_;
   std::vector<json::object> basis_sources_;
   json::object incoming_source_;
   std::string basis_chart_;
@@ -4417,6 +4425,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
 };
 
 struct ParsedExactEvaluatedLattice {
+  std::string witness_schema;
   std::string identity;
   std::string canonical_witness;
   EpsilonLatticeSaturationResult<Rational> saturation;
@@ -4500,7 +4509,241 @@ ParsedExactEvaluatedLattice parse_exact_evaluated_lattice(
       {"evaluated_basis", std::move(canonical_rows)}};
   auto saturation = saturate_finite_laurent_basis(
       basis, context + ":exact-lattice-saturation");
-  return {identity, json::serialize(canonical), std::move(saturation)};
+  return {kExactEvaluatedLatticeSchema, identity,
+          json::serialize(canonical), std::move(saturation)};
+}
+
+EpsilonLatticeSaturationResult<Rational> unit_rational_saturation(
+    std::uint32_t dimension, EpsilonWindow window,
+    const std::string& context) {
+  if (dimension == 0 || window.min_power > 0 || window.complete_max < 0)
+    throw std::invalid_argument(
+        context + ": the unit saturation requires epsilon^0 in a nonempty square window");
+  FiniteLaurentMatrix<Rational> identity(
+      dimension, FiniteLaurentVector<Rational>());
+  for (std::uint32_t row = 0; row < dimension; ++row) {
+    identity[row].reserve(dimension);
+    for (std::uint32_t column = 0; column < dimension; ++column) {
+      std::vector<Rational> coefficients(
+          window.width(), Rational(0));
+      if (row == column)
+        coefficients[static_cast<std::size_t>(
+            -static_cast<std::int64_t>(window.min_power))] =
+            Rational(1);
+      identity[row].emplace_back(window, std::move(coefficients));
+    }
+  }
+  auto saturation = saturate_finite_laurent_basis(
+      identity, context + ":unit-saturation");
+  if (saturation.diagnostics.initial_leading_rank != dimension ||
+      saturation.diagnostics.final_leading_rank != dimension ||
+      saturation.diagnostics.normalized_determinant_valuation != 0 ||
+      !saturation.diagnostics.actions.empty() ||
+      std::any_of(
+          saturation.diagnostics.initial_column_shifts.begin(),
+          saturation.diagnostics.initial_column_shifts.end(),
+          [](std::int32_t shift) { return shift != 0; }))
+    throw std::logic_error(
+        context + ": internally constructed unit saturation is not the identity transformation");
+  return saturation;
+}
+
+json::object validate_native_unit_saturation_request(
+    const json::value& raw, const std::string& context) {
+  auto request = as_object(raw, "native Acb unit-saturation request");
+  require_exact_keys(
+      request,
+      {"schema", "tile_plan", "tile_plan_checkpoint_identity",
+       "tile_plan_provenance_identity", "arm", "match"},
+      "native Acb unit-saturation request");
+  if (required_string(request, "schema") !=
+      kNativeUnitSaturationRequestSchema)
+    throw std::invalid_argument(
+        context + ": unsupported native unit-saturation request schema");
+  if (required_string(request, "tile_plan").empty() ||
+      required_string(request, "tile_plan_checkpoint_identity").empty() ||
+      required_string(request, "tile_plan_provenance_identity").empty())
+    throw std::invalid_argument(
+        context + ": native unit-saturation request lost its plan binding");
+  const auto arm = required_string(request, "arm");
+  if (arm != "lower" && arm != "upper")
+    throw std::invalid_argument(
+        context + ": native unit-saturation request has an unknown arm");
+  (void)as_u64(request.at("match"),
+               "native unit-saturation match index");
+  return request;
+}
+
+void require_ordinary_regular_basis_for_unit_saturation(
+    const std::vector<std::shared_ptr<StoredLocalBase>>& basis) {
+  if (basis.empty())
+    throw std::invalid_argument(
+        "native Acb unit-leading certification requires a nonempty basis");
+  const auto dimension = as_u32(
+      basis.front()->summary().at("dimension"),
+      "native unit-leading basis dimension");
+  if (basis.size() != dimension)
+    throw std::invalid_argument(
+        "native Acb unit-leading certification requires a square basis");
+  for (const auto& column : basis) {
+    const auto metadata = column->exact_analytic_metadata();
+    const auto& sectors = as_array(
+        metadata.at("sectors"), "native unit-leading sectors");
+    if (sectors.size() != 1)
+      throw std::domain_error(
+          "native Acb unit-leading certification requires one ordinary sector per basis column");
+    const auto& sector = as_object(
+        sectors.front(), "native unit-leading sector");
+    const auto a = parse_checkpoint_exact_descriptor(
+        sector.at("a"), "native unit-leading a tag");
+    const auto b = parse_checkpoint_exact_descriptor(
+        sector.at("b"), "native unit-leading b tag");
+    if (a.domain != ExactDomain::Rational ||
+        b.domain != ExactDomain::Rational ||
+        !(Rational(a.canonical) == Rational(0)) ||
+        !(Rational(b.canonical) == Rational(0)) ||
+        as_u32(sector.at("log_power"),
+               "native unit-leading log power") != 0)
+      throw std::domain_error(
+          "native Acb unit-leading certification requires exact a=b=0, log_power=0 basis tags");
+  }
+}
+
+ParsedExactEvaluatedLattice certify_native_unit_saturation(
+    const json::value& raw_request,
+    const FiniteLaurentMatrix<ComplexBall>& evaluated_basis,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& retained_basis,
+    const std::vector<json::object>& basis_sources,
+    const std::string& basis_point, const std::string& physical_point,
+    EpsilonWindow window, const std::string& context) {
+  require_ordinary_regular_basis_for_unit_saturation(retained_basis);
+  const auto dimension = retained_basis.size();
+  if (evaluated_basis.size() != dimension ||
+      basis_sources.size() != dimension || window.min_power > 0 ||
+      window.complete_max < 0)
+    throw std::domain_error(
+        context + ": native unit-leading certification requires a square actual basis complete through epsilon^0");
+  for (std::size_t row = 0; row < dimension; ++row) {
+    if (evaluated_basis[row].size() != dimension)
+      throw std::domain_error(
+          context + ": native unit-leading certification received a nonsquare actual basis");
+    for (std::size_t column = 0; column < dimension; ++column) {
+      const auto& frame = evaluated_basis[row][column];
+      if (frame.complete_max() < 0)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            context + ": actual Acb basis is incomplete through epsilon^0",
+            row, column, frame.complete_max());
+      for (std::int64_t power = window.min_power; power < 0; ++power)
+        if (!frame.coefficient(static_cast<std::int32_t>(power)).is_zero())
+          throw MatchingArithmeticError(
+              MatchingArithmeticErrorCode::InvalidSaturationLattice,
+              context + ": actual Acb basis has a nonzero or zero-ambiguous negative epsilon coefficient",
+              row, column, static_cast<std::int32_t>(power));
+    }
+  }
+  const auto leading = matching_detail::leading_null_relation(
+      matching_detail::epsilon_zero_matrix(
+          evaluated_basis, context + ":actual-leading-frame"),
+      context + ":actual-leading-rank");
+  if (leading.rank != dimension)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+        context + ": actual Acb epsilon^0 leading matrix is rank deficient",
+        std::nullopt, std::nullopt, 0);
+
+  auto native_request = validate_native_unit_saturation_request(
+      raw_request, context);
+  json::array proof_basis;
+  proof_basis.reserve(basis_sources.size());
+  for (const auto& source : basis_sources) proof_basis.push_back(source);
+  json::object proof_without_identity{
+      {"schema", kNativeUnitSaturationProofSchema},
+      {"native_request", std::move(native_request)},
+      {"coefficient_domain", "acb"},
+      {"basis", std::move(proof_basis)},
+      {"basis_point_exact", basis_point},
+      {"physical_match_point_exact", physical_point},
+      {"epsilon", json::object{{"min", window.min_power},
+                                {"max", window.complete_max}}},
+      {"negative_epsilon_coefficients", "exact-singleton-zero"},
+      {"leading_power", 0},
+      {"leading_rank", dimension},
+      {"leading_rank_certificate",
+       "full-pivot-acb-pivots-exclude-zero"},
+      {"transformation", "identity"}};
+  const auto identity = json::serialize(
+      canonical_json_value(proof_without_identity));
+  auto proof = proof_without_identity;
+  proof["identity"] = identity;
+  return {kNativeUnitSaturationProofSchema, identity,
+          json::serialize(canonical_json_value(proof)),
+          unit_rational_saturation(
+              static_cast<std::uint32_t>(dimension), window, context)};
+}
+
+ParsedExactEvaluatedLattice parse_native_unit_saturation_proof(
+    const json::value& raw, std::uint32_t dimension, EpsilonWindow window,
+    const std::vector<json::object>& expected_basis_sources,
+    const std::string& expected_basis_point,
+    const std::string& expected_physical_point,
+    const std::string& context) {
+  const auto& proof = as_object(raw, "native Acb unit-saturation proof");
+  require_exact_keys(
+      proof,
+      {"schema", "identity", "native_request", "coefficient_domain",
+       "basis", "basis_point_exact", "physical_match_point_exact",
+       "epsilon", "negative_epsilon_coefficients", "leading_power",
+       "leading_rank", "leading_rank_certificate", "transformation"},
+      "native Acb unit-saturation proof");
+  if (required_string(proof, "schema") !=
+          kNativeUnitSaturationProofSchema ||
+      required_string(proof, "coefficient_domain") != "acb" ||
+      required_string(proof, "negative_epsilon_coefficients") !=
+          "exact-singleton-zero" ||
+      as_i32(proof.at("leading_power"),
+             "native unit-leading power") != 0 ||
+      as_u32(proof.at("leading_rank"),
+             "native unit-leading rank") != dimension ||
+      required_string(proof, "leading_rank_certificate") !=
+          "full-pivot-acb-pivots-exclude-zero" ||
+      required_string(proof, "transformation") != "identity")
+    throw std::invalid_argument(
+        context + ": native unit-saturation proof facts are inconsistent");
+  (void)validate_native_unit_saturation_request(
+      proof.at("native_request"), context);
+  const auto& epsilon = as_object(
+      proof.at("epsilon"), "native unit-saturation proof epsilon");
+  require_exact_keys(epsilon, {"min", "max"},
+                     "native unit-saturation proof epsilon");
+  if (as_i32(epsilon.at("min"), "native proof epsilon minimum") !=
+          window.min_power ||
+      as_i32(epsilon.at("max"), "native proof epsilon maximum") !=
+          window.complete_max ||
+      required_string(proof, "basis_point_exact") !=
+          expected_basis_point ||
+      required_string(proof, "physical_match_point_exact") !=
+          expected_physical_point)
+    throw std::invalid_argument(
+        context + ": native unit-saturation proof changed its point or epsilon binding");
+  json::array expected_basis;
+  expected_basis.reserve(expected_basis_sources.size());
+  for (const auto& source : expected_basis_sources)
+    expected_basis.push_back(source);
+  if (json::serialize(canonical_json_value(proof.at("basis"))) !=
+      json::serialize(canonical_json_value(expected_basis)))
+    throw std::invalid_argument(
+        context + ": native unit-saturation proof changed its basis/checkpoint binding");
+  auto identity_input = proof;
+  const auto identity = required_string(proof, "identity");
+  identity_input.erase("identity");
+  if (identity.empty() ||
+      json::serialize(canonical_json_value(identity_input)) != identity)
+    throw std::invalid_argument(
+        context + ": native unit-saturation proof identity is inconsistent");
+  return {kNativeUnitSaturationProofSchema, identity,
+          json::serialize(canonical_json_value(proof)),
+          unit_rational_saturation(dimension, window, context)};
 }
 
 std::optional<std::int32_t> parse_optional_match_imaginary_sign(
@@ -4791,14 +5034,29 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     incoming_source["column_provenance"] =
         incoming->column_provenance()->encode();
 
-  auto exact_lattice = parse_exact_evaluated_lattice(
-      request.at("exact_lattice"), dimension, window, checkpoint_identity);
+  auto exact_lattice = [&]() -> ParsedExactEvaluatedLattice {
+    if (const auto* raw_exact = request.if_contains("exact_lattice")) {
+      if (request.if_contains("native_unit_saturation") != nullptr)
+        throw std::invalid_argument(
+            "Acb matching accepts either an exact evaluated lattice or the internal native unit-leading proof request, never both");
+      return parse_exact_evaluated_lattice(
+          *raw_exact, dimension, window, checkpoint_identity);
+    }
+    if (const auto* raw_native =
+            request.if_contains("native_unit_saturation"))
+      return certify_native_unit_saturation(
+          *raw_native, evaluated_basis, erased_basis, basis_sources,
+          basis_point.exact_coordinate, basis_physical_point.str(), window,
+          checkpoint_identity + ":native-unit-leading-proof");
+    throw std::invalid_argument(
+        "Acb matching requires an exact evaluated lattice or an internal native unit-leading proof request");
+  }();
   json::array exact_binding_basis;
   for (const auto& source : basis_sources)
     exact_binding_basis.push_back(source);
   json::object exact_lattice_provenance{
       {"schema", "diffexp2-retained-exact-lattice-binding-v1"},
-      {"witness_schema", kExactEvaluatedLatticeSchema},
+      {"witness_schema", exact_lattice.witness_schema},
       {"witness_identity", exact_lattice.identity},
       {"basis", std::move(exact_binding_basis)},
       {"basis_point_exact", basis_point.exact_coordinate},
@@ -4840,6 +5098,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       match_handle, checkpoint_identity, provenance_identity,
       exact_lattice.identity, exact_lattice_provenance_identity,
       std::move(exact_lattice.canonical_witness),
+      exact_lattice.witness_schema,
       std::move(basis_sources), std::move(incoming_source), basis_chart,
       incoming_chart, basis_point.exact_coordinate,
       incoming_point.exact_coordinate, basis_physical_point.str(), window,
@@ -5368,8 +5627,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
             derivation.at("provenance_identity"))
       throw std::invalid_argument(
           "checkpoint materialized-local owner lineage is inconsistent");
-      }
-      retained_derivation = std::move(derivation);
+    retained_derivation = std::move(derivation);
     }
   } else if (retained_owner != nullptr) {
     throw std::invalid_argument(
@@ -6171,9 +6429,25 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
   if (exact_lattice_witness_record.empty())
     throw std::invalid_argument(
         "checkpoint Acb match lost its exact lattice witness");
-  auto exact_lattice = parse_exact_evaluated_lattice(
-      json::parse(exact_lattice_witness_record), dimension, window,
-      checkpoint_identity + ":checkpoint-restore");
+  const auto raw_saturation_witness = json::parse(
+      exact_lattice_witness_record);
+  const auto& saturation_witness = as_object(
+      raw_saturation_witness, "checkpoint Acb saturation witness");
+  const auto saturation_witness_schema = required_string(
+      saturation_witness, "schema");
+  auto exact_lattice = [&]() -> ParsedExactEvaluatedLattice {
+    if (saturation_witness_schema == kExactEvaluatedLatticeSchema)
+      return parse_exact_evaluated_lattice(
+          raw_saturation_witness, dimension, window,
+          checkpoint_identity + ":checkpoint-restore");
+    if (saturation_witness_schema == kNativeUnitSaturationProofSchema)
+      return parse_native_unit_saturation_proof(
+          raw_saturation_witness, dimension, window, basis_sources,
+          basis_point, physical_point,
+          checkpoint_identity + ":checkpoint-restore");
+    throw std::invalid_argument(
+        "checkpoint Acb match has an unsupported saturation witness schema");
+  }();
   if (exact_lattice.identity != exact_lattice_identity ||
       exact_lattice.canonical_witness != exact_lattice_witness_record)
     throw std::invalid_argument(
@@ -6184,7 +6458,7 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     exact_binding_basis.push_back(source);
   json::object exact_lattice_provenance{
       {"schema", "diffexp2-retained-exact-lattice-binding-v1"},
-      {"witness_schema", kExactEvaluatedLatticeSchema},
+      {"witness_schema", exact_lattice.witness_schema},
       {"witness_identity", exact_lattice_identity},
       {"basis", std::move(exact_binding_basis)},
       {"basis_point_exact", basis_point},
@@ -6265,7 +6539,8 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
   return std::make_shared<StoredRefinedAcbMatch>(
       handle, checkpoint_identity, provenance_identity,
       exact_lattice_identity, exact_lattice_provenance_identity,
-      exact_lattice_witness_record, std::move(basis_sources),
+      exact_lattice_witness_record, exact_lattice.witness_schema,
+      std::move(basis_sources),
       std::move(incoming_source), basis_chart, incoming_chart, basis_point,
       incoming_point, physical_point, window, required_complete_max,
       dimension, relative_tolerance,
@@ -10160,7 +10435,14 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
     kernel_request["incoming_imaginary_sign"] =
         optional_plan_rim_json(producing_rim);
     kernel_request["refinement"] = request.at("refinement");
-    kernel_request["exact_lattice"] = request.at("exact_lattice");
+    if (const auto* exact = request.if_contains("exact_lattice"))
+      kernel_request["exact_lattice"] = *exact;
+    else if (const auto* native =
+                 request.if_contains("native_unit_saturation"))
+      kernel_request["native_unit_saturation"] = *native;
+    else
+      throw std::invalid_argument(
+          "planned Acb matching requires an exact lattice or the internal native unit-leading proof request");
     native_match = build_refined_acb_match(
         match_handle, kernel_request, basis_handles, basis, incoming_handle,
         incoming, precision_bits);
@@ -10499,83 +10781,18 @@ EpsilonWindow live_line_epsilon_intersection(
   return {minimum, complete_max};
 }
 
-void require_ordinary_regular_basis_for_identity_lattice(
-    const std::vector<std::shared_ptr<StoredLocalBase>>& basis) {
-  if (basis.empty())
-    throw std::invalid_argument(
-        "native ordinary identity lattice requires a nonempty basis");
-  const auto dimension = retained_local_frame_contract(basis.front()).dimension;
-  if (basis.size() != dimension)
-    throw std::invalid_argument(
-        "native ordinary identity lattice requires a square basis");
-  for (const auto& column : basis) {
-    const auto metadata = column->exact_analytic_metadata();
-    const auto& sectors = as_array(
-        metadata.at("sectors"), "ordinary identity-lattice sectors");
-    if (sectors.size() != 1)
-      throw std::domain_error(
-          "native Acb identity-lattice synthesis requires one ordinary sector per basis column");
-    const auto& sector = as_object(
-        sectors.front(), "ordinary identity-lattice sector");
-    const auto a = parse_checkpoint_exact_descriptor(
-        sector.at("a"), "ordinary identity-lattice a tag");
-    const auto b = parse_checkpoint_exact_descriptor(
-        sector.at("b"), "ordinary identity-lattice b tag");
-    if (a.domain != ExactDomain::Rational ||
-        b.domain != ExactDomain::Rational ||
-        !(Rational(a.canonical) == Rational(0)) ||
-        !(Rational(b.canonical) == Rational(0)) ||
-        as_u32(sector.at("log_power"),
-               "ordinary identity-lattice log power") != 0)
-      throw std::domain_error(
-          "native Acb identity-lattice synthesis requires exact a=b=0, log_power=0 basis tags");
-  }
-}
-
-json::object native_ordinary_identity_lattice(
+json::object native_unit_saturation_request(
     const std::shared_ptr<StoredTilePlan>& plan, const std::string& arm,
-    std::size_t match_index, EpsilonWindow window,
-    const std::vector<std::shared_ptr<StoredLocalBase>>& basis) {
-  require_ordinary_regular_basis_for_identity_lattice(basis);
-  if (window.min_power > 0 || window.complete_max < 0)
-    throw std::domain_error(
-        "native ordinary identity lattice requires epsilon^0 inside the live work window");
-  json::array basis_identity;
-  for (const auto& column : basis)
-    basis_identity.push_back(json::object{
-        {"local", column->handle()},
-        {"checkpoint_identity", column->checkpoint_identity()},
-        {"source_operator_identity", column->source_operator_identity()}});
-  const auto identity = json::serialize(canonical_json_value(json::object{
-      {"schema", "diffexp2-native-ordinary-lattice-identity-v1"},
-      {"tile_plan", plan->handle()},
-      {"tile_plan_provenance_identity", plan->provenance_identity()},
-      {"arm", arm}, {"match", match_index},
-      {"epsilon", json::object{{"min", window.min_power},
-                                {"max", window.complete_max}}},
-      {"basis", std::move(basis_identity)}}));
-  const auto dimension = retained_local_frame_contract(basis.front()).dimension;
-  json::array rows;
-  rows.reserve(dimension);
-  for (std::uint32_t row = 0; row < dimension; ++row) {
-    json::array columns;
-    columns.reserve(dimension);
-    for (std::uint32_t column = 0; column < dimension; ++column) {
-      json::array coefficients;
-      coefficients.reserve(window.width());
-      for (std::int64_t power = window.min_power;
-           power <= window.complete_max; ++power)
-        coefficients.emplace_back(
-            power == 0 && row == column ? "1" : "0");
-      columns.push_back(json::object{
-          {"min", window.min_power}, {"max", window.complete_max},
-          {"coefficients", std::move(coefficients)}});
-    }
-    rows.push_back(std::move(columns));
-  }
+    std::size_t match_index) {
+  if (!plan)
+    throw std::invalid_argument(
+        "native unit-saturation request requires its retained tile plan");
   return json::object{
-      {"schema", "diffexp2-exact-evaluated-epsilon-lattice-v1"},
-      {"identity", identity}, {"evaluated_basis", std::move(rows)}};
+      {"schema", kNativeUnitSaturationRequestSchema},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+      {"tile_plan_provenance_identity", plan->provenance_identity()},
+      {"arm", arm}, {"match", match_index}};
 }
 
 json::array line_aggregate_source_records(
@@ -14513,8 +14730,8 @@ json::object run_session_command(const json::object& root) {
                    {"required_complete_max", required_complete_max}}},
               {"checkpoint_identity", match_checkpoint}};
           if (session->domain == "acb") {
-            match_request["exact_lattice"] = native_ordinary_identity_lattice(
-                plan, input.name, tile, match_epsilon, input.basis[tile]);
+            match_request["native_unit_saturation"] =
+                native_unit_saturation_request(plan, input.name, tile);
             match_request["refinement"] = refinement;
           }
           auto match = build_planned_match_hop(

@@ -1119,7 +1119,7 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
     var_Symbol, OptionsPattern[]] := Module[
   {maxSteps = OptionValue["MaxRefinementSteps"], normalized, identities,
    checkpoints, prepared, sourceMin, availableMax, projectedRequired,
-   statePublicRequired,
+   contractionRequired, statePublicRequired,
    matchRequired, preparedShift, declaredShift, epsilon, refinement,
    lowerBasis, upperBasis, checkpointRoot, march, states = <||>,
    lowerState, upperState, integrates, lowerLimits, upperLimits,
@@ -1157,13 +1157,19 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
   availableMax = atlas["Request", "EpsWindow", "CompleteMax"];
   projectedRequired = Max[Lookup[Lookup[prepared, "Epsilon"],
     "RequiredCompleteMax"]];
-  (* The retained state gate belongs to the unprojected source.  A polar row
-     may legitimately deliver only eps^-1 from a source that starts at eps^0;
-     do not make that projected top the source state's lower completeness
-     edge.  Positive shifts are deliberately conservative: they do not buy a
-     lower source solve order, so every requested nonnegative public top must
-     still fit the prepared source atlas. *)
-  statePublicRequired = Max[sourceMin, projectedRequired];
+  (* Retain the unprojected source through every downstream contraction.
+     Multiplication by a row beginning at eps^s needs source order D-s to
+     deliver D.  An integrated monomial may additionally begin at eps^-1,
+     so reserve one more source order for integrate observables.  The exact
+     ladder preplanner already charges this same 1-s loss; keeping it here
+     prevents the arm state from discarding that reserved coefficient before
+     paired contraction. *)
+  contractionRequired = Max[Map[
+    #1["Epsilon", "RequiredCompleteMax"] -
+      #1["MinimumEpsilonShift"] +
+      If[#1["Operation"] === "integrate", 1, 0] &,
+    prepared]];
+  statePublicRequired = Max[sourceMin, contractionRequired];
   matchRequired = Max[statePublicRequired,
     Max[(#["Epsilon", "RequiredCompleteMax"] -
           #["MinimumEpsilonShift"]) & /@ prepared]];
@@ -1175,6 +1181,7 @@ RunNativeTransportObservableBatch[atlas_Association, observables_List,
     err["E6", <|"PreparedMinimumEpsilonShift" -> preparedShift,
       "AtlasDeclaredMinimumEpsilonShift" -> declaredShift,
       "ProjectedRequiredCompleteMax" -> projectedRequired,
+      "ContractionRequiredCompleteMax" -> contractionRequired,
       "StatePublicRequiredCompleteMax" -> statePublicRequired,
       "MatchRequiredCompleteMax" -> matchRequired,
       "AvailableSolveCompleteMax" -> availableMax,

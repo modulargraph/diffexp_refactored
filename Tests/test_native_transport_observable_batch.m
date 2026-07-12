@@ -78,7 +78,9 @@ assert["native_observable_batch_marches_once_and_preserves_request_order",
       {"integral", "lower-limit", "upper-limit", "polar-integral"} &&
     atlas["TargetCompleteMax"] === 0 &&
     atlas["Request", "EpsWindow", "CompleteMax"] === 1 &&
-    run["States", "lower", "epsilon", "required_complete_max"] === 0 &&
+    (* The polar integral reserves one source order for its possible
+       eps^-1 primitive before the retained arm state is contracted. *)
+    run["States", "lower", "epsilon", "required_complete_max"] === 1 &&
     Sort[Keys[Lookup[run, "States", <||>]]] === {"lower", "upper"}];
 
 checkpointPath = FileNameJoin[{$TemporaryDirectory,

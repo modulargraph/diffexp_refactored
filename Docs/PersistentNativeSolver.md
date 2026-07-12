@@ -91,7 +91,7 @@ The implemented recurrence-session commands are:
 | `match.materialize_local` | Apply a plan-driven match's retained Laurent weights to its receiving basis and publish the next retained local without coefficient JSON; eligible ordinary homogeneous bases propagate their rigorous local-tail model. |
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
-| `scc.solve_column` | Execute one retained regular exact-Rational or Acb SCC basis column, or an exact-Rational regular-singular Jordan column, and retain the parent local without coefficient JSON. |
+| `scc.solve_column` | Execute one retained regular exact-Rational or Acb SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, and retain the parent local without coefficient JSON. |
 | `scc.solve_columns` | Execute an ordered SCC basis-column batch in one bounded native worker pool and publish every retained local atomically, or none on failure. |
 | `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
 | `scc.release` | Release one retained composite SCC chart. |
@@ -119,7 +119,7 @@ The explicit
 ``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
 seedLocalComponent:1]`` seam consumes the compact run-only data in that cache
 for regular exact-Rational or Acb scalar/multidimensional scopes and the
-exact-Rational regular-singular scalar/Jordan scopes. Every capture retains
+certified exact-Rational/Acb regular-singular scalar/Jordan scopes. Every capture retains
 exact producer-side `(a,b,P)` task metadata; roots and log ceilings are never
 reconstructed from Acb values. The seam derives every component from its
 flattened eps^0 unit tensor, checked against independently encoded exact
@@ -161,13 +161,17 @@ uses exact eps^0 unit seeds in one retained full-system chart when the regular
 dependency graph is a single strongly connected block. Both forms expose the
 same ordered opaque-column contract to transport orchestration.
 
-The native protocol advertises both
+The native protocol advertises the Rational scopes
 `exact-rational-regular-singular-scalar-block-dag-column-v1` and
-`exact-rational-regular-singular-jordan-block-dag-column-v2`. At least one
+`exact-rational-regular-singular-jordan-block-dag-column-v2`, plus the Acb
+scopes `acb-regular-singular-scalar-block-dag-column-v1` and
+`acb-regular-singular-jordan-block-dag-column-v1`. At least one
 diagonal block is singular; every block has exact identity gauge/assembly, and
 every active coupling has center pole order zero so it preserves the exact
 `(a,b,p)` sector family. `no_pseudo` is retained as truthful producer
-provenance, not used as an admission decision. Couplings may
+provenance. Acb execution additionally requires the producer's exact
+`no_pseudo` proof; Rational execution continues to use exact CASE-P
+compensation. Couplings may
 have a nonzero constant Taylor coefficient, allowing an exact source resonance
 to create a new log member, and signed epsilon shifts retain the ordinary
 strict lower-frame guard.
@@ -185,8 +189,13 @@ Laurent weights are proved over the stored Taylor overlap, and the resulting
 exact `(a,b)` sectors are split, propagated, and recombined through every
 downstream SCC. Incomplete polar windows, cyclic compensation dependencies,
 nonidentity spectral frames, and center-pole tag shifts remain loud errors.
-The Wolfram producer executes both scalar and multidimensional Jordan
-scopes through the explicit seam; production dispatch is unchanged.
+For Acb, Wolfram builds the same exact tag and T/P/R plan from task/indicial
+metadata and serializes exact zero and one directly in the Acb field; no
+midpoint or enclosure decides structure. C++ revalidates every encoded target,
+shift, seed, and schedule entry against the retained Rational certificate and
+fails loudly if an exact CASE-P hit is encountered. The Wolfram producer
+executes both scalar and multidimensional Jordan scopes through the explicit
+seam; production dispatch is unchanged.
 
 The exact-rational `local.match` migration seam consumes retained regular
 locals from one session. It proves that the two chart coordinates name the

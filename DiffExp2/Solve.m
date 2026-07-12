@@ -26,7 +26,7 @@ SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\
 PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
 PrepareNativeRationalRow::usage = "PrepareNativeRationalRow[chartSystem, sourceShape, cvec, physicalVariable, serialization] prepares cvec(center+scale t,eps) as the strict JSON-ready rational row consumed by CppBackend`ApplyPersistentRationalRow. sourceShape supplies the retained local's exact EpsWindow, TWindow, and Dimension; serialization is Automatic or <|\"domain\"->\"acb\"|\"rational\",\"symbols\"->{}|>. The affine dx Jacobian is deliberately not included.";
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
-SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or an exact-Rational regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
+SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. Singular Acb execution is restricted to exact schedules without CASE-P collisions. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
 SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
@@ -4089,12 +4089,46 @@ sccNativeSourceShape[cs_Association, dimension_Integer,
   "TWindow" -> <|"CompleteMax" -> tOrder|>,
   "Dimension" -> dimension|>;
 
+(* Retain the exact affine-Jordan proof used to classify every singular Acb
+   recurrence.  This record contains only exact Rational task data and the
+   prepared Jordan-chain partition; no serialized Acb coefficient or
+   midpoint participates.  Rational C++ composites independently reconstruct
+   the same certificate from their prepared operator and cross-check it,
+   while Acb composites reuse this retained proof for T/P/R validation. *)
+sccExactAffineJordanIndicialRecord[blockcs_Association] := Module[
+  {dimension = Lookup[blockcs, "SystemSize", None], blocks,
+   malformed},
+  blocks = blockList[blockcs];
+  malformed = Select[blocks, Function[block,
+      !ListQ[Lookup[block, "Cols", None]] ||
+      Lookup[block, "Cols", {}] === {} ||
+      !AllTrue[Lookup[block, "Cols", {}], IntegerQ]]];
+  If[!IntegerQ[dimension] || dimension < 1 || blocks === {} ||
+      malformed =!= {} ||
+      Sort[Flatten[Lookup[blocks, "Cols", {}]]] =!= Range[dimension],
+    err["E6", blockcs, <|"UnsupportedJordanBlocks" -> malformed,
+      "Detail" -> "native SCC affine-Jordan root/partition metadata is malformed"|>]];
+  (* Symbolic and non-Rational algebraic composites remain preparable, but
+     cannot advertise this deliberately Rational certificate/execution
+     scope. *)
+  If[!AllTrue[Flatten[Lookup[blocks, {"a", "b"}, {}]],
+      IntegerQ[#] || Head[#] === Rational &],
+    Return[None, Module]];
+  <|"schema" -> "diffexp2-exact-affine-jordan-indicial-v1",
+    "dimension" -> dimension,
+    "blocks" -> MapIndexed[Function[{block, index}, <|
+        "block" -> First[index] - 1,
+        "columns" -> (block["Cols"] - 1),
+        "a" -> ToString[Cancel[Together[block["a"]]], InputForm],
+        "b" -> ToString[Cancel[Together[block["b"]]], InputForm]|>],
+      blocks]|>];
+
 sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
     seq_Association, blockcs_Association, captured_Association,
     capabilities_Association, block_Integer] := Module[
   {vertices = seq["Components"][[block]], expectedPrincipal,
    analytic, principal, capturedCapabilities, capturedGeometry,
-   capturedIdentity},
+   capturedIdentity, exactIndicial},
   expectedPrincipal = parentSystemRecord[[vertices, vertices]];
   analytic = Lookup[captured["Metadata"], "ChartAnalytic", None];
   If[!AssociationQ[analytic],
@@ -4121,11 +4155,14 @@ sccCapturedBlockRecord[parentSystemRecord_List, parentGeometry_Association,
   If[!StringQ[capturedIdentity] || StringLength[capturedIdentity] === 0,
     err["E6", blockcs, <|"Block" -> block,
       "Detail" -> "captured diagonal chart has no exact principal identity"|>]];
-  <|"block" -> block - 1, "vertices" -> (vertices - 1),
+  exactIndicial = sccExactAffineJordanIndicialRecord[blockcs];
+  Join[<|"block" -> block - 1, "vertices" -> (vertices - 1),
     "regular" -> capabilities["regular"],
     "identity_gauge" -> capabilities["identity_gauge"],
     "identity_v" -> capabilities["identity_v"],
-    "no_pseudo" -> capabilities["no_pseudo"]|>];
+    "no_pseudo" -> capabilities["no_pseudo"]|>,
+    If[AssociationQ[exactIndicial],
+      <|"exact_affine_jordan_indicial" -> exactIndicial|>, <||>]]];
 
 sccNativeCompositeIdentity[parent_Association, blocks_List,
     couplings_List, domain_String, symbolNames_List] := Module[
@@ -4323,13 +4360,15 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     err["E6", cs, <|"Detail" ->
       "captured native SCC exact task metadata is incomplete after static-payload compaction"|>]];
   blockDimensions = Lookup[blockSystems, "SystemSize", None];
-  columnPlans = If[capturedContract["Domain"] === "rational" &&
+  columnPlans = If[MemberQ[{"rational", "acb"},
+        capturedContract["Domain"]] &&
       capturedContract["SymbolNames"] === {},
     sccNativeCapturedColumnPlans[cs, blockSystems,
       captures, capturedContract, inputDigits],
-    (* Acb/symbolic composites remain valid prepared objects.  Exact SCC
-       column execution is deliberately Rational-only, so never infer its
-       unit lattice or T/P/R plan from numerical/string specializations. *)
+    (* Symbolic composites remain valid prepared objects.  Rational and Acb
+       plans above are derived only from exact task/indicial metadata; Acb
+       encodings are compared solely with independently encoded exact
+       zero/one values and never inspected through a midpoint. *)
     ConstantArray[{}, Length[blockSystems]]];
   prepared = DiffExp2`CppBackend`PreparePersistentSCC[captures, manifest];
   If[FailureQ[prepared] || !AssociationQ[prepared] ||
@@ -4526,7 +4565,7 @@ sccNativeCanonicalEncodedRegularBlockComponent[
    unit position to map a captured request to its local basis component. *)
 sccNativeCapturedJordanComponent[request_Association,
     task_Association, contract_Association, dimension_Integer,
-    zero_String, one_String] := Module[
+    zero_, one_] := Module[
   {fb = Lookup[contract, "FrameBase", None],
    width = Lookup[contract, "FrameWidth", None],
    nmax = Lookup[contract, "NMax", None], frameTop, unitIndex, p,
@@ -4570,7 +4609,7 @@ sccNativeCapturedJordanComponent[request_Association,
 
 sccNativeParticularRunForTag[blockcs_Association,
     contract_Association, a_, b_, sourceP_Integer,
-    inputDigits_Integer] := Module[
+    inputDigits_Integer, domain_String] := Module[
   {dimension = blockcs["SystemSize"], blocks = blockList[blockcs],
    nmax = contract["NMax"], width = contract["FrameWidth"], p,
    encode, zero, schedule},
@@ -4578,7 +4617,10 @@ sccNativeParticularRunForTag[blockcs_Association,
     err["E6", blockcs, <|"SourceLogPower" -> sourceP,
       "Detail" -> "native SCC source log power must be nonnegative"|>]];
   p = logCeiling[blockcs, a, b, sourceP, True];
-  Block[{$cppSerializationDomain = "rational",
+  If[!MemberQ[{"rational", "acb"}, domain],
+    err["E6", blockcs, <|"Domain" -> domain,
+      "Detail" -> "native singular SCC column plans require a Rational or Acb coefficient field"|>]];
+  Block[{$cppSerializationDomain = domain,
       $cppSerializationSymbols = {}},
     encode[value_] := cppScalar[Cancel[Together[value]],
       inputDigits, blockcs];
@@ -4608,14 +4650,19 @@ sccNativeParticularRunForTag[blockcs_Association,
 sccNativeCapturedColumnPlans[cs_Association, blockSystems_List,
     captures_List, contract_Association, inputDigits_Integer] := Module[
   {seq, dimensions, requests, tasks, zero, one, plans, topological,
-   edges},
+   edges, domain},
   seq = cs["IntegrationSequence"];
   topological = seq["TopologicalOrder"];
   edges = seq["CondensationEdges"];
   dimensions = Lookup[blockSystems, "SystemSize", None];
   requests = Lookup[captures, "Requests", None];
   tasks = Lookup[captures, "TaskMetadata", None];
-  Block[{$cppSerializationDomain = "rational",
+  domain = Lookup[contract, "Domain", None];
+  If[!MemberQ[{"rational", "acb"}, domain] ||
+      Lookup[contract, "SymbolNames", None] =!= {},
+    err["E6", cs, <|"Contract" -> contract,
+      "Detail" -> "native singular SCC column planning requires exact tasks in a Rational or Acb field without regulator symbols"|>]];
+  Block[{$cppSerializationDomain = domain,
       $cppSerializationSymbols = {}},
     zero = cppScalar[0, inputDigits, First[blockSystems]];
     one = cppScalar[1, inputDigits, First[blockSystems]]];
@@ -4648,7 +4695,7 @@ sccNativeCapturedColumnPlans[cs_Association, blockSystems_List,
             sourceP = Max[Lookup[reachable, predecessors]];
             run = sccNativeParticularRunForTag[
               blockSystems[[target]], contract, a, b, sourceP,
-              inputDigits];
+              inputDigits, domain];
             AssociateTo[reachable, target -> run["p"]];
             AppendTo[targetRecords,
               <|"Block" -> target, "Run" -> run|>]]],
@@ -4738,12 +4785,24 @@ sccNativeRegularBlockStatisticsQ[stats_, handle_Association,
       "collision-bound-producer-certificate"];
 
 sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
-    blockDimensions_List, scalarShape_] := Module[
+    blockDimensions_List, scalarShape_, domain_String:"rational"] := Module[
   {blockCharts = Lookup[stats, "block_charts", None],
    evidence = Lookup[stats, "capability_evidence", None],
-   expected = If[TrueQ[scalarShape],
-     "exact-rational-regular-singular-scalar-block-dag-column-v1",
-     "exact-rational-regular-singular-jordan-block-dag-column-v2"]},
+   expected, expectedNoPseudo, expectedPseudoExecution},
+  expected = Switch[domain,
+    "rational", If[TrueQ[scalarShape],
+      "exact-rational-regular-singular-scalar-block-dag-column-v1",
+      "exact-rational-regular-singular-jordan-block-dag-column-v2"],
+    "acb", If[TrueQ[scalarShape],
+      "acb-regular-singular-scalar-block-dag-column-v1",
+      "acb-regular-singular-jordan-block-dag-column-v1"],
+    _, Return[False, Module]];
+  expectedNoPseudo = If[domain === "acb",
+    "producer-proven-and-exact-schedule-revalidated-no-case-p",
+    "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate"];
+  expectedPseudoExecution = If[domain === "acb",
+    "exact-rational-certificate-case-p-rejected-for-acb",
+    "exact-rational-joint-compensation-and-formal-overlap-certificate"];
   sccNativeCompositeStatisticsQ[stats, handle] &&
     TrueQ[Lookup[stats, "execution_implemented", False]] &&
     Lookup[stats, "execution_scope", None] === expected &&
@@ -4775,10 +4834,9 @@ sccNativeSingularBlockStatisticsQ[stats_, handle_Association,
       "collision-bound-producer-certificate" &&
     Lookup[evidence, "jordan_indicial", None] ===
       "retained-exact-rational-full-matrix-certificate" &&
-    Lookup[evidence, "no_pseudo", None] ===
-      "producer-provenance-only-execution-revalidated-by-exact-schedule-certificate" &&
+    Lookup[evidence, "no_pseudo", None] === expectedNoPseudo &&
     Lookup[evidence, "pseudo_schedule_execution", None] ===
-      "exact-rational-joint-compensation-and-formal-overlap-certificate" &&
+      expectedPseudoExecution &&
     Lookup[evidence, "resonance_schedule", None] ===
       "retained-affine-jordan-verified-exact-captured-run"];
 
@@ -4892,7 +4950,9 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
   singularExecution = AssociationQ[stats] &&
     MemberQ[{
       "exact-rational-regular-singular-scalar-block-dag-column-v1",
-      "exact-rational-regular-singular-jordan-block-dag-column-v2"},
+      "exact-rational-regular-singular-jordan-block-dag-column-v2",
+      "acb-regular-singular-scalar-block-dag-column-v1",
+      "acb-regular-singular-jordan-block-dag-column-v1"},
       Lookup[stats, "execution_scope", None]];
   scalarExecution = AllTrue[blockDimensions, # === 1 &];
   If[Length[blockDimensions] < 2 ||
@@ -4908,10 +4968,19 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
       Lookup[contract, "SymbolNames", None] =!= {},
     err["E6", cs, <|"Contract" -> contract,
       "BlockDimensions" -> blockDimensions,
-      "Detail" -> "native SCC column requires two or more exact-rational or regular-Acb blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
-  If[singularExecution && domain =!= "rational",
+      "Detail" -> "native SCC column requires two or more exact-rational or Acb blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
+  If[singularExecution && !MemberQ[
+      Switch[domain,
+        "rational", {
+          "exact-rational-regular-singular-scalar-block-dag-column-v1",
+          "exact-rational-regular-singular-jordan-block-dag-column-v2"},
+        "acb", {
+          "acb-regular-singular-scalar-block-dag-column-v1",
+          "acb-regular-singular-jordan-block-dag-column-v1"},
+        _, {}], Lookup[stats, "execution_scope", None]],
     err["E6", cs, <|"Contract" -> contract,
-      "Detail" -> "native singular SCC execution remains exact-rational because pseudo/resonance decisions require exact affine data"|>]];
+      "NativeStatistics" -> stats,
+      "Detail" -> "native singular SCC capability does not match the captured scalar domain"|>]];
   If[!IntegerQ[inputDigits] || inputDigits < 1,
     err["E6", cs, <|"InputDigits" -> inputDigits,
       "Detail" -> "cached native SCC local-metadata precision is malformed"|>]];
@@ -4968,12 +5037,20 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
     seedTag = selectedPlan["Tag"];
     targetTags = Map[<|"a" -> seedTag["a"],
         "b" -> seedTag["b"], "p" -> # ["p"]|> &, targetRuns];
-    expectedCapability = If[scalarExecution,
-      "exact-rational-regular-singular-scalar-block-dag-column-v1",
-      "exact-rational-regular-singular-jordan-block-dag-column-v2"];
-    expectedProvenanceSchema = If[scalarExecution,
-      "diffexp2-native-scc-regular-singular-scalar-column-v1",
-      "diffexp2-native-scc-regular-singular-jordan-column-v2"],
+    expectedCapability = Switch[domain,
+      "rational", If[scalarExecution,
+        "exact-rational-regular-singular-scalar-block-dag-column-v1",
+        "exact-rational-regular-singular-jordan-block-dag-column-v2"],
+      "acb", If[scalarExecution,
+        "acb-regular-singular-scalar-block-dag-column-v1",
+        "acb-regular-singular-jordan-block-dag-column-v1"]];
+    expectedProvenanceSchema = Switch[domain,
+      "rational", If[scalarExecution,
+        "diffexp2-native-scc-regular-singular-scalar-column-v1",
+        "diffexp2-native-scc-regular-singular-jordan-column-v2"],
+      "acb", If[scalarExecution,
+        "diffexp2-native-scc-acb-regular-singular-scalar-column-v1",
+        "diffexp2-native-scc-acb-regular-singular-jordan-column-v1"]],
 
     If[domain === "acb",
       Block[{$cppSerializationDomain = "acb",
@@ -5096,7 +5173,7 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
         expectedCapability ||
       If[singularExecution,
         !sccNativeSingularBlockStatisticsQ[
-          stats, prepared, blockDimensions, scalarExecution],
+          stats, prepared, blockDimensions, scalarExecution, domain],
         !scalarExecution &&
           !sccNativeRegularBlockStatisticsQ[
             stats, prepared, blockDimensions, domain]],

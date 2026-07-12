@@ -408,7 +408,10 @@ General SCC execution remains disabled, but the deliberately narrow
 `exact-rational-regular-singular-{scalar,jordan}-block-dag-column` scopes.
 The regular multidimensional scope requires a singleton recurrence partition;
 the singular Jordan scope instead retains a complete exact affine-Jordan
-certificate for every block. The explicit Wolfram
+certificate for every block. A singular composite may contain one strongly
+connected block (and therefore no coupling groups) or a multi-block
+condensation DAG; both use the same retained parent-local representation.
+The explicit Wolfram
 `SolveNativeSCCBasisColumn` seam accepts all four scopes and validates their
 statistics, capability, and full column provenance. Singular execution
 requires identity gauge/assembly and sector-preserving couplings. C++ derives

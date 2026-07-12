@@ -110,7 +110,10 @@ parent/block/coupling manifest, and calls
 limited to regular or exact affine-Jordan blocks with identity
 gauge and spectral transforms.  C++ reconstructs and retains the complete
 Rational Jordan indicial certificate; `regular` is a classification rather
-than an admission predicate. It always prepares `BlockSequentialStrict`; it
+than an admission predicate. Singular affine-Jordan execution accepts both a
+single strongly connected block and a multi-block condensation DAG; the
+one-block case uses the same retained composite/local representation with an
+empty coupling list. It always prepares `BlockSequentialStrict`; it
 never
 constructs a monolithic alternative and is not yet used by production
 `SolveHomogeneous` or transport.  A bounded collision-checked Solve cache

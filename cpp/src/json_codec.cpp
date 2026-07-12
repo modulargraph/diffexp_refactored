@@ -8411,7 +8411,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       return false;
     } else {
-      if (blocks_.size() < 2 || work_.work_min > 0 ||
+      if (blocks_.empty() || work_.work_min > 0 ||
           work_.requested_max < 0 || work_.work_complete_max < 0 ||
           std::none_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
             return !block.regular;

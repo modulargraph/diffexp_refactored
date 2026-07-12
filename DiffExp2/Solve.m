@@ -4203,11 +4203,10 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
       epsWindow["Min"] > epsWindow["CompleteMax"],
     err["E6", cs, <|"Request" -> req,
       "Detail" -> "native SCC preparation requires an ordered integer epsilon window and nonnegative Taylor order"|>]];
-  If[!TrueQ[Lookup[cs, "SCCSkeleton", False]] ||
-      !AssociationQ[seq] ||
-      Length[Lookup[seq, "Components", {}]] <= 1,
+  If[!AssociationQ[seq] ||
+      Length[Lookup[seq, "Components", {}]] < 1,
     err["E6", cs, <|"Detail" ->
-      "native SCC preparation requires a multi-block SCC skeleton envelope"|>]];
+      "native SCC preparation requires a chart with a nonempty exact SCC certificate"|>]];
   If[cfg["RecurrenceBackend"] =!= "Cpp" ||
       TrueQ[$disableGroupedSpectralTransform] ||
       !TrueQ[$cppUsePersistentSessions] ||
@@ -4955,7 +4954,7 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
       "acb-regular-singular-jordan-block-dag-column-v1"},
       Lookup[stats, "execution_scope", None]];
   scalarExecution = AllTrue[blockDimensions, # === 1 &];
-  If[Length[blockDimensions] < 2 ||
+  If[Length[blockDimensions] < 1 ||
       Length[runRecords] =!= Length[blockDimensions] ||
       Length[taskRecords] =!= Length[blockDimensions] ||
       Length[columnPlans] =!= Length[blockDimensions] ||
@@ -4968,7 +4967,7 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
       Lookup[contract, "SymbolNames", None] =!= {},
     err["E6", cs, <|"Contract" -> contract,
       "BlockDimensions" -> blockDimensions,
-      "Detail" -> "native SCC column requires two or more exact-rational or Acb blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
+      "Detail" -> "native SCC column requires one or more exact-rational or Acb blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
   If[singularExecution && !MemberQ[
       Switch[domain,
         "rational", {
@@ -5290,9 +5289,9 @@ SolveNativeSCCBasis[cs_Association, req_Association,
   {seq = Lookup[cs, "IntegrationSequence", None], seeds, specs,
    prepared, workerCount, requestColumns, batch, raw, columns, cleanup,
    forbiddenPayloadKeys},
-  If[!AssociationQ[seq] || Length[Lookup[seq, "Components", {}]] < 2,
+  If[!AssociationQ[seq] || Length[Lookup[seq, "Components", {}]] < 1,
     err["E6", cs, <|"Detail" ->
-      "native SCC basis batch requires a multi-block SCC skeleton"|>]];
+      "native SCC basis batch requires a nonempty exact SCC certificate"|>]];
   If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumns] === {},
     err["E5", cs, <|"Detail" ->
       "CppBackend persistent SCC column-batch bridge is not available"|>]];

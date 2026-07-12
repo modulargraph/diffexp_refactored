@@ -61,16 +61,29 @@ result = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
   basis = If[FailureQ[prepared], prepared,
     catchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
       cs, request, 2]]];
+  valueLocal = If[FailureQ[basis], basis,
+    catchDE2[DiffExp2`Solve`SolveNativeValueRegular[cs, request,
+      {DiffExp2`EpsSeries`ESNew[0, {1, 0}],
+       DiffExp2`EpsSeries`ESNew[0, {0, 0}],
+       DiffExp2`EpsSeries`ESNew[0, {0, 0}]}]]];
+  valueEvaluation = If[FailureQ[valueLocal], valueLocal,
+    DiffExp2`CppBackend`EvaluatePersistentLocal[valueLocal,
+      <|"exact" -> "1/2"|>, <|"tail_estimate" -> False|>, 60]];
   propagated = If[FailureQ[basis], basis, First[basis["Columns"]]];
   evaluated = If[FailureQ[propagated], propagated,
     DiffExp2`CppBackend`EvaluatePersistentLocal[propagated,
       <|"exact" -> "1/2"|>, <|"tail_estimate" -> False|>, 60]];
-  {cs, prepared, stats, basis, propagated, evaluated}];
+  {cs, prepared, stats, basis, valueLocal, valueEvaluation,
+    propagated, evaluated}];
 
-{cs, prepared, stats, basis, propagated, evaluated} = result;
+{cs, prepared, stats, basis, valueLocal, valueEvaluation,
+  propagated, evaluated} = result;
 value = decodeValue[evaluated];
+transportedValue = decodeValue[valueEvaluation];
 eps0 = coefficient[value, 0];
 eps1 = coefficient[value, 1];
+transported0 = coefficient[transportedValue, 0];
+transported1 = coefficient[transportedValue, 1];
 
 ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
   Lookup[cs["IntegrationSequence"], "Components", None] ===
@@ -85,6 +98,11 @@ ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
   Lookup[basis["NativeSummary"], "columns", None] === 3 &&
   Lookup[basis["NativeSummary"], "worker_threads", None] === 2 &&
   TrueQ[Lookup[basis["NativeSummary"], "atomic_retention", False]] &&
+  Lookup[valueLocal, "Type", None] === "DiffExp2NativeValueRegular" &&
+  Lookup[valueLocal, "Session", None] === Lookup[basis, "Session", None] &&
+  Length[transported0] === 3 && Length[transported1] === 3 &&
+  Max[Abs[N[transported0 - {1, 0, 0}, 50]]] < 10^-40 &&
+  Max[Abs[N[transported1 - {0, 1/2, 0}, 50]]] < 10^-40 &&
   Length[eps0] === 3 && Length[eps1] === 3 &&
   Max[Abs[N[eps0 - {1, 0, 0}, 50]]] < 10^-40 &&
   Max[Abs[N[eps1 - {0, 1/2, 0}, 50]]] < 10^-40 &&
@@ -97,11 +115,25 @@ ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
 If[AssociationQ[basis] && ListQ[Lookup[basis, "Columns", None]],
   Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
     basis["Columns"]]];
+If[AssociationQ[valueLocal] && StringQ[Lookup[valueLocal, "Local", None]],
+  Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[valueLocal]]];
 If[AssociationQ[prepared] && StringQ[Lookup[prepared, "SCC", None]],
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[prepared]]];
 DiffExp2`Solve`ClearSolveCaches[];
 
 Print[If[ok, "PASS", "FAIL"],
   ": retained regular Acb SCC basis column executes natively"];
-If[!ok, Print[InputForm[result]]];
+If[!ok, Print[InputForm[{
+  "FailurePositions" -> Select[Range[Length[result]],
+    FailureQ[result[[#]]] &],
+  "BasisType" -> If[AssociationQ[basis], Lookup[basis, "Type", None],
+    Head[basis]],
+  "ValueType" -> If[AssociationQ[valueLocal],
+    Lookup[valueLocal, "Type", None], Head[valueLocal]],
+  "ValueSession" -> If[AssociationQ[valueLocal],
+    Lookup[valueLocal, "Session", None], None],
+  "BasisSession" -> If[AssociationQ[basis],
+    Lookup[basis, "Session", None], None],
+  "Transported" -> {transported0, transported1},
+  "BasisColumn" -> {eps0, eps1}}]]];
 Exit[If[ok, 0, 1]];

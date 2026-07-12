@@ -145,6 +145,14 @@ slabs. This complete-basis seam is the receiving state used by native
 plan-driven matching; automatic production transport dispatch is still being
 migrated.
 
+For the incoming side, ``Solve`SolveNativeValueRegular`` turns one honest
+center-value vector directly into a retained full-system local. When its chart
+was prepared as an SCC skeleton, it materializes the exact identity physical
+frame for that one value recursion while preserving the parent's native
+session identity. Thus a boundary seed and later retained SCC bases coexist in
+one C++ session without constructing or exporting a Wolfram fundamental
+matrix.
+
 The native protocol advertises both
 `exact-rational-regular-singular-scalar-block-dag-column-v1` and
 `exact-rational-regular-singular-jordan-block-dag-column-v2`. At least one

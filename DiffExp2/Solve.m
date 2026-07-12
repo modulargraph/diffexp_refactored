@@ -21,6 +21,7 @@ HomogeneousCacheCapacity::usage = "HomogeneousCacheCapacity[] gives the bounded 
 SolveParticular::usage = "SolveParticular[chartSystem, source, req] gives THE particular solution (canonical kernel choice) for a sector-native theta-form source supplied in the original physical frame.";
 SolveChart::usage = "SolveChart[chartSystem, req, source] gives <|\"Basis\", \"Particular\", \"CouplingDepth\"|>.";
 SolveValueRegular::usage = "SolveValueRegular[chartSystem, req, vals] propagates an incoming VALUE vector (one EpsSeries per component: the solution value AT THE CHART CENTER t = 0) through a REGULAR chart with ONE d-dimensional recursion (init = vals); no basis, no matching. The delivered eps-window is capped by the incoming window. Loud error on non-regular charts. (Value-transport prototype; see Docs/PerfGapAnalysis.md lever 1.)";
+SolveNativeValueRegular::usage = "SolveNativeValueRegular[chartSystem, req, vals] propagates a regular center-value vector as one retained C++ local solution. It accepts an SCC skeleton by materializing the exact identity physical frame for this single value recursion, caps delivery to the honest incoming epsilon window, and never returns a coefficient tensor.";
 SolveNativeLocalFamily::usage = "SolveNativeLocalFamily[chartSystem, req, <|\"a\"->a,\"b\"->b,\"p\"->p|>, init] runs one uncompensated homogeneous family through the persistent C++ solver and returns an opaque native handle record, never a Wolfram coefficient tensor. init is the same (p+1)-by-d EpsSeries ladder accepted by the framed recurrence. This narrow migration seam requires an identity gauge, grouped native assembly, no unresolved analytic regulators, and no pseudo-resonant family collisions; general transport continues to use SolveHomogeneous/SolveParticular.";
 PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sourceBlock, targetBlock, sourceShape, serialization] prepares one exact cross-SCC ThetaOriginal block as a deterministic JSON-ready sparse rational-multiplier matrix. serialization is Automatic (the active C++ serialization Block) or the exact field <|\"domain\"->...,\"symbols\"->{...}|>. Signed epsilon shifts are preserved; execution later proves the requested/work halo contract.";
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
@@ -5420,6 +5421,61 @@ SolveChart[cs_Association, req_Association, source_:None] := Module[
    exact (0,0,0) sector tag, honest window (capped at the incoming
    CompleteMax), no matching solve to go ambiguous, and the always-on
    ODE residual check runs on the propagated solution itself. *)
+regularPhysicalChartSystem[cs_Association] := Module[
+  {d = cs["SystemSize"]},
+  If[TrueQ[Lookup[cs, "SCCSkeleton", False]] &&
+      TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    Join[cs, <|"SCCSkeleton" -> False,
+      "SolveCacheTag" -> Lookup[cs, "SystemHash", None],
+      "ThetaMatrix" -> cs["ThetaOriginal"],
+      "Gauge" -> IdentityMatrix[d],
+      "GaugeInverse" -> IdentityMatrix[d],
+      "Residue" -> ConstantArray[0, {d, d}],
+      "V" -> IdentityMatrix[d], "VInv" -> IdentityMatrix[d],
+      "Families" -> {<|
+        "Roots" -> Table[<|"a" -> 0, "b" -> 0,
+          "BlockSize" -> 1|>, d],
+        "ColumnRange" -> Range[d], "Collisions" -> {},
+        "CollisionDepth" -> 0|>}|>],
+    cs]];
+
+SolveNativeValueRegular[cs_Association, req_Association,
+    vals_List] := Module[
+  {physical, d = cs["SystemSize"], vMin, vCM, requestedMin,
+   requestedMax, deliveredMax, nativeReq, result},
+  If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    err["E8", cs, <|"Detail" ->
+      "SolveNativeValueRegular requires a regular chart"|>]];
+  If[Length[vals] =!= d || !AllTrue[vals, DiffExp2`EpsSeries`ESQ],
+    err["E8", cs, <|"Components" -> Length[vals], "Dimension" -> d,
+      "Detail" -> "native value vector must be d EpsSeries components"|>]];
+  If[!AssociationQ[Lookup[req, "EpsWindow", None]] ||
+      !IntegerQ[Lookup[req, "TOrder", None]] || req["TOrder"] < 0,
+    err["E8", cs, <|"Request" -> req,
+      "Detail" -> "native value transport requires finite Taylor and epsilon windows"|>]];
+  vMin = Min[esMin /@ vals];
+  vCM = Min[esCM /@ vals];
+  requestedMin = Lookup[req["EpsWindow"], "Min", None];
+  requestedMax = Lookup[req["EpsWindow"], "CompleteMax", None];
+  If[!IntegerQ[requestedMin] || !IntegerQ[requestedMax] ||
+      requestedMin > requestedMax,
+    err["E8", cs, <|"Request" -> req,
+      "Detail" -> "native value transport epsilon window is malformed"|>]];
+  deliveredMax = Min[requestedMax, vCM];
+  If[deliveredMax < requestedMin,
+    err["E6", cs, <|"IncomingCompleteMax" -> vCM,
+      "RequestedMin" -> requestedMin,
+      "Detail" -> "incoming value has no honest overlap with the requested epsilon window"|>]];
+  nativeReq = Join[req, <|"EpsWindow" -> <|
+      "Min" -> Min[requestedMin, vMin],
+      "CompleteMax" -> deliveredMax|>|>];
+  physical = regularPhysicalChartSystem[cs];
+  result = SolveNativeLocalFamily[physical, nativeReq,
+    <|"a" -> 0, "b" -> 0, "p" -> 0|>, {vals}];
+  Join[result, <|"Type" -> "DiffExp2NativeValueRegular",
+    "IncomingEpsWindow" -> <|"Min" -> vMin,
+      "CompleteMax" -> vCM|>|>]];
+
 SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
   {d = cs["SystemSize"], nmax, vMin, vCM, fb, wideTop, Wd, prep, rec, ls,
    symbolic, poleDepth, numericInputQ, phaseQ, phaseTime, phase,
@@ -5430,17 +5486,8 @@ SolveValueRegular[cs_Association, req_Association, vals_List] := Module[
        itself is already a valid identity spectral/gauge frame.  Materialize
        that frame only for this value recursion: the cached SCC envelope stays
        skeletal and never pays global ChartIndicial/spectral preparation. *)
-    Return[SolveValueRegular[Join[cs, <|
-      "SCCSkeleton" -> False,
-      "ThetaMatrix" -> cs["ThetaOriginal"],
-      "Gauge" -> IdentityMatrix[d],
-      "GaugeInverse" -> IdentityMatrix[d],
-      "Residue" -> ConstantArray[0, {d, d}],
-      "V" -> IdentityMatrix[d], "VInv" -> IdentityMatrix[d],
-      "Families" -> {<|
-        "Roots" -> Table[<|"a" -> 0, "b" -> 0, "BlockSize" -> 1|>, d],
-        "ColumnRange" -> Range[d], "Collisions" -> {},
-        "CollisionDepth" -> 0|>}|>], req, vals], Module]];
+    Return[SolveValueRegular[regularPhysicalChartSystem[cs], req, vals],
+      Module]];
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "SolveValueRegular requires a regular chart (pole order 0); singular charts keep the basis+matching path"|>]];

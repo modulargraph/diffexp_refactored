@@ -24,6 +24,7 @@ RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metada
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
 CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies its native Acb theta residual against the supplied epsilon-framed theta operator and optional source. request carries point, relative_tolerance, operator_identity, checkpoint_identity, and theta_operator; no solution coefficient slab crosses the bridge.";
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
+RunPersistentAcbLocalMatch::usage = "RunPersistentAcbLocalMatch[basis, incoming, request] evaluates retained Acb locals at one exact physical point and retains an exact-Rational-lattice-guided Laurent match with bounded refinement and residual diagnostics. request supplies exact_lattice and refinement records in addition to chart, branch, checkpoint, point, and epsilon identities.";
 PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] returns the opaque summary and exact provenance of one retained native local match.";
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
 RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] applies the native sector endpoint gate to a retained local and returns an opaque session-owned endpoint-result handle. request explicitly binds source/result checkpoint identities, approach_direction, cancellation mode, and optional rim; no coefficient slab is returned.";
@@ -849,6 +850,45 @@ RunPersistentLocalMatch[basis_List, incoming_Association,
       "Missing" -> missing, "Reserved" -> reserved|>], Module]];
   request = Join[matchRequest, <|"schema" -> 2, "op" -> "local.match",
     "session" -> First[sessions],
+    "basis" -> Lookup[basisTokens, "Local"],
+    "incoming" -> incomingTokens["Local"]|>];
+  RunRequest[request]];
+
+RunPersistentAcbLocalMatch[basis_List, incoming_Association,
+    matchRequest_Association] := Module[
+  {basisTokens, incomingTokens = persistentLocalHandles[incoming], bad,
+   sessions, reserved, required, missing, request},
+  If[basis === {} || !AllTrue[basis, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent Acb local matching requires a nonempty list of local handles"|>],
+      Module]];
+  basisTokens = persistentLocalHandles /@ basis;
+  bad = Select[Range[Length[basisTokens]],
+    FailureQ[basisTokens[[#]]] &];
+  If[bad =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent Acb local match basis contains malformed handles",
+      "Positions" -> bad|>], Module]];
+  If[FailureQ[incomingTokens], Return[incomingTokens, Module]];
+  sessions = DeleteDuplicates[Join[Lookup[basisTokens, "Session"],
+    {incomingTokens["Session"]}]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent Acb local matching requires every local in one native session",
+      "Sessions" -> sessions|>], Module]];
+  reserved = Intersection[Keys[matchRequest],
+    {"schema", "op", "session", "basis", "incoming"}];
+  required = {"basis_chart", "incoming_chart", "basis_point",
+    "incoming_point", "epsilon", "basis_checkpoint_identities",
+    "incoming_checkpoint_identity", "checkpoint_identity",
+    "exact_lattice", "refinement"};
+  missing = Select[required, !KeyExistsQ[matchRequest, #] &];
+  If[reserved =!= {} || missing =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent Acb local match request is missing required fields or contains reserved protocol keys",
+      "Missing" -> missing, "Reserved" -> reserved|>], Module]];
+  request = Join[matchRequest, <|"schema" -> 2,
+    "op" -> "local.match_acb", "session" -> First[sessions],
     "basis" -> Lookup[basisTokens, "Local"],
     "incoming" -> incomingTokens["Local"]|>];
   RunRequest[request]];

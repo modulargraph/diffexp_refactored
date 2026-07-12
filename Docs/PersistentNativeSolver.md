@@ -73,6 +73,7 @@ The implemented recurrence-session commands are:
 | `local.evaluate` | Evaluate retained value and theta-value with explicit prescription semantics. |
 | `local.certify_residual` | Certify the retained local's stored-truncation theta residual with native Arb magnitudes. |
 | `local.match` | Exact-match retained regular locals and retain the Laurent lattice transformation and weights without coefficient JSON. |
+| `local.match_acb` | Evaluate retained Acb locals at an exact common physical point, apply an exact-Rational saturation transformation, and retain bounded-refinement residual diagnostics without coefficient JSON. |
 | `local.endpoint_limit` | Apply the native sector endpoint gate to one retained local and retain the specialized endpoint vector without coefficient JSON. |
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
@@ -142,8 +143,19 @@ locals from one session. It proves that the two chart coordinates name the
 same rational physical point, performs finite Laurent lattice saturation and
 matching in C++, verifies an exact stored-truncation residual through the
 requested CompleteMax, and retains the transformation and weights behind an
-opaque match handle. Acb matching and iterative numerical refinement remain a
-separate milestone; they are not silently routed through this exact path.
+opaque match handle.  The separate `local.match_acb` operation leaves that v1
+wire path unchanged.  It receives an exact-Rational evaluated-lattice witness,
+derives and retains its saturation transformation `T` natively, then evaluates
+the retained Acb basis and incoming locals at coordinates proved to name one
+exact rational physical point.  Acb never decides lattice support, zero
+structure, or resonance: every solve pivot must exclude zero as an enclosure.
+One certified factorization is reused for a bounded number of residual
+corrections, and the opaque match records pass/fail/inconclusive diagnostics
+with its honest epsilon CompleteMax.  Exact chart/checkpoint identities,
+prescriptions, requested/effective rim signs, and the canonical witness
+binding are part of the retained provenance.  The low-level Wolfram entry is
+`RunPersistentAcbLocalMatch`; `match.stats` and `match.release` are shared by
+both match kinds.
 
 `local.endpoint_limit` is a separate retained-result lifecycle.  Admission
 strongly owns its source local, so concurrent `local.release` cannot invalidate

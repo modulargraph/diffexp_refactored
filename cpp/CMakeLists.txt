@@ -124,6 +124,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_local_match
     COMMAND test_diffexp2_persistent_local_match)
 
+  add_executable(test_diffexp2_persistent_acb_local_match
+    tests/test_persistent_acb_local_match.cpp)
+  target_compile_features(test_diffexp2_persistent_acb_local_match
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_acb_local_match
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_acb_local_match
+    COMMAND test_diffexp2_persistent_acb_local_match)
+
   add_executable(test_diffexp2_persistent_checkpoint
     tests/test_persistent_checkpoint.cpp)
   target_compile_features(test_diffexp2_persistent_checkpoint

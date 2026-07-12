@@ -218,10 +218,26 @@ request, lower-frame underflow, load failure, or compiled-kernel failure is
 reported as a DiffExp2 error. It never silently falls back to the Wolfram
 recurrence. Choose `"Wolfram"` explicitly if that is the desired backend.
 
+### Retained Acb matching bridge
+
+`RunPersistentAcbLocalMatch[basis, incoming, request]` is the explicit
+low-level bridge to `local.match_acb`.  All handles must belong to one Acb
+session.  Besides chart, point, epsilon, and checkpoint identities, `request`
+contains an exact Rational `exact_lattice` witness and a bounded `refinement`
+policy.  C++ derives `T` only from that exact witness, evaluates the retained
+locals at the proved common physical point, rejects every pivot enclosure that
+overlaps zero, and reuses one factorization for residual corrections.  The
+returned handle has no coefficient slab; inspect it with
+`PersistentLocalMatchStatistics` and release it with
+`ReleasePersistentLocalMatch`.  This is a migration seam and is not yet the
+automatic transport dispatcher.
+
 ## Current scope and limitations
 
-- This is a recurrence-kernel port, not yet a C++ port of segmentation,
-  matching, transport, regularized integration, FIRE, or FeynmanTrick.
+- The production path is still primarily a recurrence-kernel port.  Exact and
+  Acb retained matching plus endpoint-limit migration seams now exist, but
+  segmentation, automatic transport orchestration, complete regularized
+  integration, FIRE, and FeynmanTrick are not yet wholly native.
 - Symbolic regulator coefficients must be exact rational functions over
   `Q`. Algebraic functions, transcendental dependence, symbolic complex
   coefficients, and mixed inexact symbolic expressions are rejected.

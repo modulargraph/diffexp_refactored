@@ -304,8 +304,8 @@ rational physical point. It then saturates the finite epsilon lattice, solves
 for weights, maps them back through the exact Laurent transformation, and
 requires an exact zero `F w - v` residual through `required_complete_max`.
 The transformation and weights stay in the session; the response contains no
-coefficient slab. Acb matching is explicitly unsupported until refinement and
-zero-overlap policies are installed.
+coefficient slab. Acb input is not accepted by this operation and is never
+silently routed away from the exact v1 wire path.
 
 ```json
 {"schema":2,"op":"local.match","session":"s:1",
@@ -325,6 +325,58 @@ The low-level Wolfram lifecycle is `RunPersistentLocalMatch`,
 `PersistentLocalMatchStatistics`, and `ReleasePersistentLocalMatch`. As with
 the native operation, it is explicit and is not yet production transport
 dispatch.
+
+#### Exact-lattice-guided Acb matching
+
+`local.match_acb` is the separate numerical matching scope.  It strongly owns
+all admitted retained locals while the operation is in flight, verifies their
+chart and checkpoint identities, and proves that the two exact rational local
+coordinates map to one physical point.  Each local is evaluated natively with
+its retained prescription and an optional explicit `basis_imaginary_sign` or
+`incoming_imaginary_sign`; both requested and effective signs are retained.
+Both local coordinates must be nonzero interior points.  A requested work
+minimum may discard lower evaluated coefficients only when every discarded
+Acb value is the exact singleton zero; zero-overlapping balls are not dropped.
+
+The `exact_lattice` record is an exact Rational matrix of finite epsilon
+frames evaluated at that same match point.  C++ canonicalizes the witness,
+performs exact epsilon-lattice saturation, and binds its identity to the
+source checkpoints, charts, prescriptions, physical point, and work window.
+Only this exact record supplies the support and Laurent transformation `T`.
+The Acb matrix is used to specialize `F T`, certify pivots, and evaluate the
+residual; an enclosure overlapping zero is never classified from its
+midpoint.  All correction solves replay one factorization.  The retained
+summary contains the exact transformation diagnostics, honest weight/residual
+windows, refinement count, and pass/fail/inconclusive coefficient counts, but
+no coefficient JSON.
+
+```json
+{"schema":2,"op":"local.match_acb","session":"s:1",
+ "basis":["l:1","l:2"],"incoming":"l:3",
+ "basis_chart":"c:2","incoming_chart":"c:1",
+ "basis_point":{"exact":"-1/3"},
+ "incoming_point":{"exact":"1/3"},
+ "basis_imaginary_sign":-1,"incoming_imaginary_sign":1,
+ "epsilon":{"min":0,"max":4,"required_complete_max":3},
+ "basis_checkpoint_identities":["basis-0","basis-1"],
+ "incoming_checkpoint_identity":"incoming",
+ "checkpoint_identity":"acb-match-state-v1",
+ "exact_lattice":{
+   "schema":"diffexp2-exact-evaluated-epsilon-lattice-v1",
+   "identity":"exact-lattice-at-match-v1",
+   "evaluated_basis":[
+     [{"min":0,"max":4,"coefficients":["1","0","0","0","0"]},
+      {"min":0,"max":4,"coefficients":["1","0","0","0","0"]}],
+     [{"min":0,"max":4,"coefficients":["0","0","0","0","0"]},
+      {"min":0,"max":4,"coefficients":["0","1","0","0","0"]}]]},
+ "refinement":{"relative_tolerance":"1e-50","max_steps":2}}
+```
+
+The Wolfram entry is `RunPersistentAcbLocalMatch`; both numerical and exact
+matches use `PersistentLocalMatchStatistics` and
+`ReleasePersistentLocalMatch`.  Checkpoint schema v1 deliberately refuses a
+live handle of either kind because it serializes only prepared charts and the
+SCC graph.
 
 ``DiffExp2`Solve`SolveNativeLocalFamily[cs, req,
 <|"a"->a,"b"->b,"p"->p|>, init]`` is the first narrow solver-level entry.

@@ -92,4 +92,13 @@ if(DE2_BUILD_TESTS)
   target_compile_features(test_diffexp2_matching PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_matching PRIVATE diffexp2_core)
   add_test(NAME cpp_matching COMMAND test_diffexp2_matching)
+
+  add_executable(test_diffexp2_persistent_local_match
+    tests/test_persistent_local_match.cpp)
+  target_compile_features(test_diffexp2_persistent_local_match
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_local_match
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_local_match
+    COMMAND test_diffexp2_persistent_local_match)
 endif()

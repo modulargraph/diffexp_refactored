@@ -2,6 +2,7 @@
 
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
+#include "diffexp2/matching.hpp"
 #include "diffexp2/recurrence.hpp"
 
 #include <boost/json.hpp>
@@ -1600,6 +1601,449 @@ class StoredLocal final : public StoredLocalBase {
   double residual_certify_ms_ = 0.0;
 };
 
+constexpr const char* kExactRegularLocalMatchCapability =
+    "exact-rational-regular-local-match-v1";
+
+class StoredMatchBase {
+ public:
+  explicit StoredMatchBase(std::string handle) : handle_(std::move(handle)) {}
+  virtual ~StoredMatchBase() = default;
+
+  virtual json::object summary() const = 0;
+  const std::string& handle() const { return handle_; }
+
+ protected:
+  std::string handle_;
+};
+
+class StoredExactRegularMatch final : public StoredMatchBase {
+ public:
+  StoredExactRegularMatch(
+      std::string handle, std::string checkpoint_identity,
+      std::string provenance_identity, std::vector<std::string> basis_handles,
+      std::vector<std::string> basis_checkpoints, std::string incoming_handle,
+      std::string incoming_checkpoint, std::string basis_chart,
+      std::string incoming_chart, std::string basis_point,
+      std::string incoming_point, std::string physical_point,
+      EpsilonWindow requested_window, std::int32_t required_complete_max,
+      std::uint32_t dimension,
+      ExactLaurentMatrix<Rational>&& transformation,
+      FiniteLaurentVector<Rational>&& weights,
+      EpsilonLatticeSaturationDiagnostics<Rational>&& diagnostics,
+      EpsilonWindow residual_window, double elapsed_ms)
+      : StoredMatchBase(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        basis_handles_(std::move(basis_handles)),
+        basis_checkpoints_(std::move(basis_checkpoints)),
+        incoming_handle_(std::move(incoming_handle)),
+        incoming_checkpoint_(std::move(incoming_checkpoint)),
+        basis_chart_(std::move(basis_chart)),
+        incoming_chart_(std::move(incoming_chart)),
+        basis_point_(std::move(basis_point)),
+        incoming_point_(std::move(incoming_point)),
+        physical_point_(std::move(physical_point)),
+        requested_window_(requested_window),
+        required_complete_max_(required_complete_max),
+        dimension_(dimension),
+        transformation_(std::move(transformation)),
+        weights_(std::move(weights)),
+        diagnostics_(std::move(diagnostics)),
+        residual_window_(residual_window),
+        elapsed_ms_(elapsed_ms) {}
+
+  json::object summary() const override {
+    json::array basis;
+    basis.reserve(basis_handles_.size());
+    for (std::size_t column = 0; column < basis_handles_.size(); ++column)
+      basis.push_back(json::object{{"column", column},
+                                   {"local", basis_handles_[column]},
+                                   {"checkpoint_identity",
+                                    basis_checkpoints_[column]}});
+
+    json::array shifts;
+    for (const auto shift : diagnostics_.initial_column_shifts)
+      shifts.push_back(shift);
+    json::array actions;
+    for (const auto& action : diagnostics_.actions)
+      actions.push_back(json::object{
+          {"leading_rank_before", action.leading_rank_before},
+          {"target_column", action.target_column},
+          {"relation_support", std::count_if(
+               action.null_relation.begin(), action.null_relation.end(),
+               [](const Rational& value) { return !value.is_zero(); })}});
+
+    json::array weight_windows;
+    for (const auto& weight : weights_)
+      weight_windows.push_back(json::object{{"min", weight.min_power()},
+                                            {"max", weight.complete_max()}});
+
+    std::size_t transformation_terms = 0;
+    for (const auto& row : transformation_)
+      for (const auto& entry : row)
+        transformation_terms += entry.terms().size();
+
+    return json::object{
+        {"match", handle_},
+        {"capability", kExactRegularLocalMatchCapability},
+        {"retained_state",
+         "exact-lattice-transformation-and-laurent-weights"},
+        {"native_retained", true},
+        {"json_coefficients", 0},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"dimension", dimension_},
+        {"basis", std::move(basis)},
+        {"incoming", incoming_handle_},
+        {"incoming_checkpoint_identity", incoming_checkpoint_},
+        {"basis_chart", basis_chart_},
+        {"incoming_chart", incoming_chart_},
+        {"basis_point_exact", basis_point_},
+        {"incoming_point_exact", incoming_point_},
+        {"physical_match_point_exact", physical_point_},
+        {"epsilon", json::object{{"min", requested_window_.min_power},
+                                  {"max", requested_window_.complete_max},
+                                  {"required_complete_max",
+                                   required_complete_max_}}},
+        {"weight_windows", std::move(weight_windows)},
+        {"transformation_terms", transformation_terms},
+        {"initial_column_shifts", std::move(shifts)},
+        {"normalized_determinant_valuation",
+         diagnostics_.normalized_determinant_valuation},
+        {"initial_leading_rank", diagnostics_.initial_leading_rank},
+        {"final_leading_rank", diagnostics_.final_leading_rank},
+        {"saturation_actions", std::move(actions)},
+        {"residual", json::object{{"status", "exact-zero"},
+                                   {"scope", "stored-taylor-truncation"},
+                                   {"min", residual_window_.min_power},
+                                   {"max", residual_window_.complete_max}}},
+        {"elapsed_ms", elapsed_ms_}};
+  }
+
+  double elapsed_ms() const { return elapsed_ms_; }
+
+ private:
+  std::string checkpoint_identity_;
+  std::string provenance_identity_;
+  std::vector<std::string> basis_handles_;
+  std::vector<std::string> basis_checkpoints_;
+  std::string incoming_handle_;
+  std::string incoming_checkpoint_;
+  std::string basis_chart_;
+  std::string incoming_chart_;
+  std::string basis_point_;
+  std::string incoming_point_;
+  std::string physical_point_;
+  EpsilonWindow requested_window_;
+  std::int32_t required_complete_max_ = 0;
+  std::uint32_t dimension_ = 0;
+  ExactLaurentMatrix<Rational> transformation_;
+  FiniteLaurentVector<Rational> weights_;
+  EpsilonLatticeSaturationDiagnostics<Rational> diagnostics_;
+  EpsilonWindow residual_window_;
+  double elapsed_ms_ = 0.0;
+};
+
+void require_exact_regular_local(const LocalSolution<Rational>& solution,
+                                 EpsilonWindow requested_window,
+                                 const RealEvaluationPoint& point,
+                                 const std::string& label) {
+  validate_local_solution(solution, false);
+  if (!solution.error.empty())
+    throw std::invalid_argument(
+        label +
+        " carries an error envelope; exact regular local matching does not "
+        "silently discard certificates");
+  if (solution.sectors.size() != 1)
+    throw std::invalid_argument(
+        label + " must contain exactly one regular local sector");
+  const auto& sector = solution.sectors.front();
+  if (sector.a.domain != ExactDomain::Rational ||
+      sector.b.domain != ExactDomain::Rational ||
+      !(Rational(sector.a.canonical) == Rational(0)) ||
+      !(Rational(sector.b.canonical) == Rational(0)) ||
+      sector.log_power != 0)
+    throw std::invalid_argument(
+        label +
+        " is not an exact-rational regular (a=0,b=0,log=0) local");
+  if (requested_window.min_power < solution.epsilon.min_power ||
+      requested_window.complete_max > solution.epsilon.complete_max)
+    throw std::invalid_argument(
+        label + " does not cover the requested complete epsilon window");
+  if (!solution.chart.infinite_radius &&
+      !arb_lt(acb_realref(point.modulus.raw()),
+              acb_realref(solution.chart.radius.raw())))
+    throw std::invalid_argument(
+        label + " match point is not provably inside its chart radius");
+}
+
+bool same_chart_geometry(const ChartGeometry& left,
+                         const ChartGeometry& right) {
+  return left.center_exact == right.center_exact &&
+         left.scale_exact == right.scale_exact &&
+         left.infinite_radius == right.infinite_radius &&
+         (left.infinite_radius || acb_equal(left.radius.raw(), right.radius.raw()));
+}
+
+Rational physical_match_point(const ChartGeometry& chart,
+                              const RealEvaluationPoint& local_point,
+                              const std::string& label) {
+  try {
+    return Rational(chart.center_exact) +
+           Rational(chart.scale_exact) *
+               Rational(local_point.exact_coordinate);
+  } catch (const std::invalid_argument&) {
+    throw std::invalid_argument(
+        label +
+        " requires rational chart center/scale geometry; algebraic geometry "
+        "is outside exact-regular-local-match-v1");
+  }
+}
+
+FiniteLaurentVector<Rational> evaluate_exact_regular_local(
+    const LocalSolution<Rational>& solution,
+    const RealEvaluationPoint& point, EpsilonWindow window) {
+  const Rational t(point.exact_coordinate);
+  std::vector<Rational> t_powers(solution.taylor_width(), Rational(1));
+  for (std::size_t n = 1; n < t_powers.size(); ++n)
+    t_powers[n] = t_powers[n - 1] * t;
+
+  const auto& sector = solution.sectors.front();
+  FiniteLaurentVector<Rational> value;
+  value.reserve(solution.dimension);
+  for (std::uint32_t component = 0; component < solution.dimension;
+       ++component) {
+    std::vector<Rational> coefficients;
+    coefficients.reserve(window.width());
+    for (std::int64_t power = window.min_power;
+         power <= window.complete_max; ++power) {
+      const auto epsilon_index = static_cast<std::size_t>(
+          power - solution.epsilon.min_power);
+      Rational coefficient(0);
+      for (std::size_t n = 0; n < solution.taylor_width(); ++n)
+        coefficient += sector.coefficients[local_detail::sector_index(
+                           solution, epsilon_index, n, component)] *
+                       t_powers[n];
+      coefficients.push_back(std::move(coefficient));
+    }
+    value.emplace_back(window, std::move(coefficients));
+  }
+  return value;
+}
+
+std::shared_ptr<StoredExactRegularMatch> build_exact_regular_match(
+    const std::string& match_handle, const json::object& request,
+    const std::vector<std::string>& basis_handles,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& erased_basis,
+    const std::string& incoming_handle,
+    const std::shared_ptr<StoredLocalBase>& erased_incoming) {
+  const auto started = std::chrono::steady_clock::now();
+  const auto& raw_window = as_object(
+      request.at("epsilon"), "exact regular match epsilon window");
+  EpsilonWindow window{as_i32(raw_window.at("min"), "match epsilon minimum"),
+                       as_i32(raw_window.at("max"), "match epsilon maximum")};
+  (void)window.width();
+  const auto required_complete_max = as_i32(
+      raw_window.at("required_complete_max"),
+      "required match residual complete maximum");
+  if (required_complete_max < window.min_power ||
+      required_complete_max > window.complete_max)
+    throw std::invalid_argument(
+        "required match residual maximum must lie inside the supplied work "
+        "epsilon window");
+
+  const auto basis_point = RealEvaluationPoint::rational(required_string(
+      as_object(request.at("basis_point"), "basis match point"), "exact"));
+  const auto incoming_point = RealEvaluationPoint::rational(required_string(
+      as_object(request.at("incoming_point"), "incoming match point"),
+      "exact"));
+  const auto basis_chart = required_string(request, "basis_chart");
+  const auto incoming_chart = required_string(request, "incoming_chart");
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  if (checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "exact regular match checkpoint identity cannot be empty");
+
+  std::vector<std::shared_ptr<StoredLocal<Rational>>> basis;
+  basis.reserve(erased_basis.size());
+  for (const auto& local : erased_basis) {
+    auto typed = std::dynamic_pointer_cast<StoredLocal<Rational>>(local);
+    if (!typed)
+      throw std::invalid_argument(
+          "exact regular local matching requires rational retained locals");
+    basis.push_back(std::move(typed));
+  }
+  auto incoming =
+      std::dynamic_pointer_cast<StoredLocal<Rational>>(erased_incoming);
+  if (!incoming)
+    throw std::invalid_argument(
+        "exact regular local matching requires a rational incoming local");
+  if (basis.empty())
+    throw std::invalid_argument(
+        "exact regular local matching requires a nonempty basis");
+  const auto dimension = basis.front()->solution().dimension;
+  if (basis.size() != dimension || incoming->solution().dimension != dimension)
+    throw std::invalid_argument(
+        "exact regular local matching requires d basis columns and a "
+        "d-component incoming local");
+
+  const auto& raw_basis_checkpoints = as_array(
+      request.at("basis_checkpoint_identities"),
+      "basis checkpoint identities");
+  if (raw_basis_checkpoints.size() != basis.size())
+    throw std::invalid_argument(
+        "basis checkpoint identity count differs from the basis dimension");
+  std::vector<std::string> basis_checkpoints;
+  basis_checkpoints.reserve(basis.size());
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    if (!raw_basis_checkpoints[column].is_string())
+      throw std::invalid_argument(
+          "basis checkpoint identities must be strings");
+    const std::string expected(raw_basis_checkpoints[column].as_string());
+    if (basis[column]->solution().checkpoint_identity != expected)
+      throw std::invalid_argument(
+          "basis checkpoint provenance mismatch at column " +
+          std::to_string(column));
+    basis_checkpoints.push_back(expected);
+    if (basis[column]->source_chart() != basis_chart)
+      throw std::invalid_argument(
+          "basis chart provenance mismatch at column " +
+          std::to_string(column));
+    if (!same_chart_geometry(basis.front()->solution().chart,
+                             basis[column]->solution().chart))
+      throw std::invalid_argument(
+          "basis locals do not share identical retained chart geometry");
+    require_exact_regular_local(
+        basis[column]->solution(), window, basis_point,
+        "basis local " + basis_handles[column]);
+  }
+  const auto expected_incoming_checkpoint = required_string(
+      request, "incoming_checkpoint_identity");
+  if (incoming->solution().checkpoint_identity !=
+      expected_incoming_checkpoint)
+    throw std::invalid_argument("incoming checkpoint provenance mismatch");
+  if (incoming->source_chart() != incoming_chart)
+    throw std::invalid_argument("incoming chart provenance mismatch");
+  require_exact_regular_local(incoming->solution(), window, incoming_point,
+                              "incoming local " + incoming_handle);
+  const auto basis_physical_point = physical_match_point(
+      basis.front()->solution().chart, basis_point, "basis match point");
+  for (std::size_t column = 1; column < basis.size(); ++column)
+    if (!(physical_match_point(
+              basis[column]->solution().chart, basis_point,
+              "basis match point at column " + std::to_string(column)) ==
+          basis_physical_point))
+      throw std::invalid_argument(
+          "basis locals do not name one exact physical match point");
+  const auto incoming_physical_point = physical_match_point(
+      incoming->solution().chart, incoming_point, "incoming match point");
+  if (!(basis_physical_point == incoming_physical_point))
+    throw std::invalid_argument(
+        "basis and incoming local coordinates do not name the same exact "
+        "physical match point");
+
+  FiniteLaurentMatrix<Rational> evaluated_basis(
+      dimension, FiniteLaurentVector<Rational>());
+  for (auto& row : evaluated_basis) row.reserve(dimension);
+  for (const auto& column : basis) {
+    auto value = evaluate_exact_regular_local(
+        column->solution(), basis_point, window);
+    for (std::uint32_t component = 0; component < dimension; ++component)
+      evaluated_basis[component].push_back(std::move(value[component]));
+  }
+  auto incoming_value = evaluate_exact_regular_local(
+      incoming->solution(), incoming_point, window);
+
+  // Exact zero rows at the lower edge are certified structural zeros.  Trim
+  // them once before both saturation and the final residual so honest
+  // completeness is not lost merely because a caller supplied a wider
+  // declared Laurent minimum than the evaluated entry actually needs.
+  for (std::uint32_t row = 0; row < dimension; ++row) {
+    incoming_value[row] = matching_detail::canonical_leading_frame(
+        incoming_value[row], checkpoint_identity + ":incoming", row);
+    for (std::uint32_t column = 0; column < dimension; ++column)
+      evaluated_basis[row][column] =
+          matching_detail::canonical_leading_frame(
+              evaluated_basis[row][column],
+              checkpoint_identity + ":basis", row, column);
+  }
+
+  auto saturated = saturate_finite_laurent_basis(
+      evaluated_basis, checkpoint_identity + ":saturation");
+  auto saturated_weights = solve_finite_laurent_system(
+      saturated.basis_times_transformation, incoming_value,
+      checkpoint_identity + ":solve");
+  auto weights = apply_exact_laurent_matrix(
+      saturated.transformation, saturated_weights);
+  auto reconstructed = apply_finite_laurent_matrix(
+      evaluated_basis, weights);
+
+  std::int32_t residual_min = reconstructed.front().min_power();
+  std::int32_t residual_max = reconstructed.front().complete_max();
+  for (std::uint32_t component = 0; component < dimension; ++component) {
+    auto residual = reconstructed[component] - incoming_value[component];
+    if (const auto leading = finite_laurent_leading_power(
+            residual, checkpoint_identity + ":residual");
+        leading.has_value())
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::SaturationFailure,
+          checkpoint_identity +
+              ": exact regular match residual is nonzero in its complete "
+              "window",
+          component, std::nullopt, *leading);
+    residual_min = std::min(residual_min, residual.min_power());
+    residual_max = std::min(residual_max, residual.complete_max());
+  }
+  (void)EpsilonWindow{residual_min, residual_max}.width();
+  if (residual_max < required_complete_max)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        checkpoint_identity +
+            ": exact regular matching consumed the required complete "
+            "epsilon window",
+        std::nullopt, std::nullopt, residual_max);
+
+  json::array provenance_basis;
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    json::object entry{{"column", column},
+                       {"local", basis_handles[column]},
+                       {"chart", basis_chart},
+                       {"checkpoint_identity", basis_checkpoints[column]}};
+    if (basis[column]->column_provenance().has_value())
+      entry["column_provenance"] =
+          basis[column]->column_provenance()->encode();
+    provenance_basis.push_back(std::move(entry));
+  }
+  json::object provenance{
+      {"schema", "diffexp2-native-exact-regular-local-match-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"basis", std::move(provenance_basis)},
+      {"incoming", json::object{
+           {"local", incoming_handle}, {"chart", incoming_chart},
+           {"checkpoint_identity", expected_incoming_checkpoint}}},
+      {"basis_point_exact", basis_point.exact_coordinate},
+      {"incoming_point_exact", incoming_point.exact_coordinate},
+      {"physical_match_point_exact", basis_physical_point.str()},
+      {"epsilon", json::object{{"min", window.min_power},
+                                {"max", window.complete_max},
+                                {"required_complete_max",
+                                 required_complete_max}}}};
+  const auto provenance_identity =
+      json::serialize(canonical_json_value(provenance));
+  const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredExactRegularMatch>(
+      match_handle, checkpoint_identity, provenance_identity, basis_handles,
+      std::move(basis_checkpoints), incoming_handle,
+      expected_incoming_checkpoint, basis_chart, incoming_chart,
+      basis_point.exact_coordinate, incoming_point.exact_coordinate,
+      basis_physical_point.str(), window, required_complete_max, dimension,
+      std::move(saturated.transformation), std::move(weights),
+      std::move(saturated.diagnostics),
+      EpsilonWindow{residual_min, residual_max}, elapsed_ms);
+}
+
 template <typename Scalar>
 LocalSolution<Scalar> make_local_solution(
     const RecurrenceProblem<Scalar>& problem,
@@ -2678,19 +3122,25 @@ struct SolverSession {
   std::size_t chart_capacity = 256;
   std::size_t local_capacity = 1024;
   std::size_t scc_capacity = 128;
+  std::size_t match_capacity = 1024;
   std::uint64_t next_chart = 1;
   std::uint64_t next_local = 1;
   std::uint64_t next_scc = 1;
+  std::uint64_t next_match = 1;
   std::size_t pending_local_solves = 0;
+  std::size_t pending_matches = 0;
   std::uint64_t total_local_solves = 0;
   std::uint64_t total_scc_column_solves = 0;
+  std::uint64_t total_local_matches = 0;
   double total_local_run_parse_ms = 0.0;
   double total_local_kernel_ms = 0.0;
+  double total_local_match_ms = 0.0;
   bool closed = false;
   mutable std::mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
   std::unordered_map<std::string, std::string> handles_by_key;
   std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>> locals;
+  std::unordered_map<std::string, std::shared_ptr<StoredMatchBase>> matches;
   std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>> sccs;
   std::unordered_map<std::string, std::string> scc_handles_by_key;
 };
@@ -3369,6 +3819,14 @@ json::object run_session_command(const json::object& root) {
         throw std::invalid_argument("SCC capacity must lie in 1..4096");
       session->scc_capacity = capacity;
     }
+    if (root.if_contains("match_capacity")) {
+      const auto capacity = as_u32(root.at("match_capacity"),
+                                   "local match capacity");
+      if (capacity == 0 || capacity > 16384)
+        throw std::invalid_argument(
+            "local match capacity must lie in 1..16384");
+      session->match_capacity = capacity;
+    }
 
     auto& registry = session_registry();
     {
@@ -3384,7 +3842,12 @@ json::object run_session_command(const json::object& root) {
                         {"precision_bits", session->precision_bits},
                         {"chart_capacity", session->chart_capacity},
                         {"local_capacity", session->local_capacity},
-                        {"scc_capacity", session->scc_capacity}};
+                        {"scc_capacity", session->scc_capacity},
+                        {"match_capacity", session->match_capacity},
+                        {"local_match_capability",
+                         domain == "rational"
+                             ? kExactRegularLocalMatchCapability
+                             : "unsupported"}};
   }
 
   if (operation == "session.close") {
@@ -3399,15 +3862,17 @@ json::object run_session_command(const json::object& root) {
       removed = std::move(found->second);
       registry.sessions.erase(found);
     }
-    std::size_t charts = 0, locals = 0, sccs = 0;
+    std::size_t charts = 0, locals = 0, matches = 0, sccs = 0;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
       removed->closed = true;
-      // In-flight local.solve calls own these reservations and decrement them
-      // on exactly one completion path.  Do not reset pending_local_solves.
+      // In-flight solve/match calls own their reservations and decrement them
+      // on exactly one completion path.  Do not reset pending counters.
       charts = removed->charts.size();
       locals = removed->locals.size();
+      matches = removed->matches.size();
       sccs = removed->sccs.size();
+      removed->matches.clear();
       removed->locals.clear();
       removed->sccs.clear();
       removed->scc_handles_by_key.clear();
@@ -3417,6 +3882,7 @@ json::object run_session_command(const json::object& root) {
     return json::object{{"status", "ok"}, {"closed", handle},
                         {"released_charts", charts},
                         {"released_locals", locals},
+                        {"released_matches", matches},
                         {"released_scc_charts", sccs}};
   }
 
@@ -3931,6 +4397,97 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "local.match") {
+    if (session->domain != "rational")
+      throw std::invalid_argument(
+          "local.match currently supports only the exact rational regular "
+          "local capability; Acb and symbolic saturation are not routed "
+          "through it");
+    const auto& raw_basis = as_array(
+        root.at("basis"), "exact regular local match basis");
+    if (raw_basis.empty())
+      throw std::invalid_argument("local.match basis cannot be empty");
+    std::vector<std::string> basis_handles;
+    basis_handles.reserve(raw_basis.size());
+    std::set<std::string> unique_handles;
+    for (const auto& raw_handle : raw_basis) {
+      if (!raw_handle.is_string())
+        throw std::invalid_argument(
+            "local.match basis handles must be strings");
+      std::string handle(raw_handle.as_string());
+      if (!unique_handles.insert(handle).second)
+        throw std::invalid_argument(
+            "local.match basis handles must be pairwise distinct");
+      basis_handles.push_back(std::move(handle));
+    }
+    const auto incoming_handle = required_string(root, "incoming");
+    if (unique_handles.contains(incoming_handle))
+      throw std::invalid_argument(
+          "local.match incoming handle must be distinct from its basis");
+
+    std::vector<std::shared_ptr<StoredLocalBase>> basis;
+    std::shared_ptr<StoredLocalBase> incoming;
+    std::string match_handle;
+    {
+      // Resolve and strongly retain every local before releasing the session
+      // lock.  A concurrent public local.release cannot invalidate an
+      // already admitted native match operation.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      if (session->matches.size() + session->pending_matches >=
+          session->match_capacity)
+        throw std::invalid_argument(
+            "persistent local match capacity is exhausted");
+      for (const auto& handle : basis_handles) {
+        const auto found = session->locals.find(handle);
+        if (found == session->locals.end())
+          throw std::invalid_argument(
+              "unknown or released native local in match basis: " + handle);
+        basis.push_back(found->second);
+      }
+      const auto found = session->locals.find(incoming_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released incoming native local: " +
+            incoming_handle);
+      incoming = found->second;
+      match_handle = "m:" + std::to_string(session->next_match++);
+      ++session->pending_matches;
+    }
+
+    std::shared_ptr<StoredExactRegularMatch> match;
+    try {
+      match = build_exact_regular_match(
+          match_handle, root, basis_handles, basis, incoming_handle,
+          incoming);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native local match reservation accounting underflow");
+      --session->pending_matches;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native local match reservation accounting underflow");
+      --session->pending_matches;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during local matching");
+      session->matches.emplace(match_handle, match);
+      ++session->total_local_matches;
+      session->total_local_match_ms += match->elapsed_ms();
+    }
+    auto result = match->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
   if (operation == "local.evaluate") {
     const auto local_handle = required_string(root, "local");
     std::shared_ptr<StoredLocalBase> local;
@@ -3976,6 +4533,38 @@ json::object run_session_command(const json::object& root) {
     result["local"] = local->handle();
     result["chart"] = local->source_chart();
     return result;
+  }
+
+  if (operation == "match.stats") {
+    const auto match_handle = required_string(root, "match");
+    std::shared_ptr<StoredMatchBase> match;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->matches.find(match_handle);
+      if (found == session->matches.end())
+        throw std::invalid_argument(
+            "unknown or released native local match");
+      match = found->second;
+    }
+    auto result = match->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "match.release") {
+    const auto match_handle = required_string(root, "match");
+    std::shared_ptr<StoredMatchBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->matches.find(match_handle);
+      if (found == session->matches.end())
+        throw std::invalid_argument(
+            "unknown or already released native local match");
+      removed = std::move(found->second);
+      session->matches.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", match_handle}};
   }
 
   if (operation == "local.release") {
@@ -4061,24 +4650,33 @@ json::object run_session_command(const json::object& root) {
   if (operation == "session.stats") {
     std::vector<std::shared_ptr<PreparedChartBase>> charts;
     std::vector<std::shared_ptr<StoredLocalBase>> locals;
+    std::vector<std::shared_ptr<StoredMatchBase>> matches;
     std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
     std::size_t pending_local_solves = 0;
+    std::size_t pending_matches = 0;
     std::uint64_t total_local_solves = 0;
     std::uint64_t total_scc_column_solves = 0;
+    std::uint64_t total_local_matches = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
+    double total_local_match_ms = 0.0;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
       for (const auto& [ignored, chart] : session->charts)
         charts.push_back(chart);
       for (const auto& [ignored, local] : session->locals)
         locals.push_back(local);
+      for (const auto& [ignored, match] : session->matches)
+        matches.push_back(match);
       for (const auto& [ignored, composite] : session->sccs)
         sccs.push_back(composite);
       pending_local_solves = session->pending_local_solves;
+      pending_matches = session->pending_matches;
       total_local_solves = session->total_local_solves;
       total_scc_column_solves = session->total_scc_column_solves;
+      total_local_matches = session->total_local_matches;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
       total_local_kernel_ms = session->total_local_kernel_ms;
+      total_local_match_ms = session->total_local_match_ms;
     }
     std::uint64_t runs = 0;
     double prepare_parse_ms = 0.0, run_parse_ms = 0.0, kernel_ms = 0.0;
@@ -4124,14 +4722,24 @@ json::object run_session_command(const json::object& root) {
     json::array scc_stats;
     for (const auto& composite : sccs)
       scc_stats.push_back(composite->stats_json());
+    json::array match_stats;
+    for (const auto& match : matches)
+      match_stats.push_back(match->summary());
     return json::object{{"status", "ok"}, {"session", session->handle},
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
                         {"charts", charts.size()}, {"runs", runs},
                         {"locals", locals.size()},
+                        {"matches", matches.size()},
                         {"scc_charts", sccs.size()},
                         {"pending_local_solves", pending_local_solves},
+                        {"pending_matches", pending_matches},
                         {"local_solves", total_local_solves},
+                        {"local_matches", total_local_matches},
+                        {"local_match_capability",
+                         session->domain == "rational"
+                             ? kExactRegularLocalMatchCapability
+                             : "unsupported"},
                         {"scc_column_solves", total_scc_column_solves},
                         {"local_evaluations", local_evaluations},
                         {"local_residual_certifications",
@@ -4146,8 +4754,10 @@ json::object run_session_command(const json::object& root) {
                         {"local_evaluate_ms", local_evaluate_ms},
                         {"local_residual_certify_ms",
                          local_residual_certify_ms},
+                        {"local_match_ms", total_local_match_ms},
                         {"chart_stats", std::move(chart_stats)},
                         {"local_stats", std::move(local_stats)},
+                        {"match_stats", std::move(match_stats)},
                         {"scc_stats", std::move(scc_stats)}};
   }
 
@@ -4302,6 +4912,9 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_scc_regular_block_dag_column",
                                        true},
+                                      {"persistent_exact_regular_local_match",
+                                       true},
+                                      {"persistent_acb_local_match", false},
                                       {"backend", "DiffExp2 C++"},
                                       {"flint", flint_version},
                                       {"librarylink", true}});

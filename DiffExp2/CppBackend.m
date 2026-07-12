@@ -33,6 +33,7 @@ PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] 
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
 RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] is the unplanned low-level endpoint seam. It applies the native sector endpoint gate to a retained local using caller-supplied approach_direction and optional rim, and returns an opaque session-owned endpoint-result handle. Prefer RunPersistentPlannedEndpointLimit for retained transport arms.";
 RunPersistentPlannedEndpointLimit::usage = "RunPersistentPlannedEndpointLimit[plan, arm, local, policy] applies the native endpoint gate to the final retained local of arm \"lower\" or \"upper\". The retained tile plan alone supplies the endpoint, final chart, local approach side, and nullable exact prescription rim; policy contains exactly checkpoint_identity and cancellation. No caller direction/rim or coefficient slab is accepted.";
+RunPersistentWeightedPlannedEndpointLimit::usage = "RunPersistentWeightedPlannedEndpointLimit[plan, arm, local, row, checkpointIdentity, cancellation] first applies one exact prepared rational row to the retained vector local in C++, then applies the plan-bound endpoint gate to that retained scalar projection. Distinct deterministic row/endpoint checkpoint identities are derived from checkpointIdentity. The projected local is never serialized, is released publicly only after the endpoint strongly owns it, and is cleaned up on endpoint failure.";
 PersistentEndpointStatistics::usage = "PersistentEndpointStatistics[handle] returns the opaque endpoint summary, analytic-regularization/branch provenance, and export counters.";
 ExportPersistentEndpoint::usage = "ExportPersistentEndpoint[handle, checkpointIdentity, outputDigits] explicitly exports the retained specialized Acb epsilon vector for final compatibility.";
 ReleasePersistentEndpoint::usage = "ReleasePersistentEndpoint[handle] releases one retained native endpoint result. A second release is a loud native error.";
@@ -1072,6 +1073,73 @@ RunPersistentPlannedEndpointLimit[plan_Association, arm_String,
     "source_checkpoint_identity" -> sourceCheckpoint,
     "checkpoint_identity" -> policy["checkpoint_identity"],
     "cancellation" -> policy["cancellation"]|>]];
+
+RunPersistentWeightedPlannedEndpointLimit[plan_Association, arm_String,
+    local_Association, row_Association, checkpointIdentity_String,
+    cancellation_Association] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   localTokens = persistentLocalHandles[local], rowKeys,
+   rowCheckpoint, endpointCheckpoint, projected = None,
+   endpoint = None, cleanup, released},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[localTokens], Return[localTokens, Module]];
+  rowKeys = {"schema", "columns", "exact_identity", "entries"};
+  If[planTokens["Session"] =!= localTokens["Session"] ||
+      !MemberQ[{"lower", "upper"}, arm] ||
+      StringLength[checkpointIdentity] == 0 ||
+      Sort[Keys[row]] =!= Sort[rowKeys] ||
+      Sort[Keys[cancellation]] =!= {"mode"} ||
+      !MemberQ[{"exact-coefficient-field", "exact-or-acb-singleton"},
+        Lookup[cancellation, "mode", None]],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "weighted plan-bound endpoint evaluation requires one session, arm lower/upper, a nonempty checkpoint root, an exact prepared rational row, and one supported exact cancellation mode"|>], Module]];
+  rowCheckpoint = checkpointIdentity <> ":weighted-row";
+  endpointCheckpoint = checkpointIdentity <> ":weighted-endpoint";
+  cleanup[] := Module[{result},
+    If[!AssociationQ[projected], Return[Null, Module]];
+    result = Quiet[ReleasePersistentLocal[projected]];
+    projected = None;
+    result];
+  projected = ApplyPersistentRationalRow[
+    local, row, rowCheckpoint];
+  If[!persistentCommandOKQ[projected], Return[projected, Module]];
+  If[Lookup[projected, "json_coefficients", None] =!= 0 ||
+      FailureQ[persistentLocalHandles[projected]],
+    cleanup[];
+    Return[Failure["CppBackend", <|"Detail" ->
+      "weighted endpoint projection violated its opaque retained-local contract"|>], Module]];
+  endpoint = RunPersistentPlannedEndpointLimit[
+    plan, arm, projected, <|
+      "checkpoint_identity" -> endpointCheckpoint,
+      "cancellation" -> cancellation|>];
+  If[!persistentCommandOKQ[endpoint],
+    released = cleanup[];
+    If[AssociationQ[released] && !persistentCommandOKQ[released],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "weighted endpoint failure also failed to release its projected scalar local",
+        "BackendFailure" -> endpoint,
+        "CleanupFailure" -> released|>], Module]];
+    Return[endpoint, Module]];
+  If[Lookup[endpoint, "json_coefficients", None] =!= 0 ||
+      FailureQ[persistentEndpointHandles[endpoint]],
+    Quiet[ReleasePersistentEndpoint[endpoint]];
+    cleanup[];
+    Return[Failure["CppBackend", <|"Detail" ->
+      "weighted endpoint gate violated its opaque retained-result contract"|>], Module]];
+  released = cleanup[];
+  If[!AssociationQ[released] || !persistentCommandOKQ[released],
+    Quiet[ReleasePersistentEndpoint[endpoint]];
+    Return[Failure["CppBackend", <|"Detail" ->
+      "weighted endpoint was created but its projected scalar public token could not be released",
+      "CleanupFailure" -> released|>], Module]];
+  Join[endpoint, <|"weighted_composition" -> <|
+    "capability" ->
+      "retained-native-weighted-plan-bound-endpoint-v1",
+    "order" -> "rational-row-before-endpoint-gate",
+    "coefficient_transport" -> "native-retained-only",
+    "row_checkpoint_identity" -> rowCheckpoint,
+    "endpoint_checkpoint_identity" -> endpointCheckpoint,
+    "projected_local_public_token_released" -> True|>|>]];
 
 CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
     checkpointIdentity_String, divisionOrder_:3] := Module[

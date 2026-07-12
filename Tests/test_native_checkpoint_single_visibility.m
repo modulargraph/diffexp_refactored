@@ -67,10 +67,16 @@ assert["integration-only visibility restores and exports without replay",
     TrueQ[Abs[N[DiffExp2`EpsSeries`ESCoefficient[value, 0] - 1/2,
       25]] < 10^-20]];
 
-If[AssociationQ[exported],
-  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[exported]];
-If[AssociationQ[run],
-  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[run]];
+restoredRelease = If[AssociationQ[exported], Quiet[Check[
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[exported],
+  $Failed]], exported];
+liveRelease = If[AssociationQ[run], Quiet[Check[
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[run],
+  $Failed]], run];
+assert["closing sessions with an empty chart cache is warning-free",
+  AssociationQ[restoredRelease] && AssociationQ[liveRelease] &&
+    Lookup[restoredRelease, "Failures", {None}] === {} &&
+    Lookup[liveRelease, "Failures", {None}] === {}];
 If[FileExistsQ[checkpointPath], DeleteFile[checkpointPath]];
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];

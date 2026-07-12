@@ -417,7 +417,8 @@ persistentForgetSessionHandle[handle_String] := Module[
   KeyDropFrom[$persistentChartCache, chartKeys];
   KeyDropFrom[$persistentSCCCache, sccKeys];
   activeTokens = DeleteDuplicates@Select[
-    Lookup[Values[$persistentChartCache], "PreparedToken", None], StringQ];
+    Map[Lookup[#, "PreparedToken", None] &,
+      Values[$persistentChartCache]], StringQ];
   $persistentPreparedTokenCache = KeyTake[
     $persistentPreparedTokenCache, activeTokens];
   Null];

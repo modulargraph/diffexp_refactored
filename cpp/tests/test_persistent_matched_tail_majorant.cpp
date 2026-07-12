@@ -1,11 +1,15 @@
+#include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
 
 #include <boost/json.hpp>
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+
+#include <unistd.h>
 
 namespace json = boost::json;
 
@@ -220,6 +224,49 @@ json::object integrate(const std::string& session,
       {"checkpoint_identity", result_checkpoint}, {"certify_tail", true}});
 }
 
+const json::object& retained_local_record(const json::object& payload,
+                                          const std::string& handle) {
+  for (const auto& raw : payload.at("retained_locals").as_array()) {
+    const auto& item = raw.as_object();
+    if (std::string(item.at("handle").as_string()) == handle)
+      return item;
+  }
+  throw std::runtime_error("checkpoint omitted retained local " + handle);
+}
+
+json::object& retained_local_record(json::object& payload,
+                                    const std::string& handle) {
+  for (auto& raw : payload.at("retained_locals").as_array()) {
+    auto& item = raw.as_object();
+    if (std::string(item.at("handle").as_string()) == handle)
+      return item;
+  }
+  throw std::runtime_error("checkpoint omitted retained local " + handle);
+}
+
+json::object checkpoint_payload(const std::string& path) {
+  return json::parse(diffexp2::checkpoint::read(path).payload_json)
+      .as_object();
+}
+
+void write_corrupt_tail_checkpoint(const std::string& source_path,
+                                   const std::string& corrupt_path,
+                                   const std::string& local_handle) {
+  const auto container = diffexp2::checkpoint::read(source_path);
+  auto header = json::parse(container.header_json).as_object();
+  auto payload = json::parse(container.payload_json).as_object();
+  auto& tail = retained_local_record(payload, local_handle)
+      .at("tail_model_restore").as_object();
+  auto& model = tail.at("model").as_object();
+  auto& n_coefficients = model.at("n_coefficients").as_array();
+  auto& n_norms = model.at("n_row_sum_upper_exact").as_array();
+  n_coefficients.at(1).as_array().front() =
+      n_coefficients.front().as_array().front();
+  n_norms.at(1) = n_norms.front();
+  diffexp2::checkpoint::write_atomic(
+      corrupt_path, json::serialize(header), json::serialize(payload));
+}
+
 bool certified_domain(const std::string& domain, bool incompatible_case) {
   json::object create{{"schema", 2}, {"op", "session.create"},
                       {"domain", domain}, {"output_digits", 40},
@@ -238,6 +285,7 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
       session, anchor, "0", domain + "-incoming-v1");
   const auto basis = solve_local(
       session, receiver, "2/3", domain + "-basis-v1");
+  const auto basis_handle = std::string(basis.at("local").as_string());
   const auto planned = request(json::object{
       {"schema", 2}, {"op", "tile.plan"}, {"session", session},
       {"checkpoint_identity", "matched-tail-plan-v1"},
@@ -246,7 +294,7 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
   const auto plan = std::string(planned.at("tile_plan").as_string());
   const auto hop = advance(
       domain, session, plan,
-      std::string(basis.at("local").as_string()),
+      basis_handle,
       std::string(incoming.at("local").as_string()),
       domain + "-matched-hop-v1");
   const auto matched = materialize(
@@ -254,15 +302,20 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
       domain + "-matched-local-v1");
   const auto matched_handle = std::string(matched.at("local").as_string());
   const auto evaluated = evaluate(session, matched_handle);
+  const auto direct_evaluated = evaluate(session, basis_handle);
   const auto line = integrate(
       session, plan, matched_handle, domain + "-matched-local-v1",
       domain + "-matched-line-v1");
+  const auto direct_line = integrate(
+      session, plan, basis_handle, domain + "-basis-v1",
+      domain + "-direct-line-v1");
 
   const auto& tail = matched.at("tail_majorant").as_object();
   const auto& evaluation_tail = evaluated.at("tail_certificate").as_object();
   const auto& line_diagnostics = line.at("diagnostics").as_object();
   bool ok = tail.at("status") == "certified" &&
       tail.at("attached") == true &&
+      tail.at("checkpoint_serialized") == true &&
       std::string(tail.at("operator_identity").as_string()) ==
           domain + "-receiver-operator-v1" &&
       std::string(tail.at("local_checkpoint_identity").as_string()) ==
@@ -274,11 +327,19 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
           "guarantee") == "certified" &&
       line.at("scope") == "full_local_with_certified_tail" &&
       line.at("error").as_object().at("guarantee") == "certified" &&
-      line_diagnostics.at("tail_certificate_status") == "certified";
+      line_diagnostics.at("tail_certificate_status") == "certified" &&
+      basis.at("tail_majorant").as_object().at("status") == "certified" &&
+      basis.at("tail_majorant").as_object().at("checkpoint_serialized") ==
+          true &&
+      direct_evaluated.at("tail_certificate").as_object().at("status") ==
+          "certified" &&
+      direct_line.at("scope") == "full_local_with_certified_tail" &&
+      direct_line.at("error").as_object().at("guarantee") == "certified";
 
   json::object incompatible;
   json::object incompatible_evaluation;
   json::object incompatible_line;
+  std::string incompatible_handle;
   if (incompatible_case) {
     const auto sourced_basis = solve_local(
         session, receiver, "2/3", "sourced-basis-v1", true);
@@ -290,8 +351,7 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
     incompatible = materialize(
         session, std::string(sourced_hop.at("match").as_string()),
         "sourced-matched-local-v1");
-    const auto incompatible_handle =
-        std::string(incompatible.at("local").as_string());
+    incompatible_handle = std::string(incompatible.at("local").as_string());
     incompatible_evaluation = evaluate(session, incompatible_handle);
     incompatible_line = integrate(
         session, plan, incompatible_handle, "sourced-matched-local-v1",
@@ -312,6 +372,103 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
             "tail_certificate_status") == "unsupported";
   }
 
+  const auto release_line = [&](const json::object& result) {
+    if (result.if_contains("line") == nullptr) return;
+    (void)request(json::object{
+        {"schema", 2}, {"op", "integration.release"},
+        {"session", session}, {"line", result.at("line")}});
+  };
+  release_line(line);
+  release_line(direct_line);
+  release_line(incompatible_line);
+  const auto base = std::filesystem::temp_directory_path() /
+      ("diffexp2-matched-tail-checkpoint-" + domain + "-" +
+       std::to_string(::getpid()));
+  const auto path = base.string() + ".de2cp";
+  const auto corrupt_path = base.string() + "-corrupt.de2cp";
+  const auto resaved_path = base.string() + "-resaved.de2cp";
+  const auto checkpoint_identity = domain + "-tail-checkpoint-v1";
+  const auto saved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+      {"path", path}, {"checkpoint_identity", checkpoint_identity}});
+  const auto saved_payload = checkpoint_payload(path);
+  const auto& saved_direct_tail = retained_local_record(
+      saved_payload, basis_handle).at("tail_model_restore").as_object();
+  const auto& saved_matched_tail = retained_local_record(
+      saved_payload, matched_handle).at("tail_model_restore").as_object();
+  write_corrupt_tail_checkpoint(path, corrupt_path, matched_handle);
+  (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                             {"session", session}});
+  const auto corruption = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", corrupt_path}, {"expected_identity", checkpoint_identity}});
+  const auto restored = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"}, {"path", path},
+      {"expected_identity", checkpoint_identity}});
+  const auto restored_session =
+      std::string(restored.at("session").as_string());
+  const auto resaved = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.save"},
+      {"session", restored_session}, {"path", resaved_path},
+      {"checkpoint_identity", domain + "-tail-resaved-v1"}});
+  const auto resaved_payload = checkpoint_payload(resaved_path);
+  const auto restored_direct_evaluated = evaluate(
+      restored_session, basis_handle);
+  const auto restored_matched_evaluated = evaluate(
+      restored_session, matched_handle);
+  const auto restored_direct_line = integrate(
+      restored_session, plan, basis_handle, domain + "-basis-v1",
+      domain + "-restored-direct-line-v1");
+  const auto restored_matched_line = integrate(
+      restored_session, plan, matched_handle,
+      domain + "-matched-local-v1",
+      domain + "-restored-matched-line-v1");
+  json::object restored_incompatible;
+  if (incompatible_case)
+    restored_incompatible = evaluate(
+        restored_session, incompatible_handle);
+
+  ok = ok && saved.at("status") == "ok" &&
+      saved_direct_tail.at("serialized") == true &&
+      saved_direct_tail.at("status") == "certified" &&
+      saved_direct_tail.at("attached_before_save") == true &&
+      saved_direct_tail.if_contains("model") != nullptr &&
+      saved_matched_tail.at("serialized") == true &&
+      saved_matched_tail.at("status") == "certified" &&
+      saved_matched_tail.at("attached_before_save") == true &&
+      saved_matched_tail.if_contains("model") != nullptr &&
+      corruption.at("status") == "error" &&
+      std::string(corruption.at("detail").as_string()).find(
+          "q/N payload") != std::string::npos &&
+      restored.at("status") == "ok" &&
+      resaved.at("status") == "ok" &&
+      retained_local_record(saved_payload, basis_handle) ==
+          retained_local_record(resaved_payload, basis_handle) &&
+      retained_local_record(saved_payload, matched_handle) ==
+          retained_local_record(resaved_payload, matched_handle) &&
+      restored_direct_evaluated.at("tail_certificate").as_object().at(
+          "status") == "certified" &&
+      restored_matched_evaluated.at("tail_certificate").as_object().at(
+          "status") == "certified" &&
+      restored_direct_line.at("scope") ==
+          "full_local_with_certified_tail" &&
+      restored_direct_line.at("error").as_object().at("guarantee") ==
+          "certified" &&
+      restored_matched_line.at("scope") ==
+          "full_local_with_certified_tail" &&
+      restored_matched_line.at("error").as_object().at("guarantee") ==
+          "certified";
+  if (incompatible_case) {
+    const auto& marker = retained_local_record(
+        saved_payload, incompatible_handle).at(
+            "tail_model_restore").as_object();
+    ok = ok && marker.at("serialized") == false &&
+        marker.at("status") == "unsupported" &&
+        marker.if_contains("model") == nullptr &&
+        restored_incompatible.at("tail_certificate").as_object().at(
+            "status") == "unsupported";
+  }
+
   if (!ok) {
     std::cerr << domain << " matched: " << json::serialize(matched) << '\n'
               << domain << " evaluate: " << json::serialize(evaluated)
@@ -323,9 +480,26 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
                 << json::serialize(incompatible_evaluation) << '\n'
                 << "incompatible line: "
                 << json::serialize(incompatible_line) << '\n';
+    std::cerr << domain << " saved: " << json::serialize(saved) << '\n'
+              << domain << " corruption: " << json::serialize(corruption)
+              << '\n' << domain << " restored: "
+              << json::serialize(restored) << '\n'
+              << domain << " resaved: " << json::serialize(resaved) << '\n'
+              << domain << " restored direct evaluate: "
+              << json::serialize(restored_direct_evaluated) << '\n'
+              << domain << " restored matched evaluate: "
+              << json::serialize(restored_matched_evaluated) << '\n'
+              << domain << " restored direct line: "
+              << json::serialize(restored_direct_line) << '\n'
+              << domain << " restored matched line: "
+              << json::serialize(restored_matched_line) << '\n';
   }
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
-                             {"session", session}});
+                             {"session", restored_session}});
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  std::filesystem::remove(corrupt_path, ignored);
+  std::filesystem::remove(resaved_path, ignored);
   return ok;
 }
 

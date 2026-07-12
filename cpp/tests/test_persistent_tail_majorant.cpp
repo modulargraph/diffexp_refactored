@@ -240,7 +240,7 @@ bool run_rational_protocol() {
       eligible.at("tail_majorant").as_object().at(
           "local_checkpoint_identity") == "tail-local-v1" &&
       eligible.at("tail_majorant").as_object().at(
-          "checkpoint_serialized") == false &&
+          "checkpoint_serialized") == true &&
       unsupported.at("tail_majorant").as_object().at("status") ==
           "unsupported" &&
       evaluated.at("tail_certificate").as_object().at("status") ==

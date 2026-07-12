@@ -277,11 +277,16 @@ rejects a nonempty input error envelope, incomplete epsilon halo,
 nonintegrable unseen center monomial, and merely-small Acb cancellation.
 Coefficients cross JSON only through `integration.export`.
 
-Tail-model checkpoint serialization is deliberately not part of schema v2.
-Local summaries expose `checkpoint_serialized:false`; a restored local reports
-the model unavailable and must be re-solved before certified-tail promotion.
-This is explicit non-promotion, never reconstruction from presentation
-digits or fallback to the advisory last-column estimate.
+Schema-2 checkpoints serialize attached certified regular-tail models for
+eligible primitive and match-materialized Rational/Acb locals.  The complete
+`q/N` ball payload, epsilon/Taylor windows, exact magnitude dumps, chart and
+prescriptions, identities, and provenance are retained without presentation
+decimals.  Restore recomputes the matrix/initial magnitudes, checks the local
+and operator binding, and requires a zero-enclosing recurrence residual at
+every retained Taylor coefficient before reattaching certification.
+Unsupported/inconclusive states and older marker-only records remain explicit
+non-promotion markers; they are not reconstructed into models.  SCC,
+singular, sourced, and rational-row locals remain outside this certificate.
 Successful results strongly own their local and plan snapshots, so releasing
 the public source handles does not invalidate inspection or export.
 

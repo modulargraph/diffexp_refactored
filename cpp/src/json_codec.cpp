@@ -1255,7 +1255,7 @@ json::object encode_tail_model_status(
       {"status", tail_majorant_status_name(result.status)},
       {"attached", result.model.has_value()},
       {"detail", result.detail},
-      {"checkpoint_serialized", false}};
+      {"checkpoint_serialized", result.model.has_value()}};
   if (result.model.has_value()) {
     encoded["operator_identity"] = result.model->operator_identity;
     encoded["local_checkpoint_identity"] =
@@ -1450,6 +1450,18 @@ ComplexBall parse_checkpoint_ball(const json::value& raw,
   return checkpoint::load_complex_ball_exact(
       {required_string(object, "real"),
        required_string(object, "imaginary")});
+}
+
+Magnitude parse_checkpoint_magnitude(const json::value& raw,
+                                     const char* label) {
+  if (!raw.is_string())
+    throw std::invalid_argument(std::string(label) +
+                                " must be an exact dump string");
+  auto result = Magnitude::from_exact_dump(std::string(raw.as_string()));
+  if (!result.is_finite())
+    throw std::invalid_argument(std::string(label) +
+                                " must be finite");
+  return result;
 }
 
 template <typename Scalar>
@@ -1961,6 +1973,161 @@ json::object checkpoint_local_solution_record(
       {"prescriptions", std::move(prescriptions)},
       {"error", checkpoint_error_envelope_record(solution.error)},
       {"checkpoint_identity", solution.checkpoint_identity}};
+}
+
+json::object checkpoint_regular_tail_model_record(
+    const RegularTaylorTailModel& model) {
+  json::array q_coefficients;
+  q_coefficients.reserve(model.q_coefficients.size());
+  for (const auto& coefficient : model.q_coefficients)
+    q_coefficients.push_back(checkpoint_ball_record(coefficient));
+  json::array n_coefficients;
+  n_coefficients.reserve(model.n_coefficients.size());
+  for (const auto& matrix : model.n_coefficients) {
+    json::array encoded_matrix;
+    encoded_matrix.reserve(matrix.size());
+    for (const auto& coefficient : matrix)
+      encoded_matrix.push_back(checkpoint_ball_record(coefficient));
+    n_coefficients.push_back(std::move(encoded_matrix));
+  }
+  json::array n_row_sum_upper;
+  n_row_sum_upper.reserve(model.n_row_sum_upper.size());
+  for (const auto& magnitude : model.n_row_sum_upper)
+    n_row_sum_upper.emplace_back(magnitude.dump_exact());
+  json::array initial_row_upper;
+  initial_row_upper.reserve(model.initial_row_upper.size());
+  for (const auto& magnitude : model.initial_row_upper)
+    initial_row_upper.emplace_back(magnitude.dump_exact());
+  json::array prescriptions;
+  prescriptions.reserve(model.prescriptions.size());
+  for (const auto& prescription : model.prescriptions)
+    prescriptions.push_back(json::object{
+        {"factor_exact", prescription.factor_exact},
+        {"sign", prescription.sign},
+        {"multiplicity", prescription.multiplicity},
+        {"leading_coefficient_sign",
+         prescription.leading_coefficient_sign}});
+  return json::object{
+      {"schema", "diffexp2-regular-taylor-tail-model-v1"},
+      {"epsilon", json::object{{"min", model.epsilon.min_power},
+                                {"max", model.epsilon.complete_max}}},
+      {"dimension", model.dimension},
+      {"taylor_complete_max", model.taylor_complete_max},
+      {"q_coefficients", std::move(q_coefficients)},
+      {"n_coefficients", std::move(n_coefficients)},
+      {"n_row_sum_upper_exact", std::move(n_row_sum_upper)},
+      {"initial_row_upper_exact", std::move(initial_row_upper)},
+      {"chart", json::object{
+           {"center_exact", model.chart.center_exact},
+           {"scale_exact", model.chart.scale_exact},
+           {"radius_exact_ball", checkpoint_ball_record(model.chart.radius)},
+           {"infinite_radius", model.chart.infinite_radius}}},
+      {"prescriptions", std::move(prescriptions)},
+      {"operator_identity", model.operator_identity},
+      {"local_checkpoint_identity", model.local_checkpoint_identity},
+      {"provenance", model.provenance}};
+}
+
+RegularTaylorTailModel parse_checkpoint_regular_tail_model(
+    const json::value& raw) {
+  const auto& object = as_object(raw, "checkpoint regular tail model");
+  require_exact_keys(
+      object,
+      {"schema", "epsilon", "dimension", "taylor_complete_max",
+       "q_coefficients", "n_coefficients", "n_row_sum_upper_exact",
+       "initial_row_upper_exact", "chart", "prescriptions",
+       "operator_identity", "local_checkpoint_identity", "provenance"},
+      "checkpoint regular tail model");
+  if (required_string(object, "schema") !=
+      "diffexp2-regular-taylor-tail-model-v1")
+    throw std::invalid_argument(
+        "unsupported checkpoint regular tail-model schema");
+  RegularTaylorTailModel model;
+  const auto& epsilon = as_object(
+      object.at("epsilon"), "checkpoint tail epsilon window");
+  require_exact_keys(epsilon, {"min", "max"},
+                     "checkpoint tail epsilon window");
+  model.epsilon = {
+      as_i32(epsilon.at("min"), "checkpoint tail epsilon minimum"),
+      as_i32(epsilon.at("max"), "checkpoint tail epsilon maximum")};
+  (void)model.epsilon.width();
+  model.dimension = as_u32(
+      object.at("dimension"), "checkpoint tail dimension");
+  if (model.dimension == 0)
+    throw std::invalid_argument("checkpoint tail dimension is zero");
+  model.taylor_complete_max = as_u32(
+      object.at("taylor_complete_max"),
+      "checkpoint tail Taylor complete maximum");
+  for (const auto& coefficient : as_array(
+           object.at("q_coefficients"),
+           "checkpoint tail q coefficients"))
+    model.q_coefficients.push_back(parse_checkpoint_ball(
+        coefficient, "checkpoint tail q coefficient"));
+  for (const auto& raw_matrix : as_array(
+           object.at("n_coefficients"),
+           "checkpoint tail N coefficients")) {
+    std::vector<ComplexBall> matrix;
+    for (const auto& coefficient : as_array(
+             raw_matrix, "checkpoint tail N matrix"))
+      matrix.push_back(parse_checkpoint_ball(
+          coefficient, "checkpoint tail N coefficient"));
+    model.n_coefficients.push_back(std::move(matrix));
+  }
+  for (const auto& magnitude : as_array(
+           object.at("n_row_sum_upper_exact"),
+           "checkpoint tail N norms"))
+    model.n_row_sum_upper.push_back(parse_checkpoint_magnitude(
+        magnitude, "checkpoint tail N norm"));
+  for (const auto& magnitude : as_array(
+           object.at("initial_row_upper_exact"),
+           "checkpoint tail initial magnitudes"))
+    model.initial_row_upper.push_back(parse_checkpoint_magnitude(
+        magnitude, "checkpoint tail initial magnitude"));
+  const auto& chart = as_object(
+      object.at("chart"), "checkpoint tail chart");
+  require_exact_keys(
+      chart,
+      {"center_exact", "scale_exact", "radius_exact_ball",
+       "infinite_radius"},
+      "checkpoint tail chart");
+  model.chart.center_exact = required_string(chart, "center_exact");
+  model.chart.scale_exact = required_string(chart, "scale_exact");
+  model.chart.radius = parse_checkpoint_ball(
+      chart.at("radius_exact_ball"), "checkpoint tail chart radius");
+  if (!chart.at("infinite_radius").is_bool())
+    throw std::invalid_argument(
+        "checkpoint tail infinite-radius flag must be Boolean");
+  model.chart.infinite_radius = chart.at("infinite_radius").as_bool();
+  for (const auto& raw_prescription : as_array(
+           object.at("prescriptions"), "checkpoint tail prescriptions")) {
+    const auto& prescription = as_object(
+        raw_prescription, "checkpoint tail prescription");
+    require_exact_keys(
+        prescription,
+        {"factor_exact", "sign", "multiplicity",
+         "leading_coefficient_sign"},
+        "checkpoint tail prescription");
+    const auto sign = as_i32(
+        prescription.at("sign"), "checkpoint tail prescription sign");
+    const auto multiplicity = as_u32(
+        prescription.at("multiplicity"),
+        "checkpoint tail prescription multiplicity");
+    const auto leading = as_i32(
+        prescription.at("leading_coefficient_sign"),
+        "checkpoint tail leading-coefficient sign");
+    if ((sign != -1 && sign != 1) || multiplicity == 0 ||
+        (leading != -1 && leading != 1))
+      throw std::invalid_argument(
+          "checkpoint tail prescription is malformed");
+    model.prescriptions.push_back(Prescription{
+        required_string(prescription, "factor_exact"), sign,
+        multiplicity, leading});
+  }
+  model.operator_identity = required_string(object, "operator_identity");
+  model.local_checkpoint_identity = required_string(
+      object, "local_checkpoint_identity");
+  model.provenance = required_string(object, "provenance");
+  return model;
 }
 
 template <typename Scalar>
@@ -2549,6 +2716,8 @@ class StoredLocal final : public StoredLocalBase {
       throw std::domain_error(
           "checkpoint schema v2 does not serialize symbolic-coefficient local state");
     } else {
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
       const auto current = stats();
       if (retained_derivation_.has_value()) {
         const auto schema = required_string(
@@ -2627,16 +2796,33 @@ class StoredLocal final : public StoredLocalBase {
             ? json::value(*retained_derivation_) : json::value(nullptr);
         record["retained_owner_lineage"] = std::move(owner_lineage);
       }
-      if (serialize_tail_checkpoint_fields_)
-        record["tail_model_restore"] = json::object{
-             {"capability", kRegularTailMajorantCapability},
-             {"serialized", false},
-             {"status", tail_checkpoint_marker_.has_value()
-                  ? tail_checkpoint_marker_->saved_status
-                  : tail_majorant_status_name(tail_model_.status)},
-             {"attached_before_save", tail_checkpoint_marker_.has_value()
-                  ? tail_checkpoint_marker_->attached_before_save
-                  : tail_model_.model.has_value()}};
+      if (serialize_tail_checkpoint_fields_) {
+        if (tail_model_.model.has_value()) {
+          if (tail_model_.status != TailMajorantStatus::Certified ||
+              tail_checkpoint_marker_.has_value())
+            throw std::logic_error(
+                "attached regular tail model has inconsistent checkpoint status");
+          tail_majorant_detail::validate_restored_regular_taylor_tail_model(
+              *tail_model_.model, solution_, source_operator_identity_);
+          record["tail_model_restore"] = json::object{
+              {"capability", kRegularTailMajorantCapability},
+              {"serialized", true},
+              {"status", "certified"},
+              {"attached_before_save", true},
+              {"model", checkpoint_regular_tail_model_record(
+                   *tail_model_.model)}};
+        } else {
+          record["tail_model_restore"] = json::object{
+              {"capability", kRegularTailMajorantCapability},
+              {"serialized", false},
+              {"status", tail_checkpoint_marker_.has_value()
+                   ? tail_checkpoint_marker_->saved_status
+                   : tail_majorant_status_name(tail_model_.status)},
+              {"attached_before_save", tail_checkpoint_marker_.has_value()
+                   ? tail_checkpoint_marker_->attached_before_save
+                   : false}};
+        }
+      }
       return record;
     }
   }
@@ -4849,6 +5035,8 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     const json::value& raw, const std::string& expected_domain,
     slong expected_precision_bits,
     std::shared_ptr<void> retained_owner = nullptr) {
+  AcbPrecisionLease lease(expected_precision_bits);
+  ComplexBall::set_precision(expected_precision_bits);
   const auto& object = as_object(raw, "checkpoint retained local");
   const bool has_tail_restore =
       object.if_contains("tail_model_restore") != nullptr;
@@ -5201,25 +5389,56 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
         object.at("column_provenance"));
   std::string saved_tail_status = "unrecorded";
   bool saved_tail_attached = false;
+  RegularTaylorTailModelResult restored_tail_model = unavailable_tail_model(
+      "checkpoint has no serialized regular tail model");
+  std::optional<TailModelCheckpointMarker> tail_checkpoint_marker;
   if (has_tail_restore) {
     const auto& tail = as_object(
         object.at("tail_model_restore"),
         "checkpoint tail-model restore marker");
-    require_exact_keys(tail,
-        {"capability", "serialized", "status", "attached_before_save"},
-        "checkpoint tail-model restore marker");
-    if (required_string(tail, "capability") !=
-            kRegularTailMajorantCapability ||
-        tail.at("serialized").as_bool())
+    const auto* raw_serialized = tail.if_contains("serialized");
+    const auto* raw_attached = tail.if_contains("attached_before_save");
+    if (raw_serialized == nullptr || !raw_serialized->is_bool() ||
+        raw_attached == nullptr || !raw_attached->is_bool() ||
+        required_string(tail, "capability") !=
+            kRegularTailMajorantCapability)
       throw std::invalid_argument(
           "checkpoint tail-model restore marker is incompatible");
-    saved_tail_attached = tail.at("attached_before_save").as_bool();
+    const auto serialized = raw_serialized->as_bool();
+    saved_tail_attached = raw_attached->as_bool();
     saved_tail_status = required_string(tail, "status");
     if (saved_tail_status != "certified" &&
         saved_tail_status != "inconclusive" &&
         saved_tail_status != "unsupported")
       throw std::invalid_argument(
           "checkpoint tail-model restore marker has an unknown status");
+    if (serialized) {
+      require_exact_keys(
+          tail,
+          {"capability", "serialized", "status", "attached_before_save",
+           "model"},
+          "checkpoint serialized tail model");
+      if (saved_tail_status != "certified" || !saved_tail_attached)
+        throw std::invalid_argument(
+            "serialized checkpoint tail model is not attached/certified");
+      auto model = parse_checkpoint_regular_tail_model(tail.at("model"));
+      tail_majorant_detail::validate_restored_regular_taylor_tail_model(
+          model, solution, source_operator_identity);
+      restored_tail_model = {
+          TailMajorantStatus::Certified, std::move(model),
+          "certified regular tail model restored from exact checkpoint state"};
+    } else {
+      require_exact_keys(
+          tail,
+          {"capability", "serialized", "status", "attached_before_save"},
+          "checkpoint tail-model restore marker");
+      restored_tail_model = unavailable_tail_model(
+          "checkpoint does not serialize this regular tail-model state; "
+          "saved model status was " + saved_tail_status +
+          "; re-solve the retained local to reattach certification state");
+      tail_checkpoint_marker = TailModelCheckpointMarker{
+          saved_tail_status, saved_tail_attached};
+    }
   }
 
   const auto& stats = as_object(object.at("runtime_stats"),
@@ -5288,15 +5507,7 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       expected_precision_bits,
       std::move(pseudo_hits), native, std::move(column_provenance),
       std::move(retained_derivation), std::move(retained_owner),
-      unavailable_tail_model(
-          "checkpoint schema v2 does not serialize regular tail models; "
-          "saved model status was " + saved_tail_status +
-          "; re-solve the retained local to reattach certification state"),
-      has_tail_restore
-          ? std::optional<TailModelCheckpointMarker>(
-                TailModelCheckpointMarker{saved_tail_status,
-                                          saved_tail_attached})
-          : std::nullopt,
+      std::move(restored_tail_model), std::move(tail_checkpoint_marker),
       has_tail_restore, has_derivation_record);
   local->restore_runtime_stats(restored_stats);
   return local;
@@ -5313,18 +5524,6 @@ AcbMatchingResidualVerdict parse_checkpoint_acb_match_verdict(
     return AcbMatchingResidualVerdict::Inconclusive;
   throw std::invalid_argument(std::string(label) +
                               " has an unsupported verdict");
-}
-
-Magnitude parse_checkpoint_magnitude(const json::value& raw,
-                                     const char* label) {
-  if (!raw.is_string())
-    throw std::invalid_argument(std::string(label) +
-                                " must be an exact dump string");
-  auto result = Magnitude::from_exact_dump(std::string(raw.as_string()));
-  if (!result.is_finite())
-    throw std::invalid_argument(std::string(label) +
-                                " must be finite");
-  return result;
 }
 
 AcbMatchingResidualDiagnostics parse_checkpoint_acb_match_residual(

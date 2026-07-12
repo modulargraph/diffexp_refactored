@@ -277,6 +277,125 @@ inline void require_model_binding(const RegularTaylorTailModel& model,
         "tail-majorant model is not bound to this retained local solution");
 }
 
+template <typename Scalar>
+void validate_restored_regular_taylor_tail_model(
+    const RegularTaylorTailModel& model,
+    const LocalSolution<Scalar>& solution,
+    const std::string& expected_operator_identity) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "restored regular tail models support Rational or Acb "
+                "locals only");
+  validate_local_solution(solution, false);
+  require_model_binding(model, solution);
+  if (expected_operator_identity.empty() ||
+      model.operator_identity != expected_operator_identity ||
+      model.provenance.empty())
+    throw std::invalid_argument(
+        "restored tail model lost its retained operator/provenance binding");
+  if (!solution.error.empty() || solution.sectors.size() != 1 ||
+      solution.sectors.front().log_power != 0 ||
+      solution.sectors.front().a.is_zero != TruthValue::Yes ||
+      solution.sectors.front().b.is_zero != TruthValue::Yes)
+    throw std::invalid_argument(
+        "restored tail model is attached to a non-ordinary local solution");
+  if (model.q_coefficients.empty() || model.n_coefficients.empty() ||
+      model.n_row_sum_upper.size() != model.n_coefficients.size() ||
+      model.initial_row_upper.size() != solution.epsilon.width())
+    throw std::invalid_argument(
+        "restored tail model has incomplete q/N or magnitude payloads");
+  if (std::any_of(model.q_coefficients.begin(),
+                  model.q_coefficients.end(),
+                  [](const ComplexBall& value) {
+                    return !value.is_finite();
+                  }) ||
+      model.q_coefficients.front().contains_zero())
+    throw std::invalid_argument(
+        "restored tail denominator payload is nonfinite or contains zero at the center");
+
+  const auto matrix_size = static_cast<std::size_t>(solution.dimension) *
+                           solution.dimension;
+  for (std::size_t lag = 0; lag < model.n_coefficients.size(); ++lag) {
+    const auto& matrix = model.n_coefficients[lag];
+    if (matrix.size() != matrix_size ||
+        std::any_of(matrix.begin(), matrix.end(),
+                    [](const ComplexBall& value) {
+                      return !value.is_finite();
+                    }))
+      throw std::invalid_argument(
+          "restored tail numerator matrix payload is malformed");
+    if (lag == 0 &&
+        std::any_of(matrix.begin(), matrix.end(),
+                    [](const ComplexBall& value) {
+                      return !value.is_zero();
+                    }))
+      throw std::invalid_argument(
+          "restored ordinary tail model has nonzero N(0)");
+    const auto recomputed = matrix_infinity_norm_upper(
+        matrix, solution.dimension);
+    if (recomputed.dump_exact() !=
+        model.n_row_sum_upper[lag].dump_exact())
+      throw std::invalid_argument(
+          "restored tail numerator norm does not equal its exact matrix norm");
+  }
+
+  const auto& sector = solution.sectors.front();
+  for (std::size_t epsilon = 0; epsilon < solution.epsilon.width();
+       ++epsilon) {
+    auto recomputed_initial = Magnitude::zero();
+    for (std::uint32_t component = 0; component < solution.dimension;
+         ++component)
+      recomputed_initial = Magnitude::maximum(
+          recomputed_initial,
+          Magnitude::upper_abs(local_detail::to_ball(
+              sector.coefficients[local_detail::sector_index(
+                  solution, epsilon, 0, component)])));
+    if (recomputed_initial.dump_exact() !=
+        model.initial_row_upper[epsilon].dump_exact())
+      throw std::invalid_argument(
+          "restored tail initial-row magnitude disagrees with its local tensor");
+  }
+
+  // Recheck the complete stored Taylor slab directly against the serialized
+  // epsilon-decoupled ODE payload.  A zero-containing interval residual is
+  // required at every retained coefficient; metadata and magnitudes alone
+  // can never reactivate a certificate.
+  for (std::size_t epsilon = 0; epsilon < solution.epsilon.width();
+       ++epsilon)
+    for (std::uint32_t n = 0; n <= solution.taylor_complete_max; ++n)
+      for (std::uint32_t row = 0; row < solution.dimension; ++row) {
+        auto residual = ComplexBall(0);
+        const auto max_q = std::min<std::size_t>(
+            n, model.q_coefficients.size() - 1);
+        for (std::size_t lag = 0; lag <= max_q; ++lag) {
+          const auto degree = n - static_cast<std::uint32_t>(lag);
+          residual += model.q_coefficients[lag] *
+              ComplexBall(static_cast<long>(degree)) *
+              local_detail::to_ball(sector.coefficients[
+                  local_detail::sector_index(
+                      solution, epsilon, degree, row)]);
+        }
+        const auto max_n = std::min<std::size_t>(
+            n, model.n_coefficients.size() - 1);
+        for (std::size_t lag = 0; lag <= max_n; ++lag) {
+          const auto degree = n - static_cast<std::uint32_t>(lag);
+          for (std::uint32_t column = 0;
+               column < solution.dimension; ++column)
+            residual -= model.n_coefficients[lag][
+                static_cast<std::size_t>(row) * solution.dimension +
+                column] *
+                local_detail::to_ball(sector.coefficients[
+                    local_detail::sector_index(
+                        solution, epsilon, degree, column)]);
+        }
+        if (!residual.contains_zero())
+          throw std::invalid_argument(
+              "restored tail q/N payload does not enclose the retained Taylor recurrence at n=" +
+              std::to_string(n) + ", row=" + std::to_string(row) +
+              ", epsilon_index=" + std::to_string(epsilon));
+      }
+}
+
 inline Magnitude geometric_tail_factor(const Magnitude& ratio_upper,
                                        ulong first_power,
                                        Magnitude* gap_lower_out = nullptr) {

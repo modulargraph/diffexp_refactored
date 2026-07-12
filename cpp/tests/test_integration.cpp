@@ -85,15 +85,19 @@ void endpoint_limit_smoke() {
   cancelling.coefficients =
       {Rational(-3), Rational(0), Rational(-5), Rational(0)};
   LocalSector<Rational> regulated = first;
-  regulated.a = ExactScalarDescriptor::rational("-3");
-  regulated.b = ExactScalarDescriptor::rational("2");
+  regulated.a = ExactScalarDescriptor::algebraic(
+      "-Sqrt[2]", diffexp2::TruthValue::No, diffexp2::TruthValue::No,
+      diffexp2::ExactSign::Negative,
+      ComplexBall::from_strings("-1.4142135623730950488016887242097"));
+  regulated.b = ExactScalarDescriptor::symbolic(
+      "rho", {"rho"}, diffexp2::TruthValue::No,
+      diffexp2::TruthValue::No, diffexp2::ExactSign::Positive,
+      ComplexBall(2));
   regulated.coefficients =
       {Rational(13), Rational(17), Rational(19), Rational(23)};
   solution.sectors = {first, cancelling, regulated};
 
-  EndpointLimitOptions options;
-  options.imaginary_sign = 1;
-  const auto result = diffexp2::endpoint_sector_limit(solution, options);
+  const auto result = diffexp2::endpoint_sector_limit(solution);
   check("endpoint gate merges absolute monomials and reads buried t^0",
         result.values.size() == 1 &&
             result.values.front().min_power() == 0 &&
@@ -101,6 +105,78 @@ void endpoint_limit_smoke() {
             overlaps(result.values.front().coefficient(0), ComplexBall(7)) &&
             overlaps(result.values.front().coefficient(1), ComplexBall(11)) &&
             result.dropped_regulated_sectors == 1);
+}
+
+void strict_numeric_cancellation_smoke() {
+  LocalSolution<ComplexBall> solution;
+  solution.chart.center_exact = "0";
+  solution.chart.scale_exact = "1";
+  solution.chart.radius = ComplexBall(2);
+  solution.epsilon = {0, 0};
+  solution.taylor_complete_max = 1;
+  solution.dimension = 1;
+
+  LocalSector<ComplexBall> first;
+  first.a = ExactScalarDescriptor::rational("-1");
+  first.b = ExactScalarDescriptor::rational("0");
+  first.log_power = 0;
+  first.coefficients = {ComplexBall(1), ComplexBall(0)};
+  auto second = first;
+  second.coefficients = {
+      ComplexBall::from_strings("-0.999999999999999999999999999999"),
+      ComplexBall(0)};
+  solution.sectors = {first, second};
+
+  bool rejected_near_zero = false;
+  try {
+    (void)diffexp2::endpoint_sector_limit(solution);
+  } catch (const NativeIntegrationError& error) {
+    rejected_near_zero =
+        error.code == NativeIntegrationErrorCode::DivergentEndpoint;
+  }
+  check("relative-small numeric residual is not a cancellation certificate",
+        rejected_near_zero);
+
+  solution.sectors[1].coefficients[0] = ComplexBall(-1);
+  const auto exact = diffexp2::endpoint_sector_limit(solution);
+  check("Acb cancellation requires the exact singleton zero",
+        exact.cancelled_divergent_coefficients == 1 &&
+            exact.values.front().coefficient(0).is_zero());
+}
+
+void branch_semantics_smoke() {
+  MonomialIntegrationOptions principal;
+  principal.complete_max = 2;
+  auto explicit_plus = principal;
+  explicit_plus.imaginary_sign = 1;
+  auto explicit_minus = principal;
+  explicit_minus.imaginary_sign = -1;
+  const auto lower = RealEvaluationPoint::rational("-1/2");
+  const auto upper = RealEvaluationPoint::rational("-1/4");
+
+  const auto default_log = diffexp2::integrate_sector_monomial(
+      SectorMonomialTag::rational("0", "0", 1), lower, upper, principal);
+  const auto plus_log = diffexp2::integrate_sector_monomial(
+      SectorMonomialTag::rational("0", "0", 1), lower, upper,
+      explicit_plus);
+  const auto minus_log = diffexp2::integrate_sector_monomial(
+      SectorMonomialTag::rational("0", "0", 1), lower, upper,
+      explicit_minus);
+  check("omitted branch sign is the principal +i0 rim",
+        overlaps(default_log.coefficient(1), plus_log.coefficient(1)));
+  check("-i0 applies the negative-axis Log shift",
+        overlaps(minus_log.coefficient(1),
+                 plus_log.coefficient(1) - imaginary_pi() / ComplexBall(2)));
+
+  const auto plus_fractional = diffexp2::integrate_sector_monomial(
+      SectorMonomialTag::rational("-1/2", "0", 0), lower, upper,
+      explicit_plus);
+  const auto minus_fractional = diffexp2::integrate_sector_monomial(
+      SectorMonomialTag::rational("-1/2", "0", 0), lower, upper,
+      explicit_minus);
+  check("-i0 applies the fractional-power phase on a same-side arm",
+        (plus_fractional.coefficient(0) + minus_fractional.coefficient(0))
+            .contains_zero());
 }
 
 void primitive_smoke() {
@@ -165,6 +241,8 @@ int main() {
   ComplexBall::set_precision(512);
   frame_smoke();
   endpoint_limit_smoke();
+  strict_numeric_cancellation_smoke();
+  branch_semantics_smoke();
   primitive_smoke();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";

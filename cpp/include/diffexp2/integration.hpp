@@ -222,7 +222,10 @@ SectorMonomialTag sector_monomial_tag(const LocalSector<Scalar>& sector,
 
 struct MonomialIntegrationOptions {
   std::int32_t complete_max = 0;
-  // Required for a branch-sensitive negative arm.  This is exact topology,
+  // The principal real-axis value is the +i0 rim, matching Mathematica's
+  // default Log/Power values.  Set -1 explicitly for the lower rim; the
+  // negative-axis Log and fractional-power phases are then continued by
+  // -2*pi*i and exp(-2*pi*i*power), respectively.  This is exact topology,
   // never inferred from the sign of an Acb imaginary midpoint.
   std::optional<std::int32_t> imaginary_sign;
 };
@@ -239,7 +242,10 @@ struct EndpointLimitOptions {
   // it, but validating it keeps endpoint checkpoint state explicit.
   std::int32_t approach_direction = 1;
   std::optional<std::int32_t> imaginary_sign;
-  std::int32_t cancellation_digits = 24;
+  // Acb cancellation is accepted only when interval arithmetic returns the
+  // exact singleton zero.  Smallness, or merely enclosing zero, cannot
+  // certify a finite limit of a divergent monomial.  Set this false when only
+  // exact coefficient-field (currently Rational) cancellation is admissible.
   bool allow_certified_numeric_cancellation = true;
 };
 
@@ -392,15 +398,9 @@ inline void validate_interval(const RealEvaluationPoint& lower,
       "interval order is not certified by the exact signs and Acb moduli");
 }
 
-inline std::int32_t require_sigma(
+inline std::int32_t prescribed_sigma(
     const MonomialIntegrationOptions& options) {
-  if (!options.imaginary_sign.has_value()) {
-    throw NativeIntegrationError(
-        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
-        "branch-sensitive negative-arm integration requires an explicit "
-        "imaginary sign");
-  }
-  const auto sigma = *options.imaginary_sign;
+  const auto sigma = options.imaginary_sign.value_or(1);
   if (sigma != 1 && sigma != -1)
     throw NativeIntegrationError(
         NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
@@ -563,7 +563,7 @@ inline EpsilonFrame<ComplexBall> endpoint_primitive(
 
   std::optional<std::int32_t> sigma;
   if (outer.sign < 0 && branch_sensitive_on_negative_arm(tag))
-    sigma = require_sigma(options);
+    sigma = prescribed_sigma(options);
   else if (outer.sign < 0)
     sigma = options.imaginary_sign.value_or(1);
   const auto log_t = endpoint_log(outer, sigma);
@@ -581,46 +581,46 @@ bool material_sector(const LocalSector<Scalar>& sector) {
                      });
 }
 
-inline bool numeric_cancellation_certified(
-    const ComplexBall& total, const std::vector<ComplexBall>& terms,
-    const EndpointLimitOptions& options) {
-  if (total.is_zero()) return true;
-  if (!options.allow_certified_numeric_cancellation ||
-      options.cancellation_digits < 0)
-    return false;
-  auto scale = Magnitude::one();
-  for (const auto& term : terms)
-    scale = Magnitude::maximum(scale, Magnitude::upper_abs(term));
-  const auto tolerance =
-      Magnitude::decimal("1e-" + std::to_string(options.cancellation_digits));
-  return Magnitude::upper_abs(total) <= scale * tolerance;
-}
-
 template <typename Scalar>
 ComplexBall coefficient_ball(const Scalar& value) {
   return local_detail::to_ball(value);
 }
 
+enum class DivergentSumVerdict : std::uint8_t {
+  CertifiedZero,
+  Uncertified,
+  Nonzero
+};
+
+struct DivergentSumResult {
+  DivergentSumVerdict verdict = DivergentSumVerdict::Nonzero;
+  bool numeric_cancellation = false;
+};
+
 template <typename Scalar>
-bool divergent_sum_passes(const std::vector<const Scalar*>& term_ptrs,
-                          const EndpointLimitOptions& options,
-                          bool* numeric_cancellation) {
-  *numeric_cancellation = false;
+DivergentSumResult divergent_sum_result(
+    const std::vector<const Scalar*>& term_ptrs,
+    const EndpointLimitOptions& options) {
   if constexpr (std::is_same_v<Scalar, Rational>) {
     Rational total(0);
     for (const auto* term : term_ptrs) total += *term;
-    return total.is_zero();
+    return {total.is_zero() ? DivergentSumVerdict::CertifiedZero
+                            : DivergentSumVerdict::Nonzero,
+            false};
   } else if constexpr (std::is_same_v<Scalar, ComplexBall>) {
     ComplexBall total(0);
-    std::vector<ComplexBall> terms;
-    terms.reserve(term_ptrs.size());
-    for (const auto* term : term_ptrs) {
-      total += *term;
-      terms.push_back(*term);
-    }
-    const auto pass = numeric_cancellation_certified(total, terms, options);
-    *numeric_cancellation = pass && !total.is_zero();
-    return pass;
+    for (const auto* term : term_ptrs) total += *term;
+    if (total.is_zero())
+      return options.allow_certified_numeric_cancellation
+                 ? DivergentSumResult{DivergentSumVerdict::CertifiedZero, true}
+                 : DivergentSumResult{DivergentSumVerdict::Uncertified, false};
+    // An enclosure containing zero proves only that equality remains
+    // possible.  A relative-smallness test is even weaker.  Neither can
+    // justify discarding a coefficient multiplying a divergent endpoint
+    // monomial.
+    return {total.contains_zero() ? DivergentSumVerdict::Uncertified
+                                  : DivergentSumVerdict::Nonzero,
+            false};
   } else {
     throw NativeIntegrationError(
         NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
@@ -690,7 +690,7 @@ inline EpsilonFrame<ComplexBall> integrate_sector_monomial(
   std::optional<std::int32_t> sigma;
   const bool has_negative_arm = lower.sign < 0 || upper.sign < 0;
   if (has_negative_arm && branch_sensitive_on_negative_arm(tag))
-    sigma = require_sigma(options);
+    sigma = prescribed_sigma(options);
   else if (has_negative_arm)
     sigma = options.imaginary_sign.value_or(1);
 
@@ -736,26 +736,11 @@ EndpointLimitResult endpoint_sector_limit(
         NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
         "endpoint imaginary sign must be exactly +1 or -1");
 
-  bool branch_sensitive = false;
-  for (const auto& sector : solution.sectors) {
-    if (sector.b.domain == ExactDomain::SymbolicRational)
-      throw unsupported_symbolic_regulator();
-    if (sector.a.domain != ExactDomain::Rational)
-      throw NativeIntegrationError(
-          NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
-          "endpoint classification currently requires rational local powers");
-    if (!material_sector(sector)) continue;
-    if (sector.b.is_zero != TruthValue::Yes || sector.log_power > 0 ||
-        sector.a.is_integer != TruthValue::Yes)
-      branch_sensitive = true;
-  }
+  // Endpoint classification itself is branch independent: exact b!=0
+  // sectors are dropped, and every surviving divergent class has one common
+  // phase.  An omitted sign therefore means the principal +i0 rim, while an
+  // explicit sign must still agree with any prepared chart prescription.
   const auto derived_sigma = derive_chart_imaginary_sign(solution);
-  if (branch_sensitive && !derived_sigma.has_value() &&
-      !options.imaginary_sign.has_value())
-    throw NativeIntegrationError(
-        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
-        "multivalued endpoint data has no explicit or chart-derived branch "
-        "prescription");
   if (derived_sigma.has_value() && options.imaginary_sign.has_value() &&
       *derived_sigma != *options.imaginary_sign)
     throw NativeIntegrationError(
@@ -777,10 +762,17 @@ EndpointLimitResult endpoint_sector_limit(
       if (material_sector(sector)) ++result.dropped_regulated_sectors;
       continue;  // exact dimensional-regulator endpoint drop
     }
+    if (sector.b.domain == ExactDomain::SymbolicRational)
+      throw unsupported_symbolic_regulator();
     if (sector.b.is_zero != TruthValue::Yes)
       throw NativeIntegrationError(
           NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
           "endpoint classification requires an exact regulator zero fact");
+    if (sector.a.domain != ExactDomain::Rational)
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+          "unregulated endpoint classification currently requires rational "
+          "local powers");
 
     const Rational a(sector.a.canonical);
     const Rational first_unseen =
@@ -819,19 +811,28 @@ EndpointLimitResult endpoint_sector_limit(
         for (const auto& cell : cells)
           terms.push_back(&cell.sector->coefficients[local_detail::sector_index(
               solution, ei, cell.taylor, component)]);
-        bool numeric_cancellation = false;
-        if (!divergent_sum_passes(terms, options, &numeric_cancellation)) {
+        const auto cancellation = divergent_sum_result(terms, options);
+        if (cancellation.verdict != DivergentSumVerdict::CertifiedZero) {
+          const bool uncertified =
+              cancellation.verdict == DivergentSumVerdict::Uncertified;
           NativeIntegrationError error(
-              NativeIntegrationErrorCode::DivergentEndpoint, "E2",
-              "divergent b=0 endpoint content does not cancel in its exact "
-              "absolute-power/log-depth class");
+              uncertified
+                  ? NativeIntegrationErrorCode::UncertifiedCancellation
+                  : NativeIntegrationErrorCode::DivergentEndpoint,
+              uncertified ? "E10" : "E2",
+              uncertified
+                  ? "numeric b=0 endpoint content may cancel, but its Acb "
+                    "sum is not the exact singleton zero; endpoint finiteness "
+                    "requires an exact coefficient relation"
+                  : "divergent b=0 endpoint content does not cancel in its "
+                    "exact absolute-power/log-depth class");
           error.absolute_power = key.first;
           error.log_power = key.second;
           error.epsilon_power = epsilon_power;
           error.component = component;
           throw error;
         }
-        if (numeric_cancellation)
+        if (cancellation.numeric_cancellation)
           ++result.cancelled_divergent_coefficients;
       }
     }

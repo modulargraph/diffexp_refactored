@@ -5431,9 +5431,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   CompositeColumnSolveResult solve_column(
       const std::string& local_handle,
       const json::object& request) override {
-    if constexpr (!std::is_same_v<Scalar, Rational>) {
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      return solve_regular_acb_column(local_handle, request);
+    } else if constexpr (!std::is_same_v<Scalar, Rational>) {
       throw std::invalid_argument(
-          "native SCC column execution currently supports only exact rational coefficients");
+          "native SCC column execution supports exact rational columns and regular Acb columns only");
     } else {
       const auto started = std::chrono::steady_clock::now();
       const bool regular_execution = regular_block_column_ready();
@@ -5745,9 +5747,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           : "exact-rational-regular-singular-jordan-block-dag-column-v2";
     if (!regular_block_column_ready())
       return "unsupported-native-scc-column";
-    return scalar_block_shape()
-        ? "exact-rational-regular-scalar-block-dag-column-v1"
-        : "exact-rational-regular-block-dag-column-v2";
+    return regular_column_capability();
   }
 
   json::object stats_json() const override {
@@ -5840,9 +5840,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                    ? "exact-rational-regular-singular-scalar-block-dag-column-v1"
                    : "exact-rational-regular-singular-jordan-block-dag-column-v2")
              : (regular_ready
-                   ? (scalar_shape
-                         ? "exact-rational-regular-scalar-block-dag-column-v1"
-                         : "exact-rational-regular-block-dag-column-v2")
+                   ? regular_column_capability()
                    : "unsupported")},
         {"general_scc_execution", false},
         {"scalar_block_dag_column_execution", scalar_ready},
@@ -5883,8 +5881,189 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
  private:
+  CompositeColumnSolveResult solve_regular_acb_column(
+      const std::string& local_handle, const json::object& request) {
+    static_assert(std::is_same_v<Scalar, ComplexBall>);
+    if (!regular_block_column_ready())
+      throw std::invalid_argument(
+          "retained Acb SCC chart does not satisfy the strict regular block-DAG column capability");
+
+    // Coupling products and block recombination happen between the individual
+    // PreparedChart solves, so the complete composite operation must retain
+    // the same Arb precision lease rather than relying on each nested solve's
+    // shorter lease.
+    AcbPrecisionLease acb_lease(blocks_.front().chart->precision_bits());
+    ComplexBall::set_precision(blocks_.front().chart->precision_bits());
+    const auto started = std::chrono::steady_clock::now();
+    const auto checkpoint_identity = required_string(
+        request, "checkpoint_identity");
+    const auto& seed_request = as_object(
+        request.at("seed"), "native Acb SCC seed request");
+    const auto seed_block = as_u32(
+        seed_request.at("block"), "native Acb SCC seed block");
+    if (seed_block >= blocks_.size())
+      throw std::invalid_argument("native Acb SCC seed block is out of range");
+
+    std::vector<std::uint8_t> reachable(blocks_.size(), 0);
+    reachable[seed_block] = 1;
+    for (const auto block : graph_.topological_order) {
+      if (!reachable[block]) continue;
+      for (const auto [source, target] : graph_.condensation_edges)
+        if (source == block) reachable[target] = 1;
+    }
+    std::vector<std::uint32_t> expected_targets;
+    for (const auto block : graph_.topological_order)
+      if (block != seed_block && reachable[block])
+        expected_targets.push_back(block);
+    const auto& target_requests = as_array(
+        request.at("targets"), "native Acb SCC target requests");
+    if (target_requests.size() != expected_targets.size())
+      throw std::invalid_argument(
+          "native Acb SCC targets must cover every reachable descendant exactly");
+    for (std::size_t index = 0; index < target_requests.size(); ++index) {
+      const auto& target = as_object(
+          target_requests[index], "native Acb SCC target request");
+      if (as_u32(target.at("block"), "native Acb SCC target block") !=
+          expected_targets[index])
+        throw std::invalid_argument(
+            "native Acb SCC targets are not in deterministic topological order");
+    }
+
+    std::vector<std::optional<LocalSolution<Scalar>>> state(blocks_.size());
+    json::array diagnostics;
+    NativeLocalDiagnostics aggregate;
+    aggregate.top_valid = kCompleteInfinity;
+
+    const auto& seed_run = checked_column_run(
+        seed_request, seed_block, true, nullptr, false);
+    const auto seed_local_component = seed_component_from_run(
+        seed_run, seed_block, false);
+    const auto basis_index =
+        blocks_[seed_block].vertices[seed_local_component];
+    auto seed_native = blocks_[seed_block].chart->solve_native(
+        seed_run, as_object(seed_request.at("metadata"),
+                            "native Acb SCC seed metadata"));
+    validate_block_result(seed_native, seed_block, true, false);
+    blocks_[seed_block].chart->record_native_local_success(
+        seed_native.diagnostics);
+    accumulate_diagnostics(aggregate, seed_native.diagnostics);
+    diagnostics.push_back(block_diagnostic(
+        seed_block, "seed", {}, nullptr, seed_native));
+    state[seed_block] = std::move(seed_native.solution);
+
+    for (std::size_t target_index = 0;
+         target_index < target_requests.size(); ++target_index) {
+      const auto target_block = expected_targets[target_index];
+      const auto& target_request = as_object(
+          target_requests[target_index], "native Acb SCC target request");
+      std::vector<LocalSolution<Scalar>> incoming;
+      std::vector<std::uint32_t> predecessors;
+      for (const auto& coupling : couplings_) {
+        if (coupling.target_block != target_block ||
+            !state[coupling.source_block].has_value())
+          continue;
+        validate_column_coupling(coupling, false);
+        auto contribution = apply_prepared_sparse_local_matrix(
+            coupling.matrix, *state[coupling.source_block],
+            checkpoint_identity + ":source:" +
+                std::to_string(coupling.source_block) + ":" +
+                std::to_string(target_block));
+        if (!contribution.has_value())
+          throw std::logic_error(
+              "a certified nonzero Acb SCC edge produced no structural source");
+        predecessors.push_back(coupling.source_block);
+        incoming.push_back(std::move(*contribution));
+      }
+      if (incoming.empty())
+        throw std::invalid_argument(
+            "reachable native Acb SCC target has no available predecessor source");
+      auto source = incoming.size() == 1
+          ? std::move(incoming.front())
+          : combine_local_solutions(
+                incoming, checkpoint_identity + ":combined-source:" +
+                              std::to_string(target_block));
+      source = restrict_local_epsilon_frame_strict_lower(
+          source, work_.work_min, work_.work_complete_max,
+          checkpoint_identity + ":source-frame:" +
+              std::to_string(target_block));
+      require_work_local(source, "combined Acb coupling source");
+
+      const auto& target_run = checked_column_run(
+          target_request, target_block, false, &source, false);
+      require_source_tag_matches_run(source, target_run);
+      auto source_data = local_solution_source_data(
+          source, as_u32(target_run.at("nmax"), "target nmax"),
+          as_u32(target_run.at("p"), "target log maximum"),
+          blocks_[target_block].chart->frame_base(),
+          blocks_[target_block].chart->frame_width());
+      auto target_native =
+          blocks_[target_block].chart->solve_native_with_source(
+              target_run,
+              as_object(target_request.at("metadata"),
+                        "native Acb SCC target metadata"),
+              std::move(source_data));
+      validate_block_result(target_native, target_block, false, false);
+      blocks_[target_block].chart->record_native_local_success(
+          target_native.diagnostics);
+      accumulate_diagnostics(aggregate, target_native.diagnostics);
+      diagnostics.push_back(block_diagnostic(
+          target_block, "particular", predecessors, &source,
+          target_native));
+      state[target_block] = std::move(target_native.solution);
+    }
+
+    std::vector<LocalSolution<Scalar>> embedded;
+    for (std::uint32_t block = 0; block < state.size(); ++block) {
+      if (!state[block].has_value()) continue;
+      embedded.push_back(local_algebra_detail::embedded_components(
+          *state[block], blocks_[block].vertices, dimension_));
+    }
+    if (embedded.empty())
+      throw std::logic_error("native Acb SCC column produced no block state");
+    auto parent = embedded.size() == 1
+        ? std::move(embedded.front())
+        : combine_local_solutions(
+              embedded, checkpoint_identity + ":work-parent");
+    require_work_local(parent, "combined Acb parent work state");
+    parent = cap_composite_public_local(
+        parent, work_.requested_max, work_.public_t_order,
+        retained_geometry_.chart, retained_geometry_.prescriptions,
+        checkpoint_identity);
+    validate_local_solution(parent, false);
+
+    const auto scalar_execution = scalar_block_shape();
+    json::object column_identity_record{
+        {"schema", scalar_execution
+             ? "diffexp2-native-scc-acb-regular-scalar-column-v1"
+             : "diffexp2-native-scc-acb-regular-column-v2"},
+        {"scc_exact_identity", exact_identity_},
+        {"basis_index", basis_index},
+        {"seed", seed_request},
+        {"targets", target_requests},
+        {"pseudo_compensation", "none"}};
+    if (!scalar_execution)
+      column_identity_record["seed_local_component"] =
+          seed_local_component;
+    SCCColumnProvenance column_provenance{
+        handle_, exact_identity_, seed_block, basis_index,
+        json::serialize(canonical_json_value(column_identity_record))};
+    auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+        local_handle, handle_, exact_identity_, std::move(parent),
+        blocks_[seed_block].chart->precision_bits(),
+        std::vector<PseudoHit<Scalar>>{}, aggregate,
+        std::move(column_provenance));
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    column_solves_.fetch_add(1);
+    {
+      std::lock_guard<std::mutex> lock(column_stats_mutex_);
+      column_solve_ms_ += elapsed_ms;
+    }
+    return {std::move(local), std::move(diagnostics), elapsed_ms};
+  }
+
   bool regular_block_column_ready() const {
-    if constexpr (!std::is_same_v<Scalar, Rational>) {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       return false;
     } else {
       if (blocks_.size() < 2 || work_.work_min > 0 ||
@@ -5905,6 +6084,17 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
   bool scalar_column_ready() const {
     return regular_block_column_ready() && scalar_block_shape();
+  }
+
+  const char* regular_column_capability() const {
+    if constexpr (std::is_same_v<Scalar, ComplexBall>)
+      return scalar_block_shape()
+          ? "acb-regular-scalar-block-dag-column-v1"
+          : "acb-regular-block-dag-column-v2";
+    else
+      return scalar_block_shape()
+          ? "exact-rational-regular-scalar-block-dag-column-v1"
+          : "exact-rational-regular-block-dag-column-v2";
   }
 
   bool regular_singular_jordan_column_ready() const {
@@ -5980,6 +6170,13 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     return active;
   }
 
+  static bool scalar_identical(const Scalar& left, const Scalar& right) {
+    if constexpr (std::is_same_v<Scalar, ComplexBall>)
+      return acb_equal(left.raw(), right.raw());
+    else
+      return left == right;
+  }
+
   const json::object& checked_column_run(
       const json::object& entry, std::uint32_t block_index, bool seed,
       const LocalSolution<Scalar>* source,
@@ -6014,26 +6211,41 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     if (nmax != work_.work_t_order)
       throw std::invalid_argument(
           "native SCC run Taylor order differs from its retained work contract");
-    const auto a_target = parse_scalar<Rational>(run.at("a_target"));
-    const auto b_target = parse_scalar<Rational>(run.at("b_target"));
     if (as_i32(run.at("a_shift_min"),
                "native SCC a-shift minimum") != 0)
       throw std::invalid_argument(
           "native SCC column requires a zero exact a-shift origin");
-    if (!regular_singular_execution &&
-        (log_max != 0 || !a_target.is_zero() || !b_target.is_zero()))
-      throw std::invalid_argument(
-          "native SCC regular block runs require p=0 and a=b=0");
     const auto& a_shifts = as_array(
         run.at("a_shifts"), "native SCC exact a-shift schedule");
     if (a_shifts.size() != static_cast<std::size_t>(nmax) + 1)
       throw std::invalid_argument(
           "native SCC regular block run has an incomplete a-shift schedule");
-    for (std::size_t n = 0; n < a_shifts.size(); ++n)
-      if (!(parse_scalar<Rational>(a_shifts[n]) ==
-            a_target + Rational(std::to_string(n))))
+    std::optional<Rational> exact_a_target;
+    std::optional<Rational> exact_b_target;
+    if (regular_singular_execution) {
+      exact_a_target = parse_scalar<Rational>(run.at("a_target"));
+      exact_b_target = parse_scalar<Rational>(run.at("b_target"));
+      for (std::size_t n = 0; n < a_shifts.size(); ++n)
+        if (!(parse_scalar<Rational>(a_shifts[n]) ==
+              *exact_a_target + Rational(std::to_string(n))))
+          throw std::invalid_argument(
+              "native SCC a-shift schedule must equal a_target plus the exact Taylor index");
+    } else {
+      const auto a_target = parse_scalar<Scalar>(run.at("a_target"));
+      const auto b_target = parse_scalar<Scalar>(run.at("b_target"));
+      if (log_max != 0 || !ScalarTraits<Scalar>::is_zero(a_target) ||
+          !ScalarTraits<Scalar>::is_zero(b_target))
         throw std::invalid_argument(
-            "native SCC a-shift schedule must equal a_target plus the exact Taylor index");
+            "native SCC regular block runs require p=0 and exact a=b=0");
+      for (std::size_t n = 0; n < a_shifts.size(); ++n) {
+        const auto shift = parse_scalar<Scalar>(a_shifts[n]);
+        const auto expected = ScalarTraits<Scalar>::integer(
+            static_cast<long>(n));
+        if (!scalar_identical(shift, expected))
+          throw std::invalid_argument(
+              "native SCC regular a-shift schedule must equal the exact Taylor index");
+      }
+    }
     if (seed) {
       if (!run.at("has_initial").as_bool())
         throw std::invalid_argument(
@@ -6061,7 +6273,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       if (initial.size() != expected_initial_coefficients ||
           validity.size() != expected_validity ||
           std::any_of(initial.begin(), initial.end(), [](const auto& value) {
-            return !parse_scalar<Rational>(value).is_zero();
+            return !ScalarTraits<Scalar>::is_zero(
+                parse_scalar<Scalar>(value));
           }) ||
           std::any_of(validity.begin(), validity.end(), [](const auto& value) {
             return !value.is_null();
@@ -6083,46 +6296,57 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     if (schedule.size() != static_cast<std::size_t>(nmax) + 1)
       throw std::invalid_argument(
           "native SCC run has an inconsistent recurrence schedule height");
-    std::vector<std::vector<BlockStep<Rational>>> exact_schedule;
-    exact_schedule.reserve(schedule.size());
-    for (std::size_t n = 0; n < schedule.size(); ++n) {
-      const auto& raw_row = schedule[n];
-      const auto& row = as_array(raw_row, "native SCC schedule row");
-      const auto expected_steps = regular_singular_execution
-          ? retained_indicial->blocks.size()
-          : static_cast<std::size_t>(block_dimension);
-      if ((!regular_singular_execution &&
-           !blocks_[block_index].chart->has_regular_singleton_partition()) ||
-          row.size() != expected_steps)
-        throw std::invalid_argument(regular_singular_execution
-            ? "native regular-singular SCC execution requires one step per retained exact Jordan block"
-            : "native SCC regular block execution requires one step per retained Jordan singleton");
-      std::vector<BlockStep<Rational>> exact_row;
-      exact_row.reserve(row.size());
-      for (const auto& raw_step : row) {
-        const auto& step = as_object(raw_step, "native SCC schedule step");
-        const auto kind = required_string(step, "case");
-        const auto da = parse_scalar<Rational>(step.at("da"));
-        const auto db = parse_scalar<Rational>(step.at("db"));
-        const auto step_case = kind == "T" ? StepCase::Taylor
-            : kind == "P" ? StepCase::Pseudo
-            : kind == "R" ? StepCase::Resonant
-            : throw std::invalid_argument(
-                  "native SCC schedule has an unknown recurrence case");
-        exact_row.push_back({step_case, da, db});
-        if (!regular_singular_execution) {
-          const auto expected_kind = n == 0 ? "R" : "T";
-          if (kind != expected_kind || !db.is_zero() ||
-              !(da == Rational(std::to_string(n))))
+    if (regular_singular_execution) {
+      std::vector<std::vector<BlockStep<Rational>>> exact_schedule;
+      exact_schedule.reserve(schedule.size());
+      for (const auto& raw_row : schedule) {
+        const auto& row = as_array(raw_row, "native SCC schedule row");
+        if (row.size() != retained_indicial->blocks.size())
+          throw std::invalid_argument(
+              "native regular-singular SCC execution requires one step per retained exact Jordan block");
+        std::vector<BlockStep<Rational>> exact_row;
+        exact_row.reserve(row.size());
+        for (const auto& raw_step : row) {
+          const auto& step = as_object(raw_step, "native SCC schedule step");
+          const auto kind = required_string(step, "case");
+          const auto step_case = kind == "T" ? StepCase::Taylor
+              : kind == "P" ? StepCase::Pseudo
+              : kind == "R" ? StepCase::Resonant
+              : throw std::invalid_argument(
+                    "native SCC schedule has an unknown recurrence case");
+          exact_row.push_back({step_case,
+              parse_scalar<Rational>(step.at("da")),
+              parse_scalar<Rational>(step.at("db"))});
+        }
+        exact_schedule.push_back(std::move(exact_row));
+      }
+      (void)certify_exact_affine_jordan_schedule(
+          *retained_indicial, *exact_a_target, *exact_b_target,
+          exact_schedule);
+    } else {
+      if (!blocks_[block_index].chart->has_regular_singleton_partition())
+        throw std::invalid_argument(
+            "native SCC regular block lost its retained singleton partition");
+      for (std::size_t n = 0; n < schedule.size(); ++n) {
+        const auto& row = as_array(schedule[n], "native SCC schedule row");
+        if (row.size() != static_cast<std::size_t>(block_dimension))
+          throw std::invalid_argument(
+              "native SCC regular execution requires one step per retained Jordan singleton");
+        const auto expected_kind = n == 0 ? "R" : "T";
+        const auto expected_da = ScalarTraits<Scalar>::integer(
+            static_cast<long>(n));
+        for (const auto& raw_step : row) {
+          const auto& step = as_object(raw_step, "native SCC schedule step");
+          const auto kind = required_string(step, "case");
+          const auto da = parse_scalar<Scalar>(step.at("da"));
+          const auto db = parse_scalar<Scalar>(step.at("db"));
+          if (kind != expected_kind ||
+              !ScalarTraits<Scalar>::is_zero(db) ||
+              !scalar_identical(da, expected_da))
             throw std::invalid_argument(
                 "native SCC regular block schedule must be resonant at zero and Taylor by exact index for every Jordan singleton");
         }
       }
-      exact_schedule.push_back(std::move(exact_row));
-    }
-    if (regular_singular_execution) {
-      (void)certify_exact_affine_jordan_schedule(
-          *retained_indicial, a_target, b_target, exact_schedule);
     }
     return run;
   }
@@ -6247,18 +6471,19 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             "native SCC regular block seed requires finite validity through the retained work maximum");
 
     const auto unit_index = static_cast<std::size_t>(unit_index_i64);
+    const auto one = ScalarTraits<Scalar>::one();
     std::optional<std::uint32_t> selected;
     for (std::uint32_t component = 0; component < dimension; ++component) {
       for (std::size_t epsilon = 0; epsilon < frame_width; ++epsilon) {
-        const auto coefficient = parse_scalar<Rational>(
+        const auto coefficient = parse_scalar<Scalar>(
             initial[static_cast<std::size_t>(component) * frame_width +
                     epsilon]);
-        if (epsilon == unit_index && coefficient == Rational(1)) {
+        if (epsilon == unit_index && scalar_identical(coefficient, one)) {
           if (selected.has_value())
             throw std::invalid_argument(
                 "native SCC seed contains more than one eps^0 unit component");
           selected = component;
-        } else if (!coefficient.is_zero()) {
+        } else if (!ScalarTraits<Scalar>::is_zero(coefficient)) {
           throw std::invalid_argument(
               "native SCC regular block seed must be exactly one eps^0 unit column");
         }
@@ -6370,17 +6595,19 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
   void require_source_tag_matches_run(
       const LocalSolution<Scalar>& source, const json::object& run) const {
-    const auto a_target = parse_scalar<Rational>(run.at("a_target"));
-    const auto b_target = parse_scalar<Rational>(run.at("b_target"));
+    const auto a_target = parse_scalar<Scalar>(run.at("a_target"));
+    const auto b_target = parse_scalar<Scalar>(run.at("b_target"));
     const auto log_max = as_u32(run.at("p"), "target log maximum");
     for (const auto& sector : source.sectors) {
       if (sector.a.domain != ExactDomain::Rational ||
           sector.b.domain != ExactDomain::Rational ||
-          !(Rational(sector.a.canonical) == a_target) ||
-          !(Rational(sector.b.canonical) == b_target) ||
           sector.log_power > log_max)
         throw std::invalid_argument(
             "native SCC coupling source tag/log sector differs from its target run");
+      verify_tag_binding<Scalar>(sector.a, a_target,
+                                 "native SCC coupling source a");
+      verify_tag_binding<Scalar>(sector.b, b_target,
+                                 "native SCC coupling source b");
     }
   }
 

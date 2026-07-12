@@ -89,7 +89,7 @@ The implemented recurrence-session commands are:
 | `match.stats` | Inspect one retained native match and its exact provenance. |
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
-| `scc.solve_column` | Execute one retained exact-rational SCC basis column in a certified regular scope, or in the narrow scalar regular-singular identity-frame scope, and retain the parent local without coefficient JSON. |
+| `scc.solve_column` | Execute one retained regular exact-Rational or Acb SCC basis column, or an exact-Rational regular-singular Jordan column, and retain the parent local without coefficient JSON. |
 | `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
 | `scc.release` | Release one retained composite SCC chart. |
 | `session.stats` | Return preparation/run timings and retained-object counters. |
@@ -115,15 +115,20 @@ at capacity rather than evicting a public SCC object.
 The explicit
 ``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
 seedLocalComponent:1]`` seam consumes the compact run-only data in that cache
-for the regular scalar/multidimensional and regular-singular scalar/Jordan
-scopes.  Every capture retains exact producer-side `(a,b,P)` task metadata;
-roots and log ceilings are never reconstructed from Acb values. The seam
-derives every component from its exact flattened eps^0 unit tensor, selects the
-requested seed without trusting capture order, orders reachable targets by the
-exact SCC certificate, and propagates the exact log ceiling through the DAG.
+for regular exact-Rational or Acb scalar/multidimensional scopes and the
+exact-Rational regular-singular scalar/Jordan scopes. Every capture retains
+exact producer-side `(a,b,P)` task metadata; roots and log ceilings are never
+reconstructed from Acb values. The seam derives every component from its
+flattened eps^0 unit tensor, checked against independently encoded exact
+zero/one values in the selected coefficient field, selects the requested seed
+without trusting capture order, orders reachable targets by the exact SCC
+certificate, and propagates the exact log ceiling through the DAG.
 Each target's zero-initial particular request and complete T/P/R schedule are
 built once from that target's exact Jordan data, then independently
-re-certified by C++. Native coupling and
+re-certified by C++. Regular Acb runs are separately restricted to exact
+`a=b=0`, `p=0`, exact integer Taylor shifts, and the retained singleton
+schedule; numerical enclosures never decide a resonance or pseudo case.
+Native coupling and
 recurrence operate on retained `LocalSolution` values and return only an
 opaque local handle plus exact column provenance.  Exact parent geometry and
 analytic prescriptions are preserved.  The three-argument scalar-v1 wire

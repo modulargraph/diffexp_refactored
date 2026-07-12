@@ -4380,6 +4380,63 @@ sccNativeCanonicalRegularBlockComponent[request_Association,
   selected = Select[Range[dimension], frames[[#]] === unitFrame &];
   If[Length[selected] === 1, First[selected], None]];
 
+(* Acb recurrence payloads encode even exact integers as {real,imag} pairs.
+   Certify the same canonical regular unit-column shape without interpreting
+   an interval midpoint as an exact value: the encodings below are generated
+   independently from exact integers in the selected coefficient domain, and
+   the native executor rechecks them as exact Arb objects. *)
+sccNativeCanonicalEncodedRegularBlockComponent[
+    request_Association, task_Association, contract_Association,
+    dimension_Integer, zero_, one_, integers_List] := Module[
+  {fb = Lookup[contract, "FrameBase", None],
+   width = Lookup[contract, "FrameWidth", None],
+   nmax = Lookup[contract, "NMax", None], frameTop, unitIndex,
+   initial, validity, schedule, zeroFrame, unitFrame, frames, selected},
+  If[dimension < 1 ||
+      !MatchQ[{fb, width, nmax}, {_Integer, _Integer, _Integer}] ||
+      width < 1 || nmax < 0 || Length[integers] =!= nmax + 1 ||
+      Sort[Keys[request]] =!= Sort[$nativeSCCColumnRunKeys] ||
+      Sort[Keys[task]] =!= Sort[{"a", "b", "P"}] ||
+      !TrueQ[zeroCanQ[task["a"]]] ||
+      !TrueQ[zeroCanQ[task["b"]]] || task["P"] =!= 0,
+    Return[None, Module]];
+  frameTop = fb + width - 1;
+  unitIndex = 1 - fb;
+  initial = Lookup[request, "initial", None];
+  validity = Lookup[request, "initial_validity", None];
+  schedule = Lookup[request, "schedule", None];
+  If[Lookup[request, "nmax", None] =!= nmax ||
+      Lookup[request, "p", None] =!= 0 ||
+      !TrueQ[Lookup[request, "has_initial", False]] ||
+      TrueQ[Lookup[request, "adaptive_probe", True]] ||
+      Lookup[request, "a_target", None] =!= zero ||
+      Lookup[request, "b_target", None] =!= zero ||
+      Lookup[request, "a_shift_min", None] =!= 0 ||
+      Lookup[request, "a_shifts", None] =!= integers ||
+      !ListQ[schedule] || Length[schedule] =!= nmax + 1 ||
+      !(And @@ MapIndexed[Function[{row, index}, Module[
+          {n = First[index] - 1},
+          ListQ[row] && Length[row] === dimension &&
+            AllTrue[row, AssociationQ[#] &&
+              Sort[Keys[#]] === Sort[{"case", "da", "db"}] &&
+              Lookup[#, "case", None] === If[n === 0, "R", "T"] &&
+              Lookup[#, "da", None] === integers[[n + 1]] &&
+              Lookup[#, "db", None] === zero &]]], schedule]) ||
+      !ListQ[initial] || Length[initial] =!= dimension width ||
+      !ListQ[validity] ||
+      validity =!= ConstantArray[frameTop, dimension] ||
+      !(1 <= unitIndex <= width) ||
+      Lookup[request, "source", Missing["Source"]] =!= Null ||
+      TrueQ[Lookup[request, "return_u", True]],
+    Return[None, Module]];
+  zeroFrame = ConstantArray[zero, width];
+  unitFrame = ReplacePart[zeroFrame, unitIndex -> one];
+  frames = Partition[initial, width];
+  If[!AllTrue[frames, # === zeroFrame || # === unitFrame &],
+    Return[None, Module]];
+  selected = Select[Range[dimension], frames[[#]] === unitFrame &];
+  If[Length[selected] === 1, First[selected], None]];
+
 (* A singular Jordan seed has the same unique eps^0 unit in its log-zero
    row, followed by the canonical eps-shifted upper-chain ladder.  The C++
    certificate verifies that complete ladder; Wolfram uses only the exact
@@ -4553,14 +4610,28 @@ sccNativeRegularBlockParticularRunTemplate[request_Association,
     "initial_validity" -> ConstantArray[Null, dimension],
     "source" -> Null, "return_u" -> False|>]];
 
+sccNativeEncodedRegularBlockParticularRunTemplate[
+    request_Association, dimension_Integer, zero_] := Module[
+  {run = sccNativeColumnRun[request], initial},
+  initial = Lookup[run, "initial", {}];
+  Join[run, <|"p" -> 0, "has_initial" -> False,
+    "adaptive_probe" -> False, "a_target" -> zero,
+    "b_target" -> zero, "a_shift_min" -> 0,
+    "initial" -> ConstantArray[zero, Length[initial]],
+    "initial_validity" -> ConstantArray[Null, dimension],
+    "source" -> Null, "return_u" -> False|>]];
+
 sccNativeRegularBlockStatisticsQ[stats_, handle_Association,
-    blockDimensions_List] := Module[
+    blockDimensions_List, domain_String:"rational"] := Module[
   {blockCharts = Lookup[stats, "block_charts", None],
-   evidence = Lookup[stats, "capability_evidence", None]},
+   evidence = Lookup[stats, "capability_evidence", None], expected},
+  expected = Switch[domain,
+    "rational", "exact-rational-regular-block-dag-column-v2",
+    "acb", "acb-regular-block-dag-column-v2",
+    _, Return[False, Module]];
   sccNativeCompositeStatisticsQ[stats, handle] &&
     TrueQ[Lookup[stats, "execution_implemented", False]] &&
-    Lookup[stats, "execution_scope", None] ===
-      "exact-rational-regular-block-dag-column-v2" &&
+    Lookup[stats, "execution_scope", None] === expected &&
     TrueQ[Lookup[stats, "regular_block_dag_column_execution", False]] &&
     TrueQ[!Lookup[stats, "scalar_block_dag_column_execution", True]] &&
     TrueQ[!Lookup[stats, "general_scc_execution", True]] &&
@@ -4701,7 +4772,8 @@ sccNativeReachableTargetBlocks[components_List, edges_List,
 SolveNativeSCCBasisColumn[cs_Association, req_Association,
     seedBlock_Integer, seedLocalComponent_Integer:1] := Module[
   {prepared, signature, cacheKey, cached, execution, blockDimensions,
-   runRecords, contract, canonicalRequests, badBlocks, components, edges,
+   runRecords, taskRecords, contract, domain, canonicalRequests, badBlocks,
+   components, edges,
    topological, targetBlocks, seedRun, targetRuns, inputDigits,
    checkpointIdentity, checkpointDigest, seed, targets, stats, response,
    backendID, provenance, forbiddenPayloadKeys, scalarExecution,
@@ -4709,7 +4781,8 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
    selectedSeedLocalComponent, expectedBasisIndex, expectedCapability,
    expectedProvenanceSchema, columnPlans, selectedPlan,
    singularExecution, seedTag, targetTags, plannedTargetBlocks,
-   provenanceLocalComponent, result},
+   provenanceLocalComponent, encodedZero, encodedOne, encodedIntegers,
+   result},
   If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumn] === {},
     err["E5", cs, <|"Detail" ->
       "CppBackend persistent SCC column bridge is not available"|>]];
@@ -4725,11 +4798,14 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
   execution = cached["Execution"];
   blockDimensions = execution["BlockDimensions"];
   runRecords = execution["Runs"];
+  taskRecords = execution["TaskMetadata"];
   contract = execution["Contract"];
+  domain = Lookup[contract, "Domain", None];
   components = execution["Components"];
   edges = execution["CondensationEdges"];
   topological = execution["TopologicalOrder"];
   columnPlans = execution["ColumnPlans"];
+  inputDigits = execution["InputDigits"];
   stats = Lookup[execution, "NativeStatistics", None];
   singularExecution = AssociationQ[stats] &&
     MemberQ[{
@@ -4739,17 +4815,24 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
   scalarExecution = AllTrue[blockDimensions, # === 1 &];
   If[Length[blockDimensions] < 2 ||
       Length[runRecords] =!= Length[blockDimensions] ||
+      Length[taskRecords] =!= Length[blockDimensions] ||
       Length[columnPlans] =!= Length[blockDimensions] ||
       Length[components] =!= Length[blockDimensions] ||
       !AllTrue[blockDimensions, IntegerQ[#] && # > 0 &] ||
       !(And @@ MapThread[
         ListQ[#1] && Length[#1] === #2 &, {components, blockDimensions}]) ||
       Total[blockDimensions] =!= cs["SystemSize"] ||
-      Lookup[contract, "Domain", None] =!= "rational" ||
+      !MemberQ[{"rational", "acb"}, domain] ||
       Lookup[contract, "SymbolNames", None] =!= {},
     err["E6", cs, <|"Contract" -> contract,
       "BlockDimensions" -> blockDimensions,
-      "Detail" -> "native SCC column requires two or more exact-rational regular or exact affine-Jordan blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
+      "Detail" -> "native SCC column requires two or more exact-rational or regular-Acb blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
+  If[singularExecution && domain =!= "rational",
+    err["E6", cs, <|"Contract" -> contract,
+      "Detail" -> "native singular SCC execution remains exact-rational because pseudo/resonance decisions require exact affine data"|>]];
+  If[!IntegerQ[inputDigits] || inputDigits < 1,
+    err["E6", cs, <|"InputDigits" -> inputDigits,
+      "Detail" -> "cached native SCC local-metadata precision is malformed"|>]];
   If[seedBlock < 1 || seedBlock > Length[blockDimensions],
     err["E6", cs, <|"SeedBlock" -> seedBlock,
       "Blocks" -> Length[blockDimensions],
@@ -4760,9 +4843,11 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
       "SeedLocalComponent" -> seedLocalComponent,
       "BlockDimension" -> blockDimensions[[seedBlock]],
       "Detail" -> "native SCC seed component is outside the one-based local block range"|>]];
-  If[!(And @@ MapThread[Function[{runs, dimension},
+  If[!(And @@ MapThread[Function[{runs, tasks, dimension},
       ListQ[runs] && Length[runs] === dimension &&
-        AllTrue[runs, AssociationQ]], {runRecords, blockDimensions}]),
+        AllTrue[runs, AssociationQ] && ListQ[tasks] &&
+        Length[tasks] === dimension && AllTrue[tasks, AssociationQ]],
+      {runRecords, taskRecords, blockDimensions}]),
     err["E6", cs, <|"Detail" ->
       "native SCC column requires one captured homogeneous request per local block component"|>]];
   targetBlocks = sccNativeReachableTargetBlocks[components, edges,
@@ -4808,10 +4893,54 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
       "diffexp2-native-scc-regular-singular-scalar-column-v1",
       "diffexp2-native-scc-regular-singular-jordan-column-v2"],
 
-    (* Keep regular scalar v1 on its original request/template/checkpoint
-       path.  In particular the optional component is not added to its wire
-       identity or returned record. *)
-    If[scalarExecution,
+    If[domain === "acb",
+      Block[{$cppSerializationDomain = "acb",
+          $cppSerializationSymbols = {}},
+        encodedZero = cppScalar[0, inputDigits, cs];
+        encodedOne = cppScalar[1, inputDigits, cs];
+        encodedIntegers = Table[cppScalar[n, inputDigits, cs],
+          {n, 0, contract["NMax"]}]];
+      componentMaps = MapThread[Function[{runs, tasks, dimension},
+          MapThread[sccNativeCanonicalEncodedRegularBlockComponent[
+              #1, #2, contract, dimension, encodedZero, encodedOne,
+              encodedIntegers] &, {runs, tasks}]],
+        {runRecords, taskRecords, blockDimensions}];
+      badBlocks = Select[Range[Length[componentMaps]], Function[block,
+        MemberQ[componentMaps[[block]], None] ||
+          Sort[componentMaps[[block]]] =!=
+            Range[blockDimensions[[block]]]]];
+      If[badBlocks =!= {},
+        err["E6", cs, <|"UnsupportedBlocks" -> badBlocks,
+          "DerivedLocalComponents" -> componentMaps,
+          "Detail" -> "captured regular Acb block requests are not one complete exact-encoded eps^0 local basis"|>]];
+      seedRequestIndex = First@FirstPosition[
+        componentMaps[[seedBlock]], seedLocalComponent];
+      selectedSeedLocalComponent =
+        componentMaps[[seedBlock, seedRequestIndex]];
+      seedRun = sccNativeColumnRun[
+        runRecords[[seedBlock, seedRequestIndex]]];
+      targetCanonicalRequests = MapThread[
+        Function[{runs, localComponents},
+          runs[[First@FirstPosition[localComponents, 1]]]],
+        {runRecords, componentMaps}];
+      targetRuns = MapThread[
+        sccNativeEncodedRegularBlockParticularRunTemplate[
+          #1, #2, encodedZero] &,
+        {targetCanonicalRequests[[targetBlocks]],
+         blockDimensions[[targetBlocks]]}];
+      expectedBasisIndex =
+        components[[seedBlock, selectedSeedLocalComponent]] - 1;
+      expectedCapability = If[scalarExecution,
+        "acb-regular-scalar-block-dag-column-v1",
+        "acb-regular-block-dag-column-v2"];
+      expectedProvenanceSchema = If[scalarExecution,
+        "diffexp2-native-scc-acb-regular-scalar-column-v1",
+        "diffexp2-native-scc-acb-regular-column-v2"],
+
+      (* Keep exact regular scalar v1 on its original request/template and
+         checkpoint path. In particular, the optional component is not added
+         to its wire identity or returned record. *)
+      If[scalarExecution,
       canonicalRequests = First /@ runRecords;
       badBlocks = Select[Range[Length[canonicalRequests]],
         !sccNativeCanonicalScalarHomogeneousRequestQ[
@@ -4857,16 +4986,12 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
       expectedCapability =
         "exact-rational-regular-block-dag-column-v2";
       expectedProvenanceSchema =
-        "diffexp2-native-scc-column-v2"];
+        "diffexp2-native-scc-column-v2"]];
     seedTag = <|"a" -> 0, "b" -> 0, "p" -> 0|>;
     targetTags = Map[<|"a" -> 0, "b" -> 0,
         "p" -> # ["p"]|> &, targetRuns]];
-  inputDigits = execution["InputDigits"];
   provenanceLocalComponent = If[scalarExecution, None,
     selectedSeedLocalComponent];
-  If[!IntegerQ[inputDigits] || inputDigits < 1,
-    err["E6", cs, <|"InputDigits" -> inputDigits,
-      "Detail" -> "cached native SCC local-metadata precision is malformed"|>]];
   checkpointDigest = Hash[{cacheKey,
       execution["ParentIdentity"], prepared, seedBlock, seedRun,
       MapThread[Rule, {targetBlocks, targetRuns}]}, "SHA256"];
@@ -4892,7 +5017,7 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
           stats, prepared, blockDimensions, scalarExecution],
         !scalarExecution &&
           !sccNativeRegularBlockStatisticsQ[
-            stats, prepared, blockDimensions]],
+            stats, prepared, blockDimensions, domain]],
     err["E6", cs, <|"NativeStatistics" -> stats,
       "ExpectedCapability" -> expectedCapability,
       "Detail" -> "retained native SCC does not advertise the required strict regular or exact affine-Jordan block-DAG column capability"|>]];

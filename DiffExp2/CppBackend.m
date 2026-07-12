@@ -37,6 +37,7 @@ PersistentEndpointStatistics::usage = "PersistentEndpointStatistics[handle] retu
 ExportPersistentEndpoint::usage = "ExportPersistentEndpoint[handle, checkpointIdentity, outputDigits] explicitly exports the retained specialized Acb epsilon vector for final compatibility.";
 ReleasePersistentEndpoint::usage = "ReleasePersistentEndpoint[handle] releases one retained native endpoint result. A second release is a loud native error.";
 CreatePersistentTilePlan::usage = "CreatePersistentTilePlan[owner, lower, upper, checkpointIdentity, divisionOrder] asks the persistent C++ session to build and retain exact lower/upper arm plans from retained chart handles. Exact match coordinates and physical/local tile intervals come from the native planner; DivisionOrder defaults to 3.";
+CreatePersistentArmTilePlan::usage = "CreatePersistentArmTilePlan[owner, arm, checkpointIdentity, divisionOrder] asks the persistent C++ session to build and retain one exact lower or upper arm plan without fabricating an opposite arm. The native planner derives the arm name from its exact direction; DivisionOrder defaults to 3.";
 PersistentTilePlanStatistics::usage = "PersistentTilePlanStatistics[handle] returns the retained immutable lower/upper native plan, including exact match and tile intervals plus branch/prescription provenance.";
 PersistentTileMatchInterval::usage = "PersistentTileMatchInterval[handle, arm, index] returns one exact native match handoff for arm \"lower\" or \"upper\". Wolfram indices are one-based.";
 PersistentTileIntegrationInterval::usage = "PersistentTileIntegrationInterval[handle, arm, index] returns one exact physical/local tile interval selected by the retained native plan. Wolfram indices are one-based.";
@@ -1092,6 +1093,24 @@ CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
     "session" -> session, "checkpoint_identity" -> checkpointIdentity,
     "division_order" -> divisionOrder, "lower" -> lower,
     "upper" -> upper|>]];
+
+CreatePersistentArmTilePlan[owner_, arm_Association,
+    checkpointIdentity_String, divisionOrder_:3] := Module[
+  {session = persistentCheckpointSession[owner], required},
+  If[FailureQ[session], Return[session, Module]];
+  If[StringLength[checkpointIdentity] == 0 || !IntegerQ[divisionOrder] ||
+      divisionOrder < 2,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "native single-arm tile planning requires a nonempty checkpoint identity and integer DivisionOrder >= 2"|>],
+      Module]];
+  required = Sort[{"from_exact", "to_exact", "charts", "topology"}];
+  If[Sort[Keys[arm]] =!= required,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "the native tile arm must contain exactly from_exact, to_exact, charts, and topology"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.plan_arm",
+    "session" -> session, "checkpoint_identity" -> checkpointIdentity,
+    "division_order" -> divisionOrder, "arm" -> arm|>]];
 
 PersistentTilePlanStatistics[handle_Association] := Module[
   {tokens = persistentTilePlanHandles[handle]},

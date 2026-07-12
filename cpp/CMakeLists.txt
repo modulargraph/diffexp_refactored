@@ -247,6 +247,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_parallel_arms
     COMMAND test_diffexp2_persistent_parallel_arms)
 
+  add_executable(test_diffexp2_persistent_singular_scc_arms
+    tests/test_persistent_singular_scc_arms.cpp)
+  target_compile_features(test_diffexp2_persistent_singular_scc_arms
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_singular_scc_arms
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_singular_scc_arms
+    COMMAND test_diffexp2_persistent_singular_scc_arms)
+
   add_executable(test_diffexp2_persistent_rational_row
     tests/test_persistent_rational_row.cpp)
   target_compile_features(test_diffexp2_persistent_rational_row

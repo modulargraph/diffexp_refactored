@@ -86,12 +86,26 @@ assert["common prefactor shifts cancel instead of becoming recursive halos",
     runtimeLedger["DeliverableCompleteMax"] === 0,
   {runtimeParity, runtimeLedger}];
 
-tooShallow = ft2FinalizeNativeEpsilonPlan[plan, {4, 3}, 9];
-execution = ft2FinalizeNativeEpsilonPlan[plan, {4, 3}, 10];
-assert["deepest prefactors are charged exactly once through their gauge offset",
+deepBoundary[requested_Integer, prefactor_Integer] := Module[
+  {working = requested + prefactor},
+  <|"BoundaryValues" -> ConstantArray[
+      ConstantArray[0, working + 1], 2],
+    "EpsPrefactors" -> ConstantArray[prefactor, 2],
+    "WorkingEpsilonOrder" -> working,
+    "RequestedEpsilonOrder" -> requested|>];
+tooShallow = ft2FinalizeNativeEpsilonPlan[
+  plan, deepBoundary[6, 3], 6];
+execution = ft2FinalizeNativeEpsilonPlan[
+  plan, deepBoundary[7, 3], 7];
+assert["deepest API padding covers the gauge offset without charging it twice",
   FailureQ[tooShallow] && AssociationQ[execution] &&
     execution["DeepGaugeOffset"] === 3 &&
-    execution["DeepRequiredBoundaryOrder"] === 10 &&
+    execution["DeepRequiredSourceCompleteMax"] === 10 &&
+    execution["DeepRequestedBoundaryOrder"] === 7 &&
+    execution["DeepBoundaryCompleteMax"] === 10 &&
+    execution["Record", "DeepBoundaryWorkingEpsilonOrder"] === 10 &&
+    execution["Record", "DeepRequestedBoundarySurplus"] === 0 &&
+    execution["Record", "DeepSourceSurplus"] === 0 &&
     ft2NativeEpsilonExecutionRecordQ[
       execution["Record"], execution["Identity"], plan],
   {tooShallow, execution}];

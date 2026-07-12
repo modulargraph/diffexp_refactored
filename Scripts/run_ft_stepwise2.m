@@ -973,15 +973,62 @@ ft2NativeEpsilonPlanQ[plan_] := Module[
         Lookup[saved, "IntrinsicLoss", -1] >= 0]]]
   ];
 
-ft2FinalizeNativeEpsilonPlan[plan_Association, deepPrefactors_List,
-    boundaryOrder_Integer] := Module[
-  {deepLevel, relative, gaugeOffset, requiredBoundaryOrder, record,
-   identity},
+(* DeepestLevelBoundary's order argument is the requested PHYSICAL Laurent
+   top B.  Its returned finite rows are padded through
+
+                         S = B + Max[p_i],
+
+   and report that edge as WorkingEpsilonOrder.  Keep B and S distinct: the
+   relative-gauge offset is charged against S, not against B a second time. *)
+ft2DeepBoundaryWindow[deepBoundary_Association,
+    requestedBoundaryOrder_Integer] := Module[
+  {values = Lookup[deepBoundary, "BoundaryValues", None],
+   prefactors = Lookup[deepBoundary, "EpsPrefactors", None], widths,
+   completeMax, workingOrder =
+     Lookup[deepBoundary, "WorkingEpsilonOrder", None],
+   reportedRequested =
+     Lookup[deepBoundary, "RequestedEpsilonOrder", None], expectedMax},
+  If[requestedBoundaryOrder < 0 || !ListQ[values] || values === {} ||
+      !AllTrue[values, ListQ] || !ListQ[prefactors] ||
+      Length[prefactors] =!= Length[values] ||
+      !AllTrue[prefactors, IntegerQ[#] && # >= 0 &],
+    Return[ft2NativeFailure[
+      "deepest boundary returned malformed finite rows or epsilon prefactors",
+      <|"RequestedBoundaryOrder" -> requestedBoundaryOrder,
+        "Prefactors" -> prefactors|>], Module]];
+  widths = Length /@ values;
+  If[MemberQ[widths, 0] || Length[DeleteDuplicates[widths]] =!= 1,
+    Return[ft2NativeFailure[
+      "deepest boundary rows do not have one common nonempty epsilon window",
+      <|"Widths" -> widths|>], Module]];
+  completeMax = First[widths] - 1;
+  expectedMax = requestedBoundaryOrder + Max[prefactors];
+  If[reportedRequested =!= requestedBoundaryOrder ||
+      workingOrder =!= completeMax || completeMax =!= expectedMax,
+    Return[ft2NativeFailure[
+      "deepest boundary order metadata does not match its returned finite window",
+      <|"RequestedBoundaryOrder" -> requestedBoundaryOrder,
+        "ReportedRequestedEpsilonOrder" -> reportedRequested,
+        "WorkingEpsilonOrder" -> workingOrder,
+        "ReturnedCompleteMax" -> completeMax,
+        "ExpectedCompleteMax" -> expectedMax|>], Module]];
+  <|"BoundaryPrefactors" -> prefactors,
+    "RequestedBoundaryOrder" -> requestedBoundaryOrder,
+    "CompleteMax" -> completeMax,
+    "WorkingEpsilonOrder" -> workingOrder|>];
+
+ft2FinalizeNativeEpsilonPlan[plan_Association,
+    deepBoundary_Association, requestedBoundaryOrder_Integer] := Module[
+  {deepLevel, relative, window, deepPrefactors, gaugeOffset,
+   requiredSourceCompleteMax, sourceCompleteMax, record, identity},
   If[!ft2NativeEpsilonPlanQ[plan],
     Return[ft2NativeFailure[
       "cannot finalize a malformed native epsilon plan"], Module]];
+  window = ft2DeepBoundaryWindow[deepBoundary, requestedBoundaryOrder];
+  If[FailureQ[window], Return[window, Module]];
   deepLevel = plan["Levels"][plan["NumLevels"]];
   relative = deepLevel["Gauge", "RelativePrefactors"];
+  deepPrefactors = window["BoundaryPrefactors"];
   If[Length[deepPrefactors] =!= Length[relative] ||
       !AllTrue[deepPrefactors, IntegerQ],
     Return[ft2NativeFailure[
@@ -989,33 +1036,45 @@ ft2FinalizeNativeEpsilonPlan[plan_Association, deepPrefactors_List,
       <|"DeepPrefactors" -> deepPrefactors,
         "RelativeGauge" -> relative|>], Module]];
   gaugeOffset = Max[deepPrefactors - relative];
-  requiredBoundaryOrder = plan["DeepRequiredRawTop"] + gaugeOffset;
-  If[boundaryOrder < requiredBoundaryOrder,
+  requiredSourceCompleteMax =
+    plan["DeepRequiredRawTop"] + gaugeOffset;
+  sourceCompleteMax = window["CompleteMax"];
+  If[sourceCompleteMax < requiredSourceCompleteMax,
     Return[ft2NativeFailure[
-      "deepest boundary order is below its exact planned gauge requirement",
-      <|"BoundaryOrder" -> boundaryOrder,
-        "RequiredBoundaryOrder" -> requiredBoundaryOrder|>], Module]];
+      "deepest returned boundary window is below its exact planned gauge requirement",
+      <|"RequestedBoundaryOrder" -> requestedBoundaryOrder,
+        "SourceCompleteMax" -> sourceCompleteMax,
+        "RequiredSourceCompleteMax" -> requiredSourceCompleteMax|>],
+    Module]];
   record = <|
-    "Schema" -> "FeynmanTrick.NativeEpsilonExecutionPlan/v1",
+    "Schema" -> "FeynmanTrick.NativeEpsilonExecutionPlan/v2",
     "BasePlanIdentity" -> plan["Identity"],
     "BasePlanRecord" -> plan["Record"],
     "DeepBoundaryPrefactors" -> deepPrefactors,
     "DeepGaugeOffset" -> gaugeOffset,
-    "DeepRequiredBoundaryOrder" -> requiredBoundaryOrder,
-    "DeepBoundaryOrder" -> boundaryOrder,
-    "DeepBoundarySurplus" -> boundaryOrder - requiredBoundaryOrder|>;
+    "DeepRequiredSourceCompleteMax" -> requiredSourceCompleteMax,
+    "DeepRequestedBoundaryOrder" -> requestedBoundaryOrder,
+    "DeepBoundaryCompleteMax" -> sourceCompleteMax,
+    "DeepBoundaryWorkingEpsilonOrder" ->
+      window["WorkingEpsilonOrder"],
+    "DeepRequestedBoundarySurplus" ->
+      requestedBoundaryOrder - plan["DeepRequiredRawTop"],
+    "DeepSourceSurplus" ->
+      sourceCompleteMax - requiredSourceCompleteMax|>;
   identity = ft2CanonicalIdentity[
     "ft2-native-epsilon-execution-plan-", record];
   <|"Record" -> record, "Identity" -> identity,
     "DeepGaugeOffset" -> gaugeOffset,
-    "DeepRequiredBoundaryOrder" -> requiredBoundaryOrder,
-    "DeepBoundaryOrder" -> boundaryOrder|>];
+    "DeepRequiredSourceCompleteMax" -> requiredSourceCompleteMax,
+    "DeepRequestedBoundaryOrder" -> requestedBoundaryOrder,
+    "DeepBoundaryCompleteMax" -> sourceCompleteMax|>];
 
 ft2NativeEpsilonExecutionRecordQ[record_, identity_, plan_] := Module[
-  {relative, deepPrefactors, gaugeOffset, requiredOrder},
+  {relative, deepPrefactors, gaugeOffset, requiredSourceCompleteMax,
+   requestedBoundaryOrder, sourceCompleteMax, workingOrder},
   If[!ft2NativeEpsilonPlanQ[plan] || !AssociationQ[record] ||
       Lookup[record, "Schema", None] =!=
-        "FeynmanTrick.NativeEpsilonExecutionPlan/v1" ||
+        "FeynmanTrick.NativeEpsilonExecutionPlan/v2" ||
       identity =!= ft2CanonicalIdentity[
         "ft2-native-epsilon-execution-plan-", record] ||
       Lookup[record, "BasePlanIdentity", None] =!= plan["Identity"] ||
@@ -1027,13 +1086,25 @@ ft2NativeEpsilonExecutionRecordQ[record_, identity_, plan_] := Module[
   If[!ListQ[deepPrefactors] || Length[deepPrefactors] =!= Length[relative] ||
       !AllTrue[deepPrefactors, IntegerQ], Return[False, Module]];
   gaugeOffset = Max[deepPrefactors - relative];
-  requiredOrder = plan["DeepRequiredRawTop"] + gaugeOffset;
+  requiredSourceCompleteMax =
+    plan["DeepRequiredRawTop"] + gaugeOffset;
+  requestedBoundaryOrder =
+    Lookup[record, "DeepRequestedBoundaryOrder", None];
+  sourceCompleteMax = Lookup[record, "DeepBoundaryCompleteMax", None];
+  workingOrder =
+    Lookup[record, "DeepBoundaryWorkingEpsilonOrder", None];
   TrueQ[Lookup[record, "DeepGaugeOffset", None] === gaugeOffset &&
-    Lookup[record, "DeepRequiredBoundaryOrder", None] === requiredOrder &&
-    IntegerQ[Lookup[record, "DeepBoundaryOrder", None]] &&
-    record["DeepBoundaryOrder"] >= requiredOrder &&
-    Lookup[record, "DeepBoundarySurplus", None] ===
-      record["DeepBoundaryOrder"] - requiredOrder]
+    Lookup[record, "DeepRequiredSourceCompleteMax", None] ===
+      requiredSourceCompleteMax &&
+    IntegerQ[requestedBoundaryOrder] && requestedBoundaryOrder >= 0 &&
+    IntegerQ[sourceCompleteMax] &&
+    sourceCompleteMax === workingOrder &&
+    sourceCompleteMax === requestedBoundaryOrder + Max[deepPrefactors] &&
+    sourceCompleteMax >= requiredSourceCompleteMax &&
+    Lookup[record, "DeepRequestedBoundarySurplus", None] ===
+      requestedBoundaryOrder - plan["DeepRequiredRawTop"] &&
+    Lookup[record, "DeepSourceSurplus", None] ===
+      sourceCompleteMax - requiredSourceCompleteMax]
   ];
 
 ft2ValidateNativePlanRuntimeLevel[planned_Association,
@@ -1432,7 +1503,8 @@ runExample[name_String] := Module[
    resumeCheckpoint = None, startLevel, finalRaw = None, ftEps, dimVar,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
    nativeEpsilonExecution = None, initialDeepPrefactors,
-   deepRelativeGauge, deepGaugeOffset, exactDeepBoundaryOrder},
+   deepRelativeGauge, deepGaugeOffset, deepBoundaryWindow,
+   deepRequiredSourceCompleteMax, deepBoundaryDeficit},
   Print["EXAMPLE ", name];
   FeynmanTrick`SetFTOption["DimensionExpression", FTExampleDimension[name]];
   topology = FTExampleTopology[name, "step"];
@@ -1494,7 +1566,12 @@ runExample[name_String] := Module[
       ftData, boundaryOrder];
     If[!AssociationQ[deepBoundary], Return[$Failed]];
     If[recurrenceBackend === "Cpp",
-      initialDeepPrefactors = deepBoundary["EpsPrefactors"];
+      deepBoundaryWindow =
+        ft2DeepBoundaryWindow[deepBoundary, boundaryOrder];
+      If[FailureQ[deepBoundaryWindow],
+        Print["FTLADDER NATIVE DEEP WINDOW FAIL ", deepBoundaryWindow];
+        Return[$Failed]];
+      initialDeepPrefactors = deepBoundaryWindow["BoundaryPrefactors"];
       deepRelativeGauge = nativeEpsilonPlan["Levels"][nLevels]
         ["Gauge"]["RelativePrefactors"];
       If[Length[initialDeepPrefactors] =!= Length[deepRelativeGauge] ||
@@ -1503,22 +1580,33 @@ runExample[name_String] := Module[
           initialDeepPrefactors, " gauge=", deepRelativeGauge];
         Return[$Failed]];
       deepGaugeOffset = Max[initialDeepPrefactors - deepRelativeGauge];
-      exactDeepBoundaryOrder =
+      deepRequiredSourceCompleteMax =
         nativeEpsilonPlan["DeepRequiredRawTop"] + deepGaugeOffset;
-      If[boundaryOrder < exactDeepBoundaryOrder,
-        Print["FTLADDER NATIVE DEEP RETRY initial=", boundaryOrder,
-          " exact=", exactDeepBoundaryOrder,
+      deepBoundaryDeficit = Max[0, deepRequiredSourceCompleteMax -
+        deepBoundaryWindow["CompleteMax"]];
+      If[deepBoundaryDeficit > 0,
+        Print["FTLADDER NATIVE DEEP RETRY requested=", boundaryOrder,
+          " sourceAvailable=", deepBoundaryWindow["CompleteMax"],
+          " sourceRequired=", deepRequiredSourceCompleteMax,
+          " deficit=", deepBoundaryDeficit,
           " gaugeOffset=", deepGaugeOffset];
-        boundaryOrder = exactDeepBoundaryOrder;
+        boundaryOrder += deepBoundaryDeficit;
         deepBoundary =
           FeynmanTrick`BoundaryConditions`DeepestLevelBoundary[
             ftData, boundaryOrder];
-        If[!AssociationQ[deepBoundary] ||
-            deepBoundary["EpsPrefactors"] =!= initialDeepPrefactors,
+        If[!AssociationQ[deepBoundary],
           Print["FTLADDER NATIVE DEEP RETRY FAIL"];
+          Return[$Failed]];
+        deepBoundaryWindow =
+          ft2DeepBoundaryWindow[deepBoundary, boundaryOrder];
+        If[FailureQ[deepBoundaryWindow] ||
+            deepBoundaryWindow["BoundaryPrefactors"] =!=
+              initialDeepPrefactors,
+          Print["FTLADDER NATIVE DEEP RETRY FAIL window=",
+            deepBoundaryWindow];
           Return[$Failed]]];
       nativeEpsilonExecution = ft2FinalizeNativeEpsilonPlan[
-        nativeEpsilonPlan, deepBoundary["EpsPrefactors"], boundaryOrder];
+        nativeEpsilonPlan, deepBoundary, boundaryOrder];
       If[FailureQ[nativeEpsilonExecution],
         Print["FTLADDER NATIVE EPSILON FINALIZE FAIL ",
           nativeEpsilonExecution];

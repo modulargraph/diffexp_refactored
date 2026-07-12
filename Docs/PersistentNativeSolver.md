@@ -316,6 +316,14 @@ Writes use `temporary -> fsync -> atomic rename`.  Restore validates every
 identity before exposing a session handle.  Unknown mandatory sections fail;
 unknown explicitly optional sections may be skipped.
 
+The implemented schema-1 checkpoint core now covers quiescent prepared chart
+operators and composite SCC graphs, including exact analytic-regularization
+metadata and cumulative session counters.  It reconstructs the typed state
+inside C++ and verifies exact signatures without replaying Wolfram
+preprocessing.  Retained local/match/endpoint and completed line/tile state
+remain mandatory future sections; schema 1 rejects such live state rather
+than emitting a checkpoint that only appears resumable.
+
 ## Migration milestones
 
 1. Persistent session registry and retained prepared recurrence operators.

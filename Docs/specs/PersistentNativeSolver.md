@@ -534,6 +534,54 @@ not a `SolveHomogeneous` or transport dispatch path.
 {"schema":2,"op":"scc.release","session":"s:1","scc":"scc:1"}
 ```
 
+### Native checkpoint core (schema 1)
+
+The first native checkpoint schema persists a quiescent session's prepared
+chart operators and retained composite SCC graph.  The file is an opaque
+binary `DE2CP001` container with big-endian lengths and independent CRC32
+checksums for its small JSON header and canonical native payload.  Writes use
+a mode-0600 temporary file, `fsync`, atomic rename, and containing-directory
+`fsync`.  No coefficient payload is returned through LibraryLink.
+
+```json
+{"schema":2,"op":"checkpoint.save","session":"s:1",
+ "path":"/absolute/path/run.de2cp",
+ "checkpoint_identity":"collision-certified-run-identity"}
+```
+
+```json
+{"schema":2,"op":"checkpoint.restore",
+ "path":"/absolute/path/run.de2cp",
+ "expected_identity":"collision-certified-run-identity"}
+```
+
+The payload contains the exact session domain, precision, declared regulator
+field, analytic/branch identity, capacities, monotone handle/cumulative work
+counters, every retained chart's complete static operator signature and SCC
+certificate, and every retained composite's exact parent matrices, graph,
+work contract, block identities, and prepared coupling kernels.  Restore runs
+that canonical material directly through the C++ preparation parsers, keeps
+the scoped chart/SCC tokens stable in the new session, and then rechecks each
+reconstructed signature byte-for-byte.  Wolfram does not rebuild matrices,
+SCCs, or prepared multipliers.  A schema/build/FLINT/configuration/checkpoint,
+analytic, chart, or SCC identity mismatch is a loud failure; unknown
+mandatory sections are never skipped.
+
+The Wolfram lifecycle is
+``CppBackend`SavePersistentCheckpoint[owner, path, identity]`` and
+``CppBackend`RestorePersistentCheckpoint[path, expectedIdentity]``.  Restore
+returns the new session and exact chart/SCC handle maps and registers that
+session for `ClearPersistentSessions[]`.  It intentionally does not recreate
+Wolfram's process-local cache keys; native resume uses the returned handles.
+
+This schema is deliberately narrower than the final checkpoint contract.  It
+rejects active or retained local and match state.  Endpoint, line, and tile
+handles are also declared as deferred handle kinds; they must gain typed
+sections before a checkpoint can represent an in-flight transport arm.  An
+SCC whose public diagonal chart handle was already released is likewise
+rejected, because schema 1 has no independent content-addressed chart section.
+These cases fail instead of silently writing a partial restart state.
+
 ### Inspect and destroy
 
 ```json
@@ -572,4 +620,5 @@ do so through the retained local; matching must preserve the same rule.
 The next native milestones extend the retained session rather than adding
 new stateless calls: matching/refinement, promotion from stored-truncation to
 certified full-local residuals once rigorous tail majorants exist, endpoint
-limits and line/tile integration, and finally native checkpoint state.
+limits and line/tile integration, and checkpoint sections for those retained
+states and completed transport arms.

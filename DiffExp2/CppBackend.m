@@ -28,6 +28,8 @@ PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] 
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
+SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for the prepared charts and retained SCC graph in owner's persistent session. Active local, match, endpoint, line, or tile handles are rejected by checkpoint schema v1.";
+RestorePersistentCheckpoint::usage = "RestorePersistentCheckpoint[path, expectedIdentity] validates and restores an opaque native checkpoint into a new persistent C++ session without replaying Wolfram preprocessing. It returns the restored session plus exact chart and SCC handle maps.";
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
 ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart and SCC handle registries.";
 PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
@@ -46,6 +48,7 @@ $persistentSessionCache = <||>;
 $persistentChartCache = <||>;
 $persistentSCCCache = <||>;
 $persistentPreparedTokenCache = <||>;
+$persistentRestoredSessionHandles = <||>;
 $persistentChartCacheMax = 1024;
 $persistentSCCCacheMax = 128;
 
@@ -380,6 +383,7 @@ persistentCloseSessionHandle[handle_String] := Module[
   sccKeys = Keys@Select[$persistentSCCCache,
     Lookup[#, "Session", None] === handle &];
   KeyDropFrom[$persistentSessionCache, sessionKeys];
+  KeyDropFrom[$persistentRestoredSessionHandles, handle];
   KeyDropFrom[$persistentChartCache, chartKeys];
   KeyDropFrom[$persistentSCCCache, sccKeys];
   activeTokens = DeleteDuplicates@Select[
@@ -878,20 +882,60 @@ ReleasePersistentLocal[handle_Association] := Module[
   RunRequest[<|"schema" -> 2, "op" -> "local.release",
     "session" -> tokens["Session"], "local" -> tokens["Local"]|>]];
 
+persistentCheckpointSession[owner_String] := If[
+  StringLength[owner] > 0, owner,
+  Failure["CppBackend", <|"Detail" ->
+    "persistent checkpoint session token must be nonempty"|>]];
+persistentCheckpointSession[owner_Association] := Module[{session},
+  session = Lookup[owner, "session", Lookup[owner, "Session", None]];
+  If[StringQ[session] && StringLength[session] > 0, session,
+    Failure["CppBackend", <|"Detail" ->
+      "persistent checkpoint owner requires an exact session token"|>]]];
+persistentCheckpointSession[_] := Failure["CppBackend", <|"Detail" ->
+  "persistent checkpoint owner must be a session string or opaque persistent handle"|>];
+
+SavePersistentCheckpoint[owner_, path_String, identity_String] := Module[
+  {session = persistentCheckpointSession[owner], expanded},
+  If[FailureQ[session], Return[session, Module]];
+  If[StringLength[identity] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent checkpoint identity must be nonempty"|>], Module]];
+  expanded = ExpandFileName[path];
+  RunRequest[<|"schema" -> 2, "op" -> "checkpoint.save",
+    "session" -> session, "path" -> expanded,
+    "checkpoint_identity" -> identity|>]];
+
+RestorePersistentCheckpoint[path_String, expectedIdentity_String] := Module[
+  {expanded, response, session},
+  If[StringLength[expectedIdentity] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "expected persistent checkpoint identity must be nonempty"|>], Module]];
+  expanded = ExpandFileName[path];
+  response = RunRequest[<|"schema" -> 2, "op" -> "checkpoint.restore",
+    "path" -> expanded, "expected_identity" -> expectedIdentity|>];
+  If[persistentCommandOKQ[response],
+    session = Lookup[response, "session", None];
+    If[StringQ[session],
+      AssociateTo[$persistentRestoredSessionHandles, session -> True]]];
+  response];
+
 ClearPersistentSessions[] := Module[{handles},
-  handles = DeleteDuplicates[
-    (Lookup[#, "Handle"] & /@ Values[$persistentSessionCache])];
+  handles = DeleteDuplicates@Join[
+    (Lookup[#, "Handle"] & /@ Values[$persistentSessionCache]),
+    Keys[$persistentRestoredSessionHandles]];
   Scan[Function[handle, Quiet[Check[RunRequest[<|"schema" -> 2,
       "op" -> "session.close", "session" -> handle|>], Null]]], handles];
   $persistentSessionCache = <||>;
   $persistentChartCache = <||>;
   $persistentSCCCache = <||>;
   $persistentPreparedTokenCache = <||>;
+  $persistentRestoredSessionHandles = <||>;
   Null];
 
 PersistentSessionInformation[] := Module[{handles},
-  handles = DeleteDuplicates[
-    (Lookup[#, "Handle"] & /@ Values[$persistentSessionCache])];
+  handles = DeleteDuplicates@Join[
+    (Lookup[#, "Handle"] & /@ Values[$persistentSessionCache]),
+    Keys[$persistentRestoredSessionHandles]];
   AssociationMap[RunRequest[<|"schema" -> 2, "op" -> "session.stats",
       "session" -> #|>] &, handles]];
 

@@ -1,5 +1,6 @@
 #include "diffexp2/json_codec.hpp"
 
+#include "diffexp2/checkpoint.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
 #include "diffexp2/matching.hpp"
@@ -53,6 +54,21 @@ std::uint32_t as_u32(const json::value& value, const char* label) {
   if (number < 0 || number > std::numeric_limits<std::uint32_t>::max())
     throw std::invalid_argument(std::string(label) + " is outside uint32 range");
   return static_cast<std::uint32_t>(number);
+}
+
+std::uint64_t as_u64(const json::value& value, const char* label) {
+  if (value.is_uint64()) return value.as_uint64();
+  if (value.is_int64() && value.as_int64() >= 0)
+    return static_cast<std::uint64_t>(value.as_int64());
+  throw std::invalid_argument(std::string(label) +
+                              " must be a nonnegative integer");
+}
+
+double as_double(const json::value& value, const char* label) {
+  if (value.is_double()) return value.as_double();
+  if (value.is_int64()) return static_cast<double>(value.as_int64());
+  if (value.is_uint64()) return static_cast<double>(value.as_uint64());
+  throw std::invalid_argument(std::string(label) + " must be numeric");
 }
 
 std::int32_t as_i32(const json::value& value, const char* label) {
@@ -3313,6 +3329,9 @@ struct SolverSession {
   double total_local_run_parse_ms = 0.0;
   double total_local_kernel_ms = 0.0;
   double total_local_match_ms = 0.0;
+  std::uint64_t checkpoint_generation = 0;
+  std::uint64_t checkpoint_restore_count = 0;
+  std::string restored_from_checkpoint_identity;
   bool closed = false;
   mutable std::mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
@@ -3914,6 +3933,531 @@ std::string static_problem_signature(const json::object& problem,
   return json::serialize(exact);
 }
 
+constexpr const char* kCheckpointFormat =
+    "diffexp2-persistent-native-session";
+constexpr std::uint32_t kCheckpointPayloadSchema = 1;
+
+json::object run_session_command(const json::object& root);
+
+void require_exact_keys(const json::object& object,
+                        std::initializer_list<std::string_view> expected,
+                        const char* label) {
+  std::set<std::string> actual;
+  for (const auto& entry : object) actual.emplace(entry.key());
+  std::set<std::string> wanted;
+  for (const auto key : expected) wanted.emplace(key);
+  if (actual != wanted)
+    throw std::invalid_argument(std::string(label) +
+                                " has unknown or missing fields");
+}
+
+std::uint64_t scoped_handle_id(const std::string& handle,
+                               std::string_view prefix,
+                               const char* label) {
+  if (!handle.starts_with(prefix) || handle.size() == prefix.size())
+    throw std::invalid_argument(std::string(label) +
+                                " has an invalid scoped handle");
+  std::uint64_t value = 0;
+  for (std::size_t index = prefix.size(); index < handle.size(); ++index) {
+    const char digit = handle[index];
+    if (digit < '0' || digit > '9')
+      throw std::invalid_argument(std::string(label) +
+                                  " has an invalid scoped handle");
+    const auto unsigned_digit = static_cast<std::uint64_t>(digit - '0');
+    if (value > (std::numeric_limits<std::uint64_t>::max() -
+                 unsigned_digit) / 10)
+      throw std::invalid_argument(std::string(label) +
+                                  " scoped handle overflows uint64");
+    value = value * 10 + unsigned_digit;
+  }
+  if (value == 0)
+    throw std::invalid_argument(std::string(label) +
+                                " scoped handle index must be positive");
+  return value;
+}
+
+json::array encode_strings(const std::vector<std::string>& values) {
+  json::array output;
+  output.reserve(values.size());
+  for (const auto& value : values) output.emplace_back(value);
+  return output;
+}
+
+json::object checkpoint_configuration_record(const SolverSession& session) {
+  return json::object{
+      {"domain", session.domain},
+      {"precision_bits", session.precision_bits},
+      {"output_digits", session.output_digits},
+      {"symbols", encode_strings(session.symbols)},
+      {"analytic", json::parse(session.analytic_identity)},
+      {"chart_capacity", session.chart_capacity},
+      {"local_capacity", session.local_capacity},
+      {"scc_capacity", session.scc_capacity},
+      {"match_capacity", session.match_capacity}};
+}
+
+std::string checkpoint_configuration_identity(const SolverSession& session) {
+  return json::serialize(canonical_json_value(
+      checkpoint_configuration_record(session)));
+}
+
+json::object checkpoint_chart_item(
+    const SolverSession& session,
+    const std::shared_ptr<PreparedChartBase>& chart) {
+  const auto signature_value = json::parse(chart->signature());
+  const auto& signature = as_object(
+      signature_value, "prepared chart exact signature");
+  const auto& analytic = as_object(
+      signature.at("analytic"), "prepared chart analytic signature");
+  if (json::serialize(analytic.at("session")) != session.analytic_identity)
+    throw std::logic_error(
+        "prepared chart session analytic identity changed after retention");
+  if (required_string(signature, "identity") != chart->exact_identity())
+    throw std::logic_error(
+        "prepared chart exact identity changed after retention");
+
+  json::object problem = signature;
+  problem.erase("identity");
+  problem.erase("analytic");
+  problem.erase("scc");
+  json::object request{
+      {"schema", 2}, {"op", "chart.prepare"},
+      {"session", session.handle}, {"key", chart->key()},
+      {"identity", chart->exact_identity()},
+      {"analytic", analytic.at("chart")},
+      {"scc", signature.at("scc")}, {"problem", std::move(problem)}};
+  return json::object{{"handle", chart->handle()},
+                      {"key", chart->key()},
+                      {"identity", chart->exact_identity()},
+                      {"signature", chart->signature()},
+                      {"request", std::move(request)}};
+}
+
+json::object checkpoint_scc_item(
+    const SolverSession& session,
+    const std::shared_ptr<CompositeSCCChartBase>& composite) {
+  const auto signature_value = json::parse(composite->signature());
+  const auto& signature = as_object(
+      signature_value, "retained SCC exact signature");
+  if (required_string(signature, "identity") != composite->exact_identity())
+    throw std::logic_error(
+        "retained SCC exact identity changed after retention");
+  json::object request = signature;
+  request["schema"] = 2;
+  request["op"] = "scc.prepare";
+  request["session"] = session.handle;
+  request["key"] = composite->key();
+  return json::object{{"handle", composite->handle()},
+                      {"key", composite->key()},
+                      {"identity", composite->exact_identity()},
+                      {"signature", composite->signature()},
+                      {"request", std::move(request)}};
+}
+
+json::array checkpoint_identity_manifest(const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(value, "checkpoint retained item");
+    manifest.push_back(json::object{{"handle", item.at("handle")},
+                                    {"key", item.at("key")},
+                                    {"identity", item.at("identity")}});
+  }
+  return manifest;
+}
+
+struct SessionCheckpointSnapshot {
+  json::object header;
+  json::object payload;
+  std::uint64_t generation = 0;
+  std::size_t charts = 0;
+  std::size_t sccs = 0;
+};
+
+SessionCheckpointSnapshot make_checkpoint_snapshot(
+    SolverSession& session, const std::string& checkpoint_identity) {
+  if (session.closed)
+    throw std::invalid_argument("cannot checkpoint a closed solver session");
+  if (session.pending_local_solves != 0 || session.pending_matches != 0)
+    throw std::invalid_argument(
+        "checkpoint requires a quiescent session with no pending local solve or match");
+  if (!session.locals.empty() || !session.matches.empty())
+    throw std::invalid_argument(
+        "checkpoint schema v1 does not serialize retained local or match handles; release them before saving");
+
+  std::vector<std::shared_ptr<PreparedChartBase>> charts;
+  charts.reserve(session.charts.size());
+  for (const auto& [ignored, chart] : session.charts) charts.push_back(chart);
+  std::sort(charts.begin(), charts.end(), [](const auto& left,
+                                             const auto& right) {
+    return scoped_handle_id(left->handle(), "c:", "chart") <
+           scoped_handle_id(right->handle(), "c:", "chart");
+  });
+  std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
+  sccs.reserve(session.sccs.size());
+  for (const auto& [ignored, composite] : session.sccs)
+    sccs.push_back(composite);
+  std::sort(sccs.begin(), sccs.end(), [](const auto& left,
+                                         const auto& right) {
+    return scoped_handle_id(left->handle(), "scc:", "SCC") <
+           scoped_handle_id(right->handle(), "scc:", "SCC");
+  });
+
+  json::array chart_items;
+  chart_items.reserve(charts.size());
+  std::set<std::string> chart_handles;
+  for (const auto& chart : charts) {
+    chart_handles.insert(chart->handle());
+    chart_items.push_back(checkpoint_chart_item(session, chart));
+  }
+  json::array scc_items;
+  scc_items.reserve(sccs.size());
+  for (const auto& composite : sccs) {
+    auto item = checkpoint_scc_item(session, composite);
+    const auto& request = as_object(item.at("request"), "SCC request");
+    for (const auto& raw_block : as_array(request.at("blocks"), "SCC blocks")) {
+      const auto& block = as_object(raw_block, "SCC block");
+      if (!chart_handles.contains(required_string(block, "chart")))
+        throw std::invalid_argument(
+            "checkpoint cannot serialize an SCC whose retained diagonal chart was publicly released");
+    }
+    scc_items.push_back(std::move(item));
+  }
+
+  if (session.checkpoint_generation ==
+      std::numeric_limits<std::uint64_t>::max())
+    throw std::overflow_error("checkpoint generation counter overflow");
+  const auto generation = session.checkpoint_generation + 1;
+  auto configuration = checkpoint_configuration_record(session);
+  json::object counters{
+      {"next_chart", session.next_chart},
+      {"next_local", session.next_local},
+      {"next_scc", session.next_scc},
+      {"next_match", session.next_match},
+      {"total_local_solves", session.total_local_solves},
+      {"total_scc_column_solves", session.total_scc_column_solves},
+      {"total_local_matches", session.total_local_matches},
+      {"total_local_run_parse_ms", session.total_local_run_parse_ms},
+      {"total_local_kernel_ms", session.total_local_kernel_ms},
+      {"total_local_match_ms", session.total_local_match_ms},
+      {"checkpoint_generation", generation},
+      {"checkpoint_restore_count", session.checkpoint_restore_count}};
+  json::object session_record{
+      {"source_handle", session.handle},
+      {"configuration", configuration},
+      {"configuration_identity", checkpoint_configuration_identity(session)},
+      {"counters", std::move(counters)}};
+  json::object payload{
+      {"schema", kCheckpointPayloadSchema},
+      {"session", std::move(session_record)},
+      {"prepared_charts", chart_items},
+      {"prepared_scc", scc_items}};
+  json::array mandatory_sections{"session", "prepared_charts",
+                                  "prepared_scc"};
+  json::array deferred_kinds{"local", "match", "endpoint", "line", "tile"};
+  json::object header{
+      {"format", kCheckpointFormat},
+      {"schema", kCheckpointPayloadSchema},
+      {"build", checkpoint::kBuildIdentity},
+      {"flint", flint_version},
+      {"checkpoint_identity", checkpoint_identity},
+      {"configuration_identity", checkpoint_configuration_identity(session)},
+      {"analytic_identity", json::parse(session.analytic_identity)},
+      {"mandatory_sections", std::move(mandatory_sections)},
+      {"optional_sections", json::array{}},
+      {"deferred_handle_kinds", std::move(deferred_kinds)},
+      {"chart_identities", checkpoint_identity_manifest(chart_items)},
+      {"scc_identities", checkpoint_identity_manifest(scc_items)},
+      {"generation", generation}};
+  return {std::move(header), std::move(payload), generation,
+          charts.size(), sccs.size()};
+}
+
+std::vector<std::string> checkpoint_string_array(const json::value& raw,
+                                                 const char* label) {
+  std::vector<std::string> result;
+  for (const auto& value : as_array(raw, label)) {
+    if (!value.is_string())
+      throw std::invalid_argument(std::string(label) +
+                                  " must contain only strings");
+    result.emplace_back(value.as_string());
+  }
+  return result;
+}
+
+void validate_checkpoint_envelope(const json::object& header,
+                                  const json::object& payload,
+                                  const std::string& expected_identity) {
+  require_exact_keys(header,
+      {"format", "schema", "build", "flint", "checkpoint_identity",
+       "configuration_identity", "analytic_identity", "mandatory_sections",
+       "optional_sections", "deferred_handle_kinds", "chart_identities",
+       "scc_identities", "generation"}, "checkpoint header");
+  require_exact_keys(payload,
+      {"schema", "session", "prepared_charts", "prepared_scc"},
+      "checkpoint payload");
+  if (required_string(header, "format") != kCheckpointFormat ||
+      as_u32(header.at("schema"), "checkpoint header schema") !=
+          kCheckpointPayloadSchema ||
+      as_u32(payload.at("schema"), "checkpoint payload schema") !=
+          kCheckpointPayloadSchema)
+    throw std::invalid_argument("unsupported native checkpoint schema");
+  if (required_string(header, "build") != checkpoint::kBuildIdentity)
+    throw std::invalid_argument(
+        "native checkpoint solver build identity is incompatible");
+  if (required_string(header, "flint") != flint_version)
+    throw std::invalid_argument(
+        "native checkpoint FLINT build identity is incompatible");
+  if (required_string(header, "checkpoint_identity") != expected_identity)
+    throw std::invalid_argument(
+        "native checkpoint identity differs from the expected identity");
+  auto mandatory = checkpoint_string_array(
+      header.at("mandatory_sections"), "mandatory checkpoint sections");
+  std::sort(mandatory.begin(), mandatory.end());
+  const std::vector<std::string> expected_sections{
+      "prepared_charts", "prepared_scc", "session"};
+  if (mandatory != expected_sections)
+    throw std::invalid_argument(
+        "native checkpoint contains unknown or missing mandatory sections");
+  if (!as_array(header.at("optional_sections"),
+                "optional checkpoint sections").empty())
+    throw std::invalid_argument(
+        "native checkpoint declares unsupported optional sections");
+
+  const auto& session = as_object(payload.at("session"),
+                                  "checkpoint session section");
+  require_exact_keys(session,
+      {"source_handle", "configuration", "configuration_identity",
+       "counters"}, "checkpoint session section");
+  if (required_string(session, "configuration_identity") !=
+      required_string(header, "configuration_identity"))
+    throw std::invalid_argument(
+        "checkpoint header and payload configuration identities disagree");
+  const auto& configuration = as_object(
+      session.at("configuration"), "checkpoint configuration");
+  if (json::serialize(canonical_json_value(configuration)) !=
+      required_string(header, "configuration_identity"))
+    throw std::invalid_argument(
+        "checkpoint configuration does not reproduce its exact identity");
+  if (configuration.at("analytic") != header.at("analytic_identity"))
+    throw std::invalid_argument(
+        "checkpoint analytic-regularization identity is inconsistent");
+  const auto& chart_items = as_array(payload.at("prepared_charts"),
+                                     "checkpoint prepared charts");
+  const auto& scc_items = as_array(payload.at("prepared_scc"),
+                                   "checkpoint prepared SCC charts");
+  if (checkpoint_identity_manifest(chart_items) !=
+          as_array(header.at("chart_identities"),
+                   "checkpoint chart identities") ||
+      checkpoint_identity_manifest(scc_items) !=
+          as_array(header.at("scc_identities"),
+                   "checkpoint SCC identities"))
+    throw std::invalid_argument(
+        "checkpoint retained identity manifest is inconsistent");
+  if (as_u64(header.at("generation"), "checkpoint generation") !=
+      as_u64(as_object(session.at("counters"), "checkpoint counters")
+                 .at("checkpoint_generation"),
+             "checkpoint generation"))
+    throw std::invalid_argument(
+        "checkpoint generation differs between header and payload");
+}
+
+json::object restore_checkpoint(const std::string& path,
+                                const std::string& expected_identity) {
+  const auto container = checkpoint::read(path);
+  const auto header_value = json::parse(container.header_json);
+  const auto payload_value = json::parse(container.payload_json);
+  const auto& header = as_object(header_value, "checkpoint JSON header");
+  const auto& payload = as_object(payload_value, "checkpoint JSON payload");
+  validate_checkpoint_envelope(header, payload, expected_identity);
+
+  const auto& saved_session = as_object(payload.at("session"),
+                                        "checkpoint session section");
+  const auto& configuration = as_object(
+      saved_session.at("configuration"), "checkpoint configuration");
+  require_exact_keys(configuration,
+      {"domain", "precision_bits", "output_digits", "symbols", "analytic",
+       "chart_capacity", "local_capacity", "scc_capacity",
+       "match_capacity"}, "checkpoint configuration");
+  json::object create{
+      {"schema", 2}, {"op", "session.create"},
+      {"domain", configuration.at("domain")},
+      {"precision_bits", configuration.at("precision_bits")},
+      {"output_digits", configuration.at("output_digits")},
+      {"symbols", configuration.at("symbols")},
+      {"analytic", configuration.at("analytic")},
+      {"chart_capacity", configuration.at("chart_capacity")},
+      {"local_capacity", configuration.at("local_capacity")},
+      {"scc_capacity", configuration.at("scc_capacity")},
+      {"match_capacity", configuration.at("match_capacity")}};
+  const auto created = run_session_command(create);
+  const auto restored_handle = required_string(created, "session");
+  bool live = true;
+  try {
+    const auto restored = find_session(restored_handle);
+    const auto source_handle = required_string(saved_session, "source_handle");
+    json::array restored_charts;
+    std::uint64_t largest_chart = 0;
+    for (const auto& raw_item : as_array(
+             payload.at("prepared_charts"), "checkpoint prepared charts")) {
+      const auto& item = as_object(raw_item, "checkpoint chart item");
+      require_exact_keys(item,
+          {"handle", "key", "identity", "signature", "request"},
+          "checkpoint chart item");
+      const auto old_handle = required_string(item, "handle");
+      const auto handle_id = scoped_handle_id(old_handle, "c:", "chart");
+      if (handle_id <= largest_chart)
+        throw std::invalid_argument(
+            "checkpoint chart handles are not in strict creation order");
+      largest_chart = handle_id;
+      auto request = as_object(item.at("request"),
+                               "checkpoint chart request");
+      if (required_string(request, "session") != source_handle ||
+          required_string(request, "key") != required_string(item, "key") ||
+          required_string(request, "identity") !=
+              required_string(item, "identity"))
+        throw std::invalid_argument(
+            "checkpoint chart request provenance is inconsistent");
+      request["session"] = restored_handle;
+      {
+        std::lock_guard<std::mutex> lock(restored->mutex);
+        restored->next_chart = handle_id;
+      }
+      const auto result = run_session_command(request);
+      if (required_string(result, "chart") != old_handle)
+        throw std::logic_error(
+            "checkpoint chart handle could not be restored exactly");
+      {
+        std::lock_guard<std::mutex> lock(restored->mutex);
+        const auto found = restored->charts.find(old_handle);
+        if (found == restored->charts.end() ||
+            found->second->signature() != required_string(item, "signature"))
+          throw std::invalid_argument(
+              "restored chart does not reproduce its exact operator identity");
+      }
+      restored_charts.push_back(json::object{
+          {"chart", old_handle}, {"key", item.at("key")},
+          {"identity", item.at("identity")}});
+    }
+
+    json::array restored_sccs;
+    std::uint64_t largest_scc = 0;
+    for (const auto& raw_item : as_array(
+             payload.at("prepared_scc"), "checkpoint prepared SCC charts")) {
+      const auto& item = as_object(raw_item, "checkpoint SCC item");
+      require_exact_keys(item,
+          {"handle", "key", "identity", "signature", "request"},
+          "checkpoint SCC item");
+      const auto old_handle = required_string(item, "handle");
+      const auto handle_id = scoped_handle_id(old_handle, "scc:", "SCC");
+      if (handle_id <= largest_scc)
+        throw std::invalid_argument(
+            "checkpoint SCC handles are not in strict creation order");
+      largest_scc = handle_id;
+      auto request = as_object(item.at("request"),
+                               "checkpoint SCC request");
+      if (required_string(request, "session") != source_handle ||
+          required_string(request, "key") != required_string(item, "key") ||
+          required_string(request, "identity") !=
+              required_string(item, "identity"))
+        throw std::invalid_argument(
+            "checkpoint SCC request provenance is inconsistent");
+      request["session"] = restored_handle;
+      {
+        std::lock_guard<std::mutex> lock(restored->mutex);
+        restored->next_scc = handle_id;
+      }
+      const auto result = run_session_command(request);
+      if (required_string(result, "scc") != old_handle)
+        throw std::logic_error(
+            "checkpoint SCC handle could not be restored exactly");
+      {
+        std::lock_guard<std::mutex> lock(restored->mutex);
+        const auto found = restored->sccs.find(old_handle);
+        if (found == restored->sccs.end() ||
+            found->second->signature() != required_string(item, "signature"))
+          throw std::invalid_argument(
+              "restored SCC does not reproduce its exact graph/operator identity");
+      }
+      restored_sccs.push_back(json::object{
+          {"scc", old_handle}, {"key", item.at("key")},
+          {"identity", item.at("identity")}});
+    }
+
+    const auto& counters = as_object(saved_session.at("counters"),
+                                     "checkpoint counters");
+    require_exact_keys(counters,
+        {"next_chart", "next_local", "next_scc", "next_match",
+         "total_local_solves", "total_scc_column_solves",
+         "total_local_matches", "total_local_run_parse_ms",
+         "total_local_kernel_ms", "total_local_match_ms",
+         "checkpoint_generation", "checkpoint_restore_count"},
+        "checkpoint counters");
+    const auto next_chart = as_u64(counters.at("next_chart"), "next chart");
+    const auto next_scc = as_u64(counters.at("next_scc"), "next SCC");
+    const auto next_local = as_u64(counters.at("next_local"), "next local");
+    const auto next_match = as_u64(counters.at("next_match"), "next match");
+    const auto restore_count = as_u64(
+        counters.at("checkpoint_restore_count"),
+        "checkpoint restore count");
+    if (next_chart <= largest_chart || next_scc <= largest_scc ||
+        next_local == 0 || next_match == 0)
+      throw std::invalid_argument(
+          "checkpoint next-handle counters do not follow retained handles");
+    if (restore_count == std::numeric_limits<std::uint64_t>::max())
+      throw std::overflow_error("checkpoint restore counter overflow");
+    {
+      std::lock_guard<std::mutex> lock(restored->mutex);
+      restored->next_chart = next_chart;
+      restored->next_local = next_local;
+      restored->next_scc = next_scc;
+      restored->next_match = next_match;
+      restored->total_local_solves = as_u64(
+          counters.at("total_local_solves"), "total local solves");
+      restored->total_scc_column_solves = as_u64(
+          counters.at("total_scc_column_solves"),
+          "total SCC column solves");
+      restored->total_local_matches = as_u64(
+          counters.at("total_local_matches"), "total local matches");
+      restored->total_local_run_parse_ms = as_double(
+          counters.at("total_local_run_parse_ms"),
+          "total local parse time");
+      restored->total_local_kernel_ms = as_double(
+          counters.at("total_local_kernel_ms"),
+          "total local kernel time");
+      restored->total_local_match_ms = as_double(
+          counters.at("total_local_match_ms"),
+          "total local match time");
+      restored->checkpoint_generation = as_u64(
+          counters.at("checkpoint_generation"), "checkpoint generation");
+      restored->checkpoint_restore_count = restore_count + 1;
+      restored->restored_from_checkpoint_identity = expected_identity;
+    }
+    live = false;
+    return json::object{
+        {"status", "ok"}, {"session", restored_handle},
+        {"checkpoint_identity", expected_identity},
+        {"generation", header.at("generation")},
+        {"restore_count", restored->checkpoint_restore_count},
+        {"configuration_identity", header.at("configuration_identity")},
+        {"analytic_identity", header.at("analytic_identity")},
+        {"charts", std::move(restored_charts)},
+        {"sccs", std::move(restored_sccs)},
+        {"deferred_handle_kinds", header.at("deferred_handle_kinds")},
+        {"replayed_wolfram_preprocessing", false}};
+  } catch (...) {
+    if (live) {
+      try {
+        run_session_command(json::object{{"schema", 2},
+                                         {"op", "session.close"},
+                                         {"session", restored_handle}});
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+}
+
 template <typename Scalar>
 std::shared_ptr<PreparedChartBase> parse_prepared_chart(
     const std::shared_ptr<SolverSession>& session, const json::object& root,
@@ -3951,6 +4495,14 @@ json::object run_session_command(const json::object& root) {
   if (as_i64(root.at("schema"), "schema") != 2)
     throw std::invalid_argument("unsupported persistent solver schema");
   const auto operation = required_string(root, "op");
+
+  if (operation == "checkpoint.restore") {
+    require_exact_keys(root,
+        {"schema", "op", "path", "expected_identity"},
+        "checkpoint.restore request");
+    return restore_checkpoint(required_string(root, "path"),
+                              required_string(root, "expected_identity"));
+  }
 
   if (operation == "session.create") {
     const auto domain = required_string(root, "domain");
@@ -4063,6 +4615,29 @@ json::object run_session_command(const json::object& root) {
   }
 
   const auto session = find_session(required_string(root, "session"));
+
+  if (operation == "checkpoint.save") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "path", "checkpoint_identity"},
+        "checkpoint.save request");
+    const auto path = required_string(root, "path");
+    const auto checkpoint_identity = required_string(
+        root, "checkpoint_identity");
+    std::lock_guard<std::mutex> lock(session->mutex);
+    auto snapshot = make_checkpoint_snapshot(*session, checkpoint_identity);
+    checkpoint::write_atomic(path, json::serialize(snapshot.header),
+                             json::serialize(snapshot.payload));
+    session->checkpoint_generation = snapshot.generation;
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"path", path}, {"checkpoint_identity", checkpoint_identity},
+        {"generation", snapshot.generation},
+        {"charts", snapshot.charts}, {"sccs", snapshot.sccs},
+        {"serialized_handle_kinds", json::array{"chart", "scc"}},
+        {"deferred_handle_kinds",
+         json::array{"local", "match", "endpoint", "line", "tile"}},
+        {"atomic", true}};
+  }
 
   if (operation == "chart.prepare") {
     const auto key = required_string(root, "key");
@@ -4833,6 +5408,9 @@ json::object run_session_command(const json::object& root) {
     std::uint64_t total_local_solves = 0;
     std::uint64_t total_scc_column_solves = 0;
     std::uint64_t total_local_matches = 0;
+    std::uint64_t checkpoint_generation = 0;
+    std::uint64_t checkpoint_restore_count = 0;
+    std::string restored_from_checkpoint_identity;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
     double total_local_match_ms = 0.0;
     {
@@ -4853,6 +5431,10 @@ json::object run_session_command(const json::object& root) {
       total_local_run_parse_ms = session->total_local_run_parse_ms;
       total_local_kernel_ms = session->total_local_kernel_ms;
       total_local_match_ms = session->total_local_match_ms;
+      checkpoint_generation = session->checkpoint_generation;
+      checkpoint_restore_count = session->checkpoint_restore_count;
+      restored_from_checkpoint_identity =
+          session->restored_from_checkpoint_identity;
     }
     std::uint64_t runs = 0;
     double prepare_parse_ms = 0.0, run_parse_ms = 0.0, kernel_ms = 0.0;
@@ -4931,6 +5513,14 @@ json::object run_session_command(const json::object& root) {
                         {"local_residual_certify_ms",
                          local_residual_certify_ms},
                         {"local_match_ms", total_local_match_ms},
+                        {"checkpoint_generation", checkpoint_generation},
+                        {"checkpoint_restore_count",
+                         checkpoint_restore_count},
+                        {"restored_from_checkpoint_identity",
+                         restored_from_checkpoint_identity.empty()
+                             ? json::value(nullptr)
+                             : json::value(
+                                   restored_from_checkpoint_identity)},
                         {"chart_stats", std::move(chart_stats)},
                         {"local_stats", std::move(local_stats)},
                         {"match_stats", std::move(match_stats)},
@@ -5091,6 +5681,10 @@ std::string backend_info_json() {
                                       {"persistent_exact_regular_local_match",
                                        true},
                                       {"persistent_acb_local_match", false},
+                                      {"persistent_checkpoint", true},
+                                      {"persistent_checkpoint_schema", 1},
+                                      {"persistent_checkpoint_handle_scope",
+                                       "prepared-chart-and-scc"},
                                       {"persistent_scc_regular_singular_scalar_block_dag_column",
                                        true},
                                       {"backend", "DiffExp2 C++"},

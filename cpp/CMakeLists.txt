@@ -3,6 +3,7 @@ pkg_check_modules(FLINT REQUIRED IMPORTED_TARGET flint)
 find_package(Boost 1.80 REQUIRED COMPONENTS json)
 
 add_library(diffexp2_core STATIC
+  src/checkpoint.cpp
   src/json_codec.cpp
 )
 set_target_properties(diffexp2_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -110,4 +111,13 @@ if(DE2_BUILD_TESTS)
     PRIVATE diffexp2_core)
   add_test(NAME cpp_persistent_local_match
     COMMAND test_diffexp2_persistent_local_match)
+
+  add_executable(test_diffexp2_persistent_checkpoint
+    tests/test_persistent_checkpoint.cpp)
+  target_compile_features(test_diffexp2_persistent_checkpoint
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_checkpoint
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_checkpoint
+    COMMAND test_diffexp2_persistent_checkpoint)
 endif()

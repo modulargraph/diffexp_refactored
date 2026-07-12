@@ -301,6 +301,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_transport_contract_pair
     COMMAND test_diffexp2_persistent_transport_contract_pair)
 
+  add_executable(test_diffexp2_persistent_transport_endpoint_batch
+    tests/test_persistent_transport_endpoint_batch.cpp)
+  target_compile_features(test_diffexp2_persistent_transport_endpoint_batch
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_transport_endpoint_batch
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_transport_endpoint_batch
+    COMMAND test_diffexp2_persistent_transport_endpoint_batch)
+
   add_executable(test_diffexp2_persistent_rational_row
     tests/test_persistent_rational_row.cpp)
   target_compile_features(test_diffexp2_persistent_rational_row

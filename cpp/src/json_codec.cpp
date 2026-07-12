@@ -1078,6 +1078,7 @@ struct ChartStats {
 
 class StoredLocalBase;
 class StoredTilePlan;
+class StoredTransportArmState;
 
 class PreparedChartBase {
  public:
@@ -2287,6 +2288,9 @@ class StoredLocalBase {
 
   virtual json::object evaluate(const json::object& request,
                                 int output_digits) = 0;
+  virtual LocalEvaluation evaluate_retained_point(
+      const RealEvaluationPoint& point,
+      std::optional<std::int32_t> exact_rim) = 0;
   virtual json::object certify_residual(const json::object& request,
                                         int output_digits) = 0;
   virtual EndpointLimitResult endpoint_limit(
@@ -2455,6 +2459,31 @@ class StoredLocal final : public StoredLocalBase {
         }
       }
       return response;
+    }
+  }
+
+  LocalEvaluation evaluate_retained_point(
+      const RealEvaluationPoint& point,
+      std::optional<std::int32_t> exact_rim) override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "retained-point evaluation rejects unresolved symbolic coefficients");
+    } else {
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
+      EvaluationOptions options;
+      options.imaginary_sign = exact_rim;
+      options.compute_tail_estimate = false;
+      const auto started = std::chrono::steady_clock::now();
+      auto result = evaluate_local_solution(solution_, point, options);
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      evaluations_.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        evaluate_ms_ += elapsed;
+      }
+      return result;
     }
   }
 
@@ -3252,6 +3281,8 @@ constexpr const char* kRetainedEndpointLimitCapability =
     "retained-native-endpoint-sector-limit-v1";
 constexpr const char* kRetainedPlannedEndpointLimitCapability =
     "retained-native-plan-bound-endpoint-sector-limit-v1";
+constexpr const char* kRetainedTransportEndpointBatchCapability =
+    "retained-native-transport-endpoint-batch-v1";
 constexpr const char* kRetainedRationalRowCapability =
     "retained-native-rational-row-local-application-v1";
 
@@ -3587,7 +3618,8 @@ class StoredEndpointResult {
       std::optional<json::object> planned_source = std::nullopt,
       std::optional<std::int32_t> planned_effective_rim = std::nullopt,
       std::shared_ptr<StoredTilePlan> plan_owner = nullptr,
-      std::shared_ptr<StoredLocalBase> local_owner = nullptr)
+      std::shared_ptr<StoredLocalBase> local_owner = nullptr,
+      std::shared_ptr<StoredTransportArmState> transport_owner = nullptr)
       : handle_(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
         provenance_identity_(std::move(provenance_identity)),
@@ -3604,14 +3636,19 @@ class StoredEndpointResult {
         planned_source_(std::move(planned_source)),
         planned_effective_rim_(planned_effective_rim),
         plan_owner_(std::move(plan_owner)),
-        local_owner_(std::move(local_owner)) {
+        local_owner_(std::move(local_owner)),
+        transport_owner_(std::move(transport_owner)) {
     // Validate the retained public frame once, before publishing its handle.
     (void)endpoint_value_window(result_);
-    if (planned_source_.has_value()
+    const bool transport_bound = transport_owner_ != nullptr;
+    if (transport_bound
+            ? (!planned_source_.has_value() || plan_owner_ != nullptr ||
+               local_owner_ != nullptr)
+            : planned_source_.has_value()
             ? (plan_owner_ == nullptr || local_owner_ == nullptr)
             : (plan_owner_ != nullptr || local_owner_ != nullptr))
       throw std::invalid_argument(
-          "plan-bound endpoint result must retain both its plan and local owners");
+          "retained endpoint ownership mode is inconsistent");
   }
 
   const std::string& handle() const { return handle_; }
@@ -3622,12 +3659,20 @@ class StoredEndpointResult {
     return provenance_identity_;
   }
   double elapsed_ms() const { return elapsed_ms_; }
-  bool plan_bound() const { return planned_source_.has_value(); }
+  bool plan_bound() const {
+    return planned_source_.has_value() && !transport_bound();
+  }
+  bool transport_bound() const { return transport_owner_ != nullptr; }
+  bool direct_plan_bound() const { return plan_bound(); }
+  bool derived_plan_bound() const { return planned_source_.has_value(); }
   const std::shared_ptr<StoredTilePlan>& plan_owner() const {
     return plan_owner_;
   }
   const std::shared_ptr<StoredLocalBase>& local_owner() const {
     return local_owner_;
+  }
+  const std::shared_ptr<StoredTransportArmState>& transport_owner() const {
+    return transport_owner_;
   }
 
   json::object summary() const {
@@ -3645,7 +3690,9 @@ class StoredEndpointResult {
     if (planned_source_.has_value()) source = *planned_source_;
     json::object result{
         {"endpoint", handle_},
-        {"capability", plan_bound()
+        {"capability", transport_bound()
+             ? kRetainedTransportEndpointBatchCapability
+             : direct_plan_bound()
              ? kRetainedPlannedEndpointLimitCapability
              : kRetainedEndpointLimitCapability},
         {"native_retained", true},
@@ -3653,7 +3700,9 @@ class StoredEndpointResult {
         {"json_coefficients", 0},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
-        {"execution_scope", plan_bound()
+        {"execution_scope", transport_bound()
+             ? "transport-state-final-vector-row-endpoint"
+             : direct_plan_bound()
              ? "plan-bound-final-arm-endpoint"
              : "unplanned-low-level"},
         {"source", std::move(source)},
@@ -3679,7 +3728,7 @@ class StoredEndpointResult {
         {"elapsed_ms", elapsed_ms_}};
     result["requested_rim"] = requested_rim_.has_value()
         ? json::value(*requested_rim_) : json::value(nullptr);
-    if (plan_bound()) {
+    if (derived_plan_bound()) {
       result["derived_rim"] = planned_effective_rim_.has_value()
           ? json::value(*planned_effective_rim_) : json::value(nullptr);
       result["effective_rim"] = planned_effective_rim_.has_value()
@@ -3714,7 +3763,9 @@ class StoredEndpointResult {
         {"coefficient_domain", source_domain_}};
     if (planned_source_.has_value()) source = *planned_source_;
     json::object record{
-        {"schema", plan_bound()
+        {"schema", transport_bound()
+             ? "diffexp2-retained-transport-endpoint-result-v1"
+             : direct_plan_bound()
              ? "diffexp2-retained-plan-bound-endpoint-result-v1"
              : "diffexp2-retained-endpoint-result-v2"},
         {"handle", handle_},
@@ -3730,7 +3781,7 @@ class StoredEndpointResult {
              result_.dropped_regulated_sectors},
              {"cancelled_divergent_coefficients",
               result_.cancelled_divergent_coefficients},
-            {"imaginary_sign", plan_bound()
+            {"imaginary_sign", derived_plan_bound()
                  ? (planned_effective_rim_.has_value()
                        ? json::value(*planned_effective_rim_)
                        : json::value(nullptr))
@@ -3738,7 +3789,7 @@ class StoredEndpointResult {
         {"elapsed_ms", elapsed_ms_},
         {"runtime_stats", json::object{{"exports", exports_},
                                         {"export_ms", export_ms_}}}};
-    if (plan_bound()) {
+    if (derived_plan_bound()) {
       record["derived_rim"] = planned_effective_rim_.has_value()
           ? json::value(*planned_effective_rim_) : json::value(nullptr);
     } else {
@@ -3801,6 +3852,7 @@ class StoredEndpointResult {
   std::optional<std::int32_t> planned_effective_rim_;
   std::shared_ptr<StoredTilePlan> plan_owner_;
   std::shared_ptr<StoredLocalBase> local_owner_;
+  std::shared_ptr<StoredTransportArmState> transport_owner_;
   mutable std::mutex stats_mutex_;
   std::uint64_t exports_ = 0;
   double export_ms_ = 0.0;
@@ -10632,6 +10684,20 @@ class StoredTransportArmState {
         static_cast<std::uint64_t>(observables));
   }
 
+  void require_endpoint_batch_counter_capacity(std::size_t rows) const {
+    const auto operation_count = endpoint_batch_operations_.load();
+    const auto row_count = endpoint_rows_.load();
+    if (operation_count == std::numeric_limits<std::uint64_t>::max() ||
+        rows > std::numeric_limits<std::uint64_t>::max() - row_count)
+      throw std::overflow_error(
+          "retained transport endpoint-batch counter overflow");
+  }
+
+  void note_endpoint_batch_success(std::size_t rows) noexcept {
+    endpoint_batch_operations_.fetch_add(1);
+    endpoint_rows_.fetch_add(static_cast<std::uint64_t>(rows));
+  }
+
   json::object summary() const {
     return json::object{
         {"transport_state", handle_},
@@ -10648,6 +10714,8 @@ class StoredTransportArmState {
         {"tiles", tile_sources_.size()},
         {"contraction_operations", contraction_operations_.load()},
         {"contracted_observables", contracted_observables_.load()},
+        {"endpoint_batch_operations", endpoint_batch_operations_.load()},
+        {"endpoint_rows", endpoint_rows_.load()},
         {"epsilon", epsilon_record()},
         {"refinement", refinement_},
         {"final_local", local_reference(final_local())},
@@ -10678,15 +10746,22 @@ class StoredTransportArmState {
                       {"contraction_operations",
                        contraction_operations_.load()},
                       {"contracted_observables",
-                       contracted_observables_.load()}}}};
+                       contracted_observables_.load()},
+                      {"endpoint_batch_operations",
+                       endpoint_batch_operations_.load()},
+                      {"endpoint_rows", endpoint_rows_.load()}}}};
   }
 
   void restore_runtime_stats(std::uint64_t stats_queries,
                              std::uint64_t contraction_operations,
-                             std::uint64_t contracted_observables) {
+                             std::uint64_t contracted_observables,
+                             std::uint64_t endpoint_batch_operations,
+                             std::uint64_t endpoint_rows) {
     stats_queries_.store(stats_queries);
     contraction_operations_.store(contraction_operations);
     contracted_observables_.store(contracted_observables);
+    endpoint_batch_operations_.store(endpoint_batch_operations);
+    endpoint_rows_.store(endpoint_rows);
   }
 
  private:
@@ -10867,6 +10942,8 @@ class StoredTransportArmState {
   mutable std::atomic<std::uint64_t> stats_queries_{0};
   std::atomic<std::uint64_t> contraction_operations_{0};
   std::atomic<std::uint64_t> contracted_observables_{0};
+  std::atomic<std::uint64_t> endpoint_batch_operations_{0};
+  std::atomic<std::uint64_t> endpoint_rows_{0};
 };
 
 void require_transport_pair_compatibility(
@@ -10902,6 +10979,135 @@ void require_transport_pair_compatibility(
       lower_plan.from.str() != upper_plan.from.str())
     throw std::invalid_argument(
         "retained transport pair plans do not share one compatible exact physical anchor");
+}
+
+struct ResolvedTransportEndpointBinding {
+  json::object source;
+  std::string arm;
+  Rational local_end;
+  std::int32_t approach_direction = 0;
+  std::optional<std::int32_t> rim;
+  bool centered = false;
+};
+
+ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
+    const std::shared_ptr<StoredTransportArmState>& state) {
+  if (!state)
+    throw std::invalid_argument(
+        "transport endpoint binding requires a retained arm state");
+  const auto& plan = state->plan_owner();
+  const auto& arm_name = state->arm_name();
+  const auto& arm = plan->arm(arm_name);
+  if (arm.exact.tiles.empty() || arm.charts.empty())
+    throw std::invalid_argument(
+        "transport endpoint arm has no final tile/chart");
+  const auto final_tile_index = arm.exact.tiles.size() - 1;
+  const auto& final_tile = arm.exact.tiles.back();
+  if (final_tile.chart >= arm.charts.size())
+    throw std::logic_error(
+        "transport endpoint final tile has an invalid chart index");
+  const auto& final_chart = arm.charts[final_tile.chart];
+  if (!(final_tile.physical_end == arm.exact.to) ||
+      final_chart.geometry.scale.is_zero() ||
+      arm.exact.direction != (arm_name == "lower" ? -1 : 1))
+    throw std::invalid_argument(
+        "transport endpoint plan has an inconsistent final physical binding");
+  const auto mapped_endpoint = final_chart.geometry.center +
+      final_chart.geometry.scale * final_tile.local_end;
+  if (!(mapped_endpoint == arm.exact.to))
+    throw std::invalid_argument(
+        "transport endpoint final local coordinate does not map to its exact physical endpoint");
+  const auto& local = state->final_local();
+  if (!local || local->source_chart() != final_chart.handle)
+    throw std::invalid_argument(
+        "transport endpoint final local does not name its final retained chart");
+  local->require_exact_plan_binding(
+      final_chart.geometry, final_chart.prescriptions,
+      "transport endpoint final local");
+
+  ResolvedTransportEndpointBinding binding;
+  binding.arm = arm_name;
+  binding.local_end = final_tile.local_end;
+  binding.centered = final_tile.local_end.is_zero();
+  binding.approach_direction =
+      -arm.exact.direction * final_chart.geometry.scale.sign();
+  binding.rim = exact_plan_rim(
+      final_chart.prescriptions, final_chart.geometry.scale);
+  binding.source = json::object{
+      {"transport_state", json::object{
+           {"handle", state->handle()},
+           {"checkpoint_identity", state->checkpoint_identity()},
+           {"provenance_identity", state->provenance_identity()}}},
+      {"tile_plan", json::object{
+           {"handle", plan->handle()},
+           {"checkpoint_identity", plan->checkpoint_identity()},
+           {"provenance_identity", plan->provenance_identity()}}},
+      {"arm", arm_name},
+      {"endpoint_exact", arm.exact.to.str()},
+      {"direction", arm.exact.direction},
+      {"final_tile", final_tile_index},
+      {"final_chart_index", final_tile.chart},
+      {"final_chart", final_chart.handle},
+      {"final_chart_identity", final_chart.exact_identity},
+      {"local_endpoint_exact", final_tile.local_end.str()},
+      {"centered", binding.centered},
+      {"approach_direction", binding.approach_direction},
+      {"derived_rim", binding.rim.has_value()
+           ? json::value(*binding.rim) : json::value(nullptr)},
+      {"final_local", json::object{
+           {"handle", local->handle()}, {"chart", local->source_chart()},
+           {"source_operator_identity", local->source_operator_identity()},
+           {"checkpoint_identity", local->checkpoint_identity()},
+           {"coefficient_domain", local->scalar_domain()}}},
+      {"prescriptions", encode_plan_prescriptions(
+           final_chart.prescriptions)}};
+  return binding;
+}
+
+void validate_prepared_rational_row_structure(
+    const json::value& raw, std::uint32_t expected_columns,
+    const char* label) {
+  const auto& row = as_object(raw, label);
+  require_exact_keys(row,
+                     {"schema", "columns", "exact_identity", "entries"},
+                     label);
+  if (required_string(row, "schema") !=
+          "diffexp2-prepared-rational-local-row-v1" ||
+      as_u32(row.at("columns"), label) != expected_columns ||
+      required_string(row, "exact_identity").empty())
+    throw std::invalid_argument(
+        std::string(label) + " has an incompatible schema, dimension, or identity");
+  std::optional<std::uint32_t> previous;
+  for (const auto& raw_entry : as_array(row.at("entries"), label)) {
+    const auto& entry = as_object(raw_entry, label);
+    require_exact_keys(entry, {"column", "multiplier"}, label);
+    const auto column = as_u32(entry.at("column"), label);
+    if (column >= expected_columns ||
+        (previous.has_value() && *previous >= column))
+      throw std::invalid_argument(
+          std::string(label) + " columns are not strictly ordered in range");
+    previous = column;
+    const auto& multiplier = as_object(entry.at("multiplier"), label);
+    require_exact_keys(
+        multiplier,
+        {"epsilon_shift", "center_pole_order", "kernels",
+         "exact_identity", "proven_zero"}, label);
+    (void)as_i32(multiplier.at("epsilon_shift"), label);
+    (void)as_u32(multiplier.at("center_pole_order"), label);
+    if (required_string(multiplier, "exact_identity").empty() ||
+        !multiplier.at("proven_zero").is_bool() ||
+        multiplier.at("proven_zero").as_bool())
+      throw std::invalid_argument(
+          std::string(label) + " contains an invalid active multiplier");
+    const auto& kernels = as_array(multiplier.at("kernels"), label);
+    if (kernels.empty())
+      throw std::invalid_argument(
+          std::string(label) + " contains no epsilon kernels");
+    for (const auto& raw_kernel : kernels)
+      if (as_array(raw_kernel, label).empty())
+        throw std::invalid_argument(
+            std::string(label) + " contains an empty Taylor kernel");
+  }
 }
 
 class StoredLineResult {
@@ -11373,6 +11579,8 @@ struct SolverSession {
   std::uint64_t total_transport_observables = 0;
   std::uint64_t total_transport_pair_contractions = 0;
   std::uint64_t total_transport_pair_observables = 0;
+  std::uint64_t total_transport_endpoint_batches = 0;
+  std::uint64_t total_transport_endpoint_rows = 0;
   std::uint64_t total_line_integrations = 0;
   std::uint64_t total_line_exports = 0;
   double total_local_run_parse_ms = 0.0;
@@ -11387,6 +11595,7 @@ struct SolverSession {
   double total_transport_arm_ms = 0.0;
   double total_transport_contraction_ms = 0.0;
   double total_transport_pair_contraction_ms = 0.0;
+  double total_transport_endpoint_batch_ms = 0.0;
   double total_line_integration_ms = 0.0;
   double total_line_export_ms = 0.0;
   bool closed = false;
@@ -12303,6 +12512,168 @@ ObservableEpsilonContract parse_observable_epsilon_contract(
     throw std::invalid_argument(
         "observable required epsilon maximum must lie in its exact output window");
   return result;
+}
+
+EndpointLimitResult restrict_endpoint_result_epsilon(
+    EndpointLimitResult result,
+    const ObservableEpsilonContract& contract,
+    const char* label) {
+  const auto available = endpoint_value_window(result);
+  const auto complete_max = std::min(
+      contract.requested.complete_max, available.complete_max);
+  if (contract.requested.min_power > complete_max ||
+      contract.required_complete_max > complete_max)
+    throw std::domain_error(
+        std::string(label) +
+        " does not cover its required exact epsilon output contract");
+  std::vector<EpsilonFrame<ComplexBall>> restricted;
+  restricted.reserve(result.values.size());
+  for (const auto& component : result.values) {
+    std::vector<ComplexBall> coefficients;
+    coefficients.reserve(static_cast<std::size_t>(
+        static_cast<std::int64_t>(complete_max) -
+        contract.requested.min_power + 1));
+    for (std::int64_t raw_power = contract.requested.min_power;
+         raw_power <= complete_max; ++raw_power)
+      coefficients.push_back(component.coefficient(
+          static_cast<std::int32_t>(raw_power)));
+    restricted.emplace_back(
+        EpsilonWindow{contract.requested.min_power, complete_max},
+        std::move(coefficients));
+  }
+  result.values = std::move(restricted);
+  return result;
+}
+
+EndpointLimitResult endpoint_result_from_retained_evaluation(
+    const LocalEvaluation& evaluation,
+    std::optional<std::int32_t> derived_rim) {
+  if (evaluation.value.dimension != 1)
+    throw std::logic_error(
+        "transport endpoint row evaluation did not remain scalar");
+  if (!evaluation.value.error.empty())
+    throw std::domain_error(
+        "transport endpoint regular-point evaluation produced an error envelope whose endpoint propagation is not implemented");
+  std::vector<ComplexBall> coefficients;
+  coefficients.reserve(evaluation.value.epsilon.width());
+  for (std::int64_t raw_power = evaluation.value.epsilon.min_power;
+       raw_power <= evaluation.value.epsilon.complete_max; ++raw_power)
+    coefficients.push_back(evaluation.value.at(
+        static_cast<std::int32_t>(raw_power), 0));
+  EndpointLimitResult result;
+  result.values.emplace_back(evaluation.value.epsilon,
+                             std::move(coefficients));
+  result.imaginary_sign = derived_rim.value_or(1);
+  return result;
+}
+
+json::object transport_endpoint_provenance(
+    const std::string& checkpoint_identity, const json::object& source,
+    const json::object& analytic_metadata) {
+  return json::object{
+      {"schema",
+       "diffexp2-retained-native-transport-endpoint-result-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"source", source},
+      {"cancellation", json::object{
+           {"mode", "exact-or-acb-singleton"}}},
+      {"analytic_metadata", analytic_metadata}};
+}
+
+std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
+    const std::string& endpoint_handle,
+    const std::string& checkpoint_identity,
+    const std::string& observable_identity,
+    const json::object& row,
+    const ObservableEpsilonContract& epsilon_contract,
+    const json::object& epsilon_record,
+    const std::string& projected_handle,
+    const std::string& projected_checkpoint_identity,
+    const std::string& domain, slong precision_bits,
+    const std::shared_ptr<StoredTransportArmState>& state,
+    const ResolvedTransportEndpointBinding& binding) {
+  if (endpoint_handle.empty() || checkpoint_identity.empty() ||
+      observable_identity.empty() || projected_handle.empty() ||
+      projected_checkpoint_identity.empty() || !state)
+    throw std::invalid_argument(
+        "transport endpoint row lost an identity or retained state owner");
+  const auto& source = state->final_local();
+  const auto source_summary = source->summary();
+  const auto started = std::chrono::steady_clock::now();
+  validate_prepared_rational_row_structure(
+      row, as_u32(source_summary.at("dimension"),
+                  "transport endpoint source dimension"),
+      "transport endpoint prepared rational row");
+  json::object row_request{
+      {"row", row},
+      {"source_checkpoint_identity", source->checkpoint_identity()},
+      {"checkpoint_identity", projected_checkpoint_identity}};
+  std::shared_ptr<StoredLocalBase> projected;
+  if (domain == "rational") {
+    const auto typed =
+        std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+    if (!typed)
+      throw std::logic_error(
+          "transport endpoint Rational source changed coefficient domain");
+    projected = build_rational_row_local<Rational>(
+        projected_handle, row_request, precision_bits, typed, source);
+  } else if (domain == "acb") {
+    const auto typed =
+        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+    if (!typed)
+      throw std::logic_error(
+          "transport endpoint Acb source changed coefficient domain");
+    projected = build_rational_row_local<ComplexBall>(
+        projected_handle, row_request, precision_bits, typed, source);
+  } else {
+    throw std::invalid_argument(
+        "transport endpoint row requires one numeric coefficient domain");
+  }
+
+  EndpointLimitResult result;
+  if (binding.centered) {
+    EndpointLimitOptions options;
+    options.approach_direction = binding.approach_direction;
+    options.imaginary_sign = binding.rim;
+    options.allow_certified_numeric_cancellation = true;
+    result = projected->endpoint_limit(options);
+  } else {
+    const auto point = RealEvaluationPoint::rational(
+        binding.local_end.str());
+    const auto evaluation = projected->evaluate_retained_point(
+        point, binding.rim);
+    result = endpoint_result_from_retained_evaluation(
+        evaluation, binding.rim);
+  }
+  result = restrict_endpoint_result_epsilon(
+      std::move(result), epsilon_contract,
+      "transport endpoint row result");
+  if (result.values.size() != 1)
+    throw std::logic_error(
+        "transport endpoint row result did not remain scalar");
+  const auto analytic_metadata = projected->exact_analytic_metadata();
+  auto endpoint_source = binding.source;
+  endpoint_source["observable"] = json::object{
+      {"identity", observable_identity},
+      {"checkpoint_identity", checkpoint_identity}};
+  endpoint_source["row"] = json::object{
+      {"exact_identity", required_string(row, "exact_identity")},
+      {"prepared_row", row}};
+  endpoint_source["output_epsilon_contract"] = epsilon_record;
+  const auto provenance = transport_endpoint_provenance(
+      checkpoint_identity, endpoint_source, analytic_metadata);
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredEndpointResult>(
+      endpoint_handle, checkpoint_identity, provenance_identity,
+      source->handle(), source->source_chart(),
+      source->source_operator_identity(), source->checkpoint_identity(),
+      source->scalar_domain(), binding.approach_direction, std::nullopt,
+      "exact-or-acb-singleton", std::move(analytic_metadata),
+      std::move(result), elapsed_ms, std::move(endpoint_source),
+      binding.rim, nullptr, nullptr, state);
 }
 
 WholeArmEpsilonContract parse_whole_arm_epsilon_contract(
@@ -13565,7 +13936,7 @@ std::string static_problem_signature(const json::object& problem,
 
 constexpr const char* kCheckpointFormat =
     "diffexp2-persistent-native-session";
-constexpr std::uint32_t kCheckpointPayloadSchema = 5;
+constexpr std::uint32_t kCheckpointPayloadSchema = 6;
 
 json::object run_session_command(const json::object& root);
 
@@ -13981,6 +14352,204 @@ restore_checkpoint_planned_endpoint_record(
   return endpoint;
 }
 
+std::shared_ptr<StoredEndpointResult>
+restore_checkpoint_transport_endpoint_record(
+    const json::value& raw, const std::string& expected_domain,
+    const std::shared_ptr<StoredTransportArmState>& state) {
+  const auto& object = as_object(
+      raw, "checkpoint retained transport endpoint");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "source", "approach_direction", "derived_rim",
+       "cancellation_mode", "analytic_metadata", "result", "elapsed_ms",
+       "runtime_stats"},
+      "checkpoint retained transport endpoint");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-transport-endpoint-result-v1")
+    throw std::invalid_argument(
+        "unsupported retained transport endpoint checkpoint schema");
+  if (!state || (expected_domain != "rational" && expected_domain != "acb") ||
+      std::string(state->final_local()->scalar_domain()) != expected_domain)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint lost its numeric state owner");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint transport endpoint contains an empty identity");
+
+  const auto binding = resolve_transport_endpoint_binding(state);
+  const auto& source = as_object(
+      object.at("source"), "checkpoint transport endpoint source");
+  auto expected_source = binding.source;
+  const auto& observable = as_object(
+      source.at("observable"), "checkpoint transport endpoint observable");
+  require_exact_keys(observable, {"identity", "checkpoint_identity"},
+                     "checkpoint transport endpoint observable");
+  if (required_string(observable, "identity").empty() ||
+      required_string(observable, "checkpoint_identity") !=
+          checkpoint_identity)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint observable identity is inconsistent");
+  const auto& row_record = as_object(
+      source.at("row"), "checkpoint transport endpoint row record");
+  require_exact_keys(row_record, {"exact_identity", "prepared_row"},
+                     "checkpoint transport endpoint row record");
+  const auto& prepared_row = as_object(
+      row_record.at("prepared_row"),
+      "checkpoint transport endpoint prepared row");
+  if (required_string(row_record, "exact_identity") !=
+      required_string(prepared_row, "exact_identity"))
+    throw std::invalid_argument(
+        "checkpoint transport endpoint row identity is stale");
+  const auto final_summary = state->final_local()->summary();
+  validate_prepared_rational_row_structure(
+      prepared_row,
+      as_u32(final_summary.at("dimension"),
+             "checkpoint transport endpoint source dimension"),
+      "checkpoint transport endpoint prepared row");
+  if (expected_domain == "rational") {
+    const auto typed =
+        std::dynamic_pointer_cast<StoredLocal<Rational>>(
+            state->final_local());
+    if (!typed)
+      throw std::invalid_argument(
+          "checkpoint transport endpoint lost its Rational final local");
+    (void)parse_prepared_rational_row<Rational>(
+        prepared_row, typed->solution());
+  } else {
+    const auto typed =
+        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
+            state->final_local());
+    if (!typed)
+      throw std::invalid_argument(
+          "checkpoint transport endpoint lost its Acb final local");
+    (void)parse_prepared_rational_row<ComplexBall>(
+        prepared_row, typed->solution());
+  }
+  const auto& epsilon_record = as_object(
+      source.at("output_epsilon_contract"),
+      "checkpoint transport endpoint epsilon contract");
+  const auto epsilon_contract = parse_observable_epsilon_contract(
+      epsilon_record, "checkpoint transport endpoint epsilon contract");
+  expected_source["observable"] = observable;
+  expected_source["row"] = row_record;
+  expected_source["output_epsilon_contract"] = epsilon_record;
+  if (source != expected_source)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint source differs from its exact state/plan/row binding");
+
+  const auto approach_direction = as_i32(
+      object.at("approach_direction"),
+      "checkpoint transport endpoint approach direction");
+  if (approach_direction != binding.approach_direction)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint approach differs from its state plan");
+  std::optional<std::int32_t> derived_rim;
+  if (!object.at("derived_rim").is_null()) {
+    derived_rim = as_i32(object.at("derived_rim"),
+                         "checkpoint transport endpoint rim");
+    if (*derived_rim != -1 && *derived_rim != 1)
+      throw std::invalid_argument(
+          "checkpoint transport endpoint rim must be +1 or -1");
+  }
+  if (derived_rim != binding.rim ||
+      required_string(object, "cancellation_mode") !=
+          "exact-or-acb-singleton")
+    throw std::invalid_argument(
+        "checkpoint transport endpoint rim or cancellation mode changed");
+  auto analytic_metadata = as_object(
+      object.at("analytic_metadata"),
+      "checkpoint transport endpoint analytic metadata");
+  validate_checkpoint_exact_analytic_metadata(analytic_metadata);
+  if (analytic_metadata !=
+      state->final_local()->exact_analytic_metadata())
+    throw std::invalid_argument(
+        "checkpoint transport endpoint analytic metadata differs from its retained final local");
+  const auto provenance = transport_endpoint_provenance(
+      checkpoint_identity, source, analytic_metadata);
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint provenance identity is inconsistent");
+
+  const auto& raw_result = as_object(
+      object.at("result"), "checkpoint transport endpoint result");
+  require_exact_keys(
+      raw_result,
+      {"values", "dropped_regulated_sectors",
+       "cancelled_divergent_coefficients", "imaginary_sign"},
+      "checkpoint transport endpoint result");
+  EndpointLimitResult result;
+  for (const auto& raw_value : as_array(
+           raw_result.at("values"),
+           "checkpoint transport endpoint values"))
+    result.values.push_back(parse_checkpoint_epsilon_frame<ComplexBall>(
+        raw_value, "checkpoint transport endpoint value"));
+  if (result.values.size() != 1)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint result is not scalar");
+  const auto checked_size = [](const json::value& value,
+                               const char* label) {
+    const auto parsed = as_u64(value, label);
+    if (parsed > std::numeric_limits<std::size_t>::max())
+      throw std::invalid_argument(std::string(label) + " exceeds size_t");
+    return static_cast<std::size_t>(parsed);
+  };
+  result.dropped_regulated_sectors = checked_size(
+      raw_result.at("dropped_regulated_sectors"),
+      "checkpoint transport endpoint dropped sectors");
+  result.cancelled_divergent_coefficients = checked_size(
+      raw_result.at("cancelled_divergent_coefficients"),
+      "checkpoint transport endpoint cancellations");
+  std::optional<std::int32_t> result_rim;
+  if (!raw_result.at("imaginary_sign").is_null())
+    result_rim = as_i32(raw_result.at("imaginary_sign"),
+                        "checkpoint transport endpoint result rim");
+  if (result_rim != binding.rim)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint result rim changed");
+  result.imaginary_sign = binding.rim.value_or(1);
+  const auto result_window = endpoint_value_window(result);
+  if (result_window.min_power != epsilon_contract.requested.min_power ||
+      result_window.complete_max >
+          epsilon_contract.requested.complete_max ||
+      result_window.complete_max <
+          epsilon_contract.required_complete_max)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint result violates its exact epsilon contract");
+
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"),
+      "checkpoint transport endpoint elapsed time");
+  const auto& stats = as_object(
+      object.at("runtime_stats"),
+      "checkpoint transport endpoint runtime stats");
+  require_exact_keys(stats, {"exports", "export_ms"},
+                     "checkpoint transport endpoint runtime stats");
+  auto endpoint = std::make_shared<StoredEndpointResult>(
+      handle, checkpoint_identity, provenance_identity,
+      state->final_local()->handle(), state->final_local()->source_chart(),
+      state->final_local()->source_operator_identity(),
+      state->final_local()->checkpoint_identity(),
+      state->final_local()->scalar_domain(), approach_direction,
+      std::nullopt, "exact-or-acb-singleton",
+      std::move(analytic_metadata), std::move(result), elapsed_ms,
+      source, binding.rim, nullptr, nullptr, state);
+  endpoint->restore_runtime_stats(
+      as_u64(stats.at("exports"),
+             "checkpoint transport endpoint exports"),
+      checkpoint_nonnegative_double(
+          stats.at("export_ms"),
+          "checkpoint transport endpoint export time"));
+  return endpoint;
+}
+
 std::size_t checkpoint_size_t(const json::value& raw, const char* label);
 
 std::shared_ptr<StoredPlannedMatchHop>
@@ -14348,7 +14917,8 @@ restore_checkpoint_transport_arm_state_record(
       "checkpoint transport-arm runtime stats");
   require_exact_keys(stats,
                      {"stats_queries", "contraction_operations",
-                      "contracted_observables"},
+                      "contracted_observables",
+                      "endpoint_batch_operations", "endpoint_rows"},
                      "checkpoint transport-arm runtime stats");
   state->restore_runtime_stats(
       as_u64(stats.at("stats_queries"),
@@ -14356,7 +14926,11 @@ restore_checkpoint_transport_arm_state_record(
       as_u64(stats.at("contraction_operations"),
              "checkpoint transport-arm contraction operations"),
       as_u64(stats.at("contracted_observables"),
-             "checkpoint transport-arm contracted observables"));
+             "checkpoint transport-arm contracted observables"),
+      as_u64(stats.at("endpoint_batch_operations"),
+             "checkpoint transport-arm endpoint-batch operations"),
+      as_u64(stats.at("endpoint_rows"),
+             "checkpoint transport-arm endpoint rows"));
   if (state->checkpoint_record() != raw)
     throw std::invalid_argument(
         "restored transport-arm state does not reproduce its exact retained state");
@@ -15550,6 +16124,10 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& [ignored, state] : session.transport_states)
     add_transport(state);
   for (const auto& [ignored, endpoint] : session.endpoints) {
+    if (endpoint->transport_bound()) {
+      add_transport(endpoint->transport_owner());
+      continue;
+    }
     if (!endpoint->plan_bound()) continue;
     const auto& plan = endpoint->plan_owner();
     if (!plan || !endpoint->local_owner())
@@ -15760,6 +16338,10 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
        session.total_transport_pair_contractions},
       {"total_transport_pair_observables",
        session.total_transport_pair_observables},
+      {"total_transport_endpoint_batches",
+       session.total_transport_endpoint_batches},
+      {"total_transport_endpoint_rows",
+       session.total_transport_endpoint_rows},
       {"total_line_integrations", session.total_line_integrations},
       {"total_line_exports", session.total_line_exports},
       {"total_local_run_parse_ms", session.total_local_run_parse_ms},
@@ -15773,6 +16355,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
        session.total_transport_contraction_ms},
       {"total_transport_pair_contraction_ms",
        session.total_transport_pair_contraction_ms},
+      {"total_transport_endpoint_batch_ms",
+       session.total_transport_endpoint_batch_ms},
       {"total_line_integration_ms", session.total_line_integration_ms},
       {"total_line_export_ms", session.total_line_export_ms},
       {"checkpoint_generation", generation},
@@ -16622,6 +17206,18 @@ json::object restore_checkpoint(const std::string& path,
         std::shared_ptr<StoredEndpointResult> endpoint;
         const auto endpoint_schema = required_string(item, "schema");
         if (endpoint_schema ==
+            "diffexp2-retained-transport-endpoint-result-v1") {
+          const auto& state_reference = as_object(
+              source.at("transport_state"),
+              "checkpoint transport endpoint state reference");
+          const auto state_found = restored->transport_states.find(
+              required_string(state_reference, "handle"));
+          if (state_found == restored->transport_states.end())
+            throw std::invalid_argument(
+                "checkpoint transport endpoint lost its strongly owned state");
+          endpoint = restore_checkpoint_transport_endpoint_record(
+              item, restored->domain, state_found->second);
+        } else if (endpoint_schema ==
             "diffexp2-retained-plan-bound-endpoint-result-v1") {
           const auto plan_found = restored->tile_plans.find(
               required_string(source, "tile_plan"));
@@ -16819,6 +17415,8 @@ json::object restore_checkpoint(const std::string& path,
          "total_transport_contractions", "total_transport_observables",
          "total_transport_pair_contractions",
          "total_transport_pair_observables",
+         "total_transport_endpoint_batches",
+         "total_transport_endpoint_rows",
          "total_line_integrations", "total_line_exports",
          "total_local_run_parse_ms",
          "total_local_kernel_ms", "total_local_match_ms",
@@ -16826,6 +17424,7 @@ json::object restore_checkpoint(const std::string& path,
          "total_tile_plan_ms", "total_transport_arm_ms",
          "total_transport_contraction_ms",
          "total_transport_pair_contraction_ms",
+         "total_transport_endpoint_batch_ms",
          "total_line_integration_ms",
          "total_line_export_ms",
          "checkpoint_generation", "checkpoint_restore_count"},
@@ -16895,6 +17494,12 @@ json::object restore_checkpoint(const std::string& path,
       restored->total_transport_pair_observables = as_u64(
           counters.at("total_transport_pair_observables"),
           "total transport-pair observables");
+      restored->total_transport_endpoint_batches = as_u64(
+          counters.at("total_transport_endpoint_batches"),
+          "total transport endpoint batches");
+      restored->total_transport_endpoint_rows = as_u64(
+          counters.at("total_transport_endpoint_rows"),
+          "total transport endpoint rows");
       restored->total_line_integrations = as_u64(
           counters.at("total_line_integrations"),
           "total line integrations");
@@ -16928,6 +17533,10 @@ json::object restore_checkpoint(const std::string& path,
           checkpoint_nonnegative_double(
               counters.at("total_transport_pair_contraction_ms"),
               "total transport-pair contraction time");
+      restored->total_transport_endpoint_batch_ms =
+          checkpoint_nonnegative_double(
+              counters.at("total_transport_endpoint_batch_ms"),
+              "total transport endpoint-batch time");
       restored->total_line_integration_ms = checkpoint_nonnegative_double(
           counters.at("total_line_integration_ms"),
           "total line-integration time");
@@ -17162,6 +17771,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedTransportPairContractionCapability},
+                        {"transport_endpoint_batch_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportEndpointBatchCapability},
                         {"certified_tail_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -19073,6 +19686,282 @@ json::object run_session_command(const json::object& root) {
         {"atomic_publication", true}, {"compact_outputs", true},
         {"checkpoint_policy", checkpoint_policy},
         {"elapsed_ms", pair_wall_ms}};
+  }
+
+  if (operation == "transport.endpoint_batch") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "transport_state",
+         "transport_state_checkpoint_identity",
+         "transport_state_provenance_identity", "checkpoint_policy",
+         "observables"},
+        "native transport.endpoint_batch request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native transport endpoint batch requires rational or Acb coefficients");
+    const auto state_handle = required_string(root, "transport_state");
+    const auto& checkpoint_policy = as_object(
+        root.at("checkpoint_policy"),
+        "native transport endpoint-batch checkpoint policy");
+    require_exact_keys(checkpoint_policy, {"schema", "root"},
+                       "native transport endpoint-batch checkpoint policy");
+    if (required_string(checkpoint_policy, "schema") !=
+        "diffexp2-deterministic-transport-endpoint-checkpoints-v1")
+      throw std::invalid_argument(
+          "unsupported native transport endpoint-batch checkpoint policy schema");
+    const auto checkpoint_root = required_string(checkpoint_policy, "root");
+    if (checkpoint_root.empty())
+      throw std::invalid_argument(
+          "native transport endpoint-batch checkpoint root cannot be empty");
+
+    struct PendingEndpointObservable {
+      std::string identity;
+      std::string checkpoint_identity;
+      json::object row;
+      ObservableEpsilonContract epsilon;
+      json::object epsilon_record;
+      std::string endpoint_handle;
+      std::string projected_handle;
+      std::string projected_checkpoint_identity;
+    };
+    std::vector<PendingEndpointObservable> pending_observables;
+    const auto& raw_observables = as_array(
+        root.at("observables"),
+        "native transport endpoint observables");
+    pending_observables.reserve(raw_observables.size());
+    std::set<std::string> identities;
+    std::set<std::string> checkpoints;
+    for (const auto& raw_observable : raw_observables) {
+      const auto& observable = as_object(
+          raw_observable, "native transport endpoint observable");
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "integrand_row", "epsilon"},
+          "native transport endpoint observable");
+      PendingEndpointObservable parsed;
+      parsed.identity = required_string(observable, "identity");
+      parsed.checkpoint_identity = required_string(
+          observable, "checkpoint_identity");
+      if (parsed.identity.empty() || parsed.checkpoint_identity.empty() ||
+          !identities.insert(parsed.identity).second ||
+          !checkpoints.insert(parsed.checkpoint_identity).second)
+        throw std::invalid_argument(
+            "native transport endpoint observable identities and checkpoints must be nonempty and pairwise unique");
+      parsed.row = as_object(
+          observable.at("integrand_row"),
+          "native transport endpoint prepared row");
+      parsed.epsilon = parse_observable_epsilon_contract(
+          observable.at("epsilon"),
+          "native transport endpoint epsilon contract");
+      parsed.epsilon_record = as_object(
+          observable.at("epsilon"),
+          "native transport endpoint epsilon contract");
+      pending_observables.push_back(std::move(parsed));
+    }
+
+    const auto observable_count = pending_observables.size();
+    std::shared_ptr<StoredTransportArmState> state;
+    ResolvedTransportEndpointBinding binding;
+    bool reservation_live = false;
+    const auto require_session_counter_capacity = [&]() {
+      if (session->total_transport_endpoint_batches ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          observable_count >
+              std::numeric_limits<std::uint64_t>::max() -
+                  session->total_transport_endpoint_rows ||
+          observable_count >
+              std::numeric_limits<std::uint64_t>::max() -
+                  session->total_endpoint_limits)
+        throw std::overflow_error(
+            "native transport endpoint-batch session counter overflow");
+    };
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->transport_states.find(state_handle);
+      if (found == session->transport_states.end())
+        throw std::invalid_argument(
+            "unknown or released native transport-arm state for endpoint batch");
+      state = found->second;
+      if (required_string(root, "transport_state_checkpoint_identity") !=
+              state->checkpoint_identity() ||
+          required_string(root, "transport_state_provenance_identity") !=
+              state->provenance_identity())
+        throw std::invalid_argument(
+            "native transport endpoint-batch state binding is stale");
+      if (std::string(state->final_local()->scalar_domain()) !=
+          session->domain)
+        throw std::invalid_argument(
+            "native transport endpoint-batch state domain differs from its session");
+      binding = resolve_transport_endpoint_binding(state);
+      state->require_endpoint_batch_counter_capacity(observable_count);
+      require_session_counter_capacity();
+      const auto source_dimension = as_u32(
+          state->final_local()->summary().at("dimension"),
+          "transport endpoint source dimension");
+      for (const auto& observable : pending_observables) {
+        validate_prepared_rational_row_structure(
+            observable.row, source_dimension,
+            "native transport endpoint prepared row");
+        if (observable.epsilon.required_complete_max >
+            state->public_required_complete_max())
+          throw std::invalid_argument(
+              "native transport endpoint required epsilon maximum exceeds the state public target");
+      }
+      if (observable_count > session->endpoint_capacity -
+                                 std::min(
+                                     session->endpoint_capacity,
+                                     session->endpoints.size() +
+                                         session->pending_endpoint_limits))
+        throw std::invalid_argument(
+            "persistent endpoint result capacity is exhausted by transport endpoint batch");
+      for (std::size_t index = 0; index < observable_count; ++index) {
+        auto& observable = pending_observables[index];
+        observable.endpoint_handle =
+            "e:" + std::to_string(session->next_endpoint++);
+        const auto scratch_root = checkpoint_root + ":observable:" +
+                                  std::to_string(index + 1);
+        observable.projected_handle =
+            "private:" + scratch_root + ":projected";
+        observable.projected_checkpoint_identity =
+            scratch_root + ":projected";
+      }
+      session->pending_endpoint_limits += observable_count;
+      reservation_live = true;
+    }
+
+    const auto release_reservation = [&]() {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (!reservation_live) return;
+      if (session->pending_endpoint_limits < observable_count)
+        throw std::logic_error(
+            "native transport endpoint-batch reservation accounting underflow");
+      session->pending_endpoint_limits -= observable_count;
+      reservation_live = false;
+    };
+    struct TransportEndpointReservationGuard final {
+      decltype(release_reservation)& release;
+      bool& live;
+      ~TransportEndpointReservationGuard() noexcept {
+        if (!live) return;
+        try {
+          release();
+        } catch (...) {
+          std::terminate();
+        }
+      }
+    } reservation_guard{release_reservation, reservation_live};
+
+    const auto operation_started = std::chrono::steady_clock::now();
+    std::unique_ptr<AcbPrecisionLease> acb_lease;
+    if (session->domain == "acb") {
+      acb_lease = std::make_unique<AcbPrecisionLease>(
+          session->precision_bits);
+      ComplexBall::set_precision(session->precision_bits);
+    }
+    std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
+    endpoints.reserve(observable_count);
+    for (const auto& observable : pending_observables)
+      endpoints.push_back(build_transport_endpoint_row(
+          observable.endpoint_handle, observable.checkpoint_identity,
+          observable.identity, observable.row, observable.epsilon,
+          observable.epsilon_record, observable.projected_handle,
+          observable.projected_checkpoint_identity, session->domain,
+          session->precision_bits, state, binding));
+    const auto operation_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - operation_started).count();
+    double endpoint_ms = 0.0;
+    for (const auto& endpoint : endpoints)
+      endpoint_ms += endpoint->elapsed_ms();
+
+    try {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits < observable_count)
+        throw std::logic_error(
+            "native transport endpoint-batch reservation accounting underflow");
+      session->pending_endpoint_limits -= observable_count;
+      reservation_live = false;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during transport endpoint batch");
+      state->require_endpoint_batch_counter_capacity(observable_count);
+      require_session_counter_capacity();
+      if (observable_count > session->endpoint_capacity -
+                                 std::min(
+                                     session->endpoint_capacity,
+                                     session->endpoints.size() +
+                                         session->pending_endpoint_limits))
+        throw std::invalid_argument(
+            "persistent endpoint result capacity changed during transport endpoint batch");
+      session->endpoints.reserve(
+          session->endpoints.size() + observable_count);
+      std::vector<std::string> inserted;
+      inserted.reserve(observable_count);
+      try {
+        for (const auto& endpoint : endpoints) {
+          if (!session->endpoints.emplace(
+                  endpoint->handle(), endpoint).second)
+            throw std::logic_error(
+                "transport endpoint handle collided during publication");
+          inserted.push_back(endpoint->handle());
+        }
+      } catch (...) {
+        for (const auto& handle : inserted)
+          session->endpoints.erase(handle);
+        throw;
+      }
+      state->note_endpoint_batch_success(observable_count);
+      ++session->total_transport_endpoint_batches;
+      session->total_transport_endpoint_rows += observable_count;
+      session->total_transport_endpoint_batch_ms += operation_ms;
+      session->total_endpoint_limits += observable_count;
+      session->total_endpoint_limit_ms += endpoint_ms;
+    } catch (...) {
+      if (reservation_live) release_reservation();
+      throw;
+    }
+
+    json::array output_endpoints;
+    output_endpoints.reserve(endpoints.size());
+    for (std::size_t index = 0; index < endpoints.size(); ++index) {
+      const auto& endpoint = endpoints[index];
+      auto summary = endpoint->summary();
+      output_endpoints.push_back(json::object{
+          {"request_index", index},
+          {"observable_identity", pending_observables[index].identity},
+          {"session", session->handle},
+          {"endpoint", endpoint->handle()},
+          {"checkpoint_identity", endpoint->checkpoint_identity()},
+          {"provenance_identity", endpoint->provenance_identity()},
+          {"epsilon", json::object{
+               {"min", summary.at("epsilon_min")},
+               {"max", summary.at("epsilon_max")}}},
+          {"centered", binding.centered},
+          {"elapsed_ms", endpoint->elapsed_ms()}});
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", kRetainedTransportEndpointBatchCapability},
+        {"native_retained", true}, {"json_coefficients", 0},
+        {"transport_state", state->handle()},
+        {"transport_state_checkpoint_identity",
+         state->checkpoint_identity()},
+        {"transport_state_provenance_identity",
+         state->provenance_identity()},
+        {"arm", binding.arm},
+        {"endpoint_exact", binding.source.at("endpoint_exact")},
+        {"local_endpoint_exact", binding.local_end.str()},
+        {"centered", binding.centered},
+        {"approach_direction", binding.approach_direction},
+        {"derived_rim", binding.rim.has_value()
+             ? json::value(*binding.rim) : json::value(nullptr)},
+        {"observables", observable_count},
+        {"endpoints", std::move(output_endpoints)},
+        {"no_projected_local_publication", true},
+        {"atomic_publication", true}, {"compact_outputs", true},
+        {"checkpoint_policy", checkpoint_policy},
+        {"elapsed_ms", operation_ms}};
   }
 
   if (operation == "integration.run_arms") {
@@ -21120,6 +22009,8 @@ json::object run_session_command(const json::object& root) {
     std::uint64_t total_transport_observables = 0;
     std::uint64_t total_transport_pair_contractions = 0;
     std::uint64_t total_transport_pair_observables = 0;
+    std::uint64_t total_transport_endpoint_batches = 0;
+    std::uint64_t total_transport_endpoint_rows = 0;
     std::uint64_t total_line_integrations = 0;
     std::uint64_t total_line_exports = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
@@ -21130,6 +22021,7 @@ json::object run_session_command(const json::object& root) {
     double total_transport_arm_ms = 0.0;
     double total_transport_contraction_ms = 0.0;
     double total_transport_pair_contraction_ms = 0.0;
+    double total_transport_endpoint_batch_ms = 0.0;
     double total_line_integration_ms = 0.0;
     double total_line_export_ms = 0.0;
     {
@@ -21169,6 +22061,10 @@ json::object run_session_command(const json::object& root) {
           session->total_transport_pair_contractions;
       total_transport_pair_observables =
           session->total_transport_pair_observables;
+      total_transport_endpoint_batches =
+          session->total_transport_endpoint_batches;
+      total_transport_endpoint_rows =
+          session->total_transport_endpoint_rows;
       total_line_integrations = session->total_line_integrations;
       total_line_exports = session->total_line_exports;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
@@ -21186,6 +22082,8 @@ json::object run_session_command(const json::object& root) {
           session->total_transport_contraction_ms;
       total_transport_pair_contraction_ms =
           session->total_transport_pair_contraction_ms;
+      total_transport_endpoint_batch_ms =
+          session->total_transport_endpoint_batch_ms;
       total_line_integration_ms = session->total_line_integration_ms;
       total_line_export_ms = session->total_line_export_ms;
     }
@@ -21302,6 +22200,10 @@ json::object run_session_command(const json::object& root) {
                          total_transport_pair_contractions},
                         {"transport_pair_observables",
                          total_transport_pair_observables},
+                        {"transport_endpoint_batches",
+                         total_transport_endpoint_batches},
+                        {"transport_endpoint_rows",
+                         total_transport_endpoint_rows},
                         {"line_integrations", total_line_integrations},
                         {"line_exports", total_line_exports},
                         {"local_match_capability",
@@ -21355,6 +22257,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedTransportPairContractionCapability},
+                        {"transport_endpoint_batch_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportEndpointBatchCapability},
                         {"certified_tail_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -21408,6 +22314,8 @@ json::object run_session_command(const json::object& root) {
                          total_transport_contraction_ms},
                         {"transport_pair_contraction_ms",
                          total_transport_pair_contraction_ms},
+                        {"transport_endpoint_batch_ms",
+                         total_transport_endpoint_batch_ms},
                         {"line_integration_ms", total_line_integration_ms},
                         {"line_export_ms", total_line_export_ms},
                         {"chart_stats", std::move(chart_stats)},
@@ -21630,6 +22538,10 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_transport_pair_contraction_capability",
                                        kRetainedTransportPairContractionCapability},
+                                      {"persistent_transport_endpoint_batch",
+                                       true},
+                                      {"persistent_transport_endpoint_batch_capability",
+                                       kRetainedTransportEndpointBatchCapability},
                                       {"persistent_certified_tail_majorant",
                                        true},
                                       {"persistent_certified_tail_majorant_capability",

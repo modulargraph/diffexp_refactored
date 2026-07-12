@@ -13,7 +13,7 @@ namespace diffexp2::checkpoint {
 // independent of compiler timestamps so checkpoints remain usable after an
 // identical source rebuild.
 inline constexpr std::string_view kBuildIdentity =
-    "diffexp2-persistent-checkpoint-owner-bound-residual-transport-pair-v6";
+    "diffexp2-persistent-checkpoint-transport-endpoint-batch-v7";
 inline constexpr std::uint32_t kContainerSchema = 1;
 
 struct Container {

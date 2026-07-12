@@ -27,6 +27,7 @@ PrepareSCCCouplingMatrix::usage = "PrepareSCCCouplingMatrix[sccChartSystem, sour
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or an exact-Rational regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
+SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
@@ -5201,6 +5202,68 @@ SolveNativeSCCBasis[cs_Association, req_Association,
     "EpsWindow" -> req["EpsWindow"],
     "TWindow" -> <|"CompleteMax" -> req["TOrder"]|>,
     "NativeSummary" -> KeyDrop[batch, {"results"}]|>];
+
+SolveNativeRegularBasis[cs_Association, req_Association,
+    threads_:Automatic] := Module[
+  {seq = Lookup[cs, "IntegrationSequence", None], d = cs["SystemSize"],
+   epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax,
+   physical, columns = {}, unitValues, built, cleanup, sessions, charts},
+  If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    err["E8", cs, <|"Detail" ->
+      "SolveNativeRegularBasis requires a regular chart"|>]];
+  If[threads =!= Automatic && !(IntegerQ[threads] && threads > 0),
+    err["E6", cs, <|"Threads" -> threads,
+      "Detail" -> "native regular basis thread count must be a positive integer or Automatic"|>]];
+  If[AssociationQ[seq] && Length[Lookup[seq, "Components", {}]] > 1,
+    Return[SolveNativeSCCBasis[cs, req, threads], Module]];
+  If[!AssociationQ[epsWindow] ||
+      !IntegerQ[Lookup[epsWindow, "Min", None]] ||
+      !IntegerQ[Lookup[epsWindow, "CompleteMax", None]],
+    err["E8", cs, <|"Request" -> req,
+      "Detail" -> "native regular basis requires a finite epsilon window"|>]];
+  epsMin = epsWindow["Min"];
+  epsMax = epsWindow["CompleteMax"];
+  If[epsMin > 0 || epsMax < 0,
+    err["E6", cs, <|"EpsWindow" -> epsWindow,
+      "Detail" -> "native regular basis normalization requires eps^0 inside the requested window"|>]];
+  physical = regularPhysicalChartSystem[cs];
+  cleanup[] := Scan[
+    Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, columns];
+  Catch[
+    Do[
+      unitValues = Table[DiffExp2`EpsSeries`ESNew[epsMin,
+          Table[If[component === basisIndex && power === 0, 1, 0],
+            {power, epsMin, epsMax}]], {component, d}];
+      built = SolveNativeLocalFamily[physical, req,
+        <|"a" -> 0, "b" -> 0, "p" -> 0|>, {unitValues}];
+      AppendTo[columns, Join[built,
+        <|"Type" -> "DiffExp2NativeRegularBasisColumn",
+          "BasisIndex" -> basisIndex|>]],
+      {basisIndex, d}],
+    "DiffExp2Error", Function[{failure, tag},
+      cleanup[]; Throw[failure, tag]]];
+  sessions = DeleteDuplicates[Lookup[columns, "Session", None]];
+  charts = DeleteDuplicates[Lookup[columns, "NativeChart", None]];
+  If[Length[columns] =!= d || sessions === {None} ||
+      Length[sessions] =!= 1 || charts === {None} || Length[charts] =!= 1 ||
+      Lookup[columns, "BasisIndex", {}] =!= Range[d],
+    cleanup[];
+    err["E6", cs, <|"Sessions" -> sessions, "NativeCharts" -> charts,
+      "BasisIndices" -> Lookup[columns, "BasisIndex", {}],
+      "Detail" -> "retained monolithic regular basis did not bind one complete native chart"|>]];
+  <|"Type" -> "DiffExp2NativeRegularBasis",
+    "Session" -> First[sessions], "NativeChart" -> First[charts],
+    "Columns" -> columns, "Dimension" -> d,
+    "Chart" -> <|"Center" -> cs["Center"],
+      "ChartMap" -> cs["ChartMap"], "Radius" -> cs["Radius"],
+      "Prescriptions" -> cs["Prescriptions"]|>,
+    "EpsWindow" -> epsWindow,
+    "TWindow" -> <|"CompleteMax" -> req["TOrder"]|>,
+    "NativeSummary" -> <|
+      "execution_capability" ->
+        "retained-regular-monolithic-unit-basis-v1",
+      "columns" -> d, "worker_threads" -> 1,
+      "json_coefficients" -> 0|>|>];
 
 sccAggregateDiagnostics[records_List, seq_Association,
     recombine_List] := Module[{diags, getLists, compensated},

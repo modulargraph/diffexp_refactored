@@ -13,7 +13,7 @@ If[!TrueQ[DiffExp2`CppBackend`BackendAvailableQ[]],
 SetAttributes[catchDE2, HoldFirst];
 catchDE2[expr_] := Quiet[Catch[expr, "DiffExp2Error"]];
 
-decodeValue[evaluated_] := Module[
+decodeValue[evaluated_, expectedDimension_:3] := Module[
   {decoded, min, max, dimension},
   If[!AssociationQ[evaluated] ||
       Lookup[evaluated, "status", "error"] =!= "ok",
@@ -24,7 +24,7 @@ decodeValue[evaluated_] := Module[
   decoded = DiffExp2`CppBackend`DecodeScalars[
     evaluated["value", "coefficients"], 60];
   If[!IntegerQ[min] || !IntegerQ[max] || min > max ||
-      dimension =!= 3 || !ListQ[decoded] ||
+      dimension =!= expectedDimension || !ListQ[decoded] ||
       Length[decoded] =!= (max - min + 1) dimension ||
       !AllTrue[decoded, !FailureQ[#] && NumericQ[#] &],
     Return[{}, Module]];
@@ -73,17 +73,30 @@ result = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
   evaluated = If[FailureQ[propagated], propagated,
     DiffExp2`CppBackend`EvaluatePersistentLocal[propagated,
       <|"exact" -> "1/2"|>, <|"tail_estimate" -> False|>, 60]];
+  monoSystem = <|"Matrix" -> {{0, 1}, {1, 0}}, "Variable" -> x|>;
+  monoChart = Join[chart, <|
+    "Name" -> "native-acb-monolithic-regular-basis"|>];
+  monoCs = catchDE2[DiffExp2`Solve`PrepareChart[monoSystem, monoChart]];
+  monoBasis = If[FailureQ[monoCs], monoCs,
+    catchDE2[DiffExp2`Solve`SolveNativeRegularBasis[
+      monoCs, request, 2]]];
+  monoEvaluations = If[FailureQ[monoBasis], {monoBasis},
+    DiffExp2`CppBackend`EvaluatePersistentLocal[#,
+      <|"exact" -> "0"|>, <|"tail_estimate" -> False|>, 60] & /@
+      monoBasis["Columns"]];
   {cs, prepared, stats, basis, valueLocal, valueEvaluation,
-    propagated, evaluated}];
+    propagated, evaluated, monoCs, monoBasis, monoEvaluations}];
 
 {cs, prepared, stats, basis, valueLocal, valueEvaluation,
-  propagated, evaluated} = result;
+  propagated, evaluated, monoCs, monoBasis, monoEvaluations} = result;
 value = decodeValue[evaluated];
 transportedValue = decodeValue[valueEvaluation];
 eps0 = coefficient[value, 0];
 eps1 = coefficient[value, 1];
 transported0 = coefficient[transportedValue, 0];
 transported1 = coefficient[transportedValue, 1];
+monoValues = decodeValue[#, 2] & /@ monoEvaluations;
+mono0 = coefficient[#, 0] & /@ monoValues;
 
 ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
   Lookup[cs["IntegrationSequence"], "Components", None] ===
@@ -103,6 +116,15 @@ ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
   Length[transported0] === 3 && Length[transported1] === 3 &&
   Max[Abs[N[transported0 - {1, 0, 0}, 50]]] < 10^-40 &&
   Max[Abs[N[transported1 - {0, 1/2, 0}, 50]]] < 10^-40 &&
+  Lookup[monoCs["IntegrationSequence"], "Components", None] ===
+    {{1, 2}} &&
+  Lookup[monoBasis, "Type", None] === "DiffExp2NativeRegularBasis" &&
+  Lookup[monoBasis, "Dimension", None] === 2 &&
+  Lookup[monoBasis["NativeSummary"], "execution_capability", None] ===
+    "retained-regular-monolithic-unit-basis-v1" &&
+  Length[mono0] === 2 &&
+  Max[Abs[N[mono0[[1]] - {1, 0}, 50]]] < 10^-40 &&
+  Max[Abs[N[mono0[[2]] - {0, 1}, 50]]] < 10^-40 &&
   Length[eps0] === 3 && Length[eps1] === 3 &&
   Max[Abs[N[eps0 - {1, 0, 0}, 50]]] < 10^-40 &&
   Max[Abs[N[eps1 - {0, 1/2, 0}, 50]]] < 10^-40 &&
@@ -117,6 +139,10 @@ If[AssociationQ[basis] && ListQ[Lookup[basis, "Columns", None]],
     basis["Columns"]]];
 If[AssociationQ[valueLocal] && StringQ[Lookup[valueLocal, "Local", None]],
   Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[valueLocal]]];
+If[AssociationQ[monoBasis] &&
+    ListQ[Lookup[monoBasis, "Columns", None]],
+  Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+    monoBasis["Columns"]]];
 If[AssociationQ[prepared] && StringQ[Lookup[prepared, "SCC", None]],
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[prepared]]];
 DiffExp2`Solve`ClearSolveCaches[];
@@ -135,5 +161,8 @@ If[!ok, Print[InputForm[{
   "BasisSession" -> If[AssociationQ[basis],
     Lookup[basis, "Session", None], None],
   "Transported" -> {transported0, transported1},
+  "MonolithicType" -> If[AssociationQ[monoBasis],
+    Lookup[monoBasis, "Type", None], Head[monoBasis]],
+  "MonolithicValues" -> mono0,
   "BasisColumn" -> {eps0, eps1}}]]];
 Exit[If[ok, 0, 1]];

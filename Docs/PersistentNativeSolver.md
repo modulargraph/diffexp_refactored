@@ -155,6 +155,12 @@ session identity. Thus a boundary seed and later retained SCC bases coexist in
 one C++ session without constructing or exporting a Wolfram fundamental
 matrix.
 
+``Solve`SolveNativeRegularBasis`` is the chart-generic receiving-basis entry
+point. It selects the atomic SCC column batch for a multi-block envelope and
+uses exact eps^0 unit seeds in one retained full-system chart when the regular
+dependency graph is a single strongly connected block. Both forms expose the
+same ordered opaque-column contract to transport orchestration.
+
 The native protocol advertises both
 `exact-rational-regular-singular-scalar-block-dag-column-v1` and
 `exact-rational-regular-singular-jordan-block-dag-column-v2`. At least one

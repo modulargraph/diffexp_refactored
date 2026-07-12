@@ -1,5 +1,9 @@
 # DiffExp 2
 
+> **Beta:** DiffExp 2 is under active development. Interfaces, checkpoint
+> formats, and numerical guarantees may still change; independently validate
+> important results before relying on them in production or publication.
+
 DiffExp 2 transports local recurrence solutions of differential systems for
 dimensionally regularized Feynman integrals. It keeps exact local behavior
 

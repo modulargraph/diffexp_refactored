@@ -22,6 +22,7 @@ wolfram_tests=(
   Tests/test_cpp_backend.m
   Tests/test_cpp_arm_batch.m
   Tests/test_feynmantrick_algebra.m
+  Tests/test_fast_tadpole_boundary.m
   Tests/test_ft_example_specs.m
   Tests/test_feynmantrick_failure_semantics.m
   Tests/test_fire_inmemory_reduction_cache.m

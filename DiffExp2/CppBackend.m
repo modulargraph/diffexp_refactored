@@ -31,6 +31,15 @@ RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] 
 PersistentEndpointStatistics::usage = "PersistentEndpointStatistics[handle] returns the opaque endpoint summary, analytic-regularization/branch provenance, and export counters.";
 ExportPersistentEndpoint::usage = "ExportPersistentEndpoint[handle, checkpointIdentity, outputDigits] explicitly exports the retained specialized Acb epsilon vector for final compatibility.";
 ReleasePersistentEndpoint::usage = "ReleasePersistentEndpoint[handle] releases one retained native endpoint result. A second release is a loud native error.";
+CreatePersistentTilePlan::usage = "CreatePersistentTilePlan[owner, lower, upper, checkpointIdentity, divisionOrder] asks the persistent C++ session to build and retain exact lower/upper arm plans from retained chart handles. Exact match coordinates and physical/local tile intervals come from the native planner; DivisionOrder defaults to 3.";
+PersistentTilePlanStatistics::usage = "PersistentTilePlanStatistics[handle] returns the retained immutable lower/upper native plan, including exact match and tile intervals plus branch/prescription provenance.";
+PersistentTileMatchInterval::usage = "PersistentTileMatchInterval[handle, arm, index] returns one exact native match handoff for arm \"lower\" or \"upper\". Wolfram indices are one-based.";
+PersistentTileIntegrationInterval::usage = "PersistentTileIntegrationInterval[handle, arm, index] returns one exact physical/local tile interval selected by the retained native plan. Wolfram indices are one-based.";
+ReleasePersistentTilePlan::usage = "ReleasePersistentTilePlan[handle] releases one public native tile-plan token. Already-retained line results keep strong ownership of their immutable plan snapshot.";
+RunPersistentTileIntegral::usage = "RunPersistentTileIntegral[plan, arm, tile, local, epsilon, checkpointIdentity] integrates the retained local over the exact tile selected by plan, applies the exact affine Jacobian, and retains a StoredTruncation result with no unseen-tail claim. Wolfram tile indices are one-based.";
+PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, StoredTruncation diagnostics, and export counters.";
+ExportPersistentLineIntegral::usage = "ExportPersistentLineIntegral[handle, checkpointIdentity, outputDigits] explicitly exports one retained physical-tile epsilon vector for compatibility.";
+ReleasePersistentLineIntegral::usage = "ReleasePersistentLineIntegral[handle] releases one retained line-integral result. A second release is a loud native error.";
 PersistentLocalStatistics::usage = "PersistentLocalStatistics[handle] returns statistics and exact metadata for a retained native local solution.";
 ReleasePersistentLocal::usage = "ReleasePersistentLocal[handle] releases one retained native local solution. A second release is a loud native error.";
 SavePersistentCheckpoint::usage = "SavePersistentCheckpoint[owner, path, identity] atomically writes an opaque versioned native checkpoint for the prepared charts and retained SCC graph in owner's persistent session. Active local, match, endpoint, line, or tile handles are rejected by checkpoint schema v1.";
@@ -974,6 +983,148 @@ ReleasePersistentEndpoint[handle_Association] := Module[
   RunRequest[<|"schema" -> 2, "op" -> "endpoint.release",
     "session" -> tokens["Session"],
     "endpoint" -> tokens["Endpoint"]|>]];
+
+persistentTilePlanHandles[handle_Association] := Module[
+  {session, plan, checkpoint},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  plan = Lookup[handle, "tile_plan", Lookup[handle, "TilePlan", None]];
+  checkpoint = Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", None]];
+  If[!StringQ[session] || !StringQ[plan] || !StringQ[checkpoint] ||
+      StringLength[checkpoint] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent tile-plan handle requires exact session, tile-plan, and checkpoint tokens"|>],
+      Module]];
+  <|"Session" -> session, "TilePlan" -> plan,
+    "CheckpointIdentity" -> checkpoint|>];
+
+CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
+    checkpointIdentity_String, divisionOrder_:3] := Module[
+  {session = persistentCheckpointSession[owner], required,
+   malformed},
+  If[FailureQ[session], Return[session, Module]];
+  If[StringLength[checkpointIdentity] == 0 || !IntegerQ[divisionOrder] ||
+      divisionOrder < 2,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "native tile planning requires a nonempty checkpoint identity and integer DivisionOrder >= 2"|>],
+      Module]];
+  required = Sort[{"from_exact", "to_exact", "charts", "topology"}];
+  malformed = Select[{lower, upper}, Sort[Keys[#]] =!= required &];
+  If[malformed =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "each native tile arm must contain exactly from_exact, to_exact, charts, and topology"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.plan",
+    "session" -> session, "checkpoint_identity" -> checkpointIdentity,
+    "division_order" -> divisionOrder, "lower" -> lower,
+    "upper" -> upper|>]];
+
+PersistentTilePlanStatistics[handle_Association] := Module[
+  {tokens = persistentTilePlanHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.stats",
+    "session" -> tokens["Session"],
+    "tile_plan" -> tokens["TilePlan"]|>]];
+
+PersistentTileMatchInterval[handle_Association, arm_String,
+    index_Integer] := Module[{tokens = persistentTilePlanHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[!MemberQ[{"lower", "upper"}, arm] || index < 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "native tile match lookup requires arm lower/upper and a positive one-based index"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.match_interval",
+    "session" -> tokens["Session"],
+    "tile_plan" -> tokens["TilePlan"], "arm" -> arm,
+    "match" -> index - 1|>]];
+
+PersistentTileIntegrationInterval[handle_Association, arm_String,
+    index_Integer] := Module[{tokens = persistentTilePlanHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[!MemberQ[{"lower", "upper"}, arm] || index < 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "native tile interval lookup requires arm lower/upper and a positive one-based index"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.integration_interval",
+    "session" -> tokens["Session"],
+    "tile_plan" -> tokens["TilePlan"], "arm" -> arm,
+    "tile" -> index - 1|>]];
+
+ReleasePersistentTilePlan[handle_Association] := Module[
+  {tokens = persistentTilePlanHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "tile.release",
+    "session" -> tokens["Session"],
+    "tile_plan" -> tokens["TilePlan"]|>]];
+
+RunPersistentTileIntegral[plan_Association, arm_String, tile_Integer,
+    local_Association, epsilon_Association,
+    checkpointIdentity_String] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   localTokens = persistentLocalHandles[local], sourceCheckpoint},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[localTokens], Return[localTokens, Module]];
+  sourceCheckpoint = Lookup[local, "checkpoint_identity",
+    Lookup[local, "CheckpointIdentity", None]];
+  If[planTokens["Session"] =!= localTokens["Session"] ||
+      !MemberQ[{"lower", "upper"}, arm] || tile < 1 ||
+      Sort[Keys[epsilon]] =!= Sort[{"min", "max"}] ||
+      !StringQ[sourceCheckpoint] || StringLength[sourceCheckpoint] == 0 ||
+      StringLength[checkpointIdentity] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent tile integration requires one session, arm lower/upper, a positive one-based tile, exact min/max epsilon window, and nonempty source/result checkpoint identities"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "integration.line",
+    "session" -> planTokens["Session"],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "local" -> localTokens["Local"], "arm" -> arm,
+    "tile" -> tile - 1, "epsilon" -> epsilon,
+    "source_checkpoint_identity" -> sourceCheckpoint,
+    "checkpoint_identity" -> checkpointIdentity|>]];
+
+persistentLineIntegralHandles[handle_Association] := Module[
+  {session, line, checkpoint},
+  session = Lookup[handle, "session", Lookup[handle, "Session", None]];
+  line = Lookup[handle, "line", Lookup[handle, "Line", None]];
+  checkpoint = Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", None]];
+  If[!StringQ[session] || !StringQ[line] || !StringQ[checkpoint] ||
+      StringLength[checkpoint] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent line-integral handle requires exact session, line, and checkpoint tokens"|>],
+      Module]];
+  <|"Session" -> session, "Line" -> line,
+    "CheckpointIdentity" -> checkpoint|>];
+
+PersistentLineIntegralStatistics[handle_Association] := Module[
+  {tokens = persistentLineIntegralHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "integration.stats",
+    "session" -> tokens["Session"], "line" -> tokens["Line"]|>]];
+
+ExportPersistentLineIntegral[handle_Association,
+    checkpointIdentity_String, outputDigits_:Automatic] := Module[
+  {tokens = persistentLineIntegralHandles[handle], request},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[StringLength[checkpointIdentity] == 0 ||
+      (outputDigits =!= Automatic &&
+       (!IntegerQ[outputDigits] || outputDigits < 1)),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "line export requires a nonempty checkpoint identity and positive output digits"|>],
+      Module]];
+  request = <|"schema" -> 2, "op" -> "integration.export",
+    "session" -> tokens["Session"], "line" -> tokens["Line"],
+    "checkpoint_identity" -> checkpointIdentity|>;
+  If[IntegerQ[outputDigits],
+    request = Append[request, "output_digits" -> outputDigits]];
+  RunRequest[request]];
+
+ReleasePersistentLineIntegral[handle_Association] := Module[
+  {tokens = persistentLineIntegralHandles[handle]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "integration.release",
+    "session" -> tokens["Session"], "line" -> tokens["Line"]|>]];
 
 PersistentLocalStatistics[handle_Association] := Module[
   {tokens = persistentLocalHandles[handle]},

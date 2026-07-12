@@ -1,9 +1,11 @@
 #include "diffexp2/json_codec.hpp"
 
 #include "diffexp2/checkpoint.hpp"
+#include "diffexp2/line_integration.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
 #include "diffexp2/matching.hpp"
+#include "diffexp2/path_planner.hpp"
 #include "diffexp2/recurrence.hpp"
 #include "diffexp2/singular_indicial.hpp"
 
@@ -1321,9 +1323,11 @@ struct StoredLocalStats {
   std::uint64_t evaluations = 0;
   std::uint64_t residual_certifications = 0;
   std::uint64_t endpoint_limits = 0;
+  std::uint64_t line_integrations = 0;
   double evaluate_ms = 0.0;
   double residual_certify_ms = 0.0;
   double endpoint_limit_ms = 0.0;
+  double line_integration_ms = 0.0;
   double create_parse_ms = 0.0;
   double create_kernel_ms = 0.0;
   std::size_t coefficient_count = 0;
@@ -1343,6 +1347,9 @@ struct NativeLocalRun {
 };
 
 json::value canonical_json_value(const json::value& value);
+void require_exact_keys(const json::object& object,
+                        std::initializer_list<std::string_view> required,
+                        const char* label);
 
 struct SCCColumnProvenance {
   std::string scc_handle;
@@ -1378,6 +1385,12 @@ class StoredLocalBase {
                                         int output_digits) = 0;
   virtual EndpointLimitResult endpoint_limit(
       const EndpointLimitOptions& options) = 0;
+  virtual StoredLineIntegral integrate_planned_line(
+      const ExactAffineChart& chart,
+      const std::vector<Prescription>& prescriptions,
+      const Rational& local_begin, const Rational& local_end,
+      const EpsilonWindow& delivered_epsilon,
+      std::optional<std::int32_t> exact_rim) = 0;
   virtual json::object endpoint_metadata() const = 0;
   virtual const std::string& checkpoint_identity() const = 0;
   virtual const char* scalar_domain() const = 0;
@@ -1570,6 +1583,76 @@ class StoredLocal final : public StoredLocalBase {
     }
   }
 
+  StoredLineIntegral integrate_planned_line(
+      const ExactAffineChart& chart,
+      const std::vector<Prescription>& prescriptions,
+      const Rational& local_begin, const Rational& local_end,
+      const EpsilonWindow& delivered_epsilon,
+      std::optional<std::int32_t> exact_rim) override {
+    if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+      throw std::domain_error(
+          "native planned line integration rejects unresolved symbolic "
+          "coefficients; specialize the retained local first");
+    } else {
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
+      if (!(Rational(solution_.chart.center_exact) == chart.center) ||
+          !(Rational(solution_.chart.scale_exact) == chart.scale) ||
+          solution_.chart.infinite_radius ||
+          !acb_equal(solution_.chart.radius.raw(),
+                     ComplexBall::from_strings(chart.radius.str()).raw()))
+        throw std::invalid_argument(
+            "retained local chart geometry differs from its native tile plan");
+      const auto same_prescription = [](const Prescription& left,
+                                        const Prescription& right) {
+        return left.factor_exact == right.factor_exact &&
+               left.sign == right.sign &&
+               left.multiplicity == right.multiplicity &&
+               left.leading_coefficient_sign ==
+                   right.leading_coefficient_sign;
+      };
+      if (solution_.prescriptions.size() != prescriptions.size() ||
+          !std::equal(solution_.prescriptions.begin(),
+                      solution_.prescriptions.end(), prescriptions.begin(),
+                      same_prescription))
+        throw std::invalid_argument(
+            "retained local prescriptions differ from its native tile plan");
+
+      StoredLineIntegrationOptions options;
+      options.delivered_epsilon = delivered_epsilon;
+      options.imaginary_sign = exact_rim;
+      if (local_begin == local_end)
+        throw std::invalid_argument(
+            "native planned line tile has zero local length");
+      const bool reverse_local_orientation = local_end < local_begin;
+      const auto& primitive_begin =
+          reverse_local_orientation ? local_end : local_begin;
+      const auto& primitive_end =
+          reverse_local_orientation ? local_begin : local_end;
+      const auto started = std::chrono::steady_clock::now();
+      auto result = integrate_stored_local_line(
+          solution_, RealEvaluationPoint::rational(primitive_begin.str()),
+          RealEvaluationPoint::rational(primitive_end.str()), options);
+      // integrate_stored_local_line is deliberately a local-coordinate
+      // primitive.  A retained physical tile has dx = scale dt, so apply the
+      // exact affine Jacobian before publishing the physical line result.
+      const auto oriented_jacobian = reverse_local_orientation
+          ? -chart.scale : chart.scale;
+      const auto jacobian =
+          ComplexBall::from_strings(oriented_jacobian.str());
+      for (auto& coefficient : result.value.coefficients)
+        coefficient *= jacobian;
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      line_integrations_.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        line_integration_ms_ += elapsed;
+      }
+      return result;
+    }
+  }
+
   json::object endpoint_metadata() const override { return metadata_json(); }
 
   const std::string& checkpoint_identity() const override {
@@ -1608,18 +1691,20 @@ class StoredLocal final : public StoredLocalBase {
     out["evaluations"] = current.evaluations;
     out["residual_certifications"] = current.residual_certifications;
     out["endpoint_limits"] = current.endpoint_limits;
+    out["line_integrations"] = current.line_integrations;
     out["evaluate_ms"] = current.evaluate_ms;
     out["residual_certify_ms"] = current.residual_certify_ms;
     out["endpoint_limit_ms"] = current.endpoint_limit_ms;
+    out["line_integration_ms"] = current.line_integration_ms;
     return out;
   }
 
   StoredLocalStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return {evaluations_.load(), residual_certifications_.load(),
-            endpoint_limits_.load(), evaluate_ms_, residual_certify_ms_,
-            endpoint_limit_ms_, create_parse_ms_, create_kernel_ms_,
-            coefficient_count()};
+            endpoint_limits_.load(), line_integrations_.load(), evaluate_ms_,
+            residual_certify_ms_, endpoint_limit_ms_, line_integration_ms_,
+            create_parse_ms_, create_kernel_ms_, coefficient_count()};
   }
 
   const LocalSolution<Scalar>& solution() const { return solution_; }
@@ -1672,10 +1757,12 @@ class StoredLocal final : public StoredLocalBase {
   std::atomic<std::uint64_t> evaluations_{0};
   std::atomic<std::uint64_t> residual_certifications_{0};
   std::atomic<std::uint64_t> endpoint_limits_{0};
+  std::atomic<std::uint64_t> line_integrations_{0};
   mutable std::mutex stats_mutex_;
   double evaluate_ms_ = 0.0;
   double residual_certify_ms_ = 0.0;
   double endpoint_limit_ms_ = 0.0;
+  double line_integration_ms_ = 0.0;
 };
 
 constexpr const char* kRetainedEndpointLimitCapability =
@@ -4357,6 +4444,368 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   double column_solve_ms_ = 0.0;
 };
 
+constexpr const char* kRetainedTilePlanCapability =
+    "retained-exact-independent-arm-tile-plan-v1";
+constexpr const char* kRetainedStoredLineCapability =
+    "retained-native-stored-truncation-physical-tile-integral-v1";
+
+struct RetainedPlanChartBinding {
+  std::string handle;
+  std::string exact_identity;
+  ExactAffineChart geometry;
+  std::vector<Prescription> prescriptions;
+  std::shared_ptr<PreparedChartBase> owner;
+};
+
+struct RetainedArmPlan {
+  ExactArmPlan exact;
+  std::vector<RetainedPlanChartBinding> charts;
+};
+
+json::array encode_path_branch_sheets(
+    const std::vector<ExactBranchSheet>& sheets) {
+  json::array encoded;
+  encoded.reserve(sheets.size());
+  for (const auto& sheet : sheets)
+    encoded.push_back(json::object{{"factor_exact", sheet.factor_exact},
+                                   {"sign", sheet.imaginary_sign}});
+  return encoded;
+}
+
+json::array encode_plan_prescriptions(
+    const std::vector<Prescription>& prescriptions) {
+  json::array encoded;
+  encoded.reserve(prescriptions.size());
+  for (const auto& prescription : prescriptions)
+    encoded.push_back(json::object{
+        {"factor_exact", prescription.factor_exact},
+        {"sign", prescription.sign},
+        {"multiplicity", prescription.multiplicity},
+        {"leading_coefficient_sign",
+         prescription.leading_coefficient_sign}});
+  return encoded;
+}
+
+json::object encode_plan_chart(const RetainedPlanChartBinding& binding,
+                               std::size_t index) {
+  return json::object{
+      {"index", index}, {"chart", binding.handle},
+      {"identity", binding.exact_identity},
+      {"center_exact", binding.geometry.center.str()},
+      {"scale_exact", binding.geometry.scale.str()},
+      {"radius_exact", binding.geometry.radius.str()},
+      {"singular_center", binding.geometry.singular_center},
+      {"prescriptions", encode_plan_prescriptions(binding.prescriptions)}};
+}
+
+const char* exact_match_kind_name(ExactMatchKind kind) {
+  switch (kind) {
+    case ExactMatchKind::SymmetricDivisionPoint:
+      return "symmetric-division-point";
+    case ExactMatchKind::BalancedSafeOverlap:
+      return "balanced-safe-overlap";
+    case ExactMatchKind::ForbiddenPointAvoidance:
+      return "forbidden-point-avoidance";
+  }
+  throw std::logic_error("unknown exact match kind");
+}
+
+json::object encode_plan_match(const RetainedArmPlan& arm,
+                               std::size_t index) {
+  if (index >= arm.exact.matches.size())
+    throw std::invalid_argument("native tile-plan match index is out of range");
+  const auto& match = arm.exact.matches[index];
+  return json::object{
+      {"index", index},
+      {"producing_chart_index", match.producing_chart},
+      {"receiving_chart_index", match.receiving_chart},
+      {"producing_chart", arm.charts.at(match.producing_chart).handle},
+      {"receiving_chart", arm.charts.at(match.receiving_chart).handle},
+      {"physical_exact", match.physical.str()},
+      {"producing_local_exact", match.producing_local.str()},
+      {"receiving_local_exact", match.receiving_local.str()},
+      {"kind", exact_match_kind_name(match.kind)},
+      {"branch_sheets", encode_path_branch_sheets(match.branch_sheets)}};
+}
+
+json::object encode_plan_tile(const RetainedArmPlan& arm,
+                              std::size_t index) {
+  if (index >= arm.exact.tiles.size())
+    throw std::invalid_argument("native tile-plan tile index is out of range");
+  const auto& tile = arm.exact.tiles[index];
+  const auto& binding = arm.charts.at(tile.chart);
+  return json::object{
+      {"index", index}, {"chart_index", tile.chart},
+      {"chart", binding.handle}, {"chart_identity", binding.exact_identity},
+      {"physical_begin_exact", tile.physical_begin.str()},
+      {"physical_end_exact", tile.physical_end.str()},
+      {"local_begin_exact", tile.local_begin.str()},
+      {"local_end_exact", tile.local_end.str()},
+      {"jacobian_exact", binding.geometry.scale.str()},
+      {"crosses_singular_center", tile.crosses_singular_center},
+      {"branch_sheets", encode_path_branch_sheets(tile.branch_sheets)},
+      {"prescriptions", encode_plan_prescriptions(binding.prescriptions)}};
+}
+
+json::object encode_plan_topology(const ExactPathTopology& topology) {
+  json::array singular_points;
+  for (const auto& point : topology.singular_points)
+    singular_points.push_back(json::value(point.str()));
+  json::array boundary_points;
+  for (const auto& point : topology.boundary_points)
+    boundary_points.push_back(json::value(point.str()));
+  json::array projections;
+  for (const auto& projection : topology.complex_projections)
+    projections.push_back(json::object{
+        {"source_identity", projection.source_identity},
+        {"real_part_exact", projection.real_part.str()},
+        {"imaginary_magnitude_exact", projection.imaginary_magnitude.str()},
+        {"retain_minus_imaginary", projection.retain_minus_imaginary},
+        {"retain_real_part", projection.retain_real_part},
+        {"retain_plus_imaginary", projection.retain_plus_imaginary}});
+  return json::object{
+      {"singular_points", std::move(singular_points)},
+      {"boundary_points", std::move(boundary_points)},
+      {"complex_projections", std::move(projections)},
+      {"branch_sheets", encode_path_branch_sheets(topology.branch_sheets)}};
+}
+
+json::object encode_retained_arm(const RetainedArmPlan& arm) {
+  json::array charts;
+  for (std::size_t index = 0; index < arm.charts.size(); ++index)
+    charts.push_back(encode_plan_chart(arm.charts[index], index));
+  json::array matches;
+  for (std::size_t index = 0; index < arm.exact.matches.size(); ++index)
+    matches.push_back(encode_plan_match(arm, index));
+  json::array tiles;
+  for (std::size_t index = 0; index < arm.exact.tiles.size(); ++index)
+    tiles.push_back(encode_plan_tile(arm, index));
+  return json::object{
+      {"from_exact", arm.exact.from.str()},
+      {"to_exact", arm.exact.to.str()},
+      {"direction", arm.exact.direction},
+      {"division_order", arm.exact.division_order},
+      {"charts", std::move(charts)}, {"matches", std::move(matches)},
+      {"tiles", std::move(tiles)},
+      {"topology", encode_plan_topology(arm.exact.topology)}};
+}
+
+std::optional<std::int32_t> exact_plan_rim(
+    const std::vector<Prescription>& prescriptions) {
+  std::optional<std::int32_t> rim;
+  for (const auto& prescription : prescriptions) {
+    if ((prescription.multiplicity & 1U) == 0) continue;
+    const auto candidate =
+        prescription.sign * prescription.leading_coefficient_sign;
+    if (rim.has_value() && *rim != candidate)
+      throw std::invalid_argument(
+          "prepared tile chart has conflicting exact odd-multiplicity prescriptions");
+    rim = candidate;
+  }
+  return rim;
+}
+
+class StoredTilePlan {
+ public:
+  StoredTilePlan(std::string handle, std::string checkpoint_identity,
+                 std::string provenance_identity, std::uint32_t division_order,
+                 RetainedArmPlan lower, RetainedArmPlan upper,
+                 double elapsed_ms)
+      : handle_(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        division_order_(division_order), lower_(std::move(lower)),
+        upper_(std::move(upper)), elapsed_ms_(elapsed_ms) {
+    validate_exact_arm_plan(lower_.exact);
+    validate_exact_arm_plan(upper_.exact);
+  }
+
+  const std::string& handle() const { return handle_; }
+  const std::string& checkpoint_identity() const {
+    return checkpoint_identity_;
+  }
+
+  const RetainedArmPlan& arm(const std::string& name) const {
+    if (name == "lower") return lower_;
+    if (name == "upper") return upper_;
+    throw std::invalid_argument("native tile-plan arm must be lower or upper");
+  }
+
+  json::object match_interval(const std::string& name,
+                              std::size_t index) const {
+    match_queries_.fetch_add(1);
+    auto encoded = encode_plan_match(arm(name), index);
+    encoded["arm"] = name;
+    encoded["tile_plan"] = handle_;
+    encoded["checkpoint_identity"] = checkpoint_identity_;
+    return encoded;
+  }
+
+  json::object tile_interval(const std::string& name,
+                             std::size_t index) const {
+    tile_queries_.fetch_add(1);
+    auto encoded = encode_plan_tile(arm(name), index);
+    encoded["arm"] = name;
+    encoded["tile_plan"] = handle_;
+    encoded["checkpoint_identity"] = checkpoint_identity_;
+    return encoded;
+  }
+
+  void note_integration() { integrations_.fetch_add(1); }
+
+  json::object summary(bool include_intervals = true) const {
+    json::object result{
+        {"tile_plan", handle_}, {"capability", kRetainedTilePlanCapability},
+        {"native_retained", true}, {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"division_order", division_order_},
+        {"independent_arms", true},
+        {"concurrent_execution", "immutable-independent-arm-snapshots"},
+        {"anchor", json::object{
+             {"lower_chart", lower_.charts.front().handle},
+             {"upper_chart", upper_.charts.front().handle},
+             {"center_exact", lower_.exact.from.str()}}},
+        {"lower_matches", lower_.exact.matches.size()},
+        {"upper_matches", upper_.exact.matches.size()},
+        {"lower_tiles", lower_.exact.tiles.size()},
+        {"upper_tiles", upper_.exact.tiles.size()},
+        {"match_interval_queries", match_queries_.load()},
+        {"tile_interval_queries", tile_queries_.load()},
+        {"integrations", integrations_.load()},
+        {"elapsed_ms", elapsed_ms_}};
+    if (include_intervals) {
+      result["lower"] = encode_retained_arm(lower_);
+      result["upper"] = encode_retained_arm(upper_);
+    }
+    return result;
+  }
+
+ private:
+  std::string handle_;
+  std::string checkpoint_identity_;
+  std::string provenance_identity_;
+  std::uint32_t division_order_ = 3;
+  RetainedArmPlan lower_;
+  RetainedArmPlan upper_;
+  double elapsed_ms_ = 0.0;
+  mutable std::atomic<std::uint64_t> match_queries_{0};
+  mutable std::atomic<std::uint64_t> tile_queries_{0};
+  std::atomic<std::uint64_t> integrations_{0};
+};
+
+class StoredLineResult {
+ public:
+  StoredLineResult(std::string handle, std::string checkpoint_identity,
+                   std::string provenance_identity, std::string arm,
+                   std::size_t tile_index, json::object interval,
+                   std::string source_checkpoint,
+                   StoredLineIntegral result, double elapsed_ms,
+                   std::shared_ptr<StoredTilePlan> plan_owner,
+                   std::shared_ptr<StoredLocalBase> local_owner)
+      : handle_(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        arm_(std::move(arm)), tile_index_(tile_index),
+        interval_(std::move(interval)),
+        source_checkpoint_(std::move(source_checkpoint)),
+        result_(std::move(result)), elapsed_ms_(elapsed_ms),
+        plan_owner_(std::move(plan_owner)),
+        local_owner_(std::move(local_owner)) {}
+
+  const std::string& handle() const { return handle_; }
+  const std::string& checkpoint_identity() const {
+    return checkpoint_identity_;
+  }
+  double elapsed_ms() const { return elapsed_ms_; }
+
+  json::object summary() const {
+    const auto& diagnostics = result_.diagnostics;
+    return json::object{
+        {"line", handle_}, {"capability", kRetainedStoredLineCapability},
+        {"native_retained", true}, {"json_coefficients", 0},
+        {"scope", "stored_truncation"},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"source", json::object{
+             {"tile_plan", plan_owner_->handle()},
+             {"tile_plan_checkpoint_identity",
+              plan_owner_->checkpoint_identity()},
+             {"local", local_owner_->handle()},
+             {"chart", local_owner_->source_chart()},
+             {"local_checkpoint_identity", source_checkpoint_}}},
+        {"arm", arm_}, {"tile", tile_index_}, {"interval", interval_},
+        {"dimension", result_.value.dimension},
+        {"epsilon_min", result_.value.epsilon.min_power},
+        {"epsilon_max", result_.value.epsilon.complete_max},
+        {"effective_rim", result_.imaginary_sign.has_value()
+             ? json::value(*result_.imaginary_sign) : json::value(nullptr)},
+        {"error", json::object{
+             {"guarantee", "none"},
+             {"provenance", result_.value.error.provenance}}},
+        {"diagnostics", json::object{
+             {"input_monomial_cells", diagnostics.input_monomial_cells},
+             {"grouped_monomials", diagnostics.grouped_monomials},
+             {"zero_groups_skipped", diagnostics.zero_groups_skipped},
+             {"cancelled_divergent_groups",
+              diagnostics.cancelled_divergent_groups},
+             {"primitive_evaluations", diagnostics.primitive_evaluations},
+             {"primitive_component_applications",
+              diagnostics.primitive_component_applications},
+             {"primitive_component_reuses",
+              diagnostics.primitive_component_reuses},
+             {"has_center_endpoint", diagnostics.has_center_endpoint},
+             {"detail", diagnostics.detail}}},
+        {"elapsed_ms", elapsed_ms_}};
+  }
+
+  json::object stats_json() const {
+    auto result = summary();
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    result["exports"] = exports_;
+    result["export_ms"] = export_ms_;
+    return result;
+  }
+
+  json::object export_values(const std::string& expected_checkpoint,
+                             int output_digits) {
+    if (expected_checkpoint != checkpoint_identity_)
+      throw std::invalid_argument(
+          "line export checkpoint identity does not match retained result");
+    const auto started = std::chrono::steady_clock::now();
+    auto value = encode_epsilon_vector(result_.value, output_digits);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      ++exports_;
+      export_ms_ += elapsed;
+    }
+    return json::object{
+        {"line", handle_}, {"checkpoint_identity", checkpoint_identity_},
+        {"compatibility_export", true},
+        {"scope", "stored_truncation"},
+        {"error_guarantee", "none"},
+        {"json_coefficients", value.at("coefficients").as_array().size()},
+        {"value", std::move(value)}, {"elapsed_ms", elapsed}};
+  }
+
+ private:
+  std::string handle_;
+  std::string checkpoint_identity_;
+  std::string provenance_identity_;
+  std::string arm_;
+  std::size_t tile_index_ = 0;
+  json::object interval_;
+  std::string source_checkpoint_;
+  StoredLineIntegral result_;
+  double elapsed_ms_ = 0.0;
+  std::shared_ptr<StoredTilePlan> plan_owner_;
+  std::shared_ptr<StoredLocalBase> local_owner_;
+  mutable std::mutex stats_mutex_;
+  std::uint64_t exports_ = 0;
+  double export_ms_ = 0.0;
+};
+
 struct SolverSession {
   std::string handle;
   std::string domain;
@@ -4369,19 +4818,28 @@ struct SolverSession {
   std::size_t scc_capacity = 128;
   std::size_t match_capacity = 1024;
   std::size_t endpoint_capacity = 1024;
+  std::size_t tile_plan_capacity = 256;
+  std::size_t line_result_capacity = 2048;
   std::uint64_t next_chart = 1;
   std::uint64_t next_local = 1;
   std::uint64_t next_scc = 1;
   std::uint64_t next_match = 1;
   std::uint64_t next_endpoint = 1;
+  std::uint64_t next_tile_plan = 1;
+  std::uint64_t next_line_result = 1;
   std::size_t pending_local_solves = 0;
   std::size_t pending_matches = 0;
   std::size_t pending_endpoint_limits = 0;
+  std::size_t pending_tile_plans = 0;
+  std::size_t pending_line_integrations = 0;
   std::uint64_t total_local_solves = 0;
   std::uint64_t total_scc_column_solves = 0;
   std::uint64_t total_local_matches = 0;
   std::uint64_t total_endpoint_limits = 0;
   std::uint64_t total_endpoint_exports = 0;
+  std::uint64_t total_tile_plans = 0;
+  std::uint64_t total_line_integrations = 0;
+  std::uint64_t total_line_exports = 0;
   double total_local_run_parse_ms = 0.0;
   double total_local_kernel_ms = 0.0;
   double total_local_match_ms = 0.0;
@@ -4390,6 +4848,9 @@ struct SolverSession {
   std::string restored_from_checkpoint_identity;
   double total_endpoint_limit_ms = 0.0;
   double total_endpoint_export_ms = 0.0;
+  double total_tile_plan_ms = 0.0;
+  double total_line_integration_ms = 0.0;
+  double total_line_export_ms = 0.0;
   bool closed = false;
   mutable std::mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
@@ -4398,9 +4859,276 @@ struct SolverSession {
   std::unordered_map<std::string, std::shared_ptr<StoredMatchBase>> matches;
   std::unordered_map<std::string, std::shared_ptr<StoredEndpointResult>>
       endpoints;
+  std::unordered_map<std::string, std::shared_ptr<StoredTilePlan>> tile_plans;
+  std::unordered_map<std::string, std::shared_ptr<StoredLineResult>>
+      line_results;
   std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>> sccs;
   std::unordered_map<std::string, std::string> scc_handles_by_key;
 };
+
+Rational parse_exact_path_rational(const json::value& raw,
+                                   const char* label) {
+  if (!raw.is_string() || raw.as_string().empty())
+    throw std::invalid_argument(std::string(label) +
+                                " must be a nonempty exact rational string");
+  try {
+    return Rational(std::string(raw.as_string()));
+  } catch (const std::invalid_argument&) {
+    throw std::invalid_argument(std::string(label) +
+                                " is not an exact rational number");
+  }
+}
+
+std::vector<Rational> parse_exact_path_points(const json::value& raw,
+                                              const char* label) {
+  std::vector<Rational> points;
+  for (const auto& value : as_array(raw, label))
+    points.push_back(parse_exact_path_rational(value, label));
+  return points;
+}
+
+ExactPathTopology parse_exact_path_topology(const json::value& raw) {
+  const auto& object = as_object(raw, "native exact path topology");
+  require_exact_keys(object,
+      {"singular_points", "boundary_points", "complex_projections",
+       "branch_sheets"}, "native exact path topology");
+  ExactPathTopology topology;
+  topology.singular_points = parse_exact_path_points(
+      object.at("singular_points"), "path singular point");
+  topology.boundary_points = parse_exact_path_points(
+      object.at("boundary_points"), "path boundary point");
+  for (const auto& raw_projection : as_array(
+           object.at("complex_projections"), "path complex projections")) {
+    const auto& projection = as_object(
+        raw_projection, "path complex projection");
+    require_exact_keys(projection,
+        {"source_identity", "real_part_exact",
+         "imaginary_magnitude_exact", "retain_minus_imaginary",
+         "retain_real_part", "retain_plus_imaginary"},
+        "path complex projection");
+    topology.complex_projections.push_back(ExactComplexProjection{
+        required_string(projection, "source_identity"),
+        parse_exact_path_rational(projection.at("real_part_exact"),
+                                  "projection real part"),
+        parse_exact_path_rational(
+            projection.at("imaginary_magnitude_exact"),
+            "projection imaginary magnitude"),
+        projection.at("retain_minus_imaginary").as_bool(),
+        projection.at("retain_real_part").as_bool(),
+        projection.at("retain_plus_imaginary").as_bool()});
+  }
+  for (const auto& raw_sheet : as_array(
+           object.at("branch_sheets"), "path branch sheets")) {
+    const auto& sheet = as_object(raw_sheet, "path branch sheet");
+    require_exact_keys(sheet, {"factor_exact", "sign"},
+                       "path branch sheet");
+    topology.branch_sheets.push_back(ExactBranchSheet{
+        required_string(sheet, "factor_exact"),
+        as_i32(sheet.at("sign"), "path branch sign")});
+  }
+  return topology;
+}
+
+RetainedPlanChartBinding bind_plan_chart(
+    const std::shared_ptr<PreparedChartBase>& chart,
+    const ExactPathTopology& topology) {
+  if (!chart->geometry_record().has_value())
+    throw std::invalid_argument(
+        "native tile planning requires retained exact chart geometry");
+  const auto geometry_value = json::parse(*chart->geometry_record());
+  const auto& geometry = as_object(
+      geometry_value, "retained native tile chart geometry");
+  if (geometry.at("infinite_radius").as_bool())
+    throw std::invalid_argument(
+        "native exact tile planning currently requires finite chart radii");
+
+  RetainedPlanChartBinding binding;
+  binding.handle = chart->handle();
+  binding.exact_identity = chart->exact_identity();
+  binding.owner = chart;
+  binding.geometry.identity = chart->exact_identity();
+  binding.geometry.center = parse_exact_path_rational(
+      geometry.at("center_exact"), "tile chart center");
+  binding.geometry.scale = parse_exact_path_rational(
+      geometry.at("scale_exact"), "tile chart scale");
+  binding.geometry.radius = parse_exact_path_rational(
+      geometry.at("radius_exact"), "tile chart radius");
+  binding.geometry.singular_center = std::any_of(
+      topology.singular_points.begin(), topology.singular_points.end(),
+      [&](const Rational& point) { return point == binding.geometry.center; });
+  for (const auto& raw_prescription : as_array(
+           geometry.at("prescriptions"), "tile chart prescriptions")) {
+    const auto& prescription = as_object(
+        raw_prescription, "tile chart prescription");
+    binding.prescriptions.push_back(Prescription{
+        required_string(prescription, "factor_exact"),
+        as_i32(prescription.at("sign"), "tile prescription sign"),
+        as_u32(prescription.at("multiplicity"),
+               "tile prescription multiplicity"),
+        as_i32(prescription.at("leading_coefficient_sign"),
+               "tile prescription leading coefficient sign")});
+  }
+  // Every exact prepared prescription must be represented on the path.  The
+  // topology may additionally retain factors which are inactive in this
+  // chart, but it may never silently alter or drop an active sheet.
+  for (const auto& prescription : binding.prescriptions) {
+    const auto found = std::find_if(
+        topology.branch_sheets.begin(), topology.branch_sheets.end(),
+        [&](const ExactBranchSheet& sheet) {
+          return sheet.factor_exact == prescription.factor_exact;
+        });
+    if (found == topology.branch_sheets.end() ||
+        found->imaginary_sign != prescription.sign)
+      throw std::invalid_argument(
+          "native tile topology does not reproduce a prepared chart branch prescription");
+  }
+  (void)exact_plan_rim(binding.prescriptions);
+  return binding;
+}
+
+std::vector<std::string> parse_plan_chart_handles(const json::object& arm) {
+  std::vector<std::string> handles;
+  for (const auto& raw : as_array(arm.at("charts"), "tile arm charts")) {
+    if (!raw.is_string() || raw.as_string().empty())
+      throw std::invalid_argument(
+          "native tile arm chart handles must be nonempty strings");
+    handles.emplace_back(raw.as_string());
+  }
+  if (handles.empty())
+    throw std::invalid_argument("native tile arm requires at least one chart");
+  return handles;
+}
+
+std::pair<ExactArmRequest, std::vector<RetainedPlanChartBinding>>
+parse_retained_arm_request(
+    const json::object& arm,
+    const std::vector<std::shared_ptr<PreparedChartBase>>& charts) {
+  require_exact_keys(arm, {"from_exact", "to_exact", "charts", "topology"},
+                     "native tile arm");
+  const auto handles = parse_plan_chart_handles(arm);
+  if (handles.size() != charts.size())
+    throw std::invalid_argument(
+        "resolved native tile chart count differs from its request");
+  ExactArmRequest request;
+  request.from = parse_exact_path_rational(arm.at("from_exact"),
+                                           "tile arm start");
+  request.to = parse_exact_path_rational(arm.at("to_exact"),
+                                         "tile arm end");
+  request.topology = parse_exact_path_topology(arm.at("topology"));
+  std::vector<RetainedPlanChartBinding> bindings;
+  bindings.reserve(charts.size());
+  request.charts.reserve(charts.size());
+  for (std::size_t index = 0; index < charts.size(); ++index) {
+    if (charts[index]->handle() != handles[index])
+      throw std::logic_error("resolved tile chart handle changed");
+    auto binding = bind_plan_chart(charts[index], request.topology);
+    request.charts.push_back(binding.geometry);
+    bindings.push_back(std::move(binding));
+  }
+  return {std::move(request), std::move(bindings)};
+}
+
+std::shared_ptr<StoredTilePlan> build_tile_plan(
+    const std::string& handle, const json::object& request,
+    const std::vector<std::shared_ptr<PreparedChartBase>>& lower_charts,
+    const std::vector<std::shared_ptr<PreparedChartBase>>& upper_charts) {
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  const auto division_order = as_u32(
+      request.at("division_order"), "native tile division order");
+  auto [lower_request, lower_bindings] = parse_retained_arm_request(
+      as_object(request.at("lower"), "lower native tile arm"), lower_charts);
+  auto [upper_request, upper_bindings] = parse_retained_arm_request(
+      as_object(request.at("upper"), "upper native tile arm"), upper_charts);
+  if (lower_bindings.front().handle != upper_bindings.front().handle)
+    throw std::invalid_argument(
+        "independent native tile arms must share one retained anchor chart");
+
+  ExactPathPlanOptions options;
+  options.division_order = division_order;
+  const auto started = std::chrono::steady_clock::now();
+  auto exact = plan_exact_independent_arms(
+      lower_request, upper_request, options);
+  RetainedArmPlan lower{std::move(exact.lower),
+                        std::move(lower_bindings)};
+  RetainedArmPlan upper{std::move(exact.upper),
+                        std::move(upper_bindings)};
+  json::object provenance{
+      {"schema", "diffexp2-retained-exact-independent-arm-tile-plan-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"division_order", division_order},
+      {"lower", encode_retained_arm(lower)},
+      {"upper", encode_retained_arm(upper)}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredTilePlan>(
+      handle, checkpoint_identity, provenance_identity, division_order,
+      std::move(lower), std::move(upper), elapsed);
+}
+
+std::shared_ptr<StoredLineResult> build_planned_line_result(
+    const std::string& handle, const json::object& request,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  const auto source_checkpoint = required_string(
+      request, "source_checkpoint_identity");
+  if (source_checkpoint != local->checkpoint_identity())
+    throw std::invalid_argument(
+        "planned line source checkpoint identity differs from its retained local");
+  const auto expected_plan_checkpoint = required_string(
+      request, "tile_plan_checkpoint_identity");
+  if (expected_plan_checkpoint != plan->checkpoint_identity())
+    throw std::invalid_argument(
+        "planned line tile-plan checkpoint identity differs from retained state");
+  const auto arm_name = required_string(request, "arm");
+  const auto tile_index = static_cast<std::size_t>(
+      as_u64(request.at("tile"), "planned line tile index"));
+  const auto& arm = plan->arm(arm_name);
+  if (tile_index >= arm.exact.tiles.size())
+    throw std::invalid_argument("planned line tile index is out of range");
+  const auto& tile = arm.exact.tiles[tile_index];
+  const auto& binding = arm.charts.at(tile.chart);
+  if (local->source_chart() != binding.handle)
+    throw std::invalid_argument(
+        "planned line local does not belong to the tile's retained chart");
+  const auto& epsilon = as_object(request.at("epsilon"),
+                                  "planned line epsilon window");
+  const auto delivered = parse_epsilon_window(
+      epsilon, "planned line epsilon window");
+  auto interval = encode_plan_tile(arm, tile_index);
+  const auto rim = exact_plan_rim(binding.prescriptions);
+  json::object provenance{
+      {"schema",
+       "diffexp2-retained-native-stored-truncation-physical-tile-integral-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", expected_plan_checkpoint},
+      {"arm", arm_name}, {"tile", tile_index},
+      {"interval", interval},
+      {"source", json::object{
+           {"local", local->handle()}, {"chart", local->source_chart()},
+           {"checkpoint_identity", source_checkpoint}}},
+      {"epsilon", json::object{{"min", delivered.min_power},
+                                {"max", delivered.complete_max}}},
+      {"scope", "stored_truncation"},
+      {"error_guarantee", "none"}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  const auto started = std::chrono::steady_clock::now();
+  auto result = local->integrate_planned_line(
+      binding.geometry, binding.prescriptions, tile.local_begin,
+      tile.local_end, delivered, rim);
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredLineResult>(
+      handle, checkpoint_identity, provenance_identity, arm_name, tile_index,
+      std::move(interval), source_checkpoint, std::move(result), elapsed,
+      plan, local);
+}
 
 std::vector<std::uint32_t> parse_index_vector(
     const json::value& raw, std::uint32_t bound, const char* label) {
@@ -5140,13 +5868,16 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   if (session.closed)
     throw std::invalid_argument("cannot checkpoint a closed solver session");
   if (session.pending_local_solves != 0 || session.pending_matches != 0 ||
-      session.pending_endpoint_limits != 0)
+      session.pending_endpoint_limits != 0 ||
+      session.pending_tile_plans != 0 ||
+      session.pending_line_integrations != 0)
     throw std::invalid_argument(
-        "checkpoint requires a quiescent session with no pending local solve, match, or endpoint limit");
+        "checkpoint requires a quiescent session with no pending local solve, match, endpoint limit, tile plan, or line integration");
   if (!session.locals.empty() || !session.matches.empty() ||
-      !session.endpoints.empty())
+      !session.endpoints.empty() || !session.tile_plans.empty() ||
+      !session.line_results.empty())
     throw std::invalid_argument(
-        "checkpoint schema v1 does not serialize retained local, match, or endpoint handles; release them before saving");
+        "checkpoint schema v1 does not serialize retained local, match, endpoint, tile-plan, or line-result handles; release them before saving");
 
   std::vector<std::shared_ptr<PreparedChartBase>> charts;
   charts.reserve(session.charts.size());
@@ -5667,6 +6398,8 @@ json::object run_session_command(const json::object& root) {
                         {"scc_capacity", session->scc_capacity},
                         {"match_capacity", session->match_capacity},
                         {"endpoint_capacity", session->endpoint_capacity},
+                        {"tile_plan_capacity", session->tile_plan_capacity},
+                        {"line_result_capacity", session->line_result_capacity},
                         {"local_match_capability",
                          domain == "rational"
                              ? kExactRegularLocalMatchCapability
@@ -5678,7 +6411,12 @@ json::object run_session_command(const json::object& root) {
                         {"endpoint_limit_capability",
                          domain == "symbolic"
                              ? "unsupported"
-                             : kRetainedEndpointLimitCapability}};
+                             : kRetainedEndpointLimitCapability},
+                        {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"line_integration_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedStoredLineCapability}};
   }
 
   if (operation == "session.close") {
@@ -5693,7 +6431,8 @@ json::object run_session_command(const json::object& root) {
       removed = std::move(found->second);
       registry.sessions.erase(found);
     }
-    std::size_t charts = 0, locals = 0, matches = 0, endpoints = 0, sccs = 0;
+    std::size_t charts = 0, locals = 0, matches = 0, endpoints = 0,
+                tile_plans = 0, line_results = 0, sccs = 0;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
       removed->closed = true;
@@ -5704,7 +6443,11 @@ json::object run_session_command(const json::object& root) {
       locals = removed->locals.size();
       matches = removed->matches.size();
       endpoints = removed->endpoints.size();
+      tile_plans = removed->tile_plans.size();
+      line_results = removed->line_results.size();
       sccs = removed->sccs.size();
+      removed->line_results.clear();
+      removed->tile_plans.clear();
       removed->endpoints.clear();
       removed->matches.clear();
       removed->locals.clear();
@@ -5718,6 +6461,8 @@ json::object run_session_command(const json::object& root) {
                         {"released_locals", locals},
                         {"released_matches", matches},
                         {"released_endpoints", endpoints},
+                        {"released_tile_plans", tile_plans},
+                        {"released_line_results", line_results},
                         {"released_scc_charts", sccs}};
   }
 
@@ -5744,6 +6489,253 @@ json::object run_session_command(const json::object& root) {
         {"deferred_handle_kinds",
          json::array{"local", "match", "endpoint", "line", "tile"}},
         {"atomic", true}};
+  }
+
+  if (operation == "tile.plan") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "checkpoint_identity",
+         "division_order", "lower", "upper"},
+        "native tile.plan request");
+    const auto& lower_request = as_object(
+        root.at("lower"), "lower native tile arm");
+    const auto& upper_request = as_object(
+        root.at("upper"), "upper native tile arm");
+    const auto lower_handles = parse_plan_chart_handles(lower_request);
+    const auto upper_handles = parse_plan_chart_handles(upper_request);
+    std::vector<std::shared_ptr<PreparedChartBase>> lower_charts;
+    std::vector<std::shared_ptr<PreparedChartBase>> upper_charts;
+    std::string plan_handle;
+    {
+      // Resolve every chart and acquire strong ownership in one admission
+      // section.  Public chart.release cannot invalidate either independently
+      // executable arm after this point.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      if (session->tile_plans.size() + session->pending_tile_plans >=
+          session->tile_plan_capacity)
+        throw std::invalid_argument(
+            "persistent native tile-plan capacity is exhausted");
+      for (const auto& handle : lower_handles) {
+        const auto found = session->charts.find(handle);
+        if (found == session->charts.end())
+          throw std::invalid_argument(
+              "unknown or released chart in lower native tile arm: " +
+              handle);
+        lower_charts.push_back(found->second);
+      }
+      for (const auto& handle : upper_handles) {
+        const auto found = session->charts.find(handle);
+        if (found == session->charts.end())
+          throw std::invalid_argument(
+              "unknown or released chart in upper native tile arm: " +
+              handle);
+        upper_charts.push_back(found->second);
+      }
+      plan_handle = "tile:" +
+          std::to_string(session->next_tile_plan++);
+      ++session->pending_tile_plans;
+    }
+    std::shared_ptr<StoredTilePlan> plan;
+    try {
+      plan = build_tile_plan(plan_handle, root, lower_charts, upper_charts);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_tile_plans == 0)
+        throw std::logic_error(
+            "native tile-plan reservation accounting underflow");
+      --session->pending_tile_plans;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_tile_plans == 0)
+        throw std::logic_error(
+            "native tile-plan reservation accounting underflow");
+      --session->pending_tile_plans;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during native tile planning");
+      session->tile_plans.emplace(plan_handle, plan);
+      ++session->total_tile_plans;
+      session->total_tile_plan_ms +=
+          plan->summary(false).at("elapsed_ms").as_double();
+    }
+    auto result = plan->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "tile.stats" || operation == "tile.match_interval" ||
+      operation == "tile.integration_interval") {
+    const auto plan_handle = required_string(root, "tile_plan");
+    std::shared_ptr<StoredTilePlan> plan;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->tile_plans.find(plan_handle);
+      if (found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or released native tile plan");
+      plan = found->second;
+    }
+    json::object result;
+    if (operation == "tile.stats") {
+      result = plan->summary();
+    } else {
+      const auto arm = required_string(root, "arm");
+      const auto index = static_cast<std::size_t>(as_u64(
+          root.at(operation == "tile.match_interval" ? "match" : "tile"),
+          operation == "tile.match_interval" ? "tile-plan match index"
+                                               : "tile-plan tile index"));
+      result = operation == "tile.match_interval"
+          ? plan->match_interval(arm, index)
+          : plan->tile_interval(arm, index);
+    }
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "tile.release") {
+    const auto plan_handle = required_string(root, "tile_plan");
+    std::shared_ptr<StoredTilePlan> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->tile_plans.find(plan_handle);
+      if (found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or already released native tile plan");
+      removed = std::move(found->second);
+      session->tile_plans.erase(found);
+    }
+    return json::object{
+        {"status", "ok"}, {"released", plan_handle},
+        {"checkpoint_identity", removed->checkpoint_identity()}};
+  }
+
+  if (operation == "integration.line") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "tile_plan", "local", "arm",
+         "tile", "epsilon", "source_checkpoint_identity",
+         "tile_plan_checkpoint_identity", "checkpoint_identity"},
+        "native integration.line request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native planned line integration requires rational or Acb coefficients");
+    const auto plan_handle = required_string(root, "tile_plan");
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredTilePlan> plan;
+    std::shared_ptr<StoredLocalBase> local;
+    std::string line_handle;
+    {
+      // The admitted operation strongly owns both dependencies.  Lower and
+      // upper calls take this lock only for admission/publication and execute
+      // their immutable plan arms concurrently outside it.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto plan_found = session->tile_plans.find(plan_handle);
+      if (plan_found == session->tile_plans.end())
+        throw std::invalid_argument(
+            "unknown or released tile plan for line integration");
+      const auto local_found = session->locals.find(local_handle);
+      if (local_found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released local for line integration");
+      if (session->line_results.size() +
+              session->pending_line_integrations >=
+          session->line_result_capacity)
+        throw std::invalid_argument(
+            "persistent native line-result capacity is exhausted");
+      plan = plan_found->second;
+      local = local_found->second;
+      line_handle = "line:" +
+          std::to_string(session->next_line_result++);
+      ++session->pending_line_integrations;
+    }
+    std::shared_ptr<StoredLineResult> result;
+    try {
+      result = build_planned_line_result(
+          line_handle, root, plan, local);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_line_integrations == 0)
+        throw std::logic_error(
+            "native line-integration reservation accounting underflow");
+      --session->pending_line_integrations;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_line_integrations == 0)
+        throw std::logic_error(
+            "native line-integration reservation accounting underflow");
+      --session->pending_line_integrations;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during native line integration");
+      session->line_results.emplace(line_handle, result);
+      ++session->total_line_integrations;
+      session->total_line_integration_ms += result->elapsed_ms();
+      plan->note_integration();
+    }
+    auto response = result->summary();
+    response["status"] = "ok";
+    response["session"] = session->handle;
+    return response;
+  }
+
+  if (operation == "integration.stats" ||
+      operation == "integration.export") {
+    const auto line_handle = required_string(root, "line");
+    std::shared_ptr<StoredLineResult> result;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->line_results.find(line_handle);
+      if (found == session->line_results.end())
+        throw std::invalid_argument(
+            "unknown or released native line result");
+      result = found->second;
+    }
+    json::object response;
+    if (operation == "integration.stats") {
+      response = result->stats_json();
+    } else {
+      const auto output_digits = root.if_contains("output_digits")
+          ? static_cast<int>(as_i64(root.at("output_digits"),
+                                    "line export output digits"))
+          : session->output_digits;
+      if (output_digits < 1)
+        throw std::invalid_argument(
+            "line export output digits must be positive");
+      response = result->export_values(
+          required_string(root, "checkpoint_identity"), output_digits);
+      const auto elapsed = response.at("elapsed_ms").as_double();
+      std::lock_guard<std::mutex> lock(session->mutex);
+      ++session->total_line_exports;
+      session->total_line_export_ms += elapsed;
+    }
+    response["status"] = "ok";
+    response["session"] = session->handle;
+    return response;
+  }
+
+  if (operation == "integration.release") {
+    const auto line_handle = required_string(root, "line");
+    std::shared_ptr<StoredLineResult> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->line_results.find(line_handle);
+      if (found == session->line_results.end())
+        throw std::invalid_argument(
+            "unknown or already released native line result");
+      removed = std::move(found->second);
+      session->line_results.erase(found);
+    }
+    return json::object{
+        {"status", "ok"}, {"released", line_handle},
+        {"checkpoint_identity", removed->checkpoint_identity()}};
   }
 
   if (operation == "chart.prepare") {
@@ -6725,10 +7717,14 @@ json::object run_session_command(const json::object& root) {
     std::vector<std::shared_ptr<StoredLocalBase>> locals;
     std::vector<std::shared_ptr<StoredMatchBase>> matches;
     std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
+    std::vector<std::shared_ptr<StoredTilePlan>> tile_plans;
+    std::vector<std::shared_ptr<StoredLineResult>> line_results;
     std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
     std::size_t pending_local_solves = 0;
     std::size_t pending_matches = 0;
     std::size_t pending_endpoint_limits = 0;
+    std::size_t pending_tile_plans = 0;
+    std::size_t pending_line_integrations = 0;
     std::uint64_t total_local_solves = 0;
     std::uint64_t total_scc_column_solves = 0;
     std::uint64_t total_local_matches = 0;
@@ -6737,10 +7733,16 @@ json::object run_session_command(const json::object& root) {
     std::string restored_from_checkpoint_identity;
     std::uint64_t total_endpoint_limits = 0;
     std::uint64_t total_endpoint_exports = 0;
+    std::uint64_t total_tile_plans = 0;
+    std::uint64_t total_line_integrations = 0;
+    std::uint64_t total_line_exports = 0;
     double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
     double total_local_match_ms = 0.0;
     double total_endpoint_limit_ms = 0.0;
     double total_endpoint_export_ms = 0.0;
+    double total_tile_plan_ms = 0.0;
+    double total_line_integration_ms = 0.0;
+    double total_line_export_ms = 0.0;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
       for (const auto& [ignored, chart] : session->charts)
@@ -6751,16 +7753,25 @@ json::object run_session_command(const json::object& root) {
         matches.push_back(match);
       for (const auto& [ignored, endpoint] : session->endpoints)
         endpoints.push_back(endpoint);
+      for (const auto& [ignored, plan] : session->tile_plans)
+        tile_plans.push_back(plan);
+      for (const auto& [ignored, result] : session->line_results)
+        line_results.push_back(result);
       for (const auto& [ignored, composite] : session->sccs)
         sccs.push_back(composite);
       pending_local_solves = session->pending_local_solves;
       pending_matches = session->pending_matches;
       pending_endpoint_limits = session->pending_endpoint_limits;
+      pending_tile_plans = session->pending_tile_plans;
+      pending_line_integrations = session->pending_line_integrations;
       total_local_solves = session->total_local_solves;
       total_scc_column_solves = session->total_scc_column_solves;
       total_local_matches = session->total_local_matches;
       total_endpoint_limits = session->total_endpoint_limits;
       total_endpoint_exports = session->total_endpoint_exports;
+      total_tile_plans = session->total_tile_plans;
+      total_line_integrations = session->total_line_integrations;
+      total_line_exports = session->total_line_exports;
       total_local_run_parse_ms = session->total_local_run_parse_ms;
       total_local_kernel_ms = session->total_local_kernel_ms;
       total_local_match_ms = session->total_local_match_ms;
@@ -6770,6 +7781,9 @@ json::object run_session_command(const json::object& root) {
           session->restored_from_checkpoint_identity;
       total_endpoint_limit_ms = session->total_endpoint_limit_ms;
       total_endpoint_export_ms = session->total_endpoint_export_ms;
+      total_tile_plan_ms = session->total_tile_plan_ms;
+      total_line_integration_ms = session->total_line_integration_ms;
+      total_line_export_ms = session->total_line_export_ms;
     }
     std::uint64_t runs = 0;
     double prepare_parse_ms = 0.0, run_parse_ms = 0.0, kernel_ms = 0.0;
@@ -6802,19 +7816,23 @@ json::object run_session_command(const json::object& root) {
     std::uint64_t local_evaluations = 0;
     std::uint64_t local_residual_certifications = 0;
     std::uint64_t local_endpoint_limits = 0;
+    std::uint64_t local_line_integrations = 0;
     std::size_t local_coefficients = 0;
     double local_evaluate_ms = 0.0, local_residual_certify_ms = 0.0;
     double local_endpoint_limit_ms = 0.0;
+    double local_line_integration_ms = 0.0;
     json::array local_stats;
     for (const auto& local : locals) {
       const auto stats = local->stats();
       local_evaluations += stats.evaluations;
       local_residual_certifications += stats.residual_certifications;
       local_endpoint_limits += stats.endpoint_limits;
+      local_line_integrations += stats.line_integrations;
       local_coefficients += stats.coefficient_count;
       local_evaluate_ms += stats.evaluate_ms;
       local_residual_certify_ms += stats.residual_certify_ms;
       local_endpoint_limit_ms += stats.endpoint_limit_ms;
+      local_line_integration_ms += stats.line_integration_ms;
       local_stats.push_back(local->stats_json());
     }
     json::array scc_stats;
@@ -6826,6 +7844,12 @@ json::object run_session_command(const json::object& root) {
     json::array endpoint_stats;
     for (const auto& endpoint : endpoints)
       endpoint_stats.push_back(endpoint->stats_json());
+    json::array tile_plan_stats;
+    for (const auto& plan : tile_plans)
+      tile_plan_stats.push_back(plan->summary(false));
+    json::array line_result_stats;
+    for (const auto& result : line_results)
+      line_result_stats.push_back(result->stats_json());
     return json::object{{"status", "ok"}, {"session", session->handle},
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
@@ -6833,14 +7857,22 @@ json::object run_session_command(const json::object& root) {
                         {"locals", locals.size()},
                         {"matches", matches.size()},
                         {"endpoints", endpoints.size()},
+                        {"tile_plans", tile_plans.size()},
+                        {"line_results", line_results.size()},
                         {"scc_charts", sccs.size()},
                         {"pending_local_solves", pending_local_solves},
                         {"pending_matches", pending_matches},
                         {"pending_endpoint_limits", pending_endpoint_limits},
+                        {"pending_tile_plans", pending_tile_plans},
+                        {"pending_line_integrations",
+                         pending_line_integrations},
                         {"local_solves", total_local_solves},
                         {"local_matches", total_local_matches},
                         {"endpoint_limits", total_endpoint_limits},
                         {"endpoint_exports", total_endpoint_exports},
+                        {"tile_plans_created", total_tile_plans},
+                        {"line_integrations", total_line_integrations},
+                        {"line_exports", total_line_exports},
                         {"local_match_capability",
                          session->domain == "rational"
                              ? kExactRegularLocalMatchCapability
@@ -6853,11 +7885,18 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedEndpointLimitCapability},
+                        {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"line_integration_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedStoredLineCapability},
                         {"scc_column_solves", total_scc_column_solves},
                         {"local_evaluations", local_evaluations},
                         {"local_residual_certifications",
                          local_residual_certifications},
                         {"local_endpoint_limits", local_endpoint_limits},
+                        {"local_line_integrations",
+                         local_line_integrations},
                         {"local_coefficient_count", local_coefficients},
                         {"static_tensor_copies", 0},
                         {"prepare_parse_ms", prepare_parse_ms},
@@ -6869,6 +7908,8 @@ json::object run_session_command(const json::object& root) {
                         {"local_residual_certify_ms",
                          local_residual_certify_ms},
                         {"local_endpoint_limit_ms", local_endpoint_limit_ms},
+                        {"local_line_integration_ms",
+                         local_line_integration_ms},
                         {"local_match_ms", total_local_match_ms},
                         {"checkpoint_generation", checkpoint_generation},
                         {"checkpoint_restore_count",
@@ -6880,10 +7921,15 @@ json::object run_session_command(const json::object& root) {
                                    restored_from_checkpoint_identity)},
                         {"endpoint_limit_ms", total_endpoint_limit_ms},
                         {"endpoint_export_ms", total_endpoint_export_ms},
+                        {"tile_plan_ms", total_tile_plan_ms},
+                        {"line_integration_ms", total_line_integration_ms},
+                        {"line_export_ms", total_line_export_ms},
                         {"chart_stats", std::move(chart_stats)},
                         {"local_stats", std::move(local_stats)},
                         {"match_stats", std::move(match_stats)},
                         {"endpoint_stats", std::move(endpoint_stats)},
+                        {"tile_plan_stats", std::move(tile_plan_stats)},
+                        {"line_result_stats", std::move(line_result_stats)},
                         {"scc_stats", std::move(scc_stats)}};
   }
 
@@ -7054,6 +8100,15 @@ std::string backend_info_json() {
                                       {"persistent_endpoint_limit_capability",
                                        kRetainedEndpointLimitCapability},
                                       {"persistent_symbolic_endpoint_limits",
+                                       false},
+                                      {"persistent_exact_tile_plans", true},
+                                      {"persistent_exact_tile_plan_capability",
+                                       kRetainedTilePlanCapability},
+                                      {"persistent_stored_line_integration",
+                                       true},
+                                      {"persistent_stored_line_integration_capability",
+                                       kRetainedStoredLineCapability},
+                                      {"persistent_symbolic_line_integration",
                                        false},
                                       {"persistent_acb_local_match", true},
                                       {"persistent_acb_local_match_capability",

@@ -80,6 +80,12 @@ The implemented recurrence-session commands are:
 | `endpoint.stats` | Inspect one retained endpoint result and its exact analytic/branch provenance. |
 | `endpoint.export` | Explicitly export a final specialized Acb epsilon vector for compatibility. |
 | `endpoint.release` | Release one retained endpoint result. |
+| `tile.plan` | Build and retain immutable exact lower/upper arm plans from retained chart geometry, branch topology, and `DivisionOrder`. |
+| `tile.match_interval` | Read one exact physical handoff and its opposite-sign producing/receiving local coordinates from a retained plan. |
+| `tile.integration_interval` | Read one exact physical/local tile interval and its affine Jacobian from a retained plan. |
+| `tile.stats` / `tile.release` | Inspect or release one retained independent-arm plan. |
+| `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector. |
+| `integration.stats` / `integration.export` / `integration.release` | Inspect, explicitly export, or release one retained tile integral. |
 | `match.stats` | Inspect one retained native match and its exact provenance. |
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
@@ -181,15 +187,39 @@ result records every sector tag, prescription, effective rim, and source
 checkpoint; coefficients cross the bridge only through the explicit
 final-compatibility `endpoint.export` call.
 
+`tile.plan` is the first retained native path/integration lifecycle.  The
+request names retained prepared charts only; C++ reads their authoritative
+exact center, scale, radius, and full prescription records, then runs the
+exact path planner.  It retains lower and upper arms as separate immutable
+snapshots sharing one strongly owned anchor.  The usual handoff is exactly
+`+1/DivisionOrder` in the producing local coordinate and
+`-1/DivisionOrder` in the receiver (with signs reversed on a reversed arm);
+unsafe or forbidden geometry is resolved or rejected by the native exact
+planner.  Complex `Re(z)` and `Re(z) +/- |Im(z)|` projections and every branch
+sheet remain explicit topology rather than midpoint guesses.
+
+The plan itself feeds both `tile.match_interval` and
+`tile.integration_interval`; Wolfram does not recompute these coordinates.
+`integration.line` accepts no endpoint coordinates.  It selects the retained
+tile, verifies the local's chart and checkpoint identity plus its complete
+prescription record, integrates the stored Taylor truncation, and applies the
+exact `dx = scale dt` Jacobian with path orientation.  The opaque line result
+states `ErrorGuarantee -> None` and explicitly says that no unseen-tail
+majorant is present.  It rejects a nonempty input error envelope, incomplete
+epsilon halo, nonintegrable unseen center monomial, and merely-small Acb
+cancellation.  Coefficients cross JSON only through `integration.export`.
+Successful results strongly own their local and plan snapshots, so releasing
+the public source handles does not invalidate inspection or export.
+
 Subsequent milestones extend the same session with complete multi-sector
 composition plus `transport.*`, `endpoint.*`, `integration.*`, and
 `checkpoint.*` operations; they do not introduce a second stateless
 execution path.
 
-All commands are serialized per session.  Independent sessions may run in
-parallel.  A session may execute independent lower/upper endpoint arms in its
-own bounded worker pool because no Wolfram evaluation is needed between
-native chart steps.
+Registry admission and publication are serialized per session.  Immutable
+native work executes outside that lock, so lower and upper tile integrations
+in one session may run concurrently without Wolfram evaluation between chart
+steps.  Independent sessions may also run in parallel.
 
 ## Native state
 
@@ -360,9 +390,9 @@ The implemented schema-1 checkpoint core now covers quiescent prepared chart
 operators and composite SCC graphs, including exact analytic-regularization
 metadata and cumulative session counters.  It reconstructs the typed state
 inside C++ and verifies exact signatures without replaying Wolfram
-preprocessing.  Retained local/match/endpoint and completed line/tile state
-remain mandatory future sections; schema 1 rejects such live state rather
-than emitting a checkpoint that only appears resumable.
+preprocessing.  Retained local/match/endpoint, tile-plan, and completed line
+state remain mandatory future sections; schema 1 rejects such live or pending
+state rather than emitting a checkpoint that only appears resumable.
 
 ## Migration milestones
 

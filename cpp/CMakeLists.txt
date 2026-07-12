@@ -151,6 +151,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_endpoint_limit
     COMMAND test_diffexp2_persistent_endpoint_limit)
 
+  add_executable(test_diffexp2_persistent_tile_line
+    tests/test_persistent_tile_line.cpp)
+  target_compile_features(test_diffexp2_persistent_tile_line
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_tile_line
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_tile_line
+    COMMAND test_diffexp2_persistent_tile_line)
+
   add_executable(test_diffexp2_path_planner tests/test_path_planner.cpp)
   target_compile_features(test_diffexp2_path_planner PRIVATE cxx_std_20)
   target_include_directories(test_diffexp2_path_planner PRIVATE

@@ -1,9 +1,12 @@
 #include "diffexp2/checkpoint.hpp"
 
 #include <boost/crc.hpp>
+#include <boost/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -11,9 +14,12 @@
 #include <filesystem>
 #include <limits>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -24,11 +30,26 @@
 namespace diffexp2::checkpoint {
 namespace {
 
+namespace json = boost::json;
+
 constexpr std::array<unsigned char, 8> kMagic{
     'D', 'E', '2', 'C', 'P', '0', '0', '1'};
 constexpr std::size_t kFixedHeaderBytes = 32;
 constexpr std::uint64_t kMaximumPayloadBytes =
     std::uint64_t{8} * 1024 * 1024 * 1024;
+constexpr std::string_view kCanonicalJsonDagCodec =
+    "diffexp2-canonical-json-string-dag-v1";
+constexpr std::size_t kMinimumInternedStringBytes = 128;
+constexpr std::size_t kMaximumCanonicalJsonEntries = 1'000'000;
+constexpr std::uint64_t kMinimumDecodedJsonBudget =
+    std::uint64_t{64} * 1024 * 1024;
+constexpr std::uint64_t kMaximumDecodedJsonBudget =
+    std::uint64_t{8} * 1024 * 1024 * 1024;
+constexpr std::uint64_t kDecodedToEncodedBudgetRatio = 1024;
+constexpr std::size_t kMaximumCanonicalJsonReferenceDepth = 4096;
+constexpr char kEncodedStringPrefix = '\0';
+constexpr char kEncodedLiteralTag = 'L';
+constexpr char kEncodedReferenceTag = 'R';
 
 std::runtime_error system_error(const std::string& action,
                                 const std::string& path) {
@@ -124,28 +145,225 @@ void close_checked(int descriptor, const std::string& path) {
     throw system_error("cannot close checkpoint", path);
 }
 
-}  // namespace
-
-ExactComplexBallDump dump_complex_ball_exact(const ComplexBall& value) {
-  if (!value.is_finite())
-    throw std::invalid_argument(
-        "cannot checkpoint a non-finite complex ball");
-  return {dump_arb_exact(acb_realref(value.raw())),
-          dump_arb_exact(acb_imagref(value.raw()))};
+void require_exact_keys(const json::object& object,
+                        std::initializer_list<std::string_view> expected,
+                        const char* label) {
+  if (object.size() != expected.size())
+    throw std::invalid_argument(std::string(label) +
+                                " has unknown or missing fields");
+  for (const auto key : expected)
+    if (object.if_contains(key) == nullptr)
+      throw std::invalid_argument(std::string(label) +
+                                  " has unknown or missing fields");
 }
 
-ComplexBall load_complex_ball_exact(const ExactComplexBallDump& dump) {
-  ComplexBall value;
-  load_arb_exact(acb_realref(value.raw()), dump.real, "real");
-  load_arb_exact(acb_imagref(value.raw()), dump.imaginary, "imaginary");
-  if (!value.is_finite())
-    throw std::invalid_argument(
-        "exact Arb checkpoint decoded a non-finite complex ball");
-  return value;
+class CanonicalJsonStringDagEncoder {
+ public:
+  json::value encode(const json::value& value) { return encode_value(value); }
+
+  json::array release_entries() { return std::move(entries_); }
+
+ private:
+  json::value encode_value(const json::value& value) {
+    if (value.is_string()) return encode_string(value.as_string());
+    if (value.is_array()) {
+      json::array encoded;
+      encoded.reserve(value.as_array().size());
+      for (const auto& item : value.as_array())
+        encoded.push_back(encode_value(item));
+      return encoded;
+    }
+    if (value.is_object()) {
+      json::object encoded;
+      for (const auto& item : value.as_object())
+        encoded[item.key()] = encode_value(item.value());
+      return encoded;
+    }
+    return value;
+  }
+
+  json::value encode_string(const json::string& raw) {
+    const std::string text(raw.data(), raw.size());
+    if (!text.empty() && text.front() == kEncodedStringPrefix)
+      return json::value(json::string(
+          std::string{kEncodedStringPrefix, kEncodedLiteralTag} + text));
+    if (text.size() < kMinimumInternedStringBytes ||
+        (text.front() != '{' && text.front() != '['))
+      return json::value(json::string(text));
+    if (const auto found = identities_.find(text);
+        found != identities_.end())
+      return json::value(json::string(reference(found->second)));
+
+    json::value parsed;
+    try {
+      parsed = json::parse(text);
+    } catch (const std::exception&) {
+      return json::value(json::string(text));
+    }
+    if ((!parsed.is_object() && !parsed.is_array()) ||
+        json::serialize(parsed) != text)
+      return json::value(json::string(text));
+    if (entries_.size() >= kMaximumCanonicalJsonEntries)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity table is too large");
+    const auto index = entries_.size();
+    identities_.emplace(text, index);
+    entries_.emplace_back(nullptr);
+    auto encoded = encode_value(parsed);
+    entries_[index] = std::move(encoded);
+    return json::value(json::string(reference(index)));
+  }
+
+  static std::string reference(std::size_t index) {
+    return std::string{kEncodedStringPrefix, kEncodedReferenceTag} +
+           std::to_string(index);
+  }
+
+  json::array entries_;
+  std::unordered_map<std::string, std::size_t> identities_;
+};
+
+class CanonicalJsonStringDagDecoder {
+ public:
+  CanonicalJsonStringDagDecoder(const json::array& entries,
+                                std::uint64_t decoded_budget)
+      : entries_(entries), decoded_(entries.size()), state_(entries.size()),
+        decoded_budget_(decoded_budget) {
+    if (entries.size() > kMaximumCanonicalJsonEntries)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity table is too large");
+    if (decoded_budget == 0 || decoded_budget > kMaximumDecodedJsonBudget)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON decoded-size budget is invalid");
+  }
+
+  json::value decode(const json::value& value) { return decode_value(value); }
+
+  void require_all_entries_used() const {
+    if (std::any_of(state_.begin(), state_.end(),
+                    [](unsigned char state) { return state != 2; }))
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity table contains unused entries");
+  }
+
+ private:
+  json::value decode_value(const json::value& value) {
+    if (value.is_string()) return decode_string(value.as_string());
+    if (value.is_array()) {
+      json::array decoded;
+      decoded.reserve(value.as_array().size());
+      for (const auto& item : value.as_array())
+        decoded.push_back(decode_value(item));
+      return decoded;
+    }
+    if (value.is_object()) {
+      json::object decoded;
+      for (const auto& item : value.as_object())
+        decoded[item.key()] = decode_value(item.value());
+      return decoded;
+    }
+    return value;
+  }
+
+  json::value decode_string(const json::string& raw) {
+    const std::string text(raw.data(), raw.size());
+    if (text.empty() || text.front() != kEncodedStringPrefix) {
+      charge(text.size());
+      return json::value(json::string(text));
+    }
+    if (text.size() >= 2 && text[1] == kEncodedLiteralTag) {
+      if (text.size() < 3 || text[2] != kEncodedStringPrefix)
+        throw std::invalid_argument(
+            "checkpoint canonical-JSON literal token is malformed");
+      charge(text.size() - 2);
+      return json::value(json::string(text.substr(2)));
+    }
+    if (text.size() < 3 || text[1] != kEncodedReferenceTag)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity token is malformed");
+    std::size_t index = 0;
+    const auto* first = text.data() + 2;
+    const auto* last = text.data() + text.size();
+    const auto parsed = std::from_chars(first, last, index);
+    if (parsed.ec != std::errc{} || parsed.ptr != last ||
+        index >= entries_.size() ||
+        std::string_view(first, static_cast<std::size_t>(last - first)) !=
+            std::to_string(index))
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity reference is invalid");
+    if (reference_depth_ >= kMaximumCanonicalJsonReferenceDepth)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity nesting is too deep");
+    ++reference_depth_;
+    try {
+      const auto& identity = decoded_identity(index);
+      --reference_depth_;
+      charge(identity.size());
+      return json::value(json::string(identity));
+    } catch (...) {
+      --reference_depth_;
+      throw;
+    }
+  }
+
+  const std::string& decoded_identity(std::size_t index) {
+    if (decoded_[index].has_value()) return *decoded_[index];
+    if (state_[index] != 0)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity table contains a cycle");
+    state_[index] = 1;
+    auto value = decode_value(entries_[index]);
+    if (!value.is_object() && !value.is_array())
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity table entry is not composite");
+    auto identity = json::serialize(value);
+    if (identity.size() < kMinimumInternedStringBytes)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON identity table contains a short entry");
+    charge(identity.size());
+    decoded_[index] = identity;
+    state_[index] = 2;
+    return *decoded_[index];
+  }
+
+  void charge(std::size_t bytes) {
+    if (bytes > decoded_budget_ - decoded_work_)
+      throw std::invalid_argument(
+          "checkpoint canonical-JSON expansion exceeds its decoded-size budget");
+    decoded_work_ += bytes;
+  }
+
+  const json::array& entries_;
+  std::vector<std::optional<std::string>> decoded_;
+  std::vector<unsigned char> state_;
+  std::uint64_t decoded_budget_ = 0;
+  std::uint64_t decoded_work_ = 0;
+  std::size_t reference_depth_ = 0;
+};
+
+std::uint64_t decoded_json_budget(std::size_t header_bytes,
+                                  std::size_t payload_bytes) {
+  const auto encoded_bytes = static_cast<std::uint64_t>(header_bytes) +
+      static_cast<std::uint64_t>(payload_bytes);
+  const auto scaled = encoded_bytes >
+          kMaximumDecodedJsonBudget / kDecodedToEncodedBudgetRatio
+      ? kMaximumDecodedJsonBudget
+      : encoded_bytes * kDecodedToEncodedBudgetRatio;
+  return std::min(kMaximumDecodedJsonBudget,
+                  std::max(kMinimumDecodedJsonBudget, scaled));
 }
 
-void write_atomic(const std::string& path, std::string_view header_json,
-                  std::string_view payload_json) {
+struct RawContainer {
+  std::uint32_t schema = 0;
+  std::string header_json;
+  std::string payload_json;
+};
+
+void write_raw_atomic(const std::string& path, std::uint32_t schema,
+                      std::string_view header_json,
+                      std::string_view payload_json) {
+  if (schema != kContainerSchema && schema != kLegacyContainerSchema)
+    throw std::invalid_argument("unsupported checkpoint container schema");
   if (path.empty()) throw std::invalid_argument("checkpoint path is empty");
   if (header_json.size() > std::numeric_limits<std::uint32_t>::max())
     throw std::invalid_argument("checkpoint header is too large");
@@ -159,7 +377,7 @@ void write_atomic(const std::string& path, std::string_view header_json,
     throw std::overflow_error("checkpoint container size overflow");
   bytes.reserve(total);
   bytes.insert(bytes.end(), kMagic.begin(), kMagic.end());
-  append_u32(bytes, kContainerSchema);
+  append_u32(bytes, schema);
   append_u32(bytes, static_cast<std::uint32_t>(header_json.size()));
   append_u64(bytes, static_cast<std::uint64_t>(payload_json.size()));
   append_u32(bytes, checksum(header_json));
@@ -203,7 +421,7 @@ void write_atomic(const std::string& path, std::string_view header_json,
   }
 }
 
-Container read(const std::string& path) {
+RawContainer read_raw(const std::string& path) {
   if (path.empty()) throw std::invalid_argument("checkpoint path is empty");
   const int descriptor = ::open(path.c_str(), O_RDONLY);
   if (descriptor < 0) throw system_error("cannot open checkpoint", path);
@@ -219,7 +437,7 @@ Container read(const std::string& path) {
     if (!std::equal(kMagic.begin(), kMagic.end(), fixed.begin()))
       throw std::runtime_error("checkpoint magic or container version is invalid");
     const auto schema = read_u32(fixed.data() + 8);
-    if (schema != kContainerSchema)
+    if (schema != kContainerSchema && schema != kLegacyContainerSchema)
       throw std::runtime_error("unsupported checkpoint container schema " +
                                std::to_string(schema));
     const auto header_size = read_u32(fixed.data() + 12);
@@ -233,7 +451,8 @@ Container read(const std::string& path) {
         header_size + payload_size;
     if (expected_size != static_cast<std::uint64_t>(metadata.st_size))
       throw std::runtime_error("checkpoint length does not match its header");
-    Container output;
+    RawContainer output;
+    output.schema = schema;
     output.header_json.resize(header_size);
     output.payload_json.resize(static_cast<std::size_t>(payload_size));
     read_all(descriptor,
@@ -253,6 +472,87 @@ Container read(const std::string& path) {
     if (open) ::close(descriptor);
     throw;
   }
+}
+
+}  // namespace
+
+ExactComplexBallDump dump_complex_ball_exact(const ComplexBall& value) {
+  if (!value.is_finite())
+    throw std::invalid_argument(
+        "cannot checkpoint a non-finite complex ball");
+  return {dump_arb_exact(acb_realref(value.raw())),
+          dump_arb_exact(acb_imagref(value.raw()))};
+}
+
+ComplexBall load_complex_ball_exact(const ExactComplexBallDump& dump) {
+  ComplexBall value;
+  load_arb_exact(acb_realref(value.raw()), dump.real, "real");
+  load_arb_exact(acb_imagref(value.raw()), dump.imaginary, "imaginary");
+  if (!value.is_finite())
+    throw std::invalid_argument(
+        "exact Arb checkpoint decoded a non-finite complex ball");
+  return value;
+}
+
+void write_atomic(const std::string& path, std::string_view header_json,
+                  std::string_view payload_json) {
+  write_atomic(path, json::parse(header_json), json::parse(payload_json));
+}
+
+void write_atomic(const std::string& path, const json::value& header,
+                  const json::value& payload) {
+  CanonicalJsonStringDagEncoder encoder;
+  auto encoded_header = encoder.encode(header);
+  auto encoded_payload = encoder.encode(payload);
+  json::object header_envelope{
+      {"codec", kCanonicalJsonDagCodec},
+      {"root", std::move(encoded_header)}};
+  json::object payload_envelope{
+      {"codec", kCanonicalJsonDagCodec},
+      {"canonical_json_strings", encoder.release_entries()},
+      {"root", std::move(encoded_payload)}};
+  write_raw_atomic(path, kContainerSchema, json::serialize(header_envelope),
+                   json::serialize(payload_envelope));
+}
+
+JsonContainer read_json(const std::string& path) {
+  auto raw = read_raw(path);
+  if (raw.schema == kLegacyContainerSchema)
+    return {json::parse(raw.header_json), json::parse(raw.payload_json)};
+
+  const auto header_value = json::parse(raw.header_json);
+  const auto payload_value = json::parse(raw.payload_json);
+  if (!header_value.is_object() || !payload_value.is_object())
+    throw std::invalid_argument(
+        "checkpoint canonical-JSON DAG envelope is not an object");
+  const auto& header = header_value.as_object();
+  const auto& payload = payload_value.as_object();
+  require_exact_keys(header, {"codec", "root"},
+                     "checkpoint canonical-JSON header envelope");
+  require_exact_keys(payload,
+                     {"codec", "canonical_json_strings", "root"},
+                     "checkpoint canonical-JSON payload envelope");
+  if (!header.at("codec").is_string() ||
+      !payload.at("codec").is_string() ||
+      header.at("codec").as_string() != kCanonicalJsonDagCodec ||
+      payload.at("codec").as_string() != kCanonicalJsonDagCodec)
+    throw std::invalid_argument(
+        "checkpoint canonical-JSON DAG codec identity is invalid");
+  if (!payload.at("canonical_json_strings").is_array())
+    throw std::invalid_argument(
+        "checkpoint canonical-JSON identity table is not an array");
+  CanonicalJsonStringDagDecoder decoder(
+      payload.at("canonical_json_strings").as_array(),
+      decoded_json_budget(raw.header_json.size(), raw.payload_json.size()));
+  JsonContainer decoded{decoder.decode(header.at("root")),
+                        decoder.decode(payload.at("root"))};
+  decoder.require_all_entries_used();
+  return decoded;
+}
+
+Container read(const std::string& path) {
+  auto decoded = read_json(path);
+  return {json::serialize(decoded.header), json::serialize(decoded.payload)};
 }
 
 }  // namespace diffexp2::checkpoint

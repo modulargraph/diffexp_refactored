@@ -1,9 +1,12 @@
 #include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
 
+#include <boost/crc.hpp>
 #include <boost/json.hpp>
 
+#include <array>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,6 +19,70 @@
 namespace json = boost::json;
 
 namespace {
+
+struct RawContainer {
+  std::string header;
+  std::string payload;
+};
+
+void append_u32(std::vector<unsigned char>& output, std::uint32_t value) {
+  for (int shift = 24; shift >= 0; shift -= 8)
+    output.push_back(static_cast<unsigned char>((value >> shift) & 0xffu));
+}
+
+void append_u64(std::vector<unsigned char>& output, std::uint64_t value) {
+  for (int shift = 56; shift >= 0; shift -= 8)
+    output.push_back(static_cast<unsigned char>((value >> shift) & 0xffu));
+}
+
+std::uint32_t read_u32(const unsigned char* bytes) {
+  std::uint32_t value = 0;
+  for (int index = 0; index < 4; ++index)
+    value = (value << 8) | bytes[index];
+  return value;
+}
+
+std::uint32_t checksum(std::string_view bytes) {
+  boost::crc_32_type crc;
+  crc.process_bytes(bytes.data(), bytes.size());
+  return crc.checksum();
+}
+
+void write_container_fixture(const std::filesystem::path& path,
+                             std::uint32_t schema,
+                             std::string_view header,
+                             std::string_view payload) {
+  std::vector<unsigned char> bytes{
+      'D', 'E', '2', 'C', 'P', '0', '0', '1'};
+  append_u32(bytes, schema);
+  append_u32(bytes, static_cast<std::uint32_t>(header.size()));
+  append_u64(bytes, payload.size());
+  append_u32(bytes, checksum(header));
+  append_u32(bytes, checksum(payload));
+  bytes.insert(bytes.end(), header.begin(), header.end());
+  bytes.insert(bytes.end(), payload.begin(), payload.end());
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  if (!file) throw std::runtime_error("could not write checkpoint fixture");
+}
+
+RawContainer read_raw_container_fixture(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  std::array<unsigned char, 32> fixed{};
+  file.read(reinterpret_cast<char*>(fixed.data()), fixed.size());
+  if (!file) throw std::runtime_error("could not read checkpoint fixture");
+  const auto header_size = read_u32(fixed.data() + 12);
+  std::uint64_t payload_size = 0;
+  for (int index = 0; index < 8; ++index)
+    payload_size = (payload_size << 8) | fixed[16 + index];
+  RawContainer output;
+  output.header.resize(header_size);
+  output.payload.resize(static_cast<std::size_t>(payload_size));
+  file.read(output.header.data(), output.header.size());
+  file.read(output.payload.data(), output.payload.size());
+  if (!file) throw std::runtime_error("checkpoint fixture is truncated");
+  return output;
+}
 
 json::object request(json::object value) {
   return json::parse(diffexp2::run_recurrence_json(json::serialize(value)))
@@ -230,6 +297,86 @@ bool corrupt_last_payload_byte(const std::filesystem::path& source,
   return static_cast<bool>(file);
 }
 
+bool canonical_json_dag_container_roundtrip(
+    const std::filesystem::path& path,
+    const std::filesystem::path& legacy_path,
+    const std::filesystem::path& unused_path) {
+  const std::string blob(4096, 'x');
+  const json::object leaf{{"schema", "nested-leaf-v1"}, {"blob", blob}};
+  const auto leaf_identity = json::serialize(leaf);
+  json::array leaf_references;
+  for (int index = 0; index < 8; ++index)
+    leaf_references.emplace_back(leaf_identity);
+  const json::object provenance{
+      {"schema", "nested-provenance-v1"},
+      {"leaf", leaf},
+      {"leaf_identity", leaf_identity},
+      {"leaf_references", std::move(leaf_references)}};
+  const auto provenance_identity = json::serialize(provenance);
+  json::array provenance_references;
+  for (int index = 0; index < 8; ++index)
+    provenance_references.emplace_back(provenance_identity);
+  const json::object closure{
+      {"schema", "nested-closure-v1"},
+      {"provenance", provenance},
+      {"provenance_identity", provenance_identity},
+      {"provenance_references", std::move(provenance_references)}};
+  const auto closure_identity = json::serialize(closure);
+  std::string reserved_literal;
+  reserved_literal.push_back('\0');
+  reserved_literal += "R7";
+  const json::object header{
+      {"schema", 8},
+      {"closure_identity", closure_identity},
+      {"closure_identity_copy", closure_identity},
+      {"reserved_literal", reserved_literal}};
+  const json::object payload{
+      {"schema", 8},
+      {"closure", closure},
+      {"closure_identity", closure_identity},
+      {"closure_identity_copy", closure_identity},
+      {"reserved_literal", reserved_literal}};
+
+  diffexp2::checkpoint::write_atomic(path.string(), header, payload);
+  const auto decoded = diffexp2::checkpoint::read_json(path.string());
+  const auto text = diffexp2::checkpoint::read(path.string());
+  write_container_fixture(legacy_path, 1, text.header_json,
+                          text.payload_json);
+  const auto legacy = diffexp2::checkpoint::read_json(legacy_path.string());
+  auto raw = read_raw_container_fixture(path);
+  auto raw_payload = json::parse(raw.payload).as_object();
+  raw_payload.at("canonical_json_strings").as_array().push_back(
+      json::object{{"unused", true}});
+  write_container_fixture(unused_path, 2, raw.header,
+                          json::serialize(raw_payload));
+  bool unused_rejected = false;
+  try {
+    (void)diffexp2::checkpoint::read_json(unused_path.string());
+  } catch (const std::invalid_argument& error) {
+    unused_rejected =
+        std::string(error.what()).find("unused entries") != std::string::npos;
+  }
+  std::array<unsigned char, 12> fixed{};
+  std::ifstream file(path, std::ios::binary);
+  file.read(reinterpret_cast<char*>(fixed.data()), fixed.size());
+  const auto semantic_bytes = json::serialize(header).size() +
+      json::serialize(payload).size() + 32;
+  const bool schema_v2 = file && fixed[8] == 0 && fixed[9] == 0 &&
+      fixed[10] == 0 && fixed[11] == 2;
+  const bool compact = std::filesystem::file_size(path) < semantic_bytes / 8;
+  const bool exact = decoded.header == header && decoded.payload == payload &&
+      legacy.header == header && legacy.payload == payload &&
+      json::parse(text.header_json) == header &&
+      json::parse(text.payload_json) == payload;
+  if (!schema_v2 || !compact || !exact || !unused_rejected)
+    std::cerr << "canonical JSON DAG codec: schema_v2=" << schema_v2
+              << " compact=" << compact << " exact=" << exact
+              << " unused_rejected=" << unused_rejected
+              << " file_bytes=" << std::filesystem::file_size(path)
+              << " semantic_bytes=" << semantic_bytes << '\n';
+  return schema_v2 && compact && exact && unused_rejected;
+}
+
 bool rational_local_roundtrip(const std::filesystem::path& path) {
   const auto created = request(json::object{
       {"schema", 2}, {"op", "session.create"}, {"domain", "rational"},
@@ -430,21 +577,28 @@ int main() {
   const auto acb_path = stem.string() + "_acb.de2cp";
   const auto resaved_path = stem.string() + "_acb_resaved.de2cp";
   const auto corrupted_path = stem.string() + "_acb_corrupt.de2cp";
+  const auto codec_path = stem.string() + "_codec.de2cp";
+  const auto legacy_path = stem.string() + "_legacy.de2cp";
+  const auto unused_path = stem.string() + "_unused.de2cp";
   for (const auto& path : {rational_path, acb_path, resaved_path,
-                           corrupted_path})
+                           corrupted_path, codec_path, legacy_path,
+                           unused_path})
     std::filesystem::remove(path);
 
   bool ok = false;
   try {
-    ok = rational_local_roundtrip(rational_path) &&
+    ok = canonical_json_dag_container_roundtrip(
+             codec_path, legacy_path, unused_path) &&
+         rational_local_roundtrip(rational_path) &&
          acb_match_roundtrip(acb_path, resaved_path, corrupted_path);
   } catch (const std::exception& error) {
     std::cerr << "checkpoint v2 exception: " << error.what() << '\n';
   }
   for (const auto& path : {rational_path, acb_path, resaved_path,
-                           corrupted_path})
+                           corrupted_path, codec_path, legacy_path,
+                           unused_path})
     std::filesystem::remove(path);
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": exact live local/Acb-match/endpoint checkpoint v2 roundtrip and CRC corruption\n";
+            << ": compact canonical-JSON DAG, exact live checkpoint roundtrip, and CRC corruption\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

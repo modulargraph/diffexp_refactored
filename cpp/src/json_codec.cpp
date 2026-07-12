@@ -17690,9 +17690,9 @@ void validate_checkpoint_envelope(const json::object& header,
 
 json::object restore_checkpoint(const std::string& path,
                                 const std::string& expected_identity) {
-  const auto container = checkpoint::read(path);
-  const auto header_value = json::parse(container.header_json);
-  const auto payload_value = json::parse(container.payload_json);
+  const auto container = checkpoint::read_json(path);
+  const auto& header_value = container.header;
+  const auto& payload_value = container.payload;
   const auto& header = as_object(header_value, "checkpoint JSON header");
   const auto& payload = as_object(payload_value, "checkpoint JSON payload");
   validate_checkpoint_envelope(header, payload, expected_identity);
@@ -18962,8 +18962,7 @@ json::object run_session_command(const json::object& root) {
         root, "checkpoint_identity");
     std::lock_guard<std::mutex> lock(session->mutex);
     auto snapshot = make_checkpoint_snapshot(*session, checkpoint_identity);
-    checkpoint::write_atomic(path, json::serialize(snapshot.header),
-                             json::serialize(snapshot.payload));
+    checkpoint::write_atomic(path, snapshot.header, snapshot.payload);
     session->checkpoint_generation = snapshot.generation;
     return json::object{
         {"status", "ok"}, {"session", session->handle},

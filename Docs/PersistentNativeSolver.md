@@ -90,6 +90,7 @@ The implemented recurrence-session commands are:
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
 | `scc.solve_column` | Execute one retained regular exact-Rational or Acb SCC basis column, or an exact-Rational regular-singular Jordan column, and retain the parent local without coefficient JSON. |
+| `scc.solve_columns` | Execute an ordered SCC basis-column batch in one bounded native worker pool and publish every retained local atomically, or none on failure. |
 | `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
 | `scc.release` | Release one retained composite SCC chart. |
 | `session.stats` | Return preparation/run timings and retained-object counters. |

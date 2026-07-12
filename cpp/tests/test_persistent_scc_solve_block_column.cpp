@@ -136,7 +136,7 @@ int main() {
   const auto created = request(R"json({
     "schema":2,"op":"session.create","domain":"rational",
     "precision_bits":256,"output_digits":30,"scc_capacity":2,
-    "local_capacity":2
+    "local_capacity":4
   })json");
   const auto session = std::string(created.at("session").as_string());
   const auto scalar = prepare_scalar_chart(session);
@@ -218,12 +218,30 @@ int main() {
   targets.push_back(json::object{{"block", 1},
                                  {"run", regular_run(2, false)},
                                  {"metadata", metadata("vector-target")}});
-  const auto propagated = request(json::object{
-      {"schema", 2}, {"op", "scc.solve_column"}, {"session", session},
-      {"scc", scc}, {"checkpoint_identity", "regular-block-propagated"},
+  json::array columns;
+  columns.push_back(json::object{
+      {"checkpoint_identity", "regular-block-propagated"},
       {"seed", json::object{{"block", 0}, {"run", regular_run(1, true)},
                              {"metadata", metadata("scalar-seed")}}},
       {"targets", std::move(targets)}});
+  columns.push_back(json::object{
+      {"checkpoint_identity", "regular-block-vector-seed"},
+      {"seed", json::object{{"block", 1},
+                             {"run", regular_run(2, true, 1)},
+                             {"metadata", metadata("vector-seed")}}},
+      {"targets", json::array{}}});
+  const auto batch = request(json::object{
+      {"schema", 2}, {"op", "scc.solve_columns"}, {"session", session},
+      {"scc", scc}, {"columns", std::move(columns)}, {"threads", 2}});
+  json::object propagated{{"status", "missing"}};
+  json::object vector_seed{{"status", "missing"}};
+  if (batch.at("status") == "ok") {
+    const auto& results = batch.at("results").as_array();
+    if (results.size() == 2) {
+      propagated = results[0].as_object();
+      vector_seed = results[1].as_object();
+    }
+  }
 
   json::object propagated_value;
   if (propagated.at("status") == "ok") {
@@ -233,13 +251,6 @@ int main() {
         {"point", json::object{{"exact", "1/2"}}},
         {"options", json::object{{"tail_estimate", false}}}});
   }
-
-  const auto vector_seed = request(json::object{
-      {"schema", 2}, {"op", "scc.solve_column"}, {"session", session},
-      {"scc", scc}, {"checkpoint_identity", "regular-block-vector-seed"},
-      {"seed", json::object{{"block", 1}, {"run", regular_run(2, true, 1)},
-                             {"metadata", metadata("vector-seed")}}},
-      {"targets", json::array{}}});
 
   json::object vector_seed_value;
   if (vector_seed.at("status") == "ok") {
@@ -252,6 +263,28 @@ int main() {
   const auto stats = request(json::object{
       {"schema", 2}, {"op", "scc.stats"}, {"session", session},
       {"scc", scc}});
+
+  auto malformed_seed = regular_run(1, true);
+  malformed_seed.at("initial").as_array()[1] = "0";
+  json::array rejected_columns;
+  rejected_columns.push_back(json::object{
+      {"checkpoint_identity", "discarded-valid-worker"},
+      {"seed", json::object{{"block", 1},
+                             {"run", regular_run(2, true, 0)},
+                             {"metadata", metadata("discarded-valid")}}},
+      {"targets", json::array{}}});
+  rejected_columns.push_back(json::object{
+      {"checkpoint_identity", "malformed-worker"},
+      {"seed", json::object{{"block", 0},
+                             {"run", std::move(malformed_seed)},
+                             {"metadata", metadata("malformed-seed")}}},
+      {"targets", json::array{}}});
+  const auto rejected_batch = request(json::object{
+      {"schema", 2}, {"op", "scc.solve_columns"}, {"session", session},
+      {"scc", scc}, {"columns", std::move(rejected_columns)},
+      {"threads", 2}});
+  const auto session_stats = request(json::object{
+      {"schema", 2}, {"op", "session.stats"}, {"session", session}});
 
   bool propagated_ok = false;
   if (propagated_value.if_contains("status") != nullptr &&
@@ -281,7 +314,16 @@ int main() {
         provenance.at("basis_index") == 2;
   }
 
-  const bool ok = propagated.at("status") == "ok" && propagated_ok &&
+  const bool ok = batch.at("status") == "ok" &&
+      batch.at("columns") == 2 && batch.at("worker_threads") == 2 &&
+      batch.at("atomic_retention") == true &&
+      batch.at("json_coefficients") == 0 &&
+      rejected_batch.at("status") == "error" &&
+      session_stats.at("locals") == 2 &&
+      session_stats.at("pending_local_solves") == 0 &&
+      session_stats.at("local_solves") == 2 &&
+      session_stats.at("scc_column_solves") == 2 &&
+      propagated.at("status") == "ok" && propagated_ok &&
       vector_seed.at("status") == "ok" && vector_seed_ok &&
       propagated.at("execution_capability") ==
           "exact-rational-regular-block-dag-column-v2" &&
@@ -297,7 +339,11 @@ int main() {
       stats.at("scc_column_solves") == 2;
 
   if (!ok) {
-    std::cerr << "propagated: " << json::serialize(propagated) << '\n'
+    std::cerr << "batch: " << json::serialize(batch) << '\n'
+              << "rejected batch: " << json::serialize(rejected_batch)
+              << '\n' << "session stats: " << json::serialize(session_stats)
+              << '\n'
+              << "propagated: " << json::serialize(propagated) << '\n'
               << "propagated value: " << json::serialize(propagated_value)
               << '\n' << "vector seed: " << json::serialize(vector_seed)
               << '\n' << "vector seed value: "

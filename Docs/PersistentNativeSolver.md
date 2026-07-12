@@ -416,16 +416,19 @@ unknown explicitly optional sections may be skipped.
 
 The implemented schema-2 checkpoint covers quiescent prepared chart operators
 and composite SCC graphs, retained Rational/Acb local solutions, and retained
-exact-lattice-guided Acb matches and endpoint results. Local tensors, exact
+exact-rational and exact-lattice-guided Acb matches, endpoint results, exact
+tile plans, and completed line results. Local tensors, exact
 tag specializations, pseudo-hit state, error envelopes, match
 weights/residuals, and every coefficient-level refinement diagnostic use exact
 FLINT/Arb dump encodings; presentation decimals are never used for restart
-state. Restore reproduces stable scoped handles, verifies exact
-source/result/checkpoint provenance, and advances monotone counters before
-exposing the new session. Symbolic locals, exact-rational matches, retained
-tile plans, and completed line results remain deferred and are rejected loudly
-rather than silently omitted; pending tile/line operations also prevent a
-quiescent checkpoint.
+state. The serialized ownership closure includes released locals, plans, and
+prepared charts still strongly owned by a retained match or line, while a
+separate visibility manifest prevents those dependency-only handles from
+becoming public again after restore. Restore reproduces stable scoped handles,
+runtime and next-handle counters, exact branch sheets/rims, and exact
+source/result/checkpoint provenance before exposing the new session. Symbolic
+locals remain a loud deferred kind; pending tile/line operations still prevent
+a quiescent checkpoint.
 
 ## Migration milestones
 

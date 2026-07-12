@@ -1585,6 +1585,223 @@ FiniteLaurentVector<Scalar> parse_checkpoint_frame_vector(
   return output;
 }
 
+json::array checkpoint_exact_laurent_matrix_record(
+    const ExactLaurentMatrix<Rational>& matrix) {
+  json::array rows;
+  rows.reserve(matrix.size());
+  for (const auto& row : matrix) {
+    json::array encoded_row;
+    encoded_row.reserve(row.size());
+    for (const auto& polynomial : row) {
+      json::array terms;
+      terms.reserve(polynomial.terms().size());
+      for (const auto& [power, coefficient] : polynomial.terms())
+        terms.push_back(json::object{{"power", power},
+                                     {"coefficient", coefficient.str()}});
+      encoded_row.push_back(std::move(terms));
+    }
+    rows.push_back(std::move(encoded_row));
+  }
+  return rows;
+}
+
+ExactLaurentMatrix<Rational> parse_checkpoint_exact_laurent_matrix(
+    const json::value& raw, std::uint32_t dimension, const char* label) {
+  const auto& rows = as_array(raw, label);
+  if (rows.size() != dimension)
+    throw std::invalid_argument(std::string(label) +
+                                " row count differs from its dimension");
+  ExactLaurentMatrix<Rational> matrix;
+  matrix.reserve(rows.size());
+  for (const auto& raw_row : rows) {
+    const auto& row = as_array(raw_row, label);
+    if (row.size() != dimension)
+      throw std::invalid_argument(std::string(label) +
+                                  " is not a square dimension-by-dimension matrix");
+    std::vector<ExactLaurentPolynomial<Rational>> parsed_row;
+    parsed_row.reserve(row.size());
+    for (const auto& raw_entry : row) {
+      ExactLaurentPolynomial<Rational> polynomial;
+      std::optional<std::int32_t> previous_power;
+      for (const auto& raw_term : as_array(raw_entry, label)) {
+        const auto& term = as_object(raw_term, label);
+        require_exact_keys(term, {"power", "coefficient"}, label);
+        const auto power = as_i32(term.at("power"), label);
+        if (previous_power.has_value() && power <= *previous_power)
+          throw std::invalid_argument(std::string(label) +
+                                      " terms are not in strict power order");
+        previous_power = power;
+        auto coefficient = parse_checkpoint_scalar<Rational>(
+            term.at("coefficient"), label);
+        if (coefficient.is_zero())
+          throw std::invalid_argument(std::string(label) +
+                                      " explicitly stores a structural-zero term");
+        polynomial.add_term(power, std::move(coefficient));
+      }
+      parsed_row.push_back(std::move(polynomial));
+    }
+    matrix.push_back(std::move(parsed_row));
+  }
+  return matrix;
+}
+
+json::object checkpoint_saturation_diagnostics_record(
+    const EpsilonLatticeSaturationDiagnostics<Rational>& diagnostics) {
+  json::array valuations;
+  for (const auto value : diagnostics.initial_column_valuations)
+    valuations.push_back(value);
+  json::array shifts;
+  for (const auto value : diagnostics.initial_column_shifts)
+    shifts.push_back(value);
+  json::array actions;
+  for (const auto& action : diagnostics.actions) {
+    json::array relation;
+    for (const auto& value : action.null_relation)
+      relation.emplace_back(value.str());
+    actions.push_back(json::object{
+        {"leading_rank_before", action.leading_rank_before},
+        {"target_column", action.target_column},
+        {"null_relation", std::move(relation)}});
+  }
+  return json::object{
+      {"initial_column_valuations", std::move(valuations)},
+      {"initial_column_shifts", std::move(shifts)},
+      {"normalized_determinant",
+       checkpoint_epsilon_frame_record(diagnostics.normalized_determinant)},
+      {"normalized_determinant_valuation",
+       diagnostics.normalized_determinant_valuation},
+      {"initial_leading_rank", diagnostics.initial_leading_rank},
+      {"final_leading_rank", diagnostics.final_leading_rank},
+      {"actions", std::move(actions)}};
+}
+
+EpsilonLatticeSaturationDiagnostics<Rational>
+parse_checkpoint_saturation_diagnostics(const json::value& raw,
+                                        std::uint32_t dimension) {
+  const auto& object = as_object(raw, "checkpoint saturation diagnostics");
+  require_exact_keys(
+      object,
+      {"initial_column_valuations", "initial_column_shifts",
+       "normalized_determinant", "normalized_determinant_valuation",
+       "initial_leading_rank", "final_leading_rank", "actions"},
+      "checkpoint saturation diagnostics");
+  std::vector<std::int32_t> valuations;
+  std::vector<std::int32_t> shifts;
+  for (const auto& value : as_array(object.at("initial_column_valuations"),
+                                     "checkpoint saturation valuations"))
+    valuations.push_back(
+        as_i32(value, "checkpoint saturation valuation"));
+  for (const auto& value : as_array(object.at("initial_column_shifts"),
+                                     "checkpoint saturation shifts"))
+    shifts.push_back(
+        as_i32(value, "checkpoint saturation shift"));
+  if (valuations.size() != dimension || shifts.size() != dimension)
+    throw std::invalid_argument(
+        "checkpoint saturation column metadata differs from its dimension");
+  auto normalized_determinant = parse_checkpoint_epsilon_frame<Rational>(
+      object.at("normalized_determinant"),
+      "checkpoint normalized determinant");
+  const auto normalized_determinant_valuation = as_i32(
+      object.at("normalized_determinant_valuation"),
+      "checkpoint normalized determinant valuation");
+  const auto leading = finite_laurent_leading_power(
+      normalized_determinant,
+      "checkpoint normalized determinant valuation");
+  if (!leading.has_value() ||
+      *leading != normalized_determinant_valuation)
+    throw std::invalid_argument(
+        "checkpoint normalized determinant valuation is inconsistent");
+  const auto initial_leading_rank = static_cast<std::size_t>(as_u64(
+      object.at("initial_leading_rank"),
+      "checkpoint initial leading rank"));
+  const auto final_leading_rank = static_cast<std::size_t>(as_u64(
+      object.at("final_leading_rank"), "checkpoint final leading rank"));
+  if (initial_leading_rank > dimension || final_leading_rank != dimension ||
+      initial_leading_rank > final_leading_rank)
+    throw std::invalid_argument(
+        "checkpoint saturation leading ranks are inconsistent");
+  std::vector<EpsilonLatticeSaturationAction<Rational>> actions;
+  for (const auto& raw_action : as_array(object.at("actions"),
+                                          "checkpoint saturation actions")) {
+    const auto& action = as_object(raw_action,
+                                   "checkpoint saturation action");
+    require_exact_keys(action,
+        {"leading_rank_before", "target_column", "null_relation"},
+        "checkpoint saturation action");
+    EpsilonLatticeSaturationAction<Rational> parsed;
+    parsed.leading_rank_before = static_cast<std::size_t>(as_u64(
+        action.at("leading_rank_before"),
+        "checkpoint saturation action rank"));
+    parsed.target_column = static_cast<std::size_t>(as_u64(
+        action.at("target_column"),
+        "checkpoint saturation target column"));
+    for (const auto& value : as_array(action.at("null_relation"),
+                                      "checkpoint saturation null relation"))
+      parsed.null_relation.push_back(parse_checkpoint_scalar<Rational>(
+          value, "checkpoint saturation null relation coefficient"));
+    if (parsed.leading_rank_before >= dimension ||
+        parsed.target_column >= dimension ||
+        parsed.null_relation.size() != dimension)
+      throw std::invalid_argument(
+          "checkpoint saturation action is outside its exact dimension");
+    actions.push_back(std::move(parsed));
+  }
+  if (normalized_determinant_valuation < 0 ||
+      actions.size() !=
+          static_cast<std::size_t>(normalized_determinant_valuation))
+    throw std::invalid_argument(
+        "checkpoint saturation action count does not reproduce its determinant valuation");
+  return {std::move(valuations), std::move(shifts),
+          std::move(normalized_determinant),
+          normalized_determinant_valuation, initial_leading_rank,
+          final_leading_rank, std::move(actions)};
+}
+
+json::object checkpoint_epsilon_vector_record(const EpsilonVector& value) {
+  json::array coefficients;
+  coefficients.reserve(value.coefficients.size());
+  for (const auto& coefficient : value.coefficients)
+    coefficients.push_back(checkpoint_ball_record(coefficient));
+  return json::object{
+      {"epsilon", json::object{{"min", value.epsilon.min_power},
+                                {"max", value.epsilon.complete_max}}},
+      {"dimension", value.dimension},
+      {"coefficients", std::move(coefficients)},
+      {"error", checkpoint_error_envelope_record(value.error)}};
+}
+
+EpsilonVector parse_checkpoint_epsilon_vector(const json::value& raw,
+                                               const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(object, {"epsilon", "dimension", "coefficients", "error"},
+                     label);
+  const auto& epsilon = as_object(object.at("epsilon"), label);
+  require_exact_keys(epsilon, {"min", "max"}, label);
+  EpsilonVector result;
+  result.epsilon = {as_i32(epsilon.at("min"), label),
+                    as_i32(epsilon.at("max"), label)};
+  const auto width = result.epsilon.width();
+  result.dimension = as_u32(object.at("dimension"), label);
+  if (result.dimension == 0)
+    throw std::invalid_argument(std::string(label) +
+                                " has zero dimension");
+  if (width > std::numeric_limits<std::size_t>::max() /
+                  static_cast<std::size_t>(result.dimension))
+    throw std::invalid_argument(std::string(label) +
+                                " tensor size overflows size_t");
+  const auto expected =
+      width * static_cast<std::size_t>(result.dimension);
+  const auto& coefficients = as_array(object.at("coefficients"), label);
+  if (coefficients.size() != expected)
+    throw std::invalid_argument(std::string(label) +
+                                " coefficient count differs from its tensor");
+  result.coefficients.reserve(expected);
+  for (const auto& coefficient : coefficients)
+    result.coefficients.push_back(parse_checkpoint_ball(coefficient, label));
+  result.error = parse_checkpoint_error_envelope(object.at("error"));
+  return result;
+}
+
 template <typename Scalar>
 json::object checkpoint_local_analytic_metadata_record(
     const LocalSolution<Scalar>& solution) {
@@ -2134,9 +2351,11 @@ class StoredLocal final : public StoredLocalBase {
                       {"residual_certifications",
                        current.residual_certifications},
                       {"endpoint_limits", current.endpoint_limits},
+                      {"line_integrations", current.line_integrations},
                       {"evaluate_ms", current.evaluate_ms},
                       {"residual_certify_ms", current.residual_certify_ms},
                       {"endpoint_limit_ms", current.endpoint_limit_ms},
+                      {"line_integration_ms", current.line_integration_ms},
                       {"coefficient_count", current.coefficient_count}}},
         {"column_provenance", column_provenance_.has_value()
              ? json::value(column_provenance_->encode())
@@ -2151,10 +2370,12 @@ class StoredLocal final : public StoredLocalBase {
     evaluations_.store(state.evaluations);
     residual_certifications_.store(state.residual_certifications);
     endpoint_limits_.store(state.endpoint_limits);
+    line_integrations_.store(state.line_integrations);
     std::lock_guard<std::mutex> lock(stats_mutex_);
     evaluate_ms_ = state.evaluate_ms;
     residual_certify_ms_ = state.residual_certify_ms;
     endpoint_limit_ms_ = state.endpoint_limit_ms;
+    line_integration_ms_ = state.line_integration_ms;
   }
 
   const LocalSolution<Scalar>& solution() const { return solution_; }
@@ -2528,9 +2749,9 @@ class StoredExactRegularMatch final : public StoredMatchBase {
  public:
   StoredExactRegularMatch(
       std::string handle, std::string checkpoint_identity,
-      std::string provenance_identity, std::vector<std::string> basis_handles,
-      std::vector<std::string> basis_checkpoints, std::string incoming_handle,
-      std::string incoming_checkpoint, std::string basis_chart,
+      std::string provenance_identity,
+      std::vector<json::object> basis_sources, json::object incoming_source,
+      std::string basis_chart,
       std::string incoming_chart, std::string basis_point,
       std::string incoming_point, std::string physical_point,
       EpsilonWindow requested_window, std::int32_t required_complete_max,
@@ -2538,14 +2759,14 @@ class StoredExactRegularMatch final : public StoredMatchBase {
       ExactLaurentMatrix<Rational>&& transformation,
       FiniteLaurentVector<Rational>&& weights,
       EpsilonLatticeSaturationDiagnostics<Rational>&& diagnostics,
-      EpsilonWindow residual_window, double elapsed_ms)
+      EpsilonWindow residual_window, double elapsed_ms,
+      std::vector<std::shared_ptr<StoredLocalBase>> basis_owners,
+      std::shared_ptr<StoredLocalBase> incoming_owner)
       : StoredMatchBase(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
         provenance_identity_(std::move(provenance_identity)),
-        basis_handles_(std::move(basis_handles)),
-        basis_checkpoints_(std::move(basis_checkpoints)),
-        incoming_handle_(std::move(incoming_handle)),
-        incoming_checkpoint_(std::move(incoming_checkpoint)),
+        basis_sources_(std::move(basis_sources)),
+        incoming_source_(std::move(incoming_source)),
         basis_chart_(std::move(basis_chart)),
         incoming_chart_(std::move(incoming_chart)),
         basis_point_(std::move(basis_point)),
@@ -2558,16 +2779,22 @@ class StoredExactRegularMatch final : public StoredMatchBase {
         weights_(std::move(weights)),
         diagnostics_(std::move(diagnostics)),
         residual_window_(residual_window),
-        elapsed_ms_(elapsed_ms) {}
+        elapsed_ms_(elapsed_ms), basis_owners_(std::move(basis_owners)),
+        incoming_owner_(std::move(incoming_owner)) {
+    if (basis_sources_.size() != dimension_ ||
+        basis_owners_.size() != dimension_ || !incoming_owner_)
+      throw std::invalid_argument(
+          "retained exact match source ownership differs from its dimension");
+  }
 
   json::object summary() const override {
     json::array basis;
-    basis.reserve(basis_handles_.size());
-    for (std::size_t column = 0; column < basis_handles_.size(); ++column)
-      basis.push_back(json::object{{"column", column},
-                                   {"local", basis_handles_[column]},
-                                   {"checkpoint_identity",
-                                    basis_checkpoints_[column]}});
+    basis.reserve(basis_sources_.size());
+    for (const auto& source : basis_sources_)
+      basis.push_back(json::object{
+          {"column", source.at("column")},
+          {"local", source.at("local")},
+          {"checkpoint_identity", source.at("checkpoint_identity")}});
 
     json::array shifts;
     for (const auto shift : diagnostics_.initial_column_shifts)
@@ -2602,8 +2829,9 @@ class StoredExactRegularMatch final : public StoredMatchBase {
         {"provenance_identity", provenance_identity_},
         {"dimension", dimension_},
         {"basis", std::move(basis)},
-        {"incoming", incoming_handle_},
-        {"incoming_checkpoint_identity", incoming_checkpoint_},
+        {"incoming", incoming_source_.at("local")},
+        {"incoming_checkpoint_identity",
+         incoming_source_.at("checkpoint_identity")},
         {"basis_chart", basis_chart_},
         {"incoming_chart", incoming_chart_},
         {"basis_point_exact", basis_point_},
@@ -2630,18 +2858,49 @@ class StoredExactRegularMatch final : public StoredMatchBase {
 
   double elapsed_ms() const { return elapsed_ms_; }
 
+  const std::vector<std::shared_ptr<StoredLocalBase>>& basis_owners() const {
+    return basis_owners_;
+  }
+  const std::shared_ptr<StoredLocalBase>& incoming_owner() const {
+    return incoming_owner_;
+  }
+
   json::object checkpoint_record() const override {
-    throw std::domain_error(
-        "checkpoint schema v2 does not yet serialize retained exact-rational match state");
+    json::array basis;
+    for (const auto& source : basis_sources_) basis.push_back(source);
+    return json::object{
+        {"schema", "diffexp2-retained-exact-rational-match-v2"},
+        {"handle", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"basis_sources", std::move(basis)},
+        {"incoming_source", incoming_source_},
+        {"basis_chart", basis_chart_},
+        {"incoming_chart", incoming_chart_},
+        {"basis_point_exact", basis_point_},
+        {"incoming_point_exact", incoming_point_},
+        {"physical_match_point_exact", physical_point_},
+        {"epsilon", json::object{{"min", requested_window_.min_power},
+                                  {"max", requested_window_.complete_max},
+                                  {"required_complete_max",
+                                   required_complete_max_}}},
+        {"dimension", dimension_},
+        {"transformation",
+         checkpoint_exact_laurent_matrix_record(transformation_)},
+        {"weights", checkpoint_frame_vector_record(weights_)},
+        {"saturation",
+         checkpoint_saturation_diagnostics_record(diagnostics_)},
+        {"residual_window",
+         json::object{{"min", residual_window_.min_power},
+                      {"max", residual_window_.complete_max}}},
+        {"elapsed_ms", elapsed_ms_}};
   }
 
  private:
   std::string checkpoint_identity_;
   std::string provenance_identity_;
-  std::vector<std::string> basis_handles_;
-  std::vector<std::string> basis_checkpoints_;
-  std::string incoming_handle_;
-  std::string incoming_checkpoint_;
+  std::vector<json::object> basis_sources_;
+  json::object incoming_source_;
   std::string basis_chart_;
   std::string incoming_chart_;
   std::string basis_point_;
@@ -2655,6 +2914,8 @@ class StoredExactRegularMatch final : public StoredMatchBase {
   EpsilonLatticeSaturationDiagnostics<Rational> diagnostics_;
   EpsilonWindow residual_window_;
   double elapsed_ms_ = 0.0;
+  std::vector<std::shared_ptr<StoredLocalBase>> basis_owners_;
+  std::shared_ptr<StoredLocalBase> incoming_owner_;
 };
 
 void require_exact_regular_local(const LocalSolution<Rational>& solution,
@@ -2917,24 +3178,38 @@ std::shared_ptr<StoredExactRegularMatch> build_exact_regular_match(
             "epsilon window",
         std::nullopt, std::nullopt, residual_max);
 
-  json::array provenance_basis;
+  std::vector<json::object> basis_sources;
+  basis_sources.reserve(basis.size());
   for (std::size_t column = 0; column < basis.size(); ++column) {
     json::object entry{{"column", column},
                        {"local", basis_handles[column]},
                        {"chart", basis_chart},
+                       {"source_operator_identity",
+                        basis[column]->source_operator_identity()},
                        {"checkpoint_identity", basis_checkpoints[column]}};
+    entry["analytic_metadata"] =
+        basis[column]->exact_analytic_metadata();
     if (basis[column]->column_provenance().has_value())
       entry["column_provenance"] =
           basis[column]->column_provenance()->encode();
-    provenance_basis.push_back(std::move(entry));
+    basis_sources.push_back(std::move(entry));
   }
+  json::object incoming_source{
+      {"local", incoming_handle}, {"chart", incoming_chart},
+      {"source_operator_identity", incoming->source_operator_identity()},
+      {"checkpoint_identity", expected_incoming_checkpoint},
+      {"analytic_metadata", incoming->exact_analytic_metadata()}};
+  if (incoming->column_provenance().has_value())
+    incoming_source["column_provenance"] =
+        incoming->column_provenance()->encode();
+  json::array provenance_basis;
+  for (const auto& source : basis_sources)
+    provenance_basis.push_back(source);
   json::object provenance{
       {"schema", "diffexp2-native-exact-regular-local-match-v1"},
       {"checkpoint_identity", checkpoint_identity},
       {"basis", std::move(provenance_basis)},
-      {"incoming", json::object{
-           {"local", incoming_handle}, {"chart", incoming_chart},
-           {"checkpoint_identity", expected_incoming_checkpoint}}},
+      {"incoming", incoming_source},
       {"basis_point_exact", basis_point.exact_coordinate},
       {"incoming_point_exact", incoming_point.exact_coordinate},
       {"physical_match_point_exact", basis_physical_point.str()},
@@ -2947,14 +3222,15 @@ std::shared_ptr<StoredExactRegularMatch> build_exact_regular_match(
   const auto elapsed_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
   return std::make_shared<StoredExactRegularMatch>(
-      match_handle, checkpoint_identity, provenance_identity, basis_handles,
-      std::move(basis_checkpoints), incoming_handle,
-      expected_incoming_checkpoint, basis_chart, incoming_chart,
+      match_handle, checkpoint_identity, provenance_identity,
+      std::move(basis_sources), std::move(incoming_source), basis_chart,
+      incoming_chart,
       basis_point.exact_coordinate, incoming_point.exact_coordinate,
       basis_physical_point.str(), window, required_complete_max, dimension,
       std::move(saturated.transformation), std::move(weights),
       std::move(saturated.diagnostics),
-      EpsilonWindow{residual_min, residual_max}, elapsed_ms);
+      EpsilonWindow{residual_min, residual_max}, elapsed_ms, erased_basis,
+      erased_incoming);
 }
 
 const char* acb_match_verdict_name(AcbMatchingResidualVerdict verdict) {
@@ -3908,7 +4184,8 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
                                 "checkpoint local runtime stats");
   require_exact_keys(stats,
       {"evaluations", "residual_certifications", "endpoint_limits",
-       "evaluate_ms", "residual_certify_ms", "endpoint_limit_ms",
+       "line_integrations", "evaluate_ms", "residual_certify_ms",
+       "endpoint_limit_ms", "line_integration_ms",
        "coefficient_count"}, "checkpoint local runtime stats");
   StoredLocalStats restored_stats;
   restored_stats.evaluations = as_u64(stats.at("evaluations"),
@@ -3918,6 +4195,8 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       "checkpoint local residual certifications");
   restored_stats.endpoint_limits = as_u64(
       stats.at("endpoint_limits"), "checkpoint local endpoint limits");
+  restored_stats.line_integrations = as_u64(
+      stats.at("line_integrations"), "checkpoint local line integrations");
   restored_stats.evaluate_ms = checkpoint_nonnegative_double(
       stats.at("evaluate_ms"), "checkpoint local evaluation time");
   restored_stats.residual_certify_ms = checkpoint_nonnegative_double(
@@ -3925,6 +4204,9 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       "checkpoint local residual-certification time");
   restored_stats.endpoint_limit_ms = checkpoint_nonnegative_double(
       stats.at("endpoint_limit_ms"), "checkpoint local endpoint time");
+  restored_stats.line_integration_ms = checkpoint_nonnegative_double(
+      stats.at("line_integration_ms"),
+      "checkpoint local line-integration time");
   restored_stats.create_parse_ms = native.parse_ms;
   restored_stats.create_kernel_ms = native.kernel_ms;
   const auto coefficient_count = as_u64(
@@ -4317,6 +4599,201 @@ void validate_checkpoint_match_source(const json::object& source,
   if (has_column_provenance)
     (void)parse_checkpoint_column_provenance(
         source.at("column_provenance"));
+}
+
+void validate_checkpoint_exact_match_source(
+    const json::object& source, bool basis_source,
+    std::size_t expected_column,
+    const std::shared_ptr<StoredLocalBase>& owner) {
+  const bool has_column_provenance =
+      source.if_contains("column_provenance") != nullptr;
+  if (basis_source) {
+    if (has_column_provenance)
+      require_exact_keys(
+          source,
+          {"column", "local", "chart", "source_operator_identity",
+           "checkpoint_identity", "analytic_metadata",
+           "column_provenance"},
+          "checkpoint exact-match basis source");
+    else
+      require_exact_keys(
+          source,
+          {"column", "local", "chart", "source_operator_identity",
+           "checkpoint_identity", "analytic_metadata"},
+          "checkpoint exact-match basis source");
+    if (as_u64(source.at("column"),
+               "checkpoint exact-match basis column") != expected_column)
+      throw std::invalid_argument(
+          "checkpoint exact-match basis sources are not in column order");
+  } else {
+    if (has_column_provenance)
+      require_exact_keys(
+          source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity", "analytic_metadata",
+           "column_provenance"},
+          "checkpoint exact-match incoming source");
+    else
+      require_exact_keys(
+          source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity", "analytic_metadata"},
+          "checkpoint exact-match incoming source");
+  }
+  if (!owner || std::string(owner->scalar_domain()) != "rational")
+    throw std::invalid_argument(
+        "checkpoint exact-match source has no exact-rational owner");
+  if (required_string(source, "local") != owner->handle() ||
+      required_string(source, "chart") != owner->source_chart() ||
+      required_string(source, "source_operator_identity") !=
+          owner->source_operator_identity() ||
+      required_string(source, "checkpoint_identity") !=
+          owner->checkpoint_identity() ||
+      source.at("analytic_metadata") != owner->exact_analytic_metadata())
+    throw std::invalid_argument(
+        "checkpoint exact-match source provenance disagrees with its retained local owner");
+  validate_checkpoint_exact_analytic_metadata(
+      source.at("analytic_metadata"));
+  if (has_column_provenance)
+    (void)parse_checkpoint_column_provenance(
+        source.at("column_provenance"));
+}
+
+std::shared_ptr<StoredExactRegularMatch>
+restore_checkpoint_exact_match_record(
+    const json::value& raw,
+    std::vector<std::shared_ptr<StoredLocalBase>> basis_owners,
+    std::shared_ptr<StoredLocalBase> incoming_owner) {
+  const auto& object = as_object(raw,
+                                 "checkpoint retained exact-rational match");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "basis_sources", "incoming_source", "basis_chart",
+       "incoming_chart", "basis_point_exact", "incoming_point_exact",
+       "physical_match_point_exact", "epsilon", "dimension",
+       "transformation", "weights", "saturation", "residual_window",
+       "elapsed_ms"},
+      "checkpoint retained exact-rational match");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-exact-rational-match-v2")
+    throw std::invalid_argument(
+        "unsupported retained exact-rational-match checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  const auto basis_chart = required_string(object, "basis_chart");
+  const auto incoming_chart = required_string(object, "incoming_chart");
+  const auto basis_point = required_string(object, "basis_point_exact");
+  const auto incoming_point = required_string(object,
+                                               "incoming_point_exact");
+  const auto physical_point = required_string(
+      object, "physical_match_point_exact");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty() || basis_chart.empty() ||
+      incoming_chart.empty() || basis_point.empty() ||
+      incoming_point.empty() || physical_point.empty())
+    throw std::invalid_argument(
+        "checkpoint exact-rational match contains an empty identity");
+  (void)Rational(basis_point);
+  (void)Rational(incoming_point);
+  (void)Rational(physical_point);
+  const auto dimension = as_u32(object.at("dimension"),
+                                "checkpoint exact-match dimension");
+  if (dimension == 0 || basis_owners.size() != dimension ||
+      !incoming_owner)
+    throw std::invalid_argument(
+        "checkpoint exact-match ownership differs from its dimension");
+  std::vector<json::object> basis_sources;
+  const auto& raw_basis = as_array(object.at("basis_sources"),
+                                   "checkpoint exact-match basis sources");
+  if (raw_basis.size() != dimension)
+    throw std::invalid_argument(
+        "checkpoint exact-match source count differs from its dimension");
+  basis_sources.reserve(dimension);
+  for (std::size_t column = 0; column < dimension; ++column) {
+    auto source = as_object(raw_basis[column],
+                            "checkpoint exact-match basis source");
+    validate_checkpoint_exact_match_source(
+        source, true, column, basis_owners[column]);
+    if (required_string(source, "chart") != basis_chart)
+      throw std::invalid_argument(
+          "checkpoint exact-match basis chart provenance is inconsistent");
+    basis_sources.push_back(std::move(source));
+  }
+  auto incoming_source = as_object(
+      object.at("incoming_source"),
+      "checkpoint exact-match incoming source");
+  validate_checkpoint_exact_match_source(
+      incoming_source, false, 0, incoming_owner);
+  if (required_string(incoming_source, "chart") != incoming_chart)
+    throw std::invalid_argument(
+        "checkpoint exact-match incoming chart provenance is inconsistent");
+
+  const auto& raw_epsilon = as_object(object.at("epsilon"),
+                                      "checkpoint exact-match epsilon");
+  require_exact_keys(raw_epsilon, {"min", "max", "required_complete_max"},
+                     "checkpoint exact-match epsilon");
+  EpsilonWindow window{
+      as_i32(raw_epsilon.at("min"), "checkpoint exact-match epsilon minimum"),
+      as_i32(raw_epsilon.at("max"), "checkpoint exact-match epsilon maximum")};
+  (void)window.width();
+  const auto required_complete_max = as_i32(
+      raw_epsilon.at("required_complete_max"),
+      "checkpoint exact-match required complete maximum");
+  if (required_complete_max < window.min_power ||
+      required_complete_max > window.complete_max)
+    throw std::invalid_argument(
+        "checkpoint exact-match requirement lies outside its work window");
+  auto transformation = parse_checkpoint_exact_laurent_matrix(
+      object.at("transformation"), dimension,
+      "checkpoint exact-match transformation");
+  auto weights = parse_checkpoint_frame_vector<Rational>(
+      object.at("weights"), dimension, "checkpoint exact-match weights");
+  auto diagnostics = parse_checkpoint_saturation_diagnostics(
+      object.at("saturation"), dimension);
+  const auto& raw_residual = as_object(
+      object.at("residual_window"), "checkpoint exact-match residual window");
+  require_exact_keys(raw_residual, {"min", "max"},
+                     "checkpoint exact-match residual window");
+  EpsilonWindow residual{
+      as_i32(raw_residual.at("min"), "checkpoint residual minimum"),
+      as_i32(raw_residual.at("max"), "checkpoint residual maximum")};
+  (void)residual.width();
+  if (residual.complete_max < required_complete_max)
+    throw std::invalid_argument(
+        "checkpoint exact-match residual lost its required complete window");
+
+  json::array provenance_basis;
+  for (const auto& source : basis_sources)
+    provenance_basis.push_back(source);
+  json::object provenance{
+      {"schema", "diffexp2-native-exact-regular-local-match-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"basis", std::move(provenance_basis)},
+      {"incoming", incoming_source},
+      {"basis_point_exact", basis_point},
+      {"incoming_point_exact", incoming_point},
+      {"physical_match_point_exact", physical_point},
+      {"epsilon", json::object{{"min", window.min_power},
+                                {"max", window.complete_max},
+                                {"required_complete_max",
+                                 required_complete_max}}}};
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint exact-match provenance identity is inconsistent");
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint exact-match elapsed time");
+  return std::make_shared<StoredExactRegularMatch>(
+      handle, checkpoint_identity, provenance_identity,
+      std::move(basis_sources), std::move(incoming_source), basis_chart,
+      incoming_chart, basis_point, incoming_point, physical_point, window,
+      required_complete_max, dimension, std::move(transformation),
+      std::move(weights), std::move(diagnostics), residual, elapsed_ms,
+      std::move(basis_owners), std::move(incoming_owner));
 }
 
 std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
@@ -6925,6 +7402,14 @@ class StoredTilePlan {
     throw std::invalid_argument("native tile-plan arm must be lower or upper");
   }
 
+  std::vector<std::shared_ptr<PreparedChartBase>> dependency_charts() const {
+    std::vector<std::shared_ptr<PreparedChartBase>> result;
+    result.reserve(lower_.charts.size() + upper_.charts.size());
+    for (const auto& binding : lower_.charts) result.push_back(binding.owner);
+    for (const auto& binding : upper_.charts) result.push_back(binding.owner);
+    return result;
+  }
+
   json::object summary(bool include_intervals = true) const {
     json::object result{
         {"tile_plan", handle_}, {"capability", kRetainedTilePlanCapability},
@@ -6952,6 +7437,30 @@ class StoredTilePlan {
       result["upper"] = encode_retained_arm(upper_);
     }
     return result;
+  }
+
+  json::object checkpoint_record() const {
+    return json::object{
+        {"schema", "diffexp2-retained-tile-plan-v2"},
+        {"handle", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"division_order", division_order_},
+        {"lower", encode_retained_arm(lower_)},
+        {"upper", encode_retained_arm(upper_)},
+        {"elapsed_ms", elapsed_ms_},
+        {"runtime_stats",
+         json::object{{"match_interval_queries", match_queries_.load()},
+                      {"tile_interval_queries", tile_queries_.load()},
+                      {"integrations", integrations_.load()}}}};
+  }
+
+  void restore_runtime_stats(std::uint64_t match_queries,
+                             std::uint64_t tile_queries,
+                             std::uint64_t integrations) {
+    match_queries_.store(match_queries);
+    tile_queries_.store(tile_queries);
+    integrations_.store(integrations);
   }
 
  private:
@@ -7057,6 +7566,13 @@ class StoredLineResult {
   }
   double elapsed_ms() const { return elapsed_ms_; }
 
+  const std::shared_ptr<StoredTilePlan>& plan_owner() const {
+    return plan_owner_;
+  }
+  const std::shared_ptr<StoredLocalBase>& local_owner() const {
+    return local_owner_;
+  }
+
   json::object summary() const {
     const auto& diagnostics = result_.diagnostics;
     return json::object{
@@ -7126,6 +7642,65 @@ class StoredLineResult {
         {"error_guarantee", "none"},
         {"json_coefficients", value.at("coefficients").as_array().size()},
         {"value", std::move(value)}, {"elapsed_ms", elapsed}};
+  }
+
+  json::object checkpoint_record() const {
+    const auto& diagnostics = result_.diagnostics;
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return json::object{
+        {"schema", "diffexp2-retained-line-result-v2"},
+        {"handle", handle_},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"arm", arm_},
+        {"tile", tile_index_},
+        {"interval", interval_},
+        {"source",
+         json::object{
+             {"tile_plan", plan_owner_->handle()},
+             {"tile_plan_checkpoint_identity",
+              plan_owner_->checkpoint_identity()},
+             {"local", local_owner_->handle()},
+             {"chart", local_owner_->source_chart()},
+             {"source_operator_identity",
+              local_owner_->source_operator_identity()},
+             {"local_checkpoint_identity", source_checkpoint_},
+             {"coefficient_domain", local_owner_->scalar_domain()},
+             {"analytic_metadata",
+              local_owner_->exact_analytic_metadata()}}},
+        {"result",
+         json::object{
+             {"value", checkpoint_epsilon_vector_record(result_.value)},
+             {"scope", "stored_truncation"},
+             {"imaginary_sign", result_.imaginary_sign.has_value()
+                  ? json::value(*result_.imaginary_sign)
+                  : json::value(nullptr)},
+             {"diagnostics",
+              json::object{
+                  {"input_monomial_cells",
+                   diagnostics.input_monomial_cells},
+                  {"grouped_monomials", diagnostics.grouped_monomials},
+                  {"zero_groups_skipped", diagnostics.zero_groups_skipped},
+                  {"cancelled_divergent_groups",
+                   diagnostics.cancelled_divergent_groups},
+                  {"primitive_evaluations",
+                   diagnostics.primitive_evaluations},
+                  {"primitive_component_applications",
+                   diagnostics.primitive_component_applications},
+                  {"primitive_component_reuses",
+                   diagnostics.primitive_component_reuses},
+                  {"has_center_endpoint",
+                   diagnostics.has_center_endpoint},
+                  {"detail", diagnostics.detail}}}}},
+        {"elapsed_ms", elapsed_ms_},
+        {"runtime_stats",
+         json::object{{"exports", exports_}, {"export_ms", export_ms_}}}};
+  }
+
+  void restore_runtime_stats(std::uint64_t exports, double export_ms) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    exports_ = exports;
+    export_ms_ = export_ms;
   }
 
  private:
@@ -8254,6 +8829,314 @@ std::uint64_t scoped_handle_id(const std::string& handle,
   return value;
 }
 
+std::pair<ExactArmRequest, std::vector<RetainedPlanChartBinding>>
+parse_checkpoint_retained_arm(
+    const json::value& raw,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<PreparedChartBase>>& charts,
+    const char* label) {
+  const auto& object = as_object(raw, label);
+  require_exact_keys(object,
+      {"from_exact", "to_exact", "direction", "division_order", "charts",
+       "matches", "tiles", "topology"}, label);
+  ExactArmRequest request;
+  request.from = parse_exact_path_rational(object.at("from_exact"), label);
+  request.to = parse_exact_path_rational(object.at("to_exact"), label);
+  request.topology = parse_exact_path_topology(object.at("topology"));
+  std::vector<RetainedPlanChartBinding> bindings;
+  const auto& raw_charts = as_array(object.at("charts"), label);
+  if (raw_charts.empty())
+    throw std::invalid_argument(std::string(label) +
+                                " has no retained charts");
+  bindings.reserve(raw_charts.size());
+  request.charts.reserve(raw_charts.size());
+  for (std::size_t index = 0; index < raw_charts.size(); ++index) {
+    const auto& raw_chart = as_object(raw_charts[index], label);
+    require_exact_keys(raw_chart,
+        {"index", "chart", "identity", "center_exact", "scale_exact",
+         "radius_exact", "singular_center", "prescriptions"}, label);
+    if (as_u64(raw_chart.at("index"), label) != index)
+      throw std::invalid_argument(std::string(label) +
+                                  " chart bindings are not in index order");
+    const auto handle = required_string(raw_chart, "chart");
+    const auto found = charts.find(handle);
+    if (found == charts.end())
+      throw std::invalid_argument(std::string(label) +
+                                  " references an absent prepared chart owner");
+    auto binding = bind_plan_chart(found->second, request.topology);
+    if (encode_plan_chart(binding, index) != raw_chart)
+      throw std::invalid_argument(std::string(label) +
+                                  " chart binding differs from its exact prepared owner");
+    request.charts.push_back(binding.geometry);
+    bindings.push_back(std::move(binding));
+  }
+  // The plan is rederived below.  These fields are still parsed here to make
+  // malformed scalar types fail before any planning work is attempted.
+  (void)as_i32(object.at("direction"), label);
+  (void)as_u32(object.at("division_order"), label);
+  (void)as_array(object.at("matches"), label);
+  (void)as_array(object.at("tiles"), label);
+  return {std::move(request), std::move(bindings)};
+}
+
+std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
+    const json::value& raw,
+    const std::unordered_map<std::string,
+                             std::shared_ptr<PreparedChartBase>>& charts) {
+  const auto& object = as_object(raw, "checkpoint retained tile plan");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "division_order", "lower", "upper", "elapsed_ms",
+       "runtime_stats"},
+      "checkpoint retained tile plan");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-tile-plan-v2")
+    throw std::invalid_argument(
+        "unsupported retained tile-plan checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint retained tile plan contains an empty identity");
+  const auto division_order = as_u32(
+      object.at("division_order"), "checkpoint tile division order");
+  auto [lower_request, lower_bindings] = parse_checkpoint_retained_arm(
+      object.at("lower"), charts, "checkpoint lower tile arm");
+  auto [upper_request, upper_bindings] = parse_checkpoint_retained_arm(
+      object.at("upper"), charts, "checkpoint upper tile arm");
+  if (lower_bindings.front().handle != upper_bindings.front().handle)
+    throw std::invalid_argument(
+        "checkpoint independent tile arms lost their shared anchor owner");
+  ExactPathPlanOptions options;
+  options.division_order = division_order;
+  auto planned = plan_exact_independent_arms(
+      lower_request, upper_request, options);
+  RetainedArmPlan lower{std::move(planned.lower),
+                        std::move(lower_bindings)};
+  RetainedArmPlan upper{std::move(planned.upper),
+                        std::move(upper_bindings)};
+  if (encode_retained_arm(lower) != object.at("lower") ||
+      encode_retained_arm(upper) != object.at("upper"))
+    throw std::invalid_argument(
+        "checkpoint tile intervals do not reproduce the exact planner result");
+  json::object provenance{
+      {"schema", "diffexp2-retained-exact-independent-arm-tile-plan-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"division_order", division_order},
+      {"lower", encode_retained_arm(lower)},
+      {"upper", encode_retained_arm(upper)}};
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint tile-plan provenance identity is inconsistent");
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint tile-plan elapsed time");
+  const auto& stats = as_object(object.at("runtime_stats"),
+                                "checkpoint tile-plan runtime stats");
+  require_exact_keys(stats,
+      {"match_interval_queries", "tile_interval_queries", "integrations"},
+      "checkpoint tile-plan runtime stats");
+  auto plan = std::make_shared<StoredTilePlan>(
+      handle, checkpoint_identity, provenance_identity, division_order,
+      std::move(lower), std::move(upper), elapsed_ms);
+  plan->restore_runtime_stats(
+      as_u64(stats.at("match_interval_queries"),
+             "checkpoint tile match queries"),
+      as_u64(stats.at("tile_interval_queries"),
+             "checkpoint tile interval queries"),
+      as_u64(stats.at("integrations"),
+             "checkpoint tile integrations"));
+  return plan;
+}
+
+std::size_t checkpoint_size_t(const json::value& raw, const char* label) {
+  const auto value = as_u64(raw, label);
+  if (value > std::numeric_limits<std::size_t>::max())
+    throw std::invalid_argument(std::string(label) + " exceeds size_t");
+  return static_cast<std::size_t>(value);
+}
+
+std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
+    const json::value& raw,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto& object = as_object(raw, "checkpoint retained line result");
+  require_exact_keys(
+      object,
+      {"schema", "handle", "checkpoint_identity", "provenance_identity",
+       "arm", "tile", "interval", "source", "result", "elapsed_ms",
+       "runtime_stats"},
+      "checkpoint retained line result");
+  if (required_string(object, "schema") !=
+      "diffexp2-retained-line-result-v2")
+    throw std::invalid_argument(
+        "unsupported retained line-result checkpoint schema");
+  const auto handle = required_string(object, "handle");
+  const auto checkpoint_identity = required_string(
+      object, "checkpoint_identity");
+  const auto provenance_identity = required_string(
+      object, "provenance_identity");
+  const auto arm_name = required_string(object, "arm");
+  const auto tile_index = checkpoint_size_t(
+      object.at("tile"), "checkpoint line tile index");
+  if (handle.empty() || checkpoint_identity.empty() ||
+      provenance_identity.empty())
+    throw std::invalid_argument(
+        "checkpoint retained line result contains an empty identity");
+  const auto& arm = plan->arm(arm_name);
+  if (tile_index >= arm.exact.tiles.size())
+    throw std::invalid_argument(
+        "checkpoint line tile lies outside its retained plan owner");
+  const auto expected_interval = encode_plan_tile(arm, tile_index);
+  const auto interval = as_object(object.at("interval"),
+                                  "checkpoint line interval");
+  if (interval != expected_interval)
+    throw std::invalid_argument(
+        "checkpoint line interval differs from its exact tile-plan owner");
+  const auto& source = as_object(object.at("source"),
+                                 "checkpoint line source");
+  require_exact_keys(
+      source,
+      {"tile_plan", "tile_plan_checkpoint_identity", "local", "chart",
+       "source_operator_identity", "local_checkpoint_identity",
+       "coefficient_domain", "analytic_metadata"},
+      "checkpoint line source");
+  if (!plan || !local ||
+      required_string(source, "tile_plan") != plan->handle() ||
+      required_string(source, "tile_plan_checkpoint_identity") !=
+          plan->checkpoint_identity() ||
+      required_string(source, "local") != local->handle() ||
+      required_string(source, "chart") != local->source_chart() ||
+      required_string(source, "source_operator_identity") !=
+          local->source_operator_identity() ||
+      required_string(source, "local_checkpoint_identity") !=
+          local->checkpoint_identity() ||
+      required_string(source, "coefficient_domain") !=
+          local->scalar_domain() ||
+      source.at("analytic_metadata") != local->exact_analytic_metadata())
+    throw std::invalid_argument(
+        "checkpoint line source provenance disagrees with its strong owners");
+  if (std::string(local->scalar_domain()) == "symbolic")
+    throw std::invalid_argument(
+        "checkpoint line result cannot own a symbolic local");
+  validate_checkpoint_exact_analytic_metadata(
+      source.at("analytic_metadata"));
+  const auto& tile = arm.exact.tiles[tile_index];
+  const auto& binding = arm.charts.at(tile.chart);
+  if (local->source_chart() != binding.handle)
+    throw std::invalid_argument(
+        "checkpoint line local does not own the tile's retained chart");
+
+  const auto& raw_result = as_object(object.at("result"),
+                                     "checkpoint line result state");
+  require_exact_keys(raw_result, {"value", "scope", "imaginary_sign",
+                                  "diagnostics"},
+                     "checkpoint line result state");
+  if (required_string(raw_result, "scope") != "stored_truncation")
+    throw std::invalid_argument(
+        "checkpoint line result has an unsupported integration scope");
+  StoredLineIntegral result;
+  result.value = parse_checkpoint_epsilon_vector(
+      raw_result.at("value"), "checkpoint line epsilon vector");
+  result.scope = LineIntegrationScope::StoredTruncation;
+  if (!raw_result.at("imaginary_sign").is_null()) {
+    result.imaginary_sign = as_i32(raw_result.at("imaginary_sign"),
+                                   "checkpoint line rim");
+    if (*result.imaginary_sign != -1 && *result.imaginary_sign != 1)
+      throw std::invalid_argument(
+          "checkpoint line rim must be +1 or -1");
+  }
+  const auto expected_rim = exact_plan_rim(binding.prescriptions);
+  if (result.imaginary_sign != expected_rim)
+    throw std::invalid_argument(
+        "checkpoint line rim differs from its exact branch prescriptions");
+  if (!result.value.error.empty() ||
+      result.value.error.guarantee != ErrorGuarantee::None)
+    throw std::invalid_argument(
+        "checkpoint stored-truncation line unexpectedly carries an error guarantee");
+  if (result.value.dimension !=
+      as_u32(local->summary().at("dimension"),
+             "checkpoint line source dimension"))
+    throw std::invalid_argument(
+        "checkpoint line result dimension differs from its local owner");
+  const auto& diagnostics = as_object(raw_result.at("diagnostics"),
+                                      "checkpoint line diagnostics");
+  require_exact_keys(
+      diagnostics,
+      {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+       "cancelled_divergent_groups", "primitive_evaluations",
+       "primitive_component_applications", "primitive_component_reuses",
+       "has_center_endpoint", "detail"},
+      "checkpoint line diagnostics");
+  result.diagnostics.input_monomial_cells = checkpoint_size_t(
+      diagnostics.at("input_monomial_cells"),
+      "checkpoint line input monomials");
+  result.diagnostics.grouped_monomials = checkpoint_size_t(
+      diagnostics.at("grouped_monomials"),
+      "checkpoint line grouped monomials");
+  result.diagnostics.zero_groups_skipped = checkpoint_size_t(
+      diagnostics.at("zero_groups_skipped"),
+      "checkpoint line skipped zero groups");
+  result.diagnostics.cancelled_divergent_groups = checkpoint_size_t(
+      diagnostics.at("cancelled_divergent_groups"),
+      "checkpoint line cancelled divergent groups");
+  result.diagnostics.primitive_evaluations = checkpoint_size_t(
+      diagnostics.at("primitive_evaluations"),
+      "checkpoint line primitive evaluations");
+  result.diagnostics.primitive_component_applications = checkpoint_size_t(
+      diagnostics.at("primitive_component_applications"),
+      "checkpoint line primitive component applications");
+  result.diagnostics.primitive_component_reuses = checkpoint_size_t(
+      diagnostics.at("primitive_component_reuses"),
+      "checkpoint line primitive component reuses");
+  if (!diagnostics.at("has_center_endpoint").is_bool())
+    throw std::invalid_argument(
+        "checkpoint line center-endpoint flag must be Boolean");
+  result.diagnostics.has_center_endpoint =
+      diagnostics.at("has_center_endpoint").as_bool();
+  result.diagnostics.detail = required_string(diagnostics, "detail");
+
+  json::object provenance{
+      {"schema",
+       "diffexp2-retained-native-stored-truncation-physical-tile-integral-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+      {"arm", arm_name}, {"tile", tile_index},
+      {"interval", interval},
+      {"source", json::object{
+           {"local", local->handle()}, {"chart", local->source_chart()},
+           {"checkpoint_identity", local->checkpoint_identity()}}},
+      {"epsilon", json::object{{"min", result.value.epsilon.min_power},
+                                {"max", result.value.epsilon.complete_max}}},
+      {"scope", "stored_truncation"},
+      {"error_guarantee", "none"}};
+  if (json::serialize(canonical_json_value(provenance)) !=
+      provenance_identity)
+    throw std::invalid_argument(
+        "checkpoint line provenance identity is inconsistent");
+  const auto elapsed_ms = checkpoint_nonnegative_double(
+      object.at("elapsed_ms"), "checkpoint line elapsed time");
+  const auto& stats = as_object(object.at("runtime_stats"),
+                                "checkpoint line runtime stats");
+  require_exact_keys(stats, {"exports", "export_ms"},
+                     "checkpoint line runtime stats");
+  auto stored = std::make_shared<StoredLineResult>(
+      handle, checkpoint_identity, provenance_identity, arm_name, tile_index,
+      interval, local->checkpoint_identity(), std::move(result), elapsed_ms,
+      plan, local);
+  stored->restore_runtime_stats(
+      as_u64(stats.at("exports"), "checkpoint line exports"),
+      checkpoint_nonnegative_double(stats.at("export_ms"),
+                                    "checkpoint line export time"));
+  return stored;
+}
+
 json::array encode_strings(const std::vector<std::string>& values) {
   json::array output;
   output.reserve(values.size());
@@ -8362,7 +9245,7 @@ json::array checkpoint_local_identity_manifest(const json::array& items) {
   return manifest;
 }
 
-json::array checkpoint_match_identity_manifest(const json::array& items) {
+json::array checkpoint_acb_match_identity_manifest(const json::array& items) {
   json::array manifest;
   manifest.reserve(items.size());
   for (const auto& value : items) {
@@ -8372,6 +9255,23 @@ json::array checkpoint_match_identity_manifest(const json::array& items) {
         {"checkpoint_identity", item.at("checkpoint_identity")},
         {"provenance_identity", item.at("provenance_identity")},
         {"exact_lattice_identity", item.at("exact_lattice_identity")}});
+  }
+  return manifest;
+}
+
+json::array checkpoint_exact_match_identity_manifest(
+    const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(
+        value, "checkpoint retained exact-rational match");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"checkpoint_identity", item.at("checkpoint_identity")},
+        {"provenance_identity", item.at("provenance_identity")},
+        {"basis_sources", item.at("basis_sources")},
+        {"incoming_source", item.at("incoming_source")}});
   }
   return manifest;
 }
@@ -8390,6 +9290,33 @@ json::array checkpoint_endpoint_identity_manifest(const json::array& items) {
   return manifest;
 }
 
+json::array checkpoint_tile_identity_manifest(const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(value, "checkpoint retained tile plan");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"checkpoint_identity", item.at("checkpoint_identity")},
+        {"provenance_identity", item.at("provenance_identity")}});
+  }
+  return manifest;
+}
+
+json::array checkpoint_line_identity_manifest(const json::array& items) {
+  json::array manifest;
+  manifest.reserve(items.size());
+  for (const auto& value : items) {
+    const auto& item = as_object(value, "checkpoint retained line result");
+    manifest.push_back(json::object{
+        {"handle", item.at("handle")},
+        {"checkpoint_identity", item.at("checkpoint_identity")},
+        {"provenance_identity", item.at("provenance_identity")},
+        {"source", item.at("source")}});
+  }
+  return manifest;
+}
+
 struct SessionCheckpointSnapshot {
   json::object header;
   json::object payload;
@@ -8397,8 +9324,11 @@ struct SessionCheckpointSnapshot {
   std::size_t charts = 0;
   std::size_t sccs = 0;
   std::size_t locals = 0;
+  std::size_t exact_matches = 0;
   std::size_t acb_matches = 0;
   std::size_t endpoints = 0;
+  std::size_t tile_plans = 0;
+  std::size_t line_results = 0;
 };
 
 SessionCheckpointSnapshot make_checkpoint_snapshot(
@@ -8411,12 +9341,58 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       session.pending_line_integrations != 0)
     throw std::invalid_argument(
         "checkpoint requires a quiescent session with no pending local solve, match, endpoint limit, tile plan, or line integration");
-  if (!session.tile_plans.empty() || !session.line_results.empty())
-    throw std::invalid_argument(
-        "checkpoint schema v2 does not serialize retained tile-plan or line-result handles; release them before saving");
+
+  // Serialize the strong-ownership closure, not only the public registries.
+  // A retained line deliberately survives local.release/tile.release, so its
+  // source snapshots must remain present without becoming public again after
+  // restore.  Visibility is recorded separately below.
+  std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>>
+      chart_closure = session.charts;
+  std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>>
+      local_closure = session.locals;
+  std::unordered_map<std::string, std::shared_ptr<StoredTilePlan>>
+      tile_closure = session.tile_plans;
+  const auto add_chart = [&](const std::shared_ptr<PreparedChartBase>& chart) {
+    if (!chart)
+      throw std::logic_error("checkpoint ownership closure contains a null chart");
+    const auto [found, inserted] = chart_closure.emplace(chart->handle(), chart);
+    if (!inserted && found->second.get() != chart.get())
+      throw std::logic_error(
+          "checkpoint ownership closure contains distinct charts with one handle");
+  };
+  const auto add_local = [&](const std::shared_ptr<StoredLocalBase>& local) {
+    if (!local)
+      throw std::logic_error("checkpoint ownership closure contains a null local");
+    const auto [found, inserted] = local_closure.emplace(local->handle(), local);
+    if (!inserted && found->second.get() != local.get())
+      throw std::logic_error(
+          "checkpoint ownership closure contains distinct locals with one handle");
+  };
+  const auto add_tile = [&](const std::shared_ptr<StoredTilePlan>& plan) {
+    if (!plan)
+      throw std::logic_error("checkpoint ownership closure contains a null tile plan");
+    const auto [found, inserted] = tile_closure.emplace(plan->handle(), plan);
+    if (!inserted && found->second.get() != plan.get())
+      throw std::logic_error(
+          "checkpoint ownership closure contains distinct tile plans with one handle");
+  };
+  for (const auto& [ignored, match] : session.matches) {
+    if (const auto exact =
+            std::dynamic_pointer_cast<StoredExactRegularMatch>(match)) {
+      for (const auto& local : exact->basis_owners()) add_local(local);
+      add_local(exact->incoming_owner());
+    }
+  }
+  for (const auto& [ignored, line] : session.line_results) {
+    add_tile(line->plan_owner());
+    add_local(line->local_owner());
+  }
+  for (const auto& [ignored, plan] : tile_closure)
+    for (const auto& chart : plan->dependency_charts()) add_chart(chart);
+
   std::vector<std::shared_ptr<PreparedChartBase>> charts;
-  charts.reserve(session.charts.size());
-  for (const auto& [ignored, chart] : session.charts) charts.push_back(chart);
+  charts.reserve(chart_closure.size());
+  for (const auto& [ignored, chart] : chart_closure) charts.push_back(chart);
   std::sort(charts.begin(), charts.end(), [](const auto& left,
                                              const auto& right) {
     return scoped_handle_id(left->handle(), "c:", "chart") <
@@ -8432,8 +9408,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
            scoped_handle_id(right->handle(), "scc:", "SCC");
   });
   std::vector<std::shared_ptr<StoredLocalBase>> locals;
-  locals.reserve(session.locals.size());
-  for (const auto& [ignored, local] : session.locals)
+  locals.reserve(local_closure.size());
+  for (const auto& [ignored, local] : local_closure)
     locals.push_back(local);
   std::sort(locals.begin(), locals.end(), [](const auto& left,
                                              const auto& right) {
@@ -8457,6 +9433,23 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
                                                    const auto& right) {
     return scoped_handle_id(left->handle(), "e:", "endpoint") <
            scoped_handle_id(right->handle(), "e:", "endpoint");
+  });
+  std::vector<std::shared_ptr<StoredTilePlan>> tile_plans;
+  tile_plans.reserve(tile_closure.size());
+  for (const auto& [ignored, plan] : tile_closure) tile_plans.push_back(plan);
+  std::sort(tile_plans.begin(), tile_plans.end(), [](const auto& left,
+                                                     const auto& right) {
+    return scoped_handle_id(left->handle(), "tile:", "tile plan") <
+           scoped_handle_id(right->handle(), "tile:", "tile plan");
+  });
+  std::vector<std::shared_ptr<StoredLineResult>> line_results;
+  line_results.reserve(session.line_results.size());
+  for (const auto& [ignored, line] : session.line_results)
+    line_results.push_back(line);
+  std::sort(line_results.begin(), line_results.end(), [](const auto& left,
+                                                         const auto& right) {
+    return scoped_handle_id(left->handle(), "line:", "line result") <
+           scoped_handle_id(right->handle(), "line:", "line result");
   });
 
   json::array chart_items;
@@ -8483,14 +9476,47 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   local_items.reserve(locals.size());
   for (const auto& local : locals)
     local_items.push_back(local->checkpoint_record());
-  json::array match_items;
-  match_items.reserve(matches.size());
-  for (const auto& match : matches)
-    match_items.push_back(match->checkpoint_record());
+  json::array exact_match_items;
+  json::array acb_match_items;
+  for (const auto& match : matches) {
+    auto record = match->checkpoint_record();
+    if (std::dynamic_pointer_cast<StoredExactRegularMatch>(match))
+      exact_match_items.push_back(std::move(record));
+    else if (std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match))
+      acb_match_items.push_back(std::move(record));
+    else
+      throw std::logic_error(
+          "checkpoint encountered an unknown retained match implementation");
+  }
   json::array endpoint_items;
   endpoint_items.reserve(endpoints.size());
   for (const auto& endpoint : endpoints)
     endpoint_items.push_back(endpoint->checkpoint_record());
+  json::array tile_items;
+  tile_items.reserve(tile_plans.size());
+  for (const auto& plan : tile_plans)
+    tile_items.push_back(plan->checkpoint_record());
+  json::array line_items;
+  line_items.reserve(line_results.size());
+  for (const auto& line : line_results)
+    line_items.push_back(line->checkpoint_record());
+
+  json::array visible_charts;
+  for (const auto& chart : charts)
+    if (session.charts.contains(chart->handle()))
+      visible_charts.emplace_back(chart->handle());
+  json::array visible_locals;
+  for (const auto& local : locals)
+    if (session.locals.contains(local->handle()))
+      visible_locals.emplace_back(local->handle());
+  json::array visible_tiles;
+  for (const auto& plan : tile_plans)
+    if (session.tile_plans.contains(plan->handle()))
+      visible_tiles.emplace_back(plan->handle());
+  json::object registry_visibility{
+      {"charts", std::move(visible_charts)},
+      {"locals", std::move(visible_locals)},
+      {"tile_plans", std::move(visible_tiles)}};
 
   if (session.checkpoint_generation ==
       std::numeric_limits<std::uint64_t>::max())
@@ -8503,22 +9529,31 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"next_scc", session.next_scc},
       {"next_match", session.next_match},
       {"next_endpoint", session.next_endpoint},
+      {"next_tile_plan", session.next_tile_plan},
+      {"next_line_result", session.next_line_result},
       {"total_local_solves", session.total_local_solves},
       {"total_scc_column_solves", session.total_scc_column_solves},
       {"total_local_matches", session.total_local_matches},
       {"total_endpoint_limits", session.total_endpoint_limits},
       {"total_endpoint_exports", session.total_endpoint_exports},
+      {"total_tile_plans", session.total_tile_plans},
+      {"total_line_integrations", session.total_line_integrations},
+      {"total_line_exports", session.total_line_exports},
       {"total_local_run_parse_ms", session.total_local_run_parse_ms},
       {"total_local_kernel_ms", session.total_local_kernel_ms},
       {"total_local_match_ms", session.total_local_match_ms},
       {"total_endpoint_limit_ms", session.total_endpoint_limit_ms},
       {"total_endpoint_export_ms", session.total_endpoint_export_ms},
+      {"total_tile_plan_ms", session.total_tile_plan_ms},
+      {"total_line_integration_ms", session.total_line_integration_ms},
+      {"total_line_export_ms", session.total_line_export_ms},
       {"checkpoint_generation", generation},
       {"checkpoint_restore_count", session.checkpoint_restore_count}};
   json::object session_record{
       {"source_handle", session.handle},
       {"configuration", configuration},
       {"configuration_identity", checkpoint_configuration_identity(session)},
+      {"registry_visibility", registry_visibility},
       {"counters", std::move(counters)}};
   json::object payload{
       {"schema", kCheckpointPayloadSchema},
@@ -8526,13 +9561,19 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"prepared_charts", chart_items},
       {"prepared_scc", scc_items},
       {"retained_locals", local_items},
-      {"retained_acb_matches", match_items},
-      {"retained_endpoints", endpoint_items}};
+      {"retained_exact_matches", exact_match_items},
+      {"retained_acb_matches", acb_match_items},
+      {"retained_endpoints", endpoint_items},
+      {"retained_tile_plans", tile_items},
+      {"retained_line_results", line_items}};
   json::array mandatory_sections{"session", "prepared_charts",
                                   "prepared_scc", "retained_locals",
+                                  "retained_exact_matches",
                                   "retained_acb_matches",
-                                  "retained_endpoints"};
-  json::array deferred_kinds{"exact-rational-match", "line", "tile"};
+                                  "retained_endpoints",
+                                  "retained_tile_plans",
+                                  "retained_line_results"};
+  json::array deferred_kinds{"symbolic-local"};
   json::object header{
       {"format", kCheckpointFormat},
       {"schema", kCheckpointPayloadSchema},
@@ -8547,14 +9588,21 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"chart_identities", checkpoint_identity_manifest(chart_items)},
       {"scc_identities", checkpoint_identity_manifest(scc_items)},
       {"local_identities", checkpoint_local_identity_manifest(local_items)},
+      {"exact_match_identities",
+       checkpoint_exact_match_identity_manifest(exact_match_items)},
       {"acb_match_identities",
-       checkpoint_match_identity_manifest(match_items)},
+       checkpoint_acb_match_identity_manifest(acb_match_items)},
       {"endpoint_identities",
        checkpoint_endpoint_identity_manifest(endpoint_items)},
+      {"tile_plan_identities",
+       checkpoint_tile_identity_manifest(tile_items)},
+      {"line_result_identities",
+       checkpoint_line_identity_manifest(line_items)},
       {"generation", generation}};
   return {std::move(header), std::move(payload), generation,
-          charts.size(), sccs.size(), locals.size(), matches.size(),
-          endpoints.size()};
+          session.charts.size(), sccs.size(), session.locals.size(),
+          exact_match_items.size(), acb_match_items.size(), endpoints.size(),
+          session.tile_plans.size(), line_results.size()};
 }
 
 std::vector<std::string> checkpoint_string_array(const json::value& raw,
@@ -8576,11 +9624,15 @@ void validate_checkpoint_envelope(const json::object& header,
       {"format", "schema", "build", "flint", "checkpoint_identity",
        "configuration_identity", "analytic_identity", "mandatory_sections",
        "optional_sections", "deferred_handle_kinds", "chart_identities",
-       "scc_identities", "local_identities", "acb_match_identities",
-       "endpoint_identities", "generation"}, "checkpoint header");
+       "scc_identities", "local_identities", "exact_match_identities",
+       "acb_match_identities", "endpoint_identities",
+       "tile_plan_identities", "line_result_identities", "generation"},
+      "checkpoint header");
   require_exact_keys(payload,
       {"schema", "session", "prepared_charts", "prepared_scc",
-       "retained_locals", "retained_acb_matches", "retained_endpoints"},
+       "retained_locals", "retained_exact_matches",
+       "retained_acb_matches", "retained_endpoints",
+       "retained_tile_plans", "retained_line_results"},
       "checkpoint payload");
   if (required_string(header, "format") != kCheckpointFormat ||
       as_u32(header.at("schema"), "checkpoint header schema") !=
@@ -8602,7 +9654,9 @@ void validate_checkpoint_envelope(const json::object& header,
   std::sort(mandatory.begin(), mandatory.end());
   const std::vector<std::string> expected_sections{
       "prepared_charts", "prepared_scc", "retained_acb_matches",
-      "retained_endpoints", "retained_locals", "session"};
+      "retained_endpoints", "retained_exact_matches",
+      "retained_line_results", "retained_locals", "retained_tile_plans",
+      "session"};
   if (mandatory != expected_sections)
     throw std::invalid_argument(
         "native checkpoint contains unknown or missing mandatory sections");
@@ -8614,8 +9668,7 @@ void validate_checkpoint_envelope(const json::object& header,
       header.at("deferred_handle_kinds"),
       "deferred checkpoint handle kinds");
   std::sort(deferred.begin(), deferred.end());
-  const std::vector<std::string> expected_deferred{
-      "exact-rational-match", "line", "tile"};
+  const std::vector<std::string> expected_deferred{"symbolic-local"};
   if (deferred != expected_deferred)
     throw std::invalid_argument(
         "native checkpoint deferred-state contract is incompatible");
@@ -8624,7 +9677,17 @@ void validate_checkpoint_envelope(const json::object& header,
                                   "checkpoint session section");
   require_exact_keys(session,
       {"source_handle", "configuration", "configuration_identity",
-       "counters"}, "checkpoint session section");
+       "registry_visibility", "counters"}, "checkpoint session section");
+  const auto& visibility = as_object(
+      session.at("registry_visibility"), "checkpoint registry visibility");
+  require_exact_keys(visibility, {"charts", "locals", "tile_plans"},
+                     "checkpoint registry visibility");
+  (void)checkpoint_string_array(visibility.at("charts"),
+                                "visible checkpoint charts");
+  (void)checkpoint_string_array(visibility.at("locals"),
+                                "visible checkpoint locals");
+  (void)checkpoint_string_array(visibility.at("tile_plans"),
+                                "visible checkpoint tile plans");
   if (required_string(session, "configuration_identity") !=
       required_string(header, "configuration_identity"))
     throw std::invalid_argument(
@@ -8644,12 +9707,21 @@ void validate_checkpoint_envelope(const json::object& header,
                                    "checkpoint prepared SCC charts");
   const auto& local_items = as_array(payload.at("retained_locals"),
                                      "checkpoint retained locals");
-  const auto& match_items = as_array(
+  const auto& exact_match_items = as_array(
+      payload.at("retained_exact_matches"),
+      "checkpoint retained exact-rational matches");
+  const auto& acb_match_items = as_array(
       payload.at("retained_acb_matches"),
       "checkpoint retained Acb matches");
   const auto& endpoint_items = as_array(
       payload.at("retained_endpoints"),
       "checkpoint retained endpoints");
+  const auto& tile_items = as_array(
+      payload.at("retained_tile_plans"),
+      "checkpoint retained tile plans");
+  const auto& line_items = as_array(
+      payload.at("retained_line_results"),
+      "checkpoint retained line results");
   if (checkpoint_identity_manifest(chart_items) !=
           as_array(header.at("chart_identities"),
                    "checkpoint chart identities") ||
@@ -8659,12 +9731,21 @@ void validate_checkpoint_envelope(const json::object& header,
       checkpoint_local_identity_manifest(local_items) !=
           as_array(header.at("local_identities"),
                    "checkpoint local identities") ||
-      checkpoint_match_identity_manifest(match_items) !=
+      checkpoint_exact_match_identity_manifest(exact_match_items) !=
+          as_array(header.at("exact_match_identities"),
+                   "checkpoint exact-match identities") ||
+      checkpoint_acb_match_identity_manifest(acb_match_items) !=
           as_array(header.at("acb_match_identities"),
                    "checkpoint Acb match identities") ||
       checkpoint_endpoint_identity_manifest(endpoint_items) !=
           as_array(header.at("endpoint_identities"),
-                   "checkpoint endpoint identities"))
+                   "checkpoint endpoint identities") ||
+      checkpoint_tile_identity_manifest(tile_items) !=
+          as_array(header.at("tile_plan_identities"),
+                   "checkpoint tile-plan identities") ||
+      checkpoint_line_identity_manifest(line_items) !=
+          as_array(header.at("line_result_identities"),
+                   "checkpoint line-result identities"))
     throw std::invalid_argument(
         "checkpoint retained identity manifest is inconsistent");
   if (as_u64(header.at("generation"), "checkpoint generation") !=
@@ -8693,6 +9774,30 @@ json::object restore_checkpoint(const std::string& path,
        "chart_capacity", "local_capacity", "scc_capacity",
        "match_capacity", "endpoint_capacity"},
       "checkpoint configuration");
+  const auto& raw_visibility = as_object(
+      saved_session.at("registry_visibility"),
+      "checkpoint registry visibility");
+  const auto visibility_set = [&](const char* key, std::string_view prefix) {
+    std::set<std::string> result;
+    for (const auto& handle : checkpoint_string_array(
+             raw_visibility.at(key), key)) {
+      (void)scoped_handle_id(handle, prefix, key);
+      if (!result.insert(handle).second)
+        throw std::invalid_argument(
+            std::string("checkpoint registry visibility duplicates a ") + key +
+            " handle");
+    }
+    return result;
+  };
+  const auto visible_charts = visibility_set("charts", "c:");
+  const auto visible_locals = visibility_set("locals", "l:");
+  const auto visible_tiles = visibility_set("tile_plans", "tile:");
+  const auto configured_chart_capacity = static_cast<std::size_t>(as_u64(
+      configuration.at("chart_capacity"),
+      "checkpoint configured chart capacity"));
+  if (visible_charts.size() > configured_chart_capacity)
+    throw std::invalid_argument(
+        "checkpoint visible charts exceed the restored session capacity");
   json::object create{
       {"schema", 2}, {"op", "session.create"},
       {"domain", configuration.at("domain")},
@@ -8710,8 +9815,20 @@ json::object restore_checkpoint(const std::string& path,
   bool live = true;
   try {
     const auto restored = find_session(restored_handle);
+    {
+      // Dependency-only chart owners are replayed briefly so tile plans can
+      // acquire their strong pointers, then removed from the public map.
+      // Their closure may legitimately exceed the public chart capacity.
+      const auto closure_size = as_array(
+          payload.at("prepared_charts"),
+          "checkpoint prepared chart closure").size();
+      std::lock_guard<std::mutex> lock(restored->mutex);
+      restored->chart_capacity =
+          std::max(configured_chart_capacity, closure_size);
+    }
     const auto source_handle = required_string(saved_session, "source_handle");
     json::array restored_charts;
+    std::set<std::string> all_chart_handles;
     std::uint64_t largest_chart = 0;
     for (const auto& raw_item : as_array(
              payload.at("prepared_charts"), "checkpoint prepared charts")) {
@@ -8720,6 +9837,9 @@ json::object restore_checkpoint(const std::string& path,
           {"handle", "key", "identity", "signature", "request"},
           "checkpoint chart item");
       const auto old_handle = required_string(item, "handle");
+      if (!all_chart_handles.insert(old_handle).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate prepared chart handles");
       const auto handle_id = scoped_handle_id(old_handle, "c:", "chart");
       if (handle_id <= largest_chart)
         throw std::invalid_argument(
@@ -8750,10 +9870,15 @@ json::object restore_checkpoint(const std::string& path,
           throw std::invalid_argument(
               "restored chart does not reproduce its exact operator identity");
       }
-      restored_charts.push_back(json::object{
-          {"chart", old_handle}, {"key", item.at("key")},
-          {"identity", item.at("identity")}});
+      if (visible_charts.contains(old_handle))
+        restored_charts.push_back(json::object{
+            {"chart", old_handle}, {"key", item.at("key")},
+            {"identity", item.at("identity")}});
     }
+    if (!std::includes(all_chart_handles.begin(), all_chart_handles.end(),
+                       visible_charts.begin(), visible_charts.end()))
+      throw std::invalid_argument(
+          "checkpoint chart visibility names an absent ownership object");
 
     json::array restored_sccs;
     std::uint64_t largest_scc = 0;
@@ -8807,11 +9932,18 @@ json::object restore_checkpoint(const std::string& path,
     }
 
     json::array restored_locals;
+    std::set<std::string> all_local_handles;
     std::uint64_t largest_local = 0;
-    json::array restored_matches;
+    json::array restored_exact_matches;
+    json::array restored_acb_matches;
     std::uint64_t largest_match = 0;
     json::array restored_endpoints;
     std::uint64_t largest_endpoint = 0;
+    json::array restored_tile_plans;
+    std::set<std::string> all_tile_handles;
+    std::uint64_t largest_tile_plan = 0;
+    json::array restored_line_results;
+    std::uint64_t largest_line_result = 0;
     {
       // The newly allocated session is already in the process registry, so
       // reconstruct all direct (non-command) retained state under its mutex.
@@ -8820,12 +9952,15 @@ json::object restore_checkpoint(const std::string& path,
       std::lock_guard<std::mutex> restore_state_lock(restored->mutex);
       const auto& saved_locals = as_array(
           payload.at("retained_locals"), "checkpoint retained locals");
-    if (saved_locals.size() > restored->local_capacity)
+    if (visible_locals.size() > restored->local_capacity)
       throw std::invalid_argument(
-          "checkpoint retained locals exceed the restored session capacity");
+          "checkpoint visible locals exceed the restored session capacity");
     for (const auto& raw_item : saved_locals) {
       const auto& item = as_object(raw_item, "checkpoint retained local");
       const auto old_handle = required_string(item, "handle");
+      if (!all_local_handles.insert(old_handle).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate retained local handles");
       const auto handle_id = scoped_handle_id(old_handle, "l:", "local");
       if (handle_id <= largest_local)
         throw std::invalid_argument(
@@ -8884,23 +10019,80 @@ json::object restore_checkpoint(const std::string& path,
       if (!restored->locals.emplace(old_handle, local).second)
         throw std::invalid_argument(
             "checkpoint contains duplicate retained local handles");
-      restored_locals.push_back(json::object{
-          {"local", old_handle}, {"chart", source},
-          {"source_operator_identity",
-           local->source_operator_identity()},
-          {"checkpoint_identity", local->checkpoint_identity()},
-          {"generation", header.at("generation")}});
+      if (visible_locals.contains(old_handle))
+        restored_locals.push_back(json::object{
+            {"local", old_handle}, {"chart", source},
+            {"source_operator_identity",
+             local->source_operator_identity()},
+            {"checkpoint_identity", local->checkpoint_identity()},
+            {"generation", header.at("generation")}});
     }
+    if (!std::includes(all_local_handles.begin(), all_local_handles.end(),
+                       visible_locals.begin(), visible_locals.end()))
+      throw std::invalid_argument(
+          "checkpoint local visibility names an absent ownership object");
 
+      const auto& saved_exact_matches = as_array(
+          payload.at("retained_exact_matches"),
+          "checkpoint retained exact-rational matches");
       const auto& saved_matches = as_array(
           payload.at("retained_acb_matches"),
           "checkpoint retained Acb matches");
-    if (saved_matches.size() > restored->match_capacity)
+    if (saved_exact_matches.size() + saved_matches.size() >
+        restored->match_capacity)
       throw std::invalid_argument(
           "checkpoint retained matches exceed the restored session capacity");
+    if (!saved_exact_matches.empty() && restored->domain != "rational")
+      throw std::invalid_argument(
+          "retained exact-rational match state requires a rational checkpoint session");
     if (!saved_matches.empty() && restored->domain != "acb")
       throw std::invalid_argument(
           "retained Acb match state requires an Acb checkpoint session");
+    for (const auto& raw_item : saved_exact_matches) {
+      const auto& item = as_object(
+          raw_item, "checkpoint retained exact-rational match");
+      const auto old_handle = required_string(item, "handle");
+      const auto handle_id = scoped_handle_id(old_handle, "m:", "match");
+      if (handle_id <= largest_match)
+        throw std::invalid_argument(
+            "checkpoint match handles are not in strict creation order");
+      largest_match = handle_id;
+      std::vector<std::shared_ptr<StoredLocalBase>> basis_owners;
+      for (const auto& raw_source : as_array(
+               item.at("basis_sources"),
+               "checkpoint exact-match basis sources")) {
+        const auto& source = as_object(
+            raw_source, "checkpoint exact-match basis source");
+        const auto found = restored->locals.find(
+            required_string(source, "local"));
+        if (found == restored->locals.end())
+          throw std::invalid_argument(
+              "checkpoint exact match lost a strongly owned basis local");
+        basis_owners.push_back(found->second);
+      }
+      const auto& incoming_source = as_object(
+          item.at("incoming_source"),
+          "checkpoint exact-match incoming source");
+      const auto incoming_found = restored->locals.find(
+          required_string(incoming_source, "local"));
+      if (incoming_found == restored->locals.end())
+        throw std::invalid_argument(
+            "checkpoint exact match lost its strongly owned incoming local");
+      auto match = restore_checkpoint_exact_match_record(
+          item, std::move(basis_owners), incoming_found->second);
+      if (match->handle() != old_handle ||
+          match->checkpoint_record() != raw_item)
+        throw std::invalid_argument(
+            "restored exact-rational match does not reproduce its exact retained state");
+      if (!restored->matches.emplace(old_handle, match).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate retained match handles");
+      restored_exact_matches.push_back(json::object{
+          {"match", old_handle},
+          {"checkpoint_identity", item.at("checkpoint_identity")},
+          {"provenance_identity", item.at("provenance_identity")},
+          {"generation", header.at("generation")}});
+    }
     for (const auto& raw_item : saved_matches) {
       const auto& item = as_object(raw_item,
                                    "checkpoint retained Acb match");
@@ -8945,7 +10137,7 @@ json::object restore_checkpoint(const std::string& path,
       if (!restored->matches.emplace(old_handle, match).second)
         throw std::invalid_argument(
             "checkpoint contains duplicate retained match handles");
-      restored_matches.push_back(json::object{
+      restored_acb_matches.push_back(json::object{
           {"match", old_handle},
           {"checkpoint_identity", item.at("checkpoint_identity")},
           {"provenance_identity", item.at("provenance_identity")},
@@ -9026,18 +10218,130 @@ json::object restore_checkpoint(const std::string& path,
             {"provenance_identity", item.at("provenance_identity")},
             {"generation", header.at("generation")}});
       }
+
+      const auto& saved_tiles = as_array(
+          payload.at("retained_tile_plans"),
+          "checkpoint retained tile plans");
+      if (visible_tiles.size() > restored->tile_plan_capacity)
+        throw std::invalid_argument(
+            "checkpoint visible tile plans exceed the restored session capacity");
+      for (const auto& raw_item : saved_tiles) {
+        const auto& item = as_object(raw_item,
+                                     "checkpoint retained tile plan");
+        const auto old_handle = required_string(item, "handle");
+        if (!all_tile_handles.insert(old_handle).second)
+          throw std::invalid_argument(
+              "checkpoint contains duplicate retained tile-plan handles");
+        const auto handle_id = scoped_handle_id(old_handle, "tile:",
+                                                "tile plan");
+        if (handle_id <= largest_tile_plan)
+          throw std::invalid_argument(
+              "checkpoint tile-plan handles are not in strict creation order");
+        largest_tile_plan = handle_id;
+        auto plan = restore_checkpoint_tile_plan_record(
+            item, restored->charts);
+        if (plan->handle() != old_handle ||
+            plan->checkpoint_record() != raw_item)
+          throw std::invalid_argument(
+              "restored tile plan does not reproduce its exact retained state");
+        if (!restored->tile_plans.emplace(old_handle, plan).second)
+          throw std::invalid_argument(
+              "checkpoint contains duplicate retained tile-plan handles");
+        if (visible_tiles.contains(old_handle))
+          restored_tile_plans.push_back(json::object{
+              {"tile_plan", old_handle},
+              {"checkpoint_identity", item.at("checkpoint_identity")},
+              {"provenance_identity", item.at("provenance_identity")},
+              {"generation", header.at("generation")}});
+      }
+      if (!std::includes(all_tile_handles.begin(), all_tile_handles.end(),
+                         visible_tiles.begin(), visible_tiles.end()))
+        throw std::invalid_argument(
+            "checkpoint tile visibility names an absent ownership object");
+
+      const auto& saved_lines = as_array(
+          payload.at("retained_line_results"),
+          "checkpoint retained line results");
+      if (saved_lines.size() > restored->line_result_capacity)
+        throw std::invalid_argument(
+            "checkpoint retained line results exceed the restored session capacity");
+      for (const auto& raw_item : saved_lines) {
+        const auto& item = as_object(raw_item,
+                                     "checkpoint retained line result");
+        const auto old_handle = required_string(item, "handle");
+        const auto handle_id = scoped_handle_id(old_handle, "line:",
+                                                "line result");
+        if (handle_id <= largest_line_result)
+          throw std::invalid_argument(
+              "checkpoint line-result handles are not in strict creation order");
+        largest_line_result = handle_id;
+        const auto& source = as_object(item.at("source"),
+                                       "checkpoint line source");
+        const auto plan_found = restored->tile_plans.find(
+            required_string(source, "tile_plan"));
+        const auto local_found = restored->locals.find(
+            required_string(source, "local"));
+        if (plan_found == restored->tile_plans.end() ||
+            local_found == restored->locals.end())
+          throw std::invalid_argument(
+              "checkpoint line result lost a strongly owned plan or local");
+        auto line = restore_checkpoint_line_result_record(
+            item, plan_found->second, local_found->second);
+        if (line->handle() != old_handle ||
+            line->checkpoint_record() != raw_item)
+          throw std::invalid_argument(
+              "restored line result does not reproduce its exact retained state");
+        if (!restored->line_results.emplace(old_handle, line).second)
+          throw std::invalid_argument(
+              "checkpoint contains duplicate retained line-result handles");
+        restored_line_results.push_back(json::object{
+            {"line", old_handle},
+            {"checkpoint_identity", item.at("checkpoint_identity")},
+            {"provenance_identity", item.at("provenance_identity")},
+            {"generation", header.at("generation")}});
+      }
+
+      for (auto iterator = restored->tile_plans.begin();
+           iterator != restored->tile_plans.end();) {
+        if (visible_tiles.contains(iterator->first)) {
+          ++iterator;
+        } else {
+          iterator = restored->tile_plans.erase(iterator);
+        }
+      }
+      for (auto iterator = restored->locals.begin();
+           iterator != restored->locals.end();) {
+        if (visible_locals.contains(iterator->first)) {
+          ++iterator;
+        } else {
+          iterator = restored->locals.erase(iterator);
+        }
+      }
+      for (auto iterator = restored->charts.begin();
+           iterator != restored->charts.end();) {
+        if (visible_charts.contains(iterator->first)) {
+          ++iterator;
+        } else {
+          restored->handles_by_key.erase(iterator->second->key());
+          iterator = restored->charts.erase(iterator);
+        }
+      }
     }
 
     const auto& counters = as_object(saved_session.at("counters"),
                                      "checkpoint counters");
     require_exact_keys(counters,
         {"next_chart", "next_local", "next_scc", "next_match",
-         "next_endpoint",
+         "next_endpoint", "next_tile_plan", "next_line_result",
          "total_local_solves", "total_scc_column_solves",
          "total_local_matches", "total_endpoint_limits",
-         "total_endpoint_exports", "total_local_run_parse_ms",
+         "total_endpoint_exports", "total_tile_plans",
+         "total_line_integrations", "total_line_exports",
+         "total_local_run_parse_ms",
          "total_local_kernel_ms", "total_local_match_ms",
          "total_endpoint_limit_ms", "total_endpoint_export_ms",
+         "total_tile_plan_ms", "total_line_integration_ms",
+         "total_line_export_ms",
          "checkpoint_generation", "checkpoint_restore_count"},
         "checkpoint counters");
     const auto next_chart = as_u64(counters.at("next_chart"), "next chart");
@@ -9046,12 +10350,18 @@ json::object restore_checkpoint(const std::string& path,
     const auto next_match = as_u64(counters.at("next_match"), "next match");
     const auto next_endpoint = as_u64(
         counters.at("next_endpoint"), "next endpoint");
+    const auto next_tile_plan = as_u64(
+        counters.at("next_tile_plan"), "next tile plan");
+    const auto next_line_result = as_u64(
+        counters.at("next_line_result"), "next line result");
     const auto restore_count = as_u64(
         counters.at("checkpoint_restore_count"),
         "checkpoint restore count");
     if (next_chart <= largest_chart || next_scc <= largest_scc ||
         next_local <= largest_local || next_match <= largest_match ||
-        next_endpoint <= largest_endpoint)
+        next_endpoint <= largest_endpoint ||
+        next_tile_plan <= largest_tile_plan ||
+        next_line_result <= largest_line_result)
       throw std::invalid_argument(
           "checkpoint next-handle counters do not follow retained handles");
     if (restore_count == std::numeric_limits<std::uint64_t>::max())
@@ -9063,6 +10373,9 @@ json::object restore_checkpoint(const std::string& path,
       restored->next_scc = next_scc;
       restored->next_match = next_match;
       restored->next_endpoint = next_endpoint;
+      restored->next_tile_plan = next_tile_plan;
+      restored->next_line_result = next_line_result;
+      restored->chart_capacity = configured_chart_capacity;
       restored->total_local_solves = as_u64(
           counters.at("total_local_solves"), "total local solves");
       restored->total_scc_column_solves = as_u64(
@@ -9074,6 +10387,13 @@ json::object restore_checkpoint(const std::string& path,
           counters.at("total_endpoint_limits"), "total endpoint limits");
       restored->total_endpoint_exports = as_u64(
           counters.at("total_endpoint_exports"), "total endpoint exports");
+      restored->total_tile_plans = as_u64(
+          counters.at("total_tile_plans"), "total tile plans");
+      restored->total_line_integrations = as_u64(
+          counters.at("total_line_integrations"),
+          "total line integrations");
+      restored->total_line_exports = as_u64(
+          counters.at("total_line_exports"), "total line exports");
       restored->total_local_run_parse_ms = as_double(
           counters.at("total_local_run_parse_ms"),
           "total local parse time");
@@ -9089,6 +10409,14 @@ json::object restore_checkpoint(const std::string& path,
       restored->total_endpoint_export_ms = as_double(
           counters.at("total_endpoint_export_ms"),
           "total endpoint export time");
+      restored->total_tile_plan_ms = checkpoint_nonnegative_double(
+          counters.at("total_tile_plan_ms"), "total tile-plan time");
+      restored->total_line_integration_ms = checkpoint_nonnegative_double(
+          counters.at("total_line_integration_ms"),
+          "total line-integration time");
+      restored->total_line_export_ms = checkpoint_nonnegative_double(
+          counters.at("total_line_export_ms"),
+          "total line-export time");
       restored->checkpoint_generation = as_u64(
           counters.at("checkpoint_generation"), "checkpoint generation");
       restored->checkpoint_restore_count = restore_count + 1;
@@ -9105,8 +10433,11 @@ json::object restore_checkpoint(const std::string& path,
         {"charts", std::move(restored_charts)},
         {"sccs", std::move(restored_sccs)},
         {"locals", std::move(restored_locals)},
-        {"acb_matches", std::move(restored_matches)},
+        {"exact_matches", std::move(restored_exact_matches)},
+        {"acb_matches", std::move(restored_acb_matches)},
         {"endpoints", std::move(restored_endpoints)},
+        {"tile_plans", std::move(restored_tile_plans)},
+        {"line_results", std::move(restored_line_results)},
         {"deferred_handle_kinds", header.at("deferred_handle_kinds")},
         {"replayed_wolfram_preprocessing", false}};
   } catch (...) {
@@ -9227,7 +10558,6 @@ json::object run_session_command(const json::object& root) {
             "endpoint result capacity must lie in 1..16384");
       session->endpoint_capacity = capacity;
     }
-
     auto& registry = session_registry();
     {
       std::lock_guard<std::mutex> lock(registry.mutex);
@@ -9337,12 +10667,16 @@ json::object run_session_command(const json::object& root) {
         {"generation", snapshot.generation},
         {"charts", snapshot.charts}, {"sccs", snapshot.sccs},
         {"locals", snapshot.locals},
+        {"exact_matches", snapshot.exact_matches},
         {"acb_matches", snapshot.acb_matches},
         {"endpoints", snapshot.endpoints},
+        {"tile_plans", snapshot.tile_plans},
+        {"line_results", snapshot.line_results},
         {"serialized_handle_kinds",
-         json::array{"chart", "scc", "local", "acb-match", "endpoint"}},
+         json::array{"chart", "scc", "local", "exact-rational-match",
+                     "acb-match", "endpoint", "tile", "line"}},
         {"deferred_handle_kinds",
-         json::array{"exact-rational-match", "line", "tile"}},
+         json::array{"symbolic-local"}},
         {"atomic", true}};
   }
 

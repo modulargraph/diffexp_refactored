@@ -157,6 +157,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_checkpoint
     COMMAND test_diffexp2_persistent_checkpoint)
 
+  add_executable(test_diffexp2_persistent_checkpoint_deferred_state
+    tests/test_persistent_checkpoint_deferred_state.cpp)
+  target_compile_features(
+    test_diffexp2_persistent_checkpoint_deferred_state PRIVATE cxx_std_20)
+  target_link_libraries(
+    test_diffexp2_persistent_checkpoint_deferred_state PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_checkpoint_deferred_state
+    COMMAND test_diffexp2_persistent_checkpoint_deferred_state)
+
   add_executable(test_diffexp2_persistent_endpoint_limit
     tests/test_persistent_endpoint_limit.cpp)
   target_compile_features(test_diffexp2_persistent_endpoint_limit

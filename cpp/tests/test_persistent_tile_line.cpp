@@ -3,6 +3,7 @@
 #include <boost/json.hpp>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <future>
 #include <iostream>
@@ -177,7 +178,7 @@ int main() {
       {"schema", 2}, {"op", "integration.export"},
       {"session", session}, {"line", upper_line_handle},
       {"checkpoint_identity", "upper-line-v1"}, {"output_digits", 40}});
-  const auto checkpoint_rejection = request(json::object{
+  const auto checkpoint_save = request(json::object{
       {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
       {"path", "/tmp/diffexp2-live-line-result.de2cp"},
       {"checkpoint_identity", "must-not-drop-lines"}});
@@ -210,9 +211,8 @@ int main() {
       upper_export.at("json_coefficients") == 1 &&
       std::abs(lower_value + 1.0 / 3.0) < 1e-30 &&
       std::abs(upper_value - 1.0 / 3.0) < 1e-30 &&
-      checkpoint_rejection.at("status") == "error" &&
-      std::string(checkpoint_rejection.at("detail").as_string()).find(
-          "line-result") != std::string::npos &&
+      checkpoint_save.at("status") == "ok" &&
+      checkpoint_save.at("line_results") == 2 &&
       session_stats.at("locals") == 0 &&
       session_stats.at("tile_plans") == 0 &&
       session_stats.at("line_results") == 2 &&
@@ -227,7 +227,7 @@ int main() {
               << "upper line: " << json::serialize(upper_line) << '\n'
               << "lower export: " << json::serialize(lower_export) << '\n'
               << "upper export: " << json::serialize(upper_export) << '\n'
-              << "checkpoint: " << json::serialize(checkpoint_rejection)
+              << "checkpoint: " << json::serialize(checkpoint_save)
               << '\n' << "session: " << json::serialize(session_stats)
               << '\n';
   }
@@ -240,6 +240,7 @@ int main() {
                              {"line", upper_line_handle}});
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                              {"session", session}});
+  std::remove("/tmp/diffexp2-live-line-result.de2cp");
   std::cout << (ok ? "PASS" : "FAIL")
             << ": retained independent tile-plan and line-result protocol\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;

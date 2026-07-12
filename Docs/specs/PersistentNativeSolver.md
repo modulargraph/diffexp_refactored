@@ -595,7 +595,8 @@ not a `SolveHomogeneous` or transport dispatch path.
 
 The native checkpoint persists a quiescent session's prepared chart
 operators, retained composite SCC graph, Rational/Acb local solutions, and
-exact-lattice-guided Acb matches and endpoint results.  The file is an opaque
+exact-rational/exact-lattice-guided Acb matches, endpoint results, retained
+exact tile plans, and completed line results.  The file is an opaque
 binary `DE2CP001` container with big-endian lengths and independent CRC32
 checksums for its small JSON header and canonical native payload.  Writes use
 a mode-0600 temporary file, `fsync`, atomic rename, and containing-directory
@@ -627,16 +628,24 @@ refinement step.  Arb and magnitude values use FLINT dump/load strings, never
 the midpoint/radius presentation bridge.  Endpoint sections retain their
 specialized epsilon vector, exact analytic/source provenance, cancellation
 policy and counts, branch rim, and export counters.
+Exact-rational match sections retain their exact Laurent transformation,
+weights, saturation witness/diagnostics, complete residual window, and strong
+source-local bindings. Tile sections retain exact rational chart geometry,
+all match/tile intervals, topology and branch sheets, and are rederived through
+the exact planner during restore. Line sections retain exact Arb coefficient
+dumps, diagnostic counters, exact physical interval and Jacobian provenance,
+branch rim, and strong local/plan ownership.
 
 Restore runs canonical prepared material directly through the C++ parsers,
-keeps chart/SCC/local/match/endpoint tokens stable in the new session, reconstructs the
-typed live states, and byte-for-byte re-emits every local/match checkpoint
+keeps chart/SCC/local/match/endpoint/tile/line tokens stable in the new session,
+reconstructs the typed live states, and byte-for-byte re-emits every retained checkpoint
 record before exposing it.  Source locals that remain live are cross-checked
 against each match's chart, analytic, and checkpoint identities; provenance
 for already released source locals remains self-contained in the match.
 Monotone next-handle counters must exceed every restored handle, so a resumed
 solve cannot reuse a token.  Wolfram does not rebuild matrices, SCCs,
-prepared multipliers, local tensors, or match state.  A
+prepared multipliers, local tensors, match state, tile geometry, or completed
+line results. A
 schema/build/FLINT/configuration/checkpoint, analytic, chart, SCC, local,
 exact-lattice, match-provenance, or residual-history mismatch is a loud
 failure; unknown mandatory sections are never skipped.
@@ -644,13 +653,12 @@ failure; unknown mandatory sections are never skipped.
 The Wolfram lifecycle is
 ``CppBackend`SavePersistentCheckpoint[owner, path, identity]`` and
 ``CppBackend`RestorePersistentCheckpoint[path, expectedIdentity]``.  Restore
-returns the new session and exact chart/SCC/local/Acb-match/endpoint handle maps and registers that
+returns the new session and exact chart/SCC/local/match/endpoint/tile/line handle maps and registers that
 session for `ClearPersistentSessions[]`.  It intentionally does not recreate
 Wolfram's process-local cache keys; native resume uses the returned handles.
 
-This schema is deliberately narrower than the final checkpoint contract.
-Symbolic-coefficient locals, exact-rational matches, and line/tile handles are
-declared as deferred kinds and fail loudly.  An SCC
+Symbolic-coefficient locals remain a declared deferred kind and fail loudly.
+An SCC
 whose public diagonal chart handle was already released is likewise rejected,
 because its operator table is not yet an independent content-addressed
 section.  These cases fail instead of silently writing a partial restart

@@ -8,11 +8,11 @@ BeginPackage["DiffExp2`NativeTransport`",
    "DiffExp2`CppBackend`"}];
 
 PrepareNativeRegularIndependentArms::usage =
-  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared retained anchor, every regular receiving basis, and one exact lower/upper native tile plan. It returns only opaque native locals/bases and exact atlas metadata.";
+  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared retained anchor, every regular receiving basis, and one exact lower/upper native tile plan. Option Integrand->{cvec,var} derives and solves the honest epsilon halo required by polar coefficient rows. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
-  "RunNativeRegularIndependentArms[atlas,cvec,var] marches both prepared regular arms using retained plan-derived matches, materializes each receiving local in C++, applies cvec(center+scale t,eps) natively, and integrates every planned tile. The current bridge executes arms sequentially; the retained atlas is compatible with the native concurrent-arm runner.";
+  "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 ReleaseNativeRegularIndependentArms::usage =
-  "ReleaseNativeRegularIndependentArms[runOrAtlas] releases public line, projected-local, materialized-local, match, basis, anchor, and tile-plan handles created by the explicit native regular-arm seam. Prepared chart/SCC caches remain session-owned and reusable.";
+  "ReleaseNativeRegularIndependentArms[runOrAtlas] releases the public final-local, line-aggregate, basis, anchor, and tile-plan handles created by the explicit native regular-arm seam. Hidden matches, projected locals, and per-tile lines are reclaimed through their retained owner chains. Prepared chart/SCC caches remain session-owned and reusable.";
 NativeRegularLineIntegral::usage =
   "NativeRegularLineIntegral[sys,boundary,from,{lo,hi},cvec] runs the explicit persistent-native regular-arm seam and returns an association whose Value is the compatibility EpsSeries integral. The anchor must lie strictly inside {lo,hi}; unsupported singular/nonrational geometry fails loudly without fallback.";
 
@@ -25,10 +25,39 @@ esQ = DiffExp2`EpsSeries`ESQ;
 esNew = DiffExp2`EpsSeries`ESNew;
 esMin = DiffExp2`EpsSeries`ESMinPower;
 esCM = DiffExp2`EpsSeries`ESCompleteMax;
-esAdd = DiffExp2`EpsSeries`ESAdd;
-esScale = DiffExp2`EpsSeries`ESScale;
+esZero = DiffExp2`EpsSeries`ESZero;
+esTruncate = DiffExp2`EpsSeries`ESTruncate;
 
 exactRationalQ[value_] := IntegerQ[value] || Head[value] === Rational;
+
+nativeRationalEpsilonShift[expression_, physicalVar_Symbol] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], canonical, numerator,
+   denominator, numeratorValuation, denominatorValuation},
+  canonical = Together[expression];
+  If[FreeQ[canonical, _?InexactNumberQ] &&
+      TrueQ[PossibleZeroQ[canonical]], Return[0, Module]];
+  numerator = Numerator[canonical];
+  denominator = Denominator[canonical];
+  If[!PolynomialQ[numerator, {physicalVar, eps}] ||
+      !PolynomialQ[denominator, {physicalVar, eps}] ||
+      !FreeQ[denominator, _?InexactNumberQ],
+    err["E5", <|"Expression" -> expression,
+      "Detail" -> "native regular-arm integrands must be rational in the physical variable and epsilon with an exact denominator"|>]];
+  numeratorValuation = Exponent[numerator, eps, Min];
+  denominatorValuation = Exponent[denominator, eps, Min];
+  If[!IntegerQ[numeratorValuation] || !IntegerQ[denominatorValuation],
+    err["E5", <|"Expression" -> expression,
+      "Detail" -> "could not determine the exact epsilon valuation of a native regular-arm integrand"|>]];
+  numeratorValuation - denominatorValuation];
+
+nativeIntegrandMinimumShift[cvec_List, physicalVar_Symbol,
+    dimension_Integer] := Module[{shifts},
+  If[Length[cvec] =!= dimension,
+    err["E8", <|"CoefficientCount" -> Length[cvec],
+      "Dimension" -> dimension,
+      "Detail" -> "native regular-arm integration requires one coefficient per physical component"|>]];
+  shifts = nativeRationalEpsilonShift[#, physicalVar] & /@ cvec;
+  If[shifts === {}, 0, Min[shifts]]];
 
 exactRationalString[value_, label_String] := Module[{canonical},
   canonical = Quiet[Check[RootReduce[value], value]];
@@ -185,6 +214,34 @@ nativeArmRequest[plan_Association, owners_List] := Module[{},
 nativeCheckpointIdentity[prefix_String, payload_] := prefix <>
   IntegerString[Hash[payload, "SHA256"], 16, 64];
 
+nativeOpaqueCheckpoint[handle_Association, label_String] := Module[{value},
+  value = Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", None]];
+  If[!StringQ[value] || StringLength[value] == 0,
+    err["E6", <|"Field" -> label,
+      "Detail" -> "retained native source has no checkpoint identity"|>]];
+  value];
+
+nativeOpaqueLocalHandleQ[handle_, session_String] :=
+  AssociationQ[handle] &&
+  Lookup[handle, "session", Lookup[handle, "Session", None]] === session &&
+  StringQ[Lookup[handle, "local", Lookup[handle, "Local", None]]] &&
+  StringLength[Lookup[handle, "local", Lookup[handle, "Local", ""]]] > 0 &&
+  StringQ[Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", None]]] &&
+  StringLength[Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", ""]]] > 0;
+
+nativeOpaqueLineHandleQ[handle_, session_String] :=
+  AssociationQ[handle] &&
+  Lookup[handle, "session", Lookup[handle, "Session", None]] === session &&
+  StringQ[Lookup[handle, "line", Lookup[handle, "Line", None]]] &&
+  StringLength[Lookup[handle, "line", Lookup[handle, "Line", ""]]] > 0 &&
+  StringQ[Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", None]]] &&
+  StringLength[Lookup[handle, "checkpoint_identity",
+    Lookup[handle, "CheckpointIdentity", ""]]] > 0;
+
 nativeLocalStatistics[local_Association] := Module[{stats},
   stats = DiffExp2`CppBackend`PersistentLocalStatistics[local];
   If[FailureQ[stats] || !AssociationQ[stats],
@@ -198,85 +255,181 @@ nativeLocalShape[local_Association] := Module[{stats = nativeLocalStatistics[loc
     "TWindow" -> <|"CompleteMax" -> stats["taylor_complete_max"]|>,
     "Dimension" -> stats["dimension"]|>];
 
-nativeIdentityLattice[dimension_Integer, min_Integer, max_Integer,
-    identity_String] := Module[{frame},
-  If[!(min <= 0 <= max),
-    err["E6", <|"EpsilonWindow" -> {min, max},
-      "Detail" -> "ordinary-basis exact lattice requires epsilon^0 in the matching window"|>]];
-  frame[row_, column_] := <|"min" -> min, "max" -> max,
-    "coefficients" -> Table[
-      ToString[Boole[row === column && power === 0], InputForm],
-      {power, min, max}]|>;
-  <|"schema" -> "diffexp2-exact-evaluated-epsilon-lattice-v1",
-    "identity" -> identity,
-    "evaluated_basis" -> Table[frame[row, column],
-      {row, dimension}, {column, dimension}]|>];
+(* Solve's opaque Wolfram records already retain the honest solve rectangle.
+   Prefer it over a native stats round-trip; top_valid can only narrow a later
+   live local, so preparing against this declared rectangle remains safe. *)
+nativePreparationShape[local_Association, dimension_Integer] := Module[
+  {epsWindow = Lookup[local, "EpsWindow", None],
+   tWindow = Lookup[local, "TWindow", None]},
+  If[AssociationQ[epsWindow] && AssociationQ[tWindow] &&
+      IntegerQ[Lookup[epsWindow, "Min", None]] &&
+      IntegerQ[Lookup[epsWindow, "CompleteMax", None]] &&
+      epsWindow["Min"] <= epsWindow["CompleteMax"] &&
+      IntegerQ[Lookup[tWindow, "CompleteMax", None]] &&
+      tWindow["CompleteMax"] >= 0,
+    <|"EpsWindow" -> KeyTake[epsWindow, {"Min", "CompleteMax"}],
+      "TWindow" -> <|"CompleteMax" -> tWindow["CompleteMax"]|>,
+      "Dimension" -> dimension|>,
+    nativeLocalShape[local]]];
 
-nativeMatchWindow[current_Association, basis_Association,
-    requested_Association] := Module[{stats, bstats, min, max},
-  stats = nativeLocalStatistics[current];
-  bstats = nativeLocalStatistics /@ basis["Columns"];
-  min = Max[requested["Min"], stats["epsilon_min"],
-    Max[Lookup[bstats, "epsilon_min"]]];
-  max = Min[requested["CompleteMax"], stats["epsilon_max"],
-    Min[Lookup[bstats, "epsilon_max"]]];
-  If[min > max,
-    err["E6", <|"Requested" -> requested,
-      "Incoming" -> KeyTake[stats, {"epsilon_min", "epsilon_max"}],
-      "Basis" -> (KeyTake[#, {"epsilon_min", "epsilon_max"}] & /@ bstats),
-      "Detail" -> "retained match has no honest common epsilon window"|>]];
-  <|"min" -> min, "max" -> max,
-    "required_complete_max" -> max|>];
+(* A materialized receiving local owns the intersection of its incoming and
+   basis-column rectangles.  Preparing a multiplier against the union
+   envelope of the receiving basis is therefore conservative: the native row
+   parser accepts excess epsilon/Taylor kernels, while it rejects a row that
+   is even one coefficient too short for the live local. *)
+nativeBasisEnvelopeShape[basis_Association] := Module[
+  {columns, shapes, dimensions, epsMin, epsMax, tMax,
+   dimension = Lookup[basis, "Dimension", None]},
+  columns = Lookup[basis, "Columns", {}];
+  If[columns === {} || !AllTrue[columns, AssociationQ] ||
+      !IntegerQ[dimension] || dimension < 1,
+    err["E6", <|"Basis" -> KeyTake[basis, {"Type", "Dimension"}],
+      "Detail" -> "native integrand-row preparation requires a nonempty retained receiving basis"|>]];
+  shapes = nativePreparationShape[#, dimension] & /@ columns;
+  dimensions = DeleteDuplicates[Lookup[shapes, "Dimension", None]];
+  If[Length[dimensions] =!= 1 || First[dimensions] =!= dimension,
+    err["E6", <|"Dimensions" -> dimensions,
+      "ExpectedDimension" -> dimension,
+      "Detail" -> "retained receiving-basis columns disagree in dimension"|>]];
+  epsMin = Min[Lookup[Lookup[shapes, "EpsWindow"], "Min"]];
+  epsMax = Max[Lookup[Lookup[shapes, "EpsWindow"], "CompleteMax"]];
+  tMax = Max[Lookup[Lookup[shapes, "TWindow"], "CompleteMax"]];
+  <|"EpsWindow" -> <|"Min" -> epsMin, "CompleteMax" -> epsMax|>,
+    "TWindow" -> <|"CompleteMax" -> tMax|>,
+    "Dimension" -> First[dimensions]|>];
 
-nativeMatchPolicy[atlas_Association, arm_String, index_Integer,
-    basis_Association, current_Association, maxSteps_Integer] := Module[
-  {window, checkpoint, policy, latticeIdentity, dimension = basis["Dimension"]},
-  window = nativeMatchWindow[current, basis, atlas["Request", "EpsWindow"]];
-  checkpoint = nativeCheckpointIdentity["de2-native-planned-match-", {
-    atlas["Plan", "TilePlan"], arm, index,
-    Lookup[basis["Columns"], "CheckpointIdentity"],
-    Lookup[current, "CheckpointIdentity",
-      Lookup[current, "checkpoint_identity", None]], window}];
-  policy = <|"epsilon" -> window,
-    "checkpoint_identity" -> checkpoint|>;
-  If[atlas["Domain"] === "acb",
-    latticeIdentity = nativeCheckpointIdentity[
-      "de2-native-ordinary-lattice-", {checkpoint, dimension, window}];
-    policy = Join[policy, <|
-      "exact_lattice" -> nativeIdentityLattice[dimension,
-        window["min"], window["max"], latticeIdentity],
-      "refinement" -> <|"relative_tolerance" ->
-          ("1e-" <> ToString[DiffExp2`Tolerances`Tol["MatchDigits"]]),
-        "max_steps" -> maxSteps|>|>]];
-  policy];
+nativePreparedArmRows[atlas_Association, data_Association, cvec_List,
+    var_Symbol] := Module[{systems, bases, shapes, rows},
+  systems = data["ChartSystems"];
+  bases = Rest[data["Bases"]];
+  shapes = Prepend[nativeBasisEnvelopeShape /@ bases,
+    nativePreparationShape[atlas["Anchor"], atlas["Dimension"]]];
+  If[Length[systems] =!= Length[shapes],
+    err["E6", <|"ChartCount" -> Length[systems],
+      "ShapeCount" -> Length[shapes],
+      "Detail" -> "native arm row envelopes do not reproduce its chart chain"|>]];
+  rows = MapThread[DiffExp2`Solve`PrepareNativeRationalRow[
+      #1, #2, cvec, var,
+      <|"domain" -> atlas["Domain"], "symbols" -> {}|>] &,
+    {systems, shapes}];
+  If[!AllTrue[rows, AssociationQ],
+    err["E5", <|"Detail" ->
+      "native arm integrand-row preparation returned a malformed row"|>]];
+  rows];
 
-Options[PrepareNativeRegularIndependentArms] = {"Threads" -> Automatic};
+nativeArmExecution[atlas_Association, data_Association, cvec_List,
+    var_Symbol] := Module[{bases, rows},
+  bases = Rest[data["Bases"]];
+  rows = nativePreparedArmRows[atlas, data, cvec, var];
+  <|"receiving_basis" -> Lookup[bases, "Columns", {}],
+    "integrand_rows" -> rows|>];
+
+nativePreparedRowsMinimumShift[rows_List] := Module[
+  {entries, multipliers, shifts},
+  entries = Flatten[Lookup[rows, "entries", {}], 1];
+  If[entries === {}, Return[0, Module]];
+  If[!AllTrue[entries, AssociationQ],
+    err["E5", <|"Detail" ->
+      "prepared native integrand rows contain malformed entries"|>]];
+  multipliers = Lookup[entries, "multiplier", None];
+  shifts = If[AllTrue[multipliers, AssociationQ],
+    Lookup[multipliers, "epsilon_shift", None], {None}];
+  If[!AllTrue[shifts, IntegerQ],
+    err["E5", <|"Detail" ->
+      "prepared native integrand rows do not expose signed epsilon shifts"|>]];
+  Min[shifts]];
+
+nativeReleaseResponseHandles[atlas_Association, response_] := Module[
+  {session = Lookup[atlas, "Session", None], arms, summaries, lines,
+   locals, sourceRecords, sourceTokens, localToken, lineToken, unique},
+  If[!AssociationQ[response], Return[Null, Module]];
+  If[!StringQ[session] || StringLength[session] == 0,
+    Return[Null, Module]];
+  arms = Lookup[response, "arms", <||>];
+  summaries = If[AssociationQ[arms], Select[Values[arms], AssociationQ], {}];
+  lines = Join[
+    Cases[{Lookup[response, "combined_line_result", None]}, _Association],
+    Cases[Lookup[summaries, "line_result", None], _Association]];
+  locals = Cases[Lookup[summaries, "final_local", None], _Association];
+  sourceRecords = Join[{Lookup[atlas, "Anchor", None]},
+    Flatten[Map[Lookup[#, "Columns", {}] &,
+      Join[Rest[Lookup[Lookup[atlas, "Lower", <||>], "Bases", {}]],
+        Rest[Lookup[Lookup[atlas, "Upper", <||>], "Bases", {}]]]], 1]];
+  localToken[record_Association] := Lookup[record, "local",
+    Lookup[record, "Local", None]];
+  lineToken[record_Association] := Lookup[record, "line",
+    Lookup[record, "Line", None]];
+  sourceTokens = DeleteDuplicates@Cases[
+    localToken /@ Select[sourceRecords, AssociationQ], _String];
+  unique[items_List, key_String] := DeleteDuplicatesBy[items,
+    Lookup[#, key, ToString[#, InputForm]] &];
+  Scan[Function[line, Module[{token = lineToken[line]},
+      If[StringQ[token] && StringLength[token] > 0,
+        Quiet[DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
+          "op" -> "integration.release", "session" -> session,
+          "line" -> token|>]]]]], unique[lines, "line"]];
+  Scan[Function[local, Module[{token = localToken[local]},
+      If[StringQ[token] && StringLength[token] > 0 &&
+          !MemberQ[sourceTokens, token],
+        Quiet[DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
+          "op" -> "local.release", "session" -> session,
+          "local" -> token|>]]]]], unique[locals, "local"]];
+  Null];
+
+Options[PrepareNativeRegularIndependentArms] = {
+  "Threads" -> Automatic, "Integrand" -> Automatic};
 
 PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     lowerPlan_Association, upperPlan_Association, OptionsPattern[]] := Module[
   {plans, lower, upper, dimension = Length[sys["Matrix"]], values,
-   epsMin, epsMax, req, anchorSystem, anchor, prepareArm, lowerData,
+   epsMin, epsMax, req, anchorSystem, anchor = None, prepareArm, lowerData,
    upperData, sessions, anchorOwner, lowerOwners, upperOwners, planIdentity,
-   nativePlan, anchorStats, sessionInfo, sessionStats, domain,
+   nativePlan = None, sessionInfo, sessionStats, domain, integrand,
+   preparedShift, halo, targetMax = cfg["EpsilonOrder"], availableMax,
+   cleanup, output, preparedBases = {},
    threads = OptionValue["Threads"]},
   plans = normalizeSharedAnchor[lowerPlan, upperPlan];
   {lower, upper} = plans;
   values = nativeBoundaryValues[boundary, dimension];
+  integrand = OptionValue["Integrand"];
+  preparedShift = Which[
+    integrand === Automatic, 0,
+    MatchQ[integrand, {_List, _Symbol}],
+      nativeIntegrandMinimumShift[integrand[[1]], integrand[[2]],
+        dimension],
+    True, err["E8", <|"Integrand" -> integrand,
+      "Detail" -> "Integrand must be Automatic or {coefficientVector, physicalVariable}"|>]];
+  halo = Max[0, -preparedShift];
   epsMin = Min[0, Min[esMin /@ values]];
-  epsMax = Min[cfg["EpsilonOrder"], Min[esCM /@ values]];
-  If[epsMax < 0,
-    err["E6", <|"BoundaryWindow" -> {epsMin, epsMax},
-      "Detail" -> "native regular basis normalization has no epsilon^0 coefficient"|>]];
+  availableMax = Min[esCM /@ values];
+  epsMax = targetMax + halo;
+  If[availableMax < epsMax,
+    err["E6", <|"BoundaryCompleteMax" -> availableMax,
+      "RequestedCompleteMax" -> targetMax,
+      "IntegrandEpsilonShift" -> preparedShift,
+      "RequiredSolveCompleteMax" -> epsMax,
+      "Detail" -> "native regular-arm boundary data does not contain the epsilon halo required by its integrand pole"|>]];
   req = <|"EpsWindow" -> <|"Min" -> epsMin,
       "CompleteMax" -> epsMax|>,
     "TOrder" -> cfg["ExpansionOrder"]|>;
+  cleanup[] := Module[{basisLocals, locals},
+    If[AssociationQ[nativePlan],
+      Quiet[DiffExp2`CppBackend`ReleasePersistentTilePlan[nativePlan]]];
+    basisLocals = If[preparedBases === {}, {},
+      Flatten[Lookup[preparedBases, "Columns", {}], 1]];
+    locals = DeleteDuplicatesBy[
+      Join[Select[basisLocals, AssociationQ],
+        Cases[{anchor}, _Association]],
+      Lookup[#, "local", Lookup[#, "Local", ToString[#, InputForm]]] &];
+    Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, locals];
+    Null];
+  output = Catch[
   anchorSystem = DiffExp2`Solve`PrepareChart[sys, First[lower["Charts"]]];
   If[!TrueQ[Lookup[anchorSystem["IndicialData"], "Regular", False]],
     err["E8", <|"Center" -> anchorSystem["Center"],
       "Detail" -> "native independent-arm anchor is not regular"|>]];
   anchor = DiffExp2`Solve`SolveNativeValueRegular[
     anchorSystem, req, values];
-  anchorStats = nativeLocalStatistics[anchor];
   sessionInfo = DiffExp2`CppBackend`PersistentSessionInformation[];
   sessionStats = Lookup[sessionInfo, anchor["Session"], None];
   domain = If[AssociationQ[sessionStats],
@@ -284,7 +437,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   If[!MemberQ[{"acb", "rational"}, domain],
     err["E5", <|"Domain" -> domain,
       "Detail" -> "native regular arm requires Acb or Rational retained locals"|>]];
-  prepareArm[plan_Association] := Module[{systems, bases},
+  prepareArm[plan_Association] := Module[{systems, bases, built},
     systems = Prepend[
       DiffExp2`Solve`PrepareChart[sys, #] & /@ Rest[plan["Charts"]],
       anchorSystem];
@@ -292,9 +445,12 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
         TrueQ[Lookup[# ["IndicialData"], "Regular", False]] &],
       err["E8", <|"Centers" -> Lookup[systems, "Center"],
         "Detail" -> "explicit native regular-arm seam encountered a singular chart"|>]];
-    bases = Prepend[
-      DiffExp2`Solve`SolveNativeRegularBasis[#, req, threads] & /@
-        Rest[systems], None];
+    bases = Prepend[Map[
+      Function[system,
+        built = DiffExp2`Solve`SolveNativeRegularBasis[
+          system, req, threads];
+        AppendTo[preparedBases, built];
+        built], Rest[systems]], None];
     <|"Plan" -> plan, "ChartSystems" -> systems,
       "Bases" -> bases|>];
   lowerData = prepareArm[lower];
@@ -322,44 +478,15 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "Detail" -> "persistent native independent-arm planning failed"|>]];
   <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
     "Session" -> First[sessions], "Domain" -> domain,
+    "Dimension" -> dimension,
     "Request" -> req, "Anchor" -> anchor, "Plan" -> nativePlan,
     "Lower" -> lowerData, "Upper" -> upperData,
-    "PlanCheckpointIdentity" -> planIdentity|>];
-
-nativeApplyRow[atlas_Association, chartSystem_Association,
-    current_Association, cvec_List, var_Symbol, arm_String,
-    tile_Integer] := Module[{shape, row, checkpoint, projected},
-  shape = nativeLocalShape[current];
-  row = DiffExp2`Solve`PrepareNativeRationalRow[chartSystem, shape,
-    cvec, var, <|"domain" -> atlas["Domain"], "symbols" -> {}|>];
-  checkpoint = nativeCheckpointIdentity["de2-native-integrand-local-", {
-    atlas["PlanCheckpointIdentity"], arm, tile,
-    Lookup[current, "CheckpointIdentity",
-      Lookup[current, "checkpoint_identity", None]],
-    row["exact_identity"]}];
-  projected = DiffExp2`CppBackend`ApplyPersistentRationalRow[
-    current, row, checkpoint];
-  If[FailureQ[projected] || !AssociationQ[projected],
-    err["E5", <|"BackendFailure" -> projected,
-      "Arm" -> arm, "Tile" -> tile,
-      "Detail" -> "native rational-row projection failed"|>]];
-  projected];
-
-nativeIntegrateTile[atlas_Association, arm_String, tile_Integer,
-    local_Association, certifyTail_] := Module[{shape, epsilon, checkpoint, line},
-  shape = nativeLocalShape[local];
-  epsilon = <|"min" -> shape["EpsWindow", "Min"],
-    "max" -> shape["EpsWindow", "CompleteMax"]|>;
-  checkpoint = nativeCheckpointIdentity["de2-native-tile-integral-", {
-    atlas["PlanCheckpointIdentity"], arm, tile,
-    Lookup[local, "CheckpointIdentity",
-      Lookup[local, "checkpoint_identity", None]], epsilon}];
-  line = DiffExp2`CppBackend`RunPersistentTileIntegral[
-    atlas["Plan"], arm, tile, local, epsilon, checkpoint, certifyTail];
-  If[FailureQ[line] || !AssociationQ[line],
-    err["E5", <|"BackendFailure" -> line, "Arm" -> arm,
-      "Tile" -> tile, "Detail" -> "persistent native tile integration failed"|>]];
-  line];
+    "TargetCompleteMax" -> targetMax,
+    "PreparedIntegrandEpsilonShift" -> preparedShift,
+    "PlanCheckpointIdentity" -> planIdentity|>,
+  "DiffExp2Error", Function[{failure, tag},
+    cleanup[]; Throw[failure, tag]]];
+  output];
 
 Options[RunNativeRegularIndependentArms] = {
   "CertifyTail" -> False, "MaxRefinementSteps" -> 2};
@@ -367,52 +494,118 @@ Options[RunNativeRegularIndependentArms] = {
 RunNativeRegularIndependentArms[atlas_Association, cvec_List,
     var_Symbol, OptionsPattern[]] := Module[
   {certify = OptionValue["CertifyTail"],
-   maxSteps = OptionValue["MaxRefinementSteps"], runArm},
+   maxSteps = OptionValue["MaxRefinementSteps"], lower, upper, epsilon,
+   refinement, checkpointRoot, response, nativeArms, armRecord,
+   backendID, sourceIdentities, rowShift, targetMax, sourceMin,
+   requiredSolveMax, availableSolveMax, runMax, result},
   If[Lookup[atlas, "Type", None] =!=
       "DiffExp2NativeRegularIndependentArmAtlas" ||
-      !BooleanQ[certify] || !IntegerQ[maxSteps] || maxSteps < 0,
+      !BooleanQ[certify] || !IntegerQ[maxSteps] ||
+      !TrueQ[0 <= maxSteps <= 32],
     err["E8", <|"AtlasType" -> Lookup[atlas, "Type", None],
       "CertifyTail" -> certify, "MaxRefinementSteps" -> maxSteps,
       "Detail" -> "native arm execution options or atlas are malformed"|>]];
-  runArm[arm_String, data_Association] := Module[
-    {current = atlas["Anchor"], lines = {}, matches = {}, locals = {},
-     projected = {}, basis, policy, match, next, scalar, chartCount},
-    chartCount = Length[data["ChartSystems"]];
-    Do[
-      scalar = nativeApplyRow[atlas, data["ChartSystems"][[tile]],
-        current, cvec, var, arm, tile];
-      AppendTo[projected, scalar];
-      AppendTo[lines, nativeIntegrateTile[
-        atlas, arm, tile, scalar, certify]];
-      If[tile < chartCount,
-        basis = data["Bases"][[tile + 1]];
-        policy = nativeMatchPolicy[atlas, arm, tile, basis,
-          current, maxSteps];
-        match = DiffExp2`CppBackend`RunPersistentPlannedMatch[
-          atlas["Plan"], arm, tile, basis["Columns"], current, policy];
-        If[FailureQ[match] || !AssociationQ[match],
-          err["E5", <|"BackendFailure" -> match, "Arm" -> arm,
-            "Match" -> tile,
-            "Detail" -> "persistent native planned match failed"|>]];
-        next = DiffExp2`CppBackend`MaterializePersistentLocalMatch[match,
-          nativeCheckpointIdentity["de2-native-receiving-local-", {
-            policy["checkpoint_identity"], arm, tile}]];
-        If[FailureQ[next] || !AssociationQ[next],
-          err["E5", <|"BackendFailure" -> next, "Arm" -> arm,
-            "Match" -> tile,
-            "Detail" -> "persistent native match materialization failed"|>]];
-        AppendTo[matches, match]; AppendTo[locals, next]; current = next],
-      {tile, chartCount}];
-    <|"Arm" -> arm, "FinalLocal" -> current, "Lines" -> lines,
-      "Matches" -> matches, "MaterializedLocals" -> locals,
-      "ProjectedLocals" -> projected|>];
+  lower = nativeArmExecution[atlas, atlas["Lower"], cvec, var];
+  upper = nativeArmExecution[atlas, atlas["Upper"], cvec, var];
+  rowShift = Min[nativePreparedRowsMinimumShift[
+      lower["integrand_rows"]],
+    nativePreparedRowsMinimumShift[upper["integrand_rows"]]];
+  targetMax = Lookup[atlas, "TargetCompleteMax", None];
+  sourceMin = atlas["Request", "EpsWindow", "Min"];
+  availableSolveMax = atlas["Request", "EpsWindow", "CompleteMax"];
+  If[!IntegerQ[targetMax] || !IntegerQ[sourceMin] ||
+      !IntegerQ[availableSolveMax],
+    err["E6", <|"Detail" ->
+      "native arm atlas has no finite source/output epsilon contract"|>]];
+  requiredSolveMax = targetMax + Max[0, -rowShift];
+  If[requiredSolveMax > availableSolveMax,
+    err["E6", <|"IntegrandEpsilonShift" -> rowShift,
+      "AvailableSolveCompleteMax" -> availableSolveMax,
+      "RequiredSolveCompleteMax" -> requiredSolveMax,
+      "Detail" -> "native arm atlas was prepared without enough epsilon halo for this integrand; prepare it with the Integrand option"|>]];
+  (* Matches consume the source work frame; projected tile rows may start
+     below it (epsilon poles) or entirely above the requested public order.
+     The latter still needs one nonempty retained interval so the compatibility
+     boundary can return the rigorously zero truncation through targetMax. *)
+  (* A positive multiplier shift can move the actual first nonzero source
+     row above targetMax, especially after exact leading-zero trimming.  Use
+     the certified source complete edge, not its declared lower bound, so the
+     projected row still has a nonempty retained interval whose lower-edge
+     zero guarantee proves the public truncation is zero. *)
+  runMax = availableSolveMax + Max[0, rowShift];
+  epsilon = <|"min" -> sourceMin + Min[0, rowShift],
+    "max" -> runMax,
+    "match_required_complete_max" -> requiredSolveMax,
+    "required_complete_max" -> targetMax|>;
+  refinement = <|"relative_tolerance" ->
+      ("1e-" <> ToString[DiffExp2`Tolerances`Tol["MatchDigits"]]),
+    "max_steps" -> maxSteps|>;
+  sourceIdentities = <|
+    "anchor" -> nativeOpaqueCheckpoint[atlas["Anchor"], "anchor"],
+    "lower_basis" -> MapIndexed[
+      nativeOpaqueCheckpoint[#1, "lower basis " <>
+        ToString[First[#2]]] &,
+      Flatten[lower["receiving_basis"], 1]],
+    "upper_basis" -> MapIndexed[
+      nativeOpaqueCheckpoint[#1, "upper basis " <>
+        ToString[First[#2]]] &,
+      Flatten[upper["receiving_basis"], 1]]|>;
+  checkpointRoot = nativeCheckpointIdentity["de2-native-arm-run-", {
+    atlas["PlanCheckpointIdentity"], atlas["Domain"], sourceIdentities,
+    epsilon, refinement, certify,
+    Lookup[lower["integrand_rows"], "exact_identity"],
+    Lookup[upper["integrand_rows"], "exact_identity"]}];
+  response = DiffExp2`CppBackend`RunPersistentNativeArms[
+    atlas["Plan"], atlas["Anchor"],
+    <|"lower" -> lower, "upper" -> upper|>, epsilon, checkpointRoot,
+    refinement, certify];
+  result = Catch[
+  If[FailureQ[response] || !AssociationQ[response] ||
+      Lookup[response, "status", "error"] =!= "ok",
+    backendID = If[AssociationQ[response],
+      Lookup[response, "id", "E5"], "E5"];
+    err[If[MemberQ[{"E3", "E4", "E5", "E6", "E7", "E8"},
+        backendID], backendID, "E5"],
+      <|"BackendFailure" -> response,
+        "Detail" -> "persistent concurrent native arm execution failed"|>]];
+  nativeArms = Lookup[response, "arms", None];
+  If[!AssociationQ[nativeArms] ||
+      Sort[Keys[nativeArms]] =!= Sort[{"lower", "upper"}] ||
+      Lookup[response, "session", None] =!= atlas["Session"] ||
+      !TrueQ[Lookup[response, "native_retained", False]] ||
+      Lookup[response, "json_coefficients", None] =!= 0 ||
+      !TrueQ[Lookup[response, "atomic_publication", False]] ||
+      !nativeOpaqueLineHandleQ[
+        Lookup[response, "combined_line_result", None], atlas["Session"]],
+    err["E5", <|"BackendResponse" -> response,
+      "Detail" -> "concurrent native arm response violated its opaque atomic-publication contract"|>]];
+  armRecord[name_String] := Module[{raw = nativeArms[name]},
+    If[!AssociationQ[raw] ||
+        !nativeOpaqueLocalHandleQ[
+          Lookup[raw, "final_local", None], atlas["Session"]] ||
+        !nativeOpaqueLineHandleQ[
+          Lookup[raw, "line_result", None], atlas["Session"]] ||
+        !IntegerQ[Lookup[raw, "matches", None]] ||
+        !IntegerQ[Lookup[raw, "tiles", None]],
+      err["E5", <|"Arm" -> name, "BackendResponse" -> raw,
+        "Detail" -> "concurrent native arm summary is malformed"|>]];
+    <|"Arm" -> name, "FinalLocal" -> raw["final_local"],
+      "Line" -> raw["line_result"], "Matches" -> raw["matches"],
+      "Tiles" -> raw["tiles"],
+      "ElapsedMilliseconds" -> Lookup[raw, "elapsed_ms", None]|>];
   <|"Type" -> "DiffExp2NativeRegularIndependentArmRun",
-    "Atlas" -> atlas, "Lower" -> runArm["lower", atlas["Lower"]],
-    "Upper" -> runArm["upper", atlas["Upper"]]|>];
+    "Atlas" -> atlas, "Lower" -> armRecord["lower"],
+    "Upper" -> armRecord["upper"],
+    "CombinedLine" -> response["combined_line_result"],
+    "NativeSummary" -> KeyDrop[response,
+      {"status", "arms", "combined_line_result"}]|>,
+  "DiffExp2Error", Function[{failure, tag},
+    nativeReleaseResponseHandles[atlas, response]; Throw[failure, tag]]];
+  result];
 
 ReleaseNativeRegularIndependentArms[obj_Association] := Module[
-  {atlas, run, lines = {}, projected = {}, materialized = {}, matches = {},
-   bases, locals, responses = {}, failures, releaseAll, releaseOKQ},
+  {atlas, run, lines = {}, runLocals = {}, matches = {}, bases, locals,
+   responses = {}, failures, releaseAll, releaseOKQ},
   {atlas, run} = Which[
     Lookup[obj, "Type", None] ===
         "DiffExp2NativeRegularIndependentArmRun", {obj["Atlas"], obj},
@@ -421,12 +614,21 @@ ReleaseNativeRegularIndependentArms[obj_Association] := Module[
     True, err["E8", <|"Type" -> Lookup[obj, "Type", None],
       "Detail" -> "native arm release requires an atlas or completed arm run"|>]];
   If[AssociationQ[run],
-    lines = Join[run["Lower", "Lines"], run["Upper", "Lines"]];
-    projected = Join[run["Lower", "ProjectedLocals"],
-      run["Upper", "ProjectedLocals"]];
-    materialized = Join[run["Lower", "MaterializedLocals"],
-      run["Upper", "MaterializedLocals"]];
-    matches = Join[run["Lower", "Matches"], run["Upper", "Matches"]]];
+    If[KeyExistsQ[run, "CombinedLine"],
+      (* Current atomic whole-arm result: intermediate matches, projected
+         locals, and tile lines were never entered in a public registry. *)
+      lines = {run["CombinedLine"], run["Lower", "Line"],
+        run["Upper", "Line"]};
+      runLocals = {run["Lower", "FinalLocal"],
+        run["Upper", "FinalLocal"]},
+      (* Accept a pre-cutover run record long enough to release it safely. *)
+      lines = Join[run["Lower", "Lines"], run["Upper", "Lines"]];
+      runLocals = Join[run["Lower", "ProjectedLocals"],
+        run["Upper", "ProjectedLocals"],
+        run["Lower", "MaterializedLocals"],
+        run["Upper", "MaterializedLocals"]];
+      matches = Join[run["Lower", "Matches"],
+        run["Upper", "Matches"]]]];
   bases = Flatten[Map[Lookup[#, "Columns", {}] &,
     Join[Rest[atlas["Lower", "Bases"]],
       Rest[atlas["Upper", "Bases"]]]], 1];
@@ -437,7 +639,7 @@ ReleaseNativeRegularIndependentArms[obj_Association] := Module[
           StringDrop[key, 1], None]] &]];
   releaseAll[DiffExp2`CppBackend`ReleasePersistentLineIntegral,
     lines, "line"];
-  locals = Join[projected, materialized, bases, {atlas["Anchor"]}];
+  locals = Join[runLocals, bases, {atlas["Anchor"]}];
   releaseAll[DiffExp2`CppBackend`ReleasePersistentLocal, locals, "local"];
   releaseAll[DiffExp2`CppBackend`ReleasePersistentLocalMatch,
     matches, "match"];
@@ -449,8 +651,9 @@ ReleaseNativeRegularIndependentArms[obj_Association] := Module[
   <|"Released" -> Length[responses] - Length[failures],
     "Failures" -> failures|>];
 
-decodeLineValue[line_Association, outputDigits_Integer] := Module[
-  {exported, value, coefficients, decoded},
+decodeLineValue[line_Association, outputDigits_Integer,
+    targetCompleteMax_Integer] := Module[
+  {exported, value, coefficients, decoded, series},
   exported = DiffExp2`CppBackend`ExportPersistentLineIntegral[line,
     Lookup[line, "checkpoint_identity",
       Lookup[line, "CheckpointIdentity", ""]], outputDigits];
@@ -463,7 +666,17 @@ decodeLineValue[line_Association, outputDigits_Integer] := Module[
   If[FailureQ[decoded],
     err["E5", <|"BackendFailure" -> decoded,
       "Detail" -> "could not decode final native line-integral coefficients"|>]];
-  esNew[value["min"], decoded]];
+  series = esNew[value["min"], decoded];
+  Which[
+    esMin[series] > targetCompleteMax, esZero[targetCompleteMax],
+    esCM[series] > targetCompleteMax,
+      esTruncate[series, targetCompleteMax],
+    esCM[series] < targetCompleteMax,
+      err["E6", <|"NativeWindow" ->
+          <|"Min" -> esMin[series], "CompleteMax" -> esCM[series]|>,
+        "TargetCompleteMax" -> targetCompleteMax,
+        "Detail" -> "final native line integral did not cover the requested epsilon order"|>],
+    True, series]];
 
 Options[NativeRegularLineIntegral] = {"Threads" -> Automatic,
   "CertifyTail" -> False, "MaxRefinementSteps" -> 2,
@@ -471,8 +684,7 @@ Options[NativeRegularLineIntegral] = {"Threads" -> Automatic,
 
 NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
     cvec_List, OptionsPattern[]] := Module[
-  {lower, upper, atlas, run, digits, lowerValues, upperValues,
-   lowerTotal, upperTotal, value, result, retain},
+  {lower, upper, atlas, run = None, digits, value, result, retain, output},
   retain = OptionValue["RetainNativeState"];
   If[!BooleanQ[retain],
     err["E8", <|"RetainNativeState" -> retain,
@@ -483,23 +695,30 @@ NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
   lower = DiffExp2`Transport`SegmentLine[sys, {from, lo}];
   upper = DiffExp2`Transport`SegmentLine[sys, {from, hi}];
   atlas = PrepareNativeRegularIndependentArms[sys, boundary, lower, upper,
-    "Threads" -> OptionValue["Threads"]];
-  run = RunNativeRegularIndependentArms[atlas, cvec, sys["Variable"],
-    "CertifyTail" -> OptionValue["CertifyTail"],
-    "MaxRefinementSteps" -> OptionValue["MaxRefinementSteps"]];
-  digits = cfg["WorkingPrecision"];
-  lowerValues = decodeLineValue[#, digits] & /@ run["Lower", "Lines"];
-  upperValues = decodeLineValue[#, digits] & /@ run["Upper", "Lines"];
-  lowerTotal = Fold[esAdd, First[lowerValues], Rest[lowerValues]];
-  upperTotal = Fold[esAdd, First[upperValues], Rest[upperValues]];
-  value = esAdd[esScale[-1, lowerTotal], upperTotal];
-  result = <|"Type" -> "DiffExp2NativeRegularLineIntegral",
-    "Value" -> value, "Atlas" -> atlas, "Run" -> run,
-    "CompatibilityExports" -> Length[lowerValues] + Length[upperValues]|>;
-  If[retain, result,
-    ReleaseNativeRegularIndependentArms[run];
-    KeyDrop[Append[result, "ReleasedNativeState" -> True],
-      {"Atlas", "Run"}]]];
+    "Threads" -> OptionValue["Threads"],
+    "Integrand" -> {cvec, sys["Variable"]}];
+  output = Catch[
+    run = RunNativeRegularIndependentArms[atlas, cvec, sys["Variable"],
+      "CertifyTail" -> OptionValue["CertifyTail"],
+      "MaxRefinementSteps" -> OptionValue["MaxRefinementSteps"]];
+    digits = cfg["WorkingPrecision"];
+    (* The signed -lower+upper aggregate is already assembled under the native
+       honest Laurent-window rules.  Export it once, at the public compatibility
+       boundary, instead of serializing every physical tile. *)
+    value = decodeLineValue[run["CombinedLine"], digits,
+      run["Atlas", "TargetCompleteMax"]];
+    result = <|"Type" -> "DiffExp2NativeRegularLineIntegral",
+      "Value" -> value, "Atlas" -> atlas, "Run" -> run,
+      "CompatibilityExports" -> 1|>;
+    If[retain, result,
+      ReleaseNativeRegularIndependentArms[run];
+      KeyDrop[Append[result, "ReleasedNativeState" -> True],
+        {"Atlas", "Run"}]],
+    "DiffExp2Error", Function[{failure, tag},
+      Quiet[ReleaseNativeRegularIndependentArms[
+        If[AssociationQ[run], run, atlas]]];
+      Throw[failure, tag]]];
+  output];
 
 End[];
 EndPackage[];

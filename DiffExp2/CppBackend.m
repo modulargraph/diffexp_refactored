@@ -1267,7 +1267,7 @@ RunPersistentNativeArms[plan_Association, anchor_Association,
     <|"receiving_basis" -> Map[Lookup[#, "Local"] &, tokens],
       "integrand_rows" -> raw["integrand_rows"],
       "sessions" -> Flatten[Map[Lookup[#, "Session"] &, tokens]]|>];
-  normalized = AssociationMap[normalizeArm, arms];
+  normalized = Map[normalizeArm, arms];
   If[AnyTrue[Values[normalized], FailureQ],
     Return[First[Select[Values[normalized], FailureQ]], Module]];
   sessions = DeleteDuplicates[Join[

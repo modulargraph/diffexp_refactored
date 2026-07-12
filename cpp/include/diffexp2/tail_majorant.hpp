@@ -688,6 +688,80 @@ RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
           "regular homogeneous tail model prepared"};
 }
 
+// Certify the equation owned by an immutable regular-tail payload.  The
+// payload is not caller data: it was captured from PreparedRecurrenceOperator
+// and RecurrenceProblem, checked against every retained Taylor coefficient,
+// and (on restore) replayed before it can be attached to a local again.
+// Keeping the denominator cleared avoids introducing a ball division at a
+// point where q may be small:
+//
+//                    q(t) theta f(t) - N(t) f(t) = 0.
+//
+// This slice is deliberately homogeneous.  A sourced local can only acquire
+// an owner-bound residual payload after its source function and unseen source
+// tail have equally strong retained provenance.
+template <typename Scalar>
+ResidualCertificate certify_regular_owner_bound_residual(
+    const LocalSolution<Scalar>& solution,
+    const RegularTaylorTailModel& model,
+    const LocalEvaluation& evaluation,
+    const RealEvaluationPoint& point,
+    const Magnitude& relative_tolerance,
+    ResidualScope scope = ResidualScope::StoredTruncation) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "owner-bound regular residuals support Rational or Acb "
+                "locals only");
+  using namespace tail_majorant_detail;
+
+  validate_restored_regular_taylor_tail_model(
+      model, solution, model.operator_identity);
+  if (evaluation.value.dimension != model.dimension ||
+      evaluation.theta_value.dimension != model.dimension ||
+      evaluation.value.epsilon.min_power != model.epsilon.min_power ||
+      evaluation.value.epsilon.complete_max != model.epsilon.complete_max ||
+      evaluation.theta_value.epsilon.min_power != model.epsilon.min_power ||
+      evaluation.theta_value.epsilon.complete_max !=
+          model.epsilon.complete_max)
+    throw std::invalid_argument(
+        "owner-bound residual evaluation differs from its retained operator window");
+
+  auto t = point.modulus;
+  if (point.sign < 0) t = -t;
+
+  auto q_at_point = ComplexBall(0);
+  for (auto lag = model.q_coefficients.rbegin();
+       lag != model.q_coefficients.rend(); ++lag)
+    q_at_point = q_at_point * t + *lag;
+
+  const auto matrix_size = static_cast<std::size_t>(model.dimension) *
+                           model.dimension;
+  std::vector<ComplexBall> n_at_point(matrix_size, ComplexBall(0));
+  for (auto lag = model.n_coefficients.rbegin();
+       lag != model.n_coefficients.rend(); ++lag)
+    for (std::size_t entry = 0; entry < matrix_size; ++entry)
+      n_at_point[entry] = n_at_point[entry] * t + (*lag)[entry];
+
+  LocalEvaluation cleared = evaluation;
+  for (auto& coefficient : cleared.theta_value.coefficients)
+    coefficient *= q_at_point;
+  EpsilonMatrix numerator;
+  numerator.epsilon = {0, 0};
+  numerator.dimension = model.dimension;
+  numerator.coefficients = std::move(n_at_point);
+  auto certificate = certify_theta_residual(
+      cleared, numerator, std::nullopt, relative_tolerance, scope);
+  if (scope == ResidualScope::StoredTruncation)
+    certificate.detail +=
+        "; equation derived from retained owner payload "
+        "q(t) theta(f)=N(t) f (homogeneous zero source)";
+  else
+    certificate.detail +=
+        "; retained q/N ownership is proven, but the requested full-local "
+        "residual still requires propagation of certified value/theta tails";
+  return certificate;
+}
+
 // Transfer the ordinary homogeneous theorem through one retained match
 // materialization.  The Laurent weights are independent of t, so every
 // complete epsilon row of their linear combination solves the same ODE.

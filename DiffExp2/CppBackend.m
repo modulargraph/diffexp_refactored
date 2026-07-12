@@ -23,7 +23,7 @@ RunPersistentSCCColumns::usage = "RunPersistentSCCColumns[handle, columns, threa
 ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
-CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies its native Acb theta residual against the supplied epsilon-framed theta operator and optional source. request carries point, relative_tolerance, operator_identity, checkpoint_identity, and theta_operator; no solution coefficient slab crosses the bridge.";
+CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies the native Acb residual of the immutable operator/source payload owned by that local. request carries point, relative_tolerance, and the operator, homogeneous-source, local-checkpoint, analytic-metadata, and provenance identities advertised by residual_binding; caller-supplied theta operators or sources are rejected.";
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
 RunPersistentAcbLocalMatch::usage = "RunPersistentAcbLocalMatch[basis, incoming, request] evaluates retained Acb locals at one exact physical point and retains an exact-Rational-lattice-guided Laurent match with bounded refinement and residual diagnostics. request supplies exact_lattice and refinement records in addition to chart, branch, checkpoint, point, and epsilon identities.";
 RunPersistentPlannedMatch::usage = "RunPersistentPlannedMatch[plan, arm, index, basis, incoming, policy] performs one plan-derived retained Rational or Acb match. The one-based match index selects exact physical/local coordinates and branch data from the plan; policy supplies epsilon/checkpoint fields and, for Acb, exact_lattice/refinement.";
@@ -861,15 +861,15 @@ CertifyPersistentLocalResidual[handle_Association,
       Module]];
   reserved = Intersection[Keys[certificateRequest],
     {"schema", "op", "session", "local", "output_digits"}];
-  missing = Select[{"point", "theta_operator", "relative_tolerance",
-      "operator_identity", "checkpoint_identity"},
+  missing = Select[{"point", "relative_tolerance", "operator_identity",
+      "source_identity", "checkpoint_identity", "analytic_metadata",
+      "provenance_identity"},
     !KeyExistsQ[certificateRequest, #] &];
   If[reserved =!= {} || missing =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
       "persistent residual request is missing required fields or contains reserved protocol keys",
       "Missing" -> missing, "Reserved" -> reserved|>], Module]];
-  payload = Join[<|"source" -> Null, "scope" -> "stored_truncation",
-      "include_residual" -> False,
+  payload = Join[<|"scope" -> "stored_truncation", "include_residual" -> False,
       "options" -> <|"tail_estimate" -> False|>|>,
     certificateRequest];
   request = Join[payload, <|"schema" -> 2,

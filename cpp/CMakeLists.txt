@@ -88,6 +88,15 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_persistent_local PRIVATE diffexp2_core)
   add_test(NAME cpp_persistent_local COMMAND test_diffexp2_persistent_local)
 
+  add_executable(test_diffexp2_persistent_owner_bound_residual
+    tests/test_persistent_owner_bound_residual.cpp)
+  target_compile_features(test_diffexp2_persistent_owner_bound_residual
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_owner_bound_residual
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_owner_bound_residual
+    COMMAND test_diffexp2_persistent_owner_bound_residual)
+
   add_executable(test_diffexp2_session_solve_many
     tests/test_session_solve_many.cpp)
   target_compile_features(test_diffexp2_session_solve_many PRIVATE cxx_std_20)

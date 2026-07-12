@@ -2197,6 +2197,80 @@ struct SCCColumnProvenance {
   }
 };
 
+constexpr const char* kOwnerBoundRegularResidualCapability =
+    "owner-bound-regular-homogeneous-residual-v1";
+
+struct OwnerBoundResidualBinding {
+  std::string kind;
+  std::string capability;
+  std::string operator_identity;
+  std::string source_identity;
+  std::string local_checkpoint_identity;
+  json::object analytic_metadata;
+  std::string prepared_payload_provenance;
+  std::string provenance_identity;
+
+  json::object encode() const {
+    return json::object{
+        {"kind", kind},
+        {"capability", capability},
+        {"operator_identity", operator_identity},
+        {"source_identity", source_identity},
+        {"local_checkpoint_identity", local_checkpoint_identity},
+        {"analytic_metadata", analytic_metadata},
+        {"prepared_payload_provenance", prepared_payload_provenance},
+        {"provenance_identity", provenance_identity},
+        {"equation", "q(t) theta(f) = N(t) f"},
+        {"source_kind", "homogeneous-zero"},
+        {"operator_payload_owner",
+         "retained-immutable-regular-tail-model"},
+        {"supported_scopes",
+         json::array{"stored_truncation", "full_local_solution-inconclusive"}}};
+  }
+};
+
+template <typename Scalar>
+OwnerBoundResidualBinding make_owner_bound_residual_binding(
+    const LocalSolution<Scalar>& solution,
+    const RegularTaylorTailModel& model,
+    const std::string& expected_operator_identity) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "owner-bound residual bindings support Rational or Acb "
+                "locals only");
+  tail_majorant_detail::validate_restored_regular_taylor_tail_model(
+      model, solution, expected_operator_identity);
+  auto analytic_metadata =
+      checkpoint_local_analytic_metadata_record(solution);
+  const json::object source_provenance{
+      {"schema", "diffexp2-retained-homogeneous-zero-source-v1"},
+      {"operator_identity", expected_operator_identity},
+      {"local_checkpoint_identity", solution.checkpoint_identity},
+      {"analytic_metadata", analytic_metadata}};
+  const auto source_identity = json::serialize(
+      canonical_json_value(source_provenance));
+  json::object provenance{
+      {"schema", "diffexp2-owner-bound-residual-binding-v1"},
+      {"kind", "regular-homogeneous-cleared-ode"},
+      {"capability", kOwnerBoundRegularResidualCapability},
+      {"operator_identity", expected_operator_identity},
+      {"source_identity", source_identity},
+      {"local_checkpoint_identity", solution.checkpoint_identity},
+      {"analytic_metadata", analytic_metadata},
+      {"prepared_payload_provenance", model.provenance},
+      {"equation", "q(t) theta(f) = N(t) f"},
+      {"source_kind", "homogeneous-zero"}};
+  return OwnerBoundResidualBinding{
+      "regular-homogeneous-cleared-ode",
+      kOwnerBoundRegularResidualCapability,
+      expected_operator_identity,
+      source_identity,
+      solution.checkpoint_identity,
+      std::move(analytic_metadata),
+      model.provenance,
+      json::serialize(canonical_json_value(provenance))};
+}
+
 class StoredLocalBase {
  public:
   StoredLocalBase(std::string handle, std::string source_chart,
@@ -2291,6 +2365,21 @@ class StoredLocal final : public StoredLocalBase {
         serialize_derivation_checkpoint_fields_(
             serialize_derivation_checkpoint_fields) {
     validate_local_solution(solution_, false);
+    if constexpr (std::is_same_v<Scalar, Rational> ||
+                  std::is_same_v<Scalar, ComplexBall>) {
+      if (tail_model_.model.has_value()) {
+        residual_binding_ = make_owner_bound_residual_binding(
+            solution_, *tail_model_.model, source_operator_identity_);
+        residual_binding_detail_ =
+            "owner-bound regular homogeneous q/N payload is available";
+      } else {
+        residual_binding_detail_ =
+            "owner-bound residual is unsupported: " + tail_model_.detail;
+      }
+    } else {
+      residual_binding_detail_ =
+          "owner-bound residual rejects unresolved symbolic coefficients";
+    }
   }
 
   json::object evaluate(const json::object& request,
@@ -2376,37 +2465,47 @@ class StoredLocal final : public StoredLocalBase {
           "local.certify_residual rejects unresolved symbolic coefficients; "
           "solve a numerically specialized chart first");
     } else {
+      if (request.if_contains("output_digits") != nullptr)
+        require_exact_keys(
+            request,
+            {"schema", "op", "session", "local", "point", "options",
+             "relative_tolerance", "scope", "include_residual",
+             "operator_identity", "source_identity",
+             "checkpoint_identity", "analytic_metadata",
+             "provenance_identity", "output_digits"},
+            "owner-bound residual request");
+      else
+        require_exact_keys(
+            request,
+            {"schema", "op", "session", "local", "point", "options",
+             "relative_tolerance", "scope", "include_residual",
+             "operator_identity", "source_identity",
+             "checkpoint_identity", "analytic_metadata",
+             "provenance_identity"},
+            "owner-bound residual request");
+      if (!residual_binding_.has_value() || !tail_model_.model.has_value())
+        throw std::domain_error(residual_binding_detail_);
+      const auto& binding = *residual_binding_;
+      if (required_string(request, "operator_identity") !=
+              binding.operator_identity ||
+          required_string(request, "source_identity") !=
+              binding.source_identity ||
+          required_string(request, "checkpoint_identity") !=
+              binding.local_checkpoint_identity ||
+          required_string(request, "provenance_identity") !=
+              binding.provenance_identity ||
+          request.at("analytic_metadata") != binding.analytic_metadata)
+        throw std::invalid_argument(
+            "owner-bound residual expectations differ from the retained "
+            "operator/source/checkpoint/provenance/analytic metadata");
+
       AcbPrecisionLease lease(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
-      const auto checkpoint_identity = required_string(
-          request, "checkpoint_identity");
-      const auto operator_identity = required_string(
-          request, "operator_identity");
-      if (checkpoint_identity.empty() || operator_identity.empty())
-        throw std::invalid_argument(
-            "native residual identities must be nonempty");
       const auto point = parse_local_evaluation_point(request);
       const auto options = parse_local_evaluation_options(request, false);
       if (options.compute_tail_estimate)
         throw std::invalid_argument(
             "stored-truncation residual certification rejects advisory tail estimates");
-      const auto theta_operator = parse_epsilon_matrix(
-          request.at("theta_operator"), "theta operator");
-      std::optional<EpsilonVector> source;
-      std::optional<std::string> source_identity;
-      if (const auto* raw_source = request.if_contains("source");
-          raw_source != nullptr && !raw_source->is_null()) {
-        source = parse_epsilon_vector(*raw_source, "residual source");
-        source_identity = required_string(request, "source_identity");
-        if (source_identity->empty())
-          throw std::invalid_argument(
-              "native residual source identity must be nonempty");
-      } else if (const auto* raw_identity =
-                     request.if_contains("source_identity");
-                 raw_identity != nullptr && !raw_identity->is_null()) {
-        throw std::invalid_argument(
-            "source_identity requires an explicit residual source");
-      }
       const auto tolerance_text = required_string(
           request, "relative_tolerance");
       const auto tolerance = Magnitude::decimal(tolerance_text);
@@ -2417,14 +2516,15 @@ class StoredLocal final : public StoredLocalBase {
               ? ResidualScope::FullLocalSolution
               : throw std::invalid_argument(
                     "residual scope must be stored_truncation or full_local_solution");
-      const auto include_residual =
-          request.if_contains("include_residual") != nullptr &&
-          request.at("include_residual").as_bool();
+      if (!request.at("include_residual").is_bool())
+        throw std::invalid_argument(
+            "owner-bound residual include_residual must be Boolean");
+      const auto include_residual = request.at("include_residual").as_bool();
 
       const auto started = std::chrono::steady_clock::now();
       const auto evaluation = evaluate_local_solution(solution_, point, options);
-      auto certificate = certify_theta_residual(
-          evaluation, theta_operator, source, tolerance, scope);
+      auto certificate = certify_regular_owner_bound_residual(
+          solution_, *tail_model_.model, evaluation, point, tolerance, scope);
       const auto elapsed = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       residual_certifications_.fetch_add(1);
@@ -2446,10 +2546,15 @@ class StoredLocal final : public StoredLocalBase {
           {"scope", scope_text}, {"verdict", verdict},
           {"detail", certificate.detail},
           {"relative_tolerance", tolerance_text},
-          {"checkpoint_identity", checkpoint_identity},
-          {"operator_identity", operator_identity},
-          {"source_identity", source_identity.has_value()
-               ? json::value(*source_identity) : json::value(nullptr)},
+          {"binding_kind", binding.kind},
+          {"capability", binding.capability},
+          {"checkpoint_identity", binding.local_checkpoint_identity},
+          {"operator_identity", binding.operator_identity},
+          {"source_identity", binding.source_identity},
+          {"provenance_identity", binding.provenance_identity},
+          {"analytic_metadata", binding.analytic_metadata},
+          {"equation", "q(t) theta(f) = N(t) f"},
+          {"source_kind", "homogeneous-zero"},
           {"epsilon_min", certificate.residual.epsilon.min_power},
           {"epsilon_max", certificate.residual.epsilon.complete_max},
           {"dimension", certificate.residual.dimension},
@@ -2668,6 +2773,15 @@ class StoredLocal final : public StoredLocalBase {
         {"top_valid", encode_validity(top_valid_)},
         {"checkpoint_identity", solution_.checkpoint_identity},
         {"tail_majorant", encode_tail_model_status(tail_model_)},
+        {"residual_binding", residual_binding_.has_value()
+             ? json::value(json::object{
+                   {"status", "available"},
+                   {"binding", residual_binding_->encode()}})
+             : json::value(json::object{
+                   {"status", "unsupported"},
+                   {"kind", "none"},
+                   {"capability", kOwnerBoundRegularResidualCapability},
+                   {"reason", residual_binding_detail_}})},
         {"metadata", metadata_json()},
         {"create_parse_ms", create_parse_ms_},
         {"create_kernel_ms", create_kernel_ms_}};
@@ -2778,7 +2892,7 @@ class StoredLocal final : public StoredLocalBase {
             current.tail_certificate_unsupported;
       }
       json::object record{
-        {"schema", "diffexp2-retained-local-v2"},
+        {"schema", "diffexp2-retained-local-v3"},
         {"handle", handle_},
         {"source_chart", source_chart_},
         {"source_operator_identity", source_operator_identity_},
@@ -2826,6 +2940,35 @@ class StoredLocal final : public StoredLocalBase {
                    : false}};
         }
       }
+      if (residual_binding_.has_value()) {
+        if (!serialize_tail_checkpoint_fields_ ||
+            !tail_model_.model.has_value())
+          throw std::logic_error(
+              "owner-bound residual lost its serialized q/N payload before checkpointing");
+        const auto recomputed = make_owner_bound_residual_binding(
+            solution_, *tail_model_.model, source_operator_identity_);
+        if (recomputed.encode() != residual_binding_->encode())
+          throw std::logic_error(
+              "owner-bound residual binding changed before checkpointing");
+        record["residual_operator_restore"] = json::object{
+            {"capability", kOwnerBoundRegularResidualCapability},
+            {"kind", residual_binding_->kind},
+            {"serialized", true},
+            {"status", "available"},
+            {"operator_payload_owner",
+             "retained-immutable-regular-tail-model"},
+            {"binding", residual_binding_->encode()},
+            {"reason", nullptr}};
+      } else {
+        record["residual_operator_restore"] = json::object{
+            {"capability", kOwnerBoundRegularResidualCapability},
+            {"kind", "none"},
+            {"serialized", false},
+            {"status", "unsupported"},
+            {"operator_payload_owner", nullptr},
+            {"binding", nullptr},
+            {"reason", residual_binding_detail_}};
+      }
       return record;
     }
   }
@@ -2853,6 +2996,15 @@ class StoredLocal final : public StoredLocalBase {
   const LocalSolution<Scalar>& solution() const { return solution_; }
   const RegularTaylorTailModelResult& tail_model() const {
     return tail_model_;
+  }
+  const std::optional<OwnerBoundResidualBinding>& residual_binding() const {
+    return residual_binding_;
+  }
+  void restore_residual_binding_detail(std::string detail) {
+    if (residual_binding_.has_value() || detail.empty())
+      throw std::invalid_argument(
+          "checkpoint unsupported residual reason is incompatible with an available binding");
+    residual_binding_detail_ = std::move(detail);
   }
   std::int32_t top_valid() const { return top_valid_; }
   const std::optional<json::object>& retained_derivation() const override {
@@ -3075,6 +3227,9 @@ class StoredLocal final : public StoredLocalBase {
   std::shared_ptr<void> retained_owner_;
   RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(
       "tail model is unavailable for this retained local");
+  std::optional<OwnerBoundResidualBinding> residual_binding_;
+  std::string residual_binding_detail_ =
+      "owner-bound residual payload was not prepared";
   std::optional<TailModelCheckpointMarker> tail_checkpoint_marker_;
   bool serialize_tail_checkpoint_fields_ = true;
   bool serialize_derivation_checkpoint_fields_ = true;
@@ -5781,40 +5936,34 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       object.if_contains("tail_model_restore") != nullptr;
   const bool has_derivation_record =
       object.if_contains("retained_derivation") != nullptr;
+  const bool has_residual_restore =
+      object.if_contains("residual_operator_restore") != nullptr;
   if (has_derivation_record !=
       (object.if_contains("retained_owner_lineage") != nullptr))
     throw std::invalid_argument(
         "checkpoint retained-local derivation fields are incomplete");
-  if (has_tail_restore && has_derivation_record)
-    require_exact_keys(object,
-        {"schema", "handle", "source_chart", "source_operator_identity",
-         "scalar_domain", "precision_bits", "solution", "pseudo_hits",
-         "diagnostics", "runtime_stats", "column_provenance",
-         "retained_derivation", "retained_owner_lineage",
-         "tail_model_restore"},
-        "checkpoint retained local");
-  else if (has_tail_restore)
-    require_exact_keys(object,
-        {"schema", "handle", "source_chart", "source_operator_identity",
-         "scalar_domain", "precision_bits", "solution", "pseudo_hits",
-         "diagnostics", "runtime_stats", "column_provenance",
-         "tail_model_restore"},
-        "checkpoint retained local");
-  else if (has_derivation_record)
-    require_exact_keys(object,
-        {"schema", "handle", "source_chart", "source_operator_identity",
-         "scalar_domain", "precision_bits", "solution", "pseudo_hits",
-         "diagnostics", "runtime_stats", "column_provenance",
-         "retained_derivation", "retained_owner_lineage"},
-        "checkpoint retained local");
-  else
-    require_exact_keys(object,
-        {"schema", "handle", "source_chart", "source_operator_identity",
-         "scalar_domain", "precision_bits", "solution", "pseudo_hits",
-         "diagnostics", "runtime_stats", "column_provenance"},
-        "checkpoint retained local");
-  if (required_string(object, "schema") != "diffexp2-retained-local-v2")
+  const auto record_schema = required_string(object, "schema");
+  if (record_schema != "diffexp2-retained-local-v3")
     throw std::invalid_argument("unsupported retained-local checkpoint schema");
+  if (!has_residual_restore)
+    throw std::invalid_argument(
+        "retained-local v3 checkpoint lacks its residual ownership record");
+  std::set<std::string> actual_keys;
+  for (const auto& entry : object) actual_keys.emplace(entry.key());
+  std::set<std::string> expected_keys{
+      "schema", "handle", "source_chart", "source_operator_identity",
+      "scalar_domain", "precision_bits", "solution", "pseudo_hits",
+      "diagnostics", "runtime_stats", "column_provenance"};
+  if (has_tail_restore) expected_keys.emplace("tail_model_restore");
+  if (has_derivation_record) {
+    expected_keys.emplace("retained_derivation");
+    expected_keys.emplace("retained_owner_lineage");
+  }
+  if (has_residual_restore)
+    expected_keys.emplace("residual_operator_restore");
+  if (actual_keys != expected_keys)
+    throw std::invalid_argument(
+        "checkpoint retained local has unknown or missing fields");
   const auto scalar_domain = required_string(object, "scalar_domain");
   const char* compile_domain = std::is_same_v<Scalar, Rational>
       ? "rational" : "acb";
@@ -6178,6 +6327,72 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     }
   }
 
+  bool saved_residual_available = false;
+  std::optional<json::object> saved_residual_binding;
+  std::optional<std::string> saved_residual_reason;
+  if (has_residual_restore) {
+    const auto& residual = as_object(
+        object.at("residual_operator_restore"),
+        "checkpoint residual-operator restore record");
+    require_exact_keys(
+        residual,
+        {"capability", "kind", "serialized", "status",
+         "operator_payload_owner", "binding", "reason"},
+        "checkpoint residual-operator restore record");
+    if (required_string(residual, "capability") !=
+            kOwnerBoundRegularResidualCapability ||
+        !residual.at("serialized").is_bool())
+      throw std::invalid_argument(
+          "checkpoint residual-operator capability or serialization flag is malformed");
+    const auto serialized = residual.at("serialized").as_bool();
+    const auto status = required_string(residual, "status");
+    const auto kind = required_string(residual, "kind");
+    if (serialized) {
+      if (status != "available" ||
+          kind != "regular-homogeneous-cleared-ode" ||
+          required_string(residual, "operator_payload_owner") !=
+              "retained-immutable-regular-tail-model" ||
+          residual.at("binding").is_null() ||
+          !residual.at("reason").is_null() ||
+          !restored_tail_model.model.has_value())
+        throw std::invalid_argument(
+            "serialized checkpoint residual binding lost its q/N payload or ownership kind");
+      const auto& binding = as_object(
+          residual.at("binding"), "checkpoint residual binding");
+      require_exact_keys(
+          binding,
+          {"kind", "capability", "operator_identity", "source_identity",
+           "local_checkpoint_identity", "analytic_metadata",
+           "prepared_payload_provenance", "provenance_identity",
+           "equation", "source_kind", "operator_payload_owner",
+           "supported_scopes"},
+          "checkpoint residual binding");
+      if (required_string(binding, "kind") != kind ||
+          required_string(binding, "capability") !=
+              kOwnerBoundRegularResidualCapability ||
+          required_string(binding, "equation") !=
+              "q(t) theta(f) = N(t) f" ||
+          required_string(binding, "source_kind") != "homogeneous-zero" ||
+          required_string(binding, "operator_payload_owner") !=
+              "retained-immutable-regular-tail-model")
+        throw std::invalid_argument(
+            "checkpoint residual binding changes its certified equation scope");
+      saved_residual_available = true;
+      saved_residual_binding = binding;
+    } else {
+      if (status != "unsupported" || kind != "none" ||
+          !residual.at("operator_payload_owner").is_null() ||
+          !residual.at("binding").is_null() ||
+          !residual.at("reason").is_string())
+        throw std::invalid_argument(
+            "unsupported checkpoint residual marker is inconsistent");
+      saved_residual_reason = std::string(residual.at("reason").as_string());
+      if (saved_residual_reason->empty())
+        throw std::invalid_argument(
+            "unsupported checkpoint residual marker has an empty reason");
+    }
+  }
+
   const auto& stats = as_object(object.at("runtime_stats"),
                                 "checkpoint local runtime stats");
   if (has_tail_restore)
@@ -6246,6 +6461,18 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       std::move(retained_derivation), std::move(retained_owner),
       std::move(restored_tail_model), std::move(tail_checkpoint_marker),
       has_tail_restore, has_derivation_record);
+  if (saved_residual_available) {
+    if (!local->residual_binding().has_value() ||
+        local->residual_binding()->encode() != *saved_residual_binding)
+      throw std::invalid_argument(
+          "checkpoint residual binding does not reproduce from its restored q/N owner payload");
+  } else if (has_residual_restore) {
+    if (local->residual_binding().has_value() ||
+        !saved_residual_reason.has_value())
+      throw std::invalid_argument(
+          "checkpoint unsupported residual state unexpectedly reproduced an owner binding");
+    local->restore_residual_binding_detail(*saved_residual_reason);
+  }
   local->restore_runtime_stats(restored_stats);
   return local;
 }

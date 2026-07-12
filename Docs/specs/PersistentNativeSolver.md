@@ -742,6 +742,25 @@ do so through the retained local; matching must preserve the same rule.
 
 ## Wolfram integration sequence
 
+The production `IntegrateLine`/`API`LineIntegral` boundary selects the
+persistent concurrent-arm operation when `RecurrenceBackend -> "Cpp"`, the
+anchor is strictly interior, the physical geometry and coefficient row are
+in the exact-rational native protocol, no caller-owned `PrecomputedCharts`
+chain was supplied, and both exact `SegmentLine` plans contain only regular
+charts.  `ExtraSingularFactors` is installed in the per-call system before
+those plans are made, so native eligibility and execution see the same
+segmentation alphabet and analytic prescriptions.  The selected plans are
+reused by native preparation rather than recomputed.
+
+Selection is one-way: after the persistent path is chosen, recurrence,
+matching, refinement, certification, or integration failure is returned
+loudly and never retried through another solver.  Unsupported geometry,
+singular charts, endpoint anchors, non-rational coefficient rows, the
+Wolfram recurrence setting, and `PrecomputedCharts` retain the established
+object-level orchestration.  In particular, a supplied precomputed chart
+chain is consumed as-is rather than silently discarded in favor of a new
+native plan.
+
 1. Split `cppRunRecursionCore`'s existing schema 1 association into a static
    operator record and a dynamic run record.
 2. Create one session per loaded differential system/configuration and close

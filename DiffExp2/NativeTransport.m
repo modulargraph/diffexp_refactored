@@ -11,6 +11,8 @@ PrepareNativeRegularIndependentArms::usage =
   "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared retained anchor, every regular receiving basis, and one exact lower/upper native tile plan. Option Integrand->{cvec,var} derives and solves the honest epsilon halo required by polar coefficient rows. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
+NativeRegularIndependentArmPlansSupportedQ::usage =
+  "NativeRegularIndependentArmPlansSupportedQ[lower,upper] is the side-effect-free public-dispatch eligibility predicate for the current exact-rational native path protocol. It accepts only a shared interior anchor, entirely regular charts, and topology/geometry representable by the retained native tile planner.";
 ReleaseNativeRegularIndependentArms::usage =
   "ReleaseNativeRegularIndependentArms[runOrAtlas] releases the public final-local, line-aggregate, basis, anchor, and tile-plan handles created by the explicit native regular-arm seam. Hidden matches, projected locals, and per-tile lines are reclaimed through their retained owner chains. Prepared chart/SCC caches remain session-owned and reusable.";
 NativeRegularLineIntegral::usage =
@@ -191,6 +193,93 @@ nativeArmTopology[plan_Association] := Module[
       (exactRationalString[#, "projection waypoint"] & /@ boundary),
     "complex_projections" -> nativeComplexProjections[plan],
     "branch_sheets" -> nativeBranchSheets[plan]|>];
+
+(* This predicate deliberately performs no native preparation and catches no
+   recurrence result.  It is the public API's pre-selection boundary: cases
+   outside the current rational tile protocol may continue through the
+   established Wolfram orchestration, while every failure after this
+   predicate selected the persistent path remains loud.  Keep the checks in
+   lockstep with normalizeSharedAnchor/nativeArmTopology. *)
+nativeTopologyProtocolQ[plan_Association] := Quiet[Check[Module[
+  {from = Lookup[plan, "From", None], to = Lookup[plan, "To", None],
+   singularities, all, real, projected, nonreal, data, pairs, relevant,
+   realOnArm, boundaryOnArm, records, grouped},
+  If[!exactRationalQ[from] || !exactRationalQ[to], Return[False, Module]];
+  singularities = Lookup[plan, "Singularities", None];
+  If[!AssociationQ[singularities], Return[False, Module]];
+  all = Lookup[singularities, "All", {}];
+  real = Lookup[singularities, "Real", {}];
+  projected = Lookup[singularities, "Projected", {}];
+  If[!ListQ[all] || !ListQ[real] || !ListQ[projected],
+    Return[False, Module]];
+  realOnArm = Select[real, inClosedArmQ[#, from, to] &];
+  boundaryOnArm = Select[
+    Lookup[singularities, "ProjectionWaypoints", {}],
+    inClosedArmQ[#, from, to] &];
+  If[!AllTrue[Join[realOnArm, boundaryOnArm], exactRationalQ],
+    Return[False, Module]];
+  nonreal = Select[all, Function[root,
+    !AnyTrue[real, Function[r, sameExactQ[root, r]]]]];
+  data = Map[Function[root, Module[{re, im, h},
+      re = Quiet[RootReduce[(root + Conjugate[root])/2]];
+      im = Quiet[RootReduce[(root - Conjugate[root])/(2 I)]];
+      h = If[TrueQ[Re[N[im, 60]] < 0], -im, im];
+      {re, Quiet[RootReduce[h]]}]], nonreal];
+  pairs = DeleteDuplicatesBy[data, ToString[#, InputForm] &];
+  relevant = Select[pairs, Function[pair,
+    AnyTrue[{pair[[1]] - pair[[2]], pair[[1]], pair[[1]] + pair[[2]]},
+      inClosedArmQ[#, from, to] &]]];
+  If[!AllTrue[relevant,
+      exactRationalQ[#[[1]]] && exactRationalQ[#[[2]]] &&
+        TrueQ[#[[2]] > 0] &], Return[False, Module]];
+  records = Flatten[Lookup[Lookup[plan, "Charts", {}],
+    "Prescriptions", {}], 1];
+  If[!AllTrue[records, AssociationQ[#] &&
+      MemberQ[{-1, 1}, Lookup[#, "Sign", None]] &],
+    Return[False, Module]];
+  grouped = GatherBy[records, ToString[
+      Lookup[#, "ExactFactor", Lookup[#, "Factor", None]], InputForm] &];
+  AllTrue[grouped,
+    Length[DeleteDuplicates[Lookup[#, "Sign", None]]] === 1 &]
+  ], False]];
+
+NativeRegularIndependentArmPlansSupportedQ[lower_Association,
+    upper_Association] := Quiet[Check[Module[
+  {lowerAnchor, upperAnchor, charts, geometryKeys =
+      {"Center", "Radius", "MatchRadius", "Scale", "LocalRadius"},
+   geometry},
+  If[Lookup[lower, "Direction", None] =!= -1 ||
+      Lookup[upper, "Direction", None] =!= 1 ||
+      !sameExactQ[Lookup[lower, "From", None],
+        Lookup[upper, "From", None]] ||
+      !TrueQ[Lookup[lower, "To", None] < Lookup[lower, "From", None] <
+        Lookup[upper, "To", None]], Return[False, Module]];
+  If[!ListQ[Lookup[lower, "Charts", None]] ||
+      !ListQ[Lookup[upper, "Charts", None]] ||
+      lower["Charts"] === {} || upper["Charts"] === {},
+    Return[False, Module]];
+  lowerAnchor = First[lower["Charts"]];
+  upperAnchor = First[upper["Charts"]];
+  If[!AssociationQ[lowerAnchor] || !AssociationQ[upperAnchor] ||
+      !sameExactQ[Lookup[lowerAnchor, "Center", None],
+        Lookup[upperAnchor, "Center", None]] ||
+      !SameQ[Lookup[lowerAnchor, "Prescriptions", {}],
+        Lookup[upperAnchor, "Prescriptions", {}]] ||
+      !exactRationalQ[cfg["RadiusOfConvergence"]],
+    Return[False, Module]];
+  charts = Join[lower["Charts"], upper["Charts"]];
+  If[!AllTrue[charts, AssociationQ[#] &&
+      Lookup[#, "Singular", Missing["Absent"]] === False &],
+    Return[False, Module]];
+  geometry = Flatten[Map[Lookup[#, geometryKeys, None] &, charts]];
+  If[!AllTrue[geometry, exactRationalQ], Return[False, Module]];
+  If[!AllTrue[Cases[charts,
+      chart_Association /; KeyExistsQ[chart, "IncomingMatchPoint"] :>
+        chart["IncomingMatchPoint"]], exactRationalQ],
+    Return[False, Module]];
+  nativeTopologyProtocolQ[lower] && nativeTopologyProtocolQ[upper]
+  ], False]];
+NativeRegularIndependentArmPlansSupportedQ[___] := False;
 
 nativeBasisOwner[basis_Association] := Module[{owner},
   owner = Lookup[basis, "NativeSCC",
@@ -680,11 +769,12 @@ decodeLineValue[line_Association, outputDigits_Integer,
 
 Options[NativeRegularLineIntegral] = {"Threads" -> Automatic,
   "CertifyTail" -> False, "MaxRefinementSteps" -> 2,
-  "RetainNativeState" -> True};
+  "RetainNativeState" -> True, "ArmPlans" -> Automatic};
 
 NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
     cvec_List, OptionsPattern[]] := Module[
-  {lower, upper, atlas, run = None, digits, value, result, retain, output},
+  {lower, upper, atlas, run = None, digits, value, result, retain, output,
+   armPlans = OptionValue["ArmPlans"]},
   retain = OptionValue["RetainNativeState"];
   If[!BooleanQ[retain],
     err["E8", <|"RetainNativeState" -> retain,
@@ -692,8 +782,21 @@ NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
   If[!TrueQ[lo < from < hi],
     err["E8", <|"Range" -> {lo, hi}, "Anchor" -> from,
       "Detail" -> "explicit native independent-arm line integral requires an interior anchor"|>]];
-  lower = DiffExp2`Transport`SegmentLine[sys, {from, lo}];
-  upper = DiffExp2`Transport`SegmentLine[sys, {from, hi}];
+  If[armPlans === Automatic,
+    lower = DiffExp2`Transport`SegmentLine[sys, {from, lo}];
+    upper = DiffExp2`Transport`SegmentLine[sys, {from, hi}],
+    If[!MatchQ[armPlans, {_Association, _Association}],
+      err["E8", <|"ArmPlans" -> armPlans,
+        "Detail" -> "ArmPlans must be Automatic or an exact {lowerPlan,upperPlan} pair"|>]];
+    {lower, upper} = armPlans;
+    If[!sameExactQ[Lookup[lower, "From", None], from] ||
+        !sameExactQ[Lookup[lower, "To", None], lo] ||
+        !sameExactQ[Lookup[upper, "From", None], from] ||
+        !sameExactQ[Lookup[upper, "To", None], hi],
+      err["E8", <|"Range" -> {lo, hi}, "Anchor" -> from,
+        "LowerPlan" -> KeyTake[lower, {"From", "To"}],
+        "UpperPlan" -> KeyTake[upper, {"From", "To"}],
+        "Detail" -> "precomputed native arm plans do not bind the requested anchor and range"|>]]];
   atlas = PrepareNativeRegularIndependentArms[sys, boundary, lower, upper,
     "Threads" -> OptionValue["Threads"],
     "Integrand" -> {cvec, sys["Variable"]}];

@@ -9464,6 +9464,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
 constexpr const char* kRetainedTilePlanCapability =
     "retained-exact-independent-arm-tile-plan-v1";
+constexpr const char* kRetainedSingleArmTilePlanCapability =
+    "retained-exact-single-arm-tile-plan-v1";
+constexpr const char* kRetainedSingleArmTilePlanCheckpointSchema =
+    "diffexp2-retained-single-arm-tile-plan-v1";
+constexpr const char* kRetainedSingleArmTilePlanProvenanceSchema =
+    "diffexp2-retained-exact-single-arm-tile-plan-v1";
 constexpr const char* kRetainedPlannedMatchHopCapability =
     "retained-exact-plan-driven-local-match-hop-v1";
 constexpr const char* kRetainedPlannedMatchMaterializationCapability =
@@ -9695,8 +9701,25 @@ class StoredTilePlan {
         provenance_identity_(std::move(provenance_identity)),
         division_order_(division_order), lower_(std::move(lower)),
         upper_(std::move(upper)), elapsed_ms_(elapsed_ms) {
-    validate_exact_arm_plan(lower_.exact);
-    validate_exact_arm_plan(upper_.exact);
+    validate_arm_set();
+  }
+
+  StoredTilePlan(std::string handle, std::string checkpoint_identity,
+                 std::string provenance_identity, std::uint32_t division_order,
+                 std::string arm_name, RetainedArmPlan arm,
+                 double elapsed_ms)
+      : handle_(std::move(handle)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        provenance_identity_(std::move(provenance_identity)),
+        division_order_(division_order), elapsed_ms_(elapsed_ms) {
+    if (arm_name == "lower")
+      lower_ = std::move(arm);
+    else if (arm_name == "upper")
+      upper_ = std::move(arm);
+    else
+      throw std::invalid_argument(
+          "single-arm tile plan name must be lower or upper");
+    validate_arm_set();
   }
 
   const std::string& handle() const { return handle_; }
@@ -9707,10 +9730,24 @@ class StoredTilePlan {
     return provenance_identity_;
   }
 
+  bool has_arm(const std::string& name) const {
+    if (name == "lower") return lower_.has_value();
+    if (name == "upper") return upper_.has_value();
+    return false;
+  }
+
+  bool has_two_arms() const {
+    return lower_.has_value() && upper_.has_value();
+  }
+
   const RetainedArmPlan& arm(const std::string& name) const {
-    if (name == "lower") return lower_;
-    if (name == "upper") return upper_;
-    throw std::invalid_argument("native tile-plan arm must be lower or upper");
+    if (name == "lower" && lower_.has_value()) return *lower_;
+    if (name == "upper" && upper_.has_value()) return *upper_;
+    if (name != "lower" && name != "upper")
+      throw std::invalid_argument(
+          "native tile-plan arm must be lower or upper");
+    throw std::invalid_argument(
+        "native tile plan does not retain the requested " + name + " arm");
   }
 
   json::object match_interval(const std::string& name,
@@ -9736,6 +9773,7 @@ class StoredTilePlan {
   void note_integration() { integrations_.fetch_add(1); }
 
   void note_match_advance(const std::string& name) {
+    (void)arm(name);
     if (name == "lower") {
       lower_match_advances_.fetch_add(1);
       return;
@@ -9749,7 +9787,8 @@ class StoredTilePlan {
 
   std::vector<std::shared_ptr<PreparedChartBase>> dependency_charts() const {
     std::vector<std::shared_ptr<PreparedChartBase>> result;
-    result.reserve(lower_.charts.size() + upper_.charts.size());
+    result.reserve((lower_.has_value() ? lower_->charts.size() : 0) +
+                   (upper_.has_value() ? upper_->charts.size() : 0));
     const auto append = [&](const RetainedPlanChartBinding& binding) {
       std::visit(
           [&](const auto& owner) {
@@ -9764,8 +9803,10 @@ class StoredTilePlan {
           },
           binding.owner);
     };
-    for (const auto& binding : lower_.charts) append(binding);
-    for (const auto& binding : upper_.charts) append(binding);
+    if (lower_.has_value())
+      for (const auto& binding : lower_->charts) append(binding);
+    if (upper_.has_value())
+      for (const auto& binding : upper_->charts) append(binding);
     return result;
   }
 
@@ -9776,12 +9817,15 @@ class StoredTilePlan {
               std::shared_ptr<CompositeSCCChartBase>>(&binding.owner))
         result.push_back(*owner);
     };
-    for (const auto& binding : lower_.charts) append(binding);
-    for (const auto& binding : upper_.charts) append(binding);
+    if (lower_.has_value())
+      for (const auto& binding : lower_->charts) append(binding);
+    if (upper_.has_value())
+      for (const auto& binding : upper_->charts) append(binding);
     return result;
   }
 
   json::object summary(bool include_intervals = true) const {
+    if (!has_two_arms()) return single_arm_summary(include_intervals);
     json::object result{
         {"tile_plan", handle_}, {"capability", kRetainedTilePlanCapability},
         {"native_retained", true}, {"checkpoint_identity", checkpoint_identity_},
@@ -9790,13 +9834,13 @@ class StoredTilePlan {
         {"independent_arms", true},
         {"concurrent_execution", "immutable-independent-arm-snapshots"},
         {"anchor", json::object{
-             {"lower_chart", lower_.charts.front().handle},
-             {"upper_chart", upper_.charts.front().handle},
-             {"center_exact", lower_.exact.from.str()}}},
-        {"lower_matches", lower_.exact.matches.size()},
-        {"upper_matches", upper_.exact.matches.size()},
-        {"lower_tiles", lower_.exact.tiles.size()},
-        {"upper_tiles", upper_.exact.tiles.size()},
+             {"lower_chart", lower_->charts.front().handle},
+             {"upper_chart", upper_->charts.front().handle},
+             {"center_exact", lower_->exact.from.str()}}},
+        {"lower_matches", lower_->exact.matches.size()},
+        {"upper_matches", upper_->exact.matches.size()},
+        {"lower_tiles", lower_->exact.tiles.size()},
+        {"upper_tiles", upper_->exact.tiles.size()},
         {"match_interval_queries", match_queries_.load()},
         {"tile_interval_queries", tile_queries_.load()},
         {"lower_match_advances", lower_match_advances_.load()},
@@ -9804,28 +9848,36 @@ class StoredTilePlan {
         {"integrations", integrations_.load()},
         {"elapsed_ms", elapsed_ms_}};
     if (include_intervals) {
-      result["lower"] = encode_retained_arm(lower_);
-      result["upper"] = encode_retained_arm(upper_);
+      result["lower"] = encode_retained_arm(*lower_);
+      result["upper"] = encode_retained_arm(*upper_);
     }
     return result;
   }
 
   json::object checkpoint_record() const {
+    if (!has_two_arms()) {
+      const auto name = single_arm_name();
+      return json::object{
+          {"schema", kRetainedSingleArmTilePlanCheckpointSchema},
+          {"handle", handle_},
+          {"checkpoint_identity", checkpoint_identity_},
+          {"provenance_identity", provenance_identity_},
+          {"division_order", division_order_},
+          {"arm_name", name},
+          {"arm", encode_retained_arm(arm(name))},
+          {"elapsed_ms", elapsed_ms_},
+          {"runtime_stats", runtime_stats_record()}};
+    }
     return json::object{
         {"schema", "diffexp2-retained-tile-plan-v2"},
         {"handle", handle_},
         {"checkpoint_identity", checkpoint_identity_},
         {"provenance_identity", provenance_identity_},
         {"division_order", division_order_},
-        {"lower", encode_retained_arm(lower_)},
-        {"upper", encode_retained_arm(upper_)},
+        {"lower", encode_retained_arm(*lower_)},
+        {"upper", encode_retained_arm(*upper_)},
         {"elapsed_ms", elapsed_ms_},
-        {"runtime_stats",
-         json::object{{"match_interval_queries", match_queries_.load()},
-                      {"tile_interval_queries", tile_queries_.load()},
-                      {"lower_match_advances", lower_match_advances_.load()},
-                      {"upper_match_advances", upper_match_advances_.load()},
-                      {"integrations", integrations_.load()}}}};
+        {"runtime_stats", runtime_stats_record()}};
   }
 
   void restore_runtime_stats(std::uint64_t match_queries,
@@ -9833,6 +9885,10 @@ class StoredTilePlan {
                              std::uint64_t lower_match_advances,
                              std::uint64_t upper_match_advances,
                              std::uint64_t integrations) {
+    if ((!lower_.has_value() && lower_match_advances != 0) ||
+        (!upper_.has_value() && upper_match_advances != 0))
+      throw std::invalid_argument(
+          "single-arm tile-plan checkpoint advances an absent arm");
     match_queries_.store(match_queries);
     tile_queries_.store(tile_queries);
     lower_match_advances_.store(lower_match_advances);
@@ -9841,12 +9897,77 @@ class StoredTilePlan {
   }
 
  private:
+  void validate_arm_set() const {
+    if (!lower_.has_value() && !upper_.has_value())
+      throw std::invalid_argument(
+          "retained tile plan must own one or two arms");
+    if (lower_.has_value()) validate_exact_arm_plan(lower_->exact);
+    if (upper_.has_value()) validate_exact_arm_plan(upper_->exact);
+    // Existing two-arm requests name the slots but historically only require
+    // opposite directions; preserve that behavior exactly. A genuine
+    // single-arm plan derives its retained name from the exact direction.
+    if (!has_two_arms()) {
+      const auto& retained = lower_.has_value() ? *lower_ : *upper_;
+      const auto expected_direction = lower_.has_value() ? -1 : 1;
+      if (retained.exact.direction != expected_direction)
+        throw std::invalid_argument(
+            "retained single tile-arm name differs from its exact direction");
+    }
+  }
+
+  std::string single_arm_name() const {
+    if (has_two_arms())
+      throw std::logic_error(
+          "two-arm tile plan has no single arm name");
+    return lower_.has_value() ? "lower" : "upper";
+  }
+
+  json::object runtime_stats_record() const {
+    return json::object{
+        {"match_interval_queries", match_queries_.load()},
+        {"tile_interval_queries", tile_queries_.load()},
+        {"lower_match_advances", lower_match_advances_.load()},
+        {"upper_match_advances", upper_match_advances_.load()},
+        {"integrations", integrations_.load()}};
+  }
+
+  json::object single_arm_summary(bool include_intervals) const {
+    const auto name = single_arm_name();
+    const auto& retained = arm(name);
+    json::object result{
+        {"tile_plan", handle_},
+        {"capability", kRetainedSingleArmTilePlanCapability},
+        {"native_retained", true},
+        {"checkpoint_identity", checkpoint_identity_},
+        {"provenance_identity", provenance_identity_},
+        {"division_order", division_order_},
+        {"independent_arms", false},
+        {"concurrent_execution", "single-immutable-arm-snapshot"},
+        {"arm_name", name},
+        {"anchor", json::object{
+             {"chart", retained.charts.front().handle},
+             {"center_exact", retained.exact.from.str()}}},
+        {"matches", retained.exact.matches.size()},
+        {"tiles", retained.exact.tiles.size()},
+        {"match_interval_queries", match_queries_.load()},
+        {"tile_interval_queries", tile_queries_.load()},
+        {"lower_match_advances", lower_match_advances_.load()},
+        {"upper_match_advances", upper_match_advances_.load()},
+        {"integrations", integrations_.load()},
+        {"elapsed_ms", elapsed_ms_}};
+    if (include_intervals) {
+      result["arm"] = encode_retained_arm(retained);
+      result[name] = encode_retained_arm(retained);
+    }
+    return result;
+  }
+
   std::string handle_;
   std::string checkpoint_identity_;
   std::string provenance_identity_;
   std::uint32_t division_order_ = 3;
-  RetainedArmPlan lower_;
-  RetainedArmPlan upper_;
+  std::optional<RetainedArmPlan> lower_;
+  std::optional<RetainedArmPlan> upper_;
   double elapsed_ms_ = 0.0;
   mutable std::atomic<std::uint64_t> match_queries_{0};
   mutable std::atomic<std::uint64_t> tile_queries_{0};
@@ -10772,6 +10893,39 @@ std::shared_ptr<StoredTilePlan> build_tile_plan(
   return std::make_shared<StoredTilePlan>(
       handle, checkpoint_identity, provenance_identity, division_order,
       std::move(lower), std::move(upper), elapsed);
+}
+
+std::shared_ptr<StoredTilePlan> build_single_arm_tile_plan(
+    const std::string& handle, const json::object& request,
+    const std::vector<RetainedPlanChartBinding::Owner>& charts) {
+  const auto checkpoint_identity = required_string(
+      request, "checkpoint_identity");
+  if (checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "native single-arm tile-plan checkpoint identity cannot be empty");
+  const auto division_order = as_u32(
+      request.at("division_order"), "native single-arm tile division order");
+  auto [arm_request, bindings] = parse_retained_arm_request(
+      as_object(request.at("arm"), "native single tile arm"), charts);
+  ExactPathPlanOptions options;
+  options.division_order = division_order;
+  const auto started = std::chrono::steady_clock::now();
+  auto exact = plan_exact_arm(arm_request, options);
+  const std::string arm_name = exact.direction < 0 ? "lower" : "upper";
+  RetainedArmPlan retained{std::move(exact), std::move(bindings)};
+  json::object provenance{
+      {"schema", kRetainedSingleArmTilePlanProvenanceSchema},
+      {"checkpoint_identity", checkpoint_identity},
+      {"division_order", division_order},
+      {"arm_name", arm_name},
+      {"arm", encode_retained_arm(retained)}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  return std::make_shared<StoredTilePlan>(
+      handle, checkpoint_identity, provenance_identity, division_order,
+      arm_name, std::move(retained), elapsed);
 }
 
 json::value optional_plan_rim_json(
@@ -12332,6 +12486,80 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
     const std::unordered_map<std::string,
                              std::shared_ptr<CompositeSCCChartBase>>& sccs) {
   const auto& object = as_object(raw, "checkpoint retained tile plan");
+  if (required_string(object, "schema") ==
+      kRetainedSingleArmTilePlanCheckpointSchema) {
+    require_exact_keys(
+        object,
+        {"schema", "handle", "checkpoint_identity", "provenance_identity",
+         "division_order", "arm_name", "arm", "elapsed_ms",
+         "runtime_stats"},
+        "checkpoint retained single-arm tile plan");
+    const auto handle = required_string(object, "handle");
+    const auto checkpoint_identity = required_string(
+        object, "checkpoint_identity");
+    const auto provenance_identity = required_string(
+        object, "provenance_identity");
+    const auto arm_name = required_string(object, "arm_name");
+    if (handle.empty() || checkpoint_identity.empty() ||
+        provenance_identity.empty() ||
+        (arm_name != "lower" && arm_name != "upper"))
+      throw std::invalid_argument(
+          "checkpoint retained single-arm tile plan contains an invalid identity or arm name");
+    const auto division_order = as_u32(
+        object.at("division_order"),
+        "checkpoint single-arm tile division order");
+    auto [arm_request, bindings] = parse_checkpoint_retained_arm(
+        object.at("arm"), charts, sccs,
+        "checkpoint retained single tile arm");
+    ExactPathPlanOptions options;
+    options.division_order = division_order;
+    auto exact = plan_exact_arm(arm_request, options);
+    const std::string derived_name =
+        exact.direction < 0 ? "lower" : "upper";
+    if (derived_name != arm_name)
+      throw std::invalid_argument(
+          "checkpoint single-arm tile-plan name differs from its exact direction");
+    RetainedArmPlan retained{std::move(exact), std::move(bindings)};
+    if (encode_retained_arm(retained) != object.at("arm"))
+      throw std::invalid_argument(
+          "checkpoint single-arm tile intervals do not reproduce the exact planner result");
+    json::object provenance{
+        {"schema", kRetainedSingleArmTilePlanProvenanceSchema},
+        {"checkpoint_identity", checkpoint_identity},
+        {"division_order", division_order},
+        {"arm_name", arm_name},
+        {"arm", encode_retained_arm(retained)}};
+    if (json::serialize(canonical_json_value(provenance)) !=
+        provenance_identity)
+      throw std::invalid_argument(
+          "checkpoint single-arm tile-plan provenance identity is inconsistent");
+    const auto elapsed_ms = checkpoint_nonnegative_double(
+        object.at("elapsed_ms"),
+        "checkpoint single-arm tile-plan elapsed time");
+    const auto& stats = as_object(
+        object.at("runtime_stats"),
+        "checkpoint single-arm tile-plan runtime stats");
+    require_exact_keys(
+        stats,
+        {"match_interval_queries", "tile_interval_queries",
+         "lower_match_advances", "upper_match_advances", "integrations"},
+        "checkpoint single-arm tile-plan runtime stats");
+    auto plan = std::make_shared<StoredTilePlan>(
+        handle, checkpoint_identity, provenance_identity, division_order,
+        arm_name, std::move(retained), elapsed_ms);
+    plan->restore_runtime_stats(
+        as_u64(stats.at("match_interval_queries"),
+               "checkpoint single-arm tile match queries"),
+        as_u64(stats.at("tile_interval_queries"),
+               "checkpoint single-arm tile interval queries"),
+        as_u64(stats.at("lower_match_advances"),
+               "checkpoint single-arm lower match advances"),
+        as_u64(stats.at("upper_match_advances"),
+               "checkpoint single-arm upper match advances"),
+        as_u64(stats.at("integrations"),
+               "checkpoint single-arm tile integrations"));
+    return plan;
+  }
   require_exact_keys(
       object,
       {"schema", "handle", "checkpoint_identity", "provenance_identity",
@@ -14952,6 +15180,8 @@ json::object run_session_command(const json::object& root) {
                              ? "unsupported"
                              : kRetainedPlannedEndpointLimitCapability},
                         {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"single_arm_tile_plan_capability",
+                         kRetainedSingleArmTilePlanCapability},
                         {"planned_match_hop_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -15134,6 +15364,82 @@ json::object run_session_command(const json::object& root) {
         throw std::invalid_argument(
             "persistent solver session closed during native tile planning");
       session->tile_plans.emplace(plan_handle, plan);
+      ++session->total_tile_plans;
+      session->total_tile_plan_ms +=
+          plan->summary(false).at("elapsed_ms").as_double();
+    }
+    auto result = plan->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "tile.plan_arm") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "checkpoint_identity",
+         "division_order", "arm"},
+        "native tile.plan_arm request");
+    const auto& arm_request = as_object(
+        root.at("arm"), "native single tile arm");
+    const auto handles = parse_plan_chart_handles(arm_request);
+    std::vector<RetainedPlanChartBinding::Owner> charts;
+    std::string plan_handle;
+    {
+      // Acquire every chart/SCC owner and the publication reservation in one
+      // admission section. The plan keeps these owners alive even if their
+      // public handles are released while exact planning runs.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      if (session->tile_plans.size() + session->pending_tile_plans >=
+          session->tile_plan_capacity)
+        throw std::invalid_argument(
+            "persistent native tile-plan capacity is exhausted");
+      const auto resolve_owner = [&](const std::string& handle)
+          -> RetainedPlanChartBinding::Owner {
+        if (handle.starts_with("c:")) {
+          const auto found = session->charts.find(handle);
+          if (found != session->charts.end()) return found->second;
+        } else if (handle.starts_with("scc:")) {
+          const auto found = session->sccs.find(handle);
+          if (found != session->sccs.end()) return found->second;
+        }
+        throw std::invalid_argument(
+            "unknown or released prepared-chart/composite-SCC owner in native single tile arm: " +
+            handle);
+      };
+      charts.reserve(handles.size());
+      for (const auto& handle : handles)
+        charts.push_back(resolve_owner(handle));
+      plan_handle = "tile:" +
+          std::to_string(session->next_tile_plan++);
+      ++session->pending_tile_plans;
+    }
+    std::shared_ptr<StoredTilePlan> plan;
+    try {
+      plan = build_single_arm_tile_plan(
+          plan_handle, root, charts);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_tile_plans == 0)
+        throw std::logic_error(
+            "native single-arm tile-plan reservation accounting underflow");
+      --session->pending_tile_plans;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_tile_plans == 0)
+        throw std::logic_error(
+            "native single-arm tile-plan reservation accounting underflow");
+      --session->pending_tile_plans;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during native single-arm tile planning");
+      if (!session->tile_plans.emplace(plan_handle, plan).second)
+        throw std::logic_error(
+            "native single-arm tile-plan handle collided during publication");
       ++session->total_tile_plans;
       session->total_tile_plan_ms +=
           plan->summary(false).at("elapsed_ms").as_double();
@@ -17582,6 +17888,8 @@ json::object run_session_command(const json::object& root) {
                              ? "unsupported"
                              : kRetainedPlannedEndpointLimitCapability},
                         {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"single_arm_tile_plan_capability",
+                         kRetainedSingleArmTilePlanCapability},
                         {"planned_match_hop_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -17832,6 +18140,10 @@ std::string backend_info_json() {
                                       {"persistent_exact_tile_plans", true},
                                       {"persistent_exact_tile_plan_capability",
                                        kRetainedTilePlanCapability},
+                                      {"persistent_exact_single_arm_tile_plans",
+                                       true},
+                                      {"persistent_exact_single_arm_tile_plan_capability",
+                                       kRetainedSingleArmTilePlanCapability},
                                       {"persistent_plan_driven_match_hop",
                                        true},
                                       {"persistent_plan_driven_match_hop_capability",

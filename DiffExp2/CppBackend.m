@@ -26,6 +26,8 @@ EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options
 CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies its native Acb theta residual against the supplied epsilon-framed theta operator and optional source. request carries point, relative_tolerance, operator_identity, checkpoint_identity, and theta_operator; no solution coefficient slab crosses the bridge.";
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
 RunPersistentAcbLocalMatch::usage = "RunPersistentAcbLocalMatch[basis, incoming, request] evaluates retained Acb locals at one exact physical point and retains an exact-Rational-lattice-guided Laurent match with bounded refinement and residual diagnostics. request supplies exact_lattice and refinement records in addition to chart, branch, checkpoint, point, and epsilon identities.";
+RunPersistentPlannedMatch::usage = "RunPersistentPlannedMatch[plan, arm, index, basis, incoming, policy] performs one plan-derived retained Rational or Acb match. The one-based match index selects exact physical/local coordinates and branch data from the plan; policy supplies epsilon/checkpoint fields and, for Acb, exact_lattice/refinement.";
+MaterializePersistentLocalMatch::usage = "MaterializePersistentLocalMatch[match, checkpointIdentity] combines a retained plan-driven match's Laurent weights with its strongly owned receiving basis entirely in C++ and returns the next opaque retained local without coefficient JSON.";
 PersistentLocalMatchStatistics::usage = "PersistentLocalMatchStatistics[handle] returns the opaque summary and exact provenance of one retained native local match.";
 ReleasePersistentLocalMatch::usage = "ReleasePersistentLocalMatch[handle] releases one retained native local match state. A second release is a loud native error.";
 RunPersistentEndpointLimit::usage = "RunPersistentEndpointLimit[local, request] applies the native sector endpoint gate to a retained local and returns an opaque session-owned endpoint-result handle. request explicitly binds source/result checkpoint identities, approach_direction, cancellation mode, and optional rim; no coefficient slab is returned.";
@@ -1092,6 +1094,58 @@ PersistentTileIntegrationInterval[handle_Association, arm_String,
     "session" -> tokens["Session"],
     "tile_plan" -> tokens["TilePlan"], "arm" -> arm,
     "tile" -> index - 1|>]];
+
+RunPersistentPlannedMatch[plan_Association, arm_String,
+    index_Integer, basis_List, incoming_Association,
+    policy_Association] := Module[
+  {planTokens = persistentTilePlanHandles[plan], basisTokens,
+   incomingTokens = persistentLocalHandles[incoming], sessions, bad,
+   reserved, required, missing, payload},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[!MemberQ[{"lower", "upper"}, arm] || index < 1 ||
+      basis === {} || !AllTrue[basis, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "planned matching requires lower/upper, a one-based positive match index, and a nonempty basis"|>], Module]];
+  basisTokens = persistentLocalHandles /@ basis;
+  bad = Select[Range[Length[basisTokens]], FailureQ[basisTokens[[#]]] &];
+  If[bad =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "planned match basis contains malformed retained locals",
+      "Positions" -> bad|>], Module]];
+  If[FailureQ[incomingTokens], Return[incomingTokens, Module]];
+  sessions = DeleteDuplicates[Join[{planTokens["Session"],
+      incomingTokens["Session"]}, Lookup[basisTokens, "Session"]]];
+  If[Length[sessions] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "planned matching requires the plan, basis, and incoming local in one native session",
+      "Sessions" -> sessions|>], Module]];
+  reserved = Intersection[Keys[policy],
+    {"schema", "op", "session", "tile_plan", "arm", "match",
+     "basis", "incoming"}];
+  required = {"epsilon", "checkpoint_identity"};
+  missing = Select[required, !KeyExistsQ[policy, #] &];
+  If[reserved =!= {} || missing =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "planned match policy is missing required fields or contains reserved protocol keys",
+      "Missing" -> missing, "Reserved" -> reserved|>], Module]];
+  payload = Join[policy, <|"schema" -> 2,
+    "op" -> "tile.match_advance", "session" -> First[sessions],
+    "tile_plan" -> planTokens["TilePlan"], "arm" -> arm,
+    "match" -> index - 1, "basis" -> Lookup[basisTokens, "Local"],
+    "incoming" -> incomingTokens["Local"]|>];
+  RunRequest[payload]];
+
+MaterializePersistentLocalMatch[match_Association,
+    checkpointIdentity_String] := Module[
+  {tokens = persistentMatchHandles[match]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[StringLength[checkpointIdentity] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "match materialization checkpoint identity must be nonempty"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "match.materialize_local",
+    "session" -> tokens["Session"], "match" -> tokens["Match"],
+    "checkpoint_identity" -> checkpointIdentity|>]];
 
 ReleasePersistentTilePlan[handle_Association] := Module[
   {tokens = persistentTilePlanHandles[handle]},

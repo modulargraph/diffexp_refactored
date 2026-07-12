@@ -83,10 +83,12 @@ The implemented recurrence-session commands are:
 | `tile.plan` | Build and retain immutable exact lower/upper arm plans from retained chart geometry, branch topology, and `DivisionOrder`. |
 | `tile.match_interval` | Read one exact physical handoff and its opposite-sign producing/receiving local coordinates from a retained plan. |
 | `tile.integration_interval` | Read one exact physical/local tile interval and its affine Jacobian from a retained plan. |
+| `tile.match_advance` | Derive one Rational/Acb match entirely from a retained plan and retain the receiving-basis weights with strong plan/local ownership. |
 | `tile.stats` / `tile.release` | Inspect or release one retained independent-arm plan. |
 | `integration.line` | Integrate one retained local over a plan-selected tile, apply the exact affine Jacobian, and retain the physical epsilon vector. |
 | `integration.stats` / `integration.export` / `integration.release` | Inspect, explicitly export, or release one retained tile integral. |
 | `match.stats` | Inspect one retained native match and its exact provenance. |
+| `match.materialize_local` | Apply a plan-driven match's retained Laurent weights to its receiving basis and publish the next retained local without coefficient JSON. |
 | `match.release` | Release one retained native match state. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
 | `scc.solve_column` | Execute one retained regular exact-Rational or Acb SCC basis column, or an exact-Rational regular-singular Jordan column, and retain the parent local without coefficient JSON. |

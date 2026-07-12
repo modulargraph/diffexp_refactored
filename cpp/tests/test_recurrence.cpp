@@ -323,6 +323,52 @@ void test_persistent_operator_session() {
     std::string(other_precision.at("session").as_string()) + "\"}");
 }
 
+void test_persistent_framed_d0_inverse() {
+  const auto created = json_request(R"json({
+    "schema":2,"op":"session.create","domain":"rational",
+    "output_digits":30,"analytic":{"regulators":[],"branch":"euclidean"}
+  })json");
+  const auto session = std::string(created.at("session").as_string());
+  const auto prepared = json_request(std::string(R"json({
+    "schema":2,"op":"chart.prepare","session":")json") + session + R"json(",
+    "key":"exp-eps@0[-2,8]","identity":"exact-exp-eps-v1",
+    "analytic":{"prescription":"none"},
+    "scc":{"components":[[0]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0],"coupling_depth":0},
+    "problem":{"domain":"rational","d":1,"fb":-2,"w":8,
+      "d_lags":[[{"s":0,"v":"1"},{"s":1,"v":"1"}]],
+      "denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],"val":[null]},
+        {"poly":[{"s":0,"e":[[0,0,"1"]]}],"rat":[],"val":[0]}],
+      "d0_inverse":null,"blocks":[[0]],"assembly":null,
+      "chop_digits":10}
+  })json");
+  const auto chart = std::string(prepared.at("chart").as_string());
+  const auto run = std::string(R"json({"schema":2,"op":"chart.solve","session":")json") +
+      session + R"json(","chart":")json" + chart + R"json(","run":{
+        "nmax":1,"p":0,"has_initial":true,"adaptive_probe":false,
+        "a_target":"0","b_target":"0","a_shift_min":0,
+        "a_shifts":["0","1"],
+        "schedule":[[{"case":"R","da":"0","db":"0"}],
+          [{"case":"T","da":"1","db":"0"}]],
+        "initial":["0","0","1","0","0","0","0","0"],
+        "initial_validity":[5],"source":null,"return_u":true}})json";
+  const auto first = json_request(run);
+  const auto second = json_request(run);
+  const auto stats = json_request(std::string(R"json({
+    "schema":2,"op":"session.stats","session":")json") + session + "\"}");
+  const auto& coefficients = first.at("u").as_array();
+  const auto& chart_stats = stats.at("chart_stats").as_array().front().as_object();
+  check("persistent chart retains one framed d0 inverse across runs",
+        prepared.at("d0_inverse_mode") == "retained-frame" &&
+            first.at("status") == "ok" && second.at("status") == "ok" &&
+            coefficients[18] == "1" && coefficients[19] == "-1" &&
+            chart_stats.at("runs") == 2 &&
+            chart_stats.at("d0_inverse_mode") == "retained-frame");
+  (void)json_request(std::string(R"json({
+    "schema":2,"op":"session.close","session":")json") + session + "\"}");
+}
+
 }  // namespace
 
 int main() {
@@ -334,6 +380,7 @@ int main() {
   test_malformed_tensor_is_typed_error();
   test_symbolic_rational_field();
   test_persistent_operator_session();
+  test_persistent_framed_d0_inverse();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

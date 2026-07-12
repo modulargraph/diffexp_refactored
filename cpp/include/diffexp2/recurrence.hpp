@@ -142,6 +142,10 @@ struct PreparedRecurrenceOperator {
   std::vector<PreparedLag<Scalar>> nhat_lags;
   std::vector<std::vector<Scalar>> rational_denominators;
   std::optional<Scalar> d0_inverse_scalar;
+  // When d0(eps) is not a scalar monomial, its framed inverse depends only on
+  // this prepared chart/window.  Retain it once instead of rebuilding the
+  // same O(W^2) recurrence for every homogeneous column and source sector.
+  Frame<Scalar> d0_inverse_frame;
   std::vector<JordanBlock> blocks;
   std::optional<PreparedMatrix<Scalar>> assembly_matrix;
   std::int32_t chop_digits = 0;
@@ -156,6 +160,7 @@ struct RecurrenceOperatorView {
   const std::vector<PreparedLag<Scalar>>& nhat_lags;
   const std::vector<std::vector<Scalar>>& rational_denominators;
   const std::optional<Scalar>& d0_inverse_scalar;
+  const Frame<Scalar>* d0_inverse_frame;
   const std::vector<JordanBlock>& blocks;
   const std::optional<PreparedMatrix<Scalar>>& assembly_matrix;
   std::int32_t chop_digits;
@@ -167,7 +172,8 @@ RecurrenceOperatorView<Scalar> recurrence_operator_view(
   return {problem.dimension, problem.frame_base, problem.frame_width,
           problem.d_lags, problem.nhat_lags,
           problem.rational_denominators, problem.d0_inverse_scalar,
-          problem.blocks, problem.assembly_matrix, problem.chop_digits};
+          nullptr, problem.blocks, problem.assembly_matrix,
+          problem.chop_digits};
 }
 
 template <typename Scalar>
@@ -176,6 +182,8 @@ RecurrenceOperatorView<Scalar> recurrence_operator_view(
   return {prepared.dimension, prepared.frame_base, prepared.frame_width,
           prepared.d_lags, prepared.nhat_lags,
           prepared.rational_denominators, prepared.d0_inverse_scalar,
+          prepared.d0_inverse_frame.empty()
+              ? nullptr : &prepared.d0_inverse_frame,
           prepared.blocks, prepared.assembly_matrix, prepared.chop_digits};
 }
 
@@ -552,6 +560,37 @@ FrameBlock<Scalar> solve_jordan(const FrameBlock<Scalar>& rhs,
 }  // namespace detail
 
 template <typename Scalar>
+Frame<Scalar> compute_framed_d0_inverse(
+    const std::vector<std::vector<ScalarShift<Scalar>>>& d_lags,
+    std::int32_t frame_base, std::uint32_t frame_width) {
+  if (frame_width == 0)
+    throw RecurrenceError("E5", "cannot prepare d0 inverse on an empty frame");
+  if (d_lags.empty() || d_lags.front().empty())
+    throw RecurrenceError("E5", "missing prepared d0 lag");
+  Frame<Scalar> d0(frame_width, ScalarTraits<Scalar>::zero());
+  for (const auto& item : d_lags.front()) {
+    const auto index = static_cast<std::int64_t>(item.shift) - frame_base;
+    if (index < 0 || index >= static_cast<std::int64_t>(frame_width))
+      throw RecurrenceError("E5", "d0 shift outside work frame");
+    // A protocol producer normally coalesces equal epsilon shifts.  Summing
+    // here makes the retained operator correct even if an equivalent exact
+    // representation contains more than one contribution at the same shift.
+    d0[static_cast<std::size_t>(index)] += item.value;
+  }
+  return detail::invert_frame(d0, frame_base);
+}
+
+template <typename Scalar>
+void retain_framed_d0_inverse(PreparedRecurrenceOperator<Scalar>& prepared) {
+  if (prepared.d0_inverse_scalar.has_value()) {
+    prepared.d0_inverse_frame.clear();
+    return;
+  }
+  prepared.d0_inverse_frame = compute_framed_d0_inverse(
+      prepared.d_lags, prepared.frame_base, prepared.frame_width);
+}
+
+template <typename Scalar>
 class RecurrenceSolver {
  public:
   explicit RecurrenceSolver(const RecurrenceProblem<Scalar>& problem)
@@ -582,16 +621,15 @@ class RecurrenceSolver {
     result_.validity.assign(validity_count, kCompleteInfinity);
     result_.top_valid = kCompleteInfinity;
     if (!op_.d0_inverse_scalar.has_value()) {
-      Frame<Scalar> d0(width_, ScalarTraits<Scalar>::zero());
-      for (const auto& item : op_.d_lags.front()) {
-        const auto index = static_cast<std::int64_t>(item.shift) -
-                           op_.frame_base;
-        if (index < 0 || index >= static_cast<std::int64_t>(width_)) {
-          throw RecurrenceError("E5", "d0 shift outside work frame");
-        }
-        d0[static_cast<std::size_t>(index)] = item.value;
+      if (op_.d0_inverse_frame != nullptr) {
+        if (op_.d0_inverse_frame->size() != width_)
+          throw RecurrenceError(
+              "E5", "retained d0 inverse has the wrong frame width");
+        inv_d0_frame_ = *op_.d0_inverse_frame;
+      } else {
+        inv_d0_frame_ = compute_framed_d0_inverse(
+            op_.d_lags, op_.frame_base, op_.frame_width);
       }
-      inv_d0_frame_ = detail::invert_frame(d0, op_.frame_base);
     } else {
       inv_d0_frame_ = detail::zero_frame<Scalar>(width_);
     }
@@ -1009,6 +1047,14 @@ class RecurrenceSolver {
       throw RecurrenceError("E5", "missing prepared recurrence lags");
     if (op_.d_lags.front().empty())
       throw RecurrenceError("E5", "prepared d0 lag is empty");
+    if (op_.d0_inverse_scalar.has_value() &&
+        op_.d0_inverse_frame != nullptr)
+      throw RecurrenceError(
+          "E5", "prepared d0 inverse cannot be both scalar and framed");
+    if (op_.d0_inverse_frame != nullptr &&
+        op_.d0_inverse_frame->size() != width_)
+      throw RecurrenceError(
+          "E5", "retained d0 inverse has the wrong frame width");
     if (p_.a_shift_min > 0 ||
         static_cast<std::int64_t>(p_.a_shift_min) +
             static_cast<std::int64_t>(p_.a_shifts.size()) <=

@@ -355,6 +355,10 @@ PreparedRecurrenceOperator<Scalar> parse_prepared_operator(
   }
   prepared.chop_digits = root.if_contains("chop_digits")
       ? as_i32(root.at("chop_digits"), "chop digits") : 0;
+  // d0 is immutable for this chart/frame.  Retain its framed inverse now so
+  // every later column/source run uses the same typed kernel without repeating
+  // the quadratic series inversion.
+  retain_framed_d0_inverse(prepared);
   return prepared;
 }
 
@@ -1091,6 +1095,7 @@ class PreparedChartBase {
   virtual std::uint32_t dimension() const = 0;
   virtual std::int32_t frame_base() const = 0;
   virtual std::uint32_t frame_width() const = 0;
+  virtual const char* d0_inverse_mode() const = 0;
   virtual ChartStats stats() const = 0;
 
   const std::string& handle() const { return handle_; }
@@ -2474,6 +2479,10 @@ class PreparedChart final : public PreparedChartBase {
   std::uint32_t dimension() const override { return prepared_.dimension; }
   std::int32_t frame_base() const override { return prepared_.frame_base; }
   std::uint32_t frame_width() const override { return prepared_.frame_width; }
+  const char* d0_inverse_mode() const override {
+    return prepared_.d0_inverse_scalar.has_value()
+        ? "retained-scalar" : "retained-frame";
+  }
   slong precision_bits() const { return precision_bits_; }
   bool has_identity_assembly() const {
     return prepared_.assembly_matrix.has_value() &&
@@ -5044,7 +5053,8 @@ json::object run_session_command(const json::object& root) {
                             {"reused", true},
                             {"dimension", chart->dimension()},
                             {"frame_base", chart->frame_base()},
-                            {"frame_width", chart->frame_width()}};
+                            {"frame_width", chart->frame_width()},
+                            {"d0_inverse_mode", chart->d0_inverse_mode()}};
       }
       if (session->charts.size() >= session->chart_capacity)
         throw std::invalid_argument("persistent chart capacity is exhausted");
@@ -5091,6 +5101,7 @@ json::object run_session_command(const json::object& root) {
                         {"dimension", chart->dimension()},
                         {"frame_base", chart->frame_base()},
                         {"frame_width", chart->frame_width()},
+                        {"d0_inverse_mode", chart->d0_inverse_mode()},
                         {"scc_components", chart->scc().component_count},
                         {"scc_structural_edges",
                          chart->scc().structural_edges.size()},
@@ -5934,6 +5945,7 @@ json::object run_session_command(const json::object& root) {
           {"dimension", chart->dimension()},
           {"frame_base", chart->frame_base()},
           {"frame_width", chart->frame_width()}, {"runs", stats.runs},
+          {"d0_inverse_mode", chart->d0_inverse_mode()},
           {"local_solves", stats.local_runs},
           {"scc_components", chart->scc().component_count},
           {"scc_structural_edges", chart->scc().structural_edges.size()},

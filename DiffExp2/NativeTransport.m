@@ -20,7 +20,7 @@ RestoreNativeTransportObservableBatchCheckpoint::usage =
 ReleaseNativeTransportObservableBatch::usage =
   "ReleaseNativeTransportObservableBatch[batch] releases every public line, endpoint, and retained transport-state token produced by RunNativeTransportObservableBatch, then releases its atlas anchor, bases, and tile plan. Strongly owned hidden matches and locals are reclaimed without exposing coefficient tensors.";
 ExportNativeTransportObservableBatch::usage =
-  "ExportNativeTransportObservableBatch[batch,outputDigits] performs the sole compatibility export for each retained line or endpoint result in request order and returns EpsSeries values. No chart, match, local-sector, or tile coefficient tensor is serialized.";
+  "ExportNativeTransportObservableBatch[batch,outputDigits] performs the sole compatibility export for each retained line or endpoint result in request order and returns EpsSeries values. Integrate results additionally retain the validated native Scope, ErrorGuarantee, and compact ErrorEnvelope diagnostics; endpoint result shape is unchanged. No chart, match, local-sector, or tile coefficient tensor is serialized.";
 NativeRegularIndependentArmPlansSupportedQ::usage =
   "NativeRegularIndependentArmPlansSupportedQ[lower,upper] is the side-effect-free public-dispatch eligibility predicate for the current exact-rational native path protocol. It accepts only a shared interior anchor, entirely regular charts, and topology/geometry representable by the retained native tile planner.";
 ReleaseNativeRegularIndependentArms::usage =
@@ -1105,6 +1105,55 @@ nativeDecodeBatchExport[exported_Association, outputDigits_Integer,
       "Detail" -> "native observable export does not cover its required epsilon maximum"|>]];
   series];
 
+nativeLineExportCertification[exported_Association] := Module[
+  {scope = Lookup[exported, "scope", None],
+   guarantee = Lookup[exported, "error_guarantee", None], value,
+   envelope, allowedGuarantees = {"none", "advisory", "certified"},
+   envelopeKeys = {"min", "max", "guarantee",
+     "absolute_upper_approx", "bound_encoding", "provenance"}, bounds},
+  value = Lookup[exported, "value", None];
+  If[!MemberQ[{"stored_truncation",
+        "full_local_with_certified_tail"}, scope] ||
+      !MemberQ[allowedGuarantees, guarantee] || !AssociationQ[value],
+    err["E5", <|"Scope" -> scope, "ErrorGuarantee" -> guarantee,
+      "Detail" -> "native line export omitted or malformed its integration certification summary"|>]];
+  envelope = Lookup[value, "error", None];
+  If[envelope === None,
+    If[guarantee =!= "none" ||
+        scope === "full_local_with_certified_tail",
+      err["E5", <|"Scope" -> scope, "ErrorGuarantee" -> guarantee,
+        "Detail" -> "native line export certification requires a returned error envelope"|>]],
+    If[!AssociationQ[envelope] ||
+        Sort[Keys[envelope]] =!= Sort[envelopeKeys] ||
+        !IntegerQ[Lookup[envelope, "min", None]] ||
+        !IntegerQ[Lookup[envelope, "max", None]] ||
+        envelope["min"] > envelope["max"] ||
+        Lookup[envelope, "guarantee", None] =!= guarantee ||
+        !StringQ[Lookup[envelope, "bound_encoding", None]] ||
+        StringLength[envelope["bound_encoding"]] === 0 ||
+        !StringQ[Lookup[envelope, "provenance", None]],
+      err["E5", <|"Scope" -> scope, "ErrorGuarantee" -> guarantee,
+        "ErrorEnvelope" -> envelope,
+        "Detail" -> "native line export returned a malformed error envelope"|>]];
+    bounds = envelope["absolute_upper_approx"];
+    If[!ListQ[bounds] ||
+        Length[bounds] =!= envelope["max"] - envelope["min"] + 1 ||
+        !AllTrue[bounds, NumberQ[#] && TrueQ[# >= 0] &] ||
+        !IntegerQ[Lookup[value, "min", None]] ||
+        !IntegerQ[Lookup[value, "max", None]] ||
+        envelope["min"] < value["min"] ||
+        envelope["max"] > value["max"],
+      err["E5", <|"ValueWindow" ->
+          Lookup[value, {"min", "max"}, None],
+        "ErrorEnvelope" -> envelope,
+        "Detail" -> "native line export error bounds do not match a finite subwindow of the returned epsilon vector"|>]]];
+  If[scope === "full_local_with_certified_tail" &&
+      guarantee =!= "certified",
+    err["E5", <|"Scope" -> scope, "ErrorGuarantee" -> guarantee,
+      "Detail" -> "full-local line scope lacks a certified native error guarantee"|>]];
+  <|"Scope" -> scope, "ErrorGuarantee" -> guarantee,
+    "ErrorEnvelope" -> envelope|>];
+
 ExportNativeTransportObservableBatch[batch_Association,
     outputDigits_Integer] := Module[{results, exported},
   If[Lookup[batch, "Type", None] =!=
@@ -1113,7 +1162,7 @@ ExportNativeTransportObservableBatch[batch_Association,
       "OutputDigits" -> outputDigits,
       "Detail" -> "native observable export requires a completed batch and positive output digits"|>]];
   results = Lookup[batch, "Results", {}];
-  exported = Map[Function[result, Module[{raw},
+  exported = Map[Function[result, Module[{raw, decoded},
     raw = Switch[result["Operation"],
       "integrate",
         DiffExp2`CppBackend`ExportPersistentLineIntegral[
@@ -1122,8 +1171,10 @@ ExportNativeTransportObservableBatch[batch_Association,
         DiffExp2`CppBackend`ExportPersistentEndpoint[
           result["Endpoint"], result["CheckpointIdentity"],
           outputDigits]];
-    Append[result, "Value" -> nativeDecodeBatchExport[raw,
-      outputDigits, result["Epsilon", "RequiredCompleteMax"]]]]],
+    decoded = Append[result, "Value" -> nativeDecodeBatchExport[raw,
+      outputDigits, result["Epsilon", "RequiredCompleteMax"]]];
+    If[result["Operation"] === "integrate",
+      Join[decoded, nativeLineExportCertification[raw]], decoded]]],
     results];
   Join[batch, <|"ExportedResults" -> exported,
     "CompatibilityExports" -> Length[exported]|>]];

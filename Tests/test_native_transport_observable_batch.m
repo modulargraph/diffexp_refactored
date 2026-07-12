@@ -41,7 +41,7 @@ observable[operation_, identity_, coefficients_:{1 + Global`eps}] := <|
   "CheckpointIdentity" -> identity <> ":checkpoint",
   "CoefficientVector" -> coefficients, "Epsilon" -> epsilon|>;
 observables = {
-  Append[observable["integrate", "integral"], "TailPolicy" -> "stored"],
+  Append[observable["integrate", "integral"], "TailPolicy" -> "require"],
   observable["limitLower", "lower-limit"],
   observable["limitUpper", "upper-limit"],
   Append[observable["integrate", "polar-integral",
@@ -113,6 +113,12 @@ upperValue = If[Length[exportedResults] === 4,
   exportedResults[[3, "Value"]], None];
 polarValue = If[Length[exportedResults] === 4,
   exportedResults[[4, "Value"]], None];
+integralCertification = If[Length[exportedResults] === 4,
+  KeyTake[exportedResults[[1]],
+    {"Scope", "ErrorGuarantee", "ErrorEnvelope"}], None];
+polarCertification = If[Length[exportedResults] === 4,
+  KeyTake[exportedResults[[4]],
+    {"Scope", "ErrorGuarantee", "ErrorEnvelope"}], None];
 assert["native_observable_batch_contracts_integrals_polar_order_and_endpoints",
   AssociationQ[exportedRun] &&
     Lookup[exportedRun, "CompatibilityExports", 0] === 4 &&
@@ -126,6 +132,34 @@ assert["native_observable_batch_contracts_integrals_polar_order_and_endpoints",
       30]] < 10^-20] &&
     TrueQ[Abs[N[DiffExp2`EpsSeries`ESCoefficient[polarValue, -1] - 1/2,
       30]] < 10^-20]];
+assert["native_observable_batch_exports_compact_line_certification_only_for_integrals",
+  AssociationQ[integralCertification] &&
+    integralCertification["Scope"] ===
+      "full_local_with_certified_tail" &&
+    integralCertification["ErrorGuarantee"] === "certified" &&
+    AssociationQ[integralCertification["ErrorEnvelope"]] &&
+    integralCertification["ErrorEnvelope", "guarantee"] ===
+      "certified" &&
+    ListQ[integralCertification["ErrorEnvelope",
+      "absolute_upper_approx"]] &&
+    integralCertification["ErrorEnvelope",
+      "absolute_upper_approx"] =!= {} &&
+    polarCertification === <|"Scope" -> "stored_truncation",
+      "ErrorGuarantee" -> "none", "ErrorEnvelope" -> None|> &&
+    AllTrue[exportedResults[[{2, 3}]],
+      Intersection[Keys[#],
+        {"Scope", "ErrorGuarantee", "ErrorEnvelope"}] === {} &]];
+malformedCertification = catchDE2[
+  DiffExp2`NativeTransport`Private`nativeLineExportCertification[<|
+    "scope" -> "full_local_with_certified_tail",
+    "error_guarantee" -> "certified",
+    "value" -> <|"min" -> 0, "max" -> 0,
+      "error" -> <|"min" -> 0, "max" -> 0,
+        "guarantee" -> "advisory", "absolute_upper_approx" -> {1.},
+        "bound_encoding" -> "approximate-double",
+        "provenance" -> "tampered"|>|>|>]];
+assert["native_observable_batch_rejects_malformed_certification_metadata",
+  FailureQ[malformedCertification]];
 
 released = If[AssociationQ[exportedRun],
   DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[exportedRun],
@@ -188,7 +222,12 @@ assert["checkpoint_restore_export_does_not_repeat_transport_arm_marches",
     Lookup[restoredStatsAfter, "transport_arm_marches", -2] ===
       Lookup[restoredStatsBefore, "transport_arm_marches", -1] &&
     Lookup[Lookup[restoredExport, "ExportedResults", {}], "Value"] ===
-      Lookup[exportedResults, "Value"]];
+      Lookup[exportedResults, "Value"] &&
+    (KeyTake[#, {"Scope", "ErrorGuarantee", "ErrorEnvelope"}] & /@
+      Select[restoredExport["ExportedResults"],
+        #["Operation"] === "integrate" &]) ===
+      (KeyTake[#, {"Scope", "ErrorGuarantee", "ErrorEnvelope"}] & /@
+        Select[exportedResults, #["Operation"] === "integrate" &])];
 restoredReleased = If[AssociationQ[restoredExport],
   DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[
     restoredExport], restoredExport];

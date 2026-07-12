@@ -1998,13 +1998,18 @@ class StoredLocal final : public StoredLocalBase {
               std::vector<PseudoHit<Scalar>>&& pseudo_hits,
               NativeLocalDiagnostics diagnostics,
               std::optional<SCCColumnProvenance> column_provenance =
-                  std::nullopt)
+                  std::nullopt,
+              std::optional<json::object> retained_derivation =
+                  std::nullopt,
+              std::shared_ptr<void> retained_owner = nullptr)
       : StoredLocalBase(std::move(handle), std::move(source_chart),
                         std::move(source_operator_identity),
                         diagnostics.parse_ms, diagnostics.kernel_ms,
                         std::move(column_provenance)),
         solution_(std::move(solution)), precision_bits_(precision_bits),
-        pseudo_hits_(std::move(pseudo_hits)), top_valid_(diagnostics.top_valid) {
+        pseudo_hits_(std::move(pseudo_hits)), top_valid_(diagnostics.top_valid),
+        retained_derivation_(std::move(retained_derivation)),
+        retained_owner_(std::move(retained_owner)) {
     validate_local_solution(solution_, false);
   }
 
@@ -2302,6 +2307,11 @@ class StoredLocal final : public StoredLocalBase {
         {"create_kernel_ms", create_kernel_ms_}};
     if (column_provenance_.has_value())
       result["column_provenance"] = column_provenance_->encode();
+    if (retained_derivation_.has_value()) {
+      result["retained_derivation"] = *retained_derivation_;
+      result["strong_derivation_ownership"] =
+          retained_owner_ != nullptr;
+    }
     return result;
   }
 
@@ -2328,6 +2338,9 @@ class StoredLocal final : public StoredLocalBase {
   }
 
   json::object checkpoint_record() const override {
+    if (retained_derivation_.has_value())
+      throw std::domain_error(
+          "checkpoint schema v2 does not yet serialize retained plan-match materialized local state");
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       throw std::domain_error(
           "checkpoint schema v2 does not serialize symbolic-coefficient local state");
@@ -2379,6 +2392,7 @@ class StoredLocal final : public StoredLocalBase {
   }
 
   const LocalSolution<Scalar>& solution() const { return solution_; }
+  std::int32_t top_valid() const { return top_valid_; }
   const std::vector<PseudoHit<Scalar>>& pseudo_hits() const {
     return pseudo_hits_;
   }
@@ -2425,6 +2439,8 @@ class StoredLocal final : public StoredLocalBase {
   slong precision_bits_ = 256;
   std::vector<PseudoHit<Scalar>> pseudo_hits_;
   std::int32_t top_valid_ = kCompleteInfinity;
+  std::optional<json::object> retained_derivation_;
+  std::shared_ptr<void> retained_owner_;
   std::atomic<std::uint64_t> evaluations_{0};
   std::atomic<std::uint64_t> residual_certifications_{0};
   std::atomic<std::uint64_t> endpoint_limits_{0};
@@ -2864,6 +2880,7 @@ class StoredExactRegularMatch final : public StoredMatchBase {
   const std::shared_ptr<StoredLocalBase>& incoming_owner() const {
     return incoming_owner_;
   }
+  const FiniteLaurentVector<Rational>& weights() const { return weights_; }
 
   json::object checkpoint_record() const override {
     json::array basis;
@@ -3436,6 +3453,17 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
          std::move(transformed_weight_windows)},
         {"residual", std::move(residual)},
         {"elapsed_ms", elapsed_ms_}};
+  }
+
+  const FiniteLaurentVector<ComplexBall>& weights() const {
+    return refined_.weights;
+  }
+
+  bool certified_for_materialization() const {
+    return !refined_.residual_history.empty() &&
+        refined_.residual_history.back().verdict ==
+            AcbMatchingResidualVerdict::Pass &&
+        refined_.residual_history.back().complete_through_required;
   }
 
   double elapsed_ms() const { return elapsed_ms_; }
@@ -7180,6 +7208,8 @@ constexpr const char* kRetainedTilePlanCapability =
     "retained-exact-independent-arm-tile-plan-v1";
 constexpr const char* kRetainedPlannedMatchHopCapability =
     "retained-exact-plan-driven-local-match-hop-v1";
+constexpr const char* kRetainedPlannedMatchMaterializationCapability =
+    "retained-native-plan-match-local-materialization-v1";
 constexpr const char* kRetainedStoredLineCapability =
     "retained-native-stored-truncation-physical-tile-integral-v1";
 
@@ -7519,11 +7549,42 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     result["strong_ownership"] = json::object{
         {"tile_plan", true}, {"basis_locals", basis_owners_.size()},
         {"incoming_local", true}};
+    result["materializations"] = materializations_.load();
     result["elapsed_ms"] = elapsed_ms_;
     return result;
   }
 
   double elapsed_ms() const { return elapsed_ms_; }
+
+  std::shared_ptr<StoredLocalBase> materialize(
+      const std::string& local_handle,
+      const std::string& result_checkpoint_identity,
+      slong precision_bits,
+      const std::shared_ptr<StoredPlannedMatchHop>& self) {
+    if (self.get() != this)
+      throw std::logic_error(
+          "retained plan-match materialization lost self ownership");
+    std::shared_ptr<StoredLocalBase> result;
+    if (const auto exact =
+            std::dynamic_pointer_cast<StoredExactRegularMatch>(match_)) {
+      result = materialize_typed<Rational>(
+          local_handle, result_checkpoint_identity, precision_bits,
+          exact->weights(), self);
+    } else if (const auto acb =
+                   std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_)) {
+      if (!acb->certified_for_materialization())
+        throw std::domain_error(
+            "an Acb plan-match handoff must have a passing complete residual before materialization");
+      result = materialize_typed<ComplexBall>(
+          local_handle, result_checkpoint_identity, precision_bits,
+          acb->weights(), self);
+    } else {
+      throw std::logic_error(
+          "retained plan-match handoff has an unsupported matching state");
+    }
+    materializations_.fetch_add(1);
+    return result;
+  }
 
   json::object checkpoint_record() const override {
     throw std::domain_error(
@@ -7531,6 +7592,140 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   }
 
  private:
+  template <typename Scalar>
+  std::shared_ptr<StoredLocalBase> materialize_typed(
+      const std::string& local_handle,
+      const std::string& result_checkpoint_identity,
+      slong precision_bits,
+      const FiniteLaurentVector<Scalar>& weights,
+      const std::shared_ptr<StoredPlannedMatchHop>& self) const {
+    if (local_handle.empty() || result_checkpoint_identity.empty())
+      throw std::invalid_argument(
+          "plan-match local materialization identities must be nonempty");
+    AcbPrecisionLease lease(precision_bits);
+    ComplexBall::set_precision(precision_bits);
+    const auto started = std::chrono::steady_clock::now();
+    const auto native_match_summary = match_->summary();
+    const auto& match_epsilon = as_object(
+        native_match_summary.at("epsilon"),
+        "retained match epsilon provenance");
+    const auto match_work_max = as_i32(
+        match_epsilon.at("max"), "retained match epsilon maximum");
+    const auto match_certified_max = [&]() {
+      if constexpr (std::is_same_v<Scalar, Rational>)
+        return as_i32(
+            as_object(native_match_summary.at("residual"),
+                      "exact retained match residual").at("max"),
+            "exact retained match residual maximum");
+      else
+        return as_i32(match_epsilon.at("required_complete_max"),
+                      "Acb retained match required maximum");
+    }();
+
+    std::vector<std::shared_ptr<StoredLocal<Scalar>>> typed_basis;
+    std::vector<const LocalSolution<Scalar>*> basis_solutions;
+    typed_basis.reserve(basis_owners_.size());
+    basis_solutions.reserve(basis_owners_.size());
+    std::int32_t materialized_top = kCompleteInfinity;
+    const auto receiving_chart = basis_owners_.front()->source_chart();
+    const auto receiving_operator =
+        basis_owners_.front()->source_operator_identity();
+    for (std::size_t column = 0; column < basis_owners_.size(); ++column) {
+      auto typed =
+          std::dynamic_pointer_cast<StoredLocal<Scalar>>(basis_owners_[column]);
+      if (!typed)
+        throw std::logic_error(
+            "retained plan-match basis coefficient domain changed");
+      if (typed->source_chart() != receiving_chart ||
+          typed->source_operator_identity() != receiving_operator)
+        throw std::logic_error(
+            "retained plan-match basis chart provenance changed");
+      if (typed->top_valid() < match_work_max)
+        throw std::domain_error(
+            "retained plan-match basis validity does not cover its matching work window");
+      if (column >= weights.size())
+        throw std::logic_error(
+            "retained plan-match weight count is smaller than its basis");
+      const auto basis_valid = std::min(
+          typed->top_valid(), typed->solution().epsilon.complete_max);
+      const auto shifted_basis_valid = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(basis_valid) +
+              weights[column].min_power(),
+          "materialized local top validity");
+      const auto weight_valid = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(typed->solution().epsilon.min_power) +
+              weights[column].complete_max(),
+          "materialized weight top validity");
+      materialized_top = std::min(
+          materialized_top, std::min(shifted_basis_valid, weight_valid));
+      basis_solutions.push_back(&typed->solution());
+      typed_basis.push_back(std::move(typed));
+    }
+    if (weights.size() != typed_basis.size())
+      throw std::logic_error(
+          "retained plan-match weight count differs from its basis");
+    const auto typed_incoming =
+        std::dynamic_pointer_cast<StoredLocal<Scalar>>(incoming_owner_);
+    if (!typed_incoming || typed_incoming->top_valid() < match_work_max)
+      throw std::domain_error(
+          "retained plan-match incoming validity does not cover its matching work window");
+
+    auto solution = materialize_local_basis_weights(
+        basis_solutions, weights, result_checkpoint_identity);
+    materialized_top = std::min(
+        {materialized_top, solution.epsilon.complete_max,
+         match_certified_max});
+    if (materialized_top < solution.epsilon.min_power)
+      throw std::domain_error(
+          "plan-match materialization has no valid output epsilon coefficient");
+    if (materialized_top < solution.epsilon.complete_max)
+      solution = restrict_local_epsilon_frame_strict_lower(
+          solution, solution.epsilon.min_power, materialized_top,
+          result_checkpoint_identity);
+    json::array weight_windows;
+    weight_windows.reserve(weights.size());
+    for (const auto& weight : weights)
+      weight_windows.push_back(json::object{
+          {"min", weight.min_power()},
+          {"max", weight.complete_max()}});
+    json::object derivation{
+        {"schema", "diffexp2-retained-plan-match-local-materialization-v1"},
+        {"capability", kRetainedPlannedMatchMaterializationCapability},
+        {"source_match", handle_},
+        {"source_match_checkpoint_identity", checkpoint_identity_},
+        {"source_match_provenance_identity",
+         required_string(native_match_summary, "provenance_identity")},
+        {"planned_hop_provenance_identity", provenance_identity_},
+        {"planned_hop", handoff_},
+        {"weight_windows", std::move(weight_windows)},
+        {"match_certified_complete_max", match_certified_max},
+        {"output", json::object{
+             {"checkpoint_identity", result_checkpoint_identity},
+             {"chart", receiving_chart},
+             {"source_operator_identity", receiving_operator},
+             {"epsilon", json::object{
+                  {"min", solution.epsilon.min_power},
+                  {"max", solution.epsilon.complete_max}}},
+             {"taylor_complete_max", solution.taylor_complete_max},
+             {"dimension", solution.dimension}}},
+        {"scope", "single-match-receiving-local"},
+        {"coefficient_transport", "native-retained-only"},
+        {"whole_arm_complete", false}};
+    const auto derivation_identity = json::serialize(
+        canonical_json_value(derivation));
+    derivation["provenance_identity"] = derivation_identity;
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    NativeLocalDiagnostics diagnostics;
+    diagnostics.top_valid = materialized_top;
+    diagnostics.kernel_ms = elapsed_ms;
+    return make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+        local_handle, receiving_chart, receiving_operator,
+        std::move(solution), precision_bits,
+        std::vector<PseudoHit<Scalar>>{}, diagnostics, std::nullopt,
+        std::move(derivation), std::static_pointer_cast<void>(self));
+  }
+
   std::shared_ptr<StoredMatchBase> match_;
   std::string checkpoint_identity_;
   std::string provenance_identity_;
@@ -7539,6 +7734,7 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   std::shared_ptr<StoredTilePlan> plan_owner_;
   std::vector<std::shared_ptr<StoredLocalBase>> basis_owners_;
   std::shared_ptr<StoredLocalBase> incoming_owner_;
+  std::atomic<std::uint64_t> materializations_{0};
 };
 
 class StoredLineResult {
@@ -10594,6 +10790,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedPlannedMatchHopCapability},
+                        {"planned_match_materialization_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedMatchMaterializationCapability},
                         {"line_integration_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -11974,6 +12174,75 @@ json::object run_session_command(const json::object& root) {
     return result;
   }
 
+  if (operation == "match.materialize_local") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "match", "checkpoint_identity"},
+        "native match.materialize_local request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native plan-match local materialization requires rational or Acb coefficients");
+    const auto match_handle = required_string(root, "match");
+    const auto checkpoint_identity = required_string(
+        root, "checkpoint_identity");
+    std::shared_ptr<StoredPlannedMatchHop> match;
+    std::string local_handle;
+    {
+      // Admission strongly retains the complete handoff before releasing the
+      // session lock.  The finite Laurent combination then runs natively and
+      // independently of public match/plan/basis tokens.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->matches.find(match_handle);
+      if (found == session->matches.end())
+        throw std::invalid_argument(
+            "unknown or released retained match for local materialization");
+      match = std::dynamic_pointer_cast<StoredPlannedMatchHop>(found->second);
+      if (!match)
+        throw std::invalid_argument(
+            "match.materialize_local requires a plan-driven match handoff");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument(
+            "persistent local capacity is exhausted");
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    std::shared_ptr<StoredLocalBase> local;
+    try {
+      local = match->materialize(
+          local_handle, checkpoint_identity, session->precision_bits, match);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native match materialization reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native match materialization reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during match materialization");
+      session->locals.emplace(local_handle, local);
+    }
+    auto result = local->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["materialization_capability"] =
+        kRetainedPlannedMatchMaterializationCapability;
+    result["native_retained"] = true;
+    result["json_coefficients"] = 0;
+    return result;
+  }
+
   if (operation == "local.evaluate") {
     const auto local_handle = required_string(root, "local");
     std::shared_ptr<StoredLocalBase> local;
@@ -12374,6 +12643,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedPlannedMatchHopCapability},
+                        {"planned_match_materialization_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedMatchMaterializationCapability},
                         {"line_integration_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -12596,6 +12869,10 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_plan_driven_match_hop_capability",
                                        kRetainedPlannedMatchHopCapability},
+                                      {"persistent_plan_match_local_materialization",
+                                       true},
+                                      {"persistent_plan_match_local_materialization_capability",
+                                       kRetainedPlannedMatchMaterializationCapability},
                                       {"persistent_stored_line_integration",
                                        true},
                                       {"persistent_stored_line_integration_capability",

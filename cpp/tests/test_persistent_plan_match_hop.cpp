@@ -1,12 +1,17 @@
 #include "diffexp2/json_codec.hpp"
+#include "diffexp2/local_algebra.hpp"
 
 #include <boost/json.hpp>
 
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace json = boost::json;
 
@@ -83,7 +88,8 @@ std::string solve_local(const std::string& session,
                         const std::string& chart,
                         const std::string& center,
                         const std::string& checkpoint,
-                        const std::string& value) {
+                        const std::string& value,
+                        const std::string& epsilon_value = "0") {
   json::array schedule_row;
   schedule_row.push_back(json::object{
       {"case", "R"}, {"da", "0"}, {"db", "0"}});
@@ -98,7 +104,7 @@ std::string solve_local(const std::string& session,
            {"b_target", "0"}, {"a_shift_min", 0},
            {"a_shifts", json::array{"0"}},
            {"schedule", std::move(schedule)},
-           {"initial", json::array{value, "0", "0"}},
+           {"initial", json::array{value, epsilon_value, "0"}},
            {"initial_validity", json::array{2}}, {"source", nullptr},
            {"return_u", false}}},
       {"metadata", json::object{
@@ -171,11 +177,56 @@ json::object hop_request(const std::string& domain,
   return value;
 }
 
+double value_midpoint(const json::object& evaluation,
+                      std::int32_t epsilon_power) {
+  const auto& value = evaluation.at("value").as_object();
+  const auto minimum = static_cast<std::int32_t>(
+      value.at("min").as_int64());
+  const auto& coefficient = value.at("coefficients").as_array().at(
+      static_cast<std::size_t>(epsilon_power - minimum));
+  return coefficient.is_string()
+      ? std::stod(std::string(coefficient.as_string()))
+      : std::stod(std::string(
+            coefficient.as_array().front().as_string()));
+}
+
+bool finite_laurent_pole_materialization() {
+  diffexp2::LocalSolution<diffexp2::Rational> column;
+  column.chart.center_exact = "0";
+  column.chart.scale_exact = "1";
+  column.chart.radius = diffexp2::ComplexBall(2);
+  column.epsilon = {0, 2};
+  column.taylor_complete_max = 0;
+  column.dimension = 1;
+  column.checkpoint_identity = "pole-basis";
+  diffexp2::LocalSector<diffexp2::Rational> sector;
+  sector.a = diffexp2::ExactScalarDescriptor::rational("0");
+  sector.b = diffexp2::ExactScalarDescriptor::rational("0");
+  sector.coefficients = {
+      diffexp2::Rational(0), diffexp2::Rational(1),
+      diffexp2::Rational(0)};
+  column.sectors.push_back(std::move(sector));
+  const diffexp2::EpsilonFrame<diffexp2::Rational> pole_weight(
+      {-1, 1}, {diffexp2::Rational(2), diffexp2::Rational(0),
+                diffexp2::Rational(0)});
+  const auto materialized = diffexp2::materialize_local_basis_weights(
+      std::vector<const diffexp2::LocalSolution<diffexp2::Rational>*>{
+          &column},
+      diffexp2::FiniteLaurentVector<diffexp2::Rational>{pole_weight},
+      "pole-materialized");
+  const auto& coefficients = materialized.sectors.front().coefficients;
+  return materialized.epsilon.min_power == -1 &&
+      materialized.epsilon.complete_max == 1 &&
+      coefficients.size() == 3 && coefficients[0].is_zero() &&
+      coefficients[1] == diffexp2::Rational(2) &&
+      coefficients[2].is_zero();
+}
+
 bool run_domain(const std::string& domain) {
   const auto created = request(json::object{
       {"schema", 2}, {"op", "session.create"}, {"domain", domain},
       {"precision_bits", 256}, {"output_digits", 30},
-      {"chart_capacity", 3}, {"local_capacity", 3},
+      {"chart_capacity", 3}, {"local_capacity", 5},
       {"match_capacity", 2}, {"tile_plan_capacity", 1}});
   const auto session = std::string(created.at("session").as_string());
   const auto anchor = prepare_chart(session, domain, domain + "-anchor", "0");
@@ -210,8 +261,37 @@ bool run_domain(const std::string& domain) {
       std::launch::async, submit, "upper", upper_basis);
   const auto lower = lower_future.get();
   const auto upper = upper_future.get();
+  if (lower.at("status") != "ok" || upper.at("status") != "ok")
+    throw std::runtime_error(
+        "match: " + json::serialize(lower) + " / " +
+        json::serialize(upper));
   const auto lower_match = std::string(lower.at("match").as_string());
   const auto upper_match = std::string(upper.at("match").as_string());
+
+  auto materialize = [&](const std::string& match,
+                         const std::string& checkpoint) {
+    return request(json::object{
+        {"schema", 2}, {"op", "match.materialize_local"},
+        {"session", session}, {"match", match},
+        {"checkpoint_identity", checkpoint}});
+  };
+  auto lower_materialized_future = std::async(
+      std::launch::async, materialize, lower_match,
+      domain + "-lower-receiving-local");
+  auto upper_materialized_future = std::async(
+      std::launch::async, materialize, upper_match,
+      domain + "-upper-receiving-local");
+  const auto lower_materialized = lower_materialized_future.get();
+  const auto upper_materialized = upper_materialized_future.get();
+  if (lower_materialized.at("status") != "ok" ||
+      upper_materialized.at("status") != "ok")
+    throw std::runtime_error(
+        "materialize: " + json::serialize(lower_materialized) + " / " +
+        json::serialize(upper_materialized));
+  const auto lower_local =
+      std::string(lower_materialized.at("local").as_string());
+  const auto upper_local =
+      std::string(upper_materialized.at("local").as_string());
   const auto plan_stats = request(json::object{
       {"schema", 2}, {"op", "tile.stats"}, {"session", session},
       {"tile_plan", plan}});
@@ -226,6 +306,20 @@ bool run_domain(const std::string& domain) {
   const auto retained_lower = request(json::object{
       {"schema", 2}, {"op", "match.stats"}, {"session", session},
       {"match", lower_match}});
+  for (const auto& match : {lower_match, upper_match})
+    (void)request(json::object{
+        {"schema", 2}, {"op", "match.release"}, {"session", session},
+        {"match", match}});
+  const auto lower_evaluation = request(json::object{
+      {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+      {"local", lower_local},
+      {"point", json::object{{"exact", "1/5"}}},
+      {"options", json::object{{"tail_estimate", false}}}});
+  const auto upper_evaluation = request(json::object{
+      {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+      {"local", upper_local},
+      {"point", json::object{{"exact", "-1/5"}}},
+      {"options", json::object{{"tail_estimate", false}}}});
   const auto checkpoint_rejection = request(json::object{
       {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
       {"path", "/tmp/diffexp2-plan-match-hop.chk"},
@@ -240,12 +334,18 @@ bool run_domain(const std::string& domain) {
   const auto& lower_advance = lower_hop.at("advance").as_object();
   const auto& lower_producing = lower_hop.at("producing").as_object();
   const auto& lower_receiving = lower_hop.at("receiving").as_object();
+  const auto& materialized_derivation =
+      lower_materialized.at("retained_derivation").as_object();
+  const auto& materialized_output =
+      materialized_derivation.at("output").as_object();
   const bool domain_match_ok = domain == "rational"
       ? lower.at("residual").as_object().at("status") == "exact-zero"
       : lower.at("residual").as_object().at("verdict") == "pass";
   const bool ok =
       created.at("planned_match_hop_capability") ==
           "retained-exact-plan-driven-local-match-hop-v1" &&
+      created.at("planned_match_materialization_capability") ==
+          "retained-native-plan-match-local-materialization-v1" &&
       lower.at("status") == "ok" && upper.at("status") == "ok" &&
       lower.at("plan_driven") == true &&
       lower.at("planned_hop_capability") ==
@@ -278,16 +378,56 @@ bool run_domain(const std::string& domain) {
       retained_lower.at("status") == "ok" &&
       retained_lower.at("planned_hop_provenance_identity") ==
           lower.at("planned_hop_provenance_identity") &&
+      retained_lower.at("materializations") == 1 &&
+      lower_materialized.at("status") == "ok" &&
+      upper_materialized.at("status") == "ok" &&
+      lower_materialized.at("materialization_capability") ==
+          "retained-native-plan-match-local-materialization-v1" &&
+      lower_materialized.at("native_retained") == true &&
+      lower_materialized.at("json_coefficients") == 0 &&
+      std::string(lower_materialized.at("chart").as_string()) ==
+          lower_chart &&
+      std::string(upper_materialized.at("chart").as_string()) ==
+          upper_chart &&
+      lower_materialized.at("epsilon_min") == 0 &&
+      lower_materialized.at("epsilon_max") ==
+          (domain == "rational" ? 2 : 1) &&
+      lower_materialized.at("strong_derivation_ownership") == true &&
+      std::string(materialized_derivation.at("source_match").as_string()) ==
+          lower_match &&
+      materialized_derivation.at("planned_hop_provenance_identity") ==
+          lower.at("planned_hop_provenance_identity") &&
+      materialized_derivation.at("coefficient_transport") ==
+          "native-retained-only" &&
+      materialized_derivation.at("match_certified_complete_max") ==
+          (domain == "rational" ? 2 : 1) &&
+      materialized_derivation.at("whole_arm_complete") == false &&
+      std::string(materialized_output.at("chart").as_string()) ==
+          lower_chart &&
+      std::string(materialized_output.at("checkpoint_identity").as_string()) ==
+          domain + "-lower-receiving-local" &&
+      lower_evaluation.at("status") == "ok" &&
+      upper_evaluation.at("status") == "ok" &&
+      std::abs(value_midpoint(lower_evaluation, 0) - 2.0) < 1e-25 &&
+      std::abs(value_midpoint(upper_evaluation, 0) - 2.0) < 1e-25 &&
       checkpoint_rejection.at("status") == "error" &&
       std::string(checkpoint_rejection.at("detail").as_string()).find(
-          "plan-driven") != std::string::npos &&
-      stats.at("locals") == 0 && stats.at("tile_plans") == 0 &&
-      stats.at("matches") == 2 && stats.at("local_matches") == 2 &&
+          "materialized local") != std::string::npos &&
+      stats.at("locals") == 2 && stats.at("tile_plans") == 0 &&
+      stats.at("matches") == 0 && stats.at("local_matches") == 2 &&
       stats.at("pending_matches") == 0;
 
   if (!ok)
     std::cerr << domain << " lower: " << json::serialize(lower) << '\n'
               << domain << " upper: " << json::serialize(upper) << '\n'
+              << domain << " lower materialized: "
+              << json::serialize(lower_materialized) << '\n'
+              << domain << " upper materialized: "
+              << json::serialize(upper_materialized) << '\n'
+              << domain << " lower evaluation: "
+              << json::serialize(lower_evaluation) << '\n'
+              << domain << " upper evaluation: "
+              << json::serialize(upper_evaluation) << '\n'
               << domain << " plan stats: " << json::serialize(plan_stats)
               << '\n' << domain << " retained: "
               << json::serialize(retained_lower) << '\n'
@@ -295,10 +435,10 @@ bool run_domain(const std::string& domain) {
               << json::serialize(checkpoint_rejection) << '\n'
               << domain << " stats: " << json::serialize(stats) << '\n';
 
-  for (const auto& match : {lower_match, upper_match})
+  for (const auto& local : {lower_local, upper_local})
     (void)request(json::object{
-        {"schema", 2}, {"op", "match.release"}, {"session", session},
-        {"match", match}});
+        {"schema", 2}, {"op", "local.release"}, {"session", session},
+        {"local", local}});
   (void)request(json::object{
       {"schema", 2}, {"op", "session.close"}, {"session", session}});
   return ok;
@@ -307,10 +447,11 @@ bool run_domain(const std::string& domain) {
 }  // namespace
 
 int main() {
+  const bool finite_pole = finite_laurent_pole_materialization();
   const bool rational = run_domain("rational");
   const bool acb = run_domain("acb");
-  const bool ok = rational && acb;
+  const bool ok = finite_pole && rational && acb;
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": retained exact plan-driven rational/Acb match hops\n";
+            << ": retained plan-driven rational/Acb match materialization\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

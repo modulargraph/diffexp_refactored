@@ -1,6 +1,7 @@
 #pragma once
 
 #include "diffexp2/local_solution.hpp"
+#include "diffexp2/matching.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -505,6 +506,126 @@ LocalSolution<Scalar> combine_local_solutions(
                         input.dimension)];
       }
       output.sectors.push_back(std::move(aligned));
+    }
+  }
+  return canonicalize_identical_local_sectors(std::move(output));
+}
+
+// Materialize one retained matching state in its receiving chart without
+// exporting either the basis slabs or the Laurent weights.  Each basis column
+// is a full local vector S_j(t,eps), while weights[j] is a finite Laurent
+// frame independent of t.  The complete upper edge is the first edge at which
+// an unseen coefficient of either factor could contribute:
+//
+//   CompleteMax(S_j w_j) =
+//     min(CompleteMax(S_j) + Min(w_j), Min(S_j) + CompleteMax(w_j)).
+//
+// Lower frame edges are exact structural bounds in both representations.
+// No zero padding above a complete edge, midpoint zero test, or coefficient
+// export is involved.
+template <typename Scalar>
+LocalSolution<Scalar> materialize_local_basis_weights(
+    const std::vector<const LocalSolution<Scalar>*>& basis,
+    const FiniteLaurentVector<Scalar>& weights,
+    std::string checkpoint_identity) {
+  if (basis.empty() || basis.size() != weights.size())
+    throw std::invalid_argument(
+        "local basis materialization requires one weight per nonempty basis column");
+  if (checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "local basis materialization checkpoint identity is empty");
+  for (const auto* column : basis) {
+    if (column == nullptr)
+      throw std::invalid_argument(
+          "local basis materialization received a null basis column");
+    validate_local_solution(*column, false);
+    if (!column->error.empty())
+      throw std::invalid_argument(
+          "local basis materialization cannot discard an error envelope");
+    local_algebra_detail::require_same_local_space(*basis.front(), *column);
+  }
+
+  std::vector<EpsilonWindow> product_windows;
+  product_windows.reserve(basis.size());
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    const auto minimum = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(basis[column]->epsilon.min_power) +
+            weights[column].min_power(),
+        "materialized local epsilon minimum");
+    const auto basis_complete = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(basis[column]->epsilon.complete_max) +
+            weights[column].min_power(),
+        "materialized local basis-complete edge");
+    const auto weight_complete = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(basis[column]->epsilon.min_power) +
+            weights[column].complete_max(),
+        "materialized local weight-complete edge");
+    product_windows.push_back(
+        {minimum, std::min(basis_complete, weight_complete)});
+  }
+  const auto minimum = std::min_element(
+      product_windows.begin(), product_windows.end(),
+      [](const auto& left, const auto& right) {
+        return left.min_power < right.min_power;
+      })->min_power;
+  const auto complete_max = std::min_element(
+      product_windows.begin(), product_windows.end(),
+      [](const auto& left, const auto& right) {
+        return left.complete_max < right.complete_max;
+      })->complete_max;
+  if (complete_max < minimum)
+    throw std::invalid_argument(
+        "materialized local basis has no common complete epsilon window");
+
+  LocalSolution<Scalar> output;
+  output.chart = basis.front()->chart;
+  output.epsilon = {minimum, complete_max};
+  output.taylor_complete_max = (*std::min_element(
+      basis.begin(), basis.end(), [](const auto* left, const auto* right) {
+        return left->taylor_complete_max < right->taylor_complete_max;
+      }))->taylor_complete_max;
+  output.dimension = basis.front()->dimension;
+  output.prescriptions = basis.front()->prescriptions;
+  output.checkpoint_identity = std::move(checkpoint_identity);
+
+  const auto output_taylor_width = output.taylor_width();
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    const auto& source = *basis[column];
+    const auto& weight = weights[column];
+    for (const auto& sector : source.sectors) {
+      LocalSector<Scalar> materialized;
+      materialized.a = sector.a;
+      materialized.b = sector.b;
+      materialized.log_power = sector.log_power;
+      materialized.coefficients.assign(
+          output.sector_size(), ScalarTraits<Scalar>::zero());
+      for (std::int64_t power = output.epsilon.min_power;
+           power <= output.epsilon.complete_max; ++power) {
+        const auto output_epsilon = static_cast<std::size_t>(
+            power - output.epsilon.min_power);
+        for (std::int64_t weight_power = weight.min_power();
+             weight_power <= weight.complete_max(); ++weight_power) {
+          const auto source_power = power - weight_power;
+          if (source_power < source.epsilon.min_power ||
+              source_power > source.epsilon.complete_max)
+            continue;
+          const auto source_epsilon = static_cast<std::size_t>(
+              source_power - source.epsilon.min_power);
+          const auto& scalar_weight = weight.coefficient(
+              static_cast<std::int32_t>(weight_power));
+          if (ScalarTraits<Scalar>::is_zero(scalar_weight)) continue;
+          for (std::size_t n = 0; n < output_taylor_width; ++n)
+            for (std::uint32_t component = 0;
+                 component < output.dimension; ++component)
+              materialized.coefficients[local_algebra_detail::flat_index(
+                  output_epsilon, n, component, output_taylor_width,
+                  output.dimension)] += scalar_weight * sector.coefficients[
+                      local_algebra_detail::flat_index(
+                          source_epsilon, n, component,
+                          source.taylor_width(), source.dimension)];
+        }
+      }
+      output.sectors.push_back(std::move(materialized));
     }
   }
   return canonicalize_identical_local_sectors(std::move(output));

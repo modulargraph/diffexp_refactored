@@ -74,7 +74,7 @@ The implemented recurrence-session commands are:
 | `local.stats` | Inspect one retained local solution and its evaluation counters. |
 | `local.release` | Release one retained local solution. |
 | `scc.prepare` | Validate and retain a typed composite SCC chart. |
-| `scc.solve_column` | Execute one exact-rational regular scalar-DAG basis column and retain the parent local without coefficient JSON. |
+| `scc.solve_column` | Execute one exact-rational regular block-DAG basis column and retain the parent local without coefficient JSON. |
 | `scc.stats` | Inspect one retained composite manifest and signed-shift bounds. |
 | `scc.release` | Release one retained composite SCC chart. |
 | `session.stats` | Return preparation/run timings and retained-object counters. |
@@ -94,15 +94,19 @@ reuses live handles, checks native stats before an early hit, and fails loudly
 at capacity rather than evicting a public SCC object.
 
 The explicit
-``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock]`` seam consumes
-the compact run-only data in that cache for the first supported execution
-scope.  It requires one canonical `a=b=p=0` homogeneous run per scalar block,
-orders reachable targets by the exact SCC certificate, and derives each
-target's zero-initial particular template from its captured run.  Native
-coupling and recurrence operate on retained `LocalSolution` values and return
-only an opaque local handle plus exact column provenance.  Exact parent
-geometry and analytic prescriptions are preserved.  It remains disconnected
-from production `SolveHomogeneous` and transport dispatch.
+``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
+seedLocalComponent:1]`` seam consumes the compact run-only data in that cache
+for the regular scalar-v1 and multidimensional-v2 scopes.  Each block must
+provide one canonical `a=b=p=0` homogeneous run per local component.  The seam
+derives every component from its exact flattened eps^0 unit tensor, selects the
+requested seed without trusting capture order, orders reachable targets by the
+exact SCC certificate, and derives each target's correctly dimensioned
+zero-initial particular template from a captured run.  Native coupling and
+recurrence operate on retained `LocalSolution` values and return only an
+opaque local handle plus exact column provenance.  Exact parent geometry and
+analytic prescriptions are preserved.  The three-argument scalar-v1 wire
+request and returned record are unchanged, and neither scope is connected to
+production `SolveHomogeneous` or transport dispatch.
 
 Subsequent milestones extend the same session with complete multi-sector
 composition plus `transport.*`, `endpoint.*`, `integration.*`, and

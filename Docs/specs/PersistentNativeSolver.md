@@ -320,10 +320,9 @@ General SCC execution remains disabled, but the deliberately narrow
 `exact-rational-regular-scalar-block-dag-column-v1` or the multidimensional
 `exact-rational-regular-block-dag-column-v2`. The latter requires a regular
 singleton recurrence partition inside every retained diagonal block. The
-explicit Wolfram `SolveNativeSCCBasisColumn` migration seam currently accepts
-only scalar v1; unsupported retained composites report
-`execution_implemented: false` and fail loudly if submitted to the native
-operation.
+explicit Wolfram `SolveNativeSCCBasisColumn` migration seam accepts both
+scopes, validates the corresponding statistics/capability string, and fails
+loudly for any other retained composite.
 
 The parent manifest carries two machine-checkable `D` by `D` row-major exact
 matrix records. Every cell has the shape
@@ -446,25 +445,31 @@ directly released stale handle, and refuses capacity exhaustion rather than
 evicting a live public SCC object.  `ClearSolveCaches[]` clears that cache and
 closes the native sessions.  Its compact private execution descriptor is
 accepted only within that full-signature cache entry and binds the same public
-handle.  It retains run-only block records, scalar dimensions, graph,
+handle.  It retains run-only block records, block dimensions, graph,
 field/frame contract, identity, precision, and last checked stats; large
 captured static operators and block systems are released after preparation.
 The public preparation result remains opaque.
 
-``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock]`` is the first
-consumer.  It requires scalar blocks and one certified canonical rational
-homogeneous run per block (`p=0`, `a=b=0`, eps^0 unit seed, fixed frame, and
-the exact regular `R/T` schedule).  It sends the seed's captured dynamic run
-unchanged.  For every reachable descendant in the certified topological
-order it derives an exact-zero/no-initial run from that descendant's captured
-run.  C++ multiplies and combines retained predecessor locals, injects the
-source directly into the target recurrence, embeds each scalar result into
-the parent dimension, caps to the public window, and retains the final local.
-The response contains an opaque local handle and exact SCC/seed/basis
-provenance with `json_coefficients: 0`; there is no coefficient slab
+``Solve`SolveNativeSCCBasisColumn[sccEnvelope, req, seedBlock,
+seedLocalComponent:1]`` is the first consumer.  It requires one certified
+canonical rational homogeneous run per local block component (`p=0`, `a=b=0`,
+one exact eps^0 unit seed, fixed frame, and one exact regular `R/T` schedule
+step per retained singleton).  Wolfram derives each run's component from the
+flattened initial tensor, proves that every block supplies a complete
+permutation of its local unit columns, and sends the selected seed's captured
+dynamic run unchanged.  For every reachable descendant in the certified
+topological order it derives a correctly dimensioned exact-zero/no-initial run
+from that descendant's captured component-one run.  C++ multiplies and
+combines retained predecessor locals, injects the vector source directly into
+the target recurrence, embeds each block result into the parent dimension,
+caps to the public window, and retains the final local.  The response contains
+an opaque local handle and exact SCC/seed/global-basis provenance with
+`json_coefficients: 0`; for v2 Wolfram also verifies the encoded local
+component in the exact column identity.  There is no coefficient slab
 roundtrip.  Parent chart geometry and ordered analytic prescriptions are
-rechecked on every local metadata record.  This explicit column API is not a
-`SolveHomogeneous` or transport dispatch path.
+rechecked on every local metadata record.  The three-argument scalar-v1 call
+keeps its original wire request and result shape.  This explicit column API is
+not a `SolveHomogeneous` or transport dispatch path.
 
 ```json
 {

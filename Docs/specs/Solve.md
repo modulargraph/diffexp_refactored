@@ -394,7 +394,7 @@ owning persistent sessions.  Hashes are indices only and no monolithic
 fallback or production dispatch change is part of this seam.
 
 The same full-`SameQ` cache entry retains a compact private execution
-descriptor: only each block's dynamic run record, scalar dimension, exact
+descriptor: only each block's dynamic run records, block dimensions, exact
 graph/field/frame contract, parent identity, input precision, last checked
 native statistics, and public handle.  The large captured static operators,
 block systems, and work request are released after C++ owns them.  The
@@ -407,39 +407,47 @@ The public result of `PrepareNativeSCCComposite` remains only
 
 ```
 SolveNativeSCCBasisColumn[sccEnvelope_Association, req_Association,
-  seedBlock_Integer]
+  seedBlock_Integer, seedLocalComponent_Integer:1]
   -> opaque native local handle record
 ```
 
 This is an explicit, non-production execution seam over a prepared composite.
-`seedBlock` is one-based.  It calls `PrepareNativeSCCComposite` only to obtain
-or validate the collision-bound cached entry; it does not recapture a live
-entry.  Every block must be scalar and every captured group must contain
-exactly one canonical exact-rational regular homogeneous request: `p=0`,
-`a=b=0`, fixed lower frame, the exact eps^0 unit initial frame, and the
-`R(0,0), T(n,0)` schedule.  Analytic-regulator fields, pseudo collisions,
+`seedBlock` and `seedLocalComponent` are one-based; the component defaults to
+one so the existing three-argument scalar-v1 call is byte- and
+behavior-compatible.  The function calls `PrepareNativeSCCComposite` only to
+obtain or validate the collision-bound cached entry; it does not recapture a
+live entry.  Every captured block group must contain exactly one canonical
+exact-rational regular homogeneous request per local component: `p=0`,
+`a=b=0`, fixed lower frame, one exact eps^0 unit initial tensor, and one
+`R(0,0), T(n,0)` schedule step per retained Jordan singleton.  Wolfram derives
+the seeded local component from each flattened initial tensor and proves that
+the group covers a complete permutation of the block's local components; it
+does not trust capture order.  Analytic-regulator fields, pseudo collisions,
 nonidentity assembly, singular blocks, and noncanonical roots are loud.
 
-The seed uses its captured run byte-for-byte after dropping the immutable
-operator fields.  Reachable descendants are listed in the exact SCC
+The selected seed uses its captured run byte-for-byte after dropping the
+immutable operator fields.  Reachable descendants are listed in the exact SCC
 topological order.  Each target run is deterministically derived from that
-target block's certified canonical run by replacing only the initial state
-with exact zero, null validity, and `has_initial=false`; `source=null` remains
-in the JSON because the typed C++ composite injects the in-memory predecessor
-`LocalSolution` directly into the recurrence.  No coefficient JSON roundtrip
-occurs.
+target block's certified component-one run by replacing only the complete
+dimension-times-frame initial tensor with exact zero, every component validity
+with null, and `has_initial=false`; `source=null` remains in the JSON because
+the typed C++ composite injects the in-memory predecessor `LocalSolution`
+directly into the recurrence.  No coefficient JSON roundtrip occurs.
 
 Local metadata is built with exact `a=b=0,p=0`, the retained parent chart
 geometry, and the complete ordered analytic prescriptions.  Exact rational
 radii are serialized as rational strings, not approximate Acb pairs.
 Checkpoint identities bind the cache key of the already full-`SameQ`-checked
 composite signature, parent identity, public SCC handle, seed run, and
-deterministic target templates.  The native summary must carry matching
-SCC/basis provenance and `json_coefficients=0`;
+deterministic target templates.  The native summary must advertise exactly
+the scalar-v1 or multidimensional-v2 execution scope selected from the block
+dimensions and carry matching SCC/global-basis provenance and
+`json_coefficients=0`.  In v2 the exact column-identity record must also bind
+the derived zero-based seed-local component;
 otherwise the newly retained local is released and the call fails loudly.
 The returned capitalized `Session`/`Local` pair is accepted by the existing
 native local evaluate/statistics/release APIs.  `SolveHomogeneous`, transport,
-and matching do not dispatch through this v1 scalar-column seam.
+and matching do not dispatch through either explicit column seam.
 
 NOT exported (deliberately): no SolveGeneral convenience wrapper (Transport
 assembles general solutions from columns + particular + matching weights);

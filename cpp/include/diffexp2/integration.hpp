@@ -166,7 +166,8 @@ enum class NativeIntegrationErrorCode : std::uint8_t {
   UnsupportedExactTag,
   UnsupportedSymbolicRegulator,
   InvalidInterval,
-  UncertifiedCancellation
+  UncertifiedCancellation,
+  IncompleteEpsilonWindow
 };
 
 class NativeIntegrationError : public std::runtime_error {

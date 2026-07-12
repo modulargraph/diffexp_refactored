@@ -46,6 +46,12 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_integration PRIVATE diffexp2_core)
   add_test(NAME cpp_integration COMMAND test_diffexp2_integration)
 
+  add_executable(test_diffexp2_line_integration
+    tests/test_line_integration.cpp)
+  target_compile_features(test_diffexp2_line_integration PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_line_integration PRIVATE diffexp2_core)
+  add_test(NAME cpp_line_integration COMMAND test_diffexp2_line_integration)
+
   add_executable(test_diffexp2_persistent_local
     tests/test_persistent_local.cpp)
   target_compile_features(test_diffexp2_persistent_local PRIVATE cxx_std_20)

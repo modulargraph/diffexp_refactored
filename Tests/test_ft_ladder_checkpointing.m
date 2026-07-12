@@ -1,11 +1,15 @@
-(* Focused tests for the stepwise runner's resumable endpoint-arm snapshots.
-   The runner is loaded definition-only: no FIRE preparation or transport is
-   performed here. *)
+(* Focused tests for the stepwise runner's Wolfram endpoint-arm snapshots
+   and the retained-native rejection boundary.  The runner is loaded
+   definition-only: no FIRE preparation or transport is performed here. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
 
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> "1"];
+(* Legacy partial-arm snapshots are an explicit Wolfram-backend feature.
+   The retained C++ observable batch owns opaque native state and resumes
+   only from completed numeric Boundary checkpoints. *)
+SetEnvironment["DE2_RECURRENCE_BACKEND" -> "Wolfram"];
 tmpDir = CreateDirectory[FileNameJoin[{$TemporaryDirectory,
   "DiffExp2_ft_checkpoint_test_" <> ToString[$ProcessID]}]];
 SetEnvironment["FT_LADDER_CHECKPOINT_DIR" -> tmpDir];
@@ -33,33 +37,17 @@ test["lower arm is saved before upper transport starts",
 test["resume computes only missing endpoint arms",
   StringContainsQ[runnerSource, "needLo && !AssociationQ[trLoCache]"] &&
     StringContainsQ[runnerSource, "needHi && !AssociationQ[trHiCache]"]];
-test["one-kernel C++ arm batching requires both missing arms",
-  StringContainsQ[runnerSource,
-    "needLo && needHi && !AssociationQ[trLoCache] &&"] &&
-    StringContainsQ[runnerSource,
-      "!AssociationQ[trHiCache]"] &&
-    StringContainsQ[runnerSource,
-      "DiffExp2`Solve`PrewarmHomogeneousBatch[roundSystems, armReq]"]];
-test["arm batching only fills genuinely idle native workers",
-  StringContainsQ[runnerSource,
-    "Length[A] < cppArmThreadBudget"] &&
-    StringContainsQ[runnerSource,
-      "Length[roundSystems] === 2"] &&
-    StringContainsQ[runnerSource,
-      "roundSystems[[1]] =!= roundSystems[[2]]"]];
-test["arm batching preflights the complete bounded cache",
-  StringContainsQ[runnerSource,
-    "DiffExp2`Solve`HomogeneousCacheCapacity[]"] &&
-    StringContainsQ[runnerSource,
-      "Length[armUniqueCharts] > armCacheCapacity"] &&
-    StringContainsQ[runnerSource,
-      "FTLADDER CPP ARM BATCH SKIP"]];
-test["arm batching opens no Wolfram subkernels",
+test["runner opens no Wolfram subkernels",
   And @@ (!StringContainsQ[runnerSource, #] & /@
     {"ParallelSubmit", "ParallelMap", "LaunchKernels", "ParallelNeeds"})];
-test["native arm prewarm does not replace synchronous arm checkpoints",
+test["retained native branch uses the observable batch dispatcher",
   StringContainsQ[runnerSource,
-    "This prewarm is pure cache state: it never marks an arm complete."] &&
+    "nativeDispatch = ft2RunNativeBoundaryDispatch["] &&
+    StringContainsQ[runnerSource,
+      "rawES = nativeDispatch[\"Values\"]"]];
+test["legacy synchronous arm checkpoints remain in the Wolfram branch",
+  StringContainsQ[runnerSource,
+    "This write must finish before the expensive upper solve starts."] &&
     StringContainsQ[runnerSource,
       "saveTransportProgress[]];\n    If[needHi"]];
 test["checkpoint replacement requests atomic overwrite",
@@ -310,6 +298,9 @@ loaded = loadLadderCheckpoint[file, name, data, prepKey];
 test["completed two-arm checkpoint remains resumable",
   AssociationQ[loaded] && AssociationQ[loaded["TransportLow"]] &&
     AssociationQ[loaded["TransportHigh"]], loaded];
+test["native backend rejects legacy partial-arm transport snapshots",
+  Block[{recurrenceBackend = "Cpp"},
+    loadLadderCheckpoint[file, name, data, prepKey] === $Failed]];
 
 badArmsFile = FileNameJoin[{tmpDir, "bad-arms.mx"}];
 saveLadderCheckpoint[badArmsFile, Join[basePayload, <|
@@ -427,6 +418,7 @@ SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> None];
 SetEnvironment["FT_LADDER_CHECKPOINT_DIR" -> None];
 SetEnvironment["FT_RESUME_LADDER_CHECKPOINT" -> None];
 SetEnvironment["FT_ALLOW_STALE_LADDER_CHECKPOINT" -> None];
+SetEnvironment["DE2_RECURRENCE_BACKEND" -> None];
 
 Print["\n", passes, " passed, ", failures, " failed."];
 If[failures > 0, Quit[1], Quit[0]];

@@ -2,10 +2,10 @@
    Mirrors Scripts/run_ft_stepwise.m but the transport/integration chain is
    DiffExp2 (sector-native, no fitting): per level the in-memory exact
    DiffMatrix is loaded directly (no slice export round-trip), boundary
-   values are transported from the anchor 11/23 to both endpoints, and the
-   boundary cases run through LineIntegral / EndpointLimitValues / direct
-   convolution.  Output: STEPWISE/FINAL rows compatible with the old
-   comparator. *)
+   C++ mode prepares both retained arms once and evaluates every level
+   observable in one native batch; explicit Wolfram mode retains the legacy
+   LineIntegral / EndpointLimitValues / direct chain.  Output:
+   STEPWISE/FINAL rows compatible with the old comparator. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -364,6 +364,10 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_] := Module[
   kind = Lookup[payload, "Kind", "Transport"];
   If[!MemberQ[{"Transport", "Boundary"}, kind],
     Return[ladderCheckpointReject[file, "unknown checkpoint kind"], Module]];
+  If[kind === "Transport" && recurrenceBackend === "Cpp",
+    Return[ladderCheckpointReject[file,
+      "legacy partial-arm Transport snapshots cannot resume the retained native observable batch; resume from a numeric Boundary checkpoint"],
+      Module]];
   level = Lookup[payload, "Level", None];
   If[!IntegerQ[level] || level < 1 || level > data["NumLevels"],
     Return[ladderCheckpointReject[file, "invalid resume level"], Module]];
@@ -551,6 +555,338 @@ limitCombined[tres_, cvec_, var_] := Module[
       " lim start t=", SessionTime[]]];
   DiffExp2`Integrate`EndpointSectorLimit[scalar][[1]]];
 
+(* Exact, runner-local construction for the retained native observable seam.
+   Keeping this data preparation separate from runExample makes it possible
+   to test the production contract without starting FIRE. *)
+ft2NativeFailure[detail_String, data_:<||>] :=
+  Failure["FeynmanTrickNativeBoundary", Join[<|"Detail" -> detail|>, data]];
+
+ft2ExactEpsilonValuation[expression_, physicalVar_Symbol,
+    epsSymbol_Symbol] := Module[
+  {canonical = Together[expression], numerator, denominator,
+   numeratorValuation, denominatorValuation},
+  If[!FreeQ[canonical, _?InexactNumberQ],
+    Return[ft2NativeFailure["native boundary coefficients must be exact",
+      <|"Expression" -> canonical|>], Module]];
+  If[TrueQ[PossibleZeroQ[canonical]], Return[0, Module]];
+  numerator = Numerator[canonical];
+  denominator = Denominator[canonical];
+  If[!PolynomialQ[numerator, {physicalVar, epsSymbol}] ||
+      !PolynomialQ[denominator, {physicalVar, epsSymbol}],
+    Return[ft2NativeFailure[
+      "native boundary coefficients must be rational in the Feynman parameter and epsilon",
+      <|"Expression" -> canonical|>], Module]];
+  numeratorValuation = Exponent[numerator, epsSymbol, Min];
+  denominatorValuation = Exponent[denominator, epsSymbol, Min];
+  If[!IntegerQ[numeratorValuation] || !IntegerQ[denominatorValuation],
+    Return[ft2NativeFailure[
+      "could not determine an exact integer epsilon valuation",
+      <|"Expression" -> canonical|>], Module]];
+  numeratorValuation - denominatorValuation];
+
+ft2IntegrationPoleAllowance[requests_List] := If[
+  AnyTrue[requests, Lookup[#, "Case", None] === "integrate" &],
+  Module[{raw = Environment["FT_INTEGRATION_POLE_ALLOWANCE"],
+      parsed, configured},
+    parsed = If[StringQ[raw] &&
+        StringMatchQ[StringTrim[raw], RegularExpression["[+]?[0-9]+"]],
+      ToExpression[StringTrim[raw]], None];
+    configured = Lookup[FeynmanTrick`Private`$FTConfig,
+      "IntegrationPoleAllowance", 4];
+    Which[
+      IntegerQ[parsed] && parsed >= 0, parsed,
+      IntegerQ[configured] && configured >= 0, configured,
+      True, 4]],
+  0];
+
+ft2PrepareBoundaryEntries[level_Integer, batch_Association,
+    currentPrefactors_List, physicalVar_Symbol, epsSymbol_Symbol,
+    normalize_] := Module[
+  {requests = Lookup[batch, "BoundaryRequests", None],
+   vectors = Lookup[batch, "CoefficientVectors", None],
+   batchKey = Lookup[batch, "Key", Missing["NoBatchKey"]],
+   payloadKey = Lookup[batch, "PayloadKey", Missing["NoPayloadKey"]],
+   dimension = Length[currentPrefactors], entries},
+  If[!ListQ[requests] || !AssociationQ[vectors] || dimension === 0,
+    Return[ft2NativeFailure[
+      "level IBP batch is missing requests or coefficient vectors"], Module]];
+  entries = MapIndexed[Function[{request, position}, Module[
+      {masterIndex = First[position], needed, raw, base, coefficients,
+       shifts, case, vi, vj, identityHash},
+      needed = Lookup[request, "NeededVec", Missing["NoNeededVector"]];
+      case = Lookup[request, "Case", None];
+      vi = Lookup[request, "Vi", None];
+      vj = Lookup[request, "Vj", None];
+      If[!MemberQ[{"integrate", "limitLower", "limitUpper", "direct"},
+          case] || !IntegerQ[vi] || !IntegerQ[vj] ||
+          !KeyExistsQ[vectors, needed],
+        Return[ft2NativeFailure["malformed batched boundary request",
+          <|"MasterIndex" -> masterIndex, "Request" -> request|>], Module]];
+      raw = vectors[needed];
+      If[!ListQ[raw] || Length[raw] =!= dimension,
+        Return[ft2NativeFailure[
+          "batched coefficient vector has the wrong dimension",
+          <|"MasterIndex" -> masterIndex, "Dimension" -> dimension|>],
+          Module]];
+      base = MapThread[Together[normalize[#1]/epsSymbol^#2] &,
+        {raw, currentPrefactors}];
+      coefficients = If[case === "integrate",
+        (Together[
+            Gamma[vi + vj]/(Gamma[vi]*Gamma[vj])*
+            physicalVar^(vi - 1)*(1 - physicalVar)^(vj - 1)*#] & /@ base),
+        base];
+      shifts = ft2ExactEpsilonValuation[#, physicalVar, epsSymbol] & /@
+        coefficients;
+      If[AnyTrue[shifts, FailureQ],
+        Return[First[Select[shifts, FailureQ]], Module]];
+      identityHash = IntegerString[Hash[
+        {level, masterIndex, case, vi, vj, batchKey, payloadKey,
+          coefficients}, "SHA256"], 16, 64];
+      <|"MasterIndex" -> masterIndex, "Case" -> case,
+        "Vi" -> vi, "Vj" -> vj, "NeededVec" -> needed,
+        "CoefficientVector" -> coefficients,
+        "ProvenZero" -> AllTrue[coefficients,
+          TrueQ[PossibleZeroQ[Together[#]]] &],
+        "MinimumEpsilonShift" -> Min[shifts],
+        "Identity" -> ("ft2-level-" <> ToString[level] <> "-master-" <>
+          ToString[masterIndex] <> "-" <> identityHash),
+        "CheckpointIdentity" -> ("ft2-level-" <> ToString[level] <>
+          "-observable-checkpoint-" <> identityHash)|>]], requests];
+  If[AnyTrue[entries, FailureQ], First[Select[entries, FailureQ]], entries]];
+
+ft2NativeEpsilonLedger[entries_List, currentBCs_List,
+    downstreamFiniteTop_Integer] := Module[
+  {widths, sourceMax, active, nonDirect, coefficientShift, coefficientHalo,
+   integrationHalo, targetMax, deliverableMax, outputMins, plannedMin,
+   plannedShift, downstreamRawTop},
+  widths = If[AllTrue[currentBCs, ListQ], Length /@ currentBCs, {}];
+  If[widths === {} || MemberQ[widths, 0] ||
+      Length[DeleteDuplicates[widths]] =!= 1,
+    Return[ft2NativeFailure[
+      "native epsilon ledger requires one nonempty common source window",
+      <|"Widths" -> widths|>], Module]];
+  sourceMax = First[widths] - 1;
+  active = Select[entries, !TrueQ[Lookup[#, "ProvenZero", False]] &];
+  nonDirect = Select[active, #["Case"] =!= "direct" &];
+  coefficientShift = If[nonDirect === {}, 0,
+    Min[Lookup[nonDirect, "MinimumEpsilonShift"]]];
+  coefficientHalo = Max[0, -coefficientShift];
+  integrationHalo = ft2IntegrationPoleAllowance[active];
+  targetMax = sourceMax - coefficientHalo;
+  deliverableMax = targetMax - integrationHalo;
+  outputMins = Association@Map[Function[entry,
+    entry["MasterIndex"] -> If[entry["Case"] === "integrate",
+      entry["MinimumEpsilonShift"] - integrationHalo,
+      entry["MinimumEpsilonShift"]]], active];
+  plannedMin = If[outputMins === <||>, 0, Min[Values[outputMins]]];
+  plannedShift = Max[0, -plannedMin];
+  downstreamRawTop = downstreamFiniteTop - plannedShift;
+  If[targetMax < 0 || deliverableMax < downstreamRawTop,
+    Return[ft2NativeFailure[
+      "source epsilon depth cannot cover the downstream raw boundary window",
+      <|"SourceCompleteMax" -> sourceMax,
+        "CoefficientHalo" -> coefficientHalo,
+        "IntegrationHalo" -> integrationHalo,
+        "TargetCompleteMax" -> targetMax,
+        "DeliverableCompleteMax" -> deliverableMax,
+        "PlannedBoundaryShift" -> plannedShift,
+        "DownstreamRawTop" -> downstreamRawTop|>], Module]];
+  <|"SourceCompleteMax" -> sourceMax,
+    "CoefficientMinimumShift" -> coefficientShift,
+    "CoefficientHalo" -> coefficientHalo,
+    "IntegrationHalo" -> integrationHalo,
+    "TargetCompleteMax" -> targetMax,
+    "DeliverableCompleteMax" -> deliverableMax,
+    "OutputMinimums" -> outputMins,
+    "PlannedBoundaryShift" -> plannedShift,
+    "DownstreamFiniteTop" -> downstreamFiniteTop,
+    "DownstreamRawTop" -> downstreamRawTop|>];
+
+ft2DirectBoundaryValue[entry_Association, currentBCs_List,
+    physicalVar_Symbol, anchor_, epsSymbol_Symbol,
+  completeMax_Integer] := Module[
+  {coefficients = entry["CoefficientVector"], out = None, coefficient,
+   coefficientShift, coefficientSeries, boundarySeries, term},
+  Do[
+    coefficient = Together[coefficients[[j]] /. physicalVar -> anchor];
+    If[!FreeQ[coefficient, physicalVar],
+      Return[ft2NativeFailure[
+        "direct coefficient retained the Feynman parameter at the anchor",
+        <|"MasterIndex" -> entry["MasterIndex"]|>], Module]];
+    If[!TrueQ[PossibleZeroQ[coefficient]],
+      coefficientShift = ft2ExactEpsilonValuation[
+        coefficient, physicalVar, epsSymbol];
+      If[FailureQ[coefficientShift], Return[coefficientShift, Module]];
+      coefficientSeries = If[coefficientShift > completeMax,
+        DiffExp2`EpsSeries`ESZero[completeMax],
+        catch2[DiffExp2`EpsSeries`ESFromExpression[
+          coefficient, epsSymbol, completeMax]]];
+      If[FailureQ[coefficientSeries], Return[coefficientSeries, Module]];
+      boundarySeries = DiffExp2`EpsSeries`ESNew[0, currentBCs[[j]]];
+      term = DiffExp2`EpsSeries`ESTimes[coefficientSeries, boundarySeries];
+      out = If[out === None, term,
+        DiffExp2`EpsSeries`ESAdd[out, term]]],
+    {j, Length[coefficients]}];
+  If[out === None, out = DiffExp2`EpsSeries`ESZero[completeMax]];
+  If[esCMx[out] < completeMax,
+    Return[ft2NativeFailure[
+      "direct convolution lacks the requested complete epsilon top",
+      <|"MasterIndex" -> entry["MasterIndex"],
+        "AvailableCompleteMax" -> esCMx[out],
+        "RequiredCompleteMax" -> completeMax|>], Module]];
+  If[esCMx[out] > completeMax,
+    out = DiffExp2`EpsSeries`ESTruncate[out, completeMax]];
+  out];
+
+(* Overridable seams for the focused definitions-only structural test. *)
+ft2NativeSegmentLine[sys_, path_] :=
+  DiffExp2`Transport`SegmentLine[sys, path];
+ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
+    physicalVar_, targetMax_, threads_] :=
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    sys, boundary, lower, upper, "Threads" -> threads,
+    "Integrands" -> {coefficientVectors, physicalVar},
+    "TargetCompleteMax" -> targetMax];
+ft2NativeRun[atlas_, observables_, physicalVar_] :=
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatch[
+    atlas, observables, physicalVar];
+ft2NativeExport[batch_, digits_] :=
+  DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
+    batch, digits];
+ft2NativeReleaseBatch[batch_] :=
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[batch];
+ft2NativeReleaseAtlas[atlas_] :=
+  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[atlas];
+
+ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
+    entries_List, ledger_Association, physicalVar_Symbol, anchor_,
+    extraSingularFactors_List, threads_Integer, outputDigits_Integer] :=
+ Module[
+  {deliverableMax = ledger["DeliverableCompleteMax"],
+   integrationHalo = ledger["IntegrationHalo"], directRequiredTop =
+     ledger["DownstreamRawTop"], provenZeroEntries, activeEntries,
+   directEntries, nonDirectEntries, zeroEntries, nativeEntries, directValues = <||>,
+   nativeValues = <||>, zeroValues = <||>, transportSystem, lowerPlan,
+   upperPlan, paddedBoundary, observables, atlas = None, batch = None,
+   exported = None, exportedResults, cleanupResult = None, result,
+   dispatchTag = Unique["ft2NativeDispatch"], values, releaseOKQ,
+   directRules},
+  provenZeroEntries = Select[entries,
+    TrueQ[Lookup[#, "ProvenZero", False]] &];
+  activeEntries = Select[entries,
+    !TrueQ[Lookup[#, "ProvenZero", False]] &];
+  directEntries = Select[activeEntries, #["Case"] === "direct" &];
+  nonDirectEntries = Map[
+    Append[#, "OutputMin" ->
+      ledger["OutputMinimums"][#["MasterIndex"]]] &,
+    Select[activeEntries, #["Case"] =!= "direct" &]];
+  zeroEntries = Select[nonDirectEntries,
+    #["OutputMin"] > deliverableMax &];
+  nativeEntries = Select[nonDirectEntries,
+    #["OutputMin"] <= deliverableMax &];
+  directRules = Map[Function[entry, Module[{value},
+      value = ft2DirectBoundaryValue[entry, currentBCs, physicalVar,
+        anchor, Global`eps, directRequiredTop];
+      If[FailureQ[value], value, entry["MasterIndex"] -> value]]],
+    directEntries];
+  If[AnyTrue[directRules, FailureQ],
+    Return[First[Select[directRules, FailureQ]], Module]];
+  directValues = Association[directRules];
+  Do[AssociateTo[zeroValues, entry["MasterIndex"] ->
+      DiffExp2`EpsSeries`ESZero[deliverableMax]],
+    {entry, provenZeroEntries}];
+  Do[AssociateTo[zeroValues, entry["MasterIndex"] ->
+      DiffExp2`EpsSeries`ESZero[deliverableMax]],
+    {entry, zeroEntries}];
+  If[nativeEntries =!= {},
+    transportSystem = Join[sys, <|"ExtraSingularFactors" ->
+      Select[extraSingularFactors, !FreeQ[#, physicalVar] &]|>];
+    lowerPlan = catch2[
+      ft2NativeSegmentLine[transportSystem, {anchor, 0}]];
+    upperPlan = catch2[
+      ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
+    If[FailureQ[lowerPlan] || FailureQ[upperPlan],
+      Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
+    paddedBoundary = If[integrationHalo === 0,
+      DiffExp2`EpsSeries`ESNew[0, #] & /@ currentBCs,
+      DiffExp2`EpsSeries`ESNew[-integrationHalo,
+        Join[ConstantArray[0, integrationHalo], #]] & /@ currentBCs];
+    observables = Map[Function[entry, Module[{observable},
+      observable = <|"Operation" -> entry["Case"],
+        "Identity" -> entry["Identity"],
+        "CheckpointIdentity" -> entry["CheckpointIdentity"],
+        "CoefficientVector" -> entry["CoefficientVector"],
+        "Epsilon" -> <|"Min" -> entry["OutputMin"],
+          "Max" -> deliverableMax,
+          "RequiredCompleteMax" -> deliverableMax|>|>;
+      If[entry["Case"] === "integrate",
+        Append[observable, "TailPolicy" -> "stored"], observable]]],
+      nativeEntries];
+    result = Catch[Internal`WithLocalSettings[
+      Null,
+      atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
+        lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
+        physicalVar, ledger["TargetCompleteMax"], threads]];
+      If[FailureQ[atlas] || !AssociationQ[atlas],
+        Throw[If[FailureQ[atlas], atlas,
+          ft2NativeFailure["native atlas preparation returned a malformed result",
+            <|"Result" -> atlas|>]], dispatchTag]];
+      batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
+      If[FailureQ[batch] || !AssociationQ[batch],
+        Throw[If[FailureQ[batch], batch,
+          ft2NativeFailure["native observable batch returned a malformed result",
+            <|"Result" -> batch|>]], dispatchTag]];
+      exported = catch2[ft2NativeExport[batch, outputDigits]];
+      If[FailureQ[exported] || !AssociationQ[exported],
+        Throw[If[FailureQ[exported], exported,
+          ft2NativeFailure["native observable export returned a malformed result",
+            <|"Result" -> exported|>]], dispatchTag]];
+      exported,
+      cleanupResult = Which[
+        AssociationQ[batch], catch2[ft2NativeReleaseBatch[batch]],
+        AssociationQ[atlas], catch2[ft2NativeReleaseAtlas[atlas]],
+        True, <|"Released" -> 0, "Failures" -> {}|>]], dispatchTag];
+    releaseOKQ[release_] := AssociationQ[release] &&
+      Lookup[release, "Failures", {"malformed"}] === {};
+    If[FailureQ[result], Return[result, Module]];
+    If[!releaseOKQ[cleanupResult],
+      Return[ft2NativeFailure["native observable owner cleanup failed",
+        <|"ReleaseResult" -> cleanupResult|>], Module]];
+    exportedResults = Lookup[exported, "ExportedResults", None];
+    If[!ListQ[exportedResults] ||
+        Length[exportedResults] =!= Length[nativeEntries] ||
+        Lookup[exportedResults, "Identity"] =!=
+          Lookup[nativeEntries, "Identity"] ||
+        !AllTrue[Lookup[exportedResults, "Value", {}],
+          DiffExp2`EpsSeries`ESQ],
+      Return[ft2NativeFailure[
+        "native observable export changed request order or value shape"],
+        Module]];
+    nativeValues = AssociationThread[
+      Lookup[nativeEntries, "MasterIndex"],
+      Lookup[exportedResults, "Value"]]];
+  values = Map[Function[masterIndex,
+      Lookup[Join[directValues, zeroValues, nativeValues], masterIndex,
+        Missing["MissingBoundaryValue", masterIndex]]],
+    Lookup[entries, "MasterIndex"]];
+  If[AnyTrue[values, MissingQ],
+    Return[ft2NativeFailure[
+      "native/direct result merge did not cover every lower master",
+      <|"Missing" -> Cases[values, _Missing]|>], Module]];
+  <|"Values" -> values,
+    "NativeBatchCalls" -> If[nativeEntries === {}, 0, 1],
+    "NativeMarches" -> If[AssociationQ[exported],
+      Lookup[exported, "NativeMarches", Missing["NotReported"]], 0],
+    "CompatibilityExports" -> If[AssociationQ[exported],
+      Lookup[exported, "CompatibilityExports", Length[nativeEntries]], 0],
+    "CheckpointRecord" -> <|
+      "Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
+      "Identities" -> Lookup[nativeEntries, "Identity"],
+      "TargetCompleteMax" -> ledger["TargetCompleteMax"],
+      "DeliverableCompleteMax" -> deliverableMax,
+      "CoefficientHalo" -> ledger["CoefficientHalo"],
+      "IntegrationHalo" -> integrationHalo|>|>];
+
 runExample[name_String] := Module[
   {topology, sequence, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
@@ -615,7 +951,9 @@ runExample[name_String] := Module[
      transportSys = None, planLo = None, planHi = None, armReq,
      loPlanCharts, hiPlanCharts, armRounds, armBatchResult,
      armUniqueCharts, armCacheCapacity, levelIBPBatch, rawExtraFacs,
-     epsilonBasis, epsilonBasisRecord},
+     epsilonBasis, epsilonBasisRecord, nativeEntries = None,
+     nativeLedger = None, nativeDispatch = None, downstreamFiniteTop,
+     esCMxLevel, configResult},
     var = levelData["FeynmanParameter"];
     (* normalize FT-layer symbols at the seam: dimension d -> 2-2eps form,
        FT epsilon symbol -> the DiffExp2 canonical Global`eps *)
@@ -655,36 +993,61 @@ runExample[name_String] := Module[
           " poleFree=", epsilonBasisRecord["PoleFree"]]]];
     levelExpansionOrder = If[resumeTransport,
       resumeCheckpoint["SourceExpansionOrder"], expansionOrder];
+    (* CoefficientVectors are part of the production transport contract.
+       Rebuild/revalidate the one batched FIRE payload even when the Wolfram
+       backend resumes a legacy arm snapshot; native Transport snapshots were
+       rejected at the loader and can never be reinterpreted as retained
+       state. *)
+    levelIBPBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
+      ftData, level];
+    If[levelIBPBatch === $Failed,
+      Print["FIRE FAIL"]; Return[$Failed, Module]];
+    requests = levelIBPBatch["BoundaryRequests"];
+    reductions = levelIBPBatch["Reductions"];
+    rawExtraFacs =
+      FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
+        ftData, level, levelIBPBatch];
+    If[rawExtraFacs === $Failed,
+      Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];
+    extraFacs = normalizeFT[rawExtraFacs];
     If[resumeTransport,
       sys = resumeCheckpoint["System"];
       If[Lookup[sys, "Variable", None] =!= var ||
           Lookup[sys, "Matrix", None] =!= A,
         Print["FTLADDER RESUME REJECT: saved system does not match level matrix"];
         Throw[$Failed, "FT2Abort"]];
-      requests = resumeCheckpoint["Requests"];
-      reductions = resumeCheckpoint["Reductions"];
-      extraFacs = resumeCheckpoint["ExtraSingularFactors"];
+      If[Lookup[resumeCheckpoint, "Requests", None] =!= requests ||
+          Lookup[resumeCheckpoint, "Reductions", None] =!=
+            AssociationMap[normalizeFT, reductions] ||
+          Lookup[resumeCheckpoint, "ExtraSingularFactors", None] =!=
+            extraFacs,
+        Print["FTLADDER RESUME REJECT: saved transport does not match the revalidated level IBP batch"];
+        Throw[$Failed, "FT2Abort"]];
       DiffExp2`Solve`ClearSolveCaches[],
       sys = catch2[DiffExp2`API`LoadSystem[
         <|"Matrix" -> A, "Variable" -> var|>]];
-      If[FailureQ[sys], Print["LOAD FAIL ", sys]; Return[$Failed, Module]];
-      levelIBPBatch = FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[
-        ftData, level];
-      If[levelIBPBatch === $Failed,
-        Print["FIRE FAIL"]; Return[$Failed, Module]];
-      requests = levelIBPBatch["BoundaryRequests"];
-      reductions = levelIBPBatch["Reductions"];
-      rawExtraFacs =
-        FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
-          ftData, level, levelIBPBatch];
-      If[rawExtraFacs === $Failed,
-        Print["FIRE BATCH FAIL"]; Return[$Failed, Module]];
-      extraFacs = normalizeFT[rawExtraFacs];
-    ];
+      If[FailureQ[sys], Print["LOAD FAIL ", sys]; Return[$Failed, Module]]];
+    If[recurrenceBackend === "Cpp",
+      nativeEntries = ft2PrepareBoundaryEntries[level, levelIBPBatch,
+        currentPrefactors, var, Global`eps, normalizeFT];
+      If[FailureQ[nativeEntries],
+        Print["FTLADDER NATIVE COEFFICIENT FAIL level=", level, " ",
+          nativeEntries];
+        Throw[$Failed, "FT2Abort"]];
+      downstreamFiniteTop = If[level > 1,
+        requestedEpsilonOrder[level - 1], epsOrder];
+      nativeLedger = ft2NativeEpsilonLedger[
+        nativeEntries, currentBCs, downstreamFiniteTop];
+      If[FailureQ[nativeLedger],
+        Print["FTLADDER NATIVE EPSILON FAIL level=", level, " ",
+          nativeLedger];
+        Throw[$Failed, "FT2Abort"]];
+      esCMxLevel = nativeLedger["TargetCompleteMax"],
+      esCMxLevel = requestedEpsilonOrder[level]];
     (* configure DiffExp2 for this level *)
-    catch2[DiffExp2`Config`LoadConfiguration[{
+    configResult = catch2[DiffExp2`Config`LoadConfiguration[{
       "WorkingPrecision" -> wp, "ExpansionOrder" -> levelExpansionOrder,
-      "EpsilonOrder" -> (esCMxLevel = requestedEpsilonOrder[level]),
+      "EpsilonOrder" -> esCMxLevel,
       "DivisionOrder" -> divisionOrder,
       "RadiusOfConvergence" -> radiusOfConvergence,
       (* The restored classic predivision planner couples placement and
@@ -693,6 +1056,29 @@ runExample[name_String] := Module[
       "RecurrenceBackend" -> recurrenceBackend,
       "DeltaPrescriptions" -> levelDeltaPrescriptions[var, sys, extraFacs],
       "Variables" -> {}}]];
+    If[FailureQ[configResult],
+      Print["CONFIG FAIL level=", level, " ", configResult];
+      Throw[$Failed, "FT2Abort"]];
+    If[recurrenceBackend === "Cpp",
+      nativeDispatch = ft2RunNativeBoundaryDispatch[
+        sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
+        extraFacs, cppArmThreadBudget, wp];
+      If[FailureQ[nativeDispatch],
+        Print["FTLADDER NATIVE BATCH FAIL level=", level, " ",
+          nativeDispatch];
+        Throw[$Failed, "FT2Abort"]];
+      rawES = nativeDispatch["Values"];
+      Print["FTLADDER NATIVE BATCH level=", level,
+        " requests=", Length[nativeEntries],
+        " batchCalls=", nativeDispatch["NativeBatchCalls"],
+        " armMarches=", nativeDispatch["NativeMarches"],
+        " exports=", nativeDispatch["CompatibilityExports"],
+        " HC=", nativeLedger["CoefficientHalo"],
+        " HI=", nativeLedger["IntegrationHalo"],
+        " sourceTop=", nativeLedger["SourceCompleteMax"],
+        " atlasTop=", nativeLedger["TargetCompleteMax"],
+        " rawTop=", nativeLedger["DeliverableCompleteMax"],
+        " t=", SessionTime[]],
     (* One pair of endpoint transports per level serves every master.  Each
        arm is checkpointed synchronously before the next arm begins. *)
     needInt = AnyTrue[requests, #["Case"] === "integrate" &];
@@ -924,6 +1310,7 @@ runExample[name_String] := Module[
             {j, Length[mastersHere]}];
           If[out === None, DiffExp2`EpsSeries`ESZero[kmax], out]]]],
       {mi, Length[mastersBelow]}];
+    ];
     If[MemberQ[rawES, $Failed], Throw[$Failed, "FT2Abort"]];
     rawES = DiffExp2`EpsSeries`ESTrim /@ rawES;
     printRows[name, level - 1, mastersBelow, rawES,

@@ -9,6 +9,7 @@
 #include "diffexp2/path_planner.hpp"
 #include "diffexp2/physical_ode.hpp"
 #include "diffexp2/recurrence.hpp"
+#include "diffexp2/scalar_row_endpoint.hpp"
 #include "diffexp2/singular_indicial.hpp"
 #include "diffexp2/tail_majorant.hpp"
 
@@ -13236,8 +13237,15 @@ restore_checkpoint_transport_endpoint_record(
         "checkpoint transport endpoint observable identity is inconsistent");
   const auto& row_record = as_object(
       source.at("row"), "checkpoint transport endpoint row record");
-  require_exact_keys(row_record, {"exact_identity", "prepared_row"},
-                     "checkpoint transport endpoint row record");
+  const bool has_projection =
+      row_record.if_contains("projection") != nullptr;
+  if (has_projection)
+    require_exact_keys(
+        row_record, {"exact_identity", "prepared_row", "projection"},
+        "checkpoint transport endpoint row record");
+  else
+    require_exact_keys(row_record, {"exact_identity", "prepared_row"},
+                       "checkpoint transport endpoint row record");
   const auto& prepared_row = as_object(
       row_record.at("prepared_row"),
       "checkpoint transport endpoint prepared row");
@@ -13251,6 +13259,39 @@ restore_checkpoint_transport_endpoint_record(
       as_u32(final_summary.at("dimension"),
              "checkpoint transport endpoint source dimension"),
       "checkpoint transport endpoint prepared row");
+  const json::object* projection_record = nullptr;
+  if (has_projection) {
+    if (!binding.centered)
+      throw std::invalid_argument(
+          "checkpoint noncentered transport endpoint has a centered projection record");
+    projection_record = &as_object(
+        row_record.at("projection"),
+        "checkpoint transport endpoint projection record");
+    require_exact_keys(
+        *projection_record,
+        {"schema", "mode", "source_taylor_complete_max",
+         "projected_taylor_complete_max", "projected_top_valid",
+         "fallback_reason"},
+        "checkpoint transport endpoint projection record");
+    if (required_string(*projection_record, "schema") !=
+        "diffexp2-centered-scalar-row-endpoint-projection-v1")
+      throw std::invalid_argument(
+          "unsupported centered transport endpoint projection schema");
+    (void)required_string(*projection_record, "mode");
+    (void)as_u32(
+        projection_record->at("source_taylor_complete_max"),
+        "checkpoint endpoint source Taylor maximum");
+    (void)as_u32(
+        projection_record->at("projected_taylor_complete_max"),
+        "checkpoint endpoint projected Taylor maximum");
+    (void)parse_validity(
+        projection_record->at("projected_top_valid"));
+    if (!projection_record->at("fallback_reason").is_null() &&
+        !projection_record->at("fallback_reason").is_string())
+      throw std::invalid_argument(
+          "checkpoint endpoint projection fallback reason must be a string or null");
+  }
+  std::optional<json::object> expected_projected_metadata;
   if (expected_domain == "rational") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<Rational>>(
@@ -13258,8 +13299,21 @@ restore_checkpoint_transport_endpoint_record(
     if (!typed)
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Rational final local");
-    (void)parse_prepared_rational_row<Rational>(
+    const auto matrix = parse_prepared_rational_row<Rational>(
         prepared_row, typed->solution());
+    if (projection_record != nullptr) {
+      const auto plan = centered_prepared_scalar_row_endpoint_plan(
+          matrix, typed->solution(), typed->top_valid());
+      if (*projection_record !=
+          transport_centered_projection_record(plan))
+        throw std::invalid_argument(
+            "checkpoint centered endpoint projection mode/window is stale");
+      expected_projected_metadata =
+          checkpoint_local_analytic_metadata_record(
+              prepared_scalar_row_endpoint_analytic_shape(
+                  matrix, typed->solution(),
+                  checkpoint_identity + ":restore-analytic-shape"));
+    }
   } else {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
@@ -13267,8 +13321,21 @@ restore_checkpoint_transport_endpoint_record(
     if (!typed)
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Acb final local");
-    (void)parse_prepared_rational_row<ComplexBall>(
+    const auto matrix = parse_prepared_rational_row<ComplexBall>(
         prepared_row, typed->solution());
+    if (projection_record != nullptr) {
+      const auto plan = centered_prepared_scalar_row_endpoint_plan(
+          matrix, typed->solution(), typed->top_valid());
+      if (*projection_record !=
+          transport_centered_projection_record(plan))
+        throw std::invalid_argument(
+            "checkpoint centered endpoint projection mode/window is stale");
+      expected_projected_metadata =
+          checkpoint_local_analytic_metadata_record(
+              prepared_scalar_row_endpoint_analytic_shape(
+                  matrix, typed->solution(),
+                  checkpoint_identity + ":restore-analytic-shape"));
+    }
   }
   const auto& epsilon_record = as_object(
       source.at("output_epsilon_contract"),
@@ -13305,10 +13372,13 @@ restore_checkpoint_transport_endpoint_record(
       object.at("analytic_metadata"),
       "checkpoint transport endpoint analytic metadata");
   validate_checkpoint_exact_analytic_metadata(analytic_metadata);
-  if (analytic_metadata !=
-      state->final_local()->exact_analytic_metadata())
+  const auto expected_analytic_metadata =
+      expected_projected_metadata.has_value()
+      ? *expected_projected_metadata
+      : state->final_local()->exact_analytic_metadata();
+  if (analytic_metadata != expected_analytic_metadata)
     throw std::invalid_argument(
-        "checkpoint transport endpoint analytic metadata differs from its retained final local");
+        "checkpoint transport endpoint analytic metadata differs from its exact projected row shape");
   const auto provenance = transport_endpoint_provenance(
       checkpoint_identity, source, analytic_metadata);
   if (json::serialize(canonical_json_value(provenance)) !=

@@ -1271,6 +1271,72 @@ json::object transport_endpoint_provenance(
       {"analytic_metadata", analytic_metadata}};
 }
 
+json::object transport_centered_projection_record(
+    PreparedScalarRowEndpointMode mode,
+    std::uint32_t source_taylor_complete_max,
+    std::uint32_t projected_taylor_complete_max,
+    std::int32_t projected_top_valid,
+    const std::string& fallback_reason) {
+  json::object record{
+      {"schema",
+       "diffexp2-centered-scalar-row-endpoint-projection-v1"},
+      {"mode", prepared_scalar_row_endpoint_mode_name(mode)},
+      {"source_taylor_complete_max", source_taylor_complete_max},
+      {"projected_taylor_complete_max", projected_taylor_complete_max},
+      {"projected_top_valid", encode_validity(projected_top_valid)}};
+  record["fallback_reason"] = fallback_reason.empty()
+      ? json::value(nullptr) : json::value(fallback_reason);
+  return record;
+}
+
+template <typename Scalar>
+json::object transport_centered_projection_record(
+    const PreparedScalarRowEndpointResult<Scalar>& result) {
+  return transport_centered_projection_record(
+      result.mode, result.source_taylor_complete_max,
+      result.projected_taylor_complete_max,
+      result.projected_top_valid, result.fallback_reason);
+}
+
+json::object transport_centered_projection_record(
+    const PreparedScalarRowEndpointPlan& plan) {
+  return transport_centered_projection_record(
+      plan.mode, plan.source_taylor_complete_max,
+      plan.projected_taylor_complete_max,
+      plan.projected_top_valid, plan.fallback_reason);
+}
+
+struct CenteredTransportEndpointRow {
+  EndpointLimitResult endpoint;
+  json::object analytic_metadata;
+  json::object projection_record;
+};
+
+template <typename Scalar>
+CenteredTransportEndpointRow build_centered_transport_endpoint_row(
+    const json::object& row,
+    const std::shared_ptr<StoredLocal<Scalar>>& source,
+    const EndpointLimitOptions& options,
+    const std::string& projected_checkpoint_identity) {
+  if (!source)
+    throw std::logic_error(
+        "centered transport endpoint lost its typed final local");
+  if (!source->solution().error.empty())
+    throw std::domain_error(
+        "native rational-row application requires explicit source error-envelope propagation");
+  const auto matrix = parse_prepared_rational_row<Scalar>(
+      row, source->solution());
+  auto computation = centered_prepared_scalar_row_endpoint_limit(
+      matrix, source->solution(), source->top_valid(), options,
+      projected_checkpoint_identity);
+  auto analytic_metadata = checkpoint_local_analytic_metadata_record(
+      computation.projected);
+  auto projection_record = transport_centered_projection_record(
+      computation);
+  return {std::move(computation.endpoint),
+          std::move(analytic_metadata), std::move(projection_record)};
+}
+
 std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
     const std::string& endpoint_handle,
     const std::string& checkpoint_identity,
@@ -1295,48 +1361,75 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
       row, as_u32(source_summary.at("dimension"),
                   "transport endpoint source dimension"),
       "transport endpoint prepared rational row");
-  json::object row_request{
-      {"row", row},
-      {"source_checkpoint_identity", source->checkpoint_identity()},
-      {"checkpoint_identity", projected_checkpoint_identity}};
-  std::shared_ptr<StoredLocalBase> projected;
-  if (domain == "rational") {
-    const auto typed =
-        std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
-    if (!typed)
-      throw std::logic_error(
-          "transport endpoint Rational source changed coefficient domain");
-    projected = build_rational_row_local<Rational>(
-        projected_handle, row_request, precision_bits, typed, source,
-        false);
-  } else if (domain == "acb") {
-    const auto typed =
-        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
-    if (!typed)
-      throw std::logic_error(
-          "transport endpoint Acb source changed coefficient domain");
-    projected = build_rational_row_local<ComplexBall>(
-        projected_handle, row_request, precision_bits, typed, source,
-        false);
-  } else {
-    throw std::invalid_argument(
-        "transport endpoint row requires one numeric coefficient domain");
-  }
-
   EndpointLimitResult result;
+  json::object analytic_metadata;
+  std::optional<json::object> projection_record;
   if (binding.centered) {
     EndpointLimitOptions options;
     options.approach_direction = binding.approach_direction;
     options.imaginary_sign = binding.rim;
     options.allow_certified_numeric_cancellation = true;
-    result = projected->endpoint_limit(options);
+    if (domain == "rational") {
+      const auto typed =
+          std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+      if (!typed)
+        throw std::logic_error(
+            "transport endpoint Rational source changed coefficient domain");
+      auto centered = build_centered_transport_endpoint_row(
+          row, typed, options, projected_checkpoint_identity);
+      result = std::move(centered.endpoint);
+      analytic_metadata = std::move(centered.analytic_metadata);
+      projection_record = std::move(centered.projection_record);
+    } else if (domain == "acb") {
+      const auto typed =
+          std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+      if (!typed)
+        throw std::logic_error(
+            "transport endpoint Acb source changed coefficient domain");
+      auto centered = build_centered_transport_endpoint_row(
+          row, typed, options, projected_checkpoint_identity);
+      result = std::move(centered.endpoint);
+      analytic_metadata = std::move(centered.analytic_metadata);
+      projection_record = std::move(centered.projection_record);
+    } else {
+      throw std::invalid_argument(
+          "transport endpoint row requires one numeric coefficient domain");
+    }
   } else {
+    json::object row_request{
+        {"row", row},
+        {"source_checkpoint_identity", source->checkpoint_identity()},
+        {"checkpoint_identity", projected_checkpoint_identity}};
+    std::shared_ptr<StoredLocalBase> projected;
+    if (domain == "rational") {
+      const auto typed =
+          std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+      if (!typed)
+        throw std::logic_error(
+            "transport endpoint Rational source changed coefficient domain");
+      projected = build_rational_row_local<Rational>(
+          projected_handle, row_request, precision_bits, typed, source,
+          false);
+    } else if (domain == "acb") {
+      const auto typed =
+          std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+      if (!typed)
+        throw std::logic_error(
+            "transport endpoint Acb source changed coefficient domain");
+      projected = build_rational_row_local<ComplexBall>(
+          projected_handle, row_request, precision_bits, typed, source,
+          false);
+    } else {
+      throw std::invalid_argument(
+          "transport endpoint row requires one numeric coefficient domain");
+    }
     const auto point = RealEvaluationPoint::rational(
         binding.local_end.str());
     const auto evaluation = projected->evaluate_retained_point(
         point, binding.rim);
     result = endpoint_result_from_retained_evaluation(
         evaluation, binding.rim);
+    analytic_metadata = projected->exact_analytic_metadata();
   }
   result = restrict_endpoint_result_epsilon(
       std::move(result), epsilon_contract,
@@ -1344,14 +1437,16 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
   if (result.values.size() != 1)
     throw std::logic_error(
         "transport endpoint row result did not remain scalar");
-  const auto analytic_metadata = projected->exact_analytic_metadata();
   auto endpoint_source = binding.source;
   endpoint_source["observable"] = json::object{
       {"identity", observable_identity},
       {"checkpoint_identity", checkpoint_identity}};
-  endpoint_source["row"] = json::object{
+  json::object row_record{
       {"exact_identity", required_string(row, "exact_identity")},
       {"prepared_row", row}};
+  if (projection_record.has_value())
+    row_record["projection"] = std::move(*projection_record);
+  endpoint_source["row"] = std::move(row_record);
   endpoint_source["output_epsilon_contract"] = epsilon_record;
   const auto provenance = transport_endpoint_provenance(
       checkpoint_identity, endpoint_source, analytic_metadata);

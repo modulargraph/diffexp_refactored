@@ -9134,8 +9134,10 @@ class PreparedChart final : public PreparedChartBase {
           "regular value handoff receiver frame would discard certified lower epsilon coefficients");
     const auto source_complete_max = std::min(
         source.epsilon.complete_max, incoming->top_valid());
-    if (source.epsilon.min_power > requested_epsilon.min_power ||
-        source_complete_max < requested_epsilon.complete_max)
+    // Assembly trims certified-zero lower epsilon rows.  The receiver's
+    // full initial slab was zero-filled above, so a stored minimum above the
+    // requested lower edge is an exact zero-padding case, not missing data.
+    if (source_complete_max < requested_epsilon.complete_max)
       throw std::domain_error(
           "regular value handoff source does not cover its requested complete epsilon window");
 
@@ -19082,11 +19084,10 @@ json::object run_session_command(const json::object& root) {
         producing_local.str());
     const auto producing_rim = exact_plan_rim(
         producing.prescriptions, producing.geometry.scale);
-    if (incoming_epsilon_min > requested_epsilon.min_power)
-      return ineligible("incoming-local-lacks-lower-epsilon-coverage");
     if (incoming_effective_max < requested_epsilon.complete_max)
       return ineligible("incoming-local-lacks-complete-epsilon-coverage");
-    if (incoming_epsilon_min < (*receiving_owner)->frame_base() ||
+    if (requested_epsilon.min_power < (*receiving_owner)->frame_base() ||
+        incoming_epsilon_min < (*receiving_owner)->frame_base() ||
         static_cast<std::int64_t>(incoming_effective_max) >
             receiver_frame_top)
       return ineligible("incoming-local-does-not-fit-receiver-epsilon-frame");

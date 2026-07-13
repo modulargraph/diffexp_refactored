@@ -6850,12 +6850,20 @@ std::vector<PseudoHit<Scalar>> parse_checkpoint_pseudo_hits(
   return result;
 }
 
+struct CheckpointValueHandoffPlanBinding {
+  json::object producing_chart;
+  json::object producing_owner;
+  json::object receiving_chart;
+  json::object receiving_owner;
+};
+
 template <typename Scalar>
 std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     const json::value& raw, const std::string& expected_domain,
     slong expected_precision_bits,
     std::shared_ptr<void> retained_owner = nullptr,
-    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner = nullptr) {
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner = nullptr,
+    const CheckpointValueHandoffPlanBinding* value_handoff_plan = nullptr) {
   AcbPrecisionLease lease(expected_precision_bits);
   ComplexBall::set_precision(expected_precision_bits);
   const auto& object = as_object(raw, "checkpoint retained local");
@@ -7211,11 +7219,13 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
                    "checkpoint plan-value handoff match index");
 
       struct ValueChartRecord {
+        std::size_t index = 0;
         std::string handle;
         std::string identity;
         Rational center;
         Rational scale;
         Rational radius;
+        std::vector<Prescription> prescriptions;
       };
       const auto parse_value_chart = [](const json::value& raw,
                                         const char* label) {
@@ -7226,19 +7236,42 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
              "scale_exact", "radius_exact", "singular_center",
              "prescriptions"},
             label);
-        (void)as_u64(chart.at("index"), label);
         if (!chart.at("singular_center").is_bool() ||
-            chart.at("singular_center").as_bool() ||
-            !as_array(chart.at("prescriptions"), label).empty())
+            chart.at("singular_center").as_bool())
           throw std::invalid_argument(
-              std::string(label) +
-              " is singular or branch-sensitive");
+              std::string(label) + " is singular");
+        const auto encoded_index = as_u64(chart.at("index"), label);
+        if (encoded_index > std::numeric_limits<std::size_t>::max())
+          throw std::invalid_argument(
+              std::string(label) + " index exceeds size_t");
         ValueChartRecord result{
+            static_cast<std::size_t>(encoded_index),
             required_string(chart, "chart"),
             required_string(chart, "identity"),
             Rational(required_string(chart, "center_exact")),
             Rational(required_string(chart, "scale_exact")),
-            Rational(required_string(chart, "radius_exact"))};
+            Rational(required_string(chart, "radius_exact")), {}};
+        for (const auto& raw_prescription : as_array(
+                 chart.at("prescriptions"), label)) {
+          const auto& prescription = as_object(raw_prescription, label);
+          require_exact_keys(
+              prescription,
+              {"factor_exact", "sign", "multiplicity",
+               "leading_coefficient_sign"},
+              label);
+          Prescription parsed{
+              required_string(prescription, "factor_exact"),
+              as_i32(prescription.at("sign"), label),
+              as_u32(prescription.at("multiplicity"), label),
+              as_i32(prescription.at("leading_coefficient_sign"), label)};
+          if ((parsed.sign != -1 && parsed.sign != 1) ||
+              (parsed.leading_coefficient_sign != -1 &&
+               parsed.leading_coefficient_sign != 1) ||
+              parsed.multiplicity == 0)
+            throw std::invalid_argument(
+                std::string(label) + " has a malformed prescription");
+          result.prescriptions.push_back(std::move(parsed));
+        }
         if (result.handle.empty() || result.identity.empty() ||
             result.scale.is_zero() || result.radius.sign() <= 0)
           throw std::invalid_argument(
@@ -7276,6 +7309,17 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
                          "checkpoint value producing binding");
       require_exact_keys(receiving_binding, {"chart", "owner"},
                          "checkpoint value receiving binding");
+      if (value_handoff_plan == nullptr ||
+          producing_binding.at("chart") !=
+              value_handoff_plan->producing_chart ||
+          producing_binding.at("owner") !=
+              value_handoff_plan->producing_owner ||
+          receiving_binding.at("chart") !=
+              value_handoff_plan->receiving_chart ||
+          receiving_binding.at("owner") !=
+              value_handoff_plan->receiving_owner)
+        throw std::invalid_argument(
+            "checkpoint value chart/owner bindings differ from their restored tile plan");
       const auto producing_chart = parse_value_chart(
           producing_binding.at("chart"),
           "checkpoint value producing chart");
@@ -7351,7 +7395,11 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           !acb_equal(prototype_metadata.chart.radius.raw(),
                      ComplexBall::from_strings(
                          receiving_chart.radius.str()).raw()) ||
-          !prototype_metadata.prescriptions.empty() ||
+          !local_algebra_detail::same_prescriptions(
+              prototype_metadata.prescriptions,
+              receiving_chart.prescriptions) ||
+          !local_algebra_detail::same_prescriptions(
+              solution.prescriptions, receiving_chart.prescriptions) ||
           prototype_metadata.a.domain != ExactDomain::Rational ||
           prototype_metadata.b.domain != ExactDomain::Rational ||
           !(Rational(prototype_metadata.a.canonical) == Rational(0)) ||
@@ -9042,6 +9090,7 @@ class PreparedChart final : public PreparedChartBase {
       json::object metadata_object,
       const std::shared_ptr<StoredLocalBase>& incoming_owner,
       const RealEvaluationPoint& producing_point,
+      std::optional<std::int32_t> producing_rim,
       const ExactAffineChart& receiving_geometry,
       const std::vector<Prescription>& receiving_prescriptions,
       EpsilonWindow requested_epsilon,
@@ -9160,10 +9209,13 @@ class PreparedChart final : public PreparedChartBase {
         }
     } else {
       EvaluationOptions options;
+      options.imaginary_sign = producing_rim;
       options.compute_tail_estimate = false;
       const auto evaluated = evaluate_local_solution(
           source, producing_point, options);
-      if (evaluated.imaginary_sign.has_value() ||
+      const auto expected_rim = producing_point.sign < 0
+          ? producing_rim : std::nullopt;
+      if (evaluated.imaginary_sign != expected_rim ||
           evaluated.value.dimension != prepared_.dimension ||
           evaluated.value.epsilon.min_power < source.epsilon.min_power ||
           evaluated.value.epsilon.complete_max < source_complete_max)
@@ -17320,15 +17372,73 @@ json::object restore_checkpoint(const std::string& path,
                 "checkpoint local has an unsupported physical equation owner kind");
           }
         }
+        std::optional<CheckpointValueHandoffPlanBinding>
+            value_handoff_plan;
+        if (!item.at("retained_derivation").is_null()) {
+          const auto& derivation = as_object(
+              item.at("retained_derivation"),
+              "checkpoint retained-local derivation");
+          if (required_string(derivation, "schema") ==
+              "diffexp2-retained-plan-value-handoff-v1") {
+            const auto plan_handle = required_string(
+                derivation, "tile_plan");
+            const auto plan_found = restored->tile_plans.find(plan_handle);
+            if (plan_found == restored->tile_plans.end() ||
+                required_string(derivation,
+                                "tile_plan_checkpoint_identity") !=
+                    plan_found->second->checkpoint_identity() ||
+                required_string(derivation,
+                                "tile_plan_provenance_identity") !=
+                    plan_found->second->provenance_identity())
+              throw std::invalid_argument(
+                  "checkpoint value handoff differs from its restored tile plan");
+            const auto arm_name = required_string(derivation, "arm");
+            const auto match_index = checkpoint_size_t(
+                derivation.at("match"),
+                "checkpoint value handoff match index");
+            const auto& arm = plan_found->second->arm(arm_name);
+            if (match_index >= arm.exact.matches.size())
+              throw std::invalid_argument(
+                  "checkpoint value handoff match is outside its restored arm");
+            const auto& match = arm.exact.matches[match_index];
+            const auto& producing = arm.charts.at(match.producing_chart);
+            const auto& receiving = arm.charts.at(match.receiving_chart);
+            const auto owner_reference = [](
+                const RetainedPlanChartBinding& binding) {
+              const auto* owner = std::get_if<
+                  std::shared_ptr<PreparedChartBase>>(&binding.owner);
+              if (owner == nullptr || !*owner)
+                throw std::invalid_argument(
+                    "checkpoint value handoff plan chart is not a primitive prepared owner");
+              return json::object{
+                  {"kind", (*owner)->equation_owner_kind()},
+                  {"handle", (*owner)->equation_owner_handle()},
+                  {"operator_identity",
+                   (*owner)->equation_operator_identity()},
+                  {"plan_exact_identity", binding.exact_identity},
+                  {"owner_signature_identity",
+                   (*owner)->owner_signature_identity()},
+                  {"physical_payload_identity",
+                   (*owner)->physical_payload_identity()}};
+            };
+            value_handoff_plan = CheckpointValueHandoffPlanBinding{
+                encode_plan_chart(producing, match.producing_chart),
+                owner_reference(producing),
+                encode_plan_chart(receiving, match.receiving_chart),
+                owner_reference(receiving)};
+          }
+        }
         std::shared_ptr<StoredLocalBase> local;
         if (restored->domain == "rational")
           local = restore_checkpoint_local_record<Rational>(
               item, restored->domain, restored->precision_bits, owner,
-              equation_owner);
+              equation_owner, value_handoff_plan.has_value()
+                  ? &*value_handoff_plan : nullptr);
         else if (restored->domain == "acb")
           local = restore_checkpoint_local_record<ComplexBall>(
               item, restored->domain, restored->precision_bits, owner,
-              equation_owner);
+              equation_owner, value_handoff_plan.has_value()
+                  ? &*value_handoff_plan : nullptr);
         else
           throw std::invalid_argument(
               "native checkpoint cannot restore symbolic local state");
@@ -18904,12 +19014,6 @@ json::object run_session_command(const json::object& root) {
     if (producing.geometry.singular_center ||
         receiving.geometry.singular_center)
       return ineligible("singular-chart-crossing");
-    if (!exact_match.branch_sheets.empty() ||
-        !producing.prescriptions.empty() ||
-        !receiving.prescriptions.empty() ||
-        !retained.exact.tiles.at(match_index).branch_sheets.empty() ||
-        !retained.exact.tiles.at(match_index + 1).branch_sheets.empty())
-      return ineligible("branch-sensitive-crossing");
     const auto* producing_owner = std::get_if<
         std::shared_ptr<PreparedChartBase>>(&producing.owner);
     const auto* receiving_owner = std::get_if<
@@ -18963,6 +19067,8 @@ json::object run_session_command(const json::object& root) {
 
     const auto producing_point = RealEvaluationPoint::rational(
         producing_local.str());
+    const auto producing_rim = exact_plan_rim(
+        producing.prescriptions, producing.geometry.scale);
     if (as_i32(incoming_summary.at("epsilon_min"),
                "value-hop incoming epsilon minimum") >
         requested_epsilon.min_power)
@@ -18973,9 +19079,12 @@ json::object run_session_command(const json::object& root) {
       return ineligible("incoming-local-lacks-complete-epsilon-coverage");
     if (session->domain == "acb") {
       const auto evaluated = incoming->evaluate_retained_point(
-          producing_point, std::nullopt);
-      if (evaluated.imaginary_sign.has_value())
-        return ineligible("center-evaluation-acquired-an-unrequested-branch");
+          producing_point, producing_rim);
+      const auto expected_rim = producing_point.sign < 0
+          ? producing_rim : std::nullopt;
+      if (evaluated.imaginary_sign != expected_rim)
+        return ineligible(
+            "center-evaluation-rim-differs-from-producing-plan-chart");
       if (evaluated.value.epsilon.complete_max <
           requested_epsilon.complete_max)
         return ineligible("center-evaluation-lost-complete-epsilon-coverage");
@@ -19081,7 +19190,7 @@ json::object run_session_command(const json::object& root) {
               "value transport hop receiver has the wrong Rational chart type");
         next = chart->solve_regular_value_handoff(
             local_handle, run_prototype, metadata_prototype, incoming,
-            producing_point,
+            producing_point, producing_rim,
             receiving.geometry, receiving.prescriptions, requested_epsilon,
             required_complete_max, result_checkpoint, std::move(derivation),
             derivation_owner, chart);
@@ -19093,7 +19202,7 @@ json::object run_session_command(const json::object& root) {
               "value transport hop receiver has the wrong Acb chart type");
         next = chart->solve_regular_value_handoff(
             local_handle, run_prototype, metadata_prototype, incoming,
-            producing_point,
+            producing_point, producing_rim,
             receiving.geometry, receiving.prescriptions, requested_epsilon,
             required_complete_max, result_checkpoint, std::move(derivation),
             derivation_owner, chart);

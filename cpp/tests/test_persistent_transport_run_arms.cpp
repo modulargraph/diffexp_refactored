@@ -33,10 +33,13 @@ std::uint64_t counter(const json::object& object, const char* key) {
   throw std::runtime_error(std::string("expected nonnegative counter: ") + key);
 }
 
-json::array prescriptions(bool branch_sensitive = true) {
+json::array prescriptions(bool branch_sensitive = true,
+                          std::int32_t sign = -1) {
   if (!branch_sensitive) return json::array{};
+  if (sign != -1 && sign != 1)
+    throw std::invalid_argument("prescription sign must be +/-1");
   return json::array{json::object{
-      {"factor_exact", "paired-state-f"}, {"sign", -1},
+      {"factor_exact", "paired-state-f"}, {"sign", sign},
       {"multiplicity", 1}, {"leading_coefficient_sign", 1}}};
 }
 
@@ -51,7 +54,8 @@ std::string prepare_chart(const std::string& session,
                           const std::string& center,
                           bool branch_sensitive = true,
                           const std::string& domain = "rational",
-                          int chop_digits = 0) {
+                          int chop_digits = 0,
+                          std::int32_t prescription_sign = -1) {
   json::array principal_row{
       json::object{{"exact", "0"}, {"proven_zero", true}}};
   json::array component{0};
@@ -98,7 +102,8 @@ std::string prepare_chart(const std::string& session,
            {"geometry", json::object{
                 {"center_exact", center}, {"scale_exact", "1"},
                 {"radius_exact", "2"}, {"infinite_radius", false},
-                {"prescriptions", prescriptions(branch_sensitive)}}},
+                {"prescriptions", prescriptions(
+                     branch_sensitive, prescription_sign)}}},
            {"principal_matrix", std::move(principal_matrix)},
            {"native_scc_capabilities", json::object{
                 {"regular", true}, {"identity_gauge", true},
@@ -120,7 +125,8 @@ std::string solve_local(const std::string& session,
                         const std::string& checkpoint,
                         const std::string& value,
                         std::uint32_t nmax = 0,
-                        bool branch_sensitive = true) {
+                        bool branch_sensitive = true,
+                        std::int32_t prescription_sign = -1) {
   json::array schedule;
   json::array shifts;
   for (std::uint32_t n = 0; n <= nmax; ++n) {
@@ -150,9 +156,51 @@ std::string solve_local(const std::string& session,
                                      {"canonical", "0"}}},
                 {"b", json::object{{"domain", "rational"},
                                      {"canonical", "0"}}}}},
-           {"prescriptions", prescriptions(branch_sensitive)},
+           {"prescriptions", prescriptions(
+                branch_sensitive, prescription_sign)},
            {"checkpoint_identity", checkpoint}}}});
   require_ok(solved, "local.solve");
+  return std::string(solved.at("local").as_string());
+}
+
+std::string solve_log_local(const std::string& session,
+                            const std::string& chart,
+                            const std::string& center,
+                            const std::string& checkpoint,
+                            std::int32_t prescription_sign = -1) {
+  constexpr std::uint32_t nmax = 4;
+  json::array shifts;
+  json::array schedule;
+  for (std::uint32_t n = 0; n <= nmax; ++n) {
+    shifts.emplace_back(std::to_string(n));
+    schedule.push_back(json::array{json::object{
+        {"case", n == 0 ? "R" : "T"},
+        {"da", std::to_string(n)}, {"db", "0"}}});
+  }
+  const auto solved = request(json::object{
+      {"schema", 2}, {"op", "local.solve"}, {"session", session},
+      {"chart", chart},
+      {"run", json::object{
+           {"nmax", nmax}, {"p", 1}, {"has_initial", true},
+           {"adaptive_probe", false}, {"a_target", "0"},
+           {"b_target", "0"}, {"a_shift_min", 0},
+           {"a_shifts", std::move(shifts)},
+           {"schedule", std::move(schedule)},
+           {"initial", json::array{"2", "0", "0", "1", "0", "0"}},
+           {"initial_validity", json::array{2, 2}}, {"source", nullptr},
+           {"return_u", false}}},
+      {"metadata", json::object{
+           {"chart", json::object{
+                {"center_exact", center}, {"scale_exact", "1"},
+                {"radius", "2"}, {"infinite_radius", false}}},
+           {"tag", json::object{
+                {"a", json::object{{"domain", "rational"},
+                                     {"canonical", "0"}}},
+                {"b", json::object{{"domain", "rational"},
+                                     {"canonical", "0"}}}}},
+           {"prescriptions", prescriptions(true, prescription_sign)},
+           {"checkpoint_identity", checkpoint}}}});
+  require_ok(solved, "log local.solve");
   return std::string(solved.at("local").as_string());
 }
 
@@ -279,25 +327,27 @@ std::string solve_multiblock_local(
   return std::string(solved.at("local").as_string());
 }
 
-json::object topology(bool branch_sensitive = true) {
+json::object topology(bool branch_sensitive = true,
+                      std::int32_t sign = -1) {
   return json::object{
       {"singular_points", json::array{}},
       {"boundary_points", json::array{}},
       {"complex_projections", json::array{}},
       {"branch_sheets", branch_sensitive
            ? json::array{json::object{
-                 {"factor_exact", "paired-state-f"}, {"sign", -1}}}
+                 {"factor_exact", "paired-state-f"}, {"sign", sign}}}
            : json::array{}}};
 }
 
 json::object arm(const std::string& endpoint,
                  const std::string& anchor_chart,
                  const std::string& receiving_chart,
-                 bool branch_sensitive = true) {
+                 bool branch_sensitive = true,
+                 std::int32_t prescription_sign = -1) {
   return json::object{
       {"from_exact", "0"}, {"to_exact", endpoint},
       {"charts", json::array{anchor_chart, receiving_chart}},
-      {"topology", topology(branch_sensitive)}};
+      {"topology", topology(branch_sensitive, prescription_sign)}};
 }
 
 json::object receiving_basis(const std::string& local) {
@@ -387,7 +437,8 @@ json::object value_solver(const std::string& center,
                           bool branch_sensitive = false,
                           std::uint32_t nmax = 4,
                           const std::string& relative_error_max = "1/100",
-                          const std::string& tail_proxy_max = "1/100") {
+                          const std::string& tail_proxy_max = "1/100",
+                          std::int32_t prescription_sign = -1) {
   json::array shifts;
   json::array schedule;
   for (std::uint32_t n = 0; n <= nmax; ++n) {
@@ -416,7 +467,8 @@ json::object value_solver(const std::string& center,
                                      {"canonical", "0"}}},
                 {"b", json::object{{"domain", "rational"},
                                      {"canonical", "0"}}}}},
-           {"prescriptions", prescriptions(branch_sensitive)},
+           {"prescriptions", prescriptions(
+                branch_sensitive, prescription_sign)},
            {"checkpoint_identity", "value-solver-prototype"}}},
       {"tail_proxy_max_exact", tail_proxy_max},
       {"relative_accuracy_max_exact", relative_error_max}};
@@ -600,20 +652,20 @@ void test_regular_value_hop_checkpoint() {
     require_ok(created, "value-hop session.create");
     session = std::string(created.at("session").as_string());
     const auto anchor_chart = prepare_chart(
-        session, "value-hop-anchor-chart", "0", false);
+        session, "value-hop-anchor-chart", "0");
     const auto lower_chart = prepare_chart(
-        session, "value-hop-lower-chart", "-2/3", false);
+        session, "value-hop-lower-chart", "-2/3");
     const auto upper_chart = prepare_chart(
-        session, "value-hop-upper-chart", "2/3", false);
+        session, "value-hop-upper-chart", "2/3");
     const auto anchor = solve_local(
         session, anchor_chart, "0", "streaming-state-anchor", "2", 4,
-        false);
+        true);
     const auto planned = request(json::object{
         {"schema", 2}, {"op", "tile.plan"}, {"session", session},
         {"checkpoint_identity", "streaming-state-plan"},
         {"division_order", 3},
-        {"lower", arm("-2/3", anchor_chart, lower_chart, false)},
-        {"upper", arm("2/3", anchor_chart, upper_chart, false)}});
+        {"lower", arm("-2/3", anchor_chart, lower_chart)},
+        {"upper", arm("2/3", anchor_chart, upper_chart)}});
     require_ok(planned, "value-hop tile.plan");
     const auto plan = std::string(planned.at("tile_plan").as_string());
     const auto low_order_anchor = solve_local(
@@ -696,12 +748,33 @@ void test_regular_value_hop_checkpoint() {
                                "Taylor by exact index");
     }
 
+    const auto logarithmic = solve_log_local(
+        session, anchor_chart, "0", "value-hop-logarithmic-source");
+    const auto before_log_rejection = session_stats(session);
+    const auto log_rejection = consume_value_hop(
+        session, plan, "lower", logarithmic,
+        "value-hop-logarithmic-source", value_solver("-2/3", true),
+        "value-hop-nonsingle-valued");
+    const auto after_log_rejection = session_stats(session);
+    if (log_rejection.at("status") != "error" ||
+        std::string(log_rejection.at("detail").as_string()).find(
+            "source is not one certified (0,0,0) sector") ==
+            std::string::npos ||
+        counter(after_log_rejection, "local_solves") !=
+            counter(before_log_rejection, "local_solves") ||
+        after_log_rejection.at("pending_local_solves") != 0)
+      throw std::runtime_error(
+          "non-single-valued prescribed source entered the value-hop path: " +
+          json::serialize(log_rejection));
+    release_local(session, logarithmic);
+
+    const auto before_hops = session_stats(session);
     const auto lower = consume_value_hop(
         session, plan, "lower", anchor, "streaming-state-anchor",
-        value_solver("-2/3"), "value-hop-success");
+        value_solver("-2/3", true), "value-hop-success");
     const auto upper = consume_value_hop(
         session, plan, "upper", anchor, "streaming-state-anchor",
-        value_solver("2/3", false, 0), "value-hop-success");
+        value_solver("2/3", true, 0), "value-hop-success");
     require_ok(lower, "lower regular value hop");
     require_ok(upper, "upper regular value hop");
     const auto after_hops = session_stats(session);
@@ -709,9 +782,9 @@ void test_regular_value_hop_checkpoint() {
         lower.at("value_hops") != 1 || lower.at("basis_matches") != 0 ||
         upper.at("value_hops") != 1 || upper.at("basis_matches") != 0 ||
         counter(after_hops, "local_matches") !=
-            counter(before, "local_matches") ||
+            counter(before_hops, "local_matches") ||
         counter(after_hops, "local_solves") !=
-            counter(before, "local_solves") + 2)
+            counter(before_hops, "local_solves") + 2)
       throw std::runtime_error(
           "eligible regular hops did not use exactly one value solve each: " +
           json::serialize(lower) + " / " + json::serialize(upper));
@@ -720,16 +793,16 @@ void test_regular_value_hop_checkpoint() {
     // basis/match path before either becomes dependency-only state.
     const auto comparison_anchor = solve_local(
         session, anchor_chart, "0", "value-basis-comparison-anchor", "2",
-        4, false);
+        4, true);
     const auto comparison_basis = solve_local(
         session, lower_chart, "-2/3", "value-basis-comparison-column", "1",
-        4, false);
+        4, true);
     const auto comparison_planned = request(json::object{
         {"schema", 2}, {"op", "tile.plan"}, {"session", session},
         {"checkpoint_identity", "value-basis-comparison-plan"},
         {"division_order", 3},
-        {"lower", arm("-2/3", anchor_chart, lower_chart, false)},
-        {"upper", arm("2/3", anchor_chart, upper_chart, false)}});
+        {"lower", arm("-2/3", anchor_chart, lower_chart)},
+        {"upper", arm("2/3", anchor_chart, upper_chart)}});
     require_ok(comparison_planned, "value/basis comparison tile.plan");
     const auto comparison_plan = std::string(
         comparison_planned.at("tile_plan").as_string());
@@ -823,6 +896,138 @@ void test_regular_value_hop_checkpoint() {
   }
 }
 
+void test_acb_prescribed_value_hops_match_basis() {
+  for (const std::int32_t sign : {-1, 1}) {
+    std::string session;
+    try {
+      const auto suffix = sign < 0 ? std::string("minus")
+                                   : std::string("plus");
+      const auto created = request(json::object{
+          {"schema", 2}, {"op", "session.create"},
+          {"domain", "acb"}, {"precision_bits", 256},
+          {"output_digits", 40}, {"chart_capacity", 6},
+          {"local_capacity", 20}, {"match_capacity", 6},
+          {"tile_plan_capacity", 2}, {"transport_state_capacity", 2},
+          {"line_result_capacity", 2}});
+      require_ok(created, "prescribed Acb session.create");
+      session = std::string(created.at("session").as_string());
+      const auto anchor_chart = prepare_chart(
+          session, "prescribed-acb-anchor-" + suffix, "0", true,
+          "acb", 4, sign);
+      const auto lower_chart = prepare_chart(
+          session, "prescribed-acb-lower-" + suffix, "-2/3", true,
+          "acb", 4, sign);
+      const auto upper_chart = prepare_chart(
+          session, "prescribed-acb-upper-" + suffix, "2/3", true,
+          "acb", 4, sign);
+      const auto value_anchor = solve_local(
+          session, anchor_chart, "0",
+          "prescribed-acb-value-anchor-" + suffix, "2", 10, true, sign);
+      const auto value_plan_record = request(json::object{
+          {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+          {"checkpoint_identity", "prescribed-acb-value-plan-" + suffix},
+          {"division_order", 3},
+          {"lower", arm("-2/3", anchor_chart, lower_chart, true, sign)},
+          {"upper", arm("2/3", anchor_chart, upper_chart, true, sign)}});
+      require_ok(value_plan_record, "prescribed Acb value tile.plan");
+      const auto value_plan = std::string(
+          value_plan_record.at("tile_plan").as_string());
+      const auto lower_value = consume_value_hop(
+          session, value_plan, "lower", value_anchor,
+          "prescribed-acb-value-anchor-" + suffix,
+          value_solver("-2/3", true, 10, "1/100", "1/10000", sign),
+          "prescribed-acb-value-" + suffix,
+          "prescribed-acb-value-plan-" + suffix);
+      const auto upper_value = consume_value_hop(
+          session, value_plan, "upper", value_anchor,
+          "prescribed-acb-value-anchor-" + suffix,
+          value_solver("2/3", true, 10, "1/100", "1/10000", sign),
+          "prescribed-acb-value-" + suffix,
+          "prescribed-acb-value-plan-" + suffix);
+      require_ok(lower_value, "prescribed Acb lower value hop");
+      require_ok(upper_value, "prescribed Acb upper value hop");
+      if (lower_value.at("used") != true || upper_value.at("used") != true)
+        throw std::runtime_error(
+            "prescribed Acb value hop did not accept both local signs");
+
+      const auto basis_anchor = solve_local(
+          session, anchor_chart, "0",
+          "prescribed-acb-basis-anchor-" + suffix, "2", 10, true, sign);
+      const auto lower_basis = solve_local(
+          session, lower_chart, "-2/3",
+          "prescribed-acb-lower-basis-" + suffix, "1", 10, true, sign);
+      const auto upper_basis = solve_local(
+          session, upper_chart, "2/3",
+          "prescribed-acb-upper-basis-" + suffix, "1", 10, true, sign);
+      const auto basis_plan_record = request(json::object{
+          {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+          {"checkpoint_identity", "prescribed-acb-basis-plan-" + suffix},
+          {"division_order", 3},
+          {"lower", arm("-2/3", anchor_chart, lower_chart, true, sign)},
+          {"upper", arm("2/3", anchor_chart, upper_chart, true, sign)}});
+      require_ok(basis_plan_record, "prescribed Acb basis tile.plan");
+      const auto basis_plan = std::string(
+          basis_plan_record.at("tile_plan").as_string());
+      const auto lower_basis_hop = consume_basis_hop(
+          session, basis_plan, "prescribed-acb-basis-plan-" + suffix,
+          "lower", basis_anchor,
+          "prescribed-acb-basis-anchor-" + suffix, {lower_basis},
+          "prescribed-acb-basis-" + suffix);
+      const auto upper_basis_hop = consume_basis_hop(
+          session, basis_plan, "prescribed-acb-basis-plan-" + suffix,
+          "upper", basis_anchor,
+          "prescribed-acb-basis-anchor-" + suffix, {upper_basis},
+          "prescribed-acb-basis-" + suffix);
+      require_ok(lower_basis_hop, "prescribed Acb lower basis hop");
+      require_ok(upper_basis_hop, "prescribed Acb upper basis hop");
+
+      const auto evaluate_center = [&](const json::value& local) {
+        const auto evaluated = request(json::object{
+            {"schema", 2}, {"op", "local.evaluate"},
+            {"session", session}, {"local", local},
+            {"point", json::object{{"exact", "0"}}},
+            {"options", json::object{{"tail_estimate", false}}},
+            {"output_digits", 40}});
+        require_ok(evaluated, "prescribed Acb center evaluation");
+        return evaluated.at("value");
+      };
+      const auto& lower_value_local =
+          lower_value.at("next_local").as_object().at("local");
+      const auto& upper_value_local =
+          upper_value.at("next_local").as_object().at("local");
+      const auto& lower_basis_local =
+          lower_basis_hop.at("next_local").as_object().at("local");
+      const auto& upper_basis_local =
+          upper_basis_hop.at("next_local").as_object().at("local");
+      if (evaluate_center(lower_value_local) !=
+              evaluate_center(lower_basis_local) ||
+          evaluate_center(upper_value_local) !=
+              evaluate_center(upper_basis_local))
+        throw std::runtime_error(
+            "prescribed Acb value and ordinary basis hops disagree");
+      for (const auto* local : {&lower_value_local, &upper_value_local}) {
+        const auto stats = request(json::object{
+            {"schema", 2}, {"op", "local.stats"},
+            {"session", session}, {"local", *local}});
+        require_ok(stats, "prescribed Acb value local.stats");
+        if (stats.at("metadata").as_object().at("prescriptions") !=
+            prescriptions(true, sign))
+          throw std::runtime_error(
+              "prescribed Acb value hop did not preserve receiver prescriptions");
+      }
+      require_ok(request(json::object{
+          {"schema", 2}, {"op", "session.close"}, {"session", session}}),
+          "prescribed Acb session.close");
+      session.clear();
+    } catch (...) {
+      if (!session.empty())
+        (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                   {"session", session}});
+      throw;
+    }
+  }
+}
+
 void test_acb_value_handoff_significance_gate() {
   std::string session;
   try {
@@ -911,7 +1116,8 @@ void test_multiblock_regular_value_fallback_owner() {
     const auto upper_chart = prepare_multiblock_chart(
         session, "multiblock-upper", "2/3");
     const auto incoming = solve_multiblock_local(
-        session, anchor_chart, "0", "multiblock-anchor-local", {"2", "3"});
+        session, anchor_chart, "0", "multiblock-anchor-local", {"2", "3"},
+        0);
     const auto basis_0 = solve_multiblock_local(
         session, lower_chart, "-2/3", "multiblock-basis-0", {"1", "0"});
     const auto basis_1 = solve_multiblock_local(
@@ -927,12 +1133,13 @@ void test_multiblock_regular_value_fallback_owner() {
     const auto before_preflight = session_stats(session);
     const auto ineligible = consume_value_hop(
         session, plan, "lower", incoming, "multiblock-anchor-local",
-        value_solver("-2/3", true), "multiblock-fallback",
+        value_solver("-2/3", true, 0), "multiblock-fallback",
         "multiblock-plan");
     require_ok(ineligible, "multiblock value preflight");
     const auto after_preflight = session_stats(session);
     if (ineligible.at("used") != false ||
-        ineligible.at("reason") != "branch-sensitive-crossing" ||
+        ineligible.at("reason") !=
+            "receiver-center-fails-exact-truncation-tail-contract" ||
         counter(after_preflight, "local_solves") !=
             counter(before_preflight, "local_solves"))
       throw std::runtime_error(
@@ -1012,16 +1219,17 @@ void test_streaming_consumed_transport() {
     const auto lower_before = session_stats(session);
     const auto ineligible_value = consume_value_hop(
         session, plan, "lower", anchor, "streaming-state-anchor",
-        value_solver("-2/3", true), "streaming-state-success");
-    require_ok(ineligible_value, "branch-sensitive value-hop preflight");
+        value_solver("-2/3", true, 0), "streaming-state-success");
+    require_ok(ineligible_value, "unsafe-tail value-hop preflight");
     const auto after_ineligible_value = session_stats(session);
     if (ineligible_value.at("used") != false ||
-        ineligible_value.at("reason") != "branch-sensitive-crossing" ||
+        ineligible_value.at("reason") !=
+            "receiver-center-fails-exact-truncation-tail-contract" ||
         after_ineligible_value.at("locals") != lower_before.at("locals") ||
         counter(after_ineligible_value, "local_solves") !=
             counter(lower_before, "local_solves"))
       throw std::runtime_error(
-          "branch-sensitive value hop did not fail closed before solving: " +
+          "unsafe-tail value hop did not fail closed before solving: " +
           json::serialize(ineligible_value));
     const auto lower = consume_hop(
         session, plan, "lower", anchor, "streaming-state-anchor",
@@ -1254,6 +1462,7 @@ int main() {
   std::string restored_second;
   try {
     test_regular_value_hop_checkpoint();
+    test_acb_prescribed_value_hops_match_basis();
     test_acb_value_handoff_significance_gate();
     test_multiblock_regular_value_fallback_owner();
     test_streaming_consumed_transport();

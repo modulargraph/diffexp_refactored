@@ -9937,7 +9937,7 @@ class ExactPseudoCompensator {
       observe_target_semantics(dependency, value, diagnostics);
   }
 
-  std::optional<PreparedRationalTaylorMultiplier<Rational>> polar_weight(
+  std::optional<PreparedEpsilonMultiplier<Rational>> polar_weight(
       const PseudoHit<Rational>& hit, std::size_t row,
       const LocalSolution<Rational>& target,
       const std::string& operation_identity) const {
@@ -9964,14 +9964,11 @@ class ExactPseudoCompensator {
       }
     }
     if (!minimum.has_value()) return std::nullopt;
-    PreparedRationalTaylorMultiplier<Rational> multiplier;
+    PreparedEpsilonMultiplier<Rational> multiplier;
     multiplier.epsilon_shift = *minimum;
-    multiplier.center_pole_order = 0;
     multiplier.exact_identity = operation_identity + ":casep:" +
         std::to_string(hit.n) + ":" + std::to_string(row);
-    multiplier.kernels.assign(
-        target.epsilon.width(),
-        std::vector<Rational>(target.taylor_width(), Rational(0)));
+    multiplier.kernels.assign(target.epsilon.width(), Rational(0));
     for (std::size_t kernel = 0; kernel < multiplier.kernels.size();
          ++kernel) {
       const auto power = static_cast<std::int64_t>(*minimum) +
@@ -9983,7 +9980,7 @@ class ExactPseudoCompensator {
         throw RecurrenceError(
             "E4", "CASE-P polar weight lies outside its retained gamma frame",
             chart_.frame_base(), static_cast<std::int32_t>(power));
-      multiplier.kernels[kernel][0] =
+      multiplier.kernels[kernel] =
           -gamma[static_cast<std::size_t>(gamma_index)];
     }
     return multiplier;
@@ -10179,7 +10176,7 @@ class ExactPseudoCompensator {
         auto multiplier = polar_weight(
             hit, row, target, operation_identity);
         if (!multiplier.has_value()) continue;
-        auto product = multiply_prepared_rational(
+        auto product = multiply_prepared_epsilon(
             target, *multiplier,
             operation_identity + ":casep-product:" +
                 std::to_string(hit.n) + ":" +

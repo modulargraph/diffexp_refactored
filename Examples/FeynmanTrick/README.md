@@ -36,8 +36,9 @@ DE2_CPP_THREADS=8 \
 sh Examples/FeynmanTrick/UnequalBanana.sh
 ```
 
-Set `FT_FIRE_PATH=/absolute/path/to/FIRE6` when FIRE is not installed at
-`Dependencies/fire/FIRE6`; the wrappers preserve that environment variable.
+Set `FT_FIRE_PATH=/absolute/path/to/fire/FIRE7` when FIRE is not installed at
+`Dependencies/fire/FIRE7/FIRE7`; the wrappers preserve that environment
+variable.
 
 To force a new FIRE preparation, add ``FT_REBUILD_PREP=1`` to the environment.
 That is normally unnecessary: solver-source changes do not invalidate the

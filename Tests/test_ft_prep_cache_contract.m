@@ -1,6 +1,6 @@
 (* Definitions-only tests for the stable FIRE/Feynman-trick preparation
    cache contract.  This test reads source files and snapshot payloads but
-   never calls SetupFIRE, FIRE6, or a transport solver. *)
+   never calls SetupFIRE, FIRE7, or a transport solver. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];

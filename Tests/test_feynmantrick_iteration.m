@@ -176,7 +176,7 @@ Module[{topo, ftData, level1Data, level1Topo, level1Props,
         failed += 3;
       ];
     ,
-      Print["FAIL: FindBasis returned $Failed (FIRE6 crashed)"];
+      Print["FAIL: FindBasis returned $Failed (FIRE7 failed)"];
       failed += 4;
     ];
   ,

@@ -152,7 +152,7 @@ Module[{topo, workDir, setupTopo, basisTopo, masters, reductions, diffMat},
     ];
   ,
     Print["FAIL: FindBasis returned $Failed"];
-    Print["  (FIRE6 may have crashed - check logs in ", workDir, ")"];
+    Print["  (FIRE7 may have failed - check logs in ", workDir, ")"];
     failed += 5; (* count missed subtests *)
   ];
 

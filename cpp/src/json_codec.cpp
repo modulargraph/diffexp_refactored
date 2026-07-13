@@ -19033,6 +19033,19 @@ json::object run_session_command(const json::object& root) {
         exact_path_detail::abs(producing_local) /
         producing.geometry.radius;
     const auto incoming_summary = incoming->summary();
+    const auto incoming_epsilon_min = as_i32(
+        incoming_summary.at("epsilon_min"),
+        "value-hop incoming epsilon minimum");
+    const auto incoming_epsilon_max = as_i32(
+        incoming_summary.at("epsilon_max"),
+        "value-hop incoming epsilon maximum");
+    const auto incoming_top_valid = parse_validity(
+        incoming_summary.at("top_valid"));
+    const auto incoming_effective_max = std::min(
+        incoming_epsilon_max, incoming_top_valid);
+    const auto receiver_frame_top = static_cast<std::int64_t>(
+        (*receiving_owner)->frame_base()) +
+        static_cast<std::int64_t>((*receiving_owner)->frame_width()) - 1;
     const auto producer_taylor_complete_max = as_u32(
         incoming_summary.at("taylor_complete_max"),
         "value-hop producer Taylor maximum");
@@ -19069,14 +19082,14 @@ json::object run_session_command(const json::object& root) {
         producing_local.str());
     const auto producing_rim = exact_plan_rim(
         producing.prescriptions, producing.geometry.scale);
-    if (as_i32(incoming_summary.at("epsilon_min"),
-               "value-hop incoming epsilon minimum") >
-        requested_epsilon.min_power)
+    if (incoming_epsilon_min > requested_epsilon.min_power)
       return ineligible("incoming-local-lacks-lower-epsilon-coverage");
-    if (as_i32(incoming_summary.at("epsilon_max"),
-               "value-hop incoming epsilon maximum") <
-        requested_epsilon.complete_max)
+    if (incoming_effective_max < requested_epsilon.complete_max)
       return ineligible("incoming-local-lacks-complete-epsilon-coverage");
+    if (incoming_epsilon_min < (*receiving_owner)->frame_base() ||
+        static_cast<std::int64_t>(incoming_effective_max) >
+            receiver_frame_top)
+      return ineligible("incoming-local-does-not-fit-receiver-epsilon-frame");
     if (session->domain == "acb") {
       const auto evaluated = incoming->evaluate_retained_point(
           producing_point, producing_rim);

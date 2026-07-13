@@ -14,6 +14,7 @@ EncodeScalar::usage = "EncodeScalar[z, digits] converts a numeric scalar to the 
 EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact rational function of named analytic regulators to the FLINT symbolic coefficient-field syntax.";
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
+PreparePersistentChart::usage = "PreparePersistentChart[schema1Request, metadata] prepares and retains only the immutable schema-2 chart/operator owner. Dynamic run fields are ignored and no recurrence or local solution is executed or published; the returned compact record binds the exact session, chart handle, and chart identity reused by later solves.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
 RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
 PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts and one full-parent physical q/C equation owner into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
@@ -448,19 +449,18 @@ persistentCloseIncompatibleSymbolicSessions[symbols_List] := Module[
   Scan[persistentCloseSessionHandle, handles];
   Null];
 
-preparePersistentRequest[request_Association, metadata_Association] := Module[
-  {missingStatic, missingRun, domain, symbols, precisionBits, outputDigits,
-   systemIdentity, sessionAnalytic, chartAnalytic, scc, static, run,
+preparePersistentChart[request_Association, metadata_Association] := Module[
+  {missingStatic, domain, symbols, precisionBits, outputDigits,
+   systemIdentity, sessionAnalytic, chartAnalytic, scc, static,
    sessionSignature, sessionKey, sessionEntry, sessionResponse, session,
    chartIdentity, chartIdentityString, chartSignature, chartKey, chartEntry,
    chartResponse, chart,
    preparedToken, createRequest, prepareRequest},
   missingStatic = Complement[$persistentRequiredStaticKeys, Keys[request]];
-  missingRun = Complement[$persistentRunKeys, Keys[request]];
-  If[missingStatic =!= {} || missingRun =!= {},
+  If[missingStatic =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
-      "persistent recurrence request is missing required fields",
-      "MissingStatic" -> missingStatic, "MissingRun" -> missingRun|>], Module]];
+      "persistent chart preparation is missing required static fields",
+      "MissingStatic" -> missingStatic|>], Module]];
   If[!KeyExistsQ[metadata, "SystemIdentity"] ||
       !KeyExistsQ[metadata, "ChartIdentity"] ||
       !AssociationQ[Lookup[metadata, "SCC", None]],
@@ -502,7 +502,6 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     session = sessionEntry["Handle"]];
 
   static = KeyTake[request, $persistentStaticKeys];
-  run = KeyTake[request, $persistentRunKeys];
   chartIdentity = metadata["ChartIdentity"];
   chartIdentityString = persistentIdentityString[chartIdentity];
   preparedToken = Lookup[metadata, "PreparedToken", None];
@@ -548,9 +547,35 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     chartIdentityString = Lookup[chartEntry, "Identity",
       chartIdentityString]];
 
-  <|"Session" -> session, "Chart" -> chart, "Run" -> run,
+  <|"Session" -> session, "Chart" -> chart,
     "ChartIdentity" -> chartIdentityString,
     "Static" -> static, "OutputDigits" -> outputDigits|>];
+
+PreparePersistentChart[request_Association,
+    metadata_Association] := Module[{prepared},
+  prepared = preparePersistentChart[request, metadata];
+  If[FailureQ[prepared], Return[prepared, Module]];
+  If[!AssociationQ[prepared] ||
+      !AllTrue[{"Session", "Chart", "ChartIdentity"},
+        StringQ[Lookup[prepared, #, None]] &],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent chart preparation returned a malformed owner record",
+      "BackendResponse" -> prepared|>],
+      Module]];
+  KeyTake[prepared, {"Session", "Chart", "ChartIdentity"}]];
+
+preparePersistentRequest[request_Association, metadata_Association] := Module[
+  {missingStatic, missingRun, prepared},
+  missingStatic = Complement[$persistentRequiredStaticKeys, Keys[request]];
+  missingRun = Complement[$persistentRunKeys, Keys[request]];
+  If[missingStatic =!= {} || missingRun =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent recurrence request is missing required fields",
+      "MissingStatic" -> missingStatic, "MissingRun" -> missingRun|>], Module]];
+  prepared = preparePersistentChart[request, metadata];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  Append[prepared, "Run" -> KeyTake[request, $persistentRunKeys]]];
 
 RunPersistentRequest[request_Association, metadata_Association] := Module[
   {prepared = preparePersistentRequest[request, metadata]},

@@ -834,7 +834,8 @@ nativeReceivingBasis[system_Association, req_Association, threads_,
 (* Keep this predicate identical to the owner/basis dispatch below.  A
    singular receiving chart always owns an SCC composite; a regular chart
    does so exactly when its certified condensation has more than one block.
-   Monolithic regular charts instead retain one ordinary chart witness. *)
+   Monolithic regular charts instead retain one prepare-only physical chart
+   owner and its immutable value-run prototype. *)
 nativeReceivingSystemUsesSCCCompositeQ[system_Association] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
@@ -1168,9 +1169,6 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       Lookup[#, "local", Lookup[#, "Local", ToString[#, InputForm]]] &];
     Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, locals];
     Scan[Function[record,
-      If[AssociationQ[Lookup[record, "Witness", None]],
-        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[
-          record["Witness"]]]];
       If[StringQ[Lookup[record, "SCC", None]],
         Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[record]]]],
       preparedOwners];
@@ -1301,14 +1299,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "NativeRationalScaleBridges", {}]],
     "UpperBridgeCount" -> Length[Lookup[upper,
       "NativeRationalScaleBridges", {}]]|>;
-  (* The tile plan now strongly owns every equation owner.  Unit-column
-     witnesses existed only to put monolithic regular charts in that owner
-     graph; retaining their coefficient slabs would defeat streamed basis
-     preparation. *)
-  If[deferReceivingBases,
-    Scan[Function[record, If[AssociationQ[Lookup[record, "Witness", None]],
-        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[
-          record["Witness"]]]]], preparedOwners]];
+  (* The tile plan now strongly owns every equation owner.  Regular owners
+     were prepare-only, so there is no disposable local slab to release. *)
   lowerData = KeyDrop[lowerData, "OwnerRecords"];
   upperData = KeyDrop[upperData, "OwnerRecords"];
   <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",

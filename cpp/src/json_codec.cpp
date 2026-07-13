@@ -1,6 +1,7 @@
 #include "diffexp2/json_codec.hpp"
 
 #include "diffexp2/checkpoint.hpp"
+#include "diffexp2/immutable_recursive_cache.hpp"
 #include "diffexp2/line_integration.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
@@ -9787,11 +9788,101 @@ std::vector<LocalSolution<Rational>> split_exact_rational_tags(
   return result;
 }
 
+struct CachedExactPseudoTarget {
+  LocalSolution<Rational> solution;
+  // Diagnostics intrinsic to this target's own recurrence.  Direct
+  // dependencies are retained explicitly so a later column can replay the
+  // cold per-column semantics once per component without double-counting a
+  // shared descendant.
+  NativeLocalDiagnostics intrinsic_diagnostics;
+  double construction_parse_ms = 0.0;
+  double construction_kernel_ms = 0.0;
+  std::vector<std::pair<
+      std::uint32_t, std::shared_ptr<const CachedExactPseudoTarget>>>
+      dependencies;
+};
+
+class ExactPseudoTargetCache {
+ public:
+  using Key = std::pair<std::uint32_t, std::uint32_t>;
+  using Core = detail::ImmutableRecursiveCache<
+      Key, CachedExactPseudoTarget>;
+
+  struct Lookup {
+    std::shared_ptr<const CachedExactPseudoTarget> target;
+    bool built = false;
+  };
+
+  using Stats = Core::Stats;
+
+  ExactPseudoTargetCache(std::string owner_identity,
+                         std::string owner_contract)
+      : owner_identity_(std::move(owner_identity)),
+        owner_contract_(std::move(owner_contract)) {
+    if (owner_identity_.empty() || owner_contract_.empty())
+      throw std::invalid_argument(
+          "exact CASE-P target cache requires an immutable owner contract");
+  }
+
+  std::string target_checkpoint_identity(std::uint32_t block,
+                                         std::uint32_t component) const {
+    return owner_identity_ + ":casep-homogeneous:block:" +
+        std::to_string(block) + ":component:" +
+        std::to_string(component);
+  }
+
+  template <typename Builder>
+  Lookup get_or_build(std::uint32_t block, std::uint32_t component,
+                      const std::string& derived_contract,
+                      Builder&& builder) {
+    if (derived_contract.empty())
+      throw std::invalid_argument(
+          "exact CASE-P target cache received an empty derived contract");
+    const auto key = std::make_pair(block, component);
+
+    // Target construction can recursively request a different Jordan target.
+    // A single recursive writer lock preserves that well-founded dependency
+    // order and prevents cross-column promise cycles.  Completed values are
+    // immutable shared objects, so readers only hold this lock for a map hit.
+    // The full operator/chart/work contract is retained once by this
+    // composite-owned cache; only the target-specific suffix is duplicated
+    // and compared per entry.
+    try {
+      auto lookup = cache_.get_or_build(
+          key, derived_contract, [&] {
+            auto target = std::forward<Builder>(builder)();
+            if (target.solution.checkpoint_identity !=
+                target_checkpoint_identity(block, component))
+              throw std::logic_error(
+                  "exact CASE-P target builder lost its cache-scoped checkpoint identity");
+            return target;
+          });
+      return {std::move(lookup.value), lookup.built};
+    } catch (const detail::ImmutableCacheContractError&) {
+      throw RecurrenceError(
+          "E5", "exact CASE-P homogeneous target cache contract changed within one retained composite");
+    } catch (const detail::ImmutableCacheCycleError&) {
+      throw RecurrenceError(
+          "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
+    }
+  }
+
+  Stats stats() const { return cache_.stats(); }
+
+ private:
+  std::string owner_identity_;
+  std::string owner_contract_;
+  Core cache_;
+};
+
 class ExactPseudoCompensator {
  public:
   ExactPseudoCompensator(PreparedChart<Rational>& chart,
-                         std::string identity)
-      : chart_(chart), identity_(std::move(identity)) {}
+                         std::uint32_t block_index,
+                         std::string identity,
+                         ExactPseudoTargetCache& target_cache)
+      : chart_(chart), block_index_(block_index),
+        identity_(std::move(identity)), target_cache_(target_cache) {}
 
   NativeLocalRun<Rational> solve(
       const json::object& run, const json::object& metadata,
@@ -9799,7 +9890,8 @@ class ExactPseudoCompensator {
       std::int32_t allowed_value_floor) {
     NativeLocalDiagnostics diagnostics;
     auto result = solve_impl(run, metadata, std::move(source),
-                             allowed_value_floor, diagnostics);
+                             allowed_value_floor, diagnostics, identity_,
+                             nullptr, nullptr);
     result.diagnostics = diagnostics;
     return result;
   }
@@ -9818,9 +9910,37 @@ class ExactPseudoCompensator {
         total.pseudo_value_certified && current.pseudo_value_certified;
   }
 
+  static void accumulate_semantics(NativeLocalDiagnostics& total,
+                                   const NativeLocalDiagnostics& current) {
+    total.top_valid = std::min(total.top_valid, current.top_valid);
+    total.pseudo_hits += current.pseudo_hits;
+    total.pseudo_compensations += current.pseudo_compensations;
+    total.max_pseudo_depth = std::max(
+        total.max_pseudo_depth, current.max_pseudo_depth);
+    total.pseudo_value_certified =
+        total.pseudo_value_certified && current.pseudo_value_certified;
+  }
+
+  void observe_target_semantics(
+      std::uint32_t component,
+      const std::shared_ptr<const CachedExactPseudoTarget>& target,
+      NativeLocalDiagnostics& diagnostics) {
+    auto [stored, inserted] = observed_targets_.emplace(component, target);
+    if (!inserted) {
+      if (stored->second.get() != target.get())
+        throw std::logic_error(
+            "CASE-P component resolved to two immutable cache values");
+      return;
+    }
+    accumulate_semantics(diagnostics, target->intrinsic_diagnostics);
+    for (const auto& [dependency, value] : target->dependencies)
+      observe_target_semantics(dependency, value, diagnostics);
+  }
+
   std::optional<PreparedRationalTaylorMultiplier<Rational>> polar_weight(
       const PseudoHit<Rational>& hit, std::size_t row,
-      const LocalSolution<Rational>& target) const {
+      const LocalSolution<Rational>& target,
+      const std::string& operation_identity) const {
     if (row >= hit.gamma_frames.size() || row >= hit.gamma_validity.size())
       throw RecurrenceError(
           "E5", "CASE-P hit has inconsistent gamma frame dimensions");
@@ -9847,7 +9967,7 @@ class ExactPseudoCompensator {
     PreparedRationalTaylorMultiplier<Rational> multiplier;
     multiplier.epsilon_shift = *minimum;
     multiplier.center_pole_order = 0;
-    multiplier.exact_identity = identity_ + ":casep:" +
+    multiplier.exact_identity = operation_identity + ":casep:" +
         std::to_string(hit.n) + ":" + std::to_string(row);
     multiplier.kernels.assign(
         target.epsilon.width(),
@@ -9873,56 +9993,171 @@ class ExactPseudoCompensator {
       std::uint32_t component, const json::object& prototype_run,
       const json::object& prototype_metadata,
       NativeLocalDiagnostics& diagnostics) {
-    if (const auto found = homogeneous_cache_.find(component);
-        found != homogeneous_cache_.end())
-      return found->second;
+    if (const auto found = observed_targets_.find(component);
+        found != observed_targets_.end())
+      return found->second->solution;
     if (!active_components_.insert(component).second)
       throw RecurrenceError(
           "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
-    const auto& indicial = chart_.exact_jordan_indicial();
-    if (!indicial.has_value() || component >= indicial->dimension)
-      throw RecurrenceError(
-          "E5", "CASE-P target component has no retained exact Jordan root");
-    const auto& block =
-        indicial->blocks[indicial->block_of_column[component]];
-    auto run = exact_derived_run(
-        prototype_run, chart_, block.root.a, block.root.b,
-        indicial->position_in_block[component], true, component);
-    auto metadata = exact_derived_metadata(
-        prototype_metadata, block.root.a, block.root.b,
-        as_u32(run.at("p"), "derived homogeneous log maximum"),
-        ":casep-target:" + std::to_string(component));
-    auto solved = solve_impl(run, metadata, std::nullopt, 0, diagnostics);
-    active_components_.erase(component);
-    auto [stored, inserted] = homogeneous_cache_.emplace(
-        component, std::move(solved.solution));
-    if (!inserted)
-      throw std::logic_error("CASE-P homogeneous target cache insertion failed");
-    return stored->second;
+    try {
+      const auto& indicial = chart_.exact_jordan_indicial();
+      if (!indicial.has_value() || component >= indicial->dimension)
+        throw RecurrenceError(
+            "E5", "CASE-P target component has no retained exact Jordan root");
+      const auto& block =
+          indicial->blocks[indicial->block_of_column[component]];
+      const auto jordan_position =
+          indicial->position_in_block[component];
+      const auto nmax = as_u32(
+          prototype_run.at("nmax"),
+          "derived homogeneous Taylor maximum");
+      const auto log_max = exact_log_ceiling(
+          *indicial, block.root.a, block.root.b,
+          jordan_position, false);
+      auto metadata = exact_derived_metadata(
+          prototype_metadata, block.root.a, block.root.b,
+          log_max,
+          ":casep-target:" + std::to_string(component));
+
+      // The cache contract contains every exact input which can influence the
+      // derived recurrence.  Only the caller's checkpoint token is excluded:
+      // it is provenance, not mathematics, and is replaced below by the
+      // immutable composite-scoped target identity.  Geometry includes the
+      // exact analytic-continuation prescriptions, including the i-delta sign.
+      auto contract_metadata = metadata;
+      contract_metadata.erase("checkpoint_identity");
+      auto& contract_chart =
+          contract_metadata.at("chart").as_object();
+      if (!contract_chart.at("infinite_radius").as_bool())
+        contract_chart["radius"] = Rational(required_string(
+            contract_chart, "radius")).str();
+      json::array jordan_columns;
+      for (const auto column : block.columns)
+        jordan_columns.push_back(column);
+      const auto derived_contract = json::serialize(canonical_json_value(
+          json::object{
+              {"schema", "diffexp2-casep-homogeneous-target-contract-v1"},
+              {"derivation", "exact-derived-jordan-run-v1"},
+              {"block", block_index_},
+              {"component", component},
+              {"jordan_block", block.block_index},
+              {"jordan_columns", std::move(jordan_columns)},
+              {"jordan_position", jordan_position},
+              {"root_a", block.root.a.str()},
+              {"root_b", block.root.b.str()},
+              {"derived_tag", json::object{
+                   {"a", block.root.a.str()},
+                   {"b", block.root.b.str()},
+                   {"p", log_max}}},
+              {"source_shape", json::object{
+                   {"kind", "canonical-jordan-homogeneous"},
+                   {"dimension", chart_.dimension()},
+                   {"epsilon_min", chart_.frame_base()},
+                   {"epsilon_width", chart_.frame_width()},
+                   {"taylor_max", nmax},
+                   {"log_max", log_max},
+                   {"initial", "canonical-jordan-unit-seed"},
+                   {"initial_validity", "complete-retained-frame"},
+                   {"source", "none"}}},
+              {"run_contract", json::object{
+                   {"has_initial", true},
+                   {"adaptive_probe", false},
+                   {"a_target", block.root.a.str()},
+                   {"b_target", block.root.b.str()},
+                   {"a_shift_min", 0},
+                   {"schedule", "exact-affine-jordan-derived"},
+                   {"return_u", false}}},
+              {"analytic_metadata", std::move(contract_metadata)}}));
+      const auto target_identity =
+          target_cache_.target_checkpoint_identity(block_index_, component);
+      metadata["checkpoint_identity"] = target_identity;
+
+      auto lookup = target_cache_.get_or_build(
+          block_index_, component, derived_contract, [&] {
+            auto run = exact_derived_run(
+                prototype_run, chart_, block.root.a, block.root.b,
+                jordan_position, true, component);
+            if (as_u32(run.at("p"),
+                       "derived homogeneous log maximum") != log_max)
+              throw std::logic_error(
+                  "CASE-P target contract log ceiling differs from its derived run");
+            ExactPseudoCompensator target_builder(
+                chart_, block_index_, target_identity, target_cache_);
+            NativeLocalDiagnostics aggregate;
+            NativeLocalDiagnostics intrinsic;
+            std::map<std::uint32_t,
+                     std::shared_ptr<const CachedExactPseudoTarget>>
+                direct_dependencies;
+            auto solved = target_builder.solve_impl(
+                run, metadata, std::nullopt, 0, aggregate,
+                target_identity, &intrinsic, &direct_dependencies);
+            solved.solution.checkpoint_identity = target_identity;
+            validate_local_solution(solved.solution, false);
+            std::vector<std::pair<
+                std::uint32_t,
+                std::shared_ptr<const CachedExactPseudoTarget>>>
+                dependencies;
+            dependencies.reserve(direct_dependencies.size());
+            for (const auto& dependency : direct_dependencies)
+              dependencies.push_back(dependency);
+            return CachedExactPseudoTarget{
+                std::move(solved.solution), std::move(intrinsic),
+                aggregate.parse_ms, aggregate.kernel_ms,
+                std::move(dependencies)};
+          });
+      active_components_.erase(component);
+      // Construction timings represent only cache misses which actually ran
+      // during this lookup (including recursively built descendants).  The
+      // exact CASE-P semantics are replayed separately over the immutable
+      // dependency DAG and deduplicated by component for every public column.
+      if (lookup.built) {
+        diagnostics.parse_ms += lookup.target->construction_parse_ms;
+        diagnostics.kernel_ms += lookup.target->construction_kernel_ms;
+      }
+      observe_target_semantics(component, lookup.target, diagnostics);
+      return lookup.target->solution;
+    } catch (...) {
+      active_components_.erase(component);
+      throw;
+    }
   }
 
   NativeLocalRun<Rational> solve_impl(
       const json::object& run, const json::object& metadata,
       std::optional<SourceData<Rational>> source,
       std::int32_t allowed_value_floor,
-      NativeLocalDiagnostics& diagnostics) {
+      NativeLocalDiagnostics& diagnostics,
+      const std::string& operation_identity,
+      NativeLocalDiagnostics* intrinsic_diagnostics,
+      std::map<std::uint32_t,
+               std::shared_ptr<const CachedExactPseudoTarget>>*
+          direct_dependencies) {
     auto raw = source.has_value()
         ? chart_.solve_native_with_source(
               run, metadata, std::move(*source))
         : chart_.solve_native(run, metadata);
     accumulate(diagnostics, raw.diagnostics);
+    if (intrinsic_diagnostics != nullptr)
+      accumulate(*intrinsic_diagnostics, raw.diagnostics);
     if (raw.pseudo_hits.empty()) return raw;
 
     const auto source_a = parse_scalar<Rational>(run.at("a_target"));
     const auto nmax = as_u32(run.at("nmax"),
                              "CASE-P certificate Taylor order");
     diagnostics.pseudo_hits += raw.pseudo_hits.size();
+    if (intrinsic_diagnostics != nullptr)
+      intrinsic_diagnostics->pseudo_hits += raw.pseudo_hits.size();
     std::vector<LocalSolution<Rational>> terms;
     terms.push_back(std::move(raw.solution));
     for (const auto& hit : raw.pseudo_hits) {
       diagnostics.max_pseudo_depth = std::max<std::uint32_t>(
           diagnostics.max_pseudo_depth,
           static_cast<std::uint32_t>(hit.columns.size()));
+      if (intrinsic_diagnostics != nullptr)
+        intrinsic_diagnostics->max_pseudo_depth =
+            std::max<std::uint32_t>(
+                intrinsic_diagnostics->max_pseudo_depth,
+                static_cast<std::uint32_t>(hit.columns.size()));
       if (hit.columns.size() != hit.gamma_frames.size() ||
           hit.columns.size() != hit.gamma_validity.size())
         throw RecurrenceError(
@@ -9930,20 +10165,35 @@ class ExactPseudoCompensator {
       for (std::size_t row = 0; row < hit.columns.size(); ++row) {
         const auto& target = homogeneous_target(
             hit.columns[row], run, metadata, diagnostics);
-        auto multiplier = polar_weight(hit, row, target);
+        if (direct_dependencies != nullptr) {
+          const auto observed = observed_targets_.find(hit.columns[row]);
+          if (observed == observed_targets_.end())
+            throw std::logic_error(
+                "CASE-P direct dependency was not retained by its column observation");
+          const auto [stored, inserted] = direct_dependencies->emplace(
+              observed->first, observed->second);
+          if (!inserted && stored->second.get() != observed->second.get())
+            throw std::logic_error(
+                "CASE-P direct dependency resolved to two immutable cache values");
+        }
+        auto multiplier = polar_weight(
+            hit, row, target, operation_identity);
         if (!multiplier.has_value()) continue;
         auto product = multiply_prepared_rational(
             target, *multiplier,
-            identity_ + ":casep-product:" + std::to_string(hit.n) + ":" +
+            operation_identity + ":casep-product:" +
+                std::to_string(hit.n) + ":" +
                 std::to_string(hit.columns[row]));
         terms.push_back(std::move(product));
         ++diagnostics.pseudo_compensations;
+        if (intrinsic_diagnostics != nullptr)
+          ++intrinsic_diagnostics->pseudo_compensations;
       }
     }
     auto compensated = terms.size() == 1
         ? std::move(terms.front())
         : combine_local_solutions(
-              terms, identity_ + ":casep-compensated");
+              terms, operation_identity + ":casep-compensated");
     certify_exact_pseudo_value_floor(
         compensated, allowed_value_floor, source_a, nmax);
     raw.solution = std::move(compensated);
@@ -9952,8 +10202,11 @@ class ExactPseudoCompensator {
   }
 
   PreparedChart<Rational>& chart_;
+  std::uint32_t block_index_ = 0;
   std::string identity_;
-  std::map<std::uint32_t, LocalSolution<Rational>> homogeneous_cache_;
+  ExactPseudoTargetCache& target_cache_;
+  std::map<std::uint32_t,
+           std::shared_ptr<const CachedExactPseudoTarget>> observed_targets_;
   std::set<std::uint32_t> active_components_;
 };
 
@@ -9988,6 +10241,63 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         physical_equation_->owner_signature_identity != exact_identity_)
       throw std::invalid_argument(
           "composite physical q/C payload names a different full parent owner identity");
+    if constexpr (std::is_same_v<Scalar, Rational>) {
+      json::array block_contracts;
+      block_contracts.reserve(blocks_.size());
+      for (const auto& block : blocks_) {
+        json::array vertices;
+        for (const auto vertex : block.vertices) vertices.push_back(vertex);
+        json::array jordan_blocks;
+        if (block.exact_jordan_indicial.has_value()) {
+          for (const auto& jordan :
+               block.exact_jordan_indicial->blocks) {
+            json::array columns;
+            for (const auto column : jordan.columns)
+              columns.push_back(column);
+            jordan_blocks.push_back(json::object{
+                {"block", jordan.block_index},
+                {"columns", std::move(columns)},
+                {"root_a", jordan.root.a.str()},
+                {"root_b", jordan.root.b.str()}});
+          }
+        }
+        block_contracts.push_back(json::object{
+            {"block", block.block},
+            {"vertices", std::move(vertices)},
+            {"principal_identity", block.principal_identity},
+            {"chart_exact_identity", block.chart->exact_identity()},
+            {"chart_signature", block.chart->signature()},
+            {"dimension", block.chart->dimension()},
+            {"frame_base", block.chart->frame_base()},
+            {"frame_width", block.chart->frame_width()},
+            {"exact_jordan_dimension",
+             block.exact_jordan_indicial.has_value()
+                 ? json::value(block.exact_jordan_indicial->dimension)
+                 : json::value(nullptr)},
+            {"exact_jordan_blocks", std::move(jordan_blocks)}});
+      }
+      const auto owner_contract = json::serialize(canonical_json_value(
+          json::object{
+              {"schema", "diffexp2-casep-target-cache-owner-v1"},
+              {"composite_exact_identity", exact_identity_},
+              {"composite_signature", signature_},
+              {"exact_system_record", exact_system_record_},
+              {"exact_theta_record", exact_theta_record_},
+              {"geometry_record", geometry_record_},
+              {"work_contract", json::object{
+                   {"work_min", work_.work_min},
+                   {"requested_min", work_.requested_min},
+                   {"requested_max", work_.requested_max},
+                   {"work_complete_max", work_.work_complete_max},
+                   {"public_t_order", work_.public_t_order},
+                   {"work_t_order", work_.work_t_order},
+                   {"wolfram_coupling_depth",
+                    work_.wolfram_coupling_depth}}},
+              {"blocks", std::move(block_contracts)}}));
+      exact_pseudo_target_cache_ =
+          std::make_unique<ExactPseudoTargetCache>(
+              exact_identity_, owner_contract);
+    }
   }
 
   CompositeColumnSolveResult solve_column(
@@ -10053,12 +10363,16 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           pseudo_compensators(blocks_.size());
       const auto pseudo_compensator = [&](std::uint32_t block)
           -> ExactPseudoCompensator& {
+        if (!exact_pseudo_target_cache_)
+          throw std::logic_error(
+              "exact Rational SCC composite has no CASE-P target cache");
         if (!pseudo_compensators[block])
           pseudo_compensators[block] =
               std::make_unique<ExactPseudoCompensator>(
-                  *blocks_[block].chart,
+                  *blocks_[block].chart, block,
                   checkpoint_identity + ":block:" +
-                      std::to_string(block));
+                      std::to_string(block),
+                  *exact_pseudo_target_cache_);
         return *pseudo_compensators[block];
       };
 
@@ -10433,6 +10747,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     const auto execution_ready = regular_ready || regular_singular_ready;
     const auto scalar_shape = scalar_block_shape();
     const auto scalar_ready = scalar_column_ready();
+    const auto pseudo_cache_stats = exact_pseudo_target_cache_
+        ? exact_pseudo_target_cache_->stats()
+        : ExactPseudoTargetCache::Stats{};
     json::object result{
         {"scc", handle_}, {"key", key_}, {"identity", exact_identity_},
         {"rational_shadow_identity", rational_shadow_identity_},
@@ -10477,6 +10794,17 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
          regular_singular_ready},
         {"scc_column_solves", column_solves_.load()},
         {"scc_column_solve_ms", column_solve_ms()},
+        {"casep_homogeneous_target_cache_scope",
+         exact_pseudo_target_cache_
+             ? "immutable-composite" : "not-applicable"},
+        {"casep_homogeneous_target_cache_serialized_builds",
+         exact_pseudo_target_cache_ != nullptr},
+        {"casep_homogeneous_target_cache_entries",
+         pseudo_cache_stats.entries},
+        {"casep_homogeneous_target_cache_builds",
+         pseudo_cache_stats.builds},
+        {"casep_homogeneous_target_cache_hits",
+         pseudo_cache_stats.hits},
         {"capability_evidence", json::object{
              {"identity_v",
               "native-retained-spectral-assembly-and-target-inverse"},
@@ -11559,6 +11887,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   std::vector<CompositeSCCCoupling<Scalar>> couplings_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
       physical_equation_;
+  std::unique_ptr<ExactPseudoTargetCache> exact_pseudo_target_cache_;
   std::atomic<std::uint64_t> column_solves_{0};
   mutable std::mutex column_stats_mutex_;
   double column_solve_ms_ = 0.0;

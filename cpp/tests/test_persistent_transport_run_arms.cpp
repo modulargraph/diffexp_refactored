@@ -616,10 +616,14 @@ void test_regular_value_hop_checkpoint() {
         {"upper", arm("2/3", anchor_chart, upper_chart, false)}});
     require_ok(planned, "value-hop tile.plan");
     const auto plan = std::string(planned.at("tile_plan").as_string());
+    const auto low_order_anchor = solve_local(
+        session, anchor_chart, "0", "value-tail-order-probe-anchor", "2",
+        0, false);
     const auto before = session_stats(session);
     const auto unsafe_tail = consume_value_hop(
-        session, plan, "lower", anchor, "streaming-state-anchor",
-        value_solver("-2/3", false, 0), "value-hop-success");
+        session, plan, "lower", low_order_anchor,
+        "value-tail-order-probe-anchor",
+        value_solver("-2/3", false, 4), "value-hop-success");
     require_ok(unsafe_tail, "unsafe-tail value hop");
     const auto after_unsafe_tail = session_stats(session);
     if (unsafe_tail.at("used") != false ||
@@ -628,8 +632,9 @@ void test_regular_value_hop_checkpoint() {
         counter(after_unsafe_tail, "local_solves") !=
             counter(before, "local_solves"))
       throw std::runtime_error(
-          "unsafe exact center tail did not fail closed before solving: " +
+          "low-order producer tail did not fail closed before solving: " +
           json::serialize(unsafe_tail));
+    release_local(session, low_order_anchor);
 
     const auto expect_rejected_template = [&](json::object solver,
                                                const char* label,
@@ -696,7 +701,7 @@ void test_regular_value_hop_checkpoint() {
         value_solver("-2/3"), "value-hop-success");
     const auto upper = consume_value_hop(
         session, plan, "upper", anchor, "streaming-state-anchor",
-        value_solver("2/3"), "value-hop-success");
+        value_solver("2/3", false, 0), "value-hop-success");
     require_ok(lower, "lower regular value hop");
     require_ok(upper, "upper regular value hop");
     const auto after_hops = session_stats(session);

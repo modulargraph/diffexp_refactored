@@ -1626,12 +1626,24 @@ class StoredTransportArmState {
                      "certificate-only producing owner");
       validate_owner(receiving_record.at("owner"), receiving,
                      "certificate-only receiving owner");
+      require_exact_keys(
+          source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity", "epsilon", "taylor_complete_max",
+           "top_valid", "analytic_metadata"},
+          "certificate-only value incoming derivation");
+      require_exact_keys(
+          target,
+          {"checkpoint_identity", "chart", "source_operator_identity",
+           "epsilon", "taylor_complete_max", "top_valid", "dimension"},
+          "certificate-only value output derivation");
       const auto& tail = as_object(
           derivation.at("tail_contract"),
           "certificate-only value tail contract");
       require_exact_keys(
           tail,
-          {"taylor_complete_max", "center_ratio_exact",
+          {"producer_taylor_complete_max",
+           "receiver_taylor_complete_max", "center_ratio_exact",
            "tail_proxy_exact", "tail_proxy_max_exact"},
           "certificate-only value tail contract");
       const auto producing_local =
@@ -1640,18 +1652,52 @@ class StoredTransportArmState {
       const auto center_ratio =
           exact_path_detail::abs(producing_local) /
           producing.geometry.radius;
-      const auto nmax = as_u32(
-          tail.at("taylor_complete_max"),
-          "certificate-only value Taylor maximum");
+      const auto producer_taylor_complete_max = as_u32(
+          tail.at("producer_taylor_complete_max"),
+          "certificate-only value producer Taylor maximum");
+      const auto receiver_taylor_complete_max = as_u32(
+          tail.at("receiver_taylor_complete_max"),
+          "certificate-only value receiver Taylor maximum");
+      const auto incoming_summary = incoming->summary();
+      const auto output_summary = output->summary();
+      const auto& source_epsilon = as_object(
+          source.at("epsilon"),
+          "certificate-only value incoming epsilon");
+      require_exact_keys(source_epsilon, {"min", "max"},
+                         "certificate-only value incoming epsilon");
       Rational tail_proxy(1);
       for (std::uint64_t power = 0;
-           power < static_cast<std::uint64_t>(nmax) + 1; ++power)
+           power < static_cast<std::uint64_t>(
+                       producer_taylor_complete_max) + 1;
+           ++power)
         tail_proxy *= center_ratio;
       const auto tail_proxy_max = Rational(required_string(
           tail, "tail_proxy_max_exact"));
       const auto* receiving_owner = std::get_if<
           std::shared_ptr<PreparedChartBase>>(&receiving.owner);
       if (!receiving_owner || !*receiving_owner ||
+          as_u32(source.at("taylor_complete_max"),
+                 "certificate-only incoming Taylor maximum") !=
+              producer_taylor_complete_max ||
+          as_u32(incoming_summary.at("taylor_complete_max"),
+                 "certificate-only retained producer Taylor maximum") !=
+              producer_taylor_complete_max ||
+          as_i32(source_epsilon.at("min"),
+                 "certificate-only incoming epsilon minimum") !=
+              as_i32(incoming_summary.at("epsilon_min"),
+                     "certificate-only retained incoming epsilon minimum") ||
+          as_i32(source_epsilon.at("max"),
+                 "certificate-only incoming epsilon maximum") !=
+              as_i32(incoming_summary.at("epsilon_max"),
+                     "certificate-only retained incoming epsilon maximum") ||
+          parse_validity(source.at("top_valid")) !=
+              parse_validity(incoming_summary.at("top_valid")) ||
+          as_u32(target.at("taylor_complete_max"),
+                 "certificate-only output Taylor maximum") !=
+              receiver_taylor_complete_max ||
+          as_u32(output_summary.at("taylor_complete_max"),
+                 "certificate-only retained receiver Taylor maximum") !=
+              receiver_taylor_complete_max ||
           Rational(required_string(tail, "center_ratio_exact")) !=
               center_ratio ||
           Rational(required_string(tail, "tail_proxy_exact")) !=
@@ -1691,6 +1737,10 @@ class StoredTransportArmState {
       require_exact_keys(evaluated,
                          {"min", "max", "required_complete_max"},
                          "certificate-only evaluated epsilon contract");
+      const auto incoming_effective_max = std::min(
+          as_i32(incoming_summary.at("epsilon_max"),
+                 "retained incoming epsilon maximum"),
+          parse_validity(incoming_summary.at("top_valid")));
       if (as_i32(epsilon.at("min"), "value epsilon minimum") !=
               work_epsilon_.min_power ||
           as_i32(epsilon.at("max"), "value epsilon maximum") !=
@@ -1701,6 +1751,13 @@ class StoredTransportArmState {
           as_i32(evaluated.at("required_complete_max"),
                  "evaluated epsilon required maximum") !=
               match_required_complete_max_ ||
+          as_i32(evaluated.at("min"),
+                 "evaluated epsilon minimum") !=
+              as_i32(incoming_summary.at("epsilon_min"),
+                     "retained incoming epsilon minimum") ||
+          as_i32(evaluated.at("max"),
+                 "evaluated epsilon maximum") !=
+              incoming_effective_max ||
           as_i32(evaluated.at("max"),
                  "evaluated epsilon maximum") <
               match_required_complete_max_)

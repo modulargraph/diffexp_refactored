@@ -7363,19 +7363,26 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           "checkpoint value tail contract");
       require_exact_keys(
           tail,
-          {"taylor_complete_max", "center_ratio_exact",
+          {"producer_taylor_complete_max",
+           "receiver_taylor_complete_max", "center_ratio_exact",
            "tail_proxy_exact", "tail_proxy_max_exact"},
           "checkpoint value tail contract");
-      const auto nmax = as_u32(
-          tail.at("taylor_complete_max"),
-          "checkpoint value Taylor maximum");
+      const auto producer_taylor_complete_max = as_u32(
+          tail.at("producer_taylor_complete_max"),
+          "checkpoint value producer Taylor maximum");
+      const auto receiver_taylor_complete_max = as_u32(
+          tail.at("receiver_taylor_complete_max"),
+          "checkpoint value receiver Taylor maximum");
       if (as_u32(prototype_run.at("nmax"),
-                 "checkpoint value prototype Taylor maximum") != nmax)
+                 "checkpoint value prototype Taylor maximum") !=
+          receiver_taylor_complete_max)
         throw std::invalid_argument(
-            "checkpoint value tail contract differs from its prototype");
+            "checkpoint value receiver order differs from its prototype");
       Rational tail_proxy(1);
       for (std::uint64_t power = 0;
-           power < static_cast<std::uint64_t>(nmax) + 1; ++power)
+           power < static_cast<std::uint64_t>(
+                       producer_taylor_complete_max) + 1;
+           ++power)
         tail_proxy *= center_ratio;
       const Rational tail_proxy_max(required_string(
           tail, "tail_proxy_max_exact"));
@@ -7448,14 +7455,34 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       require_exact_keys(
           incoming,
           {"local", "chart", "source_operator_identity",
-           "checkpoint_identity", "analytic_metadata"},
+           "checkpoint_identity", "epsilon", "taylor_complete_max",
+           "top_valid", "analytic_metadata"},
           "checkpoint value incoming");
+      const auto& incoming_epsilon = as_object(
+          incoming.at("epsilon"), "checkpoint value incoming epsilon");
+      require_exact_keys(incoming_epsilon, {"min", "max"},
+                         "checkpoint value incoming epsilon");
+      const auto incoming_min = as_i32(
+          incoming_epsilon.at("min"),
+          "checkpoint value incoming epsilon minimum");
+      const auto incoming_max = as_i32(
+          incoming_epsilon.at("max"),
+          "checkpoint value incoming epsilon maximum");
+      const auto incoming_top_valid = parse_validity(
+          incoming.at("top_valid"));
       (void)scoped_handle_id(required_string(incoming, "local"), "l:",
                              "checkpoint value incoming local");
       if (required_string(incoming, "chart") != producing_chart.handle ||
           required_string(incoming, "source_operator_identity") !=
               producing_chart.identity ||
-          required_string(incoming, "checkpoint_identity").empty())
+          required_string(incoming, "checkpoint_identity").empty() ||
+          as_u32(incoming.at("taylor_complete_max"),
+                 "checkpoint value incoming Taylor maximum") !=
+              producer_taylor_complete_max ||
+          incoming_min > incoming_max ||
+          evaluated.min_power != incoming_min ||
+          evaluated.complete_max !=
+              std::min(incoming_max, incoming_top_valid))
         throw std::invalid_argument(
             "checkpoint plan-value incoming differs from its producing chart");
       validate_checkpoint_exact_analytic_metadata(
@@ -7489,6 +7516,8 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           as_u32(output.at("taylor_complete_max"),
                  "checkpoint value output Taylor maximum") !=
               solution.taylor_complete_max ||
+          solution.taylor_complete_max !=
+              receiver_taylor_complete_max ||
           as_u32(output.at("dimension"),
                  "checkpoint value output dimension") !=
               solution.dimension ||
@@ -18899,11 +18928,18 @@ json::object run_session_command(const json::object& root) {
     const auto center_ratio =
         exact_path_detail::abs(producing_local) /
         producing.geometry.radius;
+    const auto incoming_summary = incoming->summary();
+    const auto producer_taylor_complete_max = as_u32(
+        incoming_summary.at("taylor_complete_max"),
+        "value-hop producer Taylor maximum");
+    const auto receiver_taylor_complete_max = as_u32(
+        run_prototype.at("nmax"),
+        "regular value-solver receiver Taylor maximum");
     Rational tail_proxy(1);
-    const auto nmax = as_u32(
-        run_prototype.at("nmax"), "regular value-solver Taylor maximum");
     for (std::uint64_t power = 0;
-         power < static_cast<std::uint64_t>(nmax) + 1; ++power)
+         power < static_cast<std::uint64_t>(
+                     producer_taylor_complete_max) + 1;
+         ++power)
       tail_proxy *= center_ratio;
     if (!(tail_proxy < tail_proxy_max))
       return ineligible("receiver-center-fails-exact-truncation-tail-contract");
@@ -18927,7 +18963,6 @@ json::object run_session_command(const json::object& root) {
 
     const auto producing_point = RealEvaluationPoint::rational(
         producing_local.str());
-    const auto incoming_summary = incoming->summary();
     if (as_i32(incoming_summary.at("epsilon_min"),
                "value-hop incoming epsilon minimum") >
         requested_epsilon.min_power)
@@ -18981,6 +19016,11 @@ json::object run_session_command(const json::object& root) {
           {"chart", incoming->source_chart()},
           {"source_operator_identity", incoming->source_operator_identity()},
           {"checkpoint_identity", incoming->checkpoint_identity()},
+          {"epsilon", json::object{
+               {"min", incoming_summary.at("epsilon_min")},
+               {"max", incoming_summary.at("epsilon_max")}}},
+          {"taylor_complete_max", producer_taylor_complete_max},
+          {"top_valid", incoming_summary.at("top_valid")},
           {"analytic_metadata", incoming->exact_analytic_metadata()}};
       const auto result_checkpoint = arm_checkpoint_identity(
           checkpoint_root, arm_name, "local", match_index + 1);
@@ -19006,7 +19046,10 @@ json::object run_session_command(const json::object& root) {
           {"prototype_identity", json::serialize(
                canonical_json_value(value_solver))},
           {"tail_contract", json::object{
-               {"taylor_complete_max", nmax},
+               {"producer_taylor_complete_max",
+                producer_taylor_complete_max},
+               {"receiver_taylor_complete_max",
+                receiver_taylor_complete_max},
                {"center_ratio_exact", center_ratio.str()},
                {"tail_proxy_exact", tail_proxy.str()},
                {"tail_proxy_max_exact", tail_proxy_max.str()}}},

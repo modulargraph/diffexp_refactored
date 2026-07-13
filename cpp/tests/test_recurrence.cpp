@@ -13,6 +13,7 @@ using diffexp2::MatrixEntry;
 using diffexp2::MatrixShift;
 using diffexp2::PreparedLag;
 using diffexp2::Rational;
+using diffexp2::RationalGroup;
 using diffexp2::RecurrenceProblem;
 using diffexp2::RecurrenceSolver;
 using diffexp2::ScalarShift;
@@ -106,6 +107,149 @@ void test_lower_frame_guard() {
     loud = error.id == "E4";
   }
   check("negative epsilon shift underflow is loud", loud);
+}
+
+MatrixShift<Rational> rational_matrix_shift(
+    std::int32_t shift, std::uint32_t row, std::uint32_t col,
+    const Rational& value) {
+  MatrixShift<Rational> matrix;
+  matrix.shift = shift;
+  matrix.entries.push_back(MatrixEntry<Rational>{row, col, value});
+  return matrix;
+}
+
+RecurrenceProblem<Rational> cross_lag_rational_problem(
+    bool shared_denominator_index) {
+  auto p = exponential_problem(4);
+  p.nhat_lags.assign(3, PreparedLag<Rational>{});
+  p.nhat_lags[0].valuations = {diffexp2::kCompleteInfinity};
+  p.nhat_lags[1].valuations = {0};
+  p.nhat_lags[2].valuations = {1};
+  p.rational_denominators = shared_denominator_index
+      ? std::vector<std::vector<Rational>>{{Rational(1), Rational(1)}}
+      : std::vector<std::vector<Rational>>{
+            {Rational(1), Rational(1)},
+            {Rational(1), Rational(1)}};
+
+  RationalGroup<Rational> first;
+  first.denominator_index = 0;
+  first.numerator.push_back(
+      rational_matrix_shift(0, 0, 0, Rational(2)));
+  p.nhat_lags[1].rational.push_back(std::move(first));
+
+  RationalGroup<Rational> second;
+  second.denominator_index = shared_denominator_index ? 0 : 1;
+  second.numerator.push_back(
+      rational_matrix_shift(1, 0, 0, Rational(-3)));
+  p.nhat_lags[2].rational.push_back(std::move(second));
+  return p;
+}
+
+void test_rational_cross_lag_denominator_fusion() {
+  const auto shared =
+      RecurrenceSolver<Rational>(cross_lag_rational_problem(true)).run();
+  const auto distinct =
+      RecurrenceSolver<Rational>(cross_lag_rational_problem(false)).run();
+  const auto at = [&](const diffexp2::RecurrenceResult<Rational>& result,
+                      std::uint32_t n, std::int32_t power) -> const Rational& {
+    const auto epsilon = static_cast<std::size_t>(power + 2);
+    return result.u[(static_cast<std::size_t>(n) * 2 * 8) + epsilon];
+  };
+  check("Rational shared-index fusion matches distinct-index evaluation",
+        shared.u == distinct.u && shared.validity == distinct.validity &&
+            shared.top_valid == distinct.top_valid && shared.top_valid == 5 &&
+            at(shared, 2, 0) == Rational(2) &&
+            at(shared, 2, 1) == Rational("-11/2"));
+}
+
+void test_rational_fusion_denominator_index_bounds() {
+  auto p = cross_lag_rational_problem(true);
+  p.nhat_lags[2].rational[0].denominator_index = 1;
+  bool loud = false;
+  try {
+    (void)RecurrenceSolver<Rational>(p).run();
+  } catch (const diffexp2::RecurrenceError& error) {
+    loud = error.id == "E5" &&
+        std::string(error.what()).find("denominator index") !=
+            std::string::npos;
+  }
+  check("Rational fusion rejects an uncertified denominator index", loud);
+}
+
+RecurrenceProblem<Rational> cross_lag_cancellation_underflow_problem() {
+  RecurrenceProblem<Rational> p;
+  p.dimension = 2;
+  p.nmax = 2;
+  p.log_max = 0;
+  p.frame_base = 0;
+  p.frame_width = 4;
+  p.adaptive_lower_frame_probe = true;
+  p.a_target = Rational(0);
+  p.b_target = Rational(0);
+  p.a_shift_min = 0;
+  p.a_shifts = {Rational(0), Rational(1), Rational(2)};
+  p.d_lags = {{{0, Rational(1)}}};
+  p.nhat_lags.resize(3);
+  p.nhat_lags[0].valuations.assign(4, diffexp2::kCompleteInfinity);
+  p.nhat_lags[1].valuations = {
+      diffexp2::kCompleteInfinity, -1,
+      0, diffexp2::kCompleteInfinity};
+  p.nhat_lags[2].valuations = {
+      -1, diffexp2::kCompleteInfinity,
+      diffexp2::kCompleteInfinity, diffexp2::kCompleteInfinity};
+  p.rational_denominators = {{Rational(1), Rational(1)}};
+
+  RationalGroup<Rational> first;
+  first.denominator_index = 0;
+  first.numerator.push_back(
+      rational_matrix_shift(-1, 0, 1, Rational(1)));
+  first.numerator.push_back(
+      rational_matrix_shift(0, 1, 0, Rational(1)));
+  p.nhat_lags[1].rational.push_back(std::move(first));
+
+  RationalGroup<Rational> second;
+  second.denominator_index = 0;
+  second.numerator.push_back(
+      rational_matrix_shift(-1, 0, 0, Rational(-1)));
+  p.nhat_lags[2].rational.push_back(std::move(second));
+
+  p.d0_inverse_scalar = Rational(1);
+  p.blocks = {JordanBlock{{0}}, JordanBlock{{1}}};
+  p.schedule.resize(3);
+  p.schedule[0] = {
+      {StepCase::Resonant, Rational(0), Rational(0)},
+      {StepCase::Resonant, Rational(0), Rational(0)}};
+  for (std::uint32_t n = 1; n <= 2; ++n) {
+    p.schedule[n] = {
+        {StepCase::Taylor, Rational(1), Rational(0)},
+        {StepCase::Taylor, Rational(1), Rational(0)}};
+  }
+  p.initial.assign(8, Rational(0));
+  p.initial[0] = Rational(1);
+  p.initial_validity = {3, diffexp2::kCompleteInfinity};
+  return p;
+}
+
+void test_rational_fusion_preserves_contribution_e4() {
+  auto prefix_problem = cross_lag_cancellation_underflow_problem();
+  prefix_problem.nmax = 1;
+  prefix_problem.schedule.resize(2);
+  const auto prefix = RecurrenceSolver<Rational>(prefix_problem).run();
+  const auto& initial_lead = prefix.u[0];
+  const auto first_lag_index =
+      (((static_cast<std::size_t>(1) * 2) * 2 + 1) * 4);
+  const auto& first_lag_lead = prefix.u[first_lag_index];
+  const bool dropped_terms_would_cancel =
+      initial_lead == Rational(1) && first_lag_lead == initial_lead;
+  bool loud = false;
+  try {
+    (void)RecurrenceSolver<Rational>(
+        cross_lag_cancellation_underflow_problem()).run();
+  } catch (const diffexp2::RecurrenceError& error) {
+    loud = error.id == "E4" && error.shift == -1;
+  }
+  check("Rational cross-lag cancellation cannot hide contribution E4",
+        dropped_terms_would_cancel && loud);
 }
 
 RecurrenceProblem<Rational> resonant_jordan_source_problem(
@@ -375,6 +519,9 @@ int main() {
   test_exponential();
   test_epsilon_denominator();
   test_lower_frame_guard();
+  test_rational_cross_lag_denominator_fusion();
+  test_rational_fusion_denominator_index_bounds();
+  test_rational_fusion_preserves_contribution_e4();
   test_resonant_jordan_log_ceiling_compatibility();
   test_json_error_contract();
   test_malformed_tensor_is_typed_error();

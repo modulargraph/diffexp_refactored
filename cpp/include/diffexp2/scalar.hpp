@@ -43,6 +43,7 @@ class Rational {
     flint_free(raw);
     return result;
   }
+  const fmpq* raw() const { return value_; }
 
   friend Rational operator+(const Rational& a, const Rational& b) {
     Rational out;
@@ -259,6 +260,12 @@ class ComplexBall {
     ComplexBall out;
     set_arb_string(acb_realref(out.value_), real);
     set_arb_string(acb_imagref(out.value_), imag);
+    return out;
+  }
+
+  static ComplexBall from_rational(const Rational& value) {
+    ComplexBall out;
+    acb_set_fmpq(out.value_, value.raw(), precision_bits_);
     return out;
   }
 

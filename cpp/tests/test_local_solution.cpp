@@ -14,6 +14,7 @@ using diffexp2::LocalSector;
 using diffexp2::LocalSolution;
 using diffexp2::Magnitude;
 using diffexp2::Prescription;
+using diffexp2::Rational;
 using diffexp2::RealEvaluationPoint;
 using diffexp2::ResidualVerdict;
 
@@ -50,6 +51,12 @@ LocalSolution<ComplexBall> regular_linear_solution() {
 }
 
 void test_direct_value_theta_and_residual() {
+  const Rational exact("-123456789012345678901/700000000000000000003");
+  const auto converted = ComplexBall::from_rational(exact);
+  check("direct fmpq to Acb conversion",
+        acb_contains_fmpq(converted.raw(), exact.raw()) != 0 &&
+            arb_is_zero(acb_imagref(converted.raw())));
+
   const auto evaluation = diffexp2::evaluate_local_solution(
       regular_linear_solution(), RealEvaluationPoint::rational("1/4"));
   const auto expected_value = ComplexBall::from_strings("3/2");

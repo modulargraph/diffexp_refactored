@@ -12687,7 +12687,7 @@ LocalSolution<ComplexBall> specialize_rational_local_to_acb(
     converted.coefficients.reserve(sector.coefficients.size());
     for (const auto& coefficient : sector.coefficients)
       converted.coefficients.push_back(
-          ComplexBall::from_strings(coefficient.str()));
+          ComplexBall::from_rational(coefficient));
     output.sectors.push_back(std::move(converted));
   }
   validate_local_solution(output, false);

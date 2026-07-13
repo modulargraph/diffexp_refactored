@@ -18,6 +18,7 @@ Begin["`Private`"];
 
 $jobSchema = "FeynmanTrick.FIRE7ModularJob/v2";
 $jobCacheVersion = "v2";
+$reductionSamplingPolicy = "geometric-zippel-adaptive-limits/v2";
 $lockAcquireTimeoutSeconds = 60;
 $lockOwnerGraceSeconds = 30;
 If[!AssociationQ[$OwnedLockNonces], $OwnedLockNonces = <||>];
@@ -233,7 +234,7 @@ jobIdentity[operation_String, fireRoot_String, dir_String,
     "DimensionSeparated" ->
       TrueQ[Lookup[settings, "DimensionSeparated", False]],
     "SamplingPolicy" -> If[operation === "Reduction",
-      "geometric-zippel/v1", Missing["Inactive"]],
+      $reductionSamplingPolicy, Missing["Inactive"]],
     "VariableBasePolicy" -> If[operation === "Reduction",
       "big-primes/v1", Missing["Inactive"]],
     "FIRE7SourceSHA256" -> fileSHA256[
@@ -630,7 +631,8 @@ ModularCommand[fireRoot_String, manifest_Association,
       Module]];
   command = {mpi, "--oversubscribe", "-np", ToString[workers + 1],
     fireMPI, "--calc", calc, "--zippel", "--reconstruct",
-    "--geometric", "--rational_reconstruction_limit", ToString[limit]};
+    "--geometric", "--early_abortion",
+    "--rational_reconstruction_limit", ToString[limit]};
   If[useMultiprime, command = Append[command, "--multitables"]];
   command = Append[command, "--big_primes"];
   If[TrueQ[Lookup[settings, "DimensionSeparated", False]],

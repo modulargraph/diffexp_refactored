@@ -708,6 +708,12 @@ parseAndValidateFIRETable[table_String, requested_List,
   malformedRules = Select[rules,
     !MatchQ[#, HoldPattern[Rule[Global`G[_Integer, {_Integer ...}], _]]] &];
   If[malformedRules =!= {}, Return[$Failed, Module]];
+  (* FIRE7 reconstruction can retain distinct internal relation IDs for the
+     same requested master.  Tables2Rules then emits the same exact identity
+     rule more than once.  Canonicalize those harmless duplicates before the
+     functional-LHS check below; distinct right-hand sides for one integral
+     remain a malformed table and are still rejected. *)
+  rules = DeleteDuplicates[rules];
   rulePairs = Cases[rules,
     HoldPattern[Rule[Global`G[p_Integer, idx_List], _]] :> {p, idx}];
   If[!DuplicateFreeQ[rulePairs], Return[$Failed, Module]];

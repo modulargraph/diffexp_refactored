@@ -110,6 +110,9 @@ CreateDirectory[fireBinDir, CreateIntermediateDirectories -> True];
 Export[FileNameJoin[{fireRoot, "FIRE7.m"}], "(* fake FIRE7 source *)\n", "Text"];
 Export[FileNameJoin[{fireRoot, "paths.inc"}],
   "RESULTING_MPRIME_COUNT=16\n", "Text"];
+Export[FileNameJoin[{fireBinDir, "FIRE7p"}], "fake prime worker\n", "Text"];
+Export[FileNameJoin[{fireBinDir, "FIRE7mp"}],
+  "fake multipoint worker\n", "Text"];
 Export[FileNameJoin[{fireBinDir, "FIRE7_MPI"}], "fake mpi worker\n", "Text"];
 Export[FileNameJoin[{fireBinDir, "reconstruct"}], "fake reconstruct\n", "Text"];
 
@@ -157,7 +160,7 @@ expectedCommand = {
   ExpandFileName[fakeMPI], "--oversubscribe", "-np", "4",
   ExpandFileName[FileNameJoin[{fireBinDir, "FIRE7_MPI"}]],
   "--calc", "flint", "--zippel", "--reconstruct",
-  "--geometric",
+  "--geometric", "--early_abortion",
   "--rational_reconstruction_limit", "127",
   "--multitables", "--big_primes", "--config", "contract"
 };
@@ -167,10 +170,22 @@ assert["default modular command enables reconstruction and multiprime Zippel",
   AssociationQ[manifest] &&
     And @@ (MemberQ[command, #] & /@
       {"--zippel", "--geometric", "--reconstruct", "--multitables",
-        "--big_primes"})];
+        "--big_primes", "--early_abortion"})];
 assert["default modular command avoids unsafe or unsupported policy flags",
   FreeQ[command, Alternatives[
     "--delete_tables", "--reserve", "--no_integrity", "--last_separated"]]];
+
+adaptiveIdentity = FeynmanTrick`FIRE7Runner`Private`jobIdentity[
+  "Reduction", fireRoot, configDir, manifest, defaultSettings];
+legacyIdentityRecord = ReplacePart[adaptiveIdentity["Record"],
+  "SamplingPolicy" -> "geometric-zippel/v1"];
+legacyIdentityID = IntegerString[
+  Hash[legacyIdentityRecord, "SHA256"], 16, 64];
+assert["adaptive-limit policy is versioned into modular cache identity",
+  AssociationQ[adaptiveIdentity] &&
+    adaptiveIdentity["Record", "SamplingPolicy"] ===
+      "geometric-zippel-adaptive-limits/v2" &&
+    adaptiveIdentity["ID"] =!= legacyIdentityID];
 
 singlePrimeCommand = FeynmanTrick`FIRE7Runner`ModularCommand[
   fireRoot, manifest, Join[defaultSettings, <|"UseMultiprime" -> False|>]];
@@ -421,6 +436,25 @@ malformedRHSResult = Block[{FIRE`Tables2Rules, FIRE`Tables2Masters},
     parserSentinel, {{7, {2, 1}}}, {7}]];
 assert["exact table parser rejects malformed master calls on rule right-hand sides",
   malformedRHSResult === $Failed];
+duplicateIdentityResult = Block[{FIRE`Tables2Rules, FIRE`Tables2Masters},
+  FIRE`Tables2Rules[___] := {
+    Global`G[7, {2, 1}] -> Global`G[7, {2, 1}],
+    Global`G[7, {2, 1}] -> Global`G[7, {2, 1}]};
+  FIRE`Tables2Masters[___] := {{7, {2, 1}}};
+  FeynmanTrick`FIREInterface`Private`parseAndValidateFIRETable[
+    parserSentinel, {{7, {2, 1}}}, {7}]];
+conflictingDuplicateResult = Block[{FIRE`Tables2Rules, FIRE`Tables2Masters},
+  FIRE`Tables2Rules[___] := {
+    Global`G[7, {2, 1}] -> Global`G[7, {2, 1}],
+    Global`G[7, {2, 1}] -> 2 Global`G[7, {2, 1}]};
+  FIRE`Tables2Masters[___] := {{7, {2, 1}}};
+  FeynmanTrick`FIREInterface`Private`parseAndValidateFIRETable[
+    parserSentinel, {{7, {2, 1}}}, {7}]];
+assert["exact duplicate FIRE7 identity rules are canonicalized while conflicts fail",
+  AssociationQ[duplicateIdentityResult] &&
+    duplicateIdentityResult["Rules"] === {
+      Global`G[7, {2, 1}] -> Global`G[7, {2, 1}]} &&
+    conflictingDuplicateResult === $Failed];
 assert["basis master validation binds each problem's requested index arity",
   FeynmanTrick`FIREInterface`Private`validFIREPairsForRequestsQ[
     {{7, {1, 1}}}, {{7, {2, 1}}}] &&

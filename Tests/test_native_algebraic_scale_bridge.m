@@ -104,6 +104,113 @@ inexactRadiusBridgeQ = AssociationQ[inexactRadiusBridge] &&
     Together[inexactRadiusBridge["Radius"]/
       Abs[inexactRadiusChart["Scale"]]];
 
+(* An exact algebraic physical radius is a stronger input than the interval
+   certificate above.  Keep the match disk deliberately close to the true
+   radius: the bridge must choose a strict inward rational floor without
+   shrinking past the exact rational handoff disk. *)
+exactRadiusSource = RootReduce[Sqrt[41/4]];
+exactRadiusMatch = 16/5;
+exactRadiusChart = <|"Center" -> 0, "Singular" -> False,
+  "Radius" -> exactRadiusSource, "MatchRadius" -> exactRadiusMatch,
+  "Scale" -> exactRadiusMatch,
+  "LocalRadius" -> Together[exactRadiusSource/exactRadiusMatch],
+  "UseSCCSkeleton" -> True, "Name" -> "exact-algebraic-radius",
+  "Prescriptions" -> {minusDeltaPrescription}|>;
+exactRadiusBridge = catchDE2[
+  DiffExp2`NativeTransport`Private`bridgeNativeRegularChartScale[
+    exactRadiusChart, 4]];
+exactRadiusCertificate = If[AssociationQ[exactRadiusBridge],
+  Lookup[exactRadiusBridge, "NativeRationalScaleBridge", <||>], <||>];
+exactRadiusBridgeQ = AssociationQ[exactRadiusBridge] &&
+  Lookup[exactRadiusCertificate, "Schema", None] ===
+    "diffexp2-native-inward-rational-algebraic-radius-v1" &&
+  Lookup[exactRadiusCertificate, "BridgeKind", None] ===
+    "ExactAlgebraicPhysicalRadius" &&
+  Lookup[exactRadiusCertificate, "FloorBits", None] === 64 &&
+  Lookup[exactRadiusCertificate, "OriginalPhysicalRadius", None] ===
+    exactRadiusSource &&
+  Lookup[exactRadiusCertificate, "NativePhysicalRadius", None] ===
+    exactRadiusBridge["Radius"] &&
+  Lookup[exactRadiusCertificate, "OriginalLocalRadius", None] ===
+    exactRadiusChart["LocalRadius"] &&
+  Lookup[exactRadiusCertificate, "NativeLocalRadius", None] ===
+    exactRadiusBridge["LocalRadius"] &&
+  TrueQ[Lookup[exactRadiusCertificate, "ExactContainmentProved", False]] &&
+  exactRadiusBridge["Center"] === exactRadiusChart["Center"] &&
+  exactRadiusBridge["Scale"] === exactRadiusChart["Scale"] &&
+  exactRadiusBridge["MatchRadius"] === exactRadiusMatch &&
+  exactRadiusBridge["Prescriptions"] ===
+    exactRadiusChart["Prescriptions"] &&
+  IntegerQ[Numerator[exactRadiusBridge["Radius"]]] &&
+  IntegerQ[Denominator[exactRadiusBridge["Radius"]]] &&
+  IntegerQ[Numerator[exactRadiusBridge["LocalRadius"]]] &&
+  IntegerQ[Denominator[exactRadiusBridge["LocalRadius"]]] &&
+  TrueQ[FullSimplify[RootReduce[
+    0 < exactRadiusMatch < exactRadiusBridge["Radius"] <
+      exactRadiusSource]]] &&
+  exactRadiusBridge["LocalRadius"] ===
+    Together[exactRadiusBridge["Radius"]/exactRadiusMatch];
+
+(* SegmentLine may cap the same retained anchor differently on its two
+   arms.  Normalization must select the larger exact disk, after which both
+   copies receive one identical conservative rational bridge. *)
+sharedLowerRadius = RootReduce[Sqrt[10]];
+sharedUpperRadius = exactRadiusSource;
+sharedLowerMatch = 31/10;
+sharedUpperMatch = 16/5;
+sharedSelectedMatch = Max[sharedLowerMatch, sharedUpperMatch];
+sharedLowerAnchor = <|"Center" -> 0, "Singular" -> False,
+  "Radius" -> sharedLowerRadius, "MatchRadius" -> sharedLowerMatch,
+  "Scale" -> sharedLowerMatch,
+  "LocalRadius" -> Together[sharedLowerRadius/sharedLowerMatch],
+  "ChartVar" -> Global`t, "UseSCCSkeleton" -> True,
+  "Name" -> "exact-shared-lower", "Prescriptions" -> {}|>;
+sharedUpperAnchor = Join[sharedLowerAnchor, <|
+  "Radius" -> sharedUpperRadius,
+  "MatchRadius" -> sharedUpperMatch, "Scale" -> sharedUpperMatch,
+  "LocalRadius" -> Together[sharedUpperRadius/sharedUpperMatch],
+  "Name" -> "exact-shared-upper"|>];
+sharedLowerPlan = <|"From" -> 0, "To" -> -1, "Direction" -> -1,
+  "Charts" -> {sharedLowerAnchor}, "SegmentCount" -> 1,
+  "EndpointIsSingular" -> False, "DigitsNeeded" -> 20,
+  "Singularities" -> singularities|>;
+sharedUpperPlan = <|"From" -> 0, "To" -> 1, "Direction" -> 1,
+  "Charts" -> {sharedUpperAnchor}, "SegmentCount" -> 1,
+  "EndpointIsSingular" -> False, "DigitsNeeded" -> 20,
+  "Singularities" -> singularities|>;
+sharedNormalized = catchDE2[
+  DiffExp2`NativeTransport`Private`normalizeSharedAnchor[
+    sharedLowerPlan, sharedUpperPlan]];
+sharedNormalizationQ = ListQ[sharedNormalized] &&
+  Length[sharedNormalized] === 2 &&
+  Module[{lower = First[sharedNormalized]["Charts"][[1]],
+      upper = Last[sharedNormalized]["Charts"][[1]], provenance},
+    provenance = Lookup[lower, "SharedAnchorNormalization", <||>];
+    lower === upper && lower["Center"] === 0 &&
+      lower["Radius"] === sharedUpperRadius &&
+      lower["MatchRadius"] === sharedSelectedMatch &&
+      lower["Scale"] === sharedSelectedMatch &&
+      lower["LocalRadius"] ===
+        Together[sharedUpperRadius/sharedSelectedMatch] &&
+      AssociationQ[provenance] &&
+      Lookup[provenance, "Schema", None] ===
+        "diffexp2-native-shared-anchor-normalization-v1" &&
+      Lookup[provenance, "IncomingLowerPhysicalRadius", None] ===
+        sharedLowerRadius &&
+      Lookup[provenance, "IncomingUpperPhysicalRadius", None] ===
+        sharedUpperRadius &&
+      Lookup[provenance, "IncomingLowerMatchRadius", None] ===
+        sharedLowerMatch &&
+      Lookup[provenance, "IncomingUpperMatchRadius", None] ===
+        sharedUpperMatch &&
+      Lookup[provenance, "SelectedPhysicalRadius", None] ===
+        sharedUpperRadius &&
+      Lookup[provenance, "SelectedMatchRadius", None] ===
+        sharedSelectedMatch];
+sharedEligibleQ = TrueQ[
+  DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
+    sharedLowerPlan, sharedUpperPlan]];
+
 (* Exact-equality overlap is not stable under two strict inward floors.  The
    public eligibility gate must reject this atlas before native preparation. *)
 tightChart1 = Join[endpoint, <|"Center" -> 1/3,
@@ -270,9 +377,96 @@ runDomain[exactDomain_] := Module[
         "lower_tiles", "upper_tiles"}], stats],
     "Released" -> released, "After" -> after|>];
 
+runExactSharedAnchor[] := Module[
+  {atlas, stats, lowerChart, upperChart, certificate, audit, session,
+   normalization, released, after, geometryQ, checks},
+  atlas = Block[{DiffExp2`Solve`Private`$cppExactDomain = True},
+    catchDE2[
+      DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+        system, {DiffExp2`EpsSeries`ESNew[0, {1}]},
+        sharedLowerPlan, sharedUpperPlan, "Threads" -> 2]]];
+  If[FailureQ[atlas] || !AssociationQ[atlas],
+    Return[<|"OK" -> False, "Atlas" -> atlas|>, Module]];
+  session = atlas["Session"];
+  stats = DiffExp2`CppBackend`PersistentTilePlanStatistics[atlas["Plan"]];
+  lowerChart = First[atlas["Lower", "Plan", "Charts"]];
+  upperChart = First[atlas["Upper", "Plan", "Charts"]];
+  certificate = Lookup[lowerChart, "NativeRationalScaleBridge", <||>];
+  normalization = Lookup[lowerChart, "SharedAnchorNormalization", <||>];
+  audit = Lookup[atlas, "NativeGeometryAudit", <||>];
+  geometryQ = AssociationQ[stats] &&
+    exactArmGeometryQ[stats["lower"], atlas["Lower", "Plan"]] &&
+    exactArmGeometryQ[stats["upper"], atlas["Upper", "Plan"]];
+  checks = {
+    atlas["Domain"] === "rational",
+    lowerChart === upperChart,
+    lowerChart["Center"] === 0,
+    lowerChart["Scale"] === sharedSelectedMatch,
+    lowerChart["MatchRadius"] === sharedSelectedMatch,
+    IntegerQ[Numerator[lowerChart["Radius"]]],
+    IntegerQ[Denominator[lowerChart["Radius"]]],
+    IntegerQ[Numerator[lowerChart["LocalRadius"]]],
+    IntegerQ[Denominator[lowerChart["LocalRadius"]]],
+    lowerChart["LocalRadius"] ===
+      Together[lowerChart["Radius"]/sharedSelectedMatch],
+    TrueQ[FullSimplify[RootReduce[
+      sharedSelectedMatch < lowerChart["Radius"] < sharedUpperRadius]]],
+    Lookup[normalization, "Schema", None] ===
+      "diffexp2-native-shared-anchor-normalization-v1",
+    Lookup[normalization, "IncomingLowerPhysicalRadius", None] ===
+      sharedLowerRadius,
+    Lookup[normalization, "IncomingUpperPhysicalRadius", None] ===
+      sharedUpperRadius,
+    Lookup[normalization, "IncomingLowerMatchRadius", None] ===
+      sharedLowerMatch,
+    Lookup[normalization, "IncomingUpperMatchRadius", None] ===
+      sharedUpperMatch,
+    Lookup[normalization, "SelectedPhysicalRadius", None] ===
+      sharedUpperRadius,
+    Lookup[normalization, "SelectedMatchRadius", None] ===
+      sharedSelectedMatch,
+    Lookup[certificate, "Schema", None] ===
+      "diffexp2-native-inward-rational-algebraic-radius-v1",
+    Lookup[certificate, "BridgeKind", None] ===
+      "ExactAlgebraicPhysicalRadius",
+    Lookup[certificate, "OriginalPhysicalRadius", None] ===
+      sharedUpperRadius,
+    Lookup[certificate, "NativePhysicalRadius", None] ===
+      lowerChart["Radius"],
+    Lookup[certificate, "OriginalLocalRadius", None] ===
+      Together[sharedUpperRadius/sharedSelectedMatch],
+    Lookup[certificate, "NativeLocalRadius", None] ===
+      lowerChart["LocalRadius"],
+    TrueQ[Lookup[certificate, "ExactContainmentProved", False]],
+    AssociationQ[stats] && Lookup[stats, "status", "error"] === "ok",
+    Lookup[audit, "Schema", None] ===
+      "diffexp2-native-exact-geometry-proof-v1",
+    TrueQ[Lookup[audit, "BackendExactPlanValidated", False]],
+    TrueQ[Lookup[audit, "NativeDisksContainedInOriginal", False]],
+    Lookup[audit, "LowerBridgeCount", None] === 1,
+    Lookup[audit, "UpperBridgeCount", None] === 1,
+    geometryQ};
+  released = DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[
+    atlas];
+  after = Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
+    session, <||>];
+  <|"OK" -> And @@ checks && AssociationQ[released] &&
+      Lookup[released, "Failures", {"missing"}] === {} &&
+      Lookup[after, "tile_plans", -1] === 0 &&
+      Lookup[after, "locals", -1] === 0,
+    "Checks" -> checks,
+    "Atlas" -> KeyTake[atlas,
+      {"Type", "Domain", "NativeGeometryAudit"}],
+    "Stats" -> If[AssociationQ[stats],
+      KeyTake[stats, {"status", "lower_matches", "upper_matches",
+        "lower_tiles", "upper_tiles"}], stats],
+    "Released" -> released, "After" -> after|>];
+
 rationalResult = runDomain[True];
 DiffExp2`Solve`ClearSolveCaches[];
 acbResult = runDomain[False];
+DiffExp2`Solve`ClearSolveCaches[];
+sharedAnchorResult = runExactSharedAnchor[];
 DiffExp2`Solve`ClearSolveCaches[];
 
 (* A backend error association from tile.plan must become Failure at this
@@ -290,18 +484,24 @@ loudStatusQ = FailureQ[loudFailure] &&
   Lookup[loudData["BackendResponse"], "status", "ok"] === "error";
 
 ok = exactFloorQ && eligibleQ && singularScopeQ &&
-  inexactRadiusBridgeQ && tightRejectedQ &&
+  inexactRadiusBridgeQ && exactRadiusBridgeQ &&
+  sharedNormalizationQ && sharedEligibleQ && tightRejectedQ &&
   projectionBridgeQ &&
   TrueQ[rationalResult["OK"]] &&
-  TrueQ[acbResult["OK"]] && loudStatusQ;
+  TrueQ[acbResult["OK"]] && TrueQ[sharedAnchorResult["OK"]] &&
+  loudStatusQ;
 
 If[TrueQ[ok],
   Print["PASS: exact regular algebraic-scale native bridge"],
   Print["FAIL: ", InputForm[<|"ExactFloor" -> exactFloorQ,
     "Eligible" -> eligibleQ, "SingularScope" -> singularScopeQ,
     "InexactRadiusBridge" -> inexactRadiusBridgeQ,
+    "ExactRadiusBridge" -> exactRadiusBridgeQ,
+    "SharedNormalization" -> sharedNormalizationQ,
+    "SharedEligible" -> sharedEligibleQ,
     "TightRejected" -> tightRejectedQ,
     "Rational" -> rationalResult,
-    "Acb" -> acbResult, "LoudFailure" -> loudFailure,
+    "Acb" -> acbResult, "SharedAnchor" -> sharedAnchorResult,
+    "LoudFailure" -> loudFailure,
     "LoudStatus" -> loudStatusQ|>]];
   Exit[1]];

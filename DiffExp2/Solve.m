@@ -30,6 +30,7 @@ SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, re
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
 SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
 PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSystem,req] prepares the lightweight retained equation owner needed by exact tile planning without retaining a complete regular basis. Multi-block systems return their SCC composite; a monolithic system retains one unit-column witness whose chart owner is shared by later basis solves.";
+WithNativeSCCCompositeCacheReservation::usage = "WithNativeSCCCompositeCacheReservation[count,expr] evaluates expr with capacity reserved for exactly count additional live native SCC composite owners. The reservation is dynamically scoped, never evicts a live public handle, and leaves ordinary direct preparation subject to the default bounded capacity.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 DropWolframPreparationCaches::usage = "DropWolframPreparationCaches[] drops only Wolfram-side chart/operator/multiplier preparation memo state while preserving every retained native session, chart, SCC, local, match, and tile-plan handle.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
@@ -3398,6 +3399,7 @@ ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
   $physicalClearedODECache = <||>; $cppStaticOperatorCache = <||>;
   $nativeSCCCompositeCache = <||>;
+  $nativeSCCCompositeReservedCapacity = 0;
   $homogeneousFramePlanOverride = None;
   $cppHomogeneousFrameOverride = None;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
@@ -3409,6 +3411,7 @@ DropWolframPreparationCaches[] := Module[{},
   $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
   $physicalClearedODECache = <||>; $cppStaticOperatorCache = <||>;
   $nativeSCCCompositeCache = <||>;
+  $nativeSCCCompositeReservedCapacity = 0;
   $homogeneousFramePlanOverride = None;
   $cppHomogeneousFrameOverride = None;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
@@ -4224,6 +4227,38 @@ sccWorkTOrder[cs_Association, req_Association] :=
    monolithic coarsening candidate. *)
 $nativeSCCCompositeCache = <||>;
 $nativeSCCCompositeCacheMax = 32;
+$nativeSCCCompositeReservedCapacity = 0;
+
+nativeSCCCompositeEffectiveCapacity[] := Max[
+  $nativeSCCCompositeCacheMax, $nativeSCCCompositeReservedCapacity];
+
+nativeSCCCompositeCacheAdmissionQ[] :=
+  Length[$nativeSCCCompositeCache] < nativeSCCCompositeEffectiveCapacity[];
+
+nativeSCCCompositeRequireAdmission[cs_Association] :=
+  If[!nativeSCCCompositeCacheAdmissionQ[],
+    err["E6", cs, <|"Capacity" ->
+        nativeSCCCompositeEffectiveCapacity[],
+      "DefaultCapacity" -> $nativeSCCCompositeCacheMax,
+      "ReservedCapacity" -> $nativeSCCCompositeReservedCapacity,
+      "Detail" -> "native SCC composite cache capacity is exhausted; clear solver caches before preparing another public handle"|>]];
+
+(* Native atlas construction must retain every receiving equation owner until
+   the exact tile plan has taken strong ownership.  That legitimate scoped
+   demand can exceed the conservative direct-call bound, but it must not turn
+   the cache into an unbounded store or evict handles which have already been
+   published.  Reserve count slots from the occupancy at scope entry; nested
+   schedulers retain the larger enclosing ceiling.  Block restores the prior
+   policy on success, Throw, or other nonlocal exit. *)
+SetAttributes[WithNativeSCCCompositeCacheReservation, HoldRest];
+WithNativeSCCCompositeCacheReservation[count_Integer?NonNegative,
+    expression_] := Block[{$nativeSCCCompositeReservedCapacity = Max[
+      $nativeSCCCompositeReservedCapacity,
+      Length[$nativeSCCCompositeCache] + count]}, expression];
+WithNativeSCCCompositeCacheReservation[count_, expression_] :=
+  err["E6", <||>, <|"Reservation" -> count,
+    "Detail" -> "native SCC composite cache reservation must be a nonnegative integer"|>];
+
 $nativeSCCColumnRunKeys = {"nmax", "p", "has_initial",
   "adaptive_probe", "a_target", "b_target", "a_shift_min",
   "a_shifts", "schedule", "initial", "initial_validity", "source",
@@ -4880,9 +4915,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   If[cached =!= None,
     err["E6", cs, <|"CacheKey" -> cacheKey,
       "Detail" -> "native SCC composite cache key collided with an unequal full signature"|>]];
-  If[Length[$nativeSCCCompositeCache] >= $nativeSCCCompositeCacheMax,
-    err["E6", cs, <|"Capacity" -> $nativeSCCCompositeCacheMax,
-      "Detail" -> "native SCC composite cache capacity is exhausted; clear solver caches before preparing another public handle"|>]];
+  nativeSCCCompositeRequireAdmission[cs];
 
   condensation = seq["CondensationEdges"];
   If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",

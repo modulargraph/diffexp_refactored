@@ -69,6 +69,12 @@ Options[DefineFTIteration] = {"OutputIntegrals" -> Automatic};
 DefineFTIteration[topology_Association, combinationSeq_List,
     numericalPoint_List:{}, OptionsPattern[]] :=
 Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
+  If[!FeynmanTrick`FIREInterface`Private`validFIRENumericalPointQ[
+        numericalPoint] ||
+      Intersection[First /@ numericalPoint,
+        Join[topology["LoopMomenta"], topology["ExternalMomenta"]]] =!= {},
+    Print["Error: numericalPoint must assign finite exact non-momentum symbols."];
+    Return[$Failed, Module]];
   nLevels = Length[combinationSeq];
   eliminatedPositions = Lookup[topology, "EliminatedPositions", {}];
   outputIntegrals =
@@ -176,10 +182,17 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
      only for scalar-product replacement right-hand sides.  In particular,
      symbolic masses and other coefficients may occur directly in the
      propagators.  Freeze those symbols before FIRE sees the level topology. *)
-  newProps = newProps /. numericalPoint;
+  newProps =
+    FeynmanTrick`FIREInterface`Private`applyFIRENumericalPoint[
+      newProps, numericalPoint];
 
   (* Propagator replacements: original scalar product rules with numerical kinematic values *)
-  newReplacements = ftData["TopTopology"]["Replacements"] /. numericalPoint;
+  newReplacements =
+    FeynmanTrick`FIREInterface`Private`applyFIRENumericalPointToReplacements[
+      ftData["TopTopology"]["Replacements"], numericalPoint];
+  If[newProps === $Failed || newReplacements === $Failed,
+    Print["Error: NumericalPoint substitutions are cyclic or do not reach a fixed point."];
+    Return[ftData, Module]];
 
   (* Create new topology *)
   name = ftData["TopTopology"]["Name"] <> "_L" <> ToString[level];

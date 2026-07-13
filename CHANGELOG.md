@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Upgraded Feynman-trick preparation to FIRE 7.1 with finite-field Zippel
+  sampling, multiprime MPI execution, exact rational reconstruction, and an
+  explicitly selectable Classical parity backend.
+- Added source/runtime-bound modular caches, atomic completion markers and
+  locks, exact-artifact validation, process-tree timeouts, independent basis
+  probes, and strict table-coverage checks.
+- Expanded basis discovery with first-shell dotted and numerator seeds, fixing
+  request-dependent sunrise masters; real bubble and sunrise reductions now
+  agree exactly between Classical and modular FIRE7.
+
 ## 2.0.0 — 2026-07-11
 
 - Replaced the strategy/fallback stack with one strict finite-width recurrence

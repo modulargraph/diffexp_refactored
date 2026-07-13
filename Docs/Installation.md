@@ -12,7 +12,9 @@ does.
 - CMake 3.24 or newer and a C++20 compiler;
 - FLINT, GMP/MPFR, and Boost.JSON 1.80 or newer;
 - Ninja is optional but used in the commands below;
-- FIRE6 only for Feynman-trick preparation.
+- FIRE 7.1 only for Feynman-trick preparation. The default modular backend
+  also requires an MPI launcher and a FIRE build with prime, multiprime, and
+  reconstruction executables.
 
 The first release is validated against Wolfram Language 15.0. Earlier versions
 may work but are outside the initial compatibility promise until added to the
@@ -104,23 +106,45 @@ configuration.
 
 ## FIRE for Feynman-trick preparation
 
-The subprocess facade looks for FIRE6 at:
+The subprocess facade looks for FIRE 7.1 at:
 
 ```text
-Dependencies/fire/FIRE6
+Dependencies/fire/FIRE7/FIRE7
 ```
 
-That directory is ignored by Git. Install FIRE there, make that path point to
-the desired installation, or set the facade option explicitly:
+`Dependencies/` is ignored by Git. A standard source build can be placed at
+that location by cloning the official FIRE repository into
+`Dependencies/fire/FIRE7`, entering its `FIRE7` subdirectory, and following
+FIRE's `./configure`, `make dep`, and `make` instructions. The modular path
+expects these nonempty executables below the configured FIRE root:
+
+```text
+bin/FIRE7
+bin/FIRE7p
+bin/FIRE7mp
+bin/FIRE7_MPI
+bin/reconstruct
+```
+
+Install FIRE there, make that path point to the desired installation, or set
+the facade option explicitly:
 
 ```mathematica
 plan = FeynmanTrick`PipelinePlan[
-  "bubble", "FIREPath" -> "/absolute/path/to/FIRE6"
+  "bubble", "FIREPath" -> "/absolute/path/to/fire/FIRE7"
 ];
 ```
 
-The CLI equivalent is `FT_FIRE_PATH`. The clean facade subprocess does not
-inherit in-memory package options from its calling kernel.
+The CLI equivalent is `FT_FIRE_PATH`. Modular FIRE7 is the default and uses
+finite-field Zippel sampling plus exact rational reconstruction. Set
+`"FIREBackend" -> "Classical"` only when an exact Classical comparison is
+wanted. The clean facade subprocess does not inherit in-memory package options
+from its calling kernel.
+
+FIRE 7.1 modular reconstruction has a fixed 16-variable exponent array. The
+facade therefore rejects modular families with more than 16 FIRE variables,
+including the dimension variable, instead of risking memory corruption.
+Classical FIRE7 execution does not use that reconstruction path.
 
 The facade executes the ladder in a clean `wolframscript` subprocess. Its
 current inherited-environment launcher requires `/usr/bin/env`, so facade

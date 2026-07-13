@@ -57,14 +57,16 @@ Module[{dir, topology, unverifiedTopology, otherTopology, verifiedTopology,
       FIRE`Tables2Rules, FIRE`Tables2Masters},
     FeynmanTrick`FIREInterface`Private`ensureFIRELoaded[] := Null;
     FeynmanTrick`FIREInterface`Private`runFIRE6[
-        _String, runDir_String, _String] := Module[{requestFile, tableFile},
+        _String, runDir_String, stem_String, ___] :=
+      Module[{requestFile, tableFile},
       runCalls++;
-      requestFile = FileNameJoin[{runDir, "cache_stub_reduce.m"}];
+      requestFile = FileNameJoin[{runDir, stem <> ".m"}];
       AppendTo[fireRequests, Get[requestFile]];
-      tableFile = FileNameJoin[{runDir, "cache_stub_reduce.tables"}];
+      tableFile = FileNameJoin[{runDir, stem <> ".tables"}];
       Export[tableFile, "fake FIRE table", "Text"];
       0];
-    FIRE`Tables2Rules[_String] := {
+    FIRE`Tables2Rules[_String, Identity, True,
+        "ResultVar" -> Global`G] := {
       Global`G[17, {2, 0}] -> 3 Global`G[17, {1, 0}]
     };
     FIRE`Tables2Masters[_String] := {{17, {1, 0}}};
@@ -175,8 +177,18 @@ Module[{dir, quickBin, slowBin, pidFile, oldTimeout, chmodResults,
   slowBin = FileNameJoin[{dir, "fake_FIRE6_slow"}];
   pidFile = FileNameJoin[{dir, "slow_pids.txt"}];
 
+  Do[
+    Export[FileNameJoin[{dir, stem <> ".config"}], StringJoin[
+      "#variables x,d\n", "#start\n",
+      "#problem 1 ", stem, ".start\n",
+      "#integrals ", stem, ".m\n",
+      "#output ", stem, ".tables\n"], "Text"];
+    Export[FileNameJoin[{dir, stem <> ".start"}], "fake start\n", "Text"];
+    Export[FileNameJoin[{dir, stem <> ".m"}], "{{1,{1}}}\n", "Text"],
+    {stem, {"quick", "slow"}}];
+
   Export[quickBin,
-    "#!/bin/sh\nprintf 'quick fake FIRE completed\\n'\nexit 0\n", "Text"];
+    "#!/bin/sh\nprintf 'quick fake FIRE completed\\n'\nprintf 'table\\n' > artifacts/quick.tables\nexit 0\n", "Text"];
   Export[slowBin, StringJoin[
     "#!/bin/sh\n",
     "sleep 10 &\n",
@@ -233,7 +245,7 @@ Module[{dir, quickBin, slowBin, pidFile, oldTimeout, chmodResults,
   ];
   assert["FIRE timeout keeps exit code and exact diagnostic",
     slowExit === 124 &&
-      StringContainsQ[slowLog, "FIRE6 timeout after 1s"] &&
+      StringContainsQ[slowLog, "FIRE7 timeout after 1s"] &&
       slowSeconds < 4.5];
   assert["FIRE timeout cleans parent and child processes", orphanFree];
   assert["FIRE runner removes isolated attempt directories",

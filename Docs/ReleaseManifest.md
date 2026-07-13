@@ -15,7 +15,7 @@ allowlist. It rejects both missing files and accidental additions.
 | `DiffExp2.m` | Stable root loader; selects the compiled recurrence backend by default |
 | `DiffExp2/` | Exact recurrence, transport, matching, endpoint, integration, and public API modules |
 | `FeynmanTrick.m` | Stable root loader for Feynman-trick preparation and execution |
-| selected `FeynmanTrick/*.m` | Exact family/request contracts, topology algebra, FIRE interface, iteration, level reductions, boundary data, and pipeline facade |
+| selected `FeynmanTrick/*.m` | Exact family/request contracts, topology algebra, FIRE7 Classical/modular execution, iteration, level reductions, boundary data, and pipeline facade |
 | `cpp/`, `CMakeLists.txt` | C++20/FLINT recurrence backend and native test |
 | `Examples/` | Runnable direct and Feynman-trick examples |
 | selected `Docs/*.md` | Installation, tutorials, API, continuation, results, migration, citation, and backend documentation |
@@ -57,20 +57,23 @@ Scripts/run_release_tests.sh
 
 The release runner executes the exact Wolfram test allowlist, requires the C++
 backend for compiled parity tests, runs both direct examples, and checks every
-shipped shell wrapper. Set `DE2_RUN_FIRE_TESTS=1` only when a FIRE 6
-installation is configured and the optional real-FIRE integration tests are
+shipped shell wrapper. The finite-field runner, reconstruction, cache, lock,
+and pipeline contracts use fake executables and run unconditionally. Set
+`DE2_RUN_FIRE_TESTS=1` only when a built FIRE 7.1 installation and MPI launcher
+are configured and the optional real Classical/modular parity tests are
 desired.
 
-The FIRE reduction cache is invocation-local and content-addressed. DiffExp 2
-does not reuse FIRE persistent databases across invocations. Prepared
-topology snapshots and transport checkpoints validate their source,
-configuration, runtime, dimension-variable, and exact request fingerprints
-before reuse.
+The FIRE reduction and modular-sample caches are content-addressed. Verified
+finite-field samples may be reused across invocations, but only under exact
+source, executable, input, sampling-policy, and configuration fingerprints;
+unmarked or mismatched artifacts are quarantined. Prepared topology snapshots
+and transport checkpoints likewise validate their source, configuration,
+runtime, dimension-variable, and exact request fingerprints before reuse.
 
 ## External dependencies and scope
 
-FIRE is not vendored. It is needed to prepare a new Feynman-trick family, but
-not to transport an existing exact differential system. The public facade
+FIRE 7.1 is not vendored. It is needed to prepare a new Feynman-trick family,
+but not to transport an existing exact differential system. The public facade
 currently starts one clean `wolframscript` child, which can occupy a second
 Wolfram license seat; native C++ workers do not consume Wolfram seats.
 

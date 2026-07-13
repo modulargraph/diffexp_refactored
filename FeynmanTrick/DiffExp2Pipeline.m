@@ -73,12 +73,24 @@ RunnerSettingsFromEnvironment[] := Module[
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
    deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
    saveNativeTransportCheckpoint,
-   fireTimeout, firePath,
+   fireTimeout, firePath, fireBackend, fireCalc, fireModularWorkers,
+   fireUseMultiprime, firePrimeLimit, fireKeepModularTables,
+   fireDimensionSeparated, fireMultiprimeWidth, fireMPIExecutable,
+   fireBasisProbeCount, fireModularCacheDirectory,
    resume, checkpointDir, prepRoot, values},
   backend = envOrDefault["DE2_RECURRENCE_BACKEND", "Cpp"];
   If[!MemberQ[{"Cpp", "Wolfram"}, backend],
     Return[failure["DE2_RECURRENCE_BACKEND must be Cpp or Wolfram",
       <|"Value" -> backend|>], Module]];
+  fireBackend = envOrDefault["FT_FIRE_BACKEND", "Modular"];
+  If[!MemberQ[{"Modular", "Classical"}, fireBackend],
+    Return[failure["FT_FIRE_BACKEND must be Modular or Classical",
+      <|"Value" -> fireBackend|>], Module]];
+  fireCalc = envOrDefault["FT_FIRE_CALC", "flint"];
+  If[!StringMatchQ[fireCalc,
+      RegularExpression["[A-Za-z0-9][A-Za-z0-9_.+-]*"]],
+    Return[failure["FT_FIRE_CALC must be one nonempty calculator name",
+      <|"Value" -> fireCalc|>], Module]];
   values = {
     threads = parseInteger["DE2_CPP_THREADS",
       envOrDefault["DE2_CPP_THREADS", "4"], 1],
@@ -92,6 +104,21 @@ RunnerSettingsFromEnvironment[] := Module[
       envOrDefault["FT_BOUNDARY_EXTRA_ORDER", "4"], 0],
     fireTimeout = parseInteger["FT_FIRE_TIMEOUT_SECONDS",
       envOrDefault["FT_FIRE_TIMEOUT_SECONDS", "1800"], 1],
+    fireModularWorkers = parseInteger["FT_FIRE_MODULAR_WORKERS",
+      envOrDefault["FT_FIRE_MODULAR_WORKERS",
+        ToString[Max[1, Min[10, $ProcessorCount]], InputForm]], 1],
+    fireUseMultiprime = parseFlag["FT_FIRE_USE_MULTIPRIME",
+      envOrDefault["FT_FIRE_USE_MULTIPRIME", "1"]],
+    firePrimeLimit = parseInteger["FT_FIRE_PRIME_LIMIT",
+      envOrDefault["FT_FIRE_PRIME_LIMIT", "127"], 1],
+    fireKeepModularTables = parseFlag["FT_FIRE_KEEP_MODULAR_TABLES",
+      envOrDefault["FT_FIRE_KEEP_MODULAR_TABLES", "1"]],
+    fireDimensionSeparated = parseFlag["FT_FIRE_DIMENSION_SEPARATED",
+      envOrDefault["FT_FIRE_DIMENSION_SEPARATED", "0"]],
+    fireMultiprimeWidth = parseInteger["FT_FIRE_MULTIPRIME_WIDTH",
+      envOrDefault["FT_FIRE_MULTIPRIME_WIDTH", "16"], 1],
+    fireBasisProbeCount = parseInteger["FT_FIRE_BASIS_PROBE_COUNT",
+      envOrDefault["FT_FIRE_BASIS_PROBE_COUNT", "2"], 2],
     divisionOrder = parseInteger["FT_DIVISION_ORDER",
       envOrDefault["FT_DIVISION_ORDER", "3"], 2],
     radius = parsePositiveRational["FT_RADIUS_OF_CONVERGENCE",
@@ -115,6 +142,15 @@ RunnerSettingsFromEnvironment[] := Module[
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
+  If[fireModularWorkers > 10,
+    Return[failure["FT_FIRE_MODULAR_WORKERS must not exceed 10",
+      <|"Value" -> fireModularWorkers|>], Module]];
+  If[firePrimeLimit > 127,
+    Return[failure["FT_FIRE_PRIME_LIMIT must not exceed 127",
+      <|"Value" -> firePrimeLimit|>], Module]];
+  If[fireBasisProbeCount > 127,
+    Return[failure["FT_FIRE_BASIS_PROBE_COUNT must not exceed 127",
+      <|"Value" -> fireBasisProbeCount|>], Module]];
   requestedStepDivisionOrder = parseInteger["FT_STEP_DIVISION_ORDER",
     envOrDefault["FT_STEP_DIVISION_ORDER", ToString[divisionOrder, InputForm]], 1];
   If[FailureQ[requestedStepDivisionOrder], Return[requestedStepDivisionOrder, Module]];
@@ -128,7 +164,13 @@ RunnerSettingsFromEnvironment[] := Module[
   prepRoot = envOrDefault["FT_PREP_CACHE_DIR",
     FileNameJoin[{$TemporaryDirectory, "DiffExp2_FT_Prepared"}]];
   firePath = ExpandFileName[envOrDefault["FT_FIRE_PATH",
-    FileNameJoin[{$packageRoot, "Dependencies", "fire", "FIRE6"}]]];
+    FileNameJoin[{$packageRoot, "Dependencies", "fire", "FIRE7", "FIRE7"}]]];
+  fireMPIExecutable = envOrDefault["FT_FIRE_MPI_EXECUTABLE", "Automatic"];
+  fireMPIExecutable = If[fireMPIExecutable === "Automatic", Automatic,
+    fireMPIExecutable];
+  fireModularCacheDirectory = ExpandFileName[envOrDefault[
+    "FT_FIRE_MODULAR_CACHE_DIR",
+    FileNameJoin[{$TemporaryDirectory, "DiffExp2_FIRE7_Modular"}]]];
   <|
     "RecurrenceBackend" -> backend, "CppThreads" -> threads,
     "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
@@ -136,6 +178,17 @@ RunnerSettingsFromEnvironment[] := Module[
     "BoundaryExtraOrder" -> boundaryExtraOrder,
     "FIRETimeoutSeconds" -> fireTimeout,
     "FIREPath" -> firePath,
+    "FIREBackend" -> fireBackend,
+    "FIRECalc" -> fireCalc,
+    "FIREModularWorkers" -> fireModularWorkers,
+    "FIREUseMultiprime" -> fireUseMultiprime,
+    "FIREPrimeLimit" -> firePrimeLimit,
+    "FIREKeepModularTables" -> fireKeepModularTables,
+    "FIREDimensionSeparated" -> fireDimensionSeparated,
+    "FIREMultiprimeWidth" -> fireMultiprimeWidth,
+    "FIREMPIExecutable" -> fireMPIExecutable,
+    "FIREBasisProbeCount" -> fireBasisProbeCount,
+    "FIREModularCacheDirectory" -> fireModularCacheDirectory,
     "DivisionOrder" -> divisionOrder,
     "RequestedStepDivisionOrder" -> requestedStepDivisionOrder,
     (* The classic planner couples placement and +/-1/k matching. *)
@@ -168,6 +221,17 @@ Options[PipelinePlan] = {
   "DeltaPrescriptionSign" -> 1,
   "PreparedCacheDirectory" -> Automatic,
   "FIREPath" -> Automatic,
+  "FIREBackend" -> "Modular",
+  "FIRECalc" -> "flint",
+  "FIREModularWorkers" -> Automatic,
+  "FIREUseMultiprime" -> True,
+  "FIREPrimeLimit" -> 127,
+  "FIREKeepModularTables" -> True,
+  "FIREDimensionSeparated" -> False,
+  "FIREMultiprimeWidth" -> 16,
+  "FIREMPIExecutable" -> Automatic,
+  "FIREBasisProbeCount" -> 2,
+  "FIREModularCacheDirectory" -> Automatic,
   "CheckpointDirectory" -> Automatic,
   "ResumeFrom" -> None,
   "RebuildPreparation" -> False,
@@ -225,6 +289,25 @@ validatePlanOptions[settings_Association] := Module[{checks},
       "Asynchronous"}),
     IntegerQ[settings["FIRETimeoutSeconds"]] &&
       settings["FIRETimeoutSeconds"] >= 1,
+    MemberQ[{"Modular", "Classical"}, settings["FIREBackend"]],
+    StringQ[settings["FIRECalc"]] && StringMatchQ[settings["FIRECalc"],
+      RegularExpression["[A-Za-z0-9][A-Za-z0-9_.+-]*"]],
+    IntegerQ[settings["FIREModularWorkers"]] &&
+      1 <= settings["FIREModularWorkers"] <= 10,
+    IntegerQ[settings["FIREPrimeLimit"]] &&
+      1 <= settings["FIREPrimeLimit"] <= 127,
+    IntegerQ[settings["FIREMultiprimeWidth"]] &&
+      settings["FIREMultiprimeWidth"] >= 1,
+    IntegerQ[settings["FIREBasisProbeCount"]] &&
+      2 <= settings["FIREBasisProbeCount"] <= 127,
+    And @@ (boolQ[settings[#]] & /@ {
+      "FIREUseMultiprime", "FIREKeepModularTables",
+      "FIREDimensionSeparated"}),
+    (settings["FIREMPIExecutable"] === Automatic ||
+      (StringQ[settings["FIREMPIExecutable"]] &&
+        StringLength[StringTrim[settings["FIREMPIExecutable"]]] > 0)),
+    StringQ[settings["FIREModularCacheDirectory"]] &&
+      StringLength[StringTrim[settings["FIREModularCacheDirectory"]]] > 0,
     AssociationQ[settings["ExtraEnvironment"]] &&
       AllTrue[Keys[settings["ExtraEnvironment"]], StringQ] &&
       AllTrue[Values[settings["ExtraEnvironment"]], StringQ],
@@ -236,6 +319,8 @@ validatePlanOptions[settings_Association] := Module[{checks},
 
 buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := Module[
   {threads, runner, executable, workdir, prep, firePath, firePathOption,
+   fireModularWorkers, fireModularCacheDirectory,
+   fireModularCacheDirectoryOption, fireMPIExecutable,
    checkpoint, resume, stop,
    settings, valid, env},
   If[StringLength[StringTrim[example]] === 0 || StringContainsQ[example, ","],
@@ -255,11 +340,28 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
   prep = ExpandFileName[Replace[OptionValue["PreparedCacheDirectory"],
     Automatic :> FileNameJoin[{$TemporaryDirectory, "DiffExp2_FT_Prepared"}]]];
   firePathOption = Replace[OptionValue["FIREPath"],
-    Automatic :> FileNameJoin[{$packageRoot, "Dependencies", "fire", "FIRE6"}]];
+    Automatic :> FileNameJoin[{
+      $packageRoot, "Dependencies", "fire", "FIRE7", "FIRE7"}]];
   If[!StringQ[firePathOption] || StringLength[StringTrim[firePathOption]] === 0,
     Return[failure["\"FIREPath\" must be a nonempty path string",
       <|"Value" -> OptionValue["FIREPath"]|>], Module]];
   firePath = ExpandFileName[StringTrim[firePathOption]];
+  fireModularWorkers = Replace[OptionValue["FIREModularWorkers"],
+    Automatic :> Max[1, Min[10, $ProcessorCount]]];
+  fireModularCacheDirectoryOption = Replace[
+    OptionValue["FIREModularCacheDirectory"],
+    Automatic :> FileNameJoin[{
+      $TemporaryDirectory, "DiffExp2_FIRE7_Modular"}]];
+  If[!StringQ[fireModularCacheDirectoryOption] ||
+      StringLength[StringTrim[fireModularCacheDirectoryOption]] === 0,
+    Return[failure[
+      "\"FIREModularCacheDirectory\" must be a nonempty path string",
+      <|"Value" -> OptionValue["FIREModularCacheDirectory"]|>], Module]];
+  fireModularCacheDirectory = ExpandFileName[
+    StringTrim[fireModularCacheDirectoryOption]];
+  fireMPIExecutable = OptionValue["FIREMPIExecutable"];
+  If[StringQ[fireMPIExecutable],
+    fireMPIExecutable = StringTrim[fireMPIExecutable]];
   checkpoint = ExpandFileName[Replace[OptionValue["CheckpointDirectory"],
     Automatic :> FileNameJoin[{$TemporaryDirectory,
       "DiffExp2_FT_Checkpoints", example}]]];
@@ -293,6 +395,17 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "SaveNativeTransportCheckpoint" ->
       OptionValue["SaveNativeTransportCheckpoint"],
     "FIREPath" -> firePath,
+    "FIREBackend" -> OptionValue["FIREBackend"],
+    "FIRECalc" -> OptionValue["FIRECalc"],
+    "FIREModularWorkers" -> fireModularWorkers,
+    "FIREUseMultiprime" -> OptionValue["FIREUseMultiprime"],
+    "FIREPrimeLimit" -> OptionValue["FIREPrimeLimit"],
+    "FIREKeepModularTables" -> OptionValue["FIREKeepModularTables"],
+    "FIREDimensionSeparated" -> OptionValue["FIREDimensionSeparated"],
+    "FIREMultiprimeWidth" -> OptionValue["FIREMultiprimeWidth"],
+    "FIREMPIExecutable" -> fireMPIExecutable,
+    "FIREBasisProbeCount" -> OptionValue["FIREBasisProbeCount"],
+    "FIREModularCacheDirectory" -> fireModularCacheDirectory,
     "FIRETimeoutSeconds" -> OptionValue["FIRETimeoutSeconds"],
     "Asynchronous" -> OptionValue["Asynchronous"],
     "ExtraEnvironment" -> OptionValue["ExtraEnvironment"]
@@ -341,6 +454,25 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
       inputString[settings["RadiusOfConvergence"]],
     "FT_PREP_CACHE_DIR" -> prep,
     "FT_FIRE_PATH" -> firePath,
+    "FT_FIRE_BACKEND" -> settings["FIREBackend"],
+    "FT_FIRE_CALC" -> settings["FIRECalc"],
+    "FT_FIRE_MODULAR_WORKERS" ->
+      inputString[settings["FIREModularWorkers"]],
+    "FT_FIRE_USE_MULTIPRIME" ->
+      boolString[settings["FIREUseMultiprime"]],
+    "FT_FIRE_PRIME_LIMIT" -> inputString[settings["FIREPrimeLimit"]],
+    "FT_FIRE_KEEP_MODULAR_TABLES" ->
+      boolString[settings["FIREKeepModularTables"]],
+    "FT_FIRE_DIMENSION_SEPARATED" ->
+      boolString[settings["FIREDimensionSeparated"]],
+    "FT_FIRE_MULTIPRIME_WIDTH" ->
+      inputString[settings["FIREMultiprimeWidth"]],
+    "FT_FIRE_MPI_EXECUTABLE" -> If[
+      settings["FIREMPIExecutable"] === Automatic, "Automatic",
+      settings["FIREMPIExecutable"]],
+    "FT_FIRE_BASIS_PROBE_COUNT" ->
+      inputString[settings["FIREBasisProbeCount"]],
+    "FT_FIRE_MODULAR_CACHE_DIR" -> settings["FIREModularCacheDirectory"],
     "FT_LADDER_CHECKPOINT_DIR" -> checkpoint,
     "FT_REBUILD_PREP" -> boolString[settings["RebuildPreparation"]],
     "FT_MIGRATE_LEGACY_PREP" ->

@@ -1,6 +1,6 @@
 (* ::Package:: *)
 (* FeynmanTrick - Feynman Parameter Integration Package *)
-(* Implements iterative Feynman trick with FIRE6 IBP reductions *)
+(* Implements iterative Feynman trick with FIRE7 IBP reductions *)
 
 BeginPackage["FeynmanTrick`"];
 
@@ -53,7 +53,22 @@ FeynmanTrick`$FeynmanTrickVersion = "2.0.0";
 $FTConfig = <|
   "FIREPath" -> FileNameJoin[{
     ParentDirectory[DirectoryName[$InputFileName]],
-    "Dependencies", "fire", "FIRE6"
+    "Dependencies", "fire", "FIRE7", "FIRE7"
+  }],
+  "FIREBackend" -> "Modular",
+  "FIRECalc" -> "flint",
+  "FIREModularWorkers" -> Max[1, Min[10, $ProcessorCount]],
+  "FIREUseMultiprime" -> True,
+  "FIREPrimeLimit" -> 127,
+  (* Keep finite-field samples and reconstruction limits so an interrupted
+     job can resume without repeating completed FIRE7 probes. *)
+  "FIREKeepModularTables" -> True,
+  "FIREDimensionSeparated" -> False,
+  "FIREMultiprimeWidth" -> 16,
+  "FIREMPIExecutable" -> Automatic,
+  "FIREBasisProbeCount" -> 2,
+  "FIREModularCacheDirectory" -> FileNameJoin[{
+    $TemporaryDirectory, "DiffExp2_FIRE7_Modular"
   }],
   "WorkDirectory" -> FileNameJoin[{$TemporaryDirectory, "FeynmanTrick"}],
   "FeynmanParameter" -> FeynmanTrick`xx,
@@ -61,9 +76,9 @@ $FTConfig = <|
   "DimensionVariable" -> Global`d,
   "DimensionExpression" -> Automatic,
   "EpsilonSymbol" -> FeynmanTrick`FTeps,
-  "Threads" -> 1,        (* FIRE6 multi-threading can be unstable; default to 1 *)
+  "Threads" -> 1,
   "FThreads" -> 1,
-  "FIRETimeoutSeconds" -> 600,  (* watchdog timeout for a single FIRE6 run *)
+  "FIRETimeoutSeconds" -> 600,  (* watchdog timeout for one FIRE7 job *)
   "AutoDetectRestrictions" -> False,
   "ReductionCache" -> True,
   "WorkingPrecision" -> 500,

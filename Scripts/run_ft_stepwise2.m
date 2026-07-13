@@ -87,7 +87,15 @@ If[AssociationQ[ft2FamilyRequest] &&
     ft2FamilyRunName];
   Exit[2]];
 
-FeynmanTrick`SetFTOption["FIREPath", runnerSettings["FIREPath"]];
+(* Restore the exact FIRE7 backend contract serialized by PipelinePlan before
+   any family preparation or reduction-cache identity is computed. *)
+Scan[(FeynmanTrick`SetFTOption[#, runnerSettings[#]]) &, {
+  "FIREPath", "FIREBackend", "FIRECalc", "FIREModularWorkers",
+  "FIREUseMultiprime", "FIREPrimeLimit", "FIREKeepModularTables",
+  "FIREDimensionSeparated", "FIREMultiprimeWidth", "FIREMPIExecutable",
+  "FIREBasisProbeCount", "FIREModularCacheDirectory",
+  "FIRETimeoutSeconds"
+}];
 
 singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
 recurrenceBackend = runnerSettings["RecurrenceBackend"];
@@ -294,21 +302,31 @@ $ft2AllDiscoveryCacheSchema = "FeynmanTrick.AllMasterDiscoveryCache/v2";
 $ft2AllDiscoveryContractSchema = "FeynmanTrick.AllMasterDiscoveryContract/v2";
 
 ft2AllDiscoveryTopology[request_Association] := Module[
-  {family = request["Family"], topology},
+  {family = request["Family"], topology, propagators, replacements},
   topology = family["Topology"];
+  propagators =
+    FeynmanTrick`FIREInterface`Private`applyFIRENumericalPoint[
+      topology["Propagators"], family["NumericalPoint"]];
+  replacements =
+    FeynmanTrick`FIREInterface`Private`applyFIRENumericalPointToReplacements[
+      topology["Replacements"], family["NumericalPoint"]];
+  If[propagators === $Failed || replacements === $Failed,
+    Return[Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "NumericalPoint substitutions are cyclic or do not reach a fixed point"|>],
+      Module]];
   topology = Join[topology, <|
     "Name" -> family["Name"] <> "_L0_all_" <>
       StringTake[request["RequestID"], -12],
-    "Propagators" ->
-      (topology["Propagators"] /. family["NumericalPoint"]),
-    "Replacements" ->
-      (topology["Replacements"] /. family["NumericalPoint"])
+    "Propagators" -> propagators,
+    "Replacements" -> replacements
   |>];
   topology
 ];
 
 ft2AllDiscoveryContractRecord[name_String, request_Association] := Module[
-  {family = request["Family"], fireSource},
+  {family = request["Family"], fireSource, discoveryTopology},
+  discoveryTopology = ft2AllDiscoveryTopology[request];
+  If[FailureQ[discoveryTopology], Return[discoveryTopology, Module]];
   fireSource = SelectFirst[$ftPrepPreparationSourceIdentities,
     Lookup[#, "RelativePath", None] === "FeynmanTrick/FIREInterface.m" &,
     Failure["FeynmanTrickAllMasterDiscovery", <|
@@ -319,7 +337,7 @@ ft2AllDiscoveryContractRecord[name_String, request_Association] := Module[
     "PipelineRequestID" -> request["RequestID"],
     "SelectionRequestID" -> request["OutputRequests"][[1, "RequestID"]],
     "FamilyID" -> family["FamilyID"],
-    "DiscoveryTopology" -> ft2AllDiscoveryTopology[request],
+    "DiscoveryTopology" -> discoveryTopology,
     "CombinationSequence" -> family["CombinationSequence"],
     "NumericalPoint" -> family["NumericalPoint"],
     "DimensionExpression" -> family["Dimension"],
@@ -409,6 +427,7 @@ ft2ValidateAllDiscoverySetup[request_Association, setupTopology_] := Module[
       "Detail" -> "SetupFIRE failed during L0 All-master discovery"|>], Module]];
   expectedN = family["NumPropagators"];
   expectedTopology = ft2AllDiscoveryTopology[request];
+  If[FailureQ[expectedTopology], Return[expectedTopology, Module]];
   actualN = Lookup[setupTopology, "NumPropagators", None];
   numerators = Lookup[setupTopology, "NumeratorPositions", {}];
   If[actualN =!= expectedN || numerators =!= {} ||
@@ -443,6 +462,7 @@ ft2ValidateAllDiscoveryMasters[request_Association, masters_] :=
 ft2DiscoverAllOutputSelection[request_Association] := Module[
   {topology, setupTopology, basisTopology, validatedSetup, resolution},
   topology = ft2AllDiscoveryTopology[request];
+  If[FailureQ[topology], Return[topology, Module]];
   setupTopology = Quiet[Check[ft2AllSetupFIRE[topology], $Failed]];
   validatedSetup = ft2ValidateAllDiscoverySetup[request, setupTopology];
   If[FailureQ[validatedSetup], Return[validatedSetup, Module]];
@@ -461,6 +481,7 @@ ft2DiscoverAllOutputSelection[request_Association] := Module[
 ft2ResolveAllOutputSelection[name_String, request_Association] := Module[
   {contract, file, cached, resolution, saved},
   contract = ft2AllDiscoveryContractRecord[name, request];
+  If[FailureQ[contract], Return[contract, Module]];
   If[AnyTrue[Lookup[contract, "DiscoverySources", {}], FailureQ],
     Return[Failure["FeynmanTrickAllMasterDiscovery", <|
       "Detail" -> "All-master discovery source identity is incomplete",

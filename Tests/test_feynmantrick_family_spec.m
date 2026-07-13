@@ -138,6 +138,19 @@ badDuplicateRule = Quiet[FeynmanTrick`CreateFamily[
 badNumericalPoint = Quiet[FeynmanTrick`CreateFamily[
   Join[raw, <|"NumericalPoint" -> {Global`s -> -1.0}|>]],
   FeynmanTrick`FamilySpec`CreateFamily::inexact];
+badCompositePoint = Quiet[FeynmanTrick`CreateFamily[
+  Join[raw, <|"NumericalPoint" -> {Global`p^2 -> -1}|>]],
+  FeynmanTrick`FamilySpec`CreateFamily::rules];
+badMomentumPoint = Quiet[FeynmanTrick`CreateFamily[
+  Join[raw, <|"NumericalPoint" -> {Global`p -> 0}|>]],
+  FeynmanTrick`FamilySpec`CreateFamily::point];
+badNonfinitePoint = Quiet[FeynmanTrick`CreateFamily[
+  Join[raw, <|"NumericalPoint" -> {Global`s -> ComplexInfinity}|>]],
+  FeynmanTrick`FamilySpec`CreateFamily::point];
+badCyclicPoint = Quiet[FeynmanTrick`CreateFamily[
+  Join[raw, <|"NumericalPoint" -> {
+    Global`s -> Global`q, Global`q -> Global`s}|>]],
+  FeynmanTrick`FamilySpec`CreateFamily::point];
 badDimension = Quiet[FeynmanTrick`CreateFamily[
   Join[raw, <|"Dimension" -> Indeterminate|>]],
   {FeynmanTrick`FamilySpec`CreateFamily::dimension, Power::infy}];
@@ -160,6 +173,9 @@ assert["RuleDelayed replacements rejected", badDelayed === $Failed];
 assert["duplicate replacement left-hand sides rejected",
   badDuplicateRule === $Failed];
 assert["inexact numerical point rejected", badNumericalPoint === $Failed];
+assert["NumericalPoint requires finite non-momentum symbol assignments",
+  badCompositePoint === $Failed && badMomentumPoint === $Failed &&
+    badNonfinitePoint === $Failed && badCyclicPoint === $Failed];
 assert["nonfinite dimension rejected", badDimension === $Failed];
 assert["unsafe FIRE name rejected", badName === $Failed];
 assert["momentum symbols must be unique and disjoint",

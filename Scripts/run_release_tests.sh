@@ -26,6 +26,11 @@ wolfram_tests=(
   Tests/test_fast_tadpole_boundary.m
   Tests/test_ft_example_specs.m
   Tests/test_feynmantrick_failure_semantics.m
+  Tests/test_fire7_modular_contract.m
+  Tests/test_fire7_pipeline_plumbing.m
+  Tests/test_fire7_rational_reconstruction.m
+  Tests/test_fire7_lock_cache_contract.m
+  Tests/test_fire7_classical_exact_output.m
   Tests/test_fire_inmemory_reduction_cache.m
   Tests/test_fire_level_reduction_batch.m
   Tests/test_ft_pipeline_facade.m
@@ -58,9 +63,11 @@ for script in Examples/FeynmanTrick/*.sh; do
 done
 
 if [[ "${DE2_RUN_FIRE_TESTS:-0}" == 1 ]]; then
-  echo "=== optional FIRE integration"
+  echo "=== optional FIRE7 integration"
   wolframscript -file Tests/test_feynmantrick_fire.m
   wolframscript -file Tests/test_feynmantrick_iteration.m
+  wolframscript -file Tests/test_fire7_real_bubble_parity.m
+  wolframscript -file Tests/test_fire7_real_sunrise_parity.m
 fi
 
 echo "Release test suite passed."

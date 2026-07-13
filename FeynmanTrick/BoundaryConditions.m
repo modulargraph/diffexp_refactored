@@ -3,13 +3,13 @@
 (* Uses the generalized tadpole formula:                                  *)
 (*   I_v^(n-1) = Gamma(v - L*d/2) / Gamma(v) * U^(v-(L+1)*d/2) / F^(v-L*d/2) *)
 (* where U and F are Symanzik polynomials, L is the loop number.         *)
-(* Multiloop-ready: uses FIRE6's UF function for Symanzik computation.   *)
+(* Multiloop-ready: follows FIRE's UF construction for Symanzik data.   *)
 
 BeginPackage["FeynmanTrick`BoundaryConditions`", {"FeynmanTrick`"}];
 
 ComputeSymanzikPolynomials::usage =
   "ComputeSymanzikPolynomials[propagators, loopMomenta, replacements] computes the \
-Symanzik polynomials U and F using FIRE6's UF function. Returns {U, F, feynmanVars}.";
+Symanzik polynomials U and F using FIRE's UF construction. Returns {U, F, feynmanVars}.";
 
 EvaluateTadpoleBoundary::usage =
   "EvaluateTadpoleBoundary[U, F, v, numLoops, epsOrder] evaluates the generalized \
@@ -41,7 +41,7 @@ Begin["`Private`"];
 (* ============================================================ *)
 (* Symanzik Polynomial Computation                              *)
 (* Computes U and F directly by completing the square over      *)
-(* loop momenta. Same algorithm as FIRE6's UF function.         *)
+(* loop momenta. Same algorithm as FIRE's UF construction.      *)
 (* ============================================================ *)
 
 ComputeSymanzikPolynomials[propagators_List, loopMomenta_List, replacements_List] :=
@@ -509,15 +509,21 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
       Print["  Sum of rescaled params: ", Total[rescaledNumerical]];
     ];
 
-    (* Substitute rescaled params into U and F, plus kinematic values *)
-    subRules = Join[
-      Thread[feynVars -> rescaledNumerical],
-      kinPoint
-    ];
-
-    Uval = N[Expand[U /. subRules], precision];
-    Fval = N[Expand[F /. subRules], precision];
+    (* Substitute Feynman parameters once, then freeze the exact kinematic
+       point to a fixed point.  This keeps boundary kinematics identical to
+       the FIRE and level-topology paths for chained assignments. *)
+    subRules = Thread[feynVars -> rescaledNumerical];
+    Uval = FeynmanTrick`FIREInterface`Private`applyFIRENumericalPoint[
+      Expand[U /. subRules], kinPoint];
+    Fval = FeynmanTrick`FIREInterface`Private`applyFIRENumericalPoint[
+      Expand[F /. subRules], kinPoint];
+    If[Uval =!= $Failed, Uval = N[Uval, precision]];
+    If[Fval =!= $Failed, Fval = N[Fval, precision]];
   ];
+
+  If[Uval === $Failed || Fval === $Failed,
+    Print["Error: NumericalPoint substitutions failed in the deepest boundary."];
+    Return[$Failed]];
 
   If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 1,
     Print["  U_tilde(numerical) = ", Uval];

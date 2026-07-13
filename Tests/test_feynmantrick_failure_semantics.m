@@ -63,7 +63,15 @@ Module[{dir, topology, partialTable, result, runCalls = 0, readCalls = 0},
   topology["StartFileReady"] = True;
 
   result = Block[{FeynmanTrick`FIREInterface`Private`runFIRE6,
+      FeynmanTrick`FIREInterface`Private`preparedTopologyCompatibleQ,
+      FeynmanTrick`FIREInterface`Private`preparedStartHashes,
+      FeynmanTrick`FIREInterface`Private`preparedRunnerRuntimeHashes,
+      FeynmanTrick`FIREInterface`Private`ensureFIRELoaded,
       FIRE`Tables2Masters},
+    FeynmanTrick`FIREInterface`Private`preparedTopologyCompatibleQ[___] := True;
+    FeynmanTrick`FIREInterface`Private`preparedStartHashes[___] := <||>;
+    FeynmanTrick`FIREInterface`Private`preparedRunnerRuntimeHashes[___] := <||>;
+    FeynmanTrick`FIREInterface`Private`ensureFIRELoaded[] := True;
     FeynmanTrick`FIREInterface`Private`runFIRE6[___] :=
       (runCalls++; 134);
     FIRE`Tables2Masters[___] := (readCalls++; {{71, {1}}});

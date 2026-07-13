@@ -67,9 +67,12 @@ plan = FeynmanTrick`PipelinePlan["bubble"];
 result = FeynmanTrick`RunIntegrationPipeline[plan];
 ```
 
-The facade runs the tested ladder in a clean Wolfram subprocess, reuses
+The facade runs the tested ladder in a clean Wolfram subprocess, uses FIRE
+7.1 finite-field sampling and rational reconstruction by default, reuses
 prepared FIRE data and atomic ladder checkpoints, and returns named plan,
-process, or result records. The current process facade requires
+process, or result records. Install FIRE at
+`Dependencies/fire/FIRE7/FIRE7` or pass `"FIREPath"` explicitly. The current
+process facade requires
 `/usr/bin/env`, so it is supported on macOS and Linux. Direct DiffExp 2
 transport is not subject to that platform restriction.
 
@@ -103,8 +106,11 @@ allMasters = FeynmanTrick`RunIntegrationPipeline[
 allMasters["Outputs"][[All, {"Master", "Coefficients"}]]
 ```
 
-`All` performs deterministic master discovery on a cold run and caches the
-resolved ordered basis. `PipelinePlan[family, targets]` exposes the exact,
+`All` performs deterministic first-shell master discovery on a cold run and
+caches the resolved ordered basis. Because FIRE master lists are
+request-dependent, arbitrary families requiring deeper dots or numerators
+should use explicit targets while this beta policy is extended.
+`PipelinePlan[family, targets]` exposes the exact,
 content-addressed request without starting FIRE. `All` discovery rejects
 FIRE-added numerator slots; merge-position numerators, incomplete merge
 sequences, and currently unwired custom branch or kinematic-assumption fields

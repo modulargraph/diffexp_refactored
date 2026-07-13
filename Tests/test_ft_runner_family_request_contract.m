@@ -67,18 +67,20 @@ symbolicMassFamily = FeynmanTrick`CreateFamily[
     "Propagators" -> {
       Global`m1sq + Global`l^2,
       Global`m2sq + (Global`l + Global`p)^2},
+    "Replacements" -> {Global`u -> Global`s},
     "NumericalPoint" -> {
-      Global`s -> -1, Global`m1sq -> 3/2, Global`m2sq -> 5/4}
+      Global`u -> 99, Global`s -> Global`q, Global`q -> -1,
+      Global`m1sq -> 3/2, Global`m2sq -> 5/4}
   |>], All];
 symbolicMassRequest =
   FeynmanTrick`PipelineRequest`CreatePipelineRequest[symbolicMassFamily];
 symbolicMassDiscoveryTopology =
   ft2AllDiscoveryTopology[symbolicMassRequest];
-assert["All discovery freezes symbols occurring directly in propagators",
+assert["All discovery freezes chained coefficients without rewriting replacement left-hand sides",
   FreeQ[symbolicMassDiscoveryTopology["Propagators"],
     Global`m1sq | Global`m2sq] &&
     symbolicMassDiscoveryTopology["Replacements"] ===
-      {Global`p^2 -> -1}];
+      {Global`u -> -1}];
 
 allResolution = ft2ValidateAllDiscoveryMasters[
   allRequest, {{2, 0}, {1, 1}, {2, 0}}];

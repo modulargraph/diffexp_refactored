@@ -40,6 +40,8 @@ CreateFamily::rules =
   "Family field `1` must be a list of exact immediate Rules with unique left-hand sides.";
 CreateFamily::inexact =
   "Family field `1` contains an inexact number. Family definitions must be exact.";
+CreateFamily::point =
+  "NumericalPoint must contain finite exact assignments from non-momentum symbols; received `1`.";
 CreateFamily::nprop =
   "NumPropagators `1` does not agree with the propagator-list length `2`.";
 CreateFamily::dimension =
@@ -93,6 +95,9 @@ inexactNumberPresentQ[expr_] := !FreeQ[Unevaluated[expr], _Real];
 validRuleListQ[rules_] :=
   ListQ[rules] && AllTrue[rules, MatchQ[#, _Rule] &] &&
   DuplicateFreeQ[First /@ rules];
+
+validNumericalPointRuleListQ[rules_] :=
+  validRuleListQ[rules] && AllTrue[First /@ rules, Head[#] === Symbol &];
 
 validDimensionQ[dimension_] :=
   dimension =!= Automatic &&
@@ -459,12 +464,24 @@ createFamily[input_Association, positionalTargets_, nameOption_,
   eliminatedPositions = validated["EliminatedPositions"];
 
   numericalPoint = Lookup[source, "NumericalPoint", {}];
-  If[!validRuleListQ[numericalPoint],
+  If[!validNumericalPointRuleListQ[numericalPoint],
     Message[CreateFamily::rules, "NumericalPoint"];
     Return[$Failed, Module]
   ];
   If[inexactNumberPresentQ[numericalPoint],
     Message[CreateFamily::inexact, "NumericalPoint"];
+    Return[$Failed, Module]
+  ];
+  If[!FreeQ[numericalPoint,
+      Indeterminate | ComplexInfinity | _DirectedInfinity] ||
+      Intersection[First /@ numericalPoint,
+        Join[source["LoopMomenta"], source["ExternalMomenta"]]] =!= {},
+    Message[CreateFamily::point, numericalPoint];
+    Return[$Failed, Module]
+  ];
+  If[FeynmanTrick`FIREInterface`Private`applyFIRENumericalPoint[
+        First /@ numericalPoint, numericalPoint] === $Failed,
+    Message[CreateFamily::point, numericalPoint];
     Return[$Failed, Module]
   ];
 

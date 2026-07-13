@@ -340,6 +340,12 @@ locations, request identities, and settings without running.
 executes an existing `FeynmanTrick.PipelinePlan/v1` record.
 `ResumeIntegrationPipeline` sets a registry-run resume checkpoint and runs.
 
+Beta limitation: FIRE master lists are request-dependent. `All` currently
+seeds every allowed sector corner plus its one-dot and one-numerator shell,
+which is validated by bubble and sunrise but is not a proof for arbitrary
+families whose masters require deeper dots or numerators. Use explicit targets
+for such families until adaptive deeper-shell discovery is implemented.
+
 All three pipeline functions share these options:
 
 | Option | Default | Meaning |
@@ -358,7 +364,18 @@ All three pipeline functions share these options:
 | `"SingularMatchPrecondition"` | `False` | enable singular-match preconditioning |
 | `"DeltaPrescriptionSign"` | `1` | global analytic-continuation rim sign (`+1` or `-1`) |
 | `"PreparedCacheDirectory"` | `Automatic` | FIRE preparation cache root |
-| `"FIREPath"` | `Automatic` | FIRE6 installation; defaults to `Dependencies/fire/FIRE6` |
+| `"FIREPath"` | `Automatic` | FIRE 7 root; defaults to `Dependencies/fire/FIRE7/FIRE7` |
+| `"FIREBackend"` | `"Modular"` | `"Modular"` finite-field reconstruction or exact `"Classical"` execution |
+| `"FIRECalc"` | `"flint"` | FIRE coefficient calculator |
+| `"FIREModularWorkers"` | `Automatic` | modular MPI workers, from one through ten |
+| `"FIREUseMultiprime"` | `True` | use FIRE7 multiprime tables during modular reconstruction |
+| `"FIREPrimeLimit"` | `127` | largest reconstruction-prime index; values above 127 are rejected |
+| `"FIREKeepModularTables"` | `True` | retain verified samples so interrupted same-configuration jobs can resume |
+| `"FIREDimensionSeparated"` | `False` | expert-only FIRE assertion that the final variable separates |
+| `"FIREMultiprimeWidth"` | `16` | required width of the installed FIRE7 multiprime build |
+| `"FIREMPIExecutable"` | `Automatic` | MPI launcher, normally `mpirun` |
+| `"FIREBasisProbeCount"` | `2` | independent finite-field probes used to certify the master basis |
+| `"FIREModularCacheDirectory"` | `Automatic` | content-addressed FIRE7 sample/reconstruction cache |
 | `"CheckpointDirectory"` | `Automatic` | ladder checkpoint directory |
 | `"ResumeFrom"` | `None` | existing checkpoint file |
 | `"RebuildPreparation"` | `False` | ignore and rebuild prepared FIRE data |

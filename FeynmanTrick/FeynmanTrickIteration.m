@@ -6,15 +6,21 @@ BeginPackage["FeynmanTrick`FeynmanTrickIteration`", {
   "FeynmanTrick`",
   "FeynmanTrick`PropagatorAlgebra`",
   "FeynmanTrick`FIREInterface`",
+  "FeynmanTrick`FamilySpec`",
   "FeynmanTrick`MatrixExport`",
   "FeynmanTrick`EpsPrefactors`"
 }];
 
 DefineFTIteration::usage =
-  "DefineFTIteration[topology, combinationSequence, numericalPoint] defines a \
+  "DefineFTIteration[topology, combinationSequence, numericalPoint, opts] defines a \
 multi-level Feynman trick iteration. \
 combinationSequence: list of {i,j} pairs (propagator positions to combine). \
-numericalPoint: replacement rules for kinematic variables.";
+numericalPoint: replacement rules for kinematic variables. \
+The option \"OutputIntegrals\" selects one or more ordered L0 target index vectors; \
+Automatic preserves the legacy all-ones target.";
+
+DefineFTIteration::alltargets =
+  "OutputIntegrals -> All requires top-level master discovery, which is not implemented by DefineFTIteration. Supply explicit integer index vectors.";
 
 BuildLevel::usage =
   "BuildLevel[ftData, level] constructs the topology at a given level by \
@@ -58,14 +64,27 @@ Begin["`Private`"];
 (* Sets up the multi-level iteration data structure              *)
 (* ============================================================ *)
 
-DefineFTIteration[topology_Association, combinationSeq_List, numericalPoint_List:{}] :=
-Module[{ftData, nLevels, eliminatedPositions, topMaster},
+Options[DefineFTIteration] = {"OutputIntegrals" -> Automatic};
+
+DefineFTIteration[topology_Association, combinationSeq_List,
+    numericalPoint_List:{}, OptionsPattern[]] :=
+Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
   nLevels = Length[combinationSeq];
   eliminatedPositions = Lookup[topology, "EliminatedPositions", {}];
-  topMaster = ReplacePart[
-    ConstantArray[1, topology["NumPropagators"]],
-    Thread[eliminatedPositions -> 0]
+  outputIntegrals =
+    FeynmanTrick`FamilySpec`NormalizeOutputIntegrals[
+      OptionValue["OutputIntegrals"], topology["NumPropagators"],
+      eliminatedPositions
+    ];
+  If[outputIntegrals === $Failed, Return[$Failed, Module]];
+  If[outputIntegrals === All,
+    Message[DefineFTIteration::alltargets];
+    Return[$Failed, Module]
   ];
+  outputIntegrals =
+    FeynmanTrick`FamilySpec`ValidateOutputIntegralsForSequence[
+      outputIntegrals, combinationSeq, eliminatedPositions];
+  If[outputIntegrals === $Failed, Return[$Failed, Module]];
 
   ftData = <|
     "TopTopology" -> topology,
@@ -80,7 +99,7 @@ Module[{ftData, nLevels, eliminatedPositions, topMaster},
         "FeynmanParameter" -> None,
         "FixedParams" -> {},
         "EliminatedPositions" -> eliminatedPositions,
-        "Masters" -> {topMaster},
+        "Masters" -> outputIntegrals,
         "DiffMatrix" -> {},
         "Computed" -> False
       |>
@@ -152,6 +171,12 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
     prevFixedParams = Append[prevFixedParams,
       prevLevel["FeynmanParameter"] -> fixedVal];
   ];
+
+  (* NumericalPoint is the exact evaluation point for the whole family, not
+     only for scalar-product replacement right-hand sides.  In particular,
+     symbolic masses and other coefficients may occur directly in the
+     propagators.  Freeze those symbols before FIRE sees the level topology. *)
+  newProps = newProps /. numericalPoint;
 
   (* Propagator replacements: original scalar product rules with numerical kinematic values *)
   newReplacements = ftData["TopTopology"]["Replacements"] /. numericalPoint;

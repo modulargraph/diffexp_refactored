@@ -50,9 +50,46 @@ result = FeynmanTrick`ResumeIntegrationPipeline[
 
 `"Asynchronous" -> True` returns a
 `FeynmanTrick.PipelineProcess/v1` record containing the process object and
-plan. The facade accepts one validated registry name at a time. The underlying
-CLI accepts comma-separated names, and custom topology objects continue to use
-the lower-level iteration API.
+plan. A run accepts either one validated registry name or one exact
+user-defined family. The underlying registry CLI also accepts comma-separated
+names.
+
+### User-defined families and output selection
+
+Pass an exact family together with one index vector, an ordered list of index
+vectors, or `All`:
+
+```mathematica
+family = <|
+  "Name" -> "massive_bubble_custom",
+  "LoopMomenta" -> {l},
+  "ExternalMomenta" -> {p},
+  "Propagators" -> {1 - l^2, 3/2 - (l - p)^2},
+  "Replacements" -> {p^2 -> s},
+  "NumericalPoint" -> {s -> -1},
+  "Dimension" -> 2 - 2 FeynmanTrick`FTeps
+|>;
+
+selected = FeynmanTrick`RunIntegrationPipeline[
+  family, {{1, 1}}, "EpsilonOrder" -> 2
+];
+
+allMasters = FeynmanTrick`RunIntegrationPipeline[
+  family, All, "EpsilonOrder" -> 2
+];
+```
+
+`CreateFamily` validates and canonicalizes the mathematical input without
+starting FIRE. `PipelinePlan[family, targets]` then creates an exact,
+content-addressed WXF request without writing it; execution publishes that
+request atomically before starting the child. Explicit targets retain their
+order and multiplicity. `NumericalPoint` is applied both to scalar-product
+replacement rules and to symbols occurring directly in propagators, so exact
+symbolic masses may be fixed there. `All` performs deterministic level-zero
+FIRE master discovery at execution and caches a source- and runtime-bound
+resolution.
+The parent independently validates every returned target identity and, for
+`All`, the discovery manifest.
 
 The facade runs `Scripts/run_ft_stepwise2.m` in a clean `wolframscript`
 subprocess. Its argv and environment are explicit in `PipelinePlan`; no shell
@@ -102,6 +139,7 @@ The current fixtures in `Scripts/FTExamples.m` are:
 | `box_triangle` | massless two-loop four-point subfamily | `4-2 eps` |
 | `double_box_planar` | massless planar double box | `4-2 eps` |
 | `pentagon` | massless pentagon at fixed negative adjacent invariants | `4-2 eps` |
+| `pentagon_massive` | fully massive pentagon at a symmetric Euclidean point | `4-2 eps` |
 
 Release examples are in [Examples/FeynmanTrick](../Examples/FeynmanTrick/README.md).
 `bubble`, `sunrise`, and `banana_unequal` are the recommended progression.
@@ -158,6 +196,8 @@ reduction cache.  Its v3 contract records the exact topology, combination
 sequence, dimension, preparation-affecting configuration, Wolfram/FIRE
 runtime, and repository-relative hashes of the three preparation modules:
 `PropagatorAlgebra.m`, `FIREInterface.m`, and `FeynmanTrickIteration.m`.
+Custom-family contracts additionally hash `FamilySpec.m` and
+`PipelineRequest.m` and bind the exact output selection.
 `FeynmanTrick.m` configuration semantics are represented by their evaluated
 contract values; `MatrixExport.m` writes artifacts only; and
 `LevelReduction.m` derives transport-time requests whose exact hardened
@@ -198,7 +238,9 @@ wolframscript -file Scripts/run_ft_stepwise2.m
 
 The checkpoint records the example, backend, precision, expansion and epsilon
 settings, prepared-data key, level metadata, the exact per-master epsilon
-basis and normalized-matrix hash, and a source fingerprint.
+basis and normalized-matrix hash, and a source fingerprint. Custom-family
+checkpoints additionally bind the family, pipeline request, and any resolved
+`All` selection identities.
 Stale/unversioned checkpoints are rejected unless
 `FT_ALLOW_STALE_LADDER_CHECKPOINT=1` is set; descendants of an explicitly
 accepted stale checkpoint remain marked tainted.
@@ -223,6 +265,12 @@ STEPWISE {"Example":...,"Level":...,"Master":...,"RawMinPower":...,"Coefficients
 FINAL {"Example":...,"Finite":...,"RawMinPower":...,"Certification":...}
 ```
 
+Custom-family runs emit one ordered `FINAL` row per requested integral, with
+its family, pipeline-request, physical-integral, and ordinal identities. An
+`All` run first emits exactly one `OUTPUT_RESOLUTION` manifest; the parent
+requires the final rows to match that manifest. The typed result exposes all
+accepted rows through `result["Outputs"]`.
+
 Use the `STEPWISE` rows for Laurent coefficients and intermediate-level
 audits.  Historical logs used `"Finite"` inconsistently when a result had
 poles; [Results](Results.md) reports coefficients explicitly and does not rely
@@ -233,25 +281,21 @@ handoffs, proved-zero observables, and the initial deepest boundary instead
 carry an explicit `"Applicability":"not-applicable"` record.  The terminal
 `FINAL` row repeats the certification of its corresponding level-zero master.
 
-## Adding a topology today
+## Custom-family limits
 
-The implemented building blocks are:
+The public family path requires exact propagators, replacement rules,
+kinematic points, dimensions, and a complete merge sequence ending in one
+active propagator. `All` discovery fails before transport when FIRE introduces
+additional numerator slots. Any requested or discovered numerator at a merge
+position is rejected, while auxiliary slots introduced during explicit-target
+preparation remain a lower-level implementation detail and are not advertised
+as `All` outputs. Custom analytic-prescription and kinematic-assumption fields
+are also rejected until their branch/assumption semantics are wired into the
+production request path.
 
-```mathematica
-FeynmanTrick`FIREInterface`DefineTopology[...]
-FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[...]
-FeynmanTrick`FeynmanTrickIteration`RunFullIteration[...]
-```
-
-The public facade delegates its numerical ladder to
-`Scripts/run_ft_stepwise2.m`. Therefore a new release-quality example must
-either:
-
-1. add a named exact fixture to `Scripts/FTExamples.m` and use the driver; or
-2. use the lower-level iteration objects directly until the facade gains a
-   custom-topology plan schema.
-
-Copying the runner's private helpers into user notebooks is not recommended.
+The lower-level `DefineTopology`, `DefineFTIteration`, and `RunFullIteration`
+objects remain available for development work, but copying runner-private
+helpers into notebooks is not recommended.
 
 ## Failure and reproducibility rules
 

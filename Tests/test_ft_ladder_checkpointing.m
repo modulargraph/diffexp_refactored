@@ -56,6 +56,14 @@ test["prepared snapshot schema invalidates legacy reduction keys",
   $ftPrepCacheVersion === 3, $ftPrepCacheVersion];
 test["epsilon-basis transport bumps the checkpoint schema",
   $ftLadderCheckpointVersion === 2, $ftLadderCheckpointVersion];
+requiredLadderSources = ExpandFileName /@ {
+  FileNameJoin[{repoRoot, "FeynmanTrick", "BoundaryConditions.m"}],
+  FileNameJoin[{repoRoot, "FeynmanTrick", "EpsPrefactors.m"}],
+  FileNameJoin[{repoRoot, "FeynmanTrick", "LevelReduction.m"}]
+};
+test["ladder source fingerprint covers every post-preparation FT module",
+  ContainsAll[$ftLadderSourcePaths, requiredLadderSources],
+  Complement[requiredLadderSources, $ftLadderSourcePaths]];
 
 (* A two-link raw 1/eps chain is the minimal form of the double-box L3
    failure.  The exact diagonal basis must remove both poles, shift the

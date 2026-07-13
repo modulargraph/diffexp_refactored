@@ -15,7 +15,7 @@ allowlist. It rejects both missing files and accidental additions.
 | `DiffExp2.m` | Stable root loader; selects the compiled recurrence backend by default |
 | `DiffExp2/` | Exact recurrence, transport, matching, endpoint, integration, and public API modules |
 | `FeynmanTrick.m` | Stable root loader for Feynman-trick preparation and execution |
-| selected `FeynmanTrick/*.m` | Topology algebra, FIRE interface, iteration, exact level reductions, boundary data, and pipeline facade |
+| selected `FeynmanTrick/*.m` | Exact family/request contracts, topology algebra, FIRE interface, iteration, level reductions, boundary data, and pipeline facade |
 | `cpp/`, `CMakeLists.txt` | C++20/FLINT recurrence backend and native test |
 | `Examples/` | Runnable direct and Feynman-trick examples |
 | selected `Docs/*.md` | Installation, tutorials, API, continuation, results, migration, citation, and backend documentation |

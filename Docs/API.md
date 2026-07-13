@@ -310,25 +310,35 @@ The release-facing pipeline functions are:
 ```mathematica
 FeynmanTrick`$FeynmanTrickVersion
 FeynmanTrick`SupportedExamples[]
+FeynmanTrick`CreateFamily[family, opts]
+FeynmanTrick`CreateFamily[family, targets, opts]
 FeynmanTrick`PipelinePlan[example, opts]
+FeynmanTrick`PipelinePlan[family, targets, opts]
 FeynmanTrick`RunIntegrationPipeline[example, opts]
+FeynmanTrick`RunIntegrationPipeline[family, targets, opts]
 FeynmanTrick`RunIntegrationPipeline[plan]
 FeynmanTrick`ResumeIntegrationPipeline[example, checkpoint, opts]
 ```
 
-`example` must be one registry name, not a comma-separated list or a custom
-topology object. The current registry is:
+`example` must be one registry name rather than a comma-separated list.
+Alternatively, `family` is an exact raw family or unprepared topology and
+`targets` is one index vector, an ordered nonempty list of vectors, or `All`.
+`CreateFamily` performs process-free canonicalization; custom-family plans are
+content-addressed and do not write their WXF handoff until execution. The
+exact `NumericalPoint` fixes symbols in both propagators and scalar-product
+replacement rules. The current registry is:
 
 ```text
 bubble, sunrise, banana, banana_unequal, banana4, banana4_unequal,
-kite, box, pentagon, box_bubble, box_triangle, double_box_planar
+kite, box, pentagon, pentagon_massive, box_bubble, box_triangle,
+double_box_planar
 ```
 
 `PipelinePlan` validates and exposes the exact command, environment, cache
-locations, and settings without running. `RunIntegrationPipeline` either
-builds a plan from an example name and options or executes an existing
-`FeynmanTrick.PipelinePlan/v1` record. `ResumeIntegrationPipeline` sets the
-resume checkpoint and runs.
+locations, request identities, and settings without running.
+`RunIntegrationPipeline` builds a plan from a registry name or family, or
+executes an existing `FeynmanTrick.PipelinePlan/v1` record.
+`ResumeIntegrationPipeline` sets a registry-run resume checkpoint and runs.
 
 All three pipeline functions share these options:
 
@@ -346,17 +356,22 @@ All three pipeline functions share these options:
 | `"ValueTransport"` | `True` | use regular-chart value transport |
 | `"BatchEndpointArms"` | `True` | request paired native endpoint-arm prewarming when applicable |
 | `"SingularMatchPrecondition"` | `False` | enable singular-match preconditioning |
+| `"DeltaPrescriptionSign"` | `1` | global analytic-continuation rim sign (`+1` or `-1`) |
 | `"PreparedCacheDirectory"` | `Automatic` | FIRE preparation cache root |
 | `"FIREPath"` | `Automatic` | FIRE6 installation; defaults to `Dependencies/fire/FIRE6` |
 | `"CheckpointDirectory"` | `Automatic` | ladder checkpoint directory |
 | `"ResumeFrom"` | `None` | existing checkpoint file |
 | `"RebuildPreparation"` | `False` | ignore and rebuild prepared FIRE data |
+| `"MigrateLegacyPreparation"` | `False` | explicitly migrate a compatible legacy preparation cache |
 | `"AllowStaleCheckpoint"` | `False` | permit explicitly stale ladder metadata |
+| `"SaveNativeTransportCheckpoint"` | `False` | retain native transport checkpoint state |
 | `"StopAfterBoundaryLevel"` | `None` | stop after a nonnegative level |
 | `"FIRETimeoutSeconds"` | `1800` | watchdog for one FIRE invocation |
 | `"Runner"` | `Automatic` | path to the tested runner script |
 | `"WolframScript"` | `Automatic` | `wolframscript` executable |
 | `"WorkingDirectory"` | `Automatic` | subprocess working directory |
+| `"RequestAwareRunner"` | `False` | declare a nondefault runner compatible with custom request contracts |
+| `"RequestDirectory"` | `Automatic` | content-addressed custom-family WXF handoff directory |
 | `"ExtraEnvironment"` | `<||>` | additional string-valued environment entries |
 | `"Asynchronous"` | `False` | return a running process record instead of waiting |
 
@@ -364,8 +379,8 @@ The facade returns one of:
 
 | Record | Schema | Important keys |
 | --- | --- | --- |
-| plan | `FeynmanTrick.PipelinePlan/v1` | `Example`, `Command`, `Environment`, `Settings`, cache and checkpoint paths |
-| result | `FeynmanTrick.PipelineResult/v1` | `Status`, `ExitCode`, parsed `Final` and `Stepwise`, output streams, `Plan` |
+| plan | `FeynmanTrick.PipelinePlan/v1` | `Example`, `Command`, `Environment`, `Settings`, cache/checkpoint paths, and custom request fields when applicable |
+| result | `FeynmanTrick.PipelineResult/v1` | `Status`, `ExitCode`, ordered `Outputs`, compatibility `Final`, `OutputResolution`, `Stepwise`, output streams, `Plan` |
 | asynchronous process | `FeynmanTrick.PipelineProcess/v1` | `Status`, `Process`, `Plan` |
 
 The current facade launches the runner through `/usr/bin/env`, so process

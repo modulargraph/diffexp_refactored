@@ -48,7 +48,9 @@ std::string prepare_chart(const std::string& session,
   json::array principal_matrix;
   principal_matrix.push_back(std::move(principal_row));
   json::object problem{
-      {"domain", domain}, {"d", 1}, {"fb", 0}, {"w", 1},
+      // Keep one exact-zero upper epsilon coefficient for the regulated
+      // center-endpoint primitive's mandatory lookahead.
+      {"domain", domain}, {"d", 1}, {"fb", 0}, {"w", 2},
       {"d_lags", nested(json::array{json::object{
            {"s", 0}, {"v", "1"}}})},
       {"denominators", json::array{}},
@@ -99,8 +101,8 @@ json::object solve_anchor(const std::string& session,
            {"a_shifts", json::array{"0"}},
            {"schedule", nested(json::array{json::object{
                 {"case", "R"}, {"da", "0"}, {"db", "0"}}})},
-           {"initial", json::array{"1"}},
-           {"initial_validity", json::array{0}},
+           {"initial", json::array{"1", "0"}},
+           {"initial_validity", json::array{1}},
            {"source", nullptr}, {"return_u", false}}},
       {"metadata", json::object{
            {"chart", json::object{
@@ -178,10 +180,15 @@ json::object rational_row(const std::string& identity) {
            {"column", 0},
            {"multiplier", json::object{
                 {"epsilon_shift", 0}, {"center_pole_order", 0},
-                {"kernels", nested(json::array{"1"})},
-                {"analytic_coefficients", json::array{json::object{
-                     {"numerator", json::array{"1"}},
-                     {"denominator", json::array{"1", "-1/2"}}}}},
+                {"kernels", json::array{
+                     json::array{"1"}, json::array{"0"}}},
+                {"analytic_coefficients", json::array{
+                     json::object{
+                         {"numerator", json::array{"1"}},
+                         {"denominator", json::array{"1", "-1/2"}}},
+                     json::object{
+                         {"numerator", json::array{"0"}},
+                         {"denominator", json::array{"1"}}}}},
                 {"exact_identity", identity},
                 {"proven_zero", false}}}}}}};
 }

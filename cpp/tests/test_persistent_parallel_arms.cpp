@@ -80,7 +80,7 @@ std::string prepare_chart(const std::string& session,
            {"coupling_depth", 0}}},
       {"problem", json::object{
            {"domain", domain}, {"precision_bits", 256},
-           {"d", 1}, {"fb", frame_base}, {"w", 3},
+           {"d", 1}, {"fb", frame_base}, {"w", 4},
            {"d_lags", std::move(d_lags)},
            {"denominators", json::array{}},
            {"nhat_lags", std::move(nhat_lags)},
@@ -119,8 +119,9 @@ std::string solve_local(const std::string& session,
            {"b_target", "0"}, {"a_shift_min", 0},
            {"a_shifts", std::move(shifts)},
            {"schedule", std::move(schedule)},
-           {"initial", json::array{value, next_epsilon_value, "0"}},
-           {"initial_validity", json::array{2}}, {"source", nullptr},
+           {"initial",
+            json::array{value, next_epsilon_value, "0", "0"}},
+           {"initial_validity", json::array{3}}, {"source", nullptr},
            {"return_u", false}}},
       {"metadata", json::object{
            {"chart", json::object{
@@ -168,7 +169,7 @@ json::object integrand_row(std::int32_t shift,
            {"multiplier", json::object{
                 {"epsilon_shift", shift}, {"center_pole_order", 0},
                 {"kernels", json::array{one_kernel, zero_kernel,
-                                        zero_kernel}},
+                                        zero_kernel, zero_kernel}},
                 {"exact_identity", identity},
                 {"proven_zero", false}}}}}}};
 }
@@ -214,7 +215,9 @@ json::object run_arms_request(const std::string& session,
       {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
       {"tile_plan_checkpoint_identity", "parallel-plan"},
       {"anchor_checkpoint_identity", "parallel-anchor"},
-      {"epsilon", json::object{{"min", work_min}, {"max", 2},
+      // The -1 integrand rows and regulated primitive each consume one
+      // upper epsilon order beyond the public complete maximum.
+      {"epsilon", json::object{{"min", work_min}, {"max", 3},
                                 {"required_complete_max", 1},
                                 {"match_required_complete_max",
                                  match_required_complete_max}}},
@@ -339,10 +342,10 @@ bool positive_leading_match_smoke(const std::string& domain) {
     if (domain == "rational") {
       coefficient_ok = lower_final.at("epsilon_min") == 1 &&
           upper_final.at("epsilon_min") == 1 &&
-          combined.at("epsilon_min") == 1 &&
+          combined.at("epsilon_min") == 0 &&
           combined_export.at("status") == "ok" &&
-          combined_export.at("value").as_object().at("min") == 1 &&
-          std::abs(exported_coefficient(combined_export) - 4.0 / 3.0) <
+          combined_export.at("value").as_object().at("min") == 0 &&
+          std::abs(exported_coefficient(combined_export, 1) - 4.0 / 3.0) <
               1e-30;
     } else {
       const auto lower_value = evaluate_final(lower_final);
@@ -354,8 +357,8 @@ bool positive_leading_match_smoke(const std::string& domain) {
       const auto& combined_coefficients =
           combined_export.at("value").as_object()
               .at("coefficients").as_array();
-      coefficient_ok = lower_final.at("epsilon_min") == 0 &&
-          upper_final.at("epsilon_min") == 0 &&
+      coefficient_ok = lower_final.at("epsilon_min") == 1 &&
+          upper_final.at("epsilon_min") == 1 &&
           combined.at("epsilon_min") == 0 &&
           lower_value.at("status") == "ok" &&
           upper_value.at("status") == "ok" &&

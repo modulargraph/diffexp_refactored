@@ -483,7 +483,8 @@ int main() {
       .at("registry_visibility").as_object();
   const bool ok = is_error(wrong_owner) && is_error(nontrivial_rejected) &&
       std::string(nontrivial_rejected.at("detail").as_string())
-              .find("epsilon-unimodular spectral frame") !=
+              .find(
+                  "exact t-independent Laurent-unimodular spectral frame") !=
           std::string::npos &&
       intermediate.at("residual_binding").as_object().at("status") ==
           "unsupported" &&

@@ -452,8 +452,17 @@ int main() {
       "/tmp/diffexp2-transport-contract-pair.de2cp";
   const std::string checkpoint_second =
       "/tmp/diffexp2-transport-contract-pair-second.de2cp";
+  const std::string checkpoint_tampered =
+      "/tmp/diffexp2-transport-contract-pair-tampered.de2cp";
+  const std::string checkpoint_count_tampered =
+      "/tmp/diffexp2-transport-contract-pair-count-tampered.de2cp";
+  const std::string checkpoint_legacy =
+      "/tmp/diffexp2-transport-contract-pair-legacy.de2cp";
   std::remove(checkpoint.c_str());
   std::remove(checkpoint_second.c_str());
+  std::remove(checkpoint_tampered.c_str());
+  std::remove(checkpoint_count_tampered.c_str());
+  std::remove(checkpoint_legacy.c_str());
   std::string session;
   std::string restored_session;
   try {
@@ -810,6 +819,91 @@ int main() {
       }
     }
 
+    auto tampered_payload = payload;
+    auto& tampered_diagnostics = tampered_payload
+        .at("retained_line_results").as_array().front().as_object()
+        .at("result").as_object().at("diagnostics").as_object();
+    if (tampered_diagnostics.at("divergent_cancellation_mode") !=
+            "exact-singleton" ||
+        tampered_diagnostics.at("divergent_relative_tolerance") != "" ||
+        tampered_diagnostics.at("divergent_cancellation_provenance") != "")
+      throw std::runtime_error(
+          "paired checkpoint did not expose an exact-singleton aggregate");
+    tampered_diagnostics["divergent_relative_tolerance"] = "1e-20";
+    diffexp2::checkpoint::write_atomic(
+        checkpoint_tampered, container.header_json,
+        json::serialize(tampered_payload));
+    const auto tampered_restore = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint_tampered},
+        {"expected_identity", "pair-roundtrip"}});
+    if (tampered_restore.at("status") == "ok") {
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", tampered_restore.at("session")}});
+      throw std::runtime_error(
+          "exact-singleton aggregate accepted a stray bounded tolerance");
+    }
+    if (std::string(tampered_restore.at("detail").as_string()).find(
+            "aggregate divergent-cancellation policy is incomplete") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "malformed aggregate cancellation failed for the wrong reason: " +
+          json::serialize(tampered_restore));
+
+    auto count_tampered_payload = payload;
+    count_tampered_payload.at("retained_line_results").as_array()
+        .front().as_object().at("result").as_object()
+        .at("diagnostics").as_object()
+        ["bounded_cancelled_divergent_coefficients"] = 1;
+    diffexp2::checkpoint::write_atomic(
+        checkpoint_count_tampered, container.header_json,
+        json::serialize(count_tampered_payload));
+    const auto count_tampered_restore = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint_count_tampered},
+        {"expected_identity", "pair-roundtrip"}});
+    if (count_tampered_restore.at("status") == "ok") {
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", count_tampered_restore.at("session")}});
+      throw std::runtime_error(
+          "exact-singleton aggregate accepted a bounded-cancelled count");
+    }
+    if (std::string(count_tampered_restore.at("detail").as_string()).find(
+            "exact-singleton aggregate cannot report bounded-cancelled") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "aggregate bounded-count tamper failed for the wrong reason: " +
+          json::serialize(count_tampered_restore));
+
+    auto legacy_payload = payload;
+    auto& legacy_diagnostics = legacy_payload
+        .at("retained_line_results").as_array().front().as_object()
+        .at("result").as_object().at("diagnostics").as_object();
+    for (const auto* key : {
+             "bounded_cancelled_divergent_coefficients",
+             "divergent_cancellation_mode",
+             "divergent_relative_tolerance",
+             "divergent_cancellation_provenance"})
+      if (legacy_diagnostics.erase(key) != 1)
+        throw std::runtime_error(
+            "paired checkpoint omitted a current cancellation diagnostic");
+    diffexp2::checkpoint::write_atomic(
+        checkpoint_legacy, container.header_json,
+        json::serialize(legacy_payload));
+    const auto legacy_restore = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint_legacy},
+        {"expected_identity", "pair-roundtrip"}});
+    if (legacy_restore.at("status") != "ok")
+      throw std::runtime_error(
+          "legacy exact-singleton aggregate failed to restore: " +
+          json::serialize(legacy_restore));
+    (void)request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", legacy_restore.at("session")}});
+
     const auto restored = request(json::object{
         {"schema", 2}, {"op", "checkpoint.restore"},
         {"path", checkpoint}, {"expected_identity", "pair-roundtrip"}});
@@ -856,6 +950,9 @@ int main() {
     session.clear();
     std::remove(checkpoint.c_str());
     std::remove(checkpoint_second.c_str());
+    std::remove(checkpoint_tampered.c_str());
+    std::remove(checkpoint_count_tampered.c_str());
+    std::remove(checkpoint_legacy.c_str());
     std::cout << "PASS: retained transport-pair contraction\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {
@@ -867,6 +964,9 @@ int main() {
                                  {"session", session}});
     std::remove(checkpoint.c_str());
     std::remove(checkpoint_second.c_str());
+    std::remove(checkpoint_tampered.c_str());
+    std::remove(checkpoint_count_tampered.c_str());
+    std::remove(checkpoint_legacy.c_str());
     std::cerr << "FAIL: retained transport-pair contraction: "
               << error.what() << '\n';
     return EXIT_FAILURE;

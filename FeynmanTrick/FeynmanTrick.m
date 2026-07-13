@@ -24,6 +24,8 @@ Module[{root = ParentDirectory[DirectoryName[$InputFileName]]},
 (* Load subpackages *)
 Get[FileNameJoin[{DirectoryName[$InputFileName], "PropagatorAlgebra.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FIREInterface.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "FamilySpec.m"}]];
+Get[FileNameJoin[{DirectoryName[$InputFileName], "PipelineRequest.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "MatrixExport.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "EpsPrefactors.m"}]];
 Get[FileNameJoin[{DirectoryName[$InputFileName], "FeynmanTrickIteration.m"}]];
@@ -38,8 +40,9 @@ Get[FileNameJoin[{DirectoryName[$InputFileName], "DiffExp2Pipeline.m"}]];
 
 (* Declare the root facade only after implementation subpackages have
    created their own symbols, avoiding Wolfram context capture. *)
-FeynmanTrick`PipelinePlan::usage = "PipelinePlan[example, opts] builds a reproducible DiffExp2 Feynman-trick run plan without executing it.";
-FeynmanTrick`RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] builds and runs a DiffExp2 Feynman-trick plan. RunIntegrationPipeline[plan] executes an existing PipelinePlan record.";
+FeynmanTrick`CreateFamily::usage = "CreateFamily[family, opts] validates an exact raw family or unprepared topology and returns a canonical FeynmanTrick family specification. CreateFamily[family, integrals, opts] records one output integral, an ordered list of output integrals, or an All request resolved by the integration pipeline at execution.";
+FeynmanTrick`PipelinePlan::usage = "PipelinePlan[example, opts] builds a reproducible DiffExp2 Feynman-trick run plan without executing it. PipelinePlan[familySpec, integrals, opts] builds an exact content-addressed custom-family request plan.";
+FeynmanTrick`RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] builds and runs a DiffExp2 Feynman-trick plan. RunIntegrationPipeline[familySpec, integrals, opts] runs selected custom-family targets or discovers all L0 masters at execution through the built-in runner (or an external runner declared request-aware). RunIntegrationPipeline[plan] executes an existing PipelinePlan record.";
 FeynmanTrick`ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[example, checkpoint, opts] resumes the DiffExp2 Feynman-trick ladder from an atomic checkpoint.";
 
 Begin["`Private`"];
@@ -86,6 +89,15 @@ FeynmanTrick`SupportedExamples[] := $supportedExamples;
 FTConfiguration[] := $FTConfig;
 
 SetFTOption[key_String, value_] := ($FTConfig[key] = value);
+
+(* Exact, process-free family-ingestion facade. *)
+Options[FeynmanTrick`CreateFamily] = {
+  "Name" -> Automatic,
+  "CombinationSequence" -> Automatic,
+  "OutputIntegrals" -> Automatic
+};
+FeynmanTrick`CreateFamily[args___] :=
+  FeynmanTrick`FamilySpec`CreateFamily[args];
 
 (* Stable root-context facade; implementation details stay in the named
    DiffExp2Pipeline subcontext. *)

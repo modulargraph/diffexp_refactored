@@ -73,6 +73,43 @@ process, or result records. The current process facade requires
 `/usr/bin/env`, so it is supported on macOS and Linux. Direct DiffExp 2
 transport is not subject to that platform restriction.
 
+User-defined families use the same facade. Family data must be exact; the
+second argument selects one integral, an ordered list of integrals, or `All`
+to discover every supported level-zero FIRE master at execution:
+
+```mathematica
+family = <|
+  "Name" -> "massive_bubble_custom",
+  "LoopMomenta" -> {l},
+  "ExternalMomenta" -> {p},
+  "Propagators" -> {1 - l^2, 3/2 - (l - p)^2},
+  "Replacements" -> {p^2 -> s},
+  "NumericalPoint" -> {s -> -1},
+  "Dimension" -> 2 - 2 FeynmanTrick`FTeps
+|>;
+
+selected = FeynmanTrick`RunIntegrationPipeline[
+  family,
+  {{1, 1}},
+  "EpsilonOrder" -> 2
+];
+
+allMasters = FeynmanTrick`RunIntegrationPipeline[
+  family,
+  All,
+  "EpsilonOrder" -> 2
+];
+
+allMasters["Outputs"][[All, {"Master", "Coefficients"}]]
+```
+
+`All` performs deterministic master discovery on a cold run and caches the
+resolved ordered basis. `PipelinePlan[family, targets]` exposes the exact,
+content-addressed request without starting FIRE. `All` discovery rejects
+FIRE-added numerator slots; merge-position numerators, incomplete merge
+sequences, and currently unwired custom branch or kinematic-assumption fields
+fail before numerical transport rather than being ignored.
+
 The underlying driver remains available for advanced and batch use:
 
 ```sh

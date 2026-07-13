@@ -163,9 +163,11 @@ in-memory differential matrix, transports exact local sectors, supports
 separate FIRE preparation caches and ladder checkpoints, and refuses
 incomplete epsilon windows.
 
-The public facade accepts one named registry example and preserves the runner's
-prepared FIRE cache and atomic ladder checkpoints. Custom topology objects
-still use the lower-level iteration API.
+The public facade accepts either one named registry example or an exact raw
+family/unprepared topology with selected output integrals or `All`. It
+preserves the runner's prepared FIRE cache and atomic ladder checkpoints, and
+binds custom-family requests and dynamic `All` resolutions into those cache
+identities.
 
 ## Features not yet restored as friendly wrappers
 
@@ -173,9 +175,14 @@ still use the lower-level iteration API.
   boundaries (finite regular-anchor expressions are supported);
 - arbitrary multi-leg line-chain convenience functions;
 - a dedicated plotting-style helper (piecewise evaluation is supported);
-- custom-topology objects in the one-call Feynman-trick facade;
 - automatic rationalizing transformations for square roots in the input
   basis.
+
+The custom-family facade rejects FIRE-added numerator slots during `All`
+discovery, numerators at merge positions, and custom analytic-prescription or
+kinematic-assumption fields until their recursion and branch semantics are
+exposed safely. Explicit-target preparation may retain FIRE auxiliary slots,
+but they are not part of the public output-selection contract.
 
 The lower-level data required for line segments, plots, and exact local powers
 is already present.  The examples show how to use it without claiming the

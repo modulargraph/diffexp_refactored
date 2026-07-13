@@ -22,14 +22,19 @@ wolfram_tests=(
   Tests/test_cpp_backend.m
   Tests/test_cpp_arm_batch.m
   Tests/test_feynmantrick_algebra.m
+  Tests/test_feynmantrick_family_spec.m
   Tests/test_fast_tadpole_boundary.m
   Tests/test_ft_example_specs.m
   Tests/test_feynmantrick_failure_semantics.m
   Tests/test_fire_inmemory_reduction_cache.m
   Tests/test_fire_level_reduction_batch.m
   Tests/test_ft_pipeline_facade.m
+  Tests/test_ft_pipeline_family_request.m
   Tests/test_ft_pipeline_process.m
+  Tests/test_ft_runner_family_request_contract.m
   Tests/test_ft_ladder_checkpointing.m
+  Tests/test_double_box_planar_oracle.m
+  Tests/test_pentagon_massive_oracle.m
   Tests/test_banana4_bessel_oracle.m
 )
 

@@ -3,11 +3,13 @@
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <unistd.h>
 
@@ -193,7 +195,12 @@ json::object& retained_line_record(json::object& payload,
   throw std::runtime_error("checkpoint omitted retained line " + handle);
 }
 
-enum class CertifiedLineTamper { Scope, ErrorEnvelope };
+enum class CertifiedLineTamper {
+  Scope,
+  ErrorEnvelope,
+  DivergentCancellation,
+  BoundedCancellationCount
+};
 
 void write_tampered_line_checkpoint(const std::string& source_path,
                                     const std::string& target_path,
@@ -206,13 +213,71 @@ void write_tampered_line_checkpoint(const std::string& source_path,
       .at("result").as_object();
   if (tamper == CertifiedLineTamper::Scope) {
     result["scope"] = "stored_truncation";
-  } else {
+  } else if (tamper == CertifiedLineTamper::ErrorEnvelope) {
     auto& error = result.at("value").as_object()
         .at("error").as_object();
     error["guarantee"] = "none";
     error["absolute_exact"] = json::array{};
     error["provenance"] = "";
+  } else if (tamper == CertifiedLineTamper::DivergentCancellation) {
+    result.at("diagnostics").as_object()
+        ["divergent_relative_tolerance"] = "2";
+  } else {
+    result.at("diagnostics").as_object()
+        ["bounded_cancelled_divergent_coefficients"] = 1;
   }
+  diffexp2::checkpoint::write_atomic(
+      target_path, json::serialize(header), json::serialize(payload));
+}
+
+void write_legacy_line_checkpoint(const std::string& source_path,
+                                  const std::string& target_path,
+                                  const std::string& line_handle) {
+  const auto container = diffexp2::checkpoint::read(source_path);
+  auto header = json::parse(container.header_json).as_object();
+  auto payload = json::parse(container.payload_json).as_object();
+  auto& line = retained_line_record(payload, line_handle);
+  auto provenance = json::parse(
+      std::string(line.at("provenance_identity").as_string())).as_object();
+  if (provenance.erase("divergent_cancellation") != 1)
+    throw std::runtime_error(
+        "current line provenance omitted divergent cancellation");
+  // boost::json::object::erase may move the final member into the erased
+  // slot.  Re-sort the top-level keys so this fixture carries the canonical
+  // identity that the historical writer produced, rather than a merely
+  // equivalent but noncanonical JSON spelling.
+  std::vector<std::string> keys;
+  keys.reserve(provenance.size());
+  for (const auto& member : provenance)
+    keys.emplace_back(member.key());
+  std::sort(keys.begin(), keys.end());
+  json::object canonical_provenance;
+  for (const auto& key : keys)
+    canonical_provenance[key] = provenance.at(key);
+  const auto legacy_identity = json::serialize(canonical_provenance);
+  line["provenance_identity"] = legacy_identity;
+  auto& diagnostics = line.at("result").as_object()
+      .at("diagnostics").as_object();
+  for (const auto* key : {
+           "bounded_cancelled_divergent_coefficients",
+           "divergent_cancellation_mode",
+           "divergent_relative_tolerance",
+           "divergent_cancellation_provenance"})
+    if (diagnostics.erase(key) != 1)
+      throw std::runtime_error(
+          "current line diagnostics omitted divergent cancellation");
+  bool updated_manifest = false;
+  for (auto& raw : header.at("line_result_identities").as_array()) {
+    auto& identity = raw.as_object();
+    if (std::string(identity.at("handle").as_string()) != line_handle)
+      continue;
+    identity["provenance_identity"] = legacy_identity;
+    updated_manifest = true;
+    break;
+  }
+  if (!updated_manifest)
+    throw std::runtime_error(
+        "checkpoint header omitted retained line identity");
   diffexp2::checkpoint::write_atomic(
       target_path, json::serialize(header), json::serialize(payload));
 }
@@ -267,9 +332,16 @@ bool run_rational_protocol() {
   const auto checkpoint_path = base.string() + ".de2cp";
   const auto scope_tamper_path = base.string() + "-scope.de2cp";
   const auto envelope_tamper_path = base.string() + "-envelope.de2cp";
+  const auto cancellation_tamper_path =
+      base.string() + "-cancellation.de2cp";
+  const auto count_tamper_path = base.string() + "-bounded-count.de2cp";
+  const auto legacy_path = base.string() + "-legacy.de2cp";
   std::filesystem::remove(checkpoint_path);
   std::filesystem::remove(scope_tamper_path);
   std::filesystem::remove(envelope_tamper_path);
+  std::filesystem::remove(cancellation_tamper_path);
+  std::filesystem::remove(count_tamper_path);
+  std::filesystem::remove(legacy_path);
   const auto saved = request(json::object{
       {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
       {"path", checkpoint_path},
@@ -278,12 +350,22 @@ bool run_rational_protocol() {
       diffexp2::checkpoint::read(checkpoint_path).payload_json).as_object();
   const auto& saved_certified = retained_line_record(
       saved_payload, certified_handle);
+  const auto& saved_cancellation = saved_certified.at("result").as_object()
+      .at("diagnostics").as_object();
   write_tampered_line_checkpoint(
       checkpoint_path, scope_tamper_path, certified_handle,
       CertifiedLineTamper::Scope);
   write_tampered_line_checkpoint(
       checkpoint_path, envelope_tamper_path, certified_handle,
       CertifiedLineTamper::ErrorEnvelope);
+  write_tampered_line_checkpoint(
+      checkpoint_path, cancellation_tamper_path, certified_handle,
+      CertifiedLineTamper::DivergentCancellation);
+  write_tampered_line_checkpoint(
+      checkpoint_path, count_tamper_path, certified_handle,
+      CertifiedLineTamper::BoundedCancellationCount);
+  write_legacy_line_checkpoint(
+      checkpoint_path, legacy_path, certified_handle);
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                              {"session", session}});
 
@@ -295,12 +377,27 @@ bool run_rational_protocol() {
       {"schema", 2}, {"op", "checkpoint.restore"},
       {"path", envelope_tamper_path},
       {"expected_identity", "certified-line-session-v1"}});
+  const auto cancellation_tamper = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", cancellation_tamper_path},
+      {"expected_identity", "certified-line-session-v1"}});
+  const auto count_tamper = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", count_tamper_path},
+      {"expected_identity", "certified-line-session-v1"}});
+  const auto legacy_restored = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", legacy_path},
+      {"expected_identity", "certified-line-session-v1"}});
   const auto restored = request(json::object{
       {"schema", 2}, {"op", "checkpoint.restore"},
       {"path", checkpoint_path},
       {"expected_identity", "certified-line-session-v1"}});
   const auto restored_session = restored.at("status") == "ok"
       ? std::string(restored.at("session").as_string()) : std::string{};
+  const auto legacy_session = legacy_restored.at("status") == "ok"
+      ? std::string(legacy_restored.at("session").as_string())
+      : std::string{};
   const auto restored_stats = restored_session.empty() ? json::object{}
       : request(json::object{
             {"schema", 2}, {"op", "integration.stats"},
@@ -311,6 +408,10 @@ bool run_rational_protocol() {
             {"session", restored_session}, {"line", certified_handle},
             {"checkpoint_identity", "certified-line-v1"},
             {"output_digits", 40}});
+  const auto legacy_stats = legacy_session.empty() ? json::object{}
+      : request(json::object{
+            {"schema", 2}, {"op", "integration.stats"},
+            {"session", legacy_session}, {"line", certified_handle}});
 
   const auto& value = evaluated.at("value").as_object();
   const auto& theta = evaluated.at("theta").as_object();
@@ -365,6 +466,10 @@ bool run_rational_protocol() {
       saved.at("status") == "ok" && saved.at("line_results") == 2 &&
       saved_certified.at("result").as_object().at("scope") ==
           "full_local_with_certified_tail" &&
+      saved_cancellation.at("divergent_cancellation_mode") ==
+          "exact-singleton" &&
+      saved_cancellation.at("divergent_relative_tolerance") == "" &&
+      saved_cancellation.at("divergent_cancellation_provenance") == "" &&
       scope_tamper.at("status") == "error" &&
       std::string(scope_tamper.at("detail").as_string()).find(
           "stored-truncation line cannot carry an error envelope") !=
@@ -374,12 +479,30 @@ bool run_rational_protocol() {
           "full-local line requires a frame-aligned certified error "
           "envelope") !=
           std::string::npos &&
+      cancellation_tamper.at("status") == "error" &&
+      std::string(cancellation_tamper.at("detail").as_string()).find(
+          "divergent-cancellation policy is incomplete") !=
+          std::string::npos &&
+      count_tamper.at("status") == "error" &&
+      std::string(count_tamper.at("detail").as_string()).find(
+          "exact-singleton line cannot report bounded-cancelled") !=
+          std::string::npos &&
+      legacy_restored.at("status") == "ok" &&
+      legacy_stats.at("status") == "ok" &&
+      legacy_stats.at("diagnostics").as_object().at(
+          "divergent_cancellation_mode") == "exact-singleton" &&
       restored.at("status") == "ok" &&
       restored.at("line_results").as_array().size() == 2 &&
       restored_stats.at("status") == "ok" &&
       restored_stats.at("scope") == "full_local_with_certified_tail" &&
       restored_stats.at("error").as_object().at("guarantee") ==
           "certified" &&
+      restored_stats.at("diagnostics").as_object().at(
+          "divergent_cancellation_mode") == "exact-singleton" &&
+      restored_stats.at("diagnostics").as_object().at(
+          "divergent_relative_tolerance").is_null() &&
+      restored_stats.at("diagnostics").as_object().at(
+          "divergent_cancellation_provenance").is_null() &&
       restored_stats.at("exports") == 1 &&
       restored_export.at("status") == "ok" &&
       restored_export.at("scope") == "full_local_with_certified_tail" &&
@@ -400,6 +523,12 @@ bool run_rational_protocol() {
               << "saved: " << json::serialize(saved) << '\n'
               << "scope tamper: " << json::serialize(scope_tamper) << '\n'
               << "envelope tamper: " << json::serialize(envelope_tamper)
+              << '\n' << "cancellation tamper: "
+              << json::serialize(cancellation_tamper)
+              << '\n' << "bounded-count tamper: "
+              << json::serialize(count_tamper)
+              << '\n' << "legacy restore: "
+              << json::serialize(legacy_restored)
               << '\n' << "restored: " << json::serialize(restored) << '\n'
               << "restored stats: " << json::serialize(restored_stats)
               << '\n' << "restored export: "
@@ -408,9 +537,15 @@ bool run_rational_protocol() {
   if (!restored_session.empty())
     (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                {"session", restored_session}});
+  if (!legacy_session.empty())
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", legacy_session}});
   std::filesystem::remove(checkpoint_path);
   std::filesystem::remove(scope_tamper_path);
   std::filesystem::remove(envelope_tamper_path);
+  std::filesystem::remove(cancellation_tamper_path);
+  std::filesystem::remove(count_tamper_path);
+  std::filesystem::remove(legacy_path);
   return ok;
 }
 

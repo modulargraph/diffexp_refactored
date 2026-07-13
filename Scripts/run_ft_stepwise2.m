@@ -29,6 +29,64 @@ If[FailureQ[runnerSettings],
   Print["Invalid Feynman-trick runner environment: ", runnerSettings];
   Exit[2]];
 
+(* A custom family is handed to the child as exact WXF plus its independent
+   content identity.  Read and validate the pair before any FIRE preparation
+   can start.  Registry execution is the exact historical no-variable path. *)
+ft2LoadFamilyRequest[file_String, expectedID_String] := Module[
+  {request, family, activeCount, unwiredFields},
+  request = FeynmanTrick`PipelineRequest`ReadPipelineRequest[file, expectedID];
+  If[FailureQ[request], Return[request, Module]];
+  family = request["Family"];
+  If[!MemberQ[{"Explicit", "AllPendingDiscovery"},
+        Lookup[request, "OutputMode", None]] ||
+      !TrueQ[Lookup[Lookup[request, "ExecutionPolicy", <||>],
+        "ExecutionReady", False]],
+    Return[Failure["FeynmanTrickFamilyRequest", <|
+      "Detail" -> "the production runner requires explicit targets or an execution-ready All-master request",
+      "RequestID" -> Lookup[request, "RequestID", None],
+      "OutputMode" -> Lookup[request, "OutputMode", None]|>], Module]];
+  activeCount = family["NumPropagators"] -
+    Length[family["EliminatedPositions"]];
+  If[activeCount <= 1 ||
+      Length[family["CombinationSequence"]] =!= activeCount - 1,
+    Return[Failure["FeynmanTrickFamilyRequest", <|
+      "Detail" -> "the production ladder requires a complete nonempty combination sequence ending in one active propagator",
+      "ActivePropagators" -> activeCount,
+      "CombinationSequence" -> family["CombinationSequence"]|>], Module]];
+  unwiredFields = Select[
+    {"AnalyticPrescription", "Prescriptions", "KinematicAssumptions"},
+    KeyExistsQ[family["Definition"], #] &];
+  If[unwiredFields =!= {},
+    Return[Failure["FeynmanTrickFamilyRequest", <|
+      "Detail" -> "custom branch or kinematic-assumption fields are not yet wired into the production runner and cannot be ignored safely",
+      "UnsupportedFields" -> unwiredFields,
+      "RequestID" -> request["RequestID"]|>], Module]];
+  request
+];
+
+ft2ResolveFamilyRequest[file_, expectedID_] := Which[
+  file === "" && expectedID === "", None,
+  !StringQ[file] || !StringQ[expectedID] || file === "" || expectedID === "",
+    Failure["FeynmanTrickFamilyRequest", <|
+      "Detail" -> "FT_FAMILY_REQUEST_FILE and FT_FAMILY_REQUEST_ID must be supplied together"|>],
+  True, ft2LoadFamilyRequest[ExpandFileName[file], expectedID]
+];
+
+ft2FamilyRequestFile = envOrDefault["FT_FAMILY_REQUEST_FILE", ""];
+ft2FamilyRequestID = envOrDefault["FT_FAMILY_REQUEST_ID", ""];
+ft2FamilyRequest = ft2ResolveFamilyRequest[
+  ft2FamilyRequestFile, ft2FamilyRequestID];
+If[FailureQ[ft2FamilyRequest],
+  Print["Invalid custom Feynman-trick request: ", ft2FamilyRequest];
+  Exit[2]];
+ft2FamilyRunName = If[AssociationQ[ft2FamilyRequest],
+  "family_" <> StringTake[ft2FamilyRequest["RequestID"], -16], None];
+If[AssociationQ[ft2FamilyRequest] &&
+    envOrDefault["FT_EXAMPLES", "bubble"] =!= ft2FamilyRunName,
+  Print["Invalid custom Feynman-trick request: FT_EXAMPLES must equal the content-addressed internal run name ",
+    ft2FamilyRunName];
+  Exit[2]];
+
 FeynmanTrick`SetFTOption["FIREPath", runnerSettings["FIREPath"]];
 
 singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
@@ -145,6 +203,15 @@ ftPrepRelativeSourceIdentity[relativePath_String] := Module[{path},
 $ftPrepPreparationSourceIdentities =
   ftPrepRelativeSourceIdentity /@ $ftPrepPreparationSourcePaths;
 
+$ftPrepCustomFamilySourcePaths = {
+  "FeynmanTrick/FamilySpec.m",
+  "FeynmanTrick/PipelineRequest.m"
+};
+$ftPrepCustomFamilySourceIdentities =
+  ftPrepRelativeSourceIdentity /@ $ftPrepCustomFamilySourcePaths;
+$ft2AllDiscoveryRunnerSourceIdentity =
+  ftPrepRelativeSourceIdentity["Scripts/run_ft_stepwise2.m"];
+
 ftPrepSelectPreparationSourceIdentities[sourceMap_Association] :=
   Lookup[sourceMap, $ftPrepPreparationSourcePaths,
     Missing["PreparationSourceAbsent"]];
@@ -173,6 +240,246 @@ ftPrepContractRecord[name_String, topology_Association, sequence_List] := <|
     FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[],
   "PreparationSources" -> $ftPrepPreparationSourceIdentities
 |>;
+
+ftPrepCustomContractRecord[name_String, request_Association,
+    resolution_:None] := Module[
+  {family = request["Family"], contract, mode, selectionFields},
+  contract = ftPrepContractRecord[
+    name, family["Topology"], family["CombinationSequence"]];
+  mode = request["OutputMode"];
+  selectionFields = Switch[mode,
+    "Explicit",
+      If[resolution =!= None,
+        Return[Failure["FeynmanTrickPreparationContract", <|
+          "Detail" -> "explicit output selection cannot carry an All-master resolution"|>],
+          Module]];
+      <|
+        "OutputSelectionMode" -> "Explicit",
+        "OutputSelection" -> family["OutputIntegrals"]
+      |>,
+    "AllPendingDiscovery",
+      If[!TrueQ[
+          FeynmanTrick`PipelineRequest`ResolvedAllOutputSelectionQ[
+            request, resolution]],
+        Return[Failure["FeynmanTrickPreparationContract", <|
+          "Detail" -> "All output selection requires a valid resolved master contract"|>],
+          Module]];
+      <|
+        (* Keep the user's original All selection explicit while binding the
+           discovered ordered basis into every derived preparation identity. *)
+        "OutputSelectionMode" -> "AllResolved",
+        "OutputSelection" -> All,
+        "AllSelectionRequestID" -> resolution["SelectionRequestID"],
+        "OutputResolutionID" -> resolution["ResolutionID"],
+        "ResolvedOutputSelection" -> resolution["Masters"],
+        "ResolvedOutputRequests" -> resolution["OutputRequests"]
+      |>,
+    _,
+      Return[Failure["FeynmanTrickPreparationContract", <|
+        "Detail" -> "unsupported custom-family output mode",
+        "OutputMode" -> mode|>], Module]
+  ];
+  Join[contract, <|
+    "CustomFamilyPreparationSchema" ->
+      "FeynmanTrick.CustomFamilyPreparation/v1",
+    "FamilyID" -> family["FamilyID"],
+    "PipelineRequestID" -> request["RequestID"],
+    "NumericalPoint" -> family["NumericalPoint"],
+    "DimensionExpression" -> family["Dimension"],
+    "CustomFamilySources" -> $ftPrepCustomFamilySourceIdentities
+  |>, selectionFields]
+];
+
+$ft2AllDiscoveryCacheSchema = "FeynmanTrick.AllMasterDiscoveryCache/v2";
+$ft2AllDiscoveryContractSchema = "FeynmanTrick.AllMasterDiscoveryContract/v2";
+
+ft2AllDiscoveryTopology[request_Association] := Module[
+  {family = request["Family"], topology},
+  topology = family["Topology"];
+  topology = Join[topology, <|
+    "Name" -> family["Name"] <> "_L0_all_" <>
+      StringTake[request["RequestID"], -12],
+    "Propagators" ->
+      (topology["Propagators"] /. family["NumericalPoint"]),
+    "Replacements" ->
+      (topology["Replacements"] /. family["NumericalPoint"])
+  |>];
+  topology
+];
+
+ft2AllDiscoveryContractRecord[name_String, request_Association] := Module[
+  {family = request["Family"], fireSource},
+  fireSource = SelectFirst[$ftPrepPreparationSourceIdentities,
+    Lookup[#, "RelativePath", None] === "FeynmanTrick/FIREInterface.m" &,
+    Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "FIREInterface source identity is absent"|>]];
+  <|
+    "Schema" -> $ft2AllDiscoveryContractSchema,
+    "Example" -> name,
+    "PipelineRequestID" -> request["RequestID"],
+    "SelectionRequestID" -> request["OutputRequests"][[1, "RequestID"]],
+    "FamilyID" -> family["FamilyID"],
+    "DiscoveryTopology" -> ft2AllDiscoveryTopology[request],
+    "CombinationSequence" -> family["CombinationSequence"],
+    "NumericalPoint" -> family["NumericalPoint"],
+    "DimensionExpression" -> family["Dimension"],
+    "PreparationConfiguration" -> ftPrepConfigurationRecord[],
+    "WolframRuntime" -> <|"Version" -> $Version, "SystemID" -> $SystemID|>,
+    "FIRERuntime" ->
+      FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord[],
+    "DiscoverySources" -> Join[
+      {fireSource, $ft2AllDiscoveryRunnerSourceIdentity},
+      $ftPrepCustomFamilySourceIdentities]
+  |>
+];
+
+ft2AllDiscoveryContractIdentity[contract_Association] :=
+  "ft-all-discovery-contract-" <>
+    IntegerString[Hash[contract, "SHA256"], 16, 64];
+
+ft2AllDiscoveryCacheFile[name_String, contract_Association] :=
+  FileNameJoin[{prepCacheRoot, name <> "_all_resolution_" <>
+    StringTake[ft2AllDiscoveryContractIdentity[contract], -32] <> ".wxf"}];
+
+ft2AllDiscoveryCachePayloadQ[payload_, request_Association,
+    contract_Association] := Module[{resolution},
+  If[!AssociationQ[payload] || Sort[Keys[payload]] =!= Sort[{
+      "Schema", "Contract", "ContractIdentity", "Resolution"}] ||
+      Lookup[payload, "Schema", None] =!= $ft2AllDiscoveryCacheSchema ||
+      Lookup[payload, "Contract", None] =!= contract ||
+      Lookup[payload, "ContractIdentity", None] =!=
+        ft2AllDiscoveryContractIdentity[contract],
+    Return[False, Module]];
+  resolution = Lookup[payload, "Resolution", None];
+  TrueQ[FeynmanTrick`PipelineRequest`ResolvedAllOutputSelectionQ[
+    request, resolution]]
+];
+
+ft2LoadAllDiscoveryCache[file_String, request_Association,
+    contract_Association] := Module[{payload},
+  If[!FileExistsQ[file], Return[$Failed, Module]];
+  payload = Quiet[Check[Import[file, "WXF"], $Failed]];
+  If[ft2AllDiscoveryCachePayloadQ[payload, request, contract],
+    payload["Resolution"], $Failed]
+];
+
+ft2SaveAllDiscoveryCache[file_String, request_Association,
+    contract_Association, resolution_Association] := Module[
+  {payload, directory, tmp, wrote, loaded},
+  payload = <|
+    "Schema" -> $ft2AllDiscoveryCacheSchema,
+    "Contract" -> contract,
+    "ContractIdentity" -> ft2AllDiscoveryContractIdentity[contract],
+    "Resolution" -> resolution
+  |>;
+  If[!ft2AllDiscoveryCachePayloadQ[payload, request, contract],
+    Return[$Failed, Module]];
+  directory = DirectoryName[file];
+  If[!DirectoryQ[directory],
+    Quiet[Check[
+      CreateDirectory[directory, CreateIntermediateDirectories -> True],
+      Return[$Failed, Module]]]];
+  tmp = file <> ".tmp-" <> ToString[$ProcessID];
+  If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+  wrote = Quiet[Check[Export[tmp, payload, "WXF"], $Failed]];
+  If[wrote === $Failed || !FileExistsQ[tmp], Return[$Failed, Module]];
+  loaded = Quiet[Check[Import[tmp, "WXF"], $Failed]];
+  If[!ft2AllDiscoveryCachePayloadQ[loaded, request, contract],
+    Quiet[DeleteFile[tmp]];
+    Return[$Failed, Module]];
+  If[!Quiet[Check[
+      RenameFile[tmp, file, OverwriteTarget -> True]; True, False]],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    Return[$Failed, Module]];
+  file
+];
+
+(* Overridable seams let focused tests exercise every discovery guard without
+   starting FIRE.  Production calls the package functions directly. *)
+ft2AllSetupFIRE[topology_Association] :=
+  FeynmanTrick`FIREInterface`SetupFIRE[topology];
+ft2AllFindBasis[topology_Association] :=
+  FeynmanTrick`FIREInterface`FindBasis[topology];
+
+ft2ValidateAllDiscoverySetup[request_Association, setupTopology_] := Module[
+  {family = request["Family"], expectedTopology, expectedN, actualN,
+   numerators},
+  If[!AssociationQ[setupTopology],
+    Return[Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "SetupFIRE failed during L0 All-master discovery"|>], Module]];
+  expectedN = family["NumPropagators"];
+  expectedTopology = ft2AllDiscoveryTopology[request];
+  actualN = Lookup[setupTopology, "NumPropagators", None];
+  numerators = Lookup[setupTopology, "NumeratorPositions", {}];
+  If[actualN =!= expectedN || numerators =!= {} ||
+      Lookup[setupTopology, "OriginalNumPropagators", expectedN] =!= expectedN,
+    Return[Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "FIRE added irreducible numerator slots that the current Feynman-trick merge recursion cannot represent",
+      "ExpectedArity" -> expectedN,
+      "ActualArity" -> actualN,
+      "NumeratorPositions" -> numerators|>], Module]];
+  If[!TrueQ[Lookup[setupTopology, "StartFileReady", False]] ||
+      Lookup[setupTopology, "Name", None] =!= expectedTopology["Name"] ||
+      Lookup[setupTopology, "LoopMomenta", None] =!=
+        expectedTopology["LoopMomenta"] ||
+      Lookup[setupTopology, "ExternalMomenta", None] =!=
+        expectedTopology["ExternalMomenta"] ||
+      Lookup[setupTopology, "OriginalPropagators", None] =!=
+        expectedTopology["Propagators"] ||
+      Lookup[setupTopology, "Replacements", None] =!=
+        expectedTopology["Replacements"] ||
+      Lookup[setupTopology, "EliminatedPositions", {}] =!=
+        expectedTopology["EliminatedPositions"],
+    Return[Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "SetupFIRE returned stale or mathematically different L0 topology metadata"|>],
+      Module]];
+  setupTopology
+];
+
+ft2ValidateAllDiscoveryMasters[request_Association, masters_] :=
+  FeynmanTrick`PipelineRequest`CreateResolvedAllOutputSelection[
+    request, masters];
+
+ft2DiscoverAllOutputSelection[request_Association] := Module[
+  {topology, setupTopology, basisTopology, validatedSetup, resolution},
+  topology = ft2AllDiscoveryTopology[request];
+  setupTopology = Quiet[Check[ft2AllSetupFIRE[topology], $Failed]];
+  validatedSetup = ft2ValidateAllDiscoverySetup[request, setupTopology];
+  If[FailureQ[validatedSetup], Return[validatedSetup, Module]];
+  basisTopology = Quiet[Check[ft2AllFindBasis[validatedSetup], $Failed]];
+  If[!AssociationQ[basisTopology] ||
+      KeyDrop[basisTopology, "Masters"] =!=
+        KeyDrop[validatedSetup, "Masters"],
+    Return[Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "FindBasis failed or returned a different L0 setup during All-master discovery"|>],
+      Module]];
+  resolution = ft2ValidateAllDiscoveryMasters[
+    request, Lookup[basisTopology, "Masters", None]];
+  resolution
+];
+
+ft2ResolveAllOutputSelection[name_String, request_Association] := Module[
+  {contract, file, cached, resolution, saved},
+  contract = ft2AllDiscoveryContractRecord[name, request];
+  If[AnyTrue[Lookup[contract, "DiscoverySources", {}], FailureQ],
+    Return[Failure["FeynmanTrickAllMasterDiscovery", <|
+      "Detail" -> "All-master discovery source identity is incomplete",
+      "Contract" -> contract|>], Module]];
+  file = ft2AllDiscoveryCacheFile[name, contract];
+  cached = If[forcePrepRebuild, $Failed,
+    ft2LoadAllDiscoveryCache[file, request, contract]];
+  If[AssociationQ[cached],
+    Print["FTPREP ALL DISCOVERY CACHE HIT ", file];
+    Return[cached, Module]];
+  Print["FTPREP ALL DISCOVERY CACHE MISS ", file];
+  resolution = ft2DiscoverAllOutputSelection[request];
+  If[FailureQ[resolution], Return[resolution, Module]];
+  saved = ft2SaveAllDiscoveryCache[file, request, contract, resolution];
+  If[saved === $Failed,
+    Print["FTPREP ALL DISCOVERY CACHE WRITE FAILED ", file],
+    Print["FTPREP ALL DISCOVERY CACHE WRITE ", file]];
+  resolution
+];
 
 ftPrepContractKey[contract_Association] := Hash[contract, "SHA256"];
 
@@ -213,13 +520,37 @@ ftPrepProvenanceQ[provenance_] := AssociationQ[provenance] &&
     _, False];
 
 $ftLadderCheckpointVersion = 2;
-$ftLadderSourceFingerprint = Hash[
-  ({#, FileHash[#, "SHA256"]} & /@ Sort[Join[
+$ft2ActivePipelineRequestID = None;
+$ft2ActiveFamilyID = None;
+$ft2ActiveAllSelectionRequestID = None;
+$ft2ActiveOutputResolutionID = None;
+$ft2CheckpointRequestMetadataKeys = {
+  "PipelineRequestID", "FamilyID", "AllSelectionRequestID",
+  "OutputResolutionID"
+};
+
+ft2CheckpointRequestMetadata[] :=
+  If[StringQ[$ft2ActivePipelineRequestID] && StringQ[$ft2ActiveFamilyID],
+    Join[<|"PipelineRequestID" -> $ft2ActivePipelineRequestID,
+      "FamilyID" -> $ft2ActiveFamilyID|>,
+      If[StringQ[$ft2ActiveAllSelectionRequestID] &&
+          StringQ[$ft2ActiveOutputResolutionID],
+        <|
+          "AllSelectionRequestID" -> $ft2ActiveAllSelectionRequestID,
+          "OutputResolutionID" -> $ft2ActiveOutputResolutionID
+        |>, <||>]],
+    <||>];
+
+$ftLadderSourcePaths = Sort[DeleteDuplicates[Join[
     FileNames["*.m", FileNameJoin[{repoRoot, "DiffExp2"}], Infinity],
+    FileNames["*.m", FileNameJoin[{repoRoot, "FeynmanTrick"}], Infinity],
     Select[FileNames["*", FileNameJoin[{repoRoot, "cpp"}], Infinity],
       FileType[#] === File &],
     {FileNameJoin[{repoRoot, "CMakeLists.txt"}]},
-    {ExpandFileName[$InputFileName]}]]), "SHA256"];
+    {FileNameJoin[{repoRoot, "FeynmanTrick.m"}]},
+    {ExpandFileName[$InputFileName]}]]];
+$ftLadderSourceFingerprint = Hash[
+  ({#, FileHash[#, "SHA256"]} & /@ $ftLadderSourcePaths), "SHA256"];
 
 preparedFTDataQ[data_] := AssociationQ[data] &&
   IntegerQ[Lookup[data, "NumLevels", None]] &&
@@ -236,7 +567,8 @@ ftPrepRuntimeRecordCompatibleQ[stored_, expected_Association] :=
 
 preparedFTDataMatchesContractQ[data_, contract_Association,
     provenance_:Automatic] := Module[
-  {nLevels, levels, config, runtime, provenanceRecord, legacyV1Q},
+  {nLevels, levels, config, runtime, provenanceRecord, legacyV1Q,
+   customQ, levelZero, outputMode, customOutputMatchQ},
   If[!preparedFTDataQ[data] ||
       Lookup[contract, "Schema", None] =!= $ftPrepContractSchema,
     Return[False, Module]];
@@ -248,6 +580,28 @@ preparedFTDataMatchesContractQ[data_, contract_Association,
   levels = Lookup[data, "Levels", <||>];
   config = Lookup[contract, "PreparationConfiguration", <||>];
   runtime = Lookup[contract, "FIRERuntime", <||>];
+  customQ = KeyExistsQ[contract, "PipelineRequestID"];
+  levelZero = Lookup[levels, 0, <||>];
+  outputMode = Lookup[contract, "OutputSelectionMode", None];
+  customOutputMatchQ = If[!customQ, True, Switch[outputMode,
+    "Explicit",
+      Lookup[levelZero, "Masters", Missing["Absent"]] ===
+        Lookup[contract, "OutputSelection", Missing["ContractAbsent"]],
+    "AllResolved",
+      Lookup[contract, "OutputSelection", Missing["ContractAbsent"]] === All &&
+      Lookup[levelZero, "Masters", Missing["Absent"]] ===
+        Lookup[contract, "ResolvedOutputSelection",
+          Missing["ContractAbsent"]] &&
+      Lookup[data, "AllSelectionRequestID", Missing["Absent"]] ===
+        Lookup[contract, "AllSelectionRequestID",
+          Missing["ContractAbsent"]] &&
+      Lookup[data, "OutputResolutionID", Missing["Absent"]] ===
+        Lookup[contract, "OutputResolutionID",
+          Missing["ContractAbsent"]] &&
+      Lookup[data, "ResolvedOutputRequests", Missing["Absent"]] ===
+        Lookup[contract, "ResolvedOutputRequests",
+          Missing["ContractAbsent"]],
+    _, False]];
   TrueQ[
     Lookup[data, "TopTopology", Missing["Absent"]] ===
       Lookup[contract, "Topology", Missing["Absent"]] &&
@@ -257,6 +611,17 @@ preparedFTDataMatchesContractQ[data_, contract_Association,
       Lookup[contract, "NumericalPoint", Missing["Absent"]] &&
     Lookup[data, "FixedParamValue", Missing["Absent"]] ===
       Lookup[config, "FixedParameterValue", Missing["Unset"]] &&
+    (!customQ || (
+      Lookup[contract, "CustomFamilyPreparationSchema", None] ===
+        "FeynmanTrick.CustomFamilyPreparation/v1" &&
+      Lookup[data, "FamilyID", Missing["Absent"]] ===
+        Lookup[contract, "FamilyID", Missing["ContractAbsent"]] &&
+      Lookup[data, "PipelineRequestID", Missing["Absent"]] ===
+        Lookup[contract, "PipelineRequestID", Missing["ContractAbsent"]] &&
+      TrueQ[customOutputMatchQ] &&
+      Lookup[Lookup[data, "TopTopology", <||>],
+        "Dimension", Missing["Absent"]] ===
+        Lookup[contract, "DimensionExpression", Missing["ContractAbsent"]])) &&
     nLevels === Length[Lookup[contract, "CombinationSequence", {}]] &&
     AssociationQ[runtime] && runtime =!= <||> &&
     AllTrue[Range[nLevels], Function[level,
@@ -556,7 +921,7 @@ saveLadderCheckpoint[file_, payload_] := Module[
   If[ladderCheckpointDir === "", Return[Null, Module]];
   If[!DirectoryQ[DirectoryName[file]],
     CreateDirectory[DirectoryName[file], CreateIntermediateDirectories -> True]];
-  saved = Join[payload, <|
+  saved = Join[payload, ft2CheckpointRequestMetadata[], <|
     "CheckpointVersion" -> $ftLadderCheckpointVersion,
     "SourceFingerprint" -> $ftLadderSourceFingerprint|>];
   Global`$FT2LadderCheckpoint = saved;
@@ -766,7 +1131,8 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
    cachedArms, recordedArms, expectedCharts, boundaryWidths, boundaryShift,
    requiredRaw, preservedRaw, preservedSource, nativeRecord,
    nativePlanRecord, nativePlanIdentity, transportKindQ,
-   nativeTransportRecord, nativeContract},
+   nativeTransportRecord, nativeContract, storedRequestMetadata,
+   expectedRequestMetadata},
   If[!FileExistsQ[file],
     Return[ladderCheckpointReject[file, "file does not exist"], Module]];
   Clear[Global`$FT2LadderCheckpoint];
@@ -777,6 +1143,13 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
   Clear[Global`$FT2LadderCheckpoint];
   If[!AssociationQ[payload],
     Return[ladderCheckpointReject[file, "payload is not an Association"], Module]];
+  storedRequestMetadata = KeyTake[payload,
+    $ft2CheckpointRequestMetadataKeys];
+  expectedRequestMetadata = ft2CheckpointRequestMetadata[];
+  If[storedRequestMetadata =!= expectedRequestMetadata,
+    Return[ladderCheckpointReject[file,
+      "custom family/request/output-resolution identity does not match"],
+      Module]];
   If[KeyExistsQ[payload, "CheckpointVersion"] &&
       payload["CheckpointVersion"] =!= $ftLadderCheckpointVersion,
     Return[ladderCheckpointReject[file, "unsupported checkpoint version"], Module]];
@@ -1178,6 +1551,40 @@ ft2FinalRow[example_, raw_, certification_] := Module[
   If[epsOrder > 0,
     Append[result, "Coefficients" -> coefficients], result]];
 
+ft2CustomFinalRows[example_, familyID_String, pipelineRequestID_String,
+    masters_List, rawValues_List, certifications_List,
+    outputRequests_List] := Module[{n, rows},
+  n = Length[masters];
+  If[n === 0 || Length[rawValues] =!= n ||
+      Length[certifications] =!= n || Length[outputRequests] =!= n ||
+      !And @@ MapThread[
+        Function[{request, master, ordinal},
+          AssociationQ[request] &&
+            Lookup[request, "IndexVector", None] === master &&
+            Lookup[request, "RequestOrdinal", None] === ordinal &&
+            StringQ[Lookup[request, "RequestID", None]] &&
+            StringQ[Lookup[request, "PhysicalIntegralID", None]]],
+        {outputRequests, masters, Range[n]}],
+    Return[Failure["FeynmanTrickOutputCertification", <|
+      "Detail" -> "custom FINAL values do not match the ordered output-request contract",
+      "Masters" -> masters,
+      "OutputRequests" -> outputRequests|>], Module]];
+  rows = MapThread[ft2FinalRow,
+    {ConstantArray[example, n], rawValues, certifications}];
+  If[AnyTrue[rows, FailureQ],
+    Return[First[Select[rows, FailureQ]], Module]];
+  MapThread[
+    Function[{row, master, request}, Join[row, <|
+        "Master" -> master,
+        "PipelineRequestID" -> pipelineRequestID,
+        "FamilyID" -> familyID,
+        "RequestID" -> request["RequestID"],
+        "RequestOrdinal" -> request["RequestOrdinal"],
+        "PhysicalIntegralID" -> request["PhysicalIntegralID"]|>,
+      KeyTake[request, {"SelectionRequestID", "ResolutionID"}]]],
+    {rows, masters, outputRequests}]
+];
+
 ft2OutputLine[prefix_String, row_Association] := Module[{json},
   json = Quiet[Check[ExportString[
     row /. x_Rational :> N[x, 50], "RawJSON", "Compact" -> True],
@@ -1291,7 +1698,7 @@ ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
     configuration_Association, deltaPrescriptions_List,
     extraSingularFactors_List, nativePlanIdentity_String] := Module[
   {record},
-  record = <|
+  record = Join[<|
     "Schema" -> "FeynmanTrick.NativeTransportContract/v1",
     "SourceFingerprint" -> $ftLadderSourceFingerprint,
     "Example" -> name, "Level" -> level, "PrepKey" -> prepKey,
@@ -1310,7 +1717,8 @@ ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
     "BranchIdentity" -> ft2CanonicalIdentity[
       "ft2-native-branch-",
       {deltaPrescriptions, extraSingularFactors}],
-    "NativeEpsilonPlanIdentity" -> nativePlanIdentity|>;
+    "NativeEpsilonPlanIdentity" -> nativePlanIdentity|>,
+    ft2CheckpointRequestMetadata[]];
   <|"Record" -> record, "Identity" -> ft2CanonicalIdentity[
     "ft2-native-transport-contract-", record]|>];
 
@@ -2325,36 +2733,116 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       Lookup[exported, "CompatibilityExports", Length[nativeEntries]], 0],
     "CheckpointRecord" -> checkpointAuditRecord|>];
 
-runExample[name_String] := Module[
+runExample[name_String, familyRequest_:None] := Module[
   {topology, sequence, prepContract, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
    resumeCheckpoint = None, startLevel, finalRaw = None,
-   finalCertification = None, ftEps, dimVar,
+   finalCertifications = None, ftEps, dimVar,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
    nativeEpsilonExecution = None, initialDeepPrefactors,
    deepRelativeGauge, deepGaugeOffset, deepBoundaryWindow,
    deepRequiredSourceCompleteMax, deepBoundaryDeficit,
-   discoveredCheckpoint},
-  Print["EXAMPLE ", name];
-  FeynmanTrick`SetFTOption["DimensionExpression", FTExampleDimension[name]];
-  topology = FTExampleTopology[name, "step"];
-  If[topology === $Failed, Return[$Failed]];
-  sequence = FTExampleSequence[name];
-  prepContract = ftPrepContractRecord[name, topology, sequence];
+   discoveredCheckpoint, customQ, family, outputName, numericalPoint,
+   outputIntegrals, outputRequests, dimensionExpression, familyID,
+   pipelineRequestID, outputMode = None, outputResolution = None,
+   outputResolutionLine},
+  customQ = familyRequest =!= None;
+  If[customQ &&
+      !TrueQ[FeynmanTrick`PipelineRequest`PipelineRequestQ[familyRequest]],
+    Print["CUSTOM FAMILY REQUEST INVALID ", familyRequest];
+    Return[$Failed]];
+  If[customQ,
+    family = familyRequest["Family"];
+    If[name =!= "family_" <> StringTake[familyRequest["RequestID"], -16],
+      Print["CUSTOM FAMILY REQUEST REJECT: internal run name is not content-addressed"];
+      Return[$Failed]];
+    outputMode = familyRequest["OutputMode"];
+    If[!MemberQ[{"Explicit", "AllPendingDiscovery"}, outputMode],
+      Print["CUSTOM FAMILY REQUEST REJECT: unsupported output mode"];
+      Return[$Failed]];
+    If[AnyTrue[{"AnalyticPrescription", "Prescriptions"},
+        KeyExistsQ[family["Definition"], #] &],
+      Print["CUSTOM FAMILY REQUEST REJECT: analytic prescriptions are not yet wired"];
+      Return[$Failed]];
+    outputName = family["Name"];
+    numericalPoint = family["NumericalPoint"];
+    outputIntegrals = If[outputMode === "Explicit",
+      family["OutputIntegrals"], All];
+    outputRequests = If[outputMode === "Explicit",
+      familyRequest["OutputRequests"], {}];
+    dimensionExpression = family["Dimension"];
+    familyID = family["FamilyID"];
+    pipelineRequestID = familyRequest["RequestID"];
+    topology = family["Topology"];
+    sequence = family["CombinationSequence"],
+    outputName = name;
+    numericalPoint = {};
+    outputIntegrals = Automatic;
+    outputRequests = Automatic;
+    dimensionExpression = FTExampleDimension[name];
+    familyID = None;
+    pipelineRequestID = None;
+    topology = FTExampleTopology[name, "step"];
+    If[topology === $Failed, Return[$Failed]];
+    sequence = FTExampleSequence[name]
+  ];
+  Print["EXAMPLE ", outputName];
+  FeynmanTrick`SetFTOption["DimensionExpression", dimensionExpression];
+  If[customQ && outputMode === "AllPendingDiscovery",
+    outputResolution = ft2ResolveAllOutputSelection[name, familyRequest];
+    If[FailureQ[outputResolution],
+      Print["CUSTOM FAMILY ALL DISCOVERY FAIL ", outputResolution];
+      Return[$Failed]];
+    outputIntegrals = outputResolution["Masters"];
+    outputRequests = outputResolution["OutputRequests"];
+    Print["CUSTOM FAMILY ALL RESOLVED count=", Length[outputIntegrals],
+      " identity=", outputResolution["ResolutionID"]];
+    outputResolutionLine = ft2OutputLine[
+      "OUTPUT_RESOLUTION ", outputResolution];
+    If[FailureQ[outputResolutionLine],
+      Print["CUSTOM FAMILY ALL RESOLUTION OUTPUT FAIL ",
+        outputResolutionLine];
+      Return[$Failed]];
+    Print[outputResolutionLine]];
+  $ft2ActivePipelineRequestID = pipelineRequestID;
+  $ft2ActiveFamilyID = familyID;
+  $ft2ActiveAllSelectionRequestID = If[AssociationQ[outputResolution],
+    outputResolution["SelectionRequestID"], None];
+  $ft2ActiveOutputResolutionID = If[AssociationQ[outputResolution],
+    outputResolution["ResolutionID"], None];
+  prepContract = If[customQ,
+    ftPrepCustomContractRecord[name, familyRequest, outputResolution],
+    ftPrepContractRecord[name, topology, sequence]];
   If[!AssociationQ[prepContract] ||
-      AnyTrue[Lookup[prepContract, "PreparationSources", {}], FailureQ],
+      AnyTrue[Join[
+        Lookup[prepContract, "PreparationSources", {}],
+        Lookup[prepContract, "CustomFamilySources", {}]], FailureQ],
     Print["FTPREP CONTRACT BUILD FAILED ", prepContract];
     Return[$Failed]];
   prepKey = ftPrepContractKey[prepContract];
   prepFile = ftPrepFile[name, prepKey];
   ftData = If[forcePrepRebuild, $Failed,
     loadPreparedFT[prepFile, prepContract]];
-  If[ftData === $Failed && !forcePrepRebuild && migrateLegacyPrep,
+  If[ftData === $Failed && !forcePrepRebuild && migrateLegacyPrep && !customQ,
     ftData = migrateLegacyPreparedFT[name, prepFile, prepContract]];
   If[ftData === $Failed,
     Print["FTPREP CACHE MISS ", prepFile];
-    ftData = FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
-      topology, sequence, {}];
+    ftData = If[customQ,
+      FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
+        topology, sequence, numericalPoint,
+        "OutputIntegrals" -> outputIntegrals],
+      FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
+        topology, sequence, {}]];
+    If[customQ && AssociationQ[ftData],
+      ftData = Join[ftData, <|
+          "FamilyID" -> familyID,
+          "PipelineRequestID" -> pipelineRequestID|>,
+        If[AssociationQ[outputResolution], <|
+          "AllSelectionRequestID" -> outputResolution["SelectionRequestID"],
+          "OutputResolutionID" -> outputResolution["ResolutionID"],
+          "ResolvedOutputRequests" -> outputResolution["OutputRequests"]
+        |>, <||>]]];
+    If[ftData === $Failed, Return[$Failed]];
     outputDir = FileNameJoin[{$TemporaryDirectory,
       "FT2_" <> name <> "_" <> ToString[$ProcessID]}];
     If[DirectoryQ[outputDir], DeleteDirectory[outputDir, DeleteContents -> True]];
@@ -2459,7 +2947,7 @@ runExample[name_String] := Module[
        of exact-symbolic (Log/Gamma giants grind the Laurent-field algebra) *)
     currentBCs = N[deepBoundary["BoundaryValues"], inputPrecision];
     currentPrefactors = deepBoundary["EpsPrefactors"];
-    If[FailureQ[printRows[name, nLevels,
+    If[FailureQ[printRows[outputName, nLevels,
       ftData["Levels"][nLevels]["Masters"],
       Table[DiffExp2`EpsSeries`ESShift[
         DiffExp2`EpsSeries`ESNew[0, currentBCs[[i]]], -currentPrefactors[[i]]],
@@ -2966,7 +3454,7 @@ runExample[name_String] := Module[
     ];
     If[MemberQ[rawES, $Failed], Throw[$Failed, "FT2Abort"]];
     rawES = DiffExp2`EpsSeries`ESTrim /@ rawES;
-    If[FailureQ[printRows[name, level - 1, mastersBelow, rawES,
+    If[FailureQ[printRows[outputName, level - 1, mastersBelow, rawES,
         ConstantArray[0, Length[mastersBelow]], rowCertifications]],
       Print["FTLADDER OUTPUT CERTIFICATION FAIL level=", level - 1];
       Throw[$Failed, "FT2Abort"]];
@@ -3048,28 +3536,46 @@ runExample[name_String] := Module[
           " availableTops=", kmaxAvail];
         Throw[$Failed, "FT2Abort"]]];
     finalRaw = rawES;
-    finalCertification = First[rowCertifications]],
+    finalCertifications = rowCertifications],
     {level, startLevel, 1, -1}], "FT2Abort"];
   If[abortRes === $Failed, Return[$Failed]];
   If[abortRes === "Stopped", Return[True]]];
   If[finalRaw === None || MemberQ[finalRaw, $Failed], Return[$Failed]];
 
-  Module[{finalRow, finalLine},
-    finalRow = ft2FinalRow[name, finalRaw[[1]], finalCertification];
-    If[FailureQ[finalRow], Print["FINAL OUTPUT FAIL ", finalRow];
-      Return[$Failed, Module]];
-    finalLine = ft2OutputLine["FINAL ", finalRow];
-    If[FailureQ[finalLine], Print["FINAL OUTPUT FAIL ", finalLine];
-      Return[$Failed, Module]];
-    Print[finalLine]];
+  If[customQ,
+    Module[{finalRows, finalLines},
+      finalRows = ft2CustomFinalRows[
+        outputName, familyID, pipelineRequestID,
+        ftData["Levels"][0]["Masters"], finalRaw, finalCertifications,
+        outputRequests];
+      If[FailureQ[finalRows], Print["FINAL OUTPUT FAIL ", finalRows];
+        Return[$Failed, Module]];
+      finalLines = ft2OutputLine["FINAL ", #] & /@ finalRows;
+      If[AnyTrue[finalLines, FailureQ],
+        Print["FINAL OUTPUT FAIL ", First[Select[finalLines, FailureQ]]];
+        Return[$Failed, Module]];
+      Scan[Print, finalLines]],
+    (* Preserve the registry FINAL association and serialization exactly. *)
+    Module[{finalRow, finalLine},
+      finalRow = ft2FinalRow[name, finalRaw[[1]],
+        First[finalCertifications]];
+      If[FailureQ[finalRow], Print["FINAL OUTPUT FAIL ", finalRow];
+        Return[$Failed, Module]];
+      finalLine = ft2OutputLine["FINAL ", finalRow];
+      If[FailureQ[finalLine], Print["FINAL OUTPUT FAIL ", finalLine];
+        Return[$Failed, Module]];
+      Print[finalLine]]];
   True];
 
 (* Let the focused checkpoint tests load these definitions without starting
    FIRE or terminating their Wolfram kernel. *)
 If[envOrDefault["FT_RUNNER_DEFINITIONS_ONLY", "0"] =!= "1",
-  requested = StringTrim /@
-    StringSplit[envOrDefault["FT_EXAMPLES", "bubble"], ","];
-  Do[
-    If[runExample[name] === $Failed, Print["FAILED ", name]; Quit[1]],
-    {name, requested}];
+  If[AssociationQ[ft2FamilyRequest],
+    If[runExample[ft2FamilyRunName, ft2FamilyRequest] === $Failed,
+      Print["FAILED ", ft2FamilyRunName]; Quit[1]],
+    requested = StringTrim /@
+      StringSplit[envOrDefault["FT_EXAMPLES", "bubble"], ","];
+    Do[
+      If[runExample[name] === $Failed, Print["FAILED ", name]; Quit[1]],
+      {name, requested}]];
   Quit[0]];

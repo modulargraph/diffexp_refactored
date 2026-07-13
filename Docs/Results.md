@@ -51,6 +51,26 @@ targets the finite coefficient, so the table establishes agreement rather
 than an identical-workload race.  Details and reproduction commands are in
 [C++ Recurrence Backend](CppBackend.md#unequal-mass-three-loop-banana-comparison).
 
+## Fully massive pentagon
+
+For the one-loop five-propagator pentagon in ``D=4-2 eps`` with squared
+internal masses ``{1,3/2,4/3,5/4,6/5}``, ``p_i^2=-1``, and
+``p_i.p_j=1/4`` for ``i != j``, the completed ladder returned
+
+```text
+eps^0    0.018133786686301957642296020548326099321491282408573
+eps^1    0.0076131154161440535648564784592130217117538189027361
+eps^2    0.0052144755784776811411112368938047226922782076161285
+```
+
+All three coefficients differ by at most ``2.3e-21`` from independently
+integrated, 20-digit Feynman-parameter pins.  The final WP300, expansion-order
+50 numerical pass resumed at level 1 from the same campaign's boundary
+checkpoint and warm FIRE preparation and took ``1900.513`` seconds (about
+31 minutes 41 seconds).  This is deliberately reported as a resumed warm
+timing, not as a cold end-to-end benchmark.  The independent evaluator is
+[Scripts/pentagon_massive_oracle.m](../Scripts/pentagon_massive_oracle.m).
+
 ## Box-bubble
 
 For the massless two-loop ``box_bubble`` fixture at ``s=-1``, ``t=-1/3`` in

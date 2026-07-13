@@ -9068,22 +9068,40 @@ class PreparedChart final : public PreparedChartBase {
     RecurrenceProblem<Scalar> problem;
     parse_run_state(run, prepared_, problem);
     if (problem.log_max != 0 || !problem.has_initial ||
+        problem.adaptive_lower_frame_probe ||
         problem.source.has_value() || problem.return_u ||
         !ScalarTraits<Scalar>::is_zero(problem.a_target) ||
         !ScalarTraits<Scalar>::is_zero(problem.b_target) ||
+        problem.a_shift_min != 0 ||
+        problem.a_shifts.size() !=
+            static_cast<std::size_t>(problem.nmax) + 1 ||
         problem.schedule.size() !=
             static_cast<std::size_t>(problem.nmax) + 1)
       throw std::invalid_argument(
           "regular value handoff prototype is not one homogeneous (0,0,0) value run");
+    const auto scalar_identical = [](const Scalar& left,
+                                     const Scalar& right) {
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        return acb_equal(left.raw(), right.raw());
+      else
+        return left == right;
+    };
     for (std::size_t n = 0; n < problem.schedule.size(); ++n) {
+      const auto expected_shift = ScalarTraits<Scalar>::integer(
+          static_cast<long>(n));
+      if (!scalar_identical(problem.a_shifts[n], expected_shift))
+        throw std::invalid_argument(
+            "regular value handoff prototype a-shifts are not the exact Taylor indices");
       if (problem.schedule[n].size() != prepared_.blocks.size())
         throw std::invalid_argument(
             "regular value handoff prototype schedule has the wrong block partition");
       for (const auto& step : problem.schedule[n]) {
         const auto expected = n == 0 ? StepCase::Resonant : StepCase::Taylor;
-        if (step.kind != expected)
+        if (step.kind != expected ||
+            !scalar_identical(step.d_a, expected_shift) ||
+            !ScalarTraits<Scalar>::is_zero(step.d_b))
           throw std::invalid_argument(
-              "regular value handoff prototype contains a singular or pseudo recurrence step");
+              "regular value handoff prototype schedule is not resonant at zero and Taylor by exact index");
       }
     }
 

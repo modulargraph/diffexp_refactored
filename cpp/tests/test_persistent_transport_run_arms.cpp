@@ -630,6 +630,67 @@ void test_regular_value_hop_checkpoint() {
       throw std::runtime_error(
           "unsafe exact center tail did not fail closed before solving: " +
           json::serialize(unsafe_tail));
+
+    const auto expect_rejected_template = [&](json::object solver,
+                                               const char* label,
+                                               const char* detail) {
+      const auto before_rejection = session_stats(session);
+      const auto rejected = consume_value_hop(
+          session, plan, "lower", anchor, "streaming-state-anchor",
+          std::move(solver), "value-hop-invalid-template");
+      const auto after_rejection = session_stats(session);
+      if (rejected.at("status") != "error" ||
+          std::string(rejected.at("detail").as_string()).find(detail) ==
+              std::string::npos ||
+          after_rejection.at("locals") != before_rejection.at("locals") ||
+          counter(after_rejection, "local_solves") !=
+              counter(before_rejection, "local_solves") ||
+          after_rejection.at("pending_local_solves") != 0)
+        throw std::runtime_error(
+            std::string("regular value-hop accepted or retained state for ") +
+            label + ": " + json::serialize(rejected) + " / " +
+            json::serialize(after_rejection));
+    };
+    {
+      auto solver = value_solver("-2/3");
+      solver.at("run").as_object()["adaptive_probe"] = true;
+      expect_rejected_template(std::move(solver), "adaptive probe",
+                               "not one homogeneous (0,0,0) value run");
+    }
+    {
+      auto solver = value_solver("-2/3");
+      solver.at("run").as_object()["a_shift_min"] = -1;
+      expect_rejected_template(std::move(solver), "nonzero shift origin",
+                               "not one homogeneous (0,0,0) value run");
+    }
+    {
+      auto solver = value_solver("-2/3");
+      solver.at("run").as_object().at("a_shifts").as_array().emplace_back(
+          "5");
+      expect_rejected_template(std::move(solver), "extra a-shift",
+                               "not one homogeneous (0,0,0) value run");
+    }
+    {
+      auto solver = value_solver("-2/3");
+      solver.at("run").as_object().at("a_shifts").as_array()[2] = "7";
+      expect_rejected_template(std::move(solver), "non-Taylor a-shift",
+                               "a-shifts are not the exact Taylor indices");
+    }
+    {
+      auto solver = value_solver("-2/3");
+      solver.at("run").as_object().at("schedule").as_array()[2]
+          .as_array()[0].as_object()["da"] = "7";
+      expect_rejected_template(std::move(solver), "non-Taylor da",
+                               "Taylor by exact index");
+    }
+    {
+      auto solver = value_solver("-2/3");
+      solver.at("run").as_object().at("schedule").as_array()[2]
+          .as_array()[0].as_object()["db"] = "1";
+      expect_rejected_template(std::move(solver), "nonzero db",
+                               "Taylor by exact index");
+    }
+
     const auto lower = consume_value_hop(
         session, plan, "lower", anchor, "streaming-state-anchor",
         value_solver("-2/3"), "value-hop-success");

@@ -2456,7 +2456,10 @@ class StoredLocalBase {
       const Rational& local_begin, const Rational& local_end,
       const EpsilonWindow& delivered_epsilon,
       std::optional<std::int32_t> exact_rim,
-      bool certify_tail) = 0;
+      bool certify_tail,
+      const std::optional<
+          StoredLineIntegrationOptions::BoundedDivergentCancellation>&
+          divergent_cancellation = std::nullopt) = 0;
   virtual json::object endpoint_metadata() const = 0;
   virtual json::object exact_analytic_metadata() const = 0;
   virtual void require_exact_plan_binding(
@@ -2883,7 +2886,10 @@ class StoredLocal final : public StoredLocalBase {
       const Rational& local_begin, const Rational& local_end,
       const EpsilonWindow& delivered_epsilon,
       std::optional<std::int32_t> exact_rim,
-      bool certify_tail) override {
+      bool certify_tail,
+      const std::optional<
+          StoredLineIntegrationOptions::BoundedDivergentCancellation>&
+          divergent_cancellation) override {
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       throw std::domain_error(
           "native planned line integration rejects unresolved symbolic "
@@ -2916,6 +2922,7 @@ class StoredLocal final : public StoredLocalBase {
       StoredLineIntegrationOptions options;
       options.delivered_epsilon = delivered_epsilon;
       options.imaginary_sign = exact_rim;
+      options.divergent_cancellation = divergent_cancellation;
       if (local_begin == local_end)
         throw std::invalid_argument(
             "native planned line tile has zero local length");
@@ -3739,8 +3746,7 @@ constexpr const char* kRetainedRationalRowCapability =
 
 template <typename Scalar>
 PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
-    const json::value& raw, const LocalSolution<Scalar>& source) {
-  const auto& row = as_object(raw, "prepared rational local row");
+    const json::object& row, const LocalSolution<Scalar>& source) {
   require_exact_keys(row,
       {"schema", "columns", "exact_identity", "entries"},
       "prepared rational local row");
@@ -3870,6 +3876,13 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
 }
 
 template <typename Scalar>
+PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
+    const json::value& raw, const LocalSolution<Scalar>& source) {
+  return parse_prepared_rational_row<Scalar>(
+      as_object(raw, "prepared rational local row"), source);
+}
+
+template <typename Scalar>
 LocalSolution<Scalar> exact_zero_scalar_local_like(
     const LocalSolution<Scalar>& source,
     const std::string& checkpoint_identity) {
@@ -3896,7 +3909,9 @@ std::shared_ptr<StoredLocalBase> build_rational_row_local(
     slong precision_bits,
     const std::shared_ptr<StoredLocal<Scalar>>& source,
     const std::shared_ptr<StoredLocalBase>& erased_source,
-    bool prepare_line_tail = true) {
+    bool prepare_line_tail = true,
+    std::optional<std::int32_t> projection_complete_max = std::nullopt,
+    const json::object* prepared_row_override = nullptr) {
   if (source == nullptr || erased_source == nullptr ||
       source.get() != erased_source.get())
     throw std::logic_error(
@@ -3921,8 +3936,11 @@ std::shared_ptr<StoredLocalBase> build_rational_row_local(
     ComplexBall::set_precision(precision_bits);
   }
   const auto started = std::chrono::steady_clock::now();
-  auto matrix = parse_prepared_rational_row<Scalar>(
-      request.at("row"), source->solution());
+  auto matrix = prepared_row_override != nullptr
+      ? parse_prepared_rational_row<Scalar>(
+            *prepared_row_override, source->solution())
+      : parse_prepared_rational_row<Scalar>(
+            request.at("row"), source->solution());
 
   json::array entry_provenance;
   entry_provenance.reserve(matrix.entries.size());
@@ -3940,12 +3958,21 @@ std::shared_ptr<StoredLocalBase> build_rational_row_local(
         {"exact_identity", entry.multiplier.exact_identity}});
   }
 
-  auto applied = apply_prepared_sparse_local_matrix(
-      matrix, source->solution(), checkpoint_identity);
+  auto applied = projection_complete_max.has_value()
+      ? apply_prepared_scalar_row_window(
+            matrix, source->solution(), *projection_complete_max,
+            checkpoint_identity)
+      : apply_prepared_sparse_local_matrix(
+            matrix, source->solution(), checkpoint_identity);
   auto solution = applied.has_value()
       ? std::move(*applied)
       : exact_zero_scalar_local_like(
             source->solution(), checkpoint_identity);
+  if (projection_complete_max.has_value() &&
+      solution.epsilon.complete_max > *projection_complete_max)
+    solution = restrict_local_epsilon_frame_strict_lower(
+        solution, solution.epsilon.min_power, *projection_complete_max,
+        checkpoint_identity);
   output_top_valid = std::min(
       output_top_valid, solution.epsilon.complete_max);
   if (output_top_valid < solution.epsilon.min_power)
@@ -10213,9 +10240,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           diagnostics.push_back(std::move(diagnostic));
           target_parts.push_back(std::move(target_native.solution));
         }
-        if (!submitted_used)
-          throw std::invalid_argument(
-              "native SCC submitted target tag is absent from the exact propagated source groups");
+        // A polar cross-SCC multiplier may shift every incoming source away
+        // from the submitted prototype tag.  In that case every particular
+        // above used an exact derived run and the prototype was correctly
+        // unused.  Requiring its tag to occur would reject a closed exact
+        // source decomposition merely because the wire request supplies one
+        // deterministic schedule template.
         auto target_state = target_parts.size() == 1
             ? std::move(target_parts.front())
             : combine_local_solutions(
@@ -10766,9 +10796,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     } else {
       if (blocks_.empty() || work_.work_min > 0 ||
           work_.requested_max < 0 || work_.work_complete_max < 0 ||
-          std::none_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
-            return !block.regular;
-          }) ||
           std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
             return block.vertices.empty() ||
                    block.chart->dimension() != block.vertices.size() ||
@@ -10776,6 +10803,22 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                    !block.exact_jordan_indicial.has_value();
           }))
         return false;
+      // Singularity is a property of the complete triangular system, not
+      // only of its diagonal SCCs.  A polar (or center-nonvanishing theta)
+      // cross coupling can make the parent regular-singular while every
+      // diagonal block remains ordinary.  Such couplings are already closed
+      // by the exact-tagged source algebra below; require at least one
+      // genuinely non-ordinary block or coupling so the ordinary path keeps
+      // its narrower capability and provenance.
+      const auto singular_parent =
+          std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
+            return !block.regular;
+          }) ||
+          std::any_of(couplings_.begin(), couplings_.end(),
+                      [&](const auto& coupling) {
+                        return !regular_coupling_ready(coupling);
+                      });
+      if (!singular_parent) return false;
       // Acb admission is schedule-specific, not producer-global.  A block
       // may advertise possible family collisions even when the submitted
       // finite Taylor schedule contains no CASE-P step.  checked_column_run
@@ -10783,7 +10826,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       // CASE-P before any Acb recurrence executes.
       return std::all_of(
           couplings_.begin(), couplings_.end(), [&](const auto& coupling) {
-            return sector_preserving_coupling_ready(coupling);
+            return exact_tagged_coupling_ready(coupling);
           });
     }
   }
@@ -10857,10 +10900,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
   bool regular_coupling_ready(
       const CompositeSCCCoupling<Scalar>& coupling) const {
-    if (!sector_preserving_coupling_ready(coupling)) return false;
+    if (!exact_tagged_coupling_ready(coupling)) return false;
     for (const auto& entry : coupling.matrix.entries) {
       if (entry.multiplier.proven_zero) continue;
-      if (std::any_of(entry.multiplier.kernels.begin(),
+      if (entry.multiplier.center_pole_order != 0 ||
+          std::any_of(entry.multiplier.kernels.begin(),
                       entry.multiplier.kernels.end(),
                       [](const auto& kernel) {
                         return !ScalarTraits<Scalar>::is_zero(kernel.front());
@@ -10870,7 +10914,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     return true;
   }
 
-  bool sector_preserving_coupling_ready(
+  // A prepared center pole is closed in the exact local algebra: t^-p
+  // changes the exact sector tag from a to a-p before source grouping.
+  // Rational regular-singular execution derives one schedule per resulting
+  // tag; Acb either keeps the submitted tag or requests its Rational shadow.
+  // Ordinary regular execution retains its stricter pole-free check above.
+  bool exact_tagged_coupling_ready(
       const CompositeSCCCoupling<Scalar>& coupling) const {
     if (coupling.source_block >= blocks_.size() ||
         coupling.target_block >= blocks_.size() ||
@@ -10886,8 +10935,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         return false;
       if (entry.multiplier.proven_zero) continue;
       active = true;
-      if (entry.multiplier.center_pole_order != 0 ||
-          entry.multiplier.kernels.empty() ||
+      if (entry.multiplier.kernels.empty() ||
           std::any_of(entry.multiplier.kernels.begin(),
                       entry.multiplier.kernels.end(),
                       [](const auto& kernel) {
@@ -11434,12 +11482,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       const CompositeSCCCoupling<Scalar>& coupling,
       bool regular_singular_execution) const {
     const bool ready = regular_singular_execution
-        ? sector_preserving_coupling_ready(coupling)
+        ? exact_tagged_coupling_ready(coupling)
         : regular_coupling_ready(coupling);
     if (!ready)
       throw std::invalid_argument(
           regular_singular_execution
-              ? "native regular-singular SCC column requires a dimension-matched exact coupling matrix which preserves the sector tag"
+              ? "native regular-singular SCC column requires a dimension-matched exact coupling matrix closed under exact sector-tag shifts"
               : "native SCC column requires a dimension-matched exact pole-free coupling matrix whose active entries vanish at chart center");
   }
 
@@ -11542,6 +11590,8 @@ constexpr const char* kRetainedTransportArmContractionCapability =
     "retained-native-transport-arm-contraction-v1";
 constexpr const char* kRetainedTransportPairContractionCapability =
     "retained-native-transport-pair-contraction-v1";
+constexpr const char* kRetainedTransportPairStreamCapability =
+    "retained-native-transport-pair-tile-stream-v1";
 constexpr const char* kRetainedLineAggregateCapability =
     "retained-native-line-aggregate-v1";
 
@@ -13591,6 +13641,20 @@ class StoredLineResult {
              {"zero_groups_skipped", diagnostics.zero_groups_skipped},
              {"cancelled_divergent_groups",
               diagnostics.cancelled_divergent_groups},
+             {"bounded_cancelled_divergent_coefficients",
+              diagnostics.bounded_cancelled_divergent_coefficients},
+             {"divergent_cancellation_mode",
+              diagnostics.divergent_cancellation_mode},
+             {"divergent_relative_tolerance",
+              diagnostics.divergent_relative_tolerance.empty()
+                  ? json::value(nullptr)
+                  : json::value(
+                        diagnostics.divergent_relative_tolerance)},
+             {"divergent_cancellation_provenance",
+              diagnostics.divergent_cancellation_provenance.empty()
+                  ? json::value(nullptr)
+                  : json::value(
+                        diagnostics.divergent_cancellation_provenance)},
              {"primitive_evaluations", diagnostics.primitive_evaluations},
              {"primitive_component_applications",
               diagnostics.primitive_component_applications},
@@ -13703,6 +13767,14 @@ class StoredLineResult {
                      diagnostics.zero_groups_skipped},
                     {"cancelled_divergent_groups",
                      diagnostics.cancelled_divergent_groups},
+                    {"bounded_cancelled_divergent_coefficients",
+                     diagnostics.bounded_cancelled_divergent_coefficients},
+                    {"divergent_cancellation_mode",
+                     diagnostics.divergent_cancellation_mode},
+                    {"divergent_relative_tolerance",
+                     diagnostics.divergent_relative_tolerance},
+                    {"divergent_cancellation_provenance",
+                     diagnostics.divergent_cancellation_provenance},
                     {"primitive_evaluations",
                      diagnostics.primitive_evaluations},
                     {"primitive_component_applications",
@@ -13759,6 +13831,14 @@ class StoredLineResult {
                   {"zero_groups_skipped", diagnostics.zero_groups_skipped},
                   {"cancelled_divergent_groups",
                    diagnostics.cancelled_divergent_groups},
+                  {"bounded_cancelled_divergent_coefficients",
+                   diagnostics.bounded_cancelled_divergent_coefficients},
+                  {"divergent_cancellation_mode",
+                   diagnostics.divergent_cancellation_mode},
+                  {"divergent_relative_tolerance",
+                   diagnostics.divergent_relative_tolerance},
+                  {"divergent_cancellation_provenance",
+                   diagnostics.divergent_cancellation_provenance},
                   {"primitive_evaluations",
                    diagnostics.primitive_evaluations},
                   {"primitive_component_applications",
@@ -13912,6 +13992,8 @@ class StoredLineResult {
   double export_ms_ = 0.0;
 };
 
+class TransportPairObservableStream;
+
 struct SolverSession {
   std::string handle;
   std::string domain;
@@ -13935,6 +14017,7 @@ struct SolverSession {
   std::uint64_t next_tile_plan = 1;
   std::uint64_t next_transport_state = 1;
   std::uint64_t next_line_result = 1;
+  std::uint64_t next_transport_pair_stream = 1;
   std::size_t pending_local_solves = 0;
   std::size_t pending_matches = 0;
   std::size_t pending_endpoint_limits = 0;
@@ -13984,6 +14067,12 @@ struct SolverSession {
       transport_states;
   std::unordered_map<std::string, std::shared_ptr<StoredLineResult>>
       line_results;
+  // Ephemeral, never checkpointed.  A live stream owns one pending line
+  // reservation and the two exact transport-state owners until finish,
+  // abort, or session close.
+  std::unordered_map<std::string,
+                     std::shared_ptr<TransportPairObservableStream>>
+      transport_pair_streams;
   std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>> sccs;
   std::unordered_map<std::string, std::string> scc_handles_by_key;
 };
@@ -14653,6 +14742,43 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
       std::move(handoff), elapsed_ms, plan, basis, incoming);
 }
 
+using BoundedDivergentCancellation =
+    StoredLineIntegrationOptions::BoundedDivergentCancellation;
+
+BoundedDivergentCancellation parse_bounded_divergent_cancellation(
+    const json::value& raw, const char* label) {
+  const auto& policy = as_object(raw, label);
+  require_exact_keys(policy,
+                     {"mode", "relative_tolerance", "provenance"},
+                     label);
+  if (required_string(policy, "mode") != "bounded-relative-acb")
+    throw std::invalid_argument(
+        std::string(label) +
+        " mode must be exactly bounded-relative-acb");
+  const auto tolerance_text = required_string(
+      policy, "relative_tolerance");
+  const auto provenance = required_string(policy, "provenance");
+  if (tolerance_text.empty() || provenance.empty())
+    throw std::invalid_argument(
+        std::string(label) +
+        " requires a nonempty tolerance and producer provenance");
+  auto tolerance = Magnitude::decimal(tolerance_text);
+  if (!tolerance.is_finite() || tolerance.is_zero() ||
+      Magnitude::one() <= tolerance)
+    throw std::invalid_argument(
+        std::string(label) +
+        " tolerance must be finite and strictly between zero and one");
+  return {std::move(tolerance), tolerance_text, provenance};
+}
+
+json::object encode_bounded_divergent_cancellation(
+    const BoundedDivergentCancellation& policy) {
+  return json::object{
+      {"mode", "bounded-relative-acb"},
+      {"relative_tolerance", policy.relative_tolerance_text},
+      {"provenance", policy.provenance}};
+}
+
 std::shared_ptr<StoredLineResult> build_planned_line_result(
     const std::string& handle, const json::object& request,
     const std::shared_ptr<StoredTilePlan>& plan,
@@ -14687,13 +14813,41 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
   const bool certify_tail =
       request.if_contains("certify_tail") != nullptr &&
       request.at("certify_tail").as_bool();
+  std::optional<BoundedDivergentCancellation> divergent_cancellation;
+  if (const auto* policy = request.if_contains("divergent_cancellation"))
+    divergent_cancellation = parse_bounded_divergent_cancellation(
+        *policy, "planned line divergent-cancellation policy");
   auto interval = encode_plan_tile(arm, tile_index);
   const auto rim = exact_plan_rim(
       binding.prescriptions, binding.geometry.scale);
   const auto started = std::chrono::steady_clock::now();
-  auto result = local->integrate_planned_line(
-      binding.geometry, binding.prescriptions, tile.local_begin,
-      tile.local_end, delivered, rim, certify_tail);
+  StoredLineIntegral result;
+  try {
+    result = local->integrate_planned_line(
+        binding.geometry, binding.prescriptions, tile.local_begin,
+        tile.local_end, delivered, rim, certify_tail,
+        divergent_cancellation);
+  } catch (const NativeIntegrationError& error) {
+    std::ostringstream detail;
+    detail << error.what() << "; arm=" << arm_name
+           << "; tile=" << tile_index
+           << "; physical_interval=[" << tile.physical_begin.str()
+           << "," << tile.physical_end.str() << "]"
+           << "; local_interval=[" << tile.local_begin.str()
+           << "," << tile.local_end.str() << "]"
+           << "; chart=" << binding.handle
+           << "; chart_center=" << binding.geometry.center.str()
+           << "; chart_scale=" << binding.geometry.scale.str()
+           << "; rim="
+           << (rim.has_value() ? std::to_string(*rim) : "none")
+           << "; source_local=" << local->handle();
+    NativeIntegrationError contextual(error.code, error.id, detail.str());
+    contextual.absolute_power = error.absolute_power;
+    contextual.log_power = error.log_power;
+    contextual.epsilon_power = error.epsilon_power;
+    contextual.component = error.component;
+    throw contextual;
+  }
   const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
   json::object provenance{
@@ -14716,6 +14870,11 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
        result.diagnostics.tail_witness_radius_exact.empty()
            ? json::value(nullptr)
            : json::value(result.diagnostics.tail_witness_radius_exact)},
+      {"divergent_cancellation",
+       divergent_cancellation.has_value()
+           ? json::value(encode_bounded_divergent_cancellation(
+                 *divergent_cancellation))
+           : json::value(json::object{{"mode", "exact-singleton"}})},
       {"scope", line_integration_scope_name(result.scope)},
       {"error_guarantee",
        error_guarantee_name(result.value.error.guarantee)},
@@ -14850,6 +15009,27 @@ StoredLineIntegral aggregate_retained_lines(
         diagnostics.cancelled_divergent_groups,
         source.cancelled_divergent_groups,
         "aggregate cancelled-divergence count");
+    diagnostics.bounded_cancelled_divergent_coefficients =
+        checked_diagnostic_sum(
+            diagnostics.bounded_cancelled_divergent_coefficients,
+            source.bounded_cancelled_divergent_coefficients,
+            "aggregate bounded-cancelled-divergence count");
+    if (source.divergent_cancellation_mode == "bounded-relative-acb") {
+      if (diagnostics.divergent_cancellation_mode == "exact-singleton") {
+        diagnostics.divergent_cancellation_mode =
+            source.divergent_cancellation_mode;
+        diagnostics.divergent_relative_tolerance =
+            source.divergent_relative_tolerance;
+        diagnostics.divergent_cancellation_provenance =
+            source.divergent_cancellation_provenance;
+      } else if (diagnostics.divergent_relative_tolerance !=
+                     source.divergent_relative_tolerance ||
+                 diagnostics.divergent_cancellation_provenance !=
+                     source.divergent_cancellation_provenance) {
+        throw std::invalid_argument(
+            "native line aggregate mixes divergent-cancellation policies");
+      }
+    }
     diagnostics.primitive_evaluations = checked_diagnostic_sum(
         diagnostics.primitive_evaluations, source.primitive_evaluations,
         "aggregate primitive evaluation count");
@@ -14966,6 +15146,27 @@ class StreamingStoredLineAccumulator {
         diagnostics.cancelled_divergent_groups,
         source.cancelled_divergent_groups,
         "streaming aggregate cancelled-divergence count");
+    diagnostics.bounded_cancelled_divergent_coefficients =
+        checked_diagnostic_sum(
+            diagnostics.bounded_cancelled_divergent_coefficients,
+            source.bounded_cancelled_divergent_coefficients,
+            "streaming aggregate bounded-cancelled-divergence count");
+    if (source.divergent_cancellation_mode == "bounded-relative-acb") {
+      if (diagnostics.divergent_cancellation_mode == "exact-singleton") {
+        diagnostics.divergent_cancellation_mode =
+            source.divergent_cancellation_mode;
+        diagnostics.divergent_relative_tolerance =
+            source.divergent_relative_tolerance;
+        diagnostics.divergent_cancellation_provenance =
+            source.divergent_cancellation_provenance;
+      } else if (diagnostics.divergent_relative_tolerance !=
+                     source.divergent_relative_tolerance ||
+                 diagnostics.divergent_cancellation_provenance !=
+                     source.divergent_cancellation_provenance) {
+        throw std::invalid_argument(
+            "streaming native line aggregate mixes divergent-cancellation policies");
+      }
+    }
     diagnostics.primitive_evaluations = checked_diagnostic_sum(
         diagnostics.primitive_evaluations, source.primitive_evaluations,
         "streaming aggregate primitive evaluation count");
@@ -15338,7 +15539,17 @@ EpsilonWindow live_line_epsilon_intersection(
     throw std::invalid_argument(
         "native whole-arm primitive halo must be nonnegative");
   const auto frame = retained_local_frame_contract(local);
-  auto minimum = std::max(requested.min_power, frame.epsilon.min_power);
+  // A regulated centre-endpoint primitive can create Laurent coefficients
+  // below the integrand frame (at most `primitive_halo` rows).  Preserve
+  // those rows here just as we already reserve the corresponding upper
+  // halo; otherwise the orchestration layer silently turns genuine poles
+  // into structural zeros before the line integrator can emit them.
+  auto minimum = std::max(
+      requested.min_power,
+      local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(frame.epsilon.min_power) -
+              primitive_halo,
+          "native whole-arm line deliverable minimum"));
   auto complete_max = std::min(
       requested.complete_max,
       local_algebra_detail::checked_i32(
@@ -15995,17 +16206,83 @@ const char* transport_tail_policy_name(TransportTailPolicy policy) {
   throw std::logic_error("unknown transport tail policy");
 }
 
+const char* transport_projection_mode_name(TransportTailPolicy policy) {
+  return policy == TransportTailPolicy::Stored
+      ? "fused-stored-hash-monomial-stream-v2"
+      : "materialized-row-local-v1";
+}
+
+void require_transport_projection_mode(
+    const json::object& aggregate, TransportTailPolicy policy,
+    const char* label) {
+  if (required_string(aggregate, "projection_mode") !=
+      transport_projection_mode_name(policy))
+    throw std::invalid_argument(
+        std::string(label) +
+        " does not match its stored-tail projection algorithm");
+}
+
+json::array compact_prepared_row_entry_facts(
+    const json::object& prepared_row) {
+  json::array facts;
+  const auto& entries = as_array(
+      prepared_row.at("entries"), "compact prepared-row entries");
+  facts.reserve(entries.size());
+  for (const auto& raw_entry : entries) {
+    const auto& entry = as_object(
+        raw_entry, "compact prepared-row entry");
+    const auto& multiplier = as_object(
+        entry.at("multiplier"), "compact prepared-row multiplier");
+    facts.push_back(json::object{
+        {"column", as_u32(entry.at("column"),
+                          "compact prepared-row column")},
+        {"epsilon_shift",
+         as_i32(multiplier.at("epsilon_shift"),
+                "compact prepared-row epsilon shift")},
+        {"center_pole_order",
+         as_u32(multiplier.at("center_pole_order"),
+                "compact prepared-row center-pole order")},
+        {"exact_identity",
+         required_string(multiplier, "exact_identity")}});
+  }
+  return facts;
+}
+
 struct TransportObservableContractionInput {
   std::string identity;
   std::string checkpoint_identity;
   std::string checkpoint_root;
   std::vector<json::object> rows;
+  // Pair contraction borrows prepared rows directly from the immutable
+  // synchronous request tree.  This avoids copying the very large exact
+  // Taylor-kernel JSON through parse and per-arm staging.  Other seams keep
+  // their existing owned rows; exactly one representation may be active.
+  std::vector<const json::object*> borrowed_rows;
   ObservableEpsilonContract epsilon;
   json::object epsilon_record;
   TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
+  std::optional<BoundedDivergentCancellation> divergent_cancellation;
   std::vector<std::string> projected_local_handles;
   std::string aggregate_handle;
   json::object aggregate_record;
+
+  std::size_t row_count() const {
+    if (!rows.empty() && !borrowed_rows.empty())
+      throw std::logic_error(
+          "transport observable cannot mix owned and borrowed rows");
+    return borrowed_rows.empty() ? rows.size() : borrowed_rows.size();
+  }
+
+  const json::object& row(std::size_t index) const {
+    if (!rows.empty() && !borrowed_rows.empty())
+      throw std::logic_error(
+          "transport observable cannot mix owned and borrowed rows");
+    if (borrowed_rows.empty()) return rows.at(index);
+    const auto* borrowed = borrowed_rows.at(index);
+    if (borrowed == nullptr)
+      throw std::logic_error("transport observable borrowed a null row");
+    return *borrowed;
+  }
 };
 
 struct TransportObservableContractionResult {
@@ -16019,6 +16296,431 @@ struct TransportObservableContractionResult {
   std::size_t tile_integrations = 0;
   double tile_integration_ms = 0.0;
   double elapsed_ms = 0.0;
+};
+
+template <typename Scalar>
+StoredLineIntegral integrate_transport_stored_row_tile(
+    slong precision_bits,
+    const std::shared_ptr<StoredLocal<Scalar>>& source,
+    const json::object& prepared_row,
+    const RetainedArmPlan& arm, const std::string& arm_name,
+    std::size_t tile_index,
+    const ObservableEpsilonContract& epsilon_contract,
+    const std::optional<BoundedDivergentCancellation>&
+        divergent_cancellation) {
+  if (!source || tile_index >= arm.exact.tiles.size())
+    throw std::invalid_argument(
+        "fused transport row integration lost its source or tile");
+  if constexpr (std::is_same_v<Scalar, ComplexBall>)
+    ComplexBall::set_precision(precision_bits);
+  const auto& tile = arm.exact.tiles[tile_index];
+  const auto& binding = arm.charts.at(tile.chart);
+  source->require_exact_plan_binding(
+      binding.geometry, binding.prescriptions,
+      "fused transport row source");
+  auto matrix = parse_prepared_rational_row<Scalar>(
+      prepared_row, source->solution());
+  const auto projection_cap = local_algebra_detail::checked_i32(
+      static_cast<std::int64_t>(
+          epsilon_contract.requested.complete_max) + 1,
+      "fused transport primitive halo");
+
+  auto projected_min = source->solution().epsilon.min_power;
+  auto projected_complete = source->solution().epsilon.complete_max;
+  auto projected_top_valid = source->top_valid();
+  bool active = false;
+  for (const auto& entry : matrix.entries) {
+    if (entry.multiplier.structurally_zero()) continue;
+    const auto term_min = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(source->solution().epsilon.min_power) +
+            entry.multiplier.epsilon_shift,
+        "fused transport projected minimum");
+    const auto term_complete = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(
+            source->solution().epsilon.complete_max) +
+            entry.multiplier.epsilon_shift,
+        "fused transport projected complete maximum");
+    const auto term_valid = shifted_local_validity(
+        source->top_valid(), entry.multiplier.epsilon_shift);
+    if (!active) {
+      projected_min = term_min;
+      projected_complete = term_complete;
+      projected_top_valid = term_valid;
+      active = true;
+    } else {
+      projected_min = std::min(projected_min, term_min);
+      projected_complete = std::min(projected_complete, term_complete);
+      projected_top_valid = std::min(projected_top_valid, term_valid);
+    }
+  }
+  projected_complete = std::min(projected_complete, projection_cap);
+  if (projected_top_valid != kCompleteInfinity)
+    projected_complete = std::min(projected_complete, projected_top_valid);
+  if (projected_complete < projected_min)
+    throw std::domain_error(
+        "fused transport row has no valid projected epsilon coefficient");
+
+  // Exact integration at a regulated centre endpoint may deepen the
+  // Laurent frame by one power of epsilon.  The low-level integrator
+  // zero-pads this extra row for tiles which do not generate it, so keeping
+  // it here is both safe and necessary for singular endpoint primitives.
+  const auto line_min = std::max(
+      epsilon_contract.requested.min_power,
+      local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(projected_min) - 1,
+          "fused transport line primitive minimum"));
+  const auto line_complete = std::min(
+      epsilon_contract.requested.complete_max,
+      local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(projected_complete) - 1,
+          "fused transport line primitive maximum"));
+  if (line_min > line_complete ||
+      epsilon_contract.required_complete_max > line_complete)
+    throw std::domain_error(
+        "fused transport row does not cover the globally required epsilon maximum");
+
+  const auto rim = exact_plan_rim(
+      binding.prescriptions, binding.geometry.scale);
+  const bool reverse_local_orientation =
+      tile.local_end < tile.local_begin;
+  const auto& primitive_begin = reverse_local_orientation
+      ? tile.local_end : tile.local_begin;
+  const auto& primitive_end = reverse_local_orientation
+      ? tile.local_begin : tile.local_end;
+  StoredLineIntegrationOptions options;
+  options.delivered_epsilon = {line_min, line_complete};
+  options.imaginary_sign = rim;
+  options.divergent_cancellation = divergent_cancellation;
+
+  StoredLineIntegral result;
+  try {
+    result = integrate_prepared_scalar_row_stored(
+        matrix, source->solution(), projected_complete,
+        RealEvaluationPoint::rational(primitive_begin.str()),
+        RealEvaluationPoint::rational(primitive_end.str()), options);
+  } catch (const NativeIntegrationError& error) {
+    std::ostringstream detail;
+    detail << error.what() << "; arm=" << arm_name
+           << "; tile=" << tile_index
+           << "; physical_interval=[" << tile.physical_begin.str()
+           << "," << tile.physical_end.str() << "]"
+           << "; local_interval=[" << tile.local_begin.str()
+           << "," << tile.local_end.str() << "]"
+           << "; chart=" << binding.handle
+           << "; chart_center=" << binding.geometry.center.str()
+           << "; chart_scale=" << binding.geometry.scale.str()
+           << "; rim="
+           << (rim.has_value() ? std::to_string(*rim) : "none")
+           << "; source_local=" << source->handle()
+           << "; fused_row_projection=true";
+    NativeIntegrationError contextual(error.code, error.id, detail.str());
+    contextual.absolute_power = error.absolute_power;
+    contextual.log_power = error.log_power;
+    contextual.epsilon_power = error.epsilon_power;
+    contextual.component = error.component;
+    throw contextual;
+  }
+
+  const auto oriented_jacobian = reverse_local_orientation
+      ? -binding.geometry.scale : binding.geometry.scale;
+  const auto jacobian =
+      ComplexBall::from_strings(oriented_jacobian.str());
+  for (auto& coefficient : result.value.coefficients)
+    coefficient *= jacobian;
+  if (!result.value.error.empty()) {
+    const auto jacobian_upper = Magnitude::upper_abs(jacobian);
+    for (auto& bound : result.value.error.absolute)
+      bound = bound * jacobian_upper;
+    result.value.error.provenance +=
+        "; physical_jacobian_exact=" + oriented_jacobian.str();
+  }
+  return result;
+}
+
+class TransportPairObservableStream final {
+ public:
+  enum class Status { Active, Poisoned, Finishing, Finished, Aborted };
+
+  struct FinishResult {
+    std::shared_ptr<StoredLineResult> line;
+    std::array<std::size_t, 2> tiles{0, 0};
+    std::array<double, 2> arm_integration_ms{0.0, 0.0};
+    double elapsed_ms = 0.0;
+  };
+
+  TransportPairObservableStream(
+      std::string handle, std::string stream_checkpoint_identity,
+      std::string line_handle, std::string checkpoint_root,
+      std::string domain, slong precision_bits,
+      std::array<std::shared_ptr<StoredTransportArmState>, 2> states,
+      std::string identity, std::string checkpoint_identity,
+      ObservableEpsilonContract epsilon, json::object epsilon_record,
+      TransportTailPolicy tail_policy,
+      std::optional<BoundedDivergentCancellation> divergent_cancellation)
+      : handle_(std::move(handle)),
+        stream_checkpoint_identity_(
+            std::move(stream_checkpoint_identity)),
+        line_handle_(std::move(line_handle)),
+        checkpoint_root_(std::move(checkpoint_root)),
+        domain_(std::move(domain)), precision_bits_(precision_bits),
+        states_(std::move(states)), identity_(std::move(identity)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        epsilon_(epsilon), epsilon_record_(std::move(epsilon_record)),
+        tail_policy_(tail_policy),
+        divergent_cancellation_(std::move(divergent_cancellation)) {
+    if (handle_.empty() || stream_checkpoint_identity_.empty() ||
+        line_handle_.empty() || checkpoint_root_.empty() ||
+        identity_.empty() || checkpoint_identity_.empty())
+      throw std::invalid_argument(
+          "transport-pair stream identities cannot be empty");
+    if (domain_ != "rational" && domain_ != "acb")
+      throw std::invalid_argument(
+          "transport-pair stream requires a numeric session domain");
+    if (tail_policy_ != TransportTailPolicy::Stored)
+      throw std::invalid_argument(
+          "transport-pair tile streaming currently requires stored tail policy");
+    if (divergent_cancellation_.has_value() && domain_ != "acb")
+      throw std::invalid_argument(
+          "bounded divergent cancellation is restricted to Acb transport-pair streams");
+    require_transport_pair_compatibility(states_[0], states_[1], domain_);
+    for (std::size_t side = 0; side < 2; ++side) {
+      expected_tiles_[side] = states_[side]->tile_sources().size();
+      if (expected_tiles_[side] == 0)
+        throw std::invalid_argument(
+            "transport-pair stream state has no retained tiles");
+      if (epsilon_.required_complete_max >
+          states_[side]->public_required_complete_max())
+        throw std::invalid_argument(
+            "transport-pair stream epsilon target exceeds a state public target");
+      states_[side]->require_contraction_counter_capacity(1);
+      row_records_[side].reserve(expected_tiles_[side]);
+    }
+  }
+
+  const std::string& handle() const { return handle_; }
+  const std::string& stream_checkpoint_identity() const {
+    return stream_checkpoint_identity_;
+  }
+  const std::string& identity() const { return identity_; }
+  const std::string& checkpoint_identity() const {
+    return checkpoint_identity_;
+  }
+  const std::string& line_handle() const { return line_handle_; }
+  const std::string& checkpoint_root() const { return checkpoint_root_; }
+  const auto& states() const { return states_; }
+  const auto& expected_tiles() const { return expected_tiles_; }
+  const auto& next_tiles() const { return next_tiles_; }
+
+  json::object add_tile(std::size_t side, std::size_t tile_index,
+                        const json::object& prepared_row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (status_ == Status::Poisoned)
+      throw std::invalid_argument(
+          "transport-pair stream is poisoned and must be aborted");
+    if (status_ != Status::Active)
+      throw std::invalid_argument(
+          "transport-pair stream no longer accepts tiles");
+    const std::size_t expected_side =
+        next_tiles_[0] < expected_tiles_[0] ? 0 : 1;
+    if (side > 1 || side != expected_side)
+      throw std::invalid_argument(
+          "transport-pair stream requires all lower tiles before upper tiles");
+    if (next_tiles_[side] >= expected_tiles_[side] ||
+        tile_index != next_tiles_[side])
+      throw std::invalid_argument(
+          "transport-pair stream tile index is missing, duplicated, or out of order");
+
+    try {
+      const auto started = std::chrono::steady_clock::now();
+      StoredLineIntegral tile;
+      std::unique_ptr<AcbPrecisionLease> acb_lease;
+      if (domain_ == "acb") {
+        acb_lease = std::make_unique<AcbPrecisionLease>(precision_bits_);
+        ComplexBall::set_precision(precision_bits_);
+        const auto source =
+            std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
+                states_[side]->tile_sources().at(tile_index));
+        if (!source)
+          throw std::logic_error(
+              "transport-pair stream Acb source changed coefficient domain");
+        tile = integrate_transport_stored_row_tile<ComplexBall>(
+            precision_bits_, source, prepared_row,
+            states_[side]->plan_owner()->arm(
+                side == 0 ? "lower" : "upper"),
+            side == 0 ? "lower" : "upper", tile_index, epsilon_,
+            divergent_cancellation_);
+      } else {
+        const auto source =
+            std::dynamic_pointer_cast<StoredLocal<Rational>>(
+                states_[side]->tile_sources().at(tile_index));
+        if (!source)
+          throw std::logic_error(
+              "transport-pair stream Rational source changed coefficient domain");
+        tile = integrate_transport_stored_row_tile<Rational>(
+            precision_bits_, source, prepared_row,
+            states_[side]->plan_owner()->arm(
+                side == 0 ? "lower" : "upper"),
+            side == 0 ? "lower" : "upper", tile_index, epsilon_,
+            divergent_cancellation_);
+      }
+      accumulators_[side].add(tile);
+      const auto row_identity = required_string(
+          prepared_row, "exact_identity");
+      row_records_[side].push_back(json::object{
+          {"tile", tile_index}, {"exact_identity", row_identity},
+          {"entries", compact_prepared_row_entry_facts(prepared_row)}});
+      ++next_tiles_[side];
+      const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      arm_integration_ms_[side] += elapsed_ms;
+      return json::object{
+          {"side", side == 0 ? "lower" : "upper"},
+          {"tile", tile_index}, {"row_exact_identity", row_identity},
+          {"lower_complete", next_tiles_[0]},
+          {"upper_complete", next_tiles_[1]},
+          {"next_side", next_tiles_[0] < expected_tiles_[0]
+               ? json::value("lower")
+               : next_tiles_[1] < expected_tiles_[1]
+                   ? json::value("upper") : json::value(nullptr)},
+          {"next_tile", next_tiles_[0] < expected_tiles_[0]
+               ? json::value(next_tiles_[0])
+               : next_tiles_[1] < expected_tiles_[1]
+                   ? json::value(next_tiles_[1]) : json::value(nullptr)},
+          {"elapsed_ms", elapsed_ms}};
+    } catch (...) {
+      status_ = Status::Poisoned;
+      throw;
+    }
+  }
+
+  FinishResult finish() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (status_ == Status::Poisoned)
+      throw std::invalid_argument(
+          "transport-pair stream is poisoned and cannot finish");
+    if (status_ != Status::Active)
+      throw std::invalid_argument(
+          "transport-pair stream is not active");
+    if (next_tiles_ != expected_tiles_)
+      throw std::invalid_argument(
+          "transport-pair stream cannot finish before every ordered tile was added exactly once");
+    status_ = Status::Finishing;
+    try {
+    const auto finish_started = std::chrono::steady_clock::now();
+    const auto observable_root = checkpoint_root_ + ":observable:1";
+    std::array<std::shared_ptr<StoredLineResult>, 2> arm_lines;
+    for (std::size_t side = 0; side < 2; ++side) {
+      const std::string arm_name = side == 0 ? "lower" : "upper";
+      const auto arm_identity = identity_ + ":" + arm_name;
+      const auto arm_checkpoint =
+          observable_root + ":" + arm_name + ":scratch";
+      json::object arm_record{
+          {"kind", "transport-state-observable-arm"},
+          {"combination", "sum-physical-tiles"},
+          {"request_index", 0},
+          {"observable_identity", arm_identity},
+          {"observable_checkpoint_identity", arm_checkpoint},
+          {"transport_state",
+           compact_transport_state_reference(states_[side])},
+          {"output_epsilon_contract", epsilon_record_},
+          {"tail_policy", transport_tail_policy_name(tail_policy_)},
+          {"projection_mode",
+           transport_projection_mode_name(tail_policy_)},
+          {"divergent_cancellation",
+           divergent_cancellation_.has_value()
+               ? json::value(encode_bounded_divergent_cancellation(
+                     *divergent_cancellation_))
+               : json::value(json::object{{"mode", "exact-singleton"}})},
+          {"rows", row_records_[side]},
+          {"tile_count", expected_tiles_[side]}};
+      const auto& exact = states_[side]->plan_owner()->arm(arm_name).exact;
+      arm_lines[side] = build_compact_transport_observable_line_from_result(
+          "private:" + observable_root + ":" + arm_name + ":aggregate",
+          arm_checkpoint, arm_name,
+          json::object{{"from_exact", exact.from.str()},
+                       {"to_exact", exact.to.str()}},
+          std::move(arm_record), states_[side],
+          accumulators_[side].finish(
+              "compact streamed native transport observable aggregate"),
+          expected_tiles_[side], arm_integration_ms_[side]);
+    }
+
+    json::object pair_record{
+        {"kind", "transport-state-observable-pair"},
+        {"combination", "negative-lower-plus-upper"},
+        {"no_remarching", true}, {"no_rematching", true},
+        {"concurrent_arms", true}, {"request_index", 0},
+        {"observable_identity", identity_},
+        {"observable_checkpoint_identity", checkpoint_identity_},
+        {"output_epsilon_contract", epsilon_record_},
+        {"tail_policy", transport_tail_policy_name(tail_policy_)},
+        {"projection_mode", transport_projection_mode_name(tail_policy_)},
+        {"divergent_cancellation",
+         divergent_cancellation_.has_value()
+             ? json::value(encode_bounded_divergent_cancellation(
+                   *divergent_cancellation_))
+             : json::value(json::object{{"mode", "exact-singleton"}})},
+        {"lower", json::object{
+             {"transport_state",
+              compact_transport_state_reference(states_[0])},
+             {"rows", row_records_[0]},
+             {"tile_count", expected_tiles_[0]}}},
+        {"upper", json::object{
+             {"transport_state",
+              compact_transport_state_reference(states_[1])},
+             {"rows", row_records_[1]},
+             {"tile_count", expected_tiles_[1]}}}};
+    auto line = build_compact_transport_pair_observable_line(
+        line_handle_, checkpoint_identity_, std::move(pair_record),
+        states_[0], states_[1], arm_lines[0], arm_lines[1]);
+    if (line->result().value.epsilon.complete_max <
+        epsilon_.required_complete_max)
+      throw std::domain_error(
+          "streamed transport-pair aggregate does not cover its required epsilon maximum");
+    FinishResult output;
+    output.line = std::move(line);
+    output.tiles = expected_tiles_;
+    output.arm_integration_ms = arm_integration_ms_;
+    output.elapsed_ms = arm_integration_ms_[0] + arm_integration_ms_[1] +
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - finish_started).count();
+    status_ = Status::Finished;
+    return output;
+    } catch (...) {
+      status_ = Status::Poisoned;
+      throw;
+    }
+  }
+
+  void abort() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (status_ == Status::Finished)
+      throw std::invalid_argument(
+          "finished transport-pair stream cannot be aborted");
+    status_ = Status::Aborted;
+  }
+
+ private:
+  std::string handle_;
+  std::string stream_checkpoint_identity_;
+  std::string line_handle_;
+  std::string checkpoint_root_;
+  std::string domain_;
+  slong precision_bits_ = 256;
+  std::array<std::shared_ptr<StoredTransportArmState>, 2> states_;
+  std::string identity_;
+  std::string checkpoint_identity_;
+  ObservableEpsilonContract epsilon_;
+  json::object epsilon_record_;
+  TransportTailPolicy tail_policy_ = TransportTailPolicy::Stored;
+  std::optional<BoundedDivergentCancellation> divergent_cancellation_;
+  std::array<std::size_t, 2> expected_tiles_{0, 0};
+  std::array<std::size_t, 2> next_tiles_{0, 0};
+  std::array<StreamingStoredLineAccumulator, 2> accumulators_;
+  std::array<json::array, 2> row_records_;
+  std::array<double, 2> arm_integration_ms_{0.0, 0.0};
+  Status status_ = Status::Active;
+  std::mutex mutex_;
 };
 
 std::vector<TransportObservableContractionResult> contract_transport_arm(
@@ -16044,7 +16746,7 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
     if (observable.identity.empty() || observable.checkpoint_identity.empty() ||
         observable.checkpoint_root.empty() ||
         observable.aggregate_handle.empty() ||
-        observable.rows.size() != tile_sources.size() ||
+        observable.row_count() != tile_sources.size() ||
         observable.projected_local_handles.size() != tile_sources.size())
       throw std::invalid_argument(
           "native observable contraction does not reproduce its retained tile topology or identities");
@@ -16054,15 +16756,52 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
     StreamingStoredLineAccumulator accumulator;
     for (std::size_t tile = 0; tile < tile_sources.size(); ++tile) {
       const auto& source = tile_sources[tile];
+      const auto& prepared_row = observable.row(tile);
       const auto row_identity = required_string(
-          observable.rows[tile], "exact_identity");
+          prepared_row, "exact_identity");
+      (void)row_identity;
+      if (transport_owner &&
+          observable.tail_policy == TransportTailPolicy::Stored) {
+        const auto fused_started = std::chrono::steady_clock::now();
+        StoredLineIntegral fused;
+        if (domain == "rational") {
+          const auto typed =
+              std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+          if (!typed)
+            throw std::logic_error(
+                "fused transport Rational source changed coefficient domain");
+          fused = integrate_transport_stored_row_tile<Rational>(
+              precision_bits, typed, prepared_row, retained, arm_name, tile,
+              observable.epsilon, observable.divergent_cancellation);
+        } else {
+          const auto typed =
+              std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+          if (!typed)
+            throw std::logic_error(
+                "fused transport Acb source changed coefficient domain");
+          fused = integrate_transport_stored_row_tile<ComplexBall>(
+              precision_bits, typed, prepared_row, retained, arm_name, tile,
+              observable.epsilon, observable.divergent_cancellation);
+        }
+        output.tile_integration_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - fused_started)
+                .count();
+        accumulator.add(fused);
+        ++output.tile_integrations;
+        continue;
+      }
       json::object row_request{
-          {"row", observable.rows[tile]},
           {"source_checkpoint_identity", source->checkpoint_identity()},
           {"checkpoint_identity",
            arm_checkpoint_identity(observable.checkpoint_root, arm_name,
                                    "integrand", tile + 1) +
                ":" + row_identity}};
+      const auto projection_complete_max =
+          local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(
+                  observable.epsilon.requested.complete_max) + 1,
+              "transport scalar-row primitive halo");
       std::shared_ptr<StoredLocalBase> projected;
       if (domain == "rational") {
         const auto typed =
@@ -16073,7 +16812,8 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
         projected = build_rational_row_local<Rational>(
             observable.projected_local_handles[tile], row_request,
             precision_bits, typed, source,
-            observable.tail_policy != TransportTailPolicy::Stored);
+            observable.tail_policy != TransportTailPolicy::Stored,
+            projection_complete_max, &prepared_row);
       } else {
         const auto typed =
             std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
@@ -16083,7 +16823,8 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
         projected = build_rational_row_local<ComplexBall>(
             observable.projected_local_handles[tile], row_request,
             precision_bits, typed, source,
-            observable.tail_policy != TransportTailPolicy::Stored);
+            observable.tail_policy != TransportTailPolicy::Stored,
+            projection_complete_max, &prepared_row);
       }
       const auto line_epsilon = live_line_epsilon_intersection(
           observable.epsilon.requested,
@@ -16101,6 +16842,10 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
                                     {"max", line_epsilon.complete_max}}}};
       if (observable.tail_policy != TransportTailPolicy::Stored)
         line_request["certify_tail"] = true;
+      if (observable.divergent_cancellation.has_value())
+        line_request["divergent_cancellation"] =
+            encode_bounded_divergent_cancellation(
+                *observable.divergent_cancellation);
       auto tile_line = build_planned_line_result(
           "private:" + arm_checkpoint_identity(
                            observable.checkpoint_root, arm_name, "tile",
@@ -18275,27 +19020,67 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
       diagnostics.if_contains("tail_certificate_status") != nullptr;
   const bool has_tail_witness =
       diagnostics.if_contains("tail_witness_radius_exact") != nullptr;
+  const std::array<const char*, 4> cancellation_diagnostic_keys{
+      "bounded_cancelled_divergent_coefficients",
+      "divergent_cancellation_mode", "divergent_relative_tolerance",
+      "divergent_cancellation_provenance"};
+  const auto cancellation_diagnostic_count = std::count_if(
+      cancellation_diagnostic_keys.begin(),
+      cancellation_diagnostic_keys.end(), [&](const char* key) {
+        return diagnostics.if_contains(key) != nullptr;
+      });
+  const bool has_cancellation_diagnostics =
+      cancellation_diagnostic_count == cancellation_diagnostic_keys.size();
+  if (cancellation_diagnostic_count != 0 &&
+      !has_cancellation_diagnostics)
+    throw std::invalid_argument(
+        "checkpoint line divergent-cancellation diagnostics are incomplete");
   if (has_tail_requested != has_tail_status ||
       has_tail_requested != has_tail_witness)
     throw std::invalid_argument(
         "checkpoint line tail diagnostics are incomplete");
   if (has_tail_requested)
-    require_exact_keys(
-        diagnostics,
-        {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
-         "cancelled_divergent_groups", "primitive_evaluations",
-         "primitive_component_applications", "primitive_component_reuses",
-         "has_center_endpoint", "tail_certificate_requested",
-         "tail_certificate_status", "tail_witness_radius_exact", "detail"},
-        "checkpoint line diagnostics");
+    if (has_cancellation_diagnostics)
+      require_exact_keys(
+          diagnostics,
+          {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+           "cancelled_divergent_groups",
+           "bounded_cancelled_divergent_coefficients",
+           "divergent_cancellation_mode", "divergent_relative_tolerance",
+           "divergent_cancellation_provenance", "primitive_evaluations",
+           "primitive_component_applications", "primitive_component_reuses",
+           "has_center_endpoint", "tail_certificate_requested",
+           "tail_certificate_status", "tail_witness_radius_exact", "detail"},
+          "checkpoint line diagnostics");
+    else
+      require_exact_keys(
+          diagnostics,
+          {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+           "cancelled_divergent_groups", "primitive_evaluations",
+           "primitive_component_applications", "primitive_component_reuses",
+           "has_center_endpoint", "tail_certificate_requested",
+           "tail_certificate_status", "tail_witness_radius_exact", "detail"},
+          "checkpoint legacy line diagnostics");
   else
-    require_exact_keys(
-        diagnostics,
-        {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
-         "cancelled_divergent_groups", "primitive_evaluations",
-         "primitive_component_applications", "primitive_component_reuses",
-         "has_center_endpoint", "detail"},
-        "checkpoint line diagnostics");
+    if (has_cancellation_diagnostics)
+      require_exact_keys(
+          diagnostics,
+          {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+           "cancelled_divergent_groups",
+           "bounded_cancelled_divergent_coefficients",
+           "divergent_cancellation_mode", "divergent_relative_tolerance",
+           "divergent_cancellation_provenance", "primitive_evaluations",
+           "primitive_component_applications", "primitive_component_reuses",
+           "has_center_endpoint", "detail"},
+          "checkpoint line diagnostics");
+    else
+      require_exact_keys(
+          diagnostics,
+          {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+           "cancelled_divergent_groups", "primitive_evaluations",
+           "primitive_component_applications", "primitive_component_reuses",
+           "has_center_endpoint", "detail"},
+          "checkpoint legacy line diagnostics");
   result.diagnostics.input_monomial_cells = checkpoint_size_t(
       diagnostics.at("input_monomial_cells"),
       "checkpoint line input monomials");
@@ -18308,6 +19093,33 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_result_record(
   result.diagnostics.cancelled_divergent_groups = checkpoint_size_t(
       diagnostics.at("cancelled_divergent_groups"),
       "checkpoint line cancelled divergent groups");
+  if (has_cancellation_diagnostics) {
+    result.diagnostics.bounded_cancelled_divergent_coefficients =
+        checkpoint_size_t(
+            diagnostics.at("bounded_cancelled_divergent_coefficients"),
+            "checkpoint line bounded-cancelled divergent coefficients");
+    result.diagnostics.divergent_cancellation_mode = required_string(
+        diagnostics, "divergent_cancellation_mode");
+    if (!diagnostics.at("divergent_relative_tolerance").is_string() ||
+        !diagnostics.at("divergent_cancellation_provenance").is_string())
+      throw std::invalid_argument(
+          "checkpoint line divergent-cancellation strings are malformed");
+    result.diagnostics.divergent_relative_tolerance = std::string(
+        diagnostics.at("divergent_relative_tolerance").as_string());
+    result.diagnostics.divergent_cancellation_provenance = std::string(
+        diagnostics.at("divergent_cancellation_provenance").as_string());
+    if (result.diagnostics.divergent_cancellation_mode != "exact-singleton" &&
+        result.diagnostics.divergent_cancellation_mode !=
+            "bounded-relative-acb")
+      throw std::invalid_argument(
+          "checkpoint line has an unsupported divergent-cancellation mode");
+    if ((result.diagnostics.divergent_cancellation_mode ==
+             "bounded-relative-acb") !=
+        (!result.diagnostics.divergent_relative_tolerance.empty() &&
+         !result.diagnostics.divergent_cancellation_provenance.empty()))
+      throw std::invalid_argument(
+          "checkpoint line divergent-cancellation policy is incomplete");
+  }
   result.diagnostics.primitive_evaluations = checkpoint_size_t(
       diagnostics.at("primitive_evaluations"),
       "checkpoint line primitive evaluations");
@@ -18658,6 +19470,10 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   std::optional<WholeArmEpsilonContract> whole_arm_epsilon_contract;
   std::optional<ObservableEpsilonContract> observable_epsilon_contract;
   std::optional<TransportTailPolicy> transport_tail_policy;
+  bool has_aggregate_divergent_cancellation = false;
+  std::string aggregate_divergent_cancellation_mode = "exact-singleton";
+  std::optional<BoundedDivergentCancellation>
+      aggregate_bounded_divergent_cancellation;
   if (!compact_transport) {
     const auto* raw_contract = aggregate.if_contains("epsilon_contract");
     if (raw_contract != nullptr)
@@ -18676,23 +19492,66 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
           " does not reproduce its retained transport topology");
     for (std::size_t index = 0; index < rows.size(); ++index) {
       const auto& row = as_object(rows[index], label);
-      require_exact_keys(row, {"tile", "exact_identity", "prepared_row"},
-                         label);
-      const auto& prepared = as_object(row.at("prepared_row"), label);
+      const bool legacy_full_row =
+          row.if_contains("prepared_row") != nullptr;
+      if (!legacy_full_row && !compact_v2)
+        throw std::invalid_argument(
+            std::string(label) +
+            " compact row identities require a SHA-bound v2 provenance");
+      if (legacy_full_row)
+        require_exact_keys(
+            row, {"tile", "exact_identity", "prepared_row"}, label);
+      else
+        require_exact_keys(
+            row, {"tile", "exact_identity", "entries"}, label);
+      const auto exact_identity = required_string(row, "exact_identity");
       if (checkpoint_size_t(row.at("tile"), label) != index ||
-          required_string(row, "exact_identity") !=
-              required_string(prepared, "exact_identity"))
+          exact_identity.empty())
         throw std::invalid_argument(
             std::string(label) + " is out of order or stale");
+      if (legacy_full_row) {
+        const auto& prepared = as_object(row.at("prepared_row"), label);
+        if (exact_identity != required_string(prepared, "exact_identity"))
+          throw std::invalid_argument(
+              std::string(label) + " legacy prepared row is stale");
+      } else {
+        std::optional<std::uint32_t> previous_column;
+        for (const auto& raw_entry : as_array(row.at("entries"), label)) {
+          const auto& entry = as_object(raw_entry, label);
+          require_exact_keys(
+              entry,
+              {"column", "epsilon_shift", "center_pole_order",
+               "exact_identity"},
+              label);
+          const auto column = as_u32(entry.at("column"), label);
+          (void)as_i32(entry.at("epsilon_shift"), label);
+          (void)as_u32(entry.at("center_pole_order"), label);
+          if ((previous_column.has_value() && *previous_column >= column) ||
+              required_string(entry, "exact_identity").empty())
+            throw std::invalid_argument(
+                std::string(label) +
+                " has stale or unordered compact entry facts");
+          previous_column = column;
+        }
+      }
     }
   };
   if (compact_single_transport) {
-    require_exact_keys(
-        aggregate,
-        {"kind", "combination", "request_index", "observable_identity",
-         "observable_checkpoint_identity", "transport_state",
-         "output_epsilon_contract", "tail_policy", "rows", "tile_count"},
-        "checkpoint compact transport observable recipe");
+    if (compact_v2)
+      require_exact_keys(
+          aggregate,
+          {"kind", "combination", "request_index", "observable_identity",
+           "observable_checkpoint_identity", "transport_state",
+           "output_epsilon_contract", "tail_policy", "projection_mode",
+           "rows", "tile_count"},
+          "checkpoint compact transport observable recipe");
+    else
+      require_exact_keys(
+          aggregate,
+          {"kind", "combination", "request_index", "observable_identity",
+           "observable_checkpoint_identity", "transport_state",
+           "output_epsilon_contract", "tail_policy", "rows", "tile_count"},
+          "checkpoint legacy compact transport observable recipe");
     if (required_string(aggregate, "kind") !=
             "transport-state-observable-arm" ||
         required_string(aggregate, "combination") !=
@@ -18733,17 +19592,52 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
     transport_tail_policy = parse_transport_tail_policy(
         aggregate.at("tail_policy"),
         "checkpoint observable tail policy");
+    if (compact_v2)
+      require_transport_projection_mode(
+          aggregate, *transport_tail_policy,
+          "checkpoint compact transport observable recipe");
     validate_observable_rows(
         aggregate.at("rows"), aggregate.at("tile_count"), transport_owner,
         "checkpoint observable prepared rows");
   } else if (compact_pair_transport) {
-    require_exact_keys(
-        aggregate,
-        {"kind", "combination", "request_index", "observable_identity",
-         "observable_checkpoint_identity", "output_epsilon_contract",
-         "tail_policy", "no_remarching", "no_rematching",
-         "concurrent_arms", "lower", "upper"},
-        "checkpoint compact transport-pair observable recipe");
+    has_aggregate_divergent_cancellation =
+        aggregate.if_contains("divergent_cancellation") != nullptr;
+    if (has_aggregate_divergent_cancellation) {
+      if (compact_v2)
+        require_exact_keys(
+            aggregate,
+            {"kind", "combination", "request_index", "observable_identity",
+             "observable_checkpoint_identity", "output_epsilon_contract",
+             "tail_policy", "projection_mode", "divergent_cancellation",
+             "no_remarching", "no_rematching", "concurrent_arms", "lower",
+             "upper"},
+            "checkpoint compact transport-pair observable recipe");
+      else
+        require_exact_keys(
+            aggregate,
+            {"kind", "combination", "request_index", "observable_identity",
+             "observable_checkpoint_identity", "output_epsilon_contract",
+             "tail_policy", "divergent_cancellation", "no_remarching",
+             "no_rematching", "concurrent_arms", "lower", "upper"},
+            "checkpoint legacy compact transport-pair observable recipe");
+    } else {
+      if (compact_v2)
+        require_exact_keys(
+            aggregate,
+            {"kind", "combination", "request_index", "observable_identity",
+             "observable_checkpoint_identity", "output_epsilon_contract",
+             "tail_policy", "projection_mode", "no_remarching",
+             "no_rematching", "concurrent_arms", "lower", "upper"},
+            "checkpoint compact transport-pair observable recipe");
+      else
+        require_exact_keys(
+            aggregate,
+            {"kind", "combination", "request_index", "observable_identity",
+             "observable_checkpoint_identity", "output_epsilon_contract",
+             "tail_policy", "no_remarching", "no_rematching",
+             "concurrent_arms", "lower", "upper"},
+            "checkpoint legacy compact transport-pair observable recipe");
+    }
     if (required_string(aggregate, "kind") !=
             "transport-state-observable-pair" ||
         required_string(aggregate, "combination") !=
@@ -18769,6 +19663,31 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
     transport_tail_policy = parse_transport_tail_policy(
         aggregate.at("tail_policy"),
         "checkpoint transport-pair tail policy");
+    if (compact_v2)
+      require_transport_projection_mode(
+          aggregate, *transport_tail_policy,
+          "checkpoint compact transport-pair observable recipe");
+    if (has_aggregate_divergent_cancellation) {
+      const auto& cancellation = as_object(
+          aggregate.at("divergent_cancellation"),
+          "checkpoint transport-pair divergent-cancellation policy");
+      aggregate_divergent_cancellation_mode = required_string(
+          cancellation, "mode");
+      if (aggregate_divergent_cancellation_mode == "exact-singleton") {
+        require_exact_keys(
+            cancellation, {"mode"},
+            "checkpoint exact-singleton divergent-cancellation policy");
+      } else if (aggregate_divergent_cancellation_mode ==
+                 "bounded-relative-acb") {
+        aggregate_bounded_divergent_cancellation =
+            parse_bounded_divergent_cancellation(
+                cancellation,
+                "checkpoint bounded divergent-cancellation policy");
+      } else {
+        throw std::invalid_argument(
+            "checkpoint transport-pair has an unsupported divergent-cancellation mode");
+      }
+    }
     const auto validate_side_recipe = [&](
         const json::value& raw_side,
         const std::shared_ptr<StoredTransportArmState>& owner,
@@ -18900,14 +19819,42 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   const auto& diagnostics = as_object(
       raw_result.at("diagnostics"),
       "checkpoint line aggregate diagnostics");
-  require_exact_keys(
-      diagnostics,
-      {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
-       "cancelled_divergent_groups", "primitive_evaluations",
-       "primitive_component_applications", "primitive_component_reuses",
-       "has_center_endpoint", "tail_certificate_requested",
-       "tail_certificate_status", "tail_witness_radius_exact", "detail"},
-      "checkpoint line aggregate diagnostics");
+  const std::array<const char*, 4> cancellation_diagnostic_keys{
+      "bounded_cancelled_divergent_coefficients",
+      "divergent_cancellation_mode", "divergent_relative_tolerance",
+      "divergent_cancellation_provenance"};
+  const auto cancellation_diagnostic_count = std::count_if(
+      cancellation_diagnostic_keys.begin(),
+      cancellation_diagnostic_keys.end(), [&](const char* key) {
+        return diagnostics.if_contains(key) != nullptr;
+      });
+  const bool has_cancellation_diagnostics =
+      cancellation_diagnostic_count == cancellation_diagnostic_keys.size();
+  if (cancellation_diagnostic_count != 0 &&
+      !has_cancellation_diagnostics)
+    throw std::invalid_argument(
+        "checkpoint aggregate divergent-cancellation diagnostics are incomplete");
+  if (has_cancellation_diagnostics)
+    require_exact_keys(
+        diagnostics,
+        {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+         "cancelled_divergent_groups",
+         "bounded_cancelled_divergent_coefficients",
+         "divergent_cancellation_mode", "divergent_relative_tolerance",
+         "divergent_cancellation_provenance", "primitive_evaluations",
+         "primitive_component_applications", "primitive_component_reuses",
+         "has_center_endpoint", "tail_certificate_requested",
+         "tail_certificate_status", "tail_witness_radius_exact", "detail"},
+        "checkpoint line aggregate diagnostics");
+  else
+    require_exact_keys(
+        diagnostics,
+        {"input_monomial_cells", "grouped_monomials", "zero_groups_skipped",
+         "cancelled_divergent_groups", "primitive_evaluations",
+         "primitive_component_applications", "primitive_component_reuses",
+         "has_center_endpoint", "tail_certificate_requested",
+         "tail_certificate_status", "tail_witness_radius_exact", "detail"},
+        "checkpoint legacy line aggregate diagnostics");
   result.diagnostics.input_monomial_cells = checkpoint_size_t(
       diagnostics.at("input_monomial_cells"),
       "checkpoint aggregate input monomials");
@@ -18920,6 +19867,33 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   result.diagnostics.cancelled_divergent_groups = checkpoint_size_t(
       diagnostics.at("cancelled_divergent_groups"),
       "checkpoint aggregate cancelled divergent groups");
+  if (has_cancellation_diagnostics) {
+    result.diagnostics.bounded_cancelled_divergent_coefficients =
+        checkpoint_size_t(
+            diagnostics.at("bounded_cancelled_divergent_coefficients"),
+            "checkpoint aggregate bounded-cancelled divergent coefficients");
+    result.diagnostics.divergent_cancellation_mode = required_string(
+        diagnostics, "divergent_cancellation_mode");
+    if (!diagnostics.at("divergent_relative_tolerance").is_string() ||
+        !diagnostics.at("divergent_cancellation_provenance").is_string())
+      throw std::invalid_argument(
+          "checkpoint aggregate divergent-cancellation strings are malformed");
+    result.diagnostics.divergent_relative_tolerance = std::string(
+        diagnostics.at("divergent_relative_tolerance").as_string());
+    result.diagnostics.divergent_cancellation_provenance = std::string(
+        diagnostics.at("divergent_cancellation_provenance").as_string());
+    if (result.diagnostics.divergent_cancellation_mode != "exact-singleton" &&
+        result.diagnostics.divergent_cancellation_mode !=
+            "bounded-relative-acb")
+      throw std::invalid_argument(
+          "checkpoint aggregate has an unsupported divergent-cancellation mode");
+    if ((result.diagnostics.divergent_cancellation_mode ==
+             "bounded-relative-acb") !=
+        (!result.diagnostics.divergent_relative_tolerance.empty() &&
+         !result.diagnostics.divergent_cancellation_provenance.empty()))
+      throw std::invalid_argument(
+          "checkpoint aggregate divergent-cancellation policy is incomplete");
+  }
   result.diagnostics.primitive_evaluations = checkpoint_size_t(
       diagnostics.at("primitive_evaluations"),
       "checkpoint aggregate primitive evaluations");
@@ -18945,6 +19919,26 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
   result.diagnostics.tail_witness_radius_exact = std::string(
       diagnostics.at("tail_witness_radius_exact").as_string());
   result.diagnostics.detail = required_string(diagnostics, "detail");
+
+  if (compact_pair_transport) {
+    if (!has_aggregate_divergent_cancellation) {
+      if (result.diagnostics.divergent_cancellation_mode !=
+          "exact-singleton")
+        throw std::invalid_argument(
+            "legacy checkpoint pair lacks the bounded-cancellation provenance named by its diagnostics");
+    } else if (result.diagnostics.divergent_cancellation_mode !=
+                   aggregate_divergent_cancellation_mode ||
+               (aggregate_bounded_divergent_cancellation.has_value() &&
+                (result.diagnostics.divergent_relative_tolerance !=
+                     aggregate_bounded_divergent_cancellation
+                         ->relative_tolerance_text ||
+                 result.diagnostics.divergent_cancellation_provenance !=
+                     aggregate_bounded_divergent_cancellation
+                         ->provenance))) {
+      throw std::invalid_argument(
+          "checkpoint pair divergent-cancellation diagnostics differ from aggregate provenance");
+    }
+  }
 
   const auto elapsed_ms = checkpoint_nonnegative_double(
       object.at("elapsed_ms"), "checkpoint line aggregate elapsed time");
@@ -21147,6 +22141,10 @@ json::object run_session_command(const json::object& root) {
                          domain == "symbolic"
                              ? "unsupported"
                              : kRetainedTransportPairContractionCapability},
+                        {"transport_pair_stream_capability",
+                         domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportPairStreamCapability},
                         {"transport_endpoint_batch_capability",
                          domain == "symbolic"
                              ? "unsupported"
@@ -21175,7 +22173,8 @@ json::object run_session_command(const json::object& root) {
     }
     std::size_t charts = 0, locals = 0, matches = 0, endpoints = 0,
                 tile_plans = 0, transport_states = 0,
-                line_results = 0, sccs = 0;
+                line_results = 0, transport_pair_streams = 0, sccs = 0;
+    std::vector<std::shared_ptr<TransportPairObservableStream>> streams;
     {
       std::lock_guard<std::mutex> lock(removed->mutex);
       removed->closed = true;
@@ -21189,7 +22188,16 @@ json::object run_session_command(const json::object& root) {
       tile_plans = removed->tile_plans.size();
       transport_states = removed->transport_states.size();
       line_results = removed->line_results.size();
+      transport_pair_streams = removed->transport_pair_streams.size();
       sccs = removed->sccs.size();
+      streams.reserve(transport_pair_streams);
+      for (auto& [ignored, stream] : removed->transport_pair_streams)
+        streams.push_back(std::move(stream));
+      if (removed->pending_line_integrations < transport_pair_streams)
+        throw std::logic_error(
+            "session close found inconsistent transport-pair stream reservations");
+      removed->pending_line_integrations -= transport_pair_streams;
+      removed->transport_pair_streams.clear();
       removed->line_results.clear();
       removed->transport_states.clear();
       removed->tile_plans.clear();
@@ -21201,6 +22209,8 @@ json::object run_session_command(const json::object& root) {
       removed->charts.clear();
       removed->handles_by_key.clear();
     }
+    for (const auto& stream : streams)
+      stream->abort();
     return json::object{{"status", "ok"}, {"closed", handle},
                         {"released_charts", charts},
                         {"released_locals", locals},
@@ -21209,6 +22219,8 @@ json::object run_session_command(const json::object& root) {
                         {"released_tile_plans", tile_plans},
                         {"released_transport_states", transport_states},
                         {"released_line_results", line_results},
+                        {"released_transport_pair_streams",
+                         transport_pair_streams},
                         {"released_scc_charts", sccs}};
   }
 
@@ -23250,6 +24262,8 @@ json::object run_session_command(const json::object& root) {
             {"output_epsilon_contract", observable.epsilon_record},
             {"tail_policy",
              transport_tail_policy_name(observable.tail_policy)},
+            {"projection_mode",
+             transport_projection_mode_name(observable.tail_policy)},
             {"rows", std::move(row_records)}};
         contraction_inputs.push_back(std::move(input));
       }
@@ -23376,6 +24390,435 @@ json::object run_session_command(const json::object& root) {
         {"elapsed_ms", contraction_ms}};
   }
 
+  if (operation == "transport.contract_pair_stream_begin") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "lower", "upper",
+         "checkpoint_policy", "observable"},
+        "native transport.contract_pair_stream_begin request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native transport-pair streaming requires rational or Acb coefficients");
+
+    struct StateReference {
+      std::string handle;
+      std::string checkpoint_identity;
+      std::string provenance_identity;
+    };
+    const auto parse_state_reference = [&](const json::value& raw,
+                                           const char* label) {
+      const auto& reference = as_object(raw, label);
+      require_exact_keys(reference,
+                         {"transport_state", "checkpoint_identity",
+                          "provenance_identity"}, label);
+      StateReference parsed{
+          required_string(reference, "transport_state"),
+          required_string(reference, "checkpoint_identity"),
+          required_string(reference, "provenance_identity")};
+      if (parsed.handle.empty() || parsed.checkpoint_identity.empty() ||
+          parsed.provenance_identity.empty())
+        throw std::invalid_argument(
+            std::string(label) + " contains an empty exact state token");
+      return parsed;
+    };
+    const std::array<StateReference, 2> state_references{
+        parse_state_reference(root.at("lower"),
+                              "streamed transport-pair lower state"),
+        parse_state_reference(root.at("upper"),
+                              "streamed transport-pair upper state")};
+
+    const auto& checkpoint_policy = as_object(
+        root.at("checkpoint_policy"),
+        "streamed transport-pair checkpoint policy");
+    require_exact_keys(checkpoint_policy, {"schema", "root"},
+                       "streamed transport-pair checkpoint policy");
+    if (required_string(checkpoint_policy, "schema") !=
+        "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1")
+      throw std::invalid_argument(
+          "unsupported streamed transport-pair checkpoint policy schema");
+    const auto checkpoint_root = required_string(checkpoint_policy, "root");
+    if (checkpoint_root.empty())
+      throw std::invalid_argument(
+          "streamed transport-pair checkpoint root cannot be empty");
+
+    const auto& observable = as_object(
+        root.at("observable"), "streamed transport-pair observable");
+    if (observable.if_contains("divergent_cancellation") != nullptr)
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy",
+           "divergent_cancellation"},
+          "streamed transport-pair observable");
+    else
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy"},
+          "streamed transport-pair observable");
+    const auto identity = required_string(observable, "identity");
+    const auto observable_checkpoint = required_string(
+        observable, "checkpoint_identity");
+    if (identity.empty() || observable_checkpoint.empty())
+      throw std::invalid_argument(
+          "streamed transport-pair observable identities cannot be empty");
+    const auto epsilon = parse_observable_epsilon_contract(
+        observable.at("epsilon"),
+        "streamed transport-pair output epsilon contract");
+    const auto epsilon_record = as_object(
+        observable.at("epsilon"),
+        "streamed transport-pair output epsilon contract");
+    const auto tail_policy = parse_transport_tail_policy(
+        observable.at("tail_policy"),
+        "streamed transport-pair tail policy");
+    if (tail_policy != TransportTailPolicy::Stored)
+      throw std::invalid_argument(
+          "transport-pair tile streaming currently supports only stored tails");
+    std::optional<BoundedDivergentCancellation> divergent_cancellation;
+    if (const auto* policy =
+            observable.if_contains("divergent_cancellation")) {
+      if (session->domain != "acb")
+        throw std::invalid_argument(
+            "bounded divergent cancellation is restricted to Acb transport-pair streams");
+      divergent_cancellation = parse_bounded_divergent_cancellation(
+          *policy, "streamed transport-pair divergent-cancellation policy");
+    }
+
+    std::array<std::shared_ptr<StoredTransportArmState>, 2> states;
+    std::shared_ptr<TransportPairObservableStream> stream;
+    std::string stream_handle;
+    std::string stream_checkpoint;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      if (!session->transport_pair_streams.empty())
+        throw std::invalid_argument(
+            "persistent solver session already owns an active transport-pair stream");
+      for (std::size_t side = 0; side < 2; ++side) {
+        const auto found = session->transport_states.find(
+            state_references[side].handle);
+        if (found == session->transport_states.end())
+          throw std::invalid_argument(
+              "unknown or released transport-arm state for streamed pair contraction");
+        states[side] = found->second;
+        if (state_references[side].checkpoint_identity !=
+                states[side]->checkpoint_identity() ||
+            state_references[side].provenance_identity !=
+                states[side]->provenance_identity())
+          throw std::invalid_argument(
+              "streamed transport-pair state binding is stale");
+      }
+      require_transport_pair_compatibility(
+          states[0], states[1], session->domain);
+      states[0]->require_contraction_counter_capacity(1);
+      states[1]->require_contraction_counter_capacity(1);
+      if (session->total_transport_contractions >
+              std::numeric_limits<std::uint64_t>::max() - 2 ||
+          session->total_transport_observables >
+              std::numeric_limits<std::uint64_t>::max() - 2 ||
+          session->total_transport_pair_contractions ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          session->total_transport_pair_observables ==
+              std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error(
+            "streamed transport-pair session counter overflow");
+      if (session->line_results.size() +
+              session->pending_line_integrations >=
+          session->line_result_capacity)
+        throw std::invalid_argument(
+            "persistent line-result capacity is exhausted by streamed transport-pair contraction");
+      if (session->next_transport_pair_stream ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          session->next_line_result ==
+              std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error(
+            "streamed transport-pair handle counter overflow");
+      stream_handle = "pair-stream:" + session->handle + ":" +
+          std::to_string(session->next_transport_pair_stream++);
+      stream_checkpoint = checkpoint_root + ":stream";
+      const auto line_handle =
+          "line:" + std::to_string(session->next_line_result++);
+      stream = std::make_shared<TransportPairObservableStream>(
+          stream_handle, stream_checkpoint, line_handle, checkpoint_root,
+          session->domain, session->precision_bits, states, identity,
+          observable_checkpoint, epsilon, epsilon_record, tail_policy,
+          divergent_cancellation);
+      if (!session->transport_pair_streams.emplace(
+              stream_handle, stream).second)
+        throw std::logic_error(
+            "streamed transport-pair handle collided at publication");
+      ++session->pending_line_integrations;
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", kRetainedTransportPairStreamCapability},
+        {"stream", stream_handle},
+        {"stream_checkpoint_identity", stream_checkpoint},
+        {"observable_identity", identity},
+        {"observable_checkpoint_identity", observable_checkpoint},
+        {"lower", json::object{
+             {"transport_state", states[0]->handle()},
+             {"checkpoint_identity", states[0]->checkpoint_identity()},
+             {"provenance_identity", states[0]->provenance_identity()},
+             {"tiles", stream->expected_tiles()[0]}}},
+        {"upper", json::object{
+             {"transport_state", states[1]->handle()},
+             {"checkpoint_identity", states[1]->checkpoint_identity()},
+             {"provenance_identity", states[1]->provenance_identity()},
+             {"tiles", stream->expected_tiles()[1]}}},
+        {"next_side", "lower"}, {"next_tile", 0},
+        {"tail_policy", "stored"},
+        {"atomic_publication", true},
+        {"checkpoint_policy", checkpoint_policy}};
+  }
+
+  if (operation == "transport.contract_pair_stream_add_tile") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "stream",
+         "stream_checkpoint_identity", "side", "tile", "row"},
+        "native transport.contract_pair_stream_add_tile request");
+    const auto stream_handle = required_string(root, "stream");
+    const auto stream_checkpoint = required_string(
+        root, "stream_checkpoint_identity");
+    const auto side_name = required_string(root, "side");
+    const std::size_t side = side_name == "lower" ? 0 :
+        side_name == "upper" ? 1 : 2;
+    if (side > 1)
+      throw std::invalid_argument(
+          "streamed transport-pair tile side must be lower or upper");
+    const auto tile = static_cast<std::size_t>(
+        as_u32(root.at("tile"), "streamed transport-pair tile index"));
+    const auto& row = as_object(
+        root.at("row"), "streamed transport-pair prepared row");
+    std::shared_ptr<TransportPairObservableStream> stream;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->transport_pair_streams.find(stream_handle);
+      if (found == session->transport_pair_streams.end())
+        throw std::invalid_argument(
+            "unknown, aborted, or finished transport-pair stream");
+      stream = found->second;
+      if (stream_checkpoint != stream->stream_checkpoint_identity())
+        throw std::invalid_argument(
+            "streamed transport-pair checkpoint binding is stale");
+    }
+    auto progress = stream->add_tile(side, tile, row);
+    progress["status"] = "ok";
+    progress["session"] = session->handle;
+    progress["capability"] = kRetainedTransportPairStreamCapability;
+    progress["stream"] = stream_handle;
+    progress["stream_checkpoint_identity"] = stream_checkpoint;
+    progress["atomic_publication"] = true;
+    return progress;
+  }
+
+  if (operation == "transport.contract_pair_stream_abort") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "stream",
+         "stream_checkpoint_identity"},
+        "native transport.contract_pair_stream_abort request");
+    const auto stream_handle = required_string(root, "stream");
+    const auto stream_checkpoint = required_string(
+        root, "stream_checkpoint_identity");
+    const auto prefix = "pair-stream:" + session->handle + ":";
+    if (stream_handle.rfind(prefix, 0) != 0)
+      throw std::invalid_argument(
+          "transport-pair stream belongs to a different session");
+    std::shared_ptr<TransportPairObservableStream> stream;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->transport_pair_streams.find(stream_handle);
+      if (found == session->transport_pair_streams.end())
+        return json::object{
+            {"status", "ok"}, {"session", session->handle},
+            {"capability", kRetainedTransportPairStreamCapability},
+            {"stream", stream_handle}, {"aborted", false},
+            {"already_absent", true}};
+      stream = found->second;
+      if (stream_checkpoint != stream->stream_checkpoint_identity())
+        throw std::invalid_argument(
+            "streamed transport-pair checkpoint binding is stale");
+      session->transport_pair_streams.erase(found);
+    }
+    stream->abort();
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_line_integrations == 0)
+        throw std::logic_error(
+            "streamed transport-pair abort reservation underflow");
+      --session->pending_line_integrations;
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", kRetainedTransportPairStreamCapability},
+        {"stream", stream_handle},
+        {"stream_checkpoint_identity", stream_checkpoint},
+        {"aborted", true}, {"atomic_publication", true}};
+  }
+
+  if (operation == "transport.contract_pair_stream_finish") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "stream",
+         "stream_checkpoint_identity"},
+        "native transport.contract_pair_stream_finish request");
+    const auto stream_handle = required_string(root, "stream");
+    const auto stream_checkpoint = required_string(
+        root, "stream_checkpoint_identity");
+    std::shared_ptr<TransportPairObservableStream> stream;
+    bool reservation_live = false;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->transport_pair_streams.find(stream_handle);
+      if (found == session->transport_pair_streams.end())
+        throw std::invalid_argument(
+            "unknown, aborted, or finished transport-pair stream");
+      stream = found->second;
+      if (stream_checkpoint != stream->stream_checkpoint_identity())
+        throw std::invalid_argument(
+            "streamed transport-pair checkpoint binding is stale");
+      session->transport_pair_streams.erase(found);
+      reservation_live = true;
+    }
+    const auto release_reservation = [&]() {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (!reservation_live) return;
+      if (session->pending_line_integrations == 0)
+        throw std::logic_error(
+            "streamed transport-pair finish reservation underflow");
+      --session->pending_line_integrations;
+      reservation_live = false;
+    };
+    struct StreamFinishReservationGuard final {
+      decltype(release_reservation)& release;
+      bool& live;
+      ~StreamFinishReservationGuard() noexcept {
+        if (!live) return;
+        try {
+          release();
+        } catch (...) {
+          std::terminate();
+        }
+      }
+    } reservation_guard{release_reservation, reservation_live};
+
+    std::unique_ptr<AcbPrecisionLease> acb_lease;
+    if (session->domain == "acb") {
+      acb_lease = std::make_unique<AcbPrecisionLease>(
+          session->precision_bits);
+      ComplexBall::set_precision(session->precision_bits);
+    }
+    auto finished = stream->finish();
+    const auto& states = stream->states();
+    const auto tile_integrations = static_cast<std::uint64_t>(
+        finished.tiles[0]) + static_cast<std::uint64_t>(finished.tiles[1]);
+    try {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_line_integrations == 0)
+        throw std::logic_error(
+            "streamed transport-pair finish reservation underflow");
+      --session->pending_line_integrations;
+      reservation_live = false;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during streamed transport-pair contraction");
+      states[0]->require_contraction_counter_capacity(1);
+      states[1]->require_contraction_counter_capacity(1);
+      if (session->total_transport_contractions >
+              std::numeric_limits<std::uint64_t>::max() - 2 ||
+          session->total_transport_observables >
+              std::numeric_limits<std::uint64_t>::max() - 2 ||
+          session->total_transport_pair_contractions ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          session->total_transport_pair_observables ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          tile_integrations >
+              std::numeric_limits<std::uint64_t>::max() -
+                  session->total_line_integrations)
+        throw std::overflow_error(
+            "streamed transport-pair session counter overflow at publication");
+      if (!session->line_results.emplace(
+              finished.line->handle(), finished.line).second)
+        throw std::logic_error(
+            "streamed transport-pair line handle collided during publication");
+      states[0]->note_contraction_success(1);
+      states[1]->note_contraction_success(1);
+      session->total_transport_contractions += 2;
+      session->total_transport_observables += 2;
+      ++session->total_transport_pair_contractions;
+      ++session->total_transport_pair_observables;
+      session->total_transport_contraction_ms +=
+          finished.arm_integration_ms[0] +
+          finished.arm_integration_ms[1];
+      session->total_transport_pair_contraction_ms += finished.elapsed_ms;
+      session->total_line_integrations += tile_integrations;
+      session->total_line_integration_ms +=
+          finished.arm_integration_ms[0] +
+          finished.arm_integration_ms[1];
+      for (std::size_t side = 0; side < 2; ++side)
+        for (std::size_t tile = 0; tile < finished.tiles[side]; ++tile)
+          states[side]->plan_owner()->note_integration();
+    } catch (...) {
+      if (reservation_live) release_reservation();
+      throw;
+    }
+
+    const auto& line = finished.line;
+    json::array output_lines;
+    output_lines.push_back(json::object{
+        {"request_index", 0},
+        {"observable_identity", stream->identity()},
+        {"session", session->handle}, {"line", line->handle()},
+        {"checkpoint_identity", line->checkpoint_identity()},
+        {"provenance_identity", line->provenance_identity()},
+        {"combination", "negative-lower-plus-upper"},
+        {"scope", line_integration_scope_name(line->result().scope)},
+        {"epsilon", json::object{
+             {"min", line->result().value.epsilon.min_power},
+             {"max", line->result().value.epsilon.complete_max}}},
+        {"error", encode_error_envelope_summary(
+                      line->result().value.error)},
+        {"lower_tiles", finished.tiles[0]},
+        {"upper_tiles", finished.tiles[1]},
+        {"elapsed_ms", finished.elapsed_ms}});
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", kRetainedTransportPairStreamCapability},
+        {"native_retained", true}, {"json_coefficients", 0},
+        {"stream", stream_handle},
+        {"stream_checkpoint_identity", stream_checkpoint},
+        {"lower", json::object{
+             {"transport_state", states[0]->handle()},
+             {"checkpoint_identity", states[0]->checkpoint_identity()},
+             {"provenance_identity", states[0]->provenance_identity()},
+             {"tiles", finished.tiles[0]},
+             {"elapsed_ms", finished.arm_integration_ms[0]}}},
+        {"upper", json::object{
+             {"transport_state", states[1]->handle()},
+             {"checkpoint_identity", states[1]->checkpoint_identity()},
+             {"provenance_identity", states[1]->provenance_identity()},
+             {"tiles", finished.tiles[1]},
+             {"elapsed_ms", finished.arm_integration_ms[1]}}},
+        {"combination", "negative-lower-plus-upper"},
+        {"observables", 1}, {"lines", std::move(output_lines)},
+        {"tile_integrations", tile_integrations},
+        {"no_remarching", true}, {"no_rematching", true},
+        {"concurrent_arms", false}, {"max_parallel_arms", 1},
+        {"streaming_tile_contraction", true},
+        {"persistent_tile_stream", true},
+        {"atomic_publication", true}, {"compact_outputs", true},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+             {"root", stream->checkpoint_root()}}},
+        {"elapsed_ms", finished.elapsed_ms}};
+  }
+
   if (operation == "transport.contract_pair") {
     require_exact_keys(
         root,
@@ -23430,10 +24873,14 @@ json::object run_session_command(const json::object& root) {
     struct PendingPairObservable {
       std::string identity;
       std::string checkpoint_identity;
-      std::array<std::vector<json::object>, 2> rows;
+      // The request root outlives this synchronous operation.  Borrow its
+      // immutable prepared rows instead of deep-copying every exact kernel
+      // through pending and per-arm records.
+      std::array<std::vector<const json::object*>, 2> rows;
       ObservableEpsilonContract epsilon;
       json::object epsilon_record;
       TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
+      std::optional<BoundedDivergentCancellation> divergent_cancellation;
     };
     std::vector<PendingPairObservable> pending_observables;
     const auto& raw_observables = as_array(
@@ -23444,11 +24891,19 @@ json::object run_session_command(const json::object& root) {
     for (const auto& raw_observable : raw_observables) {
       const auto& observable = as_object(
           raw_observable, "native transport-pair observable");
-      require_exact_keys(
-          observable,
-          {"identity", "checkpoint_identity", "lower_integrand_rows",
-           "upper_integrand_rows", "epsilon", "tail_policy"},
-          "native transport-pair observable");
+      if (observable.if_contains("divergent_cancellation") != nullptr)
+        require_exact_keys(
+            observable,
+            {"identity", "checkpoint_identity", "lower_integrand_rows",
+             "upper_integrand_rows", "epsilon", "tail_policy",
+             "divergent_cancellation"},
+            "native transport-pair observable");
+      else
+        require_exact_keys(
+            observable,
+            {"identity", "checkpoint_identity", "lower_integrand_rows",
+             "upper_integrand_rows", "epsilon", "tail_policy"},
+            "native transport-pair observable");
       PendingPairObservable parsed;
       parsed.identity = required_string(observable, "identity");
       parsed.checkpoint_identity = required_string(
@@ -23462,7 +24917,7 @@ json::object run_session_command(const json::object& root) {
         const auto* key = side == 0 ? "lower_integrand_rows"
                                     : "upper_integrand_rows";
         for (const auto& raw_row : as_array(observable.at(key), key))
-          parsed.rows[side].push_back(as_object(raw_row, key));
+          parsed.rows[side].push_back(&as_object(raw_row, key));
       }
       parsed.epsilon = parse_observable_epsilon_contract(
           observable.at("epsilon"),
@@ -23473,6 +24928,16 @@ json::object run_session_command(const json::object& root) {
       parsed.tail_policy = parse_transport_tail_policy(
           observable.at("tail_policy"),
           "native transport-pair tail policy");
+      if (const auto* policy =
+              observable.if_contains("divergent_cancellation")) {
+        if (session->domain != "acb")
+          throw std::invalid_argument(
+              "bounded divergent cancellation is restricted to Acb transport-pair observables");
+        parsed.divergent_cancellation =
+            parse_bounded_divergent_cancellation(
+                *policy,
+                "native transport-pair divergent-cancellation policy");
+      }
       pending_observables.push_back(std::move(parsed));
     }
 
@@ -23555,24 +25020,27 @@ json::object run_session_command(const json::object& root) {
           input.checkpoint_identity =
               observable_root + ":" + arm_name + ":scratch";
           input.checkpoint_root = observable_root + ":" + arm_name;
-          input.rows = observable.rows[side];
+          input.borrowed_rows = observable.rows[side];
           input.epsilon = observable.epsilon;
           input.epsilon_record = observable.epsilon_record;
           input.tail_policy = observable.tail_policy;
+          input.divergent_cancellation =
+              observable.divergent_cancellation;
           input.aggregate_handle =
               "private:" + observable_root + ":" + arm_name + ":aggregate";
-          input.projected_local_handles.reserve(input.rows.size());
-          pair_row_records[side].reserve(input.rows.size());
-          for (std::size_t tile = 0; tile < input.rows.size(); ++tile) {
+          input.projected_local_handles.reserve(input.row_count());
+          pair_row_records[side].reserve(input.row_count());
+          for (std::size_t tile = 0; tile < input.row_count(); ++tile) {
             input.projected_local_handles.push_back(
                 "private:" + arm_checkpoint_identity(
                                  input.checkpoint_root, arm_name,
                                  "projected", tile + 1));
             const auto row_identity = required_string(
-                input.rows[tile], "exact_identity");
+                input.row(tile), "exact_identity");
             pair_row_records[side].push_back(json::object{
                 {"tile", tile}, {"exact_identity", row_identity},
-                {"prepared_row", input.rows[tile]}});
+                {"entries",
+                 compact_prepared_row_entry_facts(input.row(tile))}});
           }
           input.aggregate_record = json::object{
               {"kind", "transport-state-observable-arm"},
@@ -23584,10 +25052,18 @@ json::object run_session_command(const json::object& root) {
               {"transport_state",
                compact_transport_state_reference(states[side])},
               {"output_epsilon_contract", observable.epsilon_record},
-              {"tail_policy",
+            {"tail_policy",
                transport_tail_policy_name(observable.tail_policy)},
+            {"projection_mode",
+             transport_projection_mode_name(observable.tail_policy)},
+            {"divergent_cancellation",
+             observable.divergent_cancellation.has_value()
+                 ? json::value(encode_bounded_divergent_cancellation(
+                       *observable.divergent_cancellation))
+                 : json::value(
+                       json::object{{"mode", "exact-singleton"}})},
               {"rows", pair_row_records[side]},
-              {"tile_count", input.rows.size()}};
+              {"tile_count", input.row_count()}};
           arm_inputs[side].push_back(std::move(input));
         }
         const auto line_handle =
@@ -23604,6 +25080,14 @@ json::object run_session_command(const json::object& root) {
             {"output_epsilon_contract", observable.epsilon_record},
             {"tail_policy",
              transport_tail_policy_name(observable.tail_policy)},
+            {"projection_mode",
+             transport_projection_mode_name(observable.tail_policy)},
+            {"divergent_cancellation",
+             observable.divergent_cancellation.has_value()
+                 ? json::value(encode_bounded_divergent_cancellation(
+                       *observable.divergent_cancellation))
+                 : json::value(
+                       json::object{{"mode", "exact-singleton"}})},
             {"lower", json::object{
                  {"transport_state",
                   compact_transport_state_reference(states[0])},
@@ -26139,6 +27623,7 @@ json::object run_session_command(const json::object& root) {
     std::size_t pending_tile_plans = 0;
     std::size_t pending_transport_states = 0;
     std::size_t pending_line_integrations = 0;
+    std::size_t transport_pair_streams = 0;
     std::uint64_t total_local_solves = 0;
     std::uint64_t total_scc_column_solves = 0;
     std::uint64_t total_local_matches = 0;
@@ -26192,6 +27677,7 @@ json::object run_session_command(const json::object& root) {
       pending_tile_plans = session->pending_tile_plans;
       pending_transport_states = session->pending_transport_states;
       pending_line_integrations = session->pending_line_integrations;
+      transport_pair_streams = session->transport_pair_streams.size();
       total_local_solves = session->total_local_solves;
       total_scc_column_solves = session->total_scc_column_solves;
       total_local_matches = session->total_local_matches;
@@ -26320,6 +27806,7 @@ json::object run_session_command(const json::object& root) {
                         {"tile_plans", tile_plans.size()},
                         {"transport_states", transport_states.size()},
                         {"line_results", line_results.size()},
+                        {"transport_pair_streams", transport_pair_streams},
                         {"scc_charts", sccs.size()},
                         {"pending_local_solves", pending_local_solves},
                         {"pending_matches", pending_matches},
@@ -26401,6 +27888,10 @@ json::object run_session_command(const json::object& root) {
                          session->domain == "symbolic"
                              ? "unsupported"
                              : kRetainedTransportPairContractionCapability},
+                        {"transport_pair_stream_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportPairStreamCapability},
                         {"transport_endpoint_batch_capability",
                          session->domain == "symbolic"
                              ? "unsupported"
@@ -26682,6 +28173,10 @@ std::string backend_info_json() {
                                        true},
                                       {"persistent_transport_pair_contraction_capability",
                                        kRetainedTransportPairContractionCapability},
+                                      {"persistent_transport_pair_tile_stream",
+                                       true},
+                                      {"persistent_transport_pair_tile_stream_capability",
+                                       kRetainedTransportPairStreamCapability},
                                       {"persistent_transport_endpoint_batch",
                                        true},
                                       {"persistent_transport_endpoint_batch_capability",

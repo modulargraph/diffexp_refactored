@@ -2,6 +2,8 @@
 
 #include "diffexp2/integration.hpp"
 
+#include <flint/acb_mat.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +12,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -24,7 +28,8 @@ enum class MatchingArithmeticErrorCode : std::uint8_t {
   ExponentOverflow,
   InsufficientCompleteWindow,
   InvalidSaturationLattice,
-  SaturationFailure
+  SaturationFailure,
+  SearchBudgetExhausted
 };
 
 class MatchingArithmeticError : public std::runtime_error {
@@ -118,6 +123,53 @@ EpsilonFrame<Scalar> canonical_leading_frame(
   // MinPower to CompleteMax records precisely that fact; coefficients above
   // CompleteMax remain unknown, as required by EpsilonFrame.
   return EpsilonFrame<Scalar>::zero(input.complete_max());
+}
+
+struct CertifiedLaurentLeadingPower {
+  std::optional<std::int32_t> power;
+  std::optional<std::int32_t> first_ambiguous_power;
+};
+
+// Probe whether a frame is usable as a Laurent pivot without forcing a
+// decision on a zero-overlapping Acb coefficient.  Once an ambiguous
+// coefficient is encountered, a later proved-nonzero coefficient cannot be
+// called the leading one, so this candidate is skipped.  Exact-zero frames
+// remain distinguishable from ambiguous candidates.
+template <typename Scalar>
+CertifiedLaurentLeadingPower certified_laurent_leading_power(
+    const EpsilonFrame<Scalar>& input) {
+  for (std::size_t index = 0; index < input.coefficients().size(); ++index) {
+    const auto power = checked_power(
+        static_cast<std::int64_t>(input.min_power()) +
+            static_cast<std::int64_t>(index),
+        "certified Laurent leading power");
+    switch (zero_decision(input.coefficients()[index])) {
+      case ZeroDecision::Zero:
+        continue;
+      case ZeroDecision::Ambiguous:
+        return {std::nullopt, power};
+      case ZeroDecision::Nonzero:
+        return {power, std::nullopt};
+    }
+  }
+  return {};
+}
+
+// Canonicalize exactly as far as the enclosure proves.  A certified nonzero
+// leading coefficient permits removal of the exact-zero prefix; a wholly
+// certified-zero frame becomes structural zero through CompleteMax.  If the
+// first undecided coefficient overlaps zero, preserve the original frame and
+// its full enclosure instead of guessing its valuation.
+template <typename Scalar>
+EpsilonFrame<Scalar> canonicalize_certified_or_preserve_ambiguous(
+    const EpsilonFrame<Scalar>& input, const std::string& context,
+    std::optional<std::size_t> row = std::nullopt,
+    std::optional<std::size_t> column = std::nullopt) {
+  const auto leading = certified_laurent_leading_power(input);
+  if (leading.first_ambiguous_power.has_value()) return input;
+  if (!leading.power.has_value())
+    return EpsilonFrame<Scalar>::zero(input.complete_max());
+  return canonical_leading_frame(input, context, row, column);
 }
 
 template <typename Matrix>
@@ -785,105 +837,254 @@ LeadingNullRelation<Scalar> leading_null_relation(
 enum class FullRankProofResult : std::uint8_t {
   Proved,
   Ambiguous,
-  Deficient
+  Deficient,
+  SearchBudgetExhausted
 };
-
-// Full-rank certification has weaker zero-decision requirements than lattice
-// saturation: an ambiguous off-pivot entry is harmless when a sequence of
-// pivots whose balls all exclude zero proves invertibility.  Try certified
-// full pivots deterministically, backtracking only when interval widening
-// makes a later pivot unprovable.  Below-pivot balls may be arbitrary because
-// division by the certified pivot is valid for every value in its enclosure.
-template <typename Scalar>
-FullRankProofResult certified_full_rank_search(
-    DenseScalarMatrix<Scalar> matrix, std::size_t position) {
-  const auto size = matrix.size();
-  if (position == size) return FullRankProofResult::Proved;
-
-  std::vector<std::pair<std::size_t, std::size_t>> candidates;
-  bool has_ambiguous_candidate = false;
-  for (std::size_t row = position; row < size; ++row) {
-    for (std::size_t column = position; column < size; ++column) {
-      switch (zero_decision(matrix[row][column])) {
-        case ZeroDecision::Zero:
-          break;
-        case ZeroDecision::Ambiguous:
-          has_ambiguous_candidate = true;
-          break;
-        case ZeroDecision::Nonzero:
-          candidates.emplace_back(row, column);
-          break;
-      }
-    }
-  }
-  if (candidates.empty())
-    return has_ambiguous_candidate ? FullRankProofResult::Ambiguous
-                                   : FullRankProofResult::Deficient;
-
-  bool has_ambiguous_continuation = has_ambiguous_candidate;
-  for (const auto& [pivot_row, pivot_column] : candidates) {
-    auto next = matrix;
-    if (pivot_row != position)
-      std::swap(next[position], next[pivot_row]);
-    if (pivot_column != position)
-      for (auto& row : next)
-        std::swap(row[position], row[pivot_column]);
-
-    for (std::size_t row = position + 1; row < size; ++row) {
-      if (zero_decision(next[row][position]) == ZeroDecision::Zero) {
-        next[row][position] = ScalarTraits<Scalar>::zero();
-        continue;
-      }
-      const auto factor = next[row][position] / next[position][position];
-      next[row][position] = ScalarTraits<Scalar>::zero();
-      for (std::size_t column = position + 1; column < size; ++column)
-        next[row][column] -= factor * next[position][column];
-    }
-
-    const auto continuation = certified_full_rank_search(
-        std::move(next), position + 1);
-    if (continuation == FullRankProofResult::Proved)
-      return continuation;
-    has_ambiguous_continuation |=
-        continuation == FullRankProofResult::Ambiguous;
-  }
-  return has_ambiguous_continuation ? FullRankProofResult::Ambiguous
-                                    : FullRankProofResult::Deficient;
-}
 
 template <typename Scalar>
 std::optional<std::vector<std::pair<std::size_t, std::size_t>>>
-certified_full_rank_plan(DenseScalarMatrix<Scalar> matrix,
-                         std::size_t position) {
+certified_full_rank_plan_bounded_search(
+    DenseScalarMatrix<Scalar> matrix, std::size_t position,
+    std::size_t& remaining_nodes, std::size_t branch_width);
+
+struct CertifiedPivotCandidate {
+  std::size_t row = 0;
+  std::size_t column = 0;
+};
+
+// Prefer the ball which is separated from zero by the largest number of
+// relative-accuracy bits.  A lower absolute-modulus bound breaks the (quite
+// common) accuracy tie, implementing full rather than row-only pivoting.
+// Exact scalar fields deliberately retain row/column order: there is no
+// enclosure quality to rank and the stable order minimizes behavior churn.
+template <typename Scalar>
+int compare_certified_pivot_strength(const Scalar&, const Scalar&) {
+  return 0;
+}
+
+template <>
+inline int compare_certified_pivot_strength<ComplexBall>(
+    const ComplexBall& left, const ComplexBall& right) {
+  const auto left_accuracy = acb_rel_accuracy_bits(left.raw());
+  const auto right_accuracy = acb_rel_accuracy_bits(right.raw());
+  if (left_accuracy != right_accuracy)
+    return left_accuracy > right_accuracy ? 1 : -1;
+
+  arf_t left_lower;
+  arf_t right_lower;
+  arf_init(left_lower);
+  arf_init(right_lower);
+  acb_get_abs_lbound_arf(left_lower, left.raw(), ComplexBall::precision());
+  acb_get_abs_lbound_arf(right_lower, right.raw(), ComplexBall::precision());
+  const auto comparison = arf_cmp(left_lower, right_lower);
+  arf_clear(left_lower);
+  arf_clear(right_lower);
+  return comparison > 0 ? 1 : comparison < 0 ? -1 : 0;
+}
+
+template <typename Scalar>
+std::vector<CertifiedPivotCandidate> ranked_certified_pivots(
+    const DenseScalarMatrix<Scalar>& matrix, std::size_t position) {
   const auto size = matrix.size();
-  if (position == size)
-    return std::vector<std::pair<std::size_t, std::size_t>>{};
+  std::vector<CertifiedPivotCandidate> candidates;
+  candidates.reserve((size - position) * (size - position));
   for (std::size_t pivot_row = position; pivot_row < size; ++pivot_row) {
     for (std::size_t pivot_column = position; pivot_column < size;
          ++pivot_column) {
       if (zero_decision(matrix[pivot_row][pivot_column]) !=
           ZeroDecision::Nonzero)
         continue;
-      auto next = matrix;
-      if (pivot_row != position)
-        std::swap(next[position], next[pivot_row]);
-      if (pivot_column != position)
-        for (auto& row : next)
-          std::swap(row[position], row[pivot_column]);
-      for (std::size_t row = position + 1; row < size; ++row) {
-        const auto factor = next[row][position] /
-                            next[position][position];
-        next[row][position] = ScalarTraits<Scalar>::zero();
-        for (std::size_t column = position + 1; column < size; ++column)
-          next[row][column] -= factor * next[position][column];
-      }
-      auto tail = certified_full_rank_plan(std::move(next), position + 1);
-      if (!tail.has_value()) continue;
-      tail->insert(tail->begin(), {pivot_row, pivot_column});
-      return tail;
+      candidates.push_back({pivot_row, pivot_column});
     }
   }
+  std::stable_sort(
+      candidates.begin(), candidates.end(),
+      [&matrix](const auto& left, const auto& right) {
+        const auto strength = compare_certified_pivot_strength(
+            matrix[left.row][left.column], matrix[right.row][right.column]);
+        if (strength != 0) return strength > 0;
+        if (left.row != right.row) return left.row < right.row;
+        return left.column < right.column;
+      });
+  return candidates;
+}
+
+template <typename Scalar>
+void apply_certified_pivot(DenseScalarMatrix<Scalar>& matrix,
+                           std::size_t position,
+                           const CertifiedPivotCandidate& pivot) {
+  const auto size = matrix.size();
+  if (pivot.row != position)
+    std::swap(matrix[position], matrix[pivot.row]);
+  if (pivot.column != position)
+    for (auto& row : matrix)
+      std::swap(row[position], row[pivot.column]);
+
+  for (std::size_t row = position + 1; row < size; ++row) {
+    if (zero_decision(matrix[row][position]) == ZeroDecision::Zero) {
+      matrix[row][position] = ScalarTraits<Scalar>::zero();
+      continue;
+    }
+    const auto factor = matrix[row][position] /
+                        matrix[position][position];
+    matrix[row][position] = ScalarTraits<Scalar>::zero();
+    for (std::size_t column = position + 1; column < size; ++column)
+      matrix[row][column] -= factor * matrix[position][column];
+  }
+}
+
+// The normal route is a single in-place rank-revealing elimination: O(n^3)
+// arithmetic and no matrix copy per candidate.  Every chosen pivot is still
+// individually certified not to contain zero, so ordering changes efficiency
+// only, never the proof obligation.
+template <typename Scalar>
+std::optional<std::vector<std::pair<std::size_t, std::size_t>>>
+certified_full_rank_greedy_plan(DenseScalarMatrix<Scalar> matrix,
+                                std::size_t position) {
+  std::vector<std::pair<std::size_t, std::size_t>> plan;
+  plan.reserve(matrix.size() - position);
+  for (; position < matrix.size(); ++position) {
+    auto candidates = ranked_certified_pivots(matrix, position);
+    if (candidates.empty()) return std::nullopt;
+    const auto pivot = candidates.front();
+    plan.emplace_back(pivot.row, pivot.column);
+    apply_certified_pivot(matrix, position, pivot);
+  }
+  return plan;
+}
+
+// Interval widening can exceptionally make the strongest greedy route
+// inconclusive even though another certified pivot order succeeds.  Explore
+// alternatives in the same deterministic quality order, but never permit an
+// unbounded factorial search at production dimensions.  Small matrices retain
+// exhaustive existence parity with the former planner.
+template <typename Scalar>
+std::optional<std::vector<std::pair<std::size_t, std::size_t>>>
+certified_full_rank_plan_bounded_search(
+    DenseScalarMatrix<Scalar> matrix, std::size_t position,
+    std::size_t& remaining_nodes, std::size_t branch_width) {
+  if (position == matrix.size())
+    return std::vector<std::pair<std::size_t, std::size_t>>{};
+  auto candidates = ranked_certified_pivots(matrix, position);
+  if (candidates.size() > branch_width) candidates.resize(branch_width);
+  for (const auto& pivot : candidates) {
+    if (remaining_nodes == 0) return std::nullopt;
+    --remaining_nodes;
+    auto next = matrix;
+    apply_certified_pivot(next, position, pivot);
+    auto tail = certified_full_rank_plan_bounded_search(
+        std::move(next), position + 1, remaining_nodes, branch_width);
+    if (!tail.has_value()) continue;
+    tail->insert(tail->begin(), {pivot.row, pivot.column});
+    return tail;
+  }
   return std::nullopt;
+}
+
+template <typename Scalar>
+std::optional<std::vector<std::pair<std::size_t, std::size_t>>>
+certified_full_rank_plan(DenseScalarMatrix<Scalar> matrix,
+                         std::size_t position) {
+  auto greedy = certified_full_rank_greedy_plan(matrix, position);
+  if (greedy.has_value()) return greedy;
+
+  constexpr std::size_t exhaustive_size = 5;
+  constexpr std::size_t production_node_budget = 32;
+  constexpr std::size_t production_branch_width = 3;
+  const auto remaining_dimension = matrix.size() - position;
+  auto remaining_nodes = remaining_dimension <= exhaustive_size
+      ? std::numeric_limits<std::size_t>::max()
+      : production_node_budget;
+  const auto branch_width = remaining_dimension <= exhaustive_size
+      ? std::numeric_limits<std::size_t>::max()
+      : production_branch_width;
+  return certified_full_rank_plan_bounded_search(
+      std::move(matrix), position, remaining_nodes, branch_width);
+}
+
+template <typename Scalar>
+bool active_submatrix_has_ambiguous_entry(
+    const DenseScalarMatrix<Scalar>& matrix, std::size_t position) {
+  for (std::size_t row = position; row < matrix.size(); ++row)
+    for (std::size_t column = position; column < matrix.size(); ++column)
+      if (zero_decision(matrix[row][column]) == ZeroDecision::Ambiguous)
+        return true;
+  return false;
+}
+
+template <typename Scalar>
+FullRankProofResult certified_full_rank_bounded_search(
+    DenseScalarMatrix<Scalar> matrix, std::size_t position,
+    std::size_t& remaining_nodes, std::size_t branch_width) {
+  if (position == matrix.size()) return FullRankProofResult::Proved;
+  auto candidates = ranked_certified_pivots(matrix, position);
+  const auto has_ambiguous_candidate =
+      active_submatrix_has_ambiguous_entry(matrix, position);
+  if (candidates.empty())
+    return has_ambiguous_candidate ? FullRankProofResult::Ambiguous
+                                   : FullRankProofResult::Deficient;
+  const auto candidates_truncated = candidates.size() > branch_width;
+  if (candidates_truncated) candidates.resize(branch_width);
+
+  bool saw_ambiguous = has_ambiguous_candidate;
+  // Unvisited certified candidates are logically an exhausted search budget,
+  // never evidence of rank deficiency.
+  bool exhausted_budget = candidates_truncated;
+  for (const auto& pivot : candidates) {
+    if (remaining_nodes == 0) {
+      exhausted_budget = true;
+      break;
+    }
+    --remaining_nodes;
+    auto next = matrix;
+    apply_certified_pivot(next, position, pivot);
+    const auto continuation = certified_full_rank_bounded_search(
+        std::move(next), position + 1, remaining_nodes, branch_width);
+    if (continuation == FullRankProofResult::Proved) return continuation;
+    saw_ambiguous |= continuation == FullRankProofResult::Ambiguous;
+    exhausted_budget |=
+        continuation == FullRankProofResult::SearchBudgetExhausted;
+  }
+  if (exhausted_budget) return FullRankProofResult::SearchBudgetExhausted;
+  return saw_ambiguous ? FullRankProofResult::Ambiguous
+                       : FullRankProofResult::Deficient;
+}
+
+// Full-rank certification has weaker zero-decision requirements than lattice
+// saturation: arbitrary off-pivot balls are harmless when a sequence of
+// certified nonzero pivots proves invertibility.  Use the same O(n^3) greedy
+// proof first as the plan-producing path.  Only interval-inconclusive greedy
+// routes backtrack, exhaustively for small matrices and under a global node
+// budget at production dimensions.
+template <typename Scalar>
+FullRankProofResult certified_full_rank_search(
+    DenseScalarMatrix<Scalar> matrix, std::size_t position) {
+  auto greedy_matrix = matrix;
+  for (auto current = position; current < greedy_matrix.size(); ++current) {
+    auto candidates = ranked_certified_pivots(greedy_matrix, current);
+    if (candidates.empty()) {
+      if (!active_submatrix_has_ambiguous_entry(greedy_matrix, current))
+        return FullRankProofResult::Deficient;
+      break;
+    }
+    apply_certified_pivot(greedy_matrix, current, candidates.front());
+    if (current + 1 == greedy_matrix.size())
+      return FullRankProofResult::Proved;
+  }
+  if (position == matrix.size()) return FullRankProofResult::Proved;
+
+  constexpr std::size_t exhaustive_size = 5;
+  constexpr std::size_t production_node_budget = 32;
+  constexpr std::size_t production_branch_width = 3;
+  const auto remaining_dimension = matrix.size() - position;
+  auto remaining_nodes = remaining_dimension <= exhaustive_size
+      ? std::numeric_limits<std::size_t>::max()
+      : production_node_budget;
+  const auto branch_width = remaining_dimension <= exhaustive_size
+      ? std::numeric_limits<std::size_t>::max()
+      : production_branch_width;
+  return certified_full_rank_bounded_search(
+      std::move(matrix), position, remaining_nodes, branch_width);
 }
 
 template <typename Scalar>
@@ -902,6 +1103,11 @@ std::size_t certify_full_rank_by_nonzero_pivots(
         MatchingArithmeticErrorCode::AmbiguousZero,
         context +
             ": no certified nonzero pivot sequence proves full rank; remaining Acb enclosures overlap zero");
+  if (result == FullRankProofResult::SearchBudgetExhausted)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::SearchBudgetExhausted,
+        context +
+            ": bounded certified pivot search exhausted its global node budget");
   throw MatchingArithmeticError(
       MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
       context + ": the leading matrix is certifiably rank deficient");
@@ -926,6 +1132,108 @@ DenseScalarMatrix<Scalar> epsilon_zero_matrix(
       result[row][column] = entry.coefficient(0);
     }
   }
+  return result;
+}
+
+template <typename Scalar>
+FiniteLaurentVector<Scalar> left_multiply_dense_by_finite_vector(
+    const DenseScalarMatrix<Scalar>& left,
+    const FiniteLaurentVector<Scalar>& right,
+    const std::string& context) {
+  const auto inner = rectangular_columns(left, "dense left multiplier");
+  if (inner != right.size())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": dense multiplier and finite vector dimensions disagree");
+  FiniteLaurentVector<Scalar> result;
+  result.reserve(left.size());
+  for (std::size_t row = 0; row < left.size(); ++row) {
+    std::optional<EpsilonFrame<Scalar>> value;
+    for (std::size_t column = 0; column < inner; ++column) {
+      if (ScalarTraits<Scalar>::is_zero(left[row][column])) continue;
+      auto term = right[column].scaled(left[row][column]);
+      value = value.has_value() ? *value + term : std::move(term);
+    }
+    if (!value.has_value())
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::StructurallySingularTransformation,
+          context + ": dense multiplier has a structurally zero row", row);
+    result.push_back(std::move(*value));
+  }
+  return result;
+}
+
+template <typename Scalar>
+FiniteLaurentMatrix<Scalar> left_multiply_dense_by_finite_matrix(
+    const DenseScalarMatrix<Scalar>& left,
+    const FiniteLaurentMatrix<Scalar>& right,
+    const std::string& context) {
+  const auto inner = rectangular_columns(left, "dense left multiplier");
+  const auto columns = rectangular_columns(right, "finite right matrix");
+  if (inner != right.size())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": dense and finite matrix dimensions disagree");
+  FiniteLaurentMatrix<Scalar> result(
+      left.size(), FiniteLaurentVector<Scalar>());
+  for (std::size_t row = 0; row < left.size(); ++row) {
+    result[row].reserve(columns);
+    for (std::size_t column = 0; column < columns; ++column) {
+      std::optional<EpsilonFrame<Scalar>> value;
+      for (std::size_t k = 0; k < inner; ++k) {
+        if (ScalarTraits<Scalar>::is_zero(left[row][k])) continue;
+        auto term = right[k][column].scaled(left[row][k]);
+        value = value.has_value() ? *value + term : std::move(term);
+      }
+      if (!value.has_value())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::StructurallySingularTransformation,
+            context + ": dense multiplier has a structurally zero row", row,
+            column);
+      result[row].push_back(std::move(*value));
+    }
+  }
+  return result;
+}
+
+// Return a fixed zero-radius dyadic approximation to the inverse of the
+// midpoint matrix.  The inverse computation itself may be rounded: taking
+// its midpoint simply chooses a concrete preconditioner.  Subsequent Acb
+// multiplication encloses R*A and R*b, and factorization still requires
+// every actual pivot to exclude zero.  Therefore this improves wrapping
+// without licensing any midpoint zero/nonzero decision.
+inline std::optional<DenseScalarMatrix<ComplexBall>>
+acb_midpoint_inverse_preconditioner(
+    const DenseScalarMatrix<ComplexBall>& matrix) {
+  const auto size = rectangular_columns(matrix, "Acb midpoint matrix");
+  if (size == 0 || matrix.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        "Acb midpoint preconditioner requires a nonempty square matrix");
+
+  struct AcbMatrixOwner {
+    explicit AcbMatrixOwner(slong size) { acb_mat_init(value, size, size); }
+    ~AcbMatrixOwner() { acb_mat_clear(value); }
+    acb_mat_t value;
+  } midpoint(static_cast<slong>(size)), inverse(static_cast<slong>(size));
+  for (std::size_t row = 0; row < size; ++row)
+    for (std::size_t column = 0; column < size; ++column)
+      acb_get_mid(
+          acb_mat_entry(midpoint.value, static_cast<slong>(row),
+                        static_cast<slong>(column)),
+          matrix[row][column].raw());
+  if (acb_mat_inv(inverse.value, midpoint.value,
+                  ComplexBall::precision()) == 0)
+    return std::nullopt;
+
+  DenseScalarMatrix<ComplexBall> result(
+      size, std::vector<ComplexBall>(size));
+  for (std::size_t row = 0; row < size; ++row)
+    for (std::size_t column = 0; column < size; ++column)
+      acb_get_mid(
+          result[row][column].raw(),
+          acb_mat_entry(inverse.value, static_cast<slong>(row),
+                        static_cast<slong>(column)));
   return result;
 }
 
@@ -1219,6 +1527,12 @@ struct FiniteLaurentFactorization {
   FiniteLaurentMatrix<Scalar> upper;
   std::vector<std::size_t> column_permutation;
   std::vector<Step> steps;
+  // A fixed constant row transformation chosen before elimination.  It is
+  // applied to every right-hand side before replaying `steps`.  For Acb this
+  // may be a zero-radius dyadic approximate inverse used solely to reduce
+  // interval wrapping; no entry of it is treated as an exact inverse.
+  std::optional<matching_detail::DenseScalarMatrix<Scalar>>
+      left_preconditioner;
 };
 
 // Deterministic full-pivot Gaussian elimination over finite Laurent frames.
@@ -1239,11 +1553,6 @@ FiniteLaurentFactorization<Scalar> factor_finite_laurent_system(
         MatchingArithmeticErrorCode::DimensionMismatch,
         context + ": coefficient matrix must be square");
 
-  for (std::size_t row = 0; row < size; ++row)
-    for (std::size_t column = 0; column < size; ++column)
-      matrix[row][column] = matching_detail::canonical_leading_frame(
-          matrix[row][column], context + ": input valuation", row, column);
-
   std::vector<std::size_t> column_permutation(size);
   for (std::size_t i = 0; i < size; ++i) column_permutation[i] = i;
   std::vector<typename FiniteLaurentFactorization<Scalar>::Step> steps;
@@ -1256,14 +1565,30 @@ FiniteLaurentFactorization<Scalar> factor_finite_laurent_system(
       std::int32_t power;
     };
     std::optional<Pivot> pivot;
+    std::optional<std::tuple<std::size_t, std::size_t, std::int32_t>>
+        first_ambiguous;
     for (std::size_t row = position; row < size; ++row) {
       for (std::size_t column = position; column < size; ++column) {
-        const auto power = finite_laurent_leading_power(
-            matrix[row][column], context + ": pivot search");
-        if (power.has_value() &&
-            (!pivot.has_value() || *power < pivot->power))
-          pivot = Pivot{row, column, *power};
+        const auto leading =
+            matching_detail::certified_laurent_leading_power(
+                matrix[row][column]);
+        if (leading.first_ambiguous_power.has_value() &&
+            !first_ambiguous.has_value())
+          first_ambiguous =
+              std::tuple{row, column, *leading.first_ambiguous_power};
+        if (leading.power.has_value() &&
+            (!pivot.has_value() || *leading.power < pivot->power))
+          pivot = Pivot{row, column, *leading.power};
       }
+    }
+    if (!pivot.has_value() && first_ambiguous.has_value()) {
+      const auto [row, column, power] = *first_ambiguous;
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::AmbiguousZero,
+          context +
+              ": no certified Laurent pivot remains; an Acb candidate "
+              "overlaps zero at its required leading coefficient",
+          row, column, power);
     }
     if (!pivot.has_value())
       throw MatchingArithmeticError(
@@ -1285,12 +1610,45 @@ FiniteLaurentFactorization<Scalar> factor_finite_laurent_system(
       std::swap(column_permutation[position],
                 column_permutation[pivot->column]);
     }
+    // Only the selected pivot needs a canonical leading frame.  Its probe
+    // above certified every discarded coefficient as exact zero.
+    matrix[position][position] = matching_detail::canonical_leading_frame(
+        matrix[position][position], context + ": selected pivot", position,
+        position);
+    for (std::size_t column = position + 1; column < size; ++column) {
+      const auto leading =
+          matching_detail::certified_laurent_leading_power(
+              matrix[position][column]);
+      if (leading.power.has_value()) {
+        // These entries are about to be multiplied by every elimination
+        // factor.  Retaining certified leading zeros would unnecessarily
+        // lower the honest product CompleteMax, just as it does for the
+        // below-pivot quotient numerator.
+        matrix[position][column] =
+            matching_detail::canonical_leading_frame(
+                matrix[position][column],
+                context + ": certified pivot-row entry", position, column);
+      } else if (!leading.first_ambiguous_power.has_value()) {
+        matrix[position][column] = EpsilonFrame<Scalar>::zero(
+            matrix[position][column].complete_max());
+      }
+    }
 
     for (std::size_t row = position + 1; row < size; ++row) {
-      const auto below_pivot = finite_laurent_leading_power(
-          matrix[row][position],
-          context + ": below-pivot elimination entry");
-      if (!below_pivot.has_value()) continue;
+      const auto below_pivot =
+          matching_detail::certified_laurent_leading_power(
+              matrix[row][position]);
+      if (!below_pivot.power.has_value() &&
+          !below_pivot.first_ambiguous_power.has_value()) {
+        matrix[row][position] = EpsilonFrame<Scalar>::zero(
+            matrix[row][position].complete_max());
+      }
+      if (below_pivot.power.has_value())
+        matrix[row][position] =
+            matching_detail::canonical_leading_frame(
+                matrix[row][position],
+                context + ": certified below-pivot numerator", row,
+                position);
       const auto factor = finite_laurent_quotient(
           matrix[row][position], matrix[position][position],
           context + ": elimination quotient");
@@ -1306,14 +1664,20 @@ FiniteLaurentFactorization<Scalar> factor_finite_laurent_system(
       matrix[row][position] =
           EpsilonFrame<Scalar>::zero(eliminated.complete_max());
       for (std::size_t column = position + 1; column < size; ++column) {
-        matrix[row][column] = matching_detail::canonical_leading_frame(
-            matrix[row][column] - factor * matrix[position][column],
-            context + ": Schur cancellation", row, column);
+        matrix[row][column] =
+            matrix[row][column] - factor * matrix[position][column];
       }
       step.eliminations.push_back({row, factor});
     }
     steps.push_back(std::move(step));
   }
+
+  for (std::size_t row = 0; row < size; ++row)
+    for (std::size_t column = row; column < size; ++column)
+      matrix[row][column] =
+          matching_detail::canonicalize_certified_or_preserve_ambiguous(
+              matrix[row][column], context + ": stored upper triangle", row,
+              column);
 
   return {std::move(matrix), std::move(column_permutation),
           std::move(steps)};
@@ -1366,6 +1730,33 @@ factor_exact_nonnegative_finite_laurent_system(
   // already proves invertibility.
   auto pivot_plan = matching_detail::certified_full_rank_plan(
       matching_detail::epsilon_zero_matrix(matrix, context), 0);
+  std::optional<matching_detail::DenseScalarMatrix<Scalar>>
+      left_preconditioner;
+  if (!pivot_plan.has_value()) {
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      // Exact CASE-P provenance proves that the transformed formal basis has
+      // no negative epsilon coefficients and is a full-rank epsilon lattice.
+      // Numerical evaluation can nevertheless make ordinary interval
+      // elimination wrap badly.  A fixed midpoint-inverse row
+      // preconditioner is safe: it is applied to A and every rhs, while the
+      // resulting pivots remain subject to the usual Acb exclusion test.
+      auto candidate = matching_detail::acb_midpoint_inverse_preconditioner(
+          matching_detail::epsilon_zero_matrix(matrix, context));
+      if (candidate.has_value()) {
+        auto preconditioned =
+            matching_detail::left_multiply_dense_by_finite_matrix(
+                *candidate, matrix, context + ": midpoint preconditioning");
+        auto candidate_plan = matching_detail::certified_full_rank_plan(
+            matching_detail::epsilon_zero_matrix(preconditioned, context),
+            0);
+        if (candidate_plan.has_value()) {
+          matrix = std::move(preconditioned);
+          pivot_plan = std::move(candidate_plan);
+          left_preconditioner = std::move(candidate);
+        }
+      }
+    }
+  }
   if (pivot_plan.has_value()) {
     std::vector<std::size_t> column_permutation(size);
     for (std::size_t index = 0; index < size; ++index)
@@ -1392,18 +1783,11 @@ factor_exact_nonnegative_finite_laurent_system(
           matrix[position][position],
           context + ": planned pivot", position, position);
       for (std::size_t row = position + 1; row < size; ++row) {
-        const auto structural_zero = std::all_of(
-            matrix[row][position].coefficients().begin(),
-            matrix[row][position].coefficients().end(),
-            [](const Scalar& value) {
-              return matching_detail::zero_decision(value) ==
-                  matching_detail::ZeroDecision::Zero;
-            });
-        if (structural_zero) {
-          matrix[row][position] = EpsilonFrame<Scalar>::zero(
-              matrix[row][position].complete_max());
-          continue;
-        }
+        matrix[row][position] =
+            matching_detail::canonicalize_certified_or_preserve_ambiguous(
+                matrix[row][position],
+                context + ": planned below-pivot numerator", row,
+                position);
         const auto factor = finite_laurent_quotient(
             matrix[row][position], matrix[position][position],
             context + ": planned elimination quotient");
@@ -1418,8 +1802,14 @@ factor_exact_nonnegative_finite_laurent_system(
       }
       steps.push_back(std::move(step));
     }
+    for (std::size_t row = 0; row < size; ++row)
+      for (std::size_t column = row; column < size; ++column)
+        matrix[row][column] =
+            matching_detail::canonicalize_certified_or_preserve_ambiguous(
+                matrix[row][column], context + ": stored upper triangle",
+                row, column);
     return {std::move(matrix), std::move(column_permutation),
-            std::move(steps)};
+            std::move(steps), std::move(left_preconditioner)};
   }
 
   return factor_finite_laurent_system(
@@ -1439,6 +1829,11 @@ FiniteLaurentVector<Scalar> solve_factorized_finite_laurent_system(
         MatchingArithmeticErrorCode::DimensionMismatch,
         context + ": factorization and rhs dimensions disagree");
 
+  if (factorization.left_preconditioner.has_value())
+    right_hand_side = matching_detail::left_multiply_dense_by_finite_vector(
+        *factorization.left_preconditioner, right_hand_side,
+        context + ": left preconditioning");
+
   for (std::size_t position = 0; position < size; ++position) {
     const auto& step = factorization.steps[position];
     if (step.row_swap >= size || step.column_swap >= size)
@@ -1447,6 +1842,10 @@ FiniteLaurentVector<Scalar> solve_factorized_finite_laurent_system(
           context + ": malformed factorization permutation");
     if (step.row_swap != position)
       std::swap(right_hand_side[position], right_hand_side[step.row_swap]);
+    right_hand_side[position] =
+        matching_detail::canonicalize_certified_or_preserve_ambiguous(
+            right_hand_side[position],
+            context + ": forward rhs pivot row", position);
     for (const auto& elimination : step.eliminations) {
       if (elimination.row <= position || elimination.row >= size)
         throw MatchingArithmeticError(
@@ -1465,6 +1864,9 @@ FiniteLaurentVector<Scalar> solve_factorized_finite_laurent_system(
     for (std::size_t column = reverse + 1; column < size; ++column)
       residual = residual - factorization.upper[reverse][column] *
                                 permuted_solution[column];
+    residual =
+        matching_detail::canonicalize_certified_or_preserve_ambiguous(
+            residual, context + ": back-substitution numerator", reverse);
     permuted_solution[reverse] = finite_laurent_quotient(
         residual, factorization.upper[reverse][reverse],
         context + ": back-substitution quotient");

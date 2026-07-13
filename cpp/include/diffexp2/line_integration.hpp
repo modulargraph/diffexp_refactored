@@ -1,6 +1,7 @@
 #pragma once
 
 #include "diffexp2/integration.hpp"
+#include "diffexp2/local_algebra.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -32,6 +33,17 @@ struct StoredLineIntegrationOptions {
   // complete_max must be computable without reading an unknown coefficient.
   EpsilonWindow delivered_epsilon;
   std::optional<std::int32_t> imaginary_sign;
+  // Generic native line integration remains exact-singleton strict.  The
+  // only caller allowed to populate this policy is the explicitly declared
+  // FT transport-pair observable path.  Its tolerance and producer
+  // provenance are therefore part of the retained request, never a hidden
+  // global threshold.
+  struct BoundedDivergentCancellation {
+    Magnitude relative_tolerance;
+    std::string relative_tolerance_text;
+    std::string provenance;
+  };
+  std::optional<BoundedDivergentCancellation> divergent_cancellation;
 };
 
 struct StoredLineIntegrationDiagnostics {
@@ -39,6 +51,7 @@ struct StoredLineIntegrationDiagnostics {
   std::size_t grouped_monomials = 0;
   std::size_t zero_groups_skipped = 0;
   std::size_t cancelled_divergent_groups = 0;
+  std::size_t bounded_cancelled_divergent_coefficients = 0;
   std::size_t primitive_evaluations = 0;
   std::size_t primitive_component_applications = 0;
   std::size_t primitive_component_reuses = 0;
@@ -46,6 +59,9 @@ struct StoredLineIntegrationDiagnostics {
   bool tail_certificate_requested = false;
   std::string tail_certificate_status = "not-requested";
   std::string tail_witness_radius_exact;
+  std::string divergent_cancellation_mode = "exact-singleton";
+  std::string divergent_relative_tolerance;
+  std::string divergent_cancellation_provenance;
   std::string detail;
 };
 
@@ -120,6 +136,11 @@ struct MonomialGroup {
   SectorMonomialTag tag;
   // Flat [input epsilon][component], component fastest.
   std::vector<Scalar> coefficients;
+  // Per [input epsilon][component], this is the maximum rigorous upper
+  // magnitude of the ungrouped contributions.  It is deliberately kept
+  // separate from the grouped coefficient so cancellation cannot shrink its
+  // own reference scale.
+  std::vector<Magnitude> contribution_scale_uppers;
   std::size_t cell_count = 0;
   bool had_material_input = false;
 };
@@ -127,6 +148,46 @@ struct MonomialGroup {
 inline MonomialKey monomial_key(const SectorMonomialTag& tag) {
   return {tag.m.canonical, static_cast<std::uint8_t>(tag.b.domain),
           tag.b.canonical, tag.log_power};
+}
+
+// Compact bounded-memory index for the fused transport path.  Exact tag
+// strings remain owned once by OutputSector; each projected sector/Taylor
+// cell contributes only this 16-byte POD record.
+struct FusedMonomialWorkItem {
+  std::uint64_t stable_key_hash = 0;
+  std::uint32_t sector_ordinal = 0;
+  std::uint32_t taylor_order = 0;
+};
+
+static_assert(std::is_trivially_copyable_v<FusedMonomialWorkItem>);
+static_assert(sizeof(FusedMonomialWorkItem) == 16);
+
+inline void fnv1a64_append_byte(std::uint64_t& hash, std::uint8_t byte) {
+  hash ^= byte;
+  hash *= UINT64_C(1099511628211);
+}
+
+inline void fnv1a64_append_u64(std::uint64_t& hash, std::uint64_t value) {
+  for (unsigned shift = 0; shift < 64; shift += 8)
+    fnv1a64_append_byte(
+        hash, static_cast<std::uint8_t>((value >> shift) & UINT64_C(0xff)));
+}
+
+inline void fnv1a64_append_string(std::uint64_t& hash,
+                                  const std::string& value) {
+  fnv1a64_append_u64(hash, value.size());
+  for (const auto byte : value)
+    fnv1a64_append_byte(hash, static_cast<std::uint8_t>(byte));
+}
+
+inline std::uint64_t stable_monomial_key_hash(
+    const SectorMonomialTag& tag) {
+  std::uint64_t hash = UINT64_C(14695981039346656037);
+  fnv1a64_append_string(hash, tag.m.canonical);
+  fnv1a64_append_byte(hash, static_cast<std::uint8_t>(tag.b.domain));
+  fnv1a64_append_string(hash, tag.b.canonical);
+  fnv1a64_append_u64(hash, tag.log_power);
+  return hash;
 }
 
 inline bool same_exact_descriptor(const ExactScalarDescriptor& left,
@@ -159,6 +220,8 @@ std::map<MonomialKey, MonomialGroup<Scalar>> group_monomials(
         group.tag = std::move(tag);
         group.coefficients.assign(coefficient_count,
                                   ScalarTraits<Scalar>::zero());
+        group.contribution_scale_uppers.assign(coefficient_count,
+                                               Magnitude::zero());
         found = groups.emplace(key, std::move(group)).first;
       } else if (!same_exact_descriptor(found->second.tag.b, tag.b)) {
         throw NativeIntegrationError(
@@ -176,7 +239,11 @@ std::map<MonomialKey, MonomialGroup<Scalar>> group_monomials(
               sector.coefficients[local_detail::sector_index(
                   solution, ei, n, component)];
           if (!exact_singleton_zero(value)) group.had_material_input = true;
-          group.coefficients[ei * solution.dimension + component] += value;
+          const auto cell = ei * solution.dimension + component;
+          group.coefficients[cell] += value;
+          group.contribution_scale_uppers[cell] = Magnitude::maximum(
+              group.contribution_scale_uppers[cell],
+              Magnitude::upper_abs(as_ball(value)));
         }
       }
     }
@@ -262,38 +329,72 @@ bool material_group(const MonomialGroup<Scalar>& group) {
 }
 
 template <typename Scalar>
-[[noreturn]] void throw_divergent_group(
+bool accept_or_throw_divergent_group(
     const LocalSolution<Scalar>& solution,
     const MonomialGroup<Scalar>& group,
-    const std::vector<std::optional<std::int32_t>>& first_nonzero) {
+    const StoredLineIntegrationOptions& options,
+    StoredLineIntegrationDiagnostics* diagnostics) {
+  bool had_material_coefficient = false;
   for (std::uint32_t component = 0; component < solution.dimension;
        ++component) {
-    if (!first_nonzero[component].has_value()) continue;
-    const auto power = *first_nonzero[component];
-    const auto ei = static_cast<std::size_t>(
-        static_cast<std::int64_t>(power) - solution.epsilon.min_power);
-    const auto& coefficient =
-        group.coefficients[ei * solution.dimension + component];
-    bool uncertified = false;
-    if constexpr (std::is_same_v<Scalar, ComplexBall>)
-      uncertified = coefficient.contains_zero();
-    NativeIntegrationError error(
-        uncertified
-            ? NativeIntegrationErrorCode::UncertifiedCancellation
-            : NativeIntegrationErrorCode::DivergentEndpoint,
-        uncertified ? "E10" : "E2",
-        uncertified
-            ? "grouped Acb coefficient of a divergent center monomial "
-              "contains zero but is not the exact singleton zero"
-            : "grouped coefficient of a divergent center monomial is "
-              "nonzero");
-    error.absolute_power = group.tag.m.canonical;
-    error.log_power = group.tag.log_power;
-    error.epsilon_power = power;
-    error.component = component;
-    throw error;
+    for (std::int64_t power64 = solution.epsilon.min_power;
+         power64 <= solution.epsilon.complete_max; ++power64) {
+      const auto power = static_cast<std::int32_t>(power64);
+      const auto ei = static_cast<std::size_t>(
+          power64 - solution.epsilon.min_power);
+      const auto cell = ei * solution.dimension + component;
+      const auto& coefficient = group.coefficients[cell];
+      if (exact_singleton_zero(coefficient)) continue;
+      had_material_coefficient = true;
+
+      bool bounded = false;
+      Magnitude scale = Magnitude::one();
+      Magnitude bound = Magnitude::zero();
+      Magnitude coefficient_upper = Magnitude::zero();
+      if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+        if (options.divergent_cancellation.has_value()) {
+          scale = Magnitude::maximum(
+              Magnitude::one(), group.contribution_scale_uppers[cell]);
+          bound = scale * options.divergent_cancellation->relative_tolerance;
+          coefficient_upper = Magnitude::upper_abs(coefficient);
+          bounded = coefficient_upper <= bound;
+        }
+      }
+      if (bounded) {
+        ++diagnostics->bounded_cancelled_divergent_coefficients;
+        continue;
+      }
+
+      bool uncertified = false;
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        uncertified = coefficient.contains_zero();
+      std::ostringstream detail;
+      detail << (uncertified
+          ? "grouped Acb coefficient of a divergent center monomial "
+            "contains zero but is not certified by the active cancellation policy"
+          : "grouped coefficient of a divergent center monomial is nonzero");
+      if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+        if (options.divergent_cancellation.has_value())
+          detail << "; coefficient_upper="
+                 << coefficient_upper.dump_exact()
+                 << "; contribution_scale_upper=" << scale.dump_exact()
+                 << "; relative_tolerance="
+                 << options.divergent_cancellation->relative_tolerance_text
+                 << "; tolerance_bound_upper=" << bound.dump_exact();
+      }
+      NativeIntegrationError error(
+          uncertified
+              ? NativeIntegrationErrorCode::UncertifiedCancellation
+              : NativeIntegrationErrorCode::DivergentEndpoint,
+          uncertified ? "E10" : "E2", detail.str());
+      error.absolute_power = group.tag.m.canonical;
+      error.log_power = group.tag.log_power;
+      error.epsilon_power = power;
+      error.component = component;
+      throw error;
+    }
   }
-  throw std::logic_error("divergent group has no nonzero coefficient");
+  return had_material_coefficient;
 }
 
 }  // namespace line_integration_detail
@@ -352,6 +453,23 @@ StoredLineIntegral integrate_stored_local_line(
       ComplexBall(0));
   result.diagnostics.has_center_endpoint =
       lower.sign == 0 || upper.sign == 0;
+  if (options.divergent_cancellation.has_value()) {
+    if (!options.divergent_cancellation->relative_tolerance.is_finite() ||
+        options.divergent_cancellation->relative_tolerance.is_zero() ||
+        Magnitude::one() <=
+            options.divergent_cancellation->relative_tolerance ||
+        options.divergent_cancellation->relative_tolerance_text.empty() ||
+        options.divergent_cancellation->provenance.empty())
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+          "bounded divergent-cancellation policy is malformed");
+    result.diagnostics.divergent_cancellation_mode =
+        "bounded-relative-acb";
+    result.diagnostics.divergent_relative_tolerance =
+        options.divergent_cancellation->relative_tolerance_text;
+    result.diagnostics.divergent_cancellation_provenance =
+        options.divergent_cancellation->provenance;
+  }
   require_integrable_first_unseen_taylor(
       solution, result.diagnostics.has_center_endpoint);
 
@@ -394,8 +512,11 @@ StoredLineIntegral integrate_stored_local_line(
     }
     const bool divergent = center_divergent(
         group.tag, result.diagnostics.has_center_endpoint);
-    if (material_components != 0 && divergent)
-      throw_divergent_group(solution, group, first_nonzero);
+    const bool bounded_divergent_cancellation =
+        material_components != 0 && divergent;
+    if (bounded_divergent_cancellation)
+      (void)accept_or_throw_divergent_group(
+          solution, group, options, &result.diagnostics);
 
     const auto primitive_min = primitive_min_power(
         group.tag, result.diagnostics.has_center_endpoint);
@@ -422,9 +543,10 @@ StoredLineIntegral integrate_stored_local_line(
     // Even an all-zero retained group cannot bypass the halo gate: its next
     // unknown epsilon coefficient can feed a requested row through a
     // negative-power primitive.
-    if (material_components == 0) {
+    if (material_components == 0 || bounded_divergent_cancellation) {
       ++result.diagnostics.zero_groups_skipped;
-      if (divergent && group.had_material_input && group.cell_count > 1)
+      if (bounded_divergent_cancellation ||
+          (divergent && group.had_material_input && group.cell_count > 1))
         ++result.diagnostics.cancelled_divergent_groups;
       continue;
     }
@@ -483,6 +605,564 @@ StoredLineIntegral integrate_stored_local_line(
   result.value.error.provenance =
       "stored Taylor truncation only; no unseen-tail majorant or full-local "
       "certificate";
+  result.diagnostics.detail = result.value.error.provenance;
+  return result;
+}
+
+// Transport-only stored-truncation seam.  It reproduces
+//
+//   apply_prepared_sparse_local_matrix(row, source)
+//   -> canonicalize identical output sectors
+//   -> group_monomials
+//   -> integrate_stored_local_line
+//
+// without ever owning the complete projected scalar LocalSolution.  Only
+// exact-tag/contributor metadata is retained globally.  One final monomial
+// group and one canonical output-sector/Taylor cell epsilon vector are live
+// at a time, while divergent cells still meet in the same global monomial
+// group before the cancellation gate runs.
+template <typename Scalar>
+StoredLineIntegral integrate_prepared_scalar_row_stored(
+    const PreparedSparseLocalMultiplierMatrix<Scalar>& matrix,
+    const LocalSolution<Scalar>& source,
+    std::int32_t projected_complete_cap,
+    const RealEvaluationPoint& lower_input,
+    const RealEvaluationPoint& upper_input,
+    const StoredLineIntegrationOptions& options) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "fused row integration supports Rational or Acb only");
+  using namespace line_integration_detail;
+  validate_local_solution(source, false);
+  if (!source.error.empty())
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+        "fused scalar-row integration cannot discard a source error envelope");
+  if (matrix.rows != 1 || matrix.columns != source.dimension)
+    throw std::invalid_argument(
+        "fused scalar-row dimensions disagree with the source local");
+
+  const auto epsilon_width = source.epsilon.width();
+  const auto taylor_width = source.taylor_width();
+  auto projected_min = source.epsilon.min_power;
+  auto projected_complete = source.epsilon.complete_max;
+  bool active = false;
+  for (const auto& entry : matrix.entries) {
+    if (entry.row != 0 || entry.column >= matrix.columns)
+      throw std::invalid_argument(
+          "fused scalar-row entry is out of range");
+    if (entry.multiplier.structurally_zero()) continue;
+    if (entry.multiplier.kernels.size() < epsilon_width)
+      throw std::invalid_argument(
+          "fused scalar-row multiplier has too few epsilon kernels");
+    for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon)
+      if (entry.multiplier.kernels[epsilon].size() < taylor_width)
+        throw std::invalid_argument(
+            "fused scalar-row multiplier has too few Taylor coefficients");
+    const auto term_min = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(source.epsilon.min_power) +
+            entry.multiplier.epsilon_shift,
+        "fused scalar-row epsilon minimum");
+    const auto term_complete = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(source.epsilon.complete_max) +
+            entry.multiplier.epsilon_shift,
+        "fused scalar-row epsilon complete maximum");
+    if (!active) {
+      projected_min = term_min;
+      projected_complete = term_complete;
+      active = true;
+    } else {
+      projected_min = std::min(projected_min, term_min);
+      projected_complete = std::min(projected_complete, term_complete);
+    }
+  }
+  projected_complete = std::min(
+      projected_complete, projected_complete_cap);
+  if (projected_complete < projected_min)
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::IncompleteEpsilonWindow, "E10",
+        "fused scalar row has no coefficient in its requested upper window");
+  const EpsilonWindow projected_epsilon{
+      projected_min, projected_complete};
+
+  const auto lower = require_exact_rational_point(lower_input, "lower");
+  const auto upper = require_exact_rational_point(upper_input, "upper");
+  integration_detail::validate_interval(lower, upper);
+  require_inside_chart(source, lower, "lower");
+  require_inside_chart(source, upper, "upper");
+  (void)options.delivered_epsilon.width();
+  if (options.imaginary_sign.has_value() &&
+      *options.imaginary_sign != 1 && *options.imaginary_sign != -1)
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+        "fused line imaginary sign must be exactly +1 or -1");
+
+  std::optional<std::int32_t> chart_sign;
+  try {
+    chart_sign = derive_chart_imaginary_sign(source);
+  } catch (const std::domain_error& error) {
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+        std::string("invalid prepared chart branch prescription: ") +
+            error.what());
+  }
+  if (chart_sign.has_value() && options.imaginary_sign.has_value() &&
+      *chart_sign != *options.imaginary_sign)
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+        "explicit fused-line branch sign conflicts with the prepared chart");
+  const auto effective_sign = options.imaginary_sign.has_value()
+      ? options.imaginary_sign : chart_sign;
+  const bool has_negative_arm = lower.sign < 0 || upper.sign < 0;
+  const bool has_center_endpoint = lower.sign == 0 || upper.sign == 0;
+
+  StoredLineIntegral result;
+  result.value.epsilon = options.delivered_epsilon;
+  result.value.dimension = 1;
+  result.value.coefficients.assign(options.delivered_epsilon.width(),
+                                   ComplexBall(0));
+  result.imaginary_sign = effective_sign;
+  result.diagnostics.has_center_endpoint = has_center_endpoint;
+  if (options.divergent_cancellation.has_value()) {
+    if (!options.divergent_cancellation->relative_tolerance.is_finite() ||
+        options.divergent_cancellation->relative_tolerance.is_zero() ||
+        Magnitude::one() <=
+            options.divergent_cancellation->relative_tolerance ||
+        options.divergent_cancellation->relative_tolerance_text.empty() ||
+        options.divergent_cancellation->provenance.empty())
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+          "bounded divergent-cancellation policy is malformed");
+    result.diagnostics.divergent_cancellation_mode =
+        "bounded-relative-acb";
+    result.diagnostics.divergent_relative_tolerance =
+        options.divergent_cancellation->relative_tolerance_text;
+    result.diagnostics.divergent_cancellation_provenance =
+        options.divergent_cancellation->provenance;
+  }
+
+  using OutputSectorKey =
+      std::tuple<std::uint8_t, std::string, std::uint8_t, std::string,
+                 std::uint32_t>;
+  using MatrixEntry =
+      typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry;
+  struct Contributor {
+    const MatrixEntry* entry = nullptr;
+    const LocalSector<Scalar>* sector = nullptr;
+  };
+  struct OutputSector {
+    LocalSector<Scalar> tag;
+    std::vector<Contributor> contributors;
+  };
+  std::map<OutputSectorKey, OutputSector> output_sectors;
+  const auto admit_output_sector = [&](const LocalSector<Scalar>& sector,
+                                       const MatrixEntry* entry,
+                                       bool add_contributor = true) {
+    LocalSector<Scalar> tag;
+    tag.a = entry == nullptr
+        ? sector.a
+        : local_algebra_detail::subtract_nonnegative_integer(
+              sector.a, entry->multiplier.center_pole_order);
+    tag.b = sector.b;
+    tag.log_power = sector.log_power;
+    const OutputSectorKey key{
+        static_cast<std::uint8_t>(tag.a.domain), tag.a.canonical,
+        static_cast<std::uint8_t>(tag.b.domain), tag.b.canonical,
+        tag.log_power};
+    auto [found, inserted] = output_sectors.try_emplace(key);
+    if (inserted) {
+      found->second.tag = std::move(tag);
+    } else if (!same_exact_descriptor(found->second.tag.a, tag.a) ||
+               !same_exact_descriptor(found->second.tag.b, tag.b)) {
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+          "equal fused output-sector keys carry inconsistent exact descriptors");
+    }
+    if (entry != nullptr && add_contributor)
+      found->second.contributors.push_back(Contributor{entry, &sector});
+  };
+  if (active) {
+    for (const auto& entry : matrix.entries) {
+      if (entry.multiplier.structurally_zero()) continue;
+      const auto term_min = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(source.epsilon.min_power) +
+              entry.multiplier.epsilon_shift,
+          "fused scalar-row admission epsilon minimum");
+      for (const auto& sector : source.sectors) {
+        // Match apply_prepared_scalar_row_window exactly: an active matrix
+        // entry does not by itself materialize every selected source tag.
+        // Admit this pair only when at least one raw finite convolution
+        // product in the capped projected frame is exact-nonzero.  For Acb,
+        // is_zero means the singleton zero; an enclosure containing zero is
+        // deliberately retained as material.
+        bool pair_can_contribute = false;
+        for (std::size_t kernel_epsilon = 0;
+             kernel_epsilon < epsilon_width && !pair_can_contribute;
+             ++kernel_epsilon) {
+          const auto output_base = static_cast<std::int64_t>(term_min) +
+              static_cast<std::int64_t>(kernel_epsilon);
+          if (output_base > projected_epsilon.complete_max) break;
+          const auto& kernel = entry.multiplier.kernels[kernel_epsilon];
+          for (std::size_t input_epsilon = 0;
+               input_epsilon + kernel_epsilon < epsilon_width &&
+                   !pair_can_contribute;
+               ++input_epsilon) {
+            const auto output_power = output_base +
+                static_cast<std::int64_t>(input_epsilon);
+            if (output_power > projected_epsilon.complete_max) break;
+            if (output_power < projected_epsilon.min_power) continue;
+            for (std::size_t kernel_taylor = 0;
+                 kernel_taylor < taylor_width && !pair_can_contribute;
+                 ++kernel_taylor) {
+              const auto& multiplier = kernel[kernel_taylor];
+              if (exact_singleton_zero(multiplier)) continue;
+              for (std::size_t input_taylor = 0;
+                   input_taylor + kernel_taylor < taylor_width;
+                   ++input_taylor) {
+                const auto& coefficient = sector.coefficients[
+                    local_detail::sector_index(
+                        source, input_epsilon, input_taylor,
+                        entry.column)];
+                if (!exact_singleton_zero(coefficient)) {
+                  pair_can_contribute = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (pair_can_contribute)
+          admit_output_sector(sector, &entry);
+      }
+    }
+    if (output_sectors.empty()) {
+      // Preserve the same one-tag zero representative as the sparse scalar
+      // projector when every active pair is exact zero in the capped frame.
+      const auto active_entry = std::find_if(
+          matrix.entries.begin(), matrix.entries.end(),
+          [](const auto& entry) {
+            return !entry.multiplier.structurally_zero();
+          });
+      if (active_entry == matrix.entries.end() || source.sectors.empty())
+        throw std::logic_error(
+            "active fused scalar row lost its zero-sector representative");
+      admit_output_sector(source.sectors.front(), &*active_entry, false);
+    }
+  } else {
+    // A structurally zero row follows exact_zero_scalar_local_like: its
+    // frame and sector tags are inherited from one scalar source component.
+    for (const auto& sector : source.sectors)
+      admit_output_sector(sector, nullptr);
+  }
+  if (output_sectors.empty())
+    throw std::logic_error("fused scalar row produced no output-sector metadata");
+
+  if (has_center_endpoint) {
+    const Rational unseen_shift(std::to_string(taylor_width + 1));
+    for (const auto& [key, output_sector] : output_sectors) {
+      (void)key;
+      const auto& sector = output_sector.tag;
+      if (sector.b.is_zero != TruthValue::Yes) continue;
+      if (sector.a.domain != ExactDomain::Rational)
+        throw NativeIntegrationError(
+            NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+            "center-touching fused row requires rational local powers");
+      const auto first_unseen =
+          Rational(sector.a.canonical) + unseen_shift;
+      if (ExactScalarDescriptor::rational(first_unseen.str()).sign !=
+          ExactSign::Positive)
+        throw NativeIntegrationError(
+            NativeIntegrationErrorCode::IncompleteTaylorWindow, "E10",
+            "center-touching fused Taylor window has a nonintegrable first unseen monomial");
+    }
+  }
+
+  std::vector<const OutputSector*> canonical_output_sectors;
+  canonical_output_sectors.reserve(output_sectors.size());
+  for (const auto& [sector_key, output_sector] : output_sectors) {
+    (void)sector_key;
+    canonical_output_sectors.push_back(&output_sector);
+  }
+  if (canonical_output_sectors.size() >
+      std::numeric_limits<std::uint32_t>::max())
+    throw std::overflow_error(
+        "fused output-sector count exceeds its compact work index");
+  if (taylor_width != 0 && canonical_output_sectors.size() >
+          std::numeric_limits<std::size_t>::max() / taylor_width)
+    throw std::overflow_error("fused monomial work-item count overflows");
+
+  std::vector<FusedMonomialWorkItem> work_items;
+  work_items.reserve(canonical_output_sectors.size() * taylor_width);
+  for (std::size_t ordinal = 0;
+       ordinal < canonical_output_sectors.size(); ++ordinal) {
+    const auto& output_sector = *canonical_output_sectors[ordinal];
+    for (std::size_t n = 0; n < taylor_width; ++n) {
+      auto tag = sector_monomial_tag(
+          output_sector.tag, static_cast<std::uint32_t>(n));
+      integration_detail::validate_tag(tag);
+      work_items.push_back(FusedMonomialWorkItem{
+          stable_monomial_key_hash(tag), static_cast<std::uint32_t>(ordinal),
+          static_cast<std::uint32_t>(n)});
+    }
+  }
+  std::sort(work_items.begin(), work_items.end(),
+            [](const auto& left, const auto& right) {
+              return std::tie(left.stable_key_hash, left.sector_ordinal,
+                              left.taylor_order) <
+                     std::tie(right.stable_key_hash, right.sector_ordinal,
+                              right.taylor_order);
+            });
+
+  const auto tag_for_item = [&](const FusedMonomialWorkItem& item) {
+    return sector_monomial_tag(
+        canonical_output_sectors.at(item.sector_ordinal)->tag,
+        item.taylor_order);
+  };
+  const auto key_for_item = [&](const FusedMonomialWorkItem& item) {
+    return monomial_key(tag_for_item(item));
+  };
+
+  // A 64-bit hash owns no exact strings and makes the normal sort entirely
+  // integer-only.  Exact equality remains authoritative: detect a true hash
+  // collision and sort just that bucket by the full key, with the canonical
+  // sector/Taylor ordinal as the deterministic Acb addition tie-break.
+  std::size_t grouped_monomials = 0;
+  std::vector<std::uint64_t> collision_hashes;
+  for (std::size_t bucket_begin = 0; bucket_begin < work_items.size();) {
+    std::size_t bucket_end = bucket_begin + 1;
+    while (bucket_end < work_items.size() &&
+           work_items[bucket_end].stable_key_hash ==
+               work_items[bucket_begin].stable_key_hash)
+      ++bucket_end;
+    const auto first_key = key_for_item(work_items[bucket_begin]);
+    bool hash_collision = false;
+    for (std::size_t index = bucket_begin + 1;
+         index < bucket_end; ++index)
+      if (key_for_item(work_items[index]) != first_key) {
+        hash_collision = true;
+        break;
+      }
+    if (hash_collision) {
+      collision_hashes.push_back(
+          work_items[bucket_begin].stable_key_hash);
+      std::sort(
+          work_items.begin() + static_cast<std::ptrdiff_t>(bucket_begin),
+          work_items.begin() + static_cast<std::ptrdiff_t>(bucket_end),
+          [&](const auto& left, const auto& right) {
+            const auto left_key = key_for_item(left);
+            const auto right_key = key_for_item(right);
+            if (left_key != right_key) return left_key < right_key;
+            return std::tie(left.sector_ordinal, left.taylor_order) <
+                   std::tie(right.sector_ordinal, right.taylor_order);
+          });
+      auto previous_key = key_for_item(work_items[bucket_begin]);
+      ++grouped_monomials;
+      for (std::size_t index = bucket_begin + 1;
+           index < bucket_end; ++index) {
+        auto current_key = key_for_item(work_items[index]);
+        if (current_key != previous_key) {
+          ++grouped_monomials;
+          previous_key = std::move(current_key);
+        }
+      }
+    } else {
+      ++grouped_monomials;
+    }
+    bucket_begin = bucket_end;
+  }
+  result.diagnostics.grouped_monomials = grouped_monomials;
+
+  LocalSolution<Scalar> projected_shape;
+  projected_shape.epsilon = projected_epsilon;
+  projected_shape.dimension = 1;
+  const auto build_group = [&](std::size_t group_begin,
+                               std::size_t group_end,
+                               const SectorMonomialTag& group_tag) {
+    MonomialGroup<Scalar> group;
+    group.tag = group_tag;
+    group.coefficients.assign(projected_epsilon.width(),
+                              ScalarTraits<Scalar>::zero());
+    group.contribution_scale_uppers.assign(projected_epsilon.width(),
+                                           Magnitude::zero());
+    for (std::size_t item_index = group_begin;
+         item_index < group_end; ++item_index) {
+      const auto& item = work_items[item_index];
+      const auto* output_sector =
+          canonical_output_sectors.at(item.sector_ordinal);
+      const auto taylor = item.taylor_order;
+      if (!same_exact_descriptor(group.tag.b, output_sector->tag.b))
+        throw NativeIntegrationError(
+            NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+            "equal fused monomial keys carry inconsistent regulator descriptors");
+      std::vector<Scalar> cell(projected_epsilon.width(),
+                               ScalarTraits<Scalar>::zero());
+      for (const auto& contributor : output_sector->contributors) {
+        const auto& entry = *contributor.entry;
+        const auto& sector = *contributor.sector;
+        const auto term_min = local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(source.epsilon.min_power) +
+                entry.multiplier.epsilon_shift,
+            "fused row-cell epsilon minimum");
+        for (std::int64_t raw_power = projected_epsilon.min_power;
+             raw_power <= projected_epsilon.complete_max; ++raw_power) {
+          const auto term_index = raw_power - term_min;
+          if (term_index < 0 ||
+              term_index >= static_cast<std::int64_t>(epsilon_width))
+            continue;
+          const auto output_epsilon = static_cast<std::size_t>(
+              raw_power - projected_epsilon.min_power);
+          for (std::int64_t kernel_epsilon = 0;
+               kernel_epsilon <= term_index; ++kernel_epsilon) {
+            const auto input_epsilon = term_index - kernel_epsilon;
+            const auto& kernel = entry.multiplier.kernels[
+                static_cast<std::size_t>(kernel_epsilon)];
+            for (std::size_t kernel_taylor = 0;
+                 kernel_taylor <= taylor; ++kernel_taylor) {
+              const auto& multiplier = kernel[kernel_taylor];
+              if (exact_singleton_zero(multiplier)) continue;
+              const auto input_taylor = taylor - kernel_taylor;
+              const auto& coefficient = sector.coefficients[
+                  local_detail::sector_index(
+                      source, static_cast<std::size_t>(input_epsilon),
+                      input_taylor, entry.column)];
+              if (exact_singleton_zero(coefficient)) continue;
+              local_algebra_detail::add_product(
+                  cell[output_epsilon], multiplier, coefficient);
+            }
+          }
+        }
+      }
+      ++group.cell_count;
+      for (std::size_t epsilon = 0; epsilon < cell.size(); ++epsilon) {
+        const auto& value = cell[epsilon];
+        if (!exact_singleton_zero(value)) group.had_material_input = true;
+        group.coefficients[epsilon] += value;
+        group.contribution_scale_uppers[epsilon] = Magnitude::maximum(
+            group.contribution_scale_uppers[epsilon],
+            Magnitude::upper_abs(as_ball(value)));
+      }
+    }
+    return group;
+  };
+
+  const auto for_each_exact_group = [&](auto&& visitor) {
+    for (std::size_t group_begin = 0; group_begin < work_items.size();) {
+      const auto group_tag = tag_for_item(work_items[group_begin]);
+      std::size_t hash_end = group_begin + 1;
+      while (hash_end < work_items.size() &&
+             work_items[hash_end].stable_key_hash ==
+                 work_items[group_begin].stable_key_hash)
+        ++hash_end;
+      if (!std::binary_search(
+              collision_hashes.begin(), collision_hashes.end(),
+              work_items[group_begin].stable_key_hash)) {
+        visitor(group_begin, hash_end, group_tag);
+        group_begin = hash_end;
+        continue;
+      }
+      const auto group_key = monomial_key(group_tag);
+      std::size_t group_end = group_begin + 1;
+      while (group_end < hash_end &&
+             key_for_item(work_items[group_end]) == group_key)
+        ++group_end;
+      visitor(group_begin, group_end, group_tag);
+      group_begin = group_end;
+    }
+  };
+
+  // The materialized path performs this as one global preflight before any
+  // divergence or halo error.  Preserve that ordering without retaining all
+  // projected coefficients: only the exceptional missing-rim path needs a
+  // read-only streaming pass over the monomial groups.
+  if (has_negative_arm && !effective_sign.has_value()) {
+    for_each_exact_group(
+        [&](std::size_t group_begin, std::size_t group_end,
+            const SectorMonomialTag& group_tag) {
+          if (!integration_detail::branch_sensitive_on_negative_arm(
+                  group_tag))
+            return;
+          if (material_group(
+                  build_group(group_begin, group_end, group_tag)))
+            throw NativeIntegrationError(
+                NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+                "negative branch-sensitive fused line has no derivable imaginary sign");
+        });
+  }
+
+  for_each_exact_group(
+      [&](std::size_t group_begin, std::size_t group_end,
+          const SectorMonomialTag& group_tag) {
+    auto group = build_group(group_begin, group_end, group_tag);
+    result.diagnostics.input_monomial_cells += group.cell_count;
+
+    const auto first_nonzero =
+        first_nonzero_power(projected_shape, group, 0);
+    const auto material_components = first_nonzero.has_value() ? 1U : 0U;
+    const bool divergent = center_divergent(
+        group.tag, has_center_endpoint);
+    const bool cancelled_divergent = material_components != 0 && divergent;
+    if (cancelled_divergent)
+      (void)accept_or_throw_divergent_group(
+          projected_shape, group, options, &result.diagnostics);
+
+    const auto primitive_min = primitive_min_power(
+        group.tag, has_center_endpoint);
+    const auto deliverable_max = local_detail::checked_i32(
+        static_cast<std::int64_t>(projected_epsilon.complete_max) +
+            primitive_min,
+        "fused line deliverable epsilon maximum");
+    if (deliverable_max < options.delivered_epsilon.complete_max)
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::IncompleteEpsilonWindow, "E10",
+          "fused row coefficient frame does not cover the requested primitive output");
+
+    if (material_components == 0 || cancelled_divergent) {
+      ++result.diagnostics.zero_groups_skipped;
+      if (cancelled_divergent ||
+          (divergent && group.had_material_input && group.cell_count > 1))
+        ++result.diagnostics.cancelled_divergent_groups;
+      return;
+    }
+    MonomialIntegrationOptions primitive_options;
+    primitive_options.imaginary_sign = effective_sign;
+    primitive_options.complete_max = std::max(
+        primitive_min,
+        checked_difference(options.delivered_epsilon.complete_max,
+                           *first_nonzero,
+                           "fused required primitive complete maximum"));
+    const auto primitive = integrate_sector_monomial(
+        group.tag, lower, upper, primitive_options);
+    if (primitive.min_power() != primitive_min)
+      throw std::logic_error(
+          "fused line primitive minimum disagrees with its exact preflight");
+    ++result.diagnostics.primitive_evaluations;
+    ++result.diagnostics.primitive_component_applications;
+
+    std::vector<ComplexBall> coefficient_values;
+    coefficient_values.reserve(static_cast<std::size_t>(
+        static_cast<std::int64_t>(projected_epsilon.complete_max) -
+        *first_nonzero + 1));
+    for (std::int64_t raw_power = *first_nonzero;
+         raw_power <= projected_epsilon.complete_max; ++raw_power)
+      coefficient_values.push_back(as_ball(group.coefficients[
+          static_cast<std::size_t>(raw_power - projected_epsilon.min_power)]));
+    const EpsilonFrame<ComplexBall> coefficient_frame(
+        *first_nonzero, std::move(coefficient_values));
+    const auto contribution = coefficient_frame * primitive;
+    if (contribution.complete_max() <
+        options.delivered_epsilon.complete_max)
+      throw std::logic_error(
+          "fused line epsilon preflight did not deliver its promised window");
+    for (std::int64_t raw_power = options.delivered_epsilon.min_power;
+         raw_power <= options.delivered_epsilon.complete_max; ++raw_power)
+      result.value.at(static_cast<std::int32_t>(raw_power), 0) +=
+          contribution.coefficient(static_cast<std::int32_t>(raw_power));
+  });
+
+  result.value.error.guarantee = ErrorGuarantee::None;
+  result.value.error.provenance =
+      "stored Taylor truncation only; fused transport row projection; no "
+      "unseen-tail majorant or full-local certificate";
   result.diagnostics.detail = result.value.error.provenance;
   return result;
 }

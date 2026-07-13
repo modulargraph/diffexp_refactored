@@ -77,8 +77,8 @@ $FTConfig = <|
 
 $supportedExamples = {
   "bubble", "sunrise", "banana", "banana_unequal", "banana4",
-  "banana4_unequal", "kite", "box", "pentagon", "box_bubble",
-  "box_triangle", "double_box_planar"
+  "banana4_unequal", "kite", "box", "pentagon", "pentagon_massive",
+  "box_bubble", "box_triangle", "double_box_planar"
 };
 
 FeynmanTrick`SupportedExamples[] := $supportedExamples;

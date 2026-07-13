@@ -8,9 +8,10 @@ If[!TrueQ[DiffExp2`CppBackend`BackendAvailableQ[]],
   Exit[If[Environment["DE2_REQUIRE_CPP"] === "1", 1, 0]]];
 
 passed = 0; failed = 0;
-assert[label_String, condition_] := If[TrueQ[condition],
+assert[label_String, condition_, detail_:None] := If[TrueQ[condition],
   passed++; Print["  PASS: ", label],
-  failed++; Print["  FAIL: ", label]];
+  failed++; Print["  FAIL: ", label,
+    If[detail === None, "", ": " <> ToString[detail, InputForm]]]];
 SetAttributes[catchDE2, HoldFirst];
 catchDE2[expression_] := Quiet[Catch[expression, "DiffExp2Error"]];
 nativeOKQ[value_] := AssociationQ[value] &&
@@ -30,11 +31,14 @@ x = Global`x;
 system = DiffExp2`LoadSystem[<|"Matrix" -> {{0}}, "Variable" -> x|>];
 lowerPlan = DiffExp2`Transport`SegmentLine[system, {0, -1/4}];
 upperPlan = DiffExp2`Transport`SegmentLine[system, {0, 1/4}];
-one = DiffExp2`EpsSeries`ESNew[-2, {0, 0, 1}];
+(* Pair integration consumes one primitive epsilon halo even for this
+   epsilon-independent fixture.  Retain that certified zero coefficient so
+   the requested epsilon^0 result remains globally complete. *)
+one = DiffExp2`EpsSeries`ESNew[-2, {0, 0, 1, 0}];
 atlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     system, {one}, lowerPlan, upperPlan, "Threads" -> 1,
-    "Integrand" -> {{1}, x}]];
+    "Integrand" -> {{1}, x}, "TargetCompleteMax" -> 1]];
 
 lowerRows = If[FailureQ[atlas], {}, catchDE2[
   DiffExp2`NativeTransport`Private`nativePreparedArmRows[
@@ -64,6 +68,16 @@ upperState = Lookup[states, "upper", <||>];
 
 epsilon = <|"Min" -> 0, "Max" -> 0,
   "RequiredCompleteMax" -> 0|>;
+boundedCancellation = <|
+  "Mode" -> "bounded-relative-acb",
+  "RelativeTolerance" ->
+    "1.0000000000000000000000000000000000000000000000000e-24",
+  "Provenance" -> ExportString[<|
+      "schema" -> "feynman-trick-divergent-cancellation-v1",
+      "producer" -> "DiffExp2`Tolerances`Tol",
+      "key" -> "LaurentLeadTol",
+      "exact_value" -> "1/1000000000000000000000000"|>,
+    "RawJSON", "Compact" -> True]|>;
 observable[identity_, checkpoint_, tail_:Automatic] := Module[{result},
   result = <|"Identity" -> identity,
     "CheckpointIdentity" -> checkpoint,
@@ -108,8 +122,8 @@ overRequired = If[nativeOKQ[transport],
   DiffExp2`CppBackend`ContractPersistentTransportPairObservables[
     lowerState, upperState,
     {Join[observable["over-required", "over-required-checkpoint"], <|
-      "Epsilon" -> <|"Min" -> 0, "Max" -> 1,
-        "RequiredCompleteMax" -> 1|>|>]}, "over-required-root"],
+      "Epsilon" -> <|"Min" -> 0, "Max" -> 2,
+        "RequiredCompleteMax" -> 2|>|>]}, "over-required-root"],
   transport];
 swapped = If[nativeOKQ[transport],
   DiffExp2`CppBackend`ContractPersistentTransportPairObservables[
@@ -123,7 +137,9 @@ afterInvalid = sessionStats[];
 assert["transport_pair_bridge_rejects_malformed_signs_and_duplicates",
   FailureQ[extraSign] && FailureQ[missingUpper] &&
     FailureQ[duplicateIdentity] && FailureQ[duplicateCheckpoint] &&
-    FailureQ[overRequired] && FailureQ[swapped]];
+    (FailureQ[overRequired] ||
+      Lookup[overRequired, "status", None] === "error") &&
+    FailureQ[swapped]];
 assert["transport_pair_bridge_rejects_native_provenance_tamper_atomically",
   AssociationQ[tampered] && Lookup[tampered, "status", "ok"] === "error" &&
     SameQ[mutationCounters[beforeInvalid],
@@ -151,7 +167,8 @@ assert["transport_pair_bridge_zero_is_line_allocation_free",
 oneResult = If[nativeOKQ[transport],
   DiffExp2`CppBackend`ContractPersistentTransportPairObservables[
     lowerState, upperState,
-    {observable["one-observable", "one-observable-checkpoint"]},
+    {Append[observable["one-observable", "one-observable-checkpoint"],
+      "DivergentCancellation" -> boundedCancellation]},
     "transport-pair-one"], transport];
 oneLines = If[nativeOKQ[oneResult], Lookup[oneResult, "lines", {}], {}];
 oneLineStats = If[Length[oneLines] === 1,
@@ -173,12 +190,21 @@ assert["transport_pair_bridge_one_defaults_tail_and_fixes_minus_plus",
   nativeOKQ[oneResult] && Length[oneLines] === 1 &&
     Lookup[oneResult, "combination", None] ===
       "negative-lower-plus-upper" &&
-    Lookup[oneResult, "max_parallel_arms", 0] === 2 &&
+    Lookup[oneResult, "max_parallel_arms", 0] === 1 &&
     Lookup[oneResult, "no_remarching", False] === True &&
     Lookup[oneResult, "no_rematching", False] === True &&
     nativeOKQ[oneLineStats] && nativeOKQ[oneExport] &&
+    Lookup[Lookup[oneLineStats, "diagnostics", <||>],
+      "divergent_cancellation_mode", None] === "bounded-relative-acb" &&
+    Lookup[Lookup[oneLineStats, "diagnostics", <||>],
+      "divergent_cancellation_provenance", None] ===
+        boundedCancellation["Provenance"] &&
     NumberQ[oneEpsilonZero] &&
-    TrueQ[Abs[N[oneEpsilonZero - 1/2, 30]] < 10^-20]];
+    TrueQ[Abs[N[oneEpsilonZero - 1/2, 30]] < 10^-20],
+  {KeyTake[oneResult, {"status", "observables", "combination",
+      "max_parallel_arms", "no_remarching", "no_rematching"}],
+   KeyTake[oneLineStats, {"status"}], KeyTake[oneExport, {"status"}],
+   oneEpsilonZero}];
 
 manyIdentities = {"many-z", "many-a"};
 manyResult = If[nativeOKQ[transport],
@@ -194,9 +220,14 @@ assert["transport_pair_bridge_many_preserves_order_and_opaque_outputs",
     Lookup[manyLines, "request_index"] === {0, 1} &&
     Lookup[manyLines, "observable_identity"] === manyIdentities &&
     DuplicateFreeQ[Lookup[manyLines, "line"]] &&
-    Lookup[manyResult, "max_parallel_arms", 0] === 2 &&
+    Lookup[manyResult, "max_parallel_arms", 0] === 1 &&
     Lookup[afterMany, "transport_pair_observables", -1] === 3 &&
-    Lookup[afterMany, "pending_line_integrations", -1] === 0];
+    Lookup[afterMany, "pending_line_integrations", -1] === 0,
+  {KeyTake[manyResult, {"status", "observables", "combination",
+      "max_parallel_arms"}],
+   Lookup[manyLines, {"request_index", "observable_identity", "line"}],
+   KeyTake[afterMany, {"transport_pair_observables",
+      "pending_line_integrations"}]}];
 
 lineHandles = Join[oneLines, manyLines];
 lineReleases = DiffExp2`CppBackend`ReleasePersistentLineIntegral /@

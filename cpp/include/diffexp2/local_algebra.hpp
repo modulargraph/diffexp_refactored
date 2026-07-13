@@ -363,6 +363,232 @@ LocalSolution<Scalar> multiply_prepared_rational(
   return canonicalize_identical_local_sectors(std::move(output));
 }
 
+namespace local_algebra_detail {
+
+template <typename Scalar>
+void add_product(Scalar& accumulator, const Scalar& left,
+                 const Scalar& right) {
+  accumulator += left * right;
+}
+
+template <>
+inline void add_product<ComplexBall>(ComplexBall& accumulator,
+                                     const ComplexBall& left,
+                                     const ComplexBall& right) {
+  acb_addmul(accumulator.raw(), left.raw(), right.raw(),
+             ComplexBall::precision());
+}
+
+}  // namespace local_algebra_detail
+
+// Direct specialization of a sparse one-row local matrix.  Observable
+// contraction needs only one scalar local, while the generic matrix path
+// selects, multiplies, embeds, and combines one complete LocalSolution per
+// active column.  Accumulate the same finite convolutions directly into the
+// scalar exact-tag groups instead.  A caller may cap the honest upper frame;
+// coefficients above it are deliberately not computed, while the structural
+// lower edge and the least complete active-entry edge remain unchanged.
+template <typename Scalar>
+std::optional<LocalSolution<Scalar>> apply_prepared_scalar_row_window(
+    const PreparedSparseLocalMultiplierMatrix<Scalar>& matrix,
+    const LocalSolution<Scalar>& input,
+    std::int32_t target_complete_max,
+    std::string checkpoint_identity = {}) {
+  validate_local_solution(input, false);
+  if (!input.error.empty())
+    throw std::invalid_argument(
+        "native scalar-row application needs explicit error-envelope propagation");
+  if (matrix.rows != 1 || matrix.columns != input.dimension)
+    throw std::invalid_argument(
+        "prepared scalar row dimensions disagree with its local");
+
+  const auto epsilon_width = input.epsilon.width();
+  const auto taylor_width = input.taylor_width();
+  std::int32_t natural_min = std::numeric_limits<std::int32_t>::max();
+  std::int32_t natural_complete = std::numeric_limits<std::int32_t>::max();
+  bool active = false;
+  for (const auto& entry : matrix.entries) {
+    if (entry.row != 0 || entry.column >= matrix.columns)
+      throw std::invalid_argument(
+          "prepared scalar-row entry is out of range");
+    if (entry.multiplier.structurally_zero()) continue;
+    active = true;
+    if (entry.multiplier.kernels.size() < epsilon_width)
+      throw std::invalid_argument(
+          "prepared scalar-row multiplier has too few epsilon kernels");
+    for (std::size_t j = 0; j < epsilon_width; ++j)
+      if (entry.multiplier.kernels[j].size() < taylor_width)
+        throw std::invalid_argument(
+            "prepared scalar-row multiplier has too few Taylor coefficients");
+    natural_min = std::min(
+        natural_min, local_algebra_detail::checked_i32(
+                         static_cast<std::int64_t>(input.epsilon.min_power) +
+                             entry.multiplier.epsilon_shift,
+                         "scalar-row epsilon minimum"));
+    natural_complete = std::min(
+        natural_complete,
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(input.epsilon.complete_max) +
+                entry.multiplier.epsilon_shift,
+            "scalar-row epsilon complete maximum"));
+  }
+  if (!active) return std::nullopt;
+
+  const auto complete_max = std::min(
+      natural_complete, target_complete_max);
+  if (complete_max < natural_min)
+    throw std::invalid_argument(
+        "prepared scalar row has no coefficient in its requested upper window");
+
+  LocalSolution<Scalar> output;
+  output.chart = input.chart;
+  output.epsilon = {natural_min, complete_max};
+  output.taylor_complete_max = input.taylor_complete_max;
+  output.dimension = 1;
+  output.prescriptions = input.prescriptions;
+  output.checkpoint_identity = checkpoint_identity.empty()
+      ? input.checkpoint_identity + ":scalar-row:" + matrix.exact_identity
+      : std::move(checkpoint_identity);
+  // One output tag per input sector is the common row-projection shape.
+  // Reserve only that metadata scale; varying pole orders may grow beyond it,
+  // but reserving the full sector-entry cross product would recreate the
+  // memory problem this specialization is intended to avoid.
+  output.sectors.reserve(input.sectors.size());
+
+  const auto find_group = [&](const LocalSector<Scalar>& source,
+                              std::uint32_t pole) -> LocalSector<Scalar>& {
+    const auto shifted_a =
+        local_algebra_detail::subtract_nonnegative_integer(source.a, pole);
+    const auto found = std::find_if(
+        output.sectors.begin(), output.sectors.end(),
+        [&](const auto& candidate) {
+          return candidate.log_power == source.log_power &&
+                 local_algebra_detail::same_descriptor(candidate.a,
+                                                       shifted_a) &&
+                 local_algebra_detail::same_descriptor(candidate.b,
+                                                       source.b);
+        });
+    if (found != output.sectors.end()) return *found;
+    LocalSector<Scalar> group;
+    group.a = shifted_a;
+    group.b = source.b;
+    group.log_power = source.log_power;
+    group.coefficients.assign(output.sector_size(),
+                              ScalarTraits<Scalar>::zero());
+    output.sectors.push_back(std::move(group));
+    return output.sectors.back();
+  };
+
+  for (const auto& entry : matrix.entries) {
+    if (entry.multiplier.structurally_zero()) continue;
+    const auto term_min = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(input.epsilon.min_power) +
+            entry.multiplier.epsilon_shift,
+        "scalar-row term epsilon minimum");
+    const bool multiplier_can_contribute = [&]() {
+      for (std::size_t kernel_epsilon = 0;
+           kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+        if (static_cast<std::int64_t>(term_min) +
+                static_cast<std::int64_t>(kernel_epsilon) >
+            complete_max)
+          break;
+        const auto& kernel = entry.multiplier.kernels[kernel_epsilon];
+        if (std::any_of(
+                kernel.begin(), kernel.begin() + taylor_width,
+                [](const auto& value) {
+                  return !ScalarTraits<Scalar>::is_zero(value);
+                }))
+          return true;
+      }
+      return false;
+    }();
+    if (!multiplier_can_contribute) continue;
+    for (const auto& sector : input.sectors) {
+      const bool selected_component_can_contribute = [&]() {
+        for (std::size_t input_epsilon = 0;
+             input_epsilon < epsilon_width; ++input_epsilon)
+          for (std::size_t input_taylor = 0;
+               input_taylor < taylor_width; ++input_taylor)
+            if (!ScalarTraits<Scalar>::is_zero(
+                    sector.coefficients[
+                        local_algebra_detail::flat_index(
+                            input_epsilon, input_taylor, entry.column,
+                            taylor_width, input.dimension)]))
+              return true;
+        return false;
+      }();
+      if (!selected_component_can_contribute) continue;
+      LocalSector<Scalar>* group = nullptr;
+      for (std::size_t kernel_epsilon = 0;
+           kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+        const auto& kernel = entry.multiplier.kernels[kernel_epsilon];
+        for (std::size_t input_epsilon = 0;
+             input_epsilon + kernel_epsilon < epsilon_width;
+             ++input_epsilon) {
+          const auto output_power = local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(term_min) +
+                  static_cast<std::int64_t>(input_epsilon) +
+                  static_cast<std::int64_t>(kernel_epsilon),
+              "scalar-row output epsilon power");
+          if (output_power > complete_max) break;
+          const auto output_epsilon = static_cast<std::size_t>(
+              output_power - output.epsilon.min_power);
+          for (std::size_t kernel_taylor = 0;
+               kernel_taylor < taylor_width; ++kernel_taylor) {
+            const auto& kernel_coefficient = kernel[kernel_taylor];
+            if (ScalarTraits<Scalar>::is_zero(kernel_coefficient)) continue;
+            for (std::size_t input_taylor = 0;
+                 input_taylor + kernel_taylor < taylor_width;
+                 ++input_taylor) {
+              const auto& source_coefficient = sector.coefficients[
+                  local_algebra_detail::flat_index(
+                      input_epsilon, input_taylor, entry.column,
+                      taylor_width, input.dimension)];
+              if (ScalarTraits<Scalar>::is_zero(source_coefficient))
+                continue;
+              // Allocate the potentially large scalar sector slab only
+              // after both exact operands prove that this selected component
+              // can contribute.  For Acb, is_zero means the exact singleton
+              // zero; an enclosure merely containing zero remains material.
+              if (group == nullptr)
+                group = &find_group(
+                    sector, entry.multiplier.center_pole_order);
+              auto& destination = group->coefficients[
+                  local_algebra_detail::flat_index(
+                      output_epsilon, input_taylor + kernel_taylor, 0,
+                      taylor_width, 1)];
+              local_algebra_detail::add_product(
+                  destination, kernel_coefficient, source_coefficient);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (output.sectors.empty()) {
+    // Every active exact entry still owns the frame computed above even when
+    // all of its finite kernels or selected source cells are exact zero.
+    // LocalSolution requires at least one sector, so retain one genuine
+    // product tag as a zero representative without materializing the full
+    // input-sector x active-entry cross product.
+    const auto active_entry = std::find_if(
+        matrix.entries.begin(), matrix.entries.end(), [](const auto& entry) {
+          return !entry.multiplier.structurally_zero();
+        });
+    if (active_entry == matrix.entries.end() || input.sectors.empty())
+      throw std::logic_error(
+          "active scalar row lost its zero-sector representative");
+    (void)find_group(input.sectors.front(),
+                     active_entry->multiplier.center_pole_order);
+  }
+
+  std::stable_sort(output.sectors.begin(), output.sectors.end(),
+                   local_algebra_detail::sector_less<Scalar>);
+  validate_local_solution(output, false);
+  return output;
+}
+
 // Restrict a finite local slab to a target recurrence frame.  Discarding
 // known upper coefficients is safe because the target never consumes them.
 // Discarding lower coefficients is only safe when every discarded exact

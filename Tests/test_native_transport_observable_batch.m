@@ -46,6 +46,8 @@ observables = {
   observable["limitUpper", "upper-limit"],
   Append[observable["integrate", "polar-integral",
       {1/Global`eps + 1}],
+    "TailPolicy" -> "stored"],
+  Append[observable["integrate", "second-integral"],
     "TailPolicy" -> "stored"]};
 sessionStats[] := If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
@@ -64,18 +66,105 @@ assert["native_observable_batch_rejects_duplicate_identity_before_march",
     Lookup[beforeInvalid, "transport_arm_marches", -1] ===
       Lookup[afterInvalid, "transport_arm_marches", -2]];
 
+(* A definitions-only failure fixture proves that completed chunks and even
+   a malformed current response are both reclaimed before the two retained
+   states.  No real native owner is allocated by this block. *)
+mockAtlas = <|
+  "Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
+  "Dimension" -> 1, "PlanCheckpointIdentity" -> "mock-plan-checkpoint",
+  "Domain" -> "acb", "Session" -> "mock-session",
+  "Plan" -> <|"plan" -> "mock-plan"|>,
+  "Anchor" -> <|"checkpoint_identity" -> "mock-anchor-checkpoint"|>,
+  "PreparedIntegrandEpsilonShift" -> 0,
+  "Request" -> <|"EpsWindow" -> <|"Min" -> 0,
+      "CompleteMax" -> 1|>|>,
+  "Lower" -> <|"Bases" -> {None}, "ChartSystems" -> {None}|>,
+  "Upper" -> <|"Bases" -> {None}, "ChartSystems" -> {None}|>|>;
+mockIntegrates = Table[
+  <|"Operation" -> "integrate", "Identity" -> "mock-" <> ToString[i],
+    "CheckpointIdentity" -> "mock-checkpoint-" <> ToString[i],
+    "CoefficientVector" -> {1},
+    "Epsilon" -> <|"Min" -> 0, "Max" -> 0,
+      "RequiredCompleteMax" -> 0|>, "TailPolicy" -> "stored"|>,
+  {i, 3}];
+mockPairCalls = 0; mockPairRoots = {}; mockPairIdentities = {};
+mockReleasedLines = {}; mockReleasedStates = {}; mockMarchCalls = 0;
+mockFailure = catchDE2[Block[{
+    DiffExp2`NativeTransport`Private`nativeArmRowRecipes =
+      Function[{ignoredAtlas, ignoredArm}, {<|"MockRecipe" -> True|>}],
+    DiffExp2`NativeTransport`Private`nativePrepareBatchObservable =
+      Function[{raw, ignoredVar, ignoredDimension},
+        Append[raw, "MinimumEpsilonShift" -> 0]],
+    DiffExp2`Solve`DropWolframPreparationCaches = Function[Null, Null],
+    DiffExp2`CppBackend`RunPersistentTransportArms =
+      Function[{plan, anchor, arms, epsWindow, root, refinement},
+        mockMarchCalls++;
+        <|"status" -> "ok", "session" -> "mock-session",
+          "native_retained" -> True, "json_coefficients" -> 0,
+          "states" -> <|
+            "lower" -> <|"session" -> "mock-session", "arm" -> "lower",
+              "transport_state" -> "transport:mock-lower",
+              "checkpoint_identity" -> "mock-state-lower-checkpoint",
+              "provenance_identity" -> "mock-state-lower-provenance"|>,
+            "upper" -> <|"session" -> "mock-session", "arm" -> "upper",
+              "transport_state" -> "transport:mock-upper",
+              "checkpoint_identity" -> "mock-state-upper-checkpoint",
+              "provenance_identity" -> "mock-state-upper-provenance"|>|>|>],
+    DiffExp2`NativeTransport`Private`nativeContractStoredPairObservableStreamed =
+      Function[{lowerState, upperState, request, lowerRecipes,
+          upperRecipes, ignoredVar, ignoredDomain, root}, Module[
+        {call, line},
+        mockPairCalls++; call = mockPairCalls;
+        AppendTo[mockPairRoots, root];
+        AppendTo[mockPairIdentities, {request["Identity"]}];
+        line = <|"session" -> "mock-session",
+          "line" -> "line:mock-" <> ToString[call],
+          "checkpoint_identity" -> request["CheckpointIdentity"],
+          "provenance_identity" -> "mock-line-provenance-" <>
+            ToString[call], "request_index" -> 0,
+          "observable_identity" -> request["Identity"]|>;
+        <|"status" -> If[call === 2, "error", "ok"],
+          "lines" -> {line}|>]],
+    DiffExp2`CppBackend`ReleasePersistentLineIntegral =
+      Function[handle, AppendTo[mockReleasedLines, handle["line"]];
+        <|"status" -> "ok"|>],
+    DiffExp2`CppBackend`ReleasePersistentTransportArm =
+      Function[handle,
+        AppendTo[mockReleasedStates, handle["transport_state"]];
+        <|"status" -> "ok"|>]},
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatch[
+    mockAtlas, mockIntegrates, x]]];
+assert["native_observable_chunk_failure_releases_prior_and_current_lines",
+  FailureQ[mockFailure] && mockMarchCalls === 1 && mockPairCalls === 2 &&
+    mockPairIdentities === {{"mock-1"}, {"mock-2"}} &&
+    DuplicateFreeQ[mockPairRoots] &&
+    StringEndsQ[mockPairRoots[[1]], ":integrals:chunk:1"] &&
+    StringEndsQ[mockPairRoots[[2]], ":integrals:chunk:2"] &&
+    Sort[mockReleasedLines] === {"line:mock-1", "line:mock-2"} &&
+    Sort[mockReleasedStates] ===
+      {"transport:mock-lower", "transport:mock-upper"}];
+
+beforeRun = sessionStats[];
 run = If[FailureQ[atlas], atlas, catchDE2[
   DiffExp2`NativeTransport`RunNativeTransportObservableBatch[
     atlas, observables, x, "MaxRefinementSteps" -> 1]]];
+afterRun = sessionStats[];
 results = If[AssociationQ[run], Lookup[run, "Results", {}], {}];
 assert["native_observable_batch_marches_once_and_preserves_request_order",
   AssociationQ[run] &&
     Lookup[run, "Type", None] ===
       "DiffExp2NativeTransportObservableBatch" &&
     Lookup[run, "NativeMarches", 0] === 2 &&
-    Lookup[results, "RequestIndex"] === {0, 1, 2, 3} &&
+    Lookup[results, "RequestIndex"] === {0, 1, 2, 3, 4} &&
     Lookup[results, "Identity"] ===
-      {"integral", "lower-limit", "upper-limit", "polar-integral"} &&
+      {"integral", "lower-limit", "upper-limit", "polar-integral",
+       "second-integral"} &&
+    run["NativeSummary", "PairCalls"] === 3 &&
+    run["NativeSummary", "Pair", "ChunkCount"] === 3 &&
+    Lookup[afterRun, "transport_pair_contractions", -1] ===
+      Lookup[beforeRun, "transport_pair_contractions", 0] + 3 &&
+    Lookup[afterRun, "transport_arm_marches", -1] ===
+      Lookup[beforeRun, "transport_arm_marches", 0] + 2 &&
     atlas["TargetCompleteMax"] === 0 &&
     atlas["Request", "EpsWindow", "CompleteMax"] === 1 &&
     (* The polar integral reserves one source order for its possible
@@ -137,24 +226,27 @@ exportedRun = If[AssociationQ[run], catchDE2[
   run];
 exportedResults = If[AssociationQ[exportedRun],
   Lookup[exportedRun, "ExportedResults", {}], {}];
-lineValue = If[Length[exportedResults] === 4,
+lineValue = If[Length[exportedResults] === 5,
   exportedResults[[1, "Value"]], None];
-lowerValue = If[Length[exportedResults] === 4,
+lowerValue = If[Length[exportedResults] === 5,
   exportedResults[[2, "Value"]], None];
-upperValue = If[Length[exportedResults] === 4,
+upperValue = If[Length[exportedResults] === 5,
   exportedResults[[3, "Value"]], None];
-polarValue = If[Length[exportedResults] === 4,
+polarValue = If[Length[exportedResults] === 5,
   exportedResults[[4, "Value"]], None];
-integralCertification = If[Length[exportedResults] === 4,
+secondLineValue = If[Length[exportedResults] === 5,
+  exportedResults[[5, "Value"]], None];
+integralCertification = If[Length[exportedResults] === 5,
   KeyTake[exportedResults[[1]],
     {"Scope", "ErrorGuarantee", "ErrorEnvelope"}], None];
-polarCertification = If[Length[exportedResults] === 4,
+polarCertification = If[Length[exportedResults] === 5,
   KeyTake[exportedResults[[4]],
     {"Scope", "ErrorGuarantee", "ErrorEnvelope"}], None];
 assert["native_observable_batch_contracts_integrals_polar_order_and_endpoints",
   AssociationQ[exportedRun] &&
-    Lookup[exportedRun, "CompatibilityExports", 0] === 4 &&
-    AllTrue[{lineValue, lowerValue, upperValue, polarValue},
+    Lookup[exportedRun, "CompatibilityExports", 0] === 5 &&
+    AllTrue[{lineValue, lowerValue, upperValue, polarValue,
+        secondLineValue},
       DiffExp2`EpsSeries`ESQ] &&
     TrueQ[Abs[N[DiffExp2`EpsSeries`ESCoefficient[lineValue, 0] - 1/2,
       30]] < 10^-20] &&
@@ -163,6 +255,8 @@ assert["native_observable_batch_contracts_integrals_polar_order_and_endpoints",
     TrueQ[Abs[N[DiffExp2`EpsSeries`ESCoefficient[upperValue, 0] - 1,
       30]] < 10^-20] &&
     TrueQ[Abs[N[DiffExp2`EpsSeries`ESCoefficient[polarValue, -1] - 1/2,
+      30]] < 10^-20] &&
+    TrueQ[Abs[N[DiffExp2`EpsSeries`ESCoefficient[secondLineValue, 0] - 1/2,
       30]] < 10^-20]];
 assert["native_observable_batch_exports_compact_line_certification_only_for_integrals",
   AssociationQ[integralCertification] &&

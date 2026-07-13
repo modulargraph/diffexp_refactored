@@ -12,7 +12,7 @@ PrepareNativeRegularIndependentArms::usage =
 RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 RunNativeTransportObservableBatch::usage =
-  "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
+  "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. ObservableContractionChunkSize defaults to 1 so prepared rows are sent to the native backend in bounded-memory deterministic chunks. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
 RunNativeTransportObservableBatchOwned::usage =
   "RunNativeTransportObservableBatchOwned[atlasSymbol,observables,var] is the ownership-taking batch entry point. It compacts atlasSymbol after preparing the observable rows, before allocating native transport states, so large Wolfram ChartSystems are no longer retained at the march peak.";
 SaveNativeTransportObservableBatchCheckpoint::usage =
@@ -294,12 +294,17 @@ nativeRationalEpsilonShift[expression_, physicalVar_Symbol] := Module[
   numeratorValuation - denominatorValuation];
 
 nativeIntegrandMinimumShift[cvec_List, physicalVar_Symbol,
-    dimension_Integer] := Module[{shifts},
+    dimension_Integer] := Module[{active, shifts},
   If[Length[cvec] =!= dimension,
     err["E8", <|"CoefficientCount" -> Length[cvec],
       "Dimension" -> dimension,
       "Detail" -> "native regular-arm integration requires one coefficient per physical component"|>]];
-  shifts = nativeRationalEpsilonShift[#, physicalVar] & /@ cvec;
+  (* A structurally exact zero has no valuation and must not force the
+     minimum back to eps^0.  Inexact zeros remain active so an uncertain
+     coefficient cannot silently relax the honest source window. *)
+  active = Select[cvec, !TrueQ[FreeQ[#, _?InexactNumberQ] &&
+        PossibleZeroQ[Together[#]]] &];
+  shifts = nativeRationalEpsilonShift[#, physicalVar] & /@ active;
   If[shifts === {}, 0, Min[shifts]]];
 
 exactRationalString[value_, label_String] := Module[{canonical},
@@ -554,13 +559,41 @@ nativeBasisOwner[basis_Association] := Module[{owner},
 SetAttributes[nativeCatchDE2, HoldFirst];
 nativeCatchDE2[expression_] := Catch[expression, "DiffExp2Error"];
 
-nativeAcbCasePFailureQ[failure_] := Module[{needle},
+(* An Acb regular-singular basis is first attempted as a capability probe.
+   CASE-P and exact multi-tag sources deliberately fail that probe before the
+   Rational shadow is selected.  DE2Error prints before throwing, so a plain
+   Catch makes a successfully recovered probe look like a terminal error.
+   Buffer Print only across this narrow probe.  The caller discards precisely
+   the expected DE2Error record and replays every other progress/debug print;
+   unrecognized failures replay the complete buffer before remaining loud. *)
+SetAttributes[nativeCatchDE2Buffered, HoldFirst];
+nativeCatchDE2Buffered[expression_] := Module[{records = {}, result},
+  result = Block[{Print = Function[Null,
+      AppendTo[records, HoldComplete[##]], HoldAllComplete]},
+    nativeCatchDE2[expression]];
+  {result, records}];
+
+nativeReplayPrintRecord[HoldComplete[args___]] := Print[args];
+nativeReplayPrintRecords[records_List] :=
+  Scan[nativeReplayPrintRecord, records];
+
+$nativeAcbRationalShadowFailureNeedles = {
+  "native Acb regular-singular SCC execution rejects exact CASE-P collisions",
+  "native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source"};
+
+nativeAcbRationalShadowTriggerTextQ[text_String] := AnyTrue[
+  $nativeAcbRationalShadowFailureNeedles, StringContainsQ[text, #] &];
+
+nativeAcbShadowTriggerPrintRecordQ[record_] :=
+  MatchQ[record,
+    HoldComplete["DiffExp2 error ", _String, ": ", _String]] &&
+  !FreeQ[record,
+    text_String /; nativeAcbRationalShadowTriggerTextQ[text], Infinity];
+
+nativeAcbCasePFailureQ[failure_] := Module[{},
   If[!FailureQ[failure], Return[False, Module]];
-  needle = {
-    "native Acb regular-singular SCC execution rejects exact CASE-P collisions",
-    "native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source"};
   !FreeQ[Unevaluated[failure],
-    text_String /; AnyTrue[needle, StringContainsQ[text, #] &], Infinity]];
+    text_String /; nativeAcbRationalShadowTriggerTextQ[text], Infinity]];
 
 nativeShadowColumn[source_Association, targetSCC_Association,
     shadowIdentity_String, system_Association] := Module[
@@ -667,7 +700,8 @@ nativeRationalShadowBasis[system_Association, req_Association, threads_,
 nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
-   sequence, components, built, expectedTypes, targetSCC, attempt},
+   sequence, components, built, expectedTypes, targetSCC, attempt,
+   probePrints, shadowDecision},
   If[regular,
     built = DiffExp2`Solve`SolveNativeRegularBasis[
       system, req, threads];
@@ -686,13 +720,33 @@ nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
        It accepts only a certified exact affine-Jordan block DAG (including
        one SCC) and propagates every unsupported/CASE-P failure unchanged. *)
     targetSCC = DiffExp2`Solve`PrepareNativeSCCComposite[system, req];
-    attempt = nativeCatchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
-      system, req, threads]];
-    built = Which[
-      !FailureQ[attempt], attempt,
-      nativeAcbCasePFailureQ[attempt],
-        nativeRationalShadowBasis[system, req, threads, targetSCC],
-      True, Throw[attempt, "DiffExp2Error"]];
+    shadowDecision =
+      DiffExp2`Solve`Private`sccNativeCachedRationalShadowDecision[
+        system, req, targetSCC];
+    If[TrueQ[shadowDecision["RequiresRationalShadow"]],
+      (* The collision-bound producer certificate selects the exact route for
+         a CASE-P schedule or identity-frame polar source.  Build the shadow
+         directly: no speculative Acb columns are executed or discarded. *)
+      built = nativeRationalShadowBasis[
+        system, req, threads, targetSCC];
+      built = Join[built, <|"NativeSummary" -> Join[
+        Lookup[built, "NativeSummary", <||>], <|
+          "selection_capability" ->
+            "producer-certified-proactive-rational-shadow-v1",
+          "selection_certificate" ->
+            shadowDecision["Certificate"]|>]|>],
+      {attempt, probePrints} = nativeCatchDE2Buffered[
+        DiffExp2`Solve`SolveNativeSCCBasis[system, req, threads]];
+      built = Which[
+        !FailureQ[attempt],
+          nativeReplayPrintRecords[probePrints]; attempt,
+        nativeAcbCasePFailureQ[attempt],
+          nativeReplayPrintRecords[
+            Select[probePrints, !nativeAcbShadowTriggerPrintRecordQ[#] &]];
+          nativeRationalShadowBasis[system, req, threads, targetSCC],
+        True,
+          nativeReplayPrintRecords[probePrints];
+          Throw[attempt, "DiffExp2Error"]]];
     expectedTypes = {"DiffExp2NativeSCCBasis"}];
   If[!AssociationQ[built] ||
       !MemberQ[expectedTypes, Lookup[built, "Type", None]] ||
@@ -845,8 +899,8 @@ nativeBasisEnvelopeShape[basis_Association] := Module[
     "TWindow" -> <|"CompleteMax" -> tMax|>,
     "Dimension" -> First[dimensions]|>];
 
-nativePreparedArmRows[atlas_Association, data_Association, cvec_List,
-    var_Symbol] := Module[{systems, bases, shapes, rows},
+nativeArmRowRecipes[atlas_Association, data_Association] := Module[
+  {systems, bases, shapes, charts},
   systems = data["ChartSystems"];
   bases = Rest[data["Bases"]];
   shapes = Prepend[
@@ -860,10 +914,38 @@ nativePreparedArmRows[atlas_Association, data_Association, cvec_List,
     err["E6", <|"ChartCount" -> Length[systems],
       "ShapeCount" -> Length[shapes],
       "Detail" -> "native arm row envelopes do not reproduce its chart chain"|>]];
-  rows = MapThread[DiffExp2`Solve`PrepareNativeRationalRow[
-      #1, #2, cvec, var,
-      <|"domain" -> atlas["Domain"], "symbols" -> {}|>] &,
-    {systems, shapes}];
+  (* PrepareNativeRationalRow consumes only this small geometric chart
+     projection.  Capturing it before atlas compaction lets observable rows
+     be constructed one tile at a time after the native march without
+     retaining the full chart systems or solved bases. *)
+  charts = KeyTake[#, {"SystemSize", "ChartMap", "ChartVar", "Center",
+        "Radius", "Prescriptions"}] & /@ systems;
+  MapThread[<|"Chart" -> #1, "Shape" -> #2|> &, {charts, shapes}]];
+
+nativePrepareArmRecipeRow[recipe_Association, cvec_List,
+    var_Symbol, domain_String] := Module[{row},
+  If[Sort[Keys[recipe]] =!= {"Chart", "Shape"} ||
+      !AssociationQ[recipe["Chart"]] ||
+      !AssociationQ[recipe["Shape"]],
+    err["E6", <|"Detail" ->
+      "lazy native integrand-row recipe is malformed"|>]];
+  row = DiffExp2`Solve`PrepareNativeRationalRow[
+    recipe["Chart"], recipe["Shape"], cvec, var,
+    <|"domain" -> domain, "symbols" -> {}|>];
+  If[!AssociationQ[row],
+    err["E5", <|"Detail" ->
+      "lazy native integrand-row preparation returned a malformed row"|>]];
+  row];
+
+nativeDropRationalMultiplierPreparationCache[] := Module[{},
+  DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
+  Null];
+
+nativePreparedArmRows[atlas_Association, data_Association, cvec_List,
+    var_Symbol] := Module[{recipes, rows},
+  recipes = nativeArmRowRecipes[atlas, data];
+  rows = nativePrepareArmRecipeRow[#, cvec, var, atlas["Domain"]] & /@
+    recipes;
   If[!AllTrue[rows, AssociationQ],
     err["E5", <|"Detail" ->
       "native arm integrand-row preparation returned a malformed row"|>]];
@@ -1303,20 +1385,23 @@ nativeOrderedObservableOutputs[raw_, expected_List, session_String,
 nativeBatchObservable[raw_, dimension_Integer] := Module[
   {baseKeys = {"Operation", "Identity", "CheckpointIdentity",
       "CoefficientVector", "Epsilon"}, keys, operation, epsilon,
-   tailPolicy},
+   tailPolicy, divergentCancellation, integrateKeys},
   If[!AssociationQ[raw],
     err["E8", <|"Observable" -> raw,
       "Detail" -> "native transport batch observables must be associations"|>]];
   operation = Lookup[raw, "Operation", None];
   keys = Sort[Keys[raw]];
+  integrateKeys = Join[baseKeys,
+    Select[{"TailPolicy", "DivergentCancellation"},
+      KeyExistsQ[raw, #] &]];
   If[!MemberQ[{"integrate", "limitLower", "limitUpper"}, operation] ||
-      (operation === "integrate" && keys =!= Sort[baseKeys] &&
-        keys =!= Sort[Append[baseKeys, "TailPolicy"]]) ||
+      (operation === "integrate" && keys =!= Sort[integrateKeys]) ||
       (operation =!= "integrate" && keys =!= Sort[baseKeys]),
     err["E8", <|"Operation" -> operation, "Keys" -> Keys[raw],
-      "Detail" -> "native transport observables require exactly Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; only integrate accepts optional TailPolicy"|>]];
+      "Detail" -> "native transport observables require exactly Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; only integrate accepts optional TailPolicy and DivergentCancellation"|>]];
   epsilon = raw["Epsilon"];
   tailPolicy = Lookup[raw, "TailPolicy", "stored"];
+  divergentCancellation = Lookup[raw, "DivergentCancellation", None];
   If[!nativeNonemptyStringQ[raw["Identity"]] ||
       !nativeNonemptyStringQ[raw["CheckpointIdentity"]] ||
       !ListQ[raw["CoefficientVector"]] ||
@@ -1329,42 +1414,116 @@ nativeBatchObservable[raw_, dimension_Integer] := Module[
       !TrueQ[epsilon["Min"] <= epsilon["RequiredCompleteMax"] <=
         epsilon["Max"]] ||
       (operation === "integrate" &&
-        !MemberQ[{"stored", "attempt", "require"}, tailPolicy]),
+        (!MemberQ[{"stored", "attempt", "require"}, tailPolicy] ||
+         (divergentCancellation =!= None &&
+          (!AssociationQ[divergentCancellation] ||
+           Sort[Keys[divergentCancellation]] =!=
+             Sort[{"Mode", "RelativeTolerance", "Provenance"}] ||
+           Lookup[divergentCancellation, "Mode", None] =!=
+             "bounded-relative-acb" ||
+           !nativeNonemptyStringQ[Lookup[divergentCancellation,
+             "RelativeTolerance", None]] ||
+           !nativeNonemptyStringQ[Lookup[divergentCancellation,
+             "Provenance", None]])))),
     err["E8", <|"Identity" -> Lookup[raw, "Identity", None],
       "Operation" -> operation,
       "Detail" -> "native transport observable identities, coefficient dimension, epsilon window, or tail policy are malformed"|>]];
-  <|"Operation" -> operation, "Identity" -> raw["Identity"],
+  Join[<|"Operation" -> operation, "Identity" -> raw["Identity"],
     "CheckpointIdentity" -> raw["CheckpointIdentity"],
     "CoefficientVector" -> raw["CoefficientVector"],
-    "Epsilon" -> epsilon, "TailPolicy" -> tailPolicy|>];
+    "Epsilon" -> epsilon, "TailPolicy" -> tailPolicy|>,
+    If[divergentCancellation === None, <||>,
+      <|"DivergentCancellation" -> divergentCancellation|>]]];
 
-nativePrepareBatchObservable[observable_Association,
-    prepareRows_] := Module[{lowerRows = {}, upperRows = {}, relevant,
-   shift, coefficients = observable["CoefficientVector"]},
-  Switch[observable["Operation"],
-    "integrate",
-      lowerRows = prepareRows["lower", coefficients];
-      upperRows = prepareRows["upper", coefficients],
-    "limitLower",
-      lowerRows = prepareRows["lower", coefficients],
-    "limitUpper",
-      upperRows = prepareRows["upper", coefficients]];
-  relevant = Join[lowerRows, upperRows];
-  If[relevant === {},
-    err["E6", <|"Identity" -> observable["Identity"],
-      "Detail" -> "native transport observable prepared no retained chart row"|>]];
-  shift = nativePreparedRowsMinimumShift[relevant];
-  Join[observable, <|"LowerRows" -> lowerRows,
-    "UpperRows" -> upperRows, "MinimumEpsilonShift" -> shift|>]];
+nativePrepareBatchObservable[observable_Association, var_Symbol,
+    dimension_Integer] := Module[
+  {shift, coefficients = observable["CoefficientVector"]},
+  (* This is deliberately a metadata-only prepass.  Eagerly preparing every
+     chart row here used to retain both the rows and SectorSeries multiplier
+     cache entries throughout the march, defeating native tile streaming. *)
+  shift = nativeIntegrandMinimumShift[coefficients, var, dimension];
+  Append[observable, "MinimumEpsilonShift" -> shift]];
 
-nativeBatchReleasePublished[states_, pair_, lowerEndpoints_,
-    upperEndpoints_] := Module[{lines, endpoints},
-  lines = If[AssociationQ[pair], Lookup[pair, "lines", {}], {}];
-  endpoints = Join[
-    If[AssociationQ[lowerEndpoints],
-      Lookup[lowerEndpoints, "endpoints", {}], {}],
-    If[AssociationQ[upperEndpoints],
-      Lookup[upperEndpoints, "endpoints", {}], {}]];
+nativePairStreamObservableMetadata[observable_Association] :=
+  Join[<|"Identity" -> observable["Identity"],
+    "CheckpointIdentity" -> observable["CheckpointIdentity"],
+    "Epsilon" -> observable["Epsilon"],
+    "TailPolicy" -> "stored"|>,
+    If[KeyExistsQ[observable, "DivergentCancellation"],
+      <|"DivergentCancellation" ->
+        observable["DivergentCancellation"]|>, <||>]];
+
+nativeContractStoredPairObservableStreamed[lowerState_Association,
+    upperState_Association, observable_Association,
+    lowerRecipes_List, upperRecipes_List, var_Symbol, domain_String,
+    checkpointRoot_String] := Module[
+  {stream = None, response, row = None, completed = False, output,
+   tag = Unique["nativePairTileStream"], cleanup},
+  cleanup[] := Module[{},
+    Clear[row];
+    nativeDropRationalMultiplierPreparationCache[];
+    If[AssociationQ[stream] && !completed,
+      Quiet[DiffExp2`CppBackend`AbortPersistentTransportPairObservableStream[
+        stream]]];
+    Null];
+  output = Catch[
+    CheckAbort[Catch[
+      stream =
+        DiffExp2`CppBackend`BeginPersistentTransportPairObservableStream[
+          lowerState, upperState,
+          nativePairStreamObservableMetadata[observable],
+          checkpointRoot];
+      If[FailureQ[stream] || !AssociationQ[stream] ||
+          Lookup[stream, "status", "error"] =!= "ok",
+        Throw[stream, tag]];
+      Do[
+        row = nativePrepareArmRecipeRow[lowerRecipes[[tile]],
+          observable["CoefficientVector"], var, domain];
+        response =
+          DiffExp2`CppBackend`AddPersistentTransportPairObservableStreamTile[
+            stream, "lower", tile - 1, row];
+        Clear[row];
+        nativeDropRationalMultiplierPreparationCache[];
+        If[FailureQ[response] || !AssociationQ[response] ||
+            Lookup[response, "status", "error"] =!= "ok",
+          Throw[response, tag]],
+        {tile, Length[lowerRecipes]}];
+      Do[
+        row = nativePrepareArmRecipeRow[upperRecipes[[tile]],
+          observable["CoefficientVector"], var, domain];
+        response =
+          DiffExp2`CppBackend`AddPersistentTransportPairObservableStreamTile[
+            stream, "upper", tile - 1, row];
+        Clear[row];
+        nativeDropRationalMultiplierPreparationCache[];
+        If[FailureQ[response] || !AssociationQ[response] ||
+            Lookup[response, "status", "error"] =!= "ok",
+          Throw[response, tag]],
+        {tile, Length[upperRecipes]}];
+      response =
+        DiffExp2`CppBackend`FinishPersistentTransportPairObservableStream[
+          stream];
+      If[AssociationQ[response] &&
+          Lookup[response, "status", "error"] === "ok",
+        completed = True];
+      response,
+      tag], cleanup[]; Abort[]],
+    "DiffExp2Error", Function[{failure, errorTag},
+      cleanup[]; Throw[failure, errorTag]]];
+  cleanup[];
+  output];
+
+nativeBatchReleasePublished[states_, pairs_, lowerEndpointBatches_,
+    upperEndpointBatches_] := Module[
+  {pairList, lowerList, upperList, lines, endpoints},
+  pairList = Select[If[ListQ[pairs], pairs, {pairs}], AssociationQ];
+  lowerList = Select[If[ListQ[lowerEndpointBatches],
+    lowerEndpointBatches, {lowerEndpointBatches}], AssociationQ];
+  upperList = Select[If[ListQ[upperEndpointBatches],
+    upperEndpointBatches, {upperEndpointBatches}], AssociationQ];
+  lines = Flatten[Lookup[pairList, "lines", {}], 1];
+  endpoints = Flatten[Join[Lookup[lowerList, "endpoints", {}],
+    Lookup[upperList, "endpoints", {}]], 1];
   Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLineIntegral[#]] &,
     Select[lines, AssociationQ]];
   Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentEndpoint[#]] &,
@@ -1373,6 +1532,12 @@ nativeBatchReleasePublished[states_, pair_, lowerEndpoints_,
     Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentTransportArm[#]] &,
       Select[Values[states], AssociationQ]]];
   Null];
+
+nativeChunkedObservableSummary[responses_List, chunkSize_Integer,
+    resultKey_String] := If[responses === {}, None, <|
+  "ChunkSize" -> chunkSize,
+  "ChunkCount" -> Length[responses],
+  "Chunks" -> (KeyDrop[#, {"status", resultKey}] & /@ responses)|>];
 
 nativeStreamTransportArm[atlas_Association, data_Association,
     arm_String, epsilon_Association, checkpointRoot_String,
@@ -1424,6 +1589,7 @@ nativeStreamTransportArm[atlas_Association, data_Association,
 
 Options[RunNativeTransportObservableBatch] = {
   "MaxRefinementSteps" -> 2,
+  "ObservableContractionChunkSize" -> 1,
   "ConsumeReceivingBases" -> False,
   "AtlasCompactor" -> Identity};
 
@@ -1431,15 +1597,21 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     var_Symbol, OptionsPattern[]] := Module[
   {atlas = atlasIn,
    maxSteps = OptionValue["MaxRefinementSteps"], normalized, identities,
+   contractionChunkSize =
+     OptionValue["ObservableContractionChunkSize"],
    checkpoints, prepared, sourceMin, availableMax, projectedRequired,
    contractionRequired, statePublicRequired,
    matchRequired, preparedShift, declaredShift, epsilon, refinement,
    lowerBasis, upperBasis, checkpointRoot, march, states = <||>,
    lowerState, upperState, integrates, lowerLimits, upperLimits,
-   pair = None, lowerEndpoints = None, upperEndpoints = None,
+   pairResponses = {}, lowerEndpointResponses = {},
+   upperEndpointResponses = {}, chunkResponse, chunkRecords,
+   observableChunks, chunk, chunkIndices, integrateIndices,
+   lowerLimitIndices, upperLimitIndices, legacyObservables,
+   endpointObservables, lowerRowRecipes, upperRowRecipes, row,
    pairRecords = {}, lowerRecords = {}, upperRecords = {},
    pairByIdentity = <||>, lowerByIdentity = <||>, upperByIdentity = <||>,
-   resultRecords, prepareRows, output, cacheMemoryBefore,
+   resultRecords, output, cacheMemoryBefore,
    cacheMemoryAfter, workingAtlas = atlas,
    atlasCompactor = OptionValue["AtlasCompactor"],
    consumeReceivingBases = TrueQ[OptionValue["ConsumeReceivingBases"]],
@@ -1450,6 +1622,11 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     err["E8", <|"AtlasType" -> Lookup[atlas, "Type", None],
       "MaxRefinementSteps" -> maxSteps,
       "Detail" -> "native transport observable batch received a malformed atlas or refinement bound"|>]];
+  If[!IntegerQ[contractionChunkSize] ||
+      !TrueQ[1 <= contractionChunkSize <= 32],
+    err["E8", <|"ObservableContractionChunkSize" ->
+      contractionChunkSize,
+      "Detail" -> "native observable contraction chunk size must be an integer from 1 through 32"|>]];
   normalized = nativeBatchObservable[#, atlas["Dimension"]] & /@
     observables;
   identities = Lookup[normalized, "Identity"];
@@ -1463,13 +1640,14 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     Return[<|"Type" -> "DiffExp2NativeTransportObservableBatch",
       "Atlas" -> atlas, "States" -> <||>, "Results" -> {},
       "NativeMarches" -> 0, "CompatibilityExports" -> 0|>, Module]];
-  prepareRows[arm_String, coefficients_List] :=
-    prepareRows[arm, coefficients] = Switch[arm,
-      "lower", nativePreparedArmRows[atlas, atlas["Lower"],
-        coefficients, var],
-      "upper", nativePreparedArmRows[atlas, atlas["Upper"],
-        coefficients, var]];
-  prepared = nativePrepareBatchObservable[#, prepareRows] & /@ normalized;
+  (* Capture only the chart geometry and honest local rectangle needed to
+     prepare one projected row.  The complete chart systems/bases may then
+     be compacted before the march, while no prepared multiplier or row is
+     retained in Wolfram. *)
+  lowerRowRecipes = nativeArmRowRecipes[atlas, atlas["Lower"]];
+  upperRowRecipes = nativeArmRowRecipes[atlas, atlas["Upper"]];
+  prepared = nativePrepareBatchObservable[#, var, atlas["Dimension"]] & /@
+    normalized;
   deferredReceivingBases = TrueQ[
     Lookup[atlas, "DeferredReceivingBases", False]];
   workingAtlas = If[deferredReceivingBases, atlas, Join[atlas, <|
@@ -1484,13 +1662,13 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
      atlas into the evaluated body, so neither the caller compactor nor cache
      clearing can reclaim ChartSystems before the native march allocation. *)
   atlas = workingAtlas;
-  Clear[prepareRows];
   If[Head[atlasCompactor] === Function,
     nativeStageTiming["atlas-owner-compacted"]];
-  (* Every integrand row is now self-contained and every chart/SCC/local
-     needed by the march is strongly retained in C++.  Drop only duplicate
+  (* The compact row recipes are self-contained and every chart/SCC/local
+     needed by the march is strongly retained in C++.  Drop duplicate
      Wolfram preparation memo state before the two-arm allocation peak;
-     never close a session or release an opaque native owner here. *)
+     rows themselves will be prepared only after the march, one tile at a
+     time.  Never close a session or release an opaque native owner here. *)
   cacheMemoryBefore = MemoryInUse[];
   If[!deferredReceivingBases,
     DiffExp2`Solve`DropWolframPreparationCaches[]];
@@ -1543,16 +1721,23 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     Lookup[Rest[workingAtlas["Lower", "Bases"]], "Columns", {}]];
   upperBasis = If[deferredReceivingBases, {},
     Lookup[Rest[workingAtlas["Upper", "Bases"]], "Columns", {}]];
-  checkpointRoot = nativeCheckpointIdentity["de2-native-observable-batch-", {
-    workingAtlas["PlanCheckpointIdentity"], workingAtlas["Domain"],
-    nativeOpaqueCheckpoint[workingAtlas["Anchor"], "anchor"], epsilon,
-    refinement, Map[KeyTake[#, {"Operation", "Identity",
-      "CheckpointIdentity", "Epsilon", "TailPolicy",
-      "MinimumEpsilonShift"}] &,
-      prepared],
-    Map[Lookup[#, "exact_identity"] &,
-      Flatten[Join[Lookup[prepared, "LowerRows"],
-        Lookup[prepared, "UpperRows"]], 1]]}];
+  (* Bind the exact physical observable before any row exists.  Each native
+     add_tile additionally binds the actual prepared-row identity, so the
+     final line provenance proves both this physical request and every lazy
+     chart specialization without requiring an eager all-row identity list. *)
+  checkpointRoot = nativeCheckpointIdentity["de2-native-observable-batch-", <|
+    "schema" ->
+      "diffexp2-native-observable-lazy-row-checkpoint-identity-v1",
+    "plan_checkpoint_identity" ->
+      workingAtlas["PlanCheckpointIdentity"],
+    "domain" -> workingAtlas["Domain"],
+    "anchor_checkpoint_identity" ->
+      nativeOpaqueCheckpoint[workingAtlas["Anchor"], "anchor"],
+    "epsilon" -> epsilon, "refinement" -> refinement,
+    "observables" -> Map[KeyTake[#, {"Operation", "Identity",
+      "CheckpointIdentity", "CoefficientVector", "Epsilon",
+      "TailPolicy", "MinimumEpsilonShift",
+      "DivergentCancellation"}] &, prepared]|>];
   output = Catch[
     march = If[deferredReceivingBases,
       streamedArms = <|
@@ -1603,62 +1788,153 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       atlasCompactor[workingAtlas];
       If[deferredReceivingBases,
         DiffExp2`Solve`DropWolframPreparationCaches[]]];
-    integrates = Select[prepared, #["Operation"] === "integrate" &];
-    lowerLimits = Select[prepared, #["Operation"] === "limitLower" &];
-    upperLimits = Select[prepared, #["Operation"] === "limitUpper" &];
+    integrateIndices = Select[Range[Length[prepared]],
+      prepared[[#, "Operation"]] === "integrate" &];
+    lowerLimitIndices = Select[Range[Length[prepared]],
+      prepared[[#, "Operation"]] === "limitLower" &];
+    upperLimitIndices = Select[Range[Length[prepared]],
+      prepared[[#, "Operation"]] === "limitUpper" &];
+    integrates = prepared[[integrateIndices]];
+    lowerLimits = prepared[[lowerLimitIndices]];
+    upperLimits = prepared[[upperLimitIndices]];
     If[integrates =!= {},
       nativeStageTiming["paired-contraction-start observables=",
         Length[integrates]];
-      pair = DiffExp2`CppBackend`ContractPersistentTransportPairObservables[
-        lowerState, upperState,
-        Map[<|"Identity" -> #["Identity"],
-            "CheckpointIdentity" -> #["CheckpointIdentity"],
-            "LowerIntegrandRows" -> #["LowerRows"],
-            "UpperIntegrandRows" -> #["UpperRows"],
-            "Epsilon" -> #["Epsilon"],
-            "TailPolicy" -> #["TailPolicy"]|> &, integrates],
-        checkpointRoot <> ":integrals"];
+      observableChunks = Partition[integrateIndices,
+        UpTo[contractionChunkSize]];
+      Do[
+        chunkIndices = observableChunks[[chunkIndex]];
+        chunk = prepared[[chunkIndices]];
+        If[Length[chunk] === 1 &&
+            First[chunk]["TailPolicy"] === "stored",
+          (* The default singleton path never owns more than one prepared
+             row: prepare, synchronously add, clear the row and multiplier
+             memo, then advance to the next tile. *)
+          chunkResponse = nativeContractStoredPairObservableStreamed[
+            lowerState, upperState, First[chunk], lowerRowRecipes,
+            upperRowRecipes, var, workingAtlas["Domain"],
+            checkpointRoot <> ":integrals:chunk:" <>
+              ToString[chunkIndex]],
+          (* Tail certification still uses the legacy atomic batch API.
+             Likewise, an explicit chunk size above one preserves its
+             requested batched behavior.  Only this bounded chunk is eager. *)
+          legacyObservables = Map[Function[observable,
+            Module[{lowerRows, upperRows},
+              lowerRows = Map[Function[recipe,
+                row = nativePrepareArmRecipeRow[recipe,
+                  observable["CoefficientVector"], var,
+                  workingAtlas["Domain"]];
+                nativeDropRationalMultiplierPreparationCache[];
+                row], lowerRowRecipes];
+              upperRows = Map[Function[recipe,
+                row = nativePrepareArmRecipeRow[recipe,
+                  observable["CoefficientVector"], var,
+                  workingAtlas["Domain"]];
+                nativeDropRationalMultiplierPreparationCache[];
+                row], upperRowRecipes];
+              Join[<|"Identity" -> observable["Identity"],
+                "CheckpointIdentity" ->
+                  observable["CheckpointIdentity"],
+                "LowerIntegrandRows" -> lowerRows,
+                "UpperIntegrandRows" -> upperRows,
+                "Epsilon" -> observable["Epsilon"],
+                "TailPolicy" -> observable["TailPolicy"]|>,
+                If[KeyExistsQ[observable, "DivergentCancellation"],
+                  <|"DivergentCancellation" ->
+                    observable["DivergentCancellation"]|>, <||>]]]],
+            chunk];
+          chunkResponse =
+            DiffExp2`CppBackend`ContractPersistentTransportPairObservables[
+              lowerState, upperState, legacyObservables,
+              checkpointRoot <> ":integrals:chunk:" <>
+                ToString[chunkIndex]];
+          Clear[legacyObservables, row];
+          nativeDropRationalMultiplierPreparationCache[]];
+        (* Record even a malformed current response before validation: a
+           backend failure may still have published handles that the batch
+           failure path must release. *)
+        If[AssociationQ[chunkResponse],
+          AppendTo[pairResponses, chunkResponse]];
+        If[FailureQ[chunkResponse] || !AssociationQ[chunkResponse] ||
+            Lookup[chunkResponse, "status", "error"] =!= "ok",
+          err["E5", <|"BackendFailure" -> chunkResponse,
+            "ChunkIndex" -> chunkIndex,
+            "Detail" -> "native paired observable contraction chunk failed"|>]];
+        chunkRecords = nativeOrderedObservableOutputs[
+          chunkResponse, chunk, workingAtlas["Session"], "line"];
+        pairRecords = Join[pairRecords, chunkRecords],
+        {chunkIndex, Length[observableChunks]}];
       nativeStageTiming["paired-contraction-done"];
-      If[FailureQ[pair] || !AssociationQ[pair] ||
-          Lookup[pair, "status", "error"] =!= "ok",
-        err["E5", <|"BackendFailure" -> pair,
-          "Detail" -> "native paired observable contraction failed"|>]];
-      pairRecords = nativeOrderedObservableOutputs[
-        pair, integrates, workingAtlas["Session"], "line"];
       pairByIdentity = AssociationThread[Lookup[integrates, "Identity"],
         pairRecords]];
     If[lowerLimits =!= {},
-      lowerEndpoints =
-        DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[
-          lowerState,
-          Map[<|"Identity" -> #["Identity"],
-              "CheckpointIdentity" -> #["CheckpointIdentity"],
-              "IntegrandRow" -> Last[#["LowerRows"]],
-              "Epsilon" -> #["Epsilon"]|> &, lowerLimits],
-          checkpointRoot <> ":lower-endpoints"];
-      If[FailureQ[lowerEndpoints] || !AssociationQ[lowerEndpoints] ||
-          Lookup[lowerEndpoints, "status", "error"] =!= "ok",
-        err["E5", <|"BackendFailure" -> lowerEndpoints,
-          "Detail" -> "native lower endpoint observable batch failed"|>]];
-      lowerRecords = nativeOrderedObservableOutputs[
-        lowerEndpoints, lowerLimits, workingAtlas["Session"], "endpoint"];
+      observableChunks = Partition[lowerLimitIndices,
+        UpTo[contractionChunkSize]];
+      Do[
+        chunkIndices = observableChunks[[chunkIndex]];
+        chunk = prepared[[chunkIndices]];
+        endpointObservables = Map[Function[observable,
+          row = nativePrepareArmRecipeRow[Last[lowerRowRecipes],
+            observable["CoefficientVector"], var,
+            workingAtlas["Domain"]];
+          nativeDropRationalMultiplierPreparationCache[];
+          <|"Identity" -> observable["Identity"],
+            "CheckpointIdentity" -> observable["CheckpointIdentity"],
+            "IntegrandRow" -> row,
+            "Epsilon" -> observable["Epsilon"]|>], chunk];
+        chunkResponse =
+          DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[
+            lowerState, endpointObservables,
+            checkpointRoot <> ":lower-endpoints:chunk:" <>
+              ToString[chunkIndex]];
+        Clear[endpointObservables, row];
+        nativeDropRationalMultiplierPreparationCache[];
+        If[AssociationQ[chunkResponse],
+          AppendTo[lowerEndpointResponses, chunkResponse]];
+        If[FailureQ[chunkResponse] || !AssociationQ[chunkResponse] ||
+            Lookup[chunkResponse, "status", "error"] =!= "ok",
+          err["E5", <|"BackendFailure" -> chunkResponse,
+            "ChunkIndex" -> chunkIndex,
+            "Detail" -> "native lower endpoint observable chunk failed"|>]];
+        chunkRecords = nativeOrderedObservableOutputs[
+          chunkResponse, chunk, workingAtlas["Session"], "endpoint"];
+        lowerRecords = Join[lowerRecords, chunkRecords],
+        {chunkIndex, Length[observableChunks]}];
       lowerByIdentity = AssociationThread[Lookup[lowerLimits, "Identity"],
         lowerRecords]];
     If[upperLimits =!= {},
-      upperEndpoints =
-        DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[
-          upperState,
-          Map[<|"Identity" -> #["Identity"],
-              "CheckpointIdentity" -> #["CheckpointIdentity"],
-              "IntegrandRow" -> Last[#["UpperRows"]],
-              "Epsilon" -> #["Epsilon"]|> &, upperLimits],
-          checkpointRoot <> ":upper-endpoints"];
-      If[FailureQ[upperEndpoints] || !AssociationQ[upperEndpoints] ||
-          Lookup[upperEndpoints, "status", "error"] =!= "ok",
-        err["E5", <|"BackendFailure" -> upperEndpoints,
-          "Detail" -> "native upper endpoint observable batch failed"|>]];
-      upperRecords = nativeOrderedObservableOutputs[
-        upperEndpoints, upperLimits, workingAtlas["Session"], "endpoint"];
+      observableChunks = Partition[upperLimitIndices,
+        UpTo[contractionChunkSize]];
+      Do[
+        chunkIndices = observableChunks[[chunkIndex]];
+        chunk = prepared[[chunkIndices]];
+        endpointObservables = Map[Function[observable,
+          row = nativePrepareArmRecipeRow[Last[upperRowRecipes],
+            observable["CoefficientVector"], var,
+            workingAtlas["Domain"]];
+          nativeDropRationalMultiplierPreparationCache[];
+          <|"Identity" -> observable["Identity"],
+            "CheckpointIdentity" -> observable["CheckpointIdentity"],
+            "IntegrandRow" -> row,
+            "Epsilon" -> observable["Epsilon"]|>], chunk];
+        chunkResponse =
+          DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[
+            upperState, endpointObservables,
+            checkpointRoot <> ":upper-endpoints:chunk:" <>
+              ToString[chunkIndex]];
+        Clear[endpointObservables, row];
+        nativeDropRationalMultiplierPreparationCache[];
+        If[AssociationQ[chunkResponse],
+          AppendTo[upperEndpointResponses, chunkResponse]];
+        If[FailureQ[chunkResponse] || !AssociationQ[chunkResponse] ||
+            Lookup[chunkResponse, "status", "error"] =!= "ok",
+          err["E5", <|"BackendFailure" -> chunkResponse,
+            "ChunkIndex" -> chunkIndex,
+            "Detail" -> "native upper endpoint observable chunk failed"|>]];
+        chunkRecords = nativeOrderedObservableOutputs[
+          chunkResponse, chunk, workingAtlas["Session"], "endpoint"];
+        upperRecords = Join[upperRecords, chunkRecords],
+        {chunkIndex, Length[observableChunks]}];
       upperByIdentity = AssociationThread[Lookup[upperLimits, "Identity"],
         upperRecords]];
     resultRecords = MapIndexed[Function[{observable, position},
@@ -1679,15 +1955,20 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       "CompatibilityExports" -> 0,
       "NativeSummary" -> <|
         "March" -> KeyDrop[march, {"status", "states"}],
-        "Pair" -> If[AssociationQ[pair],
-          KeyDrop[pair, {"status", "lines"}], None],
-        "LowerEndpoints" -> If[AssociationQ[lowerEndpoints],
-          KeyDrop[lowerEndpoints, {"status", "endpoints"}], None],
-        "UpperEndpoints" -> If[AssociationQ[upperEndpoints],
-          KeyDrop[upperEndpoints, {"status", "endpoints"}], None]|>|>,
+        "PairCalls" -> Length[pairResponses],
+        "Pair" -> nativeChunkedObservableSummary[
+          pairResponses, contractionChunkSize, "lines"],
+        "LowerEndpointCalls" -> Length[lowerEndpointResponses],
+        "LowerEndpoints" -> nativeChunkedObservableSummary[
+          lowerEndpointResponses, contractionChunkSize, "endpoints"],
+        "UpperEndpointCalls" -> Length[upperEndpointResponses],
+        "UpperEndpoints" -> nativeChunkedObservableSummary[
+          upperEndpointResponses, contractionChunkSize, "endpoints"]|>|>,
     "DiffExp2Error", Function[{failure, tag},
-      nativeBatchReleasePublished[states, pair, lowerEndpoints,
-        upperEndpoints];
+      Clear[row, legacyObservables, endpointObservables];
+      nativeDropRationalMultiplierPreparationCache[];
+      nativeBatchReleasePublished[states, pairResponses,
+        lowerEndpointResponses, upperEndpointResponses];
       If[AssociationQ[streamedArms],
         Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
           Flatten[Rest[Lookup[#, "tile_sources", {}]] & /@
@@ -1697,11 +1978,14 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
 
 SetAttributes[RunNativeTransportObservableBatchOwned, HoldFirst];
 Options[RunNativeTransportObservableBatchOwned] = {
-  "MaxRefinementSteps" -> 2};
+  "MaxRefinementSteps" -> 2,
+  "ObservableContractionChunkSize" -> 1};
 RunNativeTransportObservableBatchOwned[owner_Symbol, observables_List,
     var_Symbol, OptionsPattern[]] :=
   RunNativeTransportObservableBatch[owner, observables, var,
     "MaxRefinementSteps" -> OptionValue["MaxRefinementSteps"],
+    "ObservableContractionChunkSize" ->
+      OptionValue["ObservableContractionChunkSize"],
     "ConsumeReceivingBases" -> True,
     "AtlasCompactor" -> Function[compactAtlas, owner = compactAtlas]];
 

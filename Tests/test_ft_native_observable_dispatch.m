@@ -185,6 +185,15 @@ assert["mixed dispatch plans both arms but invokes one native batch/export",
     mixed["NativeMarches"] === 2 &&
     mixed["CompatibilityExports"] === 4,
   {counts, mixed}];
+integrateObservables = Select[capturedObservables,
+  # ["Operation"] === "integrate" &];
+limitObservables = Select[capturedObservables,
+  MemberQ[{"limitLower", "limitUpper"}, # ["Operation"]] &];
+divergentPolicies = Lookup[integrateObservables,
+  "DivergentCancellation", Missing["NotFound"]];
+divergentProvenance = Quiet[Check[
+    ImportString[#, "RawJSON"] & /@
+      Lookup[divergentPolicies, "Provenance"], $Failed]];
 assert["atlas preparation receives every active non-direct vector and exact target",
   AssociationQ[capturedPrepare] &&
     capturedPrepare["TargetCompleteMax"] === 9 &&
@@ -207,7 +216,25 @@ assert["observable order and operation-specific epsilon windows are stable",
       {"stored", "stored"} &&
     Keys[capturedObservables[[1]]] ===
       {"Operation", "Identity", "CheckpointIdentity",
-       "CoefficientVector", "Epsilon", "TailPolicy"}];
+       "CoefficientVector", "Epsilon", "TailPolicy",
+       "DivergentCancellation"}];
+assert["FT integrate observables alone carry one explicit bounded cancellation policy",
+  Length[divergentPolicies] === 2 &&
+    Lookup[divergentPolicies, "Mode"] ===
+      {"bounded-relative-acb", "bounded-relative-acb"} &&
+    SameQ @@ Lookup[divergentPolicies, "RelativeTolerance"] &&
+    StringQ[divergentPolicies[[1, "RelativeTolerance"]]] &&
+    StringMatchQ[divergentPolicies[[1, "RelativeTolerance"]],
+      NumberString ~~ "e-24"] &&
+    SameQ @@ Lookup[divergentPolicies, "Provenance"] &&
+    FreeQ[limitObservables, "DivergentCancellation"] &&
+    ListQ[divergentProvenance] &&
+    divergentProvenance === ConstantArray[<|
+        "schema" -> "feynman-trick-divergent-cancellation-v1",
+        "producer" -> "DiffExp2`Tolerances`Tol",
+        "key" -> "LaurentLeadTol",
+        "exact_value" -> "1/1000000000000000000000000"|>, 2],
+  {divergentPolicies, divergentProvenance, limitObservables}];
 assert["high-shift integration is marched rather than unsafely pruned",
   capturedObservables[[-1, "Identity"]] === entries[[6, "Identity"]] &&
     capturedObservables[[-1, "Epsilon", "Min"]] === 8];
@@ -441,6 +468,40 @@ parsedPipeline = FeynmanTrick`DiffExp2Pipeline`Private`pipelineResult[
   <|"Schema" -> "definitions-only-plan"|>,
   <|"StandardOutput" -> syntheticOutput, "StandardError" -> "",
     "ExitCode" -> 0|>];
+positiveRaw = DiffExp2`EpsSeries`ESNew[-1,
+  {11, 22, 3 + 4 I, 5 - 6 I}];
+positiveCertification =
+  ft2NotApplicableCertification["direct", "direct"];
+legacyStepRow = Block[{epsOrder = 0},
+  ft2StepwiseRow["positive-output-fixture", 0, {1}, positiveRaw, 0,
+    positiveCertification]];
+legacyFinalRow = Block[{epsOrder = 0},
+  ft2FinalRow["positive-output-fixture", positiveRaw,
+    positiveCertification]];
+positiveStepRow = Block[{epsOrder = 2},
+  ft2StepwiseRow["positive-output-fixture", 0, {1}, positiveRaw, 0,
+    positiveCertification]];
+positiveFinalRow = Block[{epsOrder = 2},
+  ft2FinalRow["positive-output-fixture", positiveRaw,
+    positiveCertification]];
+incompleteRaw = DiffExp2`EpsSeries`ESNew[0, {1, 2}];
+incompleteStepRow = Block[{epsOrder = 2},
+  ft2StepwiseRow["incomplete-output-fixture", 0, {1}, incompleteRaw, 0,
+    positiveCertification]];
+incompleteFinalRow = Block[{epsOrder = 2},
+  ft2FinalRow["incomplete-output-fixture", incompleteRaw,
+    positiveCertification]];
+positiveSyntheticOutput = StringRiffle[{
+  ft2OutputLine["STEPWISE ", positiveStepRow],
+  ft2OutputLine["FINAL ", positiveFinalRow]}, "\n"];
+positiveParsedPipeline =
+  FeynmanTrick`DiffExp2Pipeline`Private`pipelineResult[
+    <|"Schema" -> "positive-definitions-only-plan"|>,
+    <|"StandardOutput" -> positiveSyntheticOutput,
+      "StandardError" -> "", "ExitCode" -> 0|>];
+complexCoefficientQ[value_, re_, im_] := AssociationQ[value] &&
+  TrueQ[Abs[N[value["Re"] - re, 30]] < 10^-20] &&
+  TrueQ[Abs[N[value["Im"] - im, 30]] < 10^-20];
 assert["STEPWISE printer retains one compact certification per master",
   ListQ[printedRows] && Length[printedRows] === 1 &&
     printedRows[[1, "Certification"]] === mixed["Certifications"][[1]] &&
@@ -465,6 +526,41 @@ assert["facade parser preserves certified stored and not-applicable records",
     parsedPipeline["Final", "Certification"] ===
       parsedPipeline["Stepwise"][[1, "Certification"]],
   parsedPipeline];
+assert["order-zero output retains the exact singleton-compatible shape",
+  AssociationQ[legacyStepRow] && AssociationQ[legacyFinalRow] &&
+    legacyStepRow["Coefficients"][[All, 1]] === {-1, 0} &&
+    Keys[legacyFinalRow] ===
+      {"Example", "Finite", "RawMinPower", "Certification"} &&
+    !KeyExistsQ[legacyFinalRow, "Coefficients"] &&
+    TrueQ[Abs[N[legacyFinalRow["Finite"] - 22, 30]] < 10^-20],
+  {legacyStepRow, legacyFinalRow}];
+assert["positive epsilon requests expose every STEPWISE and FINAL coefficient",
+  AssociationQ[positiveStepRow] && AssociationQ[positiveFinalRow] &&
+    positiveStepRow["Coefficients"][[All, 1]] === {-1, 0, 1, 2} &&
+    positiveFinalRow["Coefficients"][[All, 1]] === {-1, 0, 1, 2} &&
+    TrueQ[Abs[N[positiveFinalRow["Finite"] - 22, 30]] < 10^-20] &&
+    complexCoefficientQ[
+      positiveStepRow["Coefficients"][[3, 2]], 3, 4] &&
+    complexCoefficientQ[
+      positiveFinalRow["Coefficients"][[4, 2]], 5, -6],
+  {positiveStepRow, positiveFinalRow}];
+assert["output completeness fails explicitly below the requested epsilon top",
+  FailureQ[incompleteStepRow] && FailureQ[incompleteFinalRow] &&
+    incompleteStepRow["RequestedCompleteMax"] === 2 &&
+    incompleteStepRow["AvailableCompleteMax"] === 1 &&
+    incompleteFinalRow["RequestedCompleteMax"] === 2 &&
+    incompleteFinalRow["AvailableCompleteMax"] === 1,
+  {incompleteStepRow, incompleteFinalRow}];
+assert["facade parser preserves positive-order Laurent rows and complex encoding",
+  AssociationQ[positiveParsedPipeline] &&
+    positiveParsedPipeline["Status"] === "Succeeded" &&
+    positiveParsedPipeline["Stepwise"][[1, "Coefficients"]][[All, 1]] ===
+      {-1, 0, 1, 2} &&
+    positiveParsedPipeline["Final", "Coefficients"][[All, 1]] ===
+      {-1, 0, 1, 2} &&
+    complexCoefficientQ[
+      positiveParsedPipeline["Final", "Coefficients"][[3, 2]], 3, 4],
+  positiveParsedPipeline];
 
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> None];
 SetEnvironment["DE2_RECURRENCE_BACKEND" -> None];

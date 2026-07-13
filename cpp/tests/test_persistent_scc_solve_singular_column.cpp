@@ -248,6 +248,171 @@ json::object jordan_column_request(const std::string& session,
           {"metadata", jordan_metadata(checkpoint + ":target", pseudo)}}}}};
 }
 
+std::string prepare_regular_zero_chart(const std::string& session,
+                                       const std::string& key,
+                                       const std::string& identity) {
+  const auto response = request(std::string(R"json({
+    "schema":2,"op":"chart.prepare","session":")json") + session +
+    R"json(","key":")json" + key + R"json(","identity":")json" +
+    identity + R"json(",
+    "analytic":{
+      "geometry":{"center_exact":"0","scale_exact":"1",
+        "radius_exact":"2","infinite_radius":false,"prescriptions":[]},
+      "principal_matrix":[[{"exact":"0","proven_zero":true}]],
+      "native_scc_capabilities":{"regular":true,"identity_gauge":true,
+        "identity_v":true,"no_pseudo":true}},
+    "scc":{"components":[[0]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0],"coupling_depth":0},
+    "problem":{"domain":"rational","d":1,"fb":-3,"w":7,
+      "d_lags":[[{"s":0,"v":"1"}]],"denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],"val":[null]}],
+      "d0_inverse":"1","blocks":[[0]],
+      "assembly":{"identity":true,"poly":[],"rat":[],"val":[0]},
+      "chop_digits":0}
+  })json");
+  if (response.at("status") != "ok")
+    throw std::runtime_error(json::serialize(response));
+  return std::string(response.at("chart").as_string());
+}
+
+json::object regular_zero_run(bool seed) {
+  constexpr std::uint32_t nmax = 6;
+  constexpr std::uint32_t frame_width = 7;
+  json::array shifts;
+  json::array schedule;
+  for (std::uint32_t n = 0; n <= nmax; ++n) {
+    shifts.push_back(json::string(std::to_string(n)));
+    schedule.push_back(json::array{json::object{
+        {"case", n == 0 ? "R" : "T"},
+        {"da", std::to_string(n)}, {"db", "0"}}});
+  }
+  json::array initial;
+  for (std::uint32_t epsilon = 0; epsilon < frame_width; ++epsilon)
+    initial.push_back(seed && epsilon == 3 ? "1" : "0");
+  return json::object{{"nmax", nmax}, {"p", 0},
+      {"has_initial", seed}, {"adaptive_probe", false},
+      {"a_target", "0"}, {"b_target", "0"},
+      {"a_shift_min", 0}, {"a_shifts", std::move(shifts)},
+      {"schedule", std::move(schedule)}, {"initial", std::move(initial)},
+      {"initial_validity", json::array{seed ? json::value(3)
+                                             : json::value(nullptr)}},
+      {"source", nullptr}, {"return_u", false}};
+}
+
+json::object regular_zero_metadata(const std::string& checkpoint) {
+  auto result = metadata(checkpoint);
+  result.at("tag").as_object().at("a").as_object()["canonical"] = "0";
+  result.at("tag").as_object().at("b").as_object()["canonical"] = "0";
+  result.at("tag").as_object()["p"] =
+      json::object{{"domain", "integer"}, {"canonical", "0"}};
+  return result;
+}
+
+bool regular_diagonal_polar_coupling_case(const std::string& session) {
+  const auto first = prepare_regular_zero_chart(
+      session, "regular-polar-source-key", "regular-polar-source");
+  const auto second = prepare_regular_zero_chart(
+      session, "regular-polar-target-key", "regular-polar-target");
+  const auto prepared = request(std::string(R"json({
+    "schema":2,"op":"scc.prepare","session":")json") + session +
+    R"json(","key":"regular-diagonal-polar-coupling-key",
+    "identity":"regular-diagonal-polar-coupling-parent-v1",
+    "parent":{"dimension":2,
+      "exact_system_record":[
+        [{"exact":"0","proven_zero":true},
+         {"exact":"0","proven_zero":true}],
+        [{"exact":"1/t^2","proven_zero":false},
+         {"exact":"0","proven_zero":true}]],
+      "exact_theta_record":[
+        [{"exact":"0","proven_zero":true},
+         {"exact":"0","proven_zero":true}],
+        [{"exact":"1/t","proven_zero":false},
+         {"exact":"0","proven_zero":true}]],
+      "chart":{"center_exact":"0","scale_exact":"1",
+        "radius_exact":"2","infinite_radius":false,"prescriptions":[]},
+      "scc":{"components":[[0],[1]],"structural_edges":[[0,1]],
+        "condensation_edges":[[0,1]],"topological_order":[0,1],
+        "coupling_depth":1},
+      "execution":{"mode":"BlockSequentialStrict","work_t_order":6},
+      "work_contract":{"work_min":-3,"requested_min":-2,
+        "requested_max":0,"work_complete_max":3,"public_t_order":0,
+        "wolfram_coupling_depth":2}},
+    "blocks":[
+      {"block":0,"vertices":[0],"chart":")json" + first +
+    R"json(","principal_identity":"regular-polar-source",
+       "regular":true,"identity_gauge":true,"identity_v":true,
+       "no_pseudo":true,
+       "exact_affine_jordan_indicial":{"schema":"diffexp2-exact-affine-jordan-indicial-v1",
+         "dimension":1,"blocks":[{"block":0,"columns":[0],
+           "a":"0","b":"0"}]}},
+      {"block":1,"vertices":[1],"chart":")json" + second +
+    R"json(","principal_identity":"regular-polar-target",
+       "regular":true,"identity_gauge":true,"identity_v":true,
+       "no_pseudo":true,
+       "exact_affine_jordan_indicial":{"schema":"diffexp2-exact-affine-jordan-indicial-v1",
+         "dimension":1,"blocks":[{"block":0,"columns":[0],
+           "a":"0","b":"0"}]} }],
+    "couplings":[{"source_block":0,"target_block":1,
+      "source_vertices":[0],"target_vertices":[1],
+      "rows":1,"columns":1,"exact_identity":"regular-polar-0-to-1",
+      "domain":"rational","symbols":[],
+      "entries":[{"row":0,"column":0,"source_vertex":0,
+        "target_vertex":1,"exact_original_entry":"1/t^2",
+        "exact_theta_entry":"1/t",
+        "multiplier":{"epsilon_shift":0,"center_pole_order":1,
+          "kernels":[
+            ["1","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0"]],
+          "exact_identity":"1/t","proven_zero":false}}]}]
+  })json");
+  if (prepared.at("status") != "ok") {
+    std::cerr << "regular-polar scc.prepare: "
+              << json::serialize(prepared) << '\n';
+    return false;
+  }
+  const auto scc = std::string(prepared.at("scc").as_string());
+  const auto solved = request(json::object{
+      {"schema", 2}, {"op", "scc.solve_column"}, {"session", session},
+      {"scc", scc}, {"checkpoint_identity", "regular-polar-checkpoint"},
+      {"seed", json::object{
+          {"block", 0}, {"run", regular_zero_run(true)},
+          {"metadata", regular_zero_metadata("regular-polar-seed")}}},
+      {"targets", json::array{json::object{
+          {"block", 1}, {"run", regular_zero_run(false)},
+          {"metadata", regular_zero_metadata("regular-polar-target")}}}}});
+  const auto stats = request(json::object{
+      {"schema", 2}, {"op", "scc.stats"}, {"session", session},
+      {"scc", scc}});
+  bool shifted_source = false;
+  if (solved.at("status") == "ok") {
+    for (const auto& raw : solved.at("block_diagnostics").as_array()) {
+      const auto& diagnostic = raw.as_object();
+      if (diagnostic.at("block") == 1 &&
+          diagnostic.if_contains("source_a") != nullptr &&
+          diagnostic.at("source_a") == "-1")
+        shifted_source = true;
+    }
+  }
+  const bool ok = solved.at("status") == "ok" && shifted_source &&
+      solved.at("execution_capability") ==
+          "exact-rational-regular-singular-scalar-block-dag-column-v1" &&
+      stats.at("execution_implemented") == true &&
+      stats.at("execution_scope") ==
+          "exact-rational-regular-singular-scalar-block-dag-column-v1" &&
+      stats.at("scalar_block_dag_column_execution") == false &&
+      stats.at("regular_singular_scalar_block_dag_column_execution") == true;
+  if (!ok)
+    std::cerr << "regular-polar solved: " << json::serialize(solved)
+              << '\n' << "regular-polar stats: " << json::serialize(stats)
+              << '\n';
+  return ok;
+}
+
 bool multidimensional_jordan_case(const std::string& session) {
   const auto first = prepare_jordan_chart(session);
   const auto second = prepare_jordan_target_chart(session);
@@ -263,7 +428,7 @@ bool multidimensional_jordan_case(const std::string& session) {
         [{"exact":"1","proven_zero":false},
          {"exact":"((1/2)+(eps/3))/t","proven_zero":false},
          {"exact":"0","proven_zero":true}],
-        [{"exact":"1/t","proven_zero":false},
+        [{"exact":"1/t^2","proven_zero":false},
          {"exact":"0","proven_zero":true},
          {"exact":"((1/2)+(eps/3))/t","proven_zero":false}]],
       "exact_theta_record":[
@@ -273,7 +438,7 @@ bool multidimensional_jordan_case(const std::string& session) {
         [{"exact":"t","proven_zero":false},
          {"exact":"(1/2)+(eps/3)","proven_zero":false},
          {"exact":"0","proven_zero":true}],
-        [{"exact":"1","proven_zero":false},
+        [{"exact":"1/t","proven_zero":false},
          {"exact":"0","proven_zero":true},
          {"exact":"(1/2)+(eps/3)","proven_zero":false}]],
       "chart":{"center_exact":"0","scale_exact":"1",
@@ -300,9 +465,9 @@ bool multidimensional_jordan_case(const std::string& session) {
       "rows":1,"columns":2,"exact_identity":"jordan-0-to-1",
       "domain":"rational","symbols":[],
       "entries":[{"row":0,"column":0,"source_vertex":0,
-        "target_vertex":2,"exact_original_entry":"1/t",
-        "exact_theta_entry":"1",
-        "multiplier":{"epsilon_shift":0,"center_pole_order":0,
+        "target_vertex":2,"exact_original_entry":"1/t^2",
+        "exact_theta_entry":"1/t",
+        "multiplier":{"epsilon_shift":0,"center_pole_order":1,
           "kernels":[
             ["1","0","0","0","0","0","0"],
             ["0","0","0","0","0","0","0"],
@@ -311,7 +476,7 @@ bool multidimensional_jordan_case(const std::string& session) {
             ["0","0","0","0","0","0","0"],
             ["0","0","0","0","0","0","0"],
             ["0","0","0","0","0","0","0"]],
-          "exact_identity":"1","proven_zero":false}}]}]
+          "exact_identity":"1/t","proven_zero":false}}]}]
   })json");
   if (prepared.at("status") != "ok") {
     std::cerr << "jordan scc.prepare: " << json::serialize(prepared) << '\n';
@@ -327,6 +492,7 @@ bool multidimensional_jordan_case(const std::string& session) {
       {"scc", scc}});
 
   bool indicial_ok = false;
+  bool polar_tag_shift_ok = false;
   if (stats.at("block_charts").is_array() &&
       stats.at("block_charts").as_array().size() == 2) {
     const auto& first_block =
@@ -338,6 +504,15 @@ bool multidimensional_jordan_case(const std::string& session) {
       indicial_ok = certificate.at("dimension") == 2 &&
           certificate.at("max_jordan_size") == 2 &&
           certificate.at("blocks").as_array().size() == 1;
+    }
+  }
+  if (solved.at("status") == "ok") {
+    for (const auto& raw : solved.at("block_diagnostics").as_array()) {
+      const auto& diagnostic = raw.as_object();
+      if (diagnostic.at("block") == 1 &&
+          diagnostic.if_contains("source_a") != nullptr &&
+          diagnostic.at("source_a") == "-1/2")
+        polar_tag_shift_ok = true;
     }
   }
   // This request changes a homogeneous seed tag away from its retained
@@ -356,7 +531,7 @@ bool multidimensional_jordan_case(const std::string& session) {
           "exact-rational-regular-singular-jordan-block-dag-column-v2" &&
       stats.at("regular_singular_jordan_block_dag_column_execution") == true &&
       stats.at("regular_singular_scalar_block_dag_column_execution") == false &&
-      indicial_ok;
+      indicial_ok && polar_tag_shift_ok;
   if (!ok) {
     std::cerr << "jordan solved: " << json::serialize(solved) << '\n'
               << "jordan pseudo: " << json::serialize(pseudo) << '\n'
@@ -370,8 +545,8 @@ bool multidimensional_jordan_case(const std::string& session) {
 int main() {
   const auto created = request(R"json({
     "schema":2,"op":"session.create","domain":"rational",
-    "precision_bits":256,"output_digits":30,"scc_capacity":2,
-    "local_capacity":4
+    "precision_bits":256,"output_digits":30,"scc_capacity":3,
+    "local_capacity":6
   })json");
   const auto session = std::string(created.at("session").as_string());
   const auto first = prepare_singular_chart(
@@ -490,6 +665,8 @@ int main() {
       stats.at("max_coupling_shift") == -1 &&
       stats.at("scc_column_solves") == 1;
   const bool jordan_ok = multidimensional_jordan_case(session);
+  const bool regular_polar_ok =
+      regular_diagonal_polar_coupling_case(session);
 
   if (!ok) {
     std::cerr << "insufficient: " << json::serialize(insufficient) << '\n'
@@ -499,7 +676,7 @@ int main() {
   }
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                              {"session", session}});
-  std::cout << (ok && jordan_ok ? "PASS" : "FAIL")
+  std::cout << (ok && jordan_ok && regular_polar_ok ? "PASS" : "FAIL")
             << ": persistent scalar and Jordan regular-singular SCC resonance\n";
-  return ok && jordan_ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  return ok && jordan_ok && regular_polar_ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

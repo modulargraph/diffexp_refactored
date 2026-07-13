@@ -52,7 +52,12 @@ ConsumePersistentTransportHop::usage = "ConsumePersistentTransportHop[plan,arm,i
 PublishPersistentConsumedTransportStates::usage = "PublishPersistentConsumedTransportStates[plan,anchor,arms,epsilon,checkpointRoot,refinement] atomically publishes lower/upper compact certificate-only states after streaming hops. Each arm contains only ordered tile_sources (including the common anchor); C++ validates the already-sealed per-hop lineage directly, without echoing basis/operator/match provenance through Wolfram. Non-anchor tile-source public tokens are consumed only after both states validate.";
 RunPersistentTransportArm::usage = "RunPersistentTransportArm[plan,arm,anchor,receivingBasis,epsilon,checkpointRoot,refinement] marches one retained lower or upper arm entirely in C++ without projecting or integrating observables. It returns an opaque transport-state handle that strongly owns its plan, anchor, receiving bases, hidden planned matches, one unprojected source local per tile, and final local; no coefficient slab is serialized.";
 ContractPersistentTransportObservables::usage = "ContractPersistentTransportObservables[state,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against one retained native transport-arm state without rematching. Each observable has exactly Identity, CheckpointIdentity, IntegrandRows, Epsilon, and TailPolicy; Epsilon has exactly Min, Max, and RequiredCompleteMax. IntegrandRows contains one prepared rational row per retained tile. TailPolicy is \"stored\", \"attempt\", or \"require\": stored never requests tail certification, attempt may remain stored-truncation, and require fails atomically unless every tile aggregates with a certified full-local tail. The result retains input order and returns directly usable opaque line handles; an empty observable list succeeds without publishing lines.";
-ContractPersistentTransportPairObservables::usage = "ContractPersistentTransportPairObservables[lowerState,upperState,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against exact retained lower/upper states in one native paired request. Each observable has exactly Identity, CheckpointIdentity, LowerIntegrandRows, UpperIntegrandRows, Epsilon, and optionally TailPolicy; omitted TailPolicy means \"stored\". Epsilon has exactly Min, Max, and RequiredCompleteMax. The wrapper accepts no caller signs, arms, points, rims, or cancellation data: native transport.contract_pair always combines -lower+upper. Results retain request order and are opaque paired line handles.";
+ContractPersistentTransportPairObservables::usage = "ContractPersistentTransportPairObservables[lowerState,upperState,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against exact retained lower/upper states in one native paired request. Each observable has exactly Identity, CheckpointIdentity, LowerIntegrandRows, UpperIntegrandRows, Epsilon, and optionally TailPolicy and DivergentCancellation. DivergentCancellation is the explicit FT-only bounded-relative Acb policy with Mode, RelativeTolerance, and Provenance; omission keeps exact-singleton cancellation. Epsilon has exactly Min, Max, and RequiredCompleteMax. The wrapper accepts no caller signs, arms, points, or rims: native transport.contract_pair always combines -lower+upper. Results retain request order and are opaque paired line handles.";
+BeginPersistentTransportPairObservableStream::usage = "BeginPersistentTransportPairObservableStream[lowerState,upperState,observable,checkpointRoot] begins one bounded-memory native paired contraction for a stored-tail observable. The begin request sends only observable metadata; prepared rows are subsequently supplied one at a time.";
+AddPersistentTransportPairObservableStreamTile::usage = "AddPersistentTransportPairObservableStreamTile[stream,side,tile,row] adds exactly one prepared rational row to a paired contraction stream. side is lower or upper and tile is the zero-based native tile index. Every lower tile must be added in order before every upper tile.";
+FinishPersistentTransportPairObservableStream::usage = "FinishPersistentTransportPairObservableStream[stream] atomically publishes the completed paired line after every expected lower and upper tile has been added exactly once.";
+AbortPersistentTransportPairObservableStream::usage = "AbortPersistentTransportPairObservableStream[stream] abandons an unfinished paired contraction stream and releases its reserved native line slot without publishing a partial line.";
+ContractPersistentTransportPairObservableStreamed::usage = "ContractPersistentTransportPairObservableStreamed[lowerState,upperState,observable,checkpointRoot] contracts one stored-tail paired observable with a bounded-memory begin/add-tile/finish protocol. Rows are sent strictly lower then upper, one prepared row per native request; any failure or kernel abort attempts to abort the native stream.";
 RunPersistentTransportEndpointBatch::usage = "RunPersistentTransportEndpointBatch[state,observables,checkpointRoot] atomically contracts an ordered list of zero, one, or many prepared scalar rows against the final retained local of one native transport-arm state and returns opaque endpoint handles. Each observable has exactly Identity, CheckpointIdentity, IntegrandRow, and Epsilon; Epsilon has exactly Min, Max, and RequiredCompleteMax. The retained state and plan derive the arm, endpoint, local coordinate, approach direction, and analytic prescription; callers cannot override them.";
 PersistentTransportArmStatistics::usage = "PersistentTransportArmStatistics[state] returns the opaque retained arm-state topology, exact provenance, ownership counts, epsilon/refinement contract, final-local handle, and statistics.";
 ReleasePersistentTransportArm::usage = "ReleasePersistentTransportArm[state] releases one public transport-state token. A second release is a loud native error; independently published final locals remain governed by their own tokens.";
@@ -1876,16 +1881,29 @@ normalizePersistentTransportPairObservable[observable_, lowerTiles_,
     upperTiles_] := Module[
   {baseKeys = {"Identity", "CheckpointIdentity", "LowerIntegrandRows",
       "UpperIntegrandRows", "Epsilon"}, keys, tailPolicy, lower,
-   upper, dimensions},
+   upper, dimensions, cancellation, allowedKeys},
   If[!AssociationQ[observable],
     Return[Failure["CppBackend", <|"Detail" ->
       "each transport-pair observable must be an association"|>], Module]];
   keys = Sort[Keys[observable]];
-  If[keys =!= Sort[baseKeys] &&
-      keys =!= Sort[Append[baseKeys, "TailPolicy"]],
+  allowedKeys = Join[baseKeys, {"TailPolicy", "DivergentCancellation"}];
+  If[!AllTrue[baseKeys, MemberQ[keys, #] &] ||
+      Complement[keys, allowedKeys] =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
-      "each transport-pair observable requires exactly Identity, CheckpointIdentity, LowerIntegrandRows, UpperIntegrandRows, Epsilon, and optional TailPolicy; signs, arms, points, rims, and cancellation are not accepted"|>], Module]];
+      "each transport-pair observable requires Identity, CheckpointIdentity, LowerIntegrandRows, UpperIntegrandRows, Epsilon, and only optional TailPolicy/DivergentCancellation"|>], Module]];
   tailPolicy = Lookup[observable, "TailPolicy", "stored"];
+  cancellation = Lookup[observable, "DivergentCancellation", None];
+  If[cancellation =!= None &&
+      (!AssociationQ[cancellation] ||
+       Sort[Keys[cancellation]] =!=
+         Sort[{"Mode", "RelativeTolerance", "Provenance"}] ||
+       Lookup[cancellation, "Mode", None] =!= "bounded-relative-acb" ||
+       !persistentNonemptyStringQ[
+         Lookup[cancellation, "RelativeTolerance", None]] ||
+       !persistentNonemptyStringQ[
+         Lookup[cancellation, "Provenance", None]]),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "DivergentCancellation requires bounded-relative-acb Mode and nonempty string RelativeTolerance/Provenance"|>], Module]];
   lower = normalizePersistentTransportObservable[<|
     "Identity" -> observable["Identity"],
     "CheckpointIdentity" -> observable["CheckpointIdentity"],
@@ -1906,12 +1924,247 @@ normalizePersistentTransportPairObservable[observable_, lowerTiles_,
     Return[Failure["CppBackend", <|"Detail" ->
       "lower and upper prepared rows of one transport-pair observable must have one common physical dimension",
       "Identity" -> observable["Identity"]|>], Module]];
-  <|"identity" -> lower["identity"],
+  Join[<|"identity" -> lower["identity"],
     "checkpoint_identity" -> lower["checkpoint_identity"],
     "lower_integrand_rows" -> lower["integrand_rows"],
     "upper_integrand_rows" -> upper["integrand_rows"],
     "epsilon" -> lower["epsilon"],
-    "tail_policy" -> tailPolicy|>];
+    "tail_policy" -> tailPolicy|>,
+    If[cancellation === None, <||>,
+      <|"divergent_cancellation" -> <|
+        "mode" -> cancellation["Mode"],
+        "relative_tolerance" -> cancellation["RelativeTolerance"],
+        "provenance" -> cancellation["Provenance"]|>|>]]];
+
+normalizePersistentTransportPairStreamObservable[observable_, lowerTiles_,
+    upperTiles_] := Module[
+  {baseKeys = {"Identity", "CheckpointIdentity", "Epsilon"},
+   rowKeys = {"LowerIntegrandRows", "UpperIntegrandRows"},
+   keys, allowedKeys, tailPolicy,
+   cancellation, lowerRows, upperRows, dimensions, epsilon,
+   epsilonKeys = {"Min", "Max", "RequiredCompleteMax"}},
+  If[!AssociationQ[observable],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "a streamed transport-pair observable must be an association"|>],
+      Module]];
+  keys = Sort[Keys[observable]];
+  allowedKeys = Join[baseKeys, rowKeys,
+    {"TailPolicy", "DivergentCancellation"}];
+  If[!AllTrue[baseKeys, MemberQ[keys, #] &] ||
+      Count[KeyExistsQ[observable, #] & /@ rowKeys, True] === 1 ||
+      Complement[keys, allowedKeys] =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "a streamed transport-pair observable requires Identity, CheckpointIdentity, and Epsilon; prepared lower/upper rows may either both be present for convenience validation or both be omitted from the metadata-only begin"|>], Module]];
+  tailPolicy = Lookup[observable, "TailPolicy", "stored"];
+  If[tailPolicy =!= "stored",
+    Return[Failure["CppBackend", <|"Detail" ->
+      "tile-streamed paired contraction currently requires TailPolicy stored",
+      "TailPolicy" -> tailPolicy|>], Module]];
+  cancellation = Lookup[observable, "DivergentCancellation", None];
+  If[cancellation =!= None &&
+      (!AssociationQ[cancellation] ||
+       Sort[Keys[cancellation]] =!=
+         Sort[{"Mode", "RelativeTolerance", "Provenance"}] ||
+       Lookup[cancellation, "Mode", None] =!= "bounded-relative-acb" ||
+       !persistentNonemptyStringQ[
+         Lookup[cancellation, "RelativeTolerance", None]] ||
+       !persistentNonemptyStringQ[
+         Lookup[cancellation, "Provenance", None]]),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "DivergentCancellation requires bounded-relative-acb Mode and nonempty string RelativeTolerance/Provenance"|>], Module]];
+  lowerRows = Lookup[observable, "LowerIntegrandRows", None];
+  upperRows = Lookup[observable, "UpperIntegrandRows", None];
+  epsilon = observable["Epsilon"];
+  If[!persistentNonemptyStringQ[observable["Identity"]] ||
+      !persistentNonemptyStringQ[observable["CheckpointIdentity"]] ||
+      (lowerRows =!= None &&
+        (!ListQ[lowerRows] || lowerRows === {} ||
+         !ListQ[upperRows] || upperRows === {} ||
+         !AllTrue[lowerRows, persistentPreparedRationalRowQ] ||
+         !AllTrue[upperRows, persistentPreparedRationalRowQ] ||
+         (IntegerQ[lowerTiles] && Length[lowerRows] =!= lowerTiles) ||
+         (IntegerQ[upperTiles] && Length[upperRows] =!= upperTiles))),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "streamed paired contraction requires one valid prepared rational row per retained lower and upper tile",
+      "Identity" -> Lookup[observable, "Identity", None]|>], Module]];
+  dimensions = If[lowerRows === None, {},
+    Lookup[Join[lowerRows, upperRows], "columns"]];
+  If[dimensions =!= {} && Length[DeleteDuplicates[dimensions]] =!= 1,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "all streamed lower and upper prepared rows must have one common physical dimension",
+      "Identity" -> observable["Identity"]|>], Module]];
+  If[!AssociationQ[epsilon] ||
+      Sort[Keys[epsilon]] =!= Sort[epsilonKeys] ||
+      !AllTrue[Lookup[epsilon, epsilonKeys], IntegerQ] ||
+      !TrueQ[epsilon["Min"] <= epsilon["RequiredCompleteMax"] <=
+        epsilon["Max"]],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "streamed paired observable Epsilon requires integer Min, Max, and RequiredCompleteMax with Min <= RequiredCompleteMax <= Max",
+      "Identity" -> observable["Identity"]|>], Module]];
+  Join[<|"identity" -> observable["Identity"],
+    "checkpoint_identity" -> observable["CheckpointIdentity"],
+    "epsilon" -> <|"min" -> epsilon["Min"],
+      "max" -> epsilon["Max"],
+      "required_complete_max" -> epsilon["RequiredCompleteMax"]|>,
+    "tail_policy" -> "stored"|>,
+    If[cancellation === None, <||>,
+      <|"divergent_cancellation" -> <|
+        "mode" -> cancellation["Mode"],
+        "relative_tolerance" -> cancellation["RelativeTolerance"],
+        "provenance" -> cancellation["Provenance"]|>|>]]];
+
+persistentTransportPairStreamContext[lowerState_Association,
+    upperState_Association, checkpointRoot_String] := Module[
+  {lower = persistentTransportContractStateHandles[lowerState],
+   upper = persistentTransportContractStateHandles[upperState],
+   lowerArm, upperArm},
+  If[FailureQ[lower], Return[lower, Module]];
+  If[FailureQ[upper], Return[upper, Module]];
+  lowerArm = Lookup[lowerState, "arm",
+    Lookup[lowerState, "Arm", Automatic]];
+  upperArm = Lookup[upperState, "arm",
+    Lookup[upperState, "Arm", Automatic]];
+  If[lower["Session"] =!= upper["Session"] ||
+      lower["TransportState"] === upper["TransportState"] ||
+      (lowerArm =!= Automatic && lowerArm =!= "lower") ||
+      (upperArm =!= Automatic && upperArm =!= "upper"),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "streamed paired contraction requires distinct exact lower/upper retained states from one persistent session"|>], Module]];
+  If[StringLength[StringTrim[checkpointRoot]] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "streamed transport-pair checkpoint root must be nonempty"|>],
+      Module]];
+  <|"Lower" -> lower, "Upper" -> upper|>];
+
+persistentTransportPairStreamHandles[stream_Association] := Module[
+  {session, token, checkpoint},
+  session = Lookup[stream, "session", Lookup[stream, "Session", None]];
+  token = Lookup[stream, "stream", Lookup[stream, "Stream", None]];
+  checkpoint = Lookup[stream, "stream_checkpoint_identity",
+    Lookup[stream, "StreamCheckpointIdentity", None]];
+  If[!persistentNonemptyStringQ[session] ||
+      !persistentNonemptyStringQ[token] ||
+      !persistentNonemptyStringQ[checkpoint],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "paired contraction stream requires nonempty session, stream, and stream checkpoint tokens"|>], Module]];
+  <|"Session" -> session, "Stream" -> token,
+    "CheckpointIdentity" -> checkpoint|>];
+
+BeginPersistentTransportPairObservableStream[lowerState_Association,
+    upperState_Association, observable_Association,
+    checkpointRoot_String] := Module[
+  {context, lower, upper, normalized, stateLimits, requiredCompleteMax},
+  context = persistentTransportPairStreamContext[
+    lowerState, upperState, checkpointRoot];
+  If[FailureQ[context], Return[context, Module]];
+  lower = context["Lower"]; upper = context["Upper"];
+  normalized = normalizePersistentTransportPairStreamObservable[
+    observable, lower["Tiles"], upper["Tiles"]];
+  If[FailureQ[normalized], Return[normalized, Module]];
+  requiredCompleteMax = normalized["epsilon",
+    "required_complete_max"];
+  stateLimits = {lower["RequiredCompleteMax"],
+    upper["RequiredCompleteMax"]};
+  If[AnyTrue[Select[stateLimits, IntegerQ],
+      requiredCompleteMax > # &],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "the streamed observable required epsilon maximum exceeds a retained arm state's public target",
+      "StateRequiredCompleteMax" -> stateLimits,
+      "ObservableRequiredCompleteMax" -> requiredCompleteMax|>], Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.contract_pair_stream_begin",
+    "session" -> lower["Session"],
+    "lower" -> <|
+      "transport_state" -> lower["TransportState"],
+      "checkpoint_identity" -> lower["CheckpointIdentity"],
+      "provenance_identity" -> lower["ProvenanceIdentity"]|>,
+    "upper" -> <|
+      "transport_state" -> upper["TransportState"],
+      "checkpoint_identity" -> upper["CheckpointIdentity"],
+      "provenance_identity" -> upper["ProvenanceIdentity"]|>,
+    "checkpoint_policy" -> <|
+      "schema" ->
+        "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1",
+      "root" -> checkpointRoot|>,
+    "observable" -> normalized|>]];
+
+AddPersistentTransportPairObservableStreamTile[stream_Association,
+    side_String, tile_Integer, row_Association] := Module[{tokens},
+  tokens = persistentTransportPairStreamHandles[stream];
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[!MemberQ[{"lower", "upper"}, side] || tile < 0 ||
+      !persistentPreparedRationalRowQ[row],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "stream tile addition requires side lower/upper, a nonnegative zero-based tile, and exactly one prepared rational row",
+      "Side" -> side, "Tile" -> tile|>], Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.contract_pair_stream_add_tile",
+    "session" -> tokens["Session"], "stream" -> tokens["Stream"],
+    "stream_checkpoint_identity" -> tokens["CheckpointIdentity"],
+    "side" -> side, "tile" -> tile, "row" -> row|>]];
+
+FinishPersistentTransportPairObservableStream[stream_Association] :=
+  Module[{tokens = persistentTransportPairStreamHandles[stream]},
+    If[FailureQ[tokens], Return[tokens, Module]];
+    RunRequest[<|"schema" -> 2,
+      "op" -> "transport.contract_pair_stream_finish",
+      "session" -> tokens["Session"], "stream" -> tokens["Stream"],
+      "stream_checkpoint_identity" -> tokens["CheckpointIdentity"]|>]];
+
+AbortPersistentTransportPairObservableStream[stream_Association] :=
+  Module[{tokens = persistentTransportPairStreamHandles[stream]},
+    If[FailureQ[tokens], Return[tokens, Module]];
+    RunRequest[<|"schema" -> 2,
+      "op" -> "transport.contract_pair_stream_abort",
+      "session" -> tokens["Session"], "stream" -> tokens["Stream"],
+      "stream_checkpoint_identity" -> tokens["CheckpointIdentity"]|>]];
+
+ContractPersistentTransportPairObservableStreamed[
+    lowerState_Association, upperState_Association,
+    observable_Association, checkpointRoot_String] := Module[
+  {stream, lowerRows, upperRows, row, response, result, completed = False,
+   tag = Unique["transportPairStream"]},
+  (* Begin validates every row before allocating a native reservation. *)
+  stream = BeginPersistentTransportPairObservableStream[
+    lowerState, upperState, observable, checkpointRoot];
+  If[FailureQ[stream] || !AssociationQ[stream] ||
+      Lookup[stream, "status", "error"] =!= "ok",
+    Return[stream, Module]];
+  lowerRows = observable["LowerIntegrandRows"];
+  upperRows = observable["UpperIntegrandRows"];
+  result = CheckAbort[
+    Catch[
+      Do[
+        row = First[lowerRows]; lowerRows = Rest[lowerRows];
+        response = AddPersistentTransportPairObservableStreamTile[
+          stream, "lower", tile - 1, row];
+        Clear[row];
+        If[FailureQ[response] || !AssociationQ[response] ||
+            Lookup[response, "status", "error"] =!= "ok",
+          Throw[response, tag]],
+        {tile, Length[observable["LowerIntegrandRows"]]}];
+      Do[
+        row = First[upperRows]; upperRows = Rest[upperRows];
+        response = AddPersistentTransportPairObservableStreamTile[
+          stream, "upper", tile - 1, row];
+        Clear[row];
+        If[FailureQ[response] || !AssociationQ[response] ||
+            Lookup[response, "status", "error"] =!= "ok",
+          Throw[response, tag]],
+        {tile, Length[observable["UpperIntegrandRows"]]}];
+      response = FinishPersistentTransportPairObservableStream[stream];
+      If[AssociationQ[response] &&
+          Lookup[response, "status", "error"] === "ok",
+        completed = True];
+      response,
+      tag],
+    If[!completed,
+      Quiet[AbortPersistentTransportPairObservableStream[stream]]];
+    Abort[]];
+  Clear[row, lowerRows, upperRows];
+  If[!completed,
+    Quiet[AbortPersistentTransportPairObservableStream[stream]]];
+  result];
 
 ContractPersistentTransportPairObservables[lowerState_Association,
     upperState_Association, observables_List,

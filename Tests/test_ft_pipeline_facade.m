@@ -22,6 +22,8 @@ invalidSignPlan = FeynmanTrick`PipelinePlan["bubble",
   "DeltaPrescriptionSign" -> 0];
 migrationPlan = FeynmanTrick`PipelinePlan["bubble",
   "MigrateLegacyPreparation" -> True];
+nativeCheckpointPlan = FeynmanTrick`PipelinePlan["bubble",
+  "SaveNativeTransportCheckpoint" -> True];
 
 SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "+1"];
 plusRunnerSettings =
@@ -33,6 +35,10 @@ SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "0"];
 invalidRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
 SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> None];
+SetEnvironment["FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT" -> "2"];
+invalidNativeCheckpointRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT" -> None];
 
 rootFacadeDefinitions = DownValues[FeynmanTrick`PipelinePlan];
 Get[FileNameJoin[{repoRoot, "FeynmanTrick.m"}]];
@@ -87,6 +93,15 @@ assert["legacy preparation migration is explicit in plan and environment",
     TrueQ[migrationPlan["Settings", "MigrateLegacyPreparation"]] &&
     migrationPlan["Environment", "FT_MIGRATE_LEGACY_PREP"] === "1" &&
     plan["Environment", "FT_MIGRATE_LEGACY_PREP"] === "0"];
+assert["heavy native transport snapshots are explicit opt-in acceleration",
+  plan["Settings", "SaveNativeTransportCheckpoint"] === False &&
+    plan["Environment", "FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT"] === "0" &&
+    AssociationQ[nativeCheckpointPlan] &&
+    TrueQ[nativeCheckpointPlan["Settings",
+      "SaveNativeTransportCheckpoint"]] &&
+    nativeCheckpointPlan["Environment",
+      "FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT"] === "1" &&
+    FailureQ[invalidNativeCheckpointRunnerSettings]];
 assert["fast transport settings are explicit",
   plan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
     plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&

@@ -4244,6 +4244,7 @@ sccNativeCompositeExecutionDescriptorQ[entry_Association,
     ListQ[Lookup[descriptor, "Runs", None]] &&
     ListQ[Lookup[descriptor, "TaskMetadata", None]] &&
     ListQ[Lookup[descriptor, "ColumnPlans", None]] &&
+    AssociationQ[Lookup[descriptor, "RationalShadowDecision", None]] &&
     AssociationQ[Lookup[descriptor, "Contract", None]] &&
     StringQ[Lookup[descriptor, "ParentIdentity", None]] &&
     ListQ[Lookup[descriptor, "Components", None]] &&
@@ -4815,7 +4816,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    inputDigits, runRecords, taskRecords, columnPlans, blockDimensions,
    framePlans, forcedFrame, physicalPayload, spectralFrames,
    sourceTransforms, gaugeTransforms, gaugeFrames, gaugePrepStart,
-   gaugePrepMemory, gaugeProbeRecord},
+   gaugePrepMemory, gaugeProbeRecord, rationalShadowDecision},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -5056,6 +5057,8 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
        encodings are compared solely with independently encoded exact
        zero/one values and never inspected through a midpoint. *)
     ConstantArray[{}, Length[blockSystems]]];
+  rationalShadowDecision = sccNativeRationalShadowDecision[
+    capturedContract["Domain"], blockRecords, couplings, columnPlans];
   prepared = DiffExp2`CppBackend`PreparePersistentSCC[captures, manifest];
   If[FailureQ[prepared] || !AssociationQ[prepared] ||
       !StringQ[Lookup[prepared, "Session", None]] ||
@@ -5073,7 +5076,9 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   executionDescriptor = <|
     "PublicHandle" -> result, "BlockDimensions" -> blockDimensions,
     "Runs" -> runRecords, "TaskMetadata" -> taskRecords,
-    "ColumnPlans" -> columnPlans, "Contract" -> capturedContract,
+    "ColumnPlans" -> columnPlans,
+    "RationalShadowDecision" -> rationalShadowDecision,
+    "Contract" -> capturedContract,
     "ParentIdentity" -> identity, "Components" -> components,
     "CondensationEdges" -> condensation,
     "TopologicalOrder" -> seq["TopologicalOrder"],
@@ -5401,6 +5406,80 @@ sccNativeCapturedColumnPlans[cs_Association, blockSystems_List,
     blockPlans], {seedBlock, Length[blockSystems]}];
   plans];
 
+(* Select the exact Rational shadow before an Acb basis batch only from exact
+   producer metadata.  This is a deterministic route-selection certificate,
+   not a sampled numerical heuristic:
+
+   - a CASE-P step in a captured seed schedule is checked before its Acb
+     recurrence starts, and the complete basis submits every captured seed;
+   - with identity gauge/spectral frames, a genuine polar cross-SCC
+     multiplier shifts source support by -p.  The exact Rational executor is
+     closed under those tag shifts and its later specialization proves the
+     same physical equation, geometry, and public work window.  Different
+     DAG paths could cancel a shifted sector, so this condition deliberately
+     certifies that the Rational route is safe, not that Acb must fail.
+
+   Nonidentity frames and target-only CASE-P schedules remain on the strict
+   runtime gate: proving their composed tag support requires exact matrix
+   composition, so this producer never guesses from individual entries. *)
+sccNativeSeedRunContainsPseudoQ[columnPlans_List] := AnyTrue[
+  Flatten[columnPlans, 1], Function[plan,
+    AssociationQ[plan] && AnyTrue[
+      Flatten[Lookup[Lookup[plan, "SeedRun", <||>], "schedule", {}], 1],
+      AssociationQ[#] && Lookup[#, "case", None] === "P" &]]];
+
+sccNativeActivePolarCouplingQ[coupling_Association] := AnyTrue[
+  Lookup[coupling, "entries", {}], Function[entry,
+    AssociationQ[entry] &&
+      !TrueQ[Lookup[Lookup[entry, "multiplier", <||>],
+        "proven_zero", True]] &&
+      IntegerQ[Lookup[Lookup[entry, "multiplier", <||>],
+        "center_pole_order", None]] &&
+      Lookup[entry["multiplier"], "center_pole_order", 0] > 0]];
+
+sccNativeRationalShadowDecision[domain_, blockRecords_List,
+    couplings_List, columnPlans_List] := Module[
+  {seedCaseP, identityFrames, polarCoupling, reason},
+  If[domain =!= "acb", Return[<|
+    "RequiresRationalShadow" -> False,
+    "Certificate" -> "non-acb-domain"|>, Module]];
+  seedCaseP = sccNativeSeedRunContainsPseudoQ[columnPlans];
+  identityFrames = blockRecords =!= {} && AllTrue[blockRecords,
+    AssociationQ[#] && TrueQ[Lookup[#, "identity_gauge", False]] &&
+      TrueQ[Lookup[#, "identity_v", False]] &];
+  polarCoupling = identityFrames &&
+    AnyTrue[couplings, sccNativeActivePolarCouplingQ];
+  reason = Which[
+    seedCaseP, "captured-seed-schedule-contains-exact-case-p",
+    polarCoupling,
+      "identity-frame-cross-coupling-has-positive-center-pole-order",
+    True, "runtime-exact-schedule-and-tag-gate-required"];
+  <|"RequiresRationalShadow" -> TrueQ[seedCaseP || polarCoupling],
+    "Certificate" -> reason,
+    "SeedCaseP" -> TrueQ[seedCaseP],
+    "IdentityFrames" -> TrueQ[identityFrames],
+    "PolarCrossCoupling" -> TrueQ[polarCoupling]|>];
+
+sccNativeCachedRationalShadowDecision[cs_Association, req_Association,
+    prepared_Association] := Module[
+  {signature, cacheKey, cached, execution, decision},
+  signature = sccNativeCompositeCacheSignature[cs, req];
+  cacheKey = Hash[signature, "SHA256"];
+  cached = Lookup[$nativeSCCCompositeCache, cacheKey, None];
+  If[!AssociationQ[cached] ||
+      !sccNativeCompositeExecutionDescriptorQ[cached, signature] ||
+      !SameQ[Lookup[cached, "Result", None], prepared],
+    err["E6", cs, <|"CacheKey" -> cacheKey,
+      "Detail" -> "native SCC Rational-shadow decision is not collision-bound to the prepared public handle"|>]];
+  execution = cached["Execution"];
+  decision = Lookup[execution, "RationalShadowDecision", None];
+  If[!AssociationQ[decision] ||
+      !BooleanQ[Lookup[decision, "RequiresRationalShadow", None]] ||
+      !StringQ[Lookup[decision, "Certificate", None]],
+    err["E6", cs, <|"Decision" -> decision,
+      "Detail" -> "cached native SCC Rational-shadow decision is malformed"|>]];
+  decision];
+
 sccNativeColumnRun[request_Association] :=
   KeyTake[request, $nativeSCCColumnRunKeys];
 
@@ -5550,7 +5629,14 @@ sccNativePseudoDiagnosticsQ[response_Association] := Module[
         IntegerQ[depth], depth >= 0,
         uncompensated === 0,
         If[hits === 0, True,
-          compensations > 0 && depth > 0 &&
+          (* A certified CASE-P hit need not materialize a compensation
+             term: the exact Rational compensator deliberately omits a
+             polar weight when every retained negative-epsilon gamma
+             coefficient is exactly zero.  The positive depth proves that
+             a genuine hit was inspected, while the exact value certificate
+             and zero unresolved-hit count prove that omitting the term was
+             not an approximate or fallback decision. *)
+          depth > 0 &&
             TrueQ[Lookup[record, "pseudo_value_certified", False]]]]]]]];
 
 sccNativeCanonicalJSONValue[value_Association] := Association@Map[
@@ -5617,7 +5703,9 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
    selectedSeedLocalComponent, expectedBasisIndex, expectedCapability,
    expectedProvenanceSchema, columnPlans, selectedPlan,
    singularExecution, seedTag, targetTags, plannedTargetBlocks,
-   provenanceLocalComponent, encodedZero, encodedOne},
+   provenanceLocalComponent, encodedZero, encodedOne, blockCharts,
+   blockRegularity, capturedSingularExecution,
+   advertisedSingularExecution},
   If[DownValues[DiffExp2`CppBackend`RunPersistentSCCColumn] === {},
     err["E5", cs, <|"Detail" ->
       "CppBackend persistent SCC column bridge is not available"|>]];
@@ -5642,13 +5730,34 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
   columnPlans = execution["ColumnPlans"];
   inputDigits = execution["InputDigits"];
   stats = Lookup[execution, "NativeStatistics", None];
-  singularExecution = AssociationQ[stats] &&
+  (* execution_scope is an executor admission result, not the mathematical
+     chart classification.  In particular an exact regular-singular capture
+     can temporarily advertise "unsupported" when one later native
+     prerequisite (such as a polar cross-SCC coupling) is unavailable.  Do
+     not then reinterpret honest p>0 Jordan seeds as regular unit columns.
+     The retained block regularity is exact producer metadata, and the
+     nonempty captured column plans independently certify the seed shapes.
+     The strict capability predicate below remains authoritative before any
+     request is submitted to C++. *)
+  blockCharts = If[AssociationQ[stats],
+    Lookup[stats, "block_charts", None], None];
+  blockRegularity = If[ListQ[blockCharts],
+    Lookup[blockCharts, "regular", None], None];
+  capturedSingularExecution = ListQ[blockRegularity] &&
+    Length[blockRegularity] === Length[blockDimensions] &&
+    AllTrue[blockRegularity, MemberQ[{True, False}, #] &] &&
+    MemberQ[blockRegularity, False] && ListQ[columnPlans] &&
+    Length[columnPlans] === Length[blockDimensions] &&
+    AllTrue[columnPlans, ListQ[#] && # =!= {} &];
+  advertisedSingularExecution = AssociationQ[stats] &&
     MemberQ[{
       "exact-rational-regular-singular-scalar-block-dag-column-v1",
       "exact-rational-regular-singular-jordan-block-dag-column-v2",
       "acb-regular-singular-scalar-block-dag-column-v1",
       "acb-regular-singular-jordan-block-dag-column-v1"},
       Lookup[stats, "execution_scope", None]];
+  singularExecution = capturedSingularExecution ||
+    advertisedSingularExecution;
   scalarExecution = AllTrue[blockDimensions, # === 1 &];
   If[Length[blockDimensions] < 1 ||
       Length[runRecords] =!= Length[blockDimensions] ||
@@ -5664,7 +5773,7 @@ sccNativeBuildColumnRequest[cs_Association, req_Association,
     err["E6", cs, <|"Contract" -> contract,
       "BlockDimensions" -> blockDimensions,
       "Detail" -> "native SCC column requires one or more exact-rational or Acb blocks with dimensions matching the parent SCC partition and no regulator field"|>]];
-  If[singularExecution && !MemberQ[
+  If[advertisedSingularExecution && !MemberQ[
       Switch[domain,
         "rational", {
           "exact-rational-regular-singular-scalar-block-dag-column-v1",

@@ -91,6 +91,34 @@ std::string solve_anchor(const std::string& session,
   return std::string(solved.at("local").as_string());
 }
 
+std::string solve_regulated_anchor(const std::string& session,
+                                   const std::string& chart) {
+  auto value = json::parse(R"json({
+    "schema":2,"op":"local.solve","session":"placeholder",
+    "chart":"placeholder",
+    "run":{"nmax":0,"p":0,"has_initial":true,
+      "adaptive_probe":false,"a_target":"-1","b_target":"1",
+      "a_shift_min":0,"a_shifts":["-1"],
+      "schedule":[[{"case":"R","da":"0","db":"0"}]],
+      "initial":["1","0","0"],"initial_validity":[2],
+      "source":null,"return_u":false},
+    "metadata":{"chart":{"center_exact":"0","scale_exact":"1",
+        "radius":"2","infinite_radius":false},
+      "tag":{"a":{"domain":"rational","canonical":"-1"},
+        "b":{"domain":"rational","canonical":"1"}},
+      "prescriptions":[{"factor_exact":"t","sign":-1,
+        "multiplicity":1,"leading_coefficient_sign":1}],
+      "checkpoint_identity":"pair-common-anchor"}
+  })json").as_object();
+  value["session"] = session;
+  value["chart"] = chart;
+  const auto solved = request(std::move(value));
+  if (solved.at("status") != "ok")
+    throw std::runtime_error(
+        "regulated local.solve: " + json::serialize(solved));
+  return std::string(solved.at("local").as_string());
+}
+
 json::object topology() {
   return json::object{
       {"singular_points", json::array{}},
@@ -156,6 +184,22 @@ json::object row(const std::string& identity, bool malformed = false) {
            {"column", 0}, {"multiplier", multiplier(identity)}}}}};
 }
 
+json::object regulated_row(const std::string& identity,
+                           const std::string& coefficient) {
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 1}, {"exact_identity", identity},
+      {"entries", json::array{json::object{
+           {"column", 0},
+           {"multiplier", json::object{
+                {"epsilon_shift", 0}, {"center_pole_order", 0},
+                {"kernels", json::array{
+                     json::array{coefficient}, json::array{"0"},
+                     json::array{"0"}}},
+                {"exact_identity", coefficient},
+                {"proven_zero", false}}}}}}};
+}
+
 json::object observable(const std::string& identity,
                         const std::string& checkpoint,
                         const std::string& tail = "stored",
@@ -168,6 +212,19 @@ json::object observable(const std::string& identity,
       {"epsilon", json::object{
            {"min", 0}, {"max", 0}, {"required_complete_max", 0}}},
       {"tail_policy", tail}};
+}
+
+json::object regulated_observable(const std::string& identity,
+                                  const std::string& checkpoint) {
+  return json::object{
+      {"identity", identity}, {"checkpoint_identity", checkpoint},
+      {"lower_integrand_rows",
+       json::array{regulated_row(identity + ":lower", "1")}},
+      {"upper_integrand_rows",
+       json::array{regulated_row(identity + ":upper", "2")}},
+      {"epsilon", json::object{
+           {"min", -1}, {"max", 0}, {"required_complete_max", 0}}},
+      {"tail_policy", "stored"}};
 }
 
 json::object state_reference(const json::object& state) {
@@ -191,6 +248,65 @@ json::object contract_pair(const std::string& session,
             "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
            {"root", checkpoint_root}}},
       {"observables", std::move(observables)}});
+}
+
+json::object stream_observable(const std::string& identity,
+                               const std::string& checkpoint,
+                               std::int32_t minimum = 0) {
+  return json::object{
+      {"identity", identity}, {"checkpoint_identity", checkpoint},
+      {"epsilon", json::object{
+           {"min", minimum}, {"max", 0}, {"required_complete_max", 0}}},
+      {"tail_policy", "stored"}};
+}
+
+json::object begin_stream(const std::string& session,
+                          const json::object& lower,
+                          const json::object& upper,
+                          const std::string& identity,
+                          const std::string& checkpoint,
+                          const std::string& checkpoint_root,
+                          std::int32_t minimum = 0) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.contract_pair_stream_begin"},
+      {"session", session}, {"lower", state_reference(lower)},
+      {"upper", state_reference(upper)},
+      {"checkpoint_policy", json::object{
+           {"schema",
+            "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+           {"root", checkpoint_root}}},
+      {"observable", stream_observable(identity, checkpoint, minimum)}});
+}
+
+json::object add_stream_tile(const std::string& session,
+                             const json::object& stream,
+                             const std::string& side,
+                             std::size_t tile,
+                             json::object prepared_row) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.contract_pair_stream_add_tile"},
+      {"session", session}, {"stream", stream.at("stream")},
+      {"stream_checkpoint_identity",
+       stream.at("stream_checkpoint_identity")},
+      {"side", side}, {"tile", tile}, {"row", std::move(prepared_row)}});
+}
+
+json::object finish_stream(const std::string& session,
+                           const json::object& stream) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.contract_pair_stream_finish"},
+      {"session", session}, {"stream", stream.at("stream")},
+      {"stream_checkpoint_identity",
+       stream.at("stream_checkpoint_identity")}});
+}
+
+json::object abort_stream(const std::string& session,
+                          const json::object& stream) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.contract_pair_stream_abort"},
+      {"session", session}, {"stream", stream.at("stream")},
+      {"stream_checkpoint_identity",
+       stream.at("stream_checkpoint_identity")}});
 }
 
 json::object session_stats(const std::string& session) {
@@ -227,6 +343,108 @@ bool payload_has_handle(const json::array& records,
   return false;
 }
 
+void regulated_center_primitive_preserves_pair_lower_halo() {
+  std::string session;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "rational"}, {"output_digits", 50},
+        {"chart_capacity", 1}, {"local_capacity", 1},
+        {"match_capacity", 1}, {"tile_plan_capacity", 2},
+        {"transport_state_capacity", 2}, {"line_result_capacity", 2}});
+    if (created.at("status") != "ok")
+      throw std::runtime_error(
+          "regulated session.create: " + json::serialize(created));
+    session = std::string(created.at("session").as_string());
+    const auto chart = prepare_anchor_chart(session);
+    const auto anchor = solve_regulated_anchor(session, chart);
+    const auto lower_plan = prepare_plan(
+        session, "regulated-lower-plan", "-1/3", chart);
+    const auto upper_plan = prepare_plan(
+        session, "regulated-upper-plan", "1/2", chart);
+    const auto lower = run_state(
+        session, lower_plan, "regulated-lower-plan", anchor, "lower",
+        "regulated-lower-state");
+    const auto upper = run_state(
+        session, upper_plan, "regulated-upper-plan", anchor, "upper",
+        "regulated-upper-state");
+    if (lower.at("status") != "ok" || upper.at("status") != "ok")
+      throw std::runtime_error(
+          "regulated retained states failed: " + json::serialize(lower) +
+          " / " + json::serialize(upper));
+
+    const auto paired = contract_pair(
+        session, lower, upper,
+        json::array{regulated_observable(
+            "pair-regulated-halo", "pair-regulated-halo-checkpoint")},
+        "pair-regulated-halo-root");
+    if (paired.at("status") != "ok" ||
+        paired.at("lines").as_array().size() != 1)
+      throw std::runtime_error(
+          "regulated pair contraction failed: " + json::serialize(paired));
+    const auto& paired_line =
+        paired.at("lines").as_array().front().as_object();
+    const auto paired_export = export_line(session, paired_line);
+    if (paired_line.at("epsilon").as_object().at("min") != -1 ||
+        paired_export.at("status") != "ok" ||
+        paired_export.at("value").as_object().at("min") != -1 ||
+        std::abs(midpoint(paired_export) - 1.0) > 1e-40)
+      throw std::runtime_error(
+          "one-shot pair clipped the regulated primitive lower halo: " +
+          json::serialize(paired_export));
+
+    const auto stream = begin_stream(
+        session, lower, upper, "pair-stream-regulated-halo",
+        "pair-stream-regulated-halo-checkpoint",
+        "pair-stream-regulated-halo-root", -1);
+    const auto lower_added = add_stream_tile(
+        session, stream, "lower", 0,
+        regulated_row("pair-stream-regulated-halo:lower", "1"));
+    const auto upper_added = add_stream_tile(
+        session, stream, "upper", 0,
+        regulated_row("pair-stream-regulated-halo:upper", "2"));
+    const auto streamed = finish_stream(session, stream);
+    if (stream.at("status") != "ok" ||
+        lower_added.at("status") != "ok" ||
+        upper_added.at("status") != "ok" ||
+        streamed.at("status") != "ok" ||
+        streamed.at("lines").as_array().size() != 1)
+      throw std::runtime_error(
+          "regulated pair stream failed: " + json::serialize(streamed));
+    const auto& streamed_line =
+        streamed.at("lines").as_array().front().as_object();
+    const auto streamed_export = export_line(session, streamed_line);
+    if (streamed_line.at("epsilon").as_object().at("min") != -1 ||
+        streamed_export.at("status") != "ok" ||
+        streamed_export.at("value").as_object().at("min") != -1 ||
+        std::abs(midpoint(streamed_export) - 1.0) > 1e-40 ||
+        streamed_export.at("value") != paired_export.at("value"))
+      throw std::runtime_error(
+          "streamed pair clipped or changed the regulated primitive lower halo: " +
+          json::serialize(streamed_export));
+
+    for (const auto& state : {lower, upper})
+      (void)request(json::object{
+          {"schema", 2}, {"op", "transport.release"},
+          {"session", session},
+          {"transport_state", state.at("transport_state")}});
+    for (const auto& plan : {lower_plan, upper_plan})
+      (void)request(json::object{
+          {"schema", 2}, {"op", "tile.release"}, {"session", session},
+          {"tile_plan", plan.at("tile_plan")}});
+    (void)request(json::object{{"schema", 2}, {"op", "local.release"},
+                               {"session", session}, {"local", anchor}});
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", session}});
+    session.clear();
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    throw;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -239,6 +457,7 @@ int main() {
   std::string session;
   std::string restored_session;
   try {
+    regulated_center_primitive_preserves_pair_lower_halo();
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "rational"}, {"output_digits", 50},
@@ -385,18 +604,123 @@ int main() {
           "required pair tail did not fail atomically: " +
           json::serialize(require));
 
+    const auto before_stream_abort = session_stats(session);
+    const auto aborted_stream = begin_stream(
+        session, lower, upper, "pair-stream-abort",
+        "pair-stream-abort-checkpoint", "pair-stream-abort-root");
+    const auto open_stream_stats = session_stats(session);
+    const auto blocked_checkpoint = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+        {"path", checkpoint},
+        {"checkpoint_identity", "pair-open-stream-must-not-save"}});
+    const auto upper_first = add_stream_tile(
+        session, aborted_stream, "upper", 0,
+        row("pair-stream-abort:upper"));
+    const auto aborted = abort_stream(session, aborted_stream);
+    const auto aborted_again = abort_stream(session, aborted_stream);
+    const auto after_stream_abort = session_stats(session);
+    if (aborted_stream.at("status") != "ok" ||
+        open_stream_stats.at("transport_pair_streams") != 1 ||
+        open_stream_stats.at("pending_line_integrations") != 1 ||
+        blocked_checkpoint.at("status") != "error" ||
+        upper_first.at("status") != "error" ||
+        aborted.at("status") != "ok" || aborted.at("aborted") != true ||
+        aborted_again.at("status") != "ok" ||
+        aborted_again.at("already_absent") != true ||
+        after_stream_abort.at("transport_pair_streams") != 0 ||
+        after_stream_abort.at("pending_line_integrations") != 0 ||
+        before_stream_abort.at("line_results") !=
+            after_stream_abort.at("line_results") ||
+        before_stream_abort.at("transport_pair_contractions") !=
+            after_stream_abort.at("transport_pair_contractions") ||
+        before_stream_abort.at("line_integrations") !=
+            after_stream_abort.at("line_integrations"))
+      throw std::runtime_error(
+          "stream abort/checkpoint transaction was not atomic");
+
+    const auto before_poison = session_stats(session);
+    const auto poisoned_stream = begin_stream(
+        session, lower, upper, "pair-stream-poison",
+        "pair-stream-poison-checkpoint", "pair-stream-poison-root");
+    const auto malformed_tile = add_stream_tile(
+        session, poisoned_stream, "lower", 0,
+        row("pair-stream-poison:malformed", true));
+    const auto poisoned_retry = add_stream_tile(
+        session, poisoned_stream, "lower", 0,
+        row("pair-stream-poison:retry"));
+    const auto poison_abort = abort_stream(session, poisoned_stream);
+    const auto after_poison = session_stats(session);
+    if (malformed_tile.at("status") != "error" ||
+        poisoned_retry.at("status") != "error" ||
+        poison_abort.at("status") != "ok" ||
+        after_poison.at("transport_pair_streams") != 0 ||
+        after_poison.at("pending_line_integrations") != 0 ||
+        before_poison.at("line_results") != after_poison.at("line_results") ||
+        before_poison.at("transport_pair_contractions") !=
+            after_poison.at("transport_pair_contractions") ||
+        before_poison.at("line_integrations") !=
+            after_poison.at("line_integrations"))
+      throw std::runtime_error(
+          "malformed streamed row did not poison and abort atomically");
+
+    const auto before_premature = session_stats(session);
+    const auto premature_stream = begin_stream(
+        session, lower, upper, "pair-stream-premature",
+        "pair-stream-premature-checkpoint", "pair-stream-premature-root");
+    const auto premature_finish = finish_stream(session, premature_stream);
+    const auto after_premature = session_stats(session);
+    if (premature_finish.at("status") != "error" ||
+        after_premature.at("transport_pair_streams") != 0 ||
+        after_premature.at("pending_line_integrations") != 0 ||
+        before_premature.at("line_results") !=
+            after_premature.at("line_results") ||
+        before_premature.at("transport_pair_contractions") !=
+            after_premature.at("transport_pair_contractions") ||
+        before_premature.at("line_integrations") !=
+            after_premature.at("line_integrations"))
+      throw std::runtime_error(
+          "premature streamed finish did not terminate without publication");
+
+    const auto streamed_begin = begin_stream(
+        session, lower, upper, "pair-streamed",
+        "pair-streamed-checkpoint", "pair-streamed-root");
+    const auto streamed_lower = add_stream_tile(
+        session, streamed_begin, "lower", 0,
+        row("pair-streamed:lower"));
+    const auto streamed_upper = add_stream_tile(
+        session, streamed_begin, "upper", 0,
+        row("pair-streamed:upper"));
+    const auto streamed = finish_stream(session, streamed_begin);
+    if (streamed_begin.at("status") != "ok" ||
+        streamed_lower.at("status") != "ok" ||
+        streamed_upper.at("status") != "ok" ||
+        streamed_upper.at("next_side") != nullptr ||
+        streamed.at("status") != "ok" ||
+        streamed.at("persistent_tile_stream") != true ||
+        streamed.at("lines").as_array().size() != 1 ||
+        streamed.at("tile_integrations") != 2)
+      throw std::runtime_error(
+          "one-row transport-pair stream did not finish exactly: " +
+          json::serialize(streamed));
+    const auto streamed_export = export_line(
+        session, streamed.at("lines").as_array().front().as_object());
+    if (streamed_export.at("status") != "ok" ||
+        std::abs(midpoint(streamed_export) - 5.0 / 6.0) > 1e-40)
+      throw std::runtime_error(
+          "streamed pair value differs from the one-shot contraction");
+
     const auto after_success = session_stats(session);
     const auto lower_after_success = state_stats(session, lower);
     const auto upper_after_success = state_stats(session, upper);
-    if (counter(after_success, "transport_pair_contractions") != 3 ||
-        counter(after_success, "transport_pair_observables") != 4 ||
-        counter(after_success, "transport_contractions") != 6 ||
-        counter(after_success, "transport_observables") != 8 ||
-        counter(after_success, "line_integrations") != 8 ||
-        counter(lower_after_success, "contraction_operations") != 3 ||
-        counter(upper_after_success, "contraction_operations") != 3 ||
-        counter(lower_after_success, "contracted_observables") != 4 ||
-        counter(upper_after_success, "contracted_observables") != 4)
+    if (counter(after_success, "transport_pair_contractions") != 4 ||
+        counter(after_success, "transport_pair_observables") != 5 ||
+        counter(after_success, "transport_contractions") != 8 ||
+        counter(after_success, "transport_observables") != 10 ||
+        counter(after_success, "line_integrations") != 10 ||
+        counter(lower_after_success, "contraction_operations") != 4 ||
+        counter(upper_after_success, "contraction_operations") != 4 ||
+        counter(lower_after_success, "contracted_observables") != 5 ||
+        counter(upper_after_success, "contracted_observables") != 5)
       throw std::runtime_error(
           "successful pair counters are not additive and honest");
 
@@ -404,6 +728,7 @@ int main() {
     lines.push_back(one.at("lines").as_array().front().as_object());
     for (const auto& raw : many.at("lines").as_array())
       lines.push_back(raw.as_object());
+    lines.push_back(streamed.at("lines").as_array().front().as_object());
     const auto first_export_value = one_export.at("value");
     for (const auto& state : {lower, upper})
       if (request(json::object{
@@ -453,6 +778,11 @@ int main() {
             "paired checkpoint emitted a noncompact line record");
       const auto& provenance = record.at("provenance").as_object();
       const auto& source = provenance.at("source").as_object();
+      const auto& aggregate = provenance.at("aggregate").as_object();
+      if (aggregate.at("projection_mode") !=
+          "fused-stored-hash-monomial-stream-v2")
+        throw std::runtime_error(
+            "paired checkpoint lost its bounded-memory projection algorithm");
       for (const auto* side_name : {"lower", "upper"}) {
         const auto& side = source.at(side_name).as_object();
         const auto& state = side.at("transport_state").as_object();
@@ -460,6 +790,23 @@ int main() {
             state.if_contains("provenance_identity") != nullptr)
           throw std::runtime_error(
               "paired checkpoint recursively embedded owner provenance");
+        const auto& recipe_side = aggregate.at(side_name).as_object();
+        const auto& rows = recipe_side.at("rows").as_array();
+        if (rows.size() != 1)
+          throw std::runtime_error(
+              "paired checkpoint lost its compact row order");
+        const auto& row = rows.front().as_object();
+        if (row.size() != 3 || row.if_contains("tile") == nullptr ||
+            row.if_contains("exact_identity") == nullptr ||
+            row.if_contains("entries") == nullptr ||
+            row.if_contains("prepared_row") != nullptr)
+          throw std::runtime_error(
+              "paired checkpoint retained a deep prepared-row copy");
+        const auto& entry_facts = row.at("entries").as_array();
+        if (entry_facts.size() != 1 ||
+            entry_facts.front().as_object().size() != 4)
+          throw std::runtime_error(
+              "paired checkpoint lost its compact exact entry facts");
       }
     }
 
@@ -473,7 +820,7 @@ int main() {
         restored_stats.at("transport_states") != 0 ||
         restored_stats.at("tile_plans") != 0 ||
         restored_stats.at("locals") != 0 ||
-        restored_stats.at("line_results") != 4 ||
+        restored_stats.at("line_results") != 5 ||
         restored_export.at("value") != first_export_value)
       throw std::runtime_error(
           "first paired hidden-owner restore changed visibility or value");

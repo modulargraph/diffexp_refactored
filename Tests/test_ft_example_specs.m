@@ -14,6 +14,7 @@ kite = FTExampleSpec["kite"];
 banana4 = FTExampleSpec["banana4"];
 banana4Unequal = FTExampleSpec["banana4_unequal"];
 bananaUnequal = FTExampleSpec["banana_unequal"];
+pentagonMassive = FTExampleSpec["pentagon_massive"];
 bananaUnequalFT = FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
   FTExampleTopology["banana_unequal", "spec"],
   FTExampleSequence["banana_unequal"], {}];
@@ -23,7 +24,8 @@ banana4UnequalFT = FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
 
 assert["ft_examples_extended_names",
   ContainsAll[FTExampleNames[],
-    {"kite", "banana4", "banana4_unequal", "banana_unequal"}]];
+    {"kite", "banana4", "banana4_unequal", "banana_unequal",
+      "pentagon_massive"}]];
 assert["ft_banana_unequal_euclidean_definition",
   Length[bananaUnequal["LoopMomenta"]] === 3 &&
   Length[bananaUnequal["ExternalMomenta"]] === 1 &&
@@ -61,10 +63,27 @@ assert["ft_banana4_unequal_euclidean_definition",
       banana4Unequal["Propagators"]) === {2, 3/2, 4/3, 5/4, 1}];
 assert["ft_banana4_unequal_selects_scalar_top_integral",
   banana4UnequalFT["Levels"][0]["Masters"] === {{1, 1, 1, 1, 1}}];
+assert["ft_massive_pentagon_strictly_euclidean_definition",
+  Length[pentagonMassive["LoopMomenta"]] === 1 &&
+  Length[pentagonMassive["ExternalMomenta"]] === 4 &&
+  Length[pentagonMassive["Propagators"]] === 5 &&
+  pentagonMassive["Dimension"] === 4 - 2 FeynmanTrick`FTeps &&
+  ((# /. Thread[Join[pentagonMassive["LoopMomenta"],
+      pentagonMassive["ExternalMomenta"]] -> 0]) & /@
+      pentagonMassive["Propagators"]) === {1, 3/2, 4/3, 5/4, 6/5} &&
+  Sort[Eigenvalues[-Table[
+      pentagonMassive["ExternalMomenta"][[i]]*
+        pentagonMassive["ExternalMomenta"][[j]] /.
+          pentagonMassive["Replacements"],
+      {i, 4}, {j, 4}]]] === {1/4, 5/4, 5/4, 5/4} &&
+  (Expand[(Total[pentagonMassive["ExternalMomenta"]])^2] /.
+      pentagonMassive["Replacements"]) === -1];
 assert["ft_extended_left_to_right_sequences",
   FTExampleSequence["kite"] === {{1, 2}, {1, 3}, {1, 4}, {1, 5}} &&
   FTExampleSequence["banana4"] === {{1, 2}, {1, 3}, {1, 4}, {1, 5}} &&
   FTExampleSequence["banana4_unequal"] ===
+    {{1, 2}, {1, 3}, {1, 4}, {1, 5}} &&
+  FTExampleSequence["pentagon_massive"] ===
     {{1, 2}, {1, 3}, {1, 4}, {1, 5}} &&
   FTExampleSequence["banana_unequal"] === {{1, 2}, {1, 3}, {1, 4}}];
 

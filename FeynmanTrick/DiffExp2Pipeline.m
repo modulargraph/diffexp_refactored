@@ -72,6 +72,7 @@ RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
    deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
+   saveNativeTransportCheckpoint,
    fireTimeout, firePath,
    resume, checkpointDir, prepRoot, values},
   backend = envOrDefault["DE2_RECURRENCE_BACKEND", "Cpp"];
@@ -108,6 +109,9 @@ RunnerSettingsFromEnvironment[] := Module[
       envOrDefault["FT_MIGRATE_LEGACY_PREP", "0"]],
     allowStale = parseFlag["FT_ALLOW_STALE_LADDER_CHECKPOINT",
       envOrDefault["FT_ALLOW_STALE_LADDER_CHECKPOINT", "0"]],
+    saveNativeTransportCheckpoint = parseFlag[
+      "FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT",
+      envOrDefault["FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT", "0"]],
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
@@ -144,7 +148,8 @@ RunnerSettingsFromEnvironment[] := Module[
     "PrepCacheRoot" -> prepRoot, "ForcePrepRebuild" -> rebuild,
     "MigrateLegacyPreparation" -> migrateLegacyPrep,
     "ResumeCheckpoint" -> resume, "CheckpointDirectory" -> checkpointDir,
-    "AllowStaleCheckpoint" -> allowStale
+    "AllowStaleCheckpoint" -> allowStale,
+    "SaveNativeTransportCheckpoint" -> saveNativeTransportCheckpoint
   |>];
 
 Options[PipelinePlan] = {
@@ -168,6 +173,7 @@ Options[PipelinePlan] = {
   "RebuildPreparation" -> False,
   "MigrateLegacyPreparation" -> False,
   "AllowStaleCheckpoint" -> False,
+  "SaveNativeTransportCheckpoint" -> False,
   "StopAfterBoundaryLevel" -> None,
   "FIRETimeoutSeconds" -> 1800,
   "Runner" -> Automatic,
@@ -213,7 +219,8 @@ validatePlanOptions[settings_Association] := Module[{checks},
     And @@ (boolQ[settings[#]] & /@ {
       "ValueTransport", "BatchEndpointArms", "SingularMatchPrecondition",
       "RebuildPreparation", "MigrateLegacyPreparation",
-      "AllowStaleCheckpoint", "Asynchronous"}),
+      "AllowStaleCheckpoint", "SaveNativeTransportCheckpoint",
+      "Asynchronous"}),
     IntegerQ[settings["FIRETimeoutSeconds"]] &&
       settings["FIRETimeoutSeconds"] >= 1,
     AssociationQ[settings["ExtraEnvironment"]] &&
@@ -280,6 +287,8 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
     "MigrateLegacyPreparation" ->
       OptionValue["MigrateLegacyPreparation"],
     "AllowStaleCheckpoint" -> OptionValue["AllowStaleCheckpoint"],
+    "SaveNativeTransportCheckpoint" ->
+      OptionValue["SaveNativeTransportCheckpoint"],
     "FIREPath" -> firePath,
     "FIRETimeoutSeconds" -> OptionValue["FIRETimeoutSeconds"],
     "Asynchronous" -> OptionValue["Asynchronous"],
@@ -326,6 +335,8 @@ PipelinePlan[example_String, OptionsPattern[]] := Module[
       boolString[settings["MigrateLegacyPreparation"]],
     "FT_ALLOW_STALE_LADDER_CHECKPOINT" ->
       boolString[settings["AllowStaleCheckpoint"]],
+    "FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT" ->
+      boolString[settings["SaveNativeTransportCheckpoint"]],
     "FT_FIRE_TIMEOUT_SECONDS" -> inputString[settings["FIRETimeoutSeconds"]]
   |>;
   If[resume =!= None, env["FT_RESUME_LADDER_CHECKPOINT"] = resume];

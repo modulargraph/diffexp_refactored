@@ -90,6 +90,8 @@ migrateLegacyPrep = runnerSettings["MigrateLegacyPreparation"];
 resumeLadderFile = runnerSettings["ResumeCheckpoint"];
 ladderCheckpointDir = runnerSettings["CheckpointDirectory"];
 allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
+saveNativeTransportCheckpoint =
+  runnerSettings["SaveNativeTransportCheckpoint"];
 
 (* RunFullIteration is FIRE-dominated but independent of DiffExp2's
    transport settings.  Persist both the populated ftData and FIRE's
@@ -1118,28 +1120,63 @@ ft2CertificationForEntry[entry_Association, exportedResult_] := Which[
     ft2NativeFailure["cannot classify native output certification",
       <|"Entry" -> entry|>]];
 
+ft2RequestedCoefficientRows[raw_, requestedTop_Integer,
+    outputKind_String] := Module[{rowMin, availableTop, outputTop},
+  If[requestedTop < 0,
+    Return[Failure["FeynmanTrickOutputCompleteness", <|
+      "Detail" -> outputKind <>
+        " output requires a nonnegative integer requested epsilon order",
+      "RequestedCompleteMax" -> requestedTop|>], Module]];
+  rowMin = esMn[raw];
+  availableTop = esCMx[raw];
+  If[availableTop < requestedTop,
+    Return[Failure["FeynmanTrickOutputCompleteness", <|
+      "Detail" -> outputKind <>
+        " output does not cover the requested epsilon order",
+      "RequestedCompleteMax" -> requestedTop,
+      "AvailableCompleteMax" -> availableTop,
+      "RawMinPower" -> rowMin|>], Module]];
+  outputTop = Min[requestedTop, availableTop];
+  Table[{power, cleanNumber[esC[raw, power]]},
+    {power, rowMin, outputTop}]];
+
+ft2RequestedCoefficientRows[raw_, requestedTop_, outputKind_String] :=
+  Failure["FeynmanTrickOutputCompleteness", <|
+    "Detail" -> outputKind <>
+      " output requires a nonnegative integer requested epsilon order",
+    "RequestedCompleteMax" -> requestedTop|>];
+
 ft2StepwiseRow[example_, level_, master_, raw_, prefactor_,
-    certification_] := Module[{rowMin},
+    certification_] := Module[{rowMin, coefficients},
   If[!ft2OutputCertificationQ[certification],
     Return[Failure["FeynmanTrickOutputCertification", <|
       "Detail" -> "STEPWISE certification is malformed",
       "Certification" -> certification|>], Module]];
   rowMin = esMn[raw];
+  coefficients = ft2RequestedCoefficientRows[raw, epsOrder, "STEPWISE"];
+  If[FailureQ[coefficients], Return[coefficients, Module]];
   <|"Example" -> example, "Level" -> level, "Master" -> master,
     "EpsPrefactor" -> prefactor, "RawMinPower" -> rowMin,
-    "Coefficients" -> Table[{p, cleanNumber[esC[raw, p]]},
-      {p, rowMin, Min[0, esCMx[raw]]}],
+    "Coefficients" -> coefficients,
     "Certification" -> certification|>];
 
-ft2FinalRow[example_, raw_, certification_] :=
+ft2FinalRow[example_, raw_, certification_] := Module[
+  {coefficients, result},
   If[!ft2OutputCertificationQ[certification],
-    Failure["FeynmanTrickOutputCertification", <|
+    Return[Failure["FeynmanTrickOutputCertification", <|
       "Detail" -> "FINAL certification is malformed",
-      "Certification" -> certification|>],
-    <|"Example" -> example,
-      "Finite" -> cleanNumber[esC[raw, 0]],
-      "RawMinPower" -> esMn[raw],
-      "Certification" -> certification|>];
+      "Certification" -> certification|>], Module]];
+  coefficients = ft2RequestedCoefficientRows[raw, epsOrder, "FINAL"];
+  If[FailureQ[coefficients], Return[coefficients, Module]];
+  result = <|"Example" -> example,
+    "Finite" -> cleanNumber[esC[raw, 0]],
+    "RawMinPower" -> esMn[raw],
+    "Certification" -> certification|>;
+  (* EpsilonOrder==0 retains the exact historical FINAL association.  A
+     positive request adds the complete Laurent row without replacing the
+     long-standing Finite compatibility field. *)
+  If[epsOrder > 0,
+    Append[result, "Coefficients" -> coefficients], result]];
 
 ft2OutputLine[prefix_String, row_Association] := Module[{json},
   json = Quiet[Check[ExportString[
@@ -1888,6 +1925,27 @@ ft2NativeStageTiming[fields___] := If[
   Print["FTLADDER NATIVE STAGE ", fields, " t=", SessionTime[],
     " memory=", MemoryInUse[]]];
 
+(* The legacy/Wolfram combined-integrand gate uses LaurentLeadTol.  Native
+   transport is exact-singleton strict everywhere else; only FT integrate
+   observables carry this explicit, identity-bound bounded-relative policy. *)
+ft2DivergentCancellationPolicy[] := Module[{tol, decimal, provenance},
+  tol = Together[DiffExp2`Tolerances`Tol["LaurentLeadTol"]];
+  If[!FreeQ[tol, _?InexactNumberQ] || !TrueQ[0 < tol < 1],
+    Return[ft2NativeFailure[
+      "LaurentLeadTol must be one exact number strictly between zero and one",
+      <|"LaurentLeadTol" -> tol|>], Module]];
+  decimal = ToString[ScientificForm[N[tol, 50], 50,
+      NumberFormat -> (Row[{#1, "e", #3}] &)], OutputForm];
+  provenance = ExportString[<|
+      "schema" -> "feynman-trick-divergent-cancellation-v1",
+      "producer" -> "DiffExp2`Tolerances`Tol",
+      "key" -> "LaurentLeadTol",
+      "exact_value" -> ToString[tol, InputForm]|>,
+    "RawJSON", "Compact" -> True];
+  <|"Mode" -> "bounded-relative-acb",
+    "RelativeTolerance" -> decimal,
+    "Provenance" -> provenance|>];
+
 ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     entries_List, ledger_Association, physicalVar_Symbol, anchor_,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
@@ -1913,7 +1971,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
    nativeCheckpointState = None, nativeResumeRecord = None,
    restoredNativeQ = False, resumeCore, checkpointAuditRecord = None,
    publishResult = None, makeCheckpointAuditRecord, nativeBatchMatchesQ,
-   nativeResultByMaster = <||>, certifications},
+   nativeResultByMaster = <||>, certifications,
+   divergentCancellation},
   masterIndices = Lookup[entries, "MasterIndex", {}];
   batchKeys = DeleteDuplicates[Lookup[entries, "BatchKey", {}]];
   batchPayloadKeys =
@@ -2049,6 +2108,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       DiffExp2`EpsSeries`ESNew[0, #] & /@ currentBCs,
       DiffExp2`EpsSeries`ESNew[-integrationHalo,
         Join[ConstantArray[0, integrationHalo], #]] & /@ currentBCs];
+    divergentCancellation = ft2DivergentCancellationPolicy[];
+    If[FailureQ[divergentCancellation], Return[divergentCancellation, Module]];
     observables = Map[Function[entry, Module[{observable},
       observable = <|"Operation" -> entry["Case"],
         "Identity" -> entry["Identity"],
@@ -2062,7 +2123,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
            Full-local tail models are an optional certification product and
            can multiply memory across every projected tile; they are not
            needed for the finite-order FT ladder or analytic regularization. *)
-        Append[observable, "TailPolicy" -> "stored"], observable]]],
+        Join[observable, <|"TailPolicy" -> "stored",
+          "DivergentCancellation" -> divergentCancellation|>],
+        observable]]],
       nativeEntries];
     nativeBatchMatchesQ[candidate_, expectedAtlas_] :=
       AssociationQ[candidate] &&
@@ -2089,14 +2152,16 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           "ft2-native-observable-payload-",
           {nativeBatchPayloadIdentity, atlasPlanIdentity,
             Map[KeyTake[#, {"Operation", "Identity",
-                "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+                "CheckpointIdentity", "Epsilon", "TailPolicy",
+                "DivergentCancellation"}] &,
               observables]}];
         checkpointIdentity = ft2CanonicalIdentity[
           "ft2-native-transport-state-",
           {checkpointContractIdentity, atlasPlanIdentity,
             nativeBatchPayloadIdentity,
             Map[KeyTake[#, {"Operation", "Identity",
-                "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+                "CheckpointIdentity", "Epsilon", "TailPolicy",
+                "DivergentCancellation"}] &,
               observables]}];
         If[resumeCore["NativeBatchPayloadIdentity"] =!=
               nativeBatchPayloadIdentity ||
@@ -2125,7 +2190,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           "ft2-native-observable-payload-",
           {nativeBatchPayloadIdentity, atlasPlanIdentity,
             Map[KeyTake[#, {"Operation", "Identity",
-                "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+                "CheckpointIdentity", "Epsilon", "TailPolicy",
+                "DivergentCancellation"}] &,
               observables]}];
         ft2NativeStageTiming["observable-run-start"];
         batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
@@ -2141,7 +2207,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
             {checkpointContractIdentity, atlasPlanIdentity,
               nativeBatchPayloadIdentity,
               Map[KeyTake[#, {"Operation", "Identity",
-                  "CheckpointIdentity", "Epsilon", "TailPolicy"}] &,
+                  "CheckpointIdentity", "Epsilon", "TailPolicy",
+                  "DivergentCancellation"}] &,
                 observables]}];
           nativeCheckpointState = catch2[ft2NativeSaveCheckpoint[
             batch, checkpointSpec["Path"], checkpointIdentity]];
@@ -2585,7 +2652,13 @@ runExample[name_String] := Module[
           <|"Mode" -> "Restore",
             "Record" -> resumeCheckpoint["NativeTransportCheckpoint"],
             "ContractIdentity" -> nativeTransportContract["Identity"]|>,
-        nativeStateFile =!= "",
+        saveNativeTransportCheckpoint && nativeStateFile =!= "",
+          (* A completed native-state snapshot is an optional acceleration
+             point, not the default durability mechanism.  It retains every
+             chart/local needed to reconstruct the live C++ session and can
+             be much larger than the numerical result.  The ordinary
+             boundary checkpoint written immediately after export remains
+             enabled independently and is the memory-bounded default. *)
           <|"Mode" -> "Save", "Path" -> nativeStateFile,
             "ContractIdentity" -> nativeTransportContract["Identity"],
             "Publish" -> Function[{resumeRecord, auditRecord},

@@ -11,6 +11,8 @@
      - box family + pentagon: massless on-shell legs, d = 4-2eps
        box/box_bubble/box_triangle/double_box_planar: s = -1, t = -1/3
        pentagon: {s12,s23,s34,s45,s15} = {-1,-2,-3,-5,-7}
+     - pentagon_massive: squared internal masses {1,3/2,4/3,5/4,6/5},
+       p_i^2 = -1 and p_i.p_j = 1/4 (i != j), d = 4-2eps
 
    box_bubble drops double-box propagators 1 and 2; p1 and p2 then enter at
    the same vertex, so it is kinematically a 2-loop THREE-point function
@@ -47,6 +49,20 @@ FTExamplePentagonReplacements[] := {
   Global`p1 Global`p3 -> -1,
   Global`p2 Global`p4 -> -1,
   Global`p1 Global`p4 -> 5
+};
+
+(* Symmetric, strictly Euclidean four-vector point.  With
+   p5=-(p1+p2+p3+p4), p5^2=-1 as well.  The Euclidean Gram matrix -p_i.p_j
+   has eigenvalues {1/4,5/4,5/4,5/4}. *)
+FTExampleMassivePentagonReplacements[] := {
+  Global`p1^2 -> -1, Global`p2^2 -> -1,
+  Global`p3^2 -> -1, Global`p4^2 -> -1,
+  Global`p1 Global`p2 -> 1/4,
+  Global`p1 Global`p3 -> 1/4,
+  Global`p1 Global`p4 -> 1/4,
+  Global`p2 Global`p3 -> 1/4,
+  Global`p2 Global`p4 -> 1/4,
+  Global`p3 Global`p4 -> 1/4
 };
 
 FTExampleSpec[name_String] := Switch[name,
@@ -171,6 +187,22 @@ FTExampleSpec[name_String] := Switch[name,
         -(Global`l1 + Global`p1 + Global`p2 + Global`p3 + Global`p4)^2
       },
       "Replacements" -> FTExamplePentagonReplacements[],
+      "Dimension" -> 4 - 2*FeynmanTrick`FTeps
+    |>,
+  "pentagon_massive",
+    <|
+      "LoopMomenta" -> {Global`l1},
+      "ExternalMomenta" -> {
+        Global`p1, Global`p2, Global`p3, Global`p4},
+      "Propagators" -> {
+        1 - Global`l1^2,
+        3/2 - (Global`l1 + Global`p1)^2,
+        4/3 - (Global`l1 + Global`p1 + Global`p2)^2,
+        5/4 - (Global`l1 + Global`p1 + Global`p2 + Global`p3)^2,
+        6/5 - (Global`l1 + Global`p1 + Global`p2 +
+          Global`p3 + Global`p4)^2
+      },
+      "Replacements" -> FTExampleMassivePentagonReplacements[],
       "Dimension" -> 4 - 2*FeynmanTrick`FTeps
     |>,
   "box_bubble",

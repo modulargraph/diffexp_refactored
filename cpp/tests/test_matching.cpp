@@ -1,9 +1,12 @@
 #include "diffexp2/matching.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <initializer_list>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using diffexp2::ComplexBall;
@@ -78,6 +81,37 @@ EpsilonFrame<ComplexBall> ball_value_frame(const ComplexBall& value,
   return EpsilonFrame<ComplexBall>(0, std::move(coefficients));
 }
 
+ComplexBall real_ball_with_error(long midpoint, slong error_exponent) {
+  ComplexBall result(midpoint);
+  arb_add_error_2exp_si(acb_realref(result.raw()), error_exponent);
+  return result;
+}
+
+template <typename Scalar>
+std::optional<std::vector<std::pair<std::size_t, std::size_t>>>
+reference_exhaustive_full_rank_plan(
+    diffexp2::matching_detail::DenseScalarMatrix<Scalar> matrix,
+    std::size_t position = 0) {
+  if (position == matrix.size())
+    return std::vector<std::pair<std::size_t, std::size_t>>{};
+  for (std::size_t row = position; row < matrix.size(); ++row) {
+    for (std::size_t column = position; column < matrix.size(); ++column) {
+      if (diffexp2::matching_detail::zero_decision(matrix[row][column]) !=
+          diffexp2::matching_detail::ZeroDecision::Nonzero)
+        continue;
+      auto next = matrix;
+      diffexp2::matching_detail::apply_certified_pivot(
+          next, position, {row, column});
+      auto tail = reference_exhaustive_full_rank_plan(
+          std::move(next), position + 1);
+      if (!tail.has_value()) continue;
+      tail->insert(tail->begin(), {row, column});
+      return tail;
+    }
+  }
+  return std::nullopt;
+}
+
 void transformation_support_smoke() {
   const auto input = frame(0, {1, 2, 3});
   const auto constant = ExactLaurentPolynomial<Rational>::monomial(
@@ -150,11 +184,78 @@ void quotient_and_solve_smoke() {
       {frame(0, {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
        frame(0, {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})},
       "certified-zero triangular smoke");
-  check("certified-zero below pivot does not shorten completeness",
+  check("finite-zero below pivot shrinks RHS completeness honestly",
         triangular[0].complete_max() == 10 &&
-            triangular[1].complete_max() == 10 &&
+            triangular[1].complete_max() == 4 &&
             triangular[0].coefficient(0) == Rational(1) &&
             triangular[1].coefficient(0) == Rational(2));
+
+  const auto epsilon = frame(0, {0, 1, 0, 0, 0, 0});
+  const auto epsilon_squared = frame(0, {0, 0, 1, 0, 0, 0});
+  const auto epsilon_cubed = frame(0, {0, 0, 0, 1, 0, 0});
+  const auto zero_wide = frame(0, {0, 0, 0, 0, 0, 0});
+  const auto valuation_factorization =
+      diffexp2::factor_finite_laurent_system<Rational>(
+          {{epsilon, zero_wide}, {epsilon_squared, epsilon_cubed}},
+          "certified below-pivot valuation window");
+  const auto& valuation_factor =
+      valuation_factorization.steps.front().eliminations.front().factor;
+  check("certified below-pivot zeros do not consume quotient completeness",
+        valuation_factor.min_power() == 1 &&
+            valuation_factor.complete_max() == 4 &&
+            valuation_factor.coefficient(1) == Rational(1));
+
+  const auto twice_epsilon_cubed = frame(0, {0, 0, 0, 2, 0, 0});
+  const auto schur_factorization =
+      diffexp2::factor_finite_laurent_system<Rational>(
+          {{epsilon, epsilon_squared},
+           {epsilon_squared, twice_epsilon_cubed}},
+          "certified pivot-row valuation window");
+  check("certified pivot-row zeros do not consume Schur completeness",
+        schur_factorization.upper[1][1].min_power() == 3 &&
+            schur_factorization.upper[1][1].complete_max() == 5 &&
+            schur_factorization.upper[1][1].coefficient(3) == Rational(1));
+
+  const auto upper_window_matrix = FiniteLaurentMatrix<Rational>{
+      {rational_constant_frame("1"), epsilon_squared},
+      {zero_wide, rational_constant_frame("1")}};
+  const auto upper_window_factorization =
+      diffexp2::factor_exact_nonnegative_finite_laurent_system(
+          upper_window_matrix,
+          "certified stored-upper back-substitution window");
+  const auto short_polar_weight = frame(-2, {1, 0, 0, 0});
+  const auto wide_regular_weight = frame(0, {2, 0, 0, 0});
+  const auto canonical_epsilon_squared = frame(2, {1, 0, 0, 0});
+  const std::vector<EpsilonFrame<Rational>> upper_window_rhs = {
+      wide_regular_weight + canonical_epsilon_squared * short_polar_weight,
+      short_polar_weight};
+  const auto upper_window_solution =
+      diffexp2::solve_factorized_finite_laurent_system(
+          upper_window_factorization, upper_window_rhs,
+          "certified stored-upper back-substitution solve");
+  check("certified stored-upper zeros preserve solved CompleteMax",
+        upper_window_factorization.upper[0][1].min_power() == 2 &&
+            upper_window_solution[0].complete_max() == 3 &&
+            upper_window_solution[0].coefficient(0) == Rational(2) &&
+            upper_window_solution[1].complete_max() == 1);
+
+  const auto finite_zero_through_two =
+      diffexp2::matching_detail::
+          canonicalize_certified_or_preserve_ambiguous(
+              frame(0, {0, 0, 0}), "finite-zero contract");
+  const auto finite_zero_through_zero =
+      diffexp2::matching_detail::
+          canonicalize_certified_or_preserve_ambiguous(
+              frame(0, {0}), "short finite-zero contract");
+  const auto negative_power_zero_factor = diffexp2::finite_laurent_quotient(
+      finite_zero_through_zero, epsilon,
+      "finite zero divided by positive-valuation pivot");
+  const auto finite_zero_schur_update =
+      epsilon_squared -
+      negative_power_zero_factor * finite_zero_through_two;
+  check("finite zero times a negative-power factor loses completeness honestly",
+        negative_power_zero_factor.complete_max() == -1 &&
+            finite_zero_schur_update.complete_max() == 1);
 }
 
 void epsilon_lattice_saturation_smoke() {
@@ -340,6 +441,39 @@ void refined_acb_ambiguous_pivot_smoke() {
         rejected);
 }
 
+void laurent_off_pivot_ambiguity_smoke() {
+  ComplexBall::set_precision(256);
+  ComplexBall ambiguous;
+  arb_add_error_2exp_si(acb_realref(ambiguous.raw()), -80);
+  const auto one = ball_constant_frame("1");
+  const auto zero = ball_constant_frame("0");
+  const auto epsilon = ball_epsilon_frame("1");
+  const auto overlap = ball_value_frame(ambiguous);
+  const FiniteLaurentMatrix<ComplexBall> matrix = {
+      {one, overlap}, {zero, epsilon}};
+  const std::vector<EpsilonFrame<ComplexBall>> expected = {
+      ball_constant_frame("2"), ball_constant_frame("3")};
+  const auto right_hand_side =
+      diffexp2::apply_finite_laurent_matrix(matrix, expected);
+  const auto solved = diffexp2::solve_finite_laurent_system(
+      matrix, right_hand_side, "ambiguous off-pivot Laurent solve");
+  check("Laurent factorization ignores an ambiguous off-pivot valuation",
+        (solved[0].coefficient(0) - ComplexBall(2)).contains_zero() &&
+            (solved[1].coefficient(0) - ComplexBall(3)).contains_zero());
+
+  bool rejected = false;
+  try {
+    (void)diffexp2::factor_finite_laurent_system<ComplexBall>(
+        {{overlap}}, "ambiguous only Laurent pivot");
+  } catch (const MatchingArithmeticError& error) {
+    rejected = error.code == MatchingArithmeticErrorCode::AmbiguousZero &&
+               error.row == 0 && error.column == 0 &&
+               error.epsilon_power == 0;
+  }
+  check("Laurent factorization rejects an ambiguous required pivot loudly",
+        rejected);
+}
+
 void refined_acb_ambiguous_off_pivot_smoke() {
   ComplexBall::set_precision(256);
   ComplexBall two(2);
@@ -379,6 +513,122 @@ void refined_acb_ambiguous_off_pivot_smoke() {
                 .contains_zero());
 }
 
+void verified_midpoint_preconditioner_smoke() {
+  // A 13x13 Hilbert matrix at the minimum production precision is a compact
+  // deterministic wrapping stress case.  Direct interval elimination cannot
+  // find a complete certified pivot path, although the interval matrix is
+  // regular.  A fixed dyadic midpoint-inverse row transform exposes that
+  // regularity without classifying any zero-containing coefficient.
+  ComplexBall::set_precision(64);
+  constexpr std::size_t size = 13;
+  FiniteLaurentMatrix<ComplexBall> matrix(
+      size, std::vector<EpsilonFrame<ComplexBall>>());
+  for (std::size_t row = 0; row < size; ++row) {
+    matrix[row].reserve(size);
+    for (std::size_t column = 0; column < size; ++column)
+      matrix[row].push_back(ball_constant_frame(
+          "1/" + std::to_string(row + column + 1), 40));
+  }
+  const auto direct = diffexp2::matching_detail::certified_full_rank_plan(
+      diffexp2::matching_detail::epsilon_zero_matrix(
+          matrix, "Hilbert direct leading matrix"),
+      0);
+  const auto factorization =
+      diffexp2::factor_exact_nonnegative_finite_laurent_system(
+          matrix, "verified Hilbert midpoint preconditioning");
+  std::vector<EpsilonFrame<ComplexBall>> ones(
+      size, ball_constant_frame("1", 40));
+  const auto right_hand_side =
+      diffexp2::apply_finite_laurent_matrix(matrix, ones);
+  const auto solved = diffexp2::solve_factorized_finite_laurent_system(
+      factorization, right_hand_side,
+      "verified Hilbert preconditioned solve");
+  const bool encloses_expected = std::all_of(
+      solved.begin(), solved.end(), [](const auto& value) {
+        return (value.coefficient(0) - ComplexBall(1)).contains_zero();
+      });
+  check("verified midpoint inverse rescues an Acb wrapping-only rank failure",
+        !direct.has_value() &&
+            factorization.left_preconditioner.has_value() &&
+            encloses_expected);
+  ComplexBall::set_precision(256);
+}
+
+void certified_pivot_quality_and_parity_smoke() {
+  ComplexBall::set_precision(256);
+  const auto weak = real_ball_with_error(1, -12);
+  const auto strong = real_ball_with_error(1, -100);
+  const auto ranked = diffexp2::matching_detail::certified_full_rank_plan(
+      diffexp2::matching_detail::DenseScalarMatrix<ComplexBall>{
+          {weak, ComplexBall(0)}, {ComplexBall(0), strong}},
+      0);
+  check("certified planner ranks tighter relative-radius pivot first",
+        ranked.has_value() && ranked->front() == std::pair{1UL, 1UL});
+
+  // Property comparison against the former exhaustive row/column DFS.  The
+  // matrices deliberately mix exact zeros, zero-overlapping balls, and
+  // certified nonzero balls; all are small enough for exhaustive reference.
+  std::uint64_t state = 0x9e3779b97f4a7c15ULL;
+  bool parity = true;
+  for (std::size_t sample = 0; sample < 40 && parity; ++sample) {
+    diffexp2::matching_detail::DenseScalarMatrix<ComplexBall> matrix(
+        3, std::vector<ComplexBall>(3, ComplexBall(0)));
+    for (std::size_t row = 0; row < 3; ++row) {
+      for (std::size_t column = 0; column < 3; ++column) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        const auto midpoint = static_cast<long>((state >> 32) % 7) - 3;
+        if (midpoint == 0 && ((state >> 8) & 1U) != 0)
+          matrix[row][column] = real_ball_with_error(0, -80);
+        else if (midpoint != 0 && ((state >> 9) & 1U) != 0)
+          matrix[row][column] = real_ball_with_error(midpoint, -80);
+        else
+          matrix[row][column] = ComplexBall(midpoint);
+      }
+    }
+    const auto reference = reference_exhaustive_full_rank_plan(matrix);
+    const auto planned =
+        diffexp2::matching_detail::certified_full_rank_plan(matrix, 0);
+    parity = reference.has_value() == planned.has_value();
+  }
+  check("small Acb property sweep matches exhaustive planner existence",
+        parity);
+}
+
+void dense_eleven_by_eleven_pivot_budget_smoke() {
+  ComplexBall::set_precision(256);
+  constexpr std::size_t size = 11;
+  diffexp2::matching_detail::DenseScalarMatrix<ComplexBall> matrix(
+      size, std::vector<ComplexBall>(size, ComplexBall(0)));
+  for (std::size_t row = 0; row + 1 < size; ++row) {
+    for (std::size_t column = 0; column < size; ++column) {
+      const auto midpoint = static_cast<long>(
+          1 + (row == column ? 1 : 0));
+      matrix[row][column] = real_ball_with_error(midpoint, -180);
+    }
+  }
+  // A duplicated final row with independent tiny radii is the adversarial
+  // interval analogue of a dense rank-10 matrix.  It offers certified pivots
+  // almost everywhere but no certifiable last pivot, which made the old DFS
+  // enumerate pivot permutations.
+  for (std::size_t column = 0; column < size; ++column)
+    matrix.back()[column] = matrix[size - 2][column];
+
+  const auto start = std::chrono::steady_clock::now();
+  const auto plan =
+      diffexp2::matching_detail::certified_full_rank_plan(matrix, 0);
+  const auto proof =
+      diffexp2::matching_detail::certified_full_rank_search(matrix, 0);
+  const auto elapsed = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - start).count();
+  std::cout << "  INFO: dense 11x11 bounded pivot planning " << elapsed
+            << " s\n";
+  check("dense 11x11 ambiguous-rank planner is globally bounded",
+        !plan.has_value() &&
+            proof == diffexp2::matching_detail::FullRankProofResult::
+                         SearchBudgetExhausted &&
+            elapsed < 2.0);
+}
+
 }  // namespace
 
 int main() {
@@ -389,7 +639,11 @@ int main() {
   refined_acb_match_smoke();
   ill_scaled_refinement_smoke();
   refined_acb_ambiguous_pivot_smoke();
+  laurent_off_pivot_ambiguity_smoke();
   refined_acb_ambiguous_off_pivot_smoke();
+  verified_midpoint_preconditioner_smoke();
+  certified_pivot_quality_and_parity_smoke();
+  dense_eleven_by_eleven_pivot_budget_smoke();
   std::cout << "Results: " << (checked - failed) << " / " << checked
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

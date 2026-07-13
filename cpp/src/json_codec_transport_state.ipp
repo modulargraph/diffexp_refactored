@@ -1139,10 +1139,9 @@ class StoredTransportArmState {
         {"tile_plan_checkpoint_identity",
          plan_owner_->checkpoint_identity()},
         {"arm", arm_},
-        {"matches", consumed_certificate_only_
-                        ? tile_sources_.size() - 1
-                        : consumed_compact_ ? cached_match_references_.size()
-                                            : matches_.size()},
+        {"matches", transition_count()},
+        {"value_hops", value_hop_count()},
+        {"basis_matches", basis_match_count()},
         {"tiles", tile_sources_.size()},
         {"contraction_operations", contraction_operations_.load()},
         {"contracted_observables", contracted_observables_.load()},
@@ -1278,19 +1277,38 @@ class StoredTransportArmState {
         record["derivation"] = nullptr;
       } else {
         const auto& derivation = *tile_sources_[tile]->retained_derivation();
-        record["derivation"] = json::object{
-            {"schema", "diffexp2-consumed-plan-match-certificate-v1"},
-            {"match", tile - 1},
-            {"source_match_checkpoint_identity",
-             derivation.at("source_match_checkpoint_identity")},
-            {"incoming_checkpoint_identity",
-             as_object(derivation.at("incoming"),
-                       "certificate-only incoming derivation")
-                 .at("checkpoint_identity")},
-            {"output_checkpoint_identity",
-             as_object(derivation.at("output"),
-                       "certificate-only output derivation")
-                 .at("checkpoint_identity")}};
+        const auto schema = required_string(derivation, "schema");
+        if (schema ==
+            "diffexp2-retained-plan-value-handoff-v1") {
+          record["derivation"] = json::object{
+              {"schema",
+               "diffexp2-consumed-plan-value-handoff-certificate-v1"},
+              {"match", tile - 1},
+              {"handoff_provenance_identity",
+               derivation.at("provenance_identity")},
+              {"incoming_checkpoint_identity",
+               as_object(derivation.at("incoming"),
+                         "certificate-only value incoming derivation")
+                   .at("checkpoint_identity")},
+              {"output_checkpoint_identity",
+               as_object(derivation.at("output"),
+                         "certificate-only value output derivation")
+                   .at("checkpoint_identity")}};
+        } else {
+          record["derivation"] = json::object{
+              {"schema", "diffexp2-consumed-plan-match-certificate-v1"},
+              {"match", tile - 1},
+              {"source_match_checkpoint_identity",
+               derivation.at("source_match_checkpoint_identity")},
+              {"incoming_checkpoint_identity",
+               as_object(derivation.at("incoming"),
+                         "certificate-only incoming derivation")
+                   .at("checkpoint_identity")},
+              {"output_checkpoint_identity",
+               as_object(derivation.at("output"),
+                         "certificate-only output derivation")
+                   .at("checkpoint_identity")}};
+        }
       }
       chain.push_back(std::move(record));
     }
@@ -1348,6 +1366,30 @@ class StoredTransportArmState {
       result += basis.size();
     }
     return result;
+  }
+
+  std::size_t transition_count() const {
+    return consumed_certificate_only_
+        ? tile_sources_.size() - 1
+        : consumed_compact_ ? cached_match_references_.size()
+                            : matches_.size();
+  }
+
+  std::size_t value_hop_count() const {
+    if (!consumed_certificate_only_) return 0;
+    std::size_t count = 0;
+    for (std::size_t tile = 1; tile < tile_sources_.size(); ++tile) {
+      const auto& derivation = tile_sources_[tile]->retained_derivation();
+      if (derivation.has_value() &&
+          required_string(*derivation, "schema") ==
+              "diffexp2-retained-plan-value-handoff-v1")
+        ++count;
+    }
+    return count;
+  }
+
+  std::size_t basis_match_count() const {
+    return transition_count() - value_hop_count();
   }
 
   void validate() const {
@@ -1450,10 +1492,13 @@ class StoredTransportArmState {
           output->retained_derivation_owner() != nullptr ||
           !output->retained_derivation().has_value())
         throw std::invalid_argument(
-            "certificate-only transport tile has no sealed plan-match derivation");
+            "certificate-only transport tile has no sealed transport derivation");
       const auto& derivation = *output->retained_derivation();
-      if (required_string(derivation, "schema") !=
-              "diffexp2-retained-plan-match-local-materialization-v2" ||
+      const auto schema = required_string(derivation, "schema");
+      const bool value_handoff = schema ==
+          "diffexp2-retained-plan-value-handoff-v1";
+      if ((!value_handoff && schema !=
+              "diffexp2-retained-plan-match-local-materialization-v2") ||
           required_string(derivation, "tile_plan") !=
               plan_owner_->handle() ||
           required_string(derivation, "tile_plan_checkpoint_identity") !=
@@ -1487,11 +1532,187 @@ class StoredTransportArmState {
                           "equation_owner_signature_identity") !=
               equation_owner->owner_signature_identity() ||
           required_string(derivation, "equation_payload_identity") !=
-              equation_owner->physical_payload_identity() ||
-          required_string(derivation,
-                          "source_match_checkpoint_identity").empty())
+              equation_owner->physical_payload_identity())
         throw std::invalid_argument(
-            "certificate-only transport derivation lost its match/equation certificate");
+            "certificate-only transport derivation lost its equation certificate");
+      if (!value_handoff) {
+        if (required_string(derivation,
+                            "source_match_checkpoint_identity").empty())
+          throw std::invalid_argument(
+              "certificate-only transport derivation lost its match certificate");
+        continue;
+      }
+
+      require_exact_keys(
+          derivation,
+          {"schema", "capability", "tile_plan",
+           "tile_plan_checkpoint_identity", "tile_plan_provenance_identity",
+           "arm", "match", "producing", "receiving",
+           "receiver_center_physical_exact", "producing_local_exact",
+           "prototype_identity", "tail_contract", "accuracy_contract",
+           "epsilon", "incoming", "scope",
+           "coefficient_transport", "whole_arm_complete",
+           "evaluated_epsilon", "output",
+           "equation_owner_signature_identity",
+           "equation_payload_identity", "provenance_identity"},
+          "certificate-only plan-value handoff");
+      if (required_string(derivation, "capability") !=
+              "retained-native-regular-value-handoff-v1" ||
+          required_string(derivation, "scope") !=
+              "single-regular-to-regular-transport-hop" ||
+          required_string(derivation, "coefficient_transport") !=
+              "native-retained-only" ||
+          !derivation.at("whole_arm_complete").is_bool() ||
+          derivation.at("whole_arm_complete").as_bool() ||
+          required_string(derivation, "tile_plan_provenance_identity") !=
+              plan_owner_->provenance_identity() ||
+          required_string(derivation, "prototype_identity").empty())
+        throw std::invalid_argument(
+            "certificate-only plan-value handoff changed its sealed scope");
+      const auto& exact_match = retained.exact.matches[tile - 1];
+      const auto& producing = retained.charts.at(
+          exact_match.producing_chart);
+      const auto& receiving = retained.charts.at(
+          exact_match.receiving_chart);
+      const auto& producing_record = as_object(
+          derivation.at("producing"),
+          "certificate-only value producing binding");
+      const auto& receiving_record = as_object(
+          derivation.at("receiving"),
+          "certificate-only value receiving binding");
+      require_exact_keys(producing_record, {"chart", "owner"},
+                         "certificate-only value producing binding");
+      require_exact_keys(receiving_record, {"chart", "owner"},
+                         "certificate-only value receiving binding");
+      if (producing_record.at("chart") !=
+              encode_plan_chart(producing, exact_match.producing_chart) ||
+          receiving_record.at("chart") !=
+              encode_plan_chart(receiving, exact_match.receiving_chart) ||
+          required_string(derivation,
+                          "receiver_center_physical_exact") !=
+              receiving.geometry.center.str() ||
+          required_string(derivation, "producing_local_exact") !=
+              ((receiving.geometry.center - producing.geometry.center) /
+               producing.geometry.scale).str())
+        throw std::invalid_argument(
+            "certificate-only value handoff geometry differs from its exact plan");
+      const auto validate_owner = [](const json::value& raw,
+                                     const RetainedPlanChartBinding& binding,
+                                     const char* label) {
+        const auto& owner_record = as_object(raw, label);
+        require_exact_keys(
+            owner_record,
+            {"kind", "handle", "operator_identity",
+             "plan_exact_identity", "owner_signature_identity",
+             "physical_payload_identity"}, label);
+        const auto* owner = std::get_if<
+            std::shared_ptr<PreparedChartBase>>(&binding.owner);
+        if (!owner || !*owner ||
+            required_string(owner_record, "kind") !=
+                (*owner)->equation_owner_kind() ||
+            required_string(owner_record, "handle") != binding.handle ||
+            required_string(owner_record, "operator_identity") !=
+                binding.exact_identity ||
+            required_string(owner_record, "plan_exact_identity") !=
+                binding.exact_identity ||
+            required_string(owner_record, "owner_signature_identity") !=
+                (*owner)->owner_signature_identity() ||
+            required_string(owner_record, "physical_payload_identity") !=
+                (*owner)->physical_payload_identity())
+          throw std::invalid_argument(
+              std::string(label) + " differs from its retained plan owner");
+      };
+      validate_owner(producing_record.at("owner"), producing,
+                     "certificate-only producing owner");
+      validate_owner(receiving_record.at("owner"), receiving,
+                     "certificate-only receiving owner");
+      const auto& tail = as_object(
+          derivation.at("tail_contract"),
+          "certificate-only value tail contract");
+      require_exact_keys(
+          tail,
+          {"taylor_complete_max", "center_ratio_exact",
+           "tail_proxy_exact", "tail_proxy_max_exact"},
+          "certificate-only value tail contract");
+      const auto producing_local =
+          (receiving.geometry.center - producing.geometry.center) /
+          producing.geometry.scale;
+      const auto center_ratio =
+          exact_path_detail::abs(producing_local) /
+          producing.geometry.radius;
+      const auto nmax = as_u32(
+          tail.at("taylor_complete_max"),
+          "certificate-only value Taylor maximum");
+      Rational tail_proxy(1);
+      for (std::uint64_t power = 0;
+           power < static_cast<std::uint64_t>(nmax) + 1; ++power)
+        tail_proxy *= center_ratio;
+      const auto tail_proxy_max = Rational(required_string(
+          tail, "tail_proxy_max_exact"));
+      const auto* receiving_owner = std::get_if<
+          std::shared_ptr<PreparedChartBase>>(&receiving.owner);
+      if (!receiving_owner || !*receiving_owner ||
+          Rational(required_string(tail, "center_ratio_exact")) !=
+              center_ratio ||
+          Rational(required_string(tail, "tail_proxy_exact")) !=
+              tail_proxy ||
+          required_string(tail, "tail_proxy_max_exact") !=
+              (*receiving_owner)->regular_value_tail_proxy_max_exact() ||
+          !(tail_proxy < tail_proxy_max))
+        throw std::invalid_argument(
+            "certificate-only value handoff tail contract changed");
+      const auto& accuracy = as_object(
+          derivation.at("accuracy_contract"),
+          "certificate-only value accuracy contract");
+      require_exact_keys(
+          accuracy,
+          {"relative_error_max_exact", "gate",
+           "acb_preflight_required"},
+          "certificate-only value accuracy contract");
+      const Rational relative_error_max(required_string(
+          accuracy, "relative_error_max_exact"));
+      if (relative_error_max.sign() <= 0 ||
+          !(relative_error_max < Rational(1)) ||
+          required_string(accuracy, "gate") !=
+              "component-radii-lte-threshold-times-max-one-upper-magnitude-v1" ||
+          !accuracy.at("acb_preflight_required").is_bool() ||
+          accuracy.at("acb_preflight_required").as_bool() !=
+              (output->scalar_domain() == std::string("acb")))
+        throw std::invalid_argument(
+            "certificate-only value handoff accuracy contract changed");
+      const auto& epsilon = as_object(
+          derivation.at("epsilon"),
+          "certificate-only value epsilon contract");
+      const auto& evaluated = as_object(
+          derivation.at("evaluated_epsilon"),
+          "certificate-only evaluated epsilon contract");
+      require_exact_keys(epsilon, {"min", "max", "required_complete_max"},
+                         "certificate-only value epsilon contract");
+      require_exact_keys(evaluated,
+                         {"min", "max", "required_complete_max"},
+                         "certificate-only evaluated epsilon contract");
+      if (as_i32(epsilon.at("min"), "value epsilon minimum") !=
+              work_epsilon_.min_power ||
+          as_i32(epsilon.at("max"), "value epsilon maximum") !=
+              work_epsilon_.complete_max ||
+          as_i32(epsilon.at("required_complete_max"),
+                 "value epsilon required maximum") !=
+              match_required_complete_max_ ||
+          as_i32(evaluated.at("required_complete_max"),
+                 "evaluated epsilon required maximum") !=
+              match_required_complete_max_ ||
+          as_i32(evaluated.at("max"),
+                 "evaluated epsilon maximum") <
+              match_required_complete_max_)
+        throw std::invalid_argument(
+            "certificate-only value handoff epsilon completeness changed");
+      auto identity_input = derivation;
+      const auto identity = required_string(
+          identity_input, "provenance_identity");
+      identity_input.erase("provenance_identity");
+      if (json::serialize(canonical_json_value(identity_input)) != identity)
+        throw std::invalid_argument(
+            "certificate-only value handoff identity is inconsistent");
     }
   }
 

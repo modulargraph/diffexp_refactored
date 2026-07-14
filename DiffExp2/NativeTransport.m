@@ -763,14 +763,15 @@ nativeRationalShadowBasis[system_Association, req_Association, threads_,
   Quiet[DiffExp2`CppBackend`ClosePersistentSession[rationalBasis]];
   result];
 
-nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
+nativeReceivingBasis[system_Association, req_Association, threads_,
+    forceMonolithicRegular_:False] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
    sequence, components, built, expectedTypes, targetSCC, attempt,
    probePrints, shadowDecision},
   If[regular,
     built = DiffExp2`Solve`SolveNativeRegularBasis[
-      system, req, threads];
+      system, req, threads, forceMonolithicRegular];
     expectedTypes = {
       "DiffExp2NativeRegularBasis", "DiffExp2NativeSCCBasis"},
     sequence = Lookup[system, "IntegrationSequence", None];
@@ -1210,7 +1211,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   anchorOwner = anchor["NativeChart"];
   prepareArm[plan_Association] := Module[
     {systems, bases, built, prepared, kinds, ownerRecords, owners,
-     sccOwnerCount},
+     valueSolvers, sccOwnerCount},
     systems = Prepend[
       MapIndexed[Function[{chart, index},
         nativeStageTiming["chart-prepare-start index=", First[index]];
@@ -1224,8 +1225,11 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       Rest[systems]], "Anchor"];
     If[MemberQ[kinds, "SingularSCC"],
       containsSingularReceivingCharts = True];
-    sccOwnerCount = Count[Rest[systems],
-      system_ /; nativeReceivingSystemUsesSCCCompositeQ[system]];
+    sccOwnerCount = Count[Rest[systems], system_ /;
+      If[deferReceivingBases,
+        !TrueQ[Lookup[Lookup[system, "IndicialData", <||>],
+          "Regular", False]],
+        nativeReceivingSystemUsesSCCCompositeQ[system]]];
     If[deferReceivingBases,
       ownerRecords =
         DiffExp2`Solve`WithNativeSCCCompositeCacheReservation[
@@ -1246,8 +1250,10 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
               " ownerType=", Lookup[built, "Type", None]];
             built], Rest[systems]]];
       owners = Prepend[nativeBasisOwner /@ ownerRecords, anchorOwner];
+      valueSolvers = Lookup[ownerRecords, "ValueSolver", None];
       bases = ConstantArray[None, Length[systems]],
       ownerRecords = {};
+      valueSolvers = ConstantArray[None, Length[Rest[systems]]];
       bases = Prepend[
         DiffExp2`Solve`WithNativeSCCCompositeCacheReservation[
           (* Every eager target may select one exact Rational shadow.  The
@@ -1262,9 +1268,14 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
             nativeStageTiming["basis-solve-done index=", First[index]];
             built], Rest[systems]]], None];
       owners = Prepend[nativeBasisOwner /@ Rest[bases], anchorOwner]];
+    If[Length[valueSolvers] =!= Length[Rest[systems]],
+      err["E6", <|"ValueSolverCount" -> Length[valueSolvers],
+        "ReceivingChartCount" -> Length[Rest[systems]],
+        "Detail" -> "native deferred value-solver vector is not aligned with receiving chart systems"|>]];
     <|"Plan" -> plan, "ChartSystems" -> systems,
       "Bases" -> bases, "BasisKinds" -> kinds,
-      "Owners" -> owners, "OwnerRecords" -> ownerRecords|>];
+      "Owners" -> owners, "ValueSolvers" -> valueSolvers,
+      "OwnerRecords" -> ownerRecords|>];
   lowerData = prepareArm[lower];
   upperData = prepareArm[upper];
   sessions = DeleteDuplicates@Join[{anchor["Session"]},
@@ -1658,33 +1669,55 @@ nativeStreamTransportArm[atlas_Association, data_Association,
     arm_String, epsilon_Association, checkpointRoot_String,
     refinement_Association] := Module[
   {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
-   tiles = {atlas["Anchor"]}, hopEpsilon, basis, response, next, output},
+   valueSolvers = data["ValueSolvers"], tiles = {atlas["Anchor"]},
+   hopEpsilon, valueSolver, valueResponse, basis, response, next, output},
+  If[!ListQ[valueSolvers] || Length[valueSolvers] =!= Length[systems],
+    err["E6", <|"Arm" -> arm,
+      "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
+      "ReceivingChartCount" -> Length[systems],
+      "Detail" -> "streamed native value-solver vector is not aligned with receiving chart systems"|>]];
   hopEpsilon = <|"min" -> epsilon["min"], "max" -> epsilon["max"],
     "required_complete_max" -> epsilon["match_required_complete_max"]|>;
   output = Catch[
     Do[
-      nativeStageTiming["stream-basis-start arm=", arm,
-        " index=", index];
-      basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
-        Lookup[atlas, "Threads", Automatic]];
-      nativeStageTiming["stream-basis-done arm=", arm,
-        " index=", index,
-        " center=", InputForm[Lookup[systems[[index]], "Center", None]],
-        " regular=", TrueQ[Lookup[
-          Lookup[systems[[index]], "IndicialData", <||>],
-          "Regular", False]],
-        " elapsedMs=", Lookup[
-          Lookup[basis, "NativeSummary", <||>], "elapsed_ms", None],
-        " workers=", Lookup[
-          Lookup[basis, "NativeSummary", <||>], "worker_threads", None],
-        " capability=", Lookup[
-          Lookup[basis, "NativeSummary", <||>],
-          "execution_capability", Lookup[
+      basis = None;
+      valueSolver = valueSolvers[[index]];
+      valueResponse = If[AssociationQ[valueSolver],
+        DiffExp2`CppBackend`ConsumePersistentTransportValueHop[
+          atlas["Plan"], arm, index, valueSolver, current,
+          hopEpsilon, checkpointRoot],
+        <|"status" -> "ok", "used" -> False,
+          "reason" -> "receiver-has-no-regular-value-solver"|>];
+      If[FailureQ[valueResponse] || !AssociationQ[valueResponse] ||
+          Lookup[valueResponse, "status", "error"] =!= "ok",
+        err["E5", <|"Arm" -> arm, "Match" -> index,
+          "BackendFailure" -> valueResponse,
+          "Detail" -> "streamed native value-handoff eligibility or execution failed"|>]];
+      If[TrueQ[Lookup[valueResponse, "used", False]],
+        response = valueResponse,
+        nativeStageTiming["stream-basis-start arm=", arm,
+          " index=", index, " value-reason=",
+          Lookup[valueResponse, "reason", "ineligible"]];
+        basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
+          Lookup[atlas, "Threads", Automatic], True];
+        nativeStageTiming["stream-basis-done arm=", arm,
+          " index=", index,
+          " center=", InputForm[Lookup[systems[[index]], "Center", None]],
+          " regular=", TrueQ[Lookup[
+            Lookup[systems[[index]], "IndicialData", <||>],
+            "Regular", False]],
+          " elapsedMs=", Lookup[
+            Lookup[basis, "NativeSummary", <||>], "elapsed_ms", None],
+          " workers=", Lookup[
+            Lookup[basis, "NativeSummary", <||>], "worker_threads", None],
+          " capability=", Lookup[
             Lookup[basis, "NativeSummary", <||>],
-            "selection_capability", None]]];
-      response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
-        atlas["Plan"], arm, index, basis["Columns"], current,
-        hopEpsilon, checkpointRoot, refinement];
+            "execution_capability", Lookup[
+              Lookup[basis, "NativeSummary", <||>],
+              "selection_capability", None]]];
+        response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
+          atlas["Plan"], arm, index, basis["Columns"], current,
+          hopEpsilon, checkpointRoot, refinement]];
       If[FailureQ[response] || !AssociationQ[response] ||
           Lookup[response, "status", "error"] =!= "ok",
         If[AssociationQ[basis],
@@ -1697,7 +1730,8 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       If[AssociationQ[next] && !KeyExistsQ[next, "session"],
         next = Append[next, "session" -> atlas["Session"]]];
       If[!nativeOpaqueLocalHandleQ[next, atlas["Session"]] ||
-          !ListQ[Lookup[response, "consumed_basis_handles", None]],
+          !(TrueQ[Lookup[response, "used", False]] ||
+            ListQ[Lookup[response, "consumed_basis_handles", None]]),
         err["E5", <|"Arm" -> arm, "Match" -> index,
           "BackendResponse" -> response,
           "Detail" -> "streamed native transport hop returned a malformed consumed-local result"|>]];

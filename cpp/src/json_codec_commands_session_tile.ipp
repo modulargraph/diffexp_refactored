@@ -6,6 +6,7 @@ std::shared_ptr<PreparedChartBase> parse_prepared_chart(
     std::optional<std::string> geometry_record,
     std::optional<std::string> principal_matrix_record,
     std::optional<std::string> native_scc_capabilities,
+    std::optional<std::string> regular_value_relative_accuracy_max_exact,
     SCCCertificate scc,
     std::string signature) {
   const auto started = std::chrono::steady_clock::now();
@@ -31,7 +32,9 @@ std::shared_ptr<PreparedChartBase> parse_prepared_chart(
   return make_retained_typed_shared<Scalar, PreparedChart<Scalar>>(
       handle, key, exact_identity, std::move(signature),
       std::move(geometry_record), std::move(principal_matrix_record),
-      std::move(native_scc_capabilities), std::move(scc), std::move(prepared),
+      std::move(native_scc_capabilities),
+      std::move(regular_value_relative_accuracy_max_exact), std::move(scc),
+      std::move(prepared),
       std::move(physical_equation), session->precision_bits,
       session->symbols, elapsed);
 }
@@ -812,4 +815,3 @@ json::object run_session_command(const json::object& root) {
     response["session"] = session->handle;
     return response;
   }
-

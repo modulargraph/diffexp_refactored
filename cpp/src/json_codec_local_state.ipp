@@ -1,3 +1,50 @@
+// Certify the accuracy of a value-handoff coefficient without reducing an
+// Arb enclosure to midpoint-relative bits.  The component radii and Acb
+// upper magnitude are exact dyadic mag values; a zero-crossing coefficient
+// therefore still passes when its absolute enclosure is sufficiently tight.
+bool value_handoff_accurate(const ComplexBall& value,
+                            const Rational& relative_error_max) {
+  if (!value.is_finite() || relative_error_max.sign() <= 0 ||
+      !(relative_error_max < Rational(1)))
+    return false;
+  mag_t scale;
+  mag_init(scale);
+  acb_get_mag(scale, value.raw());
+  if (mag_is_inf(scale)) {
+    mag_clear(scale);
+    return false;
+  }
+  if (mag_cmp_2exp_si(scale, 0) < 0) mag_one(scale);
+
+  fmpq_t threshold, scale_exact, allowed, radius_exact;
+  fmpq_init(threshold);
+  fmpq_init(scale_exact);
+  fmpq_init(allowed);
+  fmpq_init(radius_exact);
+  const auto threshold_string = relative_error_max.str();
+  const bool parsed =
+      fmpq_set_str(threshold, threshold_string.c_str(), 10) == 0;
+  if (parsed) {
+    fmpq_canonicalise(threshold);
+    mag_get_fmpq(scale_exact, scale);
+    fmpq_mul(allowed, threshold, scale_exact);
+  }
+  const auto radius_passes = [&](const mag_t radius) {
+    if (!parsed || mag_is_inf(radius)) return false;
+    mag_get_fmpq(radius_exact, radius);
+    return fmpq_cmp(radius_exact, allowed) <= 0;
+  };
+  const bool accurate =
+      radius_passes(arb_radref(acb_realref(value.raw()))) &&
+      radius_passes(arb_radref(acb_imagref(value.raw())));
+  fmpq_clear(radius_exact);
+  fmpq_clear(allowed);
+  fmpq_clear(scale_exact);
+  fmpq_clear(threshold);
+  mag_clear(scale);
+  return accurate;
+}
+
 std::vector<std::string> parse_symbols(const json::object& object) {
   std::vector<std::string> symbols;
   if (const auto* raw_symbols = object.if_contains("symbols")) {
@@ -490,6 +537,8 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
                     std::optional<std::string> geometry_record,
                     std::optional<std::string> principal_matrix_record,
                     std::optional<std::string> native_scc_capabilities,
+                    std::optional<std::string>
+                        regular_value_relative_accuracy_max_exact,
                     SCCCertificate scc, double prepare_parse_ms)
       : handle_(std::move(handle)), key_(std::move(key)),
         exact_identity_(std::move(exact_identity)),
@@ -497,6 +546,8 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
         geometry_record_(std::move(geometry_record)),
         principal_matrix_record_(std::move(principal_matrix_record)),
         native_scc_capabilities_(std::move(native_scc_capabilities)),
+        regular_value_relative_accuracy_max_exact_(
+            std::move(regular_value_relative_accuracy_max_exact)),
         scc_(std::move(scc)),
         prepare_parse_ms_(prepare_parse_ms) {}
   virtual ~PreparedChartBase() = default;
@@ -510,6 +561,7 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
   virtual std::int32_t frame_base() const = 0;
   virtual std::uint32_t frame_width() const = 0;
   virtual const char* d0_inverse_mode() const = 0;
+  virtual std::string regular_value_tail_proxy_max_exact() const = 0;
   virtual ChartStats stats() const = 0;
 
   const std::string& equation_owner_handle() const override {
@@ -535,6 +587,10 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
   const std::optional<std::string>& native_scc_capabilities() const {
     return native_scc_capabilities_;
   }
+  const std::optional<std::string>&
+  regular_value_relative_accuracy_max_exact() const {
+    return regular_value_relative_accuracy_max_exact_;
+  }
   const SCCCertificate& scc() const { return scc_; }
 
  protected:
@@ -545,6 +601,7 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
   std::optional<std::string> geometry_record_;
   std::optional<std::string> principal_matrix_record_;
   std::optional<std::string> native_scc_capabilities_;
+  std::optional<std::string> regular_value_relative_accuracy_max_exact_;
   SCCCertificate scc_;
   double prepare_parse_ms_ = 0.0;
 };
@@ -1826,7 +1883,9 @@ class StoredLocal final : public StoredLocalBase {
           (required_string(*retained_derivation_, "schema") ==
                "diffexp2-retained-plan-match-local-materialization-v1" ||
            required_string(*retained_derivation_, "schema") ==
-               "diffexp2-retained-plan-match-local-materialization-v2");
+               "diffexp2-retained-plan-match-local-materialization-v2" ||
+           required_string(*retained_derivation_, "schema") ==
+               "diffexp2-retained-plan-value-handoff-v1");
       if (sealed_plan_match_lineage_ &&
           (!homogeneous_match_derivation || retained_owner_ != nullptr))
         throw std::invalid_argument(
@@ -2439,6 +2498,8 @@ class StoredLocal final : public StoredLocalBase {
             schema !=
                 "diffexp2-retained-plan-match-local-materialization-v2" &&
             schema !=
+                "diffexp2-retained-plan-value-handoff-v1" &&
+            schema !=
                 "diffexp2-retained-rational-row-local-application-v1")
           throw std::domain_error(
               "native checkpoint does not serialize this retained local derivation kind");
@@ -2500,6 +2561,20 @@ class StoredLocal final : public StoredLocalBase {
                derivation.at("tile_plan_checkpoint_identity")},
               {"arm", derivation.at("arm")},
               {"match_index", derivation.at("match")}};
+        } else if (derivation_schema ==
+            "diffexp2-retained-plan-value-handoff-v1") {
+          owner_lineage = json::object{
+              {"tile_plan", derivation.at("tile_plan")},
+              {"tile_plan_checkpoint_identity",
+               derivation.at("tile_plan_checkpoint_identity")},
+              {"arm", derivation.at("arm")},
+              {"match_index", derivation.at("match")},
+              {"incoming_checkpoint_identity",
+               as_object(derivation.at("incoming"),
+                         "checkpoint value-handoff incoming")
+                   .at("checkpoint_identity")},
+              {"handoff_provenance_identity",
+               derivation.at("provenance_identity")}};
         } else {
           owner_lineage = rational_row_owner_lineage();
         }
@@ -2546,7 +2621,11 @@ class StoredLocal final : public StoredLocalBase {
         {"equation_owner_restore", std::move(equation_owner_restore)}};
       if (sealed_plan_match_lineage_)
         record["derivation_owner_restore"] =
-            "sealed-plan-match-lineage";
+            retained_derivation_.has_value() &&
+                    required_string(*retained_derivation_, "schema") ==
+                        "diffexp2-retained-plan-value-handoff-v1"
+                ? "sealed-plan-value-handoff-lineage"
+                : "sealed-plan-match-lineage";
       if (serialize_derivation_checkpoint_fields_) {
         record["retained_derivation"] = retained_derivation_.has_value()
             ? json::value(*retained_derivation_) : json::value(nullptr);
@@ -2676,7 +2755,9 @@ class StoredLocal final : public StoredLocalBase {
           "only a strongly owned plan-match local lineage can be sealed");
     const auto& derivation = *retained_derivation_;
     const auto derivation_schema = required_string(derivation, "schema");
-    if (derivation_schema !=
+    const bool value_handoff = derivation_schema ==
+        "diffexp2-retained-plan-value-handoff-v1";
+    if (!value_handoff && derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v1" &&
         derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v2")
@@ -2704,7 +2785,61 @@ class StoredLocal final : public StoredLocalBase {
       throw std::logic_error(
           "plan-match local lost its exact physical equation owner before sealing");
     json::object sealed;
-    if (derivation_schema ==
+    if (value_handoff) {
+      require_exact_keys(
+          derivation,
+          {"schema", "capability", "tile_plan",
+           "tile_plan_checkpoint_identity", "tile_plan_provenance_identity",
+           "arm", "match", "producing", "receiving",
+           "receiver_center_physical_exact", "producing_local_exact",
+           "prototype_identity", "tail_contract", "accuracy_contract",
+           "epsilon", "incoming", "scope", "coefficient_transport",
+           "whole_arm_complete", "evaluated_epsilon", "output",
+           "equation_owner_signature_identity",
+           "equation_payload_identity", "provenance_identity"},
+          "sealed plan-value handoff derivation");
+      if (required_string(derivation, "capability") !=
+              "retained-native-regular-value-handoff-v1" ||
+          required_string(derivation, "scope") !=
+              "single-regular-to-regular-transport-hop" ||
+          required_string(derivation, "coefficient_transport") !=
+              "native-retained-only" ||
+          !derivation.at("whole_arm_complete").is_bool() ||
+          derivation.at("whole_arm_complete").as_bool() ||
+          required_string(derivation,
+              "equation_owner_signature_identity") !=
+              equation_owner_->owner_signature_identity() ||
+          required_string(derivation, "equation_payload_identity") !=
+              equation_owner_->physical_payload_identity())
+        throw std::logic_error(
+            "plan-value handoff changed its scope or equation-owner binding before sealing");
+      auto identity_input = derivation;
+      const auto identity = required_string(
+          identity_input, "provenance_identity");
+      identity_input.erase("provenance_identity");
+      if (json::serialize(canonical_json_value(identity_input)) != identity)
+        throw std::logic_error(
+            "plan-value handoff derivation identity changed before sealing");
+      const auto& incoming = as_object(
+          derivation.at("incoming"), "sealed plan-value incoming");
+      sealed = json::object{
+          {"schema", "diffexp2-sealed-plan-value-handoff-lineage-v1"},
+          {"local", handle_},
+          {"local_checkpoint_identity", solution_.checkpoint_identity},
+          {"source_operator_identity", source_operator_identity_},
+          {"tile_plan", derivation.at("tile_plan")},
+          {"tile_plan_checkpoint_identity",
+           derivation.at("tile_plan_checkpoint_identity")},
+          {"arm", derivation.at("arm")},
+          {"match_index", derivation.at("match")},
+          {"incoming_checkpoint_identity",
+           incoming.at("checkpoint_identity")},
+          {"handoff_provenance_identity", identity},
+          {"equation_owner_signature_identity",
+           equation_owner_->owner_signature_identity()},
+          {"equation_payload_identity",
+           equation_owner_->physical_payload_identity()}};
+    } else if (derivation_schema ==
         "diffexp2-retained-plan-match-local-materialization-v2") {
       if (required_string(derivation,
               "equation_owner_signature_identity") !=

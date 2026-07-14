@@ -20,6 +20,7 @@
     std::optional<std::string> geometry_record;
     std::optional<std::string> principal_matrix_record;
     std::optional<std::string> native_scc_capabilities;
+    std::optional<std::string> regular_value_relative_accuracy_max_exact;
     if (analytic.is_object()) {
       const auto& analytic_object = analytic.as_object();
       if (const auto* geometry = analytic_object.if_contains("geometry"))
@@ -33,6 +34,19 @@
               analytic_object.if_contains("native_scc_capabilities"))
         native_scc_capabilities =
             canonical_native_scc_capabilities(*capabilities);
+      if (const auto* raw_accuracy = analytic_object.if_contains(
+              "regular_value_relative_accuracy_max_exact")) {
+        if (!raw_accuracy->is_string())
+          throw std::invalid_argument(
+              "prepared chart regular-value relative-accuracy contract must be an exact rational string");
+        const auto accuracy_text = std::string(raw_accuracy->as_string());
+        const Rational accuracy(accuracy_text);
+        if (accuracy.sign() <= 0 || !(accuracy < Rational(1)) ||
+            accuracy.str() != accuracy_text)
+          throw std::invalid_argument(
+              "prepared chart regular-value relative-accuracy contract must be a canonical exact rational strictly between zero and one");
+        regular_value_relative_accuracy_max_exact = accuracy_text;
+      }
     }
     json::object combined_analytic;
     combined_analytic["session"] = json::parse(session->analytic_identity);
@@ -70,16 +84,19 @@
       chart = parse_prepared_chart<Rational>(
           session, root, chart_handle, key, identity, geometry_record,
           principal_matrix_record, native_scc_capabilities,
+          regular_value_relative_accuracy_max_exact,
           std::move(scc), std::move(signature));
     else if (session->domain == "acb")
       chart = parse_prepared_chart<ComplexBall>(
           session, root, chart_handle, key, identity, geometry_record,
           principal_matrix_record, native_scc_capabilities,
+          regular_value_relative_accuracy_max_exact,
           std::move(scc), std::move(signature));
     else
       chart = parse_prepared_chart<SymbolicRational>(
           session, root, chart_handle, key, identity, geometry_record,
           principal_matrix_record, native_scc_capabilities,
+          regular_value_relative_accuracy_max_exact,
           std::move(scc), std::move(signature));
     {
       std::lock_guard<std::mutex> lock(session->mutex);
@@ -1663,4 +1680,3 @@
 
   throw std::invalid_argument("unknown persistent solver operation: " + operation);
 }
-

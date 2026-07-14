@@ -28,8 +28,8 @@ PrepareNativeRationalRow::usage = "PrepareNativeRationalRow[chartSystem, sourceS
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest with one full original-master physical q/C owner, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. Singular Acb execution is restricted to exact schedules without CASE-P collisions. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
-SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes use the ordered native SCC batch; a single strongly connected block uses the same retained full-system recurrence with exact eps^0 unit seeds. No coefficient tensor crosses the bridge.";
-PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSystem,req] prepares the retained equation owner needed by exact deferred tile planning without executing a disposable unit-column solve or retaining a complete regular basis. Multi-block systems return their SCC composite; a monolithic system retains its immutable physical chart owner and value-solver prototype.";
+SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic, forceMonolithic:False] returns a complete retained basis for any regular chart. Multi-block SCC envelopes normally use the ordered native SCC batch; forceMonolithic=True instead solves the full physical frame so a fallback basis has the same primitive owner as a deferred value-handoff plan. No coefficient tensor crosses the bridge.";
+PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSystem,req] prepares the primitive physical-frame equation owner and immutable value-solver prototype needed by exact deferred tile planning without executing a disposable unit-column solve or retaining a complete regular basis. Later value and monolithic-basis runs reuse the same collision-certified native chart owner.";
 WithNativeSCCCompositeCacheReservation::usage = "WithNativeSCCCompositeCacheReservation[count,expr] evaluates expr with capacity reserved for exactly count additional live native SCC composite owners. The reservation is dynamically scoped, never evicts a live public handle, and leaves ordinary direct preparation subject to the default bounded capacity.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 DropWolframPreparationCaches::usage = "DropWolframPreparationCaches[] drops only Wolfram-side chart/operator/multiplier preparation memo state while preserving every retained native session, chart, SCC, local, match, and tile-plan handle.";
@@ -1950,6 +1950,10 @@ sccBlockPrincipalMatrixRecord[cs_Association] := Module[
       "Detail" -> "native SCC principal matrix registry entry is malformed"|>]];
   sccExactMatrixRecord[matrix, variable, cs]];
 
+cppRegularValueRelativeAccuracyMaxExact[] := ToString[
+  DiffExp2`Tolerances`Tol["ResidTol"]/
+    10^DiffExp2`Tolerances`$SafetyDigits, InputForm];
+
 cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
   {systemIdentity, chartIdentity, chartAnalytic},
   (* SolveCacheTag joins diagonal SCC blocks back under the parent level's
@@ -1967,6 +1971,8 @@ cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
       ToString[Lookup[cs, "Prescriptions", {}], InputForm],
     "Prescriptions" ->
       (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}]),
+    "regular_value_relative_accuracy_max_exact" ->
+      cppRegularValueRelativeAccuracyMaxExact[],
     "geometry" -> cppPersistentGeometry[cs]|>;
   If[IntegerQ[Lookup[cs, "SCCBlock", None]],
     chartAnalytic = Join[chartAnalytic, <|
@@ -3817,9 +3823,8 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
       "metadata" -> localMetadata,
       "tail_proxy_max_exact" -> ToString[
         DiffExp2`Tolerances`Tol["LaurentLeadTol"]/100, InputForm],
-      "relative_accuracy_max_exact" -> ToString[
-        DiffExp2`Tolerances`Tol["ResidTol"]/
-          10^DiffExp2`Tolerances`$SafetyDigits, InputForm]|>]];
+      "relative_accuracy_max_exact" ->
+        cppRegularValueRelativeAccuracyMaxExact[]|>]];
 
 (* First production seam for a session-owned native LocalSolution.  It is
    intentionally narrower than SolveHomogeneous: no SCC orchestration,
@@ -6566,7 +6571,7 @@ SolveNativeSCCBasis[cs_Association, req_Association,
     "NativeSummary" -> KeyDrop[batch, {"results"}]|>];
 
 SolveNativeRegularBasis[cs_Association, req_Association,
-    threads_:Automatic] := Module[
+    threads_:Automatic, forceMonolithic_:False] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], d = cs["SystemSize"],
    epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax,
    physical, columns = {}, unitValues, built, cleanup, sessions, charts},
@@ -6576,7 +6581,8 @@ SolveNativeRegularBasis[cs_Association, req_Association,
   If[threads =!= Automatic && !(IntegerQ[threads] && threads > 0),
     err["E6", cs, <|"Threads" -> threads,
       "Detail" -> "native regular basis thread count must be a positive integer or Automatic"|>]];
-  If[AssociationQ[seq] && Length[Lookup[seq, "Components", {}]] > 1,
+  If[!TrueQ[forceMonolithic] && AssociationQ[seq] &&
+      Length[Lookup[seq, "Components", {}]] > 1,
     Return[SolveNativeSCCBasis[cs, req, threads], Module]];
   If[!AssociationQ[epsWindow] ||
       !IntegerQ[Lookup[epsWindow, "Min", None]] ||
@@ -6634,14 +6640,12 @@ SolveNativeRegularBasis[cs_Association, req_Association,
    value or fallback-basis runs to that same native owner.  Singular receivers
    continue to use SCC composites. *)
 PrepareNativeRegularBasisOwner[cs_Association, req_Association] := Module[
-  {seq = Lookup[cs, "IntegrationSequence", None], d = cs["SystemSize"],
+  {d = cs["SystemSize"],
    epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax, physical,
    unitValues, prepared, owner, expectedIdentity},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "PrepareNativeRegularBasisOwner requires a regular chart"|>]];
-  If[AssociationQ[seq] && Length[Lookup[seq, "Components", {}]] > 1,
-    Return[PrepareNativeSCCComposite[cs, req], Module]];
   If[!AssociationQ[epsWindow] ||
       !IntegerQ[Lookup[epsWindow, "Min", None]] ||
       !IntegerQ[Lookup[epsWindow, "CompleteMax", None]],

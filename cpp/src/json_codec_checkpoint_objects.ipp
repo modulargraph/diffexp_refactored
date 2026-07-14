@@ -958,14 +958,39 @@ restore_checkpoint_transport_arm_state_record(
         const auto& certificate = as_object(
             reference.at("derivation"),
             "checkpoint certificate-only hop derivation");
-        require_exact_keys(
-            certificate,
-            {"schema", "match", "source_match_checkpoint_identity",
-             "incoming_checkpoint_identity", "output_checkpoint_identity"},
-            "checkpoint certificate-only hop derivation");
-        if (required_string(certificate, "schema") !=
-                "diffexp2-consumed-plan-match-certificate-v1" ||
-            checkpoint_size_t(certificate.at("match"),
+        const auto certificate_schema = required_string(
+            certificate, "schema");
+        if (certificate_schema ==
+            "diffexp2-consumed-plan-value-handoff-certificate-v1") {
+          require_exact_keys(
+              certificate,
+              {"schema", "match", "handoff_provenance_identity",
+               "incoming_checkpoint_identity", "output_checkpoint_identity"},
+              "checkpoint certificate-only value-hop derivation");
+          const auto& local_derivation = found->second->retained_derivation();
+          if (!local_derivation.has_value() ||
+              required_string(*local_derivation, "schema") !=
+                  "diffexp2-retained-plan-value-handoff-v1" ||
+              required_string(certificate,
+                              "handoff_provenance_identity") !=
+                  required_string(*local_derivation,
+                                  "provenance_identity"))
+            throw std::invalid_argument(
+                "checkpoint certificate-only value hop lost its sealed handoff identity");
+        } else {
+          require_exact_keys(
+              certificate,
+              {"schema", "match", "source_match_checkpoint_identity",
+               "incoming_checkpoint_identity", "output_checkpoint_identity"},
+              "checkpoint certificate-only match-hop derivation");
+          if (certificate_schema !=
+                  "diffexp2-consumed-plan-match-certificate-v1" ||
+              required_string(certificate,
+                              "source_match_checkpoint_identity").empty())
+            throw std::invalid_argument(
+                "checkpoint certificate-only match hop lost its match identity");
+        }
+        if (checkpoint_size_t(certificate.at("match"),
                               "checkpoint certificate-only match index") !=
                 tile - 1 ||
             required_string(certificate,
@@ -973,9 +998,7 @@ restore_checkpoint_transport_arm_state_record(
                 tile_sources.back()->checkpoint_identity() ||
             required_string(certificate,
                             "output_checkpoint_identity") !=
-                found->second->checkpoint_identity() ||
-            required_string(certificate,
-                            "source_match_checkpoint_identity").empty())
+                found->second->checkpoint_identity())
           throw std::invalid_argument(
               "checkpoint certificate-only hop breaks its checkpoint chain");
       }

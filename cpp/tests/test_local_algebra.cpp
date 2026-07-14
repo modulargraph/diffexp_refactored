@@ -10,7 +10,6 @@ using diffexp2::ExactScalarDescriptor;
 using diffexp2::ComplexBall;
 using diffexp2::LocalSector;
 using diffexp2::LocalSolution;
-using diffexp2::PreparedEpsilonMultiplier;
 using diffexp2::PreparedRationalTaylorMultiplier;
 using diffexp2::PreparedSparseLocalMultiplierMatrix;
 using diffexp2::Rational;
@@ -225,26 +224,6 @@ int main() {
   // out(eps index 2,t^2,c1) = in(2,t^2,c1) + 2 in(2,t^1,c1)
   //                              + 3 in(1,t^2,c1)
   ok = ok && equal(coefficients[index(2, 2, 1, 3, 2)], "1012");
-
-  auto epsilon_generic = multiplier(-2, 0);
-  for (auto& kernel : epsilon_generic.kernels) {
-    const auto constant = kernel.front();
-    std::fill(kernel.begin(), kernel.end(), Rational(0));
-    kernel.front() = constant;
-  }
-  PreparedEpsilonMultiplier<Rational> epsilon_specialized;
-  epsilon_specialized.epsilon_shift = epsilon_generic.epsilon_shift;
-  epsilon_specialized.exact_identity = "1+3eps";
-  epsilon_specialized.kernels = {
-      Rational(1), Rational(3), Rational(0)};
-  const auto epsilon_reference = diffexp2::multiply_prepared_rational(
-      input, epsilon_generic, "epsilon-reference");
-  const auto epsilon_product = diffexp2::multiply_prepared_epsilon(
-      input, epsilon_specialized, "epsilon-specialized");
-  ok = ok && same_rational_local(epsilon_reference, epsilon_product) &&
-       epsilon_product.epsilon.min_power == -3 &&
-       epsilon_product.epsilon.complete_max == -1 &&
-       epsilon_product.sectors.front().a.canonical == "1/2";
 
   PreparedSparseLocalMultiplierMatrix<Rational> matrix;
   matrix.rows = 2;

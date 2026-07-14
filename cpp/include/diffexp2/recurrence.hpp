@@ -769,57 +769,15 @@ class RecurrenceSolver {
     auto acc = detail::zero_block<Scalar>(d_, width_);
     std::vector<std::int32_t> acc_valid(d_, kCompleteInfinity);
 
+    // Polynomial Nhat terms and unfused rational groups. The JSON codec may
+    // fuse equal denominators across lags in a later optimization; this form
+    // is coefficient-identical and keeps every per-contribution underflow
+    // witness before any cancellation.
     const auto max_nhat = std::min<std::uint32_t>(n, op_.nhat_lags.size() - 1);
-    if constexpr (std::is_same_v<Scalar, Rational>) {
-      // Exact denominator indices are producer-certified canonical identities.
-      // Fuse only on that certificate: equal-looking coefficient vectors at
-      // different indices deliberately remain separate buckets.
-      std::vector<std::optional<FrameBlock<Scalar>>> rational_rhs(
-          op_.rational_denominators.size());
-      for (std::uint32_t j = 1; j <= max_nhat; ++j) {
-        const auto input = get_block(n - j, log);
-        const auto& lag = op_.nhat_lags[j];
-        for (const auto& matrix : lag.polynomial) {
-          detail::add_block_inplace(acc, detail::matrix_shift_product(
-              matrix, input, op_, p_.adaptive_lower_frame_probe));
-        }
-        // Completeness is a per-lag contract. Record it before any exact
-        // numerator cancellation in a shared-denominator bucket.
-        update_nhat_validity(
-            acc_valid, lag, get_validity(n - j, log));
-        for (const auto& group : lag.rational) {
-          auto numerator = detail::zero_block<Scalar>(d_, width_);
-          for (const auto& matrix : group.numerator) {
-            // Perform every shift, including its E4 lower-frame check, before
-            // cancellation with a contribution from another lag is possible.
-            detail::add_block_inplace(numerator,
-                detail::matrix_shift_product(
-                    matrix, input, op_, p_.adaptive_lower_frame_probe));
-          }
-          auto& bucket = rational_rhs.at(group.denominator_index);
-          if (bucket.has_value()) {
-            detail::add_block_inplace(*bucket, numerator);
-          } else {
-            bucket.emplace(std::move(numerator));
-          }
-        }
-      }
-      for (std::size_t denominator_index = 0;
-           denominator_index < rational_rhs.size(); ++denominator_index) {
-        if (!rational_rhs[denominator_index].has_value()) continue;
-        detail::add_block_inplace(acc, detail::divide_rational(
-            *rational_rhs[denominator_index],
-            op_.rational_denominators[denominator_index]));
-      }
-    } else {
-      // Acb and symbolic coefficient fields retain the established unfused
-      // evaluation order exactly.
-      for (std::uint32_t j = 1; j <= max_nhat; ++j) {
-        const auto input = get_block(n - j, log);
-        detail::add_block_inplace(acc, apply_nhat_lag(op_.nhat_lags[j], input));
-        update_nhat_validity(
-            acc_valid, op_.nhat_lags[j], get_validity(n - j, log));
-      }
+    for (std::uint32_t j = 1; j <= max_nhat; ++j) {
+      const auto input = get_block(n - j, log);
+      detail::add_block_inplace(acc, apply_nhat_lag(op_.nhat_lags[j], input));
+      update_nhat_validity(acc_valid, op_.nhat_lags[j], get_validity(n - j, log));
     }
 
     const auto max_d = std::min<std::uint32_t>(n, op_.d_lags.size() - 1);

@@ -60,22 +60,6 @@ struct PreparedRationalTaylorMultiplier {
   }
 };
 
-// Exact multiplier which is independent of the chart variable,
-//
-//   eps^epsilon_shift * Sum_j kernels[j] eps^j.
-//
-// Keeping this shape separate avoids materializing an epsilon-by-Taylor
-// rectangle filled with zeros and avoids routing a scalar epsilon
-// convolution through the quadratic Taylor convolution.  CASE-P polar
-// compensation is the first user, but the operation is general for any
-// prepared multiplier proved constant in the local chart variable.
-template <typename Scalar>
-struct PreparedEpsilonMultiplier {
-  std::int32_t epsilon_shift = 0;
-  std::vector<Scalar> kernels;
-  std::string exact_identity;
-};
-
 template <typename Scalar>
 struct PreparedSparseLocalMultiplierMatrix {
   struct Entry {
@@ -396,68 +380,6 @@ inline void add_product<ComplexBall>(ComplexBall& accumulator,
 }
 
 }  // namespace local_algebra_detail
-
-template <typename Scalar>
-LocalSolution<Scalar> multiply_prepared_epsilon(
-    const LocalSolution<Scalar>& input,
-    const PreparedEpsilonMultiplier<Scalar>& multiplier,
-    std::string checkpoint_identity = {}) {
-  validate_local_solution(input, false);
-  if (!input.error.empty())
-    throw std::invalid_argument(
-        "native epsilon multiplication needs explicit error-envelope propagation");
-  const auto epsilon_width = input.epsilon.width();
-  if (multiplier.kernels.size() < epsilon_width)
-    throw std::invalid_argument(
-        "prepared epsilon multiplier has too few kernels");
-
-  LocalSolution<Scalar> output;
-  output.chart = input.chart;
-  output.epsilon = {
-      local_algebra_detail::checked_i32(
-          static_cast<std::int64_t>(input.epsilon.min_power) +
-              multiplier.epsilon_shift,
-          "epsilon-product minimum"),
-      local_algebra_detail::checked_i32(
-          static_cast<std::int64_t>(input.epsilon.complete_max) +
-              multiplier.epsilon_shift,
-          "epsilon-product maximum")};
-  output.taylor_complete_max = input.taylor_complete_max;
-  output.dimension = input.dimension;
-  output.prescriptions = input.prescriptions;
-  output.checkpoint_identity = checkpoint_identity.empty()
-      ? input.checkpoint_identity + ":mul-epsilon:" +
-            multiplier.exact_identity
-      : std::move(checkpoint_identity);
-  output.sectors.reserve(input.sectors.size());
-
-  const auto slab_width = input.taylor_width() * input.dimension;
-  for (const auto& sector : input.sectors) {
-    LocalSector<Scalar> product;
-    product.a = sector.a;
-    product.b = sector.b;
-    product.log_power = sector.log_power;
-    product.coefficients.assign(output.sector_size(),
-                                ScalarTraits<Scalar>::zero());
-    for (std::size_t out_ei = 0; out_ei < epsilon_width; ++out_ei) {
-      for (std::size_t kernel_ei = 0; kernel_ei <= out_ei;
-           ++kernel_ei) {
-        const auto& kernel = multiplier.kernels[kernel_ei];
-        if (ScalarTraits<Scalar>::is_zero(kernel)) continue;
-        const auto input_ei = out_ei - kernel_ei;
-        const auto output_offset = out_ei * slab_width;
-        const auto input_offset = input_ei * slab_width;
-        for (std::size_t coefficient = 0; coefficient < slab_width;
-             ++coefficient)
-          local_algebra_detail::add_product(
-              product.coefficients[output_offset + coefficient], kernel,
-              sector.coefficients[input_offset + coefficient]);
-      }
-    }
-    output.sectors.push_back(std::move(product));
-  }
-  return canonicalize_identical_local_sectors(std::move(output));
-}
 
 // Direct specialization of a sparse one-row local matrix.  Observable
 // contraction needs only one scalar local, while the generic matrix path

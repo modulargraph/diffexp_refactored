@@ -93,19 +93,19 @@ json::object solve_local(const std::string& session,
                          const std::string& radius,
                          const std::string& checkpoint,
                          json::array initial) {
+  json::array schedule_row{
+      json::object{{"case", "R"}, {"da", "0"}, {"db", "0"}},
+      json::object{{"case", "R"}, {"da", "0"}, {"db", "0"}}};
   json::array schedule;
-  for (std::uint32_t n = 0; n <= 4; ++n)
-    schedule.push_back(json::array{
-        json::object{{"case", "R"}, {"da", "0"}, {"db", "0"}},
-        json::object{{"case", "R"}, {"da", "0"}, {"db", "0"}}});
+  schedule.push_back(std::move(schedule_row));
   const auto solved = request(json::object{
       {"schema", 2}, {"op", "local.solve"}, {"session", session},
       {"chart", chart},
       {"run", json::object{
-           {"nmax", 4}, {"p", 0}, {"has_initial", true},
+           {"nmax", 0}, {"p", 0}, {"has_initial", true},
            {"adaptive_probe", false}, {"a_target", "0"},
            {"b_target", "0"}, {"a_shift_min", 0},
-           {"a_shifts", json::array{"0", "1", "2", "3", "4"}},
+           {"a_shifts", json::array{"0"}},
            {"schedule", std::move(schedule)},
            {"initial", std::move(initial)},
            {"initial_validity", json::array{2, 2}},
@@ -176,39 +176,31 @@ json::object run_state(const std::string& session,
 
 json::object multiplier(const std::string& scale,
                         std::int32_t epsilon_shift,
-                        const std::string& identity,
-                        std::uint32_t center_pole_order = 0) {
+                        const std::string& identity) {
   return json::object{
-      {"epsilon_shift", epsilon_shift},
-      {"center_pole_order", center_pole_order},
+      {"epsilon_shift", epsilon_shift}, {"center_pole_order", 0},
       {"kernels", json::array{
-           json::array{scale, "0", "0", "0", "0"},
-           json::array{"0", "0", "0", "0", "0"},
-           json::array{"0", "0", "0", "0", "0"}}},
+           json::array{scale}, json::array{"0"}, json::array{"0"}}},
       {"exact_identity", identity}, {"proven_zero", false}};
 }
 
 json::object cancellation_row(const std::string& identity,
-                              std::int32_t shift = 0,
-                              std::uint32_t center_pole_order = 0) {
+                              std::int32_t shift = 0) {
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
       {"columns", 2}, {"exact_identity", identity},
       {"entries", json::array{
            json::object{{"column", 0},
                         {"multiplier", multiplier("1", shift,
-                                                  identity + ":c0",
-                                                  center_pole_order)}},
+                                                  identity + ":c0")}},
            json::object{{"column", 1},
                         {"multiplier", multiplier("1", shift,
-                                                  identity + ":c1",
-                                                  center_pole_order)}}}}};
+                                                  identity + ":c1")}}}}};
 }
 
 json::object first_component_row(const std::string& identity,
                                  std::int32_t shift = 0,
-                                 bool malformed = false,
-                                 std::uint32_t center_pole_order = 0) {
+                                 bool malformed = false) {
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
       {"columns", 2}, {"exact_identity", identity},
@@ -216,7 +208,7 @@ json::object first_component_row(const std::string& identity,
            {"column", 0},
            {"multiplier", multiplier(
                 malformed ? "not-a-rational" : "1", shift,
-                identity + ":c0", center_pole_order)}}}}};
+                identity + ":c0")}}}}};
 }
 
 json::object observable(const std::string& identity,
@@ -303,7 +295,7 @@ int main() {
         {"domain", "rational"}, {"output_digits", 50},
         {"chart_capacity", 2}, {"local_capacity", 4},
         {"match_capacity", 2}, {"tile_plan_capacity", 2},
-        {"transport_state_capacity", 2}, {"endpoint_capacity", 6}});
+        {"transport_state_capacity", 2}, {"endpoint_capacity", 5}});
     session = std::string(created.at("session").as_string());
     const auto anchor_chart = prepare_chart(
         session, "endpoint-batch-anchor-chart", "0", "2");
@@ -410,53 +402,6 @@ int main() {
       throw std::runtime_error(
           "malformed later row did not roll back atomically");
 
-    const auto before_incomplete = session_stats(session);
-    const auto centered_before_incomplete = state_stats(
-        session, centered_state);
-    const auto incomplete = endpoint_batch(
-        session, centered_state,
-        json::array{
-            observable("valid-before-incomplete",
-                       "valid-before-incomplete-checkpoint",
-                       cancellation_row("valid-before-incomplete-row")),
-            observable("incomplete-tower", "incomplete-tower-checkpoint",
-                       first_component_row(
-                           "incomplete-tower-row", 0, false, 5))},
-        "endpoint-incomplete");
-    const auto after_incomplete = session_stats(session);
-    const auto centered_after_incomplete = state_stats(
-        session, centered_state);
-    if (incomplete.at("status") != "error" ||
-        before_incomplete.at("endpoints") !=
-            after_incomplete.at("endpoints") ||
-        before_incomplete.at("endpoint_limits") !=
-            after_incomplete.at("endpoint_limits") ||
-        before_incomplete.at("transport_endpoint_batches") !=
-            after_incomplete.at("transport_endpoint_batches") ||
-        centered_before_incomplete.at("endpoint_batch_operations") !=
-            centered_after_incomplete.at("endpoint_batch_operations") ||
-        after_incomplete.at("pending_endpoint_limits") != 0)
-      throw std::runtime_error(
-          "later incomplete endpoint tower did not roll back atomically");
-
-    const auto pole = endpoint_batch(
-        session, centered_state,
-        json::array{observable(
-            "center-pole", "center-pole-checkpoint",
-            cancellation_row("center-pole-row", 0, 1))},
-        "endpoint-pole");
-    if (pole.at("status") != "ok" ||
-        pole.at("endpoints").as_array().size() != 1)
-      throw std::runtime_error(
-          "centered nonzero-pole endpoint failed: " +
-          json::serialize(pole));
-    const auto pole_export = export_endpoint(
-        session, pole.at("endpoints").as_array().front().as_object());
-    if (pole_export.at("status") != "ok" ||
-        std::abs(midpoint(pole_export, 0)) > 1e-45)
-      throw std::runtime_error(
-          "centered nonzero-pole cancellation changed its finite value");
-
     json::array many_observables;
     for (int index = 0; index < 3; ++index)
       many_observables.push_back(observable(
@@ -525,11 +470,11 @@ int main() {
     const auto final_stats = session_stats(session);
     const auto centered_stats = state_stats(session, centered_state);
     const auto regular_stats = state_stats(session, regular_state);
-    if (counter(final_stats, "transport_endpoint_batches") != 5 ||
-        counter(final_stats, "transport_endpoint_rows") != 6 ||
-        counter(final_stats, "endpoint_limits") != 6 ||
-        counter(centered_stats, "endpoint_batch_operations") != 4 ||
-        counter(centered_stats, "endpoint_rows") != 5 ||
+    if (counter(final_stats, "transport_endpoint_batches") != 4 ||
+        counter(final_stats, "transport_endpoint_rows") != 5 ||
+        counter(final_stats, "endpoint_limits") != 5 ||
+        counter(centered_stats, "endpoint_batch_operations") != 3 ||
+        counter(centered_stats, "endpoint_rows") != 4 ||
         counter(regular_stats, "endpoint_batch_operations") != 1 ||
         counter(regular_stats, "endpoint_rows") != 1 ||
         final_stats.at("locals") != 4 || final_stats.at("matches") != 0 ||
@@ -540,8 +485,6 @@ int main() {
     std::vector<json::object> retained_endpoints;
     retained_endpoints.push_back(
         one.at("endpoints").as_array().front().as_object());
-    retained_endpoints.push_back(
-        pole.at("endpoints").as_array().front().as_object());
     for (const auto& raw : many.at("endpoints").as_array())
       retained_endpoints.push_back(raw.as_object());
     retained_endpoints.push_back(
@@ -594,38 +537,14 @@ int main() {
         container.payload_json.find("private:") != std::string::npos)
       throw std::runtime_error(
           "compact endpoint checkpoint lost its state closure or retained scratch locals");
-    std::size_t centered_projection_records = 0;
     for (const auto& raw : payload.at("retained_endpoints").as_array()) {
       const auto& record = raw.as_object();
-      const auto& row_record = record.at("source").as_object()
-          .at("row").as_object();
       if (record.at("schema") !=
               "diffexp2-retained-transport-endpoint-result-v1" ||
           record.at("source").as_object().if_contains("row") == nullptr)
         throw std::runtime_error(
             "endpoint checkpoint is not compact and row-bound");
-      if (const auto* raw_projection =
-              row_record.if_contains("projection")) {
-        ++centered_projection_records;
-        const auto& projection = raw_projection->as_object();
-        const bool nonzero_pole =
-            row_record.at("exact_identity") == "center-pole-row";
-        if (projection.at("schema") !=
-                "diffexp2-centered-scalar-row-endpoint-projection-v1" ||
-            projection.at("mode") !=
-                "centered-b0-rational-taylor-liveness-v1" ||
-            projection.at("source_taylor_complete_max") != 4 ||
-            projection.at("projected_taylor_complete_max") !=
-                (nonzero_pole ? 1 : 0) ||
-            !projection.at("fallback_reason").is_null())
-          throw std::runtime_error(
-              "centered endpoint liveness provenance changed: " +
-              json::serialize(projection));
-      }
     }
-    if (centered_projection_records != 5)
-      throw std::runtime_error(
-          "centered endpoint projection provenance count changed");
 
     const auto restored = request(json::object{
         {"schema", 2}, {"op", "checkpoint.restore"},
@@ -641,7 +560,7 @@ int main() {
     if (restored_stats.at("transport_states") != 0 ||
         restored_stats.at("tile_plans") != 0 ||
         restored_stats.at("locals") != 0 ||
-        restored_stats.at("endpoints") != 6 ||
+        restored_stats.at("endpoints") != 5 ||
         restored_export.at("value") != regular_export_value)
       throw std::runtime_error(
           "first hidden transport-endpoint restore changed visibility or value");

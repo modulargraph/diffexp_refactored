@@ -1,7 +1,6 @@
 #include "diffexp2/json_codec.hpp"
 
 #include "diffexp2/checkpoint.hpp"
-#include "diffexp2/immutable_recursive_cache.hpp"
 #include "diffexp2/line_integration.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
@@ -9,7 +8,6 @@
 #include "diffexp2/path_planner.hpp"
 #include "diffexp2/physical_ode.hpp"
 #include "diffexp2/recurrence.hpp"
-#include "diffexp2/scalar_row_endpoint.hpp"
 #include "diffexp2/singular_indicial.hpp"
 #include "diffexp2/tail_majorant.hpp"
 
@@ -47,7 +45,6 @@ json::value canonical_json_value(const json::value& value);
 void require_exact_keys(const json::object& object,
                         std::initializer_list<std::string_view> expected,
                         const char* label);
-void validate_checkpoint_exact_analytic_metadata(const json::value& raw);
 
 const json::object& as_object(const json::value& value, const char* label) {
   if (!value.is_object()) throw std::invalid_argument(std::string(label) + " must be an object");
@@ -463,54 +460,6 @@ json::value encode_scalar(const ComplexBall& value, int digits) {
   result.emplace_back(value.real_radius_exponent());
   result.emplace_back(value.imag_radius_exponent());
   return result;
-}
-
-// Match Transport.m's value-handoff significance policy without reducing an
-// Arb enclosure to midpoint-relative bits.  The two component radii and the
-// Acb absolute upper magnitude are exact dyadic mag values; compare their
-// fmpq images against threshold * Max[1, upper magnitude] so a tiny or
-// zero-crossing coefficient can still pass on certified absolute accuracy.
-bool value_handoff_accurate(const ComplexBall& value,
-                            const Rational& relative_error_max) {
-  if (!value.is_finite() || relative_error_max.sign() <= 0 ||
-      !(relative_error_max < Rational(1)))
-    return false;
-  mag_t scale;
-  mag_init(scale);
-  acb_get_mag(scale, value.raw());
-  if (mag_is_inf(scale)) {
-    mag_clear(scale);
-    return false;
-  }
-  if (mag_cmp_2exp_si(scale, 0) < 0) mag_one(scale);
-
-  fmpq_t threshold, scale_exact, allowed, radius_exact;
-  fmpq_init(threshold);
-  fmpq_init(scale_exact);
-  fmpq_init(allowed);
-  fmpq_init(radius_exact);
-  const auto threshold_string = relative_error_max.str();
-  const bool parsed =
-      fmpq_set_str(threshold, threshold_string.c_str(), 10) == 0;
-  if (parsed) {
-    fmpq_canonicalise(threshold);
-    mag_get_fmpq(scale_exact, scale);
-    fmpq_mul(allowed, threshold, scale_exact);
-  }
-  const auto radius_passes = [&](const mag_t radius) {
-    if (!parsed || mag_is_inf(radius)) return false;
-    mag_get_fmpq(radius_exact, radius);
-    return fmpq_cmp(radius_exact, allowed) <= 0;
-  };
-  const bool accurate =
-      radius_passes(arb_radref(acb_realref(value.raw()))) &&
-      radius_passes(arb_radref(acb_imagref(value.raw())));
-  fmpq_clear(radius_exact);
-  fmpq_clear(allowed);
-  fmpq_clear(scale_exact);
-  fmpq_clear(threshold);
-  mag_clear(scale);
-  return accurate;
 }
 
 template <typename Scalar>
@@ -1273,7 +1222,6 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
   virtual std::int32_t frame_base() const = 0;
   virtual std::uint32_t frame_width() const = 0;
   virtual const char* d0_inverse_mode() const = 0;
-  virtual std::string regular_value_tail_proxy_max_exact() const = 0;
   virtual ChartStats stats() const = 0;
 
   const std::string& equation_owner_handle() const override {
@@ -2604,9 +2552,7 @@ class StoredLocal final : public StoredLocalBase {
           (required_string(*retained_derivation_, "schema") ==
                "diffexp2-retained-plan-match-local-materialization-v1" ||
            required_string(*retained_derivation_, "schema") ==
-               "diffexp2-retained-plan-match-local-materialization-v2" ||
-           required_string(*retained_derivation_, "schema") ==
-               "diffexp2-retained-plan-value-handoff-v1");
+               "diffexp2-retained-plan-match-local-materialization-v2");
       if (sealed_plan_match_lineage_ &&
           (!homogeneous_match_derivation || retained_owner_ != nullptr))
         throw std::invalid_argument(
@@ -3219,8 +3165,6 @@ class StoredLocal final : public StoredLocalBase {
             schema !=
                 "diffexp2-retained-plan-match-local-materialization-v2" &&
             schema !=
-                "diffexp2-retained-plan-value-handoff-v1" &&
-            schema !=
                 "diffexp2-retained-rational-row-local-application-v1")
           throw std::domain_error(
               "native checkpoint does not serialize this retained local derivation kind");
@@ -3282,20 +3226,6 @@ class StoredLocal final : public StoredLocalBase {
                derivation.at("tile_plan_checkpoint_identity")},
               {"arm", derivation.at("arm")},
               {"match_index", derivation.at("match")}};
-        } else if (derivation_schema ==
-            "diffexp2-retained-plan-value-handoff-v1") {
-          owner_lineage = json::object{
-              {"tile_plan", derivation.at("tile_plan")},
-              {"tile_plan_checkpoint_identity",
-               derivation.at("tile_plan_checkpoint_identity")},
-              {"arm", derivation.at("arm")},
-              {"match_index", derivation.at("match")},
-              {"incoming_checkpoint_identity",
-               as_object(derivation.at("incoming"),
-                         "checkpoint value-handoff incoming")
-                   .at("checkpoint_identity")},
-              {"handoff_provenance_identity",
-               derivation.at("provenance_identity")}};
         } else {
           owner_lineage = rational_row_owner_lineage();
         }
@@ -3342,11 +3272,7 @@ class StoredLocal final : public StoredLocalBase {
         {"equation_owner_restore", std::move(equation_owner_restore)}};
       if (sealed_plan_match_lineage_)
         record["derivation_owner_restore"] =
-            retained_derivation_.has_value() &&
-                    required_string(*retained_derivation_, "schema") ==
-                        "diffexp2-retained-plan-value-handoff-v1"
-                ? "sealed-plan-value-handoff-lineage"
-                : "sealed-plan-match-lineage";
+            "sealed-plan-match-lineage";
       if (serialize_derivation_checkpoint_fields_) {
         record["retained_derivation"] = retained_derivation_.has_value()
             ? json::value(*retained_derivation_) : json::value(nullptr);
@@ -3476,9 +3402,7 @@ class StoredLocal final : public StoredLocalBase {
           "only a strongly owned plan-match local lineage can be sealed");
     const auto& derivation = *retained_derivation_;
     const auto derivation_schema = required_string(derivation, "schema");
-    const bool value_handoff = derivation_schema ==
-        "diffexp2-retained-plan-value-handoff-v1";
-    if (!value_handoff && derivation_schema !=
+    if (derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v1" &&
         derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v2")
@@ -3506,62 +3430,7 @@ class StoredLocal final : public StoredLocalBase {
       throw std::logic_error(
           "plan-match local lost its exact physical equation owner before sealing");
     json::object sealed;
-    if (value_handoff) {
-      require_exact_keys(
-          derivation,
-          {"schema", "capability", "tile_plan",
-           "tile_plan_checkpoint_identity", "tile_plan_provenance_identity",
-           "arm", "match", "producing", "receiving",
-           "receiver_center_physical_exact", "producing_local_exact",
-           "prototype_identity", "tail_contract", "accuracy_contract",
-           "epsilon", "incoming", "scope",
-           "coefficient_transport", "whole_arm_complete",
-           "evaluated_epsilon", "output",
-           "equation_owner_signature_identity",
-           "equation_payload_identity", "provenance_identity"},
-          "sealed plan-value handoff derivation");
-      if (required_string(derivation, "capability") !=
-              "retained-native-regular-value-handoff-v1" ||
-          required_string(derivation, "scope") !=
-              "single-regular-to-regular-transport-hop" ||
-          required_string(derivation, "coefficient_transport") !=
-              "native-retained-only" ||
-          !derivation.at("whole_arm_complete").is_bool() ||
-          derivation.at("whole_arm_complete").as_bool() ||
-          required_string(derivation,
-              "equation_owner_signature_identity") !=
-              equation_owner_->owner_signature_identity() ||
-          required_string(derivation, "equation_payload_identity") !=
-              equation_owner_->physical_payload_identity())
-        throw std::logic_error(
-            "plan-value handoff changed its scope or equation-owner binding before sealing");
-      auto identity_input = derivation;
-      const auto identity = required_string(
-          identity_input, "provenance_identity");
-      identity_input.erase("provenance_identity");
-      if (json::serialize(canonical_json_value(identity_input)) != identity)
-        throw std::logic_error(
-            "plan-value handoff derivation identity changed before sealing");
-      const auto& incoming = as_object(
-          derivation.at("incoming"), "sealed plan-value incoming");
-      sealed = json::object{
-          {"schema", "diffexp2-sealed-plan-value-handoff-lineage-v1"},
-          {"local", handle_},
-          {"local_checkpoint_identity", solution_.checkpoint_identity},
-          {"source_operator_identity", source_operator_identity_},
-          {"tile_plan", derivation.at("tile_plan")},
-          {"tile_plan_checkpoint_identity",
-           derivation.at("tile_plan_checkpoint_identity")},
-          {"arm", derivation.at("arm")},
-          {"match_index", derivation.at("match")},
-          {"incoming_checkpoint_identity",
-           incoming.at("checkpoint_identity")},
-          {"handoff_provenance_identity", identity},
-          {"equation_owner_signature_identity",
-           equation_owner_->owner_signature_identity()},
-          {"equation_payload_identity",
-           equation_owner_->physical_payload_identity()}};
-    } else if (derivation_schema ==
+    if (derivation_schema ==
         "diffexp2-retained-plan-match-local-materialization-v2") {
       if (required_string(derivation,
               "equation_owner_signature_identity") !=
@@ -6850,20 +6719,12 @@ std::vector<PseudoHit<Scalar>> parse_checkpoint_pseudo_hits(
   return result;
 }
 
-struct CheckpointValueHandoffPlanBinding {
-  json::object producing_chart;
-  json::object producing_owner;
-  json::object receiving_chart;
-  json::object receiving_owner;
-};
-
 template <typename Scalar>
 std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     const json::value& raw, const std::string& expected_domain,
     slong expected_precision_bits,
     std::shared_ptr<void> retained_owner = nullptr,
-    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner = nullptr,
-    const CheckpointValueHandoffPlanBinding* value_handoff_plan = nullptr) {
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner = nullptr) {
   AcbPrecisionLease lease(expected_precision_bits);
   ComplexBall::set_precision(expected_precision_bits);
   const auto& object = as_object(raw, "checkpoint retained local");
@@ -6905,12 +6766,9 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
   if (actual_keys != expected_keys)
     throw std::invalid_argument(
         "checkpoint retained local has unknown or missing fields");
-  const auto sealed_owner_restore = sealed_plan_match_lineage
-      ? required_string(object, "derivation_owner_restore")
-      : std::string();
   if (sealed_plan_match_lineage &&
-      sealed_owner_restore != "sealed-plan-match-lineage" &&
-      sealed_owner_restore != "sealed-plan-value-handoff-lineage")
+      required_string(object, "derivation_owner_restore") !=
+          "sealed-plan-match-lineage")
     throw std::invalid_argument(
         "checkpoint sealed local has an unsupported derivation-owner restore policy");
   const auto scalar_domain = required_string(object, "scalar_domain");
@@ -7007,18 +6865,9 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
     if (sealed_plan_match_lineage && derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v1" &&
         derivation_schema !=
-            "diffexp2-retained-plan-match-local-materialization-v2" &&
-        derivation_schema !=
-            "diffexp2-retained-plan-value-handoff-v1")
+            "diffexp2-retained-plan-match-local-materialization-v2")
       throw std::invalid_argument(
-          "checkpoint sealed lineage is not a supported transport materialization");
-    if (sealed_plan_match_lineage &&
-        ((derivation_schema ==
-              "diffexp2-retained-plan-value-handoff-v1") !=
-         (sealed_owner_restore ==
-              "sealed-plan-value-handoff-lineage")))
-      throw std::invalid_argument(
-          "checkpoint sealed transport derivation and restore policy disagree");
+          "checkpoint sealed lineage is not a plan-match materialization");
     if (derivation_schema ==
         "diffexp2-retained-rational-row-local-application-v1") {
       require_exact_keys(
@@ -7175,433 +7024,6 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
               source_operator_identity)
         throw std::invalid_argument(
             "checkpoint rational-row owner lineage is inconsistent");
-      retained_derivation = std::move(derivation);
-    } else if (derivation_schema ==
-        "diffexp2-retained-plan-value-handoff-v1") {
-      require_exact_keys(
-          derivation,
-          {"schema", "capability", "tile_plan",
-           "tile_plan_checkpoint_identity", "tile_plan_provenance_identity",
-           "arm", "match", "producing", "receiving",
-           "receiver_center_physical_exact", "producing_local_exact",
-           "prototype_identity", "tail_contract", "accuracy_contract",
-           "epsilon", "incoming", "scope", "coefficient_transport",
-           "whole_arm_complete", "evaluated_epsilon", "output",
-           "equation_owner_signature_identity",
-           "equation_payload_identity", "provenance_identity"},
-          "checkpoint plan-value handoff derivation");
-      if (required_string(derivation, "capability") !=
-              "retained-native-regular-value-handoff-v1" ||
-          required_string(derivation, "scope") !=
-              "single-regular-to-regular-transport-hop" ||
-          required_string(derivation, "coefficient_transport") !=
-              "native-retained-only" ||
-          !derivation.at("whole_arm_complete").is_bool() ||
-          derivation.at("whole_arm_complete").as_bool() ||
-          !equation_owner ||
-          std::string(equation_owner->equation_owner_kind()) !=
-              "prepared-chart" ||
-          required_string(derivation,
-                          "equation_owner_signature_identity") !=
-              equation_owner->owner_signature_identity() ||
-          required_string(derivation, "equation_payload_identity") !=
-              equation_owner->physical_payload_identity())
-        throw std::invalid_argument(
-            "checkpoint plan-value handoff changed its sealed scope or equation owner");
-      (void)required_string(derivation, "tile_plan");
-      (void)required_string(derivation, "tile_plan_checkpoint_identity");
-      (void)required_string(derivation, "tile_plan_provenance_identity");
-      const auto arm = required_string(derivation, "arm");
-      if (arm != "lower" && arm != "upper")
-        throw std::invalid_argument(
-            "checkpoint plan-value handoff arm is invalid");
-      (void)as_u64(derivation.at("match"),
-                   "checkpoint plan-value handoff match index");
-
-      struct ValueChartRecord {
-        std::size_t index = 0;
-        std::string handle;
-        std::string identity;
-        Rational center;
-        Rational scale;
-        Rational radius;
-        std::vector<Prescription> prescriptions;
-      };
-      const auto parse_value_chart = [](const json::value& raw,
-                                        const char* label) {
-        const auto& chart = as_object(raw, label);
-        require_exact_keys(
-            chart,
-            {"index", "chart", "identity", "center_exact",
-             "scale_exact", "radius_exact", "singular_center",
-             "prescriptions"},
-            label);
-        if (!chart.at("singular_center").is_bool() ||
-            chart.at("singular_center").as_bool())
-          throw std::invalid_argument(
-              std::string(label) + " is singular");
-        const auto encoded_index = as_u64(chart.at("index"), label);
-        if (encoded_index > std::numeric_limits<std::size_t>::max())
-          throw std::invalid_argument(
-              std::string(label) + " index exceeds size_t");
-        ValueChartRecord result{
-            static_cast<std::size_t>(encoded_index),
-            required_string(chart, "chart"),
-            required_string(chart, "identity"),
-            Rational(required_string(chart, "center_exact")),
-            Rational(required_string(chart, "scale_exact")),
-            Rational(required_string(chart, "radius_exact")), {}};
-        for (const auto& raw_prescription : as_array(
-                 chart.at("prescriptions"), label)) {
-          const auto& prescription = as_object(raw_prescription, label);
-          require_exact_keys(
-              prescription,
-              {"factor_exact", "sign", "multiplicity",
-               "leading_coefficient_sign"},
-              label);
-          Prescription parsed{
-              required_string(prescription, "factor_exact"),
-              as_i32(prescription.at("sign"), label),
-              as_u32(prescription.at("multiplicity"), label),
-              as_i32(prescription.at("leading_coefficient_sign"), label)};
-          if ((parsed.sign != -1 && parsed.sign != 1) ||
-              (parsed.leading_coefficient_sign != -1 &&
-               parsed.leading_coefficient_sign != 1) ||
-              parsed.multiplicity == 0)
-            throw std::invalid_argument(
-                std::string(label) + " has a malformed prescription");
-          result.prescriptions.push_back(std::move(parsed));
-        }
-        if (result.handle.empty() || result.identity.empty() ||
-            result.scale.is_zero() || result.radius.sign() <= 0)
-          throw std::invalid_argument(
-              std::string(label) + " has invalid exact geometry");
-        return result;
-      };
-      const auto validate_value_owner = [](
-          const json::value& raw, const ValueChartRecord& chart,
-          const char* label) {
-        const auto& owner = as_object(raw, label);
-        require_exact_keys(
-            owner,
-            {"kind", "handle", "operator_identity",
-             "plan_exact_identity", "owner_signature_identity",
-             "physical_payload_identity"},
-            label);
-        if (required_string(owner, "kind") != "prepared-chart" ||
-            required_string(owner, "handle") != chart.handle ||
-            required_string(owner, "operator_identity") != chart.identity ||
-            required_string(owner, "plan_exact_identity") !=
-                chart.identity ||
-            required_string(owner, "owner_signature_identity").empty() ||
-            required_string(owner, "physical_payload_identity").empty())
-          throw std::invalid_argument(
-              std::string(label) + " changed its exact chart binding");
-        return owner;
-      };
-      const auto& producing_binding = as_object(
-          derivation.at("producing"),
-          "checkpoint value producing binding");
-      const auto& receiving_binding = as_object(
-          derivation.at("receiving"),
-          "checkpoint value receiving binding");
-      require_exact_keys(producing_binding, {"chart", "owner"},
-                         "checkpoint value producing binding");
-      require_exact_keys(receiving_binding, {"chart", "owner"},
-                         "checkpoint value receiving binding");
-      if (value_handoff_plan == nullptr ||
-          producing_binding.at("chart") !=
-              value_handoff_plan->producing_chart ||
-          producing_binding.at("owner") !=
-              value_handoff_plan->producing_owner ||
-          receiving_binding.at("chart") !=
-              value_handoff_plan->receiving_chart ||
-          receiving_binding.at("owner") !=
-              value_handoff_plan->receiving_owner)
-        throw std::invalid_argument(
-            "checkpoint value chart/owner bindings differ from their restored tile plan");
-      const auto producing_chart = parse_value_chart(
-          producing_binding.at("chart"),
-          "checkpoint value producing chart");
-      const auto receiving_chart = parse_value_chart(
-          receiving_binding.at("chart"),
-          "checkpoint value receiving chart");
-      (void)validate_value_owner(
-          producing_binding.at("owner"), producing_chart,
-          "checkpoint value producing owner");
-      const auto receiving_owner = validate_value_owner(
-          receiving_binding.at("owner"), receiving_chart,
-          "checkpoint value receiving owner");
-      if (receiving_chart.handle != source_chart ||
-          receiving_chart.identity != source_operator_identity ||
-          required_string(receiving_owner, "owner_signature_identity") !=
-              equation_owner->owner_signature_identity() ||
-          required_string(receiving_owner, "physical_payload_identity") !=
-              equation_owner->physical_payload_identity())
-        throw std::invalid_argument(
-            "checkpoint value receiving owner differs from its restored physical chart");
-      const auto producing_local =
-          (receiving_chart.center - producing_chart.center) /
-          producing_chart.scale;
-      const auto center_ratio =
-          exact_path_detail::abs(producing_local) /
-          producing_chart.radius;
-      if (Rational(required_string(
-              derivation, "receiver_center_physical_exact")) !=
-              receiving_chart.center ||
-          Rational(required_string(derivation, "producing_local_exact")) !=
-              producing_local)
-        throw std::invalid_argument(
-            "checkpoint plan-value handoff changed its exact center geometry");
-
-      const auto prototype_identity = required_string(
-          derivation, "prototype_identity");
-      const auto prototype_value = json::parse(prototype_identity);
-      const auto& prototype = as_object(
-          prototype_value, "checkpoint value-solver prototype identity");
-      require_exact_keys(
-          prototype,
-          {"schema", "run", "metadata", "tail_proxy_max_exact",
-           "relative_accuracy_max_exact"},
-          "checkpoint value-solver prototype identity");
-      if (required_string(prototype, "schema") !=
-              "diffexp2-native-regular-value-solver-prototype-v1" ||
-          json::serialize(canonical_json_value(prototype_value)) !=
-              prototype_identity)
-        throw std::invalid_argument(
-            "checkpoint value-solver prototype identity is not canonical");
-      const auto& prototype_run = as_object(
-          prototype.at("run"), "checkpoint value-solver run");
-      require_exact_keys(
-          prototype_run,
-          {"nmax", "p", "has_initial", "adaptive_probe", "a_target",
-           "b_target", "a_shift_min", "a_shifts", "schedule", "initial",
-           "initial_validity", "source", "return_u"},
-          "checkpoint value-solver run");
-      const auto& prototype_metadata_object = as_object(
-          prototype.at("metadata"),
-          "checkpoint value-solver metadata");
-      require_exact_keys(
-          prototype_metadata_object,
-          {"chart", "tag", "prescriptions", "checkpoint_identity"},
-          "checkpoint value-solver metadata");
-      const auto prototype_metadata = parse_local_metadata(
-          prototype_metadata_object);
-      if (!(Rational(prototype_metadata.chart.center_exact) ==
-                receiving_chart.center) ||
-          !(Rational(prototype_metadata.chart.scale_exact) ==
-                receiving_chart.scale) ||
-          prototype_metadata.chart.infinite_radius ||
-          !acb_equal(prototype_metadata.chart.radius.raw(),
-                     ComplexBall::from_strings(
-                         receiving_chart.radius.str()).raw()) ||
-          !local_algebra_detail::same_prescriptions(
-              prototype_metadata.prescriptions,
-              receiving_chart.prescriptions) ||
-          !local_algebra_detail::same_prescriptions(
-              solution.prescriptions, receiving_chart.prescriptions) ||
-          prototype_metadata.a.domain != ExactDomain::Rational ||
-          prototype_metadata.b.domain != ExactDomain::Rational ||
-          !(Rational(prototype_metadata.a.canonical) == Rational(0)) ||
-          !(Rational(prototype_metadata.b.canonical) == Rational(0)))
-        throw std::invalid_argument(
-            "checkpoint value-solver metadata differs from its receiving chart");
-      const auto& tail = as_object(
-          derivation.at("tail_contract"),
-          "checkpoint value tail contract");
-      require_exact_keys(
-          tail,
-          {"producer_taylor_complete_max",
-           "receiver_taylor_complete_max", "center_ratio_exact",
-           "tail_proxy_exact", "tail_proxy_max_exact"},
-          "checkpoint value tail contract");
-      const auto producer_taylor_complete_max = as_u32(
-          tail.at("producer_taylor_complete_max"),
-          "checkpoint value producer Taylor maximum");
-      const auto receiver_taylor_complete_max = as_u32(
-          tail.at("receiver_taylor_complete_max"),
-          "checkpoint value receiver Taylor maximum");
-      if (as_u32(prototype_run.at("nmax"),
-                 "checkpoint value prototype Taylor maximum") !=
-          receiver_taylor_complete_max)
-        throw std::invalid_argument(
-            "checkpoint value receiver order differs from its prototype");
-      Rational tail_proxy(1);
-      for (std::uint64_t power = 0;
-           power < static_cast<std::uint64_t>(
-                       producer_taylor_complete_max) + 1;
-           ++power)
-        tail_proxy *= center_ratio;
-      const Rational tail_proxy_max(required_string(
-          tail, "tail_proxy_max_exact"));
-      const auto prepared_owner =
-          std::dynamic_pointer_cast<PreparedChartBase>(equation_owner);
-      if (!prepared_owner ||
-          Rational(required_string(tail, "center_ratio_exact")) !=
-              center_ratio ||
-          Rational(required_string(tail, "tail_proxy_exact")) !=
-              tail_proxy ||
-          required_string(tail, "tail_proxy_max_exact") !=
-              required_string(prototype, "tail_proxy_max_exact") ||
-          required_string(tail, "tail_proxy_max_exact") !=
-              prepared_owner->regular_value_tail_proxy_max_exact() ||
-          !(tail_proxy < tail_proxy_max))
-        throw std::invalid_argument(
-            "checkpoint plan-value handoff tail contract is inconsistent");
-      const auto& accuracy = as_object(
-          derivation.at("accuracy_contract"),
-          "checkpoint value accuracy contract");
-      require_exact_keys(
-          accuracy,
-          {"relative_error_max_exact", "gate",
-           "acb_preflight_required"},
-          "checkpoint value accuracy contract");
-      const Rational relative_error_max(required_string(
-          accuracy, "relative_error_max_exact"));
-      if (relative_error_max.sign() <= 0 ||
-          !(relative_error_max < Rational(1)) ||
-          required_string(accuracy, "relative_error_max_exact") !=
-              required_string(prototype, "relative_accuracy_max_exact") ||
-          required_string(accuracy, "gate") !=
-              "component-radii-lte-threshold-times-max-one-upper-magnitude-v1" ||
-          !accuracy.at("acb_preflight_required").is_bool() ||
-          accuracy.at("acb_preflight_required").as_bool() !=
-              (expected_domain == "acb"))
-        throw std::invalid_argument(
-            "checkpoint plan-value handoff accuracy contract is inconsistent");
-
-      const auto parse_value_epsilon = [](const json::value& raw,
-                                          const char* label) {
-        const auto& epsilon = as_object(raw, label);
-        require_exact_keys(epsilon, {"min", "max", "required_complete_max"},
-                           label);
-        EpsilonWindow window{
-            as_i32(epsilon.at("min"), label),
-            as_i32(epsilon.at("max"), label)};
-        (void)window.width();
-        const auto required = as_i32(
-            epsilon.at("required_complete_max"), label);
-        if (required < window.min_power ||
-            required > window.complete_max)
-          throw std::invalid_argument(
-              std::string(label) + " has an inconsistent complete edge");
-        return std::pair{window, required};
-      };
-      const auto [requested, requested_required] = parse_value_epsilon(
-          derivation.at("epsilon"),
-          "checkpoint value requested epsilon");
-      const auto [evaluated, evaluated_required] = parse_value_epsilon(
-          derivation.at("evaluated_epsilon"),
-          "checkpoint value evaluated epsilon");
-      if (evaluated_required != requested_required ||
-          evaluated.min_power > requested.min_power ||
-          evaluated.complete_max < requested.complete_max)
-        throw std::invalid_argument(
-            "checkpoint plan-value handoff lost evaluated epsilon completeness");
-      const auto& incoming = as_object(
-          derivation.at("incoming"), "checkpoint value incoming");
-      require_exact_keys(
-          incoming,
-          {"local", "chart", "source_operator_identity",
-           "checkpoint_identity", "epsilon", "taylor_complete_max",
-           "top_valid", "analytic_metadata"},
-          "checkpoint value incoming");
-      const auto& incoming_epsilon = as_object(
-          incoming.at("epsilon"), "checkpoint value incoming epsilon");
-      require_exact_keys(incoming_epsilon, {"min", "max"},
-                         "checkpoint value incoming epsilon");
-      const auto incoming_min = as_i32(
-          incoming_epsilon.at("min"),
-          "checkpoint value incoming epsilon minimum");
-      const auto incoming_max = as_i32(
-          incoming_epsilon.at("max"),
-          "checkpoint value incoming epsilon maximum");
-      const auto incoming_top_valid = parse_validity(
-          incoming.at("top_valid"));
-      (void)scoped_handle_id(required_string(incoming, "local"), "l:",
-                             "checkpoint value incoming local");
-      if (required_string(incoming, "chart") != producing_chart.handle ||
-          required_string(incoming, "source_operator_identity") !=
-              producing_chart.identity ||
-          required_string(incoming, "checkpoint_identity").empty() ||
-          as_u32(incoming.at("taylor_complete_max"),
-                 "checkpoint value incoming Taylor maximum") !=
-              producer_taylor_complete_max ||
-          incoming_min > incoming_max ||
-          evaluated.min_power != incoming_min ||
-          evaluated.complete_max !=
-              std::min(incoming_max, incoming_top_valid))
-        throw std::invalid_argument(
-            "checkpoint plan-value incoming differs from its producing chart");
-      validate_checkpoint_exact_analytic_metadata(
-          incoming.at("analytic_metadata"));
-      const auto& output = as_object(
-          derivation.at("output"), "checkpoint value output");
-      require_exact_keys(
-          output,
-          {"checkpoint_identity", "chart", "source_operator_identity",
-           "epsilon", "taylor_complete_max", "top_valid", "dimension"},
-          "checkpoint value output");
-      const auto& output_epsilon = as_object(
-          output.at("epsilon"), "checkpoint value output epsilon");
-      require_exact_keys(output_epsilon, {"min", "max"},
-                         "checkpoint value output epsilon");
-      const auto output_top_valid = parse_validity(output.at("top_valid"));
-      const auto& saved_diagnostics = as_object(
-          object.at("diagnostics"),
-          "checkpoint value output diagnostics");
-      if (required_string(output, "checkpoint_identity") !=
-              solution.checkpoint_identity ||
-          required_string(output, "chart") != source_chart ||
-          required_string(output, "source_operator_identity") !=
-              source_operator_identity ||
-          as_i32(output_epsilon.at("min"),
-                 "checkpoint value output epsilon minimum") !=
-              solution.epsilon.min_power ||
-          as_i32(output_epsilon.at("max"),
-                 "checkpoint value output epsilon maximum") !=
-              solution.epsilon.complete_max ||
-          as_u32(output.at("taylor_complete_max"),
-                 "checkpoint value output Taylor maximum") !=
-              solution.taylor_complete_max ||
-          solution.taylor_complete_max !=
-              receiver_taylor_complete_max ||
-          as_u32(output.at("dimension"),
-                 "checkpoint value output dimension") !=
-              solution.dimension ||
-          output_top_valid !=
-              parse_validity(saved_diagnostics.at("top_valid")) ||
-          output_top_valid < requested_required)
-        throw std::invalid_argument(
-            "checkpoint plan-value output disagrees with its retained tensor");
-      const auto& lineage = as_object(
-          object.at("retained_owner_lineage"),
-          "checkpoint plan-value owner lineage");
-      require_exact_keys(
-          lineage,
-          {"tile_plan", "tile_plan_checkpoint_identity", "arm",
-           "match_index", "incoming_checkpoint_identity",
-           "handoff_provenance_identity"},
-          "checkpoint plan-value owner lineage");
-      if (lineage.at("tile_plan") != derivation.at("tile_plan") ||
-          lineage.at("tile_plan_checkpoint_identity") !=
-              derivation.at("tile_plan_checkpoint_identity") ||
-          lineage.at("arm") != derivation.at("arm") ||
-          lineage.at("match_index") != derivation.at("match") ||
-          lineage.at("incoming_checkpoint_identity") !=
-              incoming.at("checkpoint_identity") ||
-          lineage.at("handoff_provenance_identity") !=
-              derivation.at("provenance_identity"))
-        throw std::invalid_argument(
-            "checkpoint plan-value owner lineage is inconsistent");
-      auto identity_input = derivation;
-      const auto derivation_identity = required_string(
-          derivation, "provenance_identity");
-      identity_input.erase("provenance_identity");
-      if (json::serialize(canonical_json_value(identity_input)) !=
-          derivation_identity)
-        throw std::invalid_argument(
-            "checkpoint plan-value derivation identity is inconsistent");
       retained_derivation = std::move(derivation);
     } else if (derivation_schema ==
         "diffexp2-retained-plan-match-local-materialization-v2") {
@@ -9008,14 +8430,6 @@ class PreparedChart final : public PreparedChartBase {
     return prepared_.d0_inverse_scalar.has_value()
         ? "retained-scalar" : "retained-frame";
   }
-  std::string regular_value_tail_proxy_max_exact() const override {
-    const auto structural_digits = std::min(
-        std::max(prepared_.chop_digits / 2, 0), 24);
-    Rational result(1);
-    for (int digit = 0; digit < structural_digits + 2; ++digit)
-      result = result / Rational(10);
-    return result.str();
-  }
   const char* equation_scalar_domain() const override {
     if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
     if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
@@ -9084,244 +8498,6 @@ class PreparedChart final : public PreparedChartBase {
   const std::optional<std::string>& exact_jordan_indicial_error() const {
     return exact_jordan_indicial_error_;
   }
-
-  std::shared_ptr<StoredLocalBase> solve_regular_value_handoff(
-      const std::string& local_handle, const json::object& run_prototype,
-      json::object metadata_object,
-      const std::shared_ptr<StoredLocalBase>& incoming_owner,
-      const RealEvaluationPoint& producing_point,
-      std::optional<std::int32_t> producing_rim,
-      const ExactAffineChart& receiving_geometry,
-      const std::vector<Prescription>& receiving_prescriptions,
-      EpsilonWindow requested_epsilon,
-      std::int32_t required_complete_max,
-      const std::string& result_checkpoint_identity,
-      json::object derivation,
-      std::shared_ptr<void> derivation_owner,
-      std::shared_ptr<PhysicalEquationOwnerBase> equation_owner) {
-    if (local_handle.empty() || result_checkpoint_identity.empty() ||
-        !incoming_owner || !derivation_owner || !equation_owner ||
-        equation_owner.get() != this)
-      throw std::invalid_argument(
-          "regular value handoff lost an identity or strong owner");
-    (void)requested_epsilon.width();
-    if (required_complete_max < requested_epsilon.min_power ||
-        required_complete_max > requested_epsilon.complete_max)
-      throw std::invalid_argument(
-          "regular value handoff epsilon contract is inconsistent");
-    if (!physical_equation_ || !has_identity_assembly() ||
-        !has_regular_singleton_partition())
-      throw std::invalid_argument(
-          "regular value handoff receiver is not a physical identity-frame value solver");
-
-    auto incoming =
-        std::dynamic_pointer_cast<StoredLocal<Scalar>>(incoming_owner);
-    if (!incoming || incoming->solution().dimension != prepared_.dimension)
-      throw std::invalid_argument(
-          "regular value handoff coefficient domain or dimension changed");
-    const auto& source = incoming->solution();
-    validate_local_solution(source, false);
-    if (!source.error.empty() || source.sectors.size() != 1 ||
-        source.sectors.front().a.domain != ExactDomain::Rational ||
-        source.sectors.front().b.domain != ExactDomain::Rational ||
-        !(Rational(source.sectors.front().a.canonical) == Rational(0)) ||
-        !(Rational(source.sectors.front().b.canonical) == Rational(0)) ||
-        source.sectors.front().log_power != 0)
-      throw std::invalid_argument(
-          "regular value handoff source is not one certified (0,0,0) sector");
-    if (source.epsilon.min_power < prepared_.frame_base)
-      throw std::domain_error(
-          "regular value handoff receiver frame would discard certified lower epsilon coefficients");
-    const auto source_complete_max = std::min(
-        source.epsilon.complete_max, incoming->top_valid());
-    // Assembly trims certified-zero lower epsilon rows.  The receiver's
-    // full initial slab was zero-filled above, so a stored minimum above the
-    // requested lower edge is an exact zero-padding case, not missing data.
-    if (source_complete_max < requested_epsilon.complete_max)
-      throw std::domain_error(
-          "regular value handoff source does not cover its requested complete epsilon window");
-
-    AcbPrecisionLease acb_lease(precision_bits_);
-    ComplexBall::set_precision(precision_bits_);
-    auto run = run_prototype;
-    const auto parse_started = std::chrono::steady_clock::now();
-    RecurrenceProblem<Scalar> problem;
-    parse_run_state(run, prepared_, problem);
-    if (problem.log_max != 0 || !problem.has_initial ||
-        problem.adaptive_lower_frame_probe ||
-        problem.source.has_value() || problem.return_u ||
-        !ScalarTraits<Scalar>::is_zero(problem.a_target) ||
-        !ScalarTraits<Scalar>::is_zero(problem.b_target) ||
-        problem.a_shift_min != 0 ||
-        problem.a_shifts.size() !=
-            static_cast<std::size_t>(problem.nmax) + 1 ||
-        problem.schedule.size() !=
-            static_cast<std::size_t>(problem.nmax) + 1)
-      throw std::invalid_argument(
-          "regular value handoff prototype is not one homogeneous (0,0,0) value run");
-    const auto scalar_identical = [](const Scalar& left,
-                                     const Scalar& right) {
-      if constexpr (std::is_same_v<Scalar, ComplexBall>)
-        return acb_equal(left.raw(), right.raw());
-      else
-        return left == right;
-    };
-    for (std::size_t n = 0; n < problem.schedule.size(); ++n) {
-      const auto expected_shift = ScalarTraits<Scalar>::integer(
-          static_cast<long>(n));
-      if (!scalar_identical(problem.a_shifts[n], expected_shift))
-        throw std::invalid_argument(
-            "regular value handoff prototype a-shifts are not the exact Taylor indices");
-      if (problem.schedule[n].size() != prepared_.blocks.size())
-        throw std::invalid_argument(
-            "regular value handoff prototype schedule has the wrong block partition");
-      for (const auto& step : problem.schedule[n]) {
-        const auto expected = n == 0 ? StepCase::Resonant : StepCase::Taylor;
-        if (step.kind != expected ||
-            !scalar_identical(step.d_a, expected_shift) ||
-            !ScalarTraits<Scalar>::is_zero(step.d_b))
-          throw std::invalid_argument(
-              "regular value handoff prototype schedule is not resonant at zero and Taylor by exact index");
-      }
-    }
-
-    const auto frame_width = static_cast<std::size_t>(prepared_.frame_width);
-    problem.initial.assign(
-        static_cast<std::size_t>(prepared_.dimension) * frame_width,
-        ScalarTraits<Scalar>::zero());
-    problem.initial_validity.assign(prepared_.dimension,
-                                    source_complete_max);
-    if constexpr (std::is_same_v<Scalar, Rational>) {
-      const auto evaluated = evaluate_exact_regular_local(
-          source, producing_point,
-          EpsilonWindow{source.epsilon.min_power, source_complete_max},
-          "regular value handoff source");
-      for (std::uint32_t component = 0; component < prepared_.dimension;
-           ++component)
-        for (std::int64_t raw_power = source.epsilon.min_power;
-             raw_power <= source_complete_max; ++raw_power) {
-          const auto power = static_cast<std::int32_t>(raw_power);
-          const auto frame = static_cast<std::size_t>(
-              static_cast<std::int64_t>(power) - prepared_.frame_base);
-          if (frame >= frame_width)
-            throw std::domain_error(
-                "regular value handoff source exceeds the receiver value frame");
-          problem.initial[static_cast<std::size_t>(component) * frame_width +
-                          frame] = evaluated[component].coefficient(power);
-        }
-    } else {
-      EvaluationOptions options;
-      options.imaginary_sign = producing_rim;
-      options.compute_tail_estimate = false;
-      const auto evaluated = evaluate_local_solution(
-          source, producing_point, options);
-      const auto expected_rim = producing_point.sign < 0
-          ? producing_rim : std::nullopt;
-      if (evaluated.imaginary_sign != expected_rim ||
-          evaluated.value.dimension != prepared_.dimension ||
-          evaluated.value.epsilon.min_power < source.epsilon.min_power ||
-          evaluated.value.epsilon.complete_max < source_complete_max)
-        throw std::invalid_argument(
-            "regular value handoff Acb evaluation changed its branch or epsilon frame");
-      for (std::uint32_t component = 0; component < prepared_.dimension;
-           ++component)
-        for (std::int64_t raw_power = source.epsilon.min_power;
-             raw_power <= source_complete_max; ++raw_power) {
-          const auto power = static_cast<std::int32_t>(raw_power);
-          const auto frame = static_cast<std::size_t>(
-              static_cast<std::int64_t>(power) - prepared_.frame_base);
-          if (frame >= frame_width)
-            throw std::domain_error(
-                "regular value handoff source exceeds the receiver value frame");
-          if (power >= evaluated.value.epsilon.min_power)
-            problem.initial[
-                static_cast<std::size_t>(component) * frame_width + frame] =
-                evaluated.value.at(power, component);
-        }
-    }
-
-    metadata_object["checkpoint_identity"] = result_checkpoint_identity;
-    auto metadata = parse_local_metadata(metadata_object);
-    const auto same_prescription = [](const Prescription& left,
-                                      const Prescription& right) {
-      return left.factor_exact == right.factor_exact &&
-             left.sign == right.sign &&
-             left.multiplicity == right.multiplicity &&
-             left.leading_coefficient_sign ==
-                 right.leading_coefficient_sign;
-    };
-    if (!(Rational(metadata.chart.center_exact) ==
-              receiving_geometry.center) ||
-        !(Rational(metadata.chart.scale_exact) ==
-              receiving_geometry.scale) ||
-        metadata.chart.infinite_radius ||
-        !acb_equal(metadata.chart.radius.raw(),
-                   ComplexBall::from_strings(
-                       receiving_geometry.radius.str()).raw()) ||
-        metadata.prescriptions.size() != receiving_prescriptions.size() ||
-        !std::equal(metadata.prescriptions.begin(),
-                    metadata.prescriptions.end(),
-                    receiving_prescriptions.begin(), same_prescription))
-      throw std::invalid_argument(
-          "regular value handoff prototype metadata differs from its retained plan chart");
-    verify_tag_binding(metadata.a, problem.a_target,
-                       "regular value handoff a");
-    verify_tag_binding(metadata.b, problem.b_target,
-                       "regular value handoff b");
-    const auto parse_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - parse_started).count();
-
-    const auto kernel_started = std::chrono::steady_clock::now();
-    auto recurrence = RecurrenceSolver<Scalar>(problem, prepared_).run();
-    auto assembled = assemble_recurrence(prepared_, problem, recurrence);
-    auto solution = make_local_solution(
-        problem, std::move(assembled), std::move(metadata));
-    validate_local_solution(solution, false);
-    if (solution.epsilon.complete_max < requested_epsilon.complete_max ||
-        recurrence.top_valid < requested_epsilon.complete_max)
-      throw std::domain_error(
-          "regular value handoff solve did not preserve the requested complete epsilon window");
-    auto tail_model = prepare_regular_homogeneous_tail_model(
-        prepared_, problem, solution, exact_identity_);
-    auto pseudo_hits = std::move(recurrence.hits);
-    if (!pseudo_hits.empty())
-      throw std::domain_error(
-          "regular value handoff unexpectedly encountered a pseudo resonance");
-    const auto kernel_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - kernel_started).count();
-    const NativeLocalDiagnostics diagnostics{
-        recurrence.top_valid, parse_ms, kernel_ms};
-
-    derivation["evaluated_epsilon"] = json::object{
-        {"min", source.epsilon.min_power},
-        {"max", source_complete_max},
-        {"required_complete_max", required_complete_max}};
-    derivation["output"] = json::object{
-        {"checkpoint_identity", solution.checkpoint_identity},
-        {"chart", handle_},
-        {"source_operator_identity", exact_identity_},
-        {"epsilon", json::object{{"min", solution.epsilon.min_power},
-                                  {"max", solution.epsilon.complete_max}}},
-        {"taylor_complete_max", solution.taylor_complete_max},
-        {"top_valid", encode_validity(recurrence.top_valid)},
-        {"dimension", solution.dimension}};
-    derivation["equation_owner_signature_identity"] =
-        equation_owner->owner_signature_identity();
-    derivation["equation_payload_identity"] =
-        equation_owner->physical_payload_identity();
-    derivation["provenance_identity"] = json::serialize(
-        canonical_json_value(derivation));
-
-    auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
-        local_handle, handle_, exact_identity_, std::move(solution),
-        precision_bits_, std::move(pseudo_hits), diagnostics, std::nullopt,
-        std::move(derivation), std::move(derivation_owner),
-        std::move(tail_model), std::nullopt, true, true,
-        std::move(equation_owner), physical_equation_);
-    record_native_local_success(diagnostics);
-    return local;
-  }
-
   ChartStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return {runs_.load(), local_runs_.load(), prepare_parse_ms_,
@@ -10611,101 +9787,11 @@ std::vector<LocalSolution<Rational>> split_exact_rational_tags(
   return result;
 }
 
-struct CachedExactPseudoTarget {
-  LocalSolution<Rational> solution;
-  // Diagnostics intrinsic to this target's own recurrence.  Direct
-  // dependencies are retained explicitly so a later column can replay the
-  // cold per-column semantics once per component without double-counting a
-  // shared descendant.
-  NativeLocalDiagnostics intrinsic_diagnostics;
-  double construction_parse_ms = 0.0;
-  double construction_kernel_ms = 0.0;
-  std::vector<std::pair<
-      std::uint32_t, std::shared_ptr<const CachedExactPseudoTarget>>>
-      dependencies;
-};
-
-class ExactPseudoTargetCache {
- public:
-  using Key = std::pair<std::uint32_t, std::uint32_t>;
-  using Core = detail::ImmutableRecursiveCache<
-      Key, CachedExactPseudoTarget>;
-
-  struct Lookup {
-    std::shared_ptr<const CachedExactPseudoTarget> target;
-    bool built = false;
-  };
-
-  using Stats = Core::Stats;
-
-  ExactPseudoTargetCache(std::string owner_identity,
-                         std::string owner_contract)
-      : owner_identity_(std::move(owner_identity)),
-        owner_contract_(std::move(owner_contract)) {
-    if (owner_identity_.empty() || owner_contract_.empty())
-      throw std::invalid_argument(
-          "exact CASE-P target cache requires an immutable owner contract");
-  }
-
-  std::string target_checkpoint_identity(std::uint32_t block,
-                                         std::uint32_t component) const {
-    return owner_identity_ + ":casep-homogeneous:block:" +
-        std::to_string(block) + ":component:" +
-        std::to_string(component);
-  }
-
-  template <typename Builder>
-  Lookup get_or_build(std::uint32_t block, std::uint32_t component,
-                      const std::string& derived_contract,
-                      Builder&& builder) {
-    if (derived_contract.empty())
-      throw std::invalid_argument(
-          "exact CASE-P target cache received an empty derived contract");
-    const auto key = std::make_pair(block, component);
-
-    // Target construction can recursively request a different Jordan target.
-    // A single recursive writer lock preserves that well-founded dependency
-    // order and prevents cross-column promise cycles.  Completed values are
-    // immutable shared objects, so readers only hold this lock for a map hit.
-    // The full operator/chart/work contract is retained once by this
-    // composite-owned cache; only the target-specific suffix is duplicated
-    // and compared per entry.
-    try {
-      auto lookup = cache_.get_or_build(
-          key, derived_contract, [&] {
-            auto target = std::forward<Builder>(builder)();
-            if (target.solution.checkpoint_identity !=
-                target_checkpoint_identity(block, component))
-              throw std::logic_error(
-                  "exact CASE-P target builder lost its cache-scoped checkpoint identity");
-            return target;
-          });
-      return {std::move(lookup.value), lookup.built};
-    } catch (const detail::ImmutableCacheContractError&) {
-      throw RecurrenceError(
-          "E5", "exact CASE-P homogeneous target cache contract changed within one retained composite");
-    } catch (const detail::ImmutableCacheCycleError&) {
-      throw RecurrenceError(
-          "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
-    }
-  }
-
-  Stats stats() const { return cache_.stats(); }
-
- private:
-  std::string owner_identity_;
-  std::string owner_contract_;
-  Core cache_;
-};
-
 class ExactPseudoCompensator {
  public:
   ExactPseudoCompensator(PreparedChart<Rational>& chart,
-                         std::uint32_t block_index,
-                         std::string identity,
-                         ExactPseudoTargetCache& target_cache)
-      : chart_(chart), block_index_(block_index),
-        identity_(std::move(identity)), target_cache_(target_cache) {}
+                         std::string identity)
+      : chart_(chart), identity_(std::move(identity)) {}
 
   NativeLocalRun<Rational> solve(
       const json::object& run, const json::object& metadata,
@@ -10713,8 +9799,7 @@ class ExactPseudoCompensator {
       std::int32_t allowed_value_floor) {
     NativeLocalDiagnostics diagnostics;
     auto result = solve_impl(run, metadata, std::move(source),
-                             allowed_value_floor, diagnostics, identity_,
-                             nullptr, nullptr);
+                             allowed_value_floor, diagnostics);
     result.diagnostics = diagnostics;
     return result;
   }
@@ -10733,37 +9818,9 @@ class ExactPseudoCompensator {
         total.pseudo_value_certified && current.pseudo_value_certified;
   }
 
-  static void accumulate_semantics(NativeLocalDiagnostics& total,
-                                   const NativeLocalDiagnostics& current) {
-    total.top_valid = std::min(total.top_valid, current.top_valid);
-    total.pseudo_hits += current.pseudo_hits;
-    total.pseudo_compensations += current.pseudo_compensations;
-    total.max_pseudo_depth = std::max(
-        total.max_pseudo_depth, current.max_pseudo_depth);
-    total.pseudo_value_certified =
-        total.pseudo_value_certified && current.pseudo_value_certified;
-  }
-
-  void observe_target_semantics(
-      std::uint32_t component,
-      const std::shared_ptr<const CachedExactPseudoTarget>& target,
-      NativeLocalDiagnostics& diagnostics) {
-    auto [stored, inserted] = observed_targets_.emplace(component, target);
-    if (!inserted) {
-      if (stored->second.get() != target.get())
-        throw std::logic_error(
-            "CASE-P component resolved to two immutable cache values");
-      return;
-    }
-    accumulate_semantics(diagnostics, target->intrinsic_diagnostics);
-    for (const auto& [dependency, value] : target->dependencies)
-      observe_target_semantics(dependency, value, diagnostics);
-  }
-
-  std::optional<PreparedEpsilonMultiplier<Rational>> polar_weight(
+  std::optional<PreparedRationalTaylorMultiplier<Rational>> polar_weight(
       const PseudoHit<Rational>& hit, std::size_t row,
-      const LocalSolution<Rational>& target,
-      const std::string& operation_identity) const {
+      const LocalSolution<Rational>& target) const {
     if (row >= hit.gamma_frames.size() || row >= hit.gamma_validity.size())
       throw RecurrenceError(
           "E5", "CASE-P hit has inconsistent gamma frame dimensions");
@@ -10787,11 +9844,14 @@ class ExactPseudoCompensator {
       }
     }
     if (!minimum.has_value()) return std::nullopt;
-    PreparedEpsilonMultiplier<Rational> multiplier;
+    PreparedRationalTaylorMultiplier<Rational> multiplier;
     multiplier.epsilon_shift = *minimum;
-    multiplier.exact_identity = operation_identity + ":casep:" +
+    multiplier.center_pole_order = 0;
+    multiplier.exact_identity = identity_ + ":casep:" +
         std::to_string(hit.n) + ":" + std::to_string(row);
-    multiplier.kernels.assign(target.epsilon.width(), Rational(0));
+    multiplier.kernels.assign(
+        target.epsilon.width(),
+        std::vector<Rational>(target.taylor_width(), Rational(0)));
     for (std::size_t kernel = 0; kernel < multiplier.kernels.size();
          ++kernel) {
       const auto power = static_cast<std::int64_t>(*minimum) +
@@ -10803,7 +9863,7 @@ class ExactPseudoCompensator {
         throw RecurrenceError(
             "E4", "CASE-P polar weight lies outside its retained gamma frame",
             chart_.frame_base(), static_cast<std::int32_t>(power));
-      multiplier.kernels[kernel] =
+      multiplier.kernels[kernel][0] =
           -gamma[static_cast<std::size_t>(gamma_index)];
     }
     return multiplier;
@@ -10813,171 +9873,56 @@ class ExactPseudoCompensator {
       std::uint32_t component, const json::object& prototype_run,
       const json::object& prototype_metadata,
       NativeLocalDiagnostics& diagnostics) {
-    if (const auto found = observed_targets_.find(component);
-        found != observed_targets_.end())
-      return found->second->solution;
+    if (const auto found = homogeneous_cache_.find(component);
+        found != homogeneous_cache_.end())
+      return found->second;
     if (!active_components_.insert(component).second)
       throw RecurrenceError(
           "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
-    try {
-      const auto& indicial = chart_.exact_jordan_indicial();
-      if (!indicial.has_value() || component >= indicial->dimension)
-        throw RecurrenceError(
-            "E5", "CASE-P target component has no retained exact Jordan root");
-      const auto& block =
-          indicial->blocks[indicial->block_of_column[component]];
-      const auto jordan_position =
-          indicial->position_in_block[component];
-      const auto nmax = as_u32(
-          prototype_run.at("nmax"),
-          "derived homogeneous Taylor maximum");
-      const auto log_max = exact_log_ceiling(
-          *indicial, block.root.a, block.root.b,
-          jordan_position, false);
-      auto metadata = exact_derived_metadata(
-          prototype_metadata, block.root.a, block.root.b,
-          log_max,
-          ":casep-target:" + std::to_string(component));
-
-      // The cache contract contains every exact input which can influence the
-      // derived recurrence.  Only the caller's checkpoint token is excluded:
-      // it is provenance, not mathematics, and is replaced below by the
-      // immutable composite-scoped target identity.  Geometry includes the
-      // exact analytic-continuation prescriptions, including the i-delta sign.
-      auto contract_metadata = metadata;
-      contract_metadata.erase("checkpoint_identity");
-      auto& contract_chart =
-          contract_metadata.at("chart").as_object();
-      if (!contract_chart.at("infinite_radius").as_bool())
-        contract_chart["radius"] = Rational(required_string(
-            contract_chart, "radius")).str();
-      json::array jordan_columns;
-      for (const auto column : block.columns)
-        jordan_columns.push_back(column);
-      const auto derived_contract = json::serialize(canonical_json_value(
-          json::object{
-              {"schema", "diffexp2-casep-homogeneous-target-contract-v1"},
-              {"derivation", "exact-derived-jordan-run-v1"},
-              {"block", block_index_},
-              {"component", component},
-              {"jordan_block", block.block_index},
-              {"jordan_columns", std::move(jordan_columns)},
-              {"jordan_position", jordan_position},
-              {"root_a", block.root.a.str()},
-              {"root_b", block.root.b.str()},
-              {"derived_tag", json::object{
-                   {"a", block.root.a.str()},
-                   {"b", block.root.b.str()},
-                   {"p", log_max}}},
-              {"source_shape", json::object{
-                   {"kind", "canonical-jordan-homogeneous"},
-                   {"dimension", chart_.dimension()},
-                   {"epsilon_min", chart_.frame_base()},
-                   {"epsilon_width", chart_.frame_width()},
-                   {"taylor_max", nmax},
-                   {"log_max", log_max},
-                   {"initial", "canonical-jordan-unit-seed"},
-                   {"initial_validity", "complete-retained-frame"},
-                   {"source", "none"}}},
-              {"run_contract", json::object{
-                   {"has_initial", true},
-                   {"adaptive_probe", false},
-                   {"a_target", block.root.a.str()},
-                   {"b_target", block.root.b.str()},
-                   {"a_shift_min", 0},
-                   {"schedule", "exact-affine-jordan-derived"},
-                   {"return_u", false}}},
-              {"analytic_metadata", std::move(contract_metadata)}}));
-      const auto target_identity =
-          target_cache_.target_checkpoint_identity(block_index_, component);
-      metadata["checkpoint_identity"] = target_identity;
-
-      auto lookup = target_cache_.get_or_build(
-          block_index_, component, derived_contract, [&] {
-            auto run = exact_derived_run(
-                prototype_run, chart_, block.root.a, block.root.b,
-                jordan_position, true, component);
-            if (as_u32(run.at("p"),
-                       "derived homogeneous log maximum") != log_max)
-              throw std::logic_error(
-                  "CASE-P target contract log ceiling differs from its derived run");
-            ExactPseudoCompensator target_builder(
-                chart_, block_index_, target_identity, target_cache_);
-            NativeLocalDiagnostics aggregate;
-            NativeLocalDiagnostics intrinsic;
-            std::map<std::uint32_t,
-                     std::shared_ptr<const CachedExactPseudoTarget>>
-                direct_dependencies;
-            auto solved = target_builder.solve_impl(
-                run, metadata, std::nullopt, 0, aggregate,
-                target_identity, &intrinsic, &direct_dependencies);
-            solved.solution.checkpoint_identity = target_identity;
-            validate_local_solution(solved.solution, false);
-            std::vector<std::pair<
-                std::uint32_t,
-                std::shared_ptr<const CachedExactPseudoTarget>>>
-                dependencies;
-            dependencies.reserve(direct_dependencies.size());
-            for (const auto& dependency : direct_dependencies)
-              dependencies.push_back(dependency);
-            return CachedExactPseudoTarget{
-                std::move(solved.solution), std::move(intrinsic),
-                aggregate.parse_ms, aggregate.kernel_ms,
-                std::move(dependencies)};
-          });
-      active_components_.erase(component);
-      // Construction timings represent only cache misses which actually ran
-      // during this lookup (including recursively built descendants).  The
-      // exact CASE-P semantics are replayed separately over the immutable
-      // dependency DAG and deduplicated by component for every public column.
-      if (lookup.built) {
-        diagnostics.parse_ms += lookup.target->construction_parse_ms;
-        diagnostics.kernel_ms += lookup.target->construction_kernel_ms;
-      }
-      observe_target_semantics(component, lookup.target, diagnostics);
-      return lookup.target->solution;
-    } catch (...) {
-      active_components_.erase(component);
-      throw;
-    }
+    const auto& indicial = chart_.exact_jordan_indicial();
+    if (!indicial.has_value() || component >= indicial->dimension)
+      throw RecurrenceError(
+          "E5", "CASE-P target component has no retained exact Jordan root");
+    const auto& block =
+        indicial->blocks[indicial->block_of_column[component]];
+    auto run = exact_derived_run(
+        prototype_run, chart_, block.root.a, block.root.b,
+        indicial->position_in_block[component], true, component);
+    auto metadata = exact_derived_metadata(
+        prototype_metadata, block.root.a, block.root.b,
+        as_u32(run.at("p"), "derived homogeneous log maximum"),
+        ":casep-target:" + std::to_string(component));
+    auto solved = solve_impl(run, metadata, std::nullopt, 0, diagnostics);
+    active_components_.erase(component);
+    auto [stored, inserted] = homogeneous_cache_.emplace(
+        component, std::move(solved.solution));
+    if (!inserted)
+      throw std::logic_error("CASE-P homogeneous target cache insertion failed");
+    return stored->second;
   }
 
   NativeLocalRun<Rational> solve_impl(
       const json::object& run, const json::object& metadata,
       std::optional<SourceData<Rational>> source,
       std::int32_t allowed_value_floor,
-      NativeLocalDiagnostics& diagnostics,
-      const std::string& operation_identity,
-      NativeLocalDiagnostics* intrinsic_diagnostics,
-      std::map<std::uint32_t,
-               std::shared_ptr<const CachedExactPseudoTarget>>*
-          direct_dependencies) {
+      NativeLocalDiagnostics& diagnostics) {
     auto raw = source.has_value()
         ? chart_.solve_native_with_source(
               run, metadata, std::move(*source))
         : chart_.solve_native(run, metadata);
     accumulate(diagnostics, raw.diagnostics);
-    if (intrinsic_diagnostics != nullptr)
-      accumulate(*intrinsic_diagnostics, raw.diagnostics);
     if (raw.pseudo_hits.empty()) return raw;
 
     const auto source_a = parse_scalar<Rational>(run.at("a_target"));
     const auto nmax = as_u32(run.at("nmax"),
                              "CASE-P certificate Taylor order");
     diagnostics.pseudo_hits += raw.pseudo_hits.size();
-    if (intrinsic_diagnostics != nullptr)
-      intrinsic_diagnostics->pseudo_hits += raw.pseudo_hits.size();
     std::vector<LocalSolution<Rational>> terms;
     terms.push_back(std::move(raw.solution));
     for (const auto& hit : raw.pseudo_hits) {
       diagnostics.max_pseudo_depth = std::max<std::uint32_t>(
           diagnostics.max_pseudo_depth,
           static_cast<std::uint32_t>(hit.columns.size()));
-      if (intrinsic_diagnostics != nullptr)
-        intrinsic_diagnostics->max_pseudo_depth =
-            std::max<std::uint32_t>(
-                intrinsic_diagnostics->max_pseudo_depth,
-                static_cast<std::uint32_t>(hit.columns.size()));
       if (hit.columns.size() != hit.gamma_frames.size() ||
           hit.columns.size() != hit.gamma_validity.size())
         throw RecurrenceError(
@@ -10985,35 +9930,20 @@ class ExactPseudoCompensator {
       for (std::size_t row = 0; row < hit.columns.size(); ++row) {
         const auto& target = homogeneous_target(
             hit.columns[row], run, metadata, diagnostics);
-        if (direct_dependencies != nullptr) {
-          const auto observed = observed_targets_.find(hit.columns[row]);
-          if (observed == observed_targets_.end())
-            throw std::logic_error(
-                "CASE-P direct dependency was not retained by its column observation");
-          const auto [stored, inserted] = direct_dependencies->emplace(
-              observed->first, observed->second);
-          if (!inserted && stored->second.get() != observed->second.get())
-            throw std::logic_error(
-                "CASE-P direct dependency resolved to two immutable cache values");
-        }
-        auto multiplier = polar_weight(
-            hit, row, target, operation_identity);
+        auto multiplier = polar_weight(hit, row, target);
         if (!multiplier.has_value()) continue;
-        auto product = multiply_prepared_epsilon(
+        auto product = multiply_prepared_rational(
             target, *multiplier,
-            operation_identity + ":casep-product:" +
-                std::to_string(hit.n) + ":" +
+            identity_ + ":casep-product:" + std::to_string(hit.n) + ":" +
                 std::to_string(hit.columns[row]));
         terms.push_back(std::move(product));
         ++diagnostics.pseudo_compensations;
-        if (intrinsic_diagnostics != nullptr)
-          ++intrinsic_diagnostics->pseudo_compensations;
       }
     }
     auto compensated = terms.size() == 1
         ? std::move(terms.front())
         : combine_local_solutions(
-              terms, operation_identity + ":casep-compensated");
+              terms, identity_ + ":casep-compensated");
     certify_exact_pseudo_value_floor(
         compensated, allowed_value_floor, source_a, nmax);
     raw.solution = std::move(compensated);
@@ -11022,11 +9952,8 @@ class ExactPseudoCompensator {
   }
 
   PreparedChart<Rational>& chart_;
-  std::uint32_t block_index_ = 0;
   std::string identity_;
-  ExactPseudoTargetCache& target_cache_;
-  std::map<std::uint32_t,
-           std::shared_ptr<const CachedExactPseudoTarget>> observed_targets_;
+  std::map<std::uint32_t, LocalSolution<Rational>> homogeneous_cache_;
   std::set<std::uint32_t> active_components_;
 };
 
@@ -11061,63 +9988,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         physical_equation_->owner_signature_identity != exact_identity_)
       throw std::invalid_argument(
           "composite physical q/C payload names a different full parent owner identity");
-    if constexpr (std::is_same_v<Scalar, Rational>) {
-      json::array block_contracts;
-      block_contracts.reserve(blocks_.size());
-      for (const auto& block : blocks_) {
-        json::array vertices;
-        for (const auto vertex : block.vertices) vertices.push_back(vertex);
-        json::array jordan_blocks;
-        if (block.exact_jordan_indicial.has_value()) {
-          for (const auto& jordan :
-               block.exact_jordan_indicial->blocks) {
-            json::array columns;
-            for (const auto column : jordan.columns)
-              columns.push_back(column);
-            jordan_blocks.push_back(json::object{
-                {"block", jordan.block_index},
-                {"columns", std::move(columns)},
-                {"root_a", jordan.root.a.str()},
-                {"root_b", jordan.root.b.str()}});
-          }
-        }
-        block_contracts.push_back(json::object{
-            {"block", block.block},
-            {"vertices", std::move(vertices)},
-            {"principal_identity", block.principal_identity},
-            {"chart_exact_identity", block.chart->exact_identity()},
-            {"chart_signature", block.chart->signature()},
-            {"dimension", block.chart->dimension()},
-            {"frame_base", block.chart->frame_base()},
-            {"frame_width", block.chart->frame_width()},
-            {"exact_jordan_dimension",
-             block.exact_jordan_indicial.has_value()
-                 ? json::value(block.exact_jordan_indicial->dimension)
-                 : json::value(nullptr)},
-            {"exact_jordan_blocks", std::move(jordan_blocks)}});
-      }
-      const auto owner_contract = json::serialize(canonical_json_value(
-          json::object{
-              {"schema", "diffexp2-casep-target-cache-owner-v1"},
-              {"composite_exact_identity", exact_identity_},
-              {"composite_signature", signature_},
-              {"exact_system_record", exact_system_record_},
-              {"exact_theta_record", exact_theta_record_},
-              {"geometry_record", geometry_record_},
-              {"work_contract", json::object{
-                   {"work_min", work_.work_min},
-                   {"requested_min", work_.requested_min},
-                   {"requested_max", work_.requested_max},
-                   {"work_complete_max", work_.work_complete_max},
-                   {"public_t_order", work_.public_t_order},
-                   {"work_t_order", work_.work_t_order},
-                   {"wolfram_coupling_depth",
-                    work_.wolfram_coupling_depth}}},
-              {"blocks", std::move(block_contracts)}}));
-      exact_pseudo_target_cache_ =
-          std::make_unique<ExactPseudoTargetCache>(
-              exact_identity_, owner_contract);
-    }
   }
 
   CompositeColumnSolveResult solve_column(
@@ -11183,16 +10053,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           pseudo_compensators(blocks_.size());
       const auto pseudo_compensator = [&](std::uint32_t block)
           -> ExactPseudoCompensator& {
-        if (!exact_pseudo_target_cache_)
-          throw std::logic_error(
-              "exact Rational SCC composite has no CASE-P target cache");
         if (!pseudo_compensators[block])
           pseudo_compensators[block] =
               std::make_unique<ExactPseudoCompensator>(
-                  *blocks_[block].chart, block,
+                  *blocks_[block].chart,
                   checkpoint_identity + ":block:" +
-                      std::to_string(block),
-                  *exact_pseudo_target_cache_);
+                      std::to_string(block));
         return *pseudo_compensators[block];
       };
 
@@ -11567,9 +10433,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     const auto execution_ready = regular_ready || regular_singular_ready;
     const auto scalar_shape = scalar_block_shape();
     const auto scalar_ready = scalar_column_ready();
-    const auto pseudo_cache_stats = exact_pseudo_target_cache_
-        ? exact_pseudo_target_cache_->stats()
-        : ExactPseudoTargetCache::Stats{};
     json::object result{
         {"scc", handle_}, {"key", key_}, {"identity", exact_identity_},
         {"rational_shadow_identity", rational_shadow_identity_},
@@ -11614,17 +10477,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
          regular_singular_ready},
         {"scc_column_solves", column_solves_.load()},
         {"scc_column_solve_ms", column_solve_ms()},
-        {"casep_homogeneous_target_cache_scope",
-         exact_pseudo_target_cache_
-             ? "immutable-composite" : "not-applicable"},
-        {"casep_homogeneous_target_cache_serialized_builds",
-         exact_pseudo_target_cache_ != nullptr},
-        {"casep_homogeneous_target_cache_entries",
-         pseudo_cache_stats.entries},
-        {"casep_homogeneous_target_cache_builds",
-         pseudo_cache_stats.builds},
-        {"casep_homogeneous_target_cache_hits",
-         pseudo_cache_stats.hits},
         {"capability_evidence", json::object{
              {"identity_v",
               "native-retained-spectral-assembly-and-target-inverse"},
@@ -12707,7 +11559,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   std::vector<CompositeSCCCoupling<Scalar>> couplings_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
       physical_equation_;
-  std::unique_ptr<ExactPseudoTargetCache> exact_pseudo_target_cache_;
   std::atomic<std::uint64_t> column_solves_{0};
   mutable std::mutex column_stats_mutex_;
   double column_solve_ms_ = 0.0;
@@ -13510,7 +12361,7 @@ LocalSolution<ComplexBall> specialize_rational_local_to_acb(
     converted.coefficients.reserve(sector.coefficients.size());
     for (const auto& coefficient : sector.coefficients)
       converted.coefficients.push_back(
-          ComplexBall::from_rational(coefficient));
+          ComplexBall::from_strings(coefficient.str()));
     output.sectors.push_back(std::move(converted));
   }
   validate_local_solution(output, false);
@@ -14059,15 +12910,8 @@ restore_checkpoint_transport_endpoint_record(
         "checkpoint transport endpoint observable identity is inconsistent");
   const auto& row_record = as_object(
       source.at("row"), "checkpoint transport endpoint row record");
-  const bool has_projection =
-      row_record.if_contains("projection") != nullptr;
-  if (has_projection)
-    require_exact_keys(
-        row_record, {"exact_identity", "prepared_row", "projection"},
-        "checkpoint transport endpoint row record");
-  else
-    require_exact_keys(row_record, {"exact_identity", "prepared_row"},
-                       "checkpoint transport endpoint row record");
+  require_exact_keys(row_record, {"exact_identity", "prepared_row"},
+                     "checkpoint transport endpoint row record");
   const auto& prepared_row = as_object(
       row_record.at("prepared_row"),
       "checkpoint transport endpoint prepared row");
@@ -14081,39 +12925,6 @@ restore_checkpoint_transport_endpoint_record(
       as_u32(final_summary.at("dimension"),
              "checkpoint transport endpoint source dimension"),
       "checkpoint transport endpoint prepared row");
-  const json::object* projection_record = nullptr;
-  if (has_projection) {
-    if (!binding.centered)
-      throw std::invalid_argument(
-          "checkpoint noncentered transport endpoint has a centered projection record");
-    projection_record = &as_object(
-        row_record.at("projection"),
-        "checkpoint transport endpoint projection record");
-    require_exact_keys(
-        *projection_record,
-        {"schema", "mode", "source_taylor_complete_max",
-         "projected_taylor_complete_max", "projected_top_valid",
-         "fallback_reason"},
-        "checkpoint transport endpoint projection record");
-    if (required_string(*projection_record, "schema") !=
-        "diffexp2-centered-scalar-row-endpoint-projection-v1")
-      throw std::invalid_argument(
-          "unsupported centered transport endpoint projection schema");
-    (void)required_string(*projection_record, "mode");
-    (void)as_u32(
-        projection_record->at("source_taylor_complete_max"),
-        "checkpoint endpoint source Taylor maximum");
-    (void)as_u32(
-        projection_record->at("projected_taylor_complete_max"),
-        "checkpoint endpoint projected Taylor maximum");
-    (void)parse_validity(
-        projection_record->at("projected_top_valid"));
-    if (!projection_record->at("fallback_reason").is_null() &&
-        !projection_record->at("fallback_reason").is_string())
-      throw std::invalid_argument(
-          "checkpoint endpoint projection fallback reason must be a string or null");
-  }
-  std::optional<json::object> expected_projected_metadata;
   if (expected_domain == "rational") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<Rational>>(
@@ -14121,21 +12932,8 @@ restore_checkpoint_transport_endpoint_record(
     if (!typed)
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Rational final local");
-    const auto matrix = parse_prepared_rational_row<Rational>(
+    (void)parse_prepared_rational_row<Rational>(
         prepared_row, typed->solution());
-    if (projection_record != nullptr) {
-      const auto plan = centered_prepared_scalar_row_endpoint_plan(
-          matrix, typed->solution(), typed->top_valid());
-      if (*projection_record !=
-          transport_centered_projection_record(plan))
-        throw std::invalid_argument(
-            "checkpoint centered endpoint projection mode/window is stale");
-      expected_projected_metadata =
-          checkpoint_local_analytic_metadata_record(
-              prepared_scalar_row_endpoint_analytic_shape(
-                  matrix, typed->solution(),
-                  checkpoint_identity + ":restore-analytic-shape"));
-    }
   } else {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
@@ -14143,21 +12941,8 @@ restore_checkpoint_transport_endpoint_record(
     if (!typed)
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Acb final local");
-    const auto matrix = parse_prepared_rational_row<ComplexBall>(
+    (void)parse_prepared_rational_row<ComplexBall>(
         prepared_row, typed->solution());
-    if (projection_record != nullptr) {
-      const auto plan = centered_prepared_scalar_row_endpoint_plan(
-          matrix, typed->solution(), typed->top_valid());
-      if (*projection_record !=
-          transport_centered_projection_record(plan))
-        throw std::invalid_argument(
-            "checkpoint centered endpoint projection mode/window is stale");
-      expected_projected_metadata =
-          checkpoint_local_analytic_metadata_record(
-              prepared_scalar_row_endpoint_analytic_shape(
-                  matrix, typed->solution(),
-                  checkpoint_identity + ":restore-analytic-shape"));
-    }
   }
   const auto& epsilon_record = as_object(
       source.at("output_epsilon_contract"),
@@ -14194,13 +12979,10 @@ restore_checkpoint_transport_endpoint_record(
       object.at("analytic_metadata"),
       "checkpoint transport endpoint analytic metadata");
   validate_checkpoint_exact_analytic_metadata(analytic_metadata);
-  const auto expected_analytic_metadata =
-      expected_projected_metadata.has_value()
-      ? *expected_projected_metadata
-      : state->final_local()->exact_analytic_metadata();
-  if (analytic_metadata != expected_analytic_metadata)
+  if (analytic_metadata !=
+      state->final_local()->exact_analytic_metadata())
     throw std::invalid_argument(
-        "checkpoint transport endpoint analytic metadata differs from its exact projected row shape");
+        "checkpoint transport endpoint analytic metadata differs from its retained final local");
   const auto provenance = transport_endpoint_provenance(
       checkpoint_identity, source, analytic_metadata);
   if (json::serialize(canonical_json_value(provenance)) !=
@@ -14607,39 +13389,14 @@ restore_checkpoint_transport_arm_state_record(
         const auto& certificate = as_object(
             reference.at("derivation"),
             "checkpoint certificate-only hop derivation");
-        const auto certificate_schema = required_string(
-            certificate, "schema");
-        if (certificate_schema ==
-            "diffexp2-consumed-plan-value-handoff-certificate-v1") {
-          require_exact_keys(
-              certificate,
-              {"schema", "match", "handoff_provenance_identity",
-               "incoming_checkpoint_identity", "output_checkpoint_identity"},
-              "checkpoint certificate-only value-hop derivation");
-          const auto& local_derivation = found->second->retained_derivation();
-          if (!local_derivation.has_value() ||
-              required_string(*local_derivation, "schema") !=
-                  "diffexp2-retained-plan-value-handoff-v1" ||
-              required_string(certificate,
-                              "handoff_provenance_identity") !=
-                  required_string(*local_derivation,
-                                  "provenance_identity"))
-            throw std::invalid_argument(
-                "checkpoint certificate-only value hop lost its sealed handoff identity");
-        } else {
-          require_exact_keys(
-              certificate,
-              {"schema", "match", "source_match_checkpoint_identity",
-               "incoming_checkpoint_identity", "output_checkpoint_identity"},
-              "checkpoint certificate-only match-hop derivation");
-          if (certificate_schema !=
-                  "diffexp2-consumed-plan-match-certificate-v1" ||
-              required_string(certificate,
-                              "source_match_checkpoint_identity").empty())
-            throw std::invalid_argument(
-                "checkpoint certificate-only match hop lost its match identity");
-        }
-        if (checkpoint_size_t(certificate.at("match"),
+        require_exact_keys(
+            certificate,
+            {"schema", "match", "source_match_checkpoint_identity",
+             "incoming_checkpoint_identity", "output_checkpoint_identity"},
+            "checkpoint certificate-only hop derivation");
+        if (required_string(certificate, "schema") !=
+                "diffexp2-consumed-plan-match-certificate-v1" ||
+            checkpoint_size_t(certificate.at("match"),
                               "checkpoint certificate-only match index") !=
                 tile - 1 ||
             required_string(certificate,
@@ -14647,7 +13404,9 @@ restore_checkpoint_transport_arm_state_record(
                 tile_sources.back()->checkpoint_identity() ||
             required_string(certificate,
                             "output_checkpoint_identity") !=
-                found->second->checkpoint_identity())
+                found->second->checkpoint_identity() ||
+            required_string(certificate,
+                            "source_match_checkpoint_identity").empty())
           throw std::invalid_argument(
               "checkpoint certificate-only hop breaks its checkpoint chain");
       }
@@ -16466,8 +15225,6 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           schema !=
               "diffexp2-retained-plan-match-local-materialization-v2" &&
           schema !=
-              "diffexp2-retained-plan-value-handoff-v1" &&
-          schema !=
               "diffexp2-retained-rational-row-local-application-v1")
         throw std::domain_error(
             "native checkpoint does not serialize this retained local derivation kind");
@@ -16476,9 +15233,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
         if ((schema ==
                  "diffexp2-retained-plan-match-local-materialization-v1" ||
              schema ==
-                 "diffexp2-retained-plan-match-local-materialization-v2" ||
-             schema ==
-                 "diffexp2-retained-plan-value-handoff-v1") &&
+                 "diffexp2-retained-plan-match-local-materialization-v2") &&
             local->has_sealed_plan_match_lineage())
           return;
         throw std::logic_error(
@@ -17374,73 +16129,15 @@ json::object restore_checkpoint(const std::string& path,
                 "checkpoint local has an unsupported physical equation owner kind");
           }
         }
-        std::optional<CheckpointValueHandoffPlanBinding>
-            value_handoff_plan;
-        if (!item.at("retained_derivation").is_null()) {
-          const auto& derivation = as_object(
-              item.at("retained_derivation"),
-              "checkpoint retained-local derivation");
-          if (required_string(derivation, "schema") ==
-              "diffexp2-retained-plan-value-handoff-v1") {
-            const auto plan_handle = required_string(
-                derivation, "tile_plan");
-            const auto plan_found = restored->tile_plans.find(plan_handle);
-            if (plan_found == restored->tile_plans.end() ||
-                required_string(derivation,
-                                "tile_plan_checkpoint_identity") !=
-                    plan_found->second->checkpoint_identity() ||
-                required_string(derivation,
-                                "tile_plan_provenance_identity") !=
-                    plan_found->second->provenance_identity())
-              throw std::invalid_argument(
-                  "checkpoint value handoff differs from its restored tile plan");
-            const auto arm_name = required_string(derivation, "arm");
-            const auto match_index = checkpoint_size_t(
-                derivation.at("match"),
-                "checkpoint value handoff match index");
-            const auto& arm = plan_found->second->arm(arm_name);
-            if (match_index >= arm.exact.matches.size())
-              throw std::invalid_argument(
-                  "checkpoint value handoff match is outside its restored arm");
-            const auto& match = arm.exact.matches[match_index];
-            const auto& producing = arm.charts.at(match.producing_chart);
-            const auto& receiving = arm.charts.at(match.receiving_chart);
-            const auto owner_reference = [](
-                const RetainedPlanChartBinding& binding) {
-              const auto* owner = std::get_if<
-                  std::shared_ptr<PreparedChartBase>>(&binding.owner);
-              if (owner == nullptr || !*owner)
-                throw std::invalid_argument(
-                    "checkpoint value handoff plan chart is not a primitive prepared owner");
-              return json::object{
-                  {"kind", (*owner)->equation_owner_kind()},
-                  {"handle", (*owner)->equation_owner_handle()},
-                  {"operator_identity",
-                   (*owner)->equation_operator_identity()},
-                  {"plan_exact_identity", binding.exact_identity},
-                  {"owner_signature_identity",
-                   (*owner)->owner_signature_identity()},
-                  {"physical_payload_identity",
-                   (*owner)->physical_payload_identity()}};
-            };
-            value_handoff_plan = CheckpointValueHandoffPlanBinding{
-                encode_plan_chart(producing, match.producing_chart),
-                owner_reference(producing),
-                encode_plan_chart(receiving, match.receiving_chart),
-                owner_reference(receiving)};
-          }
-        }
         std::shared_ptr<StoredLocalBase> local;
         if (restored->domain == "rational")
           local = restore_checkpoint_local_record<Rational>(
               item, restored->domain, restored->precision_bits, owner,
-              equation_owner, value_handoff_plan.has_value()
-                  ? &*value_handoff_plan : nullptr);
+              equation_owner);
         else if (restored->domain == "acb")
           local = restore_checkpoint_local_record<ComplexBall>(
               item, restored->domain, restored->precision_bits, owner,
-              equation_owner, value_handoff_plan.has_value()
-                  ? &*value_handoff_plan : nullptr);
+              equation_owner);
         else
           throw std::invalid_argument(
               "native checkpoint cannot restore symbolic local state");
@@ -18895,378 +17592,6 @@ json::object run_session_command(const json::object& root) {
     response["status"] = "ok";
     response["session"] = session->handle;
     return response;
-  }
-
-  if (operation == "transport.consume_value_hop") {
-    require_exact_keys(
-        root,
-        {"schema", "op", "session", "tile_plan",
-         "tile_plan_checkpoint_identity", "arm", "match", "value_solver",
-         "incoming", "incoming_checkpoint_identity", "epsilon",
-         "checkpoint_policy"},
-        "native transport.consume_value_hop request");
-    if (session->domain == "symbolic")
-      throw std::invalid_argument(
-          "transport.consume_value_hop requires Rational or Acb coefficients");
-    const auto arm_name = required_string(root, "arm");
-    const auto match_index = checkpoint_size_t(
-        root.at("match"), "value transport hop match index");
-    const auto incoming_handle = required_string(root, "incoming");
-    const auto& value_solver = as_object(
-        root.at("value_solver"), "regular value-solver prototype");
-    require_exact_keys(value_solver,
-                       {"schema", "run", "metadata",
-                        "tail_proxy_max_exact",
-                        "relative_accuracy_max_exact"},
-                       "regular value-solver prototype");
-    if (required_string(value_solver, "schema") !=
-            "diffexp2-native-regular-value-solver-prototype-v1")
-      throw std::invalid_argument(
-          "unsupported regular value-solver prototype schema");
-    const auto& run_prototype = as_object(
-        value_solver.at("run"), "regular value-solver run prototype");
-    require_exact_keys(
-        run_prototype,
-        {"nmax", "p", "has_initial", "adaptive_probe", "a_target",
-         "b_target", "a_shift_min", "a_shifts", "schedule", "initial",
-         "initial_validity", "source", "return_u"},
-        "regular value-solver run prototype");
-    const auto& metadata_prototype = as_object(
-        value_solver.at("metadata"),
-        "regular value-solver metadata prototype");
-    const Rational tail_proxy_max(
-        required_string(value_solver, "tail_proxy_max_exact"));
-    const Rational relative_accuracy_max(
-        required_string(value_solver, "relative_accuracy_max_exact"));
-    if (tail_proxy_max.sign() <= 0 || !(tail_proxy_max < Rational(1)) ||
-        relative_accuracy_max.sign() <= 0 ||
-        !(relative_accuracy_max < Rational(1)) ||
-        required_string(value_solver, "tail_proxy_max_exact") !=
-            tail_proxy_max.str() ||
-        required_string(value_solver, "relative_accuracy_max_exact") !=
-            relative_accuracy_max.str())
-      throw std::invalid_argument(
-          "regular value-solver accuracy thresholds must be canonical exact rationals strictly between zero and one");
-
-    const auto& epsilon = as_object(
-        root.at("epsilon"), "value transport hop epsilon contract");
-    require_exact_keys(epsilon, {"min", "max", "required_complete_max"},
-                       "value transport hop epsilon contract");
-    EpsilonWindow requested_epsilon{
-        as_i32(epsilon.at("min"), "value hop epsilon minimum"),
-        as_i32(epsilon.at("max"), "value hop epsilon maximum")};
-    (void)requested_epsilon.width();
-    const auto required_complete_max = as_i32(
-        epsilon.at("required_complete_max"),
-        "value hop required epsilon maximum");
-    if (required_complete_max < requested_epsilon.min_power ||
-        required_complete_max > requested_epsilon.complete_max)
-      throw std::invalid_argument(
-          "value transport hop epsilon contract is inconsistent");
-    const auto& checkpoint_policy = as_object(
-        root.at("checkpoint_policy"),
-        "value transport hop checkpoint policy");
-    require_exact_keys(checkpoint_policy, {"schema", "root"},
-                       "value transport hop checkpoint policy");
-    if (required_string(checkpoint_policy, "schema") !=
-            "diffexp2-deterministic-arm-checkpoints-v1")
-      throw std::invalid_argument(
-          "unsupported value transport hop checkpoint policy");
-    const auto checkpoint_root = required_string(checkpoint_policy, "root");
-
-    std::shared_ptr<StoredTilePlan> plan;
-    std::shared_ptr<StoredLocalBase> incoming;
-    {
-      std::lock_guard<std::mutex> lock(session->mutex);
-      if (session->closed)
-        throw std::invalid_argument("persistent solver session is closed");
-      const auto plan_found = session->tile_plans.find(
-          required_string(root, "tile_plan"));
-      if (plan_found == session->tile_plans.end() ||
-          required_string(root, "tile_plan_checkpoint_identity") !=
-              plan_found->second->checkpoint_identity())
-        throw std::invalid_argument(
-            "value transport hop tile-plan binding is stale");
-      plan = plan_found->second;
-      const auto& retained = plan->arm(arm_name);
-      if (match_index >= retained.exact.matches.size())
-        throw std::invalid_argument(
-            "value transport hop match lies outside its exact arm");
-      const auto incoming_found = session->locals.find(incoming_handle);
-      if (incoming_found == session->locals.end() ||
-          required_string(root, "incoming_checkpoint_identity") !=
-              incoming_found->second->checkpoint_identity())
-        throw std::invalid_argument(
-            "value transport hop incoming-local binding is stale");
-      incoming = incoming_found->second;
-    }
-
-    const auto ineligible = [&](const char* reason) {
-      return json::object{
-          {"status", "ok"}, {"session", session->handle},
-          {"capability", "regular-value-transport-hop-v1"},
-          {"used", false}, {"reason", reason},
-          {"arm", arm_name}, {"match", match_index},
-          {"value_hops", 0}, {"basis_matches", 0}};
-    };
-    const auto& retained = plan->arm(arm_name);
-    const auto& exact_match = retained.exact.matches[match_index];
-    const auto& producing = retained.charts.at(exact_match.producing_chart);
-    const auto& receiving = retained.charts.at(exact_match.receiving_chart);
-    if (producing.geometry.singular_center ||
-        receiving.geometry.singular_center)
-      return ineligible("singular-chart-crossing");
-    const auto* producing_owner = std::get_if<
-        std::shared_ptr<PreparedChartBase>>(&producing.owner);
-    const auto* receiving_owner = std::get_if<
-        std::shared_ptr<PreparedChartBase>>(&receiving.owner);
-    if (!producing_owner || !*producing_owner)
-      return ineligible("producing-owner-is-not-a-primitive-regular-chart");
-    if (!receiving_owner || !*receiving_owner)
-      return ineligible("receiving-owner-is-not-a-primitive-regular-chart");
-    if (required_string(value_solver, "tail_proxy_max_exact") !=
-        (*receiving_owner)->regular_value_tail_proxy_max_exact())
-      throw std::invalid_argument(
-          "regular value-solver tail threshold differs from its prepared owner");
-    const auto producing_local =
-        (receiving.geometry.center - producing.geometry.center) /
-        producing.geometry.scale;
-    const auto center_ratio =
-        exact_path_detail::abs(producing_local) /
-        producing.geometry.radius;
-    const auto incoming_summary = incoming->summary();
-    const auto incoming_epsilon_min = as_i32(
-        incoming_summary.at("epsilon_min"),
-        "value-hop incoming epsilon minimum");
-    const auto incoming_epsilon_max = as_i32(
-        incoming_summary.at("epsilon_max"),
-        "value-hop incoming epsilon maximum");
-    const auto incoming_top_valid = parse_validity(
-        incoming_summary.at("top_valid"));
-    const auto incoming_effective_max = std::min(
-        incoming_epsilon_max, incoming_top_valid);
-    const auto receiver_frame_top = static_cast<std::int64_t>(
-        (*receiving_owner)->frame_base()) +
-        static_cast<std::int64_t>((*receiving_owner)->frame_width()) - 1;
-    const auto producer_taylor_complete_max = as_u32(
-        incoming_summary.at("taylor_complete_max"),
-        "value-hop producer Taylor maximum");
-    const auto receiver_taylor_complete_max = as_u32(
-        run_prototype.at("nmax"),
-        "regular value-solver receiver Taylor maximum");
-    Rational tail_proxy(1);
-    for (std::uint64_t power = 0;
-         power < static_cast<std::uint64_t>(
-                     producer_taylor_complete_max) + 1;
-         ++power)
-      tail_proxy *= center_ratio;
-    if (!(tail_proxy < tail_proxy_max))
-      return ineligible("receiver-center-fails-exact-truncation-tail-contract");
-    if (incoming->source_chart() != producing.handle ||
-        incoming->source_operator_identity() != producing.exact_identity)
-      throw std::invalid_argument(
-          "value transport hop incoming local differs from its producing plan chart");
-    incoming->require_exact_plan_binding(
-        producing.geometry, producing.prescriptions,
-        "value transport hop incoming local");
-    const auto incoming_equation_owner = incoming->retained_equation_owner();
-    if (!incoming_equation_owner ||
-        incoming_equation_owner.get() != producing_owner->get())
-      return ineligible("incoming-equation-owner-is-not-the-producing-plan-owner");
-    if ((*receiving_owner)->equation_owner_handle() != receiving.handle ||
-        (*receiving_owner)->equation_operator_identity() !=
-            receiving.exact_identity ||
-        (*receiving_owner)->owner_signature_identity().empty() ||
-        (*receiving_owner)->physical_payload_identity().empty())
-      return ineligible("receiving-owner-has-no-complete-physical-value-contract");
-
-    const auto producing_point = RealEvaluationPoint::rational(
-        producing_local.str());
-    const auto producing_rim = exact_plan_rim(
-        producing.prescriptions, producing.geometry.scale);
-    if (incoming_effective_max < requested_epsilon.complete_max)
-      return ineligible("incoming-local-lacks-complete-epsilon-coverage");
-    if (requested_epsilon.min_power < (*receiving_owner)->frame_base() ||
-        incoming_epsilon_min < (*receiving_owner)->frame_base() ||
-        static_cast<std::int64_t>(incoming_effective_max) >
-            receiver_frame_top)
-      return ineligible("incoming-local-does-not-fit-receiver-epsilon-frame");
-    if (session->domain == "acb") {
-      const auto evaluated = incoming->evaluate_retained_point(
-          producing_point, producing_rim);
-      const auto expected_rim = producing_point.sign < 0
-          ? producing_rim : std::nullopt;
-      if (evaluated.imaginary_sign != expected_rim)
-        return ineligible(
-            "center-evaluation-rim-differs-from-producing-plan-chart");
-      if (evaluated.value.epsilon.complete_max <
-          requested_epsilon.complete_max)
-        return ineligible("center-evaluation-lost-complete-epsilon-coverage");
-      for (const auto& coefficient : evaluated.value.coefficients)
-        if (!value_handoff_accurate(coefficient, relative_accuracy_max))
-          return ineligible("center-evaluation-fails-relative-accuracy-contract");
-    }
-
-    std::string local_handle;
-    {
-      std::lock_guard<std::mutex> lock(session->mutex);
-      if (session->closed)
-        throw std::invalid_argument("persistent solver session is closed");
-      if (session->locals.size() + session->pending_local_solves + 1 >
-          session->local_capacity)
-        throw std::invalid_argument(
-            "persistent local capacity is exhausted by value transport hop");
-      local_handle = "l:" + std::to_string(session->next_local++);
-      ++session->pending_local_solves;
-    }
-
-    const auto started = std::chrono::steady_clock::now();
-    std::shared_ptr<StoredLocalBase> next;
-    json::object sealed_lineage;
-    try {
-      const auto owner_reference = [](const RetainedPlanChartBinding& binding,
-                                      const PreparedChartBase& owner) {
-        return json::object{
-            {"kind", owner.equation_owner_kind()},
-            {"handle", owner.equation_owner_handle()},
-            {"operator_identity", owner.equation_operator_identity()},
-            {"plan_exact_identity", binding.exact_identity},
-            {"owner_signature_identity", owner.owner_signature_identity()},
-            {"physical_payload_identity", owner.physical_payload_identity()}};
-      };
-      const auto incoming_record = json::object{
-          {"local", incoming->handle()},
-          {"chart", incoming->source_chart()},
-          {"source_operator_identity", incoming->source_operator_identity()},
-          {"checkpoint_identity", incoming->checkpoint_identity()},
-          {"epsilon", json::object{
-               {"min", incoming_summary.at("epsilon_min")},
-               {"max", incoming_summary.at("epsilon_max")}}},
-          {"taylor_complete_max", producer_taylor_complete_max},
-          {"top_valid", incoming_summary.at("top_valid")},
-          {"analytic_metadata", incoming->exact_analytic_metadata()}};
-      const auto result_checkpoint = arm_checkpoint_identity(
-          checkpoint_root, arm_name, "local", match_index + 1);
-      json::object derivation{
-          {"schema", "diffexp2-retained-plan-value-handoff-v1"},
-          {"capability", "retained-native-regular-value-handoff-v1"},
-          {"tile_plan", plan->handle()},
-          {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
-          {"tile_plan_provenance_identity", plan->provenance_identity()},
-          {"arm", arm_name},
-          {"match", match_index},
-          {"producing", json::object{
-               {"chart", encode_plan_chart(
-                    producing, exact_match.producing_chart)},
-               {"owner", owner_reference(producing, **producing_owner)}}},
-          {"receiving", json::object{
-               {"chart", encode_plan_chart(
-                    receiving, exact_match.receiving_chart)},
-               {"owner", owner_reference(receiving, **receiving_owner)}}},
-          {"receiver_center_physical_exact",
-           receiving.geometry.center.str()},
-          {"producing_local_exact", producing_local.str()},
-          {"prototype_identity", json::serialize(
-               canonical_json_value(value_solver))},
-          {"tail_contract", json::object{
-               {"producer_taylor_complete_max",
-                producer_taylor_complete_max},
-               {"receiver_taylor_complete_max",
-                receiver_taylor_complete_max},
-               {"center_ratio_exact", center_ratio.str()},
-               {"tail_proxy_exact", tail_proxy.str()},
-               {"tail_proxy_max_exact", tail_proxy_max.str()}}},
-          {"accuracy_contract", json::object{
-               {"relative_error_max_exact", relative_accuracy_max.str()},
-               {"gate",
-                "component-radii-lte-threshold-times-max-one-upper-magnitude-v1"},
-               {"acb_preflight_required", session->domain == "acb"}}},
-          {"epsilon", json::object{
-               {"min", requested_epsilon.min_power},
-               {"max", requested_epsilon.complete_max},
-               {"required_complete_max", required_complete_max}}},
-          {"incoming", incoming_record},
-          {"scope", "single-regular-to-regular-transport-hop"},
-          {"coefficient_transport", "native-retained-only"},
-          {"whole_arm_complete", false}};
-      struct ValueHandoffOwners {
-        std::shared_ptr<StoredTilePlan> plan;
-        std::shared_ptr<StoredLocalBase> incoming;
-        std::shared_ptr<PreparedChartBase> receiving;
-      };
-      auto derivation_owner = std::make_shared<ValueHandoffOwners>(
-          ValueHandoffOwners{plan, incoming, *receiving_owner});
-      if (session->domain == "rational") {
-        auto chart = std::dynamic_pointer_cast<PreparedChart<Rational>>(
-            *receiving_owner);
-        if (!chart)
-          throw std::invalid_argument(
-              "value transport hop receiver has the wrong Rational chart type");
-        next = chart->solve_regular_value_handoff(
-            local_handle, run_prototype, metadata_prototype, incoming,
-            producing_point, producing_rim,
-            receiving.geometry, receiving.prescriptions, requested_epsilon,
-            required_complete_max, result_checkpoint, std::move(derivation),
-            derivation_owner, chart);
-      } else {
-        auto chart = std::dynamic_pointer_cast<PreparedChart<ComplexBall>>(
-            *receiving_owner);
-        if (!chart)
-          throw std::invalid_argument(
-              "value transport hop receiver has the wrong Acb chart type");
-        next = chart->solve_regular_value_handoff(
-            local_handle, run_prototype, metadata_prototype, incoming,
-            producing_point, producing_rim,
-            receiving.geometry, receiving.prescriptions, requested_epsilon,
-            required_complete_max, result_checkpoint, std::move(derivation),
-            derivation_owner, chart);
-      }
-      sealed_lineage = next->seal_plan_match_lineage();
-    } catch (...) {
-      std::lock_guard<std::mutex> lock(session->mutex);
-      if (session->pending_local_solves == 0)
-        throw std::logic_error(
-            "value transport hop reservation accounting underflow");
-      --session->pending_local_solves;
-      throw;
-    }
-
-    const auto next_stats = next->stats();
-    {
-      std::lock_guard<std::mutex> lock(session->mutex);
-      if (session->pending_local_solves == 0)
-        throw std::logic_error(
-            "value transport hop reservation accounting underflow");
-      --session->pending_local_solves;
-      if (session->closed)
-        throw std::invalid_argument(
-            "persistent solver session closed during value transport hop");
-      const auto found = session->locals.find(incoming_handle);
-      if (found == session->locals.end() ||
-          found->second.get() != incoming.get())
-        throw std::invalid_argument(
-            "value transport hop incoming owner changed before publication");
-      if (!session->locals.emplace(local_handle, next).second)
-        throw std::logic_error(
-            "value transport hop local handle collision");
-      ++session->total_local_solves;
-      session->total_local_run_parse_ms += next_stats.create_parse_ms;
-      session->total_local_kernel_ms += next_stats.create_kernel_ms;
-      plan->note_match_advance(arm_name);
-    }
-    auto next_summary = compact_transport_local_reference(next);
-    next_summary["release_via"] = "local";
-    return json::object{
-        {"status", "ok"}, {"session", session->handle},
-        {"capability", "regular-value-transport-hop-v1"},
-        {"native_retained", true}, {"json_coefficients", 0},
-        {"used", true}, {"reason", "eligible-regular-safe-center"},
-        {"arm", arm_name}, {"match", match_index},
-        {"value_hops", 1}, {"basis_matches", 0},
-        {"next_local", std::move(next_summary)},
-        {"sealed_local_lineage", std::move(sealed_lineage)},
-        {"elapsed_ms", std::chrono::duration<double, std::milli>(
-             std::chrono::steady_clock::now() - started).count()}};
   }
 
   if (operation == "transport.consume_hop") {

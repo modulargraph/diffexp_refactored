@@ -52,13 +52,6 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_integration PRIVATE diffexp2_core)
   add_test(NAME cpp_integration COMMAND test_diffexp2_integration)
 
-  add_executable(test_diffexp2_scalar_row_endpoint
-    tests/test_scalar_row_endpoint.cpp)
-  target_compile_features(test_diffexp2_scalar_row_endpoint PRIVATE cxx_std_20)
-  target_link_libraries(test_diffexp2_scalar_row_endpoint PRIVATE diffexp2_core)
-  add_test(NAME cpp_scalar_row_endpoint
-    COMMAND test_diffexp2_scalar_row_endpoint)
-
   add_executable(test_diffexp2_line_integration
     tests/test_line_integration.cpp)
   target_compile_features(test_diffexp2_line_integration PRIVATE cxx_std_20)

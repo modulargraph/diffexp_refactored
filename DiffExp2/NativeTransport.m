@@ -762,15 +762,14 @@ nativeRationalShadowBasis[system_Association, req_Association, threads_,
   Quiet[DiffExp2`CppBackend`ClosePersistentSession[rationalBasis]];
   result];
 
-nativeReceivingBasis[system_Association, req_Association, threads_,
-    forceMonolithicRegular_:False] := Module[
+nativeReceivingBasis[system_Association, req_Association, threads_] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
    sequence, components, built, expectedTypes, targetSCC, attempt,
    probePrints, shadowDecision},
   If[regular,
     built = DiffExp2`Solve`SolveNativeRegularBasis[
-      system, req, threads, forceMonolithicRegular];
+      system, req, threads];
     expectedTypes = {
       "DiffExp2NativeRegularBasis", "DiffExp2NativeSCCBasis"},
     sequence = Lookup[system, "IntegrationSequence", None];
@@ -834,8 +833,7 @@ nativeReceivingBasis[system_Association, req_Association, threads_,
 (* Keep this predicate identical to the owner/basis dispatch below.  A
    singular receiving chart always owns an SCC composite; a regular chart
    does so exactly when its certified condensation has more than one block.
-   Monolithic regular charts instead retain one prepare-only physical chart
-   owner and its immutable value-run prototype. *)
+   Monolithic regular charts instead retain one ordinary chart witness. *)
 nativeReceivingSystemUsesSCCCompositeQ[system_Association] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
@@ -1169,6 +1167,9 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       Lookup[#, "local", Lookup[#, "Local", ToString[#, InputForm]]] &];
     Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, locals];
     Scan[Function[record,
+      If[AssociationQ[Lookup[record, "Witness", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[
+          record["Witness"]]]];
       If[StringQ[Lookup[record, "SCC", None]],
         Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[record]]]],
       preparedOwners];
@@ -1195,7 +1196,6 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   anchorOwner = anchor["NativeChart"];
   prepareArm[plan_Association] := Module[
     {systems, bases, built, prepared, kinds, ownerRecords, owners,
-     valueSolvers,
      sccOwnerCount},
     systems = Prepend[
       MapIndexed[Function[{chart, index},
@@ -1210,11 +1210,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       Rest[systems]], "Anchor"];
     If[MemberQ[kinds, "SingularSCC"],
       containsSingularReceivingCharts = True];
-    sccOwnerCount = Count[Rest[systems], system_ /;
-      If[deferReceivingBases,
-        !TrueQ[Lookup[Lookup[system, "IndicialData", <||>],
-          "Regular", False]],
-        nativeReceivingSystemUsesSCCCompositeQ[system]]];
+    sccOwnerCount = Count[Rest[systems],
+      system_ /; nativeReceivingSystemUsesSCCCompositeQ[system]];
     If[deferReceivingBases,
       ownerRecords =
         DiffExp2`Solve`WithNativeSCCCompositeCacheReservation[
@@ -1230,10 +1227,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
             nativeStageTiming["owner-prepare-done index=", First[index]];
             built], Rest[systems]]];
       owners = Prepend[nativeBasisOwner /@ ownerRecords, anchorOwner];
-      valueSolvers = Lookup[ownerRecords, "ValueSolver", None];
       bases = ConstantArray[None, Length[systems]],
       ownerRecords = {};
-      valueSolvers = ConstantArray[None, Length[Rest[systems]]];
       bases = Prepend[
         DiffExp2`Solve`WithNativeSCCCompositeCacheReservation[
           (* Every eager target may select one exact Rational shadow.  The
@@ -1248,14 +1243,9 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
             nativeStageTiming["basis-solve-done index=", First[index]];
             built], Rest[systems]]], None];
       owners = Prepend[nativeBasisOwner /@ Rest[bases], anchorOwner]];
-    If[Length[valueSolvers] =!= Length[Rest[systems]],
-      err["E6", <|"ValueSolverCount" -> Length[valueSolvers],
-        "ReceivingChartCount" -> Length[Rest[systems]],
-        "Detail" -> "native deferred value-solver vector is not aligned with receiving chart systems"|>]];
     <|"Plan" -> plan, "ChartSystems" -> systems,
       "Bases" -> bases, "BasisKinds" -> kinds,
-      "Owners" -> owners, "ValueSolvers" -> valueSolvers,
-      "OwnerRecords" -> ownerRecords|>];
+      "Owners" -> owners, "OwnerRecords" -> ownerRecords|>];
   lowerData = prepareArm[lower];
   upperData = prepareArm[upper];
   sessions = DeleteDuplicates@Join[{anchor["Session"]},
@@ -1299,8 +1289,14 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "NativeRationalScaleBridges", {}]],
     "UpperBridgeCount" -> Length[Lookup[upper,
       "NativeRationalScaleBridges", {}]]|>;
-  (* The tile plan now strongly owns every equation owner.  Regular owners
-     were prepare-only, so there is no disposable local slab to release. *)
+  (* The tile plan now strongly owns every equation owner.  Unit-column
+     witnesses existed only to put monolithic regular charts in that owner
+     graph; retaining their coefficient slabs would defeat streamed basis
+     preparation. *)
+  If[deferReceivingBases,
+    Scan[Function[record, If[AssociationQ[Lookup[record, "Witness", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[
+          record["Witness"]]]]], preparedOwners]];
   lowerData = KeyDrop[lowerData, "OwnerRecords"];
   upperData = KeyDrop[upperData, "OwnerRecords"];
   <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
@@ -1640,42 +1636,20 @@ nativeStreamTransportArm[atlas_Association, data_Association,
     arm_String, epsilon_Association, checkpointRoot_String,
     refinement_Association] := Module[
   {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
-   valueSolvers = data["ValueSolvers"], tiles = {atlas["Anchor"]},
-   hopEpsilon, valueSolver, valueResponse, basis, response, next, output},
-  If[!ListQ[valueSolvers] || Length[valueSolvers] =!= Length[systems],
-    err["E6", <|"Arm" -> arm,
-      "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
-      "ReceivingChartCount" -> Length[systems],
-      "Detail" -> "streamed native value-solver vector is not aligned with receiving chart systems"|>]];
+   tiles = {atlas["Anchor"]}, hopEpsilon, basis, response, next, output},
   hopEpsilon = <|"min" -> epsilon["min"], "max" -> epsilon["max"],
     "required_complete_max" -> epsilon["match_required_complete_max"]|>;
   output = Catch[
     Do[
-      basis = None;
-      valueSolver = valueSolvers[[index]];
-      valueResponse = If[AssociationQ[valueSolver],
-        DiffExp2`CppBackend`ConsumePersistentTransportValueHop[
-          atlas["Plan"], arm, index, valueSolver, current,
-          hopEpsilon, checkpointRoot],
-        <|"status" -> "ok", "used" -> False,
-          "reason" -> "receiver-has-no-regular-value-solver"|>];
-      If[FailureQ[valueResponse] || !AssociationQ[valueResponse] ||
-          Lookup[valueResponse, "status", "error"] =!= "ok",
-        err["E5", <|"Arm" -> arm, "Match" -> index,
-          "BackendFailure" -> valueResponse,
-          "Detail" -> "streamed native value-handoff eligibility or execution failed"|>]];
-      If[TrueQ[Lookup[valueResponse, "used", False]],
-        response = valueResponse,
-        nativeStageTiming["stream-basis-start arm=", arm,
-          " index=", index, " value-reason=",
-          Lookup[valueResponse, "reason", "ineligible"]];
-        basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
-          Lookup[atlas, "Threads", Automatic], True];
-        nativeStageTiming["stream-basis-done arm=", arm,
-          " index=", index];
-        response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
-          atlas["Plan"], arm, index, basis["Columns"], current,
-          hopEpsilon, checkpointRoot, refinement]];
+      nativeStageTiming["stream-basis-start arm=", arm,
+        " index=", index];
+      basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
+        Lookup[atlas, "Threads", Automatic]];
+      nativeStageTiming["stream-basis-done arm=", arm,
+        " index=", index];
+      response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
+        atlas["Plan"], arm, index, basis["Columns"], current,
+        hopEpsilon, checkpointRoot, refinement];
       If[FailureQ[response] || !AssociationQ[response] ||
           Lookup[response, "status", "error"] =!= "ok",
         If[AssociationQ[basis],
@@ -1688,8 +1662,7 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       If[AssociationQ[next] && !KeyExistsQ[next, "session"],
         next = Append[next, "session" -> atlas["Session"]]];
       If[!nativeOpaqueLocalHandleQ[next, atlas["Session"]] ||
-          !(TrueQ[Lookup[response, "used", False]] ||
-            ListQ[Lookup[response, "consumed_basis_handles", None]]),
+          !ListQ[Lookup[response, "consumed_basis_handles", None]],
         err["E5", <|"Arm" -> arm, "Match" -> index,
           "BackendResponse" -> response,
           "Detail" -> "streamed native transport hop returned a malformed consumed-local result"|>]];

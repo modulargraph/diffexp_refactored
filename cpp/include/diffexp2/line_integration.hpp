@@ -975,6 +975,101 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
   LocalSolution<Scalar> projected_shape;
   projected_shape.epsilon = projected_epsilon;
   projected_shape.dimension = 1;
+
+  // The scalar implementation below used to recompute the complete
+  // two-dimensional epsilon/Taylor convolution independently for every
+  // output Taylor cell.  At the production banana settings (roughly twenty
+  // epsilon rows and six hundred Taylor rows) that means tens of millions of
+  // 4000-bit acb_mul calls per tile.  For Acb, form the same finite Taylor
+  // convolutions with FLINT's polynomial kernel once per epsilon pair and
+  // retain only the capped projected rectangle.  Epsilon ordering, Taylor
+  // truncation, structural-zero decisions, and the later exact monomial
+  // grouping are unchanged.
+  std::vector<std::vector<ComplexBall>> acb_projected_sector_cells;
+  if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+    const auto projected_width = projected_epsilon.width();
+    acb_projected_sector_cells.resize(canonical_output_sectors.size());
+    for (std::size_t ordinal = 0;
+         ordinal < canonical_output_sectors.size(); ++ordinal) {
+      const auto& output_sector = *canonical_output_sectors[ordinal];
+      auto& cells = acb_projected_sector_cells[ordinal];
+      cells.assign(projected_width * taylor_width, ComplexBall(0));
+      for (const auto& contributor : output_sector.contributors) {
+        const auto& entry = *contributor.entry;
+        const auto& sector = *contributor.sector;
+        const auto term_min = local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(source.epsilon.min_power) +
+                entry.multiplier.epsilon_shift,
+            "fused Acb polynomial row-cell epsilon minimum");
+
+        std::vector<local_algebra_detail::AcbPolynomial>
+            kernel_polynomials;
+        std::vector<local_algebra_detail::AcbPolynomial>
+            source_polynomials;
+        std::vector<bool> kernel_material(epsilon_width, false);
+        std::vector<bool> source_material(epsilon_width, false);
+        kernel_polynomials.reserve(epsilon_width);
+        source_polynomials.reserve(epsilon_width);
+        for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon) {
+          kernel_polynomials.emplace_back();
+          source_polynomials.emplace_back();
+          const auto& kernel = entry.multiplier.kernels[epsilon];
+          for (std::size_t taylor = 0; taylor < taylor_width; ++taylor) {
+            const auto& multiplier = kernel[taylor];
+            if (!exact_singleton_zero(multiplier)) {
+              acb_poly_set_coeff_acb(kernel_polynomials.back().raw(),
+                                     static_cast<slong>(taylor),
+                                     multiplier.raw());
+              kernel_material[epsilon] = true;
+            }
+            const auto& coefficient = sector.coefficients[
+                local_detail::sector_index(
+                    source, epsilon, taylor, entry.column)];
+            if (!exact_singleton_zero(coefficient)) {
+              acb_poly_set_coeff_acb(source_polynomials.back().raw(),
+                                     static_cast<slong>(taylor),
+                                     coefficient.raw());
+              source_material[epsilon] = true;
+            }
+          }
+        }
+
+        local_algebra_detail::AcbPolynomial product;
+        for (std::size_t kernel_epsilon = 0;
+             kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+          if (!kernel_material[kernel_epsilon]) continue;
+          for (std::size_t input_epsilon = 0;
+               input_epsilon + kernel_epsilon < epsilon_width;
+               ++input_epsilon) {
+            if (!source_material[input_epsilon]) continue;
+            const auto raw_power = static_cast<std::int64_t>(term_min) +
+                static_cast<std::int64_t>(kernel_epsilon) +
+                static_cast<std::int64_t>(input_epsilon);
+            if (raw_power < projected_epsilon.min_power ||
+                raw_power > projected_epsilon.complete_max)
+              continue;
+            acb_poly_mullow(product.raw(),
+                            kernel_polynomials[kernel_epsilon].raw(),
+                            source_polynomials[input_epsilon].raw(),
+                            static_cast<slong>(taylor_width),
+                            ComplexBall::precision());
+            const auto output_epsilon = static_cast<std::size_t>(
+                raw_power - projected_epsilon.min_power);
+            const auto product_length = std::min<std::size_t>(
+                taylor_width,
+                static_cast<std::size_t>(acb_poly_length(product.raw())));
+            for (std::size_t taylor = 0; taylor < product_length; ++taylor) {
+              ComplexBall coefficient;
+              acb_poly_get_coeff_acb(coefficient.raw(), product.raw(),
+                                     static_cast<slong>(taylor));
+              cells[output_epsilon * taylor_width + taylor] += coefficient;
+            }
+          }
+        }
+      }
+    }
+  }
+
   const auto build_group = [&](std::size_t group_begin,
                                std::size_t group_end,
                                const SectorMonomialTag& group_tag) {
@@ -996,38 +1091,46 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
             "equal fused monomial keys carry inconsistent regulator descriptors");
       std::vector<Scalar> cell(projected_epsilon.width(),
                                ScalarTraits<Scalar>::zero());
-      for (const auto& contributor : output_sector->contributors) {
-        const auto& entry = *contributor.entry;
-        const auto& sector = *contributor.sector;
-        const auto term_min = local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(source.epsilon.min_power) +
-                entry.multiplier.epsilon_shift,
-            "fused row-cell epsilon minimum");
-        for (std::int64_t raw_power = projected_epsilon.min_power;
-             raw_power <= projected_epsilon.complete_max; ++raw_power) {
-          const auto term_index = raw_power - term_min;
-          if (term_index < 0 ||
-              term_index >= static_cast<std::int64_t>(epsilon_width))
-            continue;
-          const auto output_epsilon = static_cast<std::size_t>(
-              raw_power - projected_epsilon.min_power);
-          for (std::int64_t kernel_epsilon = 0;
-               kernel_epsilon <= term_index; ++kernel_epsilon) {
-            const auto input_epsilon = term_index - kernel_epsilon;
-            const auto& kernel = entry.multiplier.kernels[
-                static_cast<std::size_t>(kernel_epsilon)];
-            for (std::size_t kernel_taylor = 0;
-                 kernel_taylor <= taylor; ++kernel_taylor) {
-              const auto& multiplier = kernel[kernel_taylor];
-              if (exact_singleton_zero(multiplier)) continue;
-              const auto input_taylor = taylor - kernel_taylor;
-              const auto& coefficient = sector.coefficients[
-                  local_detail::sector_index(
-                      source, static_cast<std::size_t>(input_epsilon),
-                      input_taylor, entry.column)];
-              if (exact_singleton_zero(coefficient)) continue;
-              local_algebra_detail::add_product(
-                  cell[output_epsilon], multiplier, coefficient);
+      if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+        const auto& projected =
+            acb_projected_sector_cells.at(item.sector_ordinal);
+        for (std::size_t epsilon = 0;
+             epsilon < projected_epsilon.width(); ++epsilon)
+          cell[epsilon] = projected[epsilon * taylor_width + taylor];
+      } else {
+        for (const auto& contributor : output_sector->contributors) {
+          const auto& entry = *contributor.entry;
+          const auto& sector = *contributor.sector;
+          const auto term_min = local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(source.epsilon.min_power) +
+                  entry.multiplier.epsilon_shift,
+              "fused row-cell epsilon minimum");
+          for (std::int64_t raw_power = projected_epsilon.min_power;
+               raw_power <= projected_epsilon.complete_max; ++raw_power) {
+            const auto term_index = raw_power - term_min;
+            if (term_index < 0 ||
+                term_index >= static_cast<std::int64_t>(epsilon_width))
+              continue;
+            const auto output_epsilon = static_cast<std::size_t>(
+                raw_power - projected_epsilon.min_power);
+            for (std::int64_t kernel_epsilon = 0;
+                 kernel_epsilon <= term_index; ++kernel_epsilon) {
+              const auto input_epsilon = term_index - kernel_epsilon;
+              const auto& kernel = entry.multiplier.kernels[
+                  static_cast<std::size_t>(kernel_epsilon)];
+              for (std::size_t kernel_taylor = 0;
+                   kernel_taylor <= taylor; ++kernel_taylor) {
+                const auto& multiplier = kernel[kernel_taylor];
+                if (exact_singleton_zero(multiplier)) continue;
+                const auto input_taylor = taylor - kernel_taylor;
+                const auto& coefficient = sector.coefficients[
+                    local_detail::sector_index(
+                        source, static_cast<std::size_t>(input_epsilon),
+                        input_taylor, entry.column)];
+                if (exact_singleton_zero(coefficient)) continue;
+                local_algebra_detail::add_product(
+                    cell[output_epsilon], multiplier, coefficient);
+              }
             }
           }
         }

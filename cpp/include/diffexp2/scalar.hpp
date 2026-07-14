@@ -281,6 +281,43 @@ class ComplexBall {
     return tiny;
   }
 
+  // Certified relative counterpart used only for structural numeric
+  // decisions.  `scale` must exclude zero; comparing against its absolute
+  // lower bound makes the test rigorous even though both operands are balls.
+  bool chop_if_certified_relative_to(const ComplexBall& scale,
+                                     int decimal_digits) {
+    if (is_zero()) return true;
+    if (scale.contains_zero()) return false;
+    arf_t upper, lower;
+    arf_init(upper);
+    arf_init(lower);
+    acb_get_abs_ubound_arf(upper, value_, precision_bits_);
+    acb_get_abs_lbound_arf(lower, scale.value_, precision_bits_);
+    const auto bits = static_cast<slong>(
+        std::ceil(static_cast<double>(decimal_digits) * std::log2(10.0)));
+    arf_mul_2exp_si(lower, lower, -bits);
+    const bool tiny = arf_cmp(upper, lower) < 0;
+    arf_clear(lower);
+    arf_clear(upper);
+    if (tiny) acb_zero(value_);
+    return tiny;
+  }
+
+  [[nodiscard]] bool certified_abs_lower_greater_than(
+      const ComplexBall& other) const {
+    if (contains_zero()) return false;
+    if (other.contains_zero()) return true;
+    arf_t left, right;
+    arf_init(left);
+    arf_init(right);
+    acb_get_abs_lbound_arf(left, value_, precision_bits_);
+    acb_get_abs_lbound_arf(right, other.value_, precision_bits_);
+    const bool greater = arf_cmp(left, right) > 0;
+    arf_clear(right);
+    arf_clear(left);
+    return greater;
+  }
+
   [[nodiscard]] std::string real_midpoint(int digits) const {
     return arb_midpoint_string(acb_realref(value_), digits);
   }

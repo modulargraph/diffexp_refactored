@@ -581,6 +581,13 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return provenance_identity_;
   }
 
+  std::optional<json::object> incomplete_acb_summary() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || acb->certified_for_materialization()) return std::nullopt;
+    return acb->summary();
+  }
+
   std::shared_ptr<PhysicalEquationOwnerBase>
   inheritable_basis_equation_owner() const {
     if (basis_owners_.empty()) return nullptr;
@@ -677,6 +684,10 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
                lattice.at("normalized_determinant_valuation")},
               {"transformation_min_power",
                lattice.at("transformation_min_power")},
+              {"transformation_terms",
+               lattice.at("transformation_terms")},
+              {"initial_column_shifts",
+               lattice.at("initial_column_shifts")},
               {"initial_leading_rank",
                lattice.at("initial_leading_rank")},
               {"final_leading_rank",
@@ -684,6 +695,12 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           throw std::domain_error(
               "an Acb plan-match handoff must have a passing complete residual before materialization; residual=" +
               json::serialize(summary.at("residual")) +
+              "; refinement=" +
+              json::serialize(summary.at("refinement")) +
+              "; epsilon=" +
+              json::serialize(summary.at("epsilon")) +
+              "; weight_windows=" +
+              json::serialize(summary.at("weight_windows")) +
               "; exact_lattice=" +
               json::serialize(compact_lattice));
         }
@@ -1866,19 +1883,30 @@ void validate_prepared_rational_row_structure(
           std::string(label) + " columns are not strictly ordered in range");
     previous = column;
     const auto& multiplier = as_object(entry.at("multiplier"), label);
+    const bool has_kernels =
+        multiplier.if_contains("kernels") != nullptr;
     const bool has_analytic_coefficients =
         multiplier.if_contains("analytic_coefficients") != nullptr;
-    if (has_analytic_coefficients)
+    if (has_kernels && has_analytic_coefficients)
       require_exact_keys(
           multiplier,
           {"epsilon_shift", "center_pole_order", "kernels",
            "exact_identity", "proven_zero", "analytic_coefficients"},
           label);
-    else
+    else if (has_kernels)
       require_exact_keys(
           multiplier,
           {"epsilon_shift", "center_pole_order", "kernels",
            "exact_identity", "proven_zero"}, label);
+    else if (has_analytic_coefficients)
+      require_exact_keys(
+          multiplier,
+          {"epsilon_shift", "center_pole_order", "exact_identity",
+           "proven_zero", "analytic_coefficients"}, label);
+    else
+      throw std::invalid_argument(
+          std::string(label) +
+          " multiplier needs Taylor kernels or an analytic rational source");
     (void)as_i32(multiplier.at("epsilon_shift"), label);
     (void)as_u32(multiplier.at("center_pole_order"), label);
     if (required_string(multiplier, "exact_identity").empty() ||
@@ -1886,18 +1914,23 @@ void validate_prepared_rational_row_structure(
         multiplier.at("proven_zero").as_bool())
       throw std::invalid_argument(
           std::string(label) + " contains an invalid active multiplier");
-    const auto& kernels = as_array(multiplier.at("kernels"), label);
-    if (kernels.empty())
-      throw std::invalid_argument(
-          std::string(label) + " contains no epsilon kernels");
-    for (const auto& raw_kernel : kernels)
-      if (as_array(raw_kernel, label).empty())
+    std::size_t kernel_count = 0;
+    if (has_kernels) {
+      const auto& kernels = as_array(multiplier.at("kernels"), label);
+      if (kernels.empty())
         throw std::invalid_argument(
-            std::string(label) + " contains an empty Taylor kernel");
+            std::string(label) + " contains no epsilon kernels");
+      kernel_count = kernels.size();
+      for (const auto& raw_kernel : kernels)
+        if (as_array(raw_kernel, label).empty())
+          throw std::invalid_argument(
+              std::string(label) + " contains an empty Taylor kernel");
+    }
     if (has_analytic_coefficients) {
       const auto& coefficients = as_array(
           multiplier.at("analytic_coefficients"), label);
-      if (coefficients.size() != kernels.size())
+      if (coefficients.empty() ||
+          (has_kernels && coefficients.size() != kernel_count))
         throw std::invalid_argument(
             std::string(label) +
             " analytic coefficient count differs from its epsilon kernels");

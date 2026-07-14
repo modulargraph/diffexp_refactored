@@ -107,6 +107,7 @@ DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
 If[singularMatchPrecondition,
   Print["DE2 singular match precondition enabled"]];
 wp = runnerSettings["WorkingPrecision"];
+matchDigits = runnerSettings["MatchingDigits"];
 epsOrder = runnerSettings["EpsilonOrder"];
 expansionOrder = runnerSettings["ExpansionOrder"];
 boundaryExtraOrder = runnerSettings["BoundaryExtraOrder"];
@@ -1193,6 +1194,8 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
     Return[ladderCheckpointReject[file, "example does not match"], Module]];
   If[Lookup[payload, "WorkingPrecision", None] =!= wp,
     Return[ladderCheckpointReject[file, "WorkingPrecision does not match"], Module]];
+  If[Lookup[payload, "MatchingDigits", matchDigits] =!= matchDigits,
+    Return[ladderCheckpointReject[file, "MatchingDigits does not match"], Module]];
   If[KeyExistsQ[payload, "RecurrenceBackend"] &&
       payload["RecurrenceBackend"] =!= recurrenceBackend,
     Return[ladderCheckpointReject[file,
@@ -1665,6 +1668,28 @@ limitCombined[tres_, cvec_, var_] := Module[
 ft2NativeFailure[detail_String, data_:<||>] :=
   Failure["FeynmanTrickNativeBoundary", Join[<|"Detail" -> detail|>, data]];
 
+ft2NativeMatchingReservoirRetry[failure_?FailureQ,
+    level_Integer] := Module[{data, backend, additional},
+  data = Quiet[Check[failure[[2]], <||>]];
+  backend = If[AssociationQ[data],
+    Lookup[data, "BackendFailure", None], None];
+  additional = If[AssociationQ[backend] &&
+      Lookup[backend, "reason", None] ===
+        "acb_match_residual_inconclusive" &&
+      TrueQ[Lookup[backend, "retryable_epsilon_reservoir", False]],
+    Lookup[backend, "required_additional_epsilon_orders", None], None];
+  If[IntegerQ[additional] && additional > 0,
+    Failure["FeynmanTrickNativeMatchingReservoir", <|
+      "Detail" -> "native matching needs a wider private epsilon reservoir",
+      "Level" -> level, "AdditionalOrders" -> additional,
+      "BackendFailure" -> backend|>], None]];
+
+ft2NativeMatchingReservoirRetry[_, _Integer] := None;
+
+ft2NativeMatchingReservoirRetryQ[failure_] := FailureQ[failure] &&
+  Quiet[Check[failure[[1]] ===
+    "FeynmanTrickNativeMatchingReservoir", False]];
+
 ft2CanonicalIdentity[prefix_String, value_] := prefix <>
   IntegerString[Hash[value, "SHA256"], 16, 64];
 
@@ -1699,11 +1724,13 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
     (StringQ[record["NativeEpsilonPlanIdentity"]] &&
       StringLength[record["NativeEpsilonPlanIdentity"]] > 0)) &&
   AllTrue[Lookup[record, {"SourceCompleteMax", "TargetCompleteMax",
+      "RequiredTargetCompleteMax",
       "DeliverableCompleteMax", "RequiredRawTop",
       "CoefficientHalo", "IntegrationHalo", "MatchEpsilonPadding"},
     None], IntegerQ] &&
   With[{source = record["SourceCompleteMax"],
       target = record["TargetCompleteMax"],
+      requiredTarget = record["RequiredTargetCompleteMax"],
       deliverable = record["DeliverableCompleteMax"],
       required = record["RequiredRawTop"],
       coefficientHalo = record["CoefficientHalo"],
@@ -1711,8 +1738,9 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
       matchPadding = record["MatchEpsilonPadding"]},
     coefficientHalo >= 0 && matchPadding >= 0 &&
       MemberQ[{0, 1}, integrationHalo] &&
-      target + matchPadding === source - coefficientHalo &&
-      source >= target >= deliverable >= required];
+      requiredTarget + matchPadding === source - coefficientHalo &&
+      source >= target >= deliverable >= required &&
+      target >= requiredTarget >= required];
 
 ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
     boundaryValues_, boundaryPrefactors_, entries_List, ledger_Association,
@@ -1899,10 +1927,13 @@ ft2PrepareBoundaryEntries[level_Integer, batch_Association,
 
    so q cancels and must never be recursively charged as a new halo. *)
 ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
-    halos_List, normalize_, suppliedBatches_:Automatic] := Module[
+    halos_List, normalize_, suppliedBatches_:Automatic,
+    matchingPrivateHalos_:Automatic] := Module[
   {levels = Lookup[ftData, "Levels", None], nLevels, previousRequired,
+   previousPublicRequired,
    levelRecords = {}, runtimeLevels = <||>, levelData, matrix, gauge,
-   batch, entries, active, entryLosses, intrinsicLoss, userFloor,
+   batch, entries, active, entryLosses, intrinsicLoss, matchingSolveLoss,
+   matchingHalos, userFloor, publicRequired,
    required, record, identity},
   nLevels = Lookup[ftData, "NumLevels", If[AssociationQ[levels],
     Length[Select[Keys[levels], IntegerQ[#] && # > 0 &]], None]];
@@ -1911,7 +1942,23 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
     Return[ft2NativeFailure[
       "native epsilon preplanner received invalid levels, epsilon order, or level halos"],
       Module]];
+  matchingHalos = Which[
+    matchingPrivateHalos === Automatic, ConstantArray[0, nLevels],
+    ListQ[matchingPrivateHalos] &&
+        Length[matchingPrivateHalos] === nLevels &&
+        AllTrue[matchingPrivateHalos, IntegerQ[#] && # >= 0 &],
+      matchingPrivateHalos,
+    AssociationQ[matchingPrivateHalos] &&
+        AllTrue[Range[nLevels],
+          IntegerQ[Lookup[matchingPrivateHalos, #, 0]] &&
+            Lookup[matchingPrivateHalos, #, 0] >= 0 &],
+      Lookup[matchingPrivateHalos, Range[nLevels], 0],
+    True, Return[ft2NativeFailure[
+      "native epsilon preplanner received invalid private matching halos",
+      <|"MatchingPrivateHalos" -> matchingPrivateHalos,
+        "NumLevels" -> nLevels|>], Module]];
   previousRequired = epsilonOrder;
+  previousPublicRequired = epsilonOrder;
   Do[
     If[!KeyExistsQ[levels, level],
       Return[ft2NativeFailure[
@@ -1943,8 +1990,18 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
           entry["MinimumEpsilonShift"]]], active];
     intrinsicLoss = If[entryLosses === <||>, 0,
       Max[Values[entryLosses]]];
+    (* Matching is an internal change of basis, not a physical epsilon-order
+       consumer.  Its factorization/refinement halo is private to the match
+       transaction and the residual certificate is authoritative only through
+       RequiredOutputRawTop.  Charging elimination depth recursively here was
+       the architectural error that expanded a public order-0 banana request
+       to order 33. *)
+    matchingSolveLoss = matchingHalos[[level]];
     userFloor = ft2UserRawFloor[epsilonOrder, halos, level];
-    required = Max[userFloor, previousRequired + intrinsicLoss];
+    publicRequired = Max[userFloor,
+      previousPublicRequired + intrinsicLoss];
+    required = Max[userFloor,
+      previousRequired + intrinsicLoss + matchingSolveLoss];
     record = <|
       "Schema" -> "FeynmanTrick.NativeEpsilonPlanLevel/v1",
       "Level" -> level,
@@ -1961,32 +2018,42 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
         Lookup[entries, "MinimumEpsilonShift"],
       "EntryLosses" -> entryLosses,
       "IntrinsicLoss" -> intrinsicLoss,
+      "MatchingSolveLoss" -> matchingSolveLoss,
       "UserRawFloor" -> userFloor,
+      "RequiredOutputPublicRawTop" -> previousPublicRequired,
       "RequiredOutputRawTop" -> previousRequired,
+      "RequiredPublicRawTop" -> publicRequired,
       "RequiredRawTop" -> required|>;
     AppendTo[levelRecords, record];
     AssociateTo[runtimeLevels, level -> <|
       "Record" -> record, "Gauge" -> gauge, "Batch" -> batch,
       "RelativeEntries" -> entries,
+      "RequiredOutputPublicRawTop" -> previousPublicRequired,
       "RequiredOutputRawTop" -> previousRequired,
+      "RequiredPublicRawTop" -> publicRequired,
       "RequiredRawTop" -> required|>];
+    previousPublicRequired = publicRequired;
     previousRequired = required,
     {level, 1, nLevels}];
   record = <|
     "Schema" -> "FeynmanTrick.NativeEpsilonPlan/v1",
     "EpsilonOrder" -> epsilonOrder,
     "LevelEpsilonHalos" -> halos,
+    "MatchingPrivateHalos" -> matchingHalos,
     "NumLevels" -> nLevels,
     "Levels" -> levelRecords,
+    "DeepRequiredPublicRawTop" -> previousPublicRequired,
     "DeepRequiredRawTop" -> previousRequired|>;
   identity = ft2CanonicalIdentity["ft2-native-epsilon-plan-", record];
   <|"Schema" -> record["Schema"], "Identity" -> identity,
     "Record" -> record, "Levels" -> runtimeLevels,
     "NumLevels" -> nLevels,
+    "DeepRequiredPublicRawTop" -> previousPublicRequired,
     "DeepRequiredRawTop" -> previousRequired|>];
 
 ft2NativeEpsilonPlanQ[plan_] := Module[
-  {record, levels, nLevels, levelRecords, deepRequired},
+  {record, levels, nLevels, levelRecords, deepRequired, deepPublic,
+   matchingHalos},
   If[!AssociationQ[plan], Return[False, Module]];
   record = Lookup[plan, "Record", None];
   levels = Lookup[plan, "Levels", None];
@@ -2003,10 +2070,18 @@ ft2NativeEpsilonPlanQ[plan_] := Module[
     Return[False, Module]];
   levelRecords = Lookup[record, "Levels", None];
   deepRequired = Lookup[record, "DeepRequiredRawTop", None];
+  deepPublic = Lookup[record, "DeepRequiredPublicRawTop", None];
+  matchingHalos = Lookup[record, "MatchingPrivateHalos", None];
   If[!ListQ[levelRecords] || Length[levelRecords] =!= nLevels ||
       Sort[Keys[levels]] =!= Range[nLevels] ||
-      !IntegerQ[deepRequired] ||
+      !IntegerQ[deepRequired] || !IntegerQ[deepPublic] ||
+      deepPublic > deepRequired ||
+      !ListQ[matchingHalos] || Length[matchingHalos] =!= nLevels ||
+      !AllTrue[matchingHalos, IntegerQ[#] && # >= 0 &] ||
+      Lookup[plan, "DeepRequiredPublicRawTop", None] =!= deepPublic ||
       Lookup[plan, "DeepRequiredRawTop", None] =!= deepRequired ||
+      Lookup[Last[levelRecords], "RequiredPublicRawTop", None] =!=
+        deepPublic ||
       Lookup[Last[levelRecords], "RequiredRawTop", None] =!= deepRequired,
     Return[False, Module]];
   AllTrue[Range[nLevels], Function[level,
@@ -2021,12 +2096,26 @@ ft2NativeEpsilonPlanQ[plan_] := Module[
         ListQ[Lookup[runtime, "RelativeEntries", None]] &&
         Lookup[runtime, "RequiredOutputRawTop", None] ===
           Lookup[saved, "RequiredOutputRawTop", None] &&
+        Lookup[runtime, "RequiredOutputPublicRawTop", None] ===
+          Lookup[saved, "RequiredOutputPublicRawTop", None] &&
+        Lookup[runtime, "RequiredPublicRawTop", None] ===
+          Lookup[saved, "RequiredPublicRawTop", None] &&
         Lookup[runtime, "RequiredRawTop", None] ===
           Lookup[saved, "RequiredRawTop", None] &&
+        IntegerQ[Lookup[saved, "RequiredOutputPublicRawTop", None]] &&
         IntegerQ[Lookup[saved, "RequiredOutputRawTop", None]] &&
+        IntegerQ[Lookup[saved, "RequiredPublicRawTop", None]] &&
         IntegerQ[Lookup[saved, "RequiredRawTop", None]] &&
+        Lookup[saved, "RequiredOutputPublicRawTop", 1] <=
+          Lookup[saved, "RequiredOutputRawTop", 0] &&
+        Lookup[saved, "RequiredPublicRawTop", 1] <=
+          Lookup[saved, "RequiredRawTop", 0] &&
+        Lookup[saved, "MatchingSolveLoss", None] ===
+          matchingHalos[[level]] &&
         IntegerQ[Lookup[saved, "IntrinsicLoss", None]] &&
-        Lookup[saved, "IntrinsicLoss", -1] >= 0]]]
+        Lookup[saved, "IntrinsicLoss", -1] >= 0 &&
+        IntegerQ[Lookup[saved, "MatchingSolveLoss", None]] &&
+        Lookup[saved, "MatchingSolveLoss", -1] >= 0]]]
   ];
 
 (* DeepestLevelBoundary's order argument is the requested PHYSICAL Laurent
@@ -2222,10 +2311,13 @@ ft2ValidateNativePlanRuntimeLevel[planned_Association,
     "PlannedIntrinsicLoss" -> planned["Record", "IntrinsicLoss"]|>];
 
 ft2NativeEpsilonLedger[entries_List, currentBCs_List,
-    downstreamFiniteTop_Integer] := Module[
+    downstreamFiniteTop_Integer,
+    downstreamPublicFiniteTop_Integer] := Module[
   {widths, availableSourceMax, active, nonDirect,
    coefficientShift, coefficientHalo, integrationHalo, targetMax,
-   deliverableMax, outputMins, capacityByMaster, activeCapacities},
+   publicTargetMax, deliverableMax, publicDeliverableMax,
+   maximumDeliverableMax, outputMins, capacityByMaster,
+   activeCapacities},
   widths = If[AllTrue[currentBCs, ListQ], Length /@ currentBCs, {}];
   If[widths === {} || MemberQ[widths, 0] ||
       Length[DeleteDuplicates[widths]] =!= 1,
@@ -2239,18 +2331,16 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
     Min[Lookup[nonDirect, "MinimumEpsilonShift"]]];
   coefficientHalo = Max[0, -coefficientShift];
   integrationHalo = ft2NativeIntegrationHalo[active];
-  (* downstreamFiniteTop is an independently required raw floor F.  A pole
-     that happens to appear (or cancel) never buys completeness.  Preserve
-     the honest source reservoir instead: with available work edge S,
-     Prepare's maximal public target is T=S-HC.  Per-entry exact capacities
-     are S+s for direct/limits and S+s-1 for native integration. *)
-  (* Preserve every coefficient that the exact source/row contract can
-     honestly deliver.  The downstream floor remains the public requirement;
-     surplus coefficients are carried to the next FT level as an internal
-     reservoir for later singularly perturbed matches.  Discarding that
-     reservoir here defeats BoundaryExtraOrder and can leave a later exact
-     CASE-P lattice transformation with too little finite epsilon width. *)
-  targetMax = availableSourceMax - coefficientHalo;
+  (* downstreamFiniteTop is the independently planned public output edge.
+     Keep it distinct from the source reservoir: integration needs one state
+     coefficient beyond that edge, while every remaining source coefficient
+     is private matching work.  Promoting the whole reservoir to targetMax
+     makes MatchEpsilonPadding identically zero and moves the goalpost every
+     time the planner supplies more data. *)
+  deliverableMax = downstreamFiniteTop;
+  publicDeliverableMax = downstreamPublicFiniteTop;
+  targetMax = deliverableMax + integrationHalo;
+  publicTargetMax = publicDeliverableMax + integrationHalo;
   outputMins = Association@Map[Function[entry,
     entry["MasterIndex"] -> If[entry["Case"] === "integrate",
       entry["MinimumEpsilonShift"] - integrationHalo,
@@ -2260,30 +2350,39 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
       entry["MinimumEpsilonShift"] -
       If[entry["Case"] === "integrate", 1, 0])], active];
   activeCapacities = Values[capacityByMaster];
-  deliverableMax = If[activeCapacities === {}, availableSourceMax,
+  maximumDeliverableMax = If[activeCapacities === {}, availableSourceMax,
     Min[Prepend[activeCapacities, availableSourceMax]]];
-  If[downstreamFiniteTop < 0 || targetMax < 0 ||
-      deliverableMax < downstreamFiniteTop,
+  If[downstreamPublicFiniteTop < 0 ||
+      downstreamPublicFiniteTop > downstreamFiniteTop ||
+      targetMax < 0 || publicTargetMax < 0 ||
+      maximumDeliverableMax < deliverableMax ||
+      targetMax > availableSourceMax - coefficientHalo,
     Return[ft2NativeFailure[
       "source epsilon depth cannot cover the downstream raw boundary window",
       <|"AvailableSourceCompleteMax" -> availableSourceMax,
         "RequiredRawTop" -> downstreamFiniteTop,
         "CoefficientHalo" -> coefficientHalo,
         "IntegrationHalo" -> integrationHalo,
+        "PublicTargetCompleteMax" -> publicTargetMax,
         "TargetCompleteMax" -> targetMax,
+        "PublicDeliverableCompleteMax" -> publicDeliverableMax,
         "DeliverableCompleteMax" -> deliverableMax,
+        "MaximumDeliverableCompleteMax" -> maximumDeliverableMax,
         "CapacityByMaster" -> capacityByMaster|>], Module]];
   <|"AvailableSourceCompleteMax" -> availableSourceMax,
     "SourceCompleteMax" -> availableSourceMax,
     "CoefficientMinimumShift" -> coefficientShift,
     "CoefficientHalo" -> coefficientHalo,
     "IntegrationHalo" -> integrationHalo,
+    "PublicTargetCompleteMax" -> publicTargetMax,
     "TargetCompleteMax" -> targetMax,
+    "PublicDeliverableCompleteMax" -> publicDeliverableMax,
     "DeliverableCompleteMax" -> deliverableMax,
     "OutputMinimums" -> outputMins,
     "CapacityByMaster" -> capacityByMaster,
     "DownstreamFiniteTop" -> downstreamFiniteTop,
-    "DownstreamRawTop" -> downstreamFiniteTop|>];
+    "DownstreamReservoirRawTop" -> downstreamFiniteTop,
+    "DownstreamRawTop" -> downstreamPublicFiniteTop|>];
 
 ft2DirectBoundaryValue[entry_Association, currentBCs_List,
     physicalVar_Symbol, anchor_, epsSymbol_Symbol,
@@ -2325,11 +2424,12 @@ ft2DirectBoundaryValue[entry_Association, currentBCs_List,
 ft2NativeSegmentLine[sys_, path_] :=
   DiffExp2`Transport`SegmentLine[sys, path];
 ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
-    physicalVar_, targetMax_, threads_] :=
+    physicalVar_, targetMax_, requiredTargetMax_, threads_] :=
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     sys, boundary, lower, upper, "Threads" -> threads,
     "Integrands" -> {coefficientVectors, physicalVar},
     "TargetCompleteMax" -> targetMax,
+    "RequiredTargetCompleteMax" -> requiredTargetMax,
     "DeferReceivingBases" -> True];
 SetAttributes[ft2NativeRun, HoldFirst];
 ft2NativeRun[atlas_Symbol, observables_, physicalVar_] :=
@@ -2474,12 +2574,18 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "NativeEpsilonPlanIdentity" -> nativePlanIdentity,
     "SourceCompleteMax" -> ledger["SourceCompleteMax"],
     "TargetCompleteMax" -> ledger["TargetCompleteMax"],
+    "RequiredTargetCompleteMax" ->
+      ledger["TargetCompleteMax"],
     "DeliverableCompleteMax" -> deliverableMax,
     "RequiredRawTop" -> ledger["DownstreamRawTop"],
     "CoefficientHalo" -> ledger["CoefficientHalo"],
     "IntegrationHalo" -> integrationHalo,
     "MatchEpsilonPadding" -> If[AssociationQ[atlas],
-      Lookup[atlas, "MatchEpsilonPadding", 0], 0]|>;
+      Lookup[atlas, "MatchEpsilonPadding",
+        ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
+          ledger["TargetCompleteMax"]],
+      ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
+        ledger["TargetCompleteMax"]]|>;
   provenZeroEntries = Select[entries,
     TrueQ[Lookup[#, "ProvenZero", False]] &];
   activeEntries = Select[entries,
@@ -2546,7 +2652,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         "CoefficientVector" -> entry["CoefficientVector"],
         "Epsilon" -> <|"Min" -> entry["OutputMin"],
           "Max" -> deliverableMax,
-          "RequiredCompleteMax" -> publicRequiredTop|>|>;
+          "RequiredCompleteMax" -> deliverableMax|>|>;
       If[entry["Case"] === "integrate",
         (* Production transport returns the honest stored Taylor truncation.
            Full-local tail models are an optional certification product and
@@ -2604,7 +2710,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         ft2NativeStageTiming["atlas-prepare-start"];
         atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
           lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
-          physicalVar, ledger["TargetCompleteMax"], threads]];
+          physicalVar, ledger["TargetCompleteMax"],
+          ledger["TargetCompleteMax"], threads]];
         If[FailureQ[atlas] || !AssociationQ[atlas] ||
             Lookup[atlas, "Type", None] =!=
               "DiffExp2NativeRegularIndependentArmAtlas" ||
@@ -2754,7 +2861,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
       Lookup[exported, "CompatibilityExports", Length[nativeEntries]], 0],
     "CheckpointRecord" -> checkpointAuditRecord|>];
 
-runExample[name_String, familyRequest_:None] := Module[
+runExample[name_String, familyRequest_:None,
+    matchingPrivateHalos_:Automatic] := Module[
   {topology, sequence, prepContract, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
    resumeCheckpoint = None, startLevel, finalRaw = None,
@@ -2880,7 +2988,8 @@ runExample[name_String, familyRequest_:None] := Module[
     ftEps -> Global`eps);
   If[recurrenceBackend === "Cpp",
     nativeEpsilonPlan = ft2BuildNativeEpsilonPlan[
-      ftData, epsOrder, levelEpsilonHalos, normalizeFT];
+      ftData, epsOrder, levelEpsilonHalos, normalizeFT, Automatic,
+      matchingPrivateHalos];
     If[FailureQ[nativeEpsilonPlan],
       Print["FTLADDER NATIVE EPSILON PLAN FAIL ", nativeEpsilonPlan];
       Return[$Failed]];
@@ -2888,6 +2997,8 @@ runExample[name_String, familyRequest_:None] := Module[
       nativeEpsilonPlan["Identity"],
       " losses=", Lookup[nativeEpsilonPlan["Record", "Levels"],
         "IntrinsicLoss"],
+      " matchLosses=", Lookup[nativeEpsilonPlan["Record", "Levels"],
+        "MatchingSolveLoss"],
       " required=", Lookup[nativeEpsilonPlan["Record", "Levels"],
         "RequiredRawTop"]]];
   If[resumeLadderFile =!= "",
@@ -2996,7 +3107,8 @@ runExample[name_String, familyRequest_:None] := Module[
      esCMxLevel, configResult, deltaPrescriptions, plannedLevel = None,
      runtimePlanCheck, nativeTransportContract = None,
      nativeCheckpointSpec = None, nativeStateFile, nativeSidecarFile,
-     nativeConfigurationRecord, rowCertifications},
+     nativeConfigurationRecord, rowCertifications,
+     downstreamPublicFiniteTop},
     var = levelData["FeynmanParameter"];
     If[recurrenceBackend === "Cpp",
       plannedLevel = nativeEpsilonPlan["Levels"][level]];
@@ -3099,18 +3211,26 @@ runExample[name_String, familyRequest_:None] := Module[
           runtimePlanCheck];
         Throw[$Failed, "FT2Abort"]];
       downstreamFiniteTop = plannedLevel["RequiredOutputRawTop"];
+      downstreamPublicFiniteTop =
+        plannedLevel["RequiredOutputPublicRawTop"];
       nativeLedger = ft2NativeEpsilonLedger[
-        nativeEntries, currentBCs, downstreamFiniteTop];
+        nativeEntries, currentBCs, downstreamFiniteTop,
+        downstreamPublicFiniteTop];
       If[FailureQ[nativeLedger],
         Print["FTLADDER NATIVE EPSILON FAIL level=", level, " ",
           nativeLedger];
         Throw[$Failed, "FT2Abort"]];
+      ft2NativeStageTiming["level=", level,
+        " epsilon-ledger=", InputForm[nativeLedger],
+        " boundary-width=", Length /@ currentBCs,
+        " prefactors=", currentPrefactors];
       esCMxLevel = nativeLedger["TargetCompleteMax"],
       esCMxLevel = requestedEpsilonOrder[level]];
     (* configure DiffExp2 for this level *)
     deltaPrescriptions = levelDeltaPrescriptions[var, sys, extraFacs];
     configResult = catch2[DiffExp2`Config`LoadConfiguration[{
       "WorkingPrecision" -> wp, "ExpansionOrder" -> levelExpansionOrder,
+      "LinearSolveChopPrecision" -> matchDigits,
       "EpsilonOrder" -> esCMxLevel,
       "DivisionOrder" -> divisionOrder,
       "RadiusOfConvergence" -> radiusOfConvergence,
@@ -3127,6 +3247,7 @@ runExample[name_String, familyRequest_:None] := Module[
     If[recurrenceBackend === "Cpp",
       nativeConfigurationRecord = <|
         "WorkingPrecision" -> wp,
+        "MatchingDigits" -> matchDigits,
         "ExpansionOrder" -> levelExpansionOrder,
         "EpsilonOrder" -> esCMxLevel,
         "DivisionOrder" -> divisionOrder,
@@ -3184,6 +3305,7 @@ runExample[name_String, familyRequest_:None] := Module[
                 "Reductions" -> AssociationMap[normalizeFT, reductions],
                 "ExtraSingularFactors" -> extraFacs,
                 "Anchor" -> anchor, "WorkingPrecision" -> wp,
+                "MatchingDigits" -> matchDigits,
                 "DivisionOrder" -> divisionOrder,
                 "RadiusOfConvergence" -> radiusOfConvergence,
                 "ValueTransportMode" ->
@@ -3211,12 +3333,15 @@ runExample[name_String, familyRequest_:None] := Module[
         " native-dispatch-ready"];
       nativeDispatch = ft2RunNativeBoundaryDispatch[
         sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
-        extraFacs, deltaPrescriptions, cppArmThreadBudget, wp,
+        extraFacs, deltaPrescriptions, cppArmThreadBudget, inputPrecision,
         nativeEpsilonExecution["Identity"], nativeCheckpointSpec];
       If[FailureQ[nativeDispatch],
         Print["FTLADDER NATIVE BATCH FAIL level=", level, " ",
           nativeDispatch];
-        Throw[$Failed, "FT2Abort"]];
+        With[{retry = ft2NativeMatchingReservoirRetry[
+            nativeDispatch, level]},
+          Throw[If[ft2NativeMatchingReservoirRetryQ[retry],
+            retry, $Failed], "FT2Abort"]]];
       If[!resumeNativeTransport && nativeStateFile =!= "" &&
           AssociationQ[nativeDispatch["NativeTransportCheckpoint"]],
         If[!ft2NativeTransportResumeRecordQ[
@@ -3277,6 +3402,7 @@ runExample[name_String, familyRequest_:None] := Module[
         "TransportLow" -> trLoCache, "TransportHigh" -> trHiCache,
         "CompletedArms" -> completedArms,
         "Anchor" -> anchor, "WorkingPrecision" -> wp,
+        "MatchingDigits" -> matchDigits,
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
         "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
@@ -3524,6 +3650,7 @@ runExample[name_String, familyRequest_:None] := Module[
           "BoundaryPrefactors" -> currentPrefactors,
           "MastersHere" -> mastersBelow, "Anchor" -> anchor,
           "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
+          "MatchingDigits" -> matchDigits,
           "RecurrenceBackend" -> recurrenceBackend,
           "DeltaPrescriptionSign" -> deltaPrescriptionSign,
           "BoundaryExtraOrder" -> boundaryExtraOrder,
@@ -3539,7 +3666,8 @@ runExample[name_String, familyRequest_:None] := Module[
             recurrenceBackend === "Cpp", needTop + shift, None],
           "NativeObservableBatch" -> If[recurrenceBackend === "Cpp",
             Join[nativeDispatch["CheckpointRecord"],
-              <|"DeliverableCompleteMax" -> needTop|>], None],
+              <|"RequiredRawTop" -> nextReq,
+                "DeliverableCompleteMax" -> needTop|>], None],
           "NativeEpsilonPlan" -> If[recurrenceBackend === "Cpp",
             nativeEpsilonExecution["Record"], None],
           "NativeEpsilonPlanIdentity" -> If[
@@ -3559,6 +3687,7 @@ runExample[name_String, familyRequest_:None] := Module[
     finalRaw = rawES;
     finalCertifications = rowCertifications],
     {level, startLevel, 1, -1}], "FT2Abort"];
+  If[FailureQ[abortRes], Return[abortRes]];
   If[abortRes === $Failed, Return[$Failed]];
   If[abortRes === "Stopped", Return[True]]];
   If[finalRaw === None || MemberQ[finalRaw, $Failed], Return[$Failed]];
@@ -3588,15 +3717,45 @@ runExample[name_String, familyRequest_:None] := Module[
       Print[finalLine]]];
   True];
 
+ft2RunExampleWithMatchingRetries[name_String,
+    familyRequest_:None] := Module[
+  {matchingPrivateHalos = <||>, result, data, level, additional,
+   updated, attempt = 0, maxAttempts = 12, maxHalo = 64},
+  While[attempt < maxAttempts,
+    ++attempt;
+    result = runExample[name, familyRequest, matchingPrivateHalos];
+    If[!ft2NativeMatchingReservoirRetryQ[result], Return[result, Module]];
+    data = result[[2]];
+    level = Lookup[data, "Level", None];
+    additional = Lookup[data, "AdditionalOrders", None];
+    If[!IntegerQ[level] || level < 1 ||
+        !IntegerQ[additional] || additional < 1,
+      Return[$Failed, Module]];
+    updated = Lookup[matchingPrivateHalos, level, 0] + additional;
+    If[updated > maxHalo,
+      Print["FTLADDER NATIVE MATCH RETRY EXHAUSTED level=", level,
+        " requestedPrivateHalo=", updated, " limit=", maxHalo];
+      Return[$Failed, Module]];
+    AssociateTo[matchingPrivateHalos, level -> updated];
+    Print["FTLADDER NATIVE MATCH RETRY level=", level,
+      " additional=", additional,
+      " privateHalos=", matchingPrivateHalos];
+    DiffExp2`Solve`ClearSolveCaches[]];
+  Print["FTLADDER NATIVE MATCH RETRY EXHAUSTED attempts=", maxAttempts,
+    " privateHalos=", matchingPrivateHalos];
+  $Failed];
+
 (* Let the focused checkpoint tests load these definitions without starting
    FIRE or terminating their Wolfram kernel. *)
 If[envOrDefault["FT_RUNNER_DEFINITIONS_ONLY", "0"] =!= "1",
   If[AssociationQ[ft2FamilyRequest],
-    If[runExample[ft2FamilyRunName, ft2FamilyRequest] === $Failed,
+    If[ft2RunExampleWithMatchingRetries[
+        ft2FamilyRunName, ft2FamilyRequest] === $Failed,
       Print["FAILED ", ft2FamilyRunName]; Quit[1]],
     requested = StringTrim /@
       StringSplit[envOrDefault["FT_EXAMPLES", "bubble"], ","];
     Do[
-      If[runExample[name] === $Failed, Print["FAILED ", name]; Quit[1]],
+      If[ft2RunExampleWithMatchingRetries[name] === $Failed,
+        Print["FAILED ", name]; Quit[1]],
       {name, requested}]];
   Quit[0]];

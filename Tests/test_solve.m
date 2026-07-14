@@ -561,9 +561,19 @@ assert["su19_gauge_transform_budget",
   !FailureQ[r19t] &&
   DiffExp2`Solve`Private`spectralTransformPoleDepth[cs19t] === 0 &&
   DiffExp2`Solve`Private`gaugeCoefficientData[cs19t, 6]["EpsValuation"] === -8 &&
+  DiffExp2`Solve`Private`gaugeCoefficientEpsValuation[cs19t, 6] === -8 &&
   DiffExp2`Solve`Private`finalTransformPoleDepth[cs19t, 6] === 8 &&
   AllTrue[r19t["Basis"]["Columns"],
     #["EpsWindow"] === <|"Min" -> -8, "CompleteMax" -> 2|> &]];
+
+(* An epsilon-monomial denominator followed by a regular rational t
+   denominator has a uniform valuation bound.  The planner must obtain it
+   without constructing the complete Taylor quotient. *)
+assert["su19_gauge_fast_uniform_valuation",
+  DiffExp2`Solve`Private`gaugeCoefficientEpsValuation[
+    <|"ChartVar" -> t,
+      "Gauge" -> {{1, (1 + eps t)/(eps^2 (1 + t + t^2))}, {0, 1}},
+      "SystemSize" -> 2|>, 600] === -2];
 
 (* SU-22: two successive CASE-P layers.  The a=0 column first collides
    with (1,eps), then its eps^-1 descendant collides with (2,2eps), so the

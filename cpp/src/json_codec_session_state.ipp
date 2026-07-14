@@ -256,6 +256,10 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
       parent.at("work_contract"), "SCC work contract");
   work.work_min = as_i32(
       work_object.at("work_min"), "work epsilon minimum");
+  if (const auto* audit = work_object.if_contains(
+          "cancellation_audit_base"); audit != nullptr && !audit->is_null())
+    work.cancellation_audit_base =
+        as_i32(*audit, "work cancellation audit base");
   work.requested_min = as_i32(
       work_object.at("requested_min"), "requested epsilon minimum");
   work.requested_max = as_i32(
@@ -272,6 +276,11 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
       work.requested_max > work.work_complete_max)
     throw std::invalid_argument(
         "SCC epsilon work contract has inconsistent ordered bounds");
+  if (work.cancellation_audit_base.has_value() &&
+      !(work.work_min < *work.cancellation_audit_base &&
+        *work.cancellation_audit_base <= work.requested_min))
+    throw std::invalid_argument(
+        "SCC cancellation audit base is outside its lower guard contract");
   if (work.wolfram_coupling_depth != graph.coupling_depth + 1)
     throw std::invalid_argument(
         "Wolfram coupling depth must equal native edge depth plus one");
@@ -595,9 +604,10 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
             "SCC coupling exact entries differ from their indexed parent cells");
       const auto& raw_multiplier = as_object(
           raw_entry.at("multiplier"), "prepared SCC multiplier");
-      PreparedRationalTaylorMultiplier<Scalar> multiplier;
-      multiplier.epsilon_shift = as_i32(
-          raw_multiplier.at("epsilon_shift"), "multiplier epsilon shift");
+      auto multiplier = parse_prepared_rational_taylor_multiplier<Scalar>(
+          raw_multiplier, frame_width,
+          static_cast<std::size_t>(work.work_t_order) + 1, true,
+          "prepared SCC multiplier");
       const auto shifted_work_min = static_cast<std::int64_t>(work.work_min) +
           multiplier.epsilon_shift;
       const auto shifted_work_max =
@@ -609,26 +619,12 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
           shifted_work_max > std::numeric_limits<std::int32_t>::max())
         throw std::invalid_argument(
             "SCC multiplier shift overflows the retained epsilon frame");
-      multiplier.center_pole_order = as_u32(
-          raw_multiplier.at("center_pole_order"),
-          "multiplier center-pole order");
-      multiplier.exact_identity = required_string(
-          raw_multiplier, "exact_identity");
       if (multiplier.exact_identity != exact_theta_entry)
         throw std::invalid_argument(
             "prepared multiplier identity differs from the exact theta entry");
-      multiplier.proven_zero = raw_multiplier.at("proven_zero").as_bool();
       if (multiplier.proven_zero != parent_original.proven_zero)
         throw std::invalid_argument(
             "prepared multiplier structural-zero fact differs from its exact parent cell");
-      for (const auto& raw_kernel : as_array(
-               raw_multiplier.at("kernels"), "multiplier epsilon kernels")) {
-        std::vector<Scalar> kernel;
-        for (const auto& coefficient : as_array(
-                 raw_kernel, "multiplier Taylor kernel"))
-          kernel.push_back(parse_scalar<Scalar>(coefficient));
-        multiplier.kernels.push_back(std::move(kernel));
-      }
       if (!multiplier.proven_zero) {
         if (multiplier.kernels.size() != frame_width ||
             std::any_of(multiplier.kernels.begin(), multiplier.kernels.end(),
@@ -825,4 +821,3 @@ json::object solve_prepared_chart_safe(
                         {"chart", chart->handle()}};
   }
 }
-

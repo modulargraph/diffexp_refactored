@@ -155,6 +155,74 @@
             session->precision_bits,
             checkpoint_configuration_identity(*session), plan,
             basis_handles, basis, incoming_handle, incoming, true);
+        if (auto incomplete = match->incomplete_acb_summary();
+            incomplete.has_value()) {
+          const auto& residual = as_object(
+              incomplete->at("residual"),
+              "incomplete consuming-hop Acb residual");
+          const auto& complete_window = as_object(
+              residual.at("complete_window"),
+              "incomplete consuming-hop Acb residual window");
+          const auto complete_max = as_i32(
+              complete_window.at("max"),
+              "incomplete consuming-hop Acb residual maximum");
+          const auto additional = std::max<std::int32_t>(
+              0, required_complete_max - complete_max);
+          const auto complete_through_required =
+              residual.at("complete_through_required").as_bool();
+          const auto& coefficient_verdicts = as_object(
+              residual.at("coefficient_verdicts"),
+              "incomplete consuming-hop Acb coefficient verdicts");
+          const auto inconclusive_coefficients = as_u64(
+              coefficient_verdicts.at("inconclusive"),
+              "incomplete consuming-hop inconclusive coefficient count");
+          const bool retryable_epsilon =
+              !complete_through_required && additional > 0;
+          const bool retryable_clearance =
+              complete_through_required && inconclusive_coefficients > 0;
+          const auto& lattice = as_object(
+              incomplete->at("exact_lattice"),
+              "incomplete consuming-hop exact lattice");
+          const json::object compact_lattice{
+              {"normalized_determinant_valuation",
+               lattice.at("normalized_determinant_valuation")},
+              {"transformation_min_power",
+               lattice.at("transformation_min_power")},
+              {"transformation_terms",
+               lattice.at("transformation_terms")},
+              {"initial_column_shifts",
+               lattice.at("initial_column_shifts")},
+              {"initial_leading_rank",
+               lattice.at("initial_leading_rank")},
+              {"final_leading_rank",
+               lattice.at("final_leading_rank")}};
+          {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->pending_local_solves == 0)
+              throw std::logic_error(
+                  "consuming transport hop reservation accounting underflow");
+            --session->pending_local_solves;
+          }
+          return json::object{
+              {"status", "error"},
+              {"id", "CPP"},
+              {"reason", "acb_match_residual_inconclusive"},
+              {"retryable_epsilon_reservoir", retryable_epsilon},
+              {"retryable_matching_clearance", retryable_clearance},
+              {"required_additional_epsilon_orders", additional},
+              {"arm", arm_name},
+              {"match", match_index},
+              {"geometry", match->handoff().at("geometry")},
+              {"residual", residual},
+              {"epsilon", incomplete->at("epsilon")},
+              {"refinement", incomplete->at("refinement")},
+              {"weight_windows", incomplete->at("weight_windows")},
+              {"exact_lattice", compact_lattice},
+              {"detail",
+               retryable_epsilon
+                   ? "the Acb match needs a wider private epsilon reservoir before materialization"
+                   : "the Acb match reaches the required epsilon order but its finite-Taylor overlap is not accurate enough for the residual tolerance"}};
+        }
         next = match->materialize(
             local_handle,
             arm_checkpoint_identity(checkpoint_root, arm_name, "local",
@@ -2827,4 +2895,3 @@
         {"checkpoint_policy", checkpoint_policy},
         {"elapsed_ms", operation_ms}};
   }
-

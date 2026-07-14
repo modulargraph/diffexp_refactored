@@ -110,6 +110,12 @@ struct RecurrenceProblem {
   std::uint32_t frame_width = 0;
   bool has_initial = true;
   bool adaptive_lower_frame_probe = false;
+  // Optional lower edge of the trusted recurrence rectangle.  Coefficients
+  // below this power are a finite guard band: after a complete n-layer has
+  // been assembled and its Jordan systems solved, they must either be exact
+  // zero or an Acb enclosure certified below chop_digits.  A genuine value
+  // in the guard requests a wider frame instead of silently truncating it.
+  std::optional<std::int32_t> cancellation_audit_base;
 
   Scalar a_target;
   Scalar b_target;
@@ -119,9 +125,19 @@ struct RecurrenceProblem {
   std::vector<Scalar> a_shifts;
 
   std::vector<std::vector<ScalarShift<Scalar>>> d_lags;
-  std::vector<PreparedLag<Scalar>> nhat_lags;  // index zero intentionally empty
+  std::vector<PreparedLag<Scalar>> nhat_lags;
   std::vector<std::vector<Scalar>> rational_denominators;
   std::optional<Scalar> d0_inverse_scalar;
+
+  // In the ordinary Frobenius representation Nhat is already in the exact
+  // affine-Jordan residue basis.  An epsilon-degenerate eigenvector frame can
+  // make every positive Taylor lag artificially polar.  The epsilon-regular
+  // representation instead stores Nhat in the reduced physical basis.  Its
+  // n>=1 principal matrices are epsilon units; the spectral principal and
+  // V^-1 are retained only for the sourced n=0 resonance transaction.
+  bool epsilon_regular_principal = false;
+  std::optional<PreparedLag<Scalar>> spectral_principal_lag;
+  std::optional<PreparedMatrix<Scalar>> spectral_source_matrix;
 
   std::vector<JordanBlock> blocks;
   std::vector<std::vector<BlockStep<Scalar>>> schedule;  // [n][block]
@@ -147,6 +163,9 @@ struct PreparedRecurrenceOperator {
   std::vector<PreparedLag<Scalar>> nhat_lags;
   std::vector<std::vector<Scalar>> rational_denominators;
   std::optional<Scalar> d0_inverse_scalar;
+  bool epsilon_regular_principal = false;
+  std::optional<PreparedLag<Scalar>> spectral_principal_lag;
+  std::optional<PreparedMatrix<Scalar>> spectral_source_matrix;
   // When d0(eps) is not a scalar monomial, its framed inverse depends only on
   // this prepared chart/window.  Retain it once instead of rebuilding the
   // same O(W^2) recurrence for every homogeneous column and source sector.
@@ -165,6 +184,9 @@ struct RecurrenceOperatorView {
   const std::vector<PreparedLag<Scalar>>& nhat_lags;
   const std::vector<std::vector<Scalar>>& rational_denominators;
   const std::optional<Scalar>& d0_inverse_scalar;
+  bool epsilon_regular_principal;
+  const std::optional<PreparedLag<Scalar>>& spectral_principal_lag;
+  const std::optional<PreparedMatrix<Scalar>>& spectral_source_matrix;
   const Frame<Scalar>* d0_inverse_frame;
   const std::vector<JordanBlock>& blocks;
   const std::optional<PreparedMatrix<Scalar>>& assembly_matrix;
@@ -177,6 +199,8 @@ RecurrenceOperatorView<Scalar> recurrence_operator_view(
   return {problem.dimension, problem.frame_base, problem.frame_width,
           problem.d_lags, problem.nhat_lags,
           problem.rational_denominators, problem.d0_inverse_scalar,
+          problem.epsilon_regular_principal,
+          problem.spectral_principal_lag, problem.spectral_source_matrix,
           nullptr, problem.blocks, problem.assembly_matrix,
           problem.chop_digits};
 }
@@ -187,6 +211,9 @@ RecurrenceOperatorView<Scalar> recurrence_operator_view(
   return {prepared.dimension, prepared.frame_base, prepared.frame_width,
           prepared.d_lags, prepared.nhat_lags,
           prepared.rational_denominators, prepared.d0_inverse_scalar,
+          prepared.epsilon_regular_principal,
+          prepared.spectral_principal_lag,
+          prepared.spectral_source_matrix,
           prepared.d0_inverse_frame.empty()
               ? nullptr : &prepared.d0_inverse_frame,
           prepared.blocks, prepared.assembly_matrix, prepared.chop_digits};
@@ -491,6 +518,116 @@ FrameBlock<Scalar> divide_rational(const FrameBlock<Scalar>& rhs,
 }
 
 template <typename Scalar>
+std::vector<std::vector<Scalar>> expand_integral_lag(
+    const PreparedLag<Scalar>& lag, std::uint32_t dimension,
+    std::uint32_t width,
+    const std::vector<std::vector<Scalar>>& denominators) {
+  const auto matrix_size = static_cast<std::size_t>(dimension) * dimension;
+  std::vector<std::vector<Scalar>> out(
+      width, std::vector<Scalar>(matrix_size, ScalarTraits<Scalar>::zero()));
+  const auto add_shifts = [&](const std::vector<MatrixShift<Scalar>>& shifts,
+                              std::vector<std::vector<Scalar>>& target) {
+    for (const auto& shifted : shifts) {
+      if (shifted.shift < 0)
+        throw RecurrenceError(
+            "E5", "epsilon-regular principal contains a negative epsilon shift",
+            0, shifted.shift);
+      if (static_cast<std::uint64_t>(shifted.shift) >= width) continue;
+      auto& coefficient = target[static_cast<std::size_t>(shifted.shift)];
+      for (const auto& entry : shifted.entries) {
+        if (entry.row >= dimension || entry.col >= dimension)
+          throw RecurrenceError(
+              "E5", "epsilon-regular principal matrix entry is out of range");
+        coefficient[static_cast<std::size_t>(entry.row) * dimension +
+                    entry.col] += entry.value;
+      }
+    }
+  };
+  add_shifts(lag.polynomial, out);
+  for (const auto& group : lag.rational) {
+    if (group.denominator_index >= denominators.size())
+      throw RecurrenceError(
+          "E5", "epsilon-regular principal denominator is out of range");
+    const auto& q = denominators[group.denominator_index];
+    if (q.empty() || ScalarTraits<Scalar>::is_zero(q.front()))
+      throw RecurrenceError(
+          "E5", "epsilon-regular principal denominator has zero constant term");
+    std::vector<std::vector<Scalar>> numerator(
+        width, std::vector<Scalar>(matrix_size, ScalarTraits<Scalar>::zero()));
+    std::vector<std::vector<Scalar>> quotient(
+        width, std::vector<Scalar>(matrix_size, ScalarTraits<Scalar>::zero()));
+    add_shifts(group.numerator, numerator);
+    for (std::size_t power = 0; power < width; ++power) {
+      const auto last = std::min(power, q.size() - 1);
+      for (std::size_t entry = 0; entry < matrix_size; ++entry) {
+        auto value = numerator[power][entry];
+        for (std::size_t h = 1; h <= last; ++h)
+          value -= q[h] * quotient[power - h][entry];
+        quotient[power][entry] = value / q.front();
+        out[power][entry] += quotient[power][entry];
+      }
+    }
+  }
+  return out;
+}
+
+template <typename Scalar>
+std::vector<Scalar> expand_integral_scalar_lag(
+    const std::vector<ScalarShift<Scalar>>& lag, std::uint32_t width) {
+  std::vector<Scalar> out(width, ScalarTraits<Scalar>::zero());
+  for (const auto& shifted : lag) {
+    if (shifted.shift < 0)
+      throw RecurrenceError(
+          "E5", "epsilon-regular scalar principal contains a negative shift",
+          0, shifted.shift);
+    if (static_cast<std::uint64_t>(shifted.shift) < width)
+      out[static_cast<std::size_t>(shifted.shift)] += shifted.value;
+  }
+  return out;
+}
+
+template <typename Scalar>
+std::vector<Scalar> solve_dense_system(
+    std::vector<std::vector<Scalar>> matrix, std::vector<Scalar> rhs) {
+  const auto dimension = matrix.size();
+  if (dimension == 0 || rhs.size() != dimension ||
+      std::any_of(matrix.begin(), matrix.end(), [&](const auto& row) {
+        return row.size() != dimension;
+      }))
+    throw RecurrenceError("E5", "malformed epsilon-regular dense system");
+  for (std::size_t column = 0; column < dimension; ++column) {
+    auto pivot = column;
+    while (pivot < dimension &&
+           ScalarTraits<Scalar>::is_zero(matrix[pivot][column]))
+      ++pivot;
+    if (pivot == dimension)
+      throw RecurrenceError(
+          "E5", "epsilon-regular principal constant matrix is singular");
+    if (pivot != column) {
+      std::swap(matrix[pivot], matrix[column]);
+      std::swap(rhs[pivot], rhs[column]);
+    }
+    const auto pivot_value = matrix[column][column];
+    for (std::size_t row = column + 1; row < dimension; ++row) {
+      if (ScalarTraits<Scalar>::is_zero(matrix[row][column])) continue;
+      const auto factor = matrix[row][column] / pivot_value;
+      matrix[row][column] = ScalarTraits<Scalar>::zero();
+      for (std::size_t other = column + 1; other < dimension; ++other)
+        matrix[row][other] -= factor * matrix[column][other];
+      rhs[row] -= factor * rhs[column];
+    }
+  }
+  std::vector<Scalar> solution(dimension, ScalarTraits<Scalar>::zero());
+  for (std::size_t reverse = dimension; reverse-- > 0;) {
+    auto value = rhs[reverse];
+    for (std::size_t column = reverse + 1; column < dimension; ++column)
+      value -= matrix[reverse][column] * solution[column];
+    solution[reverse] = value / matrix[reverse][reverse];
+  }
+  return solution;
+}
+
+template <typename Scalar>
 Frame<Scalar> affine_divide(const Frame<Scalar>& rhs, const Scalar& d_a,
                             const Scalar& d_b, StepCase kind,
                             std::int32_t frame_base) {
@@ -638,12 +775,26 @@ class RecurrenceSolver {
     } else {
       inv_d0_frame_ = detail::zero_frame<Scalar>(width_);
     }
+    if (op_.epsilon_regular_principal) {
+      principal_coefficients_ = detail::expand_integral_lag(
+          op_.nhat_lags.front(), d_, width_,
+          op_.rational_denominators);
+      d0_coefficients_ = detail::expand_integral_scalar_lag(
+          op_.d_lags.front(), width_);
+    }
   }
 
  public:
   RecurrenceResult<Scalar> run() {
-    seed_initial();
-    const std::uint32_t n0 = p_.has_initial ? 1 : 0;
+    if (p_.has_initial) {
+      seed_initial();
+      audit_completed_layer(0);
+    } else if (op_.epsilon_regular_principal) {
+      seed_epsilon_regular_source_layer();
+      audit_completed_layer(0);
+    }
+    const std::uint32_t n0 =
+        (p_.has_initial || op_.epsilon_regular_principal) ? 1 : 0;
     for (std::uint32_t n = n0; n <= nmax_; ++n) step_n(n);
     result_.top_valid = kCompleteInfinity;
     for (const auto value : result_.validity) {
@@ -688,6 +839,35 @@ class RecurrenceSolver {
     for (std::uint32_t r = 0; r < d_; ++r) result_.validity[v_index(n, log, r)] = values[r];
   }
 
+  void audit_completed_layer(std::uint32_t n) {
+    if (!p_.cancellation_audit_base.has_value()) return;
+    const auto audit_base = *p_.cancellation_audit_base;
+    const auto guard_width = static_cast<std::size_t>(
+        static_cast<std::int64_t>(audit_base) - op_.frame_base);
+    for (std::uint32_t log = 0; log < logs_; ++log) {
+      for (std::uint32_t component = 0; component < d_; ++component) {
+        for (std::size_t epsilon = 0; epsilon < guard_width; ++epsilon) {
+          auto& value = result_.u[u_index(n, log, component, epsilon)];
+          if (ScalarTraits<Scalar>::is_zero(value)) continue;
+          if (ScalarTraits<Scalar>::certified_zero(value, op_.chop_digits)) {
+            value = ScalarTraits<Scalar>::zero();
+            continue;
+          }
+          const auto power = static_cast<std::int32_t>(
+              static_cast<std::int64_t>(op_.frame_base) + epsilon);
+          throw RecurrenceError(
+              "E4",
+              "completed recurrence layer has genuine lower-epsilon "
+              "content in its cancellation guard at n=" +
+                  std::to_string(n) + ", log=" + std::to_string(log) +
+                  ", component=" + std::to_string(component) +
+                  ", epsilon_power=" + std::to_string(power),
+              op_.frame_base, power);
+        }
+      }
+    }
+  }
+
   const Scalar& a_shift(std::int32_t m) const {
     const auto index = m - p_.a_shift_min;
     if (index < 0 || index >= static_cast<std::int32_t>(p_.a_shifts.size())) {
@@ -699,14 +879,224 @@ class RecurrenceSolver {
   void seed_initial() {
     if (!p_.has_initial) return;
     for (std::uint32_t log = 0; log <= p_.log_max; ++log) {
+      auto input = detail::zero_block<Scalar>(d_, width_);
+      std::vector<std::int32_t> input_validity(d_);
       for (std::uint32_t r = 0; r < d_; ++r) {
         for (std::uint32_t k = 0; k < width_; ++k) {
           const auto source = ((static_cast<std::size_t>(log) * d_ + r) * width_ + k);
-          result_.u[u_index(0, log, r, k)] = p_.initial[source];
+          input[r][k] = p_.initial[source];
         }
-        result_.validity[v_index(0, log, r)] =
+        input_validity[r] =
             p_.initial_validity[static_cast<std::size_t>(log) * d_ + r];
       }
+      if (op_.epsilon_regular_principal) {
+        const auto output = detail::apply_prepared_matrix(
+            *op_.assembly_matrix, input, op_);
+        set_block(0, log, output);
+        set_validity(0, log, prepared_matrix_validity(
+            *op_.assembly_matrix, input_validity));
+      } else {
+        set_block(0, log, input);
+        set_validity(0, log, input_validity);
+      }
+    }
+  }
+
+  std::vector<std::int32_t> prepared_matrix_validity(
+      const PreparedMatrix<Scalar>& matrix,
+      const std::vector<std::int32_t>& input) const {
+    std::vector<std::int32_t> output(d_, kCompleteInfinity);
+    for (std::uint32_t row = 0; row < d_; ++row) {
+      for (std::uint32_t column = 0; column < d_; ++column) {
+        const auto valuation = matrix.valuations[
+            static_cast<std::size_t>(row) * d_ + column];
+        if (valuation != kCompleteInfinity)
+          output[row] = std::min(output[row], detail::valid_shift(
+              input[column], valuation, frame_top_));
+      }
+    }
+    return output;
+  }
+
+  void seed_epsilon_regular_source_layer() {
+    if (!op_.spectral_principal_lag.has_value() ||
+        !op_.spectral_source_matrix.has_value() ||
+        !op_.assembly_matrix.has_value())
+      throw RecurrenceError(
+          "E5", "epsilon-regular sourced recurrence lacks its n=0 spectral transaction");
+
+    RecurrenceProblem<Scalar> spectral;
+    spectral.dimension = d_;
+    spectral.nmax = 0;
+    spectral.log_max = p_.log_max;
+    spectral.frame_base = op_.frame_base;
+    spectral.frame_width = width_;
+    spectral.has_initial = false;
+    spectral.adaptive_lower_frame_probe = p_.adaptive_lower_frame_probe;
+    spectral.cancellation_audit_base = p_.cancellation_audit_base;
+    spectral.a_target = p_.a_target;
+    spectral.b_target = p_.b_target;
+    spectral.a_shift_min = p_.a_shift_min;
+    spectral.a_shifts = {a_shift(0)};
+    spectral.blocks = op_.blocks;
+    spectral.schedule = {p_.schedule.front()};
+    spectral.chop_digits = op_.chop_digits;
+    spectral.return_u = true;
+
+    SourceData<Scalar> source;
+    const auto points = static_cast<std::size_t>(p_.log_max) + 1;
+    source.frames.assign(points * d_ * width_,
+                         ScalarTraits<Scalar>::zero());
+    source.validity.assign(points * d_, kCompleteInfinity);
+    source.present.assign(points, 0);
+    for (std::uint32_t log = 0; log <= p_.log_max; ++log) {
+      const auto physical = source_at(0, log);
+      if (!physical.has_value()) continue;
+      const auto transformed = detail::apply_prepared_matrix(
+          *op_.spectral_source_matrix, physical->first, op_);
+      const auto validity = prepared_matrix_validity(
+          *op_.spectral_source_matrix, physical->second);
+      source.present[log] = 1;
+      for (std::uint32_t row = 0; row < d_; ++row) {
+        source.validity[static_cast<std::size_t>(log) * d_ + row] =
+            validity[row];
+        for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon)
+          source.frames[(static_cast<std::size_t>(log) * d_ + row) *
+                        width_ + epsilon] = transformed[row][epsilon];
+      }
+    }
+    spectral.source = std::move(source);
+
+    const std::vector<PreparedLag<Scalar>> spectral_lags = {
+        *op_.spectral_principal_lag};
+    const std::optional<PreparedLag<Scalar>> no_principal;
+    const std::optional<PreparedMatrix<Scalar>> no_matrix;
+    RecurrenceOperatorView<Scalar> spectral_view{
+        d_, op_.frame_base, width_, op_.d_lags, spectral_lags,
+        op_.rational_denominators, op_.d0_inverse_scalar, false,
+        no_principal, no_matrix, op_.d0_inverse_frame, op_.blocks,
+        no_matrix, op_.chop_digits};
+    auto spectral_result = RecurrenceSolver(spectral, spectral_view).run();
+    const auto spectral_logs = static_cast<std::uint32_t>(p_.log_max + 2);
+    const auto spectral_u_index = [&](std::uint32_t log,
+                                      std::uint32_t component,
+                                      std::uint32_t epsilon) {
+      return ((static_cast<std::size_t>(log) * d_ + component) * width_ +
+              epsilon);
+    };
+    const auto spectral_v_index = [&](std::uint32_t log,
+                                      std::uint32_t component) {
+      return static_cast<std::size_t>(log) * d_ + component;
+    };
+    (void)spectral_logs;
+    for (std::uint32_t log = 0; log <= p_.log_max; ++log) {
+      auto input = detail::zero_block<Scalar>(d_, width_);
+      std::vector<std::int32_t> validity(d_);
+      for (std::uint32_t component = 0; component < d_; ++component) {
+        validity[component] =
+            spectral_result.validity[spectral_v_index(log, component)];
+        for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon)
+          input[component][epsilon] = spectral_result.u[
+              spectral_u_index(log, component, epsilon)];
+      }
+      set_block(0, log, detail::apply_prepared_matrix(
+          *op_.assembly_matrix, input, op_));
+      set_validity(0, log, prepared_matrix_validity(
+          *op_.assembly_matrix, validity));
+    }
+    result_.hits = std::move(spectral_result.hits);
+  }
+
+  void solve_epsilon_regular_resonant_layer(
+      std::uint32_t n,
+      const std::vector<FrameBlock<Scalar>>& physical_rhs,
+      const std::vector<std::vector<std::int32_t>>& physical_validity) {
+    if (!op_.spectral_principal_lag.has_value() ||
+        !op_.spectral_source_matrix.has_value() ||
+        !op_.assembly_matrix.has_value())
+      throw RecurrenceError(
+          "E5", "epsilon-regular resonance lacks its spectral transaction");
+
+    RecurrenceProblem<Scalar> spectral;
+    spectral.dimension = d_;
+    spectral.nmax = 0;
+    spectral.log_max = p_.log_max;
+    spectral.frame_base = op_.frame_base;
+    spectral.frame_width = width_;
+    spectral.has_initial = false;
+    spectral.adaptive_lower_frame_probe = p_.adaptive_lower_frame_probe;
+    spectral.cancellation_audit_base = p_.cancellation_audit_base;
+    spectral.a_target = a_shift(static_cast<std::int32_t>(n));
+    spectral.b_target = p_.b_target;
+    spectral.a_shift_min = 0;
+    spectral.a_shifts = {spectral.a_target};
+    spectral.blocks = op_.blocks;
+    spectral.schedule = {p_.schedule[n]};
+    spectral.chop_digits = op_.chop_digits;
+    spectral.return_u = true;
+
+    SourceData<Scalar> source;
+    const auto points = static_cast<std::size_t>(p_.log_max) + 1;
+    source.frames.assign(points * d_ * width_,
+                         ScalarTraits<Scalar>::zero());
+    source.validity.assign(points * d_, kCompleteInfinity);
+    source.present.assign(points, 1);
+    for (std::uint32_t log = 0; log <= p_.log_max; ++log) {
+      const auto transformed = detail::apply_prepared_matrix(
+          *op_.spectral_source_matrix, physical_rhs[log], op_);
+      const auto divided = detail::apply_inv_d0(
+          transformed, op_.d0_inverse_scalar, inv_d0_frame_,
+          op_.frame_base);
+      const auto validity = prepared_matrix_validity(
+          *op_.spectral_source_matrix, physical_validity[log]);
+      for (std::uint32_t row = 0; row < d_; ++row) {
+        source.validity[static_cast<std::size_t>(log) * d_ + row] =
+            validity[row];
+        for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon)
+          source.frames[(static_cast<std::size_t>(log) * d_ + row) *
+                        width_ + epsilon] = divided[row][epsilon];
+      }
+    }
+    spectral.source = std::move(source);
+
+    const std::vector<PreparedLag<Scalar>> spectral_lags = {
+        *op_.spectral_principal_lag};
+    const std::optional<PreparedLag<Scalar>> no_principal;
+    const std::optional<PreparedMatrix<Scalar>> no_matrix;
+    RecurrenceOperatorView<Scalar> spectral_view{
+        d_, op_.frame_base, width_, op_.d_lags, spectral_lags,
+        op_.rational_denominators, op_.d0_inverse_scalar, false,
+        no_principal, no_matrix, op_.d0_inverse_frame, op_.blocks,
+        no_matrix, op_.chop_digits};
+    auto spectral_result = RecurrenceSolver(spectral, spectral_view).run();
+    const auto spectral_u_index = [&](std::uint32_t log,
+                                      std::uint32_t component,
+                                      std::uint32_t epsilon) {
+      return ((static_cast<std::size_t>(log) * d_ + component) * width_ +
+              epsilon);
+    };
+    const auto spectral_v_index = [&](std::uint32_t log,
+                                      std::uint32_t component) {
+      return static_cast<std::size_t>(log) * d_ + component;
+    };
+    for (std::uint32_t log = 0; log <= p_.log_max; ++log) {
+      auto input = detail::zero_block<Scalar>(d_, width_);
+      std::vector<std::int32_t> validity(d_);
+      for (std::uint32_t component = 0; component < d_; ++component) {
+        validity[component] =
+            spectral_result.validity[spectral_v_index(log, component)];
+        for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon)
+          input[component][epsilon] = spectral_result.u[
+              spectral_u_index(log, component, epsilon)];
+      }
+      set_block(n, log, detail::apply_prepared_matrix(
+          *op_.assembly_matrix, input, op_));
+      set_validity(n, log, prepared_matrix_validity(
+          *op_.assembly_matrix, validity));
+    }
+    for (auto& hit : spectral_result.hits) {
+      hit.n = n;
+      result_.hits.push_back(std::move(hit));
     }
   }
 
@@ -769,15 +1159,51 @@ class RecurrenceSolver {
     auto acc = detail::zero_block<Scalar>(d_, width_);
     std::vector<std::int32_t> acc_valid(d_, kCompleteInfinity);
 
-    // Polynomial Nhat terms and unfused rational groups. The JSON codec may
-    // fuse equal denominators across lags in a later optimization; this form
-    // is coefficient-identical and keeps every per-contribution underflow
-    // witness before any cancellation.
     const auto max_nhat = std::min<std::uint32_t>(n, op_.nhat_lags.size() - 1);
-    for (std::uint32_t j = 1; j <= max_nhat; ++j) {
-      const auto input = get_block(n - j, log);
-      detail::add_block_inplace(acc, apply_nhat_lag(op_.nhat_lags[j], input));
-      update_nhat_validity(acc_valid, op_.nhat_lags[j], get_validity(n - j, log));
+    if constexpr (std::is_same_v<Scalar, Rational>) {
+      // Denominator indices are canonical producer identities. Accumulate
+      // exact numerators across lags before dividing, while retaining every
+      // per-lag shift/underflow and completeness check.
+      std::vector<std::optional<FrameBlock<Scalar>>> rational_rhs(
+          op_.rational_denominators.size());
+      for (std::uint32_t j = 1; j <= max_nhat; ++j) {
+        const auto input = get_block(n - j, log);
+        const auto& lag = op_.nhat_lags[j];
+        for (const auto& matrix : lag.polynomial) {
+          detail::add_block_inplace(acc, detail::matrix_shift_product(
+              matrix, input, op_, p_.adaptive_lower_frame_probe));
+        }
+        update_nhat_validity(
+            acc_valid, lag, get_validity(n - j, log));
+        for (const auto& group : lag.rational) {
+          auto numerator = detail::zero_block<Scalar>(d_, width_);
+          for (const auto& matrix : group.numerator) {
+            detail::add_block_inplace(numerator,
+                detail::matrix_shift_product(
+                    matrix, input, op_, p_.adaptive_lower_frame_probe));
+          }
+          auto& bucket = rational_rhs.at(group.denominator_index);
+          if (bucket.has_value()) {
+            detail::add_block_inplace(*bucket, numerator);
+          } else {
+            bucket.emplace(std::move(numerator));
+          }
+        }
+      }
+      for (std::size_t denominator_index = 0;
+           denominator_index < rational_rhs.size(); ++denominator_index) {
+        if (!rational_rhs[denominator_index].has_value()) continue;
+        detail::add_block_inplace(acc, detail::divide_rational(
+            *rational_rhs[denominator_index],
+            op_.rational_denominators[denominator_index]));
+      }
+    } else {
+      for (std::uint32_t j = 1; j <= max_nhat; ++j) {
+        const auto input = get_block(n - j, log);
+        detail::add_block_inplace(acc, apply_nhat_lag(op_.nhat_lags[j], input));
+        update_nhat_validity(
+            acc_valid, op_.nhat_lags[j], get_validity(n - j, log));
+      }
     }
 
     const auto max_d = std::min<std::uint32_t>(n, op_.d_lags.size() - 1);
@@ -833,6 +1259,75 @@ class RecurrenceSolver {
       }
     }
     return {std::move(acc), std::move(acc_valid)};
+  }
+
+  FrameBlock<Scalar> solve_epsilon_regular_principal(
+      std::uint32_t n, const FrameBlock<Scalar>& rhs) const {
+    const auto matrix_size = static_cast<std::size_t>(d_) * d_;
+    std::vector<std::vector<Scalar>> coefficients(
+        width_, std::vector<Scalar>(matrix_size,
+            ScalarTraits<Scalar>::zero()));
+    const auto affine_constant = a_shift(static_cast<std::int32_t>(n));
+    for (std::uint32_t power = 0; power < width_; ++power) {
+      coefficients[power] = principal_coefficients_[power];
+      for (auto& value : coefficients[power]) value = -value;
+      for (std::uint32_t diagonal = 0; diagonal < d_; ++diagonal) {
+        const auto index = static_cast<std::size_t>(diagonal) * d_ + diagonal;
+        coefficients[power][index] +=
+            d0_coefficients_[power] * affine_constant;
+        if (power > 0)
+          coefficients[power][index] +=
+              d0_coefficients_[power - 1] * p_.b_target;
+      }
+    }
+
+    std::vector<std::vector<Scalar>> constant_matrix(
+        d_, std::vector<Scalar>(d_, ScalarTraits<Scalar>::zero()));
+    for (std::uint32_t row = 0; row < d_; ++row)
+      for (std::uint32_t column = 0; column < d_; ++column)
+        constant_matrix[row][column] =
+            coefficients.front()[static_cast<std::size_t>(row) * d_ + column];
+
+    auto solution = detail::zero_block<Scalar>(d_, width_);
+    for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon) {
+      std::vector<Scalar> coefficient(d_, ScalarTraits<Scalar>::zero());
+      for (std::uint32_t row = 0; row < d_; ++row) {
+        coefficient[row] = rhs[row][epsilon];
+        for (std::uint32_t power = 1; power <= epsilon; ++power)
+          for (std::uint32_t column = 0; column < d_; ++column)
+            coefficient[row] -= coefficients[power][
+                static_cast<std::size_t>(row) * d_ + column] *
+                solution[column][epsilon - power];
+      }
+      const auto solved = detail::solve_dense_system(
+          constant_matrix, std::move(coefficient));
+      for (std::uint32_t row = 0; row < d_; ++row)
+        solution[row][epsilon] = solved[row];
+    }
+    return solution;
+  }
+
+  void solve_epsilon_regular_nonresonant(
+      std::uint32_t n, std::uint32_t log,
+      const FrameBlock<Scalar>& r_block,
+      const std::vector<std::int32_t>& r_valid) {
+    auto rhs = r_block;
+    auto rhs_valid = r_valid;
+    const auto above = get_block(n, log + 1);
+    const auto above_valid = get_validity(n, log + 1);
+    const auto eps_above = detail::shift_block(above, 1, op_.frame_base);
+    for (const auto& scalar_shift : op_.d_lags.front()) {
+      auto shifted = detail::shift_block(
+          eps_above, scalar_shift.shift, op_.frame_base);
+      shifted = detail::scale_block(shifted, scalar_shift.value);
+      detail::sub_block_inplace(rhs, shifted);
+      for (std::uint32_t row = 0; row < d_; ++row)
+        rhs_valid[row] = std::min(rhs_valid[row], detail::valid_shift(
+            above_valid[row], 1 + scalar_shift.shift, frame_top_));
+    }
+    set_block(n, log, solve_epsilon_regular_principal(n, rhs));
+    const auto complete = *std::min_element(rhs_valid.begin(), rhs_valid.end());
+    set_validity(n, log, std::vector<std::int32_t>(d_, complete));
   }
 
   void solve_nonresonant(std::uint32_t n, std::uint32_t log,
@@ -1027,12 +1522,28 @@ class RecurrenceSolver {
       r_blocks.push_back(std::move(rhs.first));
       r_valid.push_back(std::move(rhs.second));
     }
-    for (std::int32_t log = static_cast<std::int32_t>(p_.log_max);
-         log >= 0; --log) {
-      solve_nonresonant(n, static_cast<std::uint32_t>(log),
-                        r_blocks[log], r_valid[log]);
+    const bool epsilon_regular_resonance =
+        op_.epsilon_regular_principal &&
+        std::any_of(p_.schedule[n].begin(), p_.schedule[n].end(),
+                    [](const auto& step) {
+                      return step.kind != StepCase::Taylor;
+                    });
+    if (epsilon_regular_resonance) {
+      solve_epsilon_regular_resonant_layer(n, r_blocks, r_valid);
+    } else for (std::int32_t log = static_cast<std::int32_t>(p_.log_max);
+               log >= 0; --log) {
+      if (op_.epsilon_regular_principal) {
+        solve_epsilon_regular_nonresonant(
+            n, static_cast<std::uint32_t>(log),
+            r_blocks[log], r_valid[log]);
+      } else {
+        solve_nonresonant(n, static_cast<std::uint32_t>(log),
+                          r_blocks[log], r_valid[log]);
+      }
     }
-    solve_resonant(n, r_blocks, r_valid);
+    if (!op_.epsilon_regular_principal)
+      solve_resonant(n, r_blocks, r_valid);
+    audit_completed_layer(n);
   }
 
   void validate_problem() const {
@@ -1044,6 +1555,15 @@ class RecurrenceSolver {
     if (frame_top < std::numeric_limits<std::int32_t>::min() ||
         frame_top > std::numeric_limits<std::int32_t>::max())
       throw RecurrenceError("E5", "epsilon work frame exceeds int32 range");
+    // A nonempty guard is intentional: an equal base would advertise
+    // adaptive auditing while checking no coefficients.
+    if (p_.cancellation_audit_base.has_value() &&
+        !(static_cast<std::int64_t>(op_.frame_base) <
+              *p_.cancellation_audit_base &&
+          static_cast<std::int64_t>(*p_.cancellation_audit_base) <=
+              frame_top))
+      throw RecurrenceError(
+          "E5", "recurrence cancellation audit base is outside the work frame");
     (void)checked_tensor_size(
         {static_cast<std::size_t>(nmax_) + 1,
          static_cast<std::size_t>(p_.log_max) + 2, d_, width_},
@@ -1070,6 +1590,22 @@ class RecurrenceSolver {
     for (const auto& row : p_.schedule) {
       if (row.size() != op_.blocks.size())
         throw RecurrenceError("E5", "invalid block-step schedule width");
+    }
+    if (op_.epsilon_regular_principal) {
+      if (!op_.spectral_principal_lag.has_value() ||
+          !op_.spectral_source_matrix.has_value() ||
+          !op_.assembly_matrix.has_value())
+        throw RecurrenceError(
+            "E5", "epsilon-regular principal lacks its exact spectral boundary data");
+      for (const auto& lag : op_.d_lags)
+        for (const auto& item : lag)
+          if (item.shift < 0)
+            throw RecurrenceError(
+                "E5", "epsilon-regular scalar operator has a negative valuation");
+      for (const auto valuation : op_.nhat_lags.front().valuations)
+        if (valuation != kCompleteInfinity && valuation < 0)
+          throw RecurrenceError(
+              "E5", "epsilon-regular physical principal has a negative valuation");
     }
     if (p_.has_initial) {
       const auto frame_count = checked_tensor_size(
@@ -1124,6 +1660,20 @@ class RecurrenceSolver {
       validate_groups(lag);
       validate_matrix_shifts(lag);
     }
+    if (op_.spectral_principal_lag.has_value()) {
+      if (op_.spectral_principal_lag->valuations.size() != matrix_size)
+        throw RecurrenceError(
+            "E5", "malformed epsilon-regular spectral-principal valuation tensor");
+      validate_groups(*op_.spectral_principal_lag);
+      validate_matrix_shifts(*op_.spectral_principal_lag);
+    }
+    if (op_.spectral_source_matrix.has_value()) {
+      if (op_.spectral_source_matrix->valuations.size() != matrix_size)
+        throw RecurrenceError(
+            "E5", "malformed epsilon-regular spectral-source valuation tensor");
+      validate_groups(*op_.spectral_source_matrix);
+      validate_matrix_shifts(*op_.spectral_source_matrix);
+    }
     if (op_.assembly_matrix.has_value()) {
       if (op_.assembly_matrix->valuations.size() != matrix_size)
         throw RecurrenceError("E5", "malformed assembly valuation tensor");
@@ -1169,6 +1719,8 @@ class RecurrenceSolver {
   std::int32_t frame_top_;
   RecurrenceResult<Scalar> result_;
   Frame<Scalar> inv_d0_frame_;
+  std::vector<std::vector<Scalar>> principal_coefficients_;
+  std::vector<Scalar> d0_coefficients_;
 };
 
 template <typename Scalar>
@@ -1218,18 +1770,23 @@ AssembledResult<Scalar> assemble_recurrence_with_operator(
       for (std::uint32_t c = 0; c < op.dimension; ++c)
         for (std::uint32_t k = 0; k < op.frame_width; ++k)
           input[c][k] = result.u[u_index(n, log, c, k)];
-      const auto output = detail::apply_prepared_matrix(matrix, input, op);
+      const auto output = op.epsilon_regular_principal
+          ? input
+          : detail::apply_prepared_matrix(matrix, input, op);
       for (std::uint32_t r = 0; r < op.dimension; ++r) {
         for (std::uint32_t k = 0; k < op.frame_width; ++k)
           transformed[t_index(n, log, r, k)] = output[r][k];
-        std::int32_t row_valid = kCompleteInfinity;
-        for (std::uint32_t c = 0; c < op.dimension; ++c) {
-          const auto mv = matrix.valuations[static_cast<std::size_t>(r) * op.dimension + c];
-          if (mv != kCompleteInfinity) {
-            row_valid = std::min(row_valid, detail::valid_shift(
-                result.validity[v_index(n, log, c)], mv, frame_top));
+        std::int32_t row_valid = op.epsilon_regular_principal
+            ? result.validity[v_index(n, log, r)]
+            : kCompleteInfinity;
+        if (!op.epsilon_regular_principal)
+          for (std::uint32_t c = 0; c < op.dimension; ++c) {
+            const auto mv = matrix.valuations[
+                static_cast<std::size_t>(r) * op.dimension + c];
+            if (mv != kCompleteInfinity)
+              row_valid = std::min(row_valid, detail::valid_shift(
+                  result.validity[v_index(n, log, c)], mv, frame_top));
           }
-        }
         transformed_validity[tv_index(n, log, r)] = row_valid;
         if (row_valid != kCompleteInfinity) complete_max = std::min(complete_max, row_valid);
       }

@@ -12,6 +12,7 @@ assert[label_String, condition_] := If[TrueQ[condition],
 
 plan = FeynmanTrick`PipelinePlan["bubble",
   "WorkingPrecision" -> 250,
+  "MatchingDigits" -> 18,
   "ExpansionOrder" -> 40,
   "CppThreads" -> 6,
   "FIREPath" -> FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}],
@@ -105,7 +106,9 @@ assert["heavy native transport snapshots are explicit opt-in acceleration",
 assert["fast transport settings are explicit",
   plan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
     plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&
-    plan["Environment", "DE2_CPP_THREADS"] === "6"];
+    plan["Environment", "DE2_CPP_THREADS"] === "6" &&
+    plan["Settings", "MatchingDigits"] === 18 &&
+    plan["Environment", "FT_MATCH_DIGITS"] === "18"];
 assert["FIRE installation path is explicit and reproducible",
   plan["Environment", "FT_FIRE_PATH"] ===
     ExpandFileName[FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}]] &&

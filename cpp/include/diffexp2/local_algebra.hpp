@@ -3,6 +3,8 @@
 #include "diffexp2/local_solution.hpp"
 #include "diffexp2/matching.hpp"
 
+#include <flint/acb_poly.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -75,6 +78,95 @@ struct PreparedSparseLocalMultiplierMatrix {
 };
 
 namespace local_algebra_detail {
+
+// Move-only owner for a FLINT polynomial.  Acb local algebra uses these to
+// replace the scalar O(N^2) Taylor convolution with Arb's polynomial kernel
+// while preserving the same finite epsilon/Taylor rectangle.
+class AcbPolynomial {
+ public:
+  AcbPolynomial() { acb_poly_init(value_); }
+  AcbPolynomial(const AcbPolynomial&) = delete;
+  AcbPolynomial& operator=(const AcbPolynomial&) = delete;
+  AcbPolynomial(AcbPolynomial&& other) noexcept : AcbPolynomial() {
+    acb_poly_swap(value_, other.value_);
+  }
+  AcbPolynomial& operator=(AcbPolynomial&& other) noexcept {
+    acb_poly_swap(value_, other.value_);
+    return *this;
+  }
+  ~AcbPolynomial() { acb_poly_clear(value_); }
+
+  acb_poly_struct* raw() { return value_; }
+  const acb_poly_struct* raw() const { return value_; }
+
+ private:
+  acb_poly_t value_;
+};
+
+// Materialize the finite Taylor kernel of a compact rational coefficient.
+// Transport rows arrive with the complete low-degree numerator/denominator
+// polynomials, so expanding hundreds of coefficients in Wolfram and shipping
+// them as JSON is redundant.  Acb uses FLINT's native power-series division;
+// exact coefficient fields retain the same elementary division recurrence.
+template <typename Scalar>
+std::vector<Scalar> expand_rational_taylor(
+    const PreparedRationalAnalyticCoefficient<Scalar>& rational,
+    std::size_t taylor_width) {
+  if (rational.numerator.empty() || rational.denominator.empty())
+    throw std::invalid_argument(
+        "compact rational Taylor source has an empty polynomial");
+  if (taylor_width == 0)
+    throw std::invalid_argument(
+        "compact rational Taylor source requested an empty kernel");
+
+  if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+    if (rational.denominator.front().contains_zero())
+      throw std::domain_error(
+          "compact rational Taylor denominator contains zero at the chart center");
+    if (taylor_width >
+        static_cast<std::size_t>(std::numeric_limits<slong>::max()))
+      throw std::overflow_error(
+          "compact rational Taylor width exceeds FLINT range");
+    AcbPolynomial numerator;
+    AcbPolynomial denominator;
+    AcbPolynomial quotient;
+    for (std::size_t i = 0; i < rational.numerator.size(); ++i)
+      if (!rational.numerator[i].is_zero())
+        acb_poly_set_coeff_acb(numerator.raw(), static_cast<slong>(i),
+                               rational.numerator[i].raw());
+    for (std::size_t i = 0; i < rational.denominator.size(); ++i)
+      if (!rational.denominator[i].is_zero())
+        acb_poly_set_coeff_acb(denominator.raw(), static_cast<slong>(i),
+                               rational.denominator[i].raw());
+    acb_poly_div_series(quotient.raw(), numerator.raw(), denominator.raw(),
+                        static_cast<slong>(taylor_width),
+                        ComplexBall::precision());
+    std::vector<Scalar> kernel(taylor_width);
+    for (std::size_t i = 0; i < taylor_width; ++i) {
+      acb_poly_get_coeff_acb(kernel[i].raw(), quotient.raw(),
+                             static_cast<slong>(i));
+      if (!kernel[i].is_finite())
+        throw std::domain_error(
+            "compact rational Taylor expansion produced a nonfinite Acb coefficient");
+    }
+    return kernel;
+  } else {
+    if (ScalarTraits<Scalar>::is_zero(rational.denominator.front()))
+      throw std::domain_error(
+          "compact rational Taylor denominator is zero at the chart center");
+    std::vector<Scalar> kernel(taylor_width, ScalarTraits<Scalar>::zero());
+    for (std::size_t m = 0; m < taylor_width; ++m) {
+      auto value = m < rational.numerator.size()
+          ? rational.numerator[m]
+          : ScalarTraits<Scalar>::zero();
+      const auto denominator_degree = rational.denominator.size() - 1;
+      for (std::size_t l = 1; l <= std::min(m, denominator_degree); ++l)
+        value -= rational.denominator[l] * kernel[m - l];
+      kernel[m] = value / rational.denominator.front();
+    }
+    return kernel;
+  }
+}
 
 inline std::int32_t checked_i32(std::int64_t value, const char* label) {
   if (value < std::numeric_limits<std::int32_t>::min() ||
@@ -330,6 +422,25 @@ LocalSolution<Scalar> multiply_prepared_rational(
       : std::move(checkpoint_identity);
   output.sectors.reserve(input.sectors.size());
 
+  std::vector<local_algebra_detail::AcbPolynomial>
+      acb_kernel_polynomials;
+  std::vector<bool> acb_kernel_material;
+  if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+    acb_kernel_polynomials.reserve(epsilon_width);
+    acb_kernel_material.assign(epsilon_width, false);
+    for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon) {
+      acb_kernel_polynomials.emplace_back();
+      for (std::size_t taylor = 0; taylor < taylor_width; ++taylor) {
+        const auto& coefficient = multiplier.kernels[epsilon][taylor];
+        if (coefficient.is_zero()) continue;
+        acb_poly_set_coeff_acb(acb_kernel_polynomials.back().raw(),
+                               static_cast<slong>(taylor),
+                               coefficient.raw());
+        acb_kernel_material[epsilon] = true;
+      }
+    }
+  }
+
   for (const auto& sector : input.sectors) {
     LocalSector<Scalar> product;
     product.a = local_algebra_detail::subtract_nonnegative_integer(
@@ -338,21 +449,80 @@ LocalSolution<Scalar> multiply_prepared_rational(
     product.log_power = sector.log_power;
     product.coefficients.assign(output.sector_size(),
                                 ScalarTraits<Scalar>::zero());
-    for (std::size_t out_ei = 0; out_ei < epsilon_width; ++out_ei) {
-      for (std::size_t kernel_ei = 0; kernel_ei <= out_ei; ++kernel_ei) {
-        const auto input_ei = out_ei - kernel_ei;
-        const auto& kernel = multiplier.kernels[kernel_ei];
-        for (std::size_t n = 0; n < taylor_width; ++n) {
-          for (std::size_t m = 0; m <= n; ++m) {
-            if (ScalarTraits<Scalar>::is_zero(kernel[m])) continue;
-            for (std::uint32_t component = 0;
-                 component < input.dimension; ++component) {
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      // The old loop below performed a fresh scalar triangular Taylor
+      // convolution for every output epsilon row.  At N=600 this dominates
+      // every SCC coupling and gauge transform.  Build one source polynomial
+      // per epsilon row/component and use Arb's capped product for the same
+      // finite convolution rectangle.
+      for (std::uint32_t component = 0;
+           component < input.dimension; ++component) {
+        std::vector<local_algebra_detail::AcbPolynomial>
+            source_polynomials;
+        std::vector<bool> source_material(epsilon_width, false);
+        source_polynomials.reserve(epsilon_width);
+        for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon) {
+          source_polynomials.emplace_back();
+          for (std::size_t taylor = 0; taylor < taylor_width; ++taylor) {
+            const auto& coefficient = sector.coefficients[
+                local_algebra_detail::flat_index(
+                    epsilon, taylor, component, taylor_width,
+                    input.dimension)];
+            if (coefficient.is_zero()) continue;
+            acb_poly_set_coeff_acb(source_polynomials.back().raw(),
+                                   static_cast<slong>(taylor),
+                                   coefficient.raw());
+            source_material[epsilon] = true;
+          }
+        }
+        local_algebra_detail::AcbPolynomial polynomial_product;
+        for (std::size_t kernel_epsilon = 0;
+             kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+          if (!acb_kernel_material[kernel_epsilon]) continue;
+          for (std::size_t input_epsilon = 0;
+               input_epsilon + kernel_epsilon < epsilon_width;
+               ++input_epsilon) {
+            if (!source_material[input_epsilon]) continue;
+            acb_poly_mullow(
+                polynomial_product.raw(),
+                acb_kernel_polynomials[kernel_epsilon].raw(),
+                source_polynomials[input_epsilon].raw(),
+                static_cast<slong>(taylor_width),
+                ComplexBall::precision());
+            const auto output_epsilon = input_epsilon + kernel_epsilon;
+            const auto product_length = std::min<std::size_t>(
+                taylor_width, static_cast<std::size_t>(
+                    acb_poly_length(polynomial_product.raw())));
+            for (std::size_t taylor = 0;
+                 taylor < product_length; ++taylor) {
+              ComplexBall coefficient;
+              acb_poly_get_coeff_acb(
+                  coefficient.raw(), polynomial_product.raw(),
+                  static_cast<slong>(taylor));
               product.coefficients[local_algebra_detail::flat_index(
-                  out_ei, n, component, taylor_width, input.dimension)] +=
-                  kernel[m] * sector.coefficients[
-                      local_algebra_detail::flat_index(
-                          input_ei, n - m, component, taylor_width,
-                          input.dimension)];
+                  output_epsilon, taylor, component, taylor_width,
+                  input.dimension)] += coefficient;
+            }
+          }
+        }
+      }
+    } else {
+      for (std::size_t out_ei = 0; out_ei < epsilon_width; ++out_ei) {
+        for (std::size_t kernel_ei = 0; kernel_ei <= out_ei; ++kernel_ei) {
+          const auto input_ei = out_ei - kernel_ei;
+          const auto& kernel = multiplier.kernels[kernel_ei];
+          for (std::size_t n = 0; n < taylor_width; ++n) {
+            for (std::size_t m = 0; m <= n; ++m) {
+              if (ScalarTraits<Scalar>::is_zero(kernel[m])) continue;
+              for (std::uint32_t component = 0;
+                   component < input.dimension; ++component) {
+                product.coefficients[local_algebra_detail::flat_index(
+                    out_ei, n, component, taylor_width, input.dimension)] +=
+                    kernel[m] * sector.coefficients[
+                        local_algebra_detail::flat_index(
+                            input_ei, n - m, component, taylor_width,
+                            input.dimension)];
+              }
             }
           }
         }

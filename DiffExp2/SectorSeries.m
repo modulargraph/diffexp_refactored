@@ -345,7 +345,9 @@ ExactExpressionIdentity[entry_, var_Symbol] := Module[
     "expression" -> exactIdentityAST[canonical]|>,
     "RawJSON", "Compact" -> True]];
 
-Options[PrepareRationalMultiplier] = {"SerializationDomain" -> "acb"};
+Options[PrepareRationalMultiplier] = {
+  "SerializationDomain" -> "acb",
+  "PrepareTaylorKernels" -> True};
 
 PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
     OptionsPattern[]] := Module[
@@ -353,14 +355,19 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
    jmin, jcount, cj, d0, troots, wp, M, Q, kmin, kmax, ncols,
    prepSignature, prepKey, cached, prepared, provenZero, exactIdentity,
    analyticRationals, storePrepared, serializationDomain,
-   preserveExactRational},
+   preserveExactRational, prepareTaylorKernels},
   shapeData = multiplierShape[shape];
   wp = cfg["WorkingPrecision"];
   serializationDomain = OptionValue["SerializationDomain"];
+  prepareTaylorKernels = OptionValue["PrepareTaylorKernels"];
   If[!MemberQ[{"acb", "rational", "symbolic"}, serializationDomain],
     err["serializationdomain", <|
       "SerializationDomain" -> serializationDomain,
       "Detail" -> "rational multiplier serialization domain must be acb, rational, or symbolic"|>]];
+  If[!BooleanQ[prepareTaylorKernels],
+    err["taylorkernels", <|
+      "PrepareTaylorKernels" -> prepareTaylorKernels,
+      "Detail" -> "rational multiplier Taylor-kernel preparation flag must be True or False"|>]];
   preserveExactRational = MemberQ[
     {"rational", "symbolic"}, serializationDomain];
   cT = Together[c /. var -> var];
@@ -380,7 +387,7 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
     {Context[eps], SymbolName[eps]}, kmin, kmax, ncols,
     shapeData["Radius"], wp,
     cfg["ChopPrecision"], DiffExp2`Tolerances`$InputPrecisionFactor,
-    serializationDomain};
+    serializationDomain, prepareTaylorKernels};
   prepKey = Hash[prepSignature, "SHA256"];
   cached = Lookup[$multiplyRationalPreparedCache, prepKey, None];
   If[AssociationQ[cached],
@@ -395,6 +402,7 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
   storePrepared[] := Module[{},
     prepared = <|"EpsilonShift" -> jmin, "CenterPoleOrder" -> M,
       "TaylorKernels" -> Q, "ExactIdentity" -> exactIdentity,
+      "EpsilonKernelCount" -> jcount,
       "AnalyticRationals" -> analyticRationals,
       "ProvenZero" -> provenZero|>;
     If[Length[$multiplyRationalPreparedCache] >=
@@ -408,8 +416,9 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
      algebra cannot discard its honest window constraint. *)
   If[zeroCanQ[cT],
     jmin = 0; M = 0;
-    Q = ConstantArray[0, {jcount, ncols}];
-    If[!provenZero, Q[[1, 1]] = cT];
+    Q = If[prepareTaylorKernels,
+      ConstantArray[0, {jcount, ncols}], None];
+    If[prepareTaylorKernels && !provenZero, Q[[1, 1]] = cT];
     analyticRationals = Table[<|
       "NumeratorCoefficients" -> If[j == 1, {cT}, {0}],
       "DenominatorCoefficients" -> {1}|>, {j, jcount}];
@@ -496,22 +505,33 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
   (* one-pass exact Taylor via the division recursion (SeriesCoefficient
      per order is prohibitively slow on big rationals), then numericize at
      2x WP (structure already decided on exact data) *)
-  Q = Table[Module[{qj = Cancel[Together[cj[[j]]*var^M]], num1, den1, nc, dc, csr},
+  Q = If[prepareTaylorKernels,
+    Table[Module[{qj = Cancel[Together[cj[[j]]*var^M]], num1, den1,
+       nc, dc, csr, denominatorDegree},
       If[structuralZeroQ[qj], ConstantArray[0, ncols],
         num1 = Numerator[qj]; den1 = Denominator[qj];
-        nc = Table[Coefficient[num1, var, n], {n, 0, ncols - 1}];
-        dc = Table[Coefficient[den1, var, n], {n, 0, ncols - 1}];
+        (* Polynomial coefficient extraction and division must scale with the
+           actual denominator degree, not with the square of the requested
+           Taylor order.  The previous length-ncols coefficient tables plus
+           Sum[...,{l,1,m}] revisited hundreds of certified zero denominator
+           coefficients for every output order. *)
+        nc = Take[CoefficientList[num1, var], UpTo[ncols]];
+        dc = Take[CoefficientList[den1, var], UpTo[ncols]];
+        denominatorDegree = Length[dc] - 1;
         csr = ConstantArray[0, ncols];
-        csr[[1]] = Together[nc[[1]]/dc[[1]]];
+        csr[[1]] = Together[First[nc]/First[dc]];
         Do[csr[[m + 1]] = Together[
-            (nc[[m + 1]] - Sum[dc[[l + 1]]*csr[[m - l + 1]], {l, 1, m}])/dc[[1]]],
+            (If[m < Length[nc], nc[[m + 1]], 0] -
+              Sum[dc[[l + 1]]*csr[[m - l + 1]],
+                {l, 1, Min[m, denominatorDegree]}])/First[dc]],
           {m, 1, ncols - 1}];
         (* Exact pole classification is complete.  Keep small rationals
            exact; ground algebraic or giant numeric coefficients once at
            2x WP so later convolutions cannot accumulate exact-expression
            swell or hit the kernel's small default extra-precision limit. *)
         Map[groundTaylorCoefficient[#, wp, preserveExactRational] &, csr]]],
-    {j, 1, jcount}];
+      {j, 1, jcount}],
+    None];
   (* A finite Taylor kernel does not determine an unseen tail.  Retain the
      complete rational function for every epsilon coefficient after removing
      the common center pole.  The native certificate layer serializes these

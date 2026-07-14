@@ -19,7 +19,9 @@ std::string static_problem_signature(const json::object& problem,
   json::object exact;
   for (const auto* key : {"domain", "symbols", "precision_bits", "d", "fb",
                           "w", "d_lags", "denominators", "nhat_lags",
-                          "d0_inverse", "blocks", "assembly", "physical_ode",
+                          "d0_inverse", "blocks", "epsilon_regular_principal",
+                          "spectral_principal", "spectral_source",
+                          "assembly", "physical_ode",
                           "chop_digits"}) {
     if (const auto* value = problem.if_contains(key)) exact[key] = *value;
   }
@@ -2496,7 +2498,9 @@ json::array checkpoint_acb_match_identity_manifest(const json::array& items) {
         {"handle", item.at("handle")},
         {"checkpoint_identity", item.at("checkpoint_identity")},
         {"provenance_identity", item.at("provenance_identity")},
-        {"exact_lattice_identity", item.at("exact_lattice_identity")}});
+        {"exact_lattice_identity", item.at("exact_lattice_identity")},
+        {"matching_frame_identity",
+         item.at("matching_frame_identity")}});
   }
   return manifest;
 }
@@ -2638,4 +2642,3 @@ json::array checkpoint_line_identity_manifest(const json::array& items) {
   }
   return manifest;
 }
-

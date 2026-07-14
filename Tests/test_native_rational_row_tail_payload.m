@@ -1,5 +1,6 @@
-(* The public rational-row handoff must retain a full analytic completion;
-   finite Taylor kernels alone cannot certify the projected integration tail. *)
+(* The public rational-row handoff retains the low-degree analytic completion.
+   Native FLINT algebra materializes the finite Taylor kernel from this compact
+   source instead of receiving a redundant expanded coefficient rectangle. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -21,8 +22,7 @@ row = DiffExp2`Solve`PrepareNativeRationalRow[
   <|"domain" -> "rational", "symbols" -> {}|>];
 multiplier = row["entries"][[1, "multiplier"]];
 analytic = multiplier["analytic_coefficients"][[1]];
-kernel = DiffExp2`CppBackend`DecodeScalar[#, 80] & /@
-  multiplier["kernels"][[1]];
+kernel = Table[1/2^n, {n, 0, shape["TWindow", "CompleteMax"]}];
 numerator = DiffExp2`CppBackend`DecodeScalar[#, 80] & /@
   analytic["numerator"];
 denominator = DiffExp2`CppBackend`DecodeScalar[#, 80] & /@
@@ -40,12 +40,12 @@ Do[replayed[[n + 1]] = Together[(
 ok = row["schema"] === "diffexp2-prepared-rational-local-row-v1" &&
   TrueQ[DiffExp2`CppBackend`Private`persistentPreparedRationalRowQ[row]] &&
   Sort[Keys[multiplier]] === Sort[{"epsilon_shift", "center_pole_order",
-    "kernels", "analytic_coefficients", "exact_identity", "proven_zero"}] &&
-  Length[multiplier["analytic_coefficients"]] ===
-    Length[multiplier["kernels"]] && denominator =!= {} &&
+    "analytic_coefficients", "exact_identity", "proven_zero"}] &&
+  Length[multiplier["analytic_coefficients"]] === 3 &&
+  !KeyExistsQ[multiplier, "kernels"] && denominator =!= {} &&
   denominator[[1]] =!= 0 && replayed === kernel &&
   zeroAnalyticNumerators === {{0}, {0}};
 
 Print[If[TrueQ[ok], "PASS", "FAIL"],
-  ": native rational-row analytic tail payload replays every finite kernel"];
+  ": compact native rational-row payload replays the finite kernel"];
 If[!TrueQ[ok], Exit[1]];

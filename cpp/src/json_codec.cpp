@@ -6,6 +6,7 @@
 #include "json_codec_support.hpp"
 
 #include "diffexp2/checkpoint.hpp"
+#include "diffexp2/immutable_recursive_cache.hpp"
 #include "diffexp2/line_integration.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/local_solution.hpp"
@@ -49,6 +50,7 @@ namespace {
 using namespace json_codec_detail;
 
 #include "json_codec_local_state.ipp"
+#include "json_codec_multiplier_state.ipp"
 #include "json_codec_endpoint_state.ipp"
 #include "json_codec_matching_state.ipp"
 #include "json_codec_chart_scc_state.ipp"

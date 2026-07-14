@@ -462,6 +462,25 @@ class PhysicalEquationOwnerBase {
   virtual const std::string& physical_payload_identity() const = 0;
   virtual const std::string& physical_payload_record() const = 0;
   virtual const std::string& owner_signature_identity() const = 0;
+  virtual std::optional<std::pair<
+      FiniteLaurentVector<ComplexBall>, std::string>>
+  normalize_acb_matching_vector(
+      const FiniteLaurentVector<ComplexBall>& physical) const {
+    (void)physical;
+    return std::nullopt;
+  }
+  virtual std::optional<FiniteLaurentMatrix<ComplexBall>>
+  right_normalize_acb_matching_basis(
+      const FiniteLaurentMatrix<ComplexBall>& left_normalized) const {
+    (void)left_normalized;
+    return std::nullopt;
+  }
+  virtual std::optional<FiniteLaurentVector<ComplexBall>>
+  denormalize_acb_matching_weights(
+      const FiniteLaurentVector<ComplexBall>& normalized) const {
+    (void)normalized;
+    return std::nullopt;
+  }
 };
 
 class PreparedChartBase : public PhysicalEquationOwnerBase {
@@ -2989,4 +3008,3 @@ class StoredLocal final : public StoredLocalBase {
   double endpoint_limit_ms_ = 0.0;
   double line_integration_ms_ = 0.0;
 };
-

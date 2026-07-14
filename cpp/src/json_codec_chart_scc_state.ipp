@@ -131,6 +131,7 @@ class PreparedChart final : public PreparedChartBase {
   std::uint32_t dimension() const override { return prepared_.dimension; }
   std::int32_t frame_base() const override { return prepared_.frame_base; }
   std::uint32_t frame_width() const override { return prepared_.frame_width; }
+  std::int32_t chop_digits() const { return prepared_.chop_digits; }
   const char* d0_inverse_mode() const override {
     return prepared_.d0_inverse_scalar.has_value()
         ? "retained-scalar" : "retained-frame";
@@ -161,6 +162,9 @@ class PreparedChart final : public PreparedChartBase {
     return prepared_.assembly_matrix.has_value() &&
            prepared_.assembly_matrix->identity;
   }
+  bool uses_epsilon_regular_principal() const {
+    return prepared_.epsilon_regular_principal;
+  }
   bool has_assembly() const {
     return prepared_.assembly_matrix.has_value();
   }
@@ -168,6 +172,88 @@ class PreparedChart final : public PreparedChartBase {
     static const std::string empty;
     return prepared_.assembly_matrix.has_value()
         ? prepared_.assembly_matrix->exact_identity : empty;
+  }
+  FiniteLaurentVector<ComplexBall> apply_assembly_to_acb_matching_vector(
+      const FiniteLaurentVector<ComplexBall>& input) const {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      (void)input;
+      throw std::logic_error(
+          "only an Acb chart can specialize its matching assembly frame");
+    } else {
+      if (!prepared_.assembly_matrix.has_value() ||
+          input.size() != prepared_.dimension)
+        throw std::invalid_argument(
+            "matching assembly requires one spectral frame per chart component");
+      const auto work_top = matching_detail::checked_power(
+          static_cast<std::int64_t>(prepared_.frame_base) +
+              prepared_.frame_width - 1,
+          "matching assembly work maximum");
+      auto framed = detail::zero_block<ComplexBall>(
+          prepared_.dimension, prepared_.frame_width);
+      for (std::size_t component = 0; component < input.size(); ++component) {
+        if (input[component].min_power() < prepared_.frame_base ||
+            input[component].complete_max() > work_top)
+          throw MatchingArithmeticError(
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+              "matching assembly input component " +
+                  std::to_string(component) + " window [" +
+                  std::to_string(input[component].min_power()) + "," +
+                  std::to_string(input[component].complete_max()) +
+                  "] lies outside prepared [" +
+                  std::to_string(prepared_.frame_base) + "," +
+                  std::to_string(work_top) + "]");
+        for (std::int64_t power = input[component].min_power();
+             power <= input[component].complete_max(); ++power)
+          framed[component][static_cast<std::size_t>(
+              power - prepared_.frame_base)] =
+              input[component].coefficient(
+                  static_cast<std::int32_t>(power));
+      }
+      const auto op = recurrence_operator_view(prepared_);
+      const auto output = detail::apply_prepared_matrix(
+          *prepared_.assembly_matrix, framed, op);
+      FiniteLaurentVector<ComplexBall> result;
+      result.reserve(prepared_.dimension);
+      for (std::uint32_t row = 0; row < prepared_.dimension; ++row) {
+        std::optional<std::int32_t> minimum;
+        auto complete_max = work_top;
+        for (std::uint32_t column = 0; column < prepared_.dimension;
+             ++column) {
+          const auto valuation = prepared_.assembly_matrix->valuations[
+              static_cast<std::size_t>(row) * prepared_.dimension + column];
+          if (valuation == kCompleteInfinity) continue;
+          const auto candidate_min = matching_detail::checked_power(
+              static_cast<std::int64_t>(input[column].min_power()) +
+                  valuation,
+              "matching assembly output minimum");
+          minimum = !minimum.has_value()
+              ? candidate_min : std::min(*minimum, candidate_min);
+          complete_max = std::min(
+              complete_max, matching_detail::checked_power(
+                  static_cast<std::int64_t>(
+                      input[column].complete_max()) + valuation,
+                  "matching assembly output maximum"));
+        }
+        if (!minimum.has_value() || *minimum < prepared_.frame_base ||
+            complete_max < *minimum)
+          throw MatchingArithmeticError(
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+              "matching assembly output does not fit its prepared epsilon frame");
+        auto first = *minimum;
+        while (first < complete_max &&
+               output[row][static_cast<std::size_t>(
+                   first - prepared_.frame_base)].is_zero())
+          ++first;
+        std::vector<ComplexBall> coefficients;
+        coefficients.reserve(EpsilonWindow{first, complete_max}.width());
+        for (std::int64_t power = first; power <= complete_max; ++power)
+          coefficients.push_back(output[row][static_cast<std::size_t>(
+              power - prepared_.frame_base)]);
+        result.emplace_back(
+            EpsilonWindow{first, complete_max}, std::move(coefficients));
+      }
+      return result;
+    }
   }
   bool has_regular_singleton_partition() const {
     if (prepared_.blocks.size() != prepared_.dimension) return false;
@@ -364,6 +450,15 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
   virtual const std::string& geometry_record() const = 0;
   virtual std::uint32_t dimension() const = 0;
   virtual const CompositeWorkContract& work_contract() const = 0;
+  // For an epsilon-regular singular composite, express a physical parent
+  // value in the exact block-spectral normal frame used at the residue.  The
+  // same invertible left transformation is applied to the receiving basis
+  // and incoming value, so matching weights are unchanged while the Laurent
+  // solve no longer sees the confluent physical columns.
+  virtual std::optional<std::pair<
+      FiniteLaurentVector<ComplexBall>, std::string>>
+  normalize_acb_matching_vector(
+      const FiniteLaurentVector<ComplexBall>& physical) const override = 0;
   virtual std::vector<std::shared_ptr<PreparedChartBase>>
   dependency_charts() const = 0;
   const std::string& equation_owner_handle() const override {
@@ -393,6 +488,7 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
 
 struct CompositeWorkContract {
   std::int32_t work_min = 0;
+  std::optional<std::int32_t> cancellation_audit_base;
   std::int32_t requested_min = 0;
   std::int32_t requested_max = 0;
   std::int32_t work_complete_max = 0;
@@ -524,30 +620,12 @@ CompositeGaugeTransform<Scalar> parse_composite_gauge_transform(
     const auto exact_entry = required_string(entry, "exact_entry");
     const auto& raw_multiplier = as_object(entry.at("multiplier"),
                                            "SCC gauge multiplier");
-    require_exact_keys(raw_multiplier,
-        {"epsilon_shift", "center_pole_order", "kernels",
-         "exact_identity", "proven_zero"}, "SCC gauge multiplier");
-    PreparedRationalTaylorMultiplier<Scalar> multiplier;
-    multiplier.epsilon_shift = as_i32(raw_multiplier.at("epsilon_shift"),
-                                      "gauge epsilon shift");
-    multiplier.center_pole_order = as_u32(
-        raw_multiplier.at("center_pole_order"), "gauge center pole order");
-    multiplier.exact_identity = required_string(raw_multiplier, "exact_identity");
-    multiplier.proven_zero = raw_multiplier.at("proven_zero").as_bool();
+    auto multiplier = parse_prepared_rational_taylor_multiplier<Scalar>(
+        raw_multiplier, frame_width,
+        static_cast<std::size_t>(work.work_t_order) + 1, true,
+        "SCC gauge multiplier");
     if (multiplier.proven_zero || multiplier.exact_identity != exact_entry)
       throw std::invalid_argument("SCC gauge entry is zero or changed exact identity");
-    for (const auto& raw_kernel : as_array(raw_multiplier.at("kernels"),
-                                           "SCC gauge epsilon kernels")) {
-      std::vector<Scalar> kernel;
-      for (const auto& coefficient : as_array(raw_kernel, "SCC gauge Taylor kernel"))
-        kernel.push_back(parse_scalar<Scalar>(coefficient));
-      multiplier.kernels.push_back(std::move(kernel));
-    }
-    if (multiplier.kernels.size() != frame_width ||
-        std::any_of(multiplier.kernels.begin(), multiplier.kernels.end(),
-          [&](const auto& kernel) { return kernel.size() !=
-              static_cast<std::size_t>(work.work_t_order) + 1; }))
-      throw std::invalid_argument("SCC gauge kernels do not cover the work rectangle");
     active_rows[row] = 1; active_columns[column] = 1;
     transform.matrix.entries.push_back(
         typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry{
@@ -744,14 +822,10 @@ parse_composite_spectral_source_transform(
     const auto& raw_multiplier = as_object(
         raw_entry.at("multiplier"),
         "prepared spectral source-transform multiplier");
-    require_exact_keys(raw_multiplier,
-        {"epsilon_shift", "center_pole_order", "kernels",
-         "exact_identity", "proven_zero"},
+    auto multiplier = parse_prepared_rational_taylor_multiplier<Scalar>(
+        raw_multiplier, frame_width,
+        static_cast<std::size_t>(work.work_t_order) + 1, true,
         "prepared spectral source-transform multiplier");
-    PreparedRationalTaylorMultiplier<Scalar> multiplier;
-    multiplier.epsilon_shift = as_i32(
-        raw_multiplier.at("epsilon_shift"),
-        "spectral source-transform epsilon shift");
     const auto shifted_work_min = static_cast<std::int64_t>(work.work_min) +
         multiplier.epsilon_shift;
     const auto shifted_work_max =
@@ -763,38 +837,15 @@ parse_composite_spectral_source_transform(
         shifted_work_max > std::numeric_limits<std::int32_t>::max())
       throw std::invalid_argument(
           "SCC spectral source-transform shift overflows the retained epsilon frame");
-    multiplier.center_pole_order = as_u32(
-        raw_multiplier.at("center_pole_order"),
-        "spectral source-transform center-pole order");
     if (multiplier.center_pole_order != 0)
       throw std::invalid_argument(
           "t-independent SCC spectral VInv cannot have a center pole");
-    multiplier.exact_identity = required_string(
-        raw_multiplier, "exact_identity");
     if (multiplier.exact_identity != exact_entry)
       throw std::invalid_argument(
           "prepared spectral multiplier identity differs from its exact VInv entry");
-    multiplier.proven_zero = raw_multiplier.at("proven_zero").as_bool();
     if (multiplier.proven_zero)
       throw std::invalid_argument(
           "structurally zero SCC spectral source-transform entries must be omitted");
-    for (const auto& raw_kernel : as_array(
-             raw_multiplier.at("kernels"),
-             "spectral source-transform epsilon kernels")) {
-      std::vector<Scalar> kernel;
-      for (const auto& coefficient : as_array(
-               raw_kernel, "spectral source-transform Taylor kernel"))
-        kernel.push_back(parse_scalar<Scalar>(coefficient));
-      multiplier.kernels.push_back(std::move(kernel));
-    }
-    if (multiplier.kernels.size() != frame_width ||
-        std::any_of(multiplier.kernels.begin(), multiplier.kernels.end(),
-            [&](const auto& kernel) {
-              return kernel.size() !=
-                  static_cast<std::size_t>(work.work_t_order) + 1;
-            }))
-      throw std::invalid_argument(
-          "active SCC spectral source-transform kernels do not cover the exact work rectangle");
     active_rows[row] = 1;
     active_columns[column] = 1;
     transform.matrix.entries.push_back(
@@ -998,7 +1049,10 @@ LocalSolution<Scalar> cap_composite_public_local(
   if (input.epsilon.complete_max < complete_max ||
       input.epsilon.min_power > complete_max)
     throw std::invalid_argument(
-        "native SCC work state cannot deliver the requested epsilon maximum");
+        "native SCC work state cannot deliver requested epsilon maximum " +
+        std::to_string(complete_max) + " from work window [" +
+        std::to_string(input.epsilon.min_power) + "," +
+        std::to_string(input.epsilon.complete_max) + "]");
   if (input.taylor_complete_max < taylor_complete_max)
     throw std::invalid_argument(
         "native SCC work state cannot deliver the requested Taylor order");
@@ -1133,14 +1187,12 @@ std::uint32_t exact_log_ceiling(
   return static_cast<std::uint32_t>(result);
 }
 
+template <typename Scalar>
 json::object exact_derived_run(
-    const json::object& prototype, const PreparedChart<Rational>& chart,
+    const json::object& prototype, const PreparedChart<Scalar>& chart,
+    const ExactJordanIndicialCertificate& indicial,
     const Rational& a, const Rational& b, std::uint32_t base_log,
     bool homogeneous, std::optional<std::uint32_t> seed_component) {
-  const auto& indicial = chart.exact_jordan_indicial();
-  if (!indicial.has_value())
-    throw RecurrenceError(
-        "E5", "cannot derive a pseudo-compensation run without an exact Jordan certificate");
   const auto nmax = as_u32(prototype.at("nmax"),
                            "derived pseudo-compensation Taylor order");
   const auto dimension = chart.dimension();
@@ -1159,14 +1211,14 @@ json::object exact_derived_run(
     if (!seed_component.has_value() || *seed_component >= dimension)
       throw RecurrenceError(
           "E5", "derived pseudo-compensation seed component is out of range");
-    position = indicial->position_in_block[*seed_component];
+    position = indicial.position_in_block[*seed_component];
     base_log = std::max(base_log, position);
   } else if (seed_component.has_value()) {
     throw RecurrenceError(
         "E5", "derived particular run unexpectedly carries a seed component");
   }
   const auto log_max = exact_log_ceiling(
-      *indicial, a, b, base_log, !homogeneous);
+      indicial, a, b, base_log, !homogeneous);
 
   json::array a_shifts;
   json::array schedule;
@@ -1176,8 +1228,8 @@ json::object exact_derived_run(
     const auto a_n = a + Rational(std::to_string(n));
     a_shifts.push_back(json::string(a_n.str()));
     json::array row;
-    row.reserve(indicial->blocks.size());
-    for (const auto& block : indicial->blocks) {
+    row.reserve(indicial.blocks.size());
+    for (const auto& block : indicial.blocks) {
       const auto d_a = a_n - block.root.a;
       const auto d_b = b - block.root.b;
       const auto step = singular_indicial_detail::classify_step(d_a, d_b);
@@ -1202,8 +1254,8 @@ json::object exact_derived_run(
     std::optional<std::uint32_t> expected_component;
     std::optional<std::size_t> expected_epsilon;
     if (homogeneous && log <= position) {
-      const auto block_index = indicial->block_of_column[*seed_component];
-      const auto& block = indicial->blocks[block_index];
+      const auto block_index = indicial.block_of_column[*seed_component];
+      const auto& block = indicial.blocks[block_index];
       expected_component = block.columns[position - log];
       const auto epsilon_i64 = -static_cast<std::int64_t>(log) - frame_base;
       if (epsilon_i64 < 0 || epsilon_i64 >= frame_width)
@@ -1227,7 +1279,7 @@ json::object exact_derived_run(
   auto run = prototype;
   run["p"] = log_max;
   run["has_initial"] = homogeneous;
-  run["adaptive_probe"] = false;
+  run["adaptive_probe"] = prototype.at("adaptive_probe");
   run["a_target"] = a.str();
   run["b_target"] = b.str();
   run["a_shift_min"] = 0;
@@ -1349,6 +1401,138 @@ void add_exact_formal_below(
   }
 }
 
+// Numeric counterpart of the exact formal expansion above.  Exact Rational
+// tags still determine the formal monomials; only their coefficients live in
+// Acb.  This lets an enclosure prove CASE-P cancellation at the configured
+// chop floor without promoting the whole recurrence to arbitrary-precision
+// rational arithmetic.
+void add_acb_formal_below(
+    const LocalSolution<ComplexBall>& solution,
+    std::int32_t exclusive_top,
+    const std::optional<Rational>& maximum_t_power,
+    std::map<ExactFormalKey, ComplexBall>& coefficients) {
+  validate_local_solution(solution, false);
+  for (const auto& sector : solution.sectors) {
+    if (sector.a.domain != ExactDomain::Rational ||
+        sector.b.domain != ExactDomain::Rational)
+      throw RecurrenceError(
+          "E5", "Acb pseudo-compensation requires exact rational sector tags");
+    const Rational a(sector.a.canonical);
+    const Rational b(sector.b.canonical);
+    Rational exact_log_normalization(1);
+    for (std::uint32_t divisor = 2; divisor <= sector.log_power; ++divisor)
+      exact_log_normalization =
+          exact_log_normalization / Rational(std::to_string(divisor));
+    const auto log_normalization =
+        ComplexBall::from_strings(exact_log_normalization.str());
+    const auto b_ball = ComplexBall::from_strings(b.str());
+    for (std::size_t n = 0; n < solution.taylor_width(); ++n) {
+      const auto total_t_power = a + Rational(std::to_string(n));
+      if (maximum_t_power.has_value() &&
+          total_t_power > *maximum_t_power)
+        continue;
+      for (std::int64_t epsilon = solution.epsilon.min_power;
+           epsilon <= solution.epsilon.complete_max; ++epsilon) {
+        const auto epsilon_index = static_cast<std::size_t>(
+            epsilon - solution.epsilon.min_power);
+        const auto base_power_i64 = epsilon + sector.log_power;
+        if (base_power_i64 >= exclusive_top) continue;
+        if (base_power_i64 < std::numeric_limits<std::int32_t>::min())
+          throw RecurrenceError(
+              "E5", "Acb pseudo-compensation epsilon power underflows int32");
+        for (std::uint32_t component = 0;
+             component < solution.dimension; ++component) {
+          const auto& value = sector.coefficients[
+              local_algebra_detail::flat_index(
+                  epsilon_index, n, component, solution.taylor_width(),
+                  solution.dimension)];
+          if (value.is_zero()) continue;
+          auto exponential_factor = ComplexBall::from_strings("1");
+          for (std::uint64_t j = 0;
+               base_power_i64 + static_cast<std::int64_t>(j) <
+                   exclusive_top;
+               ++j) {
+            if (j > std::numeric_limits<std::uint32_t>::max() -
+                        sector.log_power)
+              throw RecurrenceError(
+                  "E5", "Acb pseudo-compensation log degree overflows uint32");
+            ExactFormalKey key{
+                total_t_power.str(),
+                static_cast<std::int32_t>(base_power_i64 +
+                                          static_cast<std::int64_t>(j)),
+                sector.log_power + static_cast<std::uint32_t>(j),
+                component};
+            auto found = coefficients.try_emplace(
+                key, ScalarTraits<ComplexBall>::zero()).first;
+            found->second += value * log_normalization * exponential_factor;
+            if (b.is_zero()) break;
+            if (j == std::numeric_limits<std::uint32_t>::max())
+              throw RecurrenceError(
+                  "E5", "Acb pseudo-compensation exponential order overflows uint32");
+            exponential_factor *= b_ball /
+                ComplexBall(static_cast<long>(j + 1));
+          }
+        }
+      }
+    }
+  }
+}
+
+void canonicalize_acb_formal_coefficients(
+    std::map<ExactFormalKey, ComplexBall>& coefficients,
+    std::int32_t chop_digits, const char* context) {
+  for (auto iterator = coefficients.begin();
+       iterator != coefficients.end();) {
+    auto canonical = ScalarTraits<ComplexBall>::canonicalized(
+        iterator->second, chop_digits);
+    if (canonical.is_zero()) {
+      iterator = coefficients.erase(iterator);
+      continue;
+    }
+    if (canonical.contains_zero())
+      throw RecurrenceError(
+          "E5", std::string(context) +
+              " is numerically ambiguous; requires the exact Rational shadow");
+    iterator->second = std::move(canonical);
+    ++iterator;
+  }
+}
+
+std::int32_t acb_formal_value_floor(
+    const LocalSolution<ComplexBall>& solution, std::int32_t chop_digits) {
+  std::map<ExactFormalKey, ComplexBall> coefficients;
+  add_acb_formal_below(solution, 0, std::nullopt, coefficients);
+  canonicalize_acb_formal_coefficients(
+      coefficients, chop_digits, "native Acb source value floor");
+  if (coefficients.empty()) return 0;
+  return std::min_element(
+      coefficients.begin(), coefficients.end(),
+      [](const auto& left, const auto& right) {
+        return left.first.epsilon_power < right.first.epsilon_power;
+      })->first.epsilon_power;
+}
+
+void certify_acb_pseudo_value_floor(
+    const LocalSolution<ComplexBall>& solution,
+    std::int32_t allowed_floor, const Rational& source_a,
+    std::uint32_t source_taylor_max, std::int32_t chop_digits) {
+  const auto checked_top = std::min<std::int32_t>(0, allowed_floor);
+  std::map<ExactFormalKey, ComplexBall> coefficients;
+  add_acb_formal_below(
+      solution, checked_top,
+      source_a + Rational(std::to_string(source_taylor_max)), coefficients);
+  canonicalize_acb_formal_coefficients(
+      coefficients, chop_digits, "native Acb CASE-P value-floor cancellation");
+  if (coefficients.empty()) return;
+  const auto& witness = coefficients.begin()->first;
+  throw RecurrenceError(
+      "E5", "Acb CASE-P compensation leaves a certified value pole below the input floor at eps^" +
+                std::to_string(witness.epsilon_power) + ", t_power=" +
+                witness.t_power + ", log_power=" +
+                std::to_string(witness.log_power) + ", component=" +
+                std::to_string(witness.component));
+}
+
 EpsilonLatticeSaturationResult<Rational>
 rational_shadow_formal_saturation(
     const std::vector<std::shared_ptr<const RationalShadowColumnWitness>>&
@@ -1467,11 +1651,12 @@ void certify_exact_pseudo_value_floor(
                 sector_witnesses + "]");
 }
 
-std::vector<LocalSolution<Rational>> split_exact_rational_tags(
-    const LocalSolution<Rational>& source, const std::string& identity) {
+template <typename Scalar>
+std::vector<LocalSolution<Scalar>> split_exact_rational_tags(
+    const LocalSolution<Scalar>& source, const std::string& identity) {
   validate_local_solution(source, false);
   std::map<std::pair<std::string, std::string>,
-           std::vector<LocalSector<Rational>>> grouped;
+           std::vector<LocalSector<Scalar>>> grouped;
   for (const auto& sector : source.sectors) {
     if (sector.a.domain != ExactDomain::Rational ||
         sector.b.domain != ExactDomain::Rational)
@@ -1480,7 +1665,7 @@ std::vector<LocalSolution<Rational>> split_exact_rational_tags(
     grouped[{Rational(sector.a.canonical).str(),
              Rational(sector.b.canonical).str()}].push_back(sector);
   }
-  std::vector<LocalSolution<Rational>> result;
+  std::vector<LocalSolution<Scalar>> result;
   result.reserve(grouped.size());
   for (auto& [tag, sectors] : grouped) {
     auto group = source;
@@ -1492,15 +1677,71 @@ std::vector<LocalSolution<Rational>> split_exact_rational_tags(
   return result;
 }
 
-class ExactPseudoCompensator {
- public:
-  ExactPseudoCompensator(PreparedChart<Rational>& chart,
-                         std::string identity)
-      : chart_(chart), identity_(std::move(identity)) {}
+template <typename Scalar>
+struct CachedPseudoTarget {
+  LocalSolution<Scalar> solution;
+  NativeLocalDiagnostics diagnostics;
+};
 
-  NativeLocalRun<Rational> solve(
+template <typename Scalar>
+class PseudoTargetCache {
+ public:
+  using Key = std::pair<std::uint32_t, std::uint32_t>;
+  using Core = detail::ImmutableRecursiveCache<Key, CachedPseudoTarget<Scalar>>;
+  using Lookup = Core::Lookup;
+  using Stats = Core::Stats;
+
+  explicit PseudoTargetCache(std::string owner_identity)
+      : owner_identity_(std::move(owner_identity)) {
+    if (owner_identity_.empty())
+      throw std::invalid_argument(
+          "exact CASE-P target cache requires an immutable owner identity");
+  }
+
+  std::string target_checkpoint_identity(std::uint32_t block,
+                                         std::uint32_t component) const {
+    return owner_identity_ + ":casep-homogeneous:block:" +
+        std::to_string(block) + ":component:" +
+        std::to_string(component);
+  }
+
+  template <typename Builder>
+  Lookup get_or_build(std::uint32_t block, std::uint32_t component,
+                      const std::string& contract, Builder&& builder) {
+    try {
+      return cache_.get_or_build(
+          {block, component}, contract, std::forward<Builder>(builder));
+    } catch (const detail::ImmutableCacheContractError&) {
+      throw RecurrenceError(
+          "E5", "exact CASE-P homogeneous target cache contract changed within one retained composite");
+    } catch (const detail::ImmutableCacheCycleError&) {
+      throw RecurrenceError(
+          "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
+    }
+  }
+
+  Stats stats() const { return cache_.stats(); }
+
+ private:
+  std::string owner_identity_;
+  Core cache_;
+};
+
+template <typename Scalar>
+class PseudoCompensator {
+ public:
+  PseudoCompensator(PreparedChart<Scalar>& chart,
+                    const ExactJordanIndicialCertificate& indicial,
+                    std::uint32_t block_index,
+                    std::string identity,
+                    PseudoTargetCache<Scalar>& target_cache)
+      : chart_(chart), block_index_(block_index),
+        indicial_(indicial), identity_(std::move(identity)),
+        target_cache_(target_cache) {}
+
+  NativeLocalRun<Scalar> solve(
       const json::object& run, const json::object& metadata,
-      std::optional<SourceData<Rational>> source,
+      std::optional<SourceData<Scalar>> source,
       std::int32_t allowed_value_floor) {
     NativeLocalDiagnostics diagnostics;
     auto result = solve_impl(run, metadata, std::move(source),
@@ -1523,9 +1764,9 @@ class ExactPseudoCompensator {
         total.pseudo_value_certified && current.pseudo_value_certified;
   }
 
-  std::optional<PreparedRationalTaylorMultiplier<Rational>> polar_weight(
-      const PseudoHit<Rational>& hit, std::size_t row,
-      const LocalSolution<Rational>& target) const {
+  std::optional<PreparedRationalTaylorMultiplier<Scalar>> polar_weight(
+      const PseudoHit<Scalar>& hit, std::size_t row,
+      const LocalSolution<Scalar>& target) const {
     if (row >= hit.gamma_frames.size() || row >= hit.gamma_validity.size())
       throw RecurrenceError(
           "E5", "CASE-P hit has inconsistent gamma frame dimensions");
@@ -1543,20 +1784,27 @@ class ExactPseudoCompensator {
       const auto power = chart_.frame_base() +
                          static_cast<std::int32_t>(index);
       if (power >= 0) break;
-      if (!gamma[index].is_zero()) {
+      auto coefficient = ScalarTraits<Scalar>::canonicalized(
+          gamma[index], chart_.chop_digits());
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        if (!coefficient.is_zero() && coefficient.contains_zero())
+          throw RecurrenceError(
+              "E5", "native Acb CASE-P polar weight is numerically ambiguous; requires the exact Rational shadow");
+      if (!ScalarTraits<Scalar>::is_zero(coefficient)) {
         minimum = power;
         break;
       }
     }
     if (!minimum.has_value()) return std::nullopt;
-    PreparedRationalTaylorMultiplier<Rational> multiplier;
+    PreparedRationalTaylorMultiplier<Scalar> multiplier;
     multiplier.epsilon_shift = *minimum;
     multiplier.center_pole_order = 0;
     multiplier.exact_identity = identity_ + ":casep:" +
         std::to_string(hit.n) + ":" + std::to_string(row);
     multiplier.kernels.assign(
         target.epsilon.width(),
-        std::vector<Rational>(target.taylor_width(), Rational(0)));
+        std::vector<Scalar>(target.taylor_width(),
+                            ScalarTraits<Scalar>::zero()));
     for (std::size_t kernel = 0; kernel < multiplier.kernels.size();
          ++kernel) {
       const auto power = static_cast<std::int64_t>(*minimum) +
@@ -1568,47 +1816,82 @@ class ExactPseudoCompensator {
         throw RecurrenceError(
             "E4", "CASE-P polar weight lies outside its retained gamma frame",
             chart_.frame_base(), static_cast<std::int32_t>(power));
-      multiplier.kernels[kernel][0] =
-          -gamma[static_cast<std::size_t>(gamma_index)];
+      auto coefficient = ScalarTraits<Scalar>::canonicalized(
+          gamma[static_cast<std::size_t>(gamma_index)],
+          chart_.chop_digits());
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        if (!coefficient.is_zero() && coefficient.contains_zero())
+          throw RecurrenceError(
+              "E5", "native Acb CASE-P polar coefficient is numerically ambiguous; requires the exact Rational shadow");
+      multiplier.kernels[kernel][0] = -coefficient;
     }
     return multiplier;
   }
 
-  const LocalSolution<Rational>& homogeneous_target(
+  const LocalSolution<Scalar>& homogeneous_target(
       std::uint32_t component, const json::object& prototype_run,
       const json::object& prototype_metadata,
       NativeLocalDiagnostics& diagnostics) {
     if (const auto found = homogeneous_cache_.find(component);
         found != homogeneous_cache_.end())
-      return found->second;
+      return found->second->solution;
     if (!active_components_.insert(component).second)
       throw RecurrenceError(
           "E5", "exact CASE-P compensation dependency is cyclic; the retained family ordering is not well founded");
-    const auto& indicial = chart_.exact_jordan_indicial();
-    if (!indicial.has_value() || component >= indicial->dimension)
-      throw RecurrenceError(
-          "E5", "CASE-P target component has no retained exact Jordan root");
-    const auto& block =
-        indicial->blocks[indicial->block_of_column[component]];
-    auto run = exact_derived_run(
-        prototype_run, chart_, block.root.a, block.root.b,
-        indicial->position_in_block[component], true, component);
-    auto metadata = exact_derived_metadata(
-        prototype_metadata, block.root.a, block.root.b,
-        as_u32(run.at("p"), "derived homogeneous log maximum"),
-        ":casep-target:" + std::to_string(component));
-    auto solved = solve_impl(run, metadata, std::nullopt, 0, diagnostics);
-    active_components_.erase(component);
-    auto [stored, inserted] = homogeneous_cache_.emplace(
-        component, std::move(solved.solution));
-    if (!inserted)
-      throw std::logic_error("CASE-P homogeneous target cache insertion failed");
-    return stored->second;
+    try {
+      if (component >= indicial_.dimension)
+        throw RecurrenceError(
+            "E5", "CASE-P target component has no retained exact Jordan root");
+      const auto& block =
+          indicial_.blocks[indicial_.block_of_column[component]];
+      auto run = exact_derived_run(
+          prototype_run, chart_, indicial_, block.root.a, block.root.b,
+          indicial_.position_in_block[component], true, component);
+      auto metadata = exact_derived_metadata(
+          prototype_metadata, block.root.a, block.root.b,
+          as_u32(run.at("p"), "derived homogeneous log maximum"),
+          ":casep-target:" + std::to_string(component));
+      auto contract_metadata = metadata;
+      contract_metadata.erase("checkpoint_identity");
+      const auto contract = json::serialize(canonical_json_value(
+          json::object{{"schema", "diffexp2-casep-target-cache-v1"},
+                       {"block", block_index_},
+                       {"component", component},
+                       {"run", run},
+                       {"metadata", std::move(contract_metadata)}}));
+      const auto target_identity =
+          target_cache_.target_checkpoint_identity(block_index_, component);
+      metadata["checkpoint_identity"] = target_identity;
+      auto lookup = target_cache_.get_or_build(
+          block_index_, component, contract, [&] {
+            NativeLocalDiagnostics target_diagnostics;
+            PseudoCompensator<Scalar> target_builder(
+                chart_, indicial_, block_index_, target_identity,
+                target_cache_);
+            auto solved = target_builder.solve_impl(
+                run, metadata, std::nullopt, 0, target_diagnostics);
+            solved.solution.checkpoint_identity = target_identity;
+            validate_local_solution(solved.solution, false);
+            return CachedPseudoTarget<Scalar>{
+                std::move(solved.solution), target_diagnostics};
+          });
+      accumulate(diagnostics, lookup.value->diagnostics);
+      auto [stored, inserted] = homogeneous_cache_.emplace(
+          component, std::move(lookup.value));
+      if (!inserted)
+        throw std::logic_error(
+            "CASE-P homogeneous target cache insertion failed");
+      active_components_.erase(component);
+      return stored->second->solution;
+    } catch (...) {
+      active_components_.erase(component);
+      throw;
+    }
   }
 
-  NativeLocalRun<Rational> solve_impl(
+  NativeLocalRun<Scalar> solve_impl(
       const json::object& run, const json::object& metadata,
-      std::optional<SourceData<Rational>> source,
+      std::optional<SourceData<Scalar>> source,
       std::int32_t allowed_value_floor,
       NativeLocalDiagnostics& diagnostics) {
     auto raw = source.has_value()
@@ -1622,7 +1905,7 @@ class ExactPseudoCompensator {
     const auto nmax = as_u32(run.at("nmax"),
                              "CASE-P certificate Taylor order");
     diagnostics.pseudo_hits += raw.pseudo_hits.size();
-    std::vector<LocalSolution<Rational>> terms;
+    std::vector<LocalSolution<Scalar>> terms;
     terms.push_back(std::move(raw.solution));
     for (const auto& hit : raw.pseudo_hits) {
       diagnostics.max_pseudo_depth = std::max<std::uint32_t>(
@@ -1649,16 +1932,28 @@ class ExactPseudoCompensator {
         ? std::move(terms.front())
         : combine_local_solutions(
               terms, identity_ + ":casep-compensated");
-    certify_exact_pseudo_value_floor(
-        compensated, allowed_value_floor, source_a, nmax);
+    if constexpr (std::is_same_v<Scalar, Rational>) {
+      certify_exact_pseudo_value_floor(
+          compensated, allowed_value_floor, source_a, nmax);
+    } else {
+      static_assert(std::is_same_v<Scalar, ComplexBall>);
+      certify_acb_pseudo_value_floor(
+          compensated, allowed_value_floor, source_a, nmax,
+          chart_.chop_digits());
+    }
     raw.solution = std::move(compensated);
     raw.pseudo_hits.clear();
     return raw;
   }
 
-  PreparedChart<Rational>& chart_;
+  PreparedChart<Scalar>& chart_;
+  std::uint32_t block_index_ = 0;
+  const ExactJordanIndicialCertificate& indicial_;
   std::string identity_;
-  std::map<std::uint32_t, LocalSolution<Rational>> homogeneous_cache_;
+  PseudoTargetCache<Scalar>& target_cache_;
+  std::map<std::uint32_t,
+           std::shared_ptr<const CachedPseudoTarget<Scalar>>>
+      homogeneous_cache_;
   std::set<std::uint32_t> active_components_;
 };
 
@@ -1693,6 +1988,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         physical_equation_->owner_signature_identity != exact_identity_)
       throw std::invalid_argument(
           "composite physical q/C payload names a different full parent owner identity");
+    if constexpr (std::is_same_v<Scalar, Rational> ||
+                  std::is_same_v<Scalar, ComplexBall>)
+      pseudo_target_cache_ =
+          std::make_unique<PseudoTargetCache<Scalar>>(exact_identity_);
   }
 
   CompositeColumnSolveResult solve_column(
@@ -1754,16 +2053,24 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       json::array diagnostics;
       NativeLocalDiagnostics aggregate;
       aggregate.top_valid = kCompleteInfinity;
-      std::vector<std::unique_ptr<ExactPseudoCompensator>>
+      std::vector<std::unique_ptr<PseudoCompensator<Rational>>>
           pseudo_compensators(blocks_.size());
       const auto pseudo_compensator = [&](std::uint32_t block)
-          -> ExactPseudoCompensator& {
+          -> PseudoCompensator<Rational>& {
+        if (!pseudo_target_cache_)
+          throw std::logic_error(
+              "exact Rational SCC composite has no CASE-P target cache");
+        if (!blocks_[block].exact_jordan_indicial.has_value())
+          throw std::logic_error(
+              "exact Rational SCC block has no CASE-P Jordan certificate");
         if (!pseudo_compensators[block])
           pseudo_compensators[block] =
-              std::make_unique<ExactPseudoCompensator>(
+              std::make_unique<PseudoCompensator<Rational>>(
                   *blocks_[block].chart,
+                  *blocks_[block].exact_jordan_indicial, block,
                   checkpoint_identity + ":block:" +
-                      std::to_string(block));
+                      std::to_string(block),
+                  *pseudo_target_cache_);
         return *pseudo_compensators[block];
       };
 
@@ -1901,6 +2208,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               source_log = std::max(source_log, sector.log_power);
             auto run = exact_derived_run(
                 submitted_run, *blocks_[target_block].chart,
+                *blocks_[target_block].exact_jordan_indicial,
                 group_a, group_b, source_log, false, std::nullopt);
             auto metadata = exact_derived_metadata(
                 as_object(target_request.at("metadata"),
@@ -2041,6 +2349,253 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     return work_;
   }
 
+  std::optional<std::pair<FiniteLaurentVector<ComplexBall>, std::string>>
+  normalize_acb_matching_vector(
+      const FiniteLaurentVector<ComplexBall>& physical) const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      (void)physical;
+      return std::nullopt;
+    } else {
+      if (physical.size() != dimension_)
+        throw std::invalid_argument(
+            "SCC matching normal-frame vector has the wrong parent dimension");
+      const bool epsilon_regular = std::any_of(
+          blocks_.begin(), blocks_.end(), [](const auto& block) {
+            return block.chart->uses_epsilon_regular_principal();
+          });
+      if (!epsilon_regular) return std::nullopt;
+
+      std::vector<std::optional<EpsilonFrame<ComplexBall>>> rows(
+          dimension_);
+      std::string frame_identity =
+          exact_identity_ + ":epsilon-regular-block-spectral-match-frame";
+      for (const auto& block : blocks_) {
+        // A t-dependent gauge needs an exact point specialization rather
+        // than a finite Taylor replay.  Keep this first normal-frame scope
+        // deliberately to identity-gauge blocks; the banana confluent chart
+        // and its surrounding SCC satisfy that stronger certificate.
+        if (!block.to_reduced.identity)
+          return std::nullopt;
+        const auto& transform = block.source_transform;
+        if (!spectral_frame_ready(block))
+          throw std::logic_error(
+              "epsilon-regular SCC matching lost its certified spectral frame");
+        frame_identity += ":" + transform.producer_identity;
+        if (transform.identity) {
+          for (std::size_t component = 0;
+               component < block.vertices.size(); ++component) {
+            const auto vertex = block.vertices[component];
+            rows[vertex] = rows[vertex].has_value()
+                ? *rows[vertex] + physical[vertex]
+                : physical[vertex];
+          }
+          continue;
+        }
+        for (const auto& entry : transform.matrix.entries) {
+          if (entry.row >= block.vertices.size() ||
+              entry.column >= block.vertices.size())
+            throw std::logic_error(
+                "spectral matching transform entry is outside its block");
+          const auto& multiplier = entry.multiplier;
+          std::vector<ComplexBall> coefficients;
+          coefficients.reserve(multiplier.kernels.size());
+          for (const auto& kernel : multiplier.kernels) {
+            if (kernel.empty())
+              throw std::logic_error(
+                  "spectral matching transform has an empty Taylor kernel");
+            for (std::size_t taylor = 1; taylor < kernel.size(); ++taylor)
+              if (!kernel[taylor].is_zero())
+                throw std::logic_error(
+                    "spectral matching transform unexpectedly depends on the chart variable");
+            coefficients.push_back(kernel.front());
+          }
+          auto term = EpsilonFrame<ComplexBall>(
+              multiplier.epsilon_shift, std::move(coefficients)) *
+              physical[block.vertices[entry.column]];
+          const auto output = block.vertices[entry.row];
+          rows[output] = rows[output].has_value()
+              ? *rows[output] + term
+              : std::move(term);
+        }
+      }
+      FiniteLaurentVector<ComplexBall> normalized;
+      normalized.reserve(dimension_);
+      for (std::uint32_t row = 0; row < dimension_; ++row) {
+        if (!rows[row].has_value())
+          throw std::logic_error(
+              "spectral matching normal frame has an empty parent row");
+        normalized.push_back(std::move(*rows[row]));
+      }
+      return std::pair{std::move(normalized), std::move(frame_identity)};
+    }
+  }
+
+  std::optional<FiniteLaurentMatrix<ComplexBall>>
+  right_normalize_acb_matching_basis(
+      const FiniteLaurentMatrix<ComplexBall>& left_normalized)
+      const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      (void)left_normalized;
+      return std::nullopt;
+    } else {
+      if (left_normalized.size() != dimension_ ||
+          std::any_of(left_normalized.begin(), left_normalized.end(),
+              [&](const auto& row) { return row.size() != dimension_; }))
+        throw std::invalid_argument(
+            "SCC right matching normalization requires a square parent basis");
+      if (!std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
+            return block.chart->uses_epsilon_regular_principal();
+          }))
+        return std::nullopt;
+
+      FiniteLaurentMatrix<ComplexBall> normalized(
+          dimension_, FiniteLaurentVector<ComplexBall>());
+      for (auto& row : normalized) row.reserve(dimension_);
+      for (std::uint32_t parent_row = 0; parent_row < dimension_;
+           ++parent_row) {
+        std::vector<std::optional<EpsilonFrame<ComplexBall>>> columns(
+            dimension_);
+        for (const auto& block : blocks_) {
+          if (block.source_transform.identity) {
+            for (const auto vertex : block.vertices)
+              columns[vertex] = left_normalized[parent_row][vertex];
+            continue;
+          }
+          const auto frame_base = block.chart->frame_base();
+          const auto frame_top = matching_detail::checked_power(
+              static_cast<std::int64_t>(frame_base) +
+                  block.chart->frame_width() - 1,
+              "SCC spectral assembly matching maximum");
+          if (frame_base > 0 || frame_top < 0)
+            throw std::logic_error(
+                "SCC spectral assembly frame does not contain epsilon^0");
+          FiniteLaurentMatrix<ComplexBall> assembly(
+              block.vertices.size(), FiniteLaurentVector<ComplexBall>());
+          for (auto& row : assembly) row.reserve(block.vertices.size());
+          for (std::size_t spectral_column = 0;
+               spectral_column < block.vertices.size(); ++spectral_column) {
+            FiniteLaurentVector<ComplexBall> unit;
+            unit.reserve(block.vertices.size());
+            for (std::size_t component = 0;
+                 component < block.vertices.size(); ++component) {
+              std::vector<ComplexBall> coefficients(
+                  static_cast<std::size_t>(frame_top) + 1,
+                  ScalarTraits<ComplexBall>::zero());
+              if (component == spectral_column)
+                coefficients.front() = ScalarTraits<ComplexBall>::one();
+              unit.emplace_back(0, std::move(coefficients));
+            }
+            auto assembled =
+                block.chart->apply_assembly_to_acb_matching_vector(unit);
+            for (std::size_t row = 0; row < block.vertices.size(); ++row)
+              assembly[row].push_back(std::move(assembled[row]));
+          }
+          for (std::size_t spectral_column = 0;
+               spectral_column < block.vertices.size(); ++spectral_column) {
+            std::optional<EpsilonFrame<ComplexBall>> value;
+            for (std::size_t physical_column = 0;
+                 physical_column < block.vertices.size(); ++physical_column) {
+              auto term = left_normalized[parent_row]
+                              [block.vertices[physical_column]] *
+                  assembly[physical_column][spectral_column];
+              value = value.has_value()
+                  ? *value + term : std::move(term);
+            }
+            columns[block.vertices[spectral_column]] = std::move(*value);
+          }
+        }
+        for (auto& column : columns) {
+          if (!column.has_value())
+            throw std::logic_error(
+                "right spectral matching normalization left an empty column");
+          normalized[parent_row].push_back(std::move(*column));
+        }
+      }
+      return normalized;
+    }
+  }
+
+  std::optional<FiniteLaurentVector<ComplexBall>>
+  denormalize_acb_matching_weights(
+      const FiniteLaurentVector<ComplexBall>& normalized) const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      (void)normalized;
+      return std::nullopt;
+    } else {
+      if (normalized.size() != dimension_)
+        throw std::invalid_argument(
+            "SCC matching weight denormalization has the wrong dimension");
+      if (!std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
+            return block.chart->uses_epsilon_regular_principal();
+          }))
+        return std::nullopt;
+      std::vector<std::optional<EpsilonFrame<ComplexBall>>> physical(
+          dimension_);
+      for (const auto& block : blocks_) {
+        FiniteLaurentVector<ComplexBall> local;
+        local.reserve(block.vertices.size());
+        for (const auto vertex : block.vertices)
+          local.push_back(normalized[vertex]);
+        if (!block.source_transform.identity) {
+          const auto frame_base = block.chart->frame_base();
+          const auto frame_top = matching_detail::checked_power(
+              static_cast<std::int64_t>(frame_base) +
+                  block.chart->frame_width() - 1,
+              "SCC matching weight assembly maximum");
+          if (frame_base > 0 || frame_top < 0)
+            throw std::logic_error(
+                "SCC matching weight assembly does not contain epsilon^0");
+          FiniteLaurentMatrix<ComplexBall> assembly(
+              block.vertices.size(), FiniteLaurentVector<ComplexBall>());
+          for (auto& row : assembly) row.reserve(block.vertices.size());
+          for (std::size_t column = 0; column < block.vertices.size();
+               ++column) {
+            FiniteLaurentVector<ComplexBall> unit;
+            unit.reserve(block.vertices.size());
+            for (std::size_t component = 0;
+                 component < block.vertices.size(); ++component) {
+              std::vector<ComplexBall> coefficients(
+                  static_cast<std::size_t>(frame_top) + 1,
+                  ScalarTraits<ComplexBall>::zero());
+              if (component == column)
+                coefficients.front() = ScalarTraits<ComplexBall>::one();
+              unit.emplace_back(0, std::move(coefficients));
+            }
+            auto assembled =
+                block.chart->apply_assembly_to_acb_matching_vector(unit);
+            for (std::size_t row = 0; row < block.vertices.size(); ++row)
+              assembly[row].push_back(std::move(assembled[row]));
+          }
+          FiniteLaurentVector<ComplexBall> assembled_weights;
+          assembled_weights.reserve(block.vertices.size());
+          for (std::size_t row = 0; row < block.vertices.size(); ++row) {
+            std::optional<EpsilonFrame<ComplexBall>> value;
+            for (std::size_t column = 0; column < block.vertices.size();
+                 ++column) {
+              auto term = assembly[row][column] * local[column];
+              value = value.has_value()
+                  ? *value + term : std::move(term);
+            }
+            assembled_weights.push_back(std::move(*value));
+          }
+          local = std::move(assembled_weights);
+        }
+        for (std::size_t component = 0; component < block.vertices.size();
+             ++component)
+          physical[block.vertices[component]] = std::move(local[component]);
+      }
+      FiniteLaurentVector<ComplexBall> result;
+      result.reserve(dimension_);
+      for (auto& frame : physical) {
+        if (!frame.has_value())
+          throw std::logic_error(
+              "SCC matching weight denormalization left an empty component");
+        result.push_back(std::move(*frame));
+      }
+      return result;
+    }
+  }
+
   const char* equation_scalar_domain() const override {
     if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
     if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
@@ -2138,6 +2693,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     const auto execution_ready = regular_ready || regular_singular_ready;
     const auto scalar_shape = scalar_block_shape();
     const auto scalar_ready = scalar_column_ready();
+    const auto pseudo_cache_stats = pseudo_target_cache_
+        ? pseudo_target_cache_->stats()
+        : typename PseudoTargetCache<Scalar>::Stats{};
     json::object result{
         {"scc", handle_}, {"key", key_}, {"identity", exact_identity_},
         {"rational_shadow_identity", rational_shadow_identity_},
@@ -2153,6 +2711,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"active_coupling_entries", active_entries},
         {"proven_zero_coupling_entries", proven_zero_entries},
         {"frame_base", work_.work_min},
+        {"cancellation_audit_base", work_.cancellation_audit_base.has_value()
+             ? json::value(*work_.cancellation_audit_base)
+             : json::value(nullptr)},
         {"frame_width", static_cast<std::uint32_t>(
              static_cast<std::int64_t>(work_.work_complete_max) -
              work_.work_min + 1)},
@@ -2182,6 +2743,15 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
          regular_singular_ready},
         {"scc_column_solves", column_solves_.load()},
         {"scc_column_solve_ms", column_solve_ms()},
+        {"casep_homogeneous_target_cache_scope",
+         pseudo_target_cache_
+             ? "immutable-composite" : "not-applicable"},
+        {"casep_homogeneous_target_cache_entries",
+         pseudo_cache_stats.entries},
+        {"casep_homogeneous_target_cache_builds",
+         pseudo_cache_stats.builds},
+        {"casep_homogeneous_target_cache_hits",
+         pseudo_cache_stats.hits},
         {"capability_evidence", json::object{
              {"identity_v",
               "native-retained-spectral-assembly-and-target-inverse"},
@@ -2306,6 +2876,26 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     json::array diagnostics;
     NativeLocalDiagnostics aggregate;
     aggregate.top_valid = kCompleteInfinity;
+    std::vector<std::unique_ptr<PseudoCompensator<ComplexBall>>>
+        pseudo_compensators(blocks_.size());
+    const auto pseudo_compensator = [&](std::uint32_t block)
+        -> PseudoCompensator<ComplexBall>& {
+      if (!pseudo_target_cache_)
+        throw std::logic_error(
+            "Acb SCC composite has no CASE-P target cache");
+      if (!blocks_[block].exact_jordan_indicial.has_value())
+        throw std::logic_error(
+            "Acb SCC block has no CASE-P Jordan certificate");
+      if (!pseudo_compensators[block])
+        pseudo_compensators[block] =
+            std::make_unique<PseudoCompensator<ComplexBall>>(
+                *blocks_[block].chart,
+                *blocks_[block].exact_jordan_indicial, block,
+                checkpoint_identity + ":block:" +
+                    std::to_string(block),
+                *pseudo_target_cache_);
+      return *pseudo_compensators[block];
+    };
 
     const auto& seed_run = checked_column_run(
         seed_request, seed_block, true, nullptr,
@@ -2314,9 +2904,15 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         seed_run, seed_block, regular_singular_execution);
     const auto basis_index =
         blocks_[seed_block].vertices[seed_local_component];
-    auto seed_native = blocks_[seed_block].chart->solve_native(
-        seed_run, as_object(seed_request.at("metadata"),
-                            "native Acb SCC seed metadata"));
+    auto seed_native = regular_singular_execution
+        ? pseudo_compensator(seed_block).solve(
+              seed_run,
+              as_object(seed_request.at("metadata"),
+                        "native Acb SCC seed metadata"),
+              std::nullopt, 0)
+        : blocks_[seed_block].chart->solve_native(
+              seed_run, as_object(seed_request.at("metadata"),
+                                  "native Acb SCC seed metadata"));
     validate_block_result(seed_native, seed_block, true,
                           regular_singular_execution);
     blocks_[seed_block].chart->record_native_local_success(
@@ -2371,38 +2967,119 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               std::to_string(target_block));
       require_work_local(source, "combined Acb coupling source");
 
-      const auto& target_run = checked_column_run(
-          target_request, target_block, false, &source,
-          regular_singular_execution);
-      try {
+      if (!regular_singular_execution) {
+        const auto& target_run = checked_column_run(
+            target_request, target_block, false, &source, false);
         require_source_tag_matches_run(source, target_run);
-      } catch (const std::invalid_argument&) {
-        if (regular_singular_execution)
-          throw RecurrenceError(
-              "E5",
-              "native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source");
-        throw;
+        auto source_data = local_solution_source_data(
+            source, as_u32(target_run.at("nmax"), "target nmax"),
+            as_u32(target_run.at("p"), "target log maximum"),
+            blocks_[target_block].chart->frame_base(),
+            blocks_[target_block].chart->frame_width());
+        auto target_native =
+            blocks_[target_block].chart->solve_native_with_source(
+                target_run,
+                as_object(target_request.at("metadata"),
+                          "native Acb SCC target metadata"),
+                std::move(source_data));
+        validate_block_result(target_native, target_block, false, false);
+        blocks_[target_block].chart->record_native_local_success(
+            target_native.diagnostics);
+        accumulate_diagnostics(aggregate, target_native.diagnostics);
+        diagnostics.push_back(block_diagnostic(
+            target_block, "particular", predecessors, &source,
+            target_native));
+        state[target_block] = std::move(target_native.solution);
+        continue;
       }
-      auto source_data = local_solution_source_data(
-          source, as_u32(target_run.at("nmax"), "target nmax"),
-          as_u32(target_run.at("p"), "target log maximum"),
-          blocks_[target_block].chart->frame_base(),
-          blocks_[target_block].chart->frame_width());
-      auto target_native =
-          blocks_[target_block].chart->solve_native_with_source(
-              target_run,
+
+      // Exact tags determine separate affine schedules even though the
+      // coefficient field is Acb.  This is the same decomposition used by
+      // the Rational fallback, with cancellation accepted only when the
+      // resulting enclosure is below the configured chop floor.
+      auto groups = split_exact_rational_tags(
+          source, checkpoint_identity + ":source-groups:" +
+                      std::to_string(target_block));
+      const auto& submitted_run = as_object(
+          target_request.at("run"), "native Acb SCC target run");
+      const Rational submitted_a =
+          parse_scalar<Rational>(submitted_run.at("a_target"));
+      const Rational submitted_b =
+          parse_scalar<Rational>(submitted_run.at("b_target"));
+      bool submitted_used = false;
+      std::vector<LocalSolution<ComplexBall>> target_parts;
+      target_parts.reserve(groups.size());
+      for (std::size_t group_index = 0; group_index < groups.size();
+           ++group_index) {
+        auto& group = groups[group_index];
+        if (group.sectors.empty())
+          throw std::logic_error("Acb SCC source tag group is empty");
+        const Rational group_a(group.sectors.front().a.canonical);
+        const Rational group_b(group.sectors.front().b.canonical);
+        const bool use_submitted = group_a == submitted_a &&
+                                   group_b == submitted_b;
+        json::object derived_entry;
+        const json::object* entry = &target_request;
+        if (!use_submitted) {
+          std::uint32_t source_log = 0;
+          for (const auto& sector : group.sectors)
+            source_log = std::max(source_log, sector.log_power);
+          auto run = exact_derived_run(
+              submitted_run, *blocks_[target_block].chart,
+              *blocks_[target_block].exact_jordan_indicial,
+              group_a, group_b, source_log, false, std::nullopt);
+          auto metadata = exact_derived_metadata(
               as_object(target_request.at("metadata"),
                         "native Acb SCC target metadata"),
-              std::move(source_data));
-      validate_block_result(target_native, target_block, false,
-                            regular_singular_execution);
-      blocks_[target_block].chart->record_native_local_success(
-          target_native.diagnostics);
-      accumulate_diagnostics(aggregate, target_native.diagnostics);
-      diagnostics.push_back(block_diagnostic(
-          target_block, "particular", predecessors, &source,
-          target_native));
-      state[target_block] = std::move(target_native.solution);
+              group_a, group_b,
+              as_u32(run.at("p"), "derived particular log maximum"),
+              ":derived-tag:" + std::to_string(group_index));
+          derived_entry = json::object{
+              {"block", target_block}, {"run", std::move(run)},
+              {"metadata", std::move(metadata)}};
+          entry = &derived_entry;
+        } else {
+          if (submitted_used)
+            throw std::logic_error(
+                "Acb SCC source contains duplicate submitted tag groups");
+          submitted_used = true;
+        }
+
+        const auto& target_run = checked_column_run(
+            *entry, target_block, false, &group, true);
+        require_source_tag_matches_run(group, target_run);
+        const auto allowed_floor = acb_formal_value_floor(
+            group, blocks_[target_block].chart->chop_digits());
+        auto source_data = local_solution_source_data(
+            group, as_u32(target_run.at("nmax"), "target nmax"),
+            as_u32(target_run.at("p"), "target log maximum"),
+            blocks_[target_block].chart->frame_base(),
+            blocks_[target_block].chart->frame_width());
+        auto target_native = pseudo_compensator(target_block).solve(
+            target_run,
+            as_object(entry->at("metadata"),
+                      "native Acb SCC target metadata"),
+            std::move(source_data), allowed_floor);
+        validate_block_result(target_native, target_block, false, true);
+        blocks_[target_block].chart->record_native_local_success(
+            target_native.diagnostics);
+        accumulate_diagnostics(aggregate, target_native.diagnostics);
+        auto diagnostic = block_diagnostic(
+            target_block, "particular-tag", predecessors, &group,
+            target_native);
+        diagnostic["source_a"] = group_a.str();
+        diagnostic["source_b"] = group_b.str();
+        diagnostics.push_back(std::move(diagnostic));
+        target_parts.push_back(std::move(target_native.solution));
+      }
+      auto target_state = target_parts.size() == 1
+          ? std::move(target_parts.front())
+          : combine_local_solutions(
+                target_parts,
+                checkpoint_identity + ":target-tag-sum:" +
+                    std::to_string(target_block));
+      require_work_local(target_state, "combined Acb target tag particulars");
+      state[target_block] = std::move(target_state);
     }
 
     std::vector<LocalSolution<Scalar>> embedded;
@@ -2421,8 +3098,17 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         : combine_local_solutions(
               embedded, checkpoint_identity + ":work-parent");
     require_work_local(parent, "combined Acb parent work state");
+    // A retained SCC column is a receiving-basis object, not a public
+    // observable.  Preserve every coefficient that the recurrence actually
+    // proved complete.  The public requirement remains requested_max and is
+    // checked below; an arbitrary dimension-scaled cap would discard private
+    // Laurent-match reservoir without reducing any upstream computation.
+    const auto retained_match_max = static_cast<std::int32_t>(
+        std::min<std::int64_t>(
+            parent.epsilon.complete_max,
+            work_.work_complete_max));
     parent = cap_composite_public_local(
-        parent, work_.requested_max, work_.public_t_order,
+        parent, retained_match_max, work_.public_t_order,
         retained_geometry_.chart, retained_geometry_.prescriptions,
         checkpoint_identity);
     validate_local_solution(parent, false);
@@ -2440,7 +3126,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"basis_index", basis_index},
         {"seed", seed_request},
         {"targets", target_requests},
-        {"pseudo_compensation", "none"}};
+        {"pseudo_compensation",
+         aggregate.pseudo_hits == 0
+             ? "none"
+             : "exact-schedule-acb-ball-floor-certified-v1"}};
     if (!scalar_execution)
       column_identity_record["seed_local_component"] =
           seed_local_component;
@@ -2688,13 +3377,19 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     const auto& metadata_object = as_object(
         entry.at("metadata"), "native SCC local metadata");
     validate_metadata_geometry(metadata_object);
+    const auto* raw_audit = run.if_contains("cancellation_audit_base");
+    const std::optional<std::int32_t> run_audit =
+        raw_audit == nullptr || raw_audit->is_null()
+            ? std::nullopt
+            : std::optional<std::int32_t>(
+                  as_i32(*raw_audit, "native SCC cancellation audit base"));
+    if (run_audit != work_.cancellation_audit_base)
+      throw std::invalid_argument(
+          "native SCC run cancellation audit differs from its retained work contract");
     auto metadata = parse_local_metadata(metadata_object);
     if (!run.at("source").is_null())
       throw std::invalid_argument(
           "native SCC column rejects caller-supplied recurrence source data");
-    if (run.at("adaptive_probe").as_bool())
-      throw std::invalid_argument(
-          "native SCC column requires a fixed retained lower frame");
     if (run.at("return_u").as_bool())
       throw std::invalid_argument(
           "native SCC column requires retained assembly without U JSON");
@@ -2860,15 +3555,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         }
         exact_schedule.push_back(std::move(exact_row));
       }
-      const auto schedule_certificate =
-          certify_exact_affine_jordan_schedule(
+      (void)certify_exact_affine_jordan_schedule(
           *retained_indicial, *exact_a_target, *exact_b_target,
           exact_schedule);
-      if constexpr (std::is_same_v<Scalar, ComplexBall>)
-        if (schedule_certificate.contains_pseudo)
-          throw RecurrenceError(
-              "E5",
-              "native Acb regular-singular SCC execution rejects exact CASE-P collisions; use the exact Rational compensation path");
     } else {
       if (!blocks_[block_index].chart->has_regular_singleton_partition())
         throw std::invalid_argument(
@@ -3120,6 +3809,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     physical_source = block_gauge_transform(
         physical_source, target_block, false,
         checkpoint_identity + ":gauge-inverse");
+    // The epsilon-regular recurrence accepts reduced physical source data
+    // and performs V^-1 only inside its bounded resonant-layer transaction.
+    // Retain the prepared V^-1 nevertheless: matching uses it as the exact
+    // local normal frame for both sides of the handoff.
+    if (block.chart->uses_epsilon_regular_principal())
+      return physical_source;
     if (block.source_transform.identity)
       return physical_source;
     auto transformed = apply_prepared_sparse_local_matrix(
@@ -3156,14 +3851,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   void validate_block_result(const NativeLocalRun<Scalar>& native,
                              std::uint32_t block_index, bool seed,
                              bool regular_singular_execution) const {
-    if (!native.pseudo_hits.empty() && regular_singular_execution &&
-        std::is_same_v<Scalar, ComplexBall>)
-      throw RecurrenceError(
-          "E5",
-          "native Acb regular-singular SCC recurrence produced an unsupported pseudo hit after exact no-CASE-P certification");
     if (!native.pseudo_hits.empty())
       throw std::invalid_argument(
-          "native SCC execution encountered pseudo hits after its exact schedule certificate");
+          "native SCC execution encountered uncompensated pseudo hits after its exact schedule certificate");
     if (block_index >= blocks_.size() ||
         native.solution.dimension != blocks_[block_index].vertices.size())
       throw std::invalid_argument(
@@ -3264,8 +3954,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   std::vector<CompositeSCCCoupling<Scalar>> couplings_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
       physical_equation_;
+  std::unique_ptr<PseudoTargetCache<Scalar>> pseudo_target_cache_;
   std::atomic<std::uint64_t> column_solves_{0};
   mutable std::mutex column_stats_mutex_;
   double column_solve_ms_ = 0.0;
 };
-

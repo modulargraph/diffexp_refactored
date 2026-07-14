@@ -51,7 +51,8 @@ solveDivergentLocal[session_, chart_] := request[<|
   "schema" -> 2, "op" -> "local.solve", "session" -> session,
   "chart" -> chart,
   "run" -> <|"nmax" -> 2, "p" -> 0, "has_initial" -> True,
-    "adaptive_probe" -> False, "a_target" -> "-1",
+    "adaptive_probe" -> False, "cancellation_audit_base" -> Null,
+    "a_target" -> "-1",
     "b_target" -> "0", "a_shift_min" -> 0,
     "a_shifts" -> {"-1", "0", "1"},
     "schedule" -> {

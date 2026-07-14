@@ -357,12 +357,16 @@ RunRequest[request_Association] := Module[{json, bytes, result},
 
 $persistentStaticKeys = {"domain", "symbols", "precision_bits", "d", "fb",
   "w", "d_lags", "denominators", "nhat_lags", "d0_inverse", "blocks",
+  "epsilon_regular_principal", "spectral_principal", "spectral_source",
   "assembly", "physical_ode", "chop_digits"};
 $persistentRequiredStaticKeys = DeleteCases[
-  $persistentStaticKeys, "physical_ode"];
+  $persistentStaticKeys,
+  "physical_ode" | "epsilon_regular_principal" |
+    "spectral_principal" | "spectral_source"];
 $persistentRunKeys = {"nmax", "p", "has_initial", "adaptive_probe",
-  "a_target", "b_target", "a_shift_min", "a_shifts", "schedule",
-  "initial", "initial_validity", "source", "return_u"};
+  "cancellation_audit_base", "a_target", "b_target", "a_shift_min",
+  "a_shifts", "schedule", "initial", "initial_validity", "source",
+  "return_u"};
 
 persistentCacheLookup[cache_Association, key_, signature_, label_String] :=
   Module[{entry = Lookup[cache, key, None]},
@@ -1740,24 +1744,29 @@ persistentNonemptyStringQ[value_] := StringQ[value] &&
 
 persistentPreparedRationalMultiplierQ[multiplier_] := Module[
   {kernels, keys, baseKeys = {"epsilon_shift", "center_pole_order",
-    "kernels", "exact_identity", "proven_zero"}, analytic},
+    "exact_identity", "proven_zero"}, analytic, hasKernels, hasAnalytic},
   keys = If[AssociationQ[multiplier], Sort[Keys[multiplier]], {}];
+  hasKernels = MemberQ[keys, "kernels"];
+  hasAnalytic = MemberQ[keys, "analytic_coefficients"];
   If[!AssociationQ[multiplier] ||
-      !MemberQ[{Sort[baseKeys], Sort[Append[baseKeys,
-        "analytic_coefficients"]]}, keys], Return[False, Module]];
-  kernels = multiplier["kernels"];
+      !MemberQ[{Sort[Append[baseKeys, "kernels"]],
+        Sort[Append[baseKeys, "analytic_coefficients"]],
+        Sort[Join[baseKeys, {"kernels", "analytic_coefficients"}]]},
+        keys], Return[False, Module]];
+  kernels = Lookup[multiplier, "kernels", None];
   analytic = Lookup[multiplier, "analytic_coefficients", None];
   IntegerQ[multiplier["epsilon_shift"]] &&
     IntegerQ[multiplier["center_pole_order"]] &&
     multiplier["center_pole_order"] >= 0 &&
-    ListQ[kernels] && kernels =!= {} &&
-    AllTrue[kernels, ListQ[#] && # =!= {} &] &&
-    (analytic === None || (ListQ[analytic] &&
-      Length[analytic] === Length[kernels] &&
+    (hasKernels && ListQ[kernels] && kernels =!= {} &&
+      AllTrue[kernels, ListQ[#] && # =!= {} &] || !hasKernels) &&
+    (hasAnalytic && ListQ[analytic] && analytic =!= {} &&
+      (!hasKernels || Length[analytic] === Length[kernels]) &&
       AllTrue[analytic, AssociationQ[#] &&
         Sort[Keys[#]] === Sort[{"numerator", "denominator"}] &&
         ListQ[# ["numerator"]] && # ["numerator"] =!= {} &&
-        ListQ[# ["denominator"]] && # ["denominator"] =!= {} &])) &&
+        ListQ[# ["denominator"]] && # ["denominator"] =!= {} &] ||
+      !hasAnalytic) &&
     persistentNonemptyStringQ[multiplier["exact_identity"]] &&
     multiplier["proven_zero"] === False];
 

@@ -58,7 +58,8 @@ system = <|"Variable" -> z, "Matrix" -> basis["Matrix"],
 entries = ft2PrepareBoundaryEntries[1, batch, boundaryPrefactors,
   z, Global`eps, Identity];
 ledger = ft2NativeEpsilonLedger[entries, boundaryValues,
-  nativePlan["Levels", 1, "RequiredOutputRawTop"]];
+  nativePlan["Levels", 1, "RequiredOutputRawTop"],
+  nativePlan["Levels", 1, "RequiredOutputPublicRawTop"]];
 delta = {{z, 1}, {1 - z, 1}};
 configuration = <|"WorkingPrecision" -> wp,
   "ExpansionOrder" -> expansionOrder,
@@ -92,13 +93,14 @@ audit = <|"Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
   "NativeEpsilonPlanIdentity" -> execution["Identity"],
   "SourceCompleteMax" -> ledger["SourceCompleteMax"],
   "TargetCompleteMax" -> ledger["TargetCompleteMax"],
+  "RequiredTargetCompleteMax" -> ledger["PublicTargetCompleteMax"],
   "DeliverableCompleteMax" -> ledger["DeliverableCompleteMax"],
   "RequiredRawTop" -> ledger["DownstreamRawTop"],
   "CoefficientHalo" -> ledger["CoefficientHalo"],
   "IntegrationHalo" -> ledger["IntegrationHalo"],
   "MatchEpsilonPadding" ->
     ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
-      ledger["TargetCompleteMax"]|>;
+      ledger["PublicTargetCompleteMax"]|>;
 checkpointIdentity = "native-resume-state";
 nativeStateFile = FileNameJoin[{tmpDir,
   name <> "_level1_native_transport.de2cp"}];
@@ -153,6 +155,7 @@ assert["schema-2 native sidecar passes the normal production loader",
 boundaryAudit = Join[audit, <|
   "SourceCompleteMax" -> requiredRaw,
   "TargetCompleteMax" -> requiredRaw,
+  "RequiredTargetCompleteMax" -> requiredRaw,
   "DeliverableCompleteMax" -> requiredRaw,
   "RequiredRawTop" -> requiredRaw,
   "CoefficientHalo" -> 0, "IntegrationHalo" -> 0,

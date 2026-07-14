@@ -213,12 +213,17 @@ inline std::vector<LaurentFraction> nhat_zero_entries(
     const PreparedRecurrenceOperator<Rational>& prepared) {
   if (prepared.nhat_lags.empty())
     fail("exact indicial certificate has no Nhat_0 lag");
+  if (prepared.epsilon_regular_principal &&
+      !prepared.spectral_principal_lag.has_value())
+    fail("epsilon-regular exact indicial certificate has no spectral Nhat_0 lag");
   const auto dimension = prepared.dimension;
   if (dimension == 0) fail("exact indicial certificate has zero dimension");
   if (dimension > std::numeric_limits<std::size_t>::max() / dimension)
     fail("exact indicial matrix size overflows size_t");
   const auto count = static_cast<std::size_t>(dimension) * dimension;
-  const auto& lag = prepared.nhat_lags.front();
+  const auto& lag = prepared.epsilon_regular_principal
+      ? *prepared.spectral_principal_lag
+      : prepared.nhat_lags.front();
 
   std::vector<LaurentPolynomial> polynomial_entries(count);
   collect_matrix_shifts(lag.polynomial, dimension, polynomial_entries,

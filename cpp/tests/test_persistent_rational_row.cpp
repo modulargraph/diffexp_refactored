@@ -146,6 +146,37 @@ json::object rational_row() {
                              "3eps")}}}}};
 }
 
+json::object compact_multiplier(std::int32_t shift, std::uint32_t pole,
+                                const std::string& leading,
+                                std::string identity) {
+  json::array analytic;
+  analytic.push_back(json::object{
+      {"numerator", json::array{leading}},
+      {"denominator", json::array{"1"}}});
+  for (int i = 0; i < 2; ++i)
+    analytic.push_back(json::object{
+        {"numerator", json::array{"0"}},
+        {"denominator", json::array{"1"}}});
+  return json::object{
+      {"epsilon_shift", shift}, {"center_pole_order", pole},
+      {"analytic_coefficients", std::move(analytic)},
+      {"exact_identity", std::move(identity)},
+      {"proven_zero", false}};
+}
+
+json::object compact_rational_row() {
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 2}, {"exact_identity", "[1/t,3eps]:compact"},
+      {"entries", json::array{
+           json::object{{"column", 0},
+                        {"multiplier", compact_multiplier(
+                             0, 1, "1", "1/t:compact")}},
+           json::object{{"column", 1},
+                        {"multiplier", compact_multiplier(
+                             1, 0, "3", "3eps:compact")}}}}};
+}
+
 json::object zero_row() {
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
@@ -387,7 +418,7 @@ bool rational_protocol() {
           "retained-native-rational-row-local-application-v1" &&
       malformed.at("status") == "error" &&
       std::string(malformed.at("detail").as_string()).find(
-          "exact source Taylor width") != std::string::npos &&
+          "Taylor rectangle") != std::string::npos &&
       projected.at("status") == "ok" &&
       projected.at("application_capability") ==
           "retained-native-rational-row-local-application-v1" &&
@@ -693,10 +724,61 @@ bool acb_protocol() {
   return ok;
 }
 
+bool compact_protocol(const std::string& domain) {
+  json::object create{{"schema", 2}, {"op", "session.create"},
+                      {"domain", domain}, {"output_digits", 50},
+                      {"local_capacity", 4}};
+  if (domain == "acb") create["precision_bits"] = 256;
+  const auto created = request(std::move(create));
+  const auto session = std::string(created.at("session").as_string());
+  const auto chart = prepare_chart(session, domain, "compact", "0");
+  const auto source = solve_local(
+      session, chart, "compact-row-source-" + domain);
+  const auto source_handle = std::string(source.at("local").as_string());
+  const auto explicit_result = apply_row(
+      session, source_handle, rational_row(),
+      "compact-row-source-" + domain, "explicit-row-result-" + domain);
+  const auto compact_result = apply_row(
+      session, source_handle, compact_rational_row(),
+      "compact-row-source-" + domain, "compact-row-result-" + domain);
+  bool ok = explicit_result.at("status") == "ok" &&
+      compact_result.at("status") == "ok";
+  json::object explicit_value;
+  json::object compact_value;
+  if (ok) {
+    explicit_value = request(json::object{
+        {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+        {"local", explicit_result.at("local")},
+        {"point", json::object{{"exact", "1/4"}}},
+        {"options", json::object{{"tail_estimate", false}}}});
+    compact_value = request(json::object{
+        {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+        {"local", compact_result.at("local")},
+        {"point", json::object{{"exact", "1/4"}}},
+        {"options", json::object{{"tail_estimate", false}}}});
+    ok = explicit_value.at("status") == "ok" &&
+        compact_value.at("status") == "ok" &&
+        std::abs(coefficient_midpoint(explicit_value, 0) -
+                 coefficient_midpoint(compact_value, 0)) < 1e-30 &&
+        std::abs(coefficient_midpoint(explicit_value, 1) -
+                 coefficient_midpoint(compact_value, 1)) < 1e-30;
+  }
+  if (!ok)
+    std::cerr << "compact " << domain << " explicit: "
+              << json::serialize(explicit_result) << " compact: "
+              << json::serialize(compact_result) << " explicit value: "
+              << json::serialize(explicit_value) << " compact value: "
+              << json::serialize(compact_value) << '\n';
+  (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                             {"session", session}});
+  return ok;
+}
+
 }  // namespace
 
 int main() {
-  const bool ok = rational_protocol() && acb_protocol();
+  const bool ok = rational_protocol() && acb_protocol() &&
+      compact_protocol("rational") && compact_protocol("acb");
   std::cout << (ok ? "PASS" : "FAIL")
             << ": retained Rational/Acb rational-row projection and tile integration\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;

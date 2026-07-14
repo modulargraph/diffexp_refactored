@@ -530,13 +530,22 @@ const char* acb_match_verdict_name(AcbMatchingResidualVerdict verdict) {
 json::object encode_acb_match_residual_diagnostics(
     const AcbMatchingResidualDiagnostics& diagnostics) {
   std::size_t pass = 0, fail = 0, inconclusive = 0;
+  json::array inconclusive_examples;
   for (const auto& coefficient : diagnostics.coefficients) {
     if (coefficient.verdict == AcbMatchingResidualVerdict::Pass)
       ++pass;
     else if (coefficient.verdict == AcbMatchingResidualVerdict::Fail)
       ++fail;
-    else
+    else {
       ++inconclusive;
+      if (inconclusive_examples.size() < 6)
+        inconclusive_examples.push_back(json::object{
+            {"row", coefficient.row},
+            {"epsilon_power", coefficient.epsilon_power},
+            {"residual_upper_exact",
+             coefficient.residual_upper.dump_exact()},
+            {"scale_lower_exact", coefficient.scale_lower.dump_exact()}});
+    }
   }
   return json::object{
       {"verdict", acb_match_verdict_name(diagnostics.verdict)},
@@ -550,6 +559,7 @@ json::object encode_acb_match_residual_diagnostics(
       {"coefficient_verdicts",
        json::object{{"pass", pass}, {"fail", fail},
                     {"inconclusive", inconclusive}}},
+      {"inconclusive_examples", std::move(inconclusive_examples)},
       {"detail", diagnostics.detail}};
 }
 
@@ -589,7 +599,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
       std::vector<json::object> basis_sources, json::object incoming_source,
       std::string basis_chart, std::string incoming_chart,
       std::string basis_point, std::string incoming_point,
-      std::string physical_point, EpsilonWindow requested_window,
+      std::string physical_point, std::string matching_frame_identity,
+      EpsilonWindow requested_window,
       std::int32_t required_complete_max, std::uint32_t dimension,
       std::string relative_tolerance, std::size_t max_refinement_steps,
       EpsilonLatticeSaturationResult<Rational>&& exact_saturation,
@@ -611,6 +622,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         basis_point_(std::move(basis_point)),
         incoming_point_(std::move(incoming_point)),
         physical_point_(std::move(physical_point)),
+        matching_frame_identity_(std::move(matching_frame_identity)),
         requested_window_(requested_window),
         required_complete_max_(required_complete_max),
         dimension_(dimension),
@@ -690,6 +702,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         {"basis_point_exact", basis_point_},
         {"incoming_point_exact", incoming_point_},
         {"physical_match_point_exact", physical_point_},
+        {"matching_frame_identity", matching_frame_identity_},
         {"epsilon",
          json::object{{"min", requested_window_.min_power},
                       {"max", requested_window_.complete_max},
@@ -721,6 +734,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
          json::object{{"relative_tolerance", relative_tolerance_},
                       {"max_steps", max_refinement_steps_},
                       {"steps", refined_.refinement_steps},
+                      {"factorization_preconditioner",
+                       refined_.factorization_preconditioner},
                       {"factorizations", 1}}},
         {"weight_windows", std::move(weight_windows)},
         {"transformed_weight_windows",
@@ -792,6 +807,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         {"basis_point_exact", basis_point_},
         {"incoming_point_exact", incoming_point_},
         {"physical_match_point_exact", physical_point_},
+        {"matching_frame_identity", matching_frame_identity_},
         {"epsilon",
          json::object{{"min", requested_window_.min_power},
                       {"max", requested_window_.complete_max},
@@ -806,7 +822,9 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
              {"weights", checkpoint_frame_vector_record(refined_.weights)},
              {"residual", checkpoint_frame_vector_record(refined_.residual)},
              {"residual_history", std::move(history)},
-             {"refinement_steps", refined_.refinement_steps}}},
+             {"refinement_steps", refined_.refinement_steps},
+             {"factorization_preconditioner",
+              refined_.factorization_preconditioner}}},
         {"elapsed_ms", elapsed_ms_}};
   }
 
@@ -824,6 +842,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
   std::string basis_point_;
   std::string incoming_point_;
   std::string physical_point_;
+  std::string matching_frame_identity_;
   EpsilonWindow requested_window_;
   std::int32_t required_complete_max_ = 0;
   std::uint32_t dimension_ = 0;
@@ -840,7 +859,65 @@ struct ParsedExactEvaluatedLattice {
   std::string canonical_witness;
   EpsilonLatticeSaturationResult<Rational> saturation;
   bool exact_formal_negative_coefficients_are_zero = false;
+  std::optional<ExactLaurentMatrix<ComplexBall>> acb_transformation;
 };
+
+json::array checkpoint_acb_laurent_matrix_record(
+    const ExactLaurentMatrix<ComplexBall>& matrix) {
+  json::array rows;
+  rows.reserve(matrix.size());
+  for (const auto& row : matrix) {
+    json::array encoded_row;
+    encoded_row.reserve(row.size());
+    for (const auto& polynomial : row) {
+      json::array terms;
+      terms.reserve(polynomial.terms().size());
+      for (const auto& [power, coefficient] : polynomial.terms())
+        terms.push_back(json::object{
+            {"power", power},
+            {"coefficient", checkpoint_ball_record(coefficient)}});
+      encoded_row.push_back(std::move(terms));
+    }
+    rows.push_back(std::move(encoded_row));
+  }
+  return rows;
+}
+
+ExactLaurentMatrix<ComplexBall> parse_checkpoint_acb_laurent_matrix(
+    const json::value& raw, std::uint32_t dimension, const char* label) {
+  const auto& rows = as_array(raw, label);
+  if (rows.size() != dimension)
+    throw std::invalid_argument(
+        std::string(label) + " row count differs from its dimension");
+  ExactLaurentMatrix<ComplexBall> matrix;
+  matrix.reserve(rows.size());
+  for (const auto& raw_row : rows) {
+    const auto& row = as_array(raw_row, label);
+    if (row.size() != dimension)
+      throw std::invalid_argument(
+          std::string(label) + " is not square");
+    std::vector<ExactLaurentPolynomial<ComplexBall>> parsed_row;
+    parsed_row.reserve(row.size());
+    for (const auto& raw_entry : row) {
+      ExactLaurentPolynomial<ComplexBall> polynomial;
+      std::optional<std::int32_t> previous_power;
+      for (const auto& raw_term : as_array(raw_entry, label)) {
+        const auto& term = as_object(raw_term, label);
+        require_exact_keys(term, {"power", "coefficient"}, label);
+        const auto power = as_i32(term.at("power"), label);
+        if (previous_power.has_value() && power <= *previous_power)
+          throw std::invalid_argument(
+              std::string(label) + " powers are not strictly increasing");
+        polynomial.add_term(
+            power, parse_checkpoint_ball(term.at("coefficient"), label));
+        previous_power = power;
+      }
+      parsed_row.push_back(std::move(polynomial));
+    }
+    matrix.push_back(std::move(parsed_row));
+  }
+  return matrix;
+}
 
 ParsedExactEvaluatedLattice parse_exact_evaluated_lattice(
     const json::value& raw, std::uint32_t dimension, EpsilonWindow window,
@@ -1371,9 +1448,11 @@ void validate_singular_scc_basis_sources(
               expected_identity ||
           as_u32(exact_column.at("basis_index"),
                  "singular-SCC exact column basis index") != basis_index ||
-          required_string(exact_column, "pseudo_compensation") != "none")
+          (required_string(exact_column, "pseudo_compensation") != "none" &&
+           required_string(exact_column, "pseudo_compensation") !=
+               "exact-schedule-acb-ball-floor-certified-v1"))
         throw std::domain_error(
-            context + ": singular-SCC basis column is not a supported no-pseudo affine-Jordan Acb column");
+            context + ": singular-SCC basis column lacks a supported exact-schedule Acb compensation certificate");
       const auto& seed = as_object(
           exact_column.at("seed"), "singular-SCC exact column seed");
       if (as_u32(seed.at("block"),
@@ -1402,7 +1481,8 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
     const std::string& expected_session_configuration,
     const json::object& expected_native_request,
     const std::string& expected_checkpoint_identity,
-    const std::string& context) {
+    const std::string& context,
+    bool prefer_retained_rational_shadow = true) {
   auto native_request = validate_native_singular_scc_saturation_request(
       raw_request, context, expected_session_configuration,
       expected_native_request);
@@ -1441,7 +1521,7 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
   const bool shadow_basis = std::all_of(
       shadow_witnesses.begin(), shadow_witnesses.end(),
       [](const auto& witness) { return witness != nullptr; });
-  if (shadow_basis) {
+  if (shadow_basis && prefer_retained_rational_shadow) {
     for (std::size_t column = 0; column < dimension; ++column) {
       const auto& witness = *shadow_witnesses[column];
       if (!witness.solution || witness.rational_shadow_identity.empty() ||
@@ -1501,37 +1581,171 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
             json::serialize(canonical_json_value(proof)),
             std::move(saturation), true};
   }
-  if (std::any_of(shadow_witnesses.begin(), shadow_witnesses.end(),
+  if (prefer_retained_rational_shadow &&
+      std::any_of(shadow_witnesses.begin(), shadow_witnesses.end(),
                   [](const auto& witness) { return witness != nullptr; }))
     throw std::invalid_argument(
         context + ": singular-SCC basis mixes Rational-shadow and native Acb columns");
-  for (std::size_t row = 0; row < dimension; ++row) {
+  for (std::size_t row = 0; row < dimension; ++row)
     if (evaluated_basis[row].size() != dimension)
       throw std::domain_error(
-          context + ": singular-SCC valuation-zero certification received a nonsquare actual basis");
-    for (std::size_t column = 0; column < dimension; ++column) {
-      const auto& frame = evaluated_basis[row][column];
-      if (frame.complete_max() < 0)
+          context + ": singular-SCC Laurent certification received a nonsquare actual basis");
+  for (std::size_t row = 0; row < dimension; ++row)
+    for (std::size_t column = 0; column < dimension; ++column)
+      if (evaluated_basis[row][column].complete_max() < 0)
         throw MatchingArithmeticError(
             MatchingArithmeticErrorCode::InsufficientCompleteWindow,
             context + ": actual singular-SCC Acb basis is incomplete through epsilon^0",
-            row, column, frame.complete_max());
-      for (std::int64_t power = window.min_power; power < 0; ++power)
-        if (!frame.coefficient(static_cast<std::int32_t>(power)).is_zero())
-          throw MatchingArithmeticError(
-              MatchingArithmeticErrorCode::InvalidSaturationLattice,
-              context + ": actual singular-SCC Acb basis has a nonzero or zero-ambiguous negative epsilon coefficient",
-              row, column, static_cast<std::int32_t>(power));
+            row, column, evaluated_basis[row][column].complete_max());
+
+  // Canonicalize only enclosures whose *whole ball* lies below the structural
+  // floor, then determine the column Laurent valuations from that completed
+  // evaluated basis.  This is not a midpoint zero decision: every chopped
+  // ball is rigorously negligible, and the final matching residual below is
+  // still evaluated against `evaluated_basis`, not this canonical copy.
+  //
+  // Normalizing the column valuations before factorization is essential for
+  // honest finite-window arithmetic.  Direct Gaussian elimination on the
+  // raw polar basis repeatedly combines negative minima and can discard
+  // several perfectly known upper coefficients even when the normalized
+  // determinant valuation is zero.
+  constexpr int structural_chop_digits = 100;
+  auto structural_basis = evaluated_basis;
+  for (auto& row : structural_basis)
+    for (auto& frame : row) {
+      auto coefficients = frame.coefficients();
+      for (auto& coefficient : coefficients)
+        coefficient = ScalarTraits<ComplexBall>::canonicalized(
+            coefficient, structural_chop_digits);
+      frame = EpsilonFrame<ComplexBall>(
+          frame.window(), std::move(coefficients));
     }
+  std::vector<std::int32_t> column_valuations;
+  std::optional<EpsilonLatticeSaturationResult<Rational>>
+      rational_saturation;
+  std::optional<ExactLaurentMatrix<ComplexBall>> acb_transformation;
+  try {
+    column_valuations.resize(dimension);
+    for (std::size_t column = 0; column < dimension; ++column) {
+      std::optional<std::int32_t> valuation;
+      std::optional<std::int32_t> ambiguous_floor;
+      for (std::size_t row = 0; row < dimension; ++row) {
+        const auto leading = matching_detail::certified_laurent_leading_power(
+            structural_basis[row][column]);
+        if (leading.power.has_value() &&
+            (!valuation.has_value() || *leading.power < *valuation))
+          valuation = leading.power;
+        if (leading.first_ambiguous_power.has_value() &&
+            (!ambiguous_floor.has_value() ||
+             *leading.first_ambiguous_power < *ambiguous_floor))
+          ambiguous_floor = leading.first_ambiguous_power;
+      }
+      if (!valuation.has_value())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+            context +
+                ": no certified nonzero coefficient determines an Acb column valuation",
+            std::nullopt, column);
+      // An unresolved ball below this certified nonzero candidate does not
+      // invalidate the monomial change of coordinates: every integer column
+      // shift is exactly invertible.  It only prevents calling the candidate
+      // an exact valuation.  The transformed Laurent factorization and final
+      // residual remain the proof authorities.
+      (void)ambiguous_floor;
+      column_valuations[column] = *valuation;
+    }
+
+    auto candidate_acb_saturation = saturate_finite_laurent_basis(
+        structural_basis, context + ":certified-Acb-Levelt-saturation");
+    if (candidate_acb_saturation.diagnostics
+                .normalized_determinant_valuation != 0 ||
+        candidate_acb_saturation.diagnostics.final_leading_rank !=
+            dimension)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InvalidSaturationLattice,
+          context +
+              ": certified Acb Levelt saturation did not produce a valuation-zero full-rank lattice");
+
+    FiniteLaurentMatrix<Rational> monomial_basis(
+        dimension, FiniteLaurentVector<Rational>());
+    for (std::size_t row = 0; row < dimension; ++row) {
+      monomial_basis[row].reserve(dimension);
+      for (std::size_t column = 0; column < dimension; ++column) {
+        const auto valuation = column_valuations[column];
+        if (valuation < window.min_power || valuation > window.complete_max)
+          throw MatchingArithmeticError(
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+              context +
+                  ": certified Acb column valuation lies outside the matching window",
+              row, column, valuation);
+        std::vector<Rational> coefficients(window.width(), Rational(0));
+        if (row == column)
+          coefficients[static_cast<std::size_t>(
+              static_cast<std::int64_t>(valuation) - window.min_power)] =
+              Rational(1);
+        monomial_basis[row].emplace_back(window, std::move(coefficients));
+      }
+    }
+    auto candidate_rational_saturation = saturate_finite_laurent_basis(
+        monomial_basis, context + ":certified-Acb-monomial-provenance");
+    if (candidate_rational_saturation.diagnostics
+                .normalized_determinant_valuation != 0 ||
+        candidate_rational_saturation.diagnostics.initial_leading_rank !=
+            dimension ||
+        candidate_rational_saturation.diagnostics.final_leading_rank !=
+            dimension ||
+        !candidate_rational_saturation.diagnostics.actions.empty())
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InvalidSaturationLattice,
+          context +
+              ": certified column valuations do not define a monomial valuation-zero lattice");
+
+    rational_saturation = std::move(candidate_rational_saturation);
+    acb_transformation = std::move(
+        candidate_acb_saturation.transformation);
+  } catch (const MatchingArithmeticError&) {
+    // Some otherwise well-conditioned small SCCs still have correlated
+    // leading balls whose rank is inconclusive after the strict structural
+    // chop.  Their direct Laurent factorization remains a fully certified
+    // fallback; only the final residual, never this attempted normalization,
+    // authorizes materialization.
   }
-  const auto leading_rank =
-      matching_detail::certify_full_rank_by_nonzero_pivots(
-          matching_detail::epsilon_zero_matrix(
-              evaluated_basis, context + ":actual-leading-frame"),
-          context + ":actual-leading-rank");
-  if (leading_rank != dimension)
-    throw std::logic_error(
-        context + ": singular-SCC full-rank proof returned the wrong dimension");
+  const bool monomial_saturation = rational_saturation.has_value() &&
+                                   acb_transformation.has_value();
+  if (!monomial_saturation) {
+    (void)factor_preconditioned_acb_finite_laurent_system(
+        evaluated_basis, context + ":certified-direct-Acb-Laurent-pivots");
+    json::array proof_basis;
+    proof_basis.reserve(basis_sources.size());
+    for (const auto& source : basis_sources) proof_basis.push_back(source);
+    json::object proof_without_identity{
+        {"schema", kNativeSingularSCCSaturationProofSchema},
+        {"native_request", std::move(native_request)},
+        {"coefficient_domain", "acb"},
+        {"basis", std::move(proof_basis)},
+        {"basis_point_exact", basis_point},
+        {"physical_match_point_exact", physical_point},
+        {"epsilon", json::object{{"min", window.min_power},
+                                  {"max", window.complete_max}}},
+        {"negative_epsilon_coefficients",
+         "retained-certified-Acb-Laurent-frames"},
+        {"leading_power", 0},
+        {"leading_rank", dimension},
+        {"leading_rank_certificate",
+         "full-pivot-acb-Laurent-pivots-exclude-zero"},
+        {"column_provenance_certificate",
+         "complete-exact-schedule-receiving-scc-acb"},
+        {"determinant_valuation", 0},
+        {"transformation", "direct-acb-Laurent-pivoting"}};
+    const auto identity = json::serialize(
+        canonical_json_value(proof_without_identity));
+    auto proof = proof_without_identity;
+    proof["identity"] = identity;
+    return {kNativeSingularSCCSaturationProofSchema, identity,
+            json::serialize(canonical_json_value(proof)),
+            unit_rational_saturation(
+                static_cast<std::uint32_t>(dimension), window, context)};
+  }
 
   json::array proof_basis;
   proof_basis.reserve(basis_sources.size());
@@ -1545,22 +1759,32 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
       {"physical_match_point_exact", physical_point},
       {"epsilon", json::object{{"min", window.min_power},
                                 {"max", window.complete_max}}},
-      {"negative_epsilon_coefficients", "exact-singleton-zero"},
+      {"negative_epsilon_coefficients",
+       "acb-certified-finite-laurent-lattice"},
       {"leading_power", 0},
       {"leading_rank", dimension},
-      {"leading_rank_certificate", "full-pivot-acb-pivots-exclude-zero"},
+      {"leading_rank_certificate",
+       "full-acb-Levelt-saturation-pivots-exclude-zero"},
       {"column_provenance_certificate",
-       "complete-one-receiving-scc-composite-affine-jordan-acb-no-pseudo"},
+       "complete-exact-schedule-receiving-scc-acb"},
       {"determinant_valuation", 0},
-      {"transformation", "identity"}};
+      {"transformation", "certified-acb-Levelt-lattice-saturation"},
+      {"column_valuations", json::array{}},
+      {"structural_chop_digits", structural_chop_digits},
+      {"acb_transformation", checkpoint_acb_laurent_matrix_record(
+           *acb_transformation)}};
+  auto& encoded_valuations =
+      proof_without_identity.at("column_valuations").as_array();
+  for (const auto valuation : column_valuations)
+    encoded_valuations.push_back(valuation);
   const auto identity = json::serialize(
       canonical_json_value(proof_without_identity));
   auto proof = proof_without_identity;
   proof["identity"] = identity;
   return {kNativeSingularSCCSaturationProofSchema, identity,
           json::serialize(canonical_json_value(proof)),
-          unit_rational_saturation(
-              static_cast<std::uint32_t>(dimension), window, context)};
+          std::move(*rational_saturation), false,
+          std::move(*acb_transformation)};
 }
 
 ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
@@ -1576,6 +1800,17 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
   const bool shadow_proof =
       required_string(proof, "transformation") ==
       "exact-rational-shadow-column-monomials";
+  const bool acb_monomial_proof =
+      required_string(proof, "transformation") ==
+      "certified-acb-column-monomials";
+  const bool acb_levelt_proof =
+      required_string(proof, "transformation") ==
+      "certified-acb-Levelt-lattice-saturation";
+  const bool direct_acb_proof =
+      required_string(proof, "transformation") ==
+      "direct-acb-Laurent-pivoting";
+  const bool monomial_proof =
+      shadow_proof || acb_monomial_proof || acb_levelt_proof;
   if (shadow_proof)
     require_exact_keys(
         proof,
@@ -1585,7 +1820,18 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
          "leading_rank", "leading_rank_certificate",
          "column_provenance_certificate", "determinant_valuation",
          "transformation", "column_valuations"},
-        "native Acb Rational-shadow singular-SCC proof");
+        "native Acb monomial singular-SCC proof");
+  else if (acb_monomial_proof || acb_levelt_proof)
+    require_exact_keys(
+        proof,
+        {"schema", "identity", "native_request", "coefficient_domain",
+         "basis", "basis_point_exact", "physical_match_point_exact",
+         "epsilon", "negative_epsilon_coefficients", "leading_power",
+         "leading_rank", "leading_rank_certificate",
+         "column_provenance_certificate", "determinant_valuation",
+         "transformation", "column_valuations", "structural_chop_digits",
+         "acb_transformation"},
+        "native Acb saturated singular-SCC proof");
   else
     require_exact_keys(
         proof,
@@ -1616,6 +1862,32 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
             "complete-target-bound-rational-shadow-case-p-floor-certified")
       throw std::invalid_argument(
           context + ": Rational-shadow saturation proof facts are inconsistent");
+  } else if (acb_monomial_proof || acb_levelt_proof) {
+    const auto expected_negative = acb_levelt_proof
+        ? "acb-certified-finite-laurent-lattice"
+        : "acb-certified-column-valuation";
+    const auto expected_rank = acb_levelt_proof
+        ? "full-acb-Levelt-saturation-pivots-exclude-zero"
+        : "full-pivot-acb-pivots-exclude-zero";
+    if (required_string(proof, "negative_epsilon_coefficients") !=
+            expected_negative ||
+        required_string(proof, "leading_rank_certificate") !=
+            expected_rank ||
+        required_string(proof, "column_provenance_certificate") !=
+            "complete-exact-schedule-receiving-scc-acb" ||
+        as_i32(proof.at("structural_chop_digits"),
+               "singular-SCC structural chop digits") < 32)
+      throw std::invalid_argument(
+          context + ": native singular-SCC Acb monomial proof facts are inconsistent");
+  } else if (direct_acb_proof) {
+    if (required_string(proof, "negative_epsilon_coefficients") !=
+            "retained-certified-Acb-Laurent-frames" ||
+        required_string(proof, "leading_rank_certificate") !=
+            "full-pivot-acb-Laurent-pivots-exclude-zero" ||
+        required_string(proof, "column_provenance_certificate") !=
+            "complete-exact-schedule-receiving-scc-acb")
+      throw std::invalid_argument(
+          context + ": native singular-SCC direct Acb Laurent proof facts are inconsistent");
   } else if (required_string(proof, "negative_epsilon_coefficients") !=
                  "exact-singleton-zero" ||
              required_string(proof, "leading_rank_certificate") !=
@@ -1664,16 +1936,16 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
       json::serialize(canonical_json_value(identity_input)) != identity)
     throw std::invalid_argument(
         context + ": native singular-SCC saturation proof identity is inconsistent");
-  if (!shadow_proof)
+  if (!monomial_proof)
     return {kNativeSingularSCCSaturationProofSchema, identity,
             json::serialize(canonical_json_value(proof)),
             unit_rational_saturation(dimension, window, context)};
   const auto& raw_valuations = as_array(
       proof.at("column_valuations"),
-      "Rational-shadow saturation column valuations");
+      "singular-SCC monomial saturation column valuations");
   if (raw_valuations.size() != dimension)
     throw std::invalid_argument(
-        context + ": Rational-shadow saturation valuation count differs from its basis dimension");
+        context + ": monomial saturation valuation count differs from its basis dimension");
   FiniteLaurentMatrix<Rational> monomial_basis(
       dimension, FiniteLaurentVector<Rational>());
   for (std::uint32_t row = 0; row < dimension; ++row) {
@@ -1681,10 +1953,10 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
     for (std::uint32_t column = 0; column < dimension; ++column) {
       const auto valuation = as_i32(
           raw_valuations[column],
-          "Rational-shadow saturation column valuation");
+          "singular-SCC monomial saturation column valuation");
       if (valuation < window.min_power || valuation > window.complete_max)
         throw std::invalid_argument(
-            context + ": restored Rational-shadow valuation lies outside its epsilon window");
+            context + ": restored monomial valuation lies outside its epsilon window");
       std::vector<Rational> coefficients(window.width(), Rational(0));
       if (row == column)
         coefficients[static_cast<std::size_t>(
@@ -1694,10 +1966,16 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
     }
   }
   auto saturation = saturate_finite_laurent_basis(
-      monomial_basis, context + ":restored-Rational-shadow-valuations");
+      monomial_basis, context + ":restored-singular-SCC-valuations");
+  std::optional<ExactLaurentMatrix<ComplexBall>> acb_transformation;
+  if (acb_monomial_proof || acb_levelt_proof)
+    acb_transformation = parse_checkpoint_acb_laurent_matrix(
+        proof.at("acb_transformation"), dimension,
+        "singular-SCC Acb saturation transformation");
   return {kNativeSingularSCCSaturationProofSchema, identity,
           json::serialize(canonical_json_value(proof)),
-          std::move(saturation), true};
+          std::move(saturation), shadow_proof,
+          std::move(acb_transformation)};
 }
 
 std::optional<std::int32_t> parse_optional_match_imaginary_sign(
@@ -1949,20 +2227,136 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   for (auto& row : evaluated_basis) row.reserve(dimension);
   std::vector<std::optional<std::int32_t>> effective_basis_signs;
   effective_basis_signs.reserve(dimension);
+  std::vector<LocalEvaluation> basis_evaluations;
+  basis_evaluations.reserve(dimension);
   for (std::size_t column = 0; column < basis.size(); ++column) {
-    const auto evaluation = evaluate_local_solution(
-        basis[column]->solution(), basis_point, basis_options);
-    effective_basis_signs.push_back(evaluation.imaginary_sign);
+    basis_evaluations.push_back(evaluate_local_solution(
+        basis[column]->solution(), basis_point, basis_options));
+    effective_basis_signs.push_back(
+        basis_evaluations.back().imaginary_sign);
+  }
+  const auto incoming_evaluation = evaluate_local_solution(
+      incoming->solution(), incoming_point, incoming_options);
+  auto evaluation_window = window;
+  if (expected_singular_request.has_value()) {
+    auto common_basis_max = basis_evaluations.front().value.epsilon.complete_max;
+    for (const auto& evaluation : basis_evaluations)
+      common_basis_max = std::min(
+          common_basis_max, evaluation.value.epsilon.complete_max);
+    common_basis_max = std::min(
+        common_basis_max, incoming_evaluation.value.epsilon.complete_max);
+    const auto desired_basis_max = matching_detail::checked_power(
+        static_cast<std::int64_t>(window.complete_max) +
+            2 * static_cast<std::int64_t>(dimension),
+        "singular matching basis halo maximum");
+    evaluation_window.complete_max = std::max(
+        window.complete_max, std::min(common_basis_max, desired_basis_max));
+  }
+  for (std::size_t column = 0; column < basis.size(); ++column) {
     auto frames = acb_evaluation_frames(
-        evaluation.value, window,
+        basis_evaluations[column].value, evaluation_window,
         "Acb basis evaluation at column " + std::to_string(column));
     for (std::uint32_t component = 0; component < dimension; ++component)
       evaluated_basis[component].push_back(std::move(frames[component]));
   }
-  const auto incoming_evaluation = evaluate_local_solution(
-      incoming->solution(), incoming_point, incoming_options);
   auto incoming_value = acb_evaluation_frames(
-      incoming_evaluation.value, window, "Acb incoming evaluation");
+      incoming_evaluation.value, evaluation_window,
+      "Acb incoming evaluation");
+
+  // In an epsilon-regular singular SCC, the physical fundamental columns can
+  // be strongly confluent even though the reduced system is Fuchsian.  Match
+  // after applying the receiving SCC's exact V^-1 normal frame to both sides.
+  // This is an invertible left transformation, so it cannot change the
+  // weights; it only removes the artificial finite-precision conditioning.
+  auto matching_basis = evaluated_basis;
+  auto matching_incoming = incoming_value;
+  auto matching_window = evaluation_window;
+  std::string matching_frame_identity = "physical-parent-frame";
+  bool normalized_matching_frame = false;
+  if (expected_singular_request.has_value()) {
+    const auto receiving_owner = basis.front()->retained_equation_owner();
+    if (receiving_owner) {
+      for (std::size_t column = 1; column < basis.size(); ++column)
+        if (basis[column]->retained_equation_owner().get() !=
+            receiving_owner.get())
+          throw std::invalid_argument(
+              "singular matching basis columns do not share one receiving SCC owner");
+
+      FiniteLaurentMatrix<ComplexBall> candidate(
+          dimension, FiniteLaurentVector<ComplexBall>());
+      for (auto& row : candidate) row.reserve(dimension);
+      std::optional<std::string> candidate_identity;
+      bool available = true;
+      for (std::size_t column = 0; column < dimension; ++column) {
+        FiniteLaurentVector<ComplexBall> physical_column;
+        physical_column.reserve(dimension);
+        for (std::size_t row = 0; row < dimension; ++row)
+          physical_column.push_back(evaluated_basis[row][column]);
+        auto transformed = receiving_owner->normalize_acb_matching_vector(
+            physical_column);
+        if (!transformed.has_value()) {
+          available = false;
+          break;
+        }
+        if (candidate_identity.has_value() &&
+            *candidate_identity != transformed->second)
+          throw std::logic_error(
+              "receiving SCC matching normal-frame identity changed between columns");
+        candidate_identity = transformed->second;
+        for (std::size_t row = 0; row < dimension; ++row)
+          candidate[row].push_back(std::move(transformed->first[row]));
+      }
+      if (available) {
+        auto transformed_incoming =
+            receiving_owner->normalize_acb_matching_vector(incoming_value);
+        if (!transformed_incoming.has_value() ||
+            !candidate_identity.has_value() ||
+            transformed_incoming->second != *candidate_identity)
+          throw std::logic_error(
+              "incoming value lost the receiving SCC matching normal frame");
+        auto two_sided_basis =
+            receiving_owner->right_normalize_acb_matching_basis(candidate);
+        if (!two_sided_basis.has_value())
+          throw std::logic_error(
+              "receiving SCC supplied V^-1 but not the matching right V frame");
+        matching_basis = std::move(*two_sided_basis);
+        matching_incoming = std::move(transformed_incoming->first);
+        matching_frame_identity = std::move(*candidate_identity);
+        normalized_matching_frame = true;
+
+        std::optional<std::int32_t> common_min;
+        std::optional<std::int32_t> common_max;
+        const auto include_frame = [&](const auto& frame) {
+          common_min = !common_min.has_value()
+              ? frame.min_power()
+              : std::min(*common_min, frame.min_power());
+          common_max = !common_max.has_value()
+              ? frame.complete_max()
+              : std::min(*common_max, frame.complete_max());
+        };
+        for (const auto& row : matching_basis)
+          for (const auto& frame : row) include_frame(frame);
+        for (const auto& frame : matching_incoming) include_frame(frame);
+        if (!common_min.has_value() || !common_max.has_value() ||
+            *common_min > *common_max ||
+            *common_max < required_complete_max) {
+          // A low public-order request need not recursively manufacture the
+          // private Laurent halo consumed by V^-1/V.  In that case retain the
+          // physical frame: its residual certificate is still authoritative
+          // through the requested prefix, and no surplus-order condition is
+          // imposed merely to enable the conditioning optimization.
+          matching_basis = evaluated_basis;
+          matching_incoming = incoming_value;
+          matching_window = evaluation_window;
+          matching_frame_identity = "physical-parent-frame";
+          normalized_matching_frame = false;
+        } else {
+          matching_window = {*common_min, *common_max};
+        }
+      }
+    }
+  }
+  refinement.required_min_power = matching_window.min_power;
 
   for (std::size_t column = 0; column < basis.size(); ++column) {
     json::object source{
@@ -1995,7 +2389,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     incoming_source["column_provenance"] =
         incoming->column_provenance()->encode();
 
-  auto exact_lattice = [&]() -> ParsedExactEvaluatedLattice {
+  const auto make_exact_lattice = [&]() -> ParsedExactEvaluatedLattice {
     const auto proof_request_count =
         (request.if_contains("exact_lattice") != nullptr ? 1U : 0U) +
         (request.if_contains("native_unit_saturation") != nullptr ? 1U : 0U) +
@@ -2006,23 +2400,60 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
           "Acb matching requires exactly one exact lattice, ordinary native unit-leading request, or singular-SCC valuation-zero request");
     if (const auto* raw_exact = request.if_contains("exact_lattice")) {
       return parse_exact_evaluated_lattice(
-          *raw_exact, dimension, window, checkpoint_identity);
+          *raw_exact, dimension, matching_window, checkpoint_identity);
     }
     if (const auto* raw_native =
             request.if_contains("native_unit_saturation"))
       return certify_native_unit_saturation(
-          *raw_native, evaluated_basis, erased_basis, basis_sources,
-          basis_point.exact_coordinate, basis_physical_point.str(), window,
+          *raw_native, matching_basis, erased_basis, basis_sources,
+          basis_point.exact_coordinate, basis_physical_point.str(),
+          matching_window,
           checkpoint_identity + ":native-unit-leading-proof");
     return certify_native_singular_scc_saturation(
-        request.at("native_singular_scc_saturation"), evaluated_basis,
+        request.at("native_singular_scc_saturation"), matching_basis,
         erased_basis, basis_sources, basis_point.exact_coordinate,
-        basis_physical_point.str(), window,
+        basis_physical_point.str(), matching_window,
         active_session_configuration_identity,
         *expected_singular_request,
         checkpoint_identity,
-        checkpoint_identity + ":native-singular-scc-valuation-zero-proof");
-  }();
+        checkpoint_identity + ":native-singular-scc-valuation-zero-proof",
+        !normalized_matching_frame);
+  };
+  auto exact_lattice = make_exact_lattice();
+  const auto run_refinement = [&]() {
+    return exact_lattice.acb_transformation.has_value()
+        ? refine_acb_finite_laurent_match(
+              matching_basis, matching_incoming,
+              *exact_lattice.acb_transformation, refinement,
+              checkpoint_identity + ":refined-acb-match", false)
+        : refine_acb_finite_laurent_match(
+              matching_basis, matching_incoming, exact_lattice.saturation,
+              refinement, checkpoint_identity + ":refined-acb-match",
+              exact_lattice.exact_formal_negative_coefficients_are_zero);
+  };
+  RefinedAcbLaurentMatch refined;
+  try {
+    refined = run_refinement();
+  } catch (const MatchingArithmeticError& error) {
+    if (!normalized_matching_frame ||
+        error.code != MatchingArithmeticErrorCode::InsufficientCompleteWindow)
+      throw;
+    // The Fuchsian normal frame is a numerical conditioning optimization,
+    // not part of the mathematical matching contract.  Its finite Laurent
+    // transforms can consume all private overlap late in a long arm even
+    // though the original physical frames still cover the requested result.
+    // Fall back transactionally and rebuild the exact lattice in that frame;
+    // never turn a conditioning aid into a spurious hard failure.
+    matching_basis = evaluated_basis;
+    matching_incoming = incoming_value;
+    matching_window = evaluation_window;
+    matching_frame_identity = "physical-parent-frame";
+    normalized_matching_frame = false;
+    refinement.required_min_power = matching_window.min_power;
+    exact_lattice = make_exact_lattice();
+    refined = run_refinement();
+  }
+
   json::array exact_binding_basis;
   for (const auto& source : basis_sources)
     exact_binding_basis.push_back(source);
@@ -2033,15 +2464,21 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       {"basis", std::move(exact_binding_basis)},
       {"basis_point_exact", basis_point.exact_coordinate},
       {"physical_match_point_exact", basis_physical_point.str()},
-      {"epsilon", json::object{{"min", window.min_power},
-                                {"max", window.complete_max}}}};
+      {"matching_frame_identity", matching_frame_identity},
+      {"epsilon", json::object{{"min", matching_window.min_power},
+                                {"max", matching_window.complete_max}}}};
   const auto exact_lattice_provenance_identity = json::serialize(
       canonical_json_value(exact_lattice_provenance));
-
-  auto refined = refine_acb_finite_laurent_match(
-      evaluated_basis, incoming_value, exact_lattice.saturation, refinement,
-      checkpoint_identity + ":refined-acb-match",
-      exact_lattice.exact_formal_negative_coefficients_are_zero);
+  if (normalized_matching_frame) {
+    const auto receiving_owner = basis.front()->retained_equation_owner();
+    auto physical_weights = receiving_owner
+        ? receiving_owner->denormalize_acb_matching_weights(refined.weights)
+        : std::nullopt;
+    if (!physical_weights.has_value())
+      throw std::logic_error(
+          "receiving SCC could not return Fuchsian matching weights to the physical basis");
+    refined.weights = std::move(*physical_weights);
+  }
 
   json::array provenance_basis;
   for (const auto& source : basis_sources) provenance_basis.push_back(source);
@@ -2053,8 +2490,9 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       {"basis_point_exact", basis_point.exact_coordinate},
       {"incoming_point_exact", incoming_point.exact_coordinate},
       {"physical_match_point_exact", basis_physical_point.str()},
-      {"epsilon", json::object{{"min", window.min_power},
-                                {"max", window.complete_max},
+      {"matching_frame_identity", matching_frame_identity},
+      {"epsilon", json::object{{"min", matching_window.min_power},
+                                {"max", matching_window.complete_max},
                                 {"required_complete_max",
                                  required_complete_max}}},
       {"exact_lattice_provenance_identity",
@@ -2074,7 +2512,9 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       exact_lattice.witness_schema,
       std::move(basis_sources), std::move(incoming_source), basis_chart,
       incoming_chart, basis_point.exact_coordinate,
-      incoming_point.exact_coordinate, basis_physical_point.str(), window,
+      incoming_point.exact_coordinate, basis_physical_point.str(),
+      matching_frame_identity,
+      matching_window,
       required_complete_max, dimension, relative_tolerance,
       max_refinement_steps, std::move(exact_lattice.saturation),
       std::move(refined), elapsed_ms);
@@ -2107,4 +2547,3 @@ SCCColumnProvenance parse_checkpoint_column_provenance(
         "checkpoint SCC-column provenance contains an empty identity");
   return result;
 }
-

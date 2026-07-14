@@ -70,11 +70,21 @@ json::array linear_kernels(const std::string& value) {
   return kernels;
 }
 
+json::array constant_analytic_coefficients(const std::string& value) {
+  json::array coefficients;
+  for (std::uint32_t epsilon = 0; epsilon < kFrameWidth; ++epsilon)
+    coefficients.push_back(json::object{
+        {"numerator", json::array{epsilon == 0 ? value : "0"}},
+        {"denominator", json::array{"1"}}});
+  return coefficients;
+}
+
 json::object source_transform(const std::string& role,
                               const std::string& v,
                               const std::string& vinv,
                               const std::string& domain,
-                              bool identity = false) {
+                              bool identity = false,
+                              bool compact = false) {
   const auto v_identity = role + ":V=" + v;
   const auto vinv_identity = role + ":VInv=" + vinv;
   const auto det_identity = role + ":det=" + v;
@@ -98,6 +108,14 @@ json::object source_transform(const std::string& role,
           {"row", 0}, {"column", 0},
           {"exact_entry", entry_identity}, {"epsilon_shift", 0},
           {"center_pole_order", 0}}}}});
+  auto prepared_multiplier = json::object{
+      {"epsilon_shift", 0}, {"center_pole_order", 0},
+      {"exact_identity", entry_identity}, {"proven_zero", false}};
+  if (compact)
+    prepared_multiplier["analytic_coefficients"] =
+        constant_analytic_coefficients(vinv);
+  else
+    prepared_multiplier["kernels"] = constant_kernels(vinv);
   return json::object{
       {"schema", "diffexp2-scc-spectral-source-transform-v1"},
       {"rows", 1}, {"columns", 1}, {"identity", identity},
@@ -110,11 +128,7 @@ json::object source_transform(const std::string& role,
       {"entries", json::array{json::object{
           {"row", 0}, {"column", 0},
           {"exact_entry", entry_identity},
-          {"multiplier", json::object{
-              {"epsilon_shift", 0}, {"center_pole_order", 0},
-              {"kernels", constant_kernels(vinv)},
-              {"exact_identity", entry_identity},
-              {"proven_zero", false}}}}}}};
+          {"multiplier", std::move(prepared_multiplier)}}}}};
 }
 
 json::object gauge_transform(const std::string& frame,
@@ -122,7 +136,8 @@ json::object gauge_transform(const std::string& frame,
                              const std::string& gauge,
                              const std::string& inverse,
                              const std::string& multiplier,
-                             const std::string& domain) {
+                             const std::string& domain,
+                             bool compact = false) {
   const auto gauge_identity = frame + ":Gauge=" + gauge;
   const auto inverse_identity = frame + ":GaugeInverse=" + inverse;
   const auto determinant_identity = frame + ":det=" + gauge;
@@ -139,6 +154,14 @@ json::object gauge_transform(const std::string& frame,
       {"entries", json::array{json::object{{"row", 0}, {"column", 0},
           {"exact_entry", entry_identity}, {"epsilon_shift", 0},
           {"center_pole_order", 0}}}}});
+  auto prepared_multiplier = json::object{
+      {"epsilon_shift", 0}, {"center_pole_order", 0},
+      {"exact_identity", entry_identity}, {"proven_zero", false}};
+  if (compact)
+    prepared_multiplier["analytic_coefficients"] =
+        constant_analytic_coefficients(multiplier);
+  else
+    prepared_multiplier["kernels"] = constant_kernels(multiplier);
   return json::object{
       {"schema", "diffexp2-scc-gauge-transform-v1"}, {"role", role},
       {"rows", 1}, {"columns", 1}, {"identity", false},
@@ -149,11 +172,7 @@ json::object gauge_transform(const std::string& frame,
       {"symbols", json::array{}},
       {"entries", json::array{json::object{{"row", 0}, {"column", 0},
           {"exact_entry", entry_identity},
-          {"multiplier", json::object{{"epsilon_shift", 0},
-              {"center_pole_order", 0},
-              {"kernels", constant_kernels(multiplier)},
-              {"exact_identity", entry_identity},
-              {"proven_zero", false}}}}}}};
+          {"multiplier", std::move(prepared_multiplier)}}}}};
 }
 
 json::object dense_source_transform(const std::string& role,
@@ -722,7 +741,10 @@ bool run_dense_domain(const std::string& domain) {
     // VInv^T/right-oriented gives another vector, and an extra V_S gives
     // (7/2,7/2), so every orientation/double-transform bug fails here.
     const std::array<double, 4> expected{1.5, 1.5, 1.5, 1.0};
-    values_ok = coefficients.size() == 12;
+    // Acb receiving bases retain the private epsilon=3 match coefficient;
+    // exact Rational columns keep the public 0..2 projection in this seam.
+    values_ok = coefficients.size() ==
+        (domain == "acb" ? 16 : 12);
     for (std::size_t index = 0; index < expected.size() && values_ok;
          ++index)
       values_ok = std::abs(real_midpoint(coefficients[index]) -
@@ -906,7 +928,11 @@ bool run_domain(const std::string& domain, bool test_rejections) {
     // 5 t g_source = 10 t.  V_T^-1 gives (10/3)t to the target
     // recurrence and retained assembly V_T restores 10t, hence 5 at t=1/2.
     // Omitting V_T^-1 would give 15; multiplying V_S twice would give 10.
-    values_ok = coefficients.size() == 6 &&
+    // The Acb receiving column now retains its one-coefficient private match
+    // halo (epsilon 0..3) instead of being prematurely capped at the public
+    // requested edge 2.  Evaluation therefore returns 2 components across
+    // four honest epsilon coefficients.
+    values_ok = coefficients.size() == (domain == "acb" ? 8 : 6) &&
         std::abs(real_midpoint(coefficients[0]) - 2.0) < 1e-25 &&
         std::abs(real_midpoint(coefficients[1]) - 5.0) < 1e-25;
     for (std::size_t index = 2; index < coefficients.size(); ++index)
@@ -970,21 +996,21 @@ bool run_gauge_domain(const std::string& domain) {
   blocks[1].as_object()["principal_identity"] =
       domain + ":gauge-target:principal";
   blocks[0].as_object()["source_transform"] = source_transform(
-      "gauge-source", "2", "1/2", domain);
+      "gauge-source", "2", "1/2", domain, false, true);
   blocks[1].as_object()["source_transform"] = source_transform(
-      "gauge-target", "3", "1/3", domain);
+      "gauge-target", "3", "1/3", domain, false, true);
   for (auto& value : blocks) {
     value.as_object()["identity_gauge"] = false;
     value.as_object()["exact_gauge"] = true;
   }
   blocks[0].as_object()["to_physical"] = gauge_transform(
-      "gauge-source", "to_physical", "7", "1/7", "7", domain);
+      "gauge-source", "to_physical", "7", "1/7", "7", domain, true);
   blocks[0].as_object()["to_reduced"] = gauge_transform(
-      "gauge-source", "to_reduced", "7", "1/7", "1/7", domain);
+      "gauge-source", "to_reduced", "7", "1/7", "1/7", domain, true);
   blocks[1].as_object()["to_physical"] = gauge_transform(
-      "gauge-target", "to_physical", "11", "1/11", "11", domain);
+      "gauge-target", "to_physical", "11", "1/11", "11", domain, true);
   blocks[1].as_object()["to_reduced"] = gauge_transform(
-      "gauge-target", "to_reduced", "11", "1/11", "1/11", domain);
+      "gauge-target", "to_reduced", "11", "1/11", "1/11", domain, true);
   const auto prepared = prepare_scc(
       session, domain + ":gauge-key", std::move(payload));
   json::object solved{{"status", "not-run"}}, evaluated{{"status", "not-run"}};

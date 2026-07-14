@@ -39,89 +39,12 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
 
     const auto& raw_multiplier = as_object(
         entry.at("multiplier"), "prepared rational local-row multiplier");
-    const bool has_analytic_coefficients =
-        raw_multiplier.if_contains("analytic_coefficients") != nullptr;
-    if (has_analytic_coefficients)
-      require_exact_keys(raw_multiplier,
-          {"epsilon_shift", "center_pole_order", "kernels",
-           "exact_identity", "proven_zero", "analytic_coefficients"},
-          "prepared rational local-row multiplier");
-    else
-      require_exact_keys(raw_multiplier,
-          {"epsilon_shift", "center_pole_order", "kernels",
-           "exact_identity", "proven_zero"},
-          "prepared rational local-row multiplier");
-    if (!raw_multiplier.at("proven_zero").is_bool())
-      throw std::invalid_argument(
-          "prepared rational local-row structural-zero fact must be boolean");
-    if (raw_multiplier.at("proven_zero").as_bool())
+    auto multiplier = parse_prepared_rational_taylor_multiplier<Scalar>(
+        raw_multiplier, source.epsilon.width(), source.taylor_width(), false,
+        "prepared rational local-row multiplier");
+    if (multiplier.proven_zero)
       throw std::invalid_argument(
           "structurally zero rational-row entries must be omitted");
-
-    PreparedRationalTaylorMultiplier<Scalar> multiplier;
-    multiplier.epsilon_shift = as_i32(
-        raw_multiplier.at("epsilon_shift"),
-        "prepared rational local-row epsilon shift");
-    multiplier.center_pole_order = as_u32(
-        raw_multiplier.at("center_pole_order"),
-        "prepared rational local-row center-pole order");
-    multiplier.exact_identity = required_string(
-        raw_multiplier, "exact_identity");
-    if (multiplier.exact_identity.empty())
-      throw std::invalid_argument(
-          "prepared rational local-row multiplier identity must be nonempty");
-    multiplier.proven_zero = false;
-
-    const auto& raw_kernels = as_array(
-        raw_multiplier.at("kernels"),
-        "prepared rational local-row epsilon kernels");
-    if (raw_kernels.size() < source.epsilon.width())
-      throw std::invalid_argument(
-          "prepared rational local-row multiplier does not cover the exact source epsilon width");
-    multiplier.kernels.reserve(raw_kernels.size());
-    for (const auto& raw_kernel : raw_kernels) {
-      const auto& coefficients = as_array(
-          raw_kernel, "prepared rational local-row Taylor kernel");
-      if (coefficients.size() < source.taylor_width())
-        throw std::invalid_argument(
-          "prepared rational local-row multiplier does not cover the exact source Taylor width");
-      std::vector<Scalar> kernel;
-      kernel.reserve(coefficients.size());
-      for (const auto& coefficient : coefficients)
-        kernel.push_back(parse_scalar<Scalar>(coefficient));
-      multiplier.kernels.push_back(std::move(kernel));
-    }
-    if (has_analytic_coefficients) {
-      const auto& raw_coefficients = as_array(
-          raw_multiplier.at("analytic_coefficients"),
-          "prepared rational local-row analytic coefficients");
-      if (raw_coefficients.size() != multiplier.kernels.size())
-        throw std::invalid_argument(
-            "prepared rational local-row analytic coefficient count differs from its epsilon kernels");
-      std::vector<PreparedRationalAnalyticCoefficient<Scalar>> coefficients;
-      coefficients.reserve(raw_coefficients.size());
-      for (const auto& raw_coefficient : raw_coefficients) {
-        const auto& coefficient = as_object(
-            raw_coefficient,
-            "prepared rational local-row analytic coefficient");
-        require_exact_keys(coefficient, {"numerator", "denominator"},
-                           "prepared rational local-row analytic coefficient");
-        PreparedRationalAnalyticCoefficient<Scalar> parsed;
-        for (const auto& value : as_array(
-                 coefficient.at("numerator"),
-                 "prepared rational local-row analytic numerator"))
-          parsed.numerator.push_back(parse_scalar<Scalar>(value));
-        for (const auto& value : as_array(
-                 coefficient.at("denominator"),
-                 "prepared rational local-row analytic denominator"))
-          parsed.denominator.push_back(parse_scalar<Scalar>(value));
-        if (parsed.numerator.empty() || parsed.denominator.empty())
-          throw std::invalid_argument(
-              "prepared rational local-row analytic numerator/denominator cannot be empty");
-        coefficients.push_back(std::move(parsed));
-      }
-      multiplier.analytic_coefficients = std::move(coefficients);
-    }
     matrix.entries.push_back(
         typename PreparedSparseLocalMultiplierMatrix<Scalar>::Entry{
             0, column, std::move(multiplier)});

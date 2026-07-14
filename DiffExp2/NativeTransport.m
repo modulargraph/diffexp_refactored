@@ -638,7 +638,8 @@ nativeReplayPrintRecords[records_List] :=
 
 $nativeAcbRationalShadowFailureNeedles = {
   "native Acb regular-singular SCC execution rejects exact CASE-P collisions",
-  "native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source"};
+  "native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source",
+  "requires the exact Rational shadow"};
 
 nativeAcbRationalShadowTriggerTextQ[text_String] := AnyTrue[
   $nativeAcbRationalShadowFailureNeedles, StringContainsQ[text, #] &];
@@ -1092,6 +1093,7 @@ nativeReleaseResponseHandles[atlas_Association, response_] := Module[
 Options[PrepareNativeRegularIndependentArms] = {
   "Threads" -> Automatic, "Integrand" -> Automatic,
   "Integrands" -> Automatic, "TargetCompleteMax" -> Automatic,
+  "RequiredTargetCompleteMax" -> Automatic,
   "DeferReceivingBases" -> False};
 
 PrepareNativeRegularIndependentArms[sys_Association, boundary_,
@@ -1102,7 +1104,9 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
    nativePlan = None, geometryAudit = None, sessionInfo, sessionStats,
    domain, integrand,
    preparedShift, halo, targetMax, targetOption =
-     OptionValue["TargetCompleteMax"], availableMax,
+     OptionValue["TargetCompleteMax"], requiredTargetMax,
+   requiredTargetOption = OptionValue["RequiredTargetCompleteMax"],
+   availableMax,
    minimumSolveMax, matchEpsilonPadding,
    cleanup, output, preparedBases = {}, preparedOwners = {},
    containsSingularReceivingCharts = False,
@@ -1115,6 +1119,13 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "Detail" -> "TargetCompleteMax must be Automatic or a nonnegative integer"|>]];
   targetMax = If[targetOption === Automatic,
     cfg["EpsilonOrder"], targetOption];
+  requiredTargetMax = If[requiredTargetOption === Automatic,
+    targetMax, requiredTargetOption];
+  If[!IntegerQ[requiredTargetMax] || requiredTargetMax < 0 ||
+      requiredTargetMax > targetMax,
+    err["E8", <|"TargetCompleteMax" -> targetMax,
+      "RequiredTargetCompleteMax" -> requiredTargetOption,
+      "Detail" -> "RequiredTargetCompleteMax must be an integer between zero and TargetCompleteMax"|>]];
   plans = normalizeSharedAnchor[lowerPlan, upperPlan];
   plans = bridgeNativeRegularPlanScales /@ plans;
   {lower, upper} = plans;
@@ -1139,7 +1150,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   halo = Max[0, -preparedShift];
   epsMin = Min[0, Min[esMin /@ values]];
   availableMax = Min[esCM /@ values];
-  minimumSolveMax = targetMax + halo;
+  minimumSolveMax = requiredTargetMax + halo;
   If[availableMax < minimumSolveMax,
     err["E6", <|"BoundaryCompleteMax" -> availableMax,
       "RequestedCompleteMax" -> targetMax,
@@ -1155,6 +1166,11 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   matchEpsilonPadding = epsMax - minimumSolveMax;
   req = <|"EpsWindow" -> <|"Min" -> epsMin,
       "CompleteMax" -> epsMax|>,
+    (* CompleteMax is the private reservoir available to a match.  The
+       receiving equation only has to deliver the state edge below; keeping
+       those two contracts separate prevents a wider boundary reservoir from
+       becoming a recursive public basis demand. *)
+    "RequiredCompleteMax" -> minimumSolveMax,
     "TOrder" -> cfg["ExpansionOrder"]|>;
   cleanup[] := Module[{basisLocals, locals},
     If[AssociationQ[nativePlan],
@@ -1224,7 +1240,12 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
               DiffExp2`Solve`PrepareNativeRegularBasisOwner[system, req],
               DiffExp2`Solve`PrepareNativeSCCComposite[system, req]];
             AppendTo[preparedOwners, built];
-            nativeStageTiming["owner-prepare-done index=", First[index]];
+            nativeStageTiming["owner-prepare-done index=", First[index],
+              " center=", InputForm[Lookup[system, "Center", None]],
+              " regular=", TrueQ[Lookup[
+                Lookup[system, "IndicialData", <||>],
+                "Regular", False]],
+              " ownerType=", Lookup[built, "Type", None]];
             built], Rest[systems]]];
       owners = Prepend[nativeBasisOwner /@ ownerRecords, anchorOwner];
       bases = ConstantArray[None, Length[systems]],
@@ -1309,6 +1330,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       containsSingularReceivingCharts,
     "DeferredReceivingBases" -> deferReceivingBases,
     "TargetCompleteMax" -> targetMax,
+    "RequiredTargetCompleteMax" -> requiredTargetMax,
     "MatchEpsilonPadding" -> matchEpsilonPadding,
     "Threads" -> threads,
     "PreparedIntegrandEpsilonShift" -> preparedShift,
@@ -1570,11 +1592,14 @@ nativeContractStoredPairObservableStreamed[lowerState_Association,
           Lookup[stream, "status", "error"] =!= "ok",
         Throw[stream, tag]];
       Do[
+        nativeStageTiming["paired-row-prepare-start side=lower tile=", tile];
         row = nativePrepareArmRecipeRow[lowerRecipes[[tile]],
           observable["CoefficientVector"], var, domain];
+        nativeStageTiming["paired-row-prepare-done side=lower tile=", tile];
         response =
           DiffExp2`CppBackend`AddPersistentTransportPairObservableStreamTile[
             stream, "lower", tile - 1, row];
+        nativeStageTiming["paired-tile-add-done side=lower tile=", tile];
         Clear[row];
         nativeDropRationalMultiplierPreparationCache[];
         If[FailureQ[response] || !AssociationQ[response] ||
@@ -1582,20 +1607,25 @@ nativeContractStoredPairObservableStreamed[lowerState_Association,
           Throw[response, tag]],
         {tile, Length[lowerRecipes]}];
       Do[
+        nativeStageTiming["paired-row-prepare-start side=upper tile=", tile];
         row = nativePrepareArmRecipeRow[upperRecipes[[tile]],
           observable["CoefficientVector"], var, domain];
+        nativeStageTiming["paired-row-prepare-done side=upper tile=", tile];
         response =
           DiffExp2`CppBackend`AddPersistentTransportPairObservableStreamTile[
             stream, "upper", tile - 1, row];
+        nativeStageTiming["paired-tile-add-done side=upper tile=", tile];
         Clear[row];
         nativeDropRationalMultiplierPreparationCache[];
         If[FailureQ[response] || !AssociationQ[response] ||
             Lookup[response, "status", "error"] =!= "ok",
           Throw[response, tag]],
         {tile, Length[upperRecipes]}];
+      nativeStageTiming["paired-stream-finish-start"];
       response =
         DiffExp2`CppBackend`FinishPersistentTransportPairObservableStream[
           stream];
+      nativeStageTiming["paired-stream-finish-done"];
       If[AssociationQ[response] &&
           Lookup[response, "status", "error"] === "ok",
         completed = True];
@@ -1646,7 +1676,20 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
         Lookup[atlas, "Threads", Automatic]];
       nativeStageTiming["stream-basis-done arm=", arm,
-        " index=", index];
+        " index=", index,
+        " center=", InputForm[Lookup[systems[[index]], "Center", None]],
+        " regular=", TrueQ[Lookup[
+          Lookup[systems[[index]], "IndicialData", <||>],
+          "Regular", False]],
+        " elapsedMs=", Lookup[
+          Lookup[basis, "NativeSummary", <||>], "elapsed_ms", None],
+        " workers=", Lookup[
+          Lookup[basis, "NativeSummary", <||>], "worker_threads", None],
+        " capability=", Lookup[
+          Lookup[basis, "NativeSummary", <||>],
+          "execution_capability", Lookup[
+            Lookup[basis, "NativeSummary", <||>],
+            "selection_capability", None]]];
       response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
         atlas["Plan"], arm, index, basis["Columns"], current,
         hopEpsilon, checkpointRoot, refinement];

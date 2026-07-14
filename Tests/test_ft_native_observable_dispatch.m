@@ -76,7 +76,7 @@ assert["all-zero coefficient vectors are proved before halo accounting",
 sourceRows = {
   Join[{1}, ConstantArray[0, 10]],
   Join[{2}, ConstantArray[0, 10]]};
-ledger = ft2NativeEpsilonLedger[entries, sourceRows, 7];
+ledger = ft2NativeEpsilonLedger[entries, sourceRows, 7, 7];
 assert["epsilon ledger separates coefficient and integration halos",
   AssociationQ[ledger] &&
     KeyTake[ledger, {"AvailableSourceCompleteMax", "SourceCompleteMax",
@@ -86,20 +86,20 @@ assert["epsilon ledger separates coefficient and integration halos",
       "DownstreamRawTop"}] ===
       <|"AvailableSourceCompleteMax" -> 10,
         "SourceCompleteMax" -> 10, "CoefficientHalo" -> 1,
-        "IntegrationHalo" -> 1, "TargetCompleteMax" -> 9,
-        "DeliverableCompleteMax" -> 8, "DownstreamRawTop" -> 7|>,
+        "IntegrationHalo" -> 1, "TargetCompleteMax" -> 8,
+        "DeliverableCompleteMax" -> 7, "DownstreamRawTop" -> 7|>,
   ledger];
 assert["observable minima do not discount independently required raw depth",
   ledger["OutputMinimums"] ===
     <|1 -> -2, 2 -> 1, 3 -> -1, 4 -> 0, 6 -> 19|> &&
     !KeyExistsQ[ledger["OutputMinimums"], 5],
   ledger["OutputMinimums"]];
-terminalLedger = ft2NativeEpsilonLedger[entries, sourceRows, 0];
+terminalLedger = ft2NativeEpsilonLedger[entries, sourceRows, 0, 0];
 assert["terminal raw completeness is exactly epsOrder, independent of poles",
   AssociationQ[terminalLedger] &&
     terminalLedger["SourceCompleteMax"] === 10 &&
-    terminalLedger["TargetCompleteMax"] === 9 &&
-    terminalLedger["DeliverableCompleteMax"] === 8 &&
+    terminalLedger["TargetCompleteMax"] === 1 &&
+    terminalLedger["DeliverableCompleteMax"] === 0 &&
     terminalLedger["DownstreamRawTop"] === 0 &&
     terminalLedger["DeliverableCompleteMax"] >=
       terminalLedger["DownstreamRawTop"],
@@ -148,11 +148,13 @@ mixed = Block[{
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, threads},
+       targetMax, requiredTargetMax, threads},
       counts["prepare"]++;
       capturedPrepare = <|"Boundary" -> boundary,
         "CoefficientVectors" -> coefficientVectors,
-        "TargetCompleteMax" -> targetMax, "Threads" -> threads|>;
+        "TargetCompleteMax" -> targetMax,
+        "RequiredTargetCompleteMax" -> requiredTargetMax,
+        "Threads" -> threads|>;
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "synthetic-atlas-plan"|>],
     ft2NativeRun = Function[{atlas, observables, variable},
@@ -196,7 +198,8 @@ divergentProvenance = Quiet[Check[
       Lookup[divergentPolicies, "Provenance"], $Failed]];
 assert["atlas preparation receives every active non-direct vector and exact target",
   AssociationQ[capturedPrepare] &&
-    capturedPrepare["TargetCompleteMax"] === 9 &&
+    capturedPrepare["TargetCompleteMax"] === 8 &&
+    capturedPrepare["RequiredTargetCompleteMax"] === 8 &&
     Length[capturedPrepare["CoefficientVectors"]] === 4 &&
     AllTrue[capturedPrepare["Boundary"],
       DiffExp2`EpsSeries`ESMinPower[#] === -1 &&
@@ -206,9 +209,9 @@ assert["observable order and operation-specific epsilon windows are stable",
   Lookup[capturedObservables, "Operation"] ===
     {"integrate", "limitLower", "limitUpper", "integrate"} &&
     Lookup[Lookup[capturedObservables, "Epsilon"], "Min"] ===
-      {-2, 1, -1, 8} &&
+      {-2, 1, -1, 7} &&
     Lookup[Lookup[capturedObservables, "Epsilon"], "Max"] ===
-      {8, 8, 8, 8} &&
+      {7, 7, 7, 7} &&
     Lookup[Lookup[capturedObservables, "Epsilon"],
       "RequiredCompleteMax"] === {7, 7, 7, 7} &&
     Lookup[Select[capturedObservables,
@@ -237,13 +240,13 @@ assert["FT integrate observables alone carry one explicit bounded cancellation p
   {divergentPolicies, divergentProvenance, limitObservables}];
 assert["high-shift integration is marched rather than unsafely pruned",
   capturedObservables[[-1, "Identity"]] === entries[[6, "Identity"]] &&
-    capturedObservables[[-1, "Epsilon", "Min"]] === 8];
+    capturedObservables[[-1, "Epsilon", "Min"]] === 7];
 assert["direct and proven-zero results merge in original master order",
   Length[mixed["Values"]] === 6 &&
     DiffExp2`EpsSeries`ESCoefficient[mixed["Values"][[4]], 0] === 5 &&
-    DiffExp2`EpsSeries`ESCompleteMax[mixed["Values"][[4]]] === 8 &&
-    DiffExp2`EpsSeries`ESCompleteMax[mixed["Values"][[5]]] === 8 &&
-    DiffExp2`EpsSeries`ESMinPower[mixed["Values"][[1]]] === 8,
+    DiffExp2`EpsSeries`ESCompleteMax[mixed["Values"][[4]]] === 7 &&
+    DiffExp2`EpsSeries`ESCompleteMax[mixed["Values"][[5]]] === 7 &&
+    DiffExp2`EpsSeries`ESMinPower[mixed["Values"][[1]]] === 7,
   DiffExp2`EpsSeries`ESWindow /@ mixed["Values"]];
 assert["dispatch preserves per-master certification and explicit non-applicability",
   Length[mixed["Certifications"]] === 6 &&
@@ -289,7 +292,7 @@ checkpointed = Block[{
     ft2NativeSegmentLine = Function[{system, path}, <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, threads},
+       targetMax, requiredTargetMax, threads},
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "checkpoint-atlas-plan"|>],
     ft2NativeRun = Function[{atlas, observables, variable},
@@ -332,7 +335,8 @@ restoredDispatch = Block[{
       restoreCounts["segment"]++; $Failed],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, threads}, restoreCounts["prepare"]++; $Failed],
+       targetMax, requiredTargetMax, threads},
+      restoreCounts["prepare"]++; $Failed],
     ft2NativeRun = Function[{atlas, observables, variable},
       restoreCounts["run"]++; $Failed],
     ft2NativeRestoreCheckpoint = Function[manifest,
@@ -385,14 +389,15 @@ directBatch = <|"Schema" -> "FeynmanTrick.LevelIBPBatch/v1",
     {14} -> {epsilon, 2}, {15} -> {0, 0}}]|>;
 directEntries = ft2PrepareBoundaryEntries[
   3, directBatch, {1, 0}, x, epsilon, normalizeIdentity];
-directLedger = ft2NativeEpsilonLedger[directEntries, sourceRows, 4];
+directLedger = ft2NativeEpsilonLedger[directEntries, sourceRows, 4, 4];
 counts = newCounts[];
 directOnly = Block[{
     ft2NativeSegmentLine = Function[{system, path},
       counts["segment"]++; $Failed],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, threads}, counts["prepare"]++; $Failed],
+       targetMax, requiredTargetMax, threads},
+      counts["prepare"]++; $Failed],
     ft2NativeRun = Function[{atlas, observables, variable},
       counts["run"]++; $Failed],
     ft2NativeExport = Function[{nativeBatch, digits},
@@ -425,7 +430,7 @@ malformedBatch = Block[{
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, threads},
+       targetMax, requiredTargetMax, threads},
       counts["prepare"]++;
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "malformed-run-atlas"|>],

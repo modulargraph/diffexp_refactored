@@ -1512,7 +1512,8 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
        "exact_lattice_canonical_witness", "basis_sources",
        "incoming_source", "basis_chart", "incoming_chart",
        "basis_point_exact", "incoming_point_exact",
-       "physical_match_point_exact", "epsilon", "dimension",
+       "physical_match_point_exact", "matching_frame_identity",
+       "epsilon", "dimension",
        "relative_tolerance", "max_refinement_steps", "refined",
        "elapsed_ms"}, "checkpoint retained Acb match");
   if (required_string(object, "schema") !=
@@ -1540,8 +1541,11 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
                                                "incoming_point_exact");
   const auto physical_point = required_string(
       object, "physical_match_point_exact");
+  const auto matching_frame_identity = required_string(
+      object, "matching_frame_identity");
   if (basis_chart.empty() || incoming_chart.empty() || basis_point.empty() ||
-      incoming_point.empty() || physical_point.empty())
+      incoming_point.empty() || physical_point.empty() ||
+      matching_frame_identity.empty())
     throw std::invalid_argument(
         "checkpoint Acb match lost chart or point provenance");
   const auto& raw_epsilon = as_object(object.at("epsilon"),
@@ -1645,6 +1649,7 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       {"basis", std::move(exact_binding_basis)},
       {"basis_point_exact", basis_point},
       {"physical_match_point_exact", physical_point},
+      {"matching_frame_identity", matching_frame_identity},
       {"epsilon", json::object{{"min", window.min_power},
                                 {"max", window.complete_max}}}};
   if (json::serialize(canonical_json_value(exact_lattice_provenance)) !=
@@ -1663,6 +1668,7 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       {"basis_point_exact", basis_point},
       {"incoming_point_exact", incoming_point},
       {"physical_match_point_exact", physical_point},
+      {"matching_frame_identity", matching_frame_identity},
       {"epsilon", json::object{{"min", window.min_power},
                                 {"max", window.complete_max},
                                 {"required_complete_max",
@@ -1682,7 +1688,8 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
                                       "checkpoint refined Acb state");
   require_exact_keys(raw_refined,
       {"transformed_weights", "weights", "residual", "residual_history",
-       "refinement_steps"}, "checkpoint refined Acb state");
+       "refinement_steps", "factorization_preconditioner"},
+      "checkpoint refined Acb state");
   RefinedAcbLaurentMatch refined;
   refined.transformed_weights = parse_checkpoint_frame_vector<ComplexBall>(
       raw_refined.at("transformed_weights"), dimension,
@@ -1694,6 +1701,8 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
   refined.refinement_steps = static_cast<std::size_t>(as_u64(
       raw_refined.at("refinement_steps"),
       "checkpoint Acb refinement steps"));
+  refined.factorization_preconditioner = required_string(
+      raw_refined, "factorization_preconditioner");
   if (refined.refinement_steps > max_refinement_steps)
     throw std::invalid_argument(
         "checkpoint Acb refinement count exceeds its policy");
@@ -1712,8 +1721,10 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     residual_max = std::min(residual_max, row.complete_max());
   }
   const auto& final_diagnostics = refined.residual_history.back();
-  if (final_diagnostics.complete_window.min_power != residual_min ||
-      final_diagnostics.complete_window.complete_max != residual_max)
+  if (final_diagnostics.complete_window.min_power < residual_min ||
+      final_diagnostics.complete_window.complete_max > residual_max ||
+      final_diagnostics.complete_window.min_power > required_complete_max ||
+      final_diagnostics.complete_window.complete_max < required_complete_max)
     throw std::invalid_argument(
         "checkpoint final Acb residual diagnostics do not match the retained residual frame");
   const auto elapsed_ms = checkpoint_nonnegative_double(
@@ -1724,9 +1735,9 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       exact_lattice_witness_record, exact_lattice.witness_schema,
       std::move(basis_sources),
       std::move(incoming_source), basis_chart, incoming_chart, basis_point,
-      incoming_point, physical_point, window, required_complete_max,
+      incoming_point, physical_point, matching_frame_identity, window,
+      required_complete_max,
       dimension, relative_tolerance,
       static_cast<std::size_t>(max_refinement_steps),
       std::move(exact_lattice.saturation), std::move(refined), elapsed_ms);
 }
-

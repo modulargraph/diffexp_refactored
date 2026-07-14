@@ -81,6 +81,51 @@ MatrixShift<Scalar> parse_matrix_shift(const json::value& value,
 }
 
 template <typename Scalar>
+PreparedLag<Scalar> parse_prepared_lag_object(
+    const json::value& value, std::uint32_t dimension,
+    const char* label) {
+  const auto& object = as_object(value, label);
+  PreparedLag<Scalar> lag;
+  for (const auto& raw_matrix :
+       as_array(object.at("poly"), "prepared-lag polynomial matrices"))
+    lag.polynomial.push_back(
+        parse_matrix_shift<Scalar>(raw_matrix, dimension));
+  for (const auto& raw_group :
+       as_array(object.at("rat"), "prepared-lag rational groups")) {
+    const auto& group_object = as_object(raw_group, "prepared-lag rational group");
+    RationalGroup<Scalar> group;
+    group.denominator_index =
+        as_u32(group_object.at("q"), "prepared-lag denominator index");
+    for (const auto& raw_matrix :
+         as_array(group_object.at("num"), "prepared-lag rational numerator"))
+      group.numerator.push_back(
+          parse_matrix_shift<Scalar>(raw_matrix, dimension));
+    lag.rational.push_back(std::move(group));
+  }
+  for (const auto& raw :
+       as_array(object.at("val"), "prepared-lag valuations"))
+    lag.valuations.push_back(parse_validity(raw));
+  return lag;
+}
+
+template <typename Scalar>
+PreparedMatrix<Scalar> parse_prepared_matrix_object(
+    const json::value& value, std::uint32_t dimension,
+    const char* label) {
+  const auto& object = as_object(value, label);
+  PreparedMatrix<Scalar> matrix;
+  matrix.identity = object.if_contains("identity") != nullptr &&
+                    object.at("identity").as_bool();
+  if (const auto* identity = object.if_contains("exact_identity"))
+    matrix.exact_identity = std::string(identity->as_string());
+  auto lag = parse_prepared_lag_object<Scalar>(value, dimension, label);
+  matrix.polynomial = std::move(lag.polynomial);
+  matrix.rational = std::move(lag.rational);
+  matrix.valuations = std::move(lag.valuations);
+  return matrix;
+}
+
+template <typename Scalar>
 RecurrenceProblem<Scalar> parse_problem(const json::object& root) {
   RecurrenceProblem<Scalar> problem;
   problem.dimension = as_u32(root.at("d"), "dimension");
@@ -93,6 +138,10 @@ RecurrenceProblem<Scalar> parse_problem(const json::object& root) {
   problem.adaptive_lower_frame_probe =
       root.if_contains("adaptive_probe") != nullptr &&
       root.at("adaptive_probe").as_bool();
+  if (const auto* audit = root.if_contains("cancellation_audit_base");
+      audit != nullptr && !audit->is_null())
+    problem.cancellation_audit_base =
+        as_i32(*audit, "cancellation audit base");
   problem.a_target = parse_scalar<Scalar>(root.at("a_target"));
   problem.b_target = parse_scalar<Scalar>(root.at("b_target"));
   problem.a_shift_min = as_i32(root.at("a_shift_min"), "a shift minimum");
@@ -140,6 +189,17 @@ RecurrenceProblem<Scalar> parse_problem(const json::object& root) {
          as_array(lag_object.at("val"), "Nhat valuations"))
       lag.valuations.push_back(parse_validity(value));
     problem.nhat_lags.push_back(std::move(lag));
+  }
+  problem.epsilon_regular_principal =
+      root.if_contains("epsilon_regular_principal") != nullptr &&
+      root.at("epsilon_regular_principal").as_bool();
+  if (problem.epsilon_regular_principal) {
+    problem.spectral_principal_lag = parse_prepared_lag_object<Scalar>(
+        root.at("spectral_principal"), problem.dimension,
+        "epsilon-regular spectral principal");
+    problem.spectral_source_matrix = parse_prepared_matrix_object<Scalar>(
+        root.at("spectral_source"), problem.dimension,
+        "epsilon-regular spectral source matrix");
   }
 
   if (!root.at("d0_inverse").is_null())
@@ -348,6 +408,17 @@ PreparedRecurrenceOperator<Scalar> parse_prepared_operator(
       lag.valuations.push_back(parse_validity(value));
     prepared.nhat_lags.push_back(std::move(lag));
   }
+  prepared.epsilon_regular_principal =
+      root.if_contains("epsilon_regular_principal") != nullptr &&
+      root.at("epsilon_regular_principal").as_bool();
+  if (prepared.epsilon_regular_principal) {
+    prepared.spectral_principal_lag = parse_prepared_lag_object<Scalar>(
+        root.at("spectral_principal"), prepared.dimension,
+        "epsilon-regular spectral principal");
+    prepared.spectral_source_matrix = parse_prepared_matrix_object<Scalar>(
+        root.at("spectral_source"), prepared.dimension,
+        "epsilon-regular spectral source matrix");
+  }
   if (!root.at("d0_inverse").is_null())
     prepared.d0_inverse_scalar =
         parse_scalar<Scalar>(root.at("d0_inverse"));
@@ -405,6 +476,10 @@ void parse_run_state(const json::object& run,
   problem.log_max = as_u32(run.at("p"), "log maximum");
   problem.has_initial = run.at("has_initial").as_bool();
   problem.adaptive_lower_frame_probe = run.at("adaptive_probe").as_bool();
+  if (const auto* audit = run.if_contains("cancellation_audit_base");
+      audit != nullptr && !audit->is_null())
+    problem.cancellation_audit_base =
+        as_i32(*audit, "cancellation audit base");
   problem.a_target = parse_scalar<Scalar>(run.at("a_target"));
   problem.b_target = parse_scalar<Scalar>(run.at("b_target"));
   problem.a_shift_min = as_i32(run.at("a_shift_min"), "a shift minimum");

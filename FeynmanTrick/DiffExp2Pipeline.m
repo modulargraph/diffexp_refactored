@@ -69,7 +69,7 @@ parseHalos[text_String] := Module[{parts, values},
   If[AnyTrue[values, FailureQ], First[Select[values, FailureQ]], values]];
 
 RunnerSettingsFromEnvironment[] := Module[
-  {backend, threads, wp, epsOrder, expansionOrder, boundaryExtraOrder,
+  {backend, threads, wp, matchDigits, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
    deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
    saveNativeTransportCheckpoint,
@@ -96,6 +96,13 @@ RunnerSettingsFromEnvironment[] := Module[
       envOrDefault["DE2_CPP_THREADS", "4"], 1],
     wp = parseInteger["FT_WORKING_PRECISION",
       envOrDefault["FT_WORKING_PRECISION", "500"], 20],
+    (* Working precision is arithmetic headroom, not an accuracy request.
+       The FT release contract currently compares twenty reliable decimal
+       digits, while the default order-50 Taylor seams cannot honestly
+       support WorkingPrecision/2 digits.  Keep the two budgets explicit. *)
+    matchDigits = parseInteger["FT_MATCH_DIGITS",
+      envOrDefault["FT_MATCH_DIGITS",
+        ToString[Min[20, Floor[wp/2]], InputForm]], 1],
     epsOrder = parseInteger["FT_EPS_ORDER",
       envOrDefault["FT_EPS_ORDER", "0"], 0],
     expansionOrder = parseInteger["FT_EXPANSION_ORDER",
@@ -142,6 +149,10 @@ RunnerSettingsFromEnvironment[] := Module[
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
+  If[matchDigits > Floor[wp/2],
+    Return[failure[
+      "FT_MATCH_DIGITS must not exceed half FT_WORKING_PRECISION",
+      <|"MatchDigits" -> matchDigits, "WorkingPrecision" -> wp|>], Module]];
   If[fireModularWorkers > 10,
     Return[failure["FT_FIRE_MODULAR_WORKERS must not exceed 10",
       <|"Value" -> fireModularWorkers|>], Module]];
@@ -173,7 +184,8 @@ RunnerSettingsFromEnvironment[] := Module[
     FileNameJoin[{$TemporaryDirectory, "DiffExp2_FIRE7_Modular"}]]];
   <|
     "RecurrenceBackend" -> backend, "CppThreads" -> threads,
-    "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
+    "WorkingPrecision" -> wp, "MatchingDigits" -> matchDigits,
+    "EpsilonOrder" -> epsOrder,
     "ExpansionOrder" -> expansionOrder,
     "BoundaryExtraOrder" -> boundaryExtraOrder,
     "FIRETimeoutSeconds" -> fireTimeout,
@@ -207,6 +219,7 @@ RunnerSettingsFromEnvironment[] := Module[
 
 Options[PipelinePlan] = {
   "WorkingPrecision" -> 500,
+  "MatchingDigits" -> 20,
   "ExpansionOrder" -> 50,
   "EpsilonOrder" -> 0,
   "BoundaryExtraOrder" -> 4,
@@ -270,6 +283,8 @@ resolveExecutable[value_] := Module[{candidate},
 validatePlanOptions[settings_Association] := Module[{checks},
   checks = {
     IntegerQ[settings["WorkingPrecision"]] && settings["WorkingPrecision"] >= 20,
+    IntegerQ[settings["MatchingDigits"]] && settings["MatchingDigits"] >= 1 &&
+      settings["MatchingDigits"] <= Floor[settings["WorkingPrecision"]/2],
     IntegerQ[settings["ExpansionOrder"]] && settings["ExpansionOrder"] >= 10,
     IntegerQ[settings["EpsilonOrder"]] && settings["EpsilonOrder"] >= 0,
     IntegerQ[settings["BoundaryExtraOrder"]] && settings["BoundaryExtraOrder"] >= 0,
@@ -376,6 +391,7 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
   stop = OptionValue["StopAfterBoundaryLevel"];
   settings = <|
     "WorkingPrecision" -> OptionValue["WorkingPrecision"],
+    "MatchingDigits" -> OptionValue["MatchingDigits"],
     "ExpansionOrder" -> OptionValue["ExpansionOrder"],
     "EpsilonOrder" -> OptionValue["EpsilonOrder"],
     "BoundaryExtraOrder" -> OptionValue["BoundaryExtraOrder"],
@@ -443,6 +459,7 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "FT_CPP_BATCH_ENDPOINT_ARMS" ->
       boolString[settings["BatchEndpointArms"]],
     "FT_WORKING_PRECISION" -> inputString[settings["WorkingPrecision"]],
+    "FT_MATCH_DIGITS" -> inputString[settings["MatchingDigits"]],
     "FT_EXPANSION_ORDER" -> inputString[settings["ExpansionOrder"]],
     "FT_EPS_ORDER" -> inputString[settings["EpsilonOrder"]],
     "FT_BOUNDARY_EXTRA_ORDER" -> inputString[settings["BoundaryExtraOrder"]],

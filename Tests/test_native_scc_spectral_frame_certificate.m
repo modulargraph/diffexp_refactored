@@ -96,11 +96,14 @@ ok = TrueQ[good["admissible"]] && !TrueQ[good["identity_v"]] &&
   StringContainsQ[toReduced["exact_identity"],
     "\"role\":\"to_reduced\""] &&
   TrueQ[gaugePrepParity] &&
+  AllTrue[Join[toPhysical["entries"], toReduced["entries"]],
+    !KeyExistsQ[#["multiplier"], "kernels"] &&
+      Length[#["multiplier", "analytic_coefficients"]] === 7 &] &&
   Length[entries] === 4 && Sort[entryShifts] === {0, 0, 0, 1} &&
   AllTrue[entries,
     #["multiplier", "center_pole_order"] === 0 &&
-      Length[#["multiplier", "kernels"]] === 7 &&
-      AllTrue[#["multiplier", "kernels"], Length[#] === 4 &] &];
+      !KeyExistsQ[#["multiplier"], "kernels"] &&
+      Length[#["multiplier", "analytic_coefficients"]] === 7 &];
 
 If[ok,
   Print["PASS: exact Laurent-unimodular SCC spectral-frame certificate"],

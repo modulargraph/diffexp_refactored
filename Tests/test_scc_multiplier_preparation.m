@@ -56,9 +56,12 @@ originalCell = DiffExp2`Solve`Private`sccExactCellRecord[
 thetaCell = DiffExp2`Solve`Private`sccExactCellRecord[coupling, t];
 identityRecord = ImportString[prepared["ExactIdentity"], "RawJSON"];
 groupIdentityRecord = ImportString[sparse["exact_identity"], "RawJSON"];
-decodedKernels = Map[
-  DiffExp2`CppBackend`DecodeScalar[#, 80] &,
-  entry["multiplier", "kernels"], {2}];
+decodedAnalytic = Map[
+  <|"NumeratorCoefficients" ->
+      (DiffExp2`CppBackend`DecodeScalar[#, 80] & /@ #["numerator"]),
+    "DenominatorCoefficients" ->
+      (DiffExp2`CppBackend`DecodeScalar[#, 80] & /@ #["denominator"])|> &,
+  entry["multiplier", "analytic_coefficients"]];
 
 (* The Acb preparation path deliberately grounds giant exact rationals once
    at 2x WP.  An exact Rational payload must instead retain the original Q
@@ -115,7 +118,8 @@ ok = prepared["EpsilonShift"] === -1 &&
   groupIdentityRecord["schema"] === "diffexp2-scc-coupling-v1" &&
   groupIdentityRecord["serialization", "domain"] === "rational" &&
   groupIdentityRecord["serialization", "symbols"] === {} &&
-  decodedKernels === kernels &&
+  !KeyExistsQ[entry["multiplier"], "kernels"] &&
+  decodedAnalytic === prepared["AnalyticRationals"] &&
   ByteCount[largeRational] > 500 &&
   !FreeQ[largeAcbPrepared["TaylorKernels"], _?InexactNumberQ] &&
   FreeQ[largeRationalPrepared["TaylorKernels"], _?InexactNumberQ] &&

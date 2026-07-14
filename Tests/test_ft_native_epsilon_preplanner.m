@@ -78,7 +78,7 @@ runtimeEntries = ft2PrepareBoundaryEntries[
 runtimeParity = ft2ValidateNativePlanRuntimeLevel[
   levelPlan, {4, 3}, runtimeEntries, eps];
 sourceRows = Table[Join[{i}, ConstantArray[0, 10]], {i, 1, 2}];
-runtimeLedger = ft2NativeEpsilonLedger[runtimeEntries, sourceRows, 0];
+runtimeLedger = ft2NativeEpsilonLedger[runtimeEntries, sourceRows, 0, 0];
 assert["common prefactor shifts cancel instead of becoming recursive halos",
   AssociationQ[runtimeParity] && runtimeParity["CommonOffset"] === 3 &&
     Lookup[runtimeEntries, "MinimumEpsilonShift"] === {-9, -5, 0, -2} &&

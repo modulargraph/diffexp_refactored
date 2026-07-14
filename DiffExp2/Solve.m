@@ -527,6 +527,15 @@ preparedNumericizationRequiredQ[e_] :=
     Precision[e] === Infinity);
 
 groupedEpsExactSafeQ[e_] := e === 0 ||
+  (* A Rational native session is an exact coefficient-field computation,
+     not an Acb computation whose decimal inputs happen to have zero radius.
+     In particular, the CASE-P Rational shadow is prepared under
+     $cppExactDomain after the production Acb owner has already been built.
+     Preserve every exact Q coefficient there regardless of expression
+     size; reconstructing a rounded 2x-WP Real later would be neither exact
+     nor compatible with the shadow's provenance contract. *)
+  (TrueQ[$cppExactDomain] &&
+    (IntegerQ[e] || Head[e] === Rational)) ||
   (ByteCount[e] <= 500 && !preparedNumericizationRequiredQ[e]);
 
 preparedEpsCoefficient[e_] := Module[{wp2},
@@ -2818,7 +2827,8 @@ PrepareNativeRationalRow[cs_Association, sourceShape_Association,
   localExpressions = Map[Cancel[Together[# /. physicalVar ->
       cs["Center"] + cs["ChartMap", "Scale"]*t]] &, cvec];
   prepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
-      shape, #, t] & /@ localExpressions;
+      shape, #, t, "SerializationDomain" -> domain] & /@
+    localExpressions;
   active = Select[Range[d],
     !TrueQ[prepared[[#]]["ProvenZero"]] &];
   inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*
@@ -3068,7 +3078,8 @@ PrepareSCCCouplingMatrix[cs_Association, sourceBlock_Integer,
             "OriginalCell" -> originalCell, "ThetaCell" -> thetaCell,
             "Detail" -> "active SCC coupling edge is marked proven zero in its exact parent cell record"|>]];
         prepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
-          preparationShape, coefficient, t];
+          preparationShape, coefficient, t,
+          "SerializationDomain" -> domain];
         If[TrueQ[prepared["ProvenZero"]] ||
             prepared["ExactIdentity"] =!= thetaCell["exact"],
           err["E6", cs, <|"GlobalEdge" -> edge,
@@ -4442,7 +4453,7 @@ PrepareSCCSpectralSourceTransform[blockcs_Association,
        exactEntry},
       exactEntry = DiffExp2`SectorSeries`ExactExpressionIdentity[entry, t];
       prepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
-        sourceShape, entry, t];
+        sourceShape, entry, t, "SerializationDomain" -> domain];
       If[TrueQ[prepared["ProvenZero"]], {},
         If[prepared["ExactIdentity"] =!= exactEntry ||
             prepared["CenterPoleOrder"] =!= 0,

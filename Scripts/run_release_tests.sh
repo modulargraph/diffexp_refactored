@@ -70,4 +70,9 @@ if [[ "${DE2_RUN_FIRE_TESTS:-0}" == 1 ]]; then
   wolframscript -file Tests/test_fire7_real_sunrise_parity.m
 fi
 
+if [[ "${DE2_RUN_BANANA_TIMING:-0}" == 1 ]]; then
+  echo "=== optional full banana timing regression"
+  Scripts/run_banana_timing_regression.sh
+fi
+
 echo "Release test suite passed."

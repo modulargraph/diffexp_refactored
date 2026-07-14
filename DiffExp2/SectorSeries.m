@@ -9,7 +9,7 @@ ValidateLocalSolution::usage = "ValidateLocalSolution[ls] checks every structura
 CanonicalizeLocalSolution::usage = "CanonicalizeLocalSolution[ls] merges identical and integer-spaced same-(b,p) sectors, drops syntactically zero sectors, sorts by (a,b,p).";
 ChartImSign::usage = "ChartImSign[ls] derives the chart Im-sign (+1|-1|None) from the Prescriptions list; conflicting odd-multiplicity entries are a loud error. THE one sign derivation in DiffExp2.";
 EvaluateLocalSolution::usage = "EvaluateLocalSolution[ls, tval, opts] evaluates at the chart point tval. Options: \"UsePade\", \"TOrderReduction\", \"ImSign\"; the internal \"ComputeTailEstimates\" option defaults True. Returns <|\"Value\" -> EpsSeries, \"PadeFallbacks\" -> ..., \"TailEstimates\" -> list|Missing[\"NotComputed\"]|>.";
-PrepareRationalMultiplier::usage = "PrepareRationalMultiplier[shape, c, var] classifies and prepares the exact rational multiplier c(var,eps) for a LocalSolution (or a shape association with EpsWindow, TWindow, Radius, and optional Dimension). Option \"SerializationDomain\" may be \"acb\", \"rational\", or \"symbolic\"; exact coefficient-field modes retain all rational Taylor coefficients exactly. It returns the epsilon shift, center-pole order, finite Taylor kernels, the complete analytic numerator/denominator polynomials behind each epsilon kernel, a collision-proof exact identity, and an explicit ProvenZero structural certificate.";
+PrepareRationalMultiplier::usage = "PrepareRationalMultiplier[shape, c, var] classifies and prepares the exact rational multiplier c(var,eps) for a LocalSolution (or a shape association with EpsWindow, TWindow, Radius, and optional Dimension). It returns the epsilon shift, center-pole order, finite Taylor kernels, the complete analytic numerator/denominator polynomials behind each epsilon kernel, a collision-proof exact identity, and an explicit ProvenZero structural certificate.";
 ExactExpressionIdentity::usage = "ExactExpressionIdentity[expr, var] returns the deterministic context-explicit recursive-AST certificate used by exact multiplier and SCC matrix identities.";
 MultiplyRational::usage = "MultiplyRational[ls, c] multiplies by a rational c(t, eps): center poles shift a, far poles fold into Taylor parts, interior poles are a loud error, eps-denominators shift the windows.";
 ReexpandLocalSolution::usage = "ReexpandLocalSolution[ls, newCenter, targetOrder, opts] re-expands around a regular point inside the chart, producing a single-(0,0,0)-sector LocalSolution with the explicit truncation contract.";
@@ -59,14 +59,12 @@ structuralZeroQ[e_] := FreeQ[e, _?InexactNumberQ] && zeroQ[e];
 badHeadQ[c_] := !FreeQ[c, _SeriesData | _SeriesCoefficient] ||
   MemberQ[{$Failed, Indeterminate, ComplexInfinity}, c];
 
-groundTaylorCoefficient[e_, wp_Integer, preserveExactRational_:False] :=
- Module[{wp2},
+groundTaylorCoefficient[e_, wp_Integer] := Module[{wp2},
   Which[
     e === 0, 0,
     !NumericQ[e], e,
     InexactNumberQ[e], e,
-    (TrueQ[preserveExactRational] || ByteCount[e] <= 500) &&
-      (IntegerQ[e] || Head[e] === Rational), e,
+    ByteCount[e] <= 500 && (IntegerQ[e] || Head[e] === Rational), e,
     True,
       wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
       Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
@@ -345,24 +343,13 @@ ExactExpressionIdentity[entry_, var_Symbol] := Module[
     "expression" -> exactIdentityAST[canonical]|>,
     "RawJSON", "Compact" -> True]];
 
-Options[PrepareRationalMultiplier] = {"SerializationDomain" -> "acb"};
-
-PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
-    OptionsPattern[]] := Module[
+PrepareRationalMultiplier[shape_Association, c_, var_Symbol] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], shapeData, cT, num, den, nv, dv,
    jmin, jcount, cj, d0, troots, wp, M, Q, kmin, kmax, ncols,
    prepSignature, prepKey, cached, prepared, provenZero, exactIdentity,
-   analyticRationals, storePrepared, serializationDomain,
-   preserveExactRational},
+   analyticRationals, storePrepared},
   shapeData = multiplierShape[shape];
   wp = cfg["WorkingPrecision"];
-  serializationDomain = OptionValue["SerializationDomain"];
-  If[!MemberQ[{"acb", "rational", "symbolic"}, serializationDomain],
-    err["serializationdomain", <|
-      "SerializationDomain" -> serializationDomain,
-      "Detail" -> "rational multiplier serialization domain must be acb, rational, or symbolic"|>]];
-  preserveExactRational = MemberQ[
-    {"rational", "symbolic"}, serializationDomain];
   cT = Together[c /. var -> var];
   If[!PolynomialQ[Numerator[cT], {var, eps}] || !PolynomialQ[Denominator[cT], {var, eps}],
     err["nonrational", <|"Chart" -> ToString[shapeData["Center"], InputForm],
@@ -379,8 +366,7 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
   prepSignature = {cT, {Context[var], SymbolName[var]},
     {Context[eps], SymbolName[eps]}, kmin, kmax, ncols,
     shapeData["Radius"], wp,
-    cfg["ChopPrecision"], DiffExp2`Tolerances`$InputPrecisionFactor,
-    serializationDomain};
+    cfg["ChopPrecision"], DiffExp2`Tolerances`$InputPrecisionFactor};
   prepKey = Hash[prepSignature, "SHA256"];
   cached = Lookup[$multiplyRationalPreparedCache, prepKey, None];
   If[AssociationQ[cached],
@@ -510,7 +496,7 @@ PrepareRationalMultiplier[shape_Association, c_, var_Symbol,
            exact; ground algebraic or giant numeric coefficients once at
            2x WP so later convolutions cannot accumulate exact-expression
            swell or hit the kernel's small default extra-precision limit. *)
-        Map[groundTaylorCoefficient[#, wp, preserveExactRational] &, csr]]],
+        Map[groundTaylorCoefficient[#, wp] &, csr]]],
     {j, 1, jcount}];
   (* A finite Taylor kernel does not determine an unseen tail.  Retain the
      complete rational function for every epsilon coefficient after removing

@@ -60,25 +60,6 @@ decodedKernels = Map[
   DiffExp2`CppBackend`DecodeScalar[#, 80] &,
   entry["multiplier", "kernels"], {2}];
 
-(* The Acb preparation path deliberately grounds giant exact rationals once
-   at 2x WP.  An exact Rational payload must instead retain the original Q
-   coefficient; it may never inherit the Acb cache entry or reconstruct the
-   value from that rounded Real.  This size is well above the production
-   500-byte grounding threshold while remaining cheap to prepare. *)
-largeRational = (10^2400 + 123456789)/(10^2400 + 987654321);
-largeMultiplier = largeRational/(2 - t);
-largeAcbPrepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
-  ls, largeMultiplier, t, "SerializationDomain" -> "acb"];
-largeRationalPrepared = DiffExp2`SectorSeries`PrepareRationalMultiplier[
-  ls, largeMultiplier, t, "SerializationDomain" -> "rational"];
-largeAcbReplay = DiffExp2`SectorSeries`PrepareRationalMultiplier[
-  ls, largeMultiplier, t, "SerializationDomain" -> "acb"];
-largeSolveAcb = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
-  DiffExp2`Solve`Private`preparedEpsCoefficient[largeRational]];
-largeSolveRational = Block[{
-    DiffExp2`Solve`Private`$cppExactDomain = True},
-  DiffExp2`Solve`Private`preparedEpsCoefficient[largeRational]];
-
 ok = prepared["EpsilonShift"] === -1 &&
   prepared["CenterPoleOrder"] === 1 &&
   prepared["ProvenZero"] === False &&
@@ -115,17 +96,7 @@ ok = prepared["EpsilonShift"] === -1 &&
   groupIdentityRecord["schema"] === "diffexp2-scc-coupling-v1" &&
   groupIdentityRecord["serialization", "domain"] === "rational" &&
   groupIdentityRecord["serialization", "symbols"] === {} &&
-  decodedKernels === kernels &&
-  ByteCount[largeRational] > 500 &&
-  !FreeQ[largeAcbPrepared["TaylorKernels"], _?InexactNumberQ] &&
-  FreeQ[largeRationalPrepared["TaylorKernels"], _?InexactNumberQ] &&
-  largeRationalPrepared["TaylorKernels"][[1, 1]] ===
-    largeRational/2 &&
-  largeRationalPrepared["ExactIdentity"] ===
-    largeAcbPrepared["ExactIdentity"] &&
-  largeAcbReplay === largeAcbPrepared &&
-  InexactNumberQ[largeSolveAcb] &&
-  largeSolveRational === largeRational;
+  decodedKernels === kernels;
 
 Print[If[TrueQ[ok], "PASS", "FAIL"],
   ": reusable rational and sparse SCC multiplier preparation parity"];

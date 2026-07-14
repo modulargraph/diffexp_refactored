@@ -1,34 +1,3 @@
-constexpr const char* kRetainedTilePlanCapability =
-    "retained-exact-independent-arm-tile-plan-v1";
-constexpr const char* kRetainedSingleArmTilePlanCapability =
-    "retained-exact-single-arm-tile-plan-v1";
-constexpr const char* kRetainedSingleArmTilePlanCheckpointSchema =
-    "diffexp2-retained-single-arm-tile-plan-v1";
-constexpr const char* kRetainedSingleArmTilePlanProvenanceSchema =
-    "diffexp2-retained-exact-single-arm-tile-plan-v1";
-constexpr const char* kRetainedPlannedMatchHopCapability =
-    "retained-exact-plan-driven-local-match-hop-v1";
-constexpr const char* kRetainedPlannedMatchMaterializationCapability =
-    "retained-native-plan-match-local-materialization-v1";
-constexpr const char* kRetainedStoredLineCapability =
-    "retained-native-stored-truncation-physical-tile-integral-v1";
-constexpr const char* kRetainedCertifiedLineCapability =
-    "retained-native-certified-full-local-physical-tile-integral-v1";
-constexpr const char* kRetainedParallelArmCapability =
-    "retained-native-concurrent-two-arm-march-v1";
-constexpr const char* kRetainedParallelTransportArmStateCapability =
-    "retained-native-concurrent-two-arm-transport-states-v1";
-constexpr const char* kRetainedTransportArmStateCapability =
-    "retained-native-transport-arm-state-v1";
-constexpr const char* kRetainedTransportArmContractionCapability =
-    "retained-native-transport-arm-contraction-v1";
-constexpr const char* kRetainedTransportPairContractionCapability =
-    "retained-native-transport-pair-contraction-v1";
-constexpr const char* kRetainedTransportPairStreamCapability =
-    "retained-native-transport-pair-tile-stream-v1";
-constexpr const char* kRetainedLineAggregateCapability =
-    "retained-native-line-aggregate-v1";
-
 const char* line_integration_scope_name(LineIntegrationScope scope) {
   switch (scope) {
     case LineIntegrationScope::StoredTruncation:

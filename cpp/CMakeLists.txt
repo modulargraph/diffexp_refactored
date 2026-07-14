@@ -4,7 +4,11 @@ find_package(Boost 1.80 REQUIRED COMPONENTS json)
 
 add_library(diffexp2_core STATIC
   src/checkpoint.cpp
+  src/json_codec_backend_info.cpp
   src/json_codec.cpp
+  src/json_codec_recurrence.cpp
+  src/json_codec_scc.cpp
+  src/json_codec_support.cpp
 )
 set_target_properties(diffexp2_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(diffexp2_core PUBLIC cxx_std_20)
@@ -35,6 +39,11 @@ if(DE2_BUILD_TESTS)
   target_compile_features(test_diffexp2_recurrence PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_recurrence PRIVATE diffexp2_core)
   add_test(NAME cpp_recurrence COMMAND test_diffexp2_recurrence)
+
+  add_executable(test_diffexp2_json_codec tests/test_json_codec.cpp)
+  target_compile_features(test_diffexp2_json_codec PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_json_codec PRIVATE diffexp2_core)
+  add_test(NAME cpp_json_codec COMMAND test_diffexp2_json_codec)
 
   add_executable(test_diffexp2_singular_indicial
     tests/test_singular_indicial.cpp)

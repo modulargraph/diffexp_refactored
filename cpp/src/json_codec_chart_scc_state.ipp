@@ -1279,7 +1279,18 @@ json::object exact_derived_run(
   auto run = prototype;
   run["p"] = log_max;
   run["has_initial"] = homogeneous;
-  run["adaptive_probe"] = prototype.at("adaptive_probe");
+  // A homogeneous CASE-P target is a composite-owned mathematical object,
+  // not a replay of whichever public column happened to discover it first.
+  // Submitted seed templates disable the lower-frame probe while derived
+  // particular templates enable it, so inheriting this diagnostic policy
+  // made the same (block, component) target acquire two cache contracts.
+  // Probe mode only changes when lower-edge cancellation is checked (matrix
+  // assembly before a negative epsilon shift); the enabled form is the
+  // stronger, cancellation-aware evaluation and is deterministic for every
+  // cached homogeneous target. Particular runs retain their caller policy.
+  run["adaptive_probe"] = homogeneous
+      ? json::value(true)
+      : prototype.at("adaptive_probe");
   run["a_target"] = a.str();
   run["b_target"] = b.str();
   run["a_shift_min"] = 0;

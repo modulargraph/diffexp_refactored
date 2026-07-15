@@ -1509,8 +1509,14 @@ RegularTaylorLineTailCertificate certify_rational_row_line_tail(
     throw std::invalid_argument(
         "rational-row line-tail model is not bound to this retained scalar local");
   (void)delivered_epsilon.width();
-  if (delivered_epsilon.min_power < model.epsilon.min_power ||
-      delivered_epsilon.complete_max > model.epsilon.complete_max)
+  // The fused primitive contract conservatively reserves one lower epsilon
+  // row for a possible regulated-center pole.  For the unseen regular Taylor
+  // tail, first_exponent > 0 is certified below before any epsilon
+  // convolution is accumulated, so rows below the projected model window are
+  // rigorously zero.  The accumulation loop already represents them by an
+  // empty source sum.  Upper rows, in contrast, would require unavailable
+  // source coefficients and remain a hard error.
+  if (delivered_epsilon.complete_max > model.epsilon.complete_max)
     throw std::invalid_argument(
         "rational-row line tail requests epsilon rows outside its complete projected window");
 

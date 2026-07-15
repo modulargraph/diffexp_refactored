@@ -1498,7 +1498,12 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
               " ownerType=", Lookup[built, "Type", None]];
             built], Rest[systems]]];
       owners = Prepend[nativeBasisOwner /@ ownerRecords, anchorOwner];
-      valueSolvers = Lookup[ownerRecords, "ValueSolver", None];
+      (* Lookup[{}, key, default] returns the scalar default, not an empty
+         vector.  Preserve the zero-hop arm as a typed empty list so the
+         streamed consumer sees the same one-entry-per-receiving-chart
+         contract at every cardinality. *)
+      valueSolvers = If[ownerRecords === {}, {},
+        Lookup[ownerRecords, "ValueSolver", None]];
       bases = ConstantArray[None, Length[systems]],
       ownerRecords = {};
       valueSolvers = ConstantArray[None, Length[Rest[systems]]];
@@ -1516,7 +1521,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
             nativeStageTiming["basis-solve-done index=", First[index]];
             built], Rest[systems]]], None];
       owners = Prepend[nativeBasisOwner /@ Rest[bases], anchorOwner]];
-    If[Length[valueSolvers] =!= Length[Rest[systems]],
+    If[!ListQ[valueSolvers] ||
+        Length[valueSolvers] =!= Length[Rest[systems]],
       err["E6", <|"ValueSolverCount" -> Length[valueSolvers],
         "ReceivingChartCount" -> Length[Rest[systems]],
         "Detail" -> "native deferred value-solver vector is not aligned with receiving chart systems"|>]];

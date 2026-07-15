@@ -4,6 +4,7 @@
 #include <boost/json.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -213,7 +214,11 @@ json::object contract_require(const std::string& session,
            {"integrand_rows", json::array{
                 rational_row(root + ":row")}},
            {"epsilon", json::object{
-                {"min", 0}, {"max", 0},
+                // The transport contract reserves a possible eps^-1
+                // primitive row even though this ordinary rational row has
+                // no regulated-center pole.  Its certified unseen tail must
+                // publish a rigorous zero bound for that lower row.
+                {"min", -1}, {"max", 0},
                 {"required_complete_max", 0}}},
            {"tail_policy", "require"}}}}});
   require_ok(contracted, "transport.contract require");
@@ -234,9 +239,16 @@ json::object export_line(const std::string& session,
   return exported;
 }
 
-double coefficient_midpoint(const json::object& exported) {
-  const auto& encoded = exported.at("value").as_object()
-      .at("coefficients").as_array().front().as_array();
+double coefficient_midpoint(const json::object& exported,
+                            std::int32_t power) {
+  const auto& value = exported.at("value").as_object();
+  const auto minimum = static_cast<std::int32_t>(value.at("min").as_int64());
+  const auto maximum = static_cast<std::int32_t>(value.at("max").as_int64());
+  if (power < minimum || power > maximum)
+    throw std::runtime_error("requested exported epsilon power is absent");
+  const auto index = static_cast<std::size_t>(power - minimum);
+  const auto& encoded = value.at("coefficients").as_array()
+      .at(index).as_array();
   return std::stod(std::string(encoded.front().as_string()));
 }
 
@@ -280,13 +292,18 @@ void run_domain(const std::string& domain) {
         session, state, "row-tail-contract-" + suffix, line_checkpoint);
     const auto exported = export_line(session, line);
     const auto& error = exported.at("value").as_object().at("error").as_object();
-    const auto error_upper = error.at("absolute_upper_approx")
-        .as_array().front().as_double();
+    const auto& error_upper_rows =
+        error.at("absolute_upper_approx").as_array();
+    const auto error_upper = error_upper_rows.back().as_double();
     const auto actual_tail = 2.0 * std::log(4.0 / 3.0) - 0.5;
     if (exported.at("scope") != "full_local_with_certified_tail" ||
         exported.at("error_guarantee") != "certified" ||
         error.at("guarantee") != "certified" ||
-        std::abs(coefficient_midpoint(exported) - 0.5) > 1e-30 ||
+        exported.at("value").as_object().at("min") != -1 ||
+        error.at("min") != -1 || error_upper_rows.size() != 2 ||
+        error_upper_rows.front().as_double() != 0.0 ||
+        coefficient_midpoint(exported, -1) != 0.0 ||
+        std::abs(coefficient_midpoint(exported, 0) - 0.5) > 1e-30 ||
         !std::isfinite(error_upper) || error_upper < actual_tail)
       throw std::runtime_error(
           "required rational-row certificate is not a valid full-line bound: " +

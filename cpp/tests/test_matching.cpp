@@ -14,6 +14,7 @@ using diffexp2::EpsilonFrame;
 using diffexp2::ExactLaurentMatrix;
 using diffexp2::ExactLaurentPolynomial;
 using diffexp2::FiniteLaurentMatrix;
+using diffexp2::FiniteLaurentVector;
 using diffexp2::AcbLaurentRefinementOptions;
 using diffexp2::AcbMatchingResidualVerdict;
 using diffexp2::MatchingArithmeticError;
@@ -543,6 +544,107 @@ void empty_residual_window_retry_metadata_smoke() {
         reported);
 }
 
+struct NormalFramePrefixRun {
+  std::vector<EpsilonFrame<ComplexBall>> physical_weights;
+  diffexp2::AcbMatchingResidualDiagnostics normalized_residual;
+  diffexp2::AcbMatchingResidualDiagnostics physical_residual;
+};
+
+NormalFramePrefixRun run_laurent_normal_frame_prefix(std::size_t width) {
+  const auto zero = ball_constant_frame("0", width);
+  const auto one = ball_constant_frame("1", width);
+  const FiniteLaurentMatrix<ComplexBall> physical_basis = {
+      {one, zero}, {zero, one}};
+  std::vector<ComplexBall> first_coefficients;
+  std::vector<ComplexBall> second_coefficients;
+  first_coefficients.reserve(width);
+  second_coefficients.reserve(width);
+  for (std::size_t power = 0; power < width; ++power) {
+    first_coefficients.emplace_back(static_cast<long>(power + 2));
+    second_coefficients.emplace_back(static_cast<long>(2 * power + 3));
+  }
+  const std::vector<EpsilonFrame<ComplexBall>> physical_incoming{
+      EpsilonFrame<ComplexBall>(0, std::move(first_coefficients)),
+      EpsilonFrame<ComplexBall>(0, std::move(second_coefficients))};
+
+  const auto exact_zero = ExactLaurentPolynomial<ComplexBall>::zero();
+  const auto exact_one = ExactLaurentPolynomial<ComplexBall>::one();
+  const auto inverse_epsilon =
+      ExactLaurentPolynomial<ComplexBall>::monomial(
+          -1, ComplexBall(1));
+  const auto negative_inverse_epsilon =
+      ExactLaurentPolynomial<ComplexBall>::monomial(
+          -1, ComplexBall(-1));
+  const ExactLaurentMatrix<ComplexBall> frame = {
+      {exact_one, inverse_epsilon}, {exact_zero, exact_one}};
+  const ExactLaurentMatrix<ComplexBall> inverse_frame = {
+      {exact_one, negative_inverse_epsilon}, {exact_zero, exact_one}};
+
+  FiniteLaurentMatrix<ComplexBall> left_normalized(
+      2, FiniteLaurentVector<ComplexBall>());
+  for (auto& row : left_normalized) row.reserve(2);
+  for (std::size_t column = 0; column < 2; ++column) {
+    const auto normalized_column = diffexp2::apply_exact_laurent_matrix(
+        inverse_frame,
+        {physical_basis[0][column], physical_basis[1][column]});
+    for (std::size_t row = 0; row < 2; ++row)
+      left_normalized[row].push_back(normalized_column[row]);
+  }
+  const auto normalized_basis =
+      diffexp2::right_multiply_finite_by_exact_laurent(
+          left_normalized, frame);
+  const auto normalized_incoming = diffexp2::apply_exact_laurent_matrix(
+      inverse_frame, physical_incoming);
+
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-50");
+  options.required_min_power = -1;
+  options.required_complete_max = 1;
+  options.max_refinement_steps = 2;
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      normalized_basis, normalized_incoming,
+      diffexp2::identity_exact_laurent_matrix<ComplexBall>(2), options,
+      "two-width SCC Laurent normal frame", true);
+  auto physical_weights = diffexp2::apply_exact_laurent_matrix(
+      frame, matched.weights);
+  auto physical_options = options;
+  physical_options.required_min_power = 0;
+  const auto physical =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          physical_basis, physical_weights, physical_incoming,
+          physical_options, "two-width physical prefix check");
+  return {std::move(physical_weights),
+          matched.residual_history.back(), physical.diagnostics};
+}
+
+void normal_frame_prefix_monotonicity_smoke() {
+  ComplexBall::set_precision(256);
+  const auto narrow = run_laurent_normal_frame_prefix(7);
+  const auto wide = run_laurent_normal_frame_prefix(11);
+  bool same_old_prefix = true;
+  for (std::size_t component = 0; component < 2; ++component) {
+    const auto old_top = narrow.physical_weights[component].complete_max();
+    if (wide.physical_weights[component].complete_max() < old_top) {
+      same_old_prefix = false;
+      continue;
+    }
+    for (std::int32_t power = 0; power <= old_top; ++power)
+      same_old_prefix = same_old_prefix &&
+          (narrow.physical_weights[component].coefficient(power) -
+           wide.physical_weights[component].coefficient(power)).is_zero();
+  }
+  check("widened Laurent normal-frame weights preserve the old physical prefix",
+        same_old_prefix);
+  check("widened Laurent normal frame cannot lower residual completeness",
+        wide.normalized_residual.complete_window.complete_max >=
+                narrow.normalized_residual.complete_window.complete_max &&
+            wide.physical_residual.complete_window.complete_max >=
+                narrow.physical_residual.complete_window.complete_max);
+  check("physical-prefix gate rejects a normal frame beyond its honest edge",
+        narrow.physical_residual.complete_through_required &&
+            narrow.physical_residual.complete_window.complete_max < 6);
+}
+
 void verified_midpoint_preconditioner_smoke() {
   // A 13x13 Hilbert matrix at the minimum production precision is a compact
   // deterministic wrapping stress case.  Direct interval elimination cannot
@@ -672,6 +774,7 @@ int main() {
   laurent_off_pivot_ambiguity_smoke();
   refined_acb_ambiguous_off_pivot_smoke();
   empty_residual_window_retry_metadata_smoke();
+  normal_frame_prefix_monotonicity_smoke();
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();
   dense_eleven_by_eleven_pivot_budget_smoke();

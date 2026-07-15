@@ -2384,6 +2384,15 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   }
   refinement.required_min_power = matching_window.min_power;
 
+  const auto reset_to_physical_matching_frame = [&]() {
+    matching_basis = evaluated_basis;
+    matching_incoming = incoming_value;
+    matching_window = evaluation_window;
+    matching_frame_identity = "physical-parent-frame";
+    normalized_matching_frame = false;
+    refinement.required_min_power = matching_window.min_power;
+  };
+
   for (std::size_t column = 0; column < basis.size(); ++column) {
     json::object source{
         {"column", column}, {"local", basis_handles[column]},
@@ -2470,14 +2479,65 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     // though the original physical frames still cover the requested result.
     // Fall back transactionally and rebuild the exact lattice in that frame;
     // never turn a conditioning aid into a spurious hard failure.
-    matching_basis = evaluated_basis;
-    matching_incoming = incoming_value;
-    matching_window = evaluation_window;
-    matching_frame_identity = "physical-parent-frame";
-    normalized_matching_frame = false;
-    refinement.required_min_power = matching_window.min_power;
+    reset_to_physical_matching_frame();
     exact_lattice = make_exact_lattice();
     refined = run_refinement();
+  }
+
+  // Reaching factorization is not enough to admit the optional SCC normal
+  // frame.  A finite V^-1/F/V replay may return an honest residual which no
+  // longer reaches the requested prefix, even though the untransformed
+  // physical columns still do.  Retrying with a wider owner can then change
+  // the prepared V/V^-1 rectangle and make the reported complete edge move
+  // backwards.  That violates the reservoir monotonicity required by the
+  // caller: for one physical operator/chart, widening the requested top may
+  // append coefficients but must not invalidate the old prefix.
+  //
+  // Treat the normal frame strictly as a conditioning optimization.  If its
+  // first residual does not cover the required prefix, fail closed to the
+  // physical-parent frame before publishing retry metadata.  This is a real
+  // recomputation with the physical exact lattice, never a diagnostic clamp.
+  if (normalized_matching_frame &&
+      (refined.residual_history.empty() ||
+       !refined.residual_history.back().complete_through_required)) {
+    reset_to_physical_matching_frame();
+    exact_lattice = make_exact_lattice();
+    refined = run_refinement();
+  }
+
+  if (normalized_matching_frame) {
+    const auto receiving_owner = basis.front()->retained_equation_owner();
+    auto physical_weights = receiving_owner
+        ? receiving_owner->denormalize_acb_matching_weights(refined.weights)
+        : std::nullopt;
+    if (!physical_weights.has_value())
+      throw std::logic_error(
+          "receiving SCC could not return Fuchsian matching weights to the physical basis");
+    auto physical_options = refinement;
+    physical_options.required_min_power = evaluation_window.min_power;
+    bool physical_prefix_preserved = false;
+    try {
+      const auto physical_residual =
+          matching_detail::evaluate_acb_matching_residual(
+              evaluated_basis, *physical_weights, incoming_value,
+              physical_options,
+              checkpoint_identity + ":physical-prefix-check");
+      physical_prefix_preserved =
+          physical_residual.diagnostics.complete_through_required &&
+          physical_residual.diagnostics.verdict !=
+              AcbMatchingResidualVerdict::Fail;
+    } catch (const MatchingArithmeticError& error) {
+      if (error.code !=
+          MatchingArithmeticErrorCode::InsufficientCompleteWindow)
+        throw;
+    }
+    if (!physical_prefix_preserved) {
+      reset_to_physical_matching_frame();
+      exact_lattice = make_exact_lattice();
+      refined = run_refinement();
+    } else {
+      refined.weights = std::move(*physical_weights);
+    }
   }
 
   json::array exact_binding_basis;
@@ -2495,16 +2555,6 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
                                 {"max", matching_window.complete_max}}}};
   const auto exact_lattice_provenance_identity = json::serialize(
       canonical_json_value(exact_lattice_provenance));
-  if (normalized_matching_frame) {
-    const auto receiving_owner = basis.front()->retained_equation_owner();
-    auto physical_weights = receiving_owner
-        ? receiving_owner->denormalize_acb_matching_weights(refined.weights)
-        : std::nullopt;
-    if (!physical_weights.has_value())
-      throw std::logic_error(
-          "receiving SCC could not return Fuchsian matching weights to the physical basis");
-    refined.weights = std::move(*physical_weights);
-  }
 
   json::array provenance_basis;
   for (const auto& source : basis_sources) provenance_basis.push_back(source);

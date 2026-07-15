@@ -21,6 +21,10 @@ constexpr const char* kOrdinaryProofSchema =
 constexpr const char* kAlgebraicScale = "Root[-2+#1^2&,2,0]";
 constexpr const char* kAlgebraicScaleValue =
     "[1.414213562373095048801688724209698078569671875376948073176679738 +/- 1e-63]";
+constexpr std::uint32_t kSingularFrameWidth = 7;
+constexpr std::int32_t kSingularFrameMax = 5;
+constexpr const char* kSingularSpectralVIdentity =
+    "singular-arm-block:V=1+eps";
 
 json::object request(json::object value) {
   return json::parse(diffexp2::run_recurrence_json(json::serialize(value)))
@@ -95,6 +99,63 @@ json::array scalar_entry(const std::string& value) {
   return entries;
 }
 
+json::array singular_spectral_inverse_kernels() {
+  json::array kernels;
+  for (std::uint32_t epsilon = 0;
+       epsilon < kSingularFrameWidth; ++epsilon) {
+    json::array taylor;
+    for (std::uint32_t n = 0; n <= 4; ++n)
+      taylor.emplace_back(
+          n == 0 ? (epsilon % 2 == 0 ? "1" : "-1") : "0");
+    kernels.push_back(std::move(taylor));
+  }
+  return kernels;
+}
+
+json::object singular_spectral_source_transform() {
+  constexpr auto inverse_identity =
+      "singular-arm-block:VInv=1/(1+eps)";
+  constexpr auto determinant_identity =
+      "singular-arm-block:det=1+eps";
+  const auto producer_identity = json::serialize(json::object{
+      {"schema",
+       "diffexp2-scc-spectral-source-transform-identity-v1"},
+      {"state_basis", "reduced-g-after-spectral-assembly"},
+      {"target_recurrence_basis", "spectral-u"},
+      {"dimension", 1}, {"identity", false},
+      {"epsilon_unimodular", true}, {"det_epsilon_valuation", 0},
+      {"v_exact_identity", kSingularSpectralVIdentity},
+      {"vinv_exact_identity", inverse_identity},
+      {"det_exact_identity", determinant_identity},
+      {"source_window", json::object{
+          {"epsilon_min", -1},
+          {"epsilon_complete_max", kSingularFrameMax},
+          {"taylor_complete_max", 4}}},
+      {"serialization", json::object{
+          {"domain", "acb"}, {"symbols", json::array{}}}},
+      {"entries", json::array{json::object{
+          {"row", 0}, {"column", 0},
+          {"exact_entry", inverse_identity}, {"epsilon_shift", 0},
+          {"center_pole_order", 0}}}}});
+  return json::object{
+      {"schema", "diffexp2-scc-spectral-source-transform-v1"},
+      {"rows", 1}, {"columns", 1}, {"identity", false},
+      {"epsilon_unimodular", true}, {"det_epsilon_valuation", 0},
+      {"v_exact_identity", kSingularSpectralVIdentity},
+      {"vinv_exact_identity", inverse_identity},
+      {"det_exact_identity", determinant_identity},
+      {"exact_identity", producer_identity},
+      {"domain", "acb"}, {"symbols", json::array{}},
+      {"entries", json::array{json::object{
+          {"row", 0}, {"column", 0},
+          {"exact_entry", inverse_identity},
+          {"multiplier", json::object{
+              {"epsilon_shift", 0}, {"center_pole_order", 0},
+              {"kernels", singular_spectral_inverse_kernels()},
+              {"exact_identity", inverse_identity},
+              {"proven_zero", false}}}}}}};
+}
+
 std::string prepare_regular_chart(const std::string& session,
                                   const std::string& key,
                                   const std::string& center) {
@@ -153,7 +214,9 @@ std::string prepare_singular_chart(const std::string& session) {
            {"principal_matrix", std::move(principal_matrix)},
            {"native_scc_capabilities", json::object{
                 {"regular", false}, {"identity_gauge", true},
-                {"identity_v", true}, {"no_pseudo", true}}}}},
+                {"identity_v", false},
+                {"epsilon_unimodular_v", true},
+                {"no_pseudo", true}}}}},
       {"scc", json::object{
            {"components", singleton_components()},
            {"structural_edges", self_edges()},
@@ -162,7 +225,7 @@ std::string prepare_singular_chart(const std::string& session) {
            {"coupling_depth", 0}}},
       {"problem", json::object{
            {"domain", "acb"}, {"precision_bits", 256},
-           {"d", 1}, {"fb", -1}, {"w", 4},
+           {"d", 1}, {"fb", -1}, {"w", kSingularFrameWidth},
            {"d_lags", unit_d_lags()},
            {"denominators", json::array{}},
            {"nhat_lags", json::array{json::object{
@@ -175,7 +238,11 @@ std::string prepare_singular_chart(const std::string& session) {
            {"d0_inverse", "1"},
            {"blocks", singleton_components()},
            {"assembly", json::object{
-                {"identity", true}, {"poly", json::array{}},
+                {"identity", false},
+                {"exact_identity", kSingularSpectralVIdentity},
+                {"poly", json::array{
+                     json::object{{"s", 0}, {"e", scalar_entry("1")}},
+                     json::object{{"s", 1}, {"e", scalar_entry("1")}}}},
                 {"rat", json::array{}}, {"val", json::array{0}}}},
            {"chop_digits", 0}}}});
   if (prepared.at("status") != "ok")
@@ -218,8 +285,9 @@ json::object singular_run() {
       {"adaptive_probe", false}, {"a_target", "1/2"},
       {"b_target", "1/3"}, {"a_shift_min", 0},
       {"a_shifts", std::move(shifts)}, {"schedule", std::move(schedule)},
-      {"initial", json::array{"0", "1", "0", "0"}},
-      {"initial_validity", json::array{2}}, {"source", nullptr},
+      {"initial", json::array{"0", "1", "0", "0", "0", "0", "0"}},
+      {"initial_validity", json::array{kSingularFrameMax}},
+      {"source", nullptr},
       {"return_u", false}};
 }
 
@@ -292,7 +360,8 @@ std::string prepare_singular_scc(const std::string& session,
                 {"work_t_order", 4}}},
            {"work_contract", json::object{
                 {"work_min", -1}, {"requested_min", -1},
-                {"requested_max", 2}, {"work_complete_max", 2},
+                {"requested_max", 2},
+                {"work_complete_max", kSingularFrameMax},
                 {"public_t_order", 0},
                 {"wolfram_coupling_depth", 1}}}}},
       {"blocks", json::array{json::object{
@@ -300,7 +369,9 @@ std::string prepare_singular_scc(const std::string& session,
            {"chart", block_chart},
            {"principal_identity", "singular-arm-block-identity"},
            {"regular", false}, {"identity_gauge", true},
-           {"identity_v", true}, {"no_pseudo", true},
+           {"identity_v", false}, {"epsilon_unimodular_v", true},
+           {"source_transform", singular_spectral_source_transform()},
+           {"no_pseudo", true},
            {"exact_affine_jordan_indicial", json::object{
                 {"schema", "diffexp2-exact-affine-jordan-indicial-v1"},
                 {"dimension", 1},
@@ -660,6 +731,43 @@ std::pair<bool, bool> proof_schemas(const std::string& path) {
     ordinary = ordinary || schema == kOrdinaryProofSchema;
   }
   return {singular, ordinary};
+}
+
+bool singular_match_published_in_complete_physical_frame(
+    const std::string& path) {
+  const auto payload = json::parse(
+      diffexp2::checkpoint::read(path).payload_json).as_object();
+  bool found = false;
+  for (const auto& raw_hop :
+       payload.at("retained_planned_match_hops").as_array()) {
+    const auto& native = raw_hop.as_object().at("native_match").as_object();
+    const auto witness = json::parse(std::string(
+        native.at("exact_lattice_canonical_witness").as_string()));
+    if (witness.as_object().at("schema") != kSingularProofSchema)
+      continue;
+    found = true;
+    const auto provenance = json::parse(std::string(
+        native.at("provenance_identity").as_string())).as_object();
+    const auto lattice_provenance = json::parse(std::string(
+        native.at("exact_lattice_provenance_identity").as_string()))
+        .as_object();
+    const auto& epsilon = native.at("epsilon").as_object();
+    const auto required = epsilon.at("required_complete_max").as_int64();
+    const auto& history = native.at("refined").as_object()
+        .at("residual_history").as_array();
+    if (history.empty()) return false;
+    const auto& residual = history.back().as_object();
+    if (native.at("matching_frame_identity") != "physical-parent-frame" ||
+        provenance.at("matching_frame_identity") !=
+            "physical-parent-frame" ||
+        lattice_provenance.at("matching_frame_identity") !=
+            "physical-parent-frame" ||
+        residual.at("complete_through_required") != true ||
+        residual.at("complete_window").as_object().at("max").as_int64() <
+            required)
+      return false;
+  }
+  return found;
 }
 
 }  // namespace
@@ -1230,6 +1338,8 @@ int main() {
         throw std::runtime_error(
             "transport observable checkpoint retained a private projected local");
     const auto [singular_proof, ordinary_proof] = proof_schemas(checkpoint);
+    const auto singular_physical_prefix =
+        singular_match_published_in_complete_physical_frame(checkpoint);
 
     const auto restored = request(json::object{
         {"schema", 2}, {"op", "checkpoint.restore"},
@@ -1317,6 +1427,7 @@ int main() {
         {"expected_identity", "singular-arm-roundtrip-second"}});
     const auto& arms = marched.at("arms").as_object();
     const bool ok = singular_proof && ordinary_proof &&
+        singular_physical_prefix &&
         arms.at("lower").as_object().at("matches") == 1 &&
         arms.at("upper").as_object().at("matches") == 1 &&
         tamper_rejected.at("status") == "error" &&
@@ -1325,7 +1436,8 @@ int main() {
     if (!ok)
       std::cerr << "marched: " << json::serialize(marched) << '\n'
                 << "schemas: singular=" << singular_proof
-                << " ordinary=" << ordinary_proof << '\n'
+                << " ordinary=" << ordinary_proof
+                << " physical-prefix=" << singular_physical_prefix << '\n'
                 << "tamper: " << json::serialize(tamper_rejected) << '\n';
     (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                {"session", session}});

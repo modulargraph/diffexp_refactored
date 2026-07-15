@@ -1041,6 +1041,7 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
    commonOffset, effective, boundaryShifts, normalized,
    normalizedPoleOrders, shiftedBoundary, record},
   d = Length[matrix];
+  ft2NativeStageTiming["epsilon-basis dimension=", d, " begin"];
   If[!MatrixQ[matrix] || Dimensions[matrix] =!= {d, d} || d === 0,
     Return[Failure["FeynmanTrickEpsilonBasis", <|
       "Detail" -> "level matrix must be a nonempty square matrix",
@@ -1053,15 +1054,19 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
       "Detail" -> "boundary values/prefactors do not match the level matrix",
       "Dimension" -> d, "BoundaryRows" -> Length[boundaryValues],
       "Prefactors" -> boundaryPrefactors|>], Module]];
+  ft2NativeStageTiming["epsilon-basis shape-ready"];
   widths = Length /@ boundaryValues;
   If[MemberQ[widths, 0] || Length[DeleteDuplicates[widths]] =!= 1,
     Return[Failure["FeynmanTrickEpsilonBasis", <|
       "Detail" -> "epsilon boundary rows must have one nonempty common window",
       "Widths" -> widths|>], Module]];
   inputTop = First[widths] - 1;
+  ft2NativeStageTiming["epsilon-basis boundary-ready top=", inputTop];
   gauge = If[suppliedGauge === Automatic,
     ft2RelativeEpsilonGauge[matrix, epsSymbol], suppliedGauge];
   If[FailureQ[gauge], Return[gauge, Module]];
+  ft2NativeStageTiming["epsilon-basis gauge-ready supplied=",
+    suppliedGauge =!= Automatic];
   If[!AssociationQ[gauge] ||
       Lookup[Lookup[gauge, "Record", <||>], "InputMatrixHash", None] =!=
         Hash[matrix, "SHA256"] ||
@@ -1072,6 +1077,7 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
     Return[Failure["FeynmanTrickEpsilonBasis", <|
       "Detail" -> "supplied relative epsilon gauge does not match the level matrix"|>],
     Module]];
+  ft2NativeStageTiming["epsilon-basis gauge-identity-ready"];
   canonical = gauge["CanonicalPrefactors"];
   relative = gauge["RelativePrefactors"];
   rawPoleOrders = gauge["RawPoleOrders"];
@@ -1085,6 +1091,7 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
     Return[Failure["FeynmanTrickEpsilonBasis", <|
       "Detail" -> "relative epsilon gauge has inconsistent dimensions or hashes"|>],
     Module]];
+  ft2NativeStageTiming["epsilon-basis normalized-hash-ready"];
   commonOffset = Max[boundaryPrefactors - canonical];
   effective = canonical + commonOffset;
   boundaryShifts = effective - boundaryPrefactors;
@@ -1098,6 +1105,7 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
       Table[If[n < shift, 0, row[[n - shift + 1]]],
         {n, 0, inputTop}]],
     {boundaryShifts, boundaryValues}];
+  ft2NativeStageTiming["epsilon-basis boundary-shift-ready"];
   record = <|
     "Schema" -> "FeynmanTrick.EpsilonBasis/v1",
     "CanonicalPrefactors" -> canonical,
@@ -2490,6 +2498,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
     outputDigits_Integer, nativePlanIdentity_:None,
     checkpointSpec_:None] :=
+ Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
+     DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 outputDigits]},
  Module[
   {deliverableMax = ledger["DeliverableCompleteMax"],
    publicRequiredTop = ledger["DownstreamRawTop"],
@@ -2641,10 +2651,14 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     transportSystem = Join[sys, <|"ExtraSingularFactors" ->
       Select[extraSingularFactors, !FreeQ[#, physicalVar] &]|>];
     If[checkpointMode =!= "Restore",
+      ft2NativeStageTiming["lower-plan-start"];
       lowerPlan = catch2[
         ft2NativeSegmentLine[transportSystem, {anchor, 0}]];
+      ft2NativeStageTiming["lower-plan-done"];
+      ft2NativeStageTiming["upper-plan-start"];
       upperPlan = catch2[
         ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
+      ft2NativeStageTiming["upper-plan-done"];
       If[FailureQ[lowerPlan] || FailureQ[upperPlan],
         Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
       ft2NativeStageTiming["plans-ready charts=",
@@ -2869,7 +2883,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "NativeTransportCheckpoint" -> nativeResumeRecord,
     "CompatibilityExports" -> If[AssociationQ[exported],
       Lookup[exported, "CompatibilityExports", Length[nativeEntries]], 0],
-    "CheckpointRecord" -> checkpointAuditRecord|>];
+    "CheckpointRecord" -> checkpointAuditRecord|>]];
 
 runExample[name_String, familyRequest_:None,
     matchingPrivateHalos_:Automatic] := Module[
@@ -3107,6 +3121,7 @@ runExample[name_String, familyRequest_:None,
      extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop,
      trLoCache, trHiCache, chartCache,
      resumeTransport, resumeNativeTransport, levelExpansionOrder,
+     levelEpsilonGauge,
      needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
      transportSys = None, planLo = None, planHi = None, armReq,
@@ -3132,9 +3147,15 @@ runExample[name_String, familyRequest_:None,
     resumeNativeTransport = AssociationQ[resumeCheckpoint] &&
       resumeCheckpoint["Kind"] === "NativeTransport" &&
       level === resumeCheckpoint["Level"];
+    ft2NativeStageTiming["level=", level,
+      " epsilon-basis-gauge-extract-begin"];
+    levelEpsilonGauge = If[AssociationQ[plannedLevel],
+      plannedLevel["Gauge"], Automatic];
+    ft2NativeStageTiming["level=", level,
+      " epsilon-basis-gauge-extract-ready"];
     epsilonBasis = ft2NormalizeEpsilonBasis[
       A, currentBCs, currentPrefactors, Global`eps,
-      If[AssociationQ[plannedLevel], plannedLevel["Gauge"], Automatic]];
+      levelEpsilonGauge];
     If[FailureQ[epsilonBasis],
       Print["FTLADDER EPS BASIS FAIL level=", level, " ", epsilonBasis];
       Throw[$Failed, "FT2Abort"]];

@@ -142,6 +142,7 @@ fixtureExportResults[results_List] := MapIndexed[Function[{observable, pos},
 counts = newCounts[];
 capturedPrepare = None;
 capturedObservables = None;
+capturedMaxExtraPrecision = None;
 
 mixed = Block[{
     ft2NativeSegmentLine = Function[{system, path},
@@ -150,6 +151,7 @@ mixed = Block[{
       {system, boundary, lower, upper, coefficientVectors, variable,
        targetMax, requiredTargetMax, threads},
       counts["prepare"]++;
+      capturedMaxExtraPrecision = $MaxExtraPrecision;
       capturedPrepare = <|"Boundary" -> boundary,
         "CoefficientVectors" -> coefficientVectors,
         "TargetCompleteMax" -> targetMax,
@@ -206,13 +208,15 @@ lowTargetCancellationProvenance = Quiet[Check[ImportString[
     lowTargetCancellationPolicy["Provenance"], "RawJSON"], $Failed]];
 assert["atlas preparation receives every active non-direct vector and exact target",
   AssociationQ[capturedPrepare] &&
+    capturedMaxExtraPrecision >=
+      DiffExp2`Tolerances`$MaxExtraPrecisionValue &&
     capturedPrepare["TargetCompleteMax"] === 8 &&
     capturedPrepare["RequiredTargetCompleteMax"] === 8 &&
     Length[capturedPrepare["CoefficientVectors"]] === 4 &&
     AllTrue[capturedPrepare["Boundary"],
       DiffExp2`EpsSeries`ESMinPower[#] === -1 &&
         DiffExp2`EpsSeries`ESCompleteMax[#] === 10 &],
-  capturedPrepare];
+  {capturedMaxExtraPrecision, capturedPrepare}];
 assert["observable order and operation-specific epsilon windows are stable",
   Lookup[capturedObservables, "Operation"] ===
     {"integrate", "limitLower", "limitUpper", "integrate"} &&

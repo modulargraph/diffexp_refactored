@@ -822,7 +822,7 @@
               "two-arm transport anchor belongs to a different retained chart for " +
               input.name);
         anchor->require_exact_plan_binding(
-            anchor_binding.geometry, anchor_binding.prescriptions,
+            anchor_binding.local_geometry, anchor_binding.prescriptions,
             "two-arm transport anchor");
 
         input.basis.reserve(input.basis_handles.size());
@@ -1210,7 +1210,7 @@
         throw std::invalid_argument(
             "transport-arm anchor belongs to a different retained chart");
       anchor->require_exact_plan_binding(
-          anchor_binding.geometry, anchor_binding.prescriptions,
+          anchor_binding.local_geometry, anchor_binding.prescriptions,
           "transport-arm anchor");
 
       input.basis.reserve(match_count);

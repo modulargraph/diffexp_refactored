@@ -107,7 +107,8 @@ std::string retained_plan_owner_geometry_record(
 
 RetainedPlanChartBinding bind_plan_chart(
     const RetainedPlanChartBinding::Owner& owner,
-    const ExactPathTopology& topology) {
+    const ExactPathTopology& topology, const json::object& planning,
+    const json::object& certified) {
   const auto handle = retained_plan_owner_handle(owner);
   const auto exact_identity = retained_plan_owner_identity(owner);
   const auto geometry_value = json::parse(
@@ -123,12 +124,74 @@ RetainedPlanChartBinding bind_plan_chart(
   binding.exact_identity = exact_identity;
   binding.owner = owner;
   binding.geometry.identity = exact_identity;
+  require_exact_keys(planning,
+      {"center_exact", "scale_exact", "radius_exact",
+       "certificate_identity"}, "tile planning chart");
   binding.geometry.center = parse_exact_path_rational(
-      geometry.at("center_exact"), "tile chart center");
+      planning.at("center_exact"), "tile planning chart center");
   binding.geometry.scale = parse_exact_path_rational(
-      geometry.at("scale_exact"), "tile chart scale");
+      planning.at("scale_exact"), "tile planning chart scale");
   binding.geometry.radius = parse_exact_path_rational(
-      geometry.at("radius_exact"), "tile chart radius");
+      planning.at("radius_exact"), "tile planning chart radius");
+  binding.planning_certificate_identity = required_string(
+      planning, "certificate_identity");
+  if (binding.planning_certificate_identity.empty())
+    throw std::invalid_argument(
+        "tile planning chart requires a nonempty exact certificate identity");
+  require_exact_keys(certified,
+      {"index", "center", "scale", "radius"},
+      "certified algebraic tile chart");
+  const auto& center = as_object(certified.at("center"),
+                                 "certified chart center");
+  const auto& scale = as_object(certified.at("scale"),
+                                "certified chart scale");
+  const auto& radius = as_object(certified.at("radius"),
+                                 "certified chart radius");
+  for (const auto* point : {&center, &scale, &radius})
+    require_exact_keys(*point, {"exact", "value", "sign"},
+                       "certified chart scalar");
+  binding.local_geometry.center_exact = required_string(center, "exact");
+  binding.local_geometry.scale_exact = required_string(scale, "exact");
+  binding.local_geometry.infinite_radius = false;
+  binding.center_numeric = parse_scalar<ComplexBall>(center.at("value"));
+  binding.scale_numeric = parse_scalar<ComplexBall>(scale.at("value"));
+  binding.local_geometry.radius = parse_scalar<ComplexBall>(
+      radius.at("value"));
+  binding.scale_sign = as_i32(scale.at("sign"), "certified scale sign");
+  if (binding.scale_sign != -1 && binding.scale_sign != 1)
+    throw std::invalid_argument(
+        "certified chart scale requires exact sign +/-1");
+  if (required_string(geometry, "center_exact") !=
+          binding.local_geometry.center_exact ||
+      required_string(geometry, "scale_exact") !=
+          binding.local_geometry.scale_exact ||
+      required_string(geometry, "radius_exact") !=
+          required_string(radius, "exact"))
+    throw std::invalid_argument(
+        "certified algebraic chart identity differs from its retained equation owner");
+  if (!local_detail::exactly_real(binding.center_numeric) ||
+      !local_detail::exactly_real(binding.scale_numeric) ||
+      !local_detail::exactly_real(binding.local_geometry.radius) ||
+      binding.scale_numeric.contains_zero() ||
+      !arb_is_positive(acb_realref(binding.local_geometry.radius.raw())))
+    throw std::invalid_argument(
+        "certified algebraic chart specializations are not provably real/nondegenerate");
+  const auto numeric_scale_sign =
+      arb_is_positive(acb_realref(binding.scale_numeric.raw())) ? 1
+      : arb_is_negative(acb_realref(binding.scale_numeric.raw())) ? -1 : 0;
+  if (numeric_scale_sign != binding.scale_sign ||
+      binding.geometry.scale.sign() != binding.scale_sign)
+    throw std::invalid_argument(
+        "certified chart scale sign contradicts its specialization or planning surrogate");
+  std::optional<Rational> exact_scale;
+  try {
+    exact_scale = Rational(binding.local_geometry.scale_exact);
+  } catch (const std::invalid_argument&) {
+    // A genuinely algebraic exact identity is intentionally opaque.
+  }
+  if (exact_scale.has_value() && exact_scale->sign() != binding.scale_sign)
+    throw std::invalid_argument(
+        "certified rational chart scale sign contradicts its exact identity");
   binding.geometry.singular_center = std::any_of(
       topology.singular_points.begin(), topology.singular_points.end(),
       [&](const Rational& point) { return point == binding.geometry.center; });
@@ -162,6 +225,43 @@ RetainedPlanChartBinding bind_plan_chart(
   return binding;
 }
 
+json::object certified_rational_scalar(const Rational& value) {
+  return json::object{
+      {"exact", value.str()},
+      {"value", json::array{value.str(), "0"}},
+      {"sign", value.sign()}};
+}
+
+// Compatibility path for the existing exact-rational protocol.  It is
+// deliberately implemented by constructing the same certified records as
+// the algebraic protocol, so all downstream integration and checkpoint code
+// has one representation and one validation path.
+RetainedPlanChartBinding bind_plan_chart(
+    const RetainedPlanChartBinding::Owner& owner,
+    const ExactPathTopology& topology) {
+  const auto geometry_value = json::parse(
+      retained_plan_owner_geometry_record(owner));
+  const auto& geometry = as_object(
+      geometry_value, "retained native tile chart geometry");
+  if (geometry.at("infinite_radius").as_bool())
+    throw std::invalid_argument(
+        "native exact tile planning currently requires finite chart radii");
+  const Rational center(required_string(geometry, "center_exact"));
+  const Rational scale(required_string(geometry, "scale_exact"));
+  const Rational radius(required_string(geometry, "radius_exact"));
+  json::object planning{
+      {"center_exact", center.str()}, {"scale_exact", scale.str()},
+      {"radius_exact", radius.str()},
+      {"certificate_identity",
+       "legacy-rational:" + retained_plan_owner_identity(owner) + ":" +
+           center.str() + ":" + scale.str() + ":" + radius.str()}};
+  json::object certified{
+      {"index", 0}, {"center", certified_rational_scalar(center)},
+      {"scale", certified_rational_scalar(scale)},
+      {"radius", certified_rational_scalar(radius)}};
+  return bind_plan_chart(owner, topology, planning, certified);
+}
+
 std::vector<std::string> parse_plan_chart_handles(const json::object& arm) {
   std::vector<std::string> handles;
   for (const auto& raw : as_array(arm.at("charts"), "tile arm charts")) {
@@ -179,8 +279,19 @@ std::pair<ExactArmRequest, std::vector<RetainedPlanChartBinding>>
 parse_retained_arm_request(
     const json::object& arm,
     const std::vector<RetainedPlanChartBinding::Owner>& charts) {
-  require_exact_keys(arm, {"from_exact", "to_exact", "charts", "topology"},
-                     "native tile arm");
+  const bool has_planning = arm.if_contains("planning_charts") != nullptr;
+  const bool has_certified = arm.if_contains("certified_geometry") != nullptr;
+  if (has_planning != has_certified)
+    throw std::invalid_argument(
+        "native tile arm must provide planning and certified geometry together");
+  if (has_planning)
+    require_exact_keys(arm,
+        {"from_exact", "to_exact", "charts", "planning_charts",
+         "certified_geometry", "topology"}, "native tile arm");
+  else
+    require_exact_keys(arm,
+        {"from_exact", "to_exact", "charts", "topology"},
+        "native tile arm");
   const auto handles = parse_plan_chart_handles(arm);
   if (handles.size() != charts.size())
     throw std::invalid_argument(
@@ -197,11 +308,277 @@ parse_retained_arm_request(
   for (std::size_t index = 0; index < charts.size(); ++index) {
     if (retained_plan_owner_handle(charts[index]) != handles[index])
       throw std::logic_error("resolved tile chart handle changed");
-    auto binding = bind_plan_chart(charts[index], request.topology);
+    RetainedPlanChartBinding binding;
+    if (has_planning) {
+      const auto& raw_planning = as_array(
+          arm.at("planning_charts"), "tile planning charts");
+      const auto& raw_certified = as_object(
+          arm.at("certified_geometry"), "certified algebraic arm geometry");
+      const auto& certified_charts = as_array(
+          raw_certified.at("charts"), "certified algebraic arm charts");
+      if (raw_planning.size() != charts.size() ||
+          certified_charts.size() != charts.size())
+        throw std::invalid_argument(
+            "planning/certified chart count differs from retained owners");
+      const auto& planning = as_object(raw_planning[index],
+                                       "tile planning chart");
+      const auto& certified = as_object(certified_charts[index],
+                                        "certified algebraic chart");
+      if (as_u64(certified.at("index"), "certified chart index") != index)
+        throw std::invalid_argument(
+            "certified algebraic charts are not in exact owner order");
+      binding = bind_plan_chart(charts[index], request.topology,
+                                planning, certified);
+    } else {
+      binding = bind_plan_chart(charts[index], request.topology);
+    }
     request.charts.push_back(binding.geometry);
     bindings.push_back(std::move(binding));
   }
   return {std::move(request), std::move(bindings)};
+}
+
+RealEvaluationPoint parse_certified_local_point(const json::value& raw,
+                                                const char* label) {
+  const auto& point = as_object(raw, label);
+  require_exact_keys(point, {"exact", "value", "sign"}, label);
+  const auto exact = required_string(point, "exact");
+  const auto numeric = parse_scalar<ComplexBall>(point.at("value"));
+  const auto sign = as_i32(point.at("sign"), label);
+  std::optional<Rational> rational;
+  try {
+    rational = Rational(exact);
+  } catch (const std::invalid_argument&) {
+    // A genuine algebraic exact identity is intentionally opaque to C++.
+  }
+  if (rational.has_value()) {
+    auto result = RealEvaluationPoint::rational(rational->str());
+    const auto signed_result = result.sign < 0
+        ? -result.modulus : result.modulus;
+    if (result.sign != sign ||
+        !acb_overlaps(signed_result.raw(), numeric.raw()))
+      throw std::invalid_argument(
+          std::string(label) +
+          " rational identity contradicts its certified sign/specialization");
+    return result;
+  }
+  return RealEvaluationPoint::certified(exact, numeric, sign);
+}
+
+ComplexBall signed_certified_value(const RealEvaluationPoint& point) {
+  return point.sign < 0 ? -point.modulus : point.modulus;
+}
+
+void validate_certified_local_binding(
+    const RetainedPlanChartBinding& chart,
+    const RealEvaluationPoint& local, const ComplexBall& physical,
+    const char* label) {
+  if (!arb_lt(acb_realref(local.modulus.raw()),
+              acb_realref(chart.local_geometry.radius.raw())))
+    throw std::invalid_argument(std::string(label) +
+        " is not provably inside its retained algebraic chart radius");
+  const auto mapped = chart.center_numeric +
+      chart.scale_numeric * signed_certified_value(local);
+  if (!acb_overlaps(mapped.raw(), physical.raw()))
+    throw std::invalid_argument(std::string(label) +
+        " specialization does not map to its certified physical point");
+}
+
+bool certified_tile_zero_length(const RetainedArmPlan& arm,
+                                std::size_t tile_index) {
+  const auto& tile = arm.certified_tiles.at(tile_index);
+  const bool physical_zero =
+      tile.physical_begin_exact == tile.physical_end_exact;
+  const bool local_zero =
+      tile.local_begin.exact_coordinate == tile.local_end.exact_coordinate;
+  if (physical_zero != local_zero)
+    throw std::invalid_argument(
+        "certified transport tile has inconsistent physical/local zero-length identities");
+  if (physical_zero) return true;
+
+  // Every nonzero certified tile must preserve the arm orientation.  Exact
+  // rational physical endpoints are authoritative; genuinely algebraic
+  // endpoints require strict separation of their rigorous real balls.
+  std::optional<Rational> begin_exact;
+  std::optional<Rational> end_exact;
+  try {
+    begin_exact = Rational(tile.physical_begin_exact);
+    end_exact = Rational(tile.physical_end_exact);
+  } catch (const std::invalid_argument&) {
+    begin_exact.reset();
+    end_exact.reset();
+  }
+  std::int32_t direction = 0;
+  if (begin_exact.has_value() && end_exact.has_value()) {
+    direction = *begin_exact < *end_exact
+        ? 1 : *end_exact < *begin_exact ? -1 : 0;
+  } else {
+    if (!local_detail::exactly_real(tile.physical_begin_numeric) ||
+        !local_detail::exactly_real(tile.physical_end_numeric))
+      throw std::invalid_argument(
+          "certified transport tile physical endpoints are not rigorously real");
+    direction = arb_lt(acb_realref(tile.physical_begin_numeric.raw()),
+                       acb_realref(tile.physical_end_numeric.raw()))
+        ? 1 : arb_lt(acb_realref(tile.physical_end_numeric.raw()),
+                     acb_realref(tile.physical_begin_numeric.raw()))
+        ? -1 : 0;
+  }
+  if (direction == 0 || direction != arm.exact.direction)
+    throw std::invalid_argument(
+        "certified transport tile direction contradicts its retained arm");
+  return false;
+}
+
+void attach_certified_arm_geometry(const json::object& raw_arm,
+                                   RetainedArmPlan& arm) {
+  const auto& certified = as_object(raw_arm.at("certified_geometry"),
+                                    "certified algebraic arm geometry");
+  require_exact_keys(certified,
+      {"schema", "exact_identity", "charts", "matches", "tiles"},
+      "certified algebraic arm geometry");
+  if (required_string(certified, "schema") !=
+          "diffexp2-wolfram-certified-algebraic-arm-v1")
+    throw std::invalid_argument(
+        "unsupported certified algebraic arm geometry schema");
+  arm.certified_geometry_identity = required_string(
+      certified, "exact_identity");
+  if (arm.certified_geometry_identity.empty())
+    throw std::invalid_argument(
+        "certified algebraic arm geometry identity cannot be empty");
+  arm.planning_charts = as_array(
+      raw_arm.at("planning_charts"), "tile planning charts");
+  arm.certified_geometry = certified;
+  const auto& raw_matches = as_array(certified.at("matches"),
+                                     "certified algebraic matches");
+  const auto& raw_tiles = as_array(certified.at("tiles"),
+                                   "certified algebraic tiles");
+  if (raw_matches.size() != arm.exact.matches.size() ||
+      raw_tiles.size() != arm.exact.tiles.size())
+    throw std::invalid_argument(
+        "certified algebraic geometry does not reproduce the exact plan topology");
+  arm.certified_matches.reserve(raw_matches.size());
+  for (std::size_t index = 0; index < raw_matches.size(); ++index) {
+    const auto& raw = as_object(raw_matches[index],
+                                "certified algebraic match");
+    require_exact_keys(raw,
+        {"index", "physical", "producing_local", "receiving_local"},
+        "certified algebraic match");
+    if (as_u64(raw.at("index"), "certified match index") != index)
+      throw std::invalid_argument(
+          "certified algebraic matches are not in exact plan order");
+    const auto& physical_record = as_object(raw.at("physical"),
+                                            "certified match physical point");
+    const auto physical_exact = required_string(physical_record, "exact");
+    const auto physical_numeric = parse_scalar<ComplexBall>(
+        physical_record.at("value"));
+    const auto producing_local = parse_certified_local_point(
+        raw.at("producing_local"), "certified producing local point");
+    const auto receiving_local = parse_certified_local_point(
+        raw.at("receiving_local"), "certified receiving local point");
+    const auto& planned = arm.exact.matches[index];
+    const auto& producing = arm.charts.at(planned.producing_chart);
+    const auto& receiving = arm.charts.at(planned.receiving_chart);
+    validate_certified_local_binding(producing, producing_local,
+                                     physical_numeric,
+                                     "certified producing match point");
+    validate_certified_local_binding(receiving, receiving_local,
+                                     physical_numeric,
+                                     "certified receiving match point");
+    arm.certified_matches.push_back(CertifiedPlanMatch{
+        {producing_local, physical_exact, physical_numeric,
+         raw.at("producing_local").as_object().at("value")},
+        {receiving_local, physical_exact, physical_numeric,
+         raw.at("receiving_local").as_object().at("value")}});
+  }
+  arm.certified_tiles.reserve(raw_tiles.size());
+  for (std::size_t index = 0; index < raw_tiles.size(); ++index) {
+    const auto& raw = as_object(raw_tiles[index],
+                                "certified algebraic tile");
+    require_exact_keys(raw,
+        {"index", "chart_index", "physical_begin", "physical_end",
+         "local_begin", "local_end"}, "certified algebraic tile");
+    if (as_u64(raw.at("index"), "certified tile index") != index ||
+        as_u64(raw.at("chart_index"), "certified tile chart index") !=
+            arm.exact.tiles[index].chart)
+      throw std::invalid_argument(
+          "certified algebraic tile order differs from the exact plan topology");
+    const auto& begin = as_object(raw.at("physical_begin"),
+                                  "certified tile physical begin");
+    const auto& end = as_object(raw.at("physical_end"),
+                                "certified tile physical end");
+    CertifiedPlanTile tile;
+    tile.physical_begin_exact = required_string(begin, "exact");
+    tile.physical_end_exact = required_string(end, "exact");
+    tile.physical_begin_numeric = parse_scalar<ComplexBall>(
+        begin.at("value"));
+    tile.physical_end_numeric = parse_scalar<ComplexBall>(end.at("value"));
+    tile.local_begin = parse_certified_local_point(
+        raw.at("local_begin"), "certified tile local begin");
+    tile.local_end = parse_certified_local_point(
+        raw.at("local_end"), "certified tile local end");
+    const auto& chart = arm.charts.at(arm.exact.tiles[index].chart);
+    validate_certified_local_binding(chart, tile.local_begin,
+                                     tile.physical_begin_numeric,
+                                     "certified tile begin");
+    validate_certified_local_binding(chart, tile.local_end,
+                                     tile.physical_end_numeric,
+                                     "certified tile end");
+    arm.certified_tiles.push_back(std::move(tile));
+  }
+}
+
+void attach_rational_arm_geometry(RetainedArmPlan& arm) {
+  json::array planning;
+  json::array charts;
+  planning.reserve(arm.charts.size());
+  charts.reserve(arm.charts.size());
+  for (std::size_t index = 0; index < arm.charts.size(); ++index) {
+    const auto& binding = arm.charts[index];
+    planning.push_back(json::object{
+        {"center_exact", binding.geometry.center.str()},
+        {"scale_exact", binding.geometry.scale.str()},
+        {"radius_exact", binding.geometry.radius.str()},
+        {"certificate_identity", binding.planning_certificate_identity}});
+    charts.push_back(json::object{
+        {"index", index},
+        {"center", certified_rational_scalar(binding.geometry.center)},
+        {"scale", certified_rational_scalar(binding.geometry.scale)},
+        {"radius", certified_rational_scalar(binding.geometry.radius)}});
+  }
+  json::array matches;
+  matches.reserve(arm.exact.matches.size());
+  for (std::size_t index = 0; index < arm.exact.matches.size(); ++index) {
+    const auto& match = arm.exact.matches[index];
+    matches.push_back(json::object{
+        {"index", index},
+        {"physical", certified_rational_scalar(match.physical)},
+        {"producing_local",
+         certified_rational_scalar(match.producing_local)},
+        {"receiving_local",
+         certified_rational_scalar(match.receiving_local)}});
+  }
+  json::array tiles;
+  tiles.reserve(arm.exact.tiles.size());
+  for (std::size_t index = 0; index < arm.exact.tiles.size(); ++index) {
+    const auto& tile = arm.exact.tiles[index];
+    tiles.push_back(json::object{
+        {"index", index}, {"chart_index", tile.chart},
+        {"physical_begin",
+         certified_rational_scalar(tile.physical_begin)},
+        {"physical_end", certified_rational_scalar(tile.physical_end)},
+        {"local_begin", certified_rational_scalar(tile.local_begin)},
+        {"local_end", certified_rational_scalar(tile.local_end)}});
+  }
+  json::object certified{
+      {"schema", "diffexp2-wolfram-certified-algebraic-arm-v1"},
+      {"exact_identity",
+       "legacy-rational-arm:" + arm.exact.from.str() + ":" +
+           arm.exact.to.str()},
+      {"charts", std::move(charts)}, {"matches", std::move(matches)},
+      {"tiles", std::move(tiles)}};
+  json::object raw_arm{{"planning_charts", std::move(planning)},
+                       {"certified_geometry", std::move(certified)}};
+  attach_certified_arm_geometry(raw_arm, arm);
 }
 
 std::shared_ptr<StoredTilePlan> build_tile_plan(
@@ -229,6 +606,18 @@ std::shared_ptr<StoredTilePlan> build_tile_plan(
                         std::move(lower_bindings)};
   RetainedArmPlan upper{std::move(exact.upper),
                         std::move(upper_bindings)};
+  const auto& lower_raw = as_object(request.at("lower"),
+                                    "lower native tile arm");
+  const auto& upper_raw = as_object(request.at("upper"),
+                                    "upper native tile arm");
+  if (lower_raw.if_contains("certified_geometry"))
+    attach_certified_arm_geometry(lower_raw, lower);
+  else
+    attach_rational_arm_geometry(lower);
+  if (upper_raw.if_contains("certified_geometry"))
+    attach_certified_arm_geometry(upper_raw, upper);
+  else
+    attach_rational_arm_geometry(upper);
   json::object provenance{
       {"schema", "diffexp2-retained-exact-independent-arm-tile-plan-v1"},
       {"checkpoint_identity", checkpoint_identity},
@@ -262,6 +651,12 @@ std::shared_ptr<StoredTilePlan> build_single_arm_tile_plan(
   auto exact = plan_exact_arm(arm_request, options);
   const std::string arm_name = exact.direction < 0 ? "lower" : "upper";
   RetainedArmPlan retained{std::move(exact), std::move(bindings)};
+  const auto& raw_arm = as_object(request.at("arm"),
+                                  "single native tile arm");
+  if (raw_arm.if_contains("certified_geometry"))
+    attach_certified_arm_geometry(raw_arm, retained);
+  else
+    attach_rational_arm_geometry(retained);
   json::object provenance{
       {"schema", kRetainedSingleArmTilePlanProvenanceSchema},
       {"checkpoint_identity", checkpoint_identity},
@@ -320,12 +715,12 @@ ResolvedPlannedEndpointBinding resolve_planned_endpoint_binding(
     throw std::invalid_argument(
         "plan-bound endpoint local does not name the retained final chart");
   local->require_exact_plan_binding(
-      final_chart.geometry, final_chart.prescriptions,
+      final_chart.local_geometry, final_chart.prescriptions,
       "plan-bound endpoint final local");
 
   ResolvedPlannedEndpointBinding resolved;
   resolved.approach_direction =
-      -arm.exact.direction * final_chart.geometry.scale.sign();
+      -arm.exact.direction * final_chart.scale_sign;
   resolved.rim = exact_plan_rim(
       final_chart.prescriptions, final_chart.geometry.scale);
   resolved.source = json::object{
@@ -564,11 +959,11 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
   // prescription, rim and source checkpoint passed to the existing matching
   // kernels.  Locals must reproduce the prepared chart snapshot exactly.
   incoming->require_exact_plan_binding(
-      producing.geometry, producing.prescriptions,
+      producing.local_geometry, producing.prescriptions,
       "planned incoming " + incoming_handle);
   for (std::size_t column = 0; column < basis.size(); ++column)
     basis[column]->require_exact_plan_binding(
-        receiving.geometry, receiving.prescriptions,
+      receiving.local_geometry, receiving.prescriptions,
         "planned basis " + basis_handles[column]);
 
   json::array basis_checkpoints;
@@ -581,6 +976,13 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
     throw std::invalid_argument(
         "planned local match checkpoint identity cannot be empty");
 
+  const auto& certified_match = arm.certified_matches.at(match_index);
+  const auto encode_point = [&](const CertifiedPlanPoint& point) {
+    return json::object{
+        {"exact", point.local.exact_coordinate},
+        {"value", point.local_numeric_encoding},
+        {"sign", point.local.sign}};
+  };
   json::object kernel_request{
       {"basis", [&]() {
          json::array values;
@@ -590,10 +992,10 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
       {"incoming", incoming_handle},
       {"basis_chart", receiving.handle},
       {"incoming_chart", producing.handle},
-      {"basis_point", json::object{
-           {"exact", exact_match.receiving_local.str()}}},
-      {"incoming_point", json::object{
-           {"exact", exact_match.producing_local.str()}}},
+      {"basis_point", encode_point(certified_match.receiving)},
+      {"incoming_point", encode_point(certified_match.producing)},
+      {"certified_physical_match_point_exact",
+       certified_match.receiving.physical_exact},
       {"epsilon", request.at("epsilon")},
       {"basis_checkpoint_identities", std::move(basis_checkpoints)},
       {"incoming_checkpoint_identity", incoming->checkpoint_identity()},
@@ -646,9 +1048,9 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
 
   const auto native_summary = native_match->summary();
   if (required_string(native_summary, "physical_match_point_exact") !=
-      exact_match.physical.str())
+      certified_match.receiving.physical_exact)
     throw std::logic_error(
-        "native local match physical point differs from its retained exact plan");
+        "native local match physical point differs from its retained certified geometry");
 
   auto handoff = planned_match_handoff_record(
       plan, arm_name, match_index, basis_handles, basis, incoming_handle,
@@ -723,6 +1125,7 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
   if (tile_index >= arm.exact.tiles.size())
     throw std::invalid_argument("planned line tile index is out of range");
   const auto& tile = arm.exact.tiles[tile_index];
+  const auto& certified_tile = arm.certified_tiles.at(tile_index);
   const auto& binding = arm.charts.at(tile.chart);
   if (local->source_chart() != binding.handle)
     throw std::invalid_argument(
@@ -741,12 +1144,18 @@ std::shared_ptr<StoredLineResult> build_planned_line_result(
   auto interval = encode_plan_tile(arm, tile_index);
   const auto rim = exact_plan_rim(
       binding.prescriptions, binding.geometry.scale);
+  const bool certified_zero =
+      certified_tile_zero_length(arm, tile_index);
   const auto started = std::chrono::steady_clock::now();
   StoredLineIntegral result;
   try {
     result = local->integrate_planned_line(
-        binding.geometry, binding.prescriptions, tile.local_begin,
-        tile.local_end, delivered, rim, certify_tail,
+        binding.geometry, binding.local_geometry, binding.scale_numeric,
+        binding.local_geometry.scale_exact, binding.scale_sign,
+        binding.prescriptions,
+        certified_tile.local_begin, certified_tile.local_end,
+        tile.local_end < tile.local_begin, certified_zero,
+        delivered, rim, certify_tail,
         divergent_cancellation);
   } catch (const NativeIntegrationError& error) {
     std::ostringstream detail;
@@ -1524,6 +1933,7 @@ NativeAcbSaturationBinding native_acb_saturation_binding(
     throw std::invalid_argument(
         "native Acb saturation selection match index is outside its retained arm");
   const auto& exact_match = retained.exact.matches[match_index];
+  const auto& certified_match = retained.certified_matches.at(match_index);
   const auto& receiving = retained.charts.at(exact_match.receiving_chart);
   const auto* scc_owner = std::get_if<
       std::shared_ptr<CompositeSCCChartBase>>(&receiving.owner);
@@ -1551,8 +1961,11 @@ NativeAcbSaturationBinding native_acb_saturation_binding(
           {"receiving_execution_capability",
            (*scc_owner)->column_execution_capability()},
           {"receiving_basis_point_exact",
-           exact_match.receiving_local.str()},
-          {"physical_match_point_exact", exact_match.physical.str()},
+           certified_match.receiving.local.exact_coordinate},
+          {"receiving_basis_point_sign",
+           certified_match.receiving.local.sign},
+          {"physical_match_point_exact",
+           certified_match.receiving.physical_exact},
           {"receiving_rim", optional_plan_rim_json(receiving_rim)}};
   if (!compact_plan_reference)
     request["tile_plan_provenance_identity"] =
@@ -2235,9 +2648,10 @@ StoredLineIntegral integrate_transport_stored_row_tile(
   if constexpr (std::is_same_v<Scalar, ComplexBall>)
     ComplexBall::set_precision(precision_bits);
   const auto& tile = arm.exact.tiles[tile_index];
+  const auto& certified_tile = arm.certified_tiles.at(tile_index);
   const auto& binding = arm.charts.at(tile.chart);
   source->require_exact_plan_binding(
-      binding.geometry, binding.prescriptions,
+      binding.local_geometry, binding.prescriptions,
       "fused transport row source");
   auto matrix = parse_prepared_rational_row<Scalar>(
       prepared_row, source->solution());
@@ -2305,20 +2719,51 @@ StoredLineIntegral integrate_transport_stored_row_tile(
   const bool reverse_local_orientation =
       tile.local_end < tile.local_begin;
   const auto& primitive_begin = reverse_local_orientation
-      ? tile.local_end : tile.local_begin;
+      ? certified_tile.local_end : certified_tile.local_begin;
   const auto& primitive_end = reverse_local_orientation
-      ? tile.local_begin : tile.local_end;
+      ? certified_tile.local_begin : certified_tile.local_end;
   StoredLineIntegrationOptions options;
   options.delivered_epsilon = {line_min, line_complete};
   options.imaginary_sign = rim;
+  options.certified_chart_scale_sign = binding.scale_sign;
   options.divergent_cancellation = divergent_cancellation;
+
+  // Scale bridging can retain an original exact handoff while the rational
+  // topology surrogate moves it inward, leaving a zero integration tile
+  // which still performs a basis transfer.
+  const bool certified_zero =
+      certified_tile_zero_length(arm, tile_index);
+
+  // Even a zero primitive must validate the retained branch prescription;
+  // otherwise a malformed chart could hide behind a skipped integration.
+  std::optional<std::int32_t> chart_sign;
+  try {
+    chart_sign = derive_chart_imaginary_sign(
+        source->solution(), binding.scale_sign);
+  } catch (const std::domain_error& error) {
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+        std::string("invalid prepared chart branch prescription: ") +
+            error.what());
+  }
+  if (chart_sign.has_value() && rim.has_value() &&
+      *chart_sign != *rim)
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+        "explicit fused-line branch sign conflicts with the prepared chart");
+
+  if (certified_zero) {
+    return certified_zero_physical_line(
+        {line_min, line_complete}, 1,
+        rim.has_value() ? rim : chart_sign,
+        certified_tile.local_begin.sign == 0, false);
+  }
 
   StoredLineIntegral result;
   try {
     result = integrate_prepared_scalar_row_stored(
         matrix, source->solution(), projected_complete,
-        RealEvaluationPoint::rational(primitive_begin.str()),
-        RealEvaluationPoint::rational(primitive_end.str()), options);
+        primitive_begin, primitive_end, options);
   } catch (const NativeIntegrationError& error) {
     std::ostringstream detail;
     detail << error.what() << "; arm=" << arm_name
@@ -2327,6 +2772,11 @@ StoredLineIntegral integrate_transport_stored_row_tile(
            << "," << tile.physical_end.str() << "]"
            << "; local_interval=[" << tile.local_begin.str()
            << "," << tile.local_end.str() << "]"
+           << "; certified_primitive_interval=["
+           << primitive_begin.exact_coordinate << ","
+           << primitive_end.exact_coordinate << "]"
+           << "; certified_primitive_signs=["
+           << primitive_begin.sign << "," << primitive_end.sign << "]"
            << "; chart=" << binding.handle
            << "; chart_center=" << binding.geometry.center.str()
            << "; chart_scale=" << binding.geometry.scale.str()
@@ -2342,10 +2792,11 @@ StoredLineIntegral integrate_transport_stored_row_tile(
     throw contextual;
   }
 
-  const auto oriented_jacobian = reverse_local_orientation
-      ? -binding.geometry.scale : binding.geometry.scale;
-  const auto jacobian =
-      ComplexBall::from_strings(oriented_jacobian.str());
+  const auto jacobian = reverse_local_orientation
+      ? -binding.scale_numeric : binding.scale_numeric;
+  const auto oriented_jacobian_exact = reverse_local_orientation
+      ? "-(" + binding.local_geometry.scale_exact + ")"
+      : binding.local_geometry.scale_exact;
   for (auto& coefficient : result.value.coefficients)
     coefficient *= jacobian;
   if (!result.value.error.empty()) {
@@ -2353,7 +2804,7 @@ StoredLineIntegral integrate_transport_stored_row_tile(
     for (auto& bound : result.value.error.absolute)
       bound = bound * jacobian_upper;
     result.value.error.provenance +=
-        "; physical_jacobian_exact=" + oriented_jacobian.str();
+        "; physical_jacobian_exact=" + oriented_jacobian_exact;
   }
   return result;
 }

@@ -33,6 +33,10 @@ struct StoredLineIntegrationOptions {
   // complete_max must be computable without reading an unknown coefficient.
   EpsilonWindow delivered_epsilon;
   std::optional<std::int32_t> imaginary_sign;
+  // A retained tile plan may bind a genuinely algebraic chart scale.  Its
+  // exact string remains opaque; this independently certified sign is the
+  // only scale fact needed to validate the prepared branch rim.
+  std::optional<std::int32_t> certified_chart_scale_sign;
   // Generic native line integration remains exact-singleton strict.  The
   // only caller allowed to populate this policy is the explicitly declared
   // FT transport-pair observable path.  Its tolerance and producer
@@ -72,6 +76,31 @@ struct StoredLineIntegral {
   StoredLineIntegrationDiagnostics diagnostics;
 };
 
+inline StoredLineIntegral certified_zero_physical_line(
+    const EpsilonWindow& epsilon, std::uint32_t dimension,
+    std::optional<std::int32_t> imaginary_sign,
+    bool has_center_endpoint, bool tail_certificate_requested) {
+  StoredLineIntegral zero;
+  zero.value.epsilon = epsilon;
+  zero.value.dimension = dimension;
+  zero.value.coefficients.assign(
+      epsilon.width() * dimension, ComplexBall(0));
+  zero.value.error.frame = epsilon;
+  zero.value.error.guarantee = ErrorGuarantee::Certified;
+  zero.value.error.absolute.assign(epsilon.width(), Magnitude::zero());
+  zero.value.error.provenance =
+      "exact zero certified physical tile; no primitive or unseen-tail contribution";
+  zero.scope = LineIntegrationScope::FullLocalWithCertifiedTail;
+  zero.imaginary_sign = imaginary_sign;
+  zero.diagnostics.has_center_endpoint = has_center_endpoint;
+  zero.diagnostics.tail_certificate_requested =
+      tail_certificate_requested;
+  zero.diagnostics.tail_certificate_status =
+      "exact-zero-certified-interval";
+  zero.diagnostics.detail = zero.value.error.provenance;
+  return zero;
+}
+
 namespace line_integration_detail {
 
 inline RealEvaluationPoint require_exact_rational_point(
@@ -81,6 +110,18 @@ inline RealEvaluationPoint require_exact_rational_point(
         NativeIntegrationErrorCode::InvalidInterval, "E9",
         std::string(label) +
             " endpoint has no retained exact local-coordinate identity");
+
+  if (point.certified_algebraic) {
+    if (!arb_is_zero(acb_imagref(point.modulus.raw())) ||
+        !arb_is_nonnegative(acb_realref(point.modulus.raw())) ||
+        (point.sign == 0 && !point.modulus.is_zero()) ||
+        (point.sign != 0 && point.modulus.contains_zero()))
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::InvalidInterval, "E9",
+          std::string(label) +
+              " certified algebraic endpoint has an invalid real modulus/sign specialization");
+    return point;
+  }
 
   Rational exact(0);
   try {
@@ -432,7 +473,10 @@ StoredLineIntegral integrate_stored_local_line(
 
   std::optional<std::int32_t> chart_sign;
   try {
-    chart_sign = derive_chart_imaginary_sign(solution);
+    chart_sign = options.certified_chart_scale_sign.has_value()
+        ? derive_chart_imaginary_sign(
+              solution, *options.certified_chart_scale_sign)
+        : derive_chart_imaginary_sign(solution);
   } catch (const std::domain_error& error) {
     throw NativeIntegrationError(
         NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
@@ -699,7 +743,10 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
 
   std::optional<std::int32_t> chart_sign;
   try {
-    chart_sign = derive_chart_imaginary_sign(source);
+    chart_sign = options.certified_chart_scale_sign.has_value()
+        ? derive_chart_imaginary_sign(
+              source, *options.certified_chart_scale_sign)
+        : derive_chart_imaginary_sign(source);
   } catch (const std::domain_error& error) {
     throw NativeIntegrationError(
         NativeIntegrationErrorCode::MissingBranchPrescription, "E3",

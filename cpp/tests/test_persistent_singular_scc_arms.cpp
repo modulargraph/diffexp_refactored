@@ -18,6 +18,9 @@ constexpr const char* kSingularProofSchema =
     "diffexp2-native-acb-singular-scc-valuation-zero-saturation-proof-v1";
 constexpr const char* kOrdinaryProofSchema =
     "diffexp2-native-acb-unit-leading-saturation-proof-v1";
+constexpr const char* kAlgebraicScale = "Root[-2+#1^2&,2,0]";
+constexpr const char* kAlgebraicScaleValue =
+    "[1.414213562373095048801688724209698078569671875376948073176679738 +/- 1e-63]";
 
 json::object request(json::object value) {
   return json::parse(diffexp2::run_recurrence_json(json::serialize(value)))
@@ -37,6 +40,24 @@ json::object geometry(const std::string& center) {
                       {"radius_exact", "2"},
                       {"infinite_radius", false},
                       {"prescriptions", json::array{}}};
+}
+
+json::array singular_prescriptions() {
+  return json::array{json::object{
+      {"factor_exact", "x+2/3"}, {"sign", -1},
+      {"multiplicity", 1}, {"leading_coefficient_sign", 1}}};
+}
+
+json::object singular_geometry() {
+  return json::object{
+      {"center_exact", "-2/3"},
+      {"center_numeric", json::array{"-2/3", "0"}},
+      {"scale_exact", kAlgebraicScale},
+      {"scale_numeric", json::array{kAlgebraicScaleValue, "0"}},
+      {"radius_exact", "2"},
+      {"radius_numeric", json::array{"2", "0"}},
+      {"infinite_radius", false},
+      {"prescriptions", singular_prescriptions()}};
 }
 
 json::array singleton_components() {
@@ -128,7 +149,7 @@ std::string prepare_singular_chart(const std::string& session) {
       {"key", "singular-arm-block"},
       {"identity", "singular-arm-block-identity"},
       {"analytic", json::object{
-           {"geometry", geometry("-2/3")},
+           {"geometry", singular_geometry()},
            {"principal_matrix", std::move(principal_matrix)},
            {"native_scc_capabilities", json::object{
                 {"regular", false}, {"identity_gauge", true},
@@ -213,11 +234,13 @@ json::object metadata(const std::string& center, const std::string& checkpoint,
     tag["p"] = json::object{{"domain", "integer"}, {"canonical", "0"}};
   return json::object{
       {"chart", json::object{{"center_exact", center},
-                              {"scale_exact", "1"},
+                              {"scale_exact", singular
+                                   ? kAlgebraicScale : "1"},
                               {"radius", "2"},
                               {"infinite_radius", false}}},
       {"tag", std::move(tag)},
-      {"prescriptions", json::array{}},
+      {"prescriptions", singular
+           ? singular_prescriptions() : json::array{}},
       {"checkpoint_identity", checkpoint}};
 }
 
@@ -257,7 +280,7 @@ std::string prepare_singular_scc(const std::string& session,
            {"dimension", 1},
            {"exact_system_record", std::move(exact_system)},
            {"exact_theta_record", std::move(exact_theta)},
-           {"chart", geometry("-2/3")},
+           {"chart", singular_geometry()},
            {"scc", json::object{
                 {"components", singleton_components()},
                 {"structural_edges", self_edges()},
@@ -316,11 +339,88 @@ json::object topology(bool singular) {
        singular ? json::array{"-2/3"} : json::array{}},
       {"boundary_points", json::array{}},
       {"complex_projections", json::array{}},
-      {"branch_sheets", json::array{}}};
+      {"branch_sheets", singular
+           ? json::array{json::object{
+                 {"factor_exact", "x+2/3"}, {"sign", -1}}}
+           : json::array{}}};
+}
+
+json::object certified_point(const char* exact, const char* real,
+                             std::int32_t sign) {
+  return json::object{{"exact", exact},
+                      {"value", json::array{real, "0"}},
+                      {"sign", sign}};
+}
+
+json::object algebraic_singular_arm(const std::string& anchor,
+                                    const std::string& receiver) {
+  constexpr auto root = "Root[-2+#1^2&,2,0]";
+  // The rational planning surrogate chooses a nonzero first tile, while the
+  // certified physical handoff remains at the anchor.  This is the exact
+  // scale-bridge shape exercised by the pentagon upper arm: tile zero is a
+  // basis transfer with no physical integration, and the receiving local is
+  // still genuinely algebraic.
+  constexpr auto physical_exact = "0";
+  constexpr auto physical_value = "0";
+  constexpr auto receiving_exact = "Root[-2+#1^2&,2,0]/3";
+  constexpr auto receiving_value =
+      "[0.4714045207910316829338962414032326928565572917923160243922265793 +/- 1e-64]";
+  (void)root;
+  json::array planning{
+      json::object{{"center_exact", "0"}, {"scale_exact", "1"},
+                   {"radius_exact", "2"},
+                   {"certificate_identity", "root-anchor-surrogate-v1"}},
+      json::object{{"center_exact", "-2/3"}, {"scale_exact", "1"},
+                   {"radius_exact", "2"},
+                   {"certificate_identity", "root-receiver-surrogate-v1"}}};
+  json::array charts{
+      json::object{{"index", 0},
+                   {"center", certified_point("0", "0", 0)},
+                   {"scale", certified_point("1", "1", 1)},
+                   {"radius", certified_point("2", "2", 1)}},
+      json::object{{"index", 1},
+                   {"center", certified_point("-2/3", "-2/3", -1)},
+                   {"scale", certified_point(
+                        kAlgebraicScale, kAlgebraicScaleValue, 1)},
+                   {"radius", certified_point("2", "2", 1)}}};
+  json::array matches{json::object{
+      {"index", 0},
+      {"physical", certified_point(physical_exact, physical_value, 0)},
+      {"producing_local",
+       certified_point(physical_exact, physical_value, 0)},
+      {"receiving_local",
+       certified_point(receiving_exact, receiving_value, 1)}}};
+  json::array tiles{
+      json::object{{"index", 0}, {"chart_index", 0},
+                   {"physical_begin", certified_point("0", "0", 0)},
+                   {"physical_end",
+                    certified_point(physical_exact, physical_value, 0)},
+                   {"local_begin", certified_point("0", "0", 0)},
+                   {"local_end",
+                    certified_point(physical_exact, physical_value, 0)}},
+      json::object{{"index", 1}, {"chart_index", 1},
+                   {"physical_begin",
+                    certified_point(physical_exact, physical_value, 0)},
+                   {"physical_end", certified_point("-2/3", "-2/3", -1)},
+                   {"local_begin",
+                    certified_point(receiving_exact, receiving_value, 1)},
+                   {"local_end", certified_point("0", "0", 0)}}};
+  return json::object{
+      {"from_exact", "0"}, {"to_exact", "-2/3"},
+      {"charts", json::array{anchor, receiver}},
+      {"planning_charts", std::move(planning)},
+      {"certified_geometry", json::object{
+           {"schema", "diffexp2-wolfram-certified-algebraic-arm-v1"},
+           {"exact_identity", "singular-root-arm-exact-v1"},
+           {"charts", std::move(charts)}, {"matches", std::move(matches)},
+           {"tiles", std::move(tiles)}}},
+      {"topology", topology(true)}};
 }
 
 json::object arm(const std::string& endpoint, const std::string& anchor,
                  const std::string& receiver, bool singular) {
+  if (singular)
+    return algebraic_singular_arm(anchor, receiver);
   return json::object{{"from_exact", "0"}, {"to_exact", endpoint},
                       {"charts", json::array{anchor, receiver}},
                       {"topology", topology(singular)}};
@@ -510,8 +610,9 @@ json::object direct_singular_match_request(
            {"receiving_scc", scc},
            {"receiving_scc_exact_identity", "singular-arm-scc-identity"},
            {"receiving_execution_capability",
-            "acb-regular-singular-scalar-block-dag-column-v1"},
+           "acb-regular-singular-scalar-block-dag-column-v1"},
            {"receiving_basis_point_exact", "1/2"},
+           {"receiving_basis_point_sign", 1},
            {"physical_match_point_exact", "-1/2"},
            {"receiving_rim", nullptr}}},
       {"refinement", json::object{

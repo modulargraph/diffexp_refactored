@@ -1783,14 +1783,39 @@ cppPersistentPrescription[record_Association] := <|
   "multiplicity" -> record["Multiplicity"],
   "leading_coefficient_sign" -> record["LeadingCoeffSign"]|>;
 
-cppPersistentGeometry[cs_Association] := Join[<|
-    "center_exact" -> ToString[cs["Center"], InputForm],
-    "scale_exact" -> ToString[cs["ChartMap", "Scale"], InputForm],
+cppExactRealAlgebraicQ[value_] := Module[{canonical},
+  If[!FreeQ[value, _?InexactNumberQ], Return[False, Module]];
+  canonical = Quiet[Check[RootReduce[value], $Failed]];
+  canonical =!= $Failed && NumericQ[canonical] &&
+    TrueQ[Quiet[Check[Element[canonical, Algebraics], False]]] &&
+    TrueQ[Quiet[Check[FullSimplify[Im[canonical] == 0], False]]]];
+
+cppExactAlgebraicTruthQ[condition_] := TrueQ[Quiet[Check[
+  FullSimplify[RootReduce[condition]], False]]];
+
+cppPersistentGeometry[cs_Association] := Module[
+  {digits = Max[80, 2 DiffExp2`Config`CFG["WorkingPrecision"]],
+   center = RootReduce[cs["Center"]],
+   scale = RootReduce[cs["ChartMap", "Scale"]], radius, encoded},
+  radius = If[cs["Radius"] === Infinity, Infinity,
+    RootReduce[cs["Radius"]]];
+  encoded[value_, label_] := Module[{result =
+      DiffExp2`CppBackend`EncodeScalar[value, digits]},
+    If[FailureQ[result], err["E5", cs, <|"Field" -> label,
+      "Value" -> value, "Detail" ->
+        "persistent chart geometry has no rigorous Acb specialization"|>]];
+    result];
+  Join[<|
+    "center_exact" -> ToString[center, InputForm],
+    "scale_exact" -> ToString[scale, InputForm],
+    "center_numeric" -> encoded[center, "center"],
+    "scale_numeric" -> encoded[scale, "scale"],
     "infinite_radius" -> TrueQ[cs["Radius"] === Infinity],
     "prescriptions" ->
       (cppPersistentPrescription /@ Lookup[cs, "Prescriptions", {}])|>,
   If[TrueQ[cs["Radius"] === Infinity], <||>,
-    <|"radius_exact" -> ToString[cs["Radius"], InputForm]|>]];
+    <|"radius_exact" -> ToString[radius, InputForm],
+      "radius_numeric" -> encoded[radius, "radius"]|>]]];
 
 (* Exact producer certificates for the deliberately narrow first composite
    slice.  These are structural predicates, never numerical enclosure tests.
@@ -5127,12 +5152,14 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   scale = Lookup[Lookup[cs, "ChartMap", <||>], "Scale", None];
   radius = Lookup[cs, "Radius", None];
   If[!FreeQ[{center, scale, radius}, _?InexactNumberQ] ||
-      !(IntegerQ[center] || Head[center] === Rational) ||
-      !((IntegerQ[scale] || Head[scale] === Rational) && scale =!= 0) ||
+      !cppExactRealAlgebraicQ[center] ||
+      !cppExactRealAlgebraicQ[scale] ||
+      !cppExactAlgebraicTruthQ[scale != 0] ||
       radius === Infinity ||
-      !((IntegerQ[radius] || Head[radius] === Rational) && radius > 0),
+      !cppExactRealAlgebraicQ[radius] ||
+      !cppExactAlgebraicTruthQ[radius > 0],
     err["E6", cs, <|"Scale" -> scale, "Radius" -> radius,
-      "Detail" -> "native SCC first slice requires a rational center, nonzero rational scale, and positive finite rational radius"|>]];
+      "Detail" -> "native SCC first slice requires exact real algebraic geometry, a nonzero scale, and a positive finite radius"|>]];
 
   signature = sccNativeCompositeCacheSignature[cs, req];
   cacheKey = Hash[signature, "SHA256"];

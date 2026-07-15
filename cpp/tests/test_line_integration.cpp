@@ -406,6 +406,48 @@ void fused_rational_row_matches_materialized_projection() {
                 fused.diagnostics.primitive_evaluations);
 }
 
+void fused_row_uses_exact_rational_endpoint_order() {
+  auto source = base_solution<Rational>(1);
+  source.checkpoint_identity = "fused-exact-interval-source";
+  source.sectors = {
+      sector<Rational>("0", "0", 0, {Rational(1)})};
+  PreparedSparseLocalMultiplierMatrix<Rational> row;
+  row.rows = 1;
+  row.columns = 1;
+  row.exact_identity = "fused-exact-interval-row";
+  row.entries.push_back(
+      {0, 0,
+       prepared_multiplier<Rational>(
+           0, 0, {{Rational(1)}}, "1")});
+  StoredLineIntegrationOptions options;
+  options.delivered_epsilon = {0, 0};
+
+  const std::string pentagon_endpoint =
+      "10376293541461622784/130481795891926181249";
+  const auto pentagon = diffexp2::integrate_prepared_scalar_row_stored(
+      row, source, 0, RealEvaluationPoint::rational("0"),
+      RealEvaluationPoint::rational(pentagon_endpoint), options);
+  check("fused row accepts the exact rational pentagon tile interval",
+        overlaps(pentagon.value.at(0, 0),
+                 ComplexBall::from_strings(pentagon_endpoint)));
+
+  const auto lower = RealEvaluationPoint::rational(pentagon_endpoint);
+  const auto close_exact = Rational(pentagon_endpoint) + Rational(
+      "1/1" + std::string(1000, '0'));
+  const auto upper = RealEvaluationPoint::rational(close_exact.str());
+  const bool enclosures_overlap = arb_overlaps(
+      acb_realref(lower.modulus.raw()), acb_realref(upper.modulus.raw()));
+  bool exact_order_accepted = false;
+  try {
+    (void)diffexp2::integrate_prepared_scalar_row_stored(
+        row, source, 0, lower, upper, options);
+    exact_order_accepted = true;
+  } catch (const NativeIntegrationError&) {
+  }
+  check("fused row orders distinct rational endpoints exactly when their Acb enclosures overlap",
+        enclosures_overlap && exact_order_accepted);
+}
+
 template <typename Scalar>
 LocalSolution<Scalar> cross_cell_cancellation_source(const Scalar& positive,
                                                       const Scalar& negative) {
@@ -571,6 +613,7 @@ int main() {
   upper_halo_and_first_unseen_fail_loudly();
   input_error_envelope_is_not_discarded();
   fused_rational_row_matches_materialized_projection();
+  fused_row_uses_exact_rational_endpoint_order();
   fused_row_cancels_divergence_across_sector_taylor_cells();
   fused_acb_row_matches_bounded_cross_cell_cancellation();
   fused_sparse_row_ignores_unselected_sector_payloads();

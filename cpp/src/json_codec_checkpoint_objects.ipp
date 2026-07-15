@@ -69,7 +69,8 @@ parse_checkpoint_retained_arm(
   const auto& object = as_object(raw, label);
   require_exact_keys(object,
       {"from_exact", "to_exact", "direction", "division_order", "charts",
-       "matches", "tiles", "topology"}, label);
+       "matches", "tiles", "planning_charts", "certified_geometry",
+       "topology"}, label);
   ExactArmRequest request;
   request.from = parse_exact_path_rational(object.at("from_exact"), label);
   request.to = parse_exact_path_rational(object.at("to_exact"), label);
@@ -81,6 +82,18 @@ parse_checkpoint_retained_arm(
                                 " has no retained charts");
   bindings.reserve(raw_charts.size());
   request.charts.reserve(raw_charts.size());
+  const auto& raw_planning = as_array(
+      object.at("planning_charts"), "checkpoint tile planning charts");
+  const auto& raw_certified = as_object(
+      object.at("certified_geometry"),
+      "checkpoint certified algebraic arm geometry");
+  const auto& certified_charts = as_array(
+      raw_certified.at("charts"),
+      "checkpoint certified algebraic arm charts");
+  if (raw_planning.size() != raw_charts.size() ||
+      certified_charts.size() != raw_charts.size())
+    throw std::invalid_argument(std::string(label) +
+                                " planning/certified chart count differs from its retained owners");
   for (std::size_t index = 0; index < raw_charts.size(); ++index) {
     const auto& raw_chart = as_object(raw_charts[index], label);
     require_exact_keys(raw_chart,
@@ -110,7 +123,16 @@ parse_checkpoint_retained_arm(
           std::string(label) +
           " chart binding is neither a prepared-chart nor composite-SCC handle");
     }
-    auto binding = bind_plan_chart(owner, request.topology);
+    const auto& planning = as_object(
+        raw_planning[index], "checkpoint tile planning chart");
+    const auto& certified = as_object(
+        certified_charts[index], "checkpoint certified algebraic chart");
+    if (as_u64(certified.at("index"),
+               "checkpoint certified chart index") != index)
+      throw std::invalid_argument(std::string(label) +
+                                  " certified charts are not in owner order");
+    auto binding = bind_plan_chart(owner, request.topology,
+                                   planning, certified);
     if (encode_plan_chart(binding, index) != raw_chart)
       throw std::invalid_argument(std::string(label) +
                                   " chart binding differs from its exact retained owner");
@@ -167,6 +189,9 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
       throw std::invalid_argument(
           "checkpoint single-arm tile-plan name differs from its exact direction");
     RetainedArmPlan retained{std::move(exact), std::move(bindings)};
+    attach_certified_arm_geometry(
+        as_object(object.at("arm"),
+                  "checkpoint retained single tile arm"), retained);
     if (encode_retained_arm(retained) != object.at("arm"))
       throw std::invalid_argument(
           "checkpoint single-arm tile intervals do not reproduce the exact planner result");
@@ -243,6 +268,10 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
                         std::move(lower_bindings)};
   RetainedArmPlan upper{std::move(planned.upper),
                         std::move(upper_bindings)};
+  attach_certified_arm_geometry(
+      as_object(object.at("lower"), "checkpoint lower tile arm"), lower);
+  attach_certified_arm_geometry(
+      as_object(object.at("upper"), "checkpoint upper tile arm"), upper);
   if (encode_retained_arm(lower) != object.at("lower") ||
       encode_retained_arm(upper) != object.at("upper"))
     throw std::invalid_argument(
@@ -691,11 +720,11 @@ restore_checkpoint_planned_match_hop_record(
   const auto& producing = arm.charts.at(exact_match.producing_chart);
   const auto& receiving = arm.charts.at(exact_match.receiving_chart);
   incoming->require_exact_plan_binding(
-      producing.geometry, producing.prescriptions,
+      producing.local_geometry, producing.prescriptions,
       "checkpoint planned-match incoming owner");
   for (const auto& local : basis)
     local->require_exact_plan_binding(
-        receiving.geometry, receiving.prescriptions,
+        receiving.local_geometry, receiving.prescriptions,
         "checkpoint planned-match basis owner");
 
   const auto& native_record = as_object(
@@ -752,10 +781,11 @@ restore_checkpoint_planned_match_hop_record(
     throw std::invalid_argument(
         "checkpoint planned hop embedded match does not reproduce its exact payload");
   const auto native_summary = native_match->summary();
+  const auto& certified_match = arm.certified_matches.at(match_index);
   if (required_string(native_summary, "checkpoint_identity") !=
           checkpoint_identity ||
       required_string(native_summary, "physical_match_point_exact") !=
-          exact_match.physical.str())
+          certified_match.receiving.physical_exact)
     throw std::invalid_argument(
         "checkpoint planned hop embedded match changed its checkpoint/physical point");
   std::vector<std::string> basis_handles;

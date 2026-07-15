@@ -120,6 +120,10 @@ std::string canonical_chart_geometry_record(const json::value& raw) {
   json::object canonical{{"center_exact", center},
                          {"scale_exact", scale},
                          {"infinite_radius", infinite}};
+  if (const auto* numeric = geometry.if_contains("center_numeric"))
+    canonical["center_numeric"] = *numeric;
+  if (const auto* numeric = geometry.if_contains("scale_numeric"))
+    canonical["scale_numeric"] = *numeric;
   if (infinite) {
     if (const auto* radius = geometry.if_contains("radius_exact");
         radius != nullptr && !radius->is_null() &&
@@ -133,6 +137,8 @@ std::string canonical_chart_geometry_record(const json::value& raw) {
     canonical["radius_exact"] = "Infinity";
   } else {
     canonical["radius_exact"] = required_string(geometry, "radius_exact");
+    if (const auto* numeric = geometry.if_contains("radius_numeric"))
+      canonical["radius_numeric"] = *numeric;
   }
   canonical["prescriptions"] = std::move(prescriptions);
   return json::serialize(canonical);
@@ -140,58 +146,61 @@ std::string canonical_chart_geometry_record(const json::value& raw) {
 
 void validate_first_slice_rational_geometry(const json::value& raw) {
   const auto& geometry = as_object(raw, "exact chart geometry");
-  try {
-    (void)Rational(required_string(geometry, "center_exact"));
-  } catch (const std::invalid_argument&) {
+  const auto exact_specialization = [&](const char* exact_key,
+                                        const char* numeric_key) {
+    if (const auto* numeric = geometry.if_contains(numeric_key))
+      return parse_scalar<ComplexBall>(*numeric);
+    return ComplexBall::from_strings(
+        Rational(required_string(geometry, exact_key)).str());
+  };
+  const auto center = exact_specialization("center_exact", "center_numeric");
+  const auto scale = exact_specialization("scale_exact", "scale_numeric");
+  if (!local_detail::exactly_real(center) ||
+      !local_detail::exactly_real(scale) || scale.contains_zero())
     throw std::invalid_argument(
-        "native SCC first slice requires an exact rational chart center");
-  }
-  Rational scale;
-  try {
-    scale = Rational(required_string(geometry, "scale_exact"));
-  } catch (const std::invalid_argument&) {
-    throw std::invalid_argument(
-        "native SCC first slice requires an exact rational chart scale");
-  }
-  if (scale.is_zero())
-    throw std::invalid_argument(
-        "native SCC first slice requires a nonzero chart scale");
+        "native SCC first slice requires certified real center/scale specializations and a scale excluding zero");
   if (geometry.at("infinite_radius").as_bool())
     throw std::invalid_argument(
         "native SCC first slice requires a positive finite rational radius");
 
-  Rational radius;
-  try {
-    radius = Rational(required_string(geometry, "radius_exact"));
-  } catch (const std::invalid_argument&) {
+  const auto radius = exact_specialization("radius_exact", "radius_numeric");
+  if (!local_detail::exactly_real(radius) ||
+      !arb_is_positive(acb_realref(radius.raw())))
     throw std::invalid_argument(
-        "native SCC first slice requires an exact rational finite radius");
-  }
-  const auto canonical_radius = radius.str();
-  if (radius.is_zero() || canonical_radius.front() == '-')
-    throw std::invalid_argument(
-        "native SCC first slice requires a positive finite radius");
+        "native SCC first slice requires a provably positive finite radius specialization");
 }
 
 struct RetainedCompositeGeometry {
   ChartGeometry chart;
   std::string radius_exact;
+  ComplexBall center_numeric;
+  ComplexBall scale_numeric;
   std::vector<Prescription> prescriptions;
 };
 
 RetainedCompositeGeometry parse_retained_composite_geometry(
     const json::value& raw) {
   const auto& geometry = as_object(raw, "exact chart geometry");
+  const auto exact_specialization = [&](const char* exact_key,
+                                        const char* numeric_key) {
+    if (const auto* numeric = geometry.if_contains(numeric_key))
+      return parse_scalar<ComplexBall>(*numeric);
+    return ComplexBall::from_strings(
+        Rational(required_string(geometry, exact_key)).str());
+  };
   RetainedCompositeGeometry retained;
   retained.chart.center_exact = required_string(geometry, "center_exact");
   retained.chart.scale_exact = required_string(geometry, "scale_exact");
+  retained.center_numeric = exact_specialization(
+      "center_exact", "center_numeric");
+  retained.scale_numeric = exact_specialization(
+      "scale_exact", "scale_numeric");
   retained.chart.infinite_radius = geometry.at("infinite_radius").as_bool();
   retained.radius_exact = retained.chart.infinite_radius
-      ? "Infinity"
-      : Rational(required_string(geometry, "radius_exact")).str();
+      ? "Infinity" : required_string(geometry, "radius_exact");
   if (!retained.chart.infinite_radius)
-    retained.chart.radius = ComplexBall::from_strings(
-        retained.radius_exact);
+    retained.chart.radius = exact_specialization(
+        "radius_exact", "radius_numeric");
   for (const auto& raw_prescription : as_array(
            geometry.at("prescriptions"), "exact chart prescriptions")) {
     const auto& prescription = as_object(
@@ -1725,9 +1734,13 @@ class StoredLocalBase {
   virtual EndpointLimitResult endpoint_limit(
       const EndpointLimitOptions& options) = 0;
   virtual StoredLineIntegral integrate_planned_line(
-      const ExactAffineChart& chart,
+      const ExactAffineChart& planning_chart,
+      const ChartGeometry& chart, const ComplexBall& scale_numeric,
+      const std::string& scale_exact, std::int32_t scale_sign,
       const std::vector<Prescription>& prescriptions,
-      const Rational& local_begin, const Rational& local_end,
+      const RealEvaluationPoint& local_begin,
+      const RealEvaluationPoint& local_end,
+      bool reverse_local_orientation, bool certified_zero_length,
       const EpsilonWindow& delivered_epsilon,
       std::optional<std::int32_t> exact_rim,
       bool certify_tail,
@@ -1737,7 +1750,7 @@ class StoredLocalBase {
   virtual json::object endpoint_metadata() const = 0;
   virtual json::object exact_analytic_metadata() const = 0;
   virtual void require_exact_plan_binding(
-      const ExactAffineChart& chart,
+      const ChartGeometry& chart,
       const std::vector<Prescription>& prescriptions,
       const std::string& label) const = 0;
   virtual const std::string& checkpoint_identity() const = 0;
@@ -2155,9 +2168,13 @@ class StoredLocal final : public StoredLocalBase {
   }
 
   StoredLineIntegral integrate_planned_line(
-      const ExactAffineChart& chart,
+      const ExactAffineChart& planning_chart,
+      const ChartGeometry& chart, const ComplexBall& scale_numeric,
+      const std::string& scale_exact, std::int32_t scale_sign,
       const std::vector<Prescription>& prescriptions,
-      const Rational& local_begin, const Rational& local_end,
+      const RealEvaluationPoint& local_begin,
+      const RealEvaluationPoint& local_end,
+      bool reverse_local_orientation, bool certified_zero_length,
       const EpsilonWindow& delivered_epsilon,
       std::optional<std::int32_t> exact_rim,
       bool certify_tail,
@@ -2171,11 +2188,11 @@ class StoredLocal final : public StoredLocalBase {
     } else {
       AcbPrecisionLease lease(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
-      if (!(Rational(solution_.chart.center_exact) == chart.center) ||
-          !(Rational(solution_.chart.scale_exact) == chart.scale) ||
-          solution_.chart.infinite_radius ||
-          !acb_equal(solution_.chart.radius.raw(),
-                     ComplexBall::from_strings(chart.radius.str()).raw()))
+      if (solution_.chart.center_exact != chart.center_exact ||
+          solution_.chart.scale_exact != chart.scale_exact ||
+          solution_.chart.infinite_radius != chart.infinite_radius ||
+          (!solution_.chart.infinite_radius &&
+           !acb_equal(solution_.chart.radius.raw(), chart.radius.raw())))
         throw std::invalid_argument(
             "retained local chart geometry differs from its native tile plan");
       const auto same_prescription = [](const Prescription& left,
@@ -2196,35 +2213,62 @@ class StoredLocal final : public StoredLocalBase {
       StoredLineIntegrationOptions options;
       options.delivered_epsilon = delivered_epsilon;
       options.imaginary_sign = exact_rim;
+      options.certified_chart_scale_sign = scale_sign;
       options.divergent_cancellation = divergent_cancellation;
-      if (local_begin == local_end)
+      const bool local_zero =
+          local_begin.exact_coordinate == local_end.exact_coordinate;
+      if (local_zero != certified_zero_length)
         throw std::invalid_argument(
-            "native planned line tile has zero local length");
-      const bool reverse_local_orientation = local_end < local_begin;
+            "native planned line zero-length authorization contradicts its exact local endpoints");
+      if (certified_zero_length) {
+        std::optional<std::int32_t> chart_sign;
+        try {
+          chart_sign = derive_chart_imaginary_sign(solution_, scale_sign);
+        } catch (const std::domain_error& error) {
+          throw NativeIntegrationError(
+              NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+              std::string("invalid prepared chart branch prescription: ") +
+                  error.what());
+        }
+        if (chart_sign.has_value() && exact_rim.has_value() &&
+            *chart_sign != *exact_rim)
+          throw NativeIntegrationError(
+              NativeIntegrationErrorCode::MissingBranchPrescription, "E3",
+              "explicit line branch sign conflicts with the prepared chart");
+        auto zero = certified_zero_physical_line(
+            delivered_epsilon, solution_.dimension,
+            exact_rim.has_value() ? exact_rim : chart_sign,
+            local_begin.sign == 0, certify_tail);
+        line_integrations_.fetch_add(1);
+        return zero;
+      }
       const auto& primitive_begin =
           reverse_local_orientation ? local_end : local_begin;
       const auto& primitive_end =
           reverse_local_orientation ? local_begin : local_end;
       const auto started = std::chrono::steady_clock::now();
-      const auto begin_point =
-          RealEvaluationPoint::rational(primitive_begin.str());
-      const auto end_point =
-          RealEvaluationPoint::rational(primitive_end.str());
+      const auto& begin_point = primitive_begin;
+      const auto& end_point = primitive_end;
       StoredLineIntegral result;
-      if (certify_tail && (tail_model_.model.has_value() ||
+      if (certify_tail && !begin_point.certified_algebraic &&
+          !end_point.certified_algebraic &&
+          (tail_model_.model.has_value() ||
                            (rational_row_tail_model_.has_value() &&
                             rational_row_tail_model_->model.has_value()))) {
-        const auto begin_modulus = primitive_begin.sign() < 0
-            ? -primitive_begin : primitive_begin;
-        const auto end_modulus = primitive_end.sign() < 0
-            ? -primitive_end : primitive_end;
+        const Rational begin_exact(begin_point.exact_coordinate);
+        const Rational end_exact(end_point.exact_coordinate);
+        const auto begin_modulus = begin_exact.sign() < 0
+            ? -begin_exact : begin_exact;
+        const auto end_modulus = end_exact.sign() < 0
+            ? -end_exact : end_exact;
         const auto outer = begin_modulus < end_modulus
             ? end_modulus : begin_modulus;
-        if (!(outer < chart.radius))
+        const auto& chart_radius = planning_chart.radius;
+        if (!(outer < chart_radius))
           throw std::invalid_argument(
               "planned line endpoint is not strictly inside its exact chart radius");
         const auto witness =
-            (outer + chart.radius) / Rational(2);
+            (outer + chart_radius) / Rational(2);
         auto certified = tail_model_.model.has_value()
             ? integrate_regular_local_line_with_certified_tail(
                   solution_, *tail_model_.model, begin_point, end_point,
@@ -2254,10 +2298,10 @@ class StoredLocal final : public StoredLocalBase {
       // integrate_stored_local_line is deliberately a local-coordinate
       // primitive.  A retained physical tile has dx = scale dt, so apply the
       // exact affine Jacobian before publishing the physical line result.
-      const auto oriented_jacobian = reverse_local_orientation
-          ? -chart.scale : chart.scale;
-      const auto jacobian =
-          ComplexBall::from_strings(oriented_jacobian.str());
+      const auto jacobian = reverse_local_orientation
+          ? -scale_numeric : scale_numeric;
+      const auto oriented_jacobian_exact = reverse_local_orientation
+          ? "-(" + scale_exact + ")" : scale_exact;
       for (auto& coefficient : result.value.coefficients)
         coefficient *= jacobian;
       if (!result.value.error.empty()) {
@@ -2265,7 +2309,7 @@ class StoredLocal final : public StoredLocalBase {
         for (auto& bound : result.value.error.absolute)
           bound = bound * jacobian_upper;
         result.value.error.provenance +=
-            "; physical_jacobian_exact=" + oriented_jacobian.str();
+            "; physical_jacobian_exact=" + oriented_jacobian_exact;
       }
       const auto elapsed = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
@@ -2290,16 +2334,16 @@ class StoredLocal final : public StoredLocalBase {
   }
 
   void require_exact_plan_binding(
-      const ExactAffineChart& chart,
+      const ChartGeometry& chart,
       const std::vector<Prescription>& prescriptions,
       const std::string& label) const override {
     AcbPrecisionLease lease(precision_bits_);
     ComplexBall::set_precision(precision_bits_);
-    if (!(Rational(solution_.chart.center_exact) == chart.center) ||
-        !(Rational(solution_.chart.scale_exact) == chart.scale) ||
-        solution_.chart.infinite_radius ||
-        !acb_equal(solution_.chart.radius.raw(),
-                   ComplexBall::from_strings(chart.radius.str()).raw()))
+    if (solution_.chart.center_exact != chart.center_exact ||
+        solution_.chart.scale_exact != chart.scale_exact ||
+        solution_.chart.infinite_radius != chart.infinite_radius ||
+        (!solution_.chart.infinite_radius &&
+         !acb_equal(solution_.chart.radius.raw(), chart.radius.raw())))
       throw std::invalid_argument(
           label +
           " retained local geometry differs from its exact tile-plan chart");

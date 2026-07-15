@@ -43,14 +43,54 @@ struct RetainedPlanChartBinding {
 
   std::string handle;
   std::string exact_identity;
+  // Rational surrogate used only by the exact combinatorial tile planner.
   ExactAffineChart geometry;
+  // Prepared equation geometry.  It may be genuinely algebraic; its exact
+  // strings are identities and the balls are rigorous specializations.
+  ChartGeometry local_geometry;
+  ComplexBall center_numeric;
+  ComplexBall scale_numeric;
+  std::int32_t scale_sign = 0;
+  std::string planning_certificate_identity;
   std::vector<Prescription> prescriptions;
   Owner owner;
+};
+
+struct CertifiedPlanPoint {
+  RealEvaluationPoint local;
+  std::string physical_exact;
+  ComplexBall physical_numeric;
+  // Preserve the producer's rigorous two-string Acb request encoding.  The
+  // parsed ball is used for validation/integration; this original encoding
+  // is replayed when a retained planned match invokes the matching kernel.
+  json::value local_numeric_encoding;
+};
+
+struct CertifiedPlanMatch {
+  CertifiedPlanPoint producing;
+  CertifiedPlanPoint receiving;
+};
+
+struct CertifiedPlanTile {
+  std::string physical_begin_exact;
+  std::string physical_end_exact;
+  ComplexBall physical_begin_numeric;
+  ComplexBall physical_end_numeric;
+  RealEvaluationPoint local_begin;
+  RealEvaluationPoint local_end;
 };
 
 struct RetainedArmPlan {
   ExactArmPlan exact;
   std::vector<RetainedPlanChartBinding> charts;
+  std::string certified_geometry_identity;
+  std::vector<CertifiedPlanMatch> certified_matches;
+  std::vector<CertifiedPlanTile> certified_tiles;
+  // These canonical request records are part of the retained/checkpointed
+  // plan identity.  They let restore rebind the rational planning surrogate
+  // and the Wolfram-certified algebraic geometry to the exact same owners.
+  json::array planning_charts;
+  json::object certified_geometry;
 };
 
 json::array encode_path_branch_sheets(
@@ -180,6 +220,8 @@ json::object encode_retained_arm(const RetainedArmPlan& arm) {
       {"division_order", arm.exact.division_order},
       {"charts", std::move(charts)}, {"matches", std::move(matches)},
       {"tiles", std::move(tiles)},
+      {"planning_charts", arm.planning_charts},
+      {"certified_geometry", arm.certified_geometry},
       {"topology", encode_plan_topology(arm.exact.topology)}};
 }
 
@@ -1382,7 +1424,7 @@ class StoredTransportArmState {
         throw std::invalid_argument(
             "retained transport-arm tile source belongs to a different chart");
       source->require_exact_plan_binding(
-          chart.geometry, chart.prescriptions,
+          chart.local_geometry, chart.prescriptions,
           "retained transport-arm tile source");
     }
     if (consumed_certificate_only_) {
@@ -1817,7 +1859,7 @@ ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
     throw std::invalid_argument(
         "transport endpoint final local does not name its final retained chart");
   local->require_exact_plan_binding(
-      final_chart.geometry, final_chart.prescriptions,
+      final_chart.local_geometry, final_chart.prescriptions,
       "transport endpoint final local");
 
   ResolvedTransportEndpointBinding binding;

@@ -1265,8 +1265,8 @@ json::object validate_native_singular_scc_saturation_request(
          "tile_plan_checkpoint_identity", "arm", "match",
          "match_checkpoint_identity", "receiving_scc",
          "receiving_scc_exact_identity", "receiving_execution_capability",
-         "receiving_basis_point_exact", "physical_match_point_exact",
-         "receiving_rim"},
+         "receiving_basis_point_exact", "receiving_basis_point_sign",
+         "physical_match_point_exact", "receiving_rim"},
         "compact native Acb singular-SCC valuation-zero request");
   else
     require_exact_keys(
@@ -1275,8 +1275,8 @@ json::object validate_native_singular_scc_saturation_request(
          "tile_plan_checkpoint_identity", "tile_plan_provenance_identity",
          "arm", "match", "match_checkpoint_identity", "receiving_scc",
          "receiving_scc_exact_identity", "receiving_execution_capability",
-         "receiving_basis_point_exact", "physical_match_point_exact",
-         "receiving_rim"},
+         "receiving_basis_point_exact", "receiving_basis_point_sign",
+         "physical_match_point_exact", "receiving_rim"},
         "native Acb singular-SCC valuation-zero request");
   if (!compact && schema != kNativeSingularSCCSaturationRequestSchema)
     throw std::invalid_argument(
@@ -1300,6 +1300,13 @@ json::object validate_native_singular_scc_saturation_request(
         context + ": native singular-SCC saturation request has an unknown arm");
   (void)as_u64(request.at("match"),
                "native singular-SCC saturation match index");
+  const auto basis_point_sign = as_i32(
+      request.at("receiving_basis_point_sign"),
+      "native singular-SCC receiving basis-point sign");
+  if (basis_point_sign != -1 && basis_point_sign != 1)
+    throw std::invalid_argument(
+        context +
+        ": native singular-SCC receiving basis-point sign must be +1 or -1");
   const auto capability = required_string(
       request, "receiving_execution_capability");
   if (!is_supported_acb_singular_scc_column_capability(capability))
@@ -1338,12 +1345,10 @@ void validate_singular_scc_basis_sources(
   const auto capability = required_string(
       native_request, "receiving_execution_capability");
   const bool scalar = capability == kAcbSingularScalarSCCColumnCapability;
-  const Rational basis_point(required_string(
-      native_request, "receiving_basis_point_exact"));
-  if (basis_point.is_zero())
-    throw std::invalid_argument(
-        context + ": singular-SCC matching cannot certify a chart-center evaluation");
-  const json::value expected_effective_rim = basis_point.sign() < 0
+  const auto basis_point_sign = as_i32(
+      native_request.at("receiving_basis_point_sign"),
+      "native singular-SCC receiving basis-point sign");
+  const json::value expected_effective_rim = basis_point_sign < 0
       ? native_request.at("receiving_rim") : json::value(nullptr);
   const auto* expected_column_schema = scalar
       ? "diffexp2-native-scc-acb-regular-singular-scalar-column-v1"
@@ -1992,10 +1997,6 @@ void require_acb_match_local(const LocalSolution<ComplexBall>& solution,
                              const RealEvaluationPoint& point,
                              const std::string& label) {
   validate_local_solution(solution, true);
-  if (point.sign == 0)
-    throw std::invalid_argument(
-        label +
-        " uses the chart center; refined Acb matching requires a nonzero interior point so singular powers are never assigned an artificial center value");
   if (!solution.error.empty())
     throw std::invalid_argument(
         label +
@@ -2005,6 +2006,19 @@ void require_acb_match_local(const LocalSolution<ComplexBall>& solution,
               acb_realref(solution.chart.radius.raw())))
     throw std::invalid_argument(
         label + " match point is not provably inside its chart radius");
+}
+
+RealEvaluationPoint parse_acb_match_point(const json::value& raw,
+                                          const char* label) {
+  const auto& point = as_object(raw, label);
+  if (point.if_contains("value") == nullptr &&
+      point.if_contains("sign") == nullptr)
+    return RealEvaluationPoint::rational(required_string(point, "exact"));
+  require_exact_keys(point, {"exact", "value", "sign"}, label);
+  return RealEvaluationPoint::certified(
+      required_string(point, "exact"),
+      parse_scalar<ComplexBall>(point.at("value")),
+      as_i32(point.at("sign"), label));
 }
 
 Rational acb_physical_match_point(const ChartGeometry& chart,
@@ -2115,11 +2129,10 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   refinement.required_complete_max = required_complete_max;
   refinement.max_refinement_steps = max_refinement_steps;
 
-  const auto basis_point = RealEvaluationPoint::rational(required_string(
-      as_object(request.at("basis_point"), "basis match point"), "exact"));
-  const auto incoming_point = RealEvaluationPoint::rational(required_string(
-      as_object(request.at("incoming_point"), "incoming match point"),
-      "exact"));
+  const auto basis_point = parse_acb_match_point(
+      request.at("basis_point"), "basis match point");
+  const auto incoming_point = parse_acb_match_point(
+      request.at("incoming_point"), "incoming match point");
   const auto requested_basis_sign = parse_optional_match_imaginary_sign(
       request, "basis_imaginary_sign");
   const auto requested_incoming_sign = parse_optional_match_imaginary_sign(
@@ -2206,21 +2219,34 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   require_acb_match_local(incoming->solution(), incoming_point,
                           "Acb incoming local " + incoming_handle);
 
-  const auto basis_physical_point = acb_physical_match_point(
-      basis.front()->solution().chart, basis_point, "Acb basis match point");
-  for (std::size_t column = 1; column < basis.size(); ++column)
-    if (!(acb_physical_match_point(
-              basis[column]->solution().chart, basis_point,
-              "Acb basis match point at column " +
-                  std::to_string(column)) == basis_physical_point))
+  std::string basis_physical_point;
+  if (const auto* certified = request.if_contains(
+          "certified_physical_match_point_exact")) {
+    if (!certified->is_string() || certified->as_string().empty() ||
+        !basis_point.certified_algebraic ||
+        !incoming_point.certified_algebraic)
       throw std::invalid_argument(
-          "Acb basis locals do not name one exact physical match point");
-  const auto incoming_physical_point = acb_physical_match_point(
-      incoming->solution().chart, incoming_point,
-      "Acb incoming match point");
-  if (!(basis_physical_point == incoming_physical_point))
-    throw std::invalid_argument(
-        "Acb basis and incoming coordinates do not name the same exact physical match point");
+          "certified physical match identity requires two certified algebraic local points");
+    basis_physical_point = std::string(certified->as_string());
+  } else {
+    const auto exact_basis_physical = acb_physical_match_point(
+        basis.front()->solution().chart, basis_point,
+        "Acb basis match point");
+    for (std::size_t column = 1; column < basis.size(); ++column)
+      if (!(acb_physical_match_point(
+                basis[column]->solution().chart, basis_point,
+                "Acb basis match point at column " +
+                    std::to_string(column)) == exact_basis_physical))
+        throw std::invalid_argument(
+            "Acb basis locals do not name one exact physical match point");
+    const auto incoming_physical_point = acb_physical_match_point(
+        incoming->solution().chart, incoming_point,
+        "Acb incoming match point");
+    if (!(exact_basis_physical == incoming_physical_point))
+      throw std::invalid_argument(
+          "Acb basis and incoming coordinates do not name the same exact physical match point");
+    basis_physical_point = exact_basis_physical.str();
+  }
 
   FiniteLaurentMatrix<ComplexBall> evaluated_basis(
       dimension, FiniteLaurentVector<ComplexBall>());
@@ -2406,13 +2432,13 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
             request.if_contains("native_unit_saturation"))
       return certify_native_unit_saturation(
           *raw_native, matching_basis, erased_basis, basis_sources,
-          basis_point.exact_coordinate, basis_physical_point.str(),
+          basis_point.exact_coordinate, basis_physical_point,
           matching_window,
           checkpoint_identity + ":native-unit-leading-proof");
     return certify_native_singular_scc_saturation(
         request.at("native_singular_scc_saturation"), matching_basis,
         erased_basis, basis_sources, basis_point.exact_coordinate,
-        basis_physical_point.str(), matching_window,
+        basis_physical_point, matching_window,
         active_session_configuration_identity,
         *expected_singular_request,
         checkpoint_identity,
@@ -2463,7 +2489,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       {"witness_identity", exact_lattice.identity},
       {"basis", std::move(exact_binding_basis)},
       {"basis_point_exact", basis_point.exact_coordinate},
-      {"physical_match_point_exact", basis_physical_point.str()},
+      {"physical_match_point_exact", basis_physical_point},
       {"matching_frame_identity", matching_frame_identity},
       {"epsilon", json::object{{"min", matching_window.min_power},
                                 {"max", matching_window.complete_max}}}};
@@ -2489,7 +2515,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       {"incoming", incoming_source},
       {"basis_point_exact", basis_point.exact_coordinate},
       {"incoming_point_exact", incoming_point.exact_coordinate},
-      {"physical_match_point_exact", basis_physical_point.str()},
+      {"physical_match_point_exact", basis_physical_point},
       {"matching_frame_identity", matching_frame_identity},
       {"epsilon", json::object{{"min", matching_window.min_power},
                                 {"max", matching_window.complete_max},
@@ -2512,7 +2538,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       exact_lattice.witness_schema,
       std::move(basis_sources), std::move(incoming_source), basis_chart,
       incoming_chart, basis_point.exact_coordinate,
-      incoming_point.exact_coordinate, basis_physical_point.str(),
+      incoming_point.exact_coordinate, basis_physical_point,
       matching_frame_identity,
       matching_window,
       required_complete_max, dimension, relative_tolerance,

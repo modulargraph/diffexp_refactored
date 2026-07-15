@@ -1226,7 +1226,7 @@ RunPersistentWeightedPlannedEndpointLimit[plan_Association, arm_String,
 
 CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
     checkpointIdentity_String, divisionOrder_:3] := Module[
-  {session = persistentCheckpointSession[owner], required,
+  {session = persistentCheckpointSession[owner], required, allowed,
    malformed, response},
   If[FailureQ[session], Return[session, Module]];
   If[StringLength[checkpointIdentity] == 0 || !IntegerQ[divisionOrder] ||
@@ -1235,10 +1235,13 @@ CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
       "native tile planning requires a nonempty checkpoint identity and integer DivisionOrder >= 2"|>],
       Module]];
   required = Sort[{"from_exact", "to_exact", "charts", "topology"}];
-  malformed = Select[{lower, upper}, Sort[Keys[#]] =!= required &];
+  allowed = {required, Sort[Join[required,
+    {"planning_charts", "certified_geometry"}]]};
+  malformed = Select[{lower, upper},
+    !MemberQ[allowed, Sort[Keys[#]]] &];
   If[malformed =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
-      "each native tile arm must contain exactly from_exact, to_exact, charts, and topology"|>],
+      "each native tile arm must contain the base exact planner fields and either both or neither certified algebraic geometry fields"|>],
       Module]];
   response = RunRequest[<|"schema" -> 2, "op" -> "tile.plan",
     "session" -> session, "checkpoint_identity" -> checkpointIdentity,
@@ -1253,7 +1256,7 @@ CreatePersistentTilePlan[owner_, lower_Association, upper_Association,
 
 CreatePersistentArmTilePlan[owner_, arm_Association,
     checkpointIdentity_String, divisionOrder_:3] := Module[
-  {session = persistentCheckpointSession[owner], required},
+  {session = persistentCheckpointSession[owner], required, allowed},
   If[FailureQ[session], Return[session, Module]];
   If[StringLength[checkpointIdentity] == 0 || !IntegerQ[divisionOrder] ||
       divisionOrder < 2,
@@ -1261,9 +1264,11 @@ CreatePersistentArmTilePlan[owner_, arm_Association,
       "native single-arm tile planning requires a nonempty checkpoint identity and integer DivisionOrder >= 2"|>],
       Module]];
   required = Sort[{"from_exact", "to_exact", "charts", "topology"}];
-  If[Sort[Keys[arm]] =!= required,
+  allowed = {required, Sort[Join[required,
+    {"planning_charts", "certified_geometry"}]]};
+  If[!MemberQ[allowed, Sort[Keys[arm]]],
     Return[Failure["CppBackend", <|"Detail" ->
-      "the native tile arm must contain exactly from_exact, to_exact, charts, and topology"|>],
+      "the native tile arm must contain the base exact planner fields and either both or neither certified algebraic geometry fields"|>],
       Module]];
   RunRequest[<|"schema" -> 2, "op" -> "tile.plan_arm",
     "session" -> session, "checkpoint_identity" -> checkpointIdentity,

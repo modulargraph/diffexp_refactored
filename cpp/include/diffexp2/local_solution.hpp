@@ -289,6 +289,10 @@ struct RealEvaluationPoint {
   ComplexBall modulus;
   std::int32_t sign = 0;
   std::string exact_coordinate;
+  // True only for an exact identity and sign certified by the Wolfram
+  // algebraic planner.  The ball is a rigorous specialization, never the
+  // source of the point's identity.
+  bool certified_algebraic = false;
 
   static RealEvaluationPoint rational(const std::string& value) {
     const Rational q(value);
@@ -299,6 +303,25 @@ struct RealEvaluationPoint {
                             q.is_zero() ? 0 : (canonical.front() == '-' ? -1 : 1),
                             canonical};
     return out;
+  }
+
+  static RealEvaluationPoint certified(std::string exact,
+                                       ComplexBall signed_value,
+                                       std::int32_t exact_sign) {
+    if (exact.empty() || (exact_sign != -1 && exact_sign != 0 &&
+                          exact_sign != 1))
+      throw std::invalid_argument(
+          "certified algebraic point requires an exact identity and sign");
+    if (!arb_is_zero(acb_imagref(signed_value.raw())))
+      throw std::invalid_argument(
+          "certified algebraic point specialization is not real");
+    if ((exact_sign == 0 && !signed_value.is_zero()) ||
+        (exact_sign != 0 && signed_value.contains_zero()))
+      throw std::invalid_argument(
+          "certified algebraic point sign disagrees with its specialization");
+    if (exact_sign < 0) signed_value = -signed_value;
+    return RealEvaluationPoint{std::move(signed_value), exact_sign,
+                               std::move(exact), true};
   }
 };
 
@@ -484,22 +507,12 @@ bool material_sector(const LocalSector<Scalar>& sector) {
 }
 
 template <typename Scalar>
-std::optional<std::int32_t> chart_imaginary_sign(
-    const LocalSolution<Scalar>& solution) {
+std::optional<std::int32_t> chart_imaginary_sign_from_scale_sign(
+    const LocalSolution<Scalar>& solution, std::int32_t scale_sign) {
   if (solution.prescriptions.empty()) return std::nullopt;
-  Rational scale;
-  try {
-    scale = Rational(solution.chart.scale_exact);
-  } catch (const std::invalid_argument&) {
+  if (scale_sign != -1 && scale_sign != 1)
     throw std::domain_error(
-        "analytic-continuation rim derivation requires an exact rational "
-        "chart scale");
-  }
-  if (scale.is_zero())
-    throw std::domain_error(
-        "analytic-continuation rim derivation requires a nonzero chart "
-        "scale");
-  const auto scale_sign = scale.sign();
+        "analytic-continuation rim derivation requires a certified nonzero chart-scale sign");
   std::optional<std::int32_t> derived;
   for (const auto& prescription : solution.prescriptions) {
     if ((prescription.multiplicity & 1U) == 0)
@@ -515,6 +528,25 @@ std::optional<std::int32_t> chart_imaginary_sign(
     derived = candidate;
   }
   return derived;
+}
+
+template <typename Scalar>
+std::optional<std::int32_t> chart_imaginary_sign(
+    const LocalSolution<Scalar>& solution) {
+  if (solution.prescriptions.empty()) return std::nullopt;
+  Rational scale;
+  try {
+    scale = Rational(solution.chart.scale_exact);
+  } catch (const std::invalid_argument&) {
+    throw std::domain_error(
+        "analytic-continuation rim derivation requires an exact rational "
+        "chart scale or a retained certified scale sign");
+  }
+  if (scale.is_zero())
+    throw std::domain_error(
+        "analytic-continuation rim derivation requires a nonzero chart "
+        "scale");
+  return chart_imaginary_sign_from_scale_sign(solution, scale.sign());
 }
 
 template <typename Scalar>
@@ -833,6 +865,15 @@ std::optional<std::int32_t> derive_chart_imaginary_sign(
     const LocalSolution<Scalar>& solution) {
   local_detail::validate_local_solution(solution, false);
   return local_detail::chart_imaginary_sign(solution);
+}
+
+
+template <typename Scalar>
+std::optional<std::int32_t> derive_chart_imaginary_sign(
+    const LocalSolution<Scalar>& solution, std::int32_t scale_sign) {
+  local_detail::validate_local_solution(solution, false);
+  return local_detail::chart_imaginary_sign_from_scale_sign(
+      solution, scale_sign);
 }
 
 template <typename Scalar>

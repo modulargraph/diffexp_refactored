@@ -384,6 +384,41 @@ inline void validate_interval(const RealEvaluationPoint& lower,
                               const RealEvaluationPoint& upper) {
   validate_point(lower);
   validate_point(upper);
+
+  // Rational endpoint identities are authoritative once their retained
+  // sign/modulus records have been validated by the caller.  At finite Acb
+  // precision two distinct rationals can have overlapping enclosures; that
+  // is not an ordering ambiguity in the exact interval.  Genuinely
+  // algebraic identities remain fail-closed on strict ball separation below.
+  std::optional<Rational> lower_exact;
+  std::optional<Rational> upper_exact;
+  try {
+    lower_exact = Rational(lower.exact_coordinate);
+    upper_exact = Rational(upper.exact_coordinate);
+  } catch (const std::invalid_argument&) {
+    lower_exact.reset();
+    upper_exact.reset();
+  }
+  if (lower_exact.has_value() && upper_exact.has_value()) {
+    const auto rational_point_consistent = [](
+        const RealEvaluationPoint& point, const Rational& exact) {
+      const auto normalized = RealEvaluationPoint::rational(exact.str());
+      return point.sign == normalized.sign &&
+          (point.certified_algebraic
+               ? acb_overlaps(point.modulus.raw(), normalized.modulus.raw())
+               : acb_equal(point.modulus.raw(), normalized.modulus.raw()));
+    };
+    if (!rational_point_consistent(lower, *lower_exact) ||
+        !rational_point_consistent(upper, *upper_exact))
+      throw NativeIntegrationError(
+          NativeIntegrationErrorCode::InvalidInterval, "E9",
+          "interval ball/sign contradicts a retained exact rational endpoint");
+    if (*lower_exact < *upper_exact) return;
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::InvalidInterval, "E9",
+        "interval order contradicts the retained exact rational endpoints");
+  }
+
   if (lower.sign == 0 && upper.sign == 1) return;
   if (lower.sign == -1 && upper.sign == 0) return;
   if (lower.sign == -1 && upper.sign == 1) return;

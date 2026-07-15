@@ -405,8 +405,13 @@ int main() {
         receiving.at("chart_identity") == "mixed-scc-parent" &&
         receiving.at("basis").as_array().size() == 2 &&
         std::string(materialized.at("chart").as_string()) == scc &&
-        std::string(derivation.at("output").as_object()
-                        .at("chart").as_string()) == scc &&
+        derivation.size() == 5 &&
+        derivation.at("schema") ==
+            "diffexp2-retained-plan-match-local-materialization-v1" &&
+        derivation.at("capability") ==
+            "retained-native-plan-match-local-materialization-v1" &&
+        derivation.at("checkpoint_identity") == "mixed-scc-materialized" &&
+        derivation.at("ownership") == "strong" &&
         evaluated.at("status") == "ok" && coefficients.size() == 6 &&
         std::abs(midpoint(coefficients[0]) - 2.0) < 1e-25 &&
         std::abs(midpoint(coefficients[1]) - 3.0) < 1e-25;

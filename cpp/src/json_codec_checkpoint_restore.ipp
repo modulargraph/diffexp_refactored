@@ -363,8 +363,8 @@ json::object restore_checkpoint(const std::string& path,
           const auto& derivation = as_object(
               item.at("retained_derivation"),
               "checkpoint retained-local derivation");
-          if (required_string(derivation, "schema") ==
-              "diffexp2-retained-plan-value-handoff-v1") {
+          if (is_retained_plan_value_handoff_schema(
+                  required_string(derivation, "schema"))) {
             const auto plan_handle = required_string(
                 derivation, "tile_plan");
             const auto plan_found = restored->tile_plans.find(plan_handle);
@@ -388,6 +388,24 @@ json::object restore_checkpoint(const std::string& path,
             const auto& match = arm.exact.matches[match_index];
             const auto& producing = arm.charts.at(match.producing_chart);
             const auto& receiving = arm.charts.at(match.receiving_chart);
+            std::shared_ptr<StoredLocalBase> restored_incoming;
+            if (required_string(derivation, "schema") ==
+                "diffexp2-retained-plan-value-handoff-v2") {
+              const auto& incoming_record = as_object(
+                  derivation.at("incoming"),
+                  "checkpoint value handoff incoming");
+              const auto incoming_handle = required_string(
+                  incoming_record, "local");
+              const auto incoming_found = restored->locals.find(
+                  incoming_handle);
+              if (incoming_found == restored->locals.end() ||
+                  required_string(incoming_record,
+                                  "checkpoint_identity") !=
+                      incoming_found->second->checkpoint_identity())
+                throw std::invalid_argument(
+                    "checkpoint certified value handoff incoming local was not restored before its output");
+              restored_incoming = incoming_found->second;
+            }
             const auto owner_reference = [](
                 const RetainedPlanChartBinding& binding) {
               const auto* owner = std::get_if<
@@ -410,7 +428,9 @@ json::object restore_checkpoint(const std::string& path,
                 encode_plan_chart(producing, match.producing_chart),
                 owner_reference(producing),
                 encode_plan_chart(receiving, match.receiving_chart),
-                owner_reference(receiving)};
+                owner_reference(receiving), std::move(restored_incoming),
+                exact_plan_rim(producing.prescriptions,
+                               producing.geometry.scale)};
           }
         }
         std::shared_ptr<StoredLocalBase> local;

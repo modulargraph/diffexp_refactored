@@ -148,6 +148,14 @@ class Magnitude {
   [[nodiscard]] bool is_finite() const { return !mag_is_inf(value_); }
   [[nodiscard]] double approximate_upper() const { return mag_get_d(value_); }
 
+  // Absorb this certified absolute bound into an Acb coefficient.  Keeping
+  // the operation here avoids exposing FLINT's raw magnitude representation
+  // to transport code and makes the one-way certificate-to-ball handoff
+  // explicit.
+  void add_error_to(ComplexBall& value) const {
+    acb_add_error_mag(value.raw(), value_);
+  }
+
   // FLINT's dump/load representation preserves the exact mag exponent and
   // mantissa.  Checkpoints must use this instead of a diagnostic double so a
   // restored certificate is neither weakened nor accidentally strengthened.

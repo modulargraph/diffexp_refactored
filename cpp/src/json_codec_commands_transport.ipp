@@ -167,6 +167,9 @@
                        receiving.geometry.radius.str()).raw()))
       return ineligible(
           "certified-algebraic-chart-requires-basis-match");
+    if (session->domain != "acb")
+      return ineligible(
+          "rational-value-handoff-has-no-exact-polynomial-tail-zero-certificate");
     if (producing_scale->is_zero())
       throw std::invalid_argument(
           "value transport hop producing chart has a zero exact scale");
@@ -175,6 +178,9 @@
     const auto center_ratio =
         exact_path_detail::abs(producing_local) /
         producing.geometry.radius;
+    if (!(center_ratio < Rational(1)))
+      return ineligible(
+          "receiver-center-lies-outside-producing-certified-disk");
     const auto incoming_summary = incoming->summary();
     const auto incoming_epsilon_min = as_i32(
         incoming_summary.at("epsilon_min"),
@@ -195,15 +201,6 @@
     const auto receiver_taylor_complete_max = as_u32(
         run_prototype.at("nmax"),
         "regular value-solver receiver Taylor maximum");
-    Rational tail_proxy(1);
-    for (std::uint64_t power = 0;
-         power < static_cast<std::uint64_t>(
-                     producer_taylor_complete_max) + 1;
-         ++power)
-      tail_proxy *= center_ratio;
-    if (!(tail_proxy < tail_proxy_max))
-      return ineligible(
-          "receiver-center-fails-exact-truncation-tail-contract");
     if (incoming->source_chart() != producing.handle ||
         incoming->source_operator_identity() != producing.exact_identity)
       throw std::invalid_argument(
@@ -236,23 +233,90 @@
             receiver_frame_top)
       return ineligible(
           "incoming-local-does-not-fit-receiver-epsilon-frame");
-    if (session->domain == "acb") {
-      const auto evaluated = incoming->evaluate_retained_point(
-          producing_point, producing_rim);
-      const auto expected_rim = producing_point.sign < 0
-          ? producing_rim : std::nullopt;
-      if (evaluated.imaginary_sign != expected_rim)
+    auto acb_incoming =
+        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(incoming);
+    if (!acb_incoming ||
+        acb_incoming->tail_model().status !=
+            TailMajorantStatus::Certified ||
+        !acb_incoming->tail_model().model.has_value())
+      return ineligible(
+          "incoming-local-has-no-certified-regular-tail-model");
+    constexpr std::uint32_t kWitnessSearchCap = 16;
+    std::optional<Rational> witness_radius;
+    std::uint32_t witness_dyadic_exponent = 0;
+    const auto point_modulus = exact_path_detail::abs(producing_local);
+    const auto witness_gap = producing.geometry.radius - point_modulus;
+    Rational dyadic_denominator(1);
+    for (std::uint32_t exponent = 1;
+         exponent <= kWitnessSearchCap; ++exponent) {
+      dyadic_denominator *= Rational(2);
+      const auto candidate =
+          point_modulus + witness_gap / dyadic_denominator;
+      const auto candidate_certificate =
+          certify_regular_taylor_point_tail(
+              *acb_incoming->tail_model().model,
+              producing_point, candidate.str(),
+              producer_taylor_complete_max);
+      if (candidate_certificate.status == TailMajorantStatus::Certified) {
+        witness_radius = candidate;
+        witness_dyadic_exponent = exponent;
+        break;
+      }
+      if (candidate_certificate.status !=
+              TailMajorantStatus::Inconclusive ||
+          candidate_certificate.disk.status !=
+              TailMajorantStatus::Inconclusive)
         return ineligible(
-            "center-evaluation-rim-differs-from-producing-plan-chart");
-      if (evaluated.value.epsilon.complete_max <
-          requested_epsilon.complete_max)
-        return ineligible(
-            "center-evaluation-lost-complete-epsilon-coverage");
-      for (const auto& coefficient : evaluated.value.coefficients)
-        if (!value_handoff_accurate(coefficient, relative_accuracy_max))
-          return ineligible(
-              "center-evaluation-fails-relative-accuracy-contract");
+            "receiver-center-tail-certificate-fails-after-disk-certification");
     }
+    if (!witness_radius.has_value())
+      return ineligible(
+          "receiver-center-tail-certificate-is-inconclusive");
+    auto certified = incoming->evaluate_retained_point_with_certified_tail(
+        producing_point, producing_rim, witness_radius->str());
+    if (!certified.has_value())
+      return ineligible(
+          "incoming-local-has-no-certified-regular-tail-model");
+    if (certified->tail.status != TailMajorantStatus::Certified)
+      return ineligible(
+          "receiver-center-tail-certificate-is-inconclusive");
+    const auto expected_rim = producing_point.sign < 0
+        ? producing_rim : std::nullopt;
+    if (certified->evaluation.imaginary_sign != expected_rim)
+      return ineligible(
+          "center-evaluation-rim-differs-from-producing-plan-chart");
+    if (certified->evaluation.value.epsilon.min_power !=
+            incoming_epsilon_min ||
+        certified->evaluation.value.epsilon.complete_max !=
+            incoming_epsilon_max ||
+        certified->tail.value.guarantee != ErrorGuarantee::Certified ||
+        !tail_majorant_detail::same_epsilon_window(
+            certified->evaluation.value.epsilon,
+            certified->tail.value.frame) ||
+        certified->tail.value.absolute.size() !=
+            certified->evaluation.value.epsilon.width())
+      throw std::logic_error(
+          "certified value handoff changed its retained epsilon frame");
+    auto retained_value = certified->evaluation.value;
+    retained_value.error = ErrorEnvelope{};
+    auto certified_handoff = certified->evaluation;
+    for (std::int64_t raw_power =
+             certified_handoff.value.epsilon.min_power;
+         raw_power <= certified_handoff.value.epsilon.complete_max;
+         ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      const auto row = static_cast<std::size_t>(
+          raw_power - certified_handoff.value.epsilon.min_power);
+      for (std::uint32_t component = 0;
+           component < certified_handoff.value.dimension; ++component)
+        certified->tail.value.absolute[row].add_error_to(
+            certified_handoff.value.at(power, component));
+    }
+    certified_handoff.value.error = ErrorEnvelope{};
+    for (const auto& coefficient : certified_handoff.value.coefficients)
+      if (!value_handoff_accurate(coefficient, relative_accuracy_max))
+        return ineligible(
+            "inflated-center-evaluation-fails-relative-accuracy-contract");
 
     std::string local_handle;
     {
@@ -296,8 +360,8 @@
       const auto result_checkpoint = arm_checkpoint_identity(
           checkpoint_root, arm_name, "local", match_index + 1);
       json::object derivation{
-          {"schema", "diffexp2-retained-plan-value-handoff-v1"},
-          {"capability", "retained-native-regular-value-handoff-v1"},
+          {"schema", "diffexp2-retained-plan-value-handoff-v2"},
+          {"capability", "retained-native-regular-value-handoff-v2"},
           {"tile_plan", plan->handle()},
           {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
           {"tile_plan_provenance_identity", plan->provenance_identity()},
@@ -317,18 +381,56 @@
           {"prototype_identity", json::serialize(
                canonical_json_value(value_solver))},
           {"tail_contract", json::object{
+               {"mode", "certified-regular-taylor-point-tail-acb-v1"},
                {"producer_taylor_complete_max",
                 producer_taylor_complete_max},
                {"receiver_taylor_complete_max",
                 receiver_taylor_complete_max},
                {"center_ratio_exact", center_ratio.str()},
-               {"tail_proxy_exact", tail_proxy.str()},
-               {"tail_proxy_max_exact", tail_proxy_max.str()}}},
+               {"producing_point_exact", producing_local.str()},
+               {"producing_chart_radius_exact",
+                producing.geometry.radius.str()},
+               {"witness_radius_exact", witness_radius->str()},
+               {"witness_dyadic_inward_exponent",
+                witness_dyadic_exponent},
+               {"source_model", checkpoint_regular_tail_model_record(
+                    *acb_incoming->tail_model().model)},
+               {"certificate", json::object{
+                    {"status", tail_majorant_status_name(
+                         certified->tail.status)},
+                    {"value", checkpoint_error_envelope_record(
+                         certified->tail.value)},
+                    {"theta", checkpoint_error_envelope_record(
+                         certified->tail.theta)},
+                    {"disk", json::object{
+                         {"witness_radius_exact",
+                          certified->tail.disk.witness_radius_exact},
+                         {"q_lower_exact",
+                          certified->tail.disk.q_lower.dump_exact()},
+                         {"ode_norm_upper_exact",
+                          certified->tail.disk.ode_norm_upper.dump_exact()},
+                         {"cauchy_circle_upper_exact", [&] {
+                            json::array values;
+                            for (const auto& value :
+                                 certified->tail.disk.cauchy_circle_upper)
+                              values.emplace_back(value.dump_exact());
+                            return values;
+                          }()},
+                         {"detail", certified->tail.disk.detail}}},
+                    {"detail", certified->tail.detail}}},
+               {"inflation", json::object{
+                    {"gate",
+                     "each-component-acb-add-error-mag-by-epsilon-row-v1"},
+                    {"retained_value",
+                     checkpoint_epsilon_vector_record(retained_value)},
+                    {"inflated_value",
+                     checkpoint_epsilon_vector_record(
+                         certified_handoff.value)}}}}},
           {"accuracy_contract", json::object{
                {"relative_error_max_exact", relative_accuracy_max.str()},
                {"gate",
                 "component-radii-lte-threshold-times-max-one-upper-magnitude-v1"},
-               {"acb_preflight_required", session->domain == "acb"}}},
+               {"acb_preflight_required", true}}},
           {"epsilon", json::object{
                {"min", requested_epsilon.min_power},
                {"max", requested_epsilon.complete_max},
@@ -344,31 +446,17 @@
       };
       auto derivation_owner = std::make_shared<ValueHandoffOwners>(
           ValueHandoffOwners{plan, incoming, *receiving_owner});
-      if (session->domain == "rational") {
-        auto chart = std::dynamic_pointer_cast<PreparedChart<Rational>>(
-            *receiving_owner);
-        if (!chart)
-          throw std::invalid_argument(
-              "value transport hop receiver has the wrong Rational chart type");
-        next = chart->solve_regular_value_handoff(
-            local_handle, run_prototype, metadata_prototype, incoming,
-            producing_point, producing_rim, receiving.geometry,
-            receiving.prescriptions, requested_epsilon,
-            required_complete_max, result_checkpoint, std::move(derivation),
-            derivation_owner, chart);
-      } else {
-        auto chart = std::dynamic_pointer_cast<PreparedChart<ComplexBall>>(
-            *receiving_owner);
-        if (!chart)
-          throw std::invalid_argument(
-              "value transport hop receiver has the wrong Acb chart type");
-        next = chart->solve_regular_value_handoff(
-            local_handle, run_prototype, metadata_prototype, incoming,
-            producing_point, producing_rim, receiving.geometry,
-            receiving.prescriptions, requested_epsilon,
-            required_complete_max, result_checkpoint, std::move(derivation),
-            derivation_owner, chart);
-      }
+      auto chart = std::dynamic_pointer_cast<PreparedChart<ComplexBall>>(
+          *receiving_owner);
+      if (!chart)
+        throw std::invalid_argument(
+            "value transport hop receiver has the wrong Acb chart type");
+      next = chart->solve_regular_value_handoff(
+          local_handle, run_prototype, metadata_prototype, incoming,
+          certified_handoff.value, receiving.geometry,
+          receiving.prescriptions, requested_epsilon,
+          required_complete_max, result_checkpoint, std::move(derivation),
+          derivation_owner, chart);
       sealed_lineage = next->seal_plan_match_lineage();
     } catch (...) {
       std::lock_guard<std::mutex> lock(session->mutex);

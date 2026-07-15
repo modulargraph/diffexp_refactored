@@ -310,8 +310,7 @@ class PreparedChart final : public PreparedChartBase {
       const std::string& local_handle, const json::object& run_prototype,
       json::object metadata_object,
       const std::shared_ptr<StoredLocalBase>& incoming_owner,
-      const RealEvaluationPoint& producing_point,
-      std::optional<std::int32_t> producing_rim,
+      const EpsilonVector& certified_handoff,
       const ExactAffineChart& receiving_geometry,
       const std::vector<Prescription>& receiving_prescriptions,
       EpsilonWindow requested_epsilon,
@@ -409,37 +408,17 @@ class PreparedChart final : public PreparedChartBase {
     problem.initial_validity.assign(prepared_.dimension,
                                     source_complete_max);
     if constexpr (std::is_same_v<Scalar, Rational>) {
-      const auto evaluated = evaluate_exact_regular_local(
-          source, producing_point,
-          EpsilonWindow{source.epsilon.min_power, source_complete_max},
-          "regular value handoff source");
-      for (std::uint32_t component = 0; component < prepared_.dimension;
-           ++component)
-        for (std::int64_t raw_power = source.epsilon.min_power;
-             raw_power <= source_complete_max; ++raw_power) {
-          const auto power = static_cast<std::int32_t>(raw_power);
-          const auto frame = static_cast<std::size_t>(
-              static_cast<std::int64_t>(power) - prepared_.frame_base);
-          if (frame >= frame_width)
-            throw std::domain_error(
-                "regular value handoff source exceeds the receiver value frame");
-          problem.initial[static_cast<std::size_t>(component) * frame_width +
-                          frame] = evaluated[component].coefficient(power);
-        }
+      throw std::invalid_argument(
+          "Rational regular value handoff requires an exact polynomial-tail-zero proof");
     } else {
-      EvaluationOptions options;
-      options.imaginary_sign = producing_rim;
-      options.compute_tail_estimate = false;
-      const auto evaluated = evaluate_local_solution(
-          source, producing_point, options);
-      const auto expected_rim = producing_point.sign < 0
-          ? producing_rim : std::nullopt;
-      if (evaluated.imaginary_sign != expected_rim ||
-          evaluated.value.dimension != prepared_.dimension ||
-          evaluated.value.epsilon.min_power < source.epsilon.min_power ||
-          evaluated.value.epsilon.complete_max < source_complete_max)
+      if (certified_handoff.dimension != prepared_.dimension ||
+          certified_handoff.epsilon.min_power !=
+              source.epsilon.min_power ||
+          certified_handoff.epsilon.complete_max !=
+              source.epsilon.complete_max ||
+          !certified_handoff.error.empty())
         throw std::invalid_argument(
-            "regular value handoff Acb evaluation changed its branch or epsilon frame");
+            "regular value handoff certified vector changed its source frame or retained an unabsorbed error envelope");
       for (std::uint32_t component = 0; component < prepared_.dimension;
            ++component)
         for (std::int64_t raw_power = source.epsilon.min_power;
@@ -450,10 +429,10 @@ class PreparedChart final : public PreparedChartBase {
           if (frame >= frame_width)
             throw std::domain_error(
                 "regular value handoff source exceeds the receiver value frame");
-          if (power >= evaluated.value.epsilon.min_power)
+          if (power >= certified_handoff.epsilon.min_power)
             problem.initial[
                 static_cast<std::size_t>(component) * frame_width + frame] =
-                evaluated.value.at(power, component);
+                certified_handoff.at(power, component);
         }
     }
 

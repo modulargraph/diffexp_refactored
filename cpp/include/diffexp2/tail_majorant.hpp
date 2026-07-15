@@ -1346,12 +1346,28 @@ CertifiedLocalEvaluation evaluate_local_solution_with_certified_tail(
   if (result.tail.status == TailMajorantStatus::Certified) {
     if (!same_epsilon_window(result.evaluation.value.epsilon,
                              result.tail.value.frame) ||
-        !same_epsilon_window(result.evaluation.theta_value.epsilon,
-                             result.tail.theta.frame))
+        result.evaluation.theta_value.epsilon.min_power <
+            result.tail.theta.frame.min_power ||
+        result.evaluation.theta_value.epsilon.complete_max >
+            result.tail.theta.frame.complete_max)
       throw std::logic_error(
           "ordinary tail certificate and evaluation epsilon windows differ");
     result.evaluation.value.error = result.tail.value;
-    result.evaluation.theta_value.error = result.tail.theta;
+    // A structurally zero theta value may canonically trim leading epsilon
+    // rows even though the theorem certifies the full retained frame.  Attach
+    // the exact certified sub-envelope that corresponds to the evaluated
+    // theta vector; the full theorem remains available in result.tail.
+    ErrorEnvelope theta_error;
+    theta_error.frame = result.evaluation.theta_value.epsilon;
+    theta_error.guarantee = ErrorGuarantee::Certified;
+    theta_error.provenance = result.tail.theta.provenance;
+    theta_error.absolute.reserve(theta_error.frame.width());
+    for (std::int64_t raw_power = theta_error.frame.min_power;
+         raw_power <= theta_error.frame.complete_max; ++raw_power)
+      theta_error.absolute.push_back(result.tail.theta.absolute.at(
+          static_cast<std::size_t>(
+              raw_power - result.tail.theta.frame.min_power)));
+    result.evaluation.theta_value.error = std::move(theta_error);
   } else {
     result.evaluation.value.error.provenance =
         status_prefix(result.tail.status) + ": " + result.tail.detail;

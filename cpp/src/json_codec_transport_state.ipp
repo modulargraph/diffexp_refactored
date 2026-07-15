@@ -1306,7 +1306,7 @@ class StoredTransportArmState {
       } else {
         const auto& derivation = *tile_sources_[tile]->retained_derivation();
         const auto schema = required_string(derivation, "schema");
-        if (schema == "diffexp2-retained-plan-value-handoff-v1") {
+        if (is_retained_plan_value_handoff_schema(schema)) {
           record["derivation"] = json::object{
               {"schema",
                "diffexp2-consumed-plan-value-handoff-certificate-v1"},
@@ -1408,8 +1408,8 @@ class StoredTransportArmState {
     for (std::size_t tile = 1; tile < tile_sources_.size(); ++tile) {
       const auto& derivation = tile_sources_[tile]->retained_derivation();
       if (derivation.has_value() &&
-          required_string(*derivation, "schema") ==
-              "diffexp2-retained-plan-value-handoff-v1")
+          is_retained_plan_value_handoff_schema(
+              required_string(*derivation, "schema")))
         ++count;
     }
     return count;
@@ -1522,8 +1522,8 @@ class StoredTransportArmState {
             "certificate-only transport tile has no sealed plan-match derivation");
       const auto& derivation = *output->retained_derivation();
       const auto schema = required_string(derivation, "schema");
-      const bool value_handoff = schema ==
-          "diffexp2-retained-plan-value-handoff-v1";
+      const bool value_handoff =
+          is_retained_plan_value_handoff_schema(schema);
       if ((!value_handoff && schema !=
               "diffexp2-retained-plan-match-local-materialization-v2") ||
           required_string(derivation, "tile_plan") !=

@@ -161,6 +161,8 @@ struct CheckpointValueHandoffPlanBinding {
   json::object producing_owner;
   json::object receiving_chart;
   json::object receiving_owner;
+  std::shared_ptr<StoredLocalBase> incoming;
+  std::optional<std::int32_t> producing_rim;
 };
 
 template <typename Scalar>
@@ -314,13 +316,11 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
             "diffexp2-retained-plan-match-local-materialization-v1" &&
         derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v2" &&
-        derivation_schema !=
-            "diffexp2-retained-plan-value-handoff-v1")
+        !is_retained_plan_value_handoff_schema(derivation_schema))
       throw std::invalid_argument(
           "checkpoint sealed lineage is not a supported transport materialization");
     if (sealed_plan_match_lineage &&
-        ((derivation_schema ==
-              "diffexp2-retained-plan-value-handoff-v1") !=
+        (is_retained_plan_value_handoff_schema(derivation_schema) !=
          (sealed_owner_restore ==
               "sealed-plan-value-handoff-lineage")))
       throw std::invalid_argument(
@@ -482,8 +482,10 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
         throw std::invalid_argument(
             "checkpoint rational-row owner lineage is inconsistent");
       retained_derivation = std::move(derivation);
-    } else if (derivation_schema ==
-        "diffexp2-retained-plan-value-handoff-v1") {
+    } else if (is_retained_plan_value_handoff_schema(
+                   derivation_schema)) {
+      const bool certified_tail_handoff = derivation_schema ==
+          "diffexp2-retained-plan-value-handoff-v2";
       require_exact_keys(
           derivation,
           {"schema", "capability", "tile_plan",
@@ -497,7 +499,9 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
            "equation_payload_identity", "provenance_identity"},
           "checkpoint plan-value handoff derivation");
       if (required_string(derivation, "capability") !=
-              "retained-native-regular-value-handoff-v1" ||
+              (certified_tail_handoff
+                   ? "retained-native-regular-value-handoff-v2"
+                   : "retained-native-regular-value-handoff-v1") ||
           required_string(derivation, "scope") !=
               "single-regular-to-regular-transport-hop" ||
           required_string(derivation, "coefficient_transport") !=
@@ -601,12 +605,22 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       const auto& tail = as_object(
           derivation.at("tail_contract"),
           "checkpoint value tail contract");
-      require_exact_keys(
-          tail,
-          {"producer_taylor_complete_max", "receiver_taylor_complete_max",
-           "center_ratio_exact", "tail_proxy_exact",
-           "tail_proxy_max_exact"},
-          "checkpoint value tail contract");
+      if (certified_tail_handoff)
+        require_exact_keys(
+            tail,
+            {"mode", "producer_taylor_complete_max",
+             "receiver_taylor_complete_max", "center_ratio_exact",
+             "producing_point_exact", "producing_chart_radius_exact",
+             "witness_radius_exact", "witness_dyadic_inward_exponent",
+             "source_model", "certificate", "inflation"},
+            "checkpoint certified value tail contract");
+      else
+        require_exact_keys(
+            tail,
+            {"producer_taylor_complete_max", "receiver_taylor_complete_max",
+             "center_ratio_exact", "tail_proxy_exact",
+             "tail_proxy_max_exact"},
+            "checkpoint value tail contract");
       const auto producer_order = as_u32(
           tail.at("producer_taylor_complete_max"),
           "checkpoint value producer Taylor maximum");
@@ -619,27 +633,282 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           receiver_order != solution.taylor_complete_max)
         throw std::invalid_argument(
             "checkpoint value receiver order differs from its prototype");
-      Rational tail_proxy(1);
-      for (std::uint64_t power = 0;
-           power < static_cast<std::uint64_t>(producer_order) + 1;
-           ++power)
-        tail_proxy *= center_ratio;
-      const Rational tail_proxy_max(
-          required_string(tail, "tail_proxy_max_exact"));
       const auto prepared_owner =
           std::dynamic_pointer_cast<PreparedChartBase>(equation_owner);
       if (!prepared_owner ||
           Rational(required_string(tail, "center_ratio_exact")) !=
               center_ratio ||
-          Rational(required_string(tail, "tail_proxy_exact")) !=
-              tail_proxy ||
-          required_string(tail, "tail_proxy_max_exact") !=
-              required_string(prototype, "tail_proxy_max_exact") ||
-          required_string(tail, "tail_proxy_max_exact") !=
-              prepared_owner->regular_value_tail_proxy_max_exact() ||
-          !(tail_proxy < tail_proxy_max))
+          required_string(prototype, "tail_proxy_max_exact") !=
+              prepared_owner->regular_value_tail_proxy_max_exact())
         throw std::invalid_argument(
             "checkpoint plan-value handoff tail contract is inconsistent");
+      std::optional<EpsilonVector> certified_inflated_value;
+      if (!certified_tail_handoff) {
+        Rational tail_proxy(1);
+        for (std::uint64_t power = 0;
+             power < static_cast<std::uint64_t>(producer_order) + 1;
+             ++power)
+          tail_proxy *= center_ratio;
+        const Rational tail_proxy_max(
+            required_string(tail, "tail_proxy_max_exact"));
+        if (Rational(required_string(tail, "tail_proxy_exact")) !=
+                tail_proxy ||
+            required_string(tail, "tail_proxy_max_exact") !=
+                required_string(prototype, "tail_proxy_max_exact") ||
+            required_string(tail, "tail_proxy_max_exact") !=
+                prepared_owner->regular_value_tail_proxy_max_exact() ||
+            !(tail_proxy < tail_proxy_max))
+          throw std::invalid_argument(
+              "checkpoint plan-value handoff proxy tail contract is inconsistent");
+      } else {
+        if (expected_domain != "acb" ||
+            required_string(tail, "mode") !=
+                "certified-regular-taylor-point-tail-acb-v1" ||
+            Rational(required_string(tail, "producing_point_exact")) !=
+                producing_local ||
+            Rational(required_string(
+                tail, "producing_chart_radius_exact")) !=
+                producing_radius)
+          throw std::invalid_argument(
+              "checkpoint certified value handoff changed its Acb geometry");
+        const Rational witness(
+            required_string(tail, "witness_radius_exact"));
+        const auto witness_exponent = as_u32(
+            tail.at("witness_dyadic_inward_exponent"),
+            "checkpoint certified value witness exponent");
+        Rational witness_denominator(1);
+        for (std::uint32_t exponent = 0; exponent < witness_exponent;
+             ++exponent)
+          witness_denominator *= Rational(2);
+        const auto point_modulus = exact_path_detail::abs(producing_local);
+        const auto expected_witness = point_modulus +
+            (producing_radius - point_modulus) / witness_denominator;
+        if (witness_exponent == 0 || witness_exponent > 16 ||
+            witness != expected_witness ||
+            !(point_modulus < witness) || !(witness < producing_radius))
+          throw std::invalid_argument(
+              "checkpoint certified value witness is not strictly interior");
+        auto model = parse_checkpoint_regular_tail_model(
+            tail.at("source_model"));
+        json::array model_prescriptions;
+        for (const auto& prescription : model.prescriptions)
+          model_prescriptions.push_back(json::object{
+              {"factor_exact", prescription.factor_exact},
+              {"sign", prescription.sign},
+              {"multiplicity", prescription.multiplicity},
+              {"leading_coefficient_sign",
+               prescription.leading_coefficient_sign}});
+        if (model.q_coefficients.empty() ||
+            model.n_coefficients.empty() ||
+            model.n_row_sum_upper.size() != model.n_coefficients.size() ||
+            model.initial_row_upper.size() != model.epsilon.width() ||
+            model.dimension != solution.dimension ||
+            model.taylor_complete_max != producer_order ||
+            model.operator_identity !=
+                required_string(producing_chart, "identity") ||
+            model.local_checkpoint_identity != required_string(
+                as_object(derivation.at("incoming"),
+                          "checkpoint value incoming"),
+                "checkpoint_identity") ||
+            Rational(model.chart.center_exact) != producing_center ||
+            Rational(model.chart.scale_exact) != producing_scale ||
+            model.chart.infinite_radius ||
+            !acb_equal(model.chart.radius.raw(),
+                       ComplexBall::from_strings(
+                           producing_radius.str()).raw()) ||
+            model_prescriptions !=
+                producing_chart.at("prescriptions") ||
+            std::any_of(model.q_coefficients.begin(),
+                        model.q_coefficients.end(),
+                        [](const ComplexBall& value) {
+                          return !value.is_finite();
+                        }) ||
+            model.q_coefficients.front().contains_zero() ||
+            std::any_of(model.initial_row_upper.begin(),
+                        model.initial_row_upper.end(),
+                        [](const Magnitude& value) {
+                          return !value.is_finite();
+                        }))
+          throw std::invalid_argument(
+              "checkpoint certified source model changed its retained binding");
+        const auto matrix_size =
+            static_cast<std::size_t>(model.dimension) * model.dimension;
+        for (std::size_t lag = 0; lag < model.n_coefficients.size(); ++lag) {
+          if (model.n_coefficients[lag].size() != matrix_size ||
+              std::any_of(model.n_coefficients[lag].begin(),
+                          model.n_coefficients[lag].end(),
+                          [](const ComplexBall& value) {
+                            return !value.is_finite();
+                          }) ||
+              (lag == 0 && std::any_of(
+                  model.n_coefficients[lag].begin(),
+                  model.n_coefficients[lag].end(),
+                  [](const ComplexBall& value) { return !value.is_zero(); })) ||
+              tail_majorant_detail::matrix_infinity_norm_upper(
+                  model.n_coefficients[lag], model.dimension).dump_exact() !=
+                  model.n_row_sum_upper[lag].dump_exact())
+            throw std::invalid_argument(
+                "checkpoint certified source model has an invalid N payload");
+        }
+        Rational replay_denominator(1);
+        for (std::uint32_t exponent = 1;
+             exponent <= witness_exponent; ++exponent) {
+          replay_denominator *= Rational(2);
+          const auto candidate = point_modulus +
+              (producing_radius - point_modulus) / replay_denominator;
+          const auto candidate_certificate =
+              certify_regular_taylor_point_tail(
+                  model,
+                  RealEvaluationPoint::rational(producing_local.str()),
+                  candidate.str(), producer_order);
+          if ((exponent < witness_exponent &&
+               (candidate_certificate.status !=
+                    TailMajorantStatus::Inconclusive ||
+                candidate_certificate.disk.status !=
+                    TailMajorantStatus::Inconclusive)) ||
+              (exponent == witness_exponent &&
+               candidate_certificate.status !=
+                   TailMajorantStatus::Certified))
+            throw std::invalid_argument(
+                "checkpoint certified value witness is not the first certifying dyadic candidate");
+        }
+        const auto replayed = certify_regular_taylor_point_tail(
+            model, RealEvaluationPoint::rational(producing_local.str()),
+            witness.str(), producer_order);
+        const auto& certificate = as_object(
+            tail.at("certificate"),
+            "checkpoint certified value-tail certificate");
+        require_exact_keys(
+            certificate, {"status", "value", "theta", "disk", "detail"},
+            "checkpoint certified value-tail certificate");
+        const auto saved_value = parse_checkpoint_error_envelope(
+            certificate.at("value"));
+        const auto saved_theta = parse_checkpoint_error_envelope(
+            certificate.at("theta"));
+        const auto& disk = as_object(
+            certificate.at("disk"),
+            "checkpoint certified value-tail disk");
+        require_exact_keys(
+            disk,
+            {"witness_radius_exact", "q_lower_exact",
+             "ode_norm_upper_exact", "cauchy_circle_upper_exact",
+             "detail"},
+            "checkpoint certified value-tail disk");
+        json::array replayed_circle;
+        for (const auto& value : replayed.disk.cauchy_circle_upper)
+          replayed_circle.emplace_back(value.dump_exact());
+        if (replayed.status != TailMajorantStatus::Certified ||
+            required_string(certificate, "status") != "certified" ||
+            checkpoint_error_envelope_record(replayed.value) !=
+                certificate.at("value") ||
+            checkpoint_error_envelope_record(replayed.theta) !=
+                certificate.at("theta") ||
+            required_string(certificate, "detail") != replayed.detail ||
+            required_string(disk, "witness_radius_exact") !=
+                replayed.disk.witness_radius_exact ||
+            required_string(disk, "q_lower_exact") !=
+                replayed.disk.q_lower.dump_exact() ||
+            required_string(disk, "ode_norm_upper_exact") !=
+                replayed.disk.ode_norm_upper.dump_exact() ||
+            disk.at("cauchy_circle_upper_exact") != replayed_circle ||
+            required_string(disk, "detail") != replayed.disk.detail ||
+            saved_value.guarantee != ErrorGuarantee::Certified ||
+            saved_theta.guarantee != ErrorGuarantee::Certified ||
+            !tail_majorant_detail::same_epsilon_window(
+                saved_value.frame, model.epsilon) ||
+            !tail_majorant_detail::same_epsilon_window(
+                saved_theta.frame, model.epsilon))
+          throw std::invalid_argument(
+              "checkpoint certified value-tail theorem does not replay exactly");
+        const auto& inflation = as_object(
+            tail.at("inflation"),
+            "checkpoint certified value inflation");
+        require_exact_keys(
+            inflation, {"gate", "retained_value", "inflated_value"},
+            "checkpoint certified value inflation");
+        if (required_string(inflation, "gate") !=
+            "each-component-acb-add-error-mag-by-epsilon-row-v1")
+          throw std::invalid_argument(
+              "checkpoint certified value inflation gate changed");
+        auto retained_value = parse_checkpoint_epsilon_vector(
+            inflation.at("retained_value"),
+            "checkpoint retained value before tail inflation");
+        auto inflated_value = parse_checkpoint_epsilon_vector(
+            inflation.at("inflated_value"),
+            "checkpoint retained value after tail inflation");
+        if (!retained_value.error.empty() || !inflated_value.error.empty() ||
+            retained_value.dimension != model.dimension ||
+            inflated_value.dimension != model.dimension ||
+            !tail_majorant_detail::same_epsilon_window(
+                retained_value.epsilon, model.epsilon) ||
+            !tail_majorant_detail::same_epsilon_window(
+                inflated_value.epsilon, model.epsilon))
+          throw std::invalid_argument(
+              "checkpoint certified value inflation frame changed");
+        auto restored_incoming = std::dynamic_pointer_cast<
+            StoredLocal<ComplexBall>>(value_handoff_plan->incoming);
+        if (!restored_incoming ||
+            restored_incoming->checkpoint_identity() !=
+                model.local_checkpoint_identity ||
+            restored_incoming->source_operator_identity() !=
+                model.operator_identity ||
+            restored_incoming->tail_model().status !=
+                TailMajorantStatus::Certified ||
+            !restored_incoming->tail_model().model.has_value() ||
+            checkpoint_regular_tail_model_record(
+                *restored_incoming->tail_model().model) !=
+                tail.at("source_model"))
+          throw std::invalid_argument(
+              "checkpoint certified value handoff lost its restored incoming Acb theorem owner");
+        EvaluationOptions replay_options;
+        replay_options.imaginary_sign = value_handoff_plan->producing_rim;
+        replay_options.compute_tail_estimate = false;
+        const auto restored_evaluation =
+            evaluate_local_solution_with_certified_tail(
+                restored_incoming->solution(),
+                *restored_incoming->tail_model().model,
+                RealEvaluationPoint::rational(producing_local.str()),
+                witness.str(), replay_options);
+        const auto expected_rim = producing_local.sign() < 0
+            ? value_handoff_plan->producing_rim : std::nullopt;
+        if (restored_evaluation.tail.status !=
+                TailMajorantStatus::Certified ||
+            restored_evaluation.evaluation.imaginary_sign != expected_rim ||
+            restored_evaluation.evaluation.value.dimension !=
+                retained_value.dimension ||
+            !tail_majorant_detail::same_epsilon_window(
+                restored_evaluation.evaluation.value.epsilon,
+                retained_value.epsilon) ||
+            restored_evaluation.evaluation.value.coefficients.size() !=
+                retained_value.coefficients.size())
+          throw std::invalid_argument(
+              "checkpoint certified retained center evaluation changed its frame or branch");
+        for (std::size_t coefficient = 0;
+             coefficient < retained_value.coefficients.size();
+             ++coefficient)
+          if (!acb_equal(
+                  restored_evaluation.evaluation.value
+                      .coefficients[coefficient].raw(),
+                  retained_value.coefficients[coefficient].raw()))
+            throw std::invalid_argument(
+                "checkpoint certified retained center value differs from its restored incoming local");
+        for (std::int64_t raw_power = model.epsilon.min_power;
+             raw_power <= model.epsilon.complete_max; ++raw_power) {
+          const auto power = static_cast<std::int32_t>(raw_power);
+          const auto row = static_cast<std::size_t>(
+              raw_power - model.epsilon.min_power);
+          for (std::uint32_t component = 0; component < model.dimension;
+               ++component) {
+            auto expected = retained_value.at(power, component);
+            replayed.value.absolute[row].add_error_to(expected);
+            if (!acb_equal(expected.raw(),
+                           inflated_value.at(power, component).raw()))
+              throw std::invalid_argument(
+                  "checkpoint certified value inflation does not replay exactly");
+          }
+        }
+        certified_inflated_value = std::move(inflated_value);
+      }
       const auto& accuracy = as_object(
           derivation.at("accuracy_contract"),
           "checkpoint value accuracy contract");
@@ -664,7 +933,15 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
               "component-radii-lte-threshold-times-max-one-upper-magnitude-v1" ||
           !accuracy.at("acb_preflight_required").is_bool() ||
           accuracy.at("acb_preflight_required").as_bool() !=
-              (expected_domain == "acb"))
+              (expected_domain == "acb") ||
+          (certified_inflated_value.has_value() &&
+           std::any_of(
+               certified_inflated_value->coefficients.begin(),
+               certified_inflated_value->coefficients.end(),
+               [&](const ComplexBall& value) {
+                 return !value_handoff_accurate(value,
+                                                relative_error_max);
+               })))
         throw std::invalid_argument(
             "checkpoint plan-value handoff accuracy contract is inconsistent");
 
@@ -708,6 +985,10 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           {"checkpoint_identity", "chart", "source_operator_identity",
            "epsilon", "taylor_complete_max", "top_valid", "dimension"},
           "checkpoint value output");
+      const auto& incoming_epsilon = as_object(
+          incoming.at("epsilon"), "checkpoint value incoming epsilon");
+      require_exact_keys(incoming_epsilon, {"min", "max"},
+                         "checkpoint value incoming epsilon");
       const auto& output_epsilon = as_object(
           output.at("epsilon"), "checkpoint value output epsilon");
       if (required_string(incoming, "chart") !=
@@ -734,6 +1015,45 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           parse_validity(output.at("top_valid")) < requested_required)
         throw std::invalid_argument(
             "checkpoint plan-value output disagrees with its retained tensor");
+      if (certified_inflated_value.has_value()) {
+        if (as_i32(incoming_epsilon.at("min"),
+                   "checkpoint value incoming epsilon minimum") !=
+                certified_inflated_value->epsilon.min_power ||
+            as_i32(incoming_epsilon.at("max"),
+                   "checkpoint value incoming epsilon maximum") !=
+                certified_inflated_value->epsilon.complete_max ||
+            certified_inflated_value->dimension != solution.dimension)
+          throw std::invalid_argument(
+              "checkpoint certified value source frame changed");
+        if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+          throw std::invalid_argument(
+              "checkpoint certified value handoff is not an Acb local");
+        } else {
+          if (solution.sectors.size() != 1 ||
+              solution.sectors.front().log_power != 0)
+            throw std::invalid_argument(
+                "checkpoint certified value output is not ordinary");
+          for (std::int64_t raw_power = solution.epsilon.min_power;
+               raw_power <= solution.epsilon.complete_max; ++raw_power) {
+            const auto power = static_cast<std::int32_t>(raw_power);
+            for (std::uint32_t component = 0;
+                 component < solution.dimension; ++component) {
+              const auto epsilon_index = static_cast<std::size_t>(
+                  raw_power - solution.epsilon.min_power);
+              const auto& output_constant =
+                  solution.sectors.front().coefficients[
+                      local_detail::sector_index(
+                          solution, epsilon_index, 0, component)];
+              if (!acb_equal(
+                      output_constant.raw(),
+                      certified_inflated_value->at(
+                          power, component).raw()))
+                throw std::invalid_argument(
+                    "checkpoint certified inflated value differs from the receiver initial tensor");
+            }
+          }
+        }
+      }
       const auto& lineage = as_object(
           object.at("retained_owner_lineage"),
           "checkpoint plan-value owner lineage");

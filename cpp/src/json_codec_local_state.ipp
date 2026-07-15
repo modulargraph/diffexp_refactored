@@ -45,6 +45,24 @@ bool value_handoff_accurate(const ComplexBall& value,
   return accurate;
 }
 
+bool is_retained_plan_value_handoff_schema(std::string_view schema) {
+  return schema == "diffexp2-retained-plan-value-handoff-v1" ||
+         schema == "diffexp2-retained-plan-value-handoff-v2";
+}
+
+std::string public_provenance_fingerprint(std::string_view identity) {
+  std::uint64_t hash = UINT64_C(14695981039346656037);
+  for (const auto byte : identity) {
+    hash ^= static_cast<std::uint8_t>(byte);
+    hash *= UINT64_C(1099511628211);
+  }
+  constexpr char digits[] = "0123456789abcdef";
+  std::string result = "fnv1a64:";
+  for (int shift = 60; shift >= 0; shift -= 4)
+    result.push_back(digits[(hash >> shift) & UINT64_C(0xf)]);
+  return result;
+}
+
 std::vector<std::string> parse_symbols(const json::object& object) {
   std::vector<std::string> symbols;
   if (const auto* raw_symbols = object.if_contains("symbols")) {
@@ -1786,6 +1804,11 @@ class StoredLocalBase {
   virtual LocalEvaluation evaluate_retained_point(
       const RealEvaluationPoint& point,
       std::optional<std::int32_t> exact_rim) = 0;
+  virtual std::optional<CertifiedLocalEvaluation>
+  evaluate_retained_point_with_certified_tail(
+      const RealEvaluationPoint& point,
+      std::optional<std::int32_t> exact_rim,
+      const std::string& witness_radius_exact) = 0;
   virtual json::object certify_residual(const json::object& request,
                                         int output_digits) = 0;
   virtual EndpointLimitResult endpoint_limit(
@@ -1889,6 +1912,18 @@ class StoredLocal final : public StoredLocalBase {
         rational_shadow_witness_(std::move(rational_shadow_witness)),
         sealed_plan_match_lineage_(sealed_plan_match_lineage) {
     validate_local_solution(solution_, false);
+    if (retained_derivation_.has_value()) {
+      const auto* raw_identity =
+          retained_derivation_->if_contains("provenance_identity");
+      if (raw_identity == nullptr || !raw_identity->is_string() ||
+          raw_identity->as_string().empty())
+        throw std::invalid_argument(
+            "retained local derivation has no provenance identity");
+      const auto& identity = raw_identity->as_string();
+      retained_provenance_identity_bytes_ = identity.size();
+      retained_provenance_fingerprint_ = public_provenance_fingerprint(
+          std::string_view(identity.data(), identity.size()));
+    }
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>) {
       const bool homogeneous_match_derivation =
@@ -1897,8 +1932,8 @@ class StoredLocal final : public StoredLocalBase {
                "diffexp2-retained-plan-match-local-materialization-v1" ||
            required_string(*retained_derivation_, "schema") ==
                "diffexp2-retained-plan-match-local-materialization-v2" ||
-           required_string(*retained_derivation_, "schema") ==
-               "diffexp2-retained-plan-value-handoff-v1");
+           is_retained_plan_value_handoff_schema(
+               required_string(*retained_derivation_, "schema")));
       if (sealed_plan_match_lineage_ &&
           (!homogeneous_match_derivation || retained_owner_ != nullptr))
         throw std::invalid_argument(
@@ -2059,6 +2094,49 @@ class StoredLocal final : public StoredLocalBase {
       const auto elapsed = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       evaluations_.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        evaluate_ms_ += elapsed;
+      }
+      return result;
+    }
+  }
+
+  std::optional<CertifiedLocalEvaluation>
+  evaluate_retained_point_with_certified_tail(
+      const RealEvaluationPoint& point,
+      std::optional<std::int32_t> exact_rim,
+      const std::string& witness_radius_exact) override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      return std::nullopt;
+    } else {
+      if (!tail_model_.model.has_value() ||
+          tail_model_.status != TailMajorantStatus::Certified)
+        return std::nullopt;
+      AcbPrecisionLease lease(precision_bits_);
+      ComplexBall::set_precision(precision_bits_);
+      EvaluationOptions options;
+      options.imaginary_sign = exact_rim;
+      options.compute_tail_estimate = false;
+      const auto started = std::chrono::steady_clock::now();
+      auto result = evaluate_local_solution_with_certified_tail(
+          solution_, *tail_model_.model, point, witness_radius_exact,
+          options);
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      evaluations_.fetch_add(1);
+      tail_certificate_requests_.fetch_add(1);
+      switch (result.tail.status) {
+        case TailMajorantStatus::Certified:
+          tail_certificate_certified_.fetch_add(1);
+          break;
+        case TailMajorantStatus::Inconclusive:
+          tail_certificate_inconclusive_.fetch_add(1);
+          break;
+        case TailMajorantStatus::Unsupported:
+          tail_certificate_unsupported_.fetch_add(1);
+          break;
+      }
       {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         evaluate_ms_ += elapsed;
@@ -2462,7 +2540,23 @@ class StoredLocal final : public StoredLocalBase {
     if (column_provenance_.has_value())
       result["column_provenance"] = column_provenance_->encode();
     if (retained_derivation_.has_value()) {
-      result["retained_derivation"] = *retained_derivation_;
+      const auto& derivation = *retained_derivation_;
+      if (!retained_provenance_fingerprint_.has_value())
+        throw std::logic_error(
+            "retained local lost its public provenance fingerprint");
+      result["retained_derivation"] = json::object{
+          {"schema", derivation.at("schema")},
+          {"capability", derivation.at("capability")},
+          {"provenance", json::object{
+               {"algorithm", "fnv1a64-v1"},
+               {"fingerprint", *retained_provenance_fingerprint_},
+               {"identity_bytes", retained_provenance_identity_bytes_}}},
+          {"checkpoint_identity", solution_.checkpoint_identity},
+          {"ownership", retained_owner_ != nullptr
+               ? "strong"
+               : sealed_plan_match_lineage_
+                     ? "sealed-plan-match-lineage"
+                     : "unowned"}};
       result["strong_derivation_ownership"] =
           retained_owner_ != nullptr;
     }
@@ -2541,8 +2635,7 @@ class StoredLocal final : public StoredLocalBase {
                 "diffexp2-retained-plan-match-local-materialization-v1" &&
             schema !=
                 "diffexp2-retained-plan-match-local-materialization-v2" &&
-            schema !=
-                "diffexp2-retained-plan-value-handoff-v1" &&
+            !is_retained_plan_value_handoff_schema(schema) &&
             schema !=
                 "diffexp2-retained-rational-row-local-application-v1")
           throw std::domain_error(
@@ -2605,8 +2698,8 @@ class StoredLocal final : public StoredLocalBase {
                derivation.at("tile_plan_checkpoint_identity")},
               {"arm", derivation.at("arm")},
               {"match_index", derivation.at("match")}};
-        } else if (derivation_schema ==
-            "diffexp2-retained-plan-value-handoff-v1") {
+        } else if (is_retained_plan_value_handoff_schema(
+                       derivation_schema)) {
           owner_lineage = json::object{
               {"tile_plan", derivation.at("tile_plan")},
               {"tile_plan_checkpoint_identity",
@@ -2666,8 +2759,8 @@ class StoredLocal final : public StoredLocalBase {
       if (sealed_plan_match_lineage_)
         record["derivation_owner_restore"] =
             retained_derivation_.has_value() &&
-                    required_string(*retained_derivation_, "schema") ==
-                        "diffexp2-retained-plan-value-handoff-v1"
+                    is_retained_plan_value_handoff_schema(
+                        required_string(*retained_derivation_, "schema"))
                 ? "sealed-plan-value-handoff-lineage"
                 : "sealed-plan-match-lineage";
       if (serialize_derivation_checkpoint_fields_) {
@@ -2799,8 +2892,8 @@ class StoredLocal final : public StoredLocalBase {
           "only a strongly owned plan-match local lineage can be sealed");
     const auto& derivation = *retained_derivation_;
     const auto derivation_schema = required_string(derivation, "schema");
-    const bool value_handoff = derivation_schema ==
-        "diffexp2-retained-plan-value-handoff-v1";
+    const bool value_handoff = is_retained_plan_value_handoff_schema(
+        derivation_schema);
     if (!value_handoff && derivation_schema !=
             "diffexp2-retained-plan-match-local-materialization-v1" &&
         derivation_schema !=
@@ -2843,7 +2936,10 @@ class StoredLocal final : public StoredLocalBase {
            "equation_payload_identity", "provenance_identity"},
           "sealed plan-value handoff derivation");
       if (required_string(derivation, "capability") !=
-              "retained-native-regular-value-handoff-v1" ||
+              (derivation_schema ==
+                       "diffexp2-retained-plan-value-handoff-v2"
+                   ? "retained-native-regular-value-handoff-v2"
+                   : "retained-native-regular-value-handoff-v1") ||
           required_string(derivation, "scope") !=
               "single-regular-to-regular-transport-hop" ||
           required_string(derivation, "coefficient_transport") !=
@@ -3157,6 +3253,8 @@ class StoredLocal final : public StoredLocalBase {
   std::int32_t top_valid_ = kCompleteInfinity;
   std::optional<json::object> retained_derivation_;
   std::shared_ptr<void> retained_owner_;
+  std::optional<std::string> retained_provenance_fingerprint_;
+  std::size_t retained_provenance_identity_bytes_ = 0;
   RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(
       "tail model is unavailable for this retained local");
   std::optional<RationalRowLineTailModelResult<Scalar>>

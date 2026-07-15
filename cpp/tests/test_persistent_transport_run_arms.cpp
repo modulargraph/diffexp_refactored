@@ -1,4 +1,6 @@
+#include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
+#include "diffexp2/scalar.hpp"
 
 #include <boost/json.hpp>
 
@@ -32,6 +34,43 @@ std::uint64_t counter(const json::object& object, const char* key) {
   throw std::runtime_error(std::string("expected nonnegative counter: ") + key);
 }
 
+bool epsilon_vectors_overlap(const json::value& left_raw,
+                             const json::value& right_raw) {
+  const auto& left = left_raw.as_object();
+  const auto& right = right_raw.as_object();
+  if (left.at("min") != right.at("min") ||
+      left.at("max") != right.at("max") ||
+      left.at("dimension") != right.at("dimension"))
+    return false;
+  const auto& left_coefficients = left.at("coefficients").as_array();
+  const auto& right_coefficients = right.at("coefficients").as_array();
+  if (left_coefficients.size() != right_coefficients.size()) return false;
+  const auto decode_ball = [](const json::value& raw) {
+    const auto& encoded = raw.as_array();
+    if (encoded.size() != 4 || !encoded[0].is_string() ||
+        !encoded[1].is_string() || !encoded[2].is_string() ||
+        !encoded[3].is_string())
+      throw std::runtime_error("unexpected encoded Acb coefficient");
+    auto ball = diffexp2::ComplexBall::from_strings(
+        std::string(encoded[0].as_string()),
+        std::string(encoded[1].as_string()));
+    const auto add_radius = [](arb_t value, const json::value& exponent) {
+      const auto text = std::string(exponent.as_string());
+      if (text != "zero")
+        arb_add_error_2exp_si(value, static_cast<slong>(std::stol(text)));
+    };
+    add_radius(acb_realref(ball.raw()), encoded[2]);
+    add_radius(acb_imagref(ball.raw()), encoded[3]);
+    return ball;
+  };
+  for (std::size_t index = 0; index < left_coefficients.size(); ++index) {
+    const auto left_ball = decode_ball(left_coefficients[index]);
+    const auto right_ball = decode_ball(right_coefficients[index]);
+    if (!acb_overlaps(left_ball.raw(), right_ball.raw())) return false;
+  }
+  return true;
+}
+
 json::array prescriptions(bool branch_sensitive = true,
                           std::int32_t sign = -1) {
   if (!branch_sensitive) return json::array{};
@@ -48,6 +87,12 @@ json::object epsilon_rational_one() {
                       {"denominator", json::array{"1"}}};
 }
 
+json::object epsilon_rational_minus_one() {
+  return json::object{{"zero", false}, {"valuation", 0},
+                      {"numerator", json::array{"-1"}},
+                      {"denominator", json::array{"1"}}};
+}
+
 std::string prepare_chart(const std::string& session,
                           const std::string& name,
                           const std::string& center,
@@ -56,7 +101,8 @@ std::string prepare_chart(const std::string& session,
                           int chop_digits = 0,
                           std::int32_t prescription_sign = -1,
                           const std::string& relative_accuracy_max =
-                              "1/100") {
+                              "1/100",
+                          bool near_boundary_q_zero = false) {
   json::array principal_row{
       json::object{{"exact", "0"}, {"proven_zero", true}}};
   json::array component{0};
@@ -67,10 +113,16 @@ std::string prepare_chart(const std::string& session,
   components.push_back(component);
   json::array d_lags;
   d_lags.push_back(std::move(d_lag));
+  if (near_boundary_q_zero)
+    d_lags.push_back(json::array{
+        json::object{{"s", 0}, {"v", "-1"}}});
   json::array blocks;
   blocks.push_back(std::move(component));
   const auto owner = "de2-operator-" + name;
   const auto one = epsilon_rational_one();
+  json::array physical_q{one};
+  if (near_boundary_q_zero)
+    physical_q.push_back(epsilon_rational_minus_one());
   json::array physical_c;
   physical_c.push_back(json::array{});
   json::object problem{
@@ -92,7 +144,7 @@ std::string prepare_chart(const std::string& session,
                 {"theta_coordinate", "local-t"},
                 {"owner_signature_identity", owner},
                 {"payload_identity", "de2-physical-ode-" + name},
-                {"q", json::array{one}},
+                {"q", std::move(physical_q)},
                 {"c", std::move(physical_c)}}},
            {"chop_digits", chop_digits}};
   if (domain == "acb") problem["precision_bits"] = 256;
@@ -571,9 +623,18 @@ json::object run_single(const std::string& session,
            {"root", root}}}});
 }
 
-json::object integrand_row(const std::string& identity) {
-  const json::array one{"1", "0", "0", "0", "0"};
-  const json::array zero{"0", "0", "0", "0", "0"};
+json::object integrand_row(const std::string& identity,
+                           std::size_t taylor_width = 5) {
+  if (taylor_width == 0)
+    throw std::invalid_argument("integrand row Taylor width is zero");
+  json::array one;
+  json::array zero;
+  one.reserve(taylor_width);
+  zero.reserve(taylor_width);
+  for (std::size_t n = 0; n < taylor_width; ++n) {
+    one.emplace_back(n == 0 ? "1" : "0");
+    zero.emplace_back("0");
+  }
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
       {"columns", 1}, {"exact_identity", identity},
@@ -588,7 +649,8 @@ json::object integrand_row(const std::string& identity) {
 
 json::value contract_and_export(const std::string& session,
                                 const json::object& state,
-                                const std::string& root) {
+                                const std::string& root,
+                                std::size_t taylor_width = 5) {
   const auto contracted = request(json::object{
       {"schema", 2}, {"op", "transport.contract"},
       {"session", session},
@@ -605,8 +667,8 @@ json::value contract_and_export(const std::string& session,
            {"identity", root + ":observable"},
            {"checkpoint_identity", root + ":line"},
            {"integrand_rows", json::array{
-                integrand_row(root + ":row:1"),
-                integrand_row(root + ":row:2")}},
+                integrand_row(root + ":row:1", taylor_width),
+                integrand_row(root + ":row:2", taylor_width)}},
            {"epsilon", json::object{{"min", 0}, {"max", 2},
                                       {"required_complete_max", 1}}},
            {"tail_policy", "stored"}}}}});
@@ -647,26 +709,31 @@ void release_state(const std::string& session, const std::string& state) {
 void test_regular_value_hop_checkpoint() {
   const std::string checkpoint =
       "/tmp/diffexp2-regular-value-hop-roundtrip.de2cp";
+  const std::string tampered_checkpoint =
+      "/tmp/diffexp2-regular-value-hop-retained-value-tampered.de2cp";
   std::remove(checkpoint.c_str());
+  std::remove(tampered_checkpoint.c_str());
   std::string session;
   std::string restored;
   try {
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
-        {"domain", "rational"}, {"output_digits", 40},
+        {"domain", "acb"}, {"precision_bits", 256},
+        {"output_digits", 40},
         {"chart_capacity", 6}, {"local_capacity", 12},
         {"match_capacity", 4}, {"tile_plan_capacity", 2},
         {"transport_state_capacity", 4}, {"line_result_capacity", 4}});
     require_ok(created, "value-hop session.create");
     session = std::string(created.at("session").as_string());
     const auto anchor_chart = prepare_chart(
-        session, "value-hop-anchor-chart", "0");
+        session, "value-hop-anchor-chart", "0", true, "acb", 4, -1,
+        "1/100", true);
     const auto lower_chart = prepare_chart(
-        session, "value-hop-lower-chart", "-2/3");
+        session, "value-hop-lower-chart", "-2/3", true, "acb", 4);
     const auto upper_chart = prepare_chart(
-        session, "value-hop-upper-chart", "2/3");
+        session, "value-hop-upper-chart", "2/3", true, "acb", 4);
     const auto anchor = solve_local(
-        session, anchor_chart, "0", "streaming-state-anchor", "2", 4,
+        session, anchor_chart, "0", "streaming-state-anchor", "2", 30,
         true);
     const auto planned = request(json::object{
         {"schema", 2}, {"op", "tile.plan"}, {"session", session},
@@ -677,7 +744,7 @@ void test_regular_value_hop_checkpoint() {
     require_ok(planned, "value-hop tile.plan");
     const auto plan = std::string(planned.at("tile_plan").as_string());
     const auto legacy_chart = prepare_chart(
-        session, "value-hop-legacy-chart", "-1/3", true, "rational", 0,
+        session, "value-hop-legacy-chart", "-1/3", true, "acb", 4,
         -1, "");
     const auto legacy_local = solve_local(
         session, legacy_chart, "-1/3", "value-hop-legacy-local", "1", 0,
@@ -715,17 +782,18 @@ void test_regular_value_hop_checkpoint() {
 
     const auto low_order_anchor = solve_local(
         session, anchor_chart, "0", "value-tail-order-probe-anchor", "2",
-        0, false);
+        0, true);
     const auto before = session_stats(session);
     const auto unsafe_tail = consume_value_hop(
         session, plan, "lower", low_order_anchor,
         "value-tail-order-probe-anchor",
-        value_solver("-2/3", false, 4), "value-hop-success");
+        value_solver("-2/3", false, 4, "1/100", "1/10000"),
+        "value-hop-success");
     require_ok(unsafe_tail, "unsafe-tail value hop");
     const auto after_unsafe_tail = session_stats(session);
     if (unsafe_tail.at("used") != false ||
         unsafe_tail.at("reason") !=
-            "receiver-center-fails-exact-truncation-tail-contract" ||
+            "inflated-center-evaluation-fails-relative-accuracy-contract" ||
         counter(after_unsafe_tail, "local_solves") !=
             counter(before, "local_solves"))
       throw std::runtime_error(
@@ -754,39 +822,39 @@ void test_regular_value_hop_checkpoint() {
             json::serialize(after_rejection));
     };
     {
-      auto solver = value_solver("-2/3");
+      auto solver = value_solver("-2/3", false, 4, "1/100", "1/10000");
       solver.at("run").as_object()["adaptive_probe"] = true;
       expect_rejected_template(std::move(solver), "adaptive probe",
                                "not one homogeneous (0,0,0) value run");
     }
     {
-      auto solver = value_solver("-2/3");
+      auto solver = value_solver("-2/3", false, 4, "1/100", "1/10000");
       solver.at("run").as_object()["a_shift_min"] = -1;
       expect_rejected_template(std::move(solver), "nonzero shift origin",
                                "not one homogeneous (0,0,0) value run");
     }
     {
-      auto solver = value_solver("-2/3");
+      auto solver = value_solver("-2/3", false, 4, "1/100", "1/10000");
       solver.at("run").as_object().at("a_shifts").as_array().emplace_back(
           "5");
       expect_rejected_template(std::move(solver), "extra a-shift",
                                "not one homogeneous (0,0,0) value run");
     }
     {
-      auto solver = value_solver("-2/3");
+      auto solver = value_solver("-2/3", false, 4, "1/100", "1/10000");
       solver.at("run").as_object().at("a_shifts").as_array()[2] = "7";
       expect_rejected_template(std::move(solver), "non-Taylor a-shift",
                                "a-shifts are not the exact Taylor indices");
     }
     {
-      auto solver = value_solver("-2/3");
+      auto solver = value_solver("-2/3", false, 4, "1/100", "1/10000");
       solver.at("run").as_object().at("schedule").as_array()[2]
           .as_array()[0].as_object()["da"] = "7";
       expect_rejected_template(std::move(solver), "non-Taylor da",
                                "Taylor by exact index");
     }
     {
-      auto solver = value_solver("-2/3");
+      auto solver = value_solver("-2/3", false, 4, "1/100", "1/10000");
       solver.at("run").as_object().at("schedule").as_array()[2]
           .as_array()[0].as_object()["db"] = "1";
       expect_rejected_template(std::move(solver), "nonzero db",
@@ -798,13 +866,14 @@ void test_regular_value_hop_checkpoint() {
     const auto before_log_rejection = session_stats(session);
     const auto log_rejection = consume_value_hop(
         session, plan, "lower", logarithmic,
-        "value-hop-logarithmic-source", value_solver("-2/3", true),
+        "value-hop-logarithmic-source",
+        value_solver("-2/3", true, 4, "1/100", "1/10000"),
         "value-hop-nonsingle-valued");
     const auto after_log_rejection = session_stats(session);
-    if (log_rejection.at("status") != "error" ||
-        std::string(log_rejection.at("detail").as_string()).find(
-            "source is not one certified (0,0,0) sector") ==
-            std::string::npos ||
+    if (log_rejection.at("status") != "ok" ||
+        log_rejection.at("used") != false ||
+        log_rejection.at("reason") !=
+            "incoming-local-has-no-certified-regular-tail-model" ||
         counter(after_log_rejection, "local_solves") !=
             counter(before_log_rejection, "local_solves") ||
         after_log_rejection.at("pending_local_solves") != 0)
@@ -816,12 +885,40 @@ void test_regular_value_hop_checkpoint() {
     const auto before_hops = session_stats(session);
     const auto lower = consume_value_hop(
         session, plan, "lower", anchor, "streaming-state-anchor",
-        value_solver("-2/3", true), "value-hop-success");
+        value_solver("-2/3", true, 30, "1/100", "1/10000"),
+        "value-hop-success");
     const auto upper = consume_value_hop(
         session, plan, "upper", anchor, "streaming-state-anchor",
-        value_solver("2/3", true, 0), "value-hop-success");
+        value_solver("2/3", true, 30, "1/100", "1/10000"),
+        "value-hop-success");
     require_ok(lower, "lower regular value hop");
     require_ok(upper, "upper regular value hop");
+    const auto lower_local_stats = request(json::object{
+        {"schema", 2}, {"op", "local.stats"}, {"session", session},
+        {"local", lower.at("next_local").as_object().at("local")}});
+    require_ok(lower_local_stats, "lower regular value local.stats");
+    const auto& compact_derivation =
+        lower_local_stats.at("retained_derivation").as_object();
+    const auto lower_stats_json = json::serialize(lower_local_stats);
+    if (compact_derivation.size() != 5 ||
+        compact_derivation.at("schema") !=
+            "diffexp2-retained-plan-value-handoff-v2" ||
+        compact_derivation.at("capability") !=
+            "retained-native-regular-value-handoff-v2" ||
+        compact_derivation.at("checkpoint_identity") !=
+            "value-hop-success:lower:local:1" ||
+        compact_derivation.at("ownership") !=
+            "sealed-plan-match-lineage" ||
+        compact_derivation.at("provenance").as_object()
+                .at("algorithm") != "fnv1a64-v1" ||
+        std::string(compact_derivation.at("provenance").as_object()
+                        .at("fingerprint").as_string()).empty() ||
+        lower_stats_json.size() >= 16384 ||
+        lower_stats_json.find("\"source_model\"") != std::string::npos ||
+        lower_stats_json.find("\"inflation\"") != std::string::npos)
+      throw std::runtime_error(
+          "value-hop local.stats exported a non-compact derivation: " +
+          lower_stats_json);
     const auto after_hops = session_stats(session);
     if (!lower.at("used").as_bool() || !upper.at("used").as_bool() ||
         lower.at("value_hops") != 1 || lower.at("basis_matches") != 0 ||
@@ -856,9 +953,11 @@ void test_regular_value_hop_checkpoint() {
         "value-basis-comparison-anchor", comparison_basis,
         "value-basis-comparison", "value-basis-comparison-plan");
     require_ok(basis_hop, "value/basis comparison hop");
-    const auto evaluate_center = [&](const json::value& local) {
+    const auto evaluate_center = [&](const std::string& session_handle,
+                                     const json::value& local) {
       const auto evaluated = request(json::object{
-          {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+          {"schema", 2}, {"op", "local.evaluate"},
+          {"session", session_handle},
           {"local", local},
           {"point", json::object{{"exact", "0"}}},
           {"options", json::object{{"tail_estimate", false}}},
@@ -866,8 +965,13 @@ void test_regular_value_hop_checkpoint() {
       require_ok(evaluated, "value/basis center evaluation");
       return evaluated.at("value");
     };
-    if (evaluate_center(lower.at("next_local").as_object().at("local")) !=
-        evaluate_center(basis_hop.at("next_local").as_object().at("local")))
+    if (!epsilon_vectors_overlap(
+            evaluate_center(
+                session,
+                lower.at("next_local").as_object().at("local")),
+            evaluate_center(
+                session,
+                basis_hop.at("next_local").as_object().at("local"))))
       throw std::runtime_error(
           "eligible value hop differs from the ordinary basis/match result");
     release_local(session, comparison_anchor);
@@ -891,7 +995,7 @@ void test_regular_value_hop_checkpoint() {
       throw std::runtime_error(
           "published value-hop instrumentation is inconsistent");
     const auto lower_value = contract_and_export(
-        session, lower_state, "value-hop-before-checkpoint");
+        session, lower_state, "value-hop-before-checkpoint", 31);
     require_ok(request(json::object{
         {"schema", 2}, {"op", "tile.release"}, {"session", session},
         {"tile_plan", plan}}), "value-hop tile.release");
@@ -901,6 +1005,52 @@ void test_regular_value_hop_checkpoint() {
         {"session", session}, {"path", checkpoint},
         {"checkpoint_identity", "value-hop-roundtrip"}});
     require_ok(saved, "value-hop checkpoint.save");
+    const auto container = diffexp2::checkpoint::read(checkpoint);
+    auto tampered_payload =
+        json::parse(container.payload_json).as_object();
+    bool tampered_retained_value = false;
+    for (auto& raw_local :
+         tampered_payload.at("retained_locals").as_array()) {
+      auto& local = raw_local.as_object();
+      if (local.at("retained_derivation").is_null()) continue;
+      auto& derivation = local.at("retained_derivation").as_object();
+      if (derivation.at("schema") !=
+          "diffexp2-retained-plan-value-handoff-v2")
+        continue;
+      auto& coefficients = derivation.at("tail_contract").as_object()
+          .at("inflation").as_object()
+          .at("retained_value").as_object()
+          .at("coefficients").as_array();
+      if (coefficients.size() < 2 || coefficients[0] == coefficients[1])
+        throw std::runtime_error(
+            "value-hop checkpoint has no distinct retained coefficient for tamper test");
+      coefficients[0] = coefficients[1];
+      tampered_retained_value = true;
+      break;
+    }
+    if (!tampered_retained_value)
+      throw std::runtime_error(
+          "value-hop checkpoint did not contain a v2 retained value");
+    diffexp2::checkpoint::write_atomic(
+        tampered_checkpoint, container.header_json,
+        json::serialize(tampered_payload));
+    const auto tampered_restore = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", tampered_checkpoint},
+        {"expected_identity", "value-hop-roundtrip"}});
+    if (tampered_restore.at("status") == "ok") {
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", tampered_restore.at("session")}});
+      throw std::runtime_error(
+          "checkpoint restore accepted a tampered certified retained value");
+    }
+    if (std::string(tampered_restore.at("detail").as_string()).find(
+            "differs from its restored incoming local") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "retained-value tamper was rejected for the wrong reason: " +
+          json::serialize(tampered_restore));
     require_ok(request(json::object{
         {"schema", 2}, {"op", "session.close"}, {"session", session}}),
         "value-hop session.close");
@@ -920,8 +1070,10 @@ void test_regular_value_hop_checkpoint() {
         restored_record.at("locals").as_array().size() != 0 ||
         restored_lower.at("value_hops") != 1 ||
         restored_lower.at("basis_matches") != 0 ||
-        contract_and_export(restored, lower_state,
-                            "value-hop-after-checkpoint") != lower_value)
+        !epsilon_vectors_overlap(
+            contract_and_export(restored, lower_state,
+                                "value-hop-after-checkpoint", 31),
+            lower_value))
       throw std::runtime_error(
           "regular value-hop checkpoint roundtrip changed its sealed state");
     require_ok(request(json::object{
@@ -929,6 +1081,7 @@ void test_regular_value_hop_checkpoint() {
         "restored value-hop session.close");
     restored.clear();
     std::remove(checkpoint.c_str());
+    std::remove(tampered_checkpoint.c_str());
   } catch (...) {
     if (!session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
@@ -937,6 +1090,7 @@ void test_regular_value_hop_checkpoint() {
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", restored}});
     std::remove(checkpoint.c_str());
+    std::remove(tampered_checkpoint.c_str());
     throw;
   }
 }
@@ -1071,10 +1225,10 @@ void test_acb_prescribed_value_hops_match_basis() {
           lower_basis_hop.at("next_local").as_object().at("local");
       const auto& upper_basis_local =
           upper_basis_hop.at("next_local").as_object().at("local");
-      if (evaluate_center(lower_value_local) !=
-              evaluate_center(lower_basis_local) ||
-          evaluate_center(upper_value_local) !=
-              evaluate_center(upper_basis_local))
+      if (!epsilon_vectors_overlap(evaluate_center(lower_value_local),
+                                   evaluate_center(lower_basis_local)) ||
+          !epsilon_vectors_overlap(evaluate_center(upper_value_local),
+                                   evaluate_center(upper_basis_local)))
         throw std::runtime_error(
             "prescribed Acb value and ordinary basis hops disagree");
       for (const auto* local : {&lower_value_local, &upper_value_local}) {
@@ -1152,7 +1306,7 @@ void test_acb_value_handoff_significance_gate() {
     const auto after_rejection = session_stats(session);
     if (rejected.at("used") != false ||
         rejected.at("reason") !=
-            "center-evaluation-fails-relative-accuracy-contract" ||
+            "inflated-center-evaluation-fails-relative-accuracy-contract" ||
         counter(after_rejection, "local_solves") !=
             counter(before_rejection, "local_solves"))
       throw std::runtime_error(
@@ -1284,7 +1438,7 @@ void test_multiblock_regular_value_fallback_owner() {
     const auto after_preflight = session_stats(session);
     if (ineligible.at("used") != false ||
         ineligible.at("reason") !=
-            "receiver-center-fails-exact-truncation-tail-contract" ||
+            "rational-value-handoff-has-no-exact-polynomial-tail-zero-certificate" ||
         counter(after_preflight, "local_solves") !=
             counter(before_preflight, "local_solves"))
       throw std::runtime_error(
@@ -1369,7 +1523,7 @@ void test_streaming_consumed_transport() {
     const auto after_ineligible_value = session_stats(session);
     if (ineligible_value.at("used") != false ||
         ineligible_value.at("reason") !=
-            "receiver-center-fails-exact-truncation-tail-contract" ||
+            "rational-value-handoff-has-no-exact-polynomial-tail-zero-certificate" ||
         after_ineligible_value.at("locals") != lower_before.at("locals") ||
         counter(after_ineligible_value, "local_solves") !=
             counter(lower_before, "local_solves"))

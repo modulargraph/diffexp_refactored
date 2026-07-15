@@ -510,8 +510,6 @@ bool run_domain(const std::string& domain) {
   const auto& lower_receiving = lower_hop.at("receiving").as_object();
   const auto& materialized_derivation =
       lower_materialized.at("retained_derivation").as_object();
-  const auto& materialized_output =
-      materialized_derivation.at("output").as_object();
   const bool domain_match_ok = domain == "rational"
       ? lower.at("residual").as_object().at("status") == "exact-zero"
       : lower.at("residual").as_object().at("verdict") == "pass";
@@ -568,19 +566,19 @@ bool run_domain(const std::string& domain) {
       lower_materialized.at("strong_derivation_ownership") == true &&
       lower_materialized.at("residual_binding").as_object().at("status") ==
           "available" &&
-      std::string(materialized_derivation.at("source_match").as_string()) ==
-          lower_match &&
-      materialized_derivation.at("planned_hop_provenance_identity") ==
-          lower.at("planned_hop_provenance_identity") &&
-      materialized_derivation.at("coefficient_transport") ==
-          "native-retained-only" &&
-      materialized_derivation.at("match_certified_complete_max") ==
-          2 &&
-      materialized_derivation.at("whole_arm_complete") == false &&
-      std::string(materialized_output.at("chart").as_string()) ==
-          lower_chart &&
-      std::string(materialized_output.at("checkpoint_identity").as_string()) ==
+      materialized_derivation.size() == 5 &&
+      materialized_derivation.at("schema") ==
+          "diffexp2-retained-plan-match-local-materialization-v1" &&
+      materialized_derivation.at("capability") ==
+          "retained-native-plan-match-local-materialization-v1" &&
+      materialized_derivation.at("provenance").as_object()
+              .at("algorithm") == "fnv1a64-v1" &&
+      !std::string(materialized_derivation.at("provenance").as_object()
+                       .at("fingerprint").as_string()).empty() &&
+      std::string(materialized_derivation.at("checkpoint_identity")
+                      .as_string()) ==
           domain + "-lower-receiving-local" &&
+      materialized_derivation.at("ownership") == "strong" &&
       lower_evaluation.at("status") == "ok" &&
       upper_evaluation.at("status") == "ok" &&
       lower_residual.at("status") == "ok" &&
@@ -628,7 +626,10 @@ bool run_domain(const std::string& domain) {
       std::abs(value_midpoint(restored_upper_evaluation, 0) - 2.0) < 1e-25 &&
       restored_local_stats.at("strong_derivation_ownership") == true &&
       std::string(restored_local_stats.at("retained_derivation").as_object()
-                      .at("source_match").as_string()) == lower_match &&
+                      .at("checkpoint_identity").as_string()) ==
+          domain + "-lower-receiving-local" &&
+      restored_local_stats.at("retained_derivation").as_object()
+              .at("ownership") == "strong" &&
       hidden_match.at("status") == "error" &&
       hidden_plan.at("status") == "error" &&
       hidden_source.at("status") == "error" &&

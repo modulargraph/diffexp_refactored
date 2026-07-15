@@ -999,8 +999,8 @@ restore_checkpoint_transport_arm_state_record(
               "checkpoint certificate-only value-hop derivation");
           const auto& local_derivation = found->second->retained_derivation();
           if (!local_derivation.has_value() ||
-              required_string(*local_derivation, "schema") !=
-                  "diffexp2-retained-plan-value-handoff-v1" ||
+              !is_retained_plan_value_handoff_schema(
+                  required_string(*local_derivation, "schema")) ||
               required_string(certificate,
                               "handoff_provenance_identity") !=
                   required_string(*local_derivation,

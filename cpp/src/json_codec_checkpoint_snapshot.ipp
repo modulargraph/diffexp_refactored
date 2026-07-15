@@ -150,8 +150,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
               "diffexp2-retained-plan-match-local-materialization-v1" &&
           schema !=
               "diffexp2-retained-plan-match-local-materialization-v2" &&
-          schema !=
-              "diffexp2-retained-plan-value-handoff-v1" &&
+          !is_retained_plan_value_handoff_schema(schema) &&
           schema !=
               "diffexp2-retained-rational-row-local-application-v1")
         throw std::domain_error(
@@ -162,8 +161,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
                  "diffexp2-retained-plan-match-local-materialization-v1" ||
              schema ==
                  "diffexp2-retained-plan-match-local-materialization-v2" ||
-             schema ==
-                 "diffexp2-retained-plan-value-handoff-v1") &&
+             is_retained_plan_value_handoff_schema(schema)) &&
             local->has_sealed_plan_match_lineage())
           return;
         throw std::logic_error(

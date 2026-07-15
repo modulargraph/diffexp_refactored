@@ -84,6 +84,12 @@ bool rational_smoke() {
   const auto after = request(
       std::string(R"json({"schema":2,"op":"session.stats","session":")json") +
       session + R"json("})json");
+  const auto counters = request(
+      std::string(R"json({"schema":2,"op":"session.counters","session":")json") +
+      session + R"json("})json");
+  const auto rejected_counters = request(
+      std::string(R"json({"schema":2,"op":"session.counters","session":")json") +
+      session + R"json(","detail":true})json");
 
   const auto& results = solved.at("results").as_array();
   const auto& first_u = results[0].as_object().at("u").as_array();
@@ -103,13 +109,27 @@ bool rational_smoke() {
       first_u[18] == "2" && second_u[18] == "1" &&
       results[2].as_object().at("status") == "error" &&
       results[2].as_object().at("id") == "CPP" &&
-      after.at("runs") == 2 && after.at("static_tensor_copies") == 0;
+      after.at("runs") == 2 && after.at("static_tensor_copies") == 0 &&
+      counters.at("status") == "ok" &&
+      counters.at("scope") == "fixed-session-counters" &&
+      std::string(counters.at("session").as_string()) == session &&
+      counters.at("charts") == 2 &&
+      counters.at("locals") == 0 && counters.at("local_solves") == 0 &&
+      counters.if_contains("chart_stats") == nullptr &&
+      counters.if_contains("local_stats") == nullptr &&
+      counters.if_contains("retained_derivation") == nullptr &&
+      json::serialize(counters).size() < 4096 &&
+      rejected_counters.at("status") == "error" &&
+      rejected_counters.at("id") == "CPP";
 
   if (!ok) {
     std::cerr << "rejected: " << json::serialize(rejected) << '\n'
               << "stats before: " << json::serialize(before) << '\n'
               << "solved: " << json::serialize(solved) << '\n'
-              << "stats after: " << json::serialize(after) << '\n';
+              << "stats after: " << json::serialize(after) << '\n'
+              << "counters: " << json::serialize(counters) << '\n'
+              << "rejected counters: " << json::serialize(rejected_counters)
+              << '\n';
   }
   (void)request(
       std::string(R"json({"schema":2,"op":"session.close","session":")json") +

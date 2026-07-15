@@ -1352,7 +1352,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   {plans, lower, upper, dimension = Length[sys["Matrix"]], values,
    epsMin, epsMax, req, anchorSystem, anchor = None, prepareArm, lowerData,
    upperData, sessions, anchorOwner, lowerOwners, upperOwners, planIdentity,
-   nativePlan = None, geometryAudit = None, sessionInfo, sessionStats,
+   nativePlan = None, geometryAudit = None, sessionStats,
    domain, integrand,
    preparedShift, halo, targetMax, targetOption =
      OptionValue["TargetCompleteMax"], requiredTargetMax,
@@ -1450,8 +1450,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   nativeStageTiming["anchor-solve-done boundaryMax=", availableMax,
     " request=", req["EpsWindow"], " anchor=",
     Lookup[anchor, "EpsWindow", None]];
-  sessionInfo = DiffExp2`CppBackend`PersistentSessionInformation[];
-  sessionStats = Lookup[sessionInfo, anchor["Session"], None];
+  sessionStats = DiffExp2`CppBackend`PersistentSessionCounters[anchor];
   domain = If[AssociationQ[sessionStats],
     Lookup[sessionStats, "domain", None], None];
   If[!MemberQ[{"acb", "rational"}, domain],
@@ -2639,8 +2638,7 @@ SaveNativeTransportObservableBatchCheckpoint[batch_Association,
           Lookup[states[side], "CheckpointIdentity", None]]|>,
         <|provenanceKey -> nativeCheckpointProvenanceReference[
           provenance, schema]|>]]], {"lower", "upper"}];
-  stats = DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
-    "op" -> "session.stats", "session" -> session|>];
+  stats = DiffExp2`CppBackend`PersistentSessionCounters[session];
   If[FailureQ[stats] || !AssociationQ[stats] ||
       Lookup[stats, "status", "error"] =!= "ok" ||
       !IntegerQ[Lookup[stats, "transport_arm_marches", None]],
@@ -2752,8 +2750,7 @@ RestoreNativeTransportObservableBatchCheckpoint[manifest_Association] :=
       "RestoredTransportStateHandles" -> restoredHandles[
         Lookup[restored, "transport_states", {}], "transport_state"],
       "Detail" -> "restored native checkpoint visibility differs from the completed observable manifest"|>]];
-  stats = DiffExp2`CppBackend`RunRequest[<|"schema" -> 2,
-    "op" -> "session.stats", "session" -> session|>];
+  stats = DiffExp2`CppBackend`PersistentSessionCounters[session];
   If[FailureQ[stats] || !AssociationQ[stats] ||
       Lookup[stats, "status", "error"] =!= "ok" ||
       Lookup[stats, "transport_arm_marches", None] =!=

@@ -1322,6 +1322,58 @@
     return json::object{{"status", "ok"}, {"released", chart_handle}};
   }
 
+  if (operation == "session.counters") {
+    require_exact_keys(root, {"schema", "op", "session"},
+                       "session.counters request");
+    // This endpoint is deliberately fixed-size.  Production checkpoint and
+    // orchestration code needs session-level counters, not a recursively
+    // materialized diagnostic dump of every retained object.  In particular,
+    // do not call stats_json()/summary() here: retained derivations may contain
+    // complete local tensors and can be many gigabytes in a large transport.
+    std::lock_guard<std::mutex> lock(session->mutex);
+    return json::object{
+        {"status", "ok"},
+        {"session", session->handle},
+        {"scope", "fixed-session-counters"},
+        {"domain", session->domain},
+        {"precision_bits", session->precision_bits},
+        {"charts", session->charts.size()},
+        {"locals", session->locals.size()},
+        {"matches", session->matches.size()},
+        {"endpoints", session->endpoints.size()},
+        {"tile_plans", session->tile_plans.size()},
+        {"transport_states", session->transport_states.size()},
+        {"line_results", session->line_results.size()},
+        {"transport_pair_streams", session->transport_pair_streams.size()},
+        {"scc_charts", session->sccs.size()},
+        {"pending_local_solves", session->pending_local_solves},
+        {"pending_matches", session->pending_matches},
+        {"pending_endpoint_limits", session->pending_endpoint_limits},
+        {"pending_tile_plans", session->pending_tile_plans},
+        {"pending_transport_states", session->pending_transport_states},
+        {"pending_line_integrations", session->pending_line_integrations},
+        {"local_solves", session->total_local_solves},
+        {"scc_column_solves", session->total_scc_column_solves},
+        {"local_matches", session->total_local_matches},
+        {"endpoint_limits", session->total_endpoint_limits},
+        {"endpoint_exports", session->total_endpoint_exports},
+        {"tile_plans_created", session->total_tile_plans},
+        {"transport_arm_marches", session->total_transport_arm_marches},
+        {"transport_contractions", session->total_transport_contractions},
+        {"transport_observables", session->total_transport_observables},
+        {"transport_pair_contractions",
+         session->total_transport_pair_contractions},
+        {"transport_pair_observables",
+         session->total_transport_pair_observables},
+        {"transport_endpoint_batches",
+         session->total_transport_endpoint_batches},
+        {"transport_endpoint_rows", session->total_transport_endpoint_rows},
+        {"line_integrations", session->total_line_integrations},
+        {"line_exports", session->total_line_exports},
+        {"checkpoint_generation", session->checkpoint_generation},
+        {"checkpoint_restore_count", session->checkpoint_restore_count}};
+  }
+
   if (operation == "session.stats") {
     std::vector<std::shared_ptr<PreparedChartBase>> charts;
     std::vector<std::shared_ptr<StoredLocalBase>> locals;

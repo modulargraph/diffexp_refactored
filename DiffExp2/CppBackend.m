@@ -74,6 +74,7 @@ ClosePersistentSession::usage = "ClosePersistentSession[owner] closes exactly on
 ReleasePersistentPreparedToken::usage = "ReleasePersistentPreparedToken[token] releases retained native charts certified by one prepared-operator token and removes its collision certificate.";
 ClearPersistentSessions::usage = "ClearPersistentSessions[] closes every process-local native solver session owned by this Wolfram kernel and clears its chart and SCC handle registries.";
 PersistentSessionInformation::usage = "PersistentSessionInformation[] returns native statistics for the live persistent solver sessions owned by this Wolfram kernel.";
+PersistentSessionCounters::usage = "PersistentSessionCounters[owner] returns a fixed-size session-level counter record without materializing retained object summaries. owner may be a session token or any opaque handle carrying that session.";
 DecodeScalar::usage = "DecodeScalar[encoded, precision] reconstructs a Wolfram scalar from a C++ rational or Acb midpoint/radius record with honest Accuracy.";
 DecodeScalars::usage = "DecodeScalars[encodedList, precision] reconstructs a list of C++ rational or Acb scalar records in bounded parser batches, preserving DecodeScalar semantics and falling back elementwise for mixed or malformed input.";
 ResetBackend::usage = "ResetBackend[] unloads the cached LibraryFunction handles so a rebuilt library can be loaded.";
@@ -2506,6 +2507,12 @@ ClosePersistentSession[owner_] := Module[
     "session" -> session|>];
   If[persistentCommandOKQ[response], persistentForgetSessionHandle[session]];
   response];
+
+PersistentSessionCounters[owner_] := Module[{session},
+  session = persistentCheckpointSession[owner];
+  If[FailureQ[session], Return[session, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "session.counters",
+    "session" -> session|>]];
 
 ClearPersistentSessions[] := Module[{handles},
   handles = DeleteDuplicates@Join[

@@ -52,6 +52,18 @@ observables = {
 sessionStats[] := If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
     atlas["Session"], <||>]];
+compactCounters = If[FailureQ[atlas], atlas,
+  DiffExp2`CppBackend`PersistentSessionCounters[atlas]];
+assert["native_session_counters_are_fixed_size_and_summary_free",
+  AssociationQ[compactCounters] &&
+    Lookup[compactCounters, "status", "error"] === "ok" &&
+    Lookup[compactCounters, "scope", None] ===
+      "fixed-session-counters" &&
+    Lookup[compactCounters, "session", None] === atlas["Session"] &&
+    ByteCount[compactCounters] < 10000 &&
+    FreeQ[Keys[compactCounters],
+      "chart_stats" | "local_stats" | "match_stats" |
+        "transport_state_stats" | "retained_derivation"]];
 
 beforeInvalid = sessionStats[];
 duplicate = If[FailureQ[atlas], atlas, catchDE2[

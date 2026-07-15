@@ -393,8 +393,9 @@ void ill_scaled_refinement_smoke() {
 
   AcbLaurentRefinementOptions options;
   // A zero tolerance deliberately cannot accept a nonzero-radius enclosure.
-  // This exercises the bounded correction replay and must remain honest by
-  // returning Inconclusive rather than manufacturing a numerical zero.
+  // This exercises bounded correction proposals and must remain honest by
+  // retaining the best Inconclusive prefix rather than manufacturing a
+  // numerical zero or publishing a non-improving iterate.
   options.relative_tolerance = Magnitude::zero();
   options.required_complete_max = 4;
   options.max_refinement_steps = 2;
@@ -404,9 +405,9 @@ void ill_scaled_refinement_smoke() {
       {ball_constant_frame("0"), ball_constant_frame("-1")}, exact_record,
       options, "ill-scaled refined Acb match");
   const auto expected_large = ComplexBall::from_strings("-" + big);
-  check("ill-scaled Acb solve reuses bounded refinement honestly",
-        matched.refinement_steps == 2 &&
-            matched.residual_history.size() == 3 &&
+  check("ill-scaled Acb solve retains the best bounded refinement honestly",
+        matched.refinement_steps == 0 &&
+            matched.residual_history.size() == 1 &&
             matched.residual_history.back().verdict ==
                 AcbMatchingResidualVerdict::Inconclusive &&
             matched.residual_history.back().complete_through_required &&
@@ -414,6 +415,44 @@ void ill_scaled_refinement_smoke() {
                 .contains_zero() &&
             (matched.weights[1].coefficient(0) - expected_large)
                 .contains_zero());
+}
+
+void incomplete_refinement_rollback_smoke() {
+  ComplexBall::set_precision(256);
+  std::vector<Rational> exact_basis_coefficients(19, Rational(0));
+  exact_basis_coefficients[3] = Rational(3);
+  std::vector<ComplexBall> ball_basis_coefficients(19, ComplexBall(0));
+  ball_basis_coefficients[3] = ComplexBall(3);
+  std::vector<ComplexBall> rhs_coefficients(17, ComplexBall(0));
+  rhs_coefficients[1] = ComplexBall(1);
+
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis(
+      FiniteLaurentMatrix<Rational>{{EpsilonFrame<Rational>(
+          -3, std::move(exact_basis_coefficients))}},
+      "rollback exact saturation record");
+  AcbLaurentRefinementOptions options;
+  // Division by three creates a nonzero-radius zero enclosure.  With a zero
+  // tolerance the first residual is deliberately inconclusive but complete
+  // through epsilon^12; feeding that residual back consumes three upper
+  // orders and would previously replace it with an incomplete epsilon^9
+  // iterate, causing an endless +3 reservoir retry.
+  options.relative_tolerance = Magnitude::zero();
+  options.required_min_power = -1;
+  options.required_complete_max = 12;
+  options.max_refinement_steps = 2;
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      {{EpsilonFrame<ComplexBall>(
+          -3, std::move(ball_basis_coefficients))}},
+      {EpsilonFrame<ComplexBall>(-1, std::move(rhs_coefficients))},
+      exact_record, options, "incomplete correction rollback", true);
+  check("incomplete Acb correction retains the last complete prefix",
+        matched.refinement_steps == 0 &&
+            matched.residual_history.size() == 1 &&
+            matched.residual_history.back().complete_through_required &&
+            matched.residual_history.back().complete_window.complete_max ==
+                12 &&
+            matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Inconclusive);
 }
 
 void refined_acb_ambiguous_pivot_smoke() {
@@ -770,6 +809,7 @@ int main() {
   ambiguous_acb_pivot_smoke();
   refined_acb_match_smoke();
   ill_scaled_refinement_smoke();
+  incomplete_refinement_rollback_smoke();
   refined_acb_ambiguous_pivot_smoke();
   laurent_off_pivot_ambiguity_smoke();
   refined_acb_ambiguous_off_pivot_smoke();

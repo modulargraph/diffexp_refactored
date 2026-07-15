@@ -2359,6 +2359,12 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
   RefinedAcbLaurentMatch result;
   result.factorization_preconditioner =
       factorization.preconditioner_kind;
+  std::optional<FiniteLaurentVector<ComplexBall>> last_complete_transformed;
+  std::optional<FiniteLaurentVector<ComplexBall>> last_complete_weights;
+  std::optional<FiniteLaurentVector<ComplexBall>> last_complete_residual;
+  std::optional<std::int64_t> last_complete_pass_prefix;
+  std::size_t last_complete_refinement_steps = 0;
+  std::size_t last_complete_history_size = 0;
   for (;;) {
     auto weights = apply_exact_laurent_matrix(
         transformation, transformed_weights);
@@ -2371,10 +2377,59 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     result.residual = std::move(residual.residual);
 
     const auto& latest = result.residual_history.back();
+    const auto contiguous_pass_prefix = [&latest]() {
+      const auto upper = std::min(
+          latest.complete_window.complete_max,
+          latest.required_complete_max);
+      std::int64_t prefix =
+          static_cast<std::int64_t>(latest.complete_window.min_power) - 1;
+      for (std::int64_t power = latest.complete_window.min_power;
+           power <= upper; ++power) {
+        bool saw_coefficient = false;
+        bool all_rows_pass = true;
+        for (const auto& coefficient : latest.coefficients) {
+          if (coefficient.epsilon_power != power) continue;
+          saw_coefficient = true;
+          all_rows_pass = all_rows_pass &&
+              coefficient.verdict == AcbMatchingResidualVerdict::Pass;
+        }
+        if (!saw_coefficient || !all_rows_pass) break;
+        prefix = power;
+      }
+      return prefix;
+    }();
+
+    // A finite-Laurent correction can consume upper coefficients or worsen
+    // the contiguous certified residual prefix even when an earlier iterate
+    // already covered the caller's requirement.  Keep corrections
+    // speculative and retain the best complete prefix transactionally.  A
+    // later correction may recover and win; if refinement stops first, the
+    // worse proposal must not replace the best usable iterate.  Otherwise a
+    // wider private reservoir merely permits one more destructive correction
+    // and can publish the same reservoir retry forever.
+    if (latest.complete_through_required &&
+        (!last_complete_pass_prefix.has_value() ||
+         contiguous_pass_prefix > *last_complete_pass_prefix)) {
+      last_complete_transformed = transformed_weights;
+      last_complete_weights = result.weights;
+      last_complete_residual = result.residual;
+      last_complete_pass_prefix = contiguous_pass_prefix;
+      last_complete_refinement_steps = result.refinement_steps;
+      last_complete_history_size = result.residual_history.size();
+    }
     if (latest.verdict == AcbMatchingResidualVerdict::Pass ||
         !latest.complete_through_required ||
-        result.refinement_steps >= options.max_refinement_steps)
+        result.refinement_steps >= options.max_refinement_steps) {
+      if (last_complete_transformed.has_value() &&
+          last_complete_history_size != result.residual_history.size()) {
+        transformed_weights = std::move(*last_complete_transformed);
+        result.weights = std::move(*last_complete_weights);
+        result.residual = std::move(*last_complete_residual);
+        result.refinement_steps = last_complete_refinement_steps;
+        result.residual_history.resize(last_complete_history_size);
+      }
       break;
+    }
 
     // Only correct the declared finite Laurent quotient.  Roundoff remnants
     // below its lower floor are retained in `result.residual` for diagnosis,

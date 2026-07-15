@@ -3685,7 +3685,16 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
    poleDepth, spectralDepth, transformDepth, wideTop, fb, W, prep, vPrep,
    symbols, domain, wp, inputDigits, precisionBits, staticRecord, request,
    persistentMetadata, checkpointIdentity, localMetadata, prepared,
-   valueRunKeys},
+   valueRunKeys, ownerTimingQ, ownerPhaseStarted, ownerPhase},
+  ownerTimingQ = Environment["DE2_NATIVE_OWNER_TIMING"] === "1";
+  ownerPhaseStarted = SessionTime[];
+  ownerPhase[label_String] := If[ownerTimingQ,
+    Module[{now = SessionTime[]},
+      Print["DE2 NATIVE OWNER PHASE center=", InputForm[cs["Center"]],
+        " phase=", label, " elapsedMs=",
+        N[1000 (now - ownerPhaseStarted), 8], " frame={", fb, ",",
+        W, "} dimension=", d];
+      ownerPhaseStarted = now]];
   If[cfg["RecurrenceBackend"] =!= "Cpp" ||
       !TrueQ[$cppUsePersistentSessions] ||
       Environment["DE2_CPP_PERSISTENT"] === "0",
@@ -3775,9 +3784,12 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
   fb = Min[Min[reqMin, 0] - pBudget - cdMax - 2,
       reqMin - pBudget - cdMax - poleDepth] - spectralDepth;
   W = wideTop - fb + 1;
+  ownerPhase["preflightAndFramePlan"];
   prep = prepareCleared[cs, fb, W, symbolic];
+  ownerPhase["prepareCleared"];
   vPrep = prepareFramedMatrix[cs["V"],
     DiffExp2`Config`CanonicalEps[], fb, W, cs];
+  ownerPhase["prepareFramedMatrix"];
   symbols = cppRegulatorSymbols[cs, prep, a, b, p, nmax,
     None, init, vPrep];
   If[symbols =!= {},
@@ -3793,10 +3805,12 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
       $cppSerializationSymbols = {}},
     staticRecord = cppStaticOperatorPayload[cs, prep, blocks, fb, W,
       vPrep, inputDigits, precisionBits];
+    ownerPhase["buildAndSerializeStaticOperator"];
     request = Block[{$cppStaticRecordOverride = staticRecord,
         $cppBuildRequestOnly = True},
       cppRunRecursionCore[cs, prep, a, b, p, nmax, None, fb, W,
         init, vPrep]];
+    ownerPhase["serializeDynamicPrototype"];
     persistentMetadata = Append[cppPersistentMetadata[cs, fb, W],
       "PreparedToken" -> staticRecord["Token"]];
     checkpointIdentity = "de2-native-local-" <>
@@ -3807,6 +3821,7 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
         16, 64];
     localMetadata = cppNativeLocalMetadata[cs, a, b, p, inputDigits,
       checkpointIdentity]];
+  ownerPhase["metadataAndIdentity"];
   prepared = <|"Dimension" -> d,
     "Tag" -> <|"a" -> a, "b" -> b, "p" -> p|>,
     "RequestedMin" -> reqMin, "RequestedMax" -> reqMax,
@@ -6642,7 +6657,8 @@ SolveNativeRegularBasis[cs_Association, req_Association,
 PrepareNativeRegularBasisOwner[cs_Association, req_Association] := Module[
   {d = cs["SystemSize"],
    epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax, physical,
-   unitValues, prepared, owner, expectedIdentity},
+   unitValues, prepared, owner, expectedIdentity, ownerTimingQ,
+   registrationStarted},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "PrepareNativeRegularBasisOwner requires a regular chart"|>]];
@@ -6662,8 +6678,15 @@ PrepareNativeRegularBasisOwner[cs_Association, req_Association] := Module[
         {power, epsMin, epsMax}]], {component, d}];
   prepared = prepareNativeLocalFamilyRun[physical, req,
     <|"a" -> 0, "b" -> 0, "p" -> 0|>, {unitValues}, True];
+  ownerTimingQ = Environment["DE2_NATIVE_OWNER_TIMING"] === "1";
+  registrationStarted = SessionTime[];
   owner = DiffExp2`CppBackend`PreparePersistentChart[
     prepared["Request"], prepared["PersistentMetadata"]];
+  If[ownerTimingQ, Print[
+    "DE2 NATIVE OWNER PHASE center=", InputForm[physical["Center"]],
+    " phase=cppOwnerRegistration elapsedMs=",
+    N[1000 (SessionTime[] - registrationStarted), 8],
+    " dimension=", d]];
   If[FailureQ[owner] || !AssociationQ[owner],
     err["E5", cs, <|"BackendFailure" -> owner, "Detail" ->
       "persistent native regular chart-owner preparation failed"|>]];

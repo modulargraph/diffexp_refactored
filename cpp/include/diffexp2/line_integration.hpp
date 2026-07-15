@@ -177,10 +177,12 @@ struct MonomialGroup {
   SectorMonomialTag tag;
   // Flat [input epsilon][component], component fastest.
   std::vector<Scalar> coefficients;
-  // Per [input epsilon][component], this is the maximum rigorous upper
-  // magnitude of the ungrouped contributions.  It is deliberately kept
-  // separate from the grouped coefficient so cancellation cannot shrink its
-  // own reference scale.
+  // Per [input epsilon][component], this is the rigorous l1 upper magnitude
+  // of the ungrouped contributions.  A cancellation residual accumulates
+  // the uncertainty of every addend, so a maximum would make the admissible
+  // relative error spuriously tighter by the number of terms.  The scale is
+  // deliberately kept separate from the grouped coefficient so cancellation
+  // cannot shrink its own reference norm.
   std::vector<Magnitude> contribution_scale_uppers;
   std::size_t cell_count = 0;
   bool had_material_input = false;
@@ -282,9 +284,9 @@ std::map<MonomialKey, MonomialGroup<Scalar>> group_monomials(
           if (!exact_singleton_zero(value)) group.had_material_input = true;
           const auto cell = ei * solution.dimension + component;
           group.coefficients[cell] += value;
-          group.contribution_scale_uppers[cell] = Magnitude::maximum(
-              group.contribution_scale_uppers[cell],
-              Magnitude::upper_abs(as_ball(value)));
+          group.contribution_scale_uppers[cell] =
+              group.contribution_scale_uppers[cell] +
+              Magnitude::upper_abs(as_ball(value));
         }
       }
     }
@@ -1117,6 +1119,55 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
     }
   }
 
+  // Recover the rigorous l1 norm before the fast Acb polynomial projection
+  // combines its matrix/Taylor products.  Once those products have been
+  // summed into one ball, |sum| no longer records the cancellation scale and
+  // can make an otherwise relative policy term-count dependent.  This is
+  // evaluated only for the few center-divergent monomial cells below, so the
+  // production polynomial fast path remains O(N log N) for ordinary cells.
+  const auto fused_cell_contribution_scale = [&source, &projected_epsilon,
+      epsilon_width](const OutputSector& output_sector,
+                     std::size_t output_taylor,
+                     std::size_t output_epsilon) {
+    Magnitude scale = Magnitude::zero();
+    const auto raw_power = static_cast<std::int64_t>(
+        projected_epsilon.min_power) +
+        static_cast<std::int64_t>(output_epsilon);
+    for (const auto& contributor : output_sector.contributors) {
+      const auto& entry = *contributor.entry;
+      const auto& sector = *contributor.sector;
+      const auto term_min = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(source.epsilon.min_power) +
+              entry.multiplier.epsilon_shift,
+          "fused cancellation-scale epsilon minimum");
+      const auto term_index = raw_power - term_min;
+      if (term_index < 0) continue;
+      for (std::int64_t kernel_epsilon = 0;
+           kernel_epsilon <= term_index; ++kernel_epsilon) {
+        const auto input_epsilon = term_index - kernel_epsilon;
+        if (kernel_epsilon >= static_cast<std::int64_t>(epsilon_width) ||
+            input_epsilon >= static_cast<std::int64_t>(epsilon_width))
+          continue;
+        const auto& kernel = entry.multiplier.kernels[
+            static_cast<std::size_t>(kernel_epsilon)];
+        for (std::size_t kernel_taylor = 0;
+             kernel_taylor <= output_taylor; ++kernel_taylor) {
+          const auto& multiplier = kernel[kernel_taylor];
+          if (exact_singleton_zero(multiplier)) continue;
+          const auto input_taylor = output_taylor - kernel_taylor;
+          const auto& coefficient = sector.coefficients[
+              local_detail::sector_index(
+                  source, static_cast<std::size_t>(input_epsilon),
+                  input_taylor, entry.column)];
+          if (exact_singleton_zero(coefficient)) continue;
+          scale = scale + Magnitude::upper_abs(as_ball(multiplier)) *
+              Magnitude::upper_abs(as_ball(coefficient));
+        }
+      }
+    }
+    return scale;
+  };
+
   const auto build_group = [&](std::size_t group_begin,
                                std::size_t group_end,
                                const SectorMonomialTag& group_tag) {
@@ -1187,9 +1238,15 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
         const auto& value = cell[epsilon];
         if (!exact_singleton_zero(value)) group.had_material_input = true;
         group.coefficients[epsilon] += value;
-        group.contribution_scale_uppers[epsilon] = Magnitude::maximum(
-            group.contribution_scale_uppers[epsilon],
-            Magnitude::upper_abs(as_ball(value)));
+        Magnitude contribution_scale = Magnitude::upper_abs(as_ball(value));
+        if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+          if (center_divergent(group.tag, has_center_endpoint))
+            contribution_scale = fused_cell_contribution_scale(
+                *output_sector, taylor, epsilon);
+        }
+        group.contribution_scale_uppers[epsilon] =
+            group.contribution_scale_uppers[epsilon] +
+            contribution_scale;
       }
     }
     return group;

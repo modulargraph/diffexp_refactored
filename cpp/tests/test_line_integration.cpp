@@ -191,7 +191,11 @@ void acb_cancellation_is_exact_only() {
 void acb_bounded_divergent_cancellation_is_explicit_and_relative() {
   auto solution = base_solution<ComplexBall>(1);
   ComplexBall within(1);
-  arb_add_error_2exp_si(acb_realref(within.raw()), -100);
+  // 2^-66 is larger than 1e-20 times either individual O(1) addend,
+  // but smaller than 1e-20 times their rigorous l1 contribution norm.
+  // This pins the relative cancellation policy to the accumulated scale,
+  // rather than a term-count-dependent maximum norm.
+  arb_add_error_2exp_si(acb_realref(within.raw()), -66);
   solution.sectors = {
       sector<ComplexBall>("-1", "0", 0, {within}),
       sector<ComplexBall>("-1", "0", 0, {ComplexBall(-1)})};
@@ -495,7 +499,10 @@ void fused_row_cancels_divergence_across_sector_taylor_cells() {
 
 void fused_acb_row_matches_bounded_cross_cell_cancellation() {
   ComplexBall uncertain(1);
-  arb_add_error_2exp_si(acb_realref(uncertain.raw()), -100);
+  // Exercise the same l1-scale distinction through the production fused
+  // row path: the residual is above tolerance times one contribution but
+  // below tolerance times the two-contribution cancellation norm.
+  arb_add_error_2exp_si(acb_realref(uncertain.raw()), -66);
   const auto source = cross_cell_cancellation_source<ComplexBall>(
       uncertain, ComplexBall(-1));
   const auto row = cross_cell_identity_row<ComplexBall>();
@@ -517,6 +524,39 @@ void fused_acb_row_matches_bounded_cross_cell_cancellation() {
                 fused.diagnostics.divergent_cancellation_mode &&
             materialized.diagnostics.divergent_cancellation_provenance ==
                 fused.diagnostics.divergent_cancellation_provenance);
+}
+
+void fused_acb_row_keeps_preprojection_cancellation_scale() {
+  auto source = base_solution<ComplexBall>(2);
+  ComplexBall uncertain(1);
+  arb_add_error_2exp_si(acb_realref(uncertain.raw()), -66);
+  source.sectors = {sector<ComplexBall>(
+      "-1", "0", 0, {uncertain, ComplexBall(-1)})};
+
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> row;
+  row.rows = 1;
+  row.columns = 2;
+  row.exact_identity = "fused-preprojection-l1-row";
+  row.entries.push_back(
+      {0, 0, prepared_multiplier<ComplexBall>(
+          0, 0, {{ComplexBall(1)}}, "column-zero")});
+  row.entries.push_back(
+      {0, 1, prepared_multiplier<ComplexBall>(
+          0, 0, {{ComplexBall(1)}}, "column-one")});
+
+  StoredLineIntegrationOptions options;
+  options.delivered_epsilon = {0, 0};
+  options.divergent_cancellation =
+      StoredLineIntegrationOptions::BoundedDivergentCancellation{
+          diffexp2::Magnitude::decimal("1e-20"), "1e-20",
+          "fused-preprojection-l1-test"};
+  const auto fused = diffexp2::integrate_prepared_scalar_row_stored(
+      row, source, 0, RealEvaluationPoint::rational("0"),
+      RealEvaluationPoint::rational("1/2"), options);
+  check("fused Acb row retains the l1 scale before matrix projection cancellation",
+        fused.value.at(0, 0).is_zero() &&
+            fused.diagnostics.bounded_cancelled_divergent_coefficients == 1 &&
+            fused.diagnostics.cancelled_divergent_groups == 1);
 }
 
 void fused_sparse_row_ignores_unselected_sector_payloads() {
@@ -616,6 +656,7 @@ int main() {
   fused_row_uses_exact_rational_endpoint_order();
   fused_row_cancels_divergence_across_sector_taylor_cells();
   fused_acb_row_matches_bounded_cross_cell_cancellation();
+  fused_acb_row_keeps_preprojection_cancellation_scale();
   fused_sparse_row_ignores_unselected_sector_payloads();
   fused_missing_rim_preflight_matches_materialized_error_order();
   std::cout << "Results: " << passed << " / " << (passed + failed)

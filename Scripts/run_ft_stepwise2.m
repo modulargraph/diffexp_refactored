@@ -2454,22 +2454,32 @@ ft2NativeStageTiming[fields___] := If[
   Print["FTLADDER NATIVE STAGE ", fields, " t=", SessionTime[],
     " memory=", MemoryInUse[]]];
 
-(* The legacy/Wolfram combined-integrand gate uses LaurentLeadTol.  Native
-   transport is exact-singleton strict everywhere else; only FT integrate
-   observables carry this explicit, identity-bound bounded-relative policy. *)
-ft2DivergentCancellationPolicy[] := Module[{tol, decimal, provenance},
-  tol = Together[DiffExp2`Tolerances`Tol["LaurentLeadTol"]];
+(* Native transport is exact-singleton strict everywhere else; only FT
+   integrate observables carry this explicit, identity-bound bounded-relative
+   policy.  Keep two guarded digits beyond a deliberately low matching target;
+   otherwise retain the fixed structural Laurent floor. *)
+ft2DivergentCancellationPolicy[] := Module[
+  {laurentTol, matchTol, guardDigits = DiffExp2`Tolerances`$SafetyDigits,
+   tol, decimal, provenance},
+  laurentTol = Together[DiffExp2`Tolerances`Tol["LaurentLeadTol"]];
+  matchTol = Together[DiffExp2`Tolerances`Tol["MatchTol"]];
+  tol = Max[laurentTol, matchTol/10^guardDigits];
   If[!FreeQ[tol, _?InexactNumberQ] || !TrueQ[0 < tol < 1],
     Return[ft2NativeFailure[
-      "LaurentLeadTol must be one exact number strictly between zero and one",
-      <|"LaurentLeadTol" -> tol|>], Module]];
+      "effective divergent-cancellation tolerance must be one exact number strictly between zero and one",
+      <|"LaurentLeadTol" -> laurentTol, "MatchTol" -> matchTol,
+        "GuardDigits" -> guardDigits, "EffectiveTolerance" -> tol|>],
+      Module]];
   decimal = ToString[ScientificForm[N[tol, 50], 50,
       NumberFormat -> (Row[{#1, "e", #3}] &)], OutputForm];
   provenance = ExportString[<|
-      "schema" -> "feynman-trick-divergent-cancellation-v1",
+      "schema" -> "feynman-trick-divergent-cancellation-v2",
       "producer" -> "DiffExp2`Tolerances`Tol",
-      "key" -> "LaurentLeadTol",
-      "exact_value" -> ToString[tol, InputForm]|>,
+      "formula" -> "Max[LaurentLeadTol,MatchTol/10^SafetyDigits]",
+      "laurent_lead_tol_exact" -> ToString[laurentTol, InputForm],
+      "match_tol_exact" -> ToString[matchTol, InputForm],
+      "safety_digits" -> guardDigits,
+      "effective_exact_value" -> ToString[tol, InputForm]|>,
     "RawJSON", "Compact" -> True];
   <|"Mode" -> "bounded-relative-acb",
     "RelativeTolerance" -> decimal,

@@ -196,6 +196,14 @@ divergentPolicies = Lookup[integrateObservables,
 divergentProvenance = Quiet[Check[
     ImportString[#, "RawJSON"] & /@
       Lookup[divergentPolicies, "Provenance"], $Failed]];
+defaultMatchTolExact = ToString[
+  DiffExp2`Tolerances`Tol["MatchTol"], InputForm];
+lowTargetCancellationPolicy = Block[{
+    DiffExp2`Tolerances`Tol = Function[key, Switch[key,
+      "LaurentLeadTol", 10^-24, "MatchTol", 10^-8,
+      _, $Failed]]}, ft2DivergentCancellationPolicy[]];
+lowTargetCancellationProvenance = Quiet[Check[ImportString[
+    lowTargetCancellationPolicy["Provenance"], "RawJSON"], $Failed]];
 assert["atlas preparation receives every active non-direct vector and exact target",
   AssociationQ[capturedPrepare] &&
     capturedPrepare["TargetCompleteMax"] === 8 &&
@@ -233,11 +241,28 @@ assert["FT integrate observables alone carry one explicit bounded cancellation p
     FreeQ[limitObservables, "DivergentCancellation"] &&
     ListQ[divergentProvenance] &&
     divergentProvenance === ConstantArray[<|
-        "schema" -> "feynman-trick-divergent-cancellation-v1",
+        "schema" -> "feynman-trick-divergent-cancellation-v2",
         "producer" -> "DiffExp2`Tolerances`Tol",
-        "key" -> "LaurentLeadTol",
-        "exact_value" -> "1/1000000000000000000000000"|>, 2],
+        "formula" ->
+          "Max[LaurentLeadTol,MatchTol/10^SafetyDigits]",
+        "laurent_lead_tol_exact" ->
+          "1/1000000000000000000000000",
+        "match_tol_exact" -> defaultMatchTolExact,
+        "safety_digits" -> 2,
+        "effective_exact_value" ->
+          "1/1000000000000000000000000"|>, 2],
   {divergentPolicies, divergentProvenance, limitObservables}];
+assert["low matching targets retain two guarded digits beyond the requested result",
+  AssociationQ[lowTargetCancellationPolicy] &&
+    StringMatchQ[lowTargetCancellationPolicy["RelativeTolerance"],
+      NumberString ~~ "e-10"] &&
+    AssociationQ[lowTargetCancellationProvenance] &&
+    lowTargetCancellationProvenance["effective_exact_value"] ===
+      "1/10000000000" &&
+    lowTargetCancellationProvenance["match_tol_exact"] ===
+      "1/100000000" &&
+    lowTargetCancellationProvenance["safety_digits"] === 2,
+  {lowTargetCancellationPolicy, lowTargetCancellationProvenance}];
 assert["high-shift integration is marched rather than unsafely pruned",
   capturedObservables[[-1, "Identity"]] === entries[[6, "Identity"]] &&
     capturedObservables[[-1, "Epsilon", "Min"]] === 7];

@@ -64,6 +64,57 @@ assert["planner_complex_projection_plus_minus_im_parity",
 assert["planner_degree8_projection_fast",
   findTime < 5];
 
+(* Pentagon-like projected quartic distances used to be handed to Min as
+   exact Root expressions.  Min then attempted a common number-field
+   embedding, emitted Min::meprec, and could spend minutes before native
+   transport began.  The planner must retain the exact winning expression
+   while ordering separated endpoints numerically and reserving RootReduce
+   for an ambiguous pair only. *)
+quarticRoot = Root[5184 - 67203 # + 148404 #^2 - 109440 #^3 +
+    25600 #^4 &, 1];
+quarticDistances = {
+  RootReduce[Abs[(19 - Sqrt[105])/32 - quarticRoot/3]],
+  RootReduce[Abs[(19 - Sqrt[681])/40 - quarticRoot/3]],
+  RootReduce[Abs[(-19 + Sqrt[105])/32 - quarticRoot/3]]};
+{quarticMinimumTime, quarticMinimum} = AbsoluteTiming[
+  Quiet[Check[
+    DiffExp2`Transport`Private`minimumOrderedReal[quarticDistances, 80],
+    $Failed, Min::meprec]]];
+assert["planner_root_distance_minimum_avoids_common_number_field",
+  quarticMinimum =!= $Failed && MemberQ[quarticDistances, quarticMinimum] &&
+    Abs[N[quarticMinimum - Min[N[quarticDistances, 100]], 70]] < 10^-60 &&
+    quarticMinimumTime < 1];
+quarticCappedRadius = Quiet[Check[
+  DiffExp2`Transport`Private`cappedChartRadius[
+    (19 - Sqrt[105])/32,
+    {quarticRoot/3, (19 - Sqrt[681])/40}, 2],
+  $Failed, Min::meprec]];
+assert["planner_root_radius_cap_avoids_common_number_field",
+  quarticCappedRadius =!= $Failed && NumericQ[quarticCappedRadius] &&
+    TrueQ[quarticCappedRadius > 0] &&
+    TrueQ[N[quarticCappedRadius, 80] <= 2]];
+
+(* Value-aware refinement after an exact algebraic singularity must not copy
+   that field into dozens of ordinary receiver centers.  These centers are
+   free coordinate choices: rational representatives preserve the exact
+   ordered interval and disk-overlap checks, while only the actual singular
+   charts retain their algebraic roots. *)
+algebraicRefineSys = <|"Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {x^2 - 2, x - 3/2}|>;
+SetEnvironment["DE2_VALUE_TRANSPORT" -> "1"];
+algebraicRefinePlan = DiffExp2`Transport`SegmentLine[
+  algebraicRefineSys, {0, 2}];
+regularRefineCenters = Lookup[
+  Select[algebraicRefinePlan["Charts"], !TrueQ[# ["Singular"]] &],
+  "Center", {}];
+assert["planner_value_refinement_keeps_regular_centers_rational",
+  Length[regularRefineCenters] > 10 &&
+    AllTrue[regularRefineCenters,
+      IntegerQ[#] || Head[#] === Rational &] &&
+    !FailureQ[Catch[
+      DiffExp2`Transport`ValidatePlan[algebraicRefinePlan],
+      "DiffExp2Error"]]];
+
 SetEnvironment["DE2_VALUE_TRANSPORT" -> "1"];
 planTime = First@AbsoluteTiming[
   bananaPlan = TimeConstrained[

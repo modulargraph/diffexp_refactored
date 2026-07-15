@@ -170,6 +170,25 @@ pointOrderSign[a_, b_, digits_Integer:40] := Module[
       "ExactDifference" -> reduced,
       "Detail" -> "could not order exact real planner points"|>]]];
 
+(* Select an exact real minimum without asking Min to embed every Root-valued
+   candidate in one algebraic number field.  pointOrderSign evaluates the
+   endpoints independently first and enters RootReduce only for a genuinely
+   close comparison, while the returned object remains the original exact
+   candidate.  This is the ordering analogue of numericDistance: numerics
+   nominate the winner, exact reduction resolves ambiguity. *)
+minimumOrderedReal[values_List, digits_Integer:70] := Module[
+  {finite = DeleteCases[values, Infinity], best, sign},
+  If[finite === {}, Return[Infinity, Module]];
+  best = First[finite];
+  Do[
+    sign = If[InexactNumberQ[candidate] || InexactNumberQ[best],
+      Which[TrueQ[candidate < best], -1,
+        TrueQ[candidate > best], 1, True, 0],
+      pointOrderSign[candidate, best, digits]];
+    If[sign === -1, best = candidate],
+    {candidate, Rest[finite]}];
+  best];
+
 (* Numerically compare planner points by evaluating the endpoints first.
    The previous unconditional RootReduce[a-b] made an O(n^2) spacing scan
    build a fresh degree-8 number field for every pair.  Rational differences
@@ -269,10 +288,21 @@ valueCenterMargin[expansionOrder_Integer] := Min[9/10,
 valueRefineRegularChain[charts_List, all_List, dir_, k_Integer,
     lineCap_] := Module[
   {margin = valueCenterMargin[cfg["ExpansionOrder"]], safety = 99/100,
-   radius, exactCenter, fallbackPoint, hopSafeQ, refinePair, out},
-  radius[c_] := Min[ChartRadius[c, all], lineCap];
-  exactCenter[z_] := If[FreeQ[z, _?InexactNumberQ], RootReduce[z],
-    Rationalize[N[z, 40], Max[10^-40, Abs[N[z, 40]]*10^-35]]];
+   radius, regularMidpoint, fallbackPoint, hopSafeQ, refinePair, out},
+  radius[c_] := cappedChartRadius[c, all, lineCap];
+  (* A regular center is a free coordinate choice.  In particular, do not
+     inherit an exact algebraic singular center through repeated bisection:
+     every such receiver would rebuild and serialize its operator over the
+     algebraic field even though a nearby rational center has identical
+     coverage.  regularRationalCenter retains the exact midpoint only as an
+     ordering/clearance witness and returns a rational point strictly inside
+     the same ordered interval.  Singular centers themselves remain exact. *)
+  regularMidpoint[left_, right_] := Module[
+    {cl = left["Center"], cr = right["Center"], midpoint, scale},
+    midpoint = RootReduce[(cl + cr)/2];
+    scale = numericDistance[cr, cl, Min[300,
+      Max[80, 2 cfg["WorkingPrecision"]]]];
+    regularRationalCenter[midpoint, cl, cr, dir, scale]];
   fallbackPoint[left_, right_] := Module[
     {cl = left["Center"], cr = right["Center"], rl, rr},
     rl = radius[cl]; rr = radius[cr];
@@ -296,7 +326,7 @@ valueRefineRegularChain[charts_List, all_List, dir_, k_Integer,
       err["E8", <|"LeftCenter" -> left["Center"],
         "RightCenter" -> right["Center"], "Margin" -> margin,
         "Detail" -> "value-aware regular chart refinement exceeded 64 bisections"|>]];
-    mid = exactCenter[(left["Center"] + right["Center"])/2];
+    mid = regularMidpoint[left, right];
     If[TrueQ[PossibleZeroQ[RootReduce[mid - left["Center"]]]] ||
         TrueQ[PossibleZeroQ[RootReduce[mid - right["Center"]]]],
       err["E8", <|"LeftCenter" -> left["Center"],
@@ -479,7 +509,15 @@ ChartRadius[center_, all_List] := Module[
     diffs = Map[If[FreeQ[{#, center}, _Root | _?InexactNumberQ],
       RootReduce[Abs[# - center]], numericDistance[#, center, digits]] &,
       others];
-    Min[diffs]]];
+    minimumOrderedReal[diffs, Min[300, Max[80, digits]]]]];
+
+(* Line-length caps are part of the same exact planner ordering problem as
+   the root-distance minimum.  A plain Min[ChartRadius[...], lineCap] can
+   still force two unrelated Root fields into a common embedding after the
+   inner radius selection has already avoided it. *)
+cappedChartRadius[center_, all_List, lineCap_] := minimumOrderedReal[
+  {ChartRadius[center, all], lineCap},
+  Min[300, Max[80, 2 cfg["WorkingPrecision"]]]];
 
 simpleProjectionWaypoints[projected_List, real_List, lineCap_] := Module[
   {pts, numericProjected = N[projected, 70]},
@@ -501,7 +539,8 @@ projectionRadius[center_, projected_List, lineCap_] := Module[{others},
   others = Select[projected,
     !TrueQ[PossibleZeroQ[RootReduce[# - center]]] &];
   If[others === {}, lineCap,
-    Min[lineCap, Min[RootReduce[Abs[# - center]] & /@ others]]]];
+    minimumOrderedReal[
+      Prepend[RootReduce[Abs[# - center]] & /@ others, lineCap], 80]]];
 
 (* Matching and the error probe share one hard geometric envelope.  Keep the
    old projected-geometry 1/k point whenever it lies within half of the true
@@ -591,7 +630,7 @@ classicNextCenter[xb_, projected_List, dir_, k_Integer, lineCap_,
       If[left === -Infinity, Infinity, (q - left)/(k - 1)]}, Infinity],
     DeleteCases[{If[left === -Infinity, Infinity, (q - left)/(k + 1)],
       If[right === Infinity, Infinity, (right - q)/(k - 1)]}, Infinity]];
-  g = If[steps === {}, lineCap/k, Min[steps]];
+  g = If[steps === {}, lineCap/k, minimumOrderedReal[steps, 80]];
   xnew = q + dir*g;
   If[TrueQ[dir*pointOrderSign[matchTarget, xb] > 0] &&
       TrueQ[dir*pointOrderSign[xnew, matchTarget] >= 0],
@@ -718,7 +757,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
      entries (one anchor solve per level instead of two near-copies). *)
   charts = {<|"Center" -> from, "Singular" -> False|>};
   cur = from;
-  prevRad = Min[ChartRadius[from, all], lineCap];
+  prevRad = cappedChartRadius[from, all, lineCap];
   prevMatchRad = projectionRadius[from, projected, lineCap];
   Module[{targets = Join[Map[Function[q, {q, AnyTrue[real,
           Function[r, TrueQ[PossibleZeroQ[RootReduce[r - q]]]]]}], interior],
@@ -729,7 +768,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
       forcedWaypoint = ti < Length[targets] ||
         (!targetSingular && AnyTrue[projected,
           TrueQ[PossibleZeroQ[RootReduce[# - target]]] &]);
-      radTarget = Min[ChartRadius[target, all], lineCap];
+      radTarget = cappedChartRadius[target, all, lineCap];
       While[True,
         guard++;
         If[guard > 500, err["E1", <|"Detail" -> "segmentation runaway"|>]];
@@ -776,7 +815,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
           nxt = classicNextCenter[cur, projected, dir, k, lineCap,
             If[matchTarget === None, target - dir*radTarget/k, matchTarget]];
           nxtMatchRad = projectionRadius[nxt, projected, lineCap];
-          nxtTrueRad = Min[ChartRadius[nxt, all], lineCap];
+          nxtTrueRad = cappedChartRadius[nxt, all, lineCap];
           producerIncoming = cur + dir*matchOffset[prevMatchRad, prevRad, k];
           receiverIncoming = nxt - dir*matchOffset[
             nxtMatchRad, nxtTrueRad, k];
@@ -796,9 +835,15 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
                 producerIncoming - receiverIncoming]]] && receiverSafeQ[],
             incoming = producerIncoming,
             While[!receiverSafeQ[] && clipRefinements < 64,
-              nxt = RootReduce[(cur + nxt)/2];
+              (* The inserted receiver is regular even when cur is an exact
+                 algebraic singular chart.  Keep the midpoint as a clearance
+                 witness, but do not propagate that field into the ordinary
+                 chart owner. *)
+              nxt = regularRationalCenter[RootReduce[(cur + nxt)/2],
+                cur, nxt, dir, numericDistance[nxt, cur,
+                  Min[300, Max[80, 2 cfg["WorkingPrecision"]]]]];
               nxtMatchRad = projectionRadius[nxt, projected, lineCap];
-              nxtTrueRad = Min[ChartRadius[nxt, all], lineCap];
+              nxtTrueRad = cappedChartRadius[nxt, all, lineCap];
               receiverIncoming = nxt - dir*matchOffset[
                 nxtMatchRad, nxtTrueRad, k];
               clipRefinements++];
@@ -820,7 +865,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
             "IncomingMatchPoint" -> incoming,
             "SymmetricMatch" -> symmetric|>];
           cur = nxt;
-          prevRad = Min[ChartRadius[nxt, all], lineCap];
+          prevRad = cappedChartRadius[nxt, all, lineCap];
           prevMatchRad = nxtMatchRad]];
       cur = target;
       prevRad = radTarget;
@@ -837,7 +882,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
      the match-point arithmetic on singularity-free systems) *)
   charts = MapIndexed[Module[{c = #1, rad, matchRad, scale, localRad,
       roc = cfg["RadiusOfConvergence"]},
-    rad = Min[ChartRadius[c["Center"], all], 2*Abs[to - from]];
+    rad = cappedChartRadius[c["Center"], all, 2*Abs[to - from]];
     matchRad = projectionRadius[c["Center"], projected,
       2*Abs[to - from]];
     (* Faithful affine part of old GetLineRescaled: projected geometry sets
@@ -1842,7 +1887,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     Module[{vals = boundary, d, kmax},
       d = Length[vals]; kmax = Length[First[vals]] - 1;
       <|"Center" -> plan["From"], "ChartMap" -> <|"Center" -> plan["From"], "Scale" -> 1|>,
-        "Radius" -> Min[ChartRadius[plan["From"], plan["Singularities"]["All"]],
+        "Radius" -> cappedChartRadius[plan["From"],
+          plan["Singularities"]["All"],
           2*Abs[plan["To"] - plan["From"]]],
         "Sectors" -> {<|"a" -> 0, "b" -> 0, "p" -> 0,
           "Coeffs" -> Table[Table[Table[vals[[c, k + 1]], {c, d}], {n, 0, 0}],

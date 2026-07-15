@@ -15,6 +15,9 @@ wolfram_tests=(
   Tests/test_solve.m
   Tests/test_transport.m
   Tests/test_path_planner_algebraic.m
+  Tests/test_native_algebraic_chart_bridge.m
+  Tests/test_native_algebraic_scale_bridge.m
+  Tests/test_native_regular_prepare_owner.m
   Tests/test_integrate.m
   Tests/test_api.m
   Tests/test_public_api.m
@@ -73,6 +76,11 @@ fi
 if [[ "${DE2_RUN_BANANA_TIMING:-0}" == 1 ]]; then
   echo "=== optional full banana timing regression"
   Scripts/run_banana_timing_regression.sh
+fi
+
+if [[ "${DE2_RUN_PENTAGON_TIMING:-0}" == 1 ]]; then
+  echo "=== optional full pentagon timing regression"
+  Scripts/run_pentagon_timing_regression.sh
 fi
 
 echo "Release test suite passed."

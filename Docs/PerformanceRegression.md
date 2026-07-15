@@ -52,3 +52,36 @@ The July 2026 recovery baseline on the development Mac was 264.5 seconds for
 the ordinary production path and 162.2 seconds with the already-known private
 epsilon halos. The production-path number is the regression baseline because
 it includes the bounded discovery retries users actually encounter.
+
+## Pentagon gate
+
+The massless-pentagon timing regression is also opt-in. It exercises the
+algebraic-chart transport that was recovered in July 2026 and verifies the
+finite value as well as the elapsed time:
+
+```bash
+FT_FIRE_PATH=/path/to/FIRE7 \
+FT_PREP_CACHE_DIR=/path/to/prepared-cache \
+Scripts/run_pentagon_timing_regression.sh
+```
+
+Or append it to the ordinary release suite with
+`DE2_RUN_PENTAGON_TIMING=1`. On a new machine, set
+`PENTAGON_TIMING_WARM_CACHE=1` once; as for the banana gate, FIRE preparation
+is outside the measured region and the timed run must report a cache hit.
+
+The pinned configuration is working precision 300, matching contract 8
+decimal digits, Taylor order 25, boundary extra order 16, division order 3,
+and 10 C++ threads by default. The runner starts with fresh transport
+checkpoints and supplies the exact private level-1 matching halo of two orders;
+this leaves the public epsilon request unchanged while avoiding a discovery
+replay. It checks the finite value against
+`-0.025411779885306218280920810082412842534323133089462` with tolerance
+`1e-12` and fails above 300 seconds. Override the hardware qualification
+ceiling explicitly with `PENTAGON_TIMING_MAX_SECONDS`.
+
+The first integrated recovery run took 74.54 seconds while restoring the
+level-1 boundary; profiling showed that rebuilding the short upstream ladder
+adds roughly 5--6 seconds. The five-minute gate is intentionally conservative
+enough for normal machine variability while still catching a return to the
+former repeated-owner/retry behavior.

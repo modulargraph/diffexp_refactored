@@ -1167,10 +1167,9 @@ class StoredTransportArmState {
         {"tile_plan_checkpoint_identity",
          plan_owner_->checkpoint_identity()},
         {"arm", arm_},
-        {"matches", consumed_certificate_only_
-                        ? tile_sources_.size() - 1
-                        : consumed_compact_ ? cached_match_references_.size()
-                                            : matches_.size()},
+        {"matches", transition_count()},
+        {"value_hops", value_hop_count()},
+        {"basis_matches", basis_match_count()},
         {"tiles", tile_sources_.size()},
         {"contraction_operations", contraction_operations_.load()},
         {"contracted_observables", contracted_observables_.load()},
@@ -1306,19 +1305,37 @@ class StoredTransportArmState {
         record["derivation"] = nullptr;
       } else {
         const auto& derivation = *tile_sources_[tile]->retained_derivation();
-        record["derivation"] = json::object{
-            {"schema", "diffexp2-consumed-plan-match-certificate-v1"},
-            {"match", tile - 1},
-            {"source_match_checkpoint_identity",
-             derivation.at("source_match_checkpoint_identity")},
-            {"incoming_checkpoint_identity",
-             as_object(derivation.at("incoming"),
-                       "certificate-only incoming derivation")
-                 .at("checkpoint_identity")},
-            {"output_checkpoint_identity",
-             as_object(derivation.at("output"),
-                       "certificate-only output derivation")
-                 .at("checkpoint_identity")}};
+        const auto schema = required_string(derivation, "schema");
+        if (schema == "diffexp2-retained-plan-value-handoff-v1") {
+          record["derivation"] = json::object{
+              {"schema",
+               "diffexp2-consumed-plan-value-handoff-certificate-v1"},
+              {"match", tile - 1},
+              {"handoff_provenance_identity",
+               derivation.at("provenance_identity")},
+              {"incoming_checkpoint_identity",
+               as_object(derivation.at("incoming"),
+                         "certificate-only value incoming derivation")
+                   .at("checkpoint_identity")},
+              {"output_checkpoint_identity",
+               as_object(derivation.at("output"),
+                         "certificate-only value output derivation")
+                   .at("checkpoint_identity")}};
+        } else {
+          record["derivation"] = json::object{
+              {"schema", "diffexp2-consumed-plan-match-certificate-v1"},
+              {"match", tile - 1},
+              {"source_match_checkpoint_identity",
+               derivation.at("source_match_checkpoint_identity")},
+              {"incoming_checkpoint_identity",
+               as_object(derivation.at("incoming"),
+                         "certificate-only incoming derivation")
+                   .at("checkpoint_identity")},
+              {"output_checkpoint_identity",
+               as_object(derivation.at("output"),
+                         "certificate-only output derivation")
+                   .at("checkpoint_identity")}};
+        }
       }
       chain.push_back(std::move(record));
     }
@@ -1376,6 +1393,30 @@ class StoredTransportArmState {
       result += basis.size();
     }
     return result;
+  }
+
+  std::size_t transition_count() const {
+    return consumed_certificate_only_
+        ? tile_sources_.size() - 1
+        : consumed_compact_ ? cached_match_references_.size()
+                            : matches_.size();
+  }
+
+  std::size_t value_hop_count() const {
+    if (!consumed_certificate_only_) return 0;
+    std::size_t count = 0;
+    for (std::size_t tile = 1; tile < tile_sources_.size(); ++tile) {
+      const auto& derivation = tile_sources_[tile]->retained_derivation();
+      if (derivation.has_value() &&
+          required_string(*derivation, "schema") ==
+              "diffexp2-retained-plan-value-handoff-v1")
+        ++count;
+    }
+    return count;
+  }
+
+  std::size_t basis_match_count() const {
+    return transition_count() - value_hop_count();
   }
 
   void validate() const {
@@ -1480,8 +1521,11 @@ class StoredTransportArmState {
         throw std::invalid_argument(
             "certificate-only transport tile has no sealed plan-match derivation");
       const auto& derivation = *output->retained_derivation();
-      if (required_string(derivation, "schema") !=
-              "diffexp2-retained-plan-match-local-materialization-v2" ||
+      const auto schema = required_string(derivation, "schema");
+      const bool value_handoff = schema ==
+          "diffexp2-retained-plan-value-handoff-v1";
+      if ((!value_handoff && schema !=
+              "diffexp2-retained-plan-match-local-materialization-v2") ||
           required_string(derivation, "tile_plan") !=
               plan_owner_->handle() ||
           required_string(derivation, "tile_plan_checkpoint_identity") !=
@@ -1515,11 +1559,14 @@ class StoredTransportArmState {
                           "equation_owner_signature_identity") !=
               equation_owner->owner_signature_identity() ||
           required_string(derivation, "equation_payload_identity") !=
-              equation_owner->physical_payload_identity() ||
+              equation_owner->physical_payload_identity())
+        throw std::invalid_argument(
+            "certificate-only transport derivation lost its match/equation certificate");
+      if (!value_handoff &&
           required_string(derivation,
                           "source_match_checkpoint_identity").empty())
         throw std::invalid_argument(
-            "certificate-only transport derivation lost its match/equation certificate");
+            "certificate-only plan match lost its source-match checkpoint");
     }
   }
 

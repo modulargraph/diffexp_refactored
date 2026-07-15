@@ -357,15 +357,73 @@ json::object restore_checkpoint(const std::string& path,
                 "checkpoint local has an unsupported physical equation owner kind");
           }
         }
+        std::optional<CheckpointValueHandoffPlanBinding>
+            value_handoff_plan;
+        if (!item.at("retained_derivation").is_null()) {
+          const auto& derivation = as_object(
+              item.at("retained_derivation"),
+              "checkpoint retained-local derivation");
+          if (required_string(derivation, "schema") ==
+              "diffexp2-retained-plan-value-handoff-v1") {
+            const auto plan_handle = required_string(
+                derivation, "tile_plan");
+            const auto plan_found = restored->tile_plans.find(plan_handle);
+            if (plan_found == restored->tile_plans.end() ||
+                required_string(derivation,
+                                "tile_plan_checkpoint_identity") !=
+                    plan_found->second->checkpoint_identity() ||
+                required_string(derivation,
+                                "tile_plan_provenance_identity") !=
+                    plan_found->second->provenance_identity())
+              throw std::invalid_argument(
+                  "checkpoint value handoff differs from its restored tile plan");
+            const auto arm_name = required_string(derivation, "arm");
+            const auto match_index = checkpoint_size_t(
+                derivation.at("match"),
+                "checkpoint value handoff match index");
+            const auto& arm = plan_found->second->arm(arm_name);
+            if (match_index >= arm.exact.matches.size())
+              throw std::invalid_argument(
+                  "checkpoint value handoff match is outside its restored arm");
+            const auto& match = arm.exact.matches[match_index];
+            const auto& producing = arm.charts.at(match.producing_chart);
+            const auto& receiving = arm.charts.at(match.receiving_chart);
+            const auto owner_reference = [](
+                const RetainedPlanChartBinding& binding) {
+              const auto* owner = std::get_if<
+                  std::shared_ptr<PreparedChartBase>>(&binding.owner);
+              if (owner == nullptr || !*owner)
+                throw std::invalid_argument(
+                    "checkpoint value handoff plan chart is not a primitive prepared owner");
+              return json::object{
+                  {"kind", (*owner)->equation_owner_kind()},
+                  {"handle", (*owner)->equation_owner_handle()},
+                  {"operator_identity",
+                   (*owner)->equation_operator_identity()},
+                  {"plan_exact_identity", binding.exact_identity},
+                  {"owner_signature_identity",
+                   (*owner)->owner_signature_identity()},
+                  {"physical_payload_identity",
+                   (*owner)->physical_payload_identity()}};
+            };
+            value_handoff_plan = CheckpointValueHandoffPlanBinding{
+                encode_plan_chart(producing, match.producing_chart),
+                owner_reference(producing),
+                encode_plan_chart(receiving, match.receiving_chart),
+                owner_reference(receiving)};
+          }
+        }
         std::shared_ptr<StoredLocalBase> local;
         if (restored->domain == "rational")
           local = restore_checkpoint_local_record<Rational>(
               item, restored->domain, restored->precision_bits, owner,
-              equation_owner);
+              equation_owner, value_handoff_plan.has_value()
+                  ? &*value_handoff_plan : nullptr);
         else if (restored->domain == "acb")
           local = restore_checkpoint_local_record<ComplexBall>(
               item, restored->domain, restored->precision_bits, owner,
-              equation_owner);
+              equation_owner, value_handoff_plan.has_value()
+                  ? &*value_handoff_plan : nullptr);
         else
           throw std::invalid_argument(
               "native checkpoint cannot restore symbolic local state");
@@ -1006,4 +1064,3 @@ json::object restore_checkpoint(const std::string& path,
     throw;
   }
 }
-

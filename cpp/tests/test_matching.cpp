@@ -513,6 +513,36 @@ void refined_acb_ambiguous_off_pivot_smoke() {
                 .contains_zero());
 }
 
+void empty_residual_window_retry_metadata_smoke() {
+  ComplexBall::set_precision(256);
+  const auto short_frame = []() {
+    std::vector<ComplexBall> coefficients;
+    coefficients.emplace_back(1);
+    coefficients.emplace_back(0);
+    coefficients.emplace_back(0);
+    return EpsilonFrame<ComplexBall>(-4, std::move(coefficients));
+  };
+  AcbLaurentRefinementOptions options;
+  options.required_min_power = -1;
+  options.required_complete_max = 4;
+  bool reported = false;
+  try {
+    (void)diffexp2::matching_detail::evaluate_acb_matching_residual(
+        FiniteLaurentMatrix<ComplexBall>{{short_frame()}},
+        std::vector<EpsilonFrame<ComplexBall>>{
+            ball_constant_frame("1")},
+        std::vector<EpsilonFrame<ComplexBall>>{short_frame()}, options,
+        "empty residual retry metadata");
+  } catch (const MatchingArithmeticError& error) {
+    reported =
+        error.code == MatchingArithmeticErrorCode::InsufficientCompleteWindow &&
+        error.epsilon_power.has_value() && *error.epsilon_power == -2 &&
+        options.required_complete_max - *error.epsilon_power == 6;
+  }
+  check("empty Acb residual window reports the exact retry reservoir loss",
+        reported);
+}
+
 void verified_midpoint_preconditioner_smoke() {
   // A 13x13 Hilbert matrix at the minimum production precision is a compact
   // deterministic wrapping stress case.  Direct interval elimination cannot
@@ -641,6 +671,7 @@ int main() {
   refined_acb_ambiguous_pivot_smoke();
   laurent_off_pivot_ambiguity_smoke();
   refined_acb_ambiguous_off_pivot_smoke();
+  empty_residual_window_retry_metadata_smoke();
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();
   dense_eleven_by_eleven_pivot_budget_smoke();

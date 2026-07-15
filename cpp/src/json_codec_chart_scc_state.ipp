@@ -41,6 +41,8 @@ class PreparedChart final : public PreparedChartBase {
                 std::optional<std::string> geometry_record,
                 std::optional<std::string> principal_matrix_record,
                 std::optional<std::string> native_scc_capabilities,
+                std::optional<std::string>
+                    regular_value_relative_accuracy_max_exact,
                 SCCCertificate scc,
                 PreparedRecurrenceOperator<Scalar>&& prepared,
                 std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
@@ -51,7 +53,9 @@ class PreparedChart final : public PreparedChartBase {
                           std::move(exact_identity), std::move(signature),
                           std::move(geometry_record),
                           std::move(principal_matrix_record),
-                          std::move(native_scc_capabilities), std::move(scc),
+                          std::move(native_scc_capabilities),
+                          std::move(regular_value_relative_accuracy_max_exact),
+                          std::move(scc),
                           prepare_parse_ms),
         prepared_(std::move(prepared)),
         physical_equation_(std::move(physical_equation)),
@@ -135,6 +139,14 @@ class PreparedChart final : public PreparedChartBase {
   const char* d0_inverse_mode() const override {
     return prepared_.d0_inverse_scalar.has_value()
         ? "retained-scalar" : "retained-frame";
+  }
+  std::string regular_value_tail_proxy_max_exact() const override {
+    const auto structural_digits = std::min(
+        std::max(prepared_.chop_digits / 2, 0), 24);
+    Rational result(1);
+    for (int digit = 0; digit < structural_digits + 2; ++digit)
+      result = result / Rational(10);
+    return result.str();
   }
   const char* equation_scalar_domain() const override {
     if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
@@ -288,6 +300,242 @@ class PreparedChart final : public PreparedChartBase {
   }
   const std::optional<std::string>& exact_jordan_indicial_error() const {
     return exact_jordan_indicial_error_;
+  }
+
+  // Re-expand one retained regular solution about the next regular chart's
+  // center.  This is the native equivalent of evaluating the incoming value
+  // and running one d-vector recurrence; it avoids constructing and matching
+  // a disposable d-column fundamental matrix.
+  std::shared_ptr<StoredLocalBase> solve_regular_value_handoff(
+      const std::string& local_handle, const json::object& run_prototype,
+      json::object metadata_object,
+      const std::shared_ptr<StoredLocalBase>& incoming_owner,
+      const RealEvaluationPoint& producing_point,
+      std::optional<std::int32_t> producing_rim,
+      const ExactAffineChart& receiving_geometry,
+      const std::vector<Prescription>& receiving_prescriptions,
+      EpsilonWindow requested_epsilon,
+      std::int32_t required_complete_max,
+      const std::string& result_checkpoint_identity,
+      json::object derivation,
+      std::shared_ptr<void> derivation_owner,
+      std::shared_ptr<PhysicalEquationOwnerBase> equation_owner) {
+    if (local_handle.empty() || result_checkpoint_identity.empty() ||
+        !incoming_owner || !derivation_owner || !equation_owner ||
+        equation_owner.get() != this)
+      throw std::invalid_argument(
+          "regular value handoff lost an identity or strong owner");
+    (void)requested_epsilon.width();
+    if (required_complete_max < requested_epsilon.min_power ||
+        required_complete_max > requested_epsilon.complete_max)
+      throw std::invalid_argument(
+          "regular value handoff epsilon contract is inconsistent");
+    if (!physical_equation_ || !has_identity_assembly() ||
+        !has_regular_singleton_partition())
+      throw std::invalid_argument(
+          "regular value handoff receiver is not a physical identity-frame value solver");
+
+    auto incoming =
+        std::dynamic_pointer_cast<StoredLocal<Scalar>>(incoming_owner);
+    if (!incoming || incoming->solution().dimension != prepared_.dimension)
+      throw std::invalid_argument(
+          "regular value handoff coefficient domain or dimension changed");
+    const auto& source = incoming->solution();
+    validate_local_solution(source, false);
+    if (!source.error.empty() || source.sectors.size() != 1 ||
+        source.sectors.front().a.domain != ExactDomain::Rational ||
+        source.sectors.front().b.domain != ExactDomain::Rational ||
+        !(Rational(source.sectors.front().a.canonical) == Rational(0)) ||
+        !(Rational(source.sectors.front().b.canonical) == Rational(0)) ||
+        source.sectors.front().log_power != 0)
+      throw std::invalid_argument(
+          "regular value handoff source is not one certified (0,0,0) sector");
+    if (source.epsilon.min_power < prepared_.frame_base)
+      throw std::domain_error(
+          "regular value handoff receiver frame would discard certified lower epsilon coefficients");
+    const auto source_complete_max = std::min(
+        source.epsilon.complete_max, incoming->top_valid());
+    if (source_complete_max < requested_epsilon.complete_max)
+      throw std::domain_error(
+          "regular value handoff source does not cover its requested complete epsilon window");
+
+    AcbPrecisionLease acb_lease(precision_bits_);
+    ComplexBall::set_precision(precision_bits_);
+    auto run = run_prototype;
+    const auto parse_started = std::chrono::steady_clock::now();
+    RecurrenceProblem<Scalar> problem;
+    parse_run_state(run, prepared_, problem);
+    if (problem.log_max != 0 || !problem.has_initial ||
+        problem.adaptive_lower_frame_probe || problem.source.has_value() ||
+        problem.return_u || !ScalarTraits<Scalar>::is_zero(problem.a_target) ||
+        !ScalarTraits<Scalar>::is_zero(problem.b_target) ||
+        problem.a_shift_min != 0 ||
+        problem.a_shifts.size() !=
+            static_cast<std::size_t>(problem.nmax) + 1 ||
+        problem.schedule.size() !=
+            static_cast<std::size_t>(problem.nmax) + 1)
+      throw std::invalid_argument(
+          "regular value handoff prototype is not one homogeneous (0,0,0) value run");
+    const auto scalar_identical = [](const Scalar& left,
+                                     const Scalar& right) {
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        return acb_equal(left.raw(), right.raw());
+      else
+        return left == right;
+    };
+    for (std::size_t n = 0; n < problem.schedule.size(); ++n) {
+      const auto expected_shift = ScalarTraits<Scalar>::integer(
+          static_cast<long>(n));
+      if (!scalar_identical(problem.a_shifts[n], expected_shift))
+        throw std::invalid_argument(
+            "regular value handoff prototype a-shifts are not the exact Taylor indices");
+      if (problem.schedule[n].size() != prepared_.blocks.size())
+        throw std::invalid_argument(
+            "regular value handoff prototype schedule has the wrong block partition");
+      for (const auto& step : problem.schedule[n]) {
+        const auto expected = n == 0 ? StepCase::Resonant : StepCase::Taylor;
+        if (step.kind != expected ||
+            !scalar_identical(step.d_a, expected_shift) ||
+            !ScalarTraits<Scalar>::is_zero(step.d_b))
+          throw std::invalid_argument(
+              "regular value handoff prototype schedule is not resonant at zero and Taylor by exact index");
+      }
+    }
+
+    const auto frame_width = static_cast<std::size_t>(prepared_.frame_width);
+    problem.initial.assign(
+        static_cast<std::size_t>(prepared_.dimension) * frame_width,
+        ScalarTraits<Scalar>::zero());
+    problem.initial_validity.assign(prepared_.dimension,
+                                    source_complete_max);
+    if constexpr (std::is_same_v<Scalar, Rational>) {
+      const auto evaluated = evaluate_exact_regular_local(
+          source, producing_point,
+          EpsilonWindow{source.epsilon.min_power, source_complete_max},
+          "regular value handoff source");
+      for (std::uint32_t component = 0; component < prepared_.dimension;
+           ++component)
+        for (std::int64_t raw_power = source.epsilon.min_power;
+             raw_power <= source_complete_max; ++raw_power) {
+          const auto power = static_cast<std::int32_t>(raw_power);
+          const auto frame = static_cast<std::size_t>(
+              static_cast<std::int64_t>(power) - prepared_.frame_base);
+          if (frame >= frame_width)
+            throw std::domain_error(
+                "regular value handoff source exceeds the receiver value frame");
+          problem.initial[static_cast<std::size_t>(component) * frame_width +
+                          frame] = evaluated[component].coefficient(power);
+        }
+    } else {
+      EvaluationOptions options;
+      options.imaginary_sign = producing_rim;
+      options.compute_tail_estimate = false;
+      const auto evaluated = evaluate_local_solution(
+          source, producing_point, options);
+      const auto expected_rim = producing_point.sign < 0
+          ? producing_rim : std::nullopt;
+      if (evaluated.imaginary_sign != expected_rim ||
+          evaluated.value.dimension != prepared_.dimension ||
+          evaluated.value.epsilon.min_power < source.epsilon.min_power ||
+          evaluated.value.epsilon.complete_max < source_complete_max)
+        throw std::invalid_argument(
+            "regular value handoff Acb evaluation changed its branch or epsilon frame");
+      for (std::uint32_t component = 0; component < prepared_.dimension;
+           ++component)
+        for (std::int64_t raw_power = source.epsilon.min_power;
+             raw_power <= source_complete_max; ++raw_power) {
+          const auto power = static_cast<std::int32_t>(raw_power);
+          const auto frame = static_cast<std::size_t>(
+              static_cast<std::int64_t>(power) - prepared_.frame_base);
+          if (frame >= frame_width)
+            throw std::domain_error(
+                "regular value handoff source exceeds the receiver value frame");
+          if (power >= evaluated.value.epsilon.min_power)
+            problem.initial[
+                static_cast<std::size_t>(component) * frame_width + frame] =
+                evaluated.value.at(power, component);
+        }
+    }
+
+    metadata_object["checkpoint_identity"] = result_checkpoint_identity;
+    auto metadata = parse_local_metadata(metadata_object);
+    const auto same_prescription = [](const Prescription& left,
+                                      const Prescription& right) {
+      return left.factor_exact == right.factor_exact &&
+             left.sign == right.sign &&
+             left.multiplicity == right.multiplicity &&
+             left.leading_coefficient_sign ==
+                 right.leading_coefficient_sign;
+    };
+    if (!(Rational(metadata.chart.center_exact) ==
+              receiving_geometry.center) ||
+        !(Rational(metadata.chart.scale_exact) == receiving_geometry.scale) ||
+        metadata.chart.infinite_radius ||
+        !acb_equal(metadata.chart.radius.raw(),
+                   ComplexBall::from_strings(
+                       receiving_geometry.radius.str()).raw()) ||
+        metadata.prescriptions.size() != receiving_prescriptions.size() ||
+        !std::equal(metadata.prescriptions.begin(),
+                    metadata.prescriptions.end(),
+                    receiving_prescriptions.begin(), same_prescription))
+      throw std::invalid_argument(
+          "regular value handoff prototype metadata differs from its retained plan chart");
+    verify_tag_binding(metadata.a, problem.a_target,
+                       "regular value handoff a");
+    verify_tag_binding(metadata.b, problem.b_target,
+                       "regular value handoff b");
+    const auto parse_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - parse_started).count();
+
+    const auto kernel_started = std::chrono::steady_clock::now();
+    auto recurrence = RecurrenceSolver<Scalar>(problem, prepared_).run();
+    auto assembled = assemble_recurrence(prepared_, problem, recurrence);
+    auto solution = make_local_solution(
+        problem, std::move(assembled), std::move(metadata));
+    validate_local_solution(solution, false);
+    if (solution.epsilon.complete_max < requested_epsilon.complete_max ||
+        recurrence.top_valid < requested_epsilon.complete_max)
+      throw std::domain_error(
+          "regular value handoff solve did not preserve the requested complete epsilon window");
+    auto tail_model = prepare_regular_homogeneous_tail_model(
+        prepared_, problem, solution, exact_identity_);
+    auto pseudo_hits = std::move(recurrence.hits);
+    if (!pseudo_hits.empty())
+      throw std::domain_error(
+          "regular value handoff unexpectedly encountered a pseudo resonance");
+    const auto kernel_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - kernel_started).count();
+    const NativeLocalDiagnostics diagnostics{
+        recurrence.top_valid, parse_ms, kernel_ms};
+
+    derivation["evaluated_epsilon"] = json::object{
+        {"min", source.epsilon.min_power},
+        {"max", source_complete_max},
+        {"required_complete_max", required_complete_max}};
+    derivation["output"] = json::object{
+        {"checkpoint_identity", solution.checkpoint_identity},
+        {"chart", handle_},
+        {"source_operator_identity", exact_identity_},
+        {"epsilon", json::object{{"min", solution.epsilon.min_power},
+                                  {"max", solution.epsilon.complete_max}}},
+        {"taylor_complete_max", solution.taylor_complete_max},
+        {"top_valid", encode_validity(recurrence.top_valid)},
+        {"dimension", solution.dimension}};
+    derivation["equation_owner_signature_identity"] =
+        equation_owner->owner_signature_identity();
+    derivation["equation_payload_identity"] =
+        equation_owner->physical_payload_identity();
+    derivation["provenance_identity"] = json::serialize(
+        canonical_json_value(derivation));
+
+    auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
+        local_handle, handle_, exact_identity_, std::move(solution),
+        precision_bits_, std::move(pseudo_hits), diagnostics, std::nullopt,
+        std::move(derivation), std::move(derivation_owner),
+        std::move(tail_model), std::nullopt, true, true,
+        std::move(equation_owner), physical_equation_);
+    record_native_local_success(diagnostics);
+    return local;
   }
   ChartStats stats() const override {
     std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -1279,7 +1527,18 @@ json::object exact_derived_run(
   auto run = prototype;
   run["p"] = log_max;
   run["has_initial"] = homogeneous;
-  run["adaptive_probe"] = prototype.at("adaptive_probe");
+  // A homogeneous CASE-P target is a composite-owned mathematical object,
+  // not a replay of whichever public column happened to discover it first.
+  // Submitted seed templates disable the lower-frame probe while derived
+  // particular templates enable it, so inheriting this diagnostic policy
+  // made the same (block, component) target acquire two cache contracts.
+  // Probe mode only changes when lower-edge cancellation is checked (matrix
+  // assembly before a negative epsilon shift); the enabled form is the
+  // stronger, cancellation-aware evaluation and is deterministic for every
+  // cached homogeneous target. Particular runs retain their caller policy.
+  run["adaptive_probe"] = homogeneous
+      ? json::value(true)
+      : prototype.at("adaptive_probe");
   run["a_target"] = a.str();
   run["b_target"] = b.str();
   run["a_shift_min"] = 0;

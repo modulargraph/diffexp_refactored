@@ -3,11 +3,13 @@
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace json = boost::json;
 
@@ -71,7 +73,7 @@ json::object scalar_run(bool seed, const std::string& a,
       {"source", nullptr}, {"return_u", false}};
 }
 
-json::object jordan_particular_run() {
+json::object jordan_particular_run(bool adaptive_probe) {
   constexpr std::uint32_t nmax = 8;
   constexpr std::uint32_t width = 9;
   json::array shifts;
@@ -89,12 +91,32 @@ json::object jordan_particular_run() {
       initial.push_back("0");
   return json::object{
       {"nmax", nmax}, {"p", 0}, {"has_initial", false},
-      {"adaptive_probe", false}, {"a_target", "1"},
+      {"adaptive_probe", adaptive_probe}, {"a_target", "1"},
       {"b_target", "0"}, {"a_shift_min", 0},
       {"a_shifts", std::move(shifts)}, {"schedule", std::move(schedule)},
       {"initial", std::move(initial)},
       {"initial_validity", json::array{nullptr, nullptr}},
       {"source", nullptr}, {"return_u", false}};
+}
+
+json::object casep_column(const std::string& checkpoint,
+                          bool adaptive_probe) {
+  json::array targets;
+  targets.push_back(json::object{
+      {"block", 1}, {"run", jordan_particular_run(adaptive_probe)},
+      {"metadata", metadata(
+          checkpoint + ":jordan-particular", "1", "0")}});
+  targets.push_back(json::object{
+      {"block", 2},
+      {"run", scalar_run(false, "1", "0", "3/2", "3")},
+      {"metadata", metadata(
+          checkpoint + ":tail-particular", "1", "0")}});
+  return json::object{
+      {"checkpoint_identity", checkpoint},
+      {"seed", json::object{
+          {"block", 0}, {"run", scalar_run(true, "1", "0", "1", "0")},
+          {"metadata", metadata(checkpoint + ":seed", "1", "0")}}},
+      {"targets", std::move(targets)}};
 }
 
 std::string prepare_scalar_chart(const std::string& session,
@@ -171,10 +193,11 @@ double real_midpoint(const json::value& coefficient) {
 }  // namespace
 
 int main() {
+  constexpr std::size_t column_count = 4;
   const auto created = request(R"json({
     "schema":2,"op":"session.create","domain":"rational",
     "precision_bits":384,"output_digits":50,"scc_capacity":1,
-    "local_capacity":2
+    "local_capacity":4
   })json");
   const auto session = std::string(created.at("session").as_string());
   const auto seed_chart = prepare_scalar_chart(
@@ -285,42 +308,53 @@ int main() {
   }
   const auto scc = std::string(prepared.at("scc").as_string());
 
-  json::array targets;
-  targets.push_back(json::object{
-      {"block", 1}, {"run", jordan_particular_run()},
-      {"metadata", metadata("casep-jordan-particular", "1", "0")}});
-  targets.push_back(json::object{
-      {"block", 2},
-      {"run", scalar_run(false, "1", "0", "3/2", "3")},
-      {"metadata", metadata("casep-tail-particular", "1", "0")}});
-  const auto solved = request(json::object{
-      {"schema", 2}, {"op", "scc.solve_column"}, {"session", session},
-      {"scc", scc}, {"checkpoint_identity", "casep-column-v1"},
-      {"seed", json::object{
-          {"block", 0}, {"run", scalar_run(true, "1", "0", "1", "0")},
-          {"metadata", metadata("casep-seed-column", "1", "0")}}},
-      {"targets", std::move(targets)}});
+  json::array columns;
+  std::vector<std::string> checkpoints;
+  for (std::size_t index = 0; index < column_count; ++index) {
+    checkpoints.push_back("casep-column-" + std::to_string(index));
+    // Reproduce the production double-box path: a cached homogeneous target
+    // is first discovered through a submitted seed-style template with the
+    // lower-frame probe disabled, then through derived particulars with it
+    // enabled. The target cache must canonicalize this diagnostic policy.
+    columns.push_back(casep_column(checkpoints.back(), index != 0));
+  }
+  const auto solved_batch = request(json::object{
+      {"schema", 2}, {"op", "scc.solve_columns"}, {"session", session},
+      {"scc", scc}, {"columns", std::move(columns)}, {"threads", 2}});
+  const auto& solved_results = solved_batch.at("results").as_array();
 
-  json::object evaluated;
-  if (solved.at("status") == "ok") {
-    evaluated = request(json::object{
-        {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
-        {"local", solved.at("local")},
-        {"point", json::object{{"exact", "1/2"}}},
-        {"options", json::object{{"tail_estimate", false}}}});
+  std::vector<json::object> evaluated;
+  if (solved_batch.at("status") == "ok" &&
+      solved_results.size() == column_count) {
+    for (const auto& raw_solved : solved_results) {
+      const auto& solved = raw_solved.as_object();
+      evaluated.push_back(request(json::object{
+          {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+          {"local", solved.at("local")},
+          {"point", json::object{{"exact", "1/2"}}},
+          {"options", json::object{{"tail_estimate", false}}}}));
+    }
   }
   const auto stats = request(json::object{
       {"schema", 2}, {"op", "scc.stats"}, {"session", session},
       {"scc", scc}});
 
-  bool collision_ok = false;
-  std::set<std::string> tail_tags;
-  if (solved.at("status") == "ok") {
+  bool collision_ok = solved_results.size() == column_count;
+  bool checkpoints_ok = solved_results.size() == column_count;
+  std::set<std::string> all_tail_tags;
+  for (std::size_t solved_index = 0;
+       solved_index < solved_results.size(); ++solved_index) {
+    const auto& solved = solved_results[solved_index].as_object();
+    checkpoints_ok = checkpoints_ok &&
+        std::string(solved.at("checkpoint_identity").as_string()) ==
+            checkpoints[solved_index];
+    bool column_collision = false;
+    std::set<std::string> tail_tags;
     for (const auto& raw : solved.at("block_diagnostics").as_array()) {
       const auto& diagnostic = raw.as_object();
       const auto block = diagnostic.at("block").as_int64();
       if (block == 1 && diagnostic.at("source_b") == "0") {
-        collision_ok = diagnostic.at("pseudo_hit_count") == 1 &&
+        column_collision = diagnostic.at("pseudo_hit_count") == 1 &&
             diagnostic.at("pseudo_compensation_count") == 2 &&
             diagnostic.at("max_pseudo_depth") == 2 &&
             diagnostic.at("pseudo_value_certified") == true &&
@@ -329,35 +363,64 @@ int main() {
       if (block == 2)
         tail_tags.insert(std::string(diagnostic.at("source_b").as_string()));
     }
+    collision_ok = collision_ok && column_collision &&
+        tail_tags == std::set<std::string>{"0", "1"};
+    all_tail_tags.insert(tail_tags.begin(), tail_tags.end());
   }
 
-  bool evaluated_finite = false;
-  if (evaluated.if_contains("status") != nullptr &&
-      evaluated.at("status") == "ok") {
-    const auto& value = evaluated.at("value").as_object();
+  bool evaluated_finite = evaluated.size() == column_count;
+  bool evaluated_identical = evaluated.size() == column_count;
+  std::string reference_value;
+  for (const auto& item : evaluated) {
+    evaluated_finite = evaluated_finite && item.at("status") == "ok";
+    if (!evaluated_finite) break;
+    const auto& value = item.at("value").as_object();
+    const auto serialized_value = json::serialize(value);
+    if (reference_value.empty())
+      reference_value = serialized_value;
+    else
+      evaluated_identical = evaluated_identical &&
+          serialized_value == reference_value;
     const auto& coefficients = value.at("coefficients").as_array();
-    evaluated_finite = value.at("min") == -2 && coefficients.size() >= 8;
+    evaluated_finite = evaluated_finite && value.at("min") == -2 &&
+        coefficients.size() >= 8;
     for (std::size_t index = 0; index < 8 && evaluated_finite; ++index)
       evaluated_finite = std::abs(real_midpoint(coefficients[index])) < 1e-30;
   }
 
-  const bool ok = solved.at("status") == "ok" &&
-      solved.at("pseudo_hit_count") == 0 && collision_ok &&
-      tail_tags == std::set<std::string>{"0", "1"} && evaluated_finite &&
+  const bool ok = solved_batch.at("status") == "ok" &&
+      solved_batch.at("columns") == column_count &&
+      solved_batch.at("worker_threads") == 2 &&
+      std::all_of(solved_results.begin(), solved_results.end(),
+          [](const auto& raw) {
+            return raw.as_object().at("pseudo_hit_count") == 0;
+          }) &&
+      checkpoints_ok && collision_ok &&
+      all_tail_tags == std::set<std::string>{"0", "1"} &&
+      evaluated_finite && evaluated_identical &&
       stats.at("execution_scope") ==
           "exact-rational-regular-singular-jordan-block-dag-column-v2" &&
       stats.at("rational_shadow_identity") == "casep-shadow-v1" &&
+      stats.at("casep_homogeneous_target_cache_scope") ==
+          "immutable-composite" &&
+      stats.at("casep_homogeneous_target_cache_entries") == 2 &&
+      stats.at("casep_homogeneous_target_cache_builds") == 2 &&
+      stats.at("casep_homogeneous_target_cache_hits") ==
+          2 * (column_count - 1) &&
       stats.at("capability_evidence").as_object()
           .at("pseudo_schedule_execution") ==
           "exact-rational-joint-compensation-and-formal-overlap-certificate";
   if (!ok) {
-    std::cerr << "solved: " << json::serialize(solved) << '\n'
-              << "evaluated: " << json::serialize(evaluated) << '\n'
+    std::cerr << "solved: " << json::serialize(solved_batch) << '\n'
+              << "evaluated:";
+    for (const auto& item : evaluated)
+      std::cerr << ' ' << json::serialize(item);
+    std::cerr << '\n'
               << "stats: " << json::serialize(stats) << '\n';
   }
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                               {"session", session}});
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": exact size-2 CASE-P compensation crosses SCC sources\n";
+            << ": mixed-probe CASE-P columns share two immutable targets\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

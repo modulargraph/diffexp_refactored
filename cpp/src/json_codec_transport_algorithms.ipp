@@ -1852,12 +1852,16 @@ EpsilonWindow live_match_epsilon_intersection(
     admit(retained_local_frame_contract(column));
   const auto minimum = std::max(requested.min_power, union_minimum);
   if (minimum > complete_max)
-    throw std::domain_error(
-        "native whole-arm match has no common complete epsilon window");
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        "native whole-arm match has no common complete epsilon window",
+        std::nullopt, std::nullopt, complete_max);
   if (required_complete_max < minimum ||
       required_complete_max > complete_max)
-    throw std::domain_error(
-        "native whole-arm live match intersection does not cover the globally required complete epsilon maximum");
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        "native whole-arm live match intersection does not cover the globally required complete epsilon maximum",
+        std::nullopt, std::nullopt, complete_max);
   return {minimum, complete_max};
 }
 
@@ -1871,27 +1875,22 @@ EpsilonWindow live_line_epsilon_intersection(
   const auto frame = retained_local_frame_contract(local);
   // A regulated centre-endpoint primitive can create Laurent coefficients
   // below the integrand frame (at most `primitive_halo` rows).  Preserve
-  // those rows here just as we already reserve the corresponding upper
-  // halo; otherwise the orchestration layer silently turns genuine poles
-  // into structural zeros before the line integrator can emit them.
+  // those rows here.  Do not pessimistically subtract the same bound from
+  // the upper edge: the retained line integrator inspects every exact
+  // monomial tag and rejects an insufficient coefficient halo precisely
+  // when its primitive really begins at eps^-1.  Applying the worst-case
+  // loss here as well discards a valid order from ordinary primitives and
+  // double-charges the caller's integrand halo.
   auto minimum = std::max(
       requested.min_power,
       local_algebra_detail::checked_i32(
           static_cast<std::int64_t>(frame.epsilon.min_power) -
               primitive_halo,
           "native whole-arm line deliverable minimum"));
-  auto complete_max = std::min(
-      requested.complete_max,
-      local_algebra_detail::checked_i32(
-          static_cast<std::int64_t>(frame.epsilon.complete_max) -
-              primitive_halo,
-          "native whole-arm line deliverable maximum"));
+  auto complete_max =
+      std::min(requested.complete_max, frame.epsilon.complete_max);
   if (frame.top_valid != kCompleteInfinity)
-    complete_max = std::min(
-        complete_max,
-        local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(frame.top_valid) - primitive_halo,
-            "native whole-arm line valid deliverable maximum"));
+    complete_max = std::min(complete_max, frame.top_valid);
   if (minimum > complete_max || required_complete_max > complete_max)
     throw std::domain_error(
         "native whole-arm integrand row does not cover the globally required complete epsilon maximum");
@@ -2696,19 +2695,17 @@ StoredLineIntegral integrate_transport_stored_row_tile(
         "fused transport row has no valid projected epsilon coefficient");
 
   // Exact integration at a regulated centre endpoint may deepen the
-  // Laurent frame by one power of epsilon.  The low-level integrator
-  // zero-pads this extra row for tiles which do not generate it, so keeping
-  // it here is both safe and necessary for singular endpoint primitives.
+  // Laurent frame by one power of epsilon.  Keep the possible lower row,
+  // but let the low-level exact-monomial preflight decide whether the upper
+  // coefficient halo is actually consumed.  Blindly subtracting one here
+  // loses a valid order for every ordinary primitive.
   const auto line_min = std::max(
       epsilon_contract.requested.min_power,
       local_algebra_detail::checked_i32(
           static_cast<std::int64_t>(projected_min) - 1,
           "fused transport line primitive minimum"));
   const auto line_complete = std::min(
-      epsilon_contract.requested.complete_max,
-      local_algebra_detail::checked_i32(
-          static_cast<std::int64_t>(projected_complete) - 1,
-          "fused transport line primitive maximum"));
+      epsilon_contract.requested.complete_max, projected_complete);
   if (line_min > line_complete ||
       epsilon_contract.required_complete_max > line_complete)
     throw std::domain_error(

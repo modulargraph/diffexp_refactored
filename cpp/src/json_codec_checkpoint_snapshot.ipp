@@ -151,6 +151,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           schema !=
               "diffexp2-retained-plan-match-local-materialization-v2" &&
           schema !=
+              "diffexp2-retained-plan-value-handoff-v1" &&
+          schema !=
               "diffexp2-retained-rational-row-local-application-v1")
         throw std::domain_error(
             "native checkpoint does not serialize this retained local derivation kind");
@@ -159,7 +161,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
         if ((schema ==
                  "diffexp2-retained-plan-match-local-materialization-v1" ||
              schema ==
-                 "diffexp2-retained-plan-match-local-materialization-v2") &&
+                 "diffexp2-retained-plan-match-local-materialization-v2" ||
+             schema ==
+                 "diffexp2-retained-plan-value-handoff-v1") &&
             local->has_sealed_plan_match_lineage())
           return;
         throw std::logic_error(
@@ -695,4 +699,3 @@ void validate_checkpoint_envelope(const json::object& header,
     throw std::invalid_argument(
         "checkpoint generation differs between header and payload");
 }
-

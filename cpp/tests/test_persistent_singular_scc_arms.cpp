@@ -947,7 +947,7 @@ int main() {
         unsigned_value(
             three_contract.at("lines").as_array()[2].as_object()
                 .at("epsilon").as_object(),
-            "max") != 2 ||
+            "max") != 3 ||
         three_contract.at("streaming_tile_contraction") != true)
       throw std::runtime_error(
           "attempt-tail downgrade or shifted output epsilon contract was not preserved: " +

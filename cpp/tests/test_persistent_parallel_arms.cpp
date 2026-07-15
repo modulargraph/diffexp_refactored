@@ -529,7 +529,9 @@ bool acb_unit_leading_proof_smoke() {
         marched.at("epsilon").as_object().at(
             "match_required_complete_max") == 2 &&
         marched.at("combined_line_result").as_object().at("epsilon_min") == -1 &&
-        marched.at("combined_line_result").as_object().at("epsilon_max") == 1;
+        // These ordinary primitives preserve the complete projected upper
+        // edge; only an exact regulated centre primitive consumes a halo.
+        marched.at("combined_line_result").as_object().at("epsilon_max") == 2;
     if (!ok)
       std::cerr << "Acb proof smoke: basis_midpoint=" << basis_midpoint
                 << " defective=" << defective.at("status")
@@ -822,14 +824,14 @@ int main() {
         upper.at("matches") == 2 && upper.at("tiles") == 3 &&
         lower_line.at("capability") == "retained-native-line-aggregate-v1" &&
         lower_line.at("epsilon_min") == -1 &&
-        lower_line.at("epsilon_max") == 1 &&
+        lower_line.at("epsilon_max") == 2 &&
         upper_line.at("capability") == "retained-native-line-aggregate-v1" &&
         upper_line.at("epsilon_min") == -1 &&
-        upper_line.at("epsilon_max") == 1 &&
+        upper_line.at("epsilon_max") == 2 &&
         combined_line.at("capability") ==
             "retained-native-line-aggregate-v1" &&
         combined_line.at("epsilon_min") == -1 &&
-        combined_line.at("epsilon_max") == 1 &&
+        combined_line.at("epsilon_max") == 2 &&
         lower_evaluation.at("status") == "ok" &&
         upper_evaluation.at("status") == "ok" &&
         std::abs(local_value(lower_evaluation) - 2.0) < 1e-30 &&

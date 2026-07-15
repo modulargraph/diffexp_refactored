@@ -14,6 +14,7 @@ EncodeScalar::usage = "EncodeScalar[z, digits] converts a numeric scalar to the 
 EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact rational function of named analytic regulators to the FLINT symbolic coefficient-field syntax.";
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
+PreparePersistentChart::usage = "PreparePersistentChart[schema1Request, metadata] prepares and retains only the immutable schema-2 chart/operator owner. Dynamic run fields are ignored and no recurrence or local solution is executed or published; the returned compact record binds the exact session, chart handle, and chart identity reused by later solves.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
 RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
 PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts and one full-parent physical q/C equation owner into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
@@ -49,6 +50,7 @@ RunPersistentNativeArms::usage = "RunPersistentNativeArms[plan, anchor, arms, ep
 RunPersistentTransportArms::usage = "RunPersistentTransportArms[plan,anchor,arms,epsilon,checkpointRoot,refinement] atomically marches both retained lower/upper arms in exactly two native workers and returns exactly two public transport-state tokens. arms has exactly lower/upper records, each containing only receiving_basis (one retained-local basis list per match). Each state strongly owns its hidden match/materialized-local/final-local closure. A returned final_local record is dependency-only: it is not a public local token and must not be passed to ReleasePersistentLocal; release the corresponding transport state instead.";
 RunPersistentConsumingTransportArms::usage = "RunPersistentConsumingTransportArms[plan,anchor,arms,epsilon,checkpointRoot,refinement] marches lower then upper sequentially and consumes each receiving-basis handle after its last successful exact match. Returned compact v4 transport states retain immutable match/basis provenance and materialized tile locals, but not receiving-basis coefficient slabs.";
 ConsumePersistentTransportHop::usage = "ConsumePersistentTransportHop[plan,arm,index,basis,incoming,epsilon,checkpointRoot,refinement] performs one positive one-based plan match, materializes and seals its next local, then consumes the complete receiving basis. epsilon has exactly min,max,required_complete_max. The response publishes next_local plus compact basis_reference and match_reference records for final state publication.";
+ConsumePersistentTransportValueHop::usage = "ConsumePersistentTransportValueHop[plan,arm,index,valueSolver,incoming,epsilon,checkpointRoot] attempts one plan-bound regular-to-regular value handoff. Native code alone decides eligibility from exact retained geometry, branch/prescription facts, owner bindings, truncation distance, and numerical accuracy. An ineligible response is side-effect free so the caller can build and consume the full receiving basis; an eligible response evaluates the incoming retained vector at the receiver center and performs one native value solve.";
 PublishPersistentConsumedTransportStates::usage = "PublishPersistentConsumedTransportStates[plan,anchor,arms,epsilon,checkpointRoot,refinement] atomically publishes lower/upper compact certificate-only states after streaming hops. Each arm contains only ordered tile_sources (including the common anchor); C++ validates the already-sealed per-hop lineage directly, without echoing basis/operator/match provenance through Wolfram. Non-anchor tile-source public tokens are consumed only after both states validate.";
 RunPersistentTransportArm::usage = "RunPersistentTransportArm[plan,arm,anchor,receivingBasis,epsilon,checkpointRoot,refinement] marches one retained lower or upper arm entirely in C++ without projecting or integrating observables. It returns an opaque transport-state handle that strongly owns its plan, anchor, receiving bases, hidden planned matches, one unprojected source local per tile, and final local; no coefficient slab is serialized.";
 ContractPersistentTransportObservables::usage = "ContractPersistentTransportObservables[state,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against one retained native transport-arm state without rematching. Each observable has exactly Identity, CheckpointIdentity, IntegrandRows, Epsilon, and TailPolicy; Epsilon has exactly Min, Max, and RequiredCompleteMax. IntegrandRows contains one prepared rational row per retained tile. TailPolicy is \"stored\", \"attempt\", or \"require\": stored never requests tail certification, attempt may remain stored-truncation, and require fails atomically unless every tile aggregates with a certified full-local tail. The result retains input order and returns directly usable opaque line handles; an empty observable list succeeds without publishing lines.";
@@ -451,19 +453,18 @@ persistentCloseIncompatibleSymbolicSessions[symbols_List] := Module[
   Scan[persistentCloseSessionHandle, handles];
   Null];
 
-preparePersistentRequest[request_Association, metadata_Association] := Module[
-  {missingStatic, missingRun, domain, symbols, precisionBits, outputDigits,
-   systemIdentity, sessionAnalytic, chartAnalytic, scc, static, run,
+preparePersistentChart[request_Association, metadata_Association] := Module[
+  {missingStatic, domain, symbols, precisionBits, outputDigits,
+   systemIdentity, sessionAnalytic, chartAnalytic, scc, static,
    sessionSignature, sessionKey, sessionEntry, sessionResponse, session,
    chartIdentity, chartIdentityString, chartSignature, chartKey, chartEntry,
    chartResponse, chart,
    preparedToken, createRequest, prepareRequest},
   missingStatic = Complement[$persistentRequiredStaticKeys, Keys[request]];
-  missingRun = Complement[$persistentRunKeys, Keys[request]];
-  If[missingStatic =!= {} || missingRun =!= {},
+  If[missingStatic =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
-      "persistent recurrence request is missing required fields",
-      "MissingStatic" -> missingStatic, "MissingRun" -> missingRun|>], Module]];
+      "persistent chart preparation is missing required static fields",
+      "MissingStatic" -> missingStatic|>], Module]];
   If[!KeyExistsQ[metadata, "SystemIdentity"] ||
       !KeyExistsQ[metadata, "ChartIdentity"] ||
       !AssociationQ[Lookup[metadata, "SCC", None]],
@@ -505,7 +506,6 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     session = sessionEntry["Handle"]];
 
   static = KeyTake[request, $persistentStaticKeys];
-  run = KeyTake[request, $persistentRunKeys];
   chartIdentity = metadata["ChartIdentity"];
   chartIdentityString = persistentIdentityString[chartIdentity];
   preparedToken = Lookup[metadata, "PreparedToken", None];
@@ -551,9 +551,35 @@ preparePersistentRequest[request_Association, metadata_Association] := Module[
     chartIdentityString = Lookup[chartEntry, "Identity",
       chartIdentityString]];
 
-  <|"Session" -> session, "Chart" -> chart, "Run" -> run,
+  <|"Session" -> session, "Chart" -> chart,
     "ChartIdentity" -> chartIdentityString,
     "Static" -> static, "OutputDigits" -> outputDigits|>];
+
+PreparePersistentChart[request_Association,
+    metadata_Association] := Module[{prepared},
+  prepared = preparePersistentChart[request, metadata];
+  If[FailureQ[prepared], Return[prepared, Module]];
+  If[!AssociationQ[prepared] ||
+      !AllTrue[{"Session", "Chart", "ChartIdentity"},
+        StringQ[Lookup[prepared, #, None]] &],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent chart preparation returned a malformed owner record",
+      "BackendResponse" -> prepared|>],
+      Module]];
+  KeyTake[prepared, {"Session", "Chart", "ChartIdentity"}]];
+
+preparePersistentRequest[request_Association, metadata_Association] := Module[
+  {missingStatic, missingRun, prepared},
+  missingStatic = Complement[$persistentRequiredStaticKeys, Keys[request]];
+  missingRun = Complement[$persistentRunKeys, Keys[request]];
+  If[missingStatic =!= {} || missingRun =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent recurrence request is missing required fields",
+      "MissingStatic" -> missingStatic, "MissingRun" -> missingRun|>], Module]];
+  prepared = preparePersistentChart[request, metadata];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  Append[prepared, "Run" -> KeyTake[request, $persistentRunKeys]]];
 
 RunPersistentRequest[request_Association, metadata_Association] := Module[
   {prepared = preparePersistentRequest[request, metadata]},
@@ -1603,6 +1629,46 @@ ConsumePersistentTransportHop[plan_Association, arm_String,
     "incoming" -> incomingTokens["Local"],
     "incoming_checkpoint_identity" -> incomingCheckpoint,
     "epsilon" -> epsilon, "refinement" -> refinement,
+    "checkpoint_policy" -> <|
+      "schema" -> "diffexp2-deterministic-arm-checkpoints-v1",
+      "root" -> checkpointRoot|>|>]];
+
+ConsumePersistentTransportValueHop[plan_Association, arm_String,
+    index_Integer, valueSolver_Association, incoming_Association,
+    epsilon_Association, checkpointRoot_String] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   incomingTokens = persistentLocalHandles[incoming], incomingCheckpoint,
+   epsilonKeys, solverKeys, sessions},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[incomingTokens], Return[incomingTokens, Module]];
+  incomingCheckpoint = Lookup[incoming, "checkpoint_identity",
+    Lookup[incoming, "CheckpointIdentity", None]];
+  epsilonKeys = {"min", "max", "required_complete_max"};
+  solverKeys = {"schema", "run", "metadata", "tail_proxy_max_exact",
+    "relative_accuracy_max_exact"};
+  sessions = DeleteDuplicates[{planTokens["Session"],
+    incomingTokens["Session"]}];
+  If[!MemberQ[{"lower", "upper"}, arm] || index < 1 ||
+      Length[sessions] =!= 1 || Sort[Keys[epsilon]] =!= Sort[epsilonKeys] ||
+      !AllTrue[Lookup[epsilon, epsilonKeys], IntegerQ] ||
+      !TrueQ[epsilon["min"] <= epsilon["required_complete_max"] <=
+        epsilon["max"]] || Sort[Keys[valueSolver]] =!= Sort[solverKeys] ||
+      Lookup[valueSolver, "schema", None] =!=
+        "diffexp2-native-regular-value-solver-prototype-v1" ||
+      !AssociationQ[Lookup[valueSolver, "run", None]] ||
+      !AssociationQ[Lookup[valueSolver, "metadata", None]] ||
+      !StringQ[incomingCheckpoint] || StringLength[checkpointRoot] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "regular value hop received inconsistent sessions, solver prototype, epsilon bounds, or checkpoint identities"|>], Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "transport.consume_value_hop",
+    "session" -> First[sessions],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "arm" -> arm, "match" -> index - 1,
+    "value_solver" -> valueSolver,
+    "incoming" -> incomingTokens["Local"],
+    "incoming_checkpoint_identity" -> incomingCheckpoint,
+    "epsilon" -> epsilon,
     "checkpoint_policy" -> <|
       "schema" -> "diffexp2-deterministic-arm-checkpoints-v1",
       "root" -> checkpointRoot|>|>]];

@@ -1443,12 +1443,16 @@ EpsilonWindow live_match_epsilon_intersection(
     admit(retained_local_frame_contract(column));
   const auto minimum = std::max(requested.min_power, union_minimum);
   if (minimum > complete_max)
-    throw std::domain_error(
-        "native whole-arm match has no common complete epsilon window");
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        "native whole-arm match has no common complete epsilon window",
+        std::nullopt, std::nullopt, complete_max);
   if (required_complete_max < minimum ||
       required_complete_max > complete_max)
-    throw std::domain_error(
-        "native whole-arm live match intersection does not cover the globally required complete epsilon maximum");
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        "native whole-arm live match intersection does not cover the globally required complete epsilon maximum",
+        std::nullopt, std::nullopt, complete_max);
   return {minimum, complete_max};
 }
 

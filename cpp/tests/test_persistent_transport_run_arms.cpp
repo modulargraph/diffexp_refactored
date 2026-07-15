@@ -131,7 +131,8 @@ std::string solve_local(const std::string& session,
                         const std::string& value,
                         std::uint32_t nmax = 0,
                         bool branch_sensitive = true,
-                        std::int32_t prescription_sign = -1) {
+                        std::int32_t prescription_sign = -1,
+                        std::int32_t initial_validity = 2) {
   json::array schedule;
   json::array shifts;
   for (std::uint32_t n = 0; n <= nmax; ++n) {
@@ -150,7 +151,8 @@ std::string solve_local(const std::string& session,
            {"a_shifts", std::move(shifts)},
            {"schedule", std::move(schedule)},
            {"initial", json::array{value, "0", "0"}},
-           {"initial_validity", json::array{2}}, {"source", nullptr},
+           {"initial_validity", json::array{initial_validity}},
+           {"source", nullptr},
            {"return_u", false}}},
       {"metadata", json::object{
            {"chart", json::object{
@@ -1168,6 +1170,79 @@ void test_acb_value_handoff_significance_gate() {
   }
 }
 
+void test_acb_consuming_hop_reservoir_retry_lifecycle() {
+  std::string session;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "acb"}, {"precision_bits", 256},
+        {"output_digits", 40}, {"chart_capacity", 3},
+        {"local_capacity", 4}, {"match_capacity", 2},
+        {"tile_plan_capacity", 1}, {"transport_state_capacity", 1},
+        {"line_result_capacity", 1}});
+    require_ok(created, "reservoir-retry session.create");
+    session = std::string(created.at("session").as_string());
+    const auto anchor_chart = prepare_chart(
+        session, "reservoir-retry-anchor-chart", "0", false, "acb");
+    const auto lower_chart = prepare_chart(
+        session, "reservoir-retry-lower-chart", "-2/3", false, "acb");
+    const auto upper_chart = prepare_chart(
+        session, "reservoir-retry-upper-chart", "2/3", false, "acb");
+    const auto anchor = solve_local(
+        session, anchor_chart, "0", "reservoir-retry-anchor", "2", 0,
+        false);
+    const auto short_basis = solve_local(
+        session, lower_chart, "-2/3", "reservoir-retry-short", "1", 0,
+        false, -1, 0);
+    const auto full_basis = solve_local(
+        session, lower_chart, "-2/3", "reservoir-retry-full", "1", 0,
+        false);
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", "streaming-state-plan"},
+        {"division_order", 3},
+        {"lower", arm("-2/3", anchor_chart, lower_chart, false)},
+        {"upper", arm("2/3", anchor_chart, upper_chart, false)}});
+    require_ok(planned, "reservoir-retry tile.plan");
+    const auto plan = std::string(planned.at("tile_plan").as_string());
+
+    const auto before = session_stats(session);
+    const auto retry = consume_hop(
+        session, plan, "lower", anchor, "reservoir-retry-anchor",
+        short_basis, "reservoir-retry");
+    const auto after = session_stats(session);
+    if (retry.at("status") != "error" ||
+        retry.at("reason") != "acb_match_residual_inconclusive" ||
+        retry.at("retryable_epsilon_reservoir") != true ||
+        retry.at("retryable_matching_clearance") != false ||
+        retry.at("required_additional_epsilon_orders") != 2 ||
+        after.at("locals") != before.at("locals") ||
+        after.at("pending_local_solves") != 0 ||
+        counter(after, "local_solves") != counter(before, "local_solves"))
+      throw std::runtime_error(
+          "Acb reservoir retry was not structured and transactional: " +
+          json::serialize(retry) + " / " + json::serialize(after));
+
+    release_local(session, short_basis);
+    const auto recovered = consume_hop(
+        session, plan, "lower", anchor, "reservoir-retry-anchor",
+        full_basis, "reservoir-retry-recovered");
+    require_ok(recovered, "reservoir-retry recovered consume_hop");
+    if (session_stats(session).at("pending_local_solves") != 0)
+      throw std::runtime_error(
+          "Acb reservoir retry did not leave reusable local capacity");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", session}}),
+        "reservoir-retry session.close");
+    session.clear();
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    throw;
+  }
+}
+
 void test_multiblock_regular_value_fallback_owner() {
   std::string session;
   try {
@@ -1534,6 +1609,7 @@ int main() {
     test_regular_value_hop_checkpoint();
     test_acb_prescribed_value_hops_match_basis();
     test_acb_value_handoff_significance_gate();
+    test_acb_consuming_hop_reservoir_retry_lifecycle();
     test_multiblock_regular_value_fallback_owner();
     test_streaming_consumed_transport();
     test_consuming_transport();

@@ -629,6 +629,47 @@
             session->precision_bits, match);
       }
       sealed_lineage = next->seal_plan_match_lineage();
+    } catch (const MatchingArithmeticError& error) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "consuming transport hop reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->domain == "acb" &&
+          error.code ==
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow &&
+          error.epsilon_power.has_value()) {
+        const auto complete_max = *error.epsilon_power;
+        const auto additional = std::max<std::int32_t>(
+            0, required_complete_max - complete_max);
+        if (additional > 0) {
+          const auto& arm = plan->arm(arm_name);
+          return json::object{
+              {"status", "error"},
+              {"id", "CPP"},
+              {"reason", "acb_match_residual_inconclusive"},
+              {"retryable_epsilon_reservoir", true},
+              {"retryable_matching_clearance", false},
+              {"required_additional_epsilon_orders", additional},
+              {"arm", arm_name},
+              {"match", match_index},
+              {"geometry", encode_plan_match(arm, match_index)},
+              {"residual", json::object{
+                   {"status", "no-common-complete-window"},
+                   {"common_complete_max", complete_max},
+                   {"required_complete_max", required_complete_max},
+                   {"detail", error.what()}}},
+              {"epsilon", json::object{
+                   {"min", requested_epsilon.min_power},
+                   {"max", requested_epsilon.complete_max},
+                   {"required_complete_max", required_complete_max}}},
+              {"refinement", refinement},
+              {"detail",
+               "the Acb match needs a wider private epsilon reservoir "
+               "before residual certification can begin"}};
+        }
+      }
+      throw;
     } catch (...) {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_local_solves == 0)

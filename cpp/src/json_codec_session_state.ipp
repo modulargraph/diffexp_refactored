@@ -16,6 +16,7 @@ struct SolverSession {
   std::size_t transport_state_capacity = 256;
   std::size_t line_result_capacity = 2048;
   std::uint64_t next_chart = 1;
+  std::uint64_t next_regular_equation_owner = 1;
   std::uint64_t next_local = 1;
   std::uint64_t next_scc = 1;
   std::uint64_t next_match = 1;
@@ -64,6 +65,11 @@ struct SolverSession {
   mutable std::mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>> charts;
   std::unordered_map<std::string, std::string> handles_by_key;
+  std::unordered_map<std::string,
+                     std::shared_ptr<RegularPhysicalEquationOwnerBase>>
+      regular_equation_owners;
+  std::unordered_map<std::string, std::string>
+      regular_equation_owner_handles_by_key;
   std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>> locals;
   std::unordered_map<std::string, std::shared_ptr<StoredMatchBase>> matches;
   std::unordered_map<std::string, std::shared_ptr<StoredEndpointResult>>

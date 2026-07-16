@@ -18,6 +18,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     SolverSession& session, const std::string& checkpoint_identity) {
   if (session.closed)
     throw std::invalid_argument("cannot checkpoint a closed solver session");
+  if (!session.regular_equation_owners.empty())
+    throw std::invalid_argument(
+        "checkpoint does not yet support frame-independent regular physical equation owners; release every eq: handle before saving");
   if (session.pending_local_solves != 0 || session.pending_matches != 0 ||
       session.pending_endpoint_limits != 0 ||
       session.pending_tile_plans != 0 ||

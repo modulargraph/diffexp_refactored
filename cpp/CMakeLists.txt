@@ -115,6 +115,15 @@ if(DE2_BUILD_TESTS)
   add_test(NAME cpp_persistent_owner_bound_residual
     COMMAND test_diffexp2_persistent_owner_bound_residual)
 
+  add_executable(test_diffexp2_persistent_regular_equation_owner
+    tests/test_persistent_regular_equation_owner.cpp)
+  target_compile_features(test_diffexp2_persistent_regular_equation_owner
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_persistent_regular_equation_owner
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_persistent_regular_equation_owner
+    COMMAND test_diffexp2_persistent_regular_equation_owner)
+
   add_executable(test_diffexp2_persistent_scc_owner_bound_residual
     tests/test_persistent_scc_owner_bound_residual.cpp)
   target_compile_features(test_diffexp2_persistent_scc_owner_bound_residual

@@ -18,6 +18,13 @@ int main() {
   assert(schemas[0].as_int64() == 1);
   assert(schemas[1].as_int64() == 2);
   assert(info.at("persistent_sessions").as_bool());
+  assert(info.at(
+      "persistent_frame_independent_regular_equation_owner_capability")
+             .as_string() ==
+         "frame-independent-regular-physical-equation-owner-v1");
+  assert(!info.at(
+      "persistent_frame_independent_regular_equation_owner_checkpoint")
+              .as_bool());
   assert(info.at("persistent_checkpoint_schema").as_int64() == 8);
   assert(info.at("persistent_exact_tile_plan_capability").as_string() ==
          "retained-exact-independent-arm-tile-plan-v1");

@@ -1,3 +1,142 @@
+  if (operation == "regular_equation.prepare") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "capability", "key", "identity",
+         "dimension", "geometry", "physical_ode"},
+        "frame-independent regular equation-owner request");
+    if (required_string(root, "capability") !=
+        kFrameIndependentRegularEquationOwnerCapability)
+      throw std::invalid_argument(
+          "unsupported frame-independent regular equation-owner capability");
+    const auto key = required_string(root, "key");
+    const auto identity = required_string(root, "identity");
+    if (!identity.starts_with("de2-equation-"))
+      throw std::invalid_argument(
+          "regular equation owner identity must be a de2-equation token");
+    const auto dimension = as_u32(
+        root.at("dimension"), "regular equation-owner dimension");
+    if (dimension == 0)
+      throw std::invalid_argument(
+          "regular equation-owner dimension must be positive");
+    const auto geometry_record = canonical_chart_geometry_record(
+        root.at("geometry"));
+    const auto signature = json::serialize(canonical_json_value(
+        json::object{
+            {"capability", root.at("capability")},
+            {"domain", session->domain},
+            {"precision_bits", session->precision_bits},
+            {"symbols", encode_strings(session->symbols)},
+            {"session_analytic", json::parse(session->analytic_identity)},
+            {"identity", root.at("identity")},
+            {"dimension", root.at("dimension")},
+            {"geometry", json::parse(geometry_record)},
+            {"physical_ode", root.at("physical_ode")}}));
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (const auto found =
+              session->regular_equation_owner_handles_by_key.find(key);
+          found != session->regular_equation_owner_handles_by_key.end()) {
+        const auto owner = session->regular_equation_owners.at(
+            found->second);
+        if (owner->signature() != signature)
+          throw std::invalid_argument(
+              "regular equation-owner cache key collision with unequal exact identity");
+        return json::object{
+            {"status", "ok"}, {"session", session->handle},
+            {"equation_owner", owner->handle()}, {"reused", true},
+            {"capability", kFrameIndependentRegularEquationOwnerCapability},
+            {"identity", owner->exact_identity()},
+            {"dimension", owner->dimension()},
+            {"owner_signature_identity",
+             owner->owner_signature_identity()},
+            {"physical_payload_identity",
+             owner->physical_payload_identity()}};
+      }
+      if (session->regular_equation_owners.size() >=
+          session->chart_capacity)
+        throw std::invalid_argument(
+            "persistent regular equation-owner capacity is exhausted");
+    }
+
+    std::string owner_handle;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      owner_handle = "eq:" +
+          std::to_string(session->next_regular_equation_owner++);
+    }
+    const auto parse_owner = [&]<typename Scalar>()
+        -> std::shared_ptr<RegularPhysicalEquationOwnerBase> {
+      std::unique_ptr<AcbPrecisionLease> acb_lease;
+      if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+        acb_lease = std::make_unique<AcbPrecisionLease>(
+            session->precision_bits);
+        ComplexBall::set_precision(session->precision_bits);
+      }
+      std::unique_lock<std::recursive_mutex> symbolic_lock;
+      if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+        symbolic_lock =
+            std::unique_lock<std::recursive_mutex>(symbolic_run_mutex());
+        SymbolicRational::configure(session->symbols);
+      }
+      auto equation = parse_prepared_physical_ode<Scalar>(
+          root.at("physical_ode"), dimension, false);
+      if (!equation->owner_signature_identity.starts_with(
+              "de2-equation-") ||
+          equation->owner_signature_identity != identity)
+        throw std::invalid_argument(
+            "regular physical q/C payload names a different equation owner identity");
+      const auto& q0 = equation->q_lags.front();
+      if (!equation->c_lags.front().empty() || q0.zero ||
+          q0.valuation != 0 || q0.numerator.empty() ||
+          q0.denominator.empty() ||
+          ScalarTraits<Scalar>::is_zero(q0.numerator.front()) ||
+          ScalarTraits<Scalar>::is_zero(q0.denominator.front()))
+        throw std::invalid_argument(
+            "regular physical equation owner requires an ordinary center: C(t=0,epsilon) must vanish structurally and q(t=0,epsilon) must be formally invertible at epsilon zero");
+      return make_retained_typed_shared<Scalar,
+          RegularPhysicalEquationOwner<Scalar>>(
+              owner_handle, key, identity, signature, geometry_record,
+              std::move(equation), session->precision_bits);
+    };
+    std::shared_ptr<RegularPhysicalEquationOwnerBase> owner;
+    if (session->domain == "rational")
+      owner = parse_owner.template operator()<Rational>();
+    else if (session->domain == "acb")
+      owner = parse_owner.template operator()<ComplexBall>();
+    else
+      owner = parse_owner.template operator()<SymbolicRational>();
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during regular equation-owner preparation");
+      if (const auto found =
+              session->regular_equation_owner_handles_by_key.find(key);
+          found != session->regular_equation_owner_handles_by_key.end()) {
+        const auto existing = session->regular_equation_owners.at(
+            found->second);
+        if (existing->signature() != owner->signature())
+          throw std::invalid_argument(
+              "concurrent regular equation-owner cache key collision with unequal exact identity");
+        owner = existing;
+      } else {
+        session->regular_equation_owners.emplace(owner->handle(), owner);
+        session->regular_equation_owner_handles_by_key.emplace(
+            key, owner->handle());
+      }
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"equation_owner", owner->handle()},
+        {"reused", owner->handle() != owner_handle},
+        {"capability", kFrameIndependentRegularEquationOwnerCapability},
+        {"identity", owner->exact_identity()},
+        {"dimension", owner->dimension()},
+        {"owner_signature_identity", owner->owner_signature_identity()},
+        {"physical_payload_identity", owner->physical_payload_identity()}};
+  }
+
   if (operation == "chart.prepare") {
     const auto key = required_string(root, "key");
     const auto identity = required_string(root, "identity");
@@ -1322,6 +1461,27 @@
     return json::object{{"status", "ok"}, {"released", chart_handle}};
   }
 
+  if (operation == "regular_equation.release") {
+    const auto owner_handle = required_string(root, "equation_owner");
+    std::shared_ptr<RegularPhysicalEquationOwnerBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->regular_equation_owners.find(
+          owner_handle);
+      if (found == session->regular_equation_owners.end())
+        throw std::invalid_argument(
+            "unknown or already released regular equation owner");
+      removed = found->second;
+      session->regular_equation_owner_handles_by_key.erase(
+          removed->key());
+      session->regular_equation_owners.erase(found);
+    }
+    return json::object{{"status", "ok"},
+                        {"released", owner_handle},
+                        {"capability",
+                         kFrameIndependentRegularEquationOwnerCapability}};
+  }
+
   if (operation == "session.counters") {
     require_exact_keys(root, {"schema", "op", "session"},
                        "session.counters request");
@@ -1338,6 +1498,8 @@
         {"domain", session->domain},
         {"precision_bits", session->precision_bits},
         {"charts", session->charts.size()},
+        {"regular_equation_owners",
+         session->regular_equation_owners.size()},
         {"locals", session->locals.size()},
         {"matches", session->matches.size()},
         {"endpoints", session->endpoints.size()},
@@ -1376,6 +1538,7 @@
 
   if (operation == "session.stats") {
     std::vector<std::shared_ptr<PreparedChartBase>> charts;
+    std::size_t regular_equation_owners = 0;
     std::vector<std::shared_ptr<StoredLocalBase>> locals;
     std::vector<std::shared_ptr<StoredMatchBase>> matches;
     std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
@@ -1423,6 +1586,8 @@
       std::lock_guard<std::mutex> lock(session->mutex);
       for (const auto& [ignored, chart] : session->charts)
         charts.push_back(chart);
+      regular_equation_owners =
+          session->regular_equation_owners.size();
       for (const auto& [ignored, local] : session->locals)
         locals.push_back(local);
       for (const auto& [ignored, match] : session->matches)
@@ -1566,6 +1731,8 @@
                         {"domain", session->domain},
                         {"precision_bits", session->precision_bits},
                         {"charts", charts.size()}, {"runs", runs},
+                        {"regular_equation_owners",
+                         regular_equation_owners},
                         {"locals", locals.size()},
                         {"matches", matches.size()},
                         {"endpoints", endpoints.size()},

@@ -141,6 +141,8 @@ json::object run_session_command(const json::object& root) {
                         {"transport_state_capacity",
                          session->transport_state_capacity},
                         {"line_result_capacity", session->line_result_capacity},
+                        {"regular_equation_owner_capability",
+                         kFrameIndependentRegularEquationOwnerCapability},
                         {"local_match_capability",
                          domain == "rational"
                              ? kExactRegularLocalMatchCapability
@@ -226,7 +228,8 @@ json::object run_session_command(const json::object& root) {
       removed = std::move(found->second);
       registry.sessions.erase(found);
     }
-    std::size_t charts = 0, locals = 0, matches = 0, endpoints = 0,
+    std::size_t charts = 0, regular_equation_owners = 0,
+                locals = 0, matches = 0, endpoints = 0,
                 tile_plans = 0, transport_states = 0,
                 line_results = 0, transport_pair_streams = 0, sccs = 0;
     std::vector<std::shared_ptr<TransportPairObservableStream>> streams;
@@ -237,6 +240,8 @@ json::object run_session_command(const json::object& root) {
       // and decrement them on exactly one completion path. Do not reset
       // pending counters.
       charts = removed->charts.size();
+      regular_equation_owners =
+          removed->regular_equation_owners.size();
       locals = removed->locals.size();
       matches = removed->matches.size();
       endpoints = removed->endpoints.size();
@@ -263,11 +268,15 @@ json::object run_session_command(const json::object& root) {
       removed->scc_handles_by_key.clear();
       removed->charts.clear();
       removed->handles_by_key.clear();
+      removed->regular_equation_owners.clear();
+      removed->regular_equation_owner_handles_by_key.clear();
     }
     for (const auto& stream : streams)
       stream->abort();
     return json::object{{"status", "ok"}, {"closed", handle},
                         {"released_charts", charts},
+                        {"released_regular_equation_owners",
+                         regular_equation_owners},
                         {"released_locals", locals},
                         {"released_matches", matches},
                         {"released_endpoints", endpoints},

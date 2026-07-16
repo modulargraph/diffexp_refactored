@@ -522,9 +522,9 @@ class StoredTilePlan;
 class StoredTransportArmState;
 
 // Equation ownership is deliberately independent of the current primitive
-// chart implementation.  Composite SCC owners can implement this interface
-// once they retain one full original-system q/C certificate, without changing
-// StoredLocal or its checkpoint provenance shape.
+// chart implementation.  Composite SCC owners and lightweight regular
+// physical owners can retain one full original-system q/C certificate without
+// changing StoredLocal or its checkpoint provenance shape.
 class PhysicalEquationOwnerBase {
  public:
   virtual ~PhysicalEquationOwnerBase() = default;
@@ -631,6 +631,34 @@ class PreparedChartBase : public PhysicalEquationOwnerBase {
   std::optional<std::string> regular_value_relative_accuracy_max_exact_;
   SCCCertificate scc_;
   double prepare_parse_ms_ = 0.0;
+};
+
+// A regular physical equation is exact in epsilon and independent of the
+// finite recurrence frame used by a particular local solve.  Keep this owner
+// deliberately smaller than PreparedChartBase: it is sufficient for exact
+// geometry/q/C identity and residual ownership, but cannot execute a
+// recurrence by itself.  A later value handoff must bind a separately
+// prepared dynamic chart and prove that its physical payload is identical.
+class RegularPhysicalEquationOwnerBase : public PhysicalEquationOwnerBase {
+ public:
+  virtual ~RegularPhysicalEquationOwnerBase() = default;
+  virtual const std::string& handle() const = 0;
+  virtual const std::string& key() const = 0;
+  virtual const std::string& exact_identity() const = 0;
+  virtual const std::string& signature() const = 0;
+  virtual const std::string& geometry_record() const = 0;
+  virtual std::uint32_t dimension() const = 0;
+  virtual slong precision_bits() const = 0;
+
+  const std::string& equation_owner_handle() const final {
+    return handle();
+  }
+  const std::string& equation_operator_identity() const final {
+    return exact_identity();
+  }
+  const char* equation_owner_kind() const final {
+    return "regular-physical-equation-v1";
+  }
 };
 
 std::recursive_mutex& symbolic_run_mutex() {

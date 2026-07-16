@@ -34,6 +34,67 @@ LocalSolution<Scalar> make_local_solution(
 }
 
 template <typename Scalar>
+class RegularPhysicalEquationOwner final
+    : public RegularPhysicalEquationOwnerBase {
+ public:
+  RegularPhysicalEquationOwner(
+      std::string handle, std::string key, std::string exact_identity,
+      std::string signature, std::string geometry_record,
+      std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>> equation,
+      slong precision_bits)
+      : handle_(std::move(handle)), key_(std::move(key)),
+        exact_identity_(std::move(exact_identity)),
+        signature_(std::move(signature)),
+        geometry_record_(std::move(geometry_record)),
+        equation_(std::move(equation)), precision_bits_(precision_bits) {
+    if (handle_.empty() || key_.empty() || exact_identity_.empty() ||
+        signature_.empty() || geometry_record_.empty() || !equation_ ||
+        precision_bits_ < 64 ||
+        equation_->owner_signature_identity != exact_identity_)
+      throw std::invalid_argument(
+          "regular physical equation owner lost an exact identity, geometry, or q/C payload");
+  }
+
+  const std::string& handle() const override { return handle_; }
+  const std::string& key() const override { return key_; }
+  const std::string& exact_identity() const override {
+    return exact_identity_;
+  }
+  const std::string& signature() const override { return signature_; }
+  const std::string& geometry_record() const override {
+    return geometry_record_;
+  }
+  std::uint32_t dimension() const override { return equation_->dimension; }
+  slong precision_bits() const override { return precision_bits_; }
+  const char* equation_scalar_domain() const override {
+    if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
+    return "symbolic";
+  }
+  std::shared_ptr<const void> physical_ode_erased() const override {
+    return std::static_pointer_cast<const void>(equation_);
+  }
+  const std::string& physical_payload_identity() const override {
+    return equation_->payload_identity;
+  }
+  const std::string& physical_payload_record() const override {
+    return equation_->exact_payload_record;
+  }
+  const std::string& owner_signature_identity() const override {
+    return equation_->owner_signature_identity;
+  }
+
+ private:
+  std::string handle_;
+  std::string key_;
+  std::string exact_identity_;
+  std::string signature_;
+  std::string geometry_record_;
+  std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>> equation_;
+  slong precision_bits_ = 0;
+};
+
+template <typename Scalar>
 class PreparedChart final : public PreparedChartBase {
  public:
   PreparedChart(std::string handle, std::string key,

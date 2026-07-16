@@ -8,6 +8,8 @@ inline constexpr char kRegularTailMajorantCapability[] =
     "retained-regular-homogeneous-gronwall-cauchy-tail-v1";
 inline constexpr char kOwnerBoundPhysicalResidualCapability[] =
     "owner-bound-physical-homogeneous-residual-v2";
+inline constexpr char kFrameIndependentRegularEquationOwnerCapability[] =
+    "frame-independent-regular-physical-equation-owner-v1";
 inline constexpr char kRetainedEndpointLimitCapability[] =
     "retained-native-endpoint-sector-limit-v1";
 inline constexpr char kRetainedPlannedEndpointLimitCapability[] =

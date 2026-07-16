@@ -83,4 +83,9 @@ if [[ "${DE2_RUN_PENTAGON_TIMING:-0}" == 1 ]]; then
   Scripts/run_pentagon_timing_regression.sh
 fi
 
+if [[ "${DE2_RUN_DOUBLE_BOX_TIMING:-0}" == 1 ]]; then
+  echo "=== optional full double-box timing regression"
+  Scripts/run_double_box_timing_regression.sh
+fi
+
 echo "Release test suite passed."

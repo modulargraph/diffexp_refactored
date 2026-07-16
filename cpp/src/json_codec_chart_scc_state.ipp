@@ -3984,9 +3984,20 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           "native SCC local metadata differs from retained parent chart geometry");
     if (!infinite) {
       const auto* radius = chart.if_contains("radius");
-      if (radius == nullptr || !radius->is_string() ||
-          Rational(std::string(radius->as_string())).str() !=
-              retained_geometry_.radius_exact)
+      const auto* radius_exact = chart.if_contains("radius_exact");
+      const bool exact_identity_matches =
+          radius_exact != nullptr && radius_exact->is_string() &&
+          radius_exact->as_string() == retained_geometry_.radius_exact;
+      // Schema-v1 local metadata carried only a Rational radius string.
+      // Preserve that path while allowing the exact algebraic identity plus
+      // Acb specialization emitted by current Wolfram producers.
+      const bool legacy_rational_matches =
+          radius_exact == nullptr && radius != nullptr &&
+          radius->is_string() &&
+          Rational(std::string(radius->as_string())).str() ==
+              retained_geometry_.radius_exact;
+      if (radius == nullptr ||
+          !(exact_identity_matches || legacy_rational_matches))
         throw std::invalid_argument(
             "native SCC local radius differs from retained exact parent radius");
     }

@@ -2096,6 +2096,10 @@ cppNativeChartMetadata[cs_Association, inputDigits_Integer] := Module[
         "Detail" -> "native local chart radius is not Acb-encodable"|>]];
     <|"center_exact" -> ToString[RootReduce[Re[center]], InputForm],
       "scale_exact" -> ToString[RootReduce[Re[scale]], InputForm],
+      (* The numerical radius constructs ChartGeometry, while this exact
+         identity binds algebraic radii to a retained SCC parent.  Rational
+         radii keep both fields too, so one metadata schema covers both. *)
+      "radius_exact" -> ToString[realRadius, InputForm],
       "radius" -> encodedRadius, "infinite_radius" -> False|>]];
 
 cppNativePrescriptions[cs_Association] := Map[Function[record, Module[

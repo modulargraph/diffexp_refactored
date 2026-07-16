@@ -67,6 +67,9 @@ fakePrepared = <|"Center" -> center,
   "Prescriptions" -> {}|>;
 persistentGeometry = catchDE2[
   DiffExp2`Solve`Private`cppPersistentGeometry[fakePrepared]];
+algebraicLocalMetadata = catchDE2[
+  DiffExp2`Solve`Private`cppNativeChartMetadata[
+    Join[fakePrepared, <|"Radius" -> physicalRadius|>], 160]];
 
 match = If[AssociationQ[certified], First[certified["matches"]], $Failed];
 tiles = If[AssociationQ[certified], certified["tiles"], $Failed];
@@ -79,7 +82,7 @@ ok = AssociationQ[bridged] && AssociationQ[planning] &&
   AssociationQ[certificate] && AssociationQ[certified] &&
   AssociationQ[request] && AssociationQ[capturedSingle] &&
   AssociationQ[capturedPairRaw] && FailureQ[rejectedHalfProtocol] &&
-  AssociationQ[persistentGeometry] &&
+  AssociationQ[persistentGeometry] && AssociationQ[algebraicLocalMetadata] &&
   RootReduce[bridged["Charts"][[2, "Center"]] - center] === 0 &&
   RootReduce[bridged["Charts"][[2, "Scale"]] - scale] === 0 &&
   RootReduce[bridged["Charts"][[2, "Radius"]] - physicalRadius] === 0 &&
@@ -117,7 +120,10 @@ ok = AssociationQ[bridged] && AssociationQ[planning] &&
   persistentGeometry["scale_exact"] === ToString[RootReduce[scale], InputForm] &&
   MatchQ[persistentGeometry["center_numeric"], {_String, _String}] &&
   MatchQ[persistentGeometry["scale_numeric"], {_String, _String}] &&
-  MatchQ[persistentGeometry["radius_numeric"], {_String, _String}];
+  MatchQ[persistentGeometry["radius_numeric"], {_String, _String}] &&
+  algebraicLocalMetadata["radius_exact"] ===
+    ToString[RootReduce[physicalRadius], InputForm] &&
+  MatchQ[algebraicLocalMetadata["radius"], {_String, _String}];
 
 Print[If[ok, "PASS", "FAIL"],
   ": algebraic charts retain exact geometry behind rational topology surrogates"];
@@ -127,5 +133,6 @@ If[!ok, Print[InputForm[{
   "Request" -> request, "CapturedSingle" -> capturedSingle,
   "CapturedPair" -> capturedPair, "CapturedPairRaw" -> capturedPairRaw,
   "RejectedHalfProtocol" -> rejectedHalfProtocol,
-  "PersistentGeometry" -> persistentGeometry}]]];
+  "PersistentGeometry" -> persistentGeometry,
+  "AlgebraicLocalMetadata" -> algebraicLocalMetadata}]]];
 Exit[If[ok, 0, 1]];

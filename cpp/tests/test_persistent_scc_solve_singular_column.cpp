@@ -84,6 +84,7 @@ json::object sector_run(bool seed, std::uint32_t log_max) {
 json::object metadata(const std::string& checkpoint) {
   return json::object{
       {"chart", json::object{{"center_exact", "0"}, {"scale_exact", "1"},
+                              {"radius_exact", "2"},
                               {"radius", "2"},
                               {"infinite_radius", false}}},
       {"tag", json::object{

@@ -56,6 +56,15 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_local_solution PRIVATE diffexp2_core)
   add_test(NAME cpp_local_solution COMMAND test_diffexp2_local_solution)
 
+  add_executable(test_diffexp2_physical_ode_evolution
+    tests/test_physical_ode_evolution.cpp)
+  target_compile_features(test_diffexp2_physical_ode_evolution
+    PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_physical_ode_evolution
+    PRIVATE diffexp2_core)
+  add_test(NAME cpp_physical_ode_evolution
+    COMMAND test_diffexp2_physical_ode_evolution)
+
   add_executable(test_diffexp2_integration tests/test_integration.cpp)
   target_compile_features(test_diffexp2_integration PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_integration PRIVATE diffexp2_core)

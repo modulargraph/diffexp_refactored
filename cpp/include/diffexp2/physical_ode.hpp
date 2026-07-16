@@ -335,7 +335,272 @@ void require_nonvacuous_q(
       "physical clearing multiplier q is not provably nonzero at the evaluation point");
 }
 
+struct PreparedCausalEpsilonMultiplier {
+  std::int32_t valuation = 0;
+  std::vector<ComplexBall> numerator;
+  std::vector<ComplexBall> denominator;
+};
+
+template <typename Scalar>
+PreparedCausalEpsilonMultiplier prepare_causal_multiplier(
+    const ExactEpsilonRational<Scalar>& value) {
+  if (value.zero || value.valuation < 0)
+    throw std::invalid_argument(
+        "causal epsilon multiplier requires a nonzero nonnegative valuation");
+  PreparedCausalEpsilonMultiplier prepared;
+  prepared.valuation = value.valuation;
+  prepared.numerator.reserve(value.numerator.size());
+  prepared.denominator.reserve(value.denominator.size());
+  for (const auto& coefficient : value.numerator)
+    prepared.numerator.push_back(local_detail::to_ball(coefficient));
+  for (const auto& coefficient : value.denominator)
+    prepared.denominator.push_back(local_detail::to_ball(coefficient));
+  if (prepared.numerator.empty() || prepared.denominator.empty() ||
+      prepared.numerator.front().contains_zero() ||
+      prepared.denominator.front().contains_zero())
+    throw std::domain_error(
+        "causal epsilon multiplier has no provably invertible leading data");
+  return prepared;
+}
+
+inline EpsilonVector zero_epsilon_vector(EpsilonWindow window,
+                                         std::uint32_t dimension) {
+  EpsilonVector output;
+  output.epsilon = window;
+  output.dimension = dimension;
+  const auto width = window.width();
+  if (dimension != 0 &&
+      width > std::numeric_limits<std::size_t>::max() / dimension)
+    throw std::overflow_error("ordinary-center epsilon vector size overflow");
+  output.coefficients.assign(width * dimension, ComplexBall(0));
+  return output;
+}
+
+inline void accumulate_causal_multiplier(
+    const PreparedCausalEpsilonMultiplier& multiplier,
+    const EpsilonVector& source, std::uint32_t source_component,
+    EpsilonVector& target, std::uint32_t target_component,
+    const ComplexBall& weight) {
+  if (source.epsilon.min_power != target.epsilon.min_power ||
+      source.epsilon.complete_max != target.epsilon.complete_max ||
+      source_component >= source.dimension ||
+      target_component >= target.dimension || multiplier.valuation < 0 ||
+      multiplier.numerator.empty() || multiplier.denominator.empty())
+    throw std::invalid_argument(
+        "ordinary-center causal product has inconsistent frames or dimensions");
+  if (weight.is_zero()) return;
+  const auto width = source.epsilon.width();
+  std::vector<ComplexBall> quotient(width, ComplexBall(0));
+  const auto denominator0 = multiplier.denominator.front();
+  if (denominator0.contains_zero())
+    throw std::domain_error(
+        "ordinary-center causal denominator contains zero");
+  for (std::size_t offset = 0; offset < width; ++offset) {
+    ComplexBall rhs(0);
+    for (std::size_t degree = 0;
+         degree < multiplier.numerator.size() && degree <= offset;
+         ++degree) {
+      const auto source_power = local_detail::checked_i32(
+          static_cast<std::int64_t>(source.epsilon.min_power) +
+              static_cast<std::int64_t>(offset - degree),
+          "ordinary-center causal source power");
+      rhs += multiplier.numerator[degree] *
+             source.at(source_power, source_component);
+    }
+    for (std::size_t degree = 1;
+         degree < multiplier.denominator.size() && degree <= offset;
+         ++degree)
+      rhs -= multiplier.denominator[degree] * quotient[offset - degree];
+    quotient[offset] = rhs / denominator0;
+
+    const auto target_power64 =
+        static_cast<std::int64_t>(source.epsilon.min_power) +
+        static_cast<std::int64_t>(offset) + multiplier.valuation;
+    if (target_power64 > target.epsilon.complete_max) continue;
+    const auto target_power = local_detail::checked_i32(
+        target_power64, "ordinary-center causal target power");
+    target.at(target_power, target_component) += weight * quotient[offset];
+  }
+}
+
+inline EpsilonVector solve_formal_unit_q0(
+    const PreparedCausalEpsilonMultiplier& q0,
+    const EpsilonVector& rhs, std::uint32_t taylor_index) {
+  if (taylor_index == 0 || q0.valuation != 0 || q0.numerator.empty() ||
+      q0.denominator.empty() || q0.numerator.front().contains_zero())
+    throw std::invalid_argument(
+        "ordinary-center q0 solve requires a positive Taylor index and a formal epsilon unit");
+  auto output = zero_epsilon_vector(rhs.epsilon, rhs.dimension);
+  const auto divisor = ComplexBall::from_strings(
+      std::to_string(taylor_index));
+  const auto width = rhs.epsilon.width();
+  for (std::size_t offset = 0; offset < width; ++offset) {
+    const auto power = local_detail::checked_i32(
+        static_cast<std::int64_t>(rhs.epsilon.min_power) +
+            static_cast<std::int64_t>(offset),
+        "ordinary-center q0 solve power");
+    for (std::uint32_t component = 0; component < rhs.dimension;
+         ++component) {
+      ComplexBall value(0);
+      for (std::size_t degree = 0;
+           degree < q0.denominator.size() && degree <= offset; ++degree) {
+        const auto source_power = local_detail::checked_i32(
+            static_cast<std::int64_t>(power) -
+                static_cast<std::int64_t>(degree),
+            "ordinary-center q0 numerator power");
+        value += q0.denominator[degree] *
+                 rhs.at(source_power, component);
+      }
+      value = value / divisor;
+      for (std::size_t degree = 1;
+           degree < q0.numerator.size() && degree <= offset; ++degree) {
+        const auto previous_power = local_detail::checked_i32(
+            static_cast<std::int64_t>(power) -
+                static_cast<std::int64_t>(degree),
+            "ordinary-center q0 previous power");
+        value -= q0.numerator[degree] *
+                 output.at(previous_power, component);
+      }
+      output.at(power, component) = value / q0.numerator.front();
+    }
+  }
+  return output;
+}
+
 }  // namespace physical_ode_detail
+
+struct OrdinaryCenterValueEvolution {
+  bool eligible = false;
+  std::string reason;
+  EpsilonWindow epsilon;
+  std::uint32_t dimension = 0;
+  std::uint32_t taylor_complete_max = 0;
+  // One full epsilon vector for each Taylor coefficient f_n, n=0..N.
+  std::vector<EpsilonVector> taylor_coefficients;
+
+  const EpsilonVector& at(std::uint32_t taylor_index) const {
+    if (!eligible || taylor_index >= taylor_coefficients.size())
+      throw std::out_of_range(
+          "ordinary-center Taylor coefficient is unavailable");
+    return taylor_coefficients[taylor_index];
+  }
+};
+
+template <typename Scalar>
+OrdinaryCenterValueEvolution evolve_ordinary_center_value(
+    const PreparedPhysicalClearedODE<Scalar>& ode,
+    const EpsilonVector& initial, std::uint32_t taylor_complete_max) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "ordinary-center value evolution supports Rational or Acb physical equations");
+  physical_ode_detail::validate_ode(ode);
+  const auto width = initial.epsilon.width();
+  if (initial.dimension == 0 || initial.dimension != ode.dimension ||
+      width > std::numeric_limits<std::size_t>::max() /
+                  initial.dimension ||
+      initial.coefficients.size() != width * initial.dimension ||
+      !initial.error.empty())
+    throw std::invalid_argument(
+        "ordinary-center initial value has an invalid dimension, epsilon frame, or unabsorbed error envelope");
+
+  OrdinaryCenterValueEvolution result;
+  result.epsilon = initial.epsilon;
+  result.dimension = initial.dimension;
+  result.taylor_complete_max = taylor_complete_max;
+  const auto ineligible = [&](std::string reason) {
+    result.reason = std::move(reason);
+    result.taylor_coefficients.clear();
+    return result;
+  };
+
+  if (!ode.c_lags.front().empty())
+    return ineligible(
+        "physical equation is not ordinary at t=0 because C_0 is structurally nonzero");
+  const auto& raw_q0 = ode.q_lags.front();
+  if (raw_q0.zero || raw_q0.valuation != 0 || raw_q0.numerator.empty() ||
+      raw_q0.denominator.empty() ||
+      ScalarTraits<Scalar>::is_zero(raw_q0.numerator.front()) ||
+      ScalarTraits<Scalar>::is_zero(raw_q0.denominator.front()))
+    return ineligible(
+        "physical equation q_0 is not a formal epsilon unit");
+  for (std::size_t lag = 0; lag < ode.q_lags.size(); ++lag) {
+    const auto& coefficient = ode.q_lags[lag];
+    if (!coefficient.zero && coefficient.valuation < 0)
+      return ineligible(
+          "physical q lag " + std::to_string(lag) +
+          " has a negative epsilon valuation and requires coefficients above the supplied window");
+  }
+  for (std::size_t lag = 0; lag < ode.c_lags.size(); ++lag)
+    for (const auto& entry : ode.c_lags[lag])
+      if (entry.value.valuation < 0)
+        return ineligible(
+            "physical C lag " + std::to_string(lag) + " entry (" +
+            std::to_string(entry.row) + "," +
+            std::to_string(entry.column) +
+            ") has a negative epsilon valuation and requires coefficients above the supplied window");
+
+  std::vector<std::optional<
+      physical_ode_detail::PreparedCausalEpsilonMultiplier>> q_lags;
+  q_lags.reserve(ode.q_lags.size());
+  for (const auto& coefficient : ode.q_lags) {
+    if (coefficient.zero)
+      q_lags.push_back(std::nullopt);
+    else
+      q_lags.push_back(
+          physical_ode_detail::prepare_causal_multiplier(coefficient));
+  }
+  struct PreparedCEntry {
+    std::uint32_t row = 0;
+    std::uint32_t column = 0;
+    physical_ode_detail::PreparedCausalEpsilonMultiplier multiplier;
+  };
+  std::vector<std::vector<PreparedCEntry>> c_lags(ode.c_lags.size());
+  for (std::size_t lag = 0; lag < ode.c_lags.size(); ++lag) {
+    c_lags[lag].reserve(ode.c_lags[lag].size());
+    for (const auto& entry : ode.c_lags[lag])
+      c_lags[lag].push_back(PreparedCEntry{
+          entry.row, entry.column,
+          physical_ode_detail::prepare_causal_multiplier(entry.value)});
+  }
+
+  if (static_cast<std::uint64_t>(taylor_complete_max) + 1 >
+      std::numeric_limits<std::size_t>::max())
+    throw std::overflow_error(
+        "ordinary-center Taylor coefficient count overflows size_t");
+  result.taylor_coefficients.reserve(
+      static_cast<std::size_t>(taylor_complete_max) + 1);
+  result.taylor_coefficients.push_back(initial);
+  const ComplexBall one(1);
+  for (std::uint64_t raw_n = 1; raw_n <= taylor_complete_max; ++raw_n) {
+    const auto n = static_cast<std::uint32_t>(raw_n);
+    auto rhs = physical_ode_detail::zero_epsilon_vector(
+        initial.epsilon, initial.dimension);
+    const auto maximum_lag = std::min<std::size_t>(
+        n, std::max(q_lags.size(), c_lags.size()) - 1);
+    for (std::size_t lag = 1; lag <= maximum_lag; ++lag) {
+      const auto& source = result.taylor_coefficients[n - lag];
+      if (lag < c_lags.size())
+        for (const auto& entry : c_lags[lag])
+          physical_ode_detail::accumulate_causal_multiplier(
+              entry.multiplier, source, entry.column, rhs, entry.row, one);
+      if (lag < q_lags.size() && q_lags[lag].has_value() && n > lag) {
+        const auto derivative_weight = -ComplexBall::from_strings(
+            std::to_string(n - lag));
+        for (std::uint32_t component = 0; component < initial.dimension;
+             ++component)
+          physical_ode_detail::accumulate_causal_multiplier(
+              *q_lags[lag], source, component, rhs, component,
+              derivative_weight);
+      }
+    }
+    result.taylor_coefficients.push_back(
+        physical_ode_detail::solve_formal_unit_q0(
+            *q_lags.front(), rhs, n));
+  }
+  result.eligible = true;
+  result.reason = "epsilon-causal ordinary-center physical evolution";
+  return result;
+}
 
 inline ResidualCertificate certify_cleared_vector_residual(
     const EpsilonVector& lhs, const EpsilonVector& rhs,

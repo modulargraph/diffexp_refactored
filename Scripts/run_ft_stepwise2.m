@@ -159,6 +159,10 @@ ladderCheckpointDir = runnerSettings["CheckpointDirectory"];
 allowStaleLadderCheckpoint = runnerSettings["AllowStaleCheckpoint"];
 saveNativeTransportCheckpoint =
   runnerSettings["SaveNativeTransportCheckpoint"];
+matchingHaloProfileEnabled =
+  envOrDefault["FT_DISABLE_MATCHING_HALO_PROFILE", "0"] =!= "1";
+matchingHaloProfileRoot = FileNameJoin[
+  {prepCacheRoot, "MatchingHaloProfiles"}];
 
 (* RunFullIteration is FIRE-dominated but independent of DiffExp2's
    transport settings.  Persist both the populated ftData and FIRE's
@@ -1701,6 +1705,211 @@ ft2NativeMatchingReservoirRetryQ[failure_] := FailureQ[failure] &&
 ft2CanonicalIdentity[prefix_String, value_] := prefix <>
   IntegerString[Hash[value, "SHA256"], 16, 64];
 
+(* Matching-reservoir deficits are structural lower bounds for one exact
+   prepared ladder/configuration.  Persist them separately from numerical
+   Boundary and NativeTransport checkpoints: a learned profile may seed a
+   new plan, but it is never evidence that numerical state can be restored.
+   The contract includes the zero-private-halo base plan, so a profile cannot
+   cross a changed matrix, FIRE batch, public epsilon request, or level loss. *)
+$ft2MatchingHaloProfileMax = 64;
+ft2NormalizeMatchingHaloBounds[bounds_, nLevels_Integer] := Module[{values},
+  If[nLevels < 1, Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+    "Detail" -> "matching-halo profile requires a positive level count"|>],
+    Module]];
+  values = Which[
+    AssociationQ[bounds] && AllTrue[Keys[bounds],
+        IntegerQ[#] && 1 <= # <= nLevels &],
+      Lookup[bounds, Range[nLevels], 0],
+    ListQ[bounds] && Length[bounds] === nLevels, bounds,
+    bounds === Automatic || bounds === None, ConstantArray[0, nLevels],
+    True, Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+      "Detail" -> "matching-halo bounds must be a level association or full list",
+      "Bounds" -> bounds, "NumLevels" -> nLevels|>], Module]];
+  If[!AllTrue[values, IntegerQ[#] &&
+      0 <= # <= $ft2MatchingHaloProfileMax &],
+    Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+      "Detail" -> "matching-halo bounds must be bounded nonnegative integers",
+      "Bounds" -> values|>], Module]];
+  values];
+
+ft2MergeMatchingHaloBounds[nLevels_Integer, candidates_List] := Module[
+  {normalized},
+  normalized = ft2NormalizeMatchingHaloBounds[#, nLevels] & /@ candidates;
+  If[AnyTrue[normalized, FailureQ],
+    Return[First[Select[normalized, FailureQ]], Module]];
+  Association@MapIndexed[First[#2] -> #1 &,
+    Apply[Max, Transpose[normalized], {1}]]];
+
+ft2MatchingHaloProfileContract[name_String, prepKey_,
+    basePlan_Association] := Module[{record, identity},
+  If[!ft2NativeEpsilonPlanQ[basePlan] ||
+      basePlan["Record", "MatchingPrivateHalos"] =!=
+        ConstantArray[0, basePlan["NumLevels"]],
+    Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+      "Detail" -> "matching-halo profile contract requires the exact zero-private-halo base plan"|>],
+    Module]];
+  record = Join[<|
+    "Schema" -> "FeynmanTrick.MatchingHaloProfileContract/v1",
+    "SourceFingerprint" -> $ftLadderSourceFingerprint,
+    "Example" -> name,
+    "PrepKey" -> prepKey,
+    "BasePlanIdentity" -> basePlan["Identity"],
+    "BasePlanRecord" -> basePlan["Record"],
+    "Configuration" -> <|
+      "WorkingPrecision" -> wp,
+      "MatchingDigits" -> matchDigits,
+      "ExpansionOrder" -> expansionOrder,
+      "EpsilonOrder" -> epsOrder,
+      "BoundaryExtraOrder" -> boundaryExtraOrder,
+      "DivisionOrder" -> divisionOrder,
+      "StepDivisionOrder" -> stepDivisionOrder,
+      "RadiusOfConvergence" -> radiusOfConvergence,
+      "RecurrenceBackend" -> recurrenceBackend,
+      "SingularMatchPrecondition" -> singularMatchPrecondition,
+      "DeltaPrescriptionSign" -> deltaPrescriptionSign,
+      "ValueTransportMode" -> envOrDefault["DE2_VALUE_TRANSPORT", "0"],
+      "CppThreads" -> cppArmThreadBudget,
+      "Anchor" -> anchor|>|>, ft2CheckpointRequestMetadata[]];
+  identity = ft2CanonicalIdentity[
+    "ft2-matching-halo-profile-contract-", record];
+  <|"Record" -> record, "Identity" -> identity,
+    "NumLevels" -> basePlan["NumLevels"]|>];
+
+ft2MatchingHaloProfileContractQ[contract_] := AssociationQ[contract] &&
+  Sort[Keys[contract]] === Sort[{"Record", "Identity", "NumLevels"}] &&
+  AssociationQ[contract["Record"]] &&
+  Lookup[contract["Record"], "Schema", None] ===
+    "FeynmanTrick.MatchingHaloProfileContract/v1" &&
+  IntegerQ[contract["NumLevels"]] && contract["NumLevels"] >= 1 &&
+  With[{base = Lookup[contract["Record"], "BasePlanRecord", <||>]},
+    AssociationQ[base] &&
+      Lookup[base, "Schema", None] ===
+        "FeynmanTrick.NativeEpsilonPlan/v1" &&
+      Lookup[base, "NumLevels", None] === contract["NumLevels"] &&
+      ListQ[Lookup[base, "Levels", None]] &&
+      Length[base["Levels"]] === contract["NumLevels"] &&
+      Lookup[base, "MatchingPrivateHalos", None] ===
+        ConstantArray[0, contract["NumLevels"]]] &&
+  Lookup[contract["Record"], "BasePlanIdentity", None] ===
+    ft2CanonicalIdentity["ft2-native-epsilon-plan-",
+      Lookup[contract["Record"], "BasePlanRecord", None]] &&
+  contract["Identity"] === ft2CanonicalIdentity[
+    "ft2-matching-halo-profile-contract-", contract["Record"]];
+
+ft2MatchingHaloProfileFile[contract_Association] :=
+  FileNameJoin[{matchingHaloProfileRoot,
+    "matching_halos_" <> StringTake[contract["Identity"], -64] <> ".mx"}];
+
+ft2MatchingHaloProfileQ[profile_, contract_Association] := Module[{core},
+  If[!ft2MatchingHaloProfileContractQ[contract] ||
+      !AssociationQ[profile] ||
+      Sort[Keys[profile]] =!= Sort[{"Schema", "Contract",
+        "ContractIdentity", "NumLevels", "MatchingPrivateHalos",
+        "Identity"}], Return[False, Module]];
+  core = KeyDrop[profile, "Identity"];
+  TrueQ[profile["Schema"] === "FeynmanTrick.MatchingHaloProfile/v1" &&
+    profile["Contract"] === contract["Record"] &&
+    profile["ContractIdentity"] === contract["Identity"] &&
+    profile["NumLevels"] === contract["NumLevels"] &&
+    ListQ[profile["MatchingPrivateHalos"]] &&
+    Length[profile["MatchingPrivateHalos"]] === contract["NumLevels"] &&
+    AllTrue[profile["MatchingPrivateHalos"],
+      IntegerQ[#] && 0 <= # <= $ft2MatchingHaloProfileMax &] &&
+    profile["Identity"] === ft2CanonicalIdentity[
+      "ft2-matching-halo-profile-", core]]];
+
+ft2LoadMatchingHaloProfile[file_String, contract_Association] := Module[
+  {ok, profile},
+  If[!FileExistsQ[file], Return[ConstantArray[0,
+    contract["NumLevels"]], Module]];
+  Clear[Global`$FT2MatchingHaloProfile];
+  ok = Quiet[Check[Get[file]; True, False]];
+  profile = If[TrueQ[ok], Global`$FT2MatchingHaloProfile, None];
+  Clear[Global`$FT2MatchingHaloProfile];
+  If[!TrueQ[ok] || !ft2MatchingHaloProfileQ[profile, contract],
+    Print["FTLADDER MATCH PROFILE REJECT ", file,
+      ": malformed, tampered, or contract-mismatched"];
+    Return[ConstantArray[0, contract["NumLevels"]], Module]];
+  Print["FTLADDER MATCH PROFILE HIT ", file,
+    " privateHalos=", profile["MatchingPrivateHalos"]];
+  profile["MatchingPrivateHalos"]];
+
+ft2AcquireMatchingHaloProfileLock[file_String] := Module[
+  {lock = file <> ".lock", acquired, age, attempts = 200},
+  If[!DirectoryQ[DirectoryName[file]],
+    Quiet[Check[CreateDirectory[DirectoryName[file],
+      CreateIntermediateDirectories -> True], Null]]];
+  Do[
+    acquired = Quiet[Check[CreateDirectory[lock]; True, False]];
+    If[TrueQ[acquired], Return[lock, Module]];
+    If[DirectoryQ[lock],
+      age = Quiet[Check[AbsoluteTime[] - AbsoluteTime[FileDate[lock]], 0]];
+      (* A profile write is a tiny local DumpSave plus rename.  Ten minutes
+         cannot be a live writer; it is a lock left by a killed process. *)
+      If[NumericQ[age] && age > 600,
+        Quiet[Check[DeleteDirectory[lock, DeleteContents -> True], Null]]]];
+    Pause[0.05],
+    {attempts}];
+  Failure["FeynmanTrickMatchingHaloProfile", <|
+    "Detail" -> "timed out acquiring the matching-halo profile lock",
+    "File" -> file, "Lock" -> lock|>]];
+
+ft2SaveMatchingHaloProfileUnlocked[file_String, contract_Association,
+    bounds_] := Module[
+  {existing, merged, core, profile, tmp, wrote, renamed},
+  existing = ft2LoadMatchingHaloProfile[file, contract];
+  merged = ft2MergeMatchingHaloBounds[contract["NumLevels"],
+    {existing, bounds}];
+  If[FailureQ[merged], Return[merged, Module]];
+  core = <|
+    "Schema" -> "FeynmanTrick.MatchingHaloProfile/v1",
+    "Contract" -> contract["Record"],
+    "ContractIdentity" -> contract["Identity"],
+    "NumLevels" -> contract["NumLevels"],
+    "MatchingPrivateHalos" -> Lookup[merged,
+      Range[contract["NumLevels"]], 0]|>;
+  profile = Append[core, "Identity" -> ft2CanonicalIdentity[
+    "ft2-matching-halo-profile-", core]];
+  If[!DirectoryQ[DirectoryName[file]],
+    Quiet[Check[CreateDirectory[DirectoryName[file],
+      CreateIntermediateDirectories -> True], Null]]];
+  tmp = file <> ".tmp-" <> ToString[$ProcessID] <> "-" <>
+    IntegerString[Hash[{AbsoluteTime[], RandomInteger[]}], 16] <> ".mx";
+  If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+  Global`$FT2MatchingHaloProfile = profile;
+  wrote = Quiet[Check[
+    DumpSave[tmp, Global`$FT2MatchingHaloProfile]; FileExistsQ[tmp], False]];
+  Clear[Global`$FT2MatchingHaloProfile];
+  If[!TrueQ[wrote],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+      "Detail" -> "could not write the temporary matching-halo profile",
+      "File" -> file|>], Module]];
+  renamed = Quiet[Check[
+    RenameFile[tmp, file, OverwriteTarget -> True]; True, False]];
+  If[!TrueQ[renamed],
+    If[FileExistsQ[tmp], Quiet[DeleteFile[tmp]]];
+    Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+      "Detail" -> "could not atomically publish the matching-halo profile",
+      "File" -> file|>], Module]];
+  Print["FTLADDER MATCH PROFILE ", file,
+    " privateHalos=", profile["MatchingPrivateHalos"]];
+  profile];
+
+ft2SaveMatchingHaloProfile[file_String, contract_Association,
+    bounds_] := Module[{lock},
+  If[!ft2MatchingHaloProfileContractQ[contract],
+    Return[Failure["FeynmanTrickMatchingHaloProfile", <|
+      "Detail" -> "cannot save a matching-halo profile under a malformed contract"|>],
+    Module]];
+  lock = ft2AcquireMatchingHaloProfileLock[file];
+  If[FailureQ[lock], Return[lock, Module]];
+  Internal`WithLocalSettings[
+    Null,
+    ft2SaveMatchingHaloProfileUnlocked[file, contract, bounds],
+    If[DirectoryQ[lock], Quiet[Check[
+      DeleteDirectory[lock, DeleteContents -> True], Null]]]]];
+
 ft2CanonicalBatchKeyQ[value_] := StringQ[value] &&
   StringMatchQ[value, RegularExpression["[0-9a-f]{64}"]];
 
@@ -2892,6 +3101,9 @@ runExample[name_String, familyRequest_:None,
    resumeCheckpoint = None, startLevel, finalRaw = None,
    finalCertifications = None, ftEps, dimVar,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
+   baseNativeEpsilonPlan = None, matchingHaloProfileContract = None,
+   matchingHaloProfileFile = "", loadedMatchingPrivateHalos = <||>,
+   effectiveMatchingPrivateHalos = <||>, baseNativeBatches = <||>,
    nativeEpsilonExecution = None, initialDeepPrefactors,
    deepRelativeGauge, deepGaugeOffset, deepBoundaryWindow,
    deepRequiredSourceCompleteMax, deepBoundaryDeficit,
@@ -3011,9 +3223,41 @@ runExample[name_String, familyRequest_:None,
   normalizeFT[e_] := ((e /. dimVar -> dimExpr /. Global`d -> dimExpr) /.
     ftEps -> Global`eps);
   If[recurrenceBackend === "Cpp",
-    nativeEpsilonPlan = ft2BuildNativeEpsilonPlan[
-      ftData, epsOrder, levelEpsilonHalos, normalizeFT, Automatic,
-      matchingPrivateHalos];
+    baseNativeEpsilonPlan = ft2BuildNativeEpsilonPlan[
+      ftData, epsOrder, levelEpsilonHalos, normalizeFT, Automatic, <||>];
+    If[FailureQ[baseNativeEpsilonPlan],
+      Print["FTLADDER NATIVE BASE EPSILON PLAN FAIL ",
+        baseNativeEpsilonPlan];
+      Return[$Failed]];
+    matchingHaloProfileContract = ft2MatchingHaloProfileContract[
+      name, prepKey, baseNativeEpsilonPlan];
+    If[FailureQ[matchingHaloProfileContract],
+      Print["FTLADDER MATCH PROFILE CONTRACT FAIL ",
+        matchingHaloProfileContract];
+      Return[$Failed]];
+    matchingHaloProfileFile = ft2MatchingHaloProfileFile[
+      matchingHaloProfileContract];
+    loadedMatchingPrivateHalos = If[matchingHaloProfileEnabled,
+      ft2LoadMatchingHaloProfile[matchingHaloProfileFile,
+        matchingHaloProfileContract],
+      ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]]];
+    effectiveMatchingPrivateHalos = ft2MergeMatchingHaloBounds[
+      baseNativeEpsilonPlan["NumLevels"],
+      {loadedMatchingPrivateHalos, matchingPrivateHalos}];
+    If[FailureQ[effectiveMatchingPrivateHalos],
+      Print["FTLADDER MATCH PROFILE MERGE FAIL ",
+        effectiveMatchingPrivateHalos];
+      Return[$Failed]];
+    baseNativeBatches = AssociationMap[
+      baseNativeEpsilonPlan["Levels"][#]["Batch"] &,
+      Range[baseNativeEpsilonPlan["NumLevels"]]];
+    nativeEpsilonPlan = If[
+      Values[effectiveMatchingPrivateHalos] ===
+        ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]],
+      baseNativeEpsilonPlan,
+      ft2BuildNativeEpsilonPlan[
+        ftData, epsOrder, levelEpsilonHalos, normalizeFT,
+        baseNativeBatches, effectiveMatchingPrivateHalos]];
     If[FailureQ[nativeEpsilonPlan],
       Print["FTLADDER NATIVE EPSILON PLAN FAIL ", nativeEpsilonPlan];
       Return[$Failed]];
@@ -3372,7 +3616,13 @@ runExample[name_String, familyRequest_:None,
         With[{retry = ft2NativeMatchingReservoirRetry[
             nativeDispatch, level]},
           Throw[If[ft2NativeMatchingReservoirRetryQ[retry],
-            retry, $Failed], "FT2Abort"]]];
+            Failure[retry[[1]], Join[retry[[2]], <|
+              "MatchingPrivateHalos" -> effectiveMatchingPrivateHalos,
+              "MatchingHaloProfileEnabled" -> matchingHaloProfileEnabled,
+              "MatchingHaloProfileContract" ->
+                matchingHaloProfileContract,
+              "MatchingHaloProfileFile" -> matchingHaloProfileFile|>]],
+            $Failed], "FT2Abort"]]];
       If[!resumeNativeTransport && nativeStateFile =!= "" &&
           AssociationQ[nativeDispatch["NativeTransportCheckpoint"]],
         If[!ft2NativeTransportResumeRecordQ[
@@ -3751,7 +4001,9 @@ runExample[name_String, familyRequest_:None,
 ft2RunExampleWithMatchingRetries[name_String,
     familyRequest_:None] := Module[
   {matchingPrivateHalos = <||>, result, data, level, additional,
-   updated, attempt = 0, maxAttempts = 12, maxHalo = 64},
+   current, merged, updated, profileEnabled, profileContract,
+   profileFile, profileSave, nLevels, attempt = 0, maxAttempts = 12,
+   maxHalo = $ft2MatchingHaloProfileMax},
   While[attempt < maxAttempts,
     ++attempt;
     result = runExample[name, familyRequest, matchingPrivateHalos];
@@ -3762,12 +4014,35 @@ ft2RunExampleWithMatchingRetries[name_String,
     If[!IntegerQ[level] || level < 1 ||
         !IntegerQ[additional] || additional < 1,
       Return[$Failed, Module]];
-    updated = Lookup[matchingPrivateHalos, level, 0] + additional;
+    current = Lookup[data, "MatchingPrivateHalos", matchingPrivateHalos];
+    profileContract = Lookup[data, "MatchingHaloProfileContract", None];
+    nLevels = Lookup[profileContract, "NumLevels", None];
+    If[!ft2MatchingHaloProfileContractQ[profileContract] ||
+        !IntegerQ[nLevels] || level > nLevels,
+      Print["FTLADDER NATIVE MATCH RETRY PROFILE CONTRACT FAIL"];
+      Return[$Failed, Module]];
+    merged = ft2MergeMatchingHaloBounds[
+      nLevels,
+      {matchingPrivateHalos, current}];
+    If[FailureQ[merged],
+      Print["FTLADDER NATIVE MATCH RETRY PROFILE FAIL ", merged];
+      Return[$Failed, Module]];
+    updated = Lookup[merged, level, 0] + additional;
     If[updated > maxHalo,
       Print["FTLADDER NATIVE MATCH RETRY EXHAUSTED level=", level,
         " requestedPrivateHalo=", updated, " limit=", maxHalo];
       Return[$Failed, Module]];
-    AssociateTo[matchingPrivateHalos, level -> updated];
+    AssociateTo[merged, level -> updated];
+    matchingPrivateHalos = merged;
+    profileEnabled = TrueQ[Lookup[data,
+      "MatchingHaloProfileEnabled", False]];
+    profileFile = Lookup[data, "MatchingHaloProfileFile", ""];
+    If[profileEnabled && ft2MatchingHaloProfileContractQ[profileContract] &&
+        StringQ[profileFile] && StringLength[profileFile] > 0,
+      profileSave = ft2SaveMatchingHaloProfile[
+        profileFile, profileContract, matchingPrivateHalos];
+      If[FailureQ[profileSave],
+        Print["FTLADDER MATCH PROFILE SAVE WARNING ", profileSave]]];
     Print["FTLADDER NATIVE MATCH RETRY level=", level,
       " additional=", additional,
       " privateHalos=", matchingPrivateHalos];

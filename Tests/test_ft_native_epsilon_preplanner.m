@@ -130,10 +130,91 @@ minusPrescriptions = Block[{deltaPrescriptionSign = -1},
   levelDeltaPrescriptions[x, <|"SingularFactors" -> {}|>, {}]];
 assert["+1 and -1 delta rims propagate into distinct checkpoint identities",
   AllTrue[plusPrescriptions, Last[#] === 1 &] &&
-    AllTrue[minusPrescriptions, Last[#] === -1 &] &&
-    ft2CanonicalIdentity["ft2-delta-prescriptions-", plusPrescriptions] =!=
+  AllTrue[minusPrescriptions, Last[#] === -1 &] &&
+  ft2CanonicalIdentity["ft2-delta-prescriptions-", plusPrescriptions] =!=
       ft2CanonicalIdentity["ft2-delta-prescriptions-", minusPrescriptions],
   {plusPrescriptions, minusPrescriptions}];
+
+profileTmp = CreateDirectory[FileNameJoin[{$TemporaryDirectory,
+  "DiffExp2_matching_halo_profile_" <> ToString[$ProcessID]}]];
+profileContract = ft2MatchingHaloProfileContract[
+  "matching-profile-fixture", "prepared-fixture", plan];
+profileFile = Block[{matchingHaloProfileRoot = profileTmp},
+  ft2MatchingHaloProfileFile[profileContract]];
+profileSaved = ft2SaveMatchingHaloProfile[
+  profileFile, profileContract, <|1 -> 2|>];
+profileLoaded = ft2LoadMatchingHaloProfile[
+  profileFile, profileContract];
+profileSavedLower = ft2SaveMatchingHaloProfile[
+  profileFile, profileContract, <|1 -> 1|>];
+profileLoadedAfterLower = ft2LoadMatchingHaloProfile[
+  profileFile, profileContract];
+runLevelMergedBounds = ft2MergeMatchingHaloBounds[1,
+  {profileLoadedAfterLower, <|1 -> 1|>}];
+assert["learned matching-halo profiles round-trip under an exact contract",
+  ft2MatchingHaloProfileContractQ[profileContract] &&
+    AssociationQ[profileSaved] && profileLoaded === {2} &&
+    AssociationQ[profileSavedLower] && profileLoadedAfterLower === {2},
+  {profileContract, profileSaved, profileLoaded,
+    profileSavedLower, profileLoadedAfterLower}];
+assert["run-level merge keeps a loaded higher halo over an explicit lower bound",
+  runLevelMergedBounds === <|1 -> 2|>, runLevelMergedBounds];
+assert["profile writes release the same-filesystem serialization lock",
+  !DirectoryQ[profileFile <> ".lock"], profileFile <> ".lock"];
+
+mergedProfileBounds = ft2MergeMatchingHaloBounds[3,
+  {<|2 -> 5|>, <|1 -> 1, 2 -> 2|>}];
+assert["explicit direct-call halos and learned profiles merge only upward",
+  mergedProfileBounds === <|1 -> 1, 2 -> 5, 3 -> 0|> &&
+    FailureQ[ft2MergeMatchingHaloBounds[3,
+      {<|1 -> -1|>, <||>}]] &&
+    FailureQ[ft2MergeMatchingHaloBounds[3,
+      {<|1 -> $ft2MatchingHaloProfileMax + 1|>, <||>}]],
+  mergedProfileBounds];
+
+changedProfileContract = Block[{matchDigits = matchDigits + 1},
+  ft2MatchingHaloProfileContract[
+    "matching-profile-fixture", "prepared-fixture", plan]];
+changedProfileFile = Block[{matchingHaloProfileRoot = profileTmp},
+  ft2MatchingHaloProfileFile[changedProfileContract]];
+assert["matching-affecting configuration changes select a distinct profile",
+  ft2MatchingHaloProfileContractQ[changedProfileContract] &&
+    changedProfileContract["Identity"] =!= profileContract["Identity"] &&
+    changedProfileFile =!= profileFile &&
+    ft2LoadMatchingHaloProfile[profileFile, changedProfileContract] === {0},
+  {profileContract, changedProfileContract}];
+
+noncanonicalBasePlan = Join[profileContract["Record", "BasePlanRecord"],
+  <|"MatchingPrivateHalos" -> {1}|>];
+noncanonicalRecord = Join[profileContract["Record"], <|
+  "BasePlanRecord" -> noncanonicalBasePlan,
+  "BasePlanIdentity" -> ft2CanonicalIdentity[
+    "ft2-native-epsilon-plan-", noncanonicalBasePlan]|>];
+noncanonicalContract = <|"Record" -> noncanonicalRecord,
+  "Identity" -> ft2CanonicalIdentity[
+    "ft2-matching-halo-profile-contract-", noncanonicalRecord],
+  "NumLevels" -> 1|>;
+assert["profile contracts reject a nonzero or noncanonical base plan",
+  !ft2MatchingHaloProfileContractQ[noncanonicalContract],
+  noncanonicalContract];
+
+Clear[Global`$FT2MatchingHaloProfile]; Get[profileFile];
+Global`$FT2MatchingHaloProfile = Join[Global`$FT2MatchingHaloProfile,
+  <|"MatchingPrivateHalos" -> {3}|>];
+DumpSave[profileFile, Global`$FT2MatchingHaloProfile];
+Clear[Global`$FT2MatchingHaloProfile];
+tamperedProfileLoad = ft2LoadMatchingHaloProfile[
+  profileFile, profileContract];
+assert["tampered profile bounds are rejected instead of becoming trusted",
+  tamperedProfileLoad === {0}, tamperedProfileLoad];
+assert["profile publication is atomic and leaves no temporary snapshots",
+  FileNames["*.tmp-*.mx", profileTmp] === {},
+  FileNames["*", profileTmp]];
+assert["the learned-profile cache has an explicit environment opt-out",
+  StringContainsQ[Import[
+    FileNameJoin[{repoRoot, "Scripts", "run_ft_stepwise2.m"}], "Text"],
+    "FT_DISABLE_MATCHING_HALO_PROFILE"]];
+Quiet[DeleteDirectory[profileTmp, DeleteContents -> True]];
 
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> None];
 SetEnvironment["DE2_RECURRENCE_BACKEND" -> None];

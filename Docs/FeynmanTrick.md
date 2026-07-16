@@ -188,6 +188,7 @@ overridden by a named `PipelinePlan` option and is serialized into its
 | `FT_FIRE_BASIS_PROBE_COUNT` | independent basis probes, from 2 through 127 |
 | `FT_FIRE_MODULAR_CACHE_DIR` | content-addressed modular sample cache |
 | `FT_CPP_BATCH_ENDPOINT_ARMS` | request paired C++ prewarming for small lower/upper chart bases; CLI default on |
+| `FT_DISABLE_MATCHING_HALO_PROFILE` | set to `1` to disable exact learned private matching-halo reuse |
 | `DE2_VALUE_TRANSPORT` | regular-chart value transport; facade default on, direct CLI default off |
 
 More precision does not replace sufficient expansion order.  Conversely, a
@@ -238,6 +239,15 @@ collision.  The migrated v3 snapshot records that its historical FIRE setup
 and source provenance remain unverified.  Exact re-keyed cache hits never
 launch FIRE; any future missing reduction is still rejected because no
 verified setup record was fabricated.
+
+The same cache root contains small learned matching-halo profiles. A profile
+stores only nonnegative private epsilon lower bounds, never numerical
+transport state. Its identity binds the exact prepared example, zero-halo
+epsilon plan, transport configuration, request identity, and solver source
+fingerprint. Certified reservoir deficits are merged componentwise upward and
+published atomically under a same-filesystem writer lock; malformed, tampered,
+or contract-mismatched profiles are ignored. Set
+`FT_DISABLE_MATCHING_HALO_PROFILE=1` for a cold discovery run.
 
 `FT_LADDER_CHECKPOINT_DIR` stores two kinds of checkpoint:
 

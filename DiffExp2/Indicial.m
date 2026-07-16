@@ -16,6 +16,11 @@ err[id_, chartRef_, payload_] := DiffExp2`Tolerances`DE2Error[id,
     "Center" -> Lookup[chartRef, "Center", None],
     "Variable" -> Lookup[chartRef, "Variable", None]|>, payload]];
 
+indicialTiming[fields___] := If[
+  Environment["DE2_INDICIAL_TIMING"] === "1",
+  Print["DE2 INDICIAL ", fields, " t=", SessionTime[],
+    " memory=", MemoryInUse[]]];
+
 (* exact zero test on rational/algebraic scalars; no banned tokens.
    Together-canonical rational functions over the Gaussian rationals in
    non-numeric symbols are a zero-DECISION domain: === 0 decides.  Only
@@ -82,13 +87,112 @@ MatrixPoleData[A_?MatrixQ, t_Symbol] := Module[{r, heads},
 connectionMatrix[M_, T_, t_] :=
   Map[Cancel[Together[#]] &, Inverse[T] . (M . T - t*D[T, t]), {2}];
 
+$jordanShearFuchsianDimensionThreshold = 8;
+
+(* Large nilpotent pole-order-two blocks are a poor fit for the generic
+   column-by-column lattice saturation below: every adjoined full rational
+   column can enlarge the next inverse and introduce avoidable moving
+   denominators.  In a Jordan basis the leading nilpotent chains instead
+   prescribe an exact monomial shearing.  Repeat only while the pole
+   valuation rises or the exact leading rank falls, and accept the result
+   only after the same inverse and connection identities as the legacy path.
+   Small blocks retain their historical canonical gauges. *)
+jordanShearFuchsianReduce[A_?MatrixQ, t_Symbol, chartRef_Association] :=
+ Module[
+  {d = Length[A], originalM, currentM, totalT, v, leading, rank,
+   decomposition, P, J, PInv, rules, shear, step, stepInv, nextM,
+   nextV, nextLeading, nextRank, iterations = 0, maxIterations,
+   TInv, verified, residue, maxDeg},
+  If[d < $jordanShearFuchsianDimensionThreshold,
+    Return[$Failed, Module]];
+  originalM = Map[Cancel[Together[#]] &, t*A, {2}];
+  currentM = originalM;
+  totalT = IdentityMatrix[d];
+  maxIterations = 2 d;
+  While[True,
+    v = matMinValuation[currentM, t];
+    If[v >= 0, Break[]];
+    (* This bounded fast path is deliberately for Poincare-rank-one
+       nilpotent systems.  Higher rank and unsupported Jordan structure
+       return to the complete legacy reducer below. *)
+    If[v =!= -1 || iterations >= maxIterations,
+      Return[$Failed, Module]];
+    leading = Map[laurentCoeff[#, t, v] &, currentM, {2}];
+    If[!matZeroQ[MatrixPower[leading, d]],
+      Return[$Failed, Module]];
+    rank = MatrixRank[leading];
+    decomposition = JordanDecomposition[leading];
+    If[!ListQ[decomposition] || Length[decomposition] =!= 2,
+      Return[$Failed, Module]];
+    {P, J} = decomposition;
+    If[Dimensions[P] =!= {d, d} || Dimensions[J] =!= {d, d},
+      Return[$Failed, Module]];
+    PInv = Map[Cancel[Together[#]] &, Inverse[P], {2}];
+    If[!matZeroQ[P . J . PInv - leading],
+      Return[$Failed, Module]];
+    rules = Most[ArrayRules[SparseArray[J]]];
+    If[rules === {} || !AllTrue[rules,
+        #[[1, 2]] === #[[1, 1]] + 1 &&
+          zeroQ[#[[2]] - 1] &],
+      Return[$Failed, Module]];
+    shear = ConstantArray[0, d];
+    Do[
+      shear[[rule[[1, 2]]]] = Max[
+        shear[[rule[[1, 2]]]],
+        shear[[rule[[1, 1]]]] - v],
+      {rule, rules}];
+    step = P . DiagonalMatrix[t^# & /@ shear];
+    stepInv = DiagonalMatrix[t^-# & /@ shear] . PInv;
+    nextM = Map[Cancel[Together[#]] &,
+      stepInv . (currentM . step - t*D[step, t]), {2}];
+    nextV = matMinValuation[nextM, t];
+    nextRank = If[nextV < 0,
+      nextLeading = Map[laurentCoeff[#, t, nextV] &, nextM, {2}];
+      MatrixRank[nextLeading], 0];
+    If[nextV < v || (nextV === v && nextRank >= rank),
+      Return[$Failed, Module]];
+    totalT = Map[Cancel[Together[#]] &, totalT . step, {2}];
+    currentM = nextM;
+    iterations++;
+    indicialTiming["fuchsian-jordan-shear chart=",
+      Lookup[chartRef, "Name", None], " step=", iterations,
+      " valuation=", v, " leadingRank=", rank,
+      " nextValuation=", nextV, " nextLeadingRank=", nextRank]];
+  If[iterations === 0, Return[$Failed, Module]];
+  maxDeg = Max[Flatten[Map[
+    {Exponent[Numerator[Together[#]], t],
+      Exponent[Denominator[Together[#]], t]} &,
+    Flatten[totalT]]]];
+  If[maxDeg > 4 d + 8, Return[$Failed, Module]];
+  TInv = Map[Cancel[Together[#]] &, Inverse[totalT], {2}];
+  If[!matZeroQ[totalT . TInv - IdentityMatrix[d]],
+    Return[$Failed, Module]];
+  verified = connectionMatrix[originalM, totalT, t];
+  If[matMinValuation[verified, t] < 0 ||
+      !matZeroQ[verified - currentM],
+    Return[$Failed, Module]];
+  residue = Map[Cancel[Together[#]] &, verified /. t -> 0, {2}];
+  <|"PoleOrder" -> 2, "Gauge" -> totalT,
+    "GaugeInverse" -> TInv, "ThetaMatrix" -> verified,
+    "Residue" -> residue, "Steps" -> iterations,
+    "Trimmed" -> False, "GaugeInverseCertified" -> True,
+    "GaugeInverseCertificateSchema" ->
+      "diffexp2-indicial-exact-gauge-inverse-v1",
+    "GaugeValuation" -> matMinValuation[totalT, t],
+    "ReductionMethod" -> "NilpotentJordanMonomialShear"|>];
+
 FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
   {d = Length[A], M, v, L, T, B, steps = 0, maxSteps = 200, trimmed = False,
    j, u, vals, m, cvec, pivot, Emat, uNew, U, changed, pass, TInv, residue,
-   maxDeg, r},
+   maxDeg, r, fast},
+  fast = jordanShearFuchsianReduce[A, t, chartRef];
+  If[AssociationQ[fast], Return[fast, Module]];
   M = Map[Cancel[Together[#]] &, t*A, {2}];
   v = matMinValuation[M, t];
   r = 1 - v;
+  indicialTiming["fuchsian-start chart=",
+    Lookup[chartRef, "Name", None], " dimension=", d,
+    " poleOrder=", r, " valuation=", v];
   (* Step 1: Moser pre-check — leading theta coefficient must be nilpotent *)
   L = Map[laurentCoeff[#, t, v] &, M, {2}];
   If[!matZeroQ[MatrixPower[L, d]],
@@ -122,7 +226,13 @@ FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module
     uNew = Cancel[Together[#]] & /@ (Emat . u);
     U = Transpose[ReplacePart[Transpose[IdentityMatrix[d]], pivot -> uNew]];
     T = Map[Cancel[Together[#]] &, (T . Inverse[Emat]) . U, {2}];
-    steps++];
+    steps++;
+    If[steps <= 5 || Mod[steps, 10] === 0,
+      indicialTiming["fuchsian-saturation chart=",
+        Lookup[chartRef, "Name", None], " step=", steps,
+        " column=", j, " valuation=", m]]];
+  indicialTiming["fuchsian-saturation-done chart=",
+    Lookup[chartRef, "Name", None], " steps=", steps];
   (* Step 3: trim pass — ONLY columns that actually carry a pole (N-1b) *)
   Do[
     changed = False;
@@ -136,6 +246,8 @@ FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module
       {p, d}];
     If[!changed, Break[]],
     {pass, 50}];
+  indicialTiming["fuchsian-trim-done chart=",
+    Lookup[chartRef, "Name", None], " trimmed=", trimmed];
   (* Step 4: degree guard *)
   maxDeg = Max[Flatten[Map[
     {Exponent[Numerator[Together[#]], t], Exponent[Denominator[Together[#]], t]} &,
@@ -146,6 +258,8 @@ FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module
       "Detail" -> "degenerate gauge lattice (degree guard)"|>]];
   (* Step 5: finalize *)
   TInv = Map[Cancel[Together[#]] &, Inverse[T], {2}];
+  indicialTiming["fuchsian-inverse-done chart=",
+    Lookup[chartRef, "Name", None]];
   If[!matZeroQ[T . TInv - IdentityMatrix[d]],
     err["E6", chartRef, <|"Stage" -> "GaugeInverse",
       "Detail" -> "T.TInv != Identity"|>]];
@@ -154,6 +268,8 @@ FuchsianReduce[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module
     err["E6", chartRef, <|"Stage" -> "GaugeInverse",
       "Detail" -> "final theta matrix not holomorphic"|>]];
   residue = Map[Cancel[Together[#]] &, B /. t -> 0, {2}];
+  indicialTiming["fuchsian-done chart=",
+    Lookup[chartRef, "Name", None], " steps=", steps];
   <|"PoleOrder" -> r, "Gauge" -> T, "GaugeInverse" -> TInv,
     "ThetaMatrix" -> B, "Residue" -> residue, "Steps" -> steps,
     "Trimmed" -> trimmed,
@@ -344,10 +460,16 @@ ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
     err["E7", chartRef, <|"Shape" -> Dimensions[A], "t" -> t, "eps" -> eps,
       "Detail" -> "bad shape or chart reference"|>]];
   validateExact[A, chartRef];
+  indicialTiming["chart-start name=", Lookup[chartRef, "Name", None],
+    " dimension=", d];
   (* canonicalize entries ONCE: MatrixPoleData re-walks every entry per
      Laurent order (valuation + laurentCoeff), each walk re-Cancels *)
   Anorm = Map[Cancel[Together[#]] &, A, {2}];
+  indicialTiming["chart-normalized name=",
+    Lookup[chartRef, "Name", None]];
   pole = MatrixPoleData[Anorm, t];
+  indicialTiming["chart-pole-data name=",
+    Lookup[chartRef, "Name", None], " poleOrder=", pole["PoleOrder"]];
   idMat = IdentityMatrix[d];
   regular = pole["PoleOrder"] == 0;
   Which[
@@ -369,6 +491,9 @@ ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
       "GaugeValuation" -> 0|>,
     True,
     red = FuchsianReduce[Anorm, t, eps, chartRef]];
+  indicialTiming["chart-reduction-done name=",
+    Lookup[chartRef, "Name", None], " regular=", regular,
+    " steps=", Lookup[red, "Steps", None]];
   R = red["Residue"];
   If[regular,
     (* one (0,0,0) family with d-dimensional coefficient space *)
@@ -379,8 +504,14 @@ ChartIndicial[A_?MatrixQ, t_Symbol, eps_Symbol, chartRef_Association] := Module[
       "Members" -> spec, "Class" -> "Single", "JointSolve" -> False,
       "LogMax" -> 0, "EpsZeroDegeneracy" -> 0, "Collisions" -> {}|>},
     spec = AffineSpectrum[R, eps, chartRef];
+    indicialTiming["chart-spectrum-done name=",
+      Lookup[chartRef, "Name", None], " roots=", Length[spec]];
     spec = JordanChains[R, spec, eps, chartRef];
+    indicialTiming["chart-jordan-done name=",
+      Lookup[chartRef, "Name", None]];
     fams = PartitionResonanceFamilies[spec, eps, chartRef]];
+  indicialTiming["chart-families-done name=",
+    Lookup[chartRef, "Name", None], " families=", Length[fams]];
   (* I-2 invariants *)
   If[Total[spec[[All, "Multiplicity"]]] =!= d ||
      Total[Length[#["Sectors"]] & /@ fams] =!= d ||

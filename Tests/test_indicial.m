@@ -136,6 +136,54 @@ Module[{T12 = red12["Gauge"], B12 = red12["ThetaMatrix"], g1, g2, ok},
             PossibleZeroQ[Together[FullSimplify[#]]] &]] &]]],
     assert["test_rank_reduction_composition", False]]];
 
+(* Large nilpotent Poincare-rank-one blocks use a bounded Jordan-chain
+   monomial shearing instead of growing a sequence of rational lattice
+   columns.  Pad the closed-form rank-reduction fixture to the production
+   threshold and verify the exact connection identity. *)
+A12fast = Normal[SparseArray[{{1, 2} -> t^-2}, {8, 8}]];
+r12fast = ci[A12fast, t, eps, ref];
+red12fast = r12fast["Reduction"];
+assert["test_large_rank_reduction_uses_exact_jordan_shear",
+  red12fast["ReductionMethod"] ===
+      "NilpotentJordanMonomialShear" &&
+    red12fast["Steps"] === 1 &&
+    DiffExp2`Indicial`Private`matMinValuation[
+      red12fast["ThetaMatrix"], t] >= 0 &&
+    matZero[red12fast["Gauge"] . red12fast["GaugeInverse"] -
+      IdentityMatrix[8]] &&
+    matZero[
+      red12fast["GaugeInverse"] .
+          (t*A12fast . red12fast["Gauge"] -
+            t*D[red12fast["Gauge"], t]) -
+        red12fast["ThetaMatrix"]]];
+
+(* A regular theta coupling from the raised member of one leading chain to
+   an untouched component becomes the next nilpotent pole.  Its exact rank
+   drops from two to one, so the bounded fast path must perform and certify
+   a second shear rather than falling back to rational lattice growth. *)
+A12fastTwoStep = Normal[SparseArray[
+  {{1, 2} -> t^-2, {3, 4} -> t^-2, {2, 5} -> t^-1},
+  {8, 8}]];
+r12fastTwoStep = ci[A12fastTwoStep, t, eps, ref];
+red12fastTwoStep = r12fastTwoStep["Reduction"];
+assert["test_large_rank_reduction_accepts_strict_rank_progress",
+  red12fastTwoStep["ReductionMethod"] ===
+      "NilpotentJordanMonomialShear" &&
+    red12fastTwoStep["Steps"] === 2 &&
+    DiffExp2`Indicial`Private`matMinValuation[
+      red12fastTwoStep["ThetaMatrix"], t] >= 0 &&
+    matZero[red12fastTwoStep["Gauge"] .
+        red12fastTwoStep["GaugeInverse"] - IdentityMatrix[8]]];
+
+(* A rank-preserving reverse coupling is not progress: the fast path must
+   decline it so the complete legacy reducer retains the authoritative loud
+   nontermination behavior. *)
+A14fast = Normal[SparseArray[
+  {{1, 2} -> t^-2, {2, 1} -> t^-1}, {8, 8}]];
+assert["test_large_jordan_shear_declines_rank_cycle",
+  DiffExp2`Indicial`Private`jordanShearFuchsianReduce[
+    A14fast, t, ref] === $Failed];
+
 (* T-13: irregular loud *)
 e13 = catchDE2[ci[{{0, 1/t^2}, {1/t^2, 0}}, t, eps, ref]];
 assert["test_irregular_loud",

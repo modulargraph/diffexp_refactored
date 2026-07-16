@@ -5246,8 +5246,20 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
     Print["DE2 SCC BLOCK SYSTEMS start center=", center,
       " memory=", MemoryInUse[]]];
-  blockSystems = sccBlockChartSystem[cs, #] & /@
-    Range[Length[components]];
+  blockSystems = Map[Function[block,
+      If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+        Print["DE2 SCC BLOCK SYSTEM start center=", center,
+          " block=", block, " indices=", components[[block]],
+          " memory=", MemoryInUse[]]];
+      Module[{system = sccBlockChartSystem[cs, block]},
+        If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
+          Print["DE2 SCC BLOCK SYSTEM done center=", center,
+            " block=", block,
+            " regular=", Lookup[
+              Lookup[system, "IndicialData", <||>], "Regular", None],
+            " memory=", MemoryInUse[]]];
+        system]],
+    Range[Length[components]]];
   If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
     Print["DE2 SCC BLOCK SYSTEMS done center=", center,
       " memory=", MemoryInUse[]]];

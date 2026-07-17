@@ -1716,7 +1716,11 @@ ft2CanonicalIdentity[prefix_String, value_] := prefix <>
    Boundary and NativeTransport checkpoints: a learned profile may seed a
    new plan, but it is never evidence that numerical state can be restored.
    The contract includes the zero-private-halo base plan, so a profile cannot
-   cross a changed matrix, FIRE batch, public epsilon request, or level loss. *)
+   cross a changed matrix, FIRE batch, public epsilon request, or level loss.
+   It deliberately excludes the whole-tree source fingerprint: a learned
+   lower bound remains safe across unrelated implementation edits because
+   every new run still performs the current matching certificates and may
+   monotonically discover more clearance. *)
 $ft2MatchingHaloProfileMax = 64;
 ft2NormalizeMatchingHaloBounds[bounds_, nLevels_Integer] := Module[{values},
   If[nLevels < 1, Return[Failure["FeynmanTrickMatchingHaloProfile", <|
@@ -1755,8 +1759,7 @@ ft2MatchingHaloProfileContract[name_String, prepKey_,
       "Detail" -> "matching-halo profile contract requires the exact zero-private-halo base plan"|>],
     Module]];
   record = Join[<|
-    "Schema" -> "FeynmanTrick.MatchingHaloProfileContract/v1",
-    "SourceFingerprint" -> $ftLadderSourceFingerprint,
+    "Schema" -> "FeynmanTrick.MatchingHaloProfileContract/v2",
     "Example" -> name,
     "PrepKey" -> prepKey,
     "BasePlanIdentity" -> basePlan["Identity"],
@@ -1785,7 +1788,7 @@ ft2MatchingHaloProfileContractQ[contract_] := AssociationQ[contract] &&
   Sort[Keys[contract]] === Sort[{"Record", "Identity", "NumLevels"}] &&
   AssociationQ[contract["Record"]] &&
   Lookup[contract["Record"], "Schema", None] ===
-    "FeynmanTrick.MatchingHaloProfileContract/v1" &&
+    "FeynmanTrick.MatchingHaloProfileContract/v2" &&
   IntegerQ[contract["NumLevels"]] && contract["NumLevels"] >= 1 &&
   With[{base = Lookup[contract["Record"], "BasePlanRecord", <||>]},
     AssociationQ[base] &&

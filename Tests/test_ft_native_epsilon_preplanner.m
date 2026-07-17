@@ -184,6 +184,15 @@ assert["matching-affecting configuration changes select a distinct profile",
     ft2LoadMatchingHaloProfile[profileFile, changedProfileContract] === {0},
   {profileContract, changedProfileContract}];
 
+sourceIndependentProfileContract =
+  Block[{$ftLadderSourceFingerprint = "unrelated-source-edit"},
+    ft2MatchingHaloProfileContract[
+      "matching-profile-fixture", "prepared-fixture", plan]];
+assert[
+  "unrelated source edits do not discard a certified matching-halo lower bound",
+  sourceIndependentProfileContract === profileContract,
+  {profileContract, sourceIndependentProfileContract}];
+
 noncanonicalBasePlan = Join[profileContract["Record", "BasePlanRecord"],
   <|"MatchingPrivateHalos" -> {1}|>];
 noncanonicalRecord = Join[profileContract["Record"], <|

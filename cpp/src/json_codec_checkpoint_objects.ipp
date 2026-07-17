@@ -2547,13 +2547,17 @@ json::array checkpoint_acb_match_identity_manifest(const json::array& items) {
   manifest.reserve(items.size());
   for (const auto& value : items) {
     const auto& item = as_object(value, "checkpoint retained Acb match");
-    manifest.push_back(json::object{
+    json::object identity{
         {"handle", item.at("handle")},
         {"checkpoint_identity", item.at("checkpoint_identity")},
         {"provenance_identity", item.at("provenance_identity")},
         {"exact_lattice_identity", item.at("exact_lattice_identity")},
         {"matching_frame_identity",
-         item.at("matching_frame_identity")}});
+         item.at("matching_frame_identity")}};
+    if (const auto* residual_frame =
+            item.if_contains("residual_frame_identity"))
+      identity["residual_frame_identity"] = *residual_frame;
+    manifest.push_back(std::move(identity));
   }
   return manifest;
 }

@@ -121,7 +121,11 @@ ok = !AnyTrue[result, FailureQ] && AssociationQ[stats] &&
   Lookup[monoBasis, "Type", None] === "DiffExp2NativeRegularBasis" &&
   Lookup[monoBasis, "Dimension", None] === 2 &&
   Lookup[monoBasis["NativeSummary"], "execution_capability", None] ===
-    "retained-regular-monolithic-unit-basis-v1" &&
+    "retained-regular-monolithic-unit-basis-v2" &&
+  Lookup[monoBasis["NativeSummary"], "worker_threads", None] === 2 &&
+  TrueQ[Lookup[monoBasis["NativeSummary"],
+    "atomic_retention", False]] &&
+  Lookup[monoBasis["NativeSummary"], "json_coefficients", None] === 0 &&
   Length[mono0] === 2 &&
   Max[Abs[N[mono0[[1]] - {1, 0}, 50]]] < 10^-40 &&
   Max[Abs[N[mono0[[2]] - {0, 1}, 50]]] < 10^-40 &&

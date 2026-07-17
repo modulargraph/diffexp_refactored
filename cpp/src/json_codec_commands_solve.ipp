@@ -808,6 +808,200 @@
         {"json_coefficients", 0}, {"elapsed_ms", elapsed_ms}};
   }
 
+  if (operation == "local.solve_batch") {
+    if (root.if_contains("equation_owner"))
+      require_exact_keys(root,
+          {"schema", "op", "session", "chart", "threads", "runs",
+           "metadata", "equation_owner"},
+          "native retained local batch request");
+    else
+      require_exact_keys(root,
+          {"schema", "op", "session", "chart", "threads", "runs",
+           "metadata"},
+          "native retained local batch request");
+    const auto requested_threads = as_u32(
+        root.at("threads"), "native retained local batch threads");
+    if (requested_threads == 0)
+      throw std::invalid_argument(
+          "native retained local batch threads must be positive");
+    const auto& runs = as_array(
+        root.at("runs"), "native retained local batch runs");
+    const auto& metadata = as_array(
+        root.at("metadata"), "native retained local batch metadata");
+    if (runs.empty())
+      throw std::invalid_argument(
+          "native retained local batch cannot be empty");
+    if (metadata.size() != runs.size())
+      throw std::invalid_argument(
+          "native retained local batch requires one metadata record per run");
+
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner;
+    std::vector<std::string> local_handles;
+    local_handles.reserve(runs.size());
+    {
+      // Reserve every handle and capacity slot before starting workers.  The
+      // batch is published only after every recurrence and metadata check has
+      // succeeded, so callers never observe a partial regular basis.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      if (runs.size() > session->local_capacity ||
+          session->locals.size() + session->pending_local_solves >
+              session->local_capacity - runs.size())
+        throw std::invalid_argument(
+            "persistent local capacity cannot admit the complete retained local batch");
+      chart = found->second;
+      equation_owner = chart;
+      if (const auto* requested_owner = root.if_contains("equation_owner")) {
+        if (!requested_owner->is_string() ||
+            requested_owner->as_string().empty())
+          throw std::invalid_argument(
+              "persistent local equation_owner must be a nonempty eq: handle");
+        const auto owner_found = session->regular_equation_owners.find(
+            std::string(requested_owner->as_string()));
+        if (owner_found == session->regular_equation_owners.end())
+          throw std::invalid_argument(
+              "unknown or released frame-independent regular equation owner for local batch");
+        equation_owner = owner_found->second;
+      }
+      for (std::size_t index = 0; index < runs.size(); ++index)
+        local_handles.push_back(
+            "l:" + std::to_string(session->next_local++));
+      session->pending_local_solves += runs.size();
+    }
+
+    const bool symbolic_serialized = session->domain == "symbolic";
+    const auto bounded_threads = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads), runs.size()});
+    const auto worker_count = symbolic_serialized ? std::size_t{1}
+                                                   : bounded_threads;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::shared_ptr<StoredLocalBase>> locals(runs.size());
+    std::vector<std::exception_ptr> errors(runs.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        const auto index = next.fetch_add(1);
+        if (index >= runs.size()) return;
+        try {
+          locals[index] = chart->solve_local(
+              local_handles[index],
+              as_object(runs[index], "native retained local batch run"),
+              as_object(metadata[index],
+                        "native retained local batch metadata"),
+              equation_owner);
+        } catch (...) {
+          errors[index] = std::current_exception();
+        }
+      }
+    };
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    try {
+      for (std::size_t index = 0; index < worker_count; ++index)
+        workers.emplace_back(worker);
+      for (auto& thread : workers) thread.join();
+    } catch (...) {
+      for (auto& thread : workers) thread.request_stop();
+      for (auto& thread : workers)
+        if (thread.joinable()) thread.join();
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < runs.size())
+        throw std::logic_error(
+            "native retained local batch reservation accounting underflow");
+      session->pending_local_solves -= runs.size();
+      throw;
+    }
+
+    const auto failed = std::find_if(
+        errors.begin(), errors.end(), [](const auto& error) {
+          return error != nullptr;
+        });
+    if (failed != errors.end()) {
+      const auto failure = *failed;
+      {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->pending_local_solves < runs.size())
+          throw std::logic_error(
+              "native retained local batch reservation accounting underflow");
+        session->pending_local_solves -= runs.size();
+      }
+      std::rethrow_exception(failure);
+    }
+    if (std::any_of(locals.begin(), locals.end(), [](const auto& local) {
+          return local == nullptr;
+        })) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < runs.size())
+        throw std::logic_error(
+            "native retained local batch reservation accounting underflow");
+      session->pending_local_solves -= runs.size();
+      throw std::logic_error(
+          "native retained local batch completed without a retained local");
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < runs.size())
+        throw std::logic_error(
+            "native retained local batch reservation accounting underflow");
+      session->pending_local_solves -= runs.size();
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during retained local batch");
+      session->locals.reserve(session->locals.size() + locals.size());
+      std::vector<std::string> inserted;
+      inserted.reserve(locals.size());
+      try {
+        for (std::size_t index = 0; index < locals.size(); ++index) {
+          if (!session->locals.emplace(
+                  local_handles[index], locals[index]).second)
+            throw std::logic_error(
+                "native retained local batch produced a duplicate local handle");
+          inserted.push_back(local_handles[index]);
+        }
+      } catch (...) {
+        for (const auto& handle : inserted) session->locals.erase(handle);
+        throw;
+      }
+      for (const auto& local : locals) {
+        const auto local_stats = local->stats();
+        ++session->total_local_solves;
+        session->total_local_run_parse_ms += local_stats.create_parse_ms;
+        session->total_local_kernel_ms += local_stats.create_kernel_ms;
+      }
+    }
+
+    json::array responses;
+    responses.reserve(locals.size());
+    for (const auto& local : locals) {
+      auto response = local->summary();
+      response["status"] = "ok";
+      response["session"] = session->handle;
+      response["native_retained"] = true;
+      response["json_coefficients"] = 0;
+      responses.push_back(std::move(response));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"chart", chart->handle()}, {"results", std::move(responses)},
+        {"attempted", runs.size()}, {"succeeded", runs.size()},
+        {"failed", 0}, {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"symbolic_serialized", symbolic_serialized},
+        {"atomic_retention", true}, {"json_coefficients", 0},
+        {"elapsed_ms", elapsed_ms}};
+  }
+
   if (operation == "local.solve") {
     const auto chart_handle = required_string(root, "chart");
     std::shared_ptr<PreparedChartBase> chart;

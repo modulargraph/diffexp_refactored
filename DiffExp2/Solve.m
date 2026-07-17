@@ -3702,19 +3702,18 @@ homogeneousFramePlanFor[cs_Association, req_Association] :=
     $homogeneousFramePlanOverride,
     homogeneousFramePlan[cs, req]];
 
-(* Prepare the complete immutable operator plus one validated dynamic run.
-   Chart-only owner construction and local execution share this exact capture,
-   so a later value or basis solve cannot silently drift to a different frame,
+(* Prepare the complete immutable operator once.  Chart-only owner
+   construction and every dynamic local run share this exact capture, so a
+   later value or basis solve cannot silently drift to a different frame,
    physical q/C payload, or analytic chart identity. *)
-prepareNativeLocalFamilyRun[cs_Association, req_Association,
-    tag_Association, init_List, retainValueSolverPrototype_:False] := Module[
+prepareNativeLocalFamilyShared[cs_Association, req_Association,
+    tag_Association, initPrototype_List] := Module[
   {d = Lookup[cs, "SystemSize", 0], a, b, p, nmax, reqMin, reqMax,
    matchingFamilies, matchingBlocks, allowedP, blocks, fams, pMax,
    pBudget, cdMax, symbolic,
    poleDepth, spectralDepth, transformDepth, wideTop, fb, W, prep, vPrep,
-   symbols, domain, wp, inputDigits, precisionBits, staticRecord, request,
-   persistentMetadata, checkpointIdentity, localMetadata, prepared,
-   valueRunKeys, ownerTimingQ, ownerPhaseStarted, ownerPhase},
+   symbols, domain, wp, inputDigits, precisionBits, staticRecord,
+   persistentMetadata, shared, ownerTimingQ, ownerPhaseStarted, ownerPhase},
   ownerTimingQ = Environment["DE2_NATIVE_OWNER_TIMING"] === "1";
   ownerPhaseStarted = SessionTime[];
   ownerPhase[label_String] := If[ownerTimingQ,
@@ -3764,11 +3763,11 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
       !IntegerQ[reqMax] || reqMin > reqMax,
     err["E8", cs, <|"Request" -> req, "Detail" ->
       "native local family request windows must be finite ordered integers"|>]];
-  If[Length[init] =!= p + 1 || !AllTrue[init,
+  If[Length[initPrototype] =!= p + 1 || !AllTrue[initPrototype,
       ListQ[#] && Length[#] === d &&
         AllTrue[#, DiffExp2`EpsSeries`ESQ] &],
     err["E8", cs, <|"Tag" -> tag, "InitialDimensions" ->
-      Quiet[Check[Dimensions[init], Missing["Ragged"]]],
+      Quiet[Check[Dimensions[initPrototype], Missing["Ragged"]]],
       "Expected" -> {p + 1, d}, "Detail" ->
       "native local family initial ladder must contain p+1 rows of d EpsSeries values"|>]];
 
@@ -3820,7 +3819,7 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
     DiffExp2`Config`CanonicalEps[], fb, W, cs];
   ownerPhase["prepareFramedMatrix"];
   symbols = cppRegulatorSymbols[cs, prep, a, b, p, nmax,
-    None, init, vPrep];
+    None, initPrototype, vPrep];
   If[symbols =!= {},
     err["E5", cs, <|"Tag" -> tag,
       "RegulatorSymbols" -> (SymbolName /@ symbols), "Detail" ->
@@ -3834,14 +3833,62 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
       $cppSerializationSymbols = {}},
     staticRecord = cppStaticOperatorPayload[cs, prep, blocks, fb, W,
       vPrep, inputDigits, precisionBits];
-    ownerPhase["buildAndSerializeStaticOperator"];
+    ownerPhase["buildAndSerializeStaticOperator"]];
+  persistentMetadata = Append[cppPersistentMetadata[cs, fb, W],
+    "PreparedToken" -> staticRecord["Token"]];
+  ownerPhase["metadataAndIdentity"];
+  shared = <|"ChartSystem" -> cs, "RequestSpec" -> req,
+    "Dimension" -> d,
+    "Tag" -> <|"a" -> a, "b" -> b, "p" -> p|>,
+    "TaylorOrder" -> nmax,
+    "RequestedMin" -> reqMin, "RequestedMax" -> reqMax,
+    "FrameBase" -> fb, "FrameWidth" -> W,
+    "PreparedCleared" -> prep, "PreparedAssembly" -> vPrep,
+    "SerializationDomain" -> domain, "InputDigits" -> inputDigits,
+    "StaticRecord" -> staticRecord,
+    "PersistentMetadata" -> persistentMetadata|>;
+  shared];
+
+prepareNativeLocalFamilyDynamic[shared_Association, init_List,
+    retainValueSolverPrototype_:False] := Module[
+  {cs = shared["ChartSystem"], req = shared["RequestSpec"],
+   d = shared["Dimension"], normalizedTag = shared["Tag"],
+   a, b, p, nmax = shared["TaylorOrder"],
+   reqMin = shared["RequestedMin"], reqMax = shared["RequestedMax"],
+   fb = shared["FrameBase"], W = shared["FrameWidth"],
+   prep = shared["PreparedCleared"], vPrep = shared["PreparedAssembly"],
+   domain = shared["SerializationDomain"],
+   inputDigits = shared["InputDigits"],
+   staticRecord = shared["StaticRecord"],
+   persistentMetadata = shared["PersistentMetadata"], symbols, request,
+   checkpointIdentity, localMetadata, prepared, valueRunKeys},
+  {a, b, p} = Lookup[normalizedTag, {"a", "b", "p"}];
+  If[Length[init] =!= p + 1 || !AllTrue[init,
+      ListQ[#] && Length[#] === d &&
+        AllTrue[#, DiffExp2`EpsSeries`ESQ] &],
+    err["E8", cs, <|"Tag" -> normalizedTag,
+      "InitialDimensions" ->
+        Quiet[Check[Dimensions[init], Missing["Ragged"]]],
+      "Expected" -> {p + 1, d}, "Detail" ->
+        "native local family initial ladder must contain p+1 rows of d EpsSeries values"|>]];
+  (* The expensive chart-wide regulator audit was completed once while the
+     immutable preparation was captured.  A reused preparation can vary only
+     its initial ladder, so audit that small dynamic payload directly. *)
+  symbols = DeleteDuplicates[Cases[init,
+    s_Symbol /; Context[s] === "Global`" &&
+      s =!= DiffExp2`Config`CanonicalEps[] &&
+      s =!= Lookup[cs, "ChartVar", None] && !NumericQ[s], Infinity]];
+  If[symbols =!= {},
+    err["E5", cs, <|"Tag" -> normalizedTag,
+      "RegulatorSymbols" -> (SymbolName /@ SortBy[symbols, SymbolName]),
+      "Detail" ->
+        "native local handle rejects unresolved analytic regulators; specialize them before solving"|>]];
+  Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = {}},
     request = Block[{$cppStaticRecordOverride = staticRecord,
         $cppBuildRequestOnly = True},
       cppRunRecursionCore[cs, prep, a, b, p, nmax, None, fb, W,
         init, vPrep]];
-    ownerPhase["serializeDynamicPrototype"];
-    persistentMetadata = Append[cppPersistentMetadata[cs, fb, W],
-      "PreparedToken" -> staticRecord["Token"]];
     checkpointIdentity = "de2-native-local-" <>
       IntegerString[Hash[{persistentMetadata["SystemIdentity"],
         persistentMetadata["ChartIdentity"], cs["ChartMap"],
@@ -3850,9 +3897,7 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
         16, 64];
     localMetadata = cppNativeLocalMetadata[cs, a, b, p, inputDigits,
       checkpointIdentity]];
-  ownerPhase["metadataAndIdentity"];
-  prepared = <|"Dimension" -> d,
-    "Tag" -> <|"a" -> a, "b" -> b, "p" -> p|>,
+  prepared = <|"Dimension" -> d, "Tag" -> normalizedTag,
     "RequestedMin" -> reqMin, "RequestedMax" -> reqMax,
     "Request" -> request, "PersistentMetadata" -> persistentMetadata,
     "LocalMetadata" -> localMetadata,
@@ -3870,42 +3915,60 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
       "relative_accuracy_max_exact" ->
         cppRegularValueRelativeAccuracyMaxExact[]|>]];
 
-(* First production seam for a session-owned native LocalSolution.  It is
-   intentionally narrower than SolveHomogeneous: no SCC orchestration,
-   pseudo-resonant compensation, or rank-reduction gauge is hidden behind
-   the opaque handle.  Those operations still require Wolfram tensors until
-   their native counterparts preserve the same sequential completeness
-   contract. *)
-SolveNativeLocalFamily[cs_Association, req_Association,
-    tag_Association, init_List, retainValueSolverPrototype_:False,
-    equationOwner_:Automatic] := Module[
-  {prepared, response, backendID, result, reqMin, reqMax, checkpointIdentity,
-   normalizedTag},
-  prepared = prepareNativeLocalFamilyRun[cs, req, tag, init,
-    retainValueSolverPrototype];
-  reqMin = prepared["RequestedMin"];
-  reqMax = prepared["RequestedMax"];
-  checkpointIdentity = prepared["CheckpointIdentity"];
-  normalizedTag = prepared["Tag"];
-  response = DiffExp2`CppBackend`RunPersistentLocalSolve[
-    prepared["Request"], prepared["PersistentMetadata"],
-    prepared["LocalMetadata"], equationOwner];
+prepareNativeLocalFamilyRun[cs_Association, req_Association,
+    tag_Association, init_List, retainValueSolverPrototype_:False] := Module[
+  {shared = prepareNativeLocalFamilyShared[cs, req, tag, init]},
+  prepareNativeLocalFamilyDynamic[
+    shared, init, retainValueSolverPrototype]];
+
+nativeLocalFamilyFinalize[cs_Association, req_Association,
+    prepared_Association, response_, expectedSession_:Automatic,
+    expectedChart_:Automatic, expectedOperator_:Automatic] := Module[
+  {backendID, result, reqMax = prepared["RequestedMax"],
+   checkpointIdentity = prepared["CheckpointIdentity"],
+   normalizedTag = prepared["Tag"], forbiddenPayloadKeys},
   If[FailureQ[response],
     err["E5", cs, <|"BackendFailure" -> response, "Detail" ->
       "persistent native local solve failed"|>]];
-  If[Lookup[response, "status", "error"] =!= "ok",
+  If[!AssociationQ[response] ||
+      Lookup[response, "status", "error"] =!= "ok",
     backendID = Lookup[response, "id", "E5"];
     err[If[MemberQ[{"E4", "E5", "E6"}, backendID], backendID, "E5"],
       cs, <|"BackendID" -> backendID,
         "Detail" -> Lookup[response, "detail",
           "persistent native local solve returned an error"]|>]];
-  If[Lookup[response, "epsilon_max", reqMin - 1] < reqMax,
-    Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
-    err["E6", cs, <|"Tag" -> tag, "RequestedCompleteMax" -> reqMax,
-      "AvailableCompleteMax" -> Lookup[response, "epsilon_max",
-        Missing["NotAvailable"]],
+  forbiddenPayloadKeys = Intersection[Keys[response],
+    {"assembled", "coefficients", "u", "validity"}];
+  If[!StringQ[Lookup[response, "session", None]] ||
+      !StringQ[Lookup[response, "local", None]] ||
+      !StringQ[Lookup[response, "chart", None]] ||
+      (expectedSession =!= Automatic &&
+        response["session"] =!= expectedSession) ||
+      (expectedChart =!= Automatic && response["chart"] =!= expectedChart) ||
+      Lookup[response, "source_operator_identity", None] =!=
+        If[expectedOperator === Automatic,
+          prepared["PersistentMetadata", "PreparedToken"],
+          expectedOperator] ||
+      Lookup[response, "dimension", None] =!= prepared["Dimension"] ||
+      !IntegerQ[Lookup[response, "epsilon_min", None]] ||
+      !IntegerQ[Lookup[response, "epsilon_max", None]] ||
+      response["epsilon_min"] > response["epsilon_max"] ||
+      response["epsilon_max"] < reqMax ||
+      Lookup[response, "taylor_complete_max", None] =!= req["TOrder"] ||
+      Lookup[response, "checkpoint_identity", None] =!=
+        checkpointIdentity ||
+      !AssociationQ[Lookup[response, "metadata", None]] ||
+      !TrueQ[Lookup[response, "native_retained", False]] ||
+      Lookup[response, "json_coefficients", None] =!= 0 ||
+      Lookup[response, "pseudo_hit_count", None] =!= 0 ||
+      forbiddenPayloadKeys =!= {},
+    If[StringQ[Lookup[response, "local", None]],
+      Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]]];
+    err["E6", cs, <|"BackendResponse" -> response,
+      "ExpectedCheckpointIdentity" -> checkpointIdentity,
+      "ForbiddenPayloadKeys" -> forbiddenPayloadKeys,
       "Detail" ->
-        "native local family work budget did not reach the requested epsilon order"|>]];
+        "native local family summary violated its exact identity or opaque retained-local contract"|>]];
   result = <|"Type" -> "DiffExp2NativeLocalFamily",
     "Session" -> response["session"], "Local" -> response["local"],
     "NativeChart" -> response["chart"],
@@ -3915,10 +3978,39 @@ SolveNativeLocalFamily[cs_Association, req_Association,
       "Prescriptions" -> cs["Prescriptions"]|>,
     "EpsWindow" -> <|"Min" -> response["epsilon_min"],
       "CompleteMax" -> response["epsilon_max"]|>,
-    "TWindow" -> <|"CompleteMax" -> response["taylor_complete_max"]|>,
+    "TWindow" -> <|"CompleteMax" ->
+      response["taylor_complete_max"]|>,
     "CheckpointIdentity" -> checkpointIdentity,
     "NativeSummary" -> KeyDrop[response,
       {"status", "session", "local", "chart", "metadata"}]|>;
+  result];
+
+(* First production seam for a session-owned native LocalSolution.  It is
+   intentionally narrower than SolveHomogeneous: no SCC orchestration,
+   pseudo-resonant compensation, or rank-reduction gauge is hidden behind
+   the opaque handle.  Those operations still require Wolfram tensors until
+   their native counterparts preserve the same sequential completeness
+   contract. *)
+SolveNativeLocalFamily[cs_Association, req_Association,
+    tag_Association, init_List, retainValueSolverPrototype_:False,
+    equationOwner_:Automatic] := Module[
+  {prepared, response, result, expectedSession, expectedChart,
+   expectedOperator},
+  prepared = prepareNativeLocalFamilyRun[cs, req, tag, init,
+    retainValueSolverPrototype];
+  response = DiffExp2`CppBackend`RunPersistentLocalSolve[
+    prepared["Request"], prepared["PersistentMetadata"],
+    prepared["LocalMetadata"], equationOwner];
+  expectedSession = If[equationOwner === Automatic, Automatic,
+    Lookup[equationOwner, "Session", Lookup[equationOwner, "session", None]]];
+  expectedChart = If[equationOwner === Automatic, Automatic,
+    Lookup[equationOwner, "NativeEquationOwner",
+      Lookup[equationOwner, "EquationOwner", None]]];
+  expectedOperator = If[equationOwner === Automatic, Automatic,
+    Lookup[equationOwner, "EquationIdentity",
+      Lookup[equationOwner, "ChartIdentity", None]]];
+  result = nativeLocalFamilyFinalize[cs, req, prepared, response,
+    expectedSession, expectedChart, expectedOperator];
   If[!TrueQ[retainValueSolverPrototype], Return[result, Module]];
   Join[result, <|"NativeValueSolver" -> prepared["ValueSolver"]|>]];
 
@@ -6634,7 +6726,10 @@ SolveNativeRegularBasis[cs_Association, req_Association,
     equationOwner_:Automatic] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], d = cs["SystemSize"],
    epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax,
-   physical, columns = {}, unitValues, built, cleanup, sessions, charts},
+   physical, tag = <|"a" -> 0, "b" -> 0, "p" -> 0|>, unitInitials,
+   shared, prepared, workerCount, batch, raw, columns, cleanup, sessions,
+   charts, forbiddenPayloadKeys, expectedLocalChart,
+   expectedLocalOperator},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "SolveNativeRegularBasis requires a regular chart"|>]];
@@ -6656,22 +6751,79 @@ SolveNativeRegularBasis[cs_Association, req_Association,
     err["E6", cs, <|"EpsWindow" -> epsWindow,
       "Detail" -> "native regular basis normalization requires eps^0 inside the requested window"|>]];
   physical = regularPhysicalChartSystem[cs];
+  unitInitials = Table[{Table[DiffExp2`EpsSeries`ESNew[epsMin,
+      Table[If[component === basisIndex && power === 0, 1, 0],
+        {power, epsMin, epsMax}]], {component, d}]},
+    {basisIndex, d}];
+  (* The immutable chart preparation is the dominant Wolfram-side cost for
+     large regular receivers.  Capture it once, then serialize only the d
+     distinct unit-column runs and checkpoint identities. *)
+  shared = prepareNativeLocalFamilyShared[
+    physical, req, tag, First[unitInitials]];
+  prepared = prepareNativeLocalFamilyDynamic[shared, #, False] & /@
+    unitInitials;
+  If[Length[prepared] =!= d ||
+      !Apply[SameQ, Lookup[prepared, "PersistentMetadata"]],
+    err["E6", cs, <|"Detail" ->
+      "regular basis dynamic runs did not retain one exact immutable preparation"|>]];
+  workerCount = Which[
+    threads === Automatic, cppConfiguredThreads[d],
+    IntegerQ[threads] && threads > 0, Min[threads, d],
+    True, err["E6", cs, <|"Threads" -> threads,
+      "Detail" ->
+        "native regular basis batch thread count must be a positive integer or Automatic"|>]];
+  If[DownValues[DiffExp2`CppBackend`RunPersistentLocalSolves] === {},
+    err["E5", cs, <|"Detail" ->
+      "CppBackend persistent retained-local batch bridge is not available"|>]];
+  batch = DiffExp2`CppBackend`RunPersistentLocalSolves[
+    Lookup[prepared, "Request"],
+    First[Lookup[prepared, "PersistentMetadata"]],
+    Lookup[prepared, "LocalMetadata"], workerCount, equationOwner];
+  If[FailureQ[batch] || !AssociationQ[batch] ||
+      Lookup[batch, "status", "error"] =!= "ok",
+    err["E5", cs, <|"BackendFailure" -> batch,
+      "Detail" -> "persistent native regular basis batch failed"|>]];
+  raw = Lookup[batch, "results", None];
+  forbiddenPayloadKeys = Intersection[Keys[batch],
+    {"assembled", "coefficients", "u", "validity"}];
+  If[!ListQ[raw] || Length[raw] =!= d ||
+      !StringQ[Lookup[batch, "session", None]] ||
+      !StringQ[Lookup[batch, "chart", None]] ||
+      Lookup[batch, "attempted", None] =!= d ||
+      Lookup[batch, "succeeded", None] =!= d ||
+      Lookup[batch, "failed", None] =!= 0 ||
+      Lookup[batch, "requested_threads", None] =!= workerCount ||
+      !IntegerQ[Lookup[batch, "worker_threads", None]] ||
+      !TrueQ[1 <= batch["worker_threads"] <= workerCount] ||
+      !TrueQ[Lookup[batch, "atomic_retention", False]] ||
+      Lookup[batch, "json_coefficients", None] =!= 0 ||
+      forbiddenPayloadKeys =!= {},
+    If[ListQ[raw], Scan[
+      If[AssociationQ[#] && StringQ[Lookup[#, "local", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]]] &, raw]];
+    err["E6", cs, <|"BackendResponse" -> batch,
+      "ForbiddenPayloadKeys" -> forbiddenPayloadKeys,
+      "Detail" ->
+        "native regular basis batch violated its ordered opaque-retention contract"|>]];
   cleanup[] := Scan[
-    Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, columns];
-  Catch[
-    Do[
-      unitValues = Table[DiffExp2`EpsSeries`ESNew[epsMin,
-          Table[If[component === basisIndex && power === 0, 1, 0],
-            {power, epsMin, epsMax}]], {component, d}];
-      built = SolveNativeLocalFamily[physical, req,
-        <|"a" -> 0, "b" -> 0, "p" -> 0|>, {unitValues}, False,
-        equationOwner];
-      AppendTo[columns, Join[built,
+    If[AssociationQ[#] && StringQ[Lookup[#, "local", None]],
+      Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]]] &, raw];
+  expectedLocalChart = If[equationOwner === Automatic, batch["chart"],
+    Lookup[equationOwner, "NativeEquationOwner",
+      Lookup[equationOwner, "EquationOwner", None]]];
+  expectedLocalOperator = If[equationOwner === Automatic,
+    First[prepared]["PersistentMetadata", "PreparedToken"],
+    Lookup[equationOwner, "EquationIdentity",
+      Lookup[equationOwner, "ChartIdentity", None]]];
+  columns = Catch[
+    MapThread[Function[{spec, response, basisIndex},
+      Join[nativeLocalFamilyFinalize[physical, req, spec, response,
+          batch["session"], expectedLocalChart, expectedLocalOperator],
         <|"Type" -> "DiffExp2NativeRegularBasisColumn",
           "BasisIndex" -> basisIndex|>]],
-      {basisIndex, d}],
-    "DiffExp2Error", Function[{failure, tag},
-      cleanup[]; Throw[failure, tag]]];
+      {prepared, raw, Range[d]}],
+    "DiffExp2Error", Function[{failure, errorTag},
+      cleanup[]; Throw[failure, errorTag]]];
   sessions = DeleteDuplicates[Lookup[columns, "Session", None]];
   charts = DeleteDuplicates[Lookup[columns, "NativeChart", None]];
   If[Length[columns] =!= d || sessions === {None} ||
@@ -6689,11 +6841,10 @@ SolveNativeRegularBasis[cs_Association, req_Association,
       "Prescriptions" -> cs["Prescriptions"]|>,
     "EpsWindow" -> epsWindow,
     "TWindow" -> <|"CompleteMax" -> req["TOrder"]|>,
-    "NativeSummary" -> <|
+    "NativeSummary" -> Join[KeyDrop[batch, {"results"}], <|
       "execution_capability" ->
-        "retained-regular-monolithic-unit-basis-v1",
-      "columns" -> d, "worker_threads" -> 1,
-      "json_coefficients" -> 0|>|>];
+        "retained-regular-monolithic-unit-basis-v2",
+      "columns" -> d|>]|>];
 
 (* Exact tile geometry needs every receiving equation owner before marching,
    but it does not need a local-solution slab.  Capture one validated ordinary

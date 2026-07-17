@@ -26,6 +26,7 @@ RunPersistentSCCColumns::usage = "RunPersistentSCCColumns[handle, columns, threa
 SpecializePersistentRationalSCCColumn::usage = "SpecializePersistentRationalSCCColumn[source,targetSCC,rationalShadowIdentity,checkpointIdentity] imports one completed exact Rational SCC column into the paired target Acb SCC. Native code proves the shared domain-independent owner identity, physical q/C containment, exact geometry/prescriptions, and public epsilon/Taylor contract before coefficientwise specialization.";
 ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
 RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata, equationOwner:Automatic] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab. When equationOwner is supplied, the framed chart must prove exact q/C and geometry identity with that frame-independent regular owner and publishes the local under the equation owner.";
+RunPersistentLocalSolves::usage = "RunPersistentLocalSolves[schema1Requests, metadata, localMetadata, threads, equationOwner:Automatic] executes an ordered all-or-nothing batch of retained native local solves sharing one prepared chart. Each successful result is an opaque session-owned local handle; coefficient slabs are never returned.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
 CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies the native Acb residual of its immutable physical q(t,eps), C(t,eps), and homogeneous-source payload. request carries point, relative_tolerance, and the operator, owner-signature, physical-payload, source, local-checkpoint, analytic-metadata, and provenance identities advertised by residual_binding; caller-supplied operators or sources are rejected.";
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
@@ -988,6 +989,54 @@ RunPersistentLocalSolve[request_Association, metadata_Association,
       "equation_owner" -> ownerTokens["EquationOwner"]]];
   response = RunRequest[payload];
   response];
+
+RunPersistentLocalSolves[requests_List, metadata_Association,
+    localMetadata_List, threads_Integer,
+    equationOwner_:Automatic] := Module[
+  {first, static, outputDigits, badRequests, incompatible, prepared,
+   runs, payload, ownerTokens},
+  If[requests === {} || threads < 1 ||
+      Length[localMetadata] =!= Length[requests] ||
+      !AllTrue[requests, AssociationQ] ||
+      !AllTrue[localMetadata, AssociationQ],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent retained-local batch requires nonempty request/metadata association lists of equal length and a positive thread count"|>], Module]];
+  badRequests = Select[Range[Length[requests]], Function[index,
+    Complement[$persistentRequiredStaticKeys, Keys[requests[[index]]]] =!= {} ||
+      Complement[$persistentRunKeys, Keys[requests[[index]]]] =!= {}]];
+  If[badRequests =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent retained-local batch contains incomplete recurrence requests",
+      "RequestPositions" -> badRequests|>], Module]];
+  first = First[requests];
+  static = KeyTake[first, $persistentStaticKeys];
+  outputDigits = Lookup[first, "output_digits", 50];
+  incompatible = Select[Rest[requests],
+    !SameQ[KeyTake[#, $persistentStaticKeys], static] ||
+      Lookup[#, "output_digits", 50] =!= outputDigits &];
+  If[incompatible =!= {},
+    Return[Failure["CppBackend", <|"Detail" ->
+      "one persistent retained-local batch cannot mix prepared operators or output precision"|>], Module]];
+  prepared = preparePersistentRequest[first, metadata];
+  If[FailureQ[prepared] || !AssociationQ[prepared] ||
+      !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
+  runs = KeyTake[#, $persistentRunKeys] & /@ requests;
+  payload = <|"schema" -> 2, "op" -> "local.solve_batch",
+    "session" -> prepared["Session"], "chart" -> prepared["Chart"],
+    "threads" -> threads, "runs" -> runs,
+    "metadata" -> localMetadata|>;
+  If[equationOwner =!= Automatic,
+    If[!AssociationQ[equationOwner],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "equation-bound local batch requires an opaque regular equation owner"|>], Module]];
+    ownerTokens = persistentRegularEquationOwnerHandles[equationOwner];
+    If[FailureQ[ownerTokens], Return[ownerTokens, Module]];
+    If[ownerTokens["Session"] =!= prepared["Session"],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "framed chart and regular equation owner belong to different persistent sessions"|>], Module]];
+    payload = Append[payload,
+      "equation_owner" -> ownerTokens["EquationOwner"]]];
+  RunRequest[payload]];
 
 EvaluatePersistentLocal[handle_Association, point_Association,
     options_Association:<||>, outputDigits_:Automatic] := Module[

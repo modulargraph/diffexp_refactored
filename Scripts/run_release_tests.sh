@@ -17,6 +17,7 @@ wolfram_tests=(
   Tests/test_path_planner_algebraic.m
   Tests/test_native_algebraic_chart_bridge.m
   Tests/test_native_algebraic_scale_bridge.m
+  Tests/test_native_regular_basis_batch.m
   Tests/test_native_regular_prepare_owner.m
   Tests/test_integrate.m
   Tests/test_api.m

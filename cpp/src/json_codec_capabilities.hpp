@@ -34,8 +34,12 @@ inline constexpr char kNativeSingularSCCSaturationRequestSchema[] =
     "diffexp2-native-acb-singular-scc-valuation-zero-saturation-request-v1";
 inline constexpr char kNativeSingularSCCSaturationCompactRequestSchema[] =
     "diffexp2-native-acb-singular-scc-valuation-zero-saturation-request-v2";
+inline constexpr char kNativeSingularSCCSaturationBoundedRequestSchema[] =
+    "diffexp2-native-acb-singular-scc-valuation-zero-saturation-request-v3";
 inline constexpr char kNativeSingularSCCSaturationProofSchema[] =
     "diffexp2-native-acb-singular-scc-valuation-zero-saturation-proof-v1";
+inline constexpr char kNativeSingularSCCSaturationCompactProofSchema[] =
+    "diffexp2-native-acb-singular-scc-valuation-zero-saturation-proof-v2";
 inline constexpr char kAcbSingularScalarSCCColumnCapability[] =
     "acb-regular-singular-scalar-block-dag-column-v1";
 inline constexpr char kAcbSingularJordanSCCColumnCapability[] =

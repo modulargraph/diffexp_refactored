@@ -915,8 +915,12 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
              {"max", solution.epsilon.complete_max}}},
         {"taylor_complete_max", solution.taylor_complete_max},
         {"dimension", solution.dimension}};
-    const bool compact_derivation = required_string(handoff_, "schema") ==
-        "diffexp2-retained-exact-plan-match-hop-v2";
+    const auto handoff_schema = required_string(handoff_, "schema");
+    const bool compact_derivation =
+        handoff_schema ==
+            "diffexp2-retained-exact-plan-match-hop-v2" ||
+        handoff_schema ==
+            "diffexp2-retained-exact-plan-match-hop-v3";
     json::object derivation;
     if (compact_derivation) {
       if (!plan_owner_ || equation_owner == nullptr ||
@@ -1570,11 +1574,18 @@ class StoredTransportArmState {
       const auto& target = as_object(
           derivation.at("output"),
           "certificate-only transport output derivation");
+      const bool bounded_source =
+          source.if_contains("source_operator_reference") != nullptr;
       if (required_string(source, "local") != incoming->handle() ||
           required_string(source, "checkpoint_identity") !=
               incoming->checkpoint_identity() ||
-          required_string(source, "source_operator_identity") !=
-              incoming->source_operator_identity() ||
+          (bounded_source
+               ? !compact_matching_identity_reference_matches(
+                     source.at("source_operator_reference"),
+                     incoming->source_operator_identity(),
+                     "certificate-only incoming source-operator reference")
+               : required_string(source, "source_operator_identity") !=
+                     incoming->source_operator_identity()) ||
           required_string(target, "checkpoint_identity") !=
               output->checkpoint_identity() ||
           required_string(target, "chart") != output->source_chart() ||
@@ -1611,18 +1622,36 @@ class StoredTransportArmState {
       for (const auto& raw_column : raw_basis) {
         const auto& column = as_object(
             raw_column, "consumed transport-arm cached basis column");
-        require_exact_keys(
-            column,
-            {"local", "chart", "source_operator_identity",
-             "checkpoint_identity", "coefficient_domain"},
-            "consumed transport-arm cached basis column");
+        const bool bounded_operator =
+            column.if_contains("source_operator_reference") != nullptr;
+        if (bounded_operator)
+          require_exact_keys(
+              column,
+              {"local", "chart", "source_operator_reference",
+               "checkpoint_identity", "coefficient_domain"},
+              "consumed bounded transport-arm cached basis column");
+        else
+          require_exact_keys(
+              column,
+              {"local", "chart", "source_operator_identity",
+               "checkpoint_identity", "coefficient_domain"},
+              "consumed legacy transport-arm cached basis column");
         (void)scoped_handle_id(required_string(column, "local"), "l:",
                                "consumed basis local");
         if (required_string(column, "chart") !=
                 retained.charts.at(
                     retained.exact.matches[index].receiving_chart)
                     .handle ||
-            required_string(column, "source_operator_identity").empty() ||
+            (bounded_operator
+                 ? !compact_matching_identity_reference_matches(
+                       column.at("source_operator_reference"),
+                       tile_sources_[index + 1]
+                           ->source_operator_identity(),
+                       "consumed basis source-operator reference")
+                 : required_string(
+                       column, "source_operator_identity") !=
+                       tile_sources_[index + 1]
+                           ->source_operator_identity()) ||
             required_string(column, "checkpoint_identity").empty() ||
             required_string(column, "coefficient_domain") !=
                 tile_sources_[index + 1]->scalar_domain())
@@ -1646,8 +1675,13 @@ class StoredTransportArmState {
           match.at("planned_hop"),
           "consumed transport-arm planned hop");
       const auto handoff_schema = required_string(handoff, "schema");
-      const bool compact_handoff = handoff_schema ==
-          "diffexp2-retained-exact-plan-match-hop-v2";
+      const bool compact_handoff =
+          handoff_schema ==
+              "diffexp2-retained-exact-plan-match-hop-v2" ||
+          handoff_schema ==
+              "diffexp2-retained-exact-plan-match-hop-v3";
+      const bool bounded_handoff = handoff_schema ==
+          "diffexp2-retained-exact-plan-match-hop-v3";
       if (compact_handoff)
         require_exact_keys(
             handoff,
@@ -1695,10 +1729,32 @@ class StoredTransportArmState {
               tile_sources_[index]->handle() ||
           required_string(incoming, "checkpoint_identity") !=
               tile_sources_[index]->checkpoint_identity() ||
-          required_string(incoming, "source_operator_identity") !=
-              tile_sources_[index]->source_operator_identity())
+          (bounded_handoff
+               ? !compact_matching_identity_reference_matches(
+                     incoming.at("source_operator_reference"),
+                     tile_sources_[index]->source_operator_identity(),
+                     "consumed incoming source-operator reference")
+               : required_string(incoming, "source_operator_identity") !=
+                     tile_sources_[index]->source_operator_identity()))
         throw std::invalid_argument(
             "consumed transport-arm incoming lineage is inconsistent");
+      const auto& producing_chart =
+          retained.charts.at(retained.exact.matches[index].producing_chart);
+      const auto& receiving_chart =
+          retained.charts.at(retained.exact.matches[index].receiving_chart);
+      if (bounded_handoff &&
+          (!compact_matching_identity_reference_matches(
+               producing.at("chart_identity_reference"),
+               producing_chart.exact_identity,
+               "consumed producing chart-identity reference") ||
+           !compact_matching_identity_reference_matches(
+               as_object(handoff.at("receiving"),
+                         "consumed transport-arm receiving handoff")
+                   .at("chart_identity_reference"),
+               receiving_chart.exact_identity,
+               "consumed receiving chart-identity reference")))
+        throw std::invalid_argument(
+            "consumed transport-arm compact chart identity is inconsistent");
       const auto& handoff_basis = as_array(
           as_object(handoff.at("receiving"),
                     "consumed transport-arm receiving handoff")
@@ -1718,8 +1774,14 @@ class StoredTransportArmState {
             handed.at("local") != cached.at("local") ||
             handed.at("checkpoint_identity") !=
                 cached.at("checkpoint_identity") ||
-            handed.at("source_operator_identity") !=
-                cached.at("source_operator_identity"))
+            (bounded_handoff
+                 ? !compact_matching_identity_reference_matches(
+                       handed.at("source_operator_reference"),
+                       tile_sources_[index + 1]
+                           ->source_operator_identity(),
+                       "consumed handed basis source-operator reference")
+                 : handed.at("source_operator_identity") !=
+                       cached.at("source_operator_identity")))
           throw std::invalid_argument(
               "consumed transport-arm cached basis differs from its planned hop");
       }

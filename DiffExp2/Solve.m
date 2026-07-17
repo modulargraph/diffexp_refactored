@@ -6458,6 +6458,45 @@ sccNativeBlockProvenanceIdentityQ[identity_, schema_String,
     SameQ[sccNativeCanonicalJSONValue[Lookup[record, "targets", None]],
       sccNativeCanonicalJSONValue[submittedTargets]]];
 
+(* Public SCC-column summaries are bounded references to exact records retained
+   by the native SCC/local owner and its checkpoint.  The FNV values are useful
+   diagnostics only; exact authority comes from the already-validated live
+   handles, checkpoint identity, and native column binding. *)
+sccNativeColumnReferenceQ[reference_, scc_String, seedBlock_Integer,
+    basisIndex_Integer] := Module[{diagnostics, sccFingerprint,
+    columnFingerprint, sccBytes, columnBytes},
+  If[!AssociationQ[reference], Return[False, Module]];
+  diagnostics = Lookup[reference, "identity_diagnostics", None];
+  If[!AssociationQ[diagnostics], Return[False, Module]];
+  sccFingerprint = Lookup[diagnostics,
+    "scc_exact_identity_fingerprint", None];
+  columnFingerprint = Lookup[diagnostics,
+    "exact_column_identity_fingerprint", None];
+  sccBytes = Lookup[diagnostics, "scc_exact_identity_bytes", None];
+  columnBytes = Lookup[diagnostics, "exact_column_identity_bytes", None];
+  Sort[Keys[reference]] === Sort[{"schema", "authority", "scc",
+      "seed_block", "basis_index", "identity_diagnostics"}] &&
+    Sort[Keys[diagnostics]] === Sort[{"algorithm",
+      "scc_exact_identity_fingerprint", "scc_exact_identity_bytes",
+      "exact_column_identity_fingerprint",
+      "exact_column_identity_bytes"}] &&
+    Lookup[reference, "schema", None] ===
+      "diffexp2-retained-scc-column-reference-v1" &&
+    Lookup[reference, "authority", None] ===
+      "retained-native-exact-column-owner" &&
+    Lookup[reference, "scc", None] === scc &&
+    Lookup[reference, "seed_block", None] === seedBlock &&
+    Lookup[reference, "basis_index", None] === basisIndex &&
+    Lookup[diagnostics, "algorithm", None] === "fnv1a64-v1" &&
+    StringQ[sccFingerprint] &&
+    StringMatchQ[sccFingerprint,
+      RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+    StringQ[columnFingerprint] &&
+    StringMatchQ[columnFingerprint,
+      RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+    IntegerQ[sccBytes] && sccBytes > 0 &&
+    IntegerQ[columnBytes] && columnBytes > 0];
+
 sccNativeReachableTargetBlocks[components_List, edges_List,
     topological_List, seedBlock_Integer, cs_Association] := Module[
   {count = Length[components], positions, reachable, outgoing},
@@ -6838,16 +6877,8 @@ sccNativeFinalizeColumn[cs_Association, req_Association,
       Lookup[response, "pseudo_hit_count", None] =!= 0 ||
       (singularExecution && !sccNativePseudoDiagnosticsQ[response]) ||
       forbiddenPayloadKeys =!= {} || !AssociationQ[provenance] ||
-      Lookup[provenance, "scc", None] =!= prepared["SCC"] ||
-      Lookup[provenance, "scc_exact_identity", None] =!= parentIdentity ||
-      Lookup[provenance, "seed_block", None] =!= seedBlock - 1 ||
-      Lookup[provenance, "basis_index", None] =!= expectedBasisIndex ||
-      !StringQ[Lookup[provenance, "exact_column_identity", None]] ||
-      StringLength[Lookup[provenance, "exact_column_identity", ""]] === 0 ||
-      !sccNativeBlockProvenanceIdentityQ[
-        Lookup[provenance, "exact_column_identity", None],
-        expectedProvenanceSchema, parentIdentity, expectedBasisIndex,
-        provenanceLocalComponent, seed, targets],
+      !sccNativeColumnReferenceQ[provenance, prepared["SCC"],
+        seedBlock - 1, expectedBasisIndex],
     Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
     err["E6", cs, <|"BackendResponse" -> response,
       "ForbiddenPayloadKeys" -> forbiddenPayloadKeys,

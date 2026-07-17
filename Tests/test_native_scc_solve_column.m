@@ -76,9 +76,35 @@ ok = !AnyTrue[{cs, prepared, solved, evaluated}, FailureQ] &&
   Lookup[solved, "SeedBlock", None] === 1 &&
   Lookup[solved, "BasisIndex", None] === 1 &&
   AssociationQ[provenance] &&
+  Lookup[provenance, "schema", None] ===
+    "diffexp2-retained-scc-column-reference-v1" &&
+  Lookup[provenance, "authority", None] ===
+    "retained-native-exact-column-owner" &&
+  Sort[Keys[provenance]] === Sort[{"schema", "authority", "scc",
+    "seed_block", "basis_index", "identity_diagnostics"}] &&
   Lookup[provenance, "seed_block", None] === 0 &&
   Lookup[provenance, "basis_index", None] === 0 &&
-  StringQ[Lookup[provenance, "exact_column_identity", None]] &&
+  AssociationQ[Lookup[provenance, "identity_diagnostics", None]] &&
+  Sort[Keys[provenance["identity_diagnostics"]]] === Sort[{
+    "algorithm", "scc_exact_identity_fingerprint",
+    "scc_exact_identity_bytes", "exact_column_identity_fingerprint",
+    "exact_column_identity_bytes"}] &&
+  Lookup[provenance["identity_diagnostics"], "algorithm", None] ===
+    "fnv1a64-v1" &&
+  StringMatchQ[Lookup[provenance["identity_diagnostics"],
+      "scc_exact_identity_fingerprint", ""],
+    RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+  StringMatchQ[Lookup[provenance["identity_diagnostics"],
+      "exact_column_identity_fingerprint", ""],
+    RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+  IntegerQ[Lookup[provenance["identity_diagnostics"],
+    "exact_column_identity_bytes", None]] &&
+  Lookup[provenance["identity_diagnostics"],
+    "exact_column_identity_bytes", 0] > 0 &&
+  FreeQ[Keys[provenance],
+    "scc_exact_identity" | "exact_column_identity"] &&
+  StringLength[ExportString[
+    provenance, "RawJSON", "Compact" -> True]] < 1024 &&
   AssociationQ[nativeSummary] &&
   Lookup[nativeSummary, "json_coefficients", None] === 0 &&
   Intersection[Keys[nativeSummary],

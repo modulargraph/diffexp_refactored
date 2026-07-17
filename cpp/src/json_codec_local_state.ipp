@@ -1716,6 +1716,31 @@ struct SCCColumnProvenance {
                         {"basis_index", basis_index},
                         {"exact_column_identity", exact_column_identity}};
   }
+
+  // The exact identities can contain the complete composite recurrence
+  // request.  Returning them once per basis column made a large singular SCC
+  // response quadratic in the parent payload and then multiplied that data
+  // again while constructing its matching witness.  The retained local and
+  // SCC owners remain the exact authorities; this bounded record is only the
+  // public opaque reference to that already-validated native binding.
+  json::object public_reference() const {
+    return json::object{
+        {"schema", "diffexp2-retained-scc-column-reference-v1"},
+        {"authority", "retained-native-exact-column-owner"},
+        {"scc", scc_handle},
+        {"seed_block", seed_block},
+        {"basis_index", basis_index},
+        {"identity_diagnostics",
+         json::object{
+             {"algorithm", "fnv1a64-v1"},
+             {"scc_exact_identity_fingerprint",
+              public_provenance_fingerprint(scc_exact_identity)},
+             {"scc_exact_identity_bytes", scc_exact_identity.size()},
+             {"exact_column_identity_fingerprint",
+              public_provenance_fingerprint(exact_column_identity)},
+             {"exact_column_identity_bytes",
+              exact_column_identity.size()}}}};
+  }
 };
 
 struct RationalShadowColumnWitness {
@@ -2574,8 +2599,16 @@ class StoredLocal final : public StoredLocalBase {
         {"metadata", metadata_json()},
         {"create_parse_ms", create_parse_ms_},
         {"create_kernel_ms", create_kernel_ms_}};
-    if (column_provenance_.has_value())
-      result["column_provenance"] = column_provenance_->encode();
+    if (column_provenance_.has_value()) {
+      result.erase("source_operator_identity");
+      result["source_operator_reference"] = json::object{
+          {"algorithm", "fnv1a64-v1"},
+          {"fingerprint",
+           public_provenance_fingerprint(source_operator_identity_)},
+          {"identity_bytes", source_operator_identity_.size()}};
+      result["column_provenance"] =
+          column_provenance_->public_reference();
+    }
     if (retained_derivation_.has_value()) {
       const auto& derivation = *retained_derivation_;
       if (!retained_provenance_fingerprint_.has_value())

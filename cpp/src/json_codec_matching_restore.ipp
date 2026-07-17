@@ -1128,14 +1128,29 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       const auto& incoming = as_object(
           derivation.at("incoming"),
           "checkpoint compact materialized-local incoming");
-      require_exact_keys(
-          incoming,
-          {"local", "checkpoint_identity", "source_operator_identity"},
-          "checkpoint compact materialized-local incoming");
+      const bool bounded_incoming =
+          incoming.if_contains("source_operator_reference") != nullptr;
+      if (bounded_incoming)
+        require_exact_keys(
+            incoming,
+            {"local", "checkpoint_identity",
+             "source_operator_reference"},
+            "checkpoint bounded materialized-local incoming");
+      else
+        require_exact_keys(
+            incoming,
+            {"local", "checkpoint_identity",
+             "source_operator_identity"},
+            "checkpoint legacy compact materialized-local incoming");
       (void)scoped_handle_id(required_string(incoming, "local"), "l:",
                              "compact materialized-local incoming");
       (void)required_string(incoming, "checkpoint_identity");
-      (void)required_string(incoming, "source_operator_identity");
+      if (bounded_incoming)
+        (void)as_object(
+            incoming.at("source_operator_reference"),
+            "checkpoint incoming source-operator reference");
+      else
+        (void)required_string(incoming, "source_operator_identity");
       const auto& basis = as_array(
           derivation.at("basis"),
           "checkpoint compact materialized-local basis");
@@ -1145,15 +1160,30 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
       for (std::size_t column = 0; column < basis.size(); ++column) {
         const auto& source = as_object(
             basis[column], "checkpoint compact basis source");
-        require_exact_keys(
-            source,
-            {"column", "local", "checkpoint_identity",
-             "source_operator_identity"},
-            "checkpoint compact basis source");
+        const bool bounded_source =
+            source.if_contains("source_operator_reference") != nullptr;
+        if (bounded_source)
+          require_exact_keys(
+              source,
+              {"column", "local", "checkpoint_identity",
+               "source_operator_reference"},
+              "checkpoint bounded compact basis source");
+        else
+          require_exact_keys(
+              source,
+              {"column", "local", "checkpoint_identity",
+               "source_operator_identity"},
+              "checkpoint legacy compact basis source");
         if (as_u64(source.at("column"),
                    "checkpoint compact basis column") != column ||
-            required_string(source, "source_operator_identity") !=
-                source_operator_identity)
+            (bounded_source
+                 ? !compact_matching_identity_reference_matches(
+                       source.at("source_operator_reference"),
+                       source_operator_identity,
+                       "checkpoint compact basis source-operator reference")
+                 : required_string(
+                       source, "source_operator_identity") !=
+                       source_operator_identity))
           throw std::invalid_argument(
               "checkpoint compact materialized-local basis order or operator changed");
         (void)scoped_handle_id(required_string(source, "local"), "l:",
@@ -2126,23 +2156,38 @@ restore_checkpoint_exact_match_record(
     throw std::invalid_argument(
         "checkpoint exact-match residual lost its required complete window");
 
-  json::array provenance_basis;
-  for (const auto& source : basis_sources)
-    provenance_basis.push_back(source);
-  json::object provenance{
-      {"schema", "diffexp2-native-exact-regular-local-match-v1"},
-      {"checkpoint_identity", checkpoint_identity},
-      {"basis", std::move(provenance_basis)},
-      {"incoming", incoming_source},
-      {"basis_point_exact", basis_point},
-      {"incoming_point_exact", incoming_point},
-      {"physical_match_point_exact", physical_point},
-      {"epsilon", json::object{{"min", window.min_power},
-                                {"max", window.complete_max},
-                                {"required_complete_max",
-                                 required_complete_max}}}};
-  if (json::serialize(canonical_json_value(provenance)) !=
-      provenance_identity)
+  const auto exact_match_provenance = [&](bool compact) {
+    json::array provenance_basis;
+    if (compact) {
+      provenance_basis =
+          compact_matching_source_references(basis_sources);
+    } else {
+      for (const auto& source : basis_sources)
+        provenance_basis.push_back(source);
+    }
+    return json::object{
+        {"schema", "diffexp2-native-exact-regular-local-match-v1"},
+        {"checkpoint_identity", checkpoint_identity},
+        {"basis", std::move(provenance_basis)},
+        {"incoming",
+         compact
+             ? json::value(
+                   compact_matching_source_reference(incoming_source))
+             : json::value(incoming_source)},
+        {"basis_point_exact", basis_point},
+        {"incoming_point_exact", incoming_point},
+        {"physical_match_point_exact", physical_point},
+        {"epsilon", json::object{{"min", window.min_power},
+                                  {"max", window.complete_max},
+                                  {"required_complete_max",
+                                   required_complete_max}}}};
+  };
+  const auto old_provenance = exact_match_provenance(false);
+  const auto compact_provenance = exact_match_provenance(true);
+  if (json::serialize(canonical_json_value(old_provenance)) !=
+          provenance_identity &&
+      json::serialize(canonical_json_value(compact_provenance)) !=
+          provenance_identity)
     throw std::invalid_argument(
         "checkpoint exact-match provenance identity is inconsistent");
   const auto elapsed_ms = checkpoint_nonnegative_double(
@@ -2301,7 +2346,9 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
           basis_point, physical_point,
           checkpoint_identity + ":checkpoint-restore");
     if (saturation_witness_schema ==
-        kNativeSingularSCCSaturationProofSchema) {
+            kNativeSingularSCCSaturationProofSchema ||
+        saturation_witness_schema ==
+            kNativeSingularSCCSaturationCompactProofSchema) {
       if (!expected_session_configuration.has_value() ||
           !expected_singular_request.has_value())
         throw std::invalid_argument(
@@ -2320,50 +2367,77 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     throw std::invalid_argument(
         "checkpoint exact lattice identity or canonical witness is inconsistent");
 
-  json::array exact_binding_basis;
-  for (const auto& source : basis_sources)
-    exact_binding_basis.push_back(source);
-  json::object exact_lattice_provenance{
-      {"schema", "diffexp2-retained-exact-lattice-binding-v1"},
-      {"witness_schema", exact_lattice.witness_schema},
-      {"witness_identity", exact_lattice_identity},
-      {"basis", std::move(exact_binding_basis)},
-      {"basis_point_exact", basis_point},
-      {"physical_match_point_exact", physical_point},
-      {"matching_frame_identity", matching_frame_identity},
-      {"epsilon", json::object{{"min", window.min_power},
-                                {"max", window.complete_max}}}};
-  if (json::serialize(canonical_json_value(exact_lattice_provenance)) !=
-      exact_lattice_provenance_identity)
+  const auto lattice_provenance = [&](bool compact) {
+    json::array exact_binding_basis;
+    if (compact) {
+      exact_binding_basis =
+          compact_matching_source_references(basis_sources);
+    } else {
+      for (const auto& source : basis_sources)
+        exact_binding_basis.push_back(source);
+    }
+    return json::object{
+        {"schema", "diffexp2-retained-exact-lattice-binding-v1"},
+        {"witness_schema", exact_lattice.witness_schema},
+        {"witness_identity", exact_lattice_identity},
+        {"basis", std::move(exact_binding_basis)},
+        {"basis_point_exact", basis_point},
+        {"physical_match_point_exact", physical_point},
+        {"matching_frame_identity", matching_frame_identity},
+        {"epsilon", json::object{{"min", window.min_power},
+                                  {"max", window.complete_max}}}};
+  };
+  const auto old_lattice_provenance = lattice_provenance(false);
+  const auto compact_lattice_provenance = lattice_provenance(true);
+  if (json::serialize(canonical_json_value(old_lattice_provenance)) !=
+          exact_lattice_provenance_identity &&
+      json::serialize(canonical_json_value(compact_lattice_provenance)) !=
+          exact_lattice_provenance_identity)
     throw std::invalid_argument(
         "checkpoint exact lattice provenance identity is inconsistent");
 
-  json::array provenance_basis;
-  for (const auto& source : basis_sources)
-    provenance_basis.push_back(source);
-  json::object provenance{
-      {"schema", "diffexp2-native-refined-acb-local-match-v1"},
-      {"checkpoint_identity", checkpoint_identity},
-      {"basis", std::move(provenance_basis)},
-      {"incoming", incoming_source},
-      {"basis_point_exact", basis_point},
-      {"incoming_point_exact", incoming_point},
-      {"physical_match_point_exact", physical_point},
-      {"matching_frame_identity", matching_frame_identity},
-      {"epsilon", json::object{{"min", window.min_power},
-                                {"max", window.complete_max},
-                                {"required_complete_max",
-                                 required_complete_max}}},
-      {"exact_lattice_provenance_identity",
-       exact_lattice_provenance_identity},
-      {"refinement", json::object{{"relative_tolerance",
-                                    relative_tolerance},
-                                   {"max_steps",
-                                    max_refinement_steps}}}};
-  if (has_residual_frame_identity)
-    provenance["residual_frame_identity"] = residual_frame_identity;
-  if (json::serialize(canonical_json_value(provenance)) !=
-      provenance_identity)
+  const auto acb_match_provenance = [&](bool compact) {
+    json::array provenance_basis;
+    if (compact) {
+      provenance_basis =
+          compact_matching_source_references(basis_sources);
+    } else {
+      for (const auto& source : basis_sources)
+        provenance_basis.push_back(source);
+    }
+    json::object provenance{
+        {"schema", "diffexp2-native-refined-acb-local-match-v1"},
+        {"checkpoint_identity", checkpoint_identity},
+        {"basis", std::move(provenance_basis)},
+        {"incoming",
+         compact
+             ? json::value(
+                   compact_matching_source_reference(incoming_source))
+             : json::value(incoming_source)},
+        {"basis_point_exact", basis_point},
+        {"incoming_point_exact", incoming_point},
+        {"physical_match_point_exact", physical_point},
+        {"matching_frame_identity", matching_frame_identity},
+        {"epsilon", json::object{{"min", window.min_power},
+                                  {"max", window.complete_max},
+                                  {"required_complete_max",
+                                   required_complete_max}}},
+        {"exact_lattice_provenance_identity",
+         exact_lattice_provenance_identity},
+        {"refinement", json::object{{"relative_tolerance",
+                                      relative_tolerance},
+                                     {"max_steps",
+                                      max_refinement_steps}}}};
+    if (has_residual_frame_identity)
+      provenance["residual_frame_identity"] = residual_frame_identity;
+    return provenance;
+  };
+  const auto old_provenance = acb_match_provenance(false);
+  const auto compact_provenance = acb_match_provenance(true);
+  if (json::serialize(canonical_json_value(old_provenance)) !=
+          provenance_identity &&
+      json::serialize(canonical_json_value(compact_provenance)) !=
+          provenance_identity)
     throw std::invalid_argument(
         "checkpoint retained Acb match provenance identity is inconsistent");
 

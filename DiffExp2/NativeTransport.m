@@ -811,6 +811,42 @@ nativeAcbCasePFailureQ[failure_] := Module[{},
   !FreeQ[Unevaluated[failure],
     text_String /; nativeAcbRationalShadowTriggerTextQ[text], Infinity]];
 
+nativeColumnReferenceQ[reference_, scc_String, seedBlock_Integer,
+    basisIndex_Integer] :=
+  Module[{diagnostics, sccFingerprint, columnFingerprint,
+      sccBytes, columnBytes},
+    If[!AssociationQ[reference], Return[False, Module]];
+    diagnostics = Lookup[reference, "identity_diagnostics", None];
+    If[!AssociationQ[diagnostics], Return[False, Module]];
+    sccFingerprint = Lookup[diagnostics,
+      "scc_exact_identity_fingerprint", None];
+    columnFingerprint = Lookup[diagnostics,
+      "exact_column_identity_fingerprint", None];
+    sccBytes = Lookup[diagnostics, "scc_exact_identity_bytes", None];
+    columnBytes = Lookup[diagnostics, "exact_column_identity_bytes", None];
+    Sort[Keys[reference]] === Sort[{"schema", "authority", "scc",
+        "seed_block", "basis_index", "identity_diagnostics"}] &&
+      Sort[Keys[diagnostics]] === Sort[{"algorithm",
+        "scc_exact_identity_fingerprint", "scc_exact_identity_bytes",
+        "exact_column_identity_fingerprint",
+        "exact_column_identity_bytes"}] &&
+      Lookup[reference, "schema", None] ===
+        "diffexp2-retained-scc-column-reference-v1" &&
+      Lookup[reference, "authority", None] ===
+        "retained-native-exact-column-owner" &&
+      Lookup[reference, "scc", None] === scc &&
+      Lookup[reference, "seed_block", None] === seedBlock &&
+      Lookup[reference, "basis_index", None] === basisIndex &&
+      Lookup[diagnostics, "algorithm", None] === "fnv1a64-v1" &&
+      StringQ[sccFingerprint] &&
+      StringMatchQ[sccFingerprint,
+        RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+      StringQ[columnFingerprint] &&
+      StringMatchQ[columnFingerprint,
+        RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+      IntegerQ[sccBytes] && sccBytes > 0 &&
+      IntegerQ[columnBytes] && columnBytes > 0];
+
 nativeShadowColumn[source_Association, targetSCC_Association,
     shadowIdentity_String, system_Association] := Module[
   {checkpointIdentity, response, provenance, result},
@@ -833,10 +869,8 @@ nativeShadowColumn[source_Association, targetSCC_Association,
     err["E5", <|"BackendFailure" -> response,
       "Detail" -> "exact Rational CASE-P shadow could not be specialized into its paired Acb SCC"|>]];
   provenance = Lookup[response, "column_provenance", None];
-  If[!AssociationQ[provenance] ||
-      Lookup[provenance, "basis_index", None] =!=
-        source["BasisIndex"] - 1 ||
-      !StringQ[Lookup[provenance, "exact_column_identity", None]],
+  If[!nativeColumnReferenceQ[provenance, targetSCC["SCC"],
+      source["SeedBlock"] - 1, source["BasisIndex"] - 1],
     Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[response]];
     err["E6", <|"BackendResponse" -> response,
       "Detail" -> "specialized CASE-P shadow lost its exact physical-column provenance"|>]];

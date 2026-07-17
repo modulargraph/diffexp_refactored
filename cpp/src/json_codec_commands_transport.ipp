@@ -195,10 +195,22 @@
     if (incoming_top_valid < incoming_epsilon_max)
       return ineligible(
           "incoming-local-full-epsilon-window-is-not-complete");
-    if (incoming_epsilon_min > requested_epsilon.min_power ||
-        incoming_epsilon_max < requested_epsilon.complete_max)
+    if (incoming_epsilon_max < requested_epsilon.complete_max)
       return ineligible(
           "incoming-local-lacks-complete-epsilon-coverage");
+    // EpsilonWindow certifies every row below its stored minimum as
+    // structural zero.  Local assembly may therefore trim a requested lower
+    // row without losing information.  Preserve any extra stored lower rows,
+    // but widen a later stored minimum down to the requested edge with exact
+    // zeros before causal physical evolution.
+    const auto execution_epsilon_min =
+        std::min(incoming_epsilon_min, requested_epsilon.min_power);
+    const auto incoming_dimension = as_u32(
+        incoming_summary.at("dimension"),
+        "physical value-hop incoming dimension");
+    (void)physical_ode_detail::checked_physical_evolution_coefficient_count(
+        EpsilonWindow{execution_epsilon_min, incoming_epsilon_max},
+        incoming_dimension, receiver_taylor_complete_max);
 
     auto acb_incoming =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(incoming);
@@ -278,6 +290,21 @@
             certified_handoff.value.at(power, component));
     }
     certified_handoff.value.error = ErrorEnvelope{};
+    if (execution_epsilon_min <
+        certified_handoff.value.epsilon.min_power) {
+      auto widened = physical_ode_detail::zero_epsilon_vector(
+          EpsilonWindow{execution_epsilon_min, incoming_epsilon_max},
+          certified_handoff.value.dimension);
+      for (std::int64_t raw_power = incoming_epsilon_min;
+           raw_power <= incoming_epsilon_max; ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        for (std::uint32_t component = 0;
+             component < certified_handoff.value.dimension; ++component)
+          widened.at(power, component) =
+              certified_handoff.value.at(power, component);
+      }
+      certified_handoff.value = std::move(widened);
+    }
     for (const auto& coefficient : certified_handoff.value.coefficients)
       if (!value_handoff_accurate(coefficient, relative_accuracy_max))
         return ineligible(
@@ -323,12 +350,12 @@
     if (!evolution.eligible)
       return ineligible("physical-evolution-ineligible: " +
                         evolution.reason);
-    if (evolution.epsilon.min_power != incoming_epsilon_min ||
+    if (evolution.epsilon.min_power != execution_epsilon_min ||
         evolution.epsilon.complete_max != incoming_epsilon_max ||
         evolution.taylor_coefficients.size() !=
             static_cast<std::size_t>(receiver_taylor_complete_max) + 1)
       throw std::logic_error(
-          "ordinary physical evolution changed its full source epsilon window");
+          "ordinary physical evolution changed its zero-padded source epsilon window");
     const auto kernel_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - kernel_started).count();
 
@@ -443,7 +470,7 @@
           {"coefficient_transport", "native-retained-only"},
           {"whole_arm_complete", false},
           {"evaluated_epsilon", json::object{
-               {"min", incoming_epsilon_min},
+               {"min", execution_epsilon_min},
                {"max", incoming_epsilon_max},
                {"required_complete_max", required_complete_max}}},
           {"output", json::object{
@@ -1292,6 +1319,37 @@
       --session->pending_local_solves;
       if (session->domain == "acb" &&
           error.code ==
+              MatchingArithmeticErrorCode::UnresolvedDeterminantTail) {
+        const auto& arm = plan->arm(arm_name);
+        return json::object{
+            {"status", "error"},
+            {"id", "CPP"},
+            {"reason", "acb_match_residual_inconclusive"},
+            {"retryable_epsilon_reservoir", true},
+            {"retryable_matching_clearance", false},
+            {"required_additional_epsilon_orders", 1},
+            {"arm", arm_name},
+            {"match", match_index},
+            {"geometry", encode_plan_match(arm, match_index)},
+            {"residual", json::object{
+                 {"status", "unresolved-determinant-tail"},
+                 {"common_complete_max",
+                  error.epsilon_power.has_value()
+                      ? json::value(*error.epsilon_power)
+                      : json::value(nullptr)},
+                 {"required_complete_max", required_complete_max},
+                 {"detail", error.what()}}},
+            {"epsilon", json::object{
+                 {"min", requested_epsilon.min_power},
+                 {"max", requested_epsilon.complete_max},
+                 {"required_complete_max", required_complete_max}}},
+            {"refinement", refinement},
+            {"detail",
+             "the exact saturation determinant remains unresolved at the "
+             "private epsilon edge; retry with one additional order"}};
+      }
+      if (session->domain == "acb" &&
+          error.code ==
               MatchingArithmeticErrorCode::InsufficientCompleteWindow &&
           error.epsilon_power.has_value()) {
         const auto complete_max = *error.epsilon_power;
@@ -2059,7 +2117,7 @@
             session_configuration, plan, anchor, input,
             epsilon_contract.work,
             epsilon_contract.match_required_complete_max, refinement,
-            checkpoint_root);
+            checkpoint_root, true);
         output.state = std::make_shared<StoredTransportArmState>(
             state_handles[arm_index],
             checkpoint_root + ":" + input.name + ":state", input.name,
@@ -2402,7 +2460,7 @@
         session->domain, session->precision_bits, session_configuration,
         plan, anchor, input, epsilon_contract.work,
         epsilon_contract.match_required_complete_max, refinement,
-        checkpoint_root);
+        checkpoint_root, true);
     auto state = std::make_shared<StoredTransportArmState>(
         state_handle, checkpoint_root + ":" + arm_name + ":state",
         arm_name, plan, anchor, input.basis, marched.matches,

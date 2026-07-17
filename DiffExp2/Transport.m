@@ -242,12 +242,10 @@ numHandoff[x_] := N[x,
 
 (* A value solve cannot recover significance already lost while evaluating
    the preceding truncated solution at the next chart center.  In
-   particular N[x, 2 WP] does not add digits to an inexact x.  Require the
-   incoming Cauchy data's tracked uncertainty to sit below the same relative
-   scale used by ODEResidualCheck, with the repository safety margin.  When
-   this preflight fails TransportLine chooses the ordinary match-point basis
-   path before solving; this is a conditioning choice between equivalent
-   transports, not a fallback from a recurrence failure. *)
+   particular N[x, 2 WP] does not add digits to an inexact x.  The Wolfram
+   path has no certified Taylor-tail enclosure, so retain its original
+   residual-scale significance gate.  The native path has a separate
+   coefficient-dependent tail proof and ball-inflation contract below. *)
 valueHandoffAccurateQ[vals_List] := Module[
   {rtol = DiffExp2`Tolerances`Tol["ResidTol"],
    guard = DiffExp2`Tolerances`$SafetyDigits, nums},
@@ -263,11 +261,23 @@ valueHandoffAccurateQ[vals_List] := Module[
     TrueQ[uncertainty <= rtol*scale/10^guard]]]]];
 
 (* A center handoff evaluates a truncated Taylor solution farther from its
-   origin than the ordinary match point.  Precision metadata cannot see
-   that truncation error, so admit it only when the geometric tail proxy is
-   two decades below the structural Laurent floor. *)
-valueCenterMargin[expansionOrder_Integer] := Min[9/10,
-  N[(DiffExp2`Tolerances`Tol["LaurentLeadTol"]/100)^
+   origin than the ordinary match point.  The legacy Wolfram consumer keeps
+   the structural Laurent proxy because it evaluates without a certified
+   tail.  A native-certified plan may relax only deliberately low-digit runs:
+   C++ subsequently proves the actual coefficient-dependent tail, inflates
+   every ball by that enclosure, and rejects a handoff which misses its
+   cumulative relative-accuracy contract. *)
+valueCenterTailTolerance["LegacyStructural"] :=
+  DiffExp2`Tolerances`Tol["LaurentLeadTol"]/
+    10^DiffExp2`Tolerances`$SafetyDigits;
+valueCenterTailTolerance["NativeCertified"] :=
+  Max[DiffExp2`Tolerances`Tol["LaurentLeadTol"],
+    DiffExp2`Tolerances`Tol["MatchTol"]]/
+    10^DiffExp2`Tolerances`$SafetyDigits;
+
+valueCenterMargin[expansionOrder_Integer,
+    contract_String:"LegacyStructural"] := Min[9/10,
+  N[valueCenterTailTolerance[contract]^
     (1/(expansionOrder + 1)), 30]];
 
 (* The classic +1/k,-1/k handoff keeps basis matching well conditioned, but
@@ -286,8 +296,9 @@ valueCenterMargin[expansionOrder_Integer] := Min[9/10,
    planner.  Midpoints of exact centers are exact (RootReduce); the inexact
    branch is rationalized before it can become a chart center. *)
 valueRefineRegularChain[charts_List, all_List, dir_, k_Integer,
-    lineCap_] := Module[
-  {margin = valueCenterMargin[cfg["ExpansionOrder"]], safety = 99/100,
+    lineCap_, valueTailContract_String] := Module[
+  {margin = valueCenterMargin[
+      cfg["ExpansionOrder"], valueTailContract], safety = 99/100,
    radius, regularMidpoint, fallbackPoint, hopSafeQ, refinePair, out},
   radius[c_] := cappedChartRadius[c, all, lineCap];
   (* A regular center is a free coordinate choice.  In particular, do not
@@ -731,10 +742,19 @@ DigitBudget[ag_, nseg_Integer] := Module[{wp = cfg["WorkingPrecision"], dn, cd},
 
 (* ---- 2.3 segmentation ---- *)
 
-SegmentLine[sys_Association, {from_, to_}] := Module[
+Options[SegmentLine] = {
+  "ValueTailContract" -> "LegacyStructural"};
+
+SegmentLine[sys_Association, {from_, to_}, OptionsPattern[]] := Module[
   {sings, real, projected, dir, k = cfg["DivisionOrder"], charts,
    cur, interior, endpointSingular, all, guard = 0, lineCap, prevRad,
-   prevMatchRad, var = sys["Variable"]},
+   prevMatchRad, var = sys["Variable"],
+   valueTailContract = OptionValue["ValueTailContract"]},
+  If[!MemberQ[{"LegacyStructural", "NativeCertified"},
+      valueTailContract],
+    err["E2", <|"ValueTailContract" -> valueTailContract,
+      "Detail" ->
+        "ValueTailContract must be LegacyStructural or NativeCertified"|>]];
   sings = plannerProfile["FindSingularities", FindSingularities[sys]];
   all = sings["All"]; real = sings["Real"];
   dir = Sign[to - from];
@@ -876,7 +896,8 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
      refine it only under the opt-in flag. Flag-off plans remain exactly
      the pre-existing plans, including centers and match points. *)
   If[Environment["DE2_VALUE_TRANSPORT"] === "1",
-    charts = valueRefineRegularChain[charts, all, dir, k, lineCap]];
+    charts = valueRefineRegularChain[
+      charts, all, dir, k, lineCap, valueTailContract]];
   (* attach radii, match points, names; radii capped at line scale
      (a validity bound: capping is conservative; uncapped Infinity poisons
      the match-point arithmetic on singularity-free systems) *)
@@ -906,6 +927,7 @@ SegmentLine[sys_Association, {from_, to_}] := Module[
       "Prescriptions" -> chartPrescriptions[c["Center"], var]|>]] &, charts];
   <|"From" -> from, "To" -> to, "Direction" -> dir,
     "Charts" -> charts, "SegmentCount" -> Length[charts],
+    "ValueTailContract" -> valueTailContract,
     "EndpointIsSingular" -> endpointSingular,
     "DigitsNeeded" -> DigitBudget[cfg["AccuracyGoal"], Length[charts]],
     "Singularities" -> Append[sings, "ProjectionWaypoints" -> projected]|>];

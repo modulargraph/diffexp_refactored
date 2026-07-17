@@ -223,7 +223,7 @@ json::object regulated_observable(const std::string& identity,
       {"upper_integrand_rows",
        json::array{regulated_row(identity + ":upper", "2")}},
       {"epsilon", json::object{
-           {"min", -1}, {"max", 0}, {"required_complete_max", 0}}},
+           {"min", -1}, {"max", 2}, {"required_complete_max", 0}}},
       {"tail_policy", "stored"}};
 }
 
@@ -252,11 +252,13 @@ json::object contract_pair(const std::string& session,
 
 json::object stream_observable(const std::string& identity,
                                const std::string& checkpoint,
-                               std::int32_t minimum = 0) {
+                               std::int32_t minimum = 0,
+                               std::int32_t maximum = 0) {
   return json::object{
       {"identity", identity}, {"checkpoint_identity", checkpoint},
       {"epsilon", json::object{
-           {"min", minimum}, {"max", 0}, {"required_complete_max", 0}}},
+           {"min", minimum}, {"max", maximum},
+           {"required_complete_max", 0}}},
       {"tail_policy", "stored"}};
 }
 
@@ -266,7 +268,8 @@ json::object begin_stream(const std::string& session,
                           const std::string& identity,
                           const std::string& checkpoint,
                           const std::string& checkpoint_root,
-                          std::int32_t minimum = 0) {
+                          std::int32_t minimum = 0,
+                          std::int32_t maximum = 0) {
   return request(json::object{
       {"schema", 2}, {"op", "transport.contract_pair_stream_begin"},
       {"session", session}, {"lower", state_reference(lower)},
@@ -275,7 +278,8 @@ json::object begin_stream(const std::string& session,
            {"schema",
             "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
            {"root", checkpoint_root}}},
-      {"observable", stream_observable(identity, checkpoint, minimum)}});
+      {"observable",
+       stream_observable(identity, checkpoint, minimum, maximum)}});
 }
 
 json::object add_stream_tile(const std::string& session,
@@ -386,8 +390,10 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
         paired.at("lines").as_array().front().as_object();
     const auto paired_export = export_line(session, paired_line);
     if (paired_line.at("epsilon").as_object().at("min") != -1 ||
+        paired_line.at("epsilon").as_object().at("max") != 1 ||
         paired_export.at("status") != "ok" ||
         paired_export.at("value").as_object().at("min") != -1 ||
+        paired_export.at("value").as_object().at("max") != 1 ||
         std::abs(midpoint(paired_export) - 1.0) > 1e-40)
       throw std::runtime_error(
           "one-shot pair clipped the regulated primitive lower halo: " +
@@ -396,7 +402,7 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
     const auto stream = begin_stream(
         session, lower, upper, "pair-stream-regulated-halo",
         "pair-stream-regulated-halo-checkpoint",
-        "pair-stream-regulated-halo-root", -1);
+        "pair-stream-regulated-halo-root", -1, 2);
     const auto lower_added = add_stream_tile(
         session, stream, "lower", 0,
         regulated_row("pair-stream-regulated-halo:lower", "1"));
@@ -415,8 +421,10 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
         streamed.at("lines").as_array().front().as_object();
     const auto streamed_export = export_line(session, streamed_line);
     if (streamed_line.at("epsilon").as_object().at("min") != -1 ||
+        streamed_line.at("epsilon").as_object().at("max") != 1 ||
         streamed_export.at("status") != "ok" ||
         streamed_export.at("value").as_object().at("min") != -1 ||
+        streamed_export.at("value").as_object().at("max") != 1 ||
         std::abs(midpoint(streamed_export) - 1.0) > 1e-40 ||
         streamed_export.at("value") != paired_export.at("value"))
       throw std::runtime_error(

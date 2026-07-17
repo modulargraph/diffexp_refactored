@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -621,7 +622,8 @@ json::object consume_physical_value_hop(
     const std::string& incoming,
     const std::string& incoming_checkpoint, json::object solver,
     const std::string& root,
-    const std::string& plan_checkpoint) {
+    const std::string& plan_checkpoint,
+    std::int32_t epsilon_min = 0) {
   return request(json::object{
       {"schema", 2}, {"op", "transport.consume_physical_value_hop"},
       {"session", session}, {"tile_plan", plan},
@@ -630,7 +632,7 @@ json::object consume_physical_value_hop(
       {"value_solver", std::move(solver)},
       {"incoming", incoming},
       {"incoming_checkpoint_identity", incoming_checkpoint},
-      {"epsilon", json::object{{"min", 0}, {"max", 2},
+      {"epsilon", json::object{{"min", epsilon_min}, {"max", 2},
                                   {"required_complete_max", 2}}},
       {"checkpoint_policy", json::object{
            {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
@@ -1871,11 +1873,23 @@ void test_frame_independent_physical_value_wiring() {
     require_ok(planned, "physical wiring tile.plan_arm");
     const auto plan = std::string(planned.at("tile_plan").as_string());
 
+    const auto oversized = consume_physical_value_hop(
+        session, plan, "lower", 0, anchor,
+        "physical-wiring-anchor-local",
+        physical_value_solver("-2/3", 12), "physical-wiring-oversized",
+        plan_checkpoint, std::numeric_limits<std::int32_t>::min());
+    if (oversized.at("status") != "error" ||
+        std::string(oversized.at("detail").as_string()).find(
+            "unreasonably large") == std::string::npos)
+      throw std::runtime_error(
+          "ordinary physical hop did not reject an oversized zero-padding request before allocation: " +
+          json::serialize(oversized));
+
     const auto direct = consume_physical_value_hop(
         session, plan, "lower", 0, anchor,
         "physical-wiring-anchor-local",
         physical_value_solver("-2/3", 12), "physical-wiring-hop",
-        plan_checkpoint);
+        plan_checkpoint, -1);
     require_ok(direct, "physical wiring direct hop");
     if (direct.at("used") != true ||
         direct.at("execution_mode") !=
@@ -1893,14 +1907,34 @@ void test_frame_independent_physical_value_wiring() {
         {"schema", 2}, {"op", "local.stats"}, {"session", session},
         {"local", direct_local.at("local")}});
     require_ok(direct_stats, "physical wiring direct local.stats");
-    if (direct_stats.at("epsilon_min") != 0 ||
+    if (direct_stats.at("epsilon_min") != -1 ||
         direct_stats.at("epsilon_max") != 2 ||
         direct_stats.at("top_valid") != 2 ||
         direct_stats.at("tail_majorant").as_object().at("status") !=
             "unsupported")
       throw std::runtime_error(
-          "ordinary physical hop changed its full source window or claimed a tail theorem: " +
+          "ordinary physical hop did not zero-pad its structural lower row or claimed a tail theorem: " +
           json::serialize(direct_stats));
+    const auto canonical_zero_row_trimmed = [&](const char* point) {
+      const auto evaluated = request(json::object{
+          {"schema", 2}, {"op", "local.evaluate"}, {"session", session},
+          {"local", direct_local.at("local")},
+          {"point", json::object{{"exact", point}}},
+          {"options", json::object{{"tail_estimate", false}}},
+          {"output_digits", 40}});
+      require_ok(evaluated, "physical wiring padded local.evaluate");
+      const auto& value = evaluated.at("value").as_object();
+      const auto& coefficients = value.at("coefficients").as_array();
+      // Point evaluation intentionally canonicalizes away exact leading
+      // epsilon-zero rows.  The retained frame assertion above proves the
+      // structural row exists; this verifies it cannot reappear numerically.
+      return value.at("min") == 0 && value.at("max") == 2 &&
+          coefficients.size() == 3;
+    };
+    if (!canonical_zero_row_trimmed("0") ||
+        !canonical_zero_row_trimmed("1/3"))
+      throw std::runtime_error(
+          "ordinary physical hop did not canonically trim its exact structural lower row during local evaluation");
 
     const auto unavailable_tail = consume_physical_value_hop(
         session, plan, "lower", 1,
@@ -1950,7 +1984,7 @@ void test_frame_independent_physical_value_wiring() {
         {"schema", 2}, {"op", "session.counters"},
         {"session", session}});
     require_ok(counters, "physical wiring session.counters");
-    if (counter(counters, "transport_physical_value_hop_attempts") != 2 ||
+    if (counter(counters, "transport_physical_value_hop_attempts") != 3 ||
         counter(counters, "transport_physical_value_hop_successes") != 1 ||
         counter(counters, "transport_physical_value_hop_ineligible") != 1 ||
         counter(counters, "transport_framed_basis_hops") != 1)

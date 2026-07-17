@@ -452,6 +452,54 @@ void fused_row_uses_exact_rational_endpoint_order() {
         enclosures_overlap && exact_order_accepted);
 }
 
+void fused_row_charges_upper_halo_only_to_regulated_center_primitive() {
+  auto source = base_solution<Rational>(1);
+  source.epsilon = {0, 2};
+  source.checkpoint_identity = "fused-regulated-halo-source";
+  source.sectors = {
+      sector<Rational>("-1", "1", 0,
+                       {Rational(1), Rational(0), Rational(0)})};
+  PreparedSparseLocalMultiplierMatrix<Rational> row;
+  row.rows = 1;
+  row.columns = 1;
+  row.exact_identity = "fused-regulated-halo-row";
+  row.entries.push_back(
+      {0, 0,
+       prepared_multiplier<Rational>(
+           0, 0,
+           {{Rational(1)}, {Rational(0)}, {Rational(0)}}, "1")});
+
+  StoredLineIntegrationOptions strict;
+  strict.delivered_epsilon = {-1, 2};
+  bool strict_rejected = false;
+  try {
+    (void)diffexp2::integrate_prepared_scalar_row_stored(
+        row, source, 2, RealEvaluationPoint::rational("0"),
+        RealEvaluationPoint::rational("1/2"), strict);
+  } catch (const NativeIntegrationError& error) {
+    strict_rejected =
+        error.code == NativeIntegrationErrorCode::IncompleteEpsilonWindow;
+  }
+
+  auto observable = strict;
+  observable.required_complete_max = 0;
+  const auto clipped = diffexp2::integrate_prepared_scalar_row_stored(
+      row, source, 2, RealEvaluationPoint::rational("0"),
+      RealEvaluationPoint::rational("1/2"), observable);
+  check("fused observable returns the exact complete window after a regulated centre primitive consumes one upper row",
+        strict_rejected && clipped.value.epsilon.min_power == -1 &&
+            clipped.value.epsilon.complete_max == 1);
+
+  source.sectors = {
+      sector<Rational>("0", "0", 0,
+                       {Rational(1), Rational(0), Rational(0)})};
+  const auto ordinary = diffexp2::integrate_prepared_scalar_row_stored(
+      row, source, 2, RealEvaluationPoint::rational("0"),
+      RealEvaluationPoint::rational("1/2"), observable);
+  check("fused observable preserves the projected upper row for an ordinary centre primitive",
+        ordinary.value.epsilon.complete_max == 2);
+}
+
 template <typename Scalar>
 LocalSolution<Scalar> cross_cell_cancellation_source(const Scalar& positive,
                                                       const Scalar& negative) {
@@ -654,6 +702,7 @@ int main() {
   input_error_envelope_is_not_discarded();
   fused_rational_row_matches_materialized_projection();
   fused_row_uses_exact_rational_endpoint_order();
+  fused_row_charges_upper_halo_only_to_regulated_center_primitive();
   fused_row_cancels_divergence_across_sector_taylor_cells();
   fused_acb_row_matches_bounded_cross_cell_cancellation();
   fused_acb_row_keeps_preprojection_cancellation_scale();

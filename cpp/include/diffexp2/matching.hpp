@@ -24,6 +24,7 @@ enum class MatchingArithmeticErrorCode : std::uint8_t {
   AmbiguousZero,
   ZeroDivisor,
   SingularOrIncompleteSystem,
+  UnresolvedDeterminantTail,
   StructurallySingularTransformation,
   ExponentOverflow,
   InsufficientCompleteWindow,
@@ -1569,9 +1570,10 @@ saturate_rectangular_finite_laurent_basis(
       determinant, context + ": normalized pivot-row determinant");
   if (!determinant_valuation.has_value() || *determinant_valuation < 0)
     throw MatchingArithmeticError(
-        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+        MatchingArithmeticErrorCode::UnresolvedDeterminantTail,
         context +
-            ": pivot-row determinant is unresolved in the complete epsilon window");
+            ": pivot-row determinant is unresolved in the complete epsilon window",
+        std::nullopt, std::nullopt, determinant.complete_max());
   if (steps != static_cast<std::size_t>(*determinant_valuation))
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::SaturationFailure,

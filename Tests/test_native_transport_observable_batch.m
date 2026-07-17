@@ -65,8 +65,8 @@ assert["native_session_counters_are_fixed_size_and_summary_free",
       "chart_stats" | "local_stats" | "match_stats" |
       "transport_state_stats" | "retained_derivation"]];
 
-(* A streamed hop certifies only the atlas's public residual prefix while
-   retaining the larger work frame needed by later epsilon losses. *)
+(* A streamed hop certifies every retained row which a later observable can
+   consume.  Only the gap above that required edge is private match work. *)
 capturedHopEpsilon = None;
 streamFixtureAnchor = <|"session" -> "stream-fixture-session",
   "local" -> "l:anchor", "checkpoint_identity" -> "anchor-checkpoint"|>;
@@ -97,11 +97,11 @@ streamFixture = catchDE2[Block[{
       "match_required_complete_max" -> 7|>,
     "stream-fixture-root", <|"relative_tolerance" -> "1e-8",
       "max_steps" -> 2|>]]];
-assert["streamed hop separates public residual prefix from private work top",
+assert["streamed hop certifies the observable-consumed reservoir below the private work top",
   AssociationQ[streamFixture] &&
     Length[streamFixture["tile_sources"]] === 2 &&
     capturedHopEpsilon === <|"min" -> 0, "max" -> 8,
-      "required_complete_max" -> 2|>];
+      "required_complete_max" -> 7|>];
 
 beforeInvalid = sessionStats[];
 duplicate = If[FailureQ[atlas], atlas, catchDE2[

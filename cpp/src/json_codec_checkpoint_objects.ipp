@@ -691,20 +691,32 @@ restore_checkpoint_planned_match_hop_record(
         "checkpoint planned match lost an identity or strong owner");
   const auto& handoff = as_object(
       object.at("handoff"), "checkpoint planned-match handoff");
-  require_exact_keys(
-      handoff,
-      {"schema", "tile_plan", "tile_plan_checkpoint_identity",
-       "tile_plan_provenance_identity", "arm", "match", "geometry",
-       "producing", "receiving", "result_checkpoint_identity",
-       "native_match_provenance_identity", "advance"},
-      "checkpoint planned-match handoff");
-  if (required_string(handoff, "schema") !=
-          "diffexp2-retained-exact-plan-match-hop-v1" ||
+  const auto handoff_schema = required_string(handoff, "schema");
+  const bool compact_handoff =
+      handoff_schema == "diffexp2-retained-exact-plan-match-hop-v3";
+  if (compact_handoff)
+    require_exact_keys(
+        handoff,
+        {"schema", "tile_plan", "tile_plan_checkpoint_identity",
+         "arm", "match", "geometry", "producing", "receiving",
+         "result_checkpoint_identity", "advance"},
+        "checkpoint compact planned-match handoff");
+  else
+    require_exact_keys(
+        handoff,
+        {"schema", "tile_plan", "tile_plan_checkpoint_identity",
+         "tile_plan_provenance_identity", "arm", "match", "geometry",
+         "producing", "receiving", "result_checkpoint_identity",
+         "native_match_provenance_identity", "advance"},
+        "checkpoint planned-match handoff");
+  if ((!compact_handoff &&
+       handoff_schema != "diffexp2-retained-exact-plan-match-hop-v1") ||
       required_string(handoff, "tile_plan") != plan->handle() ||
       required_string(handoff, "tile_plan_checkpoint_identity") !=
           plan->checkpoint_identity() ||
-      required_string(handoff, "tile_plan_provenance_identity") !=
-          plan->provenance_identity() ||
+      (!compact_handoff &&
+       required_string(handoff, "tile_plan_provenance_identity") !=
+           plan->provenance_identity()) ||
       required_string(handoff, "result_checkpoint_identity") !=
           checkpoint_identity)
     throw std::invalid_argument(
@@ -737,7 +749,7 @@ restore_checkpoint_planned_match_hop_record(
   } else if (native_schema == "diffexp2-retained-acb-match-v2") {
     const auto saturation = native_acb_saturation_binding(
         plan, source_session_configuration_identity, arm_name, match_index,
-        checkpoint_identity);
+        checkpoint_identity, compact_handoff);
     const std::optional<json::object> expected_singular_request =
         saturation.request_key == "native_singular_scc_saturation"
             ? std::optional<json::object>(saturation.request)
@@ -793,7 +805,7 @@ restore_checkpoint_planned_match_hop_record(
   for (const auto& local : basis) basis_handles.push_back(local->handle());
   auto expected_handoff = planned_match_handoff_record(
       plan, arm_name, match_index, basis_handles, basis, incoming->handle(),
-      incoming, checkpoint_identity, native_summary);
+      incoming, checkpoint_identity, native_summary, compact_handoff);
   if (handoff != expected_handoff ||
       json::serialize(canonical_json_value(expected_handoff)) !=
           provenance_identity)
@@ -2604,20 +2616,22 @@ json::array checkpoint_planned_match_identity_manifest(
         item.at("handoff"), "checkpoint planned match handoff");
     const auto& native_match = as_object(
         item.at("native_match"), "checkpoint planned embedded match");
-    manifest.push_back(json::object{
+    json::object identity{
         {"handle", item.at("handle")},
         {"checkpoint_identity", item.at("checkpoint_identity")},
         {"provenance_identity", item.at("provenance_identity")},
         {"tile_plan", handoff.at("tile_plan")},
         {"tile_plan_checkpoint_identity",
          handoff.at("tile_plan_checkpoint_identity")},
-        {"tile_plan_provenance_identity",
-         handoff.at("tile_plan_provenance_identity")},
         {"native_match_schema", native_match.at("schema")},
         {"native_match_checkpoint_identity",
          native_match.at("checkpoint_identity")},
         {"native_match_provenance_identity",
-         native_match.at("provenance_identity")}});
+         native_match.at("provenance_identity")}};
+    if (const auto* plan_provenance =
+            handoff.if_contains("tile_plan_provenance_identity"))
+      identity["tile_plan_provenance_identity"] = *plan_provenance;
+    manifest.push_back(std::move(identity));
   }
   return manifest;
 }

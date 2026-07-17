@@ -32,6 +32,14 @@ struct StoredLineIntegrationOptions {
   // Rows below min_power are requested structural zeros; every row through
   // complete_max must be computable without reading an unknown coefficient.
   EpsilonWindow delivered_epsilon;
+  // Most callers require the complete delivery window above exactly.  A
+  // transport observable instead has a requested ceiling and a smaller
+  // public completeness floor.  When this floor is present, fused row
+  // integration may lower the returned complete_max to the exact maximum
+  // supported by all retained monomial primitives, but never below this
+  // value.  This charges the eps^-1 halo only to regulated centre primitives
+  // without discarding an upper row from ordinary tiles.
+  std::optional<std::int32_t> required_complete_max;
   std::optional<std::int32_t> imaginary_sign;
   // A retained tile plan may bind a genuinely algebraic chart scale.  Its
   // exact string remains opaque; this independently certified sign is the
@@ -737,6 +745,13 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
   require_inside_chart(source, lower, "lower");
   require_inside_chart(source, upper, "upper");
   (void)options.delivered_epsilon.width();
+  if (options.required_complete_max.has_value() &&
+      (*options.required_complete_max <
+           options.delivered_epsilon.min_power ||
+       *options.required_complete_max >
+           options.delivered_epsilon.complete_max))
+    throw std::invalid_argument(
+        "fused line required epsilon maximum must lie in its requested delivery window");
   if (options.imaginary_sign.has_value() &&
       *options.imaginary_sign != 1 && *options.imaginary_sign != -1)
     throw NativeIntegrationError(
@@ -766,10 +781,6 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
   const bool has_center_endpoint = lower.sign == 0 || upper.sign == 0;
 
   StoredLineIntegral result;
-  result.value.epsilon = options.delivered_epsilon;
-  result.value.dimension = 1;
-  result.value.coefficients.assign(options.delivered_epsilon.width(),
-                                   ComplexBall(0));
   result.imaginary_sign = effective_sign;
   result.diagnostics.has_center_endpoint = has_center_endpoint;
   if (options.divergent_cancellation.has_value()) {
@@ -970,6 +981,27 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
   const auto key_for_item = [&](const FusedMonomialWorkItem& item) {
     return monomial_key(tag_for_item(item));
   };
+
+  auto delivered_epsilon = options.delivered_epsilon;
+  if (options.required_complete_max.has_value()) {
+    auto exact_complete_max = delivered_epsilon.complete_max;
+    for (const auto& item : work_items) {
+      const auto primitive_min = primitive_min_power(
+          tag_for_item(item), has_center_endpoint);
+      exact_complete_max = std::min(
+          exact_complete_max,
+          local_detail::checked_i32(
+              static_cast<std::int64_t>(projected_epsilon.complete_max) +
+                  primitive_min,
+              "fused exact deliverable epsilon maximum"));
+    }
+    if (exact_complete_max >= *options.required_complete_max)
+      delivered_epsilon.complete_max = exact_complete_max;
+  }
+  result.value.epsilon = delivered_epsilon;
+  result.value.dimension = 1;
+  result.value.coefficients.assign(
+      delivered_epsilon.width(), ComplexBall(0));
 
   // A 64-bit hash owns no exact strings and makes the normal sort entirely
   // integer-only.  Exact equality remains authoritative: detect a true hash
@@ -1318,7 +1350,7 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
         static_cast<std::int64_t>(projected_epsilon.complete_max) +
             primitive_min,
         "fused line deliverable epsilon maximum");
-    if (deliverable_max < options.delivered_epsilon.complete_max)
+    if (deliverable_max < delivered_epsilon.complete_max)
       throw NativeIntegrationError(
           NativeIntegrationErrorCode::IncompleteEpsilonWindow, "E10",
           "fused row coefficient frame does not cover the requested primitive output");
@@ -1334,7 +1366,7 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
     primitive_options.imaginary_sign = effective_sign;
     primitive_options.complete_max = std::max(
         primitive_min,
-        checked_difference(options.delivered_epsilon.complete_max,
+        checked_difference(delivered_epsilon.complete_max,
                            *first_nonzero,
                            "fused required primitive complete maximum"));
     const auto primitive = integrate_sector_monomial(
@@ -1357,11 +1389,11 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
         *first_nonzero, std::move(coefficient_values));
     const auto contribution = coefficient_frame * primitive;
     if (contribution.complete_max() <
-        options.delivered_epsilon.complete_max)
+        delivered_epsilon.complete_max)
       throw std::logic_error(
           "fused line epsilon preflight did not deliver its promised window");
-    for (std::int64_t raw_power = options.delivered_epsilon.min_power;
-         raw_power <= options.delivered_epsilon.complete_max; ++raw_power)
+    for (std::int64_t raw_power = delivered_epsilon.min_power;
+         raw_power <= delivered_epsilon.complete_max; ++raw_power)
       result.value.at(static_cast<std::int32_t>(raw_power), 0) +=
           contribution.coefficient(static_cast<std::int32_t>(raw_power));
   });

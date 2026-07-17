@@ -1978,8 +1978,7 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
       "ReceivingChartCount" -> Length[systems],
       "Detail" -> "streamed native value-solver vector is not aligned with receiving chart systems"|>]];
-  residualRequired = Lookup[Lookup[atlas, "Request", <||>],
-    "RequiredCompleteMax", epsilon["match_required_complete_max"]];
+  residualRequired = epsilon["required_complete_max"];
   If[!IntegerQ[residualRequired] ||
       !TrueQ[epsilon["min"] <= residualRequired <=
         epsilon["match_required_complete_max"] <= epsilon["max"]],
@@ -1990,11 +1989,12 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       "WorkEpsilon" -> KeyTake[epsilon, {"min", "max"}],
       "Detail" ->
         "streamed native residual and private-work epsilon contracts are inconsistent"|>]];
-  (* The atlas request distinguishes the accuracy-certified public prefix from
-     the larger finite Laurent reservoir carried for later epsilon losses.
-     Each Acb hop must pass its residual through the former; the latter stays
-     available as bounded work data and is checked again when it reaches a
-     public observable. *)
+  (* The arm state may carry coefficients beyond the public output because a
+     later row shift or regulated primitive will consume them.  Every such
+     coefficient is part of required_complete_max and must be certified at
+     every Acb hop; otherwise the final contraction would consume an
+     unchecked reservoir.  Only the remaining gap through max is private
+     matching clearance. *)
   hopEpsilon = <|"min" -> epsilon["min"], "max" -> epsilon["max"],
     "required_complete_max" -> residualRequired|>;
   output = Catch[

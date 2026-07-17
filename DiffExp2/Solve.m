@@ -2162,7 +2162,8 @@ sccBlockPrincipalMatrixRecord[cs_Association] := Module[
   sccExactMatrixRecord[matrix, variable, cs]];
 
 cppRegularValueRelativeAccuracyMaxExact[] := ToString[
-  DiffExp2`Tolerances`Tol["ResidTol"]/
+  Max[DiffExp2`Tolerances`Tol["ResidTol"],
+    DiffExp2`Tolerances`Tol["MatchTol"]]/
     10^DiffExp2`Tolerances`$SafetyDigits, InputForm];
 
 cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[

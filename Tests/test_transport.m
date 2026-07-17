@@ -761,8 +761,10 @@ assert["tt15_value_mode_matches_basis_mode",
    chart.  Value-aware planning refines any receding regular hop that would
    exceed the strict center margin, while the singular chart itself remains a
    basis solve with the same crossing prescription. *)
-(* EO50 gives the production structural center margin (~0.309). *)
-DiffExp2`Config`UpdateConfiguration[{"ExpansionOrder" -> 50}];
+(* Use an explicit requested matching accuracy: value planning must follow
+   this public contract, rather than WP-derived residual or Laurent floors. *)
+DiffExp2`Config`UpdateConfiguration[{
+  "ExpansionOrder" -> 50, "LinearSolveChopPrecision" -> 12}];
 sys16 = Join[sys4, <|"ExtraSingularFactors" -> {x - 1/2}|>];
 plan16Value = withValueTransport[True,
   DiffExp2`Transport`SegmentLine[sys16, {11/23, 1}]];
@@ -802,12 +804,30 @@ qualityLow = {esT[0, {N[1, 10], 0, 0}]};
 assert["tt17_value_handoff_significance_gate_scale_aware",
   DiffExp2`Transport`Private`valueHandoffAccurateQ[qualityHigh] &&
   !DiffExp2`Transport`Private`valueHandoffAccurateQ[qualityLow]];
-margin17 = DiffExp2`Transport`Private`valueCenterMargin[50];
-marginTarget17 = N[(DiffExp2`Tolerances`Tol["LaurentLeadTol"]/100)^(1/51), 30];
-assert["tt17_value_center_margin_uses_structural_tail_floor",
-  Abs[margin17 - marginTarget17] < 10^-25 && 3/10 < margin17 < 8/25 &&
-  margin17^51 <= N[DiffExp2`Tolerances`Tol["LaurentLeadTol"]/100, 20]*
+legacyMargin17 = DiffExp2`Transport`Private`valueCenterMargin[50];
+nativeMargin17 = DiffExp2`Transport`Private`valueCenterMargin[
+  50, "NativeCertified"];
+legacyTailTol17 = DiffExp2`Tolerances`Tol["LaurentLeadTol"]/
+  10^DiffExp2`Tolerances`$SafetyDigits;
+nativeTailTol17 = Max[DiffExp2`Tolerances`Tol["LaurentLeadTol"],
+    DiffExp2`Tolerances`Tol["MatchTol"]]/
+  10^DiffExp2`Tolerances`$SafetyDigits;
+legacyMarginTarget17 = N[legacyTailTol17^(1/51), 30];
+nativeMarginTarget17 = N[nativeTailTol17^(1/51), 30];
+assert["tt17_legacy_value_center_margin_keeps_structural_tail_floor",
+  Abs[legacyMargin17 - legacyMarginTarget17] < 10^-25 &&
+  3/10 < legacyMargin17 < 8/25];
+assert["tt17_native_certified_margin_relaxes_only_to_guarded_matching_accuracy",
+  Abs[nativeMargin17 - nativeMarginTarget17] < 10^-25 &&
+  1/2 < nativeMargin17 < 11/20 &&
+  nativeMargin17^51 <= N[nativeTailTol17, 20]*
     (1 + 10^-20)];
+assert["tt17_native_value_accuracy_uses_the_same_guarded_matching_contract",
+  ToExpression[
+    DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]] ===
+      Max[DiffExp2`Tolerances`Tol["ResidTol"],
+        DiffExp2`Tolerances`Tol["MatchTol"]]/
+        10^DiffExp2`Tolerances`$SafetyDigits];
 
 (* End-to-end witness: f1' = K f2, f2' = 0 and boundary
    f1(0)=1-K h, f2(0)=1 make f1(h)=1 by a 70-decade cancellation at the
@@ -826,6 +846,8 @@ valueCenters17 = cachedBasisCenters[];
 assert["tt17_low_significance_value_handoff_uses_basis",
   !FailureQ[value17] && Length[plan17["Charts"]] >= 2 &&
   valueCenters17 === {h17}];
+DiffExp2`Config`UpdateConfiguration[{
+  "LinearSolveChopPrecision" -> Automatic}];
 
 (* TT18: a genuine epsilon-adic rank defect is repaired by a column-lattice
    saturation, while an ordinary resolved but ill-conditioned constant

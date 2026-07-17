@@ -34,6 +34,11 @@ assert["pentagon_massive_oracle_epsilon_density",
   pmCoefficientDensity[0, x] === 2/f^3 &&
   Together[pmCoefficientDensity[1, x] -
     (3 - 2 EulerGamma - 2 Log[f])/f^3] === 0];
+assert["pentagon_massive_oracle_cube_density",
+  Together[(pmCubeCoefficientExpression[0] /.
+      Thread[{Global`pmu1, Global`pmu2, Global`pmu3, Global`pmu4} -> u]) -
+    pmStickJacobian @@ Most[u] *
+      pmCoefficientDensity[0, simplexPoint]] === 0];
 assert["pentagon_massive_oracle_reference_pin",
   pmNumberString[reference[[1]], 20] === "0.018133786686301957640" &&
   pmNumberString[reference[[2]], 20] === "0.0076131154161440535650" &&

@@ -1111,15 +1111,29 @@ restore_checkpoint_transport_arm_state_record(
       for (const auto& raw_column : raw_columns) {
         const auto& reference = as_object(
             raw_column, "checkpoint consumed transport-arm basis reference");
-        require_exact_keys(
-            reference,
-            {"local", "chart", "source_operator_identity",
-             "checkpoint_identity", "coefficient_domain"},
-            "checkpoint consumed transport-arm basis reference");
+        const bool bounded_operator =
+            reference.if_contains("source_operator_reference") != nullptr;
+        if (bounded_operator)
+          require_exact_keys(
+              reference,
+              {"local", "chart", "source_operator_reference",
+               "checkpoint_identity", "coefficient_domain"},
+              "checkpoint consumed bounded transport-arm basis reference");
+        else
+          require_exact_keys(
+              reference,
+              {"local", "chart", "source_operator_identity",
+               "checkpoint_identity", "coefficient_domain"},
+              "checkpoint consumed legacy transport-arm basis reference");
         (void)scoped_handle_id(required_string(reference, "local"), "l:",
                                "checkpoint consumed basis local");
         (void)required_string(reference, "chart");
-        (void)required_string(reference, "source_operator_identity");
+        if (bounded_operator)
+          (void)as_object(
+              reference.at("source_operator_reference"),
+              "checkpoint consumed basis source-operator reference");
+        else
+          (void)required_string(reference, "source_operator_identity");
         (void)required_string(reference, "checkpoint_identity");
         (void)required_string(reference, "coefficient_domain");
       }

@@ -15,7 +15,7 @@ namespace json = boost::json;
 namespace {
 
 constexpr const char* kSingularProofSchema =
-    "diffexp2-native-acb-singular-scc-valuation-zero-saturation-proof-v1";
+    "diffexp2-native-acb-singular-scc-valuation-zero-saturation-proof-v2";
 constexpr const char* kOrdinaryProofSchema =
     "diffexp2-native-acb-unit-leading-saturation-proof-v1";
 constexpr const char* kAlgebraicScale = "Root[-2+#1^2&,2,0]";
@@ -715,6 +715,118 @@ bool tamper_singular_proof_session(const std::string& source,
   return true;
 }
 
+bool compact_identity_reference(const json::object& reference) {
+  const auto fingerprint =
+      std::string(reference.at("fingerprint").as_string());
+  return reference.size() == 3 &&
+      reference.at("algorithm") == "fnv1a64-v1" &&
+      fingerprint.starts_with("fnv1a64:") &&
+      fingerprint.size() == 24 &&
+      unsigned_value(reference, "identity_bytes") > 0;
+}
+
+bool compact_column_reference(const json::object& reference) {
+  const auto& diagnostics =
+      reference.at("identity_diagnostics").as_object();
+  return reference.size() == 6 &&
+      reference.at("schema") ==
+          "diffexp2-retained-scc-column-reference-v1" &&
+      reference.at("authority") ==
+          "retained-native-exact-column-owner" &&
+      diagnostics.size() == 5 &&
+      diagnostics.at("algorithm") == "fnv1a64-v1" &&
+      std::string(diagnostics.at(
+          "scc_exact_identity_fingerprint").as_string())
+          .starts_with("fnv1a64:") &&
+      unsigned_value(diagnostics, "scc_exact_identity_bytes") > 0 &&
+      std::string(diagnostics.at(
+          "exact_column_identity_fingerprint").as_string())
+          .starts_with("fnv1a64:") &&
+      unsigned_value(diagnostics, "exact_column_identity_bytes") > 0;
+}
+
+bool compact_singular_proof(const json::object& proof) {
+  const auto& request = proof.at("native_request").as_object();
+  const auto& scc_reference =
+      request.at("receiving_scc_exact_identity_reference").as_object();
+  if (request.at("schema") !=
+          "diffexp2-native-acb-singular-scc-valuation-zero-saturation-request-v3" ||
+      request.if_contains("receiving_scc_exact_identity") != nullptr ||
+      scc_reference.size() != 5 ||
+      scc_reference.at("schema") !=
+          "diffexp2-retained-scc-identity-reference-v1" ||
+      scc_reference.at("authority") !=
+          "retained-native-scc-owner-validated" ||
+      scc_reference.at("algorithm") != "fnv1a64-v1" ||
+      std::string(scc_reference.at("fingerprint").as_string()).empty() ||
+      unsigned_value(scc_reference, "identity_bytes") == 0) {
+    std::cerr << "compact proof request/reference check failed\n";
+    return false;
+  }
+  for (const auto& raw_source : proof.at("basis").as_array()) {
+    const auto& source = raw_source.as_object();
+    if (source.at("schema") !=
+            "diffexp2-retained-match-source-reference-v1" ||
+        source.at("authority") !=
+            "retained-native-local-binding-validated" ||
+        source.if_contains("source_operator_identity") != nullptr ||
+        source.if_contains("analytic_metadata") != nullptr) {
+      std::cerr << "compact proof source envelope check failed\n";
+      return false;
+    }
+    if (!compact_identity_reference(
+            source.at("source_operator_reference").as_object())) {
+      std::cerr << "compact proof source-operator reference check failed\n";
+      return false;
+    }
+    if (!compact_identity_reference(
+            source.at("analytic_metadata_reference").as_object())) {
+      std::cerr << "compact proof analytic-metadata reference check failed\n";
+      return false;
+    }
+    if (!compact_column_reference(
+            source.at("column_provenance").as_object())) {
+      std::cerr << "compact proof column reference check failed\n";
+      return false;
+    }
+    if (json::serialize(source).size() >= 2048) {
+      std::cerr << "compact proof source size check failed\n";
+      return false;
+    }
+  }
+  if (json::serialize(proof).size() >= 32768) {
+    std::cerr << "compact proof total size check failed\n";
+    return false;
+  }
+  return true;
+}
+
+bool compact_planned_handoff(const json::object& handoff) {
+  if (handoff.at("schema") !=
+      "diffexp2-retained-exact-plan-match-hop-v3")
+    return false;
+  const auto& producing = handoff.at("producing").as_object();
+  const auto& receiving = handoff.at("receiving").as_object();
+  const auto& incoming = producing.at("incoming").as_object();
+  if (!compact_identity_reference(
+          producing.at("chart_identity_reference").as_object()) ||
+      !compact_identity_reference(
+          receiving.at("chart_identity_reference").as_object()) ||
+      !compact_identity_reference(
+          incoming.at("source_operator_reference").as_object()))
+    return false;
+  for (const auto& raw_source : receiving.at("basis").as_array())
+    if (!compact_identity_reference(
+            raw_source.as_object()
+                .at("source_operator_reference").as_object()))
+      return false;
+  const auto encoded = json::serialize(handoff);
+  return encoded.size() < 16384 &&
+      encoded.find("\"source_operator_identity\"") ==
+          std::string::npos &&
+      encoded.find("\"chart_identity\"") == std::string::npos;
+}
+
 std::pair<bool, bool> proof_schemas(const std::string& path) {
   const auto payload = json::parse(
       diffexp2::checkpoint::read(path).payload_json).as_object();
@@ -727,7 +839,15 @@ std::pair<bool, bool> proof_schemas(const std::string& path) {
         native.at("exact_lattice_canonical_witness").as_string()));
     const auto schema = std::string(
         witness.as_object().at("schema").as_string());
-    singular = singular || schema == kSingularProofSchema;
+    if (schema == kSingularProofSchema) {
+      if (!compact_singular_proof(witness.as_object()) ||
+          !compact_planned_handoff(
+              raw_hop.as_object().at("handoff").as_object()))
+        throw std::runtime_error(
+            "singular proof retained recursive SCC/source identities: " +
+            json::serialize(witness));
+      singular = true;
+    }
     ordinary = ordinary || schema == kOrdinaryProofSchema;
   }
   return {singular, ordinary};
@@ -773,6 +893,8 @@ bool singular_match_published_in_complete_physical_frame(
 }  // namespace
 
 int main() {
+  const std::string large_singular_scc_identity =
+      "singular-arm-scc-identity:" + std::string(256 * 1024, 'x');
   const std::string checkpoint =
       "/tmp/diffexp2-singular-scc-arms.de2cp";
   const std::string checkpoint_second =
@@ -799,7 +921,7 @@ int main() {
         session, "singular-arm-upper-chart", "2/3");
     const auto singular_scc = prepare_singular_scc(
         session, singular_block, "singular-arm-scc",
-        "singular-arm-scc-identity");
+        large_singular_scc_identity);
     const auto foreign_scc = prepare_singular_scc(
         session, singular_block, "singular-arm-foreign-scc",
         "singular-arm-foreign-scc-identity");

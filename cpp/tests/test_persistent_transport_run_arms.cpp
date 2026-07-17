@@ -1531,9 +1531,13 @@ void test_multiblock_regular_value_fallback_owner() {
         "multiblock-fallback");
     require_ok(fallback, "multiblock primitive-owner fallback");
     const auto& next = fallback.at("next_local").as_object();
+    const auto& operator_reference =
+        next.at("source_operator_reference").as_object();
     if (std::string(next.at("chart").as_string()) != lower_chart ||
-        next.at("source_operator_identity") !=
-            "de2-operator-multiblock-lower")
+        next.if_contains("source_operator_identity") != nullptr ||
+        operator_reference.at("algorithm") != "fnv1a64-v1" ||
+        counter(operator_reference, "identity_bytes") !=
+            std::string("de2-operator-multiblock-lower").size())
       throw std::runtime_error(
           "multiblock fallback did not retain the primitive receiving owner: " +
           json::serialize(fallback));

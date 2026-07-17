@@ -1,3 +1,114 @@
+json::object compact_matching_identity_reference(
+    std::string_view identity) {
+  if (identity.empty())
+    throw std::invalid_argument(
+        "compact matching identity reference cannot bind an empty identity");
+  return json::object{
+      {"algorithm", "fnv1a64-v1"},
+      {"fingerprint", public_provenance_fingerprint(identity)},
+      {"identity_bytes", identity.size()}};
+}
+
+bool compact_matching_identity_reference_matches(
+    const json::value& raw, std::string_view expected_identity,
+    const char* label) {
+  const auto& reference = as_object(raw, label);
+  require_exact_keys(
+      reference, {"algorithm", "fingerprint", "identity_bytes"}, label);
+  return reference ==
+      compact_matching_identity_reference(expected_identity);
+}
+
+std::string_view matching_required_string_view(
+    const json::object& object, const char* key) {
+  const auto& value = object.at(key);
+  if (!value.is_string() || value.as_string().empty())
+    throw std::invalid_argument(
+        std::string("compact matching ") + key +
+        " must be a nonempty string");
+  const auto& text = value.as_string();
+  return std::string_view(text.data(), text.size());
+}
+
+// Exact source records are retained in StoredLocal and in checkpoint object
+// records.  Matching identities need a bounded reference to those live
+// authorities, not another copy of every SCC request and column schedule.
+// The checkpoint/local handle, plan binding, and direct retained-owner checks
+// remain authoritative; the FNV fields below are diagnostics, not a
+// replacement proof.
+json::object compact_matching_source_reference(
+    const json::object& source) {
+  json::object compact{
+      {"schema", "diffexp2-retained-match-source-reference-v1"},
+      {"authority", "retained-native-local-binding-validated"},
+      {"local", source.at("local")},
+      {"chart", source.at("chart")},
+      {"checkpoint_identity", source.at("checkpoint_identity")},
+      {"source_operator_reference",
+       compact_matching_identity_reference(
+           matching_required_string_view(
+               source, "source_operator_identity"))}};
+  if (const auto* column = source.if_contains("column"))
+    compact["column"] = *column;
+  if (const auto* sign =
+          source.if_contains("requested_imaginary_sign"))
+    compact["requested_imaginary_sign"] = *sign;
+  if (const auto* sign =
+          source.if_contains("effective_imaginary_sign"))
+    compact["effective_imaginary_sign"] = *sign;
+  if (const auto* width = source.if_contains("matching_taylor_width"))
+    compact["matching_taylor_width"] = *width;
+  if (const auto* raw_metadata = source.if_contains("analytic_metadata")) {
+    const auto identity = json::serialize(
+        canonical_json_value(*raw_metadata));
+    compact["analytic_metadata_reference"] =
+        compact_matching_identity_reference(identity);
+  }
+  if (const auto* raw_provenance =
+          source.if_contains("column_provenance")) {
+    const auto& provenance = as_object(
+        *raw_provenance, "compact matching SCC-column provenance");
+    require_exact_keys(
+        provenance,
+        {"scc", "scc_exact_identity", "seed_block", "basis_index",
+         "exact_column_identity"},
+        "compact matching SCC-column provenance");
+    compact["column_provenance"] = json::object{
+        {"schema", "diffexp2-retained-scc-column-reference-v1"},
+        {"authority", "retained-native-exact-column-owner"},
+        {"scc", provenance.at("scc")},
+        {"seed_block", provenance.at("seed_block")},
+        {"basis_index", provenance.at("basis_index")},
+        {"identity_diagnostics",
+         json::object{
+             {"algorithm", "fnv1a64-v1"},
+             {"scc_exact_identity_fingerprint",
+              public_provenance_fingerprint(
+                  matching_required_string_view(
+                      provenance, "scc_exact_identity"))},
+             {"scc_exact_identity_bytes",
+              matching_required_string_view(
+                  provenance, "scc_exact_identity").size()},
+             {"exact_column_identity_fingerprint",
+              public_provenance_fingerprint(
+                  matching_required_string_view(
+                      provenance, "exact_column_identity"))},
+             {"exact_column_identity_bytes",
+              matching_required_string_view(
+                  provenance, "exact_column_identity").size()}}}};
+  }
+  return compact;
+}
+
+json::array compact_matching_source_references(
+    const std::vector<json::object>& sources) {
+  json::array compact;
+  compact.reserve(sources.size());
+  for (const auto& source : sources)
+    compact.push_back(compact_matching_source_reference(source));
+  return compact;
+}
+
 class StoredMatchBase {
  public:
   explicit StoredMatchBase(std::string handle) : handle_(std::move(handle)) {}
@@ -490,14 +601,14 @@ std::shared_ptr<StoredExactRegularMatch> build_exact_regular_match(
   if (incoming->column_provenance().has_value())
     incoming_source["column_provenance"] =
         incoming->column_provenance()->encode();
-  json::array provenance_basis;
-  for (const auto& source : basis_sources)
-    provenance_basis.push_back(source);
+  auto provenance_basis =
+      compact_matching_source_references(basis_sources);
   json::object provenance{
       {"schema", "diffexp2-native-exact-regular-local-match-v1"},
       {"checkpoint_identity", checkpoint_identity},
       {"basis", std::move(provenance_basis)},
-      {"incoming", incoming_source},
+      {"incoming",
+       compact_matching_source_reference(incoming_source)},
       {"basis_point_exact", basis_point.exact_coordinate},
       {"incoming_point_exact", incoming_point.exact_coordinate},
       {"physical_match_point_exact", basis_physical_point.str()},
@@ -634,9 +745,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         refined_(std::move(refined)), elapsed_ms_(elapsed_ms) {}
 
   json::object summary() const override {
-    json::array basis;
-    basis.reserve(basis_sources_.size());
-    for (const auto& source : basis_sources_) basis.push_back(source);
+    auto basis = compact_matching_source_references(
+        basis_sources_);
 
     json::array history;
     history.reserve(refined_.residual_history.size());
@@ -699,7 +809,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         {"provenance_identity", provenance_identity_},
         {"dimension", dimension_},
         {"basis", std::move(basis)},
-        {"incoming", incoming_source_},
+        {"incoming",
+         compact_matching_source_reference(incoming_source_)},
         {"basis_chart", basis_chart_},
         {"incoming_chart", incoming_chart_},
         {"basis_point_exact", basis_point_},
@@ -1325,6 +1436,33 @@ bool is_supported_acb_singular_scc_column_capability(
       capability == kAcbSingularJordanSCCColumnCapability;
 }
 
+json::object compact_native_singular_scc_saturation_request(
+    const json::object& request) {
+  const auto schema = required_string(request, "schema");
+  if (schema == kNativeSingularSCCSaturationBoundedRequestSchema)
+    return request;
+  if (schema != kNativeSingularSCCSaturationRequestSchema &&
+      schema != kNativeSingularSCCSaturationCompactRequestSchema)
+    throw std::invalid_argument(
+        "cannot compact an unsupported native singular-SCC request");
+  const auto identity = matching_required_string_view(
+      request, "receiving_scc_exact_identity");
+  auto compact = request;
+  compact["schema"] =
+      kNativeSingularSCCSaturationBoundedRequestSchema;
+  compact.erase("tile_plan_provenance_identity");
+  compact.erase("receiving_scc_exact_identity");
+  auto identity_reference =
+      compact_matching_identity_reference(identity);
+  identity_reference["schema"] =
+      "diffexp2-retained-scc-identity-reference-v1";
+  identity_reference["authority"] =
+      "retained-native-scc-owner-validated";
+  compact["receiving_scc_exact_identity_reference"] =
+      std::move(identity_reference);
+  return compact;
+}
+
 json::object validate_native_singular_scc_saturation_request(
     const json::value& raw, const std::string& context,
     const std::optional<std::string>& expected_session_configuration =
@@ -1335,7 +1473,20 @@ json::object validate_native_singular_scc_saturation_request(
   const auto schema = required_string(request, "schema");
   const bool compact =
       schema == kNativeSingularSCCSaturationCompactRequestSchema;
-  if (compact)
+  const bool bounded =
+      schema == kNativeSingularSCCSaturationBoundedRequestSchema;
+  if (bounded)
+    require_exact_keys(
+        request,
+        {"schema", "session_configuration_identity", "tile_plan",
+         "tile_plan_checkpoint_identity", "arm", "match",
+         "match_checkpoint_identity", "receiving_scc",
+         "receiving_scc_exact_identity_reference",
+         "receiving_execution_capability",
+         "receiving_basis_point_exact", "receiving_basis_point_sign",
+         "physical_match_point_exact", "receiving_rim"},
+        "bounded native Acb singular-SCC valuation-zero request");
+  else if (compact)
     require_exact_keys(
         request,
         {"schema", "session_configuration_identity", "tile_plan",
@@ -1355,19 +1506,46 @@ json::object validate_native_singular_scc_saturation_request(
          "receiving_basis_point_exact", "receiving_basis_point_sign",
          "physical_match_point_exact", "receiving_rim"},
         "native Acb singular-SCC valuation-zero request");
-  if (!compact && schema != kNativeSingularSCCSaturationRequestSchema)
+  if (!compact && !bounded &&
+      schema != kNativeSingularSCCSaturationRequestSchema)
     throw std::invalid_argument(
         context + ": unsupported native singular-SCC saturation request schema");
   for (const auto* key :
        {"session_configuration_identity", "tile_plan",
         "tile_plan_checkpoint_identity", "match_checkpoint_identity",
-        "receiving_scc", "receiving_scc_exact_identity",
+        "receiving_scc",
         "receiving_basis_point_exact", "physical_match_point_exact"})
     if (required_string(request, key).empty())
       throw std::invalid_argument(
           context + ": native singular-SCC saturation request lost its " +
           key + " binding");
-  if (!compact &&
+  if (bounded) {
+    const auto& reference = as_object(
+        request.at("receiving_scc_exact_identity_reference"),
+        "bounded native singular-SCC exact identity reference");
+    require_exact_keys(
+        reference,
+        {"algorithm", "fingerprint", "identity_bytes", "schema",
+         "authority"},
+        "bounded native singular-SCC exact identity reference");
+    if (required_string(reference, "schema") !=
+            "diffexp2-retained-scc-identity-reference-v1" ||
+        required_string(reference, "authority") !=
+            "retained-native-scc-owner-validated" ||
+        required_string(reference, "algorithm") != "fnv1a64-v1" ||
+        required_string(reference, "fingerprint").empty() ||
+        as_u64(reference.at("identity_bytes"),
+               "bounded native singular-SCC identity bytes") == 0)
+      throw std::invalid_argument(
+          context +
+          ": bounded native singular-SCC identity reference is invalid");
+  } else if (required_string(
+                 request, "receiving_scc_exact_identity").empty()) {
+    throw std::invalid_argument(
+        context +
+        ": native singular-SCC saturation request lost its receiving_scc_exact_identity binding");
+  }
+  if (!compact && !bounded &&
       required_string(request, "tile_plan_provenance_identity").empty())
     throw std::invalid_argument(
         context + ": native singular-SCC saturation request lost its tile-plan provenance binding");
@@ -1401,11 +1579,20 @@ json::object validate_native_singular_scc_saturation_request(
           *expected_session_configuration)
     throw std::invalid_argument(
         context + ": native singular-SCC saturation request changed its stable session-configuration binding");
-  if (expected_request.has_value() &&
-      json::serialize(canonical_json_value(request)) !=
-          json::serialize(canonical_json_value(*expected_request)))
+  if (expected_request.has_value()) {
+    const auto expected = bounded
+        ? compact_native_singular_scc_saturation_request(
+              *expected_request)
+        : *expected_request;
+    if (json::serialize(canonical_json_value(request)) !=
+        json::serialize(canonical_json_value(expected)))
+      throw std::invalid_argument(
+          context + ": native singular-SCC saturation request changed its retained plan/SCC binding");
+  } else if (bounded) {
     throw std::invalid_argument(
-        context + ": native singular-SCC saturation request changed its retained plan/SCC binding");
+        context +
+        ": bounded native singular-SCC request requires its retained owner binding");
+  }
   return request;
 }
 
@@ -1628,15 +1815,18 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
     auto saturation = rational_shadow_formal_saturation(
         shadow_witnesses, window,
         context + ":Rational-shadow-formal-saturation");
-    json::array proof_basis;
-    for (const auto& source : basis_sources) proof_basis.push_back(source);
+    auto proof_basis =
+        compact_matching_source_references(basis_sources);
     json::array encoded_valuations;
     for (const auto valuation :
          saturation.diagnostics.initial_column_valuations)
       encoded_valuations.push_back(valuation);
     json::object proof_without_identity{
-        {"schema", kNativeSingularSCCSaturationProofSchema},
-        {"native_request", std::move(native_request)},
+        {"schema",
+         kNativeSingularSCCSaturationCompactProofSchema},
+        {"native_request",
+         compact_native_singular_scc_saturation_request(
+             native_request)},
         {"coefficient_domain", "acb"},
         {"basis", std::move(proof_basis)},
         {"basis_point_exact", basis_point},
@@ -1659,7 +1849,7 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
         canonical_json_value(proof_without_identity));
     auto proof = proof_without_identity;
     proof["identity"] = identity;
-    return {kNativeSingularSCCSaturationProofSchema, identity,
+    return {kNativeSingularSCCSaturationCompactProofSchema, identity,
             json::serialize(canonical_json_value(proof)),
             std::move(saturation), true};
   }
@@ -1807,12 +1997,14 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
   if (!monomial_saturation) {
     (void)factor_preconditioned_acb_finite_laurent_system(
         evaluated_basis, context + ":certified-direct-Acb-Laurent-pivots");
-    json::array proof_basis;
-    proof_basis.reserve(basis_sources.size());
-    for (const auto& source : basis_sources) proof_basis.push_back(source);
+    auto proof_basis =
+        compact_matching_source_references(basis_sources);
     json::object proof_without_identity{
-        {"schema", kNativeSingularSCCSaturationProofSchema},
-        {"native_request", std::move(native_request)},
+        {"schema",
+         kNativeSingularSCCSaturationCompactProofSchema},
+        {"native_request",
+         compact_native_singular_scc_saturation_request(
+             native_request)},
         {"coefficient_domain", "acb"},
         {"basis", std::move(proof_basis)},
         {"basis_point_exact", basis_point},
@@ -1833,18 +2025,20 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
         canonical_json_value(proof_without_identity));
     auto proof = proof_without_identity;
     proof["identity"] = identity;
-    return {kNativeSingularSCCSaturationProofSchema, identity,
+    return {kNativeSingularSCCSaturationCompactProofSchema, identity,
             json::serialize(canonical_json_value(proof)),
             unit_rational_saturation(
                 static_cast<std::uint32_t>(dimension), window, context)};
   }
 
-  json::array proof_basis;
-  proof_basis.reserve(basis_sources.size());
-  for (const auto& source : basis_sources) proof_basis.push_back(source);
+  auto proof_basis =
+      compact_matching_source_references(basis_sources);
   json::object proof_without_identity{
-      {"schema", kNativeSingularSCCSaturationProofSchema},
-      {"native_request", std::move(native_request)},
+      {"schema",
+       kNativeSingularSCCSaturationCompactProofSchema},
+      {"native_request",
+       compact_native_singular_scc_saturation_request(
+           native_request)},
       {"coefficient_domain", "acb"},
       {"basis", std::move(proof_basis)},
       {"basis_point_exact", basis_point},
@@ -1873,7 +2067,7 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
       canonical_json_value(proof_without_identity));
   auto proof = proof_without_identity;
   proof["identity"] = identity;
-  return {kNativeSingularSCCSaturationProofSchema, identity,
+  return {kNativeSingularSCCSaturationCompactProofSchema, identity,
           json::serialize(canonical_json_value(proof)),
           std::move(*rational_saturation), false,
           std::move(*acb_transformation)};
@@ -1889,6 +2083,14 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
     const std::string& context) {
   const auto& proof = as_object(
       raw, "native Acb singular-SCC valuation-zero proof");
+  const auto proof_schema = required_string(proof, "schema");
+  const bool compact_proof =
+      proof_schema == kNativeSingularSCCSaturationCompactProofSchema;
+  if (!compact_proof &&
+      proof_schema != kNativeSingularSCCSaturationProofSchema)
+    throw std::invalid_argument(
+        context +
+        ": native singular-SCC saturation proof schema is unsupported");
   const bool shadow_proof =
       required_string(proof, "transformation") ==
       "exact-rational-shadow-column-monomials";
@@ -1934,9 +2136,7 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
          "column_provenance_certificate", "determinant_valuation",
          "transformation"},
         "native Acb singular-SCC valuation-zero proof");
-  if (required_string(proof, "schema") !=
-          kNativeSingularSCCSaturationProofSchema ||
-      required_string(proof, "coefficient_domain") != "acb" ||
+  if (required_string(proof, "coefficient_domain") != "acb" ||
       as_i32(proof.at("leading_power"),
              "singular-SCC proof leading power") != 0 ||
       as_u32(proof.at("leading_rank"),
@@ -2012,15 +2212,28 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
     throw std::invalid_argument(
         context + ": native singular-SCC proof changed its point or epsilon binding");
   json::array expected_basis;
-  expected_basis.reserve(expected_basis_sources.size());
-  for (const auto& source : expected_basis_sources)
-    expected_basis.push_back(source);
+  if (compact_proof) {
+    expected_basis =
+        compact_matching_source_references(expected_basis_sources);
+  } else {
+    expected_basis.reserve(expected_basis_sources.size());
+    for (const auto& source : expected_basis_sources)
+      expected_basis.push_back(source);
+  }
   if (json::serialize(canonical_json_value(proof.at("basis"))) !=
       json::serialize(canonical_json_value(expected_basis)))
     throw std::invalid_argument(
         context + ": native singular-SCC proof changed its basis/checkpoint binding");
+  const bool bounded_request =
+      required_string(native_request, "schema") ==
+      kNativeSingularSCCSaturationBoundedRequestSchema;
+  if (bounded_request && !expected_native_request.has_value())
+    throw std::invalid_argument(
+        context +
+        ": bounded singular-SCC proof lacks its retained exact request owner");
   validate_singular_scc_basis_sources(
-      native_request, expected_basis_sources, dimension, context);
+      bounded_request ? *expected_native_request : native_request,
+      expected_basis_sources, dimension, context);
   auto identity_input = proof;
   const auto identity = required_string(proof, "identity");
   identity_input.erase("identity");
@@ -2029,7 +2242,7 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
     throw std::invalid_argument(
         context + ": native singular-SCC saturation proof identity is inconsistent");
   if (!monomial_proof)
-    return {kNativeSingularSCCSaturationProofSchema, identity,
+    return {proof_schema, identity,
             json::serialize(canonical_json_value(proof)),
             unit_rational_saturation(dimension, window, context)};
   const auto& raw_valuations = as_array(
@@ -2064,7 +2277,7 @@ ParsedExactEvaluatedLattice parse_native_singular_scc_saturation_proof(
     acb_transformation = parse_checkpoint_acb_laurent_matrix(
         proof.at("acb_transformation"), dimension,
         "singular-SCC Acb saturation transformation");
-  return {kNativeSingularSCCSaturationProofSchema, identity,
+  return {proof_schema, identity,
           json::serialize(canonical_json_value(proof)),
           std::move(saturation), shadow_proof,
           std::move(acb_transformation)};
@@ -2673,9 +2886,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       ? "physical-parent-frame"
       : matching_frame_identity;
 
-  json::array exact_binding_basis;
-  for (const auto& source : basis_sources)
-    exact_binding_basis.push_back(source);
+  auto exact_binding_basis =
+      compact_matching_source_references(basis_sources);
   json::object exact_lattice_provenance{
       {"schema", "diffexp2-retained-exact-lattice-binding-v1"},
       {"witness_schema", exact_lattice.witness_schema},
@@ -2689,13 +2901,14 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   const auto exact_lattice_provenance_identity = json::serialize(
       canonical_json_value(exact_lattice_provenance));
 
-  json::array provenance_basis;
-  for (const auto& source : basis_sources) provenance_basis.push_back(source);
+  auto provenance_basis =
+      compact_matching_source_references(basis_sources);
   json::object provenance{
       {"schema", "diffexp2-native-refined-acb-local-match-v1"},
       {"checkpoint_identity", checkpoint_identity},
       {"basis", std::move(provenance_basis)},
-      {"incoming", incoming_source},
+      {"incoming",
+       compact_matching_source_reference(incoming_source)},
       {"basis_point_exact", basis_point.exact_coordinate},
       {"incoming_point_exact", incoming_point.exact_coordinate},
       {"physical_match_point_exact", basis_physical_point},

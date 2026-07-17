@@ -837,15 +837,22 @@ json::object planned_match_handoff_record(
       receiving.prescriptions, receiving.geometry.scale);
   json::array basis_sources;
   basis_sources.reserve(basis.size());
-  for (std::size_t column = 0; column < basis.size(); ++column)
-    basis_sources.push_back(json::object{
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    json::object source{
         {"column", column}, {"local", basis_handles[column]},
-        {"checkpoint_identity", basis[column]->checkpoint_identity()},
-        {"source_operator_identity",
-         basis[column]->source_operator_identity()}});
+        {"checkpoint_identity", basis[column]->checkpoint_identity()}};
+    if (compact_plan_reference)
+      source["source_operator_reference"] =
+          compact_matching_identity_reference(
+              basis[column]->source_operator_identity());
+    else
+      source["source_operator_identity"] =
+          basis[column]->source_operator_identity();
+    basis_sources.push_back(std::move(source));
+  }
   if (compact_plan_reference)
     return json::object{
-        {"schema", "diffexp2-retained-exact-plan-match-hop-v2"},
+        {"schema", "diffexp2-retained-exact-plan-match-hop-v3"},
         {"tile_plan", plan->handle()},
         {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
         {"arm", arm_name}, {"match", match_index},
@@ -853,7 +860,9 @@ json::object planned_match_handoff_record(
         {"producing", json::object{
              {"tile", match_index},
              {"chart", producing.handle},
-             {"chart_identity", producing.exact_identity},
+             {"chart_identity_reference",
+              compact_matching_identity_reference(
+                  producing.exact_identity)},
              {"local_point_exact", exact_match.producing_local.str()},
              {"effective_rim", optional_plan_rim_json(producing_rim)},
              {"prescriptions",
@@ -861,12 +870,15 @@ json::object planned_match_handoff_record(
              {"incoming", json::object{
                   {"local", incoming_handle},
                   {"checkpoint_identity", incoming->checkpoint_identity()},
-                  {"source_operator_identity",
-                   incoming->source_operator_identity()}}}}},
+                  {"source_operator_reference",
+                   compact_matching_identity_reference(
+                       incoming->source_operator_identity())}}}}},
         {"receiving", json::object{
              {"tile", match_index + 1},
              {"chart", receiving.handle},
-             {"chart_identity", receiving.exact_identity},
+             {"chart_identity_reference",
+              compact_matching_identity_reference(
+                  receiving.exact_identity)},
              {"local_point_exact", exact_match.receiving_local.str()},
              {"effective_rim", optional_plan_rim_json(receiving_rim)},
              {"prescriptions",
@@ -2009,7 +2021,9 @@ json::object compact_transport_local_reference(
   return json::object{
       {"local", local->handle()},
       {"chart", local->source_chart()},
-      {"source_operator_identity", local->source_operator_identity()},
+      {"source_operator_reference",
+       compact_matching_identity_reference(
+           local->source_operator_identity())},
       {"checkpoint_identity", local->checkpoint_identity()},
       {"coefficient_domain", local->scalar_domain()}};
 }

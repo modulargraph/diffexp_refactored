@@ -176,9 +176,10 @@ acbCommonValue = If[rationalCommonValue === {}, {},
 acbMaximumDifference = If[Length[rationalCommonValue] > 0 &&
     Length[rationalCommonValue] === Length[acbCommonValue],
   Max[Abs[N[acbCommonValue - rationalCommonValue, 50]]], Infinity];
-acbIdentity = If[AssociationQ[acbColumn], Quiet[Check[
-    ImportString[Lookup[acbColumn["ColumnProvenance"],
-      "exact_column_identity", ""], "RawJSON"], $Failed]], $Failed];
+acbProvenance = If[AssociationQ[acbColumn],
+  Lookup[acbColumn, "ColumnProvenance", <||>], <||>];
+acbIdentityDiagnostics = If[AssociationQ[acbProvenance],
+  Lookup[acbProvenance, "identity_diagnostics", <||>], <||>];
 acbDiagnostics = If[AssociationQ[acbColumn],
   Lookup[acbColumn["NativeSummary"], "block_diagnostics", {}], {}];
 acbSourceRecords = Select[acbDiagnostics,
@@ -203,9 +204,31 @@ acbOk = !AnyTrue[acbResult, FailureQ] &&
     "acb-regular-singular-jordan-block-dag-column-v1" &&
   Length[acbSourceRecords] === 1 &&
   Lookup[First[acbSourceRecords], "result_taylor_max", 0] >= 2 &&
-  AssociationQ[acbIdentity] &&
-  exactTagEntryQ[Lookup[acbIdentity, "seed", None]] &&
-  AllTrue[Lookup[acbIdentity, "targets", {}], exactTagEntryQ] &&
+  AssociationQ[acbProvenance] &&
+  Lookup[acbProvenance, "schema", None] ===
+    "diffexp2-retained-scc-column-reference-v1" &&
+  Lookup[acbProvenance, "authority", None] ===
+    "retained-native-exact-column-owner" &&
+  Lookup[acbProvenance, "scc", None] === acbPrepared["SCC"] &&
+  Lookup[acbProvenance, "seed_block", None] ===
+    acbColumn["SeedBlock"] - 1 &&
+  Lookup[acbProvenance, "basis_index", None] === 1 &&
+  AssociationQ[acbIdentityDiagnostics] &&
+  Lookup[acbIdentityDiagnostics, "algorithm", None] ===
+    "fnv1a64-v1" &&
+  StringMatchQ[Lookup[acbIdentityDiagnostics,
+      "scc_exact_identity_fingerprint", ""],
+    RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+  StringMatchQ[Lookup[acbIdentityDiagnostics,
+      "exact_column_identity_fingerprint", ""],
+    RegularExpression["^fnv1a64:[0-9a-f]{16}$"]] &&
+  IntegerQ[Lookup[acbIdentityDiagnostics,
+    "exact_column_identity_bytes", None]] &&
+  Lookup[acbIdentityDiagnostics, "exact_column_identity_bytes", 0] > 0 &&
+  FreeQ[Keys[acbProvenance],
+    "scc_exact_identity" | "exact_column_identity"] &&
+  StringLength[ExportString[
+    acbProvenance, "RawJSON", "Compact" -> True]] < 1024 &&
   Length[rationalCommonValue] > 0 &&
   Length[acbCommonValue] === Length[rationalCommonValue] &&
   acbMaximumDifference < 10^-40;

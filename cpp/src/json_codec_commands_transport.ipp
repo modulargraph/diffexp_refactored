@@ -1334,6 +1334,42 @@
       throw;
     }
 
+    json::object response;
+    try {
+      json::object match_reference{
+          {"index", match_index},
+          {"checkpoint_identity", match->checkpoint_identity()},
+          {"provenance_identity", match->provenance_identity()},
+          {"planned_hop", match->handoff()},
+          {"sealed_local_lineage", sealed_lineage}};
+      auto next_summary = compact_transport_local_reference(next);
+      next_summary["release_via"] = "local";
+      response = json::object{
+          {"status", "ok"}, {"session", session->handle},
+          {"capability", "consuming-transport-hop-v1"},
+          {"native_retained", true}, {"json_coefficients", 0},
+          {"arm", arm_name}, {"match", match_index},
+          {"next_local", std::move(next_summary)},
+          {"basis_reference", std::move(basis_reference)},
+          {"match_reference", std::move(match_reference)},
+          {"consumed_basis_handles", raw_basis},
+          {"elapsed_ms", std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - started).count()}};
+      // Publication consumes the previous basis owners.  Prove that the
+      // entire response fits Boost.JSON before making that destructive state
+      // change; otherwise a late serialization failure leaves the native arm
+      // advanced while the Wolfram caller correctly believes that the hop
+      // failed.
+      (void)json::serialize(response);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "consuming transport hop response reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+
     {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_local_solves == 0)
@@ -1360,26 +1396,7 @@
       session->total_local_match_ms += match->elapsed_ms();
       plan->note_match_advance(arm_name);
     }
-
-    json::object match_reference{
-        {"index", match_index},
-        {"checkpoint_identity", match->checkpoint_identity()},
-        {"provenance_identity", match->provenance_identity()},
-        {"planned_hop", match->handoff()},
-        {"sealed_local_lineage", sealed_lineage}};
-    auto next_summary = compact_transport_local_reference(next);
-    next_summary["release_via"] = "local";
-    return json::object{
-        {"status", "ok"}, {"session", session->handle},
-        {"capability", "consuming-transport-hop-v1"},
-        {"native_retained", true}, {"json_coefficients", 0},
-        {"arm", arm_name}, {"match", match_index},
-        {"next_local", std::move(next_summary)},
-        {"basis_reference", std::move(basis_reference)},
-        {"match_reference", std::move(match_reference)},
-        {"consumed_basis_handles", raw_basis},
-        {"elapsed_ms", std::chrono::duration<double, std::milli>(
-             std::chrono::steady_clock::now() - started).count()}};
+    return response;
   }
 
   if (operation == "transport.publish_consumed_states") {

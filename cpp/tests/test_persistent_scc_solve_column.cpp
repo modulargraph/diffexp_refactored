@@ -79,9 +79,18 @@ double real_midpoint(const json::value& coefficient) {
       coefficient.as_array().front().as_string()));
 }
 
+std::uint64_t unsigned_value(const json::value& value) {
+  if (value.is_uint64()) return value.as_uint64();
+  if (value.is_int64() && value.as_int64() >= 0)
+    return static_cast<std::uint64_t>(value.as_int64());
+  throw std::runtime_error("expected a nonnegative JSON integer");
+}
+
 }  // namespace
 
 int main() {
+  const std::string parent_identity =
+      "two-block-column-parent-v1:" + std::string(256 * 1024, 'x');
   const auto created = request(R"json({
     "schema":2,"op":"session.create","domain":"rational",
     "precision_bits":256,"output_digits":30,"scc_capacity":2,
@@ -96,7 +105,7 @@ int main() {
   const auto prepared = request(std::string(R"json({
     "schema":2,"op":"scc.prepare","session":")json") + session +
     R"json(","key":"two-block-column-key",
-    "identity":"two-block-column-parent-v1",
+    "identity":")json" + parent_identity + R"json(",
     "parent":{
       "dimension":2,
       "exact_system_record":[
@@ -190,15 +199,31 @@ int main() {
   bool diagnostics_ok = false;
   if (solved.at("status") == "ok") {
     const auto& provenance = solved.at("column_provenance").as_object();
+    const auto& identity_diagnostics =
+        provenance.at("identity_diagnostics").as_object();
     const auto& diagnostics = solved.at("block_diagnostics").as_array();
     provenance_ok =
+        provenance.at("schema") ==
+            "diffexp2-retained-scc-column-reference-v1" &&
+        provenance.at("authority") ==
+            "retained-native-exact-column-owner" &&
         std::string(provenance.at("scc").as_string()) == scc &&
-        provenance.at("scc_exact_identity") ==
-            "two-block-column-parent-v1" &&
         provenance.at("seed_block") == 0 &&
         provenance.at("basis_index") == 0 &&
-        std::string(provenance.at("exact_column_identity").as_string())
-            .find("\"targets\"") != std::string::npos;
+        identity_diagnostics.at("algorithm") == "fnv1a64-v1" &&
+        !std::string(identity_diagnostics.at(
+            "scc_exact_identity_fingerprint").as_string()).empty() &&
+        unsigned_value(
+            identity_diagnostics.at("scc_exact_identity_bytes")) ==
+            static_cast<std::uint64_t>(parent_identity.size()) &&
+        !std::string(identity_diagnostics.at(
+            "exact_column_identity_fingerprint").as_string()).empty() &&
+        unsigned_value(identity_diagnostics.at(
+            "exact_column_identity_bytes")) > 0 &&
+        json::serialize(provenance).size() < 1024 &&
+        provenance.if_contains("scc_exact_identity") == nullptr &&
+        provenance.if_contains("exact_column_identity") == nullptr &&
+        json::serialize(solved).size() < 32768;
     diagnostics_ok = diagnostics.size() == 2 &&
         diagnostics[1].as_object().at("source_epsilon_min") == 1 &&
         diagnostics[1].as_object().at("source_epsilon_max") == 2 &&

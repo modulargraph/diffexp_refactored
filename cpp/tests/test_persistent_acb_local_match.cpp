@@ -19,6 +19,15 @@ json::object request(json::object value) {
       .as_object();
 }
 
+std::uint64_t unsigned_value(const json::object& object, const char* key) {
+  const auto& value = object.at(key);
+  if (value.is_uint64()) return value.as_uint64();
+  if (value.is_int64() && value.as_int64() >= 0)
+    return static_cast<std::uint64_t>(value.as_int64());
+  throw std::runtime_error(std::string("expected nonnegative integer: ") +
+                           key);
+}
+
 std::string prepare_regular_chart(const std::string& session) {
   auto response = request(json::parse(std::string(R"json({
     "schema":2,"op":"chart.prepare","session":")json") + session +
@@ -334,6 +343,10 @@ int main() {
   const auto& refinement = matched.at("refinement").as_object();
   const auto& retained_basis = matched.at("basis").as_array();
   const auto& retained_first = retained_basis.front().as_object();
+  const auto& retained_operator_reference =
+      retained_first.at("source_operator_reference").as_object();
+  const auto& retained_metadata_reference =
+      retained_first.at("analytic_metadata_reference").as_object();
   const auto encoded_match = json::serialize(matched);
   const bool ambiguous_rejected =
       ambiguous_result.at("status") == "error" &&
@@ -394,11 +407,29 @@ int main() {
       matched.at("json_coefficients") == 0 && matched.at("dimension") == 2 &&
       matched.at("capability") ==
           "exact-lattice-guided-acb-local-match-v1" &&
+      retained_first.at("schema") ==
+          "diffexp2-retained-match-source-reference-v1" &&
+      retained_first.at("authority") ==
+          "retained-native-local-binding-validated" &&
+      retained_first.size() == 11 &&
       std::string(retained_first.at("chart").as_string()) == chart &&
       retained_first.at("checkpoint_identity") == "basis-0" &&
       retained_first.at("requested_imaginary_sign").is_null() &&
       retained_first.at("effective_imaginary_sign").is_null() &&
-      retained_first.if_contains("analytic_metadata") != nullptr &&
+      unsigned_value(retained_first, "matching_taylor_width") > 0 &&
+      retained_first.if_contains("source_operator_identity") == nullptr &&
+      retained_first.if_contains("analytic_metadata") == nullptr &&
+      retained_operator_reference.size() == 3 &&
+      retained_operator_reference.at("algorithm") == "fnv1a64-v1" &&
+      !std::string(retained_operator_reference.at(
+          "fingerprint").as_string()).empty() &&
+      unsigned_value(retained_operator_reference, "identity_bytes") > 0 &&
+      retained_metadata_reference.size() == 3 &&
+      retained_metadata_reference.at("algorithm") == "fnv1a64-v1" &&
+      !std::string(retained_metadata_reference.at(
+          "fingerprint").as_string()).empty() &&
+      unsigned_value(retained_metadata_reference, "identity_bytes") > 0 &&
+      json::serialize(retained_first).size() < 1024 &&
       exact.at("identity") == "nontrivial-eps-pole-lattice-v1" &&
       exact.at("canonical_witness_retained") == true &&
       exact.at("transformation_min_power") == -1 &&

@@ -669,6 +669,50 @@ physicalClearedODEData[cs_Association] := Module[
     "Signature" -> signature, "Data" -> data|>];
   data];
 
+physicalEpsRationalExpression[data_Association, eps_, cs_] := Module[
+  {zero = Lookup[data, "Zero", None], valuation, p, q},
+  If[TrueQ[zero], Return[0, Module]];
+  valuation = Lookup[data, "Valuation", None];
+  p = Lookup[data, "P", None];
+  q = Lookup[data, "Q", None];
+  If[zero =!= False || !IntegerQ[valuation] ||
+      !PolynomialQ[p, eps] || !PolynomialQ[q, eps] ||
+      zeroCanQ[Coefficient[p, eps, 0]] ||
+      !TrueQ[Coefficient[q, eps, 0] === 1],
+    err["E6", cs, <|"PhysicalCoefficient" -> data,
+      "Detail" ->
+        "retained regular equation contains a malformed epsilon-rational coefficient"|>]];
+  Cancel[Together[eps^valuation p/q]]];
+
+(* A frame-independent regular owner has already paid the exact polynomial
+   LCM/GCD clear needed to publish q(t,eps) theta f = C(t,eps) f.  Rebuild the
+   ordinary identity-frame recurrence directly from that immutable q/C
+   record instead of clearing the same chart a second time when value
+   transport falls back to a basis solve. *)
+regularClearedSymbolicFromPhysicalData[cs_Association,
+    data_Association] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], d = cs["SystemSize"],
+   qData, cData, expectedIdentity, dExpr, nExpr},
+  qData = Lookup[data, "Q", None];
+  cData = Lookup[data, "C", None];
+  expectedIdentity = If[ListQ[qData] && ListQ[cData],
+    "de2-physical-ode-" <> IntegerString[
+      Hash[{"physical-original-master", qData, cData}, "SHA256"],
+      16, 64], None];
+  If[!ListQ[qData] || qData === {} || !ListQ[cData] || cData === {} ||
+      !AllTrue[qData, AssociationQ] ||
+      !AllTrue[cData, MatrixQ[#] && Dimensions[#] === {d, d} &&
+          AllTrue[Flatten[#], AssociationQ] &] ||
+      Lookup[data, "Identity", None] =!= expectedIdentity,
+    err["E6", cs, <|"PhysicalData" -> KeyTake[data, {"Identity"}],
+      "Detail" ->
+        "retained regular equation q/C data failed its exact content identity or dimensions"|>]];
+  dExpr = physicalEpsRationalExpression[#, eps, cs] & /@ qData;
+  nExpr = Map[physicalEpsRationalExpression[#, eps, cs] &,
+    cData, {3}];
+  <|"dExpr" -> dExpr, "NhatExpr" -> nExpr,
+    "dD" -> Length[dExpr] - 1, "dN" -> Length[nExpr] - 1|>];
+
 (* Q=1 entries need no second Together/series-division pass after
    epsRationalData has already canonicalized them. *)
 polynomialEpsListFromData[data_Association, eps_, fb_Integer, W_Integer] :=
@@ -2189,13 +2233,19 @@ $cppStaticOperatorCacheMax = 1024;
    structural signature; the opaque token then gives CppBackend a lightweight
    identity for the already collision-certified payload. *)
 cppStaticOperatorPayload[cs_, prep_, blocks_List, fb_Integer, W_Integer,
-    vPrep_, inputDigits_Integer, precisionBits_Integer] := Module[
+    vPrep_, inputDigits_Integer, precisionBits_Integer,
+    physicalDataOverride_:Automatic] := Module[
   {d = cs["SystemSize"], signature, key, cached, dLags, denominators,
    nLags, assembly = Null, assemblyGroups, assemblyBase, payload, record,
    physicalData, physicalPayload, token, assemblyExactIdentity,
    epsilonRegularQ, spectralPrincipal = Null, spectralSource = Null,
    encodeAdditionalMatrix, spectralSourceExactIdentity},
-  physicalData = physicalClearedODEData[cs];
+  physicalData = If[AssociationQ[physicalDataOverride],
+    physicalDataOverride, physicalClearedODEData[cs]];
+  (* Validate an owner-supplied record before it can enter either the static
+     operator identity or the native physical-equation payload. *)
+  If[AssociationQ[physicalDataOverride],
+    regularClearedSymbolicFromPhysicalData[cs, physicalData]];
   assemblyExactIdentity = If[AssociationQ[vPrep],
     DiffExp2`SectorSeries`ExactExpressionIdentity[
       Normal[cs["V"]], cs["ChartVar"]], None];
@@ -3702,17 +3752,60 @@ homogeneousFramePlanFor[cs_Association, req_Association] :=
     $homogeneousFramePlanOverride,
     homogeneousFramePlan[cs, req]];
 
+makeRegularOwnerPhysicalPreparation[cs_Association, req_Association,
+    equationIdentity_String, physicalData_Association] := Module[
+  {core},
+  (* Validate before retention; the identity below then binds the complete
+     immutable hint, not merely its compact physical-payload digest. *)
+  regularClearedSymbolicFromPhysicalData[cs, physicalData];
+  core = <|
+    "Schema" -> "DiffExp2RegularOwnerPhysicalPreparation/v1",
+    "EquationIdentity" -> equationIdentity,
+    "PhysicalPayloadIdentity" -> physicalData["Identity"],
+    "Geometry" -> cppPersistentGeometry[cs],
+    "Request" -> req,
+    "PhysicalData" -> physicalData|>;
+  Append[core, "Identity" -> ("de2-regular-owner-preparation-" <>
+    IntegerString[Hash[core, "SHA256"], 16, 64])]];
+
+regularOwnerPhysicalPreparationData[cs_Association, req_Association,
+    preparation_Association] := Module[{core, data, expectedIdentity},
+  core = KeyDrop[preparation, "Identity"];
+  data = Lookup[preparation, "PhysicalData", None];
+  expectedIdentity = "de2-regular-owner-preparation-" <>
+    IntegerString[Hash[core, "SHA256"], 16, 64];
+  If[Sort[Keys[preparation]] =!= Sort[{
+        "Schema", "EquationIdentity", "PhysicalPayloadIdentity",
+        "Geometry", "Request", "PhysicalData", "Identity"}] ||
+      Lookup[preparation, "Schema", None] =!=
+        "DiffExp2RegularOwnerPhysicalPreparation/v1" ||
+      !StringQ[Lookup[preparation, "EquationIdentity", None]] ||
+      Lookup[preparation, "Geometry", None] =!= cppPersistentGeometry[cs] ||
+      Lookup[preparation, "Request", None] =!= req ||
+      !AssociationQ[data] ||
+      Lookup[preparation, "PhysicalPayloadIdentity", None] =!=
+        Lookup[data, "Identity", None] ||
+      Lookup[preparation, "Identity", None] =!= expectedIdentity,
+    err["E6", cs, <|
+      "OwnerPreparation" -> KeyDrop[preparation, "PhysicalData"],
+      "Detail" ->
+        "regular owner physical preparation failed its exact request, geometry, or content identity"|>]];
+  regularClearedSymbolicFromPhysicalData[cs, data];
+  data];
+
 (* Prepare the complete immutable operator once.  Chart-only owner
    construction and every dynamic local run share this exact capture, so a
    later value or basis solve cannot silently drift to a different frame,
    physical q/C payload, or analytic chart identity. *)
 prepareNativeLocalFamilyShared[cs_Association, req_Association,
-    tag_Association, initPrototype_List] := Module[
+    tag_Association, initPrototype_List,
+    ownerPhysicalPreparation_:Automatic] := Module[
   {d = Lookup[cs, "SystemSize", 0], a, b, p, nmax, reqMin, reqMax,
    matchingFamilies, matchingBlocks, allowedP, blocks, fams, pMax,
    pBudget, cdMax, symbolic,
    poleDepth, spectralDepth, transformDepth, wideTop, fb, W, prep, vPrep,
    symbols, domain, wp, inputDigits, precisionBits, staticRecord,
+   ownerPhysicalData,
    persistentMetadata, shared, ownerTimingQ, ownerPhaseStarted, ownerPhase},
   ownerTimingQ = Environment["DE2_NATIVE_OWNER_TIMING"] === "1";
   ownerPhaseStarted = SessionTime[];
@@ -3801,7 +3894,12 @@ prepareNativeLocalFamilyShared[cs_Association, req_Association,
       {block, blocks}]]];
   pBudget = Max[p, pMax];
   cdMax = Max[Join[{0}, Lookup[fams, "CollisionDepth", {}]]];
-  symbolic = clearedSymbolic[cs];
+  ownerPhysicalData = If[AssociationQ[ownerPhysicalPreparation],
+    regularOwnerPhysicalPreparationData[
+      cs, req, ownerPhysicalPreparation], Automatic];
+  symbolic = If[AssociationQ[ownerPhysicalData],
+    regularClearedSymbolicFromPhysicalData[cs, ownerPhysicalData],
+    clearedSymbolic[cs]];
   poleDepth = recurrencePoleDepth[symbolic, nmax];
   spectralDepth = spectralTransformPoleDepth[cs];
   transformDepth = finalTransformPoleDepth[cs, nmax];
@@ -3832,7 +3930,7 @@ prepareNativeLocalFamilyShared[cs_Association, req_Association,
   Block[{$cppSerializationDomain = domain,
       $cppSerializationSymbols = {}},
     staticRecord = cppStaticOperatorPayload[cs, prep, blocks, fb, W,
-      vPrep, inputDigits, precisionBits];
+      vPrep, inputDigits, precisionBits, ownerPhysicalData];
     ownerPhase["buildAndSerializeStaticOperator"]];
   persistentMetadata = Append[cppPersistentMetadata[cs, fb, W],
     "PreparedToken" -> staticRecord["Token"]];
@@ -6729,7 +6827,7 @@ SolveNativeRegularBasis[cs_Association, req_Association,
    physical, tag = <|"a" -> 0, "b" -> 0, "p" -> 0|>, unitInitials,
    shared, prepared, workerCount, batch, raw, columns, cleanup, sessions,
    charts, forbiddenPayloadKeys, expectedLocalChart,
-   expectedLocalOperator},
+   expectedLocalOperator, ownerPhysicalPreparation},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "SolveNativeRegularBasis requires a regular chart"|>]];
@@ -6755,11 +6853,25 @@ SolveNativeRegularBasis[cs_Association, req_Association,
       Table[If[component === basisIndex && power === 0, 1, 0],
         {power, epsMin, epsMax}]], {component, d}]},
     {basisIndex, d}];
+  ownerPhysicalPreparation = If[
+    AssociationQ[equationOwner] &&
+      Lookup[equationOwner, "OwnerKind", None] ===
+        "FrameIndependentRegularPhysicalEquation" &&
+      AssociationQ[Lookup[equationOwner, "PhysicalPreparation", None]],
+    equationOwner["PhysicalPreparation"], Automatic];
+  If[AssociationQ[ownerPhysicalPreparation] &&
+      (Lookup[ownerPhysicalPreparation, "EquationIdentity", None] =!=
+          Lookup[equationOwner, "EquationIdentity", None] ||
+       Lookup[ownerPhysicalPreparation, "PhysicalPayloadIdentity", None] =!=
+          Lookup[equationOwner, "PhysicalPayloadIdentity", None]),
+    err["E6", cs, <|
+      "Detail" ->
+        "regular basis owner preparation is not bound to the supplied physical equation owner"|>]];
   (* The immutable chart preparation is the dominant Wolfram-side cost for
      large regular receivers.  Capture it once, then serialize only the d
      distinct unit-column runs and checkpoint identities. *)
   shared = prepareNativeLocalFamilyShared[
-    physical, req, tag, First[unitInitials]];
+    physical, req, tag, First[unitInitials], ownerPhysicalPreparation];
   prepared = prepareNativeLocalFamilyDynamic[shared, #, False] & /@
     unitInitials;
   If[Length[prepared] =!= d ||
@@ -6913,7 +7025,8 @@ PrepareNativeRegularBasisOwner[cs_Association, req_Association,
   {d = cs["SystemSize"], epsWindow = Lookup[req, "EpsWindow", None],
    physical, physicalData, geometry, sessionStats, domain, wp,
    inputDigits, identityRecord, identity, checkpointIdentity,
-   physicalPayload, localMetadata, owner, relativeAccuracy},
+   physicalPayload, localMetadata, owner, relativeAccuracy,
+   physicalPreparation},
   If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
     err["E8", cs, <|"Detail" ->
       "PrepareNativeRegularBasisOwner requires a regular chart"|>]];
@@ -6972,9 +7085,13 @@ PrepareNativeRegularBasisOwner[cs_Association, req_Association,
         Lookup[anchor, "session", None]] ||
       !StringQ[Lookup[owner, "EquationOwner", None]] ||
       !StringStartsQ[owner["EquationOwner"], "eq:"] ||
-      Lookup[owner, "EquationIdentity", None] =!= identity,
+      Lookup[owner, "EquationIdentity", None] =!= identity ||
+      Lookup[owner, "PhysicalPayloadIdentity", None] =!=
+        physicalData["Identity"],
     err["E5", cs, <|"BackendFailure" -> owner,
       "Detail" -> "frame-independent regular equation-owner preparation lost its exact session or q/C identity"|>]];
+  physicalPreparation = makeRegularOwnerPhysicalPreparation[
+    physical, req, identity, physicalData];
   <|"Type" -> "DiffExp2NativeRegularBasisOwner",
     "OwnerKind" -> "FrameIndependentRegularPhysicalEquation",
     "Session" -> owner["Session"],
@@ -6982,6 +7099,7 @@ PrepareNativeRegularBasisOwner[cs_Association, req_Association,
     "ChartIdentity" -> owner["EquationIdentity"],
     "EquationIdentity" -> owner["EquationIdentity"],
     "PhysicalPayloadIdentity" -> owner["PhysicalPayloadIdentity"],
+    "PhysicalPreparation" -> physicalPreparation,
     "ValueSolver" -> <|
       "schema" -> "diffexp2-native-ordinary-physical-value-solver-v1",
       "taylor_complete_max" -> req["TOrder"],

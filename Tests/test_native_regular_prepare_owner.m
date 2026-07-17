@@ -143,6 +143,12 @@ assert["anchor_session_owner_is_frame_independent_and_frame_free",
       "eq:"] &&
     Lookup[lightOwner["ValueSolver"], "schema", None] ===
       "diffexp2-native-ordinary-physical-value-solver-v1" &&
+    Lookup[lightOwner["PhysicalPreparation"], "Schema", None] ===
+      "DiffExp2RegularOwnerPhysicalPreparation/v1" &&
+    lightOwner["PhysicalPreparation", "EquationIdentity"] ===
+      lightOwner["EquationIdentity"] &&
+    lightOwner["PhysicalPreparation", "PhysicalPayloadIdentity"] ===
+      lightOwner["PhysicalPayloadIdentity"] &&
     Sort[Keys[lightOwner["ValueSolver"]]] === Sort[{
       "schema", "taylor_complete_max", "metadata",
       "relative_accuracy_max_exact"}] &&
@@ -151,13 +157,18 @@ assert["anchor_session_owner_is_frame_independent_and_frame_free",
     Lookup[lightStats, "charts", -1] === 1 &&
     Lookup[lightStats, "locals", -1] === 0];
 
-lightBasis = If[FailureQ[lightOwner], lightOwner, catchDE2[
+secondClearCalls = 0;
+lightBasis = If[FailureQ[lightOwner], lightOwner, catchDE2[Block[{
+    DiffExp2`Solve`Private`clearedSymbolic =
+      Function[Null, secondClearCalls++;
+        Failure["UnexpectedSecondChartClear", <||>]]},
   DiffExp2`Solve`SolveNativeRegularBasis[
-    chartSystem, request, 1, True, lightOwner]]];
+    chartSystem, request, 1, True, lightOwner]]]];
 lightBasisStats = If[AssociationQ[lightOwner],
   sessionStats[lightOwner["Session"]], <||>];
 assert["framed_fallback_is_published_under_frame_independent_owner",
   AssociationQ[lightBasis] && AssociationQ[lightOwner] &&
+    secondClearCalls === 0 &&
     lightBasis["Session"] === lightOwner["Session"] &&
     lightBasis["NativeChart"] === lightOwner["NativeEquationOwner"] &&
     Lookup[lightBasis["Columns"], "NativeChart", {}] ===
@@ -167,6 +178,16 @@ assert["framed_fallback_is_published_under_frame_independent_owner",
 If[AssociationQ[lightBasis],
   Scan[DiffExp2`CppBackend`ReleasePersistentLocal,
     lightBasis["Columns"]]];
+tamperedOwner = If[AssociationQ[lightOwner], Join[lightOwner, <|
+  "PhysicalPreparation" -> Join[lightOwner["PhysicalPreparation"], <|
+    "Request" -> Join[request, <|"TOrder" -> request["TOrder"] + 1|>]|>]|>],
+  lightOwner];
+tamperedOwnerBasis = If[AssociationQ[tamperedOwner], catchDE2[
+  DiffExp2`Solve`SolveNativeRegularBasis[
+    chartSystem, request, 1, True, tamperedOwner]], tamperedOwner];
+assert["tampered retained physical preparation is rejected before solving",
+  FailureQ[tamperedOwnerBasis] && AssociationQ[lightOwner] &&
+    Lookup[sessionStats[lightOwner["Session"]], "locals", -1] === 0];
 lightOwnerRelease = If[AssociationQ[lightOwner],
   DiffExp2`CppBackend`ReleasePersistentRegularEquationOwner[lightOwner],
   lightOwner];

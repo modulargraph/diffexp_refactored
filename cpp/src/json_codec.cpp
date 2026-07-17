@@ -14,6 +14,7 @@
 #include "diffexp2/path_planner.hpp"
 #include "diffexp2/physical_ode.hpp"
 #include "diffexp2/recurrence.hpp"
+#include "diffexp2/scc_completeness.hpp"
 #include "diffexp2/singular_indicial.hpp"
 #include "diffexp2/tail_majorant.hpp"
 

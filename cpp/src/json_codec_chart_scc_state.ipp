@@ -186,7 +186,7 @@ class PreparedChart final : public PreparedChartBase {
   NativeLocalRun<Scalar> solve_native(
       const json::object& run, const json::object& metadata_object) {
     return solve_native_impl(
-        run, metadata_object, std::nullopt, false, std::nullopt);
+        run, metadata_object, std::nullopt, false, std::nullopt, true);
   }
 
   NativeLocalRun<Scalar> solve_native_with_source(
@@ -196,7 +196,7 @@ class PreparedChart final : public PreparedChartBase {
       throw std::invalid_argument(
           "native SCC source injection rejects caller-supplied source data");
     return solve_native_impl(
-        run, metadata_object, std::move(source), false, std::nullopt);
+        run, metadata_object, std::move(source), false, std::nullopt, true);
   }
 
   void record_native_local_success(
@@ -603,7 +603,8 @@ class PreparedChart final : public PreparedChartBase {
       const json::object& run, const json::object& metadata_object,
       std::optional<SourceData<Scalar>> native_source,
       bool attach_tail_model,
-      std::optional<std::string> tail_operator_identity) {
+      std::optional<std::string> tail_operator_identity,
+      bool allow_scc_deferred_completeness) {
     if (precision_bits_ < 64)
       throw std::invalid_argument(
           "native local solutions require at least 64 bits of Acb precision");
@@ -646,9 +647,14 @@ class PreparedChart final : public PreparedChartBase {
 
     const auto kernel_started = std::chrono::steady_clock::now();
     auto recurrence = RecurrenceSolver<Scalar>(problem, prepared_).run();
-    auto assembled = assemble_recurrence(prepared_, problem, recurrence);
+    auto assembled = allow_scc_deferred_completeness
+        ? assemble_scc_recurrence_candidate(prepared_, problem, recurrence)
+        : SCCAssemblyCandidate<Scalar>{
+              assemble_recurrence(prepared_, problem, recurrence), false,
+              recurrence.top_valid};
+    require_exact_domain_for_deferred_scc_candidate(assembled);
     auto solution = make_local_solution(
-        problem, std::move(assembled), std::move(metadata));
+        problem, std::move(assembled.coefficients), std::move(metadata));
     validate_local_solution(solution, false);
     auto tail_model = unavailable_tail_model(
         attach_tail_model
@@ -664,8 +670,12 @@ class PreparedChart final : public PreparedChartBase {
     auto pseudo_hits = std::move(recurrence.hits);
     const auto kernel_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - kernel_started).count();
+    NativeLocalDiagnostics diagnostics{
+        recurrence.top_valid, parse_ms, kernel_ms};
+    diagnostics.requires_parent_completeness_certificate =
+        assembled.requires_parent_certificate;
     return {std::move(solution), std::move(pseudo_hits),
-            {recurrence.top_valid, parse_ms, kernel_ms},
+            diagnostics,
             std::move(tail_model)};
   }
 
@@ -734,13 +744,14 @@ class PreparedChart final : public PreparedChartBase {
       source_identity = regular->exact_identity();
     }
     auto native = solve_native_impl(
-        run, metadata_object, std::nullopt, true, source_identity);
+        run, metadata_object, std::nullopt, true, source_identity, false);
     std::shared_ptr<PhysicalEquationOwnerBase> retained_equation_owner;
     std::string residual_unavailable_reason;
     const bool homogeneous = run.at("source").is_null();
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>) {
       if (!homogeneous) {
+        retained_physical_equation.reset();
         residual_unavailable_reason =
             "owner-bound residual is unsupported for sourced primitive locals until the exact physical source is retained";
       } else if (!retained_physical_equation) {
@@ -2126,6 +2137,9 @@ class PseudoCompensator {
     total.top_valid = std::min(total.top_valid, current.top_valid);
     total.parse_ms += current.parse_ms;
     total.kernel_ms += current.kernel_ms;
+    total.requires_parent_completeness_certificate =
+        total.requires_parent_completeness_certificate ||
+        current.requires_parent_completeness_certificate;
     total.pseudo_hits += current.pseudo_hits;
     total.pseudo_compensations += current.pseudo_compensations;
     total.max_pseudo_depth = std::max(
@@ -2423,6 +2437,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       json::array diagnostics;
       NativeLocalDiagnostics aggregate;
       aggregate.top_valid = kCompleteInfinity;
+      std::vector<ValidatedScheduleEvidence> validated_schedules;
       std::vector<std::unique_ptr<PseudoCompensator<Rational>>>
           pseudo_compensators(blocks_.size());
       const auto pseudo_compensator = [&](std::uint32_t block)
@@ -2446,7 +2461,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
       const auto& seed_run = checked_column_run(
           seed_request, seed_block, true, nullptr,
-          regular_singular_execution);
+          regular_singular_execution, &validated_schedules);
       const auto seed_local_component = seed_component_from_run(
           seed_run, seed_block, regular_singular_execution);
       const auto basis_index =
@@ -2520,7 +2535,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         require_work_local(source, "combined coupling source");
         if (!regular_singular_execution) {
           const auto& target_run = checked_column_run(
-              target_request, target_block, false, &source, false);
+              target_request, target_block, false, &source, false,
+              &validated_schedules);
           require_source_tag_matches_run(source, target_run);
           auto source_data = local_solution_source_data(
               source, as_u32(target_run.at("nmax"), "target nmax"),
@@ -2598,7 +2614,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           }
 
           const auto& target_run = checked_column_run(
-              *entry, target_block, false, &group, true);
+              *entry, target_block, false, &group, true,
+              &validated_schedules);
           require_source_tag_matches_run(group, target_run);
           const auto allowed_floor = exact_formal_value_floor(group);
           auto source_data = local_solution_source_data(
@@ -2655,6 +2672,12 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           : combine_local_solutions(
                 embedded, checkpoint_identity + ":work-parent");
       require_work_local(parent, "combined parent work state");
+      const auto parent_completeness = certify_parent_completeness(
+          parent, aggregate, seed_block, seed_local_component, basis_index,
+          work_.requested_max, regular_singular_execution, reachable,
+          expected_targets, state, validated_schedules);
+      if (parent_completeness.has_value())
+        aggregate.top_valid = work_.requested_max;
       parent = cap_composite_public_local(
           parent, work_.requested_max, work_.public_t_order,
           retained_geometry_.chart, retained_geometry_.prescriptions,
@@ -2680,6 +2703,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           aggregate.pseudo_hits == 0
               ? "none"
               : "exact-rational-derived-jordan-targets-v1";
+      if (parent_completeness.has_value())
+        column_identity_record["parent_completeness_certificate"] =
+            *parent_completeness;
       SCCColumnProvenance column_provenance{
           handle_, exact_identity_, seed_block,
           basis_index,
@@ -3161,6 +3187,180 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
  private:
+  struct ValidatedScheduleEvidence {
+    std::uint32_t block = 0;
+    std::uint32_t taylor_rows = 0;
+    bool exact_affine_jordan = false;
+    std::size_t validation_runs = 0;
+  };
+
+  json::object certify_column_uniqueness_path(
+      std::uint32_t seed_block, std::uint32_t seed_local_component,
+      std::uint32_t basis_index, bool regular_singular_execution,
+      const std::vector<std::uint8_t>& submitted_reachable,
+      const std::vector<std::uint32_t>& submitted_targets,
+      const std::vector<std::optional<LocalSolution<Scalar>>>& state,
+      const std::vector<ValidatedScheduleEvidence>& schedules) const {
+    if (seed_block >= blocks_.size() ||
+        seed_local_component >= blocks_[seed_block].vertices.size() ||
+        blocks_[seed_block].vertices[seed_local_component] != basis_index)
+      throw std::domain_error(
+          "deferred SCC completeness lost its validated canonical seed column");
+    if (submitted_reachable.size() != blocks_.size() ||
+        state.size() != blocks_.size() ||
+        graph_.component_count != blocks_.size() ||
+        graph_.topological_order.size() != blocks_.size())
+      throw std::domain_error(
+          "deferred SCC completeness lost its retained exact block-DAG shape");
+    const std::set<std::pair<std::uint32_t, std::uint32_t>> graph_edges(
+        graph_.condensation_edges.begin(), graph_.condensation_edges.end());
+    std::set<std::pair<std::uint32_t, std::uint32_t>> coupling_edges;
+    for (const auto& coupling : couplings_)
+      if (!coupling_edges.emplace(coupling.source_block,
+                                  coupling.target_block).second)
+        throw std::domain_error(
+            "deferred SCC completeness has duplicate coupling groups for one block-DAG edge");
+    if (coupling_edges != graph_edges)
+      throw std::domain_error(
+          "deferred SCC completeness coupling set contradicts its exact block DAG");
+
+    std::vector<std::uint8_t> reachable(blocks_.size(), 0);
+    reachable[seed_block] = 1;
+    for (const auto block : graph_.topological_order) {
+      if (block >= blocks_.size())
+        throw std::domain_error(
+            "deferred SCC completeness has an invalid topological block");
+      if (!reachable[block]) continue;
+      for (const auto [source, target] : graph_.condensation_edges) {
+        if (source >= blocks_.size() || target >= blocks_.size())
+          throw std::domain_error(
+              "deferred SCC completeness has an invalid condensation edge");
+        if (source == block) reachable[target] = 1;
+      }
+    }
+    std::vector<std::uint32_t> expected_targets;
+    std::size_t reachable_count = 0;
+    for (const auto block : graph_.topological_order) {
+      if (!reachable[block]) continue;
+      ++reachable_count;
+      if (block != seed_block) expected_targets.push_back(block);
+    }
+    if (reachable != submitted_reachable ||
+        expected_targets != submitted_targets)
+      throw std::domain_error(
+          "deferred SCC completeness execution is not the retained deterministic block-DAG path");
+    for (std::size_t block = 0; block < state.size(); ++block)
+      if (state[block].has_value() != static_cast<bool>(reachable[block]))
+        throw std::domain_error(
+            "deferred SCC completeness parent does not cover exactly its reachable block DAG");
+
+    std::vector<std::uint8_t> schedule_covered(blocks_.size(), 0);
+    std::size_t validated_schedule_runs = 0;
+    for (const auto& evidence : schedules) {
+      if (evidence.block >= blocks_.size() ||
+          !reachable[evidence.block] ||
+          evidence.taylor_rows !=
+              static_cast<std::size_t>(work_.work_t_order) + 1 ||
+          evidence.exact_affine_jordan != regular_singular_execution ||
+          evidence.validation_runs == 0 || schedule_covered[evidence.block])
+        throw std::domain_error(
+            "deferred SCC completeness has inconsistent validated recurrence-schedule evidence");
+      schedule_covered[evidence.block] = 1;
+      validated_schedule_runs += evidence.validation_runs;
+    }
+    if (schedules.size() != reachable_count)
+      throw std::domain_error(
+          "deferred SCC completeness schedule evidence does not cover each reachable block exactly once");
+    for (std::size_t block = 0; block < blocks_.size(); ++block) {
+      if (!reachable[block]) continue;
+      if (!schedule_covered[block])
+        throw std::domain_error(
+            "deferred SCC completeness has a reachable block without a validated recurrence schedule");
+      if (regular_singular_execution &&
+          !blocks_[block].exact_jordan_indicial.has_value())
+        throw std::domain_error(
+            "deferred SCC completeness lost an exact affine-Jordan certificate");
+      if (!regular_singular_execution &&
+          !blocks_[block].chart->has_regular_singleton_partition())
+        throw std::domain_error(
+            "deferred SCC completeness lost an exact regular singleton schedule");
+    }
+    return json::object{
+        {"schema", "diffexp2-scc-column-uniqueness-path-v1"},
+        {"scc_exact_identity", exact_identity_},
+        {"canonical_seed",
+         json::object{{"block", seed_block},
+                      {"local_component", seed_local_component},
+                      {"basis_index", basis_index},
+                      {"normalization",
+                       regular_singular_execution
+                           ? "validated-exact-affine-jordan-log-unit"
+                           : "validated-exact-regular-epsilon-unit"}}},
+        {"reachable_blocks", reachable_count},
+        {"validated_schedule_blocks", schedules.size()},
+        {"validated_schedule_runs", validated_schedule_runs},
+        {"schedule_proof",
+         regular_singular_execution
+             ? "certify_exact_affine_jordan_schedule"
+             : "exact-regular-resonant-zero-and-Taylor-index"},
+        {"block_dag_proof",
+         "validated-SCC-condensation-and-deterministic-reachable-cover"}};
+  }
+
+  std::optional<json::object> certify_parent_completeness(
+      const LocalSolution<Scalar>& parent,
+      const NativeLocalDiagnostics& diagnostics,
+      std::uint32_t seed_block, std::uint32_t seed_local_component,
+      std::uint32_t basis_index, std::int32_t claimed_complete_max,
+      bool regular_singular_execution,
+      const std::vector<std::uint8_t>& reachable,
+      const std::vector<std::uint32_t>& expected_targets,
+      const std::vector<std::optional<LocalSolution<Scalar>>>& state,
+      const std::vector<ValidatedScheduleEvidence>& schedules) const {
+    if (!diagnostics.requires_parent_completeness_certificate)
+      return std::nullopt;
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      throw std::domain_error(
+          "deferred SCC completeness reached a non-Rational parent after its exact-domain gate");
+    } else {
+      if (!physical_equation_)
+        throw std::domain_error(
+            "deferred SCC completeness requires the retained full-parent physical q/C owner");
+      if (parent.epsilon.min_power > claimed_complete_max)
+        throw std::domain_error(
+            "deferred SCC completeness has no nonempty claimed epsilon window");
+      const EpsilonWindow claimed{
+          parent.epsilon.min_power, claimed_complete_max};
+      const auto residual = certify_scc_parent_exact_formal_residual(
+          *physical_equation_, parent, claimed, work_.public_t_order);
+      const auto uniqueness = certify_column_uniqueness_path(
+          seed_block, seed_local_component, basis_index,
+          regular_singular_execution, reachable, expected_targets, state,
+          schedules);
+      return json::object{
+          {"schema", "diffexp2-scc-parent-exact-formal-completeness-v1"},
+          {"owner_signature_identity",
+           physical_equation_->owner_signature_identity},
+          {"physical_payload_identity",
+           physical_equation_->payload_identity},
+          {"epsilon", json::object{{"min", residual.epsilon.min_power},
+                                    {"complete_max",
+                                     residual.epsilon.complete_max}}},
+          {"taylor_complete_max", residual.taylor_complete_max},
+          {"exact_tag_count", residual.exact_tag_count},
+          {"coefficient_rows", residual.coefficient_rows},
+          {"residual",
+           "coefficientwise-exact-rational-q-theta-minus-C-equality"},
+          {"reservoir",
+           "every-active-q/C-product-covered-through-claimed-complete-max"},
+          {"uniqueness", uniqueness},
+          {"seed_block", seed_block},
+          {"seed_local_component", seed_local_component},
+          {"basis_index", basis_index},
+          {"recurrence_top_valid", encode_validity(diagnostics.top_valid)}};
+    }
+  }
+
   std::shared_ptr<StoredLocalBase> retain_completed_parent_local(
       const std::string& local_handle, std::uint32_t seed_block,
       LocalSolution<Scalar> parent, const NativeLocalDiagnostics& diagnostics,
@@ -3477,6 +3677,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         std::min<std::int64_t>(
             parent.epsilon.complete_max,
             work_.work_complete_max));
+    if (aggregate.requires_parent_completeness_certificate)
+      throw std::logic_error(
+          "native Acb SCC column reached publication with deferred completeness instead of requesting its exact Rational shadow");
     parent = cap_composite_public_local(
         parent, retained_match_max, work_.public_t_order,
         retained_geometry_.chart, retained_geometry_.prescriptions,
@@ -3729,7 +3932,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   const json::object& checked_column_run(
       const json::object& entry, std::uint32_t block_index, bool seed,
       const LocalSolution<Scalar>* source,
-      bool regular_singular_execution) const {
+      bool regular_singular_execution,
+      std::vector<ValidatedScheduleEvidence>* validated_schedules =
+          nullptr) const {
     if (block_index >= blocks_.size())
       throw std::invalid_argument("native SCC run block is out of range");
     const auto block_dimension = blocks_[block_index].chart->dimension();
@@ -3951,6 +4156,22 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             throw std::invalid_argument(
                 "native SCC regular block schedule must be resonant at zero and Taylor by exact index for every Jordan singleton");
         }
+      }
+    }
+    if (validated_schedules != nullptr) {
+      const auto found = std::find_if(
+          validated_schedules->begin(), validated_schedules->end(),
+          [&](const auto& evidence) { return evidence.block == block_index; });
+      if (found == validated_schedules->end()) {
+        validated_schedules->push_back(ValidatedScheduleEvidence{
+            block_index, static_cast<std::uint32_t>(schedule.size()),
+            regular_singular_execution, 1});
+      } else {
+        if (found->taylor_rows != schedule.size() ||
+            found->exact_affine_jordan != regular_singular_execution)
+          throw std::logic_error(
+              "validated SCC tag schedules disagree within one reachable block");
+        ++found->validation_runs;
       }
     }
     return run;
@@ -4291,6 +4512,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     total.top_valid = std::min(total.top_valid, current.top_valid);
     total.parse_ms += current.parse_ms;
     total.kernel_ms += current.kernel_ms;
+    total.requires_parent_completeness_certificate =
+        total.requires_parent_completeness_certificate ||
+        current.requires_parent_completeness_certificate;
   }
 
   static json::object block_diagnostic(
@@ -4311,6 +4535,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"max_pseudo_depth", result.diagnostics.max_pseudo_depth},
         {"pseudo_value_certified",
          result.diagnostics.pseudo_value_certified},
+        {"parent_completeness_certificate_required",
+         result.diagnostics.requires_parent_completeness_certificate},
         {"uncompensated_pseudo_hit_count", result.pseudo_hits.size()},
         {"top_valid", encode_validity(result.diagnostics.top_valid)},
         {"parse_ms", result.diagnostics.parse_ms},

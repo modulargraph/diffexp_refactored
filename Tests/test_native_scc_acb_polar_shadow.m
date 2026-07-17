@@ -58,7 +58,7 @@ forcedFallbackBasis = If[FailureQ[prepared], prepared,
         Function[Null,
           forcedFallbackProbeCount++;
           {Failure["DiffExp2", <|"Detail" ->
-              "native Acb CASE-P coefficient is numerically ambiguous; requires the exact Rational shadow"|>],
+              "Acb CASE-P compensation leaves a certified value pole below the input floor at eps^-1, t_power=0, log_power=0, component=0; requires the exact Rational shadow"|>],
             {}}, HoldAllComplete]},
     catchDE2[DiffExp2`NativeTransport`Private`nativeReceivingBasis[
       cs, request, 2]]]];
@@ -67,7 +67,7 @@ falseTerminalPrints = Select[capturedPrints,
 triggerPrintRecognized =
   DiffExp2`NativeTransport`Private`nativeAcbShadowTriggerPrintRecordQ[
     HoldComplete["DiffExp2 error ", "E5", ": ",
-      "Detail=\"native Acb regular-singular SCC execution requires the exact Rational shadow for a multi-tag gauge source\""]];
+      "Detail=\"Acb CASE-P compensation leaves a certified value pole below the input floor at eps^-1, t_power=0, log_power=0, component=0; requires the exact Rational shadow\""]];
 unrelatedPrintPreserved =
   !DiffExp2`NativeTransport`Private`nativeAcbShadowTriggerPrintRecordQ[
     HoldComplete["DiffExp2 error ", "E6", ": ",

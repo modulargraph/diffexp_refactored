@@ -1906,12 +1906,20 @@ void certify_acb_pseudo_value_floor(
       coefficients, chop_digits, "native Acb CASE-P value-floor cancellation");
   if (coefficients.empty()) return;
   const auto& witness = coefficients.begin()->first;
+  // The Acb owner encloses the finite-precision coefficients serialized by
+  // Wolfram, not the original exact rational system.  A certified remnant
+  // therefore proves that this numeric owner cannot authorize the required
+  // cancellation; it does not prove that the exact CASE-P identity fails.
+  // Name the existing one-SCC Rational-shadow fallback explicitly so the
+  // bridge can retry without weakening or chopping this certificate.
   throw RecurrenceError(
       "E5", "Acb CASE-P compensation leaves a certified value pole below the input floor at eps^" +
                 std::to_string(witness.epsilon_power) + ", t_power=" +
                 witness.t_power + ", log_power=" +
                 std::to_string(witness.log_power) + ", component=" +
-                std::to_string(witness.component));
+                std::to_string(witness.component) +
+                "; requires the exact Rational shadow",
+      solution.epsilon.min_power, witness.epsilon_power);
 }
 
 EpsilonLatticeSaturationResult<Rational>
@@ -2029,7 +2037,8 @@ void certify_exact_pseudo_value_floor(
                 std::to_string(witness.log_power) + ", component=" +
                 std::to_string(witness.component) + ", coefficient=" +
                 coefficients.begin()->second.str() + ", sectors=[" +
-                sector_witnesses + "]");
+                sector_witnesses + "]",
+      solution.epsilon.min_power, witness.epsilon_power);
 }
 
 template <typename Scalar>

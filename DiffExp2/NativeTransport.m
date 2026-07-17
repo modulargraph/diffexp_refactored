@@ -442,11 +442,11 @@ nativeBridgedPlanPreflightQ[plan_Association] := Quiet[Check[Module[
           exactAlgebraicTruthQ[dir*(to - #) >= 0] &],
     Return[False, Module]];
   reaches = MapThread[
-    Abs[#1]*Min[1/k, #2/2] &,
+    {Abs[#1]*#2/2, Abs[#1]*Min[1/k, #2/2]} &,
     {scales, nativePlannerLocalRadius /@ charts}];
   If[!And @@ Table[exactAlgebraicTruthQ[
         0 < dir*(centers[[i + 1]] - centers[[i]]) <=
-          reaches[[i]] + reaches[[i + 1]]],
+          reaches[[i, 1]] + reaches[[i + 1, 2]]],
       {i, Length[centers] - 1}], Return[False, Module]];
   finalRadius = Abs[Last[scales]]*Last[nativePlannerLocalRadius /@ charts];
   exactAlgebraicTruthQ[Abs[to - Last[centers]] < finalRadius]

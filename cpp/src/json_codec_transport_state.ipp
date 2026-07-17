@@ -1280,6 +1280,17 @@ class StoredTransportArmState {
   }
 
   json::object summary() const {
+    json::array tile_source_epsilon;
+    tile_source_epsilon.reserve(tile_sources_.size());
+    for (const auto& source : tile_sources_) {
+      if (!source)
+        throw std::logic_error(
+            "retained transport state owns a null tile source");
+      const auto source_summary = source->summary();
+      tile_source_epsilon.push_back(json::object{
+          {"min", source_summary.at("epsilon_min")},
+          {"max", source_summary.at("epsilon_max")}});
+    }
     return json::object{
         {"transport_state", handle_},
         {"capability", kRetainedTransportArmStateCapability},
@@ -1295,6 +1306,7 @@ class StoredTransportArmState {
         {"value_hops", value_hop_count()},
         {"basis_matches", basis_match_count()},
         {"tiles", tile_sources_.size()},
+        {"tile_source_epsilon", std::move(tile_source_epsilon)},
         {"contraction_operations", contraction_operations_.load()},
         {"contracted_observables", contracted_observables_.load()},
         {"endpoint_batch_operations", endpoint_batch_operations_.load()},

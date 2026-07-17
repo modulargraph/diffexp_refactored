@@ -211,6 +211,26 @@ json::object first_component_row(const std::string& identity,
                 identity + ":c0")}}}}};
 }
 
+json::object public_prefix_first_component_row(
+    const std::string& identity, std::int32_t shift) {
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 2}, {"exact_identity", identity},
+      {"entries", json::array{json::object{
+           {"column", 0},
+           {"multiplier", json::object{
+                {"epsilon_shift", shift}, {"center_pole_order", 0},
+                {"analytic_coefficients", json::array{
+                     json::object{
+                         {"numerator", json::array{"1"}},
+                         {"denominator", json::array{"1"}}},
+                     json::object{
+                         {"numerator", json::array{"0"}},
+                         {"denominator", json::array{"1"}}}}},
+                {"exact_identity", identity + ":c0"},
+                {"proven_zero", false}}}}}}};
+}
+
 json::object observable(const std::string& identity,
                         const std::string& checkpoint,
                         json::object row,
@@ -431,7 +451,8 @@ int main() {
         session, regular_state,
         json::array{observable(
             "regular-shift", "regular-shift-checkpoint",
-            first_component_row("regular-shift-row", 1), 0, 3, 2)},
+            public_prefix_first_component_row("regular-shift-row", 1),
+            0, 2, 2)},
         "endpoint-regular");
     if (regular.at("status") != "ok" || regular.at("centered") != false ||
         regular.at("local_endpoint_exact") != "1/4" ||
@@ -444,11 +465,11 @@ int main() {
         session, regular.at("endpoints").as_array().front().as_object());
     if (regular_export.at("status") != "ok" ||
         regular_export.at("value").as_object().at("min") != 0 ||
-        regular_export.at("value").as_object().at("max") != 3 ||
+        regular_export.at("value").as_object().at("max") != 2 ||
         std::abs(midpoint(regular_export, 0)) > 1e-45 ||
         std::abs(midpoint(regular_export, 1) - 1.0) > 1e-40)
       throw std::runtime_error(
-          "noncentered exact evaluation or shifted epsilon window is wrong: " +
+          "noncentered public-prefix evaluation or shifted epsilon window is wrong: " +
           json::serialize(regular_export));
 
     const auto before_capacity = session_stats(session);

@@ -1200,9 +1200,11 @@
     std::shared_ptr<StoredPlannedMatchHop> match;
     std::shared_ptr<StoredLocalBase> next;
     json::object sealed_lineage;
+    auto attempted_epsilon = requested_epsilon;
     try {
       const auto live_epsilon = live_match_epsilon_intersection(
           requested_epsilon, required_complete_max, incoming, basis);
+      attempted_epsilon = live_epsilon;
       const auto match_checkpoint = arm_checkpoint_identity(
           checkpoint_root, arm_name, "match", match_index + 1);
       json::object match_request{
@@ -1340,8 +1342,8 @@
                  {"required_complete_max", required_complete_max},
                  {"detail", error.what()}}},
             {"epsilon", json::object{
-                 {"min", requested_epsilon.min_power},
-                 {"max", requested_epsilon.complete_max},
+                 {"min", attempted_epsilon.min_power},
+                 {"max", attempted_epsilon.complete_max},
                  {"required_complete_max", required_complete_max}}},
             {"refinement", refinement},
             {"detail",

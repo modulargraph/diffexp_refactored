@@ -523,6 +523,11 @@ restore_checkpoint_transport_endpoint_record(
       as_u32(final_summary.at("dimension"),
              "checkpoint transport endpoint source dimension"),
       "checkpoint transport endpoint prepared row");
+  const auto& epsilon_record = as_object(
+      source.at("output_epsilon_contract"),
+      "checkpoint transport endpoint epsilon contract");
+  const auto epsilon_contract = parse_observable_epsilon_contract(
+      epsilon_record, "checkpoint transport endpoint epsilon contract");
   if (expected_domain == "rational") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<Rational>>(
@@ -531,7 +536,8 @@ restore_checkpoint_transport_endpoint_record(
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Rational final local");
     (void)parse_prepared_rational_row<Rational>(
-        prepared_row, typed->solution());
+        prepared_row, typed->solution(),
+        epsilon_contract.requested.complete_max);
   } else {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
@@ -540,13 +546,9 @@ restore_checkpoint_transport_endpoint_record(
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Acb final local");
     (void)parse_prepared_rational_row<ComplexBall>(
-        prepared_row, typed->solution());
+        prepared_row, typed->solution(),
+        epsilon_contract.requested.complete_max);
   }
-  const auto& epsilon_record = as_object(
-      source.at("output_epsilon_contract"),
-      "checkpoint transport endpoint epsilon contract");
-  const auto epsilon_contract = parse_observable_epsilon_contract(
-      epsilon_record, "checkpoint transport endpoint epsilon contract");
   expected_source["observable"] = observable;
   expected_source["row"] = row_record;
   expected_source["output_epsilon_contract"] = epsilon_record;

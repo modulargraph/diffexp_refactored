@@ -1762,6 +1762,8 @@ ft2MatchingHaloProfileContract[name_String, prepKey_,
     "Schema" -> "FeynmanTrick.MatchingHaloProfileContract/v2",
     "Example" -> name,
     "PrepKey" -> prepKey,
+    "MatchingProofPolicy" ->
+      "exact-action-determinant-and-certified-shadow-prefix-v1",
     "BasePlanIdentity" -> basePlan["Identity"],
     "BasePlanRecord" -> basePlan["Record"],
     "Configuration" -> <|
@@ -1789,6 +1791,8 @@ ft2MatchingHaloProfileContractQ[contract_] := AssociationQ[contract] &&
   AssociationQ[contract["Record"]] &&
   Lookup[contract["Record"], "Schema", None] ===
     "FeynmanTrick.MatchingHaloProfileContract/v2" &&
+  Lookup[contract["Record"], "MatchingProofPolicy", None] ===
+    "exact-action-determinant-and-certified-shadow-prefix-v1" &&
   IntegerQ[contract["NumLevels"]] && contract["NumLevels"] >= 1 &&
   With[{base = Lookup[contract["Record"], "BasePlanRecord", <||>]},
     AssociationQ[base] &&

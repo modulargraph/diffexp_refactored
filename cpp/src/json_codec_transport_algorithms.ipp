@@ -1729,7 +1729,7 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
           "transport endpoint Rational source changed coefficient domain");
     projected = build_rational_row_local<Rational>(
         projected_handle, row_request, precision_bits, typed, source,
-        false);
+        false, epsilon_contract.requested.complete_max);
   } else if (domain == "acb") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
@@ -1738,7 +1738,7 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
           "transport endpoint Acb source changed coefficient domain");
     projected = build_rational_row_local<ComplexBall>(
         projected_handle, row_request, precision_bits, typed, source,
-        false);
+        false, epsilon_contract.requested.complete_max);
   } else {
     throw std::invalid_argument(
         "transport endpoint row requires one numeric coefficient domain");
@@ -2667,12 +2667,17 @@ StoredLineIntegral integrate_transport_stored_row_tile(
   source->require_exact_plan_binding(
       binding.local_geometry, binding.prescriptions,
       "fused transport row source");
-  auto matrix = parse_prepared_rational_row<Scalar>(
-      prepared_row, source->solution());
   const auto projection_cap = local_algebra_detail::checked_i32(
       static_cast<std::int64_t>(
           epsilon_contract.requested.complete_max) + 1,
       "fused transport primitive halo");
+  // Matching may retain a private epsilon reservoir above the public
+  // observable contract.  Decode only the per-entry multiplier prefix needed
+  // through the public output plus the exact one-row primitive halo.  The
+  // fused convolution below computes and checks the honest product edge from
+  // the full source and each multiplier's own retained width.
+  auto matrix = parse_prepared_rational_row<Scalar>(
+      prepared_row, source->solution(), projection_cap);
 
   auto projected_min = source->solution().epsilon.min_power;
   auto projected_complete = source->solution().epsilon.complete_max;

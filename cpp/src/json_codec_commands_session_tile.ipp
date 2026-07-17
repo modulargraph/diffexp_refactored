@@ -375,8 +375,13 @@ json::object run_session_command(const json::object& root) {
           source_work.work_complete_max != target_work.work_complete_max ||
           source_work.public_t_order != target_work.public_t_order ||
           source_work.work_t_order != target_work.work_t_order ||
-          source->solution().epsilon.complete_max !=
+          source->solution().epsilon.complete_max <
               target_work.requested_max ||
+          source->solution().epsilon.complete_max >
+              target_work.work_complete_max ||
+          (source->top_valid() != kCompleteInfinity &&
+           source->top_valid() <
+               source->solution().epsilon.complete_max) ||
           source->solution().epsilon.min_power <
               target_work.work_min ||
           source->solution().taylor_complete_max !=

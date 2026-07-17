@@ -706,10 +706,11 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
       throw std::invalid_argument(
           "fused scalar-row entry is out of range");
     if (entry.multiplier.structurally_zero()) continue;
-    if (entry.multiplier.kernels.size() < epsilon_width)
+    const auto multiplier_width = entry.multiplier.kernels.size();
+    if (multiplier_width == 0)
       throw std::invalid_argument(
-          "fused scalar-row multiplier has too few epsilon kernels");
-    for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon)
+          "fused scalar-row multiplier has no epsilon kernels");
+    for (std::size_t epsilon = 0; epsilon < multiplier_width; ++epsilon)
       if (entry.multiplier.kernels[epsilon].size() < taylor_width)
         throw std::invalid_argument(
             "fused scalar-row multiplier has too few Taylor coefficients");
@@ -718,8 +719,10 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
             entry.multiplier.epsilon_shift,
         "fused scalar-row epsilon minimum");
     const auto term_complete = local_algebra_detail::checked_i32(
-        static_cast<std::int64_t>(source.epsilon.complete_max) +
-            entry.multiplier.epsilon_shift,
+        static_cast<std::int64_t>(term_min) +
+            static_cast<std::int64_t>(
+                std::min(epsilon_width, multiplier_width)) -
+            1,
         "fused scalar-row epsilon complete maximum");
     if (!active) {
       projected_min = term_min;
@@ -857,15 +860,15 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
         // deliberately retained as material.
         bool pair_can_contribute = false;
         for (std::size_t kernel_epsilon = 0;
-             kernel_epsilon < epsilon_width && !pair_can_contribute;
+             kernel_epsilon < entry.multiplier.kernels.size() &&
+                 !pair_can_contribute;
              ++kernel_epsilon) {
           const auto output_base = static_cast<std::int64_t>(term_min) +
               static_cast<std::int64_t>(kernel_epsilon);
           if (output_base > projected_epsilon.complete_max) break;
           const auto& kernel = entry.multiplier.kernels[kernel_epsilon];
           for (std::size_t input_epsilon = 0;
-               input_epsilon + kernel_epsilon < epsilon_width &&
-                   !pair_can_contribute;
+               input_epsilon < epsilon_width && !pair_can_contribute;
                ++input_epsilon) {
             const auto output_power = output_base +
                 static_cast<std::int64_t>(input_epsilon);
@@ -1087,13 +1090,14 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
             kernel_polynomials;
         std::vector<local_algebra_detail::AcbPolynomial>
             source_polynomials;
-        std::vector<bool> kernel_material(epsilon_width, false);
+        const auto multiplier_width = entry.multiplier.kernels.size();
+        std::vector<bool> kernel_material(multiplier_width, false);
         std::vector<bool> source_material(epsilon_width, false);
-        kernel_polynomials.reserve(epsilon_width);
+        kernel_polynomials.reserve(multiplier_width);
         source_polynomials.reserve(epsilon_width);
-        for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon) {
+        for (std::size_t epsilon = 0; epsilon < multiplier_width;
+             ++epsilon) {
           kernel_polynomials.emplace_back();
-          source_polynomials.emplace_back();
           const auto& kernel = entry.multiplier.kernels[epsilon];
           for (std::size_t taylor = 0; taylor < taylor_width; ++taylor) {
             const auto& multiplier = kernel[taylor];
@@ -1103,6 +1107,11 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
                                      multiplier.raw());
               kernel_material[epsilon] = true;
             }
+          }
+        }
+        for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon) {
+          source_polynomials.emplace_back();
+          for (std::size_t taylor = 0; taylor < taylor_width; ++taylor) {
             const auto& coefficient = sector.coefficients[
                 local_detail::sector_index(
                     source, epsilon, taylor, entry.column)];
@@ -1117,11 +1126,10 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
 
         local_algebra_detail::AcbPolynomial product;
         for (std::size_t kernel_epsilon = 0;
-             kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+             kernel_epsilon < multiplier_width; ++kernel_epsilon) {
           if (!kernel_material[kernel_epsilon]) continue;
           for (std::size_t input_epsilon = 0;
-               input_epsilon + kernel_epsilon < epsilon_width;
-               ++input_epsilon) {
+               input_epsilon < epsilon_width; ++input_epsilon) {
             if (!source_material[input_epsilon]) continue;
             const auto raw_power = static_cast<std::int64_t>(term_min) +
                 static_cast<std::int64_t>(kernel_epsilon) +
@@ -1177,7 +1185,8 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
       for (std::int64_t kernel_epsilon = 0;
            kernel_epsilon <= term_index; ++kernel_epsilon) {
         const auto input_epsilon = term_index - kernel_epsilon;
-        if (kernel_epsilon >= static_cast<std::int64_t>(epsilon_width) ||
+        if (kernel_epsilon >= static_cast<std::int64_t>(
+                                  entry.multiplier.kernels.size()) ||
             input_epsilon >= static_cast<std::int64_t>(epsilon_width))
           continue;
         const auto& kernel = entry.multiplier.kernels[
@@ -1238,14 +1247,17 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
           for (std::int64_t raw_power = projected_epsilon.min_power;
                raw_power <= projected_epsilon.complete_max; ++raw_power) {
             const auto term_index = raw_power - term_min;
-            if (term_index < 0 ||
-                term_index >= static_cast<std::int64_t>(epsilon_width))
-              continue;
+            if (term_index < 0) continue;
             const auto output_epsilon = static_cast<std::size_t>(
                 raw_power - projected_epsilon.min_power);
             for (std::int64_t kernel_epsilon = 0;
                  kernel_epsilon <= term_index; ++kernel_epsilon) {
               const auto input_epsilon = term_index - kernel_epsilon;
+              if (kernel_epsilon >= static_cast<std::int64_t>(
+                                        entry.multiplier.kernels.size()) ||
+                  input_epsilon >=
+                      static_cast<std::int64_t>(epsilon_width))
+                continue;
               const auto& kernel = entry.multiplier.kernels[
                   static_cast<std::size_t>(kernel_epsilon)];
               for (std::size_t kernel_taylor = 0;

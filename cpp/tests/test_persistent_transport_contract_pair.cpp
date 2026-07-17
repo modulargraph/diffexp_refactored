@@ -184,6 +184,26 @@ json::object row(const std::string& identity, bool malformed = false) {
            {"column", 0}, {"multiplier", multiplier(identity)}}}}};
 }
 
+json::object public_prefix_row(const std::string& identity) {
+  json::array analytic;
+  analytic.push_back(json::object{
+      {"numerator", json::array{"1"}},
+      {"denominator", json::array{"1"}}});
+  analytic.push_back(json::object{
+      {"numerator", json::array{"0"}},
+      {"denominator", json::array{"1"}}});
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 1}, {"exact_identity", identity},
+      {"entries", json::array{json::object{
+           {"column", 0},
+           {"multiplier", json::object{
+                {"epsilon_shift", 0}, {"center_pole_order", 0},
+                {"analytic_coefficients", std::move(analytic)},
+                {"exact_identity", identity},
+                {"proven_zero", false}}}}}}};
+}
+
 json::object regulated_row(const std::string& identity,
                            const std::string& coefficient) {
   return json::object{
@@ -212,6 +232,60 @@ json::object observable(const std::string& identity,
       {"epsilon", json::object{
            {"min", 0}, {"max", 0}, {"required_complete_max", 0}}},
       {"tail_policy", tail}};
+}
+
+json::object public_prefix_observable(const std::string& identity,
+                                      const std::string& checkpoint) {
+  return json::object{
+      {"identity", identity}, {"checkpoint_identity", checkpoint},
+      {"lower_integrand_rows",
+       json::array{public_prefix_row(identity + ":lower")}},
+      {"upper_integrand_rows",
+       json::array{public_prefix_row(identity + ":upper")}},
+      {"epsilon", json::object{
+           {"min", 0}, {"max", 0}, {"required_complete_max", 0}}},
+      {"tail_policy", "stored"}};
+}
+
+json::object regulated_public_prefix_row(
+    const std::string& identity, const std::string& coefficient,
+    bool omit_primitive_halo = false) {
+  json::array analytic;
+  analytic.push_back(json::object{
+      {"numerator", json::array{coefficient}},
+      {"denominator", json::array{"1"}}});
+  if (!omit_primitive_halo)
+    analytic.push_back(json::object{
+        {"numerator", json::array{"0"}},
+        {"denominator", json::array{"1"}}});
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 1}, {"exact_identity", identity},
+      {"entries", json::array{json::object{
+           {"column", 0},
+           {"multiplier", json::object{
+                {"epsilon_shift", 0}, {"center_pole_order", 0},
+                {"analytic_coefficients", std::move(analytic)},
+                {"exact_identity", coefficient},
+                {"proven_zero", false}}}}}}};
+}
+
+json::object regulated_public_prefix_observable(
+    const std::string& identity, const std::string& checkpoint,
+    bool omit_primitive_halo = false) {
+  return json::object{
+      {"identity", identity}, {"checkpoint_identity", checkpoint},
+      {"lower_integrand_rows",
+       json::array{
+           regulated_public_prefix_row(
+               identity + ":lower", "1", omit_primitive_halo)}},
+      {"upper_integrand_rows",
+       json::array{
+           regulated_public_prefix_row(
+               identity + ":upper", "2", omit_primitive_halo)}},
+      {"epsilon", json::object{
+           {"min", -1}, {"max", 0}, {"required_complete_max", 0}}},
+      {"tail_policy", "stored"}};
 }
 
 json::object regulated_observable(const std::string& identity,
@@ -399,6 +473,55 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
           "one-shot pair clipped the regulated primitive lower halo: " +
           json::serialize(paired_export));
 
+    // The source owns three epsilon rows, while a public epsilon^0 result
+    // behind a genuine 1/epsilon primitive needs exactly two multiplier
+    // rows.  This exercises the consumer halo, not merely an ordinary
+    // primitive whose epsilon valuation is zero.
+    const auto public_prefix = contract_pair(
+        session, lower, upper,
+        json::array{regulated_public_prefix_observable(
+            "pair-regulated-public-prefix",
+            "pair-regulated-public-prefix-checkpoint")},
+        "pair-regulated-public-prefix-root");
+    if (public_prefix.at("status") != "ok" ||
+        public_prefix.at("lines").as_array().size() != 1)
+      throw std::runtime_error(
+          "regulated public-prefix pair contraction failed: " +
+          json::serialize(public_prefix));
+    const auto& public_prefix_line =
+        public_prefix.at("lines").as_array().front().as_object();
+    const auto public_prefix_export =
+        export_line(session, public_prefix_line);
+    const auto& full_coefficients =
+        paired_export.at("value").as_object().at("coefficients").as_array();
+    const auto& prefix_coefficients =
+        public_prefix_export.at("value").as_object()
+            .at("coefficients").as_array();
+    if (public_prefix_line.at("epsilon").as_object().at("min") != -1 ||
+        public_prefix_line.at("epsilon").as_object().at("max") != 0 ||
+        public_prefix_export.at("status") != "ok" ||
+        public_prefix_export.at("value").as_object().at("min") != -1 ||
+        public_prefix_export.at("value").as_object().at("max") != 0 ||
+        prefix_coefficients.size() != 2 ||
+        prefix_coefficients.at(0) != full_coefficients.at(0) ||
+        prefix_coefficients.at(1) != full_coefficients.at(1))
+      throw std::runtime_error(
+          "regulated public-prefix row lost its exact primitive halo: " +
+          json::serialize(public_prefix_export));
+
+    const auto undercovered = contract_pair(
+        session, lower, upper,
+        json::array{regulated_public_prefix_observable(
+            "pair-regulated-undercovered",
+            "pair-regulated-undercovered-checkpoint", true)},
+        "pair-regulated-undercovered-root");
+    if (undercovered.at("status") != "error" ||
+        std::string(undercovered.at("detail").as_string()).find(
+            "consumer prefix is too short") == std::string::npos)
+      throw std::runtime_error(
+          "regulated row without the primitive halo was not rejected: " +
+          json::serialize(undercovered));
+
     const auto stream = begin_stream(
         session, lower, upper, "pair-stream-regulated-halo",
         "pair-stream-regulated-halo-checkpoint",
@@ -502,9 +625,13 @@ int main() {
         session, upper_plan, "pair-upper-plan", anchor, "upper",
         "pair-upper-state");
     if (lower.at("status") != "ok" || upper.at("status") != "ok" ||
-        lower.at("tiles") != 1 || upper.at("tiles") != 1)
+        lower.at("tiles") != 1 || upper.at("tiles") != 1 ||
+        lower.at("tile_source_epsilon") !=
+            json::array{json::object{{"min", 0}, {"max", 2}}} ||
+        upper.at("tile_source_epsilon") !=
+            json::array{json::object{{"min", 0}, {"max", 2}}})
       throw std::runtime_error(
-          "paired retained states were not prepared: " +
+          "paired retained states did not expose exact live tile-source epsilon windows: " +
           json::serialize(lower) + " / " + json::serialize(upper));
 
     const auto before = session_stats(session);
@@ -549,6 +676,31 @@ int main() {
       throw std::runtime_error(
           "fixed -lower+upper value is incorrect: " +
           json::serialize(one_export));
+
+    // The retained arm source owns three epsilon rows, but a public
+    // epsilon^0 observable needs only the first multiplier row.  Private
+    // source reservoirs used by matching must not force an otherwise
+    // sufficient public integrand row to reproduce those proof-only orders.
+    const auto public_prefix = contract_pair(
+        session, lower, upper,
+        json::array{public_prefix_observable(
+            "pair-public-prefix", "pair-public-prefix-checkpoint")},
+        "pair-public-prefix-root");
+    if (public_prefix.at("status") != "ok" ||
+        public_prefix.at("lines").as_array().size() != 1)
+      throw std::runtime_error(
+          "public-prefix row did not ignore the private source reservoir: " +
+          json::serialize(public_prefix));
+    const auto public_prefix_export = export_line(
+        session,
+        public_prefix.at("lines").as_array().front().as_object());
+    if (public_prefix_export.at("status") != "ok" ||
+        public_prefix_export.at("value").as_object().at("min") != 0 ||
+        public_prefix_export.at("value").as_object().at("max") != 0 ||
+        std::abs(midpoint(public_prefix_export) - 5.0 / 6.0) > 1e-40)
+      throw std::runtime_error(
+          "public-prefix row changed the contracted public coefficient: " +
+          json::serialize(public_prefix_export));
 
     json::array many_observables;
     for (int index = 0; index < 3; ++index)
@@ -729,15 +881,15 @@ int main() {
     const auto after_success = session_stats(session);
     const auto lower_after_success = state_stats(session, lower);
     const auto upper_after_success = state_stats(session, upper);
-    if (counter(after_success, "transport_pair_contractions") != 4 ||
-        counter(after_success, "transport_pair_observables") != 5 ||
-        counter(after_success, "transport_contractions") != 8 ||
-        counter(after_success, "transport_observables") != 10 ||
-        counter(after_success, "line_integrations") != 10 ||
-        counter(lower_after_success, "contraction_operations") != 4 ||
-        counter(upper_after_success, "contraction_operations") != 4 ||
-        counter(lower_after_success, "contracted_observables") != 5 ||
-        counter(upper_after_success, "contracted_observables") != 5)
+    if (counter(after_success, "transport_pair_contractions") != 5 ||
+        counter(after_success, "transport_pair_observables") != 6 ||
+        counter(after_success, "transport_contractions") != 10 ||
+        counter(after_success, "transport_observables") != 12 ||
+        counter(after_success, "line_integrations") != 12 ||
+        counter(lower_after_success, "contraction_operations") != 5 ||
+        counter(upper_after_success, "contraction_operations") != 5 ||
+        counter(lower_after_success, "contracted_observables") != 6 ||
+        counter(upper_after_success, "contracted_observables") != 6)
       throw std::runtime_error(
           "successful pair counters are not additive and honest");
 
@@ -922,7 +1074,7 @@ int main() {
         restored_stats.at("transport_states") != 0 ||
         restored_stats.at("tile_plans") != 0 ||
         restored_stats.at("locals") != 0 ||
-        restored_stats.at("line_results") != 5 ||
+        restored_stats.at("line_results") != 6 ||
         restored_export.at("value") != first_export_value)
       throw std::runtime_error(
           "first paired hidden-owner restore changed visibility or value");

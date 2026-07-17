@@ -23,6 +23,64 @@ DiffExp2`LoadConfiguration[{
   "Variables" -> {}, "Verbosity" -> 0}];
 
 x = Global`x;
+
+(* A singular basis can store all columns one epsilon row above the physical
+   source obtained after inverse Laurent matching weights.  Row preparation
+   must use the atlas work floor, while retaining the basis's public upper
+   edge rather than any private matching reservoir. *)
+rowFixtureChart = <|"SystemSize" -> 1, "ChartVar" -> Global`t,
+  "Center" -> 0, "ChartMap" -> <|"Center" -> 0, "Scale" -> 1|>,
+  "Radius" -> 2, "Prescriptions" -> {}|>;
+rowFixtureAtlas = <|"Dimension" -> 1,
+  "Request" -> <|"EpsWindow" -> <|"Min" -> 0,
+      "CompleteMax" -> 2|>, "TOrder" -> 4|>,
+  "Anchor" -> <|"EpsWindow" -> <|"Min" -> 0,
+      "CompleteMax" -> 2|>,
+    "TWindow" -> <|"CompleteMax" -> 4|>|>|>;
+rowFixtureBasis = <|"Dimension" -> 1, "Columns" -> {
+    <|"EpsWindow" -> <|"Min" -> 1, "CompleteMax" -> 2|>,
+      "TWindow" -> <|"CompleteMax" -> 4|>|>}|>;
+rowFixtureRecipes =
+  DiffExp2`NativeTransport`Private`nativeArmRowRecipes[
+    rowFixtureAtlas,
+    <|"ChartSystems" -> {rowFixtureChart, rowFixtureChart},
+      "Bases" -> {None, rowFixtureBasis}|>];
+rowFixturePrepared =
+  DiffExp2`NativeTransport`Private`nativePrepareArmRecipeRow[
+    Last[rowFixtureRecipes], {1/(1 - x/2)}, x, "rational"];
+assert["singular row recipe restores the physical atlas epsilon floor",
+  rowFixtureRecipes[[2, "Shape", "EpsWindow"]] ===
+      <|"Min" -> 0, "CompleteMax" -> 2|> &&
+    Length[rowFixturePrepared["entries"][[1, "multiplier",
+      "analytic_coefficients"]]] === 3];
+
+(* The banana4 final tile is a concrete counterexample to using the basis
+   envelope alone: its live source is eps[-5,4], the integrand begins at
+   eps^-4, and the regulated primitive consumes through eps^1.  The lazy
+   producer must therefore emit ten multiplier coefficients even though its
+   pre-march recipe had only nine rows. *)
+bananaConsumerRecipe =
+  DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
+    <|"Chart" -> rowFixtureChart,
+      "Shape" -> <|"EpsWindow" -> <|"Min" -> -1,
+          "CompleteMax" -> 7|>,
+        "TWindow" -> <|"CompleteMax" -> 4|>,
+        "Dimension" -> 1|>|>,
+    <|"Min" -> -5, "CompleteMax" -> 4|>,
+    <|"Identity" -> "banana4-consumer-width",
+      "MinimumEpsilonShift" -> -4,
+      "Epsilon" -> <|"Min" -> -1, "Max" -> 0,
+        "RequiredCompleteMax" -> 0|>|>, 1];
+bananaConsumerPrepared =
+  DiffExp2`NativeTransport`Private`nativePrepareArmRecipeRow[
+    bananaConsumerRecipe,
+    {DiffExp2`Config`CanonicalEps[]^-4/(1 - x/2)}, x, "rational"];
+assert["regulated consumer widens the exact banana4 multiplier prefix by one",
+  bananaConsumerRecipe["Shape", "EpsWindow"] ===
+      <|"Min" -> -1, "CompleteMax" -> 8|> &&
+    Length[bananaConsumerPrepared["entries"][[1, "multiplier",
+      "analytic_coefficients"]]] === 10];
+
 system = DiffExp2`LoadSystem[<|"Matrix" -> {{0}}, "Variable" -> x|>];
 lowerPlan = DiffExp2`Transport`SegmentLine[system, {0, -1/4}];
 upperPlan = DiffExp2`Transport`SegmentLine[system, {0, 1/4}];
@@ -155,14 +213,21 @@ mockFailure = catchDE2[Block[{
             "lower" -> <|"session" -> "mock-session", "arm" -> "lower",
               "transport_state" -> "transport:mock-lower",
               "checkpoint_identity" -> "mock-state-lower-checkpoint",
-              "provenance_identity" -> "mock-state-lower-provenance"|>,
+              "provenance_identity" -> "mock-state-lower-provenance",
+              "tiles" -> 1,
+              "tile_source_epsilon" -> {
+                <|"min" -> 0, "max" -> 1|>}|>,
             "upper" -> <|"session" -> "mock-session", "arm" -> "upper",
               "transport_state" -> "transport:mock-upper",
               "checkpoint_identity" -> "mock-state-upper-checkpoint",
-              "provenance_identity" -> "mock-state-upper-provenance"|>|>|>],
+              "provenance_identity" -> "mock-state-upper-provenance",
+              "tiles" -> 1,
+              "tile_source_epsilon" -> {
+                <|"min" -> 0, "max" -> 1|>}|>|>|>],
     DiffExp2`NativeTransport`Private`nativeContractStoredPairObservableStreamed =
       Function[{lowerState, upperState, request, lowerRecipes,
-          upperRecipes, ignoredVar, ignoredDomain, root}, Module[
+          upperRecipes, ignoredVar, ignoredDomain, root,
+          lowerSourceEpsilon, upperSourceEpsilon}, Module[
         {call, line},
         mockPairCalls++; call = mockPairCalls;
         AppendTo[mockPairRoots, root];

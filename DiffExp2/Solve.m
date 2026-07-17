@@ -522,6 +522,8 @@ exactNonRationalNumberQ[e_] := NumericQ[e] && Precision[e] === Infinity &&
   !IntegerQ[e] && Head[e] =!= Rational;
 
 $numericizeAllPreparedNumbers = False;
+$disablePreparedDirectNumericization = False;  (* private parity seam *)
+$preparedDirectGuardDigits = 32;
 preparedNumericizationRequiredQ[e_] :=
   exactNonRationalNumberQ[e] ||
   (TrueQ[$numericizeAllPreparedNumbers] && e =!= 0 && NumericQ[e] &&
@@ -539,15 +541,51 @@ groupedEpsExactSafeQ[e_] := e === 0 ||
     (IntegerQ[e] || Head[e] === Rational)) ||
   (ByteCount[e] <= 500 && !preparedNumericizationRequiredQ[e]);
 
-preparedEpsCoefficient[e_] := Module[{wp2},
+finitePreparedInexactScalarQ[value_, requiredPrecision_] :=
+  InexactNumberQ[value] && NumberQ[value] &&
+    FreeQ[value, Indeterminate | ComplexInfinity | DirectedInfinity[_]] &&
+    NumberQ[Precision[value]] && Precision[value] >= requiredPrecision;
+
+(* Exact planning has already classified the epsilon valuation, P/Q grouping,
+   spectral data and frame bounds before coefficients reach this boundary.
+   For the production Acb owner, try numerical evaluation of the original
+   exact scalar first: explicitly canonicalizing thousands of distinct
+   algebraic coefficients with RootReduce can dominate singular-chart
+   preparation.  A direct result is only authoritative when it retains the
+   full requested precision and is nonzero.  Zero or cancellation-degraded
+   results fall back to exact canonicalization below. *)
+preparedDirectEpsCoefficient[e_, wp2_Integer] := Module[{candidate},
+  candidate = Quiet[Check[
+    Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
+        DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 wp2]},
+      N[e, wp2 + $preparedDirectGuardDigits]], $Failed]];
+  If[candidate === $Failed ||
+      !finitePreparedInexactScalarQ[candidate, wp2] ||
+      TrueQ[candidate == 0],
+    $Failed,
+    N[candidate, wp2]]];
+
+preparedEpsCoefficient[e_] := Module[{wp2, direct, canonical, grounded},
   If[groupedEpsExactSafeQ[e], Return[e]];
   If[!NumericQ[e], Return[e]];
   wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*
     DiffExp2`Config`CFG["WorkingPrecision"];
+  If[!TrueQ[$cppExactDomain] &&
+      !TrueQ[$disablePreparedDirectNumericization],
+    direct = preparedDirectEpsCoefficient[e, wp2];
+    If[direct =!= $Failed, Return[direct]]];
+  canonical = RootReduce[e];
+  If[canonical === 0, Return[0]];
   Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
       DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 wp2]},
-    Chop[SetPrecision[N[RootReduce[e], wp2], wp2],
-      DiffExp2`Tolerances`Tol["ChopFloor"]]]];
+    grounded = N[canonical, wp2 + $preparedDirectGuardDigits]];
+  (* Never manufacture precision with SetPrecision, and never Chop an exact
+     coefficient which exact canonicalization proved nonzero.  EncodeScalar
+     will carry the value's actual Accuracy into the Arb input radius. *)
+  If[finitePreparedInexactScalarQ[grounded, wp2] &&
+      !TrueQ[grounded == 0],
+    N[grounded, wp2],
+    canonical]];
 
 (* Canonical epsilon-rational entry.  eps^Valuation is kept outside P/Q;
    Q is normalized to Q(0)=1 so denominator equality is an exact grouping
@@ -4911,6 +4949,7 @@ sccNativeCompositeCacheSignature[cs_Association, req_Association] := {
   DiffExp2`Tolerances`$InputPrecisionFactor,
   TrueQ[$cppExactDomain], TrueQ[$cppUsePersistentSessions],
   TrueQ[$numericizeAllPreparedNumbers],
+  TrueQ[$disablePreparedDirectNumericization],
   TrueQ[$disableGlobalClearedHoist],
   TrueQ[$disableIdentityNhatShortcut],
   TrueQ[$disableAdaptiveLowerFrames],

@@ -1870,14 +1870,31 @@ void validate_checkpoint_match_source(const json::object& source,
                                       std::size_t expected_column = 0) {
   const bool has_column_provenance =
       source.if_contains("column_provenance") != nullptr;
+  const bool has_taylor_width =
+      source.if_contains("matching_taylor_width") != nullptr;
   if (basis) {
-    if (has_column_provenance)
+    if (has_column_provenance && has_taylor_width)
+      require_exact_keys(source,
+          {"column", "local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "matching_taylor_width",
+           "analytic_metadata", "column_provenance"},
+          "checkpoint Acb basis source");
+    else if (has_column_provenance)
       require_exact_keys(source,
           {"column", "local", "chart", "source_operator_identity",
            "checkpoint_identity",
            "requested_imaginary_sign", "effective_imaginary_sign",
            "analytic_metadata", "column_provenance"},
           "checkpoint Acb basis source");
+    else if (has_taylor_width)
+      require_exact_keys(source,
+          {"column", "local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "matching_taylor_width",
+           "analytic_metadata"}, "checkpoint Acb basis source");
     else
       require_exact_keys(source,
           {"column", "local", "chart", "source_operator_identity",
@@ -1889,13 +1906,28 @@ void validate_checkpoint_match_source(const json::object& source,
       throw std::invalid_argument(
           "checkpoint Acb basis sources are not in column order");
   } else {
-    if (has_column_provenance)
+    if (has_column_provenance && has_taylor_width)
+      require_exact_keys(source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "matching_taylor_width",
+           "analytic_metadata", "column_provenance"},
+          "checkpoint Acb incoming source");
+    else if (has_column_provenance)
       require_exact_keys(source,
           {"local", "chart", "source_operator_identity",
            "checkpoint_identity",
            "requested_imaginary_sign", "effective_imaginary_sign",
            "analytic_metadata", "column_provenance"},
           "checkpoint Acb incoming source");
+    else if (has_taylor_width)
+      require_exact_keys(source,
+          {"local", "chart", "source_operator_identity",
+           "checkpoint_identity",
+           "requested_imaginary_sign", "effective_imaginary_sign",
+           "matching_taylor_width",
+           "analytic_metadata"}, "checkpoint Acb incoming source");
     else
       require_exact_keys(source,
           {"local", "chart", "source_operator_identity",
@@ -1917,6 +1949,11 @@ void validate_checkpoint_match_source(const json::object& source,
       throw std::invalid_argument(
           "checkpoint Acb match source has an invalid branch sign");
   }
+  if (has_taylor_width &&
+      as_u64(source.at("matching_taylor_width"),
+             "checkpoint Acb matching Taylor width") == 0)
+    throw std::invalid_argument(
+        "checkpoint Acb match source has a zero Taylor-prefix width");
   validate_checkpoint_exact_analytic_metadata(
       source.at("analytic_metadata"));
   if (has_column_provenance)
@@ -2126,16 +2163,30 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     const std::optional<json::object>& expected_singular_request =
         std::nullopt) {
   const auto& object = as_object(raw, "checkpoint retained Acb match");
-  require_exact_keys(object,
-      {"schema", "handle", "checkpoint_identity", "provenance_identity",
-       "exact_lattice_identity", "exact_lattice_provenance_identity",
-       "exact_lattice_canonical_witness", "basis_sources",
-       "incoming_source", "basis_chart", "incoming_chart",
-       "basis_point_exact", "incoming_point_exact",
-       "physical_match_point_exact", "matching_frame_identity",
-       "epsilon", "dimension",
-       "relative_tolerance", "max_refinement_steps", "refined",
-       "elapsed_ms"}, "checkpoint retained Acb match");
+  const bool has_residual_frame_identity =
+      object.if_contains("residual_frame_identity") != nullptr;
+  if (has_residual_frame_identity)
+    require_exact_keys(object,
+        {"schema", "handle", "checkpoint_identity", "provenance_identity",
+         "exact_lattice_identity", "exact_lattice_provenance_identity",
+         "exact_lattice_canonical_witness", "basis_sources",
+         "incoming_source", "basis_chart", "incoming_chart",
+         "basis_point_exact", "incoming_point_exact",
+         "physical_match_point_exact", "matching_frame_identity",
+         "residual_frame_identity", "epsilon", "dimension",
+         "relative_tolerance", "max_refinement_steps", "refined",
+         "elapsed_ms"}, "checkpoint retained Acb match");
+  else
+    require_exact_keys(object,
+        {"schema", "handle", "checkpoint_identity", "provenance_identity",
+         "exact_lattice_identity", "exact_lattice_provenance_identity",
+         "exact_lattice_canonical_witness", "basis_sources",
+         "incoming_source", "basis_chart", "incoming_chart",
+         "basis_point_exact", "incoming_point_exact",
+         "physical_match_point_exact", "matching_frame_identity",
+         "epsilon", "dimension", "relative_tolerance",
+         "max_refinement_steps", "refined", "elapsed_ms"},
+        "checkpoint retained Acb match");
   if (required_string(object, "schema") !=
       "diffexp2-retained-acb-match-v2")
     throw std::invalid_argument(
@@ -2163,9 +2214,12 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       object, "physical_match_point_exact");
   const auto matching_frame_identity = required_string(
       object, "matching_frame_identity");
+  const auto residual_frame_identity = has_residual_frame_identity
+      ? required_string(object, "residual_frame_identity")
+      : matching_frame_identity;
   if (basis_chart.empty() || incoming_chart.empty() || basis_point.empty() ||
       incoming_point.empty() || physical_point.empty() ||
-      matching_frame_identity.empty())
+      matching_frame_identity.empty() || residual_frame_identity.empty())
     throw std::invalid_argument(
         "checkpoint Acb match lost chart or point provenance");
   const auto& raw_epsilon = as_object(object.at("epsilon"),
@@ -2217,6 +2271,13 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
   auto incoming_source = as_object(object.at("incoming_source"),
                                    "checkpoint Acb incoming source");
   validate_checkpoint_match_source(incoming_source, false);
+  const bool has_taylor_binding =
+      incoming_source.if_contains("matching_taylor_width") != nullptr;
+  for (const auto& source : basis_sources)
+    if ((source.if_contains("matching_taylor_width") != nullptr) !=
+        has_taylor_binding)
+      throw std::invalid_argument(
+          "checkpoint Acb match sources disagree on Taylor-prefix provenance");
 
   const auto exact_lattice_witness_record = required_string(
       object, "exact_lattice_canonical_witness");
@@ -2299,6 +2360,8 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
                                     relative_tolerance},
                                    {"max_steps",
                                     max_refinement_steps}}}};
+  if (has_residual_frame_identity)
+    provenance["residual_frame_identity"] = residual_frame_identity;
   if (json::serialize(canonical_json_value(provenance)) !=
       provenance_identity)
     throw std::invalid_argument(
@@ -2355,7 +2418,8 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       exact_lattice_witness_record, exact_lattice.witness_schema,
       std::move(basis_sources),
       std::move(incoming_source), basis_chart, incoming_chart, basis_point,
-      incoming_point, physical_point, matching_frame_identity, window,
+      incoming_point, physical_point, matching_frame_identity,
+      residual_frame_identity, window,
       required_complete_max,
       dimension, relative_tolerance,
       static_cast<std::size_t>(max_refinement_steps),

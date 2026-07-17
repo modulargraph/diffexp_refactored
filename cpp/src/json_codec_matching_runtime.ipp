@@ -600,6 +600,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
       std::string basis_chart, std::string incoming_chart,
       std::string basis_point, std::string incoming_point,
       std::string physical_point, std::string matching_frame_identity,
+      std::string residual_frame_identity,
       EpsilonWindow requested_window,
       std::int32_t required_complete_max, std::uint32_t dimension,
       std::string relative_tolerance, std::size_t max_refinement_steps,
@@ -623,6 +624,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         incoming_point_(std::move(incoming_point)),
         physical_point_(std::move(physical_point)),
         matching_frame_identity_(std::move(matching_frame_identity)),
+        residual_frame_identity_(std::move(residual_frame_identity)),
         requested_window_(requested_window),
         required_complete_max_(required_complete_max),
         dimension_(dimension),
@@ -684,6 +686,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
     auto residual = encode_acb_match_residual_diagnostics(
         refined_.residual_history.back());
     residual["scope"] = "stored-taylor-truncation";
+    residual["frame_identity"] = residual_frame_identity_;
     residual["history"] = std::move(history);
     return json::object{
         {"match", handle_},
@@ -703,6 +706,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         {"incoming_point_exact", incoming_point_},
         {"physical_match_point_exact", physical_point_},
         {"matching_frame_identity", matching_frame_identity_},
+        {"residual_frame_identity", residual_frame_identity_},
         {"epsilon",
          json::object{{"min", requested_window_.min_power},
                       {"max", requested_window_.complete_max},
@@ -754,6 +758,77 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
             AcbMatchingResidualVerdict::Pass &&
         refined_.residual_history.back().complete_through_required;
   }
+
+  AcbMatchingResidualVerdict final_residual_verdict() const {
+    if (refined_.residual_history.empty())
+      throw std::logic_error("retained Acb match has no residual history");
+    return refined_.residual_history.back().verdict;
+  }
+
+  bool residual_complete_through_required() const {
+    return !refined_.residual_history.empty() &&
+        refined_.residual_history.back().complete_through_required;
+  }
+
+  std::int64_t contiguous_residual_pass_prefix() const {
+    if (refined_.residual_history.empty())
+      throw std::logic_error("retained Acb match has no residual history");
+    const auto& diagnostics = refined_.residual_history.back();
+    const auto upper = std::min(diagnostics.complete_window.complete_max,
+                                diagnostics.required_complete_max);
+    std::int64_t prefix =
+        static_cast<std::int64_t>(diagnostics.complete_window.min_power) - 1;
+    for (std::int64_t power = diagnostics.complete_window.min_power;
+         power <= upper; ++power) {
+      std::size_t passed = 0;
+      for (const auto& coefficient : diagnostics.coefficients)
+        if (coefficient.epsilon_power == power &&
+            coefficient.verdict == AcbMatchingResidualVerdict::Pass)
+          ++passed;
+      if (passed != dimension_) break;
+      prefix = power;
+    }
+    return prefix;
+  }
+
+  bool has_better_inconclusive_certificate_than(
+      const StoredRefinedAcbMatch& other) const {
+    const auto statistics = [](const StoredRefinedAcbMatch& match) {
+      const auto& diagnostics = match.refined_.residual_history.back();
+      std::size_t passed = 0;
+      std::size_t failed = 0;
+      for (const auto& coefficient : diagnostics.coefficients) {
+        if (coefficient.epsilon_power >
+            diagnostics.required_complete_max)
+          continue;
+        passed += coefficient.verdict ==
+            AcbMatchingResidualVerdict::Pass;
+        failed += coefficient.verdict ==
+            AcbMatchingResidualVerdict::Fail;
+      }
+      const auto* raw_width =
+          match.incoming_source_.if_contains("matching_taylor_width");
+      const auto width = raw_width == nullptr
+          ? std::size_t{0}
+          : static_cast<std::size_t>(as_u64(
+                *raw_width, "retained Acb matching Taylor width"));
+      return std::tuple{
+          match.contiguous_residual_pass_prefix(), failed, passed,
+          diagnostics.complete_window.complete_max, width};
+    };
+    const auto [prefix, failed, passed, complete_max, width] =
+        statistics(*this);
+    const auto [other_prefix, other_failed, other_passed,
+                other_complete_max, other_width] = statistics(other);
+    if (prefix != other_prefix) return prefix > other_prefix;
+    if (failed != other_failed) return failed < other_failed;
+    if (passed != other_passed) return passed > other_passed;
+    if (complete_max != other_complete_max)
+      return complete_max > other_complete_max;
+    return width > other_width;
+  }
+
+  void replace_elapsed_ms(double elapsed_ms) { elapsed_ms_ = elapsed_ms; }
 
   std::int32_t certified_complete_max() const {
     if (!certified_for_materialization())
@@ -808,6 +883,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         {"incoming_point_exact", incoming_point_},
         {"physical_match_point_exact", physical_point_},
         {"matching_frame_identity", matching_frame_identity_},
+        {"residual_frame_identity", residual_frame_identity_},
         {"epsilon",
          json::object{{"min", requested_window_.min_power},
                       {"max", requested_window_.complete_max},
@@ -843,6 +919,7 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
   std::string incoming_point_;
   std::string physical_point_;
   std::string matching_frame_identity_;
+  std::string residual_frame_identity_;
   EpsilonWindow requested_window_;
   std::int32_t required_complete_max_ = 0;
   std::uint32_t dimension_ = 0;
@@ -2079,7 +2156,7 @@ json::value optional_match_sign_json(
   return sign.has_value() ? json::value(*sign) : json::value(nullptr);
 }
 
-std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
+std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
     const std::string& match_handle, const json::object& request,
     const std::vector<std::string>& basis_handles,
     const std::vector<std::shared_ptr<StoredLocalBase>>& erased_basis,
@@ -2087,9 +2164,12 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     const std::shared_ptr<StoredLocalBase>& erased_incoming,
     slong precision_bits,
     const std::string& active_session_configuration_identity,
-    const std::optional<json::object>& expected_singular_request =
-        std::nullopt) {
+    const std::optional<json::object>& expected_singular_request,
+    const std::optional<std::size_t>& common_taylor_width) {
   const auto started = std::chrono::steady_clock::now();
+  if (common_taylor_width.has_value() && *common_taylor_width == 0)
+    throw std::invalid_argument(
+        "Acb matching Taylor prefix must retain at least one coefficient");
   if (request.if_contains("native_singular_scc_saturation") != nullptr &&
       !expected_singular_request.has_value())
     throw std::invalid_argument(
@@ -2253,14 +2333,33 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   for (auto& row : evaluated_basis) row.reserve(dimension);
   std::vector<std::optional<std::int32_t>> effective_basis_signs;
   effective_basis_signs.reserve(dimension);
+  std::vector<std::size_t> basis_taylor_widths;
+  basis_taylor_widths.reserve(dimension);
   std::vector<LocalEvaluation> basis_evaluations;
   basis_evaluations.reserve(dimension);
   for (std::size_t column = 0; column < basis.size(); ++column) {
+    auto column_options = basis_options;
+    const auto full_width = basis[column]->solution().taylor_width();
+    const auto retained_width = common_taylor_width.value_or(full_width);
+    if (retained_width > full_width)
+      throw std::invalid_argument(
+          "Acb matching common Taylor prefix exceeds a basis local");
+    column_options.t_order_reduction = static_cast<std::uint32_t>(
+        full_width - retained_width);
     basis_evaluations.push_back(evaluate_local_solution(
-        basis[column]->solution(), basis_point, basis_options));
+        basis[column]->solution(), basis_point, column_options));
+    basis_taylor_widths.push_back(retained_width);
     effective_basis_signs.push_back(
         basis_evaluations.back().imaginary_sign);
   }
+  const auto incoming_full_width = incoming->solution().taylor_width();
+  const auto incoming_taylor_width =
+      common_taylor_width.value_or(incoming_full_width);
+  if (incoming_taylor_width > incoming_full_width)
+    throw std::invalid_argument(
+        "Acb matching common Taylor prefix exceeds the incoming local");
+  incoming_options.t_order_reduction = static_cast<std::uint32_t>(
+      incoming_full_width - incoming_taylor_width);
   const auto incoming_evaluation = evaluate_local_solution(
       incoming->solution(), incoming_point, incoming_options);
   auto evaluation_window = window;
@@ -2404,6 +2503,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
          optional_match_sign_json(requested_basis_sign)},
         {"effective_imaginary_sign",
          optional_match_sign_json(effective_basis_signs[column])},
+        {"matching_taylor_width", basis_taylor_widths[column]},
         {"analytic_metadata", basis[column]->exact_analytic_metadata()}};
     if (basis[column]->column_provenance().has_value())
       source["column_provenance"] =
@@ -2419,6 +2519,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
        optional_match_sign_json(requested_incoming_sign)},
       {"effective_imaginary_sign",
        optional_match_sign_json(incoming_evaluation.imaginary_sign)},
+      {"matching_taylor_width", incoming_taylor_width},
       {"analytic_metadata", incoming->exact_analytic_metadata()}};
   if (incoming->column_provenance().has_value())
     incoming_source["column_provenance"] =
@@ -2499,7 +2600,9 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   // recomputation with the physical exact lattice, never a diagnostic clamp.
   if (normalized_matching_frame &&
       (refined.residual_history.empty() ||
-       !refined.residual_history.back().complete_through_required)) {
+       !refined.residual_history.back().complete_through_required ||
+       refined.residual_history.back().verdict !=
+           AcbMatchingResidualVerdict::Pass)) {
     reset_to_physical_matching_frame();
     exact_lattice = make_exact_lattice();
     refined = run_refinement();
@@ -2516,16 +2619,20 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     auto physical_options = refinement;
     physical_options.required_min_power = evaluation_window.min_power;
     bool physical_prefix_preserved = false;
+    std::optional<matching_detail::AcbResidualEvaluation>
+        physical_certificate;
     try {
-      const auto physical_residual =
+      auto physical_residual =
           matching_detail::evaluate_acb_matching_residual(
               evaluated_basis, *physical_weights, incoming_value,
               physical_options,
               checkpoint_identity + ":physical-prefix-check");
       physical_prefix_preserved =
           physical_residual.diagnostics.complete_through_required &&
-          physical_residual.diagnostics.verdict !=
-              AcbMatchingResidualVerdict::Fail;
+          physical_residual.diagnostics.verdict ==
+              AcbMatchingResidualVerdict::Pass;
+      if (physical_prefix_preserved)
+        physical_certificate = std::move(physical_residual);
     } catch (const MatchingArithmeticError& error) {
       if (error.code !=
           MatchingArithmeticErrorCode::InsufficientCompleteWindow)
@@ -2537,8 +2644,14 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       refined = run_refinement();
     } else {
       refined.weights = std::move(*physical_weights);
+      refined.residual = std::move(physical_certificate->residual);
+      refined.residual_history.back() =
+          std::move(physical_certificate->diagnostics);
     }
   }
+  const std::string residual_frame_identity = normalized_matching_frame
+      ? "physical-parent-frame"
+      : matching_frame_identity;
 
   json::array exact_binding_basis;
   for (const auto& source : basis_sources)
@@ -2567,6 +2680,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       {"incoming_point_exact", incoming_point.exact_coordinate},
       {"physical_match_point_exact", basis_physical_point},
       {"matching_frame_identity", matching_frame_identity},
+      {"residual_frame_identity", residual_frame_identity},
       {"epsilon", json::object{{"min", matching_window.min_power},
                                 {"max", matching_window.complete_max},
                                 {"required_complete_max",
@@ -2589,11 +2703,124 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
       std::move(basis_sources), std::move(incoming_source), basis_chart,
       incoming_chart, basis_point.exact_coordinate,
       incoming_point.exact_coordinate, basis_physical_point,
-      matching_frame_identity,
+      matching_frame_identity, residual_frame_identity,
       matching_window,
       required_complete_max, dimension, relative_tolerance,
       max_refinement_steps, std::move(exact_lattice.saturation),
       std::move(refined), elapsed_ms);
+}
+
+std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
+    const std::string& match_handle, const json::object& request,
+    const std::vector<std::string>& basis_handles,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& erased_basis,
+    const std::string& incoming_handle,
+    const std::shared_ptr<StoredLocalBase>& erased_incoming,
+    slong precision_bits,
+    const std::string& active_session_configuration_identity,
+    const std::optional<json::object>& expected_singular_request =
+        std::nullopt) {
+  const auto started = std::chrono::steady_clock::now();
+  std::size_t common_width = std::numeric_limits<std::size_t>::max();
+  for (const auto& erased : erased_basis) {
+    const auto local =
+        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(erased);
+    if (!local)
+      throw std::invalid_argument(
+          "refined Acb matching requires Acb retained locals");
+    common_width = std::min(common_width,
+                            local->solution().taylor_width());
+  }
+  const auto incoming =
+      std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(erased_incoming);
+  if (!incoming)
+    throw std::invalid_argument(
+        "refined Acb matching requires an Acb incoming local");
+  common_width = std::min(common_width,
+                          incoming->solution().taylor_width());
+
+  const auto retryable_prefix_arithmetic = [](const auto code) {
+    return code == MatchingArithmeticErrorCode::AmbiguousZero ||
+        code == MatchingArithmeticErrorCode::ZeroDivisor ||
+        code == MatchingArithmeticErrorCode::SingularOrIncompleteSystem ||
+        code == MatchingArithmeticErrorCode::SaturationFailure ||
+        code == MatchingArithmeticErrorCode::SearchBudgetExhausted;
+  };
+  std::shared_ptr<StoredRefinedAcbMatch> full;
+  std::exception_ptr full_arithmetic_failure;
+  try {
+    full = build_refined_acb_match_once(
+        match_handle, request, basis_handles, erased_basis, incoming_handle,
+        erased_incoming, precision_bits,
+        active_session_configuration_identity, expected_singular_request,
+        std::nullopt);
+  } catch (const MatchingArithmeticError& error) {
+    if (!retryable_prefix_arithmetic(error.code)) throw;
+    full_arithmetic_failure = std::current_exception();
+  }
+  if (full && full->certified_for_materialization()) {
+    full->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count());
+    return full;
+  }
+
+  // A stored Taylor order is a maximum work reservoir, not an obligation to
+  // sum a numerically poisoned suffix.  A complete Inconclusive residual may
+  // retry, as may a proof/factorization ambiguity caused by a pivot enclosure
+  // overlapping zero.  A genuine residual Fail, an incomplete epsilon frame,
+  // or a structural/invalid-lattice error remains authoritative.  Test every
+  // shorter common prefix from largest to smallest, so increasing the stored
+  // ExpansionOrder cannot make a prefix accepted at a lower order
+  // unavailable.  The selected width is bound into every source record and
+  // therefore into the exact-lattice and match provenance.
+  if (full &&
+      (full->final_residual_verdict() !=
+           AcbMatchingResidualVerdict::Inconclusive ||
+       !full->residual_complete_through_required())) {
+    full->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count());
+    return full;
+  }
+  auto best = full;
+  if (common_width <= 1) {
+    if (best) {
+      best->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count());
+      return best;
+    }
+    std::rethrow_exception(full_arithmetic_failure);
+  }
+  for (auto width = common_width - 1; width > 0; --width) {
+    std::shared_ptr<StoredRefinedAcbMatch> candidate;
+    try {
+      candidate = build_refined_acb_match_once(
+          match_handle, request, basis_handles, erased_basis, incoming_handle,
+          erased_incoming, precision_bits,
+          active_session_configuration_identity, expected_singular_request,
+          width);
+    } catch (const MatchingArithmeticError& error) {
+      if (!retryable_prefix_arithmetic(error.code)) throw;
+      // A narrower speculative prefix can lose the full-rank or complete
+      // Laurent frame that the original attempt possessed.  It is not a new
+      // failure of the requested match; keep searching and retain the best
+      // completed diagnostic if no shorter prefix certifies.
+      continue;
+    }
+    if (candidate->certified_for_materialization()) {
+      candidate->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count());
+      return candidate;
+    }
+    if (candidate->final_residual_verdict() ==
+            AcbMatchingResidualVerdict::Inconclusive &&
+        (!best ||
+         candidate->has_better_inconclusive_certificate_than(*best)))
+      best = std::move(candidate);
+  }
+  if (!best) std::rethrow_exception(full_arithmetic_failure);
+  best->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count());
+  return best;
 }
 
 double checkpoint_nonnegative_double(const json::value& raw,

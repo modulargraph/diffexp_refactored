@@ -620,14 +620,42 @@ $physicalClearedODECacheMax = 256;
    collision can never substitute another physical equation. *)
 physicalClearedODEData[cs_Association] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], theta,
-   signature, key, cached, den, denCoeffs, denContent, cMatrix, qDegree,
-   cDegree, qCoeffs, cCoeffs, qData, cData, identity, data},
+   useGlobalAffineClear, signature, key, cached, symbolic, den, denCoeffs,
+   denContent, cMatrix, qDegree, cDegree, qCoeffs, cCoeffs, qData, cData,
+   identity, data},
   theta = Lookup[cs, "ThetaOriginal", None];
   If[!MatrixQ[theta] || Dimensions[theta] =!=
       {cs["SystemSize"], cs["SystemSize"]},
     err["E5", cs, <|
       "Detail" -> "physical residual ownership requires the exact original-master theta matrix"|>]];
-  signature = {t, theta};
+  (* Regular recurrence preparation already proves and caches the exact
+     global clearing
+
+                         D(x,eps) f'(x) = N(x,eps) f(x)
+
+     once per input system.  The physical owner used to ignore that proof
+     and recompute an LCM/GCD from every affine copy
+
+                   t beta A(x0 + beta t),
+
+     which is mathematically the same clearing but can become catastrophically
+     expensive as exact rational chart centers acquire large denominators.
+     Affine substitution is an automorphism of the coefficient field, so use
+     the existing global-clear path for an identity-frame regular chart and
+     convert its already-certified dExpr/NhatExpr coefficients directly to
+     the physical q/C record.  Singular/nonidentity and standalone fixture
+     records retain the legacy local clearing below. *)
+  useGlobalAffineClear =
+    !TrueQ[$disableGlobalClearedHoist] &&
+    KeyExistsQ[cs, "SystemClearKey"] &&
+    KeyExistsQ[cs, "Center"] &&
+    AssociationQ[Lookup[cs, "ChartMap", None]] &&
+    KeyExistsQ[cs["ChartMap"], "Scale"] &&
+    regularIdentityFrameQ[cs];
+  signature = If[useGlobalAffineClear,
+    {"physical-global-affine-clear-v1", cs["SystemClearKey"], t,
+      cs["Center"], cs["ChartMap", "Scale"]},
+    {t, theta}];
   key = Hash[signature, "SHA256"];
   cached = Lookup[$physicalClearedODECache, key, None];
   If[AssociationQ[cached] && SameQ[cached["Signature"], signature],
@@ -635,27 +663,31 @@ physicalClearedODEData[cs_Association] := Module[
   If[cached =!= None,
     err["E5", cs, <|
       "Detail" -> "physical cleared-ODE cache-key collision with unequal exact input"|>]];
-  den = Together[PolynomialLCM @@
-    (Denominator[Together[#]] & /@ Flatten[theta])];
-  denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
-  If[denCoeffs === {},
-    err["E5", cs, <|
-      "Detail" -> "physical cleared-ODE denominator is identically zero"|>]];
-  denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
-    Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
-  den = Cancel[Together[den/denContent]];
-  cMatrix = Map[Cancel[Together[den*#]] &, theta, {2}];
-  If[!PolynomialQ[den, t] ||
-      !AllTrue[Flatten[cMatrix], PolynomialQ[#, t] &],
-    err["E5", cs, <|
-      "Detail" -> "physical cleared ODE is not polynomial in the local chart coordinate"|>]];
-  qDegree = Max[0, Exponent[den, t]];
-  cDegree = Max[0, Max[Exponent[#, t] & /@ Flatten[cMatrix]]];
-  qCoeffs = Table[Cancel[Together[Coefficient[den, t, j]]],
-    {j, 0, qDegree}];
-  cCoeffs = Table[Map[Cancel[Together[#]] &,
-      Map[Coefficient[#, t, j] &, cMatrix, {2}], {2}],
-    {j, 0, cDegree}];
+  If[useGlobalAffineClear,
+    symbolic = regularClearedFromGlobal[cs];
+    qCoeffs = symbolic["dExpr"];
+    cCoeffs = symbolic["NhatExpr"],
+    den = Together[PolynomialLCM @@
+      (Denominator[Together[#]] & /@ Flatten[theta])];
+    denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
+    If[denCoeffs === {},
+      err["E5", cs, <|
+        "Detail" -> "physical cleared-ODE denominator is identically zero"|>]];
+    denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
+      Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
+    den = Cancel[Together[den/denContent]];
+    cMatrix = Map[Cancel[Together[den*#]] &, theta, {2}];
+    If[!PolynomialQ[den, t] ||
+        !AllTrue[Flatten[cMatrix], PolynomialQ[#, t] &],
+      err["E5", cs, <|
+        "Detail" -> "physical cleared ODE is not polynomial in the local chart coordinate"|>]];
+    qDegree = Max[0, Exponent[den, t]];
+    cDegree = Max[0, Max[Exponent[#, t] & /@ Flatten[cMatrix]]];
+    qCoeffs = Table[Cancel[Together[Coefficient[den, t, j]]],
+      {j, 0, qDegree}];
+    cCoeffs = Table[Map[Cancel[Together[#]] &,
+        Map[Coefficient[#, t, j] &, cMatrix, {2}], {2}],
+      {j, 0, cDegree}]];
   qData = physicalEpsRationalData[#, eps, cs] & /@ qCoeffs;
   cData = Map[physicalEpsRationalData[#, eps, cs] &, cCoeffs, {3}];
   identity = "de2-physical-ode-" <>

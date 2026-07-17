@@ -40,6 +40,33 @@ assert["physical_ode_retains_rational_epsilon_C",
 assert["physical_ode_cache_full_identity_hit",
   Length[DiffExp2`Solve`Private`$physicalClearedODECache] === 1];
 
+(* A regular chart belongs to an exact registered input system.  Its local
+   physical equation is just the affine image of the global cleared pair;
+   prove that the fast path is coefficientwise identical to the independent
+   legacy LCM/GCD construction, including the content-addressed identity. *)
+x = Global`x;
+system = <|"Matrix" ->
+    {{(1 + eps)/((1 - eps) (1 - 2 x)), 1/(1 - x)},
+     {0, eps/(2 - x)}}, "Variable" -> x|>;
+chart = <|"ChartVar" -> t, "Center" -> 1/3, "Scale" -> 2/5,
+  "Radius" -> 1, "LocalRadius" -> 1, "Prescriptions" -> {}|>;
+chartSystem = catchDE2[DiffExp2`Solve`PrepareChart[system, chart]];
+physicalChart = If[AssociationQ[chartSystem],
+  DiffExp2`Solve`Private`regularPhysicalChartSystem[chartSystem],
+  chartSystem];
+hoistedData = If[AssociationQ[physicalChart],
+  catchDE2[DiffExp2`Solve`Private`physicalClearedODEData[physicalChart]],
+  physicalChart];
+legacyData = If[AssociationQ[physicalChart],
+  Block[{DiffExp2`Solve`Private`$disableGlobalClearedHoist = True},
+    catchDE2[
+      DiffExp2`Solve`Private`physicalClearedODEData[physicalChart]]],
+  physicalChart];
+assert["physical_ode_global_affine_clear_equals_legacy_local_clear",
+  AssociationQ[hoistedData] && hoistedData === legacyData &&
+  Length[DiffExp2`Solve`Private`$globalClearedCache] === 1 &&
+  Length[DiffExp2`Solve`Private`$chartClearedCache] === 1];
+
 owner = "de2-operator-wolfram-physical-smoke";
 payload = Block[{
     DiffExp2`Solve`Private`$cppSerializationDomain = "rational",

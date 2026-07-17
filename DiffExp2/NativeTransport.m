@@ -761,12 +761,14 @@ NativeRegularIndependentArmPlansSupportedQ[lower_Association,
 NativeRegularIndependentArmPlansSupportedQ[___] := False;
 
 nativeBasisOwner[basis_Association] := Module[{owner},
-  owner = Lookup[basis, "NativeSCC",
-    Lookup[basis, "NativeChart", Lookup[basis, "SCC", None]]];
+  owner = Lookup[basis, "NativeEquationOwner",
+    Lookup[basis, "NativeSCC",
+      Lookup[basis, "NativeChart", Lookup[basis, "SCC", None]]]];
   If[!StringQ[owner] || StringLength[owner] == 0,
     err["E6", <|"Basis" -> KeyTake[basis,
-        {"Type", "Session", "NativeSCC", "NativeChart"}],
-      "Detail" -> "retained receiving basis exposes no native chart/SCC owner"|>]];
+        {"Type", "Session", "NativeEquationOwner", "NativeSCC",
+         "NativeChart"}],
+      "Detail" -> "retained receiving basis exposes no native equation/chart/SCC owner"|>]];
   owner];
 
 SetAttributes[nativeCatchDE2, HoldFirst];
@@ -918,14 +920,15 @@ nativeRationalShadowBasis[system_Association, req_Association, threads_,
   result];
 
 nativeReceivingBasis[system_Association, req_Association, threads_,
-    forceMonolithicRegular_:False] := Module[
+    forceMonolithicRegular_:False,
+    equationOwner_:Automatic] := Module[
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
    sequence, components, built, expectedTypes, targetSCC, attempt,
    probePrints, shadowDecision},
   If[regular,
     built = DiffExp2`Solve`SolveNativeRegularBasis[
-      system, req, threads, forceMonolithicRegular];
+      system, req, threads, forceMonolithicRegular, equationOwner];
     expectedTypes = {
       "DiffExp2NativeRegularBasis", "DiffExp2NativeSCCBasis"},
     sequence = Lookup[system, "IntegrationSequence", None];
@@ -1435,7 +1438,10 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &, locals];
     Scan[Function[record,
       If[StringQ[Lookup[record, "SCC", None]],
-        Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[record]]]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[record]]];
+      If[StringQ[Lookup[record, "NativeEquationOwner", None]],
+        Quiet[DiffExp2`CppBackend`ReleasePersistentRegularEquationOwner[
+          record]]]],
       preparedOwners];
     Null];
   output = Catch[
@@ -1487,7 +1493,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
             built = If[TrueQ[Lookup[
                   Lookup[system, "IndicialData", <||>],
                   "Regular", False]],
-              DiffExp2`Solve`PrepareNativeRegularBasisOwner[system, req],
+              DiffExp2`Solve`PrepareNativeRegularBasisOwner[
+                system, req, anchor],
               DiffExp2`Solve`PrepareNativeSCCComposite[system, req]];
             AppendTo[preparedOwners, built];
             nativeStageTiming["owner-prepare-done index=", First[index],
@@ -1573,10 +1580,11 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
       "NativeRationalScaleBridges", {}]],
     "UpperBridgeCount" -> Length[Lookup[upper,
       "NativeRationalScaleBridges", {}]]|>;
-  (* The tile plan now strongly owns every equation owner.  Regular owners
-     were prepare-only, so there is no disposable local slab to release. *)
-  lowerData = KeyDrop[lowerData, "OwnerRecords"];
-  upperData = KeyDrop[upperData, "OwnerRecords"];
+  (* The tile plan now strongly owns every equation owner, but streamed
+     framed fallback still needs the public eq: token until its corresponding
+     arm has finished.  Keep only these compact owner records in the atlas;
+     the observable march releases their public tokens after both states are
+     published. *)
   <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
     "Session" -> First[sessions], "Domain" -> domain,
     "Dimension" -> dimension,
@@ -1924,7 +1932,9 @@ nativeStreamTransportArm[atlas_Association, data_Association,
     refinement_Association] := Module[
   {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
    valueSolvers = data["ValueSolvers"], tiles = {atlas["Anchor"]},
-   hopEpsilon, valueSolver, valueResponse, basis, response, next, output},
+   ownerRecords = Lookup[data, "OwnerRecords", {}], hopEpsilon,
+   valueSolver, valueResponse, basis, response, next, output,
+   fallbackEquationOwner},
   If[!ListQ[valueSolvers] || Length[valueSolvers] =!= Length[systems],
     err["E6", <|"Arm" -> arm,
       "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
@@ -1936,6 +1946,12 @@ nativeStreamTransportArm[atlas_Association, data_Association,
     Do[
       basis = None;
       valueSolver = valueSolvers[[index]];
+      fallbackEquationOwner = If[ListQ[ownerRecords] &&
+          index <= Length[ownerRecords] &&
+          AssociationQ[ownerRecords[[index]]] &&
+          StringQ[Lookup[ownerRecords[[index]],
+            "NativeEquationOwner", None]],
+        ownerRecords[[index]], Automatic];
       valueResponse = If[AssociationQ[valueSolver],
         DiffExp2`CppBackend`ConsumePersistentTransportValueHop[
           atlas["Plan"], arm, index, valueSolver, current,
@@ -1953,7 +1969,8 @@ nativeStreamTransportArm[atlas_Association, data_Association,
           " index=", index, " value-reason=",
           Lookup[valueResponse, "reason", "ineligible"]];
         basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
-          Lookup[atlas, "Threads", Automatic], True];
+          Lookup[atlas, "Threads", Automatic], True,
+          fallbackEquationOwner];
         nativeStageTiming["stream-basis-done arm=", arm,
           " index=", index,
           " center=", InputForm[Lookup[systems[[index]], "Center", None]],
@@ -2031,7 +2048,7 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
    cacheMemoryAfter, workingAtlas = atlas,
    atlasCompactor = OptionValue["AtlasCompactor"],
    consumeReceivingBases = TrueQ[OptionValue["ConsumeReceivingBases"]],
-   deferredReceivingBases, streamedArms = <||>},
+   deferredReceivingBases, streamedArms = <||>, equationOwners = {}},
   If[Lookup[atlas, "Type", None] =!=
         "DiffExp2NativeRegularIndependentArmAtlas" ||
       !IntegerQ[maxSteps] || !TrueQ[0 <= maxSteps <= 32],
@@ -2192,13 +2209,25 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
           "lower"] ||
         !nativeTransportStateHandleQ[upperState, workingAtlas["Session"],
           "upper"],
-      err["E5", <|"BackendResponse" -> march,
+        err["E5", <|"BackendResponse" -> march,
         "Detail" -> "two-arm observable-batch march did not return exact lower/upper retained states"|>]];
+    If[deferredReceivingBases,
+      equationOwners = DeleteDuplicatesBy[
+        Select[Join[
+            Lookup[workingAtlas["Lower"], "OwnerRecords", {}],
+            Lookup[workingAtlas["Upper"], "OwnerRecords", {}]],
+          AssociationQ[#] &&
+            StringQ[Lookup[#, "NativeEquationOwner", None]] &],
+        Lookup[#, "NativeEquationOwner", None] &];
+      Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentRegularEquationOwner[
+          #]] &, equationOwners]];
     If[consumeReceivingBases || deferredReceivingBases,
       workingAtlas = Join[workingAtlas, <|
-        "Lower" -> Join[KeyDrop[workingAtlas["Lower"], "ChartSystems"],
+        "Lower" -> Join[KeyDrop[workingAtlas["Lower"],
+            {"ChartSystems", "OwnerRecords"}],
           <|"Bases" -> {None}|>],
-        "Upper" -> Join[KeyDrop[workingAtlas["Upper"], "ChartSystems"],
+        "Upper" -> Join[KeyDrop[workingAtlas["Upper"],
+            {"ChartSystems", "OwnerRecords"}],
           <|"Bases" -> {None}|>]|>];
       atlas = workingAtlas;
       atlasCompactor[workingAtlas];
@@ -2389,6 +2418,17 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
         Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
           Flatten[Rest[Lookup[#, "tile_sources", {}]] & /@
             Select[Values[streamedArms], AssociationQ], 1]]];
+      equationOwners = DeleteDuplicatesBy[
+        Select[Join[
+            Lookup[Lookup[workingAtlas, "Lower", <||>],
+              "OwnerRecords", {}],
+            Lookup[Lookup[workingAtlas, "Upper", <||>],
+              "OwnerRecords", {}]],
+          AssociationQ[#] &&
+            StringQ[Lookup[#, "NativeEquationOwner", None]] &],
+        Lookup[#, "NativeEquationOwner", None] &];
+      Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentRegularEquationOwner[
+          #]] &, equationOwners];
       Throw[failure, tag]]];
   output];
 
@@ -2830,7 +2870,7 @@ ReleaseNativeTransportObservableBatch[batch_Association] := Module[
 
 ReleaseNativeRegularIndependentArms[obj_Association] := Module[
   {atlas, run, lines = {}, runLocals = {}, matches = {}, bases, locals,
-   responses = {}, failures, releaseAll, releaseOKQ},
+   equationOwners, responses = {}, failures, releaseAll, releaseOKQ},
   {atlas, run} = Which[
     Lookup[obj, "Type", None] ===
         "DiffExp2NativeRegularIndependentArmRun", {obj["Atlas"], obj},
@@ -2870,6 +2910,16 @@ ReleaseNativeRegularIndependentArms[obj_Association] := Module[
     matches, "match"];
   AppendTo[responses,
     Quiet[DiffExp2`CppBackend`ReleasePersistentTilePlan[atlas["Plan"]]]];
+  equationOwners = DeleteDuplicatesBy[
+    Select[Join[
+        Lookup[Lookup[atlas, "Lower", <||>], "OwnerRecords", {}],
+        Lookup[Lookup[atlas, "Upper", <||>], "OwnerRecords", {}]],
+      AssociationQ[#] &&
+        StringQ[Lookup[#, "NativeEquationOwner", None]] &],
+    Lookup[#, "NativeEquationOwner", None] &];
+  releaseAll[
+    DiffExp2`CppBackend`ReleasePersistentRegularEquationOwner,
+    equationOwners, "NativeEquationOwner"];
   releaseOKQ[response_] := AssociationQ[response] &&
     Lookup[response, "status", "error"] === "ok";
   failures = Select[responses, !TrueQ[releaseOKQ[#]] &];

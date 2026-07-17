@@ -15,6 +15,8 @@ EncodeSymbolicScalar::usage = "EncodeSymbolicScalar[z, vars] converts an exact r
 RunRequest::usage = "RunRequest[jsonReadyAssociation] executes one coarse-grained compiled recurrence request and returns its decoded JSON response.";
 RunPersistentRequest::usage = "RunPersistentRequest[schema1Request, metadata] executes a recurrence through the persistent schema-2 session, preparing immutable chart/operator and SCC data once and sending only run-dependent frames on later calls.";
 PreparePersistentChart::usage = "PreparePersistentChart[schema1Request, metadata] prepares and retains only the immutable schema-2 chart/operator owner. Dynamic run fields are ignored and no recurrence or local solution is executed or published; the returned compact record binds the exact session, chart handle, and chart identity reused by later solves.";
+PreparePersistentRegularEquationOwner::usage = "PreparePersistentRegularEquationOwner[sessionOwner,spec] prepares one frame-independent ordinary physical q/C owner in the existing persistent session. spec contains exactly capability,key,identity,dimension,geometry,physical_ode,relative_accuracy_max_exact.";
+ReleasePersistentRegularEquationOwner::usage = "ReleasePersistentRegularEquationOwner[owner] releases one public frame-independent regular equation-owner token. Retained plans and locals may continue to own it strongly.";
 RunPersistentRequests::usage = "RunPersistentRequests[schema1Requests, metadata, threads] executes several runs sharing one retained operator through the persistent native worker pool and returns ordered per-run responses.";
 RunPersistentRequestGroups::usage = "RunPersistentRequestGroups[groups, threads] prepares several chart groups in one solver session and executes all of their dynamic runs through one ordered session.solve_many worker pool. Each group contains Requests and Metadata.";
 PreparePersistentSCC::usage = "PreparePersistentSCC[groups, manifest] prepares one retained chart for each Requests/Metadata group, binds those charts and one full-parent physical q/C equation owner into a typed schema-2 SCC manifest, and returns an opaque session-owned SCC handle.";
@@ -23,7 +25,7 @@ RunPersistentSCCColumn::usage = "RunPersistentSCCColumn[handle, seed, targets, c
 RunPersistentSCCColumns::usage = "RunPersistentSCCColumns[handle, columns, threads] executes an ordered all-or-nothing batch of retained SCC basis columns through one native worker pool. Each column contains Seed, Targets, and CheckpointIdentity; successful locals are retained atomically and no coefficient slab is returned.";
 SpecializePersistentRationalSCCColumn::usage = "SpecializePersistentRationalSCCColumn[source,targetSCC,rationalShadowIdentity,checkpointIdentity] imports one completed exact Rational SCC column into the paired target Acb SCC. Native code proves the shared domain-independent owner identity, physical q/C containment, exact geometry/prescriptions, and public epsilon/Taylor contract before coefficientwise specialization.";
 ReleasePersistentSCC::usage = "ReleasePersistentSCC[handle] releases one retained native SCC chart and removes its Wolfram collision certificate.";
-RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab.";
+RunPersistentLocalSolve::usage = "RunPersistentLocalSolve[schema1Request, metadata, localMetadata, equationOwner:Automatic] executes recurrence plus retained native assembly and returns an opaque session-owned local-solution handle without returning its coefficient slab. When equationOwner is supplied, the framed chart must prove exact q/C and geometry identity with that frame-independent regular owner and publishes the local under the equation owner.";
 EvaluatePersistentLocal::usage = "EvaluatePersistentLocal[handle, point, options, outputDigits] evaluates a retained native local solution at the JSON-ready exact rational point record. The handle is the response returned by RunPersistentLocalSolve or an association containing session/local keys.";
 CertifyPersistentLocalResidual::usage = "CertifyPersistentLocalResidual[handle, request, outputDigits] evaluates a retained local and certifies the native Acb residual of its immutable physical q(t,eps), C(t,eps), and homogeneous-source payload. request carries point, relative_tolerance, and the operator, owner-signature, physical-payload, source, local-checkpoint, analytic-metadata, and provenance identities advertised by residual_binding; caller-supplied operators or sources are rejected.";
 RunPersistentLocalMatch::usage = "RunPersistentLocalMatch[basis, incoming, request] matches retained exact-rational regular locals entirely in their common native session and retains the exact lattice transformation and Laurent weights. request binds chart/checkpoint identities, local match points, the work epsilon window, and the required residual CompleteMax.";
@@ -569,6 +571,56 @@ PreparePersistentChart[request_Association,
       Module]];
   KeyTake[prepared, {"Session", "Chart", "ChartIdentity"}]];
 
+persistentRegularEquationOwnerHandles[owner_Association] := Module[
+  {session, equationOwner},
+  session = Lookup[owner, "session", Lookup[owner, "Session", None]];
+  equationOwner = Lookup[owner, "equation_owner",
+    Lookup[owner, "EquationOwner",
+      Lookup[owner, "NativeEquationOwner", None]]];
+  If[!StringQ[session] || StringLength[session] == 0 ||
+      !StringQ[equationOwner] ||
+      !StringStartsQ[equationOwner, "eq:"],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "persistent regular equation owner requires exact session and eq: tokens"|>], Module]];
+  <|"Session" -> session, "EquationOwner" -> equationOwner|>];
+
+PreparePersistentRegularEquationOwner[sessionOwner_,
+    spec_Association] := Module[
+  {session = persistentCheckpointSession[sessionOwner], required, response},
+  If[FailureQ[session], Return[session, Module]];
+  required = {"capability", "key", "identity", "dimension", "geometry",
+    "physical_ode", "relative_accuracy_max_exact"};
+  If[Sort[Keys[spec]] =!= Sort[required] ||
+      Lookup[spec, "capability", None] =!=
+        "frame-independent-regular-physical-equation-owner-v1" ||
+      !StringQ[Lookup[spec, "key", None]] ||
+      !StringQ[Lookup[spec, "identity", None]] ||
+      !StringStartsQ[spec["identity"], "de2-equation-"] ||
+      !IntegerQ[Lookup[spec, "dimension", None]] ||
+      spec["dimension"] < 1 ||
+      !AssociationQ[Lookup[spec, "geometry", None]] ||
+      !AssociationQ[Lookup[spec, "physical_ode", None]] ||
+      !StringQ[Lookup[spec, "relative_accuracy_max_exact", None]],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "frame-independent regular equation preparation received a malformed exact owner specification"|>], Module]];
+  response = RunRequest[Join[<|"schema" -> 2,
+      "op" -> "regular_equation.prepare", "session" -> session|>, spec]];
+  If[!persistentCommandOKQ[response], Return[response, Module]];
+  <|"Session" -> session,
+    "EquationOwner" -> response["equation_owner"],
+    "EquationIdentity" -> response["identity"],
+    "Capability" -> response["capability"],
+    "OwnerSignatureIdentity" -> response["owner_signature_identity"],
+    "PhysicalPayloadIdentity" -> response["physical_payload_identity"],
+    "Reused" -> response["reused"]|>];
+
+ReleasePersistentRegularEquationOwner[owner_Association] := Module[
+  {tokens = persistentRegularEquationOwnerHandles[owner]},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  RunRequest[<|"schema" -> 2, "op" -> "regular_equation.release",
+    "session" -> tokens["Session"],
+    "equation_owner" -> tokens["EquationOwner"]|>]];
+
 preparePersistentRequest[request_Association, metadata_Association] := Module[
   {missingStatic, missingRun, prepared},
   missingStatic = Complement[$persistentRequiredStaticKeys, Keys[request]];
@@ -915,13 +967,26 @@ SpecializePersistentRationalSCCColumn[source_Association,
     "checkpoint_identity" -> checkpointIdentity|>]];
 
 RunPersistentLocalSolve[request_Association, metadata_Association,
-    localMetadata_Association] := Module[{prepared, response},
+    localMetadata_Association, equationOwner_:Automatic] := Module[
+  {prepared, response, payload, ownerTokens},
   prepared = preparePersistentRequest[request, metadata];
   If[FailureQ[prepared] || !AssociationQ[prepared] ||
       !KeyExistsQ[prepared, "Session"], Return[prepared, Module]];
-  response = RunRequest[<|"schema" -> 2, "op" -> "local.solve",
+  payload = <|"schema" -> 2, "op" -> "local.solve",
     "session" -> prepared["Session"], "chart" -> prepared["Chart"],
-    "run" -> prepared["Run"], "metadata" -> localMetadata|>];
+    "run" -> prepared["Run"], "metadata" -> localMetadata|>;
+  If[equationOwner =!= Automatic,
+    If[!AssociationQ[equationOwner],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "equation-bound local solve requires an opaque regular equation owner"|>], Module]];
+    ownerTokens = persistentRegularEquationOwnerHandles[equationOwner];
+    If[FailureQ[ownerTokens], Return[ownerTokens, Module]];
+    If[ownerTokens["Session"] =!= prepared["Session"],
+      Return[Failure["CppBackend", <|"Detail" ->
+        "framed chart and regular equation owner belong to different persistent sessions"|>], Module]];
+    payload = Append[payload,
+      "equation_owner" -> ownerTokens["EquationOwner"]]];
+  response = RunRequest[payload];
   response];
 
 EvaluatePersistentLocal[handle_Association, point_Association,
@@ -1639,14 +1704,22 @@ ConsumePersistentTransportValueHop[plan_Association, arm_String,
     epsilon_Association, checkpointRoot_String] := Module[
   {planTokens = persistentTilePlanHandles[plan],
    incomingTokens = persistentLocalHandles[incoming], incomingCheckpoint,
-   epsilonKeys, solverKeys, sessions},
+   epsilonKeys, solverKeys, sessions, solverSchema, operation},
   If[FailureQ[planTokens], Return[planTokens, Module]];
   If[FailureQ[incomingTokens], Return[incomingTokens, Module]];
   incomingCheckpoint = Lookup[incoming, "checkpoint_identity",
     Lookup[incoming, "CheckpointIdentity", None]];
   epsilonKeys = {"min", "max", "required_complete_max"};
-  solverKeys = {"schema", "run", "metadata", "tail_proxy_max_exact",
-    "relative_accuracy_max_exact"};
+  solverSchema = Lookup[valueSolver, "schema", None];
+  {solverKeys, operation} = Switch[solverSchema,
+    "diffexp2-native-regular-value-solver-prototype-v1",
+      {{"schema", "run", "metadata", "tail_proxy_max_exact",
+        "relative_accuracy_max_exact"}, "transport.consume_value_hop"},
+    "diffexp2-native-ordinary-physical-value-solver-v1",
+      {{"schema", "taylor_complete_max", "metadata",
+        "relative_accuracy_max_exact"},
+       "transport.consume_physical_value_hop"},
+    _, {{}, None}];
   sessions = DeleteDuplicates[{planTokens["Session"],
     incomingTokens["Session"]}];
   If[!MemberQ[{"lower", "upper"}, arm] || index < 1 ||
@@ -1654,14 +1727,17 @@ ConsumePersistentTransportValueHop[plan_Association, arm_String,
       !AllTrue[Lookup[epsilon, epsilonKeys], IntegerQ] ||
       !TrueQ[epsilon["min"] <= epsilon["required_complete_max"] <=
         epsilon["max"]] || Sort[Keys[valueSolver]] =!= Sort[solverKeys] ||
-      Lookup[valueSolver, "schema", None] =!=
-        "diffexp2-native-regular-value-solver-prototype-v1" ||
-      !AssociationQ[Lookup[valueSolver, "run", None]] ||
+      operation === None ||
+      If[solverSchema ===
+          "diffexp2-native-regular-value-solver-prototype-v1",
+        !AssociationQ[Lookup[valueSolver, "run", None]],
+        !IntegerQ[Lookup[valueSolver, "taylor_complete_max", None]] ||
+          valueSolver["taylor_complete_max"] < 0] ||
       !AssociationQ[Lookup[valueSolver, "metadata", None]] ||
       !StringQ[incomingCheckpoint] || StringLength[checkpointRoot] == 0,
     Return[Failure["CppBackend", <|"Detail" ->
       "regular value hop received inconsistent sessions, solver prototype, epsilon bounds, or checkpoint identities"|>], Module]];
-  RunRequest[<|"schema" -> 2, "op" -> "transport.consume_value_hop",
+  RunRequest[<|"schema" -> 2, "op" -> operation,
     "session" -> First[sessions],
     "tile_plan" -> planTokens["TilePlan"],
     "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],

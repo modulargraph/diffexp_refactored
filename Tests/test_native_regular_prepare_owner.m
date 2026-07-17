@@ -124,6 +124,60 @@ assert["fallback_monolithic_basis_reuses_prepare_only_owner_chart",
 
 If[AssociationQ[basis],
   Scan[DiffExp2`CppBackend`ReleasePersistentLocal, basis["Columns"]]];
+
+wideFrameCalls = 0;
+lightOwner = catchDE2[Block[{
+    DiffExp2`Solve`Private`prepareNativeLocalFamilyRun =
+      Function[Null, wideFrameCalls++;
+        Failure["UnexpectedWideFrame", <||>]]},
+  DiffExp2`Solve`PrepareNativeRegularBasisOwner[
+    chartSystem, request, owner]]];
+lightStats = If[AssociationQ[lightOwner],
+  sessionStats[lightOwner["Session"]], <||>];
+assert["anchor_session_owner_is_frame_independent_and_frame_free",
+  AssociationQ[lightOwner] &&
+    lightOwner["Session"] === owner["Session"] &&
+    Lookup[lightOwner, "OwnerKind", None] ===
+      "FrameIndependentRegularPhysicalEquation" &&
+    StringStartsQ[Lookup[lightOwner, "NativeEquationOwner", ""],
+      "eq:"] &&
+    Lookup[lightOwner["ValueSolver"], "schema", None] ===
+      "diffexp2-native-ordinary-physical-value-solver-v1" &&
+    Sort[Keys[lightOwner["ValueSolver"]]] === Sort[{
+      "schema", "taylor_complete_max", "metadata",
+      "relative_accuracy_max_exact"}] &&
+    wideFrameCalls === 0 &&
+    Lookup[lightStats, "regular_equation_owners", -1] === 1 &&
+    Lookup[lightStats, "charts", -1] === 1 &&
+    Lookup[lightStats, "locals", -1] === 0];
+
+lightBasis = If[FailureQ[lightOwner], lightOwner, catchDE2[
+  DiffExp2`Solve`SolveNativeRegularBasis[
+    chartSystem, request, 1, True, lightOwner]]];
+lightBasisStats = If[AssociationQ[lightOwner],
+  sessionStats[lightOwner["Session"]], <||>];
+assert["framed_fallback_is_published_under_frame_independent_owner",
+  AssociationQ[lightBasis] && AssociationQ[lightOwner] &&
+    lightBasis["Session"] === lightOwner["Session"] &&
+    lightBasis["NativeChart"] === lightOwner["NativeEquationOwner"] &&
+    Lookup[lightBasis["Columns"], "NativeChart", {}] ===
+      ConstantArray[lightOwner["NativeEquationOwner"], 2] &&
+    Lookup[lightBasisStats, "regular_equation_owners", -1] === 1 &&
+    Lookup[lightBasisStats, "locals", -1] === 2];
+If[AssociationQ[lightBasis],
+  Scan[DiffExp2`CppBackend`ReleasePersistentLocal,
+    lightBasis["Columns"]]];
+lightOwnerRelease = If[AssociationQ[lightOwner],
+  DiffExp2`CppBackend`ReleasePersistentRegularEquationOwner[lightOwner],
+  lightOwner];
+afterLightRelease = If[AssociationQ[owner],
+  sessionStats[owner["Session"]], <||>];
+assert["frame_independent_owner_public_token_releases_cleanly",
+  AssociationQ[lightOwnerRelease] &&
+    Lookup[lightOwnerRelease, "status", "error"] === "ok" &&
+    Lookup[afterLightRelease, "regular_equation_owners", -1] === 0 &&
+    Lookup[afterLightRelease, "locals", -1] === 0];
+
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];
 

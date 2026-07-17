@@ -28,8 +28,8 @@ PrepareNativeRationalRow::usage = "PrepareNativeRationalRow[chartSystem, sourceS
 PrepareNativeSCCComposite::usage = "PrepareNativeSCCComposite[sccChartSystem, req] captures (without executing) the ordinary grouped native homogeneous requests for every supported diagonal SCC block, prepares their strict typed persistent composite manifest with one full original-master physical q/C owner, and returns the opaque C++ SCC handle record. This first slice is an explicit preparation API only; SolveHomogeneous does not dispatch through it.";
 SolveNativeSCCBasisColumn::usage = "SolveNativeSCCBasisColumn[sccChartSystem, req, seedBlock, seedLocalComponent:1] executes one strict regular exact-Rational or Acb block-DAG SCC basis column, or a certified exact-Rational/Acb regular-singular Jordan column, through an already captured persistent composite and returns an opaque native local handle record without coefficient tensors. Singular Acb execution is restricted to exact schedules without CASE-P collisions. seedBlock and seedLocalComponent are one-based; the three-argument scalar-v1 call is unchanged. This explicit migration seam is not yet used by SolveHomogeneous or transport.";
 SolveNativeSCCBasis::usage = "SolveNativeSCCBasis[sccChartSystem, req, threads:Automatic] executes the complete physical SCC basis as one ordered native column batch, retaining every column atomically and returning opaque handles sorted by physical basis index. No coefficient tensor crosses the bridge.";
-SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic, forceMonolithic:False] returns a complete retained basis for any regular chart. Multi-block SCC envelopes normally use the ordered native SCC batch; forceMonolithic=True instead solves the full physical frame so a fallback basis has the same primitive owner as a deferred value-handoff plan. No coefficient tensor crosses the bridge.";
-PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSystem,req] prepares the primitive physical-frame equation owner and immutable value-solver prototype needed by exact deferred tile planning without executing a disposable unit-column solve or retaining a complete regular basis. Later value and monolithic-basis runs reuse the same collision-certified native chart owner.";
+SolveNativeRegularBasis::usage = "SolveNativeRegularBasis[chartSystem, req, threads:Automatic, forceMonolithic:False, equationOwner:Automatic] returns a complete retained basis for any regular chart. Multi-block SCC envelopes normally use the ordered native SCC batch; forceMonolithic=True instead solves the full physical frame. When equationOwner is supplied, the framed fallback is published under that exact frame-independent physical owner. No coefficient tensor crosses the bridge.";
+PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSystem,req] preserves the legacy primitive framed-chart owner path. PrepareNativeRegularBasisOwner[chartSystem,req,anchor] instead prepares a lightweight frame-independent ordinary q/C owner in anchor's existing native session and returns its compact causal value-solver prototype without constructing a recurrence frame.";
 WithNativeSCCCompositeCacheReservation::usage = "WithNativeSCCCompositeCacheReservation[count,expr] evaluates expr with capacity reserved for exactly count additional live native SCC composite owners. The reservation is dynamically scoped, never evicts a live public handle, and leaves ordinary direct preparation subject to the default bounded capacity.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 DropWolframPreparationCaches::usage = "DropWolframPreparationCaches[] drops only Wolfram-side chart/operator/multiplier preparation memo state while preserving every retained native session, chart, SCC, local, match, and tile-plan handle.";
@@ -3877,7 +3877,8 @@ prepareNativeLocalFamilyRun[cs_Association, req_Association,
    their native counterparts preserve the same sequential completeness
    contract. *)
 SolveNativeLocalFamily[cs_Association, req_Association,
-    tag_Association, init_List, retainValueSolverPrototype_:False] := Module[
+    tag_Association, init_List, retainValueSolverPrototype_:False,
+    equationOwner_:Automatic] := Module[
   {prepared, response, backendID, result, reqMin, reqMax, checkpointIdentity,
    normalizedTag},
   prepared = prepareNativeLocalFamilyRun[cs, req, tag, init,
@@ -3888,7 +3889,7 @@ SolveNativeLocalFamily[cs_Association, req_Association,
   normalizedTag = prepared["Tag"];
   response = DiffExp2`CppBackend`RunPersistentLocalSolve[
     prepared["Request"], prepared["PersistentMetadata"],
-    prepared["LocalMetadata"]];
+    prepared["LocalMetadata"], equationOwner];
   If[FailureQ[response],
     err["E5", cs, <|"BackendFailure" -> response, "Detail" ->
       "persistent native local solve failed"|>]];
@@ -6629,7 +6630,8 @@ SolveNativeSCCBasis[cs_Association, req_Association,
     "NativeSummary" -> KeyDrop[batch, {"results"}]|>];
 
 SolveNativeRegularBasis[cs_Association, req_Association,
-    threads_:Automatic, forceMonolithic_:False] := Module[
+    threads_:Automatic, forceMonolithic_:False,
+    equationOwner_:Automatic] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], d = cs["SystemSize"],
    epsWindow = Lookup[req, "EpsWindow", None], epsMin, epsMax,
    physical, columns = {}, unitValues, built, cleanup, sessions, charts},
@@ -6639,7 +6641,8 @@ SolveNativeRegularBasis[cs_Association, req_Association,
   If[threads =!= Automatic && !(IntegerQ[threads] && threads > 0),
     err["E6", cs, <|"Threads" -> threads,
       "Detail" -> "native regular basis thread count must be a positive integer or Automatic"|>]];
-  If[!TrueQ[forceMonolithic] && AssociationQ[seq] &&
+  If[equationOwner === Automatic && !TrueQ[forceMonolithic] &&
+      AssociationQ[seq] &&
       Length[Lookup[seq, "Components", {}]] > 1,
     Return[SolveNativeSCCBasis[cs, req, threads], Module]];
   If[!AssociationQ[epsWindow] ||
@@ -6661,7 +6664,8 @@ SolveNativeRegularBasis[cs_Association, req_Association,
           Table[If[component === basisIndex && power === 0, 1, 0],
             {power, epsMin, epsMax}]], {component, d}];
       built = SolveNativeLocalFamily[physical, req,
-        <|"a" -> 0, "b" -> 0, "p" -> 0|>, {unitValues}];
+        <|"a" -> 0, "b" -> 0, "p" -> 0|>, {unitValues}, False,
+        equationOwner];
       AppendTo[columns, Join[built,
         <|"Type" -> "DiffExp2NativeRegularBasisColumn",
           "BasisIndex" -> basisIndex|>]],
@@ -6746,6 +6750,92 @@ PrepareNativeRegularBasisOwner[cs_Association, req_Association] := Module[
     "NativeChart" -> owner["Chart"],
     "ChartIdentity" -> owner["ChartIdentity"],
     "ValueSolver" -> prepared["ValueSolver"]|>];
+
+(* Production deferred transport can bind ordinary receiving equations before
+   any recurrence frame exists.  The anchor has already selected and opened
+   the exact persistent scalar session, so this form serializes only physical
+   q/C, exact geometry, and one compact local-metadata prototype.  Keep the
+   two-argument definition above unchanged for compatibility and explicit
+   framed-owner tests. *)
+PrepareNativeRegularBasisOwner[cs_Association, req_Association,
+    anchor_Association] := Module[
+  {d = cs["SystemSize"], epsWindow = Lookup[req, "EpsWindow", None],
+   physical, physicalData, geometry, sessionStats, domain, wp,
+   inputDigits, identityRecord, identity, checkpointIdentity,
+   physicalPayload, localMetadata, owner, relativeAccuracy},
+  If[!TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    err["E8", cs, <|"Detail" ->
+      "PrepareNativeRegularBasisOwner requires a regular chart"|>]];
+  If[!AssociationQ[epsWindow] ||
+      !IntegerQ[Lookup[epsWindow, "Min", None]] ||
+      !IntegerQ[Lookup[epsWindow, "CompleteMax", None]] ||
+      epsWindow["Min"] > epsWindow["CompleteMax"] ||
+      !IntegerQ[Lookup[req, "TOrder", None]] || req["TOrder"] < 0,
+    err["E8", cs, <|"Request" -> req,
+      "Detail" -> "lightweight regular owner requires finite ordered epsilon and Taylor windows"|>]];
+  If[epsWindow["Min"] > 0 || epsWindow["CompleteMax"] < 0,
+    err["E6", cs, <|"EpsWindow" -> epsWindow,
+      "Detail" -> "native regular owner normalization requires eps^0 inside the requested window"|>]];
+  sessionStats = DiffExp2`CppBackend`PersistentSessionCounters[anchor];
+  domain = If[AssociationQ[sessionStats],
+    Lookup[sessionStats, "domain", None], None];
+  If[!MemberQ[{"acb", "rational"}, domain],
+    err["E5", cs, <|"BackendResponse" -> sessionStats,
+      "Detail" -> "lightweight regular owner requires an existing Acb or Rational anchor session"|>]];
+  physical = regularPhysicalChartSystem[cs];
+  physicalData = physicalClearedODEData[physical];
+  geometry = cppPersistentGeometry[physical];
+  wp = cfg["WorkingPrecision"];
+  inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
+  identityRecord = <|
+    "schema" -> "diffexp2-frame-independent-regular-equation-identity-v1",
+    "domain" -> domain, "dimension" -> d,
+    "physical_identity" -> physicalData["Identity"],
+    "center" -> RootReduce[physical["Center"]],
+    "chart_map" -> RootReduce[physical["ChartMap", "Scale"]],
+    "radius" -> If[physical["Radius"] === Infinity, Infinity,
+      RootReduce[physical["Radius"]]],
+    "prescriptions" -> Lookup[physical, "Prescriptions", {}]|>;
+  identity = "de2-equation-" <>
+    IntegerString[Hash[identityRecord, "SHA256"], 16, 64];
+  checkpointIdentity = "de2-native-physical-value-prototype-" <>
+    IntegerString[Hash[{identityRecord, req}, "SHA256"], 16, 64];
+  relativeAccuracy = cppRegularValueRelativeAccuracyMaxExact[];
+  Block[{$cppSerializationDomain = domain,
+      $cppSerializationSymbols = {}},
+    physicalPayload = cppPhysicalODEPayload[
+      physicalData, identity, inputDigits, physical];
+    localMetadata = cppNativeLocalMetadata[physical, 0, 0, 0,
+      inputDigits, checkpointIdentity]];
+  owner = DiffExp2`CppBackend`PreparePersistentRegularEquationOwner[
+    anchor, <|
+      "capability" ->
+        "frame-independent-regular-physical-equation-owner-v1",
+      "key" -> ("regular-equation:" <>
+        IntegerString[Hash[identityRecord, "SHA256"], 16, 64]),
+      "identity" -> identity, "dimension" -> d,
+      "geometry" -> geometry, "physical_ode" -> physicalPayload,
+      "relative_accuracy_max_exact" -> relativeAccuracy|>];
+  If[FailureQ[owner] || !AssociationQ[owner] ||
+      Lookup[owner, "Session", None] =!= Lookup[anchor, "Session",
+        Lookup[anchor, "session", None]] ||
+      !StringQ[Lookup[owner, "EquationOwner", None]] ||
+      !StringStartsQ[owner["EquationOwner"], "eq:"] ||
+      Lookup[owner, "EquationIdentity", None] =!= identity,
+    err["E5", cs, <|"BackendFailure" -> owner,
+      "Detail" -> "frame-independent regular equation-owner preparation lost its exact session or q/C identity"|>]];
+  <|"Type" -> "DiffExp2NativeRegularBasisOwner",
+    "OwnerKind" -> "FrameIndependentRegularPhysicalEquation",
+    "Session" -> owner["Session"],
+    "NativeEquationOwner" -> owner["EquationOwner"],
+    "ChartIdentity" -> owner["EquationIdentity"],
+    "EquationIdentity" -> owner["EquationIdentity"],
+    "PhysicalPayloadIdentity" -> owner["PhysicalPayloadIdentity"],
+    "ValueSolver" -> <|
+      "schema" -> "diffexp2-native-ordinary-physical-value-solver-v1",
+      "taylor_complete_max" -> req["TOrder"],
+      "metadata" -> localMetadata,
+      "relative_accuracy_max_exact" -> relativeAccuracy|>|>];
 
 sccAggregateDiagnostics[records_List, seq_Association,
     recombine_List] := Module[{diags, getLists, compensated},

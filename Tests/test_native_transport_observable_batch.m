@@ -428,14 +428,49 @@ ownerRun = If[FailureQ[ownerAtlas], ownerAtlas, catchDE2[
   DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
     ownerAtlas, {observable["limitLower", "owned-lower"]}, x,
     "MaxRefinementSteps" -> 1]]];
+ownerCounters = If[AssociationQ[ownerRun],
+  DiffExp2`CppBackend`PersistentSessionCounters[ownerRun["Atlas"]],
+  ownerRun];
 assert["owned deferred observable batch streams and compacts caller atlas",
   AssociationQ[ownerRun] && AssociationQ[ownerAtlas] &&
     !KeyExistsQ[ownerAtlas["Lower"], "ChartSystems"] &&
     !KeyExistsQ[ownerAtlas["Upper"], "ChartSystems"] &&
     !KeyExistsQ[ownerRun["Atlas", "Lower"], "ChartSystems"] &&
     !KeyExistsQ[ownerRun["Atlas", "Upper"], "ChartSystems"]];
+assert["owned deferred stream measures physical_selection_and_releases_owner",
+  AssociationQ[ownerCounters] &&
+    Lookup[ownerCounters,
+      "transport_physical_value_hop_attempts", -1] === 1 &&
+    Lookup[ownerCounters, "transport_physical_value_hop_successes", -1] +
+      Lookup[ownerCounters,
+        "transport_physical_value_hop_ineligible", -1] === 1 &&
+    Lookup[ownerCounters, "transport_framed_basis_hops", -1] ===
+      Lookup[ownerCounters,
+        "transport_physical_value_hop_ineligible", -2] &&
+    Lookup[ownerCounters, "regular_equation_owners", -1] === 0 &&
+    !KeyExistsQ[ownerRun["Atlas", "Lower"], "OwnerRecords"] &&
+    !KeyExistsQ[ownerRun["Atlas", "Upper"], "OwnerRecords"]];
 If[AssociationQ[ownerRun],
   DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[ownerRun]];
+
+releasedOwnerAtlas = catchDE2[
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    system, {one}, lowerPlan, streamUpperPlan, "Threads" -> 1,
+    "Integrand" -> {{1 + Global`eps}, x},
+    "TargetCompleteMax" -> 0, "DeferReceivingBases" -> True]];
+releasedOwnerSession = If[AssociationQ[releasedOwnerAtlas],
+  releasedOwnerAtlas["Session"], None];
+releasedOwnerResponse = If[AssociationQ[releasedOwnerAtlas],
+  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[
+    releasedOwnerAtlas], releasedOwnerAtlas];
+releasedOwnerCounters = If[StringQ[releasedOwnerSession],
+  DiffExp2`CppBackend`PersistentSessionCounters[releasedOwnerSession],
+  releasedOwnerResponse];
+assert["unexecuted deferred atlas release drops_public_equation_owner",
+  AssociationQ[releasedOwnerResponse] &&
+    Lookup[releasedOwnerResponse, "Failures", {"missing"}] === {} &&
+    AssociationQ[releasedOwnerCounters] &&
+    Lookup[releasedOwnerCounters, "regular_equation_owners", -1] === 0];
 
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];

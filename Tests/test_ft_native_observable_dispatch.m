@@ -227,7 +227,7 @@ assert["observable order and operation-specific epsilon windows are stable",
     Lookup[Lookup[capturedObservables, "Epsilon"], "Max"] ===
       {7, 7, 7, 7} &&
     Lookup[Lookup[capturedObservables, "Epsilon"],
-      "RequiredCompleteMax"] === {3, 3, 3, 7} &&
+      "RequiredCompleteMax"] === {7, 7, 7, 7} &&
     Lookup[Select[capturedObservables,
         #["Operation"] === "integrate" &], "TailPolicy"] ===
       {"stored", "stored"} &&

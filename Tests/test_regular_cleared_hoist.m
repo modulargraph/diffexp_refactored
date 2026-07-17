@@ -100,13 +100,16 @@ assert["regular_global_clear_preserves_exact_analytic_regulator",
 gaugeSys = <|"Matrix" -> {{0, x^-2}, {0, 0}}, "Variable" -> x|>;
 gaugeChart = catchDE2[DiffExp2`Solve`PrepareChart[gaugeSys,
   chart[0, 1, "singular-gauged-legacy"]]];
+DiffExp2`Solve`Private`$clearedSymbolicLegacyCache = <||>;
 gaugeWrapped = catchDE2[DiffExp2`Solve`Private`clearedSymbolic[gaugeChart]];
 gaugeLegacy = catchDE2[
   DiffExp2`Solve`Private`clearedSymbolicLegacy[gaugeChart]];
 assert["singular_gauged_clearing_path_unchanged",
   !FailureQ[gaugeWrapped] && !FailureQ[gaugeLegacy] &&
     !TrueQ[DiffExp2`Solve`Private`regularIdentityFrameQ[gaugeChart]] &&
-    gaugeWrapped === gaugeLegacy];
+    gaugeWrapped === gaugeLegacy &&
+    Length[
+      DiffExp2`Solve`Private`$clearedSymbolicLegacyCache] === 1];
 
 (* Pole depth cannot be cached by system alone.  The same A=x/eps has a
    t^2/eps first lag at center 0 but a t/eps first lag at center 1. *)
@@ -127,14 +130,16 @@ assert["regular_pole_depth_is_chart_specific_counterexample",
 cacheCountsBefore = Length /@ {
   DiffExp2`Solve`Private`$systemClearRegistry,
   DiffExp2`Solve`Private`$globalClearedCache,
-  DiffExp2`Solve`Private`$chartClearedCache};
+  DiffExp2`Solve`Private`$chartClearedCache,
+  DiffExp2`Solve`Private`$clearedSymbolicLegacyCache};
 DiffExp2`Solve`ClearSolveCaches[];
 cacheCountsAfter = Length /@ {
   DiffExp2`Solve`Private`$systemClearRegistry,
   DiffExp2`Solve`Private`$globalClearedCache,
-  DiffExp2`Solve`Private`$chartClearedCache};
+  DiffExp2`Solve`Private`$chartClearedCache,
+  DiffExp2`Solve`Private`$clearedSymbolicLegacyCache};
 assert["regular_global_clear_cache_keys_and_lifetime",
-  Min[cacheCountsBefore] >= 2 && cacheCountsAfter === {0, 0, 0}];
+  Min[cacheCountsBefore] >= 1 && cacheCountsAfter === {0, 0, 0, 0}];
 
 (* PrepareChart's own cache must not alias systems that happen to have the
    same expression matrix but use distinct independent-variable symbols. *)

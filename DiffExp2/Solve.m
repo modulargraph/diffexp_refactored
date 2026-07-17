@@ -1094,7 +1094,10 @@ epsValuation[e_, eps_] := Module[{c = Cancel[Together[e]]},
    before the d0(eps=0) check: a global 1/eps coefficient is a legitimate
    Laurent multiplier, while a moving factor such as (t-eps) still fails
    E3 because its primitive d0 vanishes at eps=0. *)
-clearedSymbolicLegacy[cs_] := Module[
+$clearedSymbolicLegacyCache = <||>;
+$clearedSymbolicLegacyCacheMax = 32;
+
+clearedSymbolicLegacyCore[cs_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"], den,
    denCoeffs, denContent, num, d0, dD, dN, dExpr, NhatExpr,
    phaseQ, phaseTime, phase, identityVQ, rightPolynomial,
@@ -1174,6 +1177,38 @@ clearedSymbolicLegacy[cs_] := Module[
       "nhat-final-canonicalize"]]];
   <|"dExpr" -> dExpr, "NhatExpr" -> NhatExpr,
     "dD" -> dD, "dN" -> dN|>];
+
+(* Singular SCC planning asks for the same exact spectral and physical
+   operators from several independent proof layers: seed-halo costing,
+   homogeneous frame planning, and request capture.  The operator is a pure
+   function of the exact reduced theta matrix and spectral frame, so retain a
+   small content-checked cache instead of repeating algebraic coefficient
+   extraction and RootReduce work at every layer. *)
+clearedSymbolicLegacy[cs_Association] := Module[
+  {signature, key, cached, data},
+  signature = {"cleared-symbolic-legacy-v1",
+    cs["ChartVar"], cs["SystemSize"], cs["ThetaMatrix"],
+    cs["V"], cs["VInv"],
+    TrueQ[Lookup[cs["IndicialData"], "Regular", False]],
+    TrueQ[$disableIdentityNhatShortcut],
+    TrueQ[$disablePolynomialNhatTransform]};
+  key = Hash[signature, "SHA256"];
+  cached = Lookup[$clearedSymbolicLegacyCache, key, None];
+  If[AssociationQ[cached] &&
+      SameQ[Lookup[cached, "Signature", None], signature],
+    Return[cached["Data"], Module]];
+  If[cached =!= None,
+    err["E6", cs, <|"CacheKey" -> key,
+      "Detail" ->
+        "legacy cleared-symbolic cache key collided with unequal exact input"|>]];
+  data = clearedSymbolicLegacyCore[cs];
+  If[Length[$clearedSymbolicLegacyCache] >=
+      $clearedSymbolicLegacyCacheMax,
+    KeyDropFrom[$clearedSymbolicLegacyCache,
+      First[Keys[$clearedSymbolicLegacyCache]]]];
+  AssociateTo[$clearedSymbolicLegacyCache, key ->
+    <|"Signature" -> signature, "Data" -> data|>];
+  data];
 
 $disableGlobalClearedHoist = False;
 $disableIdentityNhatShortcut = False;
@@ -3728,7 +3763,8 @@ PrewarmHomogeneousBatch[chartSystems_List, req_Association] := Module[
 
 ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
-  $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
+  $chartClearedCache = <||>; $clearedSymbolicLegacyCache = <||>;
+  $exactSCCStructureCache = <||>;
   $physicalClearedODECache = <||>; $cppStaticOperatorCache = <||>;
   $nativeSCCCompositeCache = <||>;
   $nativeSCCCompositeReservedCapacity = 0;
@@ -3740,7 +3776,8 @@ ClearSolveCaches[] := ($pcCache = <||>; $shCache = <||>; $shSysTag = None;
 DropWolframPreparationCaches[] := Module[{},
   $pcCache = <||>; $shCache = <||>; $shSysTag = None;
   $systemClearRegistry = <||>; $globalClearedCache = <||>;
-  $chartClearedCache = <||>; $exactSCCStructureCache = <||>;
+  $chartClearedCache = <||>; $clearedSymbolicLegacyCache = <||>;
+  $exactSCCStructureCache = <||>;
   $physicalClearedODECache = <||>; $cppStaticOperatorCache = <||>;
   $nativeSCCCompositeCache = <||>;
   $nativeSCCCompositeReservedCapacity = 0;

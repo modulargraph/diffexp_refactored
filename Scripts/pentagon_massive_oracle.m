@@ -43,7 +43,7 @@ pmCoefficientDensity[n_Integer?NonNegative, x_List] /; Length[x] === 5 :=
       {k, 0, n}]/f^3];
 
 pmCubeCoefficientExpression[n_Integer?NonNegative] :=
-  pmStickJacobian[Global`pmu1, Global`pmu2, Global`pmu3]
+  pmStickJacobian[Global`pmu1, Global`pmu2, Global`pmu3] *
     pmCoefficientDensity[n,
       pmSimplexPoint[Global`pmu1, Global`pmu2, Global`pmu3, Global`pmu4]];
 

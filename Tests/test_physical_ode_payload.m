@@ -82,6 +82,31 @@ assert["physical_ode_global_affine_clear_equals_legacy_local_equation",
   Length[DiffExp2`Solve`Private`$globalClearedCache] === 1 &&
   Length[DiffExp2`Solve`Private`$chartClearedCache] === 1];
 
+(* Physical ownership is in the original-master frame, so the same global
+   affine q/C pair remains valid when the recurrence chart is singular and
+   has a nonidentity gauge or spectral frame. *)
+singularSystem = <|"Matrix" -> {{(1 + eps)/x}}, "Variable" -> x|>;
+singularChart = <|"ChartVar" -> t, "Center" -> 0, "Scale" -> 2,
+  "Radius" -> 1, "LocalRadius" -> 1, "Prescriptions" -> {}|>;
+singularChartSystem = catchDE2[
+  DiffExp2`Solve`PrepareChart[singularSystem, singularChart]];
+singularHoistedData = If[AssociationQ[singularChartSystem],
+  catchDE2[
+    DiffExp2`Solve`Private`physicalClearedODEData[singularChartSystem]],
+  singularChartSystem];
+singularLegacyData = If[AssociationQ[singularChartSystem],
+  Block[{DiffExp2`Solve`Private`$disableGlobalClearedHoist = True},
+    catchDE2[
+      DiffExp2`Solve`Private`physicalClearedODEData[
+        singularChartSystem]]],
+  singularChartSystem];
+assert["physical_ode_global_affine_clear_covers_singular_chart",
+  AssociationQ[singularHoistedData] &&
+  AssociationQ[singularLegacyData] &&
+  !TrueQ[
+    DiffExp2`Solve`Private`regularIdentityFrameQ[singularChartSystem]] &&
+  samePhysicalEquationQ[singularHoistedData, singularLegacyData]];
+
 owner = "de2-operator-wolfram-physical-smoke";
 payload = Block[{
     DiffExp2`Solve`Private`$cppSerializationDomain = "rational",

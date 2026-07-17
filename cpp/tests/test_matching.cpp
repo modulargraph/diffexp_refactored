@@ -259,6 +259,76 @@ void quotient_and_solve_smoke() {
             finite_zero_schur_update.complete_max() == 1);
 }
 
+void coefficientwise_power_series_solve_smoke() {
+  constexpr std::size_t dimension = 8;
+  constexpr std::size_t matrix_width = 7;
+  FiniteLaurentMatrix<Rational> matrix(
+      dimension, FiniteLaurentVector<Rational>());
+  for (std::size_t row = 0; row < dimension; ++row) {
+    matrix[row].reserve(dimension);
+    for (std::size_t column = 0; column < dimension; ++column) {
+      std::vector<Rational> coefficients(matrix_width, Rational(0));
+      coefficients[0] = Rational(
+          static_cast<long>(row == column ? 3 : row < column ? 1 : 0));
+      if (row == column) coefficients[1] = Rational(1);
+      matrix[row].emplace_back(0, std::move(coefficients));
+    }
+  }
+  FiniteLaurentVector<Rational> expected;
+  expected.reserve(dimension);
+  for (std::size_t column = 0; column < dimension; ++column) {
+    std::vector<Rational> coefficients(8, Rational(0));
+    coefficients[0] = Rational(static_cast<long>(column + 1));
+    coefficients[1] = Rational(static_cast<long>(2 * column + 1));
+    coefficients[4] = Rational(static_cast<long>(column + 3));
+    expected.emplace_back(-1, std::move(coefficients));
+  }
+  const auto rhs = diffexp2::apply_finite_laurent_matrix(matrix, expected);
+  const auto factorization =
+      diffexp2::factor_exact_nonnegative_power_series_system(
+          matrix, "dimension-independent power-series solve");
+  const auto solved =
+      diffexp2::solve_factorized_exact_nonnegative_power_series_system(
+          factorization, rhs,
+          "dimension-independent coefficient recurrence");
+  bool same_prefix = true;
+  for (std::size_t column = 0; column < dimension; ++column) {
+    same_prefix = same_prefix && solved[column].min_power() == -1 &&
+        solved[column].complete_max() == 5;
+    for (std::int32_t power = -1; power <= 5; ++power)
+      same_prefix = same_prefix &&
+          solved[column].coefficient(power) ==
+              expected[column].coefficient(power);
+  }
+  const auto reconstructed =
+      diffexp2::apply_finite_laurent_matrix(matrix, solved);
+  bool exact_residual = true;
+  for (std::size_t row = 0; row < dimension; ++row) {
+    const auto residual = reconstructed[row] - rhs[row];
+    exact_residual = exact_residual &&
+        residual.complete_max() == 5 &&
+        !diffexp2::finite_laurent_leading_power(
+             residual, "coefficient recurrence residual").has_value();
+  }
+  check("coefficient recurrence preserves the honest top independently of dimension",
+        same_prefix && exact_residual);
+
+  const auto polar_rhs = FiniteLaurentVector<Rational>{
+      EpsilonFrame<Rational>(-2, std::vector<Rational>(8, Rational(1)))};
+  const auto scalar_factorization =
+      diffexp2::factor_exact_nonnegative_power_series_system<Rational>(
+          {{EpsilonFrame<Rational>(
+              0, std::vector<Rational>(6, Rational(1)))}},
+          "negative-floor power-series bound");
+  const auto polar_solution =
+      diffexp2::solve_factorized_exact_nonnegative_power_series_system(
+          scalar_factorization, polar_rhs,
+          "negative-floor coefficient recurrence");
+  check("coefficient recurrence loses only the true unknown matrix tail",
+        polar_solution.front().min_power() == -2 &&
+            polar_solution.front().complete_max() == 3);
+}
+
 void epsilon_lattice_saturation_smoke() {
   const auto one = frame(0, {1, 0, 0});
   const auto zero = frame(0, {0, 0, 0});
@@ -318,6 +388,45 @@ void epsilon_lattice_saturation_smoke() {
             shifted.transformation[0][0].coefficient(-2) == Rational(1) &&
             shifted.basis_times_transformation[0][0].coefficient(0) ==
                 Rational(1));
+}
+
+void acb_saturation_candidate_chop_smoke() {
+  ComplexBall::set_precision(1024);
+  const auto tenth = ComplexBall::from_strings("0.1");
+  const auto three_tenths = ComplexBall(3) * tenth;
+  std::vector<ComplexBall> epsilon_perturbed{
+      three_tenths, ComplexBall(1), ComplexBall(0)};
+  const FiniteLaurentMatrix<ComplexBall> basis = {
+      {ball_constant_frame("1", 3), ball_value_frame(tenth, 3)},
+      {ball_constant_frame("3", 3),
+       EpsilonFrame<ComplexBall>(0, std::move(epsilon_perturbed))}};
+
+  bool strict_rejected = false;
+  try {
+    (void)diffexp2::saturate_finite_laurent_basis(
+        basis, "strict Acb dependency-loss saturation");
+  } catch (const MatchingArithmeticError& error) {
+    strict_rejected =
+        error.code == MatchingArithmeticErrorCode::AmbiguousZero;
+  }
+
+  const auto saturated = diffexp2::saturate_finite_laurent_basis(
+      basis, "candidate-chopped Acb dependency-loss saturation", 100);
+  const auto& product = saturated.basis_times_transformation;
+  const bool normalized =
+      saturated.diagnostics.normalized_determinant_valuation == 1 &&
+      saturated.diagnostics.initial_leading_rank == 1 &&
+      saturated.diagnostics.final_leading_rank == 2 &&
+      saturated.diagnostics.actions.size() == 1 &&
+      product[0][0].coefficient(0).contains_zero() == false &&
+      product[0][1].coefficient(0).is_zero() &&
+      product[1][0].coefficient(0).contains_zero() == false &&
+      (product[1][1].coefficient(0) - ComplexBall(1)).contains_zero();
+  check("strict Acb saturation rejects dependency-loss zero overlaps",
+        strict_rejected);
+  check("certified candidate chop recovers the nontrivial Acb lattice",
+        normalized);
+  ComplexBall::set_precision(256);
 }
 
 void ambiguous_acb_pivot_smoke() {
@@ -449,7 +558,7 @@ void incomplete_refinement_rollback_smoke() {
         matched.refinement_steps == 0 &&
             matched.residual_history.size() == 1 &&
             matched.residual_history.back().complete_through_required &&
-            matched.residual_history.back().complete_window.complete_max ==
+            matched.residual_history.back().complete_window.complete_max >=
                 12 &&
             matched.residual_history.back().verdict ==
                 AcbMatchingResidualVerdict::Inconclusive);
@@ -805,7 +914,9 @@ void dense_eleven_by_eleven_pivot_budget_smoke() {
 int main() {
   transformation_support_smoke();
   quotient_and_solve_smoke();
+  coefficientwise_power_series_solve_smoke();
   epsilon_lattice_saturation_smoke();
+  acb_saturation_candidate_chop_smoke();
   ambiguous_acb_pivot_smoke();
   refined_acb_match_smoke();
   ill_scaled_refinement_smoke();

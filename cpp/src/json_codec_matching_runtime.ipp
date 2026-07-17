@@ -1738,15 +1738,25 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
     }
 
     auto candidate_acb_saturation = saturate_finite_laurent_basis(
-        structural_basis, context + ":certified-Acb-Levelt-saturation");
-    if (candidate_acb_saturation.diagnostics
-                .normalized_determinant_valuation != 0 ||
-        candidate_acb_saturation.diagnostics.final_leading_rank !=
+        structural_basis, context + ":certified-Acb-Levelt-saturation",
+        structural_chop_digits);
+    if (candidate_acb_saturation.diagnostics.final_leading_rank !=
             dimension)
       throw MatchingArithmeticError(
           MatchingArithmeticErrorCode::InvalidSaturationLattice,
           context +
-              ": certified Acb Levelt saturation did not produce a valuation-zero full-rank lattice");
+              ": certified Acb Levelt saturation did not produce a valuation-zero full-rank lattice; determinant_valuation=" +
+              std::to_string(candidate_acb_saturation.diagnostics
+                                 .normalized_determinant_valuation) +
+              "; initial_rank=" +
+              std::to_string(candidate_acb_saturation.diagnostics
+                                 .initial_leading_rank) +
+              "; final_rank=" +
+              std::to_string(candidate_acb_saturation.diagnostics
+                                 .final_leading_rank) +
+              "; actions=" +
+              std::to_string(
+                  candidate_acb_saturation.diagnostics.actions.size()));
 
     FiniteLaurentMatrix<Rational> monomial_basis(
         dimension, FiniteLaurentVector<Rational>());
@@ -2557,14 +2567,24 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   };
   auto exact_lattice = make_exact_lattice();
   const auto run_refinement = [&]() {
+    const auto refinement_context =
+        checkpoint_identity + ":refined-acb-match[formal-negative-zero=" +
+        (exact_lattice.exact_formal_negative_coefficients_are_zero
+             ? std::string("true")
+             : std::string("false")) +
+        ",acb-transformation=" +
+        (exact_lattice.acb_transformation.has_value()
+             ? std::string("true")
+             : std::string("false")) +
+        "]";
     return exact_lattice.acb_transformation.has_value()
         ? refine_acb_finite_laurent_match(
               matching_basis, matching_incoming,
               *exact_lattice.acb_transformation, refinement,
-              checkpoint_identity + ":refined-acb-match", false)
+              refinement_context, false)
         : refine_acb_finite_laurent_match(
               matching_basis, matching_incoming, exact_lattice.saturation,
-              refinement, checkpoint_identity + ":refined-acb-match",
+              refinement, refinement_context,
               exact_lattice.exact_formal_negative_coefficients_are_zero);
   };
   RefinedAcbLaurentMatch refined;

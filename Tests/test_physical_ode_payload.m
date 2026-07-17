@@ -40,10 +40,24 @@ assert["physical_ode_retains_rational_epsilon_C",
 assert["physical_ode_cache_full_identity_hit",
   Length[DiffExp2`Solve`Private`$physicalClearedODECache] === 1];
 
+physicalEntry[e_Association] := If[TrueQ[e["Zero"]], 0,
+  eps^e["Valuation"]*e["P"]/e["Q"]];
+physicalQPolynomial[d_Association] := Sum[
+  physicalEntry[d["Q"][[j]]]*t^(j - 1), {j, Length[d["Q"]]}];
+physicalCPolynomial[d_Association] := Sum[
+  Map[physicalEntry, d["C"][[j]], {2}]*t^(j - 1),
+  {j, Length[d["C"]]}];
+samePhysicalEquationQ[a_Association, b_Association] := AllTrue[
+  Flatten[Map[Cancel[Together[#]] &,
+    physicalQPolynomial[a]*physicalCPolynomial[b] -
+      physicalQPolynomial[b]*physicalCPolynomial[a], {2}]],
+  # === 0 &];
+
 (* A regular chart belongs to an exact registered input system.  Its local
-   physical equation is just the affine image of the global cleared pair;
-   prove that the fast path is coefficientwise identical to the independent
-   legacy LCM/GCD construction, including the content-addressed identity. *)
+   physical equation is just the affine image of the global cleared pair.
+   The fast path may retain a harmless coefficient-field unit that the
+   independent legacy LCM/GCD construction removes, so compare q1 C2=q2 C1
+   rather than a particular scalar normalization. *)
 x = Global`x;
 system = <|"Matrix" ->
     {{(1 + eps)/((1 - eps) (1 - 2 x)), 1/(1 - x)},
@@ -62,8 +76,9 @@ legacyData = If[AssociationQ[physicalChart],
     catchDE2[
       DiffExp2`Solve`Private`physicalClearedODEData[physicalChart]]],
   physicalChart];
-assert["physical_ode_global_affine_clear_equals_legacy_local_clear",
-  AssociationQ[hoistedData] && hoistedData === legacyData &&
+assert["physical_ode_global_affine_clear_equals_legacy_local_equation",
+  AssociationQ[hoistedData] && AssociationQ[legacyData] &&
+  samePhysicalEquationQ[hoistedData, legacyData] &&
   Length[DiffExp2`Solve`Private`$globalClearedCache] === 1 &&
   Length[DiffExp2`Solve`Private`$chartClearedCache] === 1];
 

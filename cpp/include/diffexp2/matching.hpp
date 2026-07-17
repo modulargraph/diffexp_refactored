@@ -2569,6 +2569,90 @@ project_acb_residual_to_laurent_floor(
   return projected;
 }
 
+// Matching weights are candidates whose authority comes from the residual,
+// not from the particular numerical solve that proposed them.  A singular
+// Laurent change of coordinates can consume several *upper* coefficients
+// while forming F*T even though those coefficients cancel again in the
+// physical weights T*y.  Extend the candidate problem with zero-radius zeros
+// so the proposal solve can carry those cancellations to completion.  This
+// extension must never be passed to residual certification: coefficients
+// above the input CompleteMax remain mathematically unknown.
+inline EpsilonFrame<ComplexBall> zero_extend_acb_match_candidate(
+    const EpsilonFrame<ComplexBall>& frame, std::size_t additional,
+    const std::string& context) {
+  if (additional == 0) return frame;
+  const auto extension_context =
+      context + ": candidate upper extension";
+  const auto maximum = checked_power(
+      static_cast<std::int64_t>(frame.complete_max()) +
+          static_cast<std::int64_t>(additional),
+      extension_context.c_str());
+  auto coefficients = frame.coefficients();
+  coefficients.resize(
+      EpsilonWindow{frame.min_power(), maximum}.width(), ComplexBall(0));
+  return EpsilonFrame<ComplexBall>(
+      {frame.min_power(), maximum}, std::move(coefficients));
+}
+
+inline FiniteLaurentVector<ComplexBall> zero_extend_acb_match_candidate(
+    const FiniteLaurentVector<ComplexBall>& vector, std::size_t additional,
+    const std::string& context) {
+  FiniteLaurentVector<ComplexBall> result;
+  result.reserve(vector.size());
+  for (const auto& frame : vector)
+    result.push_back(zero_extend_acb_match_candidate(
+        frame, additional, context));
+  return result;
+}
+
+inline FiniteLaurentMatrix<ComplexBall> zero_extend_acb_match_candidate(
+    const FiniteLaurentMatrix<ComplexBall>& matrix, std::size_t additional,
+    const std::string& context) {
+  FiniteLaurentMatrix<ComplexBall> result(matrix.size());
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    result[row].reserve(matrix[row].size());
+    for (const auto& frame : matrix[row])
+      result[row].push_back(zero_extend_acb_match_candidate(
+          frame, additional, context));
+  }
+  return result;
+}
+
+inline FiniteLaurentVector<ComplexBall>
+canonicalize_acb_match_candidate(
+    const FiniteLaurentVector<ComplexBall>& vector, int chop_digits,
+    const std::string& context) {
+  FiniteLaurentVector<ComplexBall> result;
+  result.reserve(vector.size());
+  for (std::size_t row = 0; row < vector.size(); ++row) {
+    auto coefficients = vector[row].coefficients();
+    for (auto& coefficient : coefficients)
+      coefficient =
+          ScalarTraits<ComplexBall>::canonicalized(coefficient, chop_digits);
+    result.push_back(canonicalize_certified_or_preserve_ambiguous(
+        EpsilonFrame<ComplexBall>(
+            vector[row].window(), std::move(coefficients)),
+        context, row));
+  }
+  return result;
+}
+
+inline EpsilonFrame<ComplexBall> truncate_acb_match_candidate(
+    const EpsilonFrame<ComplexBall>& frame, std::int32_t requested_top) {
+  if (frame.complete_max() <= requested_top) return frame;
+  if (frame.min_power() > requested_top)
+    return EpsilonFrame<ComplexBall>::zero(requested_top);
+  return frame.truncated(requested_top);
+}
+
+inline FiniteLaurentVector<ComplexBall> truncate_acb_match_candidate(
+    FiniteLaurentVector<ComplexBall> vector,
+    std::int32_t requested_top) {
+  for (auto& frame : vector)
+    frame = truncate_acb_match_candidate(frame, requested_top);
+  return vector;
+}
+
 inline void require_complete_exact_saturation_record(
     const EpsilonLatticeSaturationResult<Rational>& record,
     std::size_t dimension, const std::string& context) {
@@ -2631,8 +2715,56 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::InvalidSaturationLattice,
         context + ": Acb saturation transformation is not square");
-  auto transformed_basis =
+  const auto transformed_basis =
       right_multiply_finite_by_exact_laurent(basis, transformation);
+
+  std::int32_t transformation_minimum = 0;
+  bool identity_transformation = true;
+  for (const auto& row : transformation)
+    for (const auto& polynomial : row)
+      if (const auto minimum = polynomial.minimum_power();
+          minimum.has_value())
+        transformation_minimum =
+            std::min(transformation_minimum, *minimum);
+  for (std::size_t row = 0; row < dimension; ++row)
+    for (std::size_t column = 0; column < dimension; ++column) {
+      const auto& polynomial = transformation[row][column];
+      if (row != column) {
+        identity_transformation =
+            identity_transformation && polynomial.is_zero();
+        continue;
+      }
+      identity_transformation = identity_transformation &&
+          polynomial.terms().size() == 1 &&
+          polynomial.terms().begin()->first == 0 &&
+          (polynomial.terms().begin()->second - ComplexBall(1)).is_zero();
+    }
+  const auto transformation_depth = static_cast<std::size_t>(
+      -static_cast<std::int64_t>(transformation_minimum));
+  bool negative_input_support = false;
+  for (const auto& row : basis)
+    for (const auto& frame : row)
+      negative_input_support =
+          negative_input_support || frame.min_power() < 0;
+  // A nonnegative identity problem keeps the ordinary fast path byte-for-byte
+  // finite.  An identity problem with a represented Laurent tail needs one
+  // proposal coefficient to avoid losing that tail in the candidate solve.
+  // A nontrivial T gets enough private proposal width to carry its polar
+  // shift (if any) and a small guard for the quotient solve.  If this is ever
+  // insufficient, the untouched physical residual remains incomplete and
+  // requests real input width; no padded coefficient can authorize success.
+  const auto candidate_padding = identity_transformation
+      ? (negative_input_support ? std::size_t{1} : std::size_t{0})
+      : transformation_depth + std::size_t{3};
+  auto candidate_basis =
+      matching_detail::zero_extend_acb_match_candidate(
+          transformed_basis, candidate_padding,
+          context + ": speculative transformed basis");
+  const auto candidate_right_hand_side =
+      matching_detail::zero_extend_acb_match_candidate(
+          right_hand_side, candidate_padding,
+          context + ": speculative transformed rhs");
+
   std::optional<ExactNonnegativePowerSeriesFactorization<ComplexBall>>
       power_series_factorization;
   std::optional<FiniteLaurentFactorization<ComplexBall>>
@@ -2640,13 +2772,13 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
   if (exact_formal_negative_coefficients_are_zero)
     power_series_factorization =
         factor_exact_nonnegative_power_series_system(
-            std::move(transformed_basis),
+            std::move(candidate_basis),
             context +
                 ": certified transformed power-series factorization");
   else
     laurent_factorization =
         factor_preconditioned_acb_finite_laurent_system(
-            transformed_basis,
+            candidate_basis,
             context + ": certified transformed factorization");
   const auto solve = [&](const FiniteLaurentVector<ComplexBall>& rhs,
                          const std::string& solve_context) {
@@ -2657,7 +2789,7 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
               *laurent_factorization, rhs, solve_context);
   };
   auto transformed_weights = solve(
-      right_hand_side, context + ": initial solve");
+      candidate_right_hand_side, context + ": initial candidate solve");
 
   RefinedAcbLaurentMatch result;
   result.factorization_preconditioner =
@@ -2694,13 +2826,12 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
   std::size_t last_complete_refinement_steps = 0;
   std::size_t last_complete_history_size = 0;
   for (;;) {
-    auto weights = apply_exact_laurent_matrix(
-        transformation, transformed_weights);
+    auto weights = matching_detail::canonicalize_acb_match_candidate(
+        apply_exact_laurent_matrix(transformation, transformed_weights),
+        100, context + ": physical candidate weights");
     auto residual = matching_detail::evaluate_acb_matching_residual(
-        power_series_factorization.has_value()
-            ? power_series_factorization->matrix
-            : transformed_basis,
-        transformed_weights,
+        basis,
+        weights,
         right_hand_side, options,
         context + ": residual#" +
             std::to_string(result.residual_history.size()) +
@@ -2771,6 +2902,9 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     auto correction_rhs = matching_detail::project_acb_residual_to_laurent_floor(
         result.residual, latest.complete_window.min_power,
         context + ": residual correction projection");
+    correction_rhs = matching_detail::zero_extend_acb_match_candidate(
+        correction_rhs, candidate_padding,
+        context + ": speculative correction rhs");
     auto correction = solve(
         correction_rhs,
         context + ": correction#" +
@@ -2780,7 +2914,19 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
           transformed_weights[column] + correction[column];
     ++result.refinement_steps;
   }
-  result.transformed_weights = std::move(transformed_weights);
+  auto published_weight_top = right_hand_side.front().complete_max();
+  for (const auto& row : right_hand_side)
+    published_weight_top =
+        std::min(published_weight_top, row.complete_max());
+  result.weights = matching_detail::truncate_acb_match_candidate(
+      std::move(result.weights), published_weight_top);
+  const auto transformed_published_top = matching_detail::checked_power(
+      static_cast<std::int64_t>(published_weight_top) -
+          transformation_minimum,
+      "published transformed matching-weight maximum");
+  result.transformed_weights =
+      matching_detail::truncate_acb_match_candidate(
+          std::move(transformed_weights), transformed_published_top);
   return result;
 }
 

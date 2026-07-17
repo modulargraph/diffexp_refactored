@@ -1879,20 +1879,6 @@ void canonicalize_acb_formal_coefficients(
   }
 }
 
-std::int32_t acb_formal_value_floor(
-    const LocalSolution<ComplexBall>& solution, std::int32_t chop_digits) {
-  std::map<ExactFormalKey, ComplexBall> coefficients;
-  add_acb_formal_below(solution, 0, std::nullopt, coefficients);
-  canonicalize_acb_formal_coefficients(
-      coefficients, chop_digits, "native Acb source value floor");
-  if (coefficients.empty()) return 0;
-  return std::min_element(
-      coefficients.begin(), coefficients.end(),
-      [](const auto& left, const auto& right) {
-        return left.first.epsilon_power < right.first.epsilon_power;
-      })->first.epsilon_power;
-}
-
 void certify_acb_pseudo_value_floor(
     const LocalSolution<ComplexBall>& solution,
     std::int32_t allowed_floor, const Rational& source_a,
@@ -1913,7 +1899,7 @@ void certify_acb_pseudo_value_floor(
   // Name the existing one-SCC Rational-shadow fallback explicitly so the
   // bridge can retry without weakening or chopping this certificate.
   throw RecurrenceError(
-      "E5", "Acb CASE-P compensation leaves a certified value pole below the input floor at eps^" +
+      "E5", "Acb CASE-P compensation leaves a certified value pole below the work frame at eps^" +
                 std::to_string(witness.epsilon_power) + ", t_power=" +
                 witness.t_power + ", log_power=" +
                 std::to_string(witness.log_power) + ", component=" +
@@ -1989,24 +1975,13 @@ rational_shadow_formal_saturation(
       rectangular, context + ":full-formal-module");
 }
 
-std::int32_t exact_formal_value_floor(
-    const LocalSolution<Rational>& solution) {
-  std::map<ExactFormalKey, Rational> coefficients;
-  add_exact_formal_below(solution, 0, std::nullopt, coefficients);
-  if (coefficients.empty()) return 0;
-  return std::min_element(
-      coefficients.begin(), coefficients.end(),
-      [](const auto& left, const auto& right) {
-        return left.first.epsilon_power < right.first.epsilon_power;
-      })->first.epsilon_power;
-}
-
 void certify_exact_pseudo_value_floor(
     const LocalSolution<Rational>& solution, std::int32_t allowed_floor,
     const Rational& source_a, std::uint32_t source_taylor_max) {
-  // Homogeneous targets pass floor 0.  Particulars pass the exact formal
-  // floor already present in their source tag, so CASE-P may preserve a
-  // genuine dimensional pole but may never manufacture a deeper one.
+  // CASE-P compensation may introduce genuine dimensional poles, including
+  // poles absent from the inhomogeneous source.  The parent SCC residual is
+  // the proof of correctness; this local guard only prevents compensation
+  // from silently escaping the bounded work frame.
   const auto checked_top = std::min<std::int32_t>(0, allowed_floor);
   std::map<ExactFormalKey, Rational> coefficients;
   add_exact_formal_below(
@@ -2031,7 +2006,7 @@ void certify_exact_pseudo_value_floor(
     }
   }
   throw RecurrenceError(
-      "E5", "exact CASE-P compensation leaves a value pole below the input floor at eps^" +
+      "E5", "exact CASE-P compensation leaves a value pole below the work frame at eps^" +
                 std::to_string(witness.epsilon_power) + ", t_power=" +
                 witness.t_power + ", log_power=" +
                 std::to_string(witness.log_power) + ", component=" +
@@ -2039,6 +2014,52 @@ void certify_exact_pseudo_value_floor(
                 coefficients.begin()->second.str() + ", sectors=[" +
                 sector_witnesses + "]",
       solution.epsilon.min_power, witness.epsilon_power);
+}
+
+std::string exact_local_sector_summary(
+    const LocalSolution<Rational>& solution) {
+  validate_local_solution(solution, false);
+  std::string result = "{";
+  constexpr std::size_t kSectorLimit = 32;
+  for (std::size_t sector_index = 0;
+       sector_index < solution.sectors.size() &&
+       sector_index < kSectorLimit; ++sector_index) {
+    if (sector_index != 0) result += ";";
+    const auto& sector = solution.sectors[sector_index];
+    result += "a=" + sector.a.canonical + ",b=" + sector.b.canonical +
+        ",p=" + std::to_string(sector.log_power);
+    std::size_t nonzero = 0;
+    std::string first;
+    for (std::int32_t power = solution.epsilon.min_power;
+         power <= solution.epsilon.complete_max; ++power) {
+      const auto epsilon_index = static_cast<std::size_t>(
+          power - solution.epsilon.min_power);
+      for (std::uint32_t n = 0;
+           n <= solution.taylor_complete_max; ++n)
+        for (std::uint32_t component = 0;
+             component < solution.dimension; ++component) {
+          const auto& coefficient = sector.coefficients[
+              local_algebra_detail::flat_index(
+                  epsilon_index, n, component, solution.taylor_width(),
+                  solution.dimension)];
+          if (coefficient.is_zero()) continue;
+          ++nonzero;
+          if (first.empty())
+            first = "@" + std::to_string(n) + "," +
+                std::to_string(power) + "," +
+                std::to_string(component) + "=" +
+                scc_completeness_detail::bounded_rational_witness(
+                    coefficient);
+        }
+    }
+    result += ",nz=" + std::to_string(nonzero);
+    if (!first.empty()) result += first;
+  }
+  if (solution.sectors.size() > kSectorLimit)
+    result += ";...[sectors=" +
+        std::to_string(solution.sectors.size()) + "]";
+  result += "}";
+  return result;
 }
 
 template <typename Scalar>
@@ -2224,6 +2245,7 @@ class PseudoCompensator {
   const LocalSolution<Scalar>& homogeneous_target(
       std::uint32_t component, const json::object& prototype_run,
       const json::object& prototype_metadata,
+      std::int32_t allowed_value_floor,
       NativeLocalDiagnostics& diagnostics) {
     if (const auto found = homogeneous_cache_.find(component);
         found != homogeneous_cache_.end())
@@ -2262,7 +2284,8 @@ class PseudoCompensator {
                 chart_, indicial_, block_index_, target_identity,
                 target_cache_);
             auto solved = target_builder.solve_impl(
-                run, metadata, std::nullopt, 0, target_diagnostics);
+                run, metadata, std::nullopt, allowed_value_floor,
+                target_diagnostics);
             solved.solution.checkpoint_identity = target_identity;
             validate_local_solution(solved.solution, false);
             return CachedPseudoTarget<Scalar>{
@@ -2310,7 +2333,8 @@ class PseudoCompensator {
             "E5", "CASE-P hit target and gamma dimensions disagree");
       for (std::size_t row = 0; row < hit.columns.size(); ++row) {
         const auto& target = homogeneous_target(
-            hit.columns[row], run, metadata, diagnostics);
+            hit.columns[row], run, metadata, allowed_value_floor,
+            diagnostics);
         auto multiplier = polar_weight(hit, row, target);
         if (!multiplier.has_value()) continue;
         auto product = multiply_prepared_rational(
@@ -2480,7 +2504,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                 seed_run,
                 as_object(seed_request.at("metadata"),
                           "native SCC seed metadata"),
-                std::nullopt, 0)
+                std::nullopt, work_.work_min)
           : blocks_[seed_block].chart->solve_native(
                 seed_run, as_object(seed_request.at("metadata"),
                                     "native SCC seed metadata"));
@@ -2626,7 +2650,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               *entry, target_block, false, &group, true,
               &validated_schedules);
           require_source_tag_matches_run(group, target_run);
-          const auto allowed_floor = exact_formal_value_floor(group);
           auto source_data = local_solution_source_data(
               group, as_u32(target_run.at("nmax"), "target nmax"),
               as_u32(target_run.at("p"), "target log maximum"),
@@ -2636,7 +2659,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               target_run,
               as_object(entry->at("metadata"),
                         "native SCC target metadata"),
-              std::move(source_data), allowed_floor);
+              std::move(source_data), work_.work_min);
           validate_block_result(target_native, target_block, false, true);
           blocks_[target_block].chart->record_native_local_success(
               target_native.diagnostics);
@@ -3340,8 +3363,29 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             "deferred SCC completeness has no nonempty claimed epsilon window");
       const EpsilonWindow claimed{
           parent.epsilon.min_power, claimed_complete_max};
-      const auto residual = certify_scc_parent_exact_formal_residual(
-          *physical_equation_, parent, claimed, work_.public_t_order);
+      SCCFormalResidualCertificate residual;
+      try {
+        residual = certify_scc_parent_exact_formal_residual(
+            *physical_equation_, parent, claimed, work_.public_t_order);
+      } catch (const std::domain_error& error) {
+        std::string state_summary;
+        for (std::uint32_t block = 0; block < state.size(); ++block) {
+          if (!state[block].has_value()) continue;
+          auto physical = block_gauge_transform(
+              *state[block], block, true,
+              "failed-parent-residual:block:" + std::to_string(block));
+          if (!state_summary.empty()) state_summary += ";";
+          state_summary += "block=" + std::to_string(block) +
+              ",reduced=" + exact_local_sector_summary(*state[block]) +
+              ",physical=" + exact_local_sector_summary(physical);
+        }
+        throw std::domain_error(
+            "SCC parent completeness failed for basis_index=" +
+            std::to_string(basis_index) + ", seed_block=" +
+            std::to_string(seed_block) + ", seed_local_component=" +
+            std::to_string(seed_local_component) + ": " + error.what() +
+            "; state=[" + state_summary + "]");
+      }
       const auto uniqueness = certify_column_uniqueness_path(
           seed_block, seed_local_component, basis_index,
           regular_singular_execution, reachable, expected_targets, state,
@@ -3488,7 +3532,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               seed_run,
               as_object(seed_request.at("metadata"),
                         "native Acb SCC seed metadata"),
-              std::nullopt, 0)
+              std::nullopt, work_.work_min)
         : blocks_[seed_block].chart->solve_native(
               seed_run, as_object(seed_request.at("metadata"),
                                   "native Acb SCC seed metadata"));
@@ -3627,8 +3671,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         const auto& target_run = checked_column_run(
             *entry, target_block, false, &group, true);
         require_source_tag_matches_run(group, target_run);
-        const auto allowed_floor = acb_formal_value_floor(
-            group, blocks_[target_block].chart->chop_digits());
         auto source_data = local_solution_source_data(
             group, as_u32(target_run.at("nmax"), "target nmax"),
             as_u32(target_run.at("p"), "target log maximum"),
@@ -3638,7 +3680,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             target_run,
             as_object(entry->at("metadata"),
                       "native Acb SCC target metadata"),
-            std::move(source_data), allowed_floor);
+            std::move(source_data), work_.work_min);
         validate_block_result(target_native, target_block, false, true);
         blocks_[target_block].chart->record_native_local_success(
             target_native.diagnostics);

@@ -11,20 +11,43 @@ If[!TrueQ[DiffExp2`CppBackend`BackendAvailableQ[]],
 SetAttributes[catchDE2, HoldFirst];
 catchDE2[expr_] := Quiet[Catch[expr, "DiffExp2Error"]];
 
-decodeEvaluation[evaluated_] := Module[{decoded},
+decodeEvaluation[evaluated_] := Module[
+  {decoded, min, max, dimension},
   If[!AssociationQ[evaluated] ||
       Lookup[evaluated, "status", "error"] =!= "ok",
-    Return[{}, Module]];
+    Return[<||>, Module]];
+  min = Lookup[evaluated["value"], "min", 1];
+  max = Lookup[evaluated["value"], "max", 0];
+  dimension = Lookup[evaluated["value"], "dimension", 0];
   decoded = DiffExp2`CppBackend`DecodeScalars[
     evaluated["value", "coefficients"], 60];
-  If[ListQ[decoded] && AllTrue[decoded, NumericQ], decoded, {}]];
+  If[!IntegerQ[min] || !IntegerQ[max] || min > max ||
+      !IntegerQ[dimension] || dimension < 1 ||
+      !ListQ[decoded] || !AllTrue[decoded, NumericQ] ||
+      Length[decoded] =!= (max - min + 1) dimension,
+    Return[<||>, Module]];
+  <|"Min" -> min, "Max" -> max, "Dimension" -> dimension,
+    "Table" -> ArrayReshape[
+      decoded, {max - min + 1, dimension}]|>];
+
+frameDifference[left_Association, right_Association] := Module[
+  {min = Max[left["Min"], right["Min"]],
+   max = Min[left["Max"], right["Max"]], l, r},
+  If[left["Dimension"] =!= right["Dimension"] || min > max,
+    Return[Infinity, Module]];
+  l = Flatten[left["Table"][[
+    min - left["Min"] + 1 ;; max - left["Min"] + 1]]];
+  r = Flatten[right["Table"][[
+    min - right["Min"] + 1 ;; max - right["Min"] + 1]]];
+  If[l === {} || Length[l] =!= Length[r], Infinity,
+    Max[Abs[N[l - r, 50]]]]];
 
 x = Global`x; t = Global`t; eps = Global`eps;
 lambda = 1/2 + eps/3;
 system = <|"Matrix" -> {{lambda/x, 1/x}, {1, lambda/x}},
   "Variable" -> x|>;
 chart = <|"ChartVar" -> t, "Center" -> 0, "Scale" -> 1,
-  "Radius" -> 2, "LocalRadius" -> 2,
+  "Radius" -> Sqrt[2], "LocalRadius" -> Sqrt[2],
   "Name" -> "native-single-scc-singular-jordan",
   "Prescriptions" -> {}, "UseSCCSkeleton" -> True|>;
 request = <|"EpsWindow" -> <|"Min" -> -3, "CompleteMax" -> 0|>,
@@ -88,17 +111,67 @@ domainOK[result_, capability_] := Module[
   Length[evaluations] === 2 &&
   AllTrue[evaluations,
     AssociationQ[#] && Lookup[#, "status", "error"] === "ok" &] &&
-  Length[values] === 2 && AllTrue[values, Length[#] > 0 &]];
+  Length[values] === 2 && AllTrue[values, AssociationQ[#] &&
+    # =!= <||> &]];
 
 rationalCapability =
   "exact-rational-regular-singular-jordan-block-dag-column-v2";
 acbCapability = "acb-regular-singular-jordan-block-dag-column-v1";
 parity = If[AllTrue[Join[rational["Values"], acb["Values"]],
-    ListQ[#] && # =!= {} &],
-  Max[Abs[N[Flatten[acb["Values"] - rational["Values"]], 50]]] < 10^-40,
+    AssociationQ[#] && # =!= <||> &],
+  Max[MapThread[frameDifference,
+    {acb["Values"], rational["Values"]}]] < 10^-40,
   False];
+
+(* A Jordan/log column can honestly retain eps^-1 even when the public
+   request starts at eps^0.  The Rational shadow and Acb owner still share
+   the same compact work rectangle; specialization must preserve that useful
+   lower Laurent coefficient instead of demanding an identical public
+   minimum. *)
+shadowRequest = <|
+  "EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> 0|>,
+  "TOrder" -> 2|>;
+shadowCs = catchDE2[DiffExp2`Solve`PrepareChart[system, chart]];
+targetPrepared = Block[
+  {DiffExp2`Solve`Private`$cppExactDomain = False},
+  catchDE2[DiffExp2`Solve`PrepareNativeSCCComposite[
+    shadowCs, shadowRequest]]];
+targetStats = If[AssociationQ[targetPrepared],
+  DiffExp2`CppBackend`PersistentSCCStatistics[targetPrepared],
+  targetPrepared];
+sourceBasis = Block[
+  {DiffExp2`Solve`Private`$cppExactDomain = True},
+  catchDE2[DiffExp2`Solve`SolveNativeSCCBasis[
+    shadowCs, shadowRequest, 2]]];
+shadowIdentity = If[AssociationQ[targetStats],
+  Lookup[targetStats, "rational_shadow_identity", None], None];
+shadowImports = If[AssociationQ[sourceBasis] &&
+    StringQ[shadowIdentity],
+  MapIndexed[
+    DiffExp2`CppBackend`SpecializePersistentRationalSCCColumn[
+      #1, targetPrepared, shadowIdentity,
+      "single-scc-extra-lower-shadow:" <>
+        ToString[First[#2]]] &,
+    sourceBasis["Columns"]], {}];
+shadowSourceHasExtraLower = AssociationQ[sourceBasis] &&
+  AnyTrue[Lookup[sourceBasis, "Columns", {}],
+    Lookup[Lookup[#, "EpsWindow", <||>], "Min", 0] <
+      shadowRequest["EpsWindow", "Min"] &];
+shadowImportsOK = Length[shadowImports] === 2 &&
+  AllTrue[shadowImports, AssociationQ[#] &&
+    Lookup[#, "status", "error"] === "ok" &&
+    Lookup[#, "specialization_capability", None] ===
+      "exact-rational-shadow-to-acb-local-v1" &];
+If[AssociationQ[sourceBasis],
+  Quiet[DiffExp2`CppBackend`ClosePersistentSession[sourceBasis]]];
+Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+  Select[shadowImports, AssociationQ]];
+If[AssociationQ[targetPrepared],
+  Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[targetPrepared]]];
+
 ok = domainOK[rational, rationalCapability] &&
-  domainOK[acb, acbCapability] && TrueQ[parity];
+  domainOK[acb, acbCapability] && TrueQ[parity] &&
+  TrueQ[shadowSourceHasExtraLower] && TrueQ[shadowImportsOK];
 
 DiffExp2`CppBackend`ClearPersistentSessions[];
 
@@ -107,5 +180,7 @@ If[TrueQ[ok],
   Print["FAIL: ", InputForm[<|
     "Rational" -> KeyTake[rational, {"Chart", "Stats", "Basis"}],
     "Acb" -> KeyTake[acb, {"Chart", "Stats", "Basis"}],
-    "Parity" -> parity|>]];
+    "Parity" -> parity,
+    "ShadowSourceHasExtraLower" -> shadowSourceHasExtraLower,
+    "ShadowImports" -> shadowImports|>]];
   Exit[1]];

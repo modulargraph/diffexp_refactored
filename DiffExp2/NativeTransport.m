@@ -806,6 +806,9 @@ nativeAcbShadowTriggerPrintRecordQ[record_] :=
   !FreeQ[record,
     text_String /; nativeAcbRationalShadowTriggerTextQ[text], Infinity];
 
+nativeDE2ErrorPrintRecordQ[record_] :=
+  MatchQ[record, HoldComplete["DiffExp2 error ", ___]];
+
 nativeAcbCasePFailureQ[failure_] := Module[{},
   If[!FailureQ[failure], Return[False, Module]];
   !FreeQ[Unevaluated[failure],
@@ -1000,7 +1003,7 @@ nativeReceivingBasis[system_Association, req_Association, threads_,
           nativeReplayPrintRecords[probePrints]; attempt,
         nativeAcbCasePFailureQ[attempt],
           nativeReplayPrintRecords[
-            Select[probePrints, !nativeAcbShadowTriggerPrintRecordQ[#] &]];
+            Select[probePrints, !nativeDE2ErrorPrintRecordQ[#] &]];
           nativeRationalShadowBasis[system, req, threads, targetSCC],
         True,
           nativeReplayPrintRecords[probePrints];

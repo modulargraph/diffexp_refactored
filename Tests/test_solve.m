@@ -606,11 +606,17 @@ M023 = {{-1 + eps, 0, 0}, {-2, -1 + 3 eps, 0},
   {0, 0, -2 + 2 eps}};
 cs23 = pc[mkSys[M023/x + {{0, 1, 0}, {0, 0, r23c}, {0, 0, 0}}],
   mkChart[0, 1, "su23_singular_vinv_certificate"]];
+cert23 = DiffExp2`Solve`Private`epsilonRegularPrincipalCertificate[cs23, 8];
 r23 = catchDE2[sc[cs23, req[0, 3, 8]]];
 col23 = If[FailureQ[r23], None, SelectFirst[r23["Basis", "Columns"],
   MemberQ[tagsOf[#], {-2, 2, 0}] &]];
 oldFrame23 = If[col23 === None, None,
   DiffExp2`Solve`Private`spectralProbeValue[cs23, col23, 1/3]];
+assert["su23_positive_case_p_uses_epsilon_regular_principal_recurrence",
+  TrueQ[cert23["Eligible"]] &&
+  !TrueQ[cert23["PositiveTaylorNonresonant"]] &&
+  cert23["ExceptionalLayerPolicy"] ===
+    "exact-affine-jordan-spectral-transaction"];
 assert["su23_collision_certificate_uses_reduced_physical_frame",
   !FailureQ[r23] && col23 =!= None &&
   r23["Basis", "Diagnostics", "PseudoCollisionsCompensated"] === True &&
@@ -687,6 +693,26 @@ assert["su21_positive_gauge_valuation_range",
   Length[gd21["Coefficients"]] === 2 &&
   gd21["Coefficients"][[1]] === {{1}} &&
   gd21["Coefficients"][[2]] === {{0}}];
+
+(* SU-29: native singular SCC retries are edge-specific.  In particular an
+   exact nonzero parent residual is a mathematical failure, not permission to
+   expand toward the old scalar terminal frame. *)
+lowerFrameFailure29 = Failure["DiffExp2", <|"ID" -> "E4",
+  "Detail" -> "completed recurrence layer has genuine lower-epsilon content in its cancellation guard"|>];
+upperFrameFailure29 = Failure["DiffExp2", <|"ID" -> "E4",
+  "Detail" -> "SCC parent formal residual needs coefficients above the retained epsilon reservoir"|>];
+residualFailure29 = Failure["DiffExp2", <|"ID" -> "E5",
+  "Detail" -> "SCC parent exact formal residual is nonzero"|>];
+assert["su29_native_scc_bounded_retry_classifier",
+  DiffExp2`Solve`Private`sccNativeFrameFailureKind[
+    lowerFrameFailure29] === "Lower" &&
+  DiffExp2`Solve`Private`sccNativeFrameFailureKind[
+    upperFrameFailure29] === "Upper" &&
+  DiffExp2`Solve`Private`sccNativeFrameFailureKind[
+    residualFailure29] === None &&
+  DiffExp2`Solve`Private`$nativeSCCFrameRetryLimit === 5 &&
+  DiffExp2`Solve`Private`$nativeSCCFrameLowerExtraMax === 16 &&
+  DiffExp2`Solve`Private`$nativeSCCFrameTopHaloMax === 32];
 
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Print["Some tests FAILED."]; Exit[1],

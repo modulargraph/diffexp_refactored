@@ -12,6 +12,7 @@ using diffexp2::JordanBlock;
 using diffexp2::MatrixEntry;
 using diffexp2::MatrixShift;
 using diffexp2::PreparedLag;
+using diffexp2::PreparedMatrix;
 using diffexp2::Rational;
 using diffexp2::RecurrenceProblem;
 using diffexp2::RecurrenceSolver;
@@ -173,6 +174,89 @@ void test_resonant_jordan_log_ceiling_compatibility() {
   }
   check("resonant Jordan ladder rejects a hidden cross-log inconsistency",
         loud);
+}
+
+PreparedMatrix<Rational> identity_prepared_matrix(std::uint32_t dimension) {
+  PreparedMatrix<Rational> matrix;
+  matrix.identity = true;
+  matrix.valuations.assign(
+      static_cast<std::size_t>(dimension) * dimension,
+      diffexp2::kCompleteInfinity);
+  MatrixShift<Rational> identity;
+  identity.shift = 0;
+  for (std::uint32_t component = 0; component < dimension; ++component) {
+    identity.entries.push_back(
+        MatrixEntry<Rational>{component, component, Rational(1)});
+    matrix.valuations[
+        static_cast<std::size_t>(component) * dimension + component] = 0;
+  }
+  matrix.polynomial.push_back(std::move(identity));
+  return matrix;
+}
+
+RecurrenceProblem<Rational> pseudo_jordan_problem(
+    bool epsilon_regular_principal) {
+  RecurrenceProblem<Rational> problem;
+  problem.dimension = 2;
+  problem.nmax = 1;
+  problem.log_max = 0;
+  problem.frame_base = -3;
+  problem.frame_width = 7;
+  problem.has_initial = true;
+  problem.a_target = Rational(-1);
+  problem.b_target = Rational(0);
+  problem.a_shift_min = 0;
+  problem.a_shifts = {Rational(-1), Rational(0)};
+  problem.d_lags = {{{0, Rational(1)}}};
+  problem.d0_inverse_scalar = Rational(1);
+  problem.blocks = {JordanBlock{{0, 1}}};
+  problem.schedule = {
+      {{StepCase::Resonant, Rational(0), Rational(0)}},
+      {{StepCase::Pseudo, Rational(0), Rational(1)}}};
+
+  problem.nhat_lags.resize(2);
+  problem.nhat_lags[0].valuations.assign(
+      4, diffexp2::kCompleteInfinity);
+  problem.nhat_lags[1] = identity_prepared_matrix(2);
+
+  problem.initial.assign(
+      static_cast<std::size_t>(problem.dimension) * problem.frame_width,
+      Rational(0));
+  problem.initial[
+      static_cast<std::size_t>(-problem.frame_base)] = Rational(1);
+  problem.initial_validity.assign(problem.dimension, 3);
+
+  problem.epsilon_regular_principal = epsilon_regular_principal;
+  if (epsilon_regular_principal) {
+    PreparedLag<Rational> spectral_principal;
+    spectral_principal.valuations.assign(
+        4, diffexp2::kCompleteInfinity);
+    problem.spectral_principal_lag = std::move(spectral_principal);
+    problem.spectral_source_matrix = identity_prepared_matrix(2);
+    problem.assembly_matrix = identity_prepared_matrix(2);
+  }
+  return problem;
+}
+
+void test_epsilon_regular_pseudo_jordan_transaction() {
+  const auto ordinary =
+      RecurrenceSolver<Rational>(pseudo_jordan_problem(false)).run();
+  const auto epsilon_regular =
+      RecurrenceSolver<Rational>(pseudo_jordan_problem(true)).run();
+  const bool same_hits =
+      ordinary.hits.size() == 1 && epsilon_regular.hits.size() == 1 &&
+      ordinary.hits.front().n == epsilon_regular.hits.front().n &&
+      ordinary.hits.front().columns ==
+          epsilon_regular.hits.front().columns &&
+      ordinary.hits.front().delta_b ==
+          epsilon_regular.hits.front().delta_b &&
+      ordinary.hits.front().gamma_frames ==
+          epsilon_regular.hits.front().gamma_frames &&
+      ordinary.hits.front().gamma_validity ==
+          epsilon_regular.hits.front().gamma_validity;
+  check("epsilon-regular exceptional layer preserves a size-two CASE-P Jordan transaction",
+        ordinary.u == epsilon_regular.u &&
+            ordinary.validity == epsilon_regular.validity && same_hits);
 }
 
 void test_json_error_contract() {
@@ -376,6 +460,7 @@ int main() {
   test_epsilon_denominator();
   test_lower_frame_guard();
   test_resonant_jordan_log_ceiling_compatibility();
+  test_epsilon_regular_pseudo_jordan_transaction();
   test_json_error_contract();
   test_malformed_tensor_is_typed_error();
   test_symbolic_rational_field();

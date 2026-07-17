@@ -378,7 +378,7 @@ json::object run_session_command(const json::object& root) {
           source->solution().epsilon.complete_max !=
               target_work.requested_max ||
           source->solution().epsilon.min_power <
-              target_work.requested_min ||
+              target_work.work_min ||
           source->solution().taylor_complete_max !=
               target_work.public_t_order)
         throw std::invalid_argument(

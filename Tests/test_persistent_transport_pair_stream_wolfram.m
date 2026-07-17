@@ -26,15 +26,27 @@ epsilon = <|"Min" -> -1, "Max" -> 2,
 observable = <|"Identity" -> "streamed-observable",
   "CheckpointIdentity" -> "streamed-observable-checkpoint",
   "CoefficientVector" -> {1}, "Epsilon" -> epsilon,
-  "TailPolicy" -> "stored"|>;
+  "TailPolicy" -> "stored", "MinimumEpsilonShift" -> -4|>;
 row[id_String] := <|
   "schema" -> "diffexp2-prepared-rational-local-row-v1",
   "columns" -> 1, "exact_identity" -> id, "entries" -> {}|>;
+recipe[id_String] := <|"ID" -> id,
+  "Shape" -> <|"EpsWindow" -> <|"Min" -> -1,
+      "CompleteMax" -> 7|>,
+    "TWindow" -> <|"CompleteMax" -> 4|>, "Dimension" -> 1|>|>;
+lowerSourceEpsilon = {
+  <|"Min" -> -5, "CompleteMax" -> 4|>,
+  <|"Min" -> 0, "CompleteMax" -> 2|>,
+  <|"Min" -> 0, "CompleteMax" -> 2|>};
+upperSourceEpsilon = {
+  <|"Min" -> 0, "CompleteMax" -> 2|>,
+  <|"Min" -> 0, "CompleteMax" -> 2|>};
 
-requests = {}; cacheClears = 0;
+requests = {}; cacheClears = 0; preparedWindows = {};
 result = Block[{
     DiffExp2`NativeTransport`Private`nativePrepareArmRecipeRow =
       Function[{recipe, ignoredCoefficients, ignoredVar, ignoredDomain},
+        AppendTo[preparedWindows, recipe["Shape", "EpsWindow"]];
         row[recipe["ID"]]],
     DiffExp2`NativeTransport`Private`nativeDropRationalMultiplierPreparationCache =
       Function[Null, cacheClears++; Null],
@@ -59,10 +71,10 @@ result = Block[{
           <|"status" -> "ok", "aborted" -> True|>]]},
   DiffExp2`NativeTransport`Private`nativeContractStoredPairObservableStreamed[
     lowerState, upperState, observable,
-    {<|"ID" -> "lower-0"|>, <|"ID" -> "lower-1"|>,
-      <|"ID" -> "lower-2"|>},
-    {<|"ID" -> "upper-0"|>, <|"ID" -> "upper-1"|>},
-    Global`x, "acb", "mock-root"]];
+    recipe /@ {"lower-0", "lower-1", "lower-2"},
+    recipe /@ {"upper-0", "upper-1"},
+    Global`x, "acb", "mock-root", lowerSourceEpsilon,
+    upperSourceEpsilon]];
 
 ops = Lookup[requests, "op"];
 adds = Select[requests,
@@ -86,6 +98,10 @@ assert["stream_adds_exactly_one_row_in_strict_lower_upper_order",
     Lookup[adds, "tile"] === {0, 1, 2, 0, 1} &&
     Lookup[Lookup[adds, "row"], "exact_identity"] ===
       {"lower-0", "lower-1", "lower-2", "upper-0", "upper-1"} &&
+    First[preparedWindows] ===
+      <|"Min" -> -1, "CompleteMax" -> 8|> &&
+    Rest[preparedWindows] === ConstantArray[
+      <|"Min" -> -1, "CompleteMax" -> 7|>, 4] &&
     AllTrue[adds, Sort[Keys[#]] === Sort[{"schema", "op", "session",
       "stream", "stream_checkpoint_identity", "side", "tile", "row"}] &] &&
     cacheClears >= 6,
@@ -114,10 +130,10 @@ failure = Block[{
           <|"status" -> "ok", "aborted" -> True|>]]},
   DiffExp2`NativeTransport`Private`nativeContractStoredPairObservableStreamed[
     lowerState, upperState, observable,
-    {<|"ID" -> "lower-0"|>, <|"ID" -> "lower-1"|>,
-      <|"ID" -> "lower-2"|>},
-    {<|"ID" -> "upper-0"|>, <|"ID" -> "upper-1"|>},
-    Global`x, "acb", "mock-failure-root"]];
+    recipe /@ {"lower-0", "lower-1", "lower-2"},
+    recipe /@ {"upper-0", "upper-1"},
+    Global`x, "acb", "mock-failure-root", lowerSourceEpsilon,
+    upperSourceEpsilon]];
 failureOps = Lookup[failureRequests, "op"];
 assert["stream_failure_aborts_once_and_never_finishes",
   Lookup[failure, "status", "ok"] === "error" &&

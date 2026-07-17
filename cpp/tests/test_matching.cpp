@@ -388,6 +388,32 @@ void epsilon_lattice_saturation_smoke() {
             shifted.transformation[0][0].coefficient(-2) == Rational(1) &&
             shifted.basis_times_transformation[0][0].coefficient(0) ==
                 Rational(1));
+
+  // The determinant of this confluent basis is 2 eps^3, although every
+  // entry is known only through eps^2.  Sequential exact saturation has
+  // enough local information to prove three divisions; expanding the
+  // original determinant in the common entrywise rectangle does not.
+  const FiniteLaurentMatrix<Rational> confluent = {
+      {frame(0, {1, 0, 0}), frame(0, {1, 0, 0}),
+       frame(0, {1, 0, 0})},
+      {frame(0, {0, 0, 0}), frame(0, {0, 1, 0}),
+       frame(0, {0, 2, 0})},
+      {frame(0, {0, 0, 0}), frame(0, {0, 0, 1}),
+       frame(0, {0, 0, 4})}};
+  const auto confluent_saturated =
+      diffexp2::saturate_finite_laurent_basis(
+          confluent, "confluent action-derived determinant witness");
+  check("exact saturation certifies determinant valuation beyond the common entry top",
+        confluent_saturated.diagnostics.actions.size() == 3 &&
+            confluent_saturated.diagnostics
+                    .normalized_determinant_valuation == 3 &&
+            confluent_saturated.diagnostics.normalized_determinant
+                    .min_power() == 3 &&
+            confluent_saturated.diagnostics.normalized_determinant
+                    .complete_max() == 3 &&
+            confluent_saturated.diagnostics.normalized_determinant
+                    .coefficient(3) == Rational(2) &&
+            confluent_saturated.diagnostics.final_leading_rank == 3);
 }
 
 void acb_saturation_candidate_chop_smoke() {

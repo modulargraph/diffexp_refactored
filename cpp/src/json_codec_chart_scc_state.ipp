@@ -2713,14 +2713,32 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           : combine_local_solutions(
                 embedded, checkpoint_identity + ":work-parent");
       require_work_local(parent, "combined parent work state");
+      auto retained_match_max = static_cast<std::int32_t>(
+          std::min<std::int64_t>(
+              parent.epsilon.complete_max,
+              work_.work_complete_max));
+      if (!aggregate.requires_parent_completeness_certificate &&
+          aggregate.top_valid != kCompleteInfinity)
+        retained_match_max =
+            std::min(retained_match_max, aggregate.top_valid);
+      if (retained_match_max < work_.requested_max)
+        throw std::domain_error(
+            "exact SCC column does not retain the requested public epsilon maximum");
       const auto parent_completeness = certify_parent_completeness(
           parent, aggregate, seed_block, seed_local_component, basis_index,
-          work_.requested_max, regular_singular_execution, reachable,
+          retained_match_max, regular_singular_execution, reachable,
           expected_targets, state, validated_schedules);
-      if (parent_completeness.has_value())
-        aggregate.top_valid = work_.requested_max;
+      if (parent_completeness.has_value()) {
+        const auto& certified_epsilon = as_object(
+            parent_completeness->at("epsilon"),
+            "SCC parent completeness epsilon");
+        retained_match_max = as_i32(
+            certified_epsilon.at("complete_max"),
+            "SCC parent completeness maximum");
+        aggregate.top_valid = retained_match_max;
+      }
       parent = cap_composite_public_local(
-          parent, work_.requested_max, work_.public_t_order,
+          parent, retained_match_max, work_.public_t_order,
           retained_geometry_.chart, retained_geometry_.prescriptions,
           checkpoint_identity);
       validate_local_solution(parent, false);
@@ -3375,7 +3393,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       SCCFormalResidualCertificate residual;
       try {
         residual = certify_scc_parent_exact_formal_residual(
-            *physical_equation_, parent, claimed, work_.public_t_order);
+            *physical_equation_, parent, claimed, work_.public_t_order,
+            true);
       } catch (const std::domain_error& error) {
         std::string state_summary;
         for (std::uint32_t block = 0; block < state.size(); ++block) {
@@ -3399,6 +3418,17 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           seed_block, seed_local_component, basis_index,
           regular_singular_execution, reachable, expected_targets, state,
           schedules);
+      if (residual.epsilon.complete_max < work_.requested_max) {
+        // Recover the exact first failing coefficient in the public contract;
+        // the prefix probe above is used only to retain honest private
+        // reservoir beyond that mandatory edge.
+        (void)certify_scc_parent_exact_formal_residual(
+            *physical_equation_, parent,
+            {parent.epsilon.min_power, work_.requested_max},
+            work_.public_t_order);
+        throw std::logic_error(
+            "SCC parent prefix probe returned below the requested maximum without a residual witness");
+      }
       return json::object{
           {"schema", "diffexp2-scc-parent-exact-formal-completeness-v1"},
           {"owner_signature_identity",

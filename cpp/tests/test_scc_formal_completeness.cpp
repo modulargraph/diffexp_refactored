@@ -149,6 +149,14 @@ void test_formal_parent_certificate() {
   // exact nonzero coefficient eps^2 t, so no numerical tolerance can accept
   // it as completeness evidence.
   local.sectors.front().coefficients[5] = Rational(1);
+  const auto prefix =
+      diffexp2::certify_scc_parent_exact_formal_residual(
+          equation, local, {0, 2}, 1, true);
+  if (prefix.epsilon.min_power != 0 ||
+      prefix.epsilon.complete_max != 1 ||
+      prefix.coefficient_rows != 4)
+    throw std::runtime_error(
+        "formal parent prefix certificate did not stop before the first exact residual");
   bool corruption_rejected = false;
   try {
     (void)diffexp2::certify_scc_parent_exact_formal_residual(

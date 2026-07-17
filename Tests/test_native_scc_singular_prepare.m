@@ -355,8 +355,21 @@ pseudoEvaluated = If[AssociationQ[pseudoSolved],
     <|"exact" -> "1/4"|>, <|"tail_estimate" -> False|>, 60],
   pseudoSolved];
 pseudoFrame = decodeEvaluationFrame[pseudoEvaluated];
-shadowFrame = If[shadowEvaluated === {}, <||>,
-  decodeEvaluationFrame[First[shadowEvaluated]]];
+shadowFrames = decodeEvaluationFrame /@ shadowEvaluated;
+shadowFrame = If[shadowFrames === {}, <||>, First[shadowFrames]];
+shadowSourceSummaries = If[AssociationQ[shadowBasis],
+  Lookup[Lookup[shadowBasis, "Columns", {}], "NativeSummary", {}], {}];
+shadowSourceMaxima =
+  Lookup[shadowSourceSummaries, "epsilon_max", Missing["epsilon_max"]];
+shadowSourceTopValid =
+  Lookup[shadowSourceSummaries, "top_valid", Missing["top_valid"]];
+shadowFrameMaxima =
+  Lookup[shadowFrames, "Max", Missing["frame_max"]];
+shadowReservoirOk = Length[shadowFrames] === 4 &&
+  shadowFrameMaxima === shadowSourceMaxima &&
+  And @@ Thread[shadowSourceTopValid >= shadowSourceMaxima] &&
+  AllTrue[shadowFrameMaxima,
+    # > Lookup[pseudoRequest["EpsWindow"], "CompleteMax", Infinity] &];
 commonMin = If[AssociationQ[pseudoFrame] && AssociationQ[shadowFrame],
   Max[Lookup[pseudoFrame, "Min", 1], Lookup[shadowFrame, "Min", 1]], 1];
 commonMax = If[AssociationQ[pseudoFrame] && AssociationQ[shadowFrame],
@@ -389,6 +402,7 @@ shadowImportOk = Length[shadowImports] === 4 &&
   AllTrue[shadowEvaluated, AssociationQ[#] &&
       Lookup[#, "status", "error"] === "ok" &&
       Lookup[Lookup[#, "value", <||>], "dimension", None] === 4 &] &&
+  TrueQ[shadowReservoirOk] &&
   TrueQ[pseudoShadowParityOk];
 If[AssociationQ[pseudoSolved] &&
     StringQ[Lookup[pseudoSolved, "Local", None]],
@@ -441,6 +455,7 @@ If[!ok, Print[InputForm[{
   "PseudoEvaluatedStatus" -> Lookup[pseudoEvaluated, "status", None],
   "PseudoFrame" -> KeyDrop[pseudoFrame, "Table"],
   "ShadowFrame" -> KeyDrop[shadowFrame, "Table"],
+  "ShadowReservoirOk" -> shadowReservoirOk,
   "CommonFrame" -> {commonMin, commonMax},
   "PseudoShadowCommonValueLengths" ->
     {Length[pseudoCommonValue], Length[shadowCommonValue]},

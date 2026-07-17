@@ -1563,9 +1563,49 @@ saturate_rectangular_finite_laurent_basis(
   determinant_minor.reserve(size);
   for (const auto row : relation.pivot_rows)
     determinant_minor.push_back(initial_normalized[row]);
-  auto determinant = matching_detail::nonnegative_determinant_frame(
-      determinant_minor, context + ": pivot-row determinant witness",
-      certified_candidate_chop_digits);
+  const auto determinant = [&]() {
+    if constexpr (std::is_same_v<Scalar, Rational>) {
+      const auto action_valuation = matching_detail::checked_power(
+          static_cast<std::int64_t>(steps),
+          "exact saturation action determinant valuation");
+
+      FiniteLaurentMatrix<Scalar> final_minor;
+      final_minor.reserve(size);
+      for (const auto row : relation.pivot_rows)
+        final_minor.push_back(transformed[row]);
+      const auto final_determinant =
+          matching_detail::nonnegative_determinant_frame(
+              final_minor,
+              context + ": saturated pivot-row determinant witness",
+              certified_candidate_chop_digits);
+      const auto final_valuation = finite_laurent_leading_power(
+          final_determinant,
+          context + ": saturated pivot-row determinant");
+      if (!final_valuation.has_value() || *final_valuation != 0)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InvalidSaturationLattice,
+            context +
+                ": exact saturation reached full leading rank without a valuation-zero pivot minor");
+
+      // Every recorded elementary action replaces one target column by a
+      // null combination divided by epsilon, with exact target coefficient
+      // one.  Its determinant is therefore epsilon^-1.  The final
+      // valuation-zero minor and the action count prove that the same minor
+      // of the initial normalized basis has valuation `steps`; its leading
+      // coefficient is the final epsilon^0 determinant.  Use this action
+      // record as the exact certificate unconditionally: directly expanding
+      // the original rational determinant is redundant and can cause
+      // catastrophic coefficient swell even when its finite rectangle
+      // happens to reach the determinant valuation.
+      return EpsilonFrame<Scalar>(
+          {action_valuation, action_valuation},
+          {final_determinant.coefficient(0)});
+    } else {
+      return matching_detail::nonnegative_determinant_frame(
+          determinant_minor, context + ": pivot-row determinant witness",
+          certified_candidate_chop_digits);
+    }
+  }();
   const auto determinant_valuation = finite_laurent_leading_power(
       determinant, context + ": normalized pivot-row determinant");
   if (!determinant_valuation.has_value() || *determinant_valuation < 0)

@@ -418,7 +418,8 @@ inline void accumulate_multiplier(
 inline SCCFormalResidualCertificate certify_scc_parent_exact_formal_residual(
     const PreparedPhysicalClearedODE<Rational>& equation,
     const LocalSolution<Rational>& parent, EpsilonWindow claimed_epsilon,
-    std::uint32_t claimed_taylor_complete_max) {
+    std::uint32_t claimed_taylor_complete_max,
+    bool admit_maximal_exact_prefix = false) {
   physical_ode_detail::validate_ode(equation);
   local_detail::validate_local_solution(parent, true);
   if (parent.dimension != equation.dimension ||
@@ -476,6 +477,7 @@ inline SCCFormalResidualCertificate certify_scc_parent_exact_formal_residual(
     throw std::domain_error(
         "SCC parent formal residual has no exact formal sectors");
   std::size_t rows = 0;
+  std::optional<std::int32_t> first_nonzero_power;
   for (const auto& [tag, slab] : residual)
     for (std::uint32_t n = 0; n <= claimed_taylor_complete_max; ++n)
       for (std::int32_t power = claimed_epsilon.min_power;
@@ -484,6 +486,12 @@ inline SCCFormalResidualCertificate certify_scc_parent_exact_formal_residual(
              ++component) {
           ++rows;
           if (!slab[n].at(power, component).is_zero()) {
+            if (admit_maximal_exact_prefix) {
+              if (!first_nonzero_power.has_value() ||
+                  power < *first_nonzero_power)
+                first_nonzero_power = power;
+              continue;
+            }
             auto lhs = scc_completeness_detail::zero_vector(
                 claimed_epsilon, parent.dimension);
             auto rhs = scc_completeness_detail::zero_vector(
@@ -535,6 +543,21 @@ inline SCCFormalResidualCertificate certify_scc_parent_exact_formal_residual(
                     rhs.at(power, component)));
           }
         }
+  if (first_nonzero_power.has_value()) {
+    if (*first_nonzero_power <= claimed_epsilon.min_power) {
+      // Re-run the one-row strict claim to retain the detailed exact
+      // q-theta/C witness instead of returning an empty prefix.
+      return certify_scc_parent_exact_formal_residual(
+          equation, parent,
+          {claimed_epsilon.min_power, claimed_epsilon.min_power},
+          claimed_taylor_complete_max, false);
+    }
+    claimed_epsilon.complete_max =
+        static_cast<std::int32_t>(*first_nonzero_power - 1);
+    rows = residual.size() *
+        (static_cast<std::size_t>(claimed_taylor_complete_max) + 1) *
+        claimed_epsilon.width() * parent.dimension;
+  }
   return {claimed_epsilon, claimed_taylor_complete_max,
           residual.size(), rows};
 }

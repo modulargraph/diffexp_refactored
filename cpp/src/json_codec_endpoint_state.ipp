@@ -1,6 +1,7 @@
 template <typename Scalar>
 PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
-    const json::object& row, const LocalSolution<Scalar>& source) {
+    const json::object& row, const LocalSolution<Scalar>& source,
+    std::optional<std::int32_t> projected_complete_cap = std::nullopt) {
   require_exact_keys(row,
       {"schema", "columns", "exact_identity", "entries"},
       "prepared rational local row");
@@ -39,8 +40,45 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
 
     const auto& raw_multiplier = as_object(
         entry.at("multiplier"), "prepared rational local-row multiplier");
+    auto epsilon_width = source.epsilon.width();
+    if (projected_complete_cap.has_value()) {
+      const auto shift = as_i32(
+          raw_multiplier.at("epsilon_shift"),
+          "prepared rational local-row multiplier epsilon shift");
+      const auto term_min = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(source.epsilon.min_power) + shift,
+          "prepared rational local-row projected minimum");
+      const auto relative_needed =
+          static_cast<std::int64_t>(*projected_complete_cap) - term_min;
+      const auto required_width = relative_needed < 0
+          ? std::size_t{1}
+          : static_cast<std::size_t>(relative_needed) + 1;
+      epsilon_width = std::min(source.epsilon.width(), required_width);
+
+      const auto available_width = [&]() {
+        if (const auto* analytic =
+                raw_multiplier.if_contains("analytic_coefficients"))
+          return as_array(
+              *analytic,
+              "prepared rational local-row analytic coefficients").size();
+        return as_array(
+            raw_multiplier.at("kernels"),
+            "prepared rational local-row epsilon kernels").size();
+      }();
+      if (available_width < epsilon_width)
+        throw std::invalid_argument(
+            "prepared rational local-row multiplier consumer prefix is too short"
+            "; source_epsilon=[" +
+            std::to_string(source.epsilon.min_power) + "," +
+            std::to_string(source.epsilon.complete_max) + "]" +
+            "; epsilon_shift=" + std::to_string(shift) +
+            "; actual_width=" + std::to_string(available_width) +
+            "; required_width=" + std::to_string(epsilon_width) +
+            "; projected_complete_cap=" +
+            std::to_string(*projected_complete_cap));
+    }
     auto multiplier = parse_prepared_rational_taylor_multiplier<Scalar>(
-        raw_multiplier, source.epsilon.width(), source.taylor_width(), false,
+        raw_multiplier, epsilon_width, source.taylor_width(), false,
         "prepared rational local-row multiplier");
     if (multiplier.proven_zero)
       throw std::invalid_argument(
@@ -54,9 +92,11 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
 
 template <typename Scalar>
 PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
-    const json::value& raw, const LocalSolution<Scalar>& source) {
+    const json::value& raw, const LocalSolution<Scalar>& source,
+    std::optional<std::int32_t> projected_complete_cap = std::nullopt) {
   return parse_prepared_rational_row<Scalar>(
-      as_object(raw, "prepared rational local row"), source);
+      as_object(raw, "prepared rational local row"), source,
+      projected_complete_cap);
 }
 
 template <typename Scalar>
@@ -115,9 +155,11 @@ std::shared_ptr<StoredLocalBase> build_rational_row_local(
   const auto started = std::chrono::steady_clock::now();
   auto matrix = prepared_row_override != nullptr
       ? parse_prepared_rational_row<Scalar>(
-            *prepared_row_override, source->solution())
+            *prepared_row_override, source->solution(),
+            projection_complete_max)
       : parse_prepared_rational_row<Scalar>(
-            request.at("row"), source->solution());
+            request.at("row"), source->solution(),
+            projection_complete_max);
 
   json::array entry_provenance;
   entry_provenance.reserve(matrix.entries.size());

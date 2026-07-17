@@ -1244,11 +1244,11 @@ nativePreparationShape[local_Association, dimension_Integer] := Module[
       "Dimension" -> dimension|>,
     nativeLocalShape[local]]];
 
-(* A materialized receiving local owns the intersection of its incoming and
-   basis-column rectangles.  Preparing a multiplier against the union
-   envelope of the receiving basis is therefore conservative: the native row
-   parser accepts excess epsilon/Taylor kernels, while it rejects a row that
-   is even one coefficient too short for the live local. *)
+(* A receiving-basis union owns its public upper and Taylor envelopes.  Its
+   raw epsilon minimum is not always the physical matched-local minimum:
+   singular Laurent column weights can shift every stored basis column up.
+   nativeArmRowRecipes restores the atlas work floor after forming this
+   envelope. *)
 nativeBasisEnvelopeShape[basis_Association] := Module[
   {columns, shapes, dimensions, epsMin, epsMax, tMax,
    dimension = Lookup[basis, "Dimension", None]},
@@ -1271,9 +1271,14 @@ nativeBasisEnvelopeShape[basis_Association] := Module[
     "Dimension" -> First[dimensions]|>];
 
 nativeArmRowRecipes[atlas_Association, data_Association] := Module[
-  {systems, bases, shapes, charts},
+  {systems, bases, shapes, charts, workMin},
   systems = data["ChartSystems"];
   bases = Rest[data["Bases"]];
+  workMin = Lookup[Lookup[atlas["Request"], "EpsWindow", <||>],
+    "Min", None];
+  If[!IntegerQ[workMin],
+    err["E6", <|"Request" -> Lookup[atlas, "Request", None],
+      "Detail" -> "native arm row recipes require an exact atlas work minimum"|>]];
   shapes = Prepend[
     If[AllTrue[bases, AssociationQ],
       nativeBasisEnvelopeShape /@ bases,
@@ -1281,6 +1286,16 @@ nativeArmRowRecipes[atlas_Association, data_Association] := Module[
         "TWindow" -> <|"CompleteMax" -> atlas["Request", "TOrder"]|>,
         "Dimension" -> atlas["Dimension"]|>, Length[bases]]],
     nativePreparationShape[atlas["Anchor"], atlas["Dimension"]]];
+  (* A singular receiving basis may store every column with a positive
+     Laurent shift.  Matching applies the inverse column weights when it
+     materializes the physical tile source, so that source can begin at the
+     atlas work floor even though the raw basis envelope begins higher.
+     Observable multipliers are epsilon series relative to the physical
+     source minimum: restore this lower row here, without extending their
+     upper edge into the private matching reservoir. *)
+  shapes = Map[Function[shape, Join[shape, <|"EpsWindow" ->
+      Join[shape["EpsWindow"], <|"Min" ->
+        Min[shape["EpsWindow", "Min"], workMin]|>]|>]], shapes];
   If[Length[systems] =!= Length[shapes],
     err["E6", <|"ChartCount" -> Length[systems],
       "ShapeCount" -> Length[shapes],
@@ -1343,6 +1358,66 @@ nativePreparedRowsMinimumShift[rows_List] := Module[
     err["E5", <|"Detail" ->
       "prepared native integrand rows do not expose signed epsilon shifts"|>]];
   Min[shifts]];
+
+(* A retained transport state is the authority for the epsilon rectangle of
+   every live tile source.  Receiving-basis envelopes are only preparation
+   estimates: singular matching and physical-frame restoration can translate
+   their two edges by different amounts.  Keep this compact metadata outside
+   the row identity, then use it to prepare exactly the consumer-visible
+   multiplier prefix after the march. *)
+nativeTransportTileSourceEpsilonWindows[state_Association] := Module[
+  {raw = Lookup[state, "tile_source_epsilon",
+      Lookup[state, "TileSourceEpsilon", None]],
+   tiles = Lookup[state, "tiles", Lookup[state, "Tiles", None]]},
+  If[!IntegerQ[tiles] || tiles < 1 || !ListQ[raw] ||
+      Length[raw] =!= tiles ||
+      !AllTrue[raw, Function[window,
+        AssociationQ[window] &&
+          Sort[Keys[window]] === {"max", "min"} &&
+          IntegerQ[window["min"]] && IntegerQ[window["max"]] &&
+          window["min"] <= window["max"]]],
+    err["E5", <|"TransportState" ->
+        KeyTake[state, {"transport_state", "TransportState", "arm",
+          "Arm", "tiles", "Tiles", "tile_source_epsilon",
+          "TileSourceEpsilon"}],
+      "Detail" -> "retained transport state did not expose one exact epsilon window per tile source"|>]];
+  <|"Min" -> #["min"], "CompleteMax" -> #["max"]|> & /@ raw];
+
+nativeConsumerRowRecipe[recipe_Association, sourceWindow_Association,
+    observable_Association, primitiveHalo_Integer] := Module[
+  {shape = Lookup[recipe, "Shape", None], shapeWindow, sourceMin,
+   sourceMax, sourceWidth, shift, requestedMax, projectionCap,
+   relativeNeeded, requiredWidth, currentWidth, widenedMax},
+  shapeWindow = If[AssociationQ[shape],
+    Lookup[shape, "EpsWindow", None], None];
+  sourceMin = Lookup[sourceWindow, "Min", None];
+  sourceMax = Lookup[sourceWindow, "CompleteMax", None];
+  shift = Lookup[observable, "MinimumEpsilonShift", None];
+  requestedMax = Lookup[Lookup[observable, "Epsilon", <||>],
+    "Max", None];
+  If[!AssociationQ[shapeWindow] ||
+      !IntegerQ[Lookup[shapeWindow, "Min", None]] ||
+      !IntegerQ[Lookup[shapeWindow, "CompleteMax", None]] ||
+      shapeWindow["Min"] > shapeWindow["CompleteMax"] ||
+      !IntegerQ[sourceMin] || !IntegerQ[sourceMax] ||
+      sourceMin > sourceMax || !IntegerQ[shift] ||
+      !IntegerQ[requestedMax] || !IntegerQ[primitiveHalo] ||
+      primitiveHalo < 0,
+    err["E6", <|"Recipe" -> recipe, "SourceWindow" -> sourceWindow,
+      "Observable" -> KeyTake[observable,
+        {"Identity", "Epsilon", "MinimumEpsilonShift"}],
+      "PrimitiveHalo" -> primitiveHalo,
+      "Detail" -> "native consumer row sizing requires exact recipe, source, shift, and output windows"|>]];
+  sourceWidth = sourceMax - sourceMin + 1;
+  projectionCap = requestedMax + primitiveHalo;
+  relativeNeeded = projectionCap - (sourceMin + shift);
+  requiredWidth = Min[sourceWidth, Max[1, relativeNeeded + 1]];
+  currentWidth =
+    shapeWindow["CompleteMax"] - shapeWindow["Min"] + 1;
+  If[currentWidth >= requiredWidth, Return[recipe, Module]];
+  widenedMax = shapeWindow["Min"] + requiredWidth - 1;
+  Join[recipe, <|"Shape" -> Join[shape, <|"EpsWindow" ->
+      Join[shapeWindow, <|"CompleteMax" -> widenedMax|>]|>]|>]];
 
 nativeReleaseResponseHandles[atlas_Association, response_] := Module[
   {session = Lookup[atlas, "Session", None], arms, summaries, lines,
@@ -1873,7 +1948,8 @@ nativePairStreamObservableMetadata[observable_Association] :=
 nativeContractStoredPairObservableStreamed[lowerState_Association,
     upperState_Association, observable_Association,
     lowerRecipes_List, upperRecipes_List, var_Symbol, domain_String,
-    checkpointRoot_String] := Module[
+    checkpointRoot_String, lowerSourceEpsilon_List,
+    upperSourceEpsilon_List] := Module[
   {stream = None, response, row = None, completed = False, output,
    tag = Unique["nativePairTileStream"], cleanup},
   cleanup[] := Module[{},
@@ -1895,7 +1971,9 @@ nativeContractStoredPairObservableStreamed[lowerState_Association,
         Throw[stream, tag]];
       Do[
         nativeStageTiming["paired-row-prepare-start side=lower tile=", tile];
-        row = nativePrepareArmRecipeRow[lowerRecipes[[tile]],
+        row = nativePrepareArmRecipeRow[nativeConsumerRowRecipe[
+            lowerRecipes[[tile]], lowerSourceEpsilon[[tile]],
+            observable, 1],
           observable["CoefficientVector"], var, domain];
         nativeStageTiming["paired-row-prepare-done side=lower tile=", tile];
         response =
@@ -1910,7 +1988,9 @@ nativeContractStoredPairObservableStreamed[lowerState_Association,
         {tile, Length[lowerRecipes]}];
       Do[
         nativeStageTiming["paired-row-prepare-start side=upper tile=", tile];
-        row = nativePrepareArmRecipeRow[upperRecipes[[tile]],
+        row = nativePrepareArmRecipeRow[nativeConsumerRowRecipe[
+            upperRecipes[[tile]], upperSourceEpsilon[[tile]],
+            observable, 1],
           observable["CoefficientVector"], var, domain];
         nativeStageTiming["paired-row-prepare-done side=upper tile=", tile];
         response =
@@ -2091,7 +2171,8 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
    contractionRequired, statePublicRequired,
    matchRequired, preparedShift, declaredShift, epsilon, refinement,
    lowerBasis, upperBasis, checkpointRoot, march, states = <||>,
-   lowerState, upperState, integrates, lowerLimits, upperLimits,
+   lowerState, upperState, lowerSourceEpsilon, upperSourceEpsilon,
+   integrates, lowerLimits, upperLimits,
    pairResponses = {}, lowerEndpointResponses = {},
    upperEndpointResponses = {}, chunkResponse, chunkRecords,
    observableChunks, chunk, chunkIndices, integrateIndices,
@@ -2266,6 +2347,17 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
           "upper"],
         err["E5", <|"BackendResponse" -> march,
         "Detail" -> "two-arm observable-batch march did not return exact lower/upper retained states"|>]];
+    lowerSourceEpsilon =
+      nativeTransportTileSourceEpsilonWindows[lowerState];
+    upperSourceEpsilon =
+      nativeTransportTileSourceEpsilonWindows[upperState];
+    If[Length[lowerSourceEpsilon] =!= Length[lowerRowRecipes] ||
+        Length[upperSourceEpsilon] =!= Length[upperRowRecipes],
+      err["E5", <|"LowerRecipeCount" -> Length[lowerRowRecipes],
+        "LowerSourceCount" -> Length[lowerSourceEpsilon],
+        "UpperRecipeCount" -> Length[upperRowRecipes],
+        "UpperSourceCount" -> Length[upperSourceEpsilon],
+        "Detail" -> "live transport tile-source windows do not reproduce the lazy row recipes"|>]];
     If[deferredReceivingBases,
       equationOwners = DeleteDuplicatesBy[
         Select[Join[
@@ -2314,24 +2406,29 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
             lowerState, upperState, First[chunk], lowerRowRecipes,
             upperRowRecipes, var, workingAtlas["Domain"],
             checkpointRoot <> ":integrals:chunk:" <>
-              ToString[chunkIndex]],
+              ToString[chunkIndex], lowerSourceEpsilon,
+            upperSourceEpsilon],
           (* Tail certification still uses the legacy atomic batch API.
              Likewise, an explicit chunk size above one preserves its
              requested batched behavior.  Only this bounded chunk is eager. *)
           legacyObservables = Map[Function[observable,
             Module[{lowerRows, upperRows},
-              lowerRows = Map[Function[recipe,
-                row = nativePrepareArmRecipeRow[recipe,
+              lowerRows = MapThread[Function[{recipe, sourceWindow},
+                row = nativePrepareArmRecipeRow[
+                  nativeConsumerRowRecipe[recipe, sourceWindow,
+                    observable, 1],
                   observable["CoefficientVector"], var,
                   workingAtlas["Domain"]];
                 nativeDropRationalMultiplierPreparationCache[];
-                row], lowerRowRecipes];
-              upperRows = Map[Function[recipe,
-                row = nativePrepareArmRecipeRow[recipe,
+                row], {lowerRowRecipes, lowerSourceEpsilon}];
+              upperRows = MapThread[Function[{recipe, sourceWindow},
+                row = nativePrepareArmRecipeRow[
+                  nativeConsumerRowRecipe[recipe, sourceWindow,
+                    observable, 1],
                   observable["CoefficientVector"], var,
                   workingAtlas["Domain"]];
                 nativeDropRationalMultiplierPreparationCache[];
-                row], upperRowRecipes];
+                row], {upperRowRecipes, upperSourceEpsilon}];
               Join[<|"Identity" -> observable["Identity"],
                 "CheckpointIdentity" ->
                   observable["CheckpointIdentity"],
@@ -2374,7 +2471,9 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
         chunkIndices = observableChunks[[chunkIndex]];
         chunk = prepared[[chunkIndices]];
         endpointObservables = Map[Function[observable,
-          row = nativePrepareArmRecipeRow[Last[lowerRowRecipes],
+          row = nativePrepareArmRecipeRow[nativeConsumerRowRecipe[
+              Last[lowerRowRecipes], Last[lowerSourceEpsilon],
+              observable, 0],
             observable["CoefficientVector"], var,
             workingAtlas["Domain"]];
           nativeDropRationalMultiplierPreparationCache[];
@@ -2409,7 +2508,9 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
         chunkIndices = observableChunks[[chunkIndex]];
         chunk = prepared[[chunkIndices]];
         endpointObservables = Map[Function[observable,
-          row = nativePrepareArmRecipeRow[Last[upperRowRecipes],
+          row = nativePrepareArmRecipeRow[nativeConsumerRowRecipe[
+              Last[upperRowRecipes], Last[upperSourceEpsilon],
+              observable, 0],
             observable["CoefficientVector"], var,
             workingAtlas["Domain"]];
           nativeDropRationalMultiplierPreparationCache[];

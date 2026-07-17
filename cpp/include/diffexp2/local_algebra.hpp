@@ -40,10 +40,12 @@ struct PreparedRationalAnalyticCoefficient {
 //     * sum_j eps^j sum_n kernels[j][n] t^n.
 //
 // The native operation below owns only the finite triangular convolutions.
-// `kernels` must contain at least the input epsilon width and every row must
-// contain at least the input Taylor width.  This matches
-// SectorSeries`MultiplyRational: the output has the same number of epsilon
-// rows, with both ends shifted by the exact leading epsilon valuation.
+// Every kernel row must contain at least the input Taylor width.  `kernels`
+// may be a consumer prefix shorter than the input epsilon width; in that
+// case the complete product stops at the shorter of the two finite prefixes.
+// This matches the finite convolution used by SectorSeries`MultiplyRational
+// without requiring private source coefficients that the caller's capped
+// output can never consume.
 template <typename Scalar>
 struct PreparedRationalTaylorMultiplier {
   std::int32_t epsilon_shift = 0;
@@ -583,24 +585,27 @@ std::optional<LocalSolution<Scalar>> apply_prepared_scalar_row_window(
           "prepared scalar-row entry is out of range");
     if (entry.multiplier.structurally_zero()) continue;
     active = true;
-    if (entry.multiplier.kernels.size() < epsilon_width)
+    const auto multiplier_width = entry.multiplier.kernels.size();
+    if (multiplier_width == 0)
       throw std::invalid_argument(
-          "prepared scalar-row multiplier has too few epsilon kernels");
-    for (std::size_t j = 0; j < epsilon_width; ++j)
+          "prepared scalar-row multiplier has no epsilon kernels");
+    for (std::size_t j = 0; j < multiplier_width; ++j)
       if (entry.multiplier.kernels[j].size() < taylor_width)
         throw std::invalid_argument(
             "prepared scalar-row multiplier has too few Taylor coefficients");
-    natural_min = std::min(
-        natural_min, local_algebra_detail::checked_i32(
-                         static_cast<std::int64_t>(input.epsilon.min_power) +
-                             entry.multiplier.epsilon_shift,
-                         "scalar-row epsilon minimum"));
+    const auto term_min = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(input.epsilon.min_power) +
+            entry.multiplier.epsilon_shift,
+        "scalar-row epsilon minimum");
+    const auto term_complete = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(term_min) +
+            static_cast<std::int64_t>(
+                std::min(epsilon_width, multiplier_width)) -
+            1,
+        "scalar-row epsilon complete maximum");
+    natural_min = std::min(natural_min, term_min);
     natural_complete = std::min(
-        natural_complete,
-        local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(input.epsilon.complete_max) +
-                entry.multiplier.epsilon_shift,
-            "scalar-row epsilon complete maximum"));
+        natural_complete, term_complete);
   }
   if (!active) return std::nullopt;
 
@@ -655,9 +660,10 @@ std::optional<LocalSolution<Scalar>> apply_prepared_scalar_row_window(
         static_cast<std::int64_t>(input.epsilon.min_power) +
             entry.multiplier.epsilon_shift,
         "scalar-row term epsilon minimum");
+    const auto multiplier_width = entry.multiplier.kernels.size();
     const bool multiplier_can_contribute = [&]() {
       for (std::size_t kernel_epsilon = 0;
-           kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+           kernel_epsilon < multiplier_width; ++kernel_epsilon) {
         if (static_cast<std::int64_t>(term_min) +
                 static_cast<std::int64_t>(kernel_epsilon) >
             complete_max)
@@ -690,7 +696,7 @@ std::optional<LocalSolution<Scalar>> apply_prepared_scalar_row_window(
       if (!selected_component_can_contribute) continue;
       LocalSector<Scalar>* group = nullptr;
       for (std::size_t kernel_epsilon = 0;
-           kernel_epsilon < epsilon_width; ++kernel_epsilon) {
+           kernel_epsilon < multiplier_width; ++kernel_epsilon) {
         const auto& kernel = entry.multiplier.kernels[kernel_epsilon];
         for (std::size_t input_epsilon = 0;
              input_epsilon + kernel_epsilon < epsilon_width;

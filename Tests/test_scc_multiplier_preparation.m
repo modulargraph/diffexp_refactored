@@ -82,6 +82,37 @@ largeSolveRational = Block[{
     DiffExp2`Solve`Private`$cppExactDomain = True},
   DiffExp2`Solve`Private`preparedEpsCoefficient[largeRational]];
 
+(* Algebraic Acb preparation may bypass RootReduce only when direct
+   evaluation retains the complete requested precision.  A tiny exact
+   nonzero must never be converted to zero by a generic Chop floor.  A
+   cancellation-degraded direct evaluation must instead take the exact
+   RootReduce fallback, while the Rational shadow remains exact. *)
+wp2 = DiffExp2`Tolerances`$InputPrecisionFactor*
+  DiffExp2`Config`CFG["WorkingPrecision"];
+tinyAlgebraic = Sqrt[2]/10^900;
+tinyPrepared = Block[{
+    DiffExp2`Solve`Private`$cppExactDomain = False},
+  DiffExp2`Solve`Private`preparedEpsCoefficient[tinyAlgebraic]];
+cancellationAlgebraic = Sqrt[2] - Sqrt[2 - 10^-500];
+cancellationDirect = Block[{
+    DiffExp2`Tolerances`$MaxExtraPrecisionValue = 50},
+  DiffExp2`Solve`Private`preparedDirectEpsCoefficient[
+    cancellationAlgebraic, wp2]];
+cancellationPrepared = Block[{
+    DiffExp2`Solve`Private`$cppExactDomain = False,
+    DiffExp2`Tolerances`$MaxExtraPrecisionValue = 50},
+  DiffExp2`Solve`Private`preparedEpsCoefficient[
+    cancellationAlgebraic]];
+cancellationFallback = Block[{
+    DiffExp2`Solve`Private`$cppExactDomain = False,
+    DiffExp2`Solve`Private`$disablePreparedDirectNumericization = True,
+    DiffExp2`Tolerances`$MaxExtraPrecisionValue = 50},
+  DiffExp2`Solve`Private`preparedEpsCoefficient[
+    cancellationAlgebraic]];
+cancellationOracle = Block[{
+    DiffExp2`Tolerances`$MaxExtraPrecisionValue = 50},
+  N[RootReduce[cancellationAlgebraic], wp2]];
+
 ok = prepared["EpsilonShift"] === -1 &&
   prepared["CenterPoleOrder"] === 1 &&
   prepared["ProvenZero"] === False &&
@@ -129,7 +160,17 @@ ok = prepared["EpsilonShift"] === -1 &&
     largeAcbPrepared["ExactIdentity"] &&
   largeAcbReplay === largeAcbPrepared &&
   InexactNumberQ[largeSolveAcb] &&
-  largeSolveRational === largeRational;
+  largeSolveRational === largeRational &&
+  InexactNumberQ[tinyPrepared] && !TrueQ[tinyPrepared == 0] &&
+  Precision[tinyPrepared] >= wp2 &&
+  Abs[N[tinyPrepared - tinyAlgebraic, wp2 - 10]] <
+    10^(-wp2 + 10) Abs[N[tinyAlgebraic, wp2 - 10]] &&
+  cancellationDirect === $Failed &&
+  InexactNumberQ[cancellationPrepared] &&
+  Precision[cancellationPrepared] >= wp2 &&
+  cancellationPrepared === cancellationFallback &&
+  Abs[N[cancellationPrepared - cancellationOracle, wp2 - 10]] <
+    10^(-wp2 + 10) Abs[cancellationOracle];
 
 Print[If[TrueQ[ok], "PASS", "FAIL"],
   ": reusable rational and sparse SCC multiplier preparation parity"];

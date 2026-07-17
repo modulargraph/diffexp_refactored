@@ -650,10 +650,9 @@ physicalClearedODEData[cs_Association] := Module[
     KeyExistsQ[cs, "SystemClearKey"] &&
     KeyExistsQ[cs, "Center"] &&
     AssociationQ[Lookup[cs, "ChartMap", None]] &&
-    KeyExistsQ[cs["ChartMap"], "Scale"] &&
-    regularIdentityFrameQ[cs];
+    KeyExistsQ[cs["ChartMap"], "Scale"];
   signature = If[useGlobalAffineClear,
-    {"physical-global-affine-clear-v1", cs["SystemClearKey"], t,
+    {"physical-global-affine-clear-v2", cs["SystemClearKey"], t,
       cs["Center"], cs["ChartMap", "Scale"]},
     {t, theta}];
   key = Hash[signature, "SHA256"];
@@ -664,7 +663,10 @@ physicalClearedODEData[cs_Association] := Module[
     err["E5", cs, <|
       "Detail" -> "physical cleared-ODE cache-key collision with unequal exact input"|>]];
   If[useGlobalAffineClear,
-    symbolic = regularClearedFromGlobal[cs];
+    (* q(t) theta = C(t) is captured in the original-master frame.  Its
+       affine-global construction is valid at ordinary and singular centers;
+       only recurrence preparation needs q(0,eps=0) != 0. *)
+    symbolic = affinePhysicalClearedFromGlobal[cs];
     qCoeffs = symbolic["dExpr"];
     cCoeffs = symbolic["NhatExpr"],
     den = Together[PolynomialLCM @@
@@ -1219,10 +1221,10 @@ globalClearedSystem[systemKey_] := Module[
   AssociateTo[$globalClearedCache, systemKey -> cached];
   cached];
 
-regularClearedFromGlobal[cs_Association] := Module[
+affinePhysicalClearedFromGlobal[cs_Association] := Module[
   {systemKey = cs["SystemClearKey"], key, cached, global, x,
    t = cs["ChartVar"], center = cs["Center"], beta = cs["ChartMap", "Scale"],
-   affineContentInvariantQ, den, denCoeffs, denContent, num, d0, dD, dN,
+   affineContentInvariantQ, den, denCoeffs, denContent, num, dD, dN,
    dExpr, NhatExpr,
    phaseQ, phaseTime, phase},
   key = {systemKey, center, beta, t};
@@ -1273,10 +1275,6 @@ regularClearedFromGlobal[cs_Association] := Module[
   num = Map[Cancel[Together[beta*t*(# /. x -> center + beta*t)/denContent]] &,
     global["Numerator"], {2}];
   phase["affine-pair"];
-  d0 = Together[den /. t -> 0];
-  If[zeroQ[d0 /. DiffExp2`Config`CanonicalEps[] -> 0],
-    err["E3", cs, <|"Denominator" -> den,
-      "Detail" -> "cleared denominator degenerates onto the chart origin at eps = 0"|>]];
   dD = Exponent[den, t];
   dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
   dExpr = Table[Cancel[Together[Coefficient[den, t, j]]], {j, 0, dD}];
@@ -1288,6 +1286,14 @@ regularClearedFromGlobal[cs_Association] := Module[
     "dD" -> dD, "dN" -> dN|>;
   AssociateTo[$chartClearedCache, key -> cached];
   cached];
+
+regularClearedFromGlobal[cs_Association] := Module[
+  {data = affinePhysicalClearedFromGlobal[cs], d0},
+  d0 = First[data["dExpr"]];
+  If[zeroQ[d0 /. DiffExp2`Config`CanonicalEps[] -> 0],
+    err["E3", cs, <|"Denominator" -> d0,
+      "Detail" -> "cleared denominator degenerates onto the chart origin at eps = 0"|>]];
+  data];
 
 clearedSymbolic[cs_Association] := If[
   !TrueQ[$disableGlobalClearedHoist] && regularIdentityFrameQ[cs] &&
@@ -4742,14 +4748,22 @@ sccParticularBlockCost[target_Association, nmax_Integer:0] := Module[
     Max[0, Sequence @@ (# ["CollisionDepth"] & /@ target["Families"])] ];
 
 sccSeedWorkHalos[cs_Association, blockSystems_List, nmax_Integer:0] := Module[
-  {seq = cs["IntegrationSequence"], nb, edgeCost, outgoing, path,
-   seedGaugeCosts, topological},
+  {seq = cs["IntegrationSequence"], nb, edges, targets, targetCosts,
+   edgeCost, outgoing, path, seedGaugeCosts, topological},
   nb = Length[seq["Components"]];
-  edgeCost[{u_, v_}] := Module[{mat, target = blockSystems[[v]]},
+  edges = seq["CondensationEdges"];
+  targets = DeleteDuplicates[If[edges === {}, {}, edges[[All, 2]]]];
+  (* The target recurrence/gauge cost is independent of the incoming source
+     edge.  Dense SCC condensations used to rebuild the same exact algebraic
+     clear once for every predecessor, which turned one singular chart into
+     minutes of identical PolynomialGCD/coefficient work. *)
+  targetCosts = AssociationMap[
+    sccParticularBlockCost[blockSystems[[#]], nmax] &, targets];
+  edgeCost[{u_, v_}] := Module[{mat},
     mat = cs["ThetaOriginal"][[seq["Components"][[v]],
       seq["Components"][[u]]]];
-    matrixEpsPoleDepth[mat] + sccParticularBlockCost[target, nmax]];
-  outgoing = Table[Cases[seq["CondensationEdges"],
+    matrixEpsPoleDepth[mat] + targetCosts[v]];
+  outgoing = Table[Cases[edges,
       {source_, target_} /; source === block :> target],
     {block, nb}];
   topological = seq["TopologicalOrder"];

@@ -81,10 +81,13 @@ replay. It checks the finite value against
 ceiling explicitly with `PENTAGON_TIMING_MAX_SECONDS`.
 
 The first integrated recovery run took 74.54 seconds while restoring the
-level-1 boundary; profiling showed that rebuilding the short upstream ladder
-adds roughly 5--6 seconds. The five-minute gate is intentionally conservative
-enough for normal machine variability while still catching a return to the
-former repeated-owner/retry behavior.
+level-1 boundary.  After the frame-independent regular-owner transport was
+wired through production, a warm-preparation run with fresh transport
+checkpoints completed in 173 seconds on July 16, 2026.  Its finite coefficient
+differed from the pinned oracle by about `2.10e-14`, and it entered no matching
+discovery retry.  The five-minute gate is intentionally conservative enough
+for normal machine variability while still catching a return to the former
+repeated-owner/retry behavior.
 
 ## Planar double-box gate
 

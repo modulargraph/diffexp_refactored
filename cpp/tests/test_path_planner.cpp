@@ -220,10 +220,10 @@ void box_bubble_singular_endpoint_handoffs() {
 
 void forbidden_match_and_independent_arms() {
   ExactPathTopology forbidden_topology;
-  // A symbolic producer has declared x=1/2 unavailable as a handoff (for
-  // example a singular/branch split).  The naive balanced point is exactly
-  // 1/2, so the planner must choose another exact point in the overlap.
-  forbidden_topology.boundary_points = {Rational("1/2")};
+  // A symbolic producer has declared the receiver-owned -1/k point x=1/3
+  // unavailable as a handoff (for example a singular/branch split), so the
+  // planner must choose another exact point in the overlap.
+  forbidden_topology.boundary_points = {Rational("1/3"), Rational("3/5")};
   forbidden_topology.branch_sheets = {
       ExactBranchSheet{"forbidden-threshold", -1}};
   ExactArmRequest avoided{
@@ -238,7 +238,7 @@ void forbidden_match_and_independent_arms() {
         avoided_plan.matches.size() == 1 &&
             avoided_plan.matches.front().kind ==
                 ExactMatchKind::ForbiddenPointAvoidance &&
-            !(avoided_plan.matches.front().physical == Rational("1/2")) &&
+            !(avoided_plan.matches.front().physical == Rational("1/3")) &&
             avoided_plan.matches.front().producing_local.sign() > 0 &&
             avoided_plan.matches.front().receiving_local.sign() < 0);
 
@@ -269,6 +269,25 @@ void forbidden_match_and_independent_arms() {
         rejected);
 }
 
+void asymmetric_receiver_clearance() {
+  ExactPathPlanOptions options;
+  options.division_order = 4;
+  ExactArmRequest request{
+      Rational(0), Rational("3/46"),
+      {ExactAffineChart{"asymmetric-left", Rational(0), Rational("2/23"),
+                        Rational(1), false},
+       ExactAffineChart{"asymmetric-right", Rational("1/23"),
+                        Rational("1/23"), Rational(1), false}},
+      ExactPathTopology{}};
+  const auto plan = diffexp2::plan_exact_arm(request, options);
+  const auto& match = plan.matches.front();
+  check("ordinary exact planning honors receiver -1/k with producer half-radius clearance",
+        match.kind == ExactMatchKind::BalancedSafeOverlap &&
+            match.physical == Rational("3/92") &&
+            match.producing_local == Rational("3/8") &&
+            match.receiving_local == Rational("-1/4"));
+}
+
 }  // namespace
 
 int main() {
@@ -276,6 +295,7 @@ int main() {
     classic_exact_chain_and_reverse();
     box_bubble_singular_endpoint_handoffs();
     forbidden_match_and_independent_arms();
+    asymmetric_receiver_clearance();
   } catch (const std::exception& error) {
     ++failed;
     std::cout << "  FAIL: unexpected exception: " << error.what() << '\n';

@@ -211,26 +211,28 @@ sharedEligibleQ = TrueQ[
   DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
     sharedLowerPlan, sharedUpperPlan]];
 
-(* Exact-equality overlap is not stable under two strict inward floors.  The
-   public eligibility gate must reject this atlas before native preparation. *)
-tightChart1 = Join[endpoint, <|"Center" -> 1/3,
+(* Ordinary handoff ownership is asymmetric: the producer only has to remain
+   inside its certified half-radius envelope, while the receiver owns the
+   canonical -1/k point.  This exact algebraic chain is therefore valid even
+   though the older symmetric 1/k preflight rejected it after inward floors. *)
+asymmetricChart1 = Join[endpoint, <|"Center" -> 1/3,
   "Scale" -> Sqrt[2], "Radius" -> Sqrt[2],
   "MatchRadius" -> Sqrt[2], "Prescriptions" -> {}|>];
-tightChart2 = Join[endpoint, <|"Center" -> 1,
+asymmetricChart2 = Join[endpoint, <|"Center" -> 1,
   "Scale" -> 2 - Sqrt[2], "Radius" -> 2 - Sqrt[2],
   "MatchRadius" -> 2 - Sqrt[2], "Prescriptions" -> {}|>];
-tightLowerPlan = Join[lowerPlan, <|"Charts" -> {anchor},
+asymmetricLowerPlan = Join[lowerPlan, <|"Charts" -> {anchor},
   "SegmentCount" -> 1|>];
-tightUpperPlan = Join[upperPlan, <|"To" -> 1,
-  "Charts" -> {anchor, tightChart1, tightChart2},
+asymmetricUpperPlan = Join[upperPlan, <|"To" -> 1,
+  "Charts" -> {anchor, asymmetricChart1, asymmetricChart2},
   "SegmentCount" -> 3|>];
-tightOriginalEqualityQ = TrueQ[FullSimplify[RootReduce[
+asymmetricOriginalEqualityQ = TrueQ[FullSimplify[RootReduce[
   1 - 1/3 == Sqrt[2]/3 + (2 - Sqrt[2])/3]]];
-tightRejectedQ = tightOriginalEqualityQ &&
-  !TrueQ[DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
-      tightLowerPlan, tightUpperPlan]] &&
-  !TrueQ[DiffExp2`NativeTransport`Private`nativeBridgedPlanPreflightQ[
-    tightUpperPlan]];
+asymmetricAcceptedQ = asymmetricOriginalEqualityQ &&
+  TrueQ[DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
+      asymmetricLowerPlan, asymmetricUpperPlan]] &&
+  TrueQ[DiffExp2`NativeTransport`Private`nativeBridgedPlanPreflightQ[
+    asymmetricUpperPlan]];
 
 projectionRoot = Sqrt[2] + I*Sqrt[3];
 projectionPlan = <|"From" -> -1, "To" -> 4,
@@ -485,7 +487,7 @@ loudStatusQ = FailureQ[loudFailure] &&
 
 ok = exactFloorQ && eligibleQ && singularScopeQ &&
   inexactRadiusBridgeQ && exactRadiusBridgeQ &&
-  sharedNormalizationQ && sharedEligibleQ && tightRejectedQ &&
+  sharedNormalizationQ && sharedEligibleQ && asymmetricAcceptedQ &&
   projectionBridgeQ &&
   TrueQ[rationalResult["OK"]] &&
   TrueQ[acbResult["OK"]] && TrueQ[sharedAnchorResult["OK"]] &&
@@ -499,7 +501,7 @@ If[TrueQ[ok],
     "ExactRadiusBridge" -> exactRadiusBridgeQ,
     "SharedNormalization" -> sharedNormalizationQ,
     "SharedEligible" -> sharedEligibleQ,
-    "TightRejected" -> tightRejectedQ,
+    "AsymmetricAccepted" -> asymmetricAcceptedQ,
     "Rational" -> rationalResult,
     "Acb" -> acbResult, "SharedAnchor" -> sharedAnchorResult,
     "LoudFailure" -> loudFailure,

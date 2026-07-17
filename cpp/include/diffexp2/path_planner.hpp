@@ -428,14 +428,40 @@ inline ExactMatchPoint plan_match(const ExactArmRequest& request,
 
   const auto y_left = directed(left.center, direction);
   const auto y_right = directed(right.center, direction);
-  const auto left_reach = safe_physical_reach(left, division_order);
+  // SegmentLine gives the receiving chart ownership of an ordinary
+  // handoff: its canonical point is -1/k in the receiving coordinate, while
+  // the producer only has to remain inside the certified half-radius error
+  // envelope.  Requiring 1/k on both sides rejects valid asymmetric chains
+  // after exact rational scale bridging and makes increasing DivisionOrder
+  // paradoxically reduce planner clearance.
+  const auto left_reach =
+      abs(left.scale) * left.radius / Rational(2);
   const auto right_reach = safe_physical_reach(right, division_order);
+  const auto preferred_right_y = directed(preferred_from_right, direction);
+  const auto preferred_left_at_right =
+      local_coordinate(left, preferred_from_right);
+  if (preferred_right_y > y_left && preferred_right_y < y_right &&
+      abs(preferred_left_at_right) <= left.radius / Rational(2) &&
+      abs(preferred_right_local) <=
+          safe_local_limit(right, division_order) &&
+      !contains(forbidden, preferred_from_right)) {
+    result.physical = preferred_from_right;
+    result.producing_local = preferred_left_at_right;
+    result.receiving_local = preferred_right_local;
+    result.kind = ExactMatchKind::BalancedSafeOverlap;
+    return result;
+  }
   const auto gap = y_right - y_left;
   if (!(gap > Rational(0)) || gap > left_reach + right_reach)
     throw ExactPathPlanningError(
         ExactPathPlanningErrorCode::UnsafeGeometry,
-        "adjacent charts have no common exact handoff inside both 1/k and "
-        "half-radius envelopes");
+        "adjacent charts have no common exact handoff inside the producer "
+        "half-radius and receiving 1/k envelopes; pair=" +
+        std::to_string(left_index) +
+        "; left=" + left.identity + "; right=" + right.identity +
+        "; gap=" + gap.str() + "; left_reach=" + left_reach.str() +
+        "; right_reach=" + right_reach.str() +
+        "; division_order=" + std::to_string(division_order));
 
   auto y_match = y_left + gap * left_reach / (left_reach + right_reach);
   auto physical = directed(y_match, direction);
@@ -481,8 +507,7 @@ inline bool valid_match_envelopes(const ExactAffineChart& left,
       match.kind == ExactMatchKind::SingularBalancedApproach;
   if (right.singular_center != singular_approach) return false;
   if (!singular_approach)
-    return at_or_inside_safe_envelope(left, match.producing_local,
-                                      division_order) &&
+    return abs(match.producing_local) <= left.radius / Rational(2) &&
            at_or_inside_safe_envelope(right, match.receiving_local,
                                       division_order);
   if (left.singular_center || !right.singular_center ||

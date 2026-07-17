@@ -1740,6 +1740,120 @@ void validate_singular_scc_basis_sources(
         context + ": singular-SCC basis provenance does not cover every canonical column");
 }
 
+std::shared_ptr<PhysicalEquationOwnerBase>
+validate_retained_singular_scc_basis_sources(
+    const json::object& native_request,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& retained_basis,
+    const std::vector<json::object>& basis_sources,
+    std::uint32_t dimension, const std::string& context) {
+  if (dimension == 0 || retained_basis.size() != dimension ||
+      basis_sources.size() != dimension)
+    throw std::domain_error(
+        context +
+        ": retained singular-SCC proof requires one complete square basis");
+  const auto expected_scc = required_string(native_request, "receiving_scc");
+  const auto expected_identity = required_string(
+      native_request, "receiving_scc_exact_identity");
+  const auto expected_capability = required_string(
+      native_request, "receiving_execution_capability");
+  const auto basis_point_sign = as_i32(
+      native_request.at("receiving_basis_point_sign"),
+      "retained singular-SCC receiving basis-point sign");
+  const json::value expected_effective_rim = basis_point_sign < 0
+      ? native_request.at("receiving_rim") : json::value(nullptr);
+  std::vector<std::uint8_t> seen(dimension, 0);
+  std::shared_ptr<PhysicalEquationOwnerBase> common_scc_owner;
+  bool ownerless_basis = false;
+  for (std::size_t column = 0; column < basis_sources.size(); ++column) {
+    const auto& source = basis_sources[column];
+    const auto& local = retained_basis[column];
+    if (!local ||
+        as_u64(source.at("column"),
+               "retained singular-SCC proof basis column") != column ||
+        required_string(source, "local") != local->handle() ||
+        required_string(source, "chart") != local->source_chart() ||
+        required_string(source, "source_operator_identity") !=
+            local->source_operator_identity() ||
+        required_string(source, "checkpoint_identity") !=
+            local->checkpoint_identity())
+      throw std::invalid_argument(
+          context +
+          ": retained singular-SCC basis source changed its strong local binding");
+    const auto scc_owner = local->retained_equation_owner();
+    const auto owner_dimension = scc_owner
+        ? scc_owner->matching_scc_dimension() : std::nullopt;
+    const auto* owner_capability = scc_owner
+        ? scc_owner->matching_scc_column_execution_capability() : nullptr;
+    if (!scc_owner) {
+      if (common_scc_owner)
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis has inconsistent equation ownership");
+      ownerless_basis = true;
+    } else {
+      if (ownerless_basis)
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis has inconsistent equation ownership");
+      if (std::string(scc_owner->equation_owner_kind()) != "composite-scc")
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis equation owner is not a CompositeSCC");
+      if (common_scc_owner &&
+          common_scc_owner.get() != scc_owner.get())
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis columns do not share one live equation owner");
+      if (scc_owner->equation_owner_handle() != expected_scc)
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis live owner changed its handle");
+      if (scc_owner->equation_operator_identity() != expected_identity)
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis live owner changed its exact identity");
+      if (!owner_dimension.has_value() || *owner_dimension != dimension)
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis live owner changed its dimension");
+      if (owner_capability == nullptr ||
+          std::string(owner_capability) != expected_capability)
+        throw std::invalid_argument(
+            context +
+            ": retained singular-SCC basis live owner changed its execution capability");
+      if (!common_scc_owner) common_scc_owner = scc_owner;
+    }
+    if (local->source_chart() != expected_scc ||
+        local->source_operator_identity() != expected_identity ||
+        source.at("requested_imaginary_sign") !=
+            native_request.at("receiving_rim") ||
+        source.at("effective_imaginary_sign") != expected_effective_rim ||
+        source.at("analytic_metadata") != local->exact_analytic_metadata())
+      throw std::invalid_argument(
+          context +
+          ": retained singular-SCC basis source changed its SCC, rim, or analytic binding");
+    const auto& provenance = local->column_provenance();
+    const auto* raw_provenance = source.if_contains("column_provenance");
+    if (!provenance.has_value() || raw_provenance == nullptr ||
+        *raw_provenance != provenance->encode() ||
+        provenance->scc_handle != expected_scc ||
+        provenance->scc_exact_identity != expected_identity ||
+        provenance->basis_index >= dimension ||
+        seen[provenance->basis_index] != 0 ||
+        provenance->exact_column_identity.empty())
+      throw std::domain_error(
+          context +
+          ": retained singular-SCC column owner is incomplete, duplicated, or changed");
+    seen[provenance->basis_index] = 1;
+  }
+  if (std::any_of(seen.begin(), seen.end(),
+                  [](std::uint8_t value) { return value == 0; }))
+    throw std::domain_error(
+        context +
+        ": retained singular-SCC basis does not cover every canonical column");
+  return common_scc_owner;
+}
+
 ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
     const json::value& raw_request,
     const FiniteLaurentMatrix<ComplexBall>& evaluated_basis,
@@ -1755,6 +1869,9 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
   auto native_request = validate_native_singular_scc_saturation_request(
       raw_request, context, expected_session_configuration,
       expected_native_request);
+  const bool compact_request =
+      required_string(native_request, "schema") ==
+      kNativeSingularSCCSaturationCompactRequestSchema;
   if (required_string(native_request, "match_checkpoint_identity") !=
           expected_checkpoint_identity ||
       required_string(native_request, "receiving_basis_point_exact") !=
@@ -1769,17 +1886,25 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
       window.complete_max < 0)
     throw std::domain_error(
         context + ": singular-SCC valuation-zero certification requires a square actual basis complete through epsilon^0");
-  validate_singular_scc_basis_sources(
-      native_request, basis_sources, static_cast<std::uint32_t>(dimension),
-      context);
-  for (std::size_t column = 0; column < dimension; ++column) {
-    const auto& provenance = retained_basis[column]->column_provenance();
-    if (!provenance.has_value() ||
-        json::serialize(canonical_json_value(provenance->encode())) !=
-            json::serialize(canonical_json_value(
-                basis_sources[column].at("column_provenance"))))
-      throw std::invalid_argument(
-          context + ": singular-SCC proof source disagrees with its retained column owner");
+  std::shared_ptr<PhysicalEquationOwnerBase> common_scc_owner;
+  if (compact_request)
+    common_scc_owner = validate_retained_singular_scc_basis_sources(
+        native_request, retained_basis, basis_sources,
+        static_cast<std::uint32_t>(dimension), context);
+  else {
+    validate_singular_scc_basis_sources(
+        native_request, basis_sources,
+        static_cast<std::uint32_t>(dimension), context);
+    for (std::size_t column = 0; column < dimension; ++column) {
+      const auto& provenance = retained_basis[column]->column_provenance();
+      if (!provenance.has_value() ||
+          json::serialize(canonical_json_value(provenance->encode())) !=
+              json::serialize(canonical_json_value(
+                  basis_sources[column].at("column_provenance"))))
+        throw std::invalid_argument(
+            context +
+            ": singular-SCC proof source disagrees with its retained column owner");
+    }
   }
 
   std::vector<std::shared_ptr<const RationalShadowColumnWitness>>
@@ -1794,22 +1919,38 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
     for (std::size_t column = 0; column < dimension; ++column) {
       const auto& witness = *shadow_witnesses[column];
       if (!witness.solution || witness.rational_shadow_identity.empty() ||
-          witness.source_column_identity.empty())
+          witness.source_column_identity.empty() ||
+          witness.target_column_identity.empty())
         throw std::invalid_argument(
             context + ": Rational-shadow saturation witness is incomplete");
-      const auto parsed_column = json::parse(
+      const auto& exact_column_identity =
           retained_basis[column]->column_provenance()
-              ->exact_column_identity);
-      const auto& exact_column = as_object(
-          parsed_column,
-          "Rational-shadow target column identity");
-      if (required_string(exact_column, "rational_shadow_identity") !=
-              witness.rational_shadow_identity ||
-          required_string(exact_column,
-                          "rational_source_column_identity") !=
-              witness.source_column_identity)
-        throw std::invalid_argument(
-            context + ": Rational-shadow saturation witness changed its target provenance binding");
+              ->exact_column_identity;
+      if (compact_request) {
+        const auto* owner_shadow_identity = common_scc_owner
+            ? common_scc_owner->matching_scc_rational_shadow_identity()
+            : nullptr;
+        if (owner_shadow_identity == nullptr ||
+            witness.rational_shadow_identity !=
+                *owner_shadow_identity ||
+            exact_column_identity != witness.target_column_identity)
+          throw std::invalid_argument(
+              context +
+              ": retained Rational-shadow witness changed its target-column binding");
+      } else {
+        const auto parsed_column = json::parse(exact_column_identity);
+        const auto& exact_column = as_object(
+            parsed_column,
+            "Rational-shadow target column identity");
+        if (required_string(exact_column, "rational_shadow_identity") !=
+                witness.rational_shadow_identity ||
+            required_string(exact_column,
+                            "rational_source_column_identity") !=
+                witness.source_column_identity)
+          throw std::invalid_argument(
+              context +
+              ": Rational-shadow saturation witness changed its target provenance binding");
+      }
       validate_local_solution(*witness.solution, false);
     }
     auto saturation = rational_shadow_formal_saturation(

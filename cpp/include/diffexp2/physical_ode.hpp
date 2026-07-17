@@ -376,6 +376,26 @@ inline EpsilonVector zero_epsilon_vector(EpsilonWindow window,
   return output;
 }
 
+inline std::size_t checked_physical_evolution_coefficient_count(
+    EpsilonWindow window, std::uint32_t dimension,
+    std::uint32_t taylor_complete_max) {
+  constexpr std::size_t kMaximumCoefficientCount = 100'000'000;
+  std::size_t count = window.width();
+  for (const auto factor : {
+           static_cast<std::size_t>(dimension),
+           static_cast<std::size_t>(taylor_complete_max) + 1}) {
+    if (factor != 0 &&
+        count > std::numeric_limits<std::size_t>::max() / factor)
+      throw std::invalid_argument(
+          "ordinary-center physical evolution coefficient count overflows");
+    count *= factor;
+    if (count > kMaximumCoefficientCount)
+      throw std::invalid_argument(
+          "ordinary-center physical evolution is unreasonably large");
+  }
+  return count;
+}
+
 inline void accumulate_causal_multiplier(
     const PreparedCausalEpsilonMultiplier& multiplier,
     const EpsilonVector& source, std::uint32_t source_component,
@@ -495,6 +515,8 @@ OrdinaryCenterValueEvolution evolve_ordinary_center_value(
                 "ordinary-center value evolution supports Rational or Acb physical equations");
   physical_ode_detail::validate_ode(ode);
   const auto width = initial.epsilon.width();
+  (void)physical_ode_detail::checked_physical_evolution_coefficient_count(
+      initial.epsilon, initial.dimension, taylor_complete_max);
   if (initial.dimension == 0 || initial.dimension != ode.dimension ||
       width > std::numeric_limits<std::size_t>::max() /
                   initial.dimension ||

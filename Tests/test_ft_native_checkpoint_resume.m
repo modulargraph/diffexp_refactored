@@ -101,6 +101,18 @@ audit = <|"Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
   "MatchEpsilonPadding" ->
     ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
       ledger["PublicTargetCompleteMax"]|>;
+splitFrameAudit = Join[audit, <|
+  "SourceCompleteMax" -> 8,
+  "TargetCompleteMax" -> 5,
+  "RequiredTargetCompleteMax" -> 3,
+  "DeliverableCompleteMax" -> 4,
+  "RequiredRawTop" -> 4,
+  "CoefficientHalo" -> 2,
+  "IntegrationHalo" -> 1,
+  "MatchEpsilonPadding" -> 3|>];
+assert[
+  "checkpoint record keeps public target and downstream raw floors independent",
+  ft2NativeCheckpointRecordQ[splitFrameAudit]];
 checkpointIdentity = "native-resume-state";
 nativeStateFile = FileNameJoin[{tmpDir,
   name <> "_level1_native_transport.de2cp"}];

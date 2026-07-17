@@ -306,7 +306,7 @@
             session->domain, session->precision_bits,
             active_session_configuration_identity, plan, anchor,
             march_input, work_epsilon, match_required_complete_max,
-            refinement, checkpoint_root);
+            refinement, checkpoint_root, true);
         TransportObservableContractionInput observable;
         observable.identity = checkpoint_root + ":" + input.name;
         observable.checkpoint_identity =
@@ -707,4 +707,3 @@
         {"status", "ok"}, {"released", line_handle},
         {"checkpoint_identity", removed->checkpoint_identity()}};
   }
-

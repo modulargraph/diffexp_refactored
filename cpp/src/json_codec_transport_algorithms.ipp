@@ -2043,7 +2043,8 @@ RetainedArmMarchResult march_retained_arm(
     const std::shared_ptr<StoredLocalBase>& anchor,
     const RetainedArmMarchInput& input, EpsilonWindow work_epsilon,
     std::int32_t match_required_complete_max,
-    const json::object& refinement, const std::string& checkpoint_root) {
+    const json::object& refinement, const std::string& checkpoint_root,
+    bool compact_plan_reference = false) {
   if ((domain != "rational" && domain != "acb") || !plan || !anchor ||
       session_configuration_identity.empty() || checkpoint_root.empty())
     throw std::invalid_argument(
@@ -2089,7 +2090,7 @@ RetainedArmMarchResult march_retained_arm(
     if (domain == "acb") {
       auto saturation = native_acb_saturation_binding(
           plan, session_configuration_identity, input.name, match_index,
-          match_checkpoint);
+          match_checkpoint, compact_plan_reference);
       match_request[saturation.request_key] =
           std::move(saturation.request);
       match_request["refinement"] = refinement;
@@ -2098,7 +2099,7 @@ RetainedArmMarchResult march_retained_arm(
         input.match_handles[match_index], match_request, domain,
         precision_bits, session_configuration_identity, plan,
         input.basis_handles[match_index], input.basis[match_index],
-        current->handle(), current);
+        current->handle(), current, compact_plan_reference);
     std::shared_ptr<StoredLocalBase> next;
     try {
       next = match->materialize(
@@ -2735,6 +2736,8 @@ StoredLineIntegral integrate_transport_stored_row_tile(
       ? certified_tile.local_begin : certified_tile.local_end;
   StoredLineIntegrationOptions options;
   options.delivered_epsilon = {line_min, line_complete};
+  options.required_complete_max =
+      epsilon_contract.required_complete_max;
   options.imaginary_sign = rim;
   options.certified_chart_scale_sign = binding.scale_sign;
   options.divergent_cancellation = divergent_cancellation;

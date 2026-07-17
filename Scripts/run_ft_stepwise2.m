@@ -1163,7 +1163,7 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
   {payload, ok, kind, level, levelData, belowData, mastersHere, mastersBelow,
    currentRequests, savedEO, savedFingerprint, stale, needInt, needLo, needHi,
    cachedArms, recordedArms, expectedCharts, boundaryWidths, boundaryShift,
-   requiredRaw, preservedRaw, preservedSource, nativeRecord,
+   requiredRaw, savedRequiredRaw, preservedRaw, preservedSource, nativeRecord,
    nativePlanRecord, nativePlanIdentity, transportKindQ,
    nativeTransportRecord, nativeContract, storedRequestMetadata,
    expectedRequestMetadata},
@@ -1364,6 +1364,7 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
       requiredRaw = If[ft2NativeEpsilonPlanQ[nativePlan],
         nativePlan["Levels"][level]["RequiredRawTop"],
         nativeRequiredRawTop[level]];
+      savedRequiredRaw = Lookup[payload, "RequiredRawTop", None];
       preservedRaw = Lookup[payload, "PreservedRawCompleteMax", None];
       preservedSource =
         Lookup[payload, "PreservedSourceCompleteMax", None];
@@ -1375,22 +1376,27 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
           Length[DeleteDuplicates[boundaryWidths]] =!= 1 ||
           !IntegerQ[boundaryShift] ||
           Lookup[payload, "BoundaryShift", None] =!= boundaryShift ||
-          Lookup[payload, "RequiredRawTop", None] =!= requiredRaw ||
-          Lookup[payload, "RequestedEpsilonOrder", None] =!= requiredRaw ||
-          !IntegerQ[preservedRaw] || preservedRaw < requiredRaw ||
+          !IntegerQ[savedRequiredRaw] ||
+          savedRequiredRaw < requiredRaw ||
+          Lookup[payload, "RequestedEpsilonOrder", None] =!=
+            savedRequiredRaw ||
+          !IntegerQ[preservedRaw] || preservedRaw < savedRequiredRaw ||
           !IntegerQ[preservedSource] ||
           preservedSource =!= preservedRaw + boundaryShift ||
           preservedSource =!= First[boundaryWidths] - 1 ||
           !ft2NativeCheckpointRecordQ[nativeRecord] ||
-          nativeRecord["RequiredRawTop"] =!= requiredRaw ||
+          nativeRecord["RequiredRawTop"] =!= savedRequiredRaw ||
           nativeRecord["DeliverableCompleteMax"] =!= preservedRaw ||
           (ft2NativeEpsilonPlanQ[nativePlan] &&
-            (!ft2NativeEpsilonExecutionRecordQ[nativePlanRecord,
-                nativePlanIdentity, nativePlan] ||
+            (!AssociationQ[nativePlanRecord] ||
+              !StringQ[nativePlanIdentity] ||
+              nativePlanIdentity =!= ft2CanonicalIdentity[
+                "ft2-native-epsilon-execution-plan-",
+                nativePlanRecord] ||
               Lookup[nativeRecord, "NativeEpsilonPlanIdentity", None] =!=
                 nativePlanIdentity)),
         Return[ladderCheckpointReject[file,
-          "native Boundary checkpoint has an inconsistent required floor, preserved source width, shift, or observable-batch identity"],
+          "native Boundary checkpoint has an insufficient or internally inconsistent required floor, preserved source width, shift, or observable-batch identity"],
           Module]],
       If[kind === "Boundary" &&
           KeyExistsQ[payload, "RequestedEpsilonOrder"] &&
@@ -1957,7 +1963,7 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
       MemberQ[{0, 1}, integrationHalo] &&
       requiredTarget + matchPadding === source - coefficientHalo &&
       source >= target >= deliverable >= required &&
-      target >= requiredTarget >= required];
+      target >= requiredTarget];
 
 ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
     boundaryValues_, boundaryPrefactors_, entries_List, ledger_Association,
@@ -2639,7 +2645,8 @@ ft2DirectBoundaryValue[entry_Association, currentBCs_List,
 
 (* Overridable seams for the focused definitions-only structural test. *)
 ft2NativeSegmentLine[sys_, path_] :=
-  DiffExp2`Transport`SegmentLine[sys, path];
+  DiffExp2`Transport`SegmentLine[
+    sys, path, "ValueTailContract" -> "NativeCertified"];
 ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
     physicalVar_, targetMax_, requiredTargetMax_, threads_] :=
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[

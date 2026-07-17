@@ -1104,12 +1104,21 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
               "native-retained-only" ||
           !derivation.at("whole_arm_complete").is_bool() ||
           derivation.at("whole_arm_complete").as_bool() ||
-          !equation_owner ||
-          required_string(derivation,
-              "equation_owner_signature_identity") !=
-              equation_owner->owner_signature_identity() ||
-          required_string(derivation, "equation_payload_identity") !=
-              equation_owner->physical_payload_identity())
+          (equation_owner
+               ? required_string(
+                     derivation,
+                     "equation_owner_signature_identity") !=
+                         equation_owner->owner_signature_identity() ||
+                     required_string(
+                         derivation, "equation_payload_identity") !=
+                         equation_owner->physical_payload_identity()
+               : !required_string(
+                      derivation,
+                      "equation_owner_signature_identity").starts_with(
+                          "owner-operator-reference-v1:") ||
+                     required_string(
+                         derivation, "equation_payload_identity") !=
+                         "no-physical-qc-payload-v1"))
         throw std::invalid_argument(
             "checkpoint compact materialized-local derivation changes its certified scope or equation owner");
       (void)scoped_handle_id(required_string(derivation, "source_match"),

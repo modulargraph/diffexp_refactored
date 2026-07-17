@@ -659,6 +659,45 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return result;
   }
 
+  std::shared_ptr<PhysicalEquationOwnerBase>
+  planned_receiving_equation_owner() const {
+    if (!plan_owner_) return nullptr;
+    const auto arm_name = required_string(handoff_, "arm");
+    const auto match_index = static_cast<std::size_t>(
+        as_u64(handoff_.at("match"),
+               "planned-hop receiving equation-owner match index"));
+    const auto& arm = plan_owner_->arm(arm_name);
+    if (match_index >= arm.exact.matches.size())
+      throw std::logic_error(
+          "planned-hop receiving equation owner lies outside its retained arm");
+    const auto& binding = arm.charts.at(
+        arm.exact.matches[match_index].receiving_chart);
+    return std::visit(
+        [](const auto& owner)
+            -> std::shared_ptr<PhysicalEquationOwnerBase> {
+          return std::static_pointer_cast<PhysicalEquationOwnerBase>(
+              owner);
+        },
+        binding.owner);
+  }
+
+  static std::string planned_equation_owner_signature_binding(
+      const PhysicalEquationOwnerBase& owner) {
+    if (!owner.owner_signature_identity().empty())
+      return owner.owner_signature_identity();
+    const auto& identity = owner.equation_operator_identity();
+    return "owner-operator-reference-v1:" +
+        public_provenance_fingerprint(identity) + ":" +
+        std::to_string(identity.size());
+  }
+
+  static std::string planned_equation_payload_binding(
+      const PhysicalEquationOwnerBase& owner) {
+    return owner.physical_payload_identity().empty()
+        ? "no-physical-qc-payload-v1"
+        : owner.physical_payload_identity();
+  }
+
   void validate_materialized_equation_owner(
       const std::shared_ptr<StoredLocalBase>& local) const {
     if (!local || local->retained_equation_owner().get() !=
@@ -670,16 +709,62 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   void validate_materialized_derivation(
       const json::object& derivation, const char* scalar_domain) const {
     const auto native_summary = match_->summary();
-    if (required_string(derivation, "source_match") != handle_ ||
-        required_string(derivation, "source_match_checkpoint_identity") !=
-            checkpoint_identity_ ||
-        required_string(derivation, "source_match_provenance_identity") !=
-            required_string(native_summary, "provenance_identity") ||
-        required_string(derivation, "planned_hop_provenance_identity") !=
-            provenance_identity_ ||
-        derivation.at("planned_hop") != handoff_)
+    const auto derivation_schema = required_string(derivation, "schema");
+    if (derivation_schema ==
+        "diffexp2-retained-plan-match-local-materialization-v2") {
+      const auto equation_owner = inheritable_basis_equation_owner();
+      const auto planned_equation_owner =
+          planned_receiving_equation_owner();
+      const auto& producing = as_object(
+          handoff_.at("producing"),
+          "checkpoint compact planned-hop producing record");
+      const auto& receiving = as_object(
+          handoff_.at("receiving"),
+          "checkpoint compact planned-hop receiving record");
+      if (!plan_owner_ || !planned_equation_owner ||
+          (equation_owner &&
+           equation_owner.get() != planned_equation_owner.get()) ||
+          required_string(derivation, "source_match") != handle_ ||
+          required_string(
+              derivation, "source_match_checkpoint_identity") !=
+              checkpoint_identity_ ||
+          required_string(derivation, "tile_plan") !=
+              plan_owner_->handle() ||
+          required_string(
+              derivation, "tile_plan_checkpoint_identity") !=
+              plan_owner_->checkpoint_identity() ||
+          derivation.at("arm") != handoff_.at("arm") ||
+          derivation.at("match") != handoff_.at("match") ||
+          derivation.at("incoming") != producing.at("incoming") ||
+          derivation.at("basis") != receiving.at("basis") ||
+          required_string(
+              derivation, "equation_owner_signature_identity") !=
+              planned_equation_owner_signature_binding(
+                  *planned_equation_owner) ||
+          required_string(derivation, "equation_payload_identity") !=
+              planned_equation_payload_binding(
+                  *planned_equation_owner))
+        throw std::invalid_argument(
+            "checkpoint compact materialized-local lineage disagrees with its live plan, match, or equation owner");
+    } else if (derivation_schema ==
+               "diffexp2-retained-plan-match-local-materialization-v1") {
+      if (required_string(derivation, "source_match") != handle_ ||
+          required_string(
+              derivation, "source_match_checkpoint_identity") !=
+              checkpoint_identity_ ||
+          required_string(
+              derivation, "source_match_provenance_identity") !=
+              required_string(native_summary, "provenance_identity") ||
+          required_string(
+              derivation, "planned_hop_provenance_identity") !=
+              provenance_identity_ ||
+          derivation.at("planned_hop") != handoff_)
+        throw std::invalid_argument(
+            "checkpoint materialized-local lineage disagrees with its planned-hop owner");
+    } else {
       throw std::invalid_argument(
-          "checkpoint materialized-local lineage disagrees with its planned-hop owner");
+          "checkpoint materialized-local lineage has an unsupported schema");
+    }
 
     json::array expected_windows;
     std::int32_t expected_certified_max = 0;
@@ -837,6 +922,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     const auto receiving_operator =
         basis_owners_.front()->source_operator_identity();
     auto equation_owner = inheritable_basis_equation_owner();
+    const auto planned_equation_owner =
+        planned_receiving_equation_owner();
     for (std::size_t column = 0; column < basis_owners_.size(); ++column) {
       auto typed =
           std::dynamic_pointer_cast<StoredLocal<Scalar>>(basis_owners_[column]);
@@ -923,7 +1010,9 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
             "diffexp2-retained-exact-plan-match-hop-v3";
     json::object derivation;
     if (compact_derivation) {
-      if (!plan_owner_ || equation_owner == nullptr ||
+      if (!plan_owner_ || !planned_equation_owner ||
+          (equation_owner &&
+           equation_owner.get() != planned_equation_owner.get()) ||
           required_string(handoff_, "tile_plan") != plan_owner_->handle() ||
           required_string(handoff_, "tile_plan_checkpoint_identity") !=
               plan_owner_->checkpoint_identity() ||
@@ -951,9 +1040,11 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           {"match_certified_complete_max", match_certified_max},
           {"output", std::move(output_record)},
           {"equation_owner_signature_identity",
-           equation_owner->owner_signature_identity()},
+           planned_equation_owner_signature_binding(
+               *planned_equation_owner)},
           {"equation_payload_identity",
-           equation_owner->physical_payload_identity()},
+           planned_equation_payload_binding(
+               *planned_equation_owner)},
           {"scope", "single-match-receiving-local"},
           {"coefficient_transport", "native-retained-only"},
           {"whole_arm_complete", false}};

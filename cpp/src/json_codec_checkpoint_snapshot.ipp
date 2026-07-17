@@ -174,7 +174,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
             "checkpoint derived local lost its strong owner");
       }
       if (schema ==
-          "diffexp2-retained-plan-match-local-materialization-v1") {
+              "diffexp2-retained-plan-match-local-materialization-v1" ||
+          schema ==
+              "diffexp2-retained-plan-match-local-materialization-v2") {
         auto hop = std::static_pointer_cast<StoredPlannedMatchHop>(opaque);
         if (required_string(*local->retained_derivation(), "source_match") !=
             hop->handle())
@@ -343,13 +345,27 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   }
   json::array local_items;
   local_items.reserve(locals.size());
-  for (const auto& local : locals)
-    local_items.push_back(local->checkpoint_record());
+  for (const auto& local : locals) {
+    try {
+      local_items.push_back(local->checkpoint_record());
+    } catch (const std::exception& error) {
+      throw std::logic_error(
+          "checkpoint local " + local->handle() +
+          " serialization failed: " + error.what());
+    }
+  }
   json::array exact_match_items;
   json::array acb_match_items;
   json::array planned_match_items;
   for (const auto& match : matches) {
-    auto record = match->checkpoint_record();
+    json::object record;
+    try {
+      record = match->checkpoint_record();
+    } catch (const std::exception& error) {
+      throw std::logic_error(
+          "checkpoint match " + match->handle() +
+          " serialization failed: " + error.what());
+    }
     if (std::dynamic_pointer_cast<StoredPlannedMatchHop>(match))
       planned_match_items.push_back(std::move(record));
     else if (std::dynamic_pointer_cast<StoredExactRegularMatch>(match))

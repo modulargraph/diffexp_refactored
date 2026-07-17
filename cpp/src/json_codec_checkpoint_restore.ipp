@@ -629,7 +629,9 @@ json::object restore_checkpoint(const std::string& path,
             continue;
           }
           if (derivation_schema !=
-              "diffexp2-retained-plan-match-local-materialization-v1")
+                  "diffexp2-retained-plan-match-local-materialization-v1" &&
+              derivation_schema !=
+                  "diffexp2-retained-plan-match-local-materialization-v2")
             throw std::invalid_argument(
                 "checkpoint retained local has an unsupported derivation kind");
           const auto found = restored->matches.find(

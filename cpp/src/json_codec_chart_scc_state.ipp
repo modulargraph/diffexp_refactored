@@ -847,6 +847,15 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
   const std::string& rational_shadow_identity() const {
     return rational_shadow_identity_;
   }
+  std::optional<std::uint32_t> matching_scc_dimension() const override {
+    return dimension();
+  }
+  const char* matching_scc_column_execution_capability() const override {
+    return column_execution_capability();
+  }
+  const std::string* matching_scc_rational_shadow_identity() const override {
+    return &rational_shadow_identity_;
+  }
 
  protected:
   std::string handle_;

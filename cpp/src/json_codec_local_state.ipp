@@ -536,6 +536,15 @@ class PhysicalEquationOwnerBase {
   virtual const std::string& physical_payload_identity() const = 0;
   virtual const std::string& physical_payload_record() const = 0;
   virtual const std::string& owner_signature_identity() const = 0;
+  virtual std::optional<std::uint32_t> matching_scc_dimension() const {
+    return std::nullopt;
+  }
+  virtual const char* matching_scc_column_execution_capability() const {
+    return nullptr;
+  }
+  virtual const std::string* matching_scc_rational_shadow_identity() const {
+    return nullptr;
+  }
   virtual std::optional<std::pair<
       FiniteLaurentVector<ComplexBall>, std::string>>
   normalize_acb_matching_vector(
@@ -1747,6 +1756,7 @@ struct RationalShadowColumnWitness {
   std::shared_ptr<const LocalSolution<Rational>> solution;
   std::string rational_shadow_identity;
   std::string source_column_identity;
+  std::string target_column_identity;
 };
 
 EpsilonLatticeSaturationResult<Rational>

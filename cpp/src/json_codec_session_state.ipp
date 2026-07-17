@@ -777,11 +777,12 @@ LocalSolution<ComplexBall> specialize_rational_local_to_acb(
           source.prescriptions, target_geometry.prescriptions))
     throw std::invalid_argument(
         "Rational-shadow local geometry or analytic prescriptions differ from the target Acb SCC");
-  if (!target_geometry.chart.infinite_radius &&
-      !acb_contains_exact_rational(
-          source.chart.radius, Rational(target_geometry.radius_exact)))
-    throw std::invalid_argument(
-        "Rational-shadow local radius does not contain the target exact radius");
+  // The specialization command has already required byte-identical exact
+  // owner geometry records.  The two sessions may parse their common
+  // algebraic radius enclosure at different Arb precisions, so ball equality
+  // is neither an exact-identity test nor stable across domains.  The source
+  // local was validated against its retained owner when it was published;
+  // install the target owner's independently certified radius below.
 
   LocalSolution<ComplexBall> output;
   output.chart = target_geometry.chart;

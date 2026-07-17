@@ -1389,7 +1389,7 @@ clearedPhysicalSymbolic[cs_Association] := Module[{d = cs["SystemSize"]},
 epsilonRegularPrincipalCertificate[cs_Association,
     nmax_Integer] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], blocks, physical, dVals, nVals,
-   d0Val, integralOperators, integralSeeds, scalarJordan, positiveTaylor,
+   d0Val, integralOperators, integralSeeds, positiveTaylor,
    originalPoleDepth, eligible, reason},
   blocks = blockList[cs];
   physical = clearedPhysicalSymbolic[cs];
@@ -1402,25 +1402,28 @@ epsilonRegularPrincipalCertificate[cs_Association,
     AllTrue[Join[dVals, nVals], # >= 0 &];
   integralSeeds = matrixEpsPoleDepth[cs["V"]] === 0;
   originalPoleDepth = recurrencePoleDepth[clearedSymbolic[cs], nmax];
-  (* The first implementation deliberately admits only semisimple columns.
-     Any actual resonance is handled as a bounded one-layer transaction in
-     the certified spectral basis; SCC sources need not have the same a tag
-     as a homogeneous residue root. *)
-  scalarJordan = AllTrue[blocks, Lookup[#, "q", 0] === 1 &];
+  (* Positive Taylor layers are normally solved in the epsilon-integral
+     reduced physical frame.  A T/P/R layer is exceptional only at that one
+     n: RecurrenceSolver routes the complete affine-Jordan schedule through
+     its retained exact spectral principal/source transaction, then returns
+     to the physical recurrence.  That transaction supports arbitrary
+     certified Jordan chains and propagates CASE-P hits to the composite
+     compensator, so neither a nontrivial chain nor a positive resonance
+     justifies applying V^-1 N_j V (and its artificial epsilon pole) at every
+     later Taylor layer. *)
   positiveTaylor = AllTrue[Flatten[Table[
       !zeroCanQ[Cancel[Together[target["a"] + n - other["a"]]]],
       {target, blocks}, {n, 1, nmax}, {other, blocks}]], TrueQ];
   eligible = !TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
     nmax >= 1 && originalPoleDepth > 0 && integralOperators &&
-    integralSeeds && scalarJordan;
+    integralSeeds;
   reason = Which[
     TrueQ[Lookup[cs["IndicialData"], "Regular", False]], "regular-chart",
     nmax < 1, "no-positive-taylor-layer",
     originalPoleDepth === 0, "spectral-recurrence-already-epsilon-integral",
     !integralOperators, "nonintegral-reduced-operator",
     !integralSeeds, "nonintegral-homogeneous-seed-frame",
-    !scalarJordan, "nontrivial-jordan-chain",
-    True, "certified-epsilon-regular-principal-recurrence"];
+    True, "certified-affine-jordan-epsilon-regular-principal-recurrence"];
   <|"Eligible" -> eligible, "Reason" -> reason,
     "Symbolic" -> physical, "D0Valuation" -> d0Val,
     "MinimumOperatorValuation" -> If[Join[dVals, nVals] === {},
@@ -1428,7 +1431,9 @@ epsilonRegularPrincipalCertificate[cs_Association,
     "OriginalRecurrencePoleDepth" -> originalPoleDepth,
     "SpectralSeedPoleDepth" -> matrixEpsPoleDepth[cs["V"]],
     "InitialSourcePoleDepth" -> inverseSpectralTransformPoleDepth[cs],
-    "PositiveTaylorUnitDeterminant" -> positiveTaylor|>];
+    "PositiveTaylorNonresonant" -> positiveTaylor,
+    "ExceptionalLayerPolicy" ->
+      "exact-affine-jordan-spectral-transaction"|>];
 
 (* A negative-valued j-th Taylor multiplier can be used again after every
    j Taylor steps.  The old one-hit epsPoleDepth misses this composition.
@@ -4875,6 +4880,31 @@ $nativeSCCCompositeCache = <||>;
 $nativeSCCCompositeCacheMax = 32;
 $nativeSCCCompositeReservedCapacity = 0;
 
+(* A singular composite starts from a compact, cancellation-audited epsilon
+   rectangle.  These dynamically scoped values are retry coordinates, not
+   user configuration: the public default is deliberately small, while an
+   explicit frame-exhaustion witness may widen one edge without ever falling
+   back to the often enormous scalar terminal bound. *)
+$nativeSCCFrameLowerExtra = Automatic;
+$nativeSCCFrameTopHalo = Automatic;
+$nativeSCCFrameRetryLimit = 5;
+$nativeSCCFrameLowerExtraMax = 16;
+$nativeSCCFrameTopHaloMax = 32;
+
+sccNativeDefaultFrameLowerExtra[cs_Association] := Min[8, Max[4,
+  2 Lookup[Lookup[cs, "IntegrationSequence", <||>],
+    "CouplingDepth", 0]]];
+
+sccNativeEffectiveFrameLowerExtra[cs_Association] := If[
+  IntegerQ[$nativeSCCFrameLowerExtra] &&
+    0 <= $nativeSCCFrameLowerExtra <= $nativeSCCFrameLowerExtraMax,
+  $nativeSCCFrameLowerExtra, sccNativeDefaultFrameLowerExtra[cs]];
+
+sccNativeEffectiveFrameTopHalo[] := If[
+  IntegerQ[$nativeSCCFrameTopHalo] &&
+    1 <= $nativeSCCFrameTopHalo <= $nativeSCCFrameTopHaloMax,
+  $nativeSCCFrameTopHalo, 8];
+
 nativeSCCCompositeEffectiveCapacity[] := Max[
   $nativeSCCCompositeCacheMax, $nativeSCCCompositeReservedCapacity];
 
@@ -4957,6 +4987,12 @@ sccNativeCompositeCacheSignature[cs_Association, req_Association] := {
   TrueQ[$disableRationalDenominatorFusion],
   TrueQ[$disableGroupedSpectralTransform],
   TrueQ[$disablePolynomialNhatTransform],
+  sccNativeEffectiveFrameLowerExtra[cs],
+  sccNativeEffectiveFrameTopHalo[],
+  Environment["DE2_SCC_DIAGNOSTIC_START_FRAME"],
+  Environment["DE2_SCC_DIAGNOSTIC_STRICT_PROBE"],
+  Environment["DE2_SCC_DIAGNOSTIC_LOWER_EXTRA"],
+  Environment["DE2_SCC_DIAGNOSTIC_TOP_HALO"],
   Environment["DE2_CPP_PERSISTENT"]};
 
 sccCaptureHomogeneousGroup[blockcs_Association,
@@ -5515,7 +5551,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    sourceTransforms, gaugeTransforms, gaugeFrames, gaugePrepStart,
    gaugePrepMemory, gaugeProbeRecord, rationalShadowDecision,
    seedWorkHalos, blockRequiredTops, workReqs, reservoirMax,
-   diagnosticStartFrame,
+   diagnosticStartFrame, singularCompositeQ, compactFrameQ,
    coreFb, diagnosticLowerExtra, diagnosticStrictProbe,
    diagnosticTopHalo},
   missingReq = Select[{"TOrder", "EpsWindow"},
@@ -5648,16 +5684,25 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   workTOrder = sccWorkTOrder[cs, req];
   seedWorkHalos = sccSeedWorkHalos[cs, blockSystems, workTOrder];
   blockRequiredTops = reservoirMax + seedWorkHalos;
+  singularCompositeQ = !TrueQ[$disableAdaptiveLowerFrames] &&
+    AnyTrue[blockSystems,
+      !TrueQ[Lookup[Lookup[#, "IndicialData", <||>],
+        "Regular", False]] &];
   diagnosticStartFrame =
     Environment["DE2_SCC_DIAGNOSTIC_START_FRAME"] === "1";
+  compactFrameQ = diagnosticStartFrame || singularCompositeQ;
   diagnosticStrictProbe =
     Environment["DE2_SCC_DIAGNOSTIC_STRICT_PROBE"] === "1";
   diagnosticLowerExtra = Switch[
     Environment["DE2_SCC_DIAGNOSTIC_LOWER_EXTRA"],
-    "1", 1, "2", 2, "4", 4, "8", 8, "16", 16, _, 0];
+    "1", 1, "2", 2, "4", 4, "8", 8, "16", 16,
+    _, If[diagnosticStartFrame, 0,
+      sccNativeEffectiveFrameLowerExtra[cs]]];
   diagnosticTopHalo = Switch[
     Environment["DE2_SCC_DIAGNOSTIC_TOP_HALO"],
-    "4", 4, "8", 8, "16", 16, "32", 32, "64", 64, _, None];
+    "4", 4, "8", 8, "16", 16, "32", 32, "64", 64,
+    _, If[diagnosticStartFrame, None,
+      If[singularCompositeQ, sccNativeEffectiveFrameTopHalo[], None]]];
   If[IntegerQ[diagnosticTopHalo],
     seedWorkHalos = Min[#, diagnosticTopHalo] & /@ seedWorkHalos;
     blockRequiredTops = reservoirMax + seedWorkHalos];
@@ -5680,9 +5725,9 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
           "InitialSourceDepth", "FrameTop", "TerminalFrameBase"}] & /@
         framePlans]];
   coreFb = Min[Lookup[framePlans, "StartFrameBase"]];
-  fb = If[diagnosticStartFrame, coreFb,
+  fb = If[compactFrameQ, coreFb,
     Min[Lookup[framePlans, "TerminalFrameBase"]]];
-  If[diagnosticStartFrame,
+  If[compactFrameQ,
     fb = Max[Min[Lookup[framePlans, "TerminalFrameBase"]],
       fb - diagnosticLowerExtra]];
   workTop = Max[Lookup[framePlans, "FrameTop"]];
@@ -5696,9 +5741,9 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   captures = Block[{$shCache = <||>, $shSysTag = None,
       $cppStaticOperatorCache = <||>,
       $cancellationAuditBase = If[
-        diagnosticStartFrame && fb < coreFb, coreFb, None],
-      $adaptiveLowerFrameProbe = diagnosticStartFrame &&
-        diagnosticStrictProbe},
+        compactFrameQ && fb < coreFb, coreFb, None],
+      $adaptiveLowerFrameProbe = compactFrameQ &&
+        (singularCompositeQ || diagnosticStrictProbe)},
     MapThread[sccCaptureHomogeneousGroup[
         #1, #2, #3, forcedFrame] &,
       {blockSystems, workReqs, framePlans}]];
@@ -6904,7 +6949,97 @@ sccNativeFinalizeColumn[cs_Association, req_Association,
     Join[result,
       <|"SeedLocalComponent" -> selectedSeedLocalComponent|>]]];
 
-SolveNativeSCCBasisColumn[cs_Association, req_Association,
+sccNativeDiagnosticFrameOverrideQ[] := AnyTrue[{
+    "DE2_SCC_DIAGNOSTIC_START_FRAME",
+    "DE2_SCC_DIAGNOSTIC_STRICT_PROBE",
+    "DE2_SCC_DIAGNOSTIC_LOWER_EXTRA",
+    "DE2_SCC_DIAGNOSTIC_TOP_HALO"},
+  StringQ[Environment[#]] &];
+
+sccNativeFrameFailureKind[failure_] := Module[
+  {text = ToLowerCase[ToString[failure, InputForm]]},
+  Which[
+    AnyTrue[{
+        "below the work frame",
+        "below the target frame",
+        "lower-frame",
+        "retained lower epsilon frame",
+        "insufficient lower halo",
+        "lowest framed",
+        "cancellation guard",
+        "epsilon shift would discard nonzero",
+        "epsilon shift lies wholly below",
+        "pseudo jordan solve would discard",
+        "canonical jordan seed exceeds"},
+      StringContainsQ[text, #] &], "Lower",
+    AnyTrue[{
+        "above the work frame",
+        "above the retained epsilon reservoir",
+        "above retained epsilon reservoir",
+        "needs coefficients above the retained epsilon reservoir",
+        "insufficient upper halo",
+        "retained upper epsilon",
+        "polar frame incomplete"},
+      StringContainsQ[text, #] &], "Upper",
+    True, None]];
+
+sccNativeRethrowFrameFailure[cs_Association, failure_,
+    attempts_List] := Module[{payload},
+  payload = If[FailureQ[failure] &&
+      AssociationQ[Quiet[Check[failure[[2]], None]]],
+    failure[[2]], <|"ID" -> "E5",
+      "Detail" -> ToString[failure, InputForm]|>];
+  err[Lookup[payload, "ID", "E5"], cs,
+    Join[KeyDrop[payload, {"ID", "Module", "Chart"}],
+      If[Length[attempts] > 1,
+        <|"SCCFrameAttempts" -> attempts,
+          "Detail" -> Lookup[payload, "Detail",
+            "bounded native SCC epsilon-frame retries were exhausted"]|>,
+        <||>]]]];
+
+SetAttributes[sccNativeWithFrameRetries, HoldRest];
+sccNativeWithFrameRetries[cs_Association, req_Association,
+    expression_] := Module[
+  {automaticQ = !sccNativeDiagnosticFrameOverrideQ[],
+   lowerExtra = sccNativeEffectiveFrameLowerExtra[cs],
+   topHalo = sccNativeEffectiveFrameTopHalo[],
+   attempt = 0, result = None, kind, attempts = {}, next},
+  If[!automaticQ, Return[expression, Module]];
+  WithNativeSCCCompositeCacheReservation[$nativeSCCFrameRetryLimit,
+    While[attempt < $nativeSCCFrameRetryLimit,
+      attempt++;
+      (* DE2Error prints before throwing.  Intermediate bounded probes are
+         intentionally silent; a terminal failure is reissued once below
+         with the complete compact-attempt history. *)
+      result = Block[{Print = (Null &),
+          $nativeSCCFrameLowerExtra = lowerExtra,
+          $nativeSCCFrameTopHalo = topHalo},
+        Catch[expression, "DiffExp2Error"]];
+      If[!FailureQ[result],
+        If[Environment["DE2_SCC_FRAME_RETRY_TIMING"] === "1" &&
+            attempts =!= {},
+          Print["DE2 SCC FRAME RETRY recovered attempts=",
+            Append[attempts, <|"Attempt" -> attempt,
+              "LowerExtra" -> lowerExtra, "TopHalo" -> topHalo,
+              "Result" -> "ok"|>]]];
+        Return[result, Module]];
+      kind = sccNativeFrameFailureKind[result];
+      AppendTo[attempts, <|"Attempt" -> attempt,
+        "LowerExtra" -> lowerExtra, "TopHalo" -> topHalo,
+        "FailureEdge" -> kind|>];
+      next = Switch[kind,
+        "Lower", If[lowerExtra < $nativeSCCFrameLowerExtraMax,
+          Min[$nativeSCCFrameLowerExtraMax, 2 lowerExtra], None],
+        "Upper", If[topHalo < $nativeSCCFrameTopHaloMax,
+          Min[$nativeSCCFrameTopHaloMax, 2 topHalo], None],
+        _, None];
+      If[!IntegerQ[next],
+        Return[sccNativeRethrowFrameFailure[
+          cs, result, attempts], Module]];
+      If[kind === "Lower", lowerExtra = next, topHalo = next]]];
+  sccNativeRethrowFrameFailure[cs, result, attempts]];
+
+solveNativeSCCBasisColumnAttempt[cs_Association, req_Association,
     seedBlock_Integer, seedLocalComponent_Integer:1] := Module[
   {spec, response},
   spec = sccNativeBuildColumnRequest[
@@ -6914,7 +7049,13 @@ SolveNativeSCCBasisColumn[cs_Association, req_Association,
     spec["CheckpointIdentity"]];
   sccNativeFinalizeColumn[cs, req, spec, response]];
 
-SolveNativeSCCBasis[cs_Association, req_Association,
+SolveNativeSCCBasisColumn[cs_Association, req_Association,
+    seedBlock_Integer, seedLocalComponent_Integer:1] :=
+  sccNativeWithFrameRetries[cs, req,
+    solveNativeSCCBasisColumnAttempt[
+      cs, req, seedBlock, seedLocalComponent]];
+
+solveNativeSCCBasisAttempt[cs_Association, req_Association,
     threads_:Automatic] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], components,
    seeds, specs,
@@ -6997,6 +7138,11 @@ SolveNativeSCCBasis[cs_Association, req_Association,
         Lookup[Lookup[columns, "EpsWindow"], "CompleteMax"]]|>,
     "TWindow" -> <|"CompleteMax" -> req["TOrder"]|>,
     "NativeSummary" -> KeyDrop[batch, {"results"}]|>];
+
+SolveNativeSCCBasis[cs_Association, req_Association,
+    threads_:Automatic] :=
+  sccNativeWithFrameRetries[cs, req,
+    solveNativeSCCBasisAttempt[cs, req, threads]];
 
 SolveNativeRegularBasis[cs_Association, req_Association,
     threads_:Automatic, forceMonolithic_:False,

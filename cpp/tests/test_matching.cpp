@@ -488,6 +488,39 @@ void refined_acb_match_smoke() {
             (matched.weights[1].coefficient(0) - ComplexBall(2)).is_zero());
 }
 
+void refined_acb_match_without_public_upper_slack_smoke() {
+  ComplexBall::set_precision(256);
+  constexpr std::size_t width = 4;
+  const FiniteLaurentMatrix<Rational> exact_basis = {
+      {rational_constant_frame("1", width),
+       rational_constant_frame("1", width)},
+      {rational_constant_frame("0", width),
+       rational_epsilon_frame("1", width)}};
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis(
+      exact_basis, "exact no-upper-slack Acb match record");
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-50");
+  options.required_complete_max = 3;
+  options.max_refinement_steps = 2;
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      {{ball_constant_frame("1", width),
+        ball_constant_frame("1", width)},
+       {ball_constant_frame("0", width),
+        ball_epsilon_frame("1", width)}},
+      {ball_constant_frame("3", width),
+       ball_epsilon_frame("2", width)},
+      exact_record, options, "no-upper-slack refined Acb match");
+  check("private candidate zeros preserve a certified public match edge",
+        matched.residual_history.size() == 1 &&
+            matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            matched.residual_history.back().complete_through_required &&
+            matched.weights[0].complete_max() == 3 &&
+            matched.weights[1].complete_max() == 3 &&
+            (matched.weights[0].coefficient(0) - ComplexBall(1)).is_zero() &&
+            (matched.weights[1].coefficient(0) - ComplexBall(2)).is_zero());
+}
+
 void ill_scaled_refinement_smoke() {
   ComplexBall::set_precision(256);
   const std::string big =
@@ -919,6 +952,7 @@ int main() {
   acb_saturation_candidate_chop_smoke();
   ambiguous_acb_pivot_smoke();
   refined_acb_match_smoke();
+  refined_acb_match_without_public_upper_slack_smoke();
   ill_scaled_refinement_smoke();
   incomplete_refinement_rollback_smoke();
   refined_acb_ambiguous_pivot_smoke();

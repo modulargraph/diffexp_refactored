@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -173,6 +174,66 @@ struct ExactVector {
 using FormalTaylorSlab = std::vector<ExactVector>;
 using FormalSlabs = std::map<FormalTag, FormalTaylorSlab>;
 
+struct CanonicalAClass {
+  std::string b;
+  Rational base;
+};
+
+inline bool exact_integer(const Rational& value) {
+  return value.str().find('/') == std::string::npos;
+}
+
+inline std::uint32_t exact_nonnegative_integer_value(
+    const Rational& value) {
+  if (value.sign() < 0 || !exact_integer(value))
+    throw std::logic_error(
+        "formal tower alignment produced a noninteger negative shift");
+  const auto text = value.str();
+  const auto parsed = std::stoull(text);
+  if (parsed > std::numeric_limits<std::uint32_t>::max())
+    throw std::overflow_error(
+        "formal tower alignment shift exceeds uint32 range");
+  return static_cast<std::uint32_t>(parsed);
+}
+
+inline std::vector<CanonicalAClass> canonical_a_classes(
+    const LocalSolution<Rational>& solution) {
+  std::vector<CanonicalAClass> classes;
+  for (const auto& sector : solution.sectors) {
+    if (sector.a.domain != ExactDomain::Rational ||
+        sector.b.domain != ExactDomain::Rational)
+      throw std::invalid_argument(
+          "SCC parent completeness requires exact Rational Frobenius tags");
+    const Rational a(sector.a.canonical);
+    auto found = std::find_if(
+        classes.begin(), classes.end(), [&](const auto& candidate) {
+          return candidate.b == sector.b.canonical &&
+                 exact_integer(a - candidate.base);
+        });
+    if (found == classes.end()) {
+      classes.push_back(CanonicalAClass{sector.b.canonical, a});
+    } else if (a < found->base) {
+      found->base = a;
+    }
+  }
+  return classes;
+}
+
+inline const CanonicalAClass& canonical_a_class(
+    const std::vector<CanonicalAClass>& classes,
+    const LocalSector<Rational>& sector) {
+  const Rational a(sector.a.canonical);
+  const auto found = std::find_if(
+      classes.begin(), classes.end(), [&](const auto& candidate) {
+        return candidate.b == sector.b.canonical &&
+               exact_integer(a - candidate.base);
+      });
+  if (found == classes.end())
+    throw std::logic_error(
+        "formal tower lost its canonical integer-shift class");
+  return *found;
+}
+
 inline ExactVector zero_vector(EpsilonWindow epsilon,
                                std::uint32_t dimension) {
   ExactVector result;
@@ -198,14 +259,14 @@ inline FormalTaylorSlab& slab_for(
 inline FormalSlabs collect_formal_slabs(
     const LocalSolution<Rational>& solution) {
   local_detail::validate_local_solution(solution, true);
+  const auto classes = canonical_a_classes(solution);
   FormalSlabs result;
   for (const auto& sector : solution.sectors) {
-    if (sector.a.domain != ExactDomain::Rational ||
-        sector.b.domain != ExactDomain::Rational)
-      throw std::invalid_argument(
-          "SCC parent completeness requires exact Rational Frobenius tags");
+    const auto& canonical = canonical_a_class(classes, sector);
+    const auto shift = exact_nonnegative_integer_value(
+        Rational(sector.a.canonical) - canonical.base);
     const FormalTag tag{
-        sector.a.canonical, sector.b.canonical, sector.log_power};
+        canonical.base.str(), sector.b.canonical, sector.log_power};
     auto& slab = slab_for(result, tag, solution.epsilon,
                           solution.dimension,
                           solution.taylor_complete_max);
@@ -213,12 +274,17 @@ inline FormalSlabs collect_formal_slabs(
          power <= solution.epsilon.complete_max; ++power) {
       const auto epsilon_index = static_cast<std::size_t>(
           power - solution.epsilon.min_power);
-      for (std::uint32_t n = 0; n <= solution.taylor_complete_max; ++n)
+      for (std::uint32_t n = 0; n <= solution.taylor_complete_max; ++n) {
+        const auto canonical_n =
+            static_cast<std::uint64_t>(n) + shift;
+        if (canonical_n > solution.taylor_complete_max) break;
         for (std::uint32_t component = 0; component < solution.dimension;
              ++component)
-          slab[n].at(power, component) +=
+          slab[static_cast<std::size_t>(canonical_n)]
+              .at(power, component) +=
               sector.coefficients[local_detail::sector_index(
                   solution, epsilon_index, n, component)];
+      }
     }
   }
   return result;
@@ -227,23 +293,23 @@ inline FormalSlabs collect_formal_slabs(
 inline FormalSlabs collect_theta_slabs(
     const LocalSolution<Rational>& solution) {
   local_detail::validate_local_solution(solution, true);
+  const auto classes = canonical_a_classes(solution);
   FormalSlabs result;
   for (const auto& sector : solution.sectors) {
-    if (sector.a.domain != ExactDomain::Rational ||
-        sector.b.domain != ExactDomain::Rational)
-      throw std::invalid_argument(
-          "SCC parent completeness requires exact Rational Frobenius tags");
+    const auto& canonical = canonical_a_class(classes, sector);
     const Rational a(sector.a.canonical);
     const Rational b(sector.b.canonical);
+    const auto shift = exact_nonnegative_integer_value(
+        a - canonical.base);
     const FormalTag same_tag{
-        sector.a.canonical, sector.b.canonical, sector.log_power};
+        canonical.base.str(), sector.b.canonical, sector.log_power};
     auto& same = slab_for(result, same_tag, solution.epsilon,
                           solution.dimension,
                           solution.taylor_complete_max);
     FormalTaylorSlab* lower = nullptr;
     if (sector.log_power > 0) {
       const FormalTag lower_tag{
-          sector.a.canonical, sector.b.canonical,
+          canonical.base.str(), sector.b.canonical,
           sector.log_power - 1};
       lower = &slab_for(result, lower_tag, solution.epsilon,
                         solution.dimension,
@@ -254,6 +320,9 @@ inline FormalSlabs collect_theta_slabs(
       const auto epsilon_index = static_cast<std::size_t>(
           power - solution.epsilon.min_power);
       for (std::uint32_t n = 0; n <= solution.taylor_complete_max; ++n) {
+        const auto canonical_n =
+            static_cast<std::uint64_t>(n) + shift;
+        if (canonical_n > solution.taylor_complete_max) break;
         const Rational a_plus_n =
             a + Rational(std::to_string(n));
         for (std::uint32_t component = 0; component < solution.dimension;
@@ -261,20 +330,33 @@ inline FormalSlabs collect_theta_slabs(
           const auto value = sector.coefficients[
               local_detail::sector_index(
                   solution, epsilon_index, n, component)];
-          same[n].at(power, component) += a_plus_n * value;
+          same[static_cast<std::size_t>(canonical_n)]
+              .at(power, component) += a_plus_n * value;
           if (epsilon_index > 0) {
             const auto previous = sector.coefficients[
                 local_detail::sector_index(
                     solution, epsilon_index - 1, n, component)];
-            same[n].at(power, component) += b * previous;
+            same[static_cast<std::size_t>(canonical_n)]
+                .at(power, component) += b * previous;
             if (lower != nullptr)
-              (*lower)[n].at(power, component) += previous;
+              (*lower)[static_cast<std::size_t>(canonical_n)]
+                  .at(power, component) += previous;
           }
         }
       }
     }
   }
   return result;
+}
+
+inline std::string bounded_rational_witness(const Rational& value) {
+  auto witness = value.str();
+  constexpr std::size_t kWitnessLimit = 512;
+  const auto witness_size = witness.size();
+  if (witness_size > kWitnessLimit)
+    witness = witness.substr(0, kWitnessLimit) +
+        "...[decimal-bytes=" + std::to_string(witness_size) + "]";
+  return witness;
 }
 
 inline void accumulate_multiplier(
@@ -401,14 +483,57 @@ inline SCCFormalResidualCertificate certify_scc_parent_exact_formal_residual(
         for (std::uint32_t component = 0; component < parent.dimension;
              ++component) {
           ++rows;
-          if (!slab[n].at(power, component).is_zero())
+          if (!slab[n].at(power, component).is_zero()) {
+            auto lhs = scc_completeness_detail::zero_vector(
+                claimed_epsilon, parent.dimension);
+            auto rhs = scc_completeness_detail::zero_vector(
+                claimed_epsilon, parent.dimension);
+            const auto theta_found = theta_values.find(tag);
+            const auto value_found = values.find(tag);
+            if (theta_found == theta_values.end() ||
+                value_found == values.end())
+              throw std::logic_error(
+                  "SCC parent residual witness lost its exact formal tag");
+            for (std::size_t lag = 0;
+                 lag < equation.q_lags.size() && lag <= n; ++lag) {
+              const auto& q = equation.q_lags[lag];
+              if (q.zero) continue;
+              const auto source_n =
+                  n - static_cast<std::uint32_t>(lag);
+              for (std::uint32_t source_component = 0;
+                   source_component < parent.dimension;
+                   ++source_component)
+                scc_completeness_detail::accumulate_multiplier(
+                    q, theta_found->second[source_n], source_component,
+                    lhs, source_component, plus, tag, n);
+            }
+            for (std::size_t lag = 0;
+                 lag < equation.c_lags.size() && lag <= n; ++lag) {
+              const auto& entries = equation.c_lags[lag];
+              if (entries.empty()) continue;
+              const auto source_n =
+                  n - static_cast<std::uint32_t>(lag);
+              for (const auto& entry : entries)
+                scc_completeness_detail::accumulate_multiplier(
+                    entry.value, value_found->second[source_n],
+                    entry.column, rhs, entry.row, plus, tag, n);
+            }
             throw std::domain_error(
                 "SCC parent physical q/C residual is not exact zero for tag (a=" +
                 tag.a + ",b=" + tag.b + ",log=" +
                 std::to_string(tag.log_power) + "), taylor=" +
                 std::to_string(n) + ", epsilon=" +
                 std::to_string(power) + ", component=" +
-                std::to_string(component));
+                std::to_string(component) + ", coefficient=" +
+                scc_completeness_detail::bounded_rational_witness(
+                    slab[n].at(power, component)) +
+                ", q_theta=" +
+                scc_completeness_detail::bounded_rational_witness(
+                    lhs.at(power, component)) +
+                ", c_value=" +
+                scc_completeness_detail::bounded_rational_witness(
+                    rhs.at(power, component)));
+          }
         }
   return {claimed_epsilon, claimed_taylor_complete_max,
           residual.size(), rows};

@@ -68,6 +68,69 @@ LocalSolution<Rational> exponential_local() {
   return local;
 }
 
+void test_integer_shifted_tower_alignment() {
+  PreparedPhysicalClearedODE<Rational> equation;
+  equation.dimension = 2;
+  equation.q_lags = {epsilon_rational(0, "1")};
+  equation.c_lags.resize(2);
+  equation.c_lags[1].push_back(
+      PhysicalODEMatrixEntry<Rational>{
+          0, 1, epsilon_rational(0, "1")});
+  equation.owner_signature_identity = "shifted-tower-owner-v1";
+  equation.payload_identity = "shifted-tower-payload-v1";
+  equation.exact_payload_record = "shifted-tower-record-v1";
+
+  LocalSolution<Rational> local;
+  local.chart.center_exact = "0";
+  local.chart.scale_exact = "1";
+  local.chart.radius = ComplexBall::from_strings("2");
+  local.epsilon = {0, 0};
+  local.taylor_complete_max = 2;
+  local.dimension = 2;
+  local.checkpoint_identity = "shifted-tower-local-v1";
+
+  // theta(y0)=t y1, theta(y1)=0 with y0=t and y1=1.  The gauge path
+  // represents y0 in the a=-1 tower and y1 in the integer-equivalent a=0
+  // tower.  They are coefficients of the same exact formal series after
+  // aligning a+n, even though their retained sector tags differ.
+  LocalSector<Rational> lower;
+  lower.a = ExactScalarDescriptor::rational("-1");
+  lower.b = ExactScalarDescriptor::rational("0");
+  lower.log_power = 0;
+  lower.coefficients.assign(local.sector_size(), Rational(0));
+  lower.coefficients[4] = Rational(1);  // n=2, component=0: t^(-1+2)
+
+  LocalSector<Rational> upper;
+  upper.a = ExactScalarDescriptor::rational("0");
+  upper.b = ExactScalarDescriptor::rational("0");
+  upper.log_power = 0;
+  upper.coefficients.assign(local.sector_size(), Rational(0));
+  upper.coefficients[1] = Rational(1);  // n=0, component=1
+  local.sectors = {std::move(lower), std::move(upper)};
+
+  const auto certificate =
+      diffexp2::certify_scc_parent_exact_formal_residual(
+          equation, local, {0, 0}, 2);
+  if (certificate.exact_tag_count != 1 ||
+      certificate.coefficient_rows != 6)
+    throw std::runtime_error(
+        "integer-shifted formal towers were not aligned to one base");
+
+  local.sectors.front().coefficients[4] = Rational(2);
+  bool corruption_rejected = false;
+  try {
+    (void)diffexp2::certify_scc_parent_exact_formal_residual(
+        equation, local, {0, 0}, 2);
+  } catch (const std::domain_error& error) {
+    corruption_rejected =
+        std::string(error.what()).find("not exact zero") !=
+        std::string::npos;
+  }
+  if (!corruption_rejected)
+    throw std::runtime_error(
+        "aligned integer-shifted towers hid a genuine residual");
+}
+
 void test_formal_parent_certificate() {
   const auto equation = exponential_equation();
   auto local = exponential_local();
@@ -93,7 +156,9 @@ void test_formal_parent_certificate() {
   } catch (const std::domain_error& error) {
     corruption_rejected =
         std::string(error.what()).find("not exact zero") !=
-        std::string::npos;
+            std::string::npos &&
+        std::string(error.what()).find("coefficient=1") !=
+            std::string::npos;
   }
   if (!corruption_rejected)
     throw std::runtime_error(
@@ -210,6 +275,7 @@ int main() {
     ComplexBall::set_precision(256);
     test_transaction_local_candidate();
     test_formal_parent_certificate();
+    test_integer_shifted_tower_alignment();
     std::cout << "PASS: SCC formal parent completeness certificate\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {

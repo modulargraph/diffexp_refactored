@@ -1222,7 +1222,8 @@ globalClearedSystem[systemKey_] := Module[
 regularClearedFromGlobal[cs_Association] := Module[
   {systemKey = cs["SystemClearKey"], key, cached, global, x,
    t = cs["ChartVar"], center = cs["Center"], beta = cs["ChartMap", "Scale"],
-   den, denCoeffs, denContent, num, d0, dD, dN, dExpr, NhatExpr,
+   affineContentInvariantQ, den, denCoeffs, denContent, num, d0, dD, dN,
+   dExpr, NhatExpr,
    phaseQ, phaseTime, phase},
   key = {systemKey, center, beta, t};
   cached = If[KeyExistsQ[$chartClearedCache, key],
@@ -1236,13 +1237,38 @@ regularClearedFromGlobal[cs_Association] := Module[
     Print["SOLVEPHASE center=", center, " phase=hoist-", label,
       " dt=", N[now - phaseTime, 6]];
     phaseTime = now]];
+  (* globalClearedSystem has already removed the content of D(x,eps) in x.
+     For coefficient-independent exact numeric c and nonzero beta,
+     x -> c + beta t is an invertible coefficient-field automorphism.  It
+     therefore preserves primitivity up to a unit: a nonunit epsilon/parameter
+     factor common to every t coefficient after the substitution would pull
+     back to the same common factor of every x coefficient before it.  Do not
+     re-prove that invariant with a PolynomialGCD at every ordinary chart.
+     Apart from being redundant, the proof can take minutes once an atlas has
+     accumulated large rational centers.  A chart-constant unit introduced by
+     the affine map need not be removed because multiplying both sides of
+     D theta = N by that unit leaves the recurrence and physical differential
+     equation unchanged.
+
+     Symbolic geometry may itself contain eps or an analytic regulator and
+     can introduce genuine nonunit content (for example beta=eps).  Keep the
+     old exact GCD fallback for that out-of-contract case. *)
+  If[zeroCanQ[beta],
+    err["E3", cs, <|
+      "Detail" -> "affine-clearing scale must be nonzero"|>]];
+  affineContentInvariantQ = AllTrue[{center, beta},
+    NumericQ[#] && FreeQ[#, _?InexactNumberQ] &];
   den = Cancel[Together[global["Denominator"] /. x -> center + beta*t]];
-  denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
-  If[denCoeffs === {},
+  If[zeroCanQ[den],
     err["E3", cs, <|"Denominator" -> den,
       "Detail" -> "affine-shifted global denominator is identically zero"|>]];
-  denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
-    Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
+  denContent = If[affineContentInvariantQ, 1,
+    denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
+    If[denCoeffs === {},
+      err["E3", cs, <|"Denominator" -> den,
+        "Detail" -> "affine-shifted global denominator is identically zero"|>]];
+    If[Length[denCoeffs] === 1, First[denCoeffs],
+      Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]]];
   den = Cancel[Together[den/denContent]];
   num = Map[Cancel[Together[beta*t*(# /. x -> center + beta*t)/denContent]] &,
     global["Numerator"], {2}];

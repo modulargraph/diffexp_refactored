@@ -76,18 +76,20 @@ assert["all-zero coefficient vectors are proved before halo accounting",
 sourceRows = {
   Join[{1}, ConstantArray[0, 10]],
   Join[{2}, ConstantArray[0, 10]]};
-ledger = ft2NativeEpsilonLedger[entries, sourceRows, 7, 7];
+ledger = ft2NativeEpsilonLedger[entries, sourceRows, 7, 3];
 assert["epsilon ledger separates coefficient and integration halos",
   AssociationQ[ledger] &&
     KeyTake[ledger, {"AvailableSourceCompleteMax", "SourceCompleteMax",
       "CoefficientHalo",
-      "IntegrationHalo", "TargetCompleteMax",
+      "IntegrationHalo", "PublicTargetCompleteMax",
+      "TargetCompleteMax",
       "DeliverableCompleteMax",
       "DownstreamRawTop"}] ===
       <|"AvailableSourceCompleteMax" -> 10,
         "SourceCompleteMax" -> 10, "CoefficientHalo" -> 1,
-        "IntegrationHalo" -> 1, "TargetCompleteMax" -> 8,
-        "DeliverableCompleteMax" -> 7, "DownstreamRawTop" -> 7|>,
+        "IntegrationHalo" -> 1, "PublicTargetCompleteMax" -> 4,
+        "TargetCompleteMax" -> 8, "DeliverableCompleteMax" -> 7,
+        "DownstreamRawTop" -> 3|>,
   ledger];
 assert["observable minima do not discount independently required raw depth",
   ledger["OutputMinimums"] ===
@@ -211,7 +213,7 @@ assert["atlas preparation receives every active non-direct vector and exact targ
     capturedMaxExtraPrecision >=
       DiffExp2`Tolerances`$MaxExtraPrecisionValue &&
     capturedPrepare["TargetCompleteMax"] === 8 &&
-    capturedPrepare["RequiredTargetCompleteMax"] === 8 &&
+    capturedPrepare["RequiredTargetCompleteMax"] === 4 &&
     Length[capturedPrepare["CoefficientVectors"]] === 4 &&
     AllTrue[capturedPrepare["Boundary"],
       DiffExp2`EpsSeries`ESMinPower[#] === -1 &&

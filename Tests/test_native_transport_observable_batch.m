@@ -63,7 +63,45 @@ assert["native_session_counters_are_fixed_size_and_summary_free",
     ByteCount[compactCounters] < 10000 &&
     FreeQ[Keys[compactCounters],
       "chart_stats" | "local_stats" | "match_stats" |
-        "transport_state_stats" | "retained_derivation"]];
+      "transport_state_stats" | "retained_derivation"]];
+
+(* A streamed hop certifies only the atlas's public residual prefix while
+   retaining the larger work frame needed by later epsilon losses. *)
+capturedHopEpsilon = None;
+streamFixtureAnchor = <|"session" -> "stream-fixture-session",
+  "local" -> "l:anchor", "checkpoint_identity" -> "anchor-checkpoint"|>;
+streamFixture = catchDE2[Block[{
+    DiffExp2`NativeTransport`Private`nativeReceivingBasis =
+      Function[{receiver, request, threads, consume, equationOwner},
+        <|"Columns" -> {<|"session" -> "stream-fixture-session",
+            "local" -> "l:basis",
+            "checkpoint_identity" -> "basis-checkpoint"|>}|>],
+    DiffExp2`CppBackend`ConsumePersistentTransportHop =
+      Function[{plan, arm, index, basis, incoming, epsilon, root,
+          refinement},
+        capturedHopEpsilon = epsilon;
+        <|"status" -> "ok", "next_local" ->
+            <|"local" -> "l:next",
+              "checkpoint_identity" -> "next-checkpoint"|>,
+          "consumed_basis_handles" -> {"l:basis"}|>]},
+  DiffExp2`NativeTransport`Private`nativeStreamTransportArm[
+    <|"Session" -> "stream-fixture-session",
+      "Anchor" -> streamFixtureAnchor, "Plan" -> <||>, "Threads" -> 1,
+      "Request" -> <|"EpsWindow" -> <|"Min" -> 0,
+          "CompleteMax" -> 8|>, "RequiredCompleteMax" -> 2|>|>,
+    <|"ChartSystems" -> {<||>, <|"Center" -> 1,
+          "IndicialData" -> <|"Regular" -> True|>|>},
+      "ValueSolvers" -> {None}, "OwnerRecords" -> {}|>,
+    "lower", <|"min" -> 0, "max" -> 8,
+      "required_complete_max" -> 7,
+      "match_required_complete_max" -> 7|>,
+    "stream-fixture-root", <|"relative_tolerance" -> "1e-8",
+      "max_steps" -> 2|>]]];
+assert["streamed hop separates public residual prefix from private work top",
+  AssociationQ[streamFixture] &&
+    Length[streamFixture["tile_sources"]] === 2 &&
+    capturedHopEpsilon === <|"min" -> 0, "max" -> 8,
+      "required_complete_max" -> 2|>];
 
 beforeInvalid = sessionStats[];
 duplicate = If[FailureQ[atlas], atlas, catchDE2[

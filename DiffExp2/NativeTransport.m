@@ -1933,6 +1933,7 @@ nativeStreamTransportArm[atlas_Association, data_Association,
   {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
    valueSolvers = data["ValueSolvers"], tiles = {atlas["Anchor"]},
    ownerRecords = Lookup[data, "OwnerRecords", {}], hopEpsilon,
+   residualRequired,
    valueSolver, valueResponse, basis, response, next, output,
    fallbackEquationOwner},
   If[!ListQ[valueSolvers] || Length[valueSolvers] =!= Length[systems],
@@ -1940,8 +1941,25 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
       "ReceivingChartCount" -> Length[systems],
       "Detail" -> "streamed native value-solver vector is not aligned with receiving chart systems"|>]];
+  residualRequired = Lookup[Lookup[atlas, "Request", <||>],
+    "RequiredCompleteMax", epsilon["match_required_complete_max"]];
+  If[!IntegerQ[residualRequired] ||
+      !TrueQ[epsilon["min"] <= residualRequired <=
+        epsilon["match_required_complete_max"] <= epsilon["max"]],
+    err["E6", <|"Arm" -> arm,
+      "ResidualRequiredCompleteMax" -> residualRequired,
+      "MatchRequiredCompleteMax" ->
+        epsilon["match_required_complete_max"],
+      "WorkEpsilon" -> KeyTake[epsilon, {"min", "max"}],
+      "Detail" ->
+        "streamed native residual and private-work epsilon contracts are inconsistent"|>]];
+  (* The atlas request distinguishes the accuracy-certified public prefix from
+     the larger finite Laurent reservoir carried for later epsilon losses.
+     Each Acb hop must pass its residual through the former; the latter stays
+     available as bounded work data and is checked again when it reaches a
+     public observable. *)
   hopEpsilon = <|"min" -> epsilon["min"], "max" -> epsilon["max"],
-    "required_complete_max" -> epsilon["match_required_complete_max"]|>;
+    "required_complete_max" -> residualRequired|>;
   output = Catch[
     Do[
       basis = None;

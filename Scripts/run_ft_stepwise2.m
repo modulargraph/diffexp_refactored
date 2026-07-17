@@ -2804,7 +2804,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "SourceCompleteMax" -> ledger["SourceCompleteMax"],
     "TargetCompleteMax" -> ledger["TargetCompleteMax"],
     "RequiredTargetCompleteMax" ->
-      ledger["TargetCompleteMax"],
+      ledger["PublicTargetCompleteMax"],
     "DeliverableCompleteMax" -> deliverableMax,
     "RequiredRawTop" -> ledger["DownstreamRawTop"],
     "CoefficientHalo" -> ledger["CoefficientHalo"],
@@ -2812,9 +2812,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "MatchEpsilonPadding" -> If[AssociationQ[atlas],
       Lookup[atlas, "MatchEpsilonPadding",
         ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
-          ledger["TargetCompleteMax"]],
+          ledger["PublicTargetCompleteMax"]],
       ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
-        ledger["TargetCompleteMax"]]|>;
+        ledger["PublicTargetCompleteMax"]]|>;
   provenZeroEntries = Select[entries,
     TrueQ[Lookup[#, "ProvenZero", False]] &];
   activeEntries = Select[entries,
@@ -2944,7 +2944,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
           lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
           physicalVar, ledger["TargetCompleteMax"],
-          ledger["TargetCompleteMax"], threads]];
+          ledger["PublicTargetCompleteMax"], threads]];
         If[FailureQ[atlas] || !AssociationQ[atlas] ||
             Lookup[atlas, "Type", None] =!=
               "DiffExp2NativeRegularIndependentArmAtlas" ||

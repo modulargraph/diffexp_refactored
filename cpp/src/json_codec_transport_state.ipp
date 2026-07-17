@@ -879,9 +879,20 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
 
     auto solution = materialize_local_basis_weights(
         basis_solutions, weights, result_checkpoint_identity);
-    materialized_top = std::min(
-        {materialized_top, solution.epsilon.complete_max,
-         match_certified_max});
+    materialized_top = std::min(materialized_top,
+                                solution.epsilon.complete_max);
+    if constexpr (std::is_same_v<Scalar, Rational>) {
+      // For exact arithmetic the residual edge is also the algebraic finite
+      // Laurent validity edge.
+      materialized_top = std::min(materialized_top, match_certified_max);
+    } else {
+      // An Acb residual pass is an accuracy certificate, not a proof that
+      // coefficients above that prefix are invalid.  The factorized ball
+      // solve still encloses every coefficient in its honest finite work
+      // frame.  Retain that private reservoir so later epsilon losses can
+      // consume it; its radii remain visible and the eventual public
+      // residual/output checks still fail closed if it is too imprecise.
+    }
     if (materialized_top < solution.epsilon.min_power)
       throw std::domain_error(
           "plan-match materialization has no valid output epsilon coefficient");

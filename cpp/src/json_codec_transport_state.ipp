@@ -39,7 +39,8 @@ json::object encode_error_envelope_summary(const ErrorEnvelope& error) {
 
 struct RetainedPlanChartBinding {
   using Owner = std::variant<std::shared_ptr<PreparedChartBase>,
-                             std::shared_ptr<CompositeSCCChartBase>>;
+                             std::shared_ptr<CompositeSCCChartBase>,
+                             std::shared_ptr<RegularPhysicalEquationOwnerBase>>;
 
   std::string handle;
   std::string exact_identity;
@@ -374,7 +375,8 @@ class StoredTilePlan {
             using Owner = typename std::decay_t<decltype(owner)>::element_type;
             if constexpr (std::is_same_v<Owner, PreparedChartBase>) {
               result.push_back(owner);
-            } else {
+            } else if constexpr (
+                std::is_same_v<Owner, CompositeSCCChartBase>) {
               auto dependencies = owner->dependency_charts();
               result.insert(result.end(), dependencies.begin(),
                             dependencies.end());
@@ -394,6 +396,22 @@ class StoredTilePlan {
     const auto append = [&](const RetainedPlanChartBinding& binding) {
       if (const auto* owner = std::get_if<
               std::shared_ptr<CompositeSCCChartBase>>(&binding.owner))
+        result.push_back(*owner);
+    };
+    if (lower_.has_value())
+      for (const auto& binding : lower_->charts) append(binding);
+    if (upper_.has_value())
+      for (const auto& binding : upper_->charts) append(binding);
+    return result;
+  }
+
+  std::vector<std::shared_ptr<RegularPhysicalEquationOwnerBase>>
+  dependency_regular_equation_owners() const {
+    std::vector<std::shared_ptr<RegularPhysicalEquationOwnerBase>> result;
+    const auto append = [&](const RetainedPlanChartBinding& binding) {
+      if (const auto* owner = std::get_if<
+              std::shared_ptr<RegularPhysicalEquationOwnerBase>>(
+              &binding.owner))
         result.push_back(*owner);
     };
     if (lower_.has_value())

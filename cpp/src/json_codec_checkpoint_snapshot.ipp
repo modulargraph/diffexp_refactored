@@ -84,6 +84,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
             "checkpoint ownership closure contains distinct tile plans with one handle");
       return;
     }
+    if (!plan->dependency_regular_equation_owners().empty())
+      throw std::domain_error(
+          "checkpoint does not yet support a tile plan retaining frame-independent regular physical equation owners");
     for (const auto& composite : plan->dependency_sccs()) add_scc(composite);
     for (const auto& chart : plan->dependency_charts()) add_chart(chart);
   };

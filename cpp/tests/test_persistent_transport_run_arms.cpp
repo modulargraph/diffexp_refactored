@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -184,7 +185,8 @@ std::string solve_local(const std::string& session,
                         std::uint32_t nmax = 0,
                         bool branch_sensitive = true,
                         std::int32_t prescription_sign = -1,
-                        std::int32_t initial_validity = 2) {
+                        std::int32_t initial_validity = 2,
+                        const std::string& equation_owner = {}) {
   json::array schedule;
   json::array shifts;
   for (std::uint32_t n = 0; n <= nmax; ++n) {
@@ -193,7 +195,7 @@ std::string solve_local(const std::string& session,
         {"case", n == 0 ? "R" : "T"},
         {"da", std::to_string(n)}, {"db", "0"}}});
   }
-  const auto solved = request(json::object{
+  json::object solve_request{
       {"schema", 2}, {"op", "local.solve"}, {"session", session},
       {"chart", chart},
       {"run", json::object{
@@ -217,9 +219,47 @@ std::string solve_local(const std::string& session,
                                      {"canonical", "0"}}}}},
            {"prescriptions", prescriptions(
                 branch_sensitive, prescription_sign)},
-           {"checkpoint_identity", checkpoint}}}});
+           {"checkpoint_identity", checkpoint}}}};
+  if (!equation_owner.empty())
+    solve_request["equation_owner"] = equation_owner;
+  const auto solved = request(std::move(solve_request));
   require_ok(solved, "local.solve");
   return std::string(solved.at("local").as_string());
+}
+
+std::string prepare_regular_equation_owner(
+    const std::string& session, const std::string& name,
+    const std::string& center, bool branch_sensitive = true,
+    std::int32_t prescription_sign = -1,
+    const std::string& relative_accuracy_max = "1/100") {
+  const auto identity = "de2-equation-" + name;
+  json::array physical_c;
+  physical_c.emplace_back(json::array{});
+  json::array physical_q;
+  physical_q.emplace_back(epsilon_rational_one());
+  const auto prepared = request(json::object{
+      {"schema", 2}, {"op", "regular_equation.prepare"},
+      {"session", session},
+      {"capability",
+       "frame-independent-regular-physical-equation-owner-v1"},
+      {"key", "regular-equation:" + name}, {"identity", identity},
+      {"dimension", 1},
+      {"relative_accuracy_max_exact", relative_accuracy_max},
+      {"geometry", json::object{
+           {"center_exact", center}, {"scale_exact", "1"},
+           {"radius_exact", "2"}, {"infinite_radius", false},
+           {"prescriptions", prescriptions(
+                branch_sensitive, prescription_sign)}}},
+      {"physical_ode", json::object{
+           {"schema", "diffexp2-physical-cleared-ode-v1"},
+           {"basis", "physical-original-master"},
+           {"theta_coordinate", "local-t"},
+           {"owner_signature_identity", identity},
+           {"payload_identity", "de2-physical-ode-" + name},
+           {"q", std::move(physical_q)},
+           {"c", std::move(physical_c)}}}});
+  require_ok(prepared, "regular_equation.prepare");
+  return std::string(prepared.at("equation_owner").as_string());
 }
 
 std::string solve_log_local(const std::string& session,
@@ -545,6 +585,48 @@ json::object consume_value_hop(
       {"session", session}, {"tile_plan", plan},
       {"tile_plan_checkpoint_identity", plan_checkpoint},
       {"arm", arm_name}, {"match", 0},
+      {"value_solver", std::move(solver)},
+      {"incoming", incoming},
+      {"incoming_checkpoint_identity", incoming_checkpoint},
+      {"epsilon", json::object{{"min", 0}, {"max", 2},
+                                  {"required_complete_max", 2}}},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", root}}}});
+}
+
+json::object physical_value_solver(
+    const std::string& center, std::uint32_t nmax = 8,
+    const std::string& relative_error_max = "1/100") {
+  return json::object{
+      {"schema", "diffexp2-native-ordinary-physical-value-solver-v1"},
+      {"taylor_complete_max", nmax},
+      {"metadata", json::object{
+           {"chart", json::object{
+                {"center_exact", center}, {"scale_exact", "1"},
+                {"radius", "2"}, {"infinite_radius", false}}},
+           {"tag", json::object{
+                {"a", json::object{{"domain", "rational"},
+                                     {"canonical", "0"}}},
+                {"b", json::object{{"domain", "rational"},
+                                     {"canonical", "0"}}}}},
+           {"prescriptions", prescriptions(true)},
+           {"checkpoint_identity", "physical-value-solver-prototype"}}},
+      {"relative_accuracy_max_exact", relative_error_max}};
+}
+
+json::object consume_physical_value_hop(
+    const std::string& session, const std::string& plan,
+    const std::string& arm_name, std::size_t match_index,
+    const std::string& incoming,
+    const std::string& incoming_checkpoint, json::object solver,
+    const std::string& root,
+    const std::string& plan_checkpoint) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.consume_physical_value_hop"},
+      {"session", session}, {"tile_plan", plan},
+      {"tile_plan_checkpoint_identity", plan_checkpoint},
+      {"arm", arm_name}, {"match", match_index},
       {"value_solver", std::move(solver)},
       {"incoming", incoming},
       {"incoming_checkpoint_identity", incoming_checkpoint},
@@ -1747,6 +1829,159 @@ void test_consuming_transport() {
   }
 }
 
+void test_frame_independent_physical_value_wiring() {
+  const std::string checkpoint =
+      "/tmp/diffexp2-frame-independent-physical-hop.de2cp";
+  std::remove(checkpoint.c_str());
+  std::string session;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "acb"}, {"precision_bits", 256},
+        {"output_digits", 40}, {"chart_capacity", 8},
+        {"local_capacity", 16}, {"match_capacity", 8},
+        {"tile_plan_capacity", 4}});
+    require_ok(created, "physical wiring session.create");
+    session = std::string(created.at("session").as_string());
+    const auto anchor_chart = prepare_chart(
+        session, "physical-wiring-anchor", "0", true, "acb", 0);
+    const auto first_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-first", "-2/3");
+    const auto second_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-second", "-4/3");
+    const auto second_framed_chart = prepare_chart(
+        session, "physical-wiring-second", "-4/3", true, "acb", 0);
+    const auto anchor = solve_local(
+        session, anchor_chart, "0", "physical-wiring-anchor-local", "2",
+        30, true);
+
+    const std::string plan_checkpoint = "physical-wiring-plan";
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", plan_checkpoint}, {"division_order", 3},
+        {"arm", json::object{
+             {"from_exact", "0"}, {"to_exact", "-4/3"},
+             {"charts", json::array{
+                  anchor_chart, first_equation, second_equation}},
+             {"topology", topology(true)}}}});
+    require_ok(planned, "physical wiring tile.plan_arm");
+    const auto plan = std::string(planned.at("tile_plan").as_string());
+
+    const auto direct = consume_physical_value_hop(
+        session, plan, "lower", 0, anchor,
+        "physical-wiring-anchor-local",
+        physical_value_solver("-2/3", 12), "physical-wiring-hop",
+        plan_checkpoint);
+    require_ok(direct, "physical wiring direct hop");
+    if (direct.at("used") != true ||
+        direct.at("execution_mode") !=
+            "causal-ordinary-physical-evolution" ||
+        direct.at("output_tail_status") != "unsupported" ||
+        direct.at("next_hop_policy") != "exact-framed-fallback")
+      throw std::runtime_error(
+          "ordinary physical hop did not advertise its exact tail/fallback contract: " +
+          json::serialize(direct));
+    const auto& direct_local = direct.at("next_local").as_object();
+    if (std::string(direct_local.at("chart").as_string()) != first_equation)
+      throw std::runtime_error(
+          "ordinary physical hop did not retain its equation owner");
+    const auto direct_stats = request(json::object{
+        {"schema", 2}, {"op", "local.stats"}, {"session", session},
+        {"local", direct_local.at("local")}});
+    require_ok(direct_stats, "physical wiring direct local.stats");
+    if (direct_stats.at("epsilon_min") != 0 ||
+        direct_stats.at("epsilon_max") != 2 ||
+        direct_stats.at("top_valid") != 2 ||
+        direct_stats.at("tail_majorant").as_object().at("status") !=
+            "unsupported")
+      throw std::runtime_error(
+          "ordinary physical hop changed its full source window or claimed a tail theorem: " +
+          json::serialize(direct_stats));
+
+    const auto unavailable_tail = consume_physical_value_hop(
+        session, plan, "lower", 1,
+        std::string(direct_local.at("local").as_string()),
+        std::string(direct_local.at("checkpoint_identity").as_string()),
+        physical_value_solver("-4/3", 12), "physical-wiring-hop",
+        plan_checkpoint);
+    require_ok(unavailable_tail, "physical wiring unavailable-tail hop");
+    if (unavailable_tail.at("used") != false ||
+        unavailable_tail.at("execution_mode") !=
+            "framed-fallback-required" ||
+        unavailable_tail.at("reason") !=
+            "incoming-local-has-no-certified-regular-tail-model")
+      throw std::runtime_error(
+          "unsupported physical tail did not fail side-effect-free into the framed path: " +
+          json::serialize(unavailable_tail));
+
+    const auto fallback_basis = solve_local(
+        session, second_framed_chart, "-4/3",
+        "physical-wiring-framed-fallback", "1", 12, true, -1, 2,
+        second_equation);
+    const auto fallback = request(json::object{
+        {"schema", 2}, {"op", "transport.consume_hop"},
+        {"session", session}, {"tile_plan", plan},
+        {"tile_plan_checkpoint_identity", plan_checkpoint},
+        {"arm", "lower"}, {"match", 1},
+        {"receiving_basis", json::array{fallback_basis}},
+        {"incoming", direct_local.at("local")},
+        {"incoming_checkpoint_identity",
+         direct_local.at("checkpoint_identity")},
+        {"epsilon", json::object{{"min", 0}, {"max", 2},
+                                    {"required_complete_max", 2}}},
+        {"refinement", json::object{{"relative_tolerance", "1e-6"},
+                                      {"max_steps", 2}}},
+        {"checkpoint_policy", json::object{
+             {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+             {"root", "physical-wiring-framed"}}}});
+    require_ok(fallback, "physical wiring framed fallback");
+    if (std::string(fallback.at("next_local").as_object()
+                        .at("chart").as_string()) != second_equation ||
+        fallback.at("consumed_basis_handles").as_array().size() != 1)
+      throw std::runtime_error(
+          "framed fallback did not materialize under the exact equation owner: " +
+          json::serialize(fallback));
+
+    const auto counters = request(json::object{
+        {"schema", 2}, {"op", "session.counters"},
+        {"session", session}});
+    require_ok(counters, "physical wiring session.counters");
+    if (counter(counters, "transport_physical_value_hop_attempts") != 2 ||
+        counter(counters, "transport_physical_value_hop_successes") != 1 ||
+        counter(counters, "transport_physical_value_hop_ineligible") != 1 ||
+        counter(counters, "transport_framed_basis_hops") != 1)
+      throw std::runtime_error(
+          "physical/framed wiring diagnostics do not expose the alternating path: " +
+          json::serialize(counters));
+
+    for (const auto& owner : {first_equation, second_equation})
+      require_ok(request(json::object{
+          {"schema", 2}, {"op", "regular_equation.release"},
+          {"session", session}, {"equation_owner", owner}}),
+          "physical wiring regular_equation.release");
+    const auto rejected_checkpoint = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", checkpoint},
+        {"checkpoint_identity", "physical-wiring-unsupported"}});
+    if (rejected_checkpoint.at("status") != "error" ||
+        std::filesystem::exists(checkpoint))
+      throw std::runtime_error(
+          "checkpoint serialized a hidden frame-independent equation owner: " +
+          json::serialize(rejected_checkpoint));
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", session}}),
+        "physical wiring session.close");
+    session.clear();
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", session}});
+    std::remove(checkpoint.c_str());
+    throw;
+  }
+  std::remove(checkpoint.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -1767,6 +2002,7 @@ int main() {
     test_multiblock_regular_value_fallback_owner();
     test_streaming_consumed_transport();
     test_consuming_transport();
+    test_frame_independent_physical_value_wiring();
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "rational"}, {"output_digits", 40},

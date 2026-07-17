@@ -523,7 +523,8 @@ json::object run_session_command(const json::object& root) {
     std::vector<RetainedPlanChartBinding::Owner> upper_charts;
     std::string plan_handle;
     {
-      // Resolve every prepared-chart or composite-SCC owner and acquire strong
+      // Resolve every prepared-chart, composite-SCC, or frame-independent
+      // regular equation owner and acquire strong
       // typed ownership in one admission section.  Public chart.release or
       // scc.release cannot invalidate either independently executable arm
       // after this point.
@@ -543,10 +544,14 @@ json::object run_session_command(const json::object& root) {
         } else if (handle.starts_with("scc:")) {
           const auto found = session->sccs.find(handle);
           if (found != session->sccs.end()) return found->second;
+        } else if (handle.starts_with("eq:")) {
+          const auto found = session->regular_equation_owners.find(handle);
+          if (found != session->regular_equation_owners.end())
+            return found->second;
         }
         throw std::invalid_argument(
             std::string(
-                "unknown or released prepared-chart/composite-SCC owner in ") +
+                "unknown or released prepared-chart/composite-SCC/regular-equation owner in ") +
             arm_name + " native tile arm: " + handle);
       };
       for (const auto& handle : lower_handles)
@@ -618,9 +623,13 @@ json::object run_session_command(const json::object& root) {
         } else if (handle.starts_with("scc:")) {
           const auto found = session->sccs.find(handle);
           if (found != session->sccs.end()) return found->second;
+        } else if (handle.starts_with("eq:")) {
+          const auto found = session->regular_equation_owners.find(handle);
+          if (found != session->regular_equation_owners.end())
+            return found->second;
         }
         throw std::invalid_argument(
-            "unknown or released prepared-chart/composite-SCC owner in native single tile arm: " +
+            "unknown or released prepared-chart/composite-SCC/regular-equation owner in native single tile arm: " +
             handle);
       };
       charts.reserve(handles.size());

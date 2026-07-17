@@ -41,15 +41,19 @@ class RegularPhysicalEquationOwner final
       std::string handle, std::string key, std::string exact_identity,
       std::string signature, std::string geometry_record,
       std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>> equation,
-      slong precision_bits)
+      slong precision_bits,
+      std::string regular_value_relative_accuracy_max_exact)
       : handle_(std::move(handle)), key_(std::move(key)),
         exact_identity_(std::move(exact_identity)),
         signature_(std::move(signature)),
         geometry_record_(std::move(geometry_record)),
-        equation_(std::move(equation)), precision_bits_(precision_bits) {
+        equation_(std::move(equation)), precision_bits_(precision_bits),
+        regular_value_relative_accuracy_max_exact_(
+            std::move(regular_value_relative_accuracy_max_exact)) {
     if (handle_.empty() || key_.empty() || exact_identity_.empty() ||
         signature_.empty() || geometry_record_.empty() || !equation_ ||
         precision_bits_ < 64 ||
+        regular_value_relative_accuracy_max_exact_.empty() ||
         equation_->owner_signature_identity != exact_identity_)
       throw std::invalid_argument(
           "regular physical equation owner lost an exact identity, geometry, or q/C payload");
@@ -66,6 +70,10 @@ class RegularPhysicalEquationOwner final
   }
   std::uint32_t dimension() const override { return equation_->dimension; }
   slong precision_bits() const override { return precision_bits_; }
+  const std::string& regular_value_relative_accuracy_max_exact()
+      const override {
+    return regular_value_relative_accuracy_max_exact_;
+  }
   const char* equation_scalar_domain() const override {
     if constexpr (std::is_same_v<Scalar, Rational>) return "rational";
     if constexpr (std::is_same_v<Scalar, ComplexBall>) return "acb";
@@ -83,6 +91,10 @@ class RegularPhysicalEquationOwner final
   const std::string& owner_signature_identity() const override {
     return equation_->owner_signature_identity;
   }
+  const std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>&
+  physical_equation() const {
+    return equation_;
+  }
 
  private:
   std::string handle_;
@@ -92,6 +104,7 @@ class RegularPhysicalEquationOwner final
   std::string geometry_record_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>> equation_;
   slong precision_bits_ = 0;
+  std::string regular_value_relative_accuracy_max_exact_;
 };
 
 template <typename Scalar>
@@ -172,7 +185,8 @@ class PreparedChart final : public PreparedChartBase {
 
   NativeLocalRun<Scalar> solve_native(
       const json::object& run, const json::object& metadata_object) {
-    return solve_native_impl(run, metadata_object, std::nullopt, false);
+    return solve_native_impl(
+        run, metadata_object, std::nullopt, false, std::nullopt);
   }
 
   NativeLocalRun<Scalar> solve_native_with_source(
@@ -182,7 +196,7 @@ class PreparedChart final : public PreparedChartBase {
       throw std::invalid_argument(
           "native SCC source injection rejects caller-supplied source data");
     return solve_native_impl(
-        run, metadata_object, std::move(source), false);
+        run, metadata_object, std::move(source), false, std::nullopt);
   }
 
   void record_native_local_success(
@@ -588,7 +602,8 @@ class PreparedChart final : public PreparedChartBase {
   NativeLocalRun<Scalar> solve_native_impl(
       const json::object& run, const json::object& metadata_object,
       std::optional<SourceData<Scalar>> native_source,
-      bool attach_tail_model) {
+      bool attach_tail_model,
+      std::optional<std::string> tail_operator_identity) {
     if (precision_bits_ < 64)
       throw std::invalid_argument(
           "native local solutions require at least 64 bits of Acb precision");
@@ -643,7 +658,8 @@ class PreparedChart final : public PreparedChartBase {
       if constexpr (std::is_same_v<Scalar, Rational> ||
                     std::is_same_v<Scalar, ComplexBall>)
         tail_model = prepare_regular_homogeneous_tail_model(
-            prepared_, problem, solution, exact_identity_);
+            prepared_, problem, solution,
+            tail_operator_identity.value_or(exact_identity_));
     }
     auto pseudo_hits = std::move(recurrence.hits);
     const auto kernel_ms = std::chrono::duration<double, std::milli>(
@@ -657,14 +673,69 @@ class PreparedChart final : public PreparedChartBase {
       const std::string& local_handle, const json::object& run,
       const json::object& metadata_object,
       std::shared_ptr<PhysicalEquationOwnerBase> equation_owner) override {
-    if (!equation_owner || equation_owner.get() != this)
+    if (!equation_owner)
       throw std::invalid_argument(
-          "primitive local solve received a different physical equation owner");
-    auto native = solve_native_impl(
-        run, metadata_object, std::nullopt, true);
-    std::shared_ptr<PhysicalEquationOwnerBase> retained_equation_owner;
+          "primitive local solve lost its physical equation owner");
     std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
-        retained_physical_equation;
+        retained_physical_equation = physical_equation_;
+    std::string source_handle = handle_;
+    std::string source_identity = exact_identity_;
+    if (equation_owner.get() != this) {
+      auto regular = std::dynamic_pointer_cast<
+          RegularPhysicalEquationOwner<Scalar>>(equation_owner);
+      if (!regular || !physical_equation_ ||
+          regular->dimension() != prepared_.dimension ||
+          !geometry_record_.has_value() ||
+          *geometry_record_ != regular->geometry_record() ||
+          physical_equation_->payload_identity !=
+              regular->physical_equation()->payload_identity)
+        throw std::invalid_argument(
+            "framed fallback chart differs from its regular physical equation owner");
+      const auto payload_without_owner = [](const std::string& record) {
+        auto object = as_object(json::parse(record),
+                                "physical q/C payload identity");
+        object.erase("owner_signature_identity");
+        return json::serialize(canonical_json_value(object));
+      };
+      if (payload_without_owner(physical_equation_->exact_payload_record) !=
+          payload_without_owner(
+              regular->physical_equation()->exact_payload_record))
+        throw std::invalid_argument(
+            "framed fallback chart q/C payload differs from its regular physical equation owner");
+      const auto metadata = parse_local_metadata(metadata_object);
+      const auto retained_geometry = parse_retained_composite_geometry(
+          json::parse(regular->geometry_record()));
+      const auto same_prescription = [](const Prescription& left,
+                                        const Prescription& right) {
+        return left.factor_exact == right.factor_exact &&
+               left.sign == right.sign &&
+               left.multiplicity == right.multiplicity &&
+               left.leading_coefficient_sign ==
+                   right.leading_coefficient_sign;
+      };
+      if (metadata.chart.center_exact !=
+              retained_geometry.chart.center_exact ||
+          metadata.chart.scale_exact !=
+              retained_geometry.chart.scale_exact ||
+          metadata.chart.infinite_radius !=
+              retained_geometry.chart.infinite_radius ||
+          !acb_equal(metadata.chart.radius.raw(),
+                     retained_geometry.chart.radius.raw()) ||
+          metadata.prescriptions.size() !=
+              retained_geometry.prescriptions.size() ||
+          !std::equal(metadata.prescriptions.begin(),
+                      metadata.prescriptions.end(),
+                      retained_geometry.prescriptions.begin(),
+                      same_prescription))
+        throw std::invalid_argument(
+            "framed fallback local metadata differs from its regular equation owner geometry");
+      retained_physical_equation = regular->physical_equation();
+      source_handle = regular->handle();
+      source_identity = regular->exact_identity();
+    }
+    auto native = solve_native_impl(
+        run, metadata_object, std::nullopt, true, source_identity);
+    std::shared_ptr<PhysicalEquationOwnerBase> retained_equation_owner;
     std::string residual_unavailable_reason;
     const bool homogeneous = run.at("source").is_null();
     if constexpr (std::is_same_v<Scalar, Rational> ||
@@ -672,16 +743,16 @@ class PreparedChart final : public PreparedChartBase {
       if (!homogeneous) {
         residual_unavailable_reason =
             "owner-bound residual is unsupported for sourced primitive locals until the exact physical source is retained";
-      } else if (!physical_equation_) {
+      } else if (!retained_physical_equation) {
         residual_unavailable_reason =
             "owner-bound residual is unsupported: the prepared chart predates the physical q/C payload";
       } else {
         retained_equation_owner = std::move(equation_owner);
-        retained_physical_equation = physical_equation_;
       }
     }
     auto local = make_retained_typed_shared<Scalar, StoredLocal<Scalar>>(
-        local_handle, handle_, exact_identity_, std::move(native.solution),
+        local_handle, source_handle, source_identity,
+        std::move(native.solution),
         precision_bits_,
         std::move(native.pseudo_hits), native.diagnostics, std::nullopt,
         std::nullopt, nullptr,

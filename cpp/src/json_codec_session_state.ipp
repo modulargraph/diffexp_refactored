@@ -44,6 +44,13 @@ struct SolverSession {
   std::uint64_t total_transport_pair_observables = 0;
   std::uint64_t total_transport_endpoint_batches = 0;
   std::uint64_t total_transport_endpoint_rows = 0;
+  // Runtime-only wiring diagnostics.  They intentionally are not serialized
+  // in the legacy checkpoint schema; restored sessions begin a fresh
+  // measurement interval while retaining all historical numerical state.
+  std::uint64_t total_transport_physical_value_hop_attempts = 0;
+  std::uint64_t total_transport_physical_value_hop_successes = 0;
+  std::uint64_t total_transport_physical_value_hop_ineligible = 0;
+  std::uint64_t total_transport_framed_basis_hops = 0;
   std::uint64_t total_line_integrations = 0;
   std::uint64_t total_line_exports = 0;
   double total_local_run_parse_ms = 0.0;

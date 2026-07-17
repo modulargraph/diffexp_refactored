@@ -2,7 +2,8 @@
     require_exact_keys(
         root,
         {"schema", "op", "session", "capability", "key", "identity",
-         "dimension", "geometry", "physical_ode"},
+         "dimension", "geometry", "physical_ode",
+         "relative_accuracy_max_exact"},
         "frame-independent regular equation-owner request");
     if (required_string(root, "capability") !=
         kFrameIndependentRegularEquationOwnerCapability)
@@ -20,6 +21,14 @@
           "regular equation-owner dimension must be positive");
     const auto geometry_record = canonical_chart_geometry_record(
         root.at("geometry"));
+    const auto relative_accuracy_text = required_string(
+        root, "relative_accuracy_max_exact");
+    const Rational relative_accuracy_max(relative_accuracy_text);
+    if (relative_accuracy_max.sign() <= 0 ||
+        !(relative_accuracy_max < Rational(1)) ||
+        relative_accuracy_max.str() != relative_accuracy_text)
+      throw std::invalid_argument(
+          "regular equation-owner relative-accuracy contract must be a canonical exact rational strictly between zero and one");
     const auto signature = json::serialize(canonical_json_value(
         json::object{
             {"capability", root.at("capability")},
@@ -30,6 +39,7 @@
             {"identity", root.at("identity")},
             {"dimension", root.at("dimension")},
             {"geometry", json::parse(geometry_record)},
+            {"relative_accuracy_max_exact", relative_accuracy_text},
             {"physical_ode", root.at("physical_ode")}}));
 
     {
@@ -97,7 +107,8 @@
       return make_retained_typed_shared<Scalar,
           RegularPhysicalEquationOwner<Scalar>>(
               owner_handle, key, identity, signature, geometry_record,
-              std::move(equation), session->precision_bits);
+              std::move(equation), session->precision_bits,
+              relative_accuracy_text);
     };
     std::shared_ptr<RegularPhysicalEquationOwnerBase> owner;
     if (session->domain == "rational")
@@ -800,6 +811,7 @@
   if (operation == "local.solve") {
     const auto chart_handle = required_string(root, "chart");
     std::shared_ptr<PreparedChartBase> chart;
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner;
     std::string local_handle;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
@@ -810,6 +822,19 @@
           session->local_capacity)
         throw std::invalid_argument("persistent local capacity is exhausted");
       chart = found->second;
+      equation_owner = chart;
+      if (const auto* requested_owner = root.if_contains("equation_owner")) {
+        if (!requested_owner->is_string() ||
+            requested_owner->as_string().empty())
+          throw std::invalid_argument(
+              "persistent local equation_owner must be a nonempty eq: handle");
+        const auto owner_found = session->regular_equation_owners.find(
+            std::string(requested_owner->as_string()));
+        if (owner_found == session->regular_equation_owners.end())
+          throw std::invalid_argument(
+              "unknown or released frame-independent regular equation owner for local solve");
+        equation_owner = owner_found->second;
+      }
       local_handle = "l:" + std::to_string(session->next_local++);
       ++session->pending_local_solves;
     }
@@ -818,7 +843,8 @@
     try {
       local = chart->solve_local(
           local_handle, as_object(root.at("run"), "recurrence run"),
-          as_object(root.at("metadata"), "local metadata"), chart);
+          as_object(root.at("metadata"), "local metadata"),
+          equation_owner);
     } catch (...) {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_local_solves == 0)
@@ -1530,6 +1556,14 @@
         {"transport_endpoint_batches",
          session->total_transport_endpoint_batches},
         {"transport_endpoint_rows", session->total_transport_endpoint_rows},
+        {"transport_physical_value_hop_attempts",
+         session->total_transport_physical_value_hop_attempts},
+        {"transport_physical_value_hop_successes",
+         session->total_transport_physical_value_hop_successes},
+        {"transport_physical_value_hop_ineligible",
+         session->total_transport_physical_value_hop_ineligible},
+        {"transport_framed_basis_hops",
+         session->total_transport_framed_basis_hops},
         {"line_integrations", session->total_line_integrations},
         {"line_exports", session->total_line_exports},
         {"checkpoint_generation", session->checkpoint_generation},

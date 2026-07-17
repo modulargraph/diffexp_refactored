@@ -649,6 +649,8 @@ class RegularPhysicalEquationOwnerBase : public PhysicalEquationOwnerBase {
   virtual const std::string& geometry_record() const = 0;
   virtual std::uint32_t dimension() const = 0;
   virtual slong precision_bits() const = 0;
+  virtual const std::string&
+  regular_value_relative_accuracy_max_exact() const = 0;
 
   const std::string& equation_owner_handle() const final {
     return handle();
@@ -1980,6 +1982,10 @@ class StoredLocal final : public StoredLocalBase {
           if (column_provenance_.has_value())
             throw std::invalid_argument(
                 "SCC column local cannot acquire a primitive chart equation owner");
+        } else if (owner_kind == "regular-physical-equation-v1") {
+          if (column_provenance_.has_value())
+            throw std::invalid_argument(
+                "SCC column local cannot acquire a frame-independent regular equation owner");
         } else if (owner_kind == "composite-scc") {
           const bool completed_column =
               column_provenance_.has_value() &&

@@ -64,6 +64,7 @@ json::object prepare_request(const std::string& session,
       {"capability",
        "frame-independent-regular-physical-equation-owner-v1"},
       {"key", key}, {"identity", identity}, {"dimension", 1},
+      {"relative_accuracy_max_exact", "1/1000"},
       {"geometry", geometry(center)},
       {"physical_ode",
        physical_ode(identity, "de2-physical-ode-owner-fixture")}};

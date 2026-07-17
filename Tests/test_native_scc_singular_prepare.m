@@ -23,6 +23,25 @@ decodeEvaluation[evaluated_] := Module[{decoded},
   If[ListQ[decoded] &&
       AllTrue[decoded, !FailureQ[#] && NumericQ[#] &], decoded, {}]];
 
+decodeEvaluationFrame[evaluated_] := Module[
+  {decoded, min, max, dimension},
+  If[!AssociationQ[evaluated] ||
+      Lookup[evaluated, "status", "error"] =!= "ok",
+    Return[<||>, Module]];
+  min = Lookup[evaluated["value"], "min", 1];
+  max = Lookup[evaluated["value"], "max", 0];
+  dimension = Lookup[evaluated["value"], "dimension", 0];
+  decoded = DiffExp2`CppBackend`DecodeScalars[
+    evaluated["value", "coefficients"], 60];
+  If[!IntegerQ[min] || !IntegerQ[max] || min > max ||
+      !IntegerQ[dimension] || dimension < 1 || !ListQ[decoded] ||
+      Length[decoded] =!= (max - min + 1) dimension ||
+      !AllTrue[decoded, !FailureQ[#] && NumericQ[#] &],
+    Return[<||>, Module]];
+  <|"Min" -> min, "Max" -> max, "Dimension" -> dimension,
+    "Table" -> ArrayReshape[decoded,
+      {max - min + 1, dimension}]|>];
+
 exactTagEntryQ[entry_] := Module[{run, metadata, tag, a, b, p},
   If[!AssociationQ[entry], Return[False, Module]];
   run = Lookup[entry, "run", <||>];
@@ -138,6 +157,25 @@ acbResult = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
 {acbCs, acbPrepared, acbStats, acbBasis, acbColumn, acbEvaluated} =
   acbResult;
 acbValue = decodeEvaluation[acbEvaluated];
+rationalFrame = decodeEvaluationFrame[evaluated];
+acbFrame = decodeEvaluationFrame[acbEvaluated];
+acbCommonMin = If[AssociationQ[rationalFrame] && AssociationQ[acbFrame],
+  Max[Lookup[rationalFrame, "Min", 1], Lookup[acbFrame, "Min", 1]], 1];
+acbCommonMax = If[AssociationQ[rationalFrame] && AssociationQ[acbFrame],
+  Min[Lookup[rationalFrame, "Max", 0], Lookup[acbFrame, "Max", 0]], 0];
+rationalCommonValue = If[acbCommonMin <= acbCommonMax &&
+    Lookup[rationalFrame, "Dimension", 0] ===
+      Lookup[acbFrame, "Dimension", -1],
+  Flatten[rationalFrame["Table"][[
+    acbCommonMin - rationalFrame["Min"] + 1 ;;
+      acbCommonMax - rationalFrame["Min"] + 1]]], {}];
+acbCommonValue = If[rationalCommonValue === {}, {},
+  Flatten[acbFrame["Table"][[
+    acbCommonMin - acbFrame["Min"] + 1 ;;
+      acbCommonMax - acbFrame["Min"] + 1]]]];
+acbMaximumDifference = If[Length[rationalCommonValue] > 0 &&
+    Length[rationalCommonValue] === Length[acbCommonValue],
+  Max[Abs[N[acbCommonValue - rationalCommonValue, 50]]], Infinity];
 acbIdentity = If[AssociationQ[acbColumn], Quiet[Check[
     ImportString[Lookup[acbColumn["ColumnProvenance"],
       "exact_column_identity", ""], "RawJSON"], $Failed]], $Failed];
@@ -145,7 +183,7 @@ acbDiagnostics = If[AssociationQ[acbColumn],
   Lookup[acbColumn["NativeSummary"], "block_diagnostics", {}], {}];
 acbSourceRecords = Select[acbDiagnostics,
   AssociationQ[#] && Lookup[#, "block", None] === 1 &&
-    Lookup[#, "role", None] === "particular" &&
+    Lookup[#, "role", None] === "particular-tag" &&
     Lookup[#, "predecessors", None] === {0} &&
     Lookup[#, "source_sectors", 0] > 0 &];
 acbOk = !AnyTrue[acbResult, FailureQ] &&
@@ -168,8 +206,9 @@ acbOk = !AnyTrue[acbResult, FailureQ] &&
   AssociationQ[acbIdentity] &&
   exactTagEntryQ[Lookup[acbIdentity, "seed", None]] &&
   AllTrue[Lookup[acbIdentity, "targets", {}], exactTagEntryQ] &&
-  Length[rationalValue] > 0 && Length[acbValue] === Length[rationalValue] &&
-  Max[Abs[N[acbValue - rationalValue, 50]]] < 10^-40;
+  Length[rationalCommonValue] > 0 &&
+  Length[acbCommonValue] === Length[rationalCommonValue] &&
+  acbMaximumDifference < 10^-40;
 If[AssociationQ[acbBasis] && ListQ[Lookup[acbBasis, "Columns", None]],
   Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
     acbBasis["Columns"]]];
@@ -178,11 +217,10 @@ If[AssociationQ[acbPrepared] &&
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[acbPrepared]]];
 DiffExp2`Solve`ClearSolveCaches[];
 
-(* A genuine cross-block affine collision is outside this Acb slice.  Each
-   diagonal block can truthfully be no-pseudo in isolation, so C++ must still
-   revalidate the exact source/target schedule and reject CASE-P rather than
-   running approximate compensation or dropping to another integration
-   path. *)
+(* A genuine cross-block affine collision is certified from exact tags and
+   schedules, while its coefficients stay in ComplexBall arithmetic.  Each
+   diagonal block can truthfully be no-pseudo in isolation, so this exercises
+   the composite runtime CASE-P gate and the ball-certified compensation. *)
 pseudoRequest = <|
   "EpsWindow" -> <|"Min" -> -2, "CompleteMax" -> 0|>,
   "TOrder" -> 0|>;
@@ -198,7 +236,7 @@ pseudoResult = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
       {1/x, 1, (1 + eps)/x, 0},
       {0, 1/x, 0, (3/2 + 3 eps)/x}}, "Variable" -> x|>;
   pseudoChart = Join[chart, <|
-    "Name" -> "native-acb-scc-case-p-rejected"|>];
+    "Name" -> "native-acb-scc-case-p-certified"|>];
   pseudoCs = catchDE2[DiffExp2`Solve`PrepareChart[
     pseudoSystem, pseudoChart]];
   pseudoPrepared = If[FailureQ[pseudoCs], pseudoCs,
@@ -213,33 +251,46 @@ pseudoResult = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
 {pseudoCs, pseudoPrepared, pseudoStats, pseudoSolved} = pseudoResult;
 pseudoBlocks = If[AssociationQ[pseudoStats],
   Lookup[pseudoStats, "block_charts", {}], {}];
+pseudoDiagnostics = If[AssociationQ[pseudoSolved],
+  Lookup[pseudoSolved["NativeSummary"], "block_diagnostics", {}], {}];
+pseudoCollisionRecords = Select[pseudoDiagnostics,
+  AssociationQ[#] && Lookup[#, "block", None] === 1 &&
+    Lookup[#, "source_b", None] === "0" &];
+pseudoCollisionOk = Length[pseudoCollisionRecords] === 1 && With[
+  {record = First[pseudoCollisionRecords]},
+  Lookup[record, "pseudo_hit_count", None] === 1 &&
+    Lookup[record, "pseudo_compensation_count", None] === 2 &&
+    Lookup[record, "max_pseudo_depth", None] === 2 &&
+    TrueQ[Lookup[record, "pseudo_value_certified", False]] &&
+    Lookup[record, "uncompensated_pseudo_hit_count", None] === 0];
 pseudoOk = !AnyTrue[Take[pseudoResult, 3], FailureQ] &&
-  FailureQ[pseudoSolved] &&
+  AssociationQ[pseudoSolved] &&
   TrueQ[Lookup[pseudoStats, "execution_implemented", False]] &&
   Lookup[pseudoStats, "execution_scope", None] ===
     "acb-regular-singular-jordan-block-dag-column-v1" &&
   AllTrue[pseudoBlocks,
     AssociationQ[#] && TrueQ[Lookup[#, "no_pseudo", False]] &] &&
-  Lookup[pseudoSolved[[2]], "ID", None] === "E5" &&
-  StringContainsQ[
-    Lookup[pseudoSolved[[2]], "Detail", ""], "CASE-P"];
+  Lookup[pseudoSolved["NativeSummary"], "execution_capability", None] ===
+    "acb-regular-singular-jordan-block-dag-column-v1" &&
+  TrueQ[pseudoCollisionOk];
 
-automaticShadowBasis = catchDE2[
+automaticAcbBasis = catchDE2[
   DiffExp2`NativeTransport`Private`nativeReceivingBasis[
     pseudoCs, pseudoRequest, 2]];
-automaticShadowOk = AssociationQ[automaticShadowBasis] &&
-  Lookup[automaticShadowBasis, "Type", None] ===
+automaticAcbOk = AssociationQ[automaticAcbBasis] &&
+  Lookup[automaticAcbBasis, "Type", None] ===
     "DiffExp2NativeSCCBasis" &&
-  Lookup[automaticShadowBasis, "Dimension", None] === 4 &&
-  Lookup[Lookup[automaticShadowBasis, "NativeSummary", <||>],
-    "specialization_capability", None] ===
-      "exact-rational-shadow-to-acb-local-v1" &&
-  Lookup[Lookup[automaticShadowBasis, "Columns", {}],
-    "BasisIndex", {}] === Range[4];
-If[AssociationQ[automaticShadowBasis] &&
-    ListQ[Lookup[automaticShadowBasis, "Columns", None]],
+  Lookup[automaticAcbBasis, "Dimension", None] === 4 &&
+  Lookup[Lookup[automaticAcbBasis, "Columns", {}],
+    "BasisIndex", {}] === Range[4] &&
+  AllTrue[Lookup[automaticAcbBasis, "Columns", {}],
+    Lookup[Lookup[#, "NativeSummary", <||>],
+      "execution_capability", None] ===
+        "acb-regular-singular-jordan-block-dag-column-v1" &];
+If[AssociationQ[automaticAcbBasis] &&
+    ListQ[Lookup[automaticAcbBasis, "Columns", None]],
   Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
-    automaticShadowBasis["Columns"]]];
+    automaticAcbBasis["Columns"]]];
 
 (* The exact Rational CASE-P solver is a proof-producing shadow for this one
    SCC only.  Import its completed columns into the already prepared Acb SCC,
@@ -276,6 +327,33 @@ shadowEvaluated = Map[
   DiffExp2`CppBackend`EvaluatePersistentLocal[#,
       <|"exact" -> "1/4"|>, <|"tail_estimate" -> False|>, 60] &,
   shadowImports];
+pseudoEvaluated = If[AssociationQ[pseudoSolved],
+  DiffExp2`CppBackend`EvaluatePersistentLocal[pseudoSolved,
+    <|"exact" -> "1/4"|>, <|"tail_estimate" -> False|>, 60],
+  pseudoSolved];
+pseudoFrame = decodeEvaluationFrame[pseudoEvaluated];
+shadowFrame = If[shadowEvaluated === {}, <||>,
+  decodeEvaluationFrame[First[shadowEvaluated]]];
+commonMin = If[AssociationQ[pseudoFrame] && AssociationQ[shadowFrame],
+  Max[Lookup[pseudoFrame, "Min", 1], Lookup[shadowFrame, "Min", 1]], 1];
+commonMax = If[AssociationQ[pseudoFrame] && AssociationQ[shadowFrame],
+  Min[Lookup[pseudoFrame, "Max", 0], Lookup[shadowFrame, "Max", 0]], 0];
+pseudoCommonValue = If[commonMin <= commonMax &&
+    Lookup[pseudoFrame, "Dimension", 0] ===
+      Lookup[shadowFrame, "Dimension", -1],
+  Flatten[pseudoFrame["Table"][[
+    commonMin - pseudoFrame["Min"] + 1 ;;
+      commonMax - pseudoFrame["Min"] + 1]]], {}];
+shadowCommonValue = If[pseudoCommonValue === {}, {},
+  Flatten[shadowFrame["Table"][[
+    commonMin - shadowFrame["Min"] + 1 ;;
+      commonMax - shadowFrame["Min"] + 1]]]];
+pseudoShadowMaximumDifference = If[Length[pseudoCommonValue] > 0 &&
+    Length[pseudoCommonValue] === Length[shadowCommonValue],
+  Max[Abs[N[pseudoCommonValue - shadowCommonValue, 50]]], Infinity];
+pseudoShadowParityOk = Length[pseudoCommonValue] > 0 &&
+  Length[pseudoCommonValue] === Length[shadowCommonValue] &&
+  pseudoShadowMaximumDifference < 10^-40;
 shadowImportOk = Length[shadowImports] === 4 &&
   AllTrue[shadowImports, AssociationQ[#] &&
       Lookup[#, "status", "error"] === "ok" &&
@@ -287,7 +365,11 @@ shadowImportOk = Length[shadowImports] === 4 &&
   AssociationQ[shadowClosed] &&
   AllTrue[shadowEvaluated, AssociationQ[#] &&
       Lookup[#, "status", "error"] === "ok" &&
-      Lookup[Lookup[#, "value", <||>], "dimension", None] === 4 &];
+      Lookup[Lookup[#, "value", <||>], "dimension", None] === 4 &] &&
+  TrueQ[pseudoShadowParityOk];
+If[AssociationQ[pseudoSolved] &&
+    StringQ[Lookup[pseudoSolved, "Local", None]],
+  Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[pseudoSolved]]];
 Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
   shadowImports];
 If[AssociationQ[pseudoPrepared] &&
@@ -295,15 +377,21 @@ If[AssociationQ[pseudoPrepared] &&
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[pseudoPrepared]]];
 DiffExp2`Solve`ClearSolveCaches[];
 ok = TrueQ[ok] && TrueQ[acbOk] && TrueQ[pseudoOk] &&
-  TrueQ[automaticShadowOk] && TrueQ[shadowImportOk];
+  TrueQ[automaticAcbOk] && TrueQ[shadowImportOk];
 
 Print[If[ok, "PASS", "FAIL"],
-  ": Rational/Acb singular Jordan SCC parity, source propagation, and CASE-P guard"];
+  ": Rational/Acb singular Jordan SCC parity, source propagation, and ball-certified CASE-P"];
 If[!ok, Print[InputForm[{
   "RationalFailure" -> Select[result, FailureQ],
   "AcbFailure" -> Select[acbResult, FailureQ],
   "RationalValueLength" -> Length[rationalValue],
   "AcbValueLength" -> Length[acbValue],
+  "RationalFrame" -> KeyDrop[rationalFrame, "Table"],
+  "AcbFrame" -> KeyDrop[acbFrame, "Table"],
+  "AcbCommonFrame" -> {acbCommonMin, acbCommonMax},
+  "AcbCommonValueLengths" ->
+    {Length[rationalCommonValue], Length[acbCommonValue]},
+  "AcbMaximumDifference" -> acbMaximumDifference,
   "AcbStats" -> If[AssociationQ[acbStats],
     KeyTake[acbStats, {"execution_implemented", "execution_scope",
       "capability_evidence"}], acbStats],
@@ -314,9 +402,10 @@ If[!ok, Print[InputForm[{
     KeyTake[pseudoStats, {"execution_implemented", "execution_scope",
       "block_charts"}], pseudoStats],
   "PseudoSolved" -> pseudoSolved,
-  "AutomaticShadowBasis" -> If[AssociationQ[automaticShadowBasis],
-    KeyTake[automaticShadowBasis,
-      {"Type", "Dimension", "NativeSummary"}], automaticShadowBasis],
+  "PseudoCollisionRecords" -> pseudoCollisionRecords,
+  "AutomaticAcbBasis" -> If[AssociationQ[automaticAcbBasis],
+    KeyTake[automaticAcbBasis,
+      {"Type", "Dimension", "NativeSummary"}], automaticAcbBasis],
   "ShadowFailures" -> Select[shadowResult, FailureQ],
   "ShadowIdentity" -> shadowIdentity,
   "ShadowImports" -> (If[AssociationQ[#],
@@ -325,5 +414,13 @@ If[!ok, Print[InputForm[{
     shadowImports),
   "BadShadowImport" -> badShadowImport,
   "ShadowClosed" -> shadowClosed,
-  "ShadowEvaluatedStatus" -> Lookup[shadowEvaluated, "status", None]}]]];
+  "ShadowEvaluatedStatus" -> Lookup[shadowEvaluated, "status", None],
+  "PseudoEvaluatedStatus" -> Lookup[pseudoEvaluated, "status", None],
+  "PseudoFrame" -> KeyDrop[pseudoFrame, "Table"],
+  "ShadowFrame" -> KeyDrop[shadowFrame, "Table"],
+  "CommonFrame" -> {commonMin, commonMax},
+  "PseudoShadowCommonValueLengths" ->
+    {Length[pseudoCommonValue], Length[shadowCommonValue]},
+  "PseudoShadowMaximumDifference" ->
+    pseudoShadowMaximumDifference }]]];
 Exit[If[ok, 0, 1]];

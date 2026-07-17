@@ -1,9 +1,9 @@
 (* All diagonal SCCs may be ordinary while a polar cross-edge makes the
-   composite regular-singular.  Acb cannot assign its one submitted target
-   schedule to the shifted exact source tag; nativeReceivingBasis must catch
-   that expected probe failure, solve the Rational shadow, and specialize the
-   completed columns back into the paired Acb owner without printing a false
-   terminal DE2Error. *)
+   composite regular-singular.  Exact tags and schedules now let Acb execute
+   the normal path and certify its coefficient balls directly.  If a ball is
+   ambiguous, nativeReceivingBasis must still catch that narrowly identified
+   failure, solve the Rational shadow, and specialize the completed columns
+   back into the paired Acb owner without printing a false terminal error. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -51,6 +51,17 @@ result = Block[{DiffExp2`Solve`Private`$cppExactDomain = False},
   {cs, prepared, stats, decision, basis, capturedPrints, afterStats}];
 
 {cs, prepared, stats, decision, basis, capturedPrints, afterStats} = result;
+forcedFallbackProbeCount = 0;
+forcedFallbackBasis = If[FailureQ[prepared], prepared,
+  Block[{
+      DiffExp2`NativeTransport`Private`nativeCatchDE2Buffered =
+        Function[Null,
+          forcedFallbackProbeCount++;
+          {Failure["DiffExp2", <|"Detail" ->
+              "native Acb CASE-P coefficient is numerically ambiguous; requires the exact Rational shadow"|>],
+            {}}, HoldAllComplete]},
+    catchDE2[DiffExp2`NativeTransport`Private`nativeReceivingBasis[
+      cs, request, 2]]]];
 falseTerminalPrints = Select[capturedPrints,
   MatchQ[#, HoldComplete["DiffExp2 error ", _String, ": ", _String]] &];
 triggerPrintRecognized =
@@ -79,41 +90,58 @@ ok = !AnyTrue[Take[result, 3], FailureQ] &&
   AllTrue[Lookup[stats, "block_charts", {}],
     TrueQ[Lookup[#, "regular", False]] &] &&
   AssociationQ[decision] &&
-  TrueQ[Lookup[decision, "RequiresRationalShadow", False]] &&
+  !TrueQ[Lookup[decision, "RequiresRationalShadow", True]] &&
   Lookup[decision, "Certificate", None] ===
-    "identity-frame-cross-coupling-has-positive-center-pole-order" &&
+    "exact-tagged-acb-polar-cross-coupling" &&
+  TrueQ[Lookup[decision, "RationalShadowFallback", False]] &&
   AssociationQ[basis] &&
   Lookup[basis, "Type", None] === "DiffExp2NativeSCCBasis" &&
   Lookup[basis, "Dimension", None] === 2 &&
   Lookup[Lookup[basis, "Columns", {}], "BasisIndex", {}] === {1, 2} &&
-  Lookup[Lookup[basis, "NativeSummary", <||>],
+  AllTrue[Lookup[basis, "Columns", {}],
+    Lookup[Lookup[#, "NativeSummary", <||>],
+      "execution_capability", None] ===
+        "acb-regular-singular-scalar-block-dag-column-v1" &] &&
+  AssociationQ[afterStats] &&
+  Lookup[afterStats, "scc_column_solves", None] === 2 &&
+  forcedFallbackProbeCount === 1 &&
+  AssociationQ[forcedFallbackBasis] &&
+  Lookup[forcedFallbackBasis, "Type", None] ===
+    "DiffExp2NativeSCCBasis" &&
+  Lookup[forcedFallbackBasis, "Dimension", None] === 2 &&
+  Lookup[Lookup[forcedFallbackBasis, "Columns", {}],
+    "BasisIndex", {}] === {1, 2} &&
+  Lookup[Lookup[forcedFallbackBasis, "NativeSummary", <||>],
     "specialization_capability", None] ===
       "exact-rational-shadow-to-acb-local-v1" &&
-  Lookup[Lookup[basis, "NativeSummary", <||>],
-    "selection_capability", None] ===
-      "producer-certified-proactive-rational-shadow-v1" &&
-  AssociationQ[afterStats] &&
-  Lookup[afterStats, "scc_column_solves", None] === 0 &&
   !TrueQ[Lookup[nonIdentityDecision,
     "RequiresRationalShadow", True]] &&
   Lookup[nonIdentityDecision, "Certificate", None] ===
     "runtime-exact-schedule-and-tag-gate-required" &&
-  TrueQ[Lookup[seedCasePDecision,
-    "RequiresRationalShadow", False]] &&
+  !TrueQ[Lookup[nonIdentityDecision,
+    "RationalShadowFallback", False]] &&
+  !TrueQ[Lookup[seedCasePDecision,
+    "RequiresRationalShadow", True]] &&
   Lookup[seedCasePDecision, "Certificate", None] ===
-    "captured-seed-schedule-contains-exact-case-p" &&
+    "exact-schedule-acb-case-p-compensation" &&
+  TrueQ[Lookup[seedCasePDecision,
+    "RationalShadowFallback", False]] &&
   falseTerminalPrints === {} && TrueQ[triggerPrintRecognized] &&
   TrueQ[unrelatedPrintPreserved];
 
 If[AssociationQ[basis] && ListQ[Lookup[basis, "Columns", None]],
   Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
     basis["Columns"]]];
+If[AssociationQ[forcedFallbackBasis] &&
+    ListQ[Lookup[forcedFallbackBasis, "Columns", None]],
+  Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+    forcedFallbackBasis["Columns"]]];
 If[AssociationQ[prepared] && StringQ[Lookup[prepared, "SCC", None]],
   Quiet[DiffExp2`CppBackend`ReleasePersistentSCC[prepared]]];
 DiffExp2`Solve`ClearSolveCaches[];
 
 Print[If[ok, "PASS", "FAIL"],
-  ": all-regular polar Acb SCC uses quiet exact Rational shadow"];
+  ": all-regular polar Acb SCC uses direct balls with exact fallback"];
 If[!ok, Print[InputForm[{
   "Failures" -> Select[result, FailureQ],
   "Stats" -> If[AssociationQ[stats],
@@ -127,6 +155,10 @@ If[!ok, Print[InputForm[{
   "SeedCasePDecision" -> seedCasePDecision,
   "Basis" -> If[AssociationQ[basis],
     KeyTake[basis, {"Type", "Dimension", "NativeSummary"}], basis],
+  "ForcedFallbackProbeCount" -> forcedFallbackProbeCount,
+  "ForcedFallbackBasis" -> If[AssociationQ[forcedFallbackBasis],
+    KeyTake[forcedFallbackBasis,
+      {"Type", "Dimension", "NativeSummary"}], forcedFallbackBasis],
   "CapturedPrints" -> capturedPrints,
   "TriggerPrintRecognized" -> triggerPrintRecognized,
   "UnrelatedPrintPreserved" -> unrelatedPrintPreserved}]]];

@@ -188,6 +188,7 @@ SCRIPT_FILES = {
     "Scripts/run_double_box_timing_regression.sh",
     "Scripts/run_pentagon_timing_regression.sh",
     "Scripts/run_ft_stepwise2.m",
+    "Scripts/replay_native_terminal_checkpoint.m",
     "Scripts/run_release_tests.sh",
     "Scripts/verify_double_box_planar.m",
 }

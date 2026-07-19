@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -52,6 +53,14 @@ constexpr std::uint64_t kMinimumDecodedJsonBudget =
     std::uint64_t{64} * 1024 * 1024;
 constexpr std::uint64_t kMaximumDecodedJsonBudget =
     std::uint64_t{8} * 1024 * 1024 * 1024;
+// Large retained singular charts can legitimately exceed the ordinary
+// decoded-string ceiling even though their canonical-DAG container remains
+// below the 8 GiB payload limit.  Keep the normal untrusted-input limit, but
+// permit an explicit diagnostic restore of a locally produced checkpoint.
+// This is deliberately bounded so the override cannot disable expansion
+// accounting altogether.
+constexpr std::uint64_t kMaximumDiagnosticDecodedJsonBudget =
+    std::uint64_t{32} * 1024 * 1024 * 1024;
 constexpr std::uint64_t kDecodedToEncodedBudgetRatio = 1024;
 constexpr std::size_t kMaximumCanonicalJsonReferenceDepth = 4096;
 constexpr char kEncodedStringPrefix = '\0';
@@ -242,7 +251,8 @@ class CanonicalJsonStringDagDecoder {
     if (entries.size() > kMaximumCanonicalJsonEntries)
       throw std::invalid_argument(
           "checkpoint canonical-JSON identity table is too large");
-    if (decoded_budget == 0 || decoded_budget > kMaximumDecodedJsonBudget)
+    if (decoded_budget == 0 ||
+        decoded_budget > kMaximumDiagnosticDecodedJsonBudget)
       throw std::invalid_argument(
           "checkpoint canonical-JSON decoded-size budget is invalid");
   }
@@ -339,7 +349,10 @@ class CanonicalJsonStringDagDecoder {
   void charge(std::size_t bytes) {
     if (bytes > decoded_budget_ - decoded_work_)
       throw std::invalid_argument(
-          "checkpoint canonical-JSON expansion exceeds its decoded-size budget");
+          "checkpoint canonical-JSON expansion exceeds its decoded-size "
+          "budget (consumed=" + std::to_string(decoded_work_) +
+          ", next=" + std::to_string(bytes) +
+          ", budget=" + std::to_string(decoded_budget_) + ")");
     decoded_work_ += bytes;
   }
 
@@ -353,13 +366,28 @@ class CanonicalJsonStringDagDecoder {
 
 std::uint64_t decoded_json_budget(std::size_t header_bytes,
                                   std::size_t payload_bytes) {
+  auto maximum = kMaximumDecodedJsonBudget;
+  if (const auto* diagnostic =
+          std::getenv("DE2_CHECKPOINT_DECODED_JSON_BUDGET_GIB");
+      diagnostic != nullptr && *diagnostic != '\0') {
+    std::uint64_t gib = 0;
+    const auto* first = diagnostic;
+    const auto* last = diagnostic + std::strlen(diagnostic);
+    const auto parsed = std::from_chars(first, last, gib);
+    if (parsed.ec != std::errc{} || parsed.ptr != last || gib < 8 ||
+        gib > 32)
+      throw std::invalid_argument(
+          "DE2_CHECKPOINT_DECODED_JSON_BUDGET_GIB must be an integer "
+          "between 8 and 32");
+    maximum = gib * std::uint64_t{1024} * 1024 * 1024;
+  }
   const auto encoded_bytes = static_cast<std::uint64_t>(header_bytes) +
       static_cast<std::uint64_t>(payload_bytes);
   const auto scaled = encoded_bytes >
-          kMaximumDecodedJsonBudget / kDecodedToEncodedBudgetRatio
-      ? kMaximumDecodedJsonBudget
+          maximum / kDecodedToEncodedBudgetRatio
+      ? maximum
       : encoded_bytes * kDecodedToEncodedBudgetRatio;
-  return std::min(kMaximumDecodedJsonBudget,
+  return std::min(maximum,
                   std::max(kMinimumDecodedJsonBudget, scaled));
 }
 

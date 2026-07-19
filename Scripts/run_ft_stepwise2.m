@@ -1565,13 +1565,44 @@ ft2ExpectedPoleFreeExampleQ[example_String] := MemberQ[
   {"bubble", "sunrise", "banana", "banana_unequal", "banana4",
     "banana4_unequal", "kite", "pentagon_massive"}, example];
 
+ft2FinalPoleNegligibleQ[coefficient_] := Module[{bounds},
+  If[FreeQ[coefficient, _?InexactNumberQ] &&
+      TrueQ[PossibleZeroQ[coefficient]], Return[True, Module]];
+  If[!NumericQ[coefficient], Return[False, Module]];
+  bounds = catch2[
+    DiffExp2`Tolerances`NumericMagnitudeBounds[coefficient, 30]];
+  ListQ[bounds] && Length[bounds] === 2 &&
+    TrueQ[Last[bounds] <= 10^-8]];
+
 ft2UnexpectedFinalPoleRows[example_String, raw_] := Module[
   {minimum = esMn[raw], inspected},
   If[!ft2ExpectedPoleFreeExampleQ[example] || minimum >= 0, Return[{}]];
-  inspected = Table[{power, N[esC[raw, power], Min[50, wp]]},
+  inspected = Table[{power, esC[raw, power]},
     {power, minimum, -1}];
-  Select[inspected,
-    !NumericQ[Last[#]] || !TrueQ[Abs[Last[#]] <= 10^-8] &]];
+  Select[inspected, !ft2FinalPoleNegligibleQ[Last[#]] &]];
+
+ft2PretrimFinalPoleAudit[example_String, masters_List,
+    rawValues_List] := Module[{bad},
+  If[!ft2ExpectedPoleFreeExampleQ[example], Return[True, Module]];
+  If[Length[masters] =!= Length[rawValues],
+    Return[Failure["FeynmanTrickUnexpectedFinalPole", <|
+      "Detail" ->
+        "pre-trim final pole audit received inconsistent master/value counts",
+      "Example" -> example, "Masters" -> masters,
+      "ValueCount" -> Length[rawValues]|>], Module]];
+  bad = MapThread[Function[{master, raw}, Module[{rows},
+      rows = ft2UnexpectedFinalPoleRows[example, raw];
+      If[rows === {}, Nothing, <|
+        "Master" -> master,
+        "NegativeCoefficients" ->
+          ({First[#], cleanNumber[N[Last[#], Min[50, wp]]]} & /@ rows)|>]]],
+    {masters, rawValues}];
+  If[bad === {}, True,
+    Failure["FeynmanTrickUnexpectedFinalPole", <|
+      "Detail" ->
+        "a pole-free physical example has unresolved negative epsilon coefficients before ESTrimThrough; refusing to let relative trimming hide them",
+      "Example" -> example, "AbsoluteTolerance" -> 10^-8,
+      "Failures" -> bad|>]]];
 
 ft2StepwiseRow[example_, level_, master_, raw_, prefactor_,
     certification_] := Module[{rowMin, coefficients},
@@ -3156,7 +3187,7 @@ runExample[name_String, familyRequest_:None,
    discoveredCheckpoint, customQ, family, outputName, numericalPoint,
    outputIntegrals, outputRequests, dimensionExpression, familyID,
    pipelineRequestID, outputMode = None, outputResolution = None,
-   outputResolutionLine},
+   outputResolutionLine, pretrimFinalPoleAudit},
   customQ = familyRequest =!= None;
   If[customQ &&
       !TrueQ[FeynmanTrick`PipelineRequest`PipelineRequestQ[familyRequest]],
@@ -3927,6 +3958,13 @@ runExample[name_String, familyRequest_:None,
       {mi, Length[mastersBelow]}];
     ];
     If[MemberQ[rawES, $Failed], Throw[$Failed, "FT2Abort"]];
+    If[level === 1,
+      pretrimFinalPoleAudit = ft2PretrimFinalPoleAudit[
+        name, mastersBelow, rawES];
+      If[FailureQ[pretrimFinalPoleAudit],
+        Print["FTLADDER PRETRIM FINAL POLE FAIL ",
+          pretrimFinalPoleAudit];
+        Throw[$Failed, "FT2Abort"]]];
     (* Matching halos extend a private high-order reservoir.  Its remote
        coefficients can be much larger than the physical pole/finite prefix
        and therefore must not participate in ESTrim's relative leading-order

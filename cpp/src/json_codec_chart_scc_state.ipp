@@ -2954,6 +2954,64 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           }
         }
       }
+      const auto encode_scales = [](const auto& scales) {
+        json::array encoded;
+        encoded.reserve(scales.size());
+        for (const auto& [power, magnitude] : scales)
+          encoded.push_back(json::object{
+              {"power", power},
+              {"absolute_upper_exact", magnitude.dump_exact()},
+              {"absolute_upper_approx",
+               magnitude.approximate_upper()}});
+        return encoded;
+      };
+      json::array block_scales;
+      block_scales.reserve(blocks_.size());
+      for (const auto& block : blocks_) {
+        std::map<std::int32_t, Magnitude> inverse_scales;
+        for (const auto& entry : block.source_transform.matrix.entries) {
+          const auto& multiplier = entry.multiplier;
+          for (std::size_t epsilon = 0;
+               epsilon < multiplier.kernels.size(); ++epsilon) {
+            if (multiplier.kernels[epsilon].empty()) continue;
+            const auto power = matching_detail::checked_power(
+                static_cast<std::int64_t>(
+                    multiplier.epsilon_shift) + epsilon,
+                "SCC normal-frame inverse diagnostic power");
+            const auto magnitude = Magnitude::upper_abs(
+                multiplier.kernels[epsilon].front());
+            auto [found, inserted] = inverse_scales.try_emplace(
+                power, Magnitude::zero());
+            if (!(magnitude <= found->second))
+              found->second = magnitude;
+          }
+        }
+        block_scales.push_back(json::object{
+            {"block", block.block},
+            {"vertices", block.vertices.size()},
+            {"spectral_inverse_max_by_epsilon",
+             encode_scales(inverse_scales)}});
+      }
+      std::map<std::int32_t, Magnitude> right_scales;
+      if (auto right = right_denormalization_acb_matching_matrix();
+          right.has_value())
+        for (const auto& row : *right)
+          for (const auto& frame : row)
+            for (std::int64_t raw_power = frame.min_power();
+                 raw_power <= frame.complete_max(); ++raw_power) {
+              const auto power = matching_detail::checked_power(
+                  raw_power,
+                  "SCC normal-frame right diagnostic power");
+              const auto magnitude = Magnitude::upper_abs(
+                  frame.coefficient(power));
+              auto [found, inserted] = right_scales.try_emplace(
+                  power, Magnitude::zero());
+              if (!(magnitude <= found->second))
+                found->second = magnitude;
+            }
+      report["block_scales"] = std::move(block_scales);
+      report["right_denormalization_max_by_epsilon"] =
+          encode_scales(right_scales);
       report["status"] = "available";
       return report;
     }
@@ -3040,6 +3098,50 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     }
   }
 
+  std::optional<ExactLaurentMatrix<ComplexBall>>
+  right_normalization_acb_matching_transformation() const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      return std::nullopt;
+    } else {
+      ExactLaurentMatrix<ComplexBall> result(
+          dimension_,
+          std::vector<ExactLaurentPolynomial<ComplexBall>>(dimension_));
+      for (const auto& block : blocks_) {
+        if (block.source_transform.identity) {
+          for (const auto vertex : block.vertices)
+            result[vertex][vertex] =
+                ExactLaurentPolynomial<ComplexBall>::one();
+          continue;
+        }
+        for (const auto& entry : block.source_transform.matrix.entries) {
+          const auto& multiplier = entry.multiplier;
+          if (multiplier.proven_zero) continue;
+          if (multiplier.center_pole_order != 0 ||
+              multiplier.kernels.empty())
+            return std::nullopt;
+          auto& polynomial =
+              result[block.vertices[entry.row]]
+                    [block.vertices[entry.column]];
+          for (std::size_t epsilon = 0;
+               epsilon < multiplier.kernels.size(); ++epsilon) {
+            const auto& kernel = multiplier.kernels[epsilon];
+            if (kernel.empty()) return std::nullopt;
+            for (std::size_t taylor = 1;
+                 taylor < kernel.size(); ++taylor)
+              if (!kernel[taylor].is_zero()) return std::nullopt;
+            polynomial.add_term(
+                matching_detail::checked_power(
+                    static_cast<std::int64_t>(
+                        multiplier.epsilon_shift) + epsilon,
+                    "SCC right-normalization epsilon power"),
+                kernel.front());
+          }
+        }
+      }
+      return result;
+    }
+  }
+
   std::optional<FiniteLaurentVector<ComplexBall>>
   denormalize_acb_matching_weights(
       const FiniteLaurentVector<ComplexBall>& normalized) const override {
@@ -3112,6 +3214,42 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           throw std::logic_error(
               "SCC matching weight denormalization left an empty component");
         result.push_back(std::move(*frame));
+      }
+      return result;
+    }
+  }
+
+  std::optional<FiniteLaurentMatrix<ComplexBall>>
+  right_denormalization_acb_matching_matrix() const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      return std::nullopt;
+    } else {
+      std::size_t unit_width = 1;
+      for (const auto& block : blocks_)
+        unit_width = std::max(
+            unit_width,
+            static_cast<std::size_t>(block.chart->frame_width()));
+      FiniteLaurentMatrix<ComplexBall> result(
+          dimension_, FiniteLaurentVector<ComplexBall>());
+      for (auto& row : result) row.reserve(dimension_);
+      for (std::uint32_t column = 0; column < dimension_; ++column) {
+        FiniteLaurentVector<ComplexBall> unit;
+        unit.reserve(dimension_);
+        for (std::uint32_t component = 0; component < dimension_;
+             ++component) {
+          std::vector<ComplexBall> coefficients(
+              unit_width, ComplexBall(0));
+          if (component == column)
+            coefficients.front() = ComplexBall(1);
+          unit.emplace_back(0, std::move(coefficients));
+        }
+        auto physical = denormalize_acb_matching_weights(unit);
+        if (!physical.has_value() ||
+            physical->size() != dimension_)
+          throw std::logic_error(
+              "SCC matching right denormalization matrix lost a column");
+        for (std::uint32_t row = 0; row < dimension_; ++row)
+          result[row].push_back(std::move((*physical)[row]));
       }
       return result;
     }

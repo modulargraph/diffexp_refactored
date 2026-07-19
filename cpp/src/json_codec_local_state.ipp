@@ -573,10 +573,18 @@ class PhysicalEquationOwnerBase {
     (void)left_normalized;
     return std::nullopt;
   }
+  virtual std::optional<ExactLaurentMatrix<ComplexBall>>
+  right_normalization_acb_matching_transformation() const {
+    return std::nullopt;
+  }
   virtual std::optional<FiniteLaurentVector<ComplexBall>>
   denormalize_acb_matching_weights(
       const FiniteLaurentVector<ComplexBall>& normalized) const {
     (void)normalized;
+    return std::nullopt;
+  }
+  virtual std::optional<FiniteLaurentMatrix<ComplexBall>>
+  right_denormalization_acb_matching_matrix() const {
     return std::nullopt;
   }
   virtual std::optional<AcbMatchingResidualPushforward>
@@ -1246,6 +1254,32 @@ FiniteLaurentVector<Scalar> parse_checkpoint_frame_vector(
   output.reserve(values.size());
   for (const auto& value : values)
     output.push_back(parse_checkpoint_epsilon_frame<Scalar>(value, label));
+  return output;
+}
+
+template <typename Scalar>
+json::array checkpoint_frame_matrix_record(
+    const FiniteLaurentMatrix<Scalar>& matrix) {
+  json::array output;
+  output.reserve(matrix.size());
+  for (const auto& row : matrix)
+    output.push_back(checkpoint_frame_vector_record(row));
+  return output;
+}
+
+template <typename Scalar>
+FiniteLaurentMatrix<Scalar> parse_checkpoint_frame_matrix(
+    const json::value& raw, std::size_t expected_rows,
+    std::size_t expected_columns, const char* label) {
+  const auto& rows = as_array(raw, label);
+  if (rows.size() != expected_rows)
+    throw std::invalid_argument(
+        std::string(label) + " row dimension is inconsistent");
+  FiniteLaurentMatrix<Scalar> output;
+  output.reserve(rows.size());
+  for (const auto& row : rows)
+    output.push_back(parse_checkpoint_frame_vector<Scalar>(
+        row, expected_columns, label));
   return output;
 }
 

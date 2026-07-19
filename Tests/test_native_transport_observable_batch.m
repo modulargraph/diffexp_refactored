@@ -120,6 +120,28 @@ assert["factorized terminal consumer uses its physical sources and structural ou
     Length[bananaFactorizedConsumerPrepared["entries"][[1, "multiplier",
       "analytic_coefficients"]]] === 12];
 
+bananaSplitFactorizedConsumerRecipe =
+  DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
+    <|"Chart" -> rowFixtureChart,
+      "Shape" -> <|"EpsWindow" -> <|"Min" -> -1,
+          "CompleteMax" -> 36|>,
+        "TWindow" -> <|"CompleteMax" -> 4|>,
+        "Dimension" -> 3|>|>,
+    <|"Sources" -> {
+        <|"Min" -> 0, "CompleteMax" -> 45|>,
+        <|"Min" -> 0, "CompleteMax" -> 45|>,
+        <|"Min" -> -1, "CompleteMax" -> 42|>},
+      "OutputMinimumShift" -> -3,
+      "BasisMinPower" -> -4,
+      "ProjectionWeightMinPower" -> -2|>,
+    <|"Identity" -> "banana4-split-factorized-consumer-width",
+      "MinimumEpsilonShift" -> -2,
+      "Epsilon" -> <|"Min" -> -3, "Max" -> 30,
+        "RequiredCompleteMax" -> 30|>|>, 1];
+assert["factorized terminal row separates basis and transformed-weight minima",
+  bananaSplitFactorizedConsumerRecipe["Shape", "EpsWindow"] ===
+    <|"Min" -> -1, "CompleteMax" -> 38|>];
+
 softConsumerRecipe =
   DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
     <|"Chart" -> rowFixtureChart,

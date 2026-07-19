@@ -657,9 +657,92 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           "terminal mode diagnostics require one certified Acb exact-right match");
     const auto basis = terminal_acb_basis_owners();
     const auto& weights = terminal_acb_physical_weights();
-    if (basis.size() != weights.size())
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb)
+      throw std::logic_error(
+          "terminal mode diagnostics lost their retained Acb match");
+    const auto& transformed_weights = acb->transformed_weights();
+    if (basis.size() != weights.size() ||
+        basis.size() != transformed_weights.size())
       throw std::logic_error(
           "terminal mode diagnostics found different basis and weight dimensions");
+    const auto compact_match = compact_terminal_match_diagnostic();
+    json::array replay_basis;
+    replay_basis.reserve(basis.size());
+    for (const auto& owner : basis)
+      replay_basis.push_back(json::object{
+          {"local", owner->handle()},
+          {"checkpoint_identity", owner->checkpoint_identity()}});
+    const auto arm_name = required_string(handoff_, "arm");
+    const auto match_index = static_cast<std::size_t>(
+        as_u64(handoff_.at("match"),
+               "terminal mode diagnostic replay match index"));
+    const auto& replay_epsilon =
+        as_object(compact_match.at("epsilon"),
+                  "terminal mode diagnostic replay epsilon");
+    const auto& replay_refinement =
+        as_object(compact_match.at("refinement"),
+                  "terminal mode diagnostic replay refinement");
+    json::object replay_record{
+        {"schema", "diffexp2-terminal-match-replay-v1"},
+        {"plan", json::object{
+             {"tile_plan", plan_owner_->handle()},
+             {"checkpoint_identity",
+              plan_owner_->checkpoint_identity()}}},
+        {"arm", arm_name},
+        {"index", match_index + 1},
+        {"basis", std::move(replay_basis)},
+        {"incoming", json::object{
+             {"local", incoming_owner_->handle()},
+             {"checkpoint_identity",
+              incoming_owner_->checkpoint_identity()}}},
+        {"epsilon", json::object{
+             {"min", replay_epsilon.at("min")},
+             {"max", replay_epsilon.at("max")},
+             {"required_complete_max",
+              replay_epsilon.at("required_complete_max")}}},
+        {"refinement", json::object{
+             {"relative_tolerance",
+              replay_refinement.at("relative_tolerance")},
+             {"max_steps", replay_refinement.at("max_steps")}}}};
+    json::value owner_normal_frame_diagnostic = nullptr;
+    try {
+      const auto& retained = plan_owner_->arm(arm_name);
+      if (match_index < retained.certified_matches.size()) {
+        const auto owner = basis.front()->retained_equation_owner();
+        if (owner)
+          owner_normal_frame_diagnostic =
+              owner->acb_matching_normal_frame_diagnostic(
+                  retained.certified_matches[match_index]
+                      .receiving.local);
+      }
+    } catch (const std::exception& error) {
+      owner_normal_frame_diagnostic = json::object{
+          {"schema", "diffexp2-acb-normal-frame-owner-diagnostic-v1"},
+          {"status", "diagnostic-error"},
+          {"detail", error.what()}};
+    }
+    const auto encode_weight =
+        [output_digits](const EpsilonFrame<ComplexBall>& weight) {
+          json::array coefficients;
+          coefficients.reserve(weight.coefficients().size());
+          for (std::int64_t raw_power = weight.min_power();
+               raw_power <= weight.complete_max(); ++raw_power) {
+            const auto power = static_cast<std::int32_t>(raw_power);
+            coefficients.push_back(json::object{
+                {"power", power},
+                {"value", encode_scalar(
+                    weight.coefficient(power), output_digits)},
+                {"absolute_upper",
+                 Magnitude::upper_abs(weight.coefficient(power))
+                     .approximate_upper()}});
+          }
+          return json::object{
+              {"min", weight.min_power()},
+              {"max", weight.complete_max()},
+              {"coefficients", std::move(coefficients)}};
+        };
 
     json::array columns;
     columns.reserve(basis.size());
@@ -675,19 +758,6 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
             {"material", local_detail::material_sector(sector)}});
 
       const auto& weight = weights[column];
-      json::array coefficients;
-      coefficients.reserve(weight.coefficients().size());
-      for (std::int64_t raw_power = weight.min_power();
-           raw_power <= weight.complete_max(); ++raw_power) {
-        const auto power = static_cast<std::int32_t>(raw_power);
-        coefficients.push_back(json::object{
-            {"power", power},
-            {"value", encode_scalar(
-                weight.coefficient(power), output_digits)},
-            {"absolute_upper",
-             Magnitude::upper_abs(weight.coefficient(power))
-                 .approximate_upper()}});
-      }
       columns.push_back(json::object{
           {"column", column},
           {"local", basis[column]->handle()},
@@ -696,15 +766,113 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
                         {"max", solution.epsilon.complete_max}}},
           {"taylor_complete_max", solution.taylor_complete_max},
           {"sectors", std::move(sectors)},
-          {"physical_weight",
-           json::object{{"min", weight.min_power()},
-                        {"max", weight.complete_max()},
-                        {"coefficients", std::move(coefficients)}}}});
+          {"physical_weight", encode_weight(weight)},
+          {"transformed_weight",
+           encode_weight(transformed_weights[column])}});
+    }
+
+    // Matching residuals are measured at an interior handoff.  They do not
+    // reveal whether the selected linear combination leaves a tiny
+    // nonvanishing Frobenius mode at a singular endpoint.  Materialize the
+    // physical combination only for this opt-in diagnostic and report every
+    // coefficient whose absolute endpoint power is nonpositive.  Exact mag
+    // dumps keep subnormal scales such as 10^-900 observable without
+    // underflowing through a diagnostic double.
+    std::vector<const LocalSolution<ComplexBall>*> physical_sources;
+    physical_sources.reserve(basis.size());
+    for (const auto& owner : basis)
+      physical_sources.push_back(&owner->solution());
+    const auto physical_solution = materialize_local_basis_weights(
+        physical_sources, weights,
+        checkpoint_identity_ + ":terminal-mode-diagnostic");
+    json::array endpoint_modes;
+    for (std::size_t sector_index = 0;
+         sector_index < physical_solution.sectors.size();
+         ++sector_index) {
+      const auto& sector = physical_solution.sectors[sector_index];
+      if (sector.a.domain != ExactDomain::Rational) continue;
+      const Rational a(sector.a.canonical);
+      for (std::uint32_t taylor = 0;
+           taylor < physical_solution.taylor_width(); ++taylor) {
+        const auto absolute_power = ExactScalarDescriptor::rational(
+            (a + Rational(static_cast<long>(taylor))).str());
+        if (absolute_power.sign == ExactSign::Positive) continue;
+        json::array coefficient_scales;
+        Magnitude overall = Magnitude::zero();
+        std::optional<std::uint32_t> largest_component;
+        std::optional<std::int32_t> largest_epsilon_power;
+        for (std::size_t epsilon_index = 0;
+             epsilon_index < physical_solution.epsilon.width();
+             ++epsilon_index) {
+          Magnitude epsilon_maximum = Magnitude::zero();
+          std::optional<std::uint32_t> epsilon_component;
+          for (std::uint32_t component = 0;
+               component < physical_solution.dimension; ++component) {
+            const auto magnitude = Magnitude::upper_abs(
+                sector.coefficients[local_detail::sector_index(
+                    physical_solution, epsilon_index, taylor,
+                    component)]);
+            if (!(magnitude <= epsilon_maximum)) {
+              epsilon_maximum = magnitude;
+              epsilon_component = component;
+            }
+            if (!(magnitude <= overall)) {
+              overall = magnitude;
+              largest_component = component;
+              largest_epsilon_power =
+                  local_detail::checked_i32(
+                      static_cast<std::int64_t>(
+                          physical_solution.epsilon.min_power) +
+                          epsilon_index,
+                      "terminal mode diagnostic epsilon power");
+            }
+          }
+          if (!epsilon_maximum.is_zero())
+            coefficient_scales.push_back(json::object{
+                {"power",
+                 local_detail::checked_i32(
+                     static_cast<std::int64_t>(
+                         physical_solution.epsilon.min_power) +
+                         epsilon_index,
+                     "terminal mode diagnostic coefficient power")},
+                {"component", *epsilon_component},
+                {"absolute_upper_exact",
+                 epsilon_maximum.dump_exact()},
+                {"absolute_upper_approx",
+                 epsilon_maximum.approximate_upper()}});
+        }
+        if (overall.is_zero()) continue;
+        const auto mode_class =
+            sector.b.is_zero == TruthValue::No
+            ? "regulated-nonpositive"
+            : absolute_power.sign == ExactSign::Negative
+            ? "unregulated-power-divergent"
+            : sector.log_power == 0
+            ? "unregulated-finite"
+            : "unregulated-log-divergent";
+        endpoint_modes.push_back(json::object{
+            {"sector", sector_index},
+            {"a", encode_exact_descriptor(sector.a)},
+            {"b", encode_exact_descriptor(sector.b)},
+            {"log_power", sector.log_power},
+            {"taylor", taylor},
+            {"absolute_power", absolute_power.canonical},
+            {"class", mode_class},
+            {"largest_component", *largest_component},
+            {"largest_epsilon_power", *largest_epsilon_power},
+            {"absolute_upper_exact", overall.dump_exact()},
+            {"absolute_upper_approx", overall.approximate_upper()},
+            {"coefficient_scales", std::move(coefficient_scales)}});
+      }
     }
     return json::object{
         {"schema", "diffexp2-terminal-mode-diagnostic-v1"},
-        {"match", compact_terminal_match_diagnostic()},
-        {"columns", std::move(columns)}};
+        {"match", compact_match},
+        {"replay", std::move(replay_record)},
+        {"owner_normal_frame_diagnostic",
+         std::move(owner_normal_frame_diagnostic)},
+        {"columns", std::move(columns)},
+        {"physical_endpoint_modes", std::move(endpoint_modes)}};
   }
   const std::string& provenance_identity() const {
     return provenance_identity_;
@@ -715,7 +883,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
     return acb != nullptr &&
         acb->certified_for_materialization() &&
-        acb->acb_materialization_right_transformation().has_value();
+        (acb->acb_materialization_right_transformation().has_value() ||
+         acb->terminal_normal_frame_right_transformation().has_value());
   }
 
   std::vector<std::shared_ptr<StoredLocal<ComplexBall>>>
@@ -788,11 +957,58 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       physical_sources.push_back(&valid_physical_basis.back());
     }
 
-    auto factorized =
-        right_transform_local_basis_exact<ComplexBall>(
-            physical_sources,
-            *acb->acb_materialization_right_transformation(),
-            checkpoint_identity_root + ":exact-right");
+    std::vector<LocalSolution<ComplexBall>> factorized;
+    if (const auto& normal_right =
+            acb->terminal_normal_frame_right_transformation();
+        normal_right.has_value()) {
+      if (normal_right->size() != physical_sources.size() ||
+          std::any_of(normal_right->begin(), normal_right->end(),
+              [&](const auto& row) {
+                return row.size() != physical_sources.size();
+              }))
+        throw std::logic_error(
+            "terminal normal-frame right transformation is not square");
+      std::vector<LocalSolution<ComplexBall>> normal_basis;
+      normal_basis.reserve(physical_sources.size());
+      for (std::size_t output = 0;
+           output < physical_sources.size(); ++output) {
+        FiniteLaurentVector<ComplexBall> weights;
+        weights.reserve(physical_sources.size());
+        for (std::size_t input = 0;
+             input < physical_sources.size(); ++input)
+          weights.push_back((*normal_right)[input][output]);
+        normal_basis.push_back(materialize_local_basis_weights(
+            physical_sources, weights,
+            checkpoint_identity_root + ":finite-normal-right:column:" +
+                std::to_string(output)));
+      }
+      std::vector<const LocalSolution<ComplexBall>*> normal_sources;
+      normal_sources.reserve(normal_basis.size());
+      for (const auto& column : normal_basis)
+        normal_sources.push_back(&column);
+      if (const auto& acb_right =
+              acb->acb_materialization_right_transformation();
+          acb_right.has_value())
+        factorized = right_transform_local_basis_exact<ComplexBall>(
+            normal_sources, *acb_right,
+            checkpoint_identity_root +
+                ":normal-frame-acb-Levelt-right");
+      else {
+        const auto exact_right =
+            specialize_exact_rational_laurent_matrix_to_acb(
+                acb->exact_saturation_transformation());
+        factorized = right_transform_local_basis_exact<ComplexBall>(
+            normal_sources, exact_right,
+            checkpoint_identity_root +
+                ":normal-frame-exact-right");
+      }
+    } else {
+      factorized =
+          right_transform_local_basis_exact<ComplexBall>(
+              physical_sources,
+              *acb->acb_materialization_right_transformation(),
+              checkpoint_identity_root + ":exact-right");
+    }
     if (const auto& preconditioner =
             acb->acb_right_materialization_preconditioner();
         preconditioner.has_value()) {
@@ -857,6 +1073,10 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       throw std::invalid_argument(
           context +
           ": terminal adjoint contraction requires one certified Acb exact-right match");
+    if (acb->terminal_normal_frame_right_transformation().has_value())
+      throw std::invalid_argument(
+          context +
+          ": adjoint diagnostic is not implemented for a finite normal-frame terminal transformation");
     if (physical_rows.empty())
       throw std::invalid_argument(
           context + ": terminal adjoint functional batch is empty");
@@ -1143,8 +1363,6 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     if (!acb || !has_terminal_acb_factorization())
       throw std::invalid_argument(
           "terminal factorized input valuation requires one certified Acb exact-right match");
-    const auto& exact_right =
-        *acb->acb_materialization_right_transformation();
     std::vector<std::int64_t> input_minima(
         basis_owners_.size(), 0);
     const auto propagate_exact_right =
@@ -1185,8 +1403,78 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           }
           input_minima = std::move(propagated);
         };
-    propagate_exact_right(
-        exact_right, "terminal exact-right transformation");
+    if (const auto& normal_right =
+            acb->terminal_normal_frame_right_transformation();
+        normal_right.has_value()) {
+      const auto propagate_finite_right =
+          [&](const FiniteLaurentMatrix<ComplexBall>& matrix,
+              const char* context) {
+            if (matrix.size() != input_minima.size() ||
+                matrix.empty() || matrix.front().empty())
+              throw std::logic_error(
+                  std::string(context) +
+                  " differs from the terminal physical basis dimension");
+            const auto output_columns = matrix.front().size();
+            std::vector<std::optional<std::int64_t>> output_minima(
+                output_columns);
+            for (std::size_t input = 0; input < matrix.size(); ++input) {
+              if (matrix[input].size() != output_columns)
+                throw std::logic_error(
+                    std::string(context) + " is not rectangular");
+              for (std::size_t output = 0;
+                   output < output_columns; ++output) {
+                const auto& frame = matrix[input][output];
+                std::optional<std::int32_t> factor_minimum;
+                for (std::int64_t raw_power = frame.min_power();
+                     raw_power <= frame.complete_max(); ++raw_power) {
+                  const auto power =
+                      static_cast<std::int32_t>(raw_power);
+                  if (!frame.coefficient(power).is_zero()) {
+                    factor_minimum = power;
+                    break;
+                  }
+                }
+                if (!factor_minimum.has_value()) continue;
+                const auto candidate =
+                    input_minima[input] + *factor_minimum;
+                if (!output_minima[output].has_value() ||
+                    candidate < *output_minima[output])
+                  output_minima[output] = candidate;
+              }
+            }
+            std::vector<std::int64_t> propagated;
+            propagated.reserve(output_columns);
+            for (const auto minimum : output_minima) {
+              if (!minimum.has_value())
+                throw std::logic_error(
+                    std::string(context) +
+                    " has a structurally zero output column");
+              propagated.push_back(*minimum);
+            }
+            input_minima = std::move(propagated);
+          };
+      propagate_finite_right(
+          *normal_right,
+          "terminal finite normal-frame right transformation");
+      if (const auto& acb_right =
+              acb->acb_materialization_right_transformation();
+          acb_right.has_value())
+        propagate_exact_right(
+            *acb_right,
+            "terminal normal-frame Acb exact-support transformation");
+      else {
+        const auto exact_right =
+            specialize_exact_rational_laurent_matrix_to_acb(
+                acb->exact_saturation_transformation());
+        propagate_exact_right(
+            exact_right,
+            "terminal normal-frame exact-right transformation");
+      }
+    } else {
+      propagate_exact_right(
+          *acb->acb_materialization_right_transformation(),
+          "terminal exact-right transformation");
+    }
     if (const auto& preconditioner =
             acb->acb_right_materialization_preconditioner();
         preconditioner.has_value())
@@ -1194,19 +1482,10 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           *preconditioner,
           "terminal exact-right Acb preconditioner");
 
-    const auto& transformed_weights = acb->transformed_weights();
-    if (transformed_weights.size() != input_minima.size())
-      throw std::logic_error(
-          "terminal transformed weights differ from their factorized basis dimension");
     std::optional<std::int64_t> result;
-    for (std::size_t column = 0;
-         column < transformed_weights.size(); ++column) {
-      const auto candidate =
-          input_minima[column] +
-          transformed_weights[column].min_power();
-      if (!result.has_value() || candidate < *result)
-        result = candidate;
-    }
+    for (const auto minimum : input_minima)
+      if (!result.has_value() || minimum < *result)
+        result = minimum;
     if (!result.has_value())
       throw std::logic_error(
           "terminal factorized input valuation has no structural path");
@@ -2419,26 +2698,50 @@ class StoredTransportArmState {
 
       json::array consumer_sources;
       std::int32_t output_min_shift = 0;
+      auto basis_min_power =
+          as_i32(source_summary.at("epsilon_min"),
+                 "transport tile source epsilon minimum");
+      std::int32_t projection_weight_min_power = 0;
       if (terminal_factorized_match_ != nullptr &&
           tile + 1 == tile_sources_.size()) {
         const auto physical_basis =
             terminal_factorized_match_->terminal_acb_basis_owners();
         consumer_sources.reserve(physical_basis.size());
+        std::optional<std::int32_t> physical_min_power;
         for (const auto& physical_source : physical_basis) {
           const auto physical_summary = physical_source->summary();
+          const auto minimum =
+              as_i32(physical_summary.at("epsilon_min"),
+                     "terminal physical source epsilon minimum");
+          if (!physical_min_power.has_value() ||
+              minimum < *physical_min_power)
+            physical_min_power = minimum;
           consumer_sources.push_back(json::object{
               {"min", physical_summary.at("epsilon_min")},
               {"max", physical_summary.at("epsilon_max")}});
         }
+        if (!physical_min_power.has_value())
+          throw std::logic_error(
+              "terminal factorized consumer has no physical source minimum");
         output_min_shift =
             terminal_factorized_match_
                 ->terminal_acb_factorized_input_min_power();
+        basis_min_power = local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(*physical_min_power) +
+                output_min_shift,
+            "terminal factorized basis conservative epsilon minimum");
+        projection_weight_min_power =
+            terminal_factorized_match_
+                ->terminal_acb_transformed_weight_min_power();
       } else {
         consumer_sources.push_back(source_window);
       }
       tile_consumer_epsilon.push_back(json::object{
           {"sources", std::move(consumer_sources)},
-          {"output_min_shift", output_min_shift}});
+          {"output_min_shift", output_min_shift},
+          {"basis_min_power", basis_min_power},
+          {"projection_weight_min_power",
+           projection_weight_min_power}});
     }
     return json::object{
         {"transport_state", handle_},
@@ -2486,6 +2789,11 @@ class StoredTransportArmState {
       result["terminal_diagnostic"] =
           terminal_factorized_match_
               ->terminal_mode_diagnostic_summary();
+    else if (!matches_.empty() && terminal_diagnostics != nullptr &&
+             std::string(terminal_diagnostics) == "1" &&
+             matches_.back()->has_acb_match())
+      result["final_match_diagnostic"] =
+          matches_.back()->compact_terminal_match_diagnostic();
     result["stats_queries"] = stats_queries_.fetch_add(1) + 1;
     return result;
   }

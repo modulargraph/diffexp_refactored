@@ -1418,19 +1418,40 @@ nativeTransportTileConsumerEpsilonContracts[state_Association] := Module[
    factorized = TrueQ[Lookup[state, "terminal_factorized_match",
       Lookup[state, "TerminalFactorizedMatch", False]]],
    tiles = Lookup[state, "tiles", Lookup[state, "Tiles", None]],
-   validWindowQ},
+   validWindowQ, normalizeContract},
   validWindowQ[window_] := AssociationQ[window] &&
     Sort[Keys[window]] === {"max", "min"} &&
     IntegerQ[window["min"]] && IntegerQ[window["max"]] &&
     window["min"] <= window["max"];
   If[raw === None && !factorized && ListQ[legacy],
     raw = <|"sources" -> {#}, "output_min_shift" -> 0|> & /@ legacy];
+  normalizeContract[contract_Association] := Module[
+    {sources = contract["sources"], output = contract["output_min_shift"],
+     basisMin, weightMin},
+    basisMin = Lookup[contract, "basis_min_power",
+      Min[Lookup[sources, "min"]] + output];
+    weightMin = Lookup[contract, "projection_weight_min_power", output];
+    <|"Sources" ->
+        (<|"Min" -> #["min"], "CompleteMax" -> #["max"]|> & /@
+          sources),
+      "BasisMinPower" -> basisMin,
+      "ProjectionWeightMinPower" -> weightMin,
+      "OutputMinimumShift" -> output|>];
   If[!IntegerQ[tiles] || tiles < 1 || !ListQ[raw] ||
       Length[raw] =!= tiles ||
       !AllTrue[raw, Function[contract,
         AssociationQ[contract] &&
-          Sort[Keys[contract]] === {"output_min_shift", "sources"} &&
+          SubsetQ[Keys[contract],
+            {"sources", "output_min_shift"}] &&
+          SubsetQ[{"sources", "output_min_shift",
+              "basis_min_power", "projection_weight_min_power"},
+            Keys[contract]] &&
           IntegerQ[contract["output_min_shift"]] &&
+          IntegerQ[Lookup[contract, "basis_min_power",
+            Min[Lookup[contract["sources"], "min", {0}]] +
+              contract["output_min_shift"]]] &&
+          IntegerQ[Lookup[contract, "projection_weight_min_power",
+            contract["output_min_shift"]]] &&
           ListQ[contract["sources"]] && contract["sources"] =!= {} &&
           AllTrue[contract["sources"], validWindowQ]]],
     err["E5", <|"TransportState" ->
@@ -1440,15 +1461,13 @@ nativeTransportTileConsumerEpsilonContracts[state_Association] := Module[
           "TileConsumerEpsilon", "tile_source_epsilon",
           "TileSourceEpsilon"}],
       "Detail" -> "retained transport state did not expose one exact consumer epsilon contract per tile"|>]];
-  <|"Sources" ->
-      (<|"Min" -> #["min"], "CompleteMax" -> #["max"]|> & /@
-        #["sources"]),
-    "OutputMinimumShift" -> #["output_min_shift"]|> & /@ raw];
+  normalizeContract /@ raw];
 
 nativeConsumerRowRecipe[recipe_Association, sourceContract_,
     observable_Association, primitiveHalo_Integer] := Module[
   {shape = Lookup[recipe, "Shape", None], shapeWindow, sourceWindows,
-   outputMinimumShift, sourceMins, sourceMaxs, sourceWidths, shift,
+   outputMinimumShift, basisMinPower, projectionWeightMinPower,
+   splitContract = False, sourceMins, sourceMaxs, sourceWidths, shift,
    requestedMax, requiredMax, projectionCap, requiredProjectionCap,
    relativeNeeded, requiredRelativeNeeded, desiredWidths,
    minimumWidths, retainedWidths, requiredWidth, currentWidth, widenedMax},
@@ -1462,11 +1481,21 @@ nativeConsumerRowRecipe[recipe_Association, sourceContract_,
     sourceWindows = If[AssociationQ[sourceContract],
       Lookup[sourceContract, "Sources", None], None];
     outputMinimumShift = If[AssociationQ[sourceContract],
-      Lookup[sourceContract, "OutputMinimumShift", None], None]];
+      Lookup[sourceContract, "OutputMinimumShift", None], None];
+    basisMinPower = If[AssociationQ[sourceContract],
+      Lookup[sourceContract, "BasisMinPower", None], None];
+    projectionWeightMinPower = If[AssociationQ[sourceContract],
+      Lookup[sourceContract, "ProjectionWeightMinPower", None], None];
+    splitContract = IntegerQ[basisMinPower] &&
+      IntegerQ[projectionWeightMinPower]];
   sourceMins = If[ListQ[sourceWindows],
     Lookup[sourceWindows, "Min", None], None];
   sourceMaxs = If[ListQ[sourceWindows],
     Lookup[sourceWindows, "CompleteMax", None], None];
+  If[!IntegerQ[basisMinPower] && AllTrue[sourceMins, IntegerQ],
+    basisMinPower = Min[sourceMins] + outputMinimumShift];
+  If[!IntegerQ[projectionWeightMinPower],
+    projectionWeightMinPower = outputMinimumShift];
   shift = Lookup[observable, "MinimumEpsilonShift", None];
   requestedMax = Lookup[Lookup[observable, "Epsilon", <||>],
     "Max", None];
@@ -1481,7 +1510,8 @@ nativeConsumerRowRecipe[recipe_Association, sourceContract_,
       !AllTrue[sourceMins, IntegerQ] ||
       !AllTrue[sourceMaxs, IntegerQ] ||
       !And @@ Thread[sourceMins <= sourceMaxs] ||
-      !IntegerQ[outputMinimumShift] || !IntegerQ[shift] ||
+      !IntegerQ[outputMinimumShift] || !IntegerQ[basisMinPower] ||
+      !IntegerQ[projectionWeightMinPower] || !IntegerQ[shift] ||
       !IntegerQ[requestedMax] || !IntegerQ[requiredMax] ||
       requiredMax > requestedMax || !IntegerQ[primitiveHalo] ||
       primitiveHalo < 0,
@@ -1491,16 +1521,28 @@ nativeConsumerRowRecipe[recipe_Association, sourceContract_,
       "PrimitiveHalo" -> primitiveHalo,
       "Detail" -> "native consumer row sizing requires exact recipe, source, shift, and output windows"|>]];
   sourceWidths = sourceMaxs - sourceMins + 1;
-  projectionCap =
-    requestedMax - outputMinimumShift + primitiveHalo;
-  requiredProjectionCap =
-    requiredMax - outputMinimumShift + primitiveHalo;
-  relativeNeeded = projectionCap - (sourceMins + shift);
-  requiredRelativeNeeded =
-    requiredProjectionCap - (sourceMins + shift);
-  desiredWidths = Max[1, # + 1] & /@ relativeNeeded;
-  minimumWidths = Max[1, # + 1] & /@ requiredRelativeNeeded;
-  If[!And @@ Thread[minimumWidths <= sourceWidths],
+  If[splitContract,
+    projectionCap =
+      requestedMax - projectionWeightMinPower + primitiveHalo;
+    requiredProjectionCap =
+      requiredMax - projectionWeightMinPower + primitiveHalo;
+    relativeNeeded = projectionCap - (basisMinPower + shift);
+    requiredRelativeNeeded =
+      requiredProjectionCap - (basisMinPower + shift);
+    desiredWidths = {Max[1, relativeNeeded + 1]};
+    minimumWidths = {Max[1, requiredRelativeNeeded + 1]},
+    projectionCap =
+      requestedMax - outputMinimumShift + primitiveHalo;
+    requiredProjectionCap =
+      requiredMax - outputMinimumShift + primitiveHalo;
+    relativeNeeded = projectionCap - (sourceMins + shift);
+    requiredRelativeNeeded =
+      requiredProjectionCap - (sourceMins + shift);
+    desiredWidths = Max[1, # + 1] & /@ relativeNeeded;
+    minimumWidths = Max[1, # + 1] & /@ requiredRelativeNeeded];
+  If[If[splitContract,
+        First[minimumWidths] > Min[sourceWidths],
+        !And @@ Thread[minimumWidths <= sourceWidths]],
     err["E6", <|"Recipe" -> recipe, "SourceContract" -> sourceContract,
       "Observable" -> KeyTake[observable,
         {"Identity", "Epsilon", "MinimumEpsilonShift"}],
@@ -1509,10 +1551,27 @@ nativeConsumerRowRecipe[recipe_Association, sourceContract_,
       "AvailableSourceCoefficientCounts" -> sourceWidths,
       "RequiredSourceCoefficientCounts" -> minimumWidths,
       "Detail" -> "live tile source is too short for the regulated primitive consumer; retry transport with a wider epsilon reservoir"|>]];
-  retainedWidths = MapThread[Min, {sourceWidths, desiredWidths}];
+  retainedWidths = If[splitContract, desiredWidths,
+    MapThread[Min, {sourceWidths, desiredWidths}]];
   requiredWidth = Max[retainedWidths];
   currentWidth =
     shapeWindow["CompleteMax"] - shapeWindow["Min"] + 1;
+  If[Environment["DE2_DIAGNOSTIC_CONSUMER_ROWS"] === "1",
+    Print["DE2 NATIVE CONSUMER ROW SIZING ",
+      InputForm[<|"ShapeWindow" -> shapeWindow,
+        "SourceWindows" -> sourceWindows,
+        "OutputMinimumShift" -> outputMinimumShift,
+        "BasisMinPower" -> basisMinPower,
+        "ProjectionWeightMinPower" -> projectionWeightMinPower,
+        "RowMinimumShift" -> shift,
+        "RequestedMax" -> requestedMax,
+        "RequiredMax" -> requiredMax,
+        "PrimitiveHalo" -> primitiveHalo,
+        "DesiredWidths" -> desiredWidths,
+        "MinimumWidths" -> minimumWidths,
+        "RetainedWidths" -> retainedWidths,
+        "RequiredWidth" -> requiredWidth,
+        "CurrentWidth" -> currentWidth|>]]];
   If[currentWidth >= requiredWidth, Return[recipe, Module]];
   widenedMax = shapeWindow["Min"] + requiredWidth - 1;
   Join[recipe, <|"Shape" -> Join[shape, <|"EpsWindow" ->
@@ -2637,6 +2696,10 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       nativeTransportTileConsumerEpsilonContracts[lowerState];
     upperSourceEpsilon =
       nativeTransportTileConsumerEpsilonContracts[upperState];
+    If[Environment["DE2_DIAGNOSTIC_CONSUMER_ROWS"] === "1",
+      Print["DE2 NATIVE CONSUMER CONTRACTS lower=",
+        InputForm[lowerSourceEpsilon], " upper=",
+        InputForm[upperSourceEpsilon]]];
     If[Length[lowerSourceEpsilon] =!= Length[lowerRowRecipes] ||
         Length[upperSourceEpsilon] =!= Length[upperRowRecipes],
       err["E5", <|"LowerRecipeCount" -> Length[lowerRowRecipes],

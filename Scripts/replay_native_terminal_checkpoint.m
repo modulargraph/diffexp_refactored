@@ -174,8 +174,17 @@ stateStats =
   DiffExp2`CppBackend`PersistentTransportArmStatistics[state];
 If[Environment["DE2_DIAGNOSTIC_TERMINAL_STATE"] === "1",
   If[KeyExistsQ[stateStats, "terminal_diagnostic"],
+    terminalDiagnostic = stateStats["terminal_diagnostic"];
+    compactTerminalDiagnostic = <|
+      "Schema" -> Lookup[terminalDiagnostic, "schema", None],
+      "Match" -> KeyTake[
+        Lookup[terminalDiagnostic, "match", <||>], {
+          "basis_point_exact", "incoming_point_exact",
+          "physical_match_point_exact", "epsilon",
+          "materialization_association", "residual"}],
+      "Columns" -> Lookup[terminalDiagnostic, "columns", {}]|>;
     Print["TERMINAL REPLAY STATE DIAGNOSTICS ",
-      InputForm[stateStats["terminal_diagnostic"]]],
+      InputForm[compactTerminalDiagnostic]],
     Print["TERMINAL REPLAY STATE DIAGNOSTICS UNAVAILABLE ",
       InputForm[KeyTake[stateStats, {
         "transport_state", "arm", "tiles", "terminal_factorized_match",

@@ -952,7 +952,10 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
     const std::vector<std::shared_ptr<StoredLocalBase>>& basis,
     const std::string& incoming_handle,
     const std::shared_ptr<StoredLocalBase>& incoming,
-    bool compact_plan_reference = false) {
+    bool compact_plan_reference = false,
+    bool require_normalized_singular_frame = false,
+    const std::optional<json::object>&
+        retained_singular_request = std::nullopt) {
   const auto started = std::chrono::steady_clock::now();
   const auto arm_name = required_string(request, "arm");
   const auto match_index = static_cast<std::size_t>(
@@ -1036,12 +1039,19 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
       kernel_request["native_unit_saturation"] = *native;
     else if (const auto* singular =
                  request.if_contains("native_singular_scc_saturation")) {
-      const auto expected = native_acb_saturation_binding(
-          plan, active_session_configuration_identity, arm_name,
-          match_index, result_checkpoint, compact_plan_reference);
-      if (expected.request_key != "native_singular_scc_saturation" ||
+      const auto expected = retained_singular_request.has_value()
+          ? NativeAcbSaturationBinding{
+                "native_singular_scc_saturation",
+                *retained_singular_request}
+          : native_acb_saturation_binding(
+                plan, active_session_configuration_identity, arm_name,
+                match_index, result_checkpoint,
+                compact_plan_reference);
+      if (expected.request_key !=
+              "native_singular_scc_saturation" ||
           json::serialize(canonical_json_value(*singular)) !=
-              json::serialize(canonical_json_value(expected.request)))
+              json::serialize(
+                  canonical_json_value(expected.request)))
         throw std::invalid_argument(
             "planned singular-SCC Acb saturation request does not match the retained receiving SCC");
       kernel_request["native_singular_scc_saturation"] = *singular;
@@ -1052,7 +1062,7 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
     native_match = build_refined_acb_match(
         match_handle, kernel_request, basis_handles, basis, incoming_handle,
         incoming, precision_bits, active_session_configuration_identity,
-        expected_singular_request, false);
+        expected_singular_request, require_normalized_singular_frame);
   } else {
     throw std::invalid_argument(
         "plan-driven local matching requires rational or Acb coefficients");
@@ -1408,6 +1418,16 @@ StoredLineIntegral aggregate_retained_lines(
 class StreamingStoredLineAccumulator {
  public:
   void add(const StoredLineIntegral& input) {
+    if (input.diagnostics.detail.find(
+            "terminal factorized production contraction") !=
+            std::string::npos ||
+        input.diagnostics.detail.find(
+            "terminal direct-physical diagnostic contraction") !=
+            std::string::npos ||
+        input.diagnostics.detail.find(
+            "terminal adjoint diagnostic contraction") !=
+            std::string::npos)
+      terminal_contraction_detail_ = input.diagnostics.detail;
     if (!initialized_) {
       result_ = input;
       result_.imaginary_sign = std::nullopt;
@@ -1457,6 +1477,8 @@ class StreamingStoredLineAccumulator {
     finalize_errors();
     auto& diagnostics = result_.diagnostics;
     diagnostics.detail = detail;
+    if (!terminal_contraction_detail_.empty())
+      diagnostics.detail += "; " + terminal_contraction_detail_;
     diagnostics.tail_certificate_status = "aggregate-certified";
     if (all_full_local_ && result_.value.error.guarantee ==
                                ErrorGuarantee::Certified) {
@@ -1472,6 +1494,8 @@ class StreamingStoredLineAccumulator {
   }
 
  private:
+  std::string terminal_contraction_detail_;
+
   void accumulate_diagnostics(
       const StoredLineIntegrationDiagnostics& source) {
     auto& diagnostics = result_.diagnostics;
@@ -2425,6 +2449,8 @@ RetainedArmMarchResult march_retained_arm(
   std::shared_ptr<StoredLocalBase> current = anchor;
   for (std::size_t match_index = 0; match_index < match_count;
        ++match_index) {
+    const bool terminal_basis_match =
+        match_index + 1 == match_count;
     const auto match_checkpoint = arm_checkpoint_identity(
         checkpoint_root, input.name, "match", match_index + 1);
     const auto match_epsilon = live_match_epsilon_intersection(
@@ -2449,14 +2475,15 @@ RetainedArmMarchResult march_retained_arm(
         input.match_handles[match_index], match_request, domain,
         precision_bits, session_configuration_identity, plan,
         input.basis_handles[match_index], input.basis[match_index],
-        current->handle(), current, compact_plan_reference);
+        current->handle(), current, compact_plan_reference,
+        terminal_basis_match);
     std::shared_ptr<StoredLocalBase> next;
     try {
       next = match->materialize(
           input.local_handles[match_index],
           arm_checkpoint_identity(checkpoint_root, input.name, "local",
                                   match_index + 1),
-          precision_bits, match);
+          precision_bits, match, terminal_basis_match);
       require_retained_local_complete_max(
           next, match_required_complete_max, "native retained arm match");
     } catch (const std::exception& error) {
@@ -3391,13 +3418,24 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       diagnostic_route_raw == nullptr
       ? std::string()
       : std::string(diagnostic_route_raw);
+  if (!diagnostic_route.empty() &&
+      diagnostic_route != "factorized" &&
+      diagnostic_route != "physical" &&
+      diagnostic_route != "adjoint")
+    throw std::invalid_argument(
+        "DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE must be "
+        "factorized, physical, or adjoint");
   const bool diagnostic_physical =
-      diagnostic_route.empty() ||
       diagnostic_route == "physical" ||
       diagnostic_route == "adjoint";
   const bool direct_physical =
-      diagnostic_route.empty() ||
       diagnostic_route == "physical";
+  const std::string contraction_provenance =
+      diagnostic_route == "physical"
+      ? "terminal direct-physical diagnostic contraction"
+      : diagnostic_route == "adjoint"
+      ? "terminal adjoint diagnostic contraction"
+      : "terminal factorized production contraction";
   const auto projection_cap =
       terminal_factorized_physical_complete_cap(
           match, epsilon_contract.requested.complete_max, 1,
@@ -3424,10 +3462,13 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       ? certified_tile.local_end : certified_tile.local_begin;
   const auto& primitive_end = reverse_local_orientation
       ? certified_tile.local_begin : certified_tile.local_end;
-  if (certified_tile_zero_length(arm, tile_index))
-    return certified_zero_physical_line(
+  if (certified_tile_zero_length(arm, tile_index)) {
+    auto zero = certified_zero_physical_line(
         epsilon_contract.requested, 1, rim,
         certified_tile.local_begin.sign == 0, false);
+    zero.diagnostics.detail += "; selected " + contraction_provenance;
+    return zero;
+  }
 
   std::vector<StoredLineIntegral> physical;
   physical.reserve(projected.size());
@@ -3513,11 +3554,11 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
     physical_rows.push_back(std::move(row));
   }
 
-  // The projected columns already are G=(F*T)*P.  Apply their integrated
-  // functionals directly to the transformed match weights y.  This keeps the
-  // epsilon-lattice cancellations coefficientwise inside G; an adjoint solve
-  // B^-T*l is only a rearrangement of the same ill-conditioned endpoint
-  // inverse and cannot improve the physical sensitivity.
+  // Production projects G=(F*T)*P and applies its integrated functionals to
+  // the transformed match weights y.  This keeps epsilon-lattice
+  // cancellations coefficientwise inside G.  The physical and adjoint
+  // routes are explicit diagnostics only; neither may silently replace the
+  // certified factorized endpoint frame.
   auto contracted = diagnostic_route == "adjoint"
       ? match.adjoint_contract_terminal_acb_functionals(
             physical_rows,
@@ -3680,9 +3721,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
         jacobian);
   result.value.error.guarantee = ErrorGuarantee::None;
   result.value.error.provenance =
-      "stored Taylor truncation only; terminal factorized physical-basis "
-      "functional contraction; no unseen-tail majorant or full-local "
-      "certificate";
+      "stored Taylor truncation only; " + contraction_provenance +
+      "; no unseen-tail majorant or full-local certificate";
   result.scope = LineIntegrationScope::StoredTruncation;
   result.imaginary_sign = rim;
   result.diagnostics.detail =

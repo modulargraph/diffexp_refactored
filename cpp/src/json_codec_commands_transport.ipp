@@ -1229,7 +1229,8 @@
             match_handle, match_request, session->domain,
             session->precision_bits,
             checkpoint_configuration_identity(*session), plan,
-            basis_handles, basis, incoming_handle, incoming, true);
+            basis_handles, basis, incoming_handle, incoming, true,
+            terminal_basis_match);
         if (auto incomplete = match->incomplete_acb_summary();
             incomplete.has_value()) {
           const auto& residual = as_object(
@@ -2594,6 +2595,244 @@
     response["operation_elapsed_ms"] = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - operation_started).count();
     return response;
+  }
+
+  if (operation == "transport.diagnostic_rebuild_terminal_match") {
+    const bool scan_points =
+        root.if_contains("receiving_local_points") != nullptr;
+    const bool override_precision =
+        root.if_contains("precision_bits") != nullptr;
+    if (scan_points && override_precision)
+      require_exact_keys(
+          root, {"schema", "op", "session", "transport_state",
+                 "receiving_local_points", "precision_bits"},
+          "native terminal-match diagnostic scan request");
+    else if (scan_points)
+      require_exact_keys(
+          root, {"schema", "op", "session", "transport_state",
+                 "receiving_local_points"},
+          "native terminal-match diagnostic scan request");
+    else if (override_precision)
+      require_exact_keys(
+          root, {"schema", "op", "session", "transport_state",
+                 "precision_bits"},
+          "native terminal-match diagnostic rebuild request");
+    else
+      require_exact_keys(
+          root, {"schema", "op", "session", "transport_state"},
+          "native terminal-match diagnostic rebuild request");
+    const auto* diagnostics =
+        std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
+    if (diagnostics == nullptr || std::string(diagnostics) != "1")
+      throw std::invalid_argument(
+          "terminal-match diagnostic rebuild requires "
+          "DE2_DIAGNOSTIC_TERMINAL_STATE=1");
+    const auto diagnostic_precision = override_precision
+        ? static_cast<slong>(
+              as_u32(root.at("precision_bits"),
+                     "terminal diagnostic precision bits"))
+        : session->precision_bits;
+    if (diagnostic_precision < 64 ||
+        diagnostic_precision > 16384)
+      throw std::invalid_argument(
+          "terminal diagnostic precision must lie in 64..16384 bits");
+    std::shared_ptr<StoredTransportArmState> state;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->transport_states.find(
+          required_string(root, "transport_state"));
+      if (found == session->transport_states.end())
+        throw std::invalid_argument(
+            "unknown native transport-arm state for terminal rematch");
+      state = found->second;
+    }
+    const auto previous = state->terminal_factorized_match();
+    if (!previous || !previous->has_acb_match())
+      throw std::invalid_argument(
+          "terminal rematch requires one retained Acb terminal match");
+    const auto plan = state->plan_owner();
+    const auto& handoff = previous->handoff();
+    const auto arm_name = required_string(handoff, "arm");
+    const auto match_index = static_cast<std::size_t>(
+        as_u64(handoff.at("match"),
+               "terminal diagnostic rematch index"));
+    const auto previous_summary =
+        previous->compact_terminal_match_diagnostic();
+    const auto& epsilon = as_object(
+        previous_summary.at("epsilon"),
+        "terminal diagnostic rematch epsilon");
+    const auto& previous_refinement = as_object(
+        previous_summary.at("refinement"),
+        "terminal diagnostic rematch refinement");
+    const auto checkpoint_identity =
+        previous->checkpoint_identity();
+    const auto previous_acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(
+            previous->native_match());
+    if (!previous_acb)
+      throw std::logic_error(
+          "terminal diagnostic rematch lost its retained Acb proof");
+    const auto retained_singular_request =
+        previous_acb->retained_singular_saturation_request();
+    if (scan_points) {
+      const auto& raw_points = as_array(
+          root.at("receiving_local_points"),
+          "terminal diagnostic receiving-local scan points");
+      if (raw_points.empty() || raw_points.size() > 16)
+        throw std::invalid_argument(
+            "terminal diagnostic scan requires 1..16 receiving-local points");
+      const auto& retained_arm = plan->arm(arm_name);
+      if (match_index >= retained_arm.exact.matches.size())
+        throw std::logic_error(
+            "terminal diagnostic scan match index is outside its plan");
+      const auto& exact_match =
+          retained_arm.exact.matches[match_index];
+      const auto& producing =
+          retained_arm.exact.charts.at(
+              exact_match.producing_chart);
+      const auto& receiving =
+          retained_arm.exact.charts.at(
+              exact_match.receiving_chart);
+      std::vector<std::string> basis_handles;
+      json::array basis_checkpoints;
+      basis_handles.reserve(previous->basis_owners().size());
+      basis_checkpoints.reserve(previous->basis_owners().size());
+      for (const auto& owner : previous->basis_owners()) {
+        basis_handles.push_back(owner->handle());
+        basis_checkpoints.emplace_back(
+            owner->checkpoint_identity());
+      }
+      json::array scans;
+      scans.reserve(raw_points.size());
+      for (std::size_t index = 0; index < raw_points.size();
+           ++index) {
+        if (!raw_points[index].is_string())
+          throw std::invalid_argument(
+              "terminal diagnostic receiving-local points must be exact rational strings");
+        const Rational receiving_local(
+            std::string(raw_points[index].as_string()));
+        const auto physical =
+            receiving.center + receiving.scale * receiving_local;
+        const auto incoming_local =
+            (physical - producing.center) / producing.scale;
+        json::object item{
+            {"receiving_local", receiving_local.str()},
+            {"incoming_local", incoming_local.str()},
+            {"physical", physical.str()}};
+        try {
+          auto singular_request = retained_singular_request;
+          const auto scan_checkpoint =
+              checkpoint_identity + ":point-scan:" +
+              std::to_string(index);
+          singular_request["match_checkpoint_identity"] =
+              scan_checkpoint;
+          singular_request["receiving_basis_point_exact"] =
+              receiving_local.str();
+          singular_request["receiving_basis_point_sign"] =
+              receiving_local.sign();
+          singular_request["physical_match_point_exact"] =
+              physical.str();
+          json::object kernel_request{
+              {"basis", [&]() {
+                 json::array values;
+                 for (const auto& handle : basis_handles)
+                   values.emplace_back(handle);
+                 return values;
+               }()},
+              {"incoming", previous->incoming_owner()->handle()},
+              {"basis_chart",
+               previous->basis_owners().front()->source_chart()},
+              {"incoming_chart",
+               previous->incoming_owner()->source_chart()},
+              {"basis_point",
+               json::object{{"exact", receiving_local.str()}}},
+              {"incoming_point",
+               json::object{{"exact", incoming_local.str()}}},
+              {"epsilon", json::object{
+                   {"min", epsilon.at("min")},
+                   {"max", epsilon.at("max")},
+                   {"required_complete_max",
+                    epsilon.at("required_complete_max")}}},
+              {"basis_checkpoint_identities",
+               basis_checkpoints},
+              {"incoming_checkpoint_identity",
+               previous->incoming_owner()
+                   ->checkpoint_identity()},
+              {"checkpoint_identity", scan_checkpoint},
+              {"refinement", json::object{
+                   {"relative_tolerance",
+                    previous_refinement.at(
+                        "relative_tolerance")},
+                   {"max_steps",
+                    previous_refinement.at("max_steps")}}},
+              {"native_singular_scc_saturation",
+               singular_request}};
+          if (const auto sign =
+                  previous_acb
+                      ->effective_basis_imaginary_sign();
+              sign.has_value())
+            kernel_request["basis_imaginary_sign"] = *sign;
+          if (const auto sign =
+                  previous_acb
+                      ->effective_incoming_imaginary_sign();
+              sign.has_value())
+            kernel_request["incoming_imaginary_sign"] = *sign;
+          const auto rebuilt = build_refined_acb_match(
+              previous->native_match()->handle() +
+                  ":strict-point-scan:" +
+                  std::to_string(index),
+              kernel_request, basis_handles,
+              previous->basis_owners(),
+              previous->incoming_owner()->handle(),
+              previous->incoming_owner(), diagnostic_precision,
+              checkpoint_configuration_identity(*session),
+              singular_request, true);
+          item["status"] = "ok";
+          item["match"] =
+              rebuilt->compact_terminal_diagnostic_summary();
+        } catch (const std::exception& error) {
+          item["status"] = "error";
+          item["detail"] = error.what();
+        }
+        scans.push_back(std::move(item));
+      }
+      return json::object{
+          {"status", "ok"},
+          {"session", session->handle},
+          {"scan", std::move(scans)}};
+    }
+    json::object match_request{
+        {"arm", arm_name},
+        {"match", match_index},
+        {"epsilon", json::object{
+             {"min", epsilon.at("min")},
+             {"max", epsilon.at("max")},
+             {"required_complete_max",
+              epsilon.at("required_complete_max")}}},
+        {"checkpoint_identity", checkpoint_identity}};
+    match_request["native_singular_scc_saturation"] =
+        retained_singular_request;
+    match_request["refinement"] = json::object{
+        {"relative_tolerance",
+         previous_refinement.at("relative_tolerance")},
+        {"max_steps", previous_refinement.at("max_steps")}};
+    std::vector<std::string> basis_handles;
+    basis_handles.reserve(previous->basis_owners().size());
+    for (const auto& owner : previous->basis_owners())
+      basis_handles.push_back(owner->handle());
+    const auto rebuilt = build_planned_match_hop(
+        previous->native_match()->handle() + ":strict-diagnostic-rematch",
+        match_request, session->domain, diagnostic_precision,
+        checkpoint_configuration_identity(*session), plan,
+        basis_handles, previous->basis_owners(),
+        previous->incoming_owner()->handle(),
+        previous->incoming_owner(), true, true,
+        retained_singular_request);
+    return json::object{
+        {"status", "ok"},
+        {"session", session->handle},
+        {"previous", previous_summary},
+        {"rebuilt", rebuilt->compact_terminal_match_diagnostic()}};
   }
 
   if (operation == "transport.stats" ||

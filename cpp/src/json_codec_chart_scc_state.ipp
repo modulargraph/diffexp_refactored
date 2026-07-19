@@ -820,15 +820,25 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
   virtual const std::string& geometry_record() const = 0;
   virtual std::uint32_t dimension() const = 0;
   virtual const CompositeWorkContract& work_contract() const = 0;
-  // For an epsilon-regular singular composite, express a physical parent
-  // value in the exact block-spectral normal frame used at the residue.  The
-  // same invertible left transformation is applied to the receiving basis
-  // and incoming value, so matching weights are unchanged while the Laurent
-  // solve no longer sees the confluent physical columns.
+  // Express a singular physical parent value in the exact reduced
+  // block-spectral normal frame used at the residue.  This frame exists
+  // independently of whether the recurrence happened to need the
+  // epsilon-regular principal implementation: an already epsilon-integral
+  // spectral recurrence still has the same exact gauge and V/V^-1 frames.
+  // The same invertible left transformation is applied to the receiving
+  // basis and incoming value, so matching weights are unchanged while the
+  // Laurent solve no longer sees the confluent physical columns.
   virtual std::optional<std::pair<
       FiniteLaurentVector<ComplexBall>, std::string>>
   normalize_acb_matching_vector(
-      const FiniteLaurentVector<ComplexBall>& physical) const override = 0;
+      const FiniteLaurentVector<ComplexBall>& physical,
+      const RealEvaluationPoint& point) const override = 0;
+  virtual std::optional<AcbMatchingResidualPushforward>
+  pushforward_acb_matching_residual(
+      const FiniteLaurentVector<ComplexBall>& normalized,
+      const std::string& expected_normal_frame_identity,
+      const RealEvaluationPoint& point)
+      const override = 0;
   virtual std::vector<std::shared_ptr<PreparedChartBase>>
   dependency_charts() const = 0;
   const std::string& equation_owner_handle() const override {
@@ -2806,71 +2816,38 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
 
   std::optional<std::pair<FiniteLaurentVector<ComplexBall>, std::string>>
   normalize_acb_matching_vector(
-      const FiniteLaurentVector<ComplexBall>& physical) const override {
+      const FiniteLaurentVector<ComplexBall>& physical,
+      const RealEvaluationPoint& point) const override {
     if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
       (void)physical;
+      (void)point;
       return std::nullopt;
     } else {
       if (physical.size() != dimension_)
         throw std::invalid_argument(
             "SCC matching normal-frame vector has the wrong parent dimension");
-      const bool epsilon_regular = std::any_of(
-          blocks_.begin(), blocks_.end(), [](const auto& block) {
-            return block.chart->uses_epsilon_regular_principal();
-          });
-      if (!epsilon_regular) return std::nullopt;
+      auto frame_identity = acb_matching_normal_frame_identity(point);
+      if (!frame_identity.has_value()) return std::nullopt;
 
       std::vector<std::optional<EpsilonFrame<ComplexBall>>> rows(
           dimension_);
-      std::string frame_identity =
-          exact_identity_ + ":epsilon-regular-block-spectral-match-frame";
       for (const auto& block : blocks_) {
-        // A t-dependent gauge needs an exact point specialization rather
-        // than a finite Taylor replay.  Keep this first normal-frame scope
-        // deliberately to identity-gauge blocks; the banana confluent chart
-        // and its surrounding SCC satisfy that stronger certificate.
-        if (!block.to_reduced.identity)
-          return std::nullopt;
-        const auto& transform = block.source_transform;
-        if (!spectral_frame_ready(block))
-          throw std::logic_error(
-              "epsilon-regular SCC matching lost its certified spectral frame");
-        frame_identity += ":" + transform.producer_identity;
-        if (transform.identity) {
-          for (std::size_t component = 0;
-               component < block.vertices.size(); ++component) {
-            const auto vertex = block.vertices[component];
-            rows[vertex] = rows[vertex].has_value()
-                ? *rows[vertex] + physical[vertex]
-                : physical[vertex];
-          }
-          continue;
-        }
-        for (const auto& entry : transform.matrix.entries) {
-          if (entry.row >= block.vertices.size() ||
-              entry.column >= block.vertices.size())
-            throw std::logic_error(
-                "spectral matching transform entry is outside its block");
-          const auto& multiplier = entry.multiplier;
-          std::vector<ComplexBall> coefficients;
-          coefficients.reserve(multiplier.kernels.size());
-          for (const auto& kernel : multiplier.kernels) {
-            if (kernel.empty())
-              throw std::logic_error(
-                  "spectral matching transform has an empty Taylor kernel");
-            for (std::size_t taylor = 1; taylor < kernel.size(); ++taylor)
-              if (!kernel[taylor].is_zero())
-                throw std::logic_error(
-                    "spectral matching transform unexpectedly depends on the chart variable");
-            coefficients.push_back(kernel.front());
-          }
-          auto term = EpsilonFrame<ComplexBall>(
-              multiplier.epsilon_shift, std::move(coefficients)) *
-              physical[block.vertices[entry.column]];
-          const auto output = block.vertices[entry.row];
+        FiniteLaurentVector<ComplexBall> local;
+        local.reserve(block.vertices.size());
+        for (const auto vertex : block.vertices)
+          local.push_back(physical[vertex]);
+        auto reduced = apply_acb_matching_gauge_at_point(
+            block.to_reduced, local, point);
+        if (!reduced.has_value()) return std::nullopt;
+        auto spectral = apply_acb_matching_spectral_inverse(
+            block.source_transform, *reduced);
+        if (!spectral.has_value()) return std::nullopt;
+        for (std::size_t component = 0;
+             component < block.vertices.size(); ++component) {
+          const auto output = block.vertices[component];
           rows[output] = rows[output].has_value()
-              ? *rows[output] + term
-              : std::move(term);
+              ? *rows[output] + (*spectral)[component]
+              : std::move((*spectral)[component]);
         }
       }
       FiniteLaurentVector<ComplexBall> normalized;
@@ -2881,7 +2858,104 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               "spectral matching normal frame has an empty parent row");
         normalized.push_back(std::move(*rows[row]));
       }
-      return std::pair{std::move(normalized), std::move(frame_identity)};
+      return std::pair{
+          std::move(normalized), std::move(*frame_identity)};
+    }
+  }
+
+  json::object acb_matching_normal_frame_diagnostic(
+      const RealEvaluationPoint& point) const override {
+    json::object report{
+        {"schema", "diffexp2-acb-normal-frame-owner-diagnostic-v1"},
+        {"owner_kind", "composite-scc"},
+        {"point_exact", point.exact_coordinate},
+        {"point_sign", point.sign}};
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      report["status"] = "non-acb-owner";
+      return report;
+    } else {
+      if (!local_algebra_detail::signed_real_evaluation_ball(point)
+               .has_value()) {
+        report["status"] = "uncertified-real-point";
+        return report;
+      }
+      for (const auto& block : blocks_) {
+        if (!spectral_frame_ready(block)) {
+          report["status"] = "spectral-frame-not-ready";
+          report["block"] = block.block;
+          return report;
+        }
+        if (!gauge_frame_ready(block)) {
+          report["status"] = "gauge-frame-not-ready";
+          report["block"] = block.block;
+          return report;
+        }
+        if (!block.to_reduced.identity) {
+          for (const auto& entry : block.to_reduced.matrix.entries) {
+            auto detail = local_algebra_detail::
+                diagnose_prepared_rational_specialization_at_real_point(
+                    entry.multiplier, point);
+            if (!detail.has_value()) continue;
+            report["status"] = "gauge-specialization-unavailable";
+            report["block"] = block.block;
+            report["role"] = "to_reduced";
+            report["row"] = entry.row;
+            report["column"] = entry.column;
+            report["epsilon_shift"] =
+                entry.multiplier.epsilon_shift;
+            report["center_pole_order"] =
+                entry.multiplier.center_pole_order;
+            report["detail"] = std::move(*detail);
+            return report;
+          }
+        }
+        if (!block.source_transform.identity) {
+          for (const auto& entry :
+               block.source_transform.matrix.entries) {
+            const auto& multiplier = entry.multiplier;
+            if (multiplier.proven_zero) continue;
+            if (multiplier.center_pole_order != 0) {
+              report["status"] = "spectral-center-pole";
+              report["block"] = block.block;
+              report["row"] = entry.row;
+              report["column"] = entry.column;
+              return report;
+            }
+            if (multiplier.kernels.empty()) {
+              report["status"] = "spectral-kernels-unavailable";
+              report["block"] = block.block;
+              report["row"] = entry.row;
+              report["column"] = entry.column;
+              return report;
+            }
+            for (std::size_t epsilon = 0;
+                 epsilon < multiplier.kernels.size(); ++epsilon) {
+              const auto& kernel = multiplier.kernels[epsilon];
+              if (kernel.empty()) {
+                report["status"] = "spectral-kernel-empty";
+                report["block"] = block.block;
+                report["row"] = entry.row;
+                report["column"] = entry.column;
+                report["epsilon_coefficient"] = epsilon;
+                return report;
+              }
+              for (std::size_t taylor = 1;
+                   taylor < kernel.size(); ++taylor) {
+                if (kernel[taylor].is_zero()) continue;
+                report["status"] = "spectral-transform-t-dependent";
+                report["block"] = block.block;
+                report["row"] = entry.row;
+                report["column"] = entry.column;
+                report["epsilon_coefficient"] = epsilon;
+                report["taylor_coefficient"] = taylor;
+                return report;
+              }
+            }
+          }
+        }
+      }
+      report["status"] = "available";
+      return report;
     }
   }
 
@@ -2898,10 +2972,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               [&](const auto& row) { return row.size() != dimension_; }))
         throw std::invalid_argument(
             "SCC right matching normalization requires a square parent basis");
-      if (!std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
-            return block.chart->uses_epsilon_regular_principal();
-          }))
-        return std::nullopt;
 
       FiniteLaurentMatrix<ComplexBall> normalized(
           dimension_, FiniteLaurentVector<ComplexBall>());
@@ -2980,10 +3050,6 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       if (normalized.size() != dimension_)
         throw std::invalid_argument(
             "SCC matching weight denormalization has the wrong dimension");
-      if (!std::any_of(blocks_.begin(), blocks_.end(), [](const auto& block) {
-            return block.chart->uses_epsilon_regular_principal();
-          }))
-        return std::nullopt;
       std::vector<std::optional<EpsilonFrame<ComplexBall>>> physical(
           dimension_);
       for (const auto& block : blocks_) {
@@ -3048,6 +3114,103 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         result.push_back(std::move(*frame));
       }
       return result;
+    }
+  }
+
+  std::optional<AcbMatchingResidualPushforward>
+  pushforward_acb_matching_residual(
+      const FiniteLaurentVector<ComplexBall>& normalized,
+      const std::string& expected_normal_frame_identity,
+      const RealEvaluationPoint& point) const override {
+    // V is the right matching preconditioner, while the receiving gauge is a
+    // left row transformation.  A normal residual therefore returns through
+    // G(t0) V.  Keep this separate from weight denormalization, which remains
+    // V alone.
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      (void)normalized;
+      (void)expected_normal_frame_identity;
+      (void)point;
+      return std::nullopt;
+    } else {
+      if (normalized.size() != dimension_)
+        throw std::invalid_argument(
+            "SCC matching residual pushforward has the wrong dimension");
+
+      auto frame_identity = acb_matching_normal_frame_identity(point);
+      if (!frame_identity.has_value()) return std::nullopt;
+      if (*frame_identity != expected_normal_frame_identity)
+        throw std::invalid_argument(
+            "SCC matching residual pushforward normal-frame identity mismatch");
+
+      json::array exact_blocks;
+      exact_blocks.reserve(blocks_.size());
+      for (const auto& block : blocks_) {
+        const auto& transform = block.source_transform;
+        json::array vertices;
+        vertices.reserve(block.vertices.size());
+        for (const auto vertex : block.vertices)
+          vertices.emplace_back(vertex);
+        exact_blocks.push_back(json::object{
+            {"block", block.block},
+            {"vertices", std::move(vertices)},
+            {"principal_identity", block.principal_identity},
+            {"source_transform_identity", transform.producer_identity},
+            {"v_exact_identity", transform.v_exact_identity},
+            {"vinv_exact_identity", transform.vinv_exact_identity},
+            {"det_exact_identity", transform.det_exact_identity},
+            {"to_reduced_transform_identity",
+             block.to_reduced.producer_identity},
+            {"to_physical_transform_identity",
+             block.to_physical.producer_identity},
+            {"gauge_exact_identity",
+             block.to_physical.gauge_exact_identity},
+            {"gauge_inverse_exact_identity",
+             block.to_physical.gauge_inverse_exact_identity},
+            {"gauge_det_exact_identity",
+             block.to_physical.gauge_det_exact_identity},
+            {"assembly_exact_identity",
+             block.chart->assembly_exact_identity()}});
+      }
+
+      auto reduced = denormalize_acb_matching_weights(normalized);
+      if (!reduced.has_value())
+        throw std::logic_error(
+            "SCC matching residual pushforward lost its exact assembly");
+      std::vector<std::optional<EpsilonFrame<ComplexBall>>> parent(
+          dimension_);
+      for (const auto& block : blocks_) {
+        FiniteLaurentVector<ComplexBall> local;
+        local.reserve(block.vertices.size());
+        for (const auto vertex : block.vertices)
+          local.push_back((*reduced)[vertex]);
+        auto physical = apply_acb_matching_gauge_at_point(
+            block.to_physical, local, point);
+        if (!physical.has_value()) return std::nullopt;
+        for (std::size_t component = 0;
+             component < block.vertices.size(); ++component)
+          parent[block.vertices[component]] =
+              std::move((*physical)[component]);
+      }
+      FiniteLaurentVector<ComplexBall> physical;
+      physical.reserve(dimension_);
+      for (auto& component : parent) {
+        if (!component.has_value())
+          throw std::logic_error(
+              "SCC matching residual pushforward left an empty parent component");
+        physical.push_back(std::move(*component));
+      }
+      json::object certificate{
+          {"schema", "diffexp2-acb-matching-residual-pushforward-v2"},
+          {"equation_operator_identity", exact_identity_},
+          {"normal_frame_identity", *frame_identity},
+          {"physical_frame_identity", "physical-parent-frame"},
+          {"receiving_local_point",
+           json::object{{"exact", point.exact_coordinate},
+                        {"sign", point.sign}}},
+          {"blocks", std::move(exact_blocks)}};
+      return AcbMatchingResidualPushforward{
+          std::move(physical), std::move(*frame_identity),
+          json::serialize(canonical_json_value(certificate))};
     }
   }
 
@@ -3246,6 +3409,117 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
  private:
+  static std::optional<FiniteLaurentVector<ComplexBall>>
+  apply_acb_matching_gauge_at_point(
+      const CompositeGaugeTransform<Scalar>& transform,
+      const FiniteLaurentVector<ComplexBall>& input,
+      const RealEvaluationPoint& point) {
+    if (transform.matrix.rows != input.size() ||
+        transform.matrix.columns != input.size())
+      throw std::logic_error(
+          "SCC matching gauge dimensions differ from their block");
+    if (transform.identity) return input;
+    return local_algebra_detail::
+        apply_prepared_sparse_epsilon_matrix_at_real_point(
+            transform.matrix, input, point);
+  }
+
+  static std::optional<FiniteLaurentVector<ComplexBall>>
+  apply_acb_matching_spectral_inverse(
+      const CompositeSpectralSourceTransform<Scalar>& transform,
+      const FiniteLaurentVector<ComplexBall>& input) {
+    if (transform.matrix.rows != input.size() ||
+        transform.matrix.columns != input.size())
+      throw std::logic_error(
+          "SCC spectral matching dimensions differ from their block");
+    if (transform.identity) return input;
+
+    std::vector<std::optional<EpsilonFrame<ComplexBall>>> rows(
+        transform.matrix.rows);
+    for (const auto& entry : transform.matrix.entries) {
+      if (entry.row >= transform.matrix.rows ||
+          entry.column >= transform.matrix.columns)
+        throw std::logic_error(
+            "spectral matching transform entry is outside its block");
+      const auto& multiplier = entry.multiplier;
+      if (multiplier.proven_zero) continue;
+      if (multiplier.center_pole_order != 0 ||
+          multiplier.kernels.empty())
+        return std::nullopt;
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(multiplier.kernels.size());
+      for (const auto& kernel : multiplier.kernels) {
+        if (kernel.empty()) return std::nullopt;
+        for (std::size_t taylor = 1; taylor < kernel.size(); ++taylor)
+          if (!kernel[taylor].is_zero())
+            return std::nullopt;
+        coefficients.push_back(kernel.front());
+      }
+      auto term = EpsilonFrame<ComplexBall>(
+          multiplier.epsilon_shift, std::move(coefficients)) *
+          input[entry.column];
+      rows[entry.row] = rows[entry.row].has_value()
+          ? *rows[entry.row] + term
+          : std::move(term);
+    }
+
+    FiniteLaurentVector<ComplexBall> output;
+    output.reserve(rows.size());
+    for (auto& row : rows) {
+      if (!row.has_value())
+        throw std::logic_error(
+            "certified invertible SCC spectral matching frame has an empty row");
+      output.push_back(std::move(*row));
+    }
+    return output;
+  }
+
+  std::optional<std::string> acb_matching_normal_frame_identity(
+      const RealEvaluationPoint& point) const {
+    if (!local_algebra_detail::signed_real_evaluation_ball(point).has_value())
+      return std::nullopt;
+    json::array exact_blocks;
+    exact_blocks.reserve(blocks_.size());
+    for (const auto& block : blocks_) {
+      if (!spectral_frame_ready(block) || !gauge_frame_ready(block))
+        return std::nullopt;
+      json::array vertices;
+      vertices.reserve(block.vertices.size());
+      for (const auto vertex : block.vertices)
+        vertices.emplace_back(vertex);
+      exact_blocks.push_back(json::object{
+          {"block", block.block},
+          {"vertices", std::move(vertices)},
+          {"principal_identity", block.principal_identity},
+          {"source_transform_identity",
+           block.source_transform.producer_identity},
+          {"v_exact_identity", block.source_transform.v_exact_identity},
+          {"vinv_exact_identity",
+           block.source_transform.vinv_exact_identity},
+          {"det_exact_identity",
+           block.source_transform.det_exact_identity},
+          {"to_reduced_transform_identity",
+           block.to_reduced.producer_identity},
+          {"to_physical_transform_identity",
+           block.to_physical.producer_identity},
+          {"gauge_exact_identity",
+           block.to_physical.gauge_exact_identity},
+          {"gauge_inverse_exact_identity",
+           block.to_physical.gauge_inverse_exact_identity},
+          {"gauge_det_exact_identity",
+           block.to_physical.gauge_det_exact_identity},
+          {"assembly_exact_identity",
+           block.chart->assembly_exact_identity()}});
+    }
+    return json::serialize(canonical_json_value(json::object{
+        {"schema", "diffexp2-acb-scc-matching-normal-frame-v2"},
+        {"equation_operator_identity", exact_identity_},
+        {"receiving_local_point",
+         json::object{{"exact", point.exact_coordinate},
+                      {"sign", point.sign}}},
+        {"blocks", std::move(exact_blocks)}}));
+  }
+
   struct ValidatedScheduleEvidence {
     std::uint32_t block = 0;
     std::uint32_t taylor_rows = 0;

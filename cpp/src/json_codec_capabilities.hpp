@@ -78,6 +78,6 @@ inline constexpr char kRetainedLineAggregateCapability[] =
 
 inline constexpr char kCheckpointFormat[] =
     "diffexp2-persistent-native-session";
-inline constexpr std::uint32_t kCheckpointPayloadSchema = 8;
+inline constexpr std::uint32_t kCheckpointPayloadSchema = 9;
 
 }  // namespace diffexp2::json_codec_detail

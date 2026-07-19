@@ -732,6 +732,11 @@ struct LeadingNullRelation {
   std::optional<std::vector<Scalar>> vector;
   std::optional<std::size_t> target_column;
   std::vector<std::size_t> pivot_rows;
+  // When rank is full, this is the determinant of the selected leading
+  // minor with rows ordered as pivot_rows and columns in their original
+  // order.  The elimination already needed for the rank/null-relation proof
+  // supplies it essentially for free.
+  std::optional<Scalar> full_rank_leading_determinant;
 };
 
 // Full-pivot elimination at epsilon^0.  The first proved nonzero entry in
@@ -764,6 +769,8 @@ LeadingNullRelation<Scalar> leading_null_relation(
   for (std::size_t i = 0; i < row_count; ++i) row_permutation[i] = i;
 
   std::size_t rank = 0;
+  auto pivot_product = ScalarTraits<Scalar>::one();
+  bool odd_column_permutation = false;
   for (std::size_t position = 0; position < size; ++position) {
     std::optional<std::pair<std::size_t, std::size_t>> pivot;
     for (std::size_t row = position; row < row_count; ++row) {
@@ -803,8 +810,10 @@ LeadingNullRelation<Scalar> leading_null_relation(
         std::swap(row[position], row[pivot->second]);
       std::swap(column_permutation[position],
                 column_permutation[pivot->second]);
+      odd_column_permutation = !odd_column_permutation;
     }
 
+    pivot_product *= matrix[position][position];
     for (std::size_t row = position + 1; row < row_count; ++row) {
       const auto decision = zero_decision(matrix[row][position]);
       if (decision == ZeroDecision::Ambiguous)
@@ -833,9 +842,12 @@ LeadingNullRelation<Scalar> leading_null_relation(
 
   std::vector<std::size_t> pivot_rows(row_permutation.begin(),
                                       row_permutation.begin() + rank);
-  if (rank == size)
+  if (rank == size) {
+    if (odd_column_permutation) pivot_product = -pivot_product;
     return LeadingNullRelation<Scalar>{rank, {}, {},
-                                       std::move(pivot_rows)};
+                                       std::move(pivot_rows),
+                                       std::move(pivot_product)};
+  }
 
   std::vector<Scalar> permuted(size, ScalarTraits<Scalar>::zero());
   permuted[rank] = ScalarTraits<Scalar>::one();
@@ -874,7 +886,7 @@ LeadingNullRelation<Scalar> leading_null_relation(
           row, std::nullopt, 0);
   }
   return LeadingNullRelation<Scalar>{rank, std::move(relation), target,
-                                     std::move(pivot_rows)};
+                                     std::move(pivot_rows), std::nullopt};
 }
 
 enum class FullRankProofResult : std::uint8_t {
@@ -1568,38 +1580,25 @@ saturate_rectangular_finite_laurent_basis(
       const auto action_valuation = matching_detail::checked_power(
           static_cast<std::int64_t>(steps),
           "exact saturation action determinant valuation");
-
-      FiniteLaurentMatrix<Scalar> final_minor;
-      final_minor.reserve(size);
-      for (const auto row : relation.pivot_rows)
-        final_minor.push_back(transformed[row]);
-      const auto final_determinant =
-          matching_detail::nonnegative_determinant_frame(
-              final_minor,
-              context + ": saturated pivot-row determinant witness",
-              certified_candidate_chop_digits);
-      const auto final_valuation = finite_laurent_leading_power(
-          final_determinant,
-          context + ": saturated pivot-row determinant");
-      if (!final_valuation.has_value() || *final_valuation != 0)
+      if (!relation.full_rank_leading_determinant.has_value() ||
+          relation.full_rank_leading_determinant->is_zero())
         throw MatchingArithmeticError(
             MatchingArithmeticErrorCode::InvalidSaturationLattice,
             context +
-                ": exact saturation reached full leading rank without a valuation-zero pivot minor");
+                ": exact saturation reached full leading rank without a nonzero leading determinant");
 
       // Every recorded elementary action replaces one target column by a
       // null combination divided by epsilon, with exact target coefficient
-      // one.  Its determinant is therefore epsilon^-1.  The final
-      // valuation-zero minor and the action count prove that the same minor
-      // of the initial normalized basis has valuation `steps`; its leading
-      // coefficient is the final epsilon^0 determinant.  Use this action
-      // record as the exact certificate unconditionally: directly expanding
-      // the original rational determinant is redundant and can cause
-      // catastrophic coefficient swell even when its finite rectangle
-      // happens to reach the determinant valuation.
+      // one.  Its determinant is therefore epsilon^-1.  The already-proved
+      // full-rank epsilon^0 leading minor and the action count prove that the
+      // same minor of the initial normalized basis has valuation `steps`;
+      // its leading coefficient is the pivot product retained by that exact
+      // rank proof.  Expanding any positive-epsilon determinant coefficient
+      // is irrelevant to this certificate and can cause catastrophic
+      // rational coefficient swell.
       return EpsilonFrame<Scalar>(
           {action_valuation, action_valuation},
-          {final_determinant.coefficient(0)});
+          {*relation.full_rank_leading_determinant});
     } else {
       return matching_detail::nonnegative_determinant_frame(
           determinant_minor, context + ": pivot-row determinant witness",
@@ -2414,15 +2413,26 @@ struct AcbResidualEvaluation {
   AcbMatchingResidualDiagnostics diagnostics;
 };
 
-inline AcbResidualEvaluation evaluate_acb_matching_residual(
+using AcbResidualContributions =
+    std::vector<std::vector<EpsilonFrame<ComplexBall>>>;
+
+inline AcbResidualEvaluation
+certify_acb_matching_residual_with_contributions(
     const FiniteLaurentMatrix<ComplexBall>& matrix,
     const FiniteLaurentVector<ComplexBall>& weights,
     const FiniteLaurentVector<ComplexBall>& right_hand_side,
+    FiniteLaurentVector<ComplexBall> residual,
+    AcbResidualContributions contributions,
     const AcbLaurentRefinementOptions& options,
     const std::string& context) {
   const auto columns = rectangular_columns(matrix,
                                             "Acb matching residual matrix");
-  if (matrix.size() != right_hand_side.size() || columns != weights.size())
+  if (matrix.size() != right_hand_side.size() ||
+      matrix.size() != residual.size() ||
+      matrix.size() != contributions.size() ||
+      columns != weights.size() ||
+      std::any_of(contributions.begin(), contributions.end(),
+          [columns](const auto& row) { return row.size() != columns; }))
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::DimensionMismatch,
         context + ": residual dimensions disagree");
@@ -2430,26 +2440,17 @@ inline AcbResidualEvaluation evaluate_acb_matching_residual(
     throw std::invalid_argument(
         context + ": residual tolerance must be finite");
 
-  std::vector<std::vector<EpsilonFrame<ComplexBall>>> contributions(
-      matrix.size());
-  FiniteLaurentVector<ComplexBall> residual;
-  residual.reserve(matrix.size());
-  for (std::size_t row = 0; row < matrix.size(); ++row) {
-    auto& row_terms = contributions[row];
-    row_terms.reserve(columns);
-    for (std::size_t column = 0; column < columns; ++column)
-      row_terms.push_back(matrix[row][column] * weights[column]);
-    auto reconstructed = row_terms.front();
-    for (std::size_t column = 1; column < columns; ++column)
-      reconstructed = reconstructed + row_terms[column];
-    residual.push_back(right_hand_side[row] - reconstructed);
-  }
-
   auto common_min = residual.front().min_power();
   auto common_max = residual.front().complete_max();
   for (const auto& row : residual) {
     common_min = std::min(common_min, row.min_power());
     common_max = std::min(common_max, row.complete_max());
+  }
+  for (std::size_t row = 0; row < right_hand_side.size(); ++row) {
+    common_max = std::min(
+        common_max, right_hand_side[row].complete_max());
+    for (const auto& contribution : contributions[row])
+      common_max = std::min(common_max, contribution.complete_max());
   }
   const auto certified_min = options.required_min_power.has_value()
       ? std::max(common_min, *options.required_min_power)
@@ -2532,13 +2533,17 @@ inline AcbResidualEvaluation evaluate_acb_matching_residual(
           scale_lower, Magnitude::lower_abs(rhs_value));
       scale_upper = Magnitude::maximum(
           scale_upper, Magnitude::upper_abs(rhs_value));
-      for (const auto& contribution : contributions[row]) {
-        const auto value = contribution.coefficient(power);
-        scale_lower = Magnitude::maximum(
-            scale_lower, Magnitude::lower_abs(value));
-        scale_upper = Magnitude::maximum(
-            scale_upper, Magnitude::upper_abs(value));
-      }
+
+      // Publication is an accuracy claim about the reconstructed physical
+      // right-hand side, not merely a backward-error claim for A w = b.
+      // Scaling by max_j |A_j w_j| lets an arbitrarily ill-conditioned
+      // cancellation authorize an arbitrarily large physical residual.  In
+      // particular, O(10^70) individual terms which should sum to O(1)
+      // would label an O(10^62) residual an "8 digit" pass.  The exact
+      // right/normal-frame routes exist precisely to form that cancellation
+      // tightly, so certify it against max(1, |b|).  Contribution bounds are
+      // still retained above to intersect every honest finite-Laurent
+      // completeness window; they no longer weaken the accuracy contract.
 
       const auto residual_lower = Magnitude::lower_abs(residual_value);
       const auto residual_upper = Magnitude::upper_abs(residual_value);
@@ -2580,6 +2585,69 @@ inline AcbResidualEvaluation evaluate_acb_matching_residual(
           "epsilon power";
   }
   return {std::move(residual), std::move(diagnostics)};
+}
+
+inline AcbResidualEvaluation evaluate_acb_matching_residual(
+    const FiniteLaurentMatrix<ComplexBall>& matrix,
+    const FiniteLaurentVector<ComplexBall>& weights,
+    const FiniteLaurentVector<ComplexBall>& right_hand_side,
+    const AcbLaurentRefinementOptions& options,
+    const std::string& context) {
+  const auto columns = rectangular_columns(matrix,
+                                            "Acb matching residual matrix");
+  if (matrix.size() != right_hand_side.size() || columns != weights.size())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": residual dimensions disagree");
+
+  AcbResidualContributions contributions(matrix.size());
+  FiniteLaurentVector<ComplexBall> residual;
+  residual.reserve(matrix.size());
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    auto& row_terms = contributions[row];
+    row_terms.reserve(columns);
+    for (std::size_t column = 0; column < columns; ++column)
+      row_terms.push_back(matrix[row][column] * weights[column]);
+    auto reconstructed = row_terms.front();
+    for (std::size_t column = 1; column < columns; ++column)
+      reconstructed = reconstructed + row_terms[column];
+    residual.push_back(right_hand_side[row] - reconstructed);
+  }
+  return certify_acb_matching_residual_with_contributions(
+      matrix, weights, right_hand_side, std::move(residual),
+      std::move(contributions), options, context);
+}
+
+// Certify a residual formed by an independently certified linear route.  This
+// is essential when a well-conditioned exact normal frame produces a tight
+// residual but subtracting the corresponding large physical-frame quantities
+// would lose that information to interval dependency.  The physical matrix,
+// weights, and right-hand side still determine the relative scale; only the
+// cancellation-heavy subtraction is replaced.
+inline AcbResidualEvaluation certify_precomputed_acb_matching_residual(
+    const FiniteLaurentMatrix<ComplexBall>& matrix,
+    const FiniteLaurentVector<ComplexBall>& weights,
+    const FiniteLaurentVector<ComplexBall>& right_hand_side,
+    FiniteLaurentVector<ComplexBall> residual,
+    const AcbLaurentRefinementOptions& options,
+    const std::string& context) {
+  const auto columns = rectangular_columns(matrix,
+                                            "Acb matching residual matrix");
+  if (matrix.size() != right_hand_side.size() ||
+      matrix.size() != residual.size() || columns != weights.size())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": residual dimensions disagree");
+
+  AcbResidualContributions contributions(matrix.size());
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    contributions[row].reserve(columns);
+    for (std::size_t column = 0; column < columns; ++column)
+      contributions[row].push_back(matrix[row][column] * weights[column]);
+  }
+  return certify_acb_matching_residual_with_contributions(
+      matrix, weights, right_hand_side, std::move(residual),
+      std::move(contributions), options, context);
 }
 
 inline EpsilonFrame<ComplexBall> project_acb_frame_to_laurent_floor(
@@ -2744,7 +2812,8 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     const ExactLaurentMatrix<ComplexBall>& transformation,
     const AcbLaurentRefinementOptions& options,
     const std::string& context = "refined Acb finite Laurent match",
-    bool exact_formal_negative_coefficients_are_zero = false) {
+    bool exact_formal_negative_coefficients_are_zero = false,
+    bool exact_right_transformation_residual = false) {
   const auto dimension = matching_detail::rectangular_columns(
       basis, "Acb matching basis");
   if (basis.size() != dimension || right_hand_side.size() != dimension)
@@ -2871,13 +2940,32 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     auto weights = matching_detail::canonicalize_acb_match_candidate(
         apply_exact_laurent_matrix(transformation, transformed_weights),
         100, context + ": physical candidate weights");
-    auto residual = matching_detail::evaluate_acb_matching_residual(
-        basis,
-        weights,
-        right_hand_side, options,
+    const auto residual_context =
         context + ": residual#" +
-            std::to_string(result.residual_history.size()) +
-            factorization_diagnostics);
+        std::to_string(result.residual_history.size()) +
+        factorization_diagnostics;
+    auto residual = [&] {
+      if (!exact_right_transformation_residual)
+        return matching_detail::evaluate_acb_matching_residual(
+            basis, weights, right_hand_side, options, residual_context);
+
+      // T is supplied by the retained exact Rational lattice proof.  The
+      // two products F*(T*y) and (F*T)*y are therefore the same physical
+      // vector, but evaluating the former with independent balls can destroy
+      // the exact column dependencies which made F*T epsilon-regular.  Form
+      // the residual through the latter route and certify that enclosure
+      // against the original physical basis, weights, rhs, and scale.  Honest
+      // finite-Laurent windows from both products are still intersected by
+      // certify_precomputed_acb_matching_residual, so the exact identity
+      // cannot manufacture an unknown upper coefficient.
+      auto transformed =
+          matching_detail::evaluate_acb_matching_residual(
+              transformed_basis, transformed_weights, right_hand_side,
+              options, residual_context + ":exact-right-frame");
+      return matching_detail::certify_precomputed_acb_matching_residual(
+          basis, weights, right_hand_side, std::move(transformed.residual),
+          options, residual_context + ":physical-via-exact-right-frame");
+    }();
     result.residual_history.push_back(residual.diagnostics);
     result.weights = std::move(weights);
     result.residual = std::move(residual.residual);
@@ -2987,7 +3075,7 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
       basis, right_hand_side,
       specialize_exact_rational_laurent_matrix_to_acb(
           exact_saturation_record.transformation),
-      options, context, exact_formal_negative_coefficients_are_zero);
+      options, context, exact_formal_negative_coefficients_are_zero, true);
 }
 
 }  // namespace diffexp2

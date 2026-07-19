@@ -25,7 +25,9 @@ x = Global`x;
 system = DiffExp2`LoadSystem[<|"Matrix" -> {{0}}, "Variable" -> x|>];
 lowerPlan = DiffExp2`Transport`SegmentLine[system, {0, -1/4}];
 upperPlan = DiffExp2`Transport`SegmentLine[system, {0, 1/4}];
-one = DiffExp2`EpsSeries`ESNew[0, {1}];
+(* The public result ends at eps^0, while an integrated observable reserves
+   one private source coefficient for the regulated primitive. *)
+one = DiffExp2`EpsSeries`ESNew[0, {1, 0}];
 atlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     system, {one}, lowerPlan, upperPlan, "Threads" -> 1,

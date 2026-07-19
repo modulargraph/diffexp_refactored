@@ -56,6 +56,11 @@ struct StoredLineIntegrationOptions {
     std::string provenance;
   };
   std::optional<BoundedDivergentCancellation> divergent_cancellation;
+  // Terminal factorized transport evaluates the physical basis columns
+  // independently and contracts them only after exact monomial grouping.
+  // In that one internal mode a divergent group must be returned to the
+  // caller instead of being rejected column by column.
+  bool defer_divergent_groups = false;
 };
 
 struct StoredLineIntegrationDiagnostics {
@@ -78,10 +83,19 @@ struct StoredLineIntegrationDiagnostics {
 };
 
 struct StoredLineIntegral {
+  struct DeferredDivergentGroup {
+    SectorMonomialTag tag;
+    EpsilonFrame<ComplexBall> coefficients;
+    std::vector<Magnitude> contribution_scale_uppers;
+    std::size_t cell_count = 0;
+    bool had_material_input = false;
+  };
+
   EpsilonVector value;
   LineIntegrationScope scope = LineIntegrationScope::StoredTruncation;
   std::optional<std::int32_t> imaginary_sign;
   StoredLineIntegrationDiagnostics diagnostics;
+  std::vector<DeferredDivergentGroup> deferred_divergent_groups;
 };
 
 inline StoredLineIntegral certified_zero_physical_line(
@@ -524,6 +538,11 @@ StoredLineIntegral integrate_stored_local_line(
     result.diagnostics.divergent_cancellation_provenance =
         options.divergent_cancellation->provenance;
   }
+  if (options.defer_divergent_groups &&
+      !std::is_same_v<Scalar, ComplexBall>)
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+        "deferred divergent groups are restricted to Acb terminal transport");
   require_integrable_first_unseen_taylor(
       solution, result.diagnostics.has_center_endpoint);
 
@@ -568,7 +587,10 @@ StoredLineIntegral integrate_stored_local_line(
         group.tag, result.diagnostics.has_center_endpoint);
     const bool bounded_divergent_cancellation =
         material_components != 0 && divergent;
-    if (bounded_divergent_cancellation)
+    const bool deferred_divergent =
+        bounded_divergent_cancellation &&
+        options.defer_divergent_groups;
+    if (bounded_divergent_cancellation && !deferred_divergent)
       (void)accept_or_throw_divergent_group(
           solution, group, options, &result.diagnostics);
 
@@ -597,6 +619,31 @@ StoredLineIntegral integrate_stored_local_line(
     // Even an all-zero retained group cannot bypass the halo gate: its next
     // unknown epsilon coefficient can feed a requested row through a
     // negative-power primitive.
+    if (deferred_divergent) {
+      if (solution.dimension != 1)
+        throw std::logic_error(
+            "deferred terminal divergence requires one scalar physical column");
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(solution.epsilon.width());
+      std::vector<Magnitude> scales;
+      scales.reserve(solution.epsilon.width());
+      for (std::size_t epsilon = 0;
+           epsilon < solution.epsilon.width(); ++epsilon) {
+        coefficients.push_back(
+            as_ball(group.coefficients[epsilon]));
+        scales.push_back(
+            group.contribution_scale_uppers[epsilon]);
+      }
+      result.deferred_divergent_groups.push_back(
+          StoredLineIntegral::DeferredDivergentGroup{
+              group.tag,
+              EpsilonFrame<ComplexBall>(
+                  solution.epsilon, std::move(coefficients)),
+              std::move(scales), group.cell_count,
+              group.had_material_input});
+      ++result.diagnostics.zero_groups_skipped;
+      continue;
+    }
     if (material_components == 0 || bounded_divergent_cancellation) {
       ++result.diagnostics.zero_groups_skipped;
       if (bounded_divergent_cancellation ||
@@ -803,6 +850,11 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
     result.diagnostics.divergent_cancellation_provenance =
         options.divergent_cancellation->provenance;
   }
+  if (options.defer_divergent_groups &&
+      !std::is_same_v<Scalar, ComplexBall>)
+    throw NativeIntegrationError(
+        NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+        "deferred divergent groups are restricted to Acb terminal transport");
 
   using OutputSectorKey =
       std::tuple<std::uint8_t, std::string, std::uint8_t, std::string,
@@ -1352,7 +1404,9 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
     const bool divergent = center_divergent(
         group.tag, has_center_endpoint);
     const bool cancelled_divergent = material_components != 0 && divergent;
-    if (cancelled_divergent)
+    const bool deferred_divergent =
+        cancelled_divergent && options.defer_divergent_groups;
+    if (cancelled_divergent && !deferred_divergent)
       (void)accept_or_throw_divergent_group(
           projected_shape, group, options, &result.diagnostics);
 
@@ -1367,6 +1421,22 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
           NativeIntegrationErrorCode::IncompleteEpsilonWindow, "E10",
           "fused row coefficient frame does not cover the requested primitive output");
 
+    if (deferred_divergent) {
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(group.coefficients.size());
+      for (const auto& coefficient : group.coefficients)
+        coefficients.push_back(as_ball(coefficient));
+      result.deferred_divergent_groups.push_back(
+          StoredLineIntegral::DeferredDivergentGroup{
+              group.tag,
+              EpsilonFrame<ComplexBall>(
+                  projected_epsilon, std::move(coefficients)),
+              group.contribution_scale_uppers,
+              group.cell_count,
+              group.had_material_input});
+      ++result.diagnostics.zero_groups_skipped;
+      return;
+    }
     if (material_components == 0 || cancelled_divergent) {
       ++result.diagnostics.zero_groups_skipped;
       if (cancelled_divergent ||

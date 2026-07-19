@@ -624,6 +624,18 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   const std::shared_ptr<StoredMatchBase>& native_match() const {
     return match_;
   }
+  bool has_acb_match() const {
+    return std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_) !=
+        nullptr;
+  }
+  json::object compact_terminal_match_diagnostic() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb)
+      throw std::invalid_argument(
+          "compact terminal match diagnostic requires one retained Acb match");
+    return acb->compact_terminal_diagnostic_summary();
+  }
   const std::shared_ptr<StoredTilePlan>& plan_owner() const {
     return plan_owner_;
   }
@@ -639,6 +651,563 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   }
   const std::string& provenance_identity() const {
     return provenance_identity_;
+  }
+
+  bool has_terminal_acb_factorization() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    return acb != nullptr &&
+        acb->certified_for_materialization() &&
+        acb->acb_materialization_right_transformation().has_value();
+  }
+
+  std::vector<std::shared_ptr<StoredLocal<ComplexBall>>>
+  terminal_acb_basis_owners() const {
+    if (!has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal factorized consumption requires one certified Acb exact-right match");
+    std::vector<std::shared_ptr<StoredLocal<ComplexBall>>> result;
+    result.reserve(basis_owners_.size());
+    for (const auto& owner : basis_owners_) {
+      auto typed =
+          std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(owner);
+      if (!typed)
+        throw std::logic_error(
+            "terminal factorized Acb basis changed coefficient domain");
+      result.push_back(std::move(typed));
+    }
+    return result;
+  }
+
+  const FiniteLaurentVector<ComplexBall>&
+  terminal_acb_physical_weights() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal physical weights require one certified Acb exact-right match");
+    return acb->weights();
+  }
+
+  std::int32_t terminal_acb_physical_weight_min_power() const {
+    const auto& weights = terminal_acb_physical_weights();
+    if (weights.empty())
+      throw std::logic_error(
+          "terminal physical contraction has no match weights");
+    auto result = weights.front().min_power();
+    for (const auto& weight : weights)
+      result = std::min(result, weight.min_power());
+    return result;
+  }
+
+  std::vector<LocalSolution<ComplexBall>>
+  terminal_acb_factorized_basis(
+      const std::string& checkpoint_identity_root) const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization() ||
+        checkpoint_identity_root.empty())
+      throw std::invalid_argument(
+          "terminal factorized basis requires one certified Acb exact-right match and checkpoint root");
+    auto owners = terminal_acb_basis_owners();
+    std::vector<LocalSolution<ComplexBall>> valid_physical_basis;
+    valid_physical_basis.reserve(owners.size());
+    std::vector<const LocalSolution<ComplexBall>*> physical_sources;
+    physical_sources.reserve(owners.size());
+    for (std::size_t column = 0; column < owners.size(); ++column) {
+      auto source = owners[column]->solution();
+      const auto complete_max = std::min(
+          owners[column]->top_valid(),
+          source.epsilon.complete_max);
+      if (complete_max < source.epsilon.min_power)
+        throw std::domain_error(
+            "terminal physical basis has no valid epsilon coefficient");
+      if (complete_max < source.epsilon.complete_max)
+        source = restrict_local_epsilon_frame_strict_lower(
+            source, source.epsilon.min_power, complete_max,
+            checkpoint_identity_root + ":physical-valid:column:" +
+                std::to_string(column));
+      valid_physical_basis.push_back(std::move(source));
+      physical_sources.push_back(&valid_physical_basis.back());
+    }
+
+    auto factorized =
+        right_transform_local_basis_exact<ComplexBall>(
+            physical_sources,
+            *acb->acb_materialization_right_transformation(),
+            checkpoint_identity_root + ":exact-right");
+    if (const auto& preconditioner =
+            acb->acb_right_materialization_preconditioner();
+        preconditioner.has_value()) {
+      std::vector<const LocalSolution<ComplexBall>*> factorized_sources;
+      factorized_sources.reserve(factorized.size());
+      for (const auto& column : factorized)
+        factorized_sources.push_back(&column);
+      factorized =
+          right_transform_local_basis_exact<ComplexBall>(
+              factorized_sources, *preconditioner,
+              checkpoint_identity_root + ":conditioned-exact-right");
+    }
+    return factorized;
+  }
+
+  FiniteLaurentVector<ComplexBall>
+  contract_terminal_acb_physical_functionals(
+      const FiniteLaurentMatrix<ComplexBall>& physical_rows,
+      const std::string& context) const {
+    if (physical_rows.empty())
+      throw std::invalid_argument(
+          context + ": terminal physical functional batch is empty");
+    const auto& weights = terminal_acb_physical_weights();
+    for (const auto& row : physical_rows)
+      if (row.size() != weights.size())
+        throw std::invalid_argument(
+            context +
+            ": terminal physical functional differs from the match dimension");
+    return apply_finite_laurent_matrix(physical_rows, weights);
+  }
+
+  FiniteLaurentVector<ComplexBall>
+  contract_terminal_acb_factorized_functionals(
+      const FiniteLaurentMatrix<ComplexBall>& factorized_rows,
+      const std::string& context) const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          context +
+          ": terminal factorized contraction requires one certified Acb exact-right match");
+    if (factorized_rows.empty())
+      throw std::invalid_argument(
+          context + ": terminal factorized functional batch is empty");
+    for (const auto& row : factorized_rows)
+      if (row.size() != basis_owners_.size())
+        throw std::invalid_argument(
+            context +
+            ": terminal factorized functional differs from the transformed basis dimension");
+    return apply_finite_laurent_matrix(
+        factorized_rows, acb->transformed_weights());
+  }
+
+  FiniteLaurentVector<ComplexBall>
+  adjoint_contract_terminal_acb_functionals(
+      const FiniteLaurentMatrix<ComplexBall>& physical_rows,
+      std::int32_t required_output_complete_max,
+      const std::string& context) const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          context +
+          ": terminal adjoint contraction requires one certified Acb exact-right match");
+    if (physical_rows.empty())
+      throw std::invalid_argument(
+          context + ": terminal adjoint functional batch is empty");
+    auto basis = terminal_acb_basis_owners();
+    const auto dimension = basis.size();
+    for (const auto& row : physical_rows)
+      if (row.size() != dimension)
+        throw std::invalid_argument(
+            context +
+            ": terminal adjoint functional differs from the physical basis dimension");
+    auto incoming =
+        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
+            incoming_owner_);
+    if (!incoming ||
+        incoming->solution().dimension != dimension)
+      throw std::logic_error(
+          context +
+          ": terminal adjoint contraction lost its incoming physical local");
+
+    const auto basis_point =
+        RealEvaluationPoint::rational(acb->basis_point_exact());
+    const auto incoming_point =
+        RealEvaluationPoint::rational(acb->incoming_point_exact());
+    EvaluationOptions basis_options;
+    basis_options.imaginary_sign =
+        acb->effective_basis_imaginary_sign();
+    basis_options.compute_tail_estimate = false;
+    EvaluationOptions incoming_options;
+    incoming_options.imaginary_sign =
+        acb->effective_incoming_imaginary_sign();
+    incoming_options.compute_tail_estimate = false;
+    const auto matching_taylor_complete_max =
+        acb->matching_taylor_complete_max();
+
+    std::vector<LocalEvaluation> basis_evaluations;
+    basis_evaluations.reserve(dimension);
+    auto evaluation_window = acb->requested_window();
+    // The published match window is only the residual-certification
+    // contract.  A terminal adjoint can start several epsilon powers below
+    // that window, and its coefficient recurrence then needs the positive
+    // tail of the retained local evaluations.  Re-evaluate the same certified
+    // Taylor prefix at its full epsilon width instead of silently clipping it
+    // back to the public match maximum.
+    evaluation_window.complete_max =
+        std::numeric_limits<std::int32_t>::max();
+    for (std::size_t column = 0; column < dimension; ++column) {
+      auto options = basis_options;
+      const auto full_width =
+          basis[column]->solution().taylor_width();
+      if (matching_taylor_complete_max.has_value()) {
+        const auto retained_width =
+            static_cast<std::size_t>(
+                *matching_taylor_complete_max) +
+            1;
+        if (retained_width > full_width)
+          throw std::logic_error(
+              context +
+              ": retained terminal matching prefix exceeds its basis local");
+        options.t_order_reduction =
+            static_cast<std::uint32_t>(
+                full_width - retained_width);
+      }
+      basis_evaluations.push_back(evaluate_local_solution(
+          basis[column]->solution(), basis_point, options));
+      evaluation_window.complete_max = std::min(
+          evaluation_window.complete_max,
+          basis_evaluations.back().value.epsilon.complete_max);
+    }
+    const auto incoming_full_width =
+        incoming->solution().taylor_width();
+    if (matching_taylor_complete_max.has_value()) {
+      const auto retained_width =
+          static_cast<std::size_t>(
+              *matching_taylor_complete_max) +
+          1;
+      if (retained_width > incoming_full_width)
+        throw std::logic_error(
+            context +
+            ": retained terminal matching prefix exceeds its incoming local");
+      incoming_options.t_order_reduction =
+          static_cast<std::uint32_t>(
+              incoming_full_width - retained_width);
+    }
+    const auto incoming_evaluation = evaluate_local_solution(
+        incoming->solution(), incoming_point,
+        incoming_options);
+    evaluation_window.complete_max = std::min(
+        evaluation_window.complete_max,
+        incoming_evaluation.value.epsilon.complete_max);
+    if (evaluation_window.complete_max <
+        acb->certified_complete_max())
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+          context +
+              ": terminal adjoint evaluation does not cover the certified match prefix",
+          std::nullopt, std::nullopt,
+          evaluation_window.complete_max);
+
+    FiniteLaurentMatrix<ComplexBall> evaluated_basis(
+        dimension, FiniteLaurentVector<ComplexBall>());
+    for (auto& row : evaluated_basis) row.reserve(dimension);
+    for (std::size_t column = 0; column < dimension; ++column) {
+      auto frames = acb_evaluation_frames(
+          basis_evaluations[column].value,
+          evaluation_window,
+          context + ": basis evaluation");
+      for (std::size_t component = 0;
+           component < dimension; ++component)
+        evaluated_basis[component].push_back(
+            std::move(frames[component]));
+    }
+    auto incoming_value = acb_evaluation_frames(
+        incoming_evaluation.value, evaluation_window,
+        context + ": incoming evaluation");
+
+    auto conditioned_basis =
+        right_multiply_finite_by_exact_laurent(
+            evaluated_basis,
+            *acb->acb_materialization_right_transformation());
+    auto conditioned_rows =
+        right_multiply_finite_by_exact_laurent(
+            physical_rows,
+            *acb->acb_materialization_right_transformation());
+    if (const auto& preconditioner =
+            acb->acb_right_materialization_preconditioner();
+        preconditioner.has_value()) {
+      conditioned_basis =
+          right_multiply_finite_by_exact_laurent(
+              conditioned_basis, *preconditioner);
+      conditioned_rows =
+          right_multiply_finite_by_exact_laurent(
+              conditioned_rows, *preconditioner);
+    }
+
+    auto conditioned_basis_complete_max =
+        conditioned_basis.front().front().complete_max();
+    for (const auto& row : conditioned_basis)
+      for (const auto& frame : row)
+        conditioned_basis_complete_max = std::min(
+            conditioned_basis_complete_max, frame.complete_max());
+    auto conditioned_functional_min =
+        conditioned_rows.front().front().min_power();
+    for (const auto& row : conditioned_rows)
+      for (const auto& frame : row)
+        conditioned_functional_min = std::min(
+            conditioned_functional_min, frame.min_power());
+    auto incoming_min = incoming_value.front().min_power();
+    auto incoming_complete_max =
+        incoming_value.front().complete_max();
+    for (const auto& frame : incoming_value) {
+      incoming_min = std::min(incoming_min, frame.min_power());
+      incoming_complete_max = std::min(
+          incoming_complete_max, frame.complete_max());
+    }
+    const auto required_adjoint_complete_max =
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(
+                required_output_complete_max) -
+                incoming_min,
+            "terminal adjoint required solution maximum");
+    const auto required_conditioned_basis_complete_max =
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(
+                required_adjoint_complete_max) -
+                conditioned_functional_min,
+            "terminal adjoint required normalized-basis maximum");
+    const auto required_incoming_complete_max =
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(
+                required_output_complete_max) -
+                conditioned_functional_min,
+            "terminal adjoint required incoming maximum");
+    if (conditioned_basis_complete_max <
+            required_conditioned_basis_complete_max ||
+        incoming_complete_max < required_incoming_complete_max) {
+      const auto additional = std::max(
+          required_conditioned_basis_complete_max -
+              conditioned_basis_complete_max,
+          required_incoming_complete_max -
+              incoming_complete_max);
+      std::ostringstream detail;
+      detail
+          << context
+          << ": retained matching epsilon prefix is too short for the "
+             "terminal adjoint recurrence; required_output_complete_max="
+          << required_output_complete_max
+          << "; conditioned_functional_min="
+          << conditioned_functional_min
+          << "; incoming=[" << incoming_min << ","
+          << incoming_complete_max << "]"
+          << "; conditioned_basis_complete_max="
+          << conditioned_basis_complete_max
+          << "; required_conditioned_basis_complete_max="
+          << required_conditioned_basis_complete_max
+          << "; required_incoming_complete_max="
+          << required_incoming_complete_max
+          << "; required_additional_epsilon_orders="
+          << additional;
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+          detail.str(), std::nullopt, std::nullopt,
+          conditioned_basis_complete_max);
+    }
+
+    // The retained exact lattice proves the negative transformed powers
+    // structural.  Ball evaluation can leave tiny enclosures around zero;
+    // canonicalize only whole balls below the same rigorous structural floor
+    // used by matching.  The adjoint residual below is still evaluated
+    // against the unmodified physical input and functional.
+    constexpr int structural_chop_digits = 100;
+    for (auto& row : conditioned_basis)
+      for (auto& frame : row) {
+        auto coefficients = frame.coefficients();
+        for (auto& coefficient : coefficients)
+          coefficient =
+              ScalarTraits<ComplexBall>::canonicalized(
+                  coefficient, structural_chop_digits);
+        frame = EpsilonFrame<ComplexBall>(
+            frame.window(), std::move(coefficients));
+      }
+
+    FiniteLaurentMatrix<ComplexBall> transposed_basis(
+        dimension, FiniteLaurentVector<ComplexBall>());
+    for (auto& row : transposed_basis)
+      row.reserve(dimension);
+    for (std::size_t row = 0; row < dimension; ++row)
+      for (std::size_t column = 0;
+           column < dimension; ++column)
+        transposed_basis[column].push_back(
+            conditioned_basis[row][column]);
+
+    std::optional<
+        ExactNonnegativePowerSeriesFactorization<ComplexBall>>
+        power_series_factorization;
+    std::optional<FiniteLaurentFactorization<ComplexBall>>
+        laurent_factorization;
+    try {
+      power_series_factorization =
+          factor_exact_nonnegative_power_series_system(
+              transposed_basis,
+              context +
+                  ": certified adjoint power-series factorization");
+    } catch (const MatchingArithmeticError&) {
+      laurent_factorization =
+          factor_preconditioned_acb_finite_laurent_system(
+              std::move(transposed_basis),
+              context + ": adjoint Laurent factorization");
+    }
+
+    FiniteLaurentVector<ComplexBall> result;
+    result.reserve(conditioned_rows.size());
+    for (std::size_t functional = 0;
+         functional < conditioned_rows.size(); ++functional) {
+      auto adjoint = power_series_factorization.has_value()
+          ? solve_factorized_exact_nonnegative_power_series_system(
+                *power_series_factorization,
+                conditioned_rows[functional],
+                context + ": adjoint solve")
+          : solve_factorized_finite_laurent_system(
+                *laurent_factorization,
+                conditioned_rows[functional],
+                context + ": adjoint solve");
+      std::optional<EpsilonFrame<ComplexBall>> value;
+      for (std::size_t component = 0;
+           component < dimension; ++component) {
+        auto term = adjoint[component] *
+            incoming_value[component];
+        value = value.has_value()
+            ? *value + term
+            : std::move(term);
+      }
+      if (!value.has_value())
+        throw std::logic_error(
+            context +
+            ": terminal adjoint contraction produced no scalar value");
+      result.push_back(std::move(*value));
+    }
+    return result;
+  }
+
+  std::int32_t terminal_acb_factorized_input_min_power() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal factorized input valuation requires one certified Acb exact-right match");
+    const auto& exact_right =
+        *acb->acb_materialization_right_transformation();
+    std::vector<std::int64_t> input_minima(
+        basis_owners_.size(), 0);
+    const auto propagate_exact_right =
+        [&](const auto& matrix, const char* context) {
+          if (matrix.size() != input_minima.size() ||
+              matrix.empty() || matrix.front().empty())
+            throw std::logic_error(
+                std::string(context) +
+                " differs from the terminal physical basis dimension");
+          const auto output_columns = matrix.front().size();
+          std::vector<std::optional<std::int64_t>> output_minima(
+              output_columns);
+          for (std::size_t input = 0; input < matrix.size();
+               ++input) {
+            if (matrix[input].size() != output_columns)
+              throw std::logic_error(
+                  std::string(context) + " is not rectangular");
+            for (std::size_t output = 0;
+                 output < output_columns; ++output) {
+              const auto factor_minimum =
+                  matrix[input][output].minimum_power();
+              if (!factor_minimum.has_value()) continue;
+              const auto candidate =
+                  input_minima[input] + *factor_minimum;
+              if (!output_minima[output].has_value() ||
+                  candidate < *output_minima[output])
+                output_minima[output] = candidate;
+            }
+          }
+          std::vector<std::int64_t> propagated;
+          propagated.reserve(output_columns);
+          for (const auto minimum : output_minima) {
+            if (!minimum.has_value())
+              throw std::logic_error(
+                  std::string(context) +
+                  " has a structurally zero output column");
+            propagated.push_back(*minimum);
+          }
+          input_minima = std::move(propagated);
+        };
+    propagate_exact_right(
+        exact_right, "terminal exact-right transformation");
+    if (const auto& preconditioner =
+            acb->acb_right_materialization_preconditioner();
+        preconditioner.has_value())
+      propagate_exact_right(
+          *preconditioner,
+          "terminal exact-right Acb preconditioner");
+
+    const auto& transformed_weights = acb->transformed_weights();
+    if (transformed_weights.size() != input_minima.size())
+      throw std::logic_error(
+          "terminal transformed weights differ from their factorized basis dimension");
+    std::optional<std::int64_t> result;
+    for (std::size_t column = 0;
+         column < transformed_weights.size(); ++column) {
+      const auto candidate =
+          input_minima[column] +
+          transformed_weights[column].min_power();
+      if (!result.has_value() || candidate < *result)
+        result = candidate;
+    }
+    if (!result.has_value())
+      throw std::logic_error(
+          "terminal factorized input valuation has no structural path");
+    return local_algebra_detail::checked_i32(
+        *result, "terminal factorized input epsilon shift");
+  }
+
+  std::int32_t terminal_acb_transformed_weight_min_power() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal factorized weight valuation requires one certified Acb exact-right match");
+    const auto& transformed_weights = acb->transformed_weights();
+    if (transformed_weights.empty())
+      throw std::logic_error(
+          "terminal factorized contraction has no transformed weights");
+    auto result = transformed_weights.front().min_power();
+    for (const auto& weight : transformed_weights)
+      result = std::min(result, weight.min_power());
+    return result;
+  }
+
+  FiniteLaurentVector<ComplexBall>
+  contract_terminal_acb_functionals(
+      const FiniteLaurentMatrix<ComplexBall>& physical_rows,
+      const std::string& context) const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !acb->certified_for_materialization())
+      throw std::invalid_argument(
+          context +
+          ": terminal functional contraction requires one certified Acb match");
+    const auto& right =
+        acb->acb_materialization_right_transformation();
+    if (!right.has_value())
+      throw std::invalid_argument(
+          context +
+          ": terminal functional contraction has no certified right factorization");
+    if (physical_rows.empty())
+      throw std::invalid_argument(
+          context + ": terminal functional batch is empty");
+    for (const auto& row : physical_rows)
+      if (row.size() != basis_owners_.size())
+        throw std::invalid_argument(
+            context +
+            ": terminal functional row differs from the physical basis dimension");
+
+    auto transformed =
+        right_multiply_finite_by_exact_laurent(
+            physical_rows, *right);
+    if (const auto& preconditioner =
+            acb->acb_right_materialization_preconditioner();
+        preconditioner.has_value())
+      transformed = right_multiply_finite_by_exact_laurent(
+          transformed, *preconditioner);
+    return apply_finite_laurent_matrix(
+        transformed, acb->transformed_weights());
   }
 
   std::optional<json::object> incomplete_acb_summary() const {
@@ -806,7 +1375,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       const std::string& local_handle,
       const std::string& result_checkpoint_identity,
       slong precision_bits,
-      const std::shared_ptr<StoredPlannedMatchHop>& self) {
+      const std::shared_ptr<StoredPlannedMatchHop>& self,
+      bool allow_terminal_factorized_proxy = false) {
     if (self.get() != this)
       throw std::logic_error(
           "retained plan-match materialization lost self ownership");
@@ -815,7 +1385,7 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
             std::dynamic_pointer_cast<StoredExactRegularMatch>(match_)) {
       result = materialize_typed<Rational>(
           local_handle, result_checkpoint_identity, precision_bits,
-          exact->weights(), self);
+          exact->weights(), self, allow_terminal_factorized_proxy);
     } else if (const auto acb =
                    std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_)) {
       if (!acb->certified_for_materialization())
@@ -851,7 +1421,7 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         }
       result = materialize_typed<ComplexBall>(
           local_handle, result_checkpoint_identity, precision_bits,
-          acb->weights(), self);
+          acb->weights(), self, allow_terminal_factorized_proxy);
     } else {
       throw std::logic_error(
           "retained plan-match handoff has an unsupported matching state");
@@ -884,7 +1454,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       const std::string& result_checkpoint_identity,
       slong precision_bits,
       const FiniteLaurentVector<Scalar>& weights,
-      const std::shared_ptr<StoredPlannedMatchHop>& self) const {
+      const std::shared_ptr<StoredPlannedMatchHop>& self,
+      bool allow_terminal_factorized_proxy) const {
     if (local_handle.empty() || result_checkpoint_identity.empty())
       throw std::invalid_argument(
           "plan-match local materialization identities must be nonempty");
@@ -964,8 +1535,117 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       throw std::domain_error(
           "retained plan-match incoming validity does not cover its matching work window");
 
+    std::optional<std::vector<LocalSolution<ComplexBall>>>
+        exact_right_basis;
+    std::vector<const LocalSolution<Scalar>*> materialization_basis =
+        basis_solutions;
+    const FiniteLaurentVector<Scalar>* materialization_weights = &weights;
+    bool exact_right_physical_association = false;
+    bool exact_right_used_rational_shadow = false;
+    std::optional<std::uint32_t> matching_taylor_complete_max;
+    std::optional<std::vector<LocalSolution<ComplexBall>>>
+        matching_prefix_basis;
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      const auto acb =
+          std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+      if (!acb)
+        throw std::logic_error(
+            "Acb materialization lost its refined match owner");
+      matching_taylor_complete_max =
+          acb->matching_taylor_complete_max();
+      if (matching_taylor_complete_max.has_value()) {
+        matching_prefix_basis.emplace();
+        matching_prefix_basis->reserve(basis_solutions.size());
+        for (std::size_t column = 0;
+             column < basis_solutions.size(); ++column)
+          matching_prefix_basis->push_back(
+              restrict_local_taylor_prefix(
+                  *basis_solutions[column],
+                  *matching_taylor_complete_max,
+                  result_checkpoint_identity +
+                      ":matching-taylor-prefix:column:" +
+                      std::to_string(column)));
+        materialization_basis.clear();
+        materialization_basis.reserve(
+            matching_prefix_basis->size());
+        for (const auto& column : *matching_prefix_basis)
+          materialization_basis.push_back(&column);
+      }
+      if (const auto& right =
+              acb->acb_materialization_right_transformation();
+          right.has_value()) {
+        // The certified match was solved against these retained Acb columns,
+        // so they remain the sole materialization authority.  Preserve the
+        // certified right association whether T came from an exact Rational
+        // shadow or from the retained singular-SCC Acb lattice witness.
+        // Private pole rows must remain attached to epsilon-dependent
+        // Frobenius sectors: they can feed finite and positive orders when
+        // the local is evaluated, even when the final observable is regular.
+        exact_right_basis =
+            right_transform_local_basis_exact<ComplexBall>(
+                materialization_basis, *right,
+                result_checkpoint_identity +
+                    ":exact-right-basis");
+        if (const auto& preconditioner =
+                acb->acb_right_materialization_preconditioner();
+            preconditioner.has_value()) {
+          std::vector<const LocalSolution<ComplexBall>*>
+              exact_right_basis_sources;
+          exact_right_basis_sources.reserve(exact_right_basis->size());
+          for (const auto& column : *exact_right_basis)
+            exact_right_basis_sources.push_back(&column);
+          exact_right_basis =
+              right_transform_local_basis_exact<ComplexBall>(
+                  exact_right_basis_sources, *preconditioner,
+                  result_checkpoint_identity +
+                      ":conditioned-exact-right-basis");
+        }
+        materialization_basis.clear();
+        materialization_basis.reserve(exact_right_basis->size());
+        for (const auto& column : *exact_right_basis)
+          materialization_basis.push_back(&column);
+        materialization_weights = &acb->transformed_weights();
+        exact_right_physical_association = true;
+        exact_right_used_rational_shadow =
+            acb->exact_right_materialization_transformation().has_value();
+      }
+    }
+
+    // Re-evaluate the honest epsilon edge in the association that will
+    // actually be materialized.  In particular, transformed weights are not
+    // interchangeable with the physical F,w windows: exact saturation and
+    // the constant right frame can shift both Laurent edges.  Retain the
+    // earlier physical cap as an additional conservative bound so
+    // zero-extended proposal coefficients can never become publishable.
+    std::int32_t associated_materialized_top = kCompleteInfinity;
+    if (materialization_basis.size() != materialization_weights->size())
+      throw std::logic_error(
+          "selected materialization basis and weight counts differ");
+    for (std::size_t column = 0;
+         column < materialization_basis.size(); ++column) {
+      const auto& local = *materialization_basis[column];
+      const auto& weight = (*materialization_weights)[column];
+      const auto shifted_basis_valid =
+          local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(
+                  local.epsilon.complete_max) +
+                  weight.min_power(),
+              "associated materialized local top validity");
+      const auto weight_valid =
+          local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(local.epsilon.min_power) +
+                  weight.complete_max(),
+              "associated materialized weight top validity");
+      associated_materialized_top = std::min(
+          associated_materialized_top,
+          std::min(shifted_basis_valid, weight_valid));
+    }
+    materialized_top = std::min(
+        materialized_top, associated_materialized_top);
+
     auto solution = materialize_local_basis_weights(
-        basis_solutions, weights, result_checkpoint_identity);
+        materialization_basis, *materialization_weights,
+        result_checkpoint_identity);
     materialized_top = std::min(materialized_top,
                                 solution.epsilon.complete_max);
     if constexpr (std::is_same_v<Scalar, Rational>) {
@@ -987,6 +1667,298 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       solution = restrict_local_epsilon_frame_strict_lower(
           solution, solution.epsilon.min_power, materialized_top,
           result_checkpoint_identity);
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      const auto arm_name = required_string(handoff_, "arm");
+      const auto match_index = static_cast<std::size_t>(
+          as_u64(handoff_.at("match"),
+                 "materialized continuity match index"));
+      const auto& retained_arm = plan_owner_->arm(arm_name);
+      if (match_index >= retained_arm.certified_matches.size())
+        throw std::logic_error(
+            "materialized continuity match lies outside its certified plan");
+      const auto& certified_match =
+          retained_arm.certified_matches[match_index];
+      const auto& exact_match =
+          retained_arm.exact.matches.at(match_index);
+      const auto producing_rim = exact_plan_rim(
+          retained_arm.charts.at(exact_match.producing_chart)
+              .prescriptions,
+          retained_arm.charts.at(exact_match.producing_chart)
+              .geometry.scale);
+      const auto receiving_rim = exact_plan_rim(
+          retained_arm.charts.at(exact_match.receiving_chart)
+              .prescriptions,
+          retained_arm.charts.at(exact_match.receiving_chart)
+              .geometry.scale);
+      auto continuity_incoming = typed_incoming->solution();
+      if (matching_taylor_complete_max.has_value())
+        continuity_incoming = restrict_local_taylor_prefix(
+            continuity_incoming, *matching_taylor_complete_max,
+            result_checkpoint_identity +
+                ":continuity-incoming-prefix");
+      EvaluationOptions receiving_options;
+      receiving_options.imaginary_sign = receiving_rim;
+      receiving_options.compute_tail_estimate = false;
+      EvaluationOptions incoming_options;
+      incoming_options.imaginary_sign = producing_rim;
+      incoming_options.compute_tail_estimate = false;
+      const auto receiving_evaluation = evaluate_local_solution(
+          solution, certified_match.receiving.local,
+          receiving_options);
+      const auto incoming_evaluation = evaluate_local_solution(
+          continuity_incoming, certified_match.producing.local,
+          incoming_options);
+      const auto& summary_epsilon = as_object(
+          native_match_summary.at("epsilon"),
+          "materialized continuity match epsilon");
+      const auto required_continuity_max = as_i32(
+          summary_epsilon.at("required_complete_max"),
+          "materialized continuity required epsilon maximum");
+      const auto continuity_min = std::max({
+          as_i32(summary_epsilon.at("min"),
+                 "materialized continuity epsilon minimum"),
+          receiving_evaluation.value.epsilon.min_power,
+          incoming_evaluation.value.epsilon.min_power});
+      const auto continuity_max = std::min({
+          match_certified_max,
+          receiving_evaluation.value.epsilon.complete_max,
+          incoming_evaluation.value.epsilon.complete_max});
+      if (continuity_min > required_continuity_max ||
+          continuity_max < required_continuity_max)
+        throw std::domain_error(
+            "materialized receiving local does not cover its certified handoff continuity window");
+      const auto& refinement_record = as_object(
+          native_match_summary.at("refinement"),
+          "materialized continuity refinement");
+      const auto tolerance = Magnitude::decimal(
+          required_string(refinement_record, "relative_tolerance"));
+      // The match certifies the requested handoff prefix, while higher
+      // coefficients can be a deliberately speculative reservoir retained
+      // for downstream epsilon losses.  Requiring those private coefficients
+      // to satisfy the public residual tolerance turns useful wide balls into
+      // a false continuity failure.  Coverage above proves that the requested
+      // edge is present; validate exactly through that certified edge.
+      bool continuity_authoritative = true;
+      for (std::int64_t raw_power = continuity_min;
+           raw_power <= required_continuity_max &&
+           continuity_authoritative; ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        for (std::uint32_t component = 0;
+             component < solution.dimension; ++component) {
+          const auto& expected =
+              incoming_evaluation.value.at(power, component);
+          const auto residual =
+              receiving_evaluation.value.at(power, component) -
+              expected;
+          const auto scale = Magnitude::maximum(
+              Magnitude::one(), Magnitude::lower_abs(expected));
+          const auto residual_upper = Magnitude::upper_abs(residual);
+          const auto allowed_upper = scale * tolerance;
+          if (!(residual_upper <= allowed_upper)) {
+            if (allow_terminal_factorized_proxy &&
+                exact_right_physical_association) {
+              // A terminal consumer keeps the certified factorization
+              // ((L*F)*T)*P*y intact.  The coefficientwise LocalSolution is
+              // retained only as a geometry/provenance proxy: interval
+              // wrapping in that deliberately unused association must not
+              // reject an otherwise certified terminal handoff.
+              continuity_authoritative = false;
+              break;
+            }
+            const auto& normal_frame = as_object(
+                native_match_summary.at("normal_frame_attempt"),
+                "materialized continuity normal-frame attempt");
+            const auto compact_ball = [](const ComplexBall& value) {
+              return json::object{
+                  {"real_midpoint", value.real_midpoint(20)},
+                  {"imag_midpoint", value.imag_midpoint(20)},
+                  {"real_radius_exponent",
+                   value.real_radius_exponent()},
+                  {"imag_radius_exponent",
+                   value.imag_radius_exponent()}};
+            };
+            json::object reconstruction_routes;
+            try {
+              const auto acb_match =
+                  std::dynamic_pointer_cast<StoredRefinedAcbMatch>(
+                      match_);
+              if (!acb_match)
+                throw std::logic_error(
+                    "continuity route audit lost its Acb match");
+              std::vector<const LocalSolution<ComplexBall>*>
+                  physical_matching_basis;
+              if (matching_prefix_basis.has_value()) {
+                physical_matching_basis.reserve(
+                    matching_prefix_basis->size());
+                for (const auto& column : *matching_prefix_basis)
+                  physical_matching_basis.push_back(&column);
+              } else {
+                physical_matching_basis = basis_solutions;
+              }
+              const auto audit_route = [&](
+                  const LocalSolution<ComplexBall>& candidate) {
+                const auto evaluated = evaluate_local_solution(
+                    candidate, certified_match.receiving.local,
+                    receiving_options);
+                const auto& value =
+                    evaluated.value.at(power, component);
+                const auto route_residual = value - expected;
+                return json::object{
+                    {"value", compact_ball(value)},
+                    {"residual_upper",
+                     Magnitude::upper_abs(route_residual)
+                         .approximate_upper()},
+                    {"epsilon",
+                     json::object{
+                         {"min", candidate.epsilon.min_power},
+                         {"max",
+                          candidate.epsilon.complete_max}}}};
+              };
+
+              const auto physical_candidate =
+                  materialize_local_basis_weights(
+                      physical_matching_basis,
+                      acb_match->weights(),
+                      result_checkpoint_identity +
+                          ":continuity-audit:physical");
+              reconstruction_routes["physical-F*w"] =
+                  audit_route(physical_candidate);
+
+              const auto& exact_right =
+                  acb_match
+                      ->exact_right_materialization_transformation();
+              if (exact_right.has_value()) {
+                const auto numeric_right =
+                    specialize_exact_rational_laurent_matrix_to_acb(
+                        *exact_right);
+                auto numeric_right_basis =
+                    right_transform_local_basis_exact<ComplexBall>(
+                        physical_matching_basis, numeric_right,
+                        result_checkpoint_identity +
+                            ":continuity-audit:numeric-F*T");
+                if (const auto& preconditioner =
+                        acb_match
+                            ->acb_right_materialization_preconditioner();
+                    preconditioner.has_value()) {
+                  std::vector<
+                      const LocalSolution<ComplexBall>*>
+                      numeric_right_sources;
+                  numeric_right_sources.reserve(
+                      numeric_right_basis.size());
+                  for (const auto& column :
+                       numeric_right_basis)
+                    numeric_right_sources.push_back(&column);
+                  auto numeric_sequential_basis =
+                      right_transform_local_basis_exact<ComplexBall>(
+                          numeric_right_sources,
+                          *preconditioner,
+                          result_checkpoint_identity +
+                              ":continuity-audit:numeric-(F*T)*P");
+                  std::vector<
+                      const LocalSolution<ComplexBall>*>
+                      numeric_sequential_sources;
+                  numeric_sequential_sources.reserve(
+                      numeric_sequential_basis.size());
+                  for (const auto& column :
+                       numeric_sequential_basis)
+                    numeric_sequential_sources.push_back(
+                        &column);
+                  const auto numeric_sequential_candidate =
+                      materialize_local_basis_weights(
+                          numeric_sequential_sources,
+                          acb_match->transformed_weights(),
+                          result_checkpoint_identity +
+                              ":continuity-audit:"
+                              "numeric-((F*T)*P)*y");
+                  reconstruction_routes[
+                      "numeric-((F*T)*P)*y"] =
+                      audit_route(
+                          numeric_sequential_candidate);
+
+                  const auto combined =
+                      multiply_exact_laurent_matrices(
+                          numeric_right, *preconditioner);
+                  auto numeric_combined_basis =
+                      right_transform_local_basis_exact<
+                          ComplexBall>(
+                          physical_matching_basis, combined,
+                          result_checkpoint_identity +
+                              ":continuity-audit:"
+                              "numeric-F*(T*P)");
+                  std::vector<
+                      const LocalSolution<ComplexBall>*>
+                      numeric_combined_sources;
+                  numeric_combined_sources.reserve(
+                      numeric_combined_basis.size());
+                  for (const auto& column :
+                       numeric_combined_basis)
+                    numeric_combined_sources.push_back(
+                        &column);
+                  const auto numeric_combined_candidate =
+                      materialize_local_basis_weights(
+                          numeric_combined_sources,
+                          acb_match->transformed_weights(),
+                          result_checkpoint_identity +
+                              ":continuity-audit:"
+                              "numeric-(F*(T*P))*y");
+                  reconstruction_routes[
+                      "numeric-(F*(T*P))*y"] =
+                      audit_route(numeric_combined_candidate);
+                }
+              }
+            } catch (const std::exception& audit_error) {
+              reconstruction_routes["audit_error"] =
+                  audit_error.what();
+            }
+            json::object diagnostics{
+                {"association", required_string(
+                     native_match_summary,
+                     "materialization_association")},
+                {"normal_frame_status",
+                 required_string(normal_frame, "status")},
+                {"rational_shadow_basis",
+                 exact_right_used_rational_shadow},
+                {"epsilon", power},
+                {"component", component},
+                {"residual_upper",
+                 residual_upper.approximate_upper()},
+                {"allowed_upper",
+                 allowed_upper.approximate_upper()},
+                {"scale_lower", scale.approximate_upper()},
+                {"relative_tolerance",
+                 required_string(refinement_record,
+                                 "relative_tolerance")},
+                {"incoming", compact_ball(expected)},
+                {"receiving", compact_ball(
+                     receiving_evaluation.value.at(power,
+                                                   component))},
+                {"receiving_epsilon",
+                 json::object{
+                     {"min",
+                      receiving_evaluation.value.epsilon.min_power},
+                     {"max",
+                      receiving_evaluation.value.epsilon.complete_max}}},
+                {"incoming_epsilon",
+                 json::object{
+                     {"min",
+                      incoming_evaluation.value.epsilon.min_power},
+                     {"max",
+                      incoming_evaluation.value.epsilon.complete_max}}},
+                {"matching_taylor_complete_max",
+                 matching_taylor_complete_max.has_value()
+                     ? json::value(*matching_taylor_complete_max)
+                     : json::value(nullptr)},
+                {"reconstruction_routes",
+                 std::move(reconstruction_routes)}};
+            throw std::domain_error(
+                "materialized receiving local fails its certified handoff continuity at epsilon=" +
+                std::to_string(power) + ", component=" +
+                std::to_string(component) + "; diagnostics=" +
+                json::serialize(diagnostics));
+          }
+        }
+      }
+    }
     json::array weight_windows;
     weight_windows.reserve(weights.size());
     for (const auto& weight : weights)
@@ -1072,8 +2044,93 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     basis_tail_models.reserve(typed_basis.size());
     for (const auto& column : typed_basis)
       basis_tail_models.push_back(&column->tail_model());
+    std::vector<RegularTaylorTailModelResult>
+        transformed_basis_tail_models;
+    bool transformed_tail_association = false;
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      if (exact_right_physical_association) {
+        const RegularTaylorTailModel* reference_model = nullptr;
+        bool can_rebind = true;
+        for (const auto* candidate : basis_tail_models) {
+          if (candidate == nullptr ||
+              candidate->status != TailMajorantStatus::Certified ||
+              !candidate->model.has_value()) {
+            can_rebind = false;
+            break;
+          }
+          if (reference_model == nullptr)
+            reference_model = &*candidate->model;
+          else if (!tail_majorant_detail::same_operator_payload(
+                       *reference_model, *candidate->model)) {
+            can_rebind = false;
+            break;
+          }
+        }
+        if (can_rebind && reference_model != nullptr) {
+          transformed_basis_tail_models.reserve(
+              materialization_basis.size());
+          for (const auto* transformed : materialization_basis) {
+            RegularTaylorTailModel model = *reference_model;
+            model.epsilon = transformed->epsilon;
+            model.taylor_complete_max =
+                transformed->taylor_complete_max;
+            model.chart = transformed->chart;
+            model.prescriptions = transformed->prescriptions;
+            model.local_checkpoint_identity =
+                transformed->checkpoint_identity;
+            model.initial_row_upper.assign(
+                transformed->epsilon.width(), Magnitude::zero());
+            if (transformed->sectors.size() != 1 ||
+                transformed->sectors.front().log_power != 0 ||
+                transformed->sectors.front().a.is_zero !=
+                    TruthValue::Yes ||
+                transformed->sectors.front().b.is_zero !=
+                    TruthValue::Yes) {
+              can_rebind = false;
+              break;
+            }
+            const auto& sector = transformed->sectors.front();
+            for (std::size_t epsilon_index = 0;
+                 epsilon_index < transformed->epsilon.width();
+                 ++epsilon_index)
+              for (std::uint32_t component = 0;
+                   component < transformed->dimension; ++component)
+                model.initial_row_upper[epsilon_index] =
+                    Magnitude::maximum(
+                        model.initial_row_upper[epsilon_index],
+                        Magnitude::upper_abs(
+                            sector.coefficients[
+                                local_detail::sector_index(
+                                    *transformed, epsilon_index, 0,
+                                    component)]));
+            model.provenance =
+                "regular homogeneous tail model rebound to the exact-right "
+                "constant match frame; the receiving basis transformation "
+                "is t-independent and every source column owns the same "
+                "epsilon-decoupled q/N payload; " +
+                reference_model->provenance;
+            transformed_basis_tail_models.push_back(
+                {TailMajorantStatus::Certified, std::move(model),
+                 "certified regular tail model rebound through the retained exact-right match frame"});
+          }
+          if (can_rebind) {
+            basis_tail_models.clear();
+            basis_tail_models.reserve(
+                transformed_basis_tail_models.size());
+            for (const auto& rebound :
+                 transformed_basis_tail_models)
+              basis_tail_models.push_back(&rebound);
+            basis_solutions = materialization_basis;
+            transformed_tail_association = true;
+          }
+        }
+      }
+    }
     auto tail_model = derive_materialized_regular_homogeneous_tail_model(
-        basis_solutions, basis_tail_models, weights, solution,
+        basis_solutions, basis_tail_models,
+        transformed_tail_association
+            ? *materialization_weights : weights,
+        solution,
         receiving_operator, checkpoint_identity_);
     std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
         physical_equation;
@@ -1172,12 +2229,16 @@ class StoredTransportArmState {
       EpsilonWindow work_epsilon,
       std::int32_t public_required_complete_max,
       std::int32_t match_required_complete_max,
-      json::object refinement, double elapsed_ms)
+      json::object refinement, double elapsed_ms,
+      std::shared_ptr<StoredPlannedMatchHop>
+          terminal_factorized_match = nullptr)
       : handle_(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
         arm_(std::move(arm)), plan_owner_(std::move(plan_owner)),
         anchor_owner_(std::move(anchor_owner)),
         tile_sources_(std::move(tile_sources)),
+        terminal_factorized_match_(
+            std::move(terminal_factorized_match)),
         work_epsilon_(work_epsilon),
         public_required_complete_max_(public_required_complete_max),
         match_required_complete_max_(match_required_complete_max),
@@ -1244,6 +2305,10 @@ class StoredTransportArmState {
   const std::shared_ptr<StoredLocalBase>& final_local() const {
     return tile_sources_.back();
   }
+  const std::shared_ptr<StoredPlannedMatchHop>&
+  terminal_factorized_match() const {
+    return terminal_factorized_match_;
+  }
   std::int32_t public_required_complete_max() const {
     return public_required_complete_max_;
   }
@@ -1281,15 +2346,42 @@ class StoredTransportArmState {
 
   json::object summary() const {
     json::array tile_source_epsilon;
+    json::array tile_consumer_epsilon;
     tile_source_epsilon.reserve(tile_sources_.size());
-    for (const auto& source : tile_sources_) {
+    tile_consumer_epsilon.reserve(tile_sources_.size());
+    for (std::size_t tile = 0; tile < tile_sources_.size(); ++tile) {
+      const auto& source = tile_sources_[tile];
       if (!source)
         throw std::logic_error(
             "retained transport state owns a null tile source");
       const auto source_summary = source->summary();
-      tile_source_epsilon.push_back(json::object{
+      const auto source_window = json::object{
           {"min", source_summary.at("epsilon_min")},
-          {"max", source_summary.at("epsilon_max")}});
+          {"max", source_summary.at("epsilon_max")}};
+      tile_source_epsilon.push_back(source_window);
+
+      json::array consumer_sources;
+      std::int32_t output_min_shift = 0;
+      if (terminal_factorized_match_ != nullptr &&
+          tile + 1 == tile_sources_.size()) {
+        const auto physical_basis =
+            terminal_factorized_match_->terminal_acb_basis_owners();
+        consumer_sources.reserve(physical_basis.size());
+        for (const auto& physical_source : physical_basis) {
+          const auto physical_summary = physical_source->summary();
+          consumer_sources.push_back(json::object{
+              {"min", physical_summary.at("epsilon_min")},
+              {"max", physical_summary.at("epsilon_max")}});
+        }
+        output_min_shift =
+            terminal_factorized_match_
+                ->terminal_acb_factorized_input_min_power();
+      } else {
+        consumer_sources.push_back(source_window);
+      }
+      tile_consumer_epsilon.push_back(json::object{
+          {"sources", std::move(consumer_sources)},
+          {"output_min_shift", output_min_shift}});
     }
     return json::object{
         {"transport_state", handle_},
@@ -1307,10 +2399,13 @@ class StoredTransportArmState {
         {"basis_matches", basis_match_count()},
         {"tiles", tile_sources_.size()},
         {"tile_source_epsilon", std::move(tile_source_epsilon)},
+        {"tile_consumer_epsilon", std::move(tile_consumer_epsilon)},
         {"contraction_operations", contraction_operations_.load()},
         {"contracted_observables", contracted_observables_.load()},
         {"endpoint_batch_operations", endpoint_batch_operations_.load()},
         {"endpoint_rows", endpoint_rows_.load()},
+        {"terminal_factorized_match",
+         terminal_factorized_match_ != nullptr},
         {"epsilon", epsilon_record()},
         {"refinement", refinement_},
         {"final_local", local_reference(final_local())},
@@ -1318,6 +2413,8 @@ class StoredTransportArmState {
              {"tile_plan", true}, {"anchor", true},
              {"basis_locals", consumed_compact_ ? 0 : basis_owner_count()},
              {"matches", consumed_compact_ ? 0 : matches_.size()},
+             {"terminal_factorized_match",
+              terminal_factorized_match_ != nullptr},
              {"tile_sources", tile_sources_.size()}}},
         {"elapsed_ms", elapsed_ms_}};
   }
@@ -1331,7 +2428,9 @@ class StoredTransportArmState {
   json::object checkpoint_record() const {
     return json::object{
         {"schema", consumed_certificate_only_
-             ? "diffexp2-retained-transport-arm-state-v5"
+             ? terminal_factorized_match_ != nullptr
+                 ? "diffexp2-retained-transport-arm-state-v6"
+                 : "diffexp2-retained-transport-arm-state-v5"
              : consumed_compact_
              ? "diffexp2-retained-transport-arm-state-v4"
              : compact_provenance_
@@ -1490,15 +2589,26 @@ class StoredTransportArmState {
     auto plan_reference = json::object{
         {"handle", plan_owner_->handle()},
         {"checkpoint_identity", plan_owner_->checkpoint_identity()}};
-    if (consumed_certificate_only_)
-      return json::object{
-          {"schema", "diffexp2-retained-native-transport-arm-state-v4"},
+    if (consumed_certificate_only_) {
+      json::object result{
+          {"schema", terminal_factorized_match_ != nullptr
+              ? "diffexp2-retained-native-transport-arm-state-v5"
+              : "diffexp2-retained-native-transport-arm-state-v4"},
           {"checkpoint_identity", checkpoint_identity_},
           {"tile_plan", std::move(plan_reference)},
           {"arm", arm_},
           {"tile_checkpoint_chain", consumed_certificate_chain()},
           {"epsilon", epsilon_record()},
           {"refinement", refinement_}};
+      if (terminal_factorized_match_ != nullptr)
+        result["terminal_match"] = json::object{
+            {"match", terminal_factorized_match_->handle()},
+            {"checkpoint_identity",
+             terminal_factorized_match_->checkpoint_identity()},
+            {"provenance_identity",
+             terminal_factorized_match_->provenance_identity()}};
+      return result;
+    }
     if (!compact_provenance_)
       plan_reference["provenance_identity"] =
           plan_owner_->provenance_identity();
@@ -1595,6 +2705,20 @@ class StoredTransportArmState {
       if (!source)
         throw std::invalid_argument(
             "retained transport-arm state contains a null tile source");
+      const auto source_summary = source->summary();
+      const auto source_epsilon_max = as_i32(
+          source_summary.at("epsilon_max"),
+          "retained transport-arm tile-source epsilon maximum");
+      const auto source_top_valid = parse_validity(
+          source_summary.at("top_valid"));
+      const auto source_complete_max =
+          source_top_valid == kCompleteInfinity
+              ? source_epsilon_max
+              : std::min(source_epsilon_max, source_top_valid);
+      if (source_complete_max < public_required_complete_max_)
+        throw std::invalid_argument(
+            "retained transport-arm tile source does not cover its public "
+            "required complete epsilon maximum");
       const auto& exact_tile = retained.exact.tiles[tile];
       const auto& chart = retained.charts.at(exact_tile.chart);
       if (source->source_chart() != chart.handle)
@@ -1606,6 +2730,7 @@ class StoredTransportArmState {
     }
     if (consumed_certificate_only_) {
       validate_consumed_certificate_chain(retained);
+      validate_terminal_factorized_match(retained);
       return;
     }
     if (consumed_compact_) {
@@ -1711,6 +2836,42 @@ class StoredTransportArmState {
         throw std::invalid_argument(
             "certificate-only plan match lost its source-match checkpoint");
     }
+  }
+
+  void validate_terminal_factorized_match(
+      const RetainedArmPlan& retained) const {
+    if (!terminal_factorized_match_) return;
+    if (retained.exact.matches.empty() || tile_sources_.size() < 2)
+      throw std::invalid_argument(
+          "terminal factorized match has no terminal arm transition");
+    const auto terminal_index = retained.exact.matches.size() - 1;
+    const auto& match = terminal_factorized_match_;
+    const auto& handoff = match->handoff();
+    if (match->plan_owner().get() != plan_owner_.get() ||
+        match->incoming_owner().get() !=
+            tile_sources_[terminal_index].get() ||
+        required_string(handoff, "arm") != arm_ ||
+        as_u64(handoff.at("match"),
+               "terminal factorized match index") != terminal_index)
+      throw std::invalid_argument(
+          "terminal factorized match differs from its arm, plan, or incoming tile");
+    const auto& output = tile_sources_.back();
+    if (!output->has_sealed_plan_match_lineage() ||
+        !output->retained_derivation().has_value() ||
+        required_string(*output->retained_derivation(),
+                        "source_match") != match->handle() ||
+        required_string(*output->retained_derivation(),
+                        "source_match_checkpoint_identity") !=
+            match->checkpoint_identity())
+      throw std::invalid_argument(
+          "terminal factorized match differs from its sealed output lineage");
+    const auto attached = output->terminal_factorized_owner();
+    if (attached != nullptr &&
+        (attached.get() != match.get() ||
+         output->terminal_factorized_owner_checkpoint_identity() !=
+             match->checkpoint_identity()))
+      throw std::invalid_argument(
+          "terminal factorized output-local attachment changed before state publication");
   }
 
   void validate_consumed_references(const RetainedArmPlan& retained) const {
@@ -2007,6 +3168,8 @@ class StoredTransportArmState {
   std::vector<std::vector<std::shared_ptr<StoredLocalBase>>> basis_owners_;
   std::vector<std::shared_ptr<StoredPlannedMatchHop>> matches_;
   std::vector<std::shared_ptr<StoredLocalBase>> tile_sources_;
+  std::shared_ptr<StoredPlannedMatchHop>
+      terminal_factorized_match_;
   EpsilonWindow work_epsilon_;
   std::int32_t public_required_complete_max_ = 0;
   std::int32_t match_required_complete_max_ = 0;

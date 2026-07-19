@@ -877,7 +877,8 @@ bool singular_match_published_in_complete_physical_frame(
         .at("residual_history").as_array();
     if (history.empty()) return false;
     const auto& residual = history.back().as_object();
-    if (native.at("matching_frame_identity") != "physical-parent-frame" ||
+    if (native.at("schema") != "diffexp2-retained-acb-match-v4" ||
+        native.at("matching_frame_identity") != "physical-parent-frame" ||
         provenance.at("matching_frame_identity") !=
             "physical-parent-frame" ||
         lattice_provenance.at("matching_frame_identity") !=

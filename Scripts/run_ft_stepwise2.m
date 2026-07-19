@@ -1561,6 +1561,18 @@ ft2RequestedCoefficientRows[raw_, requestedTop_, outputKind_String] :=
       " output requires a nonnegative integer requested epsilon order",
     "RequestedCompleteMax" -> requestedTop|>];
 
+ft2ExpectedPoleFreeExampleQ[example_String] := MemberQ[
+  {"bubble", "sunrise", "banana", "banana_unequal", "banana4",
+    "banana4_unequal", "kite", "pentagon_massive"}, example];
+
+ft2UnexpectedFinalPoleRows[example_String, raw_] := Module[
+  {minimum = esMn[raw], inspected},
+  If[!ft2ExpectedPoleFreeExampleQ[example] || minimum >= 0, Return[{}]];
+  inspected = Table[{power, N[esC[raw, power], Min[50, wp]]},
+    {power, minimum, -1}];
+  Select[inspected,
+    !NumericQ[Last[#]] || !TrueQ[Abs[Last[#]] <= 10^-8] &]];
+
 ft2StepwiseRow[example_, level_, master_, raw_, prefactor_,
     certification_] := Module[{rowMin, coefficients},
   If[!ft2OutputCertificationQ[certification],
@@ -1576,11 +1588,19 @@ ft2StepwiseRow[example_, level_, master_, raw_, prefactor_,
     "Certification" -> certification|>];
 
 ft2FinalRow[example_, raw_, certification_] := Module[
-  {coefficients, result},
+  {coefficients, result, unexpectedPoles},
   If[!ft2OutputCertificationQ[certification],
     Return[Failure["FeynmanTrickOutputCertification", <|
       "Detail" -> "FINAL certification is malformed",
       "Certification" -> certification|>], Module]];
+  unexpectedPoles = ft2UnexpectedFinalPoleRows[example, raw];
+  If[unexpectedPoles =!= {},
+    Return[Failure["FeynmanTrickUnexpectedFinalPole", <|
+      "Detail" -> "a pole-free physical example has unresolved negative epsilon coefficients; refusing to publish an unchecked FINAL value",
+      "Example" -> example, "Tolerance" -> 10^-8,
+      "NegativeCoefficients" ->
+        ({First[#], cleanNumber[Last[#]]} & /@ unexpectedPoles),
+      "IntegrationCertification" -> certification|>], Module]];
   coefficients = ft2RequestedCoefficientRows[raw, epsOrder, "FINAL"];
   If[FailureQ[coefficients], Return[coefficients, Module]];
   result = <|"Example" -> example,
@@ -2886,6 +2906,18 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
       ft2NativeStageTiming["plans-ready charts=",
         Length /@ {lowerPlan["Charts"], upperPlan["Charts"]}]];
+      If[Environment["FT_DUMP_NATIVE_PLANS"] === "1",
+        Print["FTLADDER NATIVE PLAN DUMP lower=", InputForm[
+          KeyTake[#, {"Center", "Radius", "MatchRadius", "Scale",
+              "LocalRadius", "Singular", "IncomingMatchPoint"}] & /@
+            lowerPlan["Charts"]]];
+        Print["FTLADDER NATIVE PLAN DUMP upper=", InputForm[
+          KeyTake[#, {"Center", "Radius", "MatchRadius", "Scale",
+              "LocalRadius", "Singular", "IncomingMatchPoint"}] & /@
+            upperPlan["Charts"]]];
+        Return[ft2NativeFailure[
+          "native plan dump requested; stopped before atlas preparation"],
+          Module]];
     paddedBoundary = If[integrationHalo === 0,
       DiffExp2`EpsSeries`ESNew[0, #] & /@ currentBCs,
       DiffExp2`EpsSeries`ESNew[-integrationHalo,
@@ -3895,7 +3927,15 @@ runExample[name_String, familyRequest_:None,
       {mi, Length[mastersBelow]}];
     ];
     If[MemberQ[rawES, $Failed], Throw[$Failed, "FT2Abort"]];
-    rawES = DiffExp2`EpsSeries`ESTrim /@ rawES;
+    (* Matching halos extend a private high-order reservoir.  Its remote
+       coefficients can be much larger than the physical pole/finite prefix
+       and therefore must not participate in ESTrim's relative leading-order
+       decision.  Otherwise merely increasing a halo changes already computed
+       low epsilon coefficients into zeros. *)
+    rawES = If[recurrenceBackend === "Cpp",
+      DiffExp2`EpsSeries`ESTrimThrough[
+        #, downstreamPublicFiniteTop] & /@ rawES,
+      DiffExp2`EpsSeries`ESTrim /@ rawES];
     If[FailureQ[printRows[outputName, level - 1, mastersBelow, rawES,
         ConstantArray[0, Length[mastersBelow]], rowCertifications]],
       Print["FTLADDER OUTPUT CERTIFICATION FAIL level=", level - 1];

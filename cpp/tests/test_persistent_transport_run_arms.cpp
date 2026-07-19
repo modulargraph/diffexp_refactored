@@ -1,5 +1,6 @@
 #include "diffexp2/checkpoint.hpp"
 #include "diffexp2/json_codec.hpp"
+#include "diffexp2/local_solution.hpp"
 #include "diffexp2/scalar.hpp"
 
 #include <boost/json.hpp>
@@ -36,6 +37,26 @@ std::uint64_t counter(const json::object& object, const char* key) {
   throw std::runtime_error(std::string("expected nonnegative counter: ") + key);
 }
 
+diffexp2::ComplexBall decode_encoded_ball(const json::value& raw) {
+  const auto& encoded = raw.as_array();
+  if (encoded.size() != 4 || !encoded[0].is_string() ||
+      !encoded[1].is_string() || !encoded[2].is_string() ||
+      !encoded[3].is_string())
+    throw std::runtime_error("unexpected encoded Acb coefficient");
+  auto ball = diffexp2::ComplexBall::from_strings(
+      std::string(encoded[0].as_string()),
+      std::string(encoded[1].as_string()));
+  const auto add_radius = [](arb_t value, const json::value& exponent) {
+    const auto text = std::string(exponent.as_string());
+    if (text != "zero")
+      arb_add_error_2exp_si(
+          value, static_cast<slong>(std::stol(text)));
+  };
+  add_radius(acb_realref(ball.raw()), encoded[2]);
+  add_radius(acb_imagref(ball.raw()), encoded[3]);
+  return ball;
+}
+
 bool epsilon_vectors_overlap(const json::value& left_raw,
                              const json::value& right_raw) {
   const auto& left = left_raw.as_object();
@@ -47,27 +68,11 @@ bool epsilon_vectors_overlap(const json::value& left_raw,
   const auto& left_coefficients = left.at("coefficients").as_array();
   const auto& right_coefficients = right.at("coefficients").as_array();
   if (left_coefficients.size() != right_coefficients.size()) return false;
-  const auto decode_ball = [](const json::value& raw) {
-    const auto& encoded = raw.as_array();
-    if (encoded.size() != 4 || !encoded[0].is_string() ||
-        !encoded[1].is_string() || !encoded[2].is_string() ||
-        !encoded[3].is_string())
-      throw std::runtime_error("unexpected encoded Acb coefficient");
-    auto ball = diffexp2::ComplexBall::from_strings(
-        std::string(encoded[0].as_string()),
-        std::string(encoded[1].as_string()));
-    const auto add_radius = [](arb_t value, const json::value& exponent) {
-      const auto text = std::string(exponent.as_string());
-      if (text != "zero")
-        arb_add_error_2exp_si(value, static_cast<slong>(std::stol(text)));
-    };
-    add_radius(acb_realref(ball.raw()), encoded[2]);
-    add_radius(acb_imagref(ball.raw()), encoded[3]);
-    return ball;
-  };
   for (std::size_t index = 0; index < left_coefficients.size(); ++index) {
-    const auto left_ball = decode_ball(left_coefficients[index]);
-    const auto right_ball = decode_ball(right_coefficients[index]);
+    const auto left_ball =
+        decode_encoded_ball(left_coefficients[index]);
+    const auto right_ball =
+        decode_encoded_ball(right_coefficients[index]);
     if (!acb_overlaps(left_ball.raw(), right_ball.raw())) return false;
   }
   return true;
@@ -306,7 +311,9 @@ std::string solve_log_local(const std::string& session,
 
 std::string prepare_multiblock_chart(const std::string& session,
                                      const std::string& name,
-                                     const std::string& center) {
+                                     const std::string& center,
+                                     const std::string& domain =
+                                         "rational") {
   constexpr std::uint32_t dimension = 2;
   json::array principal_matrix;
   json::array components;
@@ -334,6 +341,29 @@ std::string prepare_multiblock_chart(const std::string& session,
     order.push_back(row);
   }
   const auto owner = "de2-operator-" + name;
+  json::object problem{
+      {"domain", domain}, {"d", dimension}, {"fb", 0},
+      {"w", 3},
+      {"d_lags", std::move(d_lags)},
+      {"denominators", json::array{}},
+      {"nhat_lags", json::array{json::object{
+           {"poly", json::array{}}, {"rat", json::array{}},
+           {"val", std::move(null_matrix)}}}},
+      {"d0_inverse", "1"}, {"blocks", std::move(blocks)},
+      {"assembly", json::object{
+           {"identity", true}, {"poly", json::array{}},
+           {"rat", json::array{}},
+           {"val", std::move(assembly_matrix)}}},
+      {"physical_ode", json::object{
+           {"schema", "diffexp2-physical-cleared-ode-v1"},
+           {"basis", "physical-original-master"},
+           {"theta_coordinate", "local-t"},
+           {"owner_signature_identity", owner},
+           {"payload_identity", "de2-physical-ode-" + name},
+           {"q", json::array{epsilon_rational_one()}},
+           {"c", std::move(physical_c)}}},
+      {"chop_digits", 0}};
+  if (domain == "acb") problem["precision_bits"] = 256;
   const auto prepared = request(json::object{
       {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
       {"key", name}, {"identity", owner},
@@ -353,28 +383,7 @@ std::string prepare_multiblock_chart(const std::string& session,
            {"condensation_edges", json::array{}},
            {"topological_order", std::move(order)},
            {"coupling_depth", 0}}},
-      {"problem", json::object{
-           {"domain", "rational"}, {"d", dimension}, {"fb", 0},
-           {"w", 3},
-           {"d_lags", std::move(d_lags)},
-           {"denominators", json::array{}},
-           {"nhat_lags", json::array{json::object{
-                {"poly", json::array{}}, {"rat", json::array{}},
-                {"val", std::move(null_matrix)}}}},
-           {"d0_inverse", "1"}, {"blocks", std::move(blocks)},
-           {"assembly", json::object{
-                {"identity", true}, {"poly", json::array{}},
-                {"rat", json::array{}},
-                {"val", std::move(assembly_matrix)}}},
-           {"physical_ode", json::object{
-                {"schema", "diffexp2-physical-cleared-ode-v1"},
-                {"basis", "physical-original-master"},
-                {"theta_coordinate", "local-t"},
-                {"owner_signature_identity", owner},
-                {"payload_identity", "de2-physical-ode-" + name},
-                {"q", json::array{epsilon_rational_one()}},
-                {"c", std::move(physical_c)}}},
-           {"chop_digits", 0}}}});
+      {"problem", std::move(problem)}});
   require_ok(prepared, "multiblock chart.prepare");
   return std::string(prepared.at("chart").as_string());
 }
@@ -672,13 +681,16 @@ json::object published_side(const std::string& anchor,
 json::object publish_consumed_states(
     const std::string& session, const std::string& plan,
     const std::string& anchor, const json::object& lower,
-    const json::object& upper, const std::string& root) {
+    const json::object& upper, const std::string& root,
+    const std::string& plan_checkpoint = "streaming-state-plan",
+    const std::string& anchor_checkpoint =
+        "streaming-state-anchor") {
   return request(json::object{
       {"schema", 2}, {"op", "transport.publish_consumed_states"},
       {"session", session}, {"tile_plan", plan},
-      {"tile_plan_checkpoint_identity", "streaming-state-plan"},
+      {"tile_plan_checkpoint_identity", plan_checkpoint},
       {"anchor", anchor},
-      {"anchor_checkpoint_identity", "streaming-state-anchor"},
+      {"anchor_checkpoint_identity", anchor_checkpoint},
       {"epsilon", epsilon_contract()}, {"refinement", refinement()},
       {"checkpoint_policy", json::object{
            {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
@@ -731,6 +743,45 @@ json::object integrand_row(const std::string& identity,
                 {"proven_zero", false}}}}}}};
 }
 
+json::object cancellation_integrand_row(
+    const std::string& identity,
+    std::size_t taylor_width = 5) {
+  if (taylor_width == 0)
+    throw std::invalid_argument(
+        "cancellation integrand row Taylor width is zero");
+  const auto kernels = [&](const std::string& constant) {
+    json::array leading;
+    json::array zero;
+    leading.reserve(taylor_width);
+    zero.reserve(taylor_width);
+    for (std::size_t n = 0; n < taylor_width; ++n) {
+      leading.emplace_back(n == 0 ? constant : "0");
+      zero.emplace_back("0");
+    }
+    return json::array{std::move(leading), zero, zero};
+  };
+  return json::object{
+      {"schema", "diffexp2-prepared-rational-local-row-v1"},
+      {"columns", 2}, {"exact_identity", identity},
+      {"entries", json::array{
+           json::object{
+               {"column", 0},
+               {"multiplier", json::object{
+                    {"epsilon_shift", 0},
+                    {"center_pole_order", 0},
+                    {"kernels", kernels("1")},
+                    {"exact_identity", identity + ":plus"},
+                    {"proven_zero", false}}}},
+           json::object{
+               {"column", 1},
+               {"multiplier", json::object{
+                    {"epsilon_shift", 0},
+                    {"center_pole_order", 0},
+                    {"kernels", kernels("-1")},
+                    {"exact_identity", identity + ":minus"},
+                    {"proven_zero", false}}}}}}};
+}
+
 json::value contract_and_export(const std::string& session,
                                 const json::object& state,
                                 const std::string& root,
@@ -769,6 +820,57 @@ json::value contract_and_export(const std::string& session,
       {"schema", 2}, {"op", "integration.release"},
       {"session", session}, {"line", line.at("line")}}),
       "integration.release");
+  return value;
+}
+
+json::value contract_cancellation_and_export(
+    const std::string& session, const json::object& state,
+    const std::string& root, std::size_t taylor_width = 5,
+    bool release_line = true) {
+  const auto contracted = request(json::object{
+      {"schema", 2}, {"op", "transport.contract"},
+      {"session", session},
+      {"transport_state", state.at("transport_state")},
+      {"transport_state_checkpoint_identity",
+       state.at("checkpoint_identity")},
+      {"transport_state_provenance_identity",
+       state.at("provenance_identity")},
+      {"checkpoint_policy", json::object{
+           {"schema",
+            "diffexp2-deterministic-transport-contraction-checkpoints-v1"},
+           {"root", root}}},
+      {"observables", json::array{json::object{
+           {"identity", root + ":observable"},
+           {"checkpoint_identity", root + ":line"},
+           {"integrand_rows", json::array{
+                cancellation_integrand_row(
+                    root + ":row:1", taylor_width),
+                cancellation_integrand_row(
+                    root + ":row:2", taylor_width)}},
+           {"epsilon", json::object{
+                {"min", 0}, {"max", 2},
+                {"required_complete_max", 1}}},
+           {"tail_policy", "stored"},
+           {"divergent_cancellation", json::object{
+                {"mode", "bounded-relative-acb"},
+                {"relative_tolerance", "1e-40"},
+                {"provenance",
+                 "terminal-single-contraction-policy-regression"}}}}}}});
+  require_ok(contracted, "terminal cancellation transport.contract");
+  const auto& line =
+      contracted.at("lines").as_array().front().as_object();
+  const auto exported = request(json::object{
+      {"schema", 2}, {"op", "integration.export"},
+      {"session", session}, {"line", line.at("line")},
+      {"checkpoint_identity", line.at("checkpoint_identity")},
+      {"output_digits", 40}});
+  require_ok(exported, "terminal cancellation integration.export");
+  const auto value = exported.at("value");
+  if (release_line)
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "integration.release"},
+        {"session", session}, {"line", line.at("line")}}),
+        "terminal cancellation integration.release");
   return value;
 }
 
@@ -1838,8 +1940,12 @@ void test_consuming_transport() {
 void test_frame_independent_physical_value_wiring() {
   const std::string checkpoint =
       "/tmp/diffexp2-frame-independent-physical-hop.de2cp";
+  const std::string resaved_checkpoint =
+      "/tmp/diffexp2-frame-independent-physical-hop-resaved.de2cp";
   std::remove(checkpoint.c_str());
+  std::remove(resaved_checkpoint.c_str());
   std::string session;
+  std::string restored_session;
   try {
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
@@ -1997,15 +2103,39 @@ void test_frame_independent_physical_value_wiring() {
           {"schema", 2}, {"op", "regular_equation.release"},
           {"session", session}, {"equation_owner", owner}}),
           "physical wiring regular_equation.release");
-    const auto rejected_checkpoint = request(json::object{
+    const auto saved_checkpoint = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
         {"session", session}, {"path", checkpoint},
-        {"checkpoint_identity", "physical-wiring-unsupported"}});
-    if (rejected_checkpoint.at("status") != "error" ||
-        std::filesystem::exists(checkpoint))
+        {"checkpoint_identity", "physical-wiring-hidden-owner"}});
+    require_ok(saved_checkpoint,
+               "physical wiring hidden-owner checkpoint.save");
+    if (saved_checkpoint.at("regular_equation_owners") != 0 ||
+        !std::filesystem::exists(checkpoint))
       throw std::runtime_error(
-          "checkpoint serialized a hidden frame-independent equation owner: " +
-          json::serialize(rejected_checkpoint));
+          "checkpoint did not distinguish hidden regular equation owners from public registry visibility: " +
+          json::serialize(saved_checkpoint));
+    const auto restored_record = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint},
+        {"expected_identity", "physical-wiring-hidden-owner"}});
+    require_ok(restored_record,
+               "physical wiring hidden-owner checkpoint.restore");
+    restored_session =
+        std::string(restored_record.at("session").as_string());
+    if (!restored_record.at("regular_equation_owners").as_array().empty())
+      throw std::runtime_error(
+          "hidden regular equation owner became publicly visible after restore");
+    const auto resaved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", restored_session}, {"path", resaved_checkpoint},
+        {"checkpoint_identity", "physical-wiring-hidden-owner-resaved"}});
+    require_ok(resaved,
+               "physical wiring restored hidden-owner checkpoint.save");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored_session}}),
+        "physical wiring restored session.close");
+    restored_session.clear();
     require_ok(request(json::object{
         {"schema", 2}, {"op", "session.close"}, {"session", session}}),
         "physical wiring session.close");
@@ -2014,10 +2144,360 @@ void test_frame_independent_physical_value_wiring() {
     if (!session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", session}});
+    if (!restored_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored_session}});
     std::remove(checkpoint.c_str());
+    std::remove(resaved_checkpoint.c_str());
     throw;
   }
   std::remove(checkpoint.c_str());
+  std::remove(resaved_checkpoint.c_str());
+}
+
+void test_acb_terminal_factorized_consumed_checkpoint() {
+  const std::string checkpoint =
+      "/tmp/diffexp2-terminal-factorized-consumed.de2cp";
+  const std::string corrupted =
+      "/tmp/diffexp2-terminal-factorized-consumed-corrupt.de2cp";
+  const std::string prepublication_checkpoint =
+      "/tmp/diffexp2-terminal-factorized-prepublication.de2cp";
+  std::remove(checkpoint.c_str());
+  std::remove(corrupted.c_str());
+  std::remove(prepublication_checkpoint.c_str());
+  std::string session;
+  std::string restored;
+  std::string restored_single;
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "acb"}, {"precision_bits", 256},
+        {"output_digits", 40}, {"chart_capacity", 6},
+        {"local_capacity", 24}, {"match_capacity", 8},
+        {"tile_plan_capacity", 2},
+        {"transport_state_capacity", 4},
+        {"line_result_capacity", 4}, {"endpoint_capacity", 4}});
+    require_ok(created, "terminal factorized session.create");
+    session = std::string(created.at("session").as_string());
+
+    const auto anchor_chart = prepare_multiblock_chart(
+        session, "terminal-factorized-anchor", "0", "acb");
+    const auto lower_chart = prepare_multiblock_chart(
+        session, "terminal-factorized-lower", "-2/3", "acb");
+    const auto upper_chart = prepare_multiblock_chart(
+        session, "terminal-factorized-upper", "2/3", "acb");
+    const std::string anchor_checkpoint =
+        "terminal-factorized-anchor-local";
+    const std::string plan_checkpoint =
+        "terminal-factorized-plan";
+    const auto anchor = solve_multiblock_local(
+        session, anchor_chart, "0", anchor_checkpoint,
+        {"1", "1"}, 8);
+    const auto lower_basis_0 = solve_multiblock_local(
+        session, lower_chart, "-2/3",
+        "terminal-factorized-lower-basis-0", {"1", "1"}, 8);
+    const auto lower_basis_1 = solve_multiblock_local(
+        session, lower_chart, "-2/3",
+        "terminal-factorized-lower-basis-1", {"0", "1"}, 8);
+    const auto upper_basis_0 = solve_multiblock_local(
+        session, upper_chart, "2/3",
+        "terminal-factorized-upper-basis-0", {"1", "1"}, 8);
+    const auto upper_basis_1 = solve_multiblock_local(
+        session, upper_chart, "2/3",
+        "terminal-factorized-upper-basis-1", {"0", "1"}, 8);
+    const auto planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+        {"checkpoint_identity", plan_checkpoint},
+        {"division_order", 3},
+        {"lower", arm("-2/3", anchor_chart, lower_chart)},
+        {"upper", arm("2/3", anchor_chart, upper_chart)}});
+    require_ok(planned, "terminal factorized tile.plan");
+    const auto plan =
+        std::string(planned.at("tile_plan").as_string());
+    const auto lower = consume_basis_hop(
+        session, plan, plan_checkpoint, "lower", anchor,
+        anchor_checkpoint, {lower_basis_0, lower_basis_1},
+        "terminal-factorized");
+    const auto upper = consume_basis_hop(
+        session, plan, plan_checkpoint, "upper", anchor,
+        anchor_checkpoint, {upper_basis_0, upper_basis_1},
+        "terminal-factorized");
+    require_ok(lower, "terminal factorized lower consume_hop");
+    require_ok(upper, "terminal factorized upper consume_hop");
+
+    const auto saved_prepublication = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", prepublication_checkpoint},
+        {"checkpoint_identity",
+         "terminal-factorized-prepublication"}});
+    require_ok(saved_prepublication,
+               "terminal factorized prepublication checkpoint.save");
+    const auto restored_prepublication = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", prepublication_checkpoint},
+        {"expected_identity",
+         "terminal-factorized-prepublication"}});
+    require_ok(restored_prepublication,
+               "terminal factorized prepublication checkpoint.restore");
+    restored_single = std::string(
+        restored_prepublication.at("session").as_string());
+    const auto single_published = request(json::object{
+        {"schema", 2},
+        {"op", "transport.publish_consumed_state"},
+        {"session", restored_single},
+        {"tile_plan", plan},
+        {"tile_plan_checkpoint_identity", plan_checkpoint},
+        {"anchor", anchor},
+        {"anchor_checkpoint_identity", anchor_checkpoint},
+        {"epsilon", epsilon_contract()},
+        {"refinement", refinement()},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-arm-checkpoints-v1"},
+             {"root", "terminal-factorized-single"}}},
+        {"arm", "lower"},
+        {"tile_sources", json::array{
+             anchor,
+             lower.at("next_local").as_object().at("local")}}});
+    require_ok(single_published,
+               "terminal factorized single-state publication");
+    const auto& single_states =
+        single_published.at("states").as_object();
+    if (single_states.size() != 1 ||
+        single_states.if_contains("lower") == nullptr ||
+        single_states.if_contains("upper") != nullptr)
+      throw std::runtime_error(
+          "single consumed-state publication changed its requested arm");
+    const auto single_value = contract_cancellation_and_export(
+        restored_single, single_states.at("lower").as_object(),
+        "terminal-factorized-single", 9);
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored_single}}),
+        "terminal factorized single-state session.close");
+    restored_single.clear();
+
+    const auto published = publish_consumed_states(
+        session, plan, anchor, lower, upper, "terminal-factorized",
+        plan_checkpoint, anchor_checkpoint);
+    require_ok(published, "terminal factorized state publication");
+    const auto& states = published.at("states").as_object();
+    const auto lower_state = states.at("lower").as_object();
+    const auto upper_state = states.at("upper").as_object();
+    if (lower_state.at("terminal_factorized_match") != true ||
+        upper_state.at("terminal_factorized_match") != true)
+      throw std::runtime_error(
+          "Acb terminal state publication dropped its factorized match owner: " +
+          json::serialize(published));
+    for (const auto* state : {&lower_state, &upper_state}) {
+      const auto& contracts =
+          state->at("tile_consumer_epsilon").as_array();
+      if (contracts.size() != counter(*state, "tiles") ||
+          contracts.empty())
+        throw std::runtime_error(
+            "terminal state did not publish one consumer epsilon contract per tile");
+      const auto& terminal = contracts.back().as_object();
+      if (terminal.at("sources").as_array().size() != 2 ||
+          !terminal.at("output_min_shift").is_int64())
+        throw std::runtime_error(
+            "terminal state did not publish its physical consumer sources and structural output shift");
+    }
+
+    const auto require_small_zero = [](const json::value& raw,
+                                       const char* label) {
+      const auto& value = raw.as_object();
+      if (value.at("dimension") != 1)
+        throw std::runtime_error(
+            std::string(label) + " did not remain scalar");
+      for (const auto& coefficient :
+           value.at("coefficients").as_array()) {
+        const auto ball = decode_encoded_ball(coefficient);
+        if (!ball.contains_zero() ||
+            diffexp2::Magnitude::upper_abs(ball)
+                    .approximate_upper() > 1e-45)
+          throw std::runtime_error(
+              std::string(label) +
+              " did not preserve the terminal cancellation");
+      }
+    };
+    require_small_zero(single_value,
+                       "single-state terminal contraction");
+    // Keep one bounded-cancellation observable public through the checkpoint
+    // round trip.  This exercises the compact single-arm recipe schema and
+    // binds its restored diagnostics back to the explicit cancellation
+    // policy, rather than only restoring the exact-singleton pair form.
+    const auto lower_value = contract_cancellation_and_export(
+        session, lower_state, "terminal-factorized-lower", 9, false);
+    const auto upper_value = contract_cancellation_and_export(
+        session, upper_state, "terminal-factorized-upper", 9);
+    require_small_zero(lower_value, "lower terminal contraction");
+    require_small_zero(upper_value, "upper terminal contraction");
+    // The direct physical route contracts L(F) with the certified physical
+    // weights w.  It must remain a genuine independent route: in particular,
+    // it must not pass through the epsilon-shifted factorization (F T) P and
+    // accidentally inherit that frame's much deeper convolution window.
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE",
+               "physical", 1) != 0)
+      throw std::runtime_error(
+          "could not enable direct physical terminal contraction");
+    json::value physical_value;
+    try {
+      physical_value = contract_cancellation_and_export(
+          session, lower_state, "terminal-direct-physical", 9);
+    } catch (...) {
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+      throw;
+    }
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+    require_small_zero(
+        physical_value, "direct physical terminal contraction");
+
+    const auto endpoints = request(json::object{
+        {"schema", 2}, {"op", "transport.endpoint_batch"},
+        {"session", session},
+        {"transport_state", lower_state.at("transport_state")},
+        {"transport_state_checkpoint_identity",
+         lower_state.at("checkpoint_identity")},
+        {"transport_state_provenance_identity",
+         lower_state.at("provenance_identity")},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-transport-endpoint-checkpoints-v1"},
+             {"root", "terminal-factorized-endpoint"}}},
+        {"observables", json::array{json::object{
+             {"identity", "terminal-factorized-endpoint-observable"},
+             {"checkpoint_identity",
+              "terminal-factorized-endpoint-result"},
+             {"integrand_row", cancellation_integrand_row(
+                  "terminal-factorized-endpoint-row", 9)},
+             {"epsilon", json::object{
+                  {"min", 0}, {"max", 2},
+                  {"required_complete_max", 1}}}}}}});
+    require_ok(endpoints, "terminal factorized endpoint_batch");
+    if (endpoints.at("endpoints").as_array().size() != 1 ||
+        endpoints.at("no_projected_local_publication") != true)
+      throw std::runtime_error(
+          "terminal factorized endpoint batch published scratch state");
+    const auto& endpoint =
+        endpoints.at("endpoints").as_array().front().as_object();
+    const auto endpoint_export = request(json::object{
+        {"schema", 2}, {"op", "endpoint.export"}, {"session", session},
+        {"endpoint", endpoint.at("endpoint")},
+        {"checkpoint_identity", endpoint.at("checkpoint_identity")},
+        {"output_digits", 40}});
+    require_ok(endpoint_export, "terminal factorized endpoint.export");
+    require_small_zero(endpoint_export.at("value"),
+                       "terminal factorized endpoint");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "endpoint.release"},
+        {"session", session}, {"endpoint", endpoint.at("endpoint")}}),
+        "terminal factorized endpoint.release");
+
+    const auto saved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", checkpoint},
+        {"checkpoint_identity", "terminal-factorized-roundtrip"}});
+    require_ok(saved, "terminal factorized checkpoint.save");
+    const auto container = diffexp2::checkpoint::read(checkpoint);
+    const auto payload =
+        json::parse(container.payload_json).as_object();
+    const auto& retained_states =
+        payload.at("retained_transport_states").as_array();
+    const auto& retained_hops =
+        payload.at("retained_planned_match_hops").as_array();
+    if (retained_states.size() != 2 || retained_hops.size() != 2)
+      throw std::runtime_error(
+          "terminal checkpoint did not retain exactly two state/match closures");
+    for (const auto& raw_state : retained_states) {
+      const auto& state = raw_state.as_object();
+      if (state.at("schema") !=
+              "diffexp2-retained-transport-arm-state-v6" ||
+          state.at("provenance").as_object().if_contains(
+              "terminal_match") == nullptr)
+        throw std::runtime_error(
+            "terminal checkpoint lost its v6 match reference");
+    }
+
+    auto corrupted_payload = payload;
+    corrupted_payload.at("retained_transport_states")
+        .as_array().front().as_object()
+        .at("provenance").as_object()
+        .at("terminal_match").as_object()
+        .at("checkpoint_identity") =
+            "tampered-terminal-match-checkpoint";
+    diffexp2::checkpoint::write_atomic(
+        corrupted, container.header_json,
+        json::serialize(corrupted_payload));
+    const auto rejected = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", corrupted},
+        {"expected_identity", "terminal-factorized-roundtrip"}});
+    if (rejected.at("status") != "error")
+      throw std::runtime_error(
+          "checkpoint restore accepted a stale terminal match reference");
+
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", session}}),
+        "terminal factorized session.close");
+    session.clear();
+    const auto restored_record = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint},
+        {"expected_identity", "terminal-factorized-roundtrip"}});
+    require_ok(restored_record,
+               "terminal factorized checkpoint.restore");
+    restored =
+        std::string(restored_record.at("session").as_string());
+    if (restored_record.at("transport_states").as_array().size() != 2 ||
+        !restored_record.at("planned_match_hops").as_array().empty())
+      throw std::runtime_error(
+          "terminal factorized restore lost its public state/match closure: " +
+          json::serialize(restored_record));
+    const auto restored_stats = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"},
+        {"session", restored},
+        {"transport_state", lower_state.at("transport_state")}});
+    require_ok(restored_stats,
+               "restored terminal factorized transport.stats");
+    if (restored_stats.at("terminal_factorized_match") != true ||
+        restored_stats.at("strong_ownership").as_object().at(
+            "terminal_factorized_match") != true)
+      throw std::runtime_error(
+          "restored terminal state did not privately retain its match owner");
+    const auto restored_lower = contract_cancellation_and_export(
+        restored, lower_state, "terminal-factorized-restored", 9);
+    require_small_zero(restored_lower,
+                       "restored terminal contraction");
+    if (!epsilon_vectors_overlap(lower_value, restored_lower))
+      throw std::runtime_error(
+          "terminal factorized checkpoint roundtrip changed its result");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored}}),
+        "restored terminal factorized session.close");
+    restored.clear();
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", session}});
+    if (!restored.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", restored}});
+    if (!restored_single.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", restored_single}});
+    std::remove(checkpoint.c_str());
+    std::remove(corrupted.c_str());
+    std::remove(prepublication_checkpoint.c_str());
+    throw;
+  }
+  std::remove(checkpoint.c_str());
+  std::remove(corrupted.c_str());
+  std::remove(prepublication_checkpoint.c_str());
 }
 
 }  // namespace
@@ -2041,6 +2521,7 @@ int main() {
     test_streaming_consumed_transport();
     test_consuming_transport();
     test_frame_independent_physical_value_wiring();
+    test_acb_terminal_factorized_consumed_checkpoint();
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "rational"}, {"output_digits", 40},

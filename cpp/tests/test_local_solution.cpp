@@ -134,6 +134,41 @@ void test_epsilon_exponent_and_log_shift() {
             .contains_zero());
 }
 
+void test_pole_rows_feed_finite_orders() {
+  LocalSolution<ComplexBall> solution;
+  solution.chart.center_exact = "0";
+  solution.chart.scale_exact = "1";
+  solution.chart.radius = ComplexBall(2);
+  solution.epsilon = {-1, 1};
+  solution.taylor_complete_max = 0;
+  solution.dimension = 1;
+
+  LocalSector<ComplexBall> fixed;
+  fixed.a = ExactScalarDescriptor::rational("0");
+  fixed.b = ExactScalarDescriptor::rational("0");
+  fixed.log_power = 0;
+  fixed.coefficients = {
+      ComplexBall(-1), ComplexBall(0), ComplexBall(0)};
+  solution.sectors.push_back(std::move(fixed));
+
+  LocalSector<ComplexBall> moving;
+  moving.a = ExactScalarDescriptor::rational("0");
+  moving.b = ExactScalarDescriptor::rational("1");
+  moving.log_power = 0;
+  moving.coefficients = {
+      ComplexBall(1), ComplexBall(0), ComplexBall(0)};
+  solution.sectors.push_back(std::move(moving));
+
+  const auto evaluation = diffexp2::evaluate_local_solution(
+      solution, RealEvaluationPoint::rational("1/2"));
+  ComplexBall log_half;
+  acb_log(log_half.raw(), ComplexBall::from_strings("1/2").raw(),
+          ComplexBall::precision());
+  check("cancelled pole rows still determine the finite coefficient",
+        evaluation.value.at(-1, 0).contains_zero() &&
+        (evaluation.value.at(0, 0) - log_half).contains_zero());
+}
+
 void test_loud_branch_failures() {
   auto missing = half_power_solution();
   missing.prescriptions.clear();
@@ -165,6 +200,7 @@ int main() {
   test_direct_value_theta_and_residual();
   test_two_branch_rims();
   test_epsilon_exponent_and_log_shift();
+  test_pole_rows_feed_finite_orders();
   test_loud_branch_failures();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";

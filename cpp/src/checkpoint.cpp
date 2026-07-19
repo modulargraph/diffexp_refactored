@@ -35,6 +35,13 @@ namespace json = boost::json;
 constexpr std::array<unsigned char, 8> kMagic{
     'D', 'E', '2', 'C', 'P', '0', '0', '1'};
 constexpr std::size_t kFixedHeaderBytes = 32;
+// Darwin rejects a single write(2) whose byte count exceeds its internal
+// syscall limit with EINVAL, even though size_t and ssize_t can represent the
+// complete request.  Checkpoints may legitimately contain multi-gigabyte
+// retained local slabs, so keep every read/write syscall comfortably below
+// platform limits and stream the container sections incrementally.
+constexpr std::size_t kMaximumIoChunkBytes =
+    std::size_t{1} * 1024 * 1024;
 constexpr std::uint64_t kMaximumPayloadBytes =
     std::uint64_t{8} * 1024 * 1024 * 1024;
 constexpr std::string_view kCanonicalJsonDagCodec =
@@ -107,7 +114,9 @@ void write_all(int descriptor, const unsigned char* data, std::size_t size,
                const std::string& path) {
   std::size_t written = 0;
   while (written < size) {
-    const auto amount = ::write(descriptor, data + written, size - written);
+    const auto request =
+        std::min(kMaximumIoChunkBytes, size - written);
+    const auto amount = ::write(descriptor, data + written, request);
     if (amount < 0) {
       if (errno == EINTR) continue;
       throw system_error("cannot write checkpoint", path);
@@ -122,8 +131,9 @@ void read_all(int descriptor, unsigned char* data, std::size_t size,
               const std::string& path) {
   std::size_t read_bytes = 0;
   while (read_bytes < size) {
-    const auto amount = ::read(descriptor, data + read_bytes,
-                               size - read_bytes);
+    const auto request =
+        std::min(kMaximumIoChunkBytes, size - read_bytes);
+    const auto amount = ::read(descriptor, data + read_bytes, request);
     if (amount < 0) {
       if (errno == EINTR) continue;
       throw system_error("cannot read checkpoint", path);
@@ -370,20 +380,24 @@ void write_raw_atomic(const std::string& path, std::uint32_t schema,
   if (payload_json.size() > kMaximumPayloadBytes)
     throw std::invalid_argument("checkpoint payload exceeds the 8 GiB limit");
 
-  std::vector<unsigned char> bytes;
-  const auto total = kFixedHeaderBytes + header_json.size() +
-                     payload_json.size();
-  if (total < header_json.size() || total < payload_json.size())
+  const auto total =
+      static_cast<std::uint64_t>(kFixedHeaderBytes) +
+      static_cast<std::uint64_t>(header_json.size()) +
+      static_cast<std::uint64_t>(payload_json.size());
+  if (total < header_json.size() || total < payload_json.size() ||
+      total > std::numeric_limits<std::size_t>::max())
     throw std::overflow_error("checkpoint container size overflow");
-  bytes.reserve(total);
-  bytes.insert(bytes.end(), kMagic.begin(), kMagic.end());
-  append_u32(bytes, schema);
-  append_u32(bytes, static_cast<std::uint32_t>(header_json.size()));
-  append_u64(bytes, static_cast<std::uint64_t>(payload_json.size()));
-  append_u32(bytes, checksum(header_json));
-  append_u32(bytes, checksum(payload_json));
-  bytes.insert(bytes.end(), header_json.begin(), header_json.end());
-  bytes.insert(bytes.end(), payload_json.begin(), payload_json.end());
+  std::vector<unsigned char> fixed;
+  fixed.reserve(kFixedHeaderBytes);
+  fixed.insert(fixed.end(), kMagic.begin(), kMagic.end());
+  append_u32(fixed, schema);
+  append_u32(fixed, static_cast<std::uint32_t>(header_json.size()));
+  append_u64(fixed, static_cast<std::uint64_t>(payload_json.size()));
+  append_u32(fixed, checksum(header_json));
+  append_u32(fixed, checksum(payload_json));
+  if (fixed.size() != kFixedHeaderBytes)
+    throw std::logic_error(
+        "checkpoint fixed-header serialization changed size");
 
   const std::filesystem::path target(path);
   const auto directory = target.has_parent_path()
@@ -397,7 +411,15 @@ void write_raw_atomic(const std::string& path, std::uint32_t schema,
   if (descriptor < 0) throw system_error("cannot create checkpoint", temporary);
   bool open = true;
   try {
-    write_all(descriptor, bytes.data(), bytes.size(), temporary);
+    write_all(descriptor, fixed.data(), fixed.size(), temporary);
+    write_all(
+        descriptor,
+        reinterpret_cast<const unsigned char*>(header_json.data()),
+        header_json.size(), temporary);
+    write_all(
+        descriptor,
+        reinterpret_cast<const unsigned char*>(payload_json.data()),
+        payload_json.size(), temporary);
     if (::fsync(descriptor) != 0)
       throw system_error("cannot fsync checkpoint", temporary);
     close_checked(descriptor, temporary);

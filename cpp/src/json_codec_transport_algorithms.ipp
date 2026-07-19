@@ -1052,7 +1052,7 @@ std::shared_ptr<StoredPlannedMatchHop> build_planned_match_hop(
     native_match = build_refined_acb_match(
         match_handle, kernel_request, basis_handles, basis, incoming_handle,
         incoming, precision_bits, active_session_configuration_identity,
-        expected_singular_request);
+        expected_singular_request, false);
   } else {
     throw std::invalid_argument(
         "plan-driven local matching requires rational or Acb coefficients");
@@ -1692,6 +1692,321 @@ json::object transport_endpoint_provenance(
       {"analytic_metadata", analytic_metadata}};
 }
 
+std::vector<LocalSolution<ComplexBall>>
+project_terminal_acb_basis_row(
+    const StoredPlannedMatchHop& match,
+    const json::object& row,
+    std::int32_t projected_complete_cap,
+    const std::string& context) {
+  // Preserve the same stable association used by the certified match:
+  //
+  //                         G = (F T) P.
+  //
+  // Projecting/integrating the confluent physical columns F independently
+  // and multiplying the resulting row by T P afterwards is algebraically
+  // equivalent, but it loses the exact coefficientwise cancellations which
+  // make G epsilon-regular.  Build G first, then apply the observable to its
+  // columns and finally contract with the already retained transformed
+  // weights.
+  auto basis = match.terminal_acb_factorized_basis(
+      context + ":factorized-basis");
+  std::vector<LocalSolution<ComplexBall>> projected;
+  projected.reserve(basis.size());
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    // A shorter Taylor prefix may have been selected to make the pointwise
+    // matching solve numerically stable.  That prefix records how the
+    // constant connection weights were obtained; it is not a new local
+    // solution and cannot truncate a downstream line or endpoint functional.
+    // Apply the certified weights to the complete retained physical basis.
+    auto source = basis[column];
+    auto matrix = parse_prepared_rational_row<ComplexBall>(
+        row, source, projected_complete_cap);
+    auto output = apply_prepared_scalar_row_window(
+        matrix, source, projected_complete_cap,
+        context + ":physical-column:" +
+            std::to_string(column));
+    auto scalar = output.has_value()
+        ? std::move(*output)
+        : exact_zero_scalar_local_like(
+              source, context + ":physical-zero-column:" +
+                  std::to_string(column));
+    if (scalar.dimension != 1)
+      throw std::logic_error(
+          context +
+          ": terminal factorized row projection did not remain scalar");
+    projected.push_back(std::move(scalar));
+  }
+  return projected;
+}
+
+std::vector<LocalSolution<ComplexBall>>
+project_terminal_acb_physical_basis_row(
+    const StoredPlannedMatchHop& match,
+    const json::object& row,
+    std::int32_t projected_complete_cap,
+    const std::string& context) {
+  auto owners = match.terminal_acb_basis_owners();
+  std::vector<LocalSolution<ComplexBall>> projected;
+  projected.reserve(owners.size());
+  for (std::size_t column = 0; column < owners.size(); ++column) {
+    auto source = owners[column]->solution();
+    const auto complete_max = std::min(
+        owners[column]->top_valid(),
+        source.epsilon.complete_max);
+    if (complete_max < source.epsilon.min_power)
+      throw std::domain_error(
+          context +
+          ": terminal physical basis has no valid epsilon coefficient");
+    if (complete_max < source.epsilon.complete_max)
+      source = restrict_local_epsilon_frame_strict_lower(
+          source, source.epsilon.min_power, complete_max,
+          context + ":physical-valid:column:" +
+              std::to_string(column));
+    auto matrix = parse_prepared_rational_row<ComplexBall>(
+        row, source, projected_complete_cap);
+    auto output = apply_prepared_scalar_row_window(
+        matrix, source, projected_complete_cap,
+        context + ":physical-column:" +
+            std::to_string(column));
+    auto scalar = output.has_value()
+        ? std::move(*output)
+        : exact_zero_scalar_local_like(
+              source, context + ":physical-zero-column:" +
+                  std::to_string(column));
+    if (scalar.dimension != 1)
+      throw std::logic_error(
+          context +
+          ": terminal physical row projection did not remain scalar");
+    projected.push_back(std::move(scalar));
+  }
+  return projected;
+}
+
+EpsilonFrame<ComplexBall> scalar_epsilon_frame(
+    const EpsilonVector& value, const std::string& context) {
+  if (value.dimension != 1)
+    throw std::logic_error(
+        context + ": expected one scalar epsilon vector");
+  std::vector<ComplexBall> coefficients;
+  coefficients.reserve(value.epsilon.width());
+  for (std::int64_t raw_power = value.epsilon.min_power;
+       raw_power <= value.epsilon.complete_max; ++raw_power)
+    coefficients.push_back(
+        value.at(static_cast<std::int32_t>(raw_power), 0));
+  return EpsilonFrame<ComplexBall>(
+      value.epsilon, std::move(coefficients));
+}
+
+std::int32_t terminal_factorized_physical_complete_cap(
+    const StoredPlannedMatchHop& match,
+    std::int32_t requested_output_complete_max,
+    std::int32_t functional_epsilon_loss,
+    const std::string& context,
+    bool contract_physical_weights = false) {
+  if (functional_epsilon_loss < 0)
+    throw std::invalid_argument(
+        context +
+        ": terminal functional epsilon loss cannot be negative");
+  const auto& weights = match.terminal_acb_physical_weights();
+  if (weights.empty())
+    throw std::logic_error(
+        context + ": terminal match has no physical weights");
+  // If the final contraction is sum_j L(G_j) y_j, coefficient q needs
+  // L(G_j) through q-min(y_j) for every column.  The leading order of the
+  // product G_j*y_j is not a substitute: a +N basis column multiplied by a
+  // -N weight can have product valuation zero while still requiring N extra
+  // functional coefficients.  Using the product valuation here silently
+  // truncated precisely the columns responsible for terminal cancellation.
+  const auto minimum_weight_power = contract_physical_weights
+      ? match.terminal_acb_physical_weight_min_power()
+      : match.terminal_acb_transformed_weight_min_power();
+  const auto label =
+      context + ": terminal physical input complete maximum";
+  return local_algebra_detail::checked_i32(
+      static_cast<std::int64_t>(
+          requested_output_complete_max) -
+          minimum_weight_power +
+          functional_epsilon_loss,
+      label.c_str());
+}
+
+EndpointLimitResult terminal_factorized_endpoint_limit(
+    const StoredPlannedMatchHop& match,
+    const json::object& row,
+    const ObservableEpsilonContract& epsilon_contract,
+    const ResolvedTransportEndpointBinding& binding,
+    const std::string& context) {
+  const auto projection_cap =
+      terminal_factorized_physical_complete_cap(
+          match, epsilon_contract.requested.complete_max, 0,
+          context + ":pointwise-window", true);
+  auto projected = project_terminal_acb_physical_basis_row(
+      match, row, projection_cap,
+      context + ":row");
+  FiniteLaurentMatrix<ComplexBall> physical_rows;
+  EndpointLimitResult result;
+  result.imaginary_sign = binding.rim.value_or(1);
+
+  if (!binding.centered) {
+    FiniteLaurentVector<ComplexBall> point_row;
+    point_row.reserve(projected.size());
+    const auto point =
+        RealEvaluationPoint::rational(binding.local_end.str());
+    for (std::size_t column = 0; column < projected.size(); ++column) {
+      EvaluationOptions options;
+      options.imaginary_sign = binding.rim;
+      options.compute_tail_estimate = false;
+      const auto evaluation =
+          evaluate_local_solution(projected[column], point, options);
+      if (!evaluation.value.error.empty())
+        throw std::domain_error(
+            context +
+            ": terminal factorized point evaluation produced an unsupported error envelope");
+      point_row.push_back(scalar_epsilon_frame(
+          evaluation.value,
+          context + ":point-column:" +
+              std::to_string(column)));
+    }
+    physical_rows.push_back(std::move(point_row));
+    auto contracted =
+        match.contract_terminal_acb_physical_functionals(
+        physical_rows, context + ":point-contraction");
+    if (contracted.size() != 1)
+      throw std::logic_error(
+          context +
+          ": terminal point contraction changed its scalar row count");
+    result.values.push_back(std::move(contracted.front()));
+    return result;
+  }
+
+  using DivergentKey = std::pair<std::string, std::uint32_t>;
+  std::vector<EpsilonFrame<ComplexBall>> finite_columns;
+  std::vector<std::map<DivergentKey, EpsilonFrame<ComplexBall>>>
+      divergent_columns(projected.size());
+  std::set<DivergentKey> divergent_keys;
+  finite_columns.reserve(projected.size());
+  for (std::size_t column = 0; column < projected.size(); ++column) {
+    const auto& local = projected[column];
+    std::vector<ComplexBall> finite(
+        local.epsilon.width(), ComplexBall(0));
+    std::map<DivergentKey, std::vector<ComplexBall>>
+        divergent_coefficients;
+    for (const auto& sector : local.sectors) {
+      if (sector.b.is_zero == TruthValue::No) {
+        if (integration_detail::material_sector(sector))
+          ++result.dropped_regulated_sectors;
+        continue;
+      }
+      if (sector.b.domain == ExactDomain::SymbolicRational)
+        throw integration_detail::unsupported_symbolic_regulator();
+      if (sector.b.is_zero != TruthValue::Yes)
+        throw NativeIntegrationError(
+            NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+            "terminal endpoint classification requires an exact regulator zero fact");
+      if (sector.a.domain != ExactDomain::Rational)
+        throw NativeIntegrationError(
+            NativeIntegrationErrorCode::UnsupportedExactTag, "E10",
+            "terminal endpoint classification requires rational local powers");
+      const Rational a(sector.a.canonical);
+      const auto first_unseen = ExactScalarDescriptor::rational(
+          (a + Rational(
+                   static_cast<long>(local.taylor_width())))
+              .str());
+      if (first_unseen.sign != ExactSign::Positive)
+        throw NativeIntegrationError(
+            NativeIntegrationErrorCode::IncompleteTaylorWindow, "E10",
+            "terminal endpoint limit is uncertified: the first unseen Taylor cell can still have nonpositive absolute power");
+      for (std::uint32_t taylor = 0;
+           taylor < local.taylor_width(); ++taylor) {
+        const auto tag = sector_monomial_tag(sector, taylor);
+        const auto classification =
+            classify_endpoint_limit_cell(tag);
+        if (classification != EndpointCellClass::Finite &&
+            classification != EndpointCellClass::Divergent)
+          continue;
+        std::vector<ComplexBall>* target = nullptr;
+        DivergentKey key;
+        if (classification == EndpointCellClass::Finite) {
+          target = &finite;
+        } else {
+          key = {tag.m.canonical, tag.log_power};
+          divergent_keys.insert(key);
+          auto [found, inserted] =
+              divergent_coefficients.try_emplace(
+                  key, local.epsilon.width(), ComplexBall(0));
+          (void)inserted;
+          target = &found->second;
+        }
+        for (std::size_t epsilon = 0;
+             epsilon < local.epsilon.width(); ++epsilon)
+          (*target)[epsilon] +=
+              sector.coefficients[local_detail::sector_index(
+                  local, epsilon, taylor, 0)];
+      }
+    }
+    finite_columns.emplace_back(
+        local.epsilon, std::move(finite));
+    for (auto& [key, coefficients] : divergent_coefficients)
+      divergent_columns[column].emplace(
+          key, EpsilonFrame<ComplexBall>(
+                   local.epsilon, std::move(coefficients)));
+  }
+
+  physical_rows.push_back(std::move(finite_columns));
+  for (const auto& key : divergent_keys) {
+    FiniteLaurentVector<ComplexBall> row_frames;
+    row_frames.reserve(projected.size());
+    for (std::size_t column = 0; column < projected.size(); ++column) {
+      const auto found = divergent_columns[column].find(key);
+      if (found != divergent_columns[column].end()) {
+        row_frames.push_back(found->second);
+      } else {
+        row_frames.emplace_back(
+            projected[column].epsilon,
+            std::vector<ComplexBall>(
+                projected[column].epsilon.width(), ComplexBall(0)));
+      }
+    }
+    physical_rows.push_back(std::move(row_frames));
+  }
+  auto contracted =
+      match.contract_terminal_acb_physical_functionals(
+      physical_rows, context + ":center-contraction");
+  if (contracted.size() != 1 + divergent_keys.size())
+    throw std::logic_error(
+        context +
+        ": terminal endpoint contraction changed its tagged row count");
+  result.values.push_back(std::move(contracted.front()));
+  std::size_t row_index = 1;
+  for (const auto& key : divergent_keys) {
+    const auto& frame = contracted[row_index++];
+    for (std::int64_t raw_power = frame.min_power();
+         raw_power <= frame.complete_max(); ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      const auto coefficient = frame.coefficient(power);
+      if (coefficient.is_zero()) {
+        ++result.cancelled_divergent_coefficients;
+        continue;
+      }
+      const bool uncertified = coefficient.contains_zero();
+      NativeIntegrationError error(
+          uncertified
+              ? NativeIntegrationErrorCode::UncertifiedCancellation
+              : NativeIntegrationErrorCode::DivergentEndpoint,
+          uncertified ? "E10" : "E2",
+          uncertified
+              ? "factorized terminal endpoint divergence contains zero but is not the exact singleton zero"
+              : "factorized terminal endpoint divergent coefficient is nonzero");
+      error.absolute_power = key.first;
+      error.log_power = key.second;
+      error.epsilon_power = power;
+      error.component = 0;
+      throw error;
+    }
+  }
+  return result;
+}
+
 std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
     const std::string& endpoint_handle,
     const std::string& checkpoint_identity,
@@ -1721,31 +2036,43 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
       {"source_checkpoint_identity", source->checkpoint_identity()},
       {"checkpoint_identity", projected_checkpoint_identity}};
   std::shared_ptr<StoredLocalBase> projected;
-  if (domain == "rational") {
-    const auto typed =
-        std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
-    if (!typed)
-      throw std::logic_error(
-          "transport endpoint Rational source changed coefficient domain");
-    projected = build_rational_row_local<Rational>(
-        projected_handle, row_request, precision_bits, typed, source,
-        false, epsilon_contract.requested.complete_max);
-  } else if (domain == "acb") {
-    const auto typed =
-        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
-    if (!typed)
-      throw std::logic_error(
-          "transport endpoint Acb source changed coefficient domain");
-    projected = build_rational_row_local<ComplexBall>(
-        projected_handle, row_request, precision_bits, typed, source,
-        false, epsilon_contract.requested.complete_max);
-  } else {
-    throw std::invalid_argument(
-        "transport endpoint row requires one numeric coefficient domain");
+  const bool terminal_factorized =
+      domain == "acb" &&
+      state->terminal_factorized_match() != nullptr &&
+      state->terminal_factorized_match()
+          ->has_terminal_acb_factorization();
+  if (!terminal_factorized) {
+    if (domain == "rational") {
+      const auto typed =
+          std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+      if (!typed)
+        throw std::logic_error(
+            "transport endpoint Rational source changed coefficient domain");
+      projected = build_rational_row_local<Rational>(
+          projected_handle, row_request, precision_bits, typed, source,
+          false, epsilon_contract.requested.complete_max);
+    } else if (domain == "acb") {
+      const auto typed =
+          std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+      if (!typed)
+        throw std::logic_error(
+            "transport endpoint Acb source changed coefficient domain");
+      projected = build_rational_row_local<ComplexBall>(
+          projected_handle, row_request, precision_bits, typed, source,
+          false, epsilon_contract.requested.complete_max);
+    } else {
+      throw std::invalid_argument(
+          "transport endpoint row requires one numeric coefficient domain");
+    }
   }
 
   EndpointLimitResult result;
-  if (binding.centered) {
+  if (terminal_factorized) {
+    result = terminal_factorized_endpoint_limit(
+        *state->terminal_factorized_match(), row,
+        epsilon_contract, binding,
+        checkpoint_identity + ":terminal-factorized");
+  } else if (binding.centered) {
     EndpointLimitOptions options;
     options.approach_direction = binding.approach_direction;
     options.imaginary_sign = binding.rim;
@@ -1765,7 +2092,9 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
   if (result.values.size() != 1)
     throw std::logic_error(
         "transport endpoint row result did not remain scalar");
-  const auto analytic_metadata = projected->exact_analytic_metadata();
+  const auto analytic_metadata = terminal_factorized
+      ? source->exact_analytic_metadata()
+      : projected->exact_analytic_metadata();
   auto endpoint_source = binding.source;
   endpoint_source["observable"] = json::object{
       {"identity", observable_identity},
@@ -1830,6 +2159,27 @@ RetainedLocalFrameContract retained_local_frame_contract(
              "retained local Taylor maximum")};
   (void)result.epsilon.width();
   return result;
+}
+
+std::int32_t retained_local_complete_max(
+    const std::shared_ptr<StoredLocalBase>& local) {
+  const auto frame = retained_local_frame_contract(local);
+  return frame.top_valid == kCompleteInfinity
+      ? frame.epsilon.complete_max
+      : std::min(frame.epsilon.complete_max, frame.top_valid);
+}
+
+void require_retained_local_complete_max(
+    const std::shared_ptr<StoredLocalBase>& local,
+    std::int32_t required_complete_max, const char* label) {
+  const auto complete_max = retained_local_complete_max(local);
+  if (complete_max < required_complete_max)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        std::string(label) +
+            " materialized physical source does not cover the globally "
+            "required complete epsilon maximum",
+        std::nullopt, std::nullopt, complete_max);
 }
 
 EpsilonWindow live_match_epsilon_intersection(
@@ -2107,6 +2457,8 @@ RetainedArmMarchResult march_retained_arm(
           arm_checkpoint_identity(checkpoint_root, input.name, "local",
                                   match_index + 1),
           precision_bits, match);
+      require_retained_local_complete_max(
+          next, match_required_complete_max, "native retained arm match");
     } catch (const std::exception& error) {
       const auto incoming_frame = retained_local_frame_contract(current);
       std::string frames =
@@ -2231,6 +2583,9 @@ ConsumingArmMarchResult march_retained_arm_consuming(
         arm_checkpoint_identity(checkpoint_root, input.name, "local",
                                 match_index + 1),
         session->precision_bits, match);
+    require_retained_local_complete_max(
+        next, match_required_complete_max,
+        "native consuming retained arm match");
 
     // At this point the full match, materialized local, tail model and
     // physical residual owner have all been validated.  Seal an immutable
@@ -2528,6 +2883,109 @@ build_compact_transport_pair_observable_line(
           lower_state, upper_state});
 }
 
+json::object encode_transport_line_value_diagnostics(
+    const StoredLineIntegral& line) {
+  const auto& result = line.value;
+  if (result.dimension == 0)
+    throw std::logic_error(
+        "transport line-value diagnostics lost their scalar dimension");
+  json::array entries;
+  entries.reserve(result.epsilon.width() * result.dimension);
+  for (std::int64_t raw_power = result.epsilon.min_power;
+       raw_power <= result.epsilon.complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < result.dimension;
+         ++component) {
+      const auto& value = result.at(power, component);
+      entries.push_back(json::object{
+          {"power", power},
+          {"component", component},
+          {"midpoint", json::array{
+               value.real_midpoint(18), value.imag_midpoint(18)}},
+          {"abs_upper_approx",
+           Magnitude::upper_abs(value).approximate_upper()},
+          {"contains_zero", value.contains_zero()}});
+    }
+  }
+  return json::object{
+      {"epsilon", json::object{
+           {"min", result.epsilon.min_power},
+           {"max", result.epsilon.complete_max}}},
+      {"dimension", result.dimension},
+      {"entries", std::move(entries)}};
+}
+
+json::object encode_transport_pair_conditioning_diagnostics(
+    const StoredLineIntegral& lower, const StoredLineIntegral& upper,
+    const StoredLineIntegral& combined,
+    json::array lower_tiles = {}, json::array upper_tiles = {}) {
+  const auto& result = combined.value;
+  if (lower.value.dimension != result.dimension ||
+      upper.value.dimension != result.dimension ||
+      result.dimension == 0)
+    throw std::logic_error(
+        "transport-pair conditioning diagnostics lost their scalar dimensions");
+
+  json::array entries;
+  entries.reserve(result.epsilon.width() * result.dimension);
+  for (std::int64_t raw_power = result.epsilon.min_power;
+       raw_power <= result.epsilon.complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < result.dimension;
+         ++component) {
+      const auto lower_value =
+          power < lower.value.epsilon.min_power
+          ? ComplexBall(0)
+          : lower.value.at(power, component);
+      const auto upper_value =
+          power < upper.value.epsilon.min_power
+          ? ComplexBall(0)
+          : upper.value.at(power, component);
+      const auto& combined_value = result.at(power, component);
+      const auto lower_upper =
+          Magnitude::upper_abs(lower_value).approximate_upper();
+      const auto upper_upper =
+          Magnitude::upper_abs(upper_value).approximate_upper();
+      const auto combined_upper =
+          Magnitude::upper_abs(combined_value).approximate_upper();
+      const auto combined_lower =
+          Magnitude::lower_abs(combined_value).approximate_upper();
+      const auto cancellation_scale = lower_upper + upper_upper;
+      const auto condition = combined_lower > 0.0
+          ? cancellation_scale / combined_lower
+          : std::numeric_limits<double>::infinity();
+      entries.push_back(json::object{
+          {"power", power},
+          {"component", component},
+          {"lower_midpoint", json::array{
+               lower_value.real_midpoint(18),
+               lower_value.imag_midpoint(18)}},
+          {"upper_midpoint", json::array{
+               upper_value.real_midpoint(18),
+               upper_value.imag_midpoint(18)}},
+          {"combined_midpoint", json::array{
+               combined_value.real_midpoint(18),
+               combined_value.imag_midpoint(18)}},
+          {"lower_abs_upper_approx", lower_upper},
+          {"upper_abs_upper_approx", upper_upper},
+          {"combined_abs_upper_approx", combined_upper},
+          {"combined_contains_zero", combined_value.contains_zero()},
+          {"cancellation_condition_upper_approx",
+           std::isfinite(condition) ? json::value(condition)
+                                    : json::value(nullptr)}});
+    }
+  }
+  return json::object{
+      {"schema", "diffexp2-transport-pair-conditioning-diagnostics-v1"},
+      {"epsilon", json::object{
+           {"min", result.epsilon.min_power},
+           {"max", result.epsilon.complete_max}}},
+      {"dimension", result.dimension},
+      {"entries", std::move(entries)},
+      {"lower_tiles", std::move(lower_tiles)},
+      {"upper_tiles", std::move(upper_tiles)}};
+}
+
 enum class TransportTailPolicy { Stored, Attempt, Require };
 
 TransportTailPolicy parse_transport_tail_policy(const json::value& raw,
@@ -2641,6 +3099,7 @@ struct TransportObservableContractionResult {
   std::vector<std::shared_ptr<StoredLocalBase>> projected;
   std::vector<std::shared_ptr<StoredLineResult>> tile_lines;
   std::shared_ptr<StoredLineResult> aggregate;
+  json::array tile_values;
   std::size_t tile_integrations = 0;
   double tile_integration_ms = 0.0;
   double elapsed_ms = 0.0;
@@ -2828,6 +3287,409 @@ StoredLineIntegral integrate_transport_stored_row_tile(
   return result;
 }
 
+Magnitude terminal_factorized_divergent_scale(
+    const StoredPlannedMatchHop& match,
+    const std::vector<
+        const StoredLineIntegral::DeferredDivergentGroup*>&
+        physical_groups,
+    std::int32_t output_power) {
+  const auto& weights = match.terminal_acb_physical_weights();
+  if (physical_groups.size() != weights.size())
+    throw std::logic_error(
+        "terminal divergent scale differs from the physical match dimension");
+  Magnitude result = Magnitude::zero();
+  for (std::size_t column = 0; column < weights.size(); ++column) {
+    const auto* group = physical_groups[column];
+    if (group == nullptr) continue;
+    const auto& weight = weights[column];
+    for (std::int64_t raw_weight_power = weight.min_power();
+         raw_weight_power <= weight.complete_max();
+         ++raw_weight_power) {
+      const auto weight_power =
+          static_cast<std::int32_t>(raw_weight_power);
+      const auto coefficient_power =
+          static_cast<std::int64_t>(output_power) -
+          raw_weight_power;
+      if (coefficient_power < group->coefficients.min_power() ||
+          coefficient_power >
+              group->coefficients.complete_max())
+        continue;
+      const auto coefficient_index = static_cast<std::size_t>(
+          coefficient_power -
+          group->coefficients.min_power());
+      result = result +
+          group->contribution_scale_uppers.at(
+              coefficient_index) *
+              Magnitude::upper_abs(
+                  weight.coefficient(weight_power));
+    }
+  }
+  return result;
+}
+
+void accumulate_terminal_line_diagnostics(
+    StoredLineIntegrationDiagnostics& target,
+    const StoredLineIntegrationDiagnostics& source) {
+  target.input_monomial_cells = checked_diagnostic_sum(
+      target.input_monomial_cells, source.input_monomial_cells,
+      "terminal line input-monomial diagnostics");
+  target.grouped_monomials = checked_diagnostic_sum(
+      target.grouped_monomials, source.grouped_monomials,
+      "terminal line grouped-monomial diagnostics");
+  target.zero_groups_skipped = checked_diagnostic_sum(
+      target.zero_groups_skipped, source.zero_groups_skipped,
+      "terminal line zero-group diagnostics");
+  target.cancelled_divergent_groups = checked_diagnostic_sum(
+      target.cancelled_divergent_groups,
+      source.cancelled_divergent_groups,
+      "terminal line divergent-group diagnostics");
+  target.bounded_cancelled_divergent_coefficients =
+      checked_diagnostic_sum(
+          target.bounded_cancelled_divergent_coefficients,
+          source.bounded_cancelled_divergent_coefficients,
+          "terminal line bounded-divergence diagnostics");
+  target.primitive_evaluations = checked_diagnostic_sum(
+      target.primitive_evaluations, source.primitive_evaluations,
+      "terminal line primitive diagnostics");
+  target.primitive_component_applications =
+      checked_diagnostic_sum(
+          target.primitive_component_applications,
+          source.primitive_component_applications,
+          "terminal line primitive-application diagnostics");
+  target.primitive_component_reuses = checked_diagnostic_sum(
+      target.primitive_component_reuses,
+      source.primitive_component_reuses,
+      "terminal line primitive-reuse diagnostics");
+  target.has_center_endpoint =
+      target.has_center_endpoint || source.has_center_endpoint;
+}
+
+StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
+    slong precision_bits,
+    const std::shared_ptr<StoredTransportArmState>& state,
+    const json::object& prepared_row,
+    const RetainedArmPlan& arm, const std::string& arm_name,
+    std::size_t tile_index,
+    const ObservableEpsilonContract& epsilon_contract,
+    const std::optional<BoundedDivergentCancellation>&
+        divergent_cancellation) {
+  if (!state || !state->terminal_factorized_match() ||
+      tile_index + 1 != state->tile_sources().size() ||
+      tile_index >= arm.exact.tiles.size())
+    throw std::invalid_argument(
+        "terminal factorized line integration lost its final tile or match owner");
+  AcbPrecisionLease lease(precision_bits);
+  ComplexBall::set_precision(precision_bits);
+  const auto& match = *state->terminal_factorized_match();
+  if (!match.has_terminal_acb_factorization())
+    throw std::invalid_argument(
+        "terminal factorized line integration has no certified Acb factorization");
+
+  const auto* diagnostic_route_raw =
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+  const std::string diagnostic_route =
+      diagnostic_route_raw == nullptr
+      ? std::string()
+      : std::string(diagnostic_route_raw);
+  const bool diagnostic_physical =
+      diagnostic_route.empty() ||
+      diagnostic_route == "physical" ||
+      diagnostic_route == "adjoint";
+  const bool direct_physical =
+      diagnostic_route.empty() ||
+      diagnostic_route == "physical";
+  const auto projection_cap =
+      terminal_factorized_physical_complete_cap(
+          match, epsilon_contract.requested.complete_max, 1,
+          "terminal factorized primitive window",
+          direct_physical);
+  auto projected = diagnostic_physical
+      ? project_terminal_acb_physical_basis_row(
+            match, prepared_row, projection_cap,
+            "terminal-physical-line:" + arm_name + ":" +
+                std::to_string(tile_index))
+      : project_terminal_acb_basis_row(
+            match, prepared_row, projection_cap,
+            "terminal-factorized-line:" + arm_name + ":" +
+                std::to_string(tile_index));
+
+  const auto& tile = arm.exact.tiles[tile_index];
+  const auto& certified_tile = arm.certified_tiles.at(tile_index);
+  const auto& binding = arm.charts.at(tile.chart);
+  const auto rim = exact_plan_rim(
+      binding.prescriptions, binding.geometry.scale);
+  const bool reverse_local_orientation =
+      tile.local_end < tile.local_begin;
+  const auto& primitive_begin = reverse_local_orientation
+      ? certified_tile.local_end : certified_tile.local_begin;
+  const auto& primitive_end = reverse_local_orientation
+      ? certified_tile.local_begin : certified_tile.local_end;
+  if (certified_tile_zero_length(arm, tile_index))
+    return certified_zero_physical_line(
+        epsilon_contract.requested, 1, rim,
+        certified_tile.local_begin.sign == 0, false);
+
+  std::vector<StoredLineIntegral> physical;
+  physical.reserve(projected.size());
+  for (std::size_t column = 0; column < projected.size(); ++column) {
+    const auto& source = projected[column];
+    const auto delivered_min =
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(
+                source.epsilon.min_power) - 1,
+            "terminal physical primitive minimum");
+    const auto delivered_max =
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(
+                source.epsilon.complete_max) - 1,
+            "terminal physical primitive maximum");
+    if (delivered_max < delivered_min)
+      throw std::domain_error(
+          "terminal physical column has no primitive epsilon window");
+    StoredLineIntegrationOptions options;
+    options.delivered_epsilon =
+        {delivered_min, delivered_max};
+    options.required_complete_max = delivered_min;
+    options.imaginary_sign = rim;
+    options.certified_chart_scale_sign = binding.scale_sign;
+    options.divergent_cancellation = divergent_cancellation;
+    options.defer_divergent_groups = true;
+    try {
+      physical.push_back(integrate_stored_local_line(
+          source, primitive_begin, primitive_end, options));
+    } catch (const NativeIntegrationError& error) {
+      std::ostringstream detail;
+      detail << error.what() << "; arm=" << arm_name
+             << "; tile=" << tile_index
+             << "; physical_basis_column=" << column
+             << "; terminal_factorized=true";
+      NativeIntegrationError contextual(
+          error.code, error.id, detail.str());
+      contextual.absolute_power = error.absolute_power;
+      contextual.log_power = error.log_power;
+      contextual.epsilon_power = error.epsilon_power;
+      contextual.component = error.component;
+      throw contextual;
+    }
+  }
+
+  using DeferredKey = line_integration_detail::MonomialKey;
+  std::map<DeferredKey, SectorMonomialTag> deferred_tags;
+  std::vector<std::map<
+      DeferredKey,
+      const StoredLineIntegral::DeferredDivergentGroup*>>
+      deferred_by_column(physical.size());
+  FiniteLaurentMatrix<ComplexBall> physical_rows(1);
+  physical_rows.front().reserve(physical.size());
+  for (std::size_t column = 0; column < physical.size(); ++column) {
+    physical_rows.front().push_back(scalar_epsilon_frame(
+        physical[column].value,
+        "terminal physical line column"));
+    for (const auto& group :
+         physical[column].deferred_divergent_groups) {
+      const auto key =
+          line_integration_detail::monomial_key(group.tag);
+      deferred_tags.try_emplace(key, group.tag);
+      deferred_by_column[column].emplace(key, &group);
+    }
+  }
+  for (const auto& [key, tag] : deferred_tags) {
+    (void)tag;
+    FiniteLaurentVector<ComplexBall> row;
+    row.reserve(physical.size());
+    for (std::size_t column = 0; column < physical.size();
+         ++column) {
+      const auto found = deferred_by_column[column].find(key);
+      if (found != deferred_by_column[column].end()) {
+        row.push_back(found->second->coefficients);
+      } else {
+        row.emplace_back(
+            projected[column].epsilon,
+            std::vector<ComplexBall>(
+                projected[column].epsilon.width(),
+                ComplexBall(0)));
+      }
+    }
+    physical_rows.push_back(std::move(row));
+  }
+
+  // The projected columns already are G=(F*T)*P.  Apply their integrated
+  // functionals directly to the transformed match weights y.  This keeps the
+  // epsilon-lattice cancellations coefficientwise inside G; an adjoint solve
+  // B^-T*l is only a rearrangement of the same ill-conditioned endpoint
+  // inverse and cannot improve the physical sensitivity.
+  auto contracted = diagnostic_route == "adjoint"
+      ? match.adjoint_contract_terminal_acb_functionals(
+            physical_rows,
+            epsilon_contract.required_complete_max,
+            "terminal-adjoint-line-contraction:" + arm_name + ":" +
+                std::to_string(tile_index))
+      : direct_physical
+      ? match.contract_terminal_acb_physical_functionals(
+            physical_rows,
+            "terminal-direct-physical-line-contraction:" + arm_name + ":" +
+                std::to_string(tile_index))
+      : match.contract_terminal_acb_factorized_functionals(
+            physical_rows,
+            "terminal-factorized-line-contraction:" + arm_name + ":" +
+                std::to_string(tile_index));
+  if (contracted.size() != 1 + deferred_tags.size())
+    throw std::logic_error(
+        "terminal factorized line contraction changed its tagged row count");
+
+  StoredLineIntegral result;
+  for (const auto& column : physical)
+    accumulate_terminal_line_diagnostics(
+        result.diagnostics, column.diagnostics);
+  result.diagnostics.divergent_cancellation_mode =
+      divergent_cancellation.has_value()
+      ? "bounded-relative-acb" : "exact-singleton";
+  if (divergent_cancellation.has_value()) {
+    result.diagnostics.divergent_relative_tolerance =
+        divergent_cancellation->relative_tolerance_text;
+    result.diagnostics.divergent_cancellation_provenance =
+        divergent_cancellation->provenance;
+  }
+
+  std::size_t contracted_index = 1;
+  for (const auto& [key, tag] : deferred_tags) {
+    const auto& frame = contracted[contracted_index++];
+    std::vector<
+        const StoredLineIntegral::DeferredDivergentGroup*>
+        physical_groups(physical.size(), nullptr);
+    for (std::size_t column = 0; column < physical.size();
+         ++column) {
+      const auto found = deferred_by_column[column].find(key);
+      if (found != deferred_by_column[column].end())
+        physical_groups[column] = found->second;
+    }
+    const bool had_material = std::any_of(
+        physical_groups.begin(), physical_groups.end(),
+        [](const auto* group) {
+          return group != nullptr && group->had_material_input;
+        });
+    for (std::int64_t raw_power = frame.min_power();
+         raw_power <= frame.complete_max(); ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      const auto coefficient = frame.coefficient(power);
+      if (coefficient.is_zero()) continue;
+      bool bounded = false;
+      Magnitude scale = Magnitude::one();
+      Magnitude bound = Magnitude::zero();
+      const auto coefficient_upper =
+          Magnitude::upper_abs(coefficient);
+      if (divergent_cancellation.has_value()) {
+        scale = Magnitude::maximum(
+            Magnitude::one(),
+            terminal_factorized_divergent_scale(
+                match, physical_groups, power));
+        bound = scale *
+            divergent_cancellation->relative_tolerance;
+        bounded = coefficient_upper <= bound;
+      }
+      if (bounded) {
+        ++result.diagnostics
+              .bounded_cancelled_divergent_coefficients;
+        continue;
+      }
+      const bool uncertified = coefficient.contains_zero();
+      std::ostringstream detail;
+      detail << (uncertified
+          ? "factorized terminal divergent coefficient contains zero but is not certified by the active cancellation policy"
+          : "factorized terminal divergent coefficient is nonzero");
+      if (divergent_cancellation.has_value())
+        detail << "; coefficient_upper="
+               << coefficient_upper.dump_exact()
+               << "; contribution_scale_upper="
+               << scale.dump_exact()
+               << "; relative_tolerance="
+               << divergent_cancellation
+                      ->relative_tolerance_text
+               << "; tolerance_bound_upper="
+               << bound.dump_exact();
+      NativeIntegrationError error(
+          uncertified
+              ? NativeIntegrationErrorCode::UncertifiedCancellation
+              : NativeIntegrationErrorCode::DivergentEndpoint,
+          uncertified ? "E10" : "E2", detail.str());
+      error.absolute_power = tag.m.canonical;
+      error.log_power = tag.log_power;
+      error.epsilon_power = power;
+      error.component = 0;
+      throw error;
+    }
+    if (had_material)
+      ++result.diagnostics.cancelled_divergent_groups;
+  }
+
+  const auto& finite = contracted.front();
+  const auto complete_max = std::min(
+      epsilon_contract.requested.complete_max,
+      finite.complete_max());
+  const auto min_power = std::max(
+      epsilon_contract.requested.min_power,
+      finite.min_power());
+  if (min_power > complete_max ||
+      epsilon_contract.required_complete_max > complete_max) {
+    std::ostringstream detail;
+    detail
+        << "terminal factorized line does not cover its required output "
+           "epsilon window; requested=["
+        << epsilon_contract.requested.min_power << ","
+        << epsilon_contract.requested.complete_max
+        << "]; required_complete_max="
+        << epsilon_contract.required_complete_max
+        << "; projection_cap=" << projection_cap
+        << "; contracted=[" << finite.min_power() << ","
+        << finite.complete_max() << "]; projected=[";
+    for (std::size_t column = 0; column < projected.size();
+         ++column) {
+      if (column != 0) detail << ",";
+      detail << projected[column].epsilon.min_power << ":"
+             << projected[column].epsilon.complete_max;
+    }
+    detail << "]; physical_integrals=[";
+    for (std::size_t column = 0; column < physical.size();
+         ++column) {
+      if (column != 0) detail << ",";
+      detail << physical[column].value.epsilon.min_power << ":"
+             << physical[column].value.epsilon.complete_max;
+    }
+    detail << "]; physical_weights=[";
+    const auto& weights = match.terminal_acb_physical_weights();
+    for (std::size_t column = 0; column < weights.size();
+         ++column) {
+      if (column != 0) detail << ",";
+      detail << weights[column].min_power() << ":"
+             << weights[column].complete_max();
+    }
+    detail << "]";
+    throw std::domain_error(detail.str());
+  }
+  result.value.epsilon = {min_power, complete_max};
+  result.value.dimension = 1;
+  result.value.coefficients.reserve(
+      result.value.epsilon.width());
+  const auto jacobian = reverse_local_orientation
+      ? -binding.scale_numeric : binding.scale_numeric;
+  for (std::int64_t raw_power = min_power;
+       raw_power <= complete_max; ++raw_power)
+    result.value.coefficients.push_back(
+        finite.coefficient(
+            static_cast<std::int32_t>(raw_power)) *
+        jacobian);
+  result.value.error.guarantee = ErrorGuarantee::None;
+  result.value.error.provenance =
+      "stored Taylor truncation only; terminal factorized physical-basis "
+      "functional contraction; no unseen-tail majorant or full-local "
+      "certificate";
+  result.scope = LineIntegrationScope::StoredTruncation;
+  result.imaginary_sign = rim;
+  result.diagnostics.detail =
+      result.value.error.provenance;
+  return result;
+}
+
 class TransportPairObservableStream final {
  public:
   enum class Status { Active, Poisoned, Finishing, Finished, Aborted };
@@ -2836,6 +3698,7 @@ class TransportPairObservableStream final {
     std::shared_ptr<StoredLineResult> line;
     std::array<std::size_t, 2> tiles{0, 0};
     std::array<double, 2> arm_integration_ms{0.0, 0.0};
+    json::object conditioning;
     double elapsed_ms = 0.0;
   };
 
@@ -2928,18 +3791,30 @@ class TransportPairObservableStream final {
       if (domain_ == "acb") {
         acb_lease = std::make_unique<AcbPrecisionLease>(precision_bits_);
         ComplexBall::set_precision(precision_bits_);
-        const auto source =
-            std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
-                states_[side]->tile_sources().at(tile_index));
-        if (!source)
-          throw std::logic_error(
-              "transport-pair stream Acb source changed coefficient domain");
-        tile = integrate_transport_stored_row_tile<ComplexBall>(
-            precision_bits_, source, prepared_row,
-            states_[side]->plan_owner()->arm(
-                side == 0 ? "lower" : "upper"),
-            side == 0 ? "lower" : "upper", tile_index, epsilon_,
-            divergent_cancellation_);
+        const std::string arm_name =
+            side == 0 ? "lower" : "upper";
+        const auto& arm =
+            states_[side]->plan_owner()->arm(arm_name);
+        if (tile_index + 1 == expected_tiles_[side] &&
+            states_[side]->terminal_factorized_match() !=
+                nullptr) {
+          tile =
+              integrate_transport_terminal_factorized_acb_row_tile(
+                  precision_bits_, states_[side], prepared_row,
+                  arm, arm_name, tile_index, epsilon_,
+                  divergent_cancellation_);
+        } else {
+          const auto source =
+              std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
+                  states_[side]->tile_sources().at(tile_index));
+          if (!source)
+            throw std::logic_error(
+                "transport-pair stream Acb source changed coefficient domain");
+          tile = integrate_transport_stored_row_tile<ComplexBall>(
+              precision_bits_, source, prepared_row, arm,
+              arm_name, tile_index, epsilon_,
+              divergent_cancellation_);
+        }
       } else {
         const auto source =
             std::dynamic_pointer_cast<StoredLocal<Rational>>(
@@ -2955,6 +3830,9 @@ class TransportPairObservableStream final {
             divergent_cancellation_);
       }
       accumulators_[side].add(tile);
+      tile_values_[side].push_back(json::object{
+          {"tile", tile_index},
+          {"value", encode_transport_line_value_diagnostics(tile)}});
       const auto row_identity = required_string(
           prepared_row, "exact_identity");
       row_records_[side].push_back(json::object{
@@ -3072,6 +3950,10 @@ class TransportPairObservableStream final {
     output.line = std::move(line);
     output.tiles = expected_tiles_;
     output.arm_integration_ms = arm_integration_ms_;
+    output.conditioning = encode_transport_pair_conditioning_diagnostics(
+        arm_lines[0]->result(), arm_lines[1]->result(),
+        output.line->result(), std::move(tile_values_[0]),
+        std::move(tile_values_[1]));
     output.elapsed_ms = arm_integration_ms_[0] + arm_integration_ms_[1] +
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - finish_started).count();
@@ -3108,6 +3990,7 @@ class TransportPairObservableStream final {
   std::array<std::size_t, 2> expected_tiles_{0, 0};
   std::array<std::size_t, 2> next_tiles_{0, 0};
   std::array<StreamingStoredLineAccumulator, 2> accumulators_;
+  std::array<json::array, 2> tile_values_;
   std::array<json::array, 2> row_records_;
   std::array<double, 2> arm_integration_ms_{0.0, 0.0};
   Status status_ = Status::Active;
@@ -3165,19 +4048,35 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
               precision_bits, typed, prepared_row, retained, arm_name, tile,
               observable.epsilon, observable.divergent_cancellation);
         } else {
-          const auto typed =
-              std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
-          if (!typed)
-            throw std::logic_error(
-                "fused transport Acb source changed coefficient domain");
-          fused = integrate_transport_stored_row_tile<ComplexBall>(
-              precision_bits, typed, prepared_row, retained, arm_name, tile,
-              observable.epsilon, observable.divergent_cancellation);
+          if (tile + 1 == tile_sources.size() &&
+              transport_owner->terminal_factorized_match() !=
+                  nullptr) {
+            fused =
+                integrate_transport_terminal_factorized_acb_row_tile(
+                    precision_bits, transport_owner, prepared_row,
+                    retained, arm_name, tile, observable.epsilon,
+                    observable.divergent_cancellation);
+          } else {
+            const auto typed =
+                std::dynamic_pointer_cast<
+                    StoredLocal<ComplexBall>>(source);
+            if (!typed)
+              throw std::logic_error(
+                  "fused transport Acb source changed coefficient domain");
+            fused =
+                integrate_transport_stored_row_tile<ComplexBall>(
+                    precision_bits, typed, prepared_row, retained,
+                    arm_name, tile, observable.epsilon,
+                    observable.divergent_cancellation);
+          }
         }
         output.tile_integration_ms +=
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - fused_started)
                 .count();
+        output.tile_values.push_back(json::object{
+            {"tile", tile},
+            {"value", encode_transport_line_value_diagnostics(fused)}});
         accumulator.add(fused);
         ++output.tile_integrations;
         continue;
@@ -3243,6 +4142,10 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
                            tile + 1),
           line_request, plan, projected);
       output.tile_integration_ms += tile_line->elapsed_ms();
+      output.tile_values.push_back(json::object{
+          {"tile", tile},
+          {"value",
+           encode_transport_line_value_diagnostics(tile_line->result())}});
       if (transport_owner) {
         accumulator.add(tile_line->result());
       } else {

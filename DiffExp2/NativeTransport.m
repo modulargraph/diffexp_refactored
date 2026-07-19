@@ -386,7 +386,8 @@ bridgeNativeRegularChartScale[chart_Association, index_Integer] := Module[
     "NativeRationalScaleBridge" -> certificate|>]];
 
 bridgeNativeRegularPlanScales[plan_Association] := Module[
-  {charts = Lookup[plan, "Charts", None], bridged, records},
+  {charts = Lookup[plan, "Charts", None], bridged, records,
+   direction = Lookup[plan, "Direction", None], certifiedPoint},
   If[!ListQ[charts] || charts === {},
     err["E8", <|"Detail" ->
       "native algebraic-scale normalization requires a nonempty chart chain"|>]];
@@ -398,12 +399,42 @@ bridgeNativeRegularPlanScales[plan_Association] := Module[
   If[records === {}, plan,
     (* IncomingMatchPoint was built for the original affine scales.  The
        retained C++ planner owns fresh exact handoffs for the shrunken
-       charts; never let stale Wolfram points masquerade as that proof. *)
-    bridged = Map[Function[chart, KeyDrop[
-        If[KeyExistsQ[chart, "IncomingMatchPoint"],
-          Append[chart, "NativeCertifiedIncomingMatchPoint" ->
-            chart["IncomingMatchPoint"]], chart],
-        {"IncomingMatchPoint", "SymmetricMatch"}]], bridged];
+       charts; never let stale Wolfram points masquerade as that proof.
+       Certified algebraic execution still needs physical handoffs in the
+       genuine chart coordinates.  In particular, a singular receiver must
+       be rebalanced after the bridge: retaining its old boundary-biased
+       point can make the singular read arbitrarily ill-conditioned even
+       though the rational topology surrogate planned a safe interior hop. *)
+    bridged = MapIndexed[Function[{chart, index},
+        certifiedPoint = Lookup[chart, "IncomingMatchPoint", None];
+        If[First[index] > 1 && TrueQ[Lookup[chart, "Singular", False]],
+          If[!MemberQ[{-1, 1}, direction],
+            err["E8", <|"ChartIndex" -> First[index],
+              "Detail" -> "a certified singular handoff requires an explicit plan direction"|>]];
+          certifiedPoint =
+            DiffExp2`Transport`Private`singularMatchPoint[
+              bridged[[First[index] - 1, "Center"]],
+              bridged[[First[index] - 1, "Radius"]],
+              chart["Center"], chart["Radius"], direction];
+          If[certifiedPoint === None ||
+              !exactRealAlgebraicQ[certifiedPoint],
+            err["E8", <|"ChartIndex" -> First[index],
+              "LeftCenter" -> bridged[[First[index] - 1, "Center"]],
+              "RightCenter" -> chart["Center"],
+              "Detail" -> "post-bridge singular charts have no exact balanced certified handoff"|>]]];
+        KeyDrop[
+          If[certifiedPoint === None, chart,
+            Append[chart, "NativeCertifiedIncomingMatchPoint" ->
+              RootReduce[certifiedPoint]]],
+          {"IncomingMatchPoint", "SymmetricMatch"}]], bridged];
+    If[Environment["DE2_DIAGNOSTIC_CERTIFIED_GEOMETRY"] === "1",
+      Print["DE2 NATIVE CERTIFIED GEOMETRY ", InputForm[
+        MapIndexed[Function[{chart, index}, <|
+          "Index" -> First[index], "Center" -> chart["Center"],
+          "Radius" -> chart["Radius"],
+          "Singular" -> Lookup[chart, "Singular", False],
+          "CertifiedIncomingMatchPoint" -> Lookup[chart,
+            "NativeCertifiedIncomingMatchPoint", None]|>], bridged]]]];
     Join[plan, <|"Charts" -> bridged,
       "NativeRationalScaleBridges" -> records,
       "NativeHandoffAuthority" -> "CppExactTilePlanner"|>]]];
@@ -962,7 +993,7 @@ nativeReceivingBasis[system_Association, req_Association, threads_,
   {regular = TrueQ[Lookup[
       Lookup[system, "IndicialData", <||>], "Regular", False]],
    sequence, components, built, expectedTypes, targetSCC, attempt,
-   probePrints, shadowDecision},
+   probePrints, shadowDecision, attemptStart, shadowStart},
   If[regular,
     built = DiffExp2`Solve`SolveNativeRegularBasis[
       system, req, threads, forceMonolithicRegular, equationOwner];
@@ -996,6 +1027,7 @@ nativeReceivingBasis[system_Association, req_Association, threads_,
             "producer-certified-proactive-rational-shadow-v1",
           "selection_certificate" ->
             shadowDecision["Certificate"]|>]|>],
+      attemptStart = AbsoluteTime[];
       {attempt, probePrints} = nativeCatchDE2Buffered[
         DiffExp2`Solve`SolveNativeSCCBasis[system, req, threads]];
       built = Which[
@@ -1004,7 +1036,19 @@ nativeReceivingBasis[system_Association, req_Association, threads_,
         nativeAcbCasePFailureQ[attempt],
           nativeReplayPrintRecords[
             Select[probePrints, !nativeDE2ErrorPrintRecordQ[#] &]];
-          nativeRationalShadowBasis[system, req, threads, targetSCC],
+          If[Environment["DE2_NATIVE_ACB_SHADOW_TRACE"] === "1",
+            Print["DE2 NATIVE SCC ACB SHADOW TRIGGER elapsedSeconds=",
+              N[AbsoluteTime[] - attemptStart],
+              " center=", InputForm[Lookup[system, "Center", None]],
+              " failure=", InputForm[attempt]]];
+          shadowStart = AbsoluteTime[];
+          built = nativeRationalShadowBasis[
+            system, req, threads, targetSCC];
+          If[Environment["DE2_NATIVE_ACB_SHADOW_TRACE"] === "1",
+            Print["DE2 NATIVE SCC RATIONAL SHADOW DONE elapsedSeconds=",
+              N[AbsoluteTime[] - shadowStart],
+              " center=", InputForm[Lookup[system, "Center", None]]]];
+          built,
         True,
           nativeReplayPrintRecords[probePrints];
           Throw[attempt, "DiffExp2Error"]]];
@@ -1359,59 +1403,114 @@ nativePreparedRowsMinimumShift[rows_List] := Module[
       "prepared native integrand rows do not expose signed epsilon shifts"|>]];
   Min[shifts]];
 
-(* A retained transport state is the authority for the epsilon rectangle of
-   every live tile source.  Receiving-basis envelopes are only preparation
-   estimates: singular matching and physical-frame restoration can translate
-   their two edges by different amounts.  Keep this compact metadata outside
-   the row identity, then use it to prepare exactly the consumer-visible
-   multiplier prefix after the march. *)
-nativeTransportTileSourceEpsilonWindows[state_Association] := Module[
-  {raw = Lookup[state, "tile_source_epsilon",
+(* A retained transport state is the authority for every local on which a
+   prepared observable row will actually act.  Usually that is the published
+   tile source.  A factorized terminal consumer instead acts on every retained
+   physical basis column before applying T, P, and y, so it publishes those
+   source windows and the structural minimum shift through that factorization.
+   The row producer uses the same certificate as the native consumer and
+   cannot accidentally size a prefix against the unused materialized proxy. *)
+nativeTransportTileConsumerEpsilonContracts[state_Association] := Module[
+  {raw = Lookup[state, "tile_consumer_epsilon",
+      Lookup[state, "TileConsumerEpsilon", None]],
+   legacy = Lookup[state, "tile_source_epsilon",
       Lookup[state, "TileSourceEpsilon", None]],
-   tiles = Lookup[state, "tiles", Lookup[state, "Tiles", None]]},
+   factorized = TrueQ[Lookup[state, "terminal_factorized_match",
+      Lookup[state, "TerminalFactorizedMatch", False]]],
+   tiles = Lookup[state, "tiles", Lookup[state, "Tiles", None]],
+   validWindowQ},
+  validWindowQ[window_] := AssociationQ[window] &&
+    Sort[Keys[window]] === {"max", "min"} &&
+    IntegerQ[window["min"]] && IntegerQ[window["max"]] &&
+    window["min"] <= window["max"];
+  If[raw === None && !factorized && ListQ[legacy],
+    raw = <|"sources" -> {#}, "output_min_shift" -> 0|> & /@ legacy];
   If[!IntegerQ[tiles] || tiles < 1 || !ListQ[raw] ||
       Length[raw] =!= tiles ||
-      !AllTrue[raw, Function[window,
-        AssociationQ[window] &&
-          Sort[Keys[window]] === {"max", "min"} &&
-          IntegerQ[window["min"]] && IntegerQ[window["max"]] &&
-          window["min"] <= window["max"]]],
+      !AllTrue[raw, Function[contract,
+        AssociationQ[contract] &&
+          Sort[Keys[contract]] === {"output_min_shift", "sources"} &&
+          IntegerQ[contract["output_min_shift"]] &&
+          ListQ[contract["sources"]] && contract["sources"] =!= {} &&
+          AllTrue[contract["sources"], validWindowQ]]],
     err["E5", <|"TransportState" ->
         KeyTake[state, {"transport_state", "TransportState", "arm",
-          "Arm", "tiles", "Tiles", "tile_source_epsilon",
+          "Arm", "tiles", "Tiles", "terminal_factorized_match",
+          "TerminalFactorizedMatch", "tile_consumer_epsilon",
+          "TileConsumerEpsilon", "tile_source_epsilon",
           "TileSourceEpsilon"}],
-      "Detail" -> "retained transport state did not expose one exact epsilon window per tile source"|>]];
-  <|"Min" -> #["min"], "CompleteMax" -> #["max"]|> & /@ raw];
+      "Detail" -> "retained transport state did not expose one exact consumer epsilon contract per tile"|>]];
+  <|"Sources" ->
+      (<|"Min" -> #["min"], "CompleteMax" -> #["max"]|> & /@
+        #["sources"]),
+    "OutputMinimumShift" -> #["output_min_shift"]|> & /@ raw];
 
-nativeConsumerRowRecipe[recipe_Association, sourceWindow_Association,
+nativeConsumerRowRecipe[recipe_Association, sourceContract_,
     observable_Association, primitiveHalo_Integer] := Module[
-  {shape = Lookup[recipe, "Shape", None], shapeWindow, sourceMin,
-   sourceMax, sourceWidth, shift, requestedMax, projectionCap,
-   relativeNeeded, requiredWidth, currentWidth, widenedMax},
+  {shape = Lookup[recipe, "Shape", None], shapeWindow, sourceWindows,
+   outputMinimumShift, sourceMins, sourceMaxs, sourceWidths, shift,
+   requestedMax, requiredMax, projectionCap, requiredProjectionCap,
+   relativeNeeded, requiredRelativeNeeded, desiredWidths,
+   minimumWidths, retainedWidths, requiredWidth, currentWidth, widenedMax},
   shapeWindow = If[AssociationQ[shape],
     Lookup[shape, "EpsWindow", None], None];
-  sourceMin = Lookup[sourceWindow, "Min", None];
-  sourceMax = Lookup[sourceWindow, "CompleteMax", None];
+  If[AssociationQ[sourceContract] &&
+      IntegerQ[Lookup[sourceContract, "Min", None]] &&
+      IntegerQ[Lookup[sourceContract, "CompleteMax", None]],
+    sourceWindows = {sourceContract};
+    outputMinimumShift = 0,
+    sourceWindows = If[AssociationQ[sourceContract],
+      Lookup[sourceContract, "Sources", None], None];
+    outputMinimumShift = If[AssociationQ[sourceContract],
+      Lookup[sourceContract, "OutputMinimumShift", None], None]];
+  sourceMins = If[ListQ[sourceWindows],
+    Lookup[sourceWindows, "Min", None], None];
+  sourceMaxs = If[ListQ[sourceWindows],
+    Lookup[sourceWindows, "CompleteMax", None], None];
   shift = Lookup[observable, "MinimumEpsilonShift", None];
   requestedMax = Lookup[Lookup[observable, "Epsilon", <||>],
     "Max", None];
+  requiredMax = Lookup[Lookup[observable, "Epsilon", <||>],
+    "RequiredCompleteMax", None];
   If[!AssociationQ[shapeWindow] ||
       !IntegerQ[Lookup[shapeWindow, "Min", None]] ||
       !IntegerQ[Lookup[shapeWindow, "CompleteMax", None]] ||
       shapeWindow["Min"] > shapeWindow["CompleteMax"] ||
-      !IntegerQ[sourceMin] || !IntegerQ[sourceMax] ||
-      sourceMin > sourceMax || !IntegerQ[shift] ||
-      !IntegerQ[requestedMax] || !IntegerQ[primitiveHalo] ||
+      !ListQ[sourceWindows] || sourceWindows === {} ||
+      !AllTrue[sourceWindows, AssociationQ] ||
+      !AllTrue[sourceMins, IntegerQ] ||
+      !AllTrue[sourceMaxs, IntegerQ] ||
+      !And @@ Thread[sourceMins <= sourceMaxs] ||
+      !IntegerQ[outputMinimumShift] || !IntegerQ[shift] ||
+      !IntegerQ[requestedMax] || !IntegerQ[requiredMax] ||
+      requiredMax > requestedMax || !IntegerQ[primitiveHalo] ||
       primitiveHalo < 0,
-    err["E6", <|"Recipe" -> recipe, "SourceWindow" -> sourceWindow,
+    err["E6", <|"Recipe" -> recipe, "SourceContract" -> sourceContract,
       "Observable" -> KeyTake[observable,
         {"Identity", "Epsilon", "MinimumEpsilonShift"}],
       "PrimitiveHalo" -> primitiveHalo,
       "Detail" -> "native consumer row sizing requires exact recipe, source, shift, and output windows"|>]];
-  sourceWidth = sourceMax - sourceMin + 1;
-  projectionCap = requestedMax + primitiveHalo;
-  relativeNeeded = projectionCap - (sourceMin + shift);
-  requiredWidth = Min[sourceWidth, Max[1, relativeNeeded + 1]];
+  sourceWidths = sourceMaxs - sourceMins + 1;
+  projectionCap =
+    requestedMax - outputMinimumShift + primitiveHalo;
+  requiredProjectionCap =
+    requiredMax - outputMinimumShift + primitiveHalo;
+  relativeNeeded = projectionCap - (sourceMins + shift);
+  requiredRelativeNeeded =
+    requiredProjectionCap - (sourceMins + shift);
+  desiredWidths = Max[1, # + 1] & /@ relativeNeeded;
+  minimumWidths = Max[1, # + 1] & /@ requiredRelativeNeeded;
+  If[!And @@ Thread[minimumWidths <= sourceWidths],
+    err["E6", <|"Recipe" -> recipe, "SourceContract" -> sourceContract,
+      "Observable" -> KeyTake[observable,
+        {"Identity", "Epsilon", "MinimumEpsilonShift"}],
+      "PrimitiveHalo" -> primitiveHalo,
+      "RequiredProjectionCompleteCap" -> requiredProjectionCap,
+      "AvailableSourceCoefficientCounts" -> sourceWidths,
+      "RequiredSourceCoefficientCounts" -> minimumWidths,
+      "Detail" -> "live tile source is too short for the regulated primitive consumer; retry transport with a wider epsilon reservoir"|>]];
+  retainedWidths = MapThread[Min, {sourceWidths, desiredWidths}];
+  requiredWidth = Max[retainedWidths];
   currentWidth =
     shapeWindow["CompleteMax"] - shapeWindow["Min"] + 1;
   If[currentWidth >= requiredWidth, Return[recipe, Module]];
@@ -2010,6 +2109,11 @@ nativeContractStoredPairObservableStreamed[lowerState_Association,
       nativeStageTiming["paired-stream-finish-done"];
       If[AssociationQ[response] &&
           Lookup[response, "status", "error"] === "ok",
+        If[Environment["DE2_NATIVE_STAGE_TIMING"] === "1",
+          nativeStageTiming["paired-conditioning=",
+            InputForm[Lookup[
+              First[Lookup[response, "lines", {<||>}]],
+              "conditioning", None]]]];
         completed = True];
       response,
       tag], cleanup[]; Abort[]],
@@ -2046,13 +2150,20 @@ nativeChunkedObservableSummary[responses_List, chunkSize_Integer,
 
 nativeStreamTransportArm[atlas_Association, data_Association,
     arm_String, epsilon_Association, checkpointRoot_String,
-    refinement_Association] := Module[
+    refinement_Association, diagnosticContext_:<||>] := Module[
   {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
    valueSolvers = data["ValueSolvers"], tiles = {atlas["Anchor"]},
    ownerRecords = Lookup[data, "OwnerRecords", {}], hopEpsilon,
    residualRequired,
    valueSolver, valueResponse, basis, response, next, output,
-   fallbackEquationOwner},
+   fallbackEquationOwner, diagnosticPath, diagnosticIdentity,
+   diagnosticSaved, diagnosticManifest, diagnosticManifestPath,
+   diagnosticLocalReference, diagnosticPlanReference,
+   posthopPath, posthopIdentity, posthopSaved, posthopManifest,
+   posthopManifestPath,
+   terminalMatchDigitsText =
+     Environment["DE2_DIAGNOSTIC_TERMINAL_MATCH_DIGITS"],
+   terminalMatchDigits, hopRefinement},
   If[!ListQ[valueSolvers] || Length[valueSolvers] =!= Length[systems],
     err["E6", <|"Arm" -> arm,
       "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
@@ -2077,9 +2188,31 @@ nativeStreamTransportArm[atlas_Association, data_Association,
      matching clearance. *)
   hopEpsilon = <|"min" -> epsilon["min"], "max" -> epsilon["max"],
     "required_complete_max" -> residualRequired|>;
+  terminalMatchDigits = Which[
+    !StringQ[terminalMatchDigitsText] ||
+        StringLength[StringTrim[terminalMatchDigitsText]] == 0,
+      None,
+    StringMatchQ[StringTrim[terminalMatchDigitsText],
+      DigitCharacter ..],
+      FromDigits[StringTrim[terminalMatchDigitsText]],
+    True,
+      err["E8", <|
+        "Value" -> terminalMatchDigitsText,
+        "Detail" ->
+          "DE2_DIAGNOSTIC_TERMINAL_MATCH_DIGITS must be a positive integer"|>]];
+  If[IntegerQ[terminalMatchDigits] && terminalMatchDigits < 1,
+    err["E8", <|
+      "Value" -> terminalMatchDigits,
+      "Detail" ->
+        "DE2_DIAGNOSTIC_TERMINAL_MATCH_DIGITS must be a positive integer"|>]];
   output = Catch[
     Do[
       basis = None;
+      hopRefinement = If[
+        index === Length[systems] && IntegerQ[terminalMatchDigits],
+        Join[refinement, <|"relative_tolerance" ->
+          ("1e-" <> ToString[terminalMatchDigits])|>],
+        refinement];
       valueSolver = valueSolvers[[index]];
       fallbackEquationOwner = If[ListQ[ownerRecords] &&
           index <= Length[ownerRecords] &&
@@ -2119,11 +2252,87 @@ nativeStreamTransportArm[atlas_Association, data_Association,
           " capability=", Lookup[
             Lookup[basis, "NativeSummary", <||>],
             "execution_capability", Lookup[
-              Lookup[basis, "NativeSummary", <||>],
+            Lookup[basis, "NativeSummary", <||>],
               "selection_capability", None]]];
+        diagnosticPath =
+          Environment["DE2_DIAGNOSTIC_PREHOP_CHECKPOINT"];
+        If[StringQ[diagnosticPath] && StringLength[diagnosticPath] > 0 &&
+            index === Length[systems],
+          diagnosticPath = ExpandFileName[diagnosticPath];
+          If[!DirectoryQ[DirectoryName[diagnosticPath]],
+            Quiet[Check[CreateDirectory[DirectoryName[diagnosticPath],
+              CreateIntermediateDirectories -> True], Null]]];
+          diagnosticIdentity = nativeCheckpointIdentity[
+            "de2-native-prehop-diagnostic-", <|
+              "Arm" -> arm, "Index" -> index,
+              "PlanCheckpointIdentity" -> Lookup[atlas["Plan"],
+                "checkpoint_identity", None],
+              "IncomingCheckpointIdentity" -> Lookup[current,
+                "checkpoint_identity", None],
+              "BasisCheckpointIdentities" ->
+                Lookup[basis["Columns"], "checkpoint_identity"],
+              "Epsilon" -> hopEpsilon,
+              "Refinement" -> hopRefinement|>];
+          diagnosticSaved =
+            DiffExp2`CppBackend`SavePersistentCheckpoint[
+              atlas["Session"], diagnosticPath, diagnosticIdentity];
+          If[FailureQ[diagnosticSaved] ||
+              !AssociationQ[diagnosticSaved] ||
+              Lookup[diagnosticSaved, "status", "error"] =!= "ok" ||
+              Lookup[diagnosticSaved, "checkpoint_identity", None] =!=
+                diagnosticIdentity,
+            Print["DE2 NATIVE PREHOP CHECKPOINT SKIPPED path=",
+              diagnosticPath, " failure=", InputForm[diagnosticSaved]],
+            diagnosticLocalReference = Function[handle, <|
+              "local" -> Lookup[handle, "local",
+                Lookup[handle, "Local", None]],
+              "checkpoint_identity" -> Lookup[handle,
+                "checkpoint_identity",
+                Lookup[handle, "CheckpointIdentity", None]]|>];
+            diagnosticPlanReference = <|
+              "tile_plan" -> Lookup[atlas["Plan"], "tile_plan",
+                Lookup[atlas["Plan"], "TilePlan", None]],
+              "checkpoint_identity" -> Lookup[atlas["Plan"],
+                "checkpoint_identity",
+                Lookup[atlas["Plan"], "CheckpointIdentity", None]]|>;
+            diagnosticManifest = Join[<|
+              "DiagnosticCheckpointPath" -> diagnosticPath,
+              "CheckpointPath" -> diagnosticPath,
+              "CheckpointIdentity" -> diagnosticIdentity,
+              (* The native checkpoint is the state authority.  This sidecar
+                 only rebinds stable opaque tokens to the restored session;
+                 embedding NativeSummary/operator payloads here previously
+                 inflated one banana diagnostic manifest to 1.8 GB. *)
+              "Plan" -> diagnosticPlanReference,
+              "Arm" -> arm, "Index" -> index,
+              "Anchor" -> diagnosticLocalReference[atlas["Anchor"]],
+              "TileSources" ->
+                (diagnosticLocalReference /@ tiles),
+              "Basis" ->
+                (diagnosticLocalReference /@ basis["Columns"]),
+              "Incoming" -> diagnosticLocalReference[current],
+              "Epsilon" -> hopEpsilon,
+              "CheckpointRoot" -> checkpointRoot,
+              "Refinement" -> hopRefinement|>, diagnosticContext];
+            diagnosticManifestPath =
+              diagnosticPath <> ".manifest.wl";
+            If[!TrueQ[Quiet[Check[
+                  Put[diagnosticManifest, diagnosticManifestPath]; True,
+                  False]]],
+              Print["DE2 NATIVE PREHOP MANIFEST SKIPPED path=",
+                diagnosticManifestPath]];
+            Print["DE2 NATIVE PREHOP CHECKPOINT path=", diagnosticPath,
+              " manifest=", diagnosticManifestPath,
+              " identity=", diagnosticIdentity]]];
         response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
           atlas["Plan"], arm, index, basis["Columns"], current,
-          hopEpsilon, checkpointRoot, refinement]];
+          hopEpsilon, checkpointRoot, hopRefinement]];
+      If[Environment["DE2_DIAGNOSTIC_TERMINAL_MATCH"] === "1" &&
+          index === Length[systems] && AssociationQ[response],
+        Print["DE2 NATIVE TERMINAL MATCH ",
+          InputForm[Lookup[
+            Lookup[response, "match_reference", <||>],
+            "diagnostic_native_match_summary", None]]]];
       If[FailureQ[response] || !AssociationQ[response] ||
           Lookup[response, "status", "error"] =!= "ok",
         If[AssociationQ[basis],
@@ -2142,6 +2351,67 @@ nativeStreamTransportArm[atlas_Association, data_Association,
           "BackendResponse" -> response,
           "Detail" -> "streamed native transport hop returned a malformed consumed-local result"|>]];
       AppendTo[tiles, next];
+      posthopPath =
+        Environment["DE2_DIAGNOSTIC_POSTHOP_CHECKPOINT"];
+      If[StringQ[posthopPath] && StringLength[posthopPath] > 0 &&
+          index === Length[systems],
+        posthopPath = ExpandFileName[posthopPath];
+        If[!DirectoryQ[DirectoryName[posthopPath]],
+          Quiet[Check[CreateDirectory[DirectoryName[posthopPath],
+            CreateIntermediateDirectories -> True], Null]]];
+        posthopIdentity = nativeCheckpointIdentity[
+          "de2-native-posthop-diagnostic-", <|
+            "Arm" -> arm, "Index" -> index,
+            "PlanCheckpointIdentity" -> Lookup[atlas["Plan"],
+              "checkpoint_identity", None],
+            "TerminalLocalCheckpointIdentity" -> Lookup[next,
+              "checkpoint_identity", None],
+            "Epsilon" -> hopEpsilon,
+            "Refinement" -> hopRefinement|>];
+        posthopSaved =
+          DiffExp2`CppBackend`SavePersistentCheckpoint[
+            atlas["Session"], posthopPath, posthopIdentity];
+        If[FailureQ[posthopSaved] ||
+            !AssociationQ[posthopSaved] ||
+            Lookup[posthopSaved, "status", "error"] =!= "ok" ||
+            Lookup[posthopSaved, "checkpoint_identity", None] =!=
+              posthopIdentity,
+          Print["DE2 NATIVE POSTHOP CHECKPOINT SKIPPED path=",
+            posthopPath, " failure=", InputForm[posthopSaved]],
+          posthopManifest = Join[<|
+            "PostHop" -> True,
+            "CheckpointPath" -> posthopPath,
+            "CheckpointIdentity" -> posthopIdentity,
+            "Plan" -> <|
+              "tile_plan" -> Lookup[atlas["Plan"], "tile_plan",
+                Lookup[atlas["Plan"], "TilePlan", None]],
+              "checkpoint_identity" -> Lookup[atlas["Plan"],
+                "checkpoint_identity",
+                Lookup[atlas["Plan"], "CheckpointIdentity", None]]|>,
+            "Arm" -> arm,
+            "Anchor" -> <|
+              "local" -> Lookup[atlas["Anchor"], "local",
+                Lookup[atlas["Anchor"], "Local", None]],
+              "checkpoint_identity" -> Lookup[atlas["Anchor"],
+                "checkpoint_identity",
+                Lookup[atlas["Anchor"], "CheckpointIdentity", None]]|>,
+            "TileSources" -> (<|
+                "local" -> Lookup[#, "local", Lookup[#, "Local", None]],
+                "checkpoint_identity" -> Lookup[#,
+                  "checkpoint_identity",
+                  Lookup[#, "CheckpointIdentity", None]]|> & /@ tiles),
+            "Epsilon" -> hopEpsilon,
+            "CheckpointRoot" -> checkpointRoot,
+            "Refinement" -> hopRefinement|>, diagnosticContext];
+          posthopManifestPath = posthopPath <> ".manifest.wl";
+          If[!TrueQ[Quiet[Check[
+                Put[posthopManifest, posthopManifestPath]; True,
+                False]]],
+            Print["DE2 NATIVE POSTHOP MANIFEST SKIPPED path=",
+              posthopManifestPath]];
+          Print["DE2 NATIVE POSTHOP CHECKPOINT path=", posthopPath,
+            " manifest=", posthopManifestPath,
+            " identity=", posthopIdentity]]];
       current = next;
       basis = None;
       ClearSystemCache[];
@@ -2308,6 +2578,22 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       "TailPolicy", "MinimumEpsilonShift",
       "DivergentCancellation"}] &, prepared]|>];
   output = Catch[
+    If[deferredReceivingBases &&
+        Environment["DE2_DIAGNOSTIC_STREAM_ARM"] === "upper",
+      streamedArms = <|
+        "upper" -> nativeStreamTransportArm[workingAtlas,
+          workingAtlas["Upper"], "upper", epsilon,
+          checkpointRoot <> ":march", refinement, <|
+            "PreparedObservables" -> prepared,
+            "RowRecipes" -> upperRowRecipes,
+            "Variable" -> var,
+            "Domain" -> workingAtlas["Domain"],
+            "ObservableCheckpointRoot" -> checkpointRoot|>]|>;
+      err["E5", <|
+        "DiagnosticArm" -> "upper",
+        "StreamedArm" -> streamedArms["upper"],
+        "Detail" ->
+          "requested upper-arm-only diagnostic completed before state publication"|>]];
     march = If[deferredReceivingBases,
       streamedArms = <|
         "lower" -> nativeStreamTransportArm[workingAtlas,
@@ -2348,9 +2634,9 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
         err["E5", <|"BackendResponse" -> march,
         "Detail" -> "two-arm observable-batch march did not return exact lower/upper retained states"|>]];
     lowerSourceEpsilon =
-      nativeTransportTileSourceEpsilonWindows[lowerState];
+      nativeTransportTileConsumerEpsilonContracts[lowerState];
     upperSourceEpsilon =
-      nativeTransportTileSourceEpsilonWindows[upperState];
+      nativeTransportTileConsumerEpsilonContracts[upperState];
     If[Length[lowerSourceEpsilon] =!= Length[lowerRowRecipes] ||
         Length[upperSourceEpsilon] =!= Length[upperRowRecipes],
       err["E5", <|"LowerRecipeCount" -> Length[lowerRowRecipes],

@@ -416,7 +416,7 @@ bool run_domain(const std::string& domain) {
   const auto& embedded_native = lower_planned->at("native_match").as_object();
   const auto expected_native_schema = domain == "rational"
       ? "diffexp2-retained-exact-rational-match-v2"
-      : "diffexp2-retained-acb-match-v2";
+      : "diffexp2-retained-acb-match-v4";
 
   json::object corruption{{"status", "ok"}};
   if (domain == "rational") {

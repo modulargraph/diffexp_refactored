@@ -63,6 +63,10 @@ parse_checkpoint_retained_arm(
     const json::value& raw,
     const std::unordered_map<std::string,
                              std::shared_ptr<PreparedChartBase>>& charts,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<RegularPhysicalEquationOwnerBase>>&
+        regular_equation_owners,
     const std::unordered_map<std::string,
                              std::shared_ptr<CompositeSCCChartBase>>& sccs,
     const char* label) {
@@ -118,10 +122,17 @@ parse_checkpoint_retained_arm(
             std::string(label) +
             " references an absent composite-SCC owner");
       owner = found->second;
+    } else if (handle.starts_with("eq:")) {
+      const auto found = regular_equation_owners.find(handle);
+      if (found == regular_equation_owners.end())
+        throw std::invalid_argument(
+            std::string(label) +
+            " references an absent regular-equation owner");
+      owner = found->second;
     } else {
       throw std::invalid_argument(
           std::string(label) +
-          " chart binding is neither a prepared-chart nor composite-SCC handle");
+          " chart binding is neither a prepared-chart, regular-equation, nor composite-SCC handle");
     }
     const auto& planning = as_object(
         raw_planning[index], "checkpoint tile planning chart");
@@ -152,6 +163,10 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
     const json::value& raw,
     const std::unordered_map<std::string,
                              std::shared_ptr<PreparedChartBase>>& charts,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<RegularPhysicalEquationOwnerBase>>&
+        regular_equation_owners,
     const std::unordered_map<std::string,
                              std::shared_ptr<CompositeSCCChartBase>>& sccs) {
   const auto& object = as_object(raw, "checkpoint retained tile plan");
@@ -178,7 +193,7 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
         object.at("division_order"),
         "checkpoint single-arm tile division order");
     auto [arm_request, bindings] = parse_checkpoint_retained_arm(
-        object.at("arm"), charts, sccs,
+        object.at("arm"), charts, regular_equation_owners, sccs,
         "checkpoint retained single tile arm");
     ExactPathPlanOptions options;
     options.division_order = division_order;
@@ -254,9 +269,11 @@ std::shared_ptr<StoredTilePlan> restore_checkpoint_tile_plan_record(
   const auto division_order = as_u32(
       object.at("division_order"), "checkpoint tile division order");
   auto [lower_request, lower_bindings] = parse_checkpoint_retained_arm(
-      object.at("lower"), charts, sccs, "checkpoint lower tile arm");
+      object.at("lower"), charts, regular_equation_owners, sccs,
+      "checkpoint lower tile arm");
   auto [upper_request, upper_bindings] = parse_checkpoint_retained_arm(
-      object.at("upper"), charts, sccs, "checkpoint upper tile arm");
+      object.at("upper"), charts, regular_equation_owners, sccs,
+      "checkpoint upper tile arm");
   if (lower_bindings.front().handle != upper_bindings.front().handle)
     throw std::invalid_argument(
         "checkpoint independent tile arms lost their shared anchor owner");
@@ -748,7 +765,9 @@ restore_checkpoint_planned_match_hop_record(
   if (native_schema == "diffexp2-retained-exact-rational-match-v2") {
     native_match = restore_checkpoint_exact_match_record(
         native_record, basis, incoming);
-  } else if (native_schema == "diffexp2-retained-acb-match-v2") {
+  } else if (native_schema == "diffexp2-retained-acb-match-v2" ||
+             native_schema == "diffexp2-retained-acb-match-v3" ||
+             native_schema == "diffexp2-retained-acb-match-v4") {
     const auto saturation = native_acb_saturation_binding(
         plan, source_session_configuration_identity, arm_name, match_index,
         checkpoint_identity, compact_handoff);
@@ -853,7 +872,10 @@ restore_checkpoint_transport_arm_state_record(
        "provenance", "elapsed_ms", "runtime_stats"},
       "checkpoint retained transport-arm state");
   const auto checkpoint_schema = required_string(object, "schema");
+  const bool terminal_factorized_certificate =
+      checkpoint_schema == "diffexp2-retained-transport-arm-state-v6";
   const bool consumed_certificate_only =
+      terminal_factorized_certificate ||
       checkpoint_schema == "diffexp2-retained-transport-arm-state-v5";
   const bool consumed_compact =
       checkpoint_schema == "diffexp2-retained-transport-arm-state-v4";
@@ -876,7 +898,14 @@ restore_checkpoint_transport_arm_state_record(
   const auto& provenance = as_object(
       object.at("provenance"),
       "checkpoint transport-arm state provenance");
-  if (consumed_certificate_only)
+  if (terminal_factorized_certificate)
+    require_exact_keys(
+        provenance,
+        {"schema", "checkpoint_identity", "tile_plan", "arm",
+         "tile_checkpoint_chain", "terminal_match", "epsilon",
+         "refinement"},
+        "checkpoint terminal-factorized transport-arm state provenance");
+  else if (consumed_certificate_only)
     require_exact_keys(
         provenance,
         {"schema", "checkpoint_identity", "tile_plan", "arm",
@@ -891,7 +920,9 @@ restore_checkpoint_transport_arm_state_record(
         "checkpoint transport-arm state provenance");
   if (required_string(provenance, "schema") !=
           (compact_provenance
-               ? (consumed_certificate_only
+               ? (terminal_factorized_certificate
+                      ? "diffexp2-retained-native-transport-arm-state-v5"
+                      : consumed_certificate_only
                       ? "diffexp2-retained-native-transport-arm-state-v4"
                       : consumed_compact
                       ? "diffexp2-retained-native-transport-arm-state-v3"
@@ -1075,11 +1106,40 @@ restore_checkpoint_transport_arm_state_record(
     const auto elapsed_ms = checkpoint_nonnegative_double(
         object.at("elapsed_ms"),
         "checkpoint certificate-only transport elapsed time");
+    std::shared_ptr<StoredPlannedMatchHop>
+        terminal_factorized_match;
+    if (terminal_factorized_certificate) {
+      const auto& terminal_reference = as_object(
+          provenance.at("terminal_match"),
+          "checkpoint terminal factorized match reference");
+      require_exact_keys(
+          terminal_reference,
+          {"match", "checkpoint_identity", "provenance_identity"},
+          "checkpoint terminal factorized match reference");
+      const auto found = matches.find(
+          required_string(terminal_reference, "match"));
+      if (found == matches.end())
+        throw std::invalid_argument(
+            "checkpoint terminal factorized match owner is missing");
+      terminal_factorized_match =
+          std::dynamic_pointer_cast<StoredPlannedMatchHop>(
+              found->second);
+      if (!terminal_factorized_match ||
+          required_string(
+              terminal_reference, "checkpoint_identity") !=
+              terminal_factorized_match->checkpoint_identity() ||
+          required_string(
+              terminal_reference, "provenance_identity") !=
+              terminal_factorized_match->provenance_identity())
+        throw std::invalid_argument(
+            "checkpoint terminal factorized match reference is stale or has the wrong kind");
+    }
     auto state = std::make_shared<StoredTransportArmState>(
         handle, checkpoint_identity, arm_name, plan, anchor,
         std::move(tile_sources), work_epsilon,
         public_required_complete_max, match_required_complete_max,
-        refinement, elapsed_ms);
+        refinement, elapsed_ms,
+        std::move(terminal_factorized_match));
     if (state->provenance_identity() != provenance_identity)
       throw std::invalid_argument(
           "restored certificate-only transport state changed provenance");
@@ -1963,21 +2023,36 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
     }
   };
   if (compact_single_transport) {
-    if (compact_v2)
-      require_exact_keys(
-          aggregate,
-          {"kind", "combination", "request_index", "observable_identity",
-           "observable_checkpoint_identity", "transport_state",
-           "output_epsilon_contract", "tail_policy", "projection_mode",
-           "rows", "tile_count"},
-          "checkpoint compact transport observable recipe");
-    else
+    has_aggregate_divergent_cancellation =
+        aggregate.if_contains("divergent_cancellation") != nullptr;
+    if (compact_v2) {
+      if (has_aggregate_divergent_cancellation)
+        require_exact_keys(
+            aggregate,
+            {"kind", "combination", "request_index", "observable_identity",
+             "observable_checkpoint_identity", "transport_state",
+             "output_epsilon_contract", "tail_policy", "projection_mode",
+             "divergent_cancellation", "rows", "tile_count"},
+            "checkpoint compact transport observable recipe");
+      else
+        require_exact_keys(
+            aggregate,
+            {"kind", "combination", "request_index", "observable_identity",
+             "observable_checkpoint_identity", "transport_state",
+             "output_epsilon_contract", "tail_policy", "projection_mode",
+             "rows", "tile_count"},
+            "checkpoint compact transport observable recipe");
+    } else {
       require_exact_keys(
           aggregate,
           {"kind", "combination", "request_index", "observable_identity",
            "observable_checkpoint_identity", "transport_state",
            "output_epsilon_contract", "tail_policy", "rows", "tile_count"},
           "checkpoint legacy compact transport observable recipe");
+      if (has_aggregate_divergent_cancellation)
+        throw std::invalid_argument(
+            "legacy compact transport observable cannot name a bounded divergent-cancellation policy");
+    }
     if (required_string(aggregate, "kind") !=
             "transport-state-observable-arm" ||
         required_string(aggregate, "combination") !=
@@ -2022,6 +2097,11 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
       require_transport_projection_mode(
           aggregate, *transport_tail_policy,
           "checkpoint compact transport observable recipe");
+    if (has_aggregate_divergent_cancellation)
+      aggregate_bounded_divergent_cancellation =
+          parse_bounded_divergent_cancellation(
+              aggregate.at("divergent_cancellation"),
+              "checkpoint compact transport observable divergent-cancellation policy");
     validate_observable_rows(
         aggregate.at("rows"), aggregate.at("tile_count"), transport_owner,
         "checkpoint observable prepared rows");
@@ -2376,6 +2456,23 @@ std::shared_ptr<StoredLineResult> restore_checkpoint_line_aggregate_record(
       throw std::invalid_argument(
           "checkpoint pair divergent-cancellation diagnostics differ from aggregate provenance");
     }
+  } else if (compact_single_transport) {
+    if (!has_aggregate_divergent_cancellation) {
+      if (result.diagnostics.divergent_cancellation_mode !=
+          "exact-singleton")
+        throw std::invalid_argument(
+            "checkpoint transport observable lacks the bounded-cancellation provenance named by its diagnostics");
+    } else if (result.diagnostics.divergent_cancellation_mode !=
+                   "bounded-relative-acb" ||
+               !aggregate_bounded_divergent_cancellation.has_value() ||
+               result.diagnostics.divergent_relative_tolerance !=
+                   aggregate_bounded_divergent_cancellation
+                       ->relative_tolerance_text ||
+               result.diagnostics.divergent_cancellation_provenance !=
+                   aggregate_bounded_divergent_cancellation->provenance) {
+      throw std::invalid_argument(
+          "checkpoint transport observable divergent-cancellation diagnostics differ from aggregate provenance");
+    }
   }
 
   const auto elapsed_ms = checkpoint_nonnegative_double(
@@ -2508,6 +2605,60 @@ json::object checkpoint_chart_item(
                       {"request", std::move(request)}};
 }
 
+json::object checkpoint_regular_equation_owner_item(
+    const SolverSession& session,
+    const std::shared_ptr<RegularPhysicalEquationOwnerBase>& owner) {
+  if (!owner || owner->handle().empty() || owner->key().empty() ||
+      owner->exact_identity().empty() || owner->signature().empty() ||
+      owner->geometry_record().empty() ||
+      owner->physical_payload_record().empty() ||
+      owner->owner_signature_identity() != owner->exact_identity())
+    throw std::logic_error(
+        "retained regular physical equation owner lost its exact checkpoint payload");
+  const auto signature_value = json::parse(owner->signature());
+  const auto& signature = as_object(
+      signature_value, "regular equation-owner exact signature");
+  require_exact_keys(
+      signature,
+      {"capability", "domain", "precision_bits", "symbols",
+       "session_analytic", "identity", "dimension", "geometry",
+       "relative_accuracy_max_exact", "physical_ode"},
+      "regular equation-owner exact signature");
+  const json::object expected_signature{
+      {"capability", kFrameIndependentRegularEquationOwnerCapability},
+      {"domain", session.domain},
+      {"precision_bits", session.precision_bits},
+      {"symbols", encode_strings(session.symbols)},
+      {"session_analytic", json::parse(session.analytic_identity)},
+      {"identity", owner->exact_identity()},
+      {"dimension", owner->dimension()},
+      {"geometry", json::parse(owner->geometry_record())},
+      {"relative_accuracy_max_exact",
+       owner->regular_value_relative_accuracy_max_exact()},
+      {"physical_ode", json::parse(owner->physical_payload_record())}};
+  if (json::serialize(canonical_json_value(expected_signature)) !=
+      owner->signature())
+    throw std::logic_error(
+        "retained regular physical equation owner changed after retention");
+  json::object request{
+      {"schema", 2},
+      {"op", "regular_equation.prepare"},
+      {"session", session.handle},
+      {"capability", kFrameIndependentRegularEquationOwnerCapability},
+      {"key", owner->key()},
+      {"identity", owner->exact_identity()},
+      {"dimension", owner->dimension()},
+      {"geometry", json::parse(owner->geometry_record())},
+      {"physical_ode", json::parse(owner->physical_payload_record())},
+      {"relative_accuracy_max_exact",
+       owner->regular_value_relative_accuracy_max_exact()}};
+  return json::object{{"handle", owner->handle()},
+                      {"key", owner->key()},
+                      {"identity", owner->exact_identity()},
+                      {"signature", owner->signature()},
+                      {"request", std::move(request)}};
+}
+
 json::object checkpoint_scc_item(
     const SolverSession& session,
     const std::shared_ptr<CompositeSCCChartBase>& composite) {
@@ -2585,6 +2736,9 @@ json::array checkpoint_acb_match_identity_manifest(const json::array& items) {
     if (const auto* residual_frame =
             item.if_contains("residual_frame_identity"))
       identity["residual_frame_identity"] = *residual_frame;
+    if (const auto* residual_certificate =
+            item.if_contains("residual_certificate_identity"))
+      identity["residual_certificate_identity"] = *residual_certificate;
     manifest.push_back(std::move(identity));
   }
   return manifest;
@@ -2677,8 +2831,11 @@ json::array checkpoint_transport_state_identity_manifest(
         "checkpoint transport-arm state provenance");
     json::value anchor;
     json::value final_local;
-    if (required_string(provenance, "schema") ==
-        "diffexp2-retained-native-transport-arm-state-v4") {
+    const auto provenance_schema = required_string(provenance, "schema");
+    if (provenance_schema ==
+            "diffexp2-retained-native-transport-arm-state-v4" ||
+        provenance_schema ==
+            "diffexp2-retained-native-transport-arm-state-v5") {
       const auto& chain = as_array(
           provenance.at("tile_checkpoint_chain"),
           "checkpoint certificate-only transport tile chain");

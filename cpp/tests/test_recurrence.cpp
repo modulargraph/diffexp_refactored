@@ -97,6 +97,24 @@ void test_epsilon_denominator() {
         at(2, 2) == Rational("1/2") && at(2, 3) == Rational(-1));
 }
 
+void test_reusable_dense_factorization() {
+  const std::vector<std::vector<Rational>> matrix{
+      {Rational(0), Rational(2), Rational(1)},
+      {Rational(1), Rational(1), Rational(0)},
+      {Rational(2), Rational(0), Rational(1)}};
+  const auto factorization =
+      diffexp2::detail::factor_dense_system(matrix);
+  const auto first = diffexp2::detail::solve_factored_dense_system(
+      factorization, {Rational(7), Rational(3), Rational(5)});
+  const auto second = diffexp2::detail::solve_factored_dense_system(
+      factorization, {Rational(10), Rational(3), Rational(0)});
+  check("one exact dense factorization solves multiple epsilon coefficients",
+        first == std::vector<Rational>{
+            Rational(1), Rational(2), Rational(3)} &&
+            second == std::vector<Rational>{
+                Rational(-1), Rational(4), Rational(2)});
+}
+
 void test_lower_frame_guard() {
   auto p = exponential_problem(1);
   p.nhat_lags[1].polynomial[0].shift = -3;
@@ -458,6 +476,7 @@ void test_persistent_framed_d0_inverse() {
 int main() {
   test_exponential();
   test_epsilon_denominator();
+  test_reusable_dense_factorization();
   test_lower_frame_guard();
   test_resonant_jordan_log_ceiling_compatibility();
   test_epsilon_regular_pseudo_jordan_transaction();

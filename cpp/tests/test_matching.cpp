@@ -547,6 +547,49 @@ void refined_acb_match_without_public_upper_slack_smoke() {
             (matched.weights[1].coefficient(0) - ComplexBall(2)).is_zero());
 }
 
+void exact_right_frame_residual_smoke() {
+  ComplexBall::set_precision(256);
+  constexpr std::size_t width = 6;
+  const FiniteLaurentMatrix<Rational> exact_basis = {
+      {rational_constant_frame("1", width),
+       rational_constant_frame("1", width)},
+      {rational_constant_frame("0", width),
+       rational_epsilon_frame("1", width)}};
+  const auto exact_record = diffexp2::saturate_finite_laurent_basis(
+      exact_basis, "exact right-frame residual record");
+  const FiniteLaurentMatrix<ComplexBall> physical_basis = {
+      {ball_constant_frame("1", width),
+       ball_constant_frame("1", width)},
+      {ball_constant_frame("0", width),
+       ball_epsilon_frame("1", width)}};
+  std::vector<ComplexBall> second_rhs(width, ComplexBall(0));
+  second_rhs[1] = ComplexBall::from_strings("1/3");
+  const FiniteLaurentVector<ComplexBall> rhs = {
+      ball_constant_frame("1", width),
+      EpsilonFrame<ComplexBall>(0, std::move(second_rhs))};
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::zero();
+  options.required_min_power = 0;
+  options.required_complete_max = 0;
+  options.max_refinement_steps = 0;
+
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      physical_basis, rhs, exact_record, options,
+      "exact right-frame physical residual");
+  const auto direct =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          physical_basis, matched.weights, rhs, options,
+          "dependency-lost physical right-frame residual");
+  check("exact right lattice certifies a physical residual without replaying confluent columns",
+        exact_record.diagnostics.actions.size() == 1 &&
+            direct.diagnostics.verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            matched.residual_history.size() == 1 &&
+            matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            matched.residual_history.back().complete_through_required);
+}
+
 void ill_scaled_refinement_smoke() {
   ComplexBall::set_precision(256);
   const std::string big =
@@ -749,6 +792,81 @@ void empty_residual_window_retry_metadata_smoke() {
   }
   check("empty Acb residual window reports the exact retry reservoir loss",
         reported);
+}
+
+void precomputed_physical_residual_certification_smoke() {
+  ComplexBall::set_precision(256);
+  const auto uncertain = real_ball_with_error(1, -20);
+  const FiniteLaurentMatrix<ComplexBall> physical_basis{
+      {ball_value_frame(uncertain)}};
+  const FiniteLaurentVector<ComplexBall> physical_weights{
+      ball_constant_frame("1")};
+  const FiniteLaurentVector<ComplexBall> physical_incoming{
+      ball_value_frame(uncertain)};
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-8");
+  options.required_min_power = 0;
+  options.required_complete_max = 0;
+
+  const auto direct =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          physical_basis, physical_weights, physical_incoming, options,
+          "dependency-heavy physical subtraction");
+  const auto pushed =
+      diffexp2::matching_detail::certify_precomputed_acb_matching_residual(
+          physical_basis, physical_weights, physical_incoming,
+          FiniteLaurentVector<ComplexBall>{ball_constant_frame("0")},
+          options, "exact normal-frame residual pushforward");
+  const auto pushed_fail =
+      diffexp2::matching_detail::certify_precomputed_acb_matching_residual(
+          physical_basis, physical_weights, physical_incoming,
+          FiniteLaurentVector<ComplexBall>{ball_constant_frame("1e-2")},
+          options, "incorrect normal-frame residual pushforward");
+  const auto cancellation_scaled_fail =
+      diffexp2::matching_detail::certify_precomputed_acb_matching_residual(
+          FiniteLaurentMatrix<ComplexBall>{
+              {ball_constant_frame("1e40")}},
+          FiniteLaurentVector<ComplexBall>{
+              ball_constant_frame("1")},
+          FiniteLaurentVector<ComplexBall>{
+              ball_constant_frame("1")},
+          FiniteLaurentVector<ComplexBall>{
+              ball_constant_frame("1e20")},
+          options,
+          "ill-conditioned cancellation cannot weaken publication accuracy");
+  auto short_options = options;
+  short_options.required_complete_max = 3;
+  const auto short_scale =
+      diffexp2::matching_detail::certify_precomputed_acb_matching_residual(
+          FiniteLaurentMatrix<ComplexBall>{
+              {ball_constant_frame("1", 2)}},
+          FiniteLaurentVector<ComplexBall>{
+              ball_constant_frame("1", 2)},
+          FiniteLaurentVector<ComplexBall>{
+              ball_constant_frame("1", 2)},
+          FiniteLaurentVector<ComplexBall>{
+              ball_constant_frame("0", 6)},
+          short_options,
+          "pushed residual cannot outlive physical scale frames");
+
+  check("direct dependency-heavy physical residual is inconclusive",
+        direct.diagnostics.verdict ==
+            AcbMatchingResidualVerdict::Inconclusive);
+  check("exactly pushed physical residual certifies against physical scale",
+        pushed.diagnostics.verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            pushed.diagnostics.complete_through_required);
+  check("a pushed residual with a certified physical discrepancy is rejected",
+        pushed_fail.diagnostics.verdict ==
+            AcbMatchingResidualVerdict::Fail);
+  check("large individual contributions cannot authorize a large physical residual",
+        cancellation_scaled_fail.diagnostics.verdict ==
+            AcbMatchingResidualVerdict::Fail);
+  check("a pushed residual cannot manufacture physical scale completeness",
+        !short_scale.diagnostics.complete_through_required &&
+            short_scale.diagnostics.complete_window.complete_max == 1 &&
+            short_scale.diagnostics.verdict ==
+                AcbMatchingResidualVerdict::Inconclusive);
 }
 
 struct NormalFramePrefixRun {
@@ -979,12 +1097,14 @@ int main() {
   ambiguous_acb_pivot_smoke();
   refined_acb_match_smoke();
   refined_acb_match_without_public_upper_slack_smoke();
+  exact_right_frame_residual_smoke();
   ill_scaled_refinement_smoke();
   incomplete_refinement_rollback_smoke();
   refined_acb_ambiguous_pivot_smoke();
   laurent_off_pivot_ambiguity_smoke();
   refined_acb_ambiguous_off_pivot_smoke();
   empty_residual_window_retry_metadata_smoke();
+  precomputed_physical_residual_certification_smoke();
   normal_frame_prefix_monotonicity_smoke();
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();

@@ -15,7 +15,7 @@ namespace diffexp2::checkpoint {
 // independent of compiler timestamps so checkpoints remain usable after an
 // identical source rebuild.
 inline constexpr std::string_view kBuildIdentity =
-    "diffexp2-persistent-checkpoint-matched-physical-residual-owner-v11";
+    "diffexp2-persistent-checkpoint-regular-equation-owner-v12";
 inline constexpr std::uint32_t kContainerSchema = 2;
 inline constexpr std::uint32_t kLegacyContainerSchema = 1;
 
@@ -43,7 +43,7 @@ ComplexBall load_complex_ball_exact(const ExactComplexBallDump& dump);
 
 // The container is endian-stable and checksums its JSON header and payload
 // independently.  Schema 2 stores recursively embedded canonical-JSON
-// identity strings as a shared DAG; readers expand them to the exact schema-8
+// identity strings as a shared DAG; readers expand them to the exact schema-9
 // solver payload and continue to accept legacy schema-1 containers.
 // write_atomic performs temporary-file + fsync + rename and fsyncs the
 // containing directory before returning.  The value overload and read_json

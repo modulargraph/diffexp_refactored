@@ -326,12 +326,12 @@ bool canonical_json_dag_container_roundtrip(
   reserved_literal.push_back('\0');
   reserved_literal += "R7";
   const json::object header{
-      {"schema", 8},
+      {"schema", 9},
       {"closure_identity", closure_identity},
       {"closure_identity_copy", closure_identity},
       {"reserved_literal", reserved_literal}};
   const json::object payload{
-      {"schema", 8},
+      {"schema", 9},
       {"closure", closure},
       {"closure_identity", closure_identity},
       {"closure_identity_copy", closure_identity},
@@ -375,6 +375,32 @@ bool canonical_json_dag_container_roundtrip(
               << " file_bytes=" << std::filesystem::file_size(path)
               << " semantic_bytes=" << semantic_bytes << '\n';
   return schema_v2 && compact && exact && unused_rejected;
+}
+
+bool streamed_large_container_roundtrip(
+    const std::filesystem::path& path) {
+  // Exceed the checkpoint implementation's bounded syscall chunk.  This
+  // guards the production case where a retained singular basis produces a
+  // multi-gigabyte payload: Darwin rejects one oversized write(2) with
+  // EINVAL, so a successful exact roundtrip proves that the container is
+  // emitted and read incrementally.
+  const std::string blob(
+      std::size_t{3} * 1024 * 1024 + 17, 'q');
+  const json::object header{
+      {"schema", "streamed-checkpoint-io-regression-v1"}};
+  const json::object payload{
+      {"schema", "streamed-checkpoint-io-regression-v1"},
+      {"blob", blob}};
+  diffexp2::checkpoint::write_atomic(
+      path.string(), header, payload);
+  const auto decoded =
+      diffexp2::checkpoint::read_json(path.string());
+  const bool ok =
+      decoded.header == header && decoded.payload == payload &&
+      std::filesystem::file_size(path) > 3 * 1024 * 1024;
+  if (!ok)
+    std::cerr << "streamed checkpoint I/O did not roundtrip exactly\n";
+  return ok;
 }
 
 bool rational_local_roundtrip(const std::filesystem::path& path) {
@@ -580,15 +606,17 @@ int main() {
   const auto codec_path = stem.string() + "_codec.de2cp";
   const auto legacy_path = stem.string() + "_legacy.de2cp";
   const auto unused_path = stem.string() + "_unused.de2cp";
+  const auto streamed_path = stem.string() + "_streamed.de2cp";
   for (const auto& path : {rational_path, acb_path, resaved_path,
                            corrupted_path, codec_path, legacy_path,
-                           unused_path})
+                           unused_path, streamed_path})
     std::filesystem::remove(path);
 
   bool ok = false;
   try {
     ok = canonical_json_dag_container_roundtrip(
              codec_path, legacy_path, unused_path) &&
+         streamed_large_container_roundtrip(streamed_path) &&
          rational_local_roundtrip(rational_path) &&
          acb_match_roundtrip(acb_path, resaved_path, corrupted_path);
   } catch (const std::exception& error) {
@@ -596,9 +624,9 @@ int main() {
   }
   for (const auto& path : {rational_path, acb_path, resaved_path,
                            corrupted_path, codec_path, legacy_path,
-                           unused_path})
+                           unused_path, streamed_path})
     std::filesystem::remove(path);
   std::cout << (ok ? "PASS" : "FAIL")
-            << ": compact canonical-JSON DAG, exact live checkpoint roundtrip, and CRC corruption\n";
+            << ": compact canonical-JSON DAG, streamed exact live checkpoint roundtrip, and CRC corruption\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -587,14 +587,21 @@ std::vector<Scalar> expand_integral_scalar_lag(
 }
 
 template <typename Scalar>
-std::vector<Scalar> solve_dense_system(
-    std::vector<std::vector<Scalar>> matrix, std::vector<Scalar> rhs) {
+struct DenseSystemFactorization {
+  std::vector<std::vector<Scalar>> matrix;
+  std::vector<std::size_t> row_swaps;
+};
+
+template <typename Scalar>
+DenseSystemFactorization<Scalar> factor_dense_system(
+    std::vector<std::vector<Scalar>> matrix) {
   const auto dimension = matrix.size();
-  if (dimension == 0 || rhs.size() != dimension ||
+  if (dimension == 0 ||
       std::any_of(matrix.begin(), matrix.end(), [&](const auto& row) {
         return row.size() != dimension;
       }))
     throw RecurrenceError("E5", "malformed epsilon-regular dense system");
+  std::vector<std::size_t> row_swaps(dimension);
   for (std::size_t column = 0; column < dimension; ++column) {
     auto pivot = column;
     while (pivot < dimension &&
@@ -603,28 +610,56 @@ std::vector<Scalar> solve_dense_system(
     if (pivot == dimension)
       throw RecurrenceError(
           "E5", "epsilon-regular principal constant matrix is singular");
+    row_swaps[column] = pivot;
     if (pivot != column) {
       std::swap(matrix[pivot], matrix[column]);
-      std::swap(rhs[pivot], rhs[column]);
     }
     const auto pivot_value = matrix[column][column];
     for (std::size_t row = column + 1; row < dimension; ++row) {
       if (ScalarTraits<Scalar>::is_zero(matrix[row][column])) continue;
       const auto factor = matrix[row][column] / pivot_value;
-      matrix[row][column] = ScalarTraits<Scalar>::zero();
+      matrix[row][column] = factor;
       for (std::size_t other = column + 1; other < dimension; ++other)
         matrix[row][other] -= factor * matrix[column][other];
-      rhs[row] -= factor * rhs[column];
     }
+  }
+  return {std::move(matrix), std::move(row_swaps)};
+}
+
+template <typename Scalar>
+std::vector<Scalar> solve_factored_dense_system(
+    const DenseSystemFactorization<Scalar>& factorization,
+    std::vector<Scalar> rhs) {
+  const auto dimension = factorization.matrix.size();
+  if (dimension == 0 || rhs.size() != dimension ||
+      factorization.row_swaps.size() != dimension)
+    throw RecurrenceError("E5", "malformed epsilon-regular dense factorization");
+  for (std::size_t column = 0; column < dimension; ++column) {
+    const auto pivot = factorization.row_swaps[column];
+    if (pivot < column || pivot >= dimension)
+      throw RecurrenceError(
+          "E5", "malformed epsilon-regular dense pivot schedule");
+    if (pivot != column) std::swap(rhs[pivot], rhs[column]);
+    for (std::size_t row = column + 1; row < dimension; ++row)
+      rhs[row] -=
+          factorization.matrix[row][column] * rhs[column];
   }
   std::vector<Scalar> solution(dimension, ScalarTraits<Scalar>::zero());
   for (std::size_t reverse = dimension; reverse-- > 0;) {
     auto value = rhs[reverse];
     for (std::size_t column = reverse + 1; column < dimension; ++column)
-      value -= matrix[reverse][column] * solution[column];
-    solution[reverse] = value / matrix[reverse][reverse];
+      value -= factorization.matrix[reverse][column] * solution[column];
+    solution[reverse] =
+        value / factorization.matrix[reverse][reverse];
   }
   return solution;
+}
+
+template <typename Scalar>
+std::vector<Scalar> solve_dense_system(
+    std::vector<std::vector<Scalar>> matrix, std::vector<Scalar> rhs) {
+  return solve_factored_dense_system(
+      factor_dense_system(std::move(matrix)), std::move(rhs));
 }
 
 template <typename Scalar>
@@ -1287,6 +1322,8 @@ class RecurrenceSolver {
       for (std::uint32_t column = 0; column < d_; ++column)
         constant_matrix[row][column] =
             coefficients.front()[static_cast<std::size_t>(row) * d_ + column];
+    const auto factorization =
+        detail::factor_dense_system(std::move(constant_matrix));
 
     auto solution = detail::zero_block<Scalar>(d_, width_);
     for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon) {
@@ -1299,8 +1336,8 @@ class RecurrenceSolver {
                 static_cast<std::size_t>(row) * d_ + column] *
                 solution[column][epsilon - power];
       }
-      const auto solved = detail::solve_dense_system(
-          constant_matrix, std::move(coefficient));
+      const auto solved = detail::solve_factored_dense_system(
+          factorization, std::move(coefficient));
       for (std::uint32_t row = 0; row < d_; ++row)
         solution[row][epsilon] = solved[row];
     }

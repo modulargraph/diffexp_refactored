@@ -25,7 +25,7 @@ int main() {
   assert(!info.at(
       "persistent_frame_independent_regular_equation_owner_checkpoint")
               .as_bool());
-  assert(info.at("persistent_checkpoint_schema").as_int64() == 8);
+  assert(info.at("persistent_checkpoint_schema").as_int64() == 9);
   assert(info.at("persistent_exact_tile_plan_capability").as_string() ==
          "retained-exact-independent-arm-tile-plan-v1");
   assert(info.at("persistent_transport_pair_tile_stream_capability")

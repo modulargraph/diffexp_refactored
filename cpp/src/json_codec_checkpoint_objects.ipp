@@ -767,7 +767,8 @@ restore_checkpoint_planned_match_hop_record(
         native_record, basis, incoming);
   } else if (native_schema == "diffexp2-retained-acb-match-v2" ||
              native_schema == "diffexp2-retained-acb-match-v3" ||
-             native_schema == "diffexp2-retained-acb-match-v4") {
+             native_schema == "diffexp2-retained-acb-match-v4" ||
+             native_schema == "diffexp2-retained-acb-match-v5") {
     const auto saturation = native_acb_saturation_binding(
         plan, source_session_configuration_identity, arm_name, match_index,
         checkpoint_identity, compact_handoff);

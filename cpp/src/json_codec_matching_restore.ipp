@@ -2427,7 +2427,10 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
         std::nullopt) {
   const auto& object = as_object(raw, "checkpoint retained Acb match");
   const auto checkpoint_schema = required_string(object, "schema");
+  const bool has_terminal_normal_frame_materialization =
+      checkpoint_schema == "diffexp2-retained-acb-match-v5";
   const bool has_acb_right_materialization =
+      has_terminal_normal_frame_materialization ||
       checkpoint_schema == "diffexp2-retained-acb-match-v4";
   const bool has_exact_right_materialization =
       has_acb_right_materialization ||
@@ -2450,6 +2453,16 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       throw std::invalid_argument(
           "checkpoint Acb match v4 lost its right materialization preconditioner field");
     shape.erase("acb_right_materialization_preconditioner");
+  }
+  if (has_terminal_normal_frame_materialization) {
+    if (shape.if_contains(
+            "terminal_normal_frame_right_transformation") == nullptr ||
+        shape.if_contains(
+            "terminal_normal_frame_exact_right_transformation") == nullptr)
+      throw std::invalid_argument(
+          "checkpoint Acb match v5 lost a terminal normal-frame transformation field");
+    shape.erase("terminal_normal_frame_right_transformation");
+    shape.erase("terminal_normal_frame_exact_right_transformation");
   }
   const bool has_residual_frame_identity =
       object.if_contains("residual_frame_identity") != nullptr;
@@ -2534,8 +2547,10 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     throw std::invalid_argument(
         "checkpoint Acb transformed residual lost its pushforward certificate");
   if (!residual_certificate_identity.empty()) {
+    const auto raw_certificate =
+        json::parse(residual_certificate_identity);
     const auto& certificate = as_object(
-        json::parse(residual_certificate_identity),
+        raw_certificate,
         "checkpoint Acb residual pushforward certificate");
     const auto certificate_schema =
         required_string(certificate, "schema");
@@ -2617,8 +2632,10 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
         throw std::invalid_argument(
             "checkpoint Acb residual pushforward point binding is inconsistent");
 
+      const auto raw_normal_frame =
+          json::parse(matching_frame_identity);
       const auto& normal_frame = as_object(
-          json::parse(matching_frame_identity),
+          raw_normal_frame,
           "checkpoint Acb SCC matching normal frame");
       require_exact_keys(normal_frame,
           {"schema", "equation_operator_identity",
@@ -2746,6 +2763,31 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
               raw_transformation, dimension,
               "checkpoint Acb exact-right materialization transformation");
   }
+  std::optional<ExactLaurentMatrix<Rational>>
+      terminal_normal_frame_exact_right_transformation;
+  if (has_terminal_normal_frame_materialization) {
+    const auto& raw_terminal_exact =
+        object.at("terminal_normal_frame_exact_right_transformation");
+    if (!raw_terminal_exact.is_null())
+      terminal_normal_frame_exact_right_transformation =
+          parse_checkpoint_exact_laurent_matrix(
+              raw_terminal_exact, dimension,
+              "checkpoint Acb terminal normal-frame exact-right transformation");
+  }
+  // A compact Rational-shadow proof records its exact formal determinant
+  // valuation and column valuations, but the latter do not reproduce the
+  // full rectangular formal-module saturation transformation.  The v4 match
+  // record stores that authoritative exact-right transformation separately.
+  // Rebind the reconstructed proof shell to it before the ordinary identity
+  // check below; otherwise every nontrivial CASE-P saturation is writable but
+  // cannot be restored.
+  if (exact_lattice.exact_formal_negative_coefficients_are_zero &&
+      exact_right_materialization_transformation.has_value())
+    exact_lattice.saturation.transformation =
+        *exact_right_materialization_transformation;
+  if (terminal_normal_frame_exact_right_transformation.has_value())
+    exact_lattice.saturation.transformation =
+        *terminal_normal_frame_exact_right_transformation;
   std::optional<ExactLaurentMatrix<ComplexBall>>
       acb_right_materialization_preconditioner;
   if (has_acb_right_materialization) {
@@ -2757,6 +2799,21 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
               raw_preconditioner, dimension,
               "checkpoint Acb right materialization preconditioner");
   }
+  std::optional<FiniteLaurentMatrix<ComplexBall>>
+      terminal_normal_frame_right_transformation;
+  if (has_terminal_normal_frame_materialization) {
+    const auto& raw_terminal =
+        object.at("terminal_normal_frame_right_transformation");
+    if (!raw_terminal.is_null())
+      terminal_normal_frame_right_transformation =
+          parse_checkpoint_frame_matrix<ComplexBall>(
+              raw_terminal, dimension, dimension,
+              "checkpoint Acb terminal normal-frame right transformation");
+  }
+  // A normalized terminal match may use either the exact formal saturation
+  // or the certified Acb Levelt transformation reconstructed from its
+  // canonical witness.  Keep the latter when present: the endpoint
+  // association is then V*T_acb*P, not V*T_exact*P.
   if (exact_right_materialization_transformation.has_value() &&
       checkpoint_exact_laurent_matrix_record(
           *exact_right_materialization_transformation) !=
@@ -2765,12 +2822,19 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     throw std::invalid_argument(
         "checkpoint Acb exact-right materialization transformation differs from its restored exact lattice");
   if (acb_right_materialization_preconditioner.has_value()) {
-    if (!exact_right_materialization_transformation.has_value() ||
-        !expected_singular_request.has_value() ||
-        matching_frame_identity != "physical-parent-frame" ||
-        residual_frame_identity != "physical-parent-frame")
+    const bool physical_exact_right =
+        exact_right_materialization_transformation.has_value() &&
+        expected_singular_request.has_value() &&
+        matching_frame_identity == "physical-parent-frame" &&
+        residual_frame_identity == "physical-parent-frame";
+    const bool terminal_normal_right =
+        terminal_normal_frame_right_transformation.has_value() &&
+        expected_singular_request.has_value() &&
+        matching_frame_identity != "physical-parent-frame" &&
+        residual_frame_identity == "physical-parent-frame";
+    if (!physical_exact_right && !terminal_normal_right)
       throw std::invalid_argument(
-          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical frame");
+          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical or terminal normal frame");
     for (const auto& row :
          *acb_right_materialization_preconditioner)
       for (const auto& entry : row)
@@ -2781,6 +2845,17 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
                 "checkpoint Acb right materialization preconditioner is not epsilon-constant");
         }
   }
+  if (terminal_normal_frame_right_transformation.has_value() &&
+      (!expected_singular_request.has_value() ||
+       matching_frame_identity == "physical-parent-frame" ||
+       residual_frame_identity != "physical-parent-frame" ||
+       exact_right_materialization_transformation.has_value()))
+    throw std::invalid_argument(
+        "checkpoint Acb terminal normal-frame transformation is not bound to a certified singular SCC normal frame");
+  if (terminal_normal_frame_right_transformation.has_value() !=
+          terminal_normal_frame_exact_right_transformation.has_value())
+    throw std::invalid_argument(
+        "checkpoint Acb terminal normal-frame finite and exact transformations must be retained together");
 
   const auto lattice_provenance = [&](bool compact) {
     json::array exact_binding_basis;
@@ -2852,6 +2927,14 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       provenance["right_materialization_preconditioner"] =
           checkpoint_acb_laurent_matrix_record(
               *acb_right_materialization_preconditioner);
+    if (terminal_normal_frame_right_transformation.has_value())
+      provenance["terminal_normal_frame_right_transformation"] =
+          checkpoint_frame_matrix_record(
+              *terminal_normal_frame_right_transformation);
+    if (terminal_normal_frame_exact_right_transformation.has_value())
+      provenance["terminal_normal_frame_exact_right_transformation"] =
+          checkpoint_exact_laurent_matrix_record(
+              *terminal_normal_frame_exact_right_transformation);
     return provenance;
   };
   const auto old_provenance = acb_match_provenance(false);
@@ -2923,5 +3006,6 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       std::move(exact_right_materialization_transformation),
       std::move(exact_lattice.acb_transformation),
       std::move(acb_right_materialization_preconditioner),
+      std::move(terminal_normal_frame_right_transformation),
       std::move(refined), elapsed_ms);
 }

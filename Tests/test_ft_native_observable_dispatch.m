@@ -506,6 +506,10 @@ parsedPipeline = FeynmanTrick`DiffExp2Pipeline`Private`pipelineResult[
     "ExitCode" -> 0|>];
 positiveRaw = DiffExp2`EpsSeries`ESNew[-1,
   {11, 22, 3 + 4 I, 5 - 6 I}];
+negligiblePoleRaw = DiffExp2`EpsSeries`ESNew[-2,
+  {10^-900, 0, 39.65552683429765`20}];
+catastrophicPoleRaw = DiffExp2`EpsSeries`ESNew[-2,
+  {10^17, 10^41, 10^67}];
 positiveCertification =
   ft2NotApplicableCertification["direct", "direct"];
 legacyStepRow = Block[{epsOrder = 0},
@@ -527,6 +531,10 @@ incompleteStepRow = Block[{epsOrder = 2},
 incompleteFinalRow = Block[{epsOrder = 2},
   ft2FinalRow["incomplete-output-fixture", incompleteRaw,
     positiveCertification]];
+negligiblePoleAudit = ft2PretrimFinalPoleAudit[
+  "banana4", {{1}}, {negligiblePoleRaw}];
+catastrophicPoleAudit = ft2PretrimFinalPoleAudit[
+  "banana4", {{1}}, {catastrophicPoleRaw}];
 positiveSyntheticOutput = StringRiffle[{
   ft2OutputLine["STEPWISE ", positiveStepRow],
   ft2OutputLine["FINAL ", positiveFinalRow]}, "\n"];
@@ -587,6 +595,12 @@ assert["output completeness fails explicitly below the requested epsilon top",
     incompleteFinalRow["RequestedCompleteMax"] === 2 &&
     incompleteFinalRow["AvailableCompleteMax"] === 1,
   {incompleteStepRow, incompleteFinalRow}];
+assert["pre-trim pole audit accepts harmless absolute remnants but rejects catastrophic poles",
+  TrueQ[negligiblePoleAudit] &&
+    FailureQ[catastrophicPoleAudit] &&
+    catastrophicPoleAudit[[1]] ===
+      "FeynmanTrickUnexpectedFinalPole",
+  {negligiblePoleAudit, catastrophicPoleAudit}];
 assert["facade parser preserves positive-order Laurent rows and complex encoding",
   AssociationQ[positiveParsedPipeline] &&
     positiveParsedPipeline["Status"] === "Succeeded" &&

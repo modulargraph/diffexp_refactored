@@ -2298,9 +2298,11 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
             "terminal state did not publish one consumer epsilon contract per tile");
       const auto& terminal = contracts.back().as_object();
       if (terminal.at("sources").as_array().size() != 2 ||
-          !terminal.at("output_min_shift").is_int64())
+          !terminal.at("output_min_shift").is_int64() ||
+          !terminal.at("basis_min_power").is_int64() ||
+          !terminal.at("projection_weight_min_power").is_int64())
         throw std::runtime_error(
-            "terminal state did not publish its physical consumer sources and structural output shift");
+            "terminal state did not publish its physical consumer sources, factorized-basis minimum, and transformed-weight minimum");
     }
 
     const auto require_small_zero = [](const json::value& raw,
@@ -2332,6 +2334,22 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
         session, upper_state, "terminal-factorized-upper", 9);
     require_small_zero(lower_value, "lower terminal contraction");
     require_small_zero(upper_value, "upper terminal contraction");
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE",
+               "factorized", 1) != 0)
+      throw std::runtime_error(
+          "could not select explicit factorized terminal contraction");
+    json::value explicit_factorized_value;
+    try {
+      explicit_factorized_value = contract_cancellation_and_export(
+          session, lower_state, "terminal-explicit-factorized", 9);
+    } catch (...) {
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+      throw;
+    }
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+    require_small_zero(
+        explicit_factorized_value,
+        "explicit factorized terminal contraction");
     // The direct physical route contracts L(F) with the certified physical
     // weights w.  It must remain a genuine independent route: in particular,
     // it must not pass through the epsilon-shifted factorization (F T) P and
@@ -2351,6 +2369,21 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
     require_small_zero(
         physical_value, "direct physical terminal contraction");
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE",
+               "invalid-route", 1) != 0)
+      throw std::runtime_error(
+          "could not select invalid terminal contraction route");
+    bool invalid_route_rejected = false;
+    try {
+      (void)contract_cancellation_and_export(
+          session, lower_state, "terminal-invalid-route", 9);
+    } catch (...) {
+      invalid_route_rejected = true;
+    }
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+    if (!invalid_route_rejected)
+      throw std::runtime_error(
+          "invalid terminal contraction route was not rejected");
 
     const auto endpoints = request(json::object{
         {"schema", 2}, {"op", "transport.endpoint_batch"},

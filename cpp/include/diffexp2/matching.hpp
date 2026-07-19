@@ -873,12 +873,21 @@ LeadingNullRelation<Scalar> leading_null_relation(
             residual, *certified_candidate_chop_digits);
     }
     const auto decision = zero_decision(residual);
-    if (decision == ZeroDecision::Ambiguous)
+    if (decision == ZeroDecision::Ambiguous) {
+      std::string ball_detail;
+      if constexpr (std::is_same_v<Scalar, ComplexBall>)
+        ball_detail =
+            "; midpoint=(" + residual.real_midpoint(16) + "," +
+            residual.imag_midpoint(16) + ")" +
+            "; radius2exp=(" + residual.real_radius_exponent() + "," +
+            residual.imag_radius_exponent() + ")";
       throw MatchingArithmeticError(
           MatchingArithmeticErrorCode::AmbiguousZero,
           context +
-              ": Acb null-relation residual overlaps zero and is not exact",
+              ": Acb null-relation residual overlaps zero and is not exact" +
+              ball_detail,
           row, std::nullopt, 0);
+    }
     if (decision == ZeroDecision::Nonzero)
       throw MatchingArithmeticError(
           MatchingArithmeticErrorCode::SaturationFailure,

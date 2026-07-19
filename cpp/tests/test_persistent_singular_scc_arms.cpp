@@ -99,6 +99,38 @@ json::array scalar_entry(const std::string& value) {
   return entries;
 }
 
+json::object epsilon_rational(
+    bool zero, std::int32_t valuation, json::array numerator) {
+  if (zero) return json::object{{"zero", true}};
+  return json::object{
+      {"zero", false}, {"valuation", valuation},
+      {"numerator", std::move(numerator)},
+      {"denominator", json::array{"1"}}};
+}
+
+json::object singular_parent_physical_ode(
+    const std::string& owner_identity) {
+  json::array q;
+  q.push_back(epsilon_rational(true, 0, json::array{"0"}));
+  q.push_back(epsilon_rational(false, 0, json::array{"1"}));
+  json::array constant_lag;
+  constant_lag.push_back(json::object{
+      {"r", 0}, {"c", 0},
+      {"v", epsilon_rational(
+          false, 0, json::array{"1/2", "1/3"})}});
+  json::array c;
+  c.push_back(std::move(constant_lag));
+  return json::object{
+      {"schema", "diffexp2-physical-cleared-ode-v1"},
+      {"basis", "physical-original-master"},
+      {"theta_coordinate", "local-t"},
+      {"owner_signature_identity", owner_identity},
+      {"payload_identity",
+       "de2-physical-ode-singular-arm-parent"},
+      // t y' = (1/2 + eps/3) y.
+      {"q", std::move(q)}, {"c", std::move(c)}};
+}
+
 json::array singular_spectral_inverse_kernels() {
   json::array kernels;
   for (std::uint32_t epsilon = 0;
@@ -378,7 +410,8 @@ std::string prepare_singular_scc(const std::string& session,
                 {"blocks", json::array{json::object{
                      {"block", 0}, {"columns", json::array{0}},
                      {"a", "1/2"}, {"b", "1/3"}}}}}}}}},
-      {"couplings", json::array{}}});
+      {"couplings", json::array{}},
+      {"physical_ode", singular_parent_physical_ode(identity)}});
   if (prepared.at("status") != "ok")
     throw std::runtime_error("scc.prepare: " + json::serialize(prepared));
   return std::string(prepared.at("scc").as_string());
@@ -577,6 +610,50 @@ json::object run_transport_arm(
       {"checkpoint_policy", json::object{
            {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", checkpoint_root}}}});
+}
+
+json::object consume_terminal_singular_hop(
+    const std::string& session, const std::string& plan,
+    const std::string& incoming, const std::string& basis,
+    const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.consume_hop"},
+      {"session", session}, {"tile_plan", plan},
+      {"tile_plan_checkpoint_identity", "singular-state-plan"},
+      {"arm", "lower"}, {"match", 0},
+      {"receiving_basis", json::array{basis}},
+      {"incoming", incoming},
+      {"incoming_checkpoint_identity", "singular-arm-anchor"},
+      {"epsilon", json::object{
+           {"min", -1}, {"max", 2}, {"required_complete_max", 2}}},
+      {"refinement", json::object{
+           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", checkpoint_root}}}});
+}
+
+json::object publish_terminal_singular_state(
+    const std::string& session, const std::string& plan,
+    const std::string& anchor, const json::object& hop,
+    const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.publish_consumed_state"},
+      {"session", session}, {"tile_plan", plan},
+      {"tile_plan_checkpoint_identity", "singular-state-plan"},
+      {"anchor", anchor},
+      {"anchor_checkpoint_identity", "singular-arm-anchor"},
+      {"epsilon", json::object{
+           {"min", -1}, {"max", 2}, {"required_complete_max", 1},
+           {"match_required_complete_max", 2}}},
+      {"refinement", json::object{
+           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy", json::object{
+           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+           {"root", checkpoint_root}}},
+      {"arm", "lower"},
+      {"tile_sources", json::array{
+           anchor, hop.at("next_local").as_object().at("local")}}});
 }
 
 json::object run_zero_match_transport_arm(
@@ -853,7 +930,7 @@ std::pair<bool, bool> proof_schemas(const std::string& path) {
   return {singular, ordinary};
 }
 
-bool singular_match_published_in_complete_physical_frame(
+bool singular_match_published_with_complete_physical_residual(
     const std::string& path) {
   const auto payload = json::parse(
       diffexp2::checkpoint::read(path).payload_json).as_object();
@@ -877,18 +954,63 @@ bool singular_match_published_in_complete_physical_frame(
         .at("residual_history").as_array();
     if (history.empty()) return false;
     const auto& residual = history.back().as_object();
-    if (native.at("schema") != "diffexp2-retained-acb-match-v4" ||
-        native.at("matching_frame_identity") != "physical-parent-frame" ||
-        provenance.at("matching_frame_identity") !=
+    const auto matching_frame =
+        std::string(native.at("matching_frame_identity").as_string());
+    const bool physical_matching =
+        matching_frame == "physical-parent-frame";
+    const bool normalized_matching = !physical_matching &&
+        json::parse(matching_frame).as_object().at("schema") ==
+            "diffexp2-acb-scc-matching-normal-frame-v2";
+    const auto* terminal_normal = native.if_contains(
+        "terminal_normal_frame_right_transformation");
+    const auto* terminal_exact = native.if_contains(
+        "terminal_normal_frame_exact_right_transformation");
+    const bool has_terminal_normal =
+        terminal_normal != nullptr && !terminal_normal->is_null();
+    const bool has_terminal_exact =
+        terminal_exact != nullptr && !terminal_exact->is_null();
+    if (native.at("schema") != "diffexp2-retained-acb-match-v5" ||
+        (!physical_matching && !normalized_matching) ||
+        provenance.at("matching_frame_identity").as_string() !=
+            matching_frame ||
+        lattice_provenance.at("matching_frame_identity").as_string() !=
+            matching_frame ||
+        native.at("residual_frame_identity") !=
             "physical-parent-frame" ||
-        lattice_provenance.at("matching_frame_identity") !=
-            "physical-parent-frame" ||
+        has_terminal_normal != has_terminal_exact ||
+        (physical_matching && has_terminal_normal) ||
+        (normalized_matching && !has_terminal_normal) ||
         residual.at("complete_through_required") != true ||
         residual.at("complete_window").as_object().at("max").as_int64() <
             required)
       return false;
   }
   return found;
+}
+
+bool terminal_normal_frame_checkpoint_complete(const std::string& path) {
+  const auto payload = json::parse(
+      diffexp2::checkpoint::read(path).payload_json).as_object();
+  for (const auto& raw_hop :
+       payload.at("retained_planned_match_hops").as_array()) {
+    const auto& native = raw_hop.as_object().at("native_match").as_object();
+    if (native.at("checkpoint_identity") !=
+        "singular-terminal-normal:lower:match:1")
+      continue;
+    const auto* finite =
+        native.if_contains("terminal_normal_frame_right_transformation");
+    if (finite == nullptr || finite->is_null()) return false;
+    const auto* exact = native.if_contains(
+        "terminal_normal_frame_exact_right_transformation");
+    if (native.at("schema") != "diffexp2-retained-acb-match-v5" ||
+        exact == nullptr || exact->is_null())
+      return false;
+    const auto frame = json::parse(std::string(
+        native.at("matching_frame_identity").as_string())).as_object();
+    return frame.at("schema") ==
+        "diffexp2-acb-scc-matching-normal-frame-v2";
+  }
+  return false;
 }
 
 }  // namespace
@@ -902,9 +1024,12 @@ int main() {
       "/tmp/diffexp2-singular-scc-arms-second.de2cp";
   const std::string tampered =
       "/tmp/diffexp2-singular-scc-arms-tampered.de2cp";
+  const std::string terminal_normal_checkpoint =
+      "/tmp/diffexp2-singular-scc-terminal-normal.de2cp";
   std::remove(checkpoint.c_str());
   std::remove(checkpoint_second.c_str());
   std::remove(tampered.c_str());
+  std::remove(terminal_normal_checkpoint.c_str());
   std::string session;
   std::string restored_session;
   try {
@@ -932,6 +1057,8 @@ int main() {
         session, singular_scc, "singular-arm-good-column");
     const auto second_singular = solve_singular_column(
         session, singular_scc, "singular-arm-second-column");
+    const auto terminal_singular = solve_singular_column(
+        session, singular_scc, "singular-arm-terminal-column");
     const auto foreign_singular = solve_singular_column(
         session, foreign_scc, "singular-arm-foreign-column");
     const auto upper_basis = solve_regular(
@@ -1003,6 +1130,72 @@ int main() {
     const auto single_plan =
         std::string(single_planned.at("tile_plan").as_string());
 
+    const auto terminal_hop = consume_terminal_singular_hop(
+        session, single_plan, anchor, terminal_singular,
+        "singular-terminal-normal");
+    if (terminal_hop.at("status") != "ok")
+      throw std::runtime_error(
+          "terminal singular consume_hop: " +
+          json::serialize(terminal_hop));
+    const auto& terminal_diagnostic = terminal_hop.at("match_reference")
+        .as_object().at("diagnostic_native_match_summary").as_object();
+    if (terminal_diagnostic.at("materialization_association") !=
+            "terminal-normal-frame-F*(V*T)*y")
+      throw std::runtime_error(
+          "terminal singular hop did not retain its sequential normal frame: " +
+          json::serialize(terminal_diagnostic));
+    const auto terminal_published = publish_terminal_singular_state(
+        session, single_plan, anchor, terminal_hop,
+        "singular-terminal-normal");
+    if (terminal_published.at("status") != "ok" ||
+        terminal_published.at("states").as_object().size() != 1)
+      throw std::runtime_error(
+          "terminal singular publish_consumed_state: " +
+          json::serialize(terminal_published));
+    const auto terminal_state_record =
+        terminal_published.at("states").as_object().at("lower").as_object();
+    const auto terminal_saved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+        {"path", terminal_normal_checkpoint},
+        {"checkpoint_identity", "singular-terminal-normal-roundtrip"}});
+    if (terminal_saved.at("status") != "ok" ||
+        !terminal_normal_frame_checkpoint_complete(
+            terminal_normal_checkpoint))
+      throw std::runtime_error(
+          "terminal singular normal-frame checkpoint is incomplete: " +
+          json::serialize(terminal_saved));
+    const auto terminal_restored = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", terminal_normal_checkpoint},
+        {"expected_identity", "singular-terminal-normal-roundtrip"}});
+    if (terminal_restored.at("status") != "ok")
+      throw std::runtime_error(
+          "terminal singular normal-frame checkpoint.restore: " +
+          json::serialize(terminal_restored));
+    const auto restored_terminal_stats = request(json::object{
+        {"schema", 2}, {"op", "transport.stats"},
+        {"session", terminal_restored.at("session")},
+        {"transport_state",
+         terminal_state_record.at("transport_state")}});
+    if (restored_terminal_stats.at("status") != "ok" ||
+        restored_terminal_stats.at("terminal_factorized_match") != true)
+      throw std::runtime_error(
+          "restored terminal singular normal-frame state: " +
+          json::serialize(restored_terminal_stats));
+    (void)request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", terminal_restored.at("session")}});
+    const auto released_terminal_state = request(json::object{
+        {"schema", 2}, {"op", "transport.release"},
+        {"session", session},
+        {"transport_state",
+         terminal_state_record.at("transport_state")}});
+    if (released_terminal_state.at("status") != "ok")
+      throw std::runtime_error(
+          "terminal singular normal-frame transport.release: " +
+          json::serialize(released_terminal_state));
+    std::remove(terminal_normal_checkpoint.c_str());
+
     const auto before_transport_rejection = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
     const auto transport_rejected = run_transport_arm(
@@ -1045,14 +1238,20 @@ int main() {
         transported.at("provenance_identity").as_string());
     const auto transport_final = std::string(
         transported.at("final_local").as_object().at("local").as_string());
+    ::setenv("DE2_DIAGNOSTIC_TERMINAL_STATE", "1", 1);
     const auto transport_stats = request(json::object{
         {"schema", 2}, {"op", "transport.stats"}, {"session", session},
         {"transport_state", transport_state}});
+    ::unsetenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
     if (transport_stats.at("status") != "ok" ||
         transport_stats.at("final_local").as_object().at("local").as_string() !=
-            transport_final)
+            transport_final ||
+        transport_stats.at("final_match_diagnostic").as_object()
+                .at("materialization_association") !=
+            "terminal-normal-frame-F*(V*T)*y")
       throw std::runtime_error(
-          "transport.stats: " + json::serialize(transport_stats));
+          "transport.run_arm did not retain its terminal singular normal "
+          "frame: " + json::serialize(transport_stats));
 
     std::vector<std::pair<std::string, std::string>> contracted_lines;
     json::value compact_export_value;
@@ -1462,7 +1661,7 @@ int main() {
             "transport observable checkpoint retained a private projected local");
     const auto [singular_proof, ordinary_proof] = proof_schemas(checkpoint);
     const auto singular_physical_prefix =
-        singular_match_published_in_complete_physical_frame(checkpoint);
+        singular_match_published_with_complete_physical_residual(checkpoint);
 
     const auto restored = request(json::object{
         {"schema", 2}, {"op", "checkpoint.restore"},
@@ -1568,6 +1767,7 @@ int main() {
     std::remove(checkpoint.c_str());
     std::remove(checkpoint_second.c_str());
     std::remove(tampered.c_str());
+    std::remove(terminal_normal_checkpoint.c_str());
     std::cout << (ok ? "PASS" : "FAIL")
               << ": Acb singular-SCC valuation-zero whole-arm proof\n";
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -1581,6 +1781,7 @@ int main() {
     std::remove(checkpoint.c_str());
     std::remove(checkpoint_second.c_str());
     std::remove(tampered.c_str());
+    std::remove(terminal_normal_checkpoint.c_str());
     std::cerr << "FAIL: Acb singular-SCC whole-arm proof: "
               << error.what() << '\n';
     return EXIT_FAILURE;

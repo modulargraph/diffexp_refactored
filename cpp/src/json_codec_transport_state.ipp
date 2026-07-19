@@ -1909,11 +1909,17 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       }
       if (const auto& right =
               acb->acb_materialization_right_transformation();
-          right.has_value()) {
+          right.has_value() &&
+          !acb->terminal_normal_frame_right_transformation().has_value()) {
         // The certified match was solved against these retained Acb columns,
         // so they remain the sole materialization authority.  Preserve the
         // certified right association whether T came from an exact Rational
         // shadow or from the retained singular-SCC Acb lattice witness.
+        // A terminal normal-frame match is different: its Acb right acts
+        // after the retained finite R frame.  Applying it directly to the
+        // physical basis would form F*(R^-1*T), not the certified F*w.
+        // The ordinary LocalSolution proxy therefore uses physical weights;
+        // terminal contraction replays R and R^-1*T sequentially.
         // Private pole rows must remain attached to epsilon-dependent
         // Frobenius sectors: they can feed finite and positive orders when
         // the local is evaluated, even when the final observable is regular.

@@ -2832,9 +2832,16 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
         expected_singular_request.has_value() &&
         matching_frame_identity != "physical-parent-frame" &&
         residual_frame_identity == "physical-parent-frame";
-    if (!physical_exact_right && !terminal_normal_right)
+    const bool normalized_direct_exact_right =
+        exact_right_materialization_transformation.has_value() &&
+        !terminal_normal_frame_right_transformation.has_value() &&
+        expected_singular_request.has_value() &&
+        matching_frame_identity != "physical-parent-frame" &&
+        residual_frame_identity == "physical-parent-frame";
+    if (!physical_exact_right && !terminal_normal_right &&
+        !normalized_direct_exact_right)
       throw std::invalid_argument(
-          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical or terminal normal frame");
+          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical, direct exact-shadow, or terminal normal frame");
     for (const auto& row :
          *acb_right_materialization_preconditioner)
       for (const auto& entry : row)

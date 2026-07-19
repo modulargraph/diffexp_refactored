@@ -8,11 +8,17 @@ namespace {
 
 using diffexp2::ExactScalarDescriptor;
 using diffexp2::ComplexBall;
+using diffexp2::EpsilonFrame;
+using diffexp2::ExactLaurentMatrix;
+using diffexp2::ExactLaurentPolynomial;
+using diffexp2::FiniteLaurentVector;
 using diffexp2::LocalSector;
 using diffexp2::LocalSolution;
+using diffexp2::PreparedRationalAnalyticCoefficient;
 using diffexp2::PreparedRationalTaylorMultiplier;
 using diffexp2::PreparedSparseLocalMultiplierMatrix;
 using diffexp2::Rational;
+using diffexp2::RealEvaluationPoint;
 
 std::size_t index(std::size_t ei, std::size_t n, std::uint32_t c,
                   std::size_t tw, std::uint32_t d) {
@@ -207,10 +213,26 @@ LocalSolution<Rational> component_sparse_sample(std::size_t sector_count) {
 int main() {
   diffexp2::ComplexBall::set_precision(128);
   const auto input = sample();
+  const auto matched_prefix =
+      diffexp2::restrict_local_taylor_prefix(
+          input, 1, "matched-prefix");
   const auto product = diffexp2::multiply_prepared_rational(
       input, multiplier(-1, 1));
 
-  bool ok = product.epsilon.min_power == -2 &&
+  bool ok = matched_prefix.taylor_complete_max == 1 &&
+            matched_prefix.epsilon.min_power ==
+                input.epsilon.min_power &&
+            matched_prefix.epsilon.complete_max ==
+                input.epsilon.complete_max &&
+            matched_prefix.dimension == input.dimension &&
+            matched_prefix.prescriptions.size() ==
+                input.prescriptions.size() &&
+            matched_prefix.prescriptions.front().factor_exact ==
+                input.prescriptions.front().factor_exact &&
+            matched_prefix.checkpoint_identity == "matched-prefix" &&
+            equal(matched_prefix.sectors.front().coefficients[
+                index(2, 1, 1, 2, 2)], "212") &&
+            product.epsilon.min_power == -2 &&
             product.epsilon.complete_max == 0 &&
             product.taylor_complete_max == 2 &&
             product.dimension == 2 && product.sectors.size() == 1 &&
@@ -247,6 +269,164 @@ int main() {
       std::vector<LocalSolution<Rational>>{product, unshifted});
   ok = ok && combined.epsilon.min_power == -2 &&
        combined.epsilon.complete_max == 0;
+
+  // A saturated solve retains a wider transformed-weight reservoir than its
+  // published physical weights.  Materializing F*(T*y) after truncating the
+  // physical weights can therefore lose a coefficient which a polar basis
+  // needs at the public edge.  The exact-right association (F*T)*y keeps it.
+  const auto exact_right_column = [](
+      const std::string& checkpoint, const Rational& polar_value) {
+    LocalSolution<Rational> local;
+    local.chart.center_exact = "0";
+    local.chart.scale_exact = "1";
+    local.chart.radius = ComplexBall(2);
+    local.epsilon = {-1, 1};
+    local.taylor_complete_max = 0;
+    local.dimension = 1;
+    local.checkpoint_identity = checkpoint;
+    LocalSector<Rational> sector;
+    sector.a = ExactScalarDescriptor::rational("0");
+    sector.b = ExactScalarDescriptor::rational("0");
+    sector.log_power = 0;
+    sector.coefficients.assign(local.sector_size(), Rational(0));
+    sector.coefficients.front() = polar_value;
+    local.sectors.push_back(std::move(sector));
+    diffexp2::validate_local_solution(local, false);
+    return local;
+  };
+  const auto exact_right_zero =
+      exact_right_column("exact-right-zero", Rational(0));
+  const auto exact_right_polar =
+      exact_right_column("exact-right-polar", Rational(7));
+  const std::vector<const LocalSolution<Rational>*> exact_right_basis{
+      &exact_right_zero, &exact_right_polar};
+  ExactLaurentMatrix<Rational> exact_right_transformation(
+      2, std::vector<ExactLaurentPolynomial<Rational>>(2));
+  exact_right_transformation[0][0].add_term(-1, Rational(1));
+  exact_right_transformation[1][0].add_term(0, Rational(1));
+  exact_right_transformation[1][1].add_term(0, Rational(1));
+  const auto exact_right_transformed =
+      diffexp2::right_transform_local_basis_exact(
+          exact_right_basis, exact_right_transformation,
+          "exact-right-transformed");
+  std::vector<const LocalSolution<Rational>*> transformed_basis;
+  for (const auto& column : exact_right_transformed)
+    transformed_basis.push_back(&column);
+  const FiniteLaurentVector<Rational> transformed_weights{
+      EpsilonFrame<Rational>({1, 1}, {Rational(1)}),
+      EpsilonFrame<Rational>({1, 1}, {Rational(0)})};
+  const auto stable_exact_right =
+      diffexp2::materialize_local_basis_weights(
+          transformed_basis, transformed_weights,
+          "exact-right-stable-output");
+  const FiniteLaurentVector<Rational> truncated_physical_weights{
+      EpsilonFrame<Rational>({0, 0}, {Rational(1)}),
+      EpsilonFrame<Rational>({0, 0}, {Rational(0)})};
+  const auto truncated_physical =
+      diffexp2::materialize_local_basis_weights(
+          exact_right_basis, truncated_physical_weights,
+          "exact-right-truncated-physical-output");
+  ok = ok &&
+       stable_exact_right.epsilon.min_power <= 0 &&
+       stable_exact_right.epsilon.complete_max >= 0 &&
+       stable_exact_right.sectors.size() == 1 &&
+       equal(stable_exact_right.sectors.front().coefficients[
+                 static_cast<std::size_t>(
+                     -stable_exact_right.epsilon.min_power)],
+             "7") &&
+       truncated_physical.sectors.size() == 1 &&
+       std::all_of(
+           truncated_physical.sectors.front().coefficients.begin(),
+           truncated_physical.sectors.front().coefficients.end(),
+           [](const auto& value) { return value.is_zero(); });
+
+  // A regular physical value can require more than one private Laurent row
+  // when distinct Frobenius exponents coalesce.  Here
+  //
+  //   eps^-2 (1 - 2 t^eps + t^(2 eps)) = log(t)^2 + O(eps).
+  //
+  // Exercise the exact-right and materialization path, not only the local
+  // evaluator: dropping either pole row before evaluation destroys the
+  // finite value and its theta derivative.
+  const auto confluent_column = [](
+      const std::string& checkpoint, const std::string& b,
+      const std::string& polar_coefficient) {
+    LocalSolution<ComplexBall> local;
+    local.chart.center_exact = "0";
+    local.chart.scale_exact = "1";
+    local.chart.radius = ComplexBall(2);
+    local.epsilon = {-2, 2};
+    local.taylor_complete_max = 0;
+    local.dimension = 1;
+    local.checkpoint_identity = checkpoint;
+    LocalSector<ComplexBall> sector;
+    sector.a = ExactScalarDescriptor::rational("0");
+    sector.b = ExactScalarDescriptor::rational(b);
+    sector.log_power = 0;
+    sector.coefficients.assign(local.sector_size(), ComplexBall(0));
+    sector.coefficients.front() =
+        ComplexBall::from_strings(polar_coefficient);
+    local.sectors.push_back(std::move(sector));
+    diffexp2::validate_local_solution(local, false);
+    return local;
+  };
+  const auto confluent_zero =
+      confluent_column("confluent-zero", "0", "1");
+  const auto confluent_one =
+      confluent_column("confluent-one", "1", "-2");
+  const auto confluent_two =
+      confluent_column("confluent-two", "2", "1");
+  const std::vector<const LocalSolution<ComplexBall>*> confluent_basis{
+      &confluent_zero, &confluent_one, &confluent_two};
+  ExactLaurentMatrix<ComplexBall> confluent_identity(
+      3, std::vector<ExactLaurentPolynomial<ComplexBall>>(3));
+  for (std::size_t diagonal = 0; diagonal < 3; ++diagonal)
+    confluent_identity[diagonal][diagonal].add_term(
+        0, ComplexBall(1));
+  const auto confluent_transformed =
+      diffexp2::right_transform_local_basis_exact(
+          confluent_basis, confluent_identity,
+          "confluent-exact-right");
+  std::vector<const LocalSolution<ComplexBall>*>
+      confluent_transformed_basis;
+  for (const auto& column : confluent_transformed)
+    confluent_transformed_basis.push_back(&column);
+  const auto complete_constant_weight = [] {
+    return EpsilonFrame<ComplexBall>(
+        0, {ComplexBall(1), ComplexBall(0), ComplexBall(0),
+            ComplexBall(0), ComplexBall(0)});
+  };
+  const FiniteLaurentVector<ComplexBall> confluent_weights{
+      complete_constant_weight(), complete_constant_weight(),
+      complete_constant_weight()};
+  const auto confluent_materialized =
+      diffexp2::materialize_local_basis_weights(
+          confluent_transformed_basis, confluent_weights,
+          "confluent-materialized");
+  const auto confluent_evaluation =
+      diffexp2::evaluate_local_solution(
+          confluent_materialized,
+          RealEvaluationPoint::rational("1/2"));
+  ComplexBall log_half;
+  acb_log(log_half.raw(), ComplexBall::from_strings("1/2").raw(),
+          ComplexBall::precision());
+  bool confluent_lower_restriction_rejected = false;
+  try {
+    (void)diffexp2::restrict_local_epsilon_frame_strict_lower(
+        confluent_materialized, 0,
+        confluent_materialized.epsilon.complete_max,
+        "invalid-confluent-lower-restriction");
+  } catch (const std::invalid_argument&) {
+    confluent_lower_restriction_rejected = true;
+  }
+  ok = ok &&
+       confluent_evaluation.value.at(-2, 0).contains_zero() &&
+       confluent_evaluation.value.at(-1, 0).contains_zero() &&
+       (confluent_evaluation.value.at(0, 0) -
+        log_half * log_half).contains_zero() &&
+       (confluent_evaluation.theta_value.at(0, 0) -
+        ComplexBall(2) * log_half).contains_zero() &&
+       confluent_lower_restriction_rejected;
 
   PreparedSparseLocalMultiplierMatrix<Rational> empty;
   empty.rows = 2;
@@ -390,6 +570,162 @@ int main() {
   empty_scalar.columns = 2;
   ok = ok && !diffexp2::apply_prepared_scalar_row_window(
       empty_scalar, input, 0).has_value();
+
+  PreparedRationalTaylorMultiplier<ComplexBall> exact_point_multiplier;
+  exact_point_multiplier.epsilon_shift = -2;
+  exact_point_multiplier.center_pole_order = 2;
+  exact_point_multiplier.exact_identity =
+      "eps^-2 t^-2 ((1+t)/(1-t) + eps (2-t)/(1+t))";
+  // Deliberately unrelated finite kernels: point specialization must consume
+  // the retained analytic rationals, never this center Taylor prefix.
+  exact_point_multiplier.kernels = {
+      {ComplexBall::from_strings("999")},
+      {ComplexBall::from_strings("-999")}};
+  exact_point_multiplier.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<ComplexBall>>{
+          {{ComplexBall::from_strings("1"),
+            ComplexBall::from_strings("1")},
+           {ComplexBall::from_strings("1"),
+            ComplexBall::from_strings("-1")}},
+          {{ComplexBall::from_strings("2"),
+            ComplexBall::from_strings("-1")},
+           {ComplexBall::from_strings("1"),
+            ComplexBall::from_strings("1")}}};
+  const auto specialized_negative =
+      diffexp2::local_algebra_detail::
+          specialize_prepared_rational_multiplier_at_real_point(
+              exact_point_multiplier,
+              RealEvaluationPoint::rational("-1/2"));
+  const auto specialized_positive =
+      diffexp2::local_algebra_detail::
+          specialize_prepared_rational_multiplier_at_real_point(
+              exact_point_multiplier,
+              RealEvaluationPoint::rational("1/2"));
+  ok = ok && specialized_negative.has_value() &&
+       specialized_negative->min_power() == -2 &&
+       specialized_negative->complete_max() == -1 &&
+       (specialized_negative->coefficient(-2) -
+        ComplexBall::from_strings("4/3")).contains_zero() &&
+       (specialized_negative->coefficient(-1) -
+        ComplexBall::from_strings("20")).contains_zero() &&
+       specialized_positive.has_value() &&
+       (specialized_positive->coefficient(-2) -
+        ComplexBall::from_strings("12")).contains_zero();
+
+  auto missing_analytic = exact_point_multiplier;
+  missing_analytic.analytic_coefficients.reset();
+  const auto missing_analytic_diagnostic =
+      diffexp2::local_algebra_detail::
+          diagnose_prepared_rational_specialization_at_real_point(
+              missing_analytic,
+              RealEvaluationPoint::rational("-1/2"));
+  ok = ok &&
+       !diffexp2::local_algebra_detail::
+            specialize_prepared_rational_multiplier_at_real_point(
+                missing_analytic,
+                RealEvaluationPoint::rational("-1/2")).has_value() &&
+       missing_analytic_diagnostic.has_value() &&
+       missing_analytic_diagnostic->find("unavailable") !=
+           std::string::npos;
+  auto singular_denominator = exact_point_multiplier;
+  singular_denominator.analytic_coefficients->front().denominator = {
+      ComplexBall::from_strings("1"),
+      ComplexBall::from_strings("2")};
+  const auto singular_denominator_diagnostic =
+      diffexp2::local_algebra_detail::
+          diagnose_prepared_rational_specialization_at_real_point(
+              singular_denominator,
+              RealEvaluationPoint::rational("-1/2"));
+  ok = ok &&
+       !diffexp2::local_algebra_detail::
+            specialize_prepared_rational_multiplier_at_real_point(
+                singular_denominator,
+                RealEvaluationPoint::rational("-1/2")).has_value() &&
+       !diffexp2::local_algebra_detail::
+            specialize_prepared_rational_multiplier_at_real_point(
+                exact_point_multiplier,
+                RealEvaluationPoint::rational("0")).has_value() &&
+       singular_denominator_diagnostic.has_value() &&
+       singular_denominator_diagnostic->find("exactly zero") !=
+           std::string::npos;
+
+  const auto analytic_entry = [](
+      std::vector<std::string> numerator) {
+    PreparedRationalTaylorMultiplier<ComplexBall> entry;
+    entry.epsilon_shift = 0;
+    entry.center_pole_order = 0;
+    entry.exact_identity = "point-matrix-entry";
+    entry.kernels = {
+        {ComplexBall::from_strings("777")},
+        {ComplexBall::from_strings("0")},
+        {ComplexBall::from_strings("0")}};
+    std::vector<ComplexBall> parsed_numerator;
+    for (const auto& coefficient : numerator)
+      parsed_numerator.push_back(ComplexBall::from_strings(coefficient));
+    entry.analytic_coefficients =
+        std::vector<PreparedRationalAnalyticCoefficient<ComplexBall>>{
+            {std::move(parsed_numerator),
+             {ComplexBall::from_strings("1")}},
+            {{ComplexBall::from_strings("0")},
+             {ComplexBall::from_strings("1")}},
+            {{ComplexBall::from_strings("0")},
+             {ComplexBall::from_strings("1")}}};
+    return entry;
+  };
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> gauge_inverse;
+  gauge_inverse.rows = gauge_inverse.columns = 2;
+  gauge_inverse.entries.push_back({0, 0, analytic_entry({"1"})});
+  gauge_inverse.entries.push_back({0, 1, analytic_entry({"0", "-1"})});
+  gauge_inverse.entries.push_back({1, 1, analytic_entry({"1"})});
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> spectral_inverse;
+  spectral_inverse.rows = spectral_inverse.columns = 2;
+  spectral_inverse.entries.push_back({0, 1, analytic_entry({"1"})});
+  spectral_inverse.entries.push_back({1, 0, analytic_entry({"1"})});
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> spectral =
+      spectral_inverse;
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> gauge;
+  gauge.rows = gauge.columns = 2;
+  gauge.entries.push_back({0, 0, analytic_entry({"1"})});
+  gauge.entries.push_back({0, 1, analytic_entry({"0", "1"})});
+  gauge.entries.push_back({1, 1, analytic_entry({"1"})});
+  FiniteLaurentVector<ComplexBall> physical_vector{
+      EpsilonFrame<ComplexBall>(
+          0, {ComplexBall::from_strings("2"), ComplexBall(0),
+              ComplexBall(0)}),
+      EpsilonFrame<ComplexBall>(
+          0, {ComplexBall::from_strings("3"), ComplexBall(0),
+              ComplexBall(0)})};
+  const auto matrix_point = RealEvaluationPoint::rational("1/2");
+  const auto reduced_vector =
+      diffexp2::local_algebra_detail::
+          apply_prepared_sparse_epsilon_matrix_at_real_point(
+              gauge_inverse, physical_vector, matrix_point);
+  const auto normal_vector = reduced_vector.has_value()
+      ? diffexp2::local_algebra_detail::
+            apply_prepared_sparse_epsilon_matrix_at_real_point(
+                spectral_inverse, *reduced_vector, matrix_point)
+      : std::nullopt;
+  const auto assembled_vector = normal_vector.has_value()
+      ? diffexp2::local_algebra_detail::
+            apply_prepared_sparse_epsilon_matrix_at_real_point(
+                spectral, *normal_vector, matrix_point)
+      : std::nullopt;
+  const auto restored_vector = assembled_vector.has_value()
+      ? diffexp2::local_algebra_detail::
+            apply_prepared_sparse_epsilon_matrix_at_real_point(
+                gauge, *assembled_vector, matrix_point)
+      : std::nullopt;
+  ok = ok && normal_vector.has_value() &&
+       normal_vector->front().complete_max() == 2 &&
+       (normal_vector->at(0).coefficient(0) -
+        ComplexBall::from_strings("3")).contains_zero() &&
+       (normal_vector->at(1).coefficient(0) -
+        ComplexBall::from_strings("1/2")).contains_zero() &&
+       restored_vector.has_value() &&
+       (restored_vector->at(0).coefficient(0) -
+        ComplexBall::from_strings("2")).contains_zero() &&
+       (restored_vector->at(1).coefficient(0) -
+        ComplexBall::from_strings("3")).contains_zero();
 
   std::cout << (ok ? "PASS" : "FAIL")
             << ": native local rational/SCC and direct scalar-row algebra\n";

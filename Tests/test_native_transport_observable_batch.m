@@ -54,12 +54,11 @@ assert["singular row recipe restores the physical atlas epsilon floor",
     Length[rowFixturePrepared["entries"][[1, "multiplier",
       "analytic_coefficients"]]] === 3];
 
-(* The banana4 final tile is a concrete counterexample to using the basis
-   envelope alone: its live source is eps[-5,4], the integrand begins at
-   eps^-4, and the regulated primitive consumes through eps^1.  The lazy
-   producer must therefore emit ten multiplier coefficients even though its
-   pre-march recipe had only nine rows. *)
-bananaConsumerRecipe =
+(* The banana4 final tile is a concrete counterexample to silently clipping
+   a consumer request to the available source.  With eps[-5,4], an integrand
+   beginning at eps^-4 cannot supply a regulated primitive through eps^1:
+   transport must retry and materialize eps^5 first. *)
+bananaShortFailure = catchDE2[
   DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
     <|"Chart" -> rowFixtureChart,
       "Shape" -> <|"EpsWindow" -> <|"Min" -> -1,
@@ -67,6 +66,21 @@ bananaConsumerRecipe =
         "TWindow" -> <|"CompleteMax" -> 4|>,
         "Dimension" -> 1|>|>,
     <|"Min" -> -5, "CompleteMax" -> 4|>,
+    <|"Identity" -> "banana4-short-consumer",
+      "MinimumEpsilonShift" -> -4,
+      "Epsilon" -> <|"Min" -> -1, "Max" -> 0,
+        "RequiredCompleteMax" -> 0|>|>, 1]];
+assert["regulated consumer rejects a physically short live source",
+  FailureQ[bananaShortFailure]];
+
+bananaConsumerRecipe =
+  DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
+    <|"Chart" -> rowFixtureChart,
+      "Shape" -> <|"EpsWindow" -> <|"Min" -> -1,
+          "CompleteMax" -> 7|>,
+        "TWindow" -> <|"CompleteMax" -> 4|>,
+        "Dimension" -> 1|>|>,
+    <|"Min" -> -5, "CompleteMax" -> 5|>,
     <|"Identity" -> "banana4-consumer-width",
       "MinimumEpsilonShift" -> -4,
       "Epsilon" -> <|"Min" -> -1, "Max" -> 0,
@@ -75,11 +89,54 @@ bananaConsumerPrepared =
   DiffExp2`NativeTransport`Private`nativePrepareArmRecipeRow[
     bananaConsumerRecipe,
     {DiffExp2`Config`CanonicalEps[]^-4/(1 - x/2)}, x, "rational"];
-assert["regulated consumer widens the exact banana4 multiplier prefix by one",
+assert["regulated consumer sizes the exact banana4 multiplier prefix",
   bananaConsumerRecipe["Shape", "EpsWindow"] ===
-      <|"Min" -> -1, "CompleteMax" -> 8|> &&
+      <|"Min" -> -1, "CompleteMax" -> 9|> &&
     Length[bananaConsumerPrepared["entries"][[1, "multiplier",
-      "analytic_coefficients"]]] === 10];
+      "analytic_coefficients"]]] === 11];
+
+bananaFactorizedConsumerRecipe =
+  DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
+    <|"Chart" -> rowFixtureChart,
+      "Shape" -> <|"EpsWindow" -> <|"Min" -> -1,
+          "CompleteMax" -> 7|>,
+        "TWindow" -> <|"CompleteMax" -> 4|>,
+        "Dimension" -> 1|>|>,
+    <|"Sources" -> {
+        <|"Min" -> -3, "CompleteMax" -> 17|>,
+        <|"Min" -> -2, "CompleteMax" -> 17|>},
+      "OutputMinimumShift" -> -3|>,
+    <|"Identity" -> "banana4-factorized-consumer-width",
+      "MinimumEpsilonShift" -> -4,
+      "Epsilon" -> <|"Min" -> -1, "Max" -> 0,
+        "RequiredCompleteMax" -> 0|>|>, 1];
+bananaFactorizedConsumerPrepared =
+  DiffExp2`NativeTransport`Private`nativePrepareArmRecipeRow[
+    bananaFactorizedConsumerRecipe,
+    {DiffExp2`Config`CanonicalEps[]^-4/(1 - x/2)}, x, "rational"];
+assert["factorized terminal consumer uses its physical sources and structural output shift",
+  bananaFactorizedConsumerRecipe["Shape", "EpsWindow"] ===
+      <|"Min" -> -1, "CompleteMax" -> 10|> &&
+    Length[bananaFactorizedConsumerPrepared["entries"][[1, "multiplier",
+      "analytic_coefficients"]]] === 12];
+
+softConsumerRecipe =
+  DiffExp2`NativeTransport`Private`nativeConsumerRowRecipe[
+    <|"Chart" -> rowFixtureChart,
+      "Shape" -> <|"EpsWindow" -> <|"Min" -> 0,
+          "CompleteMax" -> 1|>,
+        "TWindow" -> <|"CompleteMax" -> 4|>,
+        "Dimension" -> 1|>|>,
+    <|"Sources" -> {
+        <|"Min" -> 0, "CompleteMax" -> 2|>},
+      "OutputMinimumShift" -> 0|>,
+    <|"Identity" -> "soft-consumer-width",
+      "MinimumEpsilonShift" -> 0,
+      "Epsilon" -> <|"Min" -> 0, "Max" -> 4,
+        "RequiredCompleteMax" -> 1|>|>, 0];
+assert["consumer desired maximum clips to live source after covering its required maximum",
+  softConsumerRecipe["Shape", "EpsWindow"] ===
+    <|"Min" -> 0, "CompleteMax" -> 2|>];
 
 system = DiffExp2`LoadSystem[<|"Matrix" -> {{0}}, "Variable" -> x|>];
 lowerPlan = DiffExp2`Transport`SegmentLine[system, {0, -1/4}];

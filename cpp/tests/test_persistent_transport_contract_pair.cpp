@@ -414,6 +414,38 @@ double midpoint(const json::object& exported) {
   return std::stod(std::string(coefficient.front().as_string()));
 }
 
+bool valid_pair_conditioning(const json::object& line,
+                             std::int32_t epsilon_min,
+                             std::int32_t epsilon_max) {
+  const auto* raw = line.if_contains("conditioning");
+  if (raw == nullptr || !raw->is_object()) return false;
+  const auto& diagnostics = raw->as_object();
+  if (diagnostics.at("schema") !=
+          "diffexp2-transport-pair-conditioning-diagnostics-v1" ||
+      diagnostics.at("dimension") != 1)
+    return false;
+  const auto& epsilon = diagnostics.at("epsilon").as_object();
+  if (epsilon.at("min") != epsilon_min ||
+      epsilon.at("max") != epsilon_max)
+    return false;
+  const auto& entries = diagnostics.at("entries").as_array();
+  if (entries.size() != static_cast<std::size_t>(
+                            epsilon_max - epsilon_min + 1))
+    return false;
+  for (std::size_t index = 0; index < entries.size(); ++index) {
+    const auto& entry = entries[index].as_object();
+    if (entry.at("power") !=
+            epsilon_min + static_cast<std::int32_t>(index) ||
+        entry.at("component") != 0 ||
+        !entry.at("lower_midpoint").is_array() ||
+        !entry.at("upper_midpoint").is_array() ||
+        !entry.at("combined_midpoint").is_array() ||
+        !entry.at("combined_contains_zero").is_bool())
+      return false;
+  }
+  return true;
+}
+
 bool payload_has_handle(const json::array& records,
                         const std::string& handle) {
   for (const auto& raw : records)
@@ -465,6 +497,7 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
     const auto paired_export = export_line(session, paired_line);
     if (paired_line.at("epsilon").as_object().at("min") != -1 ||
         paired_line.at("epsilon").as_object().at("max") != 1 ||
+        !valid_pair_conditioning(paired_line, -1, 1) ||
         paired_export.at("status") != "ok" ||
         paired_export.at("value").as_object().at("min") != -1 ||
         paired_export.at("value").as_object().at("max") != 1 ||
@@ -545,6 +578,9 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
     const auto streamed_export = export_line(session, streamed_line);
     if (streamed_line.at("epsilon").as_object().at("min") != -1 ||
         streamed_line.at("epsilon").as_object().at("max") != 1 ||
+        !valid_pair_conditioning(streamed_line, -1, 1) ||
+        streamed_line.at("conditioning") !=
+            paired_line.at("conditioning") ||
         streamed_export.at("status") != "ok" ||
         streamed_export.at("value").as_object().at("min") != -1 ||
         streamed_export.at("value").as_object().at("max") != 1 ||
@@ -669,6 +705,10 @@ int main() {
         one.at("no_remarching") != true || one.at("no_rematching") != true)
       throw std::runtime_error(
           "one-observable pair contraction failed: " + json::serialize(one));
+    if (!valid_pair_conditioning(
+            one.at("lines").as_array().front().as_object(), 0, 0))
+      throw std::runtime_error(
+          "one-observable pair contraction omitted its bounded conditioning diagnostics");
     const auto one_export = export_line(
         session, one.at("lines").as_array().front().as_object());
     if (one_export.at("status") != "ok" ||
@@ -871,6 +911,14 @@ int main() {
       throw std::runtime_error(
           "one-row transport-pair stream did not finish exactly: " +
           json::serialize(streamed));
+    if (!valid_pair_conditioning(
+            streamed.at("lines").as_array().front().as_object(), 0, 0) ||
+        streamed.at("lines").as_array().front().as_object().at(
+            "conditioning") !=
+            one.at("lines").as_array().front().as_object().at(
+                "conditioning"))
+      throw std::runtime_error(
+          "streamed pair conditioning diagnostics differ from one-shot contraction");
     const auto streamed_export = export_line(
         session, streamed.at("lines").as_array().front().as_object());
     if (streamed_export.at("status") != "ok" ||
@@ -928,7 +976,7 @@ int main() {
       throw std::runtime_error("checkpoint.save: " + json::serialize(saved));
     const auto container = diffexp2::checkpoint::read(checkpoint);
     const auto payload = json::parse(container.payload_json).as_object();
-    if (payload.at("schema") != 8 ||
+    if (payload.at("schema") != 9 ||
         payload.at("retained_transport_states").as_array().size() != 2 ||
         !payload_has_handle(payload.at("retained_transport_states").as_array(),
                             std::string(lower.at("transport_state").as_string())) ||

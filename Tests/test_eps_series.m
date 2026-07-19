@@ -27,6 +27,7 @@ div = DiffExp2`EpsSeries`ESDivide;
 shift = DiffExp2`EpsSeries`ESShift;
 trunc = DiffExp2`EpsSeries`ESTruncate;
 trim = DiffExp2`EpsSeries`ESTrim;
+trimThrough = DiffExp2`EpsSeries`ESTrimThrough;
 sameq = DiffExp2`EpsSeries`ESSameQ;
 fromx = DiffExp2`EpsSeries`ESFromExpression;
 win = DiffExp2`EpsSeries`ESWindow;
@@ -130,6 +131,20 @@ unresolvedCenteredZero = 0``17;
 assert["trim_unresolved_centered_zero_is_not_discarded",
   DiffExp2`EpsSeries`ESMinPower[
     trim[es[-1, {unresolvedCenteredZero}]]] === -1];
+privateReservoir12 = es[-1, {N[10^-8, 100], N[2, 100],
+    N[3, 100], N[10^80, 100]}];
+assert["private reservoir cannot change the public Laurent lead",
+  DiffExp2`EpsSeries`ESMinPower[trim[privateReservoir12]] === 2 &&
+    DiffExp2`EpsSeries`ESMinPower[
+      trimThrough[privateReservoir12, 1]] === -1 &&
+    coeff[trimThrough[privateReservoir12, 1], -1] ===
+      coeff[privateReservoir12, -1] &&
+    DiffExp2`EpsSeries`ESCompleteMax[
+      trimThrough[privateReservoir12, 1]] === 2];
+assert["all-zero public prefix advances without discarding private suffix",
+  win[trimThrough[es[-2, {0, 0, 7, 9}], -1]] ===
+      <|"Min" -> 0, "CompleteMax" -> 1|> &&
+    trimThrough[es[-2, {0, 0, 7, 9}], -1]["Coeffs"] === {7, 9}];
 
 (* 13 — exact passthrough chain; hand-computed pin *)
 q13 = div[times[add[es[0, {1/3, 22/7}], es[0, {-5/11, 2}]], es[0, {1, 1}]], es[0, {2, 1}]];

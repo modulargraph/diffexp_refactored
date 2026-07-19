@@ -521,6 +521,12 @@ class StoredLocalBase;
 class StoredTilePlan;
 class StoredTransportArmState;
 
+struct AcbMatchingResidualPushforward {
+  FiniteLaurentVector<ComplexBall> residual;
+  std::string normal_frame_identity;
+  std::string certificate_identity;
+};
+
 // Equation ownership is deliberately independent of the current primitive
 // chart implementation.  Composite SCC owners and lightweight regular
 // physical owners can retain one full original-system q/C certificate without
@@ -548,9 +554,18 @@ class PhysicalEquationOwnerBase {
   virtual std::optional<std::pair<
       FiniteLaurentVector<ComplexBall>, std::string>>
   normalize_acb_matching_vector(
-      const FiniteLaurentVector<ComplexBall>& physical) const {
+      const FiniteLaurentVector<ComplexBall>& physical,
+      const RealEvaluationPoint& point) const {
     (void)physical;
+    (void)point;
     return std::nullopt;
+  }
+  virtual json::object acb_matching_normal_frame_diagnostic(
+      const RealEvaluationPoint& point) const {
+    (void)point;
+    return json::object{
+        {"schema", "diffexp2-acb-normal-frame-owner-diagnostic-v1"},
+        {"status", "unsupported-equation-owner"}};
   }
   virtual std::optional<FiniteLaurentMatrix<ComplexBall>>
   right_normalize_acb_matching_basis(
@@ -562,6 +577,16 @@ class PhysicalEquationOwnerBase {
   denormalize_acb_matching_weights(
       const FiniteLaurentVector<ComplexBall>& normalized) const {
     (void)normalized;
+    return std::nullopt;
+  }
+  virtual std::optional<AcbMatchingResidualPushforward>
+  pushforward_acb_matching_residual(
+      const FiniteLaurentVector<ComplexBall>& normalized,
+      const std::string& expected_normal_frame_identity,
+      const RealEvaluationPoint& point) const {
+    (void)normalized;
+    (void)expected_normal_frame_identity;
+    (void)point;
     return std::nullopt;
   }
 };
@@ -1862,6 +1887,9 @@ class StoredLocalBase {
                       std::nullopt)
       : handle_(std::move(handle)), source_chart_(std::move(source_chart)),
         source_operator_identity_(std::move(source_operator_identity)),
+        source_operator_fingerprint_(
+            public_provenance_fingerprint(source_operator_identity_)),
+        source_operator_identity_bytes_(source_operator_identity_.size()),
         create_parse_ms_(create_parse_ms),
         create_kernel_ms_(create_kernel_ms),
         column_provenance_(std::move(column_provenance)) {}
@@ -1906,11 +1934,18 @@ class StoredLocalBase {
   virtual json::object summary() const = 0;
   virtual json::object stats_json() const = 0;
   virtual StoredLocalStats stats() const = 0;
-  virtual json::object checkpoint_record() const = 0;
+  virtual json::object checkpoint_record(
+      bool consumed_terminal_shadow = false) const = 0;
   virtual const std::optional<json::object>& retained_derivation() const = 0;
   virtual std::shared_ptr<void> retained_derivation_owner() const = 0;
   virtual json::object seal_plan_match_lineage() = 0;
   virtual bool has_sealed_plan_match_lineage() const = 0;
+  virtual void attach_terminal_factorized_owner(
+      std::shared_ptr<void> owner,
+      std::string checkpoint_identity) = 0;
+  virtual std::shared_ptr<void> terminal_factorized_owner() const = 0;
+  virtual const std::string&
+      terminal_factorized_owner_checkpoint_identity() const = 0;
   virtual std::shared_ptr<PhysicalEquationOwnerBase>
       retained_equation_owner() const = 0;
   virtual std::shared_ptr<const RationalShadowColumnWitness>
@@ -1921,6 +1956,12 @@ class StoredLocalBase {
   const std::string& source_operator_identity() const {
     return source_operator_identity_;
   }
+  json::object source_operator_reference() const {
+    return json::object{
+        {"algorithm", "fnv1a64-v1"},
+        {"fingerprint", source_operator_fingerprint_},
+        {"identity_bytes", source_operator_identity_bytes_}};
+  }
   const std::optional<SCCColumnProvenance>& column_provenance() const {
     return column_provenance_;
   }
@@ -1929,6 +1970,8 @@ class StoredLocalBase {
   std::string handle_;
   std::string source_chart_;
   std::string source_operator_identity_;
+  std::string source_operator_fingerprint_;
+  std::size_t source_operator_identity_bytes_ = 0;
   double create_parse_ms_ = 0.0;
   double create_kernel_ms_ = 0.0;
   std::optional<SCCColumnProvenance> column_provenance_;
@@ -2611,11 +2654,7 @@ class StoredLocal final : public StoredLocalBase {
         {"create_kernel_ms", create_kernel_ms_}};
     if (column_provenance_.has_value()) {
       result.erase("source_operator_identity");
-      result["source_operator_reference"] = json::object{
-          {"algorithm", "fnv1a64-v1"},
-          {"fingerprint",
-           public_provenance_fingerprint(source_operator_identity_)},
-          {"identity_bytes", source_operator_identity_.size()}};
+      result["source_operator_reference"] = source_operator_reference();
       result["column_provenance"] =
           column_provenance_->public_reference();
     }
@@ -2700,7 +2739,8 @@ class StoredLocal final : public StoredLocalBase {
             tail_certificate_unsupported_.load()};
   }
 
-  json::object checkpoint_record() const override {
+  json::object checkpoint_record(
+      bool consumed_terminal_shadow = false) const override {
     if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
       throw std::domain_error(
           "native checkpoint does not serialize symbolic-coefficient local state");
@@ -2816,6 +2856,9 @@ class StoredLocal final : public StoredLocalBase {
         runtime["tail_certificate_unsupported"] =
             current.tail_certificate_unsupported;
       }
+      if (rational_shadow_witness_ && !consumed_terminal_shadow)
+        throw std::logic_error(
+            "checkpointing an unconsumed Rational-shadow SCC basis is unsupported: the exact witness is intentionally live-only; consume the match before saving");
       json::object record{
         {"schema", sealed_plan_match_lineage_
              ? "diffexp2-retained-local-v5"
@@ -3113,6 +3156,28 @@ class StoredLocal final : public StoredLocalBase {
   bool has_sealed_plan_match_lineage() const override {
     return sealed_plan_match_lineage_;
   }
+  void attach_terminal_factorized_owner(
+      std::shared_ptr<void> owner,
+      std::string checkpoint_identity) override {
+    if (!sealed_plan_match_lineage_ || retained_owner_ != nullptr)
+      throw std::invalid_argument(
+          "a terminal factorized owner requires one sealed owner-free plan-match lineage");
+    if (owner == nullptr || checkpoint_identity.empty() ||
+        terminal_factorized_owner_ != nullptr ||
+        !terminal_factorized_owner_checkpoint_identity_.empty())
+      throw std::invalid_argument(
+          "terminal factorized owner attachment is missing, duplicated, or malformed");
+    terminal_factorized_owner_ = std::move(owner);
+    terminal_factorized_owner_checkpoint_identity_ =
+        std::move(checkpoint_identity);
+  }
+  std::shared_ptr<void> terminal_factorized_owner() const override {
+    return terminal_factorized_owner_;
+  }
+  const std::string&
+  terminal_factorized_owner_checkpoint_identity() const override {
+    return terminal_factorized_owner_checkpoint_identity_;
+  }
   std::shared_ptr<PhysicalEquationOwnerBase> retained_equation_owner()
       const override {
     return equation_owner_;
@@ -3333,6 +3398,8 @@ class StoredLocal final : public StoredLocalBase {
   std::int32_t top_valid_ = kCompleteInfinity;
   std::optional<json::object> retained_derivation_;
   std::shared_ptr<void> retained_owner_;
+  std::shared_ptr<void> terminal_factorized_owner_;
+  std::string terminal_factorized_owner_checkpoint_identity_;
   std::optional<std::string> retained_provenance_fingerprint_;
   std::size_t retained_provenance_identity_bytes_ = 0;
   RegularTaylorTailModelResult tail_model_ = unavailable_tail_model(

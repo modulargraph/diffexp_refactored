@@ -257,6 +257,10 @@ void write_corrupt_tail_checkpoint(const std::string& source_path,
   auto payload = json::parse(container.payload_json).as_object();
   auto& tail = retained_local_record(payload, local_handle)
       .at("tail_model_restore").as_object();
+  if (tail.if_contains("model") == nullptr)
+    throw std::runtime_error(
+        "matched tail checkpoint has no corruptible model: " +
+        json::serialize(tail));
   auto& model = tail.at("model").as_object();
   auto& n_coefficients = model.at("n_coefficients").as_array();
   auto& n_norms = model.at("n_row_sum_upper_exact").as_array();
@@ -396,6 +400,10 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
       saved_payload, basis_handle).at("tail_model_restore").as_object();
   const auto& saved_matched_tail = retained_local_record(
       saved_payload, matched_handle).at("tail_model_restore").as_object();
+  if (saved_matched_tail.if_contains("model") == nullptr)
+    throw std::runtime_error(
+        domain + " matched tail was not retained: " +
+        json::serialize(matched.at("tail_majorant")));
   write_corrupt_tail_checkpoint(path, corrupt_path, matched_handle);
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                              {"session", session}});
@@ -405,6 +413,10 @@ bool certified_domain(const std::string& domain, bool incompatible_case) {
   const auto restored = request(json::object{
       {"schema", 2}, {"op", "checkpoint.restore"}, {"path", path},
       {"expected_identity", checkpoint_identity}});
+  if (restored.at("status") != "ok")
+    throw std::runtime_error(
+        domain + " matched-tail checkpoint restore: " +
+        json::serialize(restored));
   const auto restored_session =
       std::string(restored.at("session").as_string());
   const auto resaved = request(json::object{

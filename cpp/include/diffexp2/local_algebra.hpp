@@ -81,6 +81,161 @@ struct PreparedSparseLocalMultiplierMatrix {
 
 namespace local_algebra_detail {
 
+inline std::optional<ComplexBall> signed_real_evaluation_ball(
+    const RealEvaluationPoint& point) {
+  if (point.exact_coordinate.empty() || point.sign < -1 || point.sign > 1 ||
+      !arb_is_zero(acb_imagref(point.modulus.raw())) ||
+      !arb_is_nonnegative(acb_realref(point.modulus.raw())))
+    return std::nullopt;
+  if (point.sign == 0)
+    return point.modulus.is_zero()
+        ? std::optional<ComplexBall>(point.modulus)
+        : std::nullopt;
+  if (point.modulus.contains_zero()) return std::nullopt;
+  return point.sign < 0
+      ? std::optional<ComplexBall>(-point.modulus)
+      : std::optional<ComplexBall>(point.modulus);
+}
+
+inline std::optional<ComplexBall> evaluate_acb_polynomial_at(
+    const std::vector<ComplexBall>& coefficients,
+    const ComplexBall& point) {
+  if (coefficients.empty()) return std::nullopt;
+  auto value = coefficients.back();
+  for (std::size_t index = coefficients.size() - 1; index > 0; --index)
+    value = value * point + coefficients[index - 1];
+  return value;
+}
+
+// Specialize the complete retained rational function at an exact real chart
+// coordinate.  This deliberately does not replay `kernels`: those are only a
+// finite Taylor prefix around the chart center and cannot certify the gauge
+// at an off-center match point.
+inline std::optional<EpsilonFrame<ComplexBall>>
+specialize_prepared_rational_multiplier_at_real_point(
+    const PreparedRationalTaylorMultiplier<ComplexBall>& multiplier,
+    const RealEvaluationPoint& point) {
+  if (multiplier.proven_zero ||
+      !multiplier.analytic_coefficients.has_value() ||
+      multiplier.analytic_coefficients->empty() ||
+      multiplier.analytic_coefficients->size() != multiplier.kernels.size())
+    return std::nullopt;
+  const auto signed_point = signed_real_evaluation_ball(point);
+  if (!signed_point.has_value() ||
+      (multiplier.center_pole_order != 0 &&
+       signed_point->contains_zero()))
+    return std::nullopt;
+
+  ComplexBall center_pole_factor(1);
+  if (multiplier.center_pole_order != 0) {
+    acb_pow_ui(center_pole_factor.raw(), signed_point->raw(),
+               multiplier.center_pole_order, ComplexBall::precision());
+    if (center_pole_factor.contains_zero()) return std::nullopt;
+  }
+
+  std::vector<ComplexBall> specialized;
+  specialized.reserve(multiplier.analytic_coefficients->size());
+  for (const auto& rational : *multiplier.analytic_coefficients) {
+    auto numerator =
+        evaluate_acb_polynomial_at(rational.numerator, *signed_point);
+    auto denominator =
+        evaluate_acb_polynomial_at(rational.denominator, *signed_point);
+    if (!numerator.has_value() || !denominator.has_value() ||
+        denominator->contains_zero())
+      return std::nullopt;
+    auto value = *numerator / *denominator;
+    if (multiplier.center_pole_order != 0)
+      value = value / center_pole_factor;
+    specialized.push_back(std::move(value));
+  }
+  return EpsilonFrame<ComplexBall>(
+      multiplier.epsilon_shift, std::move(specialized));
+}
+
+inline std::optional<std::string>
+diagnose_prepared_rational_specialization_at_real_point(
+    const PreparedRationalTaylorMultiplier<ComplexBall>& multiplier,
+    const RealEvaluationPoint& point) {
+  if (multiplier.proven_zero)
+    return "structural-zero multiplier was retained as an active entry";
+  if (!multiplier.analytic_coefficients.has_value())
+    return "complete analytic rational coefficients are unavailable";
+  if (multiplier.analytic_coefficients->empty())
+    return "complete analytic rational coefficient list is empty";
+  if (multiplier.analytic_coefficients->size() != multiplier.kernels.size())
+    return "analytic rational and epsilon-kernel counts differ";
+  const auto signed_point = signed_real_evaluation_ball(point);
+  if (!signed_point.has_value())
+    return "receiving point has no certified signed real specialization";
+  if (multiplier.center_pole_order != 0 &&
+      signed_point->contains_zero())
+    return "receiving point intersects the gauge center pole";
+
+  if (multiplier.center_pole_order != 0) {
+    ComplexBall center_pole_factor(1);
+    acb_pow_ui(center_pole_factor.raw(), signed_point->raw(),
+               multiplier.center_pole_order, ComplexBall::precision());
+    if (center_pole_factor.contains_zero())
+      return "evaluated gauge center-pole factor contains zero";
+  }
+  for (std::size_t epsilon = 0;
+       epsilon < multiplier.analytic_coefficients->size(); ++epsilon) {
+    const auto& rational =
+        (*multiplier.analytic_coefficients)[epsilon];
+    auto numerator =
+        evaluate_acb_polynomial_at(rational.numerator, *signed_point);
+    if (!numerator.has_value())
+      return "analytic numerator is empty at epsilon coefficient " +
+          std::to_string(epsilon);
+    auto denominator =
+        evaluate_acb_polynomial_at(rational.denominator, *signed_point);
+    if (!denominator.has_value())
+      return "analytic denominator is empty at epsilon coefficient " +
+          std::to_string(epsilon);
+    if (denominator->contains_zero())
+      return std::string(denominator->is_zero()
+              ? "analytic denominator is exactly zero"
+              : "analytic denominator enclosure contains zero") +
+          " at epsilon coefficient " + std::to_string(epsilon);
+  }
+  return std::nullopt;
+}
+
+inline std::optional<FiniteLaurentVector<ComplexBall>>
+apply_prepared_sparse_epsilon_matrix_at_real_point(
+    const PreparedSparseLocalMultiplierMatrix<ComplexBall>& matrix,
+    const FiniteLaurentVector<ComplexBall>& input,
+    const RealEvaluationPoint& point) {
+  if (matrix.rows != input.size() || matrix.columns != input.size())
+    throw std::invalid_argument(
+        "point-specialized epsilon matrix dimensions differ from its vector");
+  std::vector<std::optional<EpsilonFrame<ComplexBall>>> rows(matrix.rows);
+  for (const auto& entry : matrix.entries) {
+    if (entry.row >= matrix.rows || entry.column >= matrix.columns)
+      throw std::invalid_argument(
+          "point-specialized epsilon matrix entry is outside its shape");
+    if (entry.multiplier.proven_zero) continue;
+    auto multiplier =
+        specialize_prepared_rational_multiplier_at_real_point(
+            entry.multiplier, point);
+    if (!multiplier.has_value()) return std::nullopt;
+    auto term = *multiplier * input[entry.column];
+    rows[entry.row] = rows[entry.row].has_value()
+        ? *rows[entry.row] + term
+        : std::move(term);
+  }
+
+  FiniteLaurentVector<ComplexBall> output;
+  output.reserve(rows.size());
+  for (auto& row : rows) {
+    if (!row.has_value())
+      throw std::invalid_argument(
+          "point-specialized invertible epsilon matrix has an empty row");
+    output.push_back(std::move(*row));
+  }
+  return output;
+}
+
 // Move-only owner for a FLINT polynomial.  Acb local algebra uses these to
 // replace the scalar O(N^2) Taylor convolution with Arb's polynomial kernel
 // while preserving the same finite epsilon/Taylor rectangle.
@@ -765,11 +920,65 @@ std::optional<LocalSolution<Scalar>> apply_prepared_scalar_row_window(
   return output;
 }
 
+// Retain exactly the Taylor prefix used by a certified match.  A matching
+// retry may intentionally reject a numerically poisoned stored suffix; that
+// suffix must not silently re-enter when the receiving local is materialized.
+template <typename Scalar>
+LocalSolution<Scalar> restrict_local_taylor_prefix(
+    const LocalSolution<Scalar>& input,
+    std::uint32_t target_complete_max,
+    std::string checkpoint_identity = {}) {
+  validate_local_solution(input, false);
+  if (!input.error.empty())
+    throw std::invalid_argument(
+        "native Taylor-prefix restriction needs explicit error-envelope propagation");
+  if (target_complete_max > input.taylor_complete_max)
+    throw std::invalid_argument(
+        "requested Taylor prefix exceeds the retained local order");
+  if (target_complete_max == input.taylor_complete_max)
+    return input;
+
+  LocalSolution<Scalar> output;
+  output.chart = input.chart;
+  output.epsilon = input.epsilon;
+  output.taylor_complete_max = target_complete_max;
+  output.dimension = input.dimension;
+  output.prescriptions = input.prescriptions;
+  output.checkpoint_identity = checkpoint_identity.empty()
+      ? input.checkpoint_identity + ":taylor-prefix:" +
+            std::to_string(target_complete_max)
+      : std::move(checkpoint_identity);
+  output.sectors.reserve(input.sectors.size());
+  for (const auto& sector : input.sectors) {
+    LocalSector<Scalar> restricted;
+    restricted.a = sector.a;
+    restricted.b = sector.b;
+    restricted.log_power = sector.log_power;
+    restricted.coefficients.assign(output.sector_size(),
+                                    ScalarTraits<Scalar>::zero());
+    for (std::size_t epsilon = 0;
+         epsilon < input.epsilon.width(); ++epsilon)
+      for (std::size_t taylor = 0;
+           taylor < output.taylor_width(); ++taylor)
+        for (std::uint32_t component = 0;
+             component < input.dimension; ++component)
+          restricted.coefficients[local_algebra_detail::flat_index(
+              epsilon, taylor, component, output.taylor_width(),
+              output.dimension)] =
+              sector.coefficients[local_algebra_detail::flat_index(
+                  epsilon, taylor, component, input.taylor_width(),
+                  input.dimension)];
+    output.sectors.push_back(std::move(restricted));
+  }
+  validate_local_solution(output, false);
+  return output;
+}
+
 // Restrict a finite local slab to a target recurrence frame.  Discarding
 // known upper coefficients is safe because the target never consumes them.
 // Discarding lower coefficients is only safe when every discarded exact
-// coefficient is zero: nonzero lower content means the caller did not retain
-// enough Laurent halo for the signed multiplier shift.
+// coefficient is zero: epsilon-dependent Frobenius exponents can mix a pole
+// row into finite and positive orders during evaluation.
 template <typename Scalar>
 LocalSolution<Scalar> restrict_local_epsilon_frame_strict_lower(
     const LocalSolution<Scalar>& input, std::int32_t target_min,
@@ -926,6 +1135,175 @@ LocalSolution<Scalar> combine_local_solutions(
     }
   }
   return canonicalize_identical_local_sectors(std::move(output));
+}
+
+// Apply one exact epsilon-Laurent right transformation to a retained local
+// basis without first expanding the corresponding physical weights.
+//
+// Matching in a saturated lattice solves
+//
+//                         (F T) y = b.
+//
+// Reconstructing w = T y and then materializing F w is algebraically
+// equivalent, but for Acb it recreates every confluent-column cancellation
+// independently in every Taylor coefficient.  Keeping the association
+// (F T) y preserves the exact structural dependencies used by the matching
+// solve.  Omitted terms of ExactLaurentPolynomial are structural zero, so
+// unlike a finite EpsilonFrame they do not impose an upper completeness edge.
+template <typename Scalar>
+std::vector<LocalSolution<Scalar>> right_transform_local_basis_exact(
+    const std::vector<const LocalSolution<Scalar>*>& basis,
+    const ExactLaurentMatrix<Scalar>& transformation,
+    const std::string& checkpoint_identity_root) {
+  const auto dimension = basis.size();
+  if (dimension == 0 || transformation.size() != dimension ||
+      checkpoint_identity_root.empty())
+    throw std::invalid_argument(
+        "exact right local-basis transformation requires a nonempty square basis and checkpoint root");
+  for (const auto& row : transformation)
+    if (row.size() != dimension)
+      throw std::invalid_argument(
+          "exact right local-basis transformation is not square");
+  for (const auto* column : basis) {
+    if (column == nullptr)
+      throw std::invalid_argument(
+          "exact right local-basis transformation received a null column");
+    validate_local_solution(*column, false);
+    if (!column->error.empty())
+      throw std::invalid_argument(
+          "exact right local-basis transformation cannot discard an error envelope");
+    local_algebra_detail::require_same_local_space(*basis.front(), *column);
+  }
+
+  std::vector<LocalSolution<Scalar>> transformed;
+  transformed.reserve(dimension);
+  for (std::size_t output_column = 0; output_column < dimension;
+       ++output_column) {
+    std::optional<std::int32_t> minimum;
+    std::optional<std::int32_t> complete_max;
+    std::uint32_t taylor_complete_max =
+        std::numeric_limits<std::uint32_t>::max();
+    for (std::size_t input_column = 0; input_column < dimension;
+         ++input_column) {
+      const auto& polynomial =
+          transformation[input_column][output_column];
+      const auto polynomial_minimum = polynomial.minimum_power();
+      if (!polynomial_minimum.has_value()) continue;
+      const auto term_minimum = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(
+              basis[input_column]->epsilon.min_power) +
+              *polynomial_minimum,
+          "exact right transformed local epsilon minimum");
+      const auto term_complete = local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(
+              basis[input_column]->epsilon.complete_max) +
+              *polynomial_minimum,
+          "exact right transformed local complete maximum");
+      minimum = !minimum.has_value()
+          ? term_minimum : std::min(*minimum, term_minimum);
+      complete_max = !complete_max.has_value()
+          ? term_complete : std::min(*complete_max, term_complete);
+      taylor_complete_max = std::min(
+          taylor_complete_max,
+          basis[input_column]->taylor_complete_max);
+    }
+    if (!minimum.has_value() || !complete_max.has_value() ||
+        *complete_max < *minimum ||
+        taylor_complete_max ==
+            std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument(
+          "exact right local-basis transformation has an empty or invalid output column");
+
+    LocalSolution<Scalar> output;
+    output.chart = basis.front()->chart;
+    output.epsilon = {*minimum, *complete_max};
+    output.taylor_complete_max = taylor_complete_max;
+    output.dimension = basis.front()->dimension;
+    output.prescriptions = basis.front()->prescriptions;
+    output.checkpoint_identity =
+        checkpoint_identity_root + ":column:" +
+        std::to_string(output_column);
+
+    const auto output_taylor_width = output.taylor_width();
+    for (std::size_t input_column = 0; input_column < dimension;
+         ++input_column) {
+      const auto& polynomial =
+          transformation[input_column][output_column];
+      if (polynomial.is_zero()) continue;
+      const auto& source = *basis[input_column];
+      for (const auto& sector : source.sectors) {
+        LocalSector<Scalar> materialized;
+        materialized.a = sector.a;
+        materialized.b = sector.b;
+        materialized.log_power = sector.log_power;
+        materialized.coefficients.assign(
+            output.sector_size(), ScalarTraits<Scalar>::zero());
+        for (std::int64_t output_power = output.epsilon.min_power;
+             output_power <= output.epsilon.complete_max;
+             ++output_power) {
+          const auto output_epsilon = static_cast<std::size_t>(
+              output_power - output.epsilon.min_power);
+          for (const auto& [transformation_power,
+                            transformation_coefficient] :
+               polynomial.terms()) {
+            const auto source_power =
+                output_power - transformation_power;
+            if (source_power < source.epsilon.min_power ||
+                source_power > source.epsilon.complete_max)
+              continue;
+            const auto source_epsilon = static_cast<std::size_t>(
+                source_power - source.epsilon.min_power);
+            for (std::size_t n = 0; n < output_taylor_width; ++n)
+              for (std::uint32_t component = 0;
+                   component < output.dimension; ++component)
+                materialized.coefficients[
+                    local_algebra_detail::flat_index(
+                        output_epsilon, n, component,
+                        output_taylor_width, output.dimension)] +=
+                    transformation_coefficient *
+                    sector.coefficients[
+                        local_algebra_detail::flat_index(
+                            source_epsilon, n, component,
+                            source.taylor_width(), source.dimension)];
+          }
+        }
+        output.sectors.push_back(std::move(materialized));
+      }
+    }
+    output = canonicalize_identical_local_sectors(std::move(output));
+    std::optional<std::int32_t> first_material_power;
+    for (std::int64_t power = output.epsilon.min_power;
+         power <= output.epsilon.complete_max &&
+             !first_material_power.has_value();
+         ++power) {
+      const auto epsilon_index = static_cast<std::size_t>(
+          power - output.epsilon.min_power);
+      for (const auto& sector : output.sectors) {
+        const auto begin = epsilon_index * output.taylor_width() *
+            output.dimension;
+        const auto end = begin + output.taylor_width() *
+            output.dimension;
+        if (std::any_of(
+                sector.coefficients.begin() +
+                    static_cast<std::ptrdiff_t>(begin),
+                sector.coefficients.begin() +
+                    static_cast<std::ptrdiff_t>(end),
+                [](const Scalar& value) {
+                  return !ScalarTraits<Scalar>::is_zero(value);
+                })) {
+          first_material_power = static_cast<std::int32_t>(power);
+          break;
+        }
+      }
+    }
+    if (first_material_power.has_value() &&
+        *first_material_power > output.epsilon.min_power)
+      output = restrict_local_epsilon_frame_strict_lower(
+          output, *first_material_power, output.epsilon.complete_max,
+          output.checkpoint_identity);
+    transformed.push_back(std::move(output));
+  }
+  return transformed;
 }
 
 // Materialize one retained matching state in its receiving chart without

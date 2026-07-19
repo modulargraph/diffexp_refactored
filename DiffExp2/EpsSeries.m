@@ -20,6 +20,7 @@ ESInvert::usage = "ESInvert[d] gives 1/d with window [-L, dCM - 2L], L the leadi
 ESDivide::usage = "ESDivide[a, b] gives a/b = ESTimes[a, ESInvert[b]].";
 ESTruncate::usage = "ESTruncate[s, newCM] lowers CompleteMax; extending or emptying the window is a loud error.";
 ESTrim::usage = "ESTrim[s] advances Min past negligible leading coefficients; CompleteMax never changes; all-negligible gives ESZero[CompleteMax].";
+ESTrimThrough::usage = "ESTrimThrough[s, decisionCM] advances Min using only coefficients through decisionCM to set the numerical zero scale, while retaining all coefficients through CompleteMax. This keeps a certified public Laurent prefix invariant when a private high-order reservoir is appended.";
 ESCoeffZeroQ::usage = "ESCoeffZeroQ[c, scale, tol] is the EpsSeries wrapper over Tolerances`NumericallyZeroQ (tol Automatic -> LaurentLeadTol).";
 ESSameQ::usage = "ESSameQ[a, b] gives equality at matchTol on the shared complete range; window agreement is not required.";
 ESFromExpression::usage = "ESFromExpression[expr, epsSym, kmax] gives the exact Laurent expansion complete through kmax; loud on failure, fractional powers, or residual eps. API boundary only.";
@@ -205,6 +206,31 @@ ESTrim[s_?ESQ] := Module[{scale = seriesDecisionScale[s], kmin = ESMinPower[s], 
     {i, Length[s["Coeffs"]]}];
   If[first === None, ESZero[ESCompleteMax[s]],
     mkSeries[kmin + first - 1, ESCompleteMax[s], Drop[s["Coeffs"], first - 1]]]];
+
+(* A private work reservoir is not part of the numerical object whose leading
+   Laurent order is being decided.  In particular, a large coefficient at a
+   remote epsilon order must not make a fixed pole or finite coefficient look
+   negligible.  Classify the public prefix with its own scale, then retain the
+   untouched suffix so it remains available to the next ladder level. *)
+ESTrimThrough[s_?ESQ, decisionCM_Integer] := Module[
+  {kmin = ESMinPower[s], kmax = ESCompleteMax[s], edge, prefixLength,
+   prefix, scale, first = None},
+  edge = Min[decisionCM, kmax];
+  If[edge < kmin, Return[s, Module]];
+  prefixLength = edge - kmin + 1;
+  prefix = Take[s["Coeffs"], prefixLength];
+  scale = seriesDecisionScale[mkSeries[kmin, edge, prefix]];
+  Do[If[!ESCoeffZeroQ[prefix[[i]], scale], first = i; Break[]],
+    {i, prefixLength}];
+  Which[
+    first =!= None,
+      mkSeries[kmin + first - 1, kmax, Drop[s["Coeffs"], first - 1]],
+    edge === kmax, ESZero[kmax],
+    True, mkSeries[edge + 1, kmax, Drop[s["Coeffs"], prefixLength]]]];
+ESTrimThrough[x___] := esError["ERR-BAD-CONSTRUCT",
+  <|"Function" -> "ESTrimThrough",
+    "Arguments" -> StringTake[ToString[{x}, InputForm], UpTo[200]],
+    "Detail" -> "expected ESTrimThrough[series, decisionCM_Integer]"|>];
 
 (* ---- comparison ---- *)
 

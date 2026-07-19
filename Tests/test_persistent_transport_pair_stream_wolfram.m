@@ -35,12 +35,12 @@ recipe[id_String] := <|"ID" -> id,
       "CompleteMax" -> 7|>,
     "TWindow" -> <|"CompleteMax" -> 4|>, "Dimension" -> 1|>|>;
 lowerSourceEpsilon = {
-  <|"Min" -> -5, "CompleteMax" -> 4|>,
-  <|"Min" -> 0, "CompleteMax" -> 2|>,
-  <|"Min" -> 0, "CompleteMax" -> 2|>};
+  <|"Min" -> -5, "CompleteMax" -> 6|>,
+  <|"Min" -> 0, "CompleteMax" -> 6|>,
+  <|"Min" -> 0, "CompleteMax" -> 6|>};
 upperSourceEpsilon = {
-  <|"Min" -> 0, "CompleteMax" -> 2|>,
-  <|"Min" -> 0, "CompleteMax" -> 2|>};
+  <|"Min" -> 0, "CompleteMax" -> 6|>,
+  <|"Min" -> 0, "CompleteMax" -> 6|>};
 
 requests = {}; cacheClears = 0; preparedWindows = {};
 result = Block[{
@@ -99,7 +99,7 @@ assert["stream_adds_exactly_one_row_in_strict_lower_upper_order",
     Lookup[Lookup[adds, "row"], "exact_identity"] ===
       {"lower-0", "lower-1", "lower-2", "upper-0", "upper-1"} &&
     First[preparedWindows] ===
-      <|"Min" -> -1, "CompleteMax" -> 8|> &&
+      <|"Min" -> -1, "CompleteMax" -> 10|> &&
     Rest[preparedWindows] === ConstantArray[
       <|"Min" -> -1, "CompleteMax" -> 7|>, 4] &&
     AllTrue[adds, Sort[Keys[#]] === Sort[{"schema", "op", "session",

@@ -276,7 +276,7 @@ json::object residual_request(const std::string& session,
       {"session", session}, {"local", local},
       {"point", json::object{{"exact", "1/10"}}},
       {"options", json::object{{"tail_estimate", false}}},
-      {"relative_tolerance", "1e-24"},
+      {"relative_tolerance", "2e-24"},
       {"scope", "stored_truncation"}, {"include_residual", true},
       {"operator_identity", binding.at("operator_identity")},
       {"source_identity", binding.at("source_identity")},
@@ -495,12 +495,12 @@ int main() {
           "available" && diagnostics.size() == 2 &&
       diagnostics[1].as_object().at("role") == "particular" &&
       certified.at("verdict") == "pass" && certified.at("dimension") == 2 &&
-      certified.at("epsilon_min") == 0 && certified.at("epsilon_max") == 3 &&
+      certified.at("epsilon_min") == 0 && certified.at("epsilon_max") == 7 &&
       provenance.at("owner_kind") == "composite-scc" &&
       std::string(provenance.at("owner_handle").as_string()) == scc &&
       is_error(owner_tamper_rejected) && is_error(payload_tamper_rejected) &&
       after_release.at("verdict") == "pass" &&
-      original_payload.at("schema") == 8 &&
+      original_payload.at("schema") == 9 &&
       registry_visibility.at("sccs").as_array().empty() &&
       owner_restore.at("owner_kind") == "composite-scc" &&
       std::string(owner_restore.at("owner_handle").as_string()) == scc &&

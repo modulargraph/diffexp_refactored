@@ -27,6 +27,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <initializer_list>

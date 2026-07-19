@@ -156,17 +156,49 @@ int main() {
          std::to_string(static_cast<long long>(::getpid())) + ".json"))
         .string();
     std::filesystem::remove(path);
-    const auto unsupported_checkpoint = request(json::object{
+    const auto live_checkpoint = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
         {"session", session}, {"path", path},
         {"checkpoint_identity", "regular-equation-owner-live-v1"}});
-    if (!is_error(unsupported_checkpoint) ||
-        std::string(unsupported_checkpoint.at("detail").as_string())
-                .find("does not yet support frame-independent") ==
-            std::string::npos ||
-        std::filesystem::exists(path))
+    require_ok(live_checkpoint,
+               "checkpoint.save with live regular equation owner");
+    if (live_checkpoint.at("regular_equation_owners") != 1 ||
+        !std::filesystem::exists(path))
       throw std::runtime_error(
-          "checkpoint did not reject the unsupported live owner explicitly");
+          "checkpoint did not serialize its live regular equation owner");
+    const auto restored = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", path},
+        {"expected_identity", "regular-equation-owner-live-v1"}});
+    require_ok(restored,
+               "checkpoint.restore with live regular equation owner");
+    const auto restored_session =
+        std::string(restored.at("session").as_string());
+    const auto& restored_owners =
+        restored.at("regular_equation_owners").as_array();
+    if (restored_owners.size() != 1 ||
+        std::string(restored_owners.front().as_object()
+                        .at("equation_owner").as_string()) != handle)
+      throw std::runtime_error(
+          "checkpoint restore lost the visible regular equation owner");
+    const auto restored_counters = request(json::object{
+        {"schema", 2}, {"op", "session.counters"},
+        {"session", restored_session}});
+    require_ok(restored_counters,
+               "restored regular-equation session.counters");
+    if (restored_counters.at("regular_equation_owners") != 1)
+      throw std::runtime_error(
+          "restored session did not publish its regular equation owner");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "regular_equation.release"},
+        {"session", restored_session},
+        {"equation_owner", handle}}),
+        "restored regular_equation.release");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored_session}}),
+        "restored session.close");
+    std::filesystem::remove(path);
 
     const auto released = request(json::object{
         {"schema", 2}, {"op", "regular_equation.release"},

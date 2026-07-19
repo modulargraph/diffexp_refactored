@@ -188,11 +188,13 @@ int main() {
       evaluated.at("status") == "ok") {
     const auto& coefficients = evaluated.at("value").as_object()
                                    .at("coefficients").as_array();
-    propagated_value = coefficients.size() == 4 &&
+    propagated_value = coefficients.size() == 6 &&
         std::abs(real_midpoint(coefficients[0]) - 1.0) < 1e-20 &&
         std::abs(real_midpoint(coefficients[1])) < 1e-20 &&
         std::abs(real_midpoint(coefficients[2])) < 1e-20 &&
-        std::abs(real_midpoint(coefficients[3]) - 0.5) < 1e-20;
+        std::abs(real_midpoint(coefficients[3]) - 0.5) < 1e-20 &&
+        std::abs(real_midpoint(coefficients[4])) < 1e-20 &&
+        std::abs(real_midpoint(coefficients[5])) < 1e-20;
   }
 
   bool provenance_ok = false;
@@ -234,7 +236,7 @@ int main() {
   const bool ok = solved.at("status") == "ok" &&
       std::string(solved.at("chart").as_string()) == scc &&
       solved.at("dimension") == 2 &&
-      solved.at("epsilon_min") == 0 && solved.at("epsilon_max") == 1 &&
+      solved.at("epsilon_min") == 0 && solved.at("epsilon_max") == 2 &&
       solved.at("taylor_complete_max") == 1 &&
       solved.at("native_retained") == true &&
       solved.at("json_coefficients") == 0 && provenance_ok &&

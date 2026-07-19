@@ -162,6 +162,20 @@ shadowImportsOK = Length[shadowImports] === 2 &&
     Lookup[#, "status", "error"] === "ok" &&
     Lookup[#, "specialization_capability", None] ===
       "exact-rational-shadow-to-acb-local-v1" &];
+shadowCheckpointPath = FileNameJoin[{$TemporaryDirectory,
+  "diffexp2-rational-shadow-live-only-" <>
+    ToString[$ProcessID] <> ".de2cp"}];
+Quiet[If[FileExistsQ[shadowCheckpointPath],
+  DeleteFile[shadowCheckpointPath]]];
+shadowSave = If[TrueQ[shadowImportsOK],
+  DiffExp2`CppBackend`SavePersistentCheckpoint[
+    targetPrepared, shadowCheckpointPath,
+    "single-scc-rational-shadow-live-only"], <||>];
+shadowCheckpointFailsClosed = AssociationQ[shadowSave] &&
+  Lookup[shadowSave, "status", "ok"] === "error" &&
+  StringContainsQ[Lookup[shadowSave, "detail", ""],
+    "unconsumed Rational-shadow SCC basis"] &&
+  !FileExistsQ[shadowCheckpointPath];
 If[AssociationQ[sourceBasis],
   Quiet[DiffExp2`CppBackend`ClosePersistentSession[sourceBasis]]];
 Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
@@ -171,7 +185,8 @@ If[AssociationQ[targetPrepared],
 
 ok = domainOK[rational, rationalCapability] &&
   domainOK[acb, acbCapability] && TrueQ[parity] &&
-  TrueQ[shadowSourceHasExtraLower] && TrueQ[shadowImportsOK];
+  TrueQ[shadowSourceHasExtraLower] && TrueQ[shadowImportsOK] &&
+  TrueQ[shadowCheckpointFailsClosed];
 
 DiffExp2`CppBackend`ClearPersistentSessions[];
 
@@ -182,5 +197,6 @@ If[TrueQ[ok],
     "Acb" -> KeyTake[acb, {"Chart", "Stats", "Basis"}],
     "Parity" -> parity,
     "ShadowSourceHasExtraLower" -> shadowSourceHasExtraLower,
-    "ShadowImports" -> shadowImports|>]];
+    "ShadowImports" -> shadowImports,
+    "ShadowSave" -> shadowSave|>]];
   Exit[1]];

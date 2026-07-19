@@ -55,6 +55,7 @@ RunPersistentConsumingTransportArms::usage = "RunPersistentConsumingTransportArm
 ConsumePersistentTransportHop::usage = "ConsumePersistentTransportHop[plan,arm,index,basis,incoming,epsilon,checkpointRoot,refinement] performs one positive one-based plan match, materializes and seals its next local, then consumes the complete receiving basis. epsilon has exactly min,max,required_complete_max. The response publishes next_local plus compact basis_reference and match_reference records for final state publication.";
 ConsumePersistentTransportValueHop::usage = "ConsumePersistentTransportValueHop[plan,arm,index,valueSolver,incoming,epsilon,checkpointRoot] attempts one plan-bound regular-to-regular value handoff. Native code alone decides eligibility from exact retained geometry, branch/prescription facts, owner bindings, truncation distance, and numerical accuracy. An ineligible response is side-effect free so the caller can build and consume the full receiving basis; an eligible response evaluates the incoming retained vector at the receiver center and performs one native value solve.";
 PublishPersistentConsumedTransportStates::usage = "PublishPersistentConsumedTransportStates[plan,anchor,arms,epsilon,checkpointRoot,refinement] atomically publishes lower/upper compact certificate-only states after streaming hops. Each arm contains only ordered tile_sources (including the common anchor); C++ validates the already-sealed per-hop lineage directly, without echoing basis/operator/match provenance through Wolfram. Non-anchor tile-source public tokens are consumed only after both states validate.";
+PublishPersistentConsumedTransportState::usage = "PublishPersistentConsumedTransportState[plan,anchor,arm,tileSources,epsilon,checkpointRoot,refinement] publishes one compact certificate-only lower or upper state after diagnostic or independently streamed hops. C++ validates the complete sealed lineage and consumes every non-anchor tile-source public token atomically.";
 RunPersistentTransportArm::usage = "RunPersistentTransportArm[plan,arm,anchor,receivingBasis,epsilon,checkpointRoot,refinement] marches one retained lower or upper arm entirely in C++ without projecting or integrating observables. It returns an opaque transport-state handle that strongly owns its plan, anchor, receiving bases, hidden planned matches, one unprojected source local per tile, and final local; no coefficient slab is serialized.";
 ContractPersistentTransportObservables::usage = "ContractPersistentTransportObservables[state,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against one retained native transport-arm state without rematching. Each observable has exactly Identity, CheckpointIdentity, IntegrandRows, Epsilon, and TailPolicy; Epsilon has exactly Min, Max, and RequiredCompleteMax. IntegrandRows contains one prepared rational row per retained tile. TailPolicy is \"stored\", \"attempt\", or \"require\": stored never requests tail certification, attempt may remain stored-truncation, and require fails atomically unless every tile aggregates with a certified full-local tail. The result retains input order and returns directly usable opaque line handles; an empty observable list succeeds without publishing lines.";
 ContractPersistentTransportPairObservables::usage = "ContractPersistentTransportPairObservables[lowerState,upperState,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against exact retained lower/upper states in one native paired request. Each observable has exactly Identity, CheckpointIdentity, LowerIntegrandRows, UpperIntegrandRows, Epsilon, and optionally TailPolicy and DivergentCancellation. DivergentCancellation is the explicit FT-only bounded-relative Acb policy with Mode, RelativeTolerance, and Provenance; omission keeps exact-singleton cancellation. Epsilon has exactly Min, Max, and RequiredCompleteMax. The wrapper accepts no caller signs, arms, points, or rims: native transport.contract_pair always combines -lower+upper. Results retain request order and are opaque paired line handles.";
@@ -1860,6 +1861,55 @@ PublishPersistentConsumedTransportStates[plan_Association,
     "lower" -> KeyDrop[normalized["lower"], "sessions"],
     "upper" -> KeyDrop[normalized["upper"], "sessions"]|>]];
 
+PublishPersistentConsumedTransportState[plan_Association,
+    anchor_Association, arm_String, tileSources_List,
+    epsilon_Association, checkpointRoot_String,
+    refinement_Association] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   anchorTokens = persistentLocalHandles[anchor], anchorCheckpoint,
+   tileTokens, sessions, epsilonKeys, refinementKeys},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[anchorTokens], Return[anchorTokens, Module]];
+  anchorCheckpoint = Lookup[anchor, "checkpoint_identity",
+    Lookup[anchor, "CheckpointIdentity", None]];
+  tileTokens = persistentLocalHandles /@ tileSources;
+  If[Cases[tileTokens, _Failure, Infinity] =!= {},
+    Return[First[Cases[tileTokens, _Failure, Infinity]], Module]];
+  sessions = DeleteDuplicates[Join[
+    {planTokens["Session"], anchorTokens["Session"]},
+    Lookup[tileTokens, "Session"]]];
+  epsilonKeys = {"min", "max", "required_complete_max",
+    "match_required_complete_max"};
+  refinementKeys = {"relative_tolerance", "max_steps"};
+  If[!MemberQ[{"lower", "upper"}, arm] ||
+      tileSources === {} || !AllTrue[tileSources, AssociationQ] ||
+      Length[sessions] =!= 1 || !StringQ[anchorCheckpoint] ||
+      Sort[Keys[epsilon]] =!= Sort[epsilonKeys] ||
+      !AllTrue[Lookup[epsilon, epsilonKeys], IntegerQ] ||
+      !TrueQ[epsilon["min"] <= epsilon["required_complete_max"] <=
+        epsilon["match_required_complete_max"] <= epsilon["max"]] ||
+      Sort[Keys[refinement]] =!= Sort[refinementKeys] ||
+      !StringQ[Lookup[refinement, "relative_tolerance", None]] ||
+      !IntegerQ[Lookup[refinement, "max_steps", None]] ||
+      !TrueQ[0 <= refinement["max_steps"] <= 32] ||
+      StringLength[checkpointRoot] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "single consumed-state publication received inconsistent arm, sessions, epsilon/refinement bounds, or checkpoint identities"|>],
+      Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.publish_consumed_state",
+    "session" -> First[sessions],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "anchor" -> anchorTokens["Local"],
+    "anchor_checkpoint_identity" -> anchorCheckpoint,
+    "epsilon" -> epsilon, "refinement" -> refinement,
+    "checkpoint_policy" -> <|
+      "schema" -> "diffexp2-deterministic-arm-checkpoints-v1",
+      "root" -> checkpointRoot|>,
+    "arm" -> arm,
+    "tile_sources" -> Lookup[tileTokens, "Local"]|>]];
+
 RunPersistentTransportArm[plan_Association, arm_String,
     anchor_Association, receivingBasis_List, epsilon_Association,
     checkpointRoot_String, refinement_Association] := Module[
@@ -1989,15 +2039,30 @@ persistentPreparedRationalRowQ[row_] := Module[
   SameQ[indices, Sort[DeleteDuplicates[indices]]]];
 
 normalizePersistentTransportObservable[observable_, tiles_] := Module[
-  {keys = {"Identity", "CheckpointIdentity", "IntegrandRows",
-     "Epsilon", "TailPolicy"}, epsilonKeys = {
-     "Min", "Max", "RequiredCompleteMax"}, rows, epsilon, columns},
+  {baseKeys = {"Identity", "CheckpointIdentity", "IntegrandRows",
+     "Epsilon", "TailPolicy"}, keys, epsilonKeys = {
+     "Min", "Max", "RequiredCompleteMax"}, rows, epsilon, columns,
+   cancellation},
+  keys = If[AssociationQ[observable], Sort[Keys[observable]], {}];
   If[!AssociationQ[observable] ||
-      Sort[Keys[observable]] =!= Sort[keys],
+      !AllTrue[baseKeys, MemberQ[keys, #] &] ||
+      Complement[keys, Append[baseKeys, "DivergentCancellation"]] =!= {},
     Return[Failure["CppBackend", <|"Detail" ->
-      "each transport observable requires exactly Identity, CheckpointIdentity, IntegrandRows, Epsilon, and TailPolicy"|>], Module]];
+      "each transport observable requires Identity, CheckpointIdentity, IntegrandRows, Epsilon, and TailPolicy, with only optional DivergentCancellation"|>], Module]];
   rows = observable["IntegrandRows"];
   epsilon = observable["Epsilon"];
+  cancellation = Lookup[observable, "DivergentCancellation", None];
+  If[cancellation =!= None &&
+      (!AssociationQ[cancellation] ||
+       Sort[Keys[cancellation]] =!=
+         Sort[{"Mode", "RelativeTolerance", "Provenance"}] ||
+       Lookup[cancellation, "Mode", None] =!= "bounded-relative-acb" ||
+       !persistentNonemptyStringQ[
+         Lookup[cancellation, "RelativeTolerance", None]] ||
+       !persistentNonemptyStringQ[
+         Lookup[cancellation, "Provenance", None]]),
+    Return[Failure["CppBackend", <|"Detail" ->
+      "DivergentCancellation requires bounded-relative-acb Mode and nonempty string RelativeTolerance/Provenance"|>], Module]];
   If[!persistentNonemptyStringQ[observable["Identity"]] ||
       !persistentNonemptyStringQ[observable["CheckpointIdentity"]] ||
       !ListQ[rows] || rows === {} ||
@@ -2024,13 +2089,18 @@ normalizePersistentTransportObservable[observable_, tiles_] := Module[
     Return[Failure["CppBackend", <|"Detail" ->
       "transport observable TailPolicy must be stored, attempt, or require",
       "Identity" -> observable["Identity"]|>], Module]];
-  <|"identity" -> observable["Identity"],
+  Join[<|"identity" -> observable["Identity"],
     "checkpoint_identity" -> observable["CheckpointIdentity"],
     "integrand_rows" -> rows,
     "epsilon" -> <|"min" -> epsilon["Min"],
       "max" -> epsilon["Max"],
       "required_complete_max" -> epsilon["RequiredCompleteMax"]|>,
-    "tail_policy" -> observable["TailPolicy"]|>];
+    "tail_policy" -> observable["TailPolicy"]|>,
+    If[cancellation === None, <||>,
+      <|"divergent_cancellation" -> <|
+        "mode" -> cancellation["Mode"],
+        "relative_tolerance" -> cancellation["RelativeTolerance"],
+        "provenance" -> cancellation["Provenance"]|>|>]]];
 
 ContractPersistentTransportObservables[state_Association,
     observables_List, checkpointRoot_String] := Module[

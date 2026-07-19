@@ -306,10 +306,16 @@ int main() {
     const auto& coefficients = vector_seed_value.at("value").as_object()
                                    .at("coefficients").as_array();
     const auto& provenance = vector_seed.at("column_provenance").as_object();
-    vector_seed_ok = coefficients.size() == 6 &&
+    vector_seed_ok = coefficients.size() == 9 &&
         close(real_midpoint(coefficients[0]), 0.0) &&
         close(real_midpoint(coefficients[1]), 0.5) &&
         close(real_midpoint(coefficients[2]), 1.125) &&
+        close(real_midpoint(coefficients[3]), 0.0) &&
+        close(real_midpoint(coefficients[4]), 0.0) &&
+        close(real_midpoint(coefficients[5]), 0.0) &&
+        close(real_midpoint(coefficients[6]), 0.0) &&
+        close(real_midpoint(coefficients[7]), 0.0) &&
+        close(real_midpoint(coefficients[8]), 0.0) &&
         provenance.at("seed_block") == 1 &&
         provenance.at("basis_index") == 2;
   }

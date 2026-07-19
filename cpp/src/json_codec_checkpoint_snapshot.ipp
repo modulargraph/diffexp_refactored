@@ -3,6 +3,7 @@ struct SessionCheckpointSnapshot {
   json::object payload;
   std::uint64_t generation = 0;
   std::size_t charts = 0;
+  std::size_t regular_equation_owners = 0;
   std::size_t sccs = 0;
   std::size_t locals = 0;
   std::size_t exact_matches = 0;
@@ -18,9 +19,6 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     SolverSession& session, const std::string& checkpoint_identity) {
   if (session.closed)
     throw std::invalid_argument("cannot checkpoint a closed solver session");
-  if (!session.regular_equation_owners.empty())
-    throw std::invalid_argument(
-        "checkpoint does not yet support frame-independent regular physical equation owners; release every eq: handle before saving");
   if (session.pending_local_solves != 0 || session.pending_matches != 0 ||
       session.pending_endpoint_limits != 0 ||
       session.pending_tile_plans != 0 ||
@@ -35,6 +33,9 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   // closure while recording public registry visibility separately.
   std::unordered_map<std::string, std::shared_ptr<PreparedChartBase>>
       chart_closure = session.charts;
+  std::unordered_map<
+      std::string, std::shared_ptr<RegularPhysicalEquationOwnerBase>>
+      regular_equation_owner_closure = session.regular_equation_owners;
   std::unordered_map<std::string, std::shared_ptr<CompositeSCCChartBase>>
       scc_closure = session.sccs;
   std::unordered_map<std::string, std::shared_ptr<StoredLocalBase>>
@@ -45,7 +46,19 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       match_closure;
   std::unordered_map<std::string, std::shared_ptr<StoredTransportArmState>>
       transport_closure;
+  // Rational-shadow witnesses are deliberately live-only.  A successfully
+  // consumed terminal match no longer needs that exact witness: its retained
+  // planned match contains the completed saturation/factorization record and
+  // privately owns the physical Acb columns only for later observable
+  // contractions.  Record precisely those private terminal-basis handles so
+  // their ordinary Acb local payload can be checkpointed without making an
+  // unconsumed/public shadow basis replayable.
+  std::unordered_set<std::string> consumed_terminal_shadow_basis;
+  std::unordered_set<std::string> consumed_terminal_matches;
   std::function<void(const std::shared_ptr<PreparedChartBase>&)> add_chart;
+  std::function<void(
+      const std::shared_ptr<RegularPhysicalEquationOwnerBase>&)>
+      add_regular_equation_owner;
   std::function<void(const std::shared_ptr<StoredTilePlan>&)> add_tile;
   std::function<void(const std::shared_ptr<StoredLocalBase>&)> add_local;
   std::function<void(const std::shared_ptr<StoredMatchBase>&)> add_match;
@@ -59,6 +72,17 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     if (!inserted && found->second.get() != chart.get())
       throw std::logic_error(
           "checkpoint ownership closure contains distinct charts with one handle");
+  };
+  add_regular_equation_owner = [&](
+      const std::shared_ptr<RegularPhysicalEquationOwnerBase>& owner) {
+    if (!owner)
+      throw std::logic_error(
+          "checkpoint ownership closure contains a null regular equation owner");
+    const auto [found, inserted] =
+        regular_equation_owner_closure.emplace(owner->handle(), owner);
+    if (!inserted && found->second.get() != owner.get())
+      throw std::logic_error(
+          "checkpoint ownership closure contains distinct regular equation owners with one handle");
   };
   add_scc = [&](
       const std::shared_ptr<CompositeSCCChartBase>& composite) {
@@ -84,9 +108,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
             "checkpoint ownership closure contains distinct tile plans with one handle");
       return;
     }
-    if (!plan->dependency_regular_equation_owners().empty())
-      throw std::domain_error(
-          "checkpoint does not yet support a tile plan retaining frame-independent regular physical equation owners");
+    for (const auto& owner : plan->dependency_regular_equation_owners())
+      add_regular_equation_owner(owner);
     for (const auto& composite : plan->dependency_sccs()) add_scc(composite);
     for (const auto& chart : plan->dependency_charts()) add_chart(chart);
   };
@@ -144,6 +167,14 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
           throw std::logic_error(
               "checkpoint local equation owner kind is not a CompositeSCC");
         add_scc(std::move(composite));
+      } else if (kind == "regular-physical-equation-v1") {
+        auto owner =
+            std::dynamic_pointer_cast<RegularPhysicalEquationOwnerBase>(
+                equation_owner);
+        if (!owner)
+          throw std::logic_error(
+              "checkpoint local equation owner kind is not a regular physical equation owner");
+        add_regular_equation_owner(std::move(owner));
       } else {
         throw std::domain_error(
             "native checkpoint does not yet serialize this physical equation owner kind");
@@ -216,9 +247,21 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     for (const auto& basis : state->basis_owners())
       for (const auto& local : basis) add_local(local);
     for (const auto& match : state->matches()) add_match(match);
+    if (state->terminal_factorized_match() != nullptr) {
+      const auto& terminal_match = state->terminal_factorized_match();
+      if (!session.matches.contains(terminal_match->handle())) {
+        consumed_terminal_matches.insert(terminal_match->handle());
+        for (const auto& local : terminal_match->basis_owners())
+          if (local && !session.locals.contains(local->handle()))
+            consumed_terminal_shadow_basis.insert(local->handle());
+      }
+      add_match(terminal_match);
+    }
     for (const auto& local : state->tile_sources()) add_local(local);
   };
   for (const auto& [ignored, chart] : session.charts) add_chart(chart);
+  for (const auto& [ignored, owner] : session.regular_equation_owners)
+    add_regular_equation_owner(owner);
   for (const auto& [ignored, plan] : session.tile_plans) add_tile(plan);
   for (const auto& [ignored, local] : session.locals) add_local(local);
   for (const auto& [ignored, match] : session.matches) add_match(match);
@@ -243,7 +286,22 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     for (const auto& state : line->transport_owners())
       add_transport(state);
   }
+  // A shared local is not post-match-consumed if any other retained/public
+  // match can still use it as a receiving basis.
+  for (const auto& [handle, match] : match_closure) {
+    if (consumed_terminal_matches.contains(handle)) continue;
+    if (const auto exact =
+            std::dynamic_pointer_cast<StoredExactRegularMatch>(match))
+      for (const auto& local : exact->basis_owners())
+        consumed_terminal_shadow_basis.erase(local->handle());
+    if (const auto hop =
+            std::dynamic_pointer_cast<StoredPlannedMatchHop>(match))
+      for (const auto& local : hop->basis_owners())
+        consumed_terminal_shadow_basis.erase(local->handle());
+  }
   for (const auto& [ignored, plan] : tile_closure) {
+    for (const auto& owner : plan->dependency_regular_equation_owners())
+      add_regular_equation_owner(owner);
     for (const auto& composite : plan->dependency_sccs()) add_scc(composite);
     for (const auto& chart : plan->dependency_charts()) add_chart(chart);
   }
@@ -258,6 +316,19 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     return scoped_handle_id(left->handle(), "c:", "chart") <
            scoped_handle_id(right->handle(), "c:", "chart");
   });
+  std::vector<std::shared_ptr<RegularPhysicalEquationOwnerBase>>
+      regular_equation_owners;
+  regular_equation_owners.reserve(regular_equation_owner_closure.size());
+  for (const auto& [ignored, owner] : regular_equation_owner_closure)
+    regular_equation_owners.push_back(owner);
+  std::sort(regular_equation_owners.begin(),
+            regular_equation_owners.end(),
+            [](const auto& left, const auto& right) {
+              return scoped_handle_id(left->handle(), "eq:",
+                                      "regular equation owner") <
+                     scoped_handle_id(right->handle(), "eq:",
+                                      "regular equation owner");
+            });
   std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
   sccs.reserve(scc_closure.size());
   for (const auto& [ignored, composite] : scc_closure)
@@ -330,6 +401,11 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
     chart_handles.insert(chart->handle());
     chart_items.push_back(checkpoint_chart_item(session, chart));
   }
+  json::array regular_equation_owner_items;
+  regular_equation_owner_items.reserve(regular_equation_owners.size());
+  for (const auto& owner : regular_equation_owners)
+    regular_equation_owner_items.push_back(
+        checkpoint_regular_equation_owner_item(session, owner));
   json::array scc_items;
   scc_items.reserve(sccs.size());
   for (const auto& composite : sccs) {
@@ -347,7 +423,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   local_items.reserve(locals.size());
   for (const auto& local : locals) {
     try {
-      local_items.push_back(local->checkpoint_record());
+      local_items.push_back(local->checkpoint_record(
+          consumed_terminal_shadow_basis.contains(local->handle())));
     } catch (const std::exception& error) {
       throw std::logic_error(
           "checkpoint local " + local->handle() +
@@ -397,6 +474,10 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   for (const auto& chart : charts)
     if (session.charts.contains(chart->handle()))
       visible_charts.emplace_back(chart->handle());
+  json::array visible_regular_equation_owners;
+  for (const auto& owner : regular_equation_owners)
+    if (session.regular_equation_owners.contains(owner->handle()))
+      visible_regular_equation_owners.emplace_back(owner->handle());
   json::array visible_sccs;
   for (const auto& composite : sccs)
     if (session.sccs.contains(composite->handle()))
@@ -419,6 +500,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       visible_transport_states.emplace_back(state->handle());
   json::object registry_visibility{
       {"charts", std::move(visible_charts)},
+      {"regular_equation_owners",
+       std::move(visible_regular_equation_owners)},
       {"sccs", std::move(visible_sccs)},
       {"locals", std::move(visible_locals)},
       {"matches", std::move(visible_matches)},
@@ -432,6 +515,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
   auto configuration = checkpoint_configuration_record(session);
   json::object counters{
       {"next_chart", session.next_chart},
+      {"next_regular_equation_owner",
+       session.next_regular_equation_owner},
       {"next_local", session.next_local},
       {"next_scc", session.next_scc},
       {"next_match", session.next_match},
@@ -486,6 +571,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"schema", kCheckpointPayloadSchema},
       {"session", std::move(session_record)},
       {"prepared_charts", chart_items},
+      {"regular_equation_owners", regular_equation_owner_items},
       {"prepared_scc", scc_items},
       {"retained_locals", local_items},
       {"retained_exact_matches", exact_match_items},
@@ -496,6 +582,7 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"retained_transport_states", transport_items},
       {"retained_line_results", line_items}};
   json::array mandatory_sections{"session", "prepared_charts",
+                                  "regular_equation_owners",
                                   "prepared_scc", "retained_locals",
                                   "retained_exact_matches",
                                   "retained_acb_matches",
@@ -517,6 +604,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
       {"optional_sections", json::array{}},
       {"deferred_handle_kinds", std::move(deferred_kinds)},
       {"chart_identities", checkpoint_identity_manifest(chart_items)},
+      {"regular_equation_owner_identities",
+       checkpoint_identity_manifest(regular_equation_owner_items)},
       {"scc_identities", checkpoint_identity_manifest(scc_items)},
       {"local_identities", checkpoint_local_identity_manifest(local_items)},
       {"exact_match_identities",
@@ -535,7 +624,8 @@ SessionCheckpointSnapshot make_checkpoint_snapshot(
        checkpoint_line_identity_manifest(line_items)},
       {"generation", generation}};
   return {std::move(header), std::move(payload), generation,
-          session.charts.size(), session.sccs.size(), session.locals.size(),
+          session.charts.size(), session.regular_equation_owners.size(),
+          session.sccs.size(), session.locals.size(),
           exact_match_items.size(), acb_match_items.size(),
           planned_match_items.size(), endpoints.size(),
           session.tile_plans.size(), session.transport_states.size(),
@@ -561,14 +651,16 @@ void validate_checkpoint_envelope(const json::object& header,
       {"format", "schema", "build", "flint", "checkpoint_identity",
        "configuration_identity", "analytic_identity", "mandatory_sections",
        "optional_sections", "deferred_handle_kinds", "chart_identities",
-       "scc_identities", "local_identities", "exact_match_identities",
+       "regular_equation_owner_identities", "scc_identities",
+       "local_identities", "exact_match_identities",
        "acb_match_identities", "planned_match_identities",
        "endpoint_identities",
        "tile_plan_identities", "transport_state_identities",
        "line_result_identities", "generation"},
       "checkpoint header");
   require_exact_keys(payload,
-      {"schema", "session", "prepared_charts", "prepared_scc",
+      {"schema", "session", "prepared_charts",
+       "regular_equation_owners", "prepared_scc",
        "retained_locals", "retained_exact_matches",
        "retained_acb_matches", "retained_planned_match_hops",
        "retained_endpoints",
@@ -594,7 +686,8 @@ void validate_checkpoint_envelope(const json::object& header,
       header.at("mandatory_sections"), "mandatory checkpoint sections");
   std::sort(mandatory.begin(), mandatory.end());
   const std::vector<std::string> expected_sections{
-      "prepared_charts", "prepared_scc", "retained_acb_matches",
+      "prepared_charts", "prepared_scc", "regular_equation_owners",
+      "retained_acb_matches",
       "retained_endpoints", "retained_exact_matches",
       "retained_line_results", "retained_locals",
       "retained_planned_match_hops", "retained_tile_plans",
@@ -625,11 +718,15 @@ void validate_checkpoint_envelope(const json::object& header,
       session.at("registry_visibility"), "checkpoint registry visibility");
   require_exact_keys(
       visibility,
-      {"charts", "sccs", "locals", "matches", "tile_plans",
+      {"charts", "regular_equation_owners", "sccs", "locals",
+       "matches", "tile_plans",
        "transport_states"},
       "checkpoint registry visibility");
   (void)checkpoint_string_array(visibility.at("charts"),
                                 "visible checkpoint charts");
+  (void)checkpoint_string_array(
+      visibility.at("regular_equation_owners"),
+      "visible checkpoint regular equation owners");
   (void)checkpoint_string_array(visibility.at("sccs"),
                                 "visible checkpoint SCCs");
   (void)checkpoint_string_array(visibility.at("locals"),
@@ -655,6 +752,9 @@ void validate_checkpoint_envelope(const json::object& header,
         "checkpoint analytic-regularization identity is inconsistent");
   const auto& chart_items = as_array(payload.at("prepared_charts"),
                                      "checkpoint prepared charts");
+  const auto& regular_equation_owner_items = as_array(
+      payload.at("regular_equation_owners"),
+      "checkpoint regular equation owners");
   const auto& scc_items = as_array(payload.at("prepared_scc"),
                                    "checkpoint prepared SCC charts");
   const auto& local_items = as_array(payload.at("retained_locals"),
@@ -683,6 +783,9 @@ void validate_checkpoint_envelope(const json::object& header,
   if (checkpoint_identity_manifest(chart_items) !=
           as_array(header.at("chart_identities"),
                    "checkpoint chart identities") ||
+      checkpoint_identity_manifest(regular_equation_owner_items) !=
+          as_array(header.at("regular_equation_owner_identities"),
+                   "checkpoint regular equation-owner identities") ||
       checkpoint_identity_manifest(scc_items) !=
           as_array(header.at("scc_identities"),
                    "checkpoint SCC identities") ||

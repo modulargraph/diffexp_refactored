@@ -741,10 +741,10 @@ bool run_dense_domain(const std::string& domain) {
     // VInv^T/right-oriented gives another vector, and an extra V_S gives
     // (7/2,7/2), so every orientation/double-transform bug fails here.
     const std::array<double, 4> expected{1.5, 1.5, 1.5, 1.0};
-    // Acb receiving bases retain the private epsilon=3 match coefficient;
-    // exact Rational columns keep the public 0..2 projection in this seam.
-    values_ok = coefficients.size() ==
-        (domain == "acb" ? 16 : 12);
+    // Both exact Rational shadows and Acb receiving bases retain the private
+    // epsilon=3 match coefficient; neither domain may cap a reusable column
+    // at the public 0..2 projection.
+    values_ok = coefficients.size() == 16;
     for (std::size_t index = 0; index < expected.size() && values_ok;
          ++index)
       values_ok = std::abs(real_midpoint(coefficients[index]) -
@@ -928,11 +928,11 @@ bool run_domain(const std::string& domain, bool test_rejections) {
     // 5 t g_source = 10 t.  V_T^-1 gives (10/3)t to the target
     // recurrence and retained assembly V_T restores 10t, hence 5 at t=1/2.
     // Omitting V_T^-1 would give 15; multiplying V_S twice would give 10.
-    // The Acb receiving column now retains its one-coefficient private match
-    // halo (epsilon 0..3) instead of being prematurely capped at the public
-    // requested edge 2.  Evaluation therefore returns 2 components across
-    // four honest epsilon coefficients.
-    values_ok = coefficients.size() == (domain == "acb" ? 8 : 6) &&
+    // Receiving columns in both domains retain their one-coefficient private
+    // match halo (epsilon 0..3) instead of being prematurely capped at the
+    // public requested edge 2.  Evaluation therefore returns 2 components
+    // across four honest epsilon coefficients.
+    values_ok = coefficients.size() == 8 &&
         std::abs(real_midpoint(coefficients[0]) - 2.0) < 1e-25 &&
         std::abs(real_midpoint(coefficients[1]) - 5.0) < 1e-25;
     for (std::size_t index = 2; index < coefficients.size(); ++index)

@@ -32,6 +32,8 @@ json::object restore_checkpoint(const std::string& path,
     return result;
   };
   const auto visible_charts = visibility_set("charts", "c:");
+  const auto visible_regular_equation_owners =
+      visibility_set("regular_equation_owners", "eq:");
   const auto visible_sccs = visibility_set("sccs", "scc:");
   const auto visible_locals = visibility_set("locals", "l:");
   const auto visible_matches = visibility_set("matches", "m:");
@@ -44,6 +46,10 @@ json::object restore_checkpoint(const std::string& path,
   if (visible_charts.size() > configured_chart_capacity)
     throw std::invalid_argument(
         "checkpoint visible charts exceed the restored session capacity");
+  if (visible_regular_equation_owners.size() >
+      configured_chart_capacity)
+    throw std::invalid_argument(
+        "checkpoint visible regular equation owners exceed the restored session chart capacity");
   const auto configured_scc_capacity = static_cast<std::size_t>(as_u64(
       configuration.at("scc_capacity"),
       "checkpoint configured SCC capacity"));
@@ -88,12 +94,16 @@ json::object restore_checkpoint(const std::string& path,
       const auto chart_closure_size = as_array(
           payload.at("prepared_charts"),
           "checkpoint prepared chart closure").size();
+      const auto regular_equation_owner_closure_size = as_array(
+          payload.at("regular_equation_owners"),
+          "checkpoint regular equation-owner closure").size();
       const auto scc_closure_size = as_array(
           payload.at("prepared_scc"),
           "checkpoint prepared SCC closure").size();
       std::lock_guard<std::mutex> lock(restored->mutex);
       restored->chart_capacity =
-          std::max(configured_chart_capacity, chart_closure_size);
+          std::max({configured_chart_capacity, chart_closure_size,
+                    regular_equation_owner_closure_size});
       restored->scc_capacity =
           std::max(configured_scc_capacity, scc_closure_size);
     }
@@ -206,6 +216,68 @@ json::object restore_checkpoint(const std::string& path,
       throw std::invalid_argument(
           "checkpoint SCC visibility names an absent ownership object");
 
+    json::array restored_regular_equation_owners;
+    std::set<std::string> all_regular_equation_owner_handles;
+    std::uint64_t largest_regular_equation_owner = 0;
+    for (const auto& raw_item : as_array(
+             payload.at("regular_equation_owners"),
+             "checkpoint regular equation owners")) {
+      const auto& item = as_object(
+          raw_item, "checkpoint regular equation-owner item");
+      require_exact_keys(
+          item, {"handle", "key", "identity", "signature", "request"},
+          "checkpoint regular equation-owner item");
+      const auto old_handle = required_string(item, "handle");
+      if (!all_regular_equation_owner_handles.insert(old_handle).second)
+        throw std::invalid_argument(
+            "checkpoint contains duplicate regular equation-owner handles");
+      const auto handle_id = scoped_handle_id(
+          old_handle, "eq:", "regular equation owner");
+      if (handle_id <= largest_regular_equation_owner)
+        throw std::invalid_argument(
+            "checkpoint regular equation-owner handles are not in strict creation order");
+      largest_regular_equation_owner = handle_id;
+      auto request = as_object(
+          item.at("request"), "checkpoint regular equation-owner request");
+      if (required_string(request, "session") != source_handle ||
+          required_string(request, "key") != required_string(item, "key") ||
+          required_string(request, "identity") !=
+              required_string(item, "identity"))
+        throw std::invalid_argument(
+            "checkpoint regular equation-owner request provenance is inconsistent");
+      request["session"] = restored_handle;
+      {
+        std::lock_guard<std::mutex> lock(restored->mutex);
+        restored->next_regular_equation_owner = handle_id;
+      }
+      const auto result = run_session_command(request);
+      if (required_string(result, "equation_owner") != old_handle)
+        throw std::logic_error(
+            "checkpoint regular equation-owner handle could not be restored exactly");
+      {
+        std::lock_guard<std::mutex> lock(restored->mutex);
+        const auto found =
+            restored->regular_equation_owners.find(old_handle);
+        if (found == restored->regular_equation_owners.end() ||
+            found->second->signature() !=
+                required_string(item, "signature"))
+          throw std::invalid_argument(
+              "restored regular equation owner does not reproduce its exact physical identity");
+      }
+      if (visible_regular_equation_owners.contains(old_handle))
+        restored_regular_equation_owners.push_back(json::object{
+            {"equation_owner", old_handle},
+            {"key", item.at("key")},
+            {"identity", item.at("identity")}});
+    }
+    if (!std::includes(
+            all_regular_equation_owner_handles.begin(),
+            all_regular_equation_owner_handles.end(),
+            visible_regular_equation_owners.begin(),
+            visible_regular_equation_owners.end()))
+      throw std::invalid_argument(
+          "checkpoint regular equation-owner visibility names an absent ownership object");
+
     std::unique_ptr<AcbPrecisionLease> checkpoint_acb_lease;
     if (restored->domain == "acb") {
       checkpoint_acb_lease =
@@ -273,7 +345,8 @@ json::object restore_checkpoint(const std::string& path,
               "checkpoint tile-plan handles are not in strict creation order");
         largest_tile_plan = id;
         auto plan = restore_checkpoint_tile_plan_record(
-            item, restored->charts, restored->sccs);
+            item, restored->charts,
+            restored->regular_equation_owners, restored->sccs);
         if (plan->checkpoint_record() != raw_item ||
             !restored->tile_plans.emplace(handle, plan).second)
           throw std::invalid_argument(
@@ -314,9 +387,20 @@ json::object restore_checkpoint(const std::string& path,
                   local->source_operator_identity())
             throw std::invalid_argument(
                 "checkpoint local source identity disagrees with its restored SCC");
+        } else if (source.starts_with("eq:")) {
+          (void)scoped_handle_id(
+              source, "eq:", "local source regular equation owner");
+          const auto found =
+              restored->regular_equation_owners.find(source);
+          if (!rational_row_derived &&
+              found != restored->regular_equation_owners.end() &&
+              found->second->exact_identity() !=
+                  local->source_operator_identity())
+            throw std::invalid_argument(
+                "checkpoint local source identity disagrees with its restored regular equation owner");
         } else {
           throw std::invalid_argument(
-              "checkpoint local source is neither a chart nor an SCC handle");
+              "checkpoint local source is neither a chart, regular equation owner, nor an SCC handle");
         }
         if (local->column_provenance().has_value()) {
           const auto& column = *local->column_provenance();
@@ -351,6 +435,15 @@ json::object restore_checkpoint(const std::string& path,
             if (found == restored->sccs.end())
               throw std::invalid_argument(
                   "checkpoint local physical equation owner SCC is missing");
+            equation_owner = found->second;
+          } else if (owner_kind ==
+                     "regular-physical-equation-v1") {
+            const auto found =
+                restored->regular_equation_owners.find(owner_handle);
+            if (found ==
+                restored->regular_equation_owners.end())
+              throw std::invalid_argument(
+                  "checkpoint local regular physical equation owner is missing");
             equation_owner = found->second;
           } else {
             throw std::invalid_argument(
@@ -408,21 +501,24 @@ json::object restore_checkpoint(const std::string& path,
             }
             const auto owner_reference = [](
                 const RetainedPlanChartBinding& binding) {
-              const auto* owner = std::get_if<
-                  std::shared_ptr<PreparedChartBase>>(&binding.owner);
-              if (owner == nullptr || !*owner)
-                throw std::invalid_argument(
-                    "checkpoint value handoff plan chart is not a primitive prepared owner");
-              return json::object{
-                  {"kind", (*owner)->equation_owner_kind()},
-                  {"handle", (*owner)->equation_owner_handle()},
-                  {"operator_identity",
-                   (*owner)->equation_operator_identity()},
-                  {"plan_exact_identity", binding.exact_identity},
-                  {"owner_signature_identity",
-                   (*owner)->owner_signature_identity()},
-                  {"physical_payload_identity",
-                   (*owner)->physical_payload_identity()}};
+              return std::visit(
+                  [&](const auto& owner) {
+                    if (!owner)
+                      throw std::invalid_argument(
+                          "checkpoint value handoff plan chart has a null physical equation owner");
+                    return json::object{
+                        {"kind", owner->equation_owner_kind()},
+                        {"handle", owner->equation_owner_handle()},
+                        {"operator_identity",
+                         owner->equation_operator_identity()},
+                        {"plan_exact_identity",
+                         binding.exact_identity},
+                        {"owner_signature_identity",
+                         owner->owner_signature_identity()},
+                        {"physical_payload_identity",
+                         owner->physical_payload_identity()}};
+                  },
+                  binding.owner);
             };
             value_handoff_plan = CheckpointValueHandoffPlanBinding{
                 encode_plan_chart(producing, match.producing_chart),
@@ -889,6 +985,18 @@ json::object restore_checkpoint(const std::string& path,
       for (auto it = restored->locals.begin(); it != restored->locals.end();)
         it = visible_locals.contains(it->first)
             ? std::next(it) : restored->locals.erase(it);
+      for (auto iterator =
+               restored->regular_equation_owners.begin();
+           iterator != restored->regular_equation_owners.end();) {
+        if (visible_regular_equation_owners.contains(iterator->first)) {
+          ++iterator;
+        } else {
+          restored->regular_equation_owner_handles_by_key.erase(
+              iterator->second->key());
+          iterator =
+              restored->regular_equation_owners.erase(iterator);
+        }
+      }
       for (auto iterator = restored->sccs.begin();
            iterator != restored->sccs.end();) {
         if (visible_sccs.contains(iterator->first)) {
@@ -911,7 +1019,8 @@ json::object restore_checkpoint(const std::string& path,
     const auto& counters = as_object(saved_session.at("counters"),
                                      "checkpoint counters");
     require_exact_keys(counters,
-        {"next_chart", "next_local", "next_scc", "next_match",
+        {"next_chart", "next_regular_equation_owner", "next_local",
+         "next_scc", "next_match",
          "next_endpoint", "next_tile_plan", "next_transport_state",
          "next_line_result",
          "total_local_solves", "total_scc_column_solves",
@@ -936,6 +1045,9 @@ json::object restore_checkpoint(const std::string& path,
          "checkpoint_generation", "checkpoint_restore_count"},
         "checkpoint counters");
     const auto next_chart = as_u64(counters.at("next_chart"), "next chart");
+    const auto next_regular_equation_owner = as_u64(
+        counters.at("next_regular_equation_owner"),
+        "next regular equation owner");
     const auto next_scc = as_u64(counters.at("next_scc"), "next SCC");
     const auto next_local = as_u64(counters.at("next_local"), "next local");
     const auto next_match = as_u64(counters.at("next_match"), "next match");
@@ -950,7 +1062,10 @@ json::object restore_checkpoint(const std::string& path,
     const auto restore_count = as_u64(
         counters.at("checkpoint_restore_count"),
         "checkpoint restore count");
-    if (next_chart <= largest_chart || next_scc <= largest_scc ||
+    if (next_chart <= largest_chart ||
+        next_regular_equation_owner <=
+            largest_regular_equation_owner ||
+        next_scc <= largest_scc ||
         next_local <= largest_local || next_match <= largest_match ||
         next_endpoint <= largest_endpoint ||
         next_tile_plan <= largest_tile_plan ||
@@ -963,6 +1078,8 @@ json::object restore_checkpoint(const std::string& path,
     {
       std::lock_guard<std::mutex> lock(restored->mutex);
       restored->next_chart = next_chart;
+      restored->next_regular_equation_owner =
+          next_regular_equation_owner;
       restored->next_local = next_local;
       restored->next_scc = next_scc;
       restored->next_match = next_match;
@@ -1063,6 +1180,8 @@ json::object restore_checkpoint(const std::string& path,
         {"configuration_identity", header.at("configuration_identity")},
         {"analytic_identity", header.at("analytic_identity")},
         {"charts", std::move(restored_charts)},
+        {"regular_equation_owners",
+         std::move(restored_regular_equation_owners)},
         {"sccs", std::move(restored_sccs)},
         {"locals", std::move(restored_locals)},
         {"exact_matches", std::move(restored_exact_matches)},

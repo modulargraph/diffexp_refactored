@@ -1150,6 +1150,7 @@
     json::array basis_reference;
     std::string match_handle;
     std::string local_handle;
+    bool terminal_basis_match = false;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->closed)
@@ -1166,6 +1167,8 @@
       if (match_index >= retained.exact.matches.size())
         throw std::invalid_argument(
             "consuming transport hop match lies outside its exact arm");
+      terminal_basis_match =
+          match_index + 1 == retained.exact.matches.size();
       const auto incoming_found = session->locals.find(incoming_handle);
       if (incoming_found == session->locals.end() ||
           required_string(root, "incoming_checkpoint_identity") !=
@@ -1289,6 +1292,8 @@
               {"epsilon", incomplete->at("epsilon")},
               {"refinement", incomplete->at("refinement")},
               {"weight_windows", incomplete->at("weight_windows")},
+              {"normal_frame_attempt",
+               incomplete->at("normal_frame_attempt")},
               {"exact_lattice", compact_lattice},
               {"detail",
                retryable_epsilon
@@ -1299,7 +1304,7 @@
             local_handle,
             arm_checkpoint_identity(checkpoint_root, arm_name, "local",
                                     match_index + 1),
-            session->precision_bits, match);
+            session->precision_bits, match, terminal_basis_match);
       } else {
         match = build_planned_match_hop(
             match_handle, match_request, session->domain,
@@ -1310,9 +1315,16 @@
             local_handle,
             arm_checkpoint_identity(checkpoint_root, arm_name, "local",
                                     match_index + 1),
-            session->precision_bits, match);
+            session->precision_bits, match, terminal_basis_match);
       }
+      require_retained_local_complete_max(
+          next, required_complete_max, "consuming transport hop");
       sealed_lineage = next->seal_plan_match_lineage();
+      if (terminal_basis_match &&
+          match->has_terminal_acb_factorization())
+        next->attach_terminal_factorized_owner(
+            std::static_pointer_cast<void>(match),
+            match->checkpoint_identity());
     } catch (const MatchingArithmeticError& error) {
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->pending_local_solves == 0)
@@ -1359,6 +1371,9 @@
             0, required_complete_max - complete_max);
         if (additional > 0) {
           const auto& arm = plan->arm(arm_name);
+          const bool materialized_source_incomplete =
+              std::string(error.what()).find(
+                  "materialized physical source") != std::string::npos;
           return json::object{
               {"status", "error"},
               {"id", "CPP"},
@@ -1370,7 +1385,9 @@
               {"match", match_index},
               {"geometry", encode_plan_match(arm, match_index)},
               {"residual", json::object{
-                   {"status", "no-common-complete-window"},
+                   {"status", materialized_source_incomplete
+                                  ? "materialized-source-incomplete"
+                                  : "no-common-complete-window"},
                    {"common_complete_max", complete_max},
                    {"required_complete_max", required_complete_max},
                    {"detail", error.what()}}},
@@ -1380,8 +1397,11 @@
                    {"required_complete_max", required_complete_max}}},
               {"refinement", refinement},
               {"detail",
-               "the Acb match needs a wider private epsilon reservoir "
-               "before residual certification can begin"}};
+               materialized_source_incomplete
+                   ? "the Acb match residual passed, but its Laurent-weighted "
+                     "physical source needs a wider private epsilon reservoir"
+                   : "the Acb match needs a wider private epsilon reservoir "
+                     "before residual certification can begin"}};
         }
       }
       throw;
@@ -1402,6 +1422,9 @@
           {"provenance_identity", match->provenance_identity()},
           {"planned_hop", match->handoff()},
           {"sealed_local_lineage", sealed_lineage}};
+      if (terminal_basis_match && match->has_acb_match())
+        match_reference["diagnostic_native_match_summary"] =
+            match->compact_terminal_match_diagnostic();
       auto next_summary = compact_transport_local_reference(next);
       next_summary["release_via"] = "local";
       response = json::object{
@@ -1459,14 +1482,26 @@
     return response;
   }
 
-  if (operation == "transport.publish_consumed_states") {
-    require_exact_keys(
-        root,
-        {"schema", "op", "session", "tile_plan",
-         "tile_plan_checkpoint_identity", "anchor",
-         "anchor_checkpoint_identity", "epsilon", "refinement",
-         "checkpoint_policy", "lower", "upper"},
-        "native transport.publish_consumed_states request");
+  if (operation == "transport.publish_consumed_states" ||
+      operation == "transport.publish_consumed_state") {
+    const bool single_arm =
+        operation == "transport.publish_consumed_state";
+    if (single_arm)
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan",
+           "tile_plan_checkpoint_identity", "anchor",
+           "anchor_checkpoint_identity", "epsilon", "refinement",
+           "checkpoint_policy", "arm", "tile_sources"},
+          "native transport.publish_consumed_state request");
+    else
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan",
+           "tile_plan_checkpoint_identity", "anchor",
+           "anchor_checkpoint_identity", "epsilon", "refinement",
+           "checkpoint_policy", "lower", "upper"},
+          "native transport.publish_consumed_states request");
     if (session->domain == "symbolic")
       throw std::invalid_argument(
           "transport.publish_consumed_states requires Rational or Acb coefficients");
@@ -1499,12 +1534,12 @@
       std::vector<std::string> tile_handles;
       std::vector<std::shared_ptr<StoredLocalBase>> tile_sources;
     };
-    const auto parse_side = [&](const char* arm) {
+    const auto parse_side = [&](const std::string& arm,
+                                const json::value& raw_side) {
       const auto& side = as_object(
-          root.at(arm), "published consumed transport-arm input");
-      require_exact_keys(
-          side, {"tile_sources"},
-          "published consumed transport-arm input");
+          raw_side, "published consumed transport-arm input");
+      require_exact_keys(side, {"tile_sources"},
+                         "published consumed transport-arm input");
       ConsumedStateInput input;
       input.arm = arm;
       const auto& raw_tiles = as_array(
@@ -1521,13 +1556,24 @@
       }
       return input;
     };
-    std::array<ConsumedStateInput, 2> inputs{
-        parse_side("lower"), parse_side("upper")};
+    std::vector<ConsumedStateInput> inputs;
+    if (single_arm) {
+      const auto arm_name = required_string(root, "arm");
+      if (arm_name != "lower" && arm_name != "upper")
+        throw std::invalid_argument(
+            "published consumed transport arm must be lower or upper");
+      inputs.push_back(parse_side(
+          arm_name, json::object{{"tile_sources",
+                                  root.at("tile_sources")}}));
+    } else {
+      inputs.push_back(parse_side("lower", root.at("lower")));
+      inputs.push_back(parse_side("upper", root.at("upper")));
+    }
     const auto plan_handle = required_string(root, "tile_plan");
     const auto anchor_handle = required_string(root, "anchor");
     std::shared_ptr<StoredTilePlan> plan;
     std::shared_ptr<StoredLocalBase> anchor;
-    std::array<std::string, 2> state_handles;
+    std::vector<std::string> state_handles(inputs.size());
     std::set<std::string> unique_consumed_handles;
     {
       std::lock_guard<std::mutex> lock(session->mutex);
@@ -1571,43 +1617,54 @@
         }
       }
       if (session->transport_states.size() +
-              session->pending_transport_states + 2 >
+              session->pending_transport_states + inputs.size() >
           session->transport_state_capacity)
         throw std::invalid_argument(
             "persistent transport-state capacity is exhausted");
       for (auto& handle : state_handles)
         handle = "transport:" +
-            std::to_string(session->next_transport_state++);
-      session->pending_transport_states += 2;
+          std::to_string(session->next_transport_state++);
+      session->pending_transport_states += inputs.size();
     }
 
     const auto started = std::chrono::steady_clock::now();
-    std::array<std::shared_ptr<StoredTransportArmState>, 2> states;
+    std::vector<std::shared_ptr<StoredTransportArmState>> states(
+        inputs.size());
     try {
       for (std::size_t index = 0; index < inputs.size(); ++index) {
         auto& input = inputs[index];
+        std::shared_ptr<StoredPlannedMatchHop>
+            terminal_factorized_match;
+        if (const auto erased =
+                input.tile_sources.back()
+                    ->terminal_factorized_owner();
+            erased != nullptr)
+          terminal_factorized_match =
+              std::static_pointer_cast<StoredPlannedMatchHop>(
+                  erased);
         states[index] = std::make_shared<StoredTransportArmState>(
             state_handles[index],
             checkpoint_root + ":" + input.arm + ":state", input.arm,
             plan, anchor, std::move(input.tile_sources), epsilon_contract.work,
             epsilon_contract.public_required_complete_max,
-            epsilon_contract.match_required_complete_max, refinement, 0.0);
+            epsilon_contract.match_required_complete_max, refinement, 0.0,
+            std::move(terminal_factorized_match));
       }
     } catch (...) {
       std::lock_guard<std::mutex> lock(session->mutex);
-      if (session->pending_transport_states < 2)
+      if (session->pending_transport_states < inputs.size())
         throw std::logic_error(
             "published consumed-state reservation accounting underflow");
-      session->pending_transport_states -= 2;
+      session->pending_transport_states -= inputs.size();
       throw;
     }
 
     {
       std::lock_guard<std::mutex> lock(session->mutex);
-      if (session->pending_transport_states < 2)
+      if (session->pending_transport_states < inputs.size())
         throw std::logic_error(
             "published consumed-state reservation accounting underflow");
-      session->pending_transport_states -= 2;
+      session->pending_transport_states -= inputs.size();
       if (session->closed)
         throw std::invalid_argument(
             "persistent solver session closed during consumed-state publication");
@@ -1629,7 +1686,7 @@
       }
       for (const auto& handle : unique_consumed_handles)
         session->locals.erase(handle);
-      session->total_transport_arm_marches += 2;
+      session->total_transport_arm_marches += inputs.size();
     }
 
     json::object response_states;
@@ -1643,7 +1700,9 @@
       consumed_handles.push_back(json::value(handle));
     return json::object{
         {"status", "ok"}, {"session", session->handle},
-        {"capability", "published-consumed-transport-arm-states-v1"},
+        {"capability", single_arm
+             ? "published-consumed-transport-arm-state-v1"
+             : "published-consumed-transport-arm-states-v1"},
         {"native_retained", true}, {"json_coefficients", 0},
         {"atomic_publication", true},
         {"consumed_tile_local_handles", std::move(consumed_handles)},
@@ -2608,6 +2667,8 @@
       ObservableEpsilonContract epsilon;
       json::object epsilon_record;
       TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
+      std::optional<BoundedDivergentCancellation>
+          divergent_cancellation;
     };
     std::vector<PendingObservable> pending_observables;
     const auto& raw_observables = as_array(
@@ -2618,11 +2679,18 @@
     for (const auto& raw_observable : raw_observables) {
       const auto& observable = as_object(
           raw_observable, "native transport observable");
-      require_exact_keys(
-          observable,
-          {"identity", "checkpoint_identity", "integrand_rows", "epsilon",
-           "tail_policy"},
-          "native transport observable");
+      if (observable.if_contains("divergent_cancellation") != nullptr)
+        require_exact_keys(
+            observable,
+            {"identity", "checkpoint_identity", "integrand_rows",
+             "epsilon", "tail_policy", "divergent_cancellation"},
+            "native transport observable");
+      else
+        require_exact_keys(
+            observable,
+            {"identity", "checkpoint_identity", "integrand_rows",
+             "epsilon", "tail_policy"},
+            "native transport observable");
       PendingObservable parsed;
       parsed.identity = required_string(observable, "identity");
       parsed.checkpoint_identity = required_string(
@@ -2648,6 +2716,16 @@
       parsed.tail_policy = parse_transport_tail_policy(
           observable.at("tail_policy"),
           "native transport observable tail policy");
+      if (const auto* policy =
+              observable.if_contains("divergent_cancellation")) {
+        if (session->domain != "acb")
+          throw std::invalid_argument(
+              "bounded divergent cancellation is restricted to Acb transport contractions");
+        parsed.divergent_cancellation =
+            parse_bounded_divergent_cancellation(
+                *policy,
+                "native transport divergent-cancellation policy");
+      }
       pending_observables.push_back(std::move(parsed));
     }
 
@@ -2701,6 +2779,8 @@
         input.epsilon = observable.epsilon;
         input.epsilon_record = observable.epsilon_record;
         input.tail_policy = observable.tail_policy;
+        input.divergent_cancellation =
+            observable.divergent_cancellation;
         input.aggregate_handle =
             "line:" + std::to_string(session->next_line_result++);
         input.projected_local_handles.reserve(tile_count);
@@ -2732,6 +2812,10 @@
             {"projection_mode",
              transport_projection_mode_name(observable.tail_policy)},
             {"rows", std::move(row_records)}};
+        if (observable.divergent_cancellation.has_value())
+          input.aggregate_record["divergent_cancellation"] =
+              encode_bounded_divergent_cancellation(
+                  *observable.divergent_cancellation);
         contraction_inputs.push_back(std::move(input));
       }
       session->pending_line_integrations += observable_count;
@@ -3250,6 +3334,7 @@
              {"max", line->result().value.epsilon.complete_max}}},
         {"error", encode_error_envelope_summary(
                       line->result().value.error)},
+        {"conditioning", finished.conditioning},
         {"lower_tiles", finished.tiles[0]},
         {"upper_tiles", finished.tiles[1]},
         {"elapsed_ms", finished.elapsed_ms}});
@@ -3630,6 +3715,8 @@
 
     std::vector<std::shared_ptr<StoredLineResult>> combined_lines;
     combined_lines.reserve(observable_count);
+    std::vector<json::object> pair_conditioning;
+    pair_conditioning.reserve(observable_count);
     for (std::size_t index = 0; index < observable_count; ++index) {
       if (arm_results[0].size() != observable_count ||
           arm_results[1].size() != observable_count)
@@ -3654,6 +3741,13 @@
               LineIntegrationScope::FullLocalWithCertifiedTail)
         throw std::domain_error(
             "native transport-pair contraction requires certified full-local tails on both arms");
+      pair_conditioning.push_back(
+          encode_transport_pair_conditioning_diagnostics(
+              arm_results[0][index].aggregate->result(),
+              arm_results[1][index].aggregate->result(),
+              combined->result(),
+              std::move(arm_results[0][index].tile_values),
+              std::move(arm_results[1][index].tile_values)));
       combined_lines.push_back(std::move(combined));
     }
     const auto pair_wall_ms = std::chrono::duration<double, std::milli>(
@@ -3747,6 +3841,7 @@
                {"max", line->result().value.epsilon.complete_max}}},
           {"error", encode_error_envelope_summary(
                         line->result().value.error)},
+          {"conditioning", pair_conditioning[index]},
           {"lower_tiles", arm_results[0][index].tile_integrations},
           {"upper_tiles", arm_results[1][index].tile_integrations},
           {"elapsed_ms", arm_results[0][index].elapsed_ms +

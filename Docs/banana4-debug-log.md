@@ -24,9 +24,8 @@ Rules:
 - Accurate incoming level-1 boundary:
   `/private/tmp/diffexp2-banana4-fresh-boundary-20260718/checkpoints/banana4_level1_boundary.mx`
 - Current branch: `codex/all-examples-recovery`
-- Current base commit: `90c2e3e` (experiments below also include uncommitted
-  diagnostic changes; capture a fresh diff fingerprint before the next run).
-- Dirty-tree diff fingerprint after reconstructing this ledger:
+- Current recovery commit: `3f0dfce`.
+- Historical dirty-tree diff fingerprint for B4-11 through B4-13:
   `71955139205bf5cdef753235ad78a88e0963af7f1d25cfb5367a2196772192fb`.
 - The incoming boundary is accurate. The known failure is in the final
   singular chart: locally accepted matching data can be amplified by roughly
@@ -50,6 +49,15 @@ Rules:
 | B4-11 | Make the consumed terminal Rational-shadow factorization checkpointable without allowing a public/pre-match shadow basis to masquerade as replayable. The snapshot now permits witness-free local serialization only for private basis owners of a terminal factorized match whose public basis handles and match handle have both been consumed. | Dirty tree based on `90c2e3e`; pre-change diff fingerprint `71955139205bf5cdef753235ad78a88e0963af7f1d25cfb5367a2196772192fb`. | Test-scale | Full native build succeeded. `cpp_persistent_checkpoint`, `cpp_persistent_checkpoint_deferred_state`, and `cpp_persistent_transport_run_arms` passed. The Wolfram one-block CASE-P test still passed, including its assertion that checkpointing an unconsumed Rational-shadow basis fails closed. | The ownership distinction is now encoded and ordinary terminal round-trip plus pre-match rejection are covered. Add/obtain one consumed CASE-P terminal round-trip before spending 24 minutes on banana. |
 | B4-12 | First consumed CASE-P terminal checkpoint fixture, forcing the same Rational-shadow specialization used by banana. | Public target ε⁰, source window `[-2,0]`, one lower singular terminal hop. | <1 s | Correctly failed before matching with `common_complete_max=-3`, `required_complete_max=0`, and structured retry `required_additional_epsilon_orders=3`; all four downstream assertions were therefore skipped/failed. | Widening the source through ε³ made the match complete, but this particular multi-block CASE-P system selected a direct physical materialization and therefore did not retain a terminal exact-right factorization. It cannot exercise the post-match checkpoint closure. Keep the separate CASE-P schedule coverage and use a deterministic scalar Rational-shadow terminal frame for the ownership test. |
 | B4-13 | Prove the exact post-match ownership case with a small deterministic fixture: prepare a regular two-block SCC plan using Rational-shadow imports, release the eager public witness handles, stream fresh shadow bases through consuming hops, checkpoint both retained terminal factorizations, restore, and export. | Public target ε⁰, source `[-2,3]`, two one-hop arms, WP80/EO10. Test: `Tests/test_native_casep_terminal_checkpoint.m`. | ~2 s | 4/4 passed. Both states report `terminal_factorized_match=true`; atomic v2 checkpoint save succeeds; restore repeats zero arm marches; exported epsilon series is byte-identical; both sessions release cleanly. The separate one-block singular test still proves an unconsumed shadow basis fails closed. | The narrow serializer exception now has direct positive and negative lifecycle coverage. Safe to commit it before one replayable banana run. |
+| B4-14 | Reuse an already captured terminal post-hop state to inspect endpoint amplification before paying for another march. This is a restore/contract experiment only; it does not validate the new serializer because the artifact predates `3f0dfce`. | Artifact: `.diagnostics/banana4-upper-balanced-md8-posthop.de2cp` (SHA-256 `8dd4699bece0de5f90c053fccf7b306fa7ee8be8dae0a8cb91f5a6e3fe4d180e`, 893 MiB); manifest SHA-256 `f79763e0ab67c03e5d4870b46ac1e34740ee9c06965ecb8d7d29319570069365`; EO25, match digits 8, upper arm, ε window `[-1,13]`, required through 5. Replay logs: `/private/tmp/diffexp2-banana4-b4-14-replay.log`, `/private/tmp/diffexp2-banana4-b4-14-factorized-replay.log`, `/private/tmp/diffexp2-banana4-b4-14-adjoint-replay.log`, and `/private/tmp/diffexp2-banana4-b4-14-state-replay.log`. | ~15–20 s per restore | Restore and contraction succeeded. Physical, factorized-route, and adjoint-route exports were byte-identical: ε⁰ `-1.474379443216296664084279224013345692996e36`, with spurious ε⁻¹ `-7.1759727083684920389e19`. State statistics prove this old v4 artifact has `terminal_factorized_match=false`; therefore route selection never entered the factorized terminal consumer. | The artifact is useful as a fast historical wrong-result replay, but it cannot reveal the current retained terminal match, modes, or weights. Do not mistake its route equality for evidence about the current factorization. A fresh current checkpoint-producing run is still required. |
+
+### Implementation notes (not numerical experiments)
+
+- While adding B4-14 state diagnostics, the first compile used
+  `material_sector` outside its `local_detail` namespace and called a
+  nonexistent `EpsilonFrame::width()` accessor. The build failed immediately;
+  the implementation now uses `local_detail::material_sector` and
+  `coefficients().size()`. This did not run or alter a banana calculation.
 
 ## Disproven configurations: do not repeat unchanged
 

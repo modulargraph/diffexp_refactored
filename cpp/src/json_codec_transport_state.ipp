@@ -649,6 +649,63 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   const std::string& checkpoint_identity() const {
     return checkpoint_identity_;
   }
+
+  json::object terminal_mode_diagnostic_summary(
+      int output_digits = 18) const {
+    if (!has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal mode diagnostics require one certified Acb exact-right match");
+    const auto basis = terminal_acb_basis_owners();
+    const auto& weights = terminal_acb_physical_weights();
+    if (basis.size() != weights.size())
+      throw std::logic_error(
+          "terminal mode diagnostics found different basis and weight dimensions");
+
+    json::array columns;
+    columns.reserve(basis.size());
+    for (std::size_t column = 0; column < basis.size(); ++column) {
+      const auto& solution = basis[column]->solution();
+      json::array sectors;
+      sectors.reserve(solution.sectors.size());
+      for (const auto& sector : solution.sectors)
+        sectors.push_back(json::object{
+            {"a", encode_exact_descriptor(sector.a)},
+            {"b", encode_exact_descriptor(sector.b)},
+            {"log_power", sector.log_power},
+            {"material", local_detail::material_sector(sector)}});
+
+      const auto& weight = weights[column];
+      json::array coefficients;
+      coefficients.reserve(weight.coefficients().size());
+      for (std::int64_t raw_power = weight.min_power();
+           raw_power <= weight.complete_max(); ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        coefficients.push_back(json::object{
+            {"power", power},
+            {"value", encode_scalar(
+                weight.coefficient(power), output_digits)},
+            {"absolute_upper",
+             Magnitude::upper_abs(weight.coefficient(power))
+                 .approximate_upper()}});
+      }
+      columns.push_back(json::object{
+          {"column", column},
+          {"local", basis[column]->handle()},
+          {"epsilon",
+           json::object{{"min", solution.epsilon.min_power},
+                        {"max", solution.epsilon.complete_max}}},
+          {"taylor_complete_max", solution.taylor_complete_max},
+          {"sectors", std::move(sectors)},
+          {"physical_weight",
+           json::object{{"min", weight.min_power()},
+                        {"max", weight.complete_max()},
+                        {"coefficients", std::move(coefficients)}}}});
+    }
+    return json::object{
+        {"schema", "diffexp2-terminal-mode-diagnostic-v1"},
+        {"match", compact_terminal_match_diagnostic()},
+        {"columns", std::move(columns)}};
+  }
   const std::string& provenance_identity() const {
     return provenance_identity_;
   }
@@ -2421,6 +2478,14 @@ class StoredTransportArmState {
 
   json::object stats_json() const {
     auto result = summary();
+    const auto* terminal_diagnostics =
+        std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
+    if (terminal_factorized_match_ != nullptr &&
+        terminal_diagnostics != nullptr &&
+        std::string(terminal_diagnostics) == "1")
+      result["terminal_diagnostic"] =
+          terminal_factorized_match_
+              ->terminal_mode_diagnostic_summary();
     result["stats_queries"] = stats_queries_.fetch_add(1) + 1;
     return result;
   }

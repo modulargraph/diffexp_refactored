@@ -100,7 +100,12 @@ assert["forced CASE-P shadow reaches a consumed terminal match",
       AssociationQ[#] &&
         Lookup[#, "status", "error"] === "ok" &] &&
     AllTrue[Values[stateStats],
-      TrueQ[Lookup[#, "terminal_factorized_match", False]] &]];
+      TrueQ[Lookup[#, "terminal_factorized_match", False]] &] &&
+    (Environment["DE2_DIAGNOSTIC_TERMINAL_STATE"] =!= "1" ||
+      AllTrue[Values[stateStats],
+        Lookup[Lookup[#, "terminal_diagnostic", <||>],
+          "schema", None] ===
+            "diffexp2-terminal-mode-diagnostic-v1" &])];
 
 checkpointPath = FileNameJoin[{$TemporaryDirectory,
   "diffexp2-consumed-casep-terminal-" <>

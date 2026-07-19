@@ -806,6 +806,20 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
       acb_materialization_right_transformation_ =
           std::move(acb_right_materialization_transformation);
     }
+    const bool normalized_matching_frame =
+        matching_frame_identity_ != "physical-parent-frame";
+    if (normalized_matching_frame &&
+        !terminal_normal_frame_right_transformation_.has_value() &&
+        acb_materialization_right_transformation_.has_value() &&
+        !exact_right_materialization_transformation_.has_value())
+      throw std::logic_error(
+          "nonterminal normalized Acb match exported an internal right "
+          "coordinate transformation for physical materialization");
+    if (!normalized_matching_frame &&
+        terminal_normal_frame_right_transformation_.has_value())
+      throw std::logic_error(
+          "physical Acb match retained a terminal normal-frame right "
+          "transformation");
   }
 
   json::object summary() const override {
@@ -3134,6 +3148,15 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   auto matching_window = evaluation_window;
   std::string matching_frame_identity = "physical-parent-frame";
   bool normalized_matching_frame = false;
+  const bool complete_live_rational_shadow_basis =
+      expected_singular_request.has_value() &&
+      std::all_of(
+          basis.begin(), basis.end(),
+          [](const auto& column) {
+            const auto witness = column->rational_shadow_witness();
+            return witness != nullptr && witness->solution != nullptr;
+          });
+  bool direct_rational_shadow_normal_frame = false;
   std::optional<ExactLaurentMatrix<ComplexBall>>
       normalized_matching_right_inverse;
   json::object normal_frame_attempt{
@@ -3203,18 +3226,32 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
             transformed_incoming->second != *candidate_identity)
           throw std::logic_error(
               "incoming value lost the receiving SCC matching normal frame");
-        auto two_sided_basis =
-            receiving_owner->right_normalize_acb_matching_basis(candidate);
-        if (!two_sided_basis.has_value())
-          throw std::logic_error(
-              "receiving SCC supplied V^-1 but not the matching right V frame");
-        normalized_matching_right_inverse =
-            receiving_owner
-                ->right_normalization_acb_matching_transformation();
-        if (!normalized_matching_right_inverse.has_value())
-          throw std::logic_error(
-              "receiving SCC supplied its numeric right V frame but not the retained exact-support V^-1 transformation");
-        matching_basis = std::move(*two_sided_basis);
+        if (complete_live_rational_shadow_basis) {
+          // The exact shadow supplies the physical column saturation T.
+          // `candidate` is already L*F, so refine directly against L*F*T.
+          // Building L*F*R and then applying R^-1*T is algebraically
+          // equivalent but can lose thousands of bits in the artificial
+          // R/R^-1 cancellation.
+          matching_basis = std::move(candidate);
+          direct_rational_shadow_normal_frame = true;
+          normal_frame_attempt["right_frame"] =
+              "skipped-direct-rational-shadow";
+        } else {
+          auto two_sided_basis =
+              receiving_owner->right_normalize_acb_matching_basis(candidate);
+          if (!two_sided_basis.has_value())
+            throw std::logic_error(
+                "receiving SCC supplied V^-1 but not the matching right V frame");
+          normalized_matching_right_inverse =
+              receiving_owner
+                  ->right_normalization_acb_matching_transformation();
+          if (!normalized_matching_right_inverse.has_value())
+            throw std::logic_error(
+                "receiving SCC supplied its numeric right V frame but not the retained exact-support V^-1 transformation");
+          matching_basis = std::move(*two_sided_basis);
+          normal_frame_attempt["right_frame"] =
+              "retained-two-sided-spectral-frame";
+        }
         matching_incoming = std::move(transformed_incoming->first);
         matching_frame_identity = std::move(*candidate_identity);
         normalized_matching_frame = true;
@@ -3349,6 +3386,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
     residual_certificate_identity.clear();
     selected_terminal_normal_frame_right_transformation.reset();
     normalized_matching_right_inverse.reset();
+    direct_rational_shadow_normal_frame = false;
   };
   if (require_normalized_singular_frame &&
       expected_singular_request.has_value() &&
@@ -3647,19 +3685,28 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
 
   if (normalized_matching_frame) {
     const auto receiving_owner = basis.front()->retained_equation_owner();
-    auto terminal_right_transformation = receiving_owner
-        ? receiving_owner
-              ->right_denormalization_acb_matching_matrix()
-        : std::nullopt;
-    if (!terminal_right_transformation.has_value())
-      throw std::logic_error(
-          "receiving SCC could not retain its terminal right normal-frame transformation");
-    auto physical_weights = receiving_owner
-        ? receiving_owner->denormalize_acb_matching_weights(refined.weights)
-        : std::nullopt;
-    if (!physical_weights.has_value())
-      throw std::logic_error(
-          "receiving SCC could not return Fuchsian matching weights to the physical basis");
+    std::optional<FiniteLaurentMatrix<ComplexBall>>
+        terminal_right_transformation;
+    std::optional<FiniteLaurentVector<ComplexBall>> physical_weights;
+    if (direct_rational_shadow_normal_frame) {
+      // Refinement used L*F and the physical exact T directly.  Its returned
+      // weights are already T*y in the physical F coordinates.
+      physical_weights = refined.weights;
+    } else {
+      terminal_right_transformation = receiving_owner
+          ? receiving_owner
+                ->right_denormalization_acb_matching_matrix()
+          : std::nullopt;
+      if (!terminal_right_transformation.has_value())
+        throw std::logic_error(
+            "receiving SCC could not retain its terminal right normal-frame transformation");
+      physical_weights = receiving_owner
+          ? receiving_owner->denormalize_acb_matching_weights(refined.weights)
+          : std::nullopt;
+      if (!physical_weights.has_value())
+        throw std::logic_error(
+            "receiving SCC could not return Fuchsian matching weights to the physical basis");
+    }
     auto physical_options = refinement;
     physical_options.required_min_power = evaluation_window.min_power;
     bool physical_prefix_preserved = false;
@@ -3734,7 +3781,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       exact_lattice = make_exact_lattice();
       refined = run_refinement();
     } else {
-      if (require_normalized_singular_frame)
+      if (require_normalized_singular_frame &&
+          !direct_rational_shadow_normal_frame)
         selected_terminal_normal_frame_right_transformation =
             std::move(*terminal_right_transformation);
       refined.weights = std::move(*physical_weights);
@@ -3768,7 +3816,9 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   // t-independent.
   std::optional<ExactLaurentMatrix<Rational>>
       exact_right_materialization_transformation;
-  if (!normalized_matching_frame &&
+  if ((!normalized_matching_frame ||
+       (direct_rational_shadow_normal_frame &&
+        require_normalized_singular_frame)) &&
       !exact_lattice.acb_transformation.has_value())
     exact_right_materialization_transformation =
         exact_lattice.saturation.transformation;
@@ -3776,11 +3826,25 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       acb_right_materialization_transformation;
   if (normalized_matching_frame) {
     normal_frame_attempt["terminal_materialization"] =
-        exact_lattice.acb_transformation.has_value()
-        ? "finite-normal-frame-acb-Levelt-right"
-        : "finite-normal-frame-exact-formal-right";
-    acb_right_materialization_transformation =
-        std::move(exact_lattice.acb_transformation);
+        direct_rational_shadow_normal_frame
+            ? require_normalized_singular_frame
+                ? "direct-physical-exact-rational-shadow-right"
+                : "physical-F*w"
+            : require_normalized_singular_frame
+            ? exact_lattice.acb_transformation.has_value()
+                ? "finite-normal-frame-acb-Levelt-right"
+                : "finite-normal-frame-exact-formal-right"
+            : "physical-F*w";
+    // R^-1*T is a coordinate transformation for the normalized matching
+    // basis B=L*F*R: B*(R^-1*T)=L*F*T.  It is not a right transformation of
+    // the physical receiving basis F.  Only a terminal factorized consumer
+    // retains both R and R^-1*T and can replay that association.  An
+    // ordinary streamed hop must materialize the certified physical weights
+    // w=R*T*y as F*w.
+    if (require_normalized_singular_frame &&
+        !direct_rational_shadow_normal_frame)
+      acb_right_materialization_transformation =
+          std::move(exact_lattice.acb_transformation);
   } else {
     acb_right_materialization_transformation =
         std::move(exact_lattice.acb_transformation);

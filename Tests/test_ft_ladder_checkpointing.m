@@ -277,7 +277,7 @@ basePayload = <|
   "RecurrenceBackend" -> recurrenceBackend,
   "DivisionOrder" -> divisionOrder,
   "RadiusOfConvergence" -> radiusOfConvergence,
-  "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+  "ValueTransportMode" -> valueTransportMode,
   "SingularMatchPrecondition" -> singularMatchPrecondition,
   "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
   "LevelEpsilonHalos" -> levelEpsilonHalos,

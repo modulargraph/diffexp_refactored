@@ -260,13 +260,8 @@ class PreparedChart final : public PreparedChartBase {
     return prepared_.assembly_matrix.has_value()
         ? prepared_.assembly_matrix->exact_identity : empty;
   }
-  FiniteLaurentVector<ComplexBall> apply_assembly_to_acb_matching_vector(
-      const FiniteLaurentVector<ComplexBall>& input) const {
-    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
-      (void)input;
-      throw std::logic_error(
-          "only an Acb chart can specialize its matching assembly frame");
-    } else {
+  FiniteLaurentVector<Scalar> apply_assembly_to_matching_vector(
+      const FiniteLaurentVector<Scalar>& input) const {
       if (!prepared_.assembly_matrix.has_value() ||
           input.size() != prepared_.dimension)
         throw std::invalid_argument(
@@ -275,7 +270,7 @@ class PreparedChart final : public PreparedChartBase {
           static_cast<std::int64_t>(prepared_.frame_base) +
               prepared_.frame_width - 1,
           "matching assembly work maximum");
-      auto framed = detail::zero_block<ComplexBall>(
+      auto framed = detail::zero_block<Scalar>(
           prepared_.dimension, prepared_.frame_width);
       for (std::size_t component = 0; component < input.size(); ++component) {
         if (input[component].min_power() < prepared_.frame_base ||
@@ -299,7 +294,7 @@ class PreparedChart final : public PreparedChartBase {
       const auto op = recurrence_operator_view(prepared_);
       const auto output = detail::apply_prepared_matrix(
           *prepared_.assembly_matrix, framed, op);
-      FiniteLaurentVector<ComplexBall> result;
+      FiniteLaurentVector<Scalar> result;
       result.reserve(prepared_.dimension);
       for (std::uint32_t row = 0; row < prepared_.dimension; ++row) {
         std::optional<std::int32_t> minimum;
@@ -331,7 +326,7 @@ class PreparedChart final : public PreparedChartBase {
                output[row][static_cast<std::size_t>(
                    first - prepared_.frame_base)].is_zero())
           ++first;
-        std::vector<ComplexBall> coefficients;
+        std::vector<Scalar> coefficients;
         coefficients.reserve(EpsilonWindow{first, complete_max}.width());
         for (std::int64_t power = first; power <= complete_max; ++power)
           coefficients.push_back(output[row][static_cast<std::size_t>(
@@ -340,7 +335,6 @@ class PreparedChart final : public PreparedChartBase {
             EpsilonWindow{first, complete_max}, std::move(coefficients));
       }
       return result;
-    }
   }
   bool has_regular_singleton_partition() const {
     if (prepared_.blocks.size() != prepared_.dimension) return false;
@@ -1554,26 +1548,12 @@ SourceData<Scalar> local_solution_source_data(
   return data;
 }
 
-bool exact_nonnegative_integer(const Rational& value, bool include_zero) {
-  if (value.sign() < 0 || (!include_zero && value.is_zero())) return false;
-  return value.str().find('/') == std::string::npos;
-}
-
 std::uint32_t exact_log_ceiling(
     const ExactJordanIndicialCertificate& indicial,
     const Rational& a, const Rational& b, std::uint32_t base,
-    bool include_zero_offset) {
-  std::uint64_t result = base;
-  for (const auto& block : indicial.blocks) {
-    if (!(block.root.b == b)) continue;
-    const auto offset = block.root.a - a;
-    if (exact_nonnegative_integer(offset, include_zero_offset))
-      result += block.size();
-  }
-  if (result > std::numeric_limits<std::uint32_t>::max())
-    throw RecurrenceError(
-        "E5", "derived exact Jordan log ceiling exceeds uint32 range");
-  return static_cast<std::uint32_t>(result);
+    std::uint32_t nmax, bool include_zero_offset) {
+  return singular_indicial_detail::exact_reachable_jordan_log_ceiling(
+      indicial, a, b, base, nmax, include_zero_offset);
 }
 
 template <typename Scalar>
@@ -1607,7 +1587,7 @@ json::object exact_derived_run(
         "E5", "derived particular run unexpectedly carries a seed component");
   }
   const auto log_max = exact_log_ceiling(
-      indicial, a, b, base_log, !homogeneous);
+      indicial, a, b, base_log, nmax, !homogeneous);
 
   json::array a_shifts;
   json::array schedule;
@@ -3069,7 +3049,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
               unit.emplace_back(0, std::move(coefficients));
             }
             auto assembled =
-                block.chart->apply_assembly_to_acb_matching_vector(unit);
+                block.chart->apply_assembly_to_matching_vector(unit);
             for (std::size_t row = 0; row < block.vertices.size(); ++row)
               assembly[row].push_back(std::move(assembled[row]));
           }
@@ -3098,19 +3078,16 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     }
   }
 
-  std::optional<ExactLaurentMatrix<ComplexBall>>
-  right_normalization_acb_matching_transformation() const override {
-    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
-      return std::nullopt;
-    } else {
-      ExactLaurentMatrix<ComplexBall> result(
+  std::optional<ExactLaurentMatrix<Scalar>>
+  right_normalization_matching_transformation_impl() const {
+      ExactLaurentMatrix<Scalar> result(
           dimension_,
-          std::vector<ExactLaurentPolynomial<ComplexBall>>(dimension_));
+          std::vector<ExactLaurentPolynomial<Scalar>>(dimension_));
       for (const auto& block : blocks_) {
         if (block.source_transform.identity) {
           for (const auto vertex : block.vertices)
             result[vertex][vertex] =
-                ExactLaurentPolynomial<ComplexBall>::one();
+                ExactLaurentPolynomial<Scalar>::one();
           continue;
         }
         for (const auto& entry : block.source_transform.matrix.entries) {
@@ -3139,23 +3116,36 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         }
       }
       return result;
+  }
+
+  std::optional<ExactLaurentMatrix<ComplexBall>>
+  right_normalization_acb_matching_transformation() const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      return std::nullopt;
+    } else {
+      return right_normalization_matching_transformation_impl();
     }
   }
 
-  std::optional<FiniteLaurentVector<ComplexBall>>
-  denormalize_acb_matching_weights(
-      const FiniteLaurentVector<ComplexBall>& normalized) const override {
-    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
-      (void)normalized;
+  std::optional<ExactLaurentMatrix<Rational>>
+  right_normalization_rational_matching_transformation() const override {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
       return std::nullopt;
     } else {
+      return right_normalization_matching_transformation_impl();
+    }
+  }
+
+  FiniteLaurentVector<Scalar>
+  denormalize_matching_weights_impl(
+      const FiniteLaurentVector<Scalar>& normalized) const {
       if (normalized.size() != dimension_)
         throw std::invalid_argument(
             "SCC matching weight denormalization has the wrong dimension");
-      std::vector<std::optional<EpsilonFrame<ComplexBall>>> physical(
+      std::vector<std::optional<EpsilonFrame<Scalar>>> physical(
           dimension_);
       for (const auto& block : blocks_) {
-        FiniteLaurentVector<ComplexBall> local;
+        FiniteLaurentVector<Scalar> local;
         local.reserve(block.vertices.size());
         for (const auto vertex : block.vertices)
           local.push_back(normalized[vertex]);
@@ -3168,31 +3158,31 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           if (frame_base > 0 || frame_top < 0)
             throw std::logic_error(
                 "SCC matching weight assembly does not contain epsilon^0");
-          FiniteLaurentMatrix<ComplexBall> assembly(
-              block.vertices.size(), FiniteLaurentVector<ComplexBall>());
+          FiniteLaurentMatrix<Scalar> assembly(
+              block.vertices.size(), FiniteLaurentVector<Scalar>());
           for (auto& row : assembly) row.reserve(block.vertices.size());
           for (std::size_t column = 0; column < block.vertices.size();
                ++column) {
-            FiniteLaurentVector<ComplexBall> unit;
+            FiniteLaurentVector<Scalar> unit;
             unit.reserve(block.vertices.size());
             for (std::size_t component = 0;
                  component < block.vertices.size(); ++component) {
-              std::vector<ComplexBall> coefficients(
+              std::vector<Scalar> coefficients(
                   static_cast<std::size_t>(frame_top) + 1,
-                  ScalarTraits<ComplexBall>::zero());
+                  ScalarTraits<Scalar>::zero());
               if (component == column)
-                coefficients.front() = ScalarTraits<ComplexBall>::one();
+                coefficients.front() = ScalarTraits<Scalar>::one();
               unit.emplace_back(0, std::move(coefficients));
             }
             auto assembled =
-                block.chart->apply_assembly_to_acb_matching_vector(unit);
+                block.chart->apply_assembly_to_matching_vector(unit);
             for (std::size_t row = 0; row < block.vertices.size(); ++row)
               assembly[row].push_back(std::move(assembled[row]));
           }
-          FiniteLaurentVector<ComplexBall> assembled_weights;
+          FiniteLaurentVector<Scalar> assembled_weights;
           assembled_weights.reserve(block.vertices.size());
           for (std::size_t row = 0; row < block.vertices.size(); ++row) {
-            std::optional<EpsilonFrame<ComplexBall>> value;
+            std::optional<EpsilonFrame<Scalar>> value;
             for (std::size_t column = 0; column < block.vertices.size();
                  ++column) {
               auto term = assembly[row][column] * local[column];
@@ -3207,7 +3197,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
              ++component)
           physical[block.vertices[component]] = std::move(local[component]);
       }
-      FiniteLaurentVector<ComplexBall> result;
+      FiniteLaurentVector<Scalar> result;
       result.reserve(dimension_);
       for (auto& frame : physical) {
         if (!frame.has_value())
@@ -3216,7 +3206,48 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         result.push_back(std::move(*frame));
       }
       return result;
+  }
+
+  std::optional<FiniteLaurentVector<ComplexBall>>
+  denormalize_acb_matching_weights(
+      const FiniteLaurentVector<ComplexBall>& normalized) const override {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      (void)normalized;
+      return std::nullopt;
+    } else {
+      return denormalize_matching_weights_impl(normalized);
     }
+  }
+
+  FiniteLaurentMatrix<Scalar>
+  right_denormalization_matching_matrix_impl() const {
+      std::size_t unit_width = 1;
+      for (const auto& block : blocks_)
+        unit_width = std::max(
+            unit_width,
+            static_cast<std::size_t>(block.chart->frame_width()));
+      FiniteLaurentMatrix<Scalar> result(
+          dimension_, FiniteLaurentVector<Scalar>());
+      for (auto& row : result) row.reserve(dimension_);
+      for (std::uint32_t column = 0; column < dimension_; ++column) {
+        FiniteLaurentVector<Scalar> unit;
+        unit.reserve(dimension_);
+        for (std::uint32_t component = 0; component < dimension_;
+             ++component) {
+          std::vector<Scalar> coefficients(
+              unit_width, ScalarTraits<Scalar>::zero());
+          if (component == column)
+            coefficients.front() = ScalarTraits<Scalar>::one();
+          unit.emplace_back(0, std::move(coefficients));
+        }
+        auto physical = denormalize_matching_weights_impl(unit);
+        if (physical.size() != dimension_)
+          throw std::logic_error(
+              "SCC matching right denormalization matrix lost a column");
+        for (std::uint32_t row = 0; row < dimension_; ++row)
+          result[row].push_back(std::move(physical[row]));
+      }
+      return result;
   }
 
   std::optional<FiniteLaurentMatrix<ComplexBall>>
@@ -3224,34 +3255,16 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
       return std::nullopt;
     } else {
-      std::size_t unit_width = 1;
-      for (const auto& block : blocks_)
-        unit_width = std::max(
-            unit_width,
-            static_cast<std::size_t>(block.chart->frame_width()));
-      FiniteLaurentMatrix<ComplexBall> result(
-          dimension_, FiniteLaurentVector<ComplexBall>());
-      for (auto& row : result) row.reserve(dimension_);
-      for (std::uint32_t column = 0; column < dimension_; ++column) {
-        FiniteLaurentVector<ComplexBall> unit;
-        unit.reserve(dimension_);
-        for (std::uint32_t component = 0; component < dimension_;
-             ++component) {
-          std::vector<ComplexBall> coefficients(
-              unit_width, ComplexBall(0));
-          if (component == column)
-            coefficients.front() = ComplexBall(1);
-          unit.emplace_back(0, std::move(coefficients));
-        }
-        auto physical = denormalize_acb_matching_weights(unit);
-        if (!physical.has_value() ||
-            physical->size() != dimension_)
-          throw std::logic_error(
-              "SCC matching right denormalization matrix lost a column");
-        for (std::uint32_t row = 0; row < dimension_; ++row)
-          result[row].push_back(std::move((*physical)[row]));
-      }
-      return result;
+      return right_denormalization_matching_matrix_impl();
+    }
+  }
+
+  std::optional<FiniteLaurentMatrix<Rational>>
+  right_denormalization_rational_matching_matrix() const override {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      return std::nullopt;
+    } else {
+      return right_denormalization_matching_matrix_impl();
     }
   }
 

@@ -98,6 +98,8 @@ Scan[(FeynmanTrick`SetFTOption[#, runnerSettings[#]]) &, {
 }];
 
 singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
+valueTransport = runnerSettings["ValueTransport"];
+valueTransportMode = If[TrueQ[valueTransport], "1", "0"];
 recurrenceBackend = runnerSettings["RecurrenceBackend"];
 cppBatchEndpointArms = runnerSettings["BatchEndpointArms"];
 cppArmThreadBudget = runnerSettings["CppThreads"];
@@ -1263,7 +1265,7 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None] := Module[
       Return[ladderCheckpointReject[file,
         "RadiusOfConvergence does not match"], Module]];
     If[KeyExistsQ[payload, "ValueTransportMode"] &&
-        payload["ValueTransportMode"] =!= Environment["DE2_VALUE_TRANSPORT"],
+        payload["ValueTransportMode"] =!= valueTransportMode,
       Return[ladderCheckpointReject[file,
         "DE2_VALUE_TRANSPORT mode does not match"], Module]];
     If[KeyExistsQ[payload, "SingularMatchPrecondition"] &&
@@ -1829,7 +1831,7 @@ ft2MatchingHaloProfileContract[name_String, prepKey_,
       "RecurrenceBackend" -> recurrenceBackend,
       "SingularMatchPrecondition" -> singularMatchPrecondition,
       "DeltaPrescriptionSign" -> deltaPrescriptionSign,
-      "ValueTransportMode" -> envOrDefault["DE2_VALUE_TRANSPORT", "0"],
+      "ValueTransportMode" -> valueTransportMode,
       "CppThreads" -> cppArmThreadBudget,
       "Anchor" -> anchor|>|>, ft2CheckpointRequestMetadata[]];
   identity = ft2CanonicalIdentity[
@@ -3607,7 +3609,7 @@ runExample[name_String, familyRequest_:None,
         "StepDivisionOrder" -> stepDivisionOrder,
         "RecurrenceBackend" -> recurrenceBackend,
         "SingularMatchPrecondition" -> singularMatchPrecondition,
-        "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+        "ValueTransportMode" -> valueTransportMode,
         "CppThreads" -> cppArmThreadBudget|>;
       nativeTransportContract = ft2NativeTransportContract[
         name, level, prepKey, sys, currentBCs, currentPrefactors,
@@ -3660,8 +3662,7 @@ runExample[name_String, familyRequest_:None,
                 "MatchingDigits" -> matchDigits,
                 "DivisionOrder" -> divisionOrder,
                 "RadiusOfConvergence" -> radiusOfConvergence,
-                "ValueTransportMode" ->
-                  Environment["DE2_VALUE_TRANSPORT"],
+                "ValueTransportMode" -> valueTransportMode,
                 "RecurrenceBackend" -> recurrenceBackend,
                 "SingularMatchPrecondition" ->
                   singularMatchPrecondition,
@@ -3763,7 +3764,7 @@ runExample[name_String, familyRequest_:None,
         "MatchingDigits" -> matchDigits,
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
-        "ValueTransportMode" -> Environment["DE2_VALUE_TRANSPORT"],
+        "ValueTransportMode" -> valueTransportMode,
         "RecurrenceBackend" -> recurrenceBackend,
         "SingularMatchPrecondition" -> singularMatchPrecondition,
         "DeltaPrescriptionSign" -> deltaPrescriptionSign,
@@ -3791,7 +3792,7 @@ runExample[name_String, familyRequest_:None,
        arm.  Value-vector transport has boundary-dependent recurrences, so it
        intentionally keeps the established sequential path. *)
     If[cppBatchEndpointArms && recurrenceBackend === "Cpp" &&
-        Environment["DE2_VALUE_TRANSPORT"] =!= "1" &&
+        !valueTransport &&
         Length[A] < cppArmThreadBudget &&
         needLo && needHi && !AssociationQ[trLoCache] &&
         !AssociationQ[trHiCache],

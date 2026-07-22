@@ -172,9 +172,25 @@ decimalString[x_?InexactNumberQ, digits_Integer] := Module[{record},
 
 arbInexactString[x_?InexactNumberQ, digits_Integer] := Module[
   {record, midpoint, accuracy, sourceRadiusExponent,
-   radiusExponent, radius},
+   magnitudeExponent, radiusExponent, radius},
   record = decimalRecord[x, digits];
-  If[FailureQ[record], Return[record, Module]];
+  If[FailureQ[record],
+    (* A sub-one-digit BigReal can be a harmless cancellation remnant, for
+       example 4*10^-1997 at WP1000 with 0.35 digits of relative precision.
+       RealDigits cannot publish even one midpoint digit, but Mathematica
+       still supplies a finite absolute Accuracy.  Encode a rigorous
+       zero-centred ball covering both the midpoint magnitude and its source
+       uncertainty.  This is not an exact chop and cannot discard a small
+       endpoint-significant coefficient. *)
+    accuracy = Accuracy[x];
+    If[!NumericQ[accuracy], Return[record, Module]];
+    magnitudeExponent = Quiet[Check[
+      Last[MantissaExponent[Abs[x], 10]], $Failed]];
+    If[!IntegerQ[magnitudeExponent], Return[record, Module]];
+    radiusExponent = Max[magnitudeExponent, -Floor[accuracy]];
+    radius = "2e" <> If[radiusExponent >= 0, "+", ""] <>
+      ToString[radiusExponent];
+    Return["[0 +/- " <> radius <> "]", Module]];
   midpoint = record["String"];
   accuracy = Accuracy[x];
   If[accuracy =!= Infinity && !NumericQ[accuracy],

@@ -430,7 +430,7 @@ json::object run_session_command(const json::object& root) {
           RationalShadowColumnWitness{
               std::make_shared<LocalSolution<Rational>>(source->solution()),
               shadow_identity, source_column.exact_column_identity,
-              target_column.exact_column_identity});
+              target_column.exact_column_identity, source_owner});
       imported = make_retained_typed_shared<ComplexBall,
           StoredLocal<ComplexBall>>(
           local_handle, target->handle(), target->exact_identity(),

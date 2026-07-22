@@ -2427,7 +2427,10 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
         std::nullopt) {
   const auto& object = as_object(raw, "checkpoint retained Acb match");
   const auto checkpoint_schema = required_string(object, "schema");
+  const bool has_exact_shadow_factorized_basis =
+      checkpoint_schema == "diffexp2-retained-acb-match-v6";
   const bool has_terminal_normal_frame_materialization =
+      has_exact_shadow_factorized_basis ||
       checkpoint_schema == "diffexp2-retained-acb-match-v5";
   const bool has_acb_right_materialization =
       has_terminal_normal_frame_materialization ||
@@ -2463,6 +2466,15 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
           "checkpoint Acb match v5 lost a terminal normal-frame transformation field");
     shape.erase("terminal_normal_frame_right_transformation");
     shape.erase("terminal_normal_frame_exact_right_transformation");
+  }
+  if (has_exact_shadow_factorized_basis) {
+    if (shape.if_contains("exact_shadow_factorized_basis") == nullptr ||
+        shape.if_contains(
+            "exact_shadow_extra_precision_bits") == nullptr)
+      throw std::invalid_argument(
+          "checkpoint Acb match v6 lost its exact-shadow factorized basis fields");
+    shape.erase("exact_shadow_factorized_basis");
+    shape.erase("exact_shadow_extra_precision_bits");
   }
   const bool has_residual_frame_identity =
       object.if_contains("residual_frame_identity") != nullptr;
@@ -2810,6 +2822,37 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
               raw_terminal, dimension, dimension,
               "checkpoint Acb terminal normal-frame right transformation");
   }
+  std::optional<std::vector<LocalSolution<ComplexBall>>>
+      exact_shadow_factorized_basis;
+  std::size_t exact_shadow_extra_precision_bits = 0;
+  if (has_exact_shadow_factorized_basis) {
+    const auto raw_bits = as_u64(
+        object.at("exact_shadow_extra_precision_bits"),
+        "checkpoint exact-shadow extra precision");
+    if (raw_bits > 16384)
+      throw std::invalid_argument(
+          "checkpoint exact-shadow extra precision exceeds 16384 bits");
+    exact_shadow_extra_precision_bits =
+        static_cast<std::size_t>(raw_bits);
+    const auto& raw_basis =
+        object.at("exact_shadow_factorized_basis");
+    if (!raw_basis.is_null()) {
+      const auto& columns = as_array(
+          raw_basis, "checkpoint exact-shadow factorized basis");
+      if (columns.size() != dimension ||
+          exact_shadow_extra_precision_bits == 0)
+        throw std::invalid_argument(
+            "checkpoint exact-shadow factorized basis has invalid shape or precision");
+      exact_shadow_factorized_basis.emplace();
+      exact_shadow_factorized_basis->reserve(columns.size());
+      for (const auto& column : columns)
+        exact_shadow_factorized_basis->push_back(
+            parse_checkpoint_local_solution<ComplexBall>(column));
+    } else if (exact_shadow_extra_precision_bits != 0) {
+      throw std::invalid_argument(
+          "checkpoint exact-shadow precision has no factorized basis");
+    }
+  }
   // A normalized terminal match may use either the exact formal saturation
   // or the certified Acb Levelt transformation reconstructed from its
   // canonical witness.  Keep the latter when present: the endpoint
@@ -2832,16 +2875,9 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
         expected_singular_request.has_value() &&
         matching_frame_identity != "physical-parent-frame" &&
         residual_frame_identity == "physical-parent-frame";
-    const bool normalized_direct_exact_right =
-        exact_right_materialization_transformation.has_value() &&
-        !terminal_normal_frame_right_transformation.has_value() &&
-        expected_singular_request.has_value() &&
-        matching_frame_identity != "physical-parent-frame" &&
-        residual_frame_identity == "physical-parent-frame";
-    if (!physical_exact_right && !terminal_normal_right &&
-        !normalized_direct_exact_right)
+    if (!physical_exact_right && !terminal_normal_right)
       throw std::invalid_argument(
-          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical, direct exact-shadow, or terminal normal frame");
+          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical or terminal normal frame");
     for (const auto& row :
          *acb_right_materialization_preconditioner)
       for (const auto& entry : row)
@@ -2930,6 +2966,12 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
     if (!residual_certificate_identity.empty())
       provenance["residual_certificate_identity"] =
           residual_certificate_identity;
+    if (exact_shadow_factorized_basis.has_value())
+      provenance["terminal_exact_shadow_factorized_basis"] =
+          json::object{
+              {"columns", exact_shadow_factorized_basis->size()},
+              {"extra_precision_bits",
+               exact_shadow_extra_precision_bits}};
     if (acb_right_materialization_preconditioner.has_value())
       provenance["right_materialization_preconditioner"] =
           checkpoint_acb_laurent_matrix_record(
@@ -3014,5 +3056,7 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       std::move(exact_lattice.acb_transformation),
       std::move(acb_right_materialization_preconditioner),
       std::move(terminal_normal_frame_right_transformation),
+      std::move(exact_shadow_factorized_basis),
+      exact_shadow_extra_precision_bits,
       std::move(refined), elapsed_ms);
 }

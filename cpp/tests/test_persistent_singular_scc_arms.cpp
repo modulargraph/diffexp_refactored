@@ -969,7 +969,18 @@ bool singular_match_published_with_complete_physical_residual(
         terminal_normal != nullptr && !terminal_normal->is_null();
     const bool has_terminal_exact =
         terminal_exact != nullptr && !terminal_exact->is_null();
-    if (native.at("schema") != "diffexp2-retained-acb-match-v5" ||
+    const auto* exact_shadow = native.if_contains(
+        "exact_shadow_factorized_basis");
+    const auto* exact_shadow_bits = native.if_contains(
+        "exact_shadow_extra_precision_bits");
+    const bool has_exact_shadow =
+        exact_shadow != nullptr && !exact_shadow->is_null();
+    if (native.at("schema") != "diffexp2-retained-acb-match-v6" ||
+        exact_shadow == nullptr || exact_shadow_bits == nullptr ||
+        (has_exact_shadow &&
+         exact_shadow_bits->as_int64() <= 0) ||
+        (!has_exact_shadow &&
+         exact_shadow_bits->as_int64() != 0) ||
         (!physical_matching && !normalized_matching) ||
         provenance.at("matching_frame_identity").as_string() !=
             matching_frame ||
@@ -980,6 +991,7 @@ bool singular_match_published_with_complete_physical_residual(
         has_terminal_normal != has_terminal_exact ||
         (physical_matching && has_terminal_normal) ||
         (normalized_matching && !has_terminal_normal) ||
+        (has_exact_shadow && !has_terminal_normal) ||
         residual.at("complete_through_required") != true ||
         residual.at("complete_window").as_object().at("max").as_int64() <
             required)
@@ -1002,8 +1014,16 @@ bool terminal_normal_frame_checkpoint_complete(const std::string& path) {
     if (finite == nullptr || finite->is_null()) return false;
     const auto* exact = native.if_contains(
         "terminal_normal_frame_exact_right_transformation");
-    if (native.at("schema") != "diffexp2-retained-acb-match-v5" ||
+    if (native.at("schema") != "diffexp2-retained-acb-match-v6" ||
         exact == nullptr || exact->is_null())
+      return false;
+    const auto* exact_shadow =
+        native.if_contains("exact_shadow_factorized_basis");
+    const auto* extra_precision =
+        native.if_contains("exact_shadow_extra_precision_bits");
+    if (exact_shadow == nullptr || extra_precision == nullptr ||
+        !exact_shadow->is_null() ||
+        extra_precision->as_int64() != 0)
       return false;
     const auto frame = json::parse(std::string(
         native.at("matching_frame_identity").as_string())).as_object();

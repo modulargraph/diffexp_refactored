@@ -70,6 +70,7 @@ common_environment=(
   "DE2_CPP_LIBRARY=$library"
   "DE2_RECURRENCE_BACKEND=Cpp"
   "DE2_CPP_THREADS=$cpp_threads"
+  "DE2_VALUE_TRANSPORT=1"
   "FT_EXAMPLES=banana"
   "FT_FIRE_PATH=$fire_path"
   "FT_PREP_CACHE_DIR=$prep_cache"

@@ -915,6 +915,16 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return acb->weights();
   }
 
+  const FiniteLaurentVector<ComplexBall>&
+  terminal_acb_transformed_weights() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal transformed weights require one certified Acb exact-right match");
+    return acb->transformed_weights();
+  }
+
   std::int32_t terminal_acb_physical_weight_min_power() const {
     const auto& weights = terminal_acb_physical_weights();
     if (weights.empty())
@@ -926,7 +936,16 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return result;
   }
 
-  std::vector<LocalSolution<ComplexBall>>
+  std::size_t terminal_acb_extra_precision_bits() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal extra precision requires one certified Acb factorization");
+    return acb->exact_shadow_extra_precision_bits();
+  }
+
+  std::shared_ptr<const std::vector<LocalSolution<ComplexBall>>>
   terminal_acb_factorized_basis(
       const std::string& checkpoint_identity_root) const {
     const auto acb =
@@ -935,6 +954,12 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         checkpoint_identity_root.empty())
       throw std::invalid_argument(
           "terminal factorized basis requires one certified Acb exact-right match and checkpoint root");
+    const auto precision_bits = ComplexBall::precision();
+    std::lock_guard<std::mutex> cache_lock(
+        terminal_factorized_basis_cache_mutex_);
+    if (terminal_factorized_basis_cache_ &&
+        terminal_factorized_basis_cache_precision_bits_ == precision_bits)
+      return terminal_factorized_basis_cache_;
     auto owners = terminal_acb_basis_owners();
     std::vector<LocalSolution<ComplexBall>> valid_physical_basis;
     valid_physical_basis.reserve(owners.size());
@@ -958,7 +983,11 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     }
 
     std::vector<LocalSolution<ComplexBall>> factorized;
-    if (const auto& normal_right =
+    if (const auto& exact_shadow =
+            acb->exact_shadow_factorized_basis();
+        exact_shadow.has_value()) {
+      factorized = *exact_shadow;
+    } else if (const auto& normal_right =
             acb->terminal_normal_frame_right_transformation();
         normal_right.has_value()) {
       if (normal_right->size() != physical_sources.size() ||
@@ -1021,7 +1050,11 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
               factorized_sources, *preconditioner,
               checkpoint_identity_root + ":conditioned-exact-right");
     }
-    return factorized;
+    terminal_factorized_basis_cache_ =
+        std::make_shared<const std::vector<LocalSolution<ComplexBall>>>(
+            std::move(factorized));
+    terminal_factorized_basis_cache_precision_bits_ = precision_bits;
+    return terminal_factorized_basis_cache_;
   }
 
   FiniteLaurentVector<ComplexBall>
@@ -1064,29 +1097,46 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
 
   FiniteLaurentVector<ComplexBall>
   adjoint_contract_terminal_acb_functionals(
-      const FiniteLaurentMatrix<ComplexBall>& physical_rows,
+      const FiniteLaurentMatrix<ComplexBall>& functional_rows,
       std::int32_t required_output_complete_max,
-      const std::string& context) const {
+      const std::string& context,
+      bool factorized_coordinates = false) const {
     const auto acb =
         std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
     if (!acb || !has_terminal_acb_factorization())
       throw std::invalid_argument(
           context +
           ": terminal adjoint contraction requires one certified Acb exact-right match");
-    if (acb->terminal_normal_frame_right_transformation().has_value())
+    if (!factorized_coordinates &&
+        acb->terminal_normal_frame_right_transformation().has_value())
       throw std::invalid_argument(
           context +
           ": adjoint diagnostic is not implemented for a finite normal-frame terminal transformation");
-    if (physical_rows.empty())
+    if (functional_rows.empty())
       throw std::invalid_argument(
           context + ": terminal adjoint functional batch is empty");
-    auto basis = terminal_acb_basis_owners();
+    auto physical_basis_owners = factorized_coordinates
+        ? std::vector<std::shared_ptr<StoredLocal<ComplexBall>>>{}
+        : terminal_acb_basis_owners();
+    auto factorized_basis = factorized_coordinates
+        ? terminal_acb_factorized_basis(checkpoint_identity_)
+        : std::shared_ptr<const std::vector<LocalSolution<ComplexBall>>>{};
+    std::vector<const LocalSolution<ComplexBall>*> basis;
+    if (factorized_coordinates) {
+      basis.reserve(factorized_basis->size());
+      for (const auto& column : *factorized_basis)
+        basis.push_back(&column);
+    } else {
+      basis.reserve(physical_basis_owners.size());
+      for (const auto& owner : physical_basis_owners)
+        basis.push_back(&owner->solution());
+    }
     const auto dimension = basis.size();
-    for (const auto& row : physical_rows)
+    for (const auto& row : functional_rows)
       if (row.size() != dimension)
         throw std::invalid_argument(
-            context +
-            ": terminal adjoint functional differs from the physical basis dimension");
+          context +
+              ": terminal adjoint functional differs from its selected basis dimension");
     auto incoming =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
             incoming_owner_);
@@ -1108,9 +1158,6 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     incoming_options.imaginary_sign =
         acb->effective_incoming_imaginary_sign();
     incoming_options.compute_tail_estimate = false;
-    const auto matching_taylor_complete_max =
-        acb->matching_taylor_complete_max();
-
     std::vector<LocalEvaluation> basis_evaluations;
     basis_evaluations.reserve(dimension);
     auto evaluation_window = acb->requested_window();
@@ -1124,45 +1171,127 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         std::numeric_limits<std::int32_t>::max();
     for (std::size_t column = 0; column < dimension; ++column) {
       auto options = basis_options;
-      const auto full_width =
-          basis[column]->solution().taylor_width();
-      if (matching_taylor_complete_max.has_value()) {
-        const auto retained_width =
-            static_cast<std::size_t>(
-                *matching_taylor_complete_max) +
-            1;
-        if (retained_width > full_width)
-          throw std::logic_error(
-              context +
-              ": retained terminal matching prefix exceeds its basis local");
-        options.t_order_reduction =
-            static_cast<std::uint32_t>(
-                full_width - retained_width);
-      }
+      // A shorter Taylor prefix may be selected to keep the pointwise
+      // connection-weight solve well conditioned.  It is not a new local
+      // solution and cannot truncate the terminal observable.  The adjoint
+      // evaluates the complete retained basis and incoming local here, just
+      // as project_terminal_acb_basis_row does before line integration.
       basis_evaluations.push_back(evaluate_local_solution(
-          basis[column]->solution(), basis_point, options));
+          *basis[column], basis_point, options));
+      evaluation_window.min_power = std::min(
+          evaluation_window.min_power,
+          basis_evaluations.back().value.epsilon.min_power);
       evaluation_window.complete_max = std::min(
           evaluation_window.complete_max,
           basis_evaluations.back().value.epsilon.complete_max);
     }
-    const auto incoming_full_width =
-        incoming->solution().taylor_width();
-    if (matching_taylor_complete_max.has_value()) {
-      const auto retained_width =
-          static_cast<std::size_t>(
-              *matching_taylor_complete_max) +
-          1;
-      if (retained_width > incoming_full_width)
-        throw std::logic_error(
-            context +
-            ": retained terminal matching prefix exceeds its incoming local");
-      incoming_options.t_order_reduction =
-          static_cast<std::uint32_t>(
-              incoming_full_width - retained_width);
-    }
-    const auto incoming_evaluation = evaluate_local_solution(
+    auto incoming_evaluation = evaluate_local_solution(
         incoming->solution(), incoming_point,
         incoming_options);
+    std::optional<ErrorEnvelope> certified_incoming_tail;
+    const auto* terminal_tail_mode =
+        std::getenv("DE2_DIAGNOSTIC_TERMINAL_PHYSICAL_TAIL");
+    if (terminal_tail_mode != nullptr) {
+      const std::string mode(terminal_tail_mode);
+      if (mode != "report" && mode != "inflate")
+        throw std::invalid_argument(
+            "DE2_DIAGNOSTIC_TERMINAL_PHYSICAL_TAIL must be report or inflate");
+      const auto& equation = incoming->physical_equation();
+      if (!equation) {
+        std::cerr
+            << "terminal-physical-tail context=" << context
+            << " status=unsupported detail=no-retained-physical-equation\n";
+      } else {
+        const auto prepared =
+            prepare_physical_regular_homogeneous_tail_model(
+                *equation, incoming->solution());
+        if (prepared.status != TailMajorantStatus::Certified ||
+            !prepared.model.has_value()) {
+          std::cerr
+              << "terminal-physical-tail context=" << context
+              << " status=" << tail_majorant_status_name(prepared.status)
+              << " detail=" << prepared.detail << '\n';
+        } else {
+          const auto arm_name = required_string(handoff_, "arm");
+          const auto match_index = static_cast<std::size_t>(
+              as_u64(handoff_.at("match"),
+                     "terminal physical-tail match index"));
+          const auto& arm = plan_owner_->arm(arm_name);
+          if (match_index >= arm.exact.matches.size())
+            throw std::logic_error(
+                context +
+                ": terminal physical-tail match is outside its retained arm");
+          const auto& exact_match = arm.exact.matches[match_index];
+          if (exact_match.producing_local.str() !=
+              acb->incoming_point_exact())
+            throw std::logic_error(
+                context +
+                ": terminal physical-tail point differs from retained match geometry");
+          const auto& producing =
+              arm.charts.at(exact_match.producing_chart);
+          const auto point_modulus =
+              exact_path_detail::abs(exact_match.producing_local);
+          const auto witness_gap =
+              producing.geometry.radius - point_modulus;
+          constexpr std::uint32_t kWitnessSearchCap = 16;
+          std::optional<Rational> witness_radius;
+          Rational dyadic_denominator(1);
+          for (std::uint32_t exponent = 1;
+               exponent <= kWitnessSearchCap; ++exponent) {
+            dyadic_denominator *= Rational(2);
+            const auto candidate =
+                point_modulus + witness_gap / dyadic_denominator;
+            const auto candidate_certificate =
+                certify_physical_regular_taylor_point_tail(
+                    *prepared.model, incoming_point, candidate.str());
+            if (candidate_certificate.status ==
+                TailMajorantStatus::Certified) {
+              witness_radius = candidate;
+              break;
+            }
+          }
+          if (!witness_radius.has_value()) {
+            std::cerr
+                << "terminal-physical-tail context=" << context
+                << " status=inconclusive detail=no-certified-dyadic-witness\n";
+          } else {
+            auto certified =
+                evaluate_physical_local_solution_with_certified_tail(
+                    *prepared.model, incoming_point,
+                    witness_radius->str(), incoming_options);
+            if (certified.tail.status !=
+                TailMajorantStatus::Certified) {
+              std::cerr
+                  << "terminal-physical-tail context=" << context
+                  << " status="
+                  << tail_majorant_status_name(certified.tail.status)
+                  << " detail=" << certified.tail.detail << '\n';
+            } else {
+              if (mode == "inflate")
+                incoming_evaluation = std::move(certified.evaluation);
+              certified_incoming_tail = certified.tail.value;
+              double maximum_tail_upper = 0.0;
+              for (const auto& bound :
+                   certified_incoming_tail->absolute)
+                maximum_tail_upper = std::max(
+                    maximum_tail_upper, bound.approximate_upper());
+              std::cerr
+                  << "terminal-physical-tail context=" << context
+                  << " status=certified mode=" << mode
+                  << " witness_radius_exact="
+                  << witness_radius->str()
+                  << " retained_taylor_order="
+                  << prepared.model->taylor_complete_max
+                  << " tail_upper_max=" << maximum_tail_upper
+                  << '\n';
+            }
+          }
+        }
+      }
+    }
+    evaluation_window.min_power = std::min(
+        evaluation_window.min_power,
+        incoming_evaluation.value.epsilon.min_power);
     evaluation_window.complete_max = std::min(
         evaluation_window.complete_max,
         incoming_evaluation.value.epsilon.complete_max);
@@ -1191,24 +1320,64 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     auto incoming_value = acb_evaluation_frames(
         incoming_evaluation.value, evaluation_window,
         context + ": incoming evaluation");
+    if (certified_incoming_tail.has_value() &&
+        std::string(terminal_tail_mode) == "inflate") {
+      if (!tail_majorant_detail::same_epsilon_window(
+              certified_incoming_tail->frame,
+              incoming_evaluation.value.epsilon) ||
+          certified_incoming_tail->absolute.size() !=
+              incoming_evaluation.value.epsilon.width())
+        throw std::logic_error(
+            context +
+            ": certified terminal incoming tail changed its epsilon frame");
+      for (auto& frame : incoming_value) {
+        auto coefficients = frame.coefficients();
+        for (std::int64_t raw_power = frame.min_power();
+             raw_power <= frame.complete_max(); ++raw_power) {
+          if (raw_power < certified_incoming_tail->frame.min_power ||
+              raw_power > certified_incoming_tail->frame.complete_max)
+            continue;
+          const auto power = local_algebra_detail::checked_i32(
+              raw_power, "terminal certified-tail epsilon power");
+          const auto row = static_cast<std::size_t>(
+              raw_power - certified_incoming_tail->frame.min_power);
+          certified_incoming_tail->absolute[row].add_error_to(
+              coefficients.at(static_cast<std::size_t>(
+                  raw_power - frame.min_power())));
+        }
+        frame = EpsilonFrame<ComplexBall>(
+            frame.window(), std::move(coefficients));
+      }
+    }
+    // `evaluation_window` is shared with the transformed basis so that A's
+    // rows align, but the physical incoming vector u need not begin at A's
+    // lower edge.  Remove only exact zero padding.  An ambiguous Acb ball is
+    // retained as possible support; it is never guessed to be zero.
+    for (auto& frame : incoming_value)
+      frame = matching_detail::
+          trim_leading_exact_zeros_preserve_ambiguous(frame);
 
-    auto conditioned_basis =
-        right_multiply_finite_by_exact_laurent(
-            evaluated_basis,
-            *acb->acb_materialization_right_transformation());
-    auto conditioned_rows =
-        right_multiply_finite_by_exact_laurent(
-            physical_rows,
-            *acb->acb_materialization_right_transformation());
-    if (const auto& preconditioner =
-            acb->acb_right_materialization_preconditioner();
-        preconditioner.has_value()) {
+    auto conditioned_basis = evaluated_basis;
+    auto conditioned_rows = functional_rows;
+    if (!factorized_coordinates) {
       conditioned_basis =
           right_multiply_finite_by_exact_laurent(
-              conditioned_basis, *preconditioner);
+              evaluated_basis,
+              *acb->acb_materialization_right_transformation());
       conditioned_rows =
           right_multiply_finite_by_exact_laurent(
-              conditioned_rows, *preconditioner);
+              functional_rows,
+              *acb->acb_materialization_right_transformation());
+      if (const auto& preconditioner =
+              acb->acb_right_materialization_preconditioner();
+          preconditioner.has_value()) {
+        conditioned_basis =
+            right_multiply_finite_by_exact_laurent(
+                conditioned_basis, *preconditioner);
+        conditioned_rows =
+            right_multiply_finite_by_exact_laurent(
+                conditioned_rows, *preconditioner);
+      }
     }
 
     auto conditioned_basis_complete_max =
@@ -1231,72 +1400,25 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       incoming_complete_max = std::min(
           incoming_complete_max, frame.complete_max());
     }
-    const auto required_adjoint_complete_max =
-        local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(
-                required_output_complete_max) -
-                incoming_min,
-            "terminal adjoint required solution maximum");
-    const auto required_conditioned_basis_complete_max =
-        local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(
-                required_adjoint_complete_max) -
-                conditioned_functional_min,
-            "terminal adjoint required normalized-basis maximum");
-    const auto required_incoming_complete_max =
-        local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(
-                required_output_complete_max) -
-                conditioned_functional_min,
-            "terminal adjoint required incoming maximum");
-    if (conditioned_basis_complete_max <
-            required_conditioned_basis_complete_max ||
-        incoming_complete_max < required_incoming_complete_max) {
-      const auto additional = std::max(
-          required_conditioned_basis_complete_max -
-              conditioned_basis_complete_max,
-          required_incoming_complete_max -
-              incoming_complete_max);
-      std::ostringstream detail;
-      detail
-          << context
-          << ": retained matching epsilon prefix is too short for the "
-             "terminal adjoint recurrence; required_output_complete_max="
-          << required_output_complete_max
-          << "; conditioned_functional_min="
-          << conditioned_functional_min
-          << "; incoming=[" << incoming_min << ","
-          << incoming_complete_max << "]"
-          << "; conditioned_basis_complete_max="
-          << conditioned_basis_complete_max
-          << "; required_conditioned_basis_complete_max="
-          << required_conditioned_basis_complete_max
-          << "; required_incoming_complete_max="
-          << required_incoming_complete_max
-          << "; required_additional_epsilon_orders="
-          << additional;
-      throw MatchingArithmeticError(
-          MatchingArithmeticErrorCode::InsufficientCompleteWindow,
-          detail.str(), std::nullopt, std::nullopt,
-          conditioned_basis_complete_max);
+    // The legacy physical-coordinate diagnostic reconstructs the exact-right
+    // frame numerically and may leave tiny enclosures around zeros proved by
+    // the retained lattice.  Its historical structural chop stays confined to
+    // that proposal.  The production factorized adjoint consumes the retained
+    // G=(F*T)*P columns directly and must preserve every ball: a locally tiny
+    // coefficient can be endpoint-significant.
+    if (!factorized_coordinates) {
+      constexpr int structural_chop_digits = 100;
+      for (auto& row : conditioned_basis)
+        for (auto& frame : row) {
+          auto coefficients = frame.coefficients();
+          for (auto& coefficient : coefficients)
+            coefficient =
+                ScalarTraits<ComplexBall>::canonicalized(
+                    coefficient, structural_chop_digits);
+          frame = EpsilonFrame<ComplexBall>(
+              frame.window(), std::move(coefficients));
+        }
     }
-
-    // The retained exact lattice proves the negative transformed powers
-    // structural.  Ball evaluation can leave tiny enclosures around zero;
-    // canonicalize only whole balls below the same rigorous structural floor
-    // used by matching.  The adjoint residual below is still evaluated
-    // against the unmodified physical input and functional.
-    constexpr int structural_chop_digits = 100;
-    for (auto& row : conditioned_basis)
-      for (auto& frame : row) {
-        auto coefficients = frame.coefficients();
-        for (auto& coefficient : coefficients)
-          coefficient =
-              ScalarTraits<ComplexBall>::canonicalized(
-                  coefficient, structural_chop_digits);
-        frame = EpsilonFrame<ComplexBall>(
-            frame.window(), std::move(coefficients));
-      }
 
     FiniteLaurentMatrix<ComplexBall> transposed_basis(
         dimension, FiniteLaurentVector<ComplexBall>());
@@ -1308,22 +1430,66 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         transposed_basis[column].push_back(
             conditioned_basis[row][column]);
 
+    // The exact saturation witness proves that the transformed basis has no
+    // negative epsilon powers.  Numerical evaluation can retain wide balls
+    // around those algebraic zeros, especially in the final CASE-P row.  The
+    // coefficient recurrence is therefore factored on this projected
+    // matrix, and its forward certificate must use that same exact-proven
+    // matrix.  Certifying against `transposed_basis` instead would reject the
+    // solve for numerical remnants which the lattice proof has already shown
+    // to be identically zero.
+    auto certified_nonnegative_transposed_basis =
+        exact_nonnegative_finite_laurent_matrix(
+            transposed_basis,
+            context + ": certified adjoint nonnegative basis");
     std::optional<
         ExactNonnegativePowerSeriesFactorization<ComplexBall>>
         power_series_factorization;
     std::optional<FiniteLaurentFactorization<ComplexBall>>
         laurent_factorization;
+    std::string power_series_fallback_reason;
     try {
       power_series_factorization =
           factor_exact_nonnegative_power_series_system(
-              transposed_basis,
+              certified_nonnegative_transposed_basis,
               context +
                   ": certified adjoint power-series factorization");
-    } catch (const MatchingArithmeticError&) {
+    } catch (const MatchingArithmeticError& error) {
+      switch (error.code) {
+        case MatchingArithmeticErrorCode::AmbiguousZero:
+        case MatchingArithmeticErrorCode::ZeroDivisor:
+        case MatchingArithmeticErrorCode::SingularOrIncompleteSystem:
+        case MatchingArithmeticErrorCode::UnresolvedDeterminantTail:
+          break;
+        default:
+          throw;
+      }
+      power_series_fallback_reason = error.what();
       laurent_factorization =
           factor_preconditioned_acb_finite_laurent_system(
-              std::move(transposed_basis),
+              std::move(certified_nonnegative_transposed_basis),
               context + ": adjoint Laurent factorization");
+    }
+
+    const bool diagnostic_terminal_state =
+        std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") != nullptr;
+    if (diagnostic_terminal_state) {
+      std::cerr
+          << "terminal-adjoint-window context=" << context
+          << " factorization="
+          << (power_series_factorization.has_value()
+                  ? "nonnegative-power-series"
+                  : "finite-laurent")
+          << " basis_complete=" << conditioned_basis_complete_max
+          << " functional_min=" << conditioned_functional_min
+          << " incoming=[" << incoming_min << ","
+          << incoming_complete_max << "]"
+          << " required_output=" << required_output_complete_max
+          << " power_series_fallback_reason="
+          << (power_series_fallback_reason.empty()
+                  ? "none"
+                  : power_series_fallback_reason)
+          << '\n';
     }
 
     FiniteLaurentVector<ComplexBall> result;
@@ -1339,11 +1505,210 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
                 *laurent_factorization,
                 conditioned_rows[functional],
                 context + ": adjoint solve");
+      AcbLaurentRefinementOptions adjoint_certificate_options;
+      adjoint_certificate_options.relative_tolerance =
+          Magnitude::decimal(acb->relative_tolerance_text());
+      adjoint_certificate_options.required_min_power =
+          conditioned_functional_min;
+      adjoint_certificate_options.required_complete_max =
+          local_algebra_detail::checked_i32(
+              static_cast<std::int64_t>(
+                  required_output_complete_max) - incoming_min,
+              "terminal adjoint certificate maximum");
+      adjoint_certificate_options.max_refinement_steps = 0;
+      const auto adjoint_certificate =
+          matching_detail::evaluate_acb_matching_residual(
+              certified_nonnegative_transposed_basis, adjoint,
+              conditioned_rows[functional],
+              adjoint_certificate_options,
+              context + ": adjoint forward certificate");
+      if (!adjoint_certificate.diagnostics.complete_through_required)
+      {
+        const auto additional = std::max<std::int32_t>(
+            0,
+            adjoint_certificate.diagnostics.required_complete_max -
+                adjoint_certificate.diagnostics.complete_window.complete_max);
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            context +
+                ": terminal adjoint forward residual does not cover the epsilon prefix needed by the output; common_complete_max=" +
+                std::to_string(
+                    adjoint_certificate.diagnostics.complete_window.complete_max) +
+                "; required_complete_max=" +
+                std::to_string(
+                    adjoint_certificate.diagnostics.required_complete_max) +
+                "; required_additional_epsilon_orders=" +
+                std::to_string(additional),
+            static_cast<std::size_t>(additional), functional,
+            adjoint_certificate.diagnostics.complete_window.complete_max);
+      }
+      if (adjoint_certificate.diagnostics.verdict !=
+          AcbMatchingResidualVerdict::Pass) {
+        std::string coefficient_examples;
+        std::size_t examples = 0;
+        for (const auto& coefficient :
+             adjoint_certificate.diagnostics.coefficients) {
+          if (coefficient.epsilon_power >
+                  adjoint_certificate.diagnostics.required_complete_max ||
+              coefficient.verdict == AcbMatchingResidualVerdict::Pass)
+            continue;
+          if (!coefficient_examples.empty()) coefficient_examples += ",";
+          coefficient_examples +=
+              "{row=" + std::to_string(coefficient.row) +
+              ";power=" + std::to_string(coefficient.epsilon_power) +
+              ";verdict=" +
+              std::string(
+                  coefficient.verdict == AcbMatchingResidualVerdict::Fail
+                      ? "fail" : "inconclusive") +
+              ";residual_lower=" +
+              coefficient.residual_lower.dump_exact() +
+              ";residual_upper=" +
+              coefficient.residual_upper.dump_exact() +
+              ";scale_upper=" + coefficient.scale_upper.dump_exact() +
+              "}";
+          if (++examples == 4) break;
+        }
+        throw std::domain_error(
+            context +
+            ": terminal adjoint forward residual is not certified; verdict=" +
+            std::string(
+                adjoint_certificate.diagnostics.verdict ==
+                        AcbMatchingResidualVerdict::Fail
+                    ? "fail" : "inconclusive") +
+            "; complete_window=[" +
+            std::to_string(
+                adjoint_certificate.diagnostics.complete_window.min_power) +
+            "," +
+            std::to_string(
+                adjoint_certificate.diagnostics.complete_window.complete_max) +
+            "]; required_complete_max=" +
+            std::to_string(
+                adjoint_certificate.diagnostics.required_complete_max) +
+            "; coefficient_examples=[" + coefficient_examples + "]");
+      }
+      if (diagnostic_terminal_state) {
+        double maximum_residual_upper = 0.0;
+        double maximum_scale_upper = 0.0;
+        for (const auto& coefficient :
+             adjoint_certificate.diagnostics.coefficients) {
+          if (coefficient.epsilon_power >
+              adjoint_certificate.diagnostics.required_complete_max)
+            continue;
+          maximum_residual_upper = std::max(
+              maximum_residual_upper,
+              coefficient.residual_upper.approximate_upper());
+          maximum_scale_upper = std::max(
+              maximum_scale_upper,
+              coefficient.scale_upper.approximate_upper());
+        }
+        std::cerr
+            << "terminal-adjoint-certificate context=" << context
+            << " functional=" << functional
+            << " residual_upper_max=" << maximum_residual_upper
+            << " scale_upper_max=" << maximum_scale_upper
+            << " certified_complete_max="
+            << adjoint_certificate.diagnostics.required_complete_max
+            << '\n';
+      }
+      if (certified_incoming_tail.has_value()) {
+        const auto output_min = local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(conditioned_functional_min) +
+                certified_incoming_tail->frame.min_power,
+            "terminal certified-tail output minimum");
+        const auto output_max = std::min(
+            required_output_complete_max,
+            local_algebra_detail::checked_i32(
+                static_cast<std::int64_t>(
+                    adjoint.front().complete_max()) +
+                    certified_incoming_tail->frame.complete_max,
+                "terminal certified-tail output maximum"));
+        for (std::int64_t raw_output = output_min;
+             raw_output <= output_max; ++raw_output) {
+          const auto output_power = local_algebra_detail::checked_i32(
+              raw_output, "terminal certified-tail output power");
+          auto tail_output_upper = Magnitude::zero();
+          for (std::size_t component = 0;
+               component < dimension; ++component) {
+            const auto first_adjoint = std::max<std::int64_t>(
+                adjoint[component].min_power(),
+                raw_output -
+                    certified_incoming_tail->frame.complete_max);
+            const auto last_adjoint = std::min<std::int64_t>(
+                adjoint[component].complete_max(),
+                raw_output -
+                    certified_incoming_tail->frame.min_power);
+            for (std::int64_t raw_adjoint = first_adjoint;
+                 raw_adjoint <= last_adjoint; ++raw_adjoint) {
+              const auto adjoint_power =
+                  local_algebra_detail::checked_i32(
+                      raw_adjoint,
+                      "terminal certified-tail adjoint power");
+              const auto tail_power = raw_output - raw_adjoint;
+              const auto tail_row = static_cast<std::size_t>(
+                  tail_power -
+                      certified_incoming_tail->frame.min_power);
+              tail_output_upper += Magnitude::upper_abs(
+                  adjoint[component].coefficient(adjoint_power)) *
+                  certified_incoming_tail->absolute.at(tail_row);
+            }
+          }
+          std::cerr
+              << "terminal-physical-tail-amplification context="
+              << context
+              << " functional=" << functional
+              << " epsilon_power=" << output_power
+              << " absolute_upper="
+              << tail_output_upper.approximate_upper()
+              << " absolute_upper_exact="
+              << tail_output_upper.dump_exact()
+              << '\n';
+        }
+      }
       std::optional<EpsilonFrame<ComplexBall>> value;
       for (std::size_t component = 0;
            component < dimension; ++component) {
         auto term = adjoint[component] *
             incoming_value[component];
+        if (diagnostic_terminal_state) {
+          double adjoint_upper_max = 0.0;
+          std::int32_t adjoint_upper_power = adjoint[component].min_power();
+          for (std::int64_t raw_power = adjoint[component].min_power();
+               raw_power <= adjoint[component].complete_max(); ++raw_power) {
+            const auto power = local_algebra_detail::checked_i32(
+                raw_power, "terminal adjoint sensitivity power");
+            const auto upper = Magnitude::upper_abs(
+                adjoint[component].coefficient(power)).approximate_upper();
+            if (upper > adjoint_upper_max) {
+              adjoint_upper_max = upper;
+              adjoint_upper_power = power;
+            }
+          }
+          double contribution_upper_max = 0.0;
+          std::int32_t contribution_upper_power = term.min_power();
+          const auto contribution_complete = std::min(
+              term.complete_max(), required_output_complete_max);
+          for (std::int64_t raw_power = term.min_power();
+               raw_power <= contribution_complete; ++raw_power) {
+            const auto power = local_algebra_detail::checked_i32(
+                raw_power, "terminal adjoint contribution power");
+            const auto upper = Magnitude::upper_abs(
+                term.coefficient(power)).approximate_upper();
+            if (upper > contribution_upper_max) {
+              contribution_upper_max = upper;
+              contribution_upper_power = power;
+            }
+          }
+          std::cerr
+              << "terminal-adjoint-sensitivity context=" << context
+              << " functional=" << functional
+              << " component=" << component
+              << " adjoint_upper_max=" << adjoint_upper_max
+              << " adjoint_upper_power=" << adjoint_upper_power
+              << " contribution_upper_max=" << contribution_upper_max
+              << " contribution_upper_power="
+              << contribution_upper_power
+              << '\n';
+        }
         value = value.has_value()
             ? *value + term
             : std::move(term);
@@ -1352,6 +1717,82 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         throw std::logic_error(
             context +
             ": terminal adjoint contraction produced no scalar value");
+      if (value->complete_max() < required_output_complete_max) {
+        const auto additional =
+            required_output_complete_max - value->complete_max();
+        std::ostringstream detail;
+        detail
+            << context
+            << ": terminal adjoint result is incomplete after the actual "
+               "factorization and convolution; required_output_complete_max="
+            << required_output_complete_max
+            << "; actual_output=[" << value->min_power() << ","
+            << value->complete_max() << "]"
+            << "; factorization="
+            << (power_series_factorization.has_value()
+                    ? "nonnegative-power-series"
+                    : "finite-laurent")
+            << "; conditioned_functional_min="
+            << conditioned_functional_min
+            << "; incoming=[" << incoming_min << ","
+            << incoming_complete_max << "]"
+            << "; conditioned_basis_complete_max="
+            << conditioned_basis_complete_max
+            << "; required_additional_epsilon_orders="
+            << additional;
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            detail.str(), functional, std::nullopt,
+            value->complete_max());
+      }
+      const auto output_tolerance =
+          Magnitude::decimal(acb->relative_tolerance_text());
+      for (std::int64_t raw_power = value->min_power();
+           raw_power <= std::min<std::int64_t>(
+                            value->complete_max(),
+                            required_output_complete_max);
+           ++raw_power) {
+        const auto power = local_algebra_detail::checked_i32(
+            raw_power, "terminal adjoint output accuracy power");
+        const auto coefficient = value->coefficient(power);
+        const auto midpoint =
+            matching_detail::acb_midpoint_value(coefficient);
+        const auto uncertainty = coefficient - midpoint;
+        const auto scale = Magnitude::maximum(
+            Magnitude::one(), Magnitude::lower_abs(coefficient));
+        if (!(Magnitude::upper_abs(uncertainty) <=
+              scale * output_tolerance))
+          throw std::domain_error(
+              context +
+              ": terminal adjoint output ball is too wide to publish; functional=" +
+              std::to_string(functional) +
+              "; epsilon_power=" + std::to_string(power) +
+              "; midpoint=(" + coefficient.real_midpoint(16) + "," +
+              coefficient.imag_midpoint(16) + ")" +
+              "; radius2exp=(" +
+              coefficient.real_radius_exponent() + "," +
+              coefficient.imag_radius_exponent() + ")");
+      }
+      if (diagnostic_terminal_state) {
+        auto adjoint_min = adjoint.front().min_power();
+        auto adjoint_complete = adjoint.front().complete_max();
+        for (const auto& frame : adjoint) {
+          adjoint_min = std::min(adjoint_min, frame.min_power());
+          adjoint_complete =
+              std::min(adjoint_complete, frame.complete_max());
+        }
+        std::cerr
+            << "terminal-adjoint-result context=" << context
+            << " functional=" << functional
+            << " functional_window=["
+            << conditioned_rows[functional].front().min_power()
+            << ","
+            << conditioned_rows[functional].front().complete_max()
+            << "] adjoint=[" << adjoint_min << ","
+            << adjoint_complete << "] output=["
+            << value->min_power() << ","
+            << value->complete_max() << "]\n";
+      }
       result.push_back(std::move(*value));
     }
     return result;
@@ -1494,12 +1935,7 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   }
 
   std::int32_t terminal_acb_transformed_weight_min_power() const {
-    const auto acb =
-        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
-    if (!acb || !has_terminal_acb_factorization())
-      throw std::invalid_argument(
-          "terminal factorized weight valuation requires one certified Acb exact-right match");
-    const auto& transformed_weights = acb->transformed_weights();
+    const auto& transformed_weights = terminal_acb_transformed_weights();
     if (transformed_weights.empty())
       throw std::logic_error(
           "terminal factorized contraction has no transformed weights");
@@ -1797,6 +2233,15 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           "plan-match local materialization identities must be nonempty");
     AcbPrecisionLease lease(precision_bits);
     ComplexBall::set_precision(precision_bits);
+    std::optional<matching_detail::ScopedAcbPrecision>
+        exact_shadow_precision;
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      const auto acb =
+          std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+      if (acb && acb->exact_shadow_factorized_basis().has_value())
+        exact_shadow_precision.emplace(
+            acb->exact_shadow_extra_precision_bits());
+    }
     const auto started = std::chrono::steady_clock::now();
     const auto native_match_summary = match_->summary();
     const auto& match_epsilon = as_object(
@@ -1907,7 +2352,37 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         for (const auto& column : *matching_prefix_basis)
           materialization_basis.push_back(&column);
       }
-      if (const auto& right =
+      if (const auto& exact_shadow =
+              acb->exact_shadow_factorized_basis();
+          exact_shadow.has_value()) {
+        // The final normal-frame match was certified against the exact
+        // physical Rational-shadow columns F*T. Reusing F and the separate
+        // bounded V/V^-1 maps
+        // would recreate the catastrophic cancellation which the exact
+        // coefficientwise association removed.
+        exact_right_basis = *exact_shadow;
+        if (const auto& preconditioner =
+                acb->acb_right_materialization_preconditioner();
+            preconditioner.has_value()) {
+          std::vector<const LocalSolution<ComplexBall>*>
+              exact_shadow_sources;
+          exact_shadow_sources.reserve(exact_right_basis->size());
+          for (const auto& column : *exact_right_basis)
+            exact_shadow_sources.push_back(&column);
+          exact_right_basis =
+              right_transform_local_basis_exact<ComplexBall>(
+                  exact_shadow_sources, *preconditioner,
+                  result_checkpoint_identity +
+                      ":conditioned-exact-shadow-basis");
+        }
+        materialization_basis.clear();
+        materialization_basis.reserve(exact_right_basis->size());
+        for (const auto& column : *exact_right_basis)
+          materialization_basis.push_back(&column);
+        materialization_weights = &acb->transformed_weights();
+        exact_right_physical_association = true;
+        exact_right_used_rational_shadow = true;
+      } else if (const auto& right =
               acb->acb_materialization_right_transformation();
           right.has_value() &&
           !acb->terminal_normal_frame_right_transformation().has_value()) {
@@ -2524,6 +2999,11 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   std::vector<std::shared_ptr<StoredLocalBase>> basis_owners_;
   std::shared_ptr<StoredLocalBase> incoming_owner_;
   std::atomic<std::uint64_t> materializations_{0};
+  mutable std::mutex terminal_factorized_basis_cache_mutex_;
+  mutable slong terminal_factorized_basis_cache_precision_bits_ = 0;
+  mutable std::shared_ptr<
+      const std::vector<LocalSolution<ComplexBall>>>
+      terminal_factorized_basis_cache_;
 };
 
 class StoredTransportArmState {

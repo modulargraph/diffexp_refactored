@@ -145,9 +145,76 @@ void transformation_support_smoke() {
             transformed[0].coefficient(0) == Rational(6) &&
             transformed[0].coefficient(1) == Rational(8) &&
             transformed[1].complete_max() == 2);
+
+  const auto zero = frame(0, {0, 0, 0, 0, 0, 0});
+  const auto one = frame(0, {1, 0, 0, 0, 0, 0});
+  const auto one_plus_epsilon = frame(0, {1, 1, 0, 0, 0, 0});
+  const auto epsilon = frame(0, {0, 1, 0, 0, 0, 0});
+  const FiniteLaurentMatrix<Rational> finite_basis{
+      {frame(0, {2, 3, 1, 0, 0, 0}), one},
+      {epsilon, frame(0, {1, 4, 0, 0, 0, 0})}};
+  const FiniteLaurentMatrix<Rational> right_frame{
+      {one_plus_epsilon, epsilon}, {zero, one}};
+  const ExactLaurentMatrix<Rational> exact_right{
+      {ExactLaurentPolynomial<Rational>::one(),
+       ExactLaurentPolynomial<Rational>::monomial(-1, Rational(1))},
+      {ExactLaurentPolynomial<Rational>::zero(),
+       ExactLaurentPolynomial<Rational>::one()}};
+  const auto sequential = diffexp2::right_multiply_finite_by_exact_laurent(
+      diffexp2::right_multiply_finite_laurent_matrices(
+          finite_basis, right_frame),
+      exact_right);
+  const auto fused = diffexp2::right_multiply_finite_laurent_matrices(
+      finite_basis,
+      diffexp2::right_multiply_finite_by_exact_laurent(
+          right_frame, exact_right));
+  bool associative_prefix = true;
+  for (std::size_t row = 0; row < 2; ++row)
+    for (std::size_t column = 0; column < 2; ++column) {
+      const auto minimum = std::max(
+          sequential[row][column].min_power(),
+          fused[row][column].min_power());
+      const auto maximum = std::min(
+          sequential[row][column].complete_max(),
+          fused[row][column].complete_max());
+      associative_prefix = associative_prefix && minimum <= maximum;
+      for (std::int32_t power = minimum;
+           power <= maximum; ++power)
+        associative_prefix =
+            associative_prefix &&
+            sequential[row][column].coefficient(power) ==
+                fused[row][column].coefficient(power);
+    }
+  check("finite right frame composes before an exact right map honestly",
+        associative_prefix);
 }
 
 void quotient_and_solve_smoke() {
+  const auto padded_incoming =
+      diffexp2::matching_detail::
+          trim_leading_exact_zeros_preserve_ambiguous(
+              EpsilonFrame<ComplexBall>(
+                  -3, std::vector<ComplexBall>{
+                          ComplexBall(0), ComplexBall(0), ComplexBall(2),
+                          ComplexBall(0)}));
+  check("aligned incoming trims only its exact-zero padding",
+        padded_incoming.min_power() == -1 &&
+            padded_incoming.complete_max() == 0 &&
+            padded_incoming.coefficient(-1).is_zero() == false);
+
+  const auto ambiguous_leading = real_ball_with_error(0, -80);
+  const auto ambiguous_incoming =
+      diffexp2::matching_detail::
+          trim_leading_exact_zeros_preserve_ambiguous(
+              EpsilonFrame<ComplexBall>(
+                  -3, std::vector<ComplexBall>{
+                          ComplexBall(0), ambiguous_leading,
+                          ComplexBall(2), ComplexBall(0)}));
+  check("aligned incoming retains its first zero-ambiguous coefficient",
+        ambiguous_incoming.min_power() == -2 &&
+            !ambiguous_incoming.coefficient(-2).is_zero() &&
+            ambiguous_incoming.coefficient(-2).contains_zero());
+
   const auto quotient = diffexp2::finite_laurent_quotient(
       frame(0, {2, 5, 8}), frame(-1, {0, 2, 1, 0}), "quotient smoke");
   check("finite quotient trims only certified denominator zeros",
@@ -327,6 +394,43 @@ void coefficientwise_power_series_solve_smoke() {
   check("coefficient recurrence loses only the true unknown matrix tail",
         polar_solution.front().min_power() == -2 &&
             polar_solution.front().complete_max() == 3);
+
+  // A transformed CASE-P basis can carry an Acb enclosure around a negative
+  // coefficient which the exact saturation witness proves is identically
+  // zero.  Both the recurrence and its residual certificate must consume the
+  // same witness-projected matrix; replaying the unprojected numerical
+  // remnant would test a different linear system.
+  const FiniteLaurentMatrix<Rational> numerical_remnant = {
+      {frame(-1, {7, 1, 0, 0})}};
+  const auto witness_projected =
+      diffexp2::exact_nonnegative_finite_laurent_matrix(
+          numerical_remnant, "witness-projected residual matrix");
+  const FiniteLaurentVector<Rational> witness_rhs = {
+      frame(-2, {3, 5, 0, 0})};
+  const auto witness_factorization =
+      diffexp2::factor_exact_nonnegative_power_series_system(
+          witness_projected, "witness-projected residual factorization");
+  const auto witness_solution =
+      diffexp2::solve_factorized_exact_nonnegative_power_series_system(
+          witness_factorization, witness_rhs,
+          "witness-projected residual solve");
+  const auto projected_reconstruction =
+      diffexp2::apply_finite_laurent_matrix(
+          witness_projected, witness_solution);
+  const auto unprojected_reconstruction =
+      diffexp2::apply_finite_laurent_matrix(
+          numerical_remnant, witness_solution);
+  const auto projected_residual =
+      projected_reconstruction.front() - witness_rhs.front();
+  const auto unprojected_residual =
+      unprojected_reconstruction.front() - witness_rhs.front();
+  check("exact-witness residual reuses the projected nonnegative matrix",
+        !diffexp2::finite_laurent_leading_power(
+             projected_residual,
+             "witness-projected coefficient residual").has_value() &&
+            diffexp2::finite_laurent_leading_power(
+                unprojected_residual,
+                "unprojected numerical-remnant residual").has_value());
 }
 
 void epsilon_lattice_saturation_smoke() {
@@ -588,6 +692,296 @@ void exact_right_frame_residual_smoke() {
             matched.residual_history.back().verdict ==
                 AcbMatchingResidualVerdict::Pass &&
             matched.residual_history.back().complete_through_required);
+}
+
+void retained_transformed_basis_authority_smoke() {
+  ComplexBall::set_precision(256);
+  constexpr std::size_t width = 6;
+  const FiniteLaurentMatrix<ComplexBall> unrelated_base_basis = {
+      {ball_constant_frame("0", width),
+       ball_constant_frame("0", width)},
+      {ball_constant_frame("0", width),
+       ball_constant_frame("0", width)}};
+  const FiniteLaurentMatrix<ComplexBall> retained_proposal_basis = {
+      {ball_constant_frame("1", width),
+       ball_constant_frame("0", width)},
+      {ball_constant_frame("0", width),
+       ball_constant_frame("1", width)}};
+  const FiniteLaurentMatrix<ComplexBall> authoritative_physical_basis = {
+      {ball_constant_frame("2", width),
+       ball_constant_frame("0", width)},
+      {ball_constant_frame("0", width),
+       ball_constant_frame("3", width)}};
+  const ExactLaurentMatrix<ComplexBall> coordinate_transformation = {
+      {ExactLaurentPolynomial<ComplexBall>::one(),
+       ExactLaurentPolynomial<ComplexBall>::zero()},
+      {ExactLaurentPolynomial<ComplexBall>::zero(),
+       ExactLaurentPolynomial<ComplexBall>::one()}};
+  const FiniteLaurentVector<ComplexBall> physical_rhs = {
+      ball_constant_frame("4", width),
+      ball_constant_frame("9", width)};
+  const FiniteLaurentVector<ComplexBall> deliberately_rough_proposal_rhs = {
+      ball_constant_frame("1", width),
+      ball_constant_frame("1", width)};
+  const std::function<FiniteLaurentVector<ComplexBall>(
+      const FiniteLaurentVector<ComplexBall>&)>
+      physical_residual_to_proposal_rhs =
+          [](const FiniteLaurentVector<ComplexBall>& residual) {
+            FiniteLaurentVector<ComplexBall> normalized;
+            normalized.reserve(2);
+            normalized.push_back(
+                residual[0].scaled(
+                    ComplexBall::from_strings("1/2")));
+            normalized.push_back(
+                residual[1].scaled(
+                    ComplexBall::from_strings("1/3")));
+            return normalized;
+          };
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-50");
+  options.required_min_power = 0;
+  options.required_complete_max = 3;
+  options.max_refinement_steps = 1;
+
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      unrelated_base_basis, deliberately_rough_proposal_rhs,
+      coordinate_transformation,
+      options, "retained transformed physical basis authority",
+      false, true, &retained_proposal_basis,
+      &authoritative_physical_basis, &physical_rhs,
+      &physical_residual_to_proposal_rhs, true, 512);
+  check("normalized proposal corrections can be certified in authoritative physical coordinates",
+        matched.refinement_steps == 1 &&
+            matched.residual_history.size() == 2 &&
+            matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            matched.residual_history.back().complete_through_required &&
+            (matched.transformed_weights[0].coefficient(0) -
+             ComplexBall(2)).contains_zero() &&
+            (matched.transformed_weights[1].coefficient(0) -
+             ComplexBall(3)).contains_zero());
+
+  bool missing_authority_rejected = false;
+  try {
+    (void)diffexp2::refine_acb_finite_laurent_match(
+        retained_proposal_basis, physical_rhs,
+        coordinate_transformation, options,
+        "missing retained transformed basis authority",
+        false, true, &retained_proposal_basis,
+        &authoritative_physical_basis, nullptr,
+        &physical_residual_to_proposal_rhs, true, 512);
+  } catch (const MatchingArithmeticError& error) {
+    missing_authority_rejected =
+        error.code ==
+        MatchingArithmeticErrorCode::InvalidSaturationLattice;
+  }
+  check("transformed-basis authority cannot be enabled without its retained matrix",
+        missing_authority_rejected &&
+            ComplexBall::precision() == 256);
+
+  constexpr const char* denominator =
+      "1532495540865888858358347027150309183618739122183602176";
+  const std::string one_plus_delta =
+      std::string(
+          "1532495540865888858358347027150309183618739122183602177/") +
+      denominator;
+  const std::string two_plus_delta =
+      std::string(
+          "3064991081731777716716694054300618367237478244367204353/") +
+      denominator;
+  const FiniteLaurentMatrix<ComplexBall> ill_conditioned_basis = {
+      {ball_constant_frame("1", width),
+       ball_constant_frame("1", width)},
+      {ball_constant_frame("1", width),
+       ball_constant_frame(one_plus_delta, width)}};
+  auto uncertain_two = ComplexBall(2);
+  auto uncertain_two_plus_delta =
+      ComplexBall::from_strings(two_plus_delta);
+  arb_add_error_2exp_si(
+      acb_realref(uncertain_two.raw()), -150);
+  arb_add_error_2exp_si(
+      acb_realref(uncertain_two_plus_delta.raw()), -150);
+  const FiniteLaurentVector<ComplexBall> uncertain_rhs = {
+      ball_value_frame(uncertain_two, width),
+      ball_value_frame(uncertain_two_plus_delta, width)};
+  AcbLaurentRefinementOptions ill_conditioned_options;
+  ill_conditioned_options.relative_tolerance =
+      Magnitude::decimal("1e-20");
+  ill_conditioned_options.required_min_power = 0;
+  ill_conditioned_options.required_complete_max = 3;
+  ill_conditioned_options.max_refinement_steps = 0;
+  bool enclosing_inverse_not_certified = false;
+  try {
+    const auto enclosing =
+        diffexp2::refine_acb_finite_laurent_match(
+            ill_conditioned_basis, uncertain_rhs,
+            coordinate_transformation, ill_conditioned_options,
+            "ill-conditioned enclosing inverse proposal");
+    enclosing_inverse_not_certified =
+        enclosing.residual_history.back().verdict !=
+        AcbMatchingResidualVerdict::Pass;
+  } catch (const MatchingArithmeticError&) {
+    enclosing_inverse_not_certified = true;
+  }
+  const std::function<FiniteLaurentVector<ComplexBall>(
+      const FiniteLaurentVector<ComplexBall>&)>
+      identity_correction =
+          [](const FiniteLaurentVector<ComplexBall>& residual) {
+            return residual;
+          };
+  const auto midpoint = diffexp2::refine_acb_finite_laurent_match(
+      ill_conditioned_basis, uncertain_rhs,
+      coordinate_transformation, ill_conditioned_options,
+      "ill-conditioned midpoint proposal with full-ball certificate",
+      false, true, &ill_conditioned_basis,
+      &ill_conditioned_basis, &uncertain_rhs,
+      &identity_correction, true, 512);
+  check("midpoint proposal avoids inverse-radius blow-up while the full-ball forward residual remains authoritative",
+        enclosing_inverse_not_certified &&
+            midpoint.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            (midpoint.transformed_weights[0].coefficient(0) -
+             ComplexBall(1)).contains_zero() &&
+            (midpoint.transformed_weights[1].coefficient(0) -
+             ComplexBall(1)).contains_zero() &&
+            ComplexBall::precision() == 256);
+
+  ComplexBall::set_precision(1024);
+  ComplexBall tiny_delta;
+  arf_set_ui_2exp_si(
+      arb_midref(acb_realref(tiny_delta.raw())), 1, -600);
+  const auto one_plus_tiny_delta =
+      ComplexBall(1) + tiny_delta;
+  const auto two_plus_tiny_delta =
+      ComplexBall(2) + tiny_delta;
+  const FiniteLaurentMatrix<ComplexBall>
+      retained_high_precision_basis = {
+          {ball_constant_frame("1", width),
+           ball_constant_frame("1", width)},
+          {ball_constant_frame("1", width),
+           ball_value_frame(one_plus_tiny_delta, width)}};
+  auto high_precision_rhs_first = ComplexBall(2);
+  auto high_precision_rhs_second = two_plus_tiny_delta;
+  arb_add_error_2exp_si(
+      acb_realref(high_precision_rhs_first.raw()), -700);
+  arb_add_error_2exp_si(
+      acb_realref(high_precision_rhs_second.raw()), -700);
+  const FiniteLaurentVector<ComplexBall>
+      retained_high_precision_rhs = {
+          ball_value_frame(high_precision_rhs_first, width),
+          ball_value_frame(high_precision_rhs_second, width)};
+  ComplexBall::set_precision(256);
+  bool base_precision_midpoint_not_certified = false;
+  try {
+    const auto base_precision_midpoint =
+        diffexp2::refine_acb_finite_laurent_match(
+            retained_high_precision_basis,
+            retained_high_precision_rhs,
+            coordinate_transformation, ill_conditioned_options,
+            "retained high-precision basis at base proposal precision",
+            false, true, &retained_high_precision_basis,
+            &retained_high_precision_basis,
+            &retained_high_precision_rhs,
+            &identity_correction, true);
+    base_precision_midpoint_not_certified =
+        base_precision_midpoint.residual_history.back().verdict !=
+        AcbMatchingResidualVerdict::Pass;
+  } catch (const MatchingArithmeticError&) {
+    base_precision_midpoint_not_certified = true;
+  }
+  const auto elevated_precision_midpoint =
+      diffexp2::refine_acb_finite_laurent_match(
+          retained_high_precision_basis,
+          retained_high_precision_rhs,
+          coordinate_transformation, ill_conditioned_options,
+          "retained high-precision basis at elevated proposal precision",
+          false, true, &retained_high_precision_basis,
+          &retained_high_precision_basis,
+          &retained_high_precision_rhs,
+          &identity_correction, true, 1024);
+  check("scoped proposal precision recovers retained input bits and restores the session precision",
+        base_precision_midpoint_not_certified &&
+            elevated_precision_midpoint.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            ComplexBall::precision() == 256);
+}
+
+void certified_tiny_physical_weight_publication_smoke() {
+  ComplexBall::set_precision(1024);
+  constexpr std::size_t width = 3;
+  const FiniteLaurentMatrix<ComplexBall> identity_basis = {
+      {ball_constant_frame("1", width)}};
+  const FiniteLaurentVector<ComplexBall> tiny_rhs = {
+      ball_constant_frame("1e-150", width)};
+  const ExactLaurentMatrix<ComplexBall> identity_transformation = {
+      {ExactLaurentPolynomial<ComplexBall>::one()}};
+  const std::function<FiniteLaurentVector<ComplexBall>(
+      const FiniteLaurentVector<ComplexBall>&)>
+      identity_correction =
+          [](const FiniteLaurentVector<ComplexBall>& residual) {
+            return residual;
+          };
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-180");
+  options.required_min_power = 0;
+  options.required_complete_max = 0;
+  options.max_refinement_steps = 0;
+
+  const auto matched = diffexp2::refine_acb_finite_laurent_match(
+      identity_basis, tiny_rhs, identity_transformation, options,
+      "certified tiny physical publication weight", false, true,
+      &identity_basis, &identity_basis, &tiny_rhs, &identity_correction,
+      true);
+  const auto expected = ComplexBall::from_strings("1e-150");
+  check("a certified tiny endpoint-sensitive weight is published unchopped",
+        matched.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            !matched.weights[0].coefficient(0).is_zero() &&
+            (matched.weights[0].coefficient(0) - expected).contains_zero() &&
+            !matched.transformed_weights[0].coefficient(0).is_zero());
+  ComplexBall::set_precision(256);
+}
+
+void structural_transformed_weight_floor_smoke() {
+  ComplexBall::set_precision(256);
+  constexpr std::size_t width = 4;
+  std::vector<ComplexBall> identity_coefficients(width, ComplexBall(0));
+  identity_coefficients[1] = ComplexBall(1);
+  const auto identity_frame = EpsilonFrame<ComplexBall>(
+      -1, std::move(identity_coefficients));
+  std::vector<ComplexBall> rhs_coefficients(width, ComplexBall(0));
+  rhs_coefficients[0] = ComplexBall::from_strings("1e-14");
+  rhs_coefficients[1] = ComplexBall(1);
+  const FiniteLaurentMatrix<ComplexBall> identity_basis = {
+      {identity_frame}};
+  const FiniteLaurentVector<ComplexBall> rhs = {
+      EpsilonFrame<ComplexBall>(-1, std::move(rhs_coefficients))};
+  const ExactLaurentMatrix<ComplexBall> identity_transformation = {
+      {ExactLaurentPolynomial<ComplexBall>::one()}};
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-50");
+  options.required_min_power = -1;
+  options.required_complete_max = 0;
+  options.max_refinement_steps = 0;
+
+  const auto unconstrained = diffexp2::refine_acb_finite_laurent_match(
+      identity_basis, rhs, identity_transformation, options,
+      "unconstrained transverse Taylor defect", false, true,
+      &identity_basis);
+  const auto floored = diffexp2::refine_acb_finite_laurent_match(
+      identity_basis, rhs, identity_transformation, options,
+      "structurally floored transverse Taylor defect", false, true,
+      &identity_basis, nullptr, nullptr, nullptr, false, 0,
+      std::int32_t{0});
+  check("an exact transformed-weight floor cannot be fitted away by a negative Laurent coefficient",
+        unconstrained.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            unconstrained.transformed_weights[0].min_power() == -1 &&
+            floored.residual_history.back().verdict !=
+                AcbMatchingResidualVerdict::Pass &&
+            floored.transformed_weights[0].min_power() == 0 &&
+            (floored.transformed_weights[0].coefficient(0) -
+             ComplexBall(1)).contains_zero());
 }
 
 void ill_scaled_refinement_smoke() {
@@ -1098,6 +1492,9 @@ int main() {
   refined_acb_match_smoke();
   refined_acb_match_without_public_upper_slack_smoke();
   exact_right_frame_residual_smoke();
+  retained_transformed_basis_authority_smoke();
+  certified_tiny_physical_weight_publication_smoke();
+  structural_transformed_weight_floor_smoke();
   ill_scaled_refinement_smoke();
   incomplete_refinement_rollback_smoke();
   refined_acb_ambiguous_pivot_smoke();

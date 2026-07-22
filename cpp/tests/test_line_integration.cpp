@@ -690,6 +690,37 @@ void fused_missing_rim_preflight_matches_materialized_error_order() {
             fused_missing_rim);
 }
 
+void rational_endpoint_identity_survives_precision_change() {
+  auto solution = base_solution<Rational>(1);
+  solution.sectors = {
+      sector<Rational>("0", "0", 0, {Rational(1)})};
+  StoredLineIntegrationOptions options;
+  options.delivered_epsilon = {0, 0};
+
+  ComplexBall::set_precision(128);
+  const auto lower = RealEvaluationPoint::rational("1/101");
+  const auto upper = RealEvaluationPoint::rational("2/101");
+  auto inconsistent = lower;
+  inconsistent.modulus = ComplexBall::from_strings("2/101");
+
+  ComplexBall::set_precision(1024);
+  const auto accepted = diffexp2::integrate_stored_local_line(
+      solution, lower, upper, options);
+  bool inconsistent_rejected = false;
+  try {
+    (void)diffexp2::integrate_stored_local_line(
+        solution, inconsistent, upper, options);
+  } catch (const NativeIntegrationError& error) {
+    inconsistent_rejected =
+        error.code == NativeIntegrationErrorCode::InvalidInterval;
+  }
+  check("exact rational endpoint identity survives a higher-precision consumer lease",
+        overlaps(accepted.value.at(0, 0),
+                 ComplexBall::from_strings("1/101")) &&
+            inconsistent_rejected);
+  ComplexBall::set_precision(512);
+}
+
 }  // namespace
 
 int main() {
@@ -708,6 +739,7 @@ int main() {
   fused_acb_row_keeps_preprojection_cancellation_scale();
   fused_sparse_row_ignores_unselected_sector_payloads();
   fused_missing_rim_preflight_matches_materialized_error_order();
+  rational_endpoint_identity_survives_precision_change();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

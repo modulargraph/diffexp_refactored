@@ -118,6 +118,24 @@ int main() {
             indicial.blocks[1].root.a == Rational("1/2") &&
             indicial.blocks[1].root.b == Rational("1/3"));
 
+  diffexp2::ExactJordanIndicialCertificate reachability;
+  reachability.blocks = {
+      {0, {0}, {Rational(0), Rational(2)}},
+      {1, {1, 2}, {Rational(2), Rational(2)}},
+      {2, {3, 4, 5}, {Rational(3), Rational(2)}},
+      {3, {6, 7, 8, 9}, {Rational(4), Rational(2)}},
+      {4, {10}, {Rational(1), Rational(3)}},
+      {5, {11, 12}, {Rational("5/2"), Rational(2)}}};
+  check("finite log ceiling includes the nmax resonance but not nmax+1",
+        diffexp2::singular_indicial_detail::exact_reachable_jordan_log_ceiling(
+            reachability, Rational(0), Rational(2), 4, 3, true) == 10);
+  check("homogeneous log ceiling preserves the zero-offset exclusion",
+        diffexp2::singular_indicial_detail::exact_reachable_jordan_log_ceiling(
+            reachability, Rational(0), Rational(2), 4, 3, false) == 9);
+  check("shorter finite recurrence excludes every later integral resonance",
+        diffexp2::singular_indicial_detail::exact_reachable_jordan_log_ceiling(
+            reachability, Rational(0), Rational(2), 4, 2, true) == 7);
+
   const auto resonant = diffexp2::certify_exact_affine_jordan_schedule(
       indicial, Rational("5/2"), Rational("2/3"), high_root_schedule());
   check("valid exact T/R schedule retains the true Jordan log width",

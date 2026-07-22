@@ -416,25 +416,36 @@ bool run_domain(const std::string& domain) {
   const auto& embedded_native = lower_planned->at("native_match").as_object();
   const auto expected_native_schema = domain == "rational"
       ? "diffexp2-retained-exact-rational-match-v2"
-      : "diffexp2-retained-acb-match-v5";
+      : "diffexp2-retained-acb-match-v6";
+  const bool exact_shadow_shape_ok = domain == "rational" ||
+      (embedded_native.if_contains("exact_shadow_factorized_basis") != nullptr &&
+       embedded_native.at("exact_shadow_factorized_basis").is_null() &&
+       embedded_native.if_contains("exact_shadow_extra_precision_bits") !=
+           nullptr &&
+       embedded_native.at("exact_shadow_extra_precision_bits").as_int64() ==
+           0);
 
-  json::object corruption{{"status", "ok"}};
+  auto corrupt_header = saved_header;
+  auto corrupt_payload = saved_payload;
+  auto& corrupt_native = corrupt_payload
+      .at("retained_planned_match_hops").as_array().front().as_object()
+      .at("native_match").as_object();
   if (domain == "rational") {
-    auto corrupt_header = saved_header;
-    auto corrupt_payload = saved_payload;
-    auto& corrupt_native = corrupt_payload
-        .at("retained_planned_match_hops").as_array().front().as_object()
-        .at("native_match").as_object();
     corrupt_native["schema"] = "diffexp2-retained-unknown-match-v9";
     corrupt_header.at("planned_match_identities").as_array().front()
         .as_object()["native_match_schema"] = corrupt_native.at("schema");
-    diffexp2::checkpoint::write_atomic(
-        corrupt_path, json::serialize(corrupt_header),
-        json::serialize(corrupt_payload));
-    corruption = request(json::object{
-        {"schema", 2}, {"op", "checkpoint.restore"},
-        {"path", corrupt_path}, {"expected_identity", checkpoint_identity}});
+  } else {
+    // Version 6 made the exact-shadow payload explicit even when a regular
+    // physical-frame match has no exact shadow.  A missing field must not be
+    // silently interpreted as an older checkpoint.
+    corrupt_native.erase("exact_shadow_factorized_basis");
   }
+  diffexp2::checkpoint::write_atomic(
+      corrupt_path, json::serialize(corrupt_header),
+      json::serialize(corrupt_payload));
+  const auto corruption = request(json::object{
+      {"schema", 2}, {"op", "checkpoint.restore"},
+      {"path", corrupt_path}, {"expected_identity", checkpoint_identity}});
 
   (void)request(json::object{
       {"schema", 2}, {"op", "session.close"}, {"session", session}});
@@ -473,6 +484,16 @@ bool run_domain(const std::string& domain) {
       {"checkpoint_identity", domain + "-planned-hop-resaved-v2"}});
   const auto resaved_payload = json::parse(
       diffexp2::checkpoint::read(resaved_path).payload_json).as_object();
+  const json::object* resaved_lower_planned = nullptr;
+  for (const auto& record :
+       resaved_payload.at("retained_planned_match_hops").as_array()) {
+    const auto& object = record.as_object();
+    if (std::string(object.at("handle").as_string()) == lower_match)
+      resaved_lower_planned = &object;
+  }
+  if (resaved_lower_planned == nullptr)
+    throw std::runtime_error(
+        "resaved checkpoint omitted the lower planned match hop");
 
   // The saved next-handle counters include every released strong owner.
   const auto next_anchor = prepare_chart(
@@ -604,13 +625,16 @@ bool run_domain(const std::string& domain) {
       lower_planned->at("schema") ==
           "diffexp2-retained-planned-match-hop-v2" &&
       embedded_native.at("schema") == expected_native_schema &&
+      exact_shadow_shape_ok &&
       lower_planned->at("handoff") == lower.at("planned_hop") &&
       lower_planned->at("provenance_identity") ==
           lower.at("planned_hop_provenance_identity") &&
-      (domain != "rational" ||
-       (corruption.at("status") == "error" &&
-        std::string(corruption.at("detail").as_string()).find(
-            "unsupported native match kind") != std::string::npos)) &&
+      corruption.at("status") == "error" &&
+      std::string(corruption.at("detail").as_string()).find(
+          domain == "rational"
+              ? "unsupported native match kind"
+              : "lost its exact-shadow factorized basis fields") !=
+          std::string::npos &&
       restored.at("status") == "ok" &&
       restored.at("charts").as_array().empty() &&
       restored.at("locals").as_array().size() == 2 &&
@@ -638,6 +662,8 @@ bool run_domain(const std::string& domain) {
       resaved_payload.at("retained_locals").as_array().size() == 5 &&
       resaved_payload.at("retained_planned_match_hops").as_array().size() == 2 &&
       resaved_payload.at("retained_tile_plans").as_array().size() == 1 &&
+      resaved_lower_planned->at("native_match") ==
+          lower_planned->at("native_match") &&
       next_anchor == "c:4" && next_lower_chart == "c:5" &&
       next_upper_chart == "c:6" && next_incoming == "l:6" &&
       next_basis == "l:7" && next_plan == "tile:2" &&
@@ -646,7 +672,47 @@ bool run_domain(const std::string& domain) {
       stats.at("matches") == 1 && stats.at("local_matches") == 3 &&
       stats.at("pending_matches") == 0;
 
-  if (!ok)
+  if (!ok) {
+    auto diagnose = [&](bool condition, const char* label) {
+      if (!condition)
+        std::cerr << domain << " failed assertion: " << label << '\n';
+    };
+    diagnose(saved_payload.at("prepared_charts").as_array().size() == 3,
+             "saved prepared chart count");
+    diagnose(saved_payload.at("retained_locals").as_array().size() == 5,
+             "saved retained local count");
+    diagnose(planned_records.size() == 2,
+             "saved planned match-hop count");
+    diagnose(saved_payload.at("retained_tile_plans").as_array().size() == 1,
+             "saved retained tile-plan count");
+    diagnose(embedded_native.at("schema") == expected_native_schema,
+             "embedded native match schema");
+    diagnose(exact_shadow_shape_ok,
+             "embedded Acb v6 exact-shadow field shape");
+    diagnose(lower_planned->at("handoff") == lower.at("planned_hop"),
+             "saved planned handoff identity");
+    diagnose(hidden_match.at("status") == "error",
+             "hidden restored match visibility");
+    diagnose(hidden_plan.at("status") == "error",
+             "hidden restored tile-plan visibility");
+    diagnose(hidden_source.at("status") == "error",
+             "hidden restored source-local visibility");
+    diagnose(resaved.at("status") == "ok",
+             "resaved checkpoint status");
+    diagnose(resaved.at("planned_match_hops") == 2,
+             "resaved planned match-hop count");
+    diagnose(resaved_payload.at("retained_locals").as_array().size() == 5,
+             "resaved retained local count");
+    diagnose(
+        resaved_payload.at("retained_planned_match_hops").as_array().size() ==
+            2,
+        "resaved retained planned match-hop count");
+    diagnose(
+        resaved_payload.at("retained_tile_plans").as_array().size() == 1,
+        "resaved retained tile-plan count");
+    diagnose(resaved_lower_planned->at("native_match") ==
+                 lower_planned->at("native_match"),
+             "resaved embedded native match payload");
     std::cerr << domain << " lower: " << json::serialize(lower) << '\n'
               << domain << " upper: " << json::serialize(upper) << '\n'
               << domain << " lower materialized: "
@@ -669,6 +735,7 @@ bool run_domain(const std::string& domain) {
               << domain << " next match: "
               << json::serialize(next_match_result) << '\n'
               << domain << " stats: " << json::serialize(stats) << '\n';
+  }
 
   (void)request(json::object{
       {"schema", 2}, {"op", "session.close"},

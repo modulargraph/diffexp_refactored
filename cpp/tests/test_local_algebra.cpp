@@ -208,6 +208,17 @@ LocalSolution<Rational> component_sparse_sample(std::size_t sector_count) {
   return out;
 }
 
+PreparedRationalTaylorMultiplier<Rational> casep_constant_multiplier() {
+  PreparedRationalTaylorMultiplier<Rational> out;
+  out.epsilon_shift = -2;
+  out.center_pole_order = 0;
+  out.exact_identity = "casep-taylor-constant";
+  out.kernels.assign(3, std::vector<Rational>(3, Rational(0)));
+  out.kernels[0][0] = Rational("2/3");
+  out.kernels[2][0] = Rational("-5/7");
+  return out;
+}
+
 }  // namespace
 
 int main() {
@@ -246,6 +257,68 @@ int main() {
   // out(eps index 2,t^2,c1) = in(2,t^2,c1) + 2 in(2,t^1,c1)
   //                              + 3 in(1,t^2,c1)
   ok = ok && equal(coefficients[index(2, 2, 1, 3, 2)], "1012");
+
+  // CASE-P polar weights have no positive Taylor coefficients.  Exercise the
+  // exact fast path with a negative epsilon shift, a sparse epsilon kernel,
+  // multiple Taylor orders/components, and distinct Frobenius sectors.
+  auto casep_input = sample();
+  auto second_sector = casep_input.sectors.front();
+  second_sector.a = ExactScalarDescriptor::rational("3/2");
+  second_sector.b = ExactScalarDescriptor::rational("1/2");
+  second_sector.log_power = 2;
+  for (std::size_t coefficient = 0;
+       coefficient < second_sector.coefficients.size(); ++coefficient)
+    second_sector.coefficients[coefficient] = Rational(
+        "-" + std::to_string(coefficient + 1) + "/11");
+  casep_input.sectors.push_back(std::move(second_sector));
+  const auto casep_multiplier = casep_constant_multiplier();
+  const auto casep_product = diffexp2::multiply_prepared_rational(
+      casep_input, casep_multiplier, "casep-constant-product");
+  bool casep_constant_ok =
+      casep_product.checkpoint_identity == "casep-constant-product" &&
+      casep_product.epsilon.min_power == -3 &&
+      casep_product.epsilon.complete_max == -1 &&
+      casep_product.taylor_complete_max ==
+          casep_input.taylor_complete_max &&
+      casep_product.dimension == casep_input.dimension &&
+      casep_product.prescriptions.size() == 1 &&
+      casep_product.prescriptions.front().factor_exact == "x" &&
+      casep_product.prescriptions.front().sign == 1 &&
+      casep_product.prescriptions.front().multiplicity == 1 &&
+      casep_product.prescriptions.front().leading_coefficient_sign == 1 &&
+      casep_product.sectors.size() == casep_input.sectors.size();
+  for (std::size_t sector = 0;
+       sector < casep_input.sectors.size() && casep_constant_ok; ++sector) {
+    const auto& source = casep_input.sectors[sector];
+    const auto& actual = casep_product.sectors[sector];
+    casep_constant_ok = actual.a.canonical == source.a.canonical &&
+        actual.b.canonical == source.b.canonical &&
+        actual.log_power == source.log_power;
+    for (std::size_t out_ei = 0;
+         out_ei < casep_input.epsilon.width() && casep_constant_ok; ++out_ei) {
+      for (std::size_t n = 0;
+           n < casep_input.taylor_width() && casep_constant_ok; ++n) {
+        for (std::uint32_t component = 0;
+             component < casep_input.dimension; ++component) {
+          Rational expected(0);
+          for (std::size_t kernel_ei = 0; kernel_ei <= out_ei;
+               ++kernel_ei) {
+            expected += casep_multiplier.kernels[kernel_ei][0] *
+                source.coefficients[index(
+                    out_ei - kernel_ei, n, component,
+                    casep_input.taylor_width(), casep_input.dimension)];
+          }
+          if (actual.coefficients[index(
+                  out_ei, n, component, casep_input.taylor_width(),
+                  casep_input.dimension)] != expected) {
+            casep_constant_ok = false;
+            break;
+          }
+        }
+      }
+    }
+  }
+  ok = ok && casep_constant_ok;
 
   PreparedSparseLocalMultiplierMatrix<Rational> matrix;
   matrix.rows = 2;
@@ -339,6 +412,72 @@ int main() {
            truncated_physical.sectors.front().coefficients.begin(),
            truncated_physical.sectors.front().coefficients.end(),
            [](const auto& value) { return value.is_zero(); });
+
+  // A finite denormalization frame R may agree with its exact inverse only
+  // through a bounded epsilon prefix.  It cannot replace the exact physical
+  // saturation T which was certified directly against F.  In this scalar
+  // example R=(1+eps), R^-1=(1-eps+...), so the retained finite product is
+  // complete only through eps^1.  Contracting it with an eps^-2 weight loses
+  // the public eps^0 coefficient, while direct exact F*T retains it.
+  LocalSolution<Rational> direct_t_source;
+  direct_t_source.chart.center_exact = "0";
+  direct_t_source.chart.scale_exact = "1";
+  direct_t_source.chart.radius = ComplexBall(2);
+  direct_t_source.epsilon = {0, 3};
+  direct_t_source.taylor_complete_max = 0;
+  direct_t_source.dimension = 1;
+  direct_t_source.checkpoint_identity = "direct-physical-T-source";
+  LocalSector<Rational> direct_t_sector;
+  direct_t_sector.a = ExactScalarDescriptor::rational("0");
+  direct_t_sector.b = ExactScalarDescriptor::rational("0");
+  direct_t_sector.log_power = 0;
+  direct_t_sector.coefficients = {
+      Rational(1), Rational(2), Rational(3), Rational(4)};
+  direct_t_source.sectors.push_back(std::move(direct_t_sector));
+  diffexp2::validate_local_solution(direct_t_source, false);
+  const std::vector<const LocalSolution<Rational>*> direct_t_basis{
+      &direct_t_source};
+  ExactLaurentMatrix<Rational> direct_t(
+      1, std::vector<ExactLaurentPolynomial<Rational>>(1));
+  direct_t[0][0].add_term(0, Rational(1));
+  const auto direct_t_columns =
+      diffexp2::right_transform_local_basis_exact(
+          direct_t_basis, direct_t, "direct-physical-F*T");
+  diffexp2::FiniteLaurentMatrix<Rational> bounded_r{
+      {EpsilonFrame<Rational>(
+          {0, 1}, {Rational(1), Rational(1)})}};
+  ExactLaurentMatrix<Rational> exact_r_inverse(
+      1, std::vector<ExactLaurentPolynomial<Rational>>(1));
+  exact_r_inverse[0][0].add_term(0, Rational(1));
+  exact_r_inverse[0][0].add_term(1, Rational(-1));
+  const auto bounded_identity =
+      diffexp2::right_multiply_finite_by_exact_laurent(
+          bounded_r, exact_r_inverse);
+  const auto bounded_t_column =
+      diffexp2::materialize_local_basis_weights(
+          direct_t_basis, {bounded_identity[0][0]},
+          "bounded-R-times-R-inverse-times-T");
+  const EpsilonFrame<Rational> polar_terminal_weight(
+      {-2, 0}, {Rational(1), Rational(0), Rational(0)});
+  const std::vector<const LocalSolution<Rational>*> direct_t_columns_view{
+      &direct_t_columns.front()};
+  const std::vector<const LocalSolution<Rational>*> bounded_t_columns_view{
+      &bounded_t_column};
+  const auto direct_t_result =
+      diffexp2::materialize_local_basis_weights(
+          direct_t_columns_view, {polar_terminal_weight},
+          "direct-physical-F*T-result");
+  const auto bounded_t_result =
+      diffexp2::materialize_local_basis_weights(
+          bounded_t_columns_view, {polar_terminal_weight},
+          "bounded-frame-result");
+  ok = ok &&
+       direct_t_result.epsilon.complete_max >= 0 &&
+       equal(direct_t_result.sectors.front().coefficients[
+                 static_cast<std::size_t>(
+                     -direct_t_result.epsilon.min_power)],
+             "3") &&
+       bounded_t_result.epsilon.complete_max == -1;
 
   // A regular physical value can require more than one private Laurent row
   // when distinct Frobenius exponents coalesce.  Here

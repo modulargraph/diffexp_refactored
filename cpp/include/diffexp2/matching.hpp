@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -171,6 +172,34 @@ EpsilonFrame<Scalar> canonicalize_certified_or_preserve_ambiguous(
   if (!leading.power.has_value())
     return EpsilonFrame<Scalar>::zero(input.complete_max());
   return canonical_leading_frame(input, context, row, column);
+}
+
+// Remove only coefficients which are identically zero.  Unlike
+// `canonical_leading_frame`, this operation does not need to decide whether
+// the first zero-containing Acb enclosure vanishes: that coefficient is
+// retained as possible support.  This is the right normalization for an
+// aligned vector that acquired exact padding solely to share a matrix frame.
+template <typename Scalar>
+EpsilonFrame<Scalar> trim_leading_exact_zeros_preserve_ambiguous(
+    const EpsilonFrame<Scalar>& input) {
+  const auto& coefficients = input.coefficients();
+  std::size_t first_possible = 0;
+  while (first_possible < coefficients.size() &&
+         ScalarTraits<Scalar>::is_zero(coefficients[first_possible]))
+    ++first_possible;
+  if (first_possible == coefficients.size())
+    return EpsilonFrame<Scalar>::zero(input.complete_max());
+  if (first_possible == 0) return input;
+  const auto minimum = checked_power(
+      static_cast<std::int64_t>(input.min_power()) +
+          static_cast<std::int64_t>(first_possible),
+      "finite Laurent exact-zero prefix");
+  return EpsilonFrame<Scalar>(
+      {minimum, input.complete_max()},
+      std::vector<Scalar>(
+          coefficients.begin() +
+              static_cast<std::ptrdiff_t>(first_possible),
+          coefficients.end()));
 }
 
 template <typename Matrix>
@@ -522,6 +551,44 @@ FiniteLaurentMatrix<Scalar> right_multiply_finite_by_exact_laurent(
   return result;
 }
 
+// Compose two honestly truncated finite Laurent matrices without promoting
+// an omitted coefficient to structural zero.  This is useful when a finite
+// coordinate frame R and an exact-support transformation Q should be
+// associated as R*Q before either is applied to a badly conditioned basis.
+template <typename Scalar>
+FiniteLaurentMatrix<Scalar> right_multiply_finite_laurent_matrices(
+    const FiniteLaurentMatrix<Scalar>& left,
+    const FiniteLaurentMatrix<Scalar>& right) {
+  const auto inner = matching_detail::rectangular_columns(
+      left, "left finite Laurent matrix");
+  const auto output_columns = matching_detail::rectangular_columns(
+      right, "right finite Laurent matrix");
+  if (right.size() != inner)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        "finite Laurent matrix dimensions do not compose");
+
+  FiniteLaurentMatrix<Scalar> result(
+      left.size(), FiniteLaurentVector<Scalar>());
+  for (std::size_t row = 0; row < left.size(); ++row) {
+    result[row].reserve(output_columns);
+    for (std::size_t column = 0; column < output_columns; ++column) {
+      std::optional<EpsilonFrame<Scalar>> value;
+      for (std::size_t k = 0; k < inner; ++k) {
+        auto term = left[row][k] * right[k][column];
+        value = value.has_value() ? *value + term : std::move(term);
+      }
+      if (!value.has_value())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::DimensionMismatch,
+            "finite Laurent matrix product has an empty inner dimension",
+            row, column);
+      result[row].push_back(std::move(*value));
+    }
+  }
+  return result;
+}
+
 // Specialize an exact-rational Laurent transformation coefficientwise while
 // retaining its exact support.  In particular, absence from `terms()` remains
 // structural zero; an inexact Acb coefficient is never used to decide whether
@@ -540,6 +607,32 @@ specialize_exact_rational_laurent_matrix_to_acb(
            exact[row][column].terms())
         result[row][column].add_term(
             power, ComplexBall::from_strings(coefficient.str()));
+  return result;
+}
+
+// Specialize an honestly truncated Rational Laurent matrix coefficientwise.
+// Keeping each entry's original finite window is important: coefficients
+// outside that window are unknown, rather than exact zero.
+inline FiniteLaurentMatrix<ComplexBall>
+specialize_finite_rational_laurent_matrix_to_acb(
+    const FiniteLaurentMatrix<Rational>& exact) {
+  const auto columns = matching_detail::rectangular_columns(
+      exact, "finite exact-rational Laurent matrix");
+  FiniteLaurentMatrix<ComplexBall> result(
+      exact.size(), FiniteLaurentVector<ComplexBall>());
+  for (std::size_t row = 0; row < exact.size(); ++row) {
+    result[row].reserve(columns);
+    for (std::size_t column = 0; column < columns; ++column) {
+      const auto& frame = exact[row][column];
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(frame.coefficients().size());
+      for (const auto& coefficient : frame.coefficients())
+        coefficients.push_back(
+            ComplexBall::from_strings(coefficient.str()));
+      result[row].emplace_back(
+          frame.window(), std::move(coefficients));
+    }
+  }
   return result;
 }
 
@@ -1321,6 +1414,69 @@ acb_midpoint_inverse_preconditioner(
                         static_cast<slong>(column)));
   return result;
 }
+
+inline ComplexBall acb_midpoint_value(const ComplexBall& value) {
+  ComplexBall result;
+  acb_get_mid(result.raw(), value.raw());
+  return result;
+}
+
+inline EpsilonFrame<ComplexBall> acb_midpoint_frame(
+    const EpsilonFrame<ComplexBall>& frame) {
+  std::vector<ComplexBall> coefficients;
+  coefficients.reserve(frame.coefficients().size());
+  for (const auto& coefficient : frame.coefficients())
+    coefficients.push_back(acb_midpoint_value(coefficient));
+  return EpsilonFrame<ComplexBall>(
+      EpsilonWindow{frame.min_power(), frame.complete_max()},
+      std::move(coefficients));
+}
+
+inline FiniteLaurentVector<ComplexBall> acb_midpoint_vector(
+    const FiniteLaurentVector<ComplexBall>& vector) {
+  FiniteLaurentVector<ComplexBall> result;
+  result.reserve(vector.size());
+  for (const auto& frame : vector)
+    result.push_back(acb_midpoint_frame(frame));
+  return result;
+}
+
+inline FiniteLaurentMatrix<ComplexBall> acb_midpoint_matrix(
+    const FiniteLaurentMatrix<ComplexBall>& matrix) {
+  FiniteLaurentMatrix<ComplexBall> result;
+  result.reserve(matrix.size());
+  for (const auto& row : matrix)
+    result.push_back(acb_midpoint_vector(row));
+  return result;
+}
+
+class ScopedAcbPrecision {
+ public:
+  explicit ScopedAcbPrecision(std::size_t additional_bits)
+      : original_(ComplexBall::precision()) {
+    if (additional_bits == 0) return;
+    const auto maximum = static_cast<std::uint64_t>(
+        std::numeric_limits<slong>::max());
+    const auto original = static_cast<std::uint64_t>(original_);
+    if (additional_bits > maximum - original)
+      throw std::overflow_error(
+          "temporary Acb precision exceeds slong range");
+    ComplexBall::set_precision(
+        static_cast<slong>(original + additional_bits));
+    changed_ = true;
+  }
+
+  ScopedAcbPrecision(const ScopedAcbPrecision&) = delete;
+  ScopedAcbPrecision& operator=(const ScopedAcbPrecision&) = delete;
+
+  ~ScopedAcbPrecision() noexcept {
+    if (changed_) ComplexBall::set_precision(original_);
+  }
+
+ private:
+  slong original_;
+  bool changed_ = false;
+};
 
 template <typename Scalar>
 EpsilonFrame<Scalar> saturation_divide(
@@ -2739,19 +2895,20 @@ inline FiniteLaurentMatrix<ComplexBall> zero_extend_acb_match_candidate(
 
 inline FiniteLaurentVector<ComplexBall>
 canonicalize_acb_match_candidate(
-    const FiniteLaurentVector<ComplexBall>& vector, int chop_digits,
+    const FiniteLaurentVector<ComplexBall>& vector,
     const std::string& context) {
   FiniteLaurentVector<ComplexBall> result;
   result.reserve(vector.size());
   for (std::size_t row = 0; row < vector.size(); ++row) {
-    auto coefficients = vector[row].coefficients();
-    for (auto& coefficient : coefficients)
-      coefficient =
-          ScalarTraits<ComplexBall>::canonicalized(coefficient, chop_digits);
+    // These are publication coordinates, not a structural proposal.  A
+    // coefficient which is rigorously smaller than a fixed local floor can
+    // still feed an endpoint mode with an arbitrarily large functional.  In
+    // particular, chopping at 1e-100 after certifying an unchopped 1e-180
+    // transformed-basis residual lets the returned physical weights differ
+    // from the object which passed certification.  Preserve every enclosing
+    // ball and canonicalize only an already exact-zero leading prefix.
     result.push_back(canonicalize_certified_or_preserve_ambiguous(
-        EpsilonFrame<ComplexBall>(
-            vector[row].window(), std::move(coefficients)),
-        context, row));
+        vector[row], context, row));
   }
   return result;
 }
@@ -2769,6 +2926,31 @@ inline FiniteLaurentVector<ComplexBall> truncate_acb_match_candidate(
     std::int32_t requested_top) {
   for (auto& frame : vector)
     frame = truncate_acb_match_candidate(frame, requested_top);
+  return vector;
+}
+
+inline FiniteLaurentVector<ComplexBall>
+impose_acb_match_candidate_structural_floor(
+    FiniteLaurentVector<ComplexBall> vector,
+    std::optional<std::int32_t> structural_min_power) {
+  if (!structural_min_power.has_value()) return vector;
+  for (auto& frame : vector) {
+    if (frame.min_power() >= *structural_min_power) continue;
+    if (frame.complete_max() < *structural_min_power) {
+      frame = EpsilonFrame<ComplexBall>::zero(frame.complete_max());
+      continue;
+    }
+    std::vector<ComplexBall> coefficients;
+    coefficients.reserve(static_cast<std::size_t>(
+        static_cast<std::int64_t>(frame.complete_max()) -
+        *structural_min_power + 1));
+    for (std::int64_t power = *structural_min_power;
+         power <= frame.complete_max(); ++power)
+      coefficients.push_back(
+          frame.coefficient(static_cast<std::int32_t>(power)));
+    frame = EpsilonFrame<ComplexBall>(
+        *structural_min_power, std::move(coefficients));
+  }
   return vector;
 }
 
@@ -2822,7 +3004,24 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     const AcbLaurentRefinementOptions& options,
     const std::string& context = "refined Acb finite Laurent match",
     bool exact_formal_negative_coefficients_are_zero = false,
-    bool exact_right_transformation_residual = false) {
+    bool exact_right_transformation_residual = false,
+    const FiniteLaurentMatrix<ComplexBall>*
+        retained_transformed_basis = nullptr,
+    const FiniteLaurentMatrix<ComplexBall>*
+        authoritative_residual_basis = nullptr,
+    const FiniteLaurentVector<ComplexBall>*
+        authoritative_right_hand_side = nullptr,
+    const std::function<FiniteLaurentVector<ComplexBall>(
+        const FiniteLaurentVector<ComplexBall>&)>*
+        authoritative_residual_to_proposal_rhs = nullptr,
+    bool midpoint_proposal = false,
+    std::size_t midpoint_proposal_extra_precision_bits = 0,
+    std::optional<std::int32_t>
+        transformed_weight_structural_min_power = std::nullopt) {
+  matching_detail::ScopedAcbPrecision proposal_precision(
+      midpoint_proposal
+          ? midpoint_proposal_extra_precision_bits
+          : std::size_t{0});
   const auto dimension = matching_detail::rectangular_columns(
       basis, "Acb matching basis");
   if (basis.size() != dimension || right_hand_side.size() != dimension)
@@ -2835,8 +3034,47 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     throw MatchingArithmeticError(
         MatchingArithmeticErrorCode::InvalidSaturationLattice,
         context + ": Acb saturation transformation is not square");
-  const auto transformed_basis =
-      right_multiply_finite_by_exact_laurent(basis, transformation);
+  std::optional<FiniteLaurentMatrix<ComplexBall>>
+      computed_transformed_basis;
+  if (retained_transformed_basis != nullptr) {
+    if (retained_transformed_basis->size() != dimension ||
+        matching_detail::rectangular_columns(
+            *retained_transformed_basis,
+            "retained transformed Acb matching basis") != dimension)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::DimensionMismatch,
+          context + ": retained transformed basis is not square");
+  } else {
+    computed_transformed_basis =
+        right_multiply_finite_by_exact_laurent(
+            basis, transformation);
+  }
+  const bool has_authoritative_residual =
+      authoritative_residual_basis != nullptr ||
+      authoritative_right_hand_side != nullptr ||
+      authoritative_residual_to_proposal_rhs != nullptr;
+  if (has_authoritative_residual &&
+      (authoritative_residual_basis == nullptr ||
+       authoritative_right_hand_side == nullptr ||
+       authoritative_residual_to_proposal_rhs == nullptr))
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InvalidSaturationLattice,
+        context +
+            ": authoritative residual basis, rhs, and correction map must be supplied together");
+  if (authoritative_residual_basis != nullptr) {
+    if (authoritative_residual_basis->size() != dimension ||
+        matching_detail::rectangular_columns(
+            *authoritative_residual_basis,
+            "authoritative residual Acb matching basis") != dimension ||
+        authoritative_right_hand_side->size() != dimension)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::DimensionMismatch,
+          context + ": authoritative residual system dimensions disagree");
+  }
+  const auto& transformed_basis =
+      retained_transformed_basis != nullptr
+          ? *retained_transformed_basis
+          : *computed_transformed_basis;
 
   std::int32_t transformation_minimum = 0;
   bool identity_transformation = true;
@@ -2880,10 +3118,23 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
       matching_detail::zero_extend_acb_match_candidate(
           transformed_basis, candidate_padding,
           context + ": speculative transformed basis");
-  const auto candidate_right_hand_side =
+  auto candidate_right_hand_side =
       matching_detail::zero_extend_acb_match_candidate(
           right_hand_side, candidate_padding,
           context + ": speculative transformed rhs");
+  if (midpoint_proposal) {
+    // Matching publishes a candidate only after the untouched full-ball
+    // forward residual certifies it.  The candidate itself need not enclose
+    // the inverse image of every point in an ill-conditioned rhs ball.
+    // Solve a fixed zero-radius midpoint problem to avoid magnifying input
+    // uncertainty through that inverse; no midpoint decision is used by the
+    // subsequent acceptance certificate.
+    candidate_basis =
+        matching_detail::acb_midpoint_matrix(candidate_basis);
+    candidate_right_hand_side =
+        matching_detail::acb_midpoint_vector(
+            candidate_right_hand_side);
+  }
 
   std::optional<ExactNonnegativePowerSeriesFactorization<ComplexBall>>
       power_series_factorization;
@@ -2908,8 +3159,11 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
         : solve_factorized_finite_laurent_system(
               *laurent_factorization, rhs, solve_context);
   };
-  auto transformed_weights = solve(
-      candidate_right_hand_side, context + ": initial candidate solve");
+  auto transformed_weights =
+      matching_detail::impose_acb_match_candidate_structural_floor(
+          solve(candidate_right_hand_side,
+                context + ": initial candidate solve"),
+          transformed_weight_structural_min_power);
 
   RefinedAcbLaurentMatch result;
   result.factorization_preconditioner =
@@ -2948,12 +3202,18 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
   for (;;) {
     auto weights = matching_detail::canonicalize_acb_match_candidate(
         apply_exact_laurent_matrix(transformation, transformed_weights),
-        100, context + ": physical candidate weights");
+        context + ": physical candidate weights");
     const auto residual_context =
         context + ": residual#" +
         std::to_string(result.residual_history.size()) +
         factorization_diagnostics;
     auto residual = [&] {
+      if (authoritative_residual_basis != nullptr)
+        return matching_detail::evaluate_acb_matching_residual(
+            *authoritative_residual_basis, transformed_weights,
+            *authoritative_right_hand_side,
+            options, residual_context +
+                ":authoritative-transformed-basis");
       if (!exact_right_transformation_residual)
         return matching_detail::evaluate_acb_matching_residual(
             basis, weights, right_hand_side, options, residual_context);
@@ -3041,16 +3301,28 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     auto correction_rhs = matching_detail::project_acb_residual_to_laurent_floor(
         result.residual, latest.complete_window.min_power,
         context + ": residual correction projection");
+    if (authoritative_residual_to_proposal_rhs != nullptr)
+      correction_rhs =
+          (*authoritative_residual_to_proposal_rhs)(correction_rhs);
     correction_rhs = matching_detail::zero_extend_acb_match_candidate(
         correction_rhs, candidate_padding,
         context + ": speculative correction rhs");
-    auto correction = solve(
-        correction_rhs,
-        context + ": correction#" +
-            std::to_string(result.refinement_steps + 1));
+    if (midpoint_proposal)
+      correction_rhs =
+          matching_detail::acb_midpoint_vector(correction_rhs);
+    auto correction =
+        matching_detail::impose_acb_match_candidate_structural_floor(
+            solve(correction_rhs,
+                  context + ": correction#" +
+                      std::to_string(result.refinement_steps + 1)),
+            transformed_weight_structural_min_power);
     for (std::size_t column = 0; column < dimension; ++column)
       transformed_weights[column] =
           transformed_weights[column] + correction[column];
+    transformed_weights =
+        matching_detail::impose_acb_match_candidate_structural_floor(
+            std::move(transformed_weights),
+            transformed_weight_structural_min_power);
     ++result.refinement_steps;
   }
   auto published_weight_top = right_hand_side.front().complete_max();

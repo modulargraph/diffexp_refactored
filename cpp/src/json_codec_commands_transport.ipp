@@ -3394,7 +3394,29 @@
         throw std::invalid_argument(
             "streamed transport-pair checkpoint binding is stale");
     }
-    auto progress = stream->add_tile(side, tile, row);
+    json::object progress;
+    try {
+      progress = stream->add_tile(side, tile, row);
+    } catch (const MatchingArithmeticError& error) {
+      if (error.code !=
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow ||
+          !error.row.has_value() || *error.row == 0)
+        throw;
+      return json::object{
+          {"status", "error"},
+          {"id", "CPP"},
+          {"reason", "acb_match_residual_inconclusive"},
+          {"retryable_epsilon_reservoir", true},
+          {"retryable_matching_clearance", false},
+          {"required_additional_epsilon_orders", *error.row},
+          {"side", side_name},
+          {"tile", tile},
+          {"common_complete_max",
+           error.epsilon_power.has_value()
+               ? json::value(*error.epsilon_power)
+               : json::value(nullptr)},
+          {"detail", error.what()}};
+    }
     progress["status"] = "ok";
     progress["session"] = session->handle;
     progress["capability"] = kRetainedTransportPairStreamCapability;

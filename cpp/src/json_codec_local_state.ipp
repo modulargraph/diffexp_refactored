@@ -577,6 +577,10 @@ class PhysicalEquationOwnerBase {
   right_normalization_acb_matching_transformation() const {
     return std::nullopt;
   }
+  virtual std::optional<ExactLaurentMatrix<Rational>>
+  right_normalization_rational_matching_transformation() const {
+    return std::nullopt;
+  }
   virtual std::optional<FiniteLaurentVector<ComplexBall>>
   denormalize_acb_matching_weights(
       const FiniteLaurentVector<ComplexBall>& normalized) const {
@@ -585,6 +589,10 @@ class PhysicalEquationOwnerBase {
   }
   virtual std::optional<FiniteLaurentMatrix<ComplexBall>>
   right_denormalization_acb_matching_matrix() const {
+    return std::nullopt;
+  }
+  virtual std::optional<FiniteLaurentMatrix<Rational>>
+  right_denormalization_rational_matching_matrix() const {
     return std::nullopt;
   }
   virtual std::optional<AcbMatchingResidualPushforward>
@@ -1816,6 +1824,7 @@ struct RationalShadowColumnWitness {
   std::string rational_shadow_identity;
   std::string source_column_identity;
   std::string target_column_identity;
+  std::shared_ptr<const PhysicalEquationOwnerBase> exact_equation_owner;
 };
 
 EpsilonLatticeSaturationResult<Rational>
@@ -3008,6 +3017,10 @@ class StoredLocal final : public StoredLocalBase {
   const LocalSolution<Scalar>& solution() const { return solution_; }
   const RegularTaylorTailModelResult& tail_model() const {
     return tail_model_;
+  }
+  const std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>&
+  physical_equation() const {
+    return physical_equation_;
   }
   void attach_rational_row_line_tail_model(
       RationalRowLineTailModelResult<Scalar> model) {

@@ -3,6 +3,7 @@
 #include "diffexp2/line_integration.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/matching.hpp"
+#include "diffexp2/physical_ode.hpp"
 #include "diffexp2/recurrence.hpp"
 
 #include <algorithm>
@@ -93,6 +94,39 @@ struct CertifiedLocalEvaluation {
 struct CertifiedStoredLineIntegral {
   StoredLineIntegral integral;
   RegularTaylorLineTailCertificate tail;
+};
+
+// Composite SCC locals satisfy the retained physical equation
+//
+//     Q(t, eps) theta F(t, eps) = C(t, eps) F(t, eps)
+//
+// on a finite epsilon window.  Unlike RegularTaylorTailModel, the epsilon
+// rows need not decouple.  This transient terminal model treats the whole
+// finite epsilon stack as one enlarged ordinary ODE, proves Q invertible on
+// a witness disk by a Neumann bound around Q(0), and reconstructs the stored
+// Taylor prefix from the authoritative physical equation.  It is deliberately
+// not a checkpoint payload: all fields are recomputed from the strongly held
+// physical owner whenever a terminal observable needs the certificate.
+struct PhysicalRegularTaylorTailModel {
+  EpsilonWindow epsilon;
+  std::uint32_t dimension = 0;
+  std::uint32_t taylor_complete_max = 0;
+  Magnitude q0_inverse_norm_upper = Magnitude::zero();
+  std::vector<Magnitude> q_operator_norm_upper;
+  std::vector<Magnitude> c_operator_norm_upper;
+  std::vector<Magnitude> initial_row_upper;
+  ChartGeometry chart;
+  std::vector<Prescription> prescriptions;
+  std::string physical_payload_identity;
+  std::string local_checkpoint_identity;
+  std::string provenance;
+  LocalSolution<ComplexBall> reconstructed;
+};
+
+struct PhysicalRegularTaylorTailModelResult {
+  TailMajorantStatus status = TailMajorantStatus::Unsupported;
+  std::optional<PhysicalRegularTaylorTailModel> model;
+  std::string detail;
 };
 
 // A rational-row projection is generally not a solution of the source
@@ -477,6 +511,98 @@ inline std::string certificate_provenance(
 
 }  // namespace tail_majorant_detail
 
+namespace tail_majorant_detail {
+
+inline std::vector<ComplexBall> finite_causal_multiplier_matrix(
+    const physical_ode_detail::PreparedCausalEpsilonMultiplier& multiplier,
+    EpsilonWindow epsilon) {
+  const auto width = epsilon.width();
+  if (width > std::numeric_limits<std::size_t>::max() / width)
+    throw std::overflow_error(
+        "finite causal multiplier matrix size overflows");
+  std::vector<ComplexBall> matrix(width * width, ComplexBall(0));
+  for (std::size_t column = 0; column < width; ++column) {
+    auto source = physical_ode_detail::zero_epsilon_vector(epsilon, 1);
+    source.coefficients[column] = ComplexBall(1);
+    auto target = physical_ode_detail::zero_epsilon_vector(epsilon, 1);
+    physical_ode_detail::accumulate_causal_multiplier(
+        multiplier, source, 0, target, 0, ComplexBall(1));
+    for (std::size_t row = 0; row < width; ++row)
+      matrix[row * width + column] = target.coefficients[row];
+  }
+  return matrix;
+}
+
+inline Magnitude finite_matrix_infinity_norm_upper(
+    const std::vector<ComplexBall>& matrix, std::size_t dimension) {
+  if (dimension == 0 ||
+      dimension > std::numeric_limits<std::size_t>::max() / dimension ||
+      matrix.size() != dimension * dimension)
+    throw std::invalid_argument(
+        "finite matrix infinity norm received an invalid square matrix");
+  auto maximum = Magnitude::zero();
+  for (std::size_t row = 0; row < dimension; ++row) {
+    auto sum = Magnitude::zero();
+    for (std::size_t column = 0; column < dimension; ++column)
+      sum += Magnitude::upper_abs(matrix[row * dimension + column]);
+    maximum = Magnitude::maximum(maximum, sum);
+  }
+  return maximum;
+}
+
+inline Magnitude finite_causal_multiplier_norm_upper(
+    const physical_ode_detail::PreparedCausalEpsilonMultiplier& multiplier,
+    EpsilonWindow epsilon) {
+  const auto matrix = finite_causal_multiplier_matrix(multiplier, epsilon);
+  return finite_matrix_infinity_norm_upper(matrix, epsilon.width());
+}
+
+inline Magnitude finite_causal_unit_inverse_norm_upper(
+    const physical_ode_detail::PreparedCausalEpsilonMultiplier& q0,
+    EpsilonWindow epsilon) {
+  const auto width = epsilon.width();
+  if (width > std::numeric_limits<std::size_t>::max() / width)
+    throw std::overflow_error(
+        "finite causal inverse matrix size overflows");
+  std::vector<ComplexBall> inverse(width * width, ComplexBall(0));
+  for (std::size_t column = 0; column < width; ++column) {
+    auto rhs = physical_ode_detail::zero_epsilon_vector(epsilon, 1);
+    rhs.coefficients[column] = ComplexBall(1);
+    const auto solved =
+        physical_ode_detail::solve_formal_unit_q0(q0, rhs, 1);
+    for (std::size_t row = 0; row < width; ++row)
+      inverse[row * width + column] = solved.coefficients[row];
+  }
+  return finite_matrix_infinity_norm_upper(inverse, width);
+}
+
+inline Magnitude finite_physical_c_lag_norm_upper(
+    const std::vector<PhysicalODEMatrixEntry<ComplexBall>>& entries,
+    EpsilonWindow epsilon, std::uint32_t dimension) {
+  const auto width = epsilon.width();
+  std::vector<Magnitude> row_sums(
+      width * static_cast<std::size_t>(dimension), Magnitude::zero());
+  for (const auto& entry : entries) {
+    const auto multiplier =
+        physical_ode_detail::prepare_causal_multiplier(entry.value);
+    const auto matrix = finite_causal_multiplier_matrix(
+        multiplier, epsilon);
+    for (std::size_t target_epsilon = 0;
+         target_epsilon < width; ++target_epsilon)
+      for (std::size_t source_epsilon = 0;
+           source_epsilon < width; ++source_epsilon)
+        row_sums[target_epsilon * dimension + entry.row] +=
+            Magnitude::upper_abs(
+                matrix[target_epsilon * width + source_epsilon]);
+  }
+  auto maximum = Magnitude::zero();
+  for (const auto& sum : row_sums)
+    maximum = Magnitude::maximum(maximum, sum);
+  return maximum;
+}
+
+}  // namespace tail_majorant_detail
+
 template <typename Scalar>
 RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
     const PreparedRecurrenceOperator<Scalar>& prepared,
@@ -741,6 +867,160 @@ RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
       model.local_checkpoint_identity;
   return {TailMajorantStatus::Certified, std::move(model),
           "regular homogeneous tail model prepared"};
+}
+
+inline PhysicalRegularTaylorTailModelResult
+prepare_physical_regular_homogeneous_tail_model(
+    const PreparedPhysicalClearedODE<ComplexBall>& equation,
+    const LocalSolution<ComplexBall>& solution) {
+  using namespace tail_majorant_detail;
+  const auto unsupported = [](std::string detail) {
+    return PhysicalRegularTaylorTailModelResult{
+        TailMajorantStatus::Unsupported, std::nullopt, std::move(detail)};
+  };
+  const auto inconclusive = [](std::string detail) {
+    return PhysicalRegularTaylorTailModelResult{
+        TailMajorantStatus::Inconclusive, std::nullopt, std::move(detail)};
+  };
+
+  physical_ode_detail::validate_ode(equation);
+  validate_local_solution(solution, false);
+  if (solution.dimension != equation.dimension ||
+      solution.checkpoint_identity.empty() ||
+      equation.payload_identity.empty())
+    throw std::invalid_argument(
+        "physical tail model lost its dimension or provenance binding");
+  if (!solution.error.empty())
+    return unsupported(
+        "physical regular tail model cannot absorb a local error envelope");
+  if (solution.sectors.size() != 1 ||
+      solution.sectors.front().log_power != 0 ||
+      solution.sectors.front().a.is_zero != TruthValue::Yes ||
+      solution.sectors.front().b.is_zero != TruthValue::Yes)
+    return unsupported(
+        "physical regular tail model requires one ordinary a=b=0, log=0 sector");
+  if (!equation.c_lags.front().empty())
+    return unsupported(
+        "physical regular tail model requires a structurally ordinary center C(0)=0");
+
+  EpsilonVector initial;
+  initial.epsilon = solution.epsilon;
+  initial.dimension = solution.dimension;
+  initial.coefficients.assign(
+      initial.epsilon.width() * initial.dimension, ComplexBall(0));
+  const auto& source_sector = solution.sectors.front();
+  for (std::int64_t raw_power = solution.epsilon.min_power;
+       raw_power <= solution.epsilon.complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    const auto epsilon_index = static_cast<std::size_t>(
+        raw_power - solution.epsilon.min_power);
+    for (std::uint32_t component = 0;
+         component < solution.dimension; ++component)
+      initial.at(power, component) =
+          source_sector.coefficients[local_detail::sector_index(
+              solution, epsilon_index, 0, component)];
+  }
+  const auto evolution = evolve_ordinary_center_value(
+      equation, initial, solution.taylor_complete_max);
+  if (!evolution.eligible)
+    return unsupported(
+        "physical regular Taylor reconstruction is ineligible: " +
+        evolution.reason);
+
+  PhysicalRegularTaylorTailModel model;
+  model.epsilon = solution.epsilon;
+  model.dimension = solution.dimension;
+  model.taylor_complete_max = solution.taylor_complete_max;
+  model.chart = solution.chart;
+  model.prescriptions = solution.prescriptions;
+  model.physical_payload_identity = equation.payload_identity;
+  model.local_checkpoint_identity = solution.checkpoint_identity;
+  model.reconstructed = solution;
+  auto& reconstructed_sector = model.reconstructed.sectors.front();
+  for (std::uint32_t taylor = 0;
+       taylor <= solution.taylor_complete_max; ++taylor)
+    for (std::int64_t raw_power = solution.epsilon.min_power;
+         raw_power <= solution.epsilon.complete_max; ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      const auto epsilon_index = static_cast<std::size_t>(
+          raw_power - solution.epsilon.min_power);
+      for (std::uint32_t component = 0;
+           component < solution.dimension; ++component)
+        reconstructed_sector.coefficients[local_detail::sector_index(
+            model.reconstructed, epsilon_index, taylor, component)] =
+            evolution.at(taylor).at(power, component);
+    }
+
+  model.q_operator_norm_upper.reserve(equation.q_lags.size());
+  for (const auto& coefficient : equation.q_lags) {
+    if (coefficient.zero) {
+      model.q_operator_norm_upper.push_back(Magnitude::zero());
+      continue;
+    }
+    if (coefficient.valuation < 0)
+      return unsupported(
+          "physical tail model requires causal nonnegative q epsilon valuations");
+    const auto multiplier =
+        physical_ode_detail::prepare_causal_multiplier(coefficient);
+    model.q_operator_norm_upper.push_back(
+        finite_causal_multiplier_norm_upper(multiplier, solution.epsilon));
+  }
+  const auto q0 = physical_ode_detail::prepare_causal_multiplier(
+      equation.q_lags.front());
+  if (q0.valuation != 0)
+    return unsupported(
+        "physical tail model requires q(0,eps) to be a formal epsilon unit");
+  model.q0_inverse_norm_upper =
+      finite_causal_unit_inverse_norm_upper(q0, solution.epsilon);
+
+  model.c_operator_norm_upper.reserve(equation.c_lags.size());
+  for (const auto& entries : equation.c_lags) {
+    if (std::any_of(entries.begin(), entries.end(),
+                    [](const auto& entry) {
+                      return entry.value.valuation < 0;
+                    }))
+      return unsupported(
+          "physical tail model requires causal nonnegative C epsilon valuations");
+    model.c_operator_norm_upper.push_back(
+        finite_physical_c_lag_norm_upper(
+            entries, solution.epsilon, solution.dimension));
+  }
+  if (model.q_operator_norm_upper.empty() ||
+      model.c_operator_norm_upper.empty() ||
+      !model.q0_inverse_norm_upper.is_finite() ||
+      model.q0_inverse_norm_upper.is_zero() ||
+      std::any_of(model.q_operator_norm_upper.begin(),
+                  model.q_operator_norm_upper.end(),
+                  [](const Magnitude& value) {
+                    return !value.is_finite();
+                  }) ||
+      std::any_of(model.c_operator_norm_upper.begin(),
+                  model.c_operator_norm_upper.end(),
+                  [](const Magnitude& value) {
+                    return !value.is_finite();
+                  }))
+    return inconclusive(
+        "physical finite-epsilon operator norm is zero or nonfinite");
+
+  model.initial_row_upper.assign(
+      solution.epsilon.width(), Magnitude::zero());
+  for (std::size_t epsilon_index = 0;
+       epsilon_index < solution.epsilon.width(); ++epsilon_index)
+    for (std::uint32_t component = 0;
+         component < solution.dimension; ++component)
+      model.initial_row_upper[epsilon_index] = Magnitude::maximum(
+          model.initial_row_upper[epsilon_index],
+          Magnitude::upper_abs(initial.coefficients[
+              epsilon_index * solution.dimension + component]));
+  model.provenance =
+      "transient finite-epsilon physical regular tail model; retained "
+      "q(t,eps)/C(t,eps) payload reconstructed the Taylor prefix; the "
+      "epsilon stack is bounded as one augmented ordinary ODE; "
+      "physical_payload_identity=" + model.physical_payload_identity +
+      "; local_checkpoint_identity=" +
+      model.local_checkpoint_identity;
+  return {TailMajorantStatus::Certified, std::move(model),
+          "physical finite-epsilon regular tail model prepared"};
 }
 
 // Certify the equation owned by an immutable regular-tail payload.  The
@@ -1321,6 +1601,198 @@ inline RegularTaylorPointTailCertificate certify_regular_taylor_point_tail(
   result.detail =
       "Cauchy coefficient bounds certify every Taylor coefficient beyond "
       "the retained order";
+  return result;
+}
+
+inline RegularTaylorDiskCertificate certify_physical_regular_taylor_disk(
+    const PhysicalRegularTaylorTailModel& model,
+    const std::string& witness_radius_exact) {
+  using namespace tail_majorant_detail;
+  Rational radius(0);
+  try {
+    radius = Rational(witness_radius_exact);
+  } catch (const std::invalid_argument&) {
+    throw std::invalid_argument(
+        "physical tail witness radius must be an exact rational string");
+  }
+  if (radius.sign() <= 0)
+    throw std::invalid_argument(
+        "physical tail witness radius must be positive");
+  const auto radius_ball = ComplexBall::from_strings(radius.str());
+  if (!model.chart.infinite_radius &&
+      !arb_lt(acb_realref(radius_ball.raw()),
+              acb_realref(model.chart.radius.raw())))
+    return inconclusive_disk(
+        radius.str(),
+        "physical witness disk is not provably strictly inside the retained chart radius");
+  if (model.q_operator_norm_upper.empty() ||
+      model.c_operator_norm_upper.empty() ||
+      model.initial_row_upper.size() != model.epsilon.width())
+    throw std::invalid_argument(
+        "physical tail model has incomplete operator or initial bounds");
+
+  const auto radius_upper = exact_rational_upper(radius);
+  auto q_remainder_upper = Magnitude::zero();
+  for (std::size_t lag = 1;
+       lag < model.q_operator_norm_upper.size(); ++lag)
+    q_remainder_upper += model.q_operator_norm_upper[lag] *
+        radius_upper.power_upper(static_cast<ulong>(lag));
+  const auto neumann_upper =
+      model.q0_inverse_norm_upper * q_remainder_upper;
+  const auto neumann_gap_lower = Magnitude::positive_difference_lower(
+      Magnitude::one(), neumann_upper);
+  if (neumann_gap_lower.is_zero())
+    return inconclusive_disk(
+        radius.str(),
+        "finite-epsilon Q(t) Neumann bound does not prove invertibility on the witness disk");
+  const auto q_inverse_norm_upper =
+      model.q0_inverse_norm_upper /
+      neumann_gap_lower;
+
+  auto numerator_upper = Magnitude::zero();
+  for (std::size_t lag = 1;
+       lag < model.c_operator_norm_upper.size(); ++lag)
+    numerator_upper += model.c_operator_norm_upper[lag] *
+        radius_upper.power_upper(static_cast<ulong>(lag - 1));
+  const auto ode_norm_upper = q_inverse_norm_upper * numerator_upper;
+  const auto gronwall =
+      (ode_norm_upper * radius_upper).exponential_upper();
+  if (!ode_norm_upper.is_finite() || !gronwall.is_finite())
+    return inconclusive_disk(
+        radius.str(),
+        "physical finite-epsilon ODE/Gronwall bound overflowed");
+
+  auto initial_global = Magnitude::zero();
+  for (const auto& initial : model.initial_row_upper)
+    initial_global = Magnitude::maximum(initial_global, initial);
+  RegularTaylorDiskCertificate result;
+  result.status = TailMajorantStatus::Certified;
+  result.witness_radius_exact = radius.str();
+  // For the coupled model this field records the dimensionless Neumann gap,
+  // not a scalar |q| lower bound.
+  result.q_lower = neumann_gap_lower;
+  result.ode_norm_upper = ode_norm_upper;
+  result.cauchy_circle_upper.assign(
+      model.epsilon.width(), initial_global * gronwall);
+  result.detail =
+      "finite-epsilon Q(t) is invertible by a Neumann bound and Gronwall bounds the augmented regular solution";
+  return result;
+}
+
+inline RegularTaylorPointTailCertificate
+certify_physical_regular_taylor_point_tail(
+    const PhysicalRegularTaylorTailModel& model,
+    const RealEvaluationPoint& input_point,
+    const std::string& witness_radius_exact,
+    std::optional<std::uint32_t> retained_complete_max = std::nullopt) {
+  using namespace tail_majorant_detail;
+  const auto point = line_integration_detail::require_exact_rational_point(
+      input_point, "physical-tail-evaluation");
+  const Rational exact_point(point.exact_coordinate);
+  const auto modulus = abs_rational(exact_point);
+  const Rational radius(witness_radius_exact);
+  const auto retained = retained_complete_max.value_or(
+      model.taylor_complete_max);
+  if (retained > model.taylor_complete_max)
+    throw std::invalid_argument(
+        "physical tail retained order exceeds the model order");
+
+  RegularTaylorPointTailCertificate result;
+  result.disk = certify_physical_regular_taylor_disk(
+      model, radius.str());
+  if (result.disk.status != TailMajorantStatus::Certified) {
+    result.status = result.disk.status;
+    result.detail = result.disk.detail;
+    return result;
+  }
+  if (!(modulus < radius)) {
+    result.status = TailMajorantStatus::Inconclusive;
+    result.detail =
+        "physical evaluation point is not strictly inside the witness disk";
+    return result;
+  }
+  const auto radius_lower = exact_rational_lower(radius);
+  if (radius_lower.is_zero()) {
+    result.status = TailMajorantStatus::Inconclusive;
+    result.detail =
+        "physical witness-radius enclosure has no positive lower bound";
+    return result;
+  }
+  const auto ratio_upper = exact_rational_upper(modulus) / radius_lower;
+  Magnitude gap_lower;
+  const auto first = static_cast<ulong>(retained) + 1UL;
+  const auto value_factor = geometric_tail_factor(
+      ratio_upper, first, &gap_lower);
+  if (gap_lower.is_zero()) {
+    result.status = TailMajorantStatus::Inconclusive;
+    result.detail =
+        "physical rounded |t|/R bound does not remain below one";
+    return result;
+  }
+  const auto inverse_gap = gap_lower.reciprocal_upper();
+  const auto theta_factor = ratio_upper.power_upper(first) *
+      (Magnitude::from_ui(first) * inverse_gap +
+       ratio_upper * inverse_gap * inverse_gap);
+  result.value.frame = model.epsilon;
+  result.value.guarantee = ErrorGuarantee::Certified;
+  result.theta.frame = model.epsilon;
+  result.theta.guarantee = ErrorGuarantee::Certified;
+  for (const auto& circle : result.disk.cauchy_circle_upper) {
+    result.value.absolute.push_back(circle * value_factor);
+    result.theta.absolute.push_back(circle * theta_factor);
+  }
+  const auto provenance =
+      "certified full-local point tail; augmented finite-epsilon physical "
+      "ODE; witness_radius_exact=" + radius.str() + "; " +
+      model.provenance;
+  result.value.provenance = provenance;
+  result.theta.provenance = provenance;
+  result.status = TailMajorantStatus::Certified;
+  result.detail =
+      "Cauchy bounds certify the unseen Taylor tail of the finite-epsilon physical solution";
+  return result;
+}
+
+inline CertifiedLocalEvaluation
+evaluate_physical_local_solution_with_certified_tail(
+    const PhysicalRegularTaylorTailModel& model,
+    const RealEvaluationPoint& point,
+    const std::string& witness_radius_exact,
+    EvaluationOptions options = {}) {
+  if (model.reconstructed.checkpoint_identity !=
+          model.local_checkpoint_identity ||
+      model.reconstructed.dimension != model.dimension ||
+      !tail_majorant_detail::same_epsilon_window(
+          model.reconstructed.epsilon, model.epsilon))
+    throw std::invalid_argument(
+        "physical tail model is not bound to its reconstructed local");
+  if (options.t_order_reduction > model.taylor_complete_max)
+    throw std::invalid_argument(
+        "physical tail-aware evaluation reduction exceeds retained order");
+  const auto retained = model.taylor_complete_max -
+                        options.t_order_reduction;
+  options.compute_tail_estimate = false;
+  CertifiedLocalEvaluation result;
+  result.evaluation = evaluate_local_solution(
+      model.reconstructed, point, options);
+  result.tail = certify_physical_regular_taylor_point_tail(
+      model, point, witness_radius_exact, retained);
+  if (result.tail.status != TailMajorantStatus::Certified) {
+    result.evaluation.value.error.provenance = result.tail.detail;
+    result.evaluation.theta_value.error.provenance = result.tail.detail;
+    return result;
+  }
+  result.evaluation.value.error = result.tail.value;
+  ErrorEnvelope theta_error;
+  theta_error.frame = result.evaluation.theta_value.epsilon;
+  theta_error.guarantee = ErrorGuarantee::Certified;
+  theta_error.provenance = result.tail.theta.provenance;
+  for (std::int64_t raw_power = theta_error.frame.min_power;
+       raw_power <= theta_error.frame.complete_max; ++raw_power)
+    theta_error.absolute.push_back(result.tail.theta.absolute.at(
+        static_cast<std::size_t>(
+            raw_power - result.tail.theta.frame.min_power)));
+  result.evaluation.theta_value.error = std::move(theta_error);
   return result;
 }
 

@@ -277,6 +277,16 @@ Rules:
   order and proves it cannot inflate the epsilon-zero tail. Focused adjoint
   and persistent transport tests pass; the next banana rerun was temporarily
   deferred because another repo process occupied the Wolfram license.
+- B4-82 closes the test-layer gap that allowed several B4-79--B4-81 faults to
+  survive isolated algebra tests. The ordinary release suite already checks
+  wrapper key acceptance/forwarding, exact-shadow preparation and checkpoint
+  retention, primitive singular ODE construction, recurrence classes,
+  endpoint orientation, and coefficientwise epsilon-tail propagation. A new
+  opt-in banana4 level-3 boundary gate now exercises that complete production
+  chain at expansion order 50 with a fresh transport checkpoint, requires a
+  center-ending composed-adjoint certificate, rejects retry/unsupported
+  markers, and permits noncenter tiles only when they are explicitly
+  classified. FIRE preparation remains outside its timing contract.
 
 ## Disproven configurations: do not repeat unchanged
 

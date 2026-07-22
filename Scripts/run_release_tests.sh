@@ -79,6 +79,11 @@ if [[ "${DE2_RUN_BANANA_TIMING:-0}" == 1 ]]; then
   Scripts/run_banana_timing_regression.sh
 fi
 
+if [[ "${DE2_RUN_BANANA4_BOUNDARY:-0}" == 1 ]]; then
+  echo "=== optional banana4 production-chain boundary regression"
+  Scripts/run_banana4_boundary_regression.sh
+fi
+
 if [[ "${DE2_RUN_PENTAGON_TIMING:-0}" == 1 ]]; then
   echo "=== optional full pentagon timing regression"
   Scripts/run_pentagon_timing_regression.sh

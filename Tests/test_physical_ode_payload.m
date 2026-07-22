@@ -106,6 +106,12 @@ assert["physical_ode_global_affine_clear_covers_singular_chart",
   !TrueQ[
     DiffExp2`Solve`Private`regularIdentityFrameQ[singularChartSystem]] &&
   samePhysicalEquationQ[singularHoistedData, singularLegacyData]];
+assert["physical_ode_singular_affine_pair_cancels_artificial_center_factor",
+  AssociationQ[singularHoistedData] &&
+  samePhysicalEquationQ[singularHoistedData, singularLegacyData] &&
+  Length[singularHoistedData["Q"]] === 1 &&
+  Length[singularHoistedData["C"]] === 1 &&
+  !TrueQ[singularHoistedData["Q"][[1, "Zero"]]]];
 
 owner = "de2-operator-wolfram-physical-smoke";
 payload = Block[{

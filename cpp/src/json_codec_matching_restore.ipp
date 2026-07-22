@@ -3058,5 +3058,6 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       std::move(terminal_normal_frame_right_transformation),
       std::move(exact_shadow_factorized_basis),
       exact_shadow_extra_precision_bits,
+      nullptr,
       std::move(refined), elapsed_ms);
 }

@@ -157,6 +157,96 @@ bool resonance_fails_closed() {
   return false;
 }
 
+bool rational_shadow_pseudo_resonance() {
+  BackwardAdjointTaylorProblem problem;
+  problem.dimension = 1;
+  problem.taylor_complete_max = 2;
+  problem.required_epsilon_complete_max = 0;
+  problem.q_lags = {series({"1", "0", "0"})};
+  auto uncertain_minus_one = ball("-1");
+  arb_add_error_2exp_si(acb_realref(uncertain_minus_one.raw()), -160);
+  FiniteLaurentMatrix<ComplexBall> c0(1);
+  c0.front().emplace_back(
+      0, std::vector<ComplexBall>{
+             std::move(uncertain_minus_one), ball("1"), ball("0")});
+  problem.c_transpose_lags.push_back(std::move(c0));
+  problem.forcing = {constant_vector({"-1"}, 2)};
+
+  bool unguided_failed = false;
+  try {
+    (void)solve_backward_adjoint_taylor(
+        problem, "unguided pseudo-resonant adjoint");
+  } catch (const MatchingArithmeticError&) {
+    unguided_failed = true;
+  }
+  if (!unguided_failed) return false;
+
+  const auto exact_value = [](std::initializer_list<const char*> numerator) {
+    ExactEpsilonRational<Rational> result;
+    result.zero = false;
+    for (const auto* coefficient : numerator)
+      result.numerator.emplace_back(coefficient);
+    result.denominator = {Rational(1)};
+    return result;
+  };
+  PreparedPhysicalClearedODE<Rational> exact;
+  exact.dimension = 1;
+  exact.q_lags = {exact_value({"1"})};
+  exact.c_lags = {{{0, 0, exact_value({"-1", "1"})}}};
+  exact.owner_signature_identity = "pseudo-resonant-exact-owner";
+  exact.payload_identity = "pseudo-resonant-exact-payload";
+  exact.exact_payload_record = "pseudo-resonant-exact-record";
+
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, &exact, "Rational-shadow pseudo-resonant adjoint");
+  const auto& coefficient = solved.coefficients.front().front();
+  return coefficient.min_power() == -1 &&
+         contains_exact(coefficient.coefficient(-1), "-1") &&
+         solved.common_epsilon_complete_max >= 0;
+}
+
+bool rational_shadow_true_scalar_resonance() {
+  auto problem = scalar_problem("-1");
+  problem.required_epsilon_complete_max = -1;
+  problem.q_lags = {series({"1", "0", "0"})};
+  problem.c_transpose_lags = {constant_matrix({{"-1"}}, 2)};
+  problem.forcing = {constant_vector({"-1"}, 2)};
+  const auto exact_value = [](const std::string& value) {
+    ExactEpsilonRational<Rational> result;
+    result.zero = value == "0";
+    if (!result.zero) {
+      result.numerator = {Rational(value)};
+      result.denominator = {Rational(1)};
+    }
+    return result;
+  };
+  PreparedPhysicalClearedODE<Rational> exact;
+  exact.dimension = 1;
+  exact.q_lags = {exact_value("1")};
+  exact.c_lags = {{{0, 0, exact_value("-1")}}};
+  exact.owner_signature_identity = "true-resonant-exact-owner";
+  exact.payload_identity = "true-resonant-exact-payload";
+  exact.exact_payload_record = "true-resonant-exact-record";
+
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, &exact, "Rational-shadow true scalar resonance");
+  if (solved.max_log_power != 1 ||
+      solved.higher_log_coefficients.front().size() != 1 ||
+      !contains_exact(
+          solved.coefficients.front().front().coefficient(0), "0") ||
+      !contains_exact(
+          solved.higher_log_coefficients.front().front().front()
+              .coefficient(-1),
+          "-1"))
+    return false;
+  const auto point = ball("1/2");
+  const auto evaluated = evaluate_backward_adjoint_taylor(
+      solved, point, local_detail::cb_log(point),
+      "true scalar resonant evaluation");
+  const auto expected = -point * local_detail::cb_log(point);
+  return (evaluated.front().coefficient(0) - expected).contains_zero();
+}
+
 ExactEpsilonRational<ComplexBall> exact_constant(const std::string& value) {
   ExactEpsilonRational<ComplexBall> result;
   result.zero = value == "0";
@@ -181,7 +271,8 @@ PreparedPhysicalClearedODE<ComplexBall> scalar_ode(
 }
 
 PreparedSparseLocalMultiplierMatrix<ComplexBall> scalar_row(
-    std::uint32_t center_pole_order = 0, bool geometric = false) {
+    std::uint32_t center_pole_order = 0, bool geometric = false,
+    bool doubled_geometric = false) {
   PreparedSparseLocalMultiplierMatrix<ComplexBall> row;
   row.rows = 1;
   row.columns = 1;
@@ -189,13 +280,17 @@ PreparedSparseLocalMultiplierMatrix<ComplexBall> scalar_row(
   PreparedRationalTaylorMultiplier<ComplexBall> multiplier;
   multiplier.center_pole_order = center_pole_order;
   multiplier.kernels = {{ball("1"),
-                         ball(geometric ? "1" : "0"),
-                         ball(geometric ? "1" : "0"),
-                         ball(geometric ? "1" : "0")}};
+                         ball(geometric ?
+                                  (doubled_geometric ? "2" : "1") : "0"),
+                         ball(geometric ?
+                                  (doubled_geometric ? "4" : "1") : "0"),
+                         ball(geometric ?
+                                  (doubled_geometric ? "8" : "1") : "0")}};
   PreparedRationalAnalyticCoefficient<ComplexBall> analytic;
   analytic.numerator = {ball("1")};
   analytic.denominator = geometric
-      ? std::vector<ComplexBall>{ball("1"), ball("-1")}
+      ? std::vector<ComplexBall>{
+            ball("1"), ball(doubled_geometric ? "-2" : "-1")}
       : std::vector<ComplexBall>{ball("1")};
   multiplier.analytic_coefficients =
       std::vector<PreparedRationalAnalyticCoefficient<ComplexBall>>{
@@ -281,6 +376,23 @@ bool tail_certificate_fails_closed() {
   return false;
 }
 
+bool adaptive_witness_respects_row_pole() {
+  const auto row = scalar_row(0, true, true);
+  const auto problem = prepare_backward_adjoint_taylor_problem(
+      scalar_ode("0"), row, 4, 0, 0, ball("1"),
+      "adaptive-witness composed-tail adapter");
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, "adaptive-witness composed-tail solve");
+  const auto certificate =
+      certify_backward_adjoint_taylor_tail_adaptive_witness(
+          problem, solved, row, ball("1"), ball("1/4"),
+          Rational("1/4"), Rational(1), 8,
+          "adaptive-witness row-pole regression");
+  return Rational("1/4") < certificate.witness_radius_exact &&
+         certificate.witness_radius_exact < Rational("1/2") &&
+         certificate.tail.certified_after_taylor_order == 4;
+}
+
 }  // namespace
 
 int main() {
@@ -290,8 +402,11 @@ int main() {
                   epsilon_coupled_triangular() &&
                   direct_integral_equivalence() &&
                   resonance_fails_closed() &&
+                  rational_shadow_pseudo_resonance() &&
+                  rational_shadow_true_scalar_resonance() &&
                   physical_ode_row_adapter() &&
                   certified_geometric_tail() &&
+                  adaptive_witness_respects_row_pole() &&
                   tail_certificate_fails_closed();
   std::cout << (ok ? "PASS" : "FAIL")
             << ": composed backward Fuchsian adjoint Taylor recurrence\n";

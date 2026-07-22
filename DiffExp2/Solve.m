@@ -1298,7 +1298,7 @@ affinePhysicalClearedFromGlobal[cs_Association] := Module[
   {systemKey = cs["SystemClearKey"], key, cached, global, x,
    t = cs["ChartVar"], center = cs["Center"], beta = cs["ChartMap", "Scale"],
    affineContentInvariantQ, den, denCoeffs, denContent, num, dD, dN,
-   dExpr, NhatExpr,
+   dExpr, NhatExpr, activePairEntries, centerPower,
    phaseQ, phaseTime, phase},
   key = {systemKey, center, beta, t};
   cached = If[KeyExistsQ[$chartClearedCache, key],
@@ -1347,6 +1347,26 @@ affinePhysicalClearedFromGlobal[cs_Association] := Module[
   den = Cancel[Together[den/denContent]];
   num = Map[Cancel[Together[beta*t*(# /. x -> center + beta*t)/denContent]] &,
     global["Numerator"], {2}];
+  (* D f' = N f becomes D theta f = beta t N f.  At a singular chart
+     center, the affine denominator D can contain t, which is then a common
+     factor of both sides solely because of the explicit theta multiplier.
+     The legacy local construction starts from theta=beta t A and cancels
+     this factor automatically.  The hoisted path must do the same: retaining
+     it makes q(0)=C(0)=0 and fabricates a singular/resonant Taylor layer.
+
+     Global primitivity and affine invertibility prove that t is the only new
+     possible common polynomial factor, so compare exact center valuations;
+     do not reintroduce the expensive full polynomial GCD that this path was
+     designed to avoid. *)
+  activePairEntries = Prepend[
+    Select[Flatten[num], !zeroCanQ[#] &], den];
+  centerPower = Min[Exponent[#, t, Min] & /@ activePairEntries];
+  If[!IntegerQ[centerPower] || centerPower < 0,
+    err["E3", cs, <|"CenterPower" -> centerPower,
+      "Detail" -> "affine physical q/C pair has an invalid common center valuation"|>]];
+  If[centerPower > 0,
+    den = Cancel[Together[den/t^centerPower]];
+    num = Map[Cancel[Together[#/t^centerPower]] &, num, {2}]];
   phase["affine-pair"];
   dD = Exponent[den, t];
   dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
@@ -5539,6 +5559,38 @@ sccParentPhysicalODEPayload[cs_Association, ownerIdentity_String,
       "parent physical q/C payload did not retain its full composite owner identity"|>]];
   payload];
 
+(* Acb is the execution field, not the provenance field.  When the exact
+   full-parent q/C equation is rational, retain a second canonical Rational
+   encoding beside the ball payload.  Terminal adjoints and other structural
+   consumers must not have to reconstruct exact zero/resonance facts from
+   decimal Arb enclosures or depend on a separate Rational-shadow solve having
+   happened earlier in the process. *)
+sccParentRationalShadowPhysicalODEPayload[cs_Association,
+    ownerIdentity_String, serialization_Association,
+    inputDigits_Integer] := Module[{field, data, rationalCoefficientQ},
+  field = sccSerializationField[serialization, cs];
+  If[field["domain"] =!= "acb" || field["symbols"] =!= {},
+    Return[None, Module]];
+  data = physicalClearedODEData[cs];
+  rationalCoefficientQ[entry_Association] :=
+    TrueQ[Lookup[entry, "Zero", False]] ||
+      (PolynomialQ[Lookup[entry, "P", $Failed],
+          DiffExp2`Config`CanonicalEps[]] &&
+       PolynomialQ[Lookup[entry, "Q", $Failed],
+          DiffExp2`Config`CanonicalEps[]] &&
+       AllTrue[Join[
+          CoefficientList[entry["P"],
+            DiffExp2`Config`CanonicalEps[]],
+          CoefficientList[entry["Q"],
+            DiffExp2`Config`CanonicalEps[]]],
+         IntegerQ[#] || Head[#] === Rational &]);
+  If[!AllTrue[Join[data["Q"], Flatten[data["C"]]],
+      AssociationQ[#] && rationalCoefficientQ[#] &],
+    Return[None, Module]];
+  Block[{$cppSerializationDomain = "rational",
+      $cppSerializationSymbols = {}},
+    cppPhysicalODEPayload[data, ownerIdentity, inputDigits, cs]]];
+
 PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], epsWindow,
    requestedMin, requestedMax, publicTOrder, workTOrder, plannedTop,
@@ -5552,6 +5604,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    sourceTransforms, gaugeTransforms, gaugeFrames, gaugePrepStart,
    gaugePrepMemory, gaugeProbeRecord, rationalShadowDecision,
    seedWorkHalos, blockRequiredTops, workReqs, reservoirMax,
+   rationalShadowPhysicalPayload,
    diagnosticStartFrame, singularCompositeQ, compactFrameQ,
    coreFb, diagnosticLowerExtra, diagnosticStrictProbe,
    diagnosticTopHalo},
@@ -5846,6 +5899,9 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     cfg["WorkingPrecision"];
   physicalPayload = sccParentPhysicalODEPayload[
     cs, identity, serialization, inputDigits];
+  rationalShadowPhysicalPayload =
+    sccParentRationalShadowPhysicalODEPayload[
+      cs, identity, serialization, inputDigits];
   If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
     Print["DE2 SCC PHYSICAL PAYLOAD done center=", center,
       " t=", AbsoluteTime[], " memory=", MemoryInUse[]]];
@@ -5855,6 +5911,10 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     "parent" -> parent,
     "blocks" -> blockRecords, "couplings" -> couplings,
     "physical_ode" -> physicalPayload|>;
+  If[AssociationQ[rationalShadowPhysicalPayload],
+    AssociateTo[manifest,
+      "rational_shadow_physical_ode" ->
+        rationalShadowPhysicalPayload]];
   runRecords = Map[Function[capture,
       KeyTake[#, $nativeSCCColumnRunKeys] & /@ capture["Requests"]],
     captures];

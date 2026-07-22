@@ -44,6 +44,13 @@ struct BackwardAdjointTaylorResult {
   std::int32_t common_epsilon_complete_max = 0;
   // coefficients[n-1][component] is lambda_{component,n}, n >= 1.
   std::vector<FiniteLaurentVector<ComplexBall>> coefficients;
+  // higher_log_coefficients[n-1][k-1][component] is the coefficient of
+  // t^n (epsilon Log[t])^k/k!, k >= 1.  Keeping the normalized logarithm
+  // convention identical to LocalSolution is essential: every log raise
+  // consumes one lower epsilon order and remains visible to completeness.
+  std::vector<std::vector<FiniteLaurentVector<ComplexBall>>>
+      higher_log_coefficients;
+  std::uint32_t max_log_power = 0;
 
   // This is only a planning signal.  It is not a tail certificate and must
   // never be used to publish a full-local result.
@@ -56,6 +63,11 @@ struct BackwardAdjointTailCertificate {
   Magnitude recurrence_contraction_upper = Magnitude::zero();
   Magnitude evaluation_ratio_upper = Magnitude::zero();
   std::uint32_t certified_after_taylor_order = 0;
+};
+
+struct BackwardAdjointAdaptiveTailCertificate {
+  BackwardAdjointTailCertificate tail;
+  Rational witness_radius_exact = Rational(0);
 };
 
 namespace adjoint_observable_detail {
@@ -111,6 +123,54 @@ inline FiniteLaurentVector<ComplexBall> apply_lag_operator(
   return output;
 }
 
+inline FiniteLaurentVector<ComplexBall> epsilon_shift_vector(
+    const FiniteLaurentVector<ComplexBall>& input) {
+  FiniteLaurentVector<ComplexBall> result;
+  result.reserve(input.size());
+  for (const auto& component : input)
+    result.push_back(component.shifted(1));
+  return result;
+}
+
+inline FiniteLaurentVector<ComplexBall> apply_log_lag_operator(
+    const EpsilonFrame<ComplexBall>& q,
+    const FiniteLaurentMatrix<ComplexBall>* c_transpose,
+    std::int64_t theta_factor,
+    const FiniteLaurentVector<ComplexBall>& current_log,
+    const FiniteLaurentVector<ComplexBall>* next_log,
+    std::int32_t structural_complete_max) {
+  auto output = apply_lag_operator(
+      q, c_transpose, theta_factor, current_log,
+      structural_complete_max);
+  if (next_log == nullptr) return output;
+  const auto shifted = epsilon_shift_vector(*next_log);
+  const auto log_derivative = apply_lag_operator(
+      q, nullptr, 1, shifted, structural_complete_max);
+  for (std::size_t component = 0; component < output.size(); ++component)
+    output[component] = output[component] + log_derivative[component];
+  return output;
+}
+
+inline void subtract_vector_in_place(
+    FiniteLaurentVector<ComplexBall>& target,
+    const FiniteLaurentVector<ComplexBall>& value) {
+  if (target.size() != value.size())
+    throw std::invalid_argument(
+        "backward adjoint vector dimensions disagree");
+  for (std::size_t component = 0; component < target.size(); ++component)
+    target[component] = target[component] - value[component];
+}
+
+inline void add_vector_in_place(
+    FiniteLaurentVector<ComplexBall>& target,
+    const FiniteLaurentVector<ComplexBall>& value) {
+  if (target.size() != value.size())
+    throw std::invalid_argument(
+        "backward adjoint vector dimensions disagree");
+  for (std::size_t component = 0; component < target.size(); ++component)
+    target[component] = target[component] + value[component];
+}
+
 inline double vector_upper_norm(
     const FiniteLaurentVector<ComplexBall>& value) {
   double result = 0.0;
@@ -151,6 +211,271 @@ EpsilonFrame<ComplexBall> expand_epsilon_rational(
   }
   return EpsilonFrame<ComplexBall>(value.valuation,
                                    std::move(coefficients));
+}
+
+inline EpsilonFrame<Rational> expand_exact_epsilon_rational(
+    const ExactEpsilonRational<Rational>& value,
+    std::int32_t complete_max, const std::string& context) {
+  physical_ode_detail::validate_rational(
+      value, "exact backward adjoint epsilon-rational coefficient");
+  if (value.zero || value.valuation > complete_max)
+    return EpsilonFrame<Rational>::zero(complete_max);
+  const auto width = EpsilonWindow{
+      value.valuation, complete_max}.width();
+  std::vector<Rational> coefficients(width, Rational(0));
+  const auto& denominator0 = value.denominator.front();
+  if (denominator0.is_zero())
+    throw std::domain_error(
+        context + ": exact epsilon-rational denominator is zero");
+  for (std::size_t offset = 0; offset < width; ++offset) {
+    Rational coefficient(0);
+    if (offset < value.numerator.size())
+      coefficient = value.numerator[offset];
+    for (std::size_t degree = 1;
+         degree < value.denominator.size() && degree <= offset; ++degree)
+      coefficient -= value.denominator[degree] *
+                     coefficients[offset - degree];
+    coefficients[offset] = coefficient / denominator0;
+  }
+  return EpsilonFrame<Rational>(value.valuation,
+                                std::move(coefficients));
+}
+
+inline FiniteLaurentMatrix<Rational> exact_backward_adjoint_layer(
+    const PreparedPhysicalClearedODE<Rational>& ode,
+    std::uint32_t taylor_order, std::int32_t complete_max,
+    const std::string& context) {
+  physical_ode_detail::validate_ode(ode);
+  if (ode.q_lags.empty() || ode.c_lags.empty())
+    throw std::invalid_argument(
+        context + ": exact physical equation has no indicial layer");
+  auto q0 = expand_exact_epsilon_rational(
+      ode.q_lags.front(), complete_max, context + ": exact q0");
+  FiniteLaurentMatrix<Rational> layer(
+      ode.dimension, FiniteLaurentVector<Rational>());
+  for (auto& row : layer)
+    for (std::uint32_t column = 0; column < ode.dimension; ++column)
+      row.push_back(EpsilonFrame<Rational>::zero(complete_max));
+  for (const auto& entry : ode.c_lags.front())
+    layer[entry.column][entry.row] = expand_exact_epsilon_rational(
+        entry.value, complete_max, context + ": exact C0 transpose");
+  const Rational order(std::to_string(taylor_order));
+  for (std::uint32_t diagonal = 0; diagonal < ode.dimension; ++diagonal)
+    layer[diagonal][diagonal] =
+        layer[diagonal][diagonal] + q0.scaled(order);
+  return layer;
+}
+
+inline void apply_exact_backward_adjoint_layer_zeros(
+    FiniteLaurentMatrix<ComplexBall>& numeric,
+    const FiniteLaurentMatrix<Rational>& exact,
+    const std::string& context) {
+  if (numeric.size() != exact.size())
+    throw std::invalid_argument(
+        context + ": numeric and exact layer dimensions differ");
+  for (std::size_t row = 0; row < numeric.size(); ++row) {
+    if (numeric[row].size() != exact[row].size())
+      throw std::invalid_argument(
+          context + ": numeric and exact layer shapes differ");
+    for (std::size_t column = 0; column < numeric[row].size(); ++column) {
+      const auto leading = matching_detail::certified_laurent_leading_power(
+          exact[row][column]);
+      if (leading.first_ambiguous_power.has_value())
+        throw std::logic_error(
+            context + ": exact Rational layer has an ambiguous zero");
+      if (!leading.power.has_value()) {
+        numeric[row][column] = EpsilonFrame<ComplexBall>::zero(
+            numeric[row][column].complete_max());
+        continue;
+      }
+      const auto power = *leading.power;
+      if (power < numeric[row][column].min_power() ||
+          power > numeric[row][column].complete_max())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            context +
+                ": numeric layer does not contain its exact leading power",
+            row, column, power);
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(EpsilonWindow{
+          power, numeric[row][column].complete_max()}.width());
+      for (std::int64_t raw_power = power;
+           raw_power <= numeric[row][column].complete_max(); ++raw_power)
+        coefficients.push_back(numeric[row][column].coefficient(
+            static_cast<std::int32_t>(raw_power)));
+      numeric[row][column] = EpsilonFrame<ComplexBall>(
+          power, std::move(coefficients));
+    }
+  }
+}
+
+struct ExactSimpleResonanceFrame {
+  FiniteLaurentVector<Rational> right_kernel;
+  FiniteLaurentVector<Rational> left_kernel;
+};
+
+inline FiniteLaurentMatrix<Rational> transpose_exact_matrix(
+    const FiniteLaurentMatrix<Rational>& matrix) {
+  const auto dimension = matrix.size();
+  FiniteLaurentMatrix<Rational> result(
+      dimension, FiniteLaurentVector<Rational>());
+  for (auto& row : result) row.reserve(dimension);
+  for (std::size_t row = 0; row < dimension; ++row) {
+    if (matrix[row].size() != dimension)
+      throw std::invalid_argument(
+          "exact backward adjoint layer is not square");
+    for (std::size_t column = 0; column < dimension; ++column)
+      result[row].push_back(matrix[column][row]);
+  }
+  return result;
+}
+
+inline matching_detail::DenseScalarMatrix<Rational>
+epsilon_zero_matrix(const FiniteLaurentMatrix<Rational>& matrix,
+                    const std::string& context) {
+  matching_detail::DenseScalarMatrix<Rational> result(
+      matrix.size(), std::vector<Rational>(matrix.size(), Rational(0)));
+  for (std::size_t row = 0; row < matrix.size(); ++row) {
+    if (matrix[row].size() != matrix.size())
+      throw std::invalid_argument(context + ": matrix is not square");
+    for (std::size_t column = 0; column < matrix.size(); ++column) {
+      if (matrix[row][column].complete_max() < 0)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            context + ": exact layer does not contain epsilon^0",
+            row, column, matrix[row][column].complete_max());
+      result[row][column] = matrix[row][column].coefficient(0);
+    }
+  }
+  return result;
+}
+
+inline void require_exact_zero_vector(
+    const FiniteLaurentVector<Rational>& value,
+    const std::string& context) {
+  for (std::size_t component = 0; component < value.size(); ++component)
+    for (std::int64_t raw_power = value[component].min_power();
+         raw_power <= value[component].complete_max(); ++raw_power)
+      if (!value[component]
+               .coefficient(static_cast<std::int32_t>(raw_power))
+               .is_zero())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::SaturationFailure,
+            context + ": exact formal null-vector residual is nonzero",
+            component, std::nullopt,
+            static_cast<std::int32_t>(raw_power));
+}
+
+inline FiniteLaurentVector<Rational> exact_formal_null_vector(
+    const FiniteLaurentMatrix<Rational>& matrix,
+    const matching_detail::LeadingNullRelation<Rational>& leading,
+    const std::vector<Rational>& dual_normalizer,
+    const std::string& context) {
+  const auto dimension = matrix.size();
+  if (leading.rank + 1 != dimension || !leading.vector.has_value() ||
+      leading.pivot_rows.size() != leading.rank ||
+      dual_normalizer.size() != dimension)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+        context +
+            ": only a one-dimensional semisimple resonant kernel is supported");
+  auto complete_max = matrix.front().front().complete_max();
+  for (const auto& row : matrix)
+    for (const auto& entry : row)
+      complete_max = std::min(complete_max, entry.complete_max());
+  FiniteLaurentMatrix<Rational> bordered;
+  bordered.reserve(dimension);
+  for (const auto pivot_row : leading.pivot_rows)
+    bordered.push_back(matrix.at(pivot_row));
+  FiniteLaurentVector<Rational> normalization;
+  normalization.reserve(dimension);
+  for (const auto& coefficient : dual_normalizer) {
+    std::vector<Rational> coefficients(
+        static_cast<std::size_t>(complete_max) + 1, Rational(0));
+    coefficients.front() = coefficient;
+    normalization.emplace_back(0, std::move(coefficients));
+  }
+  bordered.push_back(std::move(normalization));
+  FiniteLaurentVector<Rational> exact_rhs;
+  exact_rhs.reserve(dimension);
+  for (std::size_t row = 0; row < dimension; ++row) {
+    std::vector<Rational> coefficients(
+        static_cast<std::size_t>(complete_max) + 1, Rational(0));
+    if (row + 1 == dimension) coefficients.front() = Rational(1);
+    exact_rhs.emplace_back(0, std::move(coefficients));
+  }
+  auto factorization = factor_finite_laurent_system(
+      std::move(bordered), context + ": normalized null-vector solve");
+  auto result = solve_factorized_finite_laurent_system(
+      factorization, std::move(exact_rhs),
+      context + ": normalized null-vector coefficients");
+  require_exact_zero_vector(
+      apply_finite_laurent_matrix(matrix, result),
+      context + ": full null-vector audit");
+  return result;
+}
+
+inline std::optional<ExactSimpleResonanceFrame>
+exact_simple_resonance_frame(
+    const FiniteLaurentMatrix<Rational>& layer,
+    const std::string& context) {
+  try {
+    (void)factor_finite_laurent_system(
+        layer, context + ": exact full-rank classification");
+    return std::nullopt;
+  } catch (const MatchingArithmeticError& error) {
+    if (error.code !=
+        MatchingArithmeticErrorCode::SingularOrIncompleteSystem)
+      throw;
+  }
+  const auto leading_matrix = epsilon_zero_matrix(layer, context);
+  const auto right = matching_detail::leading_null_relation(
+      leading_matrix, context + ": exact right kernel");
+  const auto transposed_layer = transpose_exact_matrix(layer);
+  const auto left = matching_detail::leading_null_relation(
+      epsilon_zero_matrix(transposed_layer, context),
+      context + ": exact left kernel");
+  if (right.rank + 1 != layer.size() ||
+      left.rank + 1 != layer.size() || !right.vector.has_value() ||
+      !left.vector.has_value())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+        context +
+            ": resonant layer is not a simple one-dimensional kernel");
+  Rational pairing(0);
+  for (std::size_t component = 0; component < layer.size(); ++component)
+    pairing += (*left.vector)[component] * (*right.vector)[component];
+  if (pairing.is_zero())
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+        context +
+            ": resonant zero eigenvalue is nonsemisimple and needs the exact Jordan ladder");
+  return ExactSimpleResonanceFrame{
+      exact_formal_null_vector(
+          layer, right, *left.vector,
+          context + ": exact right formal kernel"),
+      exact_formal_null_vector(
+          transposed_layer, left, *right.vector,
+          context + ": exact left formal kernel")};
+}
+
+inline EpsilonFrame<ComplexBall> exact_frame_to_ball(
+    const EpsilonFrame<Rational>& exact) {
+  std::vector<ComplexBall> coefficients;
+  coefficients.reserve(exact.coefficients().size());
+  for (const auto& coefficient : exact.coefficients())
+    coefficients.push_back(ComplexBall::from_strings(coefficient.str()));
+  return EpsilonFrame<ComplexBall>(exact.window(),
+                                   std::move(coefficients));
+}
+
+inline FiniteLaurentVector<ComplexBall> exact_vector_to_ball(
+    const FiniteLaurentVector<Rational>& exact) {
+  FiniteLaurentVector<ComplexBall> result;
+  result.reserve(exact.size());
+  for (const auto& component : exact)
+    result.push_back(exact_frame_to_ball(component));
+  return result;
 }
 
 inline bool material_frame(const EpsilonFrame<ComplexBall>& value) {
@@ -400,6 +725,10 @@ certify_backward_adjoint_taylor_tail(
       problem.q_lags.empty() || problem.c_transpose_lags.empty())
     throw std::invalid_argument(
         context + ": problem and Taylor solution disagree");
+  if (solution.max_log_power != 0)
+    throw std::domain_error(
+        context +
+        ": logarithmic composed adjoint requires the augmented log-stack tail theorem");
   const auto evaluation_upper = Magnitude::upper_abs(evaluation_point);
   const auto radius_lower = Magnitude::lower_abs(witness_radius);
   const auto radius_upper = Magnitude::upper_abs(witness_radius);
@@ -501,9 +830,56 @@ certify_backward_adjoint_taylor_tail(
           evaluation_ratio, problem.taylor_complete_max};
 }
 
+inline BackwardAdjointAdaptiveTailCertificate
+certify_backward_adjoint_taylor_tail_adaptive_witness(
+    const BackwardAdjointTaylorProblem& problem,
+    const BackwardAdjointTaylorResult& solution,
+    const PreparedSparseLocalMultiplierMatrix<ComplexBall>& row,
+    const ComplexBall& oriented_physical_jacobian,
+    const ComplexBall& evaluation_point,
+    const Rational& evaluation_modulus_exact,
+    const Rational& chart_radius_exact,
+    std::uint32_t maximum_attempts = 16,
+    const std::string& context =
+        "backward Fuchsian adjoint adaptive Taylor-tail certificate") {
+  if (evaluation_modulus_exact.sign() < 0 ||
+      !(evaluation_modulus_exact < chart_radius_exact) ||
+      maximum_attempts == 0)
+    throw std::invalid_argument(
+        context + ": invalid exact evaluation/chart witness interval");
+  const auto gap = chart_radius_exact - evaluation_modulus_exact;
+  std::string last_rejection;
+  Rational denominator(2);
+  for (std::uint32_t attempt = 0; attempt < maximum_attempts; ++attempt) {
+    const auto witness_exact =
+        evaluation_modulus_exact + gap / denominator;
+    const auto witness = ComplexBall::from_strings(witness_exact.str());
+    try {
+      const auto forcing =
+          backward_adjoint_forcing_cauchy_numerator_upper(
+              problem, row, oriented_physical_jacobian, witness,
+              context + ": forcing attempt " +
+                  std::to_string(attempt + 1));
+      auto tail = certify_backward_adjoint_taylor_tail(
+          problem, solution, evaluation_point, witness, forcing,
+          context + ": tail attempt " + std::to_string(attempt + 1));
+      return {std::move(tail), witness_exact};
+    } catch (const std::domain_error& error) {
+      last_rejection = error.what();
+    }
+    denominator *= Rational(2);
+  }
+  throw std::domain_error(
+      context + ": no certified witness radius in " +
+      std::to_string(maximum_attempts) +
+      " deterministic dyadic attempts; last rejection=" +
+      last_rejection);
+}
+
 inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
     const BackwardAdjointTaylorProblem& problem,
-    const std::string& context = "backward Fuchsian adjoint") {
+    const PreparedPhysicalClearedODE<Rational>* exact_physical_ode,
+    const std::string& context) {
   using namespace adjoint_observable_detail;
   if (problem.dimension == 0 || problem.taylor_complete_max == 0 ||
       problem.q_lags.empty() || problem.c_transpose_lags.empty())
@@ -519,6 +895,26 @@ inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
     if (rhs.size() != problem.dimension)
       throw std::invalid_argument(
           context + ": forcing vector has the wrong dimension");
+  if (exact_physical_ode != nullptr) {
+    physical_ode_detail::validate_ode(*exact_physical_ode);
+    if (exact_physical_ode->dimension != problem.dimension)
+      throw std::invalid_argument(
+          context + ": exact Rational shadow has the wrong dimension");
+  }
+  auto structural_complete_max = problem.q_lags.front().complete_max();
+  for (const auto& q : problem.q_lags)
+    structural_complete_max = std::min(
+        structural_complete_max, q.complete_max());
+  for (const auto& matrix : problem.c_transpose_lags)
+    for (const auto& row : matrix)
+      for (const auto& entry : row)
+        structural_complete_max = std::min(
+            structural_complete_max, entry.complete_max());
+  if (structural_complete_max < problem.required_epsilon_complete_max)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        context + ": operator does not cover the required epsilon output",
+        std::nullopt, std::nullopt, structural_complete_max);
 
   BackwardAdjointTaylorResult result;
   result.dimension = problem.dimension;
@@ -526,12 +922,28 @@ inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
   result.common_epsilon_complete_max =
       std::numeric_limits<std::int32_t>::max();
   result.coefficients.reserve(problem.taylor_complete_max);
+  result.higher_log_coefficients.reserve(problem.taylor_complete_max);
 
   for (std::uint32_t n = 1; n <= problem.taylor_complete_max; ++n) {
-    auto rhs = n <= problem.forcing.size()
-        ? problem.forcing[n - 1]
-        : structural_zero_vector(
-              problem.dimension, problem.required_epsilon_complete_max);
+    const auto rhs_log_max = result.max_log_power;
+    std::vector<FiniteLaurentVector<ComplexBall>> rhs_logs;
+    rhs_logs.reserve(static_cast<std::size_t>(rhs_log_max) + 1);
+    rhs_logs.push_back(n <= problem.forcing.size()
+                           ? problem.forcing[n - 1]
+                           : structural_zero_vector(
+                                 problem.dimension,
+                                 structural_complete_max));
+    for (std::uint32_t log = 1; log <= rhs_log_max; ++log)
+      rhs_logs.push_back(structural_zero_vector(
+          problem.dimension, structural_complete_max));
+
+    const auto previous_log = [&](std::uint32_t order,
+                                  std::uint32_t log)
+        -> const FiniteLaurentVector<ComplexBall>* {
+      if (log == 0) return &result.coefficients.at(order - 1);
+      const auto& higher = result.higher_log_coefficients.at(order - 1);
+      return log - 1 < higher.size() ? &higher[log - 1] : nullptr;
+    };
 
     const auto maximum_lag = std::min<std::size_t>(
         n - 1,
@@ -539,19 +951,21 @@ inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
                  problem.c_transpose_lags.size()) - 1);
     for (std::size_t lag = 1; lag <= maximum_lag; ++lag) {
       const auto previous_n = n - static_cast<std::uint32_t>(lag);
-      const auto& previous = result.coefficients.at(previous_n - 1);
       const auto& q = lag < problem.q_lags.size()
           ? problem.q_lags[lag]
-          : structural_zero_frame(problem.required_epsilon_complete_max);
+          : structural_zero_frame(structural_complete_max);
       const auto* c = lag < problem.c_transpose_lags.size()
           ? &problem.c_transpose_lags[lag]
           : nullptr;
-      const auto contribution = apply_lag_operator(
-          q, c, previous_n, previous,
-          problem.required_epsilon_complete_max);
-      for (std::uint32_t component = 0;
-           component < problem.dimension; ++component)
-        rhs[component] = rhs[component] - contribution[component];
+      for (std::uint32_t log = 0; log <= rhs_log_max; ++log) {
+        const auto* current = previous_log(previous_n, log);
+        if (current == nullptr) continue;
+        const auto* above = previous_log(previous_n, log + 1);
+        const auto contribution = apply_log_lag_operator(
+            q, c, previous_n, *current, above,
+            structural_complete_max);
+        subtract_vector_in_place(rhs_logs[log], contribution);
+      }
     }
 
     FiniteLaurentMatrix<ComplexBall> layer(
@@ -565,36 +979,185 @@ inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
         layer[row].push_back(std::move(value));
       }
     }
-
-    FiniteLaurentVector<ComplexBall> solved;
-    try {
-      auto factorization = factor_preconditioned_acb_finite_laurent_system(
-          std::move(layer), context + ": Taylor layer " +
-                                std::to_string(n));
-      solved = solve_factorized_finite_laurent_system(
-          factorization, std::move(rhs),
-          context + ": Taylor coefficient " + std::to_string(n));
-    } catch (const MatchingArithmeticError& error) {
-      throw MatchingArithmeticError(
-          error.code,
+    std::optional<FiniteLaurentMatrix<Rational>> exact_layer;
+    std::optional<ExactSimpleResonanceFrame> resonance;
+    if (exact_physical_ode != nullptr) {
+      auto exact_complete_max = layer.front().front().complete_max();
+      for (const auto& row : layer)
+        for (const auto& entry : row)
+          exact_complete_max = std::min(
+              exact_complete_max, entry.complete_max());
+      exact_layer = exact_backward_adjoint_layer(
+          *exact_physical_ode, n, exact_complete_max,
+          context + ": Taylor layer " + std::to_string(n));
+      apply_exact_backward_adjoint_layer_zeros(
+          layer, *exact_layer,
           context + ": Taylor layer " + std::to_string(n) +
-              " is singular or epsilon-incomplete; a logarithmic/resonant "
-              "Fuchsian completion is required; detail=" + error.what(),
-          error.row, error.column, error.epsilon_power);
+              ": Rational-shadow structural projection");
+      resonance = exact_simple_resonance_frame(
+          *exact_layer,
+          context + ": Taylor layer " + std::to_string(n));
     }
-    for (const auto& component : solved) {
-      result.common_epsilon_complete_max = std::min(
-          result.common_epsilon_complete_max, component.complete_max());
-      if (component.complete_max() <
-          problem.required_epsilon_complete_max)
+
+    std::vector<FiniteLaurentVector<ComplexBall>> solved_logs;
+    if (!resonance.has_value()) {
+      try {
+        auto factorization =
+            factor_preconditioned_acb_finite_laurent_system(
+                layer, context + ": Taylor layer " + std::to_string(n));
+        solved_logs.resize(rhs_logs.size());
+        for (std::size_t reverse = rhs_logs.size(); reverse-- > 0;) {
+          auto adjusted = rhs_logs[reverse];
+          if (reverse + 1 < solved_logs.size()) {
+            const auto shifted =
+                epsilon_shift_vector(solved_logs[reverse + 1]);
+            const auto derivative = apply_lag_operator(
+                problem.q_lags.front(), nullptr, 1, shifted,
+                structural_complete_max);
+            subtract_vector_in_place(adjusted, derivative);
+          }
+          solved_logs[reverse] = solve_factorized_finite_laurent_system(
+              factorization, std::move(adjusted),
+              context + ": Taylor coefficient " + std::to_string(n) +
+                  ", log " + std::to_string(reverse));
+        }
+      } catch (const MatchingArithmeticError& error) {
         throw MatchingArithmeticError(
-            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            error.code,
             context + ": Taylor layer " + std::to_string(n) +
-                " does not cover the required epsilon output",
-            std::nullopt, std::nullopt,
-            component.complete_max());
+                " is singular or epsilon-incomplete; a logarithmic/resonant "
+                "Fuchsian completion is required; detail=" + error.what(),
+            error.row, error.column, error.epsilon_power);
+      }
+    } else {
+      const auto right_kernel =
+          exact_vector_to_ball(resonance->right_kernel);
+      const auto left_kernel =
+          exact_vector_to_ball(resonance->left_kernel);
+      if (right_kernel.size() != problem.dimension ||
+          left_kernel.size() != problem.dimension)
+        throw std::logic_error(
+            context + ": exact resonant frame changed dimension");
+
+      FiniteLaurentMatrix<ComplexBall> bordered;
+      bordered.reserve(static_cast<std::size_t>(problem.dimension) + 1);
+      for (std::uint32_t row = 0; row < problem.dimension; ++row) {
+        auto bordered_row = layer[row];
+        bordered_row.push_back(
+            (problem.q_lags.front() * right_kernel[row]).shifted(1));
+        bordered.push_back(std::move(bordered_row));
+      }
+      FiniteLaurentVector<ComplexBall> gauge = left_kernel;
+      gauge.push_back(structural_zero_frame(
+          structural_complete_max));
+      bordered.push_back(std::move(gauge));
+
+      const auto exact_complete_max = exact_layer->front().front()
+                                              .complete_max();
+      const auto exact_q0 = expand_exact_epsilon_rational(
+          exact_physical_ode->q_lags.front(), exact_complete_max,
+          context + ": exact resonant q0");
+      FiniteLaurentMatrix<Rational> exact_bordered;
+      exact_bordered.reserve(
+          static_cast<std::size_t>(problem.dimension) + 1);
+      for (std::uint32_t row = 0; row < problem.dimension; ++row) {
+        auto bordered_row = (*exact_layer)[row];
+        bordered_row.push_back(
+            (exact_q0 * resonance->right_kernel[row]).shifted(1));
+        exact_bordered.push_back(std::move(bordered_row));
+      }
+      auto exact_gauge = resonance->left_kernel;
+      exact_gauge.push_back(EpsilonFrame<Rational>::zero(
+          exact_complete_max));
+      exact_bordered.push_back(std::move(exact_gauge));
+      apply_exact_backward_adjoint_layer_zeros(
+          bordered, exact_bordered,
+          context + ": Taylor layer " + std::to_string(n) +
+              ": exact resonant bordered projection");
+      auto factorization =
+          factor_preconditioned_acb_finite_laurent_system(
+              bordered, context + ": Taylor layer " +
+                            std::to_string(n) +
+                            ": simple resonant bordered solve");
+
+      solved_logs.assign(
+          rhs_logs.size() + 1,
+          structural_zero_vector(
+              problem.dimension, structural_complete_max));
+      for (std::size_t log = 0; log < rhs_logs.size(); ++log) {
+        auto adjusted = rhs_logs[log];
+        subtract_vector_in_place(
+            adjusted, apply_finite_laurent_matrix(layer, solved_logs[log]));
+        auto bordered_rhs = std::move(adjusted);
+        bordered_rhs.push_back(structural_zero_frame(
+            structural_complete_max));
+        auto solved = solve_factorized_finite_laurent_system(
+            factorization, std::move(bordered_rhs),
+            context + ": Taylor coefficient " + std::to_string(n) +
+                ", resonant log " + std::to_string(log));
+        FiniteLaurentVector<ComplexBall> correction;
+        correction.reserve(problem.dimension);
+        for (std::uint32_t component = 0;
+             component < problem.dimension; ++component)
+          correction.push_back(std::move(solved[component]));
+        add_vector_in_place(solved_logs[log], correction);
+        const auto obstruction = std::move(solved.back());
+        FiniteLaurentVector<ComplexBall> raised;
+        raised.reserve(problem.dimension);
+        for (const auto& component : right_kernel)
+          raised.push_back(component * obstruction);
+        add_vector_in_place(solved_logs[log + 1], raised);
+      }
+      const auto top_residual = apply_finite_laurent_matrix(
+          layer, solved_logs.back());
+      for (std::size_t component = 0;
+           component < top_residual.size(); ++component)
+        for (std::int64_t raw_power = top_residual[component].min_power();
+             raw_power <= top_residual[component].complete_max();
+             ++raw_power)
+          if (!top_residual[component]
+                   .coefficient(static_cast<std::int32_t>(raw_power))
+                   .contains_zero())
+            throw MatchingArithmeticError(
+                MatchingArithmeticErrorCode::SaturationFailure,
+                context + ": resonant top-log residual excludes zero",
+                component, std::nullopt,
+                static_cast<std::int32_t>(raw_power));
     }
-    result.coefficients.push_back(std::move(solved));
+
+    while (solved_logs.size() > 1) {
+      const auto& last = solved_logs.back();
+      bool material = false;
+      for (const auto& component : last)
+        material = material || material_frame(component);
+      if (material) break;
+      solved_logs.pop_back();
+    }
+    for (std::size_t log_power = 0; log_power < solved_logs.size();
+         ++log_power)
+      for (const auto& component : solved_logs[log_power]) {
+        if (!material_frame(component)) continue;
+        const auto evaluated_complete = matching_detail::checked_power(
+            static_cast<std::int64_t>(component.complete_max()) +
+                static_cast<std::int64_t>(log_power),
+            "backward adjoint evaluated log completeness");
+        result.common_epsilon_complete_max = std::min(
+            result.common_epsilon_complete_max, evaluated_complete);
+        if (evaluated_complete <
+            problem.required_epsilon_complete_max)
+          throw MatchingArithmeticError(
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+              context + ": Taylor layer " + std::to_string(n) +
+                  " does not cover the required epsilon output",
+              std::nullopt, std::nullopt,
+              evaluated_complete);
+      }
+    result.max_log_power = std::max<std::uint32_t>(
+        result.max_log_power,
+        static_cast<std::uint32_t>(solved_logs.size() - 1));
+    result.coefficients.push_back(std::move(solved_logs.front()));
+    solved_logs.erase(solved_logs.begin());
+    result.higher_log_coefficients.push_back(std::move(solved_logs));
   }
 
   if (result.coefficients.size() >= 2) {
@@ -608,24 +1171,65 @@ inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
   return result;
 }
 
+inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
+    const BackwardAdjointTaylorProblem& problem,
+    const std::string& context = "backward Fuchsian adjoint") {
+  return solve_backward_adjoint_taylor(problem, nullptr, context);
+}
+
+inline FiniteLaurentVector<ComplexBall> evaluate_backward_adjoint_taylor(
+    const BackwardAdjointTaylorResult& solution,
+    const ComplexBall& point,
+    const ComplexBall& logarithm,
+    const std::string& context) {
+  using namespace adjoint_observable_detail;
+  if (solution.dimension == 0 || solution.coefficients.empty() ||
+      solution.coefficients.size() != solution.taylor_complete_max ||
+      solution.higher_log_coefficients.size() !=
+          solution.taylor_complete_max)
+    throw std::invalid_argument(context + ": malformed Taylor solution");
+  auto value = structural_zero_vector(
+      solution.dimension, solution.common_epsilon_complete_max);
+  auto log_scale = ComplexBall(1);
+  for (std::uint32_t log = 0; log <= solution.max_log_power; ++log) {
+    auto polynomial = structural_zero_vector(
+        solution.dimension, solution.common_epsilon_complete_max);
+    for (std::size_t reverse = solution.coefficients.size(); reverse-- > 0;) {
+      const FiniteLaurentVector<ComplexBall>* coefficient = nullptr;
+      if (log == 0) {
+        coefficient = &solution.coefficients[reverse];
+      } else {
+        const auto& higher = solution.higher_log_coefficients[reverse];
+        if (log - 1 < higher.size()) coefficient = &higher[log - 1];
+      }
+      for (std::uint32_t component = 0;
+           component < solution.dimension; ++component) {
+        polynomial[component] = polynomial[component].scaled(point);
+        if (coefficient != nullptr)
+          polynomial[component] = polynomial[component] +
+                                  (*coefficient)[component];
+      }
+    }
+    for (std::uint32_t component = 0;
+         component < solution.dimension; ++component) {
+      auto term = polynomial[component].scaled(point);
+      if (log > 0) term = term.shifted(static_cast<std::int32_t>(log));
+      term = term.scaled(log_scale);
+      value[component] = value[component] + term;
+    }
+    if (log < solution.max_log_power)
+      log_scale = local_detail::cb_div_ui(
+          log_scale * logarithm, log + 1);
+  }
+  return value;
+}
+
 inline FiniteLaurentVector<ComplexBall> evaluate_backward_adjoint_taylor(
     const BackwardAdjointTaylorResult& solution,
     const ComplexBall& point,
     const std::string& context = "backward Fuchsian adjoint evaluation") {
-  using namespace adjoint_observable_detail;
-  if (solution.dimension == 0 || solution.coefficients.empty() ||
-      solution.coefficients.size() != solution.taylor_complete_max)
-    throw std::invalid_argument(context + ": malformed Taylor solution");
-  auto value = structural_zero_vector(
-      solution.dimension, solution.common_epsilon_complete_max);
-  for (std::size_t reverse = solution.coefficients.size(); reverse-- > 0;) {
-    for (std::uint32_t component = 0;
-         component < solution.dimension; ++component)
-      value[component] = value[component].scaled(point) +
-                         solution.coefficients[reverse][component];
-  }
-  for (auto& component : value) component = component.scaled(point);
-  return value;
+  return evaluate_backward_adjoint_taylor(
+      solution, point, local_detail::cb_log(point), context);
 }
 
 inline EpsilonFrame<ComplexBall> contract_backward_adjoint(

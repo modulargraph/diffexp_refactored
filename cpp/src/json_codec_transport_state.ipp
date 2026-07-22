@@ -927,6 +927,97 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return equation;
   }
 
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+  terminal_rational_shadow_physical_equation() const {
+    const auto owners = terminal_acb_basis_owners();
+    if (owners.empty())
+      throw std::logic_error(
+          "terminal composed observable has no Rational-shadow basis owner");
+    std::vector<std::shared_ptr<const RationalShadowColumnWitness>> witnesses;
+    witnesses.reserve(owners.size());
+    bool any_witness = false;
+    bool all_witnesses = true;
+    for (const auto& owner : owners) {
+      auto witness = owner->rational_shadow_witness();
+      any_witness = any_witness || static_cast<bool>(witness);
+      all_witnesses = all_witnesses && static_cast<bool>(witness);
+      witnesses.push_back(std::move(witness));
+    }
+    if (!any_witness) {
+      const auto acb =
+          std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+      auto exact_owner = acb ? acb->exact_shadow_equation_owner() : nullptr;
+      if (!exact_owner) {
+        const auto receiving_owner =
+            std::dynamic_pointer_cast<CompositeSCCChartBase>(
+                owners.front()->retained_equation_owner());
+        if (receiving_owner) {
+          auto equation =
+              receiving_owner->rational_shadow_physical_equation();
+          if (equation) {
+            if (equation->dimension != owners.size())
+              throw std::logic_error(
+                  "terminal composed observable manifest Rational-shadow equation has the wrong dimension");
+            return equation;
+          }
+        }
+      }
+      if (!exact_owner) return nullptr;
+      if (std::string(exact_owner->equation_scalar_domain()) != "rational")
+        throw std::logic_error(
+            "terminal composed observable retained shadow owner is not Rational");
+      auto erased = exact_owner->physical_ode_erased();
+      if (!erased)
+        throw std::domain_error(
+            "terminal composed observable retained shadow owner has no physical equation");
+      auto equation = std::static_pointer_cast<
+          const PreparedPhysicalClearedODE<Rational>>(std::move(erased));
+      if (!equation || equation->dimension != owners.size())
+        throw std::logic_error(
+            "terminal composed observable retained shadow equation has the wrong dimension");
+      return equation;
+    }
+    if (!all_witnesses)
+      throw std::logic_error(
+          "terminal composed observable has only a partial Rational-shadow basis");
+    std::shared_ptr<const PhysicalEquationOwnerBase> exact_owner;
+    std::string shadow_identity;
+    for (std::size_t column = 0; column < owners.size(); ++column) {
+      const auto& witness = witnesses[column];
+      if (!witness || !witness->exact_equation_owner ||
+          witness->rational_shadow_identity.empty())
+        throw std::domain_error(
+            "terminal composed observable has no retained exact Rational-shadow equation");
+      if (column == 0) {
+        exact_owner = witness->exact_equation_owner;
+        shadow_identity = witness->rational_shadow_identity;
+      } else if (witness->exact_equation_owner.get() != exact_owner.get() ||
+                 witness->rational_shadow_identity != shadow_identity) {
+        throw std::logic_error(
+            "terminal composed observable columns disagree on their exact Rational-shadow owner");
+      }
+    }
+    if (!exact_owner ||
+        std::string(exact_owner->equation_scalar_domain()) != "rational")
+      throw std::logic_error(
+          "terminal composed observable exact shadow is not Rational");
+    const auto* retained_shadow =
+        exact_owner->matching_scc_rational_shadow_identity();
+    if (retained_shadow == nullptr || *retained_shadow != shadow_identity)
+      throw std::logic_error(
+          "terminal composed observable exact owner has a different Rational-shadow identity");
+    auto erased = exact_owner->physical_ode_erased();
+    if (!erased)
+      throw std::domain_error(
+          "terminal composed observable exact owner has no physical equation");
+    auto equation = std::static_pointer_cast<
+        const PreparedPhysicalClearedODE<Rational>>(std::move(erased));
+    if (!equation || equation->dimension != owners.size())
+      throw std::logic_error(
+          "terminal composed observable exact physical equation has the wrong dimension");
+    return equation;
+  }
+
   FiniteLaurentVector<ComplexBall>
   terminal_acb_incoming_physical_value() const {
     const auto acb =

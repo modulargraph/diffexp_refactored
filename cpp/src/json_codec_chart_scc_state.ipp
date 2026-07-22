@@ -814,6 +814,8 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
   virtual const std::string& geometry_record() const = 0;
   virtual std::uint32_t dimension() const = 0;
   virtual const CompositeWorkContract& work_contract() const = 0;
+  virtual std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+  rational_shadow_physical_equation() const = 0;
   // Express a singular physical parent value in the exact reduced
   // block-spectral normal frame used at the residue.  This frame exists
   // independently of whether the recurrence happened to need the
@@ -2388,7 +2390,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                     std::vector<CompositeSCCBlock<Scalar>> blocks,
                     std::vector<CompositeSCCCoupling<Scalar>> couplings,
                     std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
-                        physical_equation)
+                        physical_equation,
+                    std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+                        rational_shadow_physical_equation)
       : CompositeSCCChartBase(std::move(handle), std::move(key),
                               std::move(exact_identity),
                               std::move(signature),
@@ -2399,11 +2403,21 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         geometry_record_(std::move(geometry_record)),
         retained_geometry_(std::move(retained_geometry)), work_(work),
         blocks_(std::move(blocks)), couplings_(std::move(couplings)),
-        physical_equation_(std::move(physical_equation)) {
+        physical_equation_(std::move(physical_equation)),
+        rational_shadow_physical_equation_(
+            std::move(rational_shadow_physical_equation)) {
     if (physical_equation_ &&
         physical_equation_->owner_signature_identity != exact_identity_)
       throw std::invalid_argument(
           "composite physical q/C payload names a different full parent owner identity");
+    if (rational_shadow_physical_equation_ &&
+        (!physical_equation_ ||
+         rational_shadow_physical_equation_->owner_signature_identity !=
+             exact_identity_ ||
+         rational_shadow_physical_equation_->payload_identity !=
+             physical_equation_->payload_identity))
+      throw std::invalid_argument(
+          "composite Rational-shadow q/C payload names a different physical equation");
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>)
       pseudo_target_cache_ =
@@ -2792,6 +2806,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   std::uint32_t dimension() const override { return dimension_; }
   const CompositeWorkContract& work_contract() const override {
     return work_;
+  }
+
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+  rational_shadow_physical_equation() const override {
+    return rational_shadow_physical_equation_;
   }
 
   std::optional<std::pair<FiniteLaurentVector<ComplexBall>, std::string>>
@@ -3475,6 +3494,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
          physical_equation_
              ? json::value(physical_equation_->payload_identity)
              : json::value(nullptr)},
+        {"rational_shadow_physical_ode",
+         rational_shadow_physical_equation_ ? "retained" : "unavailable"},
         {"coupling_groups", couplings_.size()},
         {"coupling_entries", active_entries + proven_zero_entries},
         {"active_coupling_entries", active_entries},
@@ -5076,6 +5097,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   std::vector<CompositeSCCCoupling<Scalar>> couplings_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
       physical_equation_;
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+      rational_shadow_physical_equation_;
   std::unique_ptr<PseudoTargetCache<Scalar>> pseudo_target_cache_;
   std::atomic<std::uint64_t> column_solves_{0};
   mutable std::mutex column_stats_mutex_;

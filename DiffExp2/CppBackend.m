@@ -760,6 +760,23 @@ persistentSCCHandles[handle_Association] := Module[{session, scc},
       Module]];
   <|"Session" -> session, "SCC" -> scc|>];
 
+persistentSCCManifestKeysQ[manifest_Association] := Module[
+  {required = {"identity", "parent", "blocks", "couplings",
+      "physical_ode"}, optional = {"rational_shadow_identity",
+      "rational_shadow_physical_ode"}, keys = Keys[manifest]},
+  ContainsAll[keys, required] && ContainsOnly[keys, Join[required, optional]]];
+
+persistentSCCFilledManifest[manifest_Association, filledBlocks_List] :=
+  Join[<|"identity" -> manifest["identity"],
+    "rational_shadow_identity" -> Lookup[manifest,
+      "rational_shadow_identity", manifest["identity"]],
+    "parent" -> manifest["parent"], "blocks" -> filledBlocks,
+    "couplings" -> manifest["couplings"],
+    "physical_ode" -> manifest["physical_ode"]|>,
+   If[KeyExistsQ[manifest, "rational_shadow_physical_ode"],
+     <|"rational_shadow_physical_ode" ->
+        manifest["rational_shadow_physical_ode"]|>, <||>]];
+
 PreparePersistentSCC[groups_List, manifest_Association] := Module[
   {requiredKeys = {"identity", "parent", "blocks", "couplings",
       "physical_ode"}, allowedKeys,
@@ -771,11 +788,12 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
     Return[Failure["CppBackend", <|"Detail" ->
       "persistent SCC preparation requires a nonempty list of request groups"|>],
       Module]];
-  allowedKeys = Append[requiredKeys, "rational_shadow_identity"];
-  If[!MemberQ[Sort /@ {requiredKeys, allowedKeys}, Sort[Keys[manifest]]],
+  allowedKeys = Join[requiredKeys,
+    {"rational_shadow_identity", "rational_shadow_physical_ode"}];
+  If[!persistentSCCManifestKeysQ[manifest],
     Return[Failure["CppBackend", <|"Detail" ->
       "persistent SCC manifest must contain exactly the lowercase native fields",
-      "ExpectedKeys" -> {requiredKeys, allowedKeys},
+      "RequiredKeys" -> requiredKeys, "AllowedKeys" -> allowedKeys,
       "ActualKeys" -> Keys[manifest]|>],
       Module]];
   blocks = manifest["blocks"];
@@ -785,6 +803,8 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
         manifest["identity"]]] ||
       StringLength[Lookup[manifest, "rational_shadow_identity",
         manifest["identity"]]] == 0 ||
+      (KeyExistsQ[manifest, "rational_shadow_physical_ode"] &&
+       !AssociationQ[manifest["rational_shadow_physical_ode"]]) ||
       !AssociationQ[manifest["parent"]] || !ListQ[blocks] ||
       !AllTrue[blocks, AssociationQ] || !ListQ[manifest["couplings"]] ||
       !AssociationQ[manifest["physical_ode"]],
@@ -821,12 +841,7 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
   filledBlocks = MapThread[Join[#1, <|"chart" -> #2["Chart"],
         "principal_identity" -> #2["ChartIdentity"]|>] &,
     {blocks, preparedGroups}];
-  filledManifest = <|"identity" -> manifest["identity"],
-    "rational_shadow_identity" -> Lookup[manifest,
-      "rational_shadow_identity", manifest["identity"]],
-    "parent" -> manifest["parent"], "blocks" -> filledBlocks,
-    "couplings" -> manifest["couplings"],
-    "physical_ode" -> manifest["physical_ode"]|>;
+  filledManifest = persistentSCCFilledManifest[manifest, filledBlocks];
   canonicalManifest = persistentCanonicalJSONValue[filledManifest];
   manifestJSON = Quiet[Check[ExportString[canonicalManifest, "RawJSON",
       "Compact" -> True], $Failed]];

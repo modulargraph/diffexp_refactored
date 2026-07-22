@@ -72,7 +72,7 @@ RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, matchDigits, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
    deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
-   saveNativeTransportCheckpoint,
+   saveNativeTransportCheckpoint, valueTransport,
    fireTimeout, firePath, fireBackend, fireCalc, fireModularWorkers,
    fireUseMultiprime, firePrimeLimit, fireKeepModularTables,
    fireDimensionSeparated, fireMultiprimeWidth, fireMPIExecutable,
@@ -146,6 +146,13 @@ RunnerSettingsFromEnvironment[] := Module[
     saveNativeTransportCheckpoint = parseFlag[
       "FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT",
       envOrDefault["FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT", "0"]],
+    (* PipelinePlan has always made value-vector transport the release
+       default.  Direct runner entry points (including seeded diagnostics and
+       timing gates) must parse the same default instead of silently falling
+       back to the legacy fundamental-matrix march when the variable is
+       absent. *)
+    valueTransport = parseFlag["DE2_VALUE_TRANSPORT",
+      envOrDefault["DE2_VALUE_TRANSPORT", "1"]],
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
@@ -214,7 +221,8 @@ RunnerSettingsFromEnvironment[] := Module[
     "MigrateLegacyPreparation" -> migrateLegacyPrep,
     "ResumeCheckpoint" -> resume, "CheckpointDirectory" -> checkpointDir,
     "AllowStaleCheckpoint" -> allowStale,
-    "SaveNativeTransportCheckpoint" -> saveNativeTransportCheckpoint
+    "SaveNativeTransportCheckpoint" -> saveNativeTransportCheckpoint,
+    "ValueTransport" -> valueTransport
   |>];
 
 Options[PipelinePlan] = {

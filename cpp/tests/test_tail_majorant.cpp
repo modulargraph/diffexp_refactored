@@ -243,12 +243,88 @@ void test_acb_and_loud_noncertification() {
         !corrupted_model.model.has_value());
 }
 
+void test_finite_epsilon_physical_tail_model() {
+  diffexp2::PreparedPhysicalClearedODE<ComplexBall> equation;
+  equation.dimension = 1;
+  diffexp2::ExactEpsilonRational<ComplexBall> q0;
+  q0.zero = false;
+  q0.valuation = 0;
+  q0.numerator = {ComplexBall(1)};
+  q0.denominator = {ComplexBall(1)};
+  equation.q_lags = {q0};
+  equation.c_lags.resize(2);
+  diffexp2::ExactEpsilonRational<ComplexBall> one_plus_epsilon;
+  one_plus_epsilon.zero = false;
+  one_plus_epsilon.valuation = 0;
+  one_plus_epsilon.numerator = {ComplexBall(1), ComplexBall(1)};
+  one_plus_epsilon.denominator = {ComplexBall(1)};
+  equation.c_lags[1].push_back(
+      {0, 0, std::move(one_plus_epsilon)});
+  equation.owner_signature_identity = "physical-owner:coupled-exp";
+  equation.payload_identity = "physical-payload:coupled-exp";
+  equation.exact_payload_record = "physical-record:coupled-exp";
+
+  diffexp2::EpsilonVector initial;
+  initial.epsilon = {0, 1};
+  initial.dimension = 1;
+  initial.coefficients = {ComplexBall(1), ComplexBall(0)};
+  const auto evolution = diffexp2::evolve_ordinary_center_value(
+      equation, initial, 4);
+  LocalSolution<ComplexBall> solution;
+  solution.chart.center_exact = "0";
+  solution.chart.scale_exact = "1";
+  solution.chart.radius = ComplexBall::from_strings("2");
+  solution.epsilon = initial.epsilon;
+  solution.taylor_complete_max = 4;
+  solution.dimension = 1;
+  solution.checkpoint_identity = "local:physical-coupled-exp:eo4";
+  LocalSector<ComplexBall> sector;
+  sector.a = ExactScalarDescriptor::rational("0");
+  sector.b = ExactScalarDescriptor::rational("0");
+  sector.log_power = 0;
+  sector.coefficients.assign(solution.sector_size(), ComplexBall(0));
+  for (std::uint32_t taylor = 0; taylor <= 4; ++taylor)
+    for (std::int32_t power = 0; power <= 1; ++power)
+      sector.coefficients[diffexp2::local_detail::sector_index(
+          solution, static_cast<std::size_t>(power), taylor, 0)] =
+          evolution.at(taylor).at(power, 0);
+  solution.sectors.push_back(std::move(sector));
+
+  auto built =
+      diffexp2::prepare_physical_regular_homogeneous_tail_model(
+          equation, solution);
+  check("epsilon-coupled physical ODE builds an augmented tail model",
+        built.status == TailMajorantStatus::Certified &&
+        built.model.has_value());
+  if (!built.model.has_value()) {
+    std::cout << "    physical model detail: " << built.detail << '\n';
+    return;
+  }
+  const auto evaluated =
+      diffexp2::evaluate_physical_local_solution_with_certified_tail(
+          *built.model, RealEvaluationPoint::rational("1/2"), "1");
+  check("epsilon-coupled physical point evaluation carries a certified tail",
+        evaluated.tail.status == TailMajorantStatus::Certified &&
+        evaluated.evaluation.value.error.guarantee ==
+            ErrorGuarantee::Certified);
+  const auto exact0 = exponential("1/2");
+  const auto exact1 = ComplexBall::from_strings("1/2") * exact0;
+  const auto remainder0 = exact0 - evaluated.evaluation.value.at(0, 0);
+  const auto remainder1 = exact1 - evaluated.evaluation.value.at(1, 0);
+  check("augmented tail envelope covers coupled epsilon coefficients",
+        Magnitude::upper_abs(remainder0) <=
+                evaluated.evaluation.value.error.absolute.at(0) &&
+            Magnitude::upper_abs(remainder1) <=
+                evaluated.evaluation.value.error.absolute.at(1));
+}
+
 }  // namespace
 
 int main() {
   ComplexBall::set_precision(256);
   test_rational_vertical_slice();
   test_acb_and_loud_noncertification();
+  test_finite_epsilon_physical_tail_model();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

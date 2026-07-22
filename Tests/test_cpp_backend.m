@@ -134,6 +134,19 @@ assert["cpp_uncertain_decimal_tail_retries_with_covering_interval",
   uncertainTailRecord["DecimalErrorExponent"] >=
     -Floor[Accuracy[uncertainTailWitness]]];
 
+(* A high-WP banana boundary can carry an essentially zero imaginary
+   cancellation remnant with less than one reliable relative digit.
+   RealDigits has no honest midpoint digit to publish, so the bridge must
+   send a zero-centred enclosing ball instead of rejecting the coefficient
+   or silently declaring it exact zero. *)
+subdigitRemnant =
+  -4.16139585655806706564333246`0.3512002696020475*^-1997;
+subdigitEncoded = DiffExp2`CppBackend`Private`arbInexactString[
+  subdigitRemnant, 1000];
+assert["cpp_subdigit_remnant_uses_zero_centered_covering_ball",
+  StringQ[subdigitEncoded] &&
+  subdigitEncoded === "[0 +/- 2e-1996]"];
+
 rMachineComplex = catchDE2[DiffExp2`Solve`SolveValueRegular[
   csExp, req[0, 0, 4],
   {DiffExp2`EpsSeries`ESNew[0, {1.25 + 0.5 I}]}]];

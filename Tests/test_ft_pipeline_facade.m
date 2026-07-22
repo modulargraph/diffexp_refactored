@@ -26,6 +26,17 @@ migrationPlan = FeynmanTrick`PipelinePlan["bubble",
 nativeCheckpointPlan = FeynmanTrick`PipelinePlan["bubble",
   "SaveNativeTransportCheckpoint" -> True];
 
+SetEnvironment["DE2_VALUE_TRANSPORT" -> None];
+defaultValueTransportRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["DE2_VALUE_TRANSPORT" -> "0"];
+legacyValueTransportRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["DE2_VALUE_TRANSPORT" -> "2"];
+invalidValueTransportRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["DE2_VALUE_TRANSPORT" -> None];
+
 SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "+1"];
 plusRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
@@ -109,6 +120,12 @@ assert["fast transport settings are explicit",
     plan["Environment", "DE2_CPP_THREADS"] === "6" &&
     plan["Settings", "MatchingDigits"] === 18 &&
     plan["Environment", "FT_MATCH_DIGITS"] === "18"];
+assert["direct runners share the release value-transport default",
+  AssociationQ[defaultValueTransportRunnerSettings] &&
+    TrueQ[defaultValueTransportRunnerSettings["ValueTransport"]] &&
+    AssociationQ[legacyValueTransportRunnerSettings] &&
+    legacyValueTransportRunnerSettings["ValueTransport"] === False &&
+    FailureQ[invalidValueTransportRunnerSettings]];
 assert["FIRE installation path is explicit and reproducible",
   plan["Environment", "FT_FIRE_PATH"] ===
     ExpandFileName[FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}]] &&

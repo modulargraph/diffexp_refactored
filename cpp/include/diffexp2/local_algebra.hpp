@@ -582,6 +582,7 @@ LocalSolution<Scalar> multiply_prepared_rational(
   std::vector<local_algebra_detail::AcbPolynomial>
       acb_kernel_polynomials;
   std::vector<bool> acb_kernel_material;
+  bool rational_taylor_constant = false;
   if constexpr (std::is_same_v<Scalar, ComplexBall>) {
     acb_kernel_polynomials.reserve(epsilon_width);
     acb_kernel_material.assign(epsilon_width, false);
@@ -596,6 +597,17 @@ LocalSolution<Scalar> multiply_prepared_rational(
         acb_kernel_material[epsilon] = true;
       }
     }
+  } else if constexpr (std::is_same_v<Scalar, Rational>) {
+    rational_taylor_constant = std::all_of(
+        multiplier.kernels.begin(),
+        multiplier.kernels.begin() +
+            static_cast<std::ptrdiff_t>(epsilon_width),
+        [taylor_width](const auto& kernel) {
+          return std::all_of(
+              kernel.begin() + 1,
+              kernel.begin() + static_cast<std::ptrdiff_t>(taylor_width),
+              [](const auto& coefficient) { return coefficient.is_zero(); });
+        });
   }
 
   for (const auto& sector : input.sectors) {
@@ -659,6 +671,51 @@ LocalSolution<Scalar> multiply_prepared_rational(
               product.coefficients[local_algebra_detail::flat_index(
                   output_epsilon, taylor, component, taylor_width,
                   input.dimension)] += coefficient;
+            }
+          }
+        }
+      }
+    } else if constexpr (std::is_same_v<Scalar, Rational>) {
+      if (rational_taylor_constant) {
+        // CASE-P polar weights are constant in the local Taylor variable.
+        // Keep the generic loop's epsilon-kernel accumulation order while
+        // avoiding its triangular scan over coefficients proven to be zero.
+        for (std::size_t out_ei = 0; out_ei < epsilon_width; ++out_ei) {
+          for (std::size_t kernel_ei = 0; kernel_ei <= out_ei; ++kernel_ei) {
+            const auto& coefficient = multiplier.kernels[kernel_ei][0];
+            if (coefficient.is_zero()) continue;
+            const auto input_ei = out_ei - kernel_ei;
+            for (std::size_t n = 0; n < taylor_width; ++n) {
+              for (std::uint32_t component = 0;
+                   component < input.dimension; ++component) {
+                product.coefficients[local_algebra_detail::flat_index(
+                    out_ei, n, component, taylor_width, input.dimension)] +=
+                    coefficient * sector.coefficients[
+                        local_algebra_detail::flat_index(
+                            input_ei, n, component, taylor_width,
+                            input.dimension)];
+              }
+            }
+          }
+        }
+      } else {
+        for (std::size_t out_ei = 0; out_ei < epsilon_width; ++out_ei) {
+          for (std::size_t kernel_ei = 0; kernel_ei <= out_ei; ++kernel_ei) {
+            const auto input_ei = out_ei - kernel_ei;
+            const auto& kernel = multiplier.kernels[kernel_ei];
+            for (std::size_t n = 0; n < taylor_width; ++n) {
+              for (std::size_t m = 0; m <= n; ++m) {
+                if (kernel[m].is_zero()) continue;
+                for (std::uint32_t component = 0;
+                     component < input.dimension; ++component) {
+                  product.coefficients[local_algebra_detail::flat_index(
+                      out_ei, n, component, taylor_width, input.dimension)] +=
+                      kernel[m] * sector.coefficients[
+                          local_algebra_detail::flat_index(
+                              input_ei, n - m, component, taylor_width,
+                              input.dimension)];
+                }
+              }
             }
           }
         }

@@ -40,7 +40,22 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
 
     const auto& raw_multiplier = as_object(
         entry.at("multiplier"), "prepared rational local-row multiplier");
-    auto epsilon_width = source.epsilon.width();
+    const auto available_width = [&]() {
+      if (const auto* analytic =
+              raw_multiplier.if_contains("analytic_coefficients"))
+        return as_array(
+            *analytic,
+            "prepared rational local-row analytic coefficients").size();
+      return as_array(
+          raw_multiplier.at("kernels"),
+          "prepared rational local-row epsilon kernels").size();
+    }();
+    // With no requested cap, consume the full honest intersection of the
+    // retained local and prepared multiplier prefixes.  A multiplier is not
+    // required to be as wide as its source.  Explicit caps remain strict
+    // below so a caller cannot silently receive less than it requested.
+    auto epsilon_width =
+        std::min(source.epsilon.width(), available_width);
     if (projected_complete_cap.has_value()) {
       const auto shift = as_i32(
           raw_multiplier.at("epsilon_shift"),
@@ -54,17 +69,6 @@ PreparedSparseLocalMultiplierMatrix<Scalar> parse_prepared_rational_row(
           ? std::size_t{1}
           : static_cast<std::size_t>(relative_needed) + 1;
       epsilon_width = std::min(source.epsilon.width(), required_width);
-
-      const auto available_width = [&]() {
-        if (const auto* analytic =
-                raw_multiplier.if_contains("analytic_coefficients"))
-          return as_array(
-              *analytic,
-              "prepared rational local-row analytic coefficients").size();
-        return as_array(
-            raw_multiplier.at("kernels"),
-            "prepared rational local-row epsilon kernels").size();
-      }();
       if (available_width < epsilon_width)
         throw std::invalid_argument(
             "prepared rational local-row multiplier consumer prefix is too short"

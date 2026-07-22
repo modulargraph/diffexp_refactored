@@ -45,6 +45,36 @@ struct ExactJordanIndicialCertificate {
   std::vector<std::uint32_t> position_in_block;
 };
 
+namespace singular_indicial_detail {
+
+/* Bound the log ladder needed by a finite exact recurrence.  Only Jordan
+   roots reached at a Taylor index in 0..nmax can raise that ladder; roots at
+   a larger integral offset belong to a recurrence layer which is never
+   constructed. */
+inline std::uint32_t exact_reachable_jordan_log_ceiling(
+    const ExactJordanIndicialCertificate& indicial,
+    const Rational& a, const Rational& b, std::uint32_t base,
+    std::uint32_t nmax, bool include_zero_offset) {
+  std::uint64_t result = base;
+  const Rational maximum_offset(std::to_string(nmax));
+  for (const auto& block : indicial.blocks) {
+    if (!(block.root.b == b)) continue;
+    const auto offset = block.root.a - a;
+    const bool nonnegative_integer =
+        offset.sign() >= 0 &&
+        (include_zero_offset || !offset.is_zero()) &&
+        offset.str().find('/') == std::string::npos;
+    if (nonnegative_integer && offset <= maximum_offset)
+      result += block.size();
+  }
+  if (result > std::numeric_limits<std::uint32_t>::max())
+    throw RecurrenceError(
+        "E5", "derived exact Jordan log ceiling exceeds uint32 range");
+  return static_cast<std::uint32_t>(result);
+}
+
+}  // namespace singular_indicial_detail
+
 struct ExactJordanScheduleStepCertificate {
   std::uint32_t taylor_index = 0;
   std::uint32_t block_index = 0;

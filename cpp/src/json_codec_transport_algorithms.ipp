@@ -1720,7 +1720,7 @@ std::vector<LocalSolution<ComplexBall>>
 project_terminal_acb_basis_row(
     const StoredPlannedMatchHop& match,
     const json::object& row,
-    std::int32_t projected_complete_cap,
+    std::optional<std::int32_t> projected_complete_cap,
     const std::string& context) {
   // Preserve the same stable association used by the certified match:
   //
@@ -1735,18 +1735,20 @@ project_terminal_acb_basis_row(
   auto basis = match.terminal_acb_factorized_basis(
       context + ":factorized-basis");
   std::vector<LocalSolution<ComplexBall>> projected;
-  projected.reserve(basis.size());
-  for (std::size_t column = 0; column < basis.size(); ++column) {
+  projected.reserve(basis->size());
+  for (std::size_t column = 0; column < basis->size(); ++column) {
     // A shorter Taylor prefix may have been selected to make the pointwise
     // matching solve numerically stable.  That prefix records how the
     // constant connection weights were obtained; it is not a new local
     // solution and cannot truncate a downstream line or endpoint functional.
     // Apply the certified weights to the complete retained physical basis.
-    auto source = basis[column];
+    auto source = (*basis)[column];
     auto matrix = parse_prepared_rational_row<ComplexBall>(
         row, source, projected_complete_cap);
     auto output = apply_prepared_scalar_row_window(
-        matrix, source, projected_complete_cap,
+        matrix, source,
+        projected_complete_cap.value_or(
+            std::numeric_limits<std::int32_t>::max()),
         context + ":physical-column:" +
             std::to_string(column));
     auto scalar = output.has_value()
@@ -1860,11 +1862,16 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
     const ObservableEpsilonContract& epsilon_contract,
     const ResolvedTransportEndpointBinding& binding,
     const std::string& context) {
-  const auto projection_cap =
-      terminal_factorized_physical_complete_cap(
-          match, epsilon_contract.requested.complete_max, 0,
-          context + ":pointwise-window", true);
-  auto projected = project_terminal_acb_physical_basis_row(
+  matching_detail::ScopedAcbPrecision exact_shadow_precision(
+      match.terminal_acb_extra_precision_bits());
+  // The adjoint factorization can be a genuinely Laurent system.  Its
+  // inverse valuation and elimination-tail loss are properties of the live
+  // endpoint matrix, not a universal integer guard derivable from the
+  // requested output window.  This is a final consumer, so retain every
+  // honestly available prepared-row coefficient and let the adjoint's exact
+  // finite-window checks decide whether the upstream reservoir is sufficient.
+  const std::optional<std::int32_t> projection_cap = std::nullopt;
+  auto projected = project_terminal_acb_basis_row(
       match, row, projection_cap,
       context + ":row");
   FiniteLaurentMatrix<ComplexBall> physical_rows;
@@ -1892,9 +1899,9 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
               std::to_string(column)));
     }
     physical_rows.push_back(std::move(point_row));
-    auto contracted =
-        match.contract_terminal_acb_physical_functionals(
-        physical_rows, context + ":point-contraction");
+    auto contracted = match.adjoint_contract_terminal_acb_functionals(
+        physical_rows, epsilon_contract.required_complete_max,
+        context + ":factorized-adjoint-point-contraction", true);
     if (contracted.size() != 1)
       throw std::logic_error(
           context +
@@ -1993,9 +2000,9 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
     }
     physical_rows.push_back(std::move(row_frames));
   }
-  auto contracted =
-      match.contract_terminal_acb_physical_functionals(
-      physical_rows, context + ":center-contraction");
+  auto contracted = match.adjoint_contract_terminal_acb_functionals(
+      physical_rows, epsilon_contract.required_complete_max,
+      context + ":factorized-adjoint-center-contraction", true);
   if (contracted.size() != 1 + divergent_keys.size())
     throw std::logic_error(
         context +
@@ -3315,18 +3322,17 @@ StoredLineIntegral integrate_transport_stored_row_tile(
 }
 
 Magnitude terminal_factorized_divergent_scale(
-    const StoredPlannedMatchHop& match,
+    const FiniteLaurentVector<ComplexBall>& weights,
     const std::vector<
         const StoredLineIntegral::DeferredDivergentGroup*>&
-        physical_groups,
+        selected_groups,
     std::int32_t output_power) {
-  const auto& weights = match.terminal_acb_physical_weights();
-  if (physical_groups.size() != weights.size())
+  if (selected_groups.size() != weights.size())
     throw std::logic_error(
-        "terminal divergent scale differs from the physical match dimension");
+        "terminal divergent scale differs from the selected match dimension");
   Magnitude result = Magnitude::zero();
   for (std::size_t column = 0; column < weights.size(); ++column) {
-    const auto* group = physical_groups[column];
+    const auto* group = selected_groups[column];
     if (group == nullptr) continue;
     const auto& weight = weights[column];
     for (std::int64_t raw_weight_power = weight.min_power();
@@ -3411,6 +3417,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   if (!match.has_terminal_acb_factorization())
     throw std::invalid_argument(
         "terminal factorized line integration has no certified Acb factorization");
+  matching_detail::ScopedAcbPrecision exact_shadow_precision(
+      match.terminal_acb_extra_precision_bits());
 
   const auto* diagnostic_route_raw =
       std::getenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
@@ -3421,29 +3429,37 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   if (!diagnostic_route.empty() &&
       diagnostic_route != "factorized" &&
       diagnostic_route != "physical" &&
-      diagnostic_route != "adjoint")
+      diagnostic_route != "adjoint" &&
+      diagnostic_route != "compare")
     throw std::invalid_argument(
         "DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE must be "
-        "factorized, physical, or adjoint");
-  const bool diagnostic_physical =
-      diagnostic_route == "physical" ||
-      diagnostic_route == "adjoint";
+        "factorized, physical, adjoint, or compare");
+  const bool diagnostic_physical = diagnostic_route == "physical";
   const bool direct_physical =
       diagnostic_route == "physical";
+  const bool direct_factorized =
+      diagnostic_route == "factorized";
+  const bool compare_factorized =
+      diagnostic_route == "compare";
   const std::string contraction_provenance =
       diagnostic_route == "physical"
       ? "terminal direct-physical diagnostic contraction"
-      : diagnostic_route == "adjoint"
-      ? "terminal adjoint diagnostic contraction"
-      : "terminal factorized production contraction";
-  const auto projection_cap =
-      terminal_factorized_physical_complete_cap(
-          match, epsilon_contract.requested.complete_max, 1,
-          "terminal factorized primitive window",
-          direct_physical);
+      : diagnostic_route == "factorized"
+      ? "terminal direct-factorized diagnostic contraction"
+      : diagnostic_route == "compare"
+      ? "terminal factorized-adjoint production contraction with "
+        "direct-factorized comparison"
+      : "terminal factorized-adjoint production contraction";
+  const std::optional<std::int32_t> projection_cap =
+      direct_physical || direct_factorized
+      ? std::optional<std::int32_t>(terminal_factorized_physical_complete_cap(
+            match, epsilon_contract.requested.complete_max, 1,
+            "terminal factorized primitive window",
+            direct_physical))
+      : std::nullopt;
   auto projected = diagnostic_physical
       ? project_terminal_acb_physical_basis_row(
-            match, prepared_row, projection_cap,
+            match, prepared_row, *projection_cap,
             "terminal-physical-line:" + arm_name + ":" +
                 std::to_string(tile_index))
       : project_terminal_acb_basis_row(
@@ -3554,26 +3570,78 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
     physical_rows.push_back(std::move(row));
   }
 
-  // Production projects G=(F*T)*P and applies its integrated functionals to
-  // the transformed match weights y.  This keeps epsilon-lattice
-  // cancellations coefficientwise inside G.  The physical and adjoint
-  // routes are explicit diagnostics only; neither may silently replace the
-  // certified factorized endpoint frame.
-  auto contracted = diagnostic_route == "adjoint"
-      ? match.adjoint_contract_terminal_acb_functionals(
-            physical_rows,
-            epsilon_contract.required_complete_max,
-            "terminal-adjoint-line-contraction:" + arm_name + ":" +
-                std::to_string(tile_index))
-      : direct_physical
+  // Production projects G=(F*T)*P, evaluates the full endpoint map through
+  // A^T z = J^T, and contracts z^T u.  This certifies the observable itself
+  // instead of assuming an interior backward residual remains harmless at a
+  // singular endpoint.  Direct physical/factorized weight contractions are
+  // explicit diagnostics only.
+  auto contracted = direct_physical
       ? match.contract_terminal_acb_physical_functionals(
             physical_rows,
             "terminal-direct-physical-line-contraction:" + arm_name + ":" +
                 std::to_string(tile_index))
-      : match.contract_terminal_acb_factorized_functionals(
+      : direct_factorized
+      ? match.contract_terminal_acb_factorized_functionals(
             physical_rows,
-            "terminal-factorized-line-contraction:" + arm_name + ":" +
-                std::to_string(tile_index));
+            "terminal-direct-factorized-line-contraction:" + arm_name + ":" +
+                std::to_string(tile_index))
+      : match.adjoint_contract_terminal_acb_functionals(
+            physical_rows,
+            epsilon_contract.required_complete_max,
+            "terminal-factorized-adjoint-line-contraction:" + arm_name + ":" +
+                std::to_string(tile_index),
+            true);
+  if (compare_factorized) {
+    const auto direct =
+        match.contract_terminal_acb_factorized_functionals(
+            physical_rows,
+            "terminal-compare-direct-factorized-line-contraction:" +
+                arm_name + ":" + std::to_string(tile_index));
+    if (direct.size() != contracted.size())
+      throw std::logic_error(
+          "terminal direct/adjoint comparison changed its tagged row count");
+    for (std::size_t functional = 0;
+         functional < contracted.size(); ++functional) {
+      const auto common_min = std::max({
+          epsilon_contract.requested.min_power,
+          direct[functional].min_power(),
+          contracted[functional].min_power()});
+      const auto common_max = std::min({
+          epsilon_contract.requested.complete_max,
+          direct[functional].complete_max(),
+          contracted[functional].complete_max()});
+      if (common_min > common_max)
+        throw std::domain_error(
+            "terminal direct/adjoint comparison has no common requested "
+            "epsilon window");
+      for (std::int64_t raw_power = common_min;
+           raw_power <= common_max; ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        const auto direct_value = direct[functional].coefficient(power);
+        const auto adjoint_value =
+            contracted[functional].coefficient(power);
+        const auto discrepancy = adjoint_value - direct_value;
+        std::cerr
+            << "terminal-contraction-compare arm=" << arm_name
+            << " tile=" << tile_index
+            << " functional=" << functional
+            << " epsilon_power=" << power
+            << " direct_midpoint=("
+            << direct_value.real_midpoint(16) << ","
+            << direct_value.imag_midpoint(16) << ")"
+            << " adjoint_midpoint=("
+            << adjoint_value.real_midpoint(16) << ","
+            << adjoint_value.imag_midpoint(16) << ")"
+            << " discrepancy_upper="
+            << Magnitude::upper_abs(discrepancy).approximate_upper()
+            << " direct_upper="
+            << Magnitude::upper_abs(direct_value).approximate_upper()
+            << " adjoint_upper="
+            << Magnitude::upper_abs(adjoint_value).approximate_upper()
+            << '\n';
+      }
+    }
+  }
   if (contracted.size() != 1 + deferred_tags.size())
     throw std::logic_error(
         "terminal factorized line contraction changed its tagged row count");
@@ -3593,6 +3661,15 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   }
 
   std::size_t contracted_index = 1;
+  // The deferred groups have the same column coordinates as `projected`.
+  // These deferred groups are J's per-G-column contributions.  Even though
+  // production evaluates the equivalent adjoint expression z^T u, its
+  // cancellation scale must therefore use the transformed G coordinates y.
+  // Only the direct-physical diagnostic projects F and uses physical weights
+  // w.
+  const auto& selected_divergent_weights = diagnostic_physical
+      ? match.terminal_acb_physical_weights()
+      : match.terminal_acb_transformed_weights();
   for (const auto& [key, tag] : deferred_tags) {
     const auto& frame = contracted[contracted_index++];
     std::vector<
@@ -3623,7 +3700,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
         scale = Magnitude::maximum(
             Magnitude::one(),
             terminal_factorized_divergent_scale(
-                match, physical_groups, power));
+                selected_divergent_weights, physical_groups, power));
         bound = scale *
             divergent_cancellation->relative_tolerance;
         bounded = coefficient_upper <= bound;
@@ -3680,7 +3757,12 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
         << epsilon_contract.requested.complete_max
         << "]; required_complete_max="
         << epsilon_contract.required_complete_max
-        << "; projection_cap=" << projection_cap
+        << "; projection_cap=";
+    if (projection_cap.has_value())
+      detail << *projection_cap;
+    else
+      detail << "all-available";
+    detail
         << "; contracted=[" << finite.min_power() << ","
         << finite.complete_max() << "]; projected=[";
     for (std::size_t column = 0; column < projected.size();

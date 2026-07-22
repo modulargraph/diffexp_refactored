@@ -2350,6 +2350,22 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     require_small_zero(
         explicit_factorized_value,
         "explicit factorized terminal contraction");
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE",
+               "compare", 1) != 0)
+      throw std::runtime_error(
+          "could not select terminal direct/adjoint comparison");
+    json::value compared_value;
+    try {
+      compared_value = contract_cancellation_and_export(
+          session, lower_state, "terminal-compare-factorized", 9);
+    } catch (...) {
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+      throw;
+    }
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+    require_small_zero(
+        compared_value,
+        "compared direct/adjoint terminal contraction");
     // The direct physical route contracts L(F) with the certified physical
     // weights w.  It must remain a genuine independent route: in particular,
     // it must not pass through the epsilon-shifted factorization (F T) P and

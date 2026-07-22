@@ -35,6 +35,18 @@ set_target_properties(diffexp2_librarylink PROPERTIES
 
 if(DE2_BUILD_TESTS)
   enable_testing()
+  find_package(Threads REQUIRED)
+  add_executable(test_diffexp2_immutable_recursive_cache
+    tests/test_immutable_recursive_cache.cpp)
+  target_compile_features(test_diffexp2_immutable_recursive_cache
+    PRIVATE cxx_std_20)
+  target_include_directories(test_diffexp2_immutable_recursive_cache
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(test_diffexp2_immutable_recursive_cache
+    PRIVATE Threads::Threads)
+  add_test(NAME cpp_immutable_recursive_cache
+    COMMAND test_diffexp2_immutable_recursive_cache)
+
   add_executable(test_diffexp2_recurrence tests/test_recurrence.cpp)
   target_compile_features(test_diffexp2_recurrence PRIVATE cxx_std_20)
   target_link_libraries(test_diffexp2_recurrence PRIVATE diffexp2_core)

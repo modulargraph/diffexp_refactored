@@ -155,8 +155,24 @@ inline RealEvaluationPoint require_exact_rational_point(
             " endpoint is not an exact rational local coordinate");
   }
   const auto normalized = RealEvaluationPoint::rational(exact.str());
+  fmpq_t exact_modulus;
+  fmpq_init(exact_modulus);
+  const auto parse_status =
+      fmpq_set_str(exact_modulus, exact.str().c_str(), 10);
+  if (parse_status == 0) {
+    fmpq_canonicalise(exact_modulus);
+    fmpq_abs(exact_modulus, exact_modulus);
+  }
+  const bool specialization_contains_identity =
+      parse_status == 0 &&
+      acb_contains_fmpq(point.modulus.raw(), exact_modulus);
+  fmpq_clear(exact_modulus);
+  // The exact coordinate is the identity authority.  Its Acb specialization
+  // may have been created under a different precision lease, so bitwise
+  // equality with a freshly rounded ball is neither necessary nor stable.
+  // Require the retained enclosure to contain the exact modulus instead.
   if (normalized.sign != point.sign ||
-      !acb_equal(normalized.modulus.raw(), point.modulus.raw()))
+      !specialization_contains_identity)
     throw NativeIntegrationError(
         NativeIntegrationErrorCode::InvalidInterval, "E9",
         std::string(label) +

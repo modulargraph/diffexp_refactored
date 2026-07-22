@@ -3397,6 +3397,133 @@ void accumulate_terminal_line_diagnostics(
       target.has_center_endpoint || source.has_center_endpoint;
 }
 
+struct TerminalComposedAdjointDiagnostic {
+  EpsilonFrame<ComplexBall> value;
+  std::uint32_t taylor_complete_max = 0;
+  std::int32_t adjoint_epsilon_complete_max = 0;
+  std::optional<double> last_coefficient_ratio_upper;
+  Magnitude certified_output_tail_upper = Magnitude::zero();
+  Magnitude recurrence_contraction_upper = Magnitude::zero();
+};
+
+TerminalComposedAdjointDiagnostic
+compute_terminal_composed_adjoint_diagnostic(
+    const StoredPlannedMatchHop& match,
+    const json::object& prepared_row,
+    const RetainedArmPlan& arm, const std::string& arm_name,
+    std::size_t tile_index,
+    const ObservableEpsilonContract& epsilon_contract) {
+  if (tile_index >= arm.exact.tiles.size())
+    throw std::invalid_argument(
+        "terminal composed adjoint tile index is out of range");
+  const auto& tile = arm.exact.tiles[tile_index];
+  const auto& certified_tile = arm.certified_tiles.at(tile_index);
+  const auto& binding = arm.charts.at(tile.chart);
+  if (certified_tile.local_end.sign != 0)
+    throw std::domain_error(
+        "terminal composed adjoint currently requires a center endpoint");
+  auto owners = match.terminal_acb_basis_owners();
+  if (owners.empty())
+    throw std::logic_error(
+        "terminal composed adjoint has no physical receiving owner");
+  const auto& prototype = owners.front()->solution();
+  auto row = parse_prepared_rational_row<ComplexBall>(
+      prepared_row, prototype, std::nullopt);
+  auto incoming = match.terminal_acb_incoming_physical_value();
+  if (incoming.size() != prototype.dimension)
+    throw std::logic_error(
+        "terminal composed adjoint incoming value changed dimension");
+  auto incoming_min = incoming.front().min_power();
+  for (const auto& component : incoming)
+    incoming_min = std::min(incoming_min, component.min_power());
+  const auto required_adjoint_complete =
+      local_algebra_detail::checked_i32(
+          static_cast<std::int64_t>(
+              epsilon_contract.required_complete_max) - incoming_min,
+          "terminal composed adjoint epsilon maximum");
+
+  auto row_complete = std::numeric_limits<std::int32_t>::max();
+  for (const auto& entry : row.entries) {
+    if (entry.multiplier.kernels.empty()) continue;
+    row_complete = std::min(
+        row_complete,
+        local_algebra_detail::checked_i32(
+            static_cast<std::int64_t>(entry.multiplier.epsilon_shift) +
+                static_cast<std::int64_t>(
+                    entry.multiplier.kernels.size()) - 1,
+            "terminal composed row epsilon maximum"));
+  }
+  if (row_complete == std::numeric_limits<std::int32_t>::max() ||
+      row_complete < required_adjoint_complete)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        "terminal composed adjoint row does not cover the required epsilon "
+        "window", std::nullopt, std::nullopt, row_complete);
+
+  const auto reverse_local_orientation =
+      tile.local_end < tile.local_begin;
+  const auto oriented_jacobian = reverse_local_orientation
+      ? -binding.scale_numeric : binding.scale_numeric;
+  const auto taylor_complete_max = static_cast<std::uint32_t>(
+      prototype.taylor_width() - 1);
+  auto problem = prepare_backward_adjoint_taylor_problem(
+      *match.terminal_acb_receiving_physical_equation(), row,
+      taylor_complete_max, row_complete, required_adjoint_complete,
+      oriented_jacobian,
+      "terminal composed adjoint:" + arm_name + ":" +
+          std::to_string(tile_index));
+  auto solved = solve_backward_adjoint_taylor(
+      problem, "terminal composed adjoint:" + arm_name + ":" +
+                   std::to_string(tile_index));
+  const auto signed_point =
+      local_algebra_detail::signed_real_evaluation_ball(
+          certified_tile.local_begin);
+  if (!signed_point.has_value())
+    throw std::domain_error(
+        "terminal composed adjoint match point has no signed real ball");
+  const auto adjoint = evaluate_backward_adjoint_taylor(
+      solved, *signed_point,
+      "terminal composed adjoint evaluation:" + arm_name + ":" +
+          std::to_string(tile_index));
+  auto point_modulus = tile.local_begin.sign() < 0
+      ? -tile.local_begin : tile.local_begin;
+  if (!(point_modulus < binding.geometry.radius))
+    throw std::domain_error(
+        "terminal composed adjoint match point is not inside the chart radius");
+  const auto witness_exact =
+      (point_modulus + binding.geometry.radius) / Rational(2);
+  const auto witness_radius = ComplexBall::from_strings(witness_exact.str());
+  const auto forcing_bound =
+      backward_adjoint_forcing_cauchy_numerator_upper(
+          problem, row, oriented_jacobian, witness_radius,
+          "terminal composed adjoint forcing bound:" + arm_name + ":" +
+              std::to_string(tile_index));
+  const auto tail = certify_backward_adjoint_taylor_tail(
+      problem, solved, *signed_point, witness_radius, forcing_bound,
+      "terminal composed adjoint tail:" + arm_name + ":" +
+          std::to_string(tile_index));
+
+  auto contracted = contract_backward_adjoint(
+      adjoint, incoming,
+      "terminal composed adjoint contraction:" + arm_name + ":" +
+          std::to_string(tile_index));
+  auto incoming_l1 = Magnitude::zero();
+  for (const auto& component : incoming)
+    for (const auto& coefficient : component.coefficients())
+      incoming_l1 += Magnitude::upper_abs(coefficient);
+  const auto output_tail =
+      tail.absolute_vector_tail_upper * incoming_l1;
+  auto widened_coefficients = contracted.coefficients();
+  for (auto& coefficient : widened_coefficients)
+    output_tail.add_error_to(coefficient);
+  contracted = EpsilonFrame<ComplexBall>(
+      contracted.window(), std::move(widened_coefficients));
+  return {std::move(contracted), taylor_complete_max,
+          solved.common_epsilon_complete_max,
+          solved.last_coefficient_ratio_upper, output_tail,
+          tail.recurrence_contraction_upper};
+}
+
 StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
     slong precision_bits,
     const std::shared_ptr<StoredTransportArmState>& state,
@@ -3450,6 +3577,44 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       ? "terminal factorized-adjoint production contraction with "
         "direct-factorized comparison"
       : "terminal factorized-adjoint production contraction";
+  std::optional<TerminalComposedAdjointDiagnostic> composed_diagnostic;
+  if (const auto* composed_mode =
+          std::getenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT")) {
+    const std::string mode(composed_mode);
+    if (mode != "report" && mode != "require")
+      throw std::invalid_argument(
+          "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT must be report or require");
+    try {
+      composed_diagnostic = compute_terminal_composed_adjoint_diagnostic(
+          match, prepared_row, arm, arm_name, tile_index,
+          epsilon_contract);
+      std::cerr
+          << "terminal-composed-adjoint arm=" << arm_name
+          << " tile=" << tile_index
+          << " status=certified-composed-tail"
+          << " taylor_complete_max="
+          << composed_diagnostic->taylor_complete_max
+          << " adjoint_epsilon_complete_max="
+          << composed_diagnostic->adjoint_epsilon_complete_max
+          << " last_coefficient_ratio_upper=";
+      if (composed_diagnostic->last_coefficient_ratio_upper.has_value())
+        std::cerr << *composed_diagnostic->last_coefficient_ratio_upper;
+      else
+        std::cerr << "unavailable";
+      std::cerr
+          << " certified_output_tail_upper="
+          << composed_diagnostic->certified_output_tail_upper.approximate_upper()
+          << " recurrence_contraction_upper="
+          << composed_diagnostic->recurrence_contraction_upper.approximate_upper()
+          << '\n';
+    } catch (const std::exception& error) {
+      if (mode == "require") throw;
+      std::cerr
+          << "terminal-composed-adjoint arm=" << arm_name
+          << " tile=" << tile_index
+          << " status=unsupported detail=" << error.what() << '\n';
+    }
+  }
   const std::optional<std::int32_t> projection_cap =
       direct_physical || direct_factorized
       ? std::optional<std::int32_t>(terminal_factorized_physical_complete_cap(
@@ -3591,6 +3756,35 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             "terminal-factorized-adjoint-line-contraction:" + arm_name + ":" +
                 std::to_string(tile_index),
             true);
+  if (composed_diagnostic.has_value()) {
+    const auto& composed = composed_diagnostic->value;
+    const auto& legacy = contracted.front();
+    const auto common_min = std::max({
+        epsilon_contract.requested.min_power,
+        composed.min_power(), legacy.min_power()});
+    const auto common_max = std::min({
+        epsilon_contract.requested.complete_max,
+        composed.complete_max(), legacy.complete_max()});
+    for (std::int64_t raw_power = common_min;
+         raw_power <= common_max; ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      const auto discrepancy =
+          composed.coefficient(power) - legacy.coefficient(power);
+      std::cerr
+          << "terminal-composed-adjoint-compare arm=" << arm_name
+          << " tile=" << tile_index
+          << " epsilon_power=" << power
+          << " composed_midpoint=("
+          << composed.coefficient(power).real_midpoint(16) << ","
+          << composed.coefficient(power).imag_midpoint(16) << ")"
+          << " legacy_midpoint=("
+          << legacy.coefficient(power).real_midpoint(16) << ","
+          << legacy.coefficient(power).imag_midpoint(16) << ")"
+          << " discrepancy_upper="
+          << Magnitude::upper_abs(discrepancy).approximate_upper()
+          << '\n';
+    }
+  }
   if (compare_factorized) {
     const auto direct =
         match.contract_terminal_acb_factorized_functionals(

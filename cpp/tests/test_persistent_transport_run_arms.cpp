@@ -760,6 +760,15 @@ json::object cancellation_integrand_row(
     }
     return json::array{std::move(leading), zero, zero};
   };
+  const auto analytic = [&](const std::string& constant) {
+    return json::array{
+        json::object{{"numerator", json::array{constant}},
+                     {"denominator", json::array{"1"}}},
+        json::object{{"numerator", json::array{"0"}},
+                     {"denominator", json::array{"1"}}},
+        json::object{{"numerator", json::array{"0"}},
+                     {"denominator", json::array{"1"}}}};
+  };
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
       {"columns", 2}, {"exact_identity", identity},
@@ -770,6 +779,7 @@ json::object cancellation_integrand_row(
                     {"epsilon_shift", 0},
                     {"center_pole_order", 0},
                     {"kernels", kernels("1")},
+                    {"analytic_coefficients", analytic("1")},
                     {"exact_identity", identity + ":plus"},
                     {"proven_zero", false}}}},
            json::object{
@@ -778,6 +788,7 @@ json::object cancellation_integrand_row(
                     {"epsilon_shift", 0},
                     {"center_pole_order", 0},
                     {"kernels", kernels("-1")},
+                    {"analytic_coefficients", analytic("-1")},
                     {"exact_identity", identity + ":minus"},
                     {"proven_zero", false}}}}}}};
 }
@@ -2354,15 +2365,23 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
                "compare", 1) != 0)
       throw std::runtime_error(
           "could not select terminal direct/adjoint comparison");
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
+               "require", 1) != 0) {
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+      throw std::runtime_error(
+          "could not require the certified composed terminal adjoint");
+    }
     json::value compared_value;
     try {
       compared_value = contract_cancellation_and_export(
           session, lower_state, "terminal-compare-factorized", 9);
     } catch (...) {
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
       throw;
     }
     unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
     require_small_zero(
         compared_value,
         "compared direct/adjoint terminal contraction");

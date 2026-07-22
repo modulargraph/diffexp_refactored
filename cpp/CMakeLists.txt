@@ -94,6 +94,12 @@ if(DE2_BUILD_TESTS)
   target_link_libraries(test_diffexp2_tail_majorant PRIVATE diffexp2_core)
   add_test(NAME cpp_tail_majorant COMMAND test_diffexp2_tail_majorant)
 
+  add_executable(test_diffexp2_adjoint_observable
+    tests/test_adjoint_observable.cpp)
+  target_compile_features(test_diffexp2_adjoint_observable PRIVATE cxx_std_20)
+  target_link_libraries(test_diffexp2_adjoint_observable PRIVATE diffexp2_core)
+  add_test(NAME cpp_adjoint_observable COMMAND test_diffexp2_adjoint_observable)
+
   add_executable(test_diffexp2_persistent_tail_majorant
     tests/test_persistent_tail_majorant.cpp)
   target_compile_features(test_diffexp2_persistent_tail_majorant

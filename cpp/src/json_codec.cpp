@@ -6,6 +6,7 @@
 #include "json_codec_support.hpp"
 
 #include "diffexp2/checkpoint.hpp"
+#include "diffexp2/adjoint_observable.hpp"
 #include "diffexp2/immutable_recursive_cache.hpp"
 #include "diffexp2/line_integration.hpp"
 #include "diffexp2/local_algebra.hpp"

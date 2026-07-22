@@ -905,6 +905,62 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return result;
   }
 
+  std::shared_ptr<const PreparedPhysicalClearedODE<ComplexBall>>
+  terminal_acb_receiving_physical_equation() const {
+    auto owners = terminal_acb_basis_owners();
+    if (owners.empty())
+      throw std::logic_error(
+          "terminal composed observable has no receiving physical basis owner");
+    const auto equation = owners.front()->physical_equation();
+    if (!equation)
+      throw std::domain_error(
+          "terminal composed observable has no retained receiving physical equation");
+    for (std::size_t column = 1; column < owners.size(); ++column) {
+      const auto candidate = owners[column]->physical_equation();
+      if (!candidate ||
+          candidate->payload_identity != equation->payload_identity ||
+          candidate->owner_signature_identity !=
+              equation->owner_signature_identity)
+        throw std::logic_error(
+            "terminal composed observable basis columns disagree on their physical equation");
+    }
+    return equation;
+  }
+
+  FiniteLaurentVector<ComplexBall>
+  terminal_acb_incoming_physical_value() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    auto incoming =
+        std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(incoming_owner_);
+    if (!acb || !incoming || !has_terminal_acb_factorization())
+      throw std::invalid_argument(
+          "terminal composed observable requires one retained Acb match and incoming local");
+    EvaluationOptions options;
+    options.imaginary_sign = acb->effective_incoming_imaginary_sign();
+    options.compute_tail_estimate = false;
+    const auto evaluation = evaluate_local_solution(
+        incoming->solution(),
+        RealEvaluationPoint::rational(acb->incoming_point_exact()), options);
+    if (!evaluation.value.error.empty() ||
+        evaluation.value.dimension != incoming->solution().dimension)
+      throw std::domain_error(
+          "terminal composed observable incoming evaluation has an unsupported error envelope or dimension");
+    FiniteLaurentVector<ComplexBall> value;
+    value.reserve(evaluation.value.dimension);
+    for (std::uint32_t component = 0;
+         component < evaluation.value.dimension; ++component) {
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(evaluation.value.epsilon.width());
+      for (std::int64_t raw_power = evaluation.value.epsilon.min_power;
+           raw_power <= evaluation.value.epsilon.complete_max; ++raw_power)
+        coefficients.push_back(evaluation.value.at(
+            static_cast<std::int32_t>(raw_power), component));
+      value.emplace_back(evaluation.value.epsilon, std::move(coefficients));
+    }
+    return value;
+  }
+
   const FiniteLaurentVector<ComplexBall>&
   terminal_acb_physical_weights() const {
     const auto acb =

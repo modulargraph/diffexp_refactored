@@ -1248,4 +1248,44 @@ inline EpsilonFrame<ComplexBall> contract_backward_adjoint(
   return *result;
 }
 
+inline std::vector<Magnitude>
+backward_adjoint_contracted_tail_by_output(
+    const Magnitude& adjoint_coefficient_tail_upper,
+    const FiniteLaurentVector<ComplexBall>& adjoint_shape,
+    const FiniteLaurentVector<ComplexBall>& physical_value,
+    EpsilonWindow output,
+    const std::string& context =
+        "backward Fuchsian adjoint coefficientwise tail contraction") {
+  if (adjoint_shape.empty() ||
+      adjoint_shape.size() != physical_value.size())
+    throw std::invalid_argument(context + ": vector dimensions disagree");
+  std::vector<Magnitude> result(
+      output.width(), Magnitude::zero());
+  for (std::int64_t raw_output = output.min_power;
+       raw_output <= output.complete_max; ++raw_output) {
+    auto incoming_l1 = Magnitude::zero();
+    for (std::size_t component = 0;
+         component < adjoint_shape.size(); ++component) {
+      const auto& adjoint_component = adjoint_shape[component];
+      const auto& incoming_component = physical_value[component];
+      for (std::int64_t raw_incoming =
+               incoming_component.min_power();
+           raw_incoming <= incoming_component.complete_max();
+           ++raw_incoming) {
+        const auto raw_adjoint = raw_output - raw_incoming;
+        if (raw_adjoint < adjoint_component.min_power() ||
+            raw_adjoint > adjoint_component.complete_max())
+          continue;
+        incoming_l1 += Magnitude::upper_abs(
+            incoming_component.coefficient(
+                static_cast<std::int32_t>(raw_incoming)));
+      }
+    }
+    result[static_cast<std::size_t>(
+        raw_output - output.min_power)] =
+        adjoint_coefficient_tail_upper * incoming_l1;
+  }
+  return result;
+}
+
 }  // namespace diffexp2

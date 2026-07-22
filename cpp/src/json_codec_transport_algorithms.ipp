@@ -3455,7 +3455,10 @@ compute_terminal_composed_adjoint_diagnostic(
   const auto& binding = arm.charts.at(tile.chart);
   if (certified_tile.local_end.sign != 0)
     throw std::domain_error(
-        "terminal composed adjoint currently requires a center endpoint");
+        "terminal composed adjoint currently requires a center endpoint; "
+        "arm=" + arm_name + ", tile=" + std::to_string(tile_index) +
+        ", local_interval=[" + tile.local_begin.str() + "," +
+        tile.local_end.str() + "]");
   auto owners = match.terminal_acb_basis_owners();
   if (owners.empty())
     throw std::logic_error(
@@ -3494,15 +3497,18 @@ compute_terminal_composed_adjoint_diagnostic(
         "terminal composed adjoint row does not cover the required epsilon "
         "window", std::nullopt, std::nullopt, row_complete);
 
-  const auto reverse_local_orientation =
-      tile.local_end < tile.local_begin;
-  const auto oriented_jacobian = reverse_local_orientation
-      ? -binding.scale_numeric : binding.scale_numeric;
+  // This recurrence is anchored by lambda(0)=0 and publishes
+  // lambda(m)^T f(m) for the actual tile m -> 0.  Its forcing is therefore
+  // -beta*t*q*r.  Do not reuse the sign with which direct integration sorts
+  // its local endpoints: signed evaluation at m already carries that
+  // orientation, independently of whether m is positive or negative.
+  const auto oriented_jacobian = binding.scale_numeric;
   const auto taylor_complete_max = static_cast<std::uint32_t>(
       prototype.taylor_width() - 1);
   auto problem = prepare_backward_adjoint_taylor_problem(
       *match.terminal_acb_receiving_physical_equation(), row,
-      taylor_complete_max, row_complete, required_adjoint_complete,
+      taylor_complete_max, required_adjoint_complete,
+      required_adjoint_complete,
       oriented_jacobian,
       "terminal composed adjoint:" + arm_name + ":" +
           std::to_string(tile_index));
@@ -3553,15 +3559,18 @@ compute_terminal_composed_adjoint_diagnostic(
       adjoint, incoming,
       "terminal composed adjoint contraction:" + arm_name + ":" +
           std::to_string(tile_index));
-  auto incoming_l1 = Magnitude::zero();
-  for (const auto& component : incoming)
-    for (const auto& coefficient : component.coefficients())
-      incoming_l1 += Magnitude::upper_abs(coefficient);
-  const auto output_tail =
-      tail.absolute_vector_tail_upper * incoming_l1;
+  const auto output_tails = backward_adjoint_contracted_tail_by_output(
+      tail.absolute_vector_tail_upper, adjoint, incoming,
+      contracted.window(),
+      "terminal composed adjoint coefficientwise tail:" + arm_name + ":" +
+          std::to_string(tile_index));
+  auto output_tail = Magnitude::zero();
   auto widened_coefficients = contracted.coefficients();
-  for (auto& coefficient : widened_coefficients)
-    output_tail.add_error_to(coefficient);
+  for (std::size_t offset = 0; offset < widened_coefficients.size();
+       ++offset) {
+    output_tails[offset].add_error_to(widened_coefficients[offset]);
+    output_tail = Magnitude::maximum(output_tail, output_tails[offset]);
+  }
   contracted = EpsilonFrame<ComplexBall>(
       contracted.window(), std::move(widened_coefficients));
   return {std::move(contracted), taylor_complete_max,
@@ -3592,6 +3601,9 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
         "terminal factorized line integration has no certified Acb factorization");
   matching_detail::ScopedAcbPrecision exact_shadow_precision(
       match.terminal_acb_extra_precision_bits());
+  const auto& tile = arm.exact.tiles[tile_index];
+  const auto& certified_tile = arm.certified_tiles.at(tile_index);
+  const auto& binding = arm.charts.at(tile.chart);
 
   const auto* diagnostic_route_raw =
       std::getenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
@@ -3630,7 +3642,14 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
     if (mode != "report" && mode != "require")
       throw std::invalid_argument(
           "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT must be report or require");
-    try {
+    if (certified_tile.local_end.sign != 0) {
+      std::cerr
+          << "terminal-composed-adjoint arm=" << arm_name
+          << " tile=" << tile_index
+          << " status=not-applicable detail=tile-does-not-end-at-chart-center"
+          << " local_interval=[" << tile.local_begin.str() << ","
+          << tile.local_end.str() << "]\n";
+    } else try {
       composed_diagnostic = compute_terminal_composed_adjoint_diagnostic(
           match, prepared_row, arm, arm_name, tile_index,
           epsilon_contract);
@@ -3685,9 +3704,6 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             "terminal-factorized-line:" + arm_name + ":" +
                 std::to_string(tile_index));
 
-  const auto& tile = arm.exact.tiles[tile_index];
-  const auto& certified_tile = arm.certified_tiles.at(tile_index);
-  const auto& binding = arm.charts.at(tile.chart);
   const auto rim = exact_plan_rim(
       binding.prescriptions, binding.geometry.scale);
   const bool reverse_local_orientation =

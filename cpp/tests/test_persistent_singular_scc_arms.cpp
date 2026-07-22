@@ -373,6 +373,7 @@ std::string prepare_singular_scc(const std::string& session,
       {"exact", "(1/2)+(eps/3)"}, {"proven_zero", false}});
   json::array exact_theta;
   exact_theta.push_back(std::move(exact_theta_row));
+  const auto physical = singular_parent_physical_ode(identity);
   const auto prepared = request(json::object{
       {"schema", 2}, {"op", "scc.prepare"}, {"session", session},
       {"key", key}, {"identity", identity},
@@ -411,9 +412,14 @@ std::string prepare_singular_scc(const std::string& session,
                      {"block", 0}, {"columns", json::array{0}},
                      {"a", "1/2"}, {"b", "1/3"}}}}}}}}},
       {"couplings", json::array{}},
-      {"physical_ode", singular_parent_physical_ode(identity)}});
+      {"physical_ode", physical},
+      {"rational_shadow_physical_ode", physical}});
   if (prepared.at("status") != "ok")
     throw std::runtime_error("scc.prepare: " + json::serialize(prepared));
+  if (prepared.at("rational_shadow_physical_ode") != "retained")
+    throw std::runtime_error(
+        "Acb SCC dropped its manifest Rational-shadow physical equation: " +
+        json::serialize(prepared));
   return std::string(prepared.at("scc").as_string());
 }
 
@@ -1003,6 +1009,15 @@ bool singular_match_published_with_complete_physical_residual(
 bool terminal_normal_frame_checkpoint_complete(const std::string& path) {
   const auto payload = json::parse(
       diffexp2::checkpoint::read(path).payload_json).as_object();
+  bool retained_rational_physical = false;
+  for (const auto& raw_scc : payload.at("prepared_scc").as_array()) {
+    const auto& request = raw_scc.as_object().at("request").as_object();
+    if (request.if_contains("rational_shadow_physical_ode") != nullptr) {
+      retained_rational_physical = true;
+      break;
+    }
+  }
+  if (!retained_rational_physical) return false;
   for (const auto& raw_hop :
        payload.at("retained_planned_match_hops").as_array()) {
     const auto& native = raw_hop.as_object().at("native_match").as_object();

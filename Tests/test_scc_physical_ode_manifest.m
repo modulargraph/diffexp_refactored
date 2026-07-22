@@ -20,11 +20,15 @@ owner = ExportString[<|"schema" -> "diffexp2-native-scc-composite-v1",
     "fixture" -> "full-parent-physical-owner"|>,
   "RawJSON", "Compact" -> True];
 serialization = <|"domain" -> "rational", "symbols" -> {}|>;
+acbSerialization = <|"domain" -> "acb", "symbols" -> {}|>;
 
 DiffExp2`Solve`ClearSolveCaches[];
 payload = catchDE2[
   DiffExp2`Solve`Private`sccParentPhysicalODEPayload[
     cs, owner, serialization, 80]];
+rationalShadowPayload = catchDE2[
+  DiffExp2`Solve`Private`sccParentRationalShadowPhysicalODEPayload[
+    cs, owner, acbSerialization, 80]];
 cLags = Lookup[payload, "c", {}];
 linearEntries = If[Length[cLags] >= 2, cLags[[2]], {}];
 crossEntry = SelectFirst[linearEntries,
@@ -49,6 +53,27 @@ assert["scc_parent_payload_retains_epsilon_rational_cross_edge",
 assert["scc_parent_payload_is_not_a_diagonal_block_certificate",
   AnyTrue[linearEntries,
     Lookup[#, "r"] === 1 && Lookup[#, "c"] === 0 &]];
+assert["scc_acb_manifest_retains_exact_rational_physical_shadow",
+  AssociationQ[rationalShadowPayload] &&
+  rationalShadowPayload === payload];
+assert["scc_non_acb_manifest_does_not_duplicate_rational_shadow",
+  DiffExp2`Solve`Private`sccParentRationalShadowPhysicalODEPayload[
+    cs, owner, serialization, 80] === None];
+manifestShell = <|"identity" -> owner, "parent" -> <||>,
+  "blocks" -> {}, "couplings" -> {}, "physical_ode" -> payload,
+  "rational_shadow_identity" -> "shadow-fixture",
+  "rational_shadow_physical_ode" -> rationalShadowPayload|>;
+assert["scc_backend_wrapper_accepts_exact_physical_shadow_field",
+  TrueQ[DiffExp2`CppBackend`Private`persistentSCCManifestKeysQ[
+    manifestShell]]];
+assert["scc_backend_wrapper_still_rejects_unknown_manifest_fields",
+  !TrueQ[DiffExp2`CppBackend`Private`persistentSCCManifestKeysQ[
+      Append[manifestShell, "unexpected" -> True]]]];
+filledManifest = DiffExp2`CppBackend`Private`persistentSCCFilledManifest[
+  manifestShell, {<|"chart" -> "fixture"|>}];
+assert["scc_backend_wrapper_forwards_exact_physical_shadow_field",
+  Lookup[filledManifest, "rational_shadow_physical_ode", None] ===
+    rationalShadowPayload];
 
 Print["\nSCC physical ODE manifest smoke: ", passed, " passed, ", failed,
   " failed."];

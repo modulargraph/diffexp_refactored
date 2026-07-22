@@ -222,6 +222,42 @@ Rules:
   intended fail-closed behavior: solving it requires the exact chart
   indicial/Jordan/log structure and endpoint mode constraints, not a numeric
   pseudo-inverse or another increase in precision/order.
+- Follow-up B4-78 probes showed that the last sentence above classified the
+  production failure too early.  The pseudo- and true-resonance scalar
+  recurrences now both pass focused tests, but banana4 never entered either
+  exact path: its Acb SCC manifest retained only the decimal-ball q/C payload,
+  and the terminal match did not happen to originate from a live Rational
+  shadow session.  The immediate architectural fault was therefore lost exact
+  physical-equation provenance, not yet a proven banana4 resonance.  The Acb
+  manifest now carries a second canonical Rational q/C payload whenever the
+  exact equation is rational.  Native preparation verifies that every Acb
+  coefficient encloses that payload and retains it through checkpoints.  The
+  Wolfram manifest smoke (7/7) and focused native adjoint, transport, and
+  singular-SCC/checkpoint tests all pass.  The next clean probe must establish
+  the banana's actual exact recurrence class before further log/tail work.
+- B4-79 expanded that protocol regression through every boundary that failed
+  in production. The first clean run showed that `CppBackend.m` rejected the
+  new manifest key; after its allow-list accepted the key, the second run
+  showed that the wrapper rebuilt `filledManifest` without forwarding it.
+  Focused tests now require both acceptance and forwarding, while the native
+  singular-SCC test requires preparation plus checkpoint retention. The third
+  run was the first banana process to consume the exact Rational q/C payload
+  and exposed a simple-resonance bordered solve with a zero log-lift column.
+- B4-80 traced that apparent resonance to the hoisted physical-equation
+  producer, not the adjoint solver. The global pair `D f'=N f` was converted
+  to `D theta f=beta t N f` without cancelling the new common factor `t` at a
+  singular center. Thus it published `q(0)=C(0)=0` although the legacy local
+  equation was primitive. Global primitivity proves that this center factor
+  is the only new polynomial gcd, so the fix cancels the exact minimum
+  t-valuation without a general polynomial GCD. The focused physical-payload
+  suite now checks singular hoisted/legacy parity and passes 10/10. With that
+  fix, banana4's exact recurrence completes: EO30 next rejects only because no
+  analytic witness disk makes the current tail norm contractive. A certified
+  dyadic witness search is covered by a row-pole regression. At the intended
+  EO50, the first lower terminal tile obtains a rigorous composed tail, but it
+  is extremely loose (`~2.5e37`, contraction `~0.983`) and the next terminal
+  geometry is not yet expressed as a center-ending adjoint. Do not confuse
+  this large certified enclosure with an accurate production result.
 
 ## Disproven configurations: do not repeat unchanged
 
@@ -239,18 +275,21 @@ Rules:
 
 ## Next controlled experiment
 
-1. Reuse the retained chart's exact indicial/Jordan schedule to solve the
-   resonant sourced transpose recurrence with explicit logarithmic powers.
-2. Carry tagged divergent/log boundary groups through pairing with the incoming
+1. Normalize both terminal orientations to the center-boundary adjoint
+   convention and include arm/tile geometry in every rejection.
+2. Replace the pessimistic original-master infinity-norm tail with the exact
+   SCC Fuchsian/gauge frame (including the incoming-tail cross terms) so EO50
+   certifies useful digits rather than only a `10^37` enclosure.
+3. Carry tagged divergent/log boundary groups through pairing with the incoming
    physical endpoint constraints; certify their cancellation before publishing
    a scalar observable.
-3. Re-run the B4-78 clean preflight in require mode, then run full banana4 only
+4. Re-run the clean preflight in require mode, then run full banana4 only
    after the composed endpoint contraction and tail certificate both pass.
-3. Add exact scalar regular, fractional-power, logarithmic Jordan, and
+5. Add exact scalar regular, fractional-power, logarithmic Jordan, and
    epsilon-triangular tests, plus an ill-conditioned regression reproducing
    the measured `10^121` amplification and a fail-closed insufficient-order
    case.
-4. Compare the composed observable against the old direct and adjoint routes
+6. Compare the composed observable against the old direct and adjoint routes
    on a small well-conditioned fixture, then rerun banana4 clean at
    EO30/WP1000 with the already proven private halos.
 

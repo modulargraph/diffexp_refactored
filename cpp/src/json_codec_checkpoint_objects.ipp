@@ -9,6 +9,9 @@ std::string composite_scc_signature(const json::object& root) {
     exact["rational_shadow_identity"] = *shadow;
   if (const auto* physical = root.if_contains("physical_ode"))
     exact["physical_ode"] = *physical;
+  if (const auto* rational_physical =
+          root.if_contains("rational_shadow_physical_ode"))
+    exact["rational_shadow_physical_ode"] = *rational_physical;
   return json::serialize(canonical_json_value(exact));
 }
 
@@ -2681,6 +2684,18 @@ json::object checkpoint_scc_item(
   } else if (!composite->physical_payload_record().empty()) {
     throw std::logic_error(
         "retained SCC signature lost its full-parent physical q/C payload");
+  }
+  if (const auto* rational_physical =
+          signature.if_contains("rational_shadow_physical_ode")) {
+    const auto retained = composite->rational_shadow_physical_equation();
+    if (!retained ||
+        json::serialize(canonical_json_value(*rational_physical)) !=
+            retained->exact_payload_record)
+      throw std::logic_error(
+          "retained SCC Rational-shadow physical q/C payload changed after retention");
+  } else if (composite->rational_shadow_physical_equation()) {
+    throw std::logic_error(
+        "retained SCC signature lost its Rational-shadow physical q/C payload");
   }
   json::object request = signature;
   request["schema"] = 2;

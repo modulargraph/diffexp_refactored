@@ -3406,6 +3406,40 @@ struct TerminalComposedAdjointDiagnostic {
   Magnitude recurrence_contraction_upper = Magnitude::zero();
 };
 
+std::string terminal_composed_adjoint_indicial_summary(
+    const StoredPlannedMatchHop& match) {
+  const auto owners = match.terminal_acb_basis_owners();
+  if (owners.empty()) return "unavailable:no-basis-owner";
+  const auto equation_owner = owners.front()->retained_equation_owner();
+  const auto composite =
+      std::dynamic_pointer_cast<CompositeSCCChartBase>(equation_owner);
+  if (!composite) return "unavailable:not-composite-scc";
+  const auto stats = composite->stats_json();
+  const auto found = stats.find("block_charts");
+  if (found == stats.end() || !found->value().is_array())
+    return "unavailable:no-block-charts";
+  json::array blocks;
+  for (const auto& raw : found->value().as_array()) {
+    const auto& block = as_object(raw, "terminal adjoint SCC block");
+    json::object summary;
+    if (const auto index = block.find("block"); index != block.end())
+      summary["block"] = index->value();
+    if (const auto vertices = block.find("vertices");
+        vertices != block.end())
+      summary["vertices"] = vertices->value();
+    if (const auto indicial = block.find("exact_affine_jordan_indicial");
+        indicial != block.end())
+      summary["exact_affine_jordan_indicial"] = indicial->value();
+    else if (const auto root = block.find("affine_indicial_root");
+             root != block.end())
+      summary["affine_indicial_root"] = root->value();
+    else
+      summary["exact_affine_jordan_indicial"] = nullptr;
+    blocks.push_back(std::move(summary));
+  }
+  return json::serialize(canonical_json_value(blocks));
+}
+
 TerminalComposedAdjointDiagnostic
 compute_terminal_composed_adjoint_diagnostic(
     const StoredPlannedMatchHop& match,
@@ -3472,17 +3506,34 @@ compute_terminal_composed_adjoint_diagnostic(
       oriented_jacobian,
       "terminal composed adjoint:" + arm_name + ":" +
           std::to_string(tile_index));
+  const auto exact_physical_equation =
+      match.terminal_rational_shadow_physical_equation();
+  if (!exact_physical_equation &&
+      std::dynamic_pointer_cast<CompositeSCCChartBase>(
+          owners.front()->retained_equation_owner()))
+    throw std::domain_error(
+        "terminal composed adjoint composite owner has no bound exact Rational-shadow physical equation");
   auto solved = solve_backward_adjoint_taylor(
-      problem, "terminal composed adjoint:" + arm_name + ":" +
-                   std::to_string(tile_index));
+      problem, exact_physical_equation.get(),
+      "terminal composed adjoint:" + arm_name + ":" +
+          std::to_string(tile_index));
   const auto signed_point =
       local_algebra_detail::signed_real_evaluation_ball(
           certified_tile.local_begin);
   if (!signed_point.has_value())
     throw std::domain_error(
         "terminal composed adjoint match point has no signed real ball");
+  auto logarithm = local_detail::cb_log(certified_tile.local_begin.modulus);
+  if (certified_tile.local_begin.sign < 0) {
+    const auto rim = exact_plan_rim(
+        binding.prescriptions, binding.geometry.scale);
+    if (!rim.has_value())
+      throw std::domain_error(
+          "terminal composed adjoint negative match point has no exact rim prescription");
+    logarithm += local_detail::imaginary_pi(*rim);
+  }
   const auto adjoint = evaluate_backward_adjoint_taylor(
-      solved, *signed_point,
+      solved, *signed_point, logarithm,
       "terminal composed adjoint evaluation:" + arm_name + ":" +
           std::to_string(tile_index));
   auto point_modulus = tile.local_begin.sign() < 0
@@ -3490,18 +3541,13 @@ compute_terminal_composed_adjoint_diagnostic(
   if (!(point_modulus < binding.geometry.radius))
     throw std::domain_error(
         "terminal composed adjoint match point is not inside the chart radius");
-  const auto witness_exact =
-      (point_modulus + binding.geometry.radius) / Rational(2);
-  const auto witness_radius = ComplexBall::from_strings(witness_exact.str());
-  const auto forcing_bound =
-      backward_adjoint_forcing_cauchy_numerator_upper(
-          problem, row, oriented_jacobian, witness_radius,
-          "terminal composed adjoint forcing bound:" + arm_name + ":" +
+  const auto adaptive_tail =
+      certify_backward_adjoint_taylor_tail_adaptive_witness(
+          problem, solved, row, oriented_jacobian, *signed_point,
+          point_modulus, binding.geometry.radius, 16,
+          "terminal composed adjoint tail:" + arm_name + ":" +
               std::to_string(tile_index));
-  const auto tail = certify_backward_adjoint_taylor_tail(
-      problem, solved, *signed_point, witness_radius, forcing_bound,
-      "terminal composed adjoint tail:" + arm_name + ":" +
-          std::to_string(tile_index));
+  const auto& tail = adaptive_tail.tail;
 
   auto contracted = contract_backward_adjoint(
       adjoint, incoming,
@@ -3612,7 +3658,14 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
           << " tile=" << tile_index
-          << " status=unsupported detail=" << error.what() << '\n';
+          << " status=unsupported detail=" << error.what();
+      try {
+        std::cerr << " indicial="
+                  << terminal_composed_adjoint_indicial_summary(match);
+      } catch (const std::exception& diagnostic_error) {
+        std::cerr << " indicial=unavailable:" << diagnostic_error.what();
+      }
+      std::cerr << '\n';
     }
   }
   const std::optional<std::int32_t> projection_cap =

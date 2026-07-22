@@ -202,6 +202,10 @@ std::string derived_coupling_identity(
       {"exact_theta", rectangular_record(theta)}});
 }
 
+bool acb_physical_ode_contains_rational_shadow(
+    const PreparedPhysicalClearedODE<ComplexBall>& numeric,
+    const PreparedPhysicalClearedODE<Rational>& exact);
+
 template <typename Scalar>
 std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
     const std::shared_ptr<SolverSession>& session, const json::object& root,
@@ -229,6 +233,28 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
   if (const auto* raw_physical = root.if_contains("physical_ode"))
     physical_equation = parse_prepared_physical_ode<Scalar>(
         *raw_physical, dimension, false);
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+      rational_shadow_physical_equation;
+  if (const auto* raw_rational_physical =
+          root.if_contains("rational_shadow_physical_ode")) {
+    if constexpr (!std::is_same_v<Scalar, ComplexBall>) {
+      throw std::invalid_argument(
+          "only an Acb SCC may retain a Rational-shadow physical equation");
+    } else {
+      rational_shadow_physical_equation =
+          parse_prepared_physical_ode<Rational>(
+              *raw_rational_physical, dimension, false);
+      if (!physical_equation ||
+          physical_equation->owner_signature_identity !=
+              rational_shadow_physical_equation->owner_signature_identity ||
+          physical_equation->payload_identity !=
+              rational_shadow_physical_equation->payload_identity ||
+          !acb_physical_ode_contains_rational_shadow(
+              *physical_equation, *rational_shadow_physical_equation))
+        throw std::invalid_argument(
+            "Acb SCC physical equation does not enclose its retained exact Rational shadow");
+    }
+  }
   const auto exact_system = parse_exact_parent_matrix(
       parent.at("exact_system_record"), dimension,
       "exact parent system record");
@@ -681,7 +707,8 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
       exact_theta.canonical_record,
       geometry_record, std::move(retained_geometry), work,
       std::move(blocks), std::move(couplings),
-      std::move(physical_equation));
+      std::move(physical_equation),
+      std::move(rational_shadow_physical_equation));
 }
 
 struct SessionRegistry {

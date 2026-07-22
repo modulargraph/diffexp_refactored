@@ -789,6 +789,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
       std::optional<std::vector<LocalSolution<ComplexBall>>>
           exact_shadow_factorized_basis,
       std::size_t exact_shadow_extra_precision_bits,
+      std::shared_ptr<const PhysicalEquationOwnerBase>
+          exact_shadow_equation_owner,
       RefinedAcbLaurentMatch&& refined, double elapsed_ms)
       : StoredMatchBase(std::move(handle)),
         checkpoint_identity_(std::move(checkpoint_identity)),
@@ -827,6 +829,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
             std::move(exact_shadow_factorized_basis)),
         exact_shadow_extra_precision_bits_(
             exact_shadow_extra_precision_bits),
+        exact_shadow_equation_owner_(
+            std::move(exact_shadow_equation_owner)),
         refined_(std::move(refined)), elapsed_ms_(elapsed_ms) {
     if (exact_right_materialization_transformation_.has_value()) {
       if (acb_right_materialization_transformation.has_value())
@@ -1106,6 +1110,11 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
 
   std::size_t exact_shadow_extra_precision_bits() const {
     return exact_shadow_extra_precision_bits_;
+  }
+
+  const std::shared_ptr<const PhysicalEquationOwnerBase>&
+  exact_shadow_equation_owner() const {
+    return exact_shadow_equation_owner_;
   }
 
   const ExactLaurentMatrix<Rational>&
@@ -1413,6 +1422,8 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
   std::optional<std::vector<LocalSolution<ComplexBall>>>
       exact_shadow_factorized_basis_;
   std::size_t exact_shadow_extra_precision_bits_ = 0;
+  std::shared_ptr<const PhysicalEquationOwnerBase>
+      exact_shadow_equation_owner_;
   RefinedAcbLaurentMatch refined_;
   json::object normal_frame_attempt_{
       {"schema", "diffexp2-acb-normal-frame-attempt-v1"},
@@ -1434,6 +1445,8 @@ struct ParsedExactEvaluatedLattice {
   // R^-1*T must never replace the exact physical transformation T.
   std::optional<std::vector<LocalSolution<Rational>>>
       exact_shadow_fused_local_basis;
+  std::shared_ptr<const PhysicalEquationOwnerBase>
+      exact_shadow_equation_owner;
 };
 
 json::array checkpoint_acb_laurent_matrix_record(
@@ -2358,9 +2371,16 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
       const auto& witness = *shadow_witnesses[column];
       if (!witness.solution || witness.rational_shadow_identity.empty() ||
           witness.source_column_identity.empty() ||
-          witness.target_column_identity.empty())
+          witness.target_column_identity.empty() ||
+          !witness.exact_equation_owner)
         throw std::invalid_argument(
             context + ": Rational-shadow saturation witness is incomplete");
+      if (column != 0 &&
+          witness.exact_equation_owner.get() !=
+              shadow_witnesses.front()->exact_equation_owner.get())
+        throw std::invalid_argument(
+            context +
+            ": Rational-shadow columns disagree on their exact equation owner");
       const auto& exact_column_identity =
           retained_basis[column]->column_provenance()
               ->exact_column_identity;
@@ -2451,7 +2471,8 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
             std::move(saturation),
             !normalized_right_inverse.has_value(),
             std::move(normalized_transformation),
-            std::move(exact_fused_local_basis)};
+            std::move(exact_fused_local_basis),
+            shadow_witnesses.front()->exact_equation_owner};
   }
   if (prefer_retained_rational_shadow &&
       std::any_of(shadow_witnesses.begin(), shadow_witnesses.end(),
@@ -4354,6 +4375,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       std::move(selected_terminal_normal_frame_right_transformation),
       std::move(exact_shadow_factorized_basis),
       retained_exact_shadow_extra_precision_bits,
+      std::move(exact_lattice.exact_shadow_equation_owner),
       std::move(refined), elapsed_ms);
   result->replace_normal_frame_attempt(
       std::move(normal_frame_attempt));

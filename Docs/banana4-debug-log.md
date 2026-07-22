@@ -258,6 +258,25 @@ Rules:
   is extremely loose (`~2.5e37`, contraction `~0.983`) and the next terminal
   geometry is not yet expressed as a center-ending adjoint. Do not confuse
   this large certified enclosure with an accurate production result.
+- B4-81's exact orientation audit found that the diagnostic had reused the
+  sign with which direct integration sorts endpoints. For
+  `q theta lambda+C^T lambda=b`, a real terminal tile `m -> 0` instead needs
+  `b=-beta t q r` and publishes `lambda(m)^T f(m)`, independently of the sign
+  of `m`; the diagnostic now uses the chart Jacobian directly. The banana
+  upper terminal tile has neither local endpoint at the chart center
+  (`[-1/3, 204113223175596188631040/675016230994828729951659]`), so one
+  center-anchored contraction is mathematically inapplicable there. It is now
+  reported as explicitly not applicable rather than falsely certified or
+  making `require` fail. The audit also identified why the first EO50 tail was
+  `10^37`: the theorem solved/bounded every available epsilon coefficient and
+  multiplied a single worst-case tail by the L1 norm of the entire incoming
+  epsilon frame, including huge high orders irrelevant to the requested low
+  output coefficients. The adjoint is now truncated to the actually required
+  epsilon maximum and tail propagation performs the honest coefficientwise
+  convolution. A regression places `10^100` in an irrelevant high incoming
+  order and proves it cannot inflate the epsilon-zero tail. Focused adjoint
+  and persistent transport tests pass; the next banana rerun was temporarily
+  deferred because another repo process occupied the Wolfram license.
 
 ## Disproven configurations: do not repeat unchanged
 

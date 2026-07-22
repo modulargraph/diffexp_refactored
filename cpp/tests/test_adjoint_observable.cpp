@@ -393,6 +393,22 @@ bool adaptive_witness_respects_row_pole() {
          certificate.tail.certified_after_taylor_order == 4;
 }
 
+bool coefficientwise_tail_ignores_irrelevant_high_epsilon_input() {
+  FiniteLaurentVector<ComplexBall> adjoint{
+      EpsilonFrame<ComplexBall>(0, {ball("1")})};
+  std::vector<ComplexBall> incoming_coefficients(11, ball("0"));
+  incoming_coefficients.front() = ball("2");
+  incoming_coefficients.back() = ball("1e100");
+  FiniteLaurentVector<ComplexBall> incoming{
+      EpsilonFrame<ComplexBall>(0, std::move(incoming_coefficients))};
+  const auto tails = backward_adjoint_contracted_tail_by_output(
+      Magnitude::one(), adjoint, incoming, {0, 0},
+      "coefficientwise irrelevant-input regression");
+  return tails.size() == 1 &&
+         tails.front().approximate_upper() < 3.0 &&
+         tails.front().approximate_upper() >= 2.0;
+}
+
 }  // namespace
 
 int main() {
@@ -407,6 +423,7 @@ int main() {
                   physical_ode_row_adapter() &&
                   certified_geometric_tail() &&
                   adaptive_witness_respects_row_pole() &&
+                  coefficientwise_tail_ignores_irrelevant_high_epsilon_input() &&
                   tail_certificate_fails_closed();
   std::cout << (ok ? "PASS" : "FAIL")
             << ": composed backward Fuchsian adjoint Taylor recurrence\n";

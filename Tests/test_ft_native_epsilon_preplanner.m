@@ -77,6 +77,23 @@ assert["native runtime reuses the planner-owned normalized level matrix",
     runtimeMatrix =!= ftData["Levels", 1, "DiffMatrix"],
   {plannerMatrixNormalizeCalls, runtimeNormalizeCalls, runtimeMatrix}];
 
+rawRuntimeMatrix =
+  ftData["Levels", 1, "DiffMatrix"] /. d -> 1;
+rawRuntimeBasis = ft2NormalizeEpsilonBasis[
+  rawRuntimeMatrix, {{1, 0}, {2, 0}}, {1, 0}, eps,
+  levelPlan["Gauge"]];
+plannedRuntimeBasis = ft2NormalizeEpsilonBasis[
+  runtimeMatrix, {{1, 0}, {2, 0}}, {1, 0}, eps,
+  levelPlan["Gauge"]];
+assert["epsilon-basis normalization accepts the planner-owned normalized matrix under the same exact gauge",
+  AssociationQ[rawRuntimeBasis] &&
+    AssociationQ[plannedRuntimeBasis] &&
+    rawRuntimeBasis["CheckpointRecord"] ===
+      plannedRuntimeBasis["CheckpointRecord"] &&
+    plannedRuntimeBasis["Matrix"] ===
+      levelPlan["Gauge", "Matrix"],
+  {rawRuntimeBasis, plannedRuntimeBasis}];
+
 fallbackNormalizeCalls = 0;
 fallbackMatrix = ft2RuntimeLevelMatrix[
   ftData["Levels", 1], None,

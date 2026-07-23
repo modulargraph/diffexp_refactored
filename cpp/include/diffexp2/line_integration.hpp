@@ -2,6 +2,7 @@
 
 #include "diffexp2/integration.hpp"
 #include "diffexp2/local_algebra.hpp"
+#include "diffexp2/physical_ode.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -1501,6 +1502,160 @@ StoredLineIntegral integrate_prepared_scalar_row_stored(
       "stored Taylor truncation only; fused transport row projection; no "
       "unseen-tail majorant or full-local certificate";
   result.diagnostics.detail = result.value.error.provenance;
+  return result;
+}
+
+struct FactorizedOrdinaryStoredRowIntegral {
+  bool eligible = false;
+  std::string reason;
+  StoredLineIntegral integral;
+  std::size_t operator_columns = 0;
+};
+
+// Integrate a finite ordinary Taylor recurrence as a transfer operator from
+// its retained center value.  This is the line-integral analogue of
+// evaluate_ordinary_center_value_factorized: exact unit center impulses are
+// evolved and integrated first, then each original center-value ball is
+// applied once.  The caller remains responsible for certifying that `source`
+// is an authoritative replay of the retained physical recurrence and for
+// checking overlap with the historical direct integral.
+inline FactorizedOrdinaryStoredRowIntegral
+integrate_ordinary_center_stored_row_factorized(
+    const PreparedPhysicalClearedODE<ComplexBall>& equation,
+    const LocalSolution<ComplexBall>& source,
+    const PreparedSparseLocalMultiplierMatrix<ComplexBall>& matrix,
+    std::int32_t projected_complete_cap,
+    const RealEvaluationPoint& lower,
+    const RealEvaluationPoint& upper,
+    const StoredLineIntegrationOptions& options,
+    const StoredLineIntegral& direct,
+    std::size_t maximum_operator_columns =
+        std::numeric_limits<std::size_t>::max()) {
+  physical_ode_detail::validate_ode(equation);
+  validate_local_solution(source, true);
+  FactorizedOrdinaryStoredRowIntegral result;
+  const auto ineligible = [&](std::string reason) {
+    result.reason = std::move(reason);
+    result.integral = StoredLineIntegral{};
+    result.operator_columns = 0;
+    return result;
+  };
+  if (source.dimension != equation.dimension ||
+      source.sectors.size() != 1 ||
+      source.sectors.front().a.is_zero != TruthValue::Yes ||
+      source.sectors.front().b.is_zero != TruthValue::Yes ||
+      source.sectors.front().log_power != 0)
+    return ineligible(
+        "factorized ordinary row integration requires one ordinary sector "
+        "bound to the same physical equation dimension");
+  if (!direct.deferred_divergent_groups.empty())
+    return ineligible(
+        "factorized ordinary row integration cannot reassociate deferred "
+        "divergent groups");
+  if (source.epsilon.width() >
+      std::numeric_limits<std::size_t>::max() / source.dimension)
+    throw std::overflow_error(
+        "factorized ordinary row integration column count overflows size_t");
+  const auto column_count =
+      source.epsilon.width() * source.dimension;
+  if (column_count > maximum_operator_columns)
+    return ineligible(
+        "factorized ordinary row integration exceeds its operator-column "
+        "cap; required=" + std::to_string(column_count) +
+        "; cap=" + std::to_string(maximum_operator_columns));
+
+  EpsilonVector initial =
+      physical_ode_detail::zero_epsilon_vector(
+          source.epsilon, source.dimension);
+  const auto& sector = source.sectors.front();
+  for (std::size_t epsilon_index = 0;
+       epsilon_index < source.epsilon.width(); ++epsilon_index)
+    for (std::uint32_t component = 0;
+         component < source.dimension; ++component)
+      initial.coefficients[
+          epsilon_index * source.dimension + component] =
+          sector.coefficients[local_detail::sector_index(
+              source, epsilon_index, 0, component)];
+
+  auto factorized = direct;
+  std::fill(factorized.value.coefficients.begin(),
+            factorized.value.coefficients.end(), ComplexBall(0));
+  std::size_t column = 0;
+  for (std::int64_t raw_input_power = source.epsilon.min_power;
+       raw_input_power <= source.epsilon.complete_max;
+       ++raw_input_power) {
+    const auto input_power =
+        static_cast<std::int32_t>(raw_input_power);
+    for (std::uint32_t input_component = 0;
+         input_component < source.dimension; ++input_component) {
+      auto impulse = physical_ode_detail::zero_epsilon_vector(
+          source.epsilon, source.dimension);
+      impulse.at(input_power, input_component) = ComplexBall(1);
+      const auto evolved = evolve_ordinary_center_value<ComplexBall>(
+          equation, impulse, source.taylor_complete_max);
+      if (!evolved.eligible)
+        return ineligible(
+            "factorized row impulse evolution is ineligible: " +
+            evolved.reason);
+      auto impulse_local = ordinary_evolution_local_solution(
+          evolved, source.chart, source.prescriptions,
+          source.checkpoint_identity +
+              ":factorized-ordinary-row-column:" +
+              std::to_string(column));
+      StoredLineIntegral response;
+      try {
+        response = integrate_prepared_scalar_row_stored(
+            matrix, impulse_local, projected_complete_cap,
+            lower, upper, options);
+      } catch (const NativeIntegrationError& error) {
+        return ineligible(
+            "factorized row impulse integration is unsupported: " +
+            std::string(error.what()));
+      }
+      if (!response.deferred_divergent_groups.empty() ||
+          response.diagnostics.cancelled_divergent_groups != 0 ||
+          response.diagnostics
+                  .bounded_cancelled_divergent_coefficients != 0)
+        return ineligible(
+            "factorized row impulse integration encountered a divergent "
+            "group whose cancellation is not column-separable");
+      if (response.value.dimension != factorized.value.dimension ||
+          response.value.epsilon.min_power !=
+              factorized.value.epsilon.min_power ||
+          response.value.epsilon.complete_max !=
+              factorized.value.epsilon.complete_max ||
+          response.scope != factorized.scope ||
+          response.imaginary_sign != factorized.imaginary_sign)
+        throw std::logic_error(
+            "factorized ordinary row response changed the direct integral "
+            "contract");
+      const auto& amplitude =
+          initial.at(input_power, input_component);
+      for (std::int64_t raw_output_power =
+               factorized.value.epsilon.min_power;
+           raw_output_power <=
+               factorized.value.epsilon.complete_max;
+           ++raw_output_power) {
+        const auto output_power =
+            static_cast<std::int32_t>(raw_output_power);
+        for (std::uint32_t output_component = 0;
+             output_component < factorized.value.dimension;
+             ++output_component)
+          factorized.value.at(output_power, output_component) +=
+              local_detail::coefficient_or_zero(
+                  response.value, output_power,
+                  output_component) *
+              amplitude;
+      }
+      ++column;
+    }
+  }
+  result.eligible = true;
+  result.reason =
+      "finite ordinary stored-row transfer operator applied once to "
+      "retained center-value balls";
+  result.operator_columns = column_count;
+  result.integral = std::move(factorized);
   return result;
 }
 

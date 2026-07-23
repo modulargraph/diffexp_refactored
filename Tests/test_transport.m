@@ -825,9 +825,29 @@ assert["tt17_native_certified_margin_relaxes_only_to_guarded_matching_accuracy",
 assert["tt17_native_value_accuracy_uses_the_same_guarded_matching_contract",
   ToExpression[
     DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]] ===
-      Max[DiffExp2`Tolerances`Tol["ResidTol"],
-        DiffExp2`Tolerances`Tol["MatchTol"]]/
+      DiffExp2`Tolerances`Tol["MatchTol"]/
         10^DiffExp2`Tolerances`$SafetyDigits];
+assert["tt17_native_value_accuracy_adds_only_the_arm_aggregation_guard",
+  Block[{
+      DiffExp2`Solve`Private`$cppRegularValueAggregationGuardDigits = 2},
+    ToExpression[
+      DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]] ===
+        DiffExp2`Tolerances`Tol["MatchTol"]/
+          10^(DiffExp2`Tolerances`$SafetyDigits + 2)]];
+DiffExp2`Config`UpdateConfiguration[{
+  "LinearSolveChopPrecision" -> 20}];
+nativeValueAccuracy20 = ToExpression[
+  DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]];
+DiffExp2`Config`UpdateConfiguration[{
+  "LinearSolveChopPrecision" -> 21}];
+nativeValueAccuracy21 = ToExpression[
+  DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]];
+DiffExp2`Config`UpdateConfiguration[{
+  "LinearSolveChopPrecision" -> 12}];
+assert["tt17_native_value_accuracy_tracks_consecutive_high_matching_targets",
+  nativeValueAccuracy21 === nativeValueAccuracy20/10 &&
+  nativeValueAccuracy20 ===
+    10^-20/10^DiffExp2`Tolerances`$SafetyDigits];
 
 (* End-to-end witness: f1' = K f2, f2' = 0 and boundary
    f1(0)=1-K h, f2(0)=1 make f1(h)=1 by a 70-decade cancellation at the

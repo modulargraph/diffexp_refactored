@@ -399,6 +399,35 @@ test["higher-order boundary checkpoint may seed a lower-order run",
   AssociationQ[loaded] &&
     loaded["SourceExpansionOrder"] === expansionOrder + 10, loaded];
 
+raisedPublicationProfile = <|1 -> matchDigits + 2|>;
+test["legacy boundary is invalidated when its consumer publication digits rise",
+  loadLadderCheckpoint[
+    highOrderBoundaryFile, name, data, prepKey, None,
+    raisedPublicationProfile] === $Failed];
+raisedPublicationBoundaryFile =
+  FileNameJoin[{tmpDir, "raised-publication-boundary.mx"}];
+saveLadderCheckpoint[raisedPublicationBoundaryFile, <|
+  "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
+  "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
+  "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
+  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "MatchingDigits" -> matchDigits,
+  "PublicationDigits" -> matchDigits + 2,
+  "RecurrenceBackend" -> recurrenceBackend,
+  "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
+  "LevelEpsilonHalos" -> levelEpsilonHalos,
+  "SourceExpansionOrder" -> expansionOrder + 10,
+  "RequestedEpsilonOrder" -> requestedEpsilonOrder[1]|>];
+loaded = loadLadderCheckpoint[
+  raisedPublicationBoundaryFile, name, data, prepKey, None,
+  raisedPublicationProfile];
+test["boundary with explicit raised publication digits resumes only for that consumer",
+  AssociationQ[loaded] &&
+    loaded["PublicationDigits"] === matchDigits + 2 &&
+    loadLadderCheckpoint[
+      raisedPublicationBoundaryFile, name, data, prepKey] === $Failed,
+  loaded];
+
 lowOrderBoundaryFile = FileNameJoin[{tmpDir, "low-order-boundary.mx"}];
 saveLadderCheckpoint[lowOrderBoundaryFile, <|
   "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,

@@ -73,7 +73,7 @@ result = Block[{
     lowerState, upperState, observable,
     recipe /@ {"lower-0", "lower-1", "lower-2"},
     recipe /@ {"upper-0", "upper-1"},
-    Global`x, "acb", "mock-root", lowerSourceEpsilon,
+    Global`x, "acb", "mock-root", "1e-8", lowerSourceEpsilon,
     upperSourceEpsilon]];
 
 ops = Lookup[requests, "op"];
@@ -88,7 +88,8 @@ assert["stream_begin_is_metadata_only_and_finish_is_atomic",
       {"transport.contract_pair_stream_finish"}] &&
     Sort[Keys[begin["observable"]]] ===
       Sort[{"identity", "checkpoint_identity", "epsilon",
-        "tail_policy"}] &&
+        "tail_policy", "publication_relative_tolerance"}] &&
+    begin["observable", "publication_relative_tolerance"] === "1e-8" &&
     FreeQ[begin, "integrand_rows" | "row" | "rows"] &&
     Length[Lookup[result, "lines", {}]] === 1,
   {ops, Lookup[begin, "observable", None]}];
@@ -132,7 +133,8 @@ failure = Block[{
     lowerState, upperState, observable,
     recipe /@ {"lower-0", "lower-1", "lower-2"},
     recipe /@ {"upper-0", "upper-1"},
-    Global`x, "acb", "mock-failure-root", lowerSourceEpsilon,
+    Global`x, "acb", "mock-failure-root", "1e-8",
+    lowerSourceEpsilon,
     upperSourceEpsilon]];
 failureOps = Lookup[failureRequests, "op"];
 assert["stream_failure_aborts_once_and_never_finishes",

@@ -103,6 +103,26 @@ valueTransportMode = If[TrueQ[valueTransport], "1", "0"];
 recurrenceBackend = runnerSettings["RecurrenceBackend"];
 cppBatchEndpointArms = runnerSettings["BatchEndpointArms"];
 cppArmThreadBudget = runnerSettings["CppThreads"];
+observableContractionThreadsText = envOrDefault[
+  "FT_OBSERVABLE_CONTRACTION_THREADS",
+  ToString[Min[2, cppArmThreadBudget]]];
+If[!StringMatchQ[observableContractionThreadsText,
+    DigitCharacter..] ||
+    !TrueQ[1 <= FromDigits[observableContractionThreadsText] <= 32],
+  Print["Invalid FT_OBSERVABLE_CONTRACTION_THREADS: expected an integer from 1 through 32"];
+  Exit[2]];
+observableContractionThreads =
+  FromDigits[observableContractionThreadsText];
+observableContractionChunkSizeText = envOrDefault[
+  "FT_OBSERVABLE_CONTRACTION_CHUNK_SIZE",
+  ToString[observableContractionThreads]];
+If[!StringMatchQ[observableContractionChunkSizeText,
+    DigitCharacter..] ||
+    !TrueQ[1 <= FromDigits[observableContractionChunkSizeText] <= 32],
+  Print["Invalid FT_OBSERVABLE_CONTRACTION_CHUNK_SIZE: expected an integer from 1 through 32"];
+  Exit[2]];
+observableContractionChunkSize =
+  FromDigits[observableContractionChunkSizeText];
 deltaPrescriptionSign = runnerSettings["DeltaPrescriptionSign"];
 DiffExp2`Transport`Private`$enableSingularMatchPrecondition =
   singularMatchPrecondition;
@@ -110,6 +130,15 @@ If[singularMatchPrecondition,
   Print["DE2 singular match precondition enabled"]];
 wp = runnerSettings["WorkingPrecision"];
 matchDigits = runnerSettings["MatchingDigits"];
+matchingCertificationSafetyDigitsText = envOrDefault[
+  "FT_MATCHING_CERTIFICATION_SAFETY_DIGITS",
+  ToString[DiffExp2`Tolerances`$SafetyDigits]];
+If[!StringMatchQ[matchingCertificationSafetyDigitsText,
+    DigitCharacter..],
+  Print["Invalid FT_MATCHING_CERTIFICATION_SAFETY_DIGITS: expected a nonnegative integer"];
+  Exit[2]];
+matchingCertificationSafetyDigits =
+  FromDigits[matchingCertificationSafetyDigitsText];
 epsOrder = runnerSettings["EpsilonOrder"];
 expansionOrder = runnerSettings["ExpansionOrder"];
 boundaryExtraOrder = runnerSettings["BoundaryExtraOrder"];
@@ -1044,6 +1073,7 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
     boundaryPrefactors_List, epsSymbol_Symbol,
     suppliedGauge_:Automatic] := Module[
   {d, widths, inputTop, gauge, rawPoleOrders, canonical, relative,
+   matrixHash, gaugeInputHash, gaugeNormalizedHash,
    commonOffset, effective, boundaryShifts, normalized,
    normalizedPoleOrders, shiftedBoundary, record},
   d = Length[matrix];
@@ -1073,9 +1103,18 @@ ft2NormalizeEpsilonBasis[matrix_, boundaryValues_List,
   If[FailureQ[gauge], Return[gauge, Module]];
   ft2NativeStageTiming["epsilon-basis gauge-ready supplied=",
     suppliedGauge =!= Automatic];
+  matrixHash = Hash[matrix, "SHA256"];
+  gaugeInputHash =
+    Lookup[Lookup[gauge, "Record", <||>], "InputMatrixHash", None];
+  gaugeNormalizedHash =
+    Lookup[Lookup[gauge, "Record", <||>], "NormalizedMatrixHash", None];
+  (* The native planner owns and reuses the already gauge-normalized matrix
+     to avoid repeating expensive d -> 4-2 eps rational canonicalization.
+     The same exact gauge therefore legitimately arrives bound either to its
+     raw input hash or to its normalized output hash.  Every other hash is
+     rejected, and the normalized payload is checked again below. *)
   If[!AssociationQ[gauge] ||
-      Lookup[Lookup[gauge, "Record", <||>], "InputMatrixHash", None] =!=
-        Hash[matrix, "SHA256"] ||
+      !MemberQ[{gaugeInputHash, gaugeNormalizedHash}, matrixHash] ||
       !TrueQ[Lookup[Lookup[gauge, "Record", <||>], "PoleFree", False]] ||
       Lookup[gauge, "Identity", None] =!=
         ft2CanonicalIdentity["ft2-relative-epsilon-gauge-",
@@ -1166,6 +1205,29 @@ ft2CheckpointExpectedMatchingDigits[kind_String, level_Integer,
   Lookup[matchingDigitsByLevel, level + 1, matchDigits],
   Lookup[matchingDigitsByLevel, level, matchDigits]];
 
+(* MatchingDigits names the level whose solve created a checkpoint, whereas
+   PublicationDigits names the lower consumer whose requested accuracy was
+   used when the numerical boundary/transport result was certified.  Both
+   are part of the checkpoint's numerical identity. *)
+ft2CheckpointExpectedPublicationDigits[kind_String, level_Integer,
+    matchingDigitsByLevel_Association] := If[kind === "Boundary",
+  Lookup[matchingDigitsByLevel, level, matchDigits],
+  Lookup[matchingDigitsByLevel, level - 1, matchDigits]];
+
+(* A level publishes the boundary consumed by level-1.  Its internal match
+   solve may carry guarded extra digits, but endpoint acceptance belongs to
+   the downstream consumer and must not inherit that private target. *)
+ft2DownstreamPublicationDigits[level_Integer,
+    matchingDigitsByLevel_Association] :=
+  Lookup[matchingDigitsByLevel, level - 1, matchDigits];
+
+ft2LevelMatchingCertificationDigits[
+    levelMatchingDigits_Integer,
+    downstreamPublicationDigits_Integer] :=
+  Min[levelMatchingDigits,
+    downstreamPublicationDigits +
+      matchingCertificationSafetyDigits];
+
 loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None,
     matchingDigitsByLevel_:<||>] := Module[
   {payload, ok, kind, level, levelData, belowData, mastersHere, mastersBelow,
@@ -1174,7 +1236,8 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None,
    requiredRaw, savedRequiredRaw, preservedRaw, preservedSource, nativeRecord,
    nativePlanRecord, nativePlanIdentity, transportKindQ,
    nativeTransportRecord, nativeContract, storedRequestMetadata,
-   expectedRequestMetadata, expectedMatchingDigits},
+   expectedRequestMetadata, expectedMatchingDigits,
+   expectedPublicationDigits},
   If[!FileExistsQ[file],
     Return[ladderCheckpointReject[file, "file does not exist"], Module]];
   Clear[Global`$FT2LadderCheckpoint];
@@ -1212,6 +1275,8 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None,
     Return[ladderCheckpointReject[file, "invalid resume level"], Module]];
   expectedMatchingDigits = ft2CheckpointExpectedMatchingDigits[
     kind, level, matchingDigitsByLevel];
+  expectedPublicationDigits = ft2CheckpointExpectedPublicationDigits[
+    kind, level, matchingDigitsByLevel];
   If[Lookup[payload, "Example", None] =!= name,
     Return[ladderCheckpointReject[file, "example does not match"], Module]];
   If[Lookup[payload, "WorkingPrecision", None] =!= wp,
@@ -1219,6 +1284,10 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None,
   If[Lookup[payload, "MatchingDigits", matchDigits] =!=
       expectedMatchingDigits,
     Return[ladderCheckpointReject[file, "MatchingDigits does not match"], Module]];
+  If[Lookup[payload, "PublicationDigits", matchDigits] =!=
+      expectedPublicationDigits,
+    Return[ladderCheckpointReject[file,
+      "PublicationDigits does not match"], Module]];
   If[KeyExistsQ[payload, "RecurrenceBackend"] &&
       payload["RecurrenceBackend"] =!= recurrenceBackend,
     Return[ladderCheckpointReject[file,
@@ -1577,6 +1646,11 @@ ft2ExpectedPoleFreeExampleQ[example_String] := MemberQ[
   {"bubble", "sunrise", "banana", "banana_unequal", "banana4",
     "banana4_unequal", "kite", "pentagon_massive"}, example];
 
+ft2ExpectedFinalMinimumPower[example_String] := Which[
+  ft2ExpectedPoleFreeExampleQ[example], 0,
+  example === "double_box_planar", -4,
+  True, Missing["UnknownFinalPoleFloor", example]];
+
 ft2FinalPoleNegligibleQ[coefficient_] := Module[{bounds},
   If[FreeQ[coefficient, _?InexactNumberQ] &&
       TrueQ[PossibleZeroQ[coefficient]], Return[True, Module]];
@@ -1587,15 +1661,17 @@ ft2FinalPoleNegligibleQ[coefficient_] := Module[{bounds},
     TrueQ[Last[bounds] <= 10^-8]];
 
 ft2UnexpectedFinalPoleRows[example_String, raw_] := Module[
-  {minimum = esMn[raw], inspected},
-  If[!ft2ExpectedPoleFreeExampleQ[example] || minimum >= 0, Return[{}]];
+  {minimum = esMn[raw],
+   expectedMinimum = ft2ExpectedFinalMinimumPower[example], inspected},
+  If[MissingQ[expectedMinimum] || minimum >= expectedMinimum, Return[{}]];
   inspected = Table[{power, esC[raw, power]},
-    {power, minimum, -1}];
+    {power, minimum, expectedMinimum - 1}];
   Select[inspected, !ft2FinalPoleNegligibleQ[Last[#]] &]];
 
 ft2PretrimFinalPoleAudit[example_String, masters_List,
-    rawValues_List] := Module[{bad},
-  If[!ft2ExpectedPoleFreeExampleQ[example], Return[True, Module]];
+    rawValues_List] := Module[{bad, expectedMinimum},
+  expectedMinimum = ft2ExpectedFinalMinimumPower[example];
+  If[MissingQ[expectedMinimum], Return[True, Module]];
   If[Length[masters] =!= Length[rawValues],
     Return[Failure["FeynmanTrickUnexpectedFinalPole", <|
       "Detail" ->
@@ -1612,9 +1688,29 @@ ft2PretrimFinalPoleAudit[example_String, masters_List,
   If[bad === {}, True,
     Failure["FeynmanTrickUnexpectedFinalPole", <|
       "Detail" ->
-        "a pole-free physical example has unresolved negative epsilon coefficients before ESTrimThrough; refusing to let relative trimming hide them",
-      "Example" -> example, "AbsoluteTolerance" -> 10^-8,
+        "a physical example has unresolved coefficients below its proven final pole floor before ESTrimThrough; refusing to let trimming hide them",
+      "Example" -> example, "ExpectedMinimumPower" -> expectedMinimum,
+      "AbsoluteTolerance" -> 10^-8,
       "Failures" -> bad|>]]];
+
+ft2ApplyExpectedFinalPoleFloor[example_String, raw_] := Module[
+  {expectedMinimum = ft2ExpectedFinalMinimumPower[example],
+   completeMax = esCMx[raw]},
+  If[MissingQ[expectedMinimum] || esMn[raw] >= expectedMinimum,
+    Return[raw, Module]];
+  If[completeMax < expectedMinimum,
+    Return[Failure["FeynmanTrickUnexpectedFinalPole", <|
+      "Detail" ->
+        "the retained final epsilon window ends below its proven pole floor",
+      "Example" -> example, "ExpectedMinimumPower" -> expectedMinimum,
+      "AvailableCompleteMax" -> completeMax|>], Module]];
+  (* The audit above proves that every discarded numerical enclosure is
+     below the public absolute tolerance.  The example-specific pole theorem
+     supplies the stronger exact statement: these coefficients are
+     structural zeros, so advance Min instead of carrying numerical
+     cancellation remnants into the published Laurent window. *)
+  DiffExp2`EpsSeries`ESNew[expectedMinimum,
+    Table[esC[raw, power], {power, expectedMinimum, completeMax}]]];
 
 ft2StepwiseRow[example_, level_, master_, raw_, prefactor_,
     certification_] := Module[{rowMin, coefficients},
@@ -1867,6 +1963,40 @@ ft2NativeMatchingProducerRetry[failure_?FailureQ, level_Integer,
       "BackendFailure" -> backend|>], None]];
 
 ft2NativeMatchingProducerRetry[_, _Integer, _Integer, _Integer] := None;
+
+(* A terminal boundary contraction is itself the producer for the next lower
+   FT level.  If its rigorous output ball misses the requested publication
+   width, raise this level and every upstream producer by the same guarded
+   accuracy ladder used for propagated matching enclosures. *)
+ft2NativeTerminalOutputProducerRetry[failure_?FailureQ,
+    level_Integer, nLevels_Integer,
+    currentLevelDigits_Integer] := Module[
+  {data, backend, reportedAdditional, additional},
+  data = Quiet[Check[failure[[2]], <||>]];
+  backend = If[AssociationQ[data],
+    Lookup[data, "BackendFailure", None], None];
+  reportedAdditional = If[AssociationQ[backend],
+    Lookup[backend, "required_additional_digits", None], None];
+  additional = If[
+    IntegerQ[reportedAdditional] && reportedAdditional > 0,
+    reportedAdditional,
+    DiffExp2`Tolerances`$SafetyDigits];
+  If[level > 1 && level <= nLevels && currentLevelDigits > 0 &&
+      additional > 0 && AssociationQ[backend] &&
+      Lookup[backend, "reason", None] ===
+        "terminal_output_ball_inconclusive" &&
+      TrueQ[Lookup[backend, "retryable_level_accuracy", False]],
+    Failure["FeynmanTrickNativeMatchingProducer", <|
+      "Detail" ->
+        "native terminal boundary needs a tighter producer accuracy ladder",
+      "Level" -> level - 1, "ProducerLevel" -> level,
+      "NumLevels" -> nLevels,
+      "CurrentMatchingDigits" -> currentLevelDigits,
+      "AdditionalOrders" -> additional,
+      "BackendFailure" -> backend|>], None]];
+
+ft2NativeTerminalOutputProducerRetry[
+    _, _Integer, _Integer, _Integer] := None;
 
 ft2NativeMatchingProducerRetryQ[failure_] := FailureQ[failure] &&
   Quiet[Check[failure[[1]] ===
@@ -2886,9 +3016,17 @@ ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
     "RequiredTargetCompleteMax" -> requiredTargetMax,
     "DeferReceivingBases" -> True];
 SetAttributes[ft2NativeRun, HoldFirst];
-ft2NativeRun[atlas_Symbol, observables_, physicalVar_] :=
+ft2NativeRun[atlas_Symbol, observables_, physicalVar_,
+    matchingCertificationDigits_Integer,
+    publicationDigits_Integer] :=
   DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
-    atlas, observables, physicalVar];
+    atlas, observables, physicalVar,
+    "ObservableContractionChunkSize" ->
+      observableContractionChunkSize,
+    "ObservableContractionThreads" ->
+      observableContractionThreads,
+    "MatchingCertificationDigits" -> matchingCertificationDigits,
+    "PublicationDigits" -> publicationDigits];
 ft2NativeExport[batch_, digits_] :=
   DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
     batch, digits];
@@ -2942,7 +3080,9 @@ ft2DivergentCancellationPolicy[] := Module[
 ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     entries_List, ledger_Association, physicalVar_Symbol, anchor_,
     extraSingularFactors_List, deltaPrescriptions_List, threads_Integer,
-    outputDigits_Integer, nativePlanIdentity_:None,
+    outputDigits_Integer, matchingCertificationDigits_Integer,
+    publicationDigits_Integer,
+    nativePlanIdentity_:None,
     checkpointSpec_:None] :=
  Block[{$MaxExtraPrecision = Max[$MaxExtraPrecision,
      DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 outputDigits]},
@@ -3086,6 +3226,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
   nativeBatchPayloadIdentity = ft2CanonicalIdentity[
     "ft2-native-observable-payload-",
     {First[batchKeys], First[batchPayloadKeys],
+      matchingCertificationDigits, publicationDigits,
       Map[KeyTake[#, {"MasterIndex", "Case", "RequestIdentity",
           "CoefficientIdentity", "Identity", "CheckpointIdentity"}] &,
         entries],
@@ -3168,6 +3309,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         nativeBatchPayloadIdentity = ft2CanonicalIdentity[
           "ft2-native-observable-payload-",
           {nativeBatchPayloadIdentity, atlasPlanIdentity,
+            matchingCertificationDigits, publicationDigits,
             Map[KeyTake[#, {"Operation", "Identity",
                 "CheckpointIdentity", "Epsilon", "TailPolicy",
                 "DivergentCancellation"}] &,
@@ -3207,12 +3349,15 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         nativeBatchPayloadIdentity = ft2CanonicalIdentity[
           "ft2-native-observable-payload-",
           {nativeBatchPayloadIdentity, atlasPlanIdentity,
+            matchingCertificationDigits, publicationDigits,
             Map[KeyTake[#, {"Operation", "Identity",
                 "CheckpointIdentity", "Epsilon", "TailPolicy",
                 "DivergentCancellation"}] &,
               observables]}];
         ft2NativeStageTiming["observable-run-start"];
-        batch = catch2[ft2NativeRun[atlas, observables, physicalVar]];
+        batch = catch2[ft2NativeRun[
+          atlas, observables, physicalVar,
+          matchingCertificationDigits, publicationDigits]];
         ft2NativeStageTiming["observable-run-done"];
         If[checkpointMode === "Save",
           If[FailureQ[batch] || !nativeBatchMatchesQ[batch, atlas],
@@ -3659,7 +3804,8 @@ runExample[name_String, familyRequest_:None,
      runtimePlanCheck, nativeTransportContract = None,
      nativeCheckpointSpec = None, nativeStateFile, nativeSidecarFile,
      nativeConfigurationRecord, rowCertifications,
-     downstreamPublicFiniteTop, levelMatchingDigits},
+     downstreamPublicFiniteTop, levelMatchingDigits,
+     downstreamPublicationDigits, levelMatchingCertificationDigits},
     If[recurrenceBackend === "Cpp",
       plannedLevel = nativeEpsilonPlan["Levels"][level]];
     var = levelData["FeynmanParameter"];
@@ -3715,6 +3861,11 @@ runExample[name_String, familyRequest_:None,
       effectiveMatchingTaylorOrders, level, expansionOrder];
     levelMatchingDigits = Lookup[
       effectiveMatchingDigitsByLevel, level, matchDigits];
+    downstreamPublicationDigits = ft2DownstreamPublicationDigits[
+      level, effectiveMatchingDigitsByLevel];
+    levelMatchingCertificationDigits =
+      ft2LevelMatchingCertificationDigits[
+        levelMatchingDigits, downstreamPublicationDigits];
     levelExpansionOrder = If[resumeTransport || resumeNativeTransport,
       Max[resumeCheckpoint["SourceExpansionOrder"],
         requestedLevelExpansionOrder],
@@ -3819,6 +3970,9 @@ runExample[name_String, familyRequest_:None,
       nativeConfigurationRecord = <|
         "WorkingPrecision" -> wp,
         "MatchingDigits" -> levelMatchingDigits,
+        "MatchingCertificationDigits" ->
+          levelMatchingCertificationDigits,
+        "PublicationDigits" -> downstreamPublicationDigits,
         "ExpansionOrder" -> levelExpansionOrder,
         "EpsilonOrder" -> esCMxLevel,
         "DivisionOrder" -> divisionOrder,
@@ -3877,6 +4031,7 @@ runExample[name_String, familyRequest_:None,
                 "ExtraSingularFactors" -> extraFacs,
                 "Anchor" -> anchor, "WorkingPrecision" -> wp,
                 "MatchingDigits" -> levelMatchingDigits,
+                "PublicationDigits" -> downstreamPublicationDigits,
                 "DivisionOrder" -> divisionOrder,
                 "RadiusOfConvergence" -> radiusOfConvergence,
                 "ValueTransportMode" -> valueTransportMode,
@@ -3904,16 +4059,22 @@ runExample[name_String, familyRequest_:None,
       nativeDispatch = ft2RunNativeBoundaryDispatch[
         sys, currentBCs, nativeEntries, nativeLedger, var, anchor,
         extraFacs, deltaPrescriptions, cppArmThreadBudget, inputPrecision,
+        levelMatchingCertificationDigits,
+        downstreamPublicationDigits,
         nativeEpsilonExecution["Identity"], nativeCheckpointSpec];
       If[FailureQ[nativeDispatch],
         Print["FTLADDER NATIVE BATCH FAIL level=", level, " ",
           nativeDispatch];
         With[{reservoirRetry = ft2NativeMatchingReservoirRetry[
             nativeDispatch, level]},
-          With[{producerRetry = ft2NativeMatchingProducerRetry[
-              nativeDispatch, level, nLevels,
-              Lookup[effectiveMatchingDigitsByLevel, level + 1,
-                matchDigits]]},
+          With[{producerRetry = Replace[
+              ft2NativeMatchingProducerRetry[
+                nativeDispatch, level, nLevels,
+                Lookup[effectiveMatchingDigitsByLevel, level + 1,
+                  matchDigits]],
+              None :> ft2NativeTerminalOutputProducerRetry[
+                nativeDispatch, level, nLevels,
+                levelMatchingDigits]]},
           With[{retry = Which[
               ft2NativeMatchingReservoirRetryQ[reservoirRetry],
                 reservoirRetry,
@@ -3994,6 +4155,7 @@ runExample[name_String, familyRequest_:None,
         "CompletedArms" -> completedArms,
         "Anchor" -> anchor, "WorkingPrecision" -> wp,
         "MatchingDigits" -> levelMatchingDigits,
+        "PublicationDigits" -> downstreamPublicationDigits,
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
         "ValueTransportMode" -> valueTransportMode,
@@ -4197,6 +4359,11 @@ runExample[name_String, familyRequest_:None,
       If[FailureQ[pretrimFinalPoleAudit],
         Print["FTLADDER PRETRIM FINAL POLE FAIL ",
           pretrimFinalPoleAudit];
+        Throw[$Failed, "FT2Abort"]];
+      rawES = ft2ApplyExpectedFinalPoleFloor[name, #] & /@ rawES;
+      If[AnyTrue[rawES, FailureQ],
+        Print["FTLADDER FINAL POLE FLOOR FAIL ",
+          First[Select[rawES, FailureQ]]];
         Throw[$Failed, "FT2Abort"]]];
     (* Matching halos extend a private high-order reservoir.  Its remote
        coefficients can be much larger than the physical pole/finite prefix
@@ -4257,6 +4424,7 @@ runExample[name_String, familyRequest_:None,
           "MastersHere" -> mastersBelow, "Anchor" -> anchor,
           "WorkingPrecision" -> wp, "EpsilonOrder" -> epsOrder,
           "MatchingDigits" -> levelMatchingDigits,
+          "PublicationDigits" -> downstreamPublicationDigits,
           "RecurrenceBackend" -> recurrenceBackend,
           "DeltaPrescriptionSign" -> deltaPrescriptionSign,
           "BoundaryExtraOrder" -> boundaryExtraOrder,
@@ -4324,20 +4492,27 @@ runExample[name_String, familyRequest_:None,
   True];
 
 ft2RunExampleWithMatchingRetries[name_String,
-    familyRequest_:None] := Module[
-  {matchingPrivateHalos = <||>, matchingTaylorOrders = <||>,
-   matchingDigitsByLevel = <||>,
+    familyRequest_:None, initialMatchingPrivateHalos_:<||>,
+    initialMatchingTaylorOrders_:<||>,
+    initialMatchingDigitsByLevel_:<||>] := Module[
+  {matchingPrivateHalos = initialMatchingPrivateHalos,
+   matchingTaylorOrders = initialMatchingTaylorOrders,
+   matchingDigitsByLevel = initialMatchingDigitsByLevel,
    result, data, level, additional, current, merged, updated,
    currentExpansionOrder, currentTaylorOrders, profileEnabled, profileContract,
    profileFile, profileSave, nLevels, attempt = 0, maxAttempts = 12,
    residualVerdicts, previousResidualVerdicts,
    matchingTaylorProgress = <||>,
    producerLevel, currentMatchingDigits, currentMatchingDigitsByLevel,
-   raisedMatchingDigits,
+   raisedMatchingDigits, preapprovedMatchingDigits, overLimitLevels,
    maxHalo = $ft2MatchingHaloProfileMax,
    maxTaylorOrder = 4 expansionOrder,
    maxProducerDigits = Min[wp,
      matchDigits + 4 DiffExp2`Tolerances`$SafetyDigits]},
+  If[!And @@ (AssociationQ /@
+        {matchingPrivateHalos, matchingTaylorOrders,
+          matchingDigitsByLevel}),
+    Return[$Failed, Module]];
   While[attempt < maxAttempts,
     ++attempt;
     result = runExample[name, familyRequest, matchingPrivateHalos,
@@ -4363,16 +4538,25 @@ ft2RunExampleWithMatchingRetries[name_String,
           !AssociationQ[currentMatchingDigitsByLevel],
         Return[$Failed, Module]];
       updated = currentMatchingDigits + additional;
+      preapprovedMatchingDigits = Merge[
+        {matchingDigitsByLevel,
+          currentMatchingDigitsByLevel}, Max];
       raisedMatchingDigits = ft2RaiseMatchingProducerDigits[
-        Merge[{matchingDigitsByLevel,
-          currentMatchingDigitsByLevel}, Max],
+        preapprovedMatchingDigits,
         producerLevel, updated, nLevels];
+      overLimitLevels = If[AssociationQ[raisedMatchingDigits],
+        Select[Keys[raisedMatchingDigits],
+          raisedMatchingDigits[#] >
+              Lookup[preapprovedMatchingDigits, #, matchDigits] &&
+            raisedMatchingDigits[#] > maxProducerDigits &],
+        {None}];
       If[!AssociationQ[raisedMatchingDigits] ||
-          Max[Values[raisedMatchingDigits]] > maxProducerDigits,
+          overLimitLevels =!= {},
         Print["FTLADDER NATIVE MATCH PRODUCER RETRY EXHAUSTED level=",
           level, " producerLevel=", producerLevel,
           " requestedMatchingDigits=", updated,
           " raisedLevelDigits=", raisedMatchingDigits,
+          " newlyOverLimitLevels=", overLimitLevels,
           " limit=", maxProducerDigits];
         Return[$Failed, Module]];
       matchingDigitsByLevel = raisedMatchingDigits;

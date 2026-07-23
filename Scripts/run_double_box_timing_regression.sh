@@ -19,6 +19,10 @@ expansion_order=${DOUBLE_BOX_TIMING_EXPANSION_ORDER:-25}
 boundary_extra_order=${DOUBLE_BOX_TIMING_BOUNDARY_EXTRA_ORDER:-16}
 division_order=${DOUBLE_BOX_TIMING_DIVISION_ORDER:-3}
 cpp_threads=${DE2_CPP_THREADS:-10}
+level5_digits=${DOUBLE_BOX_TIMING_LEVEL5_DIGITS:-}
+level6_digits=${DOUBLE_BOX_TIMING_LEVEL6_DIGITS:-}
+level4_taylor_order=${DOUBLE_BOX_TIMING_LEVEL4_TAYLOR_ORDER:-}
+level6_taylor_order=${DOUBLE_BOX_TIMING_LEVEL6_TAYLOR_ORDER:-}
 prep_cache=${FT_PREP_CACHE_DIR:-${TMPDIR:-/tmp}/DiffExp2_FT_Prepared}
 fire_path=${FT_FIRE_PATH:-$repo_root/Dependencies/fire/FIRE7/FIRE7}
 
@@ -31,6 +35,39 @@ esac
 if (( max_seconds < 1 )); then
   echo "DOUBLE_BOX_TIMING_MAX_SECONDS must be a positive integer" >&2
   exit 2
+fi
+for setting in "$level5_digits" "$level6_digits"; do
+  if [[ -n "$setting" && ! "$setting" =~ ^[1-9][0-9]*$ ]]; then
+    echo "DOUBLE_BOX_TIMING_LEVEL5_DIGITS and DOUBLE_BOX_TIMING_LEVEL6_DIGITS must be positive integers when set" >&2
+    exit 2
+  fi
+done
+for setting in "$level4_taylor_order" "$level6_taylor_order"; do
+  if [[ -n "$setting" && ! "$setting" =~ ^[1-9][0-9]*$ ]]; then
+    echo "DOUBLE_BOX_TIMING_LEVEL4_TAYLOR_ORDER and DOUBLE_BOX_TIMING_LEVEL6_TAYLOR_ORDER must be positive integers when set" >&2
+    exit 2
+  fi
+done
+if [[ -n "$level5_digits" || -n "$level6_digits" ]]; then
+  if [[ -z "$level5_digits" || -z "$level6_digits" ]]; then
+    echo "set both DOUBLE_BOX_TIMING_LEVEL5_DIGITS and DOUBLE_BOX_TIMING_LEVEL6_DIGITS" >&2
+    exit 2
+  fi
+  initial_digit_profile="<|5 -> $level5_digits, 6 -> $level6_digits|>"
+else
+  initial_digit_profile='<||>'
+fi
+taylor_entries=()
+if [[ -n "$level4_taylor_order" ]]; then
+  taylor_entries+=("4 -> $level4_taylor_order")
+fi
+if [[ -n "$level6_taylor_order" ]]; then
+  taylor_entries+=("6 -> $level6_taylor_order")
+fi
+if (( ${#taylor_entries[@]} == 0 )); then
+  initial_taylor_profile='<||>'
+else
+  initial_taylor_profile="<|$(IFS=', '; echo "${taylor_entries[*]}")|>"
 fi
 
 if ! command -v wolframscript >/dev/null 2>&1; then
@@ -61,7 +98,15 @@ if [[ -z "$library" || ! -f "$library" ]]; then
 fi
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/diffexp2-double-box-timing.XXXXXX")
-trap 'rm -rf "$scratch"' EXIT
+cleanup() {
+  status=$?
+  if (( status == 0 )) && [[ ${DOUBLE_BOX_TIMING_KEEP_SCRATCH:-0} != 1 ]]; then
+    rm -rf "$scratch"
+  else
+    echo "double-box timing diagnostics retained at $scratch" >&2
+  fi
+}
+trap cleanup EXIT
 
 common_environment=(
   env
@@ -100,14 +145,14 @@ if [[ ${DOUBLE_BOX_TIMING_WARM_CACHE:-0} == 1 ]]; then
   fi
 fi
 
-# These halos belong to the private level-2 and level-3 basis matches. Calling
-# runExample directly keeps the public epsilon request at order zero and
-# avoids charging an already-learned matching-halo discovery retry to the
-# regression timer.
-runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; result = Global`runExample["double_box_planar", None, <|1 -> 2, 2 -> 5, 3 -> 1|>]; If[result === True, Quit[0], Print["FAILED double_box_planar: ", InputForm[result]]; Quit[1]]'
+# These halos belong to the private level-1 through level-3 basis matches.
+# Seed them into the production retry driver so the timer excludes
+# already-learned halo discovery while still exercising producer-accuracy and
+# finite-Taylor recovery.
+runner_code="Get[FileNameJoin[{Directory[], \"Scripts\", \"run_ft_stepwise2.m\"}]]; result = Global\`ft2RunExampleWithMatchingRetries[\"double_box_planar\", None, <|1 -> 2, 2 -> 5, 3 -> 1|>, $initial_taylor_profile, $initial_digit_profile]; If[result === True, Quit[0], Print[\"FAILED double_box_planar: \", InputForm[result]]; Quit[1]]"
 
 echo "=== double-box timing regression"
-echo "configuration: WP=$working_precision match=$matching_digits T=$expansion_order boundaryExtra=$boundary_extra_order division=$division_order threads=$cpp_threads ceiling=${max_seconds}s"
+echo "configuration: WP=$working_precision match=$matching_digits T=$expansion_order boundaryExtra=$boundary_extra_order division=$division_order threads=$cpp_threads levelTaylor=$initial_taylor_profile levelDigits=$initial_digit_profile ceiling=${max_seconds}s"
 SECONDS=0
 set +e
 python3 Scripts/run_with_deadline.py \

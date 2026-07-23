@@ -119,20 +119,25 @@ std::string solve_local(const std::string& session,
                         const std::string& center,
                         const std::string& checkpoint,
                         const std::string& value,
-                        const std::string& epsilon_value = "0") {
-  json::array schedule_row;
-  schedule_row.push_back(json::object{
-      {"case", "R"}, {"da", "0"}, {"db", "0"}});
+                        const std::string& epsilon_value = "0",
+                        std::uint32_t taylor_complete_max = 0) {
+  json::array shifts;
   json::array schedule;
-  schedule.push_back(std::move(schedule_row));
+  for (std::uint32_t n = 0; n <= taylor_complete_max; ++n) {
+    shifts.emplace_back(std::to_string(n));
+    schedule.push_back(json::array{json::object{
+        {"case", n == 0 ? "R" : "T"},
+        {"da", std::to_string(n)}, {"db", "0"}}});
+  }
   const auto response = request(json::object{
       {"schema", 2}, {"op", "local.solve"}, {"session", session},
       {"chart", chart},
       {"run", json::object{
-           {"nmax", 0}, {"p", 0}, {"has_initial", true},
+           {"nmax", taylor_complete_max}, {"p", 0},
+           {"has_initial", true},
            {"adaptive_probe", false}, {"a_target", "0"},
            {"b_target", "0"}, {"a_shift_min", 0},
-           {"a_shifts", json::array{"0"}},
+           {"a_shifts", std::move(shifts)},
            {"schedule", std::move(schedule)},
            {"initial", json::array{value, epsilon_value, "0"}},
            {"initial_validity", json::array{2}}, {"source", nullptr},
@@ -294,9 +299,11 @@ bool run_domain(const std::string& domain) {
   const auto incoming = solve_local(
       session, anchor, "0", domain + "-incoming", "2");
   const auto lower_basis = solve_local(
-      session, lower_chart, "-2/3", domain + "-lower-basis", "1");
+      session, lower_chart, "-2/3", domain + "-lower-basis", "1",
+      "0", domain == "acb" ? 2 : 0);
   const auto upper_basis = solve_local(
-      session, upper_chart, "2/3", domain + "-upper-basis", "1");
+      session, upper_chart, "2/3", domain + "-upper-basis", "1",
+      "0", domain == "acb" ? 2 : 0);
 
   const auto planned = request(json::object{
       {"schema", 2}, {"op", "tile.plan"}, {"session", session},
@@ -424,6 +431,12 @@ bool run_domain(const std::string& domain) {
            nullptr &&
        embedded_native.at("exact_shadow_extra_precision_bits").as_int64() ==
            0);
+  const bool asymmetric_taylor_sources_retained =
+      domain == "rational" ||
+      (embedded_native.at("basis_sources").as_array().front().as_object()
+               .at("matching_taylor_width") == 3 &&
+       embedded_native.at("incoming_source").as_object()
+               .at("matching_taylor_width") == 1);
 
   auto corrupt_header = saved_header;
   auto corrupt_payload = saved_payload;
@@ -626,6 +639,7 @@ bool run_domain(const std::string& domain) {
           "diffexp2-retained-planned-match-hop-v2" &&
       embedded_native.at("schema") == expected_native_schema &&
       exact_shadow_shape_ok &&
+      asymmetric_taylor_sources_retained &&
       lower_planned->at("handoff") == lower.at("planned_hop") &&
       lower_planned->at("provenance_identity") ==
           lower.at("planned_hop_provenance_identity") &&
@@ -689,6 +703,8 @@ bool run_domain(const std::string& domain) {
              "embedded native match schema");
     diagnose(exact_shadow_shape_ok,
              "embedded Acb v6 exact-shadow field shape");
+    diagnose(asymmetric_taylor_sources_retained,
+             "embedded Acb asymmetric Taylor source widths");
     diagnose(lower_planned->at("handoff") == lower.at("planned_hop"),
              "saved planned handoff identity");
     diagnose(hidden_match.at("status") == "error",

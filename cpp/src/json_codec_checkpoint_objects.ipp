@@ -548,6 +548,16 @@ restore_checkpoint_transport_endpoint_record(
       "checkpoint transport endpoint epsilon contract");
   const auto epsilon_contract = parse_observable_epsilon_contract(
       epsilon_record, "checkpoint transport endpoint epsilon contract");
+  const auto publication_relative_tolerance = required_string(
+      source, "publication_relative_tolerance");
+  const auto parsed_publication_relative_tolerance =
+      Magnitude::decimal(publication_relative_tolerance);
+  if (publication_relative_tolerance.empty() ||
+      !parsed_publication_relative_tolerance.is_finite() ||
+      parsed_publication_relative_tolerance.is_zero() ||
+      Magnitude::one() <= parsed_publication_relative_tolerance)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint publication tolerance must be finite and strictly between zero and one");
   if (expected_domain == "rational") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<Rational>>(
@@ -572,6 +582,8 @@ restore_checkpoint_transport_endpoint_record(
   expected_source["observable"] = observable;
   expected_source["row"] = row_record;
   expected_source["output_epsilon_contract"] = epsilon_record;
+  expected_source["publication_relative_tolerance"] =
+      publication_relative_tolerance;
   if (source != expected_source)
     throw std::invalid_argument(
         "checkpoint transport endpoint source differs from its exact state/plan/row binding");

@@ -2193,10 +2193,16 @@ sccBlockPrincipalMatrixRecord[cs_Association] := Module[
       "Detail" -> "native SCC principal matrix registry entry is malformed"|>]];
   sccExactMatrixRecord[matrix, variable, cs]];
 
+$cppRegularValueAggregationGuardDigits = 0;
+
+(* Regular value recentering is an accuracy-producing operation and must
+   follow the explicit per-level matching target.  ResidTol is only a
+   WP-derived ODE spot-check threshold; using Max[ResidTol, MatchTol] here
+   silently made every producer retry above Floor[WP/10] ineffective. *)
 cppRegularValueRelativeAccuracyMaxExact[] := ToString[
-  Max[DiffExp2`Tolerances`Tol["ResidTol"],
-    DiffExp2`Tolerances`Tol["MatchTol"]]/
-    10^DiffExp2`Tolerances`$SafetyDigits, InputForm];
+  DiffExp2`Tolerances`Tol["MatchTol"]/
+    10^(DiffExp2`Tolerances`$SafetyDigits +
+      $cppRegularValueAggregationGuardDigits), InputForm];
 
 cppPersistentMetadata[cs_Association, fb_Integer, W_Integer] := Module[
   {systemIdentity, chartIdentity, chartAnalytic},

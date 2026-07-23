@@ -1,5 +1,6 @@
 #pragma once
 
+#include "diffexp2/integration.hpp"
 #include "diffexp2/local_solution.hpp"
 
 #include <algorithm>
@@ -916,6 +917,208 @@ ordinary_evolution_local_solution(
   solution.sectors.push_back(std::move(sector));
   validate_local_solution(solution, false);
   return solution;
+}
+
+struct FactorizedOrdinaryCenterEvaluation {
+  struct ResponseColumn {
+    std::int32_t input_power = 0;
+    std::uint32_t input_component = 0;
+    ComplexBall amplitude;
+    EpsilonVector response;
+  };
+
+  bool eligible = false;
+  std::string reason;
+  LocalEvaluation evaluation;
+  std::size_t operator_columns = 0;
+  std::vector<ResponseColumn> response_columns;
+};
+
+// Contract a factorized ordinary-center transfer with an epsilon-Laurent
+// adjoint without letting structurally absent source columns reduce the
+// honest output window.  A response multiplied by an exactly zero retained
+// center coefficient is the zero series at every epsilon power, even though
+// the standalone unit-response column has only a finite stored window.
+// Retaining such a column in an intersection-based frame sum would therefore
+// turn its irrelevant response truncation into a false coverage loss.
+inline EpsilonFrame<ComplexBall>
+contract_factorized_ordinary_center_adjoint(
+    const FactorizedOrdinaryCenterEvaluation& transfer,
+    const std::vector<EpsilonFrame<ComplexBall>>& adjoint,
+    std::int32_t required_output_complete_max,
+    const std::string& context) {
+  if (adjoint.empty())
+    throw std::invalid_argument(
+        context + ": factorized ordinary adjoint is empty");
+  std::optional<EpsilonFrame<ComplexBall>> value;
+  for (const auto& column : transfer.response_columns) {
+    if (column.response.dimension != adjoint.size())
+      throw std::logic_error(
+          context +
+          ": factorized incoming response dimension changed during adjoint contraction");
+    if (column.amplitude.is_zero())
+      continue;
+    std::optional<EpsilonFrame<ComplexBall>> response_value;
+    for (std::size_t component = 0;
+         component < adjoint.size(); ++component) {
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(column.response.epsilon.width());
+      for (std::int64_t raw_power =
+               column.response.epsilon.min_power;
+           raw_power <= column.response.epsilon.complete_max;
+           ++raw_power)
+        coefficients.push_back(
+            column.response.at(
+                static_cast<std::int32_t>(raw_power),
+                static_cast<std::uint32_t>(component)));
+      const auto response_frame =
+          EpsilonFrame<ComplexBall>(
+              column.response.epsilon, std::move(coefficients));
+      auto term = adjoint[component] * response_frame;
+      response_value = response_value.has_value()
+          ? *response_value + term
+          : std::move(term);
+    }
+    if (!response_value.has_value())
+      throw std::logic_error(
+          context +
+          ": factorized incoming response produced no adjoint value");
+    auto scaled = response_value->scaled(column.amplitude);
+    value = value.has_value()
+        ? *value + scaled
+        : std::move(scaled);
+  }
+  // Every retained center coefficient can be exactly zero.  In that case
+  // the contracted transfer is the exact zero series, so it covers every
+  // requested coefficient without consulting any unit-response truncation.
+  return value.has_value()
+      ? std::move(*value)
+      : EpsilonFrame<ComplexBall>::zero(
+            required_output_complete_max);
+}
+
+// Evaluate one ordinary finite Taylor local without expanding the same
+// uncertain center value independently into every Taylor coefficient.
+//
+// The ordinary recurrence is linear in its center value.  Build its finite
+// Taylor transfer operator from exact unit impulses, evaluate those columns
+// at the requested point, and apply the resulting operator to the original
+// center-value balls once.  This is an algebraic reassociation of the same
+// retained finite recurrence, so it preserves Acb enclosure authority while
+// avoiding the dependency loss of
+//
+//   sum_n (wide coefficient_n) t^n.
+//
+// The optional column cap lets callers fail closed before constructing a
+// transfer operator that would be inappropriate for a very large private
+// epsilon frame.
+inline FactorizedOrdinaryCenterEvaluation
+evaluate_ordinary_center_value_factorized(
+    const PreparedPhysicalClearedODE<ComplexBall>& equation,
+    const LocalSolution<ComplexBall>& source,
+    const RealEvaluationPoint& point,
+    const EvaluationOptions& options = {},
+    std::size_t maximum_operator_columns =
+        std::numeric_limits<std::size_t>::max()) {
+  physical_ode_detail::validate_ode(equation);
+  validate_local_solution(source, true);
+  FactorizedOrdinaryCenterEvaluation result;
+  const auto ineligible = [&](std::string reason) {
+    result.reason = std::move(reason);
+    result.evaluation = LocalEvaluation{};
+    result.operator_columns = 0;
+    result.response_columns.clear();
+    return result;
+  };
+  if (source.dimension != equation.dimension ||
+      source.sectors.size() != 1 ||
+      source.sectors.front().a.is_zero != TruthValue::Yes ||
+      source.sectors.front().b.is_zero != TruthValue::Yes ||
+      source.sectors.front().log_power != 0)
+    return ineligible(
+        "factorized ordinary evaluation requires one ordinary sector bound "
+        "to the same physical equation dimension");
+  if (source.epsilon.width() >
+      std::numeric_limits<std::size_t>::max() / source.dimension)
+    throw std::overflow_error(
+        "factorized ordinary evaluation column count overflows size_t");
+  const auto column_count =
+      source.epsilon.width() * source.dimension;
+  if (column_count > maximum_operator_columns)
+    return ineligible(
+        "factorized ordinary evaluation exceeds its operator-column cap; "
+        "required=" + std::to_string(column_count) +
+        "; cap=" + std::to_string(maximum_operator_columns));
+
+  EpsilonVector initial =
+      physical_ode_detail::zero_epsilon_vector(
+          source.epsilon, source.dimension);
+  const auto& sector = source.sectors.front();
+  for (std::size_t epsilon_index = 0;
+       epsilon_index < source.epsilon.width(); ++epsilon_index)
+    for (std::uint32_t component = 0;
+         component < source.dimension; ++component)
+      initial.coefficients[
+          epsilon_index * source.dimension + component] =
+          sector.coefficients[local_detail::sector_index(
+              source, epsilon_index, 0, component)];
+
+  auto output = physical_ode_detail::zero_epsilon_vector(
+      source.epsilon, source.dimension);
+  std::size_t column = 0;
+  for (std::int64_t raw_input_power = source.epsilon.min_power;
+       raw_input_power <= source.epsilon.complete_max;
+       ++raw_input_power) {
+    const auto input_power =
+        static_cast<std::int32_t>(raw_input_power);
+    for (std::uint32_t input_component = 0;
+         input_component < source.dimension; ++input_component) {
+      auto impulse = physical_ode_detail::zero_epsilon_vector(
+          source.epsilon, source.dimension);
+      impulse.at(input_power, input_component) = ComplexBall(1);
+      const auto evolved = evolve_ordinary_center_value<ComplexBall>(
+          equation, impulse, source.taylor_complete_max);
+      if (!evolved.eligible)
+        return ineligible(
+            "factorized impulse evolution is ineligible: " +
+            evolved.reason);
+      auto impulse_local = ordinary_evolution_local_solution(
+          evolved, source.chart, source.prescriptions,
+          source.checkpoint_identity +
+              ":factorized-ordinary-evaluation-column:" +
+              std::to_string(column));
+      const auto response = local_detail::evaluate_value(
+          impulse_local, point, options, nullptr);
+      const auto& amplitude =
+          initial.at(input_power, input_component);
+      for (std::int64_t raw_output_power =
+               source.epsilon.min_power;
+           raw_output_power <= source.epsilon.complete_max;
+           ++raw_output_power) {
+        const auto output_power =
+            static_cast<std::int32_t>(raw_output_power);
+        for (std::uint32_t output_component = 0;
+             output_component < source.dimension;
+             ++output_component)
+          output.at(output_power, output_component) +=
+              local_detail::coefficient_or_zero(
+                  response, output_power, output_component) *
+              amplitude;
+      }
+      result.response_columns.push_back(
+          {input_power, input_component, amplitude, response});
+      ++column;
+    }
+  }
+  result.eligible = true;
+  result.reason =
+      "finite ordinary transfer operator applied once to retained center "
+      "value balls";
+  result.operator_columns = column_count;
+  result.evaluation.value = std::move(output);
+  result.evaluation.imaginary_sign =
+      point.sign < 0 ? options.imaginary_sign : std::nullopt;
+  return result;
 }
 
 inline ResidualCertificate certify_cleared_vector_residual(

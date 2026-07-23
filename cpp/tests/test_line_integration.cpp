@@ -10,6 +10,8 @@
 #include <vector>
 
 using diffexp2::ComplexBall;
+using diffexp2::EpsilonVector;
+using diffexp2::ExactEpsilonRational;
 using diffexp2::ExactScalarDescriptor;
 using diffexp2::LineIntegrationScope;
 using diffexp2::LocalSector;
@@ -18,7 +20,9 @@ using diffexp2::MonomialIntegrationOptions;
 using diffexp2::NativeIntegrationError;
 using diffexp2::NativeIntegrationErrorCode;
 using diffexp2::PreparedRationalTaylorMultiplier;
+using diffexp2::PreparedPhysicalClearedODE;
 using diffexp2::PreparedSparseLocalMultiplierMatrix;
+using diffexp2::PhysicalODEMatrixEntry;
 using diffexp2::Prescription;
 using diffexp2::Rational;
 using diffexp2::RealEvaluationPoint;
@@ -452,6 +456,114 @@ void fused_row_uses_exact_rational_endpoint_order() {
         enclosures_overlap && exact_order_accepted);
 }
 
+ExactEpsilonRational<ComplexBall> exact_ball_rational(
+    std::int32_t valuation,
+    std::initializer_list<const char*> numerator) {
+  ExactEpsilonRational<ComplexBall> value;
+  value.zero = false;
+  value.valuation = valuation;
+  for (const auto* coefficient : numerator)
+    value.numerator.push_back(
+        ComplexBall::from_strings(coefficient));
+  value.denominator.push_back(ComplexBall(1));
+  return value;
+}
+
+void factorized_ordinary_row_applies_center_ball_once() {
+  PreparedPhysicalClearedODE<ComplexBall> equation;
+  equation.dimension = 1;
+  equation.owner_signature_identity =
+      "factorized-line-equation-owner";
+  equation.payload_identity = "factorized-line-equation";
+  equation.exact_payload_record =
+      "factorized-line-equation-record";
+  equation.q_lags = {exact_ball_rational(0, {"1"})};
+  equation.c_lags.resize(2);
+  equation.c_lags[1].push_back(
+      PhysicalODEMatrixEntry<ComplexBall>{
+          0, 0, exact_ball_rational(0, {"-1"})});
+
+  EpsilonVector initial;
+  initial.epsilon = {0, 0};
+  initial.dimension = 1;
+  initial.coefficients = {
+      ComplexBall::from_strings("[1 +/- 0.1]")};
+  const auto evolution =
+      diffexp2::evolve_ordinary_center_value(
+          equation, initial, 12);
+  if (!evolution.eligible)
+    throw std::runtime_error(
+        "factorized line fixture ordinary evolution is ineligible");
+  diffexp2::ChartGeometry chart;
+  chart.center_exact = "0";
+  chart.scale_exact = "1";
+  chart.radius_exact = "1";
+  chart.radius = ComplexBall(1);
+  const auto source =
+      diffexp2::ordinary_evolution_local_solution(
+          evolution, std::move(chart), {},
+          "factorized-line-source");
+
+  std::vector<ComplexBall> identity_kernel(
+      source.taylor_width(), ComplexBall(0));
+  identity_kernel.front() = ComplexBall(1);
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> row;
+  row.rows = 1;
+  row.columns = 1;
+  row.exact_identity = "factorized-line-identity-row";
+  row.entries.push_back(
+      {0, 0,
+       prepared_multiplier<ComplexBall>(
+           0, 0, {std::move(identity_kernel)}, "1")});
+  StoredLineIntegrationOptions options;
+  options.delivered_epsilon = {0, 0};
+  const auto lower = RealEvaluationPoint::rational("0");
+  const auto upper = RealEvaluationPoint::rational("1/2");
+  const auto direct =
+      diffexp2::integrate_prepared_scalar_row_stored(
+          row, source, 0, lower, upper, options);
+  const auto factorized =
+      diffexp2::integrate_ordinary_center_stored_row_factorized(
+          equation, source, row, 0, lower, upper,
+          options, direct);
+  const auto capped =
+      diffexp2::integrate_ordinary_center_stored_row_factorized(
+          equation, source, row, 0, lower, upper,
+          options, direct, 0);
+  const bool same_value =
+      factorized.eligible &&
+      overlaps(direct.value.at(0, 0),
+               factorized.integral.value.at(0, 0));
+  const auto direct_radius = std::stoi(
+      direct.value.at(0, 0).real_radius_exponent());
+  const auto factorized_radius = factorized.eligible
+      ? std::stoi(
+            factorized.integral.value.at(0, 0)
+                .real_radius_exponent())
+      : direct_radius;
+  if (!(same_value && factorized.operator_columns == 1 &&
+        factorized_radius < direct_radius &&
+        factorized.integral.diagnostics.detail ==
+            direct.diagnostics.detail))
+    std::cerr
+        << "factorized-line fixture: eligible="
+        << factorized.eligible << "; reason="
+        << factorized.reason << "; columns="
+        << factorized.operator_columns << "; direct_radius="
+        << direct_radius << "; factorized_radius="
+        << factorized_radius << "; overlap=" << same_value
+        << '\n';
+  check("factorized ordinary row integration overlaps the direct finite integral and applies the uncertain center once",
+        same_value && factorized.operator_columns == 1 &&
+            factorized_radius < direct_radius &&
+            factorized.integral.diagnostics.detail ==
+                direct.diagnostics.detail);
+  check("factorized ordinary row integration obeys its resource cap",
+        !capped.eligible &&
+            capped.reason.find("column cap") !=
+                std::string::npos);
+}
+
 void fused_row_charges_upper_halo_only_to_regulated_center_primitive() {
   auto source = base_solution<Rational>(1);
   source.epsilon = {0, 2};
@@ -733,6 +845,7 @@ int main() {
   input_error_envelope_is_not_discarded();
   fused_rational_row_matches_materialized_projection();
   fused_row_uses_exact_rational_endpoint_order();
+  factorized_ordinary_row_applies_center_ball_once();
   fused_row_charges_upper_halo_only_to_regulated_center_primitive();
   fused_row_cancels_divergence_across_sector_taylor_cells();
   fused_acb_row_matches_bounded_cross_cell_cancellation();

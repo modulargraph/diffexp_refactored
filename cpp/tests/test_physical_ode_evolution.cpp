@@ -29,6 +29,19 @@ ExactEpsilonRational<Rational> rational(
   return value;
 }
 
+ExactEpsilonRational<ComplexBall> ball_rational(
+    std::int32_t valuation, std::initializer_list<const char*> numerator,
+    std::initializer_list<const char*> denominator = {"1"}) {
+  ExactEpsilonRational<ComplexBall> value;
+  value.zero = false;
+  value.valuation = valuation;
+  for (const auto* coefficient : numerator)
+    value.numerator.push_back(ComplexBall::from_strings(coefficient));
+  for (const auto* coefficient : denominator)
+    value.denominator.push_back(ComplexBall::from_strings(coefficient));
+  return value;
+}
+
 template <typename Scalar>
 PreparedPhysicalClearedODE<Scalar> equation_shell(std::uint32_t dimension) {
   PreparedPhysicalClearedODE<Scalar> equation;
@@ -251,6 +264,105 @@ int main() {
         zero_recenter.equation.has_value())
       throw std::runtime_error(
           "zero overlap point incorrectly acquired an ordinary recentering");
+
+    // A materialized interval Taylor tensor repeats the same uncertain
+    // center value in every coefficient.  Direct evaluation then treats
+    // those correlated copies as independent.  The factorized evaluator
+    // constructs the finite transfer polynomial from unit impulses and
+    // applies it to the center ball once.  Both paths enclose the same
+    // truncated exp(t) solution, but the factorized radius is strictly
+    // tighter at a negative point.
+    auto interval_exponential = equation_shell<ComplexBall>(1);
+    interval_exponential.q_lags = {ball_rational(0, {"1"})};
+    interval_exponential.c_lags.resize(2);
+    interval_exponential.c_lags[1].push_back(
+        PhysicalODEMatrixEntry<ComplexBall>{
+            0, 0, ball_rational(0, {"1"})});
+    auto uncertain_center =
+        vector({0, 0}, {"[1 +/- 0.1]"});
+    const auto interval_evolution =
+        diffexp2::evolve_ordinary_center_value(
+            interval_exponential, uncertain_center, 12);
+    if (!interval_evolution.eligible)
+      throw std::runtime_error(
+          "interval exponential evolution became ineligible");
+    diffexp2::ChartGeometry interval_chart;
+    interval_chart.center_exact = "0";
+    interval_chart.scale_exact = "1";
+    interval_chart.radius_exact = "1";
+    interval_chart.radius = ComplexBall(1);
+    auto interval_local =
+        diffexp2::ordinary_evolution_local_solution(
+            interval_evolution, std::move(interval_chart), {},
+            "factorized-ordinary-evaluation-fixture");
+    const auto negative_half =
+        diffexp2::RealEvaluationPoint::rational("-1/2");
+    const auto direct_interval =
+        diffexp2::evaluate_local_solution(
+            interval_local, negative_half);
+    const auto factorized_interval =
+        diffexp2::evaluate_ordinary_center_value_factorized(
+            interval_exponential, interval_local, negative_half);
+    if (!factorized_interval.eligible ||
+        factorized_interval.operator_columns != 1 ||
+        factorized_interval.response_columns.size() != 1 ||
+        factorized_interval.response_columns.front().input_power != 0 ||
+        factorized_interval.response_columns.front().input_component != 0 ||
+        !acb_overlaps(
+            factorized_interval.response_columns.front().amplitude.raw(),
+            uncertain_center.at(0, 0).raw()) ||
+        !acb_overlaps(
+            direct_interval.value.at(0, 0).raw(),
+            factorized_interval.evaluation.value.at(0, 0).raw()))
+      throw std::runtime_error(
+          "factorized ordinary evaluation lost the direct finite solution");
+    const auto direct_radius_exponent = std::stoi(
+        direct_interval.value.at(0, 0).real_radius_exponent());
+    const auto factorized_radius_exponent = std::stoi(
+        factorized_interval.evaluation.value.at(
+            0, 0).real_radius_exponent());
+    if (factorized_radius_exponent >= direct_radius_exponent)
+      throw std::runtime_error(
+          "factorized ordinary evaluation did not reduce repeated-center "
+          "dependency");
+    const auto capped_interval =
+        diffexp2::evaluate_ordinary_center_value_factorized(
+            interval_exponential, interval_local, negative_half, {}, 0);
+    if (capped_interval.eligible ||
+        capped_interval.reason.find("column cap") == std::string::npos)
+      throw std::runtime_error(
+          "factorized ordinary evaluation ignored its resource cap");
+
+    // A structurally absent input column must not narrow the honest epsilon
+    // window of the factorized adjoint sum.  Its standalone response is
+    // deliberately shorter than the active response; multiplying that
+    // response by the exact-zero amplitude is nevertheless the globally
+    // zero series.
+    diffexp2::FactorizedOrdinaryCenterEvaluation sparse_transfer;
+    sparse_transfer.eligible = true;
+    sparse_transfer.operator_columns = 2;
+    auto zero_response = vector(
+        {-2, 1}, {"1", "0", "0", "0"});
+    auto active_response = vector(
+        {0, 4}, {"1", "0", "0", "0", "0"});
+    sparse_transfer.response_columns.push_back(
+        {-2, 0, ComplexBall(0), std::move(zero_response)});
+    sparse_transfer.response_columns.push_back(
+        {0, 0, ComplexBall(2), std::move(active_response)});
+    const diffexp2::EpsilonFrame<ComplexBall> sparse_adjoint(
+        {-3, 4},
+        {ComplexBall(1), ComplexBall(0), ComplexBall(0), ComplexBall(0),
+         ComplexBall(0), ComplexBall(0), ComplexBall(0), ComplexBall(0)});
+    const auto sparse_contraction =
+        diffexp2::contract_factorized_ordinary_center_adjoint(
+            sparse_transfer, {sparse_adjoint}, 1,
+            "factorized-zero-column-fixture");
+    if (sparse_contraction.complete_max() != 1 ||
+        !acb_overlaps(
+            sparse_contraction.coefficient(-3).raw(),
+            ComplexBall(2).raw()))
+      throw std::runtime_error(
+          "an exact-zero factorized response column reduced adjoint coverage");
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

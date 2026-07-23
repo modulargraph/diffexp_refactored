@@ -30,6 +30,7 @@ enum class MatchingArithmeticErrorCode : std::uint8_t {
   ExponentOverflow,
   InsufficientCompleteWindow,
   MaterializedContinuityInconclusive,
+  TerminalOutputInconclusive,
   InvalidSaturationLattice,
   SaturationFailure,
   SearchBudgetExhausted
@@ -41,17 +42,21 @@ class MatchingArithmeticError : public std::runtime_error {
                           std::string detail,
                           std::optional<std::size_t> error_row = std::nullopt,
                           std::optional<std::size_t> error_column = std::nullopt,
-                          std::optional<std::int32_t> error_power = std::nullopt)
+                          std::optional<std::int32_t> error_power = std::nullopt,
+                          std::optional<std::uint32_t>
+                              error_required_additional_digits = std::nullopt)
       : std::runtime_error(std::move(detail)),
         code(error_code),
         row(error_row),
         column(error_column),
-        epsilon_power(error_power) {}
+        epsilon_power(error_power),
+        required_additional_digits(error_required_additional_digits) {}
 
   MatchingArithmeticErrorCode code;
   std::optional<std::size_t> row;
   std::optional<std::size_t> column;
   std::optional<std::int32_t> epsilon_power;
+  std::optional<std::uint32_t> required_additional_digits;
 };
 
 namespace matching_detail {
@@ -2600,6 +2605,155 @@ struct AcbMatchingResidualDiagnostics {
   std::string detail;
 };
 
+inline bool acb_matching_residual_certified_pass(
+    const AcbMatchingResidualDiagnostics& diagnostics) {
+  return diagnostics.complete_through_required &&
+      diagnostics.verdict == AcbMatchingResidualVerdict::Pass;
+}
+
+// A ball solve propagates the right-hand-side enclosure into its weights.
+// Re-evaluating A*w-b with those weights then treats the two correlated copies
+// of b as independent and can double the same radius.  In that case a
+// zero-radius midpoint solve is a valid proposal, but never an authority:
+// the untouched full-ball A and b must still certify its forward residual.
+// Keep this predicate deliberately permissive only about the weight probe;
+// any failed basis/RHS source or midpoint defect rules the proposal out.
+inline bool acb_midpoint_weight_proposal_applicable(
+    const AcbMatchingResidualDiagnostics& authoritative,
+    const AcbMatchingResidualDiagnostics& midpoint,
+    const AcbMatchingResidualDiagnostics& basis_probe,
+    const AcbMatchingResidualDiagnostics& weights_probe,
+    const AcbMatchingResidualDiagnostics& incoming_probe) {
+  return authoritative.complete_through_required &&
+      authoritative.verdict == AcbMatchingResidualVerdict::Inconclusive &&
+      acb_matching_residual_certified_pass(midpoint) &&
+      acb_matching_residual_certified_pass(basis_probe) &&
+      weights_probe.complete_through_required &&
+      weights_probe.verdict != AcbMatchingResidualVerdict::Fail &&
+      acb_matching_residual_certified_pass(incoming_probe);
+}
+
+// A linear match can retain the same right-hand-side ball twice: once through
+// the solved weights and once in the explicit subtraction A*w-b.  When even
+// the incoming-only probe is slightly wider than the requested tolerance, a
+// midpoint-weight proposal cannot certify that duplicated association.  A
+// fixed response operator T proposed from midpoint arithmetic can instead be
+// certified through (I-A*T)*b, which applies every uncertain coefficient of b
+// exactly once.  The full-ball A and b remain the only authority; failed
+// source probes or a defective midpoint still rule the proposal out.
+inline bool acb_factorized_rhs_proposal_applicable(
+    const AcbMatchingResidualDiagnostics& authoritative,
+    const AcbMatchingResidualDiagnostics& midpoint,
+    const AcbMatchingResidualDiagnostics& basis_probe,
+    const AcbMatchingResidualDiagnostics& weights_probe,
+    const AcbMatchingResidualDiagnostics& incoming_probe) {
+  return authoritative.complete_through_required &&
+      authoritative.verdict == AcbMatchingResidualVerdict::Inconclusive &&
+      acb_matching_residual_certified_pass(midpoint) &&
+      acb_matching_residual_certified_pass(basis_probe) &&
+      weights_probe.complete_through_required &&
+      weights_probe.verdict != AcbMatchingResidualVerdict::Fail &&
+      incoming_probe.complete_through_required &&
+      incoming_probe.verdict != AcbMatchingResidualVerdict::Fail;
+}
+
+struct AcbHandoffContinuityDecision {
+  ComplexBall residual;
+  Magnitude residual_upper;
+  Magnitude scale_lower;
+  Magnitude allowed_upper;
+  bool overlaps = false;
+  bool acceptable = false;
+};
+
+// The retained match has already certified incoming = F*w in the direct
+// point-evaluation association.  Replaying the same exact algebra by first
+// materializing F*w coefficientwise and then evaluating can widen an Arb
+// enclosure through dependency, but it cannot invalidate that certificate.
+// The replay is continuity-compatible when the two balls overlap.  For
+// disjoint balls retain the ordinary tolerance test so a small, rigorously
+// bounded reassociation displacement is also accepted.
+inline AcbHandoffContinuityDecision
+certify_acb_handoff_continuity(
+    const ComplexBall& receiving, const ComplexBall& incoming,
+    const Magnitude& relative_tolerance) {
+  auto residual = receiving - incoming;
+  const auto scale_lower = Magnitude::maximum(
+      Magnitude::one(), Magnitude::lower_abs(incoming));
+  const auto residual_upper = Magnitude::upper_abs(residual);
+  const auto allowed_upper = scale_lower * relative_tolerance;
+  const auto overlaps = residual.contains_zero();
+  return {std::move(residual), residual_upper, scale_lower,
+          allowed_upper, overlaps,
+          overlaps || residual_upper <= allowed_upper};
+}
+
+struct AcbPublicationAccuracyDecision {
+  Magnitude uncertainty_upper;
+  Magnitude scale_lower;
+  Magnitude allowed_upper;
+  std::uint32_t required_additional_digits = 0;
+  bool acceptable = false;
+};
+
+// Return the least integer d for which the same magnitude comparison would
+// pass after relaxing the publication tolerance by 10^d.  The binary search
+// stays in exact FLINT magnitude arithmetic, so the retry hint neither depends
+// on diagnostic doubles nor loses extreme exponents to under/overflow.
+inline std::uint32_t acb_publication_required_additional_digits(
+    const Magnitude& uncertainty_upper,
+    const Magnitude& allowed_upper) {
+  if (uncertainty_upper <= allowed_upper) return 0;
+  if (allowed_upper.is_zero() || !allowed_upper.is_finite() ||
+      !uncertainty_upper.is_finite())
+    return std::numeric_limits<std::uint32_t>::max();
+
+  const auto ten = Magnitude::from_ui(10);
+  std::uint32_t lower = 0;
+  std::uint32_t upper = 1;
+  while (uncertainty_upper >
+         allowed_upper * ten.power_upper(static_cast<ulong>(upper))) {
+    lower = upper;
+    if (upper > std::numeric_limits<std::uint32_t>::max() / 2)
+      return std::numeric_limits<std::uint32_t>::max();
+    upper *= 2;
+  }
+  while (lower + 1 < upper) {
+    const auto middle = lower + (upper - lower) / 2;
+    if (uncertainty_upper <=
+        allowed_upper * ten.power_upper(static_cast<ulong>(middle)))
+      upper = middle;
+    else
+      lower = middle;
+  }
+  return upper;
+}
+
+// Matching and publication are separate contracts.  A producing level may
+// solve more accurately than its consumer needs; endpoint publication must
+// therefore test the explicitly requested downstream tolerance instead of
+// silently reusing the retained match tolerance.
+inline AcbPublicationAccuracyDecision
+certify_acb_publication_accuracy(
+    const ComplexBall& value,
+    const Magnitude& publication_relative_tolerance) {
+  const auto midpoint =
+      matching_detail::acb_midpoint_value(value);
+  const auto uncertainty = value - midpoint;
+  const auto scale_lower = Magnitude::maximum(
+      Magnitude::one(), Magnitude::lower_abs(value));
+  const auto uncertainty_upper =
+      Magnitude::upper_abs(uncertainty);
+  const auto allowed_upper =
+      scale_lower * publication_relative_tolerance;
+  const auto required_additional_digits =
+      acb_publication_required_additional_digits(
+          uncertainty_upper, allowed_upper);
+  return {uncertainty_upper, scale_lower, allowed_upper,
+          required_additional_digits,
+          required_additional_digits == 0};
+}
+
 struct AcbLaurentRefinementOptions {
   Magnitude relative_tolerance = Magnitude::decimal("1e-30");
   // Matching lives in a finite Laurent quotient.  Coefficients below this
@@ -2621,6 +2775,8 @@ struct RefinedAcbLaurentMatch {
   std::vector<AcbMatchingResidualDiagnostics> residual_history;
   std::size_t refinement_steps = 0;
   std::string factorization_preconditioner = "none";
+  bool factorized_authoritative_rhs = false;
+  std::size_t factorized_authoritative_rhs_columns = 0;
 };
 
 namespace matching_detail {
@@ -3088,7 +3244,8 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
     bool midpoint_proposal = false,
     std::size_t midpoint_proposal_extra_precision_bits = 0,
     std::optional<std::int32_t>
-        transformed_weight_structural_min_power = std::nullopt) {
+        transformed_weight_structural_min_power = std::nullopt,
+    bool factorized_authoritative_rhs_proposal = false) {
   matching_detail::ScopedAcbPrecision proposal_precision(
       midpoint_proposal
           ? midpoint_proposal_extra_precision_bits
@@ -3132,6 +3289,12 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
         MatchingArithmeticErrorCode::InvalidSaturationLattice,
         context +
             ": authoritative residual basis, rhs, and correction map must be supplied together");
+  if (factorized_authoritative_rhs_proposal &&
+      (!has_authoritative_residual || !midpoint_proposal))
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InvalidSaturationLattice,
+        context +
+            ": factorized authoritative-rhs proposal requires a complete authoritative residual system and midpoint proposal");
   if (authoritative_residual_basis != nullptr) {
     if (authoritative_residual_basis->size() != dimension ||
         matching_detail::rectangular_columns(
@@ -3230,17 +3393,151 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
         : solve_factorized_finite_laurent_system(
               *laurent_factorization, rhs, solve_context);
   };
-  auto transformed_weights =
-      matching_detail::impose_acb_match_candidate_structural_floor(
+  std::optional<FiniteLaurentVector<ComplexBall>>
+      factorized_authoritative_weights;
+  std::optional<FiniteLaurentVector<ComplexBall>>
+      factorized_authoritative_residual;
+  std::size_t factorized_authoritative_columns = 0;
+  auto transformed_weights = [&] {
+    if (!factorized_authoritative_rhs_proposal)
+      return matching_detail::impose_acb_match_candidate_structural_floor(
           solve(candidate_right_hand_side,
                 context + ": initial candidate solve"),
           transformed_weight_structural_min_power);
+
+    auto source_min =
+        authoritative_right_hand_side->front().min_power();
+    auto source_max =
+        authoritative_right_hand_side->front().complete_max();
+    for (const auto& frame : *authoritative_right_hand_side) {
+      source_min = std::min(source_min, frame.min_power());
+      source_max = std::min(source_max, frame.complete_max());
+    }
+    if (source_min > source_max)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+          context +
+              ": factorized authoritative rhs has no common finite window");
+    const EpsilonWindow source_window{source_min, source_max};
+
+    std::optional<FiniteLaurentVector<ComplexBall>>
+        accumulated_transformed;
+    const auto accumulate_scaled =
+        [](std::optional<FiniteLaurentVector<ComplexBall>>& accumulated,
+           const FiniteLaurentVector<ComplexBall>& response,
+           const ComplexBall& coefficient) {
+          FiniteLaurentVector<ComplexBall> scaled;
+          scaled.reserve(response.size());
+          for (const auto& frame : response)
+            scaled.push_back(frame.scaled(coefficient));
+          if (!accumulated.has_value()) {
+            accumulated = std::move(scaled);
+            return;
+          }
+          if (accumulated->size() != scaled.size())
+            throw MatchingArithmeticError(
+                MatchingArithmeticErrorCode::DimensionMismatch,
+                "factorized authoritative-rhs response dimension changed");
+          for (std::size_t row = 0; row < scaled.size(); ++row)
+            (*accumulated)[row] =
+                (*accumulated)[row] + scaled[row];
+        };
+
+    for (std::size_t source_row = 0;
+         source_row < authoritative_right_hand_side->size();
+         ++source_row) {
+      const auto& source_frame =
+          (*authoritative_right_hand_side)[source_row];
+      for (std::int64_t raw_power = source_frame.min_power();
+           raw_power <= source_max; ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        const auto coefficient = source_frame.coefficient(power);
+        if (coefficient.is_zero()) continue;
+
+        FiniteLaurentVector<ComplexBall> impulse;
+        impulse.reserve(authoritative_right_hand_side->size());
+        for (std::size_t row = 0;
+             row < authoritative_right_hand_side->size(); ++row) {
+          std::vector<ComplexBall> coefficients(
+              source_window.width(), ComplexBall(0));
+          if (row == source_row)
+            coefficients[static_cast<std::size_t>(
+                static_cast<std::int64_t>(power) - source_min)] =
+                ComplexBall(1);
+          impulse.emplace_back(source_window, std::move(coefficients));
+        }
+
+        auto proposal_impulse =
+            (*authoritative_residual_to_proposal_rhs)(impulse);
+        proposal_impulse =
+            matching_detail::zero_extend_acb_match_candidate(
+                proposal_impulse, candidate_padding,
+                context +
+                    ": factorized authoritative-rhs impulse");
+        proposal_impulse =
+            matching_detail::acb_midpoint_vector(proposal_impulse);
+        auto response_transformed =
+            matching_detail::impose_acb_match_candidate_structural_floor(
+                solve(proposal_impulse,
+                      context +
+                          ": factorized authoritative-rhs response"),
+                transformed_weight_structural_min_power);
+        auto response_weights =
+            matching_detail::canonicalize_acb_match_candidate(
+                apply_exact_laurent_matrix(
+                    transformation, response_transformed),
+                context +
+                    ": factorized authoritative-rhs physical response");
+
+        FiniteLaurentVector<ComplexBall> response_residual;
+        response_residual.reserve(
+            authoritative_residual_basis->size());
+        for (std::size_t row = 0;
+             row < authoritative_residual_basis->size(); ++row) {
+          auto reconstructed =
+              (*authoritative_residual_basis)[row][0] *
+              response_transformed[0];
+          for (std::size_t column = 1;
+               column < response_transformed.size(); ++column)
+            reconstructed =
+                reconstructed +
+                (*authoritative_residual_basis)[row][column] *
+                    response_transformed[column];
+          response_residual.push_back(
+              impulse[row] - reconstructed);
+        }
+
+        accumulate_scaled(
+            accumulated_transformed, response_transformed,
+            coefficient);
+        accumulate_scaled(
+            factorized_authoritative_weights, response_weights,
+            coefficient);
+        accumulate_scaled(
+            factorized_authoritative_residual, response_residual,
+            coefficient);
+        ++factorized_authoritative_columns;
+      }
+    }
+    if (!accumulated_transformed.has_value() ||
+        !factorized_authoritative_weights.has_value() ||
+        !factorized_authoritative_residual.has_value())
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::InvalidSaturationLattice,
+          context +
+              ": factorized authoritative rhs contained no represented nonzero coefficient");
+    return std::move(*accumulated_transformed);
+  }();
 
   RefinedAcbLaurentMatch result;
   result.factorization_preconditioner =
       power_series_factorization.has_value()
       ? power_series_factorization->leading.preconditioner_kind
       : laurent_factorization->preconditioner_kind;
+  result.factorized_authoritative_rhs =
+      factorized_authoritative_rhs_proposal;
+  result.factorized_authoritative_rhs_columns =
+      factorized_authoritative_columns;
   std::string factorization_diagnostics =
       "; factorization=" + result.factorization_preconditioner;
   if (laurent_factorization.has_value()) {
@@ -3271,14 +3568,25 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
   std::size_t last_complete_refinement_steps = 0;
   std::size_t last_complete_history_size = 0;
   for (;;) {
-    auto weights = matching_detail::canonicalize_acb_match_candidate(
-        apply_exact_laurent_matrix(transformation, transformed_weights),
-        context + ": physical candidate weights");
+    auto weights =
+        factorized_authoritative_weights.has_value()
+        ? *factorized_authoritative_weights
+        : matching_detail::canonicalize_acb_match_candidate(
+              apply_exact_laurent_matrix(
+                  transformation, transformed_weights),
+              context + ": physical candidate weights");
     const auto residual_context =
         context + ": residual#" +
         std::to_string(result.residual_history.size()) +
         factorization_diagnostics;
     auto residual = [&] {
+      if (factorized_authoritative_residual.has_value())
+        return matching_detail::certify_precomputed_acb_matching_residual(
+            *authoritative_residual_basis, transformed_weights,
+            *authoritative_right_hand_side,
+            *factorized_authoritative_residual, options,
+            residual_context +
+                ":factorized-authoritative-rhs-operator");
       if (authoritative_residual_basis != nullptr)
         return matching_detail::evaluate_acb_matching_residual(
             *authoritative_residual_basis, transformed_weights,
@@ -3351,7 +3659,8 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
       last_complete_refinement_steps = result.refinement_steps;
       last_complete_history_size = result.residual_history.size();
     }
-    if (latest.verdict == AcbMatchingResidualVerdict::Pass ||
+    if (factorized_authoritative_rhs_proposal ||
+        latest.verdict == AcbMatchingResidualVerdict::Pass ||
         !latest.complete_through_required ||
         result.refinement_steps >= options.max_refinement_steps) {
       if (last_complete_transformed.has_value() &&

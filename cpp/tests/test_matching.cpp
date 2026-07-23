@@ -866,6 +866,119 @@ void retained_transformed_basis_authority_smoke() {
         uncertified_midpoint.residual_history.back().verdict ==
             AcbMatchingResidualVerdict::Inconclusive);
 
+  AcbLaurentRefinementOptions correlated_options;
+  correlated_options.relative_tolerance =
+      Magnitude::decimal("1e-8");
+  correlated_options.required_min_power = 0;
+  correlated_options.required_complete_max = 3;
+  correlated_options.max_refinement_steps = 0;
+  auto correlated_rhs_value = ComplexBall(1);
+  arb_add_error_2exp_si(
+      acb_realref(correlated_rhs_value.raw()), -27);
+  const FiniteLaurentVector<ComplexBall> correlated_rhs = {
+      ball_value_frame(correlated_rhs_value, width)};
+  const auto correlated_enclosing =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, correlated_rhs, identity_transformation,
+          correlated_options,
+          "correlated incoming/weight enclosure proposal");
+  const auto correlated_midpoint_basis =
+      diffexp2::matching_detail::acb_midpoint_matrix(identity_basis);
+  const auto correlated_midpoint_weights =
+      diffexp2::matching_detail::acb_midpoint_vector(
+          correlated_enclosing.weights);
+  const auto correlated_midpoint_incoming =
+      diffexp2::matching_detail::acb_midpoint_vector(correlated_rhs);
+  const auto correlated_midpoint_probe =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          correlated_midpoint_basis, correlated_midpoint_weights,
+          correlated_midpoint_incoming, correlated_options,
+          "correlated midpoint probe");
+  const auto correlated_basis_probe =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          identity_basis, correlated_midpoint_weights,
+          correlated_midpoint_incoming, correlated_options,
+          "correlated basis probe");
+  const auto correlated_weights_probe =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          correlated_midpoint_basis, correlated_enclosing.weights,
+          correlated_midpoint_incoming, correlated_options,
+          "correlated weights probe");
+  const auto correlated_incoming_probe =
+      diffexp2::matching_detail::evaluate_acb_matching_residual(
+          correlated_midpoint_basis, correlated_midpoint_weights,
+          correlated_rhs, correlated_options,
+          "correlated incoming probe");
+  const auto correlated_midpoint_candidate =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, correlated_rhs, identity_transformation,
+          correlated_options,
+          "correlated midpoint-weight proposal with full-ball residual",
+          false, true, nullptr, nullptr, nullptr, nullptr, true);
+  check("midpoint proposal removes duplicated incoming/weight interval dependency while retaining full-ball authority",
+        correlated_enclosing.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            diffexp2::acb_midpoint_weight_proposal_applicable(
+                correlated_enclosing.residual_history.back(),
+                correlated_midpoint_probe.diagnostics,
+                correlated_basis_probe.diagnostics,
+                correlated_weights_probe.diagnostics,
+                correlated_incoming_probe.diagnostics) &&
+            correlated_weights_probe.diagnostics.verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            correlated_incoming_probe.diagnostics.verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            correlated_midpoint_candidate.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass);
+
+  AcbLaurentRefinementOptions factorized_rhs_options;
+  factorized_rhs_options.relative_tolerance =
+      Magnitude::decimal("1e-16");
+  factorized_rhs_options.required_min_power = 0;
+  factorized_rhs_options.required_complete_max = 3;
+  factorized_rhs_options.max_refinement_steps = 0;
+  const FiniteLaurentVector<ComplexBall> narrower_uncertain_rhs = {
+      ball_value_frame(real_ball_with_error(1, -50), width)};
+  const auto duplicated_rhs_candidate =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, narrower_uncertain_rhs,
+          identity_transformation, factorized_rhs_options,
+          "duplicated authoritative rhs without factorization",
+          false, true, &identity_basis, &identity_basis,
+          &narrower_uncertain_rhs, &identity_correction, true);
+  const auto factorized_rhs_candidate =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, narrower_uncertain_rhs,
+          identity_transformation, factorized_rhs_options,
+          "factorized authoritative rhs operator certificate",
+          false, true, &identity_basis, &identity_basis,
+          &narrower_uncertain_rhs, &identity_correction, true, 0,
+          std::nullopt, true);
+  auto uncertain_identity = real_ball_with_error(1, -20);
+  const FiniteLaurentMatrix<ComplexBall> uncertain_identity_basis = {
+      {ball_value_frame(uncertain_identity, width)}};
+  const auto rejected_factorized_rhs_candidate =
+      diffexp2::refine_acb_finite_laurent_match(
+          uncertain_identity_basis, narrower_uncertain_rhs,
+          identity_transformation, factorized_rhs_options,
+          "factorized authoritative rhs rejected by full-ball operator",
+          false, true, &uncertain_identity_basis,
+          &uncertain_identity_basis, &narrower_uncertain_rhs,
+          &identity_correction, true, 0, std::nullopt, true);
+  check("factorized authoritative-rhs matching removes duplicated input dependency and keeps the full-ball operator authoritative",
+        duplicated_rhs_candidate.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            factorized_rhs_candidate.residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            factorized_rhs_candidate.factorized_authoritative_rhs &&
+            factorized_rhs_candidate
+                    .factorized_authoritative_rhs_columns == 1 &&
+            (factorized_rhs_candidate.weights[0].coefficient(0) -
+             narrower_uncertain_rhs[0].coefficient(0)).contains_zero() &&
+            rejected_factorized_rhs_candidate
+                    .residual_history.back().verdict !=
+                AcbMatchingResidualVerdict::Pass);
+
   ComplexBall::set_precision(1024);
   ComplexBall tiny_delta;
   arf_set_ui_2exp_si(
@@ -1382,6 +1495,48 @@ void propagated_enclosure_clearance_smoke() {
   ComplexBall::set_precision(256);
 }
 
+void materialized_handoff_overlap_smoke() {
+  ComplexBall::set_precision(256);
+  const auto incoming = real_ball_with_error(70, -22);
+  const auto receiving = real_ball_with_error(70, -20);
+  const auto compatible = diffexp2::certify_acb_handoff_continuity(
+      receiving, incoming, Magnitude::decimal("1e-8"));
+  const auto disjoint = diffexp2::certify_acb_handoff_continuity(
+      ComplexBall(72), incoming, Magnitude::decimal("1e-8"));
+  check("materialized handoff accepts overlapping reassociation balls without weakening disjoint tolerance failures",
+        compatible.overlaps && compatible.acceptable &&
+            !(compatible.residual_upper <=
+              compatible.allowed_upper) &&
+            !disjoint.overlaps && !disjoint.acceptable);
+}
+
+void publication_accuracy_is_independent_smoke() {
+  ComplexBall::set_precision(256);
+  const auto value = real_ball_with_error(1, -33);
+  const auto producer_strict =
+      diffexp2::certify_acb_publication_accuracy(
+          value, Magnitude::decimal("1e-10"));
+  const auto producer_much_stricter =
+      diffexp2::certify_acb_publication_accuracy(
+          value, Magnitude::decimal("1e-12"));
+  const auto consumer_relaxed =
+      diffexp2::certify_acb_publication_accuracy(
+          value, Magnitude::decimal("1e-8"));
+  check("endpoint publication uses the explicit consumer tolerance independently of the producer match tolerance",
+        !producer_strict.acceptable &&
+            producer_strict.required_additional_digits == 1 &&
+            !producer_much_stricter.acceptable &&
+            producer_much_stricter.required_additional_digits == 3 &&
+            consumer_relaxed.acceptable &&
+            consumer_relaxed.required_additional_digits == 0 &&
+            producer_strict.uncertainty_upper <=
+                consumer_relaxed.uncertainty_upper &&
+            consumer_relaxed.uncertainty_upper <=
+                producer_strict.uncertainty_upper &&
+            consumer_relaxed.allowed_upper >
+                producer_strict.allowed_upper);
+}
+
 struct NormalFramePrefixRun {
   std::vector<EpsilonFrame<ComplexBall>> physical_weights;
   diffexp2::AcbMatchingResidualDiagnostics normalized_residual;
@@ -1623,6 +1778,8 @@ int main() {
   precomputed_physical_residual_certification_smoke();
   complete_window_insufficient_digits_smoke();
   propagated_enclosure_clearance_smoke();
+  materialized_handoff_overlap_smoke();
+  publication_accuracy_is_independent_smoke();
   normal_frame_prefix_monotonicity_smoke();
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();

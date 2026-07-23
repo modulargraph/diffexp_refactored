@@ -994,7 +994,13 @@ LocalSolution<Scalar> restrict_local_taylor_prefix(
         "native Taylor-prefix restriction needs explicit error-envelope propagation");
   if (target_complete_max > input.taylor_complete_max)
     throw std::invalid_argument(
-        "requested Taylor prefix exceeds the retained local order");
+        "requested Taylor prefix exceeds the retained local order; "
+        "requested_complete_max=" +
+        std::to_string(target_complete_max) +
+        ";retained_complete_max=" +
+        std::to_string(input.taylor_complete_max) +
+        ";source_checkpoint_identity=" + input.checkpoint_identity +
+        ";requested_checkpoint_identity=" + checkpoint_identity);
   if (target_complete_max == input.taylor_complete_max)
     return input;
 

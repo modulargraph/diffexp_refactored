@@ -1861,6 +1861,7 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
     const StoredPlannedMatchHop& match,
     const json::object& row,
     const ObservableEpsilonContract& epsilon_contract,
+    const Magnitude& publication_relative_tolerance,
     const ResolvedTransportEndpointBinding& binding,
     const std::string& context) {
   matching_detail::ScopedAcbPrecision exact_shadow_precision(
@@ -1937,7 +1938,8 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
               context + ":direct-physical-point-contraction")
         : match.adjoint_contract_terminal_acb_functionals(
               physical_rows, epsilon_contract.required_complete_max,
-              context + ":factorized-adjoint-point-contraction", true);
+              context + ":factorized-adjoint-point-contraction", true,
+              publication_relative_tolerance);
     if (contracted.size() != 1)
       throw std::logic_error(
           context +
@@ -2042,7 +2044,8 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
             context + ":direct-physical-center-contraction")
       : match.adjoint_contract_terminal_acb_functionals(
             physical_rows, epsilon_contract.required_complete_max,
-            context + ":factorized-adjoint-center-contraction", true);
+            context + ":factorized-adjoint-center-contraction", true,
+            publication_relative_tolerance);
   if (contracted.size() != 1 + divergent_keys.size())
     throw std::logic_error(
         context +
@@ -2085,6 +2088,8 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
     const json::object& row,
     const ObservableEpsilonContract& epsilon_contract,
     const json::object& epsilon_record,
+    const Magnitude& publication_relative_tolerance,
+    const std::string& publication_relative_tolerance_text,
     const std::string& projected_handle,
     const std::string& projected_checkpoint_identity,
     const std::string& domain, slong precision_bits,
@@ -2141,7 +2146,7 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
   if (terminal_factorized) {
     result = terminal_factorized_endpoint_limit(
         *state->terminal_factorized_match(), row,
-        epsilon_contract, binding,
+        epsilon_contract, publication_relative_tolerance, binding,
         checkpoint_identity + ":terminal-factorized");
   } else if (binding.centered) {
     EndpointLimitOptions options;
@@ -2174,6 +2179,8 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
       {"exact_identity", required_string(row, "exact_identity")},
       {"prepared_row", row}};
   endpoint_source["output_epsilon_contract"] = epsilon_record;
+  endpoint_source["publication_relative_tolerance"] =
+      publication_relative_tolerance_text;
   const auto provenance = transport_endpoint_provenance(
       checkpoint_identity, endpoint_source, analytic_metadata);
   const auto provenance_identity = json::serialize(
@@ -2976,6 +2983,9 @@ json::object encode_transport_line_value_diagnostics(
           {"component", component},
           {"midpoint", json::array{
                value.real_midpoint(18), value.imag_midpoint(18)}},
+          {"radius2exp", json::array{
+               value.real_radius_exponent(),
+               value.imag_radius_exponent()}},
           {"abs_upper_approx",
            Magnitude::upper_abs(value).approximate_upper()},
           {"contains_zero", value.contains_zero()}});
@@ -3040,6 +3050,15 @@ json::object encode_transport_pair_conditioning_diagnostics(
           {"combined_midpoint", json::array{
                combined_value.real_midpoint(18),
                combined_value.imag_midpoint(18)}},
+          {"lower_radius2exp", json::array{
+               lower_value.real_radius_exponent(),
+               lower_value.imag_radius_exponent()}},
+          {"upper_radius2exp", json::array{
+               upper_value.real_radius_exponent(),
+               upper_value.imag_radius_exponent()}},
+          {"combined_radius2exp", json::array{
+               combined_value.real_radius_exponent(),
+               combined_value.imag_radius_exponent()}},
           {"lower_abs_upper_approx", lower_upper},
           {"upper_abs_upper_approx", upper_upper},
           {"combined_abs_upper_approx", combined_upper},
@@ -3142,6 +3161,7 @@ struct TransportObservableContractionInput {
   json::object epsilon_record;
   TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
   std::optional<BoundedDivergentCancellation> divergent_cancellation;
+  std::optional<Magnitude> publication_relative_tolerance;
   std::vector<std::string> projected_local_handles;
   std::string aggregate_handle;
   json::object aggregate_record;
@@ -3316,6 +3336,84 @@ StoredLineIntegral integrate_transport_stored_row_tile(
     result = integrate_prepared_scalar_row_stored(
         matrix, source->solution(), projected_complete,
         primitive_begin, primitive_end, options);
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      // A retained ordinary local is a linear map of its center value.  The
+      // historical fused integral expands the same uncertain center ball
+      // into every Taylor coefficient and then treats those correlated
+      // copies independently.  Reassociate that finite map only when the
+      // retained q/C equation independently reconstructs the complete
+      // stored prefix.  Unsupported/large cases keep the direct result.
+      constexpr std::size_t kMaximumOperatorColumns = 256;
+      const auto& equation = source->physical_equation();
+      if (equation &&
+          source->solution().epsilon.width() <=
+              std::numeric_limits<std::size_t>::max() /
+                  source->solution().dimension &&
+          source->solution().epsilon.width() *
+                  source->solution().dimension <=
+              kMaximumOperatorColumns) {
+        const auto replay =
+            prepare_physical_regular_homogeneous_tail_model(
+                *equation, source->solution());
+        if (replay.status == TailMajorantStatus::Certified &&
+            replay.model.has_value()) {
+          auto factorized =
+              integrate_ordinary_center_stored_row_factorized(
+                  *equation, replay.model->reconstructed, matrix,
+                  projected_complete, primitive_begin, primitive_end,
+                  options, result, kMaximumOperatorColumns);
+          if (factorized.eligible) {
+            if (factorized.integral.value.dimension !=
+                    result.value.dimension ||
+                factorized.integral.value.epsilon.min_power !=
+                    result.value.epsilon.min_power ||
+                factorized.integral.value.epsilon.complete_max !=
+                    result.value.epsilon.complete_max)
+              throw std::logic_error(
+                  "factorized ordinary transport row changed its retained "
+                  "epsilon coverage");
+            for (std::int64_t raw_power =
+                     result.value.epsilon.min_power;
+                 raw_power <=
+                     result.value.epsilon.complete_max;
+                 ++raw_power) {
+              const auto power =
+                  static_cast<std::int32_t>(raw_power);
+              for (std::uint32_t component = 0;
+                   component < result.value.dimension;
+                   ++component)
+                if (!acb_overlaps(
+                        result.value.at(power, component).raw(),
+                        factorized.integral.value
+                            .at(power, component).raw()))
+                  throw std::domain_error(
+                      "factorized ordinary transport row is disjoint from "
+                      "the retained direct integral; arm=" +
+                      arm_name + "; tile=" +
+                      std::to_string(tile_index) +
+                      "; epsilon_power=" +
+                      std::to_string(power) +
+                      "; component=" +
+                      std::to_string(component));
+            }
+            if (std::getenv(
+                    "DE2_DIAGNOSTIC_FACTORIZED_ORDINARY_ROW") != nullptr ||
+                std::getenv(
+                    "DE2_DIAGNOSTIC_TERMINAL_STATE") != nullptr)
+              std::cerr
+                  << "factorized-ordinary-stored-row-authority"
+                  << " arm=" << arm_name
+                  << " tile=" << tile_index
+                  << " source_local=" << source->handle()
+                  << " operator_columns="
+                  << factorized.operator_columns
+                  << " policy=certified-q/C-prefix-replay-and-full-overlap-v1"
+                  << '\n';
+            result = std::move(factorized.integral);
+          }
+        }
+      }
+    }
   } catch (const NativeIntegrationError& error) {
     std::ostringstream detail;
     detail << error.what() << "; arm=" << arm_name
@@ -4372,6 +4470,15 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             << " adjoint_midpoint=("
             << adjoint_value.real_midpoint(16) << ","
             << adjoint_value.imag_midpoint(16) << ")"
+            << " direct_radius2exp=("
+            << direct_value.real_radius_exponent() << ","
+            << direct_value.imag_radius_exponent() << ")"
+            << " adjoint_radius2exp=("
+            << adjoint_value.real_radius_exponent() << ","
+            << adjoint_value.imag_radius_exponent() << ")"
+            << " discrepancy_radius2exp=("
+            << discrepancy.real_radius_exponent() << ","
+            << discrepancy.imag_radius_exponent() << ")"
             << " discrepancy_upper="
             << Magnitude::upper_abs(discrepancy).approximate_upper()
             << " direct_upper="
@@ -4549,6 +4656,49 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   return result;
 }
 
+void require_transport_line_publication_accuracy(
+    const StoredLineIntegral& line,
+    const ObservableEpsilonContract& epsilon,
+    const Magnitude& publication_relative_tolerance,
+    const std::string& context,
+    std::optional<std::size_t> request_index = std::nullopt) {
+  const auto first = std::max(
+      epsilon.requested.min_power, line.value.epsilon.min_power);
+  const auto last = std::min(
+      epsilon.required_complete_max,
+      line.value.epsilon.complete_max);
+  if (last < first)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+        context +
+            ": paired line has no complete publication coefficient",
+        std::nullopt, request_index, line.value.epsilon.complete_max);
+  for (std::size_t component = 0;
+       component < line.value.dimension; ++component)
+    for (std::int64_t raw_power = first;
+         raw_power <= last; ++raw_power) {
+      const auto power = local_algebra_detail::checked_i32(
+          raw_power, "paired line publication power");
+      const auto coefficient = line.value.at(power, component);
+      const auto publication = certify_acb_publication_accuracy(
+          coefficient, publication_relative_tolerance);
+      if (!publication.acceptable)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::TerminalOutputInconclusive,
+            context +
+                ": final paired line ball is too wide to publish; functional=" +
+                std::to_string(component) +
+                "; epsilon_power=" + std::to_string(power) +
+                "; midpoint=(" + coefficient.real_midpoint(16) + "," +
+                coefficient.imag_midpoint(16) + ")" +
+                "; radius2exp=(" +
+                coefficient.real_radius_exponent() + "," +
+                coefficient.imag_radius_exponent() + ")",
+            component, request_index, power,
+            publication.required_additional_digits);
+    }
+}
+
 class TransportPairObservableStream final {
  public:
   enum class Status { Active, Poisoned, Finishing, Finished, Aborted };
@@ -4569,7 +4719,8 @@ class TransportPairObservableStream final {
       std::string identity, std::string checkpoint_identity,
       ObservableEpsilonContract epsilon, json::object epsilon_record,
       TransportTailPolicy tail_policy,
-      std::optional<BoundedDivergentCancellation> divergent_cancellation)
+      std::optional<BoundedDivergentCancellation> divergent_cancellation,
+      std::optional<Magnitude> publication_relative_tolerance)
       : handle_(std::move(handle)),
         stream_checkpoint_identity_(
             std::move(stream_checkpoint_identity)),
@@ -4580,7 +4731,9 @@ class TransportPairObservableStream final {
         checkpoint_identity_(std::move(checkpoint_identity)),
         epsilon_(epsilon), epsilon_record_(std::move(epsilon_record)),
         tail_policy_(tail_policy),
-        divergent_cancellation_(std::move(divergent_cancellation)) {
+        divergent_cancellation_(std::move(divergent_cancellation)),
+        publication_relative_tolerance_(
+            std::move(publication_relative_tolerance)) {
     if (handle_.empty() || stream_checkpoint_identity_.empty() ||
         line_handle_.empty() || checkpoint_root_.empty() ||
         identity_.empty() || checkpoint_identity_.empty())
@@ -4623,6 +4776,10 @@ class TransportPairObservableStream final {
   const auto& states() const { return states_; }
   const auto& expected_tiles() const { return expected_tiles_; }
   const auto& next_tiles() const { return next_tiles_; }
+  const auto& epsilon() const { return epsilon_; }
+  const auto& publication_relative_tolerance() const {
+    return publication_relative_tolerance_;
+  }
 
   json::object add_tile(std::size_t side, std::size_t tile_index,
                         const json::object& prepared_row) {
@@ -4846,6 +5003,7 @@ class TransportPairObservableStream final {
   json::object epsilon_record_;
   TransportTailPolicy tail_policy_ = TransportTailPolicy::Stored;
   std::optional<BoundedDivergentCancellation> divergent_cancellation_;
+  std::optional<Magnitude> publication_relative_tolerance_;
   std::array<std::size_t, 2> expected_tiles_{0, 0};
   std::array<std::size_t, 2> next_tiles_{0, 0};
   std::array<StreamingStoredLineAccumulator, 2> accumulators_;
@@ -4875,7 +5033,9 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
 
   std::vector<TransportObservableContractionResult> results;
   results.reserve(observables.size());
-  for (const auto& observable : observables) {
+  for (std::size_t observable_index = 0;
+       observable_index < observables.size(); ++observable_index) {
+    const auto& observable = observables[observable_index];
     if (observable.identity.empty() || observable.checkpoint_identity.empty() ||
         observable.checkpoint_root.empty() ||
         observable.aggregate_handle.empty() ||
@@ -4910,11 +5070,20 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
           if (tile + 1 == tile_sources.size() &&
               transport_owner->terminal_factorized_match() !=
                   nullptr) {
-            fused =
-                integrate_transport_terminal_factorized_acb_row_tile(
-                    precision_bits, transport_owner, prepared_row,
-                    retained, arm_name, tile, observable.epsilon,
-                    observable.divergent_cancellation);
+            try {
+              fused =
+                  integrate_transport_terminal_factorized_acb_row_tile(
+                      precision_bits, transport_owner, prepared_row,
+                      retained, arm_name, tile, observable.epsilon,
+                      observable.divergent_cancellation);
+            } catch (const MatchingArithmeticError& error) {
+              if (error.code != MatchingArithmeticErrorCode::
+                                    TerminalOutputInconclusive)
+                throw;
+              throw MatchingArithmeticError(
+                  error.code, error.what(), error.row, observable_index,
+                  error.epsilon_power);
+            }
           } else {
             const auto typed =
                 std::dynamic_pointer_cast<

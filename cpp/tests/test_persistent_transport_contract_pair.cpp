@@ -312,8 +312,9 @@ json::object contract_pair(const std::string& session,
                            const json::object& lower,
                            const json::object& upper,
                            json::array observables,
-                           const std::string& checkpoint_root) {
-  return request(json::object{
+                           const std::string& checkpoint_root,
+                           std::uint32_t threads = 0) {
+  auto payload = json::object{
       {"schema", 2}, {"op", "transport.contract_pair"},
       {"session", session}, {"lower", state_reference(lower)},
       {"upper", state_reference(upper)},
@@ -321,7 +322,9 @@ json::object contract_pair(const std::string& session,
            {"schema",
             "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
            {"root", checkpoint_root}}},
-      {"observables", std::move(observables)}});
+      {"observables", std::move(observables)}};
+  if (threads != 0) payload["threads"] = threads;
+  return request(std::move(payload));
 }
 
 json::object stream_observable(const std::string& identity,
@@ -440,8 +443,22 @@ bool valid_pair_conditioning(const json::object& line,
         !entry.at("lower_midpoint").is_array() ||
         !entry.at("upper_midpoint").is_array() ||
         !entry.at("combined_midpoint").is_array() ||
+        !entry.at("lower_radius2exp").is_array() ||
+        !entry.at("upper_radius2exp").is_array() ||
+        !entry.at("combined_radius2exp").is_array() ||
         !entry.at("combined_contains_zero").is_bool())
       return false;
+  }
+  for (const auto* key : {"lower_tiles", "upper_tiles"}) {
+    const auto& tiles = diagnostics.at(key).as_array();
+    if (tiles.empty()) return false;
+    for (const auto& raw_tile : tiles) {
+      const auto& tile = raw_tile.as_object();
+      const auto& value = tile.at("value").as_object();
+      for (const auto& raw_entry : value.at("entries").as_array())
+        if (!raw_entry.as_object().at("radius2exp").is_array())
+          return false;
+    }
   }
   return true;
 }
@@ -749,10 +766,12 @@ int main() {
           "pair-many-checkpoint-" + std::to_string(index)));
     const auto many = contract_pair(
         session, lower, upper, std::move(many_observables),
-        "pair-many-root");
+        "pair-many-root", 2);
     std::set<std::string> many_handles;
     if (many.at("status") != "ok" ||
-        many.at("lines").as_array().size() != 3)
+        many.at("lines").as_array().size() != 3 ||
+        many.at("requested_observable_threads") != 2 ||
+        many.at("observable_worker_threads") != 2)
       throw std::runtime_error(
           "many-observable pair contraction failed: " +
           json::serialize(many));

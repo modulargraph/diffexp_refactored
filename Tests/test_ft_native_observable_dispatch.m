@@ -15,6 +15,16 @@ assert[label_String, condition_, detail_:None] := If[TrueQ[condition],
   failed++; Print["  FAIL: ", label, If[detail === None, "", ": "],
     If[detail === None, "", detail]]];
 
+assert["downstream publication digits remain independent of guarded producer digits",
+  ft2DownstreamPublicationDigits[
+      5, <|4 -> 8, 5 -> 10, 6 -> 12|>] === 8 &&
+    ft2DownstreamPublicationDigits[
+      1, <|1 -> 10, 2 -> 12|>] === matchDigits];
+assert["internal matching certification consumes at most one downstream safety guard",
+  ft2LevelMatchingCertificationDigits[12, 8] === 10 &&
+    ft2LevelMatchingCertificationDigits[14, 12] === 14 &&
+    ft2LevelMatchingCertificationDigits[8, 8] === 8];
+
 reservoirBackendFailure = <|
   "reason" -> "acb_match_residual_inconclusive",
   "retryable_epsilon_reservoir" -> True,
@@ -132,6 +142,13 @@ assert["producer precision is bound to producer checkpoints, not consumers",
       "NativeTransport", 3, <|4 -> 10|>] === matchDigits &&
     ft2CheckpointExpectedMatchingDigits[
       "NativeTransport", 4, <|4 -> 10|>] === 10];
+assert["checkpoint publication identity follows the downstream consumer",
+  ft2CheckpointExpectedPublicationDigits[
+      "Boundary", 3, <|3 -> 10, 4 -> 12|>] === 10 &&
+    ft2CheckpointExpectedPublicationDigits[
+      "NativeTransport", 4, <|3 -> 10, 4 -> 12|>] === 10 &&
+    ft2CheckpointExpectedPublicationDigits[
+      "NativeTransport", 3, <|3 -> 10, 4 -> 12|>] === matchDigits];
 assert["producer digit budget retains its safety margin up the ladder",
   ft2RaiseMatchingProducerDigits[
       <|4 -> matchDigits + 2|>, 3, matchDigits + 2, 4] ===
@@ -140,6 +157,34 @@ assert["producer digit budget retains its safety margin up the ladder",
       <|3 -> matchDigits + 2, 4 -> matchDigits + 4|>,
       3, matchDigits + 4, 4] ===
         <|3 -> matchDigits + 4, 4 -> matchDigits + 6|>];
+
+terminalOutputFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> <|
+    "reason" -> "terminal_output_ball_inconclusive",
+    "retryable_level_accuracy" -> True,
+    "failure_functional" -> 0, "failure_epsilon" -> 2|>|>];
+terminalOutputRetry = ft2NativeTerminalOutputProducerRetry[
+  terminalOutputFailure, 5, 6, 10];
+measuredTerminalOutputFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> Join[
+    terminalOutputFailure[[2, "BackendFailure"]],
+    <|"required_additional_digits" -> 1|>]|>];
+measuredTerminalOutputRetry = ft2NativeTerminalOutputProducerRetry[
+  measuredTerminalOutputFailure, 5, 6, 10];
+assert[
+  "wide terminal boundary retries its own level as the next consumer's producer",
+  ft2NativeMatchingProducerRetryQ[terminalOutputRetry] &&
+    terminalOutputRetry[[2, "Level"]] === 4 &&
+    terminalOutputRetry[[2, "ProducerLevel"]] === 5 &&
+    terminalOutputRetry[[2, "NumLevels"]] === 6 &&
+    terminalOutputRetry[[2, "CurrentMatchingDigits"]] === 10 &&
+    terminalOutputRetry[[2, "AdditionalOrders"]] ===
+      DiffExp2`Tolerances`$SafetyDigits &&
+    measuredTerminalOutputRetry[[2, "AdditionalOrders"]] === 1 &&
+    ft2NativeTerminalOutputProducerRetry[
+      terminalOutputFailure, 1, 6, 10] === None,
+  <|"fallback" -> terminalOutputRetry,
+    "measured" -> measuredTerminalOutputRetry|>];
 
 assert["matching Taylor progress requires fewer inconclusive coefficients",
   ft2NativeMatchingClearanceProgressQ[
@@ -234,6 +279,60 @@ assert["matching retry driver tightens only the preceding producer level",
       {<||>, <|4 -> matchDigits +
         DiffExp2`Tolerances`$SafetyDigits|>},
   matchingProducerRetryCalls];
+
+seededRetryCalls = {};
+seededRetryResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      AppendTo[seededRetryCalls,
+        {epsilonHalos, taylorOrders, levelDigits}];
+      If[Length[seededRetryCalls] === 1,
+        Failure["FeynmanTrickNativeMatchingProducer", <|
+          "Level" -> 3, "ProducerLevel" -> 4,
+          "NumLevels" -> 4,
+          "CurrentMatchingDigits" -> matchDigits,
+          "AdditionalOrders" -> DiffExp2`Tolerances`$SafetyDigits,
+          "MatchingDigitsByLevel" -> levelDigits|>], True]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "seeded-matching-retry-fixture", None, <|2 -> 5|>,
+    <|1 -> 75|>, <||>]];
+assert[
+  "seeded timing-gate halos survive producer-accuracy retries",
+  seededRetryResult === True &&
+    seededRetryCalls === {
+      {<|2 -> 5|>, <|1 -> 75|>, <||>},
+      {<|2 -> 5|>, <|1 -> 75|>,
+        <|4 -> matchDigits +
+          DiffExp2`Tolerances`$SafetyDigits|>}},
+  seededRetryCalls];
+
+preapprovedHighDigitCalls = {};
+preapprovedHighDigitResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      AppendTo[preapprovedHighDigitCalls, levelDigits];
+      If[Length[preapprovedHighDigitCalls] === 1,
+        Failure["FeynmanTrickNativeMatchingProducer", <|
+          "Level" -> 2, "ProducerLevel" -> 3,
+          "NumLevels" -> 6,
+          "CurrentMatchingDigits" -> matchDigits + 2,
+          "AdditionalOrders" -> 1,
+          "MatchingDigitsByLevel" -> levelDigits|>], True]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "preapproved-high-digit-retry-fixture", None, <||>, <||>,
+    <|3 -> matchDigits + 2, 4 -> matchDigits + 8,
+      5 -> matchDigits + 11, 6 -> matchDigits + 13|>]];
+assert[
+  "retry ceiling checks only newly raised digits, not preapproved seeds",
+  preapprovedHighDigitResult === True &&
+    preapprovedHighDigitCalls === {
+      <|3 -> matchDigits + 2, 4 -> matchDigits + 8,
+        5 -> matchDigits + 11, 6 -> matchDigits + 13|>,
+      <|3 -> matchDigits + 3, 4 -> matchDigits + 8,
+        5 -> matchDigits + 11, 6 -> matchDigits + 13|>},
+  {preapprovedHighDigitResult, preapprovedHighDigitCalls}];
 
 x = Global`xNativeFT;
 epsilon = Global`eps;
@@ -364,6 +463,8 @@ fixtureExportResults[results_List] := MapIndexed[Function[{observable, pos},
 counts = newCounts[];
 capturedPrepare = None;
 capturedObservables = None;
+capturedMatchingCertificationDigits = None;
+capturedPublicationDigits = None;
 capturedMaxExtraPrecision = None;
 
 mixed = Block[{
@@ -381,8 +482,13 @@ mixed = Block[{
         "Threads" -> threads|>;
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "synthetic-atlas-plan"|>],
-    ft2NativeRun = Function[{atlas, observables, variable},
+    ft2NativeRun = Function[
+      {atlas, observables, variable, matchingCertificationDigits,
+       publicationDigits},
       counts["run"]++; capturedObservables = observables;
+      capturedMatchingCertificationDigits =
+        matchingCertificationDigits;
+      capturedPublicationDigits = publicationDigits;
       <|"Type" -> "DiffExp2NativeTransportObservableBatch",
         "Atlas" -> atlas, "NativeMarches" -> 2,
         "Results" -> observables|>],
@@ -401,7 +507,7 @@ mixed = Block[{
   ft2RunNativeBoundaryDispatch[
     <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
     sourceRows, entries, ledger, x, 11/23, {x, 1 - x},
-    {{x, 1}, {1 - x, 1}}, 6, 50]];
+    {{x, 1}, {1 - x, 1}}, 6, 50, 8, 8]];
 
 assert["mixed dispatch plans both arms but invokes one native batch/export",
   AssociationQ[mixed] &&
@@ -409,7 +515,9 @@ assert["mixed dispatch plans both arms but invokes one native batch/export",
       "export" -> 1, "releaseBatch" -> 1, "releaseAtlas" -> 0|> &&
     mixed["NativeBatchCalls"] === 1 &&
     mixed["NativeMarches"] === 2 &&
-    mixed["CompatibilityExports"] === 4,
+    mixed["CompatibilityExports"] === 4 &&
+    capturedMatchingCertificationDigits === 8 &&
+    capturedPublicationDigits === 8,
   {counts, mixed}];
 integrateObservables = Select[capturedObservables,
   # ["Operation"] === "integrate" &];
@@ -546,7 +654,9 @@ checkpointed = Block[{
        targetMax, requiredTargetMax, threads},
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "checkpoint-atlas-plan"|>],
-    ft2NativeRun = Function[{atlas, observables, variable},
+    ft2NativeRun = Function[
+      {atlas, observables, variable, matchingCertificationDigits,
+       publicationDigits},
       AppendTo[checkpointEvents, "run"];
       <|"Type" -> "DiffExp2NativeTransportObservableBatch",
         "Atlas" -> atlas, "NativeMarches" -> 2,
@@ -569,7 +679,8 @@ checkpointed = Block[{
   ft2RunNativeBoundaryDispatch[
     <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
     sourceRows, entries, ledger, x, 11/23, {x, 1 - x},
-    {{x, 1}, {1 - x, 1}}, 6, 50, "synthetic-epsilon-plan",
+    {{x, 1}, {1 - x, 1}}, 6, 50, 8, 8,
+    "synthetic-epsilon-plan",
     checkpointSpec]];
 assert["native sidecar publisher runs synchronously after schema-2 save and before export",
   AssociationQ[checkpointed] &&
@@ -588,7 +699,9 @@ restoredDispatch = Block[{
       {system, boundary, lower, upper, coefficientVectors, variable,
        targetMax, requiredTargetMax, threads},
       restoreCounts["prepare"]++; $Failed],
-    ft2NativeRun = Function[{atlas, observables, variable},
+    ft2NativeRun = Function[
+      {atlas, observables, variable, matchingCertificationDigits,
+       publicationDigits},
       restoreCounts["run"]++; $Failed],
     ft2NativeRestoreCheckpoint = Function[manifest,
       restoreCounts["restore"]++;
@@ -609,7 +722,8 @@ restoredDispatch = Block[{
   ft2RunNativeBoundaryDispatch[
     <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
     sourceRows, entries, ledger, x, 11/23, {x, 1 - x},
-    {{x, 1}, {1 - x, 1}}, 6, 50, "synthetic-epsilon-plan",
+    {{x, 1}, {1 - x, 1}}, 6, 50, 8, 8,
+    "synthetic-epsilon-plan",
     <|"Mode" -> "Restore", "Record" -> publishedResume,
       "ContractIdentity" -> checkpointContractIdentity|>]];
 assert["resume dispatch restores and exports without replanning or remarching",
@@ -649,7 +763,9 @@ directOnly = Block[{
       {system, boundary, lower, upper, coefficientVectors, variable,
        targetMax, requiredTargetMax, threads},
       counts["prepare"]++; $Failed],
-    ft2NativeRun = Function[{atlas, observables, variable},
+    ft2NativeRun = Function[
+      {atlas, observables, variable, matchingCertificationDigits,
+       publicationDigits},
       counts["run"]++; $Failed],
     ft2NativeExport = Function[{nativeBatch, digits},
       counts["export"]++; $Failed],
@@ -660,7 +776,7 @@ directOnly = Block[{
   ft2RunNativeBoundaryDispatch[
     <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
     sourceRows, directEntries, directLedger, x, 11/23, {},
-    {{x, 1}}, 6, 50]];
+    {{x, 1}}, 6, 50, 8, 8]];
 assert["direct-only and proven-zero work skips atlas, march, export, and release",
   AssociationQ[directOnly] && Total[Values[counts]] === 0 &&
     directOnly["NativeBatchCalls"] === 0 &&
@@ -685,7 +801,9 @@ malformedBatch = Block[{
       counts["prepare"]++;
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "malformed-run-atlas"|>],
-    ft2NativeRun = Function[{atlas, observables, variable},
+    ft2NativeRun = Function[
+      {atlas, observables, variable, matchingCertificationDigits,
+       publicationDigits},
       counts["run"]++;
       <|"Type" -> "MalformedPublishedBatch", "Atlas" -> atlas|>],
     ft2NativeExport = Function[{nativeBatch, digits},
@@ -698,7 +816,7 @@ malformedBatch = Block[{
   ft2RunNativeBoundaryDispatch[
     <|"Matrix" -> IdentityMatrix[2], "Variable" -> x|>,
     sourceRows, entries, ledger, x, 11/23, {x, 1 - x},
-    {{x, 1}, {1 - x, 1}}, 6, 50]];
+    {{x, 1}, {1 - x, 1}}, 6, 50, 8, 8]];
 assert["malformed published batch falls back to releasing its atlas owner",
   FailureQ[malformedBatch] &&
     counts === <|"segment" -> 2, "prepare" -> 1, "run" -> 1,
@@ -730,6 +848,10 @@ negligiblePoleRaw = DiffExp2`EpsSeries`ESNew[-2,
   {10^-900, 0, 39.65552683429765`20}];
 catastrophicPoleRaw = DiffExp2`EpsSeries`ESNew[-2,
   {10^17, 10^41, 10^67}];
+doubleBoxRemnantRaw = DiffExp2`EpsSeries`ESNew[-5,
+  {0``13, 12, 2.626, -77.8, -201.7, -247.0}];
+doubleBoxBadPoleRaw = DiffExp2`EpsSeries`ESNew[-5,
+  {1, 12, 2.626, -77.8, -201.7, -247.0}];
 positiveCertification =
   ft2NotApplicableCertification["direct", "direct"];
 legacyStepRow = Block[{epsOrder = 0},
@@ -755,6 +877,14 @@ negligiblePoleAudit = ft2PretrimFinalPoleAudit[
   "banana4", {{1}}, {negligiblePoleRaw}];
 catastrophicPoleAudit = ft2PretrimFinalPoleAudit[
   "banana4", {{1}}, {catastrophicPoleRaw}];
+doubleBoxRemnantAudit = ft2PretrimFinalPoleAudit[
+  "double_box_planar", {ConstantArray[1, 7]},
+  {doubleBoxRemnantRaw}];
+doubleBoxBadPoleAudit = ft2PretrimFinalPoleAudit[
+  "double_box_planar", {ConstantArray[1, 7]},
+  {doubleBoxBadPoleRaw}];
+doubleBoxFloored = ft2ApplyExpectedFinalPoleFloor[
+  "double_box_planar", doubleBoxRemnantRaw];
 positiveSyntheticOutput = StringRiffle[{
   ft2OutputLine["STEPWISE ", positiveStepRow],
   ft2OutputLine["FINAL ", positiveFinalRow]}, "\n"];
@@ -821,6 +951,14 @@ assert["pre-trim pole audit accepts harmless absolute remnants but rejects catas
     catastrophicPoleAudit[[1]] ===
       "FeynmanTrickUnexpectedFinalPole",
   {negligiblePoleAudit, catastrophicPoleAudit}];
+assert["proven double-box pole floor removes only audited sub-floor remnants",
+  TrueQ[doubleBoxRemnantAudit] &&
+    FailureQ[doubleBoxBadPoleAudit] &&
+    doubleBoxBadPoleAudit[[1]] ===
+      "FeynmanTrickUnexpectedFinalPole" &&
+    DiffExp2`EpsSeries`ESMinPower[doubleBoxFloored] === -4 &&
+    DiffExp2`EpsSeries`ESCoefficient[doubleBoxFloored, -4] === 12,
+  {doubleBoxRemnantAudit, doubleBoxBadPoleAudit, doubleBoxFloored}];
 assert["facade parser preserves positive-order Laurent rows and complex encoding",
   AssociationQ[positiveParsedPipeline] &&
     positiveParsedPipeline["Status"] === "Succeeded" &&

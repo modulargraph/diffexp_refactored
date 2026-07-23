@@ -240,6 +240,7 @@ json::object observable(const std::string& identity,
   return json::object{
       {"identity", identity}, {"checkpoint_identity", checkpoint},
       {"integrand_row", std::move(row)},
+      {"publication_relative_tolerance", "1e-8"},
       {"epsilon", json::object{
            {"min", epsilon_min}, {"max", epsilon_max},
            {"required_complete_max", required_max}}}};
@@ -421,6 +422,26 @@ int main() {
         after_malformed.at("pending_endpoint_limits") != 0)
       throw std::runtime_error(
           "malformed later row did not roll back atomically");
+
+    const auto before_bad_tolerance = session_stats(session);
+    auto bad_tolerance_observable = observable(
+        "bad-publication-tolerance",
+        "bad-publication-tolerance-checkpoint",
+        cancellation_row("bad-publication-tolerance-row"));
+    bad_tolerance_observable["publication_relative_tolerance"] = "0";
+    const auto bad_tolerance = endpoint_batch(
+        session, centered_state,
+        json::array{std::move(bad_tolerance_observable)},
+        "endpoint-bad-publication-tolerance");
+    const auto after_bad_tolerance = session_stats(session);
+    if (bad_tolerance.at("status") != "error" ||
+        before_bad_tolerance.at("endpoints") !=
+            after_bad_tolerance.at("endpoints") ||
+        before_bad_tolerance.at("transport_endpoint_batches") !=
+            after_bad_tolerance.at("transport_endpoint_batches") ||
+        after_bad_tolerance.at("pending_endpoint_limits") != 0)
+      throw std::runtime_error(
+          "invalid endpoint publication tolerance changed retained state");
 
     json::array many_observables;
     for (int index = 0; index < 3; ++index)

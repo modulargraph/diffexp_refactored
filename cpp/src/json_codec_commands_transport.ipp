@@ -268,6 +268,10 @@
     constexpr std::uint32_t kPrivateTaylorOrderMinimumStep = 25;
     std::vector<std::uint32_t> tail_order_attempts{
         tail_certificate_taylor_complete_max};
+    std::vector<std::string> tail_order_accuracy_trace;
+    std::uint32_t current_accuracy_deficit =
+        std::numeric_limits<std::uint32_t>::max();
+    std::optional<Rational> current_accuracy_excess;
     std::optional<Rational> witness_radius;
     std::uint32_t witness_dyadic_exponent = 0;
     std::string witness_dyadic_direction;
@@ -395,11 +399,31 @@
         }
         candidate_handoff.value = std::move(widened);
       }
-      if (const auto failure = value_handoff_accuracy_failure(
+      const auto accuracy_deficit =
+          value_handoff_accuracy_required_additional_digits(
               candidate_handoff.value, required_complete_max,
-              relative_accuracy_max)) {
+              relative_accuracy_max);
+      const auto accuracy_excess =
+          value_handoff_accuracy_excess_ratio(
+              candidate_handoff.value, required_complete_max,
+              relative_accuracy_max);
+      current_accuracy_deficit =
+          std::min(current_accuracy_deficit, accuracy_deficit);
+      if (accuracy_excess.has_value() &&
+          (!current_accuracy_excess.has_value() ||
+           *accuracy_excess < *current_accuracy_excess))
+        current_accuracy_excess = *accuracy_excess;
+      if (accuracy_deficit != 0) {
+        const auto failure = value_handoff_accuracy_failure(
+            candidate_handoff.value, required_complete_max,
+            relative_accuracy_max);
+        if (!failure.has_value())
+          throw std::logic_error(
+              "value handoff deficit and failure diagnostics disagree");
         last_accuracy_failure =
-            *failure + ";witness_radius_exact=" +
+            *failure + ";required_additional_digits=" +
+            std::to_string(accuracy_deficit) +
+            ";witness_radius_exact=" +
             candidate.str() + ";witness_direction=" + direction +
             ";witness_dyadic_exponent=" +
             std::to_string(exponent);
@@ -419,7 +443,7 @@
         denominator *= Rational(2);
       return denominator;
     };
-    const auto search_witness = [&] {
+    const auto search_witness = [&](const std::string& phase) {
       witness_radius.reset();
       witness_dyadic_exponent = 0;
       witness_dyadic_direction.clear();
@@ -428,6 +452,9 @@
       certified_handoff = LocalEvaluation{};
       last_accuracy_failure.clear();
       certificate_failed_after_disk = false;
+      current_accuracy_deficit =
+          std::numeric_limits<std::uint32_t>::max();
+      current_accuracy_excess.reset();
       for (std::uint32_t exponent = kWitnessSearchCap;
            exponent >= 1 && !witness_radius.has_value(); --exponent) {
         const auto candidate = producing.geometry.radius -
@@ -442,10 +469,48 @@
         (void)try_witness(candidate, "inward", exponent);
       }
     };
-    search_witness();
+    // A private Taylor extension is useful only while it tightens the exact
+    // worst radius/allowance ratio.  Permit one plateau (magnitude rounding
+    // can hide a sub-bit improvement), but do not run an entire 25..800
+    // ladder against a fixed input/arithmetic-radius floor.  Direct-center
+    // and overlap evaluation have independent geometry, so each receives its
+    // own progress history.
+    constexpr std::uint32_t kPrivateTaylorNonprogressCap = 2;
+    std::optional<Rational> phase_best_accuracy_excess;
+    std::uint32_t phase_nonprogress = 0;
+    const auto note_phase_progress = [&] {
+      std::string status = "unmeasured";
+      if (!current_accuracy_excess.has_value()) return status;
+      if (!phase_best_accuracy_excess.has_value() ||
+          *current_accuracy_excess < *phase_best_accuracy_excess) {
+        status = phase_best_accuracy_excess.has_value()
+            ? "improved"
+            : "initial";
+        phase_best_accuracy_excess = *current_accuracy_excess;
+        phase_nonprogress = 0;
+      } else {
+        status = "stalled";
+        ++phase_nonprogress;
+      }
+      return status;
+    };
+    const auto record_phase_attempt =
+        [&](const std::string& phase, const std::string& progress) {
+      tail_order_accuracy_trace.push_back(
+          phase + ":" +
+          std::to_string(tail_certificate_taylor_complete_max) + ":" +
+          (current_accuracy_deficit ==
+                  std::numeric_limits<std::uint32_t>::max()
+              ? "none"
+              : std::to_string(current_accuracy_deficit)) + ":" +
+          progress);
+    };
+    search_witness("direct");
+    record_phase_attempt("direct", note_phase_progress());
     while (!witness_radius.has_value() &&
            use_physical_source_tail &&
            !last_accuracy_failure.empty() &&
+           phase_nonprogress < kPrivateTaylorNonprogressCap &&
            tail_certificate_taylor_complete_max <
                kPrivateTaylorOrderCap) {
       const auto step = std::max(
@@ -473,7 +538,8 @@
           std::move(*extended_physical.model);
       tail_certificate_taylor_complete_max = next_order;
       tail_order_attempts.push_back(next_order);
-      search_witness();
+      search_witness("direct");
+      record_phase_attempt("direct", note_phase_progress());
     }
     if (!witness_radius.has_value() &&
         use_physical_source_tail) {
@@ -496,9 +562,13 @@
       point_modulus =
           exact_path_detail::abs(exact_match.producing_local);
       witness_gap = producing.geometry.radius - point_modulus;
-      search_witness();
+      phase_best_accuracy_excess.reset();
+      phase_nonprogress = 0;
+      search_witness("overlap");
+      record_phase_attempt("overlap", note_phase_progress());
       while (!witness_radius.has_value() &&
              !last_accuracy_failure.empty() &&
+             phase_nonprogress < kPrivateTaylorNonprogressCap &&
              tail_certificate_taylor_complete_max <
                  kPrivateTaylorOrderCap) {
         const auto step = std::max(
@@ -525,7 +595,8 @@
             std::move(*extended_physical.model);
         tail_certificate_taylor_complete_max = next_order;
         tail_order_attempts.push_back(next_order);
-        search_witness();
+        search_witness("overlap");
+        record_phase_attempt("overlap", note_phase_progress());
       }
 
       if (witness_radius.has_value()) {
@@ -804,6 +875,12 @@
            index < tail_order_attempts.size(); ++index) {
         if (index != 0) detail += ",";
         detail += std::to_string(tail_order_attempts[index]);
+      }
+      detail += ";tail_certificate_accuracy_deficits=";
+      for (std::size_t index = 0;
+           index < tail_order_accuracy_trace.size(); ++index) {
+        if (index != 0) detail += ",";
+        detail += tail_order_accuracy_trace[index];
       }
       return detail;
     };
@@ -3997,11 +4074,29 @@
 
     const auto& observable = as_object(
         root.at("observable"), "streamed transport-pair observable");
-    if (observable.if_contains("divergent_cancellation") != nullptr)
+    const bool has_divergent_cancellation =
+        observable.if_contains("divergent_cancellation") != nullptr;
+    const bool has_publication_tolerance =
+        observable.if_contains("publication_relative_tolerance") !=
+        nullptr;
+    if (has_divergent_cancellation && has_publication_tolerance)
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy",
+           "divergent_cancellation",
+           "publication_relative_tolerance"},
+          "streamed transport-pair observable");
+    else if (has_divergent_cancellation)
       require_exact_keys(
           observable,
           {"identity", "checkpoint_identity", "epsilon", "tail_policy",
            "divergent_cancellation"},
+          "streamed transport-pair observable");
+    else if (has_publication_tolerance)
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy",
+           "publication_relative_tolerance"},
           "streamed transport-pair observable");
     else
       require_exact_keys(
@@ -4034,6 +4129,18 @@
             "bounded divergent cancellation is restricted to Acb transport-pair streams");
       divergent_cancellation = parse_bounded_divergent_cancellation(
           *policy, "streamed transport-pair divergent-cancellation policy");
+    }
+    std::optional<Magnitude> publication_relative_tolerance;
+    if (has_publication_tolerance) {
+      const auto text = required_string(
+          observable, "publication_relative_tolerance");
+      publication_relative_tolerance = Magnitude::decimal(text);
+      if (text.empty() ||
+          !publication_relative_tolerance->is_finite() ||
+          publication_relative_tolerance->is_zero() ||
+          Magnitude::one() <= *publication_relative_tolerance)
+        throw std::invalid_argument(
+            "streamed transport-pair publication tolerance must be one finite decimal strictly between zero and one");
     }
 
     std::array<std::shared_ptr<StoredTransportArmState>, 2> states;
@@ -4095,7 +4202,7 @@
           stream_handle, stream_checkpoint, line_handle, checkpoint_root,
           session->domain, session->precision_bits, states, identity,
           observable_checkpoint, epsilon, epsilon_record, tail_policy,
-          divergent_cancellation);
+          divergent_cancellation, publication_relative_tolerance);
       if (!session->transport_pair_streams.emplace(
               stream_handle, stream).second)
         throw std::logic_error(
@@ -4162,6 +4269,29 @@
     try {
       progress = stream->add_tile(side, tile, row);
     } catch (const MatchingArithmeticError& error) {
+      if (error.code ==
+          MatchingArithmeticErrorCode::TerminalOutputInconclusive)
+        return json::object{
+            {"status", "error"},
+            {"id", "CPP"},
+            {"reason", "terminal_output_ball_inconclusive"},
+            {"retryable_level_accuracy", true},
+            {"request_index", 0},
+            {"failure_functional",
+             error.row.has_value()
+                 ? json::value(*error.row)
+                 : json::value(nullptr)},
+            {"failure_epsilon",
+             error.epsilon_power.has_value()
+                 ? json::value(*error.epsilon_power)
+                 : json::value(nullptr)},
+            {"required_additional_digits",
+             error.required_additional_digits.has_value()
+                 ? json::value(*error.required_additional_digits)
+                 : json::value(nullptr)},
+            {"side", side_name},
+            {"tile", tile},
+            {"detail", error.what()}};
       if (error.code !=
               MatchingArithmeticErrorCode::InsufficientCompleteWindow ||
           !error.row.has_value() || *error.row == 0)
@@ -4289,7 +4419,41 @@
           session->precision_bits);
       ComplexBall::set_precision(session->precision_bits);
     }
-    auto finished = stream->finish();
+    TransportPairObservableStream::FinishResult finished;
+    try {
+      finished = stream->finish();
+      if (stream->publication_relative_tolerance().has_value())
+        require_transport_line_publication_accuracy(
+            finished.line->result(), stream->epsilon(),
+            *stream->publication_relative_tolerance(),
+            "streamed final transport-pair observable", 0);
+    } catch (const MatchingArithmeticError& error) {
+      release_reservation();
+      if (error.code != MatchingArithmeticErrorCode::
+                            TerminalOutputInconclusive)
+        throw;
+      return json::object{
+          {"status", "error"},
+          {"id", "CPP"},
+          {"reason", "terminal_output_ball_inconclusive"},
+          {"retryable_level_accuracy", true},
+          {"request_index", 0},
+          {"failure_functional",
+           error.row.has_value()
+               ? json::value(*error.row)
+               : json::value(nullptr)},
+          {"failure_epsilon",
+               error.epsilon_power.has_value()
+                   ? json::value(*error.epsilon_power)
+                   : json::value(nullptr)},
+          {"required_additional_digits",
+           error.required_additional_digits.has_value()
+               ? json::value(*error.required_additional_digits)
+               : json::value(nullptr)},
+          {"scope", "final-paired-line"},
+          {"conditioning", finished.conditioning},
+          {"detail", error.what()}};
+    }
     const auto& states = stream->states();
     const auto tile_integrations = static_cast<std::uint64_t>(
         finished.tiles[0]) + static_cast<std::uint64_t>(finished.tiles[1]);
@@ -4397,14 +4561,29 @@
   }
 
   if (operation == "transport.contract_pair") {
-    require_exact_keys(
-        root,
-        {"schema", "op", "session", "lower", "upper",
-         "checkpoint_policy", "observables"},
-        "native transport.contract_pair request");
+    const bool has_threads = root.if_contains("threads") != nullptr;
+    if (has_threads)
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "lower", "upper",
+           "checkpoint_policy", "observables", "threads"},
+          "native transport.contract_pair request");
+    else
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "lower", "upper",
+           "checkpoint_policy", "observables"},
+          "native transport.contract_pair request");
     if (session->domain == "symbolic")
       throw std::invalid_argument(
           "native transport-pair contraction requires rational or Acb coefficients");
+    const auto requested_threads = has_threads
+        ? as_u32(root.at("threads"),
+                 "native transport-pair contraction threads")
+        : std::uint32_t{1};
+    if (requested_threads == 0)
+      throw std::invalid_argument(
+          "native transport-pair contraction threads must be positive");
 
     struct StateReference {
       std::string handle;
@@ -4458,6 +4637,8 @@
       json::object epsilon_record;
       TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
       std::optional<BoundedDivergentCancellation> divergent_cancellation;
+      std::optional<Magnitude> publication_relative_tolerance;
+      std::string publication_relative_tolerance_text;
     };
     std::vector<PendingPairObservable> pending_observables;
     const auto& raw_observables = as_array(
@@ -4468,12 +4649,32 @@
     for (const auto& raw_observable : raw_observables) {
       const auto& observable = as_object(
           raw_observable, "native transport-pair observable");
-      if (observable.if_contains("divergent_cancellation") != nullptr)
+      const bool has_divergent_cancellation =
+          observable.if_contains("divergent_cancellation") != nullptr;
+      const bool has_publication_tolerance =
+          observable.if_contains("publication_relative_tolerance") !=
+          nullptr;
+      if (has_divergent_cancellation && has_publication_tolerance)
+        require_exact_keys(
+            observable,
+            {"identity", "checkpoint_identity", "lower_integrand_rows",
+             "upper_integrand_rows", "epsilon", "tail_policy",
+             "divergent_cancellation",
+             "publication_relative_tolerance"},
+            "native transport-pair observable");
+      else if (has_divergent_cancellation)
         require_exact_keys(
             observable,
             {"identity", "checkpoint_identity", "lower_integrand_rows",
              "upper_integrand_rows", "epsilon", "tail_policy",
              "divergent_cancellation"},
+            "native transport-pair observable");
+      else if (has_publication_tolerance)
+        require_exact_keys(
+            observable,
+            {"identity", "checkpoint_identity", "lower_integrand_rows",
+             "upper_integrand_rows", "epsilon", "tail_policy",
+             "publication_relative_tolerance"},
             "native transport-pair observable");
       else
         require_exact_keys(
@@ -4505,6 +4706,19 @@
       parsed.tail_policy = parse_transport_tail_policy(
           observable.at("tail_policy"),
           "native transport-pair tail policy");
+      if (has_publication_tolerance) {
+        parsed.publication_relative_tolerance_text = required_string(
+            observable, "publication_relative_tolerance");
+        parsed.publication_relative_tolerance = Magnitude::decimal(
+            parsed.publication_relative_tolerance_text);
+        if (parsed.publication_relative_tolerance_text.empty() ||
+            !parsed.publication_relative_tolerance->is_finite() ||
+            parsed.publication_relative_tolerance->is_zero() ||
+            Magnitude::one() <=
+                *parsed.publication_relative_tolerance)
+          throw std::invalid_argument(
+              "native transport-pair publication tolerance must be one finite decimal strictly between zero and one");
+      }
       if (const auto* policy =
               observable.if_contains("divergent_cancellation")) {
         if (session->domain != "acb")
@@ -4519,6 +4733,9 @@
     }
 
     const auto observable_count = pending_observables.size();
+    const auto worker_count = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         observable_count, kMaxPersistentBatchThreads});
     std::array<std::shared_ptr<StoredTransportArmState>, 2> states;
     std::array<std::vector<TransportObservableContractionInput>, 2>
         arm_inputs;
@@ -4603,6 +4820,8 @@
           input.tail_policy = observable.tail_policy;
           input.divergent_cancellation =
               observable.divergent_cancellation;
+          input.publication_relative_tolerance =
+              observable.publication_relative_tolerance;
           input.aggregate_handle =
               "private:" + observable_root + ":" + arm_name + ":aggregate";
           input.projected_local_handles.reserve(input.row_count());
@@ -4714,24 +4933,108 @@
         arm_results;
     std::array<double, 2> arm_elapsed_ms{0.0, 0.0};
     if (observable_count != 0) {
-      // Pair contraction is deliberately sequential.  Each arm now streams
-      // one projected tile at a time; running both arms together would still
-      // double the largest projection/integration scratch allocation.
+      // Keep the two arms sequential so their largest projection scratch
+      // allocations never overlap.  Within one arm, distinct observables
+      // are mathematically and operationally independent; run only the
+      // explicitly bounded number in parallel and retain deterministic
+      // request-order publication and failure selection.
       try {
         for (std::size_t side = 0; side < 2; ++side) {
           if (session->domain == "acb")
             ComplexBall::set_precision(session->precision_bits);
           const auto started = std::chrono::steady_clock::now();
-          arm_results[side] = contract_transport_arm(
-              session->domain, session->precision_bits,
-              states[side]->plan_owner(),
-              side == 0 ? "lower" : "upper",
-              states[side]->tile_sources(), arm_inputs[side], states[side]);
+          if (worker_count == 1) {
+            arm_results[side] = contract_transport_arm(
+                session->domain, session->precision_bits,
+                states[side]->plan_owner(),
+                side == 0 ? "lower" : "upper",
+                states[side]->tile_sources(), arm_inputs[side],
+                states[side]);
+          } else {
+            arm_results[side].resize(observable_count);
+            std::atomic<std::size_t> next_observable{0};
+            std::vector<std::exception_ptr> failures(observable_count);
+            std::vector<std::jthread> workers;
+            workers.reserve(worker_count);
+            for (std::size_t worker = 0; worker < worker_count; ++worker)
+              workers.emplace_back([&, side] {
+                if (session->domain == "acb")
+                  ComplexBall::set_precision(session->precision_bits);
+                while (true) {
+                  const auto index =
+                      next_observable.fetch_add(1);
+                  if (index >= observable_count) return;
+                  try {
+                    std::vector<TransportObservableContractionInput>
+                        singleton{arm_inputs[side][index]};
+                    auto result = contract_transport_arm(
+                        session->domain, session->precision_bits,
+                        states[side]->plan_owner(),
+                        side == 0 ? "lower" : "upper",
+                        states[side]->tile_sources(), singleton,
+                        states[side]);
+                    if (result.size() != 1)
+                      throw std::logic_error(
+                          "parallel transport-pair observable returned the wrong result count");
+                    arm_results[side][index] =
+                        std::move(result.front());
+                  } catch (const MatchingArithmeticError& error) {
+                    if (error.code == MatchingArithmeticErrorCode::
+                                          TerminalOutputInconclusive)
+                      failures[index] = std::make_exception_ptr(
+                          MatchingArithmeticError(
+                              error.code, error.what(), error.row,
+                              index, error.epsilon_power,
+                              error.required_additional_digits));
+                    else
+                      failures[index] =
+                          std::current_exception();
+                  } catch (...) {
+                    failures[index] = std::current_exception();
+                  }
+                }
+              });
+            for (auto& worker : workers) worker.join();
+            const auto failed = std::find_if(
+                failures.begin(), failures.end(),
+                [](const auto& error) {
+                  return error != nullptr;
+                });
+            if (failed != failures.end())
+              std::rethrow_exception(*failed);
+          }
           arm_elapsed_ms[side] =
               std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - started)
                   .count();
         }
+      } catch (const MatchingArithmeticError& error) {
+        release_reservation();
+        if (error.code != MatchingArithmeticErrorCode::
+                              TerminalOutputInconclusive)
+          throw;
+        return json::object{
+            {"status", "error"},
+            {"id", "CPP"},
+            {"reason", "terminal_output_ball_inconclusive"},
+            {"retryable_level_accuracy", true},
+            {"request_index",
+             error.column.has_value()
+                 ? json::value(*error.column)
+                 : json::value(nullptr)},
+            {"failure_functional",
+             error.row.has_value()
+                 ? json::value(*error.row)
+                 : json::value(nullptr)},
+            {"failure_epsilon",
+             error.epsilon_power.has_value()
+                 ? json::value(*error.epsilon_power)
+                 : json::value(nullptr)},
+            {"required_additional_digits",
+             error.required_additional_digits.has_value()
+                 ? json::value(*error.required_additional_digits)
+                 : json::value(nullptr)},
+            {"detail", error.what()}};
       } catch (...) {
         release_reservation();
         throw;
@@ -4760,6 +5063,49 @@
           pending_observables[index].epsilon.required_complete_max)
         throw std::domain_error(
             "native transport-pair aggregate does not cover its required epsilon maximum");
+      auto conditioning =
+          encode_transport_pair_conditioning_diagnostics(
+              arm_results[0][index].aggregate->result(),
+              arm_results[1][index].aggregate->result(),
+              combined->result(),
+              std::move(arm_results[0][index].tile_values),
+              std::move(arm_results[1][index].tile_values));
+      if (pending_observables[index]
+              .publication_relative_tolerance.has_value()) {
+        try {
+          require_transport_line_publication_accuracy(
+              combined->result(), pending_observables[index].epsilon,
+              *pending_observables[index]
+                   .publication_relative_tolerance,
+              "final transport-pair observable", index);
+        } catch (const MatchingArithmeticError& error) {
+          release_reservation();
+          if (error.code != MatchingArithmeticErrorCode::
+                                TerminalOutputInconclusive)
+            throw;
+          return json::object{
+              {"status", "error"},
+              {"id", "CPP"},
+              {"reason", "terminal_output_ball_inconclusive"},
+              {"retryable_level_accuracy", true},
+              {"request_index", index},
+              {"failure_functional",
+               error.row.has_value()
+                   ? json::value(*error.row)
+                   : json::value(nullptr)},
+              {"failure_epsilon",
+               error.epsilon_power.has_value()
+                   ? json::value(*error.epsilon_power)
+                   : json::value(nullptr)},
+              {"required_additional_digits",
+               error.required_additional_digits.has_value()
+                   ? json::value(*error.required_additional_digits)
+                   : json::value(nullptr)},
+              {"scope", "final-paired-line"},
+              {"conditioning", std::move(conditioning)},
+              {"detail", error.what()}};
+        }
+      }
       if (pending_observables[index].tail_policy ==
               TransportTailPolicy::Require &&
           combined->result().scope !=
@@ -4767,12 +5113,7 @@
         throw std::domain_error(
             "native transport-pair contraction requires certified full-local tails on both arms");
       pair_conditioning.push_back(
-          encode_transport_pair_conditioning_diagnostics(
-              arm_results[0][index].aggregate->result(),
-              arm_results[1][index].aggregate->result(),
-              combined->result(),
-              std::move(arm_results[0][index].tile_values),
-              std::move(arm_results[1][index].tile_values)));
+          std::move(conditioning));
       combined_lines.push_back(std::move(combined));
     }
     const auto pair_wall_ms = std::chrono::duration<double, std::milli>(
@@ -4896,6 +5237,8 @@
         {"no_remarching", true}, {"no_rematching", true},
         {"concurrent_arms", false},
         {"max_parallel_arms", observable_count == 0 ? 0 : 1},
+        {"requested_observable_threads", requested_threads},
+        {"observable_worker_threads", worker_count},
         {"streaming_tile_contraction", true},
         {"atomic_publication", true}, {"compact_outputs", true},
         {"checkpoint_policy", checkpoint_policy},
@@ -4934,6 +5277,8 @@
       json::object row;
       ObservableEpsilonContract epsilon;
       json::object epsilon_record;
+      std::string publication_relative_tolerance_text;
+      Magnitude publication_relative_tolerance = Magnitude::zero();
       std::string endpoint_handle;
       std::string projected_handle;
       std::string projected_checkpoint_identity;
@@ -4950,7 +5295,8 @@
           raw_observable, "native transport endpoint observable");
       require_exact_keys(
           observable,
-          {"identity", "checkpoint_identity", "integrand_row", "epsilon"},
+          {"identity", "checkpoint_identity", "integrand_row", "epsilon",
+           "publication_relative_tolerance"},
           "native transport endpoint observable");
       PendingEndpointObservable parsed;
       parsed.identity = required_string(observable, "identity");
@@ -4970,6 +5316,19 @@
       parsed.epsilon_record = as_object(
           observable.at("epsilon"),
           "native transport endpoint epsilon contract");
+      parsed.publication_relative_tolerance_text = required_string(
+          observable, "publication_relative_tolerance");
+      if (parsed.publication_relative_tolerance_text.empty())
+        throw std::invalid_argument(
+            "native transport endpoint publication tolerance cannot be empty");
+      parsed.publication_relative_tolerance = Magnitude::decimal(
+          parsed.publication_relative_tolerance_text);
+      if (!parsed.publication_relative_tolerance.is_finite() ||
+          parsed.publication_relative_tolerance.is_zero() ||
+          Magnitude::one() <=
+              parsed.publication_relative_tolerance)
+        throw std::invalid_argument(
+            "native transport endpoint publication tolerance must be finite and strictly between zero and one");
       pending_observables.push_back(std::move(parsed));
     }
 
@@ -5076,13 +5435,44 @@
     }
     std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
     endpoints.reserve(observable_count);
-    for (const auto& observable : pending_observables)
-      endpoints.push_back(build_transport_endpoint_row(
-          observable.endpoint_handle, observable.checkpoint_identity,
-          observable.identity, observable.row, observable.epsilon,
-          observable.epsilon_record, observable.projected_handle,
-          observable.projected_checkpoint_identity, session->domain,
-          session->precision_bits, state, binding));
+    for (std::size_t index = 0; index < observable_count; ++index) {
+      const auto& observable = pending_observables[index];
+      try {
+        endpoints.push_back(build_transport_endpoint_row(
+            observable.endpoint_handle, observable.checkpoint_identity,
+            observable.identity, observable.row, observable.epsilon,
+            observable.epsilon_record,
+            observable.publication_relative_tolerance,
+            observable.publication_relative_tolerance_text,
+            observable.projected_handle,
+            observable.projected_checkpoint_identity, session->domain,
+            session->precision_bits, state, binding));
+      } catch (const MatchingArithmeticError& error) {
+        if (error.code !=
+            MatchingArithmeticErrorCode::
+                TerminalOutputInconclusive)
+          throw;
+        return json::object{
+            {"status", "error"},
+            {"id", "CPP"},
+            {"reason", "terminal_output_ball_inconclusive"},
+            {"retryable_level_accuracy", true},
+            {"request_index", index},
+            {"failure_functional",
+             error.row.has_value()
+                 ? json::value(*error.row)
+                 : json::value(nullptr)},
+            {"failure_epsilon",
+             error.epsilon_power.has_value()
+                 ? json::value(*error.epsilon_power)
+                 : json::value(nullptr)},
+            {"required_additional_digits",
+             error.required_additional_digits.has_value()
+                 ? json::value(*error.required_additional_digits)
+                 : json::value(nullptr)},
+            {"detail", error.what()}};
+      }
+    }
     const auto operation_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - operation_started).count();
     double endpoint_ms = 0.0;

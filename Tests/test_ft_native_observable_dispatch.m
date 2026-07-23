@@ -157,6 +157,11 @@ assert["producer digit budget retains its safety margin up the ladder",
       <|3 -> matchDigits + 2, 4 -> matchDigits + 4|>,
       3, matchDigits + 4, 4] ===
         <|3 -> matchDigits + 4, 4 -> matchDigits + 6|>];
+assert["banana4 final producer seed carries one measured digit plus guards",
+  ft2RaiseMatchingProducerDigits[
+      <||>, 2, matchDigits + 1, 4] ===
+    <|2 -> matchDigits + 1, 3 -> matchDigits + 3,
+      4 -> matchDigits + 5|>];
 
 terminalOutputFailure = Failure["DiffExp2", <|
   "BackendFailure" -> <|

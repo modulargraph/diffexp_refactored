@@ -157,17 +157,23 @@ if [[ ${BANANA4_BOUNDARY_WARM_CACHE:-0} == 1 ]]; then
   fi
 fi
 
-# These are matching-only reservoirs.  The public epsilon request remains 4.
-# Calling runExample directly prevents discovery retries from changing the
-# experiment being guarded.
-runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; result = Global`runExample["banana4", None, <|1 -> 20, 2 -> 14, 3 -> 8, 4 -> 0|>]; If[result === True, Quit[0], Print["FAILED banana4 boundary: ", InputForm[result]]; Quit[1]]'
-
 if [[ "$target_level" == final ]]; then
   stop_after_boundary=
   gate_label="final-value"
+  # The final consumer asks for one extra digit from its immediate boundary
+  # producer.  Apply the runner's existing two-digit guarded ladder above
+  # that producer: with the default 15-digit contract this pins
+  # levels 2/3/4 to 16/18/20.  B4-128 proved that an unguarded all-15 profile
+  # is one digit too wide already at the level-3 paired publication seam.
+  # Retain the bounded production retry driver for any later typed producer
+  # deficit; the elapsed gate includes every such retry.
+  runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; seedDigits = Global`ft2RaiseMatchingProducerDigits[<||>, 2, Global`matchDigits + 1, 4]; Print["BANANA4 FINAL PRODUCER DIGITS ", InputForm[seedDigits]]; result = Global`ft2RunExampleWithMatchingRetries["banana4", None, <|1 -> 20, 2 -> 14, 3 -> 8, 4 -> 0|>, <||>, seedDigits]; If[result === True, Quit[0], Print["FAILED banana4 boundary: ", InputForm[result]]; Quit[1]]'
 else
   stop_after_boundary=$target_level
   gate_label="level-$target_level boundary"
+  # Boundary gates remain fixed-profile experiments; they must not learn a
+  # different configuration while measuring the pinned seam.
+  runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; result = Global`runExample["banana4", None, <|1 -> 20, 2 -> 14, 3 -> 8, 4 -> 0|>]; If[result === True, Quit[0], Print["FAILED banana4 boundary: ", InputForm[result]]; Quit[1]]'
 fi
 
 echo "=== banana4 $gate_label regression"

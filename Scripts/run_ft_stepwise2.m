@@ -144,18 +144,13 @@ wp = runnerSettings["WorkingPrecision"];
 matchDigits = runnerSettings["MatchingDigits"];
 matchingCertificationSafetyDigitsText = envOrDefault[
   "FT_MATCHING_CERTIFICATION_SAFETY_DIGITS",
-  "automatic"];
-If[!MemberQ[{"automatic", "full"},
-      matchingCertificationSafetyDigitsText] &&
-    !StringMatchQ[matchingCertificationSafetyDigitsText,
-      DigitCharacter..],
-  Print["Invalid FT_MATCHING_CERTIFICATION_SAFETY_DIGITS: expected \"automatic\", \"full\", or a nonnegative integer"];
+  ToString[DiffExp2`Tolerances`$SafetyDigits]];
+If[!StringMatchQ[matchingCertificationSafetyDigitsText,
+    DigitCharacter..],
+  Print["Invalid FT_MATCHING_CERTIFICATION_SAFETY_DIGITS: expected a nonnegative integer"];
   Exit[2]];
-matchingCertificationSafetyDigits = Switch[
-  matchingCertificationSafetyDigitsText,
-  "automatic", Automatic,
-  "full", All,
-  _, FromDigits[matchingCertificationSafetyDigitsText]];
+matchingCertificationSafetyDigits =
+  FromDigits[matchingCertificationSafetyDigitsText];
 epsOrder = runnerSettings["EpsilonOrder"];
 expansionOrder = runnerSettings["ExpansionOrder"];
 boundaryExtraOrder = runnerSettings["BoundaryExtraOrder"];
@@ -1240,15 +1235,10 @@ ft2DownstreamPublicationDigits[level_Integer,
 
 ft2LevelMatchingCertificationDigits[
     levelMatchingDigits_Integer,
-    downstreamPublicationDigits_Integer,
-    example_:None] := Module[
-  {safetyDigits = matchingCertificationSafetyDigits},
-  If[safetyDigits === Automatic,
-    safetyDigits = If[example === "double_box_planar",
-      DiffExp2`Tolerances`$SafetyDigits, All]];
-  If[safetyDigits === All, levelMatchingDigits,
-    Min[levelMatchingDigits,
-      downstreamPublicationDigits + safetyDigits]]];
+    downstreamPublicationDigits_Integer] :=
+  Min[levelMatchingDigits,
+    downstreamPublicationDigits +
+      matchingCertificationSafetyDigits];
 
 loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None,
     matchingDigitsByLevel_:<||>] := Module[
@@ -3890,7 +3880,7 @@ runExample[name_String, familyRequest_:None,
       level, effectiveMatchingDigitsByLevel];
     levelMatchingCertificationDigits =
       ft2LevelMatchingCertificationDigits[
-        levelMatchingDigits, downstreamPublicationDigits, name];
+        levelMatchingDigits, downstreamPublicationDigits];
     levelExpansionOrder = If[resumeTransport || resumeNativeTransport,
       Max[resumeCheckpoint["SourceExpansionOrder"],
         requestedLevelExpansionOrder],

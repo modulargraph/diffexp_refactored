@@ -20,10 +20,20 @@ assert["downstream publication digits remain independent of guarded producer dig
       5, <|4 -> 8, 5 -> 10, 6 -> 12|>] === 8 &&
     ft2DownstreamPublicationDigits[
       1, <|1 -> 10, 2 -> 12|>] === matchDigits];
-assert["internal matching certification consumes at most one downstream safety guard",
-  ft2LevelMatchingCertificationDigits[12, 8] === 10 &&
-    ft2LevelMatchingCertificationDigits[14, 12] === 14 &&
-    ft2LevelMatchingCertificationDigits[8, 8] === 8];
+assert["internal matching certification defaults to the computation contract",
+  ft2LevelMatchingCertificationDigits[12, 8, "banana4"] === 12 &&
+    ft2LevelMatchingCertificationDigits[14, 12, "pentagon"] === 14 &&
+    ft2LevelMatchingCertificationDigits[8, 8, "sunrise"] === 8];
+assert["double-box keeps its measured downstream certification cap",
+  ft2LevelMatchingCertificationDigits[
+      12, 8, "double_box_planar"] === 10 &&
+    ft2LevelMatchingCertificationDigits[
+      14, 12, "double_box_planar"] === 14];
+assert["an explicit downstream safety cap remains available for double-box",
+  Block[{matchingCertificationSafetyDigits = 2},
+    ft2LevelMatchingCertificationDigits[12, 8] === 10 &&
+      ft2LevelMatchingCertificationDigits[14, 12] === 14 &&
+      ft2LevelMatchingCertificationDigits[8, 8] === 8]];
 
 reservoirBackendFailure = <|
   "reason" -> "acb_match_residual_inconclusive",

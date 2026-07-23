@@ -3575,13 +3575,13 @@ compute_terminal_composed_adjoint_diagnostic(
             "terminal composed extended exact row:" + arm_name + ":" +
                 std::to_string(tile_index));
   }
-  std::optional<
+  std::shared_ptr<const
       adjoint_observable_detail::NormalizedBackwardAdjointExactODE>
       normalized_exact_equation;
   if (exact_physical_equation)
     normalized_exact_equation =
-        adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
-            *exact_physical_equation, taylor_complete_max, row_complete,
+        match.terminal_normalized_backward_adjoint_exact_equation(
+            exact_physical_equation, taylor_complete_max, row_complete,
             "terminal composed normalized adjoint:" + arm_name + ":" +
                 std::to_string(tile_index));
   const auto* recurrence_exact_equation = normalized_exact_equation
@@ -3675,47 +3675,66 @@ compute_terminal_composed_adjoint_diagnostic(
     const auto output_context =
         solve_context + ": output epsilon " +
         std::to_string(output_power);
-    auto output_reservoir =
-        solve_backward_adjoint_taylor_with_epsilon_reservoir(
-            [&](std::int32_t input_complete_max) {
-              return normalized_exact_equation
-                  ? prepare_backward_adjoint_taylor_problem(
-                        normalized_exact_equation->truncated_ode, row,
-                        taylor_complete_max, input_complete_max,
-                        output_required_adjoint_complete,
-                        oriented_jacobian, output_context)
-                  : prepare_backward_adjoint_taylor_problem(
-                        *physical_equation, row, taylor_complete_max,
-                        input_complete_max,
-                        output_required_adjoint_complete,
-                        oriented_jacobian, output_context);
-            },
-            output_required_adjoint_complete, row_complete,
-            recurrence_exact_equation, output_context);
+    // The maximal private-reservoir solve is a formal Laurent solution.
+    // Its lower epsilon prefixes are identical to independently re-solving
+    // each smaller request; higher input coefficients cannot change a
+    // coefficient that is already inside the honest complete edge.  Reuse
+    // that one solution and expose only the prefix cap needed by this output.
+    std::optional<BackwardAdjointReservoirSolve> output_reservoir;
+    const BackwardAdjointTaylorProblem* output_problem =
+        &reservoir.problem;
+    const BackwardAdjointTaylorResult* output_solution = &solved;
+    FiniteLaurentVector<ComplexBall> output_adjoint_storage;
+    const FiniteLaurentVector<ComplexBall>* output_adjoint = &adjoint;
+    std::int32_t output_input_complete_max;
+    if (normalized_exact_equation && exact_row) {
+      output_input_complete_max =
+          backward_adjoint_prefix_input_complete_max(
+              reservoir, output_required_adjoint_complete,
+              output_context + ": maximal-reservoir slice");
+    } else {
+      output_reservoir =
+          solve_backward_adjoint_taylor_with_epsilon_reservoir(
+              [&](std::int32_t input_complete_max) {
+                return prepare_backward_adjoint_taylor_problem(
+                    *physical_equation, row, taylor_complete_max,
+                    input_complete_max,
+                    output_required_adjoint_complete,
+                    oriented_jacobian, output_context);
+              },
+              output_required_adjoint_complete, row_complete,
+              recurrence_exact_equation, output_context);
+      output_input_complete_max =
+          output_reservoir->input_epsilon_complete_max;
+      output_problem = &output_reservoir->problem;
+      output_solution = &output_reservoir->result;
+      output_adjoint_storage = evaluate_backward_adjoint_taylor(
+          *output_solution, *signed_point, logarithm,
+          output_context + ": evaluation");
+      output_adjoint = &output_adjoint_storage;
+    }
     if (raw_output == certified_output_min)
       coefficientwise_first_input_complete_max =
-          output_reservoir.input_epsilon_complete_max;
+          output_input_complete_max;
     coefficientwise_last_input_complete_max =
-        output_reservoir.input_epsilon_complete_max;
+        output_input_complete_max;
     coefficientwise_min_input_complete_max = std::min(
         coefficientwise_min_input_complete_max,
-        output_reservoir.input_epsilon_complete_max);
+        output_input_complete_max);
     coefficientwise_max_input_complete_max = std::max(
         coefficientwise_max_input_complete_max,
-        output_reservoir.input_epsilon_complete_max);
-    const auto output_adjoint = evaluate_backward_adjoint_taylor(
-        output_reservoir.result, *signed_point, logarithm,
-        output_context + ": evaluation");
+        output_input_complete_max);
     Magnitude adjoint_tail;
     if (normalized_exact_equation && exact_row) {
       const auto real_tail = certify_backward_adjoint_real_ray_tail(
           *normalized_exact_equation, *exact_row,
-          output_reservoir.result, oriented_jacobian,
+          solved, oriented_jacobian,
           tile.local_begin,
-          output_reservoir.input_epsilon_complete_max, 128,
+          output_input_complete_max, 128,
           "terminal composed real-ray adjoint tail:" + arm_name + ":" +
               std::to_string(tile_index) + ": output epsilon " +
-              std::to_string(output_power));
+              std::to_string(output_power),
+          &match.terminal_backward_adjoint_real_ray_operator_cache());
       adjoint_tail = real_tail.absolute_vector_tail_upper;
       const auto stability_ratio = real_tail.operator_norm_upper /
           Magnitude::from_ui(
@@ -3725,13 +3744,13 @@ compute_terminal_composed_adjoint_diagnostic(
     } else {
       const auto disk_tail =
           certify_backward_adjoint_taylor_tail_adaptive_witness(
-              output_reservoir.problem, output_reservoir.result, row,
+              *output_problem, *output_solution, row,
               oriented_jacobian, *signed_point, point_modulus,
               binding.geometry.radius, 128,
               "terminal composed adjoint tail:" + arm_name + ":" +
                   std::to_string(tile_index) + ": output epsilon " +
                   std::to_string(output_power),
-              output_reservoir.input_epsilon_complete_max,
+              output_input_complete_max,
               exact_row ? &*exact_row : nullptr,
               recurrence_exact_equation);
       adjoint_tail = disk_tail.tail.absolute_vector_tail_upper;
@@ -3742,7 +3761,7 @@ compute_terminal_composed_adjoint_diagnostic(
     const auto contracted_tail =
         backward_adjoint_contracted_tail_by_output(
             adjoint_tail,
-            output_adjoint, incoming,
+            *output_adjoint, incoming,
             {output_power, output_power},
             "terminal composed adjoint coefficientwise tail:" + arm_name +
                 ":" + std::to_string(tile_index) + ": output epsilon " +
@@ -3881,6 +3900,13 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
           << " recurrence_contraction_upper="
           << composed_diagnostic->recurrence_contraction_upper.approximate_upper()
           << '\n';
+    } catch (const BackwardAdjointCenterAnchoringError& error) {
+      std::cerr
+          << "terminal-composed-adjoint arm=" << arm_name
+          << " tile=" << tile_index
+          << " status=not-applicable"
+          << " detail=row-requires-laurent-log-center-adjoint"
+          << " forcing_power=" << error.forcing_power << '\n';
     } catch (const std::exception& error) {
       if (mode == "require") throw;
       std::cerr

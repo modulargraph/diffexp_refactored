@@ -1018,6 +1018,37 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     return equation;
   }
 
+  std::shared_ptr<const
+      adjoint_observable_detail::NormalizedBackwardAdjointExactODE>
+  terminal_normalized_backward_adjoint_exact_equation(
+      const std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>&
+          exact_equation,
+      std::uint32_t taylor_complete_max,
+      std::int32_t epsilon_complete_max,
+      const std::string& context) const {
+    if (!exact_equation)
+      throw std::invalid_argument(
+          context +
+          ": normalized terminal adjoint cache needs an exact equation");
+    const auto key =
+        std::make_pair(taylor_complete_max, epsilon_complete_max);
+    const auto contract = exact_equation->payload_identity + ":" +
+        exact_equation->owner_signature_identity +
+        ":terminal-normalized-adjoint-v1";
+    return terminal_normalized_adjoint_cache_.get_or_build(
+        key, contract, [&] {
+          return adjoint_observable_detail::
+              normalize_backward_adjoint_exact_ode_by_q(
+                  *exact_equation, taylor_complete_max,
+                  epsilon_complete_max, context);
+        }).value;
+  }
+
+  adjoint_observable_detail::BackwardAdjointRealRayOperatorCache&
+  terminal_backward_adjoint_real_ray_operator_cache() const {
+    return terminal_real_ray_operator_cache_;
+  }
+
   FiniteLaurentVector<ComplexBall>
   terminal_acb_incoming_physical_value() const {
     const auto acb =
@@ -3151,6 +3182,12 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   mutable std::shared_ptr<
       const std::vector<LocalSolution<ComplexBall>>>
       terminal_factorized_basis_cache_;
+  mutable detail::ImmutableRecursiveCache<
+      std::pair<std::uint32_t, std::int32_t>,
+      adjoint_observable_detail::NormalizedBackwardAdjointExactODE>
+      terminal_normalized_adjoint_cache_;
+  mutable adjoint_observable_detail::BackwardAdjointRealRayOperatorCache
+      terminal_real_ray_operator_cache_;
 };
 
 class StoredTransportArmState {

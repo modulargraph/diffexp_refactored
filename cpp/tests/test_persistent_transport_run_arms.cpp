@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -745,7 +746,8 @@ json::object integrand_row(const std::string& identity,
 
 json::object cancellation_integrand_row(
     const std::string& identity,
-    std::size_t taylor_width = 5) {
+    std::size_t taylor_width = 5,
+    std::uint32_t center_pole_order = 0) {
   if (taylor_width == 0)
     throw std::invalid_argument(
         "cancellation integrand row Taylor width is zero");
@@ -777,7 +779,7 @@ json::object cancellation_integrand_row(
                {"column", 0},
                {"multiplier", json::object{
                     {"epsilon_shift", 0},
-                    {"center_pole_order", 0},
+                    {"center_pole_order", center_pole_order},
                     {"kernels", kernels("1")},
                     {"analytic_coefficients", analytic("1")},
                     {"exact_identity", identity + ":plus"},
@@ -786,7 +788,7 @@ json::object cancellation_integrand_row(
                {"column", 1},
                {"multiplier", json::object{
                     {"epsilon_shift", 0},
-                    {"center_pole_order", 0},
+                    {"center_pole_order", center_pole_order},
                     {"kernels", kernels("-1")},
                     {"analytic_coefficients", analytic("-1")},
                     {"exact_identity", identity + ":minus"},
@@ -837,7 +839,8 @@ json::value contract_and_export(const std::string& session,
 json::value contract_cancellation_and_export(
     const std::string& session, const json::object& state,
     const std::string& root, std::size_t taylor_width = 5,
-    bool release_line = true) {
+    bool release_line = true,
+    std::uint32_t center_pole_order = 0) {
   const auto contracted = request(json::object{
       {"schema", 2}, {"op", "transport.contract"},
       {"session", session},
@@ -855,9 +858,11 @@ json::value contract_cancellation_and_export(
            {"checkpoint_identity", root + ":line"},
            {"integrand_rows", json::array{
                 cancellation_integrand_row(
-                    root + ":row:1", taylor_width),
+                    root + ":row:1", taylor_width,
+                    center_pole_order),
                 cancellation_integrand_row(
-                    root + ":row:2", taylor_width)}},
+                    root + ":row:2", taylor_width,
+                    center_pole_order)}},
            {"epsilon", json::object{
                 {"min", 0}, {"max", 2},
                 {"required_complete_max", 1}}},
@@ -2385,6 +2390,42 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     require_small_zero(
         compared_value,
         "compared direct/adjoint terminal contraction");
+    // A 1/t observable row is outside the lambda(0)=0 composed theorem: its
+    // adjoint needs a Laurent/log term and the integration-by-parts endpoint
+    // pairing.  `require` must classify precisely that known applicability
+    // boundary while the established production contraction still completes.
+    // This is the row class reached by banana4's seventh level-3 request.
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
+               "require", 1) != 0)
+      throw std::runtime_error(
+          "could not require center-pole composed-adjoint classification");
+    std::ostringstream center_pole_diagnostics;
+    auto* previous_stderr = std::cerr.rdbuf(center_pole_diagnostics.rdbuf());
+    json::value center_pole_value;
+    try {
+      center_pole_value = contract_cancellation_and_export(
+          session, lower_state, "terminal-center-pole-classification",
+          9, true, 1);
+    } catch (...) {
+      std::cerr.rdbuf(previous_stderr);
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+      throw;
+    }
+    std::cerr.rdbuf(previous_stderr);
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+    require_small_zero(
+        center_pole_value,
+        "center-pole classified production contraction");
+    const auto center_pole_report = center_pole_diagnostics.str();
+    if (center_pole_report.find("status=not-applicable") ==
+            std::string::npos ||
+        center_pole_report.find(
+            "detail=row-requires-laurent-log-center-adjoint") ==
+            std::string::npos ||
+        center_pole_report.find("forcing_power=0") == std::string::npos)
+      throw std::runtime_error(
+          "center-pole terminal row was not classified explicitly: " +
+          center_pole_report);
     // The direct physical route contracts L(F) with the certified physical
     // weights w.  It must remain a genuine independent route: in particular,
     // it must not pass through the epsilon-shifted factorization (F T) P and

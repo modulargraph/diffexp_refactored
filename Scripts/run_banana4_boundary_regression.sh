@@ -198,12 +198,21 @@ for forbidden in (
     if any(forbidden in line for line in lines):
         raise SystemExit(f"forbidden failure marker in banana4 boundary log: {forbidden}")
 
-# A noncenter-ending terminal tile is currently handled by the established
-# direct route.  It must be classified explicitly, never silently fed to the
-# center-anchored one-contraction theorem.
+# A noncenter-ending terminal tile and a row whose forcing reaches t^0 are
+# currently handled by the established production contraction.  The latter
+# needs a Laurent/log adjoint plus an endpoint pairing before it belongs to
+# the center-anchored one-contraction theorem.  Both cases must be classified
+# explicitly; no other composed-adjoint failure may be silently skipped.
 noncenter = [line for line in lines if "status=not-applicable" in line]
 if noncenter and not all(
-    "detail=tile-does-not-end-at-chart-center" in line for line in noncenter
+    (
+        "detail=tile-does-not-end-at-chart-center" in line
+        or (
+            "detail=row-requires-laurent-log-center-adjoint" in line
+            and "forcing_power=" in line
+        )
+    )
+    for line in noncenter
 ):
     raise SystemExit("unclassified non-applicable terminal composed-adjoint tile")
 

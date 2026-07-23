@@ -349,10 +349,10 @@ bool physical_ode_row_adapter() {
     (void)prepare_backward_adjoint_taylor_problem(
         scalar_ode("1"), scalar_row(1), 4, 0, 0, ball("1"),
         "center-pole composed adapter");
-  } catch (const std::domain_error& error) {
-    return std::string(error.what()).find(
-               "Laurent/log backward Fuchsian completion is required") !=
-           std::string::npos;
+  } catch (const BackwardAdjointCenterAnchoringError& error) {
+    return error.forcing_power == 0 &&
+           std::string(error.what()).find("endpoint pairing are required") !=
+               std::string::npos;
   }
   return false;
 }
@@ -690,6 +690,49 @@ bool batched_real_interval_remainders_match_individual_quotients() {
   return true;
 }
 
+bool real_ray_operator_bounds_are_cached_by_exact_interval() {
+  PreparedPhysicalClearedODE<Rational> exact_ode;
+  exact_ode.dimension = 1;
+  exact_ode.q_lags = {exact_rational_constant("1")};
+  exact_ode.c_lags = {
+      {{0, 0, exact_rational_constant("3")}},
+      {{0, 0, exact_rational_constant("1")}}};
+  exact_ode.owner_signature_identity = "real-ray-cache-owner";
+  exact_ode.payload_identity = "real-ray-cache-payload";
+  exact_ode.exact_payload_record = "real-ray-cache-record";
+  const auto normalized =
+      adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
+          exact_ode, 6, 0, "real-ray cache normalization");
+  const auto normalized_extended =
+      adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
+          exact_ode, 6, 1, "real-ray cache extended normalization");
+  adjoint_observable_detail::BackwardAdjointRealRayOperatorCache cache;
+  const Rational left(0);
+  const Rational right("1/4");
+  const auto interval = adjoint_observable_detail::exact_real_interval_ball(
+      left, right);
+  const auto first = cache.get_or_build(
+      normalized, left, right, interval, 6, 0,
+      "real-ray cache first lookup");
+  const auto second = cache.get_or_build(
+      normalized_extended, left, right, interval, 6, 0,
+      "real-ray cache prefix-compatible extended lookup");
+  const auto first_stats = cache.stats();
+  if (first.get() != second.get() || first_stats.entries != 1 ||
+      first_stats.builds != 1 || first_stats.hits != 1)
+    return false;
+
+  const Rational split("1/8");
+  const auto split_interval =
+      adjoint_observable_detail::exact_real_interval_ball(left, split);
+  (void)cache.get_or_build(
+      normalized, left, split, split_interval, 6, 0,
+      "real-ray cache split lookup");
+  const auto split_stats = cache.stats();
+  return split_stats.entries == 2 && split_stats.builds == 2 &&
+         split_stats.hits == 1;
+}
+
 bool real_ray_tail_ignores_pole_beyond_endpoint() {
   PreparedPhysicalClearedODE<Rational> exact_ode;
   exact_ode.dimension = 1;
@@ -836,12 +879,37 @@ bool private_epsilon_reservoir_covers_inverse_loss() {
       solve_backward_adjoint_taylor_with_epsilon_reservoir(
           factory, 0, 2, nullptr,
           "private epsilon inverse-loss regression");
-  return solved.input_epsilon_complete_max == 2 &&
-         solved.result.common_epsilon_complete_max >= 0 &&
-         contains_exact(
-             solved.result.coefficients.front()[0].coefficient(1), "1") &&
-         contains_exact(
-             solved.result.coefficients.front()[1].coefficient(-1), "1");
+  const auto larger_factory = [&](std::int32_t input_complete_max) {
+    auto problem = factory(input_complete_max);
+    problem.required_epsilon_complete_max = 1;
+    return problem;
+  };
+  const auto larger =
+      solve_backward_adjoint_taylor_with_epsilon_reservoir(
+          larger_factory, 1, 3, nullptr,
+          "larger private epsilon inverse-loss regression");
+  if (solved.input_epsilon_complete_max != 2 ||
+      solved.result.common_epsilon_complete_max < 0 ||
+      larger.result.common_epsilon_complete_max < 1 ||
+      backward_adjoint_prefix_input_complete_max(
+          larger, 0, "private epsilon sliced-prefix regression") !=
+          solved.input_epsilon_complete_max ||
+      !contains_exact(
+          solved.result.coefficients.front()[0].coefficient(1), "1") ||
+      !contains_exact(
+          solved.result.coefficients.front()[1].coefficient(-1), "1"))
+    return false;
+  for (std::size_t component = 0; component < 2; ++component) {
+    const auto& smaller = solved.result.coefficients.front()[component];
+    const auto& extended = larger.result.coefficients.front()[component];
+    const auto common_min = std::max(
+        smaller.min_power(), extended.min_power());
+    for (std::int32_t power = common_min; power <= 0; ++power)
+      if (!(smaller.coefficient(power) -
+            extended.coefficient(power)).contains_zero())
+        return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -863,6 +931,7 @@ int main() {
                   exact_q_normalization_removes_clearing_contraction() &&
                   normalized_a_posteriori_defect_encloses_exact_tail() &&
                   batched_real_interval_remainders_match_individual_quotients() &&
+                  real_ray_operator_bounds_are_cached_by_exact_interval() &&
                   real_ray_tail_ignores_pole_beyond_endpoint() &&
                   coefficientwise_tail_ignores_irrelevant_high_epsilon_input() &&
                   forcing_bound_ignores_epsilon_above_private_cap() &&

@@ -24,7 +24,7 @@ Rules:
 - Accurate incoming level-1 boundary:
   `/private/tmp/diffexp2-banana4-fresh-boundary-20260718/checkpoints/banana4_level1_boundary.mx`
 - Current branch: `codex/all-examples-recovery`
-- Current pushed recovery commit: `26f21af`.
+- Current pushed recovery commit: `04eee40`.
 - Historical dirty-tree diff fingerprint for B4-11 through B4-13:
   `71955139205bf5cdef753235ad78a88e0963af7f1d25cfb5367a2196772192fb`.
 - The incoming boundary is accurate. The B4-23 checkpoint proves the full
@@ -455,18 +455,26 @@ Rules:
 
 ## Next controlled experiment
 
-1. Run all four banana4 levels at WP300/EO50 with the proven private halos,
-   hard deadline, persistent FIRE preparation cache, and fresh transport
-   checkpoints.  Do not resume a ladder checkpoint.
-2. Compare the final value against the independent Bessel oracle and reject
+1. Re-run the documented level-2 boundary gate after the post-B4-125
+   overlap-recenter repair: WP500, EO50, match 25, private halos
+   `{20,14,8,0}`, composed-adjoint order 100, hard 420-second deadline,
+   persistent FIRE preparation cache, and fresh transport checkpoints. Do not
+   resume a ladder checkpoint. This is the only justified repeat of the
+   level-3-to-level-2 chain because the implementation changed after B4-89.
+2. If that gate passes, run the documented clean final-value gate: WP500,
+   EO50, match 15, the same private halos and composed-adjoint order, a
+   2400-second hard deadline, and fresh transport checkpoints.
+3. Compare the final value against the independent Bessel oracle and reject
    expected-zero pole remnants before trimming.
-3. If the final level fails, localize it with the existing composed/legacy
-   coefficient comparison; do not repeat the now-passing level-2 experiment
-   or reinterpret an explicitly classified center-pole row as a failure.
-4. Only after the full oracle passes, run the opt-in banana4 timing gate and
-   the pentagon/double-box gates as the release regression set.
-5. Treat a Laurent/log composed adjoint plus its center endpoint pairing as a
-   separate future theorem.  Never add a constant adjoint coefficient without
+4. If either gate fails, add its experiment row and exact log path before
+   changing configuration. Localize a final-level failure with the existing
+   composed/legacy coefficient comparison; do not repeat a passing
+   configuration or reinterpret an explicitly classified center-pole row as a
+   failure.
+5. Only after the full oracle passes, run the opt-in banana4, pentagon, and
+   double-box gates as the release regression set.
+6. Treat a Laurent/log composed adjoint plus its center endpoint pairing as a
+   separate future theorem. Never add a constant adjoint coefficient without
    carrying that boundary term.
 
 ## Additional historical evidence

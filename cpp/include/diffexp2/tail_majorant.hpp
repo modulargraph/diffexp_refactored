@@ -945,10 +945,20 @@ prepare_physical_regular_homogeneous_tail_model(
       const auto epsilon_index = static_cast<std::size_t>(
           raw_power - solution.epsilon.min_power);
       for (std::uint32_t component = 0;
-           component < solution.dimension; ++component)
-        reconstructed_sector.coefficients[local_detail::sector_index(
-            model.reconstructed, epsilon_index, taylor, component)] =
-            evolution.at(taylor).at(power, component);
+           component < solution.dimension; ++component) {
+        const auto coefficient = local_detail::sector_index(
+            solution, epsilon_index, taylor, component);
+        const auto& expected = evolution.at(taylor).at(power, component);
+        if (!encloses_recurrence_value(
+                source_sector.coefficients[coefficient], expected))
+          return inconclusive(
+              "retained Taylor tensor does not forward-enclose its physical "
+              "q/C recurrence through the claimed complete order "
+              "(n=" + std::to_string(taylor) + ", component=" +
+              std::to_string(component) + ", epsilon_index=" +
+              std::to_string(epsilon_index) + ")");
+        reconstructed_sector.coefficients[coefficient] = expected;
+      }
     }
 
   model.q_operator_norm_upper.reserve(equation.q_lags.size());

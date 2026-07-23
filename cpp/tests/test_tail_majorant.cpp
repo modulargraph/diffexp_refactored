@@ -316,6 +316,15 @@ void test_finite_epsilon_physical_tail_model() {
                 evaluated.evaluation.value.error.absolute.at(0) &&
             Magnitude::upper_abs(remainder1) <=
                 evaluated.evaluation.value.error.absolute.at(1));
+
+  auto corrupted = solution;
+  corrupted.sectors.front().coefficients.back() += ComplexBall(1);
+  const auto corrupted_model =
+      diffexp2::prepare_physical_regular_homogeneous_tail_model(
+          equation, corrupted);
+  check("physical tail proof rejects an unrelated retained Taylor tensor",
+        corrupted_model.status == TailMajorantStatus::Inconclusive &&
+            !corrupted_model.model.has_value());
 }
 
 }  // namespace

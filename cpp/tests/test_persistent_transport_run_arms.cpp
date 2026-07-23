@@ -1979,8 +1979,8 @@ void test_frame_independent_physical_value_wiring() {
         session, "physical-wiring-first", "-2/3");
     const auto second_equation = prepare_regular_equation_owner(
         session, "physical-wiring-second", "-4/3");
-    const auto second_framed_chart = prepare_chart(
-        session, "physical-wiring-second", "-4/3", true, "acb", 0);
+    const auto third_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-third", "-2");
     const auto anchor = solve_local(
         session, anchor_chart, "0", "physical-wiring-anchor-local", "2",
         30, true);
@@ -1990,9 +1990,10 @@ void test_frame_independent_physical_value_wiring() {
         {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
         {"checkpoint_identity", plan_checkpoint}, {"division_order", 3},
         {"arm", json::object{
-             {"from_exact", "0"}, {"to_exact", "-4/3"},
+             {"from_exact", "0"}, {"to_exact", "-2"},
              {"charts", json::array{
-                  anchor_chart, first_equation, second_equation}},
+                  anchor_chart, first_equation, second_equation,
+                  third_equation}},
              {"topology", topology(true)}}}});
     require_ok(planned, "physical wiring tile.plan_arm");
     const auto plan = std::string(planned.at("tile_plan").as_string());
@@ -2018,8 +2019,10 @@ void test_frame_independent_physical_value_wiring() {
     if (direct.at("used") != true ||
         direct.at("execution_mode") !=
             "causal-ordinary-physical-evolution" ||
-        direct.at("output_tail_status") != "unsupported" ||
-        direct.at("next_hop_policy") != "exact-framed-fallback")
+        direct.at("output_tail_status") !=
+            "transient-physical-reconstructible" ||
+        direct.at("next_hop_policy") !=
+            "certified-physical-tail-replay")
       throw std::runtime_error(
           "ordinary physical hop did not advertise its exact tail/fallback contract: " +
           json::serialize(direct));
@@ -2060,63 +2063,41 @@ void test_frame_independent_physical_value_wiring() {
       throw std::runtime_error(
           "ordinary physical hop did not canonically trim its exact structural lower row during local evaluation");
 
-    const auto unavailable_tail = consume_physical_value_hop(
+    const auto consecutive = consume_physical_value_hop(
         session, plan, "lower", 1,
         std::string(direct_local.at("local").as_string()),
         std::string(direct_local.at("checkpoint_identity").as_string()),
         physical_value_solver("-4/3", 12), "physical-wiring-hop",
         plan_checkpoint);
-    require_ok(unavailable_tail, "physical wiring unavailable-tail hop");
-    if (unavailable_tail.at("used") != false ||
-        unavailable_tail.at("execution_mode") !=
-            "framed-fallback-required" ||
-        unavailable_tail.at("reason") !=
-            "incoming-local-has-no-certified-regular-tail-model")
+    require_ok(consecutive, "physical wiring consecutive physical hop");
+    if (consecutive.at("used") != true ||
+        consecutive.at("execution_mode") !=
+            "causal-ordinary-physical-evolution" ||
+        consecutive.at("output_tail_status") !=
+            "transient-physical-reconstructible" ||
+        consecutive.at("next_hop_policy") !=
+            "certified-physical-tail-replay" ||
+        std::string(consecutive.at("next_local").as_object()
+                        .at("chart").as_string()) != second_equation)
       throw std::runtime_error(
-          "unsupported physical tail did not fail side-effect-free into the framed path: " +
-          json::serialize(unavailable_tail));
-
-    const auto fallback_basis = solve_local(
-        session, second_framed_chart, "-4/3",
-        "physical-wiring-framed-fallback", "1", 12, true, -1, 2,
-        second_equation);
-    const auto fallback = request(json::object{
-        {"schema", 2}, {"op", "transport.consume_hop"},
-        {"session", session}, {"tile_plan", plan},
-        {"tile_plan_checkpoint_identity", plan_checkpoint},
-        {"arm", "lower"}, {"match", 1},
-        {"receiving_basis", json::array{fallback_basis}},
-        {"incoming", direct_local.at("local")},
-        {"incoming_checkpoint_identity",
-         direct_local.at("checkpoint_identity")},
-        {"epsilon", json::object{{"min", 0}, {"max", 2},
-                                    {"required_complete_max", 2}}},
-        {"refinement", json::object{{"relative_tolerance", "1e-6"},
-                                      {"max_steps", 2}}},
-        {"checkpoint_policy", json::object{
-             {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
-             {"root", "physical-wiring-framed"}}}});
-    require_ok(fallback, "physical wiring framed fallback");
-    if (std::string(fallback.at("next_local").as_object()
-                        .at("chart").as_string()) != second_equation ||
-        fallback.at("consumed_basis_handles").as_array().size() != 1)
-      throw std::runtime_error(
-          "framed fallback did not materialize under the exact equation owner: " +
-          json::serialize(fallback));
+          "second ordinary physical hop did not replay the source q/C tail "
+          "certificate under the next equation owner: " +
+          json::serialize(consecutive));
 
     const auto counters = request(json::object{
         {"schema", 2}, {"op", "session.counters"},
         {"session", session}});
     require_ok(counters, "physical wiring session.counters");
     if (counter(counters, "transport_physical_value_hop_attempts") != 3 ||
-        counter(counters, "transport_physical_value_hop_successes") != 1 ||
-        counter(counters, "transport_physical_value_hop_ineligible") != 1 ||
-        counter(counters, "transport_framed_basis_hops") != 1)
+        counter(counters, "transport_physical_value_hop_successes") != 2 ||
+        counter(counters, "transport_physical_value_hop_ineligible") != 0 ||
+        counter(counters, "transport_framed_basis_hops") != 0)
       throw std::runtime_error(
-          "physical/framed wiring diagnostics do not expose the alternating path: " +
+          "physical wiring diagnostics do not expose consecutive causal hops: " +
           json::serialize(counters));
 
-    for (const auto& owner : {first_equation, second_equation})
+    for (const auto& owner :
+         {first_equation, second_equation, third_equation})
       require_ok(request(json::object{
           {"schema", 2}, {"op", "regular_equation.release"},
           {"session", session}, {"equation_owner", owner}}),
@@ -2132,6 +2113,10 @@ void test_frame_independent_physical_value_wiring() {
       throw std::runtime_error(
           "checkpoint did not distinguish hidden regular equation owners from public registry visibility: " +
           json::serialize(saved_checkpoint));
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", session}}),
+        "physical wiring pre-restore session.close");
+    session.clear();
     const auto restored_record = request(json::object{
         {"schema", 2}, {"op", "checkpoint.restore"},
         {"path", checkpoint},
@@ -2143,6 +2128,48 @@ void test_frame_independent_physical_value_wiring() {
     if (!restored_record.at("regular_equation_owners").as_array().empty())
       throw std::runtime_error(
           "hidden regular equation owner became publicly visible after restore");
+
+    const auto& consecutive_local =
+        consecutive.at("next_local").as_object();
+    const auto resumed = consume_physical_value_hop(
+        restored_session, plan, "lower", 2,
+        std::string(consecutive_local.at("local").as_string()),
+        std::string(
+            consecutive_local.at("checkpoint_identity").as_string()),
+        physical_value_solver("-2", 12), "physical-wiring-hop",
+        plan_checkpoint);
+    require_ok(resumed,
+               "physical wiring post-checkpoint consecutive hop");
+    if (resumed.at("used") != true ||
+        resumed.at("execution_mode") !=
+            "causal-ordinary-physical-evolution" ||
+        resumed.at("output_tail_status") !=
+            "transient-physical-reconstructible" ||
+        resumed.at("next_hop_policy") !=
+            "certified-physical-tail-replay" ||
+        std::string(resumed.at("next_local").as_object()
+                        .at("chart").as_string()) != third_equation)
+      throw std::runtime_error(
+          "restored physical tail lineage could not certify the next "
+          "causal hop without a basis fallback: " +
+          json::serialize(resumed));
+    const auto restored_counters = request(json::object{
+        {"schema", 2}, {"op", "session.counters"},
+        {"session", restored_session}});
+    require_ok(restored_counters,
+               "physical wiring restored session.counters");
+    if (counter(restored_counters,
+                "transport_physical_value_hop_attempts") != 1 ||
+        counter(restored_counters,
+                "transport_physical_value_hop_successes") != 1 ||
+        counter(restored_counters,
+                "transport_physical_value_hop_ineligible") != 0 ||
+        counter(restored_counters, "transport_framed_basis_hops") != 0)
+      throw std::runtime_error(
+          "restored causal physical-hop chain lost its counters or "
+          "fell back to basis transport: " +
+          json::serialize(restored_counters));
+
     const auto resaved = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
         {"session", restored_session}, {"path", resaved_checkpoint},
@@ -2154,10 +2181,6 @@ void test_frame_independent_physical_value_wiring() {
         {"session", restored_session}}),
         "physical wiring restored session.close");
     restored_session.clear();
-    require_ok(request(json::object{
-        {"schema", 2}, {"op", "session.close"}, {"session", session}}),
-        "physical wiring session.close");
-    session.clear();
   } catch (...) {
     if (!session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},

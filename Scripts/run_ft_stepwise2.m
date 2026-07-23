@@ -2386,6 +2386,40 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
     "DeepRequiredPublicRawTop" -> previousPublicRequired,
     "DeepRequiredRawTop" -> previousRequired|>];
 
+(* The native epsilon planner has already normalized every exact level matrix
+   and retained the result inside its gauge.  Re-evaluating the same
+   d -> 4-2 eps substitution at runtime is not a harmless lookup: for the
+   15-dimensional banana4 level it can repeat tens of minutes of symbolic
+   rational-function canonicalization before the first stage marker.  Reuse
+   the planner-owned matrix after checking its exact gauge binding and hash.
+   The non-native backend keeps its historical normalization path. *)
+ft2RuntimeLevelMatrix[levelData_Association, plannedLevel_,
+    normalize_] := Module[
+  {raw = Lookup[levelData, "DiffMatrix", None], gauge, matrix, record,
+   levelRecord},
+  If[!AssociationQ[plannedLevel], Return[normalize[raw], Module]];
+  gauge = Lookup[plannedLevel, "Gauge", None];
+  levelRecord = Lookup[plannedLevel, "Record", None];
+  If[!AssociationQ[gauge] || !AssociationQ[levelRecord],
+    Return[ft2NativeFailure[
+      "native runtime level lost its planned epsilon gauge"], Module]];
+  matrix = Lookup[gauge, "Matrix", None];
+  record = Lookup[gauge, "Record", None];
+  If[!MatrixQ[raw] || !MatrixQ[matrix] ||
+      Dimensions[matrix] =!= Dimensions[raw] ||
+      !AssociationQ[record] ||
+      Lookup[record, "InputMatrixHash", None] =!= Hash[raw, "SHA256"] ||
+      Lookup[levelRecord, "GaugeIdentity", None] =!=
+        Lookup[gauge, "Identity", None] ||
+      Lookup[gauge, "Identity", None] =!=
+        ft2CanonicalIdentity["ft2-relative-epsilon-gauge-", record] ||
+      Lookup[record, "NormalizedMatrixHash", None] =!=
+        Hash[matrix, "SHA256"],
+    Return[ft2NativeFailure[
+      "native runtime level matrix does not match its planned epsilon gauge"],
+      Module]];
+  matrix];
+
 ft2NativeEpsilonPlanQ[plan_] := Module[
   {record, levels, nLevels, levelRecords, deepRequired, deepPublic,
    matchingHalos},
@@ -3525,10 +3559,18 @@ runExample[name_String, familyRequest_:None,
      nativeCheckpointSpec = None, nativeStateFile, nativeSidecarFile,
      nativeConfigurationRecord, rowCertifications,
      downstreamPublicFiniteTop},
-    var = levelData["FeynmanParameter"];
     If[recurrenceBackend === "Cpp",
       plannedLevel = nativeEpsilonPlan["Levels"][level]];
-    A = normalizeFT[levelData["DiffMatrix"]];
+    var = levelData["FeynmanParameter"];
+    ft2NativeStageTiming["level=", level,
+      " runtime-matrix-acquire-begin"];
+    A = ft2RuntimeLevelMatrix[levelData, plannedLevel, normalizeFT];
+    If[FailureQ[A],
+      Print["FTLADDER RUNTIME MATRIX FAIL level=", level, " ", A];
+      Throw[$Failed, "FT2Abort"]];
+    ft2NativeStageTiming["level=", level,
+      " runtime-matrix-acquire-ready planned=",
+      AssociationQ[plannedLevel]];
     Print["LEVEL ", level, " var=", var, " d=", Length[A]];
     mastersHere = levelData["Masters"];
     mastersBelow = levelBelow["Masters"];

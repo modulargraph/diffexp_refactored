@@ -42,15 +42,25 @@ wolfram_tests=(
   Tests/test_ft_pipeline_process.m
   Tests/test_ft_runner_family_request_contract.m
   Tests/test_ft_ladder_checkpointing.m
+  Tests/test_ft_native_checkpoint_resume.m
+  Tests/test_ft_native_epsilon_preplanner.m
+  Tests/test_ft_native_observable_dispatch.m
   Tests/test_double_box_planar_oracle.m
   Tests/test_pentagon_massive_oracle.m
   Tests/test_banana4_bessel_oracle.m
+  Tests/test_native_algebraic_singular_handoff.m
+  Tests/test_native_casep_terminal_checkpoint.m
+  Tests/test_native_mixed_regular_singular_atlas.m
+  Tests/test_native_transport_observable_batch.m
 )
 
 for test_file in "${wolfram_tests[@]}"; do
   echo "=== $test_file"
   if [[ "$test_file" == Tests/test_cpp_backend.m ||
-        "$test_file" == Tests/test_cpp_arm_batch.m ]]; then
+        "$test_file" == Tests/test_cpp_arm_batch.m ||
+        "$test_file" == Tests/test_native_casep_terminal_checkpoint.m ||
+        "$test_file" == Tests/test_native_mixed_regular_singular_atlas.m ||
+        "$test_file" == Tests/test_native_transport_observable_batch.m ]]; then
     DE2_REQUIRE_CPP=1 wolframscript -file "$test_file"
   else
     wolframscript -file "$test_file"

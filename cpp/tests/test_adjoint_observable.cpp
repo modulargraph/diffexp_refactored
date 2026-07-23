@@ -1,5 +1,6 @@
 #include "diffexp2/adjoint_observable.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -663,6 +664,32 @@ bool normalized_a_posteriori_defect_encloses_exact_tail() {
              1e-3;
 }
 
+bool batched_real_interval_remainders_match_individual_quotients() {
+  const adjoint_observable_detail::ExactTRationalFunction exact{
+      {Rational(3), Rational(-5), Rational(7), Rational(2)},
+      {Rational(2), Rational(-3), Rational(1)}};
+  const auto interval = adjoint_observable_detail::exact_real_interval_ball(
+      Rational("-1/10"), Rational("1/8"));
+  const auto batched = adjoint_observable_detail::
+      exact_t_rational_all_taylor_remainder_quotient_real_interval_uppers(
+          exact, 12, interval, "batched real-interval remainder");
+  if (batched.size() != 13) return false;
+  for (std::uint32_t retained = 0; retained <= 12; ++retained) {
+    const auto quotient = adjoint_observable_detail::
+        exact_t_rational_taylor_remainder_quotient(
+            exact, retained, "individual real-interval remainder");
+    const auto individual = adjoint_observable_detail::
+        exact_t_rational_real_interval_upper(
+            quotient, interval, "individual real-interval upper");
+    const auto left = batched[retained].approximate_upper();
+    const auto right = individual.approximate_upper();
+    if (std::abs(left - right) >
+        1e-12 * std::max({1.0, std::abs(left), std::abs(right)}))
+      return false;
+  }
+  return true;
+}
+
 bool real_ray_tail_ignores_pole_beyond_endpoint() {
   PreparedPhysicalClearedODE<Rational> exact_ode;
   exact_ode.dimension = 1;
@@ -835,6 +862,7 @@ int main() {
                   exact_combined_forcing_cancels_cleared_row_pole() &&
                   exact_q_normalization_removes_clearing_contraction() &&
                   normalized_a_posteriori_defect_encloses_exact_tail() &&
+                  batched_real_interval_remainders_match_individual_quotients() &&
                   real_ray_tail_ignores_pole_beyond_endpoint() &&
                   coefficientwise_tail_ignores_irrelevant_high_epsilon_input() &&
                   forcing_bound_ignores_epsilon_above_private_cap() &&

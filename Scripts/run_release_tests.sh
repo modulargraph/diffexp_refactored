@@ -80,7 +80,7 @@ if [[ "${DE2_RUN_BANANA_TIMING:-0}" == 1 ]]; then
 fi
 
 if [[ "${DE2_RUN_BANANA4_BOUNDARY:-0}" == 1 ]]; then
-  echo "=== optional banana4 production-chain boundary regression"
+  echo "=== optional banana4 production chain through level-2 boundary"
   Scripts/run_banana4_boundary_regression.sh
 fi
 

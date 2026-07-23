@@ -1233,6 +1233,62 @@ inline Magnitude exact_t_rational_real_interval_upper(
   return Magnitude::upper_abs(numerator / denominator);
 }
 
+inline std::vector<Magnitude>
+exact_t_rational_all_taylor_remainder_quotient_real_interval_uppers(
+    const ExactTRationalFunction& exact,
+    std::uint32_t maximum_retained_complete_max,
+    const ComplexBall& interval, const std::string& context) {
+  const auto denominator = evaluate_exact_t_polynomial_interval(
+      exact.denominator, interval);
+  if (denominator.contains_zero())
+    throw std::domain_error(
+        context + ": exact denominator is not separated on the real interval");
+  const auto taylor = expand_exact_t_rational_taylor(
+      exact, maximum_retained_complete_max,
+      context + ": shared Taylor prefix");
+
+  auto quotient_numerator = exact.numerator;
+  quotient_numerator.resize(
+      std::max(quotient_numerator.size(), exact.denominator.size()),
+      Rational(0));
+  for (std::size_t degree = 0; degree < exact.denominator.size(); ++degree)
+    quotient_numerator[degree] -= taylor.front() * exact.denominator[degree];
+  if (quotient_numerator.empty() || !quotient_numerator.front().is_zero())
+    throw std::logic_error(
+        context + ": initial exact Taylor remainder did not factor by t");
+  quotient_numerator.erase(quotient_numerator.begin());
+  trim_exact_t_polynomial(quotient_numerator);
+
+  std::vector<Magnitude> result;
+  result.reserve(
+      static_cast<std::size_t>(maximum_retained_complete_max) + 1);
+  for (std::uint32_t retained = 0;
+       retained <= maximum_retained_complete_max; ++retained) {
+    if (exact_t_polynomial_zero(quotient_numerator)) {
+      result.push_back(Magnitude::zero());
+    } else {
+      const auto numerator = evaluate_exact_t_polynomial_interval(
+          quotient_numerator, interval);
+      result.push_back(Magnitude::upper_abs(numerator / denominator));
+    }
+    if (retained == maximum_retained_complete_max) break;
+
+    quotient_numerator.resize(
+        std::max(quotient_numerator.size(), exact.denominator.size()),
+        Rational(0));
+    const auto next_coefficient = taylor[retained + 1];
+    for (std::size_t degree = 0; degree < exact.denominator.size(); ++degree)
+      quotient_numerator[degree] -=
+          next_coefficient * exact.denominator[degree];
+    if (quotient_numerator.empty() || !quotient_numerator.front().is_zero())
+      throw std::logic_error(
+          context + ": recurrent exact Taylor remainder did not factor by t");
+    quotient_numerator.erase(quotient_numerator.begin());
+    trim_exact_t_polynomial(quotient_numerator);
+  }
+  return result;
+}
+
 inline Magnitude normalized_backward_adjoint_c_real_interval_upper(
     const NormalizedBackwardAdjointExactODE& normalized,
     const ComplexBall& interval,
@@ -1304,38 +1360,45 @@ inline Magnitude normalized_backward_adjoint_defect_quotient_real_interval_upper
     }
   }
 
+  std::vector<Magnitude> prefix_uppers(order, Magnitude::zero());
   for (std::uint32_t prefix_order = 1; prefix_order <= order;
-       ++prefix_order) {
-    const auto prefix_upper = vector_infinity_upper_through(
-        solution.coefficients[prefix_order - 1],
-        epsilon_complete_max);
-    if (prefix_upper.is_zero()) continue;
-    auto operator_quotient_upper = Magnitude::zero();
-    for (std::size_t transpose_row = 0;
-         transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
-      auto row_upper = Magnitude::zero();
-      for (std::size_t physical_row = 0;
-           physical_row < normalized.c_by_entry.size(); ++physical_row) {
-        const auto& by_epsilon =
-            normalized.c_by_entry[physical_row][transpose_row];
-        for (std::int32_t epsilon = 0;
-             epsilon <= epsilon_complete_max; ++epsilon) {
-          const auto quotient = exact_t_rational_taylor_remainder_quotient(
-              by_epsilon[static_cast<std::size_t>(epsilon)],
-              order - prefix_order,
-              context + ": C quotient prefix " +
-                  std::to_string(prefix_order) + ": epsilon " +
-                  std::to_string(epsilon));
-          row_upper += exact_t_rational_real_interval_upper(
-              quotient, interval,
-              context + ": C quotient interval");
-        }
+       ++prefix_order)
+    prefix_uppers[prefix_order - 1] = vector_infinity_upper_through(
+        solution.coefficients[prefix_order - 1], epsilon_complete_max);
+
+  std::vector<Magnitude> operator_quotient_uppers(
+      order, Magnitude::zero());
+  for (std::size_t transpose_row = 0;
+       transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
+    std::vector<Magnitude> row_uppers(order, Magnitude::zero());
+    for (std::size_t physical_row = 0;
+         physical_row < normalized.c_by_entry.size(); ++physical_row) {
+      const auto& by_epsilon =
+          normalized.c_by_entry[physical_row][transpose_row];
+      for (std::int32_t epsilon = 0;
+           epsilon <= epsilon_complete_max; ++epsilon) {
+        if (order == 0) continue;
+        const auto quotient_uppers =
+            exact_t_rational_all_taylor_remainder_quotient_real_interval_uppers(
+                by_epsilon[static_cast<std::size_t>(epsilon)], order - 1,
+                interval,
+                context + ": C quotient transpose row " +
+                    std::to_string(transpose_row) + ": physical row " +
+                    std::to_string(physical_row) + ": epsilon " +
+                    std::to_string(epsilon));
+        for (std::uint32_t prefix_order = 1; prefix_order <= order;
+             ++prefix_order)
+          row_uppers[prefix_order - 1] +=
+              quotient_uppers[order - prefix_order];
       }
-      operator_quotient_upper = Magnitude::maximum(
-          operator_quotient_upper, row_upper);
     }
-    defect += prefix_upper * operator_quotient_upper;
+    for (std::size_t prefix = 0; prefix < order; ++prefix)
+      operator_quotient_uppers[prefix] = Magnitude::maximum(
+          operator_quotient_uppers[prefix], row_uppers[prefix]);
   }
+  for (std::size_t prefix = 0; prefix < order; ++prefix)
+    if (!prefix_uppers[prefix].is_zero())
+      defect += prefix_uppers[prefix] * operator_quotient_uppers[prefix];
   return defect;
 }
 

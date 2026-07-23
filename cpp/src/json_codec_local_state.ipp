@@ -45,6 +45,44 @@ bool value_handoff_accurate(const ComplexBall& value,
   return accurate;
 }
 
+// A value hop can retain more epsilon coefficients than downstream
+// observables are allowed to consume.  Ordinary physical evolution is
+// prefix-causal (negative epsilon valuations are rejected), so private
+// matching-clearance rows above required_complete_max cannot flow back into
+// the certified public prefix.  Apply the numerical accuracy contract only
+// to that consumable prefix while retaining every higher ball unchanged.
+std::optional<std::string> value_handoff_accuracy_failure(
+    const EpsilonVector& value, std::int32_t required_complete_max,
+    const Rational& relative_error_max) {
+  if (value.dimension == 0 ||
+      value.coefficients.size() !=
+          value.epsilon.width() * value.dimension ||
+      required_complete_max < value.epsilon.min_power ||
+      required_complete_max > value.epsilon.complete_max)
+    throw std::invalid_argument(
+        "value handoff accuracy prefix is inconsistent with its epsilon vector");
+  for (std::int64_t raw_power = value.epsilon.min_power;
+       raw_power <= required_complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < value.dimension;
+         ++component) {
+      const auto& coefficient = value.at(power, component);
+      if (value_handoff_accurate(coefficient, relative_error_max)) continue;
+      return "epsilon_power=" + std::to_string(power) +
+          ";component=" + std::to_string(component) +
+          ";required_complete_max=" +
+          std::to_string(required_complete_max) +
+          ";retained_complete_max=" +
+          std::to_string(value.epsilon.complete_max) +
+          ";midpoint=(" + coefficient.real_midpoint(16) + "," +
+          coefficient.imag_midpoint(16) + ")" +
+          ";radius2exp=(" + coefficient.real_radius_exponent() + "," +
+          coefficient.imag_radius_exponent() + ")";
+    }
+  }
+  return std::nullopt;
+}
+
 bool is_retained_plan_value_handoff_schema(std::string_view schema) {
   return schema == "diffexp2-retained-plan-value-handoff-v1" ||
          schema == "diffexp2-retained-plan-value-handoff-v2";
@@ -263,6 +301,7 @@ RetainedCompositeGeometry parse_retained_composite_geometry(
   retained.chart.infinite_radius = geometry.at("infinite_radius").as_bool();
   retained.radius_exact = retained.chart.infinite_radius
       ? "Infinity" : required_string(geometry, "radius_exact");
+  retained.chart.radius_exact = retained.radius_exact;
   if (!retained.chart.infinite_radius)
     retained.chart.radius = exact_specialization(
         "radius_exact", "radius_numeric");
@@ -431,10 +470,17 @@ LocalMetadata parse_local_metadata(const json::object& metadata) {
   out.chart.center_exact = required_string(chart, "center_exact");
   out.chart.scale_exact = required_string(chart, "scale_exact");
   out.chart.infinite_radius = chart.at("infinite_radius").as_bool();
-  if (const auto* radius = chart.if_contains("radius"))
+  if (const auto* radius = chart.if_contains("radius")) {
+    if (const auto* exact = chart.if_contains("radius_exact"))
+      out.chart.radius_exact = std::string(exact->as_string());
+    else if (radius->is_string())
+      out.chart.radius_exact = std::string(radius->as_string());
     out.chart.radius = parse_scalar<ComplexBall>(*radius);
-  else if (!out.chart.infinite_radius)
+  } else if (!out.chart.infinite_radius) {
     throw std::invalid_argument("finite local chart requires a radius");
+  } else {
+    out.chart.radius_exact = "Infinity";
+  }
   if (!out.chart.infinite_radius &&
       (!local_detail::exactly_real(out.chart.radius) ||
        !arb_is_positive(acb_realref(out.chart.radius.raw()))))
@@ -701,6 +747,9 @@ class RegularPhysicalEquationOwnerBase : public PhysicalEquationOwnerBase {
   virtual slong precision_bits() const = 0;
   virtual const std::string&
   regular_value_relative_accuracy_max_exact() const = 0;
+  virtual std::shared_ptr<
+      const PreparedPhysicalClearedODE<ComplexBall>>
+  acb_physical_equation() const = 0;
 
   const std::string& equation_owner_handle() const final {
     return handle();
@@ -1532,6 +1581,7 @@ json::object checkpoint_local_analytic_metadata_record(
       {"chart", json::object{
           {"center_exact", solution.chart.center_exact},
           {"scale_exact", solution.chart.scale_exact},
+          {"radius_exact", solution.chart.radius_exact},
           {"radius_exact_ball", checkpoint_ball_record(solution.chart.radius)},
           {"infinite_radius", solution.chart.infinite_radius}}},
       {"sectors", std::move(sectors)},
@@ -1567,6 +1617,7 @@ json::object checkpoint_local_solution_record(
       {"chart", json::object{
           {"center_exact", solution.chart.center_exact},
           {"scale_exact", solution.chart.scale_exact},
+          {"radius_exact", solution.chart.radius_exact},
           {"radius_exact_ball", checkpoint_ball_record(solution.chart.radius)},
           {"infinite_radius", solution.chart.infinite_radius}}},
       {"epsilon", json::object{{"min", solution.epsilon.min_power},
@@ -1624,6 +1675,7 @@ json::object checkpoint_regular_tail_model_record(
       {"chart", json::object{
            {"center_exact", model.chart.center_exact},
            {"scale_exact", model.chart.scale_exact},
+           {"radius_exact", model.chart.radius_exact},
            {"radius_exact_ball", checkpoint_ball_record(model.chart.radius)},
            {"infinite_radius", model.chart.infinite_radius}}},
       {"prescriptions", std::move(prescriptions)},
@@ -1689,13 +1741,24 @@ RegularTaylorTailModel parse_checkpoint_regular_tail_model(
         magnitude, "checkpoint tail initial magnitude"));
   const auto& chart = as_object(
       object.at("chart"), "checkpoint tail chart");
-  require_exact_keys(
-      chart,
-      {"center_exact", "scale_exact", "radius_exact_ball",
-       "infinite_radius"},
-      "checkpoint tail chart");
+  const bool has_radius_identity =
+      chart.if_contains("radius_exact") != nullptr;
+  if (has_radius_identity)
+    require_exact_keys(
+        chart,
+        {"center_exact", "scale_exact", "radius_exact",
+         "radius_exact_ball", "infinite_radius"},
+        "checkpoint tail chart");
+  else
+    require_exact_keys(
+        chart,
+        {"center_exact", "scale_exact", "radius_exact_ball",
+         "infinite_radius"},
+        "legacy checkpoint tail chart");
   model.chart.center_exact = required_string(chart, "center_exact");
   model.chart.scale_exact = required_string(chart, "scale_exact");
+  if (has_radius_identity)
+    model.chart.radius_exact = required_string(chart, "radius_exact");
   model.chart.radius = parse_checkpoint_ball(
       chart.at("radius_exact_ball"), "checkpoint tail chart radius");
   if (!chart.at("infinite_radius").is_bool())
@@ -2483,11 +2546,17 @@ class StoredLocal final : public StoredLocalBase {
     } else {
       AcbPrecisionLease lease(precision_bits_);
       ComplexBall::set_precision(precision_bits_);
+      const bool exact_radius_available =
+          !solution_.chart.radius_exact.empty() &&
+          !chart.radius_exact.empty();
       if (solution_.chart.center_exact != chart.center_exact ||
           solution_.chart.scale_exact != chart.scale_exact ||
           solution_.chart.infinite_radius != chart.infinite_radius ||
           (!solution_.chart.infinite_radius &&
-           !acb_equal(solution_.chart.radius.raw(), chart.radius.raw())))
+           (exact_radius_available
+                ? solution_.chart.radius_exact != chart.radius_exact
+                : !acb_equal(
+                      solution_.chart.radius.raw(), chart.radius.raw()))))
         throw std::invalid_argument(
             "retained local chart geometry differs from its native tile plan");
       const auto same_prescription = [](const Prescription& left,
@@ -2634,11 +2703,17 @@ class StoredLocal final : public StoredLocalBase {
       const std::string& label) const override {
     AcbPrecisionLease lease(precision_bits_);
     ComplexBall::set_precision(precision_bits_);
+    const bool exact_radius_available =
+        !solution_.chart.radius_exact.empty() &&
+        !chart.radius_exact.empty();
     if (solution_.chart.center_exact != chart.center_exact ||
         solution_.chart.scale_exact != chart.scale_exact ||
         solution_.chart.infinite_radius != chart.infinite_radius ||
         (!solution_.chart.infinite_radius &&
-         !acb_equal(solution_.chart.radius.raw(), chart.radius.raw())))
+         (exact_radius_available
+              ? solution_.chart.radius_exact != chart.radius_exact
+              : !acb_equal(
+                    solution_.chart.radius.raw(), chart.radius.raw()))))
       throw std::invalid_argument(
           label +
           " retained local geometry differs from its exact tile-plan chart");
@@ -2751,6 +2826,26 @@ class StoredLocal final : public StoredLocalBase {
 
   json::object stats_json() const override {
     auto out = summary();
+    if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+      if (physical_equation_ != nullptr) {
+        const auto physical_tail =
+            prepare_physical_regular_homogeneous_tail_model(
+                *physical_equation_, solution_);
+        out["physical_tail_majorant"] = json::object{
+            {"capability",
+             "transient-physical-regular-taylor-tail-v1"},
+            {"status",
+             tail_majorant_status_name(physical_tail.status)},
+            {"attached", physical_tail.model.has_value()},
+            {"detail", physical_tail.detail}};
+      } else {
+        out["physical_tail_majorant"] = json::object{
+            {"capability",
+             "transient-physical-regular-taylor-tail-v1"},
+            {"status", "unsupported"}, {"attached", false},
+            {"detail", "retained local has no physical q/C equation"}};
+      }
+    }
     const auto current = stats();
     out["evaluations"] = current.evaluations;
     out["residual_certifications"] = current.residual_certifications;
@@ -3260,6 +3355,7 @@ class StoredLocal final : public StoredLocalBase {
         {"chart", json::object{
             {"center_exact", solution_.chart.center_exact},
             {"scale_exact", solution_.chart.scale_exact},
+            {"radius_exact", solution_.chart.radius_exact},
             {"infinite_radius", solution_.chart.infinite_radius},
             {"radius_ball", encode_scalar(solution_.chart.radius, 30)}}},
         {"tag", json::object{{"a", encode_exact_descriptor(sector.a)},

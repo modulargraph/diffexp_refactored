@@ -265,9 +265,11 @@ void test_finite_epsilon_physical_tail_model() {
   equation.exact_payload_record = "physical-record:coupled-exp";
 
   diffexp2::EpsilonVector initial;
-  initial.epsilon = {0, 1};
+  initial.epsilon = {0, 2};
   initial.dimension = 1;
-  initial.coefficients = {ComplexBall(1), ComplexBall(0)};
+  initial.coefficients = {
+      ComplexBall(1), ComplexBall(0),
+      ComplexBall::from_strings("1e100")};
   const auto evolution = diffexp2::evolve_ordinary_center_value(
       equation, initial, 4);
   LocalSolution<ComplexBall> solution;
@@ -284,7 +286,7 @@ void test_finite_epsilon_physical_tail_model() {
   sector.log_power = 0;
   sector.coefficients.assign(solution.sector_size(), ComplexBall(0));
   for (std::uint32_t taylor = 0; taylor <= 4; ++taylor)
-    for (std::int32_t power = 0; power <= 1; ++power)
+    for (std::int32_t power = 0; power <= 2; ++power)
       sector.coefficients[diffexp2::local_detail::sector_index(
           solution, static_cast<std::size_t>(power), taylor, 0)] =
           evolution.at(taylor).at(power, 0);
@@ -307,6 +309,22 @@ void test_finite_epsilon_physical_tail_model() {
         evaluated.tail.status == TailMajorantStatus::Certified &&
         evaluated.evaluation.value.error.guarantee ==
             ErrorGuarantee::Certified);
+  const auto midpoint_witness =
+      diffexp2::evaluate_physical_local_solution_with_certified_tail(
+          *built.model, RealEvaluationPoint::rational("1/2"), "5/4");
+  const auto outward_witness =
+      diffexp2::evaluate_physical_local_solution_with_certified_tail(
+          *built.model, RealEvaluationPoint::rational("1/2"),
+          "262141/131072");
+  check("outward certified witness can satisfy a contract that the midpoint misses",
+        midpoint_witness.tail.status ==
+                TailMajorantStatus::Certified &&
+            outward_witness.tail.status ==
+                TailMajorantStatus::Certified &&
+            2.0 * outward_witness.tail.value.absolute.at(0)
+                      .approximate_upper() <
+                midpoint_witness.tail.value.absolute.at(0)
+                    .approximate_upper());
   const auto exact0 = exponential("1/2");
   const auto exact1 = ComplexBall::from_strings("1/2") * exact0;
   const auto remainder0 = exact0 - evaluated.evaluation.value.at(0, 0);
@@ -316,13 +334,77 @@ void test_finite_epsilon_physical_tail_model() {
                 evaluated.evaluation.value.error.absolute.at(0) &&
             Magnitude::upper_abs(remainder1) <=
                 evaluated.evaluation.value.error.absolute.at(1));
+  check("private high epsilon data cannot inflate a causal low-prefix tail",
+        evaluated.evaluation.value.error.absolute.at(0)
+                    .approximate_upper() < 1.0 &&
+            evaluated.evaluation.value.error.absolute.at(2)
+                    .approximate_upper() > 1e50);
+
+  const auto extended =
+      diffexp2::prepare_physical_regular_homogeneous_tail_model(
+          equation, solution, 29);
+  check("physical handoff can reconstruct a private Taylor certification prefix",
+        extended.status == TailMajorantStatus::Certified &&
+            extended.model.has_value() &&
+            extended.model->taylor_complete_max == 29 &&
+            extended.model->reconstructed.taylor_complete_max == 29 &&
+            solution.taylor_complete_max == 4);
+  if (extended.model.has_value()) {
+    const auto extended_evaluated =
+        diffexp2::evaluate_physical_local_solution_with_certified_tail(
+            *extended.model, RealEvaluationPoint::rational("1/2"), "1");
+    check("private certification order tightens the public tail without mutating retained order",
+          extended_evaluated.tail.status ==
+                  TailMajorantStatus::Certified &&
+              extended_evaluated.evaluation.value.error.absolute.at(0)
+                      .approximate_upper() <
+                  evaluated.evaluation.value.error.absolute.at(0)
+                      .approximate_upper() &&
+              extended_evaluated.evaluation.value.error.absolute.at(0)
+                      .approximate_upper() <
+                  1e-6);
+  }
+
+  auto independently_rounded = solution;
+  const auto independently_rounded_coefficient =
+      diffexp2::local_detail::sector_index(
+          independently_rounded, 0, 3, 0);
+  const auto& recurrence_ball = evolution.at(3).at(0, 0);
+  auto overlapping_non_enclosure = recurrence_ball;
+  mag_set_ui_2exp_si(
+      arb_radref(acb_realref(overlapping_non_enclosure.raw())), 1, -200);
+  arf_t shift;
+  arf_init(shift);
+  arf_set_ui_2exp_si(shift, 1, -200);
+  arf_add(arb_midref(acb_realref(overlapping_non_enclosure.raw())),
+          arb_midref(acb_realref(overlapping_non_enclosure.raw())),
+          shift, ARF_PREC_EXACT, ARF_RND_NEAR);
+  arf_clear(shift);
+  check("fixture constructs an overlapping non-enclosing Arb replay",
+        acb_overlaps(overlapping_non_enclosure.raw(),
+                     recurrence_ball.raw()) &&
+            !acb_contains(overlapping_non_enclosure.raw(),
+                          recurrence_ball.raw()));
+  independently_rounded.sectors.front().coefficients[
+      independently_rounded_coefficient] =
+      std::move(overlapping_non_enclosure);
+  const auto independently_rounded_model =
+      diffexp2::prepare_physical_regular_homogeneous_tail_model(
+          equation, independently_rounded);
+  check("physical replay accepts overlapping independent rounding",
+        independently_rounded_model.status ==
+                TailMajorantStatus::Certified &&
+            independently_rounded_model.model.has_value());
 
   auto corrupted = solution;
-  corrupted.sectors.front().coefficients.back() += ComplexBall(1);
+  corrupted.sectors.front().coefficients[
+      diffexp2::local_detail::sector_index(
+          corrupted, 0, corrupted.taylor_complete_max, 0)] +=
+      ComplexBall(1);
   const auto corrupted_model =
       diffexp2::prepare_physical_regular_homogeneous_tail_model(
-          equation, corrupted);
-  check("physical tail proof rejects an unrelated retained Taylor tensor",
+          equation, corrupted, 29);
+  check("extended physical tail proof still rejects an unrelated retained Taylor tensor",
         corrupted_model.status == TailMajorantStatus::Inconclusive &&
             !corrupted_model.model.has_value());
 }

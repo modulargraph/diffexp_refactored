@@ -68,6 +68,13 @@ class RegularPhysicalEquationOwner final
   const std::string& geometry_record() const override {
     return geometry_record_;
   }
+  std::shared_ptr<const PreparedPhysicalClearedODE<ComplexBall>>
+  acb_physical_equation() const override {
+    if constexpr (std::is_same_v<Scalar, ComplexBall>)
+      return equation_;
+    else
+      return {};
+  }
   std::uint32_t dimension() const override { return equation_->dimension; }
   slong precision_bits() const override { return precision_bits_; }
   const std::string& regular_value_relative_accuracy_max_exact()

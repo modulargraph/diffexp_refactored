@@ -18,7 +18,7 @@ repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 
 target_level=${BANANA4_BOUNDARY_TARGET_LEVEL:-2}
-if [[ "$target_level" == final ]]; then
+if [[ "$target_level" == final || "$target_level" == 1 ]]; then
   max_seconds=${BANANA4_BOUNDARY_MAX_SECONDS:-2400}
   matching_digits=${BANANA4_BOUNDARY_MATCH_DIGITS:-15}
 else
@@ -52,9 +52,10 @@ if (( adjoint_order < expansion_order )); then
   echo "BANANA4_BOUNDARY_ADJOINT_ORDER must be an integer at least as large as the expansion order" >&2
   exit 2
 fi
-if [[ "$target_level" != 2 && "$target_level" != 3 &&
+if [[ "$target_level" != 1 && "$target_level" != 2 &&
+      "$target_level" != 3 &&
       "$target_level" != final ]]; then
-  echo "BANANA4_BOUNDARY_TARGET_LEVEL must be 2, 3, or final" >&2
+  echo "BANANA4_BOUNDARY_TARGET_LEVEL must be 1, 2, 3, or final" >&2
   exit 2
 fi
 
@@ -90,7 +91,15 @@ if [[ -z "$library" || ! -f "$library" ]]; then
 fi
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/diffexp2-banana4-boundary.XXXXXX")
-trap 'rm -rf "$scratch"' EXIT
+preserved_log=${BANANA4_BOUNDARY_LOG_PATH:-}
+cleanup() {
+  if [[ -n "$preserved_log" &&
+        -f "$scratch/banana4-boundary.log" ]]; then
+    cp "$scratch/banana4-boundary.log" "$preserved_log"
+  fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
 
 common_environment=(
   env
@@ -98,6 +107,7 @@ common_environment=(
   "DE2_RECURRENCE_BACKEND=Cpp"
   "DE2_CPP_THREADS=$cpp_threads"
   "DE2_VALUE_TRANSPORT=1"
+  "DE2_NATIVE_STAGE_TIMING=1"
   "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT=authoritative"
   "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_TAYLOR_ORDER=$adjoint_order"
   "FT_CPP_BATCH_ENDPOINT_ARMS=1"
@@ -109,7 +119,10 @@ common_environment=(
   "FT_EXPANSION_ORDER=$expansion_order"
   "FT_EPS_ORDER=4"
   "FT_BOUNDARY_EXTRA_ORDER=4"
-  "FT_LEVEL_EPS_HALOS=20,14,8,0"
+  # Public output halos are zero.  The larger values below are private
+  # matching reservoirs and must not be counted a second time in the public
+  # epsilon request.
+  "FT_LEVEL_EPS_HALOS=0,0,0,0"
   "FT_DIVISION_ORDER=3"
   "FT_REBUILD_PREP=0"
   "FT_ALLOW_STALE_LADDER_CHECKPOINT=0"
@@ -266,6 +279,63 @@ for forbidden in (
 ):
     if any(forbidden in line for line in lines):
         raise SystemExit(f"forbidden failure marker in banana4 boundary log: {forbidden}")
+
+# Crossing level 3 is the regression that exposed locally successful Acb
+# columns losing their exact right-frame correlation only at the downstream
+# singular match.  The producer certificate must therefore select and retain
+# the Rational shadow before any speculative Acb column solve.
+if target_level <= 2:
+    require(
+        "capability=producer-certified-proactive-rational-shadow-v1",
+        "proactive exact Rational-shadow singular basis",
+    )
+
+# Physical value transport is deliberately ineligible at a singular chart,
+# where a basis crossing remains necessary.  An ordinary basis solve can lose
+# the private epsilon reservoir needed by a later regular value hop and
+# previously turned one tail miss into a long fallback cascade.  It is
+# harmless at the last ordinary chart directly before a singular receiver:
+# that receiver necessarily starts a fresh basis crossing, with no intervening
+# value hop consuming the old frame.  Reject every other regular fallback.
+import re
+
+basis_start = re.compile(
+    r"DE2 NATIVE STAGE stream-basis-start arm=(\S+) index=(\d+)"
+)
+basis_done = re.compile(
+    r"DE2 NATIVE STAGE stream-basis-done arm=(\S+) index=(\d+).* regular=(True|False)"
+)
+pending_basis = {}
+basis_completions = []
+for line in lines:
+    start_match = basis_start.search(line)
+    if start_match:
+        key = start_match.groups()
+        pending_basis[key] = pending_basis.get(key, 0) + 1
+        continue
+    done_match = basis_done.search(line)
+    if not done_match:
+        continue
+    arm, index, regular = done_match.groups()
+    key = (arm, index)
+    if pending_basis.get(key, 0) < 1:
+        raise SystemExit(
+            f"basis completion has no matching start: arm={arm} index={index}"
+        )
+    pending_basis[key] -= 1
+    basis_completions.append((arm, index, regular))
+if any(count for count in pending_basis.values()):
+    raise SystemExit("banana4 log ended with an unfinished basis fallback")
+
+completion_set = set(basis_completions)
+for arm, index, regular in basis_completions:
+    if regular == "True" and (
+        arm, str(int(index) + 1), "False"
+    ) not in completion_set:
+        raise SystemExit(
+            "ordinary banana4 chart used basis fallback: "
+            f"arm={arm} index={index}"
+        )
 
 # A noncenter-ending terminal tile and a row whose forcing reaches t^0 are
 # currently handled by the established production contraction.  The latter

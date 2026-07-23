@@ -1321,6 +1321,51 @@ void complete_window_insufficient_digits_smoke() {
   ComplexBall::set_precision(256);
 }
 
+void propagated_enclosure_clearance_smoke() {
+  const auto run = [](std::size_t precision, std::size_t width) {
+    ComplexBall::set_precision(precision);
+    const FiniteLaurentMatrix<ComplexBall> basis{
+        {ball_constant_frame("1", width)}};
+    const FiniteLaurentVector<ComplexBall> weights{
+        ball_constant_frame("1", width)};
+    std::vector<ComplexBall> incoming_coefficients(
+        width, ComplexBall(0));
+    incoming_coefficients.front() = real_ball_with_error(1, -20);
+    const FiniteLaurentVector<ComplexBall> incoming{
+        EpsilonFrame<ComplexBall>(
+            0, std::move(incoming_coefficients))};
+    AcbLaurentRefinementOptions options;
+    options.relative_tolerance = Magnitude::decimal("1e-12");
+    options.required_min_power = 0;
+    options.required_complete_max = 0;
+    options.max_refinement_steps = 0;
+    const auto full =
+        diffexp2::matching_detail::evaluate_acb_matching_residual(
+            basis, weights, incoming, options,
+            "propagated enclosure full-ball residual");
+    const auto midpoint =
+        diffexp2::matching_detail::evaluate_acb_matching_midpoint_probe(
+            basis, weights, incoming, options,
+            "propagated enclosure attribution");
+    return std::pair{full.diagnostics, midpoint.diagnostics};
+  };
+
+  const auto narrow = run(256, 25);
+  const auto wide = run(1024, 100);
+  check("midpoint probe attributes order- and precision-invariant clearance to propagated enclosure",
+        narrow.first.verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            wide.first.verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            narrow.second.verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            wide.second.verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            narrow.first.complete_through_required &&
+            wide.first.complete_through_required);
+  ComplexBall::set_precision(256);
+}
+
 struct NormalFramePrefixRun {
   std::vector<EpsilonFrame<ComplexBall>> physical_weights;
   diffexp2::AcbMatchingResidualDiagnostics normalized_residual;
@@ -1561,6 +1606,7 @@ int main() {
   empty_residual_window_retry_metadata_smoke();
   precomputed_physical_residual_certification_smoke();
   complete_window_insufficient_digits_smoke();
+  propagated_enclosure_clearance_smoke();
   normal_frame_prefix_monotonicity_smoke();
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();

@@ -111,9 +111,15 @@ struct PhysicalRegularTaylorTailModel {
   EpsilonWindow epsilon;
   std::uint32_t dimension = 0;
   std::uint32_t taylor_complete_max = 0;
-  Magnitude q0_inverse_norm_upper = Magnitude::zero();
-  std::vector<Magnitude> q_operator_norm_upper;
-  std::vector<Magnitude> c_operator_norm_upper;
+  // Entry k bounds the invariant causal epsilon prefix
+  // [epsilon.min_power, epsilon.min_power + k].  A single norm over the
+  // complete private reservoir can be arbitrarily larger and must not be
+  // assigned to lower public coefficients that cannot depend on it.
+  std::vector<Magnitude> q0_inverse_prefix_norm_upper;
+  std::vector<std::vector<Magnitude>>
+      q_operator_prefix_norm_upper;
+  std::vector<std::vector<Magnitude>>
+      c_operator_prefix_norm_upper;
   std::vector<Magnitude> initial_row_upper;
   ChartGeometry chart;
   std::vector<Prescription> prescriptions;
@@ -222,11 +228,15 @@ inline bool same_epsilon_window(const EpsilonWindow& left,
 
 inline bool same_chart_geometry(const ChartGeometry& left,
                                 const ChartGeometry& right) {
+  const bool exact_radius_available =
+      !left.radius_exact.empty() && !right.radius_exact.empty();
   return left.center_exact == right.center_exact &&
       left.scale_exact == right.scale_exact &&
       left.infinite_radius == right.infinite_radius &&
       (left.infinite_radius ||
-       acb_equal(left.radius.raw(), right.radius.raw()));
+       (exact_radius_available
+            ? left.radius_exact == right.radius_exact
+            : acb_equal(left.radius.raw(), right.radius.raw())));
 }
 
 inline bool same_prescriptions(const std::vector<Prescription>& left,
@@ -327,6 +337,16 @@ inline bool encloses_recurrence_value(const Rational& stored,
 inline bool encloses_recurrence_value(const ComplexBall& stored,
                                       const ComplexBall& expected) {
   return acb_contains(stored.raw(), expected.raw());
+}
+
+inline bool overlaps_recurrence_value(const Rational& stored,
+                                      const Rational& expected) {
+  return stored == expected;
+}
+
+inline bool overlaps_recurrence_value(const ComplexBall& stored,
+                                      const ComplexBall& expected) {
+  return acb_overlaps(stored.raw(), expected.raw());
 }
 
 inline bool divisor_contains_zero(const Rational& value) {
@@ -550,11 +570,42 @@ inline Magnitude finite_matrix_infinity_norm_upper(
   return maximum;
 }
 
+inline std::vector<Magnitude> finite_causal_matrix_prefix_norm_upper(
+    const std::vector<ComplexBall>& matrix, std::size_t width) {
+  if (width == 0 ||
+      width > std::numeric_limits<std::size_t>::max() / width ||
+      matrix.size() != width * width)
+    throw std::invalid_argument(
+        "finite causal prefix norm received an invalid square matrix");
+  std::vector<Magnitude> prefix;
+  prefix.reserve(width);
+  auto maximum = Magnitude::zero();
+  for (std::size_t row = 0; row < width; ++row) {
+    auto sum = Magnitude::zero();
+    // Causality makes the finite epsilon matrix lower triangular.  Summing
+    // only through the current row therefore gives the exact induced norm of
+    // the invariant prefix, without allowing later private rows to enter it.
+    for (std::size_t column = 0; column <= row; ++column)
+      sum += Magnitude::upper_abs(matrix[row * width + column]);
+    maximum = Magnitude::maximum(maximum, sum);
+    prefix.push_back(maximum);
+  }
+  return prefix;
+}
+
 inline Magnitude finite_causal_multiplier_norm_upper(
     const physical_ode_detail::PreparedCausalEpsilonMultiplier& multiplier,
     EpsilonWindow epsilon) {
   const auto matrix = finite_causal_multiplier_matrix(multiplier, epsilon);
   return finite_matrix_infinity_norm_upper(matrix, epsilon.width());
+}
+
+inline std::vector<Magnitude> finite_causal_multiplier_prefix_norm_upper(
+    const physical_ode_detail::PreparedCausalEpsilonMultiplier& multiplier,
+    EpsilonWindow epsilon) {
+  const auto matrix = finite_causal_multiplier_matrix(multiplier, epsilon);
+  return finite_causal_matrix_prefix_norm_upper(
+      matrix, epsilon.width());
 }
 
 inline Magnitude finite_causal_unit_inverse_norm_upper(
@@ -574,6 +625,26 @@ inline Magnitude finite_causal_unit_inverse_norm_upper(
       inverse[row * width + column] = solved.coefficients[row];
   }
   return finite_matrix_infinity_norm_upper(inverse, width);
+}
+
+inline std::vector<Magnitude>
+finite_causal_unit_inverse_prefix_norm_upper(
+    const physical_ode_detail::PreparedCausalEpsilonMultiplier& q0,
+    EpsilonWindow epsilon) {
+  const auto width = epsilon.width();
+  if (width > std::numeric_limits<std::size_t>::max() / width)
+    throw std::overflow_error(
+        "finite causal inverse prefix matrix size overflows");
+  std::vector<ComplexBall> inverse(width * width, ComplexBall(0));
+  for (std::size_t column = 0; column < width; ++column) {
+    auto rhs = physical_ode_detail::zero_epsilon_vector(epsilon, 1);
+    rhs.coefficients[column] = ComplexBall(1);
+    const auto solved =
+        physical_ode_detail::solve_formal_unit_q0(q0, rhs, 1);
+    for (std::size_t row = 0; row < width; ++row)
+      inverse[row * width + column] = solved.coefficients[row];
+  }
+  return finite_causal_matrix_prefix_norm_upper(inverse, width);
 }
 
 inline Magnitude finite_physical_c_lag_norm_upper(
@@ -599,6 +670,39 @@ inline Magnitude finite_physical_c_lag_norm_upper(
   for (const auto& sum : row_sums)
     maximum = Magnitude::maximum(maximum, sum);
   return maximum;
+}
+
+inline std::vector<Magnitude> finite_physical_c_lag_prefix_norm_upper(
+    const std::vector<PhysicalODEMatrixEntry<ComplexBall>>& entries,
+    EpsilonWindow epsilon, std::uint32_t dimension) {
+  const auto width = epsilon.width();
+  std::vector<Magnitude> row_sums(
+      width * static_cast<std::size_t>(dimension), Magnitude::zero());
+  for (const auto& entry : entries) {
+    const auto multiplier =
+        physical_ode_detail::prepare_causal_multiplier(entry.value);
+    const auto matrix = finite_causal_multiplier_matrix(
+        multiplier, epsilon);
+    for (std::size_t target_epsilon = 0;
+         target_epsilon < width; ++target_epsilon)
+      for (std::size_t source_epsilon = 0;
+           source_epsilon <= target_epsilon; ++source_epsilon)
+        row_sums[target_epsilon * dimension + entry.row] +=
+            Magnitude::upper_abs(
+                matrix[target_epsilon * width + source_epsilon]);
+  }
+  std::vector<Magnitude> prefix;
+  prefix.reserve(width);
+  auto maximum = Magnitude::zero();
+  for (std::size_t target_epsilon = 0;
+       target_epsilon < width; ++target_epsilon) {
+    for (std::uint32_t row = 0; row < dimension; ++row)
+      maximum = Magnitude::maximum(
+          maximum,
+          row_sums[target_epsilon * dimension + row]);
+    prefix.push_back(maximum);
+  }
+  return prefix;
 }
 
 }  // namespace tail_majorant_detail
@@ -872,7 +976,9 @@ RegularTaylorTailModelResult prepare_regular_homogeneous_tail_model(
 inline PhysicalRegularTaylorTailModelResult
 prepare_physical_regular_homogeneous_tail_model(
     const PreparedPhysicalClearedODE<ComplexBall>& equation,
-    const LocalSolution<ComplexBall>& solution) {
+    const LocalSolution<ComplexBall>& solution,
+    std::optional<std::uint32_t> reconstruction_complete_max =
+        std::nullopt) {
   using namespace tail_majorant_detail;
   const auto unsupported = [](std::string detail) {
     return PhysicalRegularTaylorTailModelResult{
@@ -902,6 +1008,12 @@ prepare_physical_regular_homogeneous_tail_model(
   if (!equation.c_lags.front().empty())
     return unsupported(
         "physical regular tail model requires a structurally ordinary center C(0)=0");
+  const auto reconstructed_complete_max =
+      reconstruction_complete_max.value_or(
+          solution.taylor_complete_max);
+  if (reconstructed_complete_max < solution.taylor_complete_max)
+    throw std::invalid_argument(
+        "physical tail reconstruction cannot discard retained Taylor coefficients");
 
   EpsilonVector initial;
   initial.epsilon = solution.epsilon;
@@ -921,7 +1033,7 @@ prepare_physical_regular_homogeneous_tail_model(
               solution, epsilon_index, 0, component)];
   }
   const auto evolution = evolve_ordinary_center_value(
-      equation, initial, solution.taylor_complete_max);
+      equation, initial, reconstructed_complete_max);
   if (!evolution.eligible)
     return unsupported(
         "physical regular Taylor reconstruction is ineligible: " +
@@ -930,15 +1042,19 @@ prepare_physical_regular_homogeneous_tail_model(
   PhysicalRegularTaylorTailModel model;
   model.epsilon = solution.epsilon;
   model.dimension = solution.dimension;
-  model.taylor_complete_max = solution.taylor_complete_max;
+  model.taylor_complete_max = reconstructed_complete_max;
   model.chart = solution.chart;
   model.prescriptions = solution.prescriptions;
   model.physical_payload_identity = equation.payload_identity;
   model.local_checkpoint_identity = solution.checkpoint_identity;
   model.reconstructed = solution;
+  model.reconstructed.taylor_complete_max =
+      reconstructed_complete_max;
   auto& reconstructed_sector = model.reconstructed.sectors.front();
+  reconstructed_sector.coefficients.assign(
+      model.reconstructed.sector_size(), ComplexBall(0));
   for (std::uint32_t taylor = 0;
-       taylor <= solution.taylor_complete_max; ++taylor)
+       taylor <= reconstructed_complete_max; ++taylor)
     for (std::int64_t raw_power = solution.epsilon.min_power;
          raw_power <= solution.epsilon.complete_max; ++raw_power) {
       const auto power = static_cast<std::int32_t>(raw_power);
@@ -947,24 +1063,37 @@ prepare_physical_regular_homogeneous_tail_model(
       for (std::uint32_t component = 0;
            component < solution.dimension; ++component) {
         const auto coefficient = local_detail::sector_index(
-            solution, epsilon_index, taylor, component);
+            model.reconstructed, epsilon_index, taylor, component);
         const auto& expected = evolution.at(taylor).at(power, component);
-        if (!encloses_recurrence_value(
-                source_sector.coefficients[coefficient], expected))
-          return inconclusive(
-              "retained Taylor tensor does not forward-enclose its physical "
-              "q/C recurrence through the claimed complete order "
-              "(n=" + std::to_string(taylor) + ", component=" +
-              std::to_string(component) + ", epsilon_index=" +
-              std::to_string(epsilon_index) + ")");
+        // The retained recurrence and this physical q/C replay are two
+        // independently rounded rigorous evaluations of the same exact
+        // coefficient.  Neither Arb ball is required to contain the other.
+        // A nonempty intersection is the fail-closed consistency condition;
+        // the freshly reconstructed ball remains the authoritative enclosure.
+        if (taylor <= solution.taylor_complete_max) {
+          const auto retained_coefficient =
+              local_detail::sector_index(
+                  solution, epsilon_index, taylor, component);
+          if (!overlaps_recurrence_value(
+                  source_sector.coefficients[retained_coefficient],
+                  expected))
+            return inconclusive(
+                "retained Taylor tensor does not overlap its physical "
+                "q/C recurrence through the claimed complete order "
+                "(n=" + std::to_string(taylor) + ", component=" +
+                std::to_string(component) + ", epsilon_index=" +
+                std::to_string(epsilon_index) + ")");
+        }
         reconstructed_sector.coefficients[coefficient] = expected;
       }
     }
 
-  model.q_operator_norm_upper.reserve(equation.q_lags.size());
+  model.q_operator_prefix_norm_upper.reserve(equation.q_lags.size());
   for (const auto& coefficient : equation.q_lags) {
     if (coefficient.zero) {
-      model.q_operator_norm_upper.push_back(Magnitude::zero());
+      model.q_operator_prefix_norm_upper.push_back(
+          std::vector<Magnitude>(
+              solution.epsilon.width(), Magnitude::zero()));
       continue;
     }
     if (coefficient.valuation < 0)
@@ -972,18 +1101,20 @@ prepare_physical_regular_homogeneous_tail_model(
           "physical tail model requires causal nonnegative q epsilon valuations");
     const auto multiplier =
         physical_ode_detail::prepare_causal_multiplier(coefficient);
-    model.q_operator_norm_upper.push_back(
-        finite_causal_multiplier_norm_upper(multiplier, solution.epsilon));
+    model.q_operator_prefix_norm_upper.push_back(
+        finite_causal_multiplier_prefix_norm_upper(
+            multiplier, solution.epsilon));
   }
   const auto q0 = physical_ode_detail::prepare_causal_multiplier(
       equation.q_lags.front());
   if (q0.valuation != 0)
     return unsupported(
         "physical tail model requires q(0,eps) to be a formal epsilon unit");
-  model.q0_inverse_norm_upper =
-      finite_causal_unit_inverse_norm_upper(q0, solution.epsilon);
+  model.q0_inverse_prefix_norm_upper =
+      finite_causal_unit_inverse_prefix_norm_upper(
+          q0, solution.epsilon);
 
-  model.c_operator_norm_upper.reserve(equation.c_lags.size());
+  model.c_operator_prefix_norm_upper.reserve(equation.c_lags.size());
   for (const auto& entries : equation.c_lags) {
     if (std::any_of(entries.begin(), entries.end(),
                     [](const auto& entry) {
@@ -991,26 +1122,33 @@ prepare_physical_regular_homogeneous_tail_model(
                     }))
       return unsupported(
           "physical tail model requires causal nonnegative C epsilon valuations");
-    model.c_operator_norm_upper.push_back(
-        finite_physical_c_lag_norm_upper(
+    model.c_operator_prefix_norm_upper.push_back(
+        finite_physical_c_lag_prefix_norm_upper(
             entries, solution.epsilon, solution.dimension));
   }
-  if (model.q_operator_norm_upper.empty() ||
-      model.c_operator_norm_upper.empty() ||
-      !model.q0_inverse_norm_upper.is_finite() ||
-      model.q0_inverse_norm_upper.is_zero() ||
-      std::any_of(model.q_operator_norm_upper.begin(),
-                  model.q_operator_norm_upper.end(),
+  const auto valid_prefix = [&](const auto& prefix) {
+    return prefix.size() == solution.epsilon.width() &&
+        std::all_of(prefix.begin(), prefix.end(),
+                    [](const Magnitude& value) {
+                      return value.is_finite();
+                    });
+  };
+  if (model.q_operator_prefix_norm_upper.empty() ||
+      model.c_operator_prefix_norm_upper.empty() ||
+      !valid_prefix(model.q0_inverse_prefix_norm_upper) ||
+      std::any_of(model.q0_inverse_prefix_norm_upper.begin(),
+                  model.q0_inverse_prefix_norm_upper.end(),
                   [](const Magnitude& value) {
-                    return !value.is_finite();
+                    return value.is_zero();
                   }) ||
-      std::any_of(model.c_operator_norm_upper.begin(),
-                  model.c_operator_norm_upper.end(),
-                  [](const Magnitude& value) {
-                    return !value.is_finite();
-                  }))
+      !std::all_of(model.q_operator_prefix_norm_upper.begin(),
+                   model.q_operator_prefix_norm_upper.end(),
+                   valid_prefix) ||
+      !std::all_of(model.c_operator_prefix_norm_upper.begin(),
+                   model.c_operator_prefix_norm_upper.end(),
+                   valid_prefix))
     return inconclusive(
-        "physical finite-epsilon operator norm is zero or nonfinite");
+        "physical finite-epsilon prefix operator norm is zero, incomplete, or nonfinite");
 
   model.initial_row_upper.assign(
       solution.epsilon.width(), Magnitude::zero());
@@ -1025,7 +1163,11 @@ prepare_physical_regular_homogeneous_tail_model(
   model.provenance =
       "transient finite-epsilon physical regular tail model; retained "
       "q(t,eps)/C(t,eps) payload reconstructed the Taylor prefix; the "
-      "epsilon stack is bounded as one augmented ordinary ODE; "
+      "epsilon stack is bounded by its nested invariant causal prefixes; "
+      "retained_taylor_complete_max=" +
+      std::to_string(solution.taylor_complete_max) +
+      "; reconstructed_taylor_complete_max=" +
+      std::to_string(reconstructed_complete_max) + "; "
       "physical_payload_identity=" + model.physical_payload_identity +
       "; local_checkpoint_identity=" +
       model.local_checkpoint_identity;
@@ -1635,57 +1777,95 @@ inline RegularTaylorDiskCertificate certify_physical_regular_taylor_disk(
     return inconclusive_disk(
         radius.str(),
         "physical witness disk is not provably strictly inside the retained chart radius");
-  if (model.q_operator_norm_upper.empty() ||
-      model.c_operator_norm_upper.empty() ||
-      model.initial_row_upper.size() != model.epsilon.width())
+  const auto width = model.epsilon.width();
+  const auto complete_prefix_family = [width](const auto& family) {
+    return !family.empty() &&
+        std::all_of(family.begin(), family.end(),
+                    [width](const auto& prefix) {
+                      return prefix.size() == width;
+                    });
+  };
+  if (!complete_prefix_family(
+          model.q_operator_prefix_norm_upper) ||
+      !complete_prefix_family(
+          model.c_operator_prefix_norm_upper) ||
+      model.q0_inverse_prefix_norm_upper.size() != width ||
+      model.initial_row_upper.size() != width)
     throw std::invalid_argument(
         "physical tail model has incomplete operator or initial bounds");
 
   const auto radius_upper = exact_rational_upper(radius);
-  auto q_remainder_upper = Magnitude::zero();
-  for (std::size_t lag = 1;
-       lag < model.q_operator_norm_upper.size(); ++lag)
-    q_remainder_upper += model.q_operator_norm_upper[lag] *
-        radius_upper.power_upper(static_cast<ulong>(lag));
-  const auto neumann_upper =
-      model.q0_inverse_norm_upper * q_remainder_upper;
-  const auto neumann_gap_lower = Magnitude::positive_difference_lower(
-      Magnitude::one(), neumann_upper);
-  if (neumann_gap_lower.is_zero())
-    return inconclusive_disk(
-        radius.str(),
-        "finite-epsilon Q(t) Neumann bound does not prove invertibility on the witness disk");
-  const auto q_inverse_norm_upper =
-      model.q0_inverse_norm_upper /
-      neumann_gap_lower;
-
-  auto numerator_upper = Magnitude::zero();
-  for (std::size_t lag = 1;
-       lag < model.c_operator_norm_upper.size(); ++lag)
-    numerator_upper += model.c_operator_norm_upper[lag] *
-        radius_upper.power_upper(static_cast<ulong>(lag - 1));
-  const auto ode_norm_upper = q_inverse_norm_upper * numerator_upper;
-  const auto gronwall =
-      (ode_norm_upper * radius_upper).exponential_upper();
-  if (!ode_norm_upper.is_finite() || !gronwall.is_finite())
-    return inconclusive_disk(
-        radius.str(),
-        "physical finite-epsilon ODE/Gronwall bound overflowed");
-
-  auto initial_global = Magnitude::zero();
-  for (const auto& initial : model.initial_row_upper)
-    initial_global = Magnitude::maximum(initial_global, initial);
   RegularTaylorDiskCertificate result;
   result.status = TailMajorantStatus::Certified;
   result.witness_radius_exact = radius.str();
-  // For the coupled model this field records the dimensionless Neumann gap,
-  // not a scalar |q| lower bound.
-  result.q_lower = neumann_gap_lower;
-  result.ode_norm_upper = ode_norm_upper;
-  result.cauchy_circle_upper.assign(
-      model.epsilon.width(), initial_global * gronwall);
+  auto minimum_neumann_gap = Magnitude::one();
+  auto maximum_ode_norm = Magnitude::zero();
+  auto initial_prefix = Magnitude::zero();
+  result.cauchy_circle_upper.reserve(width);
+  for (std::size_t epsilon_index = 0;
+       epsilon_index < width; ++epsilon_index) {
+    auto q_remainder_upper = Magnitude::zero();
+    for (std::size_t lag = 1;
+         lag < model.q_operator_prefix_norm_upper.size(); ++lag)
+      q_remainder_upper +=
+          model.q_operator_prefix_norm_upper[lag][epsilon_index] *
+          radius_upper.power_upper(static_cast<ulong>(lag));
+    const auto neumann_upper =
+        model.q0_inverse_prefix_norm_upper[epsilon_index] *
+        q_remainder_upper;
+    const auto neumann_gap_lower =
+        Magnitude::positive_difference_lower(
+            Magnitude::one(), neumann_upper);
+    if (neumann_gap_lower.is_zero())
+      return inconclusive_disk(
+          radius.str(),
+          "finite-epsilon Q(t) Neumann bound does not prove invertibility "
+          "on the causal prefix ending at epsilon power " +
+              std::to_string(
+                  static_cast<std::int64_t>(
+                      model.epsilon.min_power) +
+                  static_cast<std::int64_t>(epsilon_index)));
+    if (neumann_gap_lower <= minimum_neumann_gap)
+      minimum_neumann_gap = neumann_gap_lower;
+    const auto q_inverse_norm_upper =
+        model.q0_inverse_prefix_norm_upper[epsilon_index] /
+        neumann_gap_lower;
+
+    auto numerator_upper = Magnitude::zero();
+    for (std::size_t lag = 1;
+         lag < model.c_operator_prefix_norm_upper.size(); ++lag)
+      numerator_upper +=
+          model.c_operator_prefix_norm_upper[lag][epsilon_index] *
+          radius_upper.power_upper(
+              static_cast<ulong>(lag - 1));
+    const auto ode_norm_upper =
+        q_inverse_norm_upper * numerator_upper;
+    const auto gronwall =
+        (ode_norm_upper * radius_upper).exponential_upper();
+    if (!ode_norm_upper.is_finite() || !gronwall.is_finite())
+      return inconclusive_disk(
+          radius.str(),
+          "physical finite-epsilon ODE/Gronwall bound overflowed on the "
+          "causal prefix ending at epsilon power " +
+              std::to_string(
+                  static_cast<std::int64_t>(
+                      model.epsilon.min_power) +
+                  static_cast<std::int64_t>(epsilon_index)));
+    maximum_ode_norm =
+        Magnitude::maximum(maximum_ode_norm, ode_norm_upper);
+    initial_prefix = Magnitude::maximum(
+        initial_prefix, model.initial_row_upper[epsilon_index]);
+    result.cauchy_circle_upper.push_back(
+        initial_prefix * gronwall);
+  }
+  // These scalar fields remain conservative summaries for diagnostics and
+  // checkpoint replay.  The actual coefficient bounds above use the
+  // corresponding invariant prefix, not these extrema.
+  result.q_lower = minimum_neumann_gap;
+  result.ode_norm_upper = maximum_ode_norm;
   result.detail =
-      "finite-epsilon Q(t) is invertible by a Neumann bound and Gronwall bounds the augmented regular solution";
+      "finite-epsilon Q(t) is invertible on every invariant causal epsilon "
+      "prefix and prefixwise Gronwall bounds its regular solution";
   return result;
 }
 

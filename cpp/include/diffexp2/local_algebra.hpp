@@ -363,7 +363,10 @@ inline bool same_chart(const ChartGeometry& left,
       left.scale_exact != right.scale_exact ||
       left.infinite_radius != right.infinite_radius)
     return false;
-  return left.infinite_radius || acb_equal(left.radius.raw(), right.radius.raw());
+  if (left.infinite_radius) return true;
+  if (!left.radius_exact.empty() && !right.radius_exact.empty())
+    return left.radius_exact == right.radius_exact;
+  return acb_equal(left.radius.raw(), right.radius.raw());
 }
 
 template <typename Scalar>

@@ -358,10 +358,15 @@ void require_exact_regular_local(const LocalSolution<Rational>& solution,
 
 bool same_chart_geometry(const ChartGeometry& left,
                          const ChartGeometry& right) {
+  const bool exact_radius_available =
+      !left.radius_exact.empty() && !right.radius_exact.empty();
   return left.center_exact == right.center_exact &&
          left.scale_exact == right.scale_exact &&
          left.infinite_radius == right.infinite_radius &&
-         (left.infinite_radius || acb_equal(left.radius.raw(), right.radius.raw()));
+         (left.infinite_radius ||
+          (exact_radius_available
+               ? left.radius_exact == right.radius_exact
+               : acb_equal(left.radius.raw(), right.radius.raw())));
 }
 
 Rational physical_match_point(const ChartGeometry& chart,
@@ -4164,6 +4169,68 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
           error.epsilon_power.has_value()
           ? json::value(*error.epsilon_power)
           : json::value(nullptr);
+    }
+    if (physical_certificate.has_value() &&
+        physical_certificate->diagnostics.complete_through_required &&
+        physical_certificate->diagnostics.verdict ==
+            AcbMatchingResidualVerdict::Inconclusive) {
+      try {
+        const auto midpoint_basis =
+            matching_detail::acb_midpoint_matrix(evaluated_basis);
+        const auto midpoint_weights =
+            matching_detail::acb_midpoint_vector(*physical_weights);
+        const auto midpoint_incoming =
+            matching_detail::acb_midpoint_vector(incoming_value);
+        const auto midpoint_probe =
+            matching_detail::evaluate_acb_matching_residual(
+                midpoint_basis, midpoint_weights, midpoint_incoming,
+                physical_options,
+                checkpoint_identity +
+                    ": physical residual zero-radius midpoint probe");
+        normal_frame_attempt["physical_midpoint_residual"] =
+            encode_acb_match_residual_diagnostics(
+                midpoint_probe.diagnostics);
+        normal_frame_attempt["physical_clearance_source"] =
+            midpoint_probe.diagnostics.complete_through_required &&
+                    midpoint_probe.diagnostics.verdict ==
+                        AcbMatchingResidualVerdict::Pass
+                ? "propagated-enclosure"
+                : "candidate-midpoint-defect";
+        if (normal_frame_attempt.at("physical_clearance_source") ==
+            "propagated-enclosure") {
+          json::object source_probes;
+          const auto record_source =
+              [&](const char* source,
+                  const FiniteLaurentMatrix<ComplexBall>& probe_basis,
+                  const FiniteLaurentVector<ComplexBall>& probe_weights,
+                  const FiniteLaurentVector<ComplexBall>& probe_incoming) {
+                const auto probe =
+                    matching_detail::evaluate_acb_matching_residual(
+                        probe_basis, probe_weights, probe_incoming,
+                        physical_options,
+                        checkpoint_identity +
+                            ": physical residual " + source +
+                            " enclosure probe");
+                source_probes[source] =
+                    encode_acb_match_residual_diagnostics(
+                        probe.diagnostics);
+              };
+          record_source("basis", evaluated_basis, midpoint_weights,
+                        midpoint_incoming);
+          record_source("weights", midpoint_basis, *physical_weights,
+                        midpoint_incoming);
+          record_source("incoming", midpoint_basis, midpoint_weights,
+                        incoming_value);
+          normal_frame_attempt[
+              "physical_clearance_source_probes"] =
+              std::move(source_probes);
+        }
+      } catch (const std::exception& error) {
+        normal_frame_attempt["physical_clearance_source"] =
+            "midpoint-probe-unavailable";
+        normal_frame_attempt["physical_midpoint_detail"] =
+            error.what();
+      }
     }
     if (diagnostic_normalized_match_authority) {
       // Diagnostic experiment: keep the candidate obtained in the retained

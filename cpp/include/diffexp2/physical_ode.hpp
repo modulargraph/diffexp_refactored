@@ -232,6 +232,143 @@ std::vector<Coefficient> convolve(
   return output;
 }
 
+template <typename Scalar>
+ExactEpsilonRational<Scalar> normalized_epsilon_rational(
+    ExactEpsilonRational<Scalar> value) {
+  if (value.zero) {
+    value.numerator.clear();
+    value.denominator.clear();
+    return value;
+  }
+  while (!value.numerator.empty() &&
+         ScalarTraits<Scalar>::is_zero(value.numerator.back()))
+    value.numerator.pop_back();
+  while (!value.denominator.empty() &&
+         ScalarTraits<Scalar>::is_zero(value.denominator.back()))
+    value.denominator.pop_back();
+  std::size_t leading_zeros = 0;
+  while (leading_zeros < value.numerator.size() &&
+         ScalarTraits<Scalar>::is_zero(
+             value.numerator[leading_zeros]))
+    ++leading_zeros;
+  if (leading_zeros == value.numerator.size()) {
+    value.zero = true;
+    value.valuation = 0;
+    value.numerator.clear();
+    value.denominator.clear();
+    return value;
+  }
+  if (leading_zeros != 0) {
+    value.valuation = shifted_power(
+        value.valuation, static_cast<std::int32_t>(leading_zeros),
+        "normalized epsilon-rational valuation");
+    value.numerator.erase(
+        value.numerator.begin(),
+        value.numerator.begin() +
+            static_cast<std::ptrdiff_t>(leading_zeros));
+  }
+  if (value.denominator.empty() ||
+      ScalarTraits<Scalar>::is_zero(value.denominator.front()))
+    throw std::domain_error(
+        "epsilon-rational normalization lost its causal denominator");
+  return value;
+}
+
+template <typename Scalar>
+ExactEpsilonRational<Scalar> scale_epsilon_rational(
+    const ExactEpsilonRational<Scalar>& value,
+    const Scalar& scale) {
+  if (value.zero || ScalarTraits<Scalar>::is_zero(scale))
+    return ExactEpsilonRational<Scalar>{};
+  auto result = value;
+  for (auto& coefficient : result.numerator)
+    coefficient *= scale;
+  return normalized_epsilon_rational(std::move(result));
+}
+
+template <typename Scalar>
+ExactEpsilonRational<Scalar> add_epsilon_rational(
+    const ExactEpsilonRational<Scalar>& left,
+    const ExactEpsilonRational<Scalar>& right) {
+  if (left.zero) return right;
+  if (right.zero) return left;
+  validate_rational(left, "left epsilon-rational summand");
+  validate_rational(right, "right epsilon-rational summand");
+  const auto valuation = std::min(left.valuation, right.valuation);
+  auto left_numerator = convolve(left.numerator, right.denominator);
+  auto right_numerator = convolve(right.numerator, left.denominator);
+  const auto left_shift = static_cast<std::size_t>(
+      static_cast<std::int64_t>(left.valuation) - valuation);
+  const auto right_shift = static_cast<std::size_t>(
+      static_cast<std::int64_t>(right.valuation) - valuation);
+  std::vector<Scalar> numerator(
+      std::max(left_shift + left_numerator.size(),
+               right_shift + right_numerator.size()),
+      ScalarTraits<Scalar>::zero());
+  for (std::size_t index = 0; index < left_numerator.size(); ++index)
+    numerator[left_shift + index] += left_numerator[index];
+  for (std::size_t index = 0; index < right_numerator.size(); ++index)
+    numerator[right_shift + index] += right_numerator[index];
+  ExactEpsilonRational<Scalar> result;
+  result.zero = false;
+  result.valuation = valuation;
+  result.numerator = std::move(numerator);
+  result.denominator = convolve(left.denominator, right.denominator);
+  return normalized_epsilon_rational(std::move(result));
+}
+
+template <typename Scalar>
+Scalar scalar_from_rational(const Rational& value) {
+  if constexpr (std::is_same_v<Scalar, Rational>)
+    return value;
+  else
+    return ComplexBall::from_strings(value.str());
+}
+
+inline Rational rational_power(const Rational& base,
+                               std::size_t exponent) {
+  Rational result(1);
+  for (std::size_t index = 0; index < exponent; ++index)
+    result *= base;
+  return result;
+}
+
+inline Rational rational_binomial(std::size_t n, std::size_t k) {
+  if (k > n) return Rational(0);
+  k = std::min(k, n - k);
+  Rational result(1);
+  for (std::size_t index = 1; index <= k; ++index) {
+    result *= Rational(std::to_string(n - k + index));
+    result = result / Rational(std::to_string(index));
+  }
+  return result;
+}
+
+template <typename Scalar>
+std::vector<ExactEpsilonRational<Scalar>>
+translate_epsilon_rational_polynomial(
+    const std::vector<ExactEpsilonRational<Scalar>>& coefficients,
+    const Rational& center) {
+  std::vector<ExactEpsilonRational<Scalar>> translated(
+      coefficients.size());
+  for (std::size_t old_degree = 0;
+       old_degree < coefficients.size(); ++old_degree) {
+    if (coefficients[old_degree].zero) continue;
+    for (std::size_t new_degree = 0;
+         new_degree <= old_degree; ++new_degree) {
+      const auto weight =
+          rational_binomial(old_degree, new_degree) *
+          rational_power(center, old_degree - new_degree);
+      translated[new_degree] = add_epsilon_rational(
+          translated[new_degree],
+          scale_epsilon_rational(
+              coefficients[old_degree],
+              scalar_from_rational<Scalar>(weight)));
+    }
+  }
+  return translated;
+}
+
 // Prove that the clearing multiplier is not the zero rational function at
 // this point.  A small q must not turn an arbitrary local into a vacuous pass.
 // We form the common numerator exactly for Rational charts and with enclosure
@@ -489,6 +626,122 @@ inline EpsilonVector solve_formal_unit_q0(
 
 }  // namespace physical_ode_detail
 
+template <typename Scalar>
+struct RecenteredPhysicalClearedODEResult {
+  bool eligible = false;
+  std::string reason;
+  std::optional<PreparedPhysicalClearedODE<Scalar>> equation;
+};
+
+// Translate a regular physical equation from t=0 to the ordinary coordinate
+// s=t-center.  Regularity supplies the structural factor C(t)=t*A(t), so
+// first cancel the common t in
+//
+//   q(t,eps) theta_t f = C(t,eps) f
+//
+// and then substitute t=center+s:
+//
+//   q(center+s,eps) theta_s f = s A(center+s,eps) f.
+//
+// Cancelling before translating is essential: multiplying through by
+// center+s would introduce an artificial q zero at the receiving chart
+// center s=-center.  The translated C constant term remains structurally
+// zero and q(0)=q(center).  Exact epsilon-rational coefficients are combined
+// over common causal denominators; no finite epsilon truncation is used.
+template <typename Scalar>
+RecenteredPhysicalClearedODEResult<Scalar>
+recenter_physical_cleared_ode(
+    const PreparedPhysicalClearedODE<Scalar>& source,
+    const Rational& center) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "physical recentering supports Rational or Acb equations");
+  physical_ode_detail::validate_ode(source);
+  RecenteredPhysicalClearedODEResult<Scalar> result;
+  if (center.is_zero()) {
+    result.reason =
+        "physical overlap recentering requires a nonzero local match point";
+    return result;
+  }
+  try {
+    if (!source.c_lags.empty() &&
+        !source.c_lags.front().empty()) {
+      result.reason =
+          "physical overlap recentering requires the regular structural "
+          "factor C(t)=t*A(t)";
+      return result;
+    }
+    auto shifted_q =
+        physical_ode_detail::translate_epsilon_rational_polynomial(
+            source.q_lags, center);
+
+    using Position = std::pair<std::uint32_t, std::uint32_t>;
+    std::map<Position,
+             std::vector<ExactEpsilonRational<Scalar>>> c_polynomials;
+    for (std::size_t degree = 1;
+         degree < source.c_lags.size(); ++degree)
+      for (const auto& entry : source.c_lags[degree]) {
+        auto& polynomial =
+            c_polynomials[{entry.row, entry.column}];
+        if (polynomial.empty())
+          polynomial.resize(source.c_lags.size() - 1);
+        polynomial[degree - 1] = entry.value;
+      }
+    std::vector<std::vector<PhysicalODEMatrixEntry<Scalar>>> shifted_c(
+        source.c_lags.size());
+    for (const auto& [position, polynomial] : c_polynomials) {
+      auto translated =
+          physical_ode_detail::translate_epsilon_rational_polynomial(
+              polynomial, center);
+      for (std::size_t degree = 0;
+           degree < translated.size(); ++degree)
+        if (!translated[degree].zero)
+          shifted_c[degree + 1].push_back(
+              PhysicalODEMatrixEntry<Scalar>{
+                  position.first, position.second,
+                  std::move(translated[degree])});
+    }
+    while (shifted_q.size() > 1 && shifted_q.back().zero)
+      shifted_q.pop_back();
+    while (shifted_c.size() > 1 && shifted_c.back().empty())
+      shifted_c.pop_back();
+
+    PreparedPhysicalClearedODE<Scalar> shifted;
+    shifted.dimension = source.dimension;
+    shifted.q_lags = std::move(shifted_q);
+    shifted.c_lags = std::move(shifted_c);
+    shifted.owner_signature_identity =
+        source.owner_signature_identity +
+        ":overlap-recenter:" + center.str();
+    shifted.payload_identity =
+        source.payload_identity +
+        ":overlap-recenter:" + center.str();
+    shifted.exact_payload_record =
+        source.exact_payload_record +
+        ";overlap_recenter_local_exact=" + center.str();
+    physical_ode_detail::validate_ode(shifted);
+    const auto& q0 = shifted.q_lags.front();
+    if (q0.zero || q0.valuation != 0 ||
+        q0.numerator.empty() || q0.denominator.empty() ||
+        ScalarTraits<Scalar>::is_zero(q0.numerator.front()) ||
+        ScalarTraits<Scalar>::is_zero(q0.denominator.front())) {
+      result.reason =
+          "recentered physical q(0,eps) is not a formal epsilon unit";
+      return result;
+    }
+    result.eligible = true;
+    result.reason =
+        "physical q/C equation recentered exactly at an ordinary overlap";
+    result.equation = std::move(shifted);
+    return result;
+  } catch (const std::exception& error) {
+    result.reason =
+        std::string("physical overlap recentering is inconclusive: ") +
+        error.what();
+    return result;
+  }
+}
+
 struct OrdinaryCenterValueEvolution {
   bool eligible = false;
   std::string reason;
@@ -622,6 +875,47 @@ OrdinaryCenterValueEvolution evolve_ordinary_center_value(
   result.eligible = true;
   result.reason = "epsilon-causal ordinary-center physical evolution";
   return result;
+}
+
+inline LocalSolution<ComplexBall>
+ordinary_evolution_local_solution(
+    const OrdinaryCenterValueEvolution& evolution,
+    ChartGeometry chart, std::vector<Prescription> prescriptions,
+    std::string checkpoint_identity) {
+  if (!evolution.eligible ||
+      evolution.taylor_coefficients.size() !=
+          static_cast<std::size_t>(
+              evolution.taylor_complete_max) + 1 ||
+      checkpoint_identity.empty())
+    throw std::invalid_argument(
+        "ordinary evolution cannot form a retained local solution");
+  LocalSolution<ComplexBall> solution;
+  solution.chart = std::move(chart);
+  solution.epsilon = evolution.epsilon;
+  solution.taylor_complete_max =
+      evolution.taylor_complete_max;
+  solution.dimension = evolution.dimension;
+  solution.prescriptions = std::move(prescriptions);
+  solution.checkpoint_identity =
+      std::move(checkpoint_identity);
+  LocalSector<ComplexBall> sector;
+  sector.a = ExactScalarDescriptor::rational("0");
+  sector.b = ExactScalarDescriptor::rational("0");
+  sector.log_power = 0;
+  sector.coefficients.reserve(solution.sector_size());
+  for (std::int64_t raw_power = solution.epsilon.min_power;
+       raw_power <= solution.epsilon.complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t taylor = 0;
+         taylor <= solution.taylor_complete_max; ++taylor)
+      for (std::uint32_t component = 0;
+           component < solution.dimension; ++component)
+        sector.coefficients.push_back(
+            evolution.at(taylor).at(power, component));
+  }
+  solution.sectors.push_back(std::move(sector));
+  validate_local_solution(solution, false);
+  return solution;
 }
 
 inline ResidualCertificate certify_cleared_vector_residual(

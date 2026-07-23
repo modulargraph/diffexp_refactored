@@ -2835,6 +2835,25 @@ inline AcbResidualEvaluation evaluate_acb_matching_residual(
       std::move(contributions), options, context);
 }
 
+// Diagnose whether an inconclusive full-ball residual is caused by the
+// candidate's central values or by uncertainty already present in its
+// inputs.  This is deliberately diagnostic only: midpoint balls have no
+// publication authority.  A passing midpoint probe paired with an
+// inconclusive authoritative residual means that increasing the receiving
+// Taylor order or the arithmetic precision cannot by itself repair the
+// handoff; an upstream enclosure must be tightened instead.
+inline AcbResidualEvaluation evaluate_acb_matching_midpoint_probe(
+    const FiniteLaurentMatrix<ComplexBall>& matrix,
+    const FiniteLaurentVector<ComplexBall>& weights,
+    const FiniteLaurentVector<ComplexBall>& right_hand_side,
+    const AcbLaurentRefinementOptions& options,
+    const std::string& context) {
+  return evaluate_acb_matching_residual(
+      acb_midpoint_matrix(matrix), acb_midpoint_vector(weights),
+      acb_midpoint_vector(right_hand_side), options,
+      context + ": zero-radius midpoint probe");
+}
+
 // Certify a residual formed by an independently certified linear route.  This
 // is essential when a well-conditioned exact normal frame produces a tight
 // residual but subtracting the corresponding large physical-frame quantities

@@ -55,7 +55,17 @@ void require_exact(const ComplexBall& actual, const char* expected,
                    const char* label) {
   if (!(actual - ComplexBall::from_strings(expected)).is_zero())
     throw std::runtime_error(std::string(label) + " differs from " +
-                             expected);
+                             expected + "; actual=" +
+                             actual.real_midpoint(30));
+}
+
+void require_encloses(const ComplexBall& actual, const char* expected,
+                      const char* label) {
+  const auto exact = ComplexBall::from_strings(expected);
+  if (!acb_contains(actual.raw(), exact.raw()))
+    throw std::runtime_error(
+        std::string(label) + " does not enclose " + expected +
+        "; actual=" + actual.real_midpoint(30));
 }
 
 PreparedPhysicalClearedODE<Rational> unit_division_equation() {
@@ -166,6 +176,81 @@ int main() {
     if (!ambiguous_rejected)
       throw std::runtime_error(
           "Acb q0 constant containing zero passed physical validation");
+
+    // Recenter q theta_t f=C f at t=t0+s.  For q=1 and C=3t,
+    // regularity first cancels C=t*3 and the translated equation is
+    //   theta_s f = 3s f.
+    // Retaining a spurious (t0+s) factor would create an artificial
+    // singularity precisely at the receiving chart center.
+    auto exponential = equation_shell<Rational>(1);
+    exponential.q_lags = {rational(0, {"1"})};
+    exponential.c_lags.resize(2);
+    exponential.c_lags[1].push_back(
+        PhysicalODEMatrixEntry<Rational>{
+            0, 0, rational(0, {"3"})});
+    const auto recentered =
+        diffexp2::recenter_physical_cleared_ode(
+            exponential, Rational("1/3"));
+    if (!recentered.eligible || !recentered.equation.has_value() ||
+        recentered.equation->q_lags.size() != 1 ||
+        recentered.equation->c_lags.size() != 2 ||
+        !(recentered.equation->q_lags[0].numerator[0] ==
+          Rational("1")) ||
+        !(recentered.equation->c_lags[1][0].value.numerator[0] ==
+          Rational("3")))
+      throw std::runtime_error(
+          "physical overlap recentering changed the translated q/C polynomial");
+    const auto recentered_evolution =
+        diffexp2::evolve_ordinary_center_value(
+            *recentered.equation, vector({0, 0}, {"1"}), 4);
+    const std::vector<const char*> expected_exponential{
+        "1", "3", "9/2", "9/2", "27/8"};
+    if (!recentered_evolution.eligible)
+      throw std::runtime_error(
+          "recentered ordinary physical equation became ineligible");
+    for (std::size_t order = 0;
+         order < expected_exponential.size(); ++order)
+      require_encloses(recentered_evolution.at(
+                           static_cast<std::uint32_t>(order)).at(0, 0),
+                       expected_exponential[order],
+                       "recentered exponential coefficient");
+
+    // Translation can make epsilon-rational t-lags with distinct
+    // denominators collide.  Their exact causal common denominator must be
+    // retained rather than truncating epsilon or treating the terms
+    // independently.
+    auto denominators = equation_shell<Rational>(1);
+    denominators.q_lags = {
+        rational(0, {"1"}, {"1", "1"}),
+        rational(0, {"1"}, {"1", "-1"})};
+    denominators.c_lags.resize(1);
+    const auto recentered_denominators =
+        diffexp2::recenter_physical_cleared_ode(
+            denominators, Rational("1/2"));
+    if (!recentered_denominators.eligible ||
+        !recentered_denominators.equation.has_value()) {
+      throw std::runtime_error(
+          "physical recentering could not combine causal denominators");
+    }
+    const auto& combined_q0 =
+        recentered_denominators.equation->q_lags.front();
+    if (combined_q0.valuation != 0 ||
+        combined_q0.numerator.size() != 2 ||
+        combined_q0.denominator.size() != 3 ||
+        !(combined_q0.numerator[0] == Rational("3/2")) ||
+        !(combined_q0.numerator[1] == Rational("-1/2")) ||
+        !(combined_q0.denominator[0] == Rational("1")) ||
+        !(combined_q0.denominator[1] == Rational("0")) ||
+        !(combined_q0.denominator[2] == Rational("-1")))
+      throw std::runtime_error(
+          "physical recentering lost the exact epsilon common denominator");
+    const auto zero_recenter =
+        diffexp2::recenter_physical_cleared_ode(
+            exponential, Rational(0));
+    if (zero_recenter.eligible ||
+        zero_recenter.equation.has_value())
+      throw std::runtime_error(
+          "zero overlap point incorrectly acquired an ordinary recentering");
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

@@ -526,7 +526,9 @@ json::object restore_checkpoint(const std::string& path,
                 encode_plan_chart(receiving, match.receiving_chart),
                 owner_reference(receiving), std::move(restored_incoming),
                 exact_plan_rim(producing.prescriptions,
-                               producing.geometry.scale)};
+                               producing.geometry.scale),
+                match.producing_local, match.receiving_local,
+                receiving.prescriptions};
           }
         }
         std::shared_ptr<StoredLocalBase> local;

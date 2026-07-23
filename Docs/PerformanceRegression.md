@@ -55,12 +55,12 @@ it includes the bounded discovery retries users actually encounter.
 
 ## Four-loop banana boundary gate
 
-The four-loop banana has a separate opt-in gate for its difficult level-3
-boundary. It is a production-chain correctness regression rather than a final
-value benchmark: it stops immediately after that boundary, at the point where
+The four-loop banana has a separate opt-in gate that crosses both of its first
+two singular handoffs and stops after the level-2 boundary. It is a
+production-chain correctness regression rather than a final-value benchmark:
 manifest forwarding, exact Rational-shadow retention, singular physical-ODE
-construction, and the terminal composed-adjoint certificate have all been
-exercised together.
+construction, real-ray terminal composed-adjoint certification, and the
+near-endpoint rational-pole case are all exercised together.
 
 ```bash
 FT_FIRE_PATH=/path/to/FIRE7 \
@@ -71,10 +71,17 @@ Scripts/run_banana4_boundary_regression.sh
 Or append it to the release suite with `DE2_RUN_BANANA4_BOUNDARY=1`. The
 pinned configuration is working precision 300, matching contract 80 digits,
 Taylor order 50, public epsilon order 4, private matching halos
-`20,14,8,0`, and 10 C++ threads by default. A fresh transport checkpoint is
-mandatory. The gate requires a certified center-ending composed-adjoint tail,
+`20,14,8,0`, private composed-adjoint order 100, and 10 C++ threads by
+default. A fresh transport checkpoint is mandatory. The gate requires a
+certified center-ending composed-adjoint tail in every executed ladder level,
 rejects unsupported/retry markers, and accepts a noncenter terminal tile only
 when it is explicitly classified as outside the one-contraction theorem.
+
+For a quicker diagnostic that only produces the level-3 boundary, set
+`BANANA4_BOUNDARY_TARGET_LEVEL=3`. This is not the release default because it
+does not exercise the near-endpoint pole that previously failed at the next
+handoff. `BANANA4_BOUNDARY_ADJOINT_ORDER` may be raised for experiments but
+may not be smaller than `BANANA4_BOUNDARY_EXPANSION_ORDER`.
 
 The default ceiling is 900 seconds and can be changed with
 `BANANA4_BOUNDARY_MAX_SECONDS` when qualifying hardware. As with the other

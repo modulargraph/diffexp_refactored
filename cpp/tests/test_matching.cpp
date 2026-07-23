@@ -545,6 +545,10 @@ void acb_saturation_candidate_chop_smoke() {
   const auto& product = saturated.basis_times_transformation;
   const bool normalized =
       saturated.diagnostics.normalized_determinant_valuation == 1 &&
+      saturated.diagnostics.normalized_determinant.min_power() == 1 &&
+      saturated.diagnostics.normalized_determinant.complete_max() == 1 &&
+      (saturated.diagnostics.normalized_determinant.coefficient(1) -
+       ComplexBall(1)).contains_zero() &&
       saturated.diagnostics.initial_leading_rank == 1 &&
       saturated.diagnostics.final_leading_rank == 2 &&
       saturated.diagnostics.actions.size() == 1 &&

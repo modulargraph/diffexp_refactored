@@ -211,6 +211,10 @@ if noncenter and not all(
             "detail=row-requires-laurent-log-center-adjoint" in line
             and "forcing_power=" in line
         )
+        or (
+            "detail=q-epsilon0-is-not-center-unit" in line
+            and "q_t_valuation=" in line
+        )
     )
     for line in noncenter
 ):

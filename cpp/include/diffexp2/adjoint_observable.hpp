@@ -39,6 +39,23 @@ struct BackwardAdjointCenterAnchoringError : std::domain_error {
   std::int64_t forcing_power;
 };
 
+// The current real-ray defect theorem is formulated after exact division by
+// q.  If q(t,epsilon=0) vanishes at the chart center (or that whole epsilon
+// coefficient is absent), the unnormalized physical contraction remains
+// meaningful but this particular normalized theorem does not apply.
+struct BackwardAdjointCenterUnitError : std::domain_error {
+  explicit BackwardAdjointCenterUnitError(
+      std::optional<std::uint32_t> t_valuation_value,
+      const std::string& context)
+      : std::domain_error(
+            context + ": q(t,epsilon=0) is not a center unit"),
+        t_valuation(t_valuation_value) {}
+
+  // nullopt means q(t,epsilon=0) is identically zero in the retained exact
+  // equation; otherwise this is its positive t-adic valuation.
+  std::optional<std::uint32_t> t_valuation;
+};
+
 // Finite-epsilon Taylor problem for the backward observable equation
 //
 //             q(t,eps) theta(lambda) + C(t,eps)^T lambda = b(t,eps).
@@ -815,10 +832,16 @@ normalize_backward_adjoint_exact_ode_by_q(
   }
   for (auto& polynomial : q_by_epsilon) trim_exact_t_polynomial(polynomial);
   const ExactTRationalFunction q0{q_by_epsilon.front(), {Rational(1)}};
-  if (exact_t_polynomial_zero(q0.numerator) ||
-      q0.numerator.front().is_zero())
-    throw std::domain_error(
-        context + ": q(t,epsilon=0) is not a center unit");
+  if (exact_t_polynomial_zero(q0.numerator))
+    throw BackwardAdjointCenterUnitError(std::nullopt, context);
+  if (q0.numerator.front().is_zero()) {
+    std::size_t valuation = 0;
+    while (valuation < q0.numerator.size() &&
+           q0.numerator[valuation].is_zero())
+      ++valuation;
+    throw BackwardAdjointCenterUnitError(
+        static_cast<std::uint32_t>(valuation), context);
+  }
 
   std::vector<std::vector<std::vector<std::vector<Rational>>>>
       c_polynomials(

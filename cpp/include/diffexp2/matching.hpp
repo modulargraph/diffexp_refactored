@@ -1159,6 +1159,41 @@ certified_full_rank_plan(DenseScalarMatrix<Scalar> matrix,
       std::move(matrix), position, remaining_nodes, branch_width);
 }
 
+// Replay an already certified pivot plan and retain the determinant enclosure
+// from the same O(n^3) elimination.  This avoids expanding det(A(epsilon))
+// through every retained epsilon coefficient merely to recover its leading
+// valuation after lattice saturation.
+template <typename Scalar>
+Scalar certified_determinant_from_full_rank_plan(
+    DenseScalarMatrix<Scalar> matrix,
+    const std::vector<std::pair<std::size_t, std::size_t>>& plan,
+    const std::string& context) {
+  const auto size = rectangular_columns(
+      matrix, "certified determinant matrix");
+  if (matrix.size() != size || plan.size() != size)
+    throw MatchingArithmeticError(
+        MatchingArithmeticErrorCode::DimensionMismatch,
+        context + ": determinant plan has the wrong dimension");
+  auto determinant = ScalarTraits<Scalar>::one();
+  for (std::size_t position = 0; position < size; ++position) {
+    const CertifiedPivotCandidate pivot{
+        plan[position].first, plan[position].second};
+    if (pivot.row < position || pivot.row >= size ||
+        pivot.column < position || pivot.column >= size ||
+        zero_decision(matrix[pivot.row][pivot.column]) !=
+            ZeroDecision::Nonzero)
+      throw MatchingArithmeticError(
+          MatchingArithmeticErrorCode::AmbiguousZero,
+          context + ": determinant plan lost its certified pivot",
+          pivot.row, pivot.column, 0);
+    determinant *= matrix[pivot.row][pivot.column];
+    if (pivot.row != position) determinant = -determinant;
+    if (pivot.column != position) determinant = -determinant;
+    apply_certified_pivot(matrix, position, pivot);
+  }
+  return determinant;
+}
+
 template <typename Scalar>
 bool active_submatrix_has_ambiguous_entry(
     const DenseScalarMatrix<Scalar>& matrix, std::size_t position) {
@@ -1663,9 +1698,17 @@ saturate_rectangular_finite_laurent_basis(
           // relation only when the frame is actually deficient; requiring
           // every Schur remainder to exclude or equal zero rejects regular
           // interval matrices through harmless dependency loss.
-          bool full_rank = row_count == size &&
-              matching_detail::certified_full_rank_plan(leading, 0)
-                  .has_value();
+          std::optional<Scalar> leading_determinant;
+          if (row_count == size) {
+            const auto plan = matching_detail::certified_full_rank_plan(
+                leading, 0);
+            if (plan.has_value())
+              leading_determinant = matching_detail::
+                  certified_determinant_from_full_rank_plan(
+                      leading, *plan,
+                      relation_context + ": leading determinant");
+          }
+          bool full_rank = leading_determinant.has_value();
           if (!full_rank && row_count == size) {
             const auto preconditioner =
                 matching_detail::acb_midpoint_inverse_preconditioner(
@@ -1683,7 +1726,8 @@ saturate_rectangular_finite_laurent_basis(
             for (std::size_t row = 0; row < size; ++row)
               pivot_rows[row] = row;
             return matching_detail::LeadingNullRelation<Scalar>{
-                size, std::nullopt, std::nullopt, std::move(pivot_rows)};
+                size, std::nullopt, std::nullopt, std::move(pivot_rows),
+                std::move(leading_determinant)};
           }
         }
         return matching_detail::leading_null_relation(
@@ -1761,6 +1805,13 @@ saturate_rectangular_finite_laurent_basis(
       // rank proof.  Expanding any positive-epsilon determinant coefficient
       // is irrelevant to this certificate and can cause catastrophic
       // rational coefficient swell.
+      return EpsilonFrame<Scalar>(
+          {action_valuation, action_valuation},
+          {*relation.full_rank_leading_determinant});
+    } else if (relation.full_rank_leading_determinant.has_value()) {
+      const auto action_valuation = matching_detail::checked_power(
+          static_cast<std::int64_t>(steps),
+          "Acb saturation action determinant valuation");
       return EpsilonFrame<Scalar>(
           {action_valuation, action_valuation},
           {*relation.full_rank_leading_determinant});

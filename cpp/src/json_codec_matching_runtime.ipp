@@ -673,21 +673,36 @@ const char* acb_match_verdict_name(AcbMatchingResidualVerdict verdict) {
 json::object encode_acb_match_residual_diagnostics(
     const AcbMatchingResidualDiagnostics& diagnostics) {
   std::size_t pass = 0, fail = 0, inconclusive = 0;
+  std::size_t required_pass = 0, required_fail = 0,
+              required_inconclusive = 0;
   json::array inconclusive_examples;
+  json::array required_inconclusive_examples;
   for (const auto& coefficient : diagnostics.coefficients) {
-    if (coefficient.verdict == AcbMatchingResidualVerdict::Pass)
+    const bool required =
+        coefficient.epsilon_power <= diagnostics.required_complete_max;
+    if (coefficient.verdict == AcbMatchingResidualVerdict::Pass) {
       ++pass;
-    else if (coefficient.verdict == AcbMatchingResidualVerdict::Fail)
+      if (required) ++required_pass;
+    } else if (coefficient.verdict == AcbMatchingResidualVerdict::Fail) {
       ++fail;
-    else {
+      if (required) ++required_fail;
+    } else {
       ++inconclusive;
-      if (inconclusive_examples.size() < 6)
-        inconclusive_examples.push_back(json::object{
+      const auto example = [&]() {
+        return json::object{
             {"row", coefficient.row},
             {"epsilon_power", coefficient.epsilon_power},
             {"residual_upper_exact",
              coefficient.residual_upper.dump_exact()},
-            {"scale_lower_exact", coefficient.scale_lower.dump_exact()}});
+            {"scale_lower_exact", coefficient.scale_lower.dump_exact()}};
+      };
+      if (inconclusive_examples.size() < 6)
+        inconclusive_examples.push_back(example());
+      if (required) {
+        ++required_inconclusive;
+        if (required_inconclusive_examples.size() < 6)
+          required_inconclusive_examples.push_back(example());
+      }
     }
   }
   return json::object{
@@ -702,7 +717,13 @@ json::object encode_acb_match_residual_diagnostics(
       {"coefficient_verdicts",
        json::object{{"pass", pass}, {"fail", fail},
                     {"inconclusive", inconclusive}}},
+      {"required_coefficient_verdicts",
+       json::object{{"pass", required_pass},
+                    {"fail", required_fail},
+                    {"inconclusive", required_inconclusive}}},
       {"inconclusive_examples", std::move(inconclusive_examples)},
+      {"required_inconclusive_examples",
+       std::move(required_inconclusive_examples)},
       {"detail", diagnostics.detail}};
 }
 

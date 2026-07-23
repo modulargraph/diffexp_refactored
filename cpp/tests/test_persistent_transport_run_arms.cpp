@@ -476,8 +476,8 @@ json::object epsilon_contract() {
                       {"match_required_complete_max", 2}};
 }
 
-json::object refinement() {
-  return json::object{{"relative_tolerance", "1e-30"},
+json::object refinement(const std::string& relative_tolerance = "1e-30") {
+  return json::object{{"relative_tolerance", relative_tolerance},
                       {"max_steps", 2}};
 }
 
@@ -653,7 +653,8 @@ json::object consume_basis_hop(
     const std::string& session, const std::string& plan,
     const std::string& plan_checkpoint, const std::string& arm_name,
     const std::string& incoming, const std::string& incoming_checkpoint,
-    const std::vector<std::string>& basis, const std::string& root) {
+    const std::vector<std::string>& basis, const std::string& root,
+    const std::string& relative_tolerance = "1e-30") {
   json::array encoded_basis;
   for (const auto& local : basis) encoded_basis.emplace_back(local);
   return request(json::object{
@@ -666,7 +667,7 @@ json::object consume_basis_hop(
       {"incoming_checkpoint_identity", incoming_checkpoint},
       {"epsilon", json::object{{"min", 0}, {"max", 2},
                                   {"required_complete_max", 2}}},
-      {"refinement", refinement()},
+      {"refinement", refinement(relative_tolerance)},
       {"checkpoint_policy", json::object{
            {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", root}}}});
@@ -872,7 +873,8 @@ json::value contract_cancellation_and_export(
                 {"relative_tolerance", "1e-40"},
                 {"provenance",
                  "terminal-single-contraction-policy-regression"}}}}}}});
-  require_ok(contracted, "terminal cancellation transport.contract");
+  require_ok(contracted,
+             ("terminal cancellation transport.contract " + root).c_str());
   const auto& line =
       contracted.at("lines").as_array().front().as_object();
   const auto exported = request(json::object{
@@ -2208,7 +2210,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
         "terminal-factorized-plan";
     const auto anchor = solve_multiblock_local(
         session, anchor_chart, "0", anchor_checkpoint,
-        {"1", "1"}, 8);
+        {"1", "1"}, 32);
     const auto lower_basis_0 = solve_multiblock_local(
         session, lower_chart, "-2/3",
         "terminal-factorized-lower-basis-0", {"1", "1"}, 8);
@@ -2286,7 +2288,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
           "single consumed-state publication changed its requested arm");
     const auto single_value = contract_cancellation_and_export(
         restored_single, single_states.at("lower").as_object(),
-        "terminal-factorized-single", 9);
+        "terminal-factorized-single", 33);
     require_ok(request(json::object{
         {"schema", 2}, {"op", "session.close"},
         {"session", restored_single}}),
@@ -2305,6 +2307,76 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
       throw std::runtime_error(
           "Acb terminal state publication dropped its factorized match owner: " +
           json::serialize(published));
+    const auto loose_lower_basis_0 = solve_multiblock_local(
+        session, lower_chart, "-2/3",
+        "terminal-factorized-loose-lower-basis-0", {"1", "1"}, 32);
+    const auto loose_lower_basis_1 = solve_multiblock_local(
+        session, lower_chart, "-2/3",
+        "terminal-factorized-loose-lower-basis-1", {"0", "1"}, 32);
+    const auto loose_lower = consume_basis_hop(
+        session, plan, plan_checkpoint, "lower", anchor,
+        anchor_checkpoint, {loose_lower_basis_0, loose_lower_basis_1},
+        "terminal-factorized-loose", "1e-2");
+    require_ok(loose_lower,
+               "accuracy-qualified terminal lower consume_hop");
+    const auto loose_published = request(json::object{
+        {"schema", 2},
+        {"op", "transport.publish_consumed_state"},
+        {"session", session},
+        {"tile_plan", plan},
+        {"tile_plan_checkpoint_identity", plan_checkpoint},
+        {"anchor", anchor},
+        {"anchor_checkpoint_identity", anchor_checkpoint},
+        {"epsilon", epsilon_contract()},
+        {"refinement", refinement("1e-2")},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-arm-checkpoints-v1"},
+             {"root", "terminal-factorized-loose"}}},
+        {"arm", "lower"},
+        {"tile_sources", json::array{
+             anchor,
+             loose_lower.at("next_local").as_object().at("local")}}});
+    require_ok(loose_published,
+               "accuracy-qualified terminal state publication");
+    const auto loose_state = loose_published.at("states").as_object()
+                                 .at("lower").as_object();
+    const auto guarded_lower_basis_0 = solve_multiblock_local(
+        session, lower_chart, "-2/3",
+        "terminal-factorized-guarded-lower-basis-0", {"1", "1"}, 8);
+    const auto guarded_lower_basis_1 = solve_multiblock_local(
+        session, lower_chart, "-2/3",
+        "terminal-factorized-guarded-lower-basis-1", {"0", "1"}, 8);
+    const auto guarded_lower = consume_basis_hop(
+        session, plan, plan_checkpoint, "lower", anchor,
+        anchor_checkpoint,
+        {guarded_lower_basis_0, guarded_lower_basis_1},
+        "terminal-factorized-guarded", "1e-4");
+    require_ok(guarded_lower,
+               "guard-digit terminal lower consume_hop");
+    const auto guarded_published = request(json::object{
+        {"schema", 2},
+        {"op", "transport.publish_consumed_state"},
+        {"session", session},
+        {"tile_plan", plan},
+        {"tile_plan_checkpoint_identity", plan_checkpoint},
+        {"anchor", anchor},
+        {"anchor_checkpoint_identity", anchor_checkpoint},
+        {"epsilon", epsilon_contract()},
+        {"refinement", refinement("1e-4")},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-arm-checkpoints-v1"},
+             {"root", "terminal-factorized-guarded"}}},
+        {"arm", "lower"},
+        {"tile_sources", json::array{
+             anchor,
+             guarded_lower.at("next_local").as_object().at("local")}}});
+    require_ok(guarded_published,
+               "guard-digit terminal state publication");
+    const auto guarded_state =
+        guarded_published.at("states").as_object()
+            .at("lower").as_object();
     for (const auto* state : {&lower_state, &upper_state}) {
       const auto& contracts =
           state->at("tile_consumer_epsilon").as_array();
@@ -2345,9 +2417,9 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     // binds its restored diagnostics back to the explicit cancellation
     // policy, rather than only restoring the exact-singleton pair form.
     const auto lower_value = contract_cancellation_and_export(
-        session, lower_state, "terminal-factorized-lower", 9, false);
+        session, lower_state, "terminal-factorized-lower", 33, false);
     const auto upper_value = contract_cancellation_and_export(
-        session, upper_state, "terminal-factorized-upper", 9);
+        session, upper_state, "terminal-factorized-upper", 33);
     require_small_zero(lower_value, "lower terminal contraction");
     require_small_zero(upper_value, "upper terminal contraction");
     if (setenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE",
@@ -2357,7 +2429,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     json::value explicit_factorized_value;
     try {
       explicit_factorized_value = contract_cancellation_and_export(
-          session, lower_state, "terminal-explicit-factorized", 9);
+          session, lower_state, "terminal-explicit-factorized", 33);
     } catch (...) {
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
       throw;
@@ -2379,7 +2451,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     json::value compared_value;
     try {
       compared_value = contract_cancellation_and_export(
-          session, lower_state, "terminal-compare-factorized", 9);
+          session, lower_state, "terminal-compare-factorized", 33);
     } catch (...) {
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
@@ -2393,6 +2465,71 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
                "authoritative", 1) != 0)
       throw std::runtime_error(
+          "could not select accuracy-qualified authoritative composed terminal adjoint");
+    std::ostringstream guarded_diagnostics;
+    auto* guarded_previous_stderr =
+        std::cerr.rdbuf(guarded_diagnostics.rdbuf());
+    json::value guarded_value;
+    try {
+      guarded_value = contract_cancellation_and_export(
+          session, guarded_state, "terminal-composed-guarded", 33);
+    } catch (...) {
+      std::cerr.rdbuf(guarded_previous_stderr);
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+      throw;
+    }
+    std::cerr.rdbuf(guarded_previous_stderr);
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+    require_small_zero(
+        guarded_value,
+        "guard-digit authoritative fallback contraction");
+    if (guarded_diagnostics.str().find(
+            "status=authoritative-fallback-insufficient-accuracy") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "authoritative composed terminal contraction consumed the full downstream match tolerance without guard digits");
+    release_state(
+        session,
+        std::string(guarded_state.at("transport_state").as_string()));
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
+               "authoritative", 1) != 0)
+      throw std::runtime_error(
+          "could not select accuracy-qualified authoritative composed terminal adjoint");
+    std::ostringstream selected_diagnostics;
+    auto* selected_previous_stderr =
+        std::cerr.rdbuf(selected_diagnostics.rdbuf());
+    json::value selected_value;
+    try {
+      selected_value = contract_cancellation_and_export(
+          session, loose_state, "terminal-composed-selected", 33);
+    } catch (...) {
+      std::cerr.rdbuf(selected_previous_stderr);
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+      throw;
+    }
+    std::cerr.rdbuf(selected_previous_stderr);
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+    const auto& selected_record = selected_value.as_object();
+    for (const auto& coefficient :
+         selected_record.at("coefficients").as_array()) {
+      const auto value = decode_encoded_ball(coefficient);
+      if (!value.contains_zero() ||
+          diffexp2::Magnitude::upper_abs(value).approximate_upper() >
+              1e-2)
+        throw std::runtime_error(
+            "accuracy-qualified authoritative composed terminal contraction did not retain its certified zero enclosure");
+    }
+    if (selected_diagnostics.str().find(
+            "status=authoritative-certified-value") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "accuracy-qualified authoritative composed terminal contraction did not report its selected route");
+    release_state(
+        session,
+        std::string(loose_state.at("transport_state").as_string()));
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
+               "authoritative", 1) != 0)
+      throw std::runtime_error(
           "could not select authoritative composed terminal adjoint");
     std::ostringstream authoritative_diagnostics;
     auto* authoritative_previous_stderr =
@@ -2400,7 +2537,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     json::value authoritative_value;
     try {
       authoritative_value = contract_cancellation_and_export(
-          session, lower_state, "terminal-composed-authoritative", 9);
+          session, lower_state, "terminal-composed-authoritative", 33);
     } catch (...) {
       std::cerr.rdbuf(authoritative_previous_stderr);
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
@@ -2408,21 +2545,14 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     }
     std::cerr.rdbuf(authoritative_previous_stderr);
     unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
-    const auto& authoritative_record = authoritative_value.as_object();
-    for (const auto& coefficient :
-         authoritative_record.at("coefficients").as_array()) {
-      const auto value = decode_encoded_ball(coefficient);
-      if (!value.contains_zero() ||
-          diffexp2::Magnitude::upper_abs(value).approximate_upper() >
-              1e-4)
-        throw std::runtime_error(
-            "authoritative composed terminal contraction did not retain its certified zero enclosure");
-    }
+    require_small_zero(
+        authoritative_value,
+        "accuracy-gated authoritative composed terminal contraction");
     if (authoritative_diagnostics.str().find(
-            "status=authoritative-certified-value") ==
+            "status=authoritative-fallback-insufficient-accuracy") ==
         std::string::npos)
       throw std::runtime_error(
-          "authoritative composed terminal contraction did not report its selected route");
+          "authoritative composed terminal contraction did not reject a rigorous but insufficiently accurate enclosure");
     // A 1/t observable row is outside the lambda(0)=0 composed theorem: its
     // adjoint needs a Laurent/log term and the integration-by-parts endpoint
     // pairing.  Authoritative mode must classify precisely that known
@@ -2439,7 +2569,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     try {
       center_pole_value = contract_cancellation_and_export(
           session, lower_state, "terminal-center-pole-classification",
-          9, true, 1);
+          33, true, 1);
     } catch (...) {
       std::cerr.rdbuf(previous_stderr);
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
@@ -2471,7 +2601,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     json::value physical_value;
     try {
       physical_value = contract_cancellation_and_export(
-          session, lower_state, "terminal-direct-physical", 9);
+          session, lower_state, "terminal-direct-physical", 33);
     } catch (...) {
       unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
       throw;
@@ -2486,7 +2616,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     bool invalid_route_rejected = false;
     try {
       (void)contract_cancellation_and_export(
-          session, lower_state, "terminal-invalid-route", 9);
+          session, lower_state, "terminal-invalid-route", 33);
     } catch (...) {
       invalid_route_rejected = true;
     }
@@ -2512,7 +2642,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
              {"checkpoint_identity",
               "terminal-factorized-endpoint-result"},
              {"integrand_row", cancellation_integrand_row(
-                  "terminal-factorized-endpoint-row", 9)},
+                  "terminal-factorized-endpoint-row", 33)},
              {"epsilon", json::object{
                   {"min", 0}, {"max", 2},
                   {"required_complete_max", 1}}}}}}});
@@ -2535,6 +2665,57 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
         {"schema", 2}, {"op", "endpoint.release"},
         {"session", session}, {"endpoint", endpoint.at("endpoint")}}),
         "terminal factorized endpoint.release");
+
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE",
+               "physical", 1) != 0)
+      throw std::runtime_error(
+          "could not enable direct physical terminal endpoint contraction");
+    json::object direct_endpoints;
+    try {
+      direct_endpoints = request(json::object{
+          {"schema", 2}, {"op", "transport.endpoint_batch"},
+          {"session", session},
+          {"transport_state", lower_state.at("transport_state")},
+          {"transport_state_checkpoint_identity",
+           lower_state.at("checkpoint_identity")},
+          {"transport_state_provenance_identity",
+           lower_state.at("provenance_identity")},
+          {"checkpoint_policy", json::object{
+               {"schema",
+                "diffexp2-deterministic-transport-endpoint-checkpoints-v1"},
+               {"root", "terminal-direct-physical-endpoint"}}},
+          {"observables", json::array{json::object{
+               {"identity", "terminal-direct-physical-endpoint-observable"},
+               {"checkpoint_identity",
+                "terminal-direct-physical-endpoint-result"},
+               {"integrand_row", cancellation_integrand_row(
+                    "terminal-direct-physical-endpoint-row", 33)},
+               {"epsilon", json::object{
+                    {"min", 0}, {"max", 2},
+                    {"required_complete_max", 1}}}}}}});
+    } catch (...) {
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+      throw;
+    }
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+    require_ok(direct_endpoints,
+               "direct physical terminal endpoint_batch");
+    const auto& direct_endpoint =
+        direct_endpoints.at("endpoints").as_array().front().as_object();
+    const auto direct_endpoint_export = request(json::object{
+        {"schema", 2}, {"op", "endpoint.export"}, {"session", session},
+        {"endpoint", direct_endpoint.at("endpoint")},
+        {"checkpoint_identity", direct_endpoint.at("checkpoint_identity")},
+        {"output_digits", 40}});
+    require_ok(direct_endpoint_export,
+               "direct physical terminal endpoint.export");
+    require_small_zero(direct_endpoint_export.at("value"),
+                       "direct physical terminal endpoint");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "endpoint.release"},
+        {"session", session},
+        {"endpoint", direct_endpoint.at("endpoint")}}),
+        "direct physical terminal endpoint.release");
 
     const auto saved = request(json::object{
         {"schema", 2}, {"op", "checkpoint.save"},
@@ -2609,7 +2790,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
       throw std::runtime_error(
           "restored terminal state did not privately retain its match owner");
     const auto restored_lower = contract_cancellation_and_export(
-        restored, lower_state, "terminal-factorized-restored", 9);
+        restored, lower_state, "terminal-factorized-restored", 33);
     require_small_zero(restored_lower,
                        "restored terminal contraction");
     if (!epsilon_vectors_overlap(lower_value, restored_lower))

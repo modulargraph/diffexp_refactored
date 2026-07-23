@@ -1761,6 +1761,55 @@ ft2NativeMatchingReservoirRetryQ[failure_] := FailureQ[failure] &&
   Quiet[Check[failure[[1]] ===
     "FeynmanTrickNativeMatchingReservoir", False]];
 
+(* A complete epsilon residual with an inconclusive accuracy verdict is not a
+   reservoir deficit.  The retained match is built from finite Taylor local
+   solutions, so retry that level with a larger Taylor work order.  Preserve
+   the coefficient verdict counts as an observable progress certificate: the
+   outer driver must not keep raising the order when one retry did not reduce
+   the number of inconclusive coefficients. *)
+ft2NativeMatchingClearanceRetry[failure_?FailureQ,
+    level_Integer, currentExpansionOrder_Integer] := Module[
+  {data, backend, residual, verdicts},
+  data = Quiet[Check[failure[[2]], <||>]];
+  backend = If[AssociationQ[data],
+    Lookup[data, "BackendFailure", None], None];
+  residual = If[AssociationQ[backend],
+    Lookup[backend, "residual", None], None];
+  verdicts = If[AssociationQ[residual],
+    Lookup[residual, "required_coefficient_verdicts",
+      Lookup[residual, "coefficient_verdicts", None]], None];
+  If[currentExpansionOrder > 0 && AssociationQ[backend] &&
+      AssociationQ[residual] &&
+      Lookup[backend, "reason", None] ===
+        "acb_match_residual_inconclusive" &&
+      !TrueQ[Lookup[backend, "retryable_epsilon_reservoir", False]] &&
+      TrueQ[Lookup[backend, "retryable_matching_clearance", False]] &&
+      TrueQ[Lookup[residual, "complete_through_required", False]] &&
+      Lookup[residual, "scope", None] === "stored-taylor-truncation",
+    Failure["FeynmanTrickNativeMatchingTaylor", <|
+      "Detail" -> "native matching needs a larger finite-Taylor overlap",
+      "Level" -> level,
+      "CurrentExpansionOrder" -> currentExpansionOrder,
+      "AdditionalOrders" -> currentExpansionOrder,
+      "ResidualVerdicts" -> verdicts,
+      "BackendFailure" -> backend|>], None]];
+
+ft2NativeMatchingClearanceRetry[_, _Integer, _] := None;
+
+ft2NativeMatchingClearanceRetryQ[failure_] := FailureQ[failure] &&
+  Quiet[Check[failure[[1]] ===
+    "FeynmanTrickNativeMatchingTaylor", False]];
+
+ft2NativeMatchingRetryQ[failure_] :=
+  ft2NativeMatchingReservoirRetryQ[failure] ||
+  ft2NativeMatchingClearanceRetryQ[failure];
+
+ft2NativeMatchingClearanceProgressQ[previous_, current_] :=
+  AssociationQ[previous] && AssociationQ[current] &&
+  IntegerQ[Lookup[previous, "inconclusive", None]] &&
+  IntegerQ[Lookup[current, "inconclusive", None]] &&
+  Lookup[current, "inconclusive"] < Lookup[previous, "inconclusive"];
+
 ft2CanonicalIdentity[prefix_String, value_] := prefix <>
   IntegerString[Hash[value, "SHA256"], 16, 64];
 
@@ -3174,7 +3223,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "CheckpointRecord" -> checkpointAuditRecord|>]];
 
 runExample[name_String, familyRequest_:None,
-    matchingPrivateHalos_:Automatic] := Module[
+    matchingPrivateHalos_:Automatic,
+    matchingTaylorOrders_:Automatic] := Module[
   {topology, sequence, prepContract, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
    resumeCheckpoint = None, startLevel, finalRaw = None,
@@ -3182,7 +3232,8 @@ runExample[name_String, familyRequest_:None,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
    baseNativeEpsilonPlan = None, matchingHaloProfileContract = None,
    matchingHaloProfileFile = "", loadedMatchingPrivateHalos = <||>,
-   effectiveMatchingPrivateHalos = <||>, baseNativeBatches = <||>,
+   effectiveMatchingPrivateHalos = <||>,
+   effectiveMatchingTaylorOrders = <||>, baseNativeBatches = <||>,
    nativeEpsilonExecution = None, initialDeepPrefactors,
    deepRelativeGauge, deepGaugeOffset, deepBoundaryWindow,
    deepRequiredSourceCompleteMax, deepBoundaryDeficit,
@@ -3296,6 +3347,19 @@ runExample[name_String, familyRequest_:None,
       savePreparedFT[prepFile, prepContract, ftData]]];
   If[ftData === $Failed, Return[$Failed]];
   nLevels = ftData["NumLevels"];
+  effectiveMatchingTaylorOrders = Which[
+    matchingTaylorOrders === Automatic || matchingTaylorOrders === None,
+      <||>,
+    AssociationQ[matchingTaylorOrders] &&
+        AllTrue[Keys[matchingTaylorOrders],
+          IntegerQ[#] && 1 <= # <= nLevels &] &&
+        AllTrue[Values[matchingTaylorOrders],
+          IntegerQ[#] && # >= expansionOrder &],
+      matchingTaylorOrders,
+    True,
+      Print["FTLADDER MATCH TAYLOR RETRY CONTRACT FAIL orders=",
+        matchingTaylorOrders];
+      Return[$Failed, Module]];
   ftEps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
   dimVar = FeynmanTrick`Private`$FTConfig["DimensionVariable"];
   dimExpr = FeynmanTrick`Private`DimensionExpression[];
@@ -3444,6 +3508,7 @@ runExample[name_String, familyRequest_:None,
      extraFacs, rawES, rawMin, shift, kmaxAvail, nextReq, needTop,
      trLoCache, trHiCache, chartCache,
      resumeTransport, resumeNativeTransport, levelExpansionOrder,
+     requestedLevelExpansionOrder,
      levelEpsilonGauge,
      needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
@@ -3500,8 +3565,12 @@ runExample[name_String, familyRequest_:None,
           " boundaryShifts=", epsilonBasis["BoundaryShifts"],
           " completeMax=", epsilonBasis["CompleteMax"],
           " poleFree=", epsilonBasisRecord["PoleFree"]]]];
+    requestedLevelExpansionOrder = Lookup[
+      effectiveMatchingTaylorOrders, level, expansionOrder];
     levelExpansionOrder = If[resumeTransport || resumeNativeTransport,
-      resumeCheckpoint["SourceExpansionOrder"], expansionOrder];
+      Max[resumeCheckpoint["SourceExpansionOrder"],
+        requestedLevelExpansionOrder],
+      requestedLevelExpansionOrder];
     (* CoefficientVectors are part of the production transport contract.
        Rebuild/revalidate the one batched FIRE payload for every resume.  A
        schema-2 native state is restored only after these exact request and
@@ -3691,16 +3760,21 @@ runExample[name_String, familyRequest_:None,
       If[FailureQ[nativeDispatch],
         Print["FTLADDER NATIVE BATCH FAIL level=", level, " ",
           nativeDispatch];
-        With[{retry = ft2NativeMatchingReservoirRetry[
+        With[{reservoirRetry = ft2NativeMatchingReservoirRetry[
             nativeDispatch, level]},
-          Throw[If[ft2NativeMatchingReservoirRetryQ[retry],
+          With[{retry = If[ft2NativeMatchingReservoirRetryQ[reservoirRetry],
+              reservoirRetry,
+              ft2NativeMatchingClearanceRetry[
+                nativeDispatch, level, levelExpansionOrder]]},
+          Throw[If[ft2NativeMatchingRetryQ[retry],
             Failure[retry[[1]], Join[retry[[2]], <|
               "MatchingPrivateHalos" -> effectiveMatchingPrivateHalos,
+              "MatchingTaylorOrders" -> effectiveMatchingTaylorOrders,
               "MatchingHaloProfileEnabled" -> matchingHaloProfileEnabled,
               "MatchingHaloProfileContract" ->
                 matchingHaloProfileContract,
               "MatchingHaloProfileFile" -> matchingHaloProfileFile|>]],
-            $Failed], "FT2Abort"]]];
+            $Failed], "FT2Abort"]]]];
       If[!resumeNativeTransport && nativeStateFile =!= "" &&
           AssociationQ[nativeDispatch["NativeTransportCheckpoint"]],
         If[!ft2NativeTransportResumeRecordQ[
@@ -4093,20 +4167,68 @@ runExample[name_String, familyRequest_:None,
 
 ft2RunExampleWithMatchingRetries[name_String,
     familyRequest_:None] := Module[
-  {matchingPrivateHalos = <||>, result, data, level, additional,
-   current, merged, updated, profileEnabled, profileContract,
+  {matchingPrivateHalos = <||>, matchingTaylorOrders = <||>,
+   result, data, level, additional, current, merged, updated,
+   currentExpansionOrder, currentTaylorOrders, profileEnabled, profileContract,
    profileFile, profileSave, nLevels, attempt = 0, maxAttempts = 12,
-   maxHalo = $ft2MatchingHaloProfileMax},
+   residualVerdicts, previousResidualVerdicts,
+   matchingTaylorProgress = <||>,
+   maxHalo = $ft2MatchingHaloProfileMax,
+   maxTaylorOrder = 4 expansionOrder},
   While[attempt < maxAttempts,
     ++attempt;
-    result = runExample[name, familyRequest, matchingPrivateHalos];
-    If[!ft2NativeMatchingReservoirRetryQ[result], Return[result, Module]];
+    result = runExample[name, familyRequest, matchingPrivateHalos,
+      matchingTaylorOrders];
+    If[!ft2NativeMatchingRetryQ[result], Return[result, Module]];
     data = result[[2]];
     level = Lookup[data, "Level", None];
     additional = Lookup[data, "AdditionalOrders", None];
     If[!IntegerQ[level] || level < 1 ||
         !IntegerQ[additional] || additional < 1,
       Return[$Failed, Module]];
+    If[ft2NativeMatchingClearanceRetryQ[result],
+      currentExpansionOrder = Lookup[
+        data, "CurrentExpansionOrder", None];
+      currentTaylorOrders = Lookup[
+        data, "MatchingTaylorOrders", matchingTaylorOrders];
+      If[!IntegerQ[currentExpansionOrder] || currentExpansionOrder < 1 ||
+          !AssociationQ[currentTaylorOrders],
+        Return[$Failed, Module]];
+      residualVerdicts = Lookup[data, "ResidualVerdicts", None];
+      previousResidualVerdicts = Lookup[
+        matchingTaylorProgress, level, None];
+      If[AssociationQ[previousResidualVerdicts] &&
+          !ft2NativeMatchingClearanceProgressQ[
+            previousResidualVerdicts, residualVerdicts],
+        Print["FTLADDER NATIVE MATCH TAYLOR RETRY STALLED level=",
+          level, " previousVerdicts=", previousResidualVerdicts,
+          " currentVerdicts=", residualVerdicts,
+          " currentExpansionOrder=", currentExpansionOrder];
+        Return[Failure["FeynmanTrickNativeMatchingTaylorStalled", <|
+          "Detail" -> "raising the finite-Taylor order did not reduce the residual's inconclusive coefficient count",
+          "Level" -> level,
+          "CurrentExpansionOrder" -> currentExpansionOrder,
+          "PreviousResidualVerdicts" -> previousResidualVerdicts,
+          "ResidualVerdicts" -> residualVerdicts,
+          "BackendFailure" -> Lookup[data, "BackendFailure", None]|>],
+          Module]];
+      If[AssociationQ[residualVerdicts],
+        AssociateTo[matchingTaylorProgress, level -> residualVerdicts]];
+      updated = currentExpansionOrder + additional;
+      If[updated > maxTaylorOrder,
+        Print["FTLADDER NATIVE MATCH TAYLOR RETRY EXHAUSTED level=",
+          level, " requestedExpansionOrder=", updated,
+          " limit=", maxTaylorOrder];
+        Return[$Failed, Module]];
+      matchingTaylorOrders = Merge[
+        {matchingTaylorOrders, currentTaylorOrders}, Max];
+      AssociateTo[matchingTaylorOrders, level -> updated];
+      Print["FTLADDER NATIVE MATCH TAYLOR RETRY level=", level,
+        " previousExpansionOrder=", currentExpansionOrder,
+        " nextExpansionOrder=", updated,
+        " levelOrders=", matchingTaylorOrders];
+      DiffExp2`Solve`ClearSolveCaches[];
+      Continue[]];
     current = Lookup[data, "MatchingPrivateHalos", matchingPrivateHalos];
     profileContract = Lookup[data, "MatchingHaloProfileContract", None];
     nLevels = Lookup[profileContract, "NumLevels", None];
@@ -4141,7 +4263,8 @@ ft2RunExampleWithMatchingRetries[name_String,
       " privateHalos=", matchingPrivateHalos];
     DiffExp2`Solve`ClearSolveCaches[]];
   Print["FTLADDER NATIVE MATCH RETRY EXHAUSTED attempts=", maxAttempts,
-    " privateHalos=", matchingPrivateHalos];
+    " privateHalos=", matchingPrivateHalos,
+    " taylorOrders=", matchingTaylorOrders];
   $Failed];
 
 (* Let the focused checkpoint tests load these definitions without starting

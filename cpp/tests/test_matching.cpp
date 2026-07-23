@@ -850,6 +850,22 @@ void retained_transformed_basis_authority_smoke() {
              ComplexBall(1)).contains_zero() &&
             ComplexBall::precision() == 256);
 
+  const FiniteLaurentMatrix<ComplexBall> identity_basis = {
+      {ball_constant_frame("1", width)}};
+  const FiniteLaurentVector<ComplexBall> wide_uncertain_rhs = {
+      ball_value_frame(real_ball_with_error(1, -20), width)};
+  const ExactLaurentMatrix<ComplexBall> identity_transformation = {
+      {ExactLaurentPolynomial<ComplexBall>::one()}};
+  const auto uncertified_midpoint =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, wide_uncertain_rhs, identity_transformation,
+          ill_conditioned_options,
+          "midpoint proposal rejected by full-ball residual",
+          false, true, nullptr, nullptr, nullptr, nullptr, true);
+  check("a passing zero-radius midpoint is not published when the full-ball residual remains inconclusive",
+        uncertified_midpoint.residual_history.back().verdict ==
+            AcbMatchingResidualVerdict::Inconclusive);
+
   ComplexBall::set_precision(1024);
   ComplexBall tiny_delta;
   arf_set_ui_2exp_si(

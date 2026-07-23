@@ -39,7 +39,11 @@ propagatedBackendFailure = Join[clearanceBackendFailure, <|
   "retryable_matching_clearance" -> False,
   "retryable_propagated_enclosure" -> True,
   "normal_frame_attempt" -> <|
-    "physical_clearance_source" -> "propagated-enclosure"|>|>];
+    "physical_clearance_source" -> "propagated-enclosure",
+    "physical_clearance_source_probes" -> <|
+      "basis" -> <|"verdict" -> "pass"|>,
+      "weights" -> <|"verdict" -> "inconclusive"|>,
+      "incoming" -> <|"verdict" -> "inconclusive"|>|>|>|>];
 propagatedFailure = Failure["DiffExp2", <|
   "BackendFailure" -> propagatedBackendFailure|>];
 continuityBackendFailure = <|
@@ -89,6 +93,53 @@ assert["producer enclosure is not misclassified as a Taylor-order retry",
       propagatedFailure, 3, 50] === None,
   {ft2NativeMatchingReservoirRetry[propagatedFailure, 3],
    ft2NativeMatchingClearanceRetry[propagatedFailure, 3, 50]}];
+producerRetry = ft2NativeMatchingProducerRetry[
+  propagatedFailure, 3, 4, 8];
+assert["propagated enclosure retries only the immediately preceding producer",
+  ft2NativeMatchingProducerRetryQ[producerRetry] &&
+    ft2NativeMatchingRetryQ[producerRetry] &&
+    producerRetry[[2, "Level"]] === 3 &&
+    producerRetry[[2, "ProducerLevel"]] === 4 &&
+    producerRetry[[2, "NumLevels"]] === 4 &&
+    producerRetry[[2, "CurrentMatchingDigits"]] === 8 &&
+    producerRetry[[2, "AdditionalOrders"]] ===
+      DiffExp2`Tolerances`$SafetyDigits &&
+    ft2NativeMatchingProducerRetry[
+      propagatedFailure, 4, 4, 8] === None &&
+    ft2NativeMatchingProducerRetry[
+      clearanceFailure, 3, 4, 8] === None,
+  producerRetry];
+weightOnlyPropagatedFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> ReplacePart[propagatedBackendFailure,
+    {"normal_frame_attempt", "physical_clearance_source_probes",
+      "incoming", "verdict"} -> "pass"]|>];
+assert["weight-only propagated enclosure is not sent back to the producer",
+  ft2NativeMatchingProducerRetry[
+    weightOnlyPropagatedFailure, 3, 4, 8] === None];
+algebraicWeightPropagatedFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> Join[
+    weightOnlyPropagatedFailure[[2, "BackendFailure"]], <|
+      "weight_shadow_retry" ->
+        "upstream-accuracy-required-nonrational-chart"|>]|>];
+assert["nonrational weight enclosure uses guarded upstream accuracy",
+  ft2NativeMatchingProducerRetryQ[
+    ft2NativeMatchingProducerRetry[
+      algebraicWeightPropagatedFailure, 3, 4, 8]]];
+assert["producer precision is bound to producer checkpoints, not consumers",
+  ft2CheckpointExpectedMatchingDigits[
+      "Boundary", 3, <|4 -> 10|>] === 10 &&
+    ft2CheckpointExpectedMatchingDigits[
+      "NativeTransport", 3, <|4 -> 10|>] === matchDigits &&
+    ft2CheckpointExpectedMatchingDigits[
+      "NativeTransport", 4, <|4 -> 10|>] === 10];
+assert["producer digit budget retains its safety margin up the ladder",
+  ft2RaiseMatchingProducerDigits[
+      <|4 -> matchDigits + 2|>, 3, matchDigits + 2, 4] ===
+    <|4 -> matchDigits + 4, 3 -> matchDigits + 2|> &&
+    ft2RaiseMatchingProducerDigits[
+      <|3 -> matchDigits + 2, 4 -> matchDigits + 4|>,
+      3, matchDigits + 4, 4] ===
+        <|3 -> matchDigits + 4, 4 -> matchDigits + 6|>];
 
 assert["matching Taylor progress requires fewer inconclusive coefficients",
   ft2NativeMatchingClearanceProgressQ[
@@ -100,7 +151,8 @@ assert["matching Taylor progress requires fewer inconclusive coefficients",
 
 matchingTaylorRetryCalls = {};
 matchingTaylorRetryResult = Block[{
-    runExample = Function[{runName, familyRequest, epsilonHalos, taylorOrders},
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
       AppendTo[matchingTaylorRetryCalls, taylorOrders];
       If[Length[matchingTaylorRetryCalls] === 1,
         Failure["FeynmanTrickNativeMatchingTaylor", <|
@@ -119,7 +171,8 @@ assert["matching retry driver doubles only the failing level Taylor order",
 
 matchingTaylorStallCalls = {};
 matchingTaylorStallResult = Block[{
-    runExample = Function[{runName, familyRequest, epsilonHalos, taylorOrders},
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
       AppendTo[matchingTaylorStallCalls, taylorOrders];
       Failure["FeynmanTrickNativeMatchingTaylor", <|
         "Level" -> 2, "AdditionalOrders" -> expansionOrder,
@@ -138,7 +191,8 @@ assert["matching retry stops after a Taylor order increase makes no progress",
 
 continuityTaylorStallCalls = {};
 continuityTaylorStallResult = Block[{
-    runExample = Function[{runName, familyRequest, epsilonHalos, taylorOrders},
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
       AppendTo[continuityTaylorStallCalls, taylorOrders];
       Failure["FeynmanTrickNativeMatchingTaylor", <|
         "Level" -> 1, "AdditionalOrders" -> expansionOrder,
@@ -159,6 +213,27 @@ assert[
     continuityTaylorStallResult[[2, "BackendFailure", "residual",
       "scope"]] === "materialized-continuity-clearance",
   {continuityTaylorStallResult, continuityTaylorStallCalls}];
+
+matchingProducerRetryCalls = {};
+matchingProducerRetryResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      AppendTo[matchingProducerRetryCalls, levelDigits];
+      If[Length[matchingProducerRetryCalls] === 1,
+        Failure["FeynmanTrickNativeMatchingProducer", <|
+          "Level" -> 3, "ProducerLevel" -> 4,
+          "NumLevels" -> 4,
+          "CurrentMatchingDigits" -> matchDigits,
+          "AdditionalOrders" -> DiffExp2`Tolerances`$SafetyDigits,
+          "MatchingDigitsByLevel" -> levelDigits|>], True]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries["matching-producer-retry-fixture"]];
+assert["matching retry driver tightens only the preceding producer level",
+  matchingProducerRetryResult === True &&
+    matchingProducerRetryCalls ===
+      {<||>, <|4 -> matchDigits +
+        DiffExp2`Tolerances`$SafetyDigits|>},
+  matchingProducerRetryCalls];
 
 x = Global`xNativeFT;
 epsilon = Global`eps;

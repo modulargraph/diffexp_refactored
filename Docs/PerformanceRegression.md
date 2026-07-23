@@ -142,11 +142,14 @@ is outside the measured region and the timed run must report a cache hit.
 The pinned configuration is working precision 300, matching contract 8
 decimal digits, Taylor order 25, boundary extra order 16, division order 3,
 and 10 C++ threads by default. The runner starts with fresh transport
-checkpoints and supplies the exact private level-1 matching halo of two orders;
-this leaves the public epsilon request unchanged while avoiding a discovery
-replay. It checks the finite value against
+checkpoints and supplies the learned private matching halos
+`<|1 -> 3, 2 -> 1|>`. Producer accuracy is pinned separately at levels 2
+through 4 to 12, 14, and 16 digits. These are private transport resources:
+the public epsilon request remains order zero and the gate performs no
+discovery replay. It checks the finite value against
 `-0.025411779885306218280920810082412842534323133089462` with tolerance
-`1e-12` and fails above 300 seconds. Override the hardware qualification
+`5e-10`, appropriate to the deliberately low eight-digit matching profile and
+compact FINAL record, and fails above 300 seconds. Override the hardware qualification
 ceiling explicitly with `PENTAGON_TIMING_MAX_SECONDS`.
 
 The first integrated recovery run took 74.54 seconds while restoring the
@@ -157,6 +160,13 @@ differed from the pinned oracle by about `2.10e-14`, and it entered no matching
 discovery retry.  The five-minute gate is intentionally conservative enough
 for normal machine variability while still catching a return to the former
 repeated-owner/retry behavior.
+
+The July 23 recovery added source-specific enclosure diagnostics and a
+certified midpoint-candidate retry for regular matching weights. A fresh
+transport run then completed in 92.67 seconds with finite value
+`-0.0254117799`. The midpoint solve is proposal-only: the untouched Acb basis
+and incoming boundary must still pass the full-ball forward residual before
+the candidate is published.
 
 ## Planar double-box gate
 

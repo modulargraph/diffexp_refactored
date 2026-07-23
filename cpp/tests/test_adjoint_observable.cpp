@@ -142,7 +142,32 @@ bool direct_integral_equivalence() {
       solved, ball("1/4"));
   const auto physical = constant_vector({"1/4"});
   const auto composed = contract_backward_adjoint(adjoint, physical);
-  return contains_exact(composed.coefficient(0), "-1/32");
+  if (!contains_exact(composed.coefficient(0), "-1/32")) return false;
+
+  // The forcing convention depends on the requested a -> 0 orientation,
+  // not on the sign of a or on whether a direct primitive implementation
+  // sorts its endpoints first.
+  const auto negative_adjoint = evaluate_backward_adjoint_taylor(
+      solved, ball("-1/4"), ball("0"),
+      "negative-point direct/composed scalar comparison");
+  const auto negative_physical = constant_vector({"-1/4"});
+  const auto negative_composed = contract_backward_adjoint(
+      negative_adjoint, negative_physical);
+  if (!contains_exact(negative_composed.coefficient(0), "-1/32"))
+    return false;
+
+  // With x=beta*t and beta=-2, b=-beta*t*q*r=2t.  The composed
+  // contraction already includes the physical Jacobian and must equal
+  // beta*Integral_a^0 t dt = 1/16 without another orientation factor.
+  auto negative_scale_problem = scalar_problem("1");
+  negative_scale_problem.forcing = {constant_vector({"2"})};
+  const auto negative_scale = solve_backward_adjoint_taylor(
+      negative_scale_problem, "negative-scale direct/composed comparison");
+  const auto negative_scale_adjoint = evaluate_backward_adjoint_taylor(
+      negative_scale, ball("1/4"));
+  const auto negative_scale_composed = contract_backward_adjoint(
+      negative_scale_adjoint, physical);
+  return contains_exact(negative_scale_composed.coefficient(0), "1/16");
 }
 
 bool resonance_fails_closed() {

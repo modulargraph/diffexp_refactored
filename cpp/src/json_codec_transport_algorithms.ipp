@@ -3708,6 +3708,12 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       binding.prescriptions, binding.geometry.scale);
   const bool reverse_local_orientation =
       tile.local_end < tile.local_begin;
+  // `physical_rows` below are integrated in monotonically increasing local
+  // t.  The published line is instead oriented in physical x, so this same
+  // Jacobian belongs both in the final result and in any comparison with the
+  // composed adjoint (whose forcing already contains dx = beta dt).
+  const auto output_jacobian = reverse_local_orientation
+      ? -binding.scale_numeric : binding.scale_numeric;
   const auto& primitive_begin = reverse_local_orientation
       ? certified_tile.local_end : certified_tile.local_begin;
   const auto& primitive_end = reverse_local_orientation
@@ -3827,7 +3833,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             true);
   if (composed_diagnostic.has_value()) {
     const auto& composed = composed_diagnostic->value;
-    const auto& legacy = contracted.front();
+    const auto legacy = contracted.front().scaled(output_jacobian);
     const auto common_min = std::max({
         epsilon_contract.requested.min_power,
         composed.min_power(), legacy.min_power()});
@@ -4056,14 +4062,12 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   result.value.dimension = 1;
   result.value.coefficients.reserve(
       result.value.epsilon.width());
-  const auto jacobian = reverse_local_orientation
-      ? -binding.scale_numeric : binding.scale_numeric;
   for (std::int64_t raw_power = min_power;
        raw_power <= complete_max; ++raw_power)
     result.value.coefficients.push_back(
         finite.coefficient(
             static_cast<std::int32_t>(raw_power)) *
-        jacobian);
+        output_jacobian);
   result.value.error.guarantee = ErrorGuarantee::None;
   result.value.error.provenance =
       "stored Taylor truncation only; " + contraction_provenance +

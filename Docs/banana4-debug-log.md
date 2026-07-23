@@ -287,6 +287,14 @@ Rules:
   center-ending composed-adjoint certificate, rejects retry/unsupported
   markers, and permits noncenter tiles only when they are explicitly
   classified. FIRE preparation remains outside its timing contract.
+- The apparent nonzero fixture disagreement seen while extending B4-81
+  (`composed=-1/3`, `legacy=+1/3`) was a diagnostic-frame error, not another
+  adjoint sign change. The composed forcing already includes the physical
+  Jacobian and requested endpoint orientation, whereas the comparison printed
+  the legacy primitive before its final Jacobian multiplication. The
+  comparison now orients the legacy frame before subtracting it, and the
+  scalar test covers positive and negative match points plus a negative chart
+  scale. Do not reintroduce endpoint-sorting sign into the adjoint forcing.
 
 ## Disproven configurations: do not repeat unchanged
 

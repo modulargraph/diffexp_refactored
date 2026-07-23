@@ -3778,7 +3778,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       return std::move(normalized->first);
     };
   };
-  const auto run_refinement = [&]() {
+  const auto run_refinement = [&](bool force_midpoint_proposal = false) {
     selected_acb_right_materialization_preconditioner.reset();
     const auto refinement_context =
         checkpoint_identity + ":refined-acb-match[formal-negative-zero=" +
@@ -3901,7 +3901,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
               physical_residual_correction_map.has_value() &&
                       !diagnostic_normalized_match_authority
                   ? &*physical_residual_correction_map : nullptr,
-              conditioned_physical_residual_basis.has_value(),
+              force_midpoint_proposal ||
+                  conditioned_physical_residual_basis.has_value(),
               std::size_t{0},
               transformed_weight_structural_min_power);
           normal_frame_attempt["right_preconditioner_residual"] =
@@ -3957,7 +3958,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
           authoritative_physical_basis != nullptr &&
                   physical_residual_correction_map.has_value()
               ? &*physical_residual_correction_map : nullptr,
-          authoritative_physical_basis != nullptr,
+          force_midpoint_proposal ||
+              authoritative_physical_basis != nullptr,
           std::size_t{0},
           transformed_weight_structural_min_power);
     }
@@ -3987,7 +3989,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         authoritative_physical_basis != nullptr &&
                 physical_residual_correction_map.has_value()
             ? &*physical_residual_correction_map : nullptr,
-        authoritative_physical_basis != nullptr,
+        force_midpoint_proposal ||
+            authoritative_physical_basis != nullptr,
         std::size_t{0},
         transformed_weight_structural_min_power);
   };
@@ -4288,6 +4291,120 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       normal_frame_attempt["physical_residual"] =
           encode_acb_match_residual_diagnostics(
               refined.residual_history.back());
+    }
+  }
+  if (!normalized_matching_frame &&
+      !refined.residual_history.empty() &&
+      refined.residual_history.back().complete_through_required &&
+      refined.residual_history.back().verdict ==
+          AcbMatchingResidualVerdict::Inconclusive) {
+    // Regular and already-physical singular receivers do not enter the
+    // Fuchsian pushforward block above, but their complete residual can fail
+    // for exactly the same two distinct reasons: a defective midpoint
+    // candidate, or an otherwise valid candidate whose input balls are too
+    // wide.  Preserve the same source attribution so the ladder never sends
+    // an incoming-boundary problem to a Taylor retry.
+    try {
+      auto physical_options = refinement;
+      physical_options.required_min_power =
+          evaluation_window.min_power;
+      const auto midpoint_basis =
+          matching_detail::acb_midpoint_matrix(evaluated_basis);
+      const auto midpoint_weights =
+          matching_detail::acb_midpoint_vector(refined.weights);
+      const auto midpoint_incoming =
+          matching_detail::acb_midpoint_vector(incoming_value);
+      const auto midpoint_probe =
+          matching_detail::evaluate_acb_matching_residual(
+              midpoint_basis, midpoint_weights, midpoint_incoming,
+              physical_options,
+              checkpoint_identity +
+                  ": physical-frame residual zero-radius midpoint probe");
+      normal_frame_attempt["physical_midpoint_residual"] =
+          encode_acb_match_residual_diagnostics(
+              midpoint_probe.diagnostics);
+      normal_frame_attempt["physical_clearance_source"] =
+          midpoint_probe.diagnostics.complete_through_required &&
+                  midpoint_probe.diagnostics.verdict ==
+                      AcbMatchingResidualVerdict::Pass
+              ? "propagated-enclosure"
+              : "candidate-midpoint-defect";
+      if (normal_frame_attempt.at("physical_clearance_source") ==
+          "propagated-enclosure") {
+        json::object source_probes;
+        const auto evaluate_source =
+            [&](const char* source,
+                const FiniteLaurentMatrix<ComplexBall>& probe_basis,
+                const FiniteLaurentVector<ComplexBall>& probe_weights,
+                const FiniteLaurentVector<ComplexBall>& probe_incoming) {
+              const auto probe =
+                  matching_detail::evaluate_acb_matching_residual(
+                      probe_basis, probe_weights, probe_incoming,
+                      physical_options,
+                      checkpoint_identity +
+                          ": physical-frame residual " + source +
+                          " enclosure probe");
+              source_probes[source] =
+                  encode_acb_match_residual_diagnostics(
+                      probe.diagnostics);
+              return probe.diagnostics;
+            };
+        const auto basis_probe =
+            evaluate_source("basis", evaluated_basis, midpoint_weights,
+                            midpoint_incoming);
+        const auto weights_probe =
+            evaluate_source("weights", midpoint_basis, refined.weights,
+                            midpoint_incoming);
+        const auto incoming_probe =
+            evaluate_source("incoming", midpoint_basis, midpoint_weights,
+                            incoming_value);
+        normal_frame_attempt["physical_clearance_source_probes"] =
+            std::move(source_probes);
+        const auto certified_pass =
+            [](const AcbMatchingResidualDiagnostics& diagnostics) {
+              return diagnostics.complete_through_required &&
+                  diagnostics.verdict ==
+                      AcbMatchingResidualVerdict::Pass;
+            };
+        if (certified_pass(basis_probe) &&
+            weights_probe.complete_through_required &&
+            weights_probe.verdict ==
+                AcbMatchingResidualVerdict::Inconclusive &&
+            certified_pass(incoming_probe)) {
+          // The solve has magnified harmless input radii into the candidate
+          // weights.  Re-solve the same finite Laurent problem using
+          // zero-radius midpoint data only to propose coordinates.  The
+          // untouched full-ball basis and incoming boundary still form the
+          // authoritative forward residual inside run_refinement(), so this
+          // cannot publish a midpoint-only decision.
+          auto midpoint_candidate = run_refinement(true);
+          if (!midpoint_candidate.residual_history.empty() &&
+              certified_pass(
+                  midpoint_candidate.residual_history.back())) {
+            refined = std::move(midpoint_candidate);
+            normal_frame_attempt[
+                "regular_midpoint_weight_proposal"] = "certified";
+            normal_frame_attempt[
+                "regular_midpoint_weight_proposal_residual"] =
+                encode_acb_match_residual_diagnostics(
+                    refined.residual_history.back());
+          } else {
+            normal_frame_attempt[
+                "regular_midpoint_weight_proposal"] =
+                "full-ball-residual-not-certified";
+            if (!midpoint_candidate.residual_history.empty())
+              normal_frame_attempt[
+                  "regular_midpoint_weight_proposal_residual"] =
+                  encode_acb_match_residual_diagnostics(
+                      midpoint_candidate.residual_history.back());
+          }
+        }
+      }
+    } catch (const std::exception& error) {
+      normal_frame_attempt["physical_clearance_source"] =
+          "midpoint-probe-unavailable";
+      normal_frame_attempt["physical_midpoint_detail"] =
+          error.what();
     }
   }
   const std::string residual_frame_identity = normalized_matching_frame

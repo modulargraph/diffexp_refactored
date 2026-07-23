@@ -84,6 +84,38 @@ seedCasePDecision =
     {<|"identity_gauge" -> False, "identity_v" -> False|>}, {},
     {{<|"SeedRun" -> <|"schedule" ->
       {{<|"case" -> "P"|>}}|>|>}}];
+weightShadowResponse = <|"status" -> "error",
+  "retryable_propagated_enclosure" -> True,
+  "normal_frame_attempt" -> <|
+    "physical_clearance_source" -> "propagated-enclosure",
+    "physical_clearance_source_probes" -> <|
+      "basis" -> <|"verdict" -> "pass"|>,
+      "weights" -> <|"verdict" -> "inconclusive"|>,
+      "incoming" -> <|"verdict" -> "pass"|>|>|>|>;
+acbBasisProbe = <|"NativeSummary" -> <||>|>;
+exactBasisProbe = <|"NativeSummary" -> <|
+  "specialization_capability" ->
+    "exact-rational-shadow-to-acb-local-v1"|>|>;
+weightShadowRetryQ =
+  DiffExp2`NativeTransport`Private`nativeWeightEnclosureRationalShadowRetryQ[
+    weightShadowResponse, acbBasisProbe, cs];
+incomingShadowRetryQ =
+  DiffExp2`NativeTransport`Private`nativeWeightEnclosureRationalShadowRetryQ[
+    ReplacePart[weightShadowResponse,
+      {"normal_frame_attempt", "physical_clearance_source_probes",
+        "incoming", "verdict"} -> "inconclusive"],
+    acbBasisProbe, cs];
+exactShadowRetryQ =
+  DiffExp2`NativeTransport`Private`nativeWeightEnclosureRationalShadowRetryQ[
+    weightShadowResponse, exactBasisProbe, cs];
+rationalShadowChartEligibleQ =
+  DiffExp2`NativeTransport`Private`nativeRationalShadowChartEligibleQ[cs];
+algebraicShadowChartEligibleQ =
+  DiffExp2`NativeTransport`Private`nativeRationalShadowChartEligibleQ[
+    Join[cs, <|"Matrix" -> {{N[Sqrt[2], 80]}}|>]];
+exactAlgebraicShadowChartEligibleQ =
+  DiffExp2`NativeTransport`Private`nativeRationalShadowChartEligibleQ[
+    Join[cs, <|"Center" -> Sqrt[2]|>]];
 ok = !AnyTrue[Take[result, 3], FailureQ] &&
   Lookup[cs["IntegrationSequence"], "Components", None] === {{1}, {2}} &&
   Lookup[stats, "execution_scope", None] ===
@@ -124,6 +156,10 @@ ok = !AnyTrue[Take[result, 3], FailureQ] &&
     "exact-schedule-acb-case-p-compensation" &&
   TrueQ[Lookup[seedCasePDecision,
     "RationalShadowFallback", False]] &&
+  TrueQ[weightShadowRetryQ] && !TrueQ[incomingShadowRetryQ] &&
+  !TrueQ[exactShadowRetryQ] && TrueQ[rationalShadowChartEligibleQ] &&
+  !TrueQ[algebraicShadowChartEligibleQ] &&
+  !TrueQ[exactAlgebraicShadowChartEligibleQ] &&
   falseTerminalPrints === {} && TrueQ[triggerPrintRecognized] &&
   TrueQ[unrelatedPrintPreserved];
 
@@ -151,6 +187,13 @@ If[!ok, Print[InputForm[{
     afterStats],
   "NonIdentityDecision" -> nonIdentityDecision,
   "SeedCasePDecision" -> seedCasePDecision,
+  "WeightShadowRetryQ" -> weightShadowRetryQ,
+  "IncomingShadowRetryQ" -> incomingShadowRetryQ,
+  "ExactShadowRetryQ" -> exactShadowRetryQ,
+  "RationalShadowChartEligibleQ" -> rationalShadowChartEligibleQ,
+  "AlgebraicShadowChartEligibleQ" -> algebraicShadowChartEligibleQ,
+  "ExactAlgebraicShadowChartEligibleQ" ->
+    exactAlgebraicShadowChartEligibleQ,
   "Basis" -> If[AssociationQ[basis],
     KeyTake[basis, {"Type", "Dimension", "NativeSummary"}], basis],
   "ForcedFallbackProbeCount" -> forcedFallbackProbeCount,

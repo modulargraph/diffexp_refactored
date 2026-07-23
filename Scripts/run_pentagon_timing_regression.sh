@@ -103,11 +103,12 @@ if [[ ${PENTAGON_TIMING_WARM_CACHE:-0} == 1 ]]; then
   fi
 fi
 
-# The halo is private to the level-1 basis match.  Calling runExample directly
-# keeps the public epsilon request at order zero while avoiding a deliberately
-# expensive discovery replay.  A reservoir-regression test separately guards
-# that widening this private window preserves the old physical prefix.
-runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; result = Global`runExample["pentagon", None, <|1 -> 2|>]; If[result === True, Quit[0], Print["FAILED pentagon: ", InputForm[result]]; Quit[1]]'
+# These are private matching resources, not public epsilon orders.  The
+# per-level digit map is bound to the level which produces each boundary:
+# tighter lower-level handoffs therefore cannot silently make an earlier
+# producer less accurate.  Calling runExample directly makes this a stable
+# production-path timing check, while focused retry tests exercise discovery.
+runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; result = Global`runExample["pentagon", None, <|1 -> 3, 2 -> 1|>, <||>, <|2 -> 12, 3 -> 14, 4 -> 16|>]; If[result === True, Quit[0], Print["FAILED pentagon: ", InputForm[result]]; Quit[1]]'
 
 echo "=== pentagon timing regression"
 echo "configuration: WP=$working_precision match=$matching_digits T=$expansion_order boundaryExtra=$boundary_extra_order division=$division_order threads=$cpp_threads ceiling=${max_seconds}s"
@@ -141,6 +142,7 @@ python3 - "$scratch/pentagon.log" <<'PY'
 from decimal import Decimal
 import json
 import pathlib
+import re
 import sys
 
 log_path = pathlib.Path(sys.argv[1])
@@ -149,7 +151,10 @@ final_lines = [line[len("FINAL "):] for line in lines if line.startswith("FINAL 
 if len(final_lines) != 1:
     raise SystemExit(f"expected exactly one FINAL record, found {len(final_lines)}")
 
-record = json.loads(final_lines[0], parse_float=Decimal, parse_int=int)
+# Wolfram's compact machine-zero spelling is `0.e-N`; normalize only that
+# lexical form before handing the otherwise strict JSON record to Python.
+final_json = re.sub(r"(?<=\d)\.e([+-]?\d+)", r"e\1", final_lines[0])
+record = json.loads(final_json, parse_float=Decimal, parse_int=int)
 if record.get("Example") != "pentagon" or record.get("RawMinPower") != -2:
     raise SystemExit(f"unexpected pentagon FINAL record: {record}")
 finite = record.get("Finite")
@@ -163,7 +168,10 @@ if not isinstance(imag, Decimal):
     imag = Decimal(str(imag))
 
 reference = Decimal("-0.025411779885306218280920810082412842534323133089462")
-tolerance = Decimal("1e-12")
+# The timing profile deliberately requests only eight matching digits and its
+# FINAL record is compactly printed.  This is a correctness smoke oracle, not
+# a high-precision reference calculation.
+tolerance = Decimal("5e-10")
 error = abs(real - reference)
 if error > tolerance or imag > tolerance:
     raise SystemExit(

@@ -989,6 +989,52 @@ nativeRationalShadowBasis[system_Association, req_Association, threads_,
   Quiet[DiffExp2`CppBackend`ClosePersistentSession[rationalBasis]];
   result];
 
+(* The C++ residual attribution distinguishes uncertainty carried by the
+   incoming boundary from uncertainty introduced by the receiving matching
+   weights.  Only the latter is repaired locally.  Replaying the same Acb
+   basis at higher Wolfram precision cannot recover correlation already lost
+   when its normal-frame weights were rounded; specialize the paired exact
+   Rational SCC shadow instead. *)
+nativeWeightEnclosureRationalShadowRetryQ[response_, basis_,
+    system_Association] := Module[
+  {normalFrame, probes, basisProbe, weightsProbe, incomingProbe, summary},
+  If[!AssociationQ[response] || !AssociationQ[basis] ||
+      TrueQ[Lookup[Lookup[system, "IndicialData", <||>],
+        "Regular", False]] ||
+      Lookup[response, "status", "error"] =!= "error" ||
+      !TrueQ[Lookup[response,
+        "retryable_propagated_enclosure", False]],
+    Return[False, Module]];
+  normalFrame = Lookup[response, "normal_frame_attempt", None];
+  probes = If[AssociationQ[normalFrame],
+    Lookup[normalFrame, "physical_clearance_source_probes", None], None];
+  basisProbe = If[AssociationQ[probes],
+    Lookup[probes, "basis", None], None];
+  weightsProbe = If[AssociationQ[probes],
+    Lookup[probes, "weights", None], None];
+  incomingProbe = If[AssociationQ[probes],
+    Lookup[probes, "incoming", None], None];
+  summary = Lookup[basis, "NativeSummary", <||>];
+  AssociationQ[basisProbe] && AssociationQ[weightsProbe] &&
+    AssociationQ[incomingProbe] &&
+    Lookup[basisProbe, "verdict", None] === "pass" &&
+    Lookup[weightsProbe, "verdict", None] === "inconclusive" &&
+    Lookup[incomingProbe, "verdict", None] === "pass" &&
+    Lookup[normalFrame, "physical_clearance_source", None] ===
+      "propagated-enclosure" &&
+    Lookup[summary, "specialization_capability", None] =!=
+      "exact-rational-shadow-to-acb-local-v1"];
+
+nativeRationalShadowChartEligibleQ[system_Association] := Module[
+  {payload = {Lookup[system, "Matrix", {}],
+      Lookup[system, "Center", None],
+      Lookup[system, "ChartMap", <||>]}, numbers},
+  numbers = Cases[payload, _?NumberQ, {0, Infinity}];
+  AllTrue[numbers, MatchQ[#, _Integer | _Rational] &] &&
+    FreeQ[payload,
+      Power[_, exponent_Rational /; Denominator[exponent] =!= 1] |
+      _Root | _AlgebraicNumber]];
+
 nativeReceivingBasis[system_Association, req_Association, threads_,
     forceMonolithicRegular_:False,
     equationOwner_:Automatic] := Module[
@@ -2232,6 +2278,7 @@ nativeStreamTransportArm[atlas_Association, data_Association,
    diagnosticLocalReference, diagnosticPlanReference,
    posthopPath, posthopIdentity, posthopSaved, posthopManifest,
    posthopManifestPath,
+   shadowTarget,
    terminalMatchDigitsText =
      Environment["DE2_DIAGNOSTIC_TERMINAL_MATCH_DIGITS"],
    terminalMatchDigits, hopRefinement},
@@ -2399,6 +2446,32 @@ nativeStreamTransportArm[atlas_Association, data_Association,
         response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
           atlas["Plan"], arm, index, basis["Columns"], current,
           hopEpsilon, checkpointRoot, hopRefinement]];
+      If[nativeWeightEnclosureRationalShadowRetryQ[
+          response, basis, systems[[index]]],
+        If[nativeRationalShadowChartEligibleQ[systems[[index]]],
+          If[Environment["DE2_NATIVE_ACB_SHADOW_TRACE"] === "1",
+            Print["DE2 NATIVE SCC WEIGHT SHADOW TRIGGER arm=", arm,
+              " index=", index,
+              " center=", InputForm[
+                Lookup[systems[[index]], "Center", None]]]];
+          Scan[Quiet[DiffExp2`CppBackend`ReleasePersistentLocal[#]] &,
+            Lookup[basis, "Columns", {}]];
+          shadowTarget = DiffExp2`Solve`PrepareNativeSCCComposite[
+            systems[[index]], atlas["Request"]];
+          basis = nativeRationalShadowBasis[
+            systems[[index]], atlas["Request"],
+            Lookup[atlas, "Threads", Automatic], shadowTarget];
+          response = DiffExp2`CppBackend`ConsumePersistentTransportHop[
+            atlas["Plan"], arm, index, basis["Columns"], current,
+            hopEpsilon, checkpointRoot, hopRefinement];
+          If[Environment["DE2_NATIVE_ACB_SHADOW_TRACE"] === "1",
+            Print["DE2 NATIVE SCC WEIGHT SHADOW DONE arm=", arm,
+              " index=", index,
+              " status=", If[AssociationQ[response],
+                Lookup[response, "status", "error"], "failure"]]],
+          response = Join[response, <|
+            "weight_shadow_retry" ->
+              "upstream-accuracy-required-nonrational-chart"|>]]];
       If[Environment["DE2_DIAGNOSTIC_TERMINAL_MATCH"] === "1" &&
           index === Length[systems] && AssociationQ[response],
         Print["DE2 NATIVE TERMINAL MATCH ",

@@ -1,26 +1,31 @@
-// Certify the accuracy of a value-handoff coefficient without reducing an
-// Arb enclosure to midpoint-relative bits.  The component radii and Acb
-// upper magnitude are exact dyadic mag values; a zero-crossing coefficient
-// therefore still passes when its absolute enclosure is sufficiently tight.
-bool value_handoff_accurate(const ComplexBall& value,
-                            const Rational& relative_error_max) {
+// Return the least decimal relaxation which would make the value-handoff
+// coefficient pass.  The component radii, scale, and threshold remain exact
+// FLINT rationals, so this planning diagnostic also works beyond machine
+// exponent range.  UINT32_MAX denotes an invalid or effectively unbounded
+// coefficient rather than a retry recommendation.
+std::uint32_t value_handoff_required_additional_digits(
+    const ComplexBall& value,
+    const Rational& relative_error_max) {
   if (!value.is_finite() || relative_error_max.sign() <= 0 ||
       !(relative_error_max < Rational(1)))
-    return false;
+    return std::numeric_limits<std::uint32_t>::max();
   mag_t scale;
   mag_init(scale);
   acb_get_mag(scale, value.raw());
   if (mag_is_inf(scale)) {
     mag_clear(scale);
-    return false;
+    return std::numeric_limits<std::uint32_t>::max();
   }
   if (mag_cmp_2exp_si(scale, 0) < 0) mag_one(scale);
 
-  fmpq_t threshold, scale_exact, allowed, radius_exact;
+  fmpq_t threshold, scale_exact, allowed, radius_exact, relaxed, ten;
   fmpq_init(threshold);
   fmpq_init(scale_exact);
   fmpq_init(allowed);
   fmpq_init(radius_exact);
+  fmpq_init(relaxed);
+  fmpq_init(ten);
+  fmpq_set_ui(ten, 10, 1);
   const auto threshold_string = relative_error_max.str();
   const bool parsed =
       fmpq_set_str(threshold, threshold_string.c_str(), 10) == 0;
@@ -29,20 +34,147 @@ bool value_handoff_accurate(const ComplexBall& value,
     mag_get_fmpq(scale_exact, scale);
     fmpq_mul(allowed, threshold, scale_exact);
   }
-  const auto radius_passes = [&](const mag_t radius) {
-    if (!parsed || mag_is_inf(radius)) return false;
+  const auto radius_deficit = [&](const mag_t radius) {
+    if (!parsed || mag_is_inf(radius))
+      return std::numeric_limits<std::uint32_t>::max();
     mag_get_fmpq(radius_exact, radius);
-    return fmpq_cmp(radius_exact, allowed) <= 0;
+    fmpq_set(relaxed, allowed);
+    std::uint32_t digits = 0;
+    while (fmpq_cmp(radius_exact, relaxed) > 0) {
+      if (digits == std::numeric_limits<std::uint32_t>::max())
+        return digits;
+      ++digits;
+      fmpq_mul(relaxed, relaxed, ten);
+    }
+    return digits;
   };
-  const bool accurate =
-      radius_passes(arb_radref(acb_realref(value.raw()))) &&
-      radius_passes(arb_radref(acb_imagref(value.raw())));
+  const auto real_deficit =
+      radius_deficit(arb_radref(acb_realref(value.raw())));
+  const auto imaginary_deficit =
+      radius_deficit(arb_radref(acb_imagref(value.raw())));
+  const auto required = std::max(real_deficit, imaginary_deficit);
+  fmpq_clear(ten);
+  fmpq_clear(relaxed);
   fmpq_clear(radius_exact);
   fmpq_clear(allowed);
   fmpq_clear(scale_exact);
   fmpq_clear(threshold);
   mag_clear(scale);
-  return accurate;
+  return required;
+}
+
+// Certify the accuracy of a value-handoff coefficient without reducing an
+// Arb enclosure to midpoint-relative bits.  A zero-crossing coefficient
+// therefore still passes when its absolute enclosure is sufficiently tight.
+bool value_handoff_accurate(const ComplexBall& value,
+                            const Rational& relative_error_max) {
+  return value_handoff_required_additional_digits(
+      value, relative_error_max) == 0;
+}
+
+std::uint32_t value_handoff_accuracy_required_additional_digits(
+    const EpsilonVector& value, std::int32_t required_complete_max,
+    const Rational& relative_error_max) {
+  if (value.dimension == 0 ||
+      value.coefficients.size() !=
+          value.epsilon.width() * value.dimension ||
+      required_complete_max < value.epsilon.min_power ||
+      required_complete_max > value.epsilon.complete_max)
+    throw std::invalid_argument(
+        "value handoff accuracy prefix is inconsistent with its epsilon vector");
+  std::uint32_t required = 0;
+  for (std::int64_t raw_power = value.epsilon.min_power;
+       raw_power <= required_complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < value.dimension;
+         ++component)
+      required = std::max(
+          required,
+          value_handoff_required_additional_digits(
+              value.at(power, component), relative_error_max));
+  }
+  return required;
+}
+
+// Return the worst exact radius/allowance ratio over the consumable prefix.
+// Unlike the decimal deficit, this changes whenever the rigorous enclosure
+// improves within one decimal decade, so private Taylor-order planning can
+// distinguish real convergence from a fixed arithmetic/input-radius floor.
+std::optional<Rational> value_handoff_accuracy_excess_ratio(
+    const EpsilonVector& value, std::int32_t required_complete_max,
+    const Rational& relative_error_max) {
+  if (value.dimension == 0 ||
+      value.coefficients.size() !=
+          value.epsilon.width() * value.dimension ||
+      required_complete_max < value.epsilon.min_power ||
+      required_complete_max > value.epsilon.complete_max)
+    throw std::invalid_argument(
+        "value handoff accuracy prefix is inconsistent with its epsilon vector");
+  if (relative_error_max.sign() <= 0 ||
+      !(relative_error_max < Rational(1)))
+    return std::nullopt;
+
+  const auto rational_from_fmpq = [](const fmpq_t value) {
+    char* raw = fmpq_get_str(nullptr, 10, value);
+    if (raw == nullptr) throw std::bad_alloc();
+    std::string text(raw);
+    flint_free(raw);
+    return Rational(text);
+  };
+  std::optional<Rational> worst;
+  for (std::int64_t raw_power = value.epsilon.min_power;
+       raw_power <= required_complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < value.dimension;
+         ++component) {
+      const auto& coefficient = value.at(power, component);
+      if (!coefficient.is_finite()) return std::nullopt;
+      mag_t scale;
+      mag_init(scale);
+      acb_get_mag(scale, coefficient.raw());
+      if (mag_is_inf(scale)) {
+        mag_clear(scale);
+        return std::nullopt;
+      }
+      if (mag_cmp_2exp_si(scale, 0) < 0) mag_one(scale);
+
+      fmpq_t threshold, scale_exact, allowed, radius_exact, ratio;
+      fmpq_init(threshold);
+      fmpq_init(scale_exact);
+      fmpq_init(allowed);
+      fmpq_init(radius_exact);
+      fmpq_init(ratio);
+      const auto threshold_string = relative_error_max.str();
+      const bool parsed =
+          fmpq_set_str(threshold, threshold_string.c_str(), 10) == 0;
+      if (parsed) {
+        fmpq_canonicalise(threshold);
+        mag_get_fmpq(scale_exact, scale);
+        fmpq_mul(allowed, threshold, scale_exact);
+      }
+      const auto absorb_radius = [&](const mag_t radius) {
+        if (!parsed || mag_is_inf(radius) || fmpq_is_zero(allowed))
+          return false;
+        mag_get_fmpq(radius_exact, radius);
+        fmpq_div(ratio, radius_exact, allowed);
+        auto exact_ratio = rational_from_fmpq(ratio);
+        if (!worst.has_value() || exact_ratio > *worst)
+          worst = std::move(exact_ratio);
+        return true;
+      };
+      const bool valid =
+          absorb_radius(arb_radref(acb_realref(coefficient.raw()))) &&
+          absorb_radius(arb_radref(acb_imagref(coefficient.raw())));
+      fmpq_clear(ratio);
+      fmpq_clear(radius_exact);
+      fmpq_clear(allowed);
+      fmpq_clear(scale_exact);
+      fmpq_clear(threshold);
+      mag_clear(scale);
+      if (!valid) return std::nullopt;
+    }
+  }
+  return worst;
 }
 
 // A value hop can retain more epsilon coefficients than downstream
@@ -3575,3 +3707,94 @@ class StoredLocal final : public StoredLocalBase {
   double endpoint_limit_ms_ = 0.0;
   double line_integration_ms_ = 0.0;
 };
+
+// Reassociate an ordinary retained point evaluation through its certified
+// physical q/C recurrence.  The direct evaluation remains authoritative
+// unless the complete stored prefix can be independently reconstructed, the
+// bounded transfer operator is applicable, and every output coefficient
+// overlaps the historical enclosure.
+std::optional<FactorizedOrdinaryCenterEvaluation>
+certified_ordinary_center_factorization(
+    const LocalSolution<ComplexBall>& source,
+    const std::shared_ptr<
+        const PreparedPhysicalClearedODE<ComplexBall>>& equation,
+    const RealEvaluationPoint& point,
+    const EvaluationOptions& options,
+    const LocalEvaluation& direct,
+    const std::string& context) {
+  constexpr std::size_t kMaximumOperatorColumns = 256;
+  if (!equation ||
+      source.epsilon.width() >
+          std::numeric_limits<std::size_t>::max() /
+              source.dimension ||
+      source.epsilon.width() * source.dimension >
+          kMaximumOperatorColumns)
+    return std::nullopt;
+  const auto replay =
+      prepare_physical_regular_homogeneous_tail_model(
+          *equation, source);
+  if (replay.status != TailMajorantStatus::Certified ||
+      !replay.model.has_value())
+    return std::nullopt;
+  auto factorized = evaluate_ordinary_center_value_factorized(
+      *equation, replay.model->reconstructed, point, options,
+      kMaximumOperatorColumns);
+  if (!factorized.eligible)
+    return std::nullopt;
+  if (factorized.evaluation.value.dimension !=
+          direct.value.dimension ||
+      factorized.evaluation.value.epsilon.complete_max !=
+          direct.value.epsilon.complete_max ||
+      factorized.evaluation.value.epsilon.min_power >
+          direct.value.epsilon.min_power)
+    throw std::logic_error(
+        context +
+        ": factorized ordinary point evaluation changed its retained "
+        "epsilon coverage");
+  for (std::int64_t raw_power =
+           direct.value.epsilon.min_power;
+       raw_power <= direct.value.epsilon.complete_max;
+       ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0;
+         component < direct.value.dimension; ++component)
+      if (!acb_overlaps(
+              direct.value.at(power, component).raw(),
+              factorized.evaluation.value
+                  .at(power, component).raw()))
+        throw std::domain_error(
+            context +
+            ": factorized ordinary point evaluation is disjoint from "
+            "the retained direct evaluation; epsilon_power=" +
+            std::to_string(power) +
+            "; component=" + std::to_string(component));
+  }
+  if (std::getenv(
+          "DE2_DIAGNOSTIC_FACTORIZED_ORDINARY_EVALUATION") !=
+          nullptr ||
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") != nullptr)
+    std::cerr
+        << "factorized-ordinary-point-authority context="
+        << context
+        << " operator_columns="
+        << factorized.operator_columns
+        << " policy=certified-q/C-prefix-replay-and-full-overlap-v1"
+        << '\n';
+  return factorized;
+}
+
+LocalEvaluation
+certified_ordinary_center_evaluation_with_factorized_fallback(
+    const LocalSolution<ComplexBall>& source,
+    const std::shared_ptr<
+        const PreparedPhysicalClearedODE<ComplexBall>>& equation,
+    const RealEvaluationPoint& point,
+    const EvaluationOptions& options,
+    LocalEvaluation direct,
+    const std::string& context) {
+  auto factorized = certified_ordinary_center_factorization(
+      source, equation, point, options, direct, context);
+  return factorized.has_value()
+      ? std::move(factorized->evaluation)
+      : std::move(direct);
+}

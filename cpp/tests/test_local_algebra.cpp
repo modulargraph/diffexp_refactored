@@ -227,6 +227,14 @@ int main() {
   const auto matched_prefix =
       diffexp2::restrict_local_taylor_prefix(
           input, 1, "matched-prefix");
+  std::string oversized_prefix_detail;
+  try {
+    (void)diffexp2::restrict_local_taylor_prefix(
+        input, input.taylor_complete_max + 1,
+        "oversized-matched-prefix");
+  } catch (const std::invalid_argument& error) {
+    oversized_prefix_detail = error.what();
+  }
   const auto product = diffexp2::multiply_prepared_rational(
       input, multiplier(-1, 1));
 
@@ -241,6 +249,17 @@ int main() {
             matched_prefix.prescriptions.front().factor_exact ==
                 input.prescriptions.front().factor_exact &&
             matched_prefix.checkpoint_identity == "matched-prefix" &&
+            oversized_prefix_detail.find(
+                "requested_complete_max=" +
+                std::to_string(input.taylor_complete_max + 1)) !=
+                std::string::npos &&
+            oversized_prefix_detail.find(
+                "retained_complete_max=" +
+                std::to_string(input.taylor_complete_max)) !=
+                std::string::npos &&
+            oversized_prefix_detail.find(
+                "requested_checkpoint_identity=oversized-matched-prefix") !=
+                std::string::npos &&
             equal(matched_prefix.sectors.front().coefficients[
                 index(2, 1, 1, 2, 2)], "212") &&
             product.epsilon.min_power == -2 &&

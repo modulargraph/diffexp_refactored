@@ -680,11 +680,21 @@ json::object encode_acb_match_residual_diagnostics(
   std::size_t pass = 0, fail = 0, inconclusive = 0;
   std::size_t required_pass = 0, required_fail = 0,
               required_inconclusive = 0;
+  std::size_t required_zero_overlaps = 0;
+  double maximum_required_residual_to_scale_upper = 0.0;
   json::array inconclusive_examples;
   json::array required_inconclusive_examples;
   for (const auto& coefficient : diagnostics.coefficients) {
     const bool required =
         coefficient.epsilon_power <= diagnostics.required_complete_max;
+    if (required) {
+      if (coefficient.residual_lower.is_zero())
+        ++required_zero_overlaps;
+      maximum_required_residual_to_scale_upper = std::max(
+          maximum_required_residual_to_scale_upper,
+          (coefficient.residual_upper / coefficient.scale_lower)
+              .approximate_upper());
+    }
     if (coefficient.verdict == AcbMatchingResidualVerdict::Pass) {
       ++pass;
       if (required) ++required_pass;
@@ -726,6 +736,10 @@ json::object encode_acb_match_residual_diagnostics(
        json::object{{"pass", required_pass},
                     {"fail", required_fail},
                     {"inconclusive", required_inconclusive}}},
+      {"required_zero_overlapping_coefficients",
+       required_zero_overlaps},
+      {"maximum_required_residual_to_scale_upper_approx",
+       maximum_required_residual_to_scale_upper},
       {"inconclusive_examples", std::move(inconclusive_examples)},
       {"required_inconclusive_examples",
        std::move(required_inconclusive_examples)},
@@ -1011,6 +1025,11 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
                       {"steps", refined_.refinement_steps},
                       {"factorization_preconditioner",
                        refined_.factorization_preconditioner},
+                      {"factorized_authoritative_rhs",
+                       refined_.factorized_authoritative_rhs},
+                      {"factorized_authoritative_rhs_columns",
+                       refined_
+                           .factorized_authoritative_rhs_columns},
                       {"factorizations", 1}}},
         {"weight_windows", std::move(weight_windows)},
         {"transformed_weight_windows",
@@ -1212,6 +1231,20 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
     return static_cast<std::uint32_t>(*common_width - 1);
   }
 
+  std::optional<std::uint32_t>
+  incoming_matching_taylor_complete_max() const {
+    const auto* raw =
+        incoming_source_.if_contains("matching_taylor_width");
+    if (raw == nullptr) return std::nullopt;
+    const auto width =
+        as_u64(*raw, "retained Acb incoming matching Taylor width");
+    if (width == 0 ||
+        width - 1 > std::numeric_limits<std::uint32_t>::max())
+      throw std::logic_error(
+          "retained Acb incoming matching Taylor prefix is invalid");
+    return static_cast<std::uint32_t>(width - 1);
+  }
+
   bool certified_for_materialization() const {
     return !refined_.residual_history.empty() &&
         refined_.residual_history.back().verdict ==
@@ -1406,7 +1439,11 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
              {"residual_history", std::move(history)},
              {"refinement_steps", refined_.refinement_steps},
              {"factorization_preconditioner",
-              refined_.factorization_preconditioner}}},
+              refined_.factorization_preconditioner},
+             {"factorized_authoritative_rhs",
+              refined_.factorized_authoritative_rhs},
+             {"factorized_authoritative_rhs_columns",
+              refined_.factorized_authoritative_rhs_columns}}},
         {"elapsed_ms", elapsed_ms_}};
     if (!residual_certificate_identity_.empty())
       record["residual_certificate_identity"] =
@@ -3756,9 +3793,12 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   const auto exact_physical_residual_correction_map = [&]()
       -> std::optional<std::function<FiniteLaurentVector<ComplexBall>(
           const FiniteLaurentVector<ComplexBall>&)>> {
-    if (!normalized_matching_frame ||
-        !exact_shadow_physical_transformed_basis.has_value())
-      return std::nullopt;
+    if (!normalized_matching_frame)
+      return std::function<FiniteLaurentVector<ComplexBall>(
+          const FiniteLaurentVector<ComplexBall>&)>{
+          [](const FiniteLaurentVector<ComplexBall>& residual) {
+            return residual;
+          }};
     const auto receiving_owner =
         basis.front()->retained_equation_owner();
     if (!receiving_owner)
@@ -3778,7 +3818,24 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       return std::move(normalized->first);
     };
   };
-  const auto run_refinement = [&](bool force_midpoint_proposal = false) {
+  const auto finite_physical_transformed_basis = [&](
+      const ExactLaurentMatrix<ComplexBall>& transformation)
+      -> std::optional<FiniteLaurentMatrix<ComplexBall>> {
+    if (!normalized_matching_frame)
+      return right_multiply_finite_by_exact_laurent(
+          evaluated_basis, transformation);
+    if (!matching_right_normalization_matrix.has_value())
+      return std::nullopt;
+    auto physical_right_composition =
+        right_multiply_finite_by_exact_laurent(
+            *matching_right_normalization_matrix,
+            transformation);
+    return right_multiply_finite_laurent_matrices(
+        evaluated_basis, physical_right_composition);
+  };
+  const auto run_refinement = [&](
+      bool force_midpoint_proposal = false,
+      bool factorized_authoritative_rhs_proposal = false) {
     selected_acb_right_materialization_preconditioner.reset();
     const auto refinement_context =
         checkpoint_identity + ":refined-acb-match[formal-negative-zero=" +
@@ -3881,6 +3938,10 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                 right_multiply_finite_by_exact_laurent(
                     *conditioned_physical_residual_basis,
                     right_preconditioner);
+          else if (factorized_authoritative_rhs_proposal)
+            conditioned_physical_residual_basis =
+                finite_physical_transformed_basis(
+                    conditioned_transformation);
           auto physical_residual_correction_map =
               exact_physical_residual_correction_map();
           auto conditioned = refine_acb_finite_laurent_match(
@@ -3904,7 +3965,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
               force_midpoint_proposal ||
                   conditioned_physical_residual_basis.has_value(),
               std::size_t{0},
-              transformed_weight_structural_min_power);
+              transformed_weight_structural_min_power,
+              factorized_authoritative_rhs_proposal);
           normal_frame_attempt["right_preconditioner_residual"] =
               conditioned.residual_history.empty()
               ? json::value(nullptr)
@@ -3941,11 +4003,20 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
               *exact_lattice.acb_transformation);
       auto physical_residual_correction_map =
           exact_physical_residual_correction_map();
+      auto factorized_physical_basis =
+          factorized_authoritative_rhs_proposal &&
+                  !exact_shadow_physical_transformed_basis.has_value()
+          ? finite_physical_transformed_basis(
+                *exact_lattice.acb_transformation)
+          : std::nullopt;
       const auto* authoritative_physical_basis =
           normalized_matching_frame &&
-              exact_shadow_physical_transformed_basis.has_value() &&
-              !diagnostic_normalized_match_authority
-          ? &*exact_shadow_physical_transformed_basis : nullptr;
+                  !diagnostic_normalized_match_authority &&
+                  exact_shadow_physical_transformed_basis.has_value()
+          ? &*exact_shadow_physical_transformed_basis
+          : factorized_physical_basis.has_value()
+          ? &*factorized_physical_basis
+          : nullptr;
       return refine_acb_finite_laurent_match(
           matching_basis, matching_incoming,
           *exact_lattice.acb_transformation, refinement,
@@ -3961,7 +4032,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
           force_midpoint_proposal ||
               authoritative_physical_basis != nullptr,
           std::size_t{0},
-          transformed_weight_structural_min_power);
+          transformed_weight_structural_min_power,
+          factorized_authoritative_rhs_proposal);
     }
     auto specialized_transformation =
         specialize_exact_rational_laurent_matrix_to_acb(
@@ -3970,11 +4042,20 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         fused_base_transformed_basis(specialized_transformation);
     auto physical_residual_correction_map =
         exact_physical_residual_correction_map();
+    auto factorized_physical_basis =
+        factorized_authoritative_rhs_proposal &&
+                !exact_shadow_physical_transformed_basis.has_value()
+        ? finite_physical_transformed_basis(
+              specialized_transformation)
+        : std::nullopt;
     const auto* authoritative_physical_basis =
         normalized_matching_frame &&
-            exact_shadow_physical_transformed_basis.has_value() &&
-            !diagnostic_normalized_match_authority
-        ? &*exact_shadow_physical_transformed_basis : nullptr;
+                !diagnostic_normalized_match_authority &&
+                exact_shadow_physical_transformed_basis.has_value()
+        ? &*exact_shadow_physical_transformed_basis
+        : factorized_physical_basis.has_value()
+        ? &*factorized_physical_basis
+        : nullptr;
     return refine_acb_finite_laurent_match(
         matching_basis, matching_incoming,
         specialized_transformation, refinement,
@@ -3992,7 +4073,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         force_midpoint_proposal ||
             authoritative_physical_basis != nullptr,
         std::size_t{0},
-        transformed_weight_structural_min_power);
+        transformed_weight_structural_min_power,
+        factorized_authoritative_rhs_proposal);
   };
   RefinedAcbLaurentMatch refined;
   try {
@@ -4217,16 +4299,69 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                 source_probes[source] =
                     encode_acb_match_residual_diagnostics(
                         probe.diagnostics);
+                return probe.diagnostics;
               };
-          record_source("basis", evaluated_basis, midpoint_weights,
-                        midpoint_incoming);
-          record_source("weights", midpoint_basis, *physical_weights,
-                        midpoint_incoming);
-          record_source("incoming", midpoint_basis, midpoint_weights,
-                        incoming_value);
+          const auto basis_probe =
+              record_source("basis", evaluated_basis, midpoint_weights,
+                            midpoint_incoming);
+          const auto weights_probe =
+              record_source("weights", midpoint_basis, *physical_weights,
+                            midpoint_incoming);
+          const auto incoming_probe =
+              record_source("incoming", midpoint_basis, midpoint_weights,
+                            incoming_value);
           normal_frame_attempt[
               "physical_clearance_source_probes"] =
               std::move(source_probes);
+          if (acb_factorized_rhs_proposal_applicable(
+                  physical_certificate->diagnostics,
+                  midpoint_probe.diagnostics, basis_probe,
+                  weights_probe, incoming_probe)) {
+            auto factorized_candidate =
+                run_refinement(true, true);
+            normal_frame_attempt[
+                "factorized_authoritative_rhs_columns"] =
+                factorized_candidate
+                    .factorized_authoritative_rhs_columns;
+            if (!factorized_candidate.residual_history.empty() &&
+                acb_matching_residual_certified_pass(
+                    factorized_candidate.residual_history.back())) {
+              refined = std::move(factorized_candidate);
+              physical_weights =
+                  receiving_owner
+                      ->denormalize_acb_matching_weights(
+                          refined.weights);
+              if (!physical_weights.has_value())
+                throw std::logic_error(
+                    "factorized authoritative-rhs proposal could not return matching weights to the physical basis");
+              physical_certificate =
+                  matching_detail::AcbResidualEvaluation{
+                      refined.residual,
+                      refined.residual_history.back()};
+              physical_prefix_preserved = true;
+              residual_certificate_identity =
+                  exact_lattice.identity +
+                  ":factorized-authoritative-rhs-physical-residual";
+              normal_frame_attempt[
+                  "factorized_authoritative_rhs_proposal"] =
+                  "certified";
+              normal_frame_attempt["status"] =
+                  "certified-factorized-authoritative-rhs";
+              normal_frame_attempt["physical_residual"] =
+                  encode_acb_match_residual_diagnostics(
+                      refined.residual_history.back());
+            } else {
+              normal_frame_attempt[
+                  "factorized_authoritative_rhs_proposal"] =
+                  "full-ball-operator-residual-not-certified";
+              if (!factorized_candidate.residual_history.empty())
+                normal_frame_attempt[
+                    "factorized_authoritative_rhs_residual"] =
+                    encode_acb_match_residual_diagnostics(
+                        factorized_candidate
+                            .residual_history.back());
+            }
+          }
         }
       } catch (const std::exception& error) {
         normal_frame_attempt["physical_clearance_source"] =
@@ -4360,26 +4495,22 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                             incoming_value);
         normal_frame_attempt["physical_clearance_source_probes"] =
             std::move(source_probes);
-        const auto certified_pass =
-            [](const AcbMatchingResidualDiagnostics& diagnostics) {
-              return diagnostics.complete_through_required &&
-                  diagnostics.verdict ==
-                      AcbMatchingResidualVerdict::Pass;
-            };
-        if (certified_pass(basis_probe) &&
-            weights_probe.complete_through_required &&
-            weights_probe.verdict ==
-                AcbMatchingResidualVerdict::Inconclusive &&
-            certified_pass(incoming_probe)) {
-          // The solve has magnified harmless input radii into the candidate
-          // weights.  Re-solve the same finite Laurent problem using
+        const auto authoritative_probe =
+            refined.residual_history.back();
+        if (acb_midpoint_weight_proposal_applicable(
+                authoritative_probe,
+                midpoint_probe.diagnostics, basis_probe, weights_probe,
+                incoming_probe)) {
+          // The solve has either magnified harmless input radii into the
+          // candidate weights or copied an otherwise acceptable incoming
+          // radius into them.  Re-solve the same finite Laurent problem using
           // zero-radius midpoint data only to propose coordinates.  The
           // untouched full-ball basis and incoming boundary still form the
           // authoritative forward residual inside run_refinement(), so this
           // cannot publish a midpoint-only decision.
           auto midpoint_candidate = run_refinement(true);
           if (!midpoint_candidate.residual_history.empty() &&
-              certified_pass(
+              acb_matching_residual_certified_pass(
                   midpoint_candidate.residual_history.back())) {
             refined = std::move(midpoint_candidate);
             normal_frame_attempt[
@@ -4397,6 +4528,42 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                   "regular_midpoint_weight_proposal_residual"] =
                   encode_acb_match_residual_diagnostics(
                       midpoint_candidate.residual_history.back());
+          }
+        }
+        if (!acb_matching_residual_certified_pass(
+                refined.residual_history.back()) &&
+            acb_factorized_rhs_proposal_applicable(
+                authoritative_probe, midpoint_probe.diagnostics,
+                basis_probe, weights_probe, incoming_probe)) {
+          auto factorized_candidate =
+              run_refinement(true, true);
+          normal_frame_attempt[
+              "factorized_authoritative_rhs_columns"] =
+              factorized_candidate
+                  .factorized_authoritative_rhs_columns;
+          if (!factorized_candidate.residual_history.empty() &&
+              acb_matching_residual_certified_pass(
+                  factorized_candidate.residual_history.back())) {
+            refined = std::move(factorized_candidate);
+            normal_frame_attempt[
+                "factorized_authoritative_rhs_proposal"] =
+                "certified";
+            normal_frame_attempt["status"] =
+                "certified-factorized-authoritative-rhs";
+            normal_frame_attempt[
+                "factorized_authoritative_rhs_residual"] =
+                encode_acb_match_residual_diagnostics(
+                    refined.residual_history.back());
+          } else {
+            normal_frame_attempt[
+                "factorized_authoritative_rhs_proposal"] =
+                "full-ball-operator-residual-not-certified";
+            if (!factorized_candidate.residual_history.empty())
+              normal_frame_attempt[
+                  "factorized_authoritative_rhs_residual"] =
+                  encode_acb_match_residual_diagnostics(
+                      factorized_candidate
+                          .residual_history.back());
           }
         }
       }

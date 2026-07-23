@@ -37,6 +37,407 @@ json::object encode_error_envelope_summary(const ErrorEnvelope& error) {
   return result;
 }
 
+void diagnose_plain_regular_taylor_evaluation(
+    const LocalSolution<ComplexBall>& solution,
+    const RealEvaluationPoint& point,
+    const LocalEvaluation& evaluation,
+    const std::string& context) {
+  const auto* requested =
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR");
+  if (requested == nullptr) return;
+  const std::string request(requested);
+  const auto separator = request.find(':');
+  if (separator == std::string::npos ||
+      request.find(':', separator + 1) != std::string::npos)
+    throw std::invalid_argument(
+        "DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR must be "
+        "<epsilon-power>:<component>");
+  const auto epsilon_power =
+      static_cast<std::int32_t>(std::stoll(request.substr(0, separator)));
+  const auto component_wide =
+      std::stoull(request.substr(separator + 1));
+  if (component_wide >= solution.dimension)
+    throw std::invalid_argument(
+        "DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR component is outside "
+        "the incoming local");
+  const auto component = static_cast<std::uint32_t>(component_wide);
+  if (epsilon_power < solution.epsilon.min_power ||
+      epsilon_power > solution.epsilon.complete_max ||
+      epsilon_power < evaluation.value.epsilon.min_power ||
+      epsilon_power > evaluation.value.epsilon.complete_max) {
+    std::cerr
+        << "terminal-incoming-taylor-summary context=" << context
+        << " status=outside-retained-window"
+        << " epsilon_power=" << epsilon_power
+        << " component=" << component << '\n';
+    return;
+  }
+
+  for (const auto& sector : solution.sectors)
+    if (sector.a.is_zero != TruthValue::Yes ||
+        sector.b.is_zero != TruthValue::Yes ||
+        sector.log_power != 0) {
+      std::cerr
+          << "terminal-incoming-taylor-summary context=" << context
+          << " status=unsupported-nonordinary-sector"
+          << " epsilon_power=" << epsilon_power
+          << " component=" << component << '\n';
+      return;
+    }
+
+  ComplexBall signed_t = point.modulus;
+  if (point.sign < 0) signed_t = -signed_t;
+  std::vector<ComplexBall> t_powers(solution.taylor_width(),
+                                    ComplexBall(1));
+  for (std::size_t taylor = 1;
+       taylor < solution.taylor_width(); ++taylor)
+    t_powers[taylor] = t_powers[taylor - 1] * signed_t;
+
+  const auto epsilon_index = static_cast<std::size_t>(
+      epsilon_power - solution.epsilon.min_power);
+  ComplexBall recomposed(0);
+  auto summed_uncertainty = Magnitude::zero();
+  auto dominant_uncertainty = Magnitude::zero();
+  std::optional<std::size_t> dominant_sector;
+  std::optional<std::size_t> dominant_taylor;
+  std::optional<ComplexBall> dominant_coefficient;
+  std::optional<ComplexBall> dominant_term;
+  for (std::size_t sector_index = 0;
+       sector_index < solution.sectors.size(); ++sector_index) {
+    const auto& sector = solution.sectors[sector_index];
+    for (std::size_t taylor = 0;
+         taylor < solution.taylor_width(); ++taylor) {
+      const auto& coefficient = sector.coefficients[
+          local_detail::sector_index(
+              solution, epsilon_index, taylor, component)];
+      const auto term = coefficient * t_powers[taylor];
+      recomposed += term;
+      const auto uncertainty = Magnitude::upper_abs(
+          term - matching_detail::acb_midpoint_value(term));
+      summed_uncertainty += uncertainty;
+      if (!dominant_taylor.has_value() ||
+          !(uncertainty <= dominant_uncertainty)) {
+        dominant_uncertainty = uncertainty;
+        dominant_sector = sector_index;
+        dominant_taylor = taylor;
+        dominant_coefficient = coefficient;
+        dominant_term = term;
+      }
+      std::cerr
+          << "terminal-incoming-taylor-term context=" << context
+          << " epsilon_power=" << epsilon_power
+          << " component=" << component
+          << " sector=" << sector_index
+          << " taylor=" << taylor
+          << " coefficient_midpoint=("
+          << coefficient.real_midpoint(12) << ","
+          << coefficient.imag_midpoint(12) << ")"
+          << " coefficient_radius2exp=("
+          << coefficient.real_radius_exponent() << ","
+          << coefficient.imag_radius_exponent() << ")"
+          << " term_midpoint=("
+          << term.real_midpoint(12) << ","
+          << term.imag_midpoint(12) << ")"
+          << " term_radius2exp=("
+          << term.real_radius_exponent() << ","
+          << term.imag_radius_exponent() << ")"
+          << " uncertainty_upper="
+          << uncertainty.approximate_upper()
+          << '\n';
+    }
+  }
+  if (!dominant_sector.has_value() || !dominant_taylor.has_value() ||
+      !dominant_coefficient.has_value() || !dominant_term.has_value())
+    throw std::logic_error(
+        "terminal incoming Taylor diagnostic found no retained term");
+  const auto& authoritative =
+      evaluation.value.at(epsilon_power, component);
+  std::cerr
+      << "terminal-incoming-taylor-summary context=" << context
+      << " status=ordinary"
+      << " epsilon_power=" << epsilon_power
+      << " component=" << component
+      << " point_exact=" << point.exact_coordinate
+      << " retained_taylor_order="
+      << solution.taylor_complete_max
+      << " dominant_sector=" << *dominant_sector
+      << " dominant_taylor=" << *dominant_taylor
+      << " dominant_coefficient_radius2exp=("
+      << dominant_coefficient->real_radius_exponent() << ","
+      << dominant_coefficient->imag_radius_exponent() << ")"
+      << " dominant_term_radius2exp=("
+      << dominant_term->real_radius_exponent() << ","
+      << dominant_term->imag_radius_exponent() << ")"
+      << " recomposed_radius2exp=("
+      << recomposed.real_radius_exponent() << ","
+      << recomposed.imag_radius_exponent() << ")"
+      << " authoritative_radius2exp=("
+      << authoritative.real_radius_exponent() << ","
+      << authoritative.imag_radius_exponent() << ")"
+      << " dominant_uncertainty_upper="
+      << dominant_uncertainty.approximate_upper()
+      << " summed_uncertainty_upper="
+      << summed_uncertainty.approximate_upper()
+      << '\n';
+}
+
+EpsilonVector inflate_certified_physical_evaluation(
+    const CertifiedLocalEvaluation& certified,
+    const EpsilonWindow& required_frame,
+    const std::string& context) {
+  if (certified.tail.status != TailMajorantStatus::Certified ||
+      certified.tail.value.guarantee != ErrorGuarantee::Certified ||
+      !tail_majorant_detail::same_epsilon_window(
+          certified.tail.value.frame, required_frame) ||
+      certified.tail.value.absolute.size() != required_frame.width())
+    throw std::logic_error(
+        context + ": certified physical evaluation has the wrong tail frame");
+  auto value = certified.evaluation.value;
+  value.error = ErrorEnvelope{};
+  if (value.epsilon.complete_max != required_frame.complete_max ||
+      value.epsilon.min_power < required_frame.min_power)
+    throw std::logic_error(
+        context +
+        ": certified physical evaluation changed its retained epsilon frame");
+  if (required_frame.min_power < value.epsilon.min_power) {
+    auto widened = physical_ode_detail::zero_epsilon_vector(
+        required_frame, value.dimension);
+    for (std::int64_t raw_power = value.epsilon.min_power;
+         raw_power <= value.epsilon.complete_max; ++raw_power) {
+      const auto power = static_cast<std::int32_t>(raw_power);
+      for (std::uint32_t component = 0;
+           component < value.dimension; ++component)
+        widened.at(power, component) = value.at(power, component);
+    }
+    value = std::move(widened);
+  }
+  for (std::int64_t raw_power = required_frame.min_power;
+       raw_power <= required_frame.complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    const auto row = static_cast<std::size_t>(
+        raw_power - required_frame.min_power);
+    for (std::uint32_t component = 0;
+         component < value.dimension; ++component)
+      certified.tail.value.absolute[row].add_error_to(
+          value.at(power, component));
+  }
+  return value;
+}
+
+std::optional<LocalEvaluation>
+diagnose_two_step_terminal_physical_recenter(
+    const LocalSolution<ComplexBall>& source,
+    const std::shared_ptr<
+        const PreparedPhysicalClearedODE<ComplexBall>>& equation,
+    const RealEvaluationPoint& target,
+    const EvaluationOptions& options,
+    const std::string& context) {
+  const auto* mode =
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_PHYSICAL_RECENTER");
+  if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR") != nullptr)
+    std::cerr
+        << "terminal-physical-recenter-env context=" << context
+        << " value=" << (mode == nullptr ? "unset" : mode) << '\n';
+  if (mode == nullptr) return std::nullopt;
+  if (std::string(mode) != "report")
+    throw std::invalid_argument(
+        "DE2_DIAGNOSTIC_TERMINAL_PHYSICAL_RECENTER must be report");
+  const auto fail = [&](const std::string& detail)
+      -> std::optional<LocalEvaluation> {
+    std::cerr
+        << "terminal-physical-recenter context=" << context
+        << " status=inconclusive detail=" << detail << '\n';
+    return std::nullopt;
+  };
+  if (!equation)
+    return fail("no-retained-physical-equation");
+  if (!target.certified_algebraic && target.exact_coordinate.empty())
+    return fail("target-has-no-exact-coordinate");
+  const Rational target_exact(target.exact_coordinate);
+  if (target_exact.is_zero())
+    return fail("target-is-already-the-source-center");
+  if (source.chart.infinite_radius || source.chart.radius_exact.empty())
+    return fail("source-chart-has-no-finite-exact-radius");
+  const Rational source_radius(source.chart.radius_exact);
+  const Rational intermediate = target_exact / Rational(2);
+  const auto intermediate_modulus =
+      exact_path_detail::abs(intermediate);
+  if (!(intermediate_modulus < source_radius))
+    return fail("intermediate-point-is-outside-source-chart");
+
+  auto source_prepared =
+      prepare_physical_regular_homogeneous_tail_model(
+          *equation, source);
+  if (source_prepared.status != TailMajorantStatus::Certified ||
+      !source_prepared.model.has_value())
+    return fail(
+        "source-tail-model-" +
+        std::string(tail_majorant_status_name(source_prepared.status)) +
+        ":" + source_prepared.detail);
+  const auto find_witness = [](
+      const PhysicalRegularTaylorTailModel& model,
+      const RealEvaluationPoint& point,
+      const Rational& point_modulus,
+      const Rational& radius,
+      const EvaluationOptions& evaluation_options)
+      -> std::optional<CertifiedLocalEvaluation> {
+    Rational denominator(1);
+    for (std::uint32_t exponent = 1; exponent <= 16; ++exponent) {
+      denominator *= Rational(2);
+      const auto witness =
+          point_modulus + (radius - point_modulus) / denominator;
+      auto evaluated =
+          evaluate_physical_local_solution_with_certified_tail(
+              model, point, witness.str(), evaluation_options);
+      if (evaluated.tail.status == TailMajorantStatus::Certified)
+        return evaluated;
+    }
+    return std::nullopt;
+  };
+  const auto intermediate_point =
+      RealEvaluationPoint::rational(intermediate.str());
+  auto source_certified = find_witness(
+      *source_prepared.model, intermediate_point,
+      intermediate_modulus, source_radius, options);
+  if (!source_certified.has_value())
+    return fail("source-to-intermediate-has-no-certified-dyadic-witness");
+  auto intermediate_value = inflate_certified_physical_evaluation(
+      *source_certified, source_prepared.model->epsilon,
+      context + ": source-to-intermediate");
+
+  auto recentered =
+      recenter_physical_cleared_ode(*equation, intermediate);
+  if (!recentered.eligible || !recentered.equation.has_value())
+    return fail("recentered-equation-ineligible:" + recentered.reason);
+  const auto recentered_radius =
+      source_radius - intermediate_modulus;
+  const auto return_exact = target_exact - intermediate;
+  const auto return_modulus =
+      exact_path_detail::abs(return_exact);
+  if (!(return_modulus < recentered_radius))
+    return fail("target-is-outside-conservative-recentered-chart");
+  const auto evolved = evolve_ordinary_center_value<ComplexBall>(
+      *recentered.equation, intermediate_value,
+      source.taylor_complete_max);
+  if (!evolved.eligible)
+    return fail("recentered-evolution-ineligible:" + evolved.reason);
+  ChartGeometry recentered_chart;
+  recentered_chart.center_exact = "0";
+  recentered_chart.scale_exact = "1";
+  recentered_chart.radius_exact = recentered_radius.str();
+  recentered_chart.radius =
+      ComplexBall::from_strings(recentered_radius.str());
+  recentered_chart.infinite_radius = false;
+  auto recentered_solution = ordinary_evolution_local_solution(
+      evolved, std::move(recentered_chart), source.prescriptions,
+      source.checkpoint_identity +
+          ":diagnostic-terminal-physical-half-recenter");
+  auto recentered_prepared =
+      prepare_physical_regular_homogeneous_tail_model(
+          *recentered.equation, recentered_solution);
+  if (recentered_prepared.status != TailMajorantStatus::Certified ||
+      !recentered_prepared.model.has_value())
+    return fail(
+        "recentered-tail-model-" +
+        std::string(tail_majorant_status_name(
+            recentered_prepared.status)) +
+        ":" + recentered_prepared.detail);
+  EvaluationOptions recentered_options = options;
+  recentered_options.imaginary_sign.reset();
+  const auto return_point =
+      RealEvaluationPoint::rational(return_exact.str());
+  auto return_certified = find_witness(
+      *recentered_prepared.model, return_point,
+      return_modulus, recentered_radius, recentered_options);
+  if (!return_certified.has_value())
+    return fail("recentered-return-has-no-certified-dyadic-witness");
+  auto final_value = inflate_certified_physical_evaluation(
+      *return_certified, recentered_prepared.model->epsilon,
+      context + ": recentered-return");
+  auto result = return_certified->evaluation;
+  result.value = std::move(final_value);
+  result.value.error = ErrorEnvelope{};
+
+  double source_tail_max = 0.0;
+  for (const auto& bound :
+       source_certified->tail.value.absolute)
+    source_tail_max =
+        std::max(source_tail_max, bound.approximate_upper());
+  double return_tail_max = 0.0;
+  for (const auto& bound :
+       return_certified->tail.value.absolute)
+    return_tail_max =
+        std::max(return_tail_max, bound.approximate_upper());
+  std::cerr
+      << "terminal-physical-recenter context=" << context
+      << " status=certified"
+      << " target_exact=" << target_exact.str()
+      << " intermediate_exact=" << intermediate.str()
+      << " recentered_return_exact=" << return_exact.str()
+      << " source_taylor_order="
+      << source_prepared.model->taylor_complete_max
+      << " recentered_taylor_order="
+      << recentered_prepared.model->taylor_complete_max
+      << " source_tail_upper_max=" << source_tail_max
+      << " return_tail_upper_max=" << return_tail_max
+      << '\n';
+  return result;
+}
+
+std::optional<LocalEvaluation>
+diagnose_factorized_terminal_physical_evaluation(
+    const LocalSolution<ComplexBall>& source,
+    const std::shared_ptr<
+        const PreparedPhysicalClearedODE<ComplexBall>>& equation,
+    const RealEvaluationPoint& target,
+    const EvaluationOptions& options,
+    const std::string& context) {
+  const auto* mode =
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_FACTORIZED_EVALUATION");
+  if (mode == nullptr) return std::nullopt;
+  if (std::string(mode) != "report")
+    throw std::invalid_argument(
+        "DE2_DIAGNOSTIC_TERMINAL_FACTORIZED_EVALUATION must be report");
+  const auto fail = [&](const std::string& detail)
+      -> std::optional<LocalEvaluation> {
+    std::cerr
+        << "terminal-factorized-physical-evaluation context=" << context
+        << " status=inconclusive detail=" << detail << '\n';
+    return std::nullopt;
+  };
+  if (!equation)
+    return fail("no-retained-physical-equation");
+  const auto started = std::chrono::steady_clock::now();
+  auto factorized = evaluate_ordinary_center_value_factorized(
+      *equation, source, target, options);
+  if (!factorized.eligible)
+    return fail(factorized.reason);
+  const auto elapsed_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+  std::cerr
+      << "terminal-factorized-physical-evaluation context=" << context
+      << " status=complete"
+      << " operator_columns=" << factorized.operator_columns
+      << " retained_taylor_order="
+      << source.taylor_complete_max
+      << " elapsed_ms=" << elapsed_ms
+      << '\n';
+  return factorized.evaluation;
+}
+
+LocalEvaluation terminal_incoming_evaluation_with_factorized_fallback(
+    const LocalSolution<ComplexBall>& source,
+    const std::shared_ptr<
+        const PreparedPhysicalClearedODE<ComplexBall>>& equation,
+    const RealEvaluationPoint& point,
+    const EvaluationOptions& options,
+    LocalEvaluation direct,
+    const std::string& context) {
+  return certified_ordinary_center_evaluation_with_factorized_fallback(
+      source, equation, point, options, std::move(direct), context);
+}
+
 struct RetainedPlanChartBinding {
   using Owner = std::variant<std::shared_ptr<PreparedChartBase>,
                              std::shared_ptr<CompositeSCCChartBase>,
@@ -1301,7 +1702,9 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       const FiniteLaurentMatrix<ComplexBall>& functional_rows,
       std::int32_t required_output_complete_max,
       const std::string& context,
-      bool factorized_coordinates = false) const {
+      bool factorized_coordinates = false,
+      std::optional<Magnitude> publication_relative_tolerance =
+          std::nullopt) const {
     const auto acb =
         std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
     if (!acb || !has_terminal_acb_factorization())
@@ -1389,6 +1792,128 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     auto incoming_evaluation = evaluate_local_solution(
         incoming->solution(), incoming_point,
         incoming_options);
+    diagnose_plain_regular_taylor_evaluation(
+        incoming->solution(), incoming_point,
+        incoming_evaluation, context);
+    const auto recentered_diagnostic =
+        diagnose_two_step_terminal_physical_recenter(
+            incoming->solution(), incoming->physical_equation(),
+            incoming_point, incoming_options, context);
+    if (recentered_diagnostic.has_value()) {
+      const auto* requested =
+          std::getenv("DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR");
+      if (requested != nullptr) {
+        const std::string request(requested);
+        const auto separator = request.find(':');
+        if (separator == std::string::npos)
+          throw std::invalid_argument(
+              "DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR must be "
+              "<epsilon-power>:<component>");
+        const auto epsilon_power = static_cast<std::int32_t>(
+            std::stoll(request.substr(0, separator)));
+        const auto component = static_cast<std::uint32_t>(
+            std::stoull(request.substr(separator + 1)));
+        if (epsilon_power >=
+                recentered_diagnostic->value.epsilon.min_power &&
+            epsilon_power <=
+                recentered_diagnostic->value.epsilon.complete_max &&
+            component < recentered_diagnostic->value.dimension) {
+          const auto& direct =
+              incoming_evaluation.value.at(epsilon_power, component);
+          const auto& recentered =
+              recentered_diagnostic->value.at(epsilon_power, component);
+          const auto discrepancy = recentered - direct;
+          std::cerr
+              << "terminal-physical-recenter-comparison context="
+              << context
+              << " epsilon_power=" << epsilon_power
+              << " component=" << component
+              << " direct_midpoint=("
+              << direct.real_midpoint(12) << ","
+              << direct.imag_midpoint(12) << ")"
+              << " direct_radius2exp=("
+              << direct.real_radius_exponent() << ","
+              << direct.imag_radius_exponent() << ")"
+              << " recentered_midpoint=("
+              << recentered.real_midpoint(12) << ","
+              << recentered.imag_midpoint(12) << ")"
+              << " recentered_radius2exp=("
+              << recentered.real_radius_exponent() << ","
+              << recentered.imag_radius_exponent() << ")"
+              << " overlaps=" << discrepancy.contains_zero()
+              << " discrepancy_radius2exp=("
+              << discrepancy.real_radius_exponent() << ","
+              << discrepancy.imag_radius_exponent() << ")"
+              << '\n';
+        }
+      }
+    }
+    const auto factorized_evaluation_diagnostic =
+        diagnose_factorized_terminal_physical_evaluation(
+            incoming->solution(), incoming->physical_equation(),
+            incoming_point, incoming_options, context);
+    if (factorized_evaluation_diagnostic.has_value()) {
+      const auto* requested =
+          std::getenv("DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR");
+      if (requested != nullptr) {
+        const std::string request(requested);
+        const auto separator = request.find(':');
+        if (separator == std::string::npos)
+          throw std::invalid_argument(
+              "DE2_DIAGNOSTIC_TERMINAL_INCOMING_TAYLOR must be "
+              "<epsilon-power>:<component>");
+        const auto epsilon_power = static_cast<std::int32_t>(
+            std::stoll(request.substr(0, separator)));
+        const auto component = static_cast<std::uint32_t>(
+            std::stoull(request.substr(separator + 1)));
+        if (epsilon_power >= factorized_evaluation_diagnostic
+                                 ->value.epsilon.min_power &&
+            epsilon_power <= factorized_evaluation_diagnostic
+                                 ->value.epsilon.complete_max &&
+            component <
+                factorized_evaluation_diagnostic->value.dimension) {
+          const auto& direct =
+              incoming_evaluation.value.at(epsilon_power, component);
+          const auto& factorized =
+              factorized_evaluation_diagnostic->value.at(
+                  epsilon_power, component);
+          const auto discrepancy = factorized - direct;
+          std::cerr
+              << "terminal-factorized-physical-comparison context="
+              << context
+              << " epsilon_power=" << epsilon_power
+              << " component=" << component
+              << " direct_midpoint=("
+              << direct.real_midpoint(12) << ","
+              << direct.imag_midpoint(12) << ")"
+              << " direct_radius2exp=("
+              << direct.real_radius_exponent() << ","
+              << direct.imag_radius_exponent() << ")"
+              << " factorized_midpoint=("
+              << factorized.real_midpoint(12) << ","
+              << factorized.imag_midpoint(12) << ")"
+              << " factorized_radius2exp=("
+              << factorized.real_radius_exponent() << ","
+              << factorized.imag_radius_exponent() << ")"
+              << " overlaps=" << discrepancy.contains_zero()
+              << " discrepancy_midpoint=("
+              << discrepancy.real_midpoint(12) << ","
+              << discrepancy.imag_midpoint(12) << ")"
+              << " discrepancy_radius2exp=("
+              << discrepancy.real_radius_exponent() << ","
+              << discrepancy.imag_radius_exponent() << ")"
+              << '\n';
+        }
+      }
+    }
+    auto factorized_incoming_transfer =
+        certified_ordinary_center_factorization(
+            incoming->solution(), incoming->physical_equation(),
+            incoming_point, incoming_options,
+            incoming_evaluation, context);
+    if (factorized_incoming_transfer.has_value())
+      incoming_evaluation =
+          factorized_incoming_transfer->evaluation;
     std::optional<ErrorEnvelope> certified_incoming_tail;
     const auto* terminal_tail_mode =
         std::getenv("DE2_DIAGNOSTIC_TERMINAL_PHYSICAL_TAIL");
@@ -1909,6 +2434,107 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
               << " contribution_upper_power="
               << contribution_upper_power
               << '\n';
+
+          // Attribute the visible interval width of each scalar convolution
+          // coefficient to the individual epsilon-product which contributes
+          // the largest uncertainty.  This is deliberately diagnostic-only:
+          // the untouched ball convolution below remains authoritative.
+          for (std::int64_t raw_output = term.min_power();
+               raw_output <= contribution_complete; ++raw_output) {
+            const auto first_adjoint = std::max<std::int64_t>(
+                adjoint[component].min_power(),
+                raw_output - incoming_value[component].complete_max());
+            const auto last_adjoint = std::min<std::int64_t>(
+                adjoint[component].complete_max(),
+                raw_output - incoming_value[component].min_power());
+            if (first_adjoint > last_adjoint) continue;
+
+            auto dominant_uncertainty = Magnitude::zero();
+            auto summed_uncertainty = Magnitude::zero();
+            std::optional<std::int32_t> dominant_adjoint_power;
+            std::optional<std::int32_t> dominant_incoming_power;
+            std::optional<ComplexBall> dominant_product;
+            for (std::int64_t raw_adjoint = first_adjoint;
+                 raw_adjoint <= last_adjoint; ++raw_adjoint) {
+              const auto adjoint_power =
+                  local_algebra_detail::checked_i32(
+                      raw_adjoint,
+                      "terminal adjoint radius-source adjoint power");
+              const auto incoming_power =
+                  local_algebra_detail::checked_i32(
+                      raw_output - raw_adjoint,
+                      "terminal adjoint radius-source incoming power");
+              const auto product =
+                  adjoint[component].coefficient(adjoint_power) *
+                  incoming_value[component].coefficient(incoming_power);
+              const auto product_midpoint =
+                  matching_detail::acb_midpoint_value(product);
+              const auto uncertainty = Magnitude::upper_abs(
+                  product - product_midpoint);
+              summed_uncertainty += uncertainty;
+              if (!dominant_adjoint_power.has_value() ||
+                  !(uncertainty <= dominant_uncertainty)) {
+                dominant_uncertainty = uncertainty;
+                dominant_adjoint_power = adjoint_power;
+                dominant_incoming_power = incoming_power;
+                dominant_product = product;
+              }
+            }
+            if (!dominant_adjoint_power.has_value() ||
+                !dominant_incoming_power.has_value() ||
+                !dominant_product.has_value())
+              continue;
+
+            const auto output_power =
+                local_algebra_detail::checked_i32(
+                    raw_output,
+                    "terminal adjoint radius-source output power");
+            const auto& dominant_adjoint =
+                adjoint[component].coefficient(
+                    *dominant_adjoint_power);
+            const auto& dominant_incoming =
+                incoming_value[component].coefficient(
+                    *dominant_incoming_power);
+            const auto& component_output =
+                term.coefficient(output_power);
+            std::cerr
+                << "terminal-adjoint-radius-source context=" << context
+                << " functional=" << functional
+                << " component=" << component
+                << " output_power=" << output_power
+                << " adjoint_power=" << *dominant_adjoint_power
+                << " incoming_power=" << *dominant_incoming_power
+                << " adjoint_midpoint=("
+                << dominant_adjoint.real_midpoint(12) << ","
+                << dominant_adjoint.imag_midpoint(12) << ")"
+                << " adjoint_radius2exp=("
+                << dominant_adjoint.real_radius_exponent() << ","
+                << dominant_adjoint.imag_radius_exponent() << ")"
+                << " incoming_midpoint=("
+                << dominant_incoming.real_midpoint(12) << ","
+                << dominant_incoming.imag_midpoint(12) << ")"
+                << " incoming_radius2exp=("
+                << dominant_incoming.real_radius_exponent() << ","
+                << dominant_incoming.imag_radius_exponent() << ")"
+                << " product_midpoint=("
+                << dominant_product->real_midpoint(12) << ","
+                << dominant_product->imag_midpoint(12) << ")"
+                << " product_radius2exp=("
+                << dominant_product->real_radius_exponent() << ","
+                << dominant_product->imag_radius_exponent() << ")"
+                << " component_output_radius2exp=("
+                << component_output.real_radius_exponent() << ","
+                << component_output.imag_radius_exponent() << ")"
+                << " dominant_uncertainty_upper="
+                << dominant_uncertainty.approximate_upper()
+                << " dominant_uncertainty_upper_exact="
+                << dominant_uncertainty.dump_exact()
+                << " summed_uncertainty_upper="
+                << summed_uncertainty.approximate_upper()
+                << " summed_uncertainty_upper_exact="
+                << summed_uncertainty.dump_exact()
+                << '\n';
+          }
         }
         value = value.has_value()
             ? *value + term
@@ -1918,6 +2544,59 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         throw std::logic_error(
             context +
             ": terminal adjoint contraction produced no scalar value");
+      if (factorized_incoming_transfer.has_value() &&
+          !certified_incoming_tail.has_value()) {
+        auto factorized_value =
+            contract_factorized_ordinary_center_adjoint(
+                *factorized_incoming_transfer, adjoint,
+                required_output_complete_max, context);
+        const auto overlap_min = std::max(
+            value->min_power(), factorized_value.min_power());
+        const auto overlap_max = std::min({
+            value->complete_max(),
+            factorized_value.complete_max(),
+            required_output_complete_max});
+        if (overlap_min > overlap_max ||
+            factorized_value.complete_max() <
+                required_output_complete_max)
+          throw std::logic_error(
+              context +
+              ": factorized incoming adjoint contraction changed its required epsilon coverage; direct=[" +
+              std::to_string(value->min_power()) + "," +
+              std::to_string(value->complete_max()) +
+              "]; factorized=[" +
+              std::to_string(factorized_value.min_power()) + "," +
+              std::to_string(factorized_value.complete_max()) +
+              "]; required_complete_max=" +
+              std::to_string(required_output_complete_max));
+        for (std::int64_t raw_power = overlap_min;
+             raw_power <= overlap_max; ++raw_power) {
+          const auto power =
+              local_algebra_detail::checked_i32(
+                  raw_power,
+                  "factorized incoming adjoint overlap power");
+          if (!acb_overlaps(
+                  value->coefficient(power).raw(),
+                  factorized_value.coefficient(power).raw()))
+            throw std::domain_error(
+                context +
+                ": factorized incoming adjoint contraction is disjoint from the retained direct contraction; epsilon_power=" +
+                std::to_string(power));
+        }
+        if (std::getenv(
+                "DE2_DIAGNOSTIC_FACTORIZED_ORDINARY_EVALUATION") !=
+                nullptr ||
+            diagnostic_terminal_state)
+          std::cerr
+              << "factorized-ordinary-adjoint-authority context="
+              << context
+              << " functional=" << functional
+              << " operator_columns="
+              << factorized_incoming_transfer->operator_columns
+              << " policy=certified-q/C-prefix-replay-and-full-overlap-v1"
+              << '\n';
+        value = std::move(factorized_value);
+      }
       if (value->complete_max() < required_output_complete_max) {
         const auto additional =
             required_output_complete_max - value->complete_max();
@@ -1946,34 +2625,34 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
             detail.str(), functional, std::nullopt,
             value->complete_max());
       }
-      const auto output_tolerance =
-          Magnitude::decimal(acb->relative_tolerance_text());
-      for (std::int64_t raw_power = value->min_power();
-           raw_power <= std::min<std::int64_t>(
-                            value->complete_max(),
-                            required_output_complete_max);
-           ++raw_power) {
-        const auto power = local_algebra_detail::checked_i32(
-            raw_power, "terminal adjoint output accuracy power");
-        const auto coefficient = value->coefficient(power);
-        const auto midpoint =
-            matching_detail::acb_midpoint_value(coefficient);
-        const auto uncertainty = coefficient - midpoint;
-        const auto scale = Magnitude::maximum(
-            Magnitude::one(), Magnitude::lower_abs(coefficient));
-        if (!(Magnitude::upper_abs(uncertainty) <=
-              scale * output_tolerance))
-          throw std::domain_error(
-              context +
-              ": terminal adjoint output ball is too wide to publish; functional=" +
-              std::to_string(functional) +
-              "; epsilon_power=" + std::to_string(power) +
-              "; midpoint=(" + coefficient.real_midpoint(16) + "," +
-              coefficient.imag_midpoint(16) + ")" +
-              "; radius2exp=(" +
-              coefficient.real_radius_exponent() + "," +
-              coefficient.imag_radius_exponent() + ")");
-      }
+      if (publication_relative_tolerance.has_value())
+        for (std::int64_t raw_power = value->min_power();
+             raw_power <= std::min<std::int64_t>(
+                              value->complete_max(),
+                              required_output_complete_max);
+             ++raw_power) {
+          const auto power = local_algebra_detail::checked_i32(
+              raw_power, "terminal adjoint output accuracy power");
+          const auto coefficient = value->coefficient(power);
+          const auto publication =
+              certify_acb_publication_accuracy(
+                  coefficient, *publication_relative_tolerance);
+          if (!publication.acceptable)
+            throw MatchingArithmeticError(
+                MatchingArithmeticErrorCode::
+                    TerminalOutputInconclusive,
+                context +
+                    ": terminal adjoint output ball is too wide to publish; functional=" +
+                    std::to_string(functional) +
+                    "; epsilon_power=" + std::to_string(power) +
+                    "; midpoint=(" + coefficient.real_midpoint(16) + "," +
+                    coefficient.imag_midpoint(16) + ")" +
+                    "; radius2exp=(" +
+                    coefficient.real_radius_exponent() + "," +
+                    coefficient.imag_radius_exponent() + ")",
+                functional, std::nullopt, power,
+                publication.required_additional_digits);
+        }
       if (diagnostic_terminal_state) {
         auto adjoint_min = adjoint.front().min_power();
         auto adjoint_complete = adjoint.front().complete_max();
@@ -2525,6 +3204,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
     bool exact_right_physical_association = false;
     bool exact_right_used_rational_shadow = false;
     std::optional<std::uint32_t> matching_taylor_complete_max;
+    std::optional<std::uint32_t>
+        incoming_matching_taylor_complete_max;
     std::optional<std::vector<LocalSolution<ComplexBall>>>
         matching_prefix_basis;
     if constexpr (std::is_same_v<Scalar, ComplexBall>) {
@@ -2535,6 +3216,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
             "Acb materialization lost its refined match owner");
       matching_taylor_complete_max =
           acb->matching_taylor_complete_max();
+      incoming_matching_taylor_complete_max =
+          acb->incoming_matching_taylor_complete_max();
       if (matching_taylor_complete_max.has_value()) {
         matching_prefix_basis.emplace();
         matching_prefix_basis->reserve(basis_solutions.size());
@@ -2709,9 +3392,10 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           retained_arm.charts.at(exact_match.receiving_chart)
               .geometry.scale);
       auto continuity_incoming = typed_incoming->solution();
-      if (matching_taylor_complete_max.has_value())
+      if (incoming_matching_taylor_complete_max.has_value())
         continuity_incoming = restrict_local_taylor_prefix(
-            continuity_incoming, *matching_taylor_complete_max,
+            continuity_incoming,
+            *incoming_matching_taylor_complete_max,
             result_checkpoint_identity +
                 ":continuity-incoming-prefix");
       EvaluationOptions receiving_options;
@@ -2765,14 +3449,11 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
              component < solution.dimension; ++component) {
           const auto& expected =
               incoming_evaluation.value.at(power, component);
-          const auto residual =
-              receiving_evaluation.value.at(power, component) -
-              expected;
-          const auto scale = Magnitude::maximum(
-              Magnitude::one(), Magnitude::lower_abs(expected));
-          const auto residual_upper = Magnitude::upper_abs(residual);
-          const auto allowed_upper = scale * tolerance;
-          if (!(residual_upper <= allowed_upper)) {
+          const auto continuity =
+              certify_acb_handoff_continuity(
+                  receiving_evaluation.value.at(power, component),
+                  expected, tolerance);
+          if (!continuity.acceptable) {
             if (allow_terminal_factorized_proxy &&
                 exact_right_physical_association) {
               // A terminal consumer keeps the certified factorization
@@ -2939,10 +3620,12 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
                 {"epsilon", power},
                 {"component", component},
                 {"residual_upper",
-                 residual_upper.approximate_upper()},
+                 continuity.residual_upper.approximate_upper()},
                 {"allowed_upper",
-                 allowed_upper.approximate_upper()},
-                {"scale_lower", scale.approximate_upper()},
+                 continuity.allowed_upper.approximate_upper()},
+                {"scale_lower",
+                 continuity.scale_lower.approximate_upper()},
+                {"overlaps", continuity.overlaps},
                 {"relative_tolerance",
                  required_string(refinement_record,
                                  "relative_tolerance")},
@@ -2965,6 +3648,11 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
                 {"matching_taylor_complete_max",
                  matching_taylor_complete_max.has_value()
                      ? json::value(*matching_taylor_complete_max)
+                     : json::value(nullptr)},
+                {"incoming_matching_taylor_complete_max",
+                 incoming_matching_taylor_complete_max.has_value()
+                     ? json::value(
+                           *incoming_matching_taylor_complete_max)
                      : json::value(nullptr)},
                 {"reconstruction_routes",
                  std::move(reconstruction_routes)}};

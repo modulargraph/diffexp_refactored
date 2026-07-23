@@ -54,6 +54,10 @@ ok = !FailureQ[result] && AssociationQ[result] &&
   result["Atlas", "TargetCompleteMax"] === 2 &&
   result["Atlas", "Request", "EpsWindow", "CompleteMax"] === 3 &&
   result["Atlas", "PreparedIntegrandEpsilonShift"] === -1 &&
+  result["Atlas", "RegularValueAggregationGuardDigits"] ===
+    Ceiling[Log10[Max[
+      Length[result["Atlas", "Lower", "Plan", "Tiles"]] +
+      Length[result["Atlas", "Upper", "Plan", "Tiles"]], 1]]] &&
   result["Run", "Lower", "Matches"] > 0 &&
   result["Run", "Upper", "Matches"] > 0 &&
   result["Run", "Lower", "Tiles"] ===

@@ -2083,8 +2083,8 @@ void test_frame_independent_physical_value_wiring() {
     // numerical contract.  The physical value path must privately extend
     // the one transported Taylor series until the coefficient-aware theorem
     // passes, without changing the retained or receiver order.  A threshold
-    // below the 256-bit arithmetic floor must still terminate at the private
-    // order cap and report the exact failed prefix/order ladder.  Separately,
+    // below the 256-bit arithmetic floor must still reach the private-order
+    // cap when its exact accuracy ratio continues improving.  Separately,
     // a request whose only consumable row is the exact structural epsilon^-1
     // zero must not be governed by retained epsilon^0..2 matching clearance.
     const auto low_order_anchor = solve_local(
@@ -2172,11 +2172,15 @@ void test_frame_independent_physical_value_wiring() {
           return detail.find("epsilon_power=0") == std::string::npos ||
               detail.find(
                   "tail_certificate_taylor_order_attempts=0,25,50,75,"
-                  "112,168,252,378,567,800") == std::string::npos;
+                  "112,168,252,378,567,800") ==
+                  std::string::npos ||
+              detail.find("tail_certificate_accuracy_deficits=") ==
+                  std::string::npos ||
+              detail.find(":improved") == std::string::npos;
         }())
       throw std::runtime_error(
-          "physical hop did not terminate and identify the inaccurate "
-          "consumable epsilon row/order ladder: " +
+          "physical hop did not retain its improving private order ladder "
+          "and identify the inaccurate consumable epsilon row: " +
           json::serialize(required_failure));
     const auto adaptive = consume_physical_value_hop(
         session, adaptive_plan, "upper", 0, stiff_anchor,
@@ -2679,6 +2683,158 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
       throw std::runtime_error(
           "Acb terminal state publication dropped its factorized match owner: " +
           json::serialize(published));
+    const auto strict_pair_publication = request(json::object{
+        {"schema", 2}, {"op", "transport.contract_pair"},
+        {"session", session},
+        {"lower", json::object{
+             {"transport_state", lower_state.at("transport_state")},
+             {"checkpoint_identity",
+              lower_state.at("checkpoint_identity")},
+             {"provenance_identity",
+              lower_state.at("provenance_identity")}}},
+        {"upper", json::object{
+             {"transport_state", upper_state.at("transport_state")},
+             {"checkpoint_identity",
+              upper_state.at("checkpoint_identity")},
+             {"provenance_identity",
+              upper_state.at("provenance_identity")}}},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+             {"root", "terminal-factorized-strict-pair"}}},
+        {"observables", json::array{json::object{
+             {"identity", "terminal-factorized-strict-pair-observable"},
+             {"checkpoint_identity",
+              "terminal-factorized-strict-pair-line"},
+             {"lower_integrand_rows", json::array{
+                  cancellation_integrand_row(
+                      "terminal-factorized-strict-pair-lower-1", 33),
+                  cancellation_integrand_row(
+                      "terminal-factorized-strict-pair-lower-2", 33)}},
+             {"upper_integrand_rows", json::array{
+                  cancellation_integrand_row(
+                      "terminal-factorized-strict-pair-upper-1", 33),
+                  cancellation_integrand_row(
+                      "terminal-factorized-strict-pair-upper-2", 33)}},
+             {"epsilon", json::object{
+                  {"min", 0}, {"max", 2},
+                  {"required_complete_max", 1}}},
+             {"tail_policy", "stored"},
+             {"publication_relative_tolerance", "1e-100"},
+             {"divergent_cancellation", json::object{
+                  {"mode", "bounded-relative-acb"},
+                  {"relative_tolerance", "1e-40"},
+                  {"provenance",
+                   "terminal-pair-conditioning-regression"}}}}}}});
+    if (strict_pair_publication.at("status") != "error" ||
+        strict_pair_publication.at("reason") !=
+            "terminal_output_ball_inconclusive" ||
+        strict_pair_publication.at("scope") != "final-paired-line" ||
+        counter(strict_pair_publication,
+                "required_additional_digits") == 0 ||
+        !strict_pair_publication.at("conditioning").is_object())
+      throw std::runtime_error(
+          "strict final-pair publication did not retain its failure conditioning: " +
+          json::serialize(strict_pair_publication));
+    const auto& strict_conditioning =
+        strict_pair_publication.at("conditioning").as_object();
+    if (strict_conditioning.at("schema") !=
+            "diffexp2-transport-pair-conditioning-diagnostics-v1" ||
+        strict_conditioning.at("lower_tiles").as_array().size() != 2 ||
+        strict_conditioning.at("upper_tiles").as_array().size() != 2 ||
+        strict_conditioning.at("entries").as_array().empty()) {
+      throw std::runtime_error(
+          "strict final-pair failure conditioning lost an arm or tile: " +
+          json::serialize(strict_conditioning));
+    }
+    const auto& strict_entry =
+        strict_conditioning.at("entries").as_array().front().as_object();
+    if (!strict_entry.at("lower_radius2exp").is_array() ||
+        !strict_entry.at("upper_radius2exp").is_array() ||
+        !strict_entry.at("combined_radius2exp").is_array())
+      throw std::runtime_error(
+          "strict final-pair failure conditioning omitted coefficient radii");
+    const auto strict_stream = request(json::object{
+        {"schema", 2},
+        {"op", "transport.contract_pair_stream_begin"},
+        {"session", session},
+        {"lower", json::object{
+             {"transport_state", lower_state.at("transport_state")},
+             {"checkpoint_identity",
+              lower_state.at("checkpoint_identity")},
+             {"provenance_identity",
+              lower_state.at("provenance_identity")}}},
+        {"upper", json::object{
+             {"transport_state", upper_state.at("transport_state")},
+             {"checkpoint_identity",
+              upper_state.at("checkpoint_identity")},
+             {"provenance_identity",
+              upper_state.at("provenance_identity")}}},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+             {"root", "terminal-factorized-strict-stream"}}},
+        {"observable", json::object{
+             {"identity",
+              "terminal-factorized-strict-stream-observable"},
+             {"checkpoint_identity",
+              "terminal-factorized-strict-stream-line"},
+             {"epsilon", json::object{
+                  {"min", 0}, {"max", 2},
+                  {"required_complete_max", 1}}},
+             {"tail_policy", "stored"},
+             {"publication_relative_tolerance", "1e-100"},
+             {"divergent_cancellation", json::object{
+                  {"mode", "bounded-relative-acb"},
+                  {"relative_tolerance", "1e-40"},
+                  {"provenance",
+                   "terminal-stream-conditioning-regression"}}}}}});
+    require_ok(strict_stream,
+               "terminal strict transport-pair stream begin");
+    const auto add_strict_stream_tile =
+        [&](const char* side, std::size_t tile,
+            const std::string& identity) {
+          const auto added = request(json::object{
+              {"schema", 2},
+              {"op", "transport.contract_pair_stream_add_tile"},
+              {"session", session},
+              {"stream", strict_stream.at("stream")},
+              {"stream_checkpoint_identity",
+               strict_stream.at("stream_checkpoint_identity")},
+              {"side", side}, {"tile", tile},
+              {"row", cancellation_integrand_row(identity, 33)}});
+          require_ok(added,
+                     "terminal strict transport-pair stream tile");
+        };
+    add_strict_stream_tile(
+        "lower", 0, "terminal-factorized-strict-stream-lower-1");
+    add_strict_stream_tile(
+        "lower", 1, "terminal-factorized-strict-stream-lower-2");
+    add_strict_stream_tile(
+        "upper", 0, "terminal-factorized-strict-stream-upper-1");
+    add_strict_stream_tile(
+        "upper", 1, "terminal-factorized-strict-stream-upper-2");
+    const auto strict_stream_publication = request(json::object{
+        {"schema", 2},
+        {"op", "transport.contract_pair_stream_finish"},
+        {"session", session},
+        {"stream", strict_stream.at("stream")},
+        {"stream_checkpoint_identity",
+         strict_stream.at("stream_checkpoint_identity")}});
+    if (strict_stream_publication.at("status") != "error" ||
+        strict_stream_publication.at("reason") !=
+            "terminal_output_ball_inconclusive" ||
+        strict_stream_publication.at("scope") != "final-paired-line" ||
+        counter(strict_stream_publication,
+                "required_additional_digits") == 0 ||
+        !strict_stream_publication.at("conditioning").is_object() ||
+        strict_stream_publication.at("conditioning").as_object().at(
+            "lower_tiles").as_array().size() != 2 ||
+        strict_stream_publication.at("conditioning").as_object().at(
+            "upper_tiles").as_array().size() != 2)
+      throw std::runtime_error(
+          "streamed strict final-pair publication did not retain its failure conditioning: " +
+          json::serialize(strict_stream_publication));
     const auto loose_lower_basis_0 = solve_multiblock_local(
         session, lower_chart, "-2/3",
         "terminal-factorized-loose-lower-basis-0", {"1", "1"}, 32);
@@ -3028,6 +3184,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
                 "terminal-factorized-endpoint-result"},
                {"integrand_row", cancellation_integrand_row(
                     "terminal-factorized-endpoint-row", 33)},
+               {"publication_relative_tolerance", "1e-8"},
                {"epsilon", json::object{
                     {"min", 0}, {"max", 2},
                     {"required_complete_max", 1}}}}}}});
@@ -3088,6 +3245,7 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
                 "terminal-direct-physical-endpoint-result"},
                {"integrand_row", cancellation_integrand_row(
                     "terminal-direct-physical-endpoint-row", 33)},
+               {"publication_relative_tolerance", "1e-8"},
                {"epsilon", json::object{
                     {"min", 0}, {"max", 2},
                     {"required_complete_max", 1}}}}}}});

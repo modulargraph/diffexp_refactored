@@ -61,7 +61,8 @@ observable[identity_, checkpoint_] := <|
   "Identity" -> identity,
   "CheckpointIdentity" -> checkpoint,
   "IntegrandRow" -> endpointRow,
-  "Epsilon" -> epsilon|>;
+  "Epsilon" -> epsilon,
+  "PublicationRelativeTolerance" -> "1e-8"|>;
 sessionStats[] := If[!nativeOKQ[state], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
     state["session"], <||>]];
@@ -88,6 +89,12 @@ forbiddenPoint = If[nativeOKQ[state],
   DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[state, {
     Append[observable["point", "point-checkpoint"], "Point" -> 0]},
     "forbidden-point"], state];
+missingPublicationTolerance = If[nativeOKQ[state],
+  DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[state, {
+    KeyDrop[observable["missing-publication",
+      "missing-publication-checkpoint"],
+      "PublicationRelativeTolerance"]},
+    "missing-publication"], state];
 overTarget = If[nativeOKQ[state],
   DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[state, {
     Join[observable["over-target", "over-target-checkpoint"], <|
@@ -99,8 +106,9 @@ afterInvalid = sessionStats[];
 assert["transport_endpoint_bridge_prepares_one_retained_final_row",
   nativeOKQ[state] && AssociationQ[endpointRow]];
 assert["transport_endpoint_bridge_rejects_invalid_records_before_native_call",
-  FailureQ[missingProvenance] && FailureQ[duplicateIdentity] &&
-    FailureQ[badRow] && FailureQ[forbiddenPoint] && FailureQ[overTarget] &&
+    FailureQ[missingProvenance] && FailureQ[duplicateIdentity] &&
+    FailureQ[badRow] && FailureQ[forbiddenPoint] &&
+    FailureQ[missingPublicationTolerance] && FailureQ[overTarget] &&
     SameQ[mutationCounters[before], mutationCounters[afterInvalid]]];
 
 zero = If[nativeOKQ[state],

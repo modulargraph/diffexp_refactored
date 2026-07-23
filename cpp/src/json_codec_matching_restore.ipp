@@ -3717,10 +3717,30 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
 
   const auto& raw_refined = as_object(object.at("refined"),
                                       "checkpoint refined Acb state");
-  require_exact_keys(raw_refined,
-      {"transformed_weights", "weights", "residual", "residual_history",
-       "refinement_steps", "factorization_preconditioner"},
-      "checkpoint refined Acb state");
+  const auto* raw_factorized_authoritative_rhs =
+      raw_refined.if_contains("factorized_authoritative_rhs");
+  const auto* raw_factorized_authoritative_rhs_columns =
+      raw_refined.if_contains("factorized_authoritative_rhs_columns");
+  const auto has_factorized_authoritative_rhs =
+      raw_factorized_authoritative_rhs != nullptr &&
+      raw_factorized_authoritative_rhs_columns != nullptr;
+  if ((raw_factorized_authoritative_rhs != nullptr) !=
+      (raw_factorized_authoritative_rhs_columns != nullptr))
+    throw std::invalid_argument(
+        "checkpoint refined Acb state has an incomplete factorized authoritative RHS record");
+  if (has_factorized_authoritative_rhs)
+    require_exact_keys(
+        raw_refined,
+        {"transformed_weights", "weights", "residual", "residual_history",
+         "refinement_steps", "factorization_preconditioner",
+         "factorized_authoritative_rhs",
+         "factorized_authoritative_rhs_columns"},
+        "checkpoint refined Acb state");
+  else
+    require_exact_keys(raw_refined,
+        {"transformed_weights", "weights", "residual", "residual_history",
+         "refinement_steps", "factorization_preconditioner"},
+        "checkpoint refined Acb state");
   RefinedAcbLaurentMatch refined;
   refined.transformed_weights = parse_checkpoint_frame_vector<ComplexBall>(
       raw_refined.at("transformed_weights"), dimension,
@@ -3734,6 +3754,21 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       "checkpoint Acb refinement steps"));
   refined.factorization_preconditioner = required_string(
       raw_refined, "factorization_preconditioner");
+  if (has_factorized_authoritative_rhs) {
+    if (!raw_factorized_authoritative_rhs->is_bool())
+      throw std::invalid_argument(
+          "checkpoint factorized authoritative RHS flag must be boolean");
+    refined.factorized_authoritative_rhs =
+        raw_factorized_authoritative_rhs->as_bool();
+    refined.factorized_authoritative_rhs_columns =
+        static_cast<std::size_t>(as_u64(
+            *raw_factorized_authoritative_rhs_columns,
+            "checkpoint factorized authoritative RHS column count"));
+    if (refined.factorized_authoritative_rhs !=
+        (refined.factorized_authoritative_rhs_columns > 0))
+      throw std::invalid_argument(
+          "checkpoint factorized authoritative RHS flag and column count disagree");
+  }
   if (refined.refinement_steps > max_refinement_steps)
     throw std::invalid_argument(
         "checkpoint Acb refinement count exceeds its policy");

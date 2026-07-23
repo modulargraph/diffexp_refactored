@@ -25,6 +25,10 @@ On a machine without a prepared banana cache, set
 `BANANA_TIMING_WARM_CACHE=1` for the first run. FIRE preparation happens
 before the timer. The measured run must report `FTPREP CACHE HIT`; this keeps
 external FIRE performance from hiding a DiffExp2 transport regression.
+Every measured command runs in its own process group under a hard wall-clock
+deadline. Exceeding the configured ceiling terminates the Wolfram process and
+its children with status 124, rather than waiting indefinitely and merely
+reporting a late result after it eventually finishes.
 
 The pinned production configuration is:
 

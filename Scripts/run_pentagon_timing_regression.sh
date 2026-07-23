@@ -113,17 +113,21 @@ echo "=== pentagon timing regression"
 echo "configuration: WP=$working_precision match=$matching_digits T=$expansion_order boundaryExtra=$boundary_extra_order division=$division_order threads=$cpp_threads ceiling=${max_seconds}s"
 SECONDS=0
 set +e
-"${common_environment[@]}" \
+python3 Scripts/run_with_deadline.py \
+  "$max_seconds" "$scratch/pentagon.log" -- \
+  "${common_environment[@]}" \
   "FT_RUNNER_DEFINITIONS_ONLY=1" \
   "FT_STOP_AFTER_BOUNDARY_LEVEL=" \
   "FT_LADDER_CHECKPOINT_DIR=$scratch/timed-checkpoints" \
-  wolframscript -code "$runner_code" \
-  2>&1 | tee "$scratch/pentagon.log"
-runner_status=${PIPESTATUS[0]}
+  wolframscript -code "$runner_code"
+runner_status=$?
 set -e
 elapsed=$SECONDS
 
 if (( runner_status != 0 )); then
+  if (( runner_status == 124 )); then
+    echo "pentagon timing hard deadline exceeded after ${max_seconds}s" >&2
+  fi
   echo "pentagon timing runner failed with status $runner_status" >&2
   exit "$runner_status"
 fi

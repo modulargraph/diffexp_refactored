@@ -111,16 +111,20 @@ echo "=== banana timing regression"
 echo "configuration: WP=$working_precision match=$matching_digits T=$expansion_order division=$division_order threads=$cpp_threads ceiling=${max_seconds}s"
 SECONDS=0
 set +e
-"${common_environment[@]}" \
+python3 Scripts/run_with_deadline.py \
+  "$max_seconds" "$scratch/banana.log" -- \
+  "${common_environment[@]}" \
   "FT_STOP_AFTER_BOUNDARY_LEVEL=" \
   "FT_LADDER_CHECKPOINT_DIR=$scratch/timed-checkpoints" \
-  wolframscript -file Scripts/run_ft_stepwise2.m \
-  2>&1 | tee "$scratch/banana.log"
-runner_status=${PIPESTATUS[0]}
+  wolframscript -file Scripts/run_ft_stepwise2.m
+runner_status=$?
 set -e
 elapsed=$SECONDS
 
 if (( runner_status != 0 )); then
+  if (( runner_status == 124 )); then
+    echo "banana timing hard deadline exceeded after ${max_seconds}s" >&2
+  fi
   echo "banana timing runner failed with status $runner_status" >&2
   exit "$runner_status"
 fi

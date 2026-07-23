@@ -24,7 +24,7 @@ Rules:
 - Accurate incoming level-1 boundary:
   `/private/tmp/diffexp2-banana4-fresh-boundary-20260718/checkpoints/banana4_level1_boundary.mx`
 - Current branch: `codex/all-examples-recovery`
-- Current pushed recovery commit: `04eee40`.
+- Recovery baseline before B4-128: `84f5caf`.
 - Historical dirty-tree diff fingerprint for B4-11 through B4-13:
   `71955139205bf5cdef753235ad78a88e0963af7f1d25cfb5367a2196772192fb`.
 - The incoming boundary is accurate. The B4-23 checkpoint proves the full
@@ -159,6 +159,7 @@ Rules:
 | B4-125 (public/private halo duplication removed, not the residual cure) | Test whether the unexpectedly deep fresh residual was caused by counting private matching reservoirs as public output demand as well. | The gate had set `FT_LEVEL_EPS_HALOS=20,14,8,0` and separately passed the same values as `runExample`'s private matching halos, contrary to the documented contract that public halos are zero. The gate now sets public halos to `0,0,0,0`, keeps private reservoirs `20,14,8,0`, preserves its log on exit, and supports a level-1 stop. Fresh WP300/EO50 log: `/private/tmp/diffexp2-banana4-level1-private-halos-v18.log`. | The public level-3 target fell from epsilon 27 to epsilon 7, proving the duplicated public demand was real. The private downstream closure still required a deliverable through epsilon 40 and the match through epsilon 43, however, so the first singular match reproduced the same 27/0/108 verdict. | Public demand and private correctness reservoirs are now separated, but the large level-1 private reservoir legitimately propagates backward. The current failure is instead the interaction between the newly rigorous authoritative level-4 value/tail enclosure and the ill-conditioned level-3 singular reconstruction; the old B4-90 pass used the pre-authoritative boundary route. | Add a focused cross-level fixture in which a certified producer tail is amplified by a singular receiving basis. The producer selection must reserve the measured receiving condition/error budget, or the consumer must propagate a coefficientwise budget; a fixed two-decimal reserve is not an architectural contract. |
 | B4-126 (singular match and overlap pass; classified terminal fallback isolated) | Rerun the pinned WP500/EO50/match-25 level-2 gate after proactive exact-shadow retention, exact chart-radius identity, and structural epsilon-prefix replay repairs. | Fresh transport checkpoints, preparation-cache hit, authoritative composed adjoint, 420-second ceiling. Log: `/private/tmp/diffexp2-banana4-level2-pinned-v27.log`. The native overlap regression now starts from epsilon rows `{0,1,0}`, forces the recentered physical route, publishes it, and restores its checkpoint. | Level 4 completed in 20.3 s. Level-3 transport published at 108.4 s. Five of six observables completed; the sixth stopped at 370.9 s. | The original 27/0/108 singular failure is gone and the WP500 ordinary overlap-recenter path completes. The final row is explicitly outside the ordinary composed theorem (`row-requires-laurent-log-center-adjoint`, forcing power 0). Its factorized fallback narrowly lost the 25-digit publication target at epsilon 21; this is the ill-conditioned route already bypassed successfully by B4-102's certified physical-coordinate experiment, not another epsilon-window or Taylor-order defect. | Select the independently certified physical functional/weight contraction automatically only for the two typed composed-theorem boundaries (Laurent/log center row and nonunit center row). The production-shaped terminal regression must assert that selection; explicit diagnostic routes remain unchanged. Rerun the same pinned gate. |
 | B4-127 (pinned level-2 boundary completes) | Verify both classified physical-coordinate fallbacks in a fresh pinned chain, including the exact center endpoint that is outside the ordinary composed-adjoint pairing. | WP500/EO50/match-25, authoritative mode, fresh transport checkpoints, preparation-cache hit. Line-only probe: `/private/tmp/diffexp2-banana4-level2-pinned-v28.log`; completed run: `/private/tmp/diffexp2-banana4-level2-pinned-v29.log`. The persistent native regression requires the Laurent/log line fallback and authoritative exact-center endpoint fallback separately. | Level 4 completed in about 20 s; level-3 transport state published at 108.3 s; the complete level-3 batch finished at 388.6 s, below the 420-second gate. | All six paired observables completed. The sixth lower line selected `classified-direct-physical-fallback`; the upper endpoint selected `classified-direct-physical-center-fallback`; seven exports were produced and the level-2 boundary checkpoint was written. The sole ordinary basis fallback was upper chart 11 immediately followed by the mandatory singular chart-12 basis crossing, so no later regular value hop consumes or loses its private frame. The old validator rejected that harmless terminal pattern after successful computation. | The timing gate now rejects ordinary fallbacks except when the very next chart on the same arm is singular. Keep the endpoint and line route-selection regressions, run the full native suite, commit this verified level-2 recovery, then continue the final level-1/Bessel oracle separately. |
+| B4-128 (planned clean final-value gate) | Determine whether the recovered full ladder now reaches final publication and the independent Bessel value without any checkpoint resume or configuration escalation. | WP500/EO50/match-15, public epsilon order 4, private halos `{20,14,8,0}`, composed-adjoint order 100, 10 C++ threads, preparation-cache hit, fresh transport checkpoints, and a 2400-second hard deadline. Preserved log: `/private/tmp/diffexp2-banana4-final-b4-128.log`. | Pending. | This is the next non-duplicative production experiment after B4-127. | Run once. On failure, retain the scratch checkpoints, record the first typed failure and exact stage, and do not change precision/order until that evidence identifies the resource. |
 
 ### Implementation notes (not numerical experiments)
 
@@ -455,15 +456,12 @@ Rules:
 
 ## Next controlled experiment
 
-1. Re-run the documented level-2 boundary gate after the post-B4-125
-   overlap-recenter repair: WP500, EO50, match 25, private halos
-   `{20,14,8,0}`, composed-adjoint order 100, hard 420-second deadline,
-   persistent FIRE preparation cache, and fresh transport checkpoints. Do not
-   resume a ladder checkpoint. This is the only justified repeat of the
-   level-3-to-level-2 chain because the implementation changed after B4-89.
-2. If that gate passes, run the documented clean final-value gate: WP500,
-   EO50, match 15, the same private halos and composed-adjoint order, a
-   2400-second hard deadline, and fresh transport checkpoints.
+1. B4-127 already passed the clean pinned level-2 boundary gate in 388.6
+   seconds. Do not repeat it without a relevant implementation change.
+2. Run B4-128, the documented clean final-value gate: WP500, EO50, match 15,
+   private halos `{20,14,8,0}`, composed-adjoint order 100, a 2400-second hard
+   deadline, persistent FIRE preparation cache, and fresh transport
+   checkpoints. Do not resume a ladder checkpoint.
 3. Compare the final value against the independent Bessel oracle and reject
    expected-zero pole remnants before trimming.
 4. If either gate fails, add its experiment row and exact log path before

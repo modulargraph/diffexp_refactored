@@ -92,10 +92,23 @@ fi
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/diffexp2-banana4-boundary.XXXXXX")
 preserved_log=${BANANA4_BOUNDARY_LOG_PATH:-}
+keep_on_failure=${BANANA4_BOUNDARY_KEEP_ON_FAILURE:-0}
+case "$keep_on_failure" in
+  0|1) ;;
+  *)
+    echo "BANANA4_BOUNDARY_KEEP_ON_FAILURE must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 cleanup() {
+  status=$?
   if [[ -n "$preserved_log" &&
         -f "$scratch/banana4-boundary.log" ]]; then
     cp "$scratch/banana4-boundary.log" "$preserved_log"
+  fi
+  if [[ "$keep_on_failure" == 1 && "$status" != 0 ]]; then
+    echo "preserved failed banana4 artifacts: $scratch" >&2
+    return
   fi
   rm -rf "$scratch"
 }

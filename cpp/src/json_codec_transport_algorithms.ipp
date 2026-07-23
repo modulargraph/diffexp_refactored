@@ -3843,7 +3843,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       diagnostic_route == "factorized";
   const bool compare_factorized =
       diagnostic_route == "compare";
-  const std::string contraction_provenance =
+  std::string contraction_provenance =
       diagnostic_route == "physical"
       ? "terminal direct-physical diagnostic contraction"
       : diagnostic_route == "factorized"
@@ -3853,12 +3853,14 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
         "direct-factorized comparison"
       : "terminal factorized-adjoint production contraction";
   std::optional<TerminalComposedAdjointDiagnostic> composed_diagnostic;
+  bool composed_authoritative = false;
   if (const auto* composed_mode =
           std::getenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT")) {
     const std::string mode(composed_mode);
-    if (mode != "report" && mode != "require")
+    if (mode != "report" && mode != "require" &&
+        mode != "authoritative")
       throw std::invalid_argument(
-          "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT must be report or require");
+          "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT must be report, require, or authoritative");
     if (certified_tile.local_end.sign != 0) {
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
@@ -3870,6 +3872,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       composed_diagnostic = compute_terminal_composed_adjoint_diagnostic(
           match, prepared_row, arm, arm_name, tile_index,
           epsilon_contract);
+      composed_authoritative = mode == "authoritative";
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
           << " tile=" << tile_index
@@ -3900,6 +3903,14 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
           << " recurrence_contraction_upper="
           << composed_diagnostic->recurrence_contraction_upper.approximate_upper()
           << '\n';
+      if (composed_authoritative) {
+        contraction_provenance =
+            "terminal certified composed backward-adjoint production contraction";
+        std::cerr
+            << "terminal-composed-adjoint-selected arm=" << arm_name
+            << " tile=" << tile_index
+            << " status=authoritative-certified-value\n";
+      }
     } catch (const BackwardAdjointCenterAnchoringError& error) {
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
@@ -3920,7 +3931,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
         std::cerr << "absent";
       std::cerr << '\n';
     } catch (const std::exception& error) {
-      if (mode == "require") throw;
+      if (mode != "report") throw;
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
           << " tile=" << tile_index
@@ -4062,23 +4073,51 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   // instead of assuming an interior backward residual remains harmless at a
   // singular endpoint.  Direct physical/factorized weight contractions are
   // explicit diagnostics only.
-  auto contracted = direct_physical
-      ? match.contract_terminal_acb_physical_functionals(
-            physical_rows,
-            "terminal-direct-physical-line-contraction:" + arm_name + ":" +
-                std::to_string(tile_index))
-      : direct_factorized
-      ? match.contract_terminal_acb_factorized_functionals(
-            physical_rows,
-            "terminal-direct-factorized-line-contraction:" + arm_name + ":" +
-                std::to_string(tile_index))
-      : match.adjoint_contract_terminal_acb_functionals(
-            physical_rows,
-            epsilon_contract.required_complete_max,
-            "terminal-factorized-adjoint-line-contraction:" + arm_name + ":" +
-                std::to_string(tile_index),
-            true);
-  if (composed_diagnostic.has_value()) {
+  FiniteLaurentVector<ComplexBall> contracted;
+  if (composed_authoritative) {
+    if (!composed_diagnostic.has_value())
+      throw std::logic_error(
+          "authoritative terminal composed adjoint lost its certified value");
+    // The composed equation already includes dx=beta*dt and therefore
+    // returns the physically oriented finite line.  `contracted` below is
+    // stored before the common output-Jacobian application, so undo exactly
+    // that final scalar here.  Divergent endpoint tags are separate rows;
+    // retain their established factorized-adjoint cancellation certificate.
+    contracted.push_back(composed_diagnostic->value.scaled(
+        ComplexBall(1) / output_jacobian));
+    if (physical_rows.size() > 1) {
+      FiniteLaurentMatrix<ComplexBall> deferred_rows(
+          physical_rows.begin() + 1, physical_rows.end());
+      auto deferred = match.adjoint_contract_terminal_acb_functionals(
+          deferred_rows,
+          epsilon_contract.required_complete_max,
+          "terminal-factorized-adjoint-deferred-contraction:" + arm_name +
+              ":" + std::to_string(tile_index),
+          true);
+      contracted.insert(
+          contracted.end(),
+          std::make_move_iterator(deferred.begin()),
+          std::make_move_iterator(deferred.end()));
+    }
+  } else if (direct_physical) {
+    contracted = match.contract_terminal_acb_physical_functionals(
+        physical_rows,
+        "terminal-direct-physical-line-contraction:" + arm_name + ":" +
+            std::to_string(tile_index));
+  } else if (direct_factorized) {
+    contracted = match.contract_terminal_acb_factorized_functionals(
+        physical_rows,
+        "terminal-direct-factorized-line-contraction:" + arm_name + ":" +
+            std::to_string(tile_index));
+  } else {
+    contracted = match.adjoint_contract_terminal_acb_functionals(
+        physical_rows,
+        epsilon_contract.required_complete_max,
+        "terminal-factorized-adjoint-line-contraction:" + arm_name + ":" +
+            std::to_string(tile_index),
+        true);
+  }
+  if (composed_diagnostic.has_value() && !composed_authoritative) {
     const auto& composed = composed_diagnostic->value;
     const auto legacy = contracted.front().scaled(output_jacobian);
     const auto common_min = std::max({

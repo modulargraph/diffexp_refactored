@@ -1,5 +1,6 @@
 #pragma once
 
+#include "diffexp2/immutable_recursive_cache.hpp"
 #include "diffexp2/local_algebra.hpp"
 #include "diffexp2/physical_ode.hpp"
 
@@ -9,13 +10,34 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace diffexp2 {
+
+// The center-anchored composed adjoint below stores only t^n, n >= 1, and
+// therefore imposes lambda(0)=0.  A forcing term at t^0 or below is not a
+// numerical failure: it belongs to the separate Laurent/log endpoint
+// problem, whose integration-by-parts formula must also retain the center
+// boundary pairing.  Keep this condition typed so callers can classify the
+// theorem as inapplicable without hiding unrelated arithmetic failures.
+struct BackwardAdjointCenterAnchoringError : std::domain_error {
+  explicit BackwardAdjointCenterAnchoringError(
+      std::int64_t forcing_power_value, const std::string& context)
+      : std::domain_error(
+            context + ": center-pole forcing reaches t^" +
+            std::to_string(forcing_power_value) +
+            "; a Laurent/log backward Fuchsian completion and endpoint "
+            "pairing are required"),
+        forcing_power(forcing_power_value) {}
+
+  std::int64_t forcing_power;
+};
 
 // Finite-epsilon Taylor problem for the backward observable equation
 //
@@ -78,6 +100,13 @@ struct BackwardAdjointRealRayTailCertificate {
   Magnitude stability_margin_lower = Magnitude::zero();
   std::uint32_t certified_after_taylor_order = 0;
   std::uint32_t accepted_intervals = 0;
+};
+
+struct BackwardAdjointRealRayOperatorIntervalBounds {
+  Magnitude operator_norm_upper = Magnitude::zero();
+  // Index prefix_order-1 bounds the quotient of C after retaining
+  // Taylor order N-prefix_order in the a-posteriori defect.
+  std::vector<Magnitude> remainder_quotient_uppers_by_prefix;
 };
 
 namespace adjoint_observable_detail {
@@ -1320,6 +1349,111 @@ inline Magnitude normalized_backward_adjoint_c_real_interval_upper(
   return matrix_upper;
 }
 
+inline BackwardAdjointRealRayOperatorIntervalBounds
+normalized_backward_adjoint_operator_real_interval_bounds(
+    const NormalizedBackwardAdjointExactODE& normalized,
+    const ComplexBall& interval,
+    std::uint32_t taylor_complete_max,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  BackwardAdjointRealRayOperatorIntervalBounds result;
+  result.operator_norm_upper =
+      normalized_backward_adjoint_c_real_interval_upper(
+          normalized, interval, epsilon_complete_max,
+          context + ": operator norm");
+  result.remainder_quotient_uppers_by_prefix.assign(
+      taylor_complete_max, Magnitude::zero());
+  for (std::size_t transpose_row = 0;
+       transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
+    std::vector<Magnitude> row_uppers(
+        taylor_complete_max, Magnitude::zero());
+    for (std::size_t physical_row = 0;
+         physical_row < normalized.c_by_entry.size(); ++physical_row) {
+      const auto& by_epsilon =
+          normalized.c_by_entry[physical_row][transpose_row];
+      for (std::int32_t epsilon = 0;
+           epsilon <= epsilon_complete_max; ++epsilon) {
+        if (taylor_complete_max == 0) continue;
+        const auto quotient_uppers =
+            exact_t_rational_all_taylor_remainder_quotient_real_interval_uppers(
+                by_epsilon[static_cast<std::size_t>(epsilon)],
+                taylor_complete_max - 1, interval,
+                context + ": C quotient transpose row " +
+                    std::to_string(transpose_row) + ": physical row " +
+                    std::to_string(physical_row) + ": epsilon " +
+                    std::to_string(epsilon));
+        for (std::uint32_t prefix_order = 1;
+             prefix_order <= taylor_complete_max; ++prefix_order)
+          row_uppers[prefix_order - 1] +=
+              quotient_uppers[taylor_complete_max - prefix_order];
+      }
+    }
+    for (std::size_t prefix = 0; prefix < taylor_complete_max; ++prefix)
+      result.remainder_quotient_uppers_by_prefix[prefix] =
+          Magnitude::maximum(
+              result.remainder_quotient_uppers_by_prefix[prefix],
+              row_uppers[prefix]);
+  }
+  return result;
+}
+
+class BackwardAdjointRealRayOperatorCache {
+ public:
+  std::shared_ptr<const BackwardAdjointRealRayOperatorIntervalBounds>
+  get_or_build(
+      const NormalizedBackwardAdjointExactODE& normalized,
+      const Rational& left, const Rational& right,
+      const ComplexBall& interval,
+      std::uint32_t taylor_complete_max,
+      std::int32_t epsilon_complete_max,
+      const std::string& context) {
+    // Normalizing through a larger retained epsilon cap does not change any
+    // lower C/q coefficient: formal division is prefix-causal.  Key the
+    // operator theorem by the exact equation owner and the prefix actually
+    // consumed, so observables with different unused row tops share it.
+    Key key{normalized.truncated_ode.owner_signature_identity,
+            left.str(), right.str(),
+            taylor_complete_max, epsilon_complete_max,
+            ComplexBall::precision()};
+    const auto contract =
+        normalized.truncated_ode.owner_signature_identity +
+        ":real-ray-operator-prefix-v2:t" +
+        std::to_string(taylor_complete_max) + ":e" +
+        std::to_string(epsilon_complete_max);
+    return cache_.get_or_build(
+        key, contract, [&] {
+          return normalized_backward_adjoint_operator_real_interval_bounds(
+              normalized, interval, taylor_complete_max,
+              epsilon_complete_max, context);
+        }).value;
+  }
+
+  auto stats() const { return cache_.stats(); }
+
+ private:
+  struct Key {
+    std::string equation_identity;
+    std::string left;
+    std::string right;
+    std::uint32_t taylor_complete_max = 0;
+    std::int32_t epsilon_complete_max = 0;
+    slong precision_bits = 0;
+
+    bool operator<(const Key& other) const {
+      return std::tie(equation_identity, left, right,
+                      taylor_complete_max, epsilon_complete_max,
+                      precision_bits) <
+             std::tie(other.equation_identity, other.left, other.right,
+                      other.taylor_complete_max,
+                      other.epsilon_complete_max,
+                      other.precision_bits);
+    }
+  };
+
+  detail::ImmutableRecursiveCache<
+      Key, BackwardAdjointRealRayOperatorIntervalBounds> cache_;
+};
+
 inline Magnitude normalized_backward_adjoint_defect_quotient_real_interval_upper(
     const NormalizedBackwardAdjointExactODE& normalized,
     const PreparedSparseLocalMultiplierMatrix<Rational>& exact_row,
@@ -1327,6 +1461,7 @@ inline Magnitude normalized_backward_adjoint_defect_quotient_real_interval_upper
     const ComplexBall& oriented_physical_jacobian,
     const ComplexBall& interval,
     std::int32_t epsilon_complete_max,
+    const BackwardAdjointRealRayOperatorIntervalBounds& operator_bounds,
     const std::string& context) {
   const auto order = solution.taylor_complete_max;
   auto defect = Magnitude::zero();
@@ -1366,39 +1501,13 @@ inline Magnitude normalized_backward_adjoint_defect_quotient_real_interval_upper
     prefix_uppers[prefix_order - 1] = vector_infinity_upper_through(
         solution.coefficients[prefix_order - 1], epsilon_complete_max);
 
-  std::vector<Magnitude> operator_quotient_uppers(
-      order, Magnitude::zero());
-  for (std::size_t transpose_row = 0;
-       transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
-    std::vector<Magnitude> row_uppers(order, Magnitude::zero());
-    for (std::size_t physical_row = 0;
-         physical_row < normalized.c_by_entry.size(); ++physical_row) {
-      const auto& by_epsilon =
-          normalized.c_by_entry[physical_row][transpose_row];
-      for (std::int32_t epsilon = 0;
-           epsilon <= epsilon_complete_max; ++epsilon) {
-        if (order == 0) continue;
-        const auto quotient_uppers =
-            exact_t_rational_all_taylor_remainder_quotient_real_interval_uppers(
-                by_epsilon[static_cast<std::size_t>(epsilon)], order - 1,
-                interval,
-                context + ": C quotient transpose row " +
-                    std::to_string(transpose_row) + ": physical row " +
-                    std::to_string(physical_row) + ": epsilon " +
-                    std::to_string(epsilon));
-        for (std::uint32_t prefix_order = 1; prefix_order <= order;
-             ++prefix_order)
-          row_uppers[prefix_order - 1] +=
-              quotient_uppers[order - prefix_order];
-      }
-    }
-    for (std::size_t prefix = 0; prefix < order; ++prefix)
-      operator_quotient_uppers[prefix] = Magnitude::maximum(
-          operator_quotient_uppers[prefix], row_uppers[prefix]);
-  }
+  if (operator_bounds.remainder_quotient_uppers_by_prefix.size() != order)
+    throw std::invalid_argument(
+        context + ": real-ray operator bounds have the wrong Taylor order");
   for (std::size_t prefix = 0; prefix < order; ++prefix)
     if (!prefix_uppers[prefix].is_zero())
-      defect += prefix_uppers[prefix] * operator_quotient_uppers[prefix];
+      defect += prefix_uppers[prefix] *
+          operator_bounds.remainder_quotient_uppers_by_prefix[prefix];
   return defect;
 }
 
@@ -1501,7 +1610,9 @@ certify_backward_adjoint_real_ray_tail(
     std::int32_t epsilon_complete_max,
     std::uint32_t maximum_subdivision_depth = 128,
     const std::string& context =
-        "backward Fuchsian adjoint real-ray tail certificate") {
+        "backward Fuchsian adjoint real-ray tail certificate",
+    adjoint_observable_detail::BackwardAdjointRealRayOperatorCache*
+        operator_cache = nullptr) {
   using namespace adjoint_observable_detail;
   if (signed_evaluation_point.is_zero() ||
       maximum_subdivision_depth == 0 ||
@@ -1532,11 +1643,25 @@ certify_backward_adjoint_real_ray_tail(
     try {
       const auto interval = exact_real_interval_ball(
           current.left, current.right);
-      const auto local_operator =
-          normalized_backward_adjoint_c_real_interval_upper(
-              normalized, interval, epsilon_complete_max,
-              context + ": operator interval depth " +
-                  std::to_string(current.depth));
+      std::shared_ptr<const BackwardAdjointRealRayOperatorIntervalBounds>
+          operator_bounds;
+      const auto operator_context =
+          context + ": operator interval depth " +
+          std::to_string(current.depth);
+      if (operator_cache) {
+        operator_bounds = operator_cache->get_or_build(
+            normalized, current.left, current.right, interval,
+            solution.taylor_complete_max, epsilon_complete_max,
+            operator_context);
+      } else {
+        operator_bounds = std::make_shared<const
+            BackwardAdjointRealRayOperatorIntervalBounds>(
+                normalized_backward_adjoint_operator_real_interval_bounds(
+                    normalized, interval,
+                    solution.taylor_complete_max,
+                    epsilon_complete_max, operator_context));
+      }
+      const auto& local_operator = operator_bounds->operator_norm_upper;
       if (next_order_magnitude <= local_operator)
         throw std::domain_error(
             context + ": interval operator norm does not prove stability");
@@ -1544,7 +1669,7 @@ certify_backward_adjoint_real_ray_tail(
           normalized_backward_adjoint_defect_quotient_real_interval_upper(
               normalized, exact_row, solution,
               oriented_physical_jacobian, interval,
-              epsilon_complete_max,
+              epsilon_complete_max, *operator_bounds,
               context + ": defect interval depth " +
                   std::to_string(current.depth));
       operator_upper = Magnitude::maximum(operator_upper, local_operator);
@@ -1674,10 +1799,8 @@ BackwardAdjointTaylorProblem prepare_backward_adjoint_taylor_problem(
             -oriented_physical_jacobian);
         if (!material_frame(forcing_coefficient)) continue;
         if (forcing_power <= 0)
-          throw std::domain_error(
-              context +
-              ": center-pole forcing reaches t^0 or below; a Laurent/log "
-              "backward Fuchsian completion is required");
+          throw BackwardAdjointCenterAnchoringError(
+              forcing_power, context);
         if (forcing_power > taylor_complete_max) continue;
         auto& target = problem.forcing[
             static_cast<std::size_t>(forcing_power - 1)][entry.column];
@@ -2339,6 +2462,31 @@ solve_backward_adjoint_taylor_with_epsilon_reservoir(
           next, "backward adjoint private epsilon reservoir maximum");
     }
   }
+}
+
+inline std::int32_t backward_adjoint_prefix_input_complete_max(
+    const BackwardAdjointReservoirSolve& maximal,
+    std::int32_t required_output_complete_max,
+    const std::string& context =
+        "backward adjoint maximal-reservoir prefix") {
+  if (required_output_complete_max >
+      maximal.result.common_epsilon_complete_max)
+    throw std::invalid_argument(
+        context + ": requested output exceeds the solved complete prefix");
+  const auto private_loss =
+      static_cast<std::int64_t>(maximal.input_epsilon_complete_max) -
+      maximal.result.common_epsilon_complete_max;
+  if (private_loss < 0)
+    throw std::logic_error(
+        context + ": solved prefix exceeds its private input reservoir");
+  const auto prefix_input =
+      static_cast<std::int64_t>(required_output_complete_max) +
+      private_loss;
+  if (prefix_input > maximal.input_epsilon_complete_max)
+    throw std::logic_error(
+        context + ": prefix reservoir exceeds the maximal solve");
+  return matching_detail::checked_power(
+      prefix_input, "backward adjoint prefix input complete maximum");
 }
 
 inline FiniteLaurentVector<ComplexBall> evaluate_backward_adjoint_taylor(

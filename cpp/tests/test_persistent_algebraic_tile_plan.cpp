@@ -61,9 +61,10 @@ std::string solve_local(const std::string& session,
                         const std::string& chart,
                         const std::string& center,
                         const std::string& scale,
-                        const std::string& radius,
+                        const std::string& radius_exact,
                         const std::string& checkpoint,
-                        const std::string& value) {
+                        const std::string& value,
+                        const std::string& radius_numeric = {}) {
   json::array schedule_row;
   schedule_row.push_back(json::object{
       {"case", "R"}, {"da", "0"}, {"db", "0"}});
@@ -84,7 +85,11 @@ std::string solve_local(const std::string& session,
       {"metadata", json::object{
            {"chart", json::object{
                 {"center_exact", center}, {"scale_exact", scale},
-                {"radius", radius}, {"infinite_radius", false}}},
+                {"radius_exact", radius_exact},
+                {"radius", radius_numeric.empty()
+                     ? json::value(radius_exact)
+                     : json::value(radius_numeric)},
+                {"infinite_radius", false}}},
            {"tag", json::object{
                 {"a", json::object{{"domain", "rational"},
                                      {"canonical", "0"}}},
@@ -166,7 +171,8 @@ json::object algebraic_arm(const std::string& anchor,
       json::object{{"index", 1},
                    {"center", certified(center_exact, center_value, 1)},
                    {"scale", certified(scale_exact, scale_value, 1)},
-                   {"radius", certified("3/4", "3/4", 1)}}};
+                   {"radius", certified(
+                        "3/4", "[0.75 +/- 1e-27]", 1)}}};
   json::array matches{json::object{
       {"index", 0},
       {"physical", certified(physical_match_exact, physical_match_value, 1)},
@@ -246,12 +252,12 @@ int main() {
                  "[0.7071067811865475244008443621 +/- 1e-27]",
                  "Sqrt[2]",
                  "[1.4142135623730950488016887242 +/- 1e-27]",
-                 "3/4", "3/4"));
+                 "3/4", "[0.75 +/- 1e-30]"));
     const auto incoming = solve_local(
         session, anchor, "0", "2", "2", "algebraic-anchor-local", "2");
     const auto basis = solve_local(
         session, receiver, "Sqrt[2]/2", "Sqrt[2]", "3/4",
-        "algebraic-receiver-local", "1");
+        "algebraic-receiver-local", "1", "[0.75 +/- 1e-25]");
     auto arm = algebraic_arm(anchor, receiver);
     const auto plan = request(json::object{
         {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
@@ -289,6 +295,18 @@ int main() {
     if (rejected.at("status") != "error")
       throw std::runtime_error(
           "mismatched algebraic owner identity was accepted");
+
+    auto bad_radius_arm = arm;
+    bad_radius_arm.at("certified_geometry").as_object()
+        .at("charts").as_array()[1].as_object()
+        .at("radius").as_object()["exact"] = "4/5";
+    const auto radius_rejected = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", "bad-algebraic-radius-plan"},
+        {"division_order", 3}, {"arm", std::move(bad_radius_arm)}});
+    if (radius_rejected.at("status") != "error")
+      throw std::runtime_error(
+          "mismatched exact radius identity was accepted");
 
     const auto center_plan = request(json::object{
         {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
@@ -359,7 +377,7 @@ int main() {
     restored_session.clear();
     std::remove(path.c_str());
     std::cout << (ok ? "PASS" : "FAIL")
-              << ": rational-surrogate to algebraic chart matching retains certified geometry\n";
+              << ": exact radius identity survives unequal rigorous specializations\n";
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
   } catch (const std::exception& error) {
     if (!session.empty())

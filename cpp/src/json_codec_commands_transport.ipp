@@ -92,18 +92,22 @@
       ++session->total_transport_physical_value_hop_attempts;
     }
 
-    const auto ineligible = [&](std::string reason) {
+    const auto ineligible = [&](std::string reason,
+                                std::string detail = {}) {
       {
         std::lock_guard<std::mutex> lock(session->mutex);
         ++session->total_transport_physical_value_hop_ineligible;
       }
-      return json::object{
+      json::object response{
           {"status", "ok"}, {"session", session->handle},
           {"capability", "ordinary-physical-value-transport-hop-v1"},
           {"execution_mode", "framed-fallback-required"},
           {"used", false}, {"reason", std::move(reason)},
           {"arm", arm_name}, {"match", match_index},
           {"value_hops", 0}, {"basis_matches", 0}};
+      if (!detail.empty())
+        response["detail"] = std::move(detail);
+      return response;
     };
     const auto& retained = plan->arm(arm_name);
     const auto& exact_match = retained.exact.matches[match_index];
@@ -221,148 +225,603 @@
         acb_incoming->tail_model().status == TailMajorantStatus::Certified &&
         acb_incoming->tail_model().model.has_value();
     std::optional<PhysicalRegularTaylorTailModel> physical_source_model;
-    if (!source_has_framed_tail) {
-      const auto& source_equation = acb_incoming->physical_equation();
-      if (!source_equation ||
-          source_equation->payload_identity !=
-              producing_equation_owner->physical_payload_identity())
-        return ineligible(
-            "incoming-local-has-no-certified-physical-tail-owner");
+    std::string physical_source_model_failure;
+    const auto& source_equation = acb_incoming->physical_equation();
+    if (source_equation &&
+        source_equation->payload_identity ==
+            producing_equation_owner->physical_payload_identity()) {
       auto prepared_physical =
           prepare_physical_regular_homogeneous_tail_model(
               *source_equation, acb_incoming->solution());
-      if (prepared_physical.status != TailMajorantStatus::Certified ||
-          !prepared_physical.model.has_value())
-        return ineligible(
-            "incoming-local-has-no-certified-physical-tail-model");
-      physical_source_model = std::move(*prepared_physical.model);
-    }
-    constexpr std::uint32_t kWitnessSearchCap = 16;
-    std::optional<Rational> witness_radius;
-    std::uint32_t witness_dyadic_exponent = 0;
-    const auto producing_point = RealEvaluationPoint::rational(
-        producing_local.str());
-    const auto producing_rim = exact_plan_rim(
-        producing.prescriptions, *producing_scale);
-    const auto point_modulus = exact_path_detail::abs(producing_local);
-    const auto witness_gap = producing.geometry.radius - point_modulus;
-    Rational dyadic_denominator(1);
-    for (std::uint32_t exponent = 1;
-         exponent <= kWitnessSearchCap; ++exponent) {
-      dyadic_denominator *= Rational(2);
-      const auto candidate =
-          point_modulus + witness_gap / dyadic_denominator;
-      const auto candidate_certificate = source_has_framed_tail
-          ? certify_regular_taylor_point_tail(
-                *acb_incoming->tail_model().model, producing_point,
-                candidate.str(), producer_taylor_complete_max)
-          : certify_physical_regular_taylor_point_tail(
-                *physical_source_model, producing_point,
-                candidate.str(), producer_taylor_complete_max);
-      if (candidate_certificate.status == TailMajorantStatus::Certified) {
-        witness_radius = candidate;
-        witness_dyadic_exponent = exponent;
-        break;
-      }
-      if (candidate_certificate.status != TailMajorantStatus::Inconclusive ||
-          candidate_certificate.disk.status !=
-              TailMajorantStatus::Inconclusive)
-        return ineligible(
-            "receiver-center-tail-certificate-fails-after-disk-certification");
-    }
-    if (!witness_radius.has_value())
-      return ineligible(
-          "receiver-center-tail-certificate-is-inconclusive");
-    std::optional<CertifiedLocalEvaluation> certified;
-    if (source_has_framed_tail) {
-      certified = incoming->evaluate_retained_point_with_certified_tail(
-          producing_point, producing_rim, witness_radius->str());
+      if (prepared_physical.status == TailMajorantStatus::Certified &&
+          prepared_physical.model.has_value())
+        physical_source_model = std::move(*prepared_physical.model);
+      else
+        physical_source_model_failure = std::move(prepared_physical.detail);
     } else {
-      EvaluationOptions options;
-      options.imaginary_sign = producing_rim;
-      options.compute_tail_estimate = false;
-      certified = evaluate_physical_local_solution_with_certified_tail(
-          *physical_source_model, producing_point, witness_radius->str(),
-          options);
+      physical_source_model_failure =
+          "incoming local has no matching retained physical q/C owner";
     }
-    if (!certified.has_value() ||
-        certified->tail.status != TailMajorantStatus::Certified)
+    if (!physical_source_model.has_value() && !source_has_framed_tail)
       return ineligible(
-          "receiver-center-tail-certificate-is-inconclusive");
-    const auto expected_rim = producing_point.sign < 0
-        ? producing_rim : std::nullopt;
-    if (certified->evaluation.imaginary_sign != expected_rim)
-      return ineligible(
-          "center-evaluation-rim-differs-from-producing-plan-chart");
-    if (certified->evaluation.value.epsilon.min_power <
-            incoming_epsilon_min ||
-        certified->evaluation.value.epsilon.complete_max !=
-            incoming_epsilon_max ||
-        certified->tail.value.guarantee != ErrorGuarantee::Certified ||
-        !tail_majorant_detail::same_epsilon_window(
-            EpsilonWindow{incoming_epsilon_min, incoming_epsilon_max},
-            certified->tail.value.frame) ||
-        certified->tail.value.absolute.size() !=
-            EpsilonWindow{incoming_epsilon_min,
-                          incoming_epsilon_max}.width())
-      throw std::logic_error(
-          "certified physical value handoff changed its retained epsilon frame");
-    auto retained_value = certified->evaluation.value;
-    retained_value.error = ErrorEnvelope{};
-    if (incoming_epsilon_min < retained_value.epsilon.min_power) {
-      auto widened = physical_ode_detail::zero_epsilon_vector(
-          EpsilonWindow{incoming_epsilon_min, incoming_epsilon_max},
-          retained_value.dimension);
-      for (std::int64_t raw_power = retained_value.epsilon.min_power;
-           raw_power <= retained_value.epsilon.complete_max; ++raw_power) {
-        const auto power = static_cast<std::int32_t>(raw_power);
-        for (std::uint32_t component = 0;
-             component < retained_value.dimension; ++component)
-          widened.at(power, component) =
-              retained_value.at(power, component);
-      }
-      retained_value = std::move(widened);
-    }
-    auto certified_handoff = certified->evaluation;
-    certified_handoff.value = retained_value;
-    for (std::int64_t raw_power =
-             certified_handoff.value.epsilon.min_power;
-         raw_power <= certified_handoff.value.epsilon.complete_max;
-         ++raw_power) {
-      const auto power = static_cast<std::int32_t>(raw_power);
-      const auto row = static_cast<std::size_t>(
-          raw_power - certified_handoff.value.epsilon.min_power);
-      for (std::uint32_t component = 0;
-           component < certified_handoff.value.dimension; ++component)
-        certified->tail.value.absolute[row].add_error_to(
-            certified_handoff.value.at(power, component));
-    }
-    certified_handoff.value.error = ErrorEnvelope{};
-    if (execution_epsilon_min <
-        certified_handoff.value.epsilon.min_power) {
-      auto widened = physical_ode_detail::zero_epsilon_vector(
-          EpsilonWindow{execution_epsilon_min, incoming_epsilon_max},
-          certified_handoff.value.dimension);
-      for (std::int64_t raw_power = incoming_epsilon_min;
-           raw_power <= incoming_epsilon_max; ++raw_power) {
-        const auto power = static_cast<std::int32_t>(raw_power);
-        for (std::uint32_t component = 0;
-             component < certified_handoff.value.dimension; ++component)
-          widened.at(power, component) =
-              certified_handoff.value.at(power, component);
-      }
-      certified_handoff.value = std::move(widened);
-    }
-    for (const auto& coefficient : certified_handoff.value.coefficients)
-      if (!value_handoff_accurate(coefficient, relative_accuracy_max))
-        return ineligible(
-            "inflated-center-evaluation-fails-relative-accuracy-contract");
-
+          "incoming-local-has-no-certified-physical-tail-model",
+          physical_source_model_failure);
+    const bool use_physical_source_tail =
+        physical_source_model.has_value();
     auto equation = std::dynamic_pointer_cast<
         RegularPhysicalEquationOwner<ComplexBall>>(*receiving_owner);
     if (!equation)
       throw std::invalid_argument(
           "physical value transport hop receiver has the wrong Acb equation type");
+    std::uint32_t tail_certificate_taylor_complete_max =
+        use_physical_source_tail
+        ? physical_source_model->taylor_complete_max
+        : producer_taylor_complete_max;
+    constexpr std::uint32_t kWitnessSearchCap = 16;
+    // Reconstructing one physical value is substantially cheaper than
+    // solving every basis column.  A coefficient-blind center ratio cannot
+    // predict the required Taylor order for a stiff local operator, so retry
+    // the exact retained q/C recurrence on a deterministic private-order
+    // ladder.  The published local keeps receiver_taylor_complete_max; only
+    // this handoff certificate sees the extended prefix.
+    constexpr std::uint32_t kPrivateTaylorOrderCap = 800;
+    constexpr std::uint32_t kPrivateTaylorOrderMinimumStep = 25;
+    std::vector<std::uint32_t> tail_order_attempts{
+        tail_certificate_taylor_complete_max};
+    std::optional<Rational> witness_radius;
+    std::uint32_t witness_dyadic_exponent = 0;
+    std::string witness_dyadic_direction;
+    auto producing_point = RealEvaluationPoint::rational(
+        producing_local.str());
+    const auto producing_rim = exact_plan_rim(
+        producing.prescriptions, *producing_scale);
+    auto expected_rim = producing_point.sign < 0
+        ? producing_rim : std::nullopt;
+    auto point_modulus = exact_path_detail::abs(producing_local);
+    auto witness_gap = producing.geometry.radius - point_modulus;
+    std::optional<CertifiedLocalEvaluation> certified;
+    EpsilonVector retained_value;
+    LocalEvaluation certified_handoff;
+    std::string last_accuracy_failure;
+    bool certificate_failed_after_disk = false;
+    bool used_overlap_recenter = false;
+    std::string direct_center_failure;
+    std::optional<CertifiedLocalEvaluation> recentered_certified;
+    EpsilonVector source_overlap_inflated_value;
+    EpsilonVector recentered_retained_value;
+    LocalEvaluation recentered_center_handoff;
+    std::optional<Rational> recentered_witness_radius;
+    std::uint32_t recentered_witness_dyadic_exponent = 0;
+    std::string recentered_witness_dyadic_direction;
+    std::uint32_t recentered_taylor_complete_max = 0;
+    std::vector<std::uint32_t> recentered_order_attempts;
+    Rational recentered_chart_radius(0);
+    const auto try_witness = [&](const Rational& candidate,
+                                 std::string direction,
+                                 std::uint32_t exponent) {
+      std::optional<CertifiedLocalEvaluation> attempted;
+      if (use_physical_source_tail) {
+        EvaluationOptions options;
+        options.imaginary_sign = producing_rim;
+        options.compute_tail_estimate = false;
+        attempted =
+            evaluate_physical_local_solution_with_certified_tail(
+                *physical_source_model, producing_point,
+                candidate.str(), options);
+      } else {
+        attempted =
+            incoming->evaluate_retained_point_with_certified_tail(
+                producing_point, producing_rim, candidate.str());
+      }
+      if (!attempted.has_value()) return false;
+      if (attempted->tail.status != TailMajorantStatus::Certified) {
+        if (attempted->tail.status !=
+                TailMajorantStatus::Inconclusive ||
+            attempted->tail.disk.status !=
+                TailMajorantStatus::Inconclusive)
+          certificate_failed_after_disk = true;
+        return false;
+      }
+      if (attempted->evaluation.imaginary_sign != expected_rim)
+        throw std::logic_error(
+            "center-evaluation rim differs from its producing plan chart");
+      if (attempted->evaluation.value.epsilon.min_power <
+              incoming_epsilon_min ||
+          attempted->evaluation.value.epsilon.complete_max !=
+              incoming_epsilon_max ||
+          attempted->tail.value.guarantee !=
+              ErrorGuarantee::Certified ||
+          !tail_majorant_detail::same_epsilon_window(
+              EpsilonWindow{incoming_epsilon_min,
+                            incoming_epsilon_max},
+              attempted->tail.value.frame) ||
+          attempted->tail.value.absolute.size() !=
+              EpsilonWindow{incoming_epsilon_min,
+                            incoming_epsilon_max}.width())
+        throw std::logic_error(
+            "certified physical value handoff changed its retained epsilon frame");
+      auto candidate_retained = attempted->evaluation.value;
+      candidate_retained.error = ErrorEnvelope{};
+      if (incoming_epsilon_min <
+          candidate_retained.epsilon.min_power) {
+        auto widened = physical_ode_detail::zero_epsilon_vector(
+            EpsilonWindow{incoming_epsilon_min,
+                          incoming_epsilon_max},
+            candidate_retained.dimension);
+        for (std::int64_t raw_power =
+                 candidate_retained.epsilon.min_power;
+             raw_power <= candidate_retained.epsilon.complete_max;
+             ++raw_power) {
+          const auto power = static_cast<std::int32_t>(raw_power);
+          for (std::uint32_t component = 0;
+               component < candidate_retained.dimension; ++component)
+            widened.at(power, component) =
+                candidate_retained.at(power, component);
+        }
+        candidate_retained = std::move(widened);
+      }
+      auto candidate_handoff = attempted->evaluation;
+      candidate_handoff.value = candidate_retained;
+      for (std::int64_t raw_power =
+               candidate_handoff.value.epsilon.min_power;
+           raw_power <=
+               candidate_handoff.value.epsilon.complete_max;
+           ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        const auto row = static_cast<std::size_t>(
+            raw_power -
+            candidate_handoff.value.epsilon.min_power);
+        for (std::uint32_t component = 0;
+             component < candidate_handoff.value.dimension;
+             ++component)
+          attempted->tail.value.absolute[row].add_error_to(
+              candidate_handoff.value.at(power, component));
+      }
+      candidate_handoff.value.error = ErrorEnvelope{};
+      if (execution_epsilon_min <
+          candidate_handoff.value.epsilon.min_power) {
+        auto widened = physical_ode_detail::zero_epsilon_vector(
+            EpsilonWindow{execution_epsilon_min,
+                          incoming_epsilon_max},
+            candidate_handoff.value.dimension);
+        for (std::int64_t raw_power = incoming_epsilon_min;
+             raw_power <= incoming_epsilon_max; ++raw_power) {
+          const auto power = static_cast<std::int32_t>(raw_power);
+          for (std::uint32_t component = 0;
+               component < candidate_handoff.value.dimension;
+               ++component)
+            widened.at(power, component) =
+                candidate_handoff.value.at(power, component);
+        }
+        candidate_handoff.value = std::move(widened);
+      }
+      if (const auto failure = value_handoff_accuracy_failure(
+              candidate_handoff.value, required_complete_max,
+              relative_accuracy_max)) {
+        last_accuracy_failure =
+            *failure + ";witness_radius_exact=" +
+            candidate.str() + ";witness_direction=" + direction +
+            ";witness_dyadic_exponent=" +
+            std::to_string(exponent);
+        return false;
+      }
+      witness_radius = candidate;
+      witness_dyadic_direction = std::move(direction);
+      witness_dyadic_exponent = exponent;
+      retained_value = std::move(candidate_retained);
+      certified_handoff = std::move(candidate_handoff);
+      certified = std::move(attempted);
+      return true;
+    };
+    const auto dyadic_denominator = [](std::uint32_t exponent) {
+      Rational denominator(1);
+      for (std::uint32_t index = 0; index < exponent; ++index)
+        denominator *= Rational(2);
+      return denominator;
+    };
+    const auto search_witness = [&] {
+      witness_radius.reset();
+      witness_dyadic_exponent = 0;
+      witness_dyadic_direction.clear();
+      certified.reset();
+      retained_value = EpsilonVector{};
+      certified_handoff = LocalEvaluation{};
+      last_accuracy_failure.clear();
+      certificate_failed_after_disk = false;
+      for (std::uint32_t exponent = kWitnessSearchCap;
+           exponent >= 1 && !witness_radius.has_value(); --exponent) {
+        const auto candidate = producing.geometry.radius -
+            witness_gap / dyadic_denominator(exponent);
+        (void)try_witness(candidate, "outward", exponent);
+      }
+      for (std::uint32_t exponent = 2;
+           exponent <= kWitnessSearchCap &&
+               !witness_radius.has_value(); ++exponent) {
+        const auto candidate = point_modulus +
+            witness_gap / dyadic_denominator(exponent);
+        (void)try_witness(candidate, "inward", exponent);
+      }
+    };
+    search_witness();
+    while (!witness_radius.has_value() &&
+           use_physical_source_tail &&
+           !last_accuracy_failure.empty() &&
+           tail_certificate_taylor_complete_max <
+               kPrivateTaylorOrderCap) {
+      const auto step = std::max(
+          kPrivateTaylorOrderMinimumStep,
+          tail_certificate_taylor_complete_max / 2);
+      const auto next_order_wide =
+          static_cast<std::uint64_t>(
+              tail_certificate_taylor_complete_max) + step;
+      const auto next_order = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(
+              next_order_wide, kPrivateTaylorOrderCap));
+      auto extended_physical =
+          prepare_physical_regular_homogeneous_tail_model(
+              *source_equation, acb_incoming->solution(), next_order);
+      if (extended_physical.status != TailMajorantStatus::Certified ||
+          !extended_physical.model.has_value())
+        return ineligible(
+            "physical-tail-private-order-reconstruction-failed",
+            "retained_taylor_complete_max=" +
+                std::to_string(producer_taylor_complete_max) +
+                ";requested_tail_certificate_taylor_complete_max=" +
+                std::to_string(next_order) + ";detail=" +
+                extended_physical.detail);
+      physical_source_model =
+          std::move(*extended_physical.model);
+      tail_certificate_taylor_complete_max = next_order;
+      tail_order_attempts.push_back(next_order);
+      search_witness();
+    }
+    if (!witness_radius.has_value() &&
+        use_physical_source_tail) {
+      direct_center_failure =
+          last_accuracy_failure.empty()
+          ? (certificate_failed_after_disk
+                 ? "direct receiver-center certificate failed after disk certification"
+                 : "direct receiver-center certificate was inconclusive")
+          : last_accuracy_failure;
+
+      // The planner already supplies a common point in the safe overlap of
+      // both ordinary charts.  If direct source-to-receiver-center
+      // evaluation remains too close to the source theorem's certified q
+      // disk even at the private-order cap, certify the source only to that
+      // overlap and continue with the receiving physical equation.
+      producing_point = RealEvaluationPoint::rational(
+          exact_match.producing_local.str());
+      expected_rim = producing_point.sign < 0
+          ? producing_rim : std::nullopt;
+      point_modulus =
+          exact_path_detail::abs(exact_match.producing_local);
+      witness_gap = producing.geometry.radius - point_modulus;
+      search_witness();
+      while (!witness_radius.has_value() &&
+             !last_accuracy_failure.empty() &&
+             tail_certificate_taylor_complete_max <
+                 kPrivateTaylorOrderCap) {
+        const auto step = std::max(
+            kPrivateTaylorOrderMinimumStep,
+            tail_certificate_taylor_complete_max / 2);
+        const auto next_order = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(
+                static_cast<std::uint64_t>(
+                    tail_certificate_taylor_complete_max) + step,
+                kPrivateTaylorOrderCap));
+        auto extended_physical =
+            prepare_physical_regular_homogeneous_tail_model(
+                *source_equation, acb_incoming->solution(),
+                next_order);
+        if (extended_physical.status !=
+                TailMajorantStatus::Certified ||
+            !extended_physical.model.has_value())
+          return ineligible(
+              "physical-overlap-source-private-order-reconstruction-failed",
+              "requested_tail_certificate_taylor_complete_max=" +
+                  std::to_string(next_order) + ";detail=" +
+                  extended_physical.detail);
+        physical_source_model =
+            std::move(*extended_physical.model);
+        tail_certificate_taylor_complete_max = next_order;
+        tail_order_attempts.push_back(next_order);
+        search_witness();
+      }
+
+      if (witness_radius.has_value()) {
+        source_overlap_inflated_value =
+            certified_handoff.value;
+        const auto receiving_match_local =
+            exact_match.receiving_local;
+        const auto recentered =
+            recenter_physical_cleared_ode(
+                *equation->physical_equation(),
+                receiving_match_local);
+        if (!recentered.eligible ||
+            !recentered.equation.has_value())
+          return ineligible(
+              "physical-overlap-recenter-ineligible",
+              recentered.reason);
+        recentered_chart_radius =
+            receiving.geometry.radius -
+            exact_path_detail::abs(receiving_match_local);
+        const auto recentered_point_exact =
+            Rational(0) - receiving_match_local;
+        const auto recentered_point =
+            RealEvaluationPoint::rational(
+                recentered_point_exact.str());
+        const auto recentered_point_modulus =
+            exact_path_detail::abs(recentered_point_exact);
+        if (!(recentered_point_modulus <
+              recentered_chart_radius))
+          return ineligible(
+              "physical-overlap-recenter-has-no-certified-return-disk");
+
+        std::optional<PhysicalRegularTaylorTailModel>
+            recentered_model;
+        std::string recentered_model_failure;
+        const auto prepare_recentered_model =
+            [&](std::uint32_t order) {
+          const auto overlap_evolution =
+              evolve_ordinary_center_value<ComplexBall>(
+                  *recentered.equation,
+                  certified_handoff.value, order);
+          if (!overlap_evolution.eligible) {
+            recentered_model_failure =
+                overlap_evolution.reason;
+            return false;
+          }
+          ChartGeometry chart;
+          chart.center_exact = "0";
+          chart.scale_exact = "1";
+          chart.radius_exact = recentered_chart_radius.str();
+          chart.radius = ComplexBall::from_strings(
+              recentered_chart_radius.str());
+          chart.infinite_radius = false;
+          auto overlap_solution =
+              ordinary_evolution_local_solution(
+                  overlap_evolution, std::move(chart),
+                  receiving.prescriptions,
+                  incoming->checkpoint_identity() +
+                      ":overlap-recenter:" + arm_name + ":" +
+                      std::to_string(match_index) + ":" +
+                      std::to_string(order));
+          auto prepared =
+              prepare_physical_regular_homogeneous_tail_model(
+                  *recentered.equation, overlap_solution);
+          if (prepared.status !=
+                  TailMajorantStatus::Certified ||
+              !prepared.model.has_value()) {
+            recentered_model_failure = prepared.detail;
+            return false;
+          }
+          recentered_model = std::move(*prepared.model);
+          recentered_taylor_complete_max = order;
+          return true;
+        };
+
+        std::string recentered_accuracy_failure;
+        bool recentered_certificate_failed_after_disk = false;
+        const auto try_recentered_witness =
+            [&](const Rational& candidate, std::string direction,
+                std::uint32_t exponent) {
+          EvaluationOptions options;
+          options.compute_tail_estimate = false;
+          auto attempted =
+              evaluate_physical_local_solution_with_certified_tail(
+                  *recentered_model, recentered_point,
+                  candidate.str(), options);
+          if (attempted.tail.status !=
+                  TailMajorantStatus::Certified) {
+            if (attempted.tail.status !=
+                    TailMajorantStatus::Inconclusive ||
+                attempted.tail.disk.status !=
+                    TailMajorantStatus::Inconclusive)
+              recentered_certificate_failed_after_disk = true;
+            return false;
+          }
+          if (attempted.evaluation.imaginary_sign.has_value() ||
+              attempted.evaluation.value.epsilon.min_power <
+                  execution_epsilon_min ||
+              attempted.evaluation.value.epsilon.complete_max !=
+                  incoming_epsilon_max ||
+              attempted.tail.value.guarantee !=
+                  ErrorGuarantee::Certified ||
+              !tail_majorant_detail::same_epsilon_window(
+                  attempted.tail.value.frame,
+                  EpsilonWindow{execution_epsilon_min,
+                                incoming_epsilon_max}))
+            throw std::logic_error(
+                "recentered physical return changed its epsilon frame or branch");
+          auto candidate_retained =
+              attempted.evaluation.value;
+          candidate_retained.error = ErrorEnvelope{};
+          // evaluate_local_solution canonically trims leading epsilon rows
+          // that are structurally zero across the reconstructed Taylor
+          // tensor.  The transport contract still owns the wider execution
+          // frame: restore that exact-zero prefix before attaching the
+          // full-frame tail certificate or publishing the receiving value.
+          if (execution_epsilon_min <
+              candidate_retained.epsilon.min_power) {
+            auto widened = physical_ode_detail::zero_epsilon_vector(
+                EpsilonWindow{execution_epsilon_min,
+                              incoming_epsilon_max},
+                candidate_retained.dimension);
+            for (std::int64_t raw_power =
+                     candidate_retained.epsilon.min_power;
+                 raw_power <=
+                     candidate_retained.epsilon.complete_max;
+                 ++raw_power) {
+              const auto power =
+                  static_cast<std::int32_t>(raw_power);
+              for (std::uint32_t component = 0;
+                   component < candidate_retained.dimension;
+                   ++component)
+                widened.at(power, component) =
+                    candidate_retained.at(power, component);
+            }
+            candidate_retained = std::move(widened);
+          }
+          auto candidate_handoff = attempted.evaluation;
+          candidate_handoff.value = candidate_retained;
+          for (std::int64_t raw_power =
+                   execution_epsilon_min;
+               raw_power <= incoming_epsilon_max;
+               ++raw_power) {
+            const auto power =
+                static_cast<std::int32_t>(raw_power);
+            const auto row = static_cast<std::size_t>(
+                raw_power - execution_epsilon_min);
+            for (std::uint32_t component = 0;
+                 component <
+                     candidate_handoff.value.dimension;
+                 ++component)
+              attempted.tail.value.absolute[row].add_error_to(
+                  candidate_handoff.value.at(
+                      power, component));
+          }
+          candidate_handoff.value.error = ErrorEnvelope{};
+          if (const auto failure =
+                  value_handoff_accuracy_failure(
+                      candidate_handoff.value,
+                      required_complete_max,
+                      relative_accuracy_max)) {
+            recentered_accuracy_failure =
+                *failure + ";witness_radius_exact=" +
+                candidate.str() + ";witness_direction=" +
+                direction + ";witness_dyadic_exponent=" +
+                std::to_string(exponent);
+            return false;
+          }
+          recentered_witness_radius = candidate;
+          recentered_witness_dyadic_direction =
+              std::move(direction);
+          recentered_witness_dyadic_exponent = exponent;
+          recentered_retained_value =
+              std::move(candidate_retained);
+          recentered_center_handoff =
+              std::move(candidate_handoff);
+          recentered_certified = std::move(attempted);
+          return true;
+        };
+        const auto search_recentered_witness = [&] {
+          recentered_witness_radius.reset();
+          recentered_witness_dyadic_direction.clear();
+          recentered_witness_dyadic_exponent = 0;
+          recentered_certified.reset();
+          recentered_retained_value = EpsilonVector{};
+          recentered_center_handoff = LocalEvaluation{};
+          recentered_accuracy_failure.clear();
+          recentered_certificate_failed_after_disk = false;
+          const auto gap =
+              recentered_chart_radius -
+              recentered_point_modulus;
+          for (std::uint32_t exponent = kWitnessSearchCap;
+               exponent >= 1 &&
+                   !recentered_witness_radius.has_value();
+               --exponent) {
+            const auto candidate =
+                recentered_chart_radius -
+                gap / dyadic_denominator(exponent);
+            (void)try_recentered_witness(
+                candidate, "outward", exponent);
+          }
+          for (std::uint32_t exponent = 2;
+               exponent <= kWitnessSearchCap &&
+                   !recentered_witness_radius.has_value();
+               ++exponent) {
+            const auto candidate =
+                recentered_point_modulus +
+                gap / dyadic_denominator(exponent);
+            (void)try_recentered_witness(
+                candidate, "inward", exponent);
+          }
+        };
+
+        auto recentered_order =
+            receiver_taylor_complete_max;
+        recentered_order_attempts.push_back(
+            recentered_order);
+        if (!prepare_recentered_model(recentered_order))
+          return ineligible(
+              "physical-overlap-recenter-model-ineligible",
+              recentered_model_failure);
+        search_recentered_witness();
+        while (!recentered_witness_radius.has_value() &&
+               !recentered_accuracy_failure.empty() &&
+               recentered_order <
+                   kPrivateTaylorOrderCap) {
+          const auto step = std::max(
+              kPrivateTaylorOrderMinimumStep,
+              recentered_order / 2);
+          recentered_order =
+              static_cast<std::uint32_t>(
+                  std::min<std::uint64_t>(
+                      static_cast<std::uint64_t>(
+                          recentered_order) + step,
+                      kPrivateTaylorOrderCap));
+          recentered_order_attempts.push_back(
+              recentered_order);
+          if (!prepare_recentered_model(recentered_order))
+            return ineligible(
+                "physical-overlap-recenter-model-ineligible",
+                recentered_model_failure);
+          search_recentered_witness();
+        }
+        if (!recentered_witness_radius.has_value()) {
+          std::string detail =
+              "direct_center_failure=" +
+              direct_center_failure +
+              ";recentered_taylor_order_attempts=";
+          for (std::size_t index = 0;
+               index < recentered_order_attempts.size();
+               ++index) {
+            if (index != 0) detail += ",";
+            detail += std::to_string(
+                recentered_order_attempts[index]);
+          }
+          if (!recentered_accuracy_failure.empty())
+            detail += ";recentered_accuracy_failure=" +
+                recentered_accuracy_failure;
+          else if (recentered_certificate_failed_after_disk)
+            detail +=
+                ";recentered_certificate_failed_after_disk=true";
+          return ineligible(
+              "physical-overlap-recenter-return-certificate-failed",
+              std::move(detail));
+        }
+        certified_handoff =
+            recentered_center_handoff;
+        used_overlap_recenter = true;
+      }
+    }
+    const auto tail_order_attempt_detail = [&] {
+      std::string detail =
+          "retained_taylor_complete_max=" +
+          std::to_string(producer_taylor_complete_max) +
+          ";tail_certificate_taylor_order_attempts=";
+      for (std::size_t index = 0;
+           index < tail_order_attempts.size(); ++index) {
+        if (index != 0) detail += ",";
+        detail += std::to_string(tail_order_attempts[index]);
+      }
+      return detail;
+    };
+    if (!witness_radius.has_value()) {
+      if (certificate_failed_after_disk)
+        return ineligible(
+            "receiver-center-tail-certificate-fails-after-disk-certification",
+            tail_order_attempt_detail());
+      if (!last_accuracy_failure.empty())
+        return ineligible(
+            "inflated-center-evaluation-fails-relative-accuracy-contract",
+            last_accuracy_failure + ";" +
+                tail_order_attempt_detail());
+      return ineligible(
+          "receiver-center-tail-certificate-is-inconclusive",
+          tail_order_attempt_detail());
+    }
+
     auto metadata = parse_local_metadata(metadata_prototype);
     const auto same_prescription = [](const Prescription& left,
                                       const Prescription& right) {
@@ -473,16 +932,113 @@
           {"taylor_complete_max", producer_taylor_complete_max},
           {"top_valid", incoming_summary.at("top_valid")},
           {"analytic_metadata", incoming->exact_analytic_metadata()}};
+      const auto physical_certificate_record =
+          [](const CertifiedLocalEvaluation& value) {
+        return json::object{
+            {"status", tail_majorant_status_name(
+                 value.tail.status)},
+            {"value", checkpoint_error_envelope_record(
+                 value.tail.value)},
+            {"theta", checkpoint_error_envelope_record(
+                 value.tail.theta)},
+            {"disk", json::object{
+                 {"witness_radius_exact",
+                  value.tail.disk.witness_radius_exact},
+                 {"q_lower_exact",
+                  value.tail.disk.q_lower.dump_exact()},
+                 {"ode_norm_upper_exact",
+                  value.tail.disk.ode_norm_upper.dump_exact()},
+                 {"cauchy_circle_upper_exact", [&] {
+                    json::array values;
+                    for (const auto& bound :
+                         value.tail.disk.cauchy_circle_upper)
+                      values.emplace_back(
+                          bound.dump_exact());
+                    return values;
+                  }()},
+                 {"detail", value.tail.disk.detail}}},
+            {"detail", value.tail.detail}};
+      };
+      const auto physical_inflation_record =
+          [](const EpsilonVector& retained,
+             const EpsilonVector& inflated) {
+        return json::object{
+            {"gate",
+             "each-component-acb-add-error-mag-by-epsilon-row-v1"},
+            {"retained_value",
+             checkpoint_epsilon_vector_record(retained)},
+            {"inflated_value",
+             checkpoint_epsilon_vector_record(inflated)}};
+      };
       json::object tail_contract;
-      if (source_has_framed_tail) {
+      if (!use_physical_source_tail) {
         tail_contract = json::object{
             {"mode", "physical-evolution-transient-tail-v2"},
             {"source_model", checkpoint_regular_tail_model_record(
                  *acb_incoming->tail_model().model)},
             {"witness_radius_exact", witness_radius->str()},
-            {"witness_dyadic_inward_exponent",
-             witness_dyadic_exponent},
+            {"witness_search_policy",
+             "accuracy-qualified-bidirectional-dyadic-v2"},
+            {"witness_dyadic_direction",
+             witness_dyadic_direction},
+            {"witness_dyadic_exponent", witness_dyadic_exponent},
             {"output_status", "transient-physical-reconstructible"},
+            {"output_reason",
+             "causal physical evolution retains an exact physical q/C owner "
+             "for certified transient tail reconstruction"}};
+      } else if (used_overlap_recenter) {
+        tail_contract = json::object{
+            {"mode",
+             "certified-physical-overlap-recenter-point-tail-acb-v1"},
+            {"producer_taylor_complete_max",
+             tail_certificate_taylor_complete_max},
+            {"receiver_taylor_complete_max",
+             receiver_taylor_complete_max},
+            {"producing_point_exact",
+             exact_match.producing_local.str()},
+            {"producing_chart_radius_exact",
+             producing.geometry.radius.str()},
+            {"witness_radius_exact",
+             witness_radius->str()},
+            {"witness_search_policy",
+             "accuracy-qualified-bidirectional-dyadic-v2"},
+            {"witness_dyadic_direction",
+             witness_dyadic_direction},
+            {"witness_dyadic_exponent",
+             witness_dyadic_exponent},
+            {"source_physical_payload_identity",
+             physical_source_model->physical_payload_identity},
+            {"source_certificate",
+             physical_certificate_record(*certified)},
+            {"source_inflation",
+             physical_inflation_record(
+                 retained_value,
+                 source_overlap_inflated_value)},
+            {"receiving_match_local_exact",
+             exact_match.receiving_local.str()},
+            {"recentered_chart_radius_exact",
+             recentered_chart_radius.str()},
+            {"recentered_taylor_complete_max",
+             recentered_taylor_complete_max},
+            {"recentered_witness_radius_exact",
+             recentered_witness_radius->str()},
+            {"recentered_witness_dyadic_direction",
+             recentered_witness_dyadic_direction},
+            {"recentered_witness_dyadic_exponent",
+             recentered_witness_dyadic_exponent},
+            {"receiving_physical_payload_identity",
+             equation->physical_payload_identity()},
+            {"recentered_certificate",
+             physical_certificate_record(
+                 *recentered_certified)},
+            {"recentered_inflation",
+             physical_inflation_record(
+                 recentered_retained_value,
+                 recentered_center_handoff.value)},
+            {"direct_center_failure",
+             direct_center_failure},
+            {"output_status",
+             "transient-physical-reconstructible"},
             {"output_reason",
              "causal physical evolution retains an exact physical q/C owner "
              "for certified transient tail reconstruction"}};
@@ -491,48 +1047,26 @@
             {"mode",
              "certified-physical-regular-taylor-point-tail-acb-v1"},
             {"producer_taylor_complete_max",
-             producer_taylor_complete_max},
+             tail_certificate_taylor_complete_max},
             {"receiver_taylor_complete_max",
              receiver_taylor_complete_max},
             {"producing_point_exact", producing_local.str()},
             {"producing_chart_radius_exact",
              producing.geometry.radius.str()},
             {"witness_radius_exact", witness_radius->str()},
-            {"witness_dyadic_inward_exponent",
-             witness_dyadic_exponent},
+            {"witness_search_policy",
+             "accuracy-qualified-bidirectional-dyadic-v2"},
+            {"witness_dyadic_direction",
+             witness_dyadic_direction},
+            {"witness_dyadic_exponent", witness_dyadic_exponent},
             {"source_physical_payload_identity",
              physical_source_model->physical_payload_identity},
-            {"certificate", json::object{
-                 {"status", tail_majorant_status_name(
-                      certified->tail.status)},
-                 {"value", checkpoint_error_envelope_record(
-                      certified->tail.value)},
-                 {"theta", checkpoint_error_envelope_record(
-                      certified->tail.theta)},
-                 {"disk", json::object{
-                      {"witness_radius_exact",
-                       certified->tail.disk.witness_radius_exact},
-                      {"q_lower_exact",
-                       certified->tail.disk.q_lower.dump_exact()},
-                      {"ode_norm_upper_exact",
-                       certified->tail.disk.ode_norm_upper.dump_exact()},
-                      {"cauchy_circle_upper_exact", [&] {
-                         json::array values;
-                         for (const auto& value :
-                              certified->tail.disk.cauchy_circle_upper)
-                           values.emplace_back(value.dump_exact());
-                         return values;
-                       }()},
-                      {"detail", certified->tail.disk.detail}}},
-                 {"detail", certified->tail.detail}}},
-            {"inflation", json::object{
-                 {"gate",
-                  "each-component-acb-add-error-mag-by-epsilon-row-v1"},
-                 {"retained_value",
-                  checkpoint_epsilon_vector_record(retained_value)},
-                 {"inflated_value",
-                  checkpoint_epsilon_vector_record(
-                      certified_handoff.value)}}},
+            {"certificate",
+             physical_certificate_record(*certified)},
+            {"inflation",
+             physical_inflation_record(
+                 retained_value,
+                 certified_handoff.value)},
             {"output_status", "transient-physical-reconstructible"},
             {"output_reason",
              "causal physical evolution retains an exact physical q/C owner "
@@ -563,7 +1097,7 @@
           {"accuracy_contract", json::object{
                {"relative_error_max_exact", relative_accuracy_text},
                {"gate",
-                "component-radii-lte-threshold-times-max-one-upper-magnitude-v1"},
+                "required-prefix-component-radii-lte-threshold-times-max-one-upper-magnitude-v2"},
                {"acb_preflight_required", true}}},
           {"epsilon", json::object{
                {"min", requested_epsilon.min_power},
@@ -658,6 +1192,24 @@
         {"used", true},
         {"reason", "eligible-causal-ordinary-physical-evolution"},
         {"arm", arm_name}, {"match", match_index},
+        {"retained_taylor_complete_max",
+         producer_taylor_complete_max},
+        {"tail_certificate_taylor_complete_max",
+         tail_certificate_taylor_complete_max},
+        {"tail_order_retries",
+         tail_order_attempts.size() - 1},
+        {"used_overlap_recenter", used_overlap_recenter},
+        {"recentered_tail_certificate_taylor_complete_max",
+         used_overlap_recenter
+             ? json::value(recentered_taylor_complete_max)
+             : json::value(nullptr)},
+        {"recentered_tail_order_retries",
+         used_overlap_recenter
+             ? json::value(
+                   recentered_order_attempts.size() - 1)
+             : json::value(nullptr)},
+        {"tail_witness_direction", witness_dyadic_direction},
+        {"tail_witness_dyadic_exponent", witness_dyadic_exponent},
         {"value_hops", 1}, {"basis_matches", 0},
         {"output_tail_status", "transient-physical-reconstructible"},
         {"next_hop_policy", "certified-physical-tail-replay"},
@@ -771,13 +1323,17 @@
       incoming = incoming_found->second;
     }
 
-    const auto ineligible = [&](const char* reason) {
-      return json::object{
+    const auto ineligible = [&](std::string reason,
+                                std::string detail = {}) {
+      json::object response{
           {"status", "ok"}, {"session", session->handle},
           {"capability", "regular-value-transport-hop-v1"},
-          {"used", false}, {"reason", reason},
+          {"used", false}, {"reason", std::move(reason)},
           {"arm", arm_name}, {"match", match_index},
           {"value_hops", 0}, {"basis_matches", 0}};
+      if (!detail.empty())
+        response["detail"] = std::move(detail);
+      return response;
     };
     const auto& retained = plan->arm(arm_name);
     const auto& exact_match = retained.exact.matches[match_index];
@@ -913,79 +1469,114 @@
     constexpr std::uint32_t kWitnessSearchCap = 16;
     std::optional<Rational> witness_radius;
     std::uint32_t witness_dyadic_exponent = 0;
+    std::string witness_dyadic_direction;
     const auto point_modulus = exact_path_detail::abs(producing_local);
     const auto witness_gap = producing.geometry.radius - point_modulus;
-    Rational dyadic_denominator(1);
-    for (std::uint32_t exponent = 1;
-         exponent <= kWitnessSearchCap; ++exponent) {
-      dyadic_denominator *= Rational(2);
-      const auto candidate =
-          point_modulus + witness_gap / dyadic_denominator;
-      const auto candidate_certificate =
-          certify_regular_taylor_point_tail(
-              *acb_incoming->tail_model().model,
-              producing_point, candidate.str(),
-              producer_taylor_complete_max);
-      if (candidate_certificate.status == TailMajorantStatus::Certified) {
-        witness_radius = candidate;
-        witness_dyadic_exponent = exponent;
-        break;
-      }
-      if (candidate_certificate.status !=
-              TailMajorantStatus::Inconclusive ||
-          candidate_certificate.disk.status !=
-              TailMajorantStatus::Inconclusive)
-        return ineligible(
-            "receiver-center-tail-certificate-fails-after-disk-certification");
-    }
-    if (!witness_radius.has_value())
-      return ineligible(
-          "receiver-center-tail-certificate-is-inconclusive");
-    auto certified = incoming->evaluate_retained_point_with_certified_tail(
-        producing_point, producing_rim, witness_radius->str());
-    if (!certified.has_value())
-      return ineligible(
-          "incoming-local-has-no-certified-regular-tail-model");
-    if (certified->tail.status != TailMajorantStatus::Certified)
-      return ineligible(
-          "receiver-center-tail-certificate-is-inconclusive");
     const auto expected_rim = producing_point.sign < 0
         ? producing_rim : std::nullopt;
-    if (certified->evaluation.imaginary_sign != expected_rim)
-      return ineligible(
-          "center-evaluation-rim-differs-from-producing-plan-chart");
-    if (certified->evaluation.value.epsilon.min_power !=
-            incoming_epsilon_min ||
-        certified->evaluation.value.epsilon.complete_max !=
-            incoming_epsilon_max ||
-        certified->tail.value.guarantee != ErrorGuarantee::Certified ||
-        !tail_majorant_detail::same_epsilon_window(
-            certified->evaluation.value.epsilon,
-            certified->tail.value.frame) ||
-        certified->tail.value.absolute.size() !=
-            certified->evaluation.value.epsilon.width())
-      throw std::logic_error(
-          "certified value handoff changed its retained epsilon frame");
-    auto retained_value = certified->evaluation.value;
-    retained_value.error = ErrorEnvelope{};
-    auto certified_handoff = certified->evaluation;
-    for (std::int64_t raw_power =
-             certified_handoff.value.epsilon.min_power;
-         raw_power <= certified_handoff.value.epsilon.complete_max;
-         ++raw_power) {
-      const auto power = static_cast<std::int32_t>(raw_power);
-      const auto row = static_cast<std::size_t>(
-          raw_power - certified_handoff.value.epsilon.min_power);
-      for (std::uint32_t component = 0;
-           component < certified_handoff.value.dimension; ++component)
-        certified->tail.value.absolute[row].add_error_to(
-            certified_handoff.value.at(power, component));
+    std::optional<CertifiedLocalEvaluation> certified;
+    EpsilonVector retained_value;
+    LocalEvaluation certified_handoff;
+    std::string last_accuracy_failure;
+    bool certificate_failed_after_disk = false;
+    const auto try_witness = [&](const Rational& candidate,
+                                 std::string direction,
+                                 std::uint32_t exponent) {
+      auto attempted =
+          incoming->evaluate_retained_point_with_certified_tail(
+              producing_point, producing_rim, candidate.str());
+      if (!attempted.has_value()) return false;
+      if (attempted->tail.status != TailMajorantStatus::Certified) {
+        if (attempted->tail.status !=
+                TailMajorantStatus::Inconclusive ||
+            attempted->tail.disk.status !=
+                TailMajorantStatus::Inconclusive)
+          certificate_failed_after_disk = true;
+        return false;
+      }
+      if (attempted->evaluation.imaginary_sign != expected_rim)
+        throw std::logic_error(
+            "center-evaluation rim differs from its producing plan chart");
+      if (attempted->evaluation.value.epsilon.min_power !=
+              incoming_epsilon_min ||
+          attempted->evaluation.value.epsilon.complete_max !=
+              incoming_epsilon_max ||
+          attempted->tail.value.guarantee !=
+              ErrorGuarantee::Certified ||
+          !tail_majorant_detail::same_epsilon_window(
+              attempted->evaluation.value.epsilon,
+              attempted->tail.value.frame) ||
+          attempted->tail.value.absolute.size() !=
+              attempted->evaluation.value.epsilon.width())
+        throw std::logic_error(
+            "certified value handoff changed its retained epsilon frame");
+      auto candidate_retained = attempted->evaluation.value;
+      candidate_retained.error = ErrorEnvelope{};
+      auto candidate_handoff = attempted->evaluation;
+      for (std::int64_t raw_power =
+               candidate_handoff.value.epsilon.min_power;
+           raw_power <=
+               candidate_handoff.value.epsilon.complete_max;
+           ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        const auto row = static_cast<std::size_t>(
+            raw_power -
+            candidate_handoff.value.epsilon.min_power);
+        for (std::uint32_t component = 0;
+             component < candidate_handoff.value.dimension;
+             ++component)
+          attempted->tail.value.absolute[row].add_error_to(
+              candidate_handoff.value.at(power, component));
+      }
+      candidate_handoff.value.error = ErrorEnvelope{};
+      if (const auto failure = value_handoff_accuracy_failure(
+              candidate_handoff.value, required_complete_max,
+              relative_accuracy_max)) {
+        last_accuracy_failure =
+            *failure + ";witness_radius_exact=" +
+            candidate.str() + ";witness_direction=" + direction +
+            ";witness_dyadic_exponent=" +
+            std::to_string(exponent);
+        return false;
+      }
+      witness_radius = candidate;
+      witness_dyadic_direction = std::move(direction);
+      witness_dyadic_exponent = exponent;
+      retained_value = std::move(candidate_retained);
+      certified_handoff = std::move(candidate_handoff);
+      certified = std::move(attempted);
+      return true;
+    };
+    const auto dyadic_denominator = [](std::uint32_t exponent) {
+      Rational denominator(1);
+      for (std::uint32_t index = 0; index < exponent; ++index)
+        denominator *= Rational(2);
+      return denominator;
+    };
+    for (std::uint32_t exponent = kWitnessSearchCap;
+         exponent >= 1 && !witness_radius.has_value(); --exponent) {
+      const auto candidate = producing.geometry.radius -
+          witness_gap / dyadic_denominator(exponent);
+      (void)try_witness(candidate, "outward", exponent);
     }
-    certified_handoff.value.error = ErrorEnvelope{};
-    for (const auto& coefficient : certified_handoff.value.coefficients)
-      if (!value_handoff_accurate(coefficient, relative_accuracy_max))
+    for (std::uint32_t exponent = 2;
+         exponent <= kWitnessSearchCap &&
+             !witness_radius.has_value(); ++exponent) {
+      const auto candidate = point_modulus +
+          witness_gap / dyadic_denominator(exponent);
+      (void)try_witness(candidate, "inward", exponent);
+    }
+    if (!witness_radius.has_value()) {
+      if (certificate_failed_after_disk)
         return ineligible(
-            "inflated-center-evaluation-fails-relative-accuracy-contract");
+            "receiver-center-tail-certificate-fails-after-disk-certification");
+      if (!last_accuracy_failure.empty())
+        return ineligible(
+            "inflated-center-evaluation-fails-relative-accuracy-contract",
+            last_accuracy_failure);
+      return ineligible(
+          "receiver-center-tail-certificate-is-inconclusive");
+    }
 
     std::string local_handle;
     {
@@ -1057,11 +1648,15 @@
                 receiver_taylor_complete_max},
                {"center_ratio_exact", center_ratio.str()},
                {"producing_point_exact", producing_local.str()},
-               {"producing_chart_radius_exact",
-                producing.geometry.radius.str()},
-               {"witness_radius_exact", witness_radius->str()},
-               {"witness_dyadic_inward_exponent",
-                witness_dyadic_exponent},
+                    {"producing_chart_radius_exact",
+                      producing.geometry.radius.str()},
+                    {"witness_radius_exact", witness_radius->str()},
+                    {"witness_search_policy",
+                     "accuracy-qualified-bidirectional-dyadic-v2"},
+                    {"witness_dyadic_direction",
+                     witness_dyadic_direction},
+                    {"witness_dyadic_exponent",
+                     witness_dyadic_exponent},
                {"source_model", checkpoint_regular_tail_model_record(
                     *acb_incoming->tail_model().model)},
                {"certificate", json::object{
@@ -1098,7 +1693,7 @@
           {"accuracy_contract", json::object{
                {"relative_error_max_exact", relative_accuracy_max.str()},
                {"gate",
-                "component-radii-lte-threshold-times-max-one-upper-magnitude-v1"},
+                "required-prefix-component-radii-lte-threshold-times-max-one-upper-magnitude-v2"},
                {"acb_preflight_required", true}}},
           {"epsilon", json::object{
                {"min", requested_epsilon.min_power},
@@ -1167,6 +1762,8 @@
         {"native_retained", true}, {"json_coefficients", 0},
         {"used", true}, {"reason", "eligible-regular-safe-center"},
         {"arm", arm_name}, {"match", match_index},
+        {"tail_witness_direction", witness_dyadic_direction},
+        {"tail_witness_dyadic_exponent", witness_dyadic_exponent},
         {"value_hops", 1}, {"basis_matches", 0},
         {"next_local", std::move(next_summary)},
         {"sealed_local_lineage", std::move(sealed_lineage)},
@@ -1358,10 +1955,23 @@
           const auto inconclusive_coefficients = as_u64(
               coefficient_verdicts.at("inconclusive"),
               "incomplete consuming-hop inconclusive coefficient count");
+          const auto& normal_frame_attempt = as_object(
+              incomplete->at("normal_frame_attempt"),
+              "incomplete consuming-hop normal-frame attempt");
+          const bool propagated_enclosure =
+              normal_frame_attempt.if_contains(
+                  "physical_clearance_source") != nullptr &&
+              normal_frame_attempt.at(
+                  "physical_clearance_source").is_string() &&
+              normal_frame_attempt.at(
+                  "physical_clearance_source").as_string() ==
+                  "propagated-enclosure";
           const bool retryable_epsilon =
               !complete_through_required && additional > 0;
           const bool retryable_clearance =
-              complete_through_required && inconclusive_coefficients > 0;
+              complete_through_required &&
+              inconclusive_coefficients > 0 &&
+              !propagated_enclosure;
           const auto& lattice = as_object(
               incomplete->at("exact_lattice"),
               "incomplete consuming-hop exact lattice");
@@ -1391,6 +2001,8 @@
               {"reason", "acb_match_residual_inconclusive"},
               {"retryable_epsilon_reservoir", retryable_epsilon},
               {"retryable_matching_clearance", retryable_clearance},
+              {"retryable_propagated_enclosure",
+               propagated_enclosure},
               {"required_additional_epsilon_orders", additional},
               {"arm", arm_name},
               {"match", match_index},
@@ -1400,11 +2012,13 @@
               {"refinement", incomplete->at("refinement")},
               {"weight_windows", incomplete->at("weight_windows")},
               {"normal_frame_attempt",
-               incomplete->at("normal_frame_attempt")},
+               normal_frame_attempt},
               {"exact_lattice", compact_lattice},
               {"detail",
                retryable_epsilon
                    ? "the Acb match needs a wider private epsilon reservoir before materialization"
+                   : propagated_enclosure
+                   ? "the Acb match reaches the required epsilon order, but uncertainty propagated by its producer encloses the residual tolerance; receiving Taylor-order and precision retries are not applicable"
                    : "the Acb match reaches the required epsilon order but its finite-Taylor overlap is not accurate enough for the residual tolerance"}};
         }
         next = match->materialize(

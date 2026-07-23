@@ -5,12 +5,14 @@
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -101,6 +103,12 @@ json::object epsilon_rational_minus_one() {
                       {"denominator", json::array{"1"}}};
 }
 
+json::object epsilon_rational_constant(const std::string& value) {
+  return json::object{{"zero", false}, {"valuation", 0},
+                      {"numerator", json::array{value}},
+                      {"denominator", json::array{"1"}}};
+}
+
 std::string prepare_chart(const std::string& session,
                           const std::string& name,
                           const std::string& center,
@@ -110,7 +118,11 @@ std::string prepare_chart(const std::string& session,
                           std::int32_t prescription_sign = -1,
                           const std::string& relative_accuracy_max =
                               "1/100",
-                          bool near_boundary_q_zero = false) {
+                          bool near_boundary_q_zero = false,
+                          const std::string& physical_growth = {},
+                          std::vector<std::string>
+                              physical_q_coefficients = {},
+                          const std::string& radius_exact = "2") {
   json::array principal_row{
       json::object{{"exact", "0"}, {"proven_zero", true}}};
   json::array component{0};
@@ -131,16 +143,41 @@ std::string prepare_chart(const std::string& session,
   json::array physical_q{one};
   if (near_boundary_q_zero)
     physical_q.push_back(epsilon_rational_minus_one());
+  if (!physical_q_coefficients.empty()) {
+    d_lags.clear();
+    physical_q.clear();
+    for (const auto& coefficient :
+         physical_q_coefficients) {
+      d_lags.push_back(json::array{json::object{
+          {"s", 0}, {"v", coefficient}}});
+      physical_q.push_back(
+          epsilon_rational_constant(coefficient));
+    }
+  }
   json::array physical_c;
   physical_c.push_back(json::array{});
+  json::array nhat_lags;
+  nhat_lags.push_back(json::object{
+      {"poly", json::array{}}, {"rat", json::array{}},
+      {"val", json::array{nullptr}}});
+  if (!physical_growth.empty()) {
+    json::array exponent;
+    exponent.push_back(json::array{0, 0, physical_growth});
+    nhat_lags.push_back(json::object{
+        {"poly", json::array{json::object{
+             {"s", 0},
+             {"e", std::move(exponent)}}}},
+        {"rat", json::array{}}, {"val", json::array{0}}});
+    physical_c.push_back(json::array{json::object{
+        {"r", 0}, {"c", 0},
+        {"v", epsilon_rational_constant(physical_growth)}}});
+  }
   json::object problem{
            {"domain", domain},
            {"d", 1}, {"fb", 0}, {"w", 3},
            {"d_lags", std::move(d_lags)},
            {"denominators", json::array{}},
-           {"nhat_lags", json::array{json::object{
-                {"poly", json::array{}}, {"rat", json::array{}},
-                {"val", json::array{nullptr}}}}},
+           {"nhat_lags", std::move(nhat_lags)},
            {"d0_inverse", "1"},
            {"blocks", std::move(blocks)},
            {"assembly", json::object{
@@ -159,7 +196,8 @@ std::string prepare_chart(const std::string& session,
   json::object analytic{
       {"geometry", json::object{
            {"center_exact", center}, {"scale_exact", "1"},
-           {"radius_exact", "2"}, {"infinite_radius", false},
+           {"radius_exact", radius_exact},
+           {"infinite_radius", false},
            {"prescriptions", prescriptions(
                 branch_sensitive, prescription_sign)}}},
       {"principal_matrix", std::move(principal_matrix)},
@@ -193,7 +231,10 @@ std::string solve_local(const std::string& session,
                         bool branch_sensitive = true,
                         std::int32_t prescription_sign = -1,
                         std::int32_t initial_validity = 2,
-                        const std::string& equation_owner = {}) {
+                        const std::string& equation_owner = {},
+                        const std::string& radius_exact = "2",
+                        std::optional<json::array> initial_override =
+                            std::nullopt) {
   json::array schedule;
   json::array shifts;
   for (std::uint32_t n = 0; n <= nmax; ++n) {
@@ -211,14 +252,17 @@ std::string solve_local(const std::string& session,
            {"b_target", "0"}, {"a_shift_min", 0},
            {"a_shifts", std::move(shifts)},
            {"schedule", std::move(schedule)},
-           {"initial", json::array{value, "0", "0"}},
+           {"initial", initial_override.has_value()
+                ? json::value(std::move(*initial_override))
+                : json::value(json::array{value, "0", "0"})},
            {"initial_validity", json::array{initial_validity}},
            {"source", nullptr},
            {"return_u", false}}},
       {"metadata", json::object{
            {"chart", json::object{
                 {"center_exact", center}, {"scale_exact", "1"},
-                {"radius", "2"}, {"infinite_radius", false}}},
+                {"radius", radius_exact},
+                {"infinite_radius", false}}},
            {"tag", json::object{
                 {"a", json::object{{"domain", "rational"},
                                      {"canonical", "0"}}},
@@ -238,10 +282,15 @@ std::string prepare_regular_equation_owner(
     const std::string& session, const std::string& name,
     const std::string& center, bool branch_sensitive = true,
     std::int32_t prescription_sign = -1,
-    const std::string& relative_accuracy_max = "1/100") {
+    const std::string& relative_accuracy_max = "1/100",
+    const std::string& physical_growth = {}) {
   const auto identity = "de2-equation-" + name;
   json::array physical_c;
   physical_c.emplace_back(json::array{});
+  if (!physical_growth.empty())
+    physical_c.push_back(json::array{json::object{
+        {"r", 0}, {"c", 0},
+        {"v", epsilon_rational_constant(physical_growth)}}});
   json::array physical_q;
   physical_q.emplace_back(epsilon_rational_one());
   const auto prepared = request(json::object{
@@ -633,7 +682,8 @@ json::object consume_physical_value_hop(
     const std::string& incoming_checkpoint, json::object solver,
     const std::string& root,
     const std::string& plan_checkpoint,
-    std::int32_t epsilon_min = 0) {
+    std::int32_t epsilon_min = 0, std::int32_t epsilon_max = 2,
+    std::int32_t required_complete_max = 2) {
   return request(json::object{
       {"schema", 2}, {"op", "transport.consume_physical_value_hop"},
       {"session", session}, {"tile_plan", plan},
@@ -642,8 +692,10 @@ json::object consume_physical_value_hop(
       {"value_solver", std::move(solver)},
       {"incoming", incoming},
       {"incoming_checkpoint_identity", incoming_checkpoint},
-      {"epsilon", json::object{{"min", epsilon_min}, {"max", 2},
-                                  {"required_complete_max", 2}}},
+      {"epsilon", json::object{{"min", epsilon_min},
+                                  {"max", epsilon_max},
+                                  {"required_complete_max",
+                                   required_complete_max}}},
       {"checkpoint_policy", json::object{
            {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", root}}}});
@@ -1960,17 +2012,25 @@ void test_frame_independent_physical_value_wiring() {
       "/tmp/diffexp2-frame-independent-physical-hop.de2cp";
   const std::string resaved_checkpoint =
       "/tmp/diffexp2-frame-independent-physical-hop-resaved.de2cp";
+  const std::string private_prefix_checkpoint =
+      "/tmp/diffexp2-frame-independent-private-prefix.de2cp";
+  const std::string overlap_checkpoint =
+      "/tmp/diffexp2-frame-independent-overlap-recenter.de2cp";
   std::remove(checkpoint.c_str());
   std::remove(resaved_checkpoint.c_str());
+  std::remove(private_prefix_checkpoint.c_str());
+  std::remove(overlap_checkpoint.c_str());
   std::string session;
   std::string restored_session;
+  std::string restored_prefix_session;
+  std::string restored_overlap_session;
   try {
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "acb"}, {"precision_bits", 256},
-        {"output_digits", 40}, {"chart_capacity", 8},
-        {"local_capacity", 16}, {"match_capacity", 8},
-        {"tile_plan_capacity", 4}});
+        {"output_digits", 40}, {"chart_capacity", 12},
+        {"local_capacity", 24}, {"match_capacity", 8},
+        {"tile_plan_capacity", 5}});
     require_ok(created, "physical wiring session.create");
     session = std::string(created.at("session").as_string());
     const auto anchor_chart = prepare_chart(
@@ -1981,6 +2041,27 @@ void test_frame_independent_physical_value_wiring() {
         session, "physical-wiring-second", "-4/3");
     const auto third_equation = prepare_regular_equation_owner(
         session, "physical-wiring-third", "-2");
+    const auto private_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-private", "-2/3", true, -1,
+        "1/1000000000000000000000000000000");
+    const std::string impossible_accuracy =
+        "1/1" + std::string(1000, '0');
+    const auto impossible_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-impossible", "-2/3", true, -1,
+        impossible_accuracy);
+    const std::string stiff_accuracy =
+        "1/1000000000000000";
+    const auto stiff_anchor_chart = prepare_chart(
+        session, "physical-wiring-stiff-anchor", "0", true, "acb", 0,
+        -1, stiff_accuracy, false, "100");
+    const auto stiff_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-stiff-receiver", "1/3", true, -1,
+        stiff_accuracy, "100");
+    const auto overlap_anchor_chart = prepare_chart(
+        session, "physical-wiring-overlap-anchor", "0", true, "acb", 0,
+        -1, "1/100", false, "", {"1", "-2"}, "1");
+    const auto overlap_equation = prepare_regular_equation_owner(
+        session, "physical-wiring-overlap-receiver", "2/3");
     const auto anchor = solve_local(
         session, anchor_chart, "0", "physical-wiring-anchor-local", "2",
         30, true);
@@ -1997,6 +2078,248 @@ void test_frame_independent_physical_value_wiring() {
              {"topology", topology(true)}}}});
     require_ok(planned, "physical wiring tile.plan_arm");
     const auto plan = std::string(planned.at("tile_plan").as_string());
+
+    // A low Taylor order makes epsilon^0 too wide for the receiver's
+    // numerical contract.  The physical value path must privately extend
+    // the one transported Taylor series until the coefficient-aware theorem
+    // passes, without changing the retained or receiver order.  A threshold
+    // below the 256-bit arithmetic floor must still terminate at the private
+    // order cap and report the exact failed prefix/order ladder.  Separately,
+    // a request whose only consumable row is the exact structural epsilon^-1
+    // zero must not be governed by retained epsilon^0..2 matching clearance.
+    const auto low_order_anchor = solve_local(
+        session, anchor_chart, "0",
+        "physical-wiring-private-prefix-anchor", "2", 0, true);
+    const auto stiff_anchor = solve_local(
+        session, stiff_anchor_chart, "0",
+        "physical-wiring-stiff-anchor-local", "1", 50, true);
+    const auto overlap_anchor = solve_local(
+        session, overlap_anchor_chart, "0",
+        "physical-wiring-overlap-anchor-local", "0", 30, true, -1, 2,
+        "", "1", json::array{"0", "1", "0"});
+    const std::string private_plan_checkpoint =
+        "physical-wiring-private-prefix-plan";
+    const auto private_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", private_plan_checkpoint},
+        {"division_order", 3},
+        {"arm", json::object{
+             {"from_exact", "0"}, {"to_exact", "-2/3"},
+             {"charts", json::array{anchor_chart, private_equation}},
+             {"topology", topology(true)}}}});
+    require_ok(private_planned,
+               "physical private-prefix tile.plan_arm");
+    const auto private_plan =
+        std::string(private_planned.at("tile_plan").as_string());
+    const std::string adaptive_plan_checkpoint =
+        "physical-wiring-adaptive-order-plan";
+    const auto adaptive_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", adaptive_plan_checkpoint},
+        {"division_order", 3},
+        {"arm", json::object{
+             {"from_exact", "0"}, {"to_exact", "1/3"},
+             {"charts", json::array{stiff_anchor_chart, stiff_equation}},
+             {"topology", topology(true)}}}});
+    require_ok(adaptive_planned,
+               "physical adaptive-order tile.plan_arm");
+    const auto adaptive_plan =
+        std::string(adaptive_planned.at("tile_plan").as_string());
+    const std::string impossible_plan_checkpoint =
+        "physical-wiring-impossible-order-plan";
+    const auto impossible_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", impossible_plan_checkpoint},
+        {"division_order", 3},
+        {"arm", json::object{
+             {"from_exact", "0"}, {"to_exact", "-2/3"},
+             {"charts", json::array{anchor_chart, impossible_equation}},
+             {"topology", topology(true)}}}});
+    require_ok(impossible_planned,
+               "physical impossible-order tile.plan_arm");
+    const auto impossible_plan =
+        std::string(impossible_planned.at("tile_plan").as_string());
+    const std::string overlap_plan_checkpoint =
+        "physical-wiring-overlap-recenter-plan";
+    const auto overlap_planned = request(json::object{
+        {"schema", 2}, {"op", "tile.plan_arm"}, {"session", session},
+        {"checkpoint_identity", overlap_plan_checkpoint},
+        {"division_order", 3},
+        {"arm", json::object{
+             {"from_exact", "0"}, {"to_exact", "2/3"},
+             {"charts", json::array{
+                  overlap_anchor_chart, overlap_equation}},
+             {"topology", topology(true)}}}});
+    require_ok(overlap_planned,
+               "physical overlap-recenter tile.plan_arm");
+    const auto overlap_plan =
+        std::string(overlap_planned.at("tile_plan").as_string());
+    const auto required_failure = consume_physical_value_hop(
+        session, impossible_plan, "lower", 0, low_order_anchor,
+        "physical-wiring-private-prefix-anchor",
+        physical_value_solver("-2/3", 12, impossible_accuracy),
+        "physical-wiring-impossible-order", impossible_plan_checkpoint,
+        -1, 2, 2);
+    require_ok(required_failure,
+               "physical capped private-order failure");
+    if (required_failure.at("used") != false ||
+        required_failure.at("reason") !=
+            "inflated-center-evaluation-fails-relative-accuracy-contract" ||
+        !required_failure.if_contains("detail") ||
+        [&] {
+          const auto detail =
+              std::string(required_failure.at("detail").as_string());
+          return detail.find("epsilon_power=0") == std::string::npos ||
+              detail.find(
+                  "tail_certificate_taylor_order_attempts=0,25,50,75,"
+                  "112,168,252,378,567,800") == std::string::npos;
+        }())
+      throw std::runtime_error(
+          "physical hop did not terminate and identify the inaccurate "
+          "consumable epsilon row/order ladder: " +
+          json::serialize(required_failure));
+    const auto adaptive = consume_physical_value_hop(
+        session, adaptive_plan, "upper", 0, stiff_anchor,
+        "physical-wiring-stiff-anchor-local",
+        physical_value_solver("1/3", 50, stiff_accuracy),
+        "physical-wiring-adaptive-order", adaptive_plan_checkpoint,
+        0, 2, 2);
+    require_ok(adaptive, "physical adaptive private-order hop");
+    const auto adaptive_retries =
+        counter(adaptive, "tail_order_retries");
+    std::uint64_t expected_adaptive_order = 50;
+    for (std::uint64_t retry = 0; retry < adaptive_retries; ++retry)
+      expected_adaptive_order = std::min<std::uint64_t>(
+          800, expected_adaptive_order +
+              std::max<std::uint64_t>(
+                  25, expected_adaptive_order / 2));
+    if (adaptive.at("used") != true ||
+        adaptive.at("retained_taylor_complete_max") != 50 ||
+        counter(adaptive,
+                "tail_certificate_taylor_complete_max") <= 50 ||
+        counter(adaptive,
+                "tail_certificate_taylor_complete_max") > 800 ||
+        counter(adaptive,
+                "tail_certificate_taylor_complete_max") !=
+            expected_adaptive_order ||
+        adaptive_retries == 0 ||
+        adaptive.at("value_hops") != 1 ||
+        adaptive.at("basis_matches") != 0)
+      throw std::runtime_error(
+          "physical hop did not adapt only its private certification order: " +
+          json::serialize(adaptive));
+    // q=1-2t has a real zero at t=1/2.  The source also starts with an exact
+    // structural epsilon^0 zero and first becomes nonzero at epsilon^1,
+    // reproducing the wider execution frame that the WP500 banana plan
+    // exposed. Therefore no amount of Taylor
+    // extension can certify the direct source evaluation at the receiving
+    // center t=2/3, while the planner's common point t=1/3 is certifiable.
+    // The hop must use that overlap, cancel the receiving chart's regular
+    // C=t*A factor before recentering, and return to its center without a
+    // framed-basis fallback.
+    const auto overlap = consume_physical_value_hop(
+        session, overlap_plan, "upper", 0, overlap_anchor,
+        "physical-wiring-overlap-anchor-local",
+        physical_value_solver("2/3", 30),
+        "physical-wiring-overlap-recenter",
+        overlap_plan_checkpoint);
+    require_ok(overlap, "physical overlap-recenter hop");
+    if (overlap.at("used") != true ||
+        overlap.at("used_overlap_recenter") != true ||
+        overlap.at("retained_taylor_complete_max") != 30 ||
+        overlap.at("tail_certificate_taylor_complete_max") != 30 ||
+        overlap.at(
+            "recentered_tail_certificate_taylor_complete_max") != 30 ||
+        overlap.at("value_hops") != 1 ||
+        overlap.at("basis_matches") != 0)
+      throw std::runtime_error(
+          "physical hop did not use its certified planner overlap: " +
+          json::serialize(overlap));
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", overlap_checkpoint},
+        {"checkpoint_identity",
+         "physical-overlap-recenter-roundtrip"}}),
+        "physical overlap-recenter checkpoint.save");
+    const auto restored_overlap = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", overlap_checkpoint},
+        {"expected_identity",
+         "physical-overlap-recenter-roundtrip"}});
+    require_ok(restored_overlap,
+               "physical overlap-recenter checkpoint.restore");
+    restored_overlap_session =
+        std::string(restored_overlap.at("session").as_string());
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored_overlap_session}}),
+        "physical overlap-recenter restored session.close");
+    restored_overlap_session.clear();
+    const auto private_prefix = consume_physical_value_hop(
+        session, private_plan, "lower", 0, low_order_anchor,
+        "physical-wiring-private-prefix-anchor",
+        physical_value_solver(
+            "-2/3", 12,
+            "1/1000000000000000000000000000000"),
+        "physical-wiring-private-prefix", private_plan_checkpoint,
+        -1, 2, -1);
+    require_ok(private_prefix,
+               "physical private-prefix accepted hop");
+    if (private_prefix.at("used") != true ||
+        private_prefix.at("value_hops") != 1 ||
+        private_prefix.at("basis_matches") != 0)
+      throw std::runtime_error(
+          "private matching-clearance coefficients incorrectly governed the public accuracy prefix: " +
+          json::serialize(private_prefix));
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"},
+        {"session", session}, {"path", private_prefix_checkpoint},
+        {"checkpoint_identity", "physical-private-prefix-roundtrip"}}),
+        "physical private-prefix checkpoint.save");
+    const auto restored_prefix = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", private_prefix_checkpoint},
+        {"expected_identity", "physical-private-prefix-roundtrip"}});
+    require_ok(restored_prefix,
+               "physical private-prefix checkpoint.restore");
+    restored_prefix_session =
+        std::string(restored_prefix.at("session").as_string());
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored_prefix_session}}),
+        "physical private-prefix restored session.close");
+    restored_prefix_session.clear();
+    release_local(
+        session,
+        std::string(adaptive.at("next_local").as_object()
+                        .at("local").as_string()));
+    release_local(
+        session,
+        std::string(private_prefix.at("next_local").as_object()
+                        .at("local").as_string()));
+    release_local(
+        session,
+        std::string(overlap.at("next_local").as_object()
+                        .at("local").as_string()));
+    release_local(session, stiff_anchor);
+    release_local(session, low_order_anchor);
+    release_local(session, overlap_anchor);
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", private_plan}}),
+        "physical private-prefix tile.release");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", adaptive_plan}}),
+        "physical adaptive-order tile.release");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", impossible_plan}}),
+        "physical impossible-order tile.release");
+    require_ok(request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", overlap_plan}}),
+        "physical overlap-recenter tile.release");
 
     const auto oversized = consume_physical_value_hop(
         session, plan, "lower", 0, anchor,
@@ -2019,6 +2342,11 @@ void test_frame_independent_physical_value_wiring() {
     if (direct.at("used") != true ||
         direct.at("execution_mode") !=
             "causal-ordinary-physical-evolution" ||
+        direct.at("retained_taylor_complete_max") != 30 ||
+        direct.at("tail_certificate_taylor_complete_max") != 30 ||
+        direct.at("tail_order_retries") != 0 ||
+        direct.at("tail_witness_direction") != "outward" ||
+        direct.at("tail_witness_dyadic_exponent") != 16 ||
         direct.at("output_tail_status") !=
             "transient-physical-reconstructible" ||
         direct.at("next_hop_policy") !=
@@ -2038,9 +2366,14 @@ void test_frame_independent_physical_value_wiring() {
         direct_stats.at("epsilon_max") != 2 ||
         direct_stats.at("top_valid") != 2 ||
         direct_stats.at("tail_majorant").as_object().at("status") !=
-            "unsupported")
+            "unsupported" ||
+        direct_stats.at("physical_tail_majorant").as_object().at(
+            "status") != "certified" ||
+        direct_stats.at("physical_tail_majorant").as_object().at(
+            "attached") != true)
       throw std::runtime_error(
-          "ordinary physical hop did not zero-pad its structural lower row or claimed a tail theorem: " +
+          "ordinary physical hop did not zero-pad its structural lower row "
+          "or retain its transient physical tail theorem: " +
           json::serialize(direct_stats));
     const auto canonical_zero_row_trimmed = [&](const char* point) {
       const auto evaluated = request(json::object{
@@ -2073,6 +2406,8 @@ void test_frame_independent_physical_value_wiring() {
     if (consecutive.at("used") != true ||
         consecutive.at("execution_mode") !=
             "causal-ordinary-physical-evolution" ||
+        consecutive.at("retained_taylor_complete_max") != 12 ||
+        consecutive.at("tail_certificate_taylor_complete_max") != 12 ||
         consecutive.at("output_tail_status") !=
             "transient-physical-reconstructible" ||
         consecutive.at("next_hop_policy") !=
@@ -2088,16 +2423,18 @@ void test_frame_independent_physical_value_wiring() {
         {"schema", 2}, {"op", "session.counters"},
         {"session", session}});
     require_ok(counters, "physical wiring session.counters");
-    if (counter(counters, "transport_physical_value_hop_attempts") != 3 ||
-        counter(counters, "transport_physical_value_hop_successes") != 2 ||
-        counter(counters, "transport_physical_value_hop_ineligible") != 0 ||
+    if (counter(counters, "transport_physical_value_hop_attempts") != 7 ||
+        counter(counters, "transport_physical_value_hop_successes") != 5 ||
+        counter(counters, "transport_physical_value_hop_ineligible") != 1 ||
         counter(counters, "transport_framed_basis_hops") != 0)
       throw std::runtime_error(
           "physical wiring diagnostics do not expose consecutive causal hops: " +
           json::serialize(counters));
 
     for (const auto& owner :
-         {first_equation, second_equation, third_equation})
+         {first_equation, second_equation, third_equation,
+          private_equation, impossible_equation, stiff_equation,
+          overlap_equation})
       require_ok(request(json::object{
           {"schema", 2}, {"op", "regular_equation.release"},
           {"session", session}, {"equation_owner", owner}}),
@@ -2143,6 +2480,8 @@ void test_frame_independent_physical_value_wiring() {
     if (resumed.at("used") != true ||
         resumed.at("execution_mode") !=
             "causal-ordinary-physical-evolution" ||
+        resumed.at("retained_taylor_complete_max") != 12 ||
+        resumed.at("tail_certificate_taylor_complete_max") != 12 ||
         resumed.at("output_tail_status") !=
             "transient-physical-reconstructible" ||
         resumed.at("next_hop_policy") !=
@@ -2188,12 +2527,22 @@ void test_frame_independent_physical_value_wiring() {
     if (!restored_session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", restored_session}});
+    if (!restored_prefix_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored_prefix_session}});
+    if (!restored_overlap_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", restored_overlap_session}});
     std::remove(checkpoint.c_str());
     std::remove(resaved_checkpoint.c_str());
+    std::remove(private_prefix_checkpoint.c_str());
+    std::remove(overlap_checkpoint.c_str());
     throw;
   }
   std::remove(checkpoint.c_str());
   std::remove(resaved_checkpoint.c_str());
+  std::remove(private_prefix_checkpoint.c_str());
+  std::remove(overlap_checkpoint.c_str());
 }
 
 void test_acb_terminal_factorized_consumed_checkpoint() {
@@ -2579,8 +2928,9 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     // A 1/t observable row is outside the lambda(0)=0 composed theorem: its
     // adjoint needs a Laurent/log term and the integration-by-parts endpoint
     // pairing.  Authoritative mode must classify precisely that known
-    // applicability boundary and fall back to the established production
-    // contraction.
+    // applicability boundary and use the independently certified physical
+    // functional/weight contraction, rather than forcing the ill-conditioned
+    // finite-factorized adjoint beyond its theorem.
     // This is the row class reached by banana4's seventh level-3 request.
     if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
                "authoritative", 1) != 0)
@@ -2609,9 +2959,12 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
         center_pole_report.find(
             "detail=row-requires-laurent-log-center-adjoint") ==
             std::string::npos ||
-        center_pole_report.find("forcing_power=0") == std::string::npos)
+        center_pole_report.find("forcing_power=0") == std::string::npos ||
+        center_pole_report.find(
+            "status=classified-direct-physical-fallback") ==
+            std::string::npos)
       throw std::runtime_error(
-          "center-pole terminal row was not classified explicitly: " +
+          "center-pole terminal row did not select its classified physical fallback: " +
           center_pole_report);
     // The direct physical route contracts L(F) with the certified physical
     // weights w.  It must remain a genuine independent route: in particular,
@@ -2648,28 +3001,50 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
       throw std::runtime_error(
           "invalid terminal contraction route was not rejected");
 
-    const auto endpoints = request(json::object{
-        {"schema", 2}, {"op", "transport.endpoint_batch"},
-        {"session", session},
-        {"transport_state", lower_state.at("transport_state")},
-        {"transport_state_checkpoint_identity",
-         lower_state.at("checkpoint_identity")},
-        {"transport_state_provenance_identity",
-         lower_state.at("provenance_identity")},
-        {"checkpoint_policy", json::object{
-             {"schema",
-              "diffexp2-deterministic-transport-endpoint-checkpoints-v1"},
-             {"root", "terminal-factorized-endpoint"}}},
-        {"observables", json::array{json::object{
-             {"identity", "terminal-factorized-endpoint-observable"},
-             {"checkpoint_identity",
-              "terminal-factorized-endpoint-result"},
-             {"integrand_row", cancellation_integrand_row(
-                  "terminal-factorized-endpoint-row", 33)},
-             {"epsilon", json::object{
-                  {"min", 0}, {"max", 2},
-                  {"required_complete_max", 1}}}}}}});
-    require_ok(endpoints, "terminal factorized endpoint_batch");
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
+               "authoritative", 1) != 0)
+      throw std::runtime_error(
+          "could not select authoritative terminal endpoint policy");
+    std::ostringstream endpoint_diagnostics;
+    auto* endpoint_previous_stderr =
+        std::cerr.rdbuf(endpoint_diagnostics.rdbuf());
+    json::object endpoints;
+    try {
+      endpoints = request(json::object{
+          {"schema", 2}, {"op", "transport.endpoint_batch"},
+          {"session", session},
+          {"transport_state", lower_state.at("transport_state")},
+          {"transport_state_checkpoint_identity",
+           lower_state.at("checkpoint_identity")},
+          {"transport_state_provenance_identity",
+           lower_state.at("provenance_identity")},
+          {"checkpoint_policy", json::object{
+               {"schema",
+                "diffexp2-deterministic-transport-endpoint-checkpoints-v1"},
+               {"root", "terminal-factorized-endpoint"}}},
+          {"observables", json::array{json::object{
+               {"identity", "terminal-factorized-endpoint-observable"},
+               {"checkpoint_identity",
+                "terminal-factorized-endpoint-result"},
+               {"integrand_row", cancellation_integrand_row(
+                    "terminal-factorized-endpoint-row", 33)},
+               {"epsilon", json::object{
+                    {"min", 0}, {"max", 2},
+                    {"required_complete_max", 1}}}}}}});
+    } catch (...) {
+      std::cerr.rdbuf(endpoint_previous_stderr);
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+      throw;
+    }
+    std::cerr.rdbuf(endpoint_previous_stderr);
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+    require_ok(endpoints, "classified physical endpoint_batch");
+    if (endpoint_diagnostics.str().find(
+            "status=classified-direct-physical-center-fallback") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "authoritative exact-center endpoint did not select its "
+          "classified physical contraction");
     if (endpoints.at("endpoints").as_array().size() != 1 ||
         endpoints.at("no_projected_local_publication") != true)
       throw std::runtime_error(

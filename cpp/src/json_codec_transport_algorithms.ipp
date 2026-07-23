@@ -152,6 +152,7 @@ RetainedPlanChartBinding bind_plan_chart(
                        "certified chart scalar");
   binding.local_geometry.center_exact = required_string(center, "exact");
   binding.local_geometry.scale_exact = required_string(scale, "exact");
+  binding.local_geometry.radius_exact = required_string(radius, "exact");
   binding.local_geometry.infinite_radius = false;
   binding.center_numeric = parse_scalar<ComplexBall>(center.at("value"));
   binding.scale_numeric = parse_scalar<ComplexBall>(scale.at("value"));
@@ -1873,7 +1874,20 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
     throw std::invalid_argument(
         "DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE must be "
         "factorized, physical, adjoint, or compare");
-  const bool direct_physical = route == "physical";
+  const auto* composed_mode_raw =
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+  const bool authoritative_center_physical =
+      route.empty() && binding.centered &&
+      composed_mode_raw != nullptr &&
+      std::string(composed_mode_raw) == "authoritative";
+  const bool direct_physical =
+      route == "physical" || authoritative_center_physical;
+  if (authoritative_center_physical)
+    std::cerr
+        << "terminal-endpoint-selected status="
+           "classified-direct-physical-center-fallback"
+        << " detail=exact-center-endpoint-has-no-ordinary-composed-"
+           "adjoint-pairing\n";
   // The adjoint factorization can be a genuinely Laurent system.  Its
   // inverse valuation and elimination-tail loss are properties of the live
   // endpoint matrix, not a universal integer guard derivable from the
@@ -3922,8 +3936,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
     throw std::invalid_argument(
         "DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE must be "
         "factorized, physical, adjoint, or compare");
-  const bool diagnostic_physical = diagnostic_route == "physical";
-  const bool direct_physical =
+  bool direct_physical =
       diagnostic_route == "physical";
   const bool direct_factorized =
       diagnostic_route == "factorized";
@@ -4066,6 +4079,18 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
           << " status=not-applicable"
           << " detail=row-requires-laurent-log-center-adjoint"
           << " forcing_power=" << error.forcing_power << '\n';
+      if (mode == "authoritative" &&
+          diagnostic_route.empty()) {
+        direct_physical = true;
+        contraction_provenance =
+            "terminal certified direct-physical fallback for "
+            "Laurent/log center-adjoint row";
+        std::cerr
+            << "terminal-composed-adjoint-selected arm=" << arm_name
+            << " tile=" << tile_index
+            << " status=classified-direct-physical-fallback"
+            << " detail=row-requires-laurent-log-center-adjoint\n";
+      }
     } catch (const BackwardAdjointCenterUnitError& error) {
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
@@ -4078,6 +4103,18 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       else
         std::cerr << "absent";
       std::cerr << '\n';
+      if (mode == "authoritative" &&
+          diagnostic_route.empty()) {
+        direct_physical = true;
+        contraction_provenance =
+            "terminal certified direct-physical fallback for "
+            "nonunit center-adjoint row";
+        std::cerr
+            << "terminal-composed-adjoint-selected arm=" << arm_name
+            << " tile=" << tile_index
+            << " status=classified-direct-physical-fallback"
+            << " detail=q-epsilon0-is-not-center-unit\n";
+      }
     } catch (const std::exception& error) {
       if (mode != "report") throw;
       std::cerr
@@ -4100,7 +4137,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             "terminal factorized primitive window",
             direct_physical))
       : std::nullopt;
-  auto projected = diagnostic_physical
+  auto projected = direct_physical
       ? project_terminal_acb_physical_basis_row(
             match, prepared_row, *projection_cap,
             "terminal-physical-line:" + arm_name + ":" +
@@ -4368,9 +4405,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   // These deferred groups are J's per-G-column contributions.  Even though
   // production evaluates the equivalent adjoint expression z^T u, its
   // cancellation scale must therefore use the transformed G coordinates y.
-  // Only the direct-physical diagnostic projects F and uses physical weights
-  // w.
-  const auto& selected_divergent_weights = diagnostic_physical
+  // A direct-physical route projects F and uses physical weights w.
+  const auto& selected_divergent_weights = direct_physical
       ? match.terminal_acb_physical_weights()
       : match.terminal_acb_transformed_weights();
   for (const auto& [key, tag] : deferred_tags) {

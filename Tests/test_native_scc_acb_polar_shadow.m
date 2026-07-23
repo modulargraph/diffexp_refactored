@@ -1,9 +1,10 @@
 (* All diagonal SCCs may be ordinary while a polar cross-edge makes the
-   composite regular-singular.  Exact tags and schedules now let Acb execute
-   the normal path and certify its coefficient balls directly.  If a ball is
-   ambiguous, nativeReceivingBasis must still catch that narrowly identified
-   failure, solve the Rational shadow, and specialize the completed columns
-   back into the paired Acb owner without printing a false terminal error. *)
+   composite regular-singular.  Its exact producer certificate must select
+   the Rational shadow before solving columns: a locally successful Acb solve
+   is not enough because a later singular match must retain correlation
+   between its right normal frame and physical weights.  The synthetic probe
+   below verifies that this producer certificate bypasses the legacy
+   speculative Acb route entirely. *)
 
 repoRoot = ParentDirectory[DirectoryName[$InputFileName]];
 SetDirectory[repoRoot];
@@ -90,7 +91,7 @@ ok = !AnyTrue[Take[result, 3], FailureQ] &&
   AllTrue[Lookup[stats, "block_charts", {}],
     TrueQ[Lookup[#, "regular", False]] &] &&
   AssociationQ[decision] &&
-  !TrueQ[Lookup[decision, "RequiresRationalShadow", True]] &&
+  TrueQ[Lookup[decision, "RequiresRationalShadow", False]] &&
   Lookup[decision, "Certificate", None] ===
     "exact-tagged-acb-polar-cross-coupling" &&
   TrueQ[Lookup[decision, "RationalShadowFallback", False]] &&
@@ -98,30 +99,27 @@ ok = !AnyTrue[Take[result, 3], FailureQ] &&
   Lookup[basis, "Type", None] === "DiffExp2NativeSCCBasis" &&
   Lookup[basis, "Dimension", None] === 2 &&
   Lookup[Lookup[basis, "Columns", {}], "BasisIndex", {}] === {1, 2} &&
-  AllTrue[Lookup[basis, "Columns", {}],
-    Lookup[Lookup[#, "NativeSummary", <||>],
-      "execution_capability", None] ===
-        "acb-regular-singular-scalar-block-dag-column-v1" &] &&
-  AssociationQ[afterStats] &&
-  Lookup[afterStats, "scc_column_solves", None] === 2 &&
-  forcedFallbackProbeCount === 1 &&
-  AssociationQ[forcedFallbackBasis] &&
-  Lookup[forcedFallbackBasis, "Type", None] ===
-    "DiffExp2NativeSCCBasis" &&
-  Lookup[forcedFallbackBasis, "Dimension", None] === 2 &&
-  Lookup[Lookup[forcedFallbackBasis, "Columns", {}],
-    "BasisIndex", {}] === {1, 2} &&
-  Lookup[Lookup[forcedFallbackBasis, "NativeSummary", <||>],
+  Lookup[Lookup[basis, "NativeSummary", <||>],
     "specialization_capability", None] ===
       "exact-rational-shadow-to-acb-local-v1" &&
+  Lookup[Lookup[basis, "NativeSummary", <||>],
+    "selection_capability", None] ===
+      "producer-certified-proactive-rational-shadow-v1" &&
+  AssociationQ[afterStats] &&
+  Lookup[afterStats, "scc_column_solves", None] === 0 &&
+  forcedFallbackProbeCount === 0 &&
+  AssociationQ[forcedFallbackBasis] &&
+  Lookup[Lookup[forcedFallbackBasis, "NativeSummary", <||>],
+    "selection_capability", None] ===
+      "producer-certified-proactive-rational-shadow-v1" &&
   !TrueQ[Lookup[nonIdentityDecision,
     "RequiresRationalShadow", True]] &&
   Lookup[nonIdentityDecision, "Certificate", None] ===
     "runtime-exact-schedule-and-tag-gate-required" &&
   !TrueQ[Lookup[nonIdentityDecision,
     "RationalShadowFallback", False]] &&
-  !TrueQ[Lookup[seedCasePDecision,
-    "RequiresRationalShadow", True]] &&
+  TrueQ[Lookup[seedCasePDecision,
+    "RequiresRationalShadow", False]] &&
   Lookup[seedCasePDecision, "Certificate", None] ===
     "exact-schedule-acb-case-p-compensation" &&
   TrueQ[Lookup[seedCasePDecision,
@@ -141,7 +139,7 @@ If[AssociationQ[prepared] && StringQ[Lookup[prepared, "SCC", None]],
 DiffExp2`Solve`ClearSolveCaches[];
 
 Print[If[ok, "PASS", "FAIL"],
-  ": all-regular polar Acb SCC uses direct balls with exact fallback"];
+  ": polar and CASE-P Acb SCCs retain proactive exact shadows"];
 If[!ok, Print[InputForm[{
   "Failures" -> Select[result, FailureQ],
   "Stats" -> If[AssociationQ[stats],

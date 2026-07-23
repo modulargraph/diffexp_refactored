@@ -259,6 +259,10 @@ struct Prescription {
 struct ChartGeometry {
   std::string center_exact;
   std::string scale_exact = "1";
+  // Exact identity and numerical enclosure are deliberately distinct.  Two
+  // retained owners may specialize the same algebraic radius at different
+  // precisions, so Acb ball equality is not a stable geometry identity.
+  std::string radius_exact;
   ComplexBall radius = ComplexBall(1);
   bool infinite_radius = false;
 };

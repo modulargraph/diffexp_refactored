@@ -6357,11 +6357,14 @@ sccNativeRationalShadowDecision[domain_, blockRecords_List,
     polarCoupling,
       "exact-tagged-acb-polar-cross-coupling",
     True, "runtime-exact-schedule-and-tag-gate-required"];
-  (* CASE-P structure and every derived tag schedule are certified from the
-     retained exact affine-Jordan record.  Execute coefficients in Acb and
-     select the Rational shadow only if an enclosure cannot certify a polar
-     weight or value-floor cancellation at the configured chop precision. *)
-  <|"RequiresRationalShadow" -> False,
+  (* CASE-P and identity-frame polar couplings are more than local
+     coefficient hazards.  Even when an Acb column solve succeeds, a later
+     singular match must compose its right normal frame with the matching
+     weights without losing their shared algebraic correlation.  The exact
+     Rational shadow is the retained authority for that composition; a
+     finite Acb fallback can manufacture a weight-radius residual which no
+     Taylor-order or working-precision retry can reduce. *)
+  <|"RequiresRationalShadow" -> TrueQ[seedCaseP || polarCoupling],
     "Certificate" -> reason,
     "RationalShadowFallback" -> TrueQ[seedCaseP || polarCoupling],
     "SeedCaseP" -> TrueQ[seedCaseP],

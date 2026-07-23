@@ -35,6 +35,13 @@ reservoirFailure = Failure["DiffExp2", <|
   "BackendFailure" -> reservoirBackendFailure|>];
 clearanceFailure = Failure["DiffExp2", <|
   "BackendFailure" -> clearanceBackendFailure|>];
+propagatedBackendFailure = Join[clearanceBackendFailure, <|
+  "retryable_matching_clearance" -> False,
+  "retryable_propagated_enclosure" -> True,
+  "normal_frame_attempt" -> <|
+    "physical_clearance_source" -> "propagated-enclosure"|>|>];
+propagatedFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> propagatedBackendFailure|>];
 continuityBackendFailure = <|
   "reason" -> "acb_match_residual_inconclusive",
   "retryable_epsilon_reservoir" -> False,
@@ -76,6 +83,12 @@ assert["materialized handoff clearance permits one failing-level Taylor probe",
     continuityRetry[[2, "AdditionalOrders"]] === 50 &&
     continuityRetry[[2, "ResidualVerdicts", "inconclusive"]] === 1,
   continuityRetry];
+assert["producer enclosure is not misclassified as a Taylor-order retry",
+  ft2NativeMatchingReservoirRetry[propagatedFailure, 3] === None &&
+    ft2NativeMatchingClearanceRetry[
+      propagatedFailure, 3, 50] === None,
+  {ft2NativeMatchingReservoirRetry[propagatedFailure, 3],
+   ft2NativeMatchingClearanceRetry[propagatedFailure, 3, 50]}];
 
 assert["matching Taylor progress requires fewer inconclusive coefficients",
   ft2NativeMatchingClearanceProgressQ[

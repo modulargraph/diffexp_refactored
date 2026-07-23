@@ -65,6 +65,13 @@ production-chain correctness regression:
 manifest forwarding, exact Rational-shadow retention, singular physical-ODE
 construction, real-ray terminal composed-adjoint certification, and the
 near-endpoint rational-pole case are all exercised together.
+The ordinary native suite complements this slow gate with two deterministic
+producer/consumer contract tests: one distinguishes an inconclusive propagated
+enclosure from a genuine midpoint residual (so Taylor order is not retried
+blindly), and one carries unequal rigorous specializations of the same exact
+algebraic chart radius through matching and checkpoint replay. These fixtures
+are intentionally end-to-end at the native ownership boundary; local SCC
+solver tests alone cannot detect either failure.
 
 ```bash
 FT_FIRE_PATH=/path/to/FIRE7 \
@@ -82,7 +89,11 @@ accuracy budget in every executed ladder level. It rejects epsilon-reservoir,
 stalled/exhausted Taylor, and unsupported markers; a bounded Taylor retry is
 allowed only while its coefficient verdict strictly improves. A noncenter
 terminal tile is accepted only when it is explicitly classified as outside
-the one-contraction theorem.
+the one-contraction theorem. Native stage records are enabled as part of the
+gate: singular-chart basis crossings remain allowed, but any basis fallback
+whose receiver is regular fails the gate. This protects the private epsilon
+reservoir and prevents one under-certified value hop from silently becoming
+a long fallback cascade.
 
 For a quicker diagnostic that only produces the level-3 boundary, set
 `BANANA4_BOUNDARY_TARGET_LEVEL=3`. This is not the release default because it

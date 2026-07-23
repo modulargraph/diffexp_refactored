@@ -805,13 +805,15 @@ nativeBasisOwner[basis_Association] := Module[{owner},
 SetAttributes[nativeCatchDE2, HoldFirst];
 nativeCatchDE2[expression_] := Catch[expression, "DiffExp2Error"];
 
-(* An Acb regular-singular basis is first attempted as a capability probe.
-   CASE-P and exact multi-tag sources deliberately fail that probe before the
-   Rational shadow is selected.  DE2Error prints before throwing, so a plain
-   Catch makes a successfully recovered probe look like a terminal error.
-   Buffer Print only across this narrow probe.  The caller discards precisely
-   the expected DE2Error record and replays every other progress/debug print;
-   unrecognized failures replay the complete buffer before remaining loud. *)
+(* Producer-certified CASE-P and identity-frame polar sources select their
+   Rational shadow proactively.  This buffered capability probe remains only
+   for an unclassified Acb regular-singular source whose local coefficient
+   execution discovers a narrower exact-shadow requirement at runtime.
+   DE2Error prints before throwing, so a plain Catch makes a successfully
+   recovered probe look like a terminal error.  Buffer Print only across this
+   narrow legacy probe.  The caller discards precisely the expected DE2Error
+   record and replays every other progress/debug print; unrecognized failures
+   replay the complete buffer before remaining loud. *)
 SetAttributes[nativeCatchDE2Buffered, HoldFirst];
 nativeCatchDE2Buffered[expression_] := Module[{records = {}, result},
   result = Block[{Print = Function[Null,
@@ -1624,7 +1626,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     lowerPlan_Association, upperPlan_Association, OptionsPattern[]] := Module[
   {plans, lower, upper, dimension = Length[sys["Matrix"]], values,
    epsMin, epsMax, req, anchorSystem, anchor = None, prepareArm, lowerData,
-   upperData, sessions, anchorOwner, lowerOwners, upperOwners, planIdentity,
+   upperData, sessions, anchorOwner, anchorStats, lowerOwners, upperOwners,
+   planIdentity,
    nativePlan = None, geometryAudit = None, sessionStats,
    domain, integrand,
    preparedShift, halo, targetMax, targetOption =
@@ -1726,6 +1729,15 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   nativeStageTiming["anchor-solve-done boundaryMax=", availableMax,
     " request=", req["EpsWindow"], " anchor=",
     Lookup[anchor, "EpsWindow", None]];
+  If[Environment["DE2_NATIVE_STAGE_TIMING"] === "1",
+    anchorStats =
+      DiffExp2`CppBackend`PersistentLocalStatistics[anchor];
+    nativeStageTiming["anchor-physical-tail status=",
+      Lookup[Lookup[anchorStats, "physical_tail_majorant", <||>],
+        "status", "unavailable"],
+      " detail=", Lookup[
+        Lookup[anchorStats, "physical_tail_majorant", <||>],
+        "detail", "unavailable"]]];
   sessionStats = DiffExp2`CppBackend`PersistentSessionCounters[anchor];
   domain = If[AssociationQ[sessionStats],
     Lookup[sessionStats, "domain", None], None];
@@ -2294,7 +2306,8 @@ nativeStreamTransportArm[atlas_Association, data_Association,
         response = valueResponse,
         nativeStageTiming["stream-basis-start arm=", arm,
           " index=", index, " value-reason=",
-          Lookup[valueResponse, "reason", "ineligible"]];
+          Lookup[valueResponse, "reason", "ineligible"],
+          " value-detail=", Lookup[valueResponse, "detail", "unavailable"]];
         basis = nativeReceivingBasis[systems[[index]], atlas["Request"],
           Lookup[atlas, "Threads", Automatic], True,
           fallbackEquationOwner];
@@ -2475,7 +2488,18 @@ nativeStreamTransportArm[atlas_Association, data_Association,
       basis = None;
       ClearSystemCache[];
       nativeStageTiming["stream-hop-done arm=", arm,
-        " index=", index],
+        " index=", index,
+        " execution=", Lookup[response, "execution_mode", None],
+        " retainedTaylor=", Lookup[
+          response, "retained_taylor_complete_max", None],
+        " certificateTaylor=", Lookup[
+          response, "tail_certificate_taylor_complete_max", None],
+        " tailOrderRetries=", Lookup[
+          response, "tail_order_retries", None],
+        " witnessDirection=", Lookup[
+          response, "tail_witness_direction", None],
+        " witnessExponent=", Lookup[
+          response, "tail_witness_dyadic_exponent", None]],
       {index, Length[systems]}];
     <|"tile_sources" -> tiles|>,
     "DiffExp2Error", Function[{failure, tag},

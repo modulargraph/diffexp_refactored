@@ -3907,6 +3907,18 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
           << " status=not-applicable"
           << " detail=row-requires-laurent-log-center-adjoint"
           << " forcing_power=" << error.forcing_power << '\n';
+    } catch (const BackwardAdjointCenterUnitError& error) {
+      std::cerr
+          << "terminal-composed-adjoint arm=" << arm_name
+          << " tile=" << tile_index
+          << " status=not-applicable"
+          << " detail=q-epsilon0-is-not-center-unit"
+          << " q_t_valuation=";
+      if (error.t_valuation.has_value())
+        std::cerr << *error.t_valuation;
+      else
+        std::cerr << "absent";
+      std::cerr << '\n';
     } catch (const std::exception& error) {
       if (mode == "require") throw;
       std::cerr

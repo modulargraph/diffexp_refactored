@@ -615,6 +615,47 @@ bool exact_q_normalization_removes_clearing_contraction() {
   return false;
 }
 
+bool nonunit_q_normalization_is_typed_applicability() {
+  const auto make_ode = [] {
+    PreparedPhysicalClearedODE<Rational> ode;
+    ode.dimension = 1;
+    ode.c_lags = {{{0, 0, exact_rational_constant("1")}}};
+    ode.owner_signature_identity = "nonunit-q-owner";
+    ode.payload_identity = "nonunit-q-payload";
+    ode.exact_payload_record = "nonunit-q-record";
+    return ode;
+  };
+
+  auto t_nonunit = make_ode();
+  t_nonunit.q_lags = {
+      exact_rational_constant("0"), exact_rational_constant("1")};
+  try {
+    (void)adjoint_observable_detail::
+        normalize_backward_adjoint_exact_ode_by_q(
+            t_nonunit, 4, 0, "t-nonunit q regression");
+    return false;
+  } catch (const BackwardAdjointCenterUnitError& error) {
+    if (!error.t_valuation.has_value() || *error.t_valuation != 1)
+      return false;
+  }
+
+  auto epsilon_nonunit = make_ode();
+  ExactEpsilonRational<Rational> epsilon;
+  epsilon.zero = false;
+  epsilon.valuation = 1;
+  epsilon.numerator = {Rational(1)};
+  epsilon.denominator = {Rational(1)};
+  epsilon_nonunit.q_lags = {std::move(epsilon)};
+  try {
+    (void)adjoint_observable_detail::
+        normalize_backward_adjoint_exact_ode_by_q(
+            epsilon_nonunit, 4, 1, "epsilon-nonunit q regression");
+  } catch (const BackwardAdjointCenterUnitError& error) {
+    return !error.t_valuation.has_value();
+  }
+  return false;
+}
+
 bool normalized_a_posteriori_defect_encloses_exact_tail() {
   PreparedPhysicalClearedODE<Rational> exact_ode;
   exact_ode.dimension = 1;
@@ -929,6 +970,7 @@ int main() {
                   adaptive_witness_handles_narrow_denominator_clearance() &&
                   exact_combined_forcing_cancels_cleared_row_pole() &&
                   exact_q_normalization_removes_clearing_contraction() &&
+                  nonunit_q_normalization_is_typed_applicability() &&
                   normalized_a_posteriori_defect_encloses_exact_tail() &&
                   batched_real_interval_remainders_match_individual_quotients() &&
                   real_ray_operator_bounds_are_cached_by_exact_interval() &&

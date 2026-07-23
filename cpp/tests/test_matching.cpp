@@ -1263,6 +1263,60 @@ void precomputed_physical_residual_certification_smoke() {
                 AcbMatchingResidualVerdict::Inconclusive);
 }
 
+void complete_window_insufficient_digits_smoke() {
+  ComplexBall::set_precision(1024);
+  const auto window_frame = [](const char* coefficient,
+                               std::int32_t power) {
+    std::vector<ComplexBall> values(40, ComplexBall(0));
+    values.at(static_cast<std::size_t>(power + 9)) =
+        ComplexBall::from_strings(coefficient);
+    return EpsilonFrame<ComplexBall>(-9, std::move(values));
+  };
+  const FiniteLaurentMatrix<ComplexBall> basis{
+      {window_frame("1", 0)}};
+  const FiniteLaurentVector<ComplexBall> weights{
+      ball_constant_frame("1", 40)};
+  const FiniteLaurentVector<ComplexBall> incoming{
+      window_frame("1", 0)};
+  AcbLaurentRefinementOptions options;
+  options.relative_tolerance = Magnitude::decimal("1e-80");
+  options.required_min_power = -9;
+  options.required_complete_max = 25;
+  options.max_refinement_steps = 0;
+
+  const auto insufficient =
+      diffexp2::matching_detail::certify_precomputed_acb_matching_residual(
+          basis, weights, incoming,
+          FiniteLaurentVector<ComplexBall>{window_frame("1e-71", 8)},
+          options, "complete 71-digit residual under 80-digit contract");
+  const auto sufficient =
+      diffexp2::matching_detail::certify_precomputed_acb_matching_residual(
+          basis, weights, incoming,
+          FiniteLaurentVector<ComplexBall>{window_frame("1e-81", 8)},
+          options, "complete 81-digit residual under 80-digit contract");
+  std::cout << "  INFO: complete-window digit control insufficient="
+            << static_cast<int>(insufficient.diagnostics.verdict)
+            << " window=["
+            << insufficient.diagnostics.complete_window.min_power << ","
+            << insufficient.diagnostics.complete_window.complete_max
+            << "] sufficient="
+            << static_cast<int>(sufficient.diagnostics.verdict)
+            << " window=["
+            << sufficient.diagnostics.complete_window.min_power << ","
+            << sufficient.diagnostics.complete_window.complete_max
+            << "]\n";
+  check("a complete epsilon window does not excuse insufficient digits",
+        insufficient.diagnostics.complete_through_required &&
+            insufficient.diagnostics.complete_window.min_power == -9 &&
+            insufficient.diagnostics.complete_window.complete_max >= 25 &&
+            insufficient.diagnostics.verdict !=
+                AcbMatchingResidualVerdict::Pass &&
+            sufficient.diagnostics.complete_through_required &&
+            sufficient.diagnostics.verdict ==
+                AcbMatchingResidualVerdict::Pass);
+  ComplexBall::set_precision(256);
+}
+
 struct NormalFramePrefixRun {
   std::vector<EpsilonFrame<ComplexBall>> physical_weights;
   diffexp2::AcbMatchingResidualDiagnostics normalized_residual;
@@ -1502,6 +1556,7 @@ int main() {
   refined_acb_ambiguous_off_pivot_smoke();
   empty_residual_window_retry_metadata_smoke();
   precomputed_physical_residual_certification_smoke();
+  complete_window_insufficient_digits_smoke();
   normal_frame_prefix_monotonicity_smoke();
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();

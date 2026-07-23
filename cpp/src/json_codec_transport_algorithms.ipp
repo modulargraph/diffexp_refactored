@@ -3508,8 +3508,19 @@ compute_terminal_composed_adjoint_diagnostic(
   // its local endpoints: signed evaluation at m already carries that
   // orientation, independently of whether m is positive or negative.
   const auto oriented_jacobian = binding.scale_numeric;
-  const auto taylor_complete_max = static_cast<std::uint32_t>(
+  const auto retained_taylor_complete_max = static_cast<std::uint32_t>(
       prototype.taylor_width() - 1);
+  auto taylor_complete_max = retained_taylor_complete_max;
+  if (const auto* raw_order = std::getenv(
+          "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_TAYLOR_ORDER")) {
+    char* end = nullptr;
+    const auto parsed = std::strtoul(raw_order, &end, 10);
+    if (raw_order[0] == '\0' || end == raw_order || *end != '\0' ||
+        parsed < retained_taylor_complete_max || parsed > 2000)
+      throw std::invalid_argument(
+          "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_TAYLOR_ORDER must be an integer between the retained order and 2000");
+    taylor_complete_max = static_cast<std::uint32_t>(parsed);
+  }
   const auto physical_equation =
       match.terminal_acb_receiving_physical_equation();
   const auto exact_physical_equation =
@@ -3554,19 +3565,47 @@ compute_terminal_composed_adjoint_diagnostic(
     }
     exact_row = std::move(parsed);
   }
+  if (taylor_complete_max > retained_taylor_complete_max) {
+    if (!exact_row.has_value())
+      throw std::domain_error(
+          "terminal composed adjoint cannot extend its Taylor order without an exact row");
+    row = adjoint_observable_detail::
+        specialize_exact_backward_adjoint_row_taylor(
+            *exact_row, taylor_complete_max,
+            "terminal composed extended exact row:" + arm_name + ":" +
+                std::to_string(tile_index));
+  }
+  std::optional<
+      adjoint_observable_detail::NormalizedBackwardAdjointExactODE>
+      normalized_exact_equation;
+  if (exact_physical_equation)
+    normalized_exact_equation =
+        adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
+            *exact_physical_equation, taylor_complete_max, row_complete,
+            "terminal composed normalized adjoint:" + arm_name + ":" +
+                std::to_string(tile_index));
+  const auto* recurrence_exact_equation = normalized_exact_equation
+      ? &normalized_exact_equation->truncated_ode
+      : exact_physical_equation.get();
   const auto solve_context =
       "terminal composed adjoint:" + arm_name + ":" +
       std::to_string(tile_index);
   auto reservoir =
       solve_backward_adjoint_taylor_with_epsilon_reservoir(
           [&](std::int32_t input_complete_max) {
-            return prepare_backward_adjoint_taylor_problem(
-                *physical_equation, row, taylor_complete_max,
-                input_complete_max, required_adjoint_complete,
-                oriented_jacobian, solve_context);
+            return normalized_exact_equation
+                ? prepare_backward_adjoint_taylor_problem(
+                      normalized_exact_equation->truncated_ode, row,
+                      taylor_complete_max, input_complete_max,
+                      required_adjoint_complete, oriented_jacobian,
+                      solve_context)
+                : prepare_backward_adjoint_taylor_problem(
+                      *physical_equation, row, taylor_complete_max,
+                      input_complete_max, required_adjoint_complete,
+                      oriented_jacobian, solve_context);
           },
           required_adjoint_complete, row_complete,
-          exact_physical_equation.get(), solve_context);
+          recurrence_exact_equation, solve_context);
   const auto& solved = reservoir.result;
   const auto signed_point =
       local_algebra_detail::signed_real_evaluation_ball(
@@ -3607,8 +3646,16 @@ compute_terminal_composed_adjoint_diagnostic(
       adjoint, incoming,
       "terminal composed adjoint contraction:" + arm_name + ":" +
           std::to_string(tile_index));
+  const auto certified_output_min = std::max(
+      contracted.min_power(), epsilon_contract.requested.min_power);
+  const auto certified_output_max = std::min(
+      contracted.complete_max(), epsilon_contract.required_complete_max);
+  if (certified_output_min > certified_output_max)
+    throw std::domain_error(
+        "terminal composed adjoint has no requested output epsilon window");
   std::vector<Magnitude> output_tails(
-      contracted.window().width(), Magnitude::zero());
+      EpsilonWindow{certified_output_min, certified_output_max}.width(),
+      Magnitude::zero());
   auto recurrence_contraction = Magnitude::zero();
   auto coefficientwise_first_input_complete_max =
       std::numeric_limits<std::int32_t>::max();
@@ -3618,8 +3665,8 @@ compute_terminal_composed_adjoint_diagnostic(
       std::numeric_limits<std::int32_t>::max();
   auto coefficientwise_max_input_complete_max =
       std::numeric_limits<std::int32_t>::min();
-  for (std::int64_t raw_output = contracted.min_power();
-       raw_output <= contracted.complete_max(); ++raw_output) {
+  for (std::int64_t raw_output = certified_output_min;
+       raw_output <= certified_output_max; ++raw_output) {
     const auto output_power = static_cast<std::int32_t>(raw_output);
     const auto output_required_adjoint_complete =
         local_algebra_detail::checked_i32(
@@ -3631,15 +3678,21 @@ compute_terminal_composed_adjoint_diagnostic(
     auto output_reservoir =
         solve_backward_adjoint_taylor_with_epsilon_reservoir(
             [&](std::int32_t input_complete_max) {
-              return prepare_backward_adjoint_taylor_problem(
-                  *physical_equation, row, taylor_complete_max,
-                  input_complete_max,
-                  output_required_adjoint_complete,
-                  oriented_jacobian, output_context);
+              return normalized_exact_equation
+                  ? prepare_backward_adjoint_taylor_problem(
+                        normalized_exact_equation->truncated_ode, row,
+                        taylor_complete_max, input_complete_max,
+                        output_required_adjoint_complete,
+                        oriented_jacobian, output_context)
+                  : prepare_backward_adjoint_taylor_problem(
+                        *physical_equation, row, taylor_complete_max,
+                        input_complete_max,
+                        output_required_adjoint_complete,
+                        oriented_jacobian, output_context);
             },
             output_required_adjoint_complete, row_complete,
-            exact_physical_equation.get(), output_context);
-    if (raw_output == contracted.min_power())
+            recurrence_exact_equation, output_context);
+    if (raw_output == certified_output_min)
       coefficientwise_first_input_complete_max =
           output_reservoir.input_epsilon_complete_max;
     coefficientwise_last_input_complete_max =
@@ -3661,9 +3714,11 @@ compute_terminal_composed_adjoint_diagnostic(
             "terminal composed adjoint tail:" + arm_name + ":" +
                 std::to_string(tile_index) + ": output epsilon " +
                 std::to_string(output_power),
-            output_reservoir.result.common_epsilon_complete_max,
+            output_reservoir.input_epsilon_complete_max,
             exact_row ? &*exact_row : nullptr,
-            exact_physical_equation.get());
+            recurrence_exact_equation,
+            normalized_exact_equation ? &*normalized_exact_equation
+                                      : nullptr);
     recurrence_contraction = Magnitude::maximum(
         recurrence_contraction,
         output_tail.tail.recurrence_contraction_upper);
@@ -3676,17 +3731,24 @@ compute_terminal_composed_adjoint_diagnostic(
                 ":" + std::to_string(tile_index) + ": output epsilon " +
                 std::to_string(output_power));
     output_tails[static_cast<std::size_t>(
-        raw_output - contracted.min_power())] = contracted_tail.front();
+        raw_output - certified_output_min)] = contracted_tail.front();
   }
   auto output_tail = Magnitude::zero();
-  auto widened_coefficients = contracted.coefficients();
-  for (std::size_t offset = 0; offset < widened_coefficients.size();
+  std::vector<ComplexBall> widened_coefficients;
+  widened_coefficients.reserve(output_tails.size());
+  for (std::size_t offset = 0; offset < output_tails.size();
        ++offset) {
-    output_tails[offset].add_error_to(widened_coefficients[offset]);
+    const auto power = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(certified_output_min) +
+            static_cast<std::int64_t>(offset),
+        "terminal composed requested output power");
+    auto coefficient = contracted.coefficient(power);
+    output_tails[offset].add_error_to(coefficient);
+    widened_coefficients.push_back(std::move(coefficient));
     output_tail = Magnitude::maximum(output_tail, output_tails[offset]);
   }
-  contracted = EpsilonFrame<ComplexBall>(
-      contracted.window(), std::move(widened_coefficients));
+  contracted = EpsilonFrame<ComplexBall>(certified_output_min,
+                                         std::move(widened_coefficients));
   return {std::move(contracted), taylor_complete_max,
           reservoir.input_epsilon_complete_max,
           solved.common_epsilon_complete_max,

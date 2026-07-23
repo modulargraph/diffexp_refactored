@@ -629,6 +629,10 @@ struct ExactTRationalFunction {
   std::vector<Rational> denominator{Rational(1)};
 };
 
+inline Magnitude exact_t_rational_disk_upper(
+    const ExactTRationalFunction& exact,
+    const Magnitude& radius_upper, const std::string& context);
+
 inline ExactTRationalFunction canonical_exact_t_rational(
     ExactTRationalFunction value) {
   trim_exact_t_polynomial(value.numerator);
@@ -662,6 +666,268 @@ inline ExactTRationalFunction add_exact_t_rationals(
       multiply_exact_t_polynomials(left.denominator, right.denominator)});
 }
 
+inline ExactTRationalFunction negate_exact_t_rational(
+    ExactTRationalFunction value) {
+  for (auto& coefficient : value.numerator) coefficient = -coefficient;
+  return value;
+}
+
+inline ExactTRationalFunction subtract_exact_t_rationals(
+    const ExactTRationalFunction& left,
+    const ExactTRationalFunction& right) {
+  return add_exact_t_rationals(left, negate_exact_t_rational(right));
+}
+
+inline ExactTRationalFunction multiply_exact_t_rationals(
+    const ExactTRationalFunction& left,
+    const ExactTRationalFunction& right) {
+  return canonical_exact_t_rational({
+      multiply_exact_t_polynomials(left.numerator, right.numerator),
+      multiply_exact_t_polynomials(left.denominator, right.denominator)});
+}
+
+inline ExactTRationalFunction divide_exact_t_rationals(
+    const ExactTRationalFunction& numerator,
+    const ExactTRationalFunction& denominator) {
+  if (exact_t_polynomial_zero(denominator.numerator))
+    throw std::domain_error("exact t-rational division by zero");
+  return canonical_exact_t_rational({
+      multiply_exact_t_polynomials(
+          numerator.numerator, denominator.denominator),
+      multiply_exact_t_polynomials(
+          numerator.denominator, denominator.numerator)});
+}
+
+inline std::vector<Rational> expand_exact_t_rational_taylor(
+    const ExactTRationalFunction& exact, std::uint32_t complete_max,
+    const std::string& context) {
+  if (exact.denominator.empty() || exact.denominator.front().is_zero())
+    throw std::domain_error(
+        context + ": t-rational denominator vanishes at the center");
+  std::vector<Rational> result(
+      static_cast<std::size_t>(complete_max) + 1, Rational(0));
+  for (std::uint32_t order = 0; order <= complete_max; ++order) {
+    auto coefficient = order < exact.numerator.size()
+        ? exact.numerator[order] : Rational(0);
+    const auto maximum_lag = std::min<std::size_t>(
+        order, exact.denominator.size() - 1);
+    for (std::size_t lag = 1; lag <= maximum_lag; ++lag)
+      coefficient -= exact.denominator[lag] * result[order - lag];
+    result[order] = coefficient / exact.denominator.front();
+  }
+  return result;
+}
+
+struct NormalizedBackwardAdjointExactODE {
+  PreparedPhysicalClearedODE<Rational> truncated_ode;
+  // Physical orientation: c_by_entry[row][column][epsilon_power].  Every
+  // entry is the exact analytic t-rational coefficient of C/q.
+  std::vector<std::vector<std::vector<ExactTRationalFunction>>> c_by_entry;
+  std::int32_t epsilon_complete_max = 0;
+};
+
+inline ExactEpsilonRational<Rational> exact_epsilon_polynomial(
+    const std::vector<Rational>& coefficients) {
+  auto first = coefficients.size();
+  while (first > 0 && coefficients[first - 1].is_zero()) --first;
+  if (first == 0) return {};
+  first = 0;
+  while (first < coefficients.size() && coefficients[first].is_zero())
+    ++first;
+  ExactEpsilonRational<Rational> result;
+  result.zero = false;
+  result.valuation = matching_detail::checked_power(
+      static_cast<std::int64_t>(first),
+      "normalized backward adjoint epsilon valuation");
+  result.numerator.assign(
+      coefficients.begin() + static_cast<std::ptrdiff_t>(first),
+      coefficients.end());
+  result.denominator = {Rational(1)};
+  return result;
+}
+
+inline NormalizedBackwardAdjointExactODE
+normalize_backward_adjoint_exact_ode_by_q(
+    const PreparedPhysicalClearedODE<Rational>& exact_ode,
+    std::uint32_t taylor_complete_max,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  physical_ode_detail::validate_ode(exact_ode);
+  if (epsilon_complete_max < 0)
+    throw std::invalid_argument(
+        context + ": normalized finite epsilon stack must begin at zero");
+  const auto epsilon_width = static_cast<std::size_t>(
+      static_cast<std::int64_t>(epsilon_complete_max) + 1);
+  const auto dimension = exact_ode.dimension;
+
+  std::vector<std::vector<Rational>> q_by_epsilon(
+      epsilon_width,
+      std::vector<Rational>(exact_ode.q_lags.size(), Rational(0)));
+  for (std::size_t lag = 0; lag < exact_ode.q_lags.size(); ++lag) {
+    const auto frame = expand_exact_epsilon_rational(
+        exact_ode.q_lags[lag], epsilon_complete_max,
+        context + ": q lag " + std::to_string(lag));
+    if (frame.min_power() < 0)
+      throw std::domain_error(
+          context + ": q has negative epsilon coupling");
+    for (std::int64_t raw_power = frame.min_power();
+         raw_power <= frame.complete_max(); ++raw_power)
+      q_by_epsilon[static_cast<std::size_t>(raw_power)][lag] =
+          frame.coefficient(static_cast<std::int32_t>(raw_power));
+  }
+  for (auto& polynomial : q_by_epsilon) trim_exact_t_polynomial(polynomial);
+  const ExactTRationalFunction q0{q_by_epsilon.front(), {Rational(1)}};
+  if (exact_t_polynomial_zero(q0.numerator) ||
+      q0.numerator.front().is_zero())
+    throw std::domain_error(
+        context + ": q(t,epsilon=0) is not a center unit");
+
+  std::vector<std::vector<std::vector<std::vector<Rational>>>>
+      c_polynomials(
+          dimension,
+          std::vector<std::vector<std::vector<Rational>>>(
+              dimension,
+              std::vector<std::vector<Rational>>(
+                  epsilon_width, std::vector<Rational>(1, Rational(0)))));
+  for (std::size_t lag = 0; lag < exact_ode.c_lags.size(); ++lag) {
+    for (const auto& entry : exact_ode.c_lags[lag]) {
+      const auto frame = expand_exact_epsilon_rational(
+          entry.value, epsilon_complete_max,
+          context + ": C lag " + std::to_string(lag));
+      if (frame.min_power() < 0)
+        throw std::domain_error(
+            context + ": C has negative epsilon coupling");
+      for (std::int64_t raw_power = frame.min_power();
+           raw_power <= frame.complete_max(); ++raw_power) {
+        auto& polynomial = c_polynomials[entry.row][entry.column]
+            [static_cast<std::size_t>(raw_power)];
+        if (polynomial.size() <= lag)
+          polynomial.resize(lag + 1, Rational(0));
+        polynomial[lag] +=
+            frame.coefficient(static_cast<std::int32_t>(raw_power));
+      }
+    }
+  }
+
+  NormalizedBackwardAdjointExactODE result;
+  result.epsilon_complete_max = epsilon_complete_max;
+  result.c_by_entry.assign(
+      dimension,
+      std::vector<std::vector<ExactTRationalFunction>>(
+          dimension,
+          std::vector<ExactTRationalFunction>(epsilon_width)));
+  for (std::uint32_t row = 0; row < dimension; ++row) {
+    for (std::uint32_t column = 0; column < dimension; ++column) {
+      for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon) {
+        trim_exact_t_polynomial(c_polynomials[row][column][epsilon]);
+        auto rhs = ExactTRationalFunction{
+            c_polynomials[row][column][epsilon], {Rational(1)}};
+        for (std::size_t q_power = 1; q_power <= epsilon; ++q_power) {
+          const ExactTRationalFunction q_term{
+              q_by_epsilon[q_power], {Rational(1)}};
+          rhs = subtract_exact_t_rationals(
+              rhs, multiply_exact_t_rationals(
+                       q_term,
+                       result.c_by_entry[row][column]
+                           [epsilon - q_power]));
+        }
+        result.c_by_entry[row][column][epsilon] =
+            divide_exact_t_rationals(rhs, q0);
+      }
+    }
+  }
+
+  auto& normalized = result.truncated_ode;
+  normalized.dimension = dimension;
+  normalized.owner_signature_identity =
+      exact_ode.owner_signature_identity + ":adjoint-q-normalized";
+  normalized.payload_identity =
+      exact_ode.payload_identity + ":adjoint-q-normalized:t" +
+      std::to_string(taylor_complete_max) + ":e" +
+      std::to_string(epsilon_complete_max);
+  normalized.exact_payload_record =
+      "diffexp2-backward-adjoint-q-normalized-v1:" +
+      normalized.payload_identity;
+  ExactEpsilonRational<Rational> one;
+  one.zero = false;
+  one.valuation = 0;
+  one.numerator = {Rational(1)};
+  one.denominator = {Rational(1)};
+  normalized.q_lags = {one};
+  normalized.c_lags.resize(
+      static_cast<std::size_t>(taylor_complete_max) + 1);
+  for (std::uint32_t row = 0; row < dimension; ++row) {
+    for (std::uint32_t column = 0; column < dimension; ++column) {
+      std::vector<std::vector<Rational>> by_epsilon;
+      by_epsilon.reserve(epsilon_width);
+      for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon)
+        by_epsilon.push_back(expand_exact_t_rational_taylor(
+            result.c_by_entry[row][column][epsilon],
+            taylor_complete_max,
+            context + ": normalized C(" + std::to_string(row) + "," +
+                std::to_string(column) + ") epsilon " +
+                std::to_string(epsilon)));
+      for (std::uint32_t lag = 0; lag <= taylor_complete_max; ++lag) {
+        std::vector<Rational> epsilon_coefficients(epsilon_width, Rational(0));
+        for (std::size_t epsilon = 0; epsilon < epsilon_width; ++epsilon)
+          epsilon_coefficients[epsilon] = by_epsilon[epsilon][lag];
+        auto value = exact_epsilon_polynomial(epsilon_coefficients);
+        if (value.zero) continue;
+        normalized.c_lags[lag].push_back(
+            {row, column, std::move(value)});
+      }
+    }
+  }
+  physical_ode_detail::validate_ode(normalized);
+  return result;
+}
+
+inline Magnitude normalized_backward_adjoint_c_tail_disk_upper(
+    const NormalizedBackwardAdjointExactODE& normalized,
+    const ComplexBall& witness_radius,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  if (epsilon_complete_max < 0 ||
+      epsilon_complete_max > normalized.epsilon_complete_max)
+    throw std::invalid_argument(
+        context + ": normalized C tail epsilon cap is out of range");
+  const auto radius_upper = Magnitude::upper_abs(witness_radius);
+  auto matrix_upper = Magnitude::zero();
+  // The recurrence contains C^T, hence a row sum here is a physical-column
+  // sum in c_by_entry.
+  for (std::size_t transpose_row = 0;
+       transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
+    auto row_upper = Magnitude::zero();
+    for (std::size_t physical_row = 0;
+         physical_row < normalized.c_by_entry.size(); ++physical_row) {
+      const auto& by_epsilon =
+          normalized.c_by_entry[physical_row][transpose_row];
+      for (std::int32_t epsilon = 0;
+           epsilon <= epsilon_complete_max; ++epsilon) {
+        const auto& coefficient =
+            by_epsilon[static_cast<std::size_t>(epsilon)];
+        if (coefficient.denominator.empty() ||
+            coefficient.denominator.front().is_zero())
+          throw std::domain_error(
+              context + ": normalized C denominator vanishes at center");
+        const auto constant = coefficient.numerator.front() /
+                              coefficient.denominator.front();
+        const auto positive_tail = subtract_exact_t_rationals(
+            coefficient,
+            ExactTRationalFunction{{constant}, {Rational(1)}});
+        row_upper += exact_t_rational_disk_upper(
+            positive_tail, radius_upper,
+            context + ": transpose row " +
+                std::to_string(transpose_row) + ": physical row " +
+                std::to_string(physical_row) + ": epsilon " +
+                std::to_string(epsilon));
+      }
+    }
+    matrix_upper = Magnitude::maximum(matrix_upper, row_upper);
+  }
+  return matrix_upper;
+}
+
 inline Magnitude exact_t_rational_disk_upper(
     const ExactTRationalFunction& exact,
     const Magnitude& radius_upper, const std::string& context) {
@@ -673,6 +939,233 @@ inline Magnitude exact_t_rational_disk_upper(
     numeric.denominator.push_back(
         ComplexBall::from_strings(coefficient.str()));
   return rational_disk_upper(numeric, radius_upper, context);
+}
+
+inline Magnitude exact_t_rational_taylor_tail_l1_upper(
+    const ExactTRationalFunction& exact,
+    std::uint32_t retained_complete_max,
+    const Magnitude& radius_upper, const std::string& context) {
+  const auto prefix = expand_exact_t_rational_taylor(
+      exact, retained_complete_max, context + ": Taylor prefix");
+  auto residual = add_exact_t_polynomials(
+      exact.numerator,
+      negate_exact_t_rational(ExactTRationalFunction{
+          multiply_exact_t_polynomials(exact.denominator, prefix),
+          {Rational(1)}}).numerator);
+  const auto first_unseen =
+      static_cast<std::size_t>(retained_complete_max) + 1;
+  if (residual.size() <= first_unseen) return Magnitude::zero();
+  for (std::size_t order = 0; order < first_unseen; ++order)
+    if (!residual[order].is_zero())
+      throw std::logic_error(
+          context + ": exact rational Taylor remainder did not factor");
+  residual.erase(
+      residual.begin(),
+      residual.begin() + static_cast<std::ptrdiff_t>(first_unseen));
+  trim_exact_t_polynomial(residual);
+  if (exact_t_polynomial_zero(residual)) return Magnitude::zero();
+
+  std::vector<ComplexBall> residual_numeric;
+  residual_numeric.reserve(residual.size());
+  for (const auto& coefficient : residual)
+    residual_numeric.push_back(
+        ComplexBall::from_strings(coefficient.str()));
+  std::vector<ComplexBall> denominator_numeric;
+  denominator_numeric.reserve(exact.denominator.size());
+  for (const auto& coefficient : exact.denominator)
+    denominator_numeric.push_back(
+        ComplexBall::from_strings(coefficient.str()));
+  auto denominator_tail = Magnitude::zero();
+  auto power = radius_upper;
+  for (std::size_t degree = 1; degree < denominator_numeric.size(); ++degree) {
+    denominator_tail +=
+        Magnitude::upper_abs(denominator_numeric[degree]) * power;
+    power = power * radius_upper;
+  }
+  const auto denominator_lower = Magnitude::positive_difference_lower(
+      Magnitude::lower_abs(denominator_numeric.front()), denominator_tail);
+  if (denominator_lower.is_zero())
+    throw std::domain_error(
+        context + ": witness disk does not separate the exact denominator");
+  return radius_upper.power_upper(
+             static_cast<ulong>(first_unseen)) *
+         polynomial_disk_upper(residual_numeric, radius_upper) /
+         denominator_lower;
+}
+
+inline Magnitude normalized_backward_adjoint_c_taylor_tail_l1_upper(
+    const NormalizedBackwardAdjointExactODE& normalized,
+    const ComplexBall& witness_radius,
+    std::int32_t epsilon_complete_max,
+    std::uint32_t retained_complete_max,
+    const std::string& context) {
+  if (epsilon_complete_max < 0 ||
+      epsilon_complete_max > normalized.epsilon_complete_max)
+    throw std::invalid_argument(
+        context + ": normalized C Taylor-tail epsilon cap is out of range");
+  const auto radius_upper = Magnitude::upper_abs(witness_radius);
+  auto matrix_upper = Magnitude::zero();
+  for (std::size_t transpose_row = 0;
+       transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
+    auto row_upper = Magnitude::zero();
+    for (std::size_t physical_row = 0;
+         physical_row < normalized.c_by_entry.size(); ++physical_row) {
+      const auto& by_epsilon =
+          normalized.c_by_entry[physical_row][transpose_row];
+      for (std::int32_t epsilon = 0;
+           epsilon <= epsilon_complete_max; ++epsilon)
+        row_upper += exact_t_rational_taylor_tail_l1_upper(
+            by_epsilon[static_cast<std::size_t>(epsilon)],
+            retained_complete_max, radius_upper,
+            context + ": transpose row " +
+                std::to_string(transpose_row) + ": physical row " +
+                std::to_string(physical_row) + ": epsilon " +
+                std::to_string(epsilon));
+    }
+    matrix_upper = Magnitude::maximum(matrix_upper, row_upper);
+  }
+  return matrix_upper;
+}
+
+inline Magnitude vector_infinity_upper_through(
+    const FiniteLaurentVector<ComplexBall>& value,
+    std::int32_t epsilon_complete_max) {
+  auto result = Magnitude::zero();
+  for (const auto& component : value)
+    for (std::int64_t raw_power = component.min_power();
+         raw_power <= std::min<std::int64_t>(
+                          component.complete_max(),
+                          epsilon_complete_max);
+         ++raw_power)
+      result = Magnitude::maximum(
+          result, Magnitude::upper_abs(component.coefficient(
+                      static_cast<std::int32_t>(raw_power))));
+  return result;
+}
+
+inline Magnitude normalized_backward_adjoint_defect_l1_upper(
+    const NormalizedBackwardAdjointExactODE& normalized,
+    const PreparedSparseLocalMultiplierMatrix<Rational>& exact_row,
+    const BackwardAdjointTaylorResult& solution,
+    const ComplexBall& oriented_physical_jacobian,
+    const ComplexBall& witness_radius,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  if (solution.taylor_complete_max == 0 ||
+      solution.coefficients.size() != solution.taylor_complete_max ||
+      exact_row.rows != 1 ||
+      exact_row.columns != normalized.truncated_ode.dimension)
+    throw std::invalid_argument(
+        context + ": malformed normalized adjoint defect payload");
+  const auto radius_upper = Magnitude::upper_abs(witness_radius);
+  const auto order = solution.taylor_complete_max;
+  auto defect = Magnitude::zero();
+
+  // g=-beta*t*r.  Sum the exact rational coefficient tails; this is an l1
+  // bound on the enlarged finite epsilon/component vector.
+  for (const auto& entry : exact_row.entries) {
+    const auto& multiplier = entry.multiplier;
+    if (multiplier.center_pole_order != 0 ||
+        !multiplier.analytic_coefficients.has_value())
+      throw std::domain_error(
+          context + ": normalized defect needs an ordinary exact row");
+    for (std::size_t epsilon = 0;
+         epsilon < multiplier.analytic_coefficients->size(); ++epsilon) {
+      const auto raw_power = matching_detail::checked_power(
+          static_cast<std::int64_t>(multiplier.epsilon_shift) +
+              static_cast<std::int64_t>(epsilon),
+          "normalized defect row epsilon power");
+      if (raw_power > epsilon_complete_max) continue;
+      const auto& rational = (*multiplier.analytic_coefficients)[epsilon];
+      auto numerator = rational.numerator;
+      numerator.insert(numerator.begin(), Rational(0));
+      const auto forcing_tail = exact_t_rational_taylor_tail_l1_upper(
+          canonical_exact_t_rational(
+              {std::move(numerator), rational.denominator}),
+          order, radius_upper,
+          context + ": forcing component " +
+              std::to_string(entry.column) + ": epsilon " +
+              std::to_string(raw_power));
+      defect += Magnitude::upper_abs(oriented_physical_jacobian) *
+                forcing_tail;
+    }
+  }
+
+  // For p_N=sum_{k=1}^N p_k t^k, only A_j with j>N-k can enter the
+  // coefficient defect above N.  Bound each exact rational A tail before
+  // multiplying by the corresponding certified prefix coefficient.
+  auto radius_power = radius_upper;
+  for (std::uint32_t prefix_order = 1; prefix_order <= order;
+       ++prefix_order) {
+    const auto prefix_upper = vector_infinity_upper_through(
+        solution.coefficients[prefix_order - 1],
+        epsilon_complete_max);
+    if (!prefix_upper.is_zero()) {
+      const auto operator_tail =
+          normalized_backward_adjoint_c_taylor_tail_l1_upper(
+              normalized, witness_radius, epsilon_complete_max,
+              order - prefix_order,
+              context + ": C tail for prefix order " +
+                  std::to_string(prefix_order));
+      defect += prefix_upper * radius_power * operator_tail;
+    }
+    radius_power = radius_power * radius_upper;
+  }
+  return defect;
+}
+
+inline PreparedSparseLocalMultiplierMatrix<ComplexBall>
+specialize_exact_backward_adjoint_row_taylor(
+    const PreparedSparseLocalMultiplierMatrix<Rational>& exact_row,
+    std::uint32_t taylor_complete_max,
+    const std::string& context) {
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> result;
+  result.rows = exact_row.rows;
+  result.columns = exact_row.columns;
+  result.exact_identity = exact_row.exact_identity;
+  result.entries.reserve(exact_row.entries.size());
+  for (const auto& entry : exact_row.entries) {
+    const auto& source = entry.multiplier;
+    if (!source.analytic_coefficients.has_value() ||
+        source.analytic_coefficients->size() != source.kernels.size())
+      throw std::domain_error(
+          context + ": exact row has no complete analytic coefficients");
+    PreparedRationalTaylorMultiplier<ComplexBall> target;
+    target.epsilon_shift = source.epsilon_shift;
+    target.center_pole_order = source.center_pole_order;
+    target.exact_identity = source.exact_identity;
+    target.proven_zero = source.proven_zero;
+    target.kernels.reserve(source.analytic_coefficients->size());
+    std::vector<PreparedRationalAnalyticCoefficient<ComplexBall>> analytic;
+    analytic.reserve(source.analytic_coefficients->size());
+    for (std::size_t epsilon = 0;
+         epsilon < source.analytic_coefficients->size(); ++epsilon) {
+      const auto& coefficient = (*source.analytic_coefficients)[epsilon];
+      const auto exact = canonical_exact_t_rational(
+          {coefficient.numerator, coefficient.denominator});
+      const auto expanded = expand_exact_t_rational_taylor(
+          exact, taylor_complete_max,
+          context + ": entry " + std::to_string(entry.column) +
+              ": epsilon " + std::to_string(epsilon));
+      std::vector<ComplexBall> numeric;
+      numeric.reserve(expanded.size());
+      for (const auto& value : expanded)
+        numeric.push_back(ComplexBall::from_strings(value.str()));
+      target.kernels.push_back(std::move(numeric));
+      PreparedRationalAnalyticCoefficient<ComplexBall> numeric_exact;
+      for (const auto& value : exact.numerator)
+        numeric_exact.numerator.push_back(
+            ComplexBall::from_strings(value.str()));
+      for (const auto& value : exact.denominator)
+        numeric_exact.denominator.push_back(
+            ComplexBall::from_strings(value.str()));
+      analytic.push_back(std::move(numeric_exact));
+    }
+    target.analytic_coefficients = std::move(analytic);
+    result.entries.push_back(
+        {entry.row, entry.column, std::move(target)});
+  }
+  return result;
 }
 
 }  // namespace adjoint_observable_detail
@@ -949,7 +1442,9 @@ certify_backward_adjoint_taylor_tail(
     const ComplexBall& witness_radius,
     const Magnitude& forcing_cauchy_numerator_upper,
     const std::string& context =
-        "backward Fuchsian adjoint Taylor-tail certificate") {
+        "backward Fuchsian adjoint Taylor-tail certificate",
+    std::optional<Magnitude> analytic_c_tail_sum_upper = std::nullopt,
+    std::optional<Magnitude> a_posteriori_defect_l1_upper = std::nullopt) {
   using namespace adjoint_observable_detail;
   if (solution.dimension != problem.dimension ||
       solution.taylor_complete_max != problem.taylor_complete_max ||
@@ -1013,12 +1508,13 @@ certify_backward_adjoint_taylor_tail(
   for (std::size_t lag = 1; lag < problem.q_lags.size(); ++lag)
     q_tail_sum += frame_l1_upper(problem.q_lags[lag]) *
                   radius_upper.power_upper(static_cast<ulong>(lag));
-  auto c_tail_sum = Magnitude::zero();
-  for (std::size_t lag = 1;
-       lag < problem.c_transpose_lags.size(); ++lag)
-    c_tail_sum += matrix_infinity_upper(
-                      problem.c_transpose_lags[lag]) *
-                  radius_upper.power_upper(static_cast<ulong>(lag));
+  auto c_tail_sum = analytic_c_tail_sum_upper.value_or(Magnitude::zero());
+  if (!analytic_c_tail_sum_upper.has_value())
+    for (std::size_t lag = 1;
+         lag < problem.c_transpose_lags.size(); ++lag)
+      c_tail_sum += matrix_infinity_upper(
+                        problem.c_transpose_lags[lag]) *
+                    radius_upper.power_upper(static_cast<ulong>(lag));
   const auto recurrence_contraction =
       q_inverse_upper *
       (next_order_magnitude * q_tail_sum + c_tail_sum) /
@@ -1034,21 +1530,33 @@ certify_backward_adjoint_taylor_tail(
     throw std::domain_error(
         context + ": recurrence contraction has no positive gap");
 
-  auto coefficient_majorant =
-      q_inverse_upper * forcing_cauchy_numerator_upper /
-      inverse_denominator_lower / contraction_gap_lower;
-  const auto lag_memory = std::max(
-      problem.q_lags.size(), problem.c_transpose_lags.size());
-  const auto first_known = problem.taylor_complete_max + 1 > lag_memory
-      ? problem.taylor_complete_max + 1 - lag_memory
-      : 1;
-  for (std::uint32_t order = first_known;
-       order <= problem.taylor_complete_max; ++order) {
-    const auto known = vector_infinity_upper(
-        solution.coefficients.at(order - 1)) *
-        radius_upper.power_upper(order);
-    coefficient_majorant = Magnitude::maximum(
-        coefficient_majorant, known);
+  auto coefficient_majorant = Magnitude::zero();
+  if (a_posteriori_defect_l1_upper.has_value()) {
+    // Weighted-l1 coefficient theorem for the normalized equation.  If
+    // L_n=nI+A0 and M bounds every ||L_n^-1|| for n>N, then the unseen
+    // coefficient l1 norm on |t|=R is at most M*D/(1-M*S).  D is the exact
+    // high-order defect of the retained prefix and S is the positive-lag
+    // operator l1 norm already used in recurrence_contraction.
+    coefficient_majorant =
+        q_inverse_upper * *a_posteriori_defect_l1_upper /
+        inverse_denominator_lower / contraction_gap_lower;
+  } else {
+    coefficient_majorant =
+        q_inverse_upper * forcing_cauchy_numerator_upper /
+        inverse_denominator_lower / contraction_gap_lower;
+    const auto lag_memory = std::max(
+        problem.q_lags.size(), problem.c_transpose_lags.size());
+    const auto first_known = problem.taylor_complete_max + 1 > lag_memory
+        ? problem.taylor_complete_max + 1 - lag_memory
+        : 1;
+    for (std::uint32_t order = first_known;
+         order <= problem.taylor_complete_max; ++order) {
+      const auto known = vector_infinity_upper(
+          solution.coefficients.at(order - 1)) *
+          radius_upper.power_upper(order);
+      coefficient_majorant = Magnitude::maximum(
+          coefficient_majorant, known);
+    }
   }
 
   const auto ratio_gap_lower = Magnitude::positive_difference_lower(
@@ -1056,8 +1564,10 @@ certify_backward_adjoint_taylor_tail(
   if (ratio_gap_lower.is_zero())
     throw std::domain_error(
         context + ": evaluation/witness ratio has no positive gap");
-  const auto tail = coefficient_majorant *
-      evaluation_ratio.power_upper(next_order) / ratio_gap_lower;
+  const auto tail = a_posteriori_defect_l1_upper.has_value()
+      ? coefficient_majorant * evaluation_ratio.power_upper(next_order)
+      : coefficient_majorant * evaluation_ratio.power_upper(next_order) /
+            ratio_gap_lower;
   return {tail, coefficient_majorant, recurrence_contraction,
           evaluation_ratio, problem.taylor_complete_max};
 }
@@ -1076,7 +1586,9 @@ certify_backward_adjoint_taylor_tail_adaptive_witness(
         "backward Fuchsian adjoint adaptive Taylor-tail certificate",
     std::optional<std::int32_t> epsilon_complete_max = std::nullopt,
     const PreparedSparseLocalMultiplierMatrix<Rational>* exact_row = nullptr,
-    const PreparedPhysicalClearedODE<Rational>* exact_ode = nullptr) {
+    const PreparedPhysicalClearedODE<Rational>* exact_ode = nullptr,
+    const adjoint_observable_detail::NormalizedBackwardAdjointExactODE*
+        normalized_exact_ode = nullptr) {
   if (evaluation_modulus_exact.sign() < 0 ||
       !(evaluation_modulus_exact < chart_radius_exact) ||
       maximum_attempts == 0)
@@ -1096,9 +1608,35 @@ certify_backward_adjoint_taylor_tail_adaptive_witness(
               epsilon_complete_max, exact_row, exact_ode,
               context + ": forcing attempt " +
                   std::to_string(attempt + 1));
+      std::optional<Magnitude> normalized_c_tail;
+      std::optional<Magnitude> normalized_defect;
+      if (normalized_exact_ode != nullptr) {
+        if (!epsilon_complete_max.has_value())
+          throw std::invalid_argument(
+              context + ": normalized C tail needs an epsilon cap");
+        normalized_c_tail =
+            adjoint_observable_detail::
+                normalized_backward_adjoint_c_tail_disk_upper(
+                    *normalized_exact_ode, witness,
+                    *epsilon_complete_max,
+                    context + ": normalized C tail attempt " +
+                        std::to_string(attempt + 1));
+        if (exact_row == nullptr)
+          throw std::invalid_argument(
+              context + ": normalized defect needs the exact row");
+        normalized_defect =
+            adjoint_observable_detail::
+                normalized_backward_adjoint_defect_l1_upper(
+                    *normalized_exact_ode, *exact_row, solution,
+                    oriented_physical_jacobian, witness,
+                    *epsilon_complete_max,
+                    context + ": normalized defect attempt " +
+                        std::to_string(attempt + 1));
+      }
       auto tail = certify_backward_adjoint_taylor_tail(
           problem, solution, evaluation_point, witness, forcing,
-          context + ": tail attempt " + std::to_string(attempt + 1));
+          context + ": tail attempt " + std::to_string(attempt + 1),
+          normalized_c_tail, normalized_defect);
       return {std::move(tail), witness_exact};
     } catch (const std::domain_error& error) {
       last_rejection = error.what();

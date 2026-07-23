@@ -539,6 +539,130 @@ bool exact_combined_forcing_cancels_cleared_row_pole() {
          combined.tail.absolute_vector_tail_upper.is_finite();
 }
 
+bool exact_q_normalization_removes_clearing_contraction() {
+  PreparedPhysicalClearedODE<Rational> cleared;
+  cleared.dimension = 1;
+  cleared.q_lags = {
+      exact_rational_constant("1"), exact_rational_constant("-2")};
+  cleared.c_lags = {
+      {{0, 0, exact_rational_constant("3")}},
+      {{0, 0, exact_rational_constant("-6")}}};
+  cleared.owner_signature_identity = "q-normalization-owner";
+  cleared.payload_identity = "q-normalization-payload";
+  cleared.exact_payload_record = "q-normalization-record";
+
+  const auto normalized =
+      adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
+          cleared, 4, 0, "q-normalization regression");
+  if (normalized.truncated_ode.q_lags.size() != 1 ||
+      normalized.truncated_ode.c_lags.size() != 5 ||
+      normalized.truncated_ode.c_lags.front().size() != 1)
+    return false;
+  const auto normalized_c0 =
+      adjoint_observable_detail::expand_exact_epsilon_rational(
+          normalized.truncated_ode.c_lags.front().front().value, 0,
+          "q-normalization C0");
+  if (!(normalized_c0.coefficient(0) == Rational(3))) return false;
+  for (std::size_t lag = 1;
+       lag < normalized.truncated_ode.c_lags.size(); ++lag)
+    if (!normalized.truncated_ode.c_lags[lag].empty()) return false;
+
+  const auto row = scalar_row();
+  const auto normalized_problem = prepare_backward_adjoint_taylor_problem(
+      normalized.truncated_ode, row, 4, 0, 0, ball("1"),
+      "q-normalized composed adapter");
+  const auto normalized_solution = solve_backward_adjoint_taylor(
+      normalized_problem, &normalized.truncated_ode,
+      "q-normalized composed solve");
+  if (!contains_exact(
+          normalized_solution.coefficients.front().front().coefficient(0),
+          "-1/4"))
+    return false;
+  for (std::size_t order = 1;
+       order < normalized_solution.coefficients.size(); ++order)
+    if (!contains_exact(
+            normalized_solution.coefficients[order].front().coefficient(0),
+            "0"))
+      return false;
+
+  const auto witness = ball("2/5");
+  const auto forcing = backward_adjoint_forcing_cauchy_numerator_upper(
+      normalized_problem, row, ball("1"), witness, 0,
+      nullptr, nullptr, "q-normalized forcing bound");
+  const auto c_tail =
+      adjoint_observable_detail::
+          normalized_backward_adjoint_c_tail_disk_upper(
+              normalized, witness, 0, "q-normalized C-tail bound");
+  const auto certificate = certify_backward_adjoint_taylor_tail(
+      normalized_problem, normalized_solution, ball("1/4"), witness,
+      forcing, "q-normalized tail certificate", c_tail);
+  if (!certificate.recurrence_contraction_upper.is_zero()) return false;
+
+  const auto cleared_problem = prepare_backward_adjoint_taylor_problem(
+      cleared, row, 4, 0, 0, ball("1"),
+      "cleared composed adapter control");
+  const auto cleared_solution = solve_backward_adjoint_taylor(
+      cleared_problem, &cleared, "cleared composed solve control");
+  try {
+    (void)certify_backward_adjoint_taylor_tail(
+        cleared_problem, cleared_solution, ball("1/4"), witness,
+        Magnitude::one(), "cleared tail control");
+  } catch (const std::domain_error& error) {
+    return std::string(error.what()).find("not contractive") !=
+           std::string::npos;
+  }
+  return false;
+}
+
+bool normalized_a_posteriori_defect_encloses_exact_tail() {
+  PreparedPhysicalClearedODE<Rational> exact_ode;
+  exact_ode.dimension = 1;
+  exact_ode.q_lags = {exact_rational_constant("1")};
+  exact_ode.c_lags = {{}};
+  exact_ode.owner_signature_identity = "defect-tail-owner";
+  exact_ode.payload_identity = "defect-tail-payload";
+  exact_ode.exact_payload_record = "defect-tail-record";
+  const auto normalized =
+      adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
+          exact_ode, 4, 0, "a-posteriori defect normalization");
+
+  PreparedSparseLocalMultiplierMatrix<Rational> exact_row;
+  exact_row.rows = 1;
+  exact_row.columns = 1;
+  exact_row.exact_identity = "defect-tail-row";
+  PreparedRationalTaylorMultiplier<Rational> multiplier;
+  multiplier.kernels = {{Rational(1), Rational(1), Rational(1),
+                         Rational(1), Rational(1)}};
+  multiplier.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<Rational>>{{
+          {Rational(1)}, {Rational(1), Rational(-1)}}};
+  multiplier.exact_identity = "defect-tail-multiplier";
+  exact_row.entries.push_back({0, 0, std::move(multiplier)});
+  const auto row =
+      adjoint_observable_detail::specialize_exact_backward_adjoint_row_taylor(
+          exact_row, 4, "a-posteriori defect row");
+  const auto problem = prepare_backward_adjoint_taylor_problem(
+      normalized.truncated_ode, row, 4, 0, 0, ball("1"),
+      "a-posteriori defect adapter");
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, &normalized.truncated_ode,
+      "a-posteriori defect solve");
+  const auto certificate =
+      certify_backward_adjoint_taylor_tail_adaptive_witness(
+          problem, solved, row, ball("1"), ball("1/4"),
+          Rational("1/4"), Rational("3/4"), 4,
+          "a-posteriori defect certificate", 0,
+          &exact_row, &normalized.truncated_ode, &normalized);
+  const auto truncated = evaluate_backward_adjoint_taylor(
+      solved, ball("1/4")).front().coefficient(0);
+  const auto exact = local_detail::cb_log(ball("3/4"));
+  return Magnitude::upper_abs(exact - truncated) <=
+             certificate.tail.absolute_vector_tail_upper &&
+         certificate.tail.recurrence_contraction_upper.is_zero() &&
+         certificate.tail.absolute_vector_tail_upper.approximate_upper() <
+             1e-3;
+}
+
 bool coefficientwise_tail_ignores_irrelevant_high_epsilon_input() {
   FiniteLaurentVector<ComplexBall> adjoint{
       EpsilonFrame<ComplexBall>(0, {ball("1")})};
@@ -642,6 +766,8 @@ int main() {
                   adaptive_witness_respects_row_pole() &&
                   adaptive_witness_handles_narrow_denominator_clearance() &&
                   exact_combined_forcing_cancels_cleared_row_pole() &&
+                  exact_q_normalization_removes_clearing_contraction() &&
+                  normalized_a_posteriori_defect_encloses_exact_tail() &&
                   coefficientwise_tail_ignores_irrelevant_high_epsilon_input() &&
                   forcing_bound_ignores_epsilon_above_private_cap() &&
                   private_epsilon_reservoir_covers_inverse_loss() &&

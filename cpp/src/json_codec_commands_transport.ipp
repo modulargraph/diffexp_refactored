@@ -1357,7 +1357,7 @@
             {"geometry", encode_plan_match(arm, match_index)},
             {"residual", json::object{
                  {"status", "materialized-continuity-inconclusive"},
-                 {"scope", "stored-taylor-truncation"},
+                 {"scope", "materialized-continuity-clearance"},
                  {"complete_through_required", true},
                  {"complete_window", json::object{
                       {"min", attempted_epsilon.min_power},
@@ -1374,7 +1374,7 @@
                  {"required_complete_max", required_complete_max}}},
             {"refinement", refinement},
             {"detail",
-             "the Acb match residual passed, but materializing its finite-Taylor receiving local did not retain the required handoff accuracy"}};
+             "the Acb match residual passed, but the independently materialized receiving local did not retain the required handoff accuracy"}};
       }
       if (session->domain == "acb" &&
           error.code ==

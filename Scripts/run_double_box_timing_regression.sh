@@ -120,6 +120,7 @@ common_environment=(
   "FT_PREP_CACHE_DIR=$prep_cache"
   "FT_WORKING_PRECISION=$working_precision"
   "FT_MATCH_DIGITS=$matching_digits"
+  "FT_MATCHING_CERTIFICATION_SAFETY_DIGITS=2"
   "FT_EXPANSION_ORDER=$expansion_order"
   "FT_EPS_ORDER=0"
   "FT_BOUNDARY_EXTRA_ORDER=$boundary_extra_order"

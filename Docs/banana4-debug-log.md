@@ -163,6 +163,14 @@ Rules:
 
 ### Implementation notes (not numerical experiments)
 
+- The first B4-128 launch detected a preparation-cache miss and was stopped
+  before transport because a timed cache miss cannot be acceptance evidence.
+  The gate's opt-in warm-up then wrote the cache but incorrectly continued
+  through the ordinary production retry driver, reaching level 2 before it
+  was stopped. This was a harness loop, not a numerical experiment.
+  `FT_PREPARATION_ONLY=1` now returns immediately after a validated cache
+  hit/write, and the warm-up requires its completion marker. The fixed-profile
+  B4-128 run begins only after this process-free precondition is tested.
 - While adding B4-14 state diagnostics, the first compile used
   `material_sector` outside its `local_detail` namespace and called a
   nonexistent `EpsilonFrame::width()` accessor. The build failed immediately;

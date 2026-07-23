@@ -18,6 +18,11 @@ fail[name_, detail_] := (Print["  [FAIL] ", name, ": ", detail]; failures++);
 test[name_, condition_, detail_:None] :=
   If[TrueQ[condition], pass[name], fail[name, detail]];
 
+test["preparation-only runner mode is strict and explicit",
+  TrueQ[ft2ParsePreparationOnly["0"] === False] &&
+    TrueQ[ft2ParsePreparationOnly["1"] === True] &&
+    FailureQ[ft2ParsePreparationOnly["yes"]]];
+
 inputTopology = FeynmanTrick`FIREInterface`DefineTopology[
   "prep-contract", {Global`l1}, {},
   {1 - Global`l1^2, 2 - Global`l1^2}, {}];

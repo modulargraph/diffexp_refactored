@@ -20,6 +20,18 @@ Get[FileNameJoin[{repoRoot, "Scripts", "FTExamples.m"}]];
 envOrDefault[name_, default_] := Module[{value = Environment[name]},
   If[StringQ[value] && StringLength[StringTrim[value]] > 0, value, default]];
 
+ft2ParsePreparationOnly[value_String] := Switch[value,
+  "0", False,
+  "1", True,
+  _, Failure["FeynmanTrickPreparationOnly", <|
+    "Detail" -> "FT_PREPARATION_ONLY must be 0 or 1",
+    "Value" -> value|>]];
+ft2PreparationOnly =
+  ft2ParsePreparationOnly[envOrDefault["FT_PREPARATION_ONLY", "0"]];
+If[FailureQ[ft2PreparationOnly],
+  Print["Invalid Feynman-trick runner environment: ", ft2PreparationOnly];
+  Exit[2]];
+
 (* The package facade and this script share one strict parser/default set.
    In particular, Cpp is now the release default; the Wolfram recurrence is
    still available only by explicit selection. *)
@@ -3614,6 +3626,9 @@ runExample[name_String, familyRequest_:None,
     If[preparedFTDataQ[ftData],
       savePreparedFT[prepFile, prepContract, ftData]]];
   If[ftData === $Failed, Return[$Failed]];
+  If[TrueQ[ft2PreparationOnly],
+    Print["FTPREP ONLY COMPLETE ", prepFile];
+    Return[True, Module]];
   nLevels = ftData["NumLevels"];
   effectiveMatchingTaylorOrders = Which[
     matchingTaylorOrders === Automatic || matchingTaylorOrders === None,

@@ -43,7 +43,7 @@ continuityBackendFailure = <|
   "residual" -> <|
     "status" -> "materialized-continuity-inconclusive",
     "complete_through_required" -> True,
-    "scope" -> "stored-taylor-truncation",
+    "scope" -> "materialized-continuity-clearance",
     "coefficient_verdicts" -> <|
       "pass" -> 0, "fail" -> 0, "inconclusive" -> 1|>,
     "required_coefficient_verdicts" -> <|
@@ -68,7 +68,7 @@ assert["complete matching clearance retries Taylor order, not epsilon width",
     clearanceRetry[[2, "AdditionalOrders"]] === 50 &&
     clearanceRetry[[2, "ResidualVerdicts", "inconclusive"]] === 5,
   {reservoirRetry, clearanceRetry}];
-assert["materialized handoff clearance retries the failing level Taylor order",
+assert["materialized handoff clearance permits one failing-level Taylor probe",
   ft2NativeMatchingReservoirRetry[continuityFailure, 1] === None &&
     ft2NativeMatchingClearanceRetryQ[continuityRetry] &&
     continuityRetry[[2, "Level"]] === 1 &&
@@ -122,6 +122,30 @@ assert["matching retry stops after a Taylor order increase makes no progress",
       "FeynmanTrickNativeMatchingTaylorStalled" &&
     matchingTaylorStallCalls === {<||>, <|2 -> 2 expansionOrder|>},
   {matchingTaylorStallResult, matchingTaylorStallCalls}];
+
+continuityTaylorStallCalls = {};
+continuityTaylorStallResult = Block[{
+    runExample = Function[{runName, familyRequest, epsilonHalos, taylorOrders},
+      AppendTo[continuityTaylorStallCalls, taylorOrders];
+      Failure["FeynmanTrickNativeMatchingTaylor", <|
+        "Level" -> 1, "AdditionalOrders" -> expansionOrder,
+        "CurrentExpansionOrder" -> Lookup[taylorOrders, 1, expansionOrder],
+        "ResidualVerdicts" -> <|
+          "pass" -> 0, "fail" -> 0, "inconclusive" -> 1|>,
+        "MatchingTaylorOrders" -> taylorOrders,
+        "BackendFailure" -> continuityBackendFailure|>]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "materialized-continuity-stall-fixture"]];
+assert[
+  "unchanged materialized continuity clearance stops after exactly one probe",
+  FailureQ[continuityTaylorStallResult] &&
+    continuityTaylorStallResult[[1]] ===
+      "FeynmanTrickNativeMatchingTaylorStalled" &&
+    continuityTaylorStallCalls === {<||>, <|1 -> 2 expansionOrder|>} &&
+    continuityTaylorStallResult[[2, "BackendFailure", "residual",
+      "scope"]] === "materialized-continuity-clearance",
+  {continuityTaylorStallResult, continuityTaylorStallCalls}];
 
 x = Global`xNativeFT;
 epsilon = Global`eps;

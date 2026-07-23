@@ -57,11 +57,11 @@ the ordinary production path and 162.2 seconds with the already-known private
 epsilon halos. The production-path number is the regression baseline because
 it includes the bounded discovery retries users actually encounter.
 
-## Four-loop banana boundary gate
+## Four-loop banana gates
 
-The four-loop banana has a separate opt-in gate that crosses both of its first
+The four-loop banana has an opt-in boundary gate that crosses both of its first
 two singular handoffs and stops after the level-2 boundary. It is a
-production-chain correctness regression rather than a final-value benchmark:
+production-chain correctness regression:
 manifest forwarding, exact Rational-shadow retention, singular physical-ODE
 construction, real-ray terminal composed-adjoint certification, and the
 near-endpoint rational-pole case are all exercised together.
@@ -95,6 +95,21 @@ The default ceiling is 420 seconds and can be changed with
 gates, the measured run must be a preparation-cache hit. Set
 `BANANA4_BOUNDARY_WARM_CACHE=1` once when populating a new cache; preparation
 is not charged to the timer.
+
+The stronger release gate executes level 1, requires final publication, and
+compares the finite value with the independent five-propagator Bessel oracle
+to eight decimal digits:
+
+```bash
+BANANA4_BOUNDARY_TARGET_LEVEL=final \
+Scripts/run_banana4_boundary_regression.sh
+```
+
+Or append it to the release suite with `DE2_RUN_BANANA4_FULL=1`. Full mode
+uses a 15-digit internal matching contract and a 2400-second ceiling by
+default, leaving seven guard digits beyond the public eight-digit oracle while
+covering the regular near-endpoint overlaps and final pole audit that the
+level-2 boundary gate cannot observe.
 
 ## Pentagon gate
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Opt-in production-chain regression through the difficult banana4 level-2
-# boundary.  This is intentionally excluded from ordinary per-change tests:
+# Opt-in production-chain regression through a selected banana4 boundary, or
+# through final publication with an independent Bessel-value check.  This is
+# intentionally excluded from ordinary per-change tests:
 # it exercises Wolfram manifest construction, LibraryLink JSON forwarding,
 # exact Rational-shadow ownership/checkpointing, the singular physical ODE,
 # and authoritative native terminal composed-adjoint selection at expansion
@@ -16,12 +17,17 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 
-max_seconds=${BANANA4_BOUNDARY_MAX_SECONDS:-420}
+target_level=${BANANA4_BOUNDARY_TARGET_LEVEL:-2}
+if [[ "$target_level" == final ]]; then
+  max_seconds=${BANANA4_BOUNDARY_MAX_SECONDS:-2400}
+  matching_digits=${BANANA4_BOUNDARY_MATCH_DIGITS:-15}
+else
+  max_seconds=${BANANA4_BOUNDARY_MAX_SECONDS:-420}
+  matching_digits=${BANANA4_BOUNDARY_MATCH_DIGITS:-25}
+fi
 working_precision=${BANANA4_BOUNDARY_WORKING_PRECISION:-500}
-matching_digits=${BANANA4_BOUNDARY_MATCH_DIGITS:-25}
 expansion_order=${BANANA4_BOUNDARY_EXPANSION_ORDER:-50}
 adjoint_order=${BANANA4_BOUNDARY_ADJOINT_ORDER:-100}
-target_level=${BANANA4_BOUNDARY_TARGET_LEVEL:-2}
 cpp_threads=${DE2_CPP_THREADS:-10}
 prep_cache=${FT_PREP_CACHE_DIR:-${TMPDIR:-/tmp}/DiffExp2_FT_Prepared}
 fire_path=${FT_FIRE_PATH:-$repo_root/Dependencies/fire/FIRE7/FIRE7}
@@ -46,8 +52,9 @@ if (( adjoint_order < expansion_order )); then
   echo "BANANA4_BOUNDARY_ADJOINT_ORDER must be an integer at least as large as the expansion order" >&2
   exit 2
 fi
-if [[ "$target_level" != 2 && "$target_level" != 3 ]]; then
-  echo "BANANA4_BOUNDARY_TARGET_LEVEL must be 2 or 3" >&2
+if [[ "$target_level" != 2 && "$target_level" != 3 &&
+      "$target_level" != final ]]; then
+  echo "BANANA4_BOUNDARY_TARGET_LEVEL must be 2, 3, or final" >&2
   exit 2
 fi
 
@@ -129,7 +136,15 @@ fi
 # experiment being guarded.
 runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; result = Global`runExample["banana4", None, <|1 -> 20, 2 -> 14, 3 -> 8, 4 -> 0|>]; If[result === True, Quit[0], Print["FAILED banana4 boundary: ", InputForm[result]]; Quit[1]]'
 
-echo "=== banana4 level-$target_level boundary regression"
+if [[ "$target_level" == final ]]; then
+  stop_after_boundary=
+  gate_label="final-value"
+else
+  stop_after_boundary=$target_level
+  gate_label="level-$target_level boundary"
+fi
+
+echo "=== banana4 $gate_label regression"
 echo "configuration: WP=$working_precision match=$matching_digits T=$expansion_order adjointT=$adjoint_order threads=$cpp_threads ceiling=${max_seconds}s"
 SECONDS=0
 set +e
@@ -137,7 +152,7 @@ python3 Scripts/run_with_deadline.py \
   "$max_seconds" "$scratch/banana4-boundary.log" -- \
   "${common_environment[@]}" \
   "FT_RUNNER_DEFINITIONS_ONLY=1" \
-  "FT_STOP_AFTER_BOUNDARY_LEVEL=$target_level" \
+  "FT_STOP_AFTER_BOUNDARY_LEVEL=$stop_after_boundary" \
   "FT_LADDER_CHECKPOINT_DIR=$scratch/checkpoints" \
   wolframscript -code "$runner_code"
 runner_status=$?
@@ -158,11 +173,14 @@ if ! grep -q 'FTPREP CACHE HIT ' "$scratch/banana4-boundary.log"; then
 fi
 
 python3 - "$scratch/banana4-boundary.log" "$target_level" <<'PY'
+from decimal import Decimal
+import json
 import pathlib
 import sys
 
 lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-target_level = int(sys.argv[2])
+target = sys.argv[2]
+target_level = 0 if target == "final" else int(target)
 
 def require(fragment, description):
     if not any(fragment in line for line in lines):
@@ -194,10 +212,48 @@ for source_level in range(4, target_level, -1):
         )
     segment_begin = batch_index + 1
 
-require(
-    f"STOPPED_AFTER_BOUNDARY_LEVEL {target_level}",
-    "intentional boundary stop",
-)
+if target == "final":
+    final_lines = [
+        line[len("FINAL "):] for line in lines if line.startswith("FINAL ")
+    ]
+    if len(final_lines) != 1:
+        raise SystemExit(
+            f"expected exactly one banana4 FINAL record, found {len(final_lines)}"
+        )
+    record = json.loads(
+        final_lines[0], parse_float=Decimal, parse_int=int
+    )
+    if record.get("Example") != "banana4" or record.get("RawMinPower") != 0:
+        raise SystemExit(f"unexpected banana4 FINAL record: {record}")
+    finite = record.get("Finite")
+    if isinstance(finite, dict):
+        real = finite.get("Re")
+        imag = abs(finite.get("Im", Decimal(0)))
+    else:
+        real = finite
+        imag = Decimal(0)
+    if not isinstance(real, Decimal):
+        real = Decimal(str(real))
+    if not isinstance(imag, Decimal):
+        imag = Decimal(str(imag))
+    reference = Decimal(
+        "39.655526834297652529992823046933581156446060218710"
+    )
+    tolerance = Decimal("1e-8")
+    error = abs(real - reference)
+    if error > tolerance or imag > tolerance:
+        raise SystemExit(
+            "banana4 result failed eight-digit Bessel oracle: "
+            f"value={real} imag={imag} error={error}"
+        )
+    if not any("FTLADDER NATIVE BATCH level=1" in line for line in lines):
+        raise SystemExit("banana4 log has no completed native level-1 batch")
+    print(f"banana4 Bessel oracle PASS: value={real} error={error}")
+else:
+    require(
+        f"STOPPED_AFTER_BOUNDARY_LEVEL {target_level}",
+        "intentional boundary stop",
+    )
 
 for forbidden in (
     "FTLADDER NATIVE BATCH FAIL",
@@ -233,7 +289,7 @@ if noncenter and not all(
 ):
     raise SystemExit("unclassified non-applicable terminal composed-adjoint tile")
 
-print("banana4 boundary production-chain PASS")
+print(f"banana4 {target} production-chain PASS")
 PY
 
 if (( elapsed > max_seconds )); then

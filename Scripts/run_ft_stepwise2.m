@@ -1762,11 +1762,11 @@ ft2NativeMatchingReservoirRetryQ[failure_] := FailureQ[failure] &&
     "FeynmanTrickNativeMatchingReservoir", False]];
 
 (* A complete epsilon residual with an inconclusive accuracy verdict is not a
-   reservoir deficit.  The retained match is built from finite Taylor local
-   solutions, so retry that level with a larger Taylor work order.  Preserve
-   the coefficient verdict counts as an observable progress certificate: the
-   outer driver must not keep raising the order when one retry did not reduce
-   the number of inconclusive coefficients. *)
+   reservoir deficit.  A stored-Taylor residual directly motivates a larger
+   Taylor work order.  An independently materialized continuity failure does
+   not identify the missing resource by itself, but permits one bounded Taylor
+   probe; the progress guard below must stop immediately when that probe does
+   not reduce the inconclusive count. *)
 ft2NativeMatchingClearanceRetry[failure_?FailureQ,
     level_Integer, currentExpansionOrder_Integer] := Module[
   {data, backend, residual, verdicts},
@@ -1785,9 +1785,12 @@ ft2NativeMatchingClearanceRetry[failure_?FailureQ,
       !TrueQ[Lookup[backend, "retryable_epsilon_reservoir", False]] &&
       TrueQ[Lookup[backend, "retryable_matching_clearance", False]] &&
       TrueQ[Lookup[residual, "complete_through_required", False]] &&
-      Lookup[residual, "scope", None] === "stored-taylor-truncation",
+      MemberQ[{"stored-taylor-truncation",
+          "materialized-continuity-clearance"},
+        Lookup[residual, "scope", None]],
     Failure["FeynmanTrickNativeMatchingTaylor", <|
-      "Detail" -> "native matching needs a larger finite-Taylor overlap",
+      "Detail" ->
+        "native matching clearance permits one larger finite-Taylor overlap probe",
       "Level" -> level,
       "CurrentExpansionOrder" -> currentExpansionOrder,
       "AdditionalOrders" -> currentExpansionOrder,

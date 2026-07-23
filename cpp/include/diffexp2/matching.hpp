@@ -29,6 +29,7 @@ enum class MatchingArithmeticErrorCode : std::uint8_t {
   StructurallySingularTransformation,
   ExponentOverflow,
   InsufficientCompleteWindow,
+  MaterializedContinuityInconclusive,
   InvalidSaturationLattice,
   SaturationFailure,
   SearchBudgetExhausted

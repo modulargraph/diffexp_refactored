@@ -111,6 +111,38 @@ assert["singular_gauged_clearing_path_unchanged",
     Length[
       DiffExp2`Solve`Private`$clearedSymbolicLegacyCache] === 1];
 
+(* The epsilon-regular principal planner asks for the singular chart in its
+   reduced physical (V=I) frame.  Identity-gauge SCC blocks are still exact
+   affine charts of their own registered subsystem, so this path must reuse
+   the global clearing too.  In particular it must not enter the legacy
+   12-by-12 local PolynomialLCM/GCD path that used to stall banana4 before
+   native execution began. *)
+singularIdentitySys = <|"Matrix" -> {
+    {(1 + eps)/x, 1/(1 - x)},
+    {0, (2 + eps)/x}}, "Variable" -> x|>;
+singularIdentityChart = catchDE2[DiffExp2`Solve`PrepareChart[
+  singularIdentitySys, chart[0, 1, "singular-identity-physical-hoist"]]];
+DiffExp2`Solve`Private`$chartClearedCache = <||>;
+DiffExp2`Solve`Private`$clearedSymbolicLegacyCache = <||>;
+singularPhysicalHoist = catchDE2[
+  DiffExp2`Solve`Private`clearedPhysicalSymbolic[singularIdentityChart]];
+singularPhysicalHoistCounts = {
+  Length[DiffExp2`Solve`Private`$chartClearedCache],
+  Length[DiffExp2`Solve`Private`$clearedSymbolicLegacyCache]};
+singularPhysicalLegacy = Block[{
+    DiffExp2`Solve`Private`$disableGlobalClearedHoist = True},
+  catchDE2[
+    DiffExp2`Solve`Private`clearedPhysicalSymbolic[singularIdentityChart]]];
+assert["singular_identity_physical_clear_reuses_global_affine_proof",
+  !FailureQ[singularIdentityChart] &&
+    singularIdentityChart["Gauge"] === IdentityMatrix[2] &&
+    singularIdentityChart["ThetaMatrix"] ===
+      singularIdentityChart["ThetaOriginal"] &&
+    !FailureQ[singularPhysicalHoist] &&
+    !FailureQ[singularPhysicalLegacy] &&
+    sameClearedEquationQ[singularPhysicalHoist, singularPhysicalLegacy] &&
+    singularPhysicalHoistCounts === {1, 0}];
+
 (* Pole depth cannot be cached by system alone.  The same A=x/eps has a
    t^2/eps first lag at center 0 but a t/eps first lag at center 1. *)
 counterSys = <|"Matrix" -> {{x/eps}}, "Variable" -> x|>;

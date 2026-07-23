@@ -1334,6 +1334,50 @@
       --session->pending_local_solves;
       if (session->domain == "acb" &&
           error.code ==
+              MatchingArithmeticErrorCode::
+                  MaterializedContinuityInconclusive) {
+        const auto& arm = plan->arm(arm_name);
+        const auto failure_power = error.epsilon_power.has_value()
+            ? json::value(*error.epsilon_power)
+            : json::value(nullptr);
+        const auto failure_component = error.row.has_value()
+            ? json::value(*error.row)
+            : json::value(nullptr);
+        const json::object verdicts{
+            {"pass", 0}, {"fail", 0}, {"inconclusive", 1}};
+        return json::object{
+            {"status", "error"},
+            {"id", "CPP"},
+            {"reason", "acb_match_residual_inconclusive"},
+            {"retryable_epsilon_reservoir", false},
+            {"retryable_matching_clearance", true},
+            {"required_additional_epsilon_orders", 0},
+            {"arm", arm_name},
+            {"match", match_index},
+            {"geometry", encode_plan_match(arm, match_index)},
+            {"residual", json::object{
+                 {"status", "materialized-continuity-inconclusive"},
+                 {"scope", "stored-taylor-truncation"},
+                 {"complete_through_required", true},
+                 {"complete_window", json::object{
+                      {"min", attempted_epsilon.min_power},
+                      {"max", attempted_epsilon.complete_max}}},
+                 {"required_complete_max", required_complete_max},
+                 {"coefficient_verdicts", verdicts},
+                 {"required_coefficient_verdicts", verdicts},
+                 {"failure_epsilon", failure_power},
+                 {"failure_component", failure_component},
+                 {"detail", error.what()}}},
+            {"epsilon", json::object{
+                 {"min", attempted_epsilon.min_power},
+                 {"max", attempted_epsilon.complete_max},
+                 {"required_complete_max", required_complete_max}}},
+            {"refinement", refinement},
+            {"detail",
+             "the Acb match residual passed, but materializing its finite-Taylor receiving local did not retain the required handoff accuracy"}};
+      }
+      if (session->domain == "acb" &&
+          error.code ==
               MatchingArithmeticErrorCode::UnresolvedDeterminantTail) {
         const auto& arm = plan->arm(arm_name);
         return json::object{

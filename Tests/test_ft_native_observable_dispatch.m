@@ -35,9 +35,26 @@ reservoirFailure = Failure["DiffExp2", <|
   "BackendFailure" -> reservoirBackendFailure|>];
 clearanceFailure = Failure["DiffExp2", <|
   "BackendFailure" -> clearanceBackendFailure|>];
+continuityBackendFailure = <|
+  "reason" -> "acb_match_residual_inconclusive",
+  "retryable_epsilon_reservoir" -> False,
+  "retryable_matching_clearance" -> True,
+  "required_additional_epsilon_orders" -> 0,
+  "residual" -> <|
+    "status" -> "materialized-continuity-inconclusive",
+    "complete_through_required" -> True,
+    "scope" -> "stored-taylor-truncation",
+    "coefficient_verdicts" -> <|
+      "pass" -> 0, "fail" -> 0, "inconclusive" -> 1|>,
+    "required_coefficient_verdicts" -> <|
+      "pass" -> 0, "fail" -> 0, "inconclusive" -> 1|>|>|>;
+continuityFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> continuityBackendFailure|>];
 reservoirRetry = ft2NativeMatchingReservoirRetry[reservoirFailure, 3];
 clearanceRetry = ft2NativeMatchingClearanceRetry[
   clearanceFailure, 3, 50];
+continuityRetry = ft2NativeMatchingClearanceRetry[
+  continuityFailure, 1, 50];
 assert["complete matching clearance retries Taylor order, not epsilon width",
   ft2NativeMatchingReservoirRetry[clearanceFailure, 3] === None &&
     ft2NativeMatchingClearanceRetry[
@@ -51,6 +68,14 @@ assert["complete matching clearance retries Taylor order, not epsilon width",
     clearanceRetry[[2, "AdditionalOrders"]] === 50 &&
     clearanceRetry[[2, "ResidualVerdicts", "inconclusive"]] === 5,
   {reservoirRetry, clearanceRetry}];
+assert["materialized handoff clearance retries the failing level Taylor order",
+  ft2NativeMatchingReservoirRetry[continuityFailure, 1] === None &&
+    ft2NativeMatchingClearanceRetryQ[continuityRetry] &&
+    continuityRetry[[2, "Level"]] === 1 &&
+    continuityRetry[[2, "CurrentExpansionOrder"]] === 50 &&
+    continuityRetry[[2, "AdditionalOrders"]] === 50 &&
+    continuityRetry[[2, "ResidualVerdicts", "inconclusive"]] === 1,
+  continuityRetry];
 
 assert["matching Taylor progress requires fewer inconclusive coefficients",
   ft2NativeMatchingClearanceProgressQ[

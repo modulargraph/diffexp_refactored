@@ -46,17 +46,69 @@ ftData = <|"NumLevels" -> 1, "Levels" -> <|
     "CombinedPositions" -> {1, 2},
     "DiffMatrix" -> {{0, 1/(eps*x)}, {0, 0}}|>|>|>;
 
+plannerMatrixNormalizeCalls = 0;
 plan = Block[{FeynmanTrick`LevelReduction`PrepareLevelIBPBatch =
       Function[Null, $Failed]},
-  ft2BuildNativeEpsilonPlan[ftData, 0, {0}, Function[value, value],
+  ft2BuildNativeEpsilonPlan[ftData, 0, {0},
+    Function[value,
+      If[value === ftData["Levels", 1, "DiffMatrix"],
+        plannerMatrixNormalizeCalls++];
+      value],
     <|1 -> batch|>]];
 levelPlan = If[AssociationQ[plan], plan["Levels"][1], <||>];
 
 assert["planner normalizes the exact relative diagonal gauge",
   AssociationQ[plan] &&
+    plannerMatrixNormalizeCalls === 1 &&
     levelPlan["Gauge", "RelativePrefactors"] === {1, 0} &&
     levelPlan["Gauge", "Record", "PoleFree"] === True,
-  plan];
+  {plannerMatrixNormalizeCalls, plan}];
+
+runtimeNormalizeCalls = 0;
+runtimeMatrix = ft2RuntimeLevelMatrix[
+  ftData["Levels", 1], levelPlan,
+  Function[value, runtimeNormalizeCalls++; value]];
+assert["native runtime reuses the planner-owned normalized level matrix",
+  plannerMatrixNormalizeCalls === 1 &&
+    runtimeNormalizeCalls === 0 &&
+    runtimeMatrix === levelPlan["Gauge", "Matrix"],
+  {plannerMatrixNormalizeCalls, runtimeNormalizeCalls, runtimeMatrix}];
+
+fallbackNormalizeCalls = 0;
+fallbackMatrix = ft2RuntimeLevelMatrix[
+  ftData["Levels", 1], None,
+  Function[value, fallbackNormalizeCalls++; value]];
+assert["non-native runtime retains the direct normalization path",
+  fallbackNormalizeCalls === 1 &&
+    fallbackMatrix === ftData["Levels", 1, "DiffMatrix"],
+  {fallbackNormalizeCalls, fallbackMatrix}];
+
+tamperedRuntimeLevel = Association[levelPlan];
+tamperedRuntimeGauge = Association[levelPlan["Gauge"]];
+tamperedRuntimeGauge["Matrix"] = IdentityMatrix[2];
+tamperedRuntimeLevel["Gauge"] = tamperedRuntimeGauge;
+assert["runtime rejects a planner matrix whose exact gauge hash changed",
+  FailureQ[ft2RuntimeLevelMatrix[
+    ftData["Levels", 1], tamperedRuntimeLevel,
+    Function[value, value]]],
+  tamperedRuntimeLevel];
+
+tamperedRuntimeData = Association[ftData["Levels", 1]];
+tamperedRuntimeData["DiffMatrix"] = IdentityMatrix[2];
+assert["runtime rejects same-size raw input changed after planning",
+  FailureQ[ft2RuntimeLevelMatrix[
+    tamperedRuntimeData, levelPlan, Function[value, value]]],
+  tamperedRuntimeData];
+
+runnerSource = Import[
+  FileNameJoin[{repoRoot, "Scripts", "run_ft_stepwise2.m"}], "Text"];
+assert["production level loop consumes the checked planned matrix path",
+  StringCount[runnerSource,
+      "A = ft2RuntimeLevelMatrix[levelData, plannedLevel, normalizeFT]"] ===
+      1 &&
+    !StringContainsQ[runnerSource,
+      "A = normalizeFT[levelData[\"DiffMatrix\"]]"],
+  "the production call site must not bypass ft2RuntimeLevelMatrix"];
 assert["mixed direct/integrate losses include the one native primitive row",
   levelPlan["Record", "RelativeMinimumEpsilonShifts"] ===
       {-6, -2, 0, 1} &&
@@ -220,8 +272,7 @@ assert["profile publication is atomic and leaves no temporary snapshots",
   FileNames["*.tmp-*.mx", profileTmp] === {},
   FileNames["*", profileTmp]];
 assert["the learned-profile cache has an explicit environment opt-out",
-  StringContainsQ[Import[
-    FileNameJoin[{repoRoot, "Scripts", "run_ft_stepwise2.m"}], "Text"],
+  StringContainsQ[runnerSource,
     "FT_DISABLE_MATCHING_HALO_PROFILE"]];
 Quiet[DeleteDirectory[profileTmp, DeleteContents -> True]];
 

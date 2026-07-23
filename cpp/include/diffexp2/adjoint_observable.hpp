@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -551,7 +552,216 @@ inline Magnitude rational_disk_upper(
   return numerator / denominator_lower;
 }
 
+inline void trim_exact_t_polynomial(std::vector<Rational>& value) {
+  while (value.size() > 1 && value.back().is_zero()) value.pop_back();
+  if (value.empty()) value.emplace_back(0);
+}
+
+inline bool exact_t_polynomial_zero(const std::vector<Rational>& value) {
+  return std::all_of(value.begin(), value.end(),
+                     [](const Rational& coefficient) {
+                       return coefficient.is_zero();
+                     });
+}
+
+inline std::vector<Rational> multiply_exact_t_polynomials(
+    const std::vector<Rational>& left,
+    const std::vector<Rational>& right) {
+  std::vector<Rational> result(
+      left.size() + right.size() - 1, Rational(0));
+  for (std::size_t i = 0; i < left.size(); ++i)
+    for (std::size_t j = 0; j < right.size(); ++j)
+      result[i + j] += left[i] * right[j];
+  trim_exact_t_polynomial(result);
+  return result;
+}
+
+inline std::vector<Rational> add_exact_t_polynomials(
+    std::vector<Rational> left, const std::vector<Rational>& right) {
+  left.resize(std::max(left.size(), right.size()), Rational(0));
+  for (std::size_t i = 0; i < right.size(); ++i) left[i] += right[i];
+  trim_exact_t_polynomial(left);
+  return left;
+}
+
+inline std::pair<std::vector<Rational>, std::vector<Rational>>
+divide_exact_t_polynomials(std::vector<Rational> numerator,
+                           std::vector<Rational> denominator) {
+  trim_exact_t_polynomial(numerator);
+  trim_exact_t_polynomial(denominator);
+  if (exact_t_polynomial_zero(denominator))
+    throw std::domain_error("exact t-polynomial division by zero");
+  if (numerator.size() < denominator.size())
+    return {{Rational(0)}, std::move(numerator)};
+  std::vector<Rational> quotient(
+      numerator.size() - denominator.size() + 1, Rational(0));
+  while (!exact_t_polynomial_zero(numerator) &&
+         numerator.size() >= denominator.size()) {
+    const auto shift = numerator.size() - denominator.size();
+    const auto factor = numerator.back() / denominator.back();
+    quotient[shift] += factor;
+    for (std::size_t i = 0; i < denominator.size(); ++i)
+      numerator[i + shift] -= factor * denominator[i];
+    trim_exact_t_polynomial(numerator);
+  }
+  trim_exact_t_polynomial(quotient);
+  return {std::move(quotient), std::move(numerator)};
+}
+
+inline std::vector<Rational> gcd_exact_t_polynomials(
+    std::vector<Rational> left, std::vector<Rational> right) {
+  trim_exact_t_polynomial(left);
+  trim_exact_t_polynomial(right);
+  while (!exact_t_polynomial_zero(right)) {
+    auto remainder = divide_exact_t_polynomials(left, right).second;
+    left = std::move(right);
+    right = std::move(remainder);
+  }
+  if (exact_t_polynomial_zero(left)) return {Rational(1)};
+  const auto leading = left.back();
+  for (auto& coefficient : left) coefficient = coefficient / leading;
+  trim_exact_t_polynomial(left);
+  return left;
+}
+
+struct ExactTRationalFunction {
+  std::vector<Rational> numerator{Rational(0)};
+  std::vector<Rational> denominator{Rational(1)};
+};
+
+inline ExactTRationalFunction canonical_exact_t_rational(
+    ExactTRationalFunction value) {
+  trim_exact_t_polynomial(value.numerator);
+  trim_exact_t_polynomial(value.denominator);
+  if (exact_t_polynomial_zero(value.denominator))
+    throw std::domain_error("exact t-rational denominator is zero");
+  if (exact_t_polynomial_zero(value.numerator)) return {};
+  const auto divisor = gcd_exact_t_polynomials(
+      value.numerator, value.denominator);
+  if (!(divisor.size() == 1 && divisor.front() == Rational(1))) {
+    auto numerator_division = divide_exact_t_polynomials(
+        value.numerator, divisor);
+    auto denominator_division = divide_exact_t_polynomials(
+        value.denominator, divisor);
+    if (!exact_t_polynomial_zero(numerator_division.second) ||
+        !exact_t_polynomial_zero(denominator_division.second))
+      throw std::logic_error("exact t-rational gcd did not divide exactly");
+    value.numerator = std::move(numerator_division.first);
+    value.denominator = std::move(denominator_division.first);
+  }
+  return value;
+}
+
+inline ExactTRationalFunction add_exact_t_rationals(
+    const ExactTRationalFunction& left,
+    const ExactTRationalFunction& right) {
+  return canonical_exact_t_rational({
+      add_exact_t_polynomials(
+          multiply_exact_t_polynomials(left.numerator, right.denominator),
+          multiply_exact_t_polynomials(right.numerator, left.denominator)),
+      multiply_exact_t_polynomials(left.denominator, right.denominator)});
+}
+
+inline Magnitude exact_t_rational_disk_upper(
+    const ExactTRationalFunction& exact,
+    const Magnitude& radius_upper, const std::string& context) {
+  PreparedRationalAnalyticCoefficient<ComplexBall> numeric;
+  for (const auto& coefficient : exact.numerator)
+    numeric.numerator.push_back(
+        ComplexBall::from_strings(coefficient.str()));
+  for (const auto& coefficient : exact.denominator)
+    numeric.denominator.push_back(
+        ComplexBall::from_strings(coefficient.str()));
+  return rational_disk_upper(numeric, radius_upper, context);
+}
+
 }  // namespace adjoint_observable_detail
+
+inline Magnitude exact_combined_backward_adjoint_forcing_disk_upper(
+    const BackwardAdjointTaylorProblem& problem,
+    const PreparedSparseLocalMultiplierMatrix<Rational>& exact_row,
+    const PreparedPhysicalClearedODE<Rational>& exact_ode,
+    const ComplexBall& oriented_physical_jacobian,
+    const ComplexBall& witness_radius,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  using namespace adjoint_observable_detail;
+  physical_ode_detail::validate_ode(exact_ode);
+  if (exact_row.rows != 1 || exact_row.columns != exact_ode.dimension ||
+      exact_row.columns != problem.dimension ||
+      problem.q_lags.size() > exact_ode.q_lags.size())
+    throw std::invalid_argument(
+        context + ": exact q/row forcing payload has the wrong shape");
+  const auto radius_upper = Magnitude::upper_abs(witness_radius);
+  std::vector<EpsilonFrame<Rational>> exact_q;
+  exact_q.reserve(problem.q_lags.size());
+  for (std::size_t lag = 0; lag < problem.q_lags.size(); ++lag)
+    exact_q.push_back(expand_exact_epsilon_rational(
+        exact_ode.q_lags[lag], problem.q_lags[lag].complete_max(),
+        context + ": exact q lag " + std::to_string(lag)));
+
+  auto row_disk_upper = Magnitude::zero();
+  for (const auto& entry : exact_row.entries) {
+    const auto& multiplier = entry.multiplier;
+    if (multiplier.center_pole_order != 0 ||
+        !multiplier.analytic_coefficients.has_value() ||
+        multiplier.analytic_coefficients->size() !=
+            multiplier.kernels.size())
+      throw std::domain_error(
+          context + ": exact combined forcing requires an ordinary complete row");
+    std::map<std::int32_t, ExactTRationalFunction> combined;
+    auto q_min = std::numeric_limits<std::int32_t>::max();
+    auto q_max = std::numeric_limits<std::int32_t>::min();
+    for (const auto& q : exact_q) {
+      q_min = std::min(q_min, q.min_power());
+      q_max = std::max(q_max, q.complete_max());
+    }
+    for (std::int64_t raw_q = q_min; raw_q <= q_max; ++raw_q) {
+      const auto q_power = static_cast<std::int32_t>(raw_q);
+      std::vector<Rational> q_polynomial(
+          exact_q.size(), Rational(0));
+      for (std::size_t lag = 0; lag < exact_q.size(); ++lag)
+        if (q_power >= exact_q[lag].min_power() &&
+            q_power <= exact_q[lag].complete_max())
+          q_polynomial[lag] = exact_q[lag].coefficient(q_power);
+      trim_exact_t_polynomial(q_polynomial);
+      if (exact_t_polynomial_zero(q_polynomial)) continue;
+      for (std::size_t offset = 0;
+           offset < multiplier.analytic_coefficients->size(); ++offset) {
+        const auto row_power = matching_detail::checked_power(
+            static_cast<std::int64_t>(multiplier.epsilon_shift) +
+                static_cast<std::int64_t>(offset),
+            "exact combined row epsilon power");
+        const auto output_power = matching_detail::checked_power(
+            raw_q + static_cast<std::int64_t>(row_power),
+            "exact combined forcing epsilon power");
+        if (output_power > epsilon_complete_max) continue;
+        const auto& row_rational =
+            (*multiplier.analytic_coefficients)[offset];
+        ExactTRationalFunction term{
+            multiply_exact_t_polynomials(
+                q_polynomial, row_rational.numerator),
+            row_rational.denominator};
+        term = canonical_exact_t_rational(std::move(term));
+        const auto found = combined.find(output_power);
+        if (found == combined.end())
+          combined.emplace(output_power, std::move(term));
+        else
+          found->second = add_exact_t_rationals(found->second, term);
+      }
+    }
+    auto component_upper = Magnitude::zero();
+    for (const auto& [epsilon_power, rational] : combined)
+      component_upper += exact_t_rational_disk_upper(
+          rational, radius_upper,
+          context + ": component " + std::to_string(entry.column) +
+              ": epsilon " + std::to_string(epsilon_power));
+    row_disk_upper = Magnitude::maximum(
+        row_disk_upper, component_upper);
+  }
+  return Magnitude::upper_abs(oriented_physical_jacobian) *
+         radius_upper * row_disk_upper;
+}
 
 template <typename Scalar>
 BackwardAdjointTaylorProblem prepare_backward_adjoint_taylor_problem(
@@ -663,6 +873,9 @@ inline Magnitude backward_adjoint_forcing_cauchy_numerator_upper(
     const PreparedSparseLocalMultiplierMatrix<ComplexBall>& row,
     const ComplexBall& oriented_physical_jacobian,
     const ComplexBall& witness_radius,
+    std::optional<std::int32_t> epsilon_complete_max,
+    const PreparedSparseLocalMultiplierMatrix<Rational>* exact_row,
+    const PreparedPhysicalClearedODE<Rational>* exact_ode,
     const std::string& context =
         "backward Fuchsian adjoint forcing Cauchy bound") {
   using namespace adjoint_observable_detail;
@@ -672,6 +885,17 @@ inline Magnitude backward_adjoint_forcing_cauchy_numerator_upper(
       row.rows != 1 || row.columns != problem.dimension)
     throw std::invalid_argument(
         context + ": invalid witness radius or row dimension");
+  if ((exact_row == nullptr) != (exact_ode == nullptr))
+    throw std::invalid_argument(
+        context + ": exact row and exact physical equation must be paired");
+  if (exact_row != nullptr) {
+    if (!epsilon_complete_max.has_value())
+      throw std::invalid_argument(
+          context + ": exact combined forcing needs an epsilon cap");
+    return exact_combined_backward_adjoint_forcing_disk_upper(
+        problem, *exact_row, *exact_ode, oriented_physical_jacobian,
+        witness_radius, *epsilon_complete_max, context);
+  }
 
   auto q_disk_upper = Magnitude::zero();
   auto t_power = Magnitude::one();
@@ -695,12 +919,20 @@ inline Magnitude backward_adjoint_forcing_cauchy_numerator_upper(
           ": complete analytic row coefficients are unavailable");
     auto component_upper = Magnitude::zero();
     for (std::size_t epsilon = 0;
-         epsilon < multiplier.analytic_coefficients->size(); ++epsilon)
+         epsilon < multiplier.analytic_coefficients->size(); ++epsilon) {
+      const auto raw_power = matching_detail::checked_power(
+          static_cast<std::int64_t>(multiplier.epsilon_shift) +
+              static_cast<std::int64_t>(epsilon),
+          "backward adjoint analytic row epsilon power");
+      if (epsilon_complete_max.has_value() &&
+          raw_power > *epsilon_complete_max)
+        continue;
       component_upper += rational_disk_upper(
           (*multiplier.analytic_coefficients)[epsilon], radius_upper,
           context + ": row component " +
               std::to_string(entry.column) + ": epsilon offset " +
               std::to_string(epsilon));
+    }
     row_disk_upper = Magnitude::maximum(
         row_disk_upper, component_upper);
   }
@@ -841,7 +1073,10 @@ certify_backward_adjoint_taylor_tail_adaptive_witness(
     const Rational& chart_radius_exact,
     std::uint32_t maximum_attempts = 16,
     const std::string& context =
-        "backward Fuchsian adjoint adaptive Taylor-tail certificate") {
+        "backward Fuchsian adjoint adaptive Taylor-tail certificate",
+    std::optional<std::int32_t> epsilon_complete_max = std::nullopt,
+    const PreparedSparseLocalMultiplierMatrix<Rational>* exact_row = nullptr,
+    const PreparedPhysicalClearedODE<Rational>* exact_ode = nullptr) {
   if (evaluation_modulus_exact.sign() < 0 ||
       !(evaluation_modulus_exact < chart_radius_exact) ||
       maximum_attempts == 0)
@@ -858,6 +1093,7 @@ certify_backward_adjoint_taylor_tail_adaptive_witness(
       const auto forcing =
           backward_adjoint_forcing_cauchy_numerator_upper(
               problem, row, oriented_physical_jacobian, witness,
+              epsilon_complete_max, exact_row, exact_ode,
               context + ": forcing attempt " +
                   std::to_string(attempt + 1));
       auto tail = certify_backward_adjoint_taylor_tail(
@@ -1175,6 +1411,69 @@ inline BackwardAdjointTaylorResult solve_backward_adjoint_taylor(
     const BackwardAdjointTaylorProblem& problem,
     const std::string& context = "backward Fuchsian adjoint") {
   return solve_backward_adjoint_taylor(problem, nullptr, context);
+}
+
+struct BackwardAdjointReservoirSolve {
+  BackwardAdjointTaylorProblem problem;
+  BackwardAdjointTaylorResult result;
+  std::int32_t input_epsilon_complete_max = 0;
+};
+
+// A Laurent matrix inverse can consume high epsilon coefficients even when
+// only a low output prefix is requested.  Grow that private input reservoir
+// inside the recurrence instead of forcing the public observable to request
+// extra epsilon orders.  The factory must return the same exact problem
+// truncated honestly through `input_complete_max`; `maximum_complete_max` is
+// the last coefficient actually retained by the prepared row.
+template <typename ProblemFactory>
+BackwardAdjointReservoirSolve
+solve_backward_adjoint_taylor_with_epsilon_reservoir(
+    ProblemFactory&& factory,
+    std::int32_t initial_complete_max,
+    std::int32_t maximum_complete_max,
+    const PreparedPhysicalClearedODE<Rational>* exact_physical_ode,
+    const std::string& context =
+        "backward Fuchsian adjoint private epsilon reservoir") {
+  if (initial_complete_max > maximum_complete_max)
+    throw std::invalid_argument(
+        context + ": initial epsilon reservoir exceeds its honest maximum");
+  auto input_complete_max = initial_complete_max;
+  while (true) {
+    auto problem = factory(input_complete_max);
+    try {
+      auto result = solve_backward_adjoint_taylor(
+          problem, exact_physical_ode,
+          context + ": input_complete_max=" +
+              std::to_string(input_complete_max));
+      return {std::move(problem), std::move(result), input_complete_max};
+    } catch (const MatchingArithmeticError& error) {
+      const bool retryable_window_failure =
+          error.code ==
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow ||
+          error.code == MatchingArithmeticErrorCode::AmbiguousZero ||
+          error.code == MatchingArithmeticErrorCode::ZeroDivisor ||
+          error.code ==
+              MatchingArithmeticErrorCode::SingularOrIncompleteSystem ||
+          error.code ==
+              MatchingArithmeticErrorCode::UnresolvedDeterminantTail;
+      if (!retryable_window_failure ||
+          input_complete_max >= maximum_complete_max)
+        throw;
+      std::int64_t additional = 1;
+      if (error.epsilon_power.has_value() &&
+          *error.epsilon_power < problem.required_epsilon_complete_max)
+        additional = static_cast<std::int64_t>(
+            problem.required_epsilon_complete_max) -
+            *error.epsilon_power;
+      const auto next = std::min<std::int64_t>(
+          maximum_complete_max,
+          static_cast<std::int64_t>(input_complete_max) +
+              std::max<std::int64_t>(1, additional));
+      if (next <= input_complete_max) throw;
+      input_complete_max = matching_detail::checked_power(
+          next, "backward adjoint private epsilon reservoir maximum");
+    }
+  }
 }
 
 inline FiniteLaurentVector<ComplexBall> evaluate_backward_adjoint_taylor(

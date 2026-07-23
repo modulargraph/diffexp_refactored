@@ -2390,13 +2390,47 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
     require_small_zero(
         compared_value,
         "compared direct/adjoint terminal contraction");
+    if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
+               "authoritative", 1) != 0)
+      throw std::runtime_error(
+          "could not select authoritative composed terminal adjoint");
+    std::ostringstream authoritative_diagnostics;
+    auto* authoritative_previous_stderr =
+        std::cerr.rdbuf(authoritative_diagnostics.rdbuf());
+    json::value authoritative_value;
+    try {
+      authoritative_value = contract_cancellation_and_export(
+          session, lower_state, "terminal-composed-authoritative", 9);
+    } catch (...) {
+      std::cerr.rdbuf(authoritative_previous_stderr);
+      unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+      throw;
+    }
+    std::cerr.rdbuf(authoritative_previous_stderr);
+    unsetenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT");
+    const auto& authoritative_record = authoritative_value.as_object();
+    for (const auto& coefficient :
+         authoritative_record.at("coefficients").as_array()) {
+      const auto value = decode_encoded_ball(coefficient);
+      if (!value.contains_zero() ||
+          diffexp2::Magnitude::upper_abs(value).approximate_upper() >
+              1e-4)
+        throw std::runtime_error(
+            "authoritative composed terminal contraction did not retain its certified zero enclosure");
+    }
+    if (authoritative_diagnostics.str().find(
+            "status=authoritative-certified-value") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "authoritative composed terminal contraction did not report its selected route");
     // A 1/t observable row is outside the lambda(0)=0 composed theorem: its
     // adjoint needs a Laurent/log term and the integration-by-parts endpoint
-    // pairing.  `require` must classify precisely that known applicability
-    // boundary while the established production contraction still completes.
+    // pairing.  Authoritative mode must classify precisely that known
+    // applicability boundary and fall back to the established production
+    // contraction.
     // This is the row class reached by banana4's seventh level-3 request.
     if (setenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT",
-               "require", 1) != 0)
+               "authoritative", 1) != 0)
       throw std::runtime_error(
           "could not require center-pole composed-adjoint classification");
     std::ostringstream center_pole_diagnostics;

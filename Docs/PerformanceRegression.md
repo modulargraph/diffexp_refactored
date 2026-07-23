@@ -117,9 +117,12 @@ Scripts/run_banana4_boundary_regression.sh
 ```
 
 Or append it to the release suite with `DE2_RUN_BANANA4_FULL=1`. Full mode
-uses a 15-digit internal matching contract and a 2400-second ceiling by
-default, leaving seven guard digits beyond the public eight-digit oracle while
-covering the regular near-endpoint overlaps and final pole audit that the
+uses a 15-digit final consumer contract plus the independently demonstrated
+producer profile `<|2->19,3->25,4->25|>`, and a 2400-second ceiling by
+default. The producer profile is not a higher public-accuracy claim: it keeps
+guard digits across the conditioned private epsilon reservoirs while the
+published result is still checked against the eight-digit oracle. The gate
+covers the regular near-endpoint overlaps and final pole audit that the
 level-2 boundary gate cannot observe.
 
 ## Pentagon gate

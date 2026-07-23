@@ -160,14 +160,14 @@ fi
 if [[ "$target_level" == final ]]; then
   stop_after_boundary=
   gate_label="final-value"
-  # The final consumer asks for one extra digit from its immediate boundary
-  # producer.  Apply the runner's existing two-digit guarded ladder above
-  # that producer: with the default 15-digit contract this pins
-  # levels 2/3/4 to 16/18/20.  B4-128 proved that an unguarded all-15 profile
-  # is one digit too wide already at the level-3 paired publication seam.
+  # Use the smallest seam profiles already demonstrated end-to-end rather
+  # than linearly scanning producer digits. B4-101/B4-102 completed level 2
+  # at 19 digits, and B4-127 completed level 3 at 25 digits. The latter also
+  # covers the two-digit guarded ladder above level 2. B4-128 and B4-129
+  # disproved the cheaper all-15 and 16/18/20 profiles respectively.
   # Retain the bounded production retry driver for any later typed producer
   # deficit; the elapsed gate includes every such retry.
-  runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; seedDigits = Global`ft2RaiseMatchingProducerDigits[<||>, 2, Global`matchDigits + 1, 4]; Print["BANANA4 FINAL PRODUCER DIGITS ", InputForm[seedDigits]]; result = Global`ft2RunExampleWithMatchingRetries["banana4", None, <|1 -> 20, 2 -> 14, 3 -> 8, 4 -> 0|>, <||>, seedDigits]; If[result === True, Quit[0], Print["FAILED banana4 boundary: ", InputForm[result]]; Quit[1]]'
+  runner_code='Get[FileNameJoin[{Directory[], "Scripts", "run_ft_stepwise2.m"}]]; seedDigits = <|2 -> 19, 3 -> 25, 4 -> 25|>; Print["BANANA4 FINAL PRODUCER DIGITS ", InputForm[seedDigits]]; result = Global`ft2RunExampleWithMatchingRetries["banana4", None, <|1 -> 20, 2 -> 14, 3 -> 8, 4 -> 0|>, <||>, seedDigits]; If[result === True, Quit[0], Print["FAILED banana4 boundary: ", InputForm[result]]; Quit[1]]'
 else
   stop_after_boundary=$target_level
   gate_label="level-$target_level boundary"

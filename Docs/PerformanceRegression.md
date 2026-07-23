@@ -53,6 +53,35 @@ the ordinary production path and 162.2 seconds with the already-known private
 epsilon halos. The production-path number is the regression baseline because
 it includes the bounded discovery retries users actually encounter.
 
+## Four-loop banana boundary gate
+
+The four-loop banana has a separate opt-in gate for its difficult level-3
+boundary. It is a production-chain correctness regression rather than a final
+value benchmark: it stops immediately after that boundary, at the point where
+manifest forwarding, exact Rational-shadow retention, singular physical-ODE
+construction, and the terminal composed-adjoint certificate have all been
+exercised together.
+
+```bash
+FT_FIRE_PATH=/path/to/FIRE7 \
+FT_PREP_CACHE_DIR=/path/to/prepared-cache \
+Scripts/run_banana4_boundary_regression.sh
+```
+
+Or append it to the release suite with `DE2_RUN_BANANA4_BOUNDARY=1`. The
+pinned configuration is working precision 300, matching contract 80 digits,
+Taylor order 50, public epsilon order 4, private matching halos
+`20,14,8,0`, and 10 C++ threads by default. A fresh transport checkpoint is
+mandatory. The gate requires a certified center-ending composed-adjoint tail,
+rejects unsupported/retry markers, and accepts a noncenter terminal tile only
+when it is explicitly classified as outside the one-contraction theorem.
+
+The default ceiling is 900 seconds and can be changed with
+`BANANA4_BOUNDARY_MAX_SECONDS` when qualifying hardware. As with the other
+gates, the measured run must be a preparation-cache hit. Set
+`BANANA4_BOUNDARY_WARM_CACHE=1` once when populating a new cache; preparation
+is not charged to the timer.
+
 ## Pentagon gate
 
 The massless-pentagon timing regression is also opt-in. It exercises the

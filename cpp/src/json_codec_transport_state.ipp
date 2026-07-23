@@ -2968,11 +2968,14 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
                      : json::value(nullptr)},
                 {"reconstruction_routes",
                  std::move(reconstruction_routes)}};
-            throw std::domain_error(
+            throw MatchingArithmeticError(
+                MatchingArithmeticErrorCode::
+                    MaterializedContinuityInconclusive,
                 "materialized receiving local fails its certified handoff continuity at epsilon=" +
                 std::to_string(power) + ", component=" +
                 std::to_string(component) + "; diagnostics=" +
-                json::serialize(diagnostics));
+                json::serialize(diagnostics),
+                component, std::nullopt, power);
           }
         }
       }

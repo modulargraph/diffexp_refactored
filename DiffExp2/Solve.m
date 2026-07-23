@@ -1402,9 +1402,21 @@ clearedSymbolic[cs_Association] := If[
    basis instead.  V is still used once for homogeneous seeds and V^-1 once
    for a sourced n=0 resonance; neither is allowed to contaminate every
    later Taylor lag. *)
-clearedPhysicalSymbolic[cs_Association] := Module[{d = cs["SystemSize"]},
-  clearedSymbolicLegacy[Join[cs, <|
-    "V" -> IdentityMatrix[d], "VInv" -> IdentityMatrix[d]|>]]];
+clearedPhysicalSymbolic[cs_Association] := Module[
+  {d = cs["SystemSize"], identityGaugeQ},
+  identityGaugeQ =
+    TrueQ[Normal[cs["Gauge"]] === IdentityMatrix[d]] &&
+    TrueQ[cs["ThetaMatrix"] === cs["ThetaOriginal"]];
+  If[!TrueQ[$disableGlobalClearedHoist] && identityGaugeQ &&
+      KeyExistsQ[cs, "SystemClearKey"],
+    (* A singular SCC block is prepared as its own registered exact system.
+       When rank reduction is the identity, its reduced physical recurrence
+       is therefore precisely the affine image of that registered system.
+       Reuse the global q/C proof instead of rebuilding the same 12-by-12
+       PolynomialLCM/GCD locally merely because the chart is singular. *)
+    affinePhysicalClearedFromGlobal[cs],
+    clearedSymbolicLegacy[Join[cs, <|
+      "V" -> IdentityMatrix[d], "VInv" -> IdentityMatrix[d]|>]]]];
 
 epsilonRegularPrincipalCertificate[cs_Association,
     nmax_Integer] := Module[

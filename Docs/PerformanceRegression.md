@@ -120,10 +120,11 @@ Or append it to the release suite with `DE2_RUN_BANANA4_FULL=1`. Full mode
 currently pins the B4-130 diagnostic producer profile
 `<|2->19,3->25,4->25|>` and a 2400-second ceiling. B4-130 is a recorded
 failure and must not be used as release evidence; the next focused replay
-tests the corrected internal-certification contract from its preserved
-level-3 input before this full-gate profile is advanced. The published result
-will still require the independent eight-digit oracle plus the regular
-near-endpoint and final-pole audits.
+must follow the B4-131 C++ value/tail audit before this full-gate profile is
+advanced. B4-131 disproved internal-certification clipping as the cause of
+the regular-hop regression, so that experimental policy change was removed.
+The published result will still require the independent eight-digit oracle
+plus the regular near-endpoint and final-pole audits.
 
 ## Pentagon gate
 

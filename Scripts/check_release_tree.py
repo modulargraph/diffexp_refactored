@@ -196,6 +196,7 @@ SCRIPT_FILES = {
     "Scripts/run_ft_seeded_snapshot.m",
     "Scripts/replay_native_terminal_checkpoint.m",
     "Scripts/run_release_tests.sh",
+    "Scripts/run_with_deadline.py",
     "Scripts/verify_double_box_planar.m",
 }
 

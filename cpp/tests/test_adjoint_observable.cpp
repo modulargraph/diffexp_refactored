@@ -663,6 +663,73 @@ bool normalized_a_posteriori_defect_encloses_exact_tail() {
              1e-3;
 }
 
+bool real_ray_tail_ignores_pole_beyond_endpoint() {
+  PreparedPhysicalClearedODE<Rational> exact_ode;
+  exact_ode.dimension = 1;
+  exact_ode.q_lags = {exact_rational_constant("1")};
+  exact_ode.c_lags = {{}};
+  exact_ode.owner_signature_identity = "real-ray-owner";
+  exact_ode.payload_identity = "real-ray-payload";
+  exact_ode.exact_payload_record = "real-ray-record";
+  const auto normalized =
+      adjoint_observable_detail::normalize_backward_adjoint_exact_ode_by_q(
+          exact_ode, 4, 0, "real-ray normalization");
+
+  const Rational endpoint("1/4");
+  const Rational pole = endpoint + Rational(1) / Rational(1048576);
+  const Rational inverse_pole = Rational(1) / pole;
+  PreparedSparseLocalMultiplierMatrix<Rational> exact_row;
+  exact_row.rows = 1;
+  exact_row.columns = 1;
+  exact_row.exact_identity = "real-ray-row";
+  PreparedRationalTaylorMultiplier<Rational> multiplier;
+  multiplier.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<Rational>>{{
+          {Rational(1)}, {Rational(1), -inverse_pole}}};
+  multiplier.kernels = {{Rational(1)}};
+  multiplier.exact_identity = "real-ray-multiplier";
+  exact_row.entries.push_back({0, 0, std::move(multiplier)});
+  const auto row =
+      adjoint_observable_detail::specialize_exact_backward_adjoint_row_taylor(
+          exact_row, 4, "real-ray exact row");
+  const auto problem = prepare_backward_adjoint_taylor_problem(
+      normalized.truncated_ode, row, 4, 0, 0, ball("1"),
+      "real-ray adapter");
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, &normalized.truncated_ode, "real-ray solve");
+  const auto certificate = certify_backward_adjoint_real_ray_tail(
+      normalized, exact_row, solved, ball("1"), endpoint, 0, 128,
+      "real-ray beyond-endpoint-pole certificate");
+  if (!certificate.absolute_vector_tail_upper.is_finite() ||
+      !certificate.stability_margin_lower.is_finite() ||
+      certificate.stability_margin_lower.is_zero() ||
+      certificate.accepted_intervals == 0)
+    return false;
+
+  auto crossed_row = exact_row;
+  const Rational crossed_pole = endpoint - Rational(1) / Rational(1048576);
+  crossed_row.entries[0]
+      .multiplier.analytic_coefficients->at(0).denominator =
+      {Rational(1), -(Rational(1) / crossed_pole)};
+  const auto crossed_taylor =
+      adjoint_observable_detail::specialize_exact_backward_adjoint_row_taylor(
+          crossed_row, 4, "real-ray crossed-pole row");
+  const auto crossed_problem = prepare_backward_adjoint_taylor_problem(
+      normalized.truncated_ode, crossed_taylor, 4, 0, 0, ball("1"),
+      "real-ray crossed-pole adapter");
+  const auto crossed_solution = solve_backward_adjoint_taylor(
+      crossed_problem, &normalized.truncated_ode,
+      "real-ray crossed-pole solve");
+  try {
+    (void)certify_backward_adjoint_real_ray_tail(
+        normalized, crossed_row, crossed_solution, ball("1"), endpoint, 0,
+        24, "real-ray crossed-pole certificate");
+  } catch (const std::domain_error&) {
+    return true;
+  }
+  return false;
+}
+
 bool coefficientwise_tail_ignores_irrelevant_high_epsilon_input() {
   FiniteLaurentVector<ComplexBall> adjoint{
       EpsilonFrame<ComplexBall>(0, {ball("1")})};
@@ -768,6 +835,7 @@ int main() {
                   exact_combined_forcing_cancels_cleared_row_pole() &&
                   exact_q_normalization_removes_clearing_contraction() &&
                   normalized_a_posteriori_defect_encloses_exact_tail() &&
+                  real_ray_tail_ignores_pole_beyond_endpoint() &&
                   coefficientwise_tail_ignores_irrelevant_high_epsilon_input() &&
                   forcing_bound_ignores_epsilon_above_private_cap() &&
                   private_epsilon_reservoir_covers_inverse_loss() &&

@@ -162,6 +162,14 @@ assert["banana4 final producer seed carries one measured digit plus guards",
       <||>, 2, matchDigits + 1, 4] ===
     <|2 -> matchDigits + 1, 3 -> matchDigits + 3,
       4 -> matchDigits + 5|>];
+banana4FinalProducerDigits = <|2 -> 19, 3 -> 25, 4 -> 25|>;
+assert["banana4 final pinned seam profile covers its guarded ladder",
+  Block[{matchDigits = 15},
+    And @@ Thread[
+      Lookup[banana4FinalProducerDigits, {2, 3, 4}] >=
+        Lookup[ft2RaiseMatchingProducerDigits[
+          <||>, 2, Lookup[banana4FinalProducerDigits, 2], 4],
+          {2, 3, 4}]]]];
 
 terminalOutputFailure = Failure["DiffExp2", <|
   "BackendFailure" -> <|

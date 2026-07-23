@@ -71,6 +71,15 @@ struct BackwardAdjointAdaptiveTailCertificate {
   Rational witness_radius_exact = Rational(0);
 };
 
+struct BackwardAdjointRealRayTailCertificate {
+  Magnitude absolute_vector_tail_upper = Magnitude::zero();
+  Magnitude scaled_defect_upper = Magnitude::zero();
+  Magnitude operator_norm_upper = Magnitude::zero();
+  Magnitude stability_margin_lower = Magnitude::zero();
+  std::uint32_t certified_after_taylor_order = 0;
+  std::uint32_t accepted_intervals = 0;
+};
+
 namespace adjoint_observable_detail {
 
 inline EpsilonFrame<ComplexBall> structural_zero_frame(
@@ -941,10 +950,10 @@ inline Magnitude exact_t_rational_disk_upper(
   return rational_disk_upper(numeric, radius_upper, context);
 }
 
-inline Magnitude exact_t_rational_taylor_tail_l1_upper(
+inline ExactTRationalFunction exact_t_rational_taylor_remainder_quotient(
     const ExactTRationalFunction& exact,
     std::uint32_t retained_complete_max,
-    const Magnitude& radius_upper, const std::string& context) {
+    const std::string& context) {
   const auto prefix = expand_exact_t_rational_taylor(
       exact, retained_complete_max, context + ": Taylor prefix");
   auto residual = add_exact_t_polynomials(
@@ -954,7 +963,8 @@ inline Magnitude exact_t_rational_taylor_tail_l1_upper(
           {Rational(1)}}).numerator);
   const auto first_unseen =
       static_cast<std::size_t>(retained_complete_max) + 1;
-  if (residual.size() <= first_unseen) return Magnitude::zero();
+  if (residual.size() <= first_unseen)
+    return {{Rational(0)}, {Rational(1)}};
   for (std::size_t order = 0; order < first_unseen; ++order)
     if (!residual[order].is_zero())
       throw std::logic_error(
@@ -963,16 +973,34 @@ inline Magnitude exact_t_rational_taylor_tail_l1_upper(
       residual.begin(),
       residual.begin() + static_cast<std::ptrdiff_t>(first_unseen));
   trim_exact_t_polynomial(residual);
-  if (exact_t_polynomial_zero(residual)) return Magnitude::zero();
+  // The input is already canonical and the exact remainder has merely had
+  // its proven t^(N+1) factor removed.  Re-running a polynomial GCD here is
+  // unnecessary and catastrophically expensive when the same analytic
+  // coefficient is queried for every prefix/output pair.
+  if (exact_t_polynomial_zero(residual))
+    return {{Rational(0)}, {Rational(1)}};
+  return {std::move(residual), exact.denominator};
+}
+
+inline Magnitude exact_t_rational_taylor_tail_l1_upper(
+    const ExactTRationalFunction& exact,
+    std::uint32_t retained_complete_max,
+    const Magnitude& radius_upper, const std::string& context) {
+  const auto quotient = exact_t_rational_taylor_remainder_quotient(
+      exact, retained_complete_max, context);
+  const auto first_unseen =
+      static_cast<std::size_t>(retained_complete_max) + 1;
+  if (exact_t_polynomial_zero(quotient.numerator))
+    return Magnitude::zero();
 
   std::vector<ComplexBall> residual_numeric;
-  residual_numeric.reserve(residual.size());
-  for (const auto& coefficient : residual)
+  residual_numeric.reserve(quotient.numerator.size());
+  for (const auto& coefficient : quotient.numerator)
     residual_numeric.push_back(
         ComplexBall::from_strings(coefficient.str()));
   std::vector<ComplexBall> denominator_numeric;
-  denominator_numeric.reserve(exact.denominator.size());
-  for (const auto& coefficient : exact.denominator)
+  denominator_numeric.reserve(quotient.denominator.size());
+  for (const auto& coefficient : quotient.denominator)
     denominator_numeric.push_back(
         ComplexBall::from_strings(coefficient.str()));
   auto denominator_tail = Magnitude::zero();
@@ -1168,6 +1196,149 @@ specialize_exact_backward_adjoint_row_taylor(
   return result;
 }
 
+inline ComplexBall exact_real_interval_ball(
+    const Rational& raw_left, const Rational& raw_right) {
+  const auto left = raw_left < raw_right ? raw_left : raw_right;
+  const auto right = raw_left < raw_right ? raw_right : raw_left;
+  const auto midpoint = (left + right) / Rational(2);
+  const auto radius = (right - left) / Rational(2);
+  auto interval = ComplexBall::from_strings(midpoint.str());
+  if (!radius.is_zero()) {
+    const auto error = ComplexBall::from_strings(radius.str());
+    arb_add_error(acb_realref(interval.raw()), acb_realref(error.raw()));
+  }
+  return interval;
+}
+
+inline ComplexBall evaluate_exact_t_polynomial_interval(
+    const std::vector<Rational>& coefficients,
+    const ComplexBall& interval) {
+  ComplexBall result(0);
+  for (std::size_t reverse = coefficients.size(); reverse-- > 0;)
+    result = result * interval +
+             ComplexBall::from_strings(coefficients[reverse].str());
+  return result;
+}
+
+inline Magnitude exact_t_rational_real_interval_upper(
+    const ExactTRationalFunction& exact,
+    const ComplexBall& interval, const std::string& context) {
+  const auto numerator = evaluate_exact_t_polynomial_interval(
+      exact.numerator, interval);
+  const auto denominator = evaluate_exact_t_polynomial_interval(
+      exact.denominator, interval);
+  if (denominator.contains_zero())
+    throw std::domain_error(
+        context + ": exact denominator is not separated on the real interval");
+  return Magnitude::upper_abs(numerator / denominator);
+}
+
+inline Magnitude normalized_backward_adjoint_c_real_interval_upper(
+    const NormalizedBackwardAdjointExactODE& normalized,
+    const ComplexBall& interval,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  if (epsilon_complete_max < 0 ||
+      epsilon_complete_max > normalized.epsilon_complete_max)
+    throw std::invalid_argument(
+        context + ": normalized real-interval C cap is out of range");
+  auto matrix_upper = Magnitude::zero();
+  for (std::size_t transpose_row = 0;
+       transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
+    auto row_upper = Magnitude::zero();
+    for (std::size_t physical_row = 0;
+         physical_row < normalized.c_by_entry.size(); ++physical_row) {
+      const auto& by_epsilon =
+          normalized.c_by_entry[physical_row][transpose_row];
+      for (std::int32_t epsilon = 0;
+           epsilon <= epsilon_complete_max; ++epsilon)
+        row_upper += exact_t_rational_real_interval_upper(
+            by_epsilon[static_cast<std::size_t>(epsilon)], interval,
+            context + ": transpose row " +
+                std::to_string(transpose_row) + ": physical row " +
+                std::to_string(physical_row) + ": epsilon " +
+                std::to_string(epsilon));
+    }
+    matrix_upper = Magnitude::maximum(matrix_upper, row_upper);
+  }
+  return matrix_upper;
+}
+
+inline Magnitude normalized_backward_adjoint_defect_quotient_real_interval_upper(
+    const NormalizedBackwardAdjointExactODE& normalized,
+    const PreparedSparseLocalMultiplierMatrix<Rational>& exact_row,
+    const BackwardAdjointTaylorResult& solution,
+    const ComplexBall& oriented_physical_jacobian,
+    const ComplexBall& interval,
+    std::int32_t epsilon_complete_max,
+    const std::string& context) {
+  const auto order = solution.taylor_complete_max;
+  auto defect = Magnitude::zero();
+  for (const auto& entry : exact_row.entries) {
+    const auto& multiplier = entry.multiplier;
+    if (multiplier.center_pole_order != 0 ||
+        !multiplier.analytic_coefficients.has_value())
+      throw std::domain_error(
+          context + ": real-ray defect needs an ordinary exact row");
+    for (std::size_t epsilon = 0;
+         epsilon < multiplier.analytic_coefficients->size(); ++epsilon) {
+      const auto raw_power = matching_detail::checked_power(
+          static_cast<std::int64_t>(multiplier.epsilon_shift) +
+              static_cast<std::int64_t>(epsilon),
+          "real-ray defect row epsilon power");
+      if (raw_power > epsilon_complete_max) continue;
+      const auto& rational = (*multiplier.analytic_coefficients)[epsilon];
+      auto numerator = rational.numerator;
+      numerator.insert(numerator.begin(), Rational(0));
+      const auto quotient = exact_t_rational_taylor_remainder_quotient(
+          canonical_exact_t_rational(
+              {std::move(numerator), rational.denominator}),
+          order,
+          context + ": forcing component " +
+              std::to_string(entry.column) + ": epsilon " +
+              std::to_string(raw_power));
+      defect += Magnitude::upper_abs(oriented_physical_jacobian) *
+                exact_t_rational_real_interval_upper(
+                    quotient, interval,
+                    context + ": forcing quotient");
+    }
+  }
+
+  for (std::uint32_t prefix_order = 1; prefix_order <= order;
+       ++prefix_order) {
+    const auto prefix_upper = vector_infinity_upper_through(
+        solution.coefficients[prefix_order - 1],
+        epsilon_complete_max);
+    if (prefix_upper.is_zero()) continue;
+    auto operator_quotient_upper = Magnitude::zero();
+    for (std::size_t transpose_row = 0;
+         transpose_row < normalized.c_by_entry.size(); ++transpose_row) {
+      auto row_upper = Magnitude::zero();
+      for (std::size_t physical_row = 0;
+           physical_row < normalized.c_by_entry.size(); ++physical_row) {
+        const auto& by_epsilon =
+            normalized.c_by_entry[physical_row][transpose_row];
+        for (std::int32_t epsilon = 0;
+             epsilon <= epsilon_complete_max; ++epsilon) {
+          const auto quotient = exact_t_rational_taylor_remainder_quotient(
+              by_epsilon[static_cast<std::size_t>(epsilon)],
+              order - prefix_order,
+              context + ": C quotient prefix " +
+                  std::to_string(prefix_order) + ": epsilon " +
+                  std::to_string(epsilon));
+          row_upper += exact_t_rational_real_interval_upper(
+              quotient, interval,
+              context + ": C quotient interval");
+        }
+      }
+      operator_quotient_upper = Magnitude::maximum(
+          operator_quotient_upper, row_upper);
+    }
+    defect += prefix_upper * operator_quotient_upper;
+  }
+  return defect;
+}
+
 }  // namespace adjoint_observable_detail
 
 inline Magnitude exact_combined_backward_adjoint_forcing_disk_upper(
@@ -1254,6 +1425,99 @@ inline Magnitude exact_combined_backward_adjoint_forcing_disk_upper(
   }
   return Magnitude::upper_abs(oriented_physical_jacobian) *
          radius_upper * row_disk_upper;
+}
+
+inline BackwardAdjointRealRayTailCertificate
+certify_backward_adjoint_real_ray_tail(
+    const adjoint_observable_detail::NormalizedBackwardAdjointExactODE&
+        normalized,
+    const PreparedSparseLocalMultiplierMatrix<Rational>& exact_row,
+    const BackwardAdjointTaylorResult& solution,
+    const ComplexBall& oriented_physical_jacobian,
+    const Rational& signed_evaluation_point,
+    std::int32_t epsilon_complete_max,
+    std::uint32_t maximum_subdivision_depth = 128,
+    const std::string& context =
+        "backward Fuchsian adjoint real-ray tail certificate") {
+  using namespace adjoint_observable_detail;
+  if (signed_evaluation_point.is_zero() ||
+      maximum_subdivision_depth == 0 ||
+      solution.dimension != normalized.truncated_ode.dimension)
+    throw std::invalid_argument(
+        context + ": invalid endpoint, depth, or dimension");
+  struct PendingInterval {
+    Rational left;
+    Rational right;
+    std::uint32_t depth = 0;
+  };
+  const auto left = signed_evaluation_point.sign() < 0
+      ? signed_evaluation_point : Rational(0);
+  const auto right = signed_evaluation_point.sign() < 0
+      ? Rational(0) : signed_evaluation_point;
+  std::vector<PendingInterval> pending{{left, right, 0}};
+  auto operator_upper = Magnitude::zero();
+  auto defect_quotient_upper = Magnitude::zero();
+  std::uint32_t accepted = 0;
+  std::string last_rejection;
+  const auto next_order =
+      static_cast<ulong>(solution.taylor_complete_max) + 1;
+  const auto next_order_magnitude = Magnitude::from_ui(next_order);
+
+  while (!pending.empty()) {
+    auto current = std::move(pending.back());
+    pending.pop_back();
+    try {
+      const auto interval = exact_real_interval_ball(
+          current.left, current.right);
+      const auto local_operator =
+          normalized_backward_adjoint_c_real_interval_upper(
+              normalized, interval, epsilon_complete_max,
+              context + ": operator interval depth " +
+                  std::to_string(current.depth));
+      if (next_order_magnitude <= local_operator)
+        throw std::domain_error(
+            context + ": interval operator norm does not prove stability");
+      const auto local_defect =
+          normalized_backward_adjoint_defect_quotient_real_interval_upper(
+              normalized, exact_row, solution,
+              oriented_physical_jacobian, interval,
+              epsilon_complete_max,
+              context + ": defect interval depth " +
+                  std::to_string(current.depth));
+      operator_upper = Magnitude::maximum(operator_upper, local_operator);
+      defect_quotient_upper = Magnitude::maximum(
+          defect_quotient_upper, local_defect);
+      ++accepted;
+    } catch (const std::domain_error& error) {
+      last_rejection = error.what();
+      if (current.depth >= maximum_subdivision_depth)
+        throw std::domain_error(
+            context + ": real interval subdivision exhausted at depth " +
+            std::to_string(current.depth) + "; last rejection=" +
+            last_rejection);
+      const auto midpoint =
+          (current.left + current.right) / Rational(2);
+      pending.push_back(
+          {midpoint, current.right, current.depth + 1});
+      pending.push_back(
+          {current.left, midpoint, current.depth + 1});
+    }
+  }
+
+  const auto stability_margin = Magnitude::positive_difference_lower(
+      next_order_magnitude, operator_upper);
+  if (stability_margin.is_zero())
+    throw std::domain_error(
+        context + ": real-ray stability margin is not positive");
+  const auto endpoint_modulus = signed_evaluation_point.sign() < 0
+      ? -signed_evaluation_point : signed_evaluation_point;
+  const auto endpoint_upper = Magnitude::upper_abs(
+      ComplexBall::from_strings(endpoint_modulus.str()));
+  const auto scaled_defect = defect_quotient_upper *
+      endpoint_upper.power_upper(next_order);
+  return {scaled_defect / stability_margin, scaled_defect,
+          operator_upper, stability_margin,
+          solution.taylor_complete_max, accepted};
 }
 
 template <typename Scalar>

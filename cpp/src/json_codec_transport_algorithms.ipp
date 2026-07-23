@@ -3706,25 +3706,42 @@ compute_terminal_composed_adjoint_diagnostic(
     const auto output_adjoint = evaluate_backward_adjoint_taylor(
         output_reservoir.result, *signed_point, logarithm,
         output_context + ": evaluation");
-    const auto output_tail =
-        certify_backward_adjoint_taylor_tail_adaptive_witness(
-            output_reservoir.problem, output_reservoir.result, row,
-            oriented_jacobian, *signed_point, point_modulus,
-            binding.geometry.radius, 128,
-            "terminal composed adjoint tail:" + arm_name + ":" +
-                std::to_string(tile_index) + ": output epsilon " +
-                std::to_string(output_power),
-            output_reservoir.input_epsilon_complete_max,
-            exact_row ? &*exact_row : nullptr,
-            recurrence_exact_equation,
-            normalized_exact_equation ? &*normalized_exact_equation
-                                      : nullptr);
-    recurrence_contraction = Magnitude::maximum(
-        recurrence_contraction,
-        output_tail.tail.recurrence_contraction_upper);
+    Magnitude adjoint_tail;
+    if (normalized_exact_equation && exact_row) {
+      const auto real_tail = certify_backward_adjoint_real_ray_tail(
+          *normalized_exact_equation, *exact_row,
+          output_reservoir.result, oriented_jacobian,
+          tile.local_begin,
+          output_reservoir.input_epsilon_complete_max, 128,
+          "terminal composed real-ray adjoint tail:" + arm_name + ":" +
+              std::to_string(tile_index) + ": output epsilon " +
+              std::to_string(output_power));
+      adjoint_tail = real_tail.absolute_vector_tail_upper;
+      const auto stability_ratio = real_tail.operator_norm_upper /
+          Magnitude::from_ui(
+              static_cast<ulong>(taylor_complete_max) + 1);
+      recurrence_contraction = Magnitude::maximum(
+          recurrence_contraction, stability_ratio);
+    } else {
+      const auto disk_tail =
+          certify_backward_adjoint_taylor_tail_adaptive_witness(
+              output_reservoir.problem, output_reservoir.result, row,
+              oriented_jacobian, *signed_point, point_modulus,
+              binding.geometry.radius, 128,
+              "terminal composed adjoint tail:" + arm_name + ":" +
+                  std::to_string(tile_index) + ": output epsilon " +
+                  std::to_string(output_power),
+              output_reservoir.input_epsilon_complete_max,
+              exact_row ? &*exact_row : nullptr,
+              recurrence_exact_equation);
+      adjoint_tail = disk_tail.tail.absolute_vector_tail_upper;
+      recurrence_contraction = Magnitude::maximum(
+          recurrence_contraction,
+          disk_tail.tail.recurrence_contraction_upper);
+    }
     const auto contracted_tail =
         backward_adjoint_contracted_tail_by_output(
-            output_tail.tail.absolute_vector_tail_upper,
+            adjoint_tail,
             output_adjoint, incoming,
             {output_power, output_power},
             "terminal composed adjoint coefficientwise tail:" + arm_name +

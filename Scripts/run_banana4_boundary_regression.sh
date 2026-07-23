@@ -146,11 +146,11 @@ common_environment=(
 if [[ ${BANANA4_BOUNDARY_WARM_CACHE:-0} == 1 ]]; then
   echo "=== warming banana4 FIRE preparation cache (not timed)"
   "${common_environment[@]}" \
-    "FT_STOP_AFTER_BOUNDARY_LEVEL=4" \
-    "FT_LADDER_CHECKPOINT_DIR=$scratch/warm-checkpoints" \
+    "FT_PREPARATION_ONLY=1" \
     wolframscript -file Scripts/run_ft_stepwise2.m \
     >"$scratch/warm.log"
-  if ! grep -Eq 'FTPREP CACHE (HIT|WRITE)' "$scratch/warm.log"; then
+  if ! grep -Eq 'FTPREP CACHE (HIT|WRITE)' "$scratch/warm.log" ||
+      ! grep -q 'FTPREP ONLY COMPLETE ' "$scratch/warm.log"; then
     echo "banana4 cache warmup did not produce or reuse a preparation cache" >&2
     tail -80 "$scratch/warm.log" >&2
     exit 1

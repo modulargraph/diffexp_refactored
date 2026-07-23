@@ -15,6 +15,89 @@ assert[label_String, condition_, detail_:None] := If[TrueQ[condition],
   failed++; Print["  FAIL: ", label, If[detail === None, "", ": "],
     If[detail === None, "", detail]]];
 
+reservoirBackendFailure = <|
+  "reason" -> "acb_match_residual_inconclusive",
+  "retryable_epsilon_reservoir" -> True,
+  "retryable_matching_clearance" -> False,
+  "required_additional_epsilon_orders" -> 3|>;
+clearanceBackendFailure = <|
+  "reason" -> "acb_match_residual_inconclusive",
+  "retryable_epsilon_reservoir" -> False,
+  "retryable_matching_clearance" -> True,
+  "required_additional_epsilon_orders" -> 0,
+  "residual" -> <|"complete_through_required" -> True,
+    "scope" -> "stored-taylor-truncation",
+    "coefficient_verdicts" -> <|
+      "pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>,
+    "required_coefficient_verdicts" -> <|
+      "pass" -> 100, "fail" -> 0, "inconclusive" -> 5|>|>|>;
+reservoirFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> reservoirBackendFailure|>];
+clearanceFailure = Failure["DiffExp2", <|
+  "BackendFailure" -> clearanceBackendFailure|>];
+reservoirRetry = ft2NativeMatchingReservoirRetry[reservoirFailure, 3];
+clearanceRetry = ft2NativeMatchingClearanceRetry[
+  clearanceFailure, 3, 50];
+assert["complete matching clearance retries Taylor order, not epsilon width",
+  ft2NativeMatchingReservoirRetry[clearanceFailure, 3] === None &&
+    ft2NativeMatchingClearanceRetry[
+      reservoirFailure, 3, 50] === None &&
+    ft2NativeMatchingReservoirRetryQ[reservoirRetry] &&
+    reservoirRetry[[2, "AdditionalOrders"]] === 3 &&
+    ft2NativeMatchingClearanceRetryQ[clearanceRetry] &&
+    ft2NativeMatchingRetryQ[clearanceRetry] &&
+    clearanceRetry[[2, "Level"]] === 3 &&
+    clearanceRetry[[2, "CurrentExpansionOrder"]] === 50 &&
+    clearanceRetry[[2, "AdditionalOrders"]] === 50 &&
+    clearanceRetry[[2, "ResidualVerdicts", "inconclusive"]] === 5,
+  {reservoirRetry, clearanceRetry}];
+
+assert["matching Taylor progress requires fewer inconclusive coefficients",
+  ft2NativeMatchingClearanceProgressQ[
+      <|"pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>,
+      <|"pass" -> 133, "fail" -> 0, "inconclusive" -> 119|>] &&
+    !ft2NativeMatchingClearanceProgressQ[
+      <|"pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>,
+      <|"pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>]];
+
+matchingTaylorRetryCalls = {};
+matchingTaylorRetryResult = Block[{
+    runExample = Function[{runName, familyRequest, epsilonHalos, taylorOrders},
+      AppendTo[matchingTaylorRetryCalls, taylorOrders];
+      If[Length[matchingTaylorRetryCalls] === 1,
+        Failure["FeynmanTrickNativeMatchingTaylor", <|
+          "Level" -> 3, "AdditionalOrders" -> expansionOrder,
+          "CurrentExpansionOrder" -> expansionOrder,
+          "ResidualVerdicts" -> <|
+            "pass" -> 10, "fail" -> 0, "inconclusive" -> 4|>,
+          "MatchingTaylorOrders" -> taylorOrders|>], True]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries["matching-taylor-retry-fixture"]];
+assert["matching retry driver doubles only the failing level Taylor order",
+  matchingTaylorRetryResult === True &&
+    matchingTaylorRetryCalls ===
+      {<||>, <|3 -> 2 expansionOrder|>},
+  matchingTaylorRetryCalls];
+
+matchingTaylorStallCalls = {};
+matchingTaylorStallResult = Block[{
+    runExample = Function[{runName, familyRequest, epsilonHalos, taylorOrders},
+      AppendTo[matchingTaylorStallCalls, taylorOrders];
+      Failure["FeynmanTrickNativeMatchingTaylor", <|
+        "Level" -> 2, "AdditionalOrders" -> expansionOrder,
+        "CurrentExpansionOrder" -> Lookup[taylorOrders, 2, expansionOrder],
+        "ResidualVerdicts" -> <|
+          "pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>,
+        "MatchingTaylorOrders" -> taylorOrders|>]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries["matching-taylor-stall-fixture"]];
+assert["matching retry stops after a Taylor order increase makes no progress",
+  FailureQ[matchingTaylorStallResult] &&
+    matchingTaylorStallResult[[1]] ===
+      "FeynmanTrickNativeMatchingTaylorStalled" &&
+    matchingTaylorStallCalls === {<||>, <|2 -> 2 expansionOrder|>},
+  {matchingTaylorStallResult, matchingTaylorStallCalls}];
+
 x = Global`xNativeFT;
 epsilon = Global`eps;
 request[index_, case_, vi_, vj_, needed_] := <|

@@ -1864,16 +1864,34 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
     const std::string& context) {
   matching_detail::ScopedAcbPrecision exact_shadow_precision(
       match.terminal_acb_extra_precision_bits());
+  const auto* route_raw =
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
+  const std::string route =
+      route_raw == nullptr ? std::string() : std::string(route_raw);
+  if (!route.empty() && route != "physical" && route != "factorized" &&
+      route != "adjoint" && route != "compare")
+    throw std::invalid_argument(
+        "DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE must be "
+        "factorized, physical, adjoint, or compare");
+  const bool direct_physical = route == "physical";
   // The adjoint factorization can be a genuinely Laurent system.  Its
   // inverse valuation and elimination-tail loss are properties of the live
   // endpoint matrix, not a universal integer guard derivable from the
   // requested output window.  This is a final consumer, so retain every
   // honestly available prepared-row coefficient and let the adjoint's exact
   // finite-window checks decide whether the upstream reservoir is sufficient.
-  const std::optional<std::int32_t> projection_cap = std::nullopt;
-  auto projected = project_terminal_acb_basis_row(
-      match, row, projection_cap,
-      context + ":row");
+  const std::optional<std::int32_t> projection_cap = direct_physical
+      ? std::optional<std::int32_t>(terminal_factorized_physical_complete_cap(
+            match, epsilon_contract.requested.complete_max, 0,
+            context + ": direct physical endpoint window", true))
+      : std::nullopt;
+  auto projected = direct_physical
+      ? project_terminal_acb_physical_basis_row(
+            match, row, *projection_cap,
+            context + ":physical-row")
+      : project_terminal_acb_basis_row(
+            match, row, projection_cap,
+            context + ":row");
   FiniteLaurentMatrix<ComplexBall> physical_rows;
   EndpointLimitResult result;
   result.imaginary_sign = binding.rim.value_or(1);
@@ -1899,9 +1917,13 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
               std::to_string(column)));
     }
     physical_rows.push_back(std::move(point_row));
-    auto contracted = match.adjoint_contract_terminal_acb_functionals(
-        physical_rows, epsilon_contract.required_complete_max,
-        context + ":factorized-adjoint-point-contraction", true);
+    auto contracted = direct_physical
+        ? match.contract_terminal_acb_physical_functionals(
+              physical_rows,
+              context + ":direct-physical-point-contraction")
+        : match.adjoint_contract_terminal_acb_functionals(
+              physical_rows, epsilon_contract.required_complete_max,
+              context + ":factorized-adjoint-point-contraction", true);
     if (contracted.size() != 1)
       throw std::logic_error(
           context +
@@ -2000,9 +2022,13 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
     }
     physical_rows.push_back(std::move(row_frames));
   }
-  auto contracted = match.adjoint_contract_terminal_acb_functionals(
-      physical_rows, epsilon_contract.required_complete_max,
-      context + ":factorized-adjoint-center-contraction", true);
+  auto contracted = direct_physical
+      ? match.contract_terminal_acb_physical_functionals(
+            physical_rows,
+            context + ":direct-physical-center-contraction")
+      : match.adjoint_contract_terminal_acb_functionals(
+            physical_rows, epsilon_contract.required_complete_max,
+            context + ":factorized-adjoint-center-contraction", true);
   if (contracted.size() != 1 + divergent_keys.size())
     throw std::logic_error(
         context +
@@ -3399,6 +3425,9 @@ void accumulate_terminal_line_diagnostics(
 
 struct TerminalComposedAdjointDiagnostic {
   EpsilonFrame<ComplexBall> value;
+  std::vector<Magnitude> coefficient_tail_uppers;
+  std::vector<Magnitude> coefficient_scale_lowers;
+  bool can_extend_taylor_exactly = false;
   std::uint32_t taylor_complete_max = 0;
   std::int32_t adjoint_epsilon_input_complete_max = 0;
   std::int32_t adjoint_epsilon_complete_max = 0;
@@ -3410,6 +3439,49 @@ struct TerminalComposedAdjointDiagnostic {
   Magnitude certified_output_tail_upper = Magnitude::zero();
   Magnitude recurrence_contraction_upper = Magnitude::zero();
 };
+
+bool terminal_composed_adjoint_meets_relative_accuracy(
+    const TerminalComposedAdjointDiagnostic& diagnostic,
+    const Magnitude& relative_tolerance) {
+  if (diagnostic.coefficient_tail_uppers.size() !=
+      diagnostic.coefficient_scale_lowers.size())
+    throw std::logic_error(
+        "terminal composed adjoint tail/scale diagnostics differ in size");
+  for (std::size_t index = 0;
+       index < diagnostic.coefficient_tail_uppers.size(); ++index)
+    if (diagnostic.coefficient_tail_uppers[index] >
+        diagnostic.coefficient_scale_lowers[index] * relative_tolerance)
+      return false;
+  return true;
+}
+
+Magnitude terminal_composed_adjoint_selection_tolerance(
+    const Magnitude& retained_match_tolerance) {
+  // A terminal value is input to the next ladder level, not the final public
+  // answer.  Selecting a tail which consumes essentially the entire match
+  // tolerance leaves no budget for the following basis reconstruction and
+  // turns a certified value into an inconclusive later handoff.  The value
+  // can cross several remaining ladder levels, so a merely local two-digit
+  // margin is insufficient (banana4 consumed it by level 2).  Reserve eight
+  // decimal digits at every published boundary; the adaptive exact-shadow
+  // route normally gains tens of digits with one additional Taylor step.
+  return retained_match_tolerance * Magnitude::decimal("1e-8");
+}
+
+Magnitude terminal_composed_adjoint_relative_tail_upper(
+    const TerminalComposedAdjointDiagnostic& diagnostic) {
+  if (diagnostic.coefficient_tail_uppers.size() !=
+      diagnostic.coefficient_scale_lowers.size())
+    throw std::logic_error(
+        "terminal composed adjoint tail/scale diagnostics differ in size");
+  auto result = Magnitude::zero();
+  for (std::size_t index = 0;
+       index < diagnostic.coefficient_tail_uppers.size(); ++index)
+    result = Magnitude::maximum(
+        result, diagnostic.coefficient_tail_uppers[index] /
+                    diagnostic.coefficient_scale_lowers[index]);
+  return result;
+}
 
 std::string terminal_composed_adjoint_indicial_summary(
     const StoredPlannedMatchHop& match) {
@@ -3451,7 +3523,9 @@ compute_terminal_composed_adjoint_diagnostic(
     const json::object& prepared_row,
     const RetainedArmPlan& arm, const std::string& arm_name,
     std::size_t tile_index,
-    const ObservableEpsilonContract& epsilon_contract) {
+    const ObservableEpsilonContract& epsilon_contract,
+    std::optional<std::uint32_t> requested_taylor_complete_max =
+        std::nullopt) {
   if (tile_index >= arm.exact.tiles.size())
     throw std::invalid_argument(
         "terminal composed adjoint tile index is out of range");
@@ -3511,8 +3585,14 @@ compute_terminal_composed_adjoint_diagnostic(
   const auto retained_taylor_complete_max = static_cast<std::uint32_t>(
       prototype.taylor_width() - 1);
   auto taylor_complete_max = retained_taylor_complete_max;
-  if (const auto* raw_order = std::getenv(
-          "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_TAYLOR_ORDER")) {
+  if (requested_taylor_complete_max.has_value()) {
+    if (*requested_taylor_complete_max < retained_taylor_complete_max ||
+        *requested_taylor_complete_max > 2000)
+      throw std::invalid_argument(
+          "requested terminal composed Taylor order must lie between the retained order and 2000");
+    taylor_complete_max = *requested_taylor_complete_max;
+  } else if (const auto* raw_order = std::getenv(
+                 "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_TAYLOR_ORDER")) {
     char* end = nullptr;
     const auto parsed = std::strtoul(raw_order, &end, 10);
     if (raw_order[0] == '\0' || end == raw_order || *end != '\0' ||
@@ -3770,6 +3850,8 @@ compute_terminal_composed_adjoint_diagnostic(
         raw_output - certified_output_min)] = contracted_tail.front();
   }
   auto output_tail = Magnitude::zero();
+  std::vector<Magnitude> output_scales;
+  output_scales.reserve(output_tails.size());
   std::vector<ComplexBall> widened_coefficients;
   widened_coefficients.reserve(output_tails.size());
   for (std::size_t offset = 0; offset < output_tails.size();
@@ -3779,13 +3861,17 @@ compute_terminal_composed_adjoint_diagnostic(
             static_cast<std::int64_t>(offset),
         "terminal composed requested output power");
     auto coefficient = contracted.coefficient(power);
+    output_scales.push_back(Magnitude::maximum(
+        Magnitude::one(), Magnitude::lower_abs(coefficient)));
     output_tails[offset].add_error_to(coefficient);
     widened_coefficients.push_back(std::move(coefficient));
     output_tail = Magnitude::maximum(output_tail, output_tails[offset]);
   }
   contracted = EpsilonFrame<ComplexBall>(certified_output_min,
                                          std::move(widened_coefficients));
-  return {std::move(contracted), taylor_complete_max,
+  return {std::move(contracted), std::move(output_tails),
+          std::move(output_scales), exact_physical_equation != nullptr,
+          taylor_complete_max,
           reservoir.input_epsilon_complete_max,
           solved.common_epsilon_complete_max,
           coefficientwise_first_input_complete_max,
@@ -3869,10 +3955,69 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
           << " local_interval=[" << tile.local_begin.str() << ","
           << tile.local_end.str() << "]\n";
     } else try {
-      composed_diagnostic = compute_terminal_composed_adjoint_diagnostic(
-          match, prepared_row, arm, arm_name, tile_index,
-          epsilon_contract);
-      composed_authoritative = mode == "authoritative";
+      std::optional<std::uint32_t> requested_taylor_complete_max;
+      const auto learned_taylor_order =
+          match.terminal_composed_taylor_order_floor();
+      if (learned_taylor_order > 0)
+        requested_taylor_complete_max = learned_taylor_order;
+      const auto relative_tolerance = Magnitude::decimal(
+          match.terminal_acb_relative_tolerance_text());
+      const auto selection_tolerance =
+          terminal_composed_adjoint_selection_tolerance(
+              relative_tolerance);
+      for (;;) {
+        composed_diagnostic = compute_terminal_composed_adjoint_diagnostic(
+            match, prepared_row, arm, arm_name, tile_index,
+            epsilon_contract, requested_taylor_complete_max);
+        if (mode != "authoritative")
+          break;
+        if (terminal_composed_adjoint_meets_relative_accuracy(
+                *composed_diagnostic, selection_tolerance)) {
+          match.learn_terminal_composed_taylor_order_floor(
+              composed_diagnostic->taylor_complete_max);
+          break;
+        }
+        if (!composed_diagnostic->can_extend_taylor_exactly) {
+          std::cerr
+              << "terminal-composed-adjoint-selected arm=" << arm_name
+              << " tile=" << tile_index
+              << " status=authoritative-fallback-insufficient-accuracy"
+              << " detail=no-exact-equation-for-taylor-extension"
+              << " relative_tail_upper="
+              << terminal_composed_adjoint_relative_tail_upper(
+                     *composed_diagnostic).approximate_upper()
+              << " relative_tolerance="
+              << match.terminal_acb_relative_tolerance_text()
+              << " selection_tolerance_factor=1e-8\n";
+          break;
+        }
+        const auto completed = composed_diagnostic->taylor_complete_max;
+        if (completed >= 2000)
+          throw std::domain_error(
+              "terminal composed adjoint did not meet the retained match accuracy by Taylor order 2000");
+        const auto next = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            2000, static_cast<std::uint64_t>(completed) +
+                      std::max<std::uint64_t>(
+                          32,
+                          static_cast<std::uint64_t>(completed) / 2)));
+        std::cerr
+            << "terminal-composed-adjoint-retry arm=" << arm_name
+            << " tile=" << tile_index
+            << " reason=insufficient-authoritative-accuracy"
+            << " completed_taylor=" << completed
+            << " next_taylor=" << next
+            << " relative_tail_upper="
+            << terminal_composed_adjoint_relative_tail_upper(
+                   *composed_diagnostic).approximate_upper()
+            << " relative_tolerance="
+            << match.terminal_acb_relative_tolerance_text()
+            << " selection_tolerance_factor=1e-8\n";
+        requested_taylor_complete_max = next;
+      }
+      composed_authoritative =
+          mode == "authoritative" &&
+          terminal_composed_adjoint_meets_relative_accuracy(
+              *composed_diagnostic, selection_tolerance);
       std::cerr
           << "terminal-composed-adjoint arm=" << arm_name
           << " tile=" << tile_index
@@ -3900,6 +4045,9 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       std::cerr
           << " certified_output_tail_upper="
           << composed_diagnostic->certified_output_tail_upper.approximate_upper()
+          << " relative_output_tail_upper="
+          << terminal_composed_adjoint_relative_tail_upper(
+                 *composed_diagnostic).approximate_upper()
           << " recurrence_contraction_upper="
           << composed_diagnostic->recurrence_contraction_upper.approximate_upper()
           << '\n';

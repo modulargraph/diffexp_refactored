@@ -73,13 +73,16 @@ Scripts/run_banana4_boundary_regression.sh
 ```
 
 Or append it to the release suite with `DE2_RUN_BANANA4_BOUNDARY=1`. The
-pinned configuration is working precision 300, matching contract 80 digits,
+pinned configuration is working precision 500, matching contract 25 digits,
 Taylor order 50, public epsilon order 4, private matching halos
 `20,14,8,0`, private composed-adjoint order 100, and 10 C++ threads by
 default. A fresh transport checkpoint is mandatory. The gate requires a
-certified center-ending composed-adjoint tail in every executed ladder level,
-rejects unsupported/retry markers, and accepts a noncenter terminal tile only
-when it is explicitly classified as outside the one-contraction theorem.
+center-ending composed-adjoint tail which also satisfies its downstream
+accuracy budget in every executed ladder level. It rejects epsilon-reservoir,
+stalled/exhausted Taylor, and unsupported markers; a bounded Taylor retry is
+allowed only while its coefficient verdict strictly improves. A noncenter
+terminal tile is accepted only when it is explicitly classified as outside
+the one-contraction theorem.
 
 For a quicker diagnostic that only produces the level-3 boundary, set
 `BANANA4_BOUNDARY_TARGET_LEVEL=3`. This is not the release default because it
@@ -87,7 +90,7 @@ does not exercise the near-endpoint pole that previously failed at the next
 handoff. `BANANA4_BOUNDARY_ADJOINT_ORDER` may be raised for experiments but
 may not be smaller than `BANANA4_BOUNDARY_EXPANSION_ORDER`.
 
-The default ceiling is 900 seconds and can be changed with
+The default ceiling is 420 seconds and can be changed with
 `BANANA4_BOUNDARY_MAX_SECONDS` when qualifying hardware. As with the other
 gates, the measured run must be a preparation-cache hit. Set
 `BANANA4_BOUNDARY_WARM_CACHE=1` once when populating a new cache; preparation

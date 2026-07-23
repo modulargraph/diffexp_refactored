@@ -636,6 +636,14 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           "compact terminal match diagnostic requires one retained Acb match");
     return acb->compact_terminal_diagnostic_summary();
   }
+  const std::string& terminal_acb_relative_tolerance_text() const {
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (!acb)
+      throw std::invalid_argument(
+          "terminal matching tolerance requires one retained Acb match");
+    return acb->relative_tolerance_text();
+  }
   const std::shared_ptr<StoredTilePlan>& plan_owner() const {
     return plan_owner_;
   }
@@ -1047,6 +1055,21 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
   adjoint_observable_detail::BackwardAdjointRealRayOperatorCache&
   terminal_backward_adjoint_real_ray_operator_cache() const {
     return terminal_real_ray_operator_cache_;
+  }
+
+  std::uint32_t terminal_composed_taylor_order_floor() const {
+    return terminal_composed_taylor_order_floor_.load(
+        std::memory_order_relaxed);
+  }
+
+  void learn_terminal_composed_taylor_order_floor(
+      std::uint32_t order) const {
+    auto current = terminal_composed_taylor_order_floor_.load(
+        std::memory_order_relaxed);
+    while (current < order &&
+           !terminal_composed_taylor_order_floor_.compare_exchange_weak(
+               current, order, std::memory_order_relaxed,
+               std::memory_order_relaxed)) {}
   }
 
   FiniteLaurentVector<ComplexBall>
@@ -3188,6 +3211,8 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       terminal_normalized_adjoint_cache_;
   mutable adjoint_observable_detail::BackwardAdjointRealRayOperatorCache
       terminal_real_ray_operator_cache_;
+  mutable std::atomic<std::uint32_t>
+      terminal_composed_taylor_order_floor_{0};
 };
 
 class StoredTransportArmState {

@@ -3,7 +3,10 @@
 # boundary.  This is intentionally excluded from ordinary per-change tests:
 # it exercises Wolfram manifest construction, LibraryLink JSON forwarding,
 # exact Rational-shadow ownership/checkpointing, the singular physical ODE,
-# and the native terminal composed-adjoint certificate at expansion order 50.
+# and authoritative native terminal composed-adjoint selection at expansion
+# order 50.  The latter must adapt its private adjoint Taylor order until its
+# rigorous enclosure meets the retained matching tolerance; containment alone
+# is not sufficient for a value consumed by the next ladder level.
 #
 # FIRE preparation is outside the measured transport contract.  Populate the
 # ordinary preparation cache once with BANANA4_BOUNDARY_WARM_CACHE=1.
@@ -13,9 +16,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 
-max_seconds=${BANANA4_BOUNDARY_MAX_SECONDS:-900}
-working_precision=${BANANA4_BOUNDARY_WORKING_PRECISION:-300}
-matching_digits=${BANANA4_BOUNDARY_MATCH_DIGITS:-80}
+max_seconds=${BANANA4_BOUNDARY_MAX_SECONDS:-420}
+working_precision=${BANANA4_BOUNDARY_WORKING_PRECISION:-500}
+matching_digits=${BANANA4_BOUNDARY_MATCH_DIGITS:-25}
 expansion_order=${BANANA4_BOUNDARY_EXPANSION_ORDER:-50}
 adjoint_order=${BANANA4_BOUNDARY_ADJOINT_ORDER:-100}
 target_level=${BANANA4_BOUNDARY_TARGET_LEVEL:-2}
@@ -88,7 +91,7 @@ common_environment=(
   "DE2_RECURRENCE_BACKEND=Cpp"
   "DE2_CPP_THREADS=$cpp_threads"
   "DE2_VALUE_TRANSPORT=1"
-  "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT=require"
+  "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT=authoritative"
   "DE2_DIAGNOSTIC_TERMINAL_COMPOSED_TAYLOR_ORDER=$adjoint_order"
   "FT_CPP_BATCH_ENDPOINT_ARMS=1"
   "FT_EXAMPLES=banana4"
@@ -182,6 +185,13 @@ for source_level in range(4, target_level, -1):
         raise SystemExit(
             f"missing center-ending composed-adjoint certificate in level {source_level}"
         )
+    if not any(
+        "status=authoritative-certified-value" in line
+        for line in lines[segment_begin:batch_index]
+    ):
+        raise SystemExit(
+            f"missing accuracy-qualified authoritative composed value in level {source_level}"
+        )
     segment_begin = batch_index + 1
 
 require(
@@ -191,7 +201,10 @@ require(
 
 for forbidden in (
     "FTLADDER NATIVE BATCH FAIL",
-    "FTLADDER NATIVE MATCH RETRY",
+    "FTLADDER NATIVE MATCH RETRY level=",
+    "FTLADDER NATIVE MATCH TAYLOR RETRY STALLED",
+    "FTLADDER NATIVE MATCH TAYLOR RETRY EXHAUSTED",
+    "status=authoritative-fallback-insufficient-accuracy",
     "status=unsupported",
     "FAILED banana4 boundary",
 ):

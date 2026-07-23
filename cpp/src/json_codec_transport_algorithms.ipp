@@ -3400,7 +3400,12 @@ void accumulate_terminal_line_diagnostics(
 struct TerminalComposedAdjointDiagnostic {
   EpsilonFrame<ComplexBall> value;
   std::uint32_t taylor_complete_max = 0;
+  std::int32_t adjoint_epsilon_input_complete_max = 0;
   std::int32_t adjoint_epsilon_complete_max = 0;
+  std::int32_t coefficientwise_first_input_complete_max = 0;
+  std::int32_t coefficientwise_last_input_complete_max = 0;
+  std::int32_t coefficientwise_min_input_complete_max = 0;
+  std::int32_t coefficientwise_max_input_complete_max = 0;
   std::optional<double> last_coefficient_ratio_upper;
   Magnitude certified_output_tail_upper = Magnitude::zero();
   Magnitude recurrence_contraction_upper = Magnitude::zero();
@@ -3505,13 +3510,8 @@ compute_terminal_composed_adjoint_diagnostic(
   const auto oriented_jacobian = binding.scale_numeric;
   const auto taylor_complete_max = static_cast<std::uint32_t>(
       prototype.taylor_width() - 1);
-  auto problem = prepare_backward_adjoint_taylor_problem(
-      *match.terminal_acb_receiving_physical_equation(), row,
-      taylor_complete_max, required_adjoint_complete,
-      required_adjoint_complete,
-      oriented_jacobian,
-      "terminal composed adjoint:" + arm_name + ":" +
-          std::to_string(tile_index));
+  const auto physical_equation =
+      match.terminal_acb_receiving_physical_equation();
   const auto exact_physical_equation =
       match.terminal_rational_shadow_physical_equation();
   if (!exact_physical_equation &&
@@ -3519,10 +3519,55 @@ compute_terminal_composed_adjoint_diagnostic(
           owners.front()->retained_equation_owner()))
     throw std::domain_error(
         "terminal composed adjoint composite owner has no bound exact Rational-shadow physical equation");
-  auto solved = solve_backward_adjoint_taylor(
-      problem, exact_physical_equation.get(),
+  std::optional<PreparedSparseLocalMultiplierMatrix<Rational>> exact_row;
+  if (exact_physical_equation) {
+    PreparedSparseLocalMultiplierMatrix<Rational> parsed;
+    parsed.rows = 1;
+    parsed.columns = row.columns;
+    parsed.exact_identity = row.exact_identity;
+    const auto& raw_entries = as_array(
+        prepared_row.at("entries"),
+        "terminal composed exact rational-row entries");
+    if (raw_entries.size() != row.entries.size())
+      throw std::logic_error(
+          "terminal composed exact/numeric rational rows differ in size");
+    parsed.entries.reserve(raw_entries.size());
+    for (std::size_t index = 0; index < raw_entries.size(); ++index) {
+      const auto& raw_entry = as_object(
+          raw_entries[index], "terminal composed exact rational-row entry");
+      const auto column = as_u32(
+          raw_entry.at("column"),
+          "terminal composed exact rational-row column");
+      if (column != row.entries[index].column)
+        throw std::logic_error(
+            "terminal composed exact/numeric rational-row columns differ");
+      const auto& raw_multiplier = as_object(
+          raw_entry.at("multiplier"),
+          "terminal composed exact rational-row multiplier");
+      auto multiplier =
+          parse_prepared_rational_taylor_multiplier<Rational>(
+              raw_multiplier,
+              row.entries[index].multiplier.kernels.size(),
+              prototype.taylor_width(), false,
+              "terminal composed exact rational-row multiplier");
+      parsed.entries.push_back({0, column, std::move(multiplier)});
+    }
+    exact_row = std::move(parsed);
+  }
+  const auto solve_context =
       "terminal composed adjoint:" + arm_name + ":" +
-          std::to_string(tile_index));
+      std::to_string(tile_index);
+  auto reservoir =
+      solve_backward_adjoint_taylor_with_epsilon_reservoir(
+          [&](std::int32_t input_complete_max) {
+            return prepare_backward_adjoint_taylor_problem(
+                *physical_equation, row, taylor_complete_max,
+                input_complete_max, required_adjoint_complete,
+                oriented_jacobian, solve_context);
+          },
+          required_adjoint_complete, row_complete,
+          exact_physical_equation.get(), solve_context);
+  const auto& solved = reservoir.result;
   const auto signed_point =
       local_algebra_detail::signed_real_evaluation_ball(
           certified_tile.local_begin);
@@ -3547,23 +3592,92 @@ compute_terminal_composed_adjoint_diagnostic(
   if (!(point_modulus < binding.geometry.radius))
     throw std::domain_error(
         "terminal composed adjoint match point is not inside the chart radius");
-  const auto adaptive_tail =
-      certify_backward_adjoint_taylor_tail_adaptive_witness(
-          problem, solved, row, oriented_jacobian, *signed_point,
-          point_modulus, binding.geometry.radius, 16,
-          "terminal composed adjoint tail:" + arm_name + ":" +
-              std::to_string(tile_index));
-  const auto& tail = adaptive_tail.tail;
-
+  std::cerr
+      << "terminal-composed-adjoint-geometry arm=" << arm_name
+      << " tile=" << tile_index
+      << " planning_local_begin=" << tile.local_begin.str()
+      << " certified_local_midpoint="
+      << signed_point->real_midpoint(32)
+      << " certified_local_radius_2exp="
+      << signed_point->real_radius_exponent()
+      << " exact_point_modulus=" << point_modulus.str()
+      << " exact_chart_radius=" << binding.geometry.radius.str()
+      << '\n';
   auto contracted = contract_backward_adjoint(
       adjoint, incoming,
       "terminal composed adjoint contraction:" + arm_name + ":" +
           std::to_string(tile_index));
-  const auto output_tails = backward_adjoint_contracted_tail_by_output(
-      tail.absolute_vector_tail_upper, adjoint, incoming,
-      contracted.window(),
-      "terminal composed adjoint coefficientwise tail:" + arm_name + ":" +
-          std::to_string(tile_index));
+  std::vector<Magnitude> output_tails(
+      contracted.window().width(), Magnitude::zero());
+  auto recurrence_contraction = Magnitude::zero();
+  auto coefficientwise_first_input_complete_max =
+      std::numeric_limits<std::int32_t>::max();
+  auto coefficientwise_last_input_complete_max =
+      std::numeric_limits<std::int32_t>::min();
+  auto coefficientwise_min_input_complete_max =
+      std::numeric_limits<std::int32_t>::max();
+  auto coefficientwise_max_input_complete_max =
+      std::numeric_limits<std::int32_t>::min();
+  for (std::int64_t raw_output = contracted.min_power();
+       raw_output <= contracted.complete_max(); ++raw_output) {
+    const auto output_power = static_cast<std::int32_t>(raw_output);
+    const auto output_required_adjoint_complete =
+        local_algebra_detail::checked_i32(
+            raw_output - static_cast<std::int64_t>(incoming_min),
+            "terminal composed coefficientwise adjoint epsilon maximum");
+    const auto output_context =
+        solve_context + ": output epsilon " +
+        std::to_string(output_power);
+    auto output_reservoir =
+        solve_backward_adjoint_taylor_with_epsilon_reservoir(
+            [&](std::int32_t input_complete_max) {
+              return prepare_backward_adjoint_taylor_problem(
+                  *physical_equation, row, taylor_complete_max,
+                  input_complete_max,
+                  output_required_adjoint_complete,
+                  oriented_jacobian, output_context);
+            },
+            output_required_adjoint_complete, row_complete,
+            exact_physical_equation.get(), output_context);
+    if (raw_output == contracted.min_power())
+      coefficientwise_first_input_complete_max =
+          output_reservoir.input_epsilon_complete_max;
+    coefficientwise_last_input_complete_max =
+        output_reservoir.input_epsilon_complete_max;
+    coefficientwise_min_input_complete_max = std::min(
+        coefficientwise_min_input_complete_max,
+        output_reservoir.input_epsilon_complete_max);
+    coefficientwise_max_input_complete_max = std::max(
+        coefficientwise_max_input_complete_max,
+        output_reservoir.input_epsilon_complete_max);
+    const auto output_adjoint = evaluate_backward_adjoint_taylor(
+        output_reservoir.result, *signed_point, logarithm,
+        output_context + ": evaluation");
+    const auto output_tail =
+        certify_backward_adjoint_taylor_tail_adaptive_witness(
+            output_reservoir.problem, output_reservoir.result, row,
+            oriented_jacobian, *signed_point, point_modulus,
+            binding.geometry.radius, 128,
+            "terminal composed adjoint tail:" + arm_name + ":" +
+                std::to_string(tile_index) + ": output epsilon " +
+                std::to_string(output_power),
+            output_reservoir.result.common_epsilon_complete_max,
+            exact_row ? &*exact_row : nullptr,
+            exact_physical_equation.get());
+    recurrence_contraction = Magnitude::maximum(
+        recurrence_contraction,
+        output_tail.tail.recurrence_contraction_upper);
+    const auto contracted_tail =
+        backward_adjoint_contracted_tail_by_output(
+            output_tail.tail.absolute_vector_tail_upper,
+            output_adjoint, incoming,
+            {output_power, output_power},
+            "terminal composed adjoint coefficientwise tail:" + arm_name +
+                ":" + std::to_string(tile_index) + ": output epsilon " +
+                std::to_string(output_power));
+    output_tails[static_cast<std::size_t>(
+        raw_output - contracted.min_power())] = contracted_tail.front();
+  }
   auto output_tail = Magnitude::zero();
   auto widened_coefficients = contracted.coefficients();
   for (std::size_t offset = 0; offset < widened_coefficients.size();
@@ -3574,9 +3688,14 @@ compute_terminal_composed_adjoint_diagnostic(
   contracted = EpsilonFrame<ComplexBall>(
       contracted.window(), std::move(widened_coefficients));
   return {std::move(contracted), taylor_complete_max,
+          reservoir.input_epsilon_complete_max,
           solved.common_epsilon_complete_max,
+          coefficientwise_first_input_complete_max,
+          coefficientwise_last_input_complete_max,
+          coefficientwise_min_input_complete_max,
+          coefficientwise_max_input_complete_max,
           solved.last_coefficient_ratio_upper, output_tail,
-          tail.recurrence_contraction_upper};
+          recurrence_contraction};
 }
 
 StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
@@ -3659,8 +3778,19 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
           << " status=certified-composed-tail"
           << " taylor_complete_max="
           << composed_diagnostic->taylor_complete_max
+          << " adjoint_epsilon_input_complete_max="
+          << composed_diagnostic->adjoint_epsilon_input_complete_max
           << " adjoint_epsilon_complete_max="
           << composed_diagnostic->adjoint_epsilon_complete_max
+          << " coefficientwise_first_input_complete_max="
+          << composed_diagnostic->coefficientwise_first_input_complete_max
+          << " coefficientwise_last_input_complete_max="
+          << composed_diagnostic->coefficientwise_last_input_complete_max
+          << " coefficientwise_input_complete_range=["
+          << composed_diagnostic->coefficientwise_min_input_complete_max
+          << ","
+          << composed_diagnostic->coefficientwise_max_input_complete_max
+          << "]"
           << " last_coefficient_ratio_upper=";
       if (composed_diagnostic->last_coefficient_ratio_upper.has_value())
         std::cerr << *composed_diagnostic->last_coefficient_ratio_upper;

@@ -282,6 +282,17 @@ ExactEpsilonRational<ComplexBall> exact_constant(const std::string& value) {
   return result;
 }
 
+ExactEpsilonRational<Rational> exact_rational_constant(
+    const std::string& value) {
+  ExactEpsilonRational<Rational> result;
+  result.zero = value == "0";
+  if (!result.zero) {
+    result.numerator = {Rational(value)};
+    result.denominator = {Rational(1)};
+  }
+  return result;
+}
+
 PreparedPhysicalClearedODE<ComplexBall> scalar_ode(
     const std::string& alpha) {
   PreparedPhysicalClearedODE<ComplexBall> ode;
@@ -356,7 +367,8 @@ bool certified_geometric_tail() {
   const auto witness_radius = ball("1/2");
   const auto forcing_bound =
       backward_adjoint_forcing_cauchy_numerator_upper(
-          problem, row, ball("1"), witness_radius,
+          problem, row, ball("1"), witness_radius, std::nullopt,
+          nullptr, nullptr,
           "geometric composed forcing bound");
   const auto certificate = certify_backward_adjoint_taylor_tail(
       problem, solved, evaluation_point, witness_radius, forcing_bound,
@@ -380,7 +392,8 @@ bool tail_certificate_fails_closed() {
       problem, "fail-closed composed-tail solve");
   try {
     (void)backward_adjoint_forcing_cauchy_numerator_upper(
-        problem, row, ball("1"), ball("2"),
+        problem, row, ball("1"), ball("2"), std::nullopt,
+        nullptr, nullptr,
         "crossed-denominator forcing bound");
     return false;
   } catch (const std::domain_error&) {
@@ -418,6 +431,114 @@ bool adaptive_witness_respects_row_pole() {
          certificate.tail.certified_after_taylor_order == 4;
 }
 
+bool adaptive_witness_handles_narrow_denominator_clearance() {
+  const Rational evaluation_exact("1/4");
+  const Rational pole_exact =
+      evaluation_exact + Rational(1) / Rational(1048576);
+  const auto evaluation = ball(evaluation_exact.str());
+  const auto inverse_pole = ball("1") / ball(pole_exact.str());
+  auto row = scalar_row();
+  auto& multiplier = row.entries.front().multiplier;
+  auto power = ball("1");
+  for (auto& coefficient : multiplier.kernels.front()) {
+    coefficient = power;
+    power *= inverse_pole;
+  }
+  multiplier.analytic_coefficients->front().denominator = {
+      ball("1"), -inverse_pole};
+  const auto problem = prepare_backward_adjoint_taylor_problem(
+      scalar_ode("0"), row, 4, 0, 0, ball("1"),
+      "narrow-clearance composed-tail adapter");
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, "narrow-clearance composed-tail solve");
+  bool shallow_failed = false;
+  try {
+    (void)certify_backward_adjoint_taylor_tail_adaptive_witness(
+        problem, solved, row, ball("1"), evaluation,
+        evaluation_exact, Rational(1), 16,
+        "narrow-clearance shallow witness");
+  } catch (const std::domain_error&) {
+    shallow_failed = true;
+  }
+  if (!shallow_failed) return false;
+  const auto deep =
+      certify_backward_adjoint_taylor_tail_adaptive_witness(
+          problem, solved, row, ball("1"), evaluation,
+          evaluation_exact, Rational(1), 64,
+          "narrow-clearance deep witness");
+  return evaluation_exact < deep.witness_radius_exact &&
+         deep.witness_radius_exact < pole_exact;
+}
+
+bool exact_combined_forcing_cancels_cleared_row_pole() {
+  PreparedPhysicalClearedODE<ComplexBall> numeric_ode;
+  numeric_ode.dimension = 1;
+  numeric_ode.q_lags = {exact_constant("1"), exact_constant("-2")};
+  numeric_ode.c_lags = {{}, {}};
+  numeric_ode.owner_signature_identity = "cleared-pole-numeric-owner";
+  numeric_ode.payload_identity = "cleared-pole-numeric-payload";
+  numeric_ode.exact_payload_record = "cleared-pole-numeric-record";
+
+  auto numeric_row = scalar_row();
+  auto& numeric_multiplier = numeric_row.entries.front().multiplier;
+  numeric_multiplier.kernels.front() = {
+      ball("1"), ball("2"), ball("4"), ball("8")};
+  numeric_multiplier.analytic_coefficients->front().denominator = {
+      ball("1"), ball("-2")};
+  const auto problem = prepare_backward_adjoint_taylor_problem(
+      numeric_ode, numeric_row, 4, 0, 0, ball("1"),
+      "cleared-row-pole composed adapter");
+  const auto solved = solve_backward_adjoint_taylor(
+      problem, "cleared-row-pole composed solve");
+
+  bool separate_bound_failed = false;
+  try {
+    (void)certify_backward_adjoint_taylor_tail_adaptive_witness(
+        problem, solved, numeric_row, ball("1"), ball("1/4"),
+        Rational("1/4"), Rational(1), 1,
+        "separate cleared-row-pole witness", 0);
+  } catch (const std::domain_error&) {
+    separate_bound_failed = true;
+  }
+  if (!separate_bound_failed) return false;
+
+  PreparedPhysicalClearedODE<Rational> exact_ode;
+  exact_ode.dimension = 1;
+  exact_ode.q_lags = {
+      exact_rational_constant("1"), exact_rational_constant("-2")};
+  exact_ode.c_lags = {{}, {}};
+  exact_ode.owner_signature_identity = "cleared-pole-exact-owner";
+  exact_ode.payload_identity = "cleared-pole-exact-payload";
+  exact_ode.exact_payload_record = "cleared-pole-exact-record";
+
+  PreparedSparseLocalMultiplierMatrix<Rational> exact_row;
+  exact_row.rows = 1;
+  exact_row.columns = 1;
+  exact_row.exact_identity = "cleared-pole-exact-row";
+  PreparedRationalTaylorMultiplier<Rational> exact_multiplier;
+  exact_multiplier.kernels = {{Rational(1), Rational(2), Rational(4),
+                               Rational(8)}};
+  exact_multiplier.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<Rational>>{{
+          {Rational(1)}, {Rational(1), Rational(-2)}}};
+  exact_multiplier.exact_identity = "cleared-pole-exact-multiplier";
+  exact_row.entries.push_back({0, 0, std::move(exact_multiplier)});
+
+  const auto crossed_combined_bound =
+      exact_combined_backward_adjoint_forcing_disk_upper(
+          problem, exact_row, exact_ode, ball("1"), ball("5/8"), 0,
+          "crossed combined cleared-row-pole bound");
+  const auto combined =
+      certify_backward_adjoint_taylor_tail_adaptive_witness(
+          problem, solved, numeric_row, ball("1"), ball("1/4"),
+          Rational("1/4"), Rational(1), 2,
+          "combined cleared-row-pole witness", 0,
+          &exact_row, &exact_ode);
+  return crossed_combined_bound.is_finite() &&
+         combined.witness_radius_exact == Rational("7/16") &&
+         combined.tail.absolute_vector_tail_upper.is_finite();
+}
+
 bool coefficientwise_tail_ignores_irrelevant_high_epsilon_input() {
   FiniteLaurentVector<ComplexBall> adjoint{
       EpsilonFrame<ComplexBall>(0, {ball("1")})};
@@ -434,6 +555,77 @@ bool coefficientwise_tail_ignores_irrelevant_high_epsilon_input() {
          tails.front().approximate_upper() >= 2.0;
 }
 
+bool forcing_bound_ignores_epsilon_above_private_cap() {
+  auto row = scalar_row(0, true);
+  auto& multiplier = row.entries.front().multiplier;
+  multiplier.kernels.push_back(
+      std::vector<ComplexBall>(4, ball("1e100")));
+  PreparedRationalAnalyticCoefficient<ComplexBall> huge;
+  huge.numerator = {ball("1e100")};
+  huge.denominator = {ball("1"), ball("-1")};
+  multiplier.analytic_coefficients->push_back(std::move(huge));
+  const auto problem = prepare_backward_adjoint_taylor_problem(
+      scalar_ode("0"), row, 4, 0, 0, ball("1"),
+      "private-cap forcing-bound adapter");
+  const auto capped = backward_adjoint_forcing_cauchy_numerator_upper(
+      problem, row, ball("1"), ball("1/2"), 0, nullptr, nullptr,
+      "private-cap forcing bound");
+  const auto uncapped = backward_adjoint_forcing_cauchy_numerator_upper(
+      problem, row, ball("1"), ball("1/2"), std::nullopt,
+      nullptr, nullptr,
+      "uncapped forcing bound");
+  return capped.approximate_upper() < 2.0 &&
+         uncapped.approximate_upper() > 1e90;
+}
+
+bool private_epsilon_reservoir_covers_inverse_loss() {
+  const auto factory = [](std::int32_t input_complete_max) {
+    const auto extended = [input_complete_max](
+        std::int32_t minimum,
+        std::initializer_list<std::pair<std::int32_t, const char*>> terms) {
+      std::vector<ComplexBall> coefficients(
+          static_cast<std::size_t>(input_complete_max - minimum) + 1,
+          ball("0"));
+      for (const auto& [power, value] : terms) {
+        if (power > input_complete_max) continue;
+        coefficients.at(static_cast<std::size_t>(power - minimum)) =
+            ball(value);
+      }
+      return EpsilonFrame<ComplexBall>(minimum, std::move(coefficients));
+    };
+    BackwardAdjointTaylorProblem problem;
+    problem.dimension = 2;
+    problem.taylor_complete_max = 1;
+    problem.required_epsilon_complete_max = 0;
+    problem.q_lags = {extended(0, {{0, "1"}})};
+    FiniteLaurentMatrix<ComplexBall> c(
+        2, FiniteLaurentVector<ComplexBall>());
+    c[0] = {extended(-1, {{-1, "1"}, {0, "-1"}}),
+            extended(0, {})};
+    c[1] = {extended(0, {}),
+            extended(0, {{0, "-1"}, {1, "1"}})};
+    problem.c_transpose_lags = {std::move(c)};
+    std::vector<ComplexBall> rhs(
+        static_cast<std::size_t>(input_complete_max) + 1,
+        ball("0"));
+    rhs.front() = ball("1");
+    problem.forcing = {FiniteLaurentVector<ComplexBall>{
+        EpsilonFrame<ComplexBall>(0, rhs),
+        EpsilonFrame<ComplexBall>(0, std::move(rhs))}};
+    return problem;
+  };
+  const auto solved =
+      solve_backward_adjoint_taylor_with_epsilon_reservoir(
+          factory, 0, 2, nullptr,
+          "private epsilon inverse-loss regression");
+  return solved.input_epsilon_complete_max == 2 &&
+         solved.result.common_epsilon_complete_max >= 0 &&
+         contains_exact(
+             solved.result.coefficients.front()[0].coefficient(1), "1") &&
+         contains_exact(
+             solved.result.coefficients.front()[1].coefficient(-1), "1");
+}
+
 }  // namespace
 
 int main() {
@@ -448,7 +640,11 @@ int main() {
                   physical_ode_row_adapter() &&
                   certified_geometric_tail() &&
                   adaptive_witness_respects_row_pole() &&
+                  adaptive_witness_handles_narrow_denominator_clearance() &&
+                  exact_combined_forcing_cancels_cleared_row_pole() &&
                   coefficientwise_tail_ignores_irrelevant_high_epsilon_input() &&
+                  forcing_bound_ignores_epsilon_above_private_cap() &&
+                  private_epsilon_reservoir_covers_inverse_loss() &&
                   tail_certificate_fails_closed();
   std::cout << (ok ? "PASS" : "FAIL")
             << ": composed backward Fuchsian adjoint Taylor recurrence\n";

@@ -115,6 +115,7 @@ Rules:
 | B4-76 | Remove final-level CASE-P target serialization without weakening recursive-cache safety, then obtain the full clean result. | Replaced the cache-wide build lock with per-key build states, same-key single-flight waiting, contract validation, same-thread and cross-thread cycle detection, shared failure propagation, and clean retry. Added a standalone threaded regression suite. Rebuilt and passed 15 relevant native suites, then ran completely clean WP1000/EO30 with private halos `20,14,8,0`; no checkpoint resume. Log: `/private/tmp/diffexp2-banana4-b4-76-casep-cache-wp1000-full-clean-v1/run.log`. | 573.36 s for level 2; 4120.25 s total to final rejection | The optimized run reproduced B4-75's ordinary level-1 boundary exactly, confirming the earlier level-2-to-level-1 blowup is solved at WP1000. The final level completed its one observable but the strict pre-trim audit rejected enormous negative coefficients: ε^-3 about `2.80e18`, ε^-2 about `2.45e51`, and ε^-1 about `2.49e107`. Thus there are two distinct ill-conditioned transitions: the level-2 seam is now stable, while final 15-dimensional level 1 still amplifies its retained approximation catastrophically. The cache fix increased parallelism for distinct targets but same-key target builds and final correctness remain bottlenecks. | Do not call banana4 solved and do not raise precision blindly. Instrument the final level's terminal adjoint/input/truncation amplification and exact pole contributions, distinguish arithmetic error from EO30 Taylor error, and apply the same fail-closed/certified strategy before testing the user's EO50 suggestion. |
 | B4-77 | Distinguish upstream EO30 Taylor-tail excitation from terminal match/adjoint residual amplification in one clean control. | Completely clean WP1000/EO30 with private halos `20,14,8,0`; no checkpoint resume; per-stage/per-arm diagnostics; production adjoint `z^T u` plus an independent direct-factorized `J y` contraction on every terminal tile; coefficientwise route discrepancy, adjoint residual, adjoint sensitivity, and component contribution scales enabled. Includes the per-key CASE-P cache, reachable-log ceiling, and Rational Taylor-constant multiplier fast path, with 17 relevant native suites passing. Log: `/private/tmp/diffexp2-banana4-b4-77-terminal-compare-wp1000-eo30-full-clean-v1/run.log`. | 740.71 s through level 2; 6217.53 s total | Both routes agreed coefficientwise through the final endpoints to about `9.33e-302`, including the catastrophic upper endpoint. Before tile scaling/aggregation that endpoint produced approximately epsilon^-3 `3.23e19`, epsilon^-2 `2.84e52`, epsilon^-1 `2.86e108`, and finite `4.14e169`; reported adjoint component contributions reached `2.43e181`. The lower endpoint remained ordinary, with pole remnants only `1e-13` to `1e-10`. The strict aggregate audit rejected epsilon^-3 `3.20e17`, epsilon^-2 `2.81e50`, and epsilon^-1 `2.83e106`. | The terminal adjoint algebra, forward residual, and direct factorized contraction are not the source of the failure. They faithfully evaluate the same EO30-truncated `A`, `J`, and `u`. WP1000 arithmetic is ample; the missing object is a composed full-local certificate/fix for spatial truncation. Keep ordinary `u` tail propagation diagnostic-only, then replace explicit ill-conditioned `J A^-1` with a certified backward inhomogeneous Fuchsian adjoint, or fail closed and request roughly order 270/replanning rather than retrying EO50. |
 | B4-78 (preflight through boundary 2) | Exercise a composed backward terminal adjoint on the real banana4 charts and determine whether the ordinary Taylor recurrence is sufficient. | Added a finite-epsilon backward inhomogeneous adjoint recurrence, exact rational prepared-row adapter, certified analytic-denominator witness, geometric Taylor-tail theorem, incoming-value contraction, and a require-mode persistent-transport integration test. Then ran a completely clean WP300/EO30 preflight with private halos `20,14,8,0`, release-default value transport, no checkpoint resume, and stop after boundary 2. Seed: the current cached prepared banana4 file. Log: `/private/tmp/diffexp2-banana4-composed-preflight.WIc9qN/run.log`. | Cheap levels 4/3 preflight completed normally | The composed route reaches the actual centered singular endpoints, but its ordinary Taylor solve fails closed at layer `n=1`: `n q0 I + C0^T` has no certifiable pivot. This is a true indicial resonance requiring a logarithmic particular solution, not another epsilon-window, precision, GCD, or Taylor-order guess. Noncentered terminal tiles correctly report that this endpoint-specific route is inapplicable. The native suite passes 48/48, including scalar, fractional, Jordan/log, epsilon-coupled, resonance-failure, denominator-witness, negative-epsilon-coupling, rigorous-tail, and retained-transport integration cases. | Extend the composed solver with the chart's exact indicial/Jordan data and logarithmic sourced recurrence. Preserve divergent/log groups until they can be paired with the incoming endpoint constraints; do not choose an arbitrary resonant homogeneous gauge or collapse a divergent boundary term prematurely. Re-run the same cheap preflight before any full level-1 banana4 attempt. |
+| B4-84 | Establish how far the ordinary production route gets at EO50 after the composed-adjoint reservoir and exact-forcing repairs, without making the diagnostic route authoritative. | Completely clean WP300/EO50; match digits 80; public epsilon order 4; private halos `20,14,8,0`; fresh transport checkpoints; seeded FIRE preparation; release-default value transport; composed-adjoint diagnostic disabled. Log: `/var/folders/r9/t81xsghn0r198pktdqz_0v700000gn/T/diffexp2-banana4-full-production.b3NNpO/banana4-full.log`. | 4 min 35 s to the level-2 rejection | Level 4 completed in 6.33 s and level 3 in 48.46 s with no retry or epsilon-window failure. Level 2 then failed closed at lower tile 5: its adjoint residual had a complete epsilon window `[-9,30]` through required power 25, but the first reported inconclusive coefficients had only about 71 decimal digits of relative enclosure against an 80-digit contract. No level-1 boundary or final value was published. | EO50 does not repair this WP300 arithmetic-certification deficit, and adding epsilon orders is irrelevant because the required window is already complete. Do not rerun this configuration. Before paying for WP1000, separate the precision needed by the ordinary ill-conditioned route from the composed route's spatial-tail problem; the future full banana4 release gate must exercise all four levels and the independent final-value oracle because the existing boundary gate passes this failed run's earlier seam. |
 
 ### Implementation notes (not numerical experiments)
 
@@ -295,6 +296,47 @@ Rules:
   comparison now orients the legacy frame before subtracting it, and the
   scalar test covers positive and negative match points plus a negative chart
   scale. Do not reintroduce endpoint-sorting sign into the adjoint forcing.
+- The first clean post-B4-82 EO50 run failed immediately at lower Taylor
+  layer 1: truncating every operator/RHS frame at the desired adjoint output
+  maximum ignored epsilon orders consumed by the Laurent matrix inverse.
+  This is a private recurrence reservoir, not a reason to widen the public
+  epsilon request. The composed solve now grows its honest input cap only as
+  far as the prepared row permits, in response to a structured incomplete-
+  window result, while retaining the coefficientwise final contraction. A
+  two-component `diag(epsilon^-1,epsilon)` regression requires exactly one
+  extra private coefficient and proves the retry terminates at the minimal
+  sufficient cap.
+- B4-83 reran the exact EO50 level-3 boundary after that repair. The private
+  recurrence reservoir grew from the desired adjoint top to epsilon 52 and
+  honestly delivered through epsilon 49; both lower composed midpoints agree
+  coefficient-for-coefficient with the independently retained legacy route,
+  the upper terminal tiles are explicitly noncenter, and the complete native
+  boundary finished in 6.7 seconds. The remaining scalar tail was still
+  `9.6e34`/`3.5e33`, because one maximum over the whole epsilon stack was
+  attached to every output coefficient. Per-output certification now rebuilds
+  only the prefix relevant to that coefficient and caps the analytic forcing
+  bound at its private input reservoir. Its first production probe showed a
+  second honest-window signal: the epsilon^-2 solve at cap zero could not yet
+  see a bordered resonant pivot and reported `SingularOrIncompleteSystem`
+  rather than `InsufficientCompleteWindow`. The private reservoir now retries
+  the factorizer's window-dependent ambiguous/zero-pivot/determinant-tail
+  codes, one coefficient at a time, up to the retained row maximum. A fixture
+  starts before the `diag(epsilon^-1,epsilon)` pivot is visible and still
+  proves minimal termination; a separate `1e100` analytic-row coefficient
+  proves the capped low-order Cauchy bound excludes irrelevant high epsilon.
+  The immediately following Wolfram launch was rejected by license activation
+  while an unrelated eMGFTools kernel held the seat; it is not a numerical
+  failure and produced no transport state.
+- The next complete EO50 launch passed level 4 in 9.9 seconds, then reached
+  level 3 and rejected output epsilon^-4 because all 16 dyadic witness disks
+  still crossed a rational row denominator. The evaluation point itself is
+  inside the analytic domain, so this was an arbitrary search-depth limit,
+  not evidence that no certificate exists. Production now permits 128 exact
+  dyadic refinements toward the evaluation point. A regression places a pole
+  less than `2^-20` beyond the evaluation modulus, proves 16 attempts fail,
+  and proves the deeper search returns a disk strictly between evaluation and
+  pole. Denominator nonvanishing remains a ball-certified requirement; the
+  search-depth increase cannot accept a crossed pole.
 
 ## Disproven configurations: do not repeat unchanged
 

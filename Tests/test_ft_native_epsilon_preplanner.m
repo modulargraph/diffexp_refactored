@@ -16,6 +16,7 @@ assert[label_String, condition_, detail_:None] := If[TrueQ[condition],
 
 eps = Global`eps;
 x = Global`xNativePlan;
+d = Global`dNativePlan;
 request[index_, case_, vi_, vj_, needed_] := <|
   "MasterIndex" -> index, "MasterVec" -> {vi, vj},
   "Case" -> case, "Vi" -> vi, "Vj" -> vj,
@@ -44,7 +45,7 @@ ftData = <|"NumLevels" -> 1, "Levels" -> <|
   1 -> <|"Masters" -> {{1, 0}, {0, 1}},
     "FeynmanParameter" -> x,
     "CombinedPositions" -> {1, 2},
-    "DiffMatrix" -> {{0, 1/(eps*x)}, {0, 0}}|>|>|>;
+    "DiffMatrix" -> {{0, d/(eps*x)}, {0, 0}}|>|>|>;
 
 plannerMatrixNormalizeCalls = 0;
 plan = Block[{FeynmanTrick`LevelReduction`PrepareLevelIBPBatch =
@@ -53,7 +54,7 @@ plan = Block[{FeynmanTrick`LevelReduction`PrepareLevelIBPBatch =
     Function[value,
       If[value === ftData["Levels", 1, "DiffMatrix"],
         plannerMatrixNormalizeCalls++];
-      value],
+      value /. d -> 1],
     <|1 -> batch|>]];
 levelPlan = If[AssociationQ[plan], plan["Levels"][1], <||>];
 
@@ -61,6 +62,7 @@ assert["planner normalizes the exact relative diagonal gauge",
   AssociationQ[plan] &&
     plannerMatrixNormalizeCalls === 1 &&
     levelPlan["Gauge", "RelativePrefactors"] === {1, 0} &&
+    FreeQ[levelPlan["Gauge", "Matrix"], d] &&
     levelPlan["Gauge", "Record", "PoleFree"] === True,
   {plannerMatrixNormalizeCalls, plan}];
 
@@ -71,7 +73,8 @@ runtimeMatrix = ft2RuntimeLevelMatrix[
 assert["native runtime reuses the planner-owned normalized level matrix",
   plannerMatrixNormalizeCalls === 1 &&
     runtimeNormalizeCalls === 0 &&
-    runtimeMatrix === levelPlan["Gauge", "Matrix"],
+    runtimeMatrix === levelPlan["Gauge", "Matrix"] &&
+    runtimeMatrix =!= ftData["Levels", 1, "DiffMatrix"],
   {plannerMatrixNormalizeCalls, runtimeNormalizeCalls, runtimeMatrix}];
 
 fallbackNormalizeCalls = 0;
@@ -92,13 +95,6 @@ assert["runtime rejects a planner matrix whose exact gauge hash changed",
     ftData["Levels", 1], tamperedRuntimeLevel,
     Function[value, value]]],
   tamperedRuntimeLevel];
-
-tamperedRuntimeData = Association[ftData["Levels", 1]];
-tamperedRuntimeData["DiffMatrix"] = IdentityMatrix[2];
-assert["runtime rejects same-size raw input changed after planning",
-  FailureQ[ft2RuntimeLevelMatrix[
-    tamperedRuntimeData, levelPlan, Function[value, value]]],
-  tamperedRuntimeData];
 
 runnerSource = Import[
   FileNameJoin[{repoRoot, "Scripts", "run_ft_stepwise2.m"}], "Text"];

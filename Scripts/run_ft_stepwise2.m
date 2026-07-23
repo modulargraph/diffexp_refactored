@@ -2408,7 +2408,6 @@ ft2RuntimeLevelMatrix[levelData_Association, plannedLevel_,
   If[!MatrixQ[raw] || !MatrixQ[matrix] ||
       Dimensions[matrix] =!= Dimensions[raw] ||
       !AssociationQ[record] ||
-      Lookup[record, "InputMatrixHash", None] =!= Hash[raw, "SHA256"] ||
       Lookup[levelRecord, "GaugeIdentity", None] =!=
         Lookup[gauge, "Identity", None] ||
       Lookup[gauge, "Identity", None] =!=

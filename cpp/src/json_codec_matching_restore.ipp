@@ -630,9 +630,20 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           "checkpoint value tail contract");
       const auto tail_mode = tail.if_contains("mode") != nullptr
           ? required_string(tail, "mode") : std::string();
-      const bool physical_evolution_handoff =
+      const bool legacy_physical_evolution_handoff =
           version_two_handoff &&
           tail_mode == "physical-evolution-tail-unavailable-v1";
+      const bool transient_physical_evolution_handoff =
+          version_two_handoff &&
+          tail_mode == "physical-evolution-transient-tail-v2";
+      const bool certified_physical_tail_handoff =
+          version_two_handoff &&
+          tail_mode ==
+              "certified-physical-regular-taylor-point-tail-acb-v1";
+      const bool physical_evolution_handoff =
+          legacy_physical_evolution_handoff ||
+          transient_physical_evolution_handoff ||
+          certified_physical_tail_handoff;
       const bool certified_tail_handoff =
           version_two_handoff &&
           tail_mode == "certified-regular-taylor-point-tail-acb-v1";
@@ -652,13 +663,24 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
              "witness_radius_exact", "witness_dyadic_inward_exponent",
              "source_model", "certificate", "inflation"},
             "checkpoint certified value tail contract");
-      else if (physical_evolution_handoff)
+      else if (legacy_physical_evolution_handoff ||
+               transient_physical_evolution_handoff)
         require_exact_keys(
             tail,
             {"mode", "source_model", "witness_radius_exact",
              "witness_dyadic_inward_exponent", "output_status",
              "output_reason"},
             "checkpoint physical-evolution value tail contract");
+      else if (certified_physical_tail_handoff)
+        require_exact_keys(
+            tail,
+            {"mode", "producer_taylor_complete_max",
+             "receiver_taylor_complete_max", "producing_point_exact",
+             "producing_chart_radius_exact", "witness_radius_exact",
+             "witness_dyadic_inward_exponent",
+             "source_physical_payload_identity", "certificate",
+             "inflation", "output_status", "output_reason"},
+            "checkpoint certified physical value tail contract");
       else
         require_exact_keys(
             tail,
@@ -666,7 +688,9 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
              "center_ratio_exact", "tail_proxy_exact",
              "tail_proxy_max_exact"},
             "checkpoint value tail contract");
-      const auto producer_order = physical_evolution_handoff
+      const auto producer_order =
+          (legacy_physical_evolution_handoff ||
+           transient_physical_evolution_handoff)
           ? as_u32(as_object(
                        derivation.at("incoming"),
                        "checkpoint physical-evolution incoming")
@@ -674,7 +698,9 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
                    "checkpoint value producer Taylor maximum")
           : as_u32(tail.at("producer_taylor_complete_max"),
                    "checkpoint value producer Taylor maximum");
-      const auto receiver_order = physical_evolution_handoff
+      const auto receiver_order =
+          (legacy_physical_evolution_handoff ||
+           transient_physical_evolution_handoff)
           ? prototype_taylor_complete_max
           : as_u32(tail.at("receiver_taylor_complete_max"),
                    "checkpoint value receiver Taylor maximum");
@@ -962,11 +988,274 @@ std::shared_ptr<StoredLocalBase> restore_checkpoint_local_record(
           }
         }
         certified_inflated_value = std::move(inflated_value);
-      } else {
+      } else if (certified_physical_tail_handoff) {
+        constexpr std::string_view kPhysicalTailReason =
+            "causal physical evolution retains an exact physical q/C owner "
+            "for certified transient tail reconstruction";
         if (expected_domain != "acb" ||
-            required_string(tail, "output_status") != "unsupported" ||
-            required_string(tail, "output_reason") !=
-                "causal physical evolution has no framed recurrence tail theorem; the next hop must use exact framed fallback")
+            required_string(tail, "mode") !=
+                "certified-physical-regular-taylor-point-tail-acb-v1" ||
+            Rational(required_string(tail, "producing_point_exact")) !=
+                producing_local ||
+            Rational(required_string(
+                tail, "producing_chart_radius_exact")) !=
+                producing_radius ||
+            required_string(tail, "output_status") !=
+                "transient-physical-reconstructible" ||
+            required_string(tail, "output_reason") != kPhysicalTailReason)
+          throw std::invalid_argument(
+              "checkpoint certified physical value handoff changed its "
+              "geometry or output-tail contract");
+        const Rational witness(
+            required_string(tail, "witness_radius_exact"));
+        const auto witness_exponent = as_u32(
+            tail.at("witness_dyadic_inward_exponent"),
+            "checkpoint certified physical value witness exponent");
+        Rational witness_denominator(1);
+        for (std::uint32_t exponent = 0; exponent < witness_exponent;
+             ++exponent)
+          witness_denominator *= Rational(2);
+        const auto point_modulus =
+            exact_path_detail::abs(producing_local);
+        const auto expected_witness = point_modulus +
+            (producing_radius - point_modulus) / witness_denominator;
+        if (witness_exponent == 0 || witness_exponent > 16 ||
+            witness != expected_witness ||
+            !(point_modulus < witness) ||
+            !(witness < producing_radius))
+          throw std::invalid_argument(
+              "checkpoint certified physical value witness is not strictly "
+              "interior");
+        auto restored_incoming = std::dynamic_pointer_cast<
+            StoredLocal<ComplexBall>>(value_handoff_plan->incoming);
+        if (!restored_incoming ||
+            restored_incoming->checkpoint_identity() != required_string(
+                as_object(derivation.at("incoming"),
+                          "checkpoint certified physical incoming"),
+                "checkpoint_identity"))
+          throw std::invalid_argument(
+              "checkpoint certified physical value handoff lost its "
+              "restored incoming Acb owner");
+        const auto& source_equation =
+            restored_incoming->physical_equation();
+        const auto source_payload_identity = required_string(
+            tail, "source_physical_payload_identity");
+        const auto& producing_owner = as_object(
+            producing.at("owner"),
+            "checkpoint certified physical producing owner");
+        if (!source_equation ||
+            source_equation->payload_identity != source_payload_identity ||
+            required_string(producing_owner,
+                            "physical_payload_identity") !=
+                source_payload_identity)
+          throw std::invalid_argument(
+              "checkpoint certified physical source equation differs from "
+              "its retained producing owner");
+        auto prepared_physical =
+            prepare_physical_regular_homogeneous_tail_model(
+                *source_equation, restored_incoming->solution());
+        if (prepared_physical.status != TailMajorantStatus::Certified ||
+            !prepared_physical.model.has_value())
+          throw std::invalid_argument(
+              "checkpoint certified physical source model does not replay");
+        auto& model = *prepared_physical.model;
+        if (model.dimension != solution.dimension ||
+            model.taylor_complete_max != producer_order ||
+            model.physical_payload_identity != source_payload_identity ||
+            model.local_checkpoint_identity !=
+                restored_incoming->checkpoint_identity() ||
+            Rational(model.chart.center_exact) != producing_center ||
+            Rational(model.chart.scale_exact) != producing_scale ||
+            model.chart.infinite_radius ||
+            !acb_equal(model.chart.radius.raw(),
+                       ComplexBall::from_strings(
+                           producing_radius.str()).raw()))
+          throw std::invalid_argument(
+              "checkpoint certified physical source model changed its "
+              "retained binding");
+        Rational replay_denominator(1);
+        for (std::uint32_t exponent = 1;
+             exponent <= witness_exponent; ++exponent) {
+          replay_denominator *= Rational(2);
+          const auto candidate = point_modulus +
+              (producing_radius - point_modulus) / replay_denominator;
+          const auto candidate_certificate =
+              certify_physical_regular_taylor_point_tail(
+                  model,
+                  RealEvaluationPoint::rational(producing_local.str()),
+                  candidate.str(), producer_order);
+          if ((exponent < witness_exponent &&
+               (candidate_certificate.status !=
+                    TailMajorantStatus::Inconclusive ||
+                candidate_certificate.disk.status !=
+                    TailMajorantStatus::Inconclusive)) ||
+              (exponent == witness_exponent &&
+               candidate_certificate.status !=
+                   TailMajorantStatus::Certified))
+            throw std::invalid_argument(
+                "checkpoint certified physical witness is not the first "
+                "certifying dyadic candidate");
+        }
+        const auto replayed =
+            certify_physical_regular_taylor_point_tail(
+                model,
+                RealEvaluationPoint::rational(producing_local.str()),
+                witness.str(), producer_order);
+        const auto& certificate = as_object(
+            tail.at("certificate"),
+            "checkpoint certified physical value-tail certificate");
+        require_exact_keys(
+            certificate, {"status", "value", "theta", "disk", "detail"},
+            "checkpoint certified physical value-tail certificate");
+        const auto saved_value = parse_checkpoint_error_envelope(
+            certificate.at("value"));
+        const auto saved_theta = parse_checkpoint_error_envelope(
+            certificate.at("theta"));
+        const auto& disk = as_object(
+            certificate.at("disk"),
+            "checkpoint certified physical value-tail disk");
+        require_exact_keys(
+            disk,
+            {"witness_radius_exact", "q_lower_exact",
+             "ode_norm_upper_exact", "cauchy_circle_upper_exact",
+             "detail"},
+            "checkpoint certified physical value-tail disk");
+        json::array replayed_circle;
+        for (const auto& value : replayed.disk.cauchy_circle_upper)
+          replayed_circle.emplace_back(value.dump_exact());
+        if (replayed.status != TailMajorantStatus::Certified ||
+            required_string(certificate, "status") != "certified" ||
+            checkpoint_error_envelope_record(replayed.value) !=
+                certificate.at("value") ||
+            checkpoint_error_envelope_record(replayed.theta) !=
+                certificate.at("theta") ||
+            required_string(certificate, "detail") != replayed.detail ||
+            required_string(disk, "witness_radius_exact") !=
+                replayed.disk.witness_radius_exact ||
+            required_string(disk, "q_lower_exact") !=
+                replayed.disk.q_lower.dump_exact() ||
+            required_string(disk, "ode_norm_upper_exact") !=
+                replayed.disk.ode_norm_upper.dump_exact() ||
+            disk.at("cauchy_circle_upper_exact") != replayed_circle ||
+            required_string(disk, "detail") != replayed.disk.detail ||
+            saved_value.guarantee != ErrorGuarantee::Certified ||
+            saved_theta.guarantee != ErrorGuarantee::Certified ||
+            !tail_majorant_detail::same_epsilon_window(
+                saved_value.frame, model.epsilon) ||
+            !tail_majorant_detail::same_epsilon_window(
+                saved_theta.frame, model.epsilon))
+          throw std::invalid_argument(
+              "checkpoint certified physical value-tail theorem does not "
+              "replay exactly");
+        const auto& inflation = as_object(
+            tail.at("inflation"),
+            "checkpoint certified physical value inflation");
+        require_exact_keys(
+            inflation, {"gate", "retained_value", "inflated_value"},
+            "checkpoint certified physical value inflation");
+        if (required_string(inflation, "gate") !=
+            "each-component-acb-add-error-mag-by-epsilon-row-v1")
+          throw std::invalid_argument(
+              "checkpoint certified physical value inflation gate changed");
+        auto retained_value = parse_checkpoint_epsilon_vector(
+            inflation.at("retained_value"),
+            "checkpoint retained physical value before tail inflation");
+        auto inflated_value = parse_checkpoint_epsilon_vector(
+            inflation.at("inflated_value"),
+            "checkpoint retained physical value after tail inflation");
+        if (!retained_value.error.empty() ||
+            !inflated_value.error.empty() ||
+            retained_value.dimension != model.dimension ||
+            inflated_value.dimension != model.dimension ||
+            !tail_majorant_detail::same_epsilon_window(
+                retained_value.epsilon, model.epsilon) ||
+            !tail_majorant_detail::same_epsilon_window(
+                inflated_value.epsilon, model.epsilon))
+          throw std::invalid_argument(
+              "checkpoint certified physical value inflation frame changed");
+        EvaluationOptions replay_options;
+        replay_options.imaginary_sign =
+            value_handoff_plan->producing_rim;
+        replay_options.compute_tail_estimate = false;
+        const auto restored_evaluation =
+            evaluate_physical_local_solution_with_certified_tail(
+                model,
+                RealEvaluationPoint::rational(producing_local.str()),
+                witness.str(), replay_options);
+        const auto expected_rim = producing_local.sign() < 0
+            ? value_handoff_plan->producing_rim : std::nullopt;
+        auto replay_retained = restored_evaluation.evaluation.value;
+        replay_retained.error = ErrorEnvelope{};
+        if (model.epsilon.min_power <
+            replay_retained.epsilon.min_power) {
+          auto widened = physical_ode_detail::zero_epsilon_vector(
+              model.epsilon, replay_retained.dimension);
+          for (std::int64_t raw_power =
+                   replay_retained.epsilon.min_power;
+               raw_power <= replay_retained.epsilon.complete_max;
+               ++raw_power) {
+            const auto power = static_cast<std::int32_t>(raw_power);
+            for (std::uint32_t component = 0;
+                 component < replay_retained.dimension; ++component)
+              widened.at(power, component) =
+                  replay_retained.at(power, component);
+          }
+          replay_retained = std::move(widened);
+        }
+        if (restored_evaluation.tail.status !=
+                TailMajorantStatus::Certified ||
+            restored_evaluation.evaluation.imaginary_sign != expected_rim ||
+            replay_retained.dimension != retained_value.dimension ||
+            !tail_majorant_detail::same_epsilon_window(
+                replay_retained.epsilon, retained_value.epsilon) ||
+            replay_retained.coefficients.size() !=
+                retained_value.coefficients.size())
+          throw std::invalid_argument(
+              "checkpoint certified physical center evaluation changed its "
+              "frame or branch");
+        for (std::size_t coefficient = 0;
+             coefficient < retained_value.coefficients.size();
+             ++coefficient)
+          if (!acb_equal(
+                  replay_retained.coefficients[coefficient].raw(),
+                  retained_value.coefficients[coefficient].raw()))
+            throw std::invalid_argument(
+                "checkpoint certified physical retained center value "
+                "differs from its restored source local");
+        for (std::int64_t raw_power = model.epsilon.min_power;
+             raw_power <= model.epsilon.complete_max; ++raw_power) {
+          const auto power = static_cast<std::int32_t>(raw_power);
+          const auto row = static_cast<std::size_t>(
+              raw_power - model.epsilon.min_power);
+          for (std::uint32_t component = 0;
+               component < model.dimension; ++component) {
+            auto expected = retained_value.at(power, component);
+            replayed.value.absolute[row].add_error_to(expected);
+            if (!acb_equal(expected.raw(),
+                           inflated_value.at(power, component).raw()))
+              throw std::invalid_argument(
+                  "checkpoint certified physical value inflation does not "
+                  "replay exactly");
+          }
+        }
+        certified_inflated_value = std::move(inflated_value);
+      } else {
+        const bool legacy_output_contract =
+            required_string(tail, "output_status") == "unsupported" &&
+            required_string(tail, "output_reason") ==
+                "causal physical evolution has no framed recurrence tail "
+                "theorem; the next hop must use exact framed fallback";
+        const bool transient_output_contract =
+            required_string(tail, "output_status") ==
+                "transient-physical-reconstructible" &&
+            required_string(tail, "output_reason") ==
+                "causal physical evolution retains an exact physical q/C "
+                "owner for certified transient tail reconstruction";
+        if (expected_domain != "acb" ||
+            (legacy_physical_evolution_handoff &&
+             !legacy_output_contract) ||
+            (transient_physical_evolution_handoff &&
+             !transient_output_contract))
           throw std::invalid_argument(
               "checkpoint physical-evolution value handoff changed its output-tail contract");
         const Rational witness(

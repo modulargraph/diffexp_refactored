@@ -214,11 +214,29 @@
 
     auto acb_incoming =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(incoming);
-    if (!acb_incoming ||
-        acb_incoming->tail_model().status != TailMajorantStatus::Certified ||
-        !acb_incoming->tail_model().model.has_value())
+    if (!acb_incoming)
       return ineligible(
-          "incoming-local-has-no-certified-regular-tail-model");
+          "incoming-local-is-not-an-acb-local");
+    const bool source_has_framed_tail =
+        acb_incoming->tail_model().status == TailMajorantStatus::Certified &&
+        acb_incoming->tail_model().model.has_value();
+    std::optional<PhysicalRegularTaylorTailModel> physical_source_model;
+    if (!source_has_framed_tail) {
+      const auto& source_equation = acb_incoming->physical_equation();
+      if (!source_equation ||
+          source_equation->payload_identity !=
+              producing_equation_owner->physical_payload_identity())
+        return ineligible(
+            "incoming-local-has-no-certified-physical-tail-owner");
+      auto prepared_physical =
+          prepare_physical_regular_homogeneous_tail_model(
+              *source_equation, acb_incoming->solution());
+      if (prepared_physical.status != TailMajorantStatus::Certified ||
+          !prepared_physical.model.has_value())
+        return ineligible(
+            "incoming-local-has-no-certified-physical-tail-model");
+      physical_source_model = std::move(*prepared_physical.model);
+    }
     constexpr std::uint32_t kWitnessSearchCap = 16;
     std::optional<Rational> witness_radius;
     std::uint32_t witness_dyadic_exponent = 0;
@@ -234,9 +252,13 @@
       dyadic_denominator *= Rational(2);
       const auto candidate =
           point_modulus + witness_gap / dyadic_denominator;
-      const auto candidate_certificate = certify_regular_taylor_point_tail(
-          *acb_incoming->tail_model().model, producing_point,
-          candidate.str(), producer_taylor_complete_max);
+      const auto candidate_certificate = source_has_framed_tail
+          ? certify_regular_taylor_point_tail(
+                *acb_incoming->tail_model().model, producing_point,
+                candidate.str(), producer_taylor_complete_max)
+          : certify_physical_regular_taylor_point_tail(
+                *physical_source_model, producing_point,
+                candidate.str(), producer_taylor_complete_max);
       if (candidate_certificate.status == TailMajorantStatus::Certified) {
         witness_radius = candidate;
         witness_dyadic_exponent = exponent;
@@ -251,8 +273,18 @@
     if (!witness_radius.has_value())
       return ineligible(
           "receiver-center-tail-certificate-is-inconclusive");
-    auto certified = incoming->evaluate_retained_point_with_certified_tail(
-        producing_point, producing_rim, witness_radius->str());
+    std::optional<CertifiedLocalEvaluation> certified;
+    if (source_has_framed_tail) {
+      certified = incoming->evaluate_retained_point_with_certified_tail(
+          producing_point, producing_rim, witness_radius->str());
+    } else {
+      EvaluationOptions options;
+      options.imaginary_sign = producing_rim;
+      options.compute_tail_estimate = false;
+      certified = evaluate_physical_local_solution_with_certified_tail(
+          *physical_source_model, producing_point, witness_radius->str(),
+          options);
+    }
     if (!certified.has_value() ||
         certified->tail.status != TailMajorantStatus::Certified)
       return ineligible(
@@ -262,21 +294,37 @@
     if (certified->evaluation.imaginary_sign != expected_rim)
       return ineligible(
           "center-evaluation-rim-differs-from-producing-plan-chart");
-    if (certified->evaluation.value.epsilon.min_power !=
+    if (certified->evaluation.value.epsilon.min_power <
             incoming_epsilon_min ||
         certified->evaluation.value.epsilon.complete_max !=
             incoming_epsilon_max ||
         certified->tail.value.guarantee != ErrorGuarantee::Certified ||
         !tail_majorant_detail::same_epsilon_window(
-            certified->evaluation.value.epsilon,
+            EpsilonWindow{incoming_epsilon_min, incoming_epsilon_max},
             certified->tail.value.frame) ||
         certified->tail.value.absolute.size() !=
-            certified->evaluation.value.epsilon.width())
+            EpsilonWindow{incoming_epsilon_min,
+                          incoming_epsilon_max}.width())
       throw std::logic_error(
           "certified physical value handoff changed its retained epsilon frame");
     auto retained_value = certified->evaluation.value;
     retained_value.error = ErrorEnvelope{};
+    if (incoming_epsilon_min < retained_value.epsilon.min_power) {
+      auto widened = physical_ode_detail::zero_epsilon_vector(
+          EpsilonWindow{incoming_epsilon_min, incoming_epsilon_max},
+          retained_value.dimension);
+      for (std::int64_t raw_power = retained_value.epsilon.min_power;
+           raw_power <= retained_value.epsilon.complete_max; ++raw_power) {
+        const auto power = static_cast<std::int32_t>(raw_power);
+        for (std::uint32_t component = 0;
+             component < retained_value.dimension; ++component)
+          widened.at(power, component) =
+              retained_value.at(power, component);
+      }
+      retained_value = std::move(widened);
+    }
     auto certified_handoff = certified->evaluation;
+    certified_handoff.value = retained_value;
     for (std::int64_t raw_power =
              certified_handoff.value.epsilon.min_power;
          raw_power <= certified_handoff.value.epsilon.complete_max;
@@ -425,6 +473,71 @@
           {"taylor_complete_max", producer_taylor_complete_max},
           {"top_valid", incoming_summary.at("top_valid")},
           {"analytic_metadata", incoming->exact_analytic_metadata()}};
+      json::object tail_contract;
+      if (source_has_framed_tail) {
+        tail_contract = json::object{
+            {"mode", "physical-evolution-transient-tail-v2"},
+            {"source_model", checkpoint_regular_tail_model_record(
+                 *acb_incoming->tail_model().model)},
+            {"witness_radius_exact", witness_radius->str()},
+            {"witness_dyadic_inward_exponent",
+             witness_dyadic_exponent},
+            {"output_status", "transient-physical-reconstructible"},
+            {"output_reason",
+             "causal physical evolution retains an exact physical q/C owner "
+             "for certified transient tail reconstruction"}};
+      } else {
+        tail_contract = json::object{
+            {"mode",
+             "certified-physical-regular-taylor-point-tail-acb-v1"},
+            {"producer_taylor_complete_max",
+             producer_taylor_complete_max},
+            {"receiver_taylor_complete_max",
+             receiver_taylor_complete_max},
+            {"producing_point_exact", producing_local.str()},
+            {"producing_chart_radius_exact",
+             producing.geometry.radius.str()},
+            {"witness_radius_exact", witness_radius->str()},
+            {"witness_dyadic_inward_exponent",
+             witness_dyadic_exponent},
+            {"source_physical_payload_identity",
+             physical_source_model->physical_payload_identity},
+            {"certificate", json::object{
+                 {"status", tail_majorant_status_name(
+                      certified->tail.status)},
+                 {"value", checkpoint_error_envelope_record(
+                      certified->tail.value)},
+                 {"theta", checkpoint_error_envelope_record(
+                      certified->tail.theta)},
+                 {"disk", json::object{
+                      {"witness_radius_exact",
+                       certified->tail.disk.witness_radius_exact},
+                      {"q_lower_exact",
+                       certified->tail.disk.q_lower.dump_exact()},
+                      {"ode_norm_upper_exact",
+                       certified->tail.disk.ode_norm_upper.dump_exact()},
+                      {"cauchy_circle_upper_exact", [&] {
+                         json::array values;
+                         for (const auto& value :
+                              certified->tail.disk.cauchy_circle_upper)
+                           values.emplace_back(value.dump_exact());
+                         return values;
+                       }()},
+                      {"detail", certified->tail.disk.detail}}},
+                 {"detail", certified->tail.detail}}},
+            {"inflation", json::object{
+                 {"gate",
+                  "each-component-acb-add-error-mag-by-epsilon-row-v1"},
+                 {"retained_value",
+                  checkpoint_epsilon_vector_record(retained_value)},
+                 {"inflated_value",
+                  checkpoint_epsilon_vector_record(
+                      certified_handoff.value)}}},
+            {"output_status", "transient-physical-reconstructible"},
+            {"output_reason",
+             "causal physical evolution retains an exact physical q/C owner "
+             "for certified transient tail reconstruction"}};
+      }
       json::object derivation{
           {"schema", "diffexp2-retained-plan-value-handoff-v2"},
           {"capability", "retained-native-regular-value-handoff-v2"},
@@ -446,16 +559,7 @@
           {"producing_local_exact", producing_local.str()},
           {"prototype_identity", json::serialize(
                canonical_json_value(value_solver))},
-          {"tail_contract", json::object{
-               {"mode", "physical-evolution-tail-unavailable-v1"},
-               {"source_model", checkpoint_regular_tail_model_record(
-                    *acb_incoming->tail_model().model)},
-               {"witness_radius_exact", witness_radius->str()},
-               {"witness_dyadic_inward_exponent",
-                witness_dyadic_exponent},
-               {"output_status", "unsupported"},
-               {"output_reason",
-                "causal physical evolution has no framed recurrence tail theorem; the next hop must use exact framed fallback"}}},
+          {"tail_contract", std::move(tail_contract)},
           {"accuracy_contract", json::object{
                {"relative_error_max_exact", relative_accuracy_text},
                {"gate",
@@ -505,7 +609,9 @@
               std::vector<PseudoHit<ComplexBall>>{}, diagnostics,
               std::nullopt, std::move(derivation), derivation_owner,
               unavailable_tail_model(
-                  "ordinary physical evolution intentionally has no framed recurrence tail model; use exact framed fallback for the next hop"),
+                  "ordinary physical evolution has no framed recurrence tail "
+                  "model; its retained physical q/C owner supports certified "
+                  "transient reconstruction"),
               std::nullopt, true, true, equation,
               equation->physical_equation());
       sealed_lineage = next->seal_plan_match_lineage();
@@ -553,8 +659,8 @@
         {"reason", "eligible-causal-ordinary-physical-evolution"},
         {"arm", arm_name}, {"match", match_index},
         {"value_hops", 1}, {"basis_matches", 0},
-        {"output_tail_status", "unsupported"},
-        {"next_hop_policy", "exact-framed-fallback"},
+        {"output_tail_status", "transient-physical-reconstructible"},
+        {"next_hop_policy", "certified-physical-tail-replay"},
         {"next_local", std::move(next_summary)},
         {"sealed_local_lineage", std::move(sealed_lineage)},
         {"elapsed_ms", std::chrono::duration<double, std::milli>(

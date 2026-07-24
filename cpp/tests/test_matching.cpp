@@ -1754,6 +1754,31 @@ void dense_eleven_by_eleven_pivot_budget_smoke() {
             elapsed < 2.0);
 }
 
+void taylor_prefix_retry_policy_smoke() {
+  check("terminal normal-frame match never retries an inconclusive finite prefix",
+        !diffexp2::acb_taylor_prefix_retryable(
+            AcbMatchingResidualVerdict::Inconclusive, true, true));
+  check("terminal normal-frame match never retries ambiguous arithmetic on a finite prefix",
+        !diffexp2::acb_taylor_prefix_retryable(
+            MatchingArithmeticErrorCode::AmbiguousZero, true) &&
+            !diffexp2::acb_taylor_prefix_retryable(
+                MatchingArithmeticErrorCode::SingularOrIncompleteSystem,
+                true));
+  check("ordinary complete inconclusive match may search a shorter prefix",
+        diffexp2::acb_taylor_prefix_retryable(
+            AcbMatchingResidualVerdict::Inconclusive, true, false) &&
+            diffexp2::acb_taylor_prefix_retryable(
+                MatchingArithmeticErrorCode::AmbiguousZero, false));
+  check("definite or incomplete ordinary residual never retries a shorter prefix",
+        !diffexp2::acb_taylor_prefix_retryable(
+            AcbMatchingResidualVerdict::Fail, true, false) &&
+            !diffexp2::acb_taylor_prefix_retryable(
+                AcbMatchingResidualVerdict::Inconclusive, false, false) &&
+            !diffexp2::acb_taylor_prefix_retryable(
+                MatchingArithmeticErrorCode::InvalidSaturationLattice,
+                false));
+}
+
 }  // namespace
 
 int main() {
@@ -1784,6 +1809,7 @@ int main() {
   verified_midpoint_preconditioner_smoke();
   certified_pivot_quality_and_parity_smoke();
   dense_eleven_by_eleven_pivot_budget_smoke();
+  taylor_prefix_retry_policy_smoke();
   std::cout << "Results: " << (checked - failed) << " / " << checked
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -2093,6 +2093,10 @@ void test_frame_independent_physical_value_wiring() {
     const auto stiff_anchor = solve_local(
         session, stiff_anchor_chart, "0",
         "physical-wiring-stiff-anchor-local", "1", 50, true);
+    const auto stalled_anchor = solve_local(
+        session, stiff_anchor_chart, "0",
+        "physical-wiring-stalled-anchor-local",
+        "[1 +/- 1e-10]", 50, true);
     const auto overlap_anchor = solve_local(
         session, overlap_anchor_chart, "0",
         "physical-wiring-overlap-anchor-local", "0", 30, true, -1, 2,
@@ -2182,6 +2186,66 @@ void test_frame_independent_physical_value_wiring() {
           "physical hop did not retain its improving private order ladder "
           "and identify the inaccurate consumable epsilon row: " +
           json::serialize(required_failure));
+    const auto stalled = consume_physical_value_hop(
+        session, adaptive_plan, "upper", 0, stalled_anchor,
+        "physical-wiring-stalled-anchor-local",
+        physical_value_solver("1/3", 50, stiff_accuracy),
+        "physical-wiring-stalled-order", adaptive_plan_checkpoint,
+        0, 2, 2);
+    require_ok(stalled, "physical stalled private-order hop");
+    if (stalled.at("used") != false ||
+        stalled.at("reason") !=
+            "inflated-center-evaluation-fails-relative-accuracy-contract" ||
+        !stalled.if_contains("detail"))
+      throw std::runtime_error(
+          "physical stalled-order fixture did not reach the accuracy-floor "
+          "fallback: " + json::serialize(stalled));
+    {
+      const auto detail =
+          std::string(stalled.at("detail").as_string());
+      const auto trace_marker =
+          std::string("tail_certificate_accuracy_deficits=");
+      const auto trace_begin = detail.find(trace_marker);
+      if (trace_begin == std::string::npos)
+        throw std::runtime_error(
+            "physical stalled-order fallback omitted its progress trace: " +
+            json::serialize(stalled));
+      std::istringstream trace(
+          detail.substr(trace_begin + trace_marker.size()));
+      bool direct_stalled = false;
+      bool overlap_stalled = false;
+      bool saw_stall = false;
+      std::string attempt;
+      while (std::getline(trace, attempt, ',')) {
+        const auto separator = attempt.find(':');
+        const auto phase = attempt.substr(0, separator);
+        bool* phase_stalled = phase == "direct"
+            ? &direct_stalled
+            : phase == "overlap" ? &overlap_stalled : nullptr;
+        if (phase_stalled == nullptr || separator == std::string::npos)
+          throw std::runtime_error(
+              "physical stalled-order fallback emitted a malformed progress "
+              "trace: " + detail);
+        if (*phase_stalled)
+          throw std::runtime_error(
+              "physical private-order retry continued after an exact-ratio "
+              "plateau: " + detail);
+        constexpr const char* stalled_suffix = ":stalled";
+        if (attempt.size() >= std::char_traits<char>::length(stalled_suffix) &&
+            attempt.compare(
+                attempt.size() -
+                    std::char_traits<char>::length(stalled_suffix),
+                std::char_traits<char>::length(stalled_suffix),
+                stalled_suffix) == 0) {
+          *phase_stalled = true;
+          saw_stall = true;
+        }
+      }
+      if (!saw_stall)
+        throw std::runtime_error(
+            "physical stalled-order fixture never exercised the exact-ratio "
+            "plateau detector: " + detail);
+    }
     const auto adaptive = consume_physical_value_hop(
         session, adaptive_plan, "upper", 0, stiff_anchor,
         "physical-wiring-stiff-anchor-local",
@@ -2306,6 +2370,7 @@ void test_frame_independent_physical_value_wiring() {
         std::string(overlap.at("next_local").as_object()
                         .at("local").as_string()));
     release_local(session, stiff_anchor);
+    release_local(session, stalled_anchor);
     release_local(session, low_order_anchor);
     release_local(session, overlap_anchor);
     require_ok(request(json::object{
@@ -2427,9 +2492,9 @@ void test_frame_independent_physical_value_wiring() {
         {"schema", 2}, {"op", "session.counters"},
         {"session", session}});
     require_ok(counters, "physical wiring session.counters");
-    if (counter(counters, "transport_physical_value_hop_attempts") != 7 ||
+    if (counter(counters, "transport_physical_value_hop_attempts") != 8 ||
         counter(counters, "transport_physical_value_hop_successes") != 5 ||
-        counter(counters, "transport_physical_value_hop_ineligible") != 1 ||
+        counter(counters, "transport_physical_value_hop_ineligible") != 2 ||
         counter(counters, "transport_framed_basis_hops") != 0)
       throw std::runtime_error(
           "physical wiring diagnostics do not expose consecutive causal hops: " +
@@ -2683,6 +2748,77 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
       throw std::runtime_error(
           "Acb terminal state publication dropped its factorized match owner: " +
           json::serialize(published));
+    const auto shifted_cancellation_row =
+        [](const std::string& identity) {
+          auto row = cancellation_integrand_row(identity, 33);
+          for (auto& raw_entry : row.at("entries").as_array())
+            raw_entry.as_object()
+                .at("multiplier")
+                .as_object()["epsilon_shift"] = -1;
+          return row;
+        };
+    const auto before_short_pair = session_stats(session);
+    const auto short_pair = request(json::object{
+        {"schema", 2}, {"op", "transport.contract_pair"},
+        {"session", session},
+        {"lower", json::object{
+             {"transport_state", lower_state.at("transport_state")},
+             {"checkpoint_identity",
+              lower_state.at("checkpoint_identity")},
+             {"provenance_identity",
+              lower_state.at("provenance_identity")}}},
+        {"upper", json::object{
+             {"transport_state", upper_state.at("transport_state")},
+             {"checkpoint_identity",
+              upper_state.at("checkpoint_identity")},
+             {"provenance_identity",
+              upper_state.at("provenance_identity")}}},
+        {"checkpoint_policy", json::object{
+             {"schema",
+              "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+             {"root", "terminal-factorized-short-pair"}}},
+        {"observables", json::array{json::object{
+             {"identity", "terminal-factorized-short-pair-observable"},
+             {"checkpoint_identity",
+              "terminal-factorized-short-pair-line"},
+             {"lower_integrand_rows", json::array{
+                  shifted_cancellation_row(
+                      "terminal-factorized-short-pair-lower-1"),
+                  shifted_cancellation_row(
+                      "terminal-factorized-short-pair-lower-2")}},
+             {"upper_integrand_rows", json::array{
+                  shifted_cancellation_row(
+                      "terminal-factorized-short-pair-upper-1"),
+                  shifted_cancellation_row(
+                      "terminal-factorized-short-pair-upper-2")}},
+             {"epsilon", json::object{
+                  {"min", 0}, {"max", 2},
+                  {"required_complete_max", 1}}},
+             {"tail_policy", "stored"}}}}});
+    const auto after_short_pair = session_stats(session);
+    if (short_pair.at("status") != "error" ||
+        short_pair.if_contains("reason") == nullptr ||
+        short_pair.at("reason") !=
+            "acb_match_residual_inconclusive" ||
+        short_pair.if_contains("retryable_epsilon_reservoir") == nullptr ||
+        short_pair.at("retryable_epsilon_reservoir") != true ||
+        short_pair.if_contains("retryable_matching_clearance") == nullptr ||
+        short_pair.at("retryable_matching_clearance") != false ||
+        short_pair.if_contains("required_additional_epsilon_orders") ==
+            nullptr ||
+        counter(short_pair, "required_additional_epsilon_orders") == 0 ||
+        short_pair.if_contains("request_index") == nullptr ||
+        short_pair.at("request_index") != 0 ||
+        short_pair.if_contains("scope") == nullptr ||
+        short_pair.at("scope") !=
+            "paired-observable-arm-contraction" ||
+        after_short_pair.at("pending_line_integrations") != 0 ||
+        after_short_pair.at("line_results") !=
+            before_short_pair.at("line_results"))
+      throw std::runtime_error(
+          "paired terminal reservoir shortage was not typed and transactional: " +
+          json::serialize(short_pair) + " / " +
+          json::serialize(after_short_pair));
     const auto strict_pair_publication = request(json::object{
         {"schema", 2}, {"op", "transport.contract_pair"},
         {"session", session},

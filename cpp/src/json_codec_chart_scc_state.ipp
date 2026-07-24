@@ -560,8 +560,12 @@ class PreparedChart final : public PreparedChartBase {
           "regular value handoff unexpectedly encountered a pseudo resonance");
     const auto kernel_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - kernel_started).count();
-    const NativeLocalDiagnostics diagnostics{
+    NativeLocalDiagnostics diagnostics{
         recurrence.top_valid, parse_ms, kernel_ms};
+    diagnostics.epsilon_regular_principal_factorizations =
+        recurrence.epsilon_regular_principal_factorizations;
+    diagnostics.epsilon_regular_principal_solves =
+        recurrence.epsilon_regular_principal_solves;
 
     derivation["evaluated_epsilon"] = json::object{
         {"min", source.epsilon.min_power},
@@ -673,6 +677,10 @@ class PreparedChart final : public PreparedChartBase {
         std::chrono::steady_clock::now() - kernel_started).count();
     NativeLocalDiagnostics diagnostics{
         recurrence.top_valid, parse_ms, kernel_ms};
+    diagnostics.epsilon_regular_principal_factorizations =
+        recurrence.epsilon_regular_principal_factorizations;
+    diagnostics.epsilon_regular_principal_solves =
+        recurrence.epsilon_regular_principal_solves;
     diagnostics.requires_parent_completeness_certificate =
         assembled.requires_parent_certificate;
     return {std::move(solution), std::move(pseudo_hits),
@@ -2175,6 +2183,10 @@ class PseudoCompensator {
     total.top_valid = std::min(total.top_valid, current.top_valid);
     total.parse_ms += current.parse_ms;
     total.kernel_ms += current.kernel_ms;
+    total.epsilon_regular_principal_factorizations +=
+        current.epsilon_regular_principal_factorizations;
+    total.epsilon_regular_principal_solves +=
+        current.epsilon_regular_principal_solves;
     total.requires_parent_completeness_certificate =
         total.requires_parent_completeness_certificate ||
         current.requires_parent_completeness_certificate;
@@ -4216,13 +4228,19 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     // proved complete.  The public requirement remains requested_max and is
     // checked below; an arbitrary dimension-scaled cap would discard private
     // Laurent-match reservoir without reducing any upstream computation.
-    const auto retained_match_max = static_cast<std::int32_t>(
+    auto retained_match_max = static_cast<std::int32_t>(
         std::min<std::int64_t>(
             parent.epsilon.complete_max,
             work_.work_complete_max));
     if (aggregate.requires_parent_completeness_certificate)
       throw std::logic_error(
           "native Acb SCC column reached publication with deferred completeness instead of requesting its exact Rational shadow");
+    if (aggregate.top_valid != kCompleteInfinity)
+      retained_match_max =
+          std::min(retained_match_max, aggregate.top_valid);
+    if (retained_match_max < work_.requested_max)
+      throw std::domain_error(
+          "native Acb SCC recurrence validity does not retain the requested public epsilon maximum");
     parent = cap_composite_public_local(
         parent, retained_match_max, work_.public_t_order,
         retained_geometry_.chart, retained_geometry_.prescriptions,
@@ -5055,6 +5073,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     total.top_valid = std::min(total.top_valid, current.top_valid);
     total.parse_ms += current.parse_ms;
     total.kernel_ms += current.kernel_ms;
+    total.epsilon_regular_principal_factorizations +=
+        current.epsilon_regular_principal_factorizations;
+    total.epsilon_regular_principal_solves +=
+        current.epsilon_regular_principal_solves;
     total.requires_parent_completeness_certificate =
         total.requires_parent_completeness_certificate ||
         current.requires_parent_completeness_certificate;
@@ -5083,7 +5105,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"uncompensated_pseudo_hit_count", result.pseudo_hits.size()},
         {"top_valid", encode_validity(result.diagnostics.top_valid)},
         {"parse_ms", result.diagnostics.parse_ms},
-        {"kernel_ms", result.diagnostics.kernel_ms}};
+        {"kernel_ms", result.diagnostics.kernel_ms},
+        {"epsilon_regular_principal_factorizations",
+         result.diagnostics.epsilon_regular_principal_factorizations},
+        {"epsilon_regular_principal_solves",
+         result.diagnostics.epsilon_regular_principal_solves}};
     if (source != nullptr) {
       diagnostic["source_epsilon_min"] = source->epsilon.min_power;
       diagnostic["source_epsilon_max"] = source->epsilon.complete_max;

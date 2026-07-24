@@ -72,7 +72,7 @@ RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, matchDigits, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
    deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
-   saveNativeTransportCheckpoint, valueTransport,
+   saveNativeTransportCheckpoint, valueTransport, nativeValueHopExecution,
    fireTimeout, firePath, fireBackend, fireCalc, fireModularWorkers,
    fireUseMultiprime, firePrimeLimit, fireKeepModularTables,
    fireDimensionSeparated, fireMultiprimeWidth, fireMPIExecutable,
@@ -153,6 +153,9 @@ RunnerSettingsFromEnvironment[] := Module[
        absent. *)
     valueTransport = parseFlag["DE2_VALUE_TRANSPORT",
       envOrDefault["DE2_VALUE_TRANSPORT", "1"]],
+    nativeValueHopExecution = parseFlag[
+      "DE2_NATIVE_VALUE_HOP_EXECUTION",
+      envOrDefault["DE2_NATIVE_VALUE_HOP_EXECUTION", "1"]],
     halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
@@ -222,7 +225,8 @@ RunnerSettingsFromEnvironment[] := Module[
     "ResumeCheckpoint" -> resume, "CheckpointDirectory" -> checkpointDir,
     "AllowStaleCheckpoint" -> allowStale,
     "SaveNativeTransportCheckpoint" -> saveNativeTransportCheckpoint,
-    "ValueTransport" -> valueTransport
+    "ValueTransport" -> valueTransport,
+    "NativeValueHopExecution" -> nativeValueHopExecution
   |>];
 
 Options[PipelinePlan] = {
@@ -237,6 +241,7 @@ Options[PipelinePlan] = {
   "RecurrenceBackend" -> "Cpp",
   "CppThreads" -> Automatic,
   "ValueTransport" -> True,
+  "NativeValueHopExecution" -> True,
   "BatchEndpointArms" -> True,
   "SingularMatchPrecondition" -> False,
   "DeltaPrescriptionSign" -> 1,
@@ -306,7 +311,8 @@ validatePlanOptions[settings_Association] := Module[{checks},
     MemberQ[{-1, 1}, settings["DeltaPrescriptionSign"]],
     IntegerQ[settings["CppThreads"]] && settings["CppThreads"] >= 1,
     And @@ (boolQ[settings[#]] & /@ {
-      "ValueTransport", "BatchEndpointArms", "SingularMatchPrecondition",
+      "ValueTransport", "NativeValueHopExecution", "BatchEndpointArms",
+      "SingularMatchPrecondition",
       "RebuildPreparation", "MigrateLegacyPreparation",
       "AllowStaleCheckpoint", "SaveNativeTransportCheckpoint",
       "Asynchronous"}),
@@ -409,6 +415,7 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "RecurrenceBackend" -> OptionValue["RecurrenceBackend"],
     "CppThreads" -> threads,
     "ValueTransport" -> OptionValue["ValueTransport"],
+    "NativeValueHopExecution" -> OptionValue["NativeValueHopExecution"],
     "BatchEndpointArms" -> OptionValue["BatchEndpointArms"],
     "SingularMatchPrecondition" -> OptionValue["SingularMatchPrecondition"],
     "DeltaPrescriptionSign" -> OptionValue["DeltaPrescriptionSign"],
@@ -460,6 +467,8 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "DE2_RECURRENCE_BACKEND" -> settings["RecurrenceBackend"],
     "DE2_CPP_THREADS" -> inputString[threads],
     "DE2_VALUE_TRANSPORT" -> boolString[settings["ValueTransport"]],
+    "DE2_NATIVE_VALUE_HOP_EXECUTION" ->
+      boolString[settings["NativeValueHopExecution"]],
     "DE2_SINGULAR_MATCH_PRECONDITION" ->
       boolString[settings["SingularMatchPrecondition"]],
     "FT_DELTA_PRESCRIPTION_SIGN" ->

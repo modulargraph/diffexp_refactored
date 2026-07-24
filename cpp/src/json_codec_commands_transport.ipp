@@ -470,12 +470,13 @@
       }
     };
     // A private Taylor extension is useful only while it tightens the exact
-    // worst radius/allowance ratio.  Permit one plateau (magnitude rounding
-    // can hide a sub-bit improvement), but do not run an entire 25..800
-    // ladder against a fixed input/arithmetic-radius floor.  Direct-center
-    // and overlap evaluation have independent geometry, so each receives its
-    // own progress history.
-    constexpr std::uint32_t kPrivateTaylorNonprogressCap = 2;
+    // worst radius/allowance ratio.  Stop at the first exact-ratio plateau:
+    // unlike a rounded decimal-digit count, this comparison cannot hide a
+    // sub-bit improvement.  Continuing once the exact ratio is unchanged
+    // only rebuilds larger Taylor prefixes against a fixed input/arithmetic
+    // radius floor.  Direct-center and overlap evaluation have independent
+    // geometry, so each receives its own progress history.
+    constexpr std::uint32_t kPrivateTaylorNonprogressCap = 1;
     std::optional<Rational> phase_best_accuracy_excess;
     std::uint32_t phase_nonprogress = 0;
     const auto note_phase_progress = [&] {
@@ -3349,7 +3350,6 @@
         }
       }
     } reservation_guard{release_reservation, reservation_live};
-
     const auto operation_started = std::chrono::steady_clock::now();
     std::unique_ptr<AcbPrecisionLease> acb_lease;
     if (session->domain == "acb") {
@@ -4923,6 +4923,29 @@
         }
       }
     } reservation_guard{release_reservation, reservation_live};
+    const auto insufficient_window_response =
+        [](const MatchingArithmeticError& error) {
+          return json::object{
+              {"status", "error"},
+              {"id", "CPP"},
+              {"reason", "acb_match_residual_inconclusive"},
+              {"retryable_epsilon_reservoir", true},
+              {"retryable_matching_clearance", false},
+              {"required_additional_epsilon_orders",
+               error.row.has_value()
+                   ? json::value(*error.row)
+                   : json::value(nullptr)},
+              {"request_index",
+               error.column.has_value()
+                   ? json::value(*error.column)
+                   : json::value(nullptr)},
+              {"common_complete_max",
+               error.epsilon_power.has_value()
+                   ? json::value(*error.epsilon_power)
+                   : json::value(nullptr)},
+              {"scope", "paired-observable-arm-contraction"},
+              {"detail", error.what()}};
+        };
 
     const auto operation_started = std::chrono::steady_clock::now();
     std::unique_ptr<AcbPrecisionLease> acb_lease;
@@ -4982,7 +5005,9 @@
                         std::move(result.front());
                   } catch (const MatchingArithmeticError& error) {
                     if (error.code == MatchingArithmeticErrorCode::
-                                          TerminalOutputInconclusive)
+                                          TerminalOutputInconclusive ||
+                        error.code == MatchingArithmeticErrorCode::
+                                          InsufficientCompleteWindow)
                       failures[index] = std::make_exception_ptr(
                           MatchingArithmeticError(
                               error.code, error.what(), error.row,
@@ -5012,6 +5037,10 @@
         }
       } catch (const MatchingArithmeticError& error) {
         release_reservation();
+        if (error.code == MatchingArithmeticErrorCode::
+                              InsufficientCompleteWindow &&
+            error.row.has_value() && *error.row > 0)
+          return insufficient_window_response(error);
         if (error.code != MatchingArithmeticErrorCode::
                               TerminalOutputInconclusive)
           throw;
@@ -5128,8 +5157,11 @@
                   std::move(retried.front());
             } catch (const MatchingArithmeticError& retry_error) {
               if (retry_error.code ==
-                  MatchingArithmeticErrorCode::
-                      TerminalOutputInconclusive)
+                      MatchingArithmeticErrorCode::
+                          TerminalOutputInconclusive ||
+                  retry_error.code ==
+                      MatchingArithmeticErrorCode::
+                          InsufficientCompleteWindow)
                 throw MatchingArithmeticError(
                     retry_error.code, retry_error.what(),
                     retry_error.row, index,

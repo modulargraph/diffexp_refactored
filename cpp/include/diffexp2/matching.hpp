@@ -2584,6 +2584,26 @@ enum class AcbMatchingResidualVerdict : std::uint8_t {
   Inconclusive
 };
 
+inline bool acb_taylor_prefix_retryable(
+    AcbMatchingResidualVerdict verdict,
+    bool complete_through_required,
+    bool terminal_normal_frame) {
+  return !terminal_normal_frame &&
+      complete_through_required &&
+      verdict == AcbMatchingResidualVerdict::Inconclusive;
+}
+
+inline bool acb_taylor_prefix_retryable(
+    MatchingArithmeticErrorCode code,
+    bool terminal_normal_frame) {
+  if (terminal_normal_frame) return false;
+  return code == MatchingArithmeticErrorCode::AmbiguousZero ||
+      code == MatchingArithmeticErrorCode::ZeroDivisor ||
+      code == MatchingArithmeticErrorCode::SingularOrIncompleteSystem ||
+      code == MatchingArithmeticErrorCode::SaturationFailure ||
+      code == MatchingArithmeticErrorCode::SearchBudgetExhausted;
+}
+
 struct AcbMatchingCoefficientResidual {
   std::size_t row = 0;
   std::int32_t epsilon_power = 0;

@@ -120,9 +120,8 @@ enum class ExactMatchKind : std::uint8_t {
   // reaches while retaining the same <=1/k and <=radius/2 envelope.
   BalancedSafeOverlap,
   // A singular receiving chart uses the exact FixWithin balance retained by
-  // the Wolfram planner.  The producer remains in its ordinary 1/k/half-
-  // radius envelope; the singular receiver is bounded by the half-radius
-  // error-probe envelope and approached from the physical near side.
+  // the Wolfram planner.  Both charts remain in their affine 1/k/half-radius
+  // envelopes, and the receiver is approached from the physical near side.
   SingularBalancedApproach,
   // The balanced/symmetric candidate was a declared singular/boundary point;
   // a deterministic exact interior rational was selected instead.
@@ -311,27 +310,30 @@ inline Rational physical_radius(const ExactAffineChart& chart) {
   return abs(chart.scale) * chart.radius;
 }
 
-// Exact rational counterpart of Transport`singularMatchPoint.  Its 9/10
-// producing radius retains truncation headroom while the full receiving
-// radius minimizes the worse of the two normalized evaluation distances.
-// Admission below still caps both sides at the half-radius error envelope
-// and keeps the producer in its ordinary 1/k design class.
+// Exact rational counterpart of Transport`singularMatchPoint.  Balance the
+// handoff using AFFINE safe reaches, not the charts' full analytic physical
+// radii.  A singular chart can have a large true radius but a tiny transport
+// scale; using the former here placed endpoint reads near |t|=1 and amplified
+// otherwise harmless Taylor tails by hundreds of orders of magnitude.
+//
+// The 9/10 producer margin leaves exact headroom for an algebraic chart whose
+// scale is subsequently replaced by a strict inward rational lower bound.
 inline Rational singular_balanced_approach(
     const ExactAffineChart& left, const ExactAffineChart& right,
-    std::int32_t direction) {
+    std::uint32_t division_order, std::int32_t direction) {
   const auto y_left = directed(left.center, direction);
   const auto y_right = directed(right.center, direction);
   const auto gap = y_right - y_left;
   const Rational margin("9/10");
-  const auto left_radius = physical_radius(left);
-  const auto right_radius = physical_radius(right);
-  const auto denominator = margin * left_radius + right_radius;
+  const auto left_reach =
+      margin * safe_physical_reach(left, division_order);
+  const auto right_reach = safe_physical_reach(right, division_order);
+  const auto denominator = left_reach + right_reach;
   if (!(gap > Rational(0)) || !(gap < denominator))
     throw ExactPathPlanningError(
         ExactPathPlanningErrorCode::UnsafeGeometry,
-        "singular receiving chart has no exact balanced approach interval");
-  return directed(y_left + gap * margin * left_radius / denominator,
-                  direction);
+        "singular receiving chart has no conditioned affine overlap");
+  return directed(y_left + gap * left_reach / denominator, direction);
 }
 
 inline bool at_or_inside_safe_envelope(const ExactAffineChart& chart,
@@ -401,17 +403,19 @@ inline ExactMatchPoint plan_match(const ExactArmRequest& request,
       throw ExactPathPlanningError(
           ExactPathPlanningErrorCode::UnsafeGeometry,
           "a singular receiving chart requires a regular producing chart");
-    result.physical = singular_balanced_approach(left, right, direction);
+    result.physical = singular_balanced_approach(
+        left, right, division_order, direction);
     result.producing_local = local_coordinate(left, result.physical);
     result.receiving_local = local_coordinate(right, result.physical);
     if (!at_or_inside_safe_envelope(left, result.producing_local,
                                     division_order) ||
-        abs(result.receiving_local) > right.radius / Rational(2) ||
+        !at_or_inside_safe_envelope(right, result.receiving_local,
+                                    division_order) ||
         contains(forbidden, result.physical))
       throw ExactPathPlanningError(
           ExactPathPlanningErrorCode::UnsafeGeometry,
-          "canonical singular approach lies outside the producing 1/k or "
-          "two half-radius envelopes");
+          "canonical singular approach lies outside an affine 1/k or "
+          "half-radius envelope");
     result.kind = ExactMatchKind::SingularBalancedApproach;
     return result;
   }
@@ -513,11 +517,12 @@ inline bool valid_match_envelopes(const ExactAffineChart& left,
   if (left.singular_center || !right.singular_center ||
       !at_or_inside_safe_envelope(left, match.producing_local,
                                   division_order) ||
-      abs(match.receiving_local) > right.radius / Rational(2))
+      !at_or_inside_safe_envelope(right, match.receiving_local,
+                                  division_order))
     return false;
   try {
     return match.physical ==
-           singular_balanced_approach(left, right, direction);
+           singular_balanced_approach(left, right, division_order, direction);
   } catch (const ExactPathPlanningError&) {
     return false;
   }

@@ -1980,6 +1980,23 @@ $cppSerializationSymbols = {};
 $cppStaticRecordOverride = None;
 $cppUsePersistentSessions = True;
 
+(* Input serialization and native arithmetic have different contracts.
+   $InputPrecisionFactor protects decimal/algebraic input encoding; it must
+   not silently double the precision of every Arb multiplication.  Native
+   output is requested at WorkingPrecision+20 decimal digits, so retain that
+   complete output width plus a fixed 32-bit arithmetic guard.  Arb parses
+   the more precise serialized input into an enclosing ball at this work
+   precision, preserving rigor while avoiding an accidental 2x-WP runtime. *)
+$cppNativeOutputGuardDigits = 20;
+$cppNativeArithmeticGuardBits = 32;
+
+cppNativeOutputDigits[wp_Integer?Positive] :=
+  wp + $cppNativeOutputGuardDigits;
+
+cppNativePrecisionBits[wp_Integer?Positive] := Max[64,
+  Ceiling[cppNativeOutputDigits[wp]*Log[2, 10]] +
+    $cppNativeArithmeticGuardBits];
+
 (* Schema-2 stores the exact SCC certificate with every retained native
    operator.  Wolfram's certificate is one-based and counts vertices on the
    longest path; the C++ protocol is zero-based and counts coupling edges. *)
@@ -2543,8 +2560,8 @@ cppRunRecursionCore[cs_, prep_, aT_, bT_, P_Integer, nmax_Integer,
    assembledData = None, sourceRecords, sourcePayload},
   t0 = SessionTime[];
   inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
-  outputDigits = wp + 20;
-  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  outputDigits = cppNativeOutputDigits[wp];
+  precisionBits = cppNativePrecisionBits[wp];
   blocks = blockList[cs];
   schedule = Table[Map[Function[blk, Module[{dA, dB, kind},
       dA = Together[aT + n - blk["a"]];
@@ -2750,7 +2767,7 @@ cppBatchRecurrences[cs_, prep_, tasks_List, nmax_Integer, fb_Integer,
     TrueQ[$cppExactDomain], "rational", True, "acb"];
   wp = cfg["WorkingPrecision"];
   inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
-  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  precisionBits = cppNativePrecisionBits[wp];
   Block[{$cppSerializationDomain = domain,
       $cppSerializationSymbols = symbols},
     (* Build/certify the immutable operator once.  Every task then shares the
@@ -4109,7 +4126,7 @@ prepareNativeLocalFamilyShared[cs_Association, req_Association,
   domain = If[TrueQ[$cppExactDomain], "rational", "acb"];
   wp = cfg["WorkingPrecision"];
   inputDigits = DiffExp2`Tolerances`$InputPrecisionFactor*wp;
-  precisionBits = Ceiling[inputDigits*Log[2, 10]] + 32;
+  precisionBits = cppNativePrecisionBits[wp];
   Block[{$cppSerializationDomain = domain,
       $cppSerializationSymbols = {}},
     staticRecord = cppStaticOperatorPayload[cs, prep, blocks, fb, W,
@@ -5016,6 +5033,7 @@ sccNativeCompositeCacheSignature[cs_Association, req_Association] := {
   cs, req, cfg["WorkingPrecision"], cfg["ChopPrecision"],
   cfg["Variables"], cfg["RecurrenceBackend"],
   DiffExp2`Tolerances`$InputPrecisionFactor,
+  cppNativePrecisionBits[cfg["WorkingPrecision"]],
   TrueQ[$cppExactDomain], TrueQ[$cppUsePersistentSessions],
   TrueQ[$numericizeAllPreparedNumbers],
   TrueQ[$disablePreparedDirectNumericization],

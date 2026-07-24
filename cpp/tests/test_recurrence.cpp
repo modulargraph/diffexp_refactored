@@ -277,6 +277,44 @@ void test_epsilon_regular_pseudo_jordan_transaction() {
             ordinary.validity == epsilon_regular.validity && same_hits);
 }
 
+void test_epsilon_regular_principal_reused_across_log_layers() {
+  auto problem = exponential_problem(3);
+  problem.log_max = 2;
+  problem.initial.assign(
+      static_cast<std::size_t>(problem.log_max + 1) *
+          problem.dimension * problem.frame_width,
+      Rational(0));
+  problem.initial[-problem.frame_base] = Rational(1);
+  problem.initial_validity.assign(
+      static_cast<std::size_t>(problem.log_max + 1) *
+          problem.dimension,
+      5);
+  problem.epsilon_regular_principal = true;
+  PreparedLag<Rational> spectral_principal;
+  spectral_principal.valuations.assign(
+      static_cast<std::size_t>(problem.dimension) * problem.dimension,
+      diffexp2::kCompleteInfinity);
+  problem.spectral_principal_lag = std::move(spectral_principal);
+  problem.spectral_source_matrix =
+      identity_prepared_matrix(problem.dimension);
+  problem.assembly_matrix = identity_prepared_matrix(problem.dimension);
+
+  const auto result = RecurrenceSolver<Rational>(problem).run();
+  const auto coefficient = [&](std::uint32_t n) -> const Rational& {
+    return result.u[
+        (((static_cast<std::size_t>(n) * (problem.log_max + 2)) *
+              problem.dimension) *
+             problem.frame_width) -
+        problem.frame_base];
+  };
+  check("epsilon-regular principal is factored once per Taylor layer and reused across log RHSs",
+        result.epsilon_regular_principal_factorizations == 3 &&
+            result.epsilon_regular_principal_solves == 9 &&
+            coefficient(1) == Rational(1) &&
+            coefficient(2) == Rational("1/2") &&
+            coefficient(3) == Rational("1/6"));
+}
+
 void test_json_error_contract() {
   const auto value = boost::json::parse(diffexp2::run_recurrence_json("{}"));
   check("malformed JSON request returns typed error",
@@ -480,6 +518,7 @@ int main() {
   test_lower_frame_guard();
   test_resonant_jordan_log_ceiling_compatibility();
   test_epsilon_regular_pseudo_jordan_transaction();
+  test_epsilon_regular_principal_reused_across_log_layers();
   test_json_error_contract();
   test_malformed_tensor_is_typed_error();
   test_symbolic_rational_field();

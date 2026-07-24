@@ -300,6 +300,31 @@ assert["tt4_validateplan_accepts_segmentline_plan",
   !FailureQ[catchDE2[DiffExp2`Transport`ValidatePlan[plan4]]] &&
   plan4["SegmentCount"] === Length[plan4["Charts"]]];
 
+(* A projected waypoint can make the affine MatchRadius tiny while the
+   singular endpoint's true complex convergence radius stays large.  The
+   endpoint handoff must follow the affine scale, not use the large true
+   disk as permission to evaluate near |t|=1. *)
+conditionedSys4 = <|"Matrix" -> {{0}}, "Variable" -> x,
+  "SingularFactors" -> {
+    x - 1, (x - 1/2)^2 + (99/202)^2}|>;
+conditionedPlan4 = DiffExp2`Transport`SegmentLine[
+  conditionedSys4, {0, 1}];
+conditionedCharts4 = conditionedPlan4["Charts"];
+conditionedEndpoint4 = Last[conditionedCharts4];
+conditionedProducer4 = conditionedCharts4[[-2]];
+conditionedMatch4 = conditionedEndpoint4["IncomingMatchPoint"];
+assert["tt4_singular_endpoint_uses_conditioned_affine_overlap",
+  !FailureQ[catchDE2[
+    DiffExp2`Transport`ValidatePlan[conditionedPlan4]]] &&
+  TrueQ[conditionedEndpoint4["Radius"] >
+    20 conditionedEndpoint4["MatchRadius"]] &&
+  TrueQ[Abs[(conditionedMatch4 - conditionedEndpoint4["Center"])/
+      conditionedEndpoint4["Scale"]] <=
+    1/DiffExp2`Config`CFG["DivisionOrder"]] &&
+  TrueQ[Abs[(conditionedMatch4 - conditionedProducer4["Center"])/
+      conditionedProducer4["Scale"]] <=
+    1/DiffExp2`Config`CFG["DivisionOrder"]]];
+
 (* TT5: the mirror direction — singular ENDPOINT at 0 from the same
    squeezed anchor (the trLo hazard).  Same contract; the eps^0 weight of
    the b = 1 sector at the 0-chart is exactly 1 (the eps^0 component of

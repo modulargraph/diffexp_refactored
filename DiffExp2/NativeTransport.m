@@ -387,7 +387,8 @@ bridgeNativeRegularChartScale[chart_Association, index_Integer] := Module[
 
 bridgeNativeRegularPlanScales[plan_Association] := Module[
   {charts = Lookup[plan, "Charts", None], bridged, records,
-   direction = Lookup[plan, "Direction", None], certifiedPoint},
+   direction = Lookup[plan, "Direction", None],
+   k = cfg["DivisionOrder"], certifiedPoint},
   If[!ListQ[charts] || charts === {},
     err["E8", <|"Detail" ->
       "native algebraic-scale normalization requires a nonempty chart chain"|>]];
@@ -415,7 +416,11 @@ bridgeNativeRegularPlanScales[plan_Association] := Module[
             DiffExp2`Transport`Private`singularMatchPoint[
               bridged[[First[index] - 1, "Center"]],
               bridged[[First[index] - 1, "Radius"]],
-              chart["Center"], chart["Radius"], direction];
+              Lookup[bridged[[First[index] - 1]], "MatchRadius",
+                bridged[[First[index] - 1, "Radius"]]],
+              chart["Center"], chart["Radius"],
+              Lookup[chart, "MatchRadius", chart["Radius"]],
+              direction, k];
           If[certifiedPoint === None ||
               !exactRealAlgebraicQ[certifiedPoint],
             err["E8", <|"ChartIndex" -> First[index],
@@ -476,8 +481,10 @@ nativeBridgedPlanPreflightQ[plan_Association] := Quiet[Check[Module[
     {Abs[#1]*#2/2, Abs[#1]*Min[1/k, #2/2]} &,
     {scales, nativePlannerLocalRadius /@ charts}];
   If[!And @@ Table[exactAlgebraicTruthQ[
-        0 < dir*(centers[[i + 1]] - centers[[i]]) <=
-          reaches[[i, 1]] + reaches[[i + 1, 2]]],
+        0 < dir*(centers[[i + 1]] - centers[[i]]) <
+          If[TrueQ[Lookup[charts[[i + 1]], "Singular", False]],
+            (9/10)*reaches[[i, 2]] + reaches[[i + 1, 2]],
+            reaches[[i, 1]] + reaches[[i + 1, 2]]]],
       {i, Length[centers] - 1}], Return[False, Module]];
   finalRadius = Abs[Last[scales]]*Last[nativePlannerLocalRadius /@ charts];
   exactAlgebraicTruthQ[Abs[to - Last[centers]] < finalRadius]
@@ -980,10 +987,14 @@ nativeRationalShadowBasis[system_Association, req_Association, threads_,
         "Prescriptions" -> system["Prescriptions"]|>,
       "EpsWindow" -> req["EpsWindow"],
       "TWindow" -> <|"CompleteMax" -> req["TOrder"]|>,
-      "NativeSummary" -> <|
+      "NativeSummary" -> Join[
+        KeyTake[Lookup[rationalBasis, "NativeSummary", <||>], {
+          "elapsed_ms", "worker_threads", "column_elapsed_ms",
+          "column_elapsed_sum_ms", "column_elapsed_min_ms",
+          "column_elapsed_max_ms", "block_timing_summary"}], <|
         "specialization_capability" ->
           "exact-rational-shadow-to-acb-local-v1",
-        "rational_shadow_identity" -> shadowIdentity|>|>,
+        "rational_shadow_identity" -> shadowIdentity|>]|>,
     "DiffExp2Error", Function[{failure, tag}, cleanup[];
       Throw[failure, tag]]];
   Quiet[DiffExp2`CppBackend`ClosePersistentSession[rationalBasis]];
@@ -2289,6 +2300,25 @@ nativeChunkedObservableSummary[responses_List, chunkSize_Integer,
   "ChunkCount" -> Length[responses],
   "Chunks" -> (KeyDrop[#, {"status", resultKey}] & /@ responses)|>];
 
+$nativeValueAccuracyCircuitThreshold = 2;
+
+nativeValueHopExecutionQ[] := Module[
+  {value = Quiet[Environment["DE2_NATIVE_VALUE_HOP_EXECUTION"]]},
+  Which[
+    !StringQ[value] || StringLength[StringTrim[value]] == 0, True,
+    StringTrim[value] === "1", True,
+    StringTrim[value] === "0", False,
+    True,
+      err["E8", <|"Value" -> value,
+        "Detail" ->
+          "DE2_NATIVE_VALUE_HOP_EXECUTION must be 0 or 1"|>]]];
+
+nativeValueAccuracyPlateauQ[response_] :=
+  AssociationQ[response] &&
+    !TrueQ[Lookup[response, "used", False]] &&
+    Lookup[response, "reason", None] ===
+      "inflated-center-evaluation-fails-relative-accuracy-contract";
+
 nativeStreamTransportArm[atlas_Association, data_Association,
     arm_String, epsilon_Association, checkpointRoot_String,
     refinement_Association, diagnosticContext_:<||>] := Module[
@@ -2302,7 +2332,8 @@ nativeStreamTransportArm[atlas_Association, data_Association,
    diagnosticLocalReference, diagnosticPlanReference,
    posthopPath, posthopIdentity, posthopSaved, posthopManifest,
    posthopManifestPath,
-   shadowTarget,
+   shadowTarget, valueAccuracyFailureStreak = 0,
+   valueHopExecution = nativeValueHopExecutionQ[],
    terminalMatchDigitsText =
      Environment["DE2_DIAGNOSTIC_TERMINAL_MATCH_DIGITS"],
    preterminalMatchDigitsText =
@@ -2405,19 +2436,42 @@ nativeStreamTransportArm[atlas_Association, data_Association,
           StringQ[Lookup[ownerRecords[[index]],
             "NativeEquationOwner", None]],
         ownerRecords[[index]], Automatic];
-      valueResponse = If[AssociationQ[valueSolver],
-        DiffExp2`CppBackend`ConsumePersistentTransportValueHop[
-          atlas["Plan"], arm, index, valueSolver, current,
-          hopEpsilon, checkpointRoot],
-        <|"status" -> "ok", "used" -> False,
-          "reason" -> "receiver-has-no-regular-value-solver"|>];
+      valueResponse = Which[
+        !TrueQ[valueHopExecution],
+          valueAccuracyFailureStreak = 0;
+          <|"status" -> "ok", "used" -> False,
+            "reason" -> "route-value-hop-execution-disabled",
+            "detail" ->
+              "value-aware chart plan retained; fallback=certified-receiving-basis"|>,
+        !AssociationQ[valueSolver],
+          valueAccuracyFailureStreak = 0;
+          <|"status" -> "ok", "used" -> False,
+            "reason" -> "receiver-has-no-regular-value-solver"|>,
+        valueAccuracyFailureStreak >=
+            $nativeValueAccuracyCircuitThreshold,
+          <|"status" -> "ok", "used" -> False,
+            "reason" -> "route-value-accuracy-circuit-open",
+            "detail" ->
+              ("consecutive_accuracy_plateaus=" <>
+                ToString[valueAccuracyFailureStreak] <>
+                ";fallback=certified-receiving-basis")|>,
+        True,
+          DiffExp2`CppBackend`ConsumePersistentTransportValueHop[
+            atlas["Plan"], arm, index, valueSolver, current,
+            hopEpsilon, checkpointRoot]];
       If[FailureQ[valueResponse] || !AssociationQ[valueResponse] ||
           Lookup[valueResponse, "status", "error"] =!= "ok",
         err["E5", <|"Arm" -> arm, "Match" -> index,
           "BackendFailure" -> valueResponse,
           "Detail" -> "streamed native value-handoff eligibility or execution failed"|>]];
       If[TrueQ[Lookup[valueResponse, "used", False]],
+        valueAccuracyFailureStreak = 0;
         response = valueResponse,
+        If[nativeValueAccuracyPlateauQ[valueResponse],
+          valueAccuracyFailureStreak++,
+          If[Lookup[valueResponse, "reason", None] =!=
+              "route-value-accuracy-circuit-open",
+            valueAccuracyFailureStreak = 0]];
         nativeStageTiming["stream-basis-start arm=", arm,
           " index=", index, " value-reason=",
           Lookup[valueResponse, "reason", "ineligible"],
@@ -2435,6 +2489,12 @@ nativeStreamTransportArm[atlas_Association, data_Association,
             Lookup[basis, "NativeSummary", <||>], "elapsed_ms", None],
           " workers=", Lookup[
             Lookup[basis, "NativeSummary", <||>], "worker_threads", None],
+          " columnMs=", InputForm[Lookup[
+            Lookup[basis, "NativeSummary", <||>],
+            "column_elapsed_ms", None]],
+          " blockTiming=", InputForm[Lookup[
+            Lookup[basis, "NativeSummary", <||>],
+            "block_timing_summary", None]],
           " capability=", Lookup[
             Lookup[basis, "NativeSummary", <||>],
             "execution_capability", Lookup[

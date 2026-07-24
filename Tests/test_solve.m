@@ -24,6 +24,21 @@ mkChart[c_, r_, name_] := <|"ChartVar" -> t, "Center" -> c, "Radius" -> r, "Name
 rowOf[ls_, sec_, k_] := sec["Coeffs"][[k - ls["EpsWindow", "Min"] + 1]];
 tagsOf[ls_] := {#["a"], #["b"], #["p"]} & /@ ls["Sectors"];
 
+nativeOutput100 = DiffExp2`Solve`Private`cppNativeOutputDigits[100];
+nativeBits100 = DiffExp2`Solve`Private`cppNativePrecisionBits[100];
+nativeOutput500 = DiffExp2`Solve`Private`cppNativeOutputDigits[500];
+nativeBits500 = DiffExp2`Solve`Private`cppNativePrecisionBits[500];
+assert["su00_native_work_precision_is_decoupled_from_input_encoding",
+  nativeOutput100 === 120 && nativeOutput500 === 520 &&
+  nativeBits100 === Ceiling[120*Log[2, 10]] + 32 &&
+  nativeBits500 === Ceiling[520*Log[2, 10]] + 32 &&
+  nativeBits500 < Ceiling[
+    DiffExp2`Tolerances`$InputPrecisionFactor*500*Log[2, 10]]];
+assert["su00_native_work_precision_covers_export_width_with_guard",
+  nativeBits100 >= Ceiling[nativeOutput100*Log[2, 10]] + 32 &&
+  nativeBits500 >= Ceiling[nativeOutput500*Log[2, 10]] + 32 &&
+  DiffExp2`Solve`Private`cppNativePrecisionBits[1] >= 64];
+
 resolvedFrameZero = SetPrecision[0., 250];
 unresolvedFrameZero = 0``17;
 assert["su00_frame_chop_exactifies_only_certified_centered_zero",

@@ -240,6 +240,126 @@ assert["streamed hop certifies the observable-consumed reservoir below the priva
     capturedHopEpsilon === <|"min" -> 0, "max" -> 8,
       "required_complete_max" -> 7|>];
 
+(* A failed physical-value shortcut is optional: the receiving basis remains
+   the rigorous path.  After two consecutive accuracy plateaus on one arm,
+   stop re-proving the same failed shortcut until a singular receiver resets
+   the route.  This bounds the banana4-style cost without accepting any
+   uncertified value or suppressing a basis match. *)
+valueCircuitCalls = 0; valueCircuitBasisCalls = 0;
+valueCircuitFixture = catchDE2[Block[{
+    DiffExp2`NativeTransport`Private`nativeReceivingBasis =
+      Function[{receiver, request, threads, consume, equationOwner},
+        valueCircuitBasisCalls++;
+        <|"Columns" -> {<|"session" -> "stream-fixture-session",
+            "local" -> ("l:circuit-basis-" <>
+              ToString[valueCircuitBasisCalls]),
+            "checkpoint_identity" -> ("circuit-basis-checkpoint-" <>
+              ToString[valueCircuitBasisCalls])|>}|>],
+    DiffExp2`CppBackend`ConsumePersistentTransportValueHop =
+      Function[{plan, arm, index, valueSolver, incoming, epsilon, root},
+        valueCircuitCalls++;
+        <|"status" -> "ok", "used" -> False,
+          "reason" ->
+            "inflated-center-evaluation-fails-relative-accuracy-contract",
+          "detail" -> "controlled-accuracy-plateau"|>],
+    DiffExp2`CppBackend`ConsumePersistentTransportHop =
+      Function[{plan, arm, index, basis, incoming, epsilon, root,
+          refinement},
+        <|"status" -> "ok", "next_local" ->
+            <|"local" -> ("l:circuit-next-" <> ToString[index]),
+              "checkpoint_identity" ->
+                ("circuit-next-checkpoint-" <> ToString[index])|>,
+          "consumed_basis_handles" -> Lookup[basis, "local"]|>]},
+  DiffExp2`NativeTransport`Private`nativeStreamTransportArm[
+    <|"Session" -> "stream-fixture-session",
+      "Anchor" -> streamFixtureAnchor, "Plan" -> <||>, "Threads" -> 1,
+      "Request" -> <|"EpsWindow" -> <|"Min" -> 0,
+          "CompleteMax" -> 8|>, "RequiredCompleteMax" -> 2|>|>,
+    <|"ChartSystems" -> Join[{<||>}, {
+        <|"Center" -> 1,
+          "IndicialData" -> <|"Regular" -> True|>|>,
+        <|"Center" -> 2,
+          "IndicialData" -> <|"Regular" -> True|>|>,
+        <|"Center" -> 3,
+          "IndicialData" -> <|"Regular" -> True|>|>,
+        <|"Center" -> 4,
+          "IndicialData" -> <|"Regular" -> False|>|>,
+        <|"Center" -> 5,
+          "IndicialData" -> <|"Regular" -> True|>|>,
+        <|"Center" -> 6,
+          "IndicialData" -> <|"Regular" -> True|>|>}],
+      "ValueSolvers" -> {
+        <|"Mock" -> True|>, <|"Mock" -> True|>,
+        <|"Mock" -> True|>, None,
+        <|"Mock" -> True|>, <|"Mock" -> True|>},
+      "OwnerRecords" -> {}|>,
+    "lower", <|"min" -> 0, "max" -> 8,
+      "required_complete_max" -> 7,
+      "match_required_complete_max" -> 7|>,
+    "stream-value-circuit-root", <|"relative_tolerance" -> "1e-8",
+      "max_steps" -> 2|>]]];
+assert["streamed value accuracy circuit bounds failed shortcuts but retains every basis match",
+  AssociationQ[valueCircuitFixture] &&
+    Length[valueCircuitFixture["tile_sources"]] === 7 &&
+    valueCircuitCalls === 4 && valueCircuitBasisCalls === 6];
+
+(* Value-aware segmentation is a geometric contract, while the native value
+   hop is only an optimization.  Disabling the latter must make no backend
+   value call and must still build, consume, and retain every certified
+   receiving basis. *)
+basisOnlyValueCalls = 0; basisOnlyValueBasisCalls = 0;
+basisOnlyValueOldEnvironment =
+  Quiet[Environment["DE2_NATIVE_VALUE_HOP_EXECUTION"]];
+basisOnlyValueFixture = Internal`WithLocalSettings[
+  SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" -> "0"],
+  catchDE2[Block[{
+      DiffExp2`NativeTransport`Private`nativeReceivingBasis =
+        Function[{receiver, request, threads, consume, equationOwner},
+          basisOnlyValueBasisCalls++;
+          <|"Columns" -> {<|"session" -> "stream-fixture-session",
+              "local" -> ("l:basis-only-" <>
+                ToString[basisOnlyValueBasisCalls]),
+              "checkpoint_identity" -> ("basis-only-checkpoint-" <>
+                ToString[basisOnlyValueBasisCalls])|>}|>],
+      DiffExp2`CppBackend`ConsumePersistentTransportValueHop =
+        Function[{plan, arm, index, valueSolver, incoming, epsilon, root},
+          basisOnlyValueCalls++;
+          <|"status" -> "ok", "used" -> True,
+            "next_local" -> <|"local" -> "unexpected-value-local",
+              "checkpoint_identity" -> "unexpected-value-checkpoint"|>|>],
+      DiffExp2`CppBackend`ConsumePersistentTransportHop =
+        Function[{plan, arm, index, basis, incoming, epsilon, root,
+            refinement},
+          <|"status" -> "ok", "next_local" ->
+              <|"local" -> ("l:basis-only-next-" <> ToString[index]),
+                "checkpoint_identity" ->
+                  ("basis-only-next-checkpoint-" <> ToString[index])|>,
+            "consumed_basis_handles" -> Lookup[basis, "local"]|>]},
+    DiffExp2`NativeTransport`Private`nativeStreamTransportArm[
+      <|"Session" -> "stream-fixture-session",
+        "Anchor" -> streamFixtureAnchor, "Plan" -> <||>, "Threads" -> 1,
+        "Request" -> <|"EpsWindow" -> <|"Min" -> 0,
+            "CompleteMax" -> 8|>, "RequiredCompleteMax" -> 2|>|>,
+      <|"ChartSystems" -> {<||>,
+          <|"Center" -> 1,
+            "IndicialData" -> <|"Regular" -> True|>|>,
+          <|"Center" -> 2,
+            "IndicialData" -> <|"Regular" -> True|>|>},
+        "ValueSolvers" -> {<|"Mock" -> True|>, <|"Mock" -> True|>},
+        "OwnerRecords" -> {}|>,
+      "lower", <|"min" -> 0, "max" -> 8,
+        "required_complete_max" -> 7,
+        "match_required_complete_max" -> 7|>,
+      "stream-basis-only-root", <|"relative_tolerance" -> "1e-8",
+        "max_steps" -> 2|>]]],
+  SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" ->
+    If[StringQ[basisOnlyValueOldEnvironment],
+      basisOnlyValueOldEnvironment, None]]];
+assert["value-aware plan can execute as certified basis-only transport",
+  AssociationQ[basisOnlyValueFixture] &&
+    Length[basisOnlyValueFixture["tile_sources"]] === 3 &&
+    basisOnlyValueCalls === 0 && basisOnlyValueBasisCalls === 2];
+
 beforeInvalid = sessionStats[];
 duplicate = If[FailureQ[atlas], atlas, catchDE2[
   DiffExp2`NativeTransport`RunNativeTransportObservableBatch[

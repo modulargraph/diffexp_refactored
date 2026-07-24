@@ -112,6 +112,9 @@ Scan[(FeynmanTrick`SetFTOption[#, runnerSettings[#]]) &, {
 singularMatchPrecondition = runnerSettings["SingularMatchPrecondition"];
 valueTransport = runnerSettings["ValueTransport"];
 valueTransportMode = If[TrueQ[valueTransport], "1", "0"];
+nativeValueHopExecution = runnerSettings["NativeValueHopExecution"];
+nativeValueHopExecutionMode =
+  If[TrueQ[nativeValueHopExecution], "1", "0"];
 recurrenceBackend = runnerSettings["RecurrenceBackend"];
 cppBatchEndpointArms = runnerSettings["BatchEndpointArms"];
 cppArmThreadBudget = runnerSettings["CppThreads"];
@@ -1358,6 +1361,11 @@ loadLadderCheckpoint[file_, name_, data_, prepKey_, nativePlan_:None,
         payload["ValueTransportMode"] =!= valueTransportMode,
       Return[ladderCheckpointReject[file,
         "DE2_VALUE_TRANSPORT mode does not match"], Module]];
+    If[KeyExistsQ[payload, "NativeValueHopExecutionMode"] &&
+        payload["NativeValueHopExecutionMode"] =!=
+          nativeValueHopExecutionMode,
+      Return[ladderCheckpointReject[file,
+        "DE2_NATIVE_VALUE_HOP_EXECUTION mode does not match"], Module]];
     If[KeyExistsQ[payload, "SingularMatchPrecondition"] &&
         payload["SingularMatchPrecondition"] =!= singularMatchPrecondition,
       Return[ladderCheckpointReject[file,
@@ -2111,6 +2119,7 @@ ft2MatchingHaloProfileContract[name_String, prepKey_,
       "SingularMatchPrecondition" -> singularMatchPrecondition,
       "DeltaPrescriptionSign" -> deltaPrescriptionSign,
       "ValueTransportMode" -> valueTransportMode,
+      "NativeValueHopExecutionMode" -> nativeValueHopExecutionMode,
       "CppThreads" -> cppArmThreadBudget,
       "Anchor" -> anchor|>|>, ft2CheckpointRequestMetadata[]];
   identity = ft2CanonicalIdentity[
@@ -4002,6 +4011,7 @@ runExample[name_String, familyRequest_:None,
         "RecurrenceBackend" -> recurrenceBackend,
         "SingularMatchPrecondition" -> singularMatchPrecondition,
         "ValueTransportMode" -> valueTransportMode,
+        "NativeValueHopExecutionMode" -> nativeValueHopExecutionMode,
         "CppThreads" -> cppArmThreadBudget|>;
       nativeTransportContract = ft2NativeTransportContract[
         name, level, prepKey, sys, currentBCs, currentPrefactors,
@@ -4056,6 +4066,8 @@ runExample[name_String, familyRequest_:None,
                 "DivisionOrder" -> divisionOrder,
                 "RadiusOfConvergence" -> radiusOfConvergence,
                 "ValueTransportMode" -> valueTransportMode,
+                "NativeValueHopExecutionMode" ->
+                  nativeValueHopExecutionMode,
                 "RecurrenceBackend" -> recurrenceBackend,
                 "SingularMatchPrecondition" ->
                   singularMatchPrecondition,
@@ -4180,6 +4192,7 @@ runExample[name_String, familyRequest_:None,
         "DivisionOrder" -> divisionOrder,
         "RadiusOfConvergence" -> radiusOfConvergence,
         "ValueTransportMode" -> valueTransportMode,
+        "NativeValueHopExecutionMode" -> nativeValueHopExecutionMode,
         "RecurrenceBackend" -> recurrenceBackend,
         "SingularMatchPrecondition" -> singularMatchPrecondition,
         "DeltaPrescriptionSign" -> deltaPrescriptionSign,

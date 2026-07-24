@@ -234,6 +234,8 @@ struct RecurrenceResult {
   std::vector<std::int32_t> validity;     // [n][log][component]
   std::vector<PseudoHit<Scalar>> hits;
   std::int32_t top_valid = kCompleteInfinity;
+  std::uint64_t epsilon_regular_principal_factorizations = 0;
+  std::uint64_t epsilon_regular_principal_solves = 0;
 };
 
 template <typename Scalar>
@@ -1296,8 +1298,13 @@ class RecurrenceSolver {
     return {std::move(acc), std::move(acc_valid)};
   }
 
-  FrameBlock<Scalar> solve_epsilon_regular_principal(
-      std::uint32_t n, const FrameBlock<Scalar>& rhs) const {
+  struct EpsilonRegularPrincipalSystem {
+    std::vector<std::vector<Scalar>> coefficients;
+    detail::DenseSystemFactorization<Scalar> factorization;
+  };
+
+  EpsilonRegularPrincipalSystem prepare_epsilon_regular_principal(
+      std::uint32_t n) {
     const auto matrix_size = static_cast<std::size_t>(d_) * d_;
     std::vector<std::vector<Scalar>> coefficients(
         width_, std::vector<Scalar>(matrix_size,
@@ -1322,9 +1329,15 @@ class RecurrenceSolver {
       for (std::uint32_t column = 0; column < d_; ++column)
         constant_matrix[row][column] =
             coefficients.front()[static_cast<std::size_t>(row) * d_ + column];
-    const auto factorization =
+    auto factorization =
         detail::factor_dense_system(std::move(constant_matrix));
+    ++result_.epsilon_regular_principal_factorizations;
+    return {std::move(coefficients), std::move(factorization)};
+  }
 
+  FrameBlock<Scalar> solve_epsilon_regular_principal(
+      const EpsilonRegularPrincipalSystem& principal,
+      const FrameBlock<Scalar>& rhs) {
     auto solution = detail::zero_block<Scalar>(d_, width_);
     for (std::uint32_t epsilon = 0; epsilon < width_; ++epsilon) {
       std::vector<Scalar> coefficient(d_, ScalarTraits<Scalar>::zero());
@@ -1332,22 +1345,24 @@ class RecurrenceSolver {
         coefficient[row] = rhs[row][epsilon];
         for (std::uint32_t power = 1; power <= epsilon; ++power)
           for (std::uint32_t column = 0; column < d_; ++column)
-            coefficient[row] -= coefficients[power][
+            coefficient[row] -= principal.coefficients[power][
                 static_cast<std::size_t>(row) * d_ + column] *
                 solution[column][epsilon - power];
       }
       const auto solved = detail::solve_factored_dense_system(
-          factorization, std::move(coefficient));
+          principal.factorization, std::move(coefficient));
       for (std::uint32_t row = 0; row < d_; ++row)
         solution[row][epsilon] = solved[row];
     }
+    ++result_.epsilon_regular_principal_solves;
     return solution;
   }
 
   void solve_epsilon_regular_nonresonant(
       std::uint32_t n, std::uint32_t log,
       const FrameBlock<Scalar>& r_block,
-      const std::vector<std::int32_t>& r_valid) {
+      const std::vector<std::int32_t>& r_valid,
+      const EpsilonRegularPrincipalSystem& principal) {
     auto rhs = r_block;
     auto rhs_valid = r_valid;
     const auto above = get_block(n, log + 1);
@@ -1362,7 +1377,7 @@ class RecurrenceSolver {
         rhs_valid[row] = std::min(rhs_valid[row], detail::valid_shift(
             above_valid[row], 1 + scalar_shift.shift, frame_top_));
     }
-    set_block(n, log, solve_epsilon_regular_principal(n, rhs));
+    set_block(n, log, solve_epsilon_regular_principal(principal, rhs));
     const auto complete = *std::min_element(rhs_valid.begin(), rhs_valid.end());
     set_validity(n, log, std::vector<std::int32_t>(d_, complete));
   }
@@ -1567,15 +1582,20 @@ class RecurrenceSolver {
                     });
     if (epsilon_regular_resonance) {
       solve_epsilon_regular_resonant_layer(n, r_blocks, r_valid);
-    } else for (std::int32_t log = static_cast<std::int32_t>(p_.log_max);
-               log >= 0; --log) {
+    } else {
+      std::optional<EpsilonRegularPrincipalSystem> principal;
+      if (op_.epsilon_regular_principal)
+        principal.emplace(prepare_epsilon_regular_principal(n));
+      for (std::int32_t log = static_cast<std::int32_t>(p_.log_max);
+           log >= 0; --log) {
       if (op_.epsilon_regular_principal) {
         solve_epsilon_regular_nonresonant(
             n, static_cast<std::uint32_t>(log),
-            r_blocks[log], r_valid[log]);
+            r_blocks[log], r_valid[log], *principal);
       } else {
         solve_nonresonant(n, static_cast<std::uint32_t>(log),
                           r_blocks[log], r_valid[log]);
+      }
       }
     }
     if (!op_.epsilon_regular_principal)

@@ -20,8 +20,10 @@ json::object request(json::object value) {
   return request(json::serialize(value));
 }
 
-std::string prepare_scalar_chart(const std::string& session) {
-  const auto response = request(std::string(R"json({
+std::string prepare_scalar_chart(
+    const std::string& session,
+    const std::string& domain = "rational") {
+  auto payload = json::parse(std::string(R"json({
     "schema":2,"op":"chart.prepare","session":")json") + session +
     R"json(","key":"regular-block-scalar-key",
     "identity":"regular-block-scalar-v1",
@@ -39,14 +41,20 @@ std::string prepare_scalar_chart(const std::string& session) {
       "d0_inverse":"1","blocks":[[0]],
       "assembly":{"identity":true,"poly":[],"rat":[],"val":[0]},
       "chop_digits":0}
-  })json");
+  })json").as_object();
+  auto& problem = payload.at("problem").as_object();
+  problem["domain"] = domain;
+  if (domain == "acb") problem["precision_bits"] = 256;
+  const auto response = request(std::move(payload));
   if (response.at("status") != "ok")
     throw std::runtime_error(json::serialize(response));
   return std::string(response.at("chart").as_string());
 }
 
-std::string prepare_vector_chart(const std::string& session) {
-  const auto response = request(std::string(R"json({
+std::string prepare_vector_chart(
+    const std::string& session,
+    const std::string& domain = "rational") {
+  auto payload = json::parse(std::string(R"json({
     "schema":2,"op":"chart.prepare","session":")json") + session +
     R"json(","key":"regular-block-vector-key",
     "identity":"regular-block-vector-v1",
@@ -71,7 +79,11 @@ std::string prepare_vector_chart(const std::string& session) {
       "d0_inverse":"1","blocks":[[0],[1]],
       "assembly":{"identity":true,"poly":[],"rat":[],
         "val":[0,null,null,0]},"chop_digits":0}
-  })json");
+  })json").as_object();
+  auto& problem = payload.at("problem").as_object();
+  problem["domain"] = domain;
+  if (domain == "acb") problem["precision_bits"] = 256;
+  const auto response = request(std::move(payload));
   if (response.at("status") != "ok")
     throw std::runtime_error(json::serialize(response));
   return std::string(response.at("chart").as_string());
@@ -142,8 +154,15 @@ int main() {
   const auto scalar = prepare_scalar_chart(session);
   const auto vector = prepare_vector_chart(session);
 
-  const auto prepared = request(std::string(R"json({
-    "schema":2,"op":"scc.prepare","session":")json") + session +
+  const auto prepare_block_dag = [](
+      const std::string& target_session,
+      const std::string& scalar_chart,
+      const std::string& vector_chart,
+      const std::string& domain,
+      const std::string& key,
+      const std::string& identity) {
+    auto payload = json::parse(std::string(R"json({
+    "schema":2,"op":"scc.prepare","session":")json") + target_session +
     R"json(","key":"regular-block-dag-key",
     "identity":"regular-block-dag-parent-v2",
     "parent":{
@@ -179,11 +198,11 @@ int main() {
         "requested_max":1,"work_complete_max":2,"public_t_order":2,
         "wolfram_coupling_depth":2}},
     "blocks":[
-      {"block":0,"vertices":[0],"chart":")json" + scalar +
+      {"block":0,"vertices":[0],"chart":")json" + scalar_chart +
     R"json(","principal_identity":"regular-block-scalar-v1",
        "regular":true,"identity_gauge":true,"identity_v":true,
        "no_pseudo":true},
-      {"block":1,"vertices":[1,2],"chart":")json" + vector +
+      {"block":1,"vertices":[1,2],"chart":")json" + vector_chart +
     R"json(","principal_identity":"regular-block-vector-v1",
        "regular":true,"identity_gauge":true,"identity_v":true,
        "no_pseudo":true}],
@@ -207,7 +226,16 @@ int main() {
          "multiplier":{"epsilon_shift":1,"center_pole_order":0,
            "kernels":[],"exact_identity":"0","proven_zero":true}}
       ]}]
-  })json");
+  })json").as_object();
+    payload["key"] = key;
+    payload["identity"] = identity;
+    payload.at("couplings").as_array().front().as_object()["domain"] =
+        domain;
+    return request(std::move(payload));
+  };
+  const auto prepared = prepare_block_dag(
+      session, scalar, vector, "rational",
+      "regular-block-dag-key", "regular-block-dag-parent-v2");
   if (prepared.at("status") != "ok") {
     std::cerr << "scc.prepare: " << json::serialize(prepared) << '\n';
     return EXIT_FAILURE;
@@ -263,6 +291,50 @@ int main() {
   const auto stats = request(json::object{
       {"schema", 2}, {"op", "scc.stats"}, {"session", session},
       {"scc", scc}});
+
+  const auto acb_created = request(R"json({
+    "schema":2,"op":"session.create","domain":"acb",
+    "precision_bits":256,"output_digits":30,"scc_capacity":1,
+    "local_capacity":1
+  })json");
+  json::object acb_prepared{{"status", "not-run"}};
+  json::object acb_propagated{{"status", "not-run"}};
+  json::object acb_value{{"status", "not-run"}};
+  std::string acb_session;
+  if (acb_created.at("status") == "ok") {
+    acb_session =
+        std::string(acb_created.at("session").as_string());
+    const auto acb_scalar =
+        prepare_scalar_chart(acb_session, "acb");
+    const auto acb_vector =
+        prepare_vector_chart(acb_session, "acb");
+    acb_prepared = prepare_block_dag(
+        acb_session, acb_scalar, acb_vector, "acb",
+        "acb-regular-block-dag-key",
+        "acb-regular-block-dag-parent-v1");
+    if (acb_prepared.at("status") == "ok") {
+      acb_propagated = request(json::object{
+          {"schema", 2}, {"op", "scc.solve_column"},
+          {"session", acb_session},
+          {"scc", acb_prepared.at("scc")},
+          {"checkpoint_identity",
+           "acb-regular-block-propagated"},
+          {"seed", json::object{
+              {"block", 0}, {"run", regular_run(1, true)},
+              {"metadata", metadata("acb-scalar-seed")}}},
+          {"targets", json::array{json::object{
+              {"block", 1}, {"run", regular_run(2, false)},
+              {"metadata", metadata("acb-vector-target")}}}}});
+      if (acb_propagated.at("status") == "ok")
+        acb_value = request(json::object{
+            {"schema", 2}, {"op", "local.evaluate"},
+            {"session", acb_session},
+            {"local", acb_propagated.at("local")},
+            {"point", json::object{{"exact", "1/2"}}},
+            {"options",
+             json::object{{"tail_estimate", false}}}});
+    }
+  }
 
   auto malformed_seed = regular_run(1, true);
   malformed_seed.at("initial").as_array()[1] = "0";
@@ -320,10 +392,50 @@ int main() {
         provenance.at("basis_index") == 2;
   }
 
+  bool acb_validity_ok =
+      acb_propagated.at("status") == "ok" &&
+      acb_propagated.at("execution_capability") ==
+          "acb-regular-block-dag-column-v2" &&
+      acb_propagated.at("epsilon_min") == -1 &&
+      acb_propagated.at("epsilon_max") == 1 &&
+      acb_propagated.at("top_valid") == 1 &&
+      acb_value.at("status") == "ok" &&
+      acb_value.at("value").as_object()
+              .at("coefficients").as_array().size() == 9;
+  if (acb_validity_ok) {
+    bool seed_validity = false;
+    bool target_validity = false;
+    for (const auto& raw :
+         acb_propagated.at("block_diagnostics").as_array()) {
+      const auto& diagnostic = raw.as_object();
+      if (diagnostic.at("block") == 0)
+        seed_validity = diagnostic.at("top_valid") == 2;
+      if (diagnostic.at("block") == 1)
+        target_validity = diagnostic.at("top_valid") == 1;
+    }
+    acb_validity_ok = seed_validity && target_validity;
+  }
+
   const bool ok = batch.at("status") == "ok" &&
       batch.at("columns") == 2 && batch.at("worker_threads") == 2 &&
       batch.at("atomic_retention") == true &&
       batch.at("json_coefficients") == 0 &&
+      batch.at("column_elapsed_ms").as_array().size() == 2 &&
+      batch.at("column_elapsed_sum_ms").as_double() >=
+          batch.at("column_elapsed_max_ms").as_double() &&
+      batch.at("column_elapsed_max_ms").as_double() >=
+          batch.at("column_elapsed_min_ms").as_double() &&
+      batch.at("column_elapsed_min_ms").as_double() >= 0.0 &&
+      batch.at("block_timing_summary").as_array().size() == 3 &&
+      std::all_of(
+          batch.at("block_timing_summary").as_array().begin(),
+          batch.at("block_timing_summary").as_array().end(),
+          [](const auto& raw) {
+            const auto& timing = raw.as_object();
+            return timing.at("calls") != 0 &&
+                timing.at("parse_ms").as_double() >= 0.0 &&
+                timing.at("kernel_ms").as_double() >= 0.0;
+          }) &&
       rejected_batch.at("status") == "error" &&
       session_stats.at("locals") == 2 &&
       session_stats.at("pending_local_solves") == 0 &&
@@ -331,6 +443,7 @@ int main() {
       session_stats.at("scc_column_solves") == 2 &&
       propagated.at("status") == "ok" && propagated_ok &&
       vector_seed.at("status") == "ok" && vector_seed_ok &&
+      acb_validity_ok &&
       propagated.at("execution_capability") ==
           "exact-rational-regular-block-dag-column-v2" &&
       stats.at("execution_implemented") == true &&
@@ -351,6 +464,11 @@ int main() {
               << '\n'
               << "propagated: " << json::serialize(propagated) << '\n'
               << "propagated value: " << json::serialize(propagated_value)
+              << '\n' << "Acb prepared: "
+              << json::serialize(acb_prepared)
+              << '\n' << "Acb propagated: "
+              << json::serialize(acb_propagated)
+              << '\n' << "Acb value: " << json::serialize(acb_value)
               << '\n' << "vector seed: " << json::serialize(vector_seed)
               << '\n' << "vector seed value: "
               << json::serialize(vector_seed_value) << '\n'
@@ -358,6 +476,10 @@ int main() {
   }
   (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                              {"session", session}});
+  if (!acb_session.empty())
+    (void)request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", acb_session}});
   std::cout << (ok ? "PASS" : "FAIL")
             << ": persistent 2+1-dimensional regular SCC block columns\n";
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;

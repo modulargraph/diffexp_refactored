@@ -778,6 +778,64 @@
       }
     }
 
+    json::array column_elapsed_ms;
+    column_elapsed_ms.reserve(columns.size());
+    double column_elapsed_sum_ms = 0.0;
+    double column_elapsed_min_ms =
+        std::numeric_limits<double>::infinity();
+    double column_elapsed_max_ms = 0.0;
+    struct BlockTimingAggregate {
+      std::size_t calls = 0;
+      double parse_ms = 0.0;
+      double kernel_ms = 0.0;
+      std::uint64_t epsilon_regular_principal_factorizations = 0;
+      std::uint64_t epsilon_regular_principal_solves = 0;
+    };
+    std::map<std::pair<std::uint32_t, std::string>,
+             BlockTimingAggregate> block_timing;
+    for (const auto& column : columns) {
+      column_elapsed_ms.emplace_back(column.elapsed_ms);
+      column_elapsed_sum_ms += column.elapsed_ms;
+      column_elapsed_min_ms =
+          std::min(column_elapsed_min_ms, column.elapsed_ms);
+      column_elapsed_max_ms =
+          std::max(column_elapsed_max_ms, column.elapsed_ms);
+      for (const auto& raw_diagnostic : column.block_diagnostics) {
+        const auto& diagnostic = as_object(
+            raw_diagnostic, "native SCC block timing diagnostic");
+        const auto block = as_u32(
+            diagnostic.at("block"), "native SCC timing block");
+        const auto role = required_string(
+            diagnostic, "role");
+        auto& aggregate = block_timing[{block, role}];
+        ++aggregate.calls;
+        aggregate.parse_ms +=
+            diagnostic.at("parse_ms").as_double();
+        aggregate.kernel_ms +=
+            diagnostic.at("kernel_ms").as_double();
+        aggregate.epsilon_regular_principal_factorizations +=
+            as_u64(diagnostic.at(
+                "epsilon_regular_principal_factorizations"),
+                "native SCC timing principal factorizations");
+        aggregate.epsilon_regular_principal_solves +=
+            as_u64(diagnostic.at(
+                "epsilon_regular_principal_solves"),
+                "native SCC timing principal solves");
+      }
+    }
+    json::array block_timing_summary;
+    block_timing_summary.reserve(block_timing.size());
+    for (const auto& [key, aggregate] : block_timing)
+      block_timing_summary.push_back(json::object{
+          {"block", key.first}, {"role", key.second},
+          {"calls", aggregate.calls},
+          {"parse_ms", aggregate.parse_ms},
+          {"kernel_ms", aggregate.kernel_ms},
+          {"epsilon_regular_principal_factorizations",
+           aggregate.epsilon_regular_principal_factorizations},
+          {"epsilon_regular_principal_solves",
+           aggregate.epsilon_regular_principal_solves}});
+
     json::array responses;
     responses.reserve(columns.size());
     for (auto& column : columns) {
@@ -805,7 +863,12 @@
         {"worker_threads", worker_count},
         {"thread_limit", kMaxPersistentBatchThreads},
         {"atomic_retention", true},
-        {"json_coefficients", 0}, {"elapsed_ms", elapsed_ms}};
+        {"json_coefficients", 0}, {"elapsed_ms", elapsed_ms},
+        {"column_elapsed_ms", std::move(column_elapsed_ms)},
+        {"column_elapsed_sum_ms", column_elapsed_sum_ms},
+        {"column_elapsed_min_ms", column_elapsed_min_ms},
+        {"column_elapsed_max_ms", column_elapsed_max_ms},
+        {"block_timing_summary", std::move(block_timing_summary)}};
   }
 
   if (operation == "local.solve_batch") {

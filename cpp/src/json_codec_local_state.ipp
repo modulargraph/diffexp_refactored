@@ -1188,6 +1188,8 @@ struct NativeLocalDiagnostics {
   std::int32_t top_valid = kCompleteInfinity;
   double parse_ms = 0.0;
   double kernel_ms = 0.0;
+  std::uint64_t epsilon_regular_principal_factorizations = 0;
+  std::uint64_t epsilon_regular_principal_solves = 0;
   // Transaction-local SCC candidates may carry a wider coefficient slab
   // only until the assembled parent passes its owner-bound formal q/C proof.
   bool requires_parent_completeness_certificate = false;

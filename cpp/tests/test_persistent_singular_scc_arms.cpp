@@ -480,7 +480,10 @@ json::object algebraic_singular_arm(const std::string& anchor,
       json::object{{"center_exact", "0"}, {"scale_exact", "1"},
                    {"radius_exact", "2"},
                    {"certificate_identity", "root-anchor-surrogate-v1"}},
-      json::object{{"center_exact", "-2/3"}, {"scale_exact", "1"},
+      // The exact Rational surrogate must preserve the certified algebraic
+      // chart's physical 1/k reach.  Unit scale no longer suffices after the
+      // planner correctly conditions singular handoffs by affine scale.
+      json::object{{"center_exact", "-2/3"}, {"scale_exact", "2"},
                    {"radius_exact", "2"},
                    {"certificate_identity", "root-receiver-surrogate-v1"}}};
   json::array charts{

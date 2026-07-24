@@ -25,17 +25,28 @@ migrationPlan = FeynmanTrick`PipelinePlan["bubble",
   "MigrateLegacyPreparation" -> True];
 nativeCheckpointPlan = FeynmanTrick`PipelinePlan["bubble",
   "SaveNativeTransportCheckpoint" -> True];
+basisOnlyValuePlan = FeynmanTrick`PipelinePlan["bubble",
+  "ValueTransport" -> True, "NativeValueHopExecution" -> False];
 
 SetEnvironment["DE2_VALUE_TRANSPORT" -> None];
+SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" -> None];
 defaultValueTransportRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
 SetEnvironment["DE2_VALUE_TRANSPORT" -> "0"];
 legacyValueTransportRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["DE2_VALUE_TRANSPORT" -> "1"];
+SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" -> "0"];
+basisOnlyValuePlanRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
 SetEnvironment["DE2_VALUE_TRANSPORT" -> "2"];
 invalidValueTransportRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
 SetEnvironment["DE2_VALUE_TRANSPORT" -> None];
+SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" -> "2"];
+invalidNativeValueHopRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" -> None];
 
 SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "+1"];
 plusRunnerSettings =
@@ -116,6 +127,7 @@ assert["heavy native transport snapshots are explicit opt-in acceleration",
     FailureQ[invalidNativeCheckpointRunnerSettings]];
 assert["fast transport settings are explicit",
   plan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
+    plan["Environment", "DE2_NATIVE_VALUE_HOP_EXECUTION"] === "1" &&
     plan["Environment", "FT_CPP_BATCH_ENDPOINT_ARMS"] === "1" &&
     plan["Environment", "DE2_CPP_THREADS"] === "6" &&
     plan["Settings", "MatchingDigits"] === 18 &&
@@ -125,7 +137,18 @@ assert["direct runners share the release value-transport default",
     TrueQ[defaultValueTransportRunnerSettings["ValueTransport"]] &&
     AssociationQ[legacyValueTransportRunnerSettings] &&
     legacyValueTransportRunnerSettings["ValueTransport"] === False &&
-    FailureQ[invalidValueTransportRunnerSettings]];
+    AssociationQ[basisOnlyValuePlanRunnerSettings] &&
+    TrueQ[basisOnlyValuePlanRunnerSettings["ValueTransport"]] &&
+    basisOnlyValuePlanRunnerSettings["NativeValueHopExecution"] === False &&
+    FailureQ[invalidValueTransportRunnerSettings] &&
+    FailureQ[invalidNativeValueHopRunnerSettings]];
+assert["value-aware planning is independent of optional native value-hop execution",
+  AssociationQ[basisOnlyValuePlan] &&
+    TrueQ[basisOnlyValuePlan["Settings", "ValueTransport"]] &&
+    basisOnlyValuePlan["Settings", "NativeValueHopExecution"] === False &&
+    basisOnlyValuePlan["Environment", "DE2_VALUE_TRANSPORT"] === "1" &&
+    basisOnlyValuePlan["Environment",
+      "DE2_NATIVE_VALUE_HOP_EXECUTION"] === "0"];
 assert["FIRE installation path is explicit and reproducible",
   plan["Environment", "FT_FIRE_PATH"] ===
     ExpandFileName[FileNameJoin[{$TemporaryDirectory, "fire-facade-test"}]] &&

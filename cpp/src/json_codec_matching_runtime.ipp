@@ -746,6 +746,89 @@ json::object encode_acb_match_residual_diagnostics(
       {"detail", diagnostics.detail}};
 }
 
+json::object diagnose_acb_laurent_matrix_overlap(
+    const FiniteLaurentMatrix<ComplexBall>& left,
+    const FiniteLaurentMatrix<ComplexBall>& right,
+    const std::string& label) {
+  if (left.size() != right.size())
+    throw std::invalid_argument(
+        label + ": compared Laurent matrices have different row counts");
+  std::size_t compared = 0;
+  std::size_t overlapping = 0;
+  std::size_t disjoint = 0;
+  double maximum_relative_discrepancy_upper = 0.0;
+  json::array disjoint_examples;
+  for (std::size_t row = 0; row < left.size(); ++row) {
+    if (left[row].size() != right[row].size())
+      throw std::invalid_argument(
+          label + ": compared Laurent matrices have different column counts");
+    for (std::size_t column = 0; column < left[row].size(); ++column) {
+      const auto minimum = std::max(
+          left[row][column].min_power(),
+          right[row][column].min_power());
+      const auto complete_max = std::min(
+          left[row][column].complete_max(),
+          right[row][column].complete_max());
+      for (std::int64_t raw_power = minimum;
+           raw_power <= complete_max; ++raw_power) {
+        const auto power = matching_detail::checked_power(
+            raw_power, "diagnostic Laurent-matrix overlap power");
+        const auto& left_value =
+            left[row][column].coefficient(power);
+        const auto& right_value =
+            right[row][column].coefficient(power);
+        const auto discrepancy = left_value - right_value;
+        const bool overlaps = discrepancy.contains_zero();
+        ++compared;
+        if (overlaps) {
+          ++overlapping;
+        } else {
+          ++disjoint;
+          if (disjoint_examples.size() < 8)
+            disjoint_examples.push_back(json::object{
+                {"row", row},
+                {"column", column},
+                {"epsilon_power", power},
+                {"discrepancy_absolute_upper_approx",
+                 Magnitude::upper_abs(discrepancy)
+                     .approximate_upper()},
+                {"left_absolute_upper_approx",
+                 Magnitude::upper_abs(left_value)
+                     .approximate_upper()},
+                {"right_absolute_upper_approx",
+                 Magnitude::upper_abs(right_value)
+                     .approximate_upper()},
+                {"discrepancy_real_radius_exponent",
+                 discrepancy.real_radius_exponent()},
+                {"discrepancy_imag_radius_exponent",
+                 discrepancy.imag_radius_exponent()}});
+        }
+        const auto scale = std::max(
+            Magnitude::upper_abs(left_value).approximate_upper(),
+            Magnitude::upper_abs(right_value).approximate_upper());
+        const auto discrepancy_upper =
+            Magnitude::upper_abs(discrepancy).approximate_upper();
+        const auto relative =
+            scale > 0.0 ? discrepancy_upper / scale
+                        : (discrepancy_upper == 0.0 ? 0.0
+                                                    : std::numeric_limits<double>::infinity());
+        maximum_relative_discrepancy_upper = std::max(
+            maximum_relative_discrepancy_upper, relative);
+      }
+    }
+  }
+  return json::object{
+      {"schema", "diffexp2-acb-laurent-matrix-overlap-diagnostic-v1"},
+      {"label", label},
+      {"compared_coefficients", compared},
+      {"overlapping_coefficients", overlapping},
+      {"disjoint_coefficients", disjoint},
+      {"all_coefficients_overlap", disjoint == 0},
+      {"maximum_relative_discrepancy_upper_approx",
+       maximum_relative_discrepancy_upper},
+      {"disjoint_examples", std::move(disjoint_examples)}};
+}
+
 json::object checkpoint_acb_match_residual_record(
     const AcbMatchingResidualDiagnostics& diagnostics) {
   json::array coefficients;
@@ -1070,8 +1153,20 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
              ? json::value(
                    static_cast<std::uint64_t>(*taylor_complete_max) + 1)
              : json::value(nullptr)},
-        {"matching_frame_identity", matching_frame_identity_},
-        {"residual_frame_identity", residual_frame_identity_},
+        {"matching_frame_reference",
+         json::object{
+             {"algorithm", "fnv1a64-v1"},
+             {"fingerprint",
+              public_provenance_fingerprint(
+                  matching_frame_identity_)},
+             {"identity_bytes", matching_frame_identity_.size()}}},
+        {"residual_frame_reference",
+         json::object{
+             {"algorithm", "fnv1a64-v1"},
+             {"fingerprint",
+              public_provenance_fingerprint(
+                  residual_frame_identity_)},
+             {"identity_bytes", residual_frame_identity_.size()}}},
         {"epsilon",
          json::object{{"min", requested_window_.min_power},
                       {"max", requested_window_.complete_max},
@@ -3097,7 +3192,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
     const std::string& active_session_configuration_identity,
     const std::optional<json::object>& expected_singular_request,
     bool require_normalized_singular_frame,
-    const std::optional<std::size_t>& common_taylor_width) {
+    const std::optional<std::size_t>& common_taylor_width,
+    bool allow_exact_recurrence_diagnostic) {
   const auto started = std::chrono::steady_clock::now();
   if (common_taylor_width.has_value() && *common_taylor_width == 0)
     throw std::invalid_argument(
@@ -3637,6 +3733,120 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                   : std::nullopt);
   };
   auto exact_lattice = make_exact_lattice();
+  if (const auto* diagnostic =
+          std::getenv("DE2_DIAGNOSTIC_RATIONAL_SHADOW_QC");
+      diagnostic != nullptr && std::string(diagnostic) == "1" &&
+      allow_exact_recurrence_diagnostic &&
+      require_normalized_singular_frame &&
+      exact_lattice.exact_shadow_fused_local_basis.has_value()) {
+    const auto& owner = exact_lattice.exact_shadow_equation_owner;
+    if (!owner ||
+        std::string(owner->equation_scalar_domain()) != "rational")
+      throw std::logic_error(
+          "exact Rational-shadow q/C diagnostic lost its Rational equation owner");
+    const auto equation =
+        std::static_pointer_cast<
+            const PreparedPhysicalClearedODE<Rational>>(
+            owner->physical_ode_erased());
+    if (!equation)
+      throw std::logic_error(
+          "exact Rational-shadow q/C diagnostic lost its physical equation");
+    auto diagnostic_taylor_width =
+        basis_taylor_widths.front();
+    if (const auto* raw_width = std::getenv(
+            "DE2_DIAGNOSTIC_RATIONAL_SHADOW_QC_TAYLOR_WIDTH");
+        raw_width != nullptr && std::string(raw_width).size() != 0) {
+      std::size_t parsed = 0;
+      const auto requested = std::stoull(raw_width, &parsed);
+      if (parsed != std::string(raw_width).size() ||
+          requested == 0 ||
+          requested > diagnostic_taylor_width)
+        throw std::invalid_argument(
+            "DE2_DIAGNOSTIC_RATIONAL_SHADOW_QC_TAYLOR_WIDTH must lie inside the retained matching Taylor width");
+      diagnostic_taylor_width =
+          static_cast<std::size_t>(requested);
+    }
+    const EpsilonWindow requested_diagnostic_window{
+        evaluation_window.min_power, required_complete_max};
+    json::array columns;
+    columns.reserve(
+        exact_lattice.exact_shadow_fused_local_basis->size());
+    for (std::size_t column = 0;
+         column <
+         exact_lattice.exact_shadow_fused_local_basis->size();
+         ++column) {
+      const auto& exact_local =
+          (*exact_lattice.exact_shadow_fused_local_basis)[column];
+      if (exact_local.epsilon.complete_max < required_complete_max)
+        throw std::logic_error(
+            "exact Rational-shadow q/C diagnostic column " +
+            std::to_string(column) +
+            " does not reach the required epsilon maximum: retained=[" +
+            std::to_string(exact_local.epsilon.min_power) + "," +
+            std::to_string(exact_local.epsilon.complete_max) +
+            "], required_complete_max=" +
+            std::to_string(required_complete_max));
+      if (exact_local.taylor_complete_max + 1 <
+          diagnostic_taylor_width)
+        throw std::logic_error(
+            "exact Rational-shadow q/C diagnostic column " +
+            std::to_string(column) +
+            " does not reach the requested Taylor width: retained_width=" +
+            std::to_string(
+                static_cast<std::uint64_t>(
+                    exact_local.taylor_complete_max) + 1) +
+            ", requested_width=" +
+            std::to_string(diagnostic_taylor_width));
+      // The saturated exact column can have a higher structural epsilon
+      // minimum than the unsaturated Acb evaluation frame.  Rows below that
+      // exact minimum are identically absent, not an uncomputed prefix.  Audit
+      // the nonzero retained slab while continuing to require the complete
+      // public upper edge.
+      const EpsilonWindow diagnostic_window{
+          std::max(requested_diagnostic_window.min_power,
+                   exact_local.epsilon.min_power),
+          requested_diagnostic_window.complete_max};
+      const auto certificate =
+          certify_scc_parent_exact_formal_residual(
+              *equation, exact_local, diagnostic_window,
+              static_cast<std::uint32_t>(
+                  diagnostic_taylor_width - 1));
+      columns.push_back(json::object{
+          {"column", column},
+          {"retained_epsilon",
+           json::object{
+               {"min", exact_local.epsilon.min_power},
+               {"complete_max",
+                exact_local.epsilon.complete_max}}},
+          {"retained_taylor_complete_max",
+           exact_local.taylor_complete_max},
+          {"epsilon",
+           json::object{
+               {"min", certificate.epsilon.min_power},
+               {"complete_max",
+                certificate.epsilon.complete_max}}},
+          {"taylor_complete_max",
+           certificate.taylor_complete_max},
+          {"exact_tag_count", certificate.exact_tag_count},
+          {"coefficient_rows", certificate.coefficient_rows}});
+    }
+    std::fprintf(
+        stderr,
+        "[diffexp2 exact Rational-shadow q/C diagnostic] %s\n",
+        json::serialize(json::object{
+            {"schema",
+             "diffexp2-exact-rational-shadow-qc-diagnostic-v1"},
+            {"physical_point_exact", basis_physical_point},
+            {"equation_payload_reference",
+             json::object{
+                 {"algorithm", "fnv1a64-v1"},
+                 {"fingerprint",
+                  public_provenance_fingerprint(
+                      equation->payload_identity)},
+                 {"identity_bytes",
+                  equation->payload_identity.size()}}},
+            {"columns", std::move(columns)}}).c_str());
+  }
   constexpr std::size_t kExactShadowExtraPrecisionBits = 2048;
   std::optional<matching_detail::ScopedAcbPrecision>
       exact_shadow_precision;
@@ -3698,6 +3908,22 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       for (std::size_t row = 0; row < dimension; ++row)
         (*exact_shadow_physical_transformed_basis)[row].push_back(
             std::move(frames[row]));
+    }
+    if (const auto* diagnostics =
+            std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
+        diagnostics != nullptr && std::string(diagnostics) == "1") {
+      const auto specialized_saturation =
+          specialize_exact_rational_laurent_matrix_to_acb(
+              exact_lattice.saturation.transformation);
+      const auto numeric_physical_transformed_basis =
+          right_multiply_finite_by_exact_laurent(
+              evaluated_basis, specialized_saturation);
+      normal_frame_attempt[
+          "exact_shadow_vs_numeric_physical_transformed_basis"] =
+          diagnose_acb_laurent_matrix_overlap(
+              *exact_shadow_physical_transformed_basis,
+              numeric_physical_transformed_basis,
+              "exact Rational-shadow F*T versus retained Acb F*T");
     }
 
     const auto receiving_owner =
@@ -4754,6 +4980,206 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   return result;
 }
 
+struct TerminalMatchDiagnosticScanSpec {
+  std::string label;
+  std::optional<Rational> receiving_local;
+  std::optional<std::size_t> taylor_width;
+};
+
+std::vector<TerminalMatchDiagnosticScanSpec>
+parse_terminal_match_diagnostic_scan_specs(const char* raw) {
+  std::vector<TerminalMatchDiagnosticScanSpec> specs;
+  if (raw == nullptr || std::string(raw).empty()) return specs;
+  const std::string input(raw);
+  std::size_t begin = 0;
+  while (begin <= input.size()) {
+    const auto end = input.find(',', begin);
+    auto token = input.substr(
+        begin, end == std::string::npos ? std::string::npos
+                                        : end - begin);
+    const auto first = token.find_first_not_of(" \t");
+    const auto last = token.find_last_not_of(" \t");
+    if (first == std::string::npos)
+      throw std::invalid_argument(
+          "DE2_DIAGNOSTIC_TERMINAL_MATCH_SCAN contains an empty item");
+    token = token.substr(first, last - first + 1);
+    const auto separator = token.find('@');
+    if (separator != std::string::npos &&
+        token.find('@', separator + 1) != std::string::npos)
+      throw std::invalid_argument(
+          "terminal match scan items accept at most one @TaylorWidth suffix");
+    const auto point_text = token.substr(0, separator);
+    const auto width_text = separator == std::string::npos
+        ? std::string() : token.substr(separator + 1);
+    TerminalMatchDiagnosticScanSpec spec;
+    spec.label = token;
+    if (point_text != "same") {
+      if (point_text.empty())
+        throw std::invalid_argument(
+            "terminal match scan requires an exact receiving local point or 'same'");
+      spec.receiving_local = Rational(point_text);
+    }
+    if (separator != std::string::npos) {
+      if (width_text.empty())
+        throw std::invalid_argument(
+            "terminal match scan @ suffix requires a Taylor width");
+      std::size_t parsed = 0;
+      const auto width = std::stoull(width_text, &parsed);
+      if (parsed != width_text.size() || width == 0 ||
+          width > std::numeric_limits<std::size_t>::max())
+        throw std::invalid_argument(
+            "terminal match scan Taylor width must be a positive integer");
+      spec.taylor_width = static_cast<std::size_t>(width);
+    }
+    specs.push_back(std::move(spec));
+    if (specs.size() > 16)
+      throw std::invalid_argument(
+          "terminal match diagnostic scan accepts at most 16 items");
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  return specs;
+}
+
+void run_failed_terminal_match_diagnostic_scans(
+    const json::object& request,
+    const std::vector<std::string>& basis_handles,
+    const std::vector<std::shared_ptr<StoredLocalBase>>& erased_basis,
+    const std::string& incoming_handle,
+    const std::shared_ptr<StoredLocalBase>& erased_incoming,
+    slong precision_bits,
+    const std::string& active_session_configuration_identity,
+    const std::optional<json::object>& expected_singular_request,
+    bool require_normalized_singular_frame) {
+  const auto specs = parse_terminal_match_diagnostic_scan_specs(
+      std::getenv("DE2_DIAGNOSTIC_TERMINAL_MATCH_SCAN"));
+  if (specs.empty()) return;
+  if (!expected_singular_request.has_value() ||
+      request.if_contains("native_singular_scc_saturation") == nullptr)
+    throw std::invalid_argument(
+        "terminal match diagnostic scan requires a retained singular-SCC request");
+  if (erased_basis.empty())
+    throw std::invalid_argument(
+        "terminal match diagnostic scan requires a receiving basis");
+  const auto basis =
+      std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
+          erased_basis.front());
+  const auto incoming =
+      std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
+          erased_incoming);
+  if (!basis || !incoming)
+    throw std::invalid_argument(
+        "terminal match diagnostic scan requires Acb locals");
+
+  const auto original_checkpoint =
+      required_string(request, "checkpoint_identity");
+  json::array results;
+  results.reserve(specs.size());
+  for (std::size_t index = 0; index < specs.size(); ++index) {
+    const auto& spec = specs[index];
+    json::object item{
+        {"scan", spec.label},
+        {"requested_taylor_width",
+         spec.taylor_width.has_value()
+             ? json::value(
+                   static_cast<std::uint64_t>(*spec.taylor_width))
+             : json::value(nullptr)}};
+    try {
+      auto scan_request = request;
+      auto scan_expected = *expected_singular_request;
+      const auto scan_checkpoint =
+          original_checkpoint + ":failed-terminal-scan:" +
+          std::to_string(index);
+      scan_request["checkpoint_identity"] = scan_checkpoint;
+      scan_expected["match_checkpoint_identity"] =
+          scan_checkpoint;
+
+      auto scan_singular = as_object(
+          scan_request.at("native_singular_scc_saturation"),
+          "terminal match diagnostic singular request");
+      scan_singular["match_checkpoint_identity"] =
+          scan_checkpoint;
+      if (spec.receiving_local.has_value()) {
+        const auto& receiving_local = *spec.receiving_local;
+        const auto receiving_center =
+            Rational(basis->solution().chart.center_exact);
+        const auto receiving_scale =
+            Rational(basis->solution().chart.scale_exact);
+        const auto producing_center =
+            Rational(incoming->solution().chart.center_exact);
+        const auto producing_scale =
+            Rational(incoming->solution().chart.scale_exact);
+        const auto physical =
+            receiving_center + receiving_scale * receiving_local;
+        const auto incoming_local =
+            (physical - producing_center) / producing_scale;
+        scan_request["basis_point"] =
+            json::object{{"exact", receiving_local.str()}};
+        scan_request["incoming_point"] =
+            json::object{{"exact", incoming_local.str()}};
+        // These diagnostic points are exact rationals constructed locally,
+        // not retained CertifiedPlanPoint balls.  Let the ordinary exact
+        // rational geometry check below recompute the common physical point
+        // instead of falsely claiming a paired algebraic-point certificate.
+        scan_request.erase(
+            "certified_physical_match_point_exact");
+        scan_expected["receiving_basis_point_exact"] =
+            receiving_local.str();
+        scan_expected["receiving_basis_point_sign"] =
+            receiving_local.sign();
+        scan_expected["physical_match_point_exact"] =
+            physical.str();
+        scan_singular["receiving_basis_point_exact"] =
+            receiving_local.str();
+        scan_singular["receiving_basis_point_sign"] =
+            receiving_local.sign();
+        scan_singular["physical_match_point_exact"] =
+            physical.str();
+        item["receiving_local"] = receiving_local.str();
+        item["incoming_local"] = incoming_local.str();
+        item["physical"] = physical.str();
+      } else {
+        item["receiving_local"] =
+            as_object(scan_request.at("basis_point"),
+                      "terminal match scan basis point")
+                .at("exact");
+        item["incoming_local"] =
+            as_object(scan_request.at("incoming_point"),
+                      "terminal match scan incoming point")
+                .at("exact");
+        item["physical"] =
+            scan_request.at(
+                "certified_physical_match_point_exact");
+      }
+      scan_request["native_singular_scc_saturation"] =
+          scan_singular;
+      const auto rebuilt = build_refined_acb_match_once(
+          original_checkpoint + ":failed-terminal-scan-match:" +
+              std::to_string(index),
+          scan_request, basis_handles, erased_basis,
+          incoming_handle, erased_incoming, precision_bits,
+          active_session_configuration_identity, scan_expected,
+          require_normalized_singular_frame,
+          spec.taylor_width, false);
+      item["status"] = "ok";
+      item["match"] =
+          rebuilt->compact_terminal_diagnostic_summary();
+    } catch (const std::exception& error) {
+      item["status"] = "error";
+      item["detail"] = error.what();
+    }
+    results.push_back(std::move(item));
+  }
+  std::fprintf(
+      stderr,
+      "[diffexp2 failed terminal match scan] %s\n",
+      json::serialize(json::object{
+          {"schema",
+           "diffexp2-failed-terminal-match-scan-v1"},
+          {"checkpoint_identity", original_checkpoint},
+          {"scan", std::move(results)}}).c_str());
+}
+
 std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
     const std::string& match_handle, const json::object& request,
     const std::vector<std::string>& basis_handles,
@@ -4784,13 +5210,6 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   common_width = std::min(common_width,
                           incoming->solution().taylor_width());
 
-  const auto retryable_prefix_arithmetic = [](const auto code) {
-    return code == MatchingArithmeticErrorCode::AmbiguousZero ||
-        code == MatchingArithmeticErrorCode::ZeroDivisor ||
-        code == MatchingArithmeticErrorCode::SingularOrIncompleteSystem ||
-        code == MatchingArithmeticErrorCode::SaturationFailure ||
-        code == MatchingArithmeticErrorCode::SearchBudgetExhausted;
-  };
   std::shared_ptr<StoredRefinedAcbMatch> full;
   std::exception_ptr full_arithmetic_failure;
   try {
@@ -4798,15 +5217,45 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
         match_handle, request, basis_handles, erased_basis, incoming_handle,
         erased_incoming, precision_bits,
         active_session_configuration_identity, expected_singular_request,
-        require_normalized_singular_frame, std::nullopt);
+        require_normalized_singular_frame, std::nullopt, true);
   } catch (const MatchingArithmeticError& error) {
-    if (!retryable_prefix_arithmetic(error.code)) throw;
+    if (!acb_taylor_prefix_retryable(
+            error.code, require_normalized_singular_frame))
+      throw;
     full_arithmetic_failure = std::current_exception();
   }
   if (full && full->certified_for_materialization()) {
     full->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count());
     return full;
+  }
+  if (full &&
+      full->final_residual_verdict() ==
+          AcbMatchingResidualVerdict::Fail &&
+      full->residual_complete_through_required()) {
+    run_failed_terminal_match_diagnostic_scans(
+        request, basis_handles, erased_basis, incoming_handle,
+        erased_incoming, precision_bits,
+        active_session_configuration_identity,
+        expected_singular_request,
+        require_normalized_singular_frame);
+  }
+
+  // A terminal singular match ultimately defines an endpoint functional.
+  // A shorter finite Taylor sum is not interchangeable with that functional
+  // unless the omitted singular and incoming tails have both been bounded.
+  // build_refined_acb_match_once deliberately disables tail estimates, so a
+  // prefix-only pass here would merely replace an inconclusive full sum by an
+  // accidental equality of two truncations.  Keep ordinary regular matching
+  // behavior unchanged while the general prefix path is migrated to a
+  // certified-tail contract, but fail closed for the terminal normal frame.
+  if (require_normalized_singular_frame) {
+    if (full) {
+      full->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count());
+      return full;
+    }
+    std::rethrow_exception(full_arithmetic_failure);
   }
 
   // A stored Taylor order is a maximum work reservoir, not an obligation to
@@ -4819,9 +5268,10 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
   // unavailable.  The selected width is bound into every source record and
   // therefore into the exact-lattice and match provenance.
   if (full &&
-      (full->final_residual_verdict() !=
-           AcbMatchingResidualVerdict::Inconclusive ||
-       !full->residual_complete_through_required())) {
+      !acb_taylor_prefix_retryable(
+          full->final_residual_verdict(),
+          full->residual_complete_through_required(),
+          require_normalized_singular_frame)) {
     full->replace_elapsed_ms(std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count());
     return full;
@@ -4842,9 +5292,9 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match(
           match_handle, request, basis_handles, erased_basis, incoming_handle,
           erased_incoming, precision_bits,
           active_session_configuration_identity, expected_singular_request,
-          require_normalized_singular_frame, width);
+          require_normalized_singular_frame, width, false);
     } catch (const MatchingArithmeticError& error) {
-      if (!retryable_prefix_arithmetic(error.code)) throw;
+      if (!acb_taylor_prefix_retryable(error.code, false)) throw;
       // A narrower speculative prefix can lose the full-rank or complete
       // Laurent frame that the original attempt possessed.  It is not a new
       // failure of the requested match; keep searching and retain the best

@@ -61,30 +61,34 @@ void classic_exact_chain_and_reverse() {
   ExactPathPlanOptions options;
   check("DivisionOrder defaults to three", options.division_order == 3);
 
-  ExactArmRequest forward{Rational(0), Rational(2),
-                          {left_chart(), middle_chart(), right_chart()},
-                          topology()};
+  ExactAffineChart forward_clearance{"forward-clearance", Rational("1/2"),
+                                     Rational(1), Rational(2), false};
+  ExactArmRequest forward{
+      Rational(0), Rational(2),
+      {left_chart(), forward_clearance, middle_chart(), right_chart()},
+      topology()};
   const auto plan = diffexp2::plan_exact_arm(forward, options);
   check("singular receiving and ordinary matches retain distinct exact contracts",
-        plan.matches.size() == 2 &&
-            plan.matches[0].kind ==
-                ExactMatchKind::SingularBalancedApproach &&
-            plan.matches[0].physical == Rational("9/29") &&
-            plan.matches[0].producing_local == Rational("9/29") &&
-            plan.matches[0].receiving_local == Rational("-10/29") &&
+        plan.matches.size() == 3 &&
             plan.matches[1].kind ==
+                ExactMatchKind::SingularBalancedApproach &&
+            plan.matches[1].physical == Rational("19/29") &&
+            plan.matches[1].producing_local == Rational("9/58") &&
+            plan.matches[1].receiving_local == Rational("-5/29") &&
+            plan.matches[2].kind ==
                 ExactMatchKind::SymmetricDivisionPoint &&
-            plan.matches[1].physical == Rational("5/3") &&
-            plan.matches[1].producing_local == Rational("1/3") &&
-            plan.matches[1].receiving_local == Rational("-1/3"));
+            plan.matches[2].physical == Rational("5/3") &&
+            plan.matches[2].producing_local == Rational("1/3") &&
+            plan.matches[2].receiving_local == Rational("-1/3"));
   check("tiles cover exactly once with no gap and flag the singular crossing",
-        plan.tiles.size() == 3 &&
+        plan.tiles.size() == 4 &&
             plan.tiles[0].physical_begin == Rational(0) &&
-            plan.tiles[0].physical_end == Rational("9/29") &&
+            plan.tiles[0].physical_end == plan.tiles[1].physical_begin &&
             plan.tiles[1].physical_begin == plan.tiles[0].physical_end &&
             plan.tiles[1].physical_end == plan.tiles[2].physical_begin &&
-            plan.tiles[2].physical_end == Rational(2) &&
-            plan.tiles[1].crosses_singular_center);
+            plan.tiles[2].physical_end == plan.tiles[3].physical_begin &&
+            plan.tiles[3].physical_end == Rational(2) &&
+            plan.tiles[2].crosses_singular_center);
   check("explicit -i0 topology propagates to every match and tile",
         std::all_of(plan.matches.begin(), plan.matches.end(), [](const auto& m) {
           return m.branch_sheets.size() == 1 &&
@@ -100,22 +104,25 @@ void classic_exact_chain_and_reverse() {
         waypoints == std::vector<Rational>({Rational(2), Rational("5/2"),
                                             Rational(3)}));
 
-  ExactArmRequest reverse{Rational(2), Rational(0),
-                          {right_chart(), middle_chart(), left_chart()},
-                          topology()};
+  ExactAffineChart reverse_clearance{"reverse-clearance", Rational("3/2"),
+                                     Rational(1), Rational(2), false};
+  ExactArmRequest reverse{
+      Rational(2), Rational(0),
+      {right_chart(), reverse_clearance, middle_chart(), left_chart()},
+      topology()};
   const auto reversed = diffexp2::plan_exact_arm(reverse, options);
   check("reversed arm mirrors physical order and local match signs",
-        reversed.direction == -1 && reversed.matches.size() == 2 &&
-            reversed.matches[0].kind ==
-                ExactMatchKind::SingularBalancedApproach &&
-            reversed.matches[0].physical == Rational("23/13") &&
-            reversed.matches[0].producing_local == Rational("-3/13") &&
-            reversed.matches[0].receiving_local == Rational("5/13") &&
+        reversed.direction == -1 && reversed.matches.size() == 3 &&
             reversed.matches[1].kind ==
+                ExactMatchKind::SingularBalancedApproach &&
+            reversed.matches[1].physical == Rational("39/29") &&
+            reversed.matches[1].producing_local == Rational("-9/58") &&
+            reversed.matches[1].receiving_local == Rational("5/29") &&
+            reversed.matches[2].kind ==
                 ExactMatchKind::SymmetricDivisionPoint &&
-            reversed.matches[1].physical == Rational("1/3") &&
-            reversed.matches[1].producing_local == Rational("-1/3") &&
-            reversed.matches[1].receiving_local == Rational("1/3"));
+            reversed.matches[2].physical == Rational("1/3") &&
+            reversed.matches[2].producing_local == Rational("-1/3") &&
+            reversed.matches[2].receiving_local == Rational("1/3"));
 }
 
 void box_bubble_singular_endpoint_handoffs() {
@@ -135,36 +142,40 @@ void box_bubble_singular_endpoint_handoffs() {
   upper_topology.boundary_points = {Rational(1)};
   upper_topology.branch_sheets = {ExactBranchSheet{"-1 + xx1", 1}};
 
+  ExactAffineChart lower_clearance{"box-bubble-lower-clearance",
+                                   Rational("1/3"), Rational(1),
+                                   Rational(1), false};
+  ExactAffineChart upper_clearance{"box-bubble-upper-clearance",
+                                   Rational("2/3"), Rational(1),
+                                   Rational(1), false};
   ExactArmRequest lower{Rational("11/23"), Rational(0),
-                        {anchor, lower_endpoint}, lower_topology};
+                        {anchor, lower_clearance, lower_endpoint},
+                        lower_topology};
   ExactArmRequest upper{Rational("11/23"), Rational(1),
-                        {anchor, upper_endpoint}, upper_topology};
+                        {anchor, upper_clearance, upper_endpoint},
+                        upper_topology};
   const auto arms = diffexp2::plan_exact_independent_arms(lower, upper);
-  const auto& lower_match = arms.lower.matches.front();
-  const auto& upper_match = arms.upper.matches.front();
+  const auto& lower_match = arms.lower.matches.back();
+  const auto& upper_match = arms.upper.matches.back();
 
-  check("box-bubble lower singular endpoint retains exact FixWithin handoff",
+  check("box-bubble lower singular endpoint uses conditioned affine balance",
         lower_match.kind == ExactMatchKind::SingularBalancedApproach &&
-            lower_match.physical == Rational("220/667") &&
-            lower_match.producing_local == Rational("-9/29") &&
-            lower_match.receiving_local == Rational("10/29"));
-  check("box-bubble upper singular endpoint closes the exact 2/69 1/k gap",
+            lower_match.physical == Rational("220/1281") &&
+            lower_match.producing_local == Rational("-69/427") &&
+            lower_match.receiving_local == Rational("230/1281"));
+  check("box-bubble upper singular endpoint stays well inside both affine frames",
         upper_match.kind == ExactMatchKind::SingularBalancedApproach &&
-            upper_match.physical == Rational("209/329") &&
-            upper_match.producing_local == Rational("108/329") &&
-            upper_match.receiving_local == Rational("-120/329"));
-  check("singular receiver may exceed 1/3 but both handoffs remain inside half radius",
+            upper_match.physical == Rational("47/57") &&
+            upper_match.producing_local == Rational("3/19") &&
+            upper_match.receiving_local == Rational("-10/57"));
+  check("both singular handoff coordinates stay within 1/k",
         diffexp2::exact_path_detail::abs(lower_match.producing_local) <=
-                Rational("1/2") &&
-            diffexp2::exact_path_detail::abs(lower_match.receiving_local) <=
-                Rational("1/2") &&
-            diffexp2::exact_path_detail::abs(upper_match.producing_local) <=
-                Rational("1/2") &&
-            diffexp2::exact_path_detail::abs(upper_match.receiving_local) <=
-                Rational("1/2") &&
-            diffexp2::exact_path_detail::abs(lower_match.receiving_local) >
                 Rational("1/3") &&
-            diffexp2::exact_path_detail::abs(upper_match.receiving_local) >
+            diffexp2::exact_path_detail::abs(lower_match.receiving_local) <=
+                Rational("1/3") &&
+            diffexp2::exact_path_detail::abs(upper_match.producing_local) <=
+                Rational("1/3") &&
+            diffexp2::exact_path_detail::abs(upper_match.receiving_local) <=
                 Rational("1/3"));
 
   ExactPathTopology unsafe_topology;
@@ -182,21 +193,21 @@ void box_bubble_singular_endpoint_handoffs() {
   } catch (const ExactPathPlanningError&) {
     half_rejected = true;
   }
-  check("singular balanced approach beyond the receiver half radius is rejected",
+  check("singular balanced approach beyond the conditioned overlap is rejected",
         half_rejected);
 
   auto rewrite_match = [](diffexp2::ExactArmPlan& plan,
                           const Rational& physical) {
-    auto& match = plan.matches.front();
-    const auto& left = plan.charts.front();
+    auto& match = plan.matches.back();
+    const auto& left = plan.charts[plan.charts.size() - 2];
     const auto& right = plan.charts.back();
     match.physical = physical;
     match.producing_local =
         diffexp2::exact_path_detail::local_coordinate(left, physical);
     match.receiving_local =
         diffexp2::exact_path_detail::local_coordinate(right, physical);
-    plan.tiles.front().physical_end = physical;
-    plan.tiles.front().local_end = match.producing_local;
+    plan.tiles[plan.tiles.size() - 2].physical_end = physical;
+    plan.tiles[plan.tiles.size() - 2].local_end = match.producing_local;
     plan.tiles.back().physical_begin = physical;
     plan.tiles.back().local_begin = match.receiving_local;
   };
@@ -214,8 +225,45 @@ void box_bubble_singular_endpoint_handoffs() {
         rejects_plan(wrong_side));
   auto noncanonical = arms.upper;
   rewrite_match(noncanonical, Rational("55/91"));
-  check("an otherwise half-safe singular handoff cannot forge the canonical balance",
+  check("an otherwise safe singular handoff cannot forge the canonical balance",
         rejects_plan(noncanonical));
+}
+
+void singular_true_radius_does_not_override_affine_conditioning() {
+  ExactPathPlanOptions options;
+  options.division_order = 4;
+  ExactPathTopology endpoint_topology;
+  endpoint_topology.singular_points = {Rational(1)};
+  const ExactAffineChart endpoint{"endpoint", Rational(1), Rational("1/101"),
+                                  Rational(100), true};
+  ExactArmRequest unsafe{
+      Rational("100/101"), Rational(1),
+      {ExactAffineChart{"pre-endpoint", Rational("100/101"),
+                        Rational("1/101"), Rational(100), false},
+       endpoint},
+      endpoint_topology};
+  bool rejected = false;
+  try {
+    (void)diffexp2::plan_exact_arm(unsafe, options);
+  } catch (const ExactPathPlanningError&) {
+    rejected = true;
+  }
+  check("large true radii cannot authorize a near-unit singular local coordinate",
+        rejected);
+
+  ExactArmRequest conditioned{
+      Rational("999/1000"), Rational(1),
+      {ExactAffineChart{"conditioned-pre-endpoint", Rational("999/1000"),
+                        Rational("1/101"), Rational(100), false},
+       endpoint},
+      endpoint_topology};
+  const auto plan = diffexp2::plan_exact_arm(conditioned, options);
+  const auto& match = plan.matches.front();
+  check("a closer regular chart gives a singular handoff within both 1/k frames",
+        diffexp2::exact_path_detail::abs(match.producing_local) <=
+                Rational("1/4") &&
+            diffexp2::exact_path_detail::abs(match.receiving_local) <=
+                Rational("1/4"));
 }
 
 void forbidden_match_and_independent_arms() {
@@ -294,6 +342,7 @@ int main() {
   try {
     classic_exact_chain_and_reverse();
     box_bubble_singular_endpoint_handoffs();
+    singular_true_radius_does_not_override_affine_conditioning();
     forbidden_match_and_independent_arms();
     asymmetric_receiver_clearance();
   } catch (const std::exception& error) {

@@ -28,22 +28,29 @@ algebraic = <|"Center" -> algebraicCenter, "Scale" -> algebraicScale,
   "MatchRadius" -> RootReduce[algebraicScale roc],
   "Singular" -> False, "Prescriptions" -> {},
   "IncomingMatchPoint" -> algebraicCenter/2|>;
+clearance = <|"Center" -> 3/4, "Scale" -> 1/4,
+  "Radius" -> 1/4, "LocalRadius" -> 1,
+  "MatchRadius" -> roc/4, "Singular" -> False,
+  "Prescriptions" -> {}, "IncomingMatchPoint" -> 2/3|>;
 terminal = <|"Center" -> 1, "Scale" -> 1, "Radius" -> 2,
   "LocalRadius" -> 2, "MatchRadius" -> roc,
   "Singular" -> True, "Prescriptions" -> {},
   "IncomingMatchPoint" -> staleTerminalPoint|>;
 plan = <|"From" -> 0, "To" -> 1, "Direction" -> 1,
-  "Charts" -> {anchor, algebraic, terminal}|>;
+  "Charts" -> {anchor, algebraic, clearance, terminal}|>;
 
 bridged = catchDE2[
   DiffExp2`NativeTransport`Private`bridgeNativeRegularPlanScales[plan]];
 expected = If[AssociationQ[bridged],
   DiffExp2`Transport`Private`singularMatchPoint[
-    bridged["Charts"][[2, "Center"]], bridged["Charts"][[2, "Radius"]],
-    bridged["Charts"][[3, "Center"]], bridged["Charts"][[3, "Radius"]], 1],
+    bridged["Charts"][[3, "Center"]], bridged["Charts"][[3, "Radius"]],
+    bridged["Charts"][[3, "MatchRadius"]],
+    bridged["Charts"][[4, "Center"]], bridged["Charts"][[4, "Radius"]],
+    bridged["Charts"][[4, "MatchRadius"]], 1,
+    DiffExp2`Config`CFG["DivisionOrder"]],
   $Failed];
 actual = If[AssociationQ[bridged],
-  Lookup[bridged["Charts"][[3]],
+  Lookup[bridged["Charts"][[4]],
     "NativeCertifiedIncomingMatchPoint", None], None];
 certified = If[AssociationQ[bridged], catchDE2[
   DiffExp2`NativeTransport`Private`nativeCertifiedArmGeometry[bridged]],
@@ -55,10 +62,14 @@ ok = AssociationQ[bridged] && AssociationQ[certified] &&
   exactSameQ &&
   !TrueQ[PossibleZeroQ[RootReduce[actual - staleTerminalPoint]]] &&
   TrueQ[0 < actual < 1] &&
-  TrueQ[Abs[actual - bridged["Charts"][[2, "Center"]]] <
-    bridged["Charts"][[2, "Radius"]]] &&
-  TrueQ[Abs[actual - 1] < bridged["Charts"][[3, "Radius"]]/2] &&
-  certified["matches"][[2, "physical", "exact"]] ===
+  TrueQ[Abs[actual - bridged["Charts"][[3, "Center"]]] <
+    bridged["Charts"][[3, "Radius"]]] &&
+  TrueQ[Abs[actual - 1] <=
+    DiffExp2`Transport`Private`matchOffset[
+      bridged["Charts"][[4, "MatchRadius"]],
+      bridged["Charts"][[4, "Radius"]],
+      DiffExp2`Config`CFG["DivisionOrder"]]] &&
+  certified["matches"][[3, "physical", "exact"]] ===
     ToString[RootReduce[actual], InputForm];
 
 Print[If[TrueQ[ok], "PASS", "FAIL"],

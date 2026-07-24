@@ -2732,9 +2732,12 @@ void test_acb_terminal_factorized_consumed_checkpoint() {
         strict_pair_publication.at("scope") != "final-paired-line" ||
         counter(strict_pair_publication,
                 "required_additional_digits") == 0 ||
+        strict_pair_publication.at(
+            "ordinary_factorization_retry") != true ||
         !strict_pair_publication.at("conditioning").is_object())
       throw std::runtime_error(
-          "strict final-pair publication did not retain its failure conditioning: " +
+          "strict final-pair publication did not retry ordinary "
+          "factorization or retain its failure conditioning: " +
           json::serialize(strict_pair_publication));
     const auto& strict_conditioning =
         strict_pair_publication.at("conditioning").as_object();

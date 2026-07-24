@@ -3162,6 +3162,11 @@ struct TransportObservableContractionInput {
   TransportTailPolicy tail_policy = TransportTailPolicy::Stored;
   std::optional<BoundedDivergentCancellation> divergent_cancellation;
   std::optional<Magnitude> publication_relative_tolerance;
+  // A direct stored-row integral is already a rigorous enclosure. Paired
+  // contraction can first test that cheap enclosure against its final
+  // publication contract and enable the much more expensive center-value
+  // reassociation only for an observable whose combined line is too wide.
+  bool factorize_ordinary_stored_rows = true;
   std::vector<std::string> projected_local_handles;
   std::string aggregate_handle;
   json::object aggregate_record;
@@ -3199,6 +3204,24 @@ struct TransportObservableContractionResult {
   double elapsed_ms = 0.0;
 };
 
+bool transport_contraction_timing_enabled() {
+  return std::getenv("DE2_DIAGNOSTIC_CONTRACTION_TIMING") != nullptr;
+}
+
+void emit_transport_contraction_timing(std::string message) {
+  if (!transport_contraction_timing_enabled()) return;
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> lock(mutex);
+  std::cerr << message << '\n';
+}
+
+double elapsed_milliseconds(
+    const std::chrono::steady_clock::time_point& started) {
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - started)
+      .count();
+}
+
 template <typename Scalar>
 StoredLineIntegral integrate_transport_stored_row_tile(
     slong precision_bits,
@@ -3208,7 +3231,8 @@ StoredLineIntegral integrate_transport_stored_row_tile(
     std::size_t tile_index,
     const ObservableEpsilonContract& epsilon_contract,
     const std::optional<BoundedDivergentCancellation>&
-        divergent_cancellation) {
+        divergent_cancellation,
+    bool factorize_ordinary_row = true) {
   if (!source || tile_index >= arm.exact.tiles.size())
     throw std::invalid_argument(
         "fused transport row integration lost its source or tile");
@@ -3332,10 +3356,16 @@ StoredLineIntegral integrate_transport_stored_row_tile(
   }
 
   StoredLineIntegral result;
+  const auto direct_started = std::chrono::steady_clock::now();
+  double direct_ms = 0.0;
+  double replay_ms = 0.0;
+  double factorized_ms = 0.0;
+  bool factorized_eligible = false;
   try {
     result = integrate_prepared_scalar_row_stored(
         matrix, source->solution(), projected_complete,
         primitive_begin, primitive_end, options);
+    direct_ms = elapsed_milliseconds(direct_started);
     if constexpr (std::is_same_v<Scalar, ComplexBall>) {
       // A retained ordinary local is a linear map of its center value.  The
       // historical fused integral expands the same uncertain center ball
@@ -3345,23 +3375,29 @@ StoredLineIntegral integrate_transport_stored_row_tile(
       // stored prefix.  Unsupported/large cases keep the direct result.
       constexpr std::size_t kMaximumOperatorColumns = 256;
       const auto& equation = source->physical_equation();
-      if (equation &&
+      if (factorize_ordinary_row && equation &&
           source->solution().epsilon.width() <=
               std::numeric_limits<std::size_t>::max() /
                   source->solution().dimension &&
           source->solution().epsilon.width() *
                   source->solution().dimension <=
               kMaximumOperatorColumns) {
+        const auto replay_started = std::chrono::steady_clock::now();
         const auto replay =
             prepare_physical_regular_homogeneous_tail_model(
                 *equation, source->solution());
+        replay_ms = elapsed_milliseconds(replay_started);
         if (replay.status == TailMajorantStatus::Certified &&
             replay.model.has_value()) {
+          const auto factorized_started =
+              std::chrono::steady_clock::now();
           auto factorized =
               integrate_ordinary_center_stored_row_factorized(
                   *equation, replay.model->reconstructed, matrix,
                   projected_complete, primitive_begin, primitive_end,
                   options, result, kMaximumOperatorColumns);
+          factorized_ms = elapsed_milliseconds(factorized_started);
+          factorized_eligible = factorized.eligible;
           if (factorized.eligible) {
             if (factorized.integral.value.dimension !=
                     result.value.dimension ||
@@ -3440,6 +3476,20 @@ StoredLineIntegral integrate_transport_stored_row_tile(
     contextual.epsilon_power = error.epsilon_power;
     contextual.component = error.component;
     throw contextual;
+  }
+  if (transport_contraction_timing_enabled()) {
+    std::ostringstream timing;
+    timing << "transport-contraction-timing"
+           << " phase=stored-row"
+           << " arm=" << arm_name
+           << " tile=" << tile_index
+           << " source_local=" << source->handle()
+           << " direct_ms=" << direct_ms
+           << " replay_ms=" << replay_ms
+           << " factorized_ms=" << factorized_ms
+           << " factorized_eligible="
+           << (factorized_eligible ? "true" : "false");
+    emit_transport_contraction_timing(timing.str());
   }
 
   const auto jacobian = reverse_local_orientation
@@ -4019,6 +4069,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   const auto& tile = arm.exact.tiles[tile_index];
   const auto& certified_tile = arm.certified_tiles.at(tile_index);
   const auto& binding = arm.charts.at(tile.chart);
+  const auto terminal_started = std::chrono::steady_clock::now();
 
   const auto* diagnostic_route_raw =
       std::getenv("DE2_DIAGNOSTIC_TERMINAL_CONTRACTION_ROUTE");
@@ -4051,6 +4102,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       : "terminal factorized-adjoint production contraction";
   std::optional<TerminalComposedAdjointDiagnostic> composed_diagnostic;
   bool composed_authoritative = false;
+  const auto composed_started = std::chrono::steady_clock::now();
   if (const auto* composed_mode =
           std::getenv("DE2_DIAGNOSTIC_TERMINAL_COMPOSED_ADJOINT")) {
     const std::string mode(composed_mode);
@@ -4228,6 +4280,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       std::cerr << '\n';
     }
   }
+  const auto composed_ms = elapsed_milliseconds(composed_started);
   const std::optional<std::int32_t> projection_cap =
       direct_physical || direct_factorized
       ? std::optional<std::int32_t>(terminal_factorized_physical_complete_cap(
@@ -4235,6 +4288,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             "terminal factorized primitive window",
             direct_physical))
       : std::nullopt;
+  const auto projection_started = std::chrono::steady_clock::now();
   auto projected = direct_physical
       ? project_terminal_acb_physical_basis_row(
             match, prepared_row, *projection_cap,
@@ -4244,6 +4298,7 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             match, prepared_row, projection_cap,
             "terminal-factorized-line:" + arm_name + ":" +
                 std::to_string(tile_index));
+  const auto projection_ms = elapsed_milliseconds(projection_started);
 
   const auto rim = exact_plan_rim(
       binding.prescriptions, binding.geometry.scale);
@@ -4269,6 +4324,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
 
   std::vector<StoredLineIntegral> physical;
   physical.reserve(projected.size());
+  const auto physical_integration_started =
+      std::chrono::steady_clock::now();
   for (std::size_t column = 0; column < projected.size(); ++column) {
     const auto& source = projected[column];
     const auto delivered_min =
@@ -4310,6 +4367,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
       throw contextual;
     }
   }
+  const auto physical_integration_ms =
+      elapsed_milliseconds(physical_integration_started);
 
   using DeferredKey = line_integration_detail::MonomialKey;
   std::map<DeferredKey, SectorMonomialTag> deferred_tags;
@@ -4357,6 +4416,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   // singular endpoint.  Direct physical/factorized weight contractions are
   // explicit diagnostics only.
   FiniteLaurentVector<ComplexBall> contracted;
+  const auto functional_contraction_started =
+      std::chrono::steady_clock::now();
   if (composed_authoritative) {
     if (!composed_diagnostic.has_value())
       throw std::logic_error(
@@ -4400,6 +4461,8 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
             std::to_string(tile_index),
         true);
   }
+  const auto functional_contraction_ms =
+      elapsed_milliseconds(functional_contraction_started);
   if (composed_diagnostic.has_value() && !composed_authoritative) {
     const auto& composed = composed_diagnostic->value;
     const auto legacy = contracted.front().scaled(output_jacobian);
@@ -4653,6 +4716,25 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   result.imaginary_sign = rim;
   result.diagnostics.detail =
       result.value.error.provenance;
+  if (transport_contraction_timing_enabled()) {
+    std::ostringstream timing;
+    timing << "transport-contraction-timing"
+           << " phase=terminal-row"
+           << " arm=" << arm_name
+           << " tile=" << tile_index
+           << " composed_ms=" << composed_ms
+           << " projection_ms=" << projection_ms
+           << " physical_integration_ms="
+           << physical_integration_ms
+           << " functional_contraction_ms="
+           << functional_contraction_ms
+           << " projected_columns=" << projected.size()
+           << " composed_authoritative="
+           << (composed_authoritative ? "true" : "false")
+           << " total_ms="
+           << elapsed_milliseconds(terminal_started);
+    emit_transport_contraction_timing(timing.str());
+  }
   return result;
 }
 
@@ -5053,6 +5135,24 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
       const auto row_identity = required_string(
           prepared_row, "exact_identity");
       (void)row_identity;
+      const auto tile_started = std::chrono::steady_clock::now();
+      if (transport_contraction_timing_enabled()) {
+        std::ostringstream timing;
+        timing << "transport-contraction-timing"
+               << " phase=tile-start"
+               << " arm=" << arm_name
+               << " observable_index=" << observable_index
+               << " observable_identity=" << observable.identity
+               << " tile=" << tile
+               << " terminal="
+               << ((domain == "acb" &&
+                    tile + 1 == tile_sources.size() &&
+                    transport_owner &&
+                    transport_owner->terminal_factorized_match() != nullptr)
+                       ? "true"
+                       : "false");
+        emit_transport_contraction_timing(timing.str());
+      }
       if (transport_owner &&
           observable.tail_policy == TransportTailPolicy::Stored) {
         const auto fused_started = std::chrono::steady_clock::now();
@@ -5095,7 +5195,8 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
                 integrate_transport_stored_row_tile<ComplexBall>(
                     precision_bits, typed, prepared_row, retained,
                     arm_name, tile, observable.epsilon,
-                    observable.divergent_cancellation);
+                    observable.divergent_cancellation,
+                    observable.factorize_ordinary_stored_rows);
           }
         }
         output.tile_integration_ms +=
@@ -5107,6 +5208,18 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
             {"value", encode_transport_line_value_diagnostics(fused)}});
         accumulator.add(fused);
         ++output.tile_integrations;
+        if (transport_contraction_timing_enabled()) {
+          std::ostringstream timing;
+          timing << "transport-contraction-timing"
+                 << " phase=tile-done"
+                 << " arm=" << arm_name
+                 << " observable_index=" << observable_index
+                 << " observable_identity=" << observable.identity
+                 << " tile=" << tile
+                 << " elapsed_ms="
+                 << elapsed_milliseconds(tile_started);
+          emit_transport_contraction_timing(timing.str());
+        }
         continue;
       }
       json::object row_request{
@@ -5181,6 +5294,18 @@ std::vector<TransportObservableContractionResult> contract_transport_arm(
         output.tile_lines.push_back(tile_line);
       }
       ++output.tile_integrations;
+      if (transport_contraction_timing_enabled()) {
+        std::ostringstream timing;
+        timing << "transport-contraction-timing"
+               << " phase=tile-done"
+               << " arm=" << arm_name
+               << " observable_index=" << observable_index
+               << " observable_identity=" << observable.identity
+               << " tile=" << tile
+               << " elapsed_ms="
+               << elapsed_milliseconds(tile_started);
+        emit_transport_contraction_timing(timing.str());
+      }
       // The line owns the projected local and the projected local owns its
       // source.  Drop both before advancing so contraction peak memory is
       // independent of the number of tiles.

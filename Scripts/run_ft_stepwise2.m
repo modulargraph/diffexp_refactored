@@ -3100,6 +3100,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
      DiffExp2`Tolerances`$MaxExtraPrecisionValue, 2 outputDigits]},
  Module[
   {deliverableMax = ledger["DeliverableCompleteMax"],
+   publicDeliverableMax = ledger["PublicDeliverableCompleteMax"],
    publicRequiredTop = ledger["DownstreamRawTop"],
    integrationHalo = ledger["IntegrationHalo"], directRequiredTop =
      ledger["DeliverableCompleteMax"], provenZeroEntries, activeEntries,
@@ -3287,7 +3288,12 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         "CoefficientVector" -> entry["CoefficientVector"],
         "Epsilon" -> <|"Min" -> entry["OutputMin"],
           "Max" -> deliverableMax,
-          "RequiredCompleteMax" -> deliverableMax|>|>;
+          (* Max retains the private reservoir needed by later arithmetic.
+             Publication and completeness certification stop at the
+             independently planned downstream public edge.  Otherwise a
+             guard coefficient can reject an already certified boundary and
+             turn every added producer digit into a moving goalpost. *)
+          "RequiredCompleteMax" -> publicDeliverableMax|>|>;
       If[entry["Case"] === "integrate",
         (* Production transport returns the honest stored Taylor truncation.
            Full-local tail models are an optional certification product and

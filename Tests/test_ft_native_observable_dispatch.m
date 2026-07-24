@@ -415,12 +415,14 @@ assert["epsilon ledger separates coefficient and integration halos",
       "CoefficientHalo",
       "IntegrationHalo", "PublicTargetCompleteMax",
       "TargetCompleteMax",
-      "DeliverableCompleteMax",
+      "PublicDeliverableCompleteMax", "DeliverableCompleteMax",
       "DownstreamRawTop"}] ===
       <|"AvailableSourceCompleteMax" -> 10,
         "SourceCompleteMax" -> 10, "CoefficientHalo" -> 1,
         "IntegrationHalo" -> 1, "PublicTargetCompleteMax" -> 4,
-        "TargetCompleteMax" -> 8, "DeliverableCompleteMax" -> 7,
+        "TargetCompleteMax" -> 8,
+        "PublicDeliverableCompleteMax" -> 3,
+        "DeliverableCompleteMax" -> 7,
         "DownstreamRawTop" -> 3|>,
   ledger];
 assert["observable minima do not discount independently required raw depth",
@@ -560,7 +562,7 @@ assert["atlas preparation receives every active non-direct vector and exact targ
       DiffExp2`EpsSeries`ESMinPower[#] === -1 &&
         DiffExp2`EpsSeries`ESCompleteMax[#] === 10 &],
   {capturedMaxExtraPrecision, capturedPrepare}];
-assert["observable order and operation-specific epsilon windows are stable",
+assert["observable publication stops at the public edge while retaining the private reservoir",
   Lookup[capturedObservables, "Operation"] ===
     {"integrate", "limitLower", "limitUpper", "integrate"} &&
     Lookup[Lookup[capturedObservables, "Epsilon"], "Min"] ===
@@ -568,7 +570,7 @@ assert["observable order and operation-specific epsilon windows are stable",
     Lookup[Lookup[capturedObservables, "Epsilon"], "Max"] ===
       {7, 7, 7, 7} &&
     Lookup[Lookup[capturedObservables, "Epsilon"],
-      "RequiredCompleteMax"] === {7, 7, 7, 7} &&
+      "RequiredCompleteMax"] === {3, 3, 3, 3} &&
     Lookup[Select[capturedObservables,
         #["Operation"] === "integrate" &], "TailPolicy"] ===
       {"stored", "stored"} &&

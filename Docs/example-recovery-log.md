@@ -124,16 +124,13 @@ escalation does not tighten that line and triggers the rejected transitive
 | B-12 | The shortcut currently certifies only the local match-digit target, but its result is a producer for an ill-conditioned singular reconstruction. | Before changing policy, use the existing producer-digit mechanism at level 4: computation 70, level-3 consumer 25, and stop immediately after the level-3 boundary. | Confirmed in B4-135. The physical shortcut remains active, raises only its private Taylor certificates to mostly 252/378, and publishes a boundary with 73.45/71.95 certified digits in 52.97 seconds. Publication remains 25. The old basis midpoint differs after the public contract and was never spatially certified; do not restore it merely because its ball was narrow. |
 | B-13 | Determine whether the restored upstream enclosure removes the level-3 fallback cascade rather than merely looking narrow in isolation. | Resume the B4-135 checkpoint with level 3 at 25 digits, stop after boundary 2, and enforce the existing 420-second gate. | Transport confirmed in B4-136: all eleven ordinary upper hops use certified physical evolution and state publication finishes at 73.91 seconds. The run then times out during the first of three two-observable contraction waves. This is a separate scheduling regression; no arithmetic failure occurs and no boundary is published. |
 | B-14 | The current two-thread/two-entry contraction default serializes six expensive banana observables, whereas the old passing gate contracted the bounded batch concurrently. | Replay the exact B4-136 input with six contraction threads and one six-entry chunk; change no numerical setting. | B4-137 removes the three-wave serialization and sustains about 5.6 cores, but still times out at 420 seconds after state publication at 74.90 seconds. All visible lower rows certify and no arithmetic failure occurs. Do not rerun or merely raise the ceiling; instrument lower/upper/cancellation/publication phases per observable and localize the remaining contraction regression. |
+| B-15 | Phase timing showed each ordinary stored-row direct integral cost milliseconds, while unconditional factorized impulse integration cost 23--36 seconds per tile; replaying q/C itself cost only about 0.25 seconds. | Publish rigorous direct paired lines first and invoke ordinary-row factorization only after a typed final publication failure. Preserve terminal contraction, overlap checks, and honest counters. | Focused C++ tests pass. Five of six level-3 observables immediately avoided factorization; the sixth exposed that the publication gate was checking private halo coefficients, not a need for unconditional factorization. |
+| B-16 | The retained level-3 output extends through private ε^40, but level 2's independently planned public edge is ε^6. The dispatcher set observable `RequiredCompleteMax=40`, so private ε^29/ε^33 deficits repeatedly rejected an already sufficient public boundary. | Keep observable `Max=40` for later arithmetic but set `RequiredCompleteMax=6` from `PublicDeliverableCompleteMax`. Add a fixture retaining through ε^7 while certifying only ε^3, then regenerate levels 4 and 3 with clean provenance. | Confirmed. The dispatch suite passes 51/51. Clean B4-145 completes level 4 at 17.75 seconds and level 3 at 188.71 seconds, exports all seven level-3 results, and writes a current-source level-2 boundary without any ordinary factorization retry. Full log: `/private/tmp/diffexp2-banana4-b4-145-public-prefix-clean.log`. |
 
-Current progress: the old B-02 failure is no longer active and the clean
-level-2 gate has passed. B4-128 through B4-130 are closed and are not retry
-targets. B4-130 cleared the earlier failures but exposed a level-2 private
-ε^25 one-digit deficit and a separate earlier accuracy loss. B4-131 through
-B4-133 closed three tempting but false explanations without repeating a full
-run. B4-134 then bisected the loss exactly to `0e9a508` and its newly eligible
-physical q/C tail replay. B4-135 proved the existing producer-digit mechanism
-can restore a rigorously narrow boundary; B4-136 proved the downstream
-transport cure and separated the remaining timeout into contraction
-scheduling. B4-137 proved concurrency is necessary but not sufficient; the
-remaining contraction implementation regression now needs per-observable
-phase timing. No final result has yet passed numerical verification.
+Current progress: the old B-02 failure is no longer active. B4-138 localized
+the timing regression, B4-139 introduced direct-first publication, and
+B4-141 exposed the public/private epsilon-window conflation instead of another
+producer shortage. B4-145 is the current clean gate: levels 4 and 3 complete
+from the FIRE cache in 188.71 seconds and write a current-source level-2
+boundary while retaining the full private reservoirs. Levels 2 and 1 and the
+independent final Bessel-oracle comparison remain outstanding.

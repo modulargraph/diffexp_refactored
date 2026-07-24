@@ -4822,6 +4822,8 @@
               observable.divergent_cancellation;
           input.publication_relative_tolerance =
               observable.publication_relative_tolerance;
+          input.factorize_ordinary_stored_rows =
+              !observable.publication_relative_tolerance.has_value();
           input.aggregate_handle =
               "private:" + observable_root + ":" + arm_name + ":aggregate";
           input.projected_local_handles.reserve(input.row_count());
@@ -5045,20 +5047,30 @@
     combined_lines.reserve(observable_count);
     std::vector<json::object> pair_conditioning;
     pair_conditioning.reserve(observable_count);
+    std::array<std::uint64_t, 2>
+        superseded_tile_integrations{0, 0};
+    double superseded_tile_integration_ms = 0.0;
+    std::vector<double> direct_probe_elapsed_ms(
+        observable_count, 0.0);
+    std::size_t ordinary_factorization_retries = 0;
     for (std::size_t index = 0; index < observable_count; ++index) {
       if (arm_results[0].size() != observable_count ||
           arm_results[1].size() != observable_count)
         throw std::logic_error(
             "native transport-pair contraction returned the wrong arm result count");
-      auto aggregate_record = std::move(pair_aggregate_records[index]);
-      const auto line_handle = required_string(
-          aggregate_record, "line_handle");
-      aggregate_record.erase("line_handle");
-      auto combined = build_compact_transport_pair_observable_line(
-          line_handle, pending_observables[index].checkpoint_identity,
-          std::move(aggregate_record), states[0], states[1],
-          arm_results[0][index].aggregate,
-          arm_results[1][index].aggregate);
+      const auto build_combined = [&]() {
+        auto aggregate_record = pair_aggregate_records[index];
+        const auto line_handle = required_string(
+            aggregate_record, "line_handle");
+        aggregate_record.erase("line_handle");
+        return build_compact_transport_pair_observable_line(
+            line_handle,
+            pending_observables[index].checkpoint_identity,
+            std::move(aggregate_record), states[0], states[1],
+            arm_results[0][index].aggregate,
+            arm_results[1][index].aggregate);
+      };
+      auto combined = build_combined();
       if (combined->result().value.epsilon.complete_max <
           pending_observables[index].epsilon.required_complete_max)
         throw std::domain_error(
@@ -5079,31 +5091,111 @@
                    .publication_relative_tolerance,
               "final transport-pair observable", index);
         } catch (const MatchingArithmeticError& error) {
-          release_reservation();
           if (error.code != MatchingArithmeticErrorCode::
                                 TerminalOutputInconclusive)
             throw;
-          return json::object{
-              {"status", "error"},
-              {"id", "CPP"},
-              {"reason", "terminal_output_ball_inconclusive"},
-              {"retryable_level_accuracy", true},
-              {"request_index", index},
-              {"failure_functional",
-               error.row.has_value()
-                   ? json::value(*error.row)
-                   : json::value(nullptr)},
-              {"failure_epsilon",
-               error.epsilon_power.has_value()
-                   ? json::value(*error.epsilon_power)
-                   : json::value(nullptr)},
-              {"required_additional_digits",
-               error.required_additional_digits.has_value()
-                   ? json::value(*error.required_additional_digits)
-                   : json::value(nullptr)},
-              {"scope", "final-paired-line"},
-              {"conditioning", std::move(conditioning)},
-              {"detail", error.what()}};
+          // The direct stored-row integral is rigorous but may lose the
+          // correlation of one uncertain center ball reused throughout its
+          // Taylor recurrence. Recompute only this failing logical
+          // observable with the expensive factorized ordinary-row
+          // reassociation. Terminal singular rows retain their established
+          // composed/factorized route in both passes.
+          direct_probe_elapsed_ms[index] =
+              arm_results[0][index].elapsed_ms +
+              arm_results[1][index].elapsed_ms;
+          for (std::size_t side = 0; side < 2; ++side) {
+            superseded_tile_integrations[side] +=
+                arm_results[side][index].tile_integrations;
+            superseded_tile_integration_ms +=
+                arm_results[side][index].tile_integration_ms;
+            auto retry_input = arm_inputs[side][index];
+            retry_input.factorize_ordinary_stored_rows = true;
+            const auto retry_started =
+                std::chrono::steady_clock::now();
+            try {
+              auto retried = contract_transport_arm(
+                  session->domain, session->precision_bits,
+                  states[side]->plan_owner(),
+                  side == 0 ? "lower" : "upper",
+                  states[side]->tile_sources(),
+                  std::vector<TransportObservableContractionInput>{
+                      std::move(retry_input)},
+                  states[side]);
+              if (retried.size() != 1)
+                throw std::logic_error(
+                    "factorized transport-pair retry returned the wrong result count");
+              arm_results[side][index] =
+                  std::move(retried.front());
+            } catch (const MatchingArithmeticError& retry_error) {
+              if (retry_error.code ==
+                  MatchingArithmeticErrorCode::
+                      TerminalOutputInconclusive)
+                throw MatchingArithmeticError(
+                    retry_error.code, retry_error.what(),
+                    retry_error.row, index,
+                    retry_error.epsilon_power,
+                    retry_error.required_additional_digits);
+              throw;
+            }
+            arm_elapsed_ms[side] +=
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    retry_started)
+                    .count();
+          }
+          ++ordinary_factorization_retries;
+          combined = build_combined();
+          conditioning =
+              encode_transport_pair_conditioning_diagnostics(
+                  arm_results[0][index].aggregate->result(),
+                  arm_results[1][index].aggregate->result(),
+                  combined->result(),
+                  std::move(
+                      arm_results[0][index].tile_values),
+                  std::move(
+                      arm_results[1][index].tile_values));
+          try {
+            require_transport_line_publication_accuracy(
+                combined->result(),
+                pending_observables[index].epsilon,
+                *pending_observables[index]
+                     .publication_relative_tolerance,
+                "final transport-pair observable after ordinary-row "
+                "factorization",
+                index);
+          } catch (const MatchingArithmeticError& retry_error) {
+            release_reservation();
+            if (retry_error.code !=
+                MatchingArithmeticErrorCode::
+                    TerminalOutputInconclusive)
+              throw;
+            return json::object{
+                {"status", "error"},
+                {"id", "CPP"},
+                {"reason",
+                 "terminal_output_ball_inconclusive"},
+                {"retryable_level_accuracy", true},
+                {"request_index", index},
+                {"failure_functional",
+                 retry_error.row.has_value()
+                     ? json::value(*retry_error.row)
+                     : json::value(nullptr)},
+                {"failure_epsilon",
+                 retry_error.epsilon_power.has_value()
+                     ? json::value(
+                           *retry_error.epsilon_power)
+                     : json::value(nullptr)},
+                {"required_additional_digits",
+                 retry_error.required_additional_digits
+                         .has_value()
+                     ? json::value(*retry_error
+                                        .required_additional_digits)
+                     : json::value(nullptr)},
+                {"scope", "final-paired-line"},
+                {"ordinary_factorization_retry", true},
+                {"conditioning", std::move(conditioning)},
+                {"detail", retry_error.what()}};
+          }
         }
       }
       if (pending_observables[index].tail_policy ==
@@ -5119,8 +5211,11 @@
     const auto pair_wall_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - operation_started).count();
 
-    std::uint64_t tile_integrations = 0;
-    double tile_integration_ms = 0.0;
+    std::uint64_t tile_integrations =
+        superseded_tile_integrations[0] +
+        superseded_tile_integrations[1];
+    double tile_integration_ms =
+        superseded_tile_integration_ms;
     for (std::size_t side = 0; side < 2; ++side)
       for (const auto& result : arm_results[side]) {
         tile_integrations += result.tile_integrations;
@@ -5184,6 +5279,10 @@
         for (const auto& result : arm_results[side])
           for (std::size_t tile = 0; tile < result.tile_integrations; ++tile)
             states[side]->plan_owner()->note_integration();
+      for (std::size_t side = 0; side < 2; ++side)
+        for (std::uint64_t tile = 0;
+             tile < superseded_tile_integrations[side]; ++tile)
+          states[side]->plan_owner()->note_integration();
     } catch (...) {
       if (reservation_live) release_reservation();
       throw;
@@ -5212,6 +5311,7 @@
           {"upper_tiles", arm_results[1][index].tile_integrations},
           {"elapsed_ms", arm_results[0][index].elapsed_ms +
                              arm_results[1][index].elapsed_ms +
+                             direct_probe_elapsed_ms[index] +
                              line->elapsed_ms()}});
     }
     return json::object{
@@ -5239,6 +5339,8 @@
         {"max_parallel_arms", observable_count == 0 ? 0 : 1},
         {"requested_observable_threads", requested_threads},
         {"observable_worker_threads", worker_count},
+        {"ordinary_factorization_retries",
+         ordinary_factorization_retries},
         {"streaming_tile_contraction", true},
         {"atomic_publication", true}, {"compact_outputs", true},
         {"checkpoint_policy", checkpoint_policy},

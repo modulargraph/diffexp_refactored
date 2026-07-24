@@ -734,6 +734,23 @@ int main() {
           "fixed -lower+upper value is incorrect: " +
           json::serialize(one_export));
 
+    auto direct_publication_observable = observable(
+        "pair-direct-publication",
+        "pair-direct-publication-checkpoint");
+    direct_publication_observable[
+        "publication_relative_tolerance"] = "1e-20";
+    const auto direct_publication = contract_pair(
+        session, lower, upper,
+        json::array{std::move(direct_publication_observable)},
+        "pair-direct-publication-root");
+    if (direct_publication.at("status") != "ok" ||
+        direct_publication.at("ordinary_factorization_retries") != 0 ||
+        direct_publication.at("lines").as_array().size() != 1)
+      throw std::runtime_error(
+          "a rigorous direct paired line that met publication was "
+          "unnecessarily factorized: " +
+          json::serialize(direct_publication));
+
     // The retained arm source owns three epsilon rows, but a public
     // epsilon^0 observable needs only the first multiplier row.  Private
     // source reservoirs used by matching must not force an otherwise
@@ -948,20 +965,22 @@ int main() {
     const auto after_success = session_stats(session);
     const auto lower_after_success = state_stats(session, lower);
     const auto upper_after_success = state_stats(session, upper);
-    if (counter(after_success, "transport_pair_contractions") != 5 ||
-        counter(after_success, "transport_pair_observables") != 6 ||
-        counter(after_success, "transport_contractions") != 10 ||
-        counter(after_success, "transport_observables") != 12 ||
-        counter(after_success, "line_integrations") != 12 ||
-        counter(lower_after_success, "contraction_operations") != 5 ||
-        counter(upper_after_success, "contraction_operations") != 5 ||
-        counter(lower_after_success, "contracted_observables") != 6 ||
-        counter(upper_after_success, "contracted_observables") != 6)
+    if (counter(after_success, "transport_pair_contractions") != 6 ||
+        counter(after_success, "transport_pair_observables") != 7 ||
+        counter(after_success, "transport_contractions") != 12 ||
+        counter(after_success, "transport_observables") != 14 ||
+        counter(after_success, "line_integrations") != 14 ||
+        counter(lower_after_success, "contraction_operations") != 6 ||
+        counter(upper_after_success, "contraction_operations") != 6 ||
+        counter(lower_after_success, "contracted_observables") != 7 ||
+        counter(upper_after_success, "contracted_observables") != 7)
       throw std::runtime_error(
           "successful pair counters are not additive and honest");
 
     std::vector<json::object> lines;
     lines.push_back(one.at("lines").as_array().front().as_object());
+    lines.push_back(
+        direct_publication.at("lines").as_array().front().as_object());
     for (const auto& raw : many.at("lines").as_array())
       lines.push_back(raw.as_object());
     lines.push_back(streamed.at("lines").as_array().front().as_object());
@@ -1141,7 +1160,7 @@ int main() {
         restored_stats.at("transport_states") != 0 ||
         restored_stats.at("tile_plans") != 0 ||
         restored_stats.at("locals") != 0 ||
-        restored_stats.at("line_results") != 6 ||
+        restored_stats.at("line_results") != 7 ||
         restored_export.at("value") != first_export_value)
       throw std::runtime_error(
           "first paired hidden-owner restore changed visibility or value");

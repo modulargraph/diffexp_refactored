@@ -727,6 +727,16 @@ struct IntervalTransferContractionResult {
   std::string detail;
 };
 
+struct IntervalTransferDegreeBoundsResult {
+  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
+  // Entry [epsilon_degree][physical_row] is the radius-weighted row sum of
+  // that Toeplitz coefficient, including every polynomial lag and finite
+  // logarithmic shift.  Geometric epsilon weights are applied only after
+  // this expensive, weight-independent enclosure has been constructed.
+  std::vector<std::vector<Magnitude>> degree_row_upper;
+  std::string detail;
+};
+
 using BallMatrix = std::vector<ComplexBall>;
 using BallMatrixSeries = std::vector<BallMatrix>;
 
@@ -853,18 +863,13 @@ inline ComplexBall exact_real_interval_ball(const Rational &raw_left,
 //       S_k + x (I+xG)^-1 F_k
 //
 // before absolute values are taken.
-inline IntervalTransferContractionResult
-certify_interval_transfer_contraction_on_x_interval(
+inline IntervalTransferDegreeBoundsResult
+certify_interval_transfer_degree_bounds_on_x_interval(
     const PreparedPhysicalClearedODE<Rational> &equation, EpsilonWindow epsilon,
     const Rational &a, const Rational &b, std::uint32_t log_complete_max,
     std::int32_t common_valuation, const Rational &x_left,
-    const Rational &x_right, const Rational &radius,
-    ulong epsilon_weight_base = 1) {
-  IntervalTransferContractionResult result;
-  if (epsilon_weight_base == 0)
-    throw std::invalid_argument(
-        "interval transfer epsilon weight base must be positive");
-  result.epsilon_weight_base = epsilon_weight_base;
+    const Rational &x_right, const Rational &radius) {
+  IntervalTransferDegreeBoundsResult result;
   const auto width = epsilon.width();
   const auto dimension = static_cast<std::size_t>(equation.dimension);
   const auto x = exact_real_interval_ball(x_left, x_right);
@@ -978,19 +983,14 @@ certify_interval_transfer_contraction_on_x_interval(
              ++epsilon_degree)
           for (std::size_t entry = 0; entry < dimension * dimension; ++entry)
             transfer[epsilon_degree][entry] += qk_series[epsilon_degree][entry];
-      for (std::size_t target_epsilon = 0; target_epsilon < width;
-           ++target_epsilon)
+      for (std::size_t epsilon_degree = 0; epsilon_degree < width;
+           ++epsilon_degree)
         for (std::size_t row = 0; row < dimension; ++row) {
           auto row_sum = Magnitude::zero();
-          for (std::size_t epsilon_degree = 0; epsilon_degree <= target_epsilon;
-               ++epsilon_degree)
-            for (std::size_t column = 0; column < dimension; ++column)
-              row_sum +=
-                  Magnitude::upper_abs(
-                      transfer[epsilon_degree][row * dimension + column]) /
-                  Magnitude::from_ui(epsilon_weight_base)
-                      .power_upper(static_cast<ulong>(epsilon_degree));
-          lag_rows[target_epsilon][row] += row_sum;
+          for (std::size_t column = 0; column < dimension; ++column)
+            row_sum += Magnitude::upper_abs(
+                transfer[epsilon_degree][row * dimension + column]);
+          lag_rows[epsilon_degree][row] += row_sum;
         }
       if (log_shift != log_complete_max) {
         inverse_power = multiply_ball_matrix_series(inverse_power, *inverse,
@@ -1005,18 +1005,64 @@ certify_interval_transfer_contraction_on_x_interval(
             radius_factor * lag_rows[epsilon_index][row];
   }
 
-  result.contraction_upper.reserve(width);
-  auto maximum = Magnitude::zero();
-  for (std::size_t epsilon_index = 0; epsilon_index < width; ++epsilon_index) {
-    for (const auto &row : accumulated[epsilon_index])
-      maximum = Magnitude::maximum(maximum, row);
-    result.contraction_upper.push_back(maximum);
-  }
+  result.degree_row_upper = std::move(accumulated);
   result.status = TailMajorantStatus::Certified;
   result.detail =
       "all-future x=1/n interval transfer with causal epsilon Toeplitz and "
       "finite log-nilpotent expansion";
   return result;
+}
+
+inline IntervalTransferContractionResult weighted_interval_transfer_contraction(
+    const IntervalTransferDegreeBoundsResult &degree_bounds,
+    ulong epsilon_weight_base) {
+  if (epsilon_weight_base == 0)
+    throw std::invalid_argument(
+        "interval transfer epsilon weight base must be positive");
+  IntervalTransferContractionResult result;
+  result.status = degree_bounds.status;
+  result.epsilon_weight_base = epsilon_weight_base;
+  result.detail = degree_bounds.detail;
+  if (degree_bounds.status != TailMajorantStatus::Certified)
+    return result;
+  if (degree_bounds.degree_row_upper.empty()) {
+    result.detail = "interval transfer degree enclosure is empty";
+    result.status = TailMajorantStatus::Inconclusive;
+    return result;
+  }
+  const auto dimension = degree_bounds.degree_row_upper.front().size();
+  const auto epsilon_weight = Magnitude::from_ui(epsilon_weight_base);
+  auto maximum = Magnitude::zero();
+  result.contraction_upper.reserve(degree_bounds.degree_row_upper.size());
+  for (std::size_t target_epsilon = 0;
+       target_epsilon < degree_bounds.degree_row_upper.size();
+       ++target_epsilon) {
+    for (std::size_t row = 0; row < dimension; ++row) {
+      auto row_sum = Magnitude::zero();
+      for (std::size_t epsilon_degree = 0; epsilon_degree <= target_epsilon;
+           ++epsilon_degree)
+        row_sum +=
+            degree_bounds.degree_row_upper[epsilon_degree][row] /
+            epsilon_weight.power_upper(static_cast<ulong>(epsilon_degree));
+      maximum = Magnitude::maximum(maximum, row_sum);
+    }
+    result.contraction_upper.push_back(maximum);
+  }
+  return result;
+}
+
+inline IntervalTransferContractionResult
+certify_interval_transfer_contraction_on_x_interval(
+    const PreparedPhysicalClearedODE<Rational> &equation, EpsilonWindow epsilon,
+    const Rational &a, const Rational &b, std::uint32_t log_complete_max,
+    std::int32_t common_valuation, const Rational &x_left,
+    const Rational &x_right, const Rational &radius,
+    ulong epsilon_weight_base = 1) {
+  return weighted_interval_transfer_contraction(
+      certify_interval_transfer_degree_bounds_on_x_interval(
+          equation, epsilon, a, b, log_complete_max, common_valuation, x_left,
+          x_right, radius),
+      epsilon_weight_base);
 }
 
 inline IntervalTransferContractionResult certify_interval_transfer_contraction(
@@ -1026,13 +1072,17 @@ inline IntervalTransferContractionResult certify_interval_transfer_contraction(
   if (n0 == 0 || n0 > std::numeric_limits<ulong>::max())
     throw std::invalid_argument(
         "interval transfer contraction received an invalid Taylor index");
+  const auto degree_bounds =
+      certify_interval_transfer_degree_bounds_on_x_interval(
+          equation, epsilon, a, b, log_complete_max, common_valuation,
+          Rational(0), Rational(1) / Rational(std::to_string(n0)), radius);
+  if (degree_bounds.status != TailMajorantStatus::Certified)
+    return weighted_interval_transfer_contraction(degree_bounds, 1);
   IntervalTransferContractionResult last;
   for (const auto epsilon_weight_base :
        {1UL, 2UL, 4UL, 8UL, 16UL, 32UL, 64UL, 128UL, 256UL, 512UL, 1024UL}) {
-    last = certify_interval_transfer_contraction_on_x_interval(
-        equation, epsilon, a, b, log_complete_max, common_valuation,
-        Rational(0), Rational(1) / Rational(std::to_string(n0)), radius,
-        epsilon_weight_base);
+    last = weighted_interval_transfer_contraction(degree_bounds,
+                                                  epsilon_weight_base);
     if (last.status == TailMajorantStatus::Certified &&
         !last.contraction_upper.empty() &&
         !Magnitude::positive_difference_lower(Magnitude::one(),

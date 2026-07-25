@@ -437,6 +437,28 @@ int main() {
       throw std::runtime_error(
           "weighted epsilon fixture does not exercise noncontracting "
           "ordinary infinity norm");
+    const auto degree_bounds = diffexp2::singular_tail_majorant_detail::
+        certify_interval_transfer_degree_bounds_on_x_interval(
+            weighted_equation, EpsilonWindow{0, 1}, Rational(0), Rational(0), 0,
+            0, Rational(0), Rational("1/5"), Rational("1/2"));
+    const auto cached_weighted =
+        diffexp2::singular_tail_majorant_detail::
+            weighted_interval_transfer_contraction(degree_bounds, 16);
+    const auto direct_weighted = diffexp2::singular_tail_majorant_detail::
+        certify_interval_transfer_contraction_on_x_interval(
+            weighted_equation, EpsilonWindow{0, 1}, Rational(0), Rational(0), 0,
+            0, Rational(0), Rational("1/5"), Rational("1/2"), 16);
+    if (cached_weighted.status != TailMajorantStatus::Certified ||
+        cached_weighted.contraction_upper.size() !=
+            direct_weighted.contraction_upper.size())
+      throw std::runtime_error(
+          "weight-independent interval transfer cache lost its prefix");
+    for (std::size_t index = 0;
+         index < cached_weighted.contraction_upper.size(); ++index)
+      if (cached_weighted.contraction_upper[index].dump_exact() !=
+          direct_weighted.contraction_upper[index].dump_exact())
+        throw std::runtime_error(
+            "cached interval transfer weighting changed its enclosure");
     const auto weighted_model =
         diffexp2::prepare_singular_rational_shadow_tail_model(
             weighted_equation, weighted_local, EpsilonWindow{0, 1}, 4, "1/2");

@@ -3480,22 +3480,24 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
         const bool singular_stage_inconclusive =
             bridged.detail.rfind("singular seed ", 0) == 0;
         if (bridged.status == TailMajorantStatus::Certified) {
-          double singular_tail_max = 0.0;
+          auto singular_tail_max = Magnitude::zero();
           for (const auto& bound :
                bridged.singular_tail.value.absolute)
-            singular_tail_max = std::max(
-                singular_tail_max,
-                bound.approximate_upper());
-          double ordinary_tail_max = 0.0;
+            singular_tail_max =
+                Magnitude::maximum(singular_tail_max, bound);
+          auto ordinary_tail_max = Magnitude::zero();
           for (const auto& bound :
                bridged.ordinary_tail.value.absolute)
-            ordinary_tail_max = std::max(
-                ordinary_tail_max,
-                bound.approximate_upper());
+            ordinary_tail_max =
+                Magnitude::maximum(ordinary_tail_max, bound);
+          trial["singular_tail_max_upper_exact"] =
+              singular_tail_max.dump_exact();
           trial["singular_tail_max_upper_approx"] =
-              singular_tail_max;
+              singular_tail_max.approximate_upper();
+          trial["ordinary_tail_max_upper_exact"] =
+              ordinary_tail_max.dump_exact();
           trial["ordinary_tail_max_upper_approx"] =
-              ordinary_tail_max;
+              ordinary_tail_max.approximate_upper();
           trials.push_back(trial);
           attempt.diagnostic["status"] = "certified";
           attempt.diagnostic["selected"] =

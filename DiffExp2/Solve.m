@@ -5893,13 +5893,22 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
       !TrueQ[Lookup[Lookup[#, "IndicialData", <||>],
         "Regular", False]] &];
   publicTOrder = req["TOrder"];
-  (* The terminal Frobenius certificate converges at |seed|/R <= 4/5.
-     Thirty-two private rows buy more than three decimal digits of certified
-     tail clearance, in addition to the existing exact depth reservoir,
-     without changing the public ExpansionOrder or any ordinary chart.
-     These rows used to be discarded when the reduced singular state was
-     capped to the public order. *)
-  singularTailTOrderHalo = If[TrueQ[singularCompositeQ], 32, 0];
+  (* Preserve an explicitly requested private singular-tail reservoir, but
+     do not impose it on every singular chart.  Terminal matching decides
+     whether its Frobenius bridge actually contracts before a bounded
+     Taylor-order retry asks for more rows.  Structurally noncontracting
+     charts must keep the established exact physical fallback at public
+     order. *)
+  singularTailTOrderHalo =
+    Lookup[req, "SingularTailTOrderHalo", 0];
+  If[!IntegerQ[singularTailTOrderHalo] ||
+      singularTailTOrderHalo < 0,
+    err["E6", cs, <|
+      "SingularTailTOrderHalo" -> singularTailTOrderHalo,
+      "Detail" ->
+        "native SCC singular-tail Taylor halo must be a nonnegative integer"|>]];
+  If[!TrueQ[singularCompositeQ],
+    singularTailTOrderHalo = 0];
   workTOrder = sccWorkTOrder[cs, req] + singularTailTOrderHalo;
   seedWorkHalos = sccSeedWorkHalos[cs, blockSystems, workTOrder];
   blockRequiredTops = reservoirMax + seedWorkHalos;

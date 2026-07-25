@@ -2044,12 +2044,56 @@
               normal_frame_attempt.at(
                   "physical_clearance_source").as_string() ==
                   "propagated-enclosure";
+          // A certified singular-to-ordinary bridge can be mathematically
+          // valid yet retain too few singular Taylor rows for the requested
+          // residual tolerance.  That is the one propagated-enclosure case
+          // where a larger finite-Taylor reservoir is a relevant retry.
+          // Require every basis-column bridge to have certified contraction;
+          // a structurally inconclusive bridge must use the established
+          // exact physical fallback without making the whole singular chart
+          // more expensive.
+          bool retryable_singular_tail = false;
+          if (propagated_enclosure) {
+            const auto* raw_bridges =
+                normal_frame_attempt.if_contains(
+                    "exact_shadow_singular_ordinary_bridges");
+            if (raw_bridges != nullptr && raw_bridges->is_array() &&
+                !raw_bridges->as_array().empty()) {
+              const auto tolerance = Magnitude::decimal(
+                  required_string(refinement, "relative_tolerance"));
+              bool all_certified = true;
+              bool tail_exceeds_tolerance = false;
+              for (const auto& raw_bridge :
+                   raw_bridges->as_array()) {
+                const auto& bridge = as_object(
+                    raw_bridge,
+                    "terminal singular bridge retry diagnostic");
+                if (required_string(bridge, "status") !=
+                    "certified") {
+                  all_certified = false;
+                  break;
+                }
+                const auto& selected = as_object(
+                    bridge.at("selected"),
+                    "selected terminal singular bridge retry diagnostic");
+                const auto tail = Magnitude::from_exact_dump(
+                    required_string(
+                        selected,
+                        "singular_tail_max_upper_exact"));
+                if (tail > tolerance)
+                  tail_exceeds_tolerance = true;
+              }
+              retryable_singular_tail =
+                  all_certified && tail_exceeds_tolerance;
+            }
+          }
           const bool retryable_epsilon =
               !complete_through_required && additional > 0;
           const bool retryable_clearance =
               complete_through_required &&
               inconclusive_coefficients > 0 &&
-              !propagated_enclosure;
+              (!propagated_enclosure ||
+               retryable_singular_tail);
           const auto& lattice = as_object(
               incomplete->at("exact_lattice"),
               "incomplete consuming-hop exact lattice");
@@ -2079,6 +2123,8 @@
               {"reason", "acb_match_residual_inconclusive"},
               {"retryable_epsilon_reservoir", retryable_epsilon},
               {"retryable_matching_clearance", retryable_clearance},
+              {"retryable_singular_tail_reservoir",
+               retryable_singular_tail},
               {"retryable_propagated_enclosure",
                propagated_enclosure},
               {"required_additional_epsilon_orders", additional},
@@ -2095,6 +2141,8 @@
               {"detail",
                retryable_epsilon
                    ? "the Acb match needs a wider private epsilon reservoir before materialization"
+                   : retryable_singular_tail
+                   ? "the terminal Frobenius bridge contracts, but its certified singular Taylor tail exceeds the requested tolerance; retry with a larger finite-Taylor reservoir"
                    : propagated_enclosure
                    ? "the Acb match reaches the required epsilon order, but uncertainty propagated by its producer encloses the residual tolerance; receiving Taylor-order and precision retries are not applicable"
                    : "the Acb match reaches the required epsilon order but its finite-Taylor overlap is not accurate enough for the residual tolerance"}};

@@ -3352,11 +3352,20 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
 
   const auto target_modulus =
       exact_path_detail::abs(target_exact);
+  // A larger seed fraction shortens the ordinary target displacement while
+  // retaining a disk that excludes the original singular center.  In the
+  // production Banana4 bridge, 3/4 gives |delta|/R=1/2, whereas the older
+  // 2/3-first order gives 2/3 and needs hundreds more private Taylor terms
+  // for the same Cauchy tail.  Prefer the geometrically strongest seed.
   const std::array<Rational, 3> seed_fractions{
-      Rational("2/3"), Rational("3/5"), Rational("3/4")};
+      Rational("3/4"), Rational("2/3"), Rational("3/5")};
+  // Frobenius future contraction improves as the witness radius shrinks.
+  // Every multiplier remains strictly greater than one, so the seed is
+  // inside the singular witness disk; trying the smallest first avoids four
+  // predictably inconclusive theorem evaluations on the hard chart.
   const std::array<Rational, 5> singular_radius_multipliers{
-      Rational("4"), Rational("3"), Rational("2"),
-      Rational("3/2"), Rational("5/4")};
+      Rational("5/4"), Rational("3/2"), Rational("2"),
+      Rational("3"), Rational("4")};
   const std::array<Rational, 4> ordinary_witness_denominators{
       Rational("2"), Rational("4"), Rational("8"),
       Rational("16")};
@@ -3364,7 +3373,7 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
       static_cast<std::uint32_t>(retained_taylor_width - 1);
   const auto ordinary_taylor_complete_max =
       std::max<std::uint32_t>(
-          168,
+          800,
           local_detail::checked_i32(
               3 * static_cast<std::int64_t>(
                       singular_taylor_complete_max) +

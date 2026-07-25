@@ -102,10 +102,11 @@ struct CertifiedStoredLineIntegral {
 //
 // on a finite epsilon window.  Unlike RegularTaylorTailModel, the epsilon
 // rows need not decouple.  This transient terminal model treats the whole
-// finite epsilon stack as one enlarged ordinary ODE, proves Q invertible on
-// a witness disk by a Neumann bound around Q(0), and reconstructs the stored
-// Taylor prefix from the authoritative physical equation.  It is deliberately
-// not a checkpoint payload: all fields are recomputed from the strongly held
+// finite epsilon stack as one enlarged ordinary ODE, proves the scalar causal
+// Q(t,epsilon) invertible on a witness disk by interval evaluation and finite
+// triangular back-substitution, and reconstructs the stored Taylor prefix
+// from the authoritative physical equation.  It is deliberately not a
+// checkpoint payload: all fields are recomputed from the strongly held
 // physical owner whenever a terminal observable needs the certificate.
 struct PhysicalRegularTaylorTailModel {
   EpsilonWindow epsilon;
@@ -118,8 +119,22 @@ struct PhysicalRegularTaylorTailModel {
   std::vector<Magnitude> q0_inverse_prefix_norm_upper;
   std::vector<std::vector<Magnitude>>
       q_operator_prefix_norm_upper;
+  // Scalar multiplication by q(t,epsilon) is lower-triangular Toeplitz on
+  // every finite causal epsilon frame.  Entry [t_lag][epsilon_lag] is the
+  // corresponding first-column coefficient.  Retaining the coefficients,
+  // rather than only a norm of Q(t)-Q(0), lets the disk proof respect the
+  // nilpotent epsilon structure instead of rejecting invertible operators
+  // through a coarse Neumann condition.
+  std::vector<std::vector<ComplexBall>>
+      q_causal_coefficients;
   std::vector<std::vector<Magnitude>>
       c_operator_prefix_norm_upper;
+  // Entry [t_lag] is a causal epsilon series of physical matrices, flattened
+  // as [epsilon_lag][row][column].  It supports interval evaluation of
+  // Q(t,epsilon)^-1 C(t,epsilon)/t before taking norms, preserving the large
+  // scalar-clearing cancellations that separate Q/C norm bounds destroy.
+  std::vector<std::vector<ComplexBall>>
+      c_causal_coefficients;
   std::vector<Magnitude> initial_row_upper;
   ChartGeometry chart;
   std::vector<Prescription> prescriptions;
@@ -647,6 +662,447 @@ finite_causal_unit_inverse_prefix_norm_upper(
   return finite_causal_matrix_prefix_norm_upper(inverse, width);
 }
 
+struct FiniteCausalQDiskInverseCertificate {
+  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
+  std::vector<Magnitude> prefix_norm_upper;
+  Magnitude diagonal_lower = Magnitude::zero();
+  std::size_t accepted_tiles = 0;
+  std::size_t subdivided_tiles = 0;
+  std::string detail;
+};
+
+struct ExactComplexDiskTile {
+  Rational real_center;
+  Rational imag_center;
+  Rational half_width;
+  std::uint32_t depth = 0;
+};
+
+inline bool tile_is_strictly_outside_disk(
+    const ExactComplexDiskTile& tile, const Rational& radius) {
+  auto real_distance =
+      abs_rational(tile.real_center) - tile.half_width;
+  auto imag_distance =
+      abs_rational(tile.imag_center) - tile.half_width;
+  if (real_distance.sign() < 0) real_distance = Rational(0);
+  if (imag_distance.sign() < 0) imag_distance = Rational(0);
+  return radius * radius <
+      real_distance * real_distance + imag_distance * imag_distance;
+}
+
+inline ComplexBall exact_complex_tile_ball(
+    const ExactComplexDiskTile& tile) {
+  auto interval = ComplexBall::from_strings(
+      tile.real_center.str(), tile.imag_center.str());
+  const auto error =
+      ComplexBall::from_strings(tile.half_width.str());
+  arb_add_error(
+      acb_realref(interval.raw()), acb_realref(error.raw()));
+  arb_add_error(
+      acb_imagref(interval.raw()), acb_realref(error.raw()));
+  return interval;
+}
+
+inline std::vector<ComplexBall>
+evaluate_causal_q_on_tile(
+    const std::vector<std::vector<ComplexBall>>& coefficients,
+    const ComplexBall& tile, std::size_t width) {
+  if (coefficients.empty() ||
+      std::any_of(coefficients.begin(), coefficients.end(),
+                  [width](const auto& lag) {
+                    return lag.size() != width;
+                  }))
+    throw std::invalid_argument(
+        "causal Q disk evaluation received incomplete coefficients");
+  std::vector<ComplexBall> value(width, ComplexBall(0));
+  for (std::size_t reverse = coefficients.size();
+       reverse-- > 0;) {
+    for (std::size_t epsilon_lag = 0;
+         epsilon_lag < width; ++epsilon_lag)
+      value[epsilon_lag] =
+          value[epsilon_lag] * tile +
+          coefficients[reverse][epsilon_lag];
+  }
+  return value;
+}
+
+inline std::vector<Magnitude>
+finite_causal_series_inverse_prefix_norm_upper(
+    const std::vector<ComplexBall>& coefficients) {
+  if (coefficients.empty() || coefficients.front().contains_zero())
+    throw std::domain_error(
+        "finite causal series inverse requires a separated diagonal");
+  const auto width = coefficients.size();
+  std::vector<ComplexBall> inverse(width, ComplexBall(0));
+  inverse.front() = ComplexBall(1) / coefficients.front();
+  for (std::size_t epsilon_lag = 1;
+       epsilon_lag < width; ++epsilon_lag) {
+    ComplexBall convolution(0);
+    for (std::size_t degree = 1;
+         degree <= epsilon_lag; ++degree)
+      convolution += coefficients[degree] *
+          inverse[epsilon_lag - degree];
+    inverse[epsilon_lag] =
+        -convolution / coefficients.front();
+  }
+  std::vector<Magnitude> prefix;
+  prefix.reserve(width);
+  auto row_sum = Magnitude::zero();
+  for (const auto& coefficient : inverse) {
+    row_sum += Magnitude::upper_abs(coefficient);
+    prefix.push_back(row_sum);
+  }
+  return prefix;
+}
+
+inline std::vector<ComplexBall>
+finite_causal_series_inverse_coefficients(
+    const std::vector<ComplexBall>& coefficients) {
+  if (coefficients.empty() || coefficients.front().contains_zero())
+    throw std::domain_error(
+        "finite causal series inverse requires a separated diagonal");
+  const auto width = coefficients.size();
+  std::vector<ComplexBall> inverse(width, ComplexBall(0));
+  inverse.front() = ComplexBall(1) / coefficients.front();
+  for (std::size_t epsilon_lag = 1;
+       epsilon_lag < width; ++epsilon_lag) {
+    ComplexBall convolution(0);
+    for (std::size_t degree = 1;
+         degree <= epsilon_lag; ++degree)
+      convolution += coefficients[degree] *
+          inverse[epsilon_lag - degree];
+    inverse[epsilon_lag] =
+        -convolution / coefficients.front();
+  }
+  return inverse;
+}
+
+struct PhysicalNormalizedODEDiskBounds {
+  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
+  // [epsilon_lag][physical_row] bounds the row sum of the corresponding
+  // causal coefficient of Q^-1 C/t over the complete disk.
+  std::vector<std::vector<Magnitude>> degree_row_upper;
+  Magnitude q_diagonal_lower = Magnitude::zero();
+  std::size_t accepted_tiles = 0;
+  std::size_t subdivided_tiles = 0;
+  std::string detail;
+};
+
+inline std::vector<ComplexBall>
+evaluate_causal_matrix_polynomial_on_tile(
+    const std::vector<std::vector<ComplexBall>>& coefficients,
+    const ComplexBall& tile, std::size_t width,
+    std::size_t matrix_size, std::size_t first_lag) {
+  if (coefficients.size() <= first_lag ||
+      std::any_of(coefficients.begin(), coefficients.end(),
+                  [width, matrix_size](const auto& lag) {
+                    return lag.size() != width * matrix_size;
+                  }))
+    throw std::invalid_argument(
+        "causal matrix disk evaluation received incomplete coefficients");
+  std::vector<ComplexBall> value(
+      width * matrix_size, ComplexBall(0));
+  for (std::size_t reverse = coefficients.size();
+       reverse-- > first_lag;) {
+    for (std::size_t entry = 0;
+         entry < value.size(); ++entry)
+      value[entry] =
+          value[entry] * tile + coefficients[reverse][entry];
+  }
+  return value;
+}
+
+inline PhysicalNormalizedODEDiskBounds
+certify_physical_normalized_ode_disk_bounds(
+    const std::vector<std::vector<ComplexBall>>& q_coefficients,
+    const std::vector<std::vector<ComplexBall>>& c_coefficients,
+    std::uint32_t dimension, const Rational& radius,
+    std::uint32_t minimum_subdivision_depth = 3) {
+  PhysicalNormalizedODEDiskBounds result;
+  if (dimension == 0 || radius.sign() <= 0 ||
+      q_coefficients.empty() || q_coefficients.front().empty() ||
+      c_coefficients.empty()) {
+    result.detail =
+        "normalized physical ODE disk bound requires a positive radius, "
+        "dimension, Q, and a structural C lag";
+    return result;
+  }
+  const auto width = q_coefficients.front().size();
+  const auto matrix_size =
+      static_cast<std::size_t>(dimension) * dimension;
+  if (std::any_of(q_coefficients.begin(), q_coefficients.end(),
+                  [width](const auto& lag) {
+                    return lag.size() != width;
+                  }) ||
+      std::any_of(c_coefficients.begin(), c_coefficients.end(),
+                  [width, matrix_size](const auto& lag) {
+                    return lag.size() != width * matrix_size;
+                  })) {
+    result.detail =
+        "normalized physical ODE disk bound has inconsistent coefficient "
+        "shape";
+    return result;
+  }
+  if (std::any_of(c_coefficients.front().begin(),
+                  c_coefficients.front().end(),
+                  [](const ComplexBall& value) {
+                    return !value.is_zero();
+                  })) {
+    result.detail =
+        "normalized physical ODE disk bound requires structurally exact "
+        "C(0)=0 before forming C/t";
+    return result;
+  }
+
+  constexpr std::uint32_t kMaximumDepth = 18;
+  constexpr std::size_t kMaximumVisitedTiles = 262144;
+  std::vector<ExactComplexDiskTile> pending;
+  pending.push_back(
+      {Rational(0), Rational(0), radius, 0});
+  result.degree_row_upper.assign(
+      width, std::vector<Magnitude>(
+                 dimension, Magnitude::zero()));
+  std::optional<Magnitude> minimum_diagonal;
+  std::size_t visited_tiles = 0;
+  while (!pending.empty()) {
+    if (++visited_tiles > kMaximumVisitedTiles) {
+      result.detail =
+          "normalized physical ODE disk cover exceeded its tile budget";
+      return result;
+    }
+    auto tile = std::move(pending.back());
+    pending.pop_back();
+    if (tile_is_strictly_outside_disk(tile, radius))
+      continue;
+    const auto tile_ball = exact_complex_tile_ball(tile);
+    const auto q =
+        evaluate_causal_q_on_tile(q_coefficients, tile_ball, width);
+    const auto diagonal_lower = Magnitude::lower_abs(q.front());
+    if (tile.depth < minimum_subdivision_depth ||
+        diagonal_lower.is_zero()) {
+      if (tile.depth >= kMaximumDepth) {
+        result.detail =
+            "normalized physical ODE disk cover cannot separate the scalar "
+            "Q diagonal from zero";
+        return result;
+      }
+      const auto child_half = tile.half_width / Rational(2);
+      for (const int real_sign : {-1, 1})
+        for (const int imag_sign : {-1, 1})
+          pending.push_back({
+              tile.real_center +
+                  Rational(real_sign) * child_half,
+              tile.imag_center +
+                  Rational(imag_sign) * child_half,
+              child_half, tile.depth + 1});
+      ++result.subdivided_tiles;
+      continue;
+    }
+
+    const auto q_inverse =
+        finite_causal_series_inverse_coefficients(q);
+    const auto c_over_t =
+        c_coefficients.size() == 1
+            ? std::vector<ComplexBall>(
+                  width * matrix_size, ComplexBall(0))
+            : evaluate_causal_matrix_polynomial_on_tile(
+                  c_coefficients, tile_ball, width,
+                  matrix_size, 1);
+    std::vector<ComplexBall> normalized(
+        width * matrix_size, ComplexBall(0));
+    for (std::size_t epsilon_degree = 0;
+         epsilon_degree < width; ++epsilon_degree)
+      for (std::size_t input_degree = 0;
+           input_degree <= epsilon_degree; ++input_degree) {
+        const auto& scalar = q_inverse[input_degree];
+        for (std::size_t entry = 0;
+             entry < matrix_size; ++entry)
+          normalized[epsilon_degree * matrix_size + entry] +=
+              scalar *
+              c_over_t[(epsilon_degree - input_degree) *
+                           matrix_size +
+                       entry];
+      }
+    for (std::size_t epsilon_degree = 0;
+         epsilon_degree < width; ++epsilon_degree)
+      for (std::uint32_t row = 0; row < dimension; ++row) {
+        auto row_sum = Magnitude::zero();
+        for (std::uint32_t column = 0;
+             column < dimension; ++column)
+          row_sum += Magnitude::upper_abs(
+              normalized[epsilon_degree * matrix_size +
+                         static_cast<std::size_t>(row) * dimension +
+                         column]);
+        result.degree_row_upper[epsilon_degree][row] =
+            Magnitude::maximum(
+                result.degree_row_upper[epsilon_degree][row],
+                row_sum);
+      }
+    if (!minimum_diagonal.has_value() ||
+        diagonal_lower <= *minimum_diagonal)
+      minimum_diagonal = diagonal_lower;
+    ++result.accepted_tiles;
+  }
+  if (result.accepted_tiles == 0 ||
+      !minimum_diagonal.has_value()) {
+    result.detail =
+        "normalized physical ODE disk cover produced no accepted tiles";
+    return result;
+  }
+  result.status = TailMajorantStatus::Certified;
+  result.q_diagonal_lower = *minimum_diagonal;
+  result.detail =
+      "Q^-1 C/t was interval-evaluated before norms on an adaptive "
+      "complex-disk cover";
+  return result;
+}
+
+inline std::vector<Magnitude>
+weighted_physical_ode_prefix_norm_upper(
+    const PhysicalNormalizedODEDiskBounds& bounds,
+    ulong epsilon_weight_base) {
+  if (epsilon_weight_base == 0 ||
+      (epsilon_weight_base & (epsilon_weight_base - 1UL)) != 0 ||
+      bounds.status != TailMajorantStatus::Certified ||
+      bounds.degree_row_upper.empty())
+    throw std::invalid_argument(
+        "weighted physical ODE prefix norm requires certified bounds and "
+        "an exact power-of-two weight");
+  const auto dimension = bounds.degree_row_upper.front().size();
+  if (dimension == 0 ||
+      std::any_of(bounds.degree_row_upper.begin(),
+                  bounds.degree_row_upper.end(),
+                  [dimension](const auto& rows) {
+                    return rows.size() != dimension;
+                  }))
+    throw std::invalid_argument(
+        "weighted physical ODE prefix norm has inconsistent dimension");
+  const auto epsilon_weight =
+      Magnitude::from_ui(epsilon_weight_base);
+  std::vector<Magnitude> prefix;
+  prefix.reserve(bounds.degree_row_upper.size());
+  auto maximum = Magnitude::zero();
+  std::vector<Magnitude> row_sums(
+      dimension, Magnitude::zero());
+  for (std::size_t epsilon_degree = 0;
+       epsilon_degree < bounds.degree_row_upper.size();
+       ++epsilon_degree) {
+    const auto scale = epsilon_weight.power_upper(
+        static_cast<ulong>(epsilon_degree));
+    for (std::size_t row = 0; row < dimension; ++row) {
+      row_sums[row] +=
+          bounds.degree_row_upper[epsilon_degree][row] / scale;
+      maximum = Magnitude::maximum(maximum, row_sums[row]);
+    }
+    prefix.push_back(maximum);
+  }
+  return prefix;
+}
+
+inline FiniteCausalQDiskInverseCertificate
+certify_finite_causal_q_disk_inverse(
+    const std::vector<std::vector<ComplexBall>>& coefficients,
+    const Rational& radius) {
+  FiniteCausalQDiskInverseCertificate result;
+  if (radius.sign() <= 0 || coefficients.empty() ||
+      coefficients.front().empty()) {
+    result.detail =
+        "finite causal Q disk inverse requires positive radius and "
+        "nonempty coefficients";
+    return result;
+  }
+  const auto width = coefficients.front().size();
+  if (std::any_of(coefficients.begin(), coefficients.end(),
+                  [width](const auto& lag) {
+                    return lag.size() != width;
+                  })) {
+    result.detail =
+        "finite causal Q disk inverse has inconsistent epsilon width";
+    return result;
+  }
+
+  // A square cover is deliberately refined only where interval dependency
+  // prevents separation of the scalar diagonal q_0(t).  Squares wholly
+  // outside the closed disk are discarded exactly.  Thus an exterior root
+  // near the Cauchy circle cannot poison the proof merely because it lies in
+  // the initial bounding square.
+  constexpr std::uint32_t kMaximumDepth = 18;
+  constexpr std::size_t kMaximumVisitedTiles = 262144;
+  std::vector<ExactComplexDiskTile> pending;
+  pending.push_back(
+      {Rational(0), Rational(0), radius, 0});
+  result.prefix_norm_upper.assign(width, Magnitude::zero());
+  std::optional<Magnitude> minimum_diagonal;
+  std::size_t visited_tiles = 0;
+  while (!pending.empty()) {
+    if (++visited_tiles > kMaximumVisitedTiles) {
+      result.detail =
+          "adaptive finite-causal Q disk cover exceeded its tile budget";
+      return result;
+    }
+    auto tile = std::move(pending.back());
+    pending.pop_back();
+    if (tile_is_strictly_outside_disk(tile, radius))
+      continue;
+
+    const auto tile_ball = exact_complex_tile_ball(tile);
+    const auto q =
+        evaluate_causal_q_on_tile(coefficients, tile_ball, width);
+    const auto diagonal_lower = Magnitude::lower_abs(q.front());
+    if (diagonal_lower.is_zero()) {
+      if (tile.depth >= kMaximumDepth) {
+        result.detail =
+            "adaptive finite-causal Q disk cover cannot separate the "
+            "scalar diagonal from zero";
+        return result;
+      }
+      const auto child_half = tile.half_width / Rational(2);
+      for (const int real_sign : {-1, 1})
+        for (const int imag_sign : {-1, 1})
+          pending.push_back({
+              tile.real_center +
+                  Rational(real_sign) * child_half,
+              tile.imag_center +
+                  Rational(imag_sign) * child_half,
+              child_half, tile.depth + 1});
+      ++result.subdivided_tiles;
+      continue;
+    }
+
+    const auto inverse_prefix =
+        finite_causal_series_inverse_prefix_norm_upper(q);
+    for (std::size_t epsilon_index = 0;
+         epsilon_index < width; ++epsilon_index)
+      result.prefix_norm_upper[epsilon_index] =
+          Magnitude::maximum(
+              result.prefix_norm_upper[epsilon_index],
+              inverse_prefix[epsilon_index]);
+    if (!minimum_diagonal.has_value() ||
+        diagonal_lower <= *minimum_diagonal)
+      minimum_diagonal = diagonal_lower;
+    ++result.accepted_tiles;
+  }
+  if (result.accepted_tiles == 0 ||
+      !minimum_diagonal.has_value() ||
+      std::any_of(result.prefix_norm_upper.begin(),
+                  result.prefix_norm_upper.end(),
+                  [](const Magnitude& value) {
+                    return value.is_zero() || !value.is_finite();
+                  })) {
+    result.detail =
+        "adaptive finite-causal Q disk cover produced no finite inverse "
+        "bound";
+    return result;
+  }
+  result.status = TailMajorantStatus::Certified;
+  result.diagonal_lower = *minimum_diagonal;
+  result.detail =
+      "scalar causal Q is separated from zero on an adaptive complex-disk "
+      "cover and every finite epsilon prefix is bounded by triangular "
+      "back-substitution";
+  return result;
+}
+
 inline Magnitude finite_physical_c_lag_norm_upper(
     const std::vector<PhysicalODEMatrixEntry<ComplexBall>>& entries,
     EpsilonWindow epsilon, std::uint32_t dimension) {
@@ -1089,11 +1545,15 @@ prepare_physical_regular_homogeneous_tail_model(
     }
 
   model.q_operator_prefix_norm_upper.reserve(equation.q_lags.size());
+  model.q_causal_coefficients.reserve(equation.q_lags.size());
   for (const auto& coefficient : equation.q_lags) {
     if (coefficient.zero) {
       model.q_operator_prefix_norm_upper.push_back(
           std::vector<Magnitude>(
               solution.epsilon.width(), Magnitude::zero()));
+      model.q_causal_coefficients.push_back(
+          std::vector<ComplexBall>(
+              solution.epsilon.width(), ComplexBall(0)));
       continue;
     }
     if (coefficient.valuation < 0)
@@ -1101,9 +1561,20 @@ prepare_physical_regular_homogeneous_tail_model(
           "physical tail model requires causal nonnegative q epsilon valuations");
     const auto multiplier =
         physical_ode_detail::prepare_causal_multiplier(coefficient);
+    const auto matrix =
+        finite_causal_multiplier_matrix(
+            multiplier, solution.epsilon);
     model.q_operator_prefix_norm_upper.push_back(
-        finite_causal_multiplier_prefix_norm_upper(
-            multiplier, solution.epsilon));
+        finite_causal_matrix_prefix_norm_upper(
+            matrix, solution.epsilon.width()));
+    std::vector<ComplexBall> causal_coefficients(
+        solution.epsilon.width(), ComplexBall(0));
+    for (std::size_t epsilon_lag = 0;
+         epsilon_lag < solution.epsilon.width(); ++epsilon_lag)
+      causal_coefficients[epsilon_lag] =
+          matrix[epsilon_lag * solution.epsilon.width()];
+    model.q_causal_coefficients.push_back(
+        std::move(causal_coefficients));
   }
   const auto q0 = physical_ode_detail::prepare_causal_multiplier(
       equation.q_lags.front());
@@ -1115,6 +1586,7 @@ prepare_physical_regular_homogeneous_tail_model(
           q0, solution.epsilon);
 
   model.c_operator_prefix_norm_upper.reserve(equation.c_lags.size());
+  model.c_causal_coefficients.reserve(equation.c_lags.size());
   for (const auto& entries : equation.c_lags) {
     if (std::any_of(entries.begin(), entries.end(),
                     [](const auto& entry) {
@@ -1125,6 +1597,30 @@ prepare_physical_regular_homogeneous_tail_model(
     model.c_operator_prefix_norm_upper.push_back(
         finite_physical_c_lag_prefix_norm_upper(
             entries, solution.epsilon, solution.dimension));
+    const auto matrix_size =
+        static_cast<std::size_t>(solution.dimension) *
+        solution.dimension;
+    std::vector<ComplexBall> causal_coefficients(
+        solution.epsilon.width() * matrix_size,
+        ComplexBall(0));
+    for (const auto& entry : entries) {
+      const auto multiplier =
+          finite_causal_multiplier_matrix(
+              physical_ode_detail::prepare_causal_multiplier(
+                  entry.value),
+              solution.epsilon);
+      for (std::size_t epsilon_lag = 0;
+           epsilon_lag < solution.epsilon.width(); ++epsilon_lag)
+        causal_coefficients[
+            epsilon_lag * matrix_size +
+            static_cast<std::size_t>(entry.row) *
+                solution.dimension +
+            entry.column] +=
+            multiplier[
+                epsilon_lag * solution.epsilon.width()];
+    }
+    model.c_causal_coefficients.push_back(
+        std::move(causal_coefficients));
   }
   const auto valid_prefix = [&](const auto& prefix) {
     return prefix.size() == solution.epsilon.width() &&
@@ -1134,7 +1630,9 @@ prepare_physical_regular_homogeneous_tail_model(
                     });
   };
   if (model.q_operator_prefix_norm_upper.empty() ||
+      model.q_causal_coefficients.empty() ||
       model.c_operator_prefix_norm_upper.empty() ||
+      model.c_causal_coefficients.empty() ||
       !valid_prefix(model.q0_inverse_prefix_norm_upper) ||
       std::any_of(model.q0_inverse_prefix_norm_upper.begin(),
                   model.q0_inverse_prefix_norm_upper.end(),
@@ -1144,9 +1642,34 @@ prepare_physical_regular_homogeneous_tail_model(
       !std::all_of(model.q_operator_prefix_norm_upper.begin(),
                    model.q_operator_prefix_norm_upper.end(),
                    valid_prefix) ||
+      !std::all_of(model.q_causal_coefficients.begin(),
+                   model.q_causal_coefficients.end(),
+                   [width = solution.epsilon.width()](
+                       const auto& coefficients) {
+                     return coefficients.size() == width &&
+                         std::all_of(
+                             coefficients.begin(), coefficients.end(),
+                             [](const ComplexBall& value) {
+                               return value.is_finite();
+                             });
+                   }) ||
       !std::all_of(model.c_operator_prefix_norm_upper.begin(),
                    model.c_operator_prefix_norm_upper.end(),
-                   valid_prefix))
+                   valid_prefix) ||
+      !std::all_of(
+          model.c_causal_coefficients.begin(),
+          model.c_causal_coefficients.end(),
+          [expected = solution.epsilon.width() *
+                      static_cast<std::size_t>(solution.dimension) *
+                      solution.dimension](
+              const auto& coefficients) {
+            return coefficients.size() == expected &&
+                std::all_of(
+                    coefficients.begin(), coefficients.end(),
+                    [](const ComplexBall& value) {
+                      return value.is_finite();
+                    });
+          }))
     return inconclusive(
         "physical finite-epsilon prefix operator norm is zero, incomplete, or nonfinite");
 
@@ -1788,84 +2311,119 @@ inline RegularTaylorDiskCertificate certify_physical_regular_taylor_disk(
   if (!complete_prefix_family(
           model.q_operator_prefix_norm_upper) ||
       !complete_prefix_family(
+          model.q_causal_coefficients) ||
+      !complete_prefix_family(
           model.c_operator_prefix_norm_upper) ||
+      model.c_causal_coefficients.empty() ||
+      !std::all_of(
+          model.c_causal_coefficients.begin(),
+          model.c_causal_coefficients.end(),
+          [width, dimension = model.dimension](
+              const auto& lag) {
+            return lag.size() ==
+                width * static_cast<std::size_t>(dimension) *
+                    dimension;
+          }) ||
       model.q0_inverse_prefix_norm_upper.size() != width ||
       model.initial_row_upper.size() != width)
     throw std::invalid_argument(
         "physical tail model has incomplete operator or initial bounds");
 
   const auto radius_upper = exact_rational_upper(radius);
+  const auto normalized =
+      certify_physical_normalized_ode_disk_bounds(
+          model.q_causal_coefficients,
+          model.c_causal_coefficients, model.dimension, radius);
+  if (normalized.status != TailMajorantStatus::Certified)
+    return inconclusive_disk(
+        radius.str(),
+        "finite-epsilon normalized physical ODE disk bound is "
+        "inconclusive: " +
+            normalized.detail);
+  const std::vector<ulong> epsilon_weights{
+      1UL, 2UL, 4UL, 8UL, 16UL, 32UL, 64UL, 128UL,
+      256UL, 512UL, 1024UL};
+  std::vector<std::vector<Magnitude>> weighted_ode_norms;
+  weighted_ode_norms.reserve(epsilon_weights.size());
+  for (const auto weight : epsilon_weights)
+    weighted_ode_norms.push_back(
+        weighted_physical_ode_prefix_norm_upper(
+            normalized, weight));
   RegularTaylorDiskCertificate result;
   result.status = TailMajorantStatus::Certified;
   result.witness_radius_exact = radius.str();
-  auto minimum_neumann_gap = Magnitude::one();
   auto maximum_ode_norm = Magnitude::zero();
-  auto initial_prefix = Magnitude::zero();
+  ulong minimum_selected_weight =
+      std::numeric_limits<ulong>::max();
+  ulong maximum_selected_weight = 0;
   result.cauchy_circle_upper.reserve(width);
   for (std::size_t epsilon_index = 0;
        epsilon_index < width; ++epsilon_index) {
-    auto q_remainder_upper = Magnitude::zero();
-    for (std::size_t lag = 1;
-         lag < model.q_operator_prefix_norm_upper.size(); ++lag)
-      q_remainder_upper +=
-          model.q_operator_prefix_norm_upper[lag][epsilon_index] *
-          radius_upper.power_upper(static_cast<ulong>(lag));
-    const auto neumann_upper =
-        model.q0_inverse_prefix_norm_upper[epsilon_index] *
-        q_remainder_upper;
-    const auto neumann_gap_lower =
-        Magnitude::positive_difference_lower(
-            Magnitude::one(), neumann_upper);
-    if (neumann_gap_lower.is_zero())
+    std::optional<Magnitude> best_circle;
+    Magnitude best_ode_norm = Magnitude::zero();
+    ulong best_weight = 0;
+    for (std::size_t candidate = 0;
+         candidate < epsilon_weights.size(); ++candidate) {
+      const auto weight = epsilon_weights[candidate];
+      const auto epsilon_weight = Magnitude::from_ui(weight);
+      auto weighted_initial = Magnitude::zero();
+      for (std::size_t source_index = 0;
+           source_index <= epsilon_index; ++source_index)
+        weighted_initial = Magnitude::maximum(
+            weighted_initial,
+            model.initial_row_upper[source_index] /
+                epsilon_weight.power_upper(
+                    static_cast<ulong>(source_index)));
+      const auto& ode_norm =
+          weighted_ode_norms[candidate][epsilon_index];
+      const auto gronwall =
+          (ode_norm * radius_upper).exponential_upper();
+      const auto circle =
+          weighted_initial * gronwall *
+          epsilon_weight.power_upper(
+              static_cast<ulong>(epsilon_index));
+      if (!circle.is_finite())
+        continue;
+      if (!best_circle.has_value() || circle <= *best_circle) {
+        best_circle = circle;
+        best_ode_norm = ode_norm;
+        best_weight = weight;
+      }
+    }
+    if (!best_circle.has_value())
       return inconclusive_disk(
           radius.str(),
-          "finite-epsilon Q(t) Neumann bound does not prove invertibility "
-          "on the causal prefix ending at epsilon power " +
-              std::to_string(
-                  static_cast<std::int64_t>(
-                      model.epsilon.min_power) +
-                  static_cast<std::int64_t>(epsilon_index)));
-    if (neumann_gap_lower <= minimum_neumann_gap)
-      minimum_neumann_gap = neumann_gap_lower;
-    const auto q_inverse_norm_upper =
-        model.q0_inverse_prefix_norm_upper[epsilon_index] /
-        neumann_gap_lower;
-
-    auto numerator_upper = Magnitude::zero();
-    for (std::size_t lag = 1;
-         lag < model.c_operator_prefix_norm_upper.size(); ++lag)
-      numerator_upper +=
-          model.c_operator_prefix_norm_upper[lag][epsilon_index] *
-          radius_upper.power_upper(
-              static_cast<ulong>(lag - 1));
-    const auto ode_norm_upper =
-        q_inverse_norm_upper * numerator_upper;
-    const auto gronwall =
-        (ode_norm_upper * radius_upper).exponential_upper();
-    if (!ode_norm_upper.is_finite() || !gronwall.is_finite())
-      return inconclusive_disk(
-          radius.str(),
-          "physical finite-epsilon ODE/Gronwall bound overflowed on the "
+          "physical normalized finite-epsilon ODE/Gronwall bound "
+          "overflowed for every tested geometric epsilon weight on the "
           "causal prefix ending at epsilon power " +
               std::to_string(
                   static_cast<std::int64_t>(
                       model.epsilon.min_power) +
                   static_cast<std::int64_t>(epsilon_index)));
     maximum_ode_norm =
-        Magnitude::maximum(maximum_ode_norm, ode_norm_upper);
-    initial_prefix = Magnitude::maximum(
-        initial_prefix, model.initial_row_upper[epsilon_index]);
-    result.cauchy_circle_upper.push_back(
-        initial_prefix * gronwall);
+        Magnitude::maximum(maximum_ode_norm, best_ode_norm);
+    minimum_selected_weight =
+        std::min(minimum_selected_weight, best_weight);
+    maximum_selected_weight =
+        std::max(maximum_selected_weight, best_weight);
+    result.cauchy_circle_upper.push_back(*best_circle);
   }
   // These scalar fields remain conservative summaries for diagnostics and
   // checkpoint replay.  The actual coefficient bounds above use the
   // corresponding invariant prefix, not these extrema.
-  result.q_lower = minimum_neumann_gap;
+  result.q_lower = normalized.q_diagonal_lower;
   result.ode_norm_upper = maximum_ode_norm;
   result.detail =
-      "finite-epsilon Q(t) is invertible on every invariant causal epsilon "
-      "prefix and prefixwise Gronwall bounds its regular solution";
+      "Q(t,epsilon)^-1 C(t,epsilon)/t is interval-evaluated before norms on "
+      "an adaptive disk cover; independently optimized geometric epsilon "
+      "weights and prefixwise Gronwall bound every invariant causal prefix; "
+      "accepted_tiles=" +
+      std::to_string(normalized.accepted_tiles) +
+      "; subdivided_tiles=" +
+      std::to_string(normalized.subdivided_tiles) +
+      "; selected_epsilon_weight_range=" +
+      std::to_string(minimum_selected_weight) + ".." +
+      std::to_string(maximum_selected_weight);
   return result;
 }
 

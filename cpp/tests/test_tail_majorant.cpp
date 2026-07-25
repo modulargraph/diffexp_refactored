@@ -409,6 +409,168 @@ void test_finite_epsilon_physical_tail_model() {
             !corrupted_model.model.has_value());
 }
 
+void test_finite_causal_q_disk_inverse_certificate() {
+  // q(t,epsilon) = 1 + t + t^2 + 100 epsilon t.  The diagonal
+  // polynomial has both roots on |t|=1, so it is invertible on |t|<=9/10.
+  // The former Neumann test rejected even the one-row prefix because
+  // |t|+|t|^2 > 1, while the large nilpotent epsilon term made wider
+  // prefixes still less likely to pass despite not changing invertibility.
+  const std::vector<std::vector<ComplexBall>> safe = {
+      {ComplexBall(1), ComplexBall(0)},
+      {ComplexBall(1), ComplexBall(100)},
+      {ComplexBall(1), ComplexBall(0)}};
+  const auto certified =
+      diffexp2::tail_majorant_detail::
+          certify_finite_causal_q_disk_inverse(
+              safe, Rational("9/10"));
+  check("adaptive Q disk proof certifies a polynomial rejected by the coarse Neumann norm",
+        certified.status == TailMajorantStatus::Certified &&
+            certified.prefix_norm_upper.size() == 2 &&
+            !certified.diagonal_lower.is_zero() &&
+            certified.accepted_tiles != 0);
+  check("finite back-substitution retains rather than ignores nilpotent epsilon coupling",
+        certified.status == TailMajorantStatus::Certified &&
+            certified.prefix_norm_upper.at(0).approximate_upper() <
+                certified.prefix_norm_upper.at(1).approximate_upper());
+
+  // q(t) = 1 + 2t + 2t^2 has roots (-1 +/- i)/2, both strictly inside
+  // |t|<=4/5.  Adaptive refinement must fail closed rather than manufacture
+  // an inverse bound around a genuine zero.
+  const std::vector<std::vector<ComplexBall>> unsafe = {
+      {ComplexBall(1)},
+      {ComplexBall(2)},
+      {ComplexBall(2)}};
+  const auto rejected =
+      diffexp2::tail_majorant_detail::
+          certify_finite_causal_q_disk_inverse(
+              unsafe, Rational("4/5"));
+  check("adaptive Q disk proof remains inconclusive when the disk contains a true zero",
+        rejected.status == TailMajorantStatus::Inconclusive);
+  const std::vector<std::vector<ComplexBall>> boundary_zero = {
+      {ComplexBall(1)},
+      {ComplexBall(1)},
+      {ComplexBall(1)}};
+  const auto boundary_rejected =
+      diffexp2::tail_majorant_detail::
+          certify_finite_causal_q_disk_inverse(
+              boundary_zero, Rational("1"));
+  check("Q root on the closed Cauchy circle remains inconclusive",
+        boundary_rejected.status ==
+            TailMajorantStatus::Inconclusive);
+
+  // A large scalar clearing polynomial is algebraically irrelevant to the
+  // physical ODE.  Form C=t*q*(2+100 epsilon), then require the normalized
+  // disk path to cancel q before norms and the geometric epsilon weight to
+  // recognize the strictly causal 100 epsilon coupling.
+  const auto scale = ComplexBall::from_strings("1e20");
+  const std::vector<std::vector<ComplexBall>> cleared_q = {
+      {scale, ComplexBall(0)},
+      {scale, ComplexBall(0)},
+      {scale, ComplexBall(0)}};
+  const auto c0 = std::vector<ComplexBall>{
+      ComplexBall(0), ComplexBall(0)};
+  const auto c = std::vector<ComplexBall>{
+      scale * ComplexBall(2), scale * ComplexBall(100)};
+  const std::vector<std::vector<ComplexBall>> cleared_c = {
+      c0, c, c, c};
+  const auto normalized =
+      diffexp2::tail_majorant_detail::
+          certify_physical_normalized_ode_disk_bounds(
+              cleared_q, cleared_c, 1, Rational("1/2"), 3);
+  const auto unweighted =
+      normalized.status == TailMajorantStatus::Certified
+          ? diffexp2::tail_majorant_detail::
+                weighted_physical_ode_prefix_norm_upper(
+                    normalized, 1)
+          : std::vector<Magnitude>{};
+  const auto weighted =
+      normalized.status == TailMajorantStatus::Certified
+          ? diffexp2::tail_majorant_detail::
+                weighted_physical_ode_prefix_norm_upper(
+                    normalized, 16)
+          : std::vector<Magnitude>{};
+  check("normalized disk proof cancels a large common clearing polynomial before norms",
+        normalized.status == TailMajorantStatus::Certified &&
+            !unweighted.empty() &&
+            unweighted.back().approximate_upper() < 1e6);
+  check("geometric epsilon norm suppresses strictly causal growth without dropping it",
+        !weighted.empty() &&
+            weighted.back().approximate_upper() <
+                unweighted.back().approximate_upper());
+
+  const auto zero_ode =
+      diffexp2::tail_majorant_detail::
+          certify_physical_normalized_ode_disk_bounds(
+              std::vector<std::vector<ComplexBall>>{
+                  {ComplexBall(1)}},
+              std::vector<std::vector<ComplexBall>>{
+                  {ComplexBall(0)}},
+              1, Rational("1"), 1);
+  const auto zero_norm =
+      zero_ode.status == TailMajorantStatus::Certified
+          ? diffexp2::tail_majorant_detail::
+                weighted_physical_ode_prefix_norm_upper(
+                    zero_ode, 1)
+          : std::vector<Magnitude>{};
+  check("identically zero physical C has an exact zero normalized growth bound",
+        zero_ode.status == TailMajorantStatus::Certified &&
+            zero_norm.size() == 1 && zero_norm.front().is_zero());
+  const auto corrupt_c0 =
+      diffexp2::tail_majorant_detail::
+          certify_physical_normalized_ode_disk_bounds(
+              std::vector<std::vector<ComplexBall>>{
+                  {ComplexBall(1)}},
+              std::vector<std::vector<ComplexBall>>{
+                  {ComplexBall(1)}, {ComplexBall(0)}},
+              1, Rational("1"), 1);
+  check("normalized physical disk proof rejects nonzero structural C(0)",
+        corrupt_c0.status == TailMajorantStatus::Inconclusive);
+  bool rejected_inexact_weight = false;
+  try {
+    (void)diffexp2::tail_majorant_detail::
+        weighted_physical_ode_prefix_norm_upper(
+            normalized, 3);
+  } catch (const std::invalid_argument&) {
+    rejected_inexact_weight = true;
+  }
+  check("weighted physical norm rejects non-power-of-two magnitude scaling",
+        rejected_inexact_weight);
+
+  diffexp2::PhysicalRegularTaylorTailModel causal_solution;
+  causal_solution.epsilon = {0, 1};
+  causal_solution.dimension = 1;
+  causal_solution.chart.center_exact = "0";
+  causal_solution.chart.scale_exact = "1";
+  causal_solution.chart.radius_exact = "2";
+  causal_solution.chart.radius =
+      ComplexBall::from_strings("2");
+  causal_solution.q0_inverse_prefix_norm_upper = {
+      Magnitude::one(), Magnitude::one()};
+  causal_solution.q_operator_prefix_norm_upper = {{
+      Magnitude::one(), Magnitude::one()}};
+  causal_solution.q_causal_coefficients = {{
+      ComplexBall(1), ComplexBall(0)}};
+  causal_solution.c_operator_prefix_norm_upper = {
+      {Magnitude::zero(), Magnitude::zero()},
+      {Magnitude::zero(), Magnitude::from_ui(100)}};
+  causal_solution.c_causal_coefficients = {
+      {ComplexBall(0), ComplexBall(0)},
+      {ComplexBall(0), ComplexBall(100)}};
+  causal_solution.initial_row_upper = {
+      Magnitude::one(), Magnitude::zero()};
+  const auto causal_disk =
+      diffexp2::certify_physical_regular_taylor_disk(
+          causal_solution, "1/2");
+  // df/dt = 100 epsilon f with f(0)=1 has
+  // [epsilon^1]f(t)=100t.  Any circle bound at R=1/2 must therefore
+  // unweight back to at least 50.
+  check("weighted physical Gronwall bound unweights the delivered epsilon coefficient",
+        causal_disk.status == TailMajorantStatus::Certified &&
+            causal_disk.cauchy_circle_upper.size() == 2 &&
+            causal_disk.cauchy_circle_upper[1]
+                    .approximate_upper() >= 50.0);
+}
+
 }  // namespace
 
 int main() {
@@ -416,6 +578,7 @@ int main() {
   test_rational_vertical_slice();
   test_acb_and_loud_noncertification();
   test_finite_epsilon_physical_tail_model();
+  test_finite_causal_q_disk_inverse_certificate();
   std::cout << "Results: " << passed << " / " << (passed + failed)
             << " tests passed\n";
   return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

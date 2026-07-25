@@ -729,6 +729,30 @@ class PhysicalEquationOwnerBase {
   virtual const std::string* matching_scc_rational_shadow_identity() const {
     return nullptr;
   }
+  virtual std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+  rational_shadow_singular_tail_equation() const {
+    return nullptr;
+  }
+  virtual std::optional<LocalSolution<Rational>>
+  rational_shadow_singular_tail_local(
+      const LocalSolution<Rational>& physical) const {
+    (void)physical;
+    return std::nullopt;
+  }
+  virtual std::optional<EpsilonVector>
+  physicalize_rational_shadow_singular_seed(
+      const EpsilonVector& tail_frame,
+      const RealEvaluationPoint& point) const {
+    (void)tail_frame;
+    (void)point;
+    return std::nullopt;
+  }
+  virtual std::optional<LocalSolution<ComplexBall>>
+  physicalize_rational_shadow_singular_local(
+      const LocalSolution<ComplexBall>& tail_frame) const {
+    (void)tail_frame;
+    return std::nullopt;
+  }
   virtual std::optional<std::pair<
       FiniteLaurentVector<ComplexBall>, std::string>>
   normalize_acb_matching_vector(
@@ -2018,6 +2042,7 @@ struct SCCColumnProvenance {
 
 struct RationalShadowColumnWitness {
   std::shared_ptr<const LocalSolution<Rational>> solution;
+  std::shared_ptr<const LocalSolution<Rational>> singular_tail_solution;
   std::string rational_shadow_identity;
   std::string source_column_identity;
   std::string target_column_identity;
@@ -2190,6 +2215,8 @@ class StoredLocalBase {
       retained_equation_owner() const = 0;
   virtual std::shared_ptr<const RationalShadowColumnWitness>
       rational_shadow_witness() const = 0;
+  virtual std::shared_ptr<const LocalSolution<Rational>>
+      rational_shadow_singular_tail_solution() const = 0;
 
   const std::string& handle() const { return handle_; }
   const std::string& source_chart() const { return source_chart_; }
@@ -2244,7 +2271,9 @@ class StoredLocal final : public StoredLocalBase {
               std::string residual_unavailable_reason = {},
               std::shared_ptr<const RationalShadowColumnWitness>
                   rational_shadow_witness = nullptr,
-              bool sealed_plan_match_lineage = false)
+              bool sealed_plan_match_lineage = false,
+              std::shared_ptr<const LocalSolution<Rational>>
+                  rational_shadow_singular_tail_solution = nullptr)
       : StoredLocalBase(std::move(handle), std::move(source_chart),
                         std::move(source_operator_identity),
                         diagnostics.parse_ms, diagnostics.kernel_ms,
@@ -2261,8 +2290,30 @@ class StoredLocal final : public StoredLocalBase {
         equation_owner_(std::move(equation_owner)),
         physical_equation_(std::move(physical_equation)),
         rational_shadow_witness_(std::move(rational_shadow_witness)),
-        sealed_plan_match_lineage_(sealed_plan_match_lineage) {
+        sealed_plan_match_lineage_(sealed_plan_match_lineage),
+        rational_shadow_singular_tail_solution_(
+            std::move(rational_shadow_singular_tail_solution)) {
     validate_local_solution(solution_, false);
+    if (rational_shadow_singular_tail_solution_) {
+      if constexpr (!std::is_same_v<Scalar, Rational>) {
+        throw std::invalid_argument(
+            "only an exact Rational retained local can own a singular-tail frame");
+      } else {
+        validate_local_solution(
+            *rational_shadow_singular_tail_solution_, false);
+        if (!rational_shadow_singular_tail_solution_->error.empty() ||
+            rational_shadow_singular_tail_solution_->dimension !=
+                solution_.dimension ||
+            !local_algebra_detail::same_chart(
+                rational_shadow_singular_tail_solution_->chart,
+                solution_.chart) ||
+            !local_algebra_detail::same_prescriptions(
+                rational_shadow_singular_tail_solution_->prescriptions,
+                solution_.prescriptions))
+          throw std::invalid_argument(
+              "retained Rational singular-tail frame differs from its physical local");
+      }
+    }
     if (retained_derivation_.has_value()) {
       const auto* raw_identity =
           retained_derivation_->if_contains("provenance_identity");
@@ -3462,6 +3513,10 @@ class StoredLocal final : public StoredLocalBase {
   rational_shadow_witness() const override {
     return rational_shadow_witness_;
   }
+  std::shared_ptr<const LocalSolution<Rational>>
+  rational_shadow_singular_tail_solution() const override {
+    return rational_shadow_singular_tail_solution_;
+  }
   const std::vector<PseudoHit<Scalar>>& pseudo_hits() const {
     return pseudo_hits_;
   }
@@ -3689,6 +3744,8 @@ class StoredLocal final : public StoredLocalBase {
   std::shared_ptr<const RationalShadowColumnWitness>
       rational_shadow_witness_;
   bool sealed_plan_match_lineage_ = false;
+  std::shared_ptr<const LocalSolution<Rational>>
+      rational_shadow_singular_tail_solution_;
   std::optional<OwnerBoundResidualBinding> residual_binding_;
   std::string residual_binding_detail_ =
       "owner-bound residual payload was not prepared";

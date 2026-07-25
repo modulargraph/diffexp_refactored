@@ -628,6 +628,44 @@ inline EpsilonVector solve_formal_unit_q0(
 }  // namespace physical_ode_detail
 
 template <typename Scalar>
+PreparedPhysicalClearedODE<Scalar>
+cancel_physical_cleared_ode_common_epsilon_monomial(
+    const PreparedPhysicalClearedODE<Scalar>& source) {
+  physical_ode_detail::validate_ode(source);
+  auto common = std::numeric_limits<std::int32_t>::max();
+  for (const auto& value : source.q_lags)
+    if (!value.zero) common = std::min(common, value.valuation);
+  for (const auto& lag : source.c_lags)
+    for (const auto& entry : lag)
+      common = std::min(common, entry.value.valuation);
+  if (common == std::numeric_limits<std::int32_t>::max())
+    throw std::invalid_argument(
+        "physical cleared ODE has no common epsilon valuation");
+  auto normalized = source;
+  const auto shift = [common](
+      ExactEpsilonRational<Scalar>& value) {
+    if (value.zero) return;
+    value.valuation = local_detail::checked_i32(
+        static_cast<std::int64_t>(value.valuation) - common,
+        "physical common epsilon monomial cancellation");
+  };
+  for (auto& value : normalized.q_lags) shift(value);
+  for (auto& lag : normalized.c_lags)
+    for (auto& entry : lag) shift(entry.value);
+  if (common != 0) {
+    normalized.owner_signature_identity +=
+        ":cancel-common-epsilon:" + std::to_string(common);
+    normalized.payload_identity +=
+        ":cancel-common-epsilon:" + std::to_string(common);
+    normalized.exact_payload_record +=
+        ";cancelled_common_epsilon_valuation=" +
+        std::to_string(common);
+  }
+  physical_ode_detail::validate_ode(normalized);
+  return normalized;
+}
+
+template <typename Scalar>
 struct RecenteredPhysicalClearedODEResult {
   bool eligible = false;
   std::string reason;
@@ -741,6 +779,167 @@ recenter_physical_cleared_ode(
         error.what();
     return result;
   }
+}
+
+// Translate a physical equation whose source center t=0 may be singular to
+// the ordinary coordinate s=t-center.  Unlike
+// recenter_physical_cleared_ode(), no structural factor is cancelled:
+//
+//   q(t,eps) theta_t f = C(t,eps) f
+//
+// is multiplied by s after t=center+s is substituted, giving
+//
+//   (center+s) q(center+s,eps) theta_s f
+//       = s C(center+s,eps) f.
+//
+// Thus q_tilde(s)=(center+s)q(center+s) and
+// C_tilde(s)=s C(center+s).  The latter has a structural zero at s=0, while
+// q_tilde(0)=center*q(center) must be a formal epsilon unit.  This exact
+// transformation is the algebraic seam used to carry a certified Frobenius
+// seed away from a singular center with the ordinary Taylor machinery.
+template <typename Scalar>
+RecenteredPhysicalClearedODEResult<Scalar>
+recenter_singular_physical_cleared_ode_to_ordinary(
+    const PreparedPhysicalClearedODE<Scalar>& source,
+    const Rational& center) {
+  static_assert(std::is_same_v<Scalar, Rational> ||
+                    std::is_same_v<Scalar, ComplexBall>,
+                "singular physical recentering supports Rational or Acb equations");
+  physical_ode_detail::validate_ode(source);
+  RecenteredPhysicalClearedODEResult<Scalar> result;
+  if (center.is_zero()) {
+    result.reason =
+        "singular physical recentering requires a nonzero seed point";
+    return result;
+  }
+  try {
+    const auto translated_q =
+        physical_ode_detail::translate_epsilon_rational_polynomial(
+            source.q_lags, center);
+    std::vector<ExactEpsilonRational<Scalar>> shifted_q(
+        translated_q.size() + 1);
+    const auto center_scalar =
+        physical_ode_detail::scalar_from_rational<Scalar>(center);
+    for (std::size_t degree = 0; degree < translated_q.size(); ++degree) {
+      shifted_q[degree] = physical_ode_detail::add_epsilon_rational(
+          shifted_q[degree],
+          physical_ode_detail::scale_epsilon_rational(
+              translated_q[degree], center_scalar));
+      shifted_q[degree + 1] =
+          physical_ode_detail::add_epsilon_rational(
+              shifted_q[degree + 1], translated_q[degree]);
+    }
+
+    using Position = std::pair<std::uint32_t, std::uint32_t>;
+    std::map<Position,
+             std::vector<ExactEpsilonRational<Scalar>>> c_polynomials;
+    for (std::size_t degree = 0;
+         degree < source.c_lags.size(); ++degree)
+      for (const auto& entry : source.c_lags[degree]) {
+        auto& polynomial = c_polynomials[{entry.row, entry.column}];
+        if (polynomial.empty())
+          polynomial.resize(source.c_lags.size());
+        polynomial[degree] = entry.value;
+      }
+    std::vector<std::vector<PhysicalODEMatrixEntry<Scalar>>> shifted_c(
+        source.c_lags.size() + 1);
+    for (const auto& [position, polynomial] : c_polynomials) {
+      auto translated =
+          physical_ode_detail::translate_epsilon_rational_polynomial(
+              polynomial, center);
+      for (std::size_t degree = 0;
+           degree < translated.size(); ++degree)
+        if (!translated[degree].zero)
+          shifted_c[degree + 1].push_back(
+              PhysicalODEMatrixEntry<Scalar>{
+                  position.first, position.second,
+                  std::move(translated[degree])});
+    }
+    while (shifted_q.size() > 1 && shifted_q.back().zero)
+      shifted_q.pop_back();
+    while (shifted_c.size() > 1 && shifted_c.back().empty())
+      shifted_c.pop_back();
+
+    PreparedPhysicalClearedODE<Scalar> shifted;
+    shifted.dimension = source.dimension;
+    shifted.q_lags = std::move(shifted_q);
+    shifted.c_lags = std::move(shifted_c);
+    shifted.owner_signature_identity =
+        source.owner_signature_identity +
+        ":singular-to-ordinary-recenter:" + center.str();
+    shifted.payload_identity =
+        source.payload_identity +
+        ":singular-to-ordinary-recenter:" + center.str();
+    shifted.exact_payload_record =
+        source.exact_payload_record +
+        ";singular_to_ordinary_seed_exact=" + center.str();
+    physical_ode_detail::validate_ode(shifted);
+    const auto& q0 = shifted.q_lags.front();
+    if (q0.zero || q0.valuation != 0 ||
+        q0.numerator.empty() || q0.denominator.empty() ||
+        ScalarTraits<Scalar>::is_zero(q0.numerator.front()) ||
+        ScalarTraits<Scalar>::is_zero(q0.denominator.front())) {
+      result.reason =
+          "singularly recentered physical q(0,eps) is not a formal epsilon unit";
+      return result;
+    }
+    if (!shifted.c_lags.front().empty()) {
+      result.reason =
+          "singularly recentered physical C lost its ordinary structural zero";
+      return result;
+    }
+    result.eligible = true;
+    result.reason =
+        "singular physical q/C equation recentered exactly at an ordinary seed";
+    result.equation = std::move(shifted);
+    return result;
+  } catch (const std::exception& error) {
+    result.reason =
+        std::string("singular physical recentering is inconclusive: ") +
+        error.what();
+    return result;
+  }
+}
+
+inline PreparedPhysicalClearedODE<ComplexBall>
+specialize_rational_physical_cleared_ode_to_acb(
+    const PreparedPhysicalClearedODE<Rational>& exact) {
+  physical_ode_detail::validate_ode(exact);
+  PreparedPhysicalClearedODE<ComplexBall> numeric;
+  numeric.dimension = exact.dimension;
+  numeric.owner_signature_identity =
+      exact.owner_signature_identity;
+  numeric.payload_identity = exact.payload_identity;
+  numeric.exact_payload_record = exact.exact_payload_record;
+  const auto specialize = [](
+      const ExactEpsilonRational<Rational>& value) {
+    ExactEpsilonRational<ComplexBall> result;
+    result.zero = value.zero;
+    result.valuation = value.valuation;
+    result.numerator.reserve(value.numerator.size());
+    result.denominator.reserve(value.denominator.size());
+    for (const auto& coefficient : value.numerator)
+      result.numerator.push_back(
+          ComplexBall::from_strings(coefficient.str()));
+    for (const auto& coefficient : value.denominator)
+      result.denominator.push_back(
+          ComplexBall::from_strings(coefficient.str()));
+    return result;
+  };
+  numeric.q_lags.reserve(exact.q_lags.size());
+  for (const auto& value : exact.q_lags)
+    numeric.q_lags.push_back(specialize(value));
+  numeric.c_lags.resize(exact.c_lags.size());
+  for (std::size_t lag = 0; lag < exact.c_lags.size(); ++lag) {
+    numeric.c_lags[lag].reserve(exact.c_lags[lag].size());
+    for (const auto& entry : exact.c_lags[lag])
+      numeric.c_lags[lag].push_back(
+          PhysicalODEMatrixEntry<ComplexBall>{
+              entry.row, entry.column,
+              specialize(entry.value)});
+  }
+  physical_ode_detail::validate_ode(numeric);
+  return numeric;
 }
 
 struct OrdinaryCenterValueEvolution {

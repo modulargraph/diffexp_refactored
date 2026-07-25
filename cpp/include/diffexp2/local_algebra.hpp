@@ -79,6 +79,62 @@ struct PreparedSparseLocalMultiplierMatrix {
   std::string exact_identity;
 };
 
+inline PreparedRationalTaylorMultiplier<ComplexBall>
+specialize_prepared_rational_multiplier_to_acb(
+    const PreparedRationalTaylorMultiplier<Rational>& exact) {
+  PreparedRationalTaylorMultiplier<ComplexBall> numeric;
+  numeric.epsilon_shift = exact.epsilon_shift;
+  numeric.center_pole_order = exact.center_pole_order;
+  numeric.exact_identity = exact.exact_identity;
+  numeric.proven_zero = exact.proven_zero;
+  numeric.kernels.reserve(exact.kernels.size());
+  for (const auto& exact_kernel : exact.kernels) {
+    std::vector<ComplexBall> kernel;
+    kernel.reserve(exact_kernel.size());
+    for (const auto& coefficient : exact_kernel)
+      kernel.push_back(ComplexBall::from_strings(coefficient.str()));
+    numeric.kernels.push_back(std::move(kernel));
+  }
+  if (exact.analytic_coefficients.has_value()) {
+    numeric.analytic_coefficients.emplace();
+    numeric.analytic_coefficients->reserve(
+        exact.analytic_coefficients->size());
+    for (const auto& exact_rational :
+         *exact.analytic_coefficients) {
+      PreparedRationalAnalyticCoefficient<ComplexBall> rational;
+      rational.numerator.reserve(exact_rational.numerator.size());
+      for (const auto& coefficient : exact_rational.numerator)
+        rational.numerator.push_back(
+            ComplexBall::from_strings(coefficient.str()));
+      rational.denominator.reserve(
+          exact_rational.denominator.size());
+      for (const auto& coefficient : exact_rational.denominator)
+        rational.denominator.push_back(
+            ComplexBall::from_strings(coefficient.str()));
+      numeric.analytic_coefficients->push_back(std::move(rational));
+    }
+  }
+  return numeric;
+}
+
+inline PreparedSparseLocalMultiplierMatrix<ComplexBall>
+specialize_prepared_rational_matrix_to_acb(
+    const PreparedSparseLocalMultiplierMatrix<Rational>& exact) {
+  PreparedSparseLocalMultiplierMatrix<ComplexBall> numeric;
+  numeric.rows = exact.rows;
+  numeric.columns = exact.columns;
+  numeric.exact_identity = exact.exact_identity;
+  numeric.entries.reserve(exact.entries.size());
+  for (const auto& exact_entry : exact.entries)
+    numeric.entries.push_back(
+        typename PreparedSparseLocalMultiplierMatrix<
+            ComplexBall>::Entry{
+            exact_entry.row, exact_entry.column,
+            specialize_prepared_rational_multiplier_to_acb(
+                exact_entry.multiplier)});
+  return numeric;
+}
+
 namespace local_algebra_detail {
 
 inline std::optional<ComplexBall> signed_real_evaluation_ball(
@@ -370,6 +426,67 @@ inline bool same_chart(const ChartGeometry& left,
 }
 
 template <typename Scalar>
+void require_factorized_local_basis_contract(
+    const std::vector<LocalSolution<Scalar>>& basis,
+    std::uint32_t dimension, EpsilonWindow requested_window,
+    std::int32_t required_complete_max,
+    const std::string& context) {
+  if (basis.empty() || basis.size() != dimension)
+    throw std::logic_error(
+        context +
+        ": factorized local basis has the wrong column count");
+  const auto& reference = basis.front();
+  validate_local_solution(reference, false);
+  if (reference.dimension != dimension ||
+      reference.sectors.empty() ||
+      reference.epsilon.min_power >
+          requested_window.complete_max ||
+      reference.epsilon.complete_max <
+          required_complete_max)
+    throw std::logic_error(
+        context +
+        ": factorized reference column has invalid shape or epsilon "
+        "coverage");
+  for (const auto& column : basis) {
+    validate_local_solution(column, false);
+    if (column.dimension != dimension ||
+        column.sectors.empty() ||
+        !same_chart(column.chart, reference.chart) ||
+        !same_prescriptions(
+            column.prescriptions, reference.prescriptions) ||
+        column.taylor_complete_max !=
+            reference.taylor_complete_max ||
+        column.epsilon.min_power >
+            requested_window.complete_max ||
+        column.epsilon.complete_max <
+            required_complete_max)
+      throw std::logic_error(
+          context +
+          ": factorized column has incompatible chart, prescriptions, "
+          "shape, Taylor width, or epsilon coverage");
+  }
+}
+
+template <typename Scalar>
+void require_factorized_receiving_local_compatibility(
+    const LocalSolution<Scalar>& factorized,
+    const LocalSolution<Scalar>& receiving,
+    const std::string& context) {
+  validate_local_solution(factorized, false);
+  validate_local_solution(receiving, false);
+  if (!same_chart(factorized.chart, receiving.chart) ||
+      !same_prescriptions(
+          factorized.prescriptions, receiving.prescriptions) ||
+      factorized.dimension != receiving.dimension ||
+      factorized.taylor_complete_max !=
+          receiving.taylor_complete_max)
+    throw std::logic_error(
+        context +
+        ": factorized local is incompatible with its receiving chart, "
+        "prescriptions, dimension, or Taylor width");
+}
+
+template <typename Scalar>
 void require_same_local_space(const LocalSolution<Scalar>& left,
                               const LocalSolution<Scalar>& right) {
   if (!same_chart(left.chart, right.chart) ||
@@ -452,6 +569,50 @@ LocalSolution<Scalar> with_selected_component(
         selected.coefficients[flat_index(ei, n, 0, output.taylor_width(), 1)] =
             sector.coefficients[flat_index(
                 ei, n, component, input.taylor_width(), input.dimension)];
+    output.sectors.push_back(std::move(selected));
+  }
+  return output;
+}
+
+template <typename Scalar>
+LocalSolution<Scalar> with_selected_components(
+    const LocalSolution<Scalar>& input,
+    const std::vector<std::uint32_t>& components) {
+  if (components.empty())
+    throw std::invalid_argument("selected local component list is empty");
+  std::vector<std::uint8_t> seen(input.dimension, 0);
+  for (const auto component : components) {
+    if (component >= input.dimension || seen[component])
+      throw std::out_of_range(
+          "selected local components are outside dimension or duplicated");
+    seen[component] = 1;
+  }
+  LocalSolution<Scalar> output;
+  output.chart = input.chart;
+  output.epsilon = input.epsilon;
+  output.taylor_complete_max = input.taylor_complete_max;
+  output.dimension = static_cast<std::uint32_t>(components.size());
+  output.prescriptions = input.prescriptions;
+  output.checkpoint_identity =
+      input.checkpoint_identity + ":components";
+  for (const auto component : components)
+    output.checkpoint_identity += ":" + std::to_string(component);
+  output.sectors.reserve(input.sectors.size());
+  for (const auto& sector : input.sectors) {
+    LocalSector<Scalar> selected;
+    selected.a = sector.a;
+    selected.b = sector.b;
+    selected.log_power = sector.log_power;
+    selected.coefficients.assign(output.sector_size(),
+                                 ScalarTraits<Scalar>::zero());
+    for (std::size_t ei = 0; ei < input.epsilon.width(); ++ei)
+      for (std::size_t n = 0; n < input.taylor_width(); ++n)
+        for (std::uint32_t local = 0; local < output.dimension; ++local)
+          selected.coefficients[flat_index(
+              ei, n, local, output.taylor_width(), output.dimension)] =
+              sector.coefficients[flat_index(
+                  ei, n, components[local], input.taylor_width(),
+                  input.dimension)];
     output.sectors.push_back(std::move(selected));
   }
   return output;

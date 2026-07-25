@@ -5627,6 +5627,124 @@ sccParentRationalShadowPhysicalODEPayload[cs_Association,
       $cppSerializationSymbols = {}},
     cppPhysicalODEPayload[data, ownerIdentity, inputDigits, cs]]];
 
+(* The terminal singular tail theorem must be applied after the same exact
+   block gauge which Fuchsianizes the diagonal SCCs.  Cross-block entries can
+   still have negative epsilon valuation, although their condensation graph
+   is acyclic.  A diagonal epsilon shearing g_i=eps^s_i h_i makes those
+   couplings causal without multiplying the scalar q by a common epsilon
+   monomial (which would destroy the formal-unit q(0,eps) premise).
+
+   The difference constraints
+
+                   s_source >= s_target - valuation(C_target,source)
+
+   are solved as longest paths from a zero super-source.  A change on the
+   d-th pass proves a positive cycle and is rejected: such a cycle would be a
+   genuine two-sided epsilon recurrence, not the finite DAG reservoir used by
+   this bridge. *)
+sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
+    ownerIdentity_String, serialization_Association,
+    inputDigits_Integer] := Module[
+  {field, eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"],
+   d = cs["SystemSize"], components, gauge, gaugeInverse, reducedTheta,
+   reducedSystem, reducedData, positions, constraints, shifts, changed,
+   candidate,
+   shearedTheta, shearedSystem, shearedData, rationalCoefficientQ,
+   q0, valuations, payload, fail},
+  fail[detail_String] := Module[{},
+    If[Environment["DE2_DIAGNOSTIC_SINGULAR_TAIL_FRAME"] === "1",
+      Print["DE2 SINGULAR TAIL FRAME unavailable: ", detail]];
+    None];
+  field = sccSerializationField[serialization, cs];
+  If[!MemberQ[{"rational", "acb"}, field["domain"]] ||
+      field["symbols"] =!= {},
+    Return[fail["execution field is not exact Rational-specializable"],
+      Module]];
+  components = Lookup[
+    Lookup[cs, "IntegrationSequence", <||>], "Components", {}];
+  If[!ListQ[components] || Length[components] =!= Length[blockSystems] ||
+      Sort[Flatten[components]] =!= Range[d],
+    err["E6", cs, <|"Detail" ->
+      "singular-tail block gauge does not cover the full parent exactly"|>]];
+  gauge = IdentityMatrix[d];
+  gaugeInverse = IdentityMatrix[d];
+  MapThread[Function[{vertices, block},
+      gauge[[vertices, vertices]] = block["Gauge"];
+      gaugeInverse[[vertices, vertices]] = block["GaugeInverse"]],
+    {components, blockSystems}];
+  reducedTheta = Map[Cancel[Together[#]] &,
+    gaugeInverse . cs["ThetaOriginal"] . gauge -
+      gaugeInverse . (t D[gauge, t]), {2}];
+  reducedSystem = KeyDrop[
+    Join[cs, <|"ThetaOriginal" -> reducedTheta|>], {"SystemClearKey"}];
+  reducedData = physicalClearedODEData[reducedSystem];
+  q0 = First[reducedData["Q"]];
+  If[TrueQ[Lookup[q0, "Zero", False]] ||
+      Lookup[q0, "Valuation", None] =!= 0,
+    Return[fail["Fuchsian block gauge did not produce a formal-unit q0"],
+      Module]];
+  positions = Position[reducedData["C"],
+    entry_Association /; !TrueQ[Lookup[entry, "Zero", False]],
+    {3}];
+  constraints = ({#[[2]], #[[3]],
+        Lookup[Extract[reducedData["C"], #], "Valuation", None]} &) /@
+    positions;
+  If[!AllTrue[constraints,
+      MatchQ[#, {_Integer, _Integer, _Integer}] &],
+    Return[fail["reduced q/C valuations are malformed"], Module]];
+  shifts = ConstantArray[0, d];
+  Do[
+    changed = False;
+    Scan[Function[constraint,
+      candidate = shifts[[constraint[[1]]]] - constraint[[3]];
+      If[shifts[[constraint[[2]]]] < candidate,
+        shifts[[constraint[[2]]]] = candidate;
+        changed = True]], constraints];
+    If[!changed, Break[]];
+    If[iteration === d,
+      Return[fail["negative epsilon valuations contain a positive cycle"],
+        Module]],
+    {iteration, d}];
+  shifts -= Min[shifts];
+  shearedTheta = MapIndexed[
+    Cancel[Together[
+      eps^(shifts[[#2[[2]]]] - shifts[[#2[[1]]]]) #1]] &,
+    reducedTheta, {2}];
+  shearedSystem = KeyDrop[
+    Join[cs, <|"ThetaOriginal" -> shearedTheta|>], {"SystemClearKey"}];
+  shearedData = physicalClearedODEData[shearedSystem];
+  q0 = First[shearedData["Q"]];
+  valuations = Join[
+    Cases[shearedData["Q"],
+      entry_Association /; !TrueQ[Lookup[entry, "Zero", False]] :>
+        Lookup[entry, "Valuation", None]],
+    Cases[Flatten[shearedData["C"]],
+      entry_Association /; !TrueQ[Lookup[entry, "Zero", False]] :>
+        Lookup[entry, "Valuation", None]]];
+  If[TrueQ[Lookup[q0, "Zero", False]] ||
+      Lookup[q0, "Valuation", None] =!= 0 ||
+      !AllTrue[valuations, IntegerQ[#] && # >= 0 &],
+    Return[fail[
+      "epsilon shearing did not produce a causal formal-unit q/C equation"],
+      Module]];
+  rationalCoefficientQ[entry_Association] :=
+    TrueQ[Lookup[entry, "Zero", False]] ||
+      (PolynomialQ[Lookup[entry, "P", $Failed], eps] &&
+       PolynomialQ[Lookup[entry, "Q", $Failed], eps] &&
+       AllTrue[Join[CoefficientList[entry["P"], eps],
+           CoefficientList[entry["Q"], eps]],
+         IntegerQ[#] || Head[#] === Rational &]);
+  If[!AllTrue[Join[shearedData["Q"], Flatten[shearedData["C"]]],
+      AssociationQ[#] && rationalCoefficientQ[#] &],
+    Return[fail["sheared q/C coefficients are not exact Rational"],
+      Module]];
+  payload = Block[{$cppSerializationDomain = "rational",
+      $cppSerializationSymbols = {}},
+    cppPhysicalODEPayload[
+      shearedData, ownerIdentity, inputDigits, shearedSystem]];
+  <|"schema" -> "diffexp2-scc-singular-tail-frame-v1",
+    "equation" -> payload, "epsilon_shifts" -> shifts|>];
+
 PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   {seq = Lookup[cs, "IntegrationSequence", None], epsWindow,
    requestedMin, requestedMax, publicTOrder, workTOrder, plannedTop,
@@ -5640,7 +5758,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    sourceTransforms, gaugeTransforms, gaugeFrames, gaugePrepStart,
    gaugePrepMemory, gaugeProbeRecord, rationalShadowDecision,
    seedWorkHalos, blockRequiredTops, workReqs, reservoirMax,
-   rationalShadowPhysicalPayload,
+   rationalShadowPhysicalPayload, rationalShadowTailPayload,
    diagnosticStartFrame, singularCompositeQ, compactFrameQ,
    coreFb, diagnosticLowerExtra, diagnosticStrictProbe,
    diagnosticTopHalo},
@@ -5938,6 +6056,13 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
   rationalShadowPhysicalPayload =
     sccParentRationalShadowPhysicalODEPayload[
       cs, identity, serialization, inputDigits];
+  rationalShadowTailPayload = If[
+    TrueQ[singularCompositeQ] &&
+      (serialization["domain"] === "rational" ||
+       AssociationQ[rationalShadowPhysicalPayload]),
+    sccRationalShadowSingularTailPayload[
+      cs, blockSystems, identity, serialization, inputDigits],
+    None];
   If[Environment["DE2_SCC_GAUGE_TIMING"] === "1",
     Print["DE2 SCC PHYSICAL PAYLOAD done center=", center,
       " t=", AbsoluteTime[], " memory=", MemoryInUse[]]];
@@ -5951,6 +6076,10 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     AssociateTo[manifest,
       "rational_shadow_physical_ode" ->
         rationalShadowPhysicalPayload]];
+  If[AssociationQ[rationalShadowTailPayload],
+    AssociateTo[manifest,
+      "rational_shadow_singular_tail" ->
+        rationalShadowTailPayload]];
   runRecords = Map[Function[capture,
       KeyTake[#, $nativeSCCColumnRunKeys] & /@ capture["Requests"]],
     captures];

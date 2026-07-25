@@ -265,6 +265,76 @@ int main() {
       throw std::runtime_error(
           "zero overlap point incorrectly acquired an ordinary recentering");
 
+    // A singular Euler equation must retain the source factor t while it is
+    // translated to an ordinary nonzero seed.  For theta_t f=2f at
+    // t0=1/3 the exact ordinary equation is
+    //
+    //   (1/3+s) theta_s f = 2s f.
+    //
+    // Starting from f(1/3)=1/9 therefore reconstructs
+    // (1/3+s)^2 coefficientwise.
+    auto euler_square = equation_shell<Rational>(1);
+    euler_square.q_lags = {rational(0, {"1"})};
+    euler_square.c_lags.resize(1);
+    euler_square.c_lags[0].push_back(
+        PhysicalODEMatrixEntry<Rational>{
+            0, 0, rational(0, {"2"})});
+    const auto singular_recentered =
+        diffexp2::recenter_singular_physical_cleared_ode_to_ordinary(
+            euler_square, Rational("1/3"));
+    if (!singular_recentered.eligible ||
+        !singular_recentered.equation.has_value() ||
+        singular_recentered.equation->q_lags.size() != 2 ||
+        singular_recentered.equation->c_lags.size() != 2 ||
+        !singular_recentered.equation->c_lags[0].empty() ||
+        !(singular_recentered.equation->q_lags[0].numerator[0] ==
+          Rational("1/3")) ||
+        !(singular_recentered.equation->q_lags[1].numerator[0] ==
+          Rational("1")) ||
+        !(singular_recentered.equation->c_lags[1][0].value.numerator[0] ==
+          Rational("2")))
+      throw std::runtime_error(
+          "singular-to-ordinary recentering changed the exact Euler equation");
+    const auto square_evolution =
+        diffexp2::evolve_ordinary_center_value(
+            *singular_recentered.equation,
+            vector({0, 0}, {"1/9"}), 4);
+    const std::vector<const char*> expected_square{
+        "1/9", "2/3", "1", "0", "0"};
+    if (!square_evolution.eligible)
+      throw std::runtime_error(
+          "singularly recentered Euler equation became ineligible");
+    for (std::size_t order = 0;
+         order < expected_square.size(); ++order)
+      require_encloses(square_evolution.at(
+                           static_cast<std::uint32_t>(order)).at(0, 0),
+                       expected_square[order],
+                       "singularly recentered Euler coefficient");
+
+    // The seed is eligible only when center*q(center,eps) is an exact
+    // formal epsilon unit.  A source q=t-1/3 vanishes at the requested seed
+    // and must remain fail closed.
+    auto bad_seed = equation_shell<Rational>(1);
+    bad_seed.q_lags = {
+        rational(0, {"-1/3"}), rational(0, {"1"})};
+    bad_seed.c_lags.resize(1);
+    const auto bad_seed_recenter =
+        diffexp2::recenter_singular_physical_cleared_ode_to_ordinary(
+            bad_seed, Rational("1/3"));
+    if (bad_seed_recenter.eligible ||
+        bad_seed_recenter.equation.has_value() ||
+        bad_seed_recenter.reason.find("formal epsilon unit") ==
+            std::string::npos)
+      throw std::runtime_error(
+          "zero q at a singular bridge seed was not rejected");
+    const auto zero_singular_recenter =
+        diffexp2::recenter_singular_physical_cleared_ode_to_ordinary(
+            euler_square, Rational(0));
+    if (zero_singular_recenter.eligible ||
+        zero_singular_recenter.equation.has_value())
+      throw std::runtime_error(
+          "singular center incorrectly acquired an ordinary seed equation");
+
     // A materialized interval Taylor tensor repeats the same uncertain
     // center value in every coefficient.  Direct evaluation then treats
     // those correlated copies as independent.  The factorized evaluator

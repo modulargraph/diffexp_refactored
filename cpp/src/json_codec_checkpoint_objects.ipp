@@ -12,6 +12,9 @@ std::string composite_scc_signature(const json::object& root) {
   if (const auto* rational_physical =
           root.if_contains("rational_shadow_physical_ode"))
     exact["rational_shadow_physical_ode"] = *rational_physical;
+  if (const auto* singular_tail =
+          root.if_contains("rational_shadow_singular_tail"))
+    exact["rational_shadow_singular_tail"] = *singular_tail;
   return json::serialize(canonical_json_value(exact));
 }
 
@@ -2708,6 +2711,22 @@ json::object checkpoint_scc_item(
   } else if (composite->rational_shadow_physical_equation()) {
     throw std::logic_error(
         "retained SCC signature lost its Rational-shadow physical q/C payload");
+  }
+  if (const auto* singular_tail =
+          signature.if_contains("rational_shadow_singular_tail")) {
+    const auto retained =
+        composite->rational_shadow_singular_tail_equation();
+    const auto& record = as_object(
+        *singular_tail, "retained SCC singular-tail frame");
+    if (!retained ||
+        json::serialize(canonical_json_value(
+            record.at("equation"))) !=
+            retained->exact_payload_record)
+      throw std::logic_error(
+          "retained SCC Rational-shadow singular-tail payload changed after retention");
+  } else if (composite->rational_shadow_singular_tail_equation()) {
+    throw std::logic_error(
+        "retained SCC signature lost its Rational-shadow singular-tail payload");
   }
   json::object request = signature;
   request["schema"] = 2;

@@ -763,7 +763,8 @@ persistentSCCHandles[handle_Association] := Module[{session, scc},
 persistentSCCManifestKeysQ[manifest_Association] := Module[
   {required = {"identity", "parent", "blocks", "couplings",
       "physical_ode"}, optional = {"rational_shadow_identity",
-      "rational_shadow_physical_ode"}, keys = Keys[manifest]},
+      "rational_shadow_physical_ode",
+      "rational_shadow_singular_tail"}, keys = Keys[manifest]},
   ContainsAll[keys, required] && ContainsOnly[keys, Join[required, optional]]];
 
 persistentSCCFilledManifest[manifest_Association, filledBlocks_List] :=
@@ -775,7 +776,10 @@ persistentSCCFilledManifest[manifest_Association, filledBlocks_List] :=
     "physical_ode" -> manifest["physical_ode"]|>,
    If[KeyExistsQ[manifest, "rational_shadow_physical_ode"],
      <|"rational_shadow_physical_ode" ->
-        manifest["rational_shadow_physical_ode"]|>, <||>]];
+        manifest["rational_shadow_physical_ode"]|>, <||>],
+   If[KeyExistsQ[manifest, "rational_shadow_singular_tail"],
+     <|"rational_shadow_singular_tail" ->
+        manifest["rational_shadow_singular_tail"]|>, <||>]];
 
 PreparePersistentSCC[groups_List, manifest_Association] := Module[
   {requiredKeys = {"identity", "parent", "blocks", "couplings",
@@ -789,7 +793,8 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
       "persistent SCC preparation requires a nonempty list of request groups"|>],
       Module]];
   allowedKeys = Join[requiredKeys,
-    {"rational_shadow_identity", "rational_shadow_physical_ode"}];
+    {"rational_shadow_identity", "rational_shadow_physical_ode",
+     "rational_shadow_singular_tail"}];
   If[!persistentSCCManifestKeysQ[manifest],
     Return[Failure["CppBackend", <|"Detail" ->
       "persistent SCC manifest must contain exactly the lowercase native fields",
@@ -805,6 +810,8 @@ PreparePersistentSCC[groups_List, manifest_Association] := Module[
         manifest["identity"]]] == 0 ||
       (KeyExistsQ[manifest, "rational_shadow_physical_ode"] &&
        !AssociationQ[manifest["rational_shadow_physical_ode"]]) ||
+      (KeyExistsQ[manifest, "rational_shadow_singular_tail"] &&
+       !AssociationQ[manifest["rational_shadow_singular_tail"]]) ||
       !AssociationQ[manifest["parent"]] || !ListQ[blocks] ||
       !AllTrue[blocks, AssociationQ] || !ListQ[manifest["couplings"]] ||
       !AssociationQ[manifest["physical_ode"]],

@@ -3381,6 +3381,10 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
             normalized_equation, *tail_local,
             bridge_epsilon,
             singular_taylor_complete_max);
+    attempt.diagnostic["prefix_tower_transfer_count"] =
+        prefix_certificate->tower_transfers.size();
+    attempt.diagnostic["prefix_tower_transfer_detail"] =
+        prefix_certificate->tower_transfer_detail;
   } catch (const std::exception& error) {
     attempt.diagnostic["status"] =
         "exact-prefix-inconclusive";
@@ -4318,6 +4322,10 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                 basis_point, exact_options,
                 retained_taylor_width,
                 evaluation_window.complete_max, column);
+        const auto bridge_diagnostic =
+            std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") != nullptr
+                ? json::serialize(bridge.diagnostic)
+                : std::string{};
         exact_shadow_bridge_attempts.push_back(
             bridge.diagnostic);
         bridged_evaluation =
@@ -4326,12 +4334,13 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
             nullptr)
           std::fprintf(
               stderr,
-              "[diffexp2 terminal exact-shadow stage] singular-ordinary-bridge-done column=%zu certified=%d elapsed_ms=%.3f\n",
+              "[diffexp2 terminal exact-shadow stage] singular-ordinary-bridge-done column=%zu certified=%d elapsed_ms=%.3f diagnostic=%s\n",
               column, bridged_evaluation.has_value() ? 1 : 0,
               std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() -
                   bridge_started)
-                  .count());
+                  .count(),
+              bridge_diagnostic.c_str());
       } else {
         exact_shadow_bridge_attempts.push_back(
             json::object{

@@ -471,6 +471,43 @@ int main() {
           "causal epsilon weighting did not certify the triangular "
           "recurrence: " +
           weighted_model.detail);
+    const auto weighted_prefix =
+        diffexp2::certify_singular_rational_shadow_prefix(
+            weighted_equation, weighted_local, EpsilonWindow{0, 1}, 4);
+    if (weighted_prefix.tower_transfers.empty() ||
+        weighted_prefix.tower_transfers.front()
+                .interval_transfer.status !=
+            TailMajorantStatus::Certified)
+      throw std::runtime_error(
+          "exact Frobenius prefix did not retain its radius-independent "
+          "transfer");
+    const auto cached_weighted_model =
+        diffexp2::prepare_singular_rational_shadow_tail_model(
+            weighted_equation, weighted_local, EpsilonWindow{0, 1}, 4, "1/2",
+            &weighted_prefix);
+    if (cached_weighted_model.status != TailMajorantStatus::Certified ||
+        !cached_weighted_model.model.has_value() ||
+        cached_weighted_model.model->towers.size() !=
+            weighted_model.model->towers.size())
+      throw std::runtime_error(
+          "cached Frobenius prefix did not reproduce its tail model");
+    for (std::size_t tower = 0;
+         tower < weighted_model.model->towers.size(); ++tower) {
+      const auto &direct = weighted_model.model->towers[tower];
+      const auto &cached = cached_weighted_model.model->towers[tower];
+      if (direct.epsilon_weight_base != cached.epsilon_weight_base ||
+          direct.contraction_upper.size() !=
+              cached.contraction_upper.size())
+        throw std::runtime_error(
+            "radius-independent Frobenius transfer cache changed its weight");
+      for (std::size_t index = 0;
+           index < direct.contraction_upper.size(); ++index)
+        if (direct.contraction_upper[index].dump_exact() !=
+            cached.contraction_upper[index].dump_exact())
+          throw std::runtime_error(
+              "radius-independent Frobenius transfer cache changed its "
+              "contraction enclosure");
+    }
 
     // Material CASE-P b towers stay independent, while exact-zero sectors
     // do not create towers or inflate the retained log ceiling.

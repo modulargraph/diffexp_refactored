@@ -75,9 +75,10 @@ int main() {
       "scc":{"components":[[0],[1]],"structural_edges":[[0,1]],
         "condensation_edges":[[0,1]],"topological_order":[0,1],
         "coupling_depth":1},
-      "execution":{"mode":"BlockSequentialStrict","work_t_order":6},
+      "execution":{"mode":"BlockSequentialStrict","work_t_order":10},
       "work_contract":{"work_min":0,"requested_min":0,
         "requested_max":1,"work_complete_max":1,"public_t_order":0,
+        "singular_tail_t_order_halo":4,
         "wolfram_coupling_depth":2}},
     "blocks":[
       {"block":0,"vertices":[0],"chart":")json" + first +
@@ -95,8 +96,9 @@ int main() {
         "source_vertex":0,"target_vertex":1,
         "exact_original_entry":"g","exact_theta_entry":"theta-g",
         "multiplier":{"epsilon_shift":-1,"center_pole_order":0,
-          "kernels":[["0","1","0","0","0","0","0"],
-                     ["0","0","0","0","0","0","0"]],
+          "kernels":[
+            ["0","1","0","0","0","0","0","0","0","0","0"],
+            ["0","0","0","0","0","0","0","0","0","0","0"]],
           "exact_identity":"theta-g","proven_zero":false}}]}],
     "rational_shadow_singular_tail":{
       "schema":"diffexp2-scc-singular-tail-frame-v1",
@@ -111,6 +113,11 @@ int main() {
           "numerator":["1"],"denominator":["1"]}}]]},
       "epsilon_shifts":[1,0]}
   })json");
+  if (prepared.at("status") != "ok") {
+    std::cerr << "scc.prepare failed: "
+              << json::serialize(prepared) << '\n';
+    return EXIT_FAILURE;
+  }
   const auto scc = std::string(prepared.at("scc").as_string());
   const auto stats = request(std::string(R"json({
     "schema":2,"op":"scc.stats","session":")json") + session +
@@ -135,6 +142,9 @@ int main() {
       stats.at("status") == "ok" &&
       std::string(stats.at("scc").as_string()) == scc &&
       stats.at("frame_base") == 0 && stats.at("frame_width") == 2 &&
+      stats.at("public_t_order") == 0 &&
+      stats.at("work_t_order") == 10 &&
+      stats.at("singular_tail_t_order_halo") == 4 &&
       released.at("status") == "ok" &&
       session_stats.at("scc_charts") == 0;
   if (!ok) {

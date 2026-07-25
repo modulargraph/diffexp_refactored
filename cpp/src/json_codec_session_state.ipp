@@ -335,6 +335,10 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
       work_object.at("work_complete_max"), "work epsilon maximum");
   work.public_t_order = as_u32(
       work_object.at("public_t_order"), "public Taylor order");
+  if (const auto* raw_halo =
+          work_object.if_contains("singular_tail_t_order_halo"))
+    work.singular_tail_t_order_halo = as_u32(
+        *raw_halo, "singular-tail private Taylor halo");
   work.wolfram_coupling_depth = as_u32(
       work_object.at("wolfram_coupling_depth"),
       "Wolfram coupling depth");
@@ -353,7 +357,9 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
         "Wolfram coupling depth must equal native edge depth plus one");
   const auto expected_work_t_order =
       static_cast<std::uint64_t>(work.public_t_order) + 2 +
-      2 * static_cast<std::uint64_t>(work.wolfram_coupling_depth);
+      2 * static_cast<std::uint64_t>(work.wolfram_coupling_depth) +
+      static_cast<std::uint64_t>(
+          work.singular_tail_t_order_halo);
   if (expected_work_t_order > std::numeric_limits<std::uint32_t>::max() ||
       work.work_t_order != expected_work_t_order)
     throw std::invalid_argument(

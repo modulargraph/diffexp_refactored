@@ -906,6 +906,7 @@ struct CompositeWorkContract {
   std::int32_t work_complete_max = 0;
   std::uint32_t public_t_order = 0;
   std::uint32_t work_t_order = 0;
+  std::uint32_t singular_tail_t_order_halo = 0;
   std::uint32_t wolfram_coupling_depth = 0;
 };
 
@@ -3839,6 +3840,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         {"work_complete_max", work_.work_complete_max},
         {"public_t_order", work_.public_t_order},
         {"work_t_order", work_.work_t_order},
+        {"singular_tail_t_order_halo",
+         work_.singular_tail_t_order_halo},
         {"wolfram_coupling_depth", work_.wolfram_coupling_depth},
         {"native_coupling_depth", graph_.coupling_depth},
         {"min_coupling_shift", min_coupling_shift.has_value()
@@ -4377,7 +4380,7 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         throw std::domain_error(
             "singular-tail retention has no complete epsilon row");
       tail_parent = cap_composite_public_local(
-          tail_parent, tail_complete_max, work_.public_t_order,
+          tail_parent, tail_complete_max, work_.work_t_order,
           retained_geometry_.chart,
           retained_geometry_.prescriptions,
           checkpoint_identity + ":tail:retained");

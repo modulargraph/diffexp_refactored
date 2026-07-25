@@ -5761,7 +5761,7 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
    rationalShadowPhysicalPayload, rationalShadowTailPayload,
    diagnosticStartFrame, singularCompositeQ, compactFrameQ,
    coreFb, diagnosticLowerExtra, diagnosticStrictProbe,
-   diagnosticTopHalo},
+   diagnosticTopHalo, singularTailTOrderHalo},
   missingReq = Select[{"TOrder", "EpsWindow"},
     !KeyExistsQ[req, #] &];
   epsWindow = Lookup[req, "EpsWindow", None];
@@ -5888,14 +5888,21 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
     err["E6", cs, <|"RequestedWindow" -> epsWindow,
       "RequiredCompleteMax" -> requestedMax,
       "Detail" -> "native SCC required epsilon edge must lie inside its private reservoir"|>]];
-  publicTOrder = req["TOrder"];
-  workTOrder = sccWorkTOrder[cs, req];
-  seedWorkHalos = sccSeedWorkHalos[cs, blockSystems, workTOrder];
-  blockRequiredTops = reservoirMax + seedWorkHalos;
   singularCompositeQ = !TrueQ[$disableAdaptiveLowerFrames] &&
     AnyTrue[blockSystems,
       !TrueQ[Lookup[Lookup[#, "IndicialData", <||>],
         "Regular", False]] &];
+  publicTOrder = req["TOrder"];
+  (* The terminal Frobenius certificate converges at |seed|/R <= 4/5.
+     Thirty-two private rows buy more than three decimal digits of certified
+     tail clearance, in addition to the existing exact depth reservoir,
+     without changing the public ExpansionOrder or any ordinary chart.
+     These rows used to be discarded when the reduced singular state was
+     capped to the public order. *)
+  singularTailTOrderHalo = If[TrueQ[singularCompositeQ], 32, 0];
+  workTOrder = sccWorkTOrder[cs, req] + singularTailTOrderHalo;
+  seedWorkHalos = sccSeedWorkHalos[cs, blockSystems, workTOrder];
+  blockRequiredTops = reservoirMax + seedWorkHalos;
   diagnosticStartFrame =
     Environment["DE2_SCC_DIAGNOSTIC_START_FRAME"] === "1";
   compactFrameQ = diagnosticStartFrame || singularCompositeQ;
@@ -5987,6 +5994,8 @@ PrepareNativeSCCComposite[cs_Association, req_Association] := Module[
         "requested_max" -> requestedMax,
         "work_complete_max" -> workTop,
         "public_t_order" -> publicTOrder,
+        "singular_tail_t_order_halo" ->
+          singularTailTOrderHalo,
         "wolfram_coupling_depth" -> seq["CouplingDepth"]|>|>];
   serialization = capturedContract["Serialization"];
   sourceTransforms = MapThread[

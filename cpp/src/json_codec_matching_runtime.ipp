@@ -3332,6 +3332,17 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
         tail_local->epsilon.complete_max;
     return attempt;
   }
+  // The physical Acb basis is deliberately capped to the public Taylor
+  // order, but a singular SCC retains a private exact Rational reservoir for
+  // its Frobenius tail.  Do not throw that reservoir away merely because the
+  // ordinary matching matrices have a narrower common width.
+  const auto singular_retained_taylor_width =
+      tail_local->taylor_width();
+  if (singular_retained_taylor_width == 0)
+    throw std::logic_error(
+        "terminal singular bridge retained an empty exact Taylor reservoir");
+  attempt.diagnostic["singular_retained_taylor_width"] =
+      singular_retained_taylor_width;
   const EpsilonWindow bridge_epsilon{
       tail_local->epsilon.min_power,
       required_evaluation_complete_max};
@@ -3359,18 +3370,21 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
   // for the same Cauchy tail.  Prefer the geometrically strongest seed.
   const std::array<Rational, 3> seed_fractions{
       Rational("3/4"), Rational("2/3"), Rational("3/5")};
-  // Frobenius future contraction improves as the witness radius shrinks.
-  // Every multiplier remains strictly greater than one, so the seed is
-  // inside the singular witness disk; trying the smallest first avoids four
-  // predictably inconclusive theorem evaluations on the hard chart.
+  // A larger certified singular witness decreases |seed|/R and therefore
+  // tightens the propagated Frobenius tail.  Try radii from largest to
+  // smallest and let the cached contraction theorem reject unsafe choices
+  // cheaply.  Returning the smallest contracting radius first can produce a
+  // theorem-backed but needlessly wide seed ball that later defeats an
+  // otherwise passing physical residual.
   const std::array<Rational, 5> singular_radius_multipliers{
-      Rational("5/4"), Rational("3/2"), Rational("2"),
-      Rational("3"), Rational("4")};
+      Rational("4"), Rational("3"), Rational("2"),
+      Rational("3/2"), Rational("5/4")};
   const std::array<Rational, 4> ordinary_witness_denominators{
       Rational("2"), Rational("4"), Rational("8"),
       Rational("16")};
   const auto singular_taylor_complete_max =
-      static_cast<std::uint32_t>(retained_taylor_width - 1);
+      static_cast<std::uint32_t>(
+          singular_retained_taylor_width - 1);
   const auto ordinary_taylor_complete_max =
       std::max<std::uint32_t>(
           800,
@@ -4603,11 +4617,15 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
           nullptr)
         std::fprintf(
             stderr,
-            "[diffexp2 terminal exact-shadow stage] retained-tail-bridge-overlap certified=%d columns=%zu\n",
+            "[diffexp2 terminal exact-shadow stage] retained-tail-bridge-overlap certified=%d columns=%zu diagnostic=%s\n",
             exact_shadow_factorized_basis.has_value() ? 1 : 0,
             exact_shadow_factorized_basis.has_value()
                 ? exact_shadow_factorized_basis->size()
-                : std::size_t{0});
+                : std::size_t{0},
+            json::serialize(
+                normal_frame_attempt.at(
+                    "exact_shadow_retained_tail_bridge_overlap"))
+                .c_str());
       if (exact_shadow_factorized_basis.has_value())
         normal_frame_attempt[
             "exact_shadow_factorized_basis_source"] =

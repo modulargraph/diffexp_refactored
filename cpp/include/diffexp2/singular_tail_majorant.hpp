@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -53,12 +54,52 @@ struct SingularFrobeniusTailModelResult {
   std::string detail;
 };
 
+struct IntervalTransferContractionResult {
+  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
+  std::vector<Magnitude> contraction_upper;
+  ulong epsilon_weight_base = 1;
+  std::string detail;
+};
+
+struct IntervalTransferDegreeBoundsResult {
+  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
+  // Entry [epsilon_degree][physical_row] is the radius-weighted row sum of
+  // that Toeplitz coefficient, including every polynomial lag and finite
+  // logarithmic shift. Geometric epsilon weights are applied only after this
+  // enclosure has been constructed.
+  std::vector<std::vector<Magnitude>> degree_row_upper;
+  std::string detail;
+};
+
+struct IntervalTransferLagDegreeBoundsResult {
+  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
+  std::size_t epsilon_width = 0;
+  std::size_t physical_dimension = 0;
+  // Entry [polynomial_lag][epsilon_degree][physical_row] excludes the witness
+  // radius. A certified exact prefix can therefore retain this expensive
+  // enclosure while bridge trials vary only their candidate radius.
+  std::vector<std::vector<std::vector<Magnitude>>> lag_degree_row_upper;
+  std::string detail;
+};
+
+struct SingularFrobeniusTowerTransferCertificate {
+  std::string a_exact;
+  std::string b_exact;
+  std::uint32_t log_complete_max = 0;
+  IntervalTransferLagDegreeBoundsResult interval_transfer;
+};
+
 struct SingularFrobeniusPrefixCertificate {
   EpsilonWindow epsilon;
   std::uint32_t taylor_complete_max = 0;
   std::string physical_payload_identity;
   std::string local_checkpoint_identity;
   SCCFormalResidualCertificate exact_residual;
+  // Radius-independent recurrence transfers are bound to the same exact
+  // equation/local/window as the residual. Bridge seed/radius searches must
+  // reuse them rather than reconstructing identical interval matrices.
+  std::vector<SingularFrobeniusTowerTransferCertificate> tower_transfers;
+  std::string tower_transfer_detail;
 };
 
 struct SingularFrobeniusPointTailCertificate {
@@ -720,23 +761,6 @@ normalized_recurrence_lag_prefix_bounds(
   return result;
 }
 
-struct IntervalTransferContractionResult {
-  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
-  std::vector<Magnitude> contraction_upper;
-  ulong epsilon_weight_base = 1;
-  std::string detail;
-};
-
-struct IntervalTransferDegreeBoundsResult {
-  TailMajorantStatus status = TailMajorantStatus::Inconclusive;
-  // Entry [epsilon_degree][physical_row] is the radius-weighted row sum of
-  // that Toeplitz coefficient, including every polynomial lag and finite
-  // logarithmic shift.  Geometric epsilon weights are applied only after
-  // this expensive, weight-independent enclosure has been constructed.
-  std::vector<std::vector<Magnitude>> degree_row_upper;
-  std::string detail;
-};
-
 using BallMatrix = std::vector<ComplexBall>;
 using BallMatrixSeries = std::vector<BallMatrix>;
 
@@ -863,15 +887,17 @@ inline ComplexBall exact_real_interval_ball(const Rational &raw_left,
 //       S_k + x (I+xG)^-1 F_k
 //
 // before absolute values are taken.
-inline IntervalTransferDegreeBoundsResult
-certify_interval_transfer_degree_bounds_on_x_interval(
+inline IntervalTransferLagDegreeBoundsResult
+certify_interval_transfer_lag_degree_bounds_on_x_interval(
     const PreparedPhysicalClearedODE<Rational> &equation, EpsilonWindow epsilon,
     const Rational &a, const Rational &b, std::uint32_t log_complete_max,
     std::int32_t common_valuation, const Rational &x_left,
-    const Rational &x_right, const Rational &radius) {
-  IntervalTransferDegreeBoundsResult result;
+    const Rational &x_right) {
+  IntervalTransferLagDegreeBoundsResult result;
   const auto width = epsilon.width();
   const auto dimension = static_cast<std::size_t>(equation.dimension);
+  result.epsilon_width = width;
+  result.physical_dimension = dimension;
   const auto x = exact_real_interval_ball(x_left, x_right);
 
   const auto adjusted_q0 =
@@ -925,10 +951,9 @@ certify_interval_transfer_degree_bounds_on_x_interval(
     return result;
   }
 
-  std::vector<std::vector<Magnitude>> accumulated(
-      width, std::vector<Magnitude>(dimension, Magnitude::zero()));
-  const auto radius_upper = tail_majorant_detail::exact_rational_upper(radius);
   const auto degree = polynomial_lag_degree(equation);
+  std::vector<std::vector<std::vector<Magnitude>>> lag_degree_row_upper(
+      static_cast<std::size_t>(degree) + 1);
   for (std::uint32_t lag = 1; lag <= degree; ++lag) {
     BallMatrixSeries qk_series(
         width, BallMatrix(dimension * dimension, ComplexBall(0)));
@@ -998,19 +1023,94 @@ certify_interval_transfer_degree_bounds_on_x_interval(
         x_log_power *= -x;
       }
     }
-    const auto radius_factor = radius_upper.power_upper(lag);
-    for (std::size_t epsilon_index = 0; epsilon_index < width; ++epsilon_index)
-      for (std::size_t row = 0; row < dimension; ++row)
-        accumulated[epsilon_index][row] +=
-            radius_factor * lag_rows[epsilon_index][row];
+    lag_degree_row_upper[lag] = std::move(lag_rows);
   }
 
-  result.degree_row_upper = std::move(accumulated);
+  result.lag_degree_row_upper = std::move(lag_degree_row_upper);
   result.status = TailMajorantStatus::Certified;
   result.detail =
       "all-future x=1/n interval transfer with causal epsilon Toeplitz and "
       "finite log-nilpotent expansion";
   return result;
+}
+
+inline IntervalTransferDegreeBoundsResult
+radius_weighted_interval_transfer_degree_bounds(
+    const IntervalTransferLagDegreeBoundsResult &lag_bounds,
+    const Rational &radius) {
+  IntervalTransferDegreeBoundsResult result;
+  result.status = lag_bounds.status;
+  result.detail = lag_bounds.detail;
+  if (lag_bounds.status != TailMajorantStatus::Certified)
+    return result;
+  if (lag_bounds.epsilon_width == 0 ||
+      lag_bounds.physical_dimension == 0 ||
+      lag_bounds.lag_degree_row_upper.empty()) {
+    result.detail = "interval transfer lag enclosure lost its shape";
+    result.status = TailMajorantStatus::Inconclusive;
+    return result;
+  }
+  if (lag_bounds.lag_degree_row_upper.size() == 1) {
+    result.degree_row_upper.assign(
+        lag_bounds.epsilon_width,
+        std::vector<Magnitude>(lag_bounds.physical_dimension,
+                               Magnitude::zero()));
+    return result;
+  }
+  const auto first_material = std::find_if(
+      std::next(lag_bounds.lag_degree_row_upper.begin()),
+      lag_bounds.lag_degree_row_upper.end(),
+      [](const auto &lag) { return !lag.empty(); });
+  if (first_material == lag_bounds.lag_degree_row_upper.end() ||
+      first_material->front().empty()) {
+    result.detail = "interval transfer lag enclosure has no material rows";
+    result.status = TailMajorantStatus::Inconclusive;
+    return result;
+  }
+  const auto width = lag_bounds.epsilon_width;
+  const auto dimension = lag_bounds.physical_dimension;
+  if (first_material->size() != width ||
+      first_material->front().size() != dimension)
+    throw std::logic_error(
+        "interval transfer lag enclosure disagrees with its retained shape");
+  result.degree_row_upper.assign(
+      width, std::vector<Magnitude>(dimension, Magnitude::zero()));
+  const auto radius_upper =
+      tail_majorant_detail::exact_rational_upper(radius);
+  for (std::size_t lag = 1;
+       lag < lag_bounds.lag_degree_row_upper.size(); ++lag) {
+    const auto &lag_rows = lag_bounds.lag_degree_row_upper[lag];
+    if (lag_rows.empty())
+      continue;
+    if (lag_rows.size() != width)
+      throw std::logic_error(
+          "interval transfer lag enclosure changed epsilon width");
+    const auto radius_factor =
+        radius_upper.power_upper(static_cast<ulong>(lag));
+    for (std::size_t epsilon_degree = 0; epsilon_degree < width;
+         ++epsilon_degree) {
+      if (lag_rows[epsilon_degree].size() != dimension)
+        throw std::logic_error(
+            "interval transfer lag enclosure changed physical dimension");
+      for (std::size_t row = 0; row < dimension; ++row)
+        result.degree_row_upper[epsilon_degree][row] +=
+            radius_factor * lag_rows[epsilon_degree][row];
+    }
+  }
+  return result;
+}
+
+inline IntervalTransferDegreeBoundsResult
+certify_interval_transfer_degree_bounds_on_x_interval(
+    const PreparedPhysicalClearedODE<Rational> &equation, EpsilonWindow epsilon,
+    const Rational &a, const Rational &b, std::uint32_t log_complete_max,
+    std::int32_t common_valuation, const Rational &x_left,
+    const Rational &x_right, const Rational &radius) {
+  return radius_weighted_interval_transfer_degree_bounds(
+      certify_interval_transfer_lag_degree_bounds_on_x_interval(
+          equation, epsilon, a, b, log_complete_max, common_valuation, x_left,
+          x_right),
+      radius);
 }
 
 inline IntervalTransferContractionResult weighted_interval_transfer_contraction(
@@ -1065,17 +1165,9 @@ certify_interval_transfer_contraction_on_x_interval(
       epsilon_weight_base);
 }
 
-inline IntervalTransferContractionResult certify_interval_transfer_contraction(
-    const PreparedPhysicalClearedODE<Rational> &equation, EpsilonWindow epsilon,
-    const Rational &a, const Rational &b, std::uint32_t log_complete_max,
-    std::int32_t common_valuation, std::uint64_t n0, const Rational &radius) {
-  if (n0 == 0 || n0 > std::numeric_limits<ulong>::max())
-    throw std::invalid_argument(
-        "interval transfer contraction received an invalid Taylor index");
-  const auto degree_bounds =
-      certify_interval_transfer_degree_bounds_on_x_interval(
-          equation, epsilon, a, b, log_complete_max, common_valuation,
-          Rational(0), Rational(1) / Rational(std::to_string(n0)), radius);
+inline IntervalTransferContractionResult
+certify_weighted_interval_transfer_contraction(
+    const IntervalTransferDegreeBoundsResult &degree_bounds) {
   if (degree_bounds.status != TailMajorantStatus::Certified)
     return weighted_interval_transfer_contraction(degree_bounds, 1);
   IntervalTransferContractionResult last;
@@ -1096,6 +1188,20 @@ inline IntervalTransferContractionResult certify_interval_transfer_contraction(
   last.detail +=
       "; no tested geometric epsilon weight proves contraction below one";
   return last;
+}
+
+inline IntervalTransferContractionResult certify_interval_transfer_contraction(
+    const PreparedPhysicalClearedODE<Rational> &equation, EpsilonWindow epsilon,
+    const Rational &a, const Rational &b, std::uint32_t log_complete_max,
+    std::int32_t common_valuation, std::uint64_t n0, const Rational &radius) {
+  if (n0 == 0 || n0 > std::numeric_limits<ulong>::max())
+    throw std::invalid_argument(
+        "interval transfer contraction received an invalid Taylor index");
+  const auto degree_bounds =
+      certify_interval_transfer_degree_bounds_on_x_interval(
+          equation, epsilon, a, b, log_complete_max, common_valuation,
+          Rational(0), Rational(1) / Rational(std::to_string(n0)), radius);
+  return certify_weighted_interval_transfer_contraction(degree_bounds);
 }
 
 inline Magnitude tower_coefficient_prefix_norm_upper(
@@ -1135,6 +1241,28 @@ inline Magnitude tower_coefficient_prefix_norm_upper(
 
 inline std::string tower_key(const std::string &a, const std::string &b) {
   return a + "\x1f" + b;
+}
+
+struct FrobeniusTowerRecord {
+  std::string a;
+  std::string b;
+  std::uint32_t max_log = 0;
+};
+
+inline std::map<std::string, FrobeniusTowerRecord>
+collect_frobenius_tower_records(const LocalSolution<Rational> &solution) {
+  const auto slabs = scc_completeness_detail::collect_formal_slabs(solution);
+  std::map<std::string, FrobeniusTowerRecord> records;
+  for (const auto &[tag, slab] : slabs) {
+    (void)slab;
+    const auto key = tower_key(tag.a, tag.b);
+    auto [found, inserted] = records.try_emplace(
+        key, FrobeniusTowerRecord{tag.a, tag.b, tag.log_power});
+    if (!inserted)
+      found->second.max_log =
+          std::max(found->second.max_log, tag.log_power);
+  }
+  return records;
 }
 
 inline LocalSolution<Rational>
@@ -1191,6 +1319,39 @@ certify_singular_rational_shadow_prefix(
   result.local_checkpoint_identity = solution.checkpoint_identity;
   result.exact_residual = certify_scc_parent_exact_formal_residual(
       equation, solution, claimed_epsilon, retained_taylor_complete_max);
+  try {
+    const auto common_valuation =
+        singular_tail_majorant_detail::common_equation_valuation(equation);
+    const auto records =
+        singular_tail_majorant_detail::collect_frobenius_tower_records(
+            solution);
+    const auto n0 =
+        static_cast<std::uint64_t>(retained_taylor_complete_max) + 1;
+    if (n0 > std::numeric_limits<ulong>::max())
+      throw std::overflow_error(
+          "singular tail first unseen order exceeds FLINT ulong");
+    result.tower_transfers.reserve(records.size());
+    for (const auto &[key, record] : records) {
+      (void)key;
+      result.tower_transfers.push_back(
+          SingularFrobeniusTowerTransferCertificate{
+              record.a, record.b, record.max_log,
+              singular_tail_majorant_detail::
+                  certify_interval_transfer_lag_degree_bounds_on_x_interval(
+                      equation, claimed_epsilon, Rational(record.a),
+                      Rational(record.b), record.max_log, common_valuation,
+                      Rational(0),
+                      Rational(1) / Rational(std::to_string(n0)))});
+    }
+    result.tower_transfer_detail =
+        "radius-independent interval transfers prepared for " +
+        std::to_string(result.tower_transfers.size()) + " Frobenius towers";
+  } catch (const std::exception &error) {
+    result.tower_transfers.clear();
+    result.tower_transfer_detail =
+        std::string("radius-independent interval transfer cache unavailable: ") +
+        error.what();
+  }
   return result;
 }
 
@@ -1256,8 +1417,9 @@ prepare_singular_rational_shadow_tail_model(
                                   "bind this equation/local/window");
   } else {
     try {
-      (void)certify_singular_rational_shadow_prefix(
-          equation, solution, claimed_epsilon, retained_taylor_complete_max);
+      (void)certify_scc_parent_exact_formal_residual(
+          equation, solution, claimed_epsilon,
+          retained_taylor_complete_max);
     } catch (const std::exception &error) {
       return inconclusive(std::string("exact Frobenius prefix does not satisfy "
                                       "its physical q/C equation: ") +
@@ -1282,20 +1444,7 @@ prepare_singular_rational_shadow_tail_model(
                            "negative C valuation");
 
   const auto slabs = scc_completeness_detail::collect_formal_slabs(solution);
-  struct TowerRecord {
-    std::string a;
-    std::string b;
-    std::uint32_t max_log = 0;
-  };
-  std::map<std::string, TowerRecord> tower_records;
-  for (const auto &[tag, slab] : slabs) {
-    (void)slab;
-    const auto key = tower_key(tag.a, tag.b);
-    auto [found, inserted] = tower_records.try_emplace(
-        key, TowerRecord{tag.a, tag.b, tag.log_power});
-    if (!inserted)
-      found->second.max_log = std::max(found->second.max_log, tag.log_power);
-  }
+  const auto tower_records = collect_frobenius_tower_records(solution);
   if (tower_records.empty())
     return unsupported(
         "singular tail model has no canonical Rational Frobenius towers");
@@ -1330,9 +1479,39 @@ prepare_singular_rational_shadow_tail_model(
           "structured all-future Frobenius inverse is inconclusive for "
           "tower (a=" +
           record.a + ",b=" + record.b + "): " + future_inverse.detail);
-    const auto interval_contraction = certify_interval_transfer_contraction(
-        equation, claimed_epsilon, a, b, record.max_log, common_valuation, n0,
-        radius);
+    IntervalTransferContractionResult interval_contraction;
+    const SingularFrobeniusTowerTransferCertificate *cached_transfer =
+        nullptr;
+    if (prefix_certificate != nullptr) {
+      const auto found = std::find_if(
+          prefix_certificate->tower_transfers.begin(),
+          prefix_certificate->tower_transfers.end(),
+          [&](const auto &candidate) {
+            return candidate.a_exact == record.a &&
+                   candidate.b_exact == record.b &&
+                   candidate.log_complete_max == record.max_log;
+          });
+      if (found != prefix_certificate->tower_transfers.end())
+        cached_transfer = &*found;
+    }
+    if (cached_transfer != nullptr &&
+        cached_transfer->interval_transfer.status ==
+            TailMajorantStatus::Certified &&
+        cached_transfer->interval_transfer.epsilon_width ==
+            claimed_epsilon.width() &&
+        cached_transfer->interval_transfer.physical_dimension ==
+            static_cast<std::size_t>(equation.dimension) &&
+        cached_transfer->interval_transfer.lag_degree_row_upper.size() ==
+            static_cast<std::size_t>(model.polynomial_lag_degree) + 1) {
+      interval_contraction =
+          certify_weighted_interval_transfer_contraction(
+              radius_weighted_interval_transfer_degree_bounds(
+                  cached_transfer->interval_transfer, radius));
+    } else {
+      interval_contraction = certify_interval_transfer_contraction(
+          equation, claimed_epsilon, a, b, record.max_log, common_valuation,
+          n0, radius);
+    }
     if (interval_contraction.status != TailMajorantStatus::Certified)
       return inconclusive(
           "structured all-future Frobenius contraction is inconclusive for "

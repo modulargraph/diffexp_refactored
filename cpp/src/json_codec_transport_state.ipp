@@ -999,6 +999,33 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
         incoming_owner_ == nullptr || basis_owners_.empty())
       throw std::invalid_argument(
           "retained planned match hop requires all strong owners");
+    const auto acb =
+        std::dynamic_pointer_cast<StoredRefinedAcbMatch>(match_);
+    if (acb &&
+        acb->exact_shadow_factorized_basis().has_value()) {
+      const auto& factorized =
+          *acb->exact_shadow_factorized_basis();
+      if (factorized.size() != basis_owners_.size())
+        throw std::logic_error(
+            "retained planned match exact-shadow basis disagrees with its "
+            "receiving basis dimension");
+      for (std::size_t column = 0;
+           column < basis_owners_.size(); ++column) {
+        const auto receiving =
+            std::dynamic_pointer_cast<
+                StoredLocal<ComplexBall>>(
+                basis_owners_[column]);
+        if (!receiving)
+          throw std::logic_error(
+              "retained planned match exact-shadow basis lost its Acb "
+              "receiving local");
+        local_algebra_detail::
+            require_factorized_receiving_local_compatibility(
+                factorized[column], receiving->solution(),
+                "retained planned match exact-shadow basis column " +
+                    std::to_string(column));
+      }
+    }
   }
 
   json::object summary() const override {

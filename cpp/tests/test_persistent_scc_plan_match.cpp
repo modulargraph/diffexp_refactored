@@ -168,7 +168,7 @@ std::string prepare_scc(const std::string& session,
        json::object{
            {"dimension", 2}, {"exact_system_record", zero_matrix(2)},
            {"exact_theta_record", zero_matrix(2)},
-           {"chart", geometry("-2/3")},
+           {"chart", geometry("-3/5")},
            {"scc", json::object{{"components", singleton_components(2)},
                                  {"structural_edges", json::array{}},
                                  {"condensation_edges", json::array{}},
@@ -197,7 +197,7 @@ std::vector<std::string> solve_scc_basis(const std::string& session,
         {"checkpoint_identity", checkpoint},
         {"seed", json::object{{"block", block},
                                {"run", regular_scalar_run()},
-                               {"metadata", metadata("-2/3", checkpoint)}}},
+                               {"metadata", metadata("-3/5", checkpoint)}}},
         {"targets", json::array{}}});
   }
   const auto response = request(json::object{
@@ -244,7 +244,7 @@ std::string solve_incoming(const std::string& session,
 json::object topology(bool singular_endpoint) {
   return json::object{
       {"singular_points",
-       singular_endpoint ? json::array{"-2/3"} : json::array{}},
+       singular_endpoint ? json::array{"-3/5"} : json::array{}},
       {"boundary_points", json::array{}},
       {"complex_projections", json::array{}},
       {"branch_sheets", json::array{json::object{
@@ -285,9 +285,9 @@ int main() {
     const auto anchor = prepare_chart(original_session, "mixed-anchor",
                                       "mixed-anchor-identity", "0", 2);
     const auto block0 = prepare_chart(original_session, "mixed-block-0",
-                                      "mixed-scc-block-0", "-2/3", 1);
+                                      "mixed-scc-block-0", "-3/5", 1);
     const auto block1 = prepare_chart(original_session, "mixed-block-1",
-                                      "mixed-scc-block-1", "-2/3", 1);
+                                      "mixed-scc-block-1", "-3/5", 1);
     const auto upper = prepare_chart(original_session, "mixed-upper",
                                      "mixed-upper-identity", "2/3", 2);
     const auto scc = prepare_scc(original_session, block0, block1);
@@ -298,7 +298,7 @@ int main() {
     const auto planned = request(json::object{
         {"schema", 2}, {"op", "tile.plan"}, {"session", original_session},
         {"checkpoint_identity", "mixed-scc-plan"}, {"division_order", 3},
-        {"lower", arm("-2/3", anchor, scc, true)},
+        {"lower", arm("-3/5", anchor, scc, true)},
         {"upper", arm("2/3", anchor, upper, false)}});
     if (planned.at("status") != "ok")
       throw std::runtime_error("tile.plan: " + json::serialize(planned));

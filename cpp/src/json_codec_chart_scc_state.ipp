@@ -831,6 +831,18 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
   virtual const CompositeWorkContract& work_contract() const = 0;
   virtual std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
   rational_shadow_physical_equation() const = 0;
+  virtual std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+  rational_shadow_singular_tail_equation() const override = 0;
+  virtual std::optional<LocalSolution<Rational>>
+  rational_shadow_singular_tail_local(
+      const LocalSolution<Rational>& physical) const override = 0;
+  virtual std::optional<EpsilonVector>
+  physicalize_rational_shadow_singular_seed(
+      const EpsilonVector& tail_frame,
+      const RealEvaluationPoint& point) const override = 0;
+  virtual std::optional<LocalSolution<ComplexBall>>
+  physicalize_rational_shadow_singular_local(
+      const LocalSolution<ComplexBall>& tail_frame) const override = 0;
   // Express a singular physical parent value in the exact reduced
   // block-spectral normal frame used at the residue.  This frame exists
   // independently of whether the recurrence happened to need the
@@ -2411,7 +2423,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
                     std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
                         physical_equation,
                     std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
-                        rational_shadow_physical_equation)
+                        rational_shadow_physical_equation,
+                    std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+                        rational_shadow_singular_tail_equation,
+                    std::vector<std::int32_t>
+                        rational_shadow_singular_tail_epsilon_shifts)
       : CompositeSCCChartBase(std::move(handle), std::move(key),
                               std::move(exact_identity),
                               std::move(signature),
@@ -2424,7 +2440,11 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         blocks_(std::move(blocks)), couplings_(std::move(couplings)),
         physical_equation_(std::move(physical_equation)),
         rational_shadow_physical_equation_(
-            std::move(rational_shadow_physical_equation)) {
+            std::move(rational_shadow_physical_equation)),
+        rational_shadow_singular_tail_equation_(
+            std::move(rational_shadow_singular_tail_equation)),
+        rational_shadow_singular_tail_epsilon_shifts_(
+            std::move(rational_shadow_singular_tail_epsilon_shifts)) {
     if (physical_equation_ &&
         physical_equation_->owner_signature_identity != exact_identity_)
       throw std::invalid_argument(
@@ -2437,6 +2457,43 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
              physical_equation_->payload_identity))
       throw std::invalid_argument(
           "composite Rational-shadow q/C payload names a different physical equation");
+    if (rational_shadow_singular_tail_equation_) {
+      if (rational_shadow_singular_tail_equation_->owner_signature_identity !=
+              exact_identity_ ||
+          rational_shadow_singular_tail_epsilon_shifts_.size() != dimension_ ||
+          *std::min_element(
+              rational_shadow_singular_tail_epsilon_shifts_.begin(),
+              rational_shadow_singular_tail_epsilon_shifts_.end()) != 0 ||
+          std::any_of(
+              rational_shadow_singular_tail_epsilon_shifts_.begin(),
+              rational_shadow_singular_tail_epsilon_shifts_.end(),
+              [](const auto shift) { return shift < 0; }))
+        throw std::invalid_argument(
+            "composite Rational-shadow singular-tail frame is malformed");
+      const auto& tail = *rational_shadow_singular_tail_equation_;
+      if (tail.q_lags.empty() || tail.q_lags.front().zero ||
+          tail.q_lags.front().valuation != 0 ||
+          std::any_of(
+              tail.q_lags.begin(), tail.q_lags.end(),
+              [](const auto& coefficient) {
+                return !coefficient.zero &&
+                    coefficient.valuation < 0;
+              }) ||
+          std::any_of(
+              tail.c_lags.begin(), tail.c_lags.end(),
+              [](const auto& lag) {
+                return std::any_of(
+                    lag.begin(), lag.end(), [](const auto& entry) {
+                      return !entry.value.zero &&
+                          entry.value.valuation < 0;
+                    });
+              }))
+        throw std::invalid_argument(
+            "composite Rational-shadow singular-tail q/C equation is not causal with a formal-unit q0");
+    } else if (!rational_shadow_singular_tail_epsilon_shifts_.empty()) {
+      throw std::invalid_argument(
+          "composite singular-tail epsilon shifts have no exact equation");
+    }
     if constexpr (std::is_same_v<Scalar, Rational> ||
                   std::is_same_v<Scalar, ComplexBall>)
       pseudo_target_cache_ =
@@ -2760,6 +2817,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
             "SCC parent completeness maximum");
         aggregate.top_valid = retained_match_max;
       }
+      auto retained_singular_tail =
+          retain_singular_tail_from_reduced_states(
+              state, checkpoint_identity);
       parent = cap_composite_public_local(
           parent, retained_match_max, work_.public_t_order,
           retained_geometry_.chart, retained_geometry_.prescriptions,
@@ -2794,7 +2854,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
           json::serialize(canonical_json_value(column_identity_record))};
       auto local = retain_completed_parent_local(
           local_handle, seed_block, std::move(parent), aggregate,
-          std::move(column_provenance), std::move(equation_owner));
+          std::move(column_provenance), std::move(equation_owner),
+          std::move(retained_singular_tail));
       const auto elapsed_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
       column_solves_.fetch_add(1);
@@ -2830,6 +2891,243 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
   rational_shadow_physical_equation() const override {
     return rational_shadow_physical_equation_;
+  }
+
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+  rational_shadow_singular_tail_equation() const override {
+    return rational_shadow_singular_tail_equation_;
+  }
+
+  std::optional<LocalSolution<Rational>>
+  rational_shadow_singular_tail_local(
+      const LocalSolution<Rational>& physical) const override {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      (void)physical;
+      return std::nullopt;
+    } else {
+      if (!rational_shadow_singular_tail_equation_ ||
+          rational_shadow_singular_tail_epsilon_shifts_.size() !=
+              dimension_)
+        return std::nullopt;
+      validate_local_solution(physical, false);
+      if (!physical.error.empty() || physical.dimension != dimension_)
+        throw std::invalid_argument(
+            "singular-tail frame conversion requires an exact full-parent local");
+      std::vector<LocalSolution<Rational>> embedded_blocks;
+      embedded_blocks.reserve(blocks_.size());
+      for (const auto& block : blocks_) {
+        auto reduced = block_gauge_transform(
+            local_algebra_detail::with_selected_components(
+                physical, block.vertices),
+            block.block, false,
+            physical.checkpoint_identity + ":singular-tail:block:" +
+                std::to_string(block.block) + ":gauge-inverse");
+        std::vector<LocalSolution<Rational>> shifted_components;
+        shifted_components.reserve(block.vertices.size());
+        for (std::uint32_t local = 0;
+             local < block.vertices.size(); ++local) {
+          const auto shift =
+              rational_shadow_singular_tail_epsilon_shifts_
+                  [block.vertices[local]];
+          auto component =
+              local_algebra_detail::with_selected_component(reduced, local);
+          if (shift != 0) {
+            PreparedRationalTaylorMultiplier<Rational> monomial;
+            monomial.epsilon_shift = -shift;
+            monomial.kernels.assign(
+                component.epsilon.width(),
+                std::vector<Rational>(
+                    component.taylor_width(), Rational(0)));
+            monomial.kernels.front().front() = Rational(1);
+            monomial.exact_identity =
+                "singular-tail-epsilon-shear:" +
+                std::to_string(-shift);
+            component = multiply_prepared_rational(
+                component, monomial,
+                component.checkpoint_identity + ":epsilon-shear:" +
+                    std::to_string(-shift));
+          }
+          shifted_components.push_back(
+              local_algebra_detail::embedded_component(
+                  component, local,
+                  static_cast<std::uint32_t>(block.vertices.size())));
+        }
+        auto shifted_block = combine_local_solutions(
+            shifted_components,
+            physical.checkpoint_identity + ":singular-tail:block:" +
+                std::to_string(block.block) + ":epsilon-sheared");
+        embedded_blocks.push_back(
+            local_algebra_detail::embedded_components(
+                shifted_block, block.vertices, dimension_));
+      }
+      return combine_local_solutions(
+          embedded_blocks,
+          physical.checkpoint_identity +
+              ":singular-tail:fuchsian-epsilon-sheared");
+    }
+  }
+
+  std::optional<EpsilonVector>
+  physicalize_rational_shadow_singular_seed(
+      const EpsilonVector& tail_frame,
+      const RealEvaluationPoint& point) const override {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      (void)tail_frame;
+      (void)point;
+      return std::nullopt;
+    } else {
+      if (!rational_shadow_singular_tail_equation_ ||
+          tail_frame.dimension != dimension_ ||
+          !tail_frame.error.empty() || point.exact_coordinate.empty())
+        return std::nullopt;
+      const Rational exact_point(point.exact_coordinate);
+      std::vector<std::optional<EpsilonFrame<ComplexBall>>> parent(
+          dimension_);
+      for (const auto& block : blocks_) {
+        FiniteLaurentVector<ComplexBall> reduced;
+        reduced.reserve(block.vertices.size());
+        for (const auto vertex : block.vertices) {
+          std::vector<ComplexBall> coefficients;
+          coefficients.reserve(tail_frame.epsilon.width());
+          for (std::int64_t power = tail_frame.epsilon.min_power;
+               power <= tail_frame.epsilon.complete_max; ++power)
+            coefficients.push_back(tail_frame.at(
+                static_cast<std::int32_t>(power), vertex));
+          reduced.emplace_back(
+              tail_frame.epsilon, std::move(coefficients));
+          reduced.back() = reduced.back().shifted(
+              rational_shadow_singular_tail_epsilon_shifts_[vertex]);
+        }
+        auto physical = apply_rational_gauge_at_point(
+            block.to_physical, reduced, exact_point);
+        if (!physical.has_value()) return std::nullopt;
+        for (std::size_t local = 0;
+             local < block.vertices.size(); ++local)
+          parent[block.vertices[local]] =
+              std::move((*physical)[local]);
+      }
+      std::int32_t min_power =
+          std::numeric_limits<std::int32_t>::max();
+      std::int32_t complete_max =
+          std::numeric_limits<std::int32_t>::max();
+      for (const auto& component : parent) {
+        if (!component.has_value())
+          throw std::logic_error(
+              "singular-tail seed conversion left an empty parent component");
+        min_power = std::min(min_power, component->min_power());
+        complete_max =
+            std::min(complete_max, component->complete_max());
+      }
+      if (complete_max < min_power) return std::nullopt;
+      auto output = physical_ode_detail::zero_epsilon_vector(
+          {min_power, complete_max}, dimension_);
+      for (std::int64_t power = min_power; power <= complete_max; ++power)
+        for (std::uint32_t component = 0; component < dimension_;
+             ++component)
+          output.at(static_cast<std::int32_t>(power), component) =
+              parent[component]->coefficient(
+                  static_cast<std::int32_t>(power));
+      return output;
+    }
+  }
+
+  std::optional<LocalSolution<ComplexBall>>
+  physicalize_rational_shadow_singular_local(
+      const LocalSolution<ComplexBall>& tail_frame) const override {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      (void)tail_frame;
+      return std::nullopt;
+    } else {
+      if (!rational_shadow_singular_tail_equation_ ||
+          rational_shadow_singular_tail_epsilon_shifts_.size() !=
+              dimension_)
+        return std::nullopt;
+      validate_local_solution(tail_frame, false);
+      if (!tail_frame.error.empty() ||
+          tail_frame.dimension != dimension_)
+        throw std::invalid_argument(
+            "singular-tail local physicalization requires one full-parent Acb local");
+
+      std::vector<LocalSolution<ComplexBall>> embedded_blocks;
+      embedded_blocks.reserve(blocks_.size());
+      for (const auto& block : blocks_) {
+        auto reduced =
+            local_algebra_detail::with_selected_components(
+                tail_frame, block.vertices);
+        std::vector<LocalSolution<ComplexBall>>
+            unshifted_components;
+        unshifted_components.reserve(block.vertices.size());
+        for (std::uint32_t local = 0;
+             local < block.vertices.size(); ++local) {
+          const auto vertex = block.vertices[local];
+          auto component =
+              local_algebra_detail::with_selected_component(
+                  reduced, local);
+          const auto shift =
+              rational_shadow_singular_tail_epsilon_shifts_
+                  [vertex];
+          if (shift != 0) {
+            PreparedRationalTaylorMultiplier<ComplexBall>
+                monomial;
+            monomial.epsilon_shift = shift;
+            monomial.kernels.assign(
+                component.epsilon.width(),
+                std::vector<ComplexBall>(
+                    component.taylor_width(), ComplexBall(0)));
+            monomial.kernels.front().front() = ComplexBall(1);
+            monomial.exact_identity =
+                "singular-tail-epsilon-unshear:" +
+                std::to_string(shift);
+            component = multiply_prepared_rational(
+                component, monomial,
+                tail_frame.checkpoint_identity +
+                    ":physicalize:block:" +
+                    std::to_string(block.block) +
+                    ":component:" + std::to_string(local) +
+                    ":epsilon-unshear");
+          }
+          unshifted_components.push_back(
+              local_algebra_detail::embedded_component(
+                  component, local,
+                  static_cast<std::uint32_t>(
+                      block.vertices.size())));
+        }
+        auto unshifted = combine_local_solutions(
+            unshifted_components,
+            tail_frame.checkpoint_identity +
+                ":physicalize:block:" +
+                std::to_string(block.block) +
+                ":epsilon-unsheared");
+        LocalSolution<ComplexBall> physical = unshifted;
+        if (!block.to_physical.identity) {
+          auto converted = apply_prepared_sparse_local_matrix(
+              specialize_prepared_rational_matrix_to_acb(
+                  block.to_physical.matrix),
+              unshifted,
+              tail_frame.checkpoint_identity +
+                  ":physicalize:block:" +
+                  std::to_string(block.block) + ":gauge");
+          if (!converted.has_value())
+            throw std::logic_error(
+                "certified singular-tail physical gauge produced no structural local");
+          physical = std::move(*converted);
+        }
+        embedded_blocks.push_back(
+            local_algebra_detail::embedded_components(
+                physical, block.vertices, dimension_));
+      }
+      if (embedded_blocks.empty())
+        throw std::logic_error(
+            "singular-tail local physicalization received no SCC blocks");
+      auto physical = embedded_blocks.size() == 1
+          ? std::move(embedded_blocks.front())
+          : combine_local_solutions(
+                embedded_blocks,
+                tail_frame.checkpoint_identity +
+                    ":physicalize:parent");
+      validate_local_solution(physical, false);
+      return physical;
+    }
   }
 
   std::optional<std::pair<FiniteLaurentVector<ComplexBall>, std::string>>
@@ -3515,6 +3813,16 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
              : json::value(nullptr)},
         {"rational_shadow_physical_ode",
          rational_shadow_physical_equation_ ? "retained" : "unavailable"},
+        {"rational_shadow_singular_tail",
+         rational_shadow_singular_tail_equation_
+             ? "fuchsian-epsilon-sheared"
+             : "unavailable"},
+        {"rational_shadow_singular_tail_max_epsilon_shift",
+         rational_shadow_singular_tail_epsilon_shifts_.empty()
+             ? json::value(nullptr)
+             : json::value(*std::max_element(
+                   rational_shadow_singular_tail_epsilon_shifts_.begin(),
+                   rational_shadow_singular_tail_epsilon_shifts_.end()))},
         {"coupling_groups", couplings_.size()},
         {"coupling_entries", active_entries + proven_zero_entries},
         {"active_coupling_entries", active_entries},
@@ -3600,6 +3908,75 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
   }
 
  private:
+  static std::optional<FiniteLaurentVector<ComplexBall>>
+  apply_rational_gauge_at_point(
+      const CompositeGaugeTransform<Rational>& transform,
+      const FiniteLaurentVector<ComplexBall>& input,
+      const Rational& point) {
+    if (transform.matrix.rows != input.size() ||
+        transform.matrix.columns != input.size())
+      throw std::logic_error(
+          "exact singular-tail gauge dimensions differ from their block");
+    if (transform.identity) return input;
+    const auto evaluate = [&](const std::vector<Rational>& polynomial) {
+      if (polynomial.empty())
+        throw std::invalid_argument(
+            "exact singular-tail gauge polynomial is empty");
+      auto value = polynomial.back();
+      for (std::size_t index = polynomial.size() - 1; index > 0; --index)
+        value = value * point + polynomial[index - 1];
+      return value;
+    };
+    std::vector<std::optional<EpsilonFrame<ComplexBall>>> rows(
+        transform.matrix.rows);
+    for (const auto& entry : transform.matrix.entries) {
+      if (entry.row >= transform.matrix.rows ||
+          entry.column >= transform.matrix.columns)
+        throw std::logic_error(
+            "exact singular-tail gauge entry is outside its block");
+      const auto& multiplier = entry.multiplier;
+      if (multiplier.proven_zero) continue;
+      if (!multiplier.analytic_coefficients.has_value() ||
+          multiplier.analytic_coefficients->empty() ||
+          multiplier.analytic_coefficients->size() !=
+              multiplier.kernels.size())
+        return std::nullopt;
+      Rational pole_factor(1);
+      for (std::uint32_t power = 0;
+           power < multiplier.center_pole_order; ++power)
+        pole_factor *= point;
+      if (pole_factor.is_zero()) return std::nullopt;
+      std::vector<ComplexBall> coefficients;
+      coefficients.reserve(
+          multiplier.analytic_coefficients->size());
+      for (const auto& rational :
+           *multiplier.analytic_coefficients) {
+        const auto denominator = evaluate(rational.denominator);
+        if (denominator.is_zero()) return std::nullopt;
+        auto value = evaluate(rational.numerator) / denominator;
+        if (multiplier.center_pole_order != 0)
+          value = value / pole_factor;
+        coefficients.push_back(local_detail::to_ball(value));
+      }
+      auto term =
+          EpsilonFrame<ComplexBall>(
+              multiplier.epsilon_shift, std::move(coefficients)) *
+          input[entry.column];
+      rows[entry.row] = rows[entry.row].has_value()
+          ? *rows[entry.row] + term
+          : std::move(term);
+    }
+    FiniteLaurentVector<ComplexBall> output;
+    output.reserve(rows.size());
+    for (auto& row : rows) {
+      if (!row.has_value())
+        throw std::logic_error(
+            "exact invertible singular-tail gauge has an empty row");
+      output.push_back(std::move(*row));
+    }
+    return output;
+  }
+
   static std::optional<FiniteLaurentVector<ComplexBall>>
   apply_acb_matching_gauge_at_point(
       const CompositeGaugeTransform<Scalar>& transform,
@@ -3918,11 +4295,105 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     }
   }
 
+  std::shared_ptr<const LocalSolution<Rational>>
+  retain_singular_tail_from_reduced_states(
+      const std::vector<std::optional<LocalSolution<Scalar>>>& state,
+      const std::string& checkpoint_identity) const {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      (void)state;
+      (void)checkpoint_identity;
+      return nullptr;
+    } else {
+      if (!rational_shadow_singular_tail_equation_ ||
+          rational_shadow_singular_tail_epsilon_shifts_.size() !=
+              dimension_)
+        return nullptr;
+      std::vector<LocalSolution<Rational>> embedded_blocks;
+      embedded_blocks.reserve(blocks_.size());
+      for (std::uint32_t block_index = 0;
+           block_index < state.size(); ++block_index) {
+        if (!state[block_index].has_value()) continue;
+        const auto& block = blocks_.at(block_index);
+        const auto& reduced = *state[block_index];
+        if (reduced.dimension != block.vertices.size())
+          throw std::logic_error(
+              "reduced SCC state dimension changed before singular-tail retention");
+        std::vector<LocalSolution<Rational>> shifted_components;
+        shifted_components.reserve(block.vertices.size());
+        for (std::uint32_t local = 0;
+             local < block.vertices.size(); ++local) {
+          const auto vertex = block.vertices[local];
+          const auto shift =
+              rational_shadow_singular_tail_epsilon_shifts_[vertex];
+          auto component =
+              local_algebra_detail::with_selected_component(
+                  reduced, local);
+          if (shift != 0) {
+            PreparedRationalTaylorMultiplier<Rational> monomial;
+            monomial.epsilon_shift = -shift;
+            monomial.kernels.assign(
+                component.epsilon.width(),
+                std::vector<Rational>(
+                    component.taylor_width(), Rational(0)));
+            monomial.kernels.front().front() = Rational(1);
+            monomial.exact_identity =
+                "singular-tail-epsilon-shear:" +
+                std::to_string(-shift);
+            component = multiply_prepared_rational(
+                component, monomial,
+                checkpoint_identity + ":tail:block:" +
+                    std::to_string(block_index) + ":component:" +
+                    std::to_string(local) + ":epsilon-shear");
+          }
+          shifted_components.push_back(
+              local_algebra_detail::embedded_component(
+                  component, local,
+                  static_cast<std::uint32_t>(
+                      block.vertices.size())));
+        }
+        auto shifted_block = combine_local_solutions(
+            shifted_components,
+            checkpoint_identity + ":tail:block:" +
+                std::to_string(block_index) + ":combined");
+        embedded_blocks.push_back(
+            local_algebra_detail::embedded_components(
+                shifted_block, block.vertices, dimension_));
+      }
+      if (embedded_blocks.empty())
+        throw std::logic_error(
+            "singular-tail retention received no reduced SCC states");
+      auto tail_parent = embedded_blocks.size() == 1
+          ? std::move(embedded_blocks.front())
+          : combine_local_solutions(
+                embedded_blocks,
+                checkpoint_identity + ":tail:parent");
+      // This is a different epsilon frame from the physical parent.  Its
+      // honest edge is determined componentwise by the reduced recurrence
+      // windows and the finite shear above; reusing the physical parent's
+      // complete maximum would mix two validity contracts.
+      const auto tail_complete_max =
+          tail_parent.epsilon.complete_max;
+      if (tail_complete_max < tail_parent.epsilon.min_power)
+        throw std::domain_error(
+            "singular-tail retention has no complete epsilon row");
+      tail_parent = cap_composite_public_local(
+          tail_parent, tail_complete_max, work_.public_t_order,
+          retained_geometry_.chart,
+          retained_geometry_.prescriptions,
+          checkpoint_identity + ":tail:retained");
+      validate_local_solution(tail_parent, false);
+      return std::make_shared<const LocalSolution<Rational>>(
+          std::move(tail_parent));
+    }
+  }
+
   std::shared_ptr<StoredLocalBase> retain_completed_parent_local(
       const std::string& local_handle, std::uint32_t seed_block,
       LocalSolution<Scalar> parent, const NativeLocalDiagnostics& diagnostics,
       SCCColumnProvenance column_provenance,
-      std::shared_ptr<CompositeSCCChartBase> equation_owner) {
+      std::shared_ptr<CompositeSCCChartBase> equation_owner,
+      std::shared_ptr<const LocalSolution<Rational>>
+          rational_shadow_singular_tail_solution = nullptr) {
     std::shared_ptr<PhysicalEquationOwnerBase> retained_owner;
     std::shared_ptr<const PreparedPhysicalClearedODE<Scalar>>
         retained_equation;
@@ -3945,7 +4416,9 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         unavailable_tail_model(
             "tail model is unavailable for an assembled SCC parent local"),
         std::nullopt, true, true, std::move(retained_owner),
-        std::move(retained_equation), std::move(unavailable_reason));
+        std::move(retained_equation), std::move(unavailable_reason),
+        nullptr, false,
+        std::move(rational_shadow_singular_tail_solution));
   }
 
   CompositeColumnSolveResult solve_regular_acb_column(
@@ -5132,6 +5605,10 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       physical_equation_;
   std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
       rational_shadow_physical_equation_;
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+      rational_shadow_singular_tail_equation_;
+  std::vector<std::int32_t>
+      rational_shadow_singular_tail_epsilon_shifts_;
   std::unique_ptr<PseudoTargetCache<Scalar>> pseudo_target_cache_;
   std::atomic<std::uint64_t> column_solves_{0};
   mutable std::mutex column_stats_mutex_;

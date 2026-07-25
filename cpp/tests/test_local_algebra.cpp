@@ -50,6 +50,30 @@ LocalSolution<Rational> sample() {
   return out;
 }
 
+LocalSolution<ComplexBall> specialize_local(
+    const LocalSolution<Rational>& exact,
+    const std::string& checkpoint_identity) {
+  LocalSolution<ComplexBall> out;
+  out.chart = exact.chart;
+  out.epsilon = exact.epsilon;
+  out.taylor_complete_max = exact.taylor_complete_max;
+  out.dimension = exact.dimension;
+  out.prescriptions = exact.prescriptions;
+  out.checkpoint_identity = checkpoint_identity;
+  for (const auto& source : exact.sectors) {
+    LocalSector<ComplexBall> sector;
+    sector.a = source.a;
+    sector.b = source.b;
+    sector.log_power = source.log_power;
+    for (const auto& coefficient : source.coefficients)
+      sector.coefficients.push_back(
+          ComplexBall::from_strings(coefficient.str()));
+    out.sectors.push_back(std::move(sector));
+  }
+  diffexp2::validate_local_solution(out, false);
+  return out;
+}
+
 PreparedRationalTaylorMultiplier<Rational> multiplier(
     std::int32_t shift, std::uint32_t pole) {
   PreparedRationalTaylorMultiplier<Rational> out;
@@ -100,26 +124,7 @@ bool same_rational_local(const LocalSolution<Rational>& left,
 }
 
 LocalSolution<ComplexBall> acb_sample() {
-  const auto exact = sample();
-  LocalSolution<ComplexBall> out;
-  out.chart = exact.chart;
-  out.epsilon = exact.epsilon;
-  out.taylor_complete_max = exact.taylor_complete_max;
-  out.dimension = exact.dimension;
-  out.prescriptions = exact.prescriptions;
-  out.checkpoint_identity = "local-algebra-acb-input";
-  for (const auto& source : exact.sectors) {
-    LocalSector<ComplexBall> sector;
-    sector.a = source.a;
-    sector.b = source.b;
-    sector.log_power = source.log_power;
-    for (const auto& coefficient : source.coefficients)
-      sector.coefficients.push_back(
-          ComplexBall::from_strings(coefficient.str()));
-    out.sectors.push_back(std::move(sector));
-  }
-  diffexp2::validate_local_solution(out, false);
-  return out;
+  return specialize_local(sample(), "local-algebra-acb-input");
 }
 
 PreparedRationalTaylorMultiplier<ComplexBall> acb_multiplier(
@@ -173,6 +178,65 @@ bool overlapping_acb_local(const LocalSolution<ComplexBall>& left,
   return true;
 }
 
+bool overlapping_acb_local_window(
+    const LocalSolution<ComplexBall>& left,
+    const LocalSolution<ComplexBall>& right,
+    std::int32_t min_power, std::int32_t complete_max) {
+  if (min_power < left.epsilon.min_power ||
+      min_power < right.epsilon.min_power ||
+      complete_max > left.epsilon.complete_max ||
+      complete_max > right.epsilon.complete_max ||
+      left.taylor_complete_max != right.taylor_complete_max ||
+      left.dimension != right.dimension)
+    return false;
+  std::vector<const LocalSector<ComplexBall>*> left_material;
+  std::vector<const LocalSector<ComplexBall>*> right_material;
+  for (const auto& sector : left.sectors)
+    if (std::any_of(sector.coefficients.begin(),
+                    sector.coefficients.end(),
+                    [](const auto& value) {
+                      return !value.is_zero();
+                    }))
+      left_material.push_back(&sector);
+  for (const auto& sector : right.sectors)
+    if (std::any_of(sector.coefficients.begin(),
+                    sector.coefficients.end(),
+                    [](const auto& value) {
+                      return !value.is_zero();
+                    }))
+      right_material.push_back(&sector);
+  if (left_material.size() != right_material.size()) return false;
+  for (std::size_t sector = 0;
+       sector < left_material.size(); ++sector) {
+    const auto& a = *left_material[sector];
+    const auto& b = *right_material[sector];
+    if (a.a.canonical != b.a.canonical ||
+        a.b.canonical != b.b.canonical ||
+        a.log_power != b.log_power)
+      return false;
+    for (std::int64_t raw_power = min_power;
+         raw_power <= complete_max; ++raw_power) {
+      const auto left_epsilon = static_cast<std::size_t>(
+          raw_power - left.epsilon.min_power);
+      const auto right_epsilon = static_cast<std::size_t>(
+          raw_power - right.epsilon.min_power);
+      for (std::size_t taylor = 0;
+           taylor < left.taylor_width(); ++taylor)
+        for (std::uint32_t component = 0;
+             component < left.dimension; ++component)
+          if (!(a.coefficients[index(
+                    left_epsilon, taylor, component,
+                    left.taylor_width(), left.dimension)] -
+                b.coefficients[index(
+                    right_epsilon, taylor, component,
+                    right.taylor_width(), right.dimension)])
+                   .contains_zero())
+            return false;
+    }
+  }
+  return true;
+}
+
 PreparedRationalTaylorMultiplier<Rational> identity_multiplier() {
   auto out = multiplier(0, 0);
   for (auto& kernel : out.kernels)
@@ -217,6 +281,82 @@ PreparedRationalTaylorMultiplier<Rational> casep_constant_multiplier() {
   out.kernels[0][0] = Rational("2/3");
   out.kernels[2][0] = Rational("-5/7");
   return out;
+}
+
+LocalSolution<Rational> epsilon_shift_components(
+    const LocalSolution<Rational>& source,
+    const std::vector<std::int32_t>& shifts,
+    const std::string& checkpoint) {
+  if (shifts.size() != source.dimension)
+    throw std::invalid_argument(
+        "test epsilon shear has the wrong dimension");
+  std::vector<LocalSolution<Rational>> embedded;
+  embedded.reserve(shifts.size());
+  for (std::uint32_t component = 0;
+       component < source.dimension; ++component) {
+    auto selected =
+        diffexp2::local_algebra_detail::with_selected_component(
+            source, component);
+    if (shifts[component] != 0) {
+      PreparedRationalTaylorMultiplier<Rational> monomial;
+      monomial.epsilon_shift = shifts[component];
+      monomial.kernels.assign(
+          selected.epsilon.width(),
+          std::vector<Rational>(
+              selected.taylor_width(), Rational(0)));
+      monomial.kernels.front().front() = Rational(1);
+      monomial.exact_identity =
+          "test-epsilon-shift:" +
+          std::to_string(shifts[component]);
+      selected = diffexp2::multiply_prepared_rational(
+          selected, monomial,
+          checkpoint + ":component:" +
+              std::to_string(component));
+    }
+    embedded.push_back(
+        diffexp2::local_algebra_detail::embedded_component(
+            selected, component, source.dimension));
+  }
+  return diffexp2::combine_local_solutions(
+      embedded, checkpoint);
+}
+
+LocalSolution<ComplexBall> epsilon_shift_components(
+    const LocalSolution<ComplexBall>& source,
+    const std::vector<std::int32_t>& shifts,
+    const std::string& checkpoint) {
+  if (shifts.size() != source.dimension)
+    throw std::invalid_argument(
+        "test epsilon unshear has the wrong dimension");
+  std::vector<LocalSolution<ComplexBall>> embedded;
+  embedded.reserve(shifts.size());
+  for (std::uint32_t component = 0;
+       component < source.dimension; ++component) {
+    auto selected =
+        diffexp2::local_algebra_detail::with_selected_component(
+            source, component);
+    if (shifts[component] != 0) {
+      PreparedRationalTaylorMultiplier<ComplexBall> monomial;
+      monomial.epsilon_shift = shifts[component];
+      monomial.kernels.assign(
+          selected.epsilon.width(),
+          std::vector<ComplexBall>(
+              selected.taylor_width(), ComplexBall(0)));
+      monomial.kernels.front().front() = ComplexBall(1);
+      monomial.exact_identity =
+          "test-epsilon-shift:" +
+          std::to_string(shifts[component]);
+      selected = diffexp2::multiply_prepared_rational(
+          selected, monomial,
+          checkpoint + ":component:" +
+              std::to_string(component));
+    }
+    embedded.push_back(
+        diffexp2::local_algebra_detail::embedded_component(
+            selected, component, source.dimension));
+  }
+  return diffexp2::combine_local_solutions(
+      embedded, checkpoint);
 }
 
 }  // namespace
@@ -884,6 +1024,351 @@ int main() {
         ComplexBall::from_strings("2")).contains_zero() &&
        (restored_vector->at(1).coefficient(0) -
         ComplexBall::from_strings("3")).contains_zero();
+
+  // Regression for the terminal reduced-tail materialization order.  The
+  // exact route applies a rational gauge before specialization; the fast
+  // route specializes the already-cancelled local and gauge first.  Every
+  // resulting ball must enclose the exact-route coefficient, including
+  // epsilon shifts and analytic rational metadata.
+  PreparedSparseLocalMultiplierMatrix<Rational> exact_tail_gauge;
+  exact_tail_gauge.rows = exact_tail_gauge.columns = 2;
+  exact_tail_gauge.exact_identity =
+      "terminal-tail-physicalization-gauge";
+  auto analytic_shift = multiplier(-1, 0);
+  analytic_shift.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<Rational>>{
+          {{Rational(1), Rational(2)}, {Rational(1)}},
+          {{Rational(3)}, {Rational(1)}},
+          {{Rational(0)}, {Rational(1)}}};
+  exact_tail_gauge.entries.push_back(
+      {0, 0, identity_multiplier()});
+  exact_tail_gauge.entries.push_back(
+      {0, 1, std::move(analytic_shift)});
+  exact_tail_gauge.entries.push_back(
+      {1, 0, multiplier(1, 0)});
+  exact_tail_gauge.entries.push_back(
+      {1, 1, identity_multiplier()});
+  const auto exact_physicalized =
+      diffexp2::apply_prepared_sparse_local_matrix(
+          exact_tail_gauge, input,
+          "terminal-tail-exact-physicalized");
+  const auto specialized_tail_gauge =
+      diffexp2::specialize_prepared_rational_matrix_to_acb(
+          exact_tail_gauge);
+  const auto numeric_physicalized =
+      diffexp2::apply_prepared_sparse_local_matrix(
+          specialized_tail_gauge, acb_input,
+          "terminal-tail-acb-physicalized");
+  ok = ok && exact_physicalized.has_value() &&
+       numeric_physicalized.has_value() &&
+       specialized_tail_gauge.entries[1]
+           .multiplier.analytic_coefficients.has_value() &&
+       overlapping_acb_local(
+           specialize_local(
+               *exact_physicalized,
+               "terminal-tail-exact-specialized"),
+           *numeric_physicalized);
+
+  // Exercise the complete terminal operator ordering rather than only one
+  // gauge application.  The two reduced columns carry distinct CASE-P
+  // sectors.  Their components have unequal epsilon shears, the right
+  // transformation mixes positive and negative Laurent powers, and the
+  // physical gauge contains an epsilon shift plus a center pole.  The legacy
+  // path clips each physical column to the SCC work rectangle before T; the
+  // retained-tail path applies T before Acb specialization, then unshears and
+  // gauges.  They must overlap on the complete common slab, while an attempt
+  // to claim the next row beyond the clipped legacy edge must be rejected.
+  const auto wide_reduced_column = [](
+      const std::string& checkpoint, const Rational& scale) {
+    LocalSolution<Rational> local;
+    local.chart.center_exact = "0";
+    local.chart.scale_exact = "1";
+    local.chart.radius = ComplexBall(2);
+    local.chart.radius_exact = "2";
+    local.epsilon = {-5, 6};
+    local.taylor_complete_max = 2;
+    local.dimension = 2;
+    local.checkpoint_identity = checkpoint;
+    local.prescriptions.push_back(
+        {"case-p-cut", -1, 1, 1});
+    for (const auto& tag :
+         std::vector<std::tuple<std::string, std::string,
+                                std::uint32_t>>{
+             {"0", "0", 0}, {"1/2", "1", 1}}) {
+      LocalSector<Rational> sector;
+      sector.a = ExactScalarDescriptor::rational(
+          std::get<0>(tag));
+      sector.b = ExactScalarDescriptor::rational(
+          std::get<1>(tag));
+      sector.log_power = std::get<2>(tag);
+      sector.coefficients.assign(
+          local.sector_size(), Rational(0));
+      for (std::size_t epsilon = 0;
+           epsilon < local.epsilon.width(); ++epsilon)
+        for (std::size_t taylor = 0;
+             taylor < local.taylor_width(); ++taylor)
+          for (std::uint32_t component = 0;
+               component < local.dimension; ++component)
+            sector.coefficients[index(
+                epsilon, taylor, component,
+                local.taylor_width(), local.dimension)] =
+                epsilon < 4
+                ? Rational(0)
+                : scale * Rational(std::to_string(
+                      1 + 97 * epsilon + 13 * taylor +
+                      3 * component +
+                      1000 * std::get<2>(tag)));
+      local.sectors.push_back(std::move(sector));
+    }
+    diffexp2::validate_local_solution(local, false);
+    return local;
+  };
+  const auto reduced_zero = wide_reduced_column(
+      "terminal-roundtrip-reduced-0", Rational(1));
+  const auto reduced_one = wide_reduced_column(
+      "terminal-roundtrip-reduced-1", Rational("-2/7"));
+  PreparedSparseLocalMultiplierMatrix<Rational>
+      roundtrip_gauge;
+  roundtrip_gauge.rows = roundtrip_gauge.columns = 2;
+  roundtrip_gauge.exact_identity =
+      "terminal-roundtrip-physical-gauge";
+  auto polar_diagonal = identity_multiplier();
+  polar_diagonal.center_pole_order = 1;
+  polar_diagonal.exact_identity = "t^-1";
+  polar_diagonal.kernels.assign(
+      reduced_zero.epsilon.width(),
+      std::vector<Rational>(
+          reduced_zero.taylor_width(), Rational(0)));
+  polar_diagonal.kernels.front().front() = Rational(1);
+  polar_diagonal.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<Rational>>(
+          reduced_zero.epsilon.width(),
+          {{Rational(0)}, {Rational(1)}});
+  polar_diagonal.analytic_coefficients->front() =
+      {{Rational(1)}, {Rational(1)}};
+  auto shifted_off_diagonal = multiplier(1, 0);
+  shifted_off_diagonal.exact_identity =
+      "eps*(1+2t+3eps)";
+  shifted_off_diagonal.kernels.resize(
+      reduced_zero.epsilon.width(),
+      std::vector<Rational>(
+          reduced_zero.taylor_width(), Rational(0)));
+  for (auto& kernel : shifted_off_diagonal.kernels)
+    kernel.resize(
+        reduced_zero.taylor_width(), Rational(0));
+  shifted_off_diagonal.analytic_coefficients =
+      std::vector<PreparedRationalAnalyticCoefficient<Rational>>{
+          {{Rational(1), Rational(2)}, {Rational(1)}},
+          {{Rational(3)}, {Rational(1)}},
+          {{Rational(0)}, {Rational(1)}}};
+  roundtrip_gauge.entries.push_back(
+      {0, 0, std::move(polar_diagonal)});
+  roundtrip_gauge.entries.push_back(
+      {0, 1, std::move(shifted_off_diagonal)});
+  auto lower_shift = multiplier(-1, 0);
+  lower_shift.kernels.resize(
+      reduced_zero.epsilon.width(),
+      std::vector<Rational>(
+          reduced_zero.taylor_width(), Rational(0)));
+  for (auto& kernel : lower_shift.kernels)
+    kernel.resize(
+        reduced_zero.taylor_width(), Rational(0));
+  auto roundtrip_identity = identity_multiplier();
+  roundtrip_identity.kernels.resize(
+      reduced_zero.epsilon.width(),
+      std::vector<Rational>(
+          reduced_zero.taylor_width(), Rational(0)));
+  for (auto& kernel : roundtrip_identity.kernels)
+    kernel.resize(
+        reduced_zero.taylor_width(), Rational(0));
+  roundtrip_gauge.entries.push_back(
+      {1, 0, std::move(lower_shift)});
+  roundtrip_gauge.entries.push_back(
+      {1, 1, std::move(roundtrip_identity)});
+  std::vector<LocalSolution<Rational>> clipped_physical_basis;
+  for (const auto* reduced :
+       std::vector<const LocalSolution<Rational>*>{
+           &reduced_zero, &reduced_one}) {
+    auto physical =
+        diffexp2::apply_prepared_sparse_local_matrix(
+            roundtrip_gauge, *reduced,
+            reduced->checkpoint_identity +
+                ":physical-before-work-clip");
+    if (!physical.has_value())
+      throw std::logic_error(
+          "terminal roundtrip fixture produced no physical column");
+    clipped_physical_basis.push_back(
+        diffexp2::restrict_local_epsilon_frame_strict_lower(
+            *physical, -2, 2,
+            reduced->checkpoint_identity +
+                ":physical-work-clip"));
+  }
+  ExactLaurentMatrix<Rational> roundtrip_right(
+      2, std::vector<ExactLaurentPolynomial<Rational>>(2));
+  roundtrip_right[0][0].add_term(-1, Rational(1));
+  roundtrip_right[0][0].add_term(1, Rational(2));
+  roundtrip_right[1][0].add_term(2, Rational(3));
+  roundtrip_right[0][1].add_term(-2, Rational(-1));
+  roundtrip_right[1][1].add_term(0, Rational(1));
+  roundtrip_right[1][1].add_term(1, Rational(1));
+  std::vector<const LocalSolution<Rational>*> clipped_physical_view;
+  for (const auto& column : clipped_physical_basis)
+    clipped_physical_view.push_back(&column);
+  const auto direct_roundtrip =
+      diffexp2::right_transform_local_basis_exact(
+          clipped_physical_view, roundtrip_right,
+          "terminal-roundtrip-direct-physical-T");
+
+  const std::vector<std::int32_t> physical_shifts{2, -1};
+  const std::vector<std::int32_t> tail_shifts{-2, 1};
+  std::vector<LocalSolution<Rational>> tail_basis;
+  tail_basis.push_back(epsilon_shift_components(
+      reduced_zero, tail_shifts,
+      "terminal-roundtrip-tail-0"));
+  tail_basis.push_back(epsilon_shift_components(
+      reduced_one, tail_shifts,
+      "terminal-roundtrip-tail-1"));
+  std::vector<const LocalSolution<Rational>*> tail_view;
+  for (const auto& column : tail_basis)
+    tail_view.push_back(&column);
+  const auto transformed_tail =
+      diffexp2::right_transform_local_basis_exact(
+          tail_view, roundtrip_right,
+          "terminal-roundtrip-tail-T");
+  const auto numeric_roundtrip_gauge =
+      diffexp2::specialize_prepared_rational_matrix_to_acb(
+          roundtrip_gauge);
+  std::vector<LocalSolution<ComplexBall>>
+      rebuilt_roundtrip;
+  for (std::size_t column = 0;
+       column < transformed_tail.size(); ++column) {
+    auto numeric_tail = specialize_local(
+        transformed_tail[column],
+        "terminal-roundtrip-tail-specialized-" +
+            std::to_string(column));
+    auto unshifted = epsilon_shift_components(
+        numeric_tail, physical_shifts,
+        "terminal-roundtrip-tail-unsheared-" +
+            std::to_string(column));
+    auto physical =
+        diffexp2::apply_prepared_sparse_local_matrix(
+            numeric_roundtrip_gauge, unshifted,
+            "terminal-roundtrip-tail-physical-" +
+                std::to_string(column));
+    if (!physical.has_value())
+      throw std::logic_error(
+          "terminal roundtrip fixture produced no rebuilt column");
+    rebuilt_roundtrip.push_back(std::move(*physical));
+  }
+  bool roundtrip_common_slab = true;
+  bool clipped_edge_rejected = false;
+  for (std::size_t column = 0;
+       column < direct_roundtrip.size(); ++column) {
+    const auto direct_numeric = specialize_local(
+        direct_roundtrip[column],
+        "terminal-roundtrip-direct-specialized-" +
+            std::to_string(column));
+    const auto common_min = std::max(
+        direct_numeric.epsilon.min_power,
+        rebuilt_roundtrip[column].epsilon.min_power);
+    const auto common_max = std::min(
+        direct_numeric.epsilon.complete_max,
+        rebuilt_roundtrip[column].epsilon.complete_max);
+    if (common_min > -1 || common_max < 0) {
+      roundtrip_common_slab = false;
+      continue;
+    }
+    roundtrip_common_slab =
+        roundtrip_common_slab &&
+        overlapping_acb_local_window(
+            direct_numeric, rebuilt_roundtrip[column],
+            -1, 0);
+    try {
+      (void)diffexp2::restrict_local_epsilon_frame_strict_lower(
+          direct_numeric, -1,
+          direct_numeric.epsilon.complete_max + 1,
+          "terminal-roundtrip-invalid-edge");
+    } catch (const std::invalid_argument&) {
+      clipped_edge_rejected = true;
+    }
+  }
+  ok = ok && roundtrip_common_slab &&
+       clipped_edge_rejected;
+
+  // Checkpoint restore constructs the same retained factorized-basis
+  // contract.  A stale column from a different chart or prescription must be
+  // rejected before a planned hop can project a terminal row through it.
+  std::vector<LocalSolution<ComplexBall>> factorized_contract{
+      acb_sample(), acb_sample()};
+  factorized_contract[0].checkpoint_identity =
+      "factorized-contract-0";
+  factorized_contract[1].checkpoint_identity =
+      "factorized-contract-1";
+  const auto omitted_structural_row =
+      factorized_contract[1].taylor_width() *
+      factorized_contract[1].dimension;
+  factorized_contract[1].epsilon.min_power = 0;
+  for (auto& sector : factorized_contract[1].sectors)
+    sector.coefficients.erase(
+        sector.coefficients.begin(),
+        sector.coefficients.begin() +
+            static_cast<std::ptrdiff_t>(
+                omitted_structural_row));
+  bool valid_factorized_contract = true;
+  try {
+    diffexp2::local_algebra_detail::
+        require_factorized_local_basis_contract(
+            factorized_contract, 2, {-1, 1}, 1,
+            "factorized-contract-valid");
+    diffexp2::local_algebra_detail::
+        require_factorized_receiving_local_compatibility(
+            factorized_contract[0], acb_input,
+            "factorized-receiving-valid");
+  } catch (const std::exception&) {
+    valid_factorized_contract = false;
+  }
+  auto mismatched_factorized = factorized_contract;
+  mismatched_factorized[1].chart.center_exact = "1/7";
+  bool mismatched_chart_rejected = false;
+  try {
+    diffexp2::local_algebra_detail::
+        require_factorized_local_basis_contract(
+            mismatched_factorized, 2, {-1, 1}, 1,
+            "factorized-contract-mismatched-chart");
+  } catch (const std::logic_error&) {
+    mismatched_chart_rejected = true;
+  }
+  auto mismatched_receiving = acb_input;
+  mismatched_receiving.prescriptions.front().sign = -1;
+  bool mismatched_receiving_rejected = false;
+  try {
+    diffexp2::local_algebra_detail::
+        require_factorized_receiving_local_compatibility(
+            factorized_contract[0], mismatched_receiving,
+            "factorized-receiving-mismatched-prescription");
+  } catch (const std::logic_error&) {
+    mismatched_receiving_rejected = true;
+  }
+  auto narrow_factorized = factorized_contract;
+  narrow_factorized[1].epsilon.complete_max = 0;
+  for (auto& sector : narrow_factorized[1].sectors)
+    sector.coefficients.resize(
+        narrow_factorized[1].epsilon.width() *
+        narrow_factorized[1].taylor_width() *
+        narrow_factorized[1].dimension);
+  bool narrow_factorized_rejected = false;
+  try {
+    diffexp2::local_algebra_detail::
+        require_factorized_local_basis_contract(
+            narrow_factorized, 2, {-1, 1}, 1,
+            "factorized-contract-narrow-window");
+  } catch (const std::logic_error&) {
+    narrow_factorized_rejected = true;
+  }
+  ok = ok && valid_factorized_contract &&
+       mismatched_chart_rejected &&
+       mismatched_receiving_rejected &&
+       narrow_factorized_rejected;
 
   std::cout << (ok ? "PASS" : "FAIL")
             << ": native local rational/SCC and direct scalar-row algebra\n";

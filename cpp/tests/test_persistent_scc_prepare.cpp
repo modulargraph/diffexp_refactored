@@ -97,7 +97,19 @@ int main() {
         "multiplier":{"epsilon_shift":-1,"center_pole_order":0,
           "kernels":[["0","1","0","0","0","0","0"],
                      ["0","0","0","0","0","0","0"]],
-          "exact_identity":"theta-g","proven_zero":false}}]}]
+          "exact_identity":"theta-g","proven_zero":false}}]}],
+    "rational_shadow_singular_tail":{
+      "schema":"diffexp2-scc-singular-tail-frame-v1",
+      "equation":{
+        "schema":"diffexp2-physical-cleared-ode-v1",
+        "basis":"physical-original-master","theta_coordinate":"local-t",
+        "owner_signature_identity":"two-block-parent-v1",
+        "payload_identity":"de2-physical-ode-tail-fixture",
+        "q":[{"zero":false,"valuation":0,
+          "numerator":["1"],"denominator":["1"]}],
+        "c":[[{"r":1,"c":0,"v":{"zero":false,"valuation":0,
+          "numerator":["1"],"denominator":["1"]}}]]},
+      "epsilon_shifts":[1,0]}
   })json");
   const auto scc = std::string(prepared.at("scc").as_string());
   const auto stats = request(std::string(R"json({
@@ -116,6 +128,10 @@ int main() {
       prepared.at("execution_implemented") == true &&
       prepared.at("scalar_block_dag_column_execution") == true &&
       prepared.at("min_coupling_shift") == -1 &&
+      prepared.at("rational_shadow_singular_tail") ==
+          "fuchsian-epsilon-sheared" &&
+      prepared.at(
+          "rational_shadow_singular_tail_max_epsilon_shift") == 1 &&
       stats.at("status") == "ok" &&
       std::string(stats.at("scc").as_string()) == scc &&
       stats.at("frame_base") == 0 && stats.at("frame_width") == 2 &&

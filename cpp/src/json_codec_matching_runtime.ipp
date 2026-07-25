@@ -986,11 +986,10 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         throw std::logic_error(
             "retained exact-shadow factorized basis is not bound to one "
             "terminal normal-frame match");
-      for (const auto& column : *exact_shadow_factorized_basis_)
-        if (column.dimension != dimension_ ||
-            column.sectors.empty())
-          throw std::logic_error(
-              "retained exact-shadow factorized column has invalid shape");
+      local_algebra_detail::require_factorized_local_basis_contract(
+          *exact_shadow_factorized_basis_, dimension_,
+          requested_window_, required_complete_max_,
+          "retained exact-shadow");
     } else if (exact_shadow_extra_precision_bits_ != 0) {
       throw std::logic_error(
           "retained match has exact-shadow precision without its basis");
@@ -1605,6 +1604,15 @@ struct ParsedExactEvaluatedLattice {
       exact_shadow_fused_local_basis;
   std::shared_ptr<const PhysicalEquationOwnerBase>
       exact_shadow_equation_owner;
+  // When the exact composite retained its already-computed reduced block
+  // states, form F*T directly in the causal Fuchsian/epsilon-sheared frame.
+  // This avoids the enormous physical-gauge round trip merely to certify a
+  // singular-to-ordinary bridge.
+  std::optional<std::vector<LocalSolution<Rational>>>
+      exact_shadow_fused_singular_tail_basis;
+  std::optional<std::vector<
+      std::shared_ptr<const LocalSolution<Rational>>>>
+      exact_shadow_source_local_basis;
 };
 
 json::array checkpoint_acb_laurent_matrix_record(
@@ -2610,19 +2618,84 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
         normalized_transformation;
     std::optional<std::vector<LocalSolution<Rational>>>
         exact_fused_local_basis;
+    std::optional<std::vector<LocalSolution<Rational>>>
+        exact_fused_singular_tail_basis;
+    std::optional<std::vector<
+        std::shared_ptr<const LocalSolution<Rational>>>>
+        exact_source_local_basis;
     if (normalized_right_inverse.has_value()) {
       normalized_transformation = multiply_exact_laurent_matrices(
           *normalized_right_inverse,
           specialize_exact_rational_laurent_matrix_to_acb(
               saturation.transformation));
-      std::vector<const LocalSolution<Rational>*> exact_basis;
-      exact_basis.reserve(dimension);
+      exact_source_local_basis.emplace();
+      exact_source_local_basis->reserve(dimension);
       for (const auto& witness : shadow_witnesses)
-        exact_basis.push_back(witness->solution.get());
-      exact_fused_local_basis =
-          right_transform_local_basis_exact(
-              exact_basis, saturation.transformation,
-              context + ":exact-physical-F*T");
+        exact_source_local_basis->push_back(witness->solution);
+      const bool complete_tail_basis = std::all_of(
+          shadow_witnesses.begin(), shadow_witnesses.end(),
+          [](const auto& witness) {
+            return witness->singular_tail_solution != nullptr;
+          });
+      if (complete_tail_basis) {
+        std::vector<const LocalSolution<Rational>*> exact_tail_basis;
+        exact_tail_basis.reserve(dimension);
+        for (const auto& witness : shadow_witnesses) {
+          validate_local_solution(
+              *witness->singular_tail_solution, false);
+          exact_tail_basis.push_back(
+              witness->singular_tail_solution.get());
+        }
+        const auto transform_started =
+            std::chrono::steady_clock::now();
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] exact-reduced-tail-F*T-start columns=%zu\n",
+              dimension);
+        exact_fused_singular_tail_basis =
+            right_transform_local_basis_exact(
+                exact_tail_basis, saturation.transformation,
+                context + ":exact-singular-tail-F*T");
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] exact-reduced-tail-F*T-done columns=%zu elapsed_ms=%.3f\n",
+              dimension,
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() -
+                  transform_started)
+                  .count());
+      } else {
+        std::vector<const LocalSolution<Rational>*> exact_basis;
+        exact_basis.reserve(dimension);
+        for (const auto& source : *exact_source_local_basis)
+          exact_basis.push_back(source.get());
+        const auto transform_started =
+            std::chrono::steady_clock::now();
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] exact-physical-F*T-start columns=%zu reason=missing-direct-tail\n",
+              dimension);
+        exact_fused_local_basis =
+            right_transform_local_basis_exact(
+                exact_basis, saturation.transformation,
+                context + ":exact-physical-F*T");
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] exact-physical-F*T-done columns=%zu elapsed_ms=%.3f\n",
+              dimension,
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() -
+                  transform_started)
+                  .count());
+      }
     }
     return {kNativeSingularSCCSaturationCompactProofSchema, identity,
             json::serialize(canonical_json_value(proof)),
@@ -2630,7 +2703,9 @@ ParsedExactEvaluatedLattice certify_native_singular_scc_saturation(
             !normalized_right_inverse.has_value(),
             std::move(normalized_transformation),
             std::move(exact_fused_local_basis),
-            shadow_witnesses.front()->exact_equation_owner};
+            shadow_witnesses.front()->exact_equation_owner,
+            std::move(exact_fused_singular_tail_basis),
+            std::move(exact_source_local_basis)};
   }
   if (prefer_retained_rational_shadow &&
       std::any_of(shadow_witnesses.begin(), shadow_witnesses.end(),
@@ -3175,6 +3250,255 @@ FiniteLaurentVector<ComplexBall> acb_evaluation_frames(
     frames.emplace_back(window, std::move(coefficients));
   }
   return frames;
+}
+
+struct TerminalSingularOrdinaryBridgeAttempt {
+  std::optional<LocalEvaluation> evaluation;
+  json::object diagnostic{
+      {"schema", "diffexp2-terminal-singular-ordinary-bridge-v1"},
+      {"status", "not-attempted"}};
+};
+
+TerminalSingularOrdinaryBridgeAttempt
+try_terminal_singular_rational_shadow_ordinary_bridge(
+    const PreparedPhysicalClearedODE<Rational>& equation,
+    const LocalSolution<Rational>* exact_local,
+    const LocalSolution<Rational>* retained_singular_tail_local,
+    const PhysicalEquationOwnerBase* singular_tail_owner,
+    const RealEvaluationPoint& target,
+    const EvaluationOptions& options,
+    std::size_t retained_taylor_width,
+    std::int32_t required_evaluation_complete_max,
+    std::size_t column) {
+  TerminalSingularOrdinaryBridgeAttempt attempt;
+  attempt.diagnostic["column"] = column;
+  attempt.diagnostic["target_exact"] = target.exact_coordinate;
+  attempt.diagnostic["retained_taylor_width"] =
+      retained_taylor_width;
+  const auto* retained_input =
+      retained_singular_tail_local != nullptr
+      ? retained_singular_tail_local
+      : exact_local;
+  if (retained_input == nullptr) {
+    attempt.diagnostic["status"] = "missing-exact-local";
+    return attempt;
+  }
+  if (retained_taylor_width == 0 ||
+      retained_taylor_width > retained_input->taylor_width()) {
+    attempt.diagnostic["status"] = "invalid-retained-width";
+    return attempt;
+  }
+  std::optional<LocalSolution<Rational>> transformed_tail_local;
+  const LocalSolution<Rational>* tail_local = exact_local;
+  const PreparedPhysicalClearedODE<Rational>* tail_equation =
+      &equation;
+  if (singular_tail_owner != nullptr) {
+    const auto retained_tail_equation =
+        singular_tail_owner->rational_shadow_singular_tail_equation();
+    if (retained_tail_equation) {
+      if (retained_singular_tail_local != nullptr) {
+        tail_local = retained_singular_tail_local;
+        attempt.diagnostic["singular_tail_local_source"] =
+            "retained-direct-reduced-state";
+      } else {
+        transformed_tail_local =
+            singular_tail_owner->rational_shadow_singular_tail_local(
+                *exact_local);
+        if (!transformed_tail_local.has_value()) {
+          attempt.diagnostic["status"] =
+              "singular-tail-frame-conversion-unavailable";
+          return attempt;
+        }
+        tail_local = &*transformed_tail_local;
+        attempt.diagnostic["singular_tail_local_source"] =
+            "physical-gauge-inverse-reconstruction";
+      }
+      tail_equation = retained_tail_equation.get();
+      attempt.diagnostic["singular_tail_frame"] =
+          "fuchsian-block-epsilon-sheared";
+      attempt.diagnostic["singular_tail_epsilon_min"] =
+          tail_local->epsilon.min_power;
+      attempt.diagnostic["singular_tail_epsilon_complete_max"] =
+          tail_local->epsilon.complete_max;
+    }
+  }
+  if (required_evaluation_complete_max >
+      tail_local->epsilon.complete_max) {
+    attempt.diagnostic["status"] =
+        "insufficient-exact-epsilon-reservoir";
+    attempt.diagnostic["required_evaluation_complete_max"] =
+        required_evaluation_complete_max;
+    attempt.diagnostic["retained_complete_max"] =
+        tail_local->epsilon.complete_max;
+    return attempt;
+  }
+  const EpsilonWindow bridge_epsilon{
+      tail_local->epsilon.min_power,
+      required_evaluation_complete_max};
+  Rational target_exact(0);
+  try {
+    target_exact = Rational(target.exact_coordinate);
+  } catch (const std::invalid_argument& error) {
+    attempt.diagnostic["status"] =
+        "unsupported-nonrational-target";
+    attempt.diagnostic["detail"] = error.what();
+    return attempt;
+  }
+  if (target_exact.is_zero()) {
+    attempt.diagnostic["status"] =
+        "unsupported-zero-target";
+    return attempt;
+  }
+
+  const auto target_modulus =
+      exact_path_detail::abs(target_exact);
+  const std::array<Rational, 3> seed_fractions{
+      Rational("2/3"), Rational("3/5"), Rational("3/4")};
+  const std::array<Rational, 5> singular_radius_multipliers{
+      Rational("4"), Rational("3"), Rational("2"),
+      Rational("3/2"), Rational("5/4")};
+  const std::array<Rational, 4> ordinary_witness_denominators{
+      Rational("2"), Rational("4"), Rational("8"),
+      Rational("16")};
+  const auto singular_taylor_complete_max =
+      static_cast<std::uint32_t>(retained_taylor_width - 1);
+  const auto ordinary_taylor_complete_max =
+      std::max<std::uint32_t>(
+          168,
+          local_detail::checked_i32(
+              3 * static_cast<std::int64_t>(
+                      singular_taylor_complete_max) +
+                  18,
+              "terminal singular bridge ordinary Taylor order"));
+  std::optional<SingularFrobeniusPrefixCertificate>
+      prefix_certificate;
+  try {
+    const auto normalized_equation =
+        cancel_physical_cleared_ode_common_epsilon_monomial(
+            *tail_equation);
+    prefix_certificate =
+        certify_singular_rational_shadow_prefix(
+            normalized_equation, *tail_local,
+            bridge_epsilon,
+            singular_taylor_complete_max);
+  } catch (const std::exception& error) {
+    attempt.diagnostic["status"] =
+        "exact-prefix-inconclusive";
+    attempt.diagnostic["detail"] = error.what();
+    return attempt;
+  }
+  json::array trials;
+  for (const auto& seed_fraction : seed_fractions) {
+    const auto seed_exact =
+        target_exact * seed_fraction;
+    const auto seed_modulus =
+        target_modulus * seed_fraction;
+    const auto delta_modulus =
+        exact_path_detail::abs(target_exact - seed_exact);
+    if (!(delta_modulus < seed_modulus)) continue;
+    const auto seed_point =
+        RealEvaluationPoint::rational(seed_exact.str());
+    for (const auto& radius_multiplier :
+         singular_radius_multipliers) {
+      const auto singular_radius =
+          seed_modulus * radius_multiplier;
+      for (const auto& denominator :
+           ordinary_witness_denominators) {
+        // Begin at the midpoint between the target displacement and the
+        // excluded singular center.  Later candidates move the witness
+        // outward only when the physical Neumann/Gronwall proof permits it.
+        const auto ordinary_radius =
+            seed_modulus -
+            (seed_modulus - delta_modulus) / denominator;
+        const bool split_frame =
+            singular_tail_owner != nullptr &&
+            singular_tail_owner
+                ->rational_shadow_singular_tail_equation();
+        if (!split_frame && exact_local == nullptr) {
+          attempt.diagnostic["status"] =
+              "missing-physical-exact-local";
+          return attempt;
+        }
+        auto bridged = split_frame
+            ? certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
+                  *tail_equation, *tail_local, equation,
+                  [&](const EpsilonVector& seed,
+                      const RealEvaluationPoint& point) {
+                    return singular_tail_owner
+                        ->physicalize_rational_shadow_singular_seed(
+                            seed, point);
+                  },
+                  bridge_epsilon, singular_taylor_complete_max,
+                  seed_point, singular_radius.str(), target,
+                  ordinary_taylor_complete_max,
+                  ordinary_radius.str(), options,
+                  &*prefix_certificate)
+            : certify_singular_rational_shadow_ordinary_bridge(
+                  equation, *exact_local, bridge_epsilon,
+                  singular_taylor_complete_max, seed_point,
+                  singular_radius.str(), target,
+                  ordinary_taylor_complete_max,
+                  ordinary_radius.str(), options,
+                  &*prefix_certificate);
+        json::object trial{
+            {"seed_fraction", seed_fraction.str()},
+            {"seed_exact", seed_exact.str()},
+            {"singular_witness_radius_exact",
+             singular_radius.str()},
+            {"ordinary_witness_radius_exact",
+             ordinary_radius.str()},
+            {"status",
+             tail_majorant_status_name(bridged.status)},
+            {"detail", bridged.detail}};
+        const bool singular_stage_inconclusive =
+            bridged.detail.rfind("singular seed ", 0) == 0;
+        if (bridged.status == TailMajorantStatus::Certified) {
+          double singular_tail_max = 0.0;
+          for (const auto& bound :
+               bridged.singular_tail.value.absolute)
+            singular_tail_max = std::max(
+                singular_tail_max,
+                bound.approximate_upper());
+          double ordinary_tail_max = 0.0;
+          for (const auto& bound :
+               bridged.ordinary_tail.value.absolute)
+            ordinary_tail_max = std::max(
+                ordinary_tail_max,
+                bound.approximate_upper());
+          trial["singular_tail_max_upper_approx"] =
+              singular_tail_max;
+          trial["ordinary_tail_max_upper_approx"] =
+              ordinary_tail_max;
+          trials.push_back(trial);
+          attempt.diagnostic["status"] = "certified";
+          attempt.diagnostic["selected"] =
+              std::move(trial);
+          attempt.diagnostic["trials"] =
+              std::move(trials);
+          attempt.diagnostic[
+              "ordinary_taylor_complete_max"] =
+              ordinary_taylor_complete_max;
+          attempt.evaluation =
+              std::move(bridged.evaluation);
+          return attempt;
+        }
+        trials.push_back(std::move(trial));
+        // A structural failure cannot be repaired by changing radii.
+        if (bridged.status ==
+            TailMajorantStatus::Unsupported) {
+          attempt.diagnostic["status"] = "unsupported";
+          attempt.diagnostic["trials"] =
+              std::move(trials);
+          return attempt;
+        }
+        if (singular_stage_inconclusive)
+          break;
+      }
+    }
+  }
+  attempt.diagnostic["status"] = "inconclusive";
+  attempt.diagnostic["trials"] = std::move(trials);
+  return attempt;
 }
 
 json::value optional_match_sign_json(
@@ -3856,8 +4180,54 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       exact_shadow_normalized_transformed_basis;
   std::optional<std::vector<LocalSolution<ComplexBall>>>
       exact_shadow_factorized_basis;
+  json::array exact_shadow_bridge_attempts;
+  const auto ensure_exact_shadow_physical_fused_basis = [&]()
+      -> const std::vector<LocalSolution<Rational>>& {
+    if (!exact_lattice.exact_shadow_fused_local_basis.has_value()) {
+      if (!exact_lattice.exact_shadow_source_local_basis.has_value() ||
+          exact_lattice.exact_shadow_source_local_basis->size() !=
+              dimension)
+        throw std::logic_error(
+            "exact Rational-shadow physical F*T fallback lost its source basis");
+      std::vector<const LocalSolution<Rational>*> sources;
+      sources.reserve(dimension);
+      for (const auto& source :
+           *exact_lattice.exact_shadow_source_local_basis) {
+        if (!source)
+          throw std::logic_error(
+              "exact Rational-shadow physical F*T fallback has an empty source column");
+        sources.push_back(source.get());
+      }
+      const auto transform_started =
+          std::chrono::steady_clock::now();
+      if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+          nullptr)
+        std::fprintf(
+            stderr,
+            "[diffexp2 terminal exact-shadow stage] lazy-exact-physical-F*T-start columns=%u\n",
+            dimension);
+      exact_lattice.exact_shadow_fused_local_basis =
+          right_transform_local_basis_exact(
+              sources, exact_lattice.saturation.transformation,
+              checkpoint_identity + ":lazy-exact-physical-F*T");
+      if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+          nullptr)
+        std::fprintf(
+            stderr,
+            "[diffexp2 terminal exact-shadow stage] lazy-exact-physical-F*T-done columns=%u elapsed_ms=%.3f\n",
+            dimension,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() -
+                transform_started)
+                .count());
+    }
+    return *exact_lattice.exact_shadow_fused_local_basis;
+  };
   if (normalized_matching_frame &&
-      exact_lattice.exact_shadow_fused_local_basis.has_value()) {
+      (exact_lattice.exact_shadow_fused_local_basis.has_value() ||
+       exact_lattice
+           .exact_shadow_fused_singular_tail_basis
+           .has_value())) {
     // The exact transformed local columns are the authority which removes
     // the terminal right-frame cancellation.  Specialize them, evaluate the
     // overlap matrices, solve, and certify under one precision lease.  A
@@ -3877,27 +4247,119 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         dimension, FiniteLaurentVector<ComplexBall>());
     for (auto& row : *exact_shadow_physical_transformed_basis)
       row.reserve(dimension);
-    exact_shadow_factorized_basis.emplace();
-    exact_shadow_factorized_basis->reserve(dimension);
+    const auto& exact_owner =
+        exact_lattice.exact_shadow_equation_owner;
+    std::shared_ptr<
+        const PreparedPhysicalClearedODE<Rational>>
+        exact_shadow_equation;
+    if (exact_owner &&
+        std::string(exact_owner->equation_scalar_domain()) ==
+            "rational")
+      exact_shadow_equation =
+          std::static_pointer_cast<
+              const PreparedPhysicalClearedODE<Rational>>(
+              exact_owner->physical_ode_erased());
     for (std::size_t column = 0; column < dimension; ++column) {
-      const auto& exact_local =
-          (*exact_lattice.exact_shadow_fused_local_basis)[column];
-      if (retained_taylor_width > exact_local.taylor_width())
+      const LocalSolution<Rational>* exact_local = nullptr;
+      if (exact_lattice.exact_shadow_fused_local_basis.has_value()) {
+        if (exact_lattice.exact_shadow_fused_local_basis->size() !=
+            dimension)
+          throw std::logic_error(
+              "exact Rational-shadow physical basis has the wrong dimension");
+        exact_local =
+            &(*exact_lattice.exact_shadow_fused_local_basis)[column];
+      }
+      const LocalSolution<Rational>* retained_tail_local =
+          nullptr;
+      if (exact_lattice
+              .exact_shadow_fused_singular_tail_basis
+              .has_value()) {
+        if (exact_lattice
+                .exact_shadow_fused_singular_tail_basis->size() !=
+            dimension)
+          throw std::logic_error(
+              "exact Rational-shadow singular-tail basis has the wrong dimension");
+        retained_tail_local =
+            &(*exact_lattice
+                  .exact_shadow_fused_singular_tail_basis)[column];
+      }
+      const auto* exact_evaluation_local =
+          retained_tail_local != nullptr
+          ? retained_tail_local
+          : exact_local;
+      if (exact_evaluation_local == nullptr ||
+          retained_taylor_width >
+              exact_evaluation_local->taylor_width())
         throw std::logic_error(
             "exact Rational-shadow transformed local is narrower than its Acb target");
       auto exact_options = basis_options;
       exact_options.t_order_reduction =
           static_cast<std::uint32_t>(
-              exact_local.taylor_width() - retained_taylor_width);
-      exact_shadow_factorized_basis->push_back(
-          specialize_rational_local_solution_to_acb(
-              exact_local,
-              checkpoint_identity +
-                  ":exact-shadow-factorized-column:" +
-                  std::to_string(column)));
-      const auto evaluated = evaluate_local_solution(
-          exact_shadow_factorized_basis->back(),
-          basis_point, exact_options);
+              exact_evaluation_local->taylor_width() -
+              retained_taylor_width);
+      std::optional<LocalEvaluation> bridged_evaluation;
+      if (exact_shadow_equation) {
+        const auto bridge_started =
+            std::chrono::steady_clock::now();
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] singular-ordinary-bridge-start column=%zu source=%s\n",
+              column,
+              retained_tail_local != nullptr
+                  ? "retained-reduced-tail"
+                  : "physical-fallback");
+        auto bridge =
+            try_terminal_singular_rational_shadow_ordinary_bridge(
+                *exact_shadow_equation, exact_local,
+                retained_tail_local,
+                exact_owner.get(),
+                basis_point, exact_options,
+                retained_taylor_width,
+                evaluation_window.complete_max, column);
+        exact_shadow_bridge_attempts.push_back(
+            bridge.diagnostic);
+        bridged_evaluation =
+            std::move(bridge.evaluation);
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] singular-ordinary-bridge-done column=%zu certified=%d elapsed_ms=%.3f\n",
+              column, bridged_evaluation.has_value() ? 1 : 0,
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() -
+                  bridge_started)
+                  .count());
+      } else {
+        exact_shadow_bridge_attempts.push_back(
+            json::object{
+                {"schema",
+                 "diffexp2-terminal-singular-ordinary-bridge-v1"},
+                {"column", column},
+                {"status",
+                 "unavailable-exact-equation-owner"}});
+      }
+      LocalEvaluation evaluated;
+      if (bridged_evaluation.has_value()) {
+        evaluated = std::move(*bridged_evaluation);
+      } else {
+        const auto& physical_basis =
+            ensure_exact_shadow_physical_fused_basis();
+        auto fallback = specialize_rational_local_solution_to_acb(
+            physical_basis[column],
+            checkpoint_identity +
+                ":exact-shadow-evaluation-fallback-column:" +
+                std::to_string(column));
+        auto fallback_options = basis_options;
+        fallback_options.t_order_reduction =
+            static_cast<std::uint32_t>(
+                fallback.taylor_width() -
+                retained_taylor_width);
+        evaluated = evaluate_local_solution(
+            fallback, basis_point, fallback_options);
+      }
       const EpsilonWindow exact_evaluation_window{
           evaluated.value.epsilon.min_power,
           evaluation_window.complete_max};
@@ -3909,6 +4371,249 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         (*exact_shadow_physical_transformed_basis)[row].push_back(
             std::move(frames[row]));
     }
+    if (exact_lattice.exact_shadow_fused_local_basis.has_value()) {
+      exact_shadow_factorized_basis.emplace();
+      exact_shadow_factorized_basis->reserve(dimension);
+      for (std::size_t column = 0; column < dimension; ++column)
+        exact_shadow_factorized_basis->push_back(
+            specialize_rational_local_solution_to_acb(
+                (*exact_lattice
+                      .exact_shadow_fused_local_basis)[column],
+                checkpoint_identity +
+                    ":exact-shadow-factorized-column:" +
+                    std::to_string(column)));
+      normal_frame_attempt[
+          "exact_shadow_factorized_basis_source"] =
+          "exact-physical-F*T";
+    } else if (
+        exact_lattice
+            .exact_shadow_fused_singular_tail_basis
+            .has_value() &&
+        exact_owner) {
+      exact_shadow_factorized_basis.emplace();
+      exact_shadow_factorized_basis->reserve(dimension);
+      bool retained_tail_overlap_certified = true;
+      json::object retained_tail_overlap{
+          {"schema",
+           "diffexp2-terminal-retained-tail-bridge-overlap-v1"},
+          {"status", "pending"},
+          {"required_min", evaluation_window.min_power},
+          {"required_complete_max",
+           evaluation_window.complete_max}};
+      for (std::size_t column = 0; column < dimension; ++column) {
+        const auto physicalize_started =
+            std::chrono::steady_clock::now();
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] acb-tail-physicalize-start column=%zu\n",
+              column);
+        auto numeric_tail =
+            specialize_rational_local_solution_to_acb(
+                (*exact_lattice
+                      .exact_shadow_fused_singular_tail_basis)
+                    [column],
+                checkpoint_identity +
+                    ":exact-shadow-reduced-tail-column:" +
+                    std::to_string(column));
+        std::optional<LocalSolution<ComplexBall>> physical;
+        try {
+          physical =
+              exact_owner
+                  ->physicalize_rational_shadow_singular_local(
+                      numeric_tail);
+        } catch (const std::exception& error) {
+          retained_tail_overlap_certified = false;
+          retained_tail_overlap["status"] =
+              "physicalization-error";
+          retained_tail_overlap["column"] = column;
+          retained_tail_overlap["detail"] = error.what();
+          exact_shadow_factorized_basis.reset();
+          break;
+        }
+        if (!physical.has_value()) {
+          retained_tail_overlap_certified = false;
+          retained_tail_overlap["status"] =
+              "physicalization-unavailable";
+          retained_tail_overlap["column"] = column;
+          exact_shadow_factorized_basis.reset();
+          break;
+        }
+        physical->checkpoint_identity =
+            checkpoint_identity +
+            ":exact-shadow-factorized-tail-column:" +
+            std::to_string(column);
+        validate_local_solution(*physical, false);
+        if (physical->taylor_width() < retained_taylor_width ||
+            physical->epsilon.complete_max <
+                evaluation_window.complete_max) {
+          retained_tail_overlap_certified = false;
+          retained_tail_overlap["status"] =
+              "insufficient-rebuilt-local-window";
+          retained_tail_overlap["column"] = column;
+          retained_tail_overlap["rebuilt_epsilon_min"] =
+              physical->epsilon.min_power;
+          retained_tail_overlap["rebuilt_epsilon_complete_max"] =
+              physical->epsilon.complete_max;
+          retained_tail_overlap["rebuilt_taylor_complete_max"] =
+              physical->taylor_complete_max;
+          break;
+        }
+        auto rebuilt_options = basis_options;
+        rebuilt_options.t_order_reduction =
+            static_cast<std::uint32_t>(
+                physical->taylor_width() -
+                retained_taylor_width);
+        std::optional<LocalEvaluation> rebuilt_evaluation;
+        try {
+          rebuilt_evaluation = evaluate_local_solution(
+              *physical, basis_point, rebuilt_options);
+        } catch (const std::exception& error) {
+          retained_tail_overlap_certified = false;
+          retained_tail_overlap["status"] =
+              "rebuilt-evaluation-error";
+          retained_tail_overlap["column"] = column;
+          retained_tail_overlap["detail"] = error.what();
+          break;
+        }
+        if (rebuilt_evaluation->value.epsilon.complete_max <
+                evaluation_window.complete_max) {
+          retained_tail_overlap_certified = false;
+          retained_tail_overlap["status"] =
+              "insufficient-rebuilt-evaluation-window";
+          retained_tail_overlap["column"] = column;
+          retained_tail_overlap["rebuilt_evaluation_min"] =
+              rebuilt_evaluation->value.epsilon.min_power;
+          retained_tail_overlap[
+              "rebuilt_evaluation_complete_max"] =
+              rebuilt_evaluation->value.epsilon.complete_max;
+          break;
+        }
+        auto rebuilt_frames = acb_evaluation_frames(
+            rebuilt_evaluation->value,
+            EpsilonWindow{
+                rebuilt_evaluation->value.epsilon.min_power,
+                evaluation_window.complete_max},
+            "rebuilt retained exact Rational-shadow tail basis at column " +
+                std::to_string(column));
+        bool column_overlaps = true;
+        for (std::size_t row = 0;
+             row < dimension && column_overlaps; ++row) {
+          const auto& authoritative =
+              (*exact_shadow_physical_transformed_basis)
+                  [row][column];
+          const auto& rebuilt = rebuilt_frames[row];
+          if (authoritative.complete_max() <
+                  evaluation_window.complete_max ||
+              rebuilt.complete_max() <
+                  evaluation_window.complete_max) {
+            retained_tail_overlap_certified = false;
+            column_overlaps = false;
+            retained_tail_overlap["status"] =
+                "insufficient-comparison-window";
+            retained_tail_overlap["column"] = column;
+            retained_tail_overlap["row"] = row;
+            retained_tail_overlap["authoritative_min"] =
+                authoritative.min_power();
+            retained_tail_overlap[
+                "authoritative_complete_max"] =
+                authoritative.complete_max();
+            retained_tail_overlap["rebuilt_min"] =
+                rebuilt.min_power();
+            retained_tail_overlap["rebuilt_complete_max"] =
+                rebuilt.complete_max();
+            break;
+          }
+          for (std::int64_t raw_power =
+                   evaluation_window.min_power;
+               raw_power <=
+                   evaluation_window.complete_max;
+               ++raw_power) {
+            const auto power =
+                local_algebra_detail::checked_i32(
+                    raw_power,
+                    "retained tail bridge overlap epsilon power");
+            const auto authoritative_coefficient =
+                power < authoritative.min_power()
+                ? ComplexBall(0)
+                : authoritative.coefficient(power);
+            const auto rebuilt_coefficient =
+                power < rebuilt.min_power()
+                ? ComplexBall(0)
+                : rebuilt.coefficient(power);
+            if (acb_overlaps(
+                    authoritative_coefficient.raw(),
+                    rebuilt_coefficient.raw()))
+              continue;
+            retained_tail_overlap_certified = false;
+            column_overlaps = false;
+            retained_tail_overlap["status"] =
+                "disjoint-rebuilt-evaluation";
+            retained_tail_overlap["column"] = column;
+            retained_tail_overlap["row"] = row;
+            retained_tail_overlap["epsilon_power"] = power;
+            break;
+          }
+        }
+        if (!column_overlaps) break;
+        exact_shadow_factorized_basis->push_back(
+            std::move(*physical));
+        if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+            nullptr)
+          std::fprintf(
+              stderr,
+              "[diffexp2 terminal exact-shadow stage] acb-tail-physicalize-done column=%zu elapsed_ms=%.3f\n",
+              column,
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() -
+                  physicalize_started)
+                  .count());
+      }
+      if (!retained_tail_overlap_certified ||
+          !exact_shadow_factorized_basis.has_value() ||
+          exact_shadow_factorized_basis->size() != dimension) {
+        exact_shadow_factorized_basis.reset();
+      } else {
+        retained_tail_overlap["status"] = "certified";
+        retained_tail_overlap["columns"] = dimension;
+      }
+      normal_frame_attempt[
+          "exact_shadow_retained_tail_bridge_overlap"] =
+          std::move(retained_tail_overlap);
+      if (std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") !=
+          nullptr)
+        std::fprintf(
+            stderr,
+            "[diffexp2 terminal exact-shadow stage] retained-tail-bridge-overlap certified=%d columns=%zu\n",
+            exact_shadow_factorized_basis.has_value() ? 1 : 0,
+            exact_shadow_factorized_basis.has_value()
+                ? exact_shadow_factorized_basis->size()
+                : std::size_t{0});
+      if (exact_shadow_factorized_basis.has_value())
+        normal_frame_attempt[
+            "exact_shadow_factorized_basis_source"] =
+            "exact-reduced-(tail*T)-then-acb-physical-gauge";
+    }
+    if (!exact_shadow_factorized_basis.has_value()) {
+      const auto& physical_basis =
+          ensure_exact_shadow_physical_fused_basis();
+      exact_shadow_factorized_basis.emplace();
+      exact_shadow_factorized_basis->reserve(dimension);
+      for (std::size_t column = 0; column < dimension; ++column)
+        exact_shadow_factorized_basis->push_back(
+            specialize_rational_local_solution_to_acb(
+                physical_basis[column],
+                checkpoint_identity +
+                    ":exact-shadow-factorized-fallback-column:" +
+                    std::to_string(column)));
+      normal_frame_attempt[
+          "exact_shadow_factorized_basis_source"] =
+          "lazy-exact-physical-F*T-fallback";
+    }
+    normal_frame_attempt[
+        "exact_shadow_singular_ordinary_bridges"] =
+        exact_shadow_bridge_attempts;
     if (const auto* diagnostics =
             std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
         diagnostics != nullptr && std::string(diagnostics) == "1") {

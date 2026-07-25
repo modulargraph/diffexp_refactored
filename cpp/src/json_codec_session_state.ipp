@@ -255,6 +255,34 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
             "Acb SCC physical equation does not enclose its retained exact Rational shadow");
     }
   }
+  std::shared_ptr<const PreparedPhysicalClearedODE<Rational>>
+      rational_shadow_singular_tail_equation;
+  std::vector<std::int32_t>
+      rational_shadow_singular_tail_epsilon_shifts;
+  if (const auto* raw_tail =
+          root.if_contains("rational_shadow_singular_tail")) {
+    const auto& tail = as_object(
+        *raw_tail, "Rational-shadow singular-tail frame");
+    require_exact_keys(
+        tail, {"schema", "equation", "epsilon_shifts"},
+        "Rational-shadow singular-tail frame");
+    if (required_string(tail, "schema") !=
+        "diffexp2-scc-singular-tail-frame-v1")
+      throw std::invalid_argument(
+          "Rational-shadow singular-tail frame has an unsupported schema");
+    rational_shadow_singular_tail_equation =
+        parse_prepared_physical_ode<Rational>(
+            tail.at("equation"), dimension, false);
+    for (const auto& raw_shift : as_array(
+             tail.at("epsilon_shifts"),
+             "Rational-shadow singular-tail epsilon shifts"))
+      rational_shadow_singular_tail_epsilon_shifts.push_back(
+          as_i32(raw_shift,
+                 "Rational-shadow singular-tail epsilon shift"));
+    if (rational_shadow_singular_tail_epsilon_shifts.size() != dimension)
+      throw std::invalid_argument(
+          "Rational-shadow singular-tail epsilon shifts have the wrong dimension");
+  }
   const auto exact_system = parse_exact_parent_matrix(
       parent.at("exact_system_record"), dimension,
       "exact parent system record");
@@ -708,7 +736,9 @@ std::shared_ptr<CompositeSCCChartBase> parse_composite_scc_chart(
       geometry_record, std::move(retained_geometry), work,
       std::move(blocks), std::move(couplings),
       std::move(physical_equation),
-      std::move(rational_shadow_physical_equation));
+      std::move(rational_shadow_physical_equation),
+      std::move(rational_shadow_singular_tail_equation),
+      std::move(rational_shadow_singular_tail_epsilon_shifts));
 }
 
 struct SessionRegistry {

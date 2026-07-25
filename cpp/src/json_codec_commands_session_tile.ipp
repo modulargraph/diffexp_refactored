@@ -426,9 +426,22 @@ json::object run_session_command(const json::object& root) {
           json::serialize(canonical_json_value(column_record))};
       NativeLocalDiagnostics diagnostics;
       diagnostics.top_valid = source->top_valid();
+      auto singular_tail_solution =
+          source->rational_shadow_singular_tail_solution();
+      if (!singular_tail_solution &&
+          source_owner->rational_shadow_singular_tail_equation()) {
+        auto reconstructed =
+            source_owner->rational_shadow_singular_tail_local(
+                source->solution());
+        if (reconstructed.has_value())
+          singular_tail_solution =
+              std::make_shared<const LocalSolution<Rational>>(
+                  std::move(*reconstructed));
+      }
       auto shadow_witness = std::make_shared<RationalShadowColumnWitness>(
           RationalShadowColumnWitness{
               std::make_shared<LocalSolution<Rational>>(source->solution()),
+              std::move(singular_tail_solution),
               shadow_identity, source_column.exact_column_identity,
               target_column.exact_column_identity, source_owner});
       imported = make_retained_typed_shared<ComplexBall,

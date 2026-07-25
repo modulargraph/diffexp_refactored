@@ -59,10 +59,14 @@ assert["scc_acb_manifest_retains_exact_rational_physical_shadow",
 assert["scc_non_acb_manifest_does_not_duplicate_rational_shadow",
   DiffExp2`Solve`Private`sccParentRationalShadowPhysicalODEPayload[
     cs, owner, serialization, 80] === None];
+singularTailPayload = <|"schema" ->
+    "diffexp2-rational-shadow-singular-tail-v1",
+  "equation" -> payload, "epsilon_shifts" -> {0, 1}|>;
 manifestShell = <|"identity" -> owner, "parent" -> <||>,
   "blocks" -> {}, "couplings" -> {}, "physical_ode" -> payload,
   "rational_shadow_identity" -> "shadow-fixture",
-  "rational_shadow_physical_ode" -> rationalShadowPayload|>;
+  "rational_shadow_physical_ode" -> rationalShadowPayload,
+  "rational_shadow_singular_tail" -> singularTailPayload|>;
 assert["scc_backend_wrapper_accepts_exact_physical_shadow_field",
   TrueQ[DiffExp2`CppBackend`Private`persistentSCCManifestKeysQ[
     manifestShell]]];
@@ -74,6 +78,9 @@ filledManifest = DiffExp2`CppBackend`Private`persistentSCCFilledManifest[
 assert["scc_backend_wrapper_forwards_exact_physical_shadow_field",
   Lookup[filledManifest, "rational_shadow_physical_ode", None] ===
     rationalShadowPayload];
+assert["scc_backend_wrapper_forwards_sheared_singular_tail_field",
+  Lookup[filledManifest, "rational_shadow_singular_tail", None] ===
+    singularTailPayload];
 
 Print["\nSCC physical ODE manifest smoke: ", passed, " passed, ", failed,
   " failed."];

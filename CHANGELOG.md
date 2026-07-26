@@ -10,6 +10,8 @@
   atomic, request-ordered publication. The 15-component unequal-mass Banana
   terminal projection fell from about 494 to 208 seconds on the development
   machine.
+- Serialized exact analytic-regulator reciprocals as explicit polynomial
+  quotients, matching FLINT's rational-function input grammar.
 - Bound deferred native value-handoff accuracy to the observable run's
   matching target, preventing low-digit transports from silently performing
   high-precision tail-certificate retries.

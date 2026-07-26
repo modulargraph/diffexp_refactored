@@ -31,6 +31,22 @@ assert["cpp_backend_librarylink_flint_available",
   AssociationQ[info] && info["schema"] === 1 &&
   StringQ[info["flint"]]];
 
+symbolicReciprocalValues = {
+  1/(1 + rho),
+  (2 - rho)/(1 + rho)^2
+};
+symbolicReciprocalStrings =
+  DiffExp2`CppBackend`EncodeSymbolicScalar[
+    #, {rho}] & /@ symbolicReciprocalValues;
+assert["cpp_symbolic_encoder_uses_explicit_rational_quotients",
+  AllTrue[symbolicReciprocalStrings, StringQ] &&
+  AllTrue[symbolicReciprocalStrings,
+    StringFreeQ[#, "^(-"] &] &&
+  And @@ MapThread[
+    Cancel[Together[ToExpression[#1] - #2]] === 0 &,
+    {symbolicReciprocalStrings, symbolicReciprocalValues}
+  ]];
+
 (* Large recurrence responses must use the bounded bulk parser without
    changing exact values, symbolic regulator identity, Acb accuracy, or the
    scalar decoder's diagnostics on malformed/mixed public input. *)

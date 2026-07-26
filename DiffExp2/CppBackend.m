@@ -245,7 +245,15 @@ EncodeSymbolicScalar[z_, vars_List] := Module[{value, num, den, names, extra},
       "Variables" -> names,
       "Detail" -> "coefficient lies outside the declared rational-function field"|>],
       Module]];
-  ToString[value, InputForm]];
+  (* InputForm prints a reciprocal polynomial as (1 + rho)^(-1), while
+     FLINT's pretty multivariate-rational parser accepts an explicit
+     numerator/denominator quotient.  Serialize the already validated
+     polynomial pair rather than the reconstructed Wolfram expression. *)
+  If[den === 1,
+    ToString[num, InputForm],
+    "(" <> ToString[num, InputForm] <> ")/(" <>
+      ToString[den, InputForm] <> ")"
+  ]];
 
 parseDecimal[s_String, precision_Integer] := Module[{held, value},
   held = StringReplace[s, {"e+" -> "*^", "e-" -> "*^-", "e" -> "*^"}];

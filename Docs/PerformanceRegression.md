@@ -59,6 +59,14 @@ it includes the bounded discovery retries users actually encounter.
 
 ## Four-loop banana gates
 
+The full four-loop investigation is intentionally paused as of 2026-07-26
+while other families are developed. No final banana4 result has passed the
+independent Bessel oracle. The boundary gate remains useful as an opt-in
+regression, but the full gate is diagnostic rather than release evidence until
+the correlated clearance-seed terminal path completes in production. See
+[`Banana4Status.md`](Banana4Status.md) for the precise stopping point, durable
+artifacts, closed experiments, and resume protocol.
+
 The four-loop banana has an opt-in boundary gate that crosses both of its first
 two singular handoffs and stops after the level-2 boundary. It is a
 production-chain correctness regression:

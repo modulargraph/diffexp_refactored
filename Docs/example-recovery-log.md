@@ -108,6 +108,12 @@ escalation does not tighten that line and triggers the rejected transitive
 
 ## Four-loop banana
 
+This table is the historical recovery summary through B4-145. The
+investigation subsequently advanced through B4-248 and is now intentionally
+paused. [`Banana4Status.md`](Banana4Status.md) is the canonical current
+handoff; [`banana4-debug-log.md`](banana4-debug-log.md) contains the complete
+experiment ledger.
+
 | ID | Observed issue | Controlled change | Result |
 |---|---|---|---|
 | B-01 | Earlier runs failed in upper terminal matching and endpoint geometry before producing a lower-level boundary. | Retained exact-right/factorized terminal work, geometry corrections, and the matching fixes recorded in their commits were exercised together in the latest production-profile run. | The closest run completed levels 4 and 3, wrote `banana4_level2_boundary.mx`, and entered level 2. No final banana4 value has been produced. |
@@ -127,10 +133,11 @@ escalation does not tighten that line and triggers the rejected transitive
 | B-15 | Phase timing showed each ordinary stored-row direct integral cost milliseconds, while unconditional factorized impulse integration cost 23--36 seconds per tile; replaying q/C itself cost only about 0.25 seconds. | Publish rigorous direct paired lines first and invoke ordinary-row factorization only after a typed final publication failure. Preserve terminal contraction, overlap checks, and honest counters. | Focused C++ tests pass. Five of six level-3 observables immediately avoided factorization; the sixth exposed that the publication gate was checking private halo coefficients, not a need for unconditional factorization. |
 | B-16 | The retained level-3 output extends through private ε^40, but level 2's independently planned public edge is ε^6. The dispatcher set observable `RequiredCompleteMax=40`, so private ε^29/ε^33 deficits repeatedly rejected an already sufficient public boundary. | Keep observable `Max=40` for later arithmetic but set `RequiredCompleteMax=6` from `PublicDeliverableCompleteMax`. Add a fixture retaining through ε^7 while certifying only ε^3, then regenerate levels 4 and 3 with clean provenance. | Confirmed. The dispatch suite passes 51/51. Clean B4-145 completes level 4 at 17.75 seconds and level 3 at 188.71 seconds, exports all seven level-3 results, and writes a current-source level-2 boundary without any ordinary factorization retry. Full log: `/private/tmp/diffexp2-banana4-b4-145-public-prefix-clean.log`. |
 
-Current progress: the old B-02 failure is no longer active. B4-138 localized
-the timing regression, B4-139 introduced direct-first publication, and
-B4-141 exposed the public/private epsilon-window conflation instead of another
-producer shortage. B4-145 is the current clean gate: levels 4 and 3 complete
-from the FIRE cache in 188.71 seconds and write a current-source level-2
-boundary while retaining the full private reservoirs. Levels 2 and 1 and the
-independent final Bessel-oracle comparison remain outstanding.
+Current progress: the old B-02 and B4-145 blockers are no longer active.
+B4-241 produced a current-source level-1 boundary, B4-245 reached the
+authoritative final upper residual, and B4-247 replaced its decorrelated
+physical-tail enclosure with a correlated clearance-seed formulation. That
+formulation passes production-shaped native lifecycle tests but has not yet
+reached the terminal match in a real banana4 run; B4-248 was deliberately
+paused during atlas preparation. No final result has passed the independent
+Bessel oracle.

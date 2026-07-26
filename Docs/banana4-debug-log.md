@@ -4,6 +4,11 @@ This file is the durable record for four-loop banana investigations. Update a
 row before starting any long run, then fill in its duration, result, and
 conclusion when the run ends.
 
+The investigation is intentionally paused as of 2026-07-26. See
+[`Banana4Status.md`](Banana4Status.md) for the concise current handoff, active
+unknown, artifact locations, and resume protocol. This ledger remains the
+authoritative experiment-by-experiment evidence.
+
 Rules:
 
 - Do not repeat a configuration already marked disproven unless a new change
@@ -21,9 +26,9 @@ Rules:
 
 - Equal-mass four-loop banana finite-part oracle:
   `39.655526834297652529992823046933581156446060218710...`
-- Accurate incoming level-1 boundary:
-  `/private/tmp/diffexp2-banana4-fresh-boundary-20260718/checkpoints/banana4_level1_boundary.mx`
-- Current branch: `codex/all-examples-recovery`
+- Current-source incoming level-1 boundary:
+  `diffexp_refactored-master-recovery/.diagnostics/b4-241-clean-full-work-reservoir/checkpoints/banana4_level1_boundary.mx`
+- Current integration point: `master` at `6e0d761` or later.
 - B4-128 source commit: `cf4af90`; B4-129 source commit: `7222d89`.
 - Historical dirty-tree diff fingerprint for B4-11 through B4-13:
   `71955139205bf5cdef753235ad78a88e0963af7f1d25cfb5367a2196772192fb`.
@@ -33,6 +38,10 @@ Rules:
   an available normal frame. The resulting weights are catastrophically
   conditioned.
 - No four-loop banana result has yet passed the oracle check.
+- B4-247's correlated clearance-seed residual is implemented and passes its
+  production-shaped lifecycle regression, but B4-248 was paused before the
+  real terminal match. The next run must test that path; it must not be
+  described as a retry of the old physical-enclosure formulation.
 
 ## Experiment ledger
 

@@ -120,6 +120,11 @@ number is an independent
 epsilon-zero oracle, not evidence that the complete DiffExp 2 four-loop ladder
 finished.
 
+The investigation is intentionally paused as of 2026-07-26 so development can
+focus on other families. No solver value has passed this oracle. The canonical
+handoff, including the last tested hypothesis and resume protocol, is
+[`Banana4Status.md`](Banana4Status.md).
+
 The unequal-mass fixture with squared masses
 ``{2,3/2,4/3,5/4,1}`` is present as ``banana4_unequal``. No completed,
 source-controlled ladder result is currently present, so the

@@ -13,7 +13,7 @@ The original repository revision used for the inventory is
 | `5pNonPlanar.nb` | Henn et al. nonplanar five-point canonical system, 108 masters and 31 letters | passing |
 | `5pPlanar1Mass.nb` | one-loop and `zzz`/`zmz`/`mzz` planar one-mass canonical systems | passing |
 | `Banana.nb` | banana differential equations | pending direct notebook parity |
-| `MultiplePolylogarithms.nb` | multiple-polylogarithm demonstration | pending |
+| `MultiplePolylogarithms.nb` | multiple-polylogarithm demonstration | passing |
 
 ## Henn nonplanar five-point system
 
@@ -130,6 +130,48 @@ times a coefficient block at a time instead of issuing a separate matrix-
 vector product for every `(matrix power, solution power)` pair. Sparse
 constant matrices and their sparse linear combinations remain sparse.
 
+## Multiple polylogarithms
+
+Run:
+
+```sh
+wolframscript -file \
+  Examples/OriginalDiffExp/MultiplePolylogarithms.wl
+```
+
+The original notebook evaluates a weight-\(w\) Goncharov polylogarithm by
+constructing a triangular rational ODE. The DiffExp 2 port multiplies that
+connection by an auxiliary epsilon and reads the coefficient of
+`eps^w`. This is an exact weight grading:
+
+```text
+d f = eps Sum_i E_(i,i+1) dlog(t-a_i) f,
+G(a_1,...,a_w;t) = coefficient of eps^w in f_1(t).
+```
+
+It also aligns ordinary GPL logarithms with DiffExp 2's exact
+`(eps Log[t])^p/p!` sector normalization. The original shuffle rules are
+retained to regularize trailing-zero base-point logarithms. A lower-half-
+plane contour implements `t-a-I0`, reproducing Mathematica's principal
+`+I Pi` continuation after a positive real letter is crossed.
+
+All seven saved notebook evaluations pass. On the July 2026 development
+machine:
+
+| Case | Expansion order | DiffExp 1 | DiffExp 2 | Absolute error |
+| --- | ---: | ---: | ---: | ---: |
+| `G[1,0,1;4]` | 50 | 0.169930 s | 0.211 s | `7.1e-26` |
+| `G[1,-10,0;4]` | 50 | 0.504031 s | 0.575 s | `2.7e-27` |
+| complex-letter weight 4 | 50 | 0.141181 s | 0.053 s | `7.7e-31` |
+| `G[1,0,1;4]` | 75 | 0.306044 s | 0.371 s | `1.4e-37` |
+| `G[1,-10,0;4]` | 75 | 0.657636 s | 0.960 s | `1.3e-37` |
+| complex-letter weight 4 | 75 | 0.138740 s | 0.090 s | `8.8e-41` |
+| `G[1,...,20;21]` | 100 | 38.701777 s | 64.51 s | `7.2e-42` |
+
+The weight-20 case uses 106 affine charts at a one-half clearance ratio.
+It is slower than the original notebook's specialized Möbius path, but
+retains roughly 41 correct digits and completes in about a minute.
+
 ## Optional timing gates
 
 The full 108-master example is deliberately opt-in:
@@ -165,3 +207,19 @@ The default hard deadline is 900 seconds. Per-family ceilings default to
 60 seconds for `1loop`, 300 seconds for `zmz` and `mzz`, and 350 seconds for
 `zzz`; override them with the corresponding
 `PLANAR_ONE_MASS_MAX_<FAMILY>_SECONDS` variables.
+
+The complete MPL notebook is opt-in:
+
+```sh
+DE2_RUN_MPL_TIMING=1 Scripts/run_release_tests.sh
+```
+
+or directly:
+
+```sh
+Scripts/run_mpl_timing_regression.sh
+```
+
+The default hard deadline is 180 seconds and the weight-20 ceiling is 120
+seconds. Override them with `MPL_DEADLINE_SECONDS` and
+`MPL_MAX_WEIGHT20_SECONDS`.

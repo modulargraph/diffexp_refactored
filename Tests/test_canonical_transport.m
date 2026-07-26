@@ -131,6 +131,37 @@ assert["canonical_algebraic_letter_transport",
     First[algebraicResult["Value"]] -
       {1, algebraicLog, algebraicLog^2/2}, 40]]] < 10^-18];
 
+chainSystem = DiffExp2`LoadCanonicalSystem[<|
+  "ConstantMatrices" -> {
+    SparseArray[{{1, 2} -> 1}, {3, 3}],
+    SparseArray[{{2, 3} -> 1}, {3, 3}]
+  },
+  "Letters" -> {1 + x, 1 + x},
+  "Variables" -> {x}
+|>];
+chainResult = catchDE2[DiffExp2`TransportCanonicalLine[
+  chainSystem,
+  {
+    {0, 0, 0},
+    {0, 0, 0},
+    {1, 0, 0}
+  },
+  {x -> 0},
+  {x -> 1},
+  "ExpansionOrder" -> 30,
+  "EpsilonOrder" -> 2,
+  "WorkingPrecision" -> 50,
+  "UsePade" -> False,
+  "ChartCenters" -> {1/2},
+  "ChartBoundaries" -> {0, 1}
+]];
+assert["canonical_block_chain_convolution",
+  !FailureQ[chainResult] &&
+  Abs[N[
+    chainResult["Value"][[1, 3]] - Log[2]^2/2,
+    40
+  ]] < 10^-14];
+
 singularSystem = DiffExp2`LoadCanonicalSystem[<|
   "ConstantMatrices" -> {
     {{0, 1}, {0, 0}},
@@ -139,6 +170,23 @@ singularSystem = DiffExp2`LoadCanonicalSystem[<|
   "Letters" -> {x, 1 + x},
   "Variables" -> {x}
 |>];
+singularGeometry = catchDE2[
+  DiffExp2`CanonicalLineChartGeometry[
+    singularSystem,
+    {x -> 0},
+    {x -> 1},
+    "WorkingPrecision" -> 50,
+    "ClearanceFactor" -> 1/3
+  ]
+];
+assert["canonical_clearance_supports_singular_start",
+  !FailureQ[singularGeometry] &&
+  First[singularGeometry["Centers"]] === 0 &&
+  First[singularGeometry["Boundaries"]] === 0 &&
+  singularGeometry["SingularStartCount"] >= 1 &&
+  TrueQ[
+    singularGeometry["MaximumClearanceRatio"] <= 1/3
+  ]];
 singularResult = catchDE2[DiffExp2`TransportCanonicalLine[
   singularSystem,
   {

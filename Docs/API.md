@@ -182,6 +182,10 @@ locating the finite zeros, poles, and square-root branch points of active
 letters. `"ClearanceFactor" -> 1/3` certifies each endpoint to be at most one
 third of the distance from its chart center to the nearest such singularity.
 The planner fails if the proposed contour itself contains a singularity.
+An exact singularity at the starting endpoint is supported: the first chart
+is centered there, its local residue is handled by the singular-start
+recurrence, and clearance is measured to the remaining singularities. An
+interior or final real singularity still requires a detour.
 `"ImaginaryDetour"` optionally adds
 `I amplitude 4 t (1-t) directions` to the straight kinematic path. It leaves
 both endpoints fixed and makes a shared `+i0`/`-i0` homotopy explicit when an

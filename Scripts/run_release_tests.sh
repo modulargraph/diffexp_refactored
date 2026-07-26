@@ -116,6 +116,11 @@ if [[ "${DE2_RUN_PLANAR_ONE_MASS_TIMING:-0}" == 1 ]]; then
   Scripts/run_planar_one_mass_timing_regression.sh
 fi
 
+if [[ "${DE2_RUN_MPL_TIMING:-0}" == 1 ]]; then
+  echo "=== optional original DiffExp multiple-polylogarithm example"
+  Scripts/run_mpl_timing_regression.sh
+fi
+
 if [[ "${DE2_RUN_DOUBLE_BOX_TIMING:-0}" == 1 ]]; then
   echo "=== optional full double-box timing regression"
   Scripts/run_double_box_timing_regression.sh

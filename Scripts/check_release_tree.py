@@ -165,6 +165,7 @@ EXAMPLE_FILES = {
     "Examples/FeynmanTrick/Sunrise.sh",
     "Examples/FeynmanTrick/UnequalBanana.sh",
     "Examples/OriginalDiffExp/HennNonplanarCanonical.wl",
+    "Examples/OriginalDiffExp/MultiplePolylogarithms.wl",
     "Examples/OriginalDiffExp/PlanarOneMassCanonical.wl",
 }
 
@@ -205,6 +206,7 @@ SCRIPT_FILES = {
     "Scripts/run_ft_stepwise2.m",
     "Scripts/run_ft_seeded_snapshot.m",
     "Scripts/run_henn_nonplanar_timing_regression.sh",
+    "Scripts/run_mpl_timing_regression.sh",
     "Scripts/run_planar_one_mass_timing_regression.sh",
     "Scripts/replay_native_terminal_checkpoint.m",
     "Scripts/run_release_tests.sh",

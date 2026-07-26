@@ -229,6 +229,25 @@ seconds for `1loop`, 300 seconds for `zmz` and `mzz`, and 350 seconds for
 `PLANAR_ONE_MASS_MAX_ZZZ_SECONDS`. Ancillary data are hash-pinned and
 ordinary tests never access the network.
 
+## Original multiple-polylogarithm gate
+
+The seven evaluations from the original DiffExp
+`MultiplePolylogarithms.nb` example are opt-in:
+
+```bash
+Scripts/run_mpl_timing_regression.sh
+```
+
+They can be appended to the release suite with `DE2_RUN_MPL_TIMING=1`.
+The gate checks the three weight-3/4 examples at expansion orders 50 and 75,
+then the weight-20 example at expansion order 100. The default hard deadline
+is 180 seconds and the weight-20 ceiling is 120 seconds. Override them with
+`MPL_DEADLINE_SECONDS` and `MPL_MAX_WEIGHT20_SECONDS`.
+
+The short examples require errors below `1e-23` or `1e-34`; the weight-20
+stress case requires error below `1e-40`. No external data or network access
+is needed.
+
 ## Planar double-box gate
 
 The planar double-box timing regression is an opt-in end-to-end gate for the

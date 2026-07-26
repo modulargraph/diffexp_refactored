@@ -240,30 +240,40 @@ canonicalSingularities[polynomials_List, lineParameter_Symbol,
 
 clearanceCharts[singularities_List, safety_, workingPrecision_Integer,
     searchSubdivisions_Integer] := Module[
-  {clearance, nextChart, centers = {}, boundaries = {0},
-    left, chart, ratios, realTolerance},
-  If[singularities === {},
+  {clearance, nextChart, centers, boundaries,
+    left, chart, ratios, realTolerance, startSingularities,
+    clearanceSingularities, firstRight},
+  realTolerance = 10^-Floor[workingPrecision/3];
+  startSingularities = Select[
+    singularities,
+    Abs[#] <= realTolerance &
+  ];
+  clearanceSingularities = Select[
+    singularities,
+    Abs[#] > realTolerance &
+  ];
+  If[clearanceSingularities === {},
     Return[<|
-      "Centers" -> {1/2},
+      "Centers" -> If[startSingularities === {}, {1/2}, {0}],
       "Boundaries" -> {0, 1},
-      "MaximumClearanceRatio" -> 0
+      "MaximumClearanceRatio" -> 0,
+      "SingularStartCount" -> Length[startSingularities]
     |>]
   ];
-  realTolerance = 10^-Floor[workingPrecision/3];
   If[AnyTrue[
-      singularities,
-      -realTolerance <= Re[#] <= 1 + realTolerance &&
+      clearanceSingularities,
+      realTolerance < Re[#] <= 1 + realTolerance &&
         Abs[Im[#]] <= realTolerance &
     ],
     err["E7",
-      "the proposed canonical contour contains a real singularity; choose an imaginary detour whose directions move every active letter singularity off the path",
+      "the proposed canonical contour contains an interior or final real singularity; choose an imaginary detour whose directions move every active letter singularity except a supported singular start off the path",
       <|"Singularities" -> Select[
-        singularities,
-        -realTolerance <= Re[#] <= 1 + realTolerance &&
+        clearanceSingularities,
+        realTolerance < Re[#] <= 1 + realTolerance &&
           Abs[Im[#]] <= realTolerance &
       ]|>]];
   clearance[point_?NumericQ] :=
-    Min[Abs[N[point, workingPrecision] - singularities]];
+    Min[Abs[N[point, workingPrecision] - clearanceSingularities]];
   nextChart[leftPoint_?NumericQ] := Module[
     {midpoint, function, samples, bracket, lo, hi, mid,
       center, right},
@@ -296,6 +306,13 @@ clearanceCharts[singularities_List, safety_, workingPrecision_Integer,
     right = Min[1, center + safety clearance[center]];
     {center, right}
   ];
+  If[startSingularities === {},
+    centers = {};
+    boundaries = {0},
+    firstRight = Min[1, safety clearance[0]];
+    centers = {0};
+    boundaries = {0, firstRight}
+  ];
   While[Last[boundaries] < 1,
     left = Last[boundaries];
     chart = nextChart[left];
@@ -313,7 +330,8 @@ clearanceCharts[singularities_List, safety_, workingPrecision_Integer,
   <|
     "Centers" -> centers,
     "Boundaries" -> boundaries,
-    "MaximumClearanceRatio" -> Max[ratios]
+    "MaximumClearanceRatio" -> Max[ratios],
+    "SingularStartCount" -> Length[startSingularities]
   |>
 ];
 

@@ -175,6 +175,19 @@ development machine. The corresponding saved DiffExp 1 times are about 86,
 [Original DiffExp example recovery](OriginalDiffExpExamples.md) for exact
 settings, hash-pinned ancillary data, and the opt-in timing gate.
 
+## Original multiple-polylogarithm example
+
+All seven saved evaluations from `MultiplePolylogarithms.nb` pass. The
+weight-3/4 cases agree to between about 25 and 40 digits and take 0.05 to
+0.96 seconds. The order-100 weight-20 case agrees to about 41 digits and
+takes 64.5 seconds, compared with the original notebook's 38.7 seconds.
+
+The port uses an auxiliary epsilon as an exact GPL weight counter, so the
+coefficient of `eps^w` in a triangular canonical system is the weight-\(w\)
+Goncharov polylogarithm. See
+[Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
+saved references, per-case timings, and optional gate.
+
 ## Reproducibility checklist
 
 A release result should record:

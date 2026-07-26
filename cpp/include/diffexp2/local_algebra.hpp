@@ -1201,6 +1201,40 @@ LocalSolution<Scalar> restrict_local_taylor_prefix(
   return output;
 }
 
+// Publish factorized matching columns only through the Taylor prefix which
+// the receiving basis actually used.  A singular endpoint may retain a wider
+// private reservoir for its tail proof; that is safe input to this boundary,
+// but it must not become part of the public retained-match contract.  A
+// narrower factorized column is never repairable by padding unknown terms.
+template <typename Scalar>
+void restrict_factorized_local_basis_taylor_prefix(
+    std::vector<LocalSolution<Scalar>>& basis,
+    std::uint32_t target_complete_max,
+    const std::string& context) {
+  if (basis.empty())
+    throw std::logic_error(
+        context + ": factorized local basis is empty");
+  for (std::size_t column = 0; column < basis.size(); ++column) {
+    validate_local_solution(basis[column], false);
+    if (basis[column].taylor_complete_max < target_complete_max)
+      throw std::logic_error(
+          context + ": factorized local column " +
+          std::to_string(column) +
+          " is narrower than the receiving Taylor prefix; "
+          "factorized_complete_max=" +
+          std::to_string(basis[column].taylor_complete_max) +
+          ";receiving_complete_max=" +
+          std::to_string(target_complete_max));
+    if (basis[column].taylor_complete_max == target_complete_max)
+      continue;
+    basis[column] = restrict_local_taylor_prefix(
+        basis[column], target_complete_max,
+        basis[column].checkpoint_identity +
+            ":receiving-taylor-prefix:" +
+            std::to_string(target_complete_max));
+  }
+}
+
 // Restrict a finite local slab to a target recurrence frame.  Discarding
 // known upper coefficients is safe because the target never consumes them.
 // Discarding lower coefficients is only safe when every discarded exact

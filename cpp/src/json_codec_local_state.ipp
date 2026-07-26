@@ -1,8 +1,59 @@
+// mag_get_fmpq materializes the complete binary exponent.  That is harmless
+// for an ordinary coefficient, but an already-useless enclosure can have an
+// exponent with billions of bits after an ill-conditioned value hop.  Asking
+// FLINT to build that rational is both unnecessary and can exhaust the
+// address space.  Only materialize a normalized radius/scale ratio whose
+// exponent is bounded.  Larger ratios are not actionable Taylor retries.
+constexpr slong kMaxHandoffRatioExponent = 1000000;
+
+bool bounded_mag_get_fmpq(fmpq_t output, const mag_t value) {
+  if (mag_is_inf(value)) return false;
+  if (mag_is_zero(value)) {
+    fmpq_zero(output);
+    return true;
+  }
+  if (!fmpz_fits_si(MAG_EXPREF(value))) return false;
+  const auto exponent = fmpz_get_si(MAG_EXPREF(value));
+  if (exponent < -kMaxHandoffRatioExponent ||
+      exponent > kMaxHandoffRatioExponent)
+    return false;
+  mag_get_fmpq(output, value);
+  return true;
+}
+
+// Preserve the old exact diagnostic arithmetic for normal values.  Only take
+// the magnitude-division fallback when either operand has a pathological
+// exponent that cannot safely be expanded as an exact rational.
+bool value_handoff_normalized_radius(fmpq_t output, const mag_t radius,
+                                     const mag_t scale) {
+  fmpq_t radius_exact, scale_exact;
+  fmpq_init(radius_exact);
+  fmpq_init(scale_exact);
+  const bool ordinary =
+      bounded_mag_get_fmpq(radius_exact, radius) &&
+      bounded_mag_get_fmpq(scale_exact, scale);
+  if (ordinary) {
+    fmpq_div(output, radius_exact, scale_exact);
+    fmpq_clear(scale_exact);
+    fmpq_clear(radius_exact);
+    return true;
+  }
+  fmpq_clear(scale_exact);
+  fmpq_clear(radius_exact);
+
+  mag_t normalized;
+  mag_init(normalized);
+  mag_div(normalized, radius, scale);
+  const bool bounded = bounded_mag_get_fmpq(output, normalized);
+  mag_clear(normalized);
+  return bounded;
+}
+
 // Return the least decimal relaxation which would make the value-handoff
-// coefficient pass.  The component radii, scale, and threshold remain exact
-// FLINT rationals, so this planning diagnostic also works beyond machine
-// exponent range.  UINT32_MAX denotes an invalid or effectively unbounded
-// coefficient rather than a retry recommendation.
+// coefficient pass.  Normalize each component radius by max(1, |value|)
+// while it is still a FLINT magnitude; only that ratio and the small
+// threshold become exact rationals.  UINT32_MAX denotes an invalid or
+// effectively unbounded coefficient rather than a retry recommendation.
 std::uint32_t value_handoff_required_additional_digits(
     const ComplexBall& value,
     const Rational& relative_error_max) {
@@ -18,29 +69,25 @@ std::uint32_t value_handoff_required_additional_digits(
   }
   if (mag_cmp_2exp_si(scale, 0) < 0) mag_one(scale);
 
-  fmpq_t threshold, scale_exact, allowed, radius_exact, relaxed, ten;
+  fmpq_t threshold, ratio_exact, relaxed, ten;
   fmpq_init(threshold);
-  fmpq_init(scale_exact);
-  fmpq_init(allowed);
-  fmpq_init(radius_exact);
+  fmpq_init(ratio_exact);
   fmpq_init(relaxed);
   fmpq_init(ten);
   fmpq_set_ui(ten, 10, 1);
   const auto threshold_string = relative_error_max.str();
   const bool parsed =
       fmpq_set_str(threshold, threshold_string.c_str(), 10) == 0;
-  if (parsed) {
-    fmpq_canonicalise(threshold);
-    mag_get_fmpq(scale_exact, scale);
-    fmpq_mul(allowed, threshold, scale_exact);
-  }
+  if (parsed) fmpq_canonicalise(threshold);
   const auto radius_deficit = [&](const mag_t radius) {
     if (!parsed || mag_is_inf(radius))
       return std::numeric_limits<std::uint32_t>::max();
-    mag_get_fmpq(radius_exact, radius);
-    fmpq_set(relaxed, allowed);
+    const bool bounded =
+        value_handoff_normalized_radius(ratio_exact, radius, scale);
+    if (!bounded) return std::numeric_limits<std::uint32_t>::max();
+    fmpq_set(relaxed, threshold);
     std::uint32_t digits = 0;
-    while (fmpq_cmp(radius_exact, relaxed) > 0) {
+    while (fmpq_cmp(ratio_exact, relaxed) > 0) {
       if (digits == std::numeric_limits<std::uint32_t>::max())
         return digits;
       ++digits;
@@ -55,9 +102,7 @@ std::uint32_t value_handoff_required_additional_digits(
   const auto required = std::max(real_deficit, imaginary_deficit);
   fmpq_clear(ten);
   fmpq_clear(relaxed);
-  fmpq_clear(radius_exact);
-  fmpq_clear(allowed);
-  fmpq_clear(scale_exact);
+  fmpq_clear(ratio_exact);
   fmpq_clear(threshold);
   mag_clear(scale);
   return required;
@@ -138,25 +183,21 @@ std::optional<Rational> value_handoff_accuracy_excess_ratio(
       }
       if (mag_cmp_2exp_si(scale, 0) < 0) mag_one(scale);
 
-      fmpq_t threshold, scale_exact, allowed, radius_exact, ratio;
+      fmpq_t threshold, normalized_exact, ratio;
       fmpq_init(threshold);
-      fmpq_init(scale_exact);
-      fmpq_init(allowed);
-      fmpq_init(radius_exact);
+      fmpq_init(normalized_exact);
       fmpq_init(ratio);
       const auto threshold_string = relative_error_max.str();
       const bool parsed =
           fmpq_set_str(threshold, threshold_string.c_str(), 10) == 0;
-      if (parsed) {
-        fmpq_canonicalise(threshold);
-        mag_get_fmpq(scale_exact, scale);
-        fmpq_mul(allowed, threshold, scale_exact);
-      }
+      if (parsed) fmpq_canonicalise(threshold);
       const auto absorb_radius = [&](const mag_t radius) {
-        if (!parsed || mag_is_inf(radius) || fmpq_is_zero(allowed))
+        if (!parsed || mag_is_inf(radius) || fmpq_is_zero(threshold))
           return false;
-        mag_get_fmpq(radius_exact, radius);
-        fmpq_div(ratio, radius_exact, allowed);
+        const bool bounded = value_handoff_normalized_radius(
+            normalized_exact, radius, scale);
+        if (!bounded) return false;
+        fmpq_div(ratio, normalized_exact, threshold);
         auto exact_ratio = rational_from_fmpq(ratio);
         if (!worst.has_value() || exact_ratio > *worst)
           worst = std::move(exact_ratio);
@@ -166,9 +207,7 @@ std::optional<Rational> value_handoff_accuracy_excess_ratio(
           absorb_radius(arb_radref(acb_realref(coefficient.raw()))) &&
           absorb_radius(arb_radref(acb_imagref(coefficient.raw())));
       fmpq_clear(ratio);
-      fmpq_clear(radius_exact);
-      fmpq_clear(allowed);
-      fmpq_clear(scale_exact);
+      fmpq_clear(normalized_exact);
       fmpq_clear(threshold);
       mag_clear(scale);
       if (!valid) return std::nullopt;

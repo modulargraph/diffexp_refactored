@@ -792,7 +792,9 @@ inline std::vector<ComplexBall>
 evaluate_causal_matrix_polynomial_on_tile(
     const std::vector<std::vector<ComplexBall>>& coefficients,
     const ComplexBall& tile, std::size_t width,
-    std::size_t matrix_size, std::size_t first_lag) {
+    std::size_t matrix_size, std::size_t first_lag,
+    const std::vector<std::pair<std::size_t, std::size_t>>&
+        active_entries) {
   if (coefficients.size() <= first_lag ||
       std::any_of(coefficients.begin(), coefficients.end(),
                   [width, matrix_size](const auto& lag) {
@@ -802,14 +804,56 @@ evaluate_causal_matrix_polynomial_on_tile(
         "causal matrix disk evaluation received incomplete coefficients");
   std::vector<ComplexBall> value(
       width * matrix_size, ComplexBall(0));
-  for (std::size_t reverse = coefficients.size();
-       reverse-- > first_lag;) {
-    for (std::size_t entry = 0;
-         entry < value.size(); ++entry)
-      value[entry] =
-          value[entry] * tile + coefficients[reverse][entry];
+  for (const auto& [entry, highest_lag] : active_entries) {
+    if (entry >= value.size() || highest_lag < first_lag ||
+        highest_lag >= coefficients.size())
+      throw std::invalid_argument(
+          "causal matrix disk evaluation received invalid sparse support");
+    auto polynomial = coefficients[highest_lag][entry];
+    for (std::size_t reverse = highest_lag;
+         reverse-- > first_lag;)
+      polynomial =
+          polynomial * tile + coefficients[reverse][entry];
+    value[entry] = std::move(polynomial);
   }
   return value;
+}
+
+inline std::vector<std::pair<std::size_t, std::size_t>>
+causal_matrix_polynomial_active_entries(
+    const std::vector<std::vector<ComplexBall>>& coefficients,
+    std::size_t width, std::size_t matrix_size,
+    std::size_t first_lag) {
+  if (coefficients.size() <= first_lag ||
+      std::any_of(coefficients.begin(), coefficients.end(),
+                  [width, matrix_size](const auto& lag) {
+                    return lag.size() != width * matrix_size;
+                  }))
+    throw std::invalid_argument(
+        "causal matrix disk support received incomplete coefficients");
+  std::vector<std::pair<std::size_t, std::size_t>> active;
+  active.reserve(width * matrix_size);
+  for (std::size_t entry = 0;
+       entry < width * matrix_size; ++entry) {
+    for (std::size_t reverse = coefficients.size();
+         reverse-- > first_lag;) {
+      if (coefficients[reverse][entry].is_zero()) continue;
+      active.emplace_back(entry, reverse);
+      break;
+    }
+  }
+  return active;
+}
+
+inline std::vector<ComplexBall>
+evaluate_causal_matrix_polynomial_on_tile(
+    const std::vector<std::vector<ComplexBall>>& coefficients,
+    const ComplexBall& tile, std::size_t width,
+    std::size_t matrix_size, std::size_t first_lag) {
+  return evaluate_causal_matrix_polynomial_on_tile(
+      coefficients, tile, width, matrix_size, first_lag,
+      causal_matrix_polynomial_active_entries(
+          coefficients, width, matrix_size, first_lag));
 }
 
 inline PhysicalNormalizedODEDiskBounds
@@ -853,6 +897,11 @@ certify_physical_normalized_ode_disk_bounds(
         "C(0)=0 before forming C/t";
     return result;
   }
+  const auto active_c_entries =
+      c_coefficients.size() == 1
+          ? std::vector<std::pair<std::size_t, std::size_t>>{}
+          : causal_matrix_polynomial_active_entries(
+                c_coefficients, width, matrix_size, 1);
 
   constexpr std::uint32_t kMaximumDepth = 18;
   constexpr std::size_t kMaximumVisitedTiles = 262144;
@@ -907,7 +956,7 @@ certify_physical_normalized_ode_disk_bounds(
                   width * matrix_size, ComplexBall(0))
             : evaluate_causal_matrix_polynomial_on_tile(
                   c_coefficients, tile_ball, width,
-                  matrix_size, 1);
+                  matrix_size, 1, active_c_entries);
     std::vector<ComplexBall> normalized(
         width * matrix_size, ComplexBall(0));
     for (std::size_t epsilon_degree = 0;
@@ -915,13 +964,17 @@ certify_physical_normalized_ode_disk_bounds(
       for (std::size_t input_degree = 0;
            input_degree <= epsilon_degree; ++input_degree) {
         const auto& scalar = q_inverse[input_degree];
+        if (scalar.is_zero()) continue;
         for (std::size_t entry = 0;
-             entry < matrix_size; ++entry)
-          normalized[epsilon_degree * matrix_size + entry] +=
-              scalar *
+             entry < matrix_size; ++entry) {
+          const auto& matrix_coefficient =
               c_over_t[(epsilon_degree - input_degree) *
                            matrix_size +
                        entry];
+          if (matrix_coefficient.is_zero()) continue;
+          normalized[epsilon_degree * matrix_size + entry] +=
+              scalar * matrix_coefficient;
+        }
       }
     for (std::size_t epsilon_degree = 0;
          epsilon_degree < width; ++epsilon_degree)

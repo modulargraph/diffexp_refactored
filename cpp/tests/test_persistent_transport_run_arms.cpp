@@ -1568,6 +1568,34 @@ void test_acb_value_handoff_significance_gate() {
       throw std::runtime_error(
           "Acb significance rejection did not fail closed before solving: " +
           json::serialize(rejected));
+
+    // A hopeless enclosure can carry a compact FLINT exponent whose exact
+    // rational expansion would require gigabytes.  Value-handoff diagnostics
+    // must reject it from magnitude arithmetic without materializing that
+    // rational.
+    const auto astronomical_radius = solve_local(
+        session, anchor_chart, "0", "acb-astronomical-radius-anchor",
+        "[1e-6 +/- 1e10000000000]", 10, false);
+    const auto before_astronomical_rejection = session_stats(session);
+    const auto astronomical_rejection = consume_value_hop(
+        session, plan, "upper", astronomical_radius,
+        "acb-astronomical-radius-anchor",
+        value_solver("2/3", false, 10, "1/100", "1/10000"),
+        "acb-value-gate");
+    require_ok(astronomical_rejection,
+               "Acb astronomical-radius value preflight");
+    const auto after_astronomical_rejection = session_stats(session);
+    if (astronomical_rejection.if_contains("used") == nullptr ||
+        astronomical_rejection.if_contains("reason") == nullptr ||
+        astronomical_rejection.at("used") != false ||
+        astronomical_rejection.at("reason") !=
+            "inflated-center-evaluation-fails-relative-accuracy-contract" ||
+        counter(after_astronomical_rejection, "local_solves") !=
+            counter(before_astronomical_rejection, "local_solves"))
+      throw std::runtime_error(
+          "Acb astronomical-radius rejection did not fail closed before "
+          "solving: " +
+          json::serialize(astronomical_rejection));
     require_ok(request(json::object{
         {"schema", 2}, {"op", "session.close"}, {"session", session}}),
         "Acb value-gate session.close");

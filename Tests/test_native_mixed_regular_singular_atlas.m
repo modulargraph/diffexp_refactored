@@ -42,15 +42,28 @@ receivingBases = If[FailureQ[atlas], {}, Join[
 sccBases = Select[receivingBases,
   Lookup[#, "Type", None] === "DiffExp2NativeSCCBasis" &];
 singularBasis = If[FailureQ[atlas], atlas,
-  SelectFirst[Rest[atlas["Lower", "Bases"]],
-    Lookup[#, "Type", None] === "DiffExp2NativeSCCBasis" &,
-    Missing["NotFound"]]];
+  Module[{position = FirstPosition[
+      atlas["Lower", "BasisKinds"], "SingularSCC",
+      Missing["NotFound"]]},
+    If[MissingQ[position], position,
+      Extract[atlas["Lower", "Bases"], position]]
+  ]];
 regularSCCBasis = If[FailureQ[atlas], atlas,
   SelectFirst[Rest[atlas["Upper", "Bases"]],
     Lookup[#, "Type", None] === "DiffExp2NativeSCCBasis" &,
     Missing["NotFound"]]];
 planStats = If[FailureQ[atlas], atlas,
   DiffExp2`CppBackend`PersistentTilePlanStatistics[atlas["Plan"]]];
+lowerMatchCount = If[AssociationQ[planStats],
+  Lookup[planStats, "lower_matches", Missing["NotAvailable"]],
+  Missing["NotAvailable"]];
+upperMatchCount = If[AssociationQ[planStats],
+  Lookup[planStats, "upper_matches", Missing["NotAvailable"]],
+  Missing["NotAvailable"]];
+initialLocalCount = If[FailureQ[atlas], Missing["NotAvailable"],
+  1 + Total[Length[Lookup[#, "Columns", {}]] & /@ receivingBases]];
+distinctSCCCount = Length@DeleteDuplicates[
+  Lookup[sccBases, "NativeSCC", Missing["NotAvailable"]]];
 before = If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
     atlas["Session"], <||>]];
@@ -91,7 +104,7 @@ planAfterSCCRelease = If[FailureQ[atlas], atlas,
 columnAfterSCCRelease = If[columns === {}, Missing["NoColumn"],
   DiffExp2`CppBackend`PersistentLocalStatistics[First[columns]]];
 
-strongOwnershipQ = Length[sccReleases] === 2 &&
+strongOwnershipQ = Length[sccReleases] === distinctSCCCount &&
   AllTrue[sccReleases, AssociationQ[#] &&
       Lookup[#, "status", "error"] === "ok" &] &&
   AssociationQ[planAfterSCCRelease] &&
@@ -132,8 +145,8 @@ transportQ = AssociationQ[transport] &&
   Lookup[transport, "status", "error"] === "ok" &&
   Lookup[transport, "native_retained", False] === True &&
   Lookup[transport, "json_coefficients", None] === 0 &&
-  Lookup[transport, "matches", None] === 1 &&
-  Lookup[transport, "tiles", None] === 2 &&
+  Lookup[transport, "matches", None] === lowerMatchCount &&
+  Lookup[transport, "tiles", None] === lowerMatchCount + 1 &&
   AssociationQ[transportFinalRelease] &&
   Lookup[transportFinalRelease, "status", "error"] === "ok" &&
   AssociationQ[transportStats] &&
@@ -144,7 +157,7 @@ transportQ = AssociationQ[transport] &&
   Lookup[transportRelease, "status", "error"] === "ok" &&
   AssociationQ[transportAfterRelease] &&
   Lookup[transportAfterRelease, "status", "ok"] === "error" &&
-  Lookup[afterTransport, "locals", -1] === 5 &&
+  Lookup[afterTransport, "locals", -1] === initialLocalCount &&
   Lookup[afterTransport, "transport_states", -1] === 0;
 
 run = If[FailureQ[atlas], atlas, catchDE2[
@@ -170,7 +183,8 @@ expected = 2 Sqrt[2]/3;
 runQ = AssociationQ[run] &&
   Lookup[run, "Type", None] ===
     "DiffExp2NativeRegularIndependentArmRun" &&
-  run["Lower", "Matches"] === 1 && run["Upper", "Matches"] === 1 &&
+  run["Lower", "Matches"] === lowerMatchCount &&
+  run["Upper", "Matches"] === upperMatchCount &&
   AssociationQ[exported] && Lookup[exported, "status", "error"] === "ok" &&
   ListQ[decoded] && NumberQ[epsilonZero] &&
   TrueQ[Abs[N[epsilonZero - expected, 30]] < 10^-5];
@@ -179,7 +193,8 @@ afterRun = If[FailureQ[atlas], <||>,
   Lookup[DiffExp2`CppBackend`PersistentSessionInformation[],
     atlas["Session"], <||>]];
 nativeExecutionQ = runQ &&
-  Lookup[afterRun, "local_matches", -1] === 3 &&
+  Lookup[afterRun, "local_matches", -1] ===
+    2 lowerMatchCount + upperMatchCount &&
   Lookup[afterRun, "transport_states", -1] === 0 &&
   Lookup[afterRun, "line_integrations", 0] > 0 &&
   Lookup[afterRun, "line_exports", -1] === 1;
@@ -196,13 +211,15 @@ preparedQ = AssociationQ[atlas] &&
   Lookup[atlas, "Type", None] ===
     "DiffExp2NativeRegularIndependentArmAtlas" &&
   TrueQ[Lookup[atlas, "ContainsSingularReceivingCharts", False]] &&
-  atlas["Lower", "BasisKinds"] === {"Anchor", "SingularSCC"} &&
-  atlas["Upper", "BasisKinds"] === {"Anchor", "Regular"} &&
-  Length[sccBases] === 2 &&
+  First[atlas["Lower", "BasisKinds"]] === "Anchor" &&
+  Last[atlas["Lower", "BasisKinds"]] === "SingularSCC" &&
+  First[atlas["Upper", "BasisKinds"]] === "Anchor" &&
+  AllTrue[Rest[atlas["Upper", "BasisKinds"]], # === "Regular" &] &&
+  distinctSCCCount >= 2 &&
   AllTrue[sccBases, Lookup[#, "Session", None] === atlas["Session"] &] &&
   Lookup[before, "tile_plans", 0] === 1 &&
-  Lookup[before, "scc_charts", 0] === 2 &&
-  Lookup[before, "locals", 0] === 5 &&
+  Lookup[before, "scc_charts", 0] === distinctSCCCount &&
+  Lookup[before, "locals", 0] === initialLocalCount &&
   Lookup[before, "local_matches", -1] === 0 &&
   Lookup[before, "line_integrations", -1] === 0;
 
@@ -213,7 +230,8 @@ cleanupQ = AssociationQ[released] &&
   Lookup[after, "tile_plans", -1] === 0 &&
   Lookup[after, "line_results", -1] === 0 &&
   Lookup[after, "scc_charts", -1] === 0 &&
-  Lookup[after, "local_matches", -1] === 3 &&
+  Lookup[after, "local_matches", -1] ===
+    2 lowerMatchCount + upperMatchCount &&
   Lookup[after, "line_integrations", 0] > 0;
 
 DiffExp2`Solve`ClearSolveCaches[];

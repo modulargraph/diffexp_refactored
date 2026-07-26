@@ -45,8 +45,9 @@ It uses the canonical system
 d f = eps Sum_i C_i dlog(W_i) f
 ```
 
-directly. Five letters contain the Gram-determinant square root. This does
-not pass an irrational matrix through the rational `LoadSystem` solver;
+directly. Five parity-odd ratio letters contain the Gram-determinant square
+root, and the root itself is the final letter. This does not pass an
+irrational matrix through the rational `LoadSystem` solver;
 `LoadCanonicalSystem` retains the constant matrices and algebraic letters
 separately.
 
@@ -56,10 +57,10 @@ order 25, Padé matching, and ε orders 0 through 4:
 | Implementation | Transport time | Maximum absolute reference error |
 | --- | ---: | ---: |
 | DiffExp 1 saved notebook output | 49.765221 s | approximately `1.7e-17` saved segment estimate |
-| DiffExp 2 canonical transport | about 5.5 s | `1.8e-12` |
+| DiffExp 2 canonical transport | 6.84 s | `1.73e-12` |
 
-Matrix extraction, system validation, and data import add about 0.38 s to
-the DiffExp 2 run. The transport is about 9.0 times faster than the saved
+Matrix extraction, system validation, and data import add about 0.46 s to
+the DiffExp 2 run. The transport is about 7.28 times faster than the saved
 DiffExp 1 order-25 timing. Times are machine-dependent; correctness is the
 primary contract.
 
@@ -115,10 +116,10 @@ order 25:
 
 | Family | Masters | Certified charts | DiffExp 1 saved time | DiffExp 2 comparable time | Speedup | Maximum error |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `1loop` | 13 | 107 | 85.556919 s | 24.19 s | 3.54x | `3.6e-12` |
-| `zmz` | 75 | 121 | 1391.141062 s | 130.50 s | 10.66x | `2.2e-11` |
-| `mzz` | 74 | 122 | 992.459149 s | 119.38 s | 8.31x | `3.2e-11` |
-| `zzz` | 86 | 119 | 1670.664508 s | 145.29 s | 11.50x | `2.5e-11` |
+| `1loop` | 13 | 107 | 85.556919 s | 28.58 s | 2.99x | `3.6e-12` |
+| `zmz` | 75 | 121 | 1391.141062 s | 156.76 s | 8.87x | `2.2e-11` |
+| `mzz` | 74 | 122 | 992.459149 s | 143.04 s | 6.94x | `3.2e-11` |
+| `zzz` | 86 | 119 | 1670.664508 s | 174.18 s | 9.59x | `2.5e-11` |
 
 The DiffExp 2 comparable time includes chart construction and the complete
 transport call, but excludes ancillary import/system validation. Times are
@@ -160,17 +161,17 @@ machine:
 
 | Case | Expansion order | DiffExp 1 | DiffExp 2 | Absolute error |
 | --- | ---: | ---: | ---: | ---: |
-| `G[1,0,1;4]` | 50 | 0.169930 s | 0.211 s | `7.1e-26` |
-| `G[1,-10,0;4]` | 50 | 0.504031 s | 0.575 s | `2.7e-27` |
-| complex-letter weight 4 | 50 | 0.141181 s | 0.053 s | `7.7e-31` |
-| `G[1,0,1;4]` | 75 | 0.306044 s | 0.371 s | `1.4e-37` |
-| `G[1,-10,0;4]` | 75 | 0.657636 s | 0.960 s | `1.3e-37` |
-| complex-letter weight 4 | 75 | 0.138740 s | 0.090 s | `8.8e-41` |
-| `G[1,...,20;21]` | 100 | 38.701777 s | 64.51 s | `7.2e-42` |
+| `G[1,0,1;4]` | 50 | 0.169930 s | 0.218 s | `7.1e-26` |
+| `G[1,-10,0;4]` | 50 | 0.504031 s | 0.593 s | `2.7e-27` |
+| complex-letter weight 4 | 50 | 0.141181 s | 0.054 s | `7.7e-31` |
+| `G[1,0,1;4]` | 75 | 0.306044 s | 0.362 s | `1.4e-37` |
+| `G[1,-10,0;4]` | 75 | 0.657636 s | 0.990 s | `1.3e-37` |
+| complex-letter weight 4 | 75 | 0.138740 s | 0.092 s | `8.8e-41` |
+| `G[1,...,20;21]` | 100 | 38.701777 s | 76.62 s | `7.2e-42` |
 
 The weight-20 case uses 106 affine charts at a one-half clearance ratio.
 It is slower than the original notebook's specialized Möbius path, but
-retains roughly 41 correct digits and completes in about a minute.
+retains roughly 41 correct digits and completes in about 77 seconds.
 
 ## Equal-mass Banana
 
@@ -209,7 +210,7 @@ all 20 saved endpoint coefficients agree with the original notebook's
 | Implementation | Route | Time | Maximum error |
 | --- | --- | ---: | ---: |
 | DiffExp 1 saved notebook | `t=-1` to `t=32`, including the `t=20` table | 41.237399 s | saved estimate `1.27e-37` |
-| DiffExp 2 | three-leg contour ending at `t=20` | 35.98 s | `2.72e-11` |
+| DiffExp 2 | three-leg contour ending at `t=20` | 27.31 s | `2.72e-11` |
 
 The timings are useful historical context but not strictly endpoint-for-
 endpoint because the old call continued to `t=32`.

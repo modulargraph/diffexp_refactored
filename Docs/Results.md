@@ -149,11 +149,11 @@ preparation, JSON/LibraryLink transfer, and validation.
 The 108-master, 31-letter canonical system from arXiv:1812.11160 is
 reproduced through epsilon order 4. At working precision 50 and expansion
 order 25, the maximum absolute error against the published endpoint table is
-`1.6e-12`.
+`1.73e-12`.
 
 The saved DiffExp 1 notebook reports 49.765221 seconds for its order-25
-transport. DiffExp 2 takes about 5.5 seconds for canonical transport on the July
-2026 development machine, plus about 0.38 seconds for matrix extraction,
+transport. DiffExp 2 takes 6.84 seconds for canonical transport on the July
+2026 development machine, plus about 0.46 seconds for matrix extraction,
 validation, and ancillary-data import. See
 [Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
 pinned data fetcher, settings, and opt-in timing gate.
@@ -168,7 +168,7 @@ published PH1 boundary to PH6 through epsilon order 4. At working precision
 Clearance-certified algebraic charts are essential: uniform charts can
 cross a Taylor convergence disk even when the grid looks fine, and raising
 the series order then amplifies the error. Including chart planning and the
-complete transport call, DiffExp 2 takes about 24, 130, 119, and 145 seconds
+complete transport call, DiffExp 2 takes about 29, 157, 143, and 174 seconds
 for `1loop`, `zmz`, `mzz`, and `zzz`, respectively, on the July 2026
 development machine. The corresponding saved DiffExp 1 times are about 86,
 1391, 992, and 1671 seconds. See
@@ -179,8 +179,8 @@ settings, hash-pinned ancillary data, and the opt-in timing gate.
 
 All seven saved evaluations from `MultiplePolylogarithms.nb` pass. The
 weight-3/4 cases agree to between about 25 and 40 digits and take 0.05 to
-0.96 seconds. The order-100 weight-20 case agrees to about 41 digits and
-takes 64.5 seconds, compared with the original notebook's 38.7 seconds.
+0.99 seconds. The order-100 weight-20 case agrees to about 41 digits and
+takes 76.62 seconds, compared with the original notebook's 38.7 seconds.
 
 The port uses an auxiliary epsilon as an exact GPL weight counter, so the
 coefficient of `eps^w` in a triangular canonical system is the weight-\(w\)
@@ -196,7 +196,7 @@ The contour runs through the upper half-plane to avoid the real
 regular-singular points at `t=0,4,16`.
 
 At working precision 100, expansion order 50, and epsilon orders 0 through 4,
-the three transport legs take 35.98 seconds in total and the maximum absolute
+the three transport legs take 27.31 seconds in total and the maximum absolute
 error over all 20 coefficients is `2.72e-11`. The old notebook reports
 41.237399 seconds for its longer `t=-1` to `t=32` path that produced the
 same table, so this timing is contextual rather than a strict like-for-like

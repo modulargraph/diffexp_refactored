@@ -265,11 +265,35 @@ contour and checks all 20 coefficients against the saved original notebook
 table with maximum absolute tolerance `1e-10`.
 
 The default hard deadline is 180 seconds and the three-leg transport ceiling
-is 75 seconds. The July 2026 development run took 35.98 seconds at working
+is 75 seconds. The July 2026 development run took 27.31 seconds at working
 precision 100 and expansion order 50. Override the limits with
 `ORIGINAL_BANANA_DEADLINE_SECONDS` and
 `ORIGINAL_BANANA_MAX_TRANSPORT_SECONDS`. The exact matrices are hash-pinned
 and ordinary tests never access the network.
+
+## Original unequal-mass Banana gate
+
+The 15-master unequal-mass endpoint from the same original `Banana.nb`
+example has a separate opt-in gate:
+
+```bash
+Scripts/fetch_original_banana_data.sh
+Scripts/run_original_banana_unequal_timing_regression.sh
+```
+
+It can be appended to the release suite with
+`DE2_RUN_ORIGINAL_BANANA_UNEQUAL_TIMING=1`. The gate transports the equal-mass
+seed from `t=-1` to `psq=50`, applies the exact equal-to-unequal degeneration
+map, and deforms the squared masses to `{2,3/2,4/3,1}`. It retains epsilon
+orders 0 through 7 and checks every master through order 4 against the saved
+high-precision DiffExp 1 endpoint with maximum absolute tolerance `1e-8`.
+
+The default hard deadline is 600 seconds and the complete equal-plus-mass
+transport ceiling is 420 seconds. The July 2026 development run took 211.15
+seconds at working precision 100 and expansion order 50, compared with
+320.636349 seconds for the saved like-for-like DiffExp 1 crosscheck. Override
+the limits with `ORIGINAL_BANANA_UNEQUAL_DEADLINE_SECONDS` and
+`ORIGINAL_BANANA_UNEQUAL_MAX_TOTAL_SECONDS`.
 
 ## Planar double-box gate
 

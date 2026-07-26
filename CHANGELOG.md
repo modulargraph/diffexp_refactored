@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Reproduced the original DiffExp Henn and one-mass canonical pentagons,
+  multiple-polylogarithm notebook, and equal-mass Banana endpoint with
+  hash-pinned inputs, saved-reference checks, and opt-in timing gates.
+- Bound deferred native value-handoff accuracy to the observable run's
+  matching target, preventing low-digit transports from silently performing
+  high-precision tail-certificate retries.
 - Upgraded Feynman-trick preparation to FIRE 7.1 with finite-field Zippel
   sampling, multiprime MPI execution, exact rational reconstruction, and an
   explicitly selectable Classical parity backend.

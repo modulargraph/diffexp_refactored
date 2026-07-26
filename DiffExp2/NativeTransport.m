@@ -8,11 +8,11 @@ BeginPackage["DiffExp2`NativeTransport`",
    "DiffExp2`CppBackend`"}];
 
 PrepareNativeRegularIndependentArms::usage =
-  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var}, or mutually exclusive Integrands->{cvecs,var}, derives the honest global epsilon halo required by polar coefficient rows. TargetCompleteMax->Automatic uses the configured EpsilonOrder; a nonnegative integer selects the public atlas target before the coefficient halo is added to the source solve. It returns only opaque native locals/bases and exact atlas metadata.";
+  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var}, or mutually exclusive Integrands->{cvecs,var}, derives the honest global epsilon halo required by polar coefficient rows. TargetCompleteMax->Automatic uses the configured EpsilonOrder; a nonnegative integer selects the public atlas target before the coefficient halo is added to the source solve. MatchingCertificationDigits must match the subsequent observable run and binds deferred value-handoff accuracy to that run rather than to an unrelated global chop target. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 RunNativeTransportObservableBatch::usage =
-  "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. ObservableContractionChunkSize defaults to 1 so prepared rows are sent to the native backend in bounded-memory deterministic chunks. MatchingCertificationDigits controls internal hop residual certification independently of the configured linear-solve/chop target. PublicationDigits explicitly controls downstream endpoint-publication accuracy. Both default to the configured matching digits. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
+  "RunNativeTransportObservableBatch[atlas,observables,var] marches the retained lower/upper atlas exactly once, then contracts every ordered integrate, limitLower, and limitUpper observable without rematching. ObservableContractionChunkSize defaults to 1 so prepared rows are sent to the native backend in bounded-memory deterministic chunks. MatchingCertificationDigits controls internal hop residual certification independently of the configured linear-solve/chop target and must equal the value used to prepare the atlas. PublicationDigits explicitly controls downstream endpoint-publication accuracy. Both default to the configured matching digits. ValueHopExecution->False selects deterministic certified basis handoffs when physical tail propagation is known to be unprofitable. Each observable contains Operation, Identity, CheckpointIdentity, CoefficientVector, and Epsilon; integrate observables may additionally contain TailPolicy. Results are opaque retained line/endpoint handles and preserve request order.";
 RunNativeTransportObservableBatchOwned::usage =
   "RunNativeTransportObservableBatchOwned[atlasSymbol,observables,var] is the ownership-taking batch entry point. It compacts atlasSymbol after preparing the observable rows, before allocating native transport states, so large Wolfram ChartSystems are no longer retained at the march peak.";
 SaveNativeTransportObservableBatchCheckpoint::usage =
@@ -1677,6 +1677,7 @@ Options[PrepareNativeRegularIndependentArms] = {
   "Threads" -> Automatic, "Integrand" -> Automatic,
   "Integrands" -> Automatic, "TargetCompleteMax" -> Automatic,
   "RequiredTargetCompleteMax" -> Automatic,
+  "MatchingCertificationDigits" -> Automatic,
   "RegularValueAggregationGuardDigits" -> Automatic,
   "DeferReceivingBases" -> False};
 
@@ -1693,6 +1694,8 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
    requiredTargetOption = OptionValue["RequiredTargetCompleteMax"],
    availableMax,
    minimumSolveMax, matchEpsilonPadding,
+   matchingCertificationDigits =
+     OptionValue["MatchingCertificationDigits"],
    regularValueAggregationGuardDigits =
      OptionValue["RegularValueAggregationGuardDigits"],
    cleanup, output, preparedBases = {}, preparedOwners = {},
@@ -1713,6 +1716,15 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     err["E8", <|"TargetCompleteMax" -> targetMax,
       "RequiredTargetCompleteMax" -> requiredTargetOption,
       "Detail" -> "RequiredTargetCompleteMax must be an integer between zero and TargetCompleteMax"|>]];
+  matchingCertificationDigits = Replace[
+    matchingCertificationDigits,
+    Automatic :> DiffExp2`Tolerances`Tol["MatchDigits"]];
+  If[!IntegerQ[matchingCertificationDigits] ||
+      !TrueQ[1 <= matchingCertificationDigits <= 1000000],
+    err["E8", <|
+      "MatchingCertificationDigits" -> matchingCertificationDigits,
+      "Detail" ->
+        "MatchingCertificationDigits must be Automatic or a positive integer"|>]];
   plans = normalizeSharedAnchor[lowerPlan, upperPlan];
   plans = bridgeNativeRegularPlanScales /@ plans;
   {lower, upper} = plans;
@@ -1790,7 +1802,9 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     Null];
   output = Block[{
     DiffExp2`Solve`Private`$cppRegularValueAggregationGuardDigits =
-      regularValueAggregationGuardDigits},
+      regularValueAggregationGuardDigits,
+    DiffExp2`Solve`Private`$cppRegularValueMatchingCertificationDigits =
+      matchingCertificationDigits},
   Catch[
   nativeStageTiming["anchor-prepare-start"];
   anchorSystem = DiffExp2`Solve`PrepareChart[sys, First[lower["Charts"]]];
@@ -1953,6 +1967,7 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     "TargetCompleteMax" -> targetMax,
     "RequiredTargetCompleteMax" -> requiredTargetMax,
     "MatchEpsilonPadding" -> matchEpsilonPadding,
+    "MatchingCertificationDigits" -> matchingCertificationDigits,
     "RegularValueAggregationGuardDigits" ->
       regularValueAggregationGuardDigits,
     "Threads" -> threads,
@@ -2321,7 +2336,8 @@ nativeValueAccuracyPlateauQ[response_] :=
 
 nativeStreamTransportArm[atlas_Association, data_Association,
     arm_String, epsilon_Association, checkpointRoot_String,
-    refinement_Association, diagnosticContext_:<||>] := Module[
+    refinement_Association, diagnosticContext_:<||>,
+    valueHopExecutionOption_:Automatic] := Module[
   {systems = Rest[data["ChartSystems"]], current = atlas["Anchor"],
    valueSolvers = data["ValueSolvers"], tiles = {atlas["Anchor"]},
    ownerRecords = Lookup[data, "OwnerRecords", {}], hopEpsilon,
@@ -2333,7 +2349,8 @@ nativeStreamTransportArm[atlas_Association, data_Association,
    posthopPath, posthopIdentity, posthopSaved, posthopManifest,
    posthopManifestPath,
    shadowTarget, valueAccuracyFailureStreak = 0,
-   valueHopExecution = nativeValueHopExecutionQ[],
+   valueHopExecution = Replace[valueHopExecutionOption,
+     Automatic :> nativeValueHopExecutionQ[]],
    terminalMatchDigitsText =
      Environment["DE2_DIAGNOSTIC_TERMINAL_MATCH_DIGITS"],
    preterminalMatchDigitsText =
@@ -2714,6 +2731,7 @@ Options[RunNativeTransportObservableBatch] = {
   "ObservableContractionThreads" -> 1,
   "MatchingCertificationDigits" -> Automatic,
   "PublicationDigits" -> Automatic,
+  "ValueHopExecution" -> Automatic,
   "ConsumeReceivingBases" -> False,
   "AtlasCompactor" -> Identity};
 
@@ -2728,6 +2746,7 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
    publicationDigits = OptionValue["PublicationDigits"],
    matchingCertificationDigits =
      OptionValue["MatchingCertificationDigits"],
+   valueHopExecution = OptionValue["ValueHopExecution"],
    publicationRelativeTolerance,
    checkpoints, prepared, sourceMin, availableMax, projectedRequired,
    contractionRequired, statePublicRequired,
@@ -2763,6 +2782,12 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     err["E8", <|"ObservableContractionThreads" ->
       contractionThreads,
       "Detail" -> "native observable contraction threads must be an integer from 1 through 32"|>]];
+  valueHopExecution = Replace[valueHopExecution,
+    Automatic :> nativeValueHopExecutionQ[]];
+  If[!BooleanQ[valueHopExecution],
+    err["E8", <|"ValueHopExecution" -> valueHopExecution,
+      "Detail" ->
+        "ValueHopExecution must be Automatic, True, or False"|>]];
   publicationDigits = Replace[publicationDigits,
     Automatic :> DiffExp2`Tolerances`Tol["MatchDigits"]];
   matchingCertificationDigits = Replace[matchingCertificationDigits,
@@ -2772,6 +2797,15 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     err["E8", <|"MatchingCertificationDigits" ->
         matchingCertificationDigits,
       "Detail" -> "native matching certification digits must be a positive integer"|>]];
+  If[Lookup[atlas, "MatchingCertificationDigits",
+        DiffExp2`Tolerances`Tol["MatchDigits"]] =!=
+      matchingCertificationDigits,
+    err["E8", <|
+      "AtlasMatchingCertificationDigits" ->
+        Lookup[atlas, "MatchingCertificationDigits", Missing["NotFound"]],
+      "MatchingCertificationDigits" -> matchingCertificationDigits,
+      "Detail" ->
+        "native atlas and observable run must use the same matching certification digits"|>]];
   If[!IntegerQ[publicationDigits] ||
       !TrueQ[1 <= publicationDigits <= 1000000],
     err["E8", <|"PublicationDigits" -> publicationDigits,
@@ -2885,6 +2919,7 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
     "anchor_checkpoint_identity" ->
       nativeOpaqueCheckpoint[workingAtlas["Anchor"], "anchor"],
     "epsilon" -> epsilon, "refinement" -> refinement,
+    "value_hop_execution" -> valueHopExecution,
     "publication_relative_tolerance" ->
       publicationRelativeTolerance,
     "observables" -> Map[KeyTake[#, {"Operation", "Identity",
@@ -2902,7 +2937,8 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
             "RowRecipes" -> upperRowRecipes,
             "Variable" -> var,
             "Domain" -> workingAtlas["Domain"],
-            "ObservableCheckpointRoot" -> checkpointRoot|>]|>;
+            "ObservableCheckpointRoot" -> checkpointRoot|>,
+          valueHopExecution]|>;
       err["E5", <|
         "DiagnosticArm" -> "upper",
         "StreamedArm" -> streamedArms["upper"],
@@ -2912,10 +2948,12 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       streamedArms = <|
         "lower" -> nativeStreamTransportArm[workingAtlas,
           workingAtlas["Lower"], "lower", epsilon,
-          checkpointRoot <> ":march", refinement],
+          checkpointRoot <> ":march", refinement, <||>,
+          valueHopExecution],
         "upper" -> nativeStreamTransportArm[workingAtlas,
           workingAtlas["Upper"], "upper", epsilon,
-          checkpointRoot <> ":march", refinement]|>;
+          checkpointRoot <> ":march", refinement, <||>,
+          valueHopExecution]|>;
       nativeStageTiming["transport-state-publish-start"];
       DiffExp2`CppBackend`PublishPersistentConsumedTransportStates[
         workingAtlas["Plan"], workingAtlas["Anchor"], streamedArms,
@@ -3205,7 +3243,8 @@ Options[RunNativeTransportObservableBatchOwned] = {
   "ObservableContractionChunkSize" -> 1,
   "ObservableContractionThreads" -> 1,
   "MatchingCertificationDigits" -> Automatic,
-  "PublicationDigits" -> Automatic};
+  "PublicationDigits" -> Automatic,
+  "ValueHopExecution" -> Automatic};
 RunNativeTransportObservableBatchOwned[owner_Symbol, observables_List,
     var_Symbol, OptionsPattern[]] :=
   RunNativeTransportObservableBatch[owner, observables, var,
@@ -3217,6 +3256,7 @@ RunNativeTransportObservableBatchOwned[owner_Symbol, observables_List,
     "MatchingCertificationDigits" ->
       OptionValue["MatchingCertificationDigits"],
     "PublicationDigits" -> OptionValue["PublicationDigits"],
+    "ValueHopExecution" -> OptionValue["ValueHopExecution"],
     "ConsumeReceivingBases" -> True,
     "AtlasCompactor" -> Function[compactAtlas, owner = compactAtlas]];
 

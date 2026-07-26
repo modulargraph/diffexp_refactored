@@ -248,6 +248,29 @@ The short examples require errors below `1e-23` or `1e-34`; the weight-20
 stress case requires error below `1e-40`. No external data or network access
 is needed.
 
+## Original equal-mass Banana gate
+
+The equal-mass portion of the original DiffExp `Banana.nb` example is
+opt-in:
+
+```bash
+Scripts/fetch_original_banana_data.sh
+Scripts/run_original_banana_timing_regression.sh
+```
+
+It can be appended to the release suite with
+`DE2_RUN_ORIGINAL_BANANA_TIMING=1`. The gate transports all four masters
+through epsilon order 4 from `t=-1` to `t=20` on a three-leg upper-half-plane
+contour and checks all 20 coefficients against the saved original notebook
+table with maximum absolute tolerance `1e-10`.
+
+The default hard deadline is 180 seconds and the three-leg transport ceiling
+is 75 seconds. The July 2026 development run took 35.98 seconds at working
+precision 100 and expansion order 50. Override the limits with
+`ORIGINAL_BANANA_DEADLINE_SECONDS` and
+`ORIGINAL_BANANA_MAX_TRANSPORT_SECONDS`. The exact matrices are hash-pinned
+and ordinary tests never access the network.
+
 ## Planar double-box gate
 
 The planar double-box timing regression is an opt-in end-to-end gate for the

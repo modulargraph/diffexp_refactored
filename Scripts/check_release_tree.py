@@ -165,6 +165,7 @@ EXAMPLE_FILES = {
     "Examples/FeynmanTrick/Sunrise.sh",
     "Examples/FeynmanTrick/UnequalBanana.sh",
     "Examples/OriginalDiffExp/HennNonplanarCanonical.wl",
+    "Examples/OriginalDiffExp/BananaEqualMass.wl",
     "Examples/OriginalDiffExp/MultiplePolylogarithms.wl",
     "Examples/OriginalDiffExp/PlanarOneMassCanonical.wl",
 }
@@ -197,6 +198,7 @@ SCRIPT_FILES = {
     "Scripts/diagnose_epsilon_lattice.m",
     "Scripts/inspect_native_transport_checkpoint.m",
     "Scripts/fetch_henn_nonplanar_data.sh",
+    "Scripts/fetch_original_banana_data.sh",
     "Scripts/fetch_planar_one_mass_data.sh",
     "Scripts/pentagon_massive_oracle.m",
     "Scripts/run_banana_timing_regression.sh",
@@ -207,6 +209,7 @@ SCRIPT_FILES = {
     "Scripts/run_ft_seeded_snapshot.m",
     "Scripts/run_henn_nonplanar_timing_regression.sh",
     "Scripts/run_mpl_timing_regression.sh",
+    "Scripts/run_original_banana_timing_regression.sh",
     "Scripts/run_planar_one_mass_timing_regression.sh",
     "Scripts/replay_native_terminal_checkpoint.m",
     "Scripts/run_release_tests.sh",

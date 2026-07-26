@@ -121,6 +121,11 @@ if [[ "${DE2_RUN_MPL_TIMING:-0}" == 1 ]]; then
   Scripts/run_mpl_timing_regression.sh
 fi
 
+if [[ "${DE2_RUN_ORIGINAL_BANANA_TIMING:-0}" == 1 ]]; then
+  echo "=== optional original DiffExp equal-mass Banana example"
+  Scripts/run_original_banana_timing_regression.sh
+fi
+
 if [[ "${DE2_RUN_DOUBLE_BOX_TIMING:-0}" == 1 ]]; then
   echo "=== optional full double-box timing regression"
   Scripts/run_double_box_timing_regression.sh

@@ -726,10 +726,18 @@ ownerAtlas = catchDE2[
     system, {one}, lowerPlan, streamUpperPlan, "Threads" -> 1,
     "Integrand" -> {{1 + Global`eps}, x},
     "TargetCompleteMax" -> 0, "DeferReceivingBases" -> True]];
+ownerMismatch = If[FailureQ[ownerAtlas], ownerAtlas, catchDE2[
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatch[
+    ownerAtlas, {observable["limitLower", "owned-mismatch"]}, x,
+    "MatchingCertificationDigits" ->
+      ownerAtlas["MatchingCertificationDigits"] + 1]]];
+assert["observable run rejects a matching target unlike its prepared atlas",
+  FailureQ[ownerMismatch]];
 ownerRun = If[FailureQ[ownerAtlas], ownerAtlas, catchDE2[
   DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
     ownerAtlas, {observable["limitLower", "owned-lower"]}, x,
-    "MaxRefinementSteps" -> 1]]];
+    "MaxRefinementSteps" -> 1,
+    "ValueHopExecution" -> False]]];
 ownerCounters = If[AssociationQ[ownerRun],
   DiffExp2`CppBackend`PersistentSessionCounters[ownerRun["Atlas"]],
   ownerRun];
@@ -739,16 +747,16 @@ assert["owned deferred observable batch streams and compacts caller atlas",
     !KeyExistsQ[ownerAtlas["Upper"], "ChartSystems"] &&
     !KeyExistsQ[ownerRun["Atlas", "Lower"], "ChartSystems"] &&
     !KeyExistsQ[ownerRun["Atlas", "Upper"], "ChartSystems"]];
-assert["owned deferred stream measures physical_selection_and_releases_owner",
+assert["owned deferred stream can select deterministic basis-only handoffs",
   AssociationQ[ownerCounters] &&
     Lookup[ownerCounters,
-      "transport_physical_value_hop_attempts", -1] === 1 &&
-    Lookup[ownerCounters, "transport_physical_value_hop_successes", -1] +
-      Lookup[ownerCounters,
-        "transport_physical_value_hop_ineligible", -1] === 1 &&
+      "transport_physical_value_hop_attempts", -1] === 0 &&
+    Lookup[ownerCounters, "transport_physical_value_hop_successes", -1]
+      === 0 &&
+    Lookup[ownerCounters,
+      "transport_physical_value_hop_ineligible", -1] === 0 &&
     Lookup[ownerCounters, "transport_framed_basis_hops", -1] ===
-      Lookup[ownerCounters,
-        "transport_physical_value_hop_ineligible", -2] &&
+      1 &&
     Lookup[ownerCounters, "regular_equation_owners", -1] === 0 &&
     !KeyExistsQ[ownerRun["Atlas", "Lower"], "OwnerRecords"] &&
     !KeyExistsQ[ownerRun["Atlas", "Upper"], "OwnerRecords"]];

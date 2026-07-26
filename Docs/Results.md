@@ -188,6 +188,23 @@ Goncharov polylogarithm. See
 [Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
 saved references, per-case timings, and optional gate.
 
+## Original equal-mass Banana example
+
+The four-master equal-mass system from `Banana.nb` is reproduced from a
+pinned high-precision `t=-1` boundary to the notebook's saved `t=20` table.
+The contour runs through the upper half-plane to avoid the real
+regular-singular points at `t=0,4,16`.
+
+At working precision 100, expansion order 50, and epsilon orders 0 through 4,
+the three transport legs take 35.98 seconds in total and the maximum absolute
+error over all 20 coefficients is `2.72e-11`. The old notebook reports
+41.237399 seconds for its longer `t=-1` to `t=32` path that produced the
+same table, so this timing is contextual rather than a strict like-for-like
+speedup. See
+[Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
+hash-pinned matrix fetcher, boundary provenance, and optional regression
+gate.
+
 ## Reproducibility checklist
 
 A release result should record:

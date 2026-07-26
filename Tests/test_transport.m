@@ -858,7 +858,15 @@ assert["tt17_native_value_accuracy_adds_only_the_arm_aggregation_guard",
     ToExpression[
       DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]] ===
         DiffExp2`Tolerances`Tol["MatchTol"]/
-          10^(DiffExp2`Tolerances`$SafetyDigits + 2)]];
+        10^(DiffExp2`Tolerances`$SafetyDigits + 2)]];
+assert["tt17_native_value_accuracy_can_bind_the_run_certification_target",
+  Block[{
+      DiffExp2`Solve`Private`$cppRegularValueAggregationGuardDigits = 2,
+      DiffExp2`Solve`Private`$cppRegularValueMatchingCertificationDigits =
+        8},
+    ToExpression[
+      DiffExp2`Solve`Private`cppRegularValueRelativeAccuracyMaxExact[]] ===
+        10^-8/10^(DiffExp2`Tolerances`$SafetyDigits + 2)]];
 DiffExp2`Config`UpdateConfiguration[{
   "LinearSolveChopPrecision" -> 20}];
 nativeValueAccuracy20 = ToExpression[

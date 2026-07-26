@@ -3029,12 +3029,14 @@ ft2NativeSegmentLine[sys_, path_] :=
   DiffExp2`Transport`SegmentLine[
     sys, path, "ValueTailContract" -> "NativeCertified"];
 ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
-    physicalVar_, targetMax_, requiredTargetMax_, threads_] :=
+    physicalVar_, targetMax_, requiredTargetMax_, threads_,
+    matchingCertificationDigits_] :=
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     sys, boundary, lower, upper, "Threads" -> threads,
     "Integrands" -> {coefficientVectors, physicalVar},
     "TargetCompleteMax" -> targetMax,
     "RequiredTargetCompleteMax" -> requiredTargetMax,
+    "MatchingCertificationDigits" -> matchingCertificationDigits,
     "DeferReceivingBases" -> True];
 SetAttributes[ft2NativeRun, HoldFirst];
 ft2NativeRun[atlas_Symbol, observables_, physicalVar_,
@@ -3362,7 +3364,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
           lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
           physicalVar, ledger["TargetCompleteMax"],
-          ledger["PublicTargetCompleteMax"], threads]];
+          ledger["PublicTargetCompleteMax"], threads,
+          matchingCertificationDigits]];
         If[FailureQ[atlas] || !AssociationQ[atlas] ||
             Lookup[atlas, "Type", None] =!=
               "DiffExp2NativeRegularIndependentArmAtlas" ||

@@ -12,7 +12,7 @@ The original repository revision used for the inventory is
 | --- | --- | --- |
 | `5pNonPlanar.nb` | Henn et al. nonplanar five-point canonical system, 108 masters and 31 letters | passing |
 | `5pPlanar1Mass.nb` | one-loop and `zzz`/`zmz`/`mzz` planar one-mass canonical systems | passing |
-| `Banana.nb` | banana differential equations | pending direct notebook parity |
+| `Banana.nb` | equal- and unequal-mass banana differential equations | equal-mass endpoint passing; unequal-mass route in progress |
 | `MultiplePolylogarithms.nb` | multiple-polylogarithm demonstration | passing |
 
 ## Henn nonplanar five-point system
@@ -172,6 +172,50 @@ The weight-20 case uses 106 affine charts at a one-half clearance ratio.
 It is slower than the original notebook's specialized Möbius path, but
 retains roughly 41 correct digits and completes in about a minute.
 
+## Equal-mass Banana
+
+Run:
+
+```sh
+Scripts/fetch_original_banana_data.sh
+wolframscript -file Examples/OriginalDiffExp/BananaEqualMass.wl
+```
+
+The fetcher pins the exact `dt_0.m` and `dt_1.m` matrices from the original
+DiffExp repository at revision
+`784c8229bf92369a03f011a48e161522c8c54bbd`. Higher epsilon slices are
+identically zero, so the full system is reconstructed as
+`dt_0 + eps dt_1`.
+
+The original notebook starts from an asymptotic boundary with two unknown
+masters. DiffExp 2 does not yet expose a generic replacement for
+`PrepareBoundaryConditions`; the runnable reproduction therefore contains a
+high-precision numerical seed at `t=-1` generated once by the pinned DiffExp 1
+notebook. It is explicitly treated as external numerical input rather than a
+rigorous ball oracle.
+
+The real path crosses regular-singular points at `t=0,4,16`. A three-leg
+upper-half-plane contour,
+
+```text
+-1 -> -1+5i -> 20+5i -> 20,
+```
+
+avoids singular basis matching while preserving the physical continuation.
+At working precision 100, expansion order 50, and epsilon orders 0 through 4,
+all 20 saved endpoint coefficients agree with the original notebook's
+25-digit table. On the July 2026 development machine:
+
+| Implementation | Route | Time | Maximum error |
+| --- | --- | ---: | ---: |
+| DiffExp 1 saved notebook | `t=-1` to `t=32`, including the `t=20` table | 41.237399 s | saved estimate `1.27e-37` |
+| DiffExp 2 | three-leg contour ending at `t=20` | 35.98 s | `2.72e-11` |
+
+The timings are useful historical context but not strictly endpoint-for-
+endpoint because the old call continued to `t=32`. The unequal-mass
+deformation and momentum route are still being qualified separately and are
+not advertised as passing yet.
+
 ## Optional timing gates
 
 The full 108-master example is deliberately opt-in:
@@ -223,3 +267,19 @@ Scripts/run_mpl_timing_regression.sh
 The default hard deadline is 180 seconds and the weight-20 ceiling is 120
 seconds. Override them with `MPL_DEADLINE_SECONDS` and
 `MPL_MAX_WEIGHT20_SECONDS`.
+
+The original equal-mass Banana reproduction is opt-in:
+
+```sh
+DE2_RUN_ORIGINAL_BANANA_TIMING=1 Scripts/run_release_tests.sh
+```
+
+or directly:
+
+```sh
+Scripts/run_original_banana_timing_regression.sh
+```
+
+Its default hard deadline is 180 seconds and its three-leg transport ceiling
+is 75 seconds. Override them with `ORIGINAL_BANANA_DEADLINE_SECONDS` and
+`ORIGINAL_BANANA_MAX_TRANSPORT_SECONDS`.

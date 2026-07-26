@@ -487,14 +487,17 @@ mixed = Block[{
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, requiredTargetMax, threads},
+       targetMax, requiredTargetMax, threads,
+       matchingCertificationDigits},
       counts["prepare"]++;
       capturedMaxExtraPrecision = $MaxExtraPrecision;
       capturedPrepare = <|"Boundary" -> boundary,
         "CoefficientVectors" -> coefficientVectors,
         "TargetCompleteMax" -> targetMax,
         "RequiredTargetCompleteMax" -> requiredTargetMax,
-        "Threads" -> threads|>;
+        "Threads" -> threads,
+        "MatchingCertificationDigits" ->
+          matchingCertificationDigits|>;
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "synthetic-atlas-plan"|>],
     ft2NativeRun = Function[
@@ -532,6 +535,7 @@ assert["mixed dispatch plans both arms but invokes one native batch/export",
     mixed["NativeMarches"] === 2 &&
     mixed["CompatibilityExports"] === 4 &&
     capturedMatchingCertificationDigits === 8 &&
+    capturedPrepare["MatchingCertificationDigits"] === 8 &&
     capturedPublicationDigits === 8,
   {counts, mixed}];
 integrateObservables = Select[capturedObservables,

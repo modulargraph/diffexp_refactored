@@ -954,6 +954,50 @@ void retained_transformed_basis_authority_smoke() {
           false, true, &identity_basis, &identity_basis,
           &narrower_uncertain_rhs, &identity_correction, true, 0,
           std::nullopt, true);
+  auto parallel_factorized_options = factorized_rhs_options;
+  parallel_factorized_options.factorized_rhs_worker_threads = 4;
+  const FiniteLaurentVector<ComplexBall>
+      multi_coefficient_uncertain_rhs = {
+          EpsilonFrame<ComplexBall>(
+              {0, 3},
+              {real_ball_with_error(1, -50), ComplexBall(2),
+               ComplexBall(3), ComplexBall(4)})};
+  const auto serial_multi_coefficient_candidate =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, multi_coefficient_uncertain_rhs,
+          identity_transformation, factorized_rhs_options,
+          "serial multi-coefficient factorized rhs",
+          false, true, &identity_basis, &identity_basis,
+          &multi_coefficient_uncertain_rhs, &identity_correction,
+          true, 0, std::nullopt, true);
+  const auto parallel_multi_coefficient_candidate =
+      diffexp2::refine_acb_finite_laurent_match(
+          identity_basis, multi_coefficient_uncertain_rhs,
+          identity_transformation, parallel_factorized_options,
+          "parallel multi-coefficient factorized rhs",
+          false, true, &identity_basis, &identity_basis,
+          &multi_coefficient_uncertain_rhs, &identity_correction,
+          true, 0, std::nullopt, true);
+  bool parallel_multi_coefficient_candidate_is_identical = true;
+  for (std::int32_t power = 0; power <= 3; ++power) {
+    parallel_multi_coefficient_candidate_is_identical =
+        parallel_multi_coefficient_candidate_is_identical &&
+        acb_equal(
+            parallel_multi_coefficient_candidate.transformed_weights[0]
+                .coefficient(power).raw(),
+            serial_multi_coefficient_candidate.transformed_weights[0]
+                .coefficient(power).raw()) &&
+        acb_equal(
+            parallel_multi_coefficient_candidate.weights[0]
+                .coefficient(power).raw(),
+            serial_multi_coefficient_candidate.weights[0]
+                .coefficient(power).raw()) &&
+        acb_equal(
+            parallel_multi_coefficient_candidate.residual[0]
+                .coefficient(power).raw(),
+            serial_multi_coefficient_candidate.residual[0]
+                .coefficient(power).raw());
+  }
   auto uncertain_identity = real_ball_with_error(1, -20);
   const FiniteLaurentMatrix<ComplexBall> uncertain_identity_basis = {
       {ball_value_frame(uncertain_identity, width)}};
@@ -973,6 +1017,14 @@ void retained_transformed_basis_authority_smoke() {
             factorized_rhs_candidate.factorized_authoritative_rhs &&
             factorized_rhs_candidate
                     .factorized_authoritative_rhs_columns == 1 &&
+            serial_multi_coefficient_candidate
+                    .factorized_authoritative_rhs_columns == 4 &&
+            parallel_multi_coefficient_candidate
+                    .factorized_authoritative_rhs_columns == 4 &&
+            parallel_multi_coefficient_candidate
+                    .residual_history.back().verdict ==
+                AcbMatchingResidualVerdict::Pass &&
+            parallel_multi_coefficient_candidate_is_identical &&
             (factorized_rhs_candidate.weights[0].coefficient(0) -
              narrower_uncertain_rhs[0].coefficient(0)).contains_zero() &&
             rejected_factorized_rhs_candidate

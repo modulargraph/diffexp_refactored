@@ -5,14 +5,18 @@
 #include <flint/acb_mat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <tuple>
 #include <utility>
@@ -2783,6 +2787,11 @@ struct AcbLaurentRefinementOptions {
   std::optional<std::int32_t> required_min_power;
   std::int32_t required_complete_max = 0;
   std::size_t max_refinement_steps = 2;
+  // A factorized authoritative-RHS certificate constructs independent
+  // response columns before accumulating them in canonical source order.
+  // Keep one worker as the library primitive's deterministic default; the
+  // retaining runtime may pass its already validated session thread budget.
+  std::size_t factorized_rhs_worker_threads = 1;
 };
 
 struct RefinedAcbLaurentMatch {
@@ -3463,6 +3472,17 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
                 (*accumulated)[row] + scaled[row];
         };
 
+    struct FactorizedResponseTask {
+      ComplexBall coefficient;
+      FiniteLaurentVector<ComplexBall> impulse;
+      FiniteLaurentVector<ComplexBall> proposal_impulse;
+    };
+    struct FactorizedResponse {
+      FiniteLaurentVector<ComplexBall> transformed;
+      FiniteLaurentVector<ComplexBall> weights;
+      FiniteLaurentVector<ComplexBall> residual;
+    };
+    std::vector<FactorizedResponseTask> response_tasks;
     for (std::size_t source_row = 0;
          source_row < authoritative_right_hand_side->size();
          ++source_row) {
@@ -3486,7 +3506,6 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
                 ComplexBall(1);
           impulse.emplace_back(source_window, std::move(coefficients));
         }
-
         auto proposal_impulse =
             (*authoritative_residual_to_proposal_rhs)(impulse);
         proposal_impulse =
@@ -3496,48 +3515,115 @@ inline RefinedAcbLaurentMatch refine_acb_finite_laurent_match(
                     ": factorized authoritative-rhs impulse");
         proposal_impulse =
             matching_detail::acb_midpoint_vector(proposal_impulse);
-        auto response_transformed =
-            matching_detail::impose_acb_match_candidate_structural_floor(
-                solve(proposal_impulse,
-                      context +
-                          ": factorized authoritative-rhs response"),
-                transformed_weight_structural_min_power);
-        auto response_weights =
-            matching_detail::canonicalize_acb_match_candidate(
-                apply_exact_laurent_matrix(
-                    transformation, response_transformed),
-                context +
-                    ": factorized authoritative-rhs physical response");
-
-        FiniteLaurentVector<ComplexBall> response_residual;
-        response_residual.reserve(
-            authoritative_residual_basis->size());
-        for (std::size_t row = 0;
-             row < authoritative_residual_basis->size(); ++row) {
-          auto reconstructed =
-              (*authoritative_residual_basis)[row][0] *
-              response_transformed[0];
-          for (std::size_t column = 1;
-               column < response_transformed.size(); ++column)
-            reconstructed =
-                reconstructed +
-                (*authoritative_residual_basis)[row][column] *
-                    response_transformed[column];
-          response_residual.push_back(
-              impulse[row] - reconstructed);
-        }
-
-        accumulate_scaled(
-            accumulated_transformed, response_transformed,
-            coefficient);
-        accumulate_scaled(
-            factorized_authoritative_weights, response_weights,
-            coefficient);
-        accumulate_scaled(
-            factorized_authoritative_residual, response_residual,
-            coefficient);
-        ++factorized_authoritative_columns;
+        response_tasks.push_back(
+            {coefficient, std::move(impulse),
+             std::move(proposal_impulse)});
       }
+    }
+
+    std::vector<std::optional<FactorizedResponse>> responses(
+        response_tasks.size());
+    const auto solve_response = [&](std::size_t task_index) {
+      const auto& task = response_tasks[task_index];
+      auto response_transformed =
+          matching_detail::impose_acb_match_candidate_structural_floor(
+              solve(task.proposal_impulse,
+                    context +
+                        ": factorized authoritative-rhs response:" +
+                        std::to_string(task_index)),
+              transformed_weight_structural_min_power);
+      auto response_weights =
+          matching_detail::canonicalize_acb_match_candidate(
+              apply_exact_laurent_matrix(
+                  transformation, response_transformed),
+              context +
+                  ": factorized authoritative-rhs physical response:" +
+                  std::to_string(task_index));
+      FiniteLaurentVector<ComplexBall> response_residual;
+      response_residual.reserve(
+          authoritative_residual_basis->size());
+      for (std::size_t row = 0;
+           row < authoritative_residual_basis->size(); ++row) {
+        auto reconstructed =
+            (*authoritative_residual_basis)[row][0] *
+            response_transformed[0];
+        for (std::size_t column = 1;
+             column < response_transformed.size(); ++column)
+          reconstructed =
+              reconstructed +
+              (*authoritative_residual_basis)[row][column] *
+                  response_transformed[column];
+        response_residual.push_back(
+            task.impulse[row] - reconstructed);
+      }
+      responses[task_index].emplace(
+          FactorizedResponse{
+              std::move(response_transformed),
+              std::move(response_weights),
+              std::move(response_residual)});
+    };
+
+    const auto worker_count = std::min(
+        response_tasks.size(),
+        std::max<std::size_t>(
+            1, options.factorized_rhs_worker_threads));
+    if (worker_count == 1) {
+      for (std::size_t task = 0; task < response_tasks.size(); ++task)
+        solve_response(task);
+    } else {
+      const auto worker_precision = ComplexBall::precision();
+      std::atomic<std::size_t> next_task{0};
+      std::exception_ptr worker_error;
+      std::mutex worker_error_mutex;
+      {
+        std::vector<std::jthread> workers;
+        workers.reserve(worker_count);
+        for (std::size_t worker = 0; worker < worker_count; ++worker)
+          workers.emplace_back([&]() {
+            ComplexBall::set_precision(worker_precision);
+            for (;;) {
+              const auto task =
+                  next_task.fetch_add(1, std::memory_order_relaxed);
+              if (task >= response_tasks.size()) break;
+              {
+                std::lock_guard<std::mutex> lock(worker_error_mutex);
+                if (worker_error) break;
+              }
+              try {
+                solve_response(task);
+              } catch (...) {
+                std::lock_guard<std::mutex> lock(worker_error_mutex);
+                if (!worker_error)
+                  worker_error = std::current_exception();
+                break;
+              }
+            }
+          });
+      }
+      if (worker_error) std::rethrow_exception(worker_error);
+    }
+
+    // Parallel work never changes the association or summation order.  The
+    // uncertain RHS coefficients are applied exactly once, in canonical
+    // row/power order, to the corresponding certified response columns.
+    for (std::size_t task = 0; task < response_tasks.size(); ++task) {
+      if (!responses[task].has_value())
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InvalidSaturationLattice,
+            context +
+                ": factorized authoritative-rhs response worker lost a task");
+      accumulate_scaled(
+          accumulated_transformed, responses[task]->transformed,
+          response_tasks[task].coefficient);
+      accumulate_scaled(
+          factorized_authoritative_weights,
+          responses[task]->weights,
+          response_tasks[task].coefficient);
+      accumulate_scaled(
+          factorized_authoritative_residual,
+          responses[task]->residual,
+          response_tasks[task].coefficient);
+      ++factorized_authoritative_columns;
     }
     if (!accumulated_transformed.has_value() ||
         !factorized_authoritative_weights.has_value() ||

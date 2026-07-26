@@ -844,8 +844,7 @@ json::object planned_match_handoff_record(
         {"checkpoint_identity", basis[column]->checkpoint_identity()}};
     if (compact_plan_reference)
       source["source_operator_reference"] =
-          compact_matching_identity_reference(
-              basis[column]->source_operator_identity());
+          basis[column]->source_operator_reference();
     else
       source["source_operator_identity"] =
           basis[column]->source_operator_identity();
@@ -872,8 +871,7 @@ json::object planned_match_handoff_record(
                   {"local", incoming_handle},
                   {"checkpoint_identity", incoming->checkpoint_identity()},
                   {"source_operator_reference",
-                   compact_matching_identity_reference(
-                       incoming->source_operator_identity())}}}}},
+                   incoming->source_operator_reference()}}}}},
         {"receiving", json::object{
              {"tile", match_index + 1},
              {"chart", receiving.handle},
@@ -2450,8 +2448,7 @@ json::object compact_transport_local_reference(
       {"local", local->handle()},
       {"chart", local->source_chart()},
       {"source_operator_reference",
-       compact_matching_identity_reference(
-           local->source_operator_identity())},
+       local->source_operator_reference()},
       {"checkpoint_identity", local->checkpoint_identity()},
       {"coefficient_domain", local->scalar_domain()}};
 }

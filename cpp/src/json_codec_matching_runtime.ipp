@@ -3599,6 +3599,21 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   refinement.relative_tolerance = Magnitude::decimal(relative_tolerance);
   refinement.required_complete_max = required_complete_max;
   refinement.max_refinement_steps = max_refinement_steps;
+  if (const auto* raw_threads = std::getenv("DE2_CPP_THREADS");
+      raw_threads != nullptr) {
+    try {
+      std::size_t parsed = 0;
+      const auto threads = std::stoull(raw_threads, &parsed);
+      if (parsed == std::string(raw_threads).size() &&
+          threads >= 1 && threads <= 32)
+        refinement.factorized_rhs_worker_threads =
+            static_cast<std::size_t>(threads);
+    } catch (const std::exception&) {
+      // The Wolfram/session boundary validates DE2_CPP_THREADS.  A direct
+      // library caller with a malformed environment retains the safe
+      // single-worker primitive default.
+    }
+  }
 
   const auto basis_point = parse_acb_match_point(
       request.at("basis_point"), "basis match point");
@@ -5696,10 +5711,15 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
              magnitude.approximate_upper()}});
       std::fprintf(
           stderr,
-          "[diffexp2 terminal diagnostic] matching right coordinate association=%s incoming_structural_min=%d transformed_weight_scales=%s elapsed_ms=%.3f\n",
+          "[diffexp2 terminal diagnostic] matching right coordinate association=%s incoming_structural_min=%d transformed_weight_scales=%s factorized_rhs_workers=%zu factorized_rhs_columns=%zu elapsed_ms=%.3f\n",
           json::serialize(*association).c_str(),
           incoming->solution().epsilon.min_power,
-          json::serialize(encoded_weight_scales).c_str(), elapsed_ms);
+          json::serialize(encoded_weight_scales).c_str(),
+          refined.factorized_authoritative_rhs
+              ? std::min(refinement.factorized_rhs_worker_threads,
+                         refined.factorized_authoritative_rhs_columns)
+              : std::size_t{1},
+          refined.factorized_authoritative_rhs_columns, elapsed_ms);
     }
   }
   if (!selected_terminal_normal_frame_right_transformation.has_value())

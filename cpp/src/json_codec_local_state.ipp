@@ -747,6 +747,17 @@ class PhysicalEquationOwnerBase {
     (void)point;
     return std::nullopt;
   }
+  // Map an already-evaluated, epsilon-sheared Rational-shadow tail seed
+  // directly into the SCC's spectral matching frame.  This deliberately
+  // bypasses physical gauge application followed by its inverse: doing those
+  // two interval operations separately loses the correlation of a small
+  // Fuchsian tail and can turn it into an unusably large physical enclosure.
+  virtual std::optional<FiniteLaurentVector<ComplexBall>>
+  normalize_rational_shadow_singular_seed(
+      const EpsilonVector& tail_frame) const {
+    (void)tail_frame;
+    return std::nullopt;
+  }
   virtual std::optional<LocalSolution<ComplexBall>>
   physicalize_rational_shadow_singular_local(
       const LocalSolution<ComplexBall>& tail_frame) const {

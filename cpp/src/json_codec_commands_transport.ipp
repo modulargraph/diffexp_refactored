@@ -2014,36 +2014,45 @@
             terminal_basis_match);
         if (auto incomplete = match->incomplete_acb_summary();
             incomplete.has_value()) {
-          const auto& residual = as_object(
-              incomplete->at("residual"),
-              "incomplete consuming-hop Acb residual");
-          const auto& complete_window = as_object(
-              residual.at("complete_window"),
-              "incomplete consuming-hop Acb residual window");
-          const auto complete_max = as_i32(
-              complete_window.at("max"),
-              "incomplete consuming-hop Acb residual maximum");
-          const auto additional = std::max<std::int32_t>(
-              0, required_complete_max - complete_max);
+          const auto& residual =
+              as_object(incomplete->at("residual"),
+                        "incomplete consuming-hop Acb residual");
+          const auto& complete_window =
+              as_object(residual.at("complete_window"),
+                        "incomplete consuming-hop Acb residual window");
+          const auto complete_max =
+              as_i32(complete_window.at("max"),
+                     "incomplete consuming-hop Acb residual maximum");
+          const auto additional =
+              std::max<std::int32_t>(0, required_complete_max - complete_max);
           const auto complete_through_required =
               residual.at("complete_through_required").as_bool();
-          const auto& coefficient_verdicts = as_object(
-              residual.at("coefficient_verdicts"),
-              "incomplete consuming-hop Acb coefficient verdicts");
-          const auto inconclusive_coefficients = as_u64(
-              coefficient_verdicts.at("inconclusive"),
-              "incomplete consuming-hop inconclusive coefficient count");
-          const auto& normal_frame_attempt = as_object(
-              incomplete->at("normal_frame_attempt"),
-              "incomplete consuming-hop normal-frame attempt");
-          const bool propagated_enclosure =
+          const auto& coefficient_verdicts =
+              as_object(residual.at("coefficient_verdicts"),
+                        "incomplete consuming-hop Acb coefficient verdicts");
+          const auto inconclusive_coefficients =
+              as_u64(coefficient_verdicts.at("inconclusive"),
+                     "incomplete consuming-hop inconclusive coefficient count");
+          const auto& normal_frame_attempt =
+              as_object(incomplete->at("normal_frame_attempt"),
+                        "incomplete consuming-hop normal-frame attempt");
+          const bool physical_propagated_enclosure =
+              normal_frame_attempt.if_contains("physical_clearance_source") !=
+                  nullptr &&
+              normal_frame_attempt.at("physical_clearance_source")
+                  .is_string() &&
+              normal_frame_attempt.at("physical_clearance_source")
+                      .as_string() == "propagated-enclosure";
+          const bool correlated_seed_propagated_enclosure =
               normal_frame_attempt.if_contains(
-                  "physical_clearance_source") != nullptr &&
-              normal_frame_attempt.at(
-                  "physical_clearance_source").is_string() &&
-              normal_frame_attempt.at(
-                  "physical_clearance_source").as_string() ==
-                  "propagated-enclosure";
+                  "correlated_tail_seed_clearance_source") != nullptr &&
+              normal_frame_attempt.at("correlated_tail_seed_clearance_source")
+                  .is_string() &&
+              normal_frame_attempt.at("correlated_tail_seed_clearance_source")
+                      .as_string() == "propagated-enclosure";
+          const bool propagated_enclosure =
+              physical_propagated_enclosure ||
+              correlated_seed_propagated_enclosure;
           // A certified singular-to-ordinary bridge can be mathematically
           // valid yet retain too few singular Taylor rows for the requested
           // residual tolerance.  That is the one propagated-enclosure case
@@ -2053,23 +2062,28 @@
           // exact physical fallback without making the whole singular chart
           // more expensive.
           bool retryable_singular_tail = false;
-          if (propagated_enclosure) {
-            const auto* raw_bridges =
-                normal_frame_attempt.if_contains(
-                    "exact_shadow_singular_ordinary_bridges");
+          if (correlated_seed_propagated_enclosure) {
+            const auto* raw_tail = normal_frame_attempt.if_contains(
+                "exact_shadow_correlated_tail_seed_max_upper_exact");
+            if (raw_tail != nullptr && raw_tail->is_string()) {
+              const auto tolerance = Magnitude::decimal(
+                  required_string(refinement, "relative_tolerance"));
+              retryable_singular_tail = Magnitude::from_exact_dump(std::string(
+                                            raw_tail->as_string())) > tolerance;
+            }
+          } else if (physical_propagated_enclosure) {
+            const auto* raw_bridges = normal_frame_attempt.if_contains(
+                "exact_shadow_singular_ordinary_bridges");
             if (raw_bridges != nullptr && raw_bridges->is_array() &&
                 !raw_bridges->as_array().empty()) {
               const auto tolerance = Magnitude::decimal(
                   required_string(refinement, "relative_tolerance"));
               bool all_certified = true;
               bool tail_exceeds_tolerance = false;
-              for (const auto& raw_bridge :
-                   raw_bridges->as_array()) {
+              for (const auto& raw_bridge : raw_bridges->as_array()) {
                 const auto& bridge = as_object(
-                    raw_bridge,
-                    "terminal singular bridge retry diagnostic");
-                if (required_string(bridge, "status") !=
-                    "certified") {
+                    raw_bridge, "terminal singular bridge retry diagnostic");
+                if (required_string(bridge, "status") != "certified") {
                   all_certified = false;
                   break;
                 }
@@ -2077,39 +2091,29 @@
                     bridge.at("selected"),
                     "selected terminal singular bridge retry diagnostic");
                 const auto tail = Magnitude::from_exact_dump(
-                    required_string(
-                        selected,
-                        "singular_tail_max_upper_exact"));
-                if (tail > tolerance)
-                  tail_exceeds_tolerance = true;
+                    required_string(selected, "singular_tail_max_upper_exact"));
+                if (tail > tolerance) tail_exceeds_tolerance = true;
               }
-              retryable_singular_tail =
-                  all_certified && tail_exceeds_tolerance;
+              retryable_singular_tail = all_certified && tail_exceeds_tolerance;
             }
           }
           const bool retryable_epsilon =
               !complete_through_required && additional > 0;
           const bool retryable_clearance =
-              complete_through_required &&
-              inconclusive_coefficients > 0 &&
-              (!propagated_enclosure ||
-               retryable_singular_tail);
-          const auto& lattice = as_object(
-              incomplete->at("exact_lattice"),
-              "incomplete consuming-hop exact lattice");
+              complete_through_required && inconclusive_coefficients > 0 &&
+              (!propagated_enclosure || retryable_singular_tail);
+          const auto& lattice =
+              as_object(incomplete->at("exact_lattice"),
+                        "incomplete consuming-hop exact lattice");
           const json::object compact_lattice{
               {"normalized_determinant_valuation",
                lattice.at("normalized_determinant_valuation")},
               {"transformation_min_power",
                lattice.at("transformation_min_power")},
-              {"transformation_terms",
-               lattice.at("transformation_terms")},
-              {"initial_column_shifts",
-               lattice.at("initial_column_shifts")},
-              {"initial_leading_rank",
-               lattice.at("initial_leading_rank")},
-              {"final_leading_rank",
-               lattice.at("final_leading_rank")}};
+              {"transformation_terms", lattice.at("transformation_terms")},
+              {"initial_column_shifts", lattice.at("initial_column_shifts")},
+              {"initial_leading_rank", lattice.at("initial_leading_rank")},
+              {"final_leading_rank", lattice.at("final_leading_rank")}};
           {
             std::lock_guard<std::mutex> lock(session->mutex);
             if (session->pending_local_solves == 0)
@@ -2123,10 +2127,16 @@
               {"reason", "acb_match_residual_inconclusive"},
               {"retryable_epsilon_reservoir", retryable_epsilon},
               {"retryable_matching_clearance", retryable_clearance},
-              {"retryable_singular_tail_reservoir",
-               retryable_singular_tail},
-              {"retryable_propagated_enclosure",
-               propagated_enclosure},
+              {"retryable_singular_tail_reservoir", retryable_singular_tail},
+              {"retryable_propagated_enclosure", propagated_enclosure},
+              {"correlated_tail_seed_residual",
+               normal_frame_attempt.if_contains(
+                   "authoritative_residual_frame") != nullptr &&
+                   normal_frame_attempt.at("authoritative_residual_frame")
+                       .is_string() &&
+                   normal_frame_attempt.at("authoritative_residual_frame")
+                           .as_string() ==
+                       "correlated-tail-clearance-seed-normal"},
               {"required_additional_epsilon_orders", additional},
               {"arm", arm_name},
               {"match", match_index},
@@ -2135,17 +2145,30 @@
               {"epsilon", incomplete->at("epsilon")},
               {"refinement", incomplete->at("refinement")},
               {"weight_windows", incomplete->at("weight_windows")},
-              {"normal_frame_attempt",
-               normal_frame_attempt},
+              {"normal_frame_attempt", normal_frame_attempt},
               {"exact_lattice", compact_lattice},
               {"detail",
-               retryable_epsilon
-                   ? "the Acb match needs a wider private epsilon reservoir before materialization"
-                   : retryable_singular_tail
-                   ? "the terminal Frobenius bridge contracts, but its certified singular Taylor tail exceeds the requested tolerance; retry with a larger finite-Taylor reservoir"
-                   : propagated_enclosure
-                   ? "the Acb match reaches the required epsilon order, but uncertainty propagated by its producer encloses the residual tolerance; receiving Taylor-order and precision retries are not applicable"
-                   : "the Acb match reaches the required epsilon order but its finite-Taylor overlap is not accurate enough for the residual tolerance"}};
+               retryable_epsilon ? "the Acb match needs a wider private "
+                                   "epsilon reservoir before materialization"
+               : retryable_singular_tail
+                   ? correlated_seed_propagated_enclosure
+                         ? "the direct correlated normal-frame residual "
+                           "reaches the requested epsilon order, but its "
+                           "certified singular Taylor tail exceeds the "
+                           "requested tolerance; retry with a larger "
+                           "finite-Taylor reservoir"
+                         : "the terminal Frobenius bridge contracts, but its "
+                           "certified singular Taylor tail exceeds the "
+                           "requested tolerance; retry with a larger "
+                           "finite-Taylor reservoir"
+               : propagated_enclosure
+                   ? "the Acb match reaches the required epsilon order, but "
+                     "uncertainty propagated by its producer encloses the "
+                     "residual tolerance; receiving Taylor-order and precision "
+                     "retries are not applicable"
+                   : "the Acb match reaches the required epsilon order but its "
+                     "finite-Taylor overlap is not accurate enough for the "
+                     "residual tolerance"}};
         }
         next = match->materialize(
             local_handle,
@@ -2156,8 +2179,8 @@
         match = build_planned_match_hop(
             match_handle, match_request, session->domain,
             session->precision_bits,
-            checkpoint_configuration_identity(*session), plan,
-            basis_handles, basis, incoming_handle, incoming, true);
+            checkpoint_configuration_identity(*session), plan, basis_handles,
+            basis, incoming_handle, incoming, true);
         next = match->materialize(
             local_handle,
             arm_checkpoint_identity(checkpoint_root, arm_name, "local",

@@ -840,6 +840,9 @@ class CompositeSCCChartBase : public PhysicalEquationOwnerBase {
   physicalize_rational_shadow_singular_seed(
       const EpsilonVector& tail_frame,
       const RealEvaluationPoint& point) const override = 0;
+  virtual std::optional<FiniteLaurentVector<ComplexBall>>
+  normalize_rational_shadow_singular_seed(
+      const EpsilonVector& tail_frame) const override = 0;
   virtual std::optional<LocalSolution<ComplexBall>>
   physicalize_rational_shadow_singular_local(
       const LocalSolution<ComplexBall>& tail_frame) const override = 0;
@@ -3032,6 +3035,58 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
     }
   }
 
+  std::optional<FiniteLaurentVector<ComplexBall>>
+  normalize_rational_shadow_singular_seed(
+      const EpsilonVector& tail_frame) const override {
+    if constexpr (!std::is_same_v<Scalar, Rational>) {
+      (void)tail_frame;
+      return std::nullopt;
+    } else {
+      if (!rational_shadow_singular_tail_equation_ ||
+          rational_shadow_singular_tail_epsilon_shifts_.size() != dimension_ ||
+          tail_frame.dimension != dimension_ || !tail_frame.error.empty())
+        return std::nullopt;
+      std::vector<std::optional<EpsilonFrame<ComplexBall>>> parent(dimension_);
+      for (const auto& block : blocks_) {
+        FiniteLaurentVector<ComplexBall> reduced;
+        reduced.reserve(block.vertices.size());
+        for (const auto vertex : block.vertices) {
+          std::vector<ComplexBall> coefficients;
+          coefficients.reserve(tail_frame.epsilon.width());
+          for (std::int64_t power = tail_frame.epsilon.min_power;
+               power <= tail_frame.epsilon.complete_max; ++power)
+            coefficients.push_back(
+                tail_frame.at(static_cast<std::int32_t>(power), vertex));
+          reduced.emplace_back(tail_frame.epsilon, std::move(coefficients));
+          // Tail retention shears component v by epsilon^(-s_v).
+          // The matching normal frame is V^-1 G^-1, so first return to the
+          // reduced physical epsilon frame and then apply V^-1 directly.
+          reduced.back() = reduced.back().shifted(
+              rational_shadow_singular_tail_epsilon_shifts_[vertex]);
+        }
+        auto spectral = apply_acb_matching_spectral_inverse(
+            block.source_transform, reduced);
+        if (!spectral.has_value()) return std::nullopt;
+        for (std::size_t local = 0; local < block.vertices.size(); ++local) {
+          const auto vertex = block.vertices[local];
+          if (parent[vertex].has_value())
+            throw std::logic_error(
+                "singular-tail normal seed mapped one parent row twice");
+          parent[vertex] = std::move((*spectral)[local]);
+        }
+      }
+      FiniteLaurentVector<ComplexBall> normalized;
+      normalized.reserve(dimension_);
+      for (std::uint32_t row = 0; row < dimension_; ++row) {
+        if (!parent[row].has_value())
+          throw std::logic_error(
+              "singular-tail normal seed left an empty parent row");
+        normalized.push_back(std::move(*parent[row]));
+      }
+      return normalized;
+    }
+  }
+
   std::optional<LocalSolution<ComplexBall>>
   physicalize_rational_shadow_singular_local(
       const LocalSolution<ComplexBall>& tail_frame) const override {
@@ -3040,14 +3095,13 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
       return std::nullopt;
     } else {
       if (!rational_shadow_singular_tail_equation_ ||
-          rational_shadow_singular_tail_epsilon_shifts_.size() !=
-              dimension_)
+          rational_shadow_singular_tail_epsilon_shifts_.size() != dimension_)
         return std::nullopt;
       validate_local_solution(tail_frame, false);
-      if (!tail_frame.error.empty() ||
-          tail_frame.dimension != dimension_)
+      if (!tail_frame.error.empty() || tail_frame.dimension != dimension_)
         throw std::invalid_argument(
-            "singular-tail local physicalization requires one full-parent Acb local");
+            "singular-tail local physicalization requires one full-parent Acb "
+            "local");
 
       std::vector<LocalSolution<ComplexBall>> embedded_blocks;
       embedded_blocks.reserve(blocks_.size());
@@ -4024,7 +4078,8 @@ class CompositeSCCChart final : public CompositeSCCChartBase {
         for (std::size_t taylor = 1; taylor < kernel.size(); ++taylor)
           if (!kernel[taylor].is_zero())
             return std::nullopt;
-        coefficients.push_back(kernel.front());
+        coefficients.push_back(
+            local_detail::to_ball(kernel.front()));
       }
       auto term = EpsilonFrame<ComplexBall>(
           multiplier.epsilon_shift, std::move(coefficients)) *

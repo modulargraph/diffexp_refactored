@@ -13,7 +13,7 @@ allowlist. It rejects both missing files and accidental additions.
 | Path | Purpose |
 | --- | --- |
 | `DiffExp2.m` | Stable root loader; selects the compiled recurrence backend by default |
-| `DiffExp2/` | Exact recurrence, transport, matching, endpoint, integration, and public API modules |
+| `DiffExp2/` | Exact recurrence, rational and canonical-dlog transport, matching, endpoint, integration, and public API modules |
 | `FeynmanTrick.m` | Stable root loader for Feynman-trick preparation and execution |
 | selected `FeynmanTrick/*.m` | Exact family/request contracts, topology algebra, FIRE7 Classical/modular execution, iteration, level reductions, boundary data, and pipeline facade |
 | `cpp/`, `CMakeLists.txt` | C++20/FLINT recurrence backend and native test |
@@ -86,4 +86,6 @@ The exact input matrix must be rational in the line variable and epsilon.
 Non-integer powers with a line-variable-dependent base are rejected. Exact
 algebraic constants, algebraic singular locations, and algebraic local
 exponents are not rejected merely for being algebraic. Indicial exponents must
-be affine in epsilon, `a + b eps`.
+be affine in epsilon, `a + b eps`. A system already provided as constant
+canonical matrices and dlog letters may instead use the dedicated canonical
+transport API, whose alphabet can contain algebraic letters.

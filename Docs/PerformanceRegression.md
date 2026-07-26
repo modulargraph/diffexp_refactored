@@ -180,6 +180,29 @@ transport run then completed in 92.67 seconds with finite value
 and incoming boundary must still pass the full-ball forward residual before
 the candidate is published.
 
+## Original Henn canonical pentagon gate
+
+The independent 108-master canonical example from the original DiffExp
+repository is opt-in:
+
+```bash
+Scripts/fetch_henn_nonplanar_data.sh
+Scripts/run_henn_nonplanar_timing_regression.sh
+```
+
+It can be appended to the release suite with
+`DE2_RUN_HENN_NONPLANAR_TIMING=1`. The gate checks all published endpoint
+coefficients through epsilon order 4 with maximum absolute tolerance `1e-9`.
+Its default settings are working precision 50, expansion order 25, and Padé
+chart matching.
+
+The default hard deadline is 120 seconds. The transport-only ceiling is 30
+seconds, compared with the original notebook's saved 49.765221-second
+order-25 transport. Set `HENN_NONPLANAR_DEADLINE_SECONDS` or
+`HENN_NONPLANAR_MAX_TRANSPORT_SECONDS` only for an explicit hardware
+qualification. Ancillary data are hash-pinned and must be fetched before the
+gate; ordinary tests never access the network.
+
 ## Planar double-box gate
 
 The planar double-box timing regression is an opt-in end-to-end gate for the

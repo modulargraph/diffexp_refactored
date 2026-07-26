@@ -21,6 +21,7 @@ wolfram_tests=(
   Tests/test_native_regular_prepare_owner.m
   Tests/test_integrate.m
   Tests/test_api.m
+  Tests/test_canonical_transport.m
   Tests/test_public_api.m
   Tests/test_paclet_metadata.m
   Tests/test_cpp_backend.m
@@ -103,6 +104,11 @@ fi
 if [[ "${DE2_RUN_PENTAGON_TIMING:-0}" == 1 ]]; then
   echo "=== optional full pentagon timing regression"
   Scripts/run_pentagon_timing_regression.sh
+fi
+
+if [[ "${DE2_RUN_HENN_NONPLANAR_TIMING:-0}" == 1 ]]; then
+  echo "=== optional original DiffExp/Henn nonplanar canonical pentagon"
+  Scripts/run_henn_nonplanar_timing_regression.sh
 fi
 
 if [[ "${DE2_RUN_DOUBLE_BOX_TIMING:-0}" == 1 ]]; then

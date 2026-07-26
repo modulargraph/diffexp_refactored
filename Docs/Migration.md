@@ -122,7 +122,10 @@ and fails on conflicts.  Interior singular crossings transform exact
 The current input limitation is narrower and stricter than a generic
 “algebraic not supported” statement: a non-integer power whose base depends on
 the line variable, such as ``Sqrt[x]`` in the matrix, is rejected.  Rationalize
-the system with an external basis/variable transformation before loading it.
+the system with an external basis/variable transformation before loading it,
+or, when the system is already canonical,
+use ``LoadCanonicalSystem`` and ``TransportCanonicalLine`` to retain the
+constant matrices and algebraic dlog letters separately.
 
 ## Result access
 
@@ -175,8 +178,8 @@ identities.
   boundaries (finite regular-anchor expressions are supported);
 - arbitrary multi-leg line-chain convenience functions;
 - a dedicated plotting-style helper (piecewise evaluation is supported);
-- automatic rationalizing transformations for square roots in the input
-  basis.
+- automatic rationalizing transformations for square roots in a generic
+  input basis (canonical dlog alphabets have a dedicated transport API).
 
 The custom-family facade rejects FIRE-added numerator slots during `All`
 discovery, numerators at merge positions, and custom analytic-prescription or

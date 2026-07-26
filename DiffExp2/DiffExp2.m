@@ -12,5 +12,6 @@ Module[{dir = DirectoryName[$InputFileName]},
   Get[FileNameJoin[{dir, "Transport.m"}]];
   Get[FileNameJoin[{dir, "NativeTransport.m"}]];
   Get[FileNameJoin[{dir, "Integrate.m"}]];
+  Get[FileNameJoin[{dir, "CanonicalTransport.m"}]];
   Get[FileNameJoin[{dir, "API.m"}]];
 ];

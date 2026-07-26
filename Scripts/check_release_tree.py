@@ -24,6 +24,7 @@ ROOT_FILES = {
 
 DIFFEXP2_FILES = {
     "DiffExp2/API.m",
+    "DiffExp2/CanonicalTransport.m",
     "DiffExp2/Config.m",
     "DiffExp2/CppBackend.m",
     "DiffExp2/DiffExp2.m",
@@ -71,6 +72,7 @@ CPP_FILES = {
     "cpp/include/diffexp2/adjoint_observable.hpp",
     "cpp/include/diffexp2/series_types.hpp",
     "cpp/include/diffexp2/singular_indicial.hpp",
+    "cpp/include/diffexp2/singular_tail_majorant.hpp",
     "cpp/include/diffexp2/tail_majorant.hpp",
     "cpp/src/checkpoint.cpp",
     "cpp/src/json_codec.cpp",
@@ -148,6 +150,7 @@ CPP_FILES = {
     "cpp/tests/test_scc_formal_completeness.cpp",
     "cpp/tests/test_session_solve_many.cpp",
     "cpp/tests/test_singular_indicial.cpp",
+    "cpp/tests/test_singular_tail_majorant.cpp",
     "cpp/tests/test_tail_majorant.cpp",
 }
 
@@ -161,6 +164,7 @@ EXAMPLE_FILES = {
     "Examples/FeynmanTrick/README.md",
     "Examples/FeynmanTrick/Sunrise.sh",
     "Examples/FeynmanTrick/UnequalBanana.sh",
+    "Examples/OriginalDiffExp/HennNonplanarCanonical.wl",
 }
 
 DOC_FILES = {
@@ -168,6 +172,7 @@ DOC_FILES = {
     "Docs/AlgebraicSquareRootPlan.md",
     "Docs/AnalyticContinuation.md",
     "Docs/AsymptoticBoundaryPlan.md",
+    "Docs/Banana4Status.md",
     "Docs/banana4-debug-log.md",
     "Docs/Citation.md",
     "Docs/CppBackend.md",
@@ -175,10 +180,12 @@ DOC_FILES = {
     "Docs/FeynmanTrick.md",
     "Docs/Installation.md",
     "Docs/Migration.md",
+    "Docs/OriginalDiffExpExamples.md",
     "Docs/PerformanceRegression.md",
     "Docs/QuickStart.md",
     "Docs/ReleaseManifest.md",
     "Docs/Results.md",
+    "Docs/example-recovery-log.md",
 }
 
 SCRIPT_FILES = {
@@ -187,6 +194,7 @@ SCRIPT_FILES = {
     "Scripts/check_release_tree.py",
     "Scripts/diagnose_epsilon_lattice.m",
     "Scripts/inspect_native_transport_checkpoint.m",
+    "Scripts/fetch_henn_nonplanar_data.sh",
     "Scripts/pentagon_massive_oracle.m",
     "Scripts/run_banana_timing_regression.sh",
     "Scripts/run_banana4_boundary_regression.sh",
@@ -194,6 +202,7 @@ SCRIPT_FILES = {
     "Scripts/run_pentagon_timing_regression.sh",
     "Scripts/run_ft_stepwise2.m",
     "Scripts/run_ft_seeded_snapshot.m",
+    "Scripts/run_henn_nonplanar_timing_regression.sh",
     "Scripts/replay_native_terminal_checkpoint.m",
     "Scripts/run_release_tests.sh",
     "Scripts/run_with_deadline.py",
@@ -204,6 +213,7 @@ TEST_FILES = {
     "Tests/benchmark_banana_singular.m",
     "Tests/test_api.m",
     "Tests/test_banana4_bessel_oracle.m",
+    "Tests/test_canonical_transport.m",
     "Tests/test_config.m",
     "Tests/test_cpp_arm_batch.m",
     "Tests/test_cpp_backend.m",

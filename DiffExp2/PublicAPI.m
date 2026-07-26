@@ -15,12 +15,14 @@ UpdateConfiguration::usage = "UpdateConfiguration[rules] atomically validates an
 CurrentConfiguration::usage = "CurrentConfiguration[] returns the resolved, String-keyed DiffExp2 configuration.";
 
 LoadSystem::usage = "LoadSystem[spec] loads an exact epsilon-rational differential system. spec may be an Association, a d<var>_full.m file, or a directory containing exactly one such file.";
+LoadCanonicalSystem::usage = "LoadCanonicalSystem[spec] loads a canonical dlog system from constant matrices, alphabet letters, and kinematic variables. Algebraic letters such as square roots are supported.";
 BackendInformation::usage = "BackendInformation[] reports the compiled recurrence backend version and availability.";
 PrepareBoundary::usage = "PrepareBoundary[expressions, opts] expands one closed-form expression per master into the finite regular-anchor coefficient array accepted by TransportEndpoint and TransportLine. It does not construct a singular/asymptotic LocalSolution from line-coordinate powers or logs. Options: \"EpsilonSymbol\" and \"EpsilonOrder\".";
 
 PlanLine::usage = "PlanLine[sys, {from, to}, opts] constructs and validates a transport plan without solving it. Option: \"ExtraSingularFactors\".";
 TransportEndpoint::usage = "TransportEndpoint[sys, boundary, from, to, opts] transports boundary data to one endpoint and returns a named TransportResult.";
 TransportLine::usage = "TransportLine[sys, boundary, {from, to}, opts] plans and transports a complete line. TransportLine[sys, boundary, plan] reuses an existing plan.";
+TransportCanonicalLine::usage = "TransportCanonicalLine[sys, boundary, from, to, opts] transports a canonical dlog system along the straight line between two real kinematic points. Explicit chart centers and boundaries are required for reproducible algebraic-letter transport.";
 LineSegments::usage = "LineSegments[result] returns named, individually inspectable local segments with domains and exact LocalSolution objects.";
 LineSegment::usage = "LineSegment[result, i] returns segment i from LineSegments[result].";
 EvaluateLine::usage = "EvaluateLine[result, point, opts] evaluates a transported line at a covered regular point and returns the local evaluation record.";
@@ -151,6 +153,21 @@ DiffExp2`LoadSystem[path_String, OptionsPattern[]] := Module[{fullFiles},
         <|"Directory" -> ExpandFileName[path], "Files" -> fullFiles|>]];
     loadSystemFile[First[fullFiles], OptionValue["Variable"]],
     loadSystemFile[path, OptionValue["Variable"]]]];
+
+DiffExp2`LoadCanonicalSystem[spec_Association] :=
+  DiffExp2`CanonicalTransport`LoadCanonicalSystem[spec];
+DiffExp2`LoadCanonicalSystem[args___] :=
+  DiffExp2`CanonicalTransport`LoadCanonicalSystem[args];
+
+Options[DiffExp2`TransportCanonicalLine] =
+  Options[DiffExp2`CanonicalTransport`TransportCanonicalLine];
+DiffExp2`TransportCanonicalLine[
+    system_Association, boundary_List, from_, to_,
+    opts:OptionsPattern[]] :=
+  DiffExp2`CanonicalTransport`TransportCanonicalLine[
+    system, boundary, from, to, opts];
+DiffExp2`TransportCanonicalLine[args___] :=
+  DiffExp2`CanonicalTransport`TransportCanonicalLine[args];
 
 (* ---- line planning and transport ---- *)
 

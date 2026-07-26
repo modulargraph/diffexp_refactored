@@ -133,6 +133,7 @@ settings, cache controls, and checkpoint resumption.
 ## Capabilities
 
 - exact epsilon-rational systems at ordinary and regular-singular points;
+- canonical dlog systems with algebraic letters, including square roots;
 - finite-width recurrences, resonances, log sectors, fractional powers, and
   inhomogeneous sources;
 - exact real-line segmentation with complex-root projections and explicit
@@ -152,6 +153,7 @@ settings, cache controls, and checkpoint resumption.
 - [Feynman Trick](Docs/FeynmanTrick.md)
 - [Analytic Continuation](Docs/AnalyticContinuation.md)
 - [Verified Results](Docs/Results.md)
+- [Original DiffExp Examples](Docs/OriginalDiffExpExamples.md)
 - [Migration from DiffExp 1](Docs/Migration.md)
 - [C++ Backend](Docs/CppBackend.md)
 - [Release Manifest](Docs/ReleaseManifest.md)
@@ -164,7 +166,9 @@ settings, cache controls, and checkpoint resumption.
   and epsilon. `LoadSystem` rejects non-integer powers with a
   variable-dependent base, such as `Sqrt[x]`. Exact algebraic constants,
   singular locations, and local exponents are a different case and are not
-  rejected merely for being algebraic.
+  rejected merely for being algebraic. Systems already supplied in canonical
+  dlog form can instead use `LoadCanonicalSystem`, whose letters may be
+  algebraic.
 - Indicial eigenvalues must be affine in epsilon, `a + b eps`.
 - There is no dedicated plotting command. Use `LineSegments` or
   `PiecewiseSolution` with the plotting style appropriate to the application.

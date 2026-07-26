@@ -121,6 +121,50 @@ The result has schema `DiffExp2.System/v1` and includes:
 | `"Dimension"` | number of masters |
 | `"Source"` | in-memory marker or expanded matrix path |
 
+### Canonical dlog systems
+
+Canonical systems keep constant matrices separate from their alphabet:
+
+```mathematica
+canonical = DiffExp2`LoadCanonicalSystem[<|
+  "ConstantMatrices" -> {C1, C2, C3},
+  "Letters" -> {W1, W2, W3},
+  "Variables" -> {v1, v2}
+|>];
+
+result = DiffExp2`TransportCanonicalLine[
+  canonical,
+  boundary,
+  {v1 -> a1, v2 -> a2},
+  {v1 -> b1, v2 -> b2},
+  "ExpansionOrder" -> 25,
+  "EpsilonOrder" -> 4,
+  "WorkingPrecision" -> 50,
+  "UsePade" -> True,
+  "ChartCenters" -> {0, 1/3, 7/10},
+  "ChartBoundaries" -> {0, 1/5, 3/5, 1}
+];
+```
+
+This solves
+
+```text
+d f = eps Sum_i C_i dlog(W_i) f.
+```
+
+The letters may be algebraic functions, including square roots. This is a
+separate path from `LoadSystem`: it does not convert an irrational matrix
+into a rational one or weaken the rational solver's input checks.
+
+The boundary convention remains
+`boundary[[master,k+1]] = coefficient of eps^k`. At a singular starting
+point it must describe a finite regular solution; incompatible residue
+actions fail loudly. Explicit chart geometry is required: the canonical path
+does not guess convergence-safe charts for a general algebraic alphabet.
+The result schema is
+`DiffExp2.CanonicalTransportResult/v1` and exposes `"Value"`, per-chart
+timings, Padé fallback counts, and the resolved numerical settings.
+
 ## Regular-anchor boundaries
 
 ```mathematica

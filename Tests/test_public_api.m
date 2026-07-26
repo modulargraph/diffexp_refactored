@@ -13,6 +13,7 @@ assert[label_String, condition_] := If[TrueQ[condition],
 exports = {
   DiffExp2`LoadConfiguration, DiffExp2`UpdateConfiguration,
   DiffExp2`CurrentConfiguration, DiffExp2`LoadSystem,
+  DiffExp2`LoadCanonicalSystem, DiffExp2`TransportCanonicalLine,
   DiffExp2`PrepareBoundary,
   DiffExp2`PlanLine, DiffExp2`TransportEndpoint, DiffExp2`TransportLine,
   DiffExp2`LineSegments, DiffExp2`LineSegment, DiffExp2`EvaluateLine,

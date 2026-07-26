@@ -3,6 +3,7 @@
 *.mx
 *.wl~
 FrontEnd/*
+Examples/OriginalDiffExp/Data/
 
 # macOS
 .DS_Store

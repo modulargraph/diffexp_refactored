@@ -144,6 +144,20 @@ These rows time the recurrence-oriented chart workload, not FIRE or an entire
 Feynman-trick computation.  Small systems can be dominated by Wolfram
 preparation, JSON/LibraryLink transfer, and validation.
 
+## Original Henn nonplanar five-point example
+
+The 108-master, 31-letter canonical system from arXiv:1812.11160 is
+reproduced through epsilon order 4. At working precision 50 and expansion
+order 25, the maximum absolute error against the published endpoint table is
+`1.6e-12`.
+
+The saved DiffExp 1 notebook reports 49.765221 seconds for its order-25
+transport. DiffExp 2 takes 8.27 seconds for canonical transport on the July
+2026 development machine, plus about 0.38 seconds for matrix extraction,
+validation, and ancillary-data import. See
+[Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
+pinned data fetcher, settings, and opt-in timing gate.
+
 ## Reproducibility checklist
 
 A release result should record:

@@ -205,6 +205,23 @@ speedup. See
 hash-pinned matrix fetcher, boundary provenance, and optional regression
 gate.
 
+## Original unequal-mass Banana example
+
+The 15-master unequal-mass endpoint at `psq=50` and squared masses
+`{2,3/2,4/3,1}` is reproduced through epsilon order 4. DiffExp 2 first moves
+the equal-mass solution to `psq=50`, applies the exact equal-to-unequal
+degeneration map, and then deforms the masses.
+
+At working precision 100 and expansion order 50, the complete transport took
+211.15 seconds on the July 2026 development machine and differed from the
+saved original DiffExp high-precision endpoint by at most `1.99e-14`. The
+like-for-like saved DiffExp 1 crosscheck timings total 320.64 seconds. A
+second DiffExp 2 route—mass deformation at `psq=1/2` followed by complex
+momentum transport—agrees through all eight retained epsilon orders to
+`2.57e-14`. See
+[Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
+contours, reference provenance, and optional timing gate.
+
 ## Reproducibility checklist
 
 A release result should record:

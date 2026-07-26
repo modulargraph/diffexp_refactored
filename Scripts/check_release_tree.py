@@ -166,8 +166,11 @@ EXAMPLE_FILES = {
     "Examples/FeynmanTrick/UnequalBanana.sh",
     "Examples/OriginalDiffExp/HennNonplanarCanonical.wl",
     "Examples/OriginalDiffExp/BananaEqualMass.wl",
+    "Examples/OriginalDiffExp/BananaUnequalMass.wl",
     "Examples/OriginalDiffExp/MultiplePolylogarithms.wl",
     "Examples/OriginalDiffExp/PlanarOneMassCanonical.wl",
+    "Examples/OriginalDiffExp/Reference/BananaBoundaryAtMinusOneEps7.m",
+    "Examples/OriginalDiffExp/Reference/BananaUnequalMassAt50.m",
 }
 
 DOC_FILES = {
@@ -210,6 +213,7 @@ SCRIPT_FILES = {
     "Scripts/run_henn_nonplanar_timing_regression.sh",
     "Scripts/run_mpl_timing_regression.sh",
     "Scripts/run_original_banana_timing_regression.sh",
+    "Scripts/run_original_banana_unequal_timing_regression.sh",
     "Scripts/run_planar_one_mass_timing_regression.sh",
     "Scripts/replay_native_terminal_checkpoint.m",
     "Scripts/run_release_tests.sh",

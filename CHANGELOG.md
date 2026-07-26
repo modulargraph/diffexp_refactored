@@ -2,9 +2,14 @@
 
 ## Unreleased
 
-- Reproduced the original DiffExp Henn and one-mass canonical pentagons,
-  multiple-polylogarithm notebook, and equal-mass Banana endpoint with
-  hash-pinned inputs, saved-reference checks, and opt-in timing gates.
+- Reproduced every example notebook in the pinned public DiffExp revision:
+  the Henn and one-mass canonical pentagons, multiple polylogarithms, and
+  both equal- and unequal-mass Banana endpoints, with hash-pinned inputs,
+  saved-reference checks, and opt-in timing gates.
+- Parallelized explicitly bounded terminal endpoint batches while preserving
+  atomic, request-ordered publication. The 15-component unequal-mass Banana
+  terminal projection fell from about 494 to 208 seconds on the development
+  machine.
 - Bound deferred native value-handoff accuracy to the observable run's
   matching target, preventing low-digit transports from silently performing
   high-precision tail-certificate retries.

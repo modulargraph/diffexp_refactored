@@ -12,7 +12,7 @@ The original repository revision used for the inventory is
 | --- | --- | --- |
 | `5pNonPlanar.nb` | Henn et al. nonplanar five-point canonical system, 108 masters and 31 letters | passing |
 | `5pPlanar1Mass.nb` | one-loop and `zzz`/`zmz`/`mzz` planar one-mass canonical systems | passing |
-| `Banana.nb` | equal- and unequal-mass banana differential equations | equal-mass endpoint passing; unequal-mass route in progress |
+| `Banana.nb` | equal- and unequal-mass banana differential equations | both endpoints passing |
 | `MultiplePolylogarithms.nb` | multiple-polylogarithm demonstration | passing |
 
 ## Henn nonplanar five-point system
@@ -212,9 +212,63 @@ all 20 saved endpoint coefficients agree with the original notebook's
 | DiffExp 2 | three-leg contour ending at `t=20` | 35.98 s | `2.72e-11` |
 
 The timings are useful historical context but not strictly endpoint-for-
-endpoint because the old call continued to `t=32`. The unequal-mass
-deformation and momentum route are still being qualified separately and are
-not advertised as passing yet.
+endpoint because the old call continued to `t=32`.
+
+## Unequal-mass Banana
+
+Run:
+
+```sh
+Scripts/fetch_original_banana_data.sh
+wolframscript -file Examples/OriginalDiffExp/BananaUnequalMass.wl
+```
+
+The target is the 15-master system at
+
+```text
+psq = 50,  (mm1,mm2,mm3,mm4) = (2,3/2,4/3,1),
+```
+
+where the `mm` variables are squared masses. The public notebook checks this
+point by two independent contours. The runnable DiffExp 2 example uses the
+faster crosscheck contour:
+
+1. transport the four equal-mass masters from `t=-1` to `t=50` through the
+   upper half-plane;
+2. lift them to the 15-master unequal family using the exact degeneration
+   map `{1,1,1,1,1,1,2,2,2,2,3,4,4,4,4}`; and
+3. deform the masses at fixed `psq=50`.
+
+The production example uses working precision 100, expansion order 50, and
+retains epsilon orders 0 through 7 while checking the original saved endpoint
+through order 4. On the July 2026 development machine:
+
+| Implementation | Equal transport from `-1` to `50` | Mass deformation | Comparable total | Maximum endpoint error |
+| --- | ---: | ---: | ---: | ---: |
+| DiffExp 1 saved crosscheck | 76.018792 s | 244.617557 s | 320.636349 s | independent-route difference `1.42e-24` |
+| DiffExp 2 | 43.59 s | 167.56 s | 211.15 s | `1.99e-14` |
+
+The original notebook also spends 33.272064 seconds constructing and
+transporting its asymptotic boundary to `t=-1`; that is excluded from the
+comparison because both DiffExp 2 Banana examples start from the same
+precomputed numerical seed. The seed was generated at working precision 1000
+using the pinned original notebook and is explicitly labelled external
+numerical input.
+
+As an independent qualification, the notebook's primary ordering was also
+run in DiffExp 2: mass deformation at `psq=1/2`, followed by the two-leg
+momentum contour
+
+```text
+1/2 -> 25+20i -> 50.
+```
+
+All 15 masters and all eight retained epsilon coefficients agree with the
+crosscheck contour; the largest absolute difference is `2.57e-14`. This
+primary route exposed a general terminal-projection bottleneck. Bounded
+four-worker endpoint batching reduced its 15-component projection from about
+494 to 208 seconds, and the complete second momentum leg from about 11.8 to
+7.3 minutes, without changing the endpoint.
 
 ## Optional timing gates
 
@@ -283,3 +337,20 @@ Scripts/run_original_banana_timing_regression.sh
 Its default hard deadline is 180 seconds and its three-leg transport ceiling
 is 75 seconds. Override them with `ORIGINAL_BANANA_DEADLINE_SECONDS` and
 `ORIGINAL_BANANA_MAX_TRANSPORT_SECONDS`.
+
+The original unequal-mass Banana reproduction is separately opt-in:
+
+```sh
+DE2_RUN_ORIGINAL_BANANA_UNEQUAL_TIMING=1 Scripts/run_release_tests.sh
+```
+
+or directly:
+
+```sh
+Scripts/run_original_banana_unequal_timing_regression.sh
+```
+
+Its default hard deadline is 600 seconds and its complete equal-plus-mass
+transport ceiling is 420 seconds. Override them with
+`ORIGINAL_BANANA_UNEQUAL_DEADLINE_SECONDS` and
+`ORIGINAL_BANANA_UNEQUAL_MAX_TOTAL_SECONDS`.

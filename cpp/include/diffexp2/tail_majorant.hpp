@@ -2334,7 +2334,9 @@ inline RegularTaylorPointTailCertificate certify_regular_taylor_point_tail(
 
 inline RegularTaylorDiskCertificate certify_physical_regular_taylor_disk(
     const PhysicalRegularTaylorTailModel& model,
-    const std::string& witness_radius_exact) {
+    const std::string& witness_radius_exact,
+    const tail_majorant_detail::PhysicalNormalizedODEDiskBounds*
+        precomputed_normalized = nullptr) {
   using namespace tail_majorant_detail;
   Rational radius(0);
   try {
@@ -2383,10 +2385,15 @@ inline RegularTaylorDiskCertificate certify_physical_regular_taylor_disk(
         "physical tail model has incomplete operator or initial bounds");
 
   const auto radius_upper = exact_rational_upper(radius);
-  const auto normalized =
-      certify_physical_normalized_ode_disk_bounds(
-          model.q_causal_coefficients,
-          model.c_causal_coefficients, model.dimension, radius);
+  PhysicalNormalizedODEDiskBounds computed_normalized;
+  if (precomputed_normalized == nullptr)
+    computed_normalized =
+        certify_physical_normalized_ode_disk_bounds(
+            model.q_causal_coefficients,
+            model.c_causal_coefficients, model.dimension, radius);
+  const auto& normalized = precomputed_normalized == nullptr
+      ? computed_normalized
+      : *precomputed_normalized;
   if (normalized.status != TailMajorantStatus::Certified)
     return inconclusive_disk(
         radius.str(),
@@ -2485,7 +2492,9 @@ certify_physical_regular_taylor_point_tail(
     const PhysicalRegularTaylorTailModel& model,
     const RealEvaluationPoint& input_point,
     const std::string& witness_radius_exact,
-    std::optional<std::uint32_t> retained_complete_max = std::nullopt) {
+    std::optional<std::uint32_t> retained_complete_max = std::nullopt,
+    const tail_majorant_detail::PhysicalNormalizedODEDiskBounds*
+        precomputed_normalized = nullptr) {
   using namespace tail_majorant_detail;
   const auto point = line_integration_detail::require_exact_rational_point(
       input_point, "physical-tail-evaluation");
@@ -2500,7 +2509,7 @@ certify_physical_regular_taylor_point_tail(
 
   RegularTaylorPointTailCertificate result;
   result.disk = certify_physical_regular_taylor_disk(
-      model, radius.str());
+      model, radius.str(), precomputed_normalized);
   if (result.disk.status != TailMajorantStatus::Certified) {
     result.status = result.disk.status;
     result.detail = result.disk.detail;
@@ -2559,7 +2568,9 @@ evaluate_physical_local_solution_with_certified_tail(
     const PhysicalRegularTaylorTailModel& model,
     const RealEvaluationPoint& point,
     const std::string& witness_radius_exact,
-    EvaluationOptions options = {}) {
+    EvaluationOptions options = {},
+    const tail_majorant_detail::PhysicalNormalizedODEDiskBounds*
+        precomputed_normalized = nullptr) {
   if (model.reconstructed.checkpoint_identity !=
           model.local_checkpoint_identity ||
       model.reconstructed.dimension != model.dimension ||
@@ -2577,7 +2588,8 @@ evaluate_physical_local_solution_with_certified_tail(
   result.evaluation = evaluate_local_solution(
       model.reconstructed, point, options);
   result.tail = certify_physical_regular_taylor_point_tail(
-      model, point, witness_radius_exact, retained);
+      model, point, witness_radius_exact, retained,
+      precomputed_normalized);
   if (result.tail.status != TailMajorantStatus::Certified) {
     result.evaluation.value.error.provenance = result.tail.detail;
     result.evaluation.theta_value.error.provenance = result.tail.detail;

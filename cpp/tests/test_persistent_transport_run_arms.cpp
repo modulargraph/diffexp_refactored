@@ -2443,7 +2443,7 @@ void test_frame_independent_physical_value_wiring() {
         direct.at("tail_certificate_taylor_complete_max") != 30 ||
         direct.at("tail_order_retries") != 0 ||
         direct.at("tail_witness_direction") != "outward" ||
-        direct.at("tail_witness_dyadic_exponent") != 16 ||
+        direct.at("tail_witness_dyadic_exponent") != 8 ||
         direct.at("output_tail_status") !=
             "transient-physical-reconstructible" ||
         direct.at("next_hop_policy") !=

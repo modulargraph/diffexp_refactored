@@ -257,7 +257,12 @@
         use_physical_source_tail
         ? physical_source_model->taylor_complete_max
         : producer_taylor_complete_max;
-    constexpr std::uint32_t kWitnessSearchCap = 16;
+    // Radii closer than 2^-8 of the remaining chart clearance can force the
+    // adaptive Q disk proof to resolve a thin annulus next to a physical
+    // singularity.  At the retained orders used here they improve the
+    // geometric tail by less than one decimal digit, but can make an
+    // optional value hop minutes slower.
+    constexpr std::uint32_t kWitnessSearchCap = 8;
     // Reconstructing one physical value is substantially cheaper than
     // solving every basis column.  A coefficient-blind center ratio cannot
     // predict the required Taylor order for a stiff local operator, so retry
@@ -284,6 +289,9 @@
     auto point_modulus = exact_path_detail::abs(producing_local);
     auto witness_gap = producing.geometry.radius - point_modulus;
     std::optional<CertifiedLocalEvaluation> certified;
+    std::map<std::string,
+             tail_majorant_detail::PhysicalNormalizedODEDiskBounds>
+        normalized_disk_cache;
     EpsilonVector retained_value;
     LocalEvaluation certified_handoff;
     std::string last_accuracy_failure;
@@ -291,6 +299,9 @@
     bool used_overlap_recenter = false;
     std::string direct_center_failure;
     std::optional<CertifiedLocalEvaluation> recentered_certified;
+    std::map<std::string,
+             tail_majorant_detail::PhysicalNormalizedODEDiskBounds>
+        recentered_normalized_disk_cache;
     EpsilonVector source_overlap_inflated_value;
     EpsilonVector recentered_retained_value;
     LocalEvaluation recentered_center_handoff;
@@ -308,10 +319,19 @@
         EvaluationOptions options;
         options.imaginary_sign = producing_rim;
         options.compute_tail_estimate = false;
+        auto [cached, inserted] =
+            normalized_disk_cache.try_emplace(candidate.str());
+        if (inserted)
+          cached->second =
+              tail_majorant_detail::
+                  certify_physical_normalized_ode_disk_bounds(
+                      physical_source_model->q_causal_coefficients,
+                      physical_source_model->c_causal_coefficients,
+                      physical_source_model->dimension, candidate);
         attempted =
             evaluate_physical_local_solution_with_certified_tail(
                 *physical_source_model, producing_point,
-                candidate.str(), options);
+                candidate.str(), options, &cached->second);
       } else {
         attempted =
             incoming->evaluate_retained_point_with_certified_tail(
@@ -679,10 +699,20 @@
                 std::uint32_t exponent) {
           EvaluationOptions options;
           options.compute_tail_estimate = false;
+          auto [cached, inserted] =
+              recentered_normalized_disk_cache.try_emplace(
+                  candidate.str());
+          if (inserted)
+            cached->second =
+                tail_majorant_detail::
+                    certify_physical_normalized_ode_disk_bounds(
+                        recentered_model->q_causal_coefficients,
+                        recentered_model->c_causal_coefficients,
+                        recentered_model->dimension, candidate);
           auto attempted =
               evaluate_physical_local_solution_with_certified_tail(
                   *recentered_model, recentered_point,
-                  candidate.str(), options);
+                  candidate.str(), options, &cached->second);
           if (attempted.tail.status !=
                   TailMajorantStatus::Certified) {
             if (attempted.tail.status !=

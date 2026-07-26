@@ -132,6 +132,18 @@ canonical = DiffExp2`LoadCanonicalSystem[<|
   "Variables" -> {v1, v2}
 |>];
 
+geometry = DiffExp2`CanonicalLineChartGeometry[
+  canonical,
+  {v1 -> a1, v2 -> a2},
+  {v1 -> b1, v2 -> b2},
+  "WorkingPrecision" -> 50,
+  "ImaginaryDetour" -> <|
+    "Amplitude" -> 1/10,
+    "Directions" -> {1, 1}
+  |>,
+  "ClearanceFactor" -> 1/3
+];
+
 result = DiffExp2`TransportCanonicalLine[
   canonical,
   boundary,
@@ -141,8 +153,13 @@ result = DiffExp2`TransportCanonicalLine[
   "EpsilonOrder" -> 4,
   "WorkingPrecision" -> 50,
   "UsePade" -> True,
-  "ChartCenters" -> {0, 1/3, 7/10},
-  "ChartBoundaries" -> {0, 1/5, 3/5, 1}
+  "ImaginaryDetour" -> <|
+    "Amplitude" -> 1/10,
+    "Directions" -> {1, 1}
+  |>,
+  "BranchTrackingSubsteps" -> 32,
+  "ChartCenters" -> geometry["Centers"],
+  "ChartBoundaries" -> geometry["Boundaries"]
 ];
 ```
 
@@ -159,11 +176,25 @@ into a rational one or weaken the rational solver's input checks.
 The boundary convention remains
 `boundary[[master,k+1]] = coefficient of eps^k`. At a singular starting
 point it must describe a finite regular solution; incompatible residue
-actions fail loudly. Explicit chart geometry is required: the canonical path
-does not guess convergence-safe charts for a general algebraic alphabet.
+actions fail loudly. Explicit chart geometry remains part of the transport
+record. `CanonicalLineChartGeometry` can construct it by algebraically
+locating the finite zeros, poles, and square-root branch points of active
+letters. `"ClearanceFactor" -> 1/3` certifies each endpoint to be at most one
+third of the distance from its chart center to the nearest such singularity.
+The planner fails if the proposed contour itself contains a singularity.
+`"ImaginaryDetour"` optionally adds
+`I amplitude 4 t (1-t) directions` to the straight kinematic path. It leaves
+both endpoints fixed and makes a shared `+i0`/`-i0` homotopy explicit when an
+original example crosses interior singular surfaces. Square-root signs are
+continued between chart centers along that contour instead of being reset to
+the principal branch in every chart; `"BranchTrackingSubsteps"` controls the
+phase-unwrapping resolution.
 The result schema is
 `DiffExp2.CanonicalTransportResult/v1` and exposes `"Value"`, per-chart
 timings, Padé fallback counts, and the resolved numerical settings.
+The geometry record has schema `DiffExp2.CanonicalChartGeometry/v1` and
+exposes its centers, boundaries, active-letter indices, singularities, and
+maximum certified clearance ratio.
 
 ## Regular-anchor boundaries
 

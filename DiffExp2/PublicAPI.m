@@ -16,6 +16,7 @@ CurrentConfiguration::usage = "CurrentConfiguration[] returns the resolved, Stri
 
 LoadSystem::usage = "LoadSystem[spec] loads an exact epsilon-rational differential system. spec may be an Association, a d<var>_full.m file, or a directory containing exactly one such file.";
 LoadCanonicalSystem::usage = "LoadCanonicalSystem[spec] loads a canonical dlog system from constant matrices, alphabet letters, and kinematic variables. Algebraic letters such as square roots are supported.";
+CanonicalLineChartGeometry::usage = "CanonicalLineChartGeometry[sys, from, to, opts] constructs clearance-certified charts from the finite algebraic singularities of the active canonical alphabet.";
 BackendInformation::usage = "BackendInformation[] reports the compiled recurrence backend version and availability.";
 PrepareBoundary::usage = "PrepareBoundary[expressions, opts] expands one closed-form expression per master into the finite regular-anchor coefficient array accepted by TransportEndpoint and TransportLine. It does not construct a singular/asymptotic LocalSolution from line-coordinate powers or logs. Options: \"EpsilonSymbol\" and \"EpsilonOrder\".";
 
@@ -158,6 +159,15 @@ DiffExp2`LoadCanonicalSystem[spec_Association] :=
   DiffExp2`CanonicalTransport`LoadCanonicalSystem[spec];
 DiffExp2`LoadCanonicalSystem[args___] :=
   DiffExp2`CanonicalTransport`LoadCanonicalSystem[args];
+
+Options[DiffExp2`CanonicalLineChartGeometry] =
+  Options[DiffExp2`CanonicalTransport`CanonicalLineChartGeometry];
+DiffExp2`CanonicalLineChartGeometry[
+    system_Association, from_, to_, opts:OptionsPattern[]] :=
+  DiffExp2`CanonicalTransport`CanonicalLineChartGeometry[
+    system, from, to, opts];
+DiffExp2`CanonicalLineChartGeometry[args___] :=
+  DiffExp2`CanonicalTransport`CanonicalLineChartGeometry[args];
 
 Options[DiffExp2`TransportCanonicalLine] =
   Options[DiffExp2`CanonicalTransport`TransportCanonicalLine];

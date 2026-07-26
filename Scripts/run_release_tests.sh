@@ -111,6 +111,11 @@ if [[ "${DE2_RUN_HENN_NONPLANAR_TIMING:-0}" == 1 ]]; then
   Scripts/run_henn_nonplanar_timing_regression.sh
 fi
 
+if [[ "${DE2_RUN_PLANAR_ONE_MASS_TIMING:-0}" == 1 ]]; then
+  echo "=== optional original DiffExp planar one-mass canonical pentagons"
+  Scripts/run_planar_one_mass_timing_regression.sh
+fi
+
 if [[ "${DE2_RUN_DOUBLE_BOX_TIMING:-0}" == 1 ]]; then
   echo "=== optional full double-box timing regression"
   Scripts/run_double_box_timing_regression.sh

@@ -43,6 +43,26 @@ assert["canonical_regular_transport",
     First[regularResult["Value"]] - regularExpected, 40]]] < 10^-18 &&
   regularResult["PadeFallbacks"] === 0];
 
+regularGeometry = catchDE2[
+  DiffExp2`CanonicalLineChartGeometry[
+    regularSystem,
+    {x -> 1},
+    {x -> 2},
+    "WorkingPrecision" -> 50,
+    "ClearanceFactor" -> 1/3
+  ]
+];
+assert["canonical_clearance_geometry",
+  !FailureQ[regularGeometry] &&
+  regularGeometry["Schema"] ===
+    "DiffExp2.CanonicalChartGeometry/v1" &&
+  regularGeometry["Centers"] === {1/2} &&
+  regularGeometry["Boundaries"] === {0, 1} &&
+  regularGeometry["ActiveLetterIndices"] === {1} &&
+  TrueQ[
+    regularGeometry["MaximumClearanceRatio"] <= 1/3
+  ]];
+
 implicitGeometry = catchDE2[DiffExp2`TransportCanonicalLine[
   regularSystem,
   {{1, 0}},
@@ -55,6 +75,37 @@ implicitGeometry = catchDE2[DiffExp2`TransportCanonicalLine[
 ]];
 assert["canonical_chart_geometry_is_explicit",
   FailureQ[implicitGeometry] && implicitGeometry["ID"] === "E6"];
+
+crossingSystem = DiffExp2`LoadCanonicalSystem[<|
+  "ConstantMatrices" -> {{{1}}},
+  "Letters" -> {x},
+  "Variables" -> {x}
+|>];
+crossingGeometry = catchDE2[
+  DiffExp2`CanonicalLineChartGeometry[
+    crossingSystem,
+    {x -> -1},
+    {x -> 1},
+    "WorkingPrecision" -> 50
+  ]
+];
+detouredGeometry = catchDE2[
+  DiffExp2`CanonicalLineChartGeometry[
+    crossingSystem,
+    {x -> -1},
+    {x -> 1},
+    "WorkingPrecision" -> 50,
+    "ImaginaryDetour" -> 1/10
+  ]
+];
+assert["canonical_clearance_requires_nonsingular_contour",
+  FailureQ[crossingGeometry] &&
+  crossingGeometry["ID"] === "E7" &&
+  !FailureQ[detouredGeometry] &&
+  Last[detouredGeometry["Boundaries"]] === 1 &&
+  TrueQ[
+    detouredGeometry["MaximumClearanceRatio"] <= 1/3
+  ]];
 
 algebraicSystem = DiffExp2`LoadCanonicalSystem[<|
   "ConstantMatrices" -> {{{1}}},

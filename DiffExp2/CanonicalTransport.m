@@ -17,6 +17,8 @@ BeginPackage[
 
 LoadCanonicalSystem::usage =
   "LoadCanonicalSystem[spec] validates constant matrices, alphabet letters, and kinematic variables for a canonical dlog system.";
+CanonicalLineChartGeometry::usage =
+  "CanonicalLineChartGeometry[sys,from,to,opts] constructs clearance-certified charts from the finite algebraic singularities of the active canonical alphabet.";
 TransportCanonicalLine::usage =
   "TransportCanonicalLine[sys,boundary,from,to,opts] transports a finite epsilon-coefficient boundary through explicitly supplied canonical charts.";
 
@@ -56,7 +58,7 @@ LoadCanonicalSystem[spec_Association] := Module[
       "all canonical matrices must be square and have one common dimension",
       <|"Dimensions" -> (Dimensions /@ matrices)|>]];
   If[!AllTrue[matrices,
-      ArrayQ[Normal[#], 2, NumericQ] &],
+      ArrayQ[#, 2, NumericQ] &],
     err["E6",
       "canonical matrices must contain only constant numeric entries"]];
   If[!FreeQ[matrices, Alternatives @@ variables],
@@ -95,7 +97,9 @@ Options[TransportCanonicalLine] = {
   "WorkingPrecision" -> Automatic,
   "UsePade" -> Automatic,
   "ChartCenters" -> Automatic,
-  "ChartBoundaries" -> Automatic
+  "ChartBoundaries" -> Automatic,
+  "ImaginaryDetour" -> None,
+  "BranchTrackingSubsteps" -> 32
 };
 
 pointAssociation[point_Association] := point;
@@ -133,6 +137,252 @@ resolvedBoolean[value_, key_String] := Module[{answer},
     err["E6", key <> " must be True or False", <|"Value" -> answer|>]];
   answer
 ];
+
+resolvedDetour[None | Automatic, variableCount_Integer] :=
+  <|"Amplitude" -> 0, "Directions" -> ConstantArray[0, variableCount]|>;
+resolvedDetour[amplitude_?realNumericQ, variableCount_Integer] /;
+    TrueQ[amplitude > 0] :=
+  <|"Amplitude" -> amplitude,
+    "Directions" -> ConstantArray[1, variableCount]|>;
+resolvedDetour[spec_Association, variableCount_Integer] := Module[
+  {amplitude, directions},
+  amplitude = Lookup[spec, "Amplitude", Missing["NotAvailable"]];
+  directions = Lookup[
+    spec, "Directions", ConstantArray[1, variableCount]];
+  If[!realNumericQ[amplitude] || !TrueQ[amplitude > 0],
+    err["E6",
+      "imaginary-detour amplitude must be a positive real number",
+      <|"Amplitude" -> amplitude|>]];
+  If[!ListQ[directions] ||
+      Length[directions] =!= variableCount ||
+      !AllTrue[directions, realNumericQ],
+    err["E6",
+      "imaginary-detour directions must contain one real number per variable",
+      <|"Directions" -> directions,
+        "VariableCount" -> variableCount|>]];
+  <|"Amplitude" -> amplitude, "Directions" -> directions|>
+];
+resolvedDetour[value_, variableCount_Integer] :=
+  err["E6",
+    "\"ImaginaryDetour\" must be None, a positive amplitude, or an Association",
+    <|"Value" -> value, "VariableCount" -> variableCount|>];
+
+zeroCanonicalMatrixQ[matrix_] := If[
+  Head[matrix] === SparseArray,
+  Length[ArrayRules[matrix]] === 1,
+  AllTrue[Flatten[matrix], TrueQ[PossibleZeroQ[#]] &]
+];
+
+algebraicNorm[expression_] := Fold[
+  Function[{current, root},
+    Together[current (current /. root -> -root)]
+  ],
+  expression,
+  DeleteDuplicates@Cases[
+    expression, Power[_, Rational[1, 2]], Infinity]
+];
+
+canonicalSingularityPolynomials[lineLetters_List,
+    lineParameter_Symbol] := Module[
+  {radicands, norms, expressions, polynomials},
+  radicands = DeleteDuplicates@Cases[
+    lineLetters,
+    Power[base_, Rational[1, 2]] :> base,
+    Infinity
+  ];
+  norms = algebraicNorm /@ lineLetters;
+  If[!FreeQ[norms, Power[_, Rational[1, 2]]],
+    err["E7",
+      "could not eliminate all square roots while deriving canonical chart clearance"]];
+  expressions = Join[
+    radicands,
+    Flatten[
+      {Numerator[#], Denominator[#]} & /@ (Together /@ norms)
+    ]
+  ];
+  polynomials = DeleteCases[
+    DeleteDuplicates[expressions],
+    value_ /; FreeQ[value, lineParameter]
+  ];
+  If[!AllTrue[polynomials, PolynomialQ[#, lineParameter] &],
+    err["E7",
+      "canonical chart clearance currently requires algebraic letters with polynomial line singularities"]];
+  polynomials
+];
+
+canonicalSingularities[polynomials_List, lineParameter_Symbol,
+    workingPrecision_Integer] := Module[
+  {rootLists, roots, mergeTolerance},
+  rootLists = Table[
+    Quiet[
+      Check[
+        lineParameter /. NSolve[
+          polynomials[[index]] == 0,
+          lineParameter,
+          WorkingPrecision -> workingPrecision
+        ],
+        $Failed
+      ]
+    ],
+    {index, Length[polynomials]}
+  ];
+  If[MemberQ[rootLists, $Failed] ||
+      !AllTrue[Flatten[rootLists], finiteNumericQ],
+    err["E7",
+      "could not determine every finite canonical line singularity"]];
+  roots = SortBy[Flatten[rootLists], {Re, Im}];
+  mergeTolerance = 10^-Floor[workingPrecision/2];
+  DeleteDuplicates[
+    roots,
+    Abs[#1 - #2] < mergeTolerance &
+  ]
+];
+
+clearanceCharts[singularities_List, safety_, workingPrecision_Integer,
+    searchSubdivisions_Integer] := Module[
+  {clearance, nextChart, centers = {}, boundaries = {0},
+    left, chart, ratios, realTolerance},
+  If[singularities === {},
+    Return[<|
+      "Centers" -> {1/2},
+      "Boundaries" -> {0, 1},
+      "MaximumClearanceRatio" -> 0
+    |>]
+  ];
+  realTolerance = 10^-Floor[workingPrecision/3];
+  If[AnyTrue[
+      singularities,
+      -realTolerance <= Re[#] <= 1 + realTolerance &&
+        Abs[Im[#]] <= realTolerance &
+    ],
+    err["E7",
+      "the proposed canonical contour contains a real singularity; choose an imaginary detour whose directions move every active letter singularity off the path",
+      <|"Singularities" -> Select[
+        singularities,
+        -realTolerance <= Re[#] <= 1 + realTolerance &&
+          Abs[Im[#]] <= realTolerance &
+      ]|>]];
+  clearance[point_?NumericQ] :=
+    Min[Abs[N[point, workingPrecision] - singularities]];
+  nextChart[leftPoint_?NumericQ] := Module[
+    {midpoint, function, samples, bracket, lo, hi, mid,
+      center, right},
+    midpoint = (leftPoint + 1)/2;
+    If[midpoint - leftPoint <= safety clearance[midpoint],
+      Return[{midpoint, 1}]
+    ];
+    function[point_?NumericQ] :=
+      point - leftPoint - safety clearance[point];
+    samples = N[
+      Subdivide[leftPoint, 1, searchSubdivisions],
+      workingPrecision
+    ];
+    bracket = SelectFirst[
+      Partition[samples, 2, 1],
+      function[#[[1]]] <= 0 && function[#[[2]]] >= 0 &,
+      Missing["NotFound"]
+    ];
+    If[MissingQ[bracket],
+      err["E7",
+        "could not bracket the next clearance-certified canonical chart",
+        <|"LeftBoundary" -> leftPoint|>]];
+    {lo, hi} = bracket;
+    Do[
+      mid = (lo + hi)/2;
+      If[function[mid] >= 0, hi = mid, lo = mid],
+      {Ceiling[Log2[10] workingPrecision]}
+    ];
+    center = (lo + hi)/2;
+    right = Min[1, center + safety clearance[center]];
+    {center, right}
+  ];
+  While[Last[boundaries] < 1,
+    left = Last[boundaries];
+    chart = nextChart[left];
+    If[chart[[2]] <= left,
+      err["E7",
+        "clearance-certified canonical chart construction stopped making progress",
+        <|"LeftBoundary" -> left, "Chart" -> chart|>]];
+    AppendTo[centers, chart[[1]]];
+    AppendTo[boundaries, chart[[2]]];
+  ];
+  ratios = MapThread[
+    Max[#1 - #2[[1]], #2[[2]] - #1]/clearance[#1] &,
+    {centers, Partition[boundaries, 2, 1]}
+  ];
+  <|
+    "Centers" -> centers,
+    "Boundaries" -> boundaries,
+    "MaximumClearanceRatio" -> Max[ratios]
+  |>
+];
+
+Options[CanonicalLineChartGeometry] = {
+  "WorkingPrecision" -> Automatic,
+  "ImaginaryDetour" -> None,
+  "ClearanceFactor" -> 1/3,
+  "SearchSubdivisions" -> 2000
+};
+
+CanonicalLineChartGeometry[system_Association, from_, to_,
+    OptionsPattern[]] := Module[
+  {workingPrecision, safety, searchSubdivisions, variables,
+    fromValues, toValues, detour,
+    lineParameter = Unique["canonicalGeometry$"], lineRules,
+    activeIndices, activeLetters, lineLetters, polynomials,
+    singularities, charts},
+  If[Lookup[system, "Schema", None] =!= "DiffExp2.CanonicalSystem/v1",
+    err["E6", "first argument is not a canonical-system record"]];
+  workingPrecision = resolvedInteger[
+    OptionValue["WorkingPrecision"], "WorkingPrecision", 20];
+  safety = OptionValue["ClearanceFactor"];
+  If[!realNumericQ[safety] || !TrueQ[0 < safety < 1],
+    err["E6", "\"ClearanceFactor\" must be a real number between 0 and 1",
+      <|"Value" -> safety|>]];
+  searchSubdivisions = OptionValue["SearchSubdivisions"];
+  If[!IntegerQ[searchSubdivisions] || searchSubdivisions < 10,
+    err["E6", "\"SearchSubdivisions\" must be an integer at least 10",
+      <|"Value" -> searchSubdivisions|>]];
+  variables = system["Variables"];
+  fromValues = pointValues[variables, from];
+  toValues = pointValues[variables, to];
+  detour = resolvedDetour[
+    OptionValue["ImaginaryDetour"], Length[variables]];
+  lineRules = Thread[
+    variables ->
+      (fromValues + lineParameter (toValues - fromValues) +
+        I detour["Amplitude"] 4 lineParameter (1 - lineParameter) *
+          detour["Directions"])
+  ];
+  activeIndices = Select[
+    Range[system["LetterCount"]],
+    !zeroCanonicalMatrixQ[system["ConstantMatrices"][[#]]] &
+  ];
+  activeLetters = system["Letters"][[activeIndices]];
+  lineLetters = Together[activeLetters /. lineRules];
+  polynomials = canonicalSingularityPolynomials[
+    lineLetters, lineParameter];
+  singularities = canonicalSingularities[
+    polynomials, lineParameter, workingPrecision];
+  charts = clearanceCharts[
+    singularities, safety, workingPrecision, searchSubdivisions];
+  Join[
+    <|
+      "Schema" -> "DiffExp2.CanonicalChartGeometry/v1",
+      "ImaginaryDetour" -> detour,
+      "ClearanceFactor" -> safety,
+      "ActiveLetterIndices" -> activeIndices,
+      "SingularityPolynomials" -> polynomials,
+      "Singularities" -> singularities
+    |>,
+    charts
+  ]
+];
+
+CanonicalLineChartGeometry[x___] :=
+  err["E6",
+    "CanonicalLineChartGeometry expects a canonical system and two endpoints",
+    <|"Arguments" -> {x}|>];
 
 chartGeometry[centersOption_, boundariesOption_] := Module[
   {centers, boundaries},
@@ -180,12 +430,89 @@ finiteNumericQ[value_] :=
 materialize[values_, workingPrecision_Integer] :=
   N[values, workingPrecision];
 
+squareRootBase[Power[base_, Rational[1, 2]]] := base;
+
+trackedSquareRootSigns[roots_List, centers_List,
+    lineParameter_Symbol, workingPrecision_Integer,
+    substeps_Integer] := Module[
+  {bases, previousPoint = 0, previousBases, continuousRoots,
+    signs = {}, target, grid, nextBases, principalRoots, chartSigns},
+  If[roots === {},
+    Return[ConstantArray[{}, Length[centers]]]];
+  bases = squareRootBase /@ roots;
+  previousBases = materialize[
+    bases /. lineParameter -> previousPoint, workingPrecision];
+  continuousRoots = materialize[
+    roots /. lineParameter -> previousPoint, workingPrecision];
+  If[!AllTrue[Join[previousBases, continuousRoots], finiteNumericQ] ||
+      AnyTrue[previousBases, TrueQ[PossibleZeroQ[#]] &],
+    err["E7",
+      "a square-root branch cannot be initialized at the path start",
+      <|"RootValues" -> continuousRoots,
+        "RadicandValues" -> previousBases|>]];
+  Do[
+    target = centers[[chartIndex]];
+    grid = Table[
+      previousPoint +
+        (target - previousPoint) stepIndex/substeps,
+      {stepIndex, 1, substeps}
+    ];
+    Do[
+      nextBases = materialize[
+        bases /. lineParameter -> point, workingPrecision];
+      If[!AllTrue[nextBases, finiteNumericQ] ||
+          AnyTrue[nextBases, TrueQ[PossibleZeroQ[#]] &],
+        err["E7",
+          "a square-root radicand vanished during branch tracking",
+          <|"Point" -> point, "RadicandValues" -> nextBases|>]];
+      continuousRoots = materialize[
+        continuousRoots *
+          Exp[Log[nextBases/previousBases]/2],
+        workingPrecision
+      ];
+      previousBases = nextBases,
+      {point, grid}
+    ];
+    principalRoots = materialize[
+      roots /. lineParameter -> target, workingPrecision];
+    chartSigns = MapThread[
+      If[Abs[#1 - #2] <= Abs[#1 + #2], 1, -1] &,
+      {continuousRoots, principalRoots}
+    ];
+    AppendTo[signs, chartSigns];
+    continuousRoots = materialize[
+      chartSigns principalRoots, workingPrecision];
+    previousPoint = target,
+    {chartIndex, Length[centers]}
+  ];
+  signs
+];
+
+chartDlogs[lineLetters_List, centers_List, lineParameter_Symbol,
+    workingPrecision_Integer, substeps_Integer] := Module[
+  {roots, signs, replacements, signedLetters},
+  roots = DeleteDuplicates@Cases[
+    lineLetters, Power[_, Rational[1, 2]], Infinity];
+  signs = trackedSquareRootSigns[
+    roots, centers, lineParameter, workingPrecision, substeps];
+  <|
+    "Roots" -> roots,
+    "Signs" -> signs,
+    "Dlogs" -> Table[
+      replacements = MapThread[
+        Rule, {roots, signs[[chartIndex]] roots}];
+      signedLetters = lineLetters /. replacements;
+      Map[Together[D[Log[#], lineParameter]] &, signedLetters],
+      {chartIndex, Length[centers]}
+    ]
+  |>
+];
+
 matrixCombination[values_List, matrices_List, dimension_Integer,
     workingPrecision_Integer] := Module[{combined},
   combined = Total[MapThread[#1 #2 &, {values, matrices}]];
   If[combined === 0,
-    combined = ConstantArray[0, {dimension, dimension}],
-    combined = Normal[combined]];
+    combined = SparseArray[{}, {dimension, dimension}]];
   materialize[combined, workingPrecision]
 ];
 
@@ -282,6 +609,23 @@ padeEvaluate[table_List, step_, order_Integer,
   <|"Value" -> values, "Fallbacks" -> fallback|>
 ];
 
+seriesForcing[coefficientMatrices_List, previousCoefficients_List,
+    order_Integer, dimension_Integer,
+    workingPrecision_Integer] := Module[
+  {forcing = ConstantArray[0, {order, dimension}], contribution},
+  Do[
+    contribution = Transpose[
+      coefficientMatrices[[matrixPower + 1]] .
+        Transpose[
+          previousCoefficients[[1 ;; order - matrixPower]]
+        ]
+    ];
+    forcing[[matrixPower + 1 ;; order]] += contribution,
+    {matrixPower, 0, order - 1}
+  ];
+  materialize[forcing, workingPrecision]
+];
+
 regularChart[inputBlocks_List, left_, center_, right_, dlogs_List,
     matrices_List, dimension_Integer, epsilonOrder_Integer,
     expansionOrder_Integer, workingPrecision_Integer, usePade_,
@@ -303,19 +647,15 @@ regularChart[inputBlocks_List, left_, center_, right_, dlogs_List,
     leftStep = left - center;
     rightStep = right - center;
     Do[
-      Do[
-        forcing = Total[
-          Table[
-            coefficientMatrices[[matrixPower + 1]] .
-              coefficients[[
-                epsilonIndex, power - matrixPower + 1]],
-            {matrixPower, 0, power}
-          ]
-        ];
-        coefficients[[epsilonIndex + 1, power + 2]] =
-          materialize[forcing/(power + 1), workingPrecision],
-        {power, 0, expansionOrder - 1}
+      forcing = seriesForcing[
+        coefficientMatrices, coefficients[[epsilonIndex]],
+        expansionOrder, dimension, workingPrecision
       ];
+      coefficients[[epsilonIndex + 1, 2 ;; expansionOrder + 1]] =
+        materialize[
+          forcing/Range[expansionOrder],
+          workingPrecision
+        ];
       evaluated = padeEvaluate[
         coefficients[[epsilonIndex + 1]], leftStep,
         expansionOrder, workingPrecision, usePade];
@@ -351,7 +691,8 @@ singularStartChart[inputBlocks_List, center_, right_, dlogs_List,
     lineParameter_Symbol] := Module[
   {z = Unique["canonicalSingular$"], residues, residueMatrix,
     compatibility, regularExpressions, series, regularValues,
-    coefficientMatrices, coefficients, forcing, output, evaluated,
+    coefficientMatrices, coefficients, forcing, residueForcing,
+    output, evaluated,
     fallbackCount = 0, timing},
   timing = AbsoluteTiming[
     residues = Table[
@@ -420,23 +761,23 @@ singularStartChart[inputBlocks_List, center_, right_, dlogs_List,
       {epsilonIndex, 0, epsilonOrder}
     ];
     Do[
-      Do[
-        forcing =
-          residueMatrix .
-            coefficients[[epsilonIndex, power + 2]] +
-          Total[
-            Table[
-              coefficientMatrices[[matrixPower + 1]] .
-                coefficients[[
-                  epsilonIndex, power - matrixPower + 1]],
-              {matrixPower, 0, power}
-            ]
-          ];
-        coefficients[[epsilonIndex + 1, power + 2]] =
-          materialize[forcing/(power + 1), workingPrecision],
-        {epsilonIndex, 1, epsilonOrder}
-      ],
-      {power, 0, expansionOrder - 1}
+      forcing = seriesForcing[
+        coefficientMatrices, coefficients[[epsilonIndex]],
+        expansionOrder, dimension, workingPrecision
+      ];
+      residueForcing = Transpose[
+        residueMatrix .
+          Transpose[
+            coefficients[[
+              epsilonIndex, 2 ;; expansionOrder + 1]]
+          ]
+      ];
+      coefficients[[epsilonIndex + 1, 2 ;; expansionOrder + 1]] =
+        materialize[
+          (forcing + residueForcing)/Range[expansionOrder],
+          workingPrecision
+        ],
+      {epsilonIndex, 1, epsilonOrder}
     ];
     output = Table[
       evaluated = padeEvaluate[
@@ -460,8 +801,10 @@ TransportCanonicalLine[system_Association, boundary_List, from_, to_,
     OptionsPattern[]] := Module[
   {dimension, matrices, letters, variables, epsilonOrder, expansionOrder,
     workingPrecision, usePade, centers, boundaries, fromValues, toValues,
-    lineParameter = Unique["canonicalLine$"], lineRules, lineLetters, dlogs,
-    blocks, chartResult, chartRecords = {}, totalTiming},
+    detour, branchTrackingSubsteps,
+    lineParameter = Unique["canonicalLine$"], lineRules,
+    lineLetters, branchData, blocks, chartResult, chartRecords = {},
+    totalTiming},
   If[Lookup[system, "Schema", None] =!= "DiffExp2.CanonicalSystem/v1",
     err["E6", "first argument is not a canonical-system record"]];
   dimension = system["Dimension"];
@@ -489,39 +832,57 @@ TransportCanonicalLine[system_Association, boundary_List, from_, to_,
   workingPrecision = resolvedInteger[
     OptionValue["WorkingPrecision"], "WorkingPrecision", 20];
   usePade = resolvedBoolean[OptionValue["UsePade"], "UsePade"];
+  branchTrackingSubsteps = resolvedInteger[
+    OptionValue["BranchTrackingSubsteps"],
+    "BranchTrackingSubsteps", 2];
   {centers, boundaries} = chartGeometry[
     OptionValue["ChartCenters"], OptionValue["ChartBoundaries"]];
   fromValues = pointValues[variables, from];
   toValues = pointValues[variables, to];
+  detour = resolvedDetour[
+    OptionValue["ImaginaryDetour"], Length[variables]];
   lineRules = Thread[
     variables ->
-      (fromValues + lineParameter (toValues - fromValues))
+      (fromValues + lineParameter (toValues - fromValues) +
+        I detour["Amplitude"] 4 lineParameter (1 - lineParameter) *
+          detour["Directions"])
   ];
   lineLetters = Together[letters /. lineRules];
-  dlogs = Map[Together[D[Log[#], lineParameter]] &, lineLetters];
+  branchData = chartDlogs[
+    lineLetters, centers, lineParameter, workingPrecision,
+    branchTrackingSubsteps];
   blocks = materialize[
     Transpose[boundary[[All, 1 ;; epsilonOrder + 1]]],
     workingPrecision
   ];
   totalTiming = AbsoluteTiming[
     Do[
+      DiffExp2`Config`PrintInfo[
+        2, "DiffExp2 canonical chart ", chartIndex, "/",
+        Length[centers], " centered at ", centers[[chartIndex]]];
       chartResult = If[chartIndex === 1 &&
           TrueQ[PossibleZeroQ[centers[[1]] - boundaries[[1]]]],
         singularStartChart[
-          blocks, centers[[1]], boundaries[[2]], dlogs, matrices,
+          blocks, centers[[1]], boundaries[[2]],
+          branchData["Dlogs"][[chartIndex]], matrices,
           dimension, epsilonOrder, expansionOrder, workingPrecision,
           usePade, lineParameter
         ],
         regularChart[
           blocks, boundaries[[chartIndex]], centers[[chartIndex]],
-          boundaries[[chartIndex + 1]], dlogs, matrices, dimension,
+          boundaries[[chartIndex + 1]],
+          branchData["Dlogs"][[chartIndex]], matrices, dimension,
           epsilonOrder, expansionOrder, workingPrecision, usePade,
           lineParameter
         ]
       ];
       blocks = chartResult[[1]];
       AppendTo[chartRecords,
-        Join[<|"Index" -> chartIndex|>, chartResult[[2]]]],
+        Join[<|"Index" -> chartIndex|>, chartResult[[2]]]];
+      DiffExp2`Config`PrintInfo[
+        2, "DiffExp2 canonical chart ", chartIndex,
+        " completed in ", chartResult[[2, "TimingSeconds"]],
+        " seconds"],
       {chartIndex, Length[centers]}
     ];
   ][[1]];
@@ -537,6 +898,9 @@ TransportCanonicalLine[system_Association, boundary_List, from_, to_,
     "UsePade" -> usePade,
     "ChartCenters" -> centers,
     "ChartBoundaries" -> boundaries,
+    "ImaginaryDetour" -> detour,
+    "SquareRootCount" -> Length[branchData["Roots"]],
+    "SquareRootSigns" -> branchData["Signs"],
     "Charts" -> chartRecords,
     "TimingSeconds" -> totalTiming,
     "PadeFallbacks" -> Total[Lookup[chartRecords, "PadeFallbacks", 0]]

@@ -152,11 +152,28 @@ order 25, the maximum absolute error against the published endpoint table is
 `1.6e-12`.
 
 The saved DiffExp 1 notebook reports 49.765221 seconds for its order-25
-transport. DiffExp 2 takes 8.27 seconds for canonical transport on the July
+transport. DiffExp 2 takes about 5.5 seconds for canonical transport on the July
 2026 development machine, plus about 0.38 seconds for matrix extraction,
 validation, and ancillary-data import. See
 [Original DiffExp example recovery](OriginalDiffExpExamples.md) for the
 pinned data fetcher, settings, and opt-in timing gate.
+
+## Original planar one-mass five-point example
+
+All four canonical systems from arXiv:2005.04195 are reproduced from the
+published PH1 boundary to PH6 through epsilon order 4. At working precision
+50 and expansion order 25, their maximum absolute errors range from
+`3.6e-12` to `3.2e-11`.
+
+Clearance-certified algebraic charts are essential: uniform charts can
+cross a Taylor convergence disk even when the grid looks fine, and raising
+the series order then amplifies the error. Including chart planning and the
+complete transport call, DiffExp 2 takes about 24, 130, 119, and 145 seconds
+for `1loop`, `zmz`, `mzz`, and `zzz`, respectively, on the July 2026
+development machine. The corresponding saved DiffExp 1 times are about 86,
+1391, 992, and 1671 seconds. See
+[Original DiffExp example recovery](OriginalDiffExpExamples.md) for exact
+settings, hash-pinned ancillary data, and the opt-in timing gate.
 
 ## Reproducibility checklist
 

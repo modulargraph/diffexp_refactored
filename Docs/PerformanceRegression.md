@@ -203,6 +203,32 @@ order-25 transport. Set `HENN_NONPLANAR_DEADLINE_SECONDS` or
 qualification. Ancillary data are hash-pinned and must be fetched before the
 gate; ordinary tests never access the network.
 
+## Original planar one-mass canonical pentagon gate
+
+The four canonical systems from the original DiffExp
+`5pPlanar1Mass.nb` example are opt-in:
+
+```bash
+Scripts/fetch_planar_one_mass_data.sh
+Scripts/run_planar_one_mass_timing_regression.sh
+```
+
+They can be appended to the release suite with
+`DE2_RUN_PLANAR_ONE_MASS_TIMING=1`. The gate checks the PH1-to-PH6 endpoint
+for every master and every coefficient from epsilon order 0 through 4, with
+maximum absolute tolerance `1e-8`. Default numerical settings are working
+precision 50, expansion order 25, no Padé matching, and clearance-certified
+algebraic charts.
+
+The hard deadline is 900 seconds. Default comparable-time ceilings are 60
+seconds for `1loop`, 300 seconds for `zmz` and `mzz`, and 350 seconds for
+`zzz`. They can be explicitly qualified on other hardware with
+`PLANAR_ONE_MASS_MAX_1LOOP_SECONDS`,
+`PLANAR_ONE_MASS_MAX_ZMZ_SECONDS`,
+`PLANAR_ONE_MASS_MAX_MZZ_SECONDS`, and
+`PLANAR_ONE_MASS_MAX_ZZZ_SECONDS`. Ancillary data are hash-pinned and
+ordinary tests never access the network.
+
 ## Planar double-box gate
 
 The planar double-box timing regression is an opt-in end-to-end gate for the

@@ -40,21 +40,31 @@ std::uint64_t unsigned_value(const json::object& object, const char* key) {
 }
 
 json::object geometry(const std::string& center) {
-  return json::object{{"center_exact", center}, {"scale_exact", "1"},
+  return json::object{{"center_exact", center},
+                      {"scale_exact", "1"},
                       {"radius_exact", "2"},
                       {"infinite_radius", false},
                       {"prescriptions", json::array{}}};
 }
 
 json::array singular_prescriptions() {
-  return json::array{json::object{
-      {"factor_exact", "x+2/3"}, {"sign", -1},
-      {"multiplicity", 1}, {"leading_coefficient_sign", 1}}};
+  return json::array{json::object{{"factor_exact", "x+2/3"},
+                                  {"sign", -1},
+                                  {"multiplicity", 1},
+                                  {"leading_coefficient_sign", 1}}};
 }
 
-json::object singular_geometry() {
-  return json::object{
-      {"center_exact", "-2/3"},
+json::object singular_geometry(bool algebraic_scale = true) {
+  if (!algebraic_scale)
+    return json::object{{"center_exact", "-2/3"},
+                        {"center_numeric", json::array{"-2/3", "0"}},
+                        {"scale_exact", "2"},
+                        {"scale_numeric", json::array{"2", "0"}},
+                        {"radius_exact", "2"},
+                        {"radius_numeric", json::array{"2", "0"}},
+                        {"infinite_radius", false},
+                        {"prescriptions", singular_prescriptions()}};
+  return json::object{{"center_exact", "-2/3"},
       {"center_numeric", json::array{"-2/3", "0"}},
       {"scale_exact", kAlgebraicScale},
       {"scale_numeric", json::array{kAlgebraicScaleValue, "0"}},
@@ -125,64 +135,92 @@ json::object singular_parent_physical_ode(
       {"basis", "physical-original-master"},
       {"theta_coordinate", "local-t"},
       {"owner_signature_identity", owner_identity},
-      {"payload_identity",
-       "de2-physical-ode-singular-arm-parent"},
+      {"payload_identity", "de2-physical-ode-singular-arm-parent"},
       // t y' = (1/2 + eps/3) y.
-      {"q", std::move(q)}, {"c", std::move(c)}};
+      {"q", std::move(q)},
+      {"c", std::move(c)}};
+}
+
+json::object singular_tail_ode(const std::string& owner_identity) {
+  json::array q;
+  q.push_back(epsilon_rational(false, 0, json::array{"1"}));
+  json::array constant_lag;
+  constant_lag.push_back(json::object{
+      {"r", 0},
+      {"c", 0},
+      {"v", epsilon_rational(false, 0, json::array{"1/2", "1/3"})}});
+  json::array c;
+  c.push_back(std::move(constant_lag));
+  return json::object{
+      {"schema", "diffexp2-physical-cleared-ode-v1"},
+      {"basis", "physical-original-master"},
+      {"theta_coordinate", "local-t"},
+      {"owner_signature_identity", owner_identity},
+      {"payload_identity", "de2-physical-ode-singular-tail-arm-parent"},
+      // After the common center factor is cancelled, the same reduced
+      // solution obeys theta y = (1/2 + eps/3) y.
+      {"q", std::move(q)},
+      {"c", std::move(c)}};
 }
 
 json::array singular_spectral_inverse_kernels() {
   json::array kernels;
-  for (std::uint32_t epsilon = 0;
-       epsilon < kSingularFrameWidth; ++epsilon) {
+  for (std::uint32_t epsilon = 0; epsilon < kSingularFrameWidth; ++epsilon) {
     json::array taylor;
     for (std::uint32_t n = 0; n <= 4; ++n)
-      taylor.emplace_back(
-          n == 0 ? (epsilon % 2 == 0 ? "1" : "-1") : "0");
+      taylor.emplace_back(n == 0 ? (epsilon % 2 == 0 ? "1" : "-1") : "0");
     kernels.push_back(std::move(taylor));
   }
   return kernels;
 }
 
-json::object singular_spectral_source_transform() {
-  constexpr auto inverse_identity =
-      "singular-arm-block:VInv=1/(1+eps)";
-  constexpr auto determinant_identity =
-      "singular-arm-block:det=1+eps";
+json::object singular_spectral_source_transform(
+    const std::string& domain = "acb") {
+  constexpr auto inverse_identity = "singular-arm-block:VInv=1/(1+eps)";
+  constexpr auto determinant_identity = "singular-arm-block:det=1+eps";
   const auto producer_identity = json::serialize(json::object{
-      {"schema",
-       "diffexp2-scc-spectral-source-transform-identity-v1"},
+      {"schema", "diffexp2-scc-spectral-source-transform-identity-v1"},
       {"state_basis", "reduced-g-after-spectral-assembly"},
       {"target_recurrence_basis", "spectral-u"},
-      {"dimension", 1}, {"identity", false},
-      {"epsilon_unimodular", true}, {"det_epsilon_valuation", 0},
+      {"dimension", 1},
+      {"identity", false},
+      {"epsilon_unimodular", true},
+      {"det_epsilon_valuation", 0},
       {"v_exact_identity", kSingularSpectralVIdentity},
       {"vinv_exact_identity", inverse_identity},
       {"det_exact_identity", determinant_identity},
-      {"source_window", json::object{
-          {"epsilon_min", -1},
+      {"source_window",
+       json::object{{"epsilon_min", -1},
           {"epsilon_complete_max", kSingularFrameMax},
           {"taylor_complete_max", 4}}},
-      {"serialization", json::object{
-          {"domain", "acb"}, {"symbols", json::array{}}}},
-      {"entries", json::array{json::object{
-          {"row", 0}, {"column", 0},
-          {"exact_entry", inverse_identity}, {"epsilon_shift", 0},
+      {"serialization",
+       json::object{{"domain", domain}, {"symbols", json::array{}}}},
+      {"entries", json::array{json::object{{"row", 0},
+                                           {"column", 0},
+                                           {"exact_entry", inverse_identity},
+                                           {"epsilon_shift", 0},
           {"center_pole_order", 0}}}}});
   return json::object{
       {"schema", "diffexp2-scc-spectral-source-transform-v1"},
-      {"rows", 1}, {"columns", 1}, {"identity", false},
-      {"epsilon_unimodular", true}, {"det_epsilon_valuation", 0},
+      {"rows", 1},
+      {"columns", 1},
+      {"identity", false},
+      {"epsilon_unimodular", true},
+      {"det_epsilon_valuation", 0},
       {"v_exact_identity", kSingularSpectralVIdentity},
       {"vinv_exact_identity", inverse_identity},
       {"det_exact_identity", determinant_identity},
       {"exact_identity", producer_identity},
-      {"domain", "acb"}, {"symbols", json::array{}},
-      {"entries", json::array{json::object{
-          {"row", 0}, {"column", 0},
+      {"domain", domain},
+      {"symbols", json::array{}},
+      {"entries",
+       json::array{json::object{
+           {"row", 0},
+           {"column", 0},
           {"exact_entry", inverse_identity},
-          {"multiplier", json::object{
-              {"epsilon_shift", 0}, {"center_pole_order", 0},
+           {"multiplier",
+            json::object{{"epsilon_shift", 0},
+                         {"center_pole_order", 0},
               {"kernels", singular_spectral_inverse_kernels()},
               {"exact_identity", inverse_identity},
               {"proven_zero", false}}}}}}};
@@ -197,33 +235,42 @@ std::string prepare_regular_chart(const std::string& session,
   json::array principal_matrix;
   principal_matrix.push_back(std::move(principal_row));
   const auto prepared = request(json::object{
-      {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
-      {"key", key}, {"identity", key + "-identity"},
-      {"analytic", json::object{
+      {"schema", 2},
+      {"op", "chart.prepare"},
+      {"session", session},
+      {"key", key},
+      {"identity", key + "-identity"},
+      {"analytic",
+       json::object{
            {"geometry", geometry(center)},
            {"principal_matrix", std::move(principal_matrix)},
-           {"native_scc_capabilities", json::object{
-                {"regular", true}, {"identity_gauge", true},
-                {"identity_v", true}, {"no_pseudo", true}}}}},
-      {"scc", json::object{
-           {"components", singleton_components()},
+           {"native_scc_capabilities", json::object{{"regular", true},
+                                                    {"identity_gauge", true},
+                                                    {"identity_v", true},
+                                                    {"no_pseudo", true}}}}},
+      {"scc", json::object{{"components", singleton_components()},
            {"structural_edges", json::array{}},
            {"condensation_edges", json::array{}},
            {"topological_order", json::array{0}},
            {"coupling_depth", 0}}},
-      {"problem", json::object{
-           {"domain", "acb"}, {"precision_bits", 256},
-           {"d", 1}, {"fb", -1}, {"w", 4},
+      {"problem",
+       json::object{{"domain", "acb"},
+                    {"precision_bits", 256},
+                    {"d", 1},
+                    {"fb", -1},
+                    {"w", 4},
            {"d_lags", unit_d_lags()},
            {"denominators", json::array{}},
-           {"nhat_lags", json::array{json::object{
-                {"poly", json::array{}}, {"rat", json::array{}},
+                    {"nhat_lags",
+                     json::array{json::object{{"poly", json::array{}},
+                                              {"rat", json::array{}},
                 {"val", json::array{nullptr}}}}},
            {"d0_inverse", "1"},
            {"blocks", singleton_components()},
-           {"assembly", json::object{
-                {"identity", true}, {"poly", json::array{}},
-                {"rat", json::array{}}, {"val", json::array{0}}}},
+                    {"assembly", json::object{{"identity", true},
+                                              {"poly", json::array{}},
+                                              {"rat", json::array{}},
+                                              {"val", json::array{0}}}},
            {"chop_digits", 0}}}});
   if (prepared.at("status") != "ok")
     throw std::runtime_error("regular chart.prepare: " +
@@ -231,56 +278,272 @@ std::string prepare_regular_chart(const std::string& session,
   return std::string(prepared.at("chart").as_string());
 }
 
-std::string prepare_singular_chart(const std::string& session) {
+std::string prepare_singular_chart(const std::string& session,
+                                   const std::string& domain = "acb",
+                                   bool algebraic_scale = true) {
   json::array principal_row;
-  principal_row.push_back(json::object{
-      {"exact", "((1/2)+(eps/3))/t"}, {"proven_zero", false}});
+  principal_row.push_back(
+      json::object{{"exact", "((1/2)+(eps/3))/t"}, {"proven_zero", false}});
   json::array principal_matrix;
   principal_matrix.push_back(std::move(principal_row));
+  json::object problem{
+      {"domain", domain},
+      {"d", 1},
+      {"fb", -1},
+      {"w", kSingularFrameWidth},
+      {"d_lags", unit_d_lags()},
+      {"denominators", json::array{}},
+      {"nhat_lags",
+       json::array{json::object{
+           {"poly",
+            json::array{json::object{{"s", 0}, {"e", scalar_entry("1/2")}},
+                        json::object{{"s", 1}, {"e", scalar_entry("1/3")}}}},
+           {"rat", json::array{}},
+           {"val", json::array{0}}}}},
+      {"d0_inverse", "1"},
+      {"blocks", singleton_components()},
+      {"assembly",
+       json::object{
+           {"identity", false},
+           {"exact_identity", kSingularSpectralVIdentity},
+           {"poly",
+            json::array{json::object{{"s", 0}, {"e", scalar_entry("1")}},
+                        json::object{{"s", 1}, {"e", scalar_entry("1")}}}},
+           {"rat", json::array{}},
+           {"val", json::array{0}}}},
+      {"chop_digits", 0}};
+  if (domain == "acb") problem["precision_bits"] = 256;
   const auto prepared = request(json::object{
-      {"schema", 2}, {"op", "chart.prepare"}, {"session", session},
-      {"key", "singular-arm-block"},
-      {"identity", "singular-arm-block-identity"},
-      {"analytic", json::object{
-           {"geometry", singular_geometry()},
+      {"schema", 2},
+      {"op", "chart.prepare"},
+      {"session", session},
+      {"key", domain + ":singular-arm-block:" +
+                  (algebraic_scale ? "algebraic" : "rational")},
+      {"identity", domain + ":singular-arm-block-identity:" +
+                       (algebraic_scale ? "algebraic" : "rational")},
+      {"analytic",
+       json::object{{"geometry", singular_geometry(algebraic_scale)},
            {"principal_matrix", std::move(principal_matrix)},
-           {"native_scc_capabilities", json::object{
-                {"regular", false}, {"identity_gauge", true},
+                    {"native_scc_capabilities",
+                     json::object{{"regular", false},
+                                  {"identity_gauge", true},
                 {"identity_v", false},
                 {"epsilon_unimodular_v", true},
                 {"no_pseudo", true}}}}},
-      {"scc", json::object{
-           {"components", singleton_components()},
+      {"scc", json::object{{"components", singleton_components()},
            {"structural_edges", self_edges()},
            {"condensation_edges", json::array{}},
            {"topological_order", json::array{0}},
            {"coupling_depth", 0}}},
-      {"problem", json::object{
-           {"domain", "acb"}, {"precision_bits", 256},
-           {"d", 1}, {"fb", -1}, {"w", kSingularFrameWidth},
-           {"d_lags", unit_d_lags()},
-           {"denominators", json::array{}},
-           {"nhat_lags", json::array{json::object{
-                {"poly", json::array{
-                     json::object{{"s", 0},
-                                  {"e", scalar_entry("1/2")}},
-                     json::object{{"s", 1},
-                                  {"e", scalar_entry("1/3")}}}},
-                {"rat", json::array{}}, {"val", json::array{0}}}}},
-           {"d0_inverse", "1"},
-           {"blocks", singleton_components()},
-           {"assembly", json::object{
-                {"identity", false},
-                {"exact_identity", kSingularSpectralVIdentity},
-                {"poly", json::array{
-                     json::object{{"s", 0}, {"e", scalar_entry("1")}},
-                     json::object{{"s", 1}, {"e", scalar_entry("1")}}}},
-                {"rat", json::array{}}, {"val", json::array{0}}}},
-           {"chop_digits", 0}}}});
+      {"problem", std::move(problem)}});
   if (prepared.at("status") != "ok")
     throw std::runtime_error("singular chart.prepare: " +
                              json::serialize(prepared));
   return std::string(prepared.at("chart").as_string());
+}
+
+json::object constant_singular_ode(const std::string& owner_identity,
+                                   bool tail_frame) {
+  json::array q;
+  if (!tail_frame) q.push_back(epsilon_rational(true, 0, json::array{"0"}));
+  q.push_back(epsilon_rational(false, 0, json::array{"1"}));
+  json::array c;
+  c.push_back(json::array{});
+  return json::object{
+      {"schema", "diffexp2-physical-cleared-ode-v1"},
+      {"basis", "physical-original-master"},
+      {"theta_coordinate", "local-t"},
+      {"owner_signature_identity", owner_identity},
+      {"payload_identity", tail_frame
+                               ? "de2-physical-ode-constant-singular-tail"
+                               : "de2-physical-ode-constant-singular-parent"},
+      {"q", std::move(q)},
+      {"c", std::move(c)}};
+}
+
+std::string prepare_constant_singular_chart(const std::string& session,
+                                            const std::string& domain) {
+  json::array principal_row;
+  principal_row.push_back(json::object{{"exact", "0"}, {"proven_zero", true}});
+  json::array principal_matrix;
+  principal_matrix.push_back(std::move(principal_row));
+  json::object problem{
+      {"domain", domain},
+      {"d", 1},
+      {"fb", -1},
+      {"w", kSingularFrameWidth},
+           {"d_lags", unit_d_lags()},
+           {"denominators", json::array{}},
+      {"nhat_lags", json::array{json::object{{"poly", json::array{}},
+                                             {"rat", json::array{}},
+                                             {"val", json::array{nullptr}}}}},
+           {"d0_inverse", "1"},
+           {"blocks", singleton_components()},
+      {"assembly",
+       json::object{
+                {"identity", false},
+                {"exact_identity", kSingularSpectralVIdentity},
+           {"poly",
+            json::array{json::object{{"s", 0}, {"e", scalar_entry("1")}},
+                     json::object{{"s", 1}, {"e", scalar_entry("1")}}}},
+           {"rat", json::array{}},
+           {"val", json::array{0}}}},
+      {"chop_digits", 0}};
+  if (domain == "acb") problem["precision_bits"] = 256;
+  const auto prepared = request(json::object{
+      {"schema", 2},
+      {"op", "chart.prepare"},
+      {"session", session},
+      {"key", domain + ":constant-singular-block"},
+      {"identity", domain + ":constant-singular-block-identity"},
+      {"analytic",
+       json::object{{"geometry", singular_geometry(false)},
+                    {"principal_matrix", std::move(principal_matrix)},
+                    {"native_scc_capabilities",
+                     json::object{{"regular", false},
+                                  {"identity_gauge", true},
+                                  {"identity_v", false},
+                                  {"epsilon_unimodular_v", true},
+                                  {"no_pseudo", true}}}}},
+      {"scc", json::object{{"components", singleton_components()},
+                           {"structural_edges", json::array{}},
+                           {"condensation_edges", json::array{}},
+                           {"topological_order", json::array{0}},
+                           {"coupling_depth", 0}}},
+      {"problem", std::move(problem)}});
+  if (prepared.at("status") != "ok")
+    throw std::runtime_error("constant singular chart.prepare: " +
+                             json::serialize(prepared));
+  return std::string(prepared.at("chart").as_string());
+}
+
+std::string prepare_constant_singular_scc(const std::string& session,
+                                          const std::string& block_chart,
+                                          const std::string& key,
+                                          const std::string& identity,
+                                          const std::string& domain) {
+  json::array exact_row;
+  exact_row.push_back(json::object{{"exact", "0"}, {"proven_zero", true}});
+  json::array exact_system;
+  exact_system.push_back(exact_row);
+  json::array exact_theta;
+  exact_theta.push_back(std::move(exact_row));
+  const auto physical = constant_singular_ode(identity, false);
+  json::object manifest{
+      {"schema", 2},
+      {"op", "scc.prepare"},
+      {"session", session},
+      {"key", key},
+      {"identity", identity},
+      {"rational_shadow_identity", "singular-arm-constant-shadow-v1"},
+      {"parent",
+       json::object{
+           {"dimension", 1},
+           {"exact_system_record", std::move(exact_system)},
+           {"exact_theta_record", std::move(exact_theta)},
+           {"chart", singular_geometry(false)},
+           {"scc", json::object{{"components", singleton_components()},
+                                {"structural_edges", json::array{}},
+                                {"condensation_edges", json::array{}},
+                                {"topological_order", json::array{0}},
+                                {"coupling_depth", 0}}},
+           {"execution", json::object{{"mode", "BlockSequentialStrict"},
+                                      {"work_t_order", 4}}},
+           {"work_contract",
+            json::object{{"work_min", -1},
+                         {"requested_min", -1},
+                         {"requested_max", 2},
+                         {"work_complete_max", kSingularFrameMax},
+                         {"public_t_order", 0},
+                         {"wolfram_coupling_depth", 1}}}}},
+      {"blocks",
+       json::array{json::object{
+           {"block", 0},
+           {"vertices", json::array{0}},
+           {"chart", block_chart},
+           {"principal_identity", domain + ":constant-singular-block-identity"},
+           {"regular", false},
+           {"identity_gauge", true},
+           {"identity_v", false},
+           {"epsilon_unimodular_v", true},
+           {"source_transform", singular_spectral_source_transform(domain)},
+           {"no_pseudo", true},
+           {"exact_affine_jordan_indicial",
+            json::object{
+                {"schema", "diffexp2-exact-affine-jordan-indicial-v1"},
+                {"dimension", 1},
+                {"blocks", json::array{json::object{{"block", 0},
+                                                    {"columns", json::array{0}},
+                                                    {"a", "0"},
+                                                    {"b", "0"}}}}}}}}},
+      {"couplings", json::array{}},
+      {"physical_ode", physical},
+      {"rational_shadow_singular_tail",
+       json::object{{"schema", "diffexp2-scc-singular-tail-frame-v1"},
+                    {"equation", constant_singular_ode(identity, true)},
+                    {"epsilon_shifts", json::array{0}}}}};
+  if (domain == "acb") manifest["rational_shadow_physical_ode"] = physical;
+  const auto prepared = request(std::move(manifest));
+  if (prepared.at("status") != "ok")
+    throw std::runtime_error("constant singular scc.prepare: " +
+                             json::serialize(prepared));
+  return std::string(prepared.at("scc").as_string());
+}
+
+json::object constant_singular_run() {
+  json::array shifts;
+  json::array schedule;
+  for (std::uint32_t n = 0; n <= 4; ++n) {
+    shifts.emplace_back(std::to_string(n));
+    schedule.push_back(json::array{json::object{
+        {"case", n == 0 ? "R" : "T"}, {"da", std::to_string(n)}, {"db", "0"}}});
+  }
+  return json::object{
+      {"nmax", 4},
+      {"p", 0},
+      {"has_initial", true},
+      {"adaptive_probe", false},
+      {"a_target", "0"},
+      {"b_target", "0"},
+      {"a_shift_min", 0},
+      {"a_shifts", std::move(shifts)},
+      {"schedule", std::move(schedule)},
+      {"initial", json::array{"0", "1", "0", "0", "0", "0", "0"}},
+      {"initial_validity", json::array{kSingularFrameMax}},
+      {"source", nullptr},
+      {"return_u", false}};
+}
+
+std::string solve_constant_singular_column(const std::string& session,
+                                           const std::string& scc,
+                                           const std::string& checkpoint) {
+  const auto solved = request(json::object{
+      {"schema", 2},
+      {"op", "scc.solve_column"},
+      {"session", session},
+      {"scc", scc},
+      {"checkpoint_identity", checkpoint},
+      {"seed",
+       json::object{
+           {"block", 0},
+           {"run", constant_singular_run()},
+           {"metadata",
+            json::object{
+                {"chart", json::object{{"center_exact", "-2/3"},
+                                       {"scale_exact", "2"},
+                                       {"radius", "2"},
+                                       {"infinite_radius", false}}},
+                {"tag", json::object{{"a", json::object{{"domain", "rational"},
+                                                        {"canonical", "0"}}},
+                                     {"b", json::object{{"domain", "rational"},
+                                                        {"canonical", "0"}}}}},
+                {"prescriptions", singular_prescriptions()},
+                {"checkpoint_identity", checkpoint + ":seed"}}}}},
+      {"targets", json::array{}}});
+  if (solved.at("status") != "ok")
+    throw std::runtime_error("constant singular scc.solve_column: " +
+                             json::serialize(solved));
+  return std::string(solved.at("local").as_string());
 }
 
 json::object regular_run(const std::string& value) {
@@ -324,99 +587,119 @@ json::object singular_run() {
 }
 
 json::object metadata(const std::string& center, const std::string& checkpoint,
-                      bool singular) {
-  json::object tag{
-      {"a", json::object{{"domain", "rational"},
+                      bool singular, bool algebraic_scale = true) {
+  json::object tag{{"a", json::object{{"domain", "rational"},
                            {"canonical", singular ? "1/2" : "0"}}},
       {"b", json::object{{"domain", "rational"},
                            {"canonical", singular ? "1/3" : "0"}}}};
   if (singular)
     tag["p"] = json::object{{"domain", "integer"}, {"canonical", "0"}};
   return json::object{
-      {"chart", json::object{{"center_exact", center},
-                              {"scale_exact", singular
-                                   ? kAlgebraicScale : "1"},
+      {"chart",
+       json::object{{"center_exact", center},
+                    {"scale_exact",
+                     singular ? algebraic_scale ? kAlgebraicScale : "2" : "1"},
                               {"radius", "2"},
                               {"infinite_radius", false}}},
       {"tag", std::move(tag)},
-      {"prescriptions", singular
-           ? singular_prescriptions() : json::array{}},
+      {"prescriptions", singular ? singular_prescriptions() : json::array{}},
       {"checkpoint_identity", checkpoint}};
 }
 
-std::string solve_regular(const std::string& session,
-                          const std::string& chart,
+std::string solve_regular(const std::string& session, const std::string& chart,
                           const std::string& center,
                           const std::string& checkpoint,
                           const std::string& value) {
-  const auto solved = request(json::object{
-      {"schema", 2}, {"op", "local.solve"}, {"session", session},
-      {"chart", chart}, {"run", regular_run(value)},
+  const auto solved =
+      request(json::object{{"schema", 2},
+                           {"op", "local.solve"},
+                           {"session", session},
+                           {"chart", chart},
+                           {"run", regular_run(value)},
       {"metadata", metadata(center, checkpoint, false)}});
   if (solved.at("status") != "ok")
-    throw std::runtime_error("regular local.solve: " +
-                             json::serialize(solved));
+    throw std::runtime_error("regular local.solve: " + json::serialize(solved));
   return std::string(solved.at("local").as_string());
 }
 
 std::string prepare_singular_scc(const std::string& session,
                                  const std::string& block_chart,
                                  const std::string& key,
-                                 const std::string& identity) {
+                                 const std::string& identity,
+                                 const std::string& domain = "acb",
+                                 bool algebraic_scale = true) {
   json::array exact_system_row;
-  exact_system_row.push_back(json::object{
-      {"exact", "((1/2)+(eps/3))/t"}, {"proven_zero", false}});
+  exact_system_row.push_back(
+      json::object{{"exact", "((1/2)+(eps/3))/t"}, {"proven_zero", false}});
   json::array exact_system;
   exact_system.push_back(std::move(exact_system_row));
   json::array exact_theta_row;
-  exact_theta_row.push_back(json::object{
-      {"exact", "(1/2)+(eps/3)"}, {"proven_zero", false}});
+  exact_theta_row.push_back(
+      json::object{{"exact", "(1/2)+(eps/3)"}, {"proven_zero", false}});
   json::array exact_theta;
   exact_theta.push_back(std::move(exact_theta_row));
   const auto physical = singular_parent_physical_ode(identity);
-  const auto prepared = request(json::object{
-      {"schema", 2}, {"op", "scc.prepare"}, {"session", session},
-      {"key", key}, {"identity", identity},
-      {"parent", json::object{
+  json::object manifest{
+      {"schema", 2},
+      {"op", "scc.prepare"},
+      {"session", session},
+      {"key", key},
+      {"identity", identity},
+      {"rational_shadow_identity", "singular-arm-shadow-v1"},
+      {"parent",
+       json::object{
            {"dimension", 1},
            {"exact_system_record", std::move(exact_system)},
            {"exact_theta_record", std::move(exact_theta)},
-           {"chart", singular_geometry()},
-           {"scc", json::object{
-                {"components", singleton_components()},
+           {"chart", singular_geometry(algebraic_scale)},
+           {"scc", json::object{{"components", singleton_components()},
                 {"structural_edges", self_edges()},
                 {"condensation_edges", json::array{}},
                 {"topological_order", json::array{0}},
                 {"coupling_depth", 0}}},
-           {"execution", json::object{
-                {"mode", "BlockSequentialStrict"},
+           {"execution", json::object{{"mode", "BlockSequentialStrict"},
                 {"work_t_order", 4}}},
-           {"work_contract", json::object{
-                {"work_min", -1}, {"requested_min", -1},
+           {"work_contract",
+            json::object{{"work_min", -1},
+                         {"requested_min", -1},
                 {"requested_max", 2},
                 {"work_complete_max", kSingularFrameMax},
                 {"public_t_order", 0},
                 {"wolfram_coupling_depth", 1}}}}},
-      {"blocks", json::array{json::object{
-           {"block", 0}, {"vertices", json::array{0}},
+      {"blocks",
+       json::array{json::object{
+           {"block", 0},
+           {"vertices", json::array{0}},
            {"chart", block_chart},
-           {"principal_identity", "singular-arm-block-identity"},
-           {"regular", false}, {"identity_gauge", true},
-           {"identity_v", false}, {"epsilon_unimodular_v", true},
-           {"source_transform", singular_spectral_source_transform()},
+           {"principal_identity",
+            domain + ":singular-arm-block-identity:" +
+                (algebraic_scale ? "algebraic" : "rational")},
+           {"regular", false},
+           {"identity_gauge", true},
+           {"identity_v", false},
+           {"epsilon_unimodular_v", true},
+           {"source_transform", singular_spectral_source_transform(domain)},
            {"no_pseudo", true},
-           {"exact_affine_jordan_indicial", json::object{
+           {"exact_affine_jordan_indicial",
+            json::object{
                 {"schema", "diffexp2-exact-affine-jordan-indicial-v1"},
                 {"dimension", 1},
-                {"blocks", json::array{json::object{
-                     {"block", 0}, {"columns", json::array{0}},
-                     {"a", "1/2"}, {"b", "1/3"}}}}}}}}},
+                {"blocks", json::array{json::object{{"block", 0},
+                                                    {"columns", json::array{0}},
+                                                    {"a", "1/2"},
+                                                    {"b", "1/3"}}}}}}}}},
       {"couplings", json::array{}},
       {"physical_ode", physical},
-      {"rational_shadow_physical_ode", physical}});
+      {"rational_shadow_singular_tail",
+       json::object{{"schema", "diffexp2-scc-singular-tail-frame-v1"},
+                    {"equation", singular_tail_ode(identity)},
+                    {"epsilon_shifts", json::array{0}}}}};
+  if (domain == "acb") manifest["rational_shadow_physical_ode"] = physical;
+  const auto prepared = request(std::move(manifest));
   if (prepared.at("status") != "ok")
     throw std::runtime_error("scc.prepare: " + json::serialize(prepared));
-  if (prepared.at("rational_shadow_physical_ode") != "retained")
+  if (domain == "acb" &&
+      prepared.at("rational_shadow_physical_ode") != "retained")
     throw std::runtime_error(
         "Acb SCC dropped its manifest Rational-shadow physical equation: " +
         json::serialize(prepared));
@@ -425,19 +708,27 @@ std::string prepare_singular_scc(const std::string& session,
 
 std::string solve_singular_column(const std::string& session,
                                   const std::string& scc,
-                                  const std::string& checkpoint) {
+                                  const std::string& checkpoint,
+                                  const std::string& domain = "acb",
+                                  bool algebraic_scale = true) {
   const auto solved = request(json::object{
-      {"schema", 2}, {"op", "scc.solve_column"}, {"session", session},
-      {"scc", scc}, {"checkpoint_identity", checkpoint},
-      {"seed", json::object{
-           {"block", 0}, {"run", singular_run()},
-           {"metadata", metadata("-2/3", checkpoint + ":seed", true)}}},
+      {"schema", 2},
+      {"op", "scc.solve_column"},
+      {"session", session},
+      {"scc", scc},
+      {"checkpoint_identity", checkpoint},
+      {"seed", json::object{{"block", 0},
+                            {"run", singular_run()},
+                            {"metadata", metadata("-2/3", checkpoint + ":seed",
+                                                  true, algebraic_scale)}}},
       {"targets", json::array{}}});
   if (solved.at("status") != "ok")
-    throw std::runtime_error("scc.solve_column: " +
-                             json::serialize(solved));
-  if (solved.at("execution_capability") !=
-      "acb-regular-singular-scalar-block-dag-column-v1")
+    throw std::runtime_error("scc.solve_column: " + json::serialize(solved));
+  const auto expected_capability =
+      domain == "acb"
+          ? "acb-regular-singular-scalar-block-dag-column-v1"
+          : "exact-rational-regular-singular-scalar-block-dag-column-v1";
+  if (solved.at("execution_capability") != expected_capability)
     throw std::runtime_error("singular SCC lacks scalar capability: " +
                              json::serialize(solved));
   return std::string(solved.at("local").as_string());
@@ -532,16 +823,25 @@ json::object algebraic_singular_arm(const std::string& anchor,
 
 json::object arm(const std::string& endpoint, const std::string& anchor,
                  const std::string& receiver, bool singular) {
-  if (singular)
-    return algebraic_singular_arm(anchor, receiver);
-  return json::object{{"from_exact", "0"}, {"to_exact", endpoint},
+  if (singular) return algebraic_singular_arm(anchor, receiver);
+  return json::object{{"from_exact", "0"},
+                      {"to_exact", endpoint},
                       {"charts", json::array{anchor, receiver}},
                       {"topology", topology(singular)}};
 }
 
+json::object rational_singular_arm(const std::string& anchor,
+                                   const std::string& receiver) {
+  return json::object{{"from_exact", "0"},
+                      {"to_exact", "-2/3"},
+                      {"charts", json::array{anchor, receiver}},
+                      {"topology", topology(true)}};
+}
+
 json::object zero_match_arm(const std::string& endpoint,
                             const std::string& anchor) {
-  return json::object{{"from_exact", "0"}, {"to_exact", endpoint},
+  return json::object{{"from_exact", "0"},
+                      {"to_exact", endpoint},
                       {"charts", json::array{anchor}},
                       {"topology", topology(false)}};
 }
@@ -551,94 +851,108 @@ json::object integrand_row(const std::string& identity) {
   const json::array zero{"0", "0", "0", "0", "0"};
   return json::object{
       {"schema", "diffexp2-prepared-rational-local-row-v1"},
-      {"columns", 1}, {"exact_identity", identity},
-      {"entries", json::array{json::object{
+      {"columns", 1},
+      {"exact_identity", identity},
+      {"entries",
+       json::array{json::object{
            {"column", 0},
-           {"multiplier", json::object{
-                {"epsilon_shift", 0}, {"center_pole_order", 0},
+           {"multiplier",
+            json::object{{"epsilon_shift", 0},
+                         {"center_pole_order", 0},
                 {"kernels", json::array{one, zero, zero, zero}},
                 {"exact_identity", identity},
                 {"proven_zero", false}}}}}}};
 }
 
-json::object execution(const std::string& basis,
-                       const std::string& prefix) {
+json::object execution(const std::string& basis, const std::string& prefix) {
   json::array basis_set;
   basis_set.emplace_back(basis);
   json::array receiving_basis;
   receiving_basis.push_back(std::move(basis_set));
   return json::object{
       {"receiving_basis", std::move(receiving_basis)},
-      {"integrand_rows", json::array{
-           integrand_row(prefix + ":row:0"),
+      {"integrand_rows", json::array{integrand_row(prefix + ":row:0"),
            integrand_row(prefix + ":row:1")}}};
 }
 
 json::object run_arms(const std::string& session, const std::string& plan,
-                      const std::string& anchor,
-                      const std::string& lower_basis,
+                      const std::string& anchor, const std::string& lower_basis,
                       const std::string& upper_basis,
                       const std::string& checkpoint_root) {
   return request(json::object{
-      {"schema", 2}, {"op", "integration.run_arms"},
-      {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
+      {"schema", 2},
+      {"op", "integration.run_arms"},
+      {"session", session},
+      {"tile_plan", plan},
+      {"anchor", anchor},
       {"tile_plan_checkpoint_identity", "singular-arm-plan"},
       {"anchor_checkpoint_identity", "singular-arm-anchor"},
-      {"epsilon", json::object{
-           {"min", -1}, {"max", 2}, {"required_complete_max", 1},
+      {"epsilon", json::object{{"min", -1},
+                               {"max", 2},
+                               {"required_complete_max", 1},
            {"match_required_complete_max", 2}}},
-      {"refinement", json::object{
-           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
-      {"checkpoint_policy", json::object{
-           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+      {"refinement",
+       json::object{{"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy",
+       json::object{{"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", checkpoint_root}}},
       {"lower", execution(lower_basis, checkpoint_root + ":lower")},
       {"upper", execution(upper_basis, checkpoint_root + ":upper")}});
 }
 
-json::object run_transport_arm(
-    const std::string& session, const std::string& plan,
-    const std::string& plan_checkpoint, const std::string& anchor,
-    const std::string& basis, const std::string& checkpoint_root) {
+json::object run_transport_arm(const std::string& session,
+                               const std::string& plan,
+                               const std::string& plan_checkpoint,
+                               const std::string& anchor,
+                               const std::string& basis,
+                               const std::string& checkpoint_root) {
   json::array basis_set;
   basis_set.emplace_back(basis);
   json::array receiving_basis;
   receiving_basis.push_back(std::move(basis_set));
   return request(json::object{
-      {"schema", 2}, {"op", "transport.run_arm"},
-      {"session", session}, {"tile_plan", plan}, {"anchor", anchor},
+      {"schema", 2},
+      {"op", "transport.run_arm"},
+      {"session", session},
+      {"tile_plan", plan},
+      {"anchor", anchor},
       {"tile_plan_checkpoint_identity", plan_checkpoint},
       {"anchor_checkpoint_identity", "singular-arm-anchor"},
       {"arm", "lower"},
       {"receiving_basis", std::move(receiving_basis)},
-      {"epsilon", json::object{
-           {"min", -1}, {"max", 2}, {"required_complete_max", 1},
+      {"epsilon", json::object{{"min", -1},
+                               {"max", 2},
+                               {"required_complete_max", 1},
            {"match_required_complete_max", 2}}},
-      {"refinement", json::object{
-           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
-      {"checkpoint_policy", json::object{
-           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+      {"refinement",
+       json::object{{"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy",
+       json::object{{"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", checkpoint_root}}}});
 }
 
 json::object consume_terminal_singular_hop(
     const std::string& session, const std::string& plan,
     const std::string& incoming, const std::string& basis,
-    const std::string& checkpoint_root) {
+    const std::string& checkpoint_root,
+    const std::string& plan_checkpoint = "singular-state-plan") {
   return request(json::object{
-      {"schema", 2}, {"op", "transport.consume_hop"},
-      {"session", session}, {"tile_plan", plan},
-      {"tile_plan_checkpoint_identity", "singular-state-plan"},
-      {"arm", "lower"}, {"match", 0},
+      {"schema", 2},
+      {"op", "transport.consume_hop"},
+      {"session", session},
+      {"tile_plan", plan},
+      {"tile_plan_checkpoint_identity", plan_checkpoint},
+      {"arm", "lower"},
+      {"match", 0},
       {"receiving_basis", json::array{basis}},
       {"incoming", incoming},
       {"incoming_checkpoint_identity", "singular-arm-anchor"},
-      {"epsilon", json::object{
-           {"min", -1}, {"max", 2}, {"required_complete_max", 2}}},
-      {"refinement", json::object{
-           {"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
-      {"checkpoint_policy", json::object{
-           {"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
+      {"epsilon",
+       json::object{{"min", -1}, {"max", 2}, {"required_complete_max", 2}}},
+      {"refinement",
+       json::object{{"relative_tolerance", "1e-30"}, {"max_steps", 2}}},
+      {"checkpoint_policy",
+       json::object{{"schema", "diffexp2-deterministic-arm-checkpoints-v1"},
            {"root", checkpoint_root}}}});
 }
 
@@ -1056,62 +1370,110 @@ bool terminal_normal_frame_checkpoint_complete(const std::string& path) {
 int main() {
   const std::string large_singular_scc_identity =
       "singular-arm-scc-identity:" + std::string(256 * 1024, 'x');
-  const std::string checkpoint =
-      "/tmp/diffexp2-singular-scc-arms.de2cp";
+  const std::string checkpoint = "/tmp/diffexp2-singular-scc-arms.de2cp";
   const std::string checkpoint_second =
       "/tmp/diffexp2-singular-scc-arms-second.de2cp";
-  const std::string tampered =
-      "/tmp/diffexp2-singular-scc-arms-tampered.de2cp";
+  const std::string tampered = "/tmp/diffexp2-singular-scc-arms-tampered.de2cp";
   const std::string terminal_normal_checkpoint =
       "/tmp/diffexp2-singular-scc-terminal-normal.de2cp";
+  const std::string correlated_seed_checkpoint =
+      "/tmp/diffexp2-singular-scc-correlated-seed.de2cp";
   std::remove(checkpoint.c_str());
   std::remove(checkpoint_second.c_str());
   std::remove(tampered.c_str());
   std::remove(terminal_normal_checkpoint.c_str());
+  std::remove(correlated_seed_checkpoint.c_str());
   std::string session;
+  std::string rational_session;
   std::string restored_session;
   try {
-    const auto created = request(json::object{
-        {"schema", 2}, {"op", "session.create"}, {"domain", "acb"},
-        {"precision_bits", 256}, {"output_digits", 30},
-        {"chart_capacity", 6}, {"scc_capacity", 2},
-        {"local_capacity", 32}, {"match_capacity", 8},
-        {"tile_plan_capacity", 2}});
+    const auto created = request(json::object{{"schema", 2},
+                                              {"op", "session.create"},
+                                              {"domain", "acb"},
+                                              {"precision_bits", 256},
+                                              {"output_digits", 30},
+                                              {"chart_capacity", 6},
+                                              {"scc_capacity", 3},
+                                              {"local_capacity", 32},
+                                              {"match_capacity", 8},
+                                              {"tile_plan_capacity", 3}});
     session = std::string(created.at("session").as_string());
-    const auto anchor_chart = prepare_regular_chart(
-        session, "singular-arm-anchor-chart", "0");
+    const auto rational_created = request(json::object{{"schema", 2},
+                                                       {"op", "session.create"},
+                                                       {"domain", "rational"},
+                                                       {"output_digits", 30},
+                                                       {"chart_capacity", 2},
+                                                       {"scc_capacity", 1},
+                                                       {"local_capacity", 4}});
+    if (rational_created.at("status") != "ok")
+      throw std::runtime_error("Rational-shadow session.create: " +
+                               json::serialize(rational_created));
+    rational_session = std::string(rational_created.at("session").as_string());
+    const auto anchor_chart =
+        prepare_regular_chart(session, "singular-arm-anchor-chart", "0");
     const auto singular_block = prepare_singular_chart(session);
-    const auto upper_chart = prepare_regular_chart(
-        session, "singular-arm-upper-chart", "2/3");
-    const auto singular_scc = prepare_singular_scc(
-        session, singular_block, "singular-arm-scc",
+    const auto correlated_singular_block =
+        prepare_constant_singular_chart(session, "acb");
+    const auto rational_singular_block =
+        prepare_constant_singular_chart(rational_session, "rational");
+    const auto upper_chart =
+        prepare_regular_chart(session, "singular-arm-upper-chart", "2/3");
+    const auto singular_scc =
+        prepare_singular_scc(session, singular_block, "singular-arm-scc",
         large_singular_scc_identity);
     const auto foreign_scc = prepare_singular_scc(
         session, singular_block, "singular-arm-foreign-scc",
         "singular-arm-foreign-scc-identity");
-    const auto anchor = solve_regular(
-        session, anchor_chart, "0", "singular-arm-anchor", "2");
+    const auto correlated_scc = prepare_constant_singular_scc(
+        session, correlated_singular_block, "singular-arm-correlated-scc",
+        "singular-arm-correlated-scc-identity", "acb");
+    const auto rational_scc = prepare_constant_singular_scc(
+        rational_session, rational_singular_block, "singular-arm-rational-scc",
+        "singular-arm-rational-scc-identity", "rational");
+    const auto anchor =
+        solve_regular(session, anchor_chart, "0", "singular-arm-anchor", "2");
     const auto good_singular = solve_singular_column(
         session, singular_scc, "singular-arm-good-column");
     const auto second_singular = solve_singular_column(
         session, singular_scc, "singular-arm-second-column");
     const auto terminal_singular = solve_singular_column(
         session, singular_scc, "singular-arm-terminal-column");
+    const auto rational_terminal =
+        solve_constant_singular_column(rational_session, rational_scc,
+                                       "singular-arm-rational-terminal-column");
+    const auto imported_terminal = request(json::object{
+        {"schema", 2},
+        {"op", "local.specialize_rational_shadow"},
+        {"session", session},
+        {"source_session", rational_session},
+        {"source_local", rational_terminal},
+        {"source_checkpoint_identity", "singular-arm-rational-terminal-column"},
+        {"target_scc", correlated_scc},
+        {"rational_shadow_identity", "singular-arm-constant-shadow-v1"},
+        {"checkpoint_identity", "singular-arm-correlated-column"}});
+    if (imported_terminal.at("status") != "ok")
+      throw std::runtime_error("terminal Rational-shadow import: " +
+                               json::serialize(imported_terminal));
+    const auto correlated_singular =
+        std::string(imported_terminal.at("local").as_string());
     const auto foreign_singular = solve_singular_column(
         session, foreign_scc, "singular-arm-foreign-column");
-    const auto upper_basis = solve_regular(
-        session, upper_chart, "2/3", "singular-arm-upper-basis", "1");
+    const auto upper_basis = solve_regular(session, upper_chart, "2/3",
+                                           "singular-arm-upper-basis", "1");
     const auto direct_rejected = direct_singular_match_request(
         session, singular_scc, good_singular, second_singular);
     if (direct_rejected.at("status") != "error" ||
-        std::string(direct_rejected.at("detail").as_string()).find(
-            "only through a retained planned match") == std::string::npos)
+        std::string(direct_rejected.at("detail").as_string())
+                .find("only through a retained planned match") ==
+            std::string::npos)
       throw std::runtime_error(
           "direct singular-SCC proof admission was not rejected: " +
           json::serialize(direct_rejected));
 
-    const auto planned = request(json::object{
-        {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+    const auto planned = request(
+        json::object{{"schema", 2},
+                     {"op", "tile.plan"},
+                     {"session", session},
         {"checkpoint_identity", "singular-arm-plan"},
         {"division_order", 3},
         {"lower", arm("-2/3", anchor_chart, singular_scc, true)},
@@ -1121,20 +1483,79 @@ int main() {
     const auto plan = std::string(planned.at("tile_plan").as_string());
     if (planned.at("lower").as_object().at("matches").as_array().size() != 1 ||
         planned.at("upper").as_object().at("matches").as_array().size() != 1)
-      throw std::runtime_error(
-          "fixture did not produce one match per arm: " +
+      throw std::runtime_error("fixture did not produce one match per arm: " +
           json::serialize(planned));
+
+    const auto correlated_planned = request(json::object{
+        {"schema", 2},
+        {"op", "tile.plan_arm"},
+        {"session", session},
+        {"checkpoint_identity", "singular-correlated-seed-plan"},
+        {"division_order", 3},
+        {"arm", rational_singular_arm(anchor_chart, correlated_scc)}});
+    if (correlated_planned.at("status") != "ok" ||
+        correlated_planned.at("matches") != 1)
+      throw std::runtime_error("correlated-tail tile.plan_arm: " +
+                               json::serialize(correlated_planned));
+    const auto correlated_plan =
+        std::string(correlated_planned.at("tile_plan").as_string());
+    const auto correlated_hop = consume_terminal_singular_hop(
+        session, correlated_plan, anchor, correlated_singular,
+        "singular-correlated-seed", "singular-correlated-seed-plan");
+    if (correlated_hop.at("status") != "ok")
+      throw std::runtime_error("correlated-tail consume_hop: " +
+                               json::serialize(correlated_hop));
+    const auto& correlated_diagnostic =
+        correlated_hop.at("match_reference")
+            .as_object()
+            .at("diagnostic_native_match_summary")
+            .as_object();
+    const auto& correlated_normal =
+        correlated_diagnostic.at("normal_frame_attempt").as_object();
+    if (correlated_normal.at("status") !=
+            "certified-correlated-tail-clearance-seed" ||
+        correlated_normal.at("authoritative_residual_frame") !=
+            "correlated-tail-clearance-seed-normal" ||
+        correlated_diagnostic.at("residual_frame_reference")
+                .as_object()
+                .at("identity_bytes") ==
+            std::string("physical-parent-frame").size() ||
+        correlated_diagnostic.at("residual_scope") !=
+            "certified-correlated-tail-seed-normal-overlap")
+      throw std::runtime_error(
+          "correlated-tail seed normal frame was not authoritative: " +
+          json::serialize(correlated_diagnostic));
+    const auto correlated_saved = request(json::object{
+        {"schema", 2},
+        {"op", "checkpoint.save"},
+        {"session", session},
+        {"path", correlated_seed_checkpoint},
+        {"checkpoint_identity", "singular-correlated-seed-roundtrip"}});
+    if (correlated_saved.at("status") != "ok")
+      throw std::runtime_error("correlated-tail checkpoint.save: " +
+                               json::serialize(correlated_saved));
+    const auto correlated_restored = request(json::object{
+        {"schema", 2},
+        {"op", "checkpoint.restore"},
+        {"path", correlated_seed_checkpoint},
+        {"expected_identity", "singular-correlated-seed-roundtrip"}});
+    if (correlated_restored.at("status") != "ok")
+      throw std::runtime_error("correlated-tail checkpoint.restore: " +
+                               json::serialize(correlated_restored));
+    (void)request(json::object{{"schema", 2},
+                               {"op", "session.close"},
+                               {"session", correlated_restored.at("session")}});
 
     const auto before_rejection = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
-    const auto rejected = run_arms(
-        session, plan, anchor, foreign_singular, upper_basis,
-        "singular-arm-rejected");
+    const auto rejected = run_arms(session, plan, anchor, foreign_singular,
+                                   upper_basis, "singular-arm-rejected");
     const auto after_rejection = request(json::object{
         {"schema", 2}, {"op", "session.stats"}, {"session", session}});
-    const bool rejected_atomically = rejected.at("status") == "error" &&
-        std::string(rejected.at("detail").as_string()).find(
-            "basis chart provenance mismatch") != std::string::npos &&
+    const bool rejected_atomically =
+        rejected.at("status") == "error" &&
+        std::string(rejected.at("detail").as_string())
+                .find("basis chart provenance mismatch") != std::string::npos &&
         before_rejection.at("locals") == after_rejection.at("locals") &&
         before_rejection.at("matches") == after_rejection.at("matches") &&
         before_rejection.at("line_results") ==
@@ -1802,10 +2223,14 @@ int main() {
     (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                {"session", session}});
     session.clear();
+    (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                               {"session", rational_session}});
+    rational_session.clear();
     std::remove(checkpoint.c_str());
     std::remove(checkpoint_second.c_str());
     std::remove(tampered.c_str());
     std::remove(terminal_normal_checkpoint.c_str());
+    std::remove(correlated_seed_checkpoint.c_str());
     std::cout << (ok ? "PASS" : "FAIL")
               << ": Acb singular-SCC valuation-zero whole-arm proof\n";
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -1813,6 +2238,9 @@ int main() {
     if (!session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", session}});
+    if (!rational_session.empty())
+      (void)request(json::object{{"schema", 2}, {"op", "session.close"},
+                                 {"session", rational_session}});
     if (!restored_session.empty())
       (void)request(json::object{{"schema", 2}, {"op", "session.close"},
                                  {"session", restored_session}});
@@ -1820,6 +2248,7 @@ int main() {
     std::remove(checkpoint_second.c_str());
     std::remove(tampered.c_str());
     std::remove(terminal_normal_checkpoint.c_str());
+    std::remove(correlated_seed_checkpoint.c_str());
     std::cerr << "FAIL: Acb singular-SCC whole-arm proof: "
               << error.what() << '\n';
     return EXIT_FAILURE;

@@ -3278,118 +3278,145 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
       residual_certificate_identity.empty())
     throw std::invalid_argument(
         "checkpoint Acb transformed residual lost its pushforward certificate");
+  bool correlated_tail_seed_residual_certificate = false;
   if (!residual_certificate_identity.empty()) {
-    const auto raw_certificate =
-        json::parse(residual_certificate_identity);
+    const auto raw_certificate = json::parse(residual_certificate_identity);
     const auto& certificate = as_object(
-        raw_certificate,
-        "checkpoint Acb residual pushforward certificate");
-    const auto certificate_schema =
-        required_string(certificate, "schema");
-    const bool point_specialized_certificate =
-        certificate_schema ==
-            "diffexp2-acb-matching-residual-pushforward-v2";
-    if (point_specialized_certificate)
-      require_exact_keys(certificate,
-          {"schema", "equation_operator_identity",
-           "normal_frame_identity", "physical_frame_identity",
-           "receiving_local_point", "blocks"},
-          "checkpoint Acb residual pushforward certificate");
-    else
-      require_exact_keys(certificate,
-          {"schema", "equation_operator_identity",
-           "normal_frame_identity", "physical_frame_identity", "blocks"},
-          "checkpoint Acb residual pushforward certificate");
-    if ((certificate_schema !=
-             "diffexp2-acb-matching-residual-pushforward-v1" &&
-         !point_specialized_certificate) ||
-        required_string(certificate, "normal_frame_identity") !=
-            matching_frame_identity ||
-        required_string(certificate, "physical_frame_identity") !=
-            residual_frame_identity ||
-        required_string(certificate, "equation_operator_identity").empty())
-      throw std::invalid_argument(
-          "checkpoint Acb residual pushforward certificate is inconsistent");
+        raw_certificate, "checkpoint Acb residual pushforward certificate");
+    const auto certificate_schema = required_string(certificate, "schema");
+    correlated_tail_seed_residual_certificate =
+        certificate_schema == "diffexp2-acb-correlated-tail-seed-residual-v1";
     if (json::serialize(canonical_json_value(certificate)) !=
         residual_certificate_identity)
       throw std::invalid_argument(
-          "checkpoint Acb residual pushforward certificate is not canonical");
-    const auto& certificate_blocks = as_array(
-        certificate.at("blocks"),
-        "checkpoint Acb residual pushforward blocks");
-    if (certificate_blocks.empty())
-      throw std::invalid_argument(
-          "checkpoint Acb residual pushforward certificate has no exact blocks");
-    std::set<std::uint32_t> block_indices;
-    for (const auto& raw_block : certificate_blocks) {
-      const auto& block = as_object(
-          raw_block, "checkpoint Acb residual pushforward block");
-      if (point_specialized_certificate)
-        require_exact_keys(block,
-            {"block", "vertices", "principal_identity",
-             "source_transform_identity", "v_exact_identity",
-             "vinv_exact_identity", "det_exact_identity",
-             "to_reduced_transform_identity",
-             "to_physical_transform_identity",
-             "gauge_exact_identity", "gauge_inverse_exact_identity",
-             "gauge_det_exact_identity", "assembly_exact_identity"},
-            "checkpoint Acb residual pushforward block");
-      else
-        require_exact_keys(block,
-            {"block", "principal_identity",
-             "source_transform_identity", "v_exact_identity",
-             "vinv_exact_identity", "det_exact_identity",
-             "assembly_exact_identity"},
-            "checkpoint Acb residual pushforward block");
-      const auto index = as_u32(
-          block.at("block"),
-          "checkpoint Acb residual pushforward block index");
-      if (!block_indices.insert(index).second ||
-          required_string(block, "principal_identity").empty())
-        throw std::invalid_argument(
-            "checkpoint Acb residual pushforward block binding is invalid");
-    }
-    if (point_specialized_certificate) {
-      const auto& point = as_object(
-          certificate.at("receiving_local_point"),
-          "checkpoint Acb residual pushforward point");
+          "checkpoint Acb residual certificate is not canonical");
+    if (correlated_tail_seed_residual_certificate) {
       require_exact_keys(
-          point, {"exact", "sign"},
-          "checkpoint Acb residual pushforward point");
-      const auto point_sign = as_i32(
-          point.at("sign"),
-          "checkpoint Acb residual pushforward point sign");
-      if (required_string(point, "exact") != basis_point ||
-          point_sign < -1 || point_sign > 1)
+          certificate,
+          {"schema", "equation_operator_identity", "matching_frame_identity",
+           "residual_frame_identity", "basis_point_exact",
+           "incoming_point_exact", "physical_point_exact",
+           "exact_lattice_identity"},
+          "checkpoint Acb correlated-tail seed residual certificate");
+      if (required_string(certificate, "equation_operator_identity").empty() ||
+          required_string(certificate, "matching_frame_identity") !=
+              matching_frame_identity ||
+          required_string(certificate, "residual_frame_identity") !=
+              residual_frame_identity ||
+          required_string(certificate, "exact_lattice_identity") !=
+              exact_lattice_identity)
         throw std::invalid_argument(
-            "checkpoint Acb residual pushforward point binding is inconsistent");
+            "checkpoint Acb correlated-tail seed residual certificate is "
+            "inconsistent");
+      try {
+        (void)Rational(required_string(certificate, "basis_point_exact"));
+        (void)Rational(required_string(certificate, "incoming_point_exact"));
+        (void)Rational(required_string(certificate, "physical_point_exact"));
+      } catch (const std::invalid_argument&) {
+        throw std::invalid_argument(
+            "checkpoint Acb correlated-tail seed residual points are not exact "
+            "rationals");
+      }
+    } else {
+      const bool point_specialized_certificate =
+          certificate_schema == "diffexp2-acb-matching-residual-pushforward-v2";
+      if (point_specialized_certificate)
+        require_exact_keys(
+            certificate,
+            {"schema", "equation_operator_identity", "normal_frame_identity",
+             "physical_frame_identity", "receiving_local_point", "blocks"},
+            "checkpoint Acb residual pushforward certificate");
+      else
+        require_exact_keys(
+            certificate,
+            {"schema", "equation_operator_identity", "normal_frame_identity",
+             "physical_frame_identity", "blocks"},
+            "checkpoint Acb residual pushforward certificate");
+      if ((certificate_schema !=
+               "diffexp2-acb-matching-residual-pushforward-v1" &&
+           !point_specialized_certificate) ||
+          required_string(certificate, "normal_frame_identity") !=
+              matching_frame_identity ||
+          required_string(certificate, "physical_frame_identity") !=
+              residual_frame_identity ||
+          required_string(certificate, "equation_operator_identity").empty())
+        throw std::invalid_argument(
+            "checkpoint Acb residual pushforward certificate is inconsistent");
+      const auto& certificate_blocks =
+          as_array(certificate.at("blocks"),
+                   "checkpoint Acb residual pushforward blocks");
+      if (certificate_blocks.empty())
+        throw std::invalid_argument(
+            "checkpoint Acb residual pushforward certificate has no exact "
+            "blocks");
+      std::set<std::uint32_t> block_indices;
+      for (const auto& raw_block : certificate_blocks) {
+        const auto& block =
+            as_object(raw_block, "checkpoint Acb residual pushforward block");
+        if (point_specialized_certificate)
+          require_exact_keys(
+              block,
+              {"block", "vertices", "principal_identity",
+               "source_transform_identity", "v_exact_identity",
+               "vinv_exact_identity", "det_exact_identity",
+               "to_reduced_transform_identity",
+               "to_physical_transform_identity", "gauge_exact_identity",
+               "gauge_inverse_exact_identity", "gauge_det_exact_identity",
+               "assembly_exact_identity"},
+              "checkpoint Acb residual pushforward block");
+        else
+          require_exact_keys(
+              block,
+              {"block", "principal_identity", "source_transform_identity",
+               "v_exact_identity", "vinv_exact_identity", "det_exact_identity",
+               "assembly_exact_identity"},
+              "checkpoint Acb residual pushforward block");
+        const auto index =
+            as_u32(block.at("block"),
+                   "checkpoint Acb residual pushforward block index");
+        if (!block_indices.insert(index).second ||
+            required_string(block, "principal_identity").empty())
+          throw std::invalid_argument(
+              "checkpoint Acb residual pushforward block binding is invalid");
+      }
+      if (point_specialized_certificate) {
+        const auto& point =
+            as_object(certificate.at("receiving_local_point"),
+                      "checkpoint Acb residual pushforward point");
+        require_exact_keys(point, {"exact", "sign"},
+                           "checkpoint Acb residual pushforward point");
+        const auto point_sign = as_i32(
+            point.at("sign"), "checkpoint Acb residual pushforward point sign");
+        if (required_string(point, "exact") != basis_point || point_sign < -1 ||
+            point_sign > 1)
+          throw std::invalid_argument(
+              "checkpoint Acb residual pushforward point binding is "
+              "inconsistent");
 
-      const auto raw_normal_frame =
-          json::parse(matching_frame_identity);
-      const auto& normal_frame = as_object(
-          raw_normal_frame,
-          "checkpoint Acb SCC matching normal frame");
-      require_exact_keys(normal_frame,
-          {"schema", "equation_operator_identity",
-           "receiving_local_point", "blocks"},
-          "checkpoint Acb SCC matching normal frame");
-      if (required_string(normal_frame, "schema") !=
-              "diffexp2-acb-scc-matching-normal-frame-v2" ||
-          required_string(normal_frame, "equation_operator_identity") !=
-              required_string(certificate,
-                              "equation_operator_identity") ||
-          normal_frame.at("receiving_local_point") !=
-              certificate.at("receiving_local_point") ||
-          normal_frame.at("blocks") != certificate.at("blocks"))
-        throw std::invalid_argument(
-            "checkpoint Acb residual pushforward differs from its point-specialized normal frame");
+        const auto raw_normal_frame = json::parse(matching_frame_identity);
+        const auto& normal_frame = as_object(
+            raw_normal_frame, "checkpoint Acb SCC matching normal frame");
+        require_exact_keys(normal_frame,
+                           {"schema", "equation_operator_identity",
+                            "receiving_local_point", "blocks"},
+                           "checkpoint Acb SCC matching normal frame");
+        if (required_string(normal_frame, "schema") !=
+                "diffexp2-acb-scc-matching-normal-frame-v2" ||
+            required_string(normal_frame, "equation_operator_identity") !=
+                required_string(certificate, "equation_operator_identity") ||
+            normal_frame.at("receiving_local_point") !=
+                certificate.at("receiving_local_point") ||
+            normal_frame.at("blocks") != certificate.at("blocks"))
+          throw std::invalid_argument(
+              "checkpoint Acb residual pushforward differs from its "
+              "point-specialized normal frame");
+      }
     }
   }
-  const auto& raw_epsilon = as_object(object.at("epsilon"),
-                                      "checkpoint Acb match epsilon window");
-  require_exact_keys(raw_epsilon,
-      {"min", "max", "required_complete_max"},
-      "checkpoint Acb match epsilon window");
+  const auto& raw_epsilon =
+      as_object(object.at("epsilon"), "checkpoint Acb match epsilon window");
+  require_exact_keys(raw_epsilon, {"min", "max", "required_complete_max"},
+                     "checkpoint Acb match epsilon window");
   const EpsilonWindow window{
       as_i32(raw_epsilon.at("min"), "checkpoint match epsilon minimum"),
       as_i32(raw_epsilon.at("max"), "checkpoint match epsilon maximum")};
@@ -3594,31 +3621,36 @@ std::shared_ptr<StoredRefinedAcbMatch> restore_checkpoint_acb_match_record(
         terminal_normal_frame_right_transformation.has_value() &&
         expected_singular_request.has_value() &&
         matching_frame_identity != "physical-parent-frame" &&
-        residual_frame_identity == "physical-parent-frame";
+        (residual_frame_identity == "physical-parent-frame" ||
+         correlated_tail_seed_residual_certificate);
     if (!physical_exact_right && !terminal_normal_right)
       throw std::invalid_argument(
-          "checkpoint Acb right materialization preconditioner is not bound to an eligible singular physical or terminal normal frame");
-    for (const auto& row :
-         *acb_right_materialization_preconditioner)
+          "checkpoint Acb right materialization preconditioner is not bound to "
+          "an eligible singular physical or terminal normal frame");
+    for (const auto& row : *acb_right_materialization_preconditioner)
       for (const auto& entry : row)
         for (const auto& [power, coefficient] : entry.terms()) {
           (void)coefficient;
           if (power != 0)
             throw std::invalid_argument(
-                "checkpoint Acb right materialization preconditioner is not epsilon-constant");
+                "checkpoint Acb right materialization preconditioner is not "
+                "epsilon-constant");
         }
   }
   if (terminal_normal_frame_right_transformation.has_value() &&
       (!expected_singular_request.has_value() ||
        matching_frame_identity == "physical-parent-frame" ||
-       residual_frame_identity != "physical-parent-frame" ||
+       (residual_frame_identity != "physical-parent-frame" &&
+        !correlated_tail_seed_residual_certificate) ||
        exact_right_materialization_transformation.has_value()))
     throw std::invalid_argument(
-        "checkpoint Acb terminal normal-frame transformation is not bound to a certified singular SCC normal frame");
+        "checkpoint Acb terminal normal-frame transformation is not bound to a "
+        "certified singular SCC normal frame");
   if (terminal_normal_frame_right_transformation.has_value() !=
           terminal_normal_frame_exact_right_transformation.has_value())
     throw std::invalid_argument(
-        "checkpoint Acb terminal normal-frame finite and exact transformations must be retained together");
+        "checkpoint Acb terminal normal-frame finite and exact transformations "
+        "must be retained together");
 
   const auto lattice_provenance = [&](bool compact) {
     json::array exact_binding_basis;

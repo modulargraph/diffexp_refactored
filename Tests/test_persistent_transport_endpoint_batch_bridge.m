@@ -146,7 +146,7 @@ manyResult = If[nativeOKQ[state],
   DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[state, {
     observable[manyIdentities[[1]], "many-checkpoint-1"],
     observable[manyIdentities[[2]], "many-checkpoint-2"]},
-    "transport-endpoint-many"], state];
+    "transport-endpoint-many", 2], state];
 manyEndpoints = If[nativeOKQ[manyResult],
   Lookup[manyResult, "endpoints", {}], {}];
 afterMany = sessionStats[];
@@ -155,6 +155,8 @@ assert["transport_endpoint_bridge_many_preserves_order_and_counters",
     Lookup[manyEndpoints, "request_index"] === {0, 1} &&
     Lookup[manyEndpoints, "observable_identity"] === manyIdentities &&
     DuplicateFreeQ[Lookup[manyEndpoints, "endpoint"]] &&
+    Lookup[manyResult, "requested_observable_threads", 0] === 2 &&
+    Lookup[manyResult, "observable_worker_threads", 0] === 2 &&
     Lookup[afterMany, "transport_endpoint_batches", -1] ===
       Lookup[before, "transport_endpoint_batches", 0] + 3 &&
     Lookup[afterMany, "transport_endpoint_rows", -1] ===

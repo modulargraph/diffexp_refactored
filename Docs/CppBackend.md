@@ -133,6 +133,23 @@ uses the symbolic rational-function field, the native dispatcher keeps that
 batch single-threaded; it does not specialize the regulator or fall back to a
 numeric/Wolfram solve.
 
+### Terminal endpoint batches
+
+`RunPersistentTransportEndpointBatch[state, observables, root, threads]`
+contracts distinct prepared endpoint rows against one immutable retained
+terminal local. The optional positive thread count defaults to one and is
+bounded by the observable count and the native persistent-batch worker limit.
+Each worker owns its projected local, endpoint result, and numerical scratch
+state. No partial result is published: the request selects the lowest-index
+failure deterministically, or publishes every successful endpoint atomically
+in request order.
+
+`RunNativeTransportObservableBatch` forwards its existing
+`ObservableContractionThreads` setting to these batches. Prepared rational
+multiplier data is retained only across one bounded endpoint chunk and cleared
+after that chunk is published. This avoids repeating identical terminal-chart
+preparation while keeping the cache lifetime and memory use bounded.
+
 The scheduling heuristic is measurement-driven. With two native workers, a
 scalar two-endpoint fixture at WP 500, expansion order 50, and epsilon order 5
 took 0.526 s for sequential chart bases and 0.309 s with paired prewarming

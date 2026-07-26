@@ -249,7 +249,8 @@ json::object observable(const std::string& identity,
 json::object endpoint_batch(const std::string& session,
                             const json::object& state,
                             json::array observables,
-                            const std::string& checkpoint_root) {
+                            const std::string& checkpoint_root,
+                            std::uint32_t threads = 1) {
   return request(json::object{
       {"schema", 2}, {"op", "transport.endpoint_batch"},
       {"session", session},
@@ -262,7 +263,7 @@ json::object endpoint_batch(const std::string& session,
            {"schema",
             "diffexp2-deterministic-transport-endpoint-checkpoints-v1"},
            {"root", checkpoint_root}}},
-      {"observables", std::move(observables)}});
+      {"observables", std::move(observables)}, {"threads", threads}});
 }
 
 json::object session_stats(const std::string& session) {
@@ -451,10 +452,12 @@ int main() {
           cancellation_row("center-many-row-" + std::to_string(index))));
     const auto many = endpoint_batch(
         session, centered_state, std::move(many_observables),
-        "endpoint-many");
+        "endpoint-many", 3);
     std::set<std::string> endpoint_handles;
     if (many.at("status") != "ok" ||
-        many.at("endpoints").as_array().size() != 3)
+        many.at("endpoints").as_array().size() != 3 ||
+        many.at("requested_observable_threads") != 3 ||
+        many.at("observable_worker_threads") != 3)
       throw std::runtime_error(
           "three-row endpoint batch failed: " + json::serialize(many));
     for (std::size_t index = 0; index < 3; ++index) {

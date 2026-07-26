@@ -3115,26 +3115,34 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       Do[
         chunkIndices = observableChunks[[chunkIndex]];
         chunk = prepared[[chunkIndices]];
+        nativeStageTiming["lower-endpoint-row-chunk-start index=",
+          chunkIndex, " observables=", Length[chunk]];
+        (* Every endpoint in this bounded chunk acts on the same terminal
+           chart.  Retain multiplier preparation across its distinct
+           coefficient vectors, then clear once after native publication. *)
         endpointObservables = Map[Function[observable,
           row = nativePrepareArmRecipeRow[nativeConsumerRowRecipe[
               Last[lowerRowRecipes], Last[lowerSourceEpsilon],
               observable, 0],
             observable["CoefficientVector"], var,
             workingAtlas["Domain"]];
-          nativeDropRationalMultiplierPreparationCache[];
           <|"Identity" -> observable["Identity"],
             "CheckpointIdentity" -> observable["CheckpointIdentity"],
             "IntegrandRow" -> row,
             "Epsilon" -> observable["Epsilon"],
             "PublicationRelativeTolerance" ->
               publicationRelativeTolerance|>], chunk];
+        nativeStageTiming["lower-endpoint-row-chunk-done index=",
+          chunkIndex];
         chunkResponse =
           DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[
             lowerState, endpointObservables,
             checkpointRoot <> ":lower-endpoints:chunk:" <>
-              ToString[chunkIndex]];
+              ToString[chunkIndex], contractionThreads];
         Clear[endpointObservables, row];
         nativeDropRationalMultiplierPreparationCache[];
+        nativeStageTiming["lower-endpoint-native-chunk-done index=",
+          chunkIndex];
         If[AssociationQ[chunkResponse],
           AppendTo[lowerEndpointResponses, chunkResponse]];
         If[FailureQ[chunkResponse] || !AssociationQ[chunkResponse] ||
@@ -3154,26 +3162,33 @@ RunNativeTransportObservableBatch[atlasIn_Association, observables_List,
       Do[
         chunkIndices = observableChunks[[chunkIndex]];
         chunk = prepared[[chunkIndices]];
+        nativeStageTiming["upper-endpoint-row-chunk-start index=",
+          chunkIndex, " observables=", Length[chunk]];
+        (* As above, cache preparation only within this explicitly bounded
+           endpoint chunk. *)
         endpointObservables = Map[Function[observable,
           row = nativePrepareArmRecipeRow[nativeConsumerRowRecipe[
               Last[upperRowRecipes], Last[upperSourceEpsilon],
               observable, 0],
             observable["CoefficientVector"], var,
             workingAtlas["Domain"]];
-          nativeDropRationalMultiplierPreparationCache[];
           <|"Identity" -> observable["Identity"],
             "CheckpointIdentity" -> observable["CheckpointIdentity"],
             "IntegrandRow" -> row,
             "Epsilon" -> observable["Epsilon"],
             "PublicationRelativeTolerance" ->
               publicationRelativeTolerance|>], chunk];
+        nativeStageTiming["upper-endpoint-row-chunk-done index=",
+          chunkIndex];
         chunkResponse =
           DiffExp2`CppBackend`RunPersistentTransportEndpointBatch[
             upperState, endpointObservables,
             checkpointRoot <> ":upper-endpoints:chunk:" <>
-              ToString[chunkIndex]];
+              ToString[chunkIndex], contractionThreads];
         Clear[endpointObservables, row];
         nativeDropRationalMultiplierPreparationCache[];
+        nativeStageTiming["upper-endpoint-native-chunk-done index=",
+          chunkIndex];
         If[AssociationQ[chunkResponse],
           AppendTo[upperEndpointResponses, chunkResponse]];
         If[FailureQ[chunkResponse] || !AssociationQ[chunkResponse] ||

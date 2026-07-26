@@ -5481,16 +5481,33 @@
   }
 
   if (operation == "transport.endpoint_batch") {
-    require_exact_keys(
-        root,
-        {"schema", "op", "session", "transport_state",
-         "transport_state_checkpoint_identity",
-         "transport_state_provenance_identity", "checkpoint_policy",
-         "observables"},
-        "native transport.endpoint_batch request");
+    const bool has_threads = root.if_contains("threads") != nullptr;
+    if (has_threads)
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "transport_state",
+           "transport_state_checkpoint_identity",
+           "transport_state_provenance_identity", "checkpoint_policy",
+           "observables", "threads"},
+          "native transport.endpoint_batch request");
+    else
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "transport_state",
+           "transport_state_checkpoint_identity",
+           "transport_state_provenance_identity", "checkpoint_policy",
+           "observables"},
+          "native transport.endpoint_batch request");
     if (session->domain == "symbolic")
       throw std::invalid_argument(
           "native transport endpoint batch requires rational or Acb coefficients");
+    const auto requested_threads = has_threads
+        ? as_u32(root.at("threads"),
+                 "native transport endpoint-batch threads")
+        : std::uint32_t{1};
+    if (requested_threads == 0)
+      throw std::invalid_argument(
+          "native transport endpoint-batch threads must be positive");
     const auto state_handle = required_string(root, "transport_state");
     const auto& checkpoint_policy = as_object(
         root.at("checkpoint_policy"),
@@ -5568,6 +5585,9 @@
     }
 
     const auto observable_count = pending_observables.size();
+    const auto worker_count = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         observable_count, kMaxPersistentBatchThreads});
     std::shared_ptr<StoredTransportArmState> state;
     ResolvedTransportEndpointBinding binding;
     bool reservation_live = false;
@@ -5669,23 +5689,64 @@
       ComplexBall::set_precision(session->precision_bits);
     }
     std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
-    endpoints.reserve(observable_count);
-    for (std::size_t index = 0; index < observable_count; ++index) {
+    endpoints.resize(observable_count);
+    std::vector<std::exception_ptr> failures(observable_count);
+    const auto build_endpoint = [&](std::size_t index) {
       const auto& observable = pending_observables[index];
+      endpoints[index] = build_transport_endpoint_row(
+          observable.endpoint_handle, observable.checkpoint_identity,
+          observable.identity, observable.row, observable.epsilon,
+          observable.epsilon_record,
+          observable.publication_relative_tolerance,
+          observable.publication_relative_tolerance_text,
+          observable.projected_handle,
+          observable.projected_checkpoint_identity, session->domain,
+          session->precision_bits, state, binding);
+    };
+    if (worker_count == 1) {
+      for (std::size_t index = 0; index < observable_count; ++index) {
+        try {
+          build_endpoint(index);
+        } catch (...) {
+          failures[index] = std::current_exception();
+          break;
+        }
+      }
+    } else {
+      // Every row reads the same immutable retained state, but owns its
+      // projection, endpoint result, and scratch identities.  Bound worker
+      // count explicitly and publish only after all rows succeed so endpoint
+      // batches remain atomic and deterministically ordered.
+      std::atomic<std::size_t> next_observable{0};
+      std::vector<std::jthread> workers;
+      workers.reserve(worker_count);
+      for (std::size_t worker = 0; worker < worker_count; ++worker)
+        workers.emplace_back([&] {
+          if (session->domain == "acb")
+            ComplexBall::set_precision(session->precision_bits);
+          while (true) {
+            const auto index = next_observable.fetch_add(1);
+            if (index >= observable_count) return;
+            try {
+              build_endpoint(index);
+            } catch (...) {
+              failures[index] = std::current_exception();
+            }
+          }
+        });
+      for (auto& worker : workers) worker.join();
+    }
+    const auto failed = std::find_if(
+        failures.begin(), failures.end(),
+        [](const auto& error) { return error != nullptr; });
+    if (failed != failures.end()) {
+      const auto index = static_cast<std::size_t>(
+          std::distance(failures.begin(), failed));
       try {
-        endpoints.push_back(build_transport_endpoint_row(
-            observable.endpoint_handle, observable.checkpoint_identity,
-            observable.identity, observable.row, observable.epsilon,
-            observable.epsilon_record,
-            observable.publication_relative_tolerance,
-            observable.publication_relative_tolerance_text,
-            observable.projected_handle,
-            observable.projected_checkpoint_identity, session->domain,
-            session->precision_bits, state, binding));
+        std::rethrow_exception(*failed);
       } catch (const MatchingArithmeticError& error) {
-        if (error.code !=
-            MatchingArithmeticErrorCode::
-                TerminalOutputInconclusive)
+        if (error.code != MatchingArithmeticErrorCode::
+                              TerminalOutputInconclusive)
           throw;
         return json::object{
             {"status", "error"},
@@ -5707,6 +5768,7 @@
                  : json::value(nullptr)},
             {"detail", error.what()}};
       }
+      std::rethrow_exception(*failed);
     }
     const auto operation_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - operation_started).count();
@@ -5783,6 +5845,8 @@
         {"status", "ok"}, {"session", session->handle},
         {"capability", kRetainedTransportEndpointBatchCapability},
         {"native_retained", true}, {"json_coefficients", 0},
+        {"requested_observable_threads", requested_threads},
+        {"observable_worker_threads", worker_count},
         {"transport_state", state->handle()},
         {"transport_state_checkpoint_identity",
          state->checkpoint_identity()},

@@ -64,7 +64,7 @@ AddPersistentTransportPairObservableStreamTile::usage = "AddPersistentTransportP
 FinishPersistentTransportPairObservableStream::usage = "FinishPersistentTransportPairObservableStream[stream] atomically publishes the completed paired line after every expected lower and upper tile has been added exactly once.";
 AbortPersistentTransportPairObservableStream::usage = "AbortPersistentTransportPairObservableStream[stream] abandons an unfinished paired contraction stream and releases its reserved native line slot without publishing a partial line.";
 ContractPersistentTransportPairObservableStreamed::usage = "ContractPersistentTransportPairObservableStreamed[lowerState,upperState,observable,checkpointRoot] contracts one stored-tail paired observable with a bounded-memory begin/add-tile/finish protocol. Rows are sent strictly lower then upper, one prepared row per native request; any failure or kernel abort attempts to abort the native stream.";
-RunPersistentTransportEndpointBatch::usage = "RunPersistentTransportEndpointBatch[state,observables,checkpointRoot] atomically contracts an ordered list of zero, one, or many prepared scalar rows against the final retained local of one native transport-arm state and returns opaque endpoint handles. Each observable has exactly Identity, CheckpointIdentity, IntegrandRow, Epsilon, and PublicationRelativeTolerance; Epsilon has exactly Min, Max, and RequiredCompleteMax. PublicationRelativeTolerance is the explicit downstream accuracy contract and is independent of the producing match tolerance. The retained state and plan derive the arm, endpoint, local coordinate, approach direction, and analytic prescription; callers cannot override them.";
+RunPersistentTransportEndpointBatch::usage = "RunPersistentTransportEndpointBatch[state,observables,checkpointRoot,threads:1] atomically contracts an ordered list of zero, one, or many prepared scalar rows against the final retained local of one native transport-arm state and returns opaque endpoint handles. Distinct rows may be evaluated by the explicitly bounded positive thread count while publication and failure selection retain request order. Each observable has exactly Identity, CheckpointIdentity, IntegrandRow, Epsilon, and PublicationRelativeTolerance; Epsilon has exactly Min, Max, and RequiredCompleteMax. PublicationRelativeTolerance is the explicit downstream accuracy contract and is independent of the producing match tolerance. The retained state and plan derive the arm, endpoint, local coordinate, approach direction, and analytic prescription; callers cannot override them.";
 PersistentTransportArmStatistics::usage = "PersistentTransportArmStatistics[state] returns the opaque retained arm-state topology, exact provenance, ownership counts, epsilon/refinement contract, final-local handle, and statistics.";
 ReleasePersistentTransportArm::usage = "ReleasePersistentTransportArm[state] releases one public transport-state token. A second release is a loud native error; independently published final locals remain governed by their own tokens.";
 PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, stored-or-certified-tail scope diagnostics, and export counters.";
@@ -2617,10 +2617,14 @@ normalizePersistentTransportEndpointObservable[observable_] := Module[
       observable["PublicationRelativeTolerance"]|>];
 
 RunPersistentTransportEndpointBatch[state_Association,
-    observables_List, checkpointRoot_String] := Module[
+    observables_List, checkpointRoot_String, threads_Integer:1] := Module[
   {tokens = persistentTransportContractStateHandles[state], normalized,
    bad, identities, checkpoints, requiredCompleteMax},
   If[FailureQ[tokens], Return[tokens, Module]];
+  If[!TrueQ[1 <= threads <= 64],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "transport endpoint threads must be an integer from 1 through 64"|>],
+      Module]];
   If[StringLength[StringTrim[checkpointRoot]] == 0,
     Return[Failure["CppBackend", <|"Detail" ->
       "transport endpoint checkpoint root must be nonempty"|>],
@@ -2656,7 +2660,7 @@ RunPersistentTransportEndpointBatch[state_Association,
       "schema" ->
         "diffexp2-deterministic-transport-endpoint-checkpoints-v1",
       "root" -> checkpointRoot|>,
-    "observables" -> normalized|>]];
+    "observables" -> normalized, "threads" -> threads|>]];
 
 PersistentTransportArmStatistics[handle_Association] := Module[
   {tokens = persistentTransportArmHandles[handle]},

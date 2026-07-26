@@ -127,6 +127,37 @@ LocalSolution<ComplexBall> acb_sample() {
   return specialize_local(sample(), "local-algebra-acb-input");
 }
 
+LocalSolution<ComplexBall> widen_acb_taylor_with_zeros(
+    const LocalSolution<ComplexBall>& input,
+    std::uint32_t target_complete_max,
+    const std::string& checkpoint_identity) {
+  if (target_complete_max < input.taylor_complete_max)
+    throw std::invalid_argument("test Taylor widening target is narrower");
+  auto output = input;
+  output.taylor_complete_max = target_complete_max;
+  output.checkpoint_identity = checkpoint_identity;
+  for (std::size_t sector_index = 0;
+       sector_index < output.sectors.size(); ++sector_index) {
+    const auto source = input.sectors[sector_index].coefficients;
+    auto& destination = output.sectors[sector_index].coefficients;
+    destination.assign(output.sector_size(), ComplexBall(0));
+    for (std::size_t epsilon = 0;
+         epsilon < input.epsilon.width(); ++epsilon)
+      for (std::size_t taylor = 0;
+           taylor < input.taylor_width(); ++taylor)
+        for (std::uint32_t component = 0;
+             component < input.dimension; ++component)
+          destination[index(
+              epsilon, taylor, component, output.taylor_width(),
+              output.dimension)] =
+              source[index(
+                  epsilon, taylor, component, input.taylor_width(),
+                  input.dimension)];
+  }
+  diffexp2::validate_local_solution(output, false);
+  return output;
+}
+
 PreparedRationalTaylorMultiplier<ComplexBall> acb_multiplier(
     std::int32_t shift, std::uint32_t pole) {
   const auto exact = multiplier(shift, pole);
@@ -1365,10 +1396,52 @@ int main() {
   } catch (const std::logic_error&) {
     narrow_factorized_rejected = true;
   }
+
+  // A singular tail proof may privately own 57 Taylor terms while the
+  // receiving match publishes only 51.  The retained exact shadow must copy
+  // that common prefix, and must fail closed if only 50 source terms exist.
+  std::vector<LocalSolution<ComplexBall>> private_width_factorized{
+      widen_acb_taylor_with_zeros(
+          acb_sample(), 56, "factorized-private-width-57"),
+      widen_acb_taylor_with_zeros(
+          acb_sample(), 56, "factorized-private-width-57-column-1")};
+  bool asymmetric_taylor_prefix_published = true;
+  try {
+    diffexp2::restrict_factorized_local_basis_taylor_prefix(
+        private_width_factorized, 50,
+        "factorized-private-57-public-51");
+  } catch (const std::exception&) {
+    asymmetric_taylor_prefix_published = false;
+  }
+  const bool published_prefix_shape =
+      asymmetric_taylor_prefix_published &&
+      private_width_factorized.size() == 2 &&
+      private_width_factorized[0].taylor_width() == 51 &&
+      private_width_factorized[1].taylor_width() == 51 &&
+      private_width_factorized[0].checkpoint_identity.find(
+          "receiving-taylor-prefix:50") != std::string::npos;
+  auto too_short_factorized = private_width_factorized;
+  for (std::size_t column = 0;
+       column < too_short_factorized.size(); ++column)
+    too_short_factorized[column] =
+        diffexp2::restrict_local_taylor_prefix(
+            too_short_factorized[column], 49,
+            "factorized-too-short-column-" +
+                std::to_string(column));
+  bool too_short_factorized_rejected = false;
+  try {
+    diffexp2::restrict_factorized_local_basis_taylor_prefix(
+        too_short_factorized, 50,
+        "factorized-private-50-public-51");
+  } catch (const std::logic_error&) {
+    too_short_factorized_rejected = true;
+  }
   ok = ok && valid_factorized_contract &&
        mismatched_chart_rejected &&
        mismatched_receiving_rejected &&
-       narrow_factorized_rejected;
+       narrow_factorized_rejected &&
+       published_prefix_shape &&
+       too_short_factorized_rejected;
 
   std::cout << (ok ? "PASS" : "FAIL")
             << ": native local rational/SCC and direct scalar-row algebra\n";

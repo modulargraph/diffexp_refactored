@@ -986,6 +986,16 @@ class StoredRefinedAcbMatch final : public StoredMatchBase {
         throw std::logic_error(
             "retained exact-shadow factorized basis is not bound to one "
             "terminal normal-frame match");
+      const auto receiving_taylor_complete_max =
+          matching_taylor_complete_max();
+      if (!receiving_taylor_complete_max.has_value())
+        throw std::logic_error(
+            "retained exact-shadow factorized basis lost its receiving "
+            "Taylor prefix");
+      restrict_factorized_local_basis_taylor_prefix(
+          *exact_shadow_factorized_basis_,
+          *receiving_taylor_complete_max,
+          "retained exact-shadow publication");
       local_algebra_detail::require_factorized_local_basis_contract(
           *exact_shadow_factorized_basis_, dimension_,
           requested_window_, required_complete_max_,
